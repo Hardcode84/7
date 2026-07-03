@@ -23,6 +23,9 @@ namespace mlir::waveamdmachine {
 // llvm::errs().
 SchedClass classifyOp(Operation *op);
 
+// True when the cost model has a non-fallback mapping for the op.
+bool hasSchedClassMapping(Operation *op);
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_OPCLASSIFIER_H

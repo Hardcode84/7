@@ -2,10 +2,9 @@
 # RUN: %python %s | FileCheck %s
 
 # CHECK: matmul_pressure_disabled: ok
-# CHECK: matmul_hard_cap_beam_report: ok
-# CHECK: fa_seq32_d16_u4_beam_report: ok
-# CHECK: cma_dma_beam_cap: ok
-# CHECK: lazy_hard_cap_issue_window_tie: ok
+# CHECK: matmul_greedy_report: ok
+# CHECK: fa_seq32_d16_u4_greedy_report: ok
+# CHECK: gfx950_mfma_dma_report: ok
 
 from __future__ import annotations
 
@@ -95,50 +94,10 @@ def fa_base_cmd() -> list[str]:
     ]
 
 
-def lazy_issue_window_tie_mlir() -> str:
+def gfx950_mfma_dma_mlir(cma_count: int = 32) -> str:
     lines = [
         'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
-        "func.func @lazy_issue_window_tie(",
-        "    %a: !waveamdmachine.reg<vgpr, 4>,",
-        "    %b: !waveamdmachine.reg<vgpr, 4>,",
-        "    %acc0: !waveamdmachine.reg<vgpr, 4>,",
-        "    %acc1: !waveamdmachine.reg<vgpr, 4>,",
-        "    %s: !waveamdmachine.reg<sgpr, 1>) {",
-        "  %m0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0",
-        "      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,",
-        "         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>",
-    ]
-    for i in range(128):
-        lines.append(f"  %i{i} = waveamdmachine.imm {i % 17} : !waveamdmachine.imm")
-    lines.extend(
-        [
-            "  %next:2 = waveamdmachine.s_add_i32 %s, %i127",
-            "      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)",
-            "        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)",
-            "  %m1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1",
-            "      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,",
-            "         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>",
-            "  %e0, %e1, %e2, %e3 = waveamdmachine.tuple_to_elements %m1",
-            "      : (!waveamdmachine.reg<vgpr, 4>) -> (",
-            "          !waveamdmachine.reg<vgpr, 1>,",
-            "          !waveamdmachine.reg<vgpr, 1>,",
-            "          !waveamdmachine.reg<vgpr, 1>,",
-            "          !waveamdmachine.reg<vgpr, 1>)",
-            "  %sum = waveamdmachine.v_add_u32 %e0, %e1",
-            "      : (!waveamdmachine.reg<vgpr, 1>,",
-            "         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>",
-            "  return",
-            "}",
-            "}",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def cma_dma_beam_cap_mlir(cma_count: int = 32) -> str:
-    lines = [
-        'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
-        "func.func @cma_dma_beam_cap(",
+        "func.func @gfx950_mfma_dma(",
         "    %a: !waveamdmachine.reg<vgpr, 4>,",
         "    %b: !waveamdmachine.reg<vgpr, 4>,",
     ]
@@ -178,66 +137,34 @@ def cma_dma_beam_cap_mlir(cma_count: int = 32) -> str:
     return "\n".join(lines)
 
 
-def check_cma_dma_beam_cap() -> None:
+def check_gfx950_mfma_dma_report() -> None:
     text = run_case(
-        "cma_dma_beam_cap",
+        "gfx950_mfma_dma_report",
         [
             str(REPO_ROOT / "build/bin/wave-opt"),
             "-",
-            "--waveamd-machine-schedule-report=print-candidates=1 "
-            "beam-search=1 max-beam-work=1000000",
+            "--waveamd-machine-schedule-report=print-candidates=1",
         ],
-        input_text=cma_dma_beam_cap_mlir(),
-        timeout=10.0,
-    )
-    cma_candidates = re.findall(
-        r"candidate func=cma_dma_beam_cap region=0 name=cma_dma_place_", text
-    )
-    if len(cma_candidates) != 8:
-        print(
-            f"cma_dma_beam_cap: expected 8 placement candidates, "
-            f"got {len(cma_candidates)}",
-            file=sys.stderr,
-        )
-        print(text[-4000:], file=sys.stderr)
-        raise SystemExit(1)
-    require("cma_dma_beam_cap", text, r"name=beam_0")
-    reject("cma_dma_beam_cap", text, r"reason=max_beam_work")
-
-
-def check_lazy_hard_cap_issue_window_tie() -> None:
-    text = run_case(
-        "lazy_hard_cap_issue_window_tie",
-        [
-            str(REPO_ROOT / "build/bin/wave-opt"),
-            "-",
-            "--waveamd-machine-schedule-report=print-candidates=1 "
-            "pressure-aware-selection=1 pressure-vgpr-budget=256 "
-            "pressure-target-waves-override=-1",
-            "--waveamd-machine-schedule=apply-schedule=1 "
-            "pressure-aware-selection=1 pressure-vgpr-budget=256 "
-            "pressure-target-waves-override=-1",
-        ],
-        input_text=lazy_issue_window_tie_mlir(),
+        input_text=gfx950_mfma_dma_mlir(),
         timeout=10.0,
     )
     require(
-        "lazy_hard_cap_issue_window_tie",
+        "gfx950_mfma_dma_report",
         text,
-        r"waveamdmachine\.mfma_f32_16x16x32_f16 %arg0, %arg1, %arg3[^\n]*\n"
-        r"\s*%[0-9]+:4 = waveamdmachine\.tuple_to_elements %[0-9]+[^\n]*\n"
-        r"\s*%[0-9]+ = waveamdmachine\.mfma_f32_16x16x32_f16 "
-        r"%arg0, %arg1, %arg2[^\n]*\n"
-        r"\s*%[0-9]+ = waveamdmachine\.v_add_u32 %[0-9]+#0, %[0-9]+#1[^\n]*\n"
-        r"\s*%[A-Za-z0-9_]+, %[A-Za-z0-9_]+ = waveamdmachine\.s_add_i32",
+        r"candidate func=gfx950_mfma_dma region=0 name=original",
     )
     require(
-        "lazy_hard_cap_issue_window_tie",
+        "gfx950_mfma_dma_report",
         text,
-        r"waveamd-machine-schedule-report candidate "
-        r"func=lazy_issue_window_tie region=0 name=[^\n]*"
-        r"hazard_wait_cycles=[1-9][0-9]*",
+        r"candidate func=gfx950_mfma_dma region=0 name=greedy",
     )
+    require(
+        "gfx950_mfma_dma_report",
+        text,
+        r"selected func=gfx950_mfma_dma region=0 name=original "
+        r".*action=keep reason=same_order",
+    )
+    reject("gfx950_mfma_dma_report", text, r"unsupported op")
 
 
 def main() -> int:
@@ -250,12 +177,12 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 10336",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 10035",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
     text = run_case(
-        "matmul_hard_cap_beam_report",
+        "matmul_greedy_report",
         [
             *matmul_base_cmd(),
             "--beam-search",
@@ -264,17 +191,20 @@ def main() -> int:
         ],
         timeout=10.0,
     )
-    require("matmul_hard_cap_beam_report", text, r"name=beam_0")
+    require("matmul_greedy_report", text, r"name=greedy")
     require(
-        "matmul_hard_cap_beam_report",
+        "matmul_greedy_report",
         text,
-        r"selected func=wmma_f16_matmul_tiled region=2 name=local_issue",
+        r"selected func=wmma_f16_matmul_tiled region=1 name=greedy "
+        r"original_cycles=2215 selected_cycles=2113 delta=-102 action=apply "
+        r"reason=better",
     )
-    require("matmul_hard_cap_beam_report", text, r"vgpr_hard_excess=0")
-    reject("matmul_hard_cap_beam_report", text, r"pressure_fallback")
+    require("matmul_greedy_report", text, r"memory_token_gaps=6")
+    reject("matmul_greedy_report", text, r"name=beam_0")
+    reject("matmul_greedy_report", text, r"pressure_fallback")
 
     text = run_case(
-        "fa_seq32_d16_u4_beam_report",
+        "fa_seq32_d16_u4_greedy_report",
         [
             *fa_base_cmd(),
             "--beam-search",
@@ -283,35 +213,21 @@ def main() -> int:
         ],
         timeout=20.0,
     )
-    require("fa_seq32_d16_u4_beam_report", text, r"name=beam_0")
-    require("fa_seq32_d16_u4_beam_report", text, r"name=issue_window")
-    require("fa_seq32_d16_u4_beam_report", text, r"name=local_issue")
     require(
-        "fa_seq32_d16_u4_beam_report",
+        "fa_seq32_d16_u4_greedy_report",
         text,
-        r"selected func=flash_attention_f32 region=2 name=critical_path",
+        r"skipped func=flash_attention_f32 region=0 reason=max_region_ops "
+        r"ops=1574 instruction_ops=1530 limit=512",
     )
     require(
-        "fa_seq32_d16_u4_beam_report",
+        "fa_seq32_d16_u4_greedy_report",
         text,
-        r"skipped func=flash_attention_f32 region=1 reason=max_region_ops "
-        r"ops=670 instruction_ops=667 limit=512",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 35683",
     )
-    require(
-        "fa_seq32_d16_u4_beam_report",
-        text,
-        r"skipped func=flash_attention_f32 region=4 reason=max_region_ops "
-        r"ops=704 instruction_ops=704 limit=512",
-    )
-    require(
-        "fa_seq32_d16_u4_beam_report",
-        text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 30782",
-    )
-    reject("fa_seq32_d16_u4_beam_report", text, r"pressure_fallback")
+    reject("fa_seq32_d16_u4_greedy_report", text, r"name=beam_0")
+    reject("fa_seq32_d16_u4_greedy_report", text, r"pressure_fallback")
 
-    check_cma_dma_beam_cap()
-    check_lazy_hard_cap_issue_window_tie()
+    check_gfx950_mfma_dma_report()
     return 0
 
 

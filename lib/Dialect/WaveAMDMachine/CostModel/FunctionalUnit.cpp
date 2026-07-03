@@ -122,9 +122,8 @@ struct ArchFUs {
 } // namespace
 
 static constexpr ArchFUs kArchFUs[] = {
-    {{9, 4, 2}, &kFUsGfx942},
-    {{9, 5, 0}, &kFUsGfx950},
-    {{11, 0, 0}, &kFUsGfx1100},
+    {{8, 0, 3}, &kFUsGfx942},   {{9, 4, 2}, &kFUsGfx942},
+    {{9, 5, 0}, &kFUsGfx950},   {{11, 0, 0}, &kFUsGfx1100},
     {{12, 0, 0}, &kFUsGfx1200},
 };
 

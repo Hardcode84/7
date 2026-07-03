@@ -1,7 +1,7 @@
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=DISABLED
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-aware-selection=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=HARD
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1 pressure-aware-selection=1 pressure-critical-vgpr-budget=3 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=CRIT
-// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1 beam-search=1 pressure-aware-selection=1 pressure-vgpr-budget=3 pressure-target-waves-override=-1' | FileCheck %s --check-prefix=APPLY-HARD
+// RUN: not wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 beam-search=1' 2>&1 | FileCheck %s --check-prefix=REPORT-BEAM-ERR
+// RUN: not wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 pressure-aware-selection=1' 2>&1 | FileCheck %s --check-prefix=REPORT-PRESSURE-ERR
+// RUN: not wave-opt %s --waveamd-machine-schedule-report='print-candidates=1 pressure-critical-vgpr-budget=3' 2>&1 | FileCheck %s --check-prefix=REPORT-BUDGET-ERR
+// RUN: not wave-opt %s --waveamd-machine-schedule='apply-schedule=1 pressure-aware-selection=1' 2>&1 | FileCheck %s --check-prefix=APPLY-ERR
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @pressure_guard(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -22,28 +22,7 @@ func.func @pressure_guard(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 }
 
-// DISABLED: waveamd-machine-schedule-report budgets func=pressure_guard hard_vgpr=3 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=disabled critical_sgpr=disabled
-// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,1,2,3,4,5
-// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=85 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,4,1,2,3,5
-// DISABLED: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=87 delta=-5 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,1,2,4,3,5
-// DISABLED: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=critical_path original_cycles=92 selected_cycles=85 delta=-7 action=keep order=0,4,1,2,3,5
-
-// HARD: waveamd-machine-schedule-report budgets func=pressure_guard hard_vgpr=3 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=disabled critical_sgpr=disabled
-// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,1,2,3,4,5
-// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=85 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=1 sgpr_hard_excess=0 order=0,4,1,2,3,5
-// HARD: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 order=0,2,1,3,4,5
-// HARD: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=92 selected_cycles=92 delta=0 action=keep order=0,1,2,3,4,5
-
-// CRIT: waveamd-machine-schedule-report budgets func=pressure_guard hard_vgpr=256 derived_hard_vgpr=256 hard_sgpr=106 derived_hard_sgpr=106 critical_vgpr=3 critical_sgpr=disabled
-// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=original cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,1,2,3,4,5
-// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=critical_path cycles=85 delta=-7 issued_ops=5 max_vgpr=4 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=1 order=0,4,1,2,3,5
-// CRIT: waveamd-machine-schedule-report candidate func=pressure_guard region=0 name=beam_0 cycles=92 delta=0 issued_ops=5 max_vgpr=3 max_sgpr=0 vgpr_hard_excess=0 sgpr_hard_excess=0 vgpr_critical_excess=0 order=0,2,1,3,4,5
-// CRIT: waveamd-machine-schedule-report selected func=pressure_guard region=0 name=original original_cycles=92 selected_cycles=92 delta=0 action=keep order=0,1,2,3,4,5
-
-// APPLY-HARD-LABEL: func.func @pressure_guard
-// APPLY-HARD: waveamdmachine.token
-// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
-// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
-// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
-// APPLY-HARD-NEXT: waveamdmachine.global_load_b32
-// APPLY-HARD-NEXT: waveamdmachine.v_add_u32
+// REPORT-BEAM-ERR: waveamd-machine-schedule-report unsupported option: beam-search
+// REPORT-PRESSURE-ERR: waveamd-machine-schedule-report unsupported option: pressure-aware-selection
+// REPORT-BUDGET-ERR: waveamd-machine-schedule-report unsupported option: pressure-critical-vgpr-budget
+// APPLY-ERR: waveamd-machine-schedule unsupported option: pressure-aware-selection

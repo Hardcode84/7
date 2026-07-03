@@ -203,8 +203,8 @@ module attributes {transform.with_named_sequence} {
         to %rpre : (!transform.any_op) -> !transform.any_op
     %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
         options = { "apply-schedule" = true,
-                    "pressure-aware-selection" = true,
-                    "max-region-ops" = 512 }
+                    "max-region-ops" = 512,
+                    "require-selected-input" = true }
         to %rrepair : (!transform.any_op) -> !transform.any_op
     %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rs)
         : (!transform.any_op) -> !transform.any_op

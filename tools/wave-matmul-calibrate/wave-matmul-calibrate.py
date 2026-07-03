@@ -243,17 +243,20 @@ def add_pressure_budget_options(
             options[option] = value
 
 
-def add_common_scheduler_options(
+def add_mutating_scheduler_options(
     options: dict[str, bool | int | str], args: argparse.Namespace
 ) -> None:
     options["max-region-ops"] = 512
-    if args.beam_search:
-        options["beam-search"] = True
-    if not args.no_pressure_aware_schedule:
-        options["pressure-aware-selection"] = True
     if args.calibration_file:
         options["calibration-file"] = str(args.calibration_file)
-    add_pressure_budget_options(options, args)
+
+
+def add_report_scheduler_options(
+    options: dict[str, bool | int | str], args: argparse.Namespace
+) -> None:
+    options["max-region-ops"] = 512
+    if args.calibration_file:
+        options["calibration-file"] = str(args.calibration_file)
 
 
 def add_schedule_model_options(
@@ -535,7 +538,18 @@ def scheduler_policy_options(
     if not variant.apply_schedule:
         return {}
     options: dict[str, bool | int | str] = {}
-    add_common_scheduler_options(options, args)
+    add_report_scheduler_options(options, args)
+    add_schedule_model_options(options, variant, args)
+    return {name: value for name, value in options.items() if value is not False}
+
+
+def schedule_pass_policy_options(
+    variant: Variant, args: argparse.Namespace
+) -> dict[str, bool | int | str]:
+    if not variant.apply_schedule:
+        return {}
+    options: dict[str, bool | int | str] = {}
+    add_mutating_scheduler_options(options, args)
     add_schedule_model_options(options, variant, args)
     return {name: value for name, value in options.items() if value is not False}
 
@@ -545,7 +559,7 @@ def schedule_pass_options(
 ) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    return {"apply-schedule": True, **scheduler_policy_options(variant, args)}
+    return {"apply-schedule": True, **schedule_pass_policy_options(variant, args)}
 
 
 def schedule_report_options(

@@ -9,7 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM-LABEL: buffer_rsrc_hoist_codegen:
 // ASM: s_mov_b32 s54, 0x80
-// ASM-NEXT: s_mov_b32 s55, 0x31016000
+// ASM: s_mov_b32 s55, 0x31016000
 // ASM: .Lbuffer_rsrc_hoist_codegen.loop_head_0:
 // ASM-NOT: s_mov_b32 s54
 // ASM-NOT: s_mov_b32 s55

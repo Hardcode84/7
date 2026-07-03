@@ -194,7 +194,7 @@ def check_post_regalloc(label: str, post_passes: list[str]) -> None:
 def check_calibration_entry(label: str, module) -> None:
     text = module.pipeline_text(
         BUILD_DIR,
-        schedule_options={"apply-schedule": True, "pressure-aware-selection": True},
+        schedule_options={"apply-schedule": True},
         report_options={"print-candidates": True},
     )
     ir, _, register_dialects = module.import_mlir_bindings(BUILD_DIR)

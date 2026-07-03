@@ -16,14 +16,11 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDHoistTuples.cpp
   WaveAMDMachine.cpp
   WaveAMDMachineCleanup.cpp
+  WaveAMDMachineGreedySchedule.cpp
   WaveAMDMachineIndexExpr.cpp
   WaveAMDMachineLoadStore.cpp
   WaveAMDMachineLoopCarryPlan.cpp
   WaveAMDMachineScfFor.cpp
-  WaveAMDMachineSchedule.cpp
-  WaveAMDMachineScheduleBeam.cpp
-  WaveAMDMachineScheduleReport.cpp
-  WaveAMDMachineScheduleSupport.cpp
   WaveAMDMachineWaitcnt.cpp
   WaveAMDMetadata.cpp
   WaveAMDMMAReusePreschedule.cpp

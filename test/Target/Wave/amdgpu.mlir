@@ -152,8 +152,8 @@ func.func @wave_nested_where(%limit: i32, %alt: i32,
 
 // CHECK-LABEL: wave_kernel:
 func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
-  // CHECK: s_load_b32 [[X:s[0-9]+]], s[0:1], 0x8
   // CHECK: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
+  // CHECK: s_load_b32 [[X:s[0-9]+]], s[0:1], 0x8
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>

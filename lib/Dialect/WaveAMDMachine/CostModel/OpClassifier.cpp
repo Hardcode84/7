@@ -47,7 +47,7 @@ static bool issuesLdsWaitcnt(Operation *op) {
   return getWaitcntInfo(op).event == WaitcntEvent::Lds;
 }
 
-SchedClass classifyOp(Operation *op) {
+static SchedClass classifyMappedOp(Operation *op) {
   // Trait pre-filter for two large categories: ops that do not advance
   // instruction-distance hazards and the full VMEM load/store family.
   if (op->hasTrait<traits::NoMachineInst>())
@@ -125,8 +125,23 @@ SchedClass classifyOp(Operation *op) {
             SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SReadVccB32Op,
             SSetprioOp, SGetregShaderCyclesOp, SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
-      .Default(fallbackClassify);
+      .Default([](Operation *op) {
+        if (op->hasTrait<traits::VALUOp>())
+          return SchedClass::Write32Bit;
+        return SchedClass::NumSchedClasses;
+      });
   // clang-format on
+}
+
+SchedClass classifyOp(Operation *op) {
+  SchedClass cls = classifyMappedOp(op);
+  if (cls != SchedClass::NumSchedClasses)
+    return cls;
+  return fallbackClassify(op);
+}
+
+bool hasSchedClassMapping(Operation *op) {
+  return classifyMappedOp(op) != SchedClass::NumSchedClasses;
 }
 
 } // namespace mlir::waveamdmachine

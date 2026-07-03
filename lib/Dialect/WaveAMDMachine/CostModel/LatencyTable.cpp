@@ -29,9 +29,8 @@ struct ArchTable {
 } // namespace
 
 static constexpr ArchTable kArchTables[] = {
-    {{9, 4, 2}, &kLatencyGfx942},
-    {{9, 5, 0}, &kLatencyGfx950},
-    {{11, 0, 0}, &kLatencyGfx1100},
+    {{8, 0, 3}, &kLatencyGfx942},   {{9, 4, 2}, &kLatencyGfx942},
+    {{9, 5, 0}, &kLatencyGfx950},   {{11, 0, 0}, &kLatencyGfx1100},
     {{12, 0, 0}, &kLatencyGfx1200},
 };
 

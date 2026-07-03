@@ -13,6 +13,21 @@
 
 namespace mlir::waveamdmachine {
 
+// GFX8 / Fiji-era GCN. Coarse scheduler model for legacy codegen tests:
+// wave64 over 4 SIMD16 units, smaller VGPR file than CDNA.
+static constexpr ArchData kGfx803{
+    /*isa=*/{8, 0, 3},
+    /*name=*/"gfx803",
+    /*wavesPerSIMD=*/10,
+    /*simdsPerCU=*/4,
+    /*vgprFileSize=*/256,
+    /*vgprAllocGranule=*/4,
+    /*valuPipelineDepth=*/4,
+    /*wave64IssueMultiplier=*/1,
+    /*issuesPerCUPerCycle=*/5,
+    /*simdIssuePeriod=*/4,
+};
+
 // CDNA3 / MI300. LLVM AMDGPUBaseInfo gives 8 waves/EU,
 // VGPR alloc granule 8, total VGPRs 512.
 // Wave64 native unit; 4-cycle SIMD16 issue period.
@@ -98,6 +113,7 @@ template <const ArchData &A> static constexpr bool sane() {
   return true;
 }
 
+static_assert(sane<kGfx803>());
 static_assert(sane<kGfx942>());
 static_assert(sane<kGfx950>());
 static_assert(sane<kGfx1100>());
@@ -109,11 +125,14 @@ static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
 }
 
 bool isArchSupported(const llvm::AMDGPU::IsaVersion &isa) {
-  return isaEq(isa, kGfx942.isa) || isaEq(isa, kGfx950.isa) ||
-         isaEq(isa, kGfx1100.isa) || isaEq(isa, kGfx1200.isa);
+  return isaEq(isa, kGfx803.isa) || isaEq(isa, kGfx942.isa) ||
+         isaEq(isa, kGfx950.isa) || isaEq(isa, kGfx1100.isa) ||
+         isaEq(isa, kGfx1200.isa);
 }
 
 const ArchData &getArchData(const llvm::AMDGPU::IsaVersion &isa) {
+  if (isaEq(isa, kGfx803.isa))
+    return kGfx803;
   if (isaEq(isa, kGfx942.isa))
     return kGfx942;
   if (isaEq(isa, kGfx950.isa))

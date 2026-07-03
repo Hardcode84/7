@@ -72,15 +72,19 @@ APIs once the shape settles.
 ## Region Model
 
 The new scheduler owns region collection. At this pipeline point, the body is
-expected to be structured machine IR: no labels, raw branches, priority-change
-ops, waitcnt ops, `s_nop`, or `s_delay_alu`. EXEC control is represented by
-region ops such as `exec_if`, not by schedulable EXEC-mask instructions inside
-a flat region.
+expected to be structured machine IR. EXEC control is represented by region ops
+such as `exec_if`, not by separate flat-region policy.
 
-Validate that invariant while collecting regions. If a label, raw branch,
-waitcnt, `s_nop`, `s_delay_alu`, priority-change op, flat EXEC read/write op,
-or any unsupported/unknown non-terminator appears, emit an error and fail the
-pass. Do not invent another separator class.
+Region collection is a positive support check. A local-region member must be a
+WaveAMDMachine op with no nested regions, no terminator trait, a cost-model
+mapping, and one of:
+
+- scheduler-supported no-instruction pseudos;
+- scheduler-supported SALU ops;
+- scheduler-supported modeled instruction classes.
+
+Everything else is a hard pass failure. Do not maintain a separate negative
+list.
 
 A scheduling region is the maximal run of non-terminator ops in one block,
 split only by ops with nested regions. Terminators end blocks; they cannot be
@@ -451,7 +455,7 @@ Focused lit tests:
 - Pipe/resource stall: independent ready op fills the issue gap.
 - Greedy order simulates worse than original: keep original.
 - Missing/malformed target and bad model options still diagnose.
-- Unsupported/unknown op in a collected region is a hard pass failure.
+- Op outside the scheduler-supported list is a hard pass failure.
 - Dependency graph cycle is a hard pass failure.
 - Loop-carried scalar and mem-token values do not enter ready predecessor
   counts.
@@ -536,7 +540,7 @@ gfx950 pattern checks:
 - **No-inst false fill.** Only real machine instructions decrement cheap
   hazard counters.
 - **Memory surprise.** Explicit token edges only; test this.
-- **Unsupported IR surprise.** Hard error. Do not silently keep or split.
+- **IR outside scheduler support.** Hard error. Do not silently keep or split.
 - **Dependency cycle.** Hard error with graph edge kind in diagnostics.
 - **Compile-time growth.** Search current ready set first; add original-distance
   cap only if needed.
@@ -546,7 +550,7 @@ gfx950 pattern checks:
 1. Add separate mutating scheduler file.
 2. Keep existing pass name and no-op default.
 3. Implement fresh region collector and dependency graph.
-4. Add hard validation for unsupported ops and singleton overlap.
+4. Add hard validation for supported ops and singleton overlap.
 5. Implement loop-carry recurrence tracking outside ready counts.
 6. Implement incremental issue and memory preview/commit state.
 7. Add M0 cheap hazard state.

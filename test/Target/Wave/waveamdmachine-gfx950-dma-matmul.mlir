@@ -39,7 +39,7 @@
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-SCALEPACK
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=256 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-EPILOGUE
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=512 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=384 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA-PIPE
 //
 // IR: wave.index_expr <{{.*xor.*floor\(1/2\*Mod\(wi, 16\)\).*}}>
@@ -115,8 +115,8 @@
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
 // MXFP4-4W-SCALE-ASM: s_waitcnt lgkmcnt(0)
 // MXFP4-4W-SCALE-ASM-NEXT: s_barrier
-// MXFP4-4W-SCALE-ASM: s_waitcnt vmcnt(24)
-// MXFP4-4W-SCALE-ASM-NEXT: s_barrier
+// MXFP4-4W-SCALE-ASM: buffer_load_dword
+// MXFP4-4W-SCALE-ASM: buffer_load_dwordx4 {{.*}} lds
 // MXFP4-4W-SCALE-ASM: ds_read_b128
 // MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 
@@ -161,10 +161,10 @@
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
 // MXFP4-PERF-ASM: s_waitcnt lgkmcnt(0)
 // MXFP4-PERF-ASM-NEXT: s_barrier
-// MXFP4-PERF-ASM-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
+// MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
-// ASMPIPE: s_waitcnt vmcnt(0)
+// ASMPIPE: s_waitcnt vmcnt(8)
 // ASMPIPE-NEXT: s_barrier
 
 // ASMBF16-LABEL: wmma_f16_matmul_tiled:
@@ -244,8 +244,6 @@
 // ASMMXFP4-DMA-PIPE: global_load_lds_dwordx4
 // ASMMXFP4-DMA-PIPE: v_mfma_scale_f32_16x16x128_f8f6f4
 
-// ASMPIPE: s_waitcnt vmcnt(0)
-// ASMPIPE-NEXT: s_barrier
-// ASMPIPE: buffer_load_dwordx4
 // ASMPIPE: ds_read_b128
+// ASMPIPE: buffer_load_dwordx4
 // ASMPIPE: v_mfma_f32_16x16x32_f16

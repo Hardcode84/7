@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "WaveAMDMachineScheduleEligibility.h"
 #include "WaveAMDMachineSelector.h"
 #include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
@@ -56,6 +57,21 @@ namespace mlir::wave {
 using namespace mlir;
 using namespace mlir::wave;
 using namespace mlir::waveamd;
+
+static constexpr StringLiteral kScheduleInputAttr =
+    "waveamdmachine.schedule_input";
+
+static bool isSchedulerStageCompatible(func::FuncOp func) {
+  WalkResult walk = func.walk([&](Operation *op) {
+    if (!isWaveAMDMachineOpForScheduling(op))
+      return WalkResult::advance();
+    if (op->getNumRegions() != 0 || op->hasTrait<OpTrait::IsTerminator>())
+      return WalkResult::advance();
+    return isSupportedSchedulerRegionMember(op) ? WalkResult::advance()
+                                                : WalkResult::interrupt();
+  });
+  return !walk.wasInterrupted();
+}
 
 namespace mlir::wave::wmsel {
 
@@ -8723,6 +8739,8 @@ struct ConvertWaveAMDToWaveAMDMachinePass
           ConvertWaveAMDToWaveAMDMachinePass> {
   void runOnOperation() override {
     Operation *root = getOperation();
+    root->walk([](func::FuncOp func) { func->removeAttr(kScheduleInputAttr); });
+
     SmallVector<func::FuncOp> targets;
     collectMachineSelectionTargets(root, targets);
 
@@ -8736,6 +8754,8 @@ struct ConvertWaveAMDToWaveAMDMachinePass
     for (func::FuncOp func : targets) {
       if (failed(wave::wmsel::WaveAMDMachineSelector(func, rangeSolver).run()))
         return signalPassFailure();
+      if (isSchedulerStageCompatible(func))
+        func->setAttr(kScheduleInputAttr, UnitAttr::get(func.getContext()));
     }
   }
 };
