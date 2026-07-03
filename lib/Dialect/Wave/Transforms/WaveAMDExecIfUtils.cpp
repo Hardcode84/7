@@ -56,6 +56,17 @@ unsigned getWaveAMDExecIfSaveBudgetReserve(func::FuncOp func) {
   return info.maxDwords + info.maxAlign - 1;
 }
 
+unsigned getWaveAMDExecIfAllocatableSGPRBudget(func::FuncOp func,
+                                               unsigned sgprLimit) {
+  WaveAMDExecIfSaveStackInfo info = getWaveAMDExecIfSaveStackInfo(func);
+  if (info.maxDwords == 0)
+    return sgprLimit;
+  if (sgprLimit <= info.maxDwords)
+    return 0;
+  unsigned allocatable = sgprLimit - info.maxDwords;
+  return (allocatable / info.maxAlign) * info.maxAlign;
+}
+
 unsigned getWaveAMDExecIfSaveBase(func::FuncOp func, unsigned sgprCount) {
   WaveAMDExecIfSaveStackInfo info = getWaveAMDExecIfSaveStackInfo(func);
   if (info.maxDwords == 0)

@@ -24,6 +24,9 @@ WaveAMDExecIfSaveStackInfo getWaveAMDExecIfSaveStackInfo(func::FuncOp func);
 
 unsigned getWaveAMDExecIfSaveBudgetReserve(func::FuncOp func);
 
+unsigned getWaveAMDExecIfAllocatableSGPRBudget(func::FuncOp func,
+                                               unsigned sgprLimit);
+
 unsigned getWaveAMDExecIfSaveBase(func::FuncOp func, unsigned sgprCount);
 
 unsigned getWaveAMDExecIfReservedSGPRCount(func::FuncOp func,

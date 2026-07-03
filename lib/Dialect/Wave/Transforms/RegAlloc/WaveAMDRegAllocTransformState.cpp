@@ -9,6 +9,7 @@
 #include "WaveAMDRegAllocTransformState.h"
 
 #include "WaveAMDRegisterLimits.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -494,6 +495,13 @@ static std::optional<unsigned> getUnsignedIntegerAttr(Operation *op,
   return static_cast<unsigned>(value);
 }
 
+static unsigned adjustSGPRBudgetForExecIfSaveStack(
+    func::FuncOp func, waveamdmachine::RegClass regClass, unsigned limit) {
+  if (regClass != waveamdmachine::RegClass::SGPR)
+    return limit;
+  return getWaveAMDExecIfAllocatableSGPRBudget(func, limit);
+}
+
 static Attribute findAncestorAttr(Operation *op, StringRef name) {
   for (Operation *cur = op; cur; cur = cur->getParentOp())
     if (Attribute attr = cur->getAttr(name))
@@ -544,14 +552,19 @@ getRegAllocTransformBudget(func::FuncOp func,
   StringRef attrName = getRegClassBudgetAttr(regClass);
   if (std::optional<unsigned> limit =
           getUnsignedIntegerAttr(func.getOperation(), attrName))
-    return {*limit, "func_attr"};
+    return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, *limit),
+            "func_attr"};
   Operation *parent = func->getParentOp();
   if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
-    return {*limit, "module_attr"};
+    return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, *limit),
+            "module_attr"};
   if (std::optional<unsigned> limit =
           getTargetAddressableBudget(func, regClass))
-    return {*limit, "target_addressable"};
-  return {getRegAllocTransformDefaultBudgetLimit(regClass), "default"};
+    return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, *limit),
+            "target_addressable"};
+  unsigned defaultLimit = getRegAllocTransformDefaultBudgetLimit(regClass);
+  return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, defaultLimit),
+          "default"};
 }
 
 FailureOr<std::optional<RegAllocTransformBudget>>
