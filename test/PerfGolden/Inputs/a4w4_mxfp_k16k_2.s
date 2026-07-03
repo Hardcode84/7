@@ -1212,6 +1212,15 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[224:227], a[80:83], a[64:67], a[224:227], v92, v97 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[220:223], a[72:75], a[64:67], a[220:223], v92, v97 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		s_barrier
+		s_waitcnt vmcnt(37)
+		v_or_b32_e32 v92, v106, v108
+		v_lshlrev_b32_e32 v92, 8, v92
+		v_or3_b32 v94, v105, v107, v92
+		s_waitcnt vmcnt(33)
+		v_or_b32_e32 v92, v110, v112
+		v_lshlrev_b32_e32 v92, 8, v92
+		v_or3_b32 v95, v109, v111, v92
+		ds_write_b64 v98, v[94:95] offset:3904
 		ds_read_b128 a[4:7], v121 offset:33760
 		ds_read_b128 a[8:11], v121 offset:33824
 		ds_read_b128 a[12:15], v121 offset:34016
@@ -1236,16 +1245,7 @@ _a4w4_kernel:
 		ds_read_b128 a[88:91], v122 offset:19424
 		ds_read_b128 a[92:95], v122 offset:19616
 		ds_read_b128 a[96:99], v122 offset:19680
-		s_waitcnt vmcnt(37)
-		v_or_b32_e32 v92, v106, v108
-		v_lshlrev_b32_e32 v92, 8, v92
-		v_or3_b32 v94, v105, v107, v92
-		s_waitcnt vmcnt(33)
-		v_or_b32_e32 v92, v110, v112
-		v_lshlrev_b32_e32 v92, 8, v92
-		v_or3_b32 v95, v109, v111, v92
-		ds_write_b64 v98, v[94:95] offset:3904
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		s_waitcnt vmcnt(29)
 		v_or_b32_e32 v92, v114, v116
@@ -1646,6 +1646,7 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], a[80:83], a[64:67], v[236:239], v92, v97 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], a[72:75], a[64:67], v[232:235], v92, v97 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		s_barrier
+		ds_write_b32 v60, v1 offset:5952
 		ds_read_b128 v[20:23], v122 offset:35712
 		ds_read_b128 v[24:27], v122 offset:35776
 		ds_read_b128 v[28:31], v122 offset:35968
@@ -1654,8 +1655,7 @@ _a4w4_kernel:
 		ds_read_b128 v[40:43], v122 offset:36288
 		ds_read_b128 v[44:47], v122 offset:36480
 		ds_read_b128 v[48:51], v122 offset:36544
-		ds_write_b32 v60, v1 offset:5952
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(8)
 		s_barrier
 		ds_read_b64_tr_b8 v[12:13], v55 offset:5952
 		s_waitcnt lgkmcnt(0)
@@ -1723,6 +1723,7 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[208:211], v[32:35], a[56:59], a[208:211], v12, v97 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[224:227], v[32:35], a[64:67], a[224:227], v12, v97 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[220:223], v[24:27], a[64:67], a[220:223], v12, v97 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		ds_write_b64 v98, v[8:9] offset:3904
 		ds_read_b128 v[20:23], v121 offset:33760
 		ds_read_b128 v[24:27], v121 offset:33824
 		ds_read_b128 v[28:31], v121 offset:34016
@@ -1739,16 +1740,15 @@ _a4w4_kernel:
 		ds_read_b128 v[80:83], v121 offset:51232
 		ds_read_b128 v[88:91], v121 offset:51424
 		ds_read_b128 v[92:95], v121 offset:51488
-		ds_read_b128 v[100:103], v122 offset:18848
-		ds_read_b128 v[104:107], v122 offset:18912
-		ds_read_b128 v[108:111], v122 offset:19104
-		ds_read_b128 v[112:115], v122 offset:19168
-		ds_read_b128 v[116:119], v122 offset:19360
-		ds_read_b128 v[124:127], v122 offset:19424
-		ds_read_b128 v[244:247], v122 offset:19616
-		ds_read_b128 v[248:251], v122 offset:19680
-		ds_write_b64 v98, v[8:9] offset:3904
-		s_waitcnt lgkmcnt(0)
+		ds_read_b128 v[96:99], v122 offset:18848
+		ds_read_b128 v[100:103], v122 offset:18912
+		ds_read_b128 v[104:107], v122 offset:19104
+		ds_read_b128 v[108:111], v122 offset:19168
+		ds_read_b128 v[112:115], v122 offset:19360
+		ds_read_b128 v[116:119], v122 offset:19424
+		ds_read_b128 v[124:127], v122 offset:19616
+		ds_read_b128 v[244:247], v122 offset:19680
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		ds_write_b32 v60, v4 offset:5952
 		s_waitcnt lgkmcnt(0)
@@ -1757,70 +1757,70 @@ _a4w4_kernel:
 		ds_read_b64_tr_b8 v[12:13], v16 offset:4032
 		ds_read_b64_tr_b8 v[52:53], v55 offset:5952
 		s_waitcnt lgkmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[100:103], v[20:23], v[84:87], v52, v8 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], v[108:111], v[20:23], a[100:103], v52, v8 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[108:111], v[28:31], v[140:143], v52, v8 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[100:103], v[28:31], v[136:139], v52, v8 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[104:107], v[24:27], v[84:87], v52, v8 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], v[112:115], v[24:27], a[100:103], v52, v8 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[112:115], v[32:35], v[140:143], v52, v8 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[104:107], v[32:35], v[136:139], v52, v8 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[116:119], v[20:23], v[128:131], v53, v8 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[244:247], v[20:23], v[132:135], v53, v8 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[244:247], v[28:31], v[148:151], v53, v8 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[116:119], v[28:31], v[144:147], v53, v8 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[124:127], v[24:27], v[128:131], v53, v8 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[248:251], v[24:27], v[132:135], v53, v8 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[248:251], v[32:35], v[148:151], v53, v8 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[124:127], v[32:35], v[144:147], v53, v8 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[116:119], v[36:39], v[160:163], v53, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[244:247], v[36:39], v[164:167], v53, v9 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[244:247], v[44:47], v[180:183], v53, v9 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[116:119], v[44:47], v[176:179], v53, v9 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[124:127], v[40:43], v[160:163], v53, v9 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[248:251], v[40:43], v[164:167], v53, v9 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[248:251], v[48:51], v[180:183], v53, v9 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[124:127], v[48:51], v[176:179], v53, v9 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[100:103], v[36:39], v[152:155], v52, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[108:111], v[36:39], v[156:159], v52, v9 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[108:111], v[44:47], v[172:175], v52, v9 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[100:103], v[44:47], v[168:171], v52, v9 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[104:107], v[40:43], v[152:155], v52, v9 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[112:115], v[40:43], v[156:159], v52, v9 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[112:115], v[48:51], v[172:175], v52, v9 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[104:107], v[48:51], v[168:171], v52, v9 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[100:103], v[56:59], v[184:187], v52, v12 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[108:111], v[56:59], v[188:191], v52, v12 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[108:111], v[68:71], v[204:207], v52, v12 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[100:103], v[68:71], v[200:203], v52, v12 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[104:107], v[64:67], v[184:187], v52, v12 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[112:115], v[64:67], v[188:191], v52, v12 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[112:115], v[72:75], v[204:207], v52, v12 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[104:107], v[72:75], v[200:203], v52, v12 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[116:119], v[56:59], v[192:195], v53, v12 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[244:247], v[56:59], v[196:199], v53, v12 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[244:247], v[68:71], v[212:215], v53, v12 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[116:119], v[68:71], v[208:211], v53, v12 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[124:127], v[64:67], v[192:195], v53, v12 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[248:251], v[64:67], v[196:199], v53, v12 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[248:251], v[72:75], v[212:215], v53, v12 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[124:127], v[72:75], v[208:211], v53, v12 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], v[116:119], v[76:79], v[224:227], v53, v13 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], v[244:247], v[76:79], v[228:231], v53, v13 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], v[244:247], v[88:91], a[104:107], v53, v13 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[240:243], v[116:119], v[88:91], v[240:243], v53, v13 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], v[124:127], v[80:83], v[224:227], v53, v13 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], v[248:251], v[80:83], v[228:231], v53, v13 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], v[248:251], v[92:95], a[104:107], v53, v13 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[240:243], v[124:127], v[92:95], v[240:243], v53, v13 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], v[100:103], v[76:79], v[216:219], v52, v13 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], v[108:111], v[76:79], v[220:223], v52, v13 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], v[108:111], v[88:91], v[236:239], v52, v13 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], v[100:103], v[88:91], v[232:235], v52, v13 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], v[104:107], v[80:83], v[216:219], v52, v13 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], v[112:115], v[80:83], v[220:223], v52, v13 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], v[112:115], v[92:95], v[236:239], v52, v13 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], v[104:107], v[92:95], v[232:235], v52, v13 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[96:99], v[20:23], v[84:87], v52, v8 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], v[104:107], v[20:23], a[100:103], v52, v8 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[104:107], v[28:31], v[140:143], v52, v8 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[96:99], v[28:31], v[136:139], v52, v8 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[100:103], v[24:27], v[84:87], v52, v8 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], v[108:111], v[24:27], a[100:103], v52, v8 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[108:111], v[32:35], v[140:143], v52, v8 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[100:103], v[32:35], v[136:139], v52, v8 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[112:115], v[20:23], v[128:131], v53, v8 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[124:127], v[20:23], v[132:135], v53, v8 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[124:127], v[28:31], v[148:151], v53, v8 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[112:115], v[28:31], v[144:147], v53, v8 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[116:119], v[24:27], v[128:131], v53, v8 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[244:247], v[24:27], v[132:135], v53, v8 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[244:247], v[32:35], v[148:151], v53, v8 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[116:119], v[32:35], v[144:147], v53, v8 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[112:115], v[36:39], v[160:163], v53, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[124:127], v[36:39], v[164:167], v53, v9 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[124:127], v[44:47], v[180:183], v53, v9 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[112:115], v[44:47], v[176:179], v53, v9 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[116:119], v[40:43], v[160:163], v53, v9 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[244:247], v[40:43], v[164:167], v53, v9 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[244:247], v[48:51], v[180:183], v53, v9 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[116:119], v[48:51], v[176:179], v53, v9 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[96:99], v[36:39], v[152:155], v52, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[104:107], v[36:39], v[156:159], v52, v9 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[104:107], v[44:47], v[172:175], v52, v9 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[96:99], v[44:47], v[168:171], v52, v9 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[100:103], v[40:43], v[152:155], v52, v9 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[108:111], v[40:43], v[156:159], v52, v9 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[108:111], v[48:51], v[172:175], v52, v9 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[100:103], v[48:51], v[168:171], v52, v9 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[96:99], v[56:59], v[184:187], v52, v12 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[104:107], v[56:59], v[188:191], v52, v12 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[104:107], v[68:71], v[204:207], v52, v12 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[96:99], v[68:71], v[200:203], v52, v12 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[100:103], v[64:67], v[184:187], v52, v12 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[108:111], v[64:67], v[188:191], v52, v12 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[108:111], v[72:75], v[204:207], v52, v12 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[100:103], v[72:75], v[200:203], v52, v12 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[112:115], v[56:59], v[192:195], v53, v12 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[124:127], v[56:59], v[196:199], v53, v12 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[124:127], v[68:71], v[212:215], v53, v12 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[112:115], v[68:71], v[208:211], v53, v12 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[116:119], v[64:67], v[192:195], v53, v12 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[244:247], v[64:67], v[196:199], v53, v12 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[244:247], v[72:75], v[212:215], v53, v12 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[116:119], v[72:75], v[208:211], v53, v12 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], v[112:115], v[76:79], v[224:227], v53, v13 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], v[124:127], v[76:79], v[228:231], v53, v13 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], v[124:127], v[88:91], a[104:107], v53, v13 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[240:243], v[112:115], v[88:91], v[240:243], v53, v13 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], v[116:119], v[80:83], v[224:227], v53, v13 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], v[244:247], v[80:83], v[228:231], v53, v13 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], v[244:247], v[92:95], a[104:107], v53, v13 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[240:243], v[116:119], v[92:95], v[240:243], v53, v13 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], v[96:99], v[76:79], v[216:219], v52, v13 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], v[104:107], v[76:79], v[220:223], v52, v13 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], v[104:107], v[88:91], v[236:239], v52, v13 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], v[96:99], v[88:91], v[232:235], v52, v13 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], v[100:103], v[80:83], v[216:219], v52, v13 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], v[108:111], v[80:83], v[220:223], v52, v13 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], v[108:111], v[92:95], v[236:239], v52, v13 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], v[100:103], v[92:95], v[232:235], v52, v13 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		ds_read_b128 v[96:99], v122 offset:52576
 		ds_read_b128 v[100:103], v122 offset:52640
 		ds_read_b128 v[104:107], v122 offset:52832

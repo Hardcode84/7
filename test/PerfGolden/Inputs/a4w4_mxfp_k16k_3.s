@@ -516,6 +516,10 @@ _a4w4_kernel:
 		v_add_u32_e32 v68, 0x10000, v69
 		v_lshlrev_b32_e32 v69, 7, v3
 		v_add3_u32 v68, v68, v69, v70
+		v_lshlrev_b32_e32 v69, 3, v0
+		v_add_u32_e32 v69, 0x20000, v69
+		s_waitcnt vmcnt(6)
+		ds_write_b64 v69, v[58:59] offset:3904
 		ds_read_b128 a[64:67], v68 offset:1984
 		ds_read_b128 a[68:71], v68 offset:2048
 		ds_read_b128 a[72:75], v68 offset:2240
@@ -524,10 +528,6 @@ _a4w4_kernel:
 		ds_read_b128 a[84:87], v68 offset:2560
 		ds_read_b128 a[88:91], v68 offset:2752
 		ds_read_b128 a[92:95], v68 offset:2816
-		v_lshlrev_b32_e32 v69, 3, v0
-		v_add_u32_e32 v69, 0x20000, v69
-		s_waitcnt vmcnt(6)
-		ds_write_b64 v69, v[58:59] offset:3904
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		v_lshlrev_b32_e32 v58, 2, v0
@@ -945,6 +945,8 @@ _a4w4_kernel:
 		ds_read_b128 a[52:55], v63 offset:51232
 		ds_read_b128 a[56:59], v63 offset:51424
 		ds_read_b128 a[60:63], v63 offset:51488
+		s_waitcnt vmcnt(17)
+		ds_write_b64 v69, v[60:61] offset:3904
 		ds_read_b128 a[64:67], v68 offset:18848
 		ds_read_b128 a[68:71], v68 offset:18912
 		ds_read_b128 a[72:75], v68 offset:19104
@@ -953,9 +955,7 @@ _a4w4_kernel:
 		ds_read_b128 a[84:87], v68 offset:19424
 		ds_read_b128 a[88:91], v68 offset:19616
 		ds_read_b128 v[252:255], v68 offset:19680
-		s_waitcnt vmcnt(17)
-		ds_write_b64 v69, v[60:61] offset:3904
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(8)
 		s_barrier
 		s_waitcnt vmcnt(16)
 		ds_write_b32 v58, v57 offset:5952
@@ -1162,6 +1162,8 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[156:159], a[68:71], a[60:63], a[156:159], v72, v71 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		s_waitcnt vmcnt(21)
 		s_barrier
+		s_waitcnt vmcnt(20)
+		ds_write_b64 v69, v[74:75] offset:3904
 		ds_read_b128 a[0:3], v63
 		ds_read_b128 a[4:7], v63 offset:64
 		ds_read_b128 a[8:11], v63 offset:256
@@ -1186,9 +1188,7 @@ _a4w4_kernel:
 		ds_read_b128 a[84:87], v68 offset:2560
 		ds_read_b128 a[88:91], v68 offset:2752
 		ds_read_b128 a[92:95], v68 offset:2816
-		s_waitcnt vmcnt(20)
-		ds_write_b64 v69, v[74:75] offset:3904
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		s_waitcnt vmcnt(19)
 		ds_write_b32 v58, v49 offset:5952
@@ -1285,6 +1285,7 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], a[68:71], a[60:63], v[180:183], v50, v73 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		s_waitcnt vmcnt(1)
 		s_barrier
+		ds_write_b32 v58, v54 offset:5952
 		ds_read_b128 v[8:11], v68 offset:35712
 		ds_read_b128 v[20:23], v68 offset:35776
 		ds_read_b128 v[24:27], v68 offset:35968
@@ -1293,8 +1294,7 @@ _a4w4_kernel:
 		ds_read_b128 v[36:39], v68 offset:36288
 		ds_read_b128 v[40:43], v68 offset:36480
 		ds_read_b128 v[44:47], v68 offset:36544
-		ds_write_b32 v58, v54 offset:5952
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(8)
 		s_barrier
 		ds_read_b64_tr_b8 v[48:49], v15 offset:5952
 		s_waitcnt lgkmcnt(0)
@@ -1362,6 +1362,7 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[144:147], v[28:31], a[52:55], a[144:147], v48, v73 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[160:163], v[28:31], a[60:63], a[160:163], v48, v73 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[156:159], v[20:23], a[60:63], a[156:159], v48, v73 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		ds_write_b64 v69, v[60:61] offset:3904
 		ds_read_b128 v[8:11], v63 offset:33760
 		ds_read_b128 v[20:23], v63 offset:33824
 		ds_read_b128 v[24:27], v63 offset:34016
@@ -1386,8 +1387,7 @@ _a4w4_kernel:
 		ds_read_b128 v[48:51], v68 offset:19424
 		ds_read_b128 v[72:75], v68 offset:19616
 		ds_read_b128 v[252:255], v68 offset:19680
-		ds_write_b64 v69, v[60:61] offset:3904
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		ds_write_b32 v58, v57 offset:5952
 		s_waitcnt lgkmcnt(0)

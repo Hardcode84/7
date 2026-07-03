@@ -629,6 +629,10 @@ _a4w4_kernel:
 		v_add_u32_e32 v107, 0x10000, v107
 		v_lshlrev_b32_e32 v108, 11, v35
 		v_add3_u32 v106, v107, v108, v106
+		v_lshlrev_b32_e32 v107, 3, v0
+		v_add_u32_e32 v107, 0x20000, v107
+		s_waitcnt vmcnt(41)
+		ds_write_b64 v107, v[50:51]
 		ds_read_b128 a[64:67], v106
 		ds_read_b128 a[68:71], v106 offset:64
 		ds_read_b128 a[72:75], v106 offset:4096
@@ -637,11 +641,7 @@ _a4w4_kernel:
 		ds_read_b128 a[84:87], v106 offset:8256
 		ds_read_b128 a[88:91], v106 offset:12288
 		ds_read_b128 a[92:95], v106 offset:12352
-		v_lshlrev_b32_e32 v107, 3, v0
-		v_add_u32_e32 v107, 0x20000, v107
-		s_waitcnt vmcnt(41)
-		ds_write_b64 v107, v[50:51]
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(8)
 		s_barrier
 		v_lshlrev_b32_e32 v50, 2, v0
 		v_add_u32_e32 v50, 0x20000, v50
@@ -1765,6 +1765,8 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[240:243], a[68:71], a[60:63], a[240:243], v98, v110 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		s_waitcnt vmcnt(34)
 		s_barrier
+		s_waitcnt vmcnt(33)
+		ds_write_b64 v107, v[132:133]
 		ds_read_b128 a[0:3], v102
 		ds_read_b128 a[4:7], v102 offset:64
 		ds_read_b128 a[8:11], v102 offset:4096
@@ -1789,9 +1791,7 @@ _a4w4_kernel:
 		ds_read_b128 a[84:87], v106 offset:8256
 		ds_read_b128 a[88:91], v106 offset:12288
 		ds_read_b128 a[92:95], v106 offset:12352
-		s_waitcnt vmcnt(33)
-		ds_write_b64 v107, v[132:133]
-		s_waitcnt lgkmcnt(0)
+		s_waitcnt lgkmcnt(14)
 		s_barrier
 		s_waitcnt vmcnt(32)
 		ds_write_b32 v50, v129 offset:2048

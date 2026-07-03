@@ -1097,6 +1097,209 @@ static void addBarrierDsReadPrefetchCandidate(
   appendUniqueCandidate(candidates, std::move(candidate));
 }
 
+static bool isTokenJoin(Operation *op) {
+  return op->hasTrait<traits::TokenJoinOp>();
+}
+
+static llvm::DenseMap<Operation *, unsigned>
+getRegionOpIndices(const ScheduleRegion &region) {
+  llvm::DenseMap<Operation *, unsigned> indices;
+  for (auto [index, op] : llvm::enumerate(region.ops))
+    indices[op] = static_cast<unsigned>(index);
+  return indices;
+}
+
+static bool collectTokenProducerIndices(
+    Value token, ArrayRef<unsigned> classes,
+    const llvm::DenseMap<Operation *, unsigned> &indices, unsigned mask,
+    SmallVectorImpl<unsigned> &producers,
+    llvm::SmallPtrSetImpl<Operation *> &seen) {
+  Operation *def = token.getDefiningOp();
+  if (!def || !seen.insert(def).second)
+    return def != nullptr;
+  if (isTokenJoin(def)) {
+    for (Value operand : def->getOperands())
+      if (!collectTokenProducerIndices(operand, classes, indices, mask,
+                                       producers, seen))
+        return false;
+    return true;
+  }
+  auto found = indices.find(def);
+  if (found == indices.end())
+    return false;
+  unsigned index = found->second;
+  if (!hasPipelineClass(classes[index], mask))
+    return false;
+  if (!llvm::is_contained(producers, index))
+    producers.push_back(index);
+  return true;
+}
+
+static llvm::BitVector
+collectInRegionProducerSlice(const ScheduleRegion &region, unsigned node) {
+  llvm::SmallPtrSet<Operation *, 16> scope;
+  for (unsigned index : llvm::seq<unsigned>(0, node))
+    scope.insert(region.ops[index]);
+
+  llvm::SmallPtrSet<Operation *, 16> needed;
+  collectProducerSlice(region.ops[node], scope, needed);
+
+  llvm::BitVector producerSlice(region.ops.size());
+  for (unsigned index : llvm::seq<unsigned>(0, node))
+    if (needed.contains(region.ops[index]))
+      producerSlice.set(index);
+  return producerSlice;
+}
+
+static std::optional<unsigned>
+findContiguousDsReadBurstBegin(ArrayRef<unsigned> classes,
+                               const llvm::BitVector &producerSlice,
+                               unsigned store) {
+  bool sawDsRead = false;
+  unsigned cursor = store;
+  while (cursor > 0) {
+    unsigned prev = cursor - 1;
+    if (producerSlice.test(prev)) {
+      --cursor;
+      continue;
+    }
+    if (hasPipelineClass(classes[prev], BPCDSRead)) {
+      sawDsRead = true;
+      --cursor;
+      continue;
+    }
+    break;
+  }
+  if (!sawDsRead || cursor == store)
+    return std::nullopt;
+  return cursor;
+}
+
+static bool collectTokenJoinedDsReadProducers(
+    Operation *tokenJoin, ArrayRef<unsigned> classes,
+    const llvm::DenseMap<Operation *, unsigned> &indices,
+    SmallVectorImpl<unsigned> &reads) {
+  if (!isTokenJoin(tokenJoin))
+    return false;
+
+  llvm::SmallPtrSet<Operation *, 16> seen;
+  for (Value operand : tokenJoin->getOperands())
+    if (!collectTokenProducerIndices(operand, classes, indices, BPCDSRead,
+                                     reads, seen))
+      return false;
+  llvm::sort(reads);
+  return !reads.empty();
+}
+
+static bool rangeHasOnlyReadsAndProducers(ArrayRef<unsigned> classes,
+                                          ArrayRef<unsigned> reads,
+                                          const llvm::BitVector &producerSlice,
+                                          unsigned begin, unsigned end) {
+  for (unsigned index : llvm::seq(begin, end)) {
+    if (llvm::is_contained(reads, index) || producerSlice.test(index))
+      continue;
+    if (isMemoryPipelineClass(classes[index]))
+      return false;
+  }
+  return true;
+}
+
+static std::optional<unsigned> findTrailingDsReadBurstBegin(
+    const ScheduleRegion &region, ArrayRef<unsigned> classes,
+    const llvm::DenseMap<Operation *, unsigned> &indices,
+    const llvm::BitVector &producerSlice, unsigned store) {
+  unsigned cursor = store;
+  while (cursor > 0 && producerSlice.test(cursor - 1))
+    --cursor;
+  if (cursor == 0)
+    return std::nullopt;
+
+  SmallVector<unsigned, 8> reads;
+  if (!collectTokenJoinedDsReadProducers(region.ops[cursor - 1], classes,
+                                         indices, reads))
+    return findContiguousDsReadBurstBegin(classes, producerSlice, cursor);
+  if (!rangeHasOnlyReadsAndProducers(classes, reads, producerSlice,
+                                     reads.front(), store))
+    return std::nullopt;
+  return reads.front();
+}
+
+static std::optional<unsigned>
+findBarrierDsWrite(Operation *barrier, unsigned barrierIndex,
+                   ArrayRef<unsigned> classes,
+                   const llvm::DenseMap<Operation *, unsigned> &indices) {
+  SmallVector<unsigned, 2> stores;
+  for (Value operand : barrier->getOperands()) {
+    if (!isa<waveamdmachine::MemTokenType>(operand.getType()))
+      continue;
+    llvm::SmallPtrSet<Operation *, 8> seen;
+    if (!collectTokenProducerIndices(operand, classes, indices, BPCDSWrite,
+                                     stores, seen))
+      return std::nullopt;
+  }
+  if (stores.size() != 1)
+    return std::nullopt;
+  unsigned store = stores.front();
+  if (store >= barrierIndex)
+    return std::nullopt;
+  return store;
+}
+
+static bool hasMemoryProducerInRange(ArrayRef<unsigned> classes,
+                                     const llvm::BitVector &producerSlice,
+                                     unsigned begin, unsigned end) {
+  for (unsigned index : llvm::seq(begin, end))
+    if (producerSlice.test(index) && isMemoryPipelineClass(classes[index]))
+      return true;
+  return false;
+}
+
+static void buildBarrierDsWriteHoistOrder(const llvm::BitVector &producerSlice,
+                                          unsigned burstBegin, unsigned store,
+                                          unsigned regionSize,
+                                          SmallVectorImpl<unsigned> &order) {
+  appendIndexRange(order, 0, burstBegin);
+  for (unsigned index : llvm::seq(burstBegin, store))
+    if (producerSlice.test(index))
+      order.push_back(index);
+  order.push_back(store);
+  for (unsigned index : llvm::seq(burstBegin, store))
+    if (!producerSlice.test(index))
+      order.push_back(index);
+  appendIndexRange(order, store + 1, regionSize);
+}
+
+static void
+addBarrierDsWriteHoistCandidate(SmallVectorImpl<OrderCandidate> &candidates,
+                                const ScheduleRegion &region,
+                                ArrayRef<unsigned> classes) {
+  llvm::DenseMap<Operation *, unsigned> indices = getRegionOpIndices(region);
+  for (auto [barrier, cls] : llvm::enumerate(classes)) {
+    if (!hasPipelineClass(cls, BPCBarrier) || barrier == 0)
+      continue;
+
+    std::optional<unsigned> store = findBarrierDsWrite(
+        region.ops[barrier], static_cast<unsigned>(barrier), classes, indices);
+    if (!store)
+      continue;
+
+    llvm::BitVector producerSlice =
+        collectInRegionProducerSlice(region, *store);
+    std::optional<unsigned> burstBegin = findTrailingDsReadBurstBegin(
+        region, classes, indices, producerSlice, *store);
+    if (!burstBegin)
+      continue;
+    if (hasMemoryProducerInRange(classes, producerSlice, *burstBegin, *store))
+      continue;
+
+    OrderCandidate candidate;
+    candidate.name = "barrier_pipeline_ds_write_hoist";
+    buildBarrierDsWriteHoistOrder(producerSlice, *burstBegin, *store,
+                                  region.ops.size(), candidate.order);
+    appendUniqueCandidate(candidates, std::move(candidate));
+  }
+}
+
 static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
     const ScheduleRegion &region, const DependenceGraph &graph,
     const waveamdmachine::ArchData &arch,
@@ -1119,11 +1322,15 @@ static SmallVector<OrderCandidate, 4> buildBarrierPipelineCandidates(
     sawMfma |= hasPipelineClass(cls, BPCMFMA);
     sawMemory |= isMemoryPipelineClass(cls);
   }
-  if (!sawMfma || !sawMemory)
+  if (!sawMemory)
     return {};
 
   SmallVector<OrderCandidate, 4> candidates;
   candidates.push_back({getIdentityOrder(region.ops.size()), "original"});
+  addBarrierDsWriteHoistCandidate(candidates, region, classes);
+  if (!sawMfma)
+    return candidates;
+
   addLdsDmaAnchorCandidates(candidates, region, classes);
   addBarrierDsReadPrefetchCandidate(candidates, classes, graph, arch);
   for (const BarrierPipelineDescriptor &descriptor :

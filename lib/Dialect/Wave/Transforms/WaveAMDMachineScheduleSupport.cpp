@@ -2913,11 +2913,13 @@ static bool isBarrierMemoryPipelineName(StringRef name) {
   return name == "barrier_pipeline_ds_read_mfma" ||
          name == "barrier_pipeline_write_read_mfma" ||
          name == "barrier_pipeline_write_read_ds_mfma" ||
-         name == "barrier_pipeline_ds_read_prefetch";
+         name == "barrier_pipeline_ds_read_prefetch" ||
+         name == "barrier_pipeline_ds_write_hoist";
 }
 
-static bool isBarrierDsReadPrefetchName(StringRef name) {
-  return name == "barrier_pipeline_ds_read_prefetch";
+static bool isBarrierPressureSlackName(StringRef name) {
+  return name == "barrier_pipeline_ds_read_prefetch" ||
+         name == "barrier_pipeline_ds_write_hoist";
 }
 
 static bool isCmaDmaPlacementCandidate(const EvaluatedCandidate &candidate) {
@@ -2961,22 +2963,20 @@ comparePressureViability(const EvaluatedCandidate &candidate,
   if (candidateViable != bestViable)
     return candidateViable;
   if (!candidateViable) {
-    static constexpr int64_t kPrefetchPressureSlack = 16;
-    bool candidatePrefetch = isBarrierDsReadPrefetchName(candidate.name);
-    bool bestPrefetch = isBarrierDsReadPrefetchName(best.name);
-    if (candidatePrefetch != bestPrefetch &&
-        candidate.metrics.pressure.supported &&
+    static constexpr int64_t kBarrierPressureSlack = 16;
+    bool candidateSlack = isBarrierPressureSlackName(candidate.name);
+    bool bestSlack = isBarrierPressureSlackName(best.name);
+    if (candidateSlack != bestSlack && candidate.metrics.pressure.supported &&
         best.metrics.pressure.supported) {
-      const EvaluatedCandidate &prefetch = candidatePrefetch ? candidate : best;
-      const EvaluatedCandidate &other = candidatePrefetch ? best : candidate;
-      bool prefetchTooHigh =
-          getHardExcess(prefetch.metrics.pressure) >
-              getHardExcess(other.metrics.pressure) + kPrefetchPressureSlack ||
-          getCriticalExcess(prefetch.metrics.pressure) >
-              getCriticalExcess(other.metrics.pressure) +
-                  kPrefetchPressureSlack;
-      if (prefetchTooHigh)
-        return !candidatePrefetch;
+      const EvaluatedCandidate &slack = candidateSlack ? candidate : best;
+      const EvaluatedCandidate &other = candidateSlack ? best : candidate;
+      bool slackTooHigh =
+          getHardExcess(slack.metrics.pressure) >
+              getHardExcess(other.metrics.pressure) + kBarrierPressureSlack ||
+          getCriticalExcess(slack.metrics.pressure) >
+              getCriticalExcess(other.metrics.pressure) + kBarrierPressureSlack;
+      if (slackTooHigh)
+        return !candidateSlack;
       return std::nullopt;
     }
     return compareEqualOverflow(candidate, best);

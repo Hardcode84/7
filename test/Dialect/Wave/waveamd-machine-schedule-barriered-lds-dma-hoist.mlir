@@ -388,6 +388,65 @@ func.func @barriered_ds_read_prefetch_second_barrier(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @barriered_ds_write_hoist_before_barrier(
+    %read_addr: !waveamdmachine.reg<vgpr, 1>,
+    %store_addr: !waveamdmachine.reg<vgpr, 1>,
+    %value: !waveamdmachine.reg<vgpr, 2>,
+    %tok0: !waveamdmachine.mem.token,
+    %tok1: !waveamdmachine.mem.token) {
+  %first = waveamdmachine.s_barrier %tok0
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %ld0, %t0 = waveamdmachine.ds_load_b128 %read_addr after %first offset 18848
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %ld1, %t1 = waveamdmachine.ds_load_b128 %read_addr after %first offset 18912
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %ld2, %t2 = waveamdmachine.ds_load_b128 %read_addr after %first offset 19104
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %ld3, %t3 = waveamdmachine.ds_load_b128 %read_addr after %first offset 19168
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
+  %reads = waveamdmachine.token_join %t0, %t1, %t2, %t3
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token,
+         !waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %store = waveamdmachine.ds_store_b64 %store_addr, %value after %tok1 offset 3904
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %second = waveamdmachine.s_barrier %store
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %post, %post_tok = waveamdmachine.ds_read_tr_b64_b8 %store_addr after %second offset 3904
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  return
+}
+}
+
+// APPLY-LABEL: func.func @barriered_ds_write_hoist_before_barrier
+// APPLY: [[FIRST:%.*]] = waveamdmachine.s_barrier
+// APPLY-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_b64
+// APPLY-NEXT: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 18848
+// APPLY-NEXT: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 18912
+// APPLY-NEXT: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 19104
+// APPLY-NEXT: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 19168
+// APPLY-NEXT: [[READS:%.*]] = waveamdmachine.token_join [[T0]], [[T1]], [[T2]], [[T3]]
+// APPLY-NEXT: [[SECOND:%.*]] = waveamdmachine.s_barrier [[STORE]]
+
+// NOHOIST-LABEL: func.func @barriered_ds_write_hoist_before_barrier
+// NOHOIST: [[FIRST:%.*]] = waveamdmachine.s_barrier
+// NOHOIST-NEXT: [[LD0:%.*]], [[T0:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 18848
+// NOHOIST-NEXT: [[LD1:%.*]], [[T1:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 18912
+// NOHOIST-NEXT: [[LD2:%.*]], [[T2:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 19104
+// NOHOIST-NEXT: [[LD3:%.*]], [[T3:%.*]] = waveamdmachine.ds_load_b128 {{.*}} after [[FIRST]] offset 19168
+// NOHOIST-NEXT: [[READS:%.*]] = waveamdmachine.token_join [[T0]], [[T1]], [[T2]], [[T3]]
+// NOHOIST-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_b64
+// NOHOIST-NEXT: [[SECOND:%.*]] = waveamdmachine.s_barrier [[STORE]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @barriered_loop_carried_memory_consumer(
     %lhs_init: !waveamdmachine.reg<vgpr, 4>,
     %rhs_init: !waveamdmachine.reg<vgpr, 4>,
