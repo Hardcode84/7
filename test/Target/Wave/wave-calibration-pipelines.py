@@ -17,8 +17,9 @@
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_v9_perf_golden_profile: ok
 # CHECK: matmul_v9_transposed_perf_golden_profile: ok
-# CHECK: matmul_tlx_mxfp_perf_golden_profile: ok
-# CHECK: matmul_tlx_mxfp_4096_perf_golden_profile: ok
+# CHECK: matmul_a4w4_mxfp_k16k_1_profile: ok
+# CHECK: matmul_a4w4_mxfp_k16k_2_profile: ok
+# CHECK: matmul_a4w4_mxfp_k16k_3_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: calibration_scheduler_region_cap: ok
@@ -1011,26 +1012,28 @@ def make_tlx_mxfp_perf_golden_args(matmul) -> argparse.Namespace:
     return matmul.parse_args(
         [
             "--chip=gfx950",
-            "--kernel-profile=tlx-a4w4-mxfp-k16k-after-bridge-wave",
+            "--kernel-profile=a4w4-mxfp-k16k-1",
             "--skip-hw",
             "--no-check",
         ]
     )
 
 
-def check_tlx_mxfp_profile_shape(matmul, args: argparse.Namespace) -> None:
+def check_tlx_mxfp_profile_shape(
+    matmul, args: argparse.Namespace, check_name: str
+) -> None:
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         args.example == "tlx-mxfp-perf-golden",
         "profile should select TLX MXFP golden IR",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         args.m == 4096 and args.n == 4096 and args.k == 16384,
         "bad TLX MXFP default shape",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         args.bm == 2
         and args.bn == 2
         and args.wave_m_tiles == 8
@@ -1039,61 +1042,64 @@ def check_tlx_mxfp_profile_shape(matmul, args: argparse.Namespace) -> None:
         "bad TLX MXFP tile shape",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         args.input_type == "mxfp4" and args.output_type == "bf16",
         "bad TLX MXFP dtypes",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         matmul.kernel_name(args) == "_a4w4_kernel",
         "bad TLX MXFP kernel symbol",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         matmul.kernel_abi(args) == "tlx-mxfp",
         "bad TLX MXFP kernel ABI",
     )
 
 
-def check_tlx_mxfp_profile_counts(matmul, args: argparse.Namespace) -> None:
+def check_tlx_mxfp_profile_counts(
+    matmul, args: argparse.Namespace, check_name: str
+) -> None:
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         matmul.compute_dynamic_lds_bytes(args) == 0,
         "TLX MXFP golden has static LDS",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         matmul.compute_kernel_arg_trip_count(args) == 0,
         "TLX MXFP golden should not expose generated-matmul trip arg",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         matmul.compute_sim_loop_trip_count(args) == 31,
         "TLX MXFP golden should report step-2 loop body count",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         matmul.compute_report_trip_count(args) == 31,
         "TLX MXFP golden report count should use natural loop count",
     )
 
 
-def check_tlx_mxfp_source(matmul, args: argparse.Namespace) -> None:
+def check_tlx_mxfp_source(matmul, args: argparse.Namespace, check_name: str) -> None:
     source = matmul.generate_kernel_module(args, "gfx950")
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         "func.func @_a4w4_kernel" in source and "gpu.module @kernels" not in source,
         "TLX MXFP source should be isolated for wave-translate",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
-        matmul.tlx_mxfp_golden_source(args).name
-        == "tlx_a4w4_mxfp_k16k_after_bridge.wave.mlir",
+        check_name,
+        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k_1.mlir",
         "bad TLX MXFP source path",
     )
 
 
-def check_tlx_mxfp_runner_forwarding(matmul, args: argparse.Namespace) -> None:
+def check_tlx_mxfp_runner_forwarding(
+    matmul, args: argparse.Namespace, check_name: str
+) -> None:
     captured: list[list[str]] = []
     old_run = matmul.run
     try:
@@ -1107,34 +1113,36 @@ def check_tlx_mxfp_runner_forwarding(matmul, args: argparse.Namespace) -> None:
     finally:
         matmul.run = old_run
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         bool(captured),
         "runner not called",
     )
     cmd = captured[0]
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         "--kernel-abi" in cmd and cmd[cmd.index("--kernel-abi") + 1] == "tlx-mxfp",
         "runner should receive TLX MXFP ABI",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         "--c-type" in cmd and cmd[cmd.index("--c-type") + 1] == "bf16",
         "runner should receive BF16 output",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         "--dynamic-lds" in cmd and cmd[cmd.index("--dynamic-lds") + 1] == "0",
         "TLX MXFP runner should not request dynamic LDS",
     )
     require(
-        "matmul_tlx_mxfp_perf_golden_profile",
+        check_name,
         cmd[-1] == "_a4w4_kernel",
         "runner should launch TLX MXFP symbol",
     )
 
 
-def check_tlx_mxfp_validation(matmul, args: argparse.Namespace) -> None:
+def check_tlx_mxfp_validation(
+    matmul, args: argparse.Namespace, check_name: str
+) -> None:
     bad_k_values = vars(args).copy()
     bad_k_values["k"] = 8192
     bad_k = argparse.Namespace(**bad_k_values)
@@ -1144,46 +1152,73 @@ def check_tlx_mxfp_validation(matmul, args: argparse.Namespace) -> None:
         pass
     else:
         require(
-            "matmul_tlx_mxfp_perf_golden_profile",
+            check_name,
             False,
             "TLX MXFP golden should reject non-frozen K",
         )
 
 
-def check_matmul_tlx_mxfp_perf_golden_profile(matmul) -> None:
+def check_matmul_a4w4_mxfp_k16k_1_profile(matmul) -> None:
+    check_name = "matmul_a4w4_mxfp_k16k_1_profile"
     args = make_tlx_mxfp_perf_golden_args(matmul)
-    check_tlx_mxfp_profile_shape(matmul, args)
-    check_tlx_mxfp_profile_counts(matmul, args)
-    check_tlx_mxfp_source(matmul, args)
-    check_tlx_mxfp_runner_forwarding(matmul, args)
-    check_tlx_mxfp_validation(matmul, args)
-    print("matmul_tlx_mxfp_perf_golden_profile: ok")
+    check_tlx_mxfp_profile_shape(matmul, args, check_name)
+    check_tlx_mxfp_profile_counts(matmul, args, check_name)
+    check_tlx_mxfp_source(matmul, args, check_name)
+    check_tlx_mxfp_runner_forwarding(matmul, args, check_name)
+    check_tlx_mxfp_validation(matmul, args, check_name)
+    print(f"{check_name}: ok")
 
 
-def check_matmul_tlx_mxfp_4096_perf_golden_profile(matmul) -> None:
+def check_matmul_a4w4_mxfp_k16k_2_profile(matmul) -> None:
+    check_name = "matmul_a4w4_mxfp_k16k_2_profile"
     args = matmul.parse_args(
         [
             "--chip=gfx950",
-            "--kernel-profile=tlx-a4w4-mxfp-4096x4096x16384-after-bridge-wave",
+            "--kernel-profile=a4w4-mxfp-k16k-2",
             "--skip-hw",
             "--no-check",
         ]
     )
-    check_tlx_mxfp_profile_shape(matmul, args)
-    check_tlx_mxfp_profile_counts(matmul, args)
+    check_tlx_mxfp_profile_shape(matmul, args, check_name)
+    check_tlx_mxfp_profile_counts(matmul, args, check_name)
     require(
-        "matmul_tlx_mxfp_4096_perf_golden_profile",
-        matmul.tlx_mxfp_golden_source(args).name
-        == "a4w4_mxfp_4096x4096x16384.after_bridge.wave.mlir",
+        check_name,
+        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k_2.mlir",
         "bad TLX MXFP 4096 source path",
     )
     source = matmul.generate_kernel_module(args, "gfx950")
     require(
-        "matmul_tlx_mxfp_4096_perf_golden_profile",
+        check_name,
         "func.func @_a4w4_kernel" in source and "gpu.module @kernels" not in source,
         "TLX MXFP 4096 source should be isolated for wave-translate",
     )
-    print("matmul_tlx_mxfp_4096_perf_golden_profile: ok")
+    print(f"{check_name}: ok")
+
+
+def check_matmul_a4w4_mxfp_k16k_3_profile(matmul) -> None:
+    check_name = "matmul_a4w4_mxfp_k16k_3_profile"
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=a4w4-mxfp-k16k-3",
+            "--skip-hw",
+            "--no-check",
+        ]
+    )
+    check_tlx_mxfp_profile_shape(matmul, args, check_name)
+    check_tlx_mxfp_profile_counts(matmul, args, check_name)
+    require(
+        check_name,
+        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k_3.mlir",
+        "bad canonicalize+cse TLX MXFP source path",
+    )
+    source = matmul.generate_kernel_module(args, "gfx950")
+    require(
+        check_name,
+        "func.func @_a4w4_kernel" in source and "gpu.module @kernels" not in source,
+        "canonicalize+cse TLX MXFP source should be isolated for wave-translate",
+    )
+    print(f"{check_name}: ok")
 
 
 def check_matmul_perf_sweep_v9_defaults(perf_sweep) -> None:
@@ -1298,8 +1333,9 @@ def main() -> int:
     check_matmul_dma_sim_trip_count(matmul)
     check_matmul_v9_perf_golden_profile(matmul)
     check_matmul_v9_transposed_perf_golden_profile(matmul)
-    check_matmul_tlx_mxfp_perf_golden_profile(matmul)
-    check_matmul_tlx_mxfp_4096_perf_golden_profile(matmul)
+    check_matmul_a4w4_mxfp_k16k_1_profile(matmul)
+    check_matmul_a4w4_mxfp_k16k_2_profile(matmul)
+    check_matmul_a4w4_mxfp_k16k_3_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)

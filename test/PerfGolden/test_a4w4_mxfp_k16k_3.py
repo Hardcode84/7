@@ -2,7 +2,7 @@
 #
 # RUN: %PYTHON %s --build-dir %wave_obj_root --generated-out %t.s | FileCheck %s
 
-# CHECK: perf-golden: a4w4_mxfp_4096x4096x16384.after_bridge.wave: asm matches golden
+# CHECK: perf-golden: a4w4_mxfp_k16k_3: asm matches golden
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-NAME = "a4w4_mxfp_4096x4096x16384.after_bridge.wave"
+NAME = "a4w4_mxfp_k16k_3"
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 SOURCE = HERE / "Inputs" / f"{NAME}.mlir"
@@ -102,7 +102,7 @@ def check_asm(
         raise SystemExit(1)
 
 
-def test_a4w4_mxfp_4096x4096x16384_after_bridge_wave() -> None:
+def test_a4w4_mxfp_k16k_3() -> None:
     check_asm(REPO_ROOT / "build")
 
 

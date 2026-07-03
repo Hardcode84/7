@@ -10,7 +10,7 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-added-large-files
-        exclude: '^test/PerfGolden/Inputs/(tlx_a4w4_mxfp_k16k_after_bridge\.wave|a4w4_mxfp_4096x4096x16384\.after_bridge\.wave)\.mlir$'
+        exclude: '^test/PerfGolden/Inputs/a4w4_mxfp_k16k_[123]\.mlir$'
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
