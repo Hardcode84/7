@@ -19,8 +19,8 @@ _a4w4_kernel:
 .L_a4w4_kernel.kernarg_preload_entry:
 	; wave backend: WaveAMDMachine MLIR pipeline finalized
 		s_add_i32 s12, s12, 0xff
-		s_cmp_lt_i32 s12, 0
 		s_mov_b32 s17, 0xff
+		s_cmp_lt_i32 s12, 0
 		s_cselect_b32 s18, s17, 0
 		s_add_i32 s12, s12, s18
 		s_ashr_i32 s12, s12, 8
@@ -41,12 +41,10 @@ _a4w4_kernel:
 		s_cmp_lg_u32 s17, 0
 		s_cselect_b32 s17, s18, s16
 		s_cselect_b32 s18, 1, 0
+		s_xor_b32 s19, s13, -1
+		s_add_i32 s19, s19, 1
 		s_cmp_lt_i32 s13, 0
-		s_cselect_b32 s19, 1, 0
-		s_xor_b32 s20, s13, -1
-		s_add_i32 s20, s20, 1
-		s_cmp_lg_u32 s19, 0
-		s_cselect_b32 s19, s20, s13
+		s_cselect_b32 s19, s19, s13
 		v_mov_b32_e32 v1, s19
 		v_cvt_f32_u32_e32 v1, v1
 		v_rcp_iflag_f32_e32 v1, v1
@@ -81,11 +79,9 @@ _a4w4_kernel:
 		s_cselect_b32 s19, s22, s20
 		s_cselect_b32 s20, 1, 0
 		s_xor_b32 s13, s16, s13
-		s_cmp_lt_i32 s13, 0
-		s_cselect_b32 s13, 1, 0
 		s_xor_b32 s16, s19, -1
 		s_add_i32 s16, s16, 1
-		s_cmp_lg_u32 s13, 0
+		s_cmp_lt_i32 s13, 0
 		s_cselect_b32 s13, s16, s19
 		s_mul_i32 s16, s13, 4
 		s_xor_b32 s19, s16, -1
@@ -122,32 +118,28 @@ _a4w4_kernel:
 		s_xor_b32 s19, s19, -1
 		s_add_i32 s19, s19, 1
 		s_add_i32 s19, s17, s19
-		s_cmp_ge_u32 s19, s12
-		v_readfirstlane_b32 s20, v1
+		s_add_i32 s20, s19, s18
+		v_readfirstlane_b32 s21, v1
 		v_mul_lo_u32 v1, s14, v2
 		v_and_b32_e32 v3, 1, v3
 		v_and_b32_e32 v5, 1, v4
 		v_accvgpr_read_b32 v6, a0
 		v_and_b32_e32 v6, 1, v6
 		v_lshrrev_b32_e32 v7, 3, v0
-		s_cselect_b32 s21, 1, 0
-		s_add_i32 s22, s19, s18
-		s_cmp_lg_u32 s21, 0
-		s_cselect_b32 s19, s22, s19
 		s_cmp_ge_u32 s19, s12
-		s_cselect_b32 s21, 1, 0
-		s_add_i32 s22, s19, s18
+		s_cselect_b32 s19, s20, s19
+		s_add_i32 s20, s19, s18
 		v_lshlrev_b32_e32 v1, 1, v1
 		v_mul_lo_u32 v8, s14, v3
 		v_mul_lo_u32 v9, s14, v5
 		v_mul_lo_u32 v10, s14, v6
 		v_and_b32_e32 v11, 1, v7
-		s_cmp_lg_u32 s21, 0
-		s_cselect_b32 s19, s22, s19
-		s_mul_i32 s21, s18, s20
+		s_cmp_ge_u32 s19, s12
+		s_cselect_b32 s19, s20, s19
+		s_mul_i32 s20, s18, s21
 		s_add_i32 s16, s16, s19
-		s_mul_hi_u32 s21, s20, s21
-		s_add_i32 s20, s20, s21
+		s_mul_hi_u32 s20, s21, s20
+		s_add_i32 s20, s21, s20
 		s_mul_hi_u32 s20, s17, s20
 		v_add_u32_e32 v12, v1, v8
 		v_lshlrev_b32_e32 v9, 6, v9
@@ -178,12 +170,10 @@ _a4w4_kernel:
 		s_cmp_lg_u32 s21, 0
 		s_cselect_b32 s17, s18, s17
 		v_readfirstlane_b32 s18, v0
-		s_cmp_ge_u32 s17, s12
-		s_cselect_b32 s12, 1, 0
-		s_add_i32 s17, s20, 1
+		s_add_i32 s21, s20, 1
 		s_mul_i32 s16, s16, 0x100
-		s_cmp_lg_u32 s12, 0
-		s_cselect_b32 s12, s17, s20
+		s_cmp_ge_u32 s17, s12
+		s_cselect_b32 s12, s21, s20
 		s_mul_i32 s17, s16, s14
 		v_add3_u32 v12, v12, v18, v19
 		s_add_u32 s20, s2, s17

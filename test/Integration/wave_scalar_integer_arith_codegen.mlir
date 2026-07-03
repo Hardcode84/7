@@ -11,11 +11,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_xor_b32
 // ASM: s_lshr_b32
 // ASM: s_and_b32
-// ASM: s_cmp_lt_i32
-// ASM: s_cselect_b32
 // ASM: s_add_i32
-// ASM: s_cmp_lg_u32
-// ASM: s_cselect_b32
+// ASM: s_cmp_lt_i32
+// ASM-NEXT: s_cselect_b32
 // ASM: global_store_b32
 func.func @scalar_integer_arith_codegen(%out: !wave.ptr<#wave.global, i32>,
                                         %x: i32, %y: i32)
