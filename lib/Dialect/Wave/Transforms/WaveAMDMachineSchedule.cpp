@@ -204,14 +204,29 @@ static bool resourceEffectsConflict(Operation *candidate, Operation *crossed) {
   return false;
 }
 
+static bool isMemToken(Value value) {
+  return isa<waveamdmachine::MemTokenType>(value.getType());
+}
+
 static bool hasMemTokenOperandOrResult(Operation *op) {
   for (Value operand : op->getOperands())
-    if (isa<waveamdmachine::MemTokenType>(operand.getType()))
+    if (isMemToken(operand))
       return true;
   for (Value result : op->getResults())
-    if (isa<waveamdmachine::MemTokenType>(result.getType()))
+    if (isMemToken(result))
       return true;
   return false;
+}
+
+static bool isMemTokenMergeOp(Operation *op) {
+  if (isKnownMemoryOp(op) || hasUnknownMemoryEffects(op) ||
+      op->getNumRegions() != 0)
+    return false;
+  if (op->getNumOperands() == 0 || op->getNumResults() == 0)
+    return false;
+  if (!llvm::all_of(op->getOperands(), isMemToken))
+    return false;
+  return llvm::all_of(op->getResults(), isMemToken);
 }
 
 static bool collectBarrierPipelineWindow(func::FuncOp func,
@@ -473,9 +488,9 @@ static unsigned getCounterMask(waveamdmachine::MemoryCounterKind kind) {
 }
 
 static bool isCounterMaskPassthrough(Operation *op) {
-  return op->hasTrait<traits::TupleAliasOp>() ||
-         isa<waveamdmachine::CopyTupleOp>(op) ||
-         op->hasTrait<traits::TokenJoinOp>();
+  return isMemTokenMergeOp(op) ||
+         (op->hasTrait<traits::NoMachineInst>() && !isKnownMemoryOp(op) &&
+          !hasUnknownMemoryEffects(op) && op->getNumRegions() == 0);
 }
 
 static unsigned getValueCounterMask(Value value,
@@ -550,7 +565,7 @@ getLoopCarriedValueUseMask(Operation *op,
 
   unsigned mask = 0;
   for (Value operand : op->getOperands()) {
-    if (isa<waveamdmachine::MemTokenType>(operand.getType()))
+    if (isMemToken(operand))
       continue;
     mask |= getLoopCarriedCounterMask(operand, carryMasks);
   }
@@ -564,7 +579,7 @@ static unsigned getLoopCarriedBarrierTokenMask(
 
   unsigned mask = 0;
   for (Value operand : op->getOperands()) {
-    if (!isa<waveamdmachine::MemTokenType>(operand.getType()))
+    if (!isMemToken(operand))
       continue;
     mask |= getLoopCarriedCounterMask(operand, carryMasks);
   }
@@ -1097,10 +1112,6 @@ static void addBarrierDsReadPrefetchCandidate(
   appendUniqueCandidate(candidates, std::move(candidate));
 }
 
-static bool isTokenJoin(Operation *op) {
-  return op->hasTrait<traits::TokenJoinOp>();
-}
-
 static llvm::DenseMap<Operation *, unsigned>
 getRegionOpIndices(const ScheduleRegion &region) {
   llvm::DenseMap<Operation *, unsigned> indices;
@@ -1117,7 +1128,7 @@ static bool collectTokenProducerIndices(
   Operation *def = token.getDefiningOp();
   if (!def || !seen.insert(def).second)
     return def != nullptr;
-  if (isTokenJoin(def)) {
+  if (isMemTokenMergeOp(def)) {
     for (Value operand : def->getOperands())
       if (!collectTokenProducerIndices(operand, classes, indices, mask,
                                        producers, seen))
@@ -1175,11 +1186,11 @@ findContiguousDsReadBurstBegin(ArrayRef<unsigned> classes,
   return cursor;
 }
 
-static bool collectTokenJoinedDsReadProducers(
+static bool collectMemTokenMergedDsReadProducers(
     Operation *tokenJoin, ArrayRef<unsigned> classes,
     const llvm::DenseMap<Operation *, unsigned> &indices,
     SmallVectorImpl<unsigned> &reads) {
-  if (!isTokenJoin(tokenJoin))
+  if (!isMemTokenMergeOp(tokenJoin))
     return false;
 
   llvm::SmallPtrSet<Operation *, 16> seen;
@@ -1215,8 +1226,8 @@ static std::optional<unsigned> findTrailingDsReadBurstBegin(
     return std::nullopt;
 
   SmallVector<unsigned, 8> reads;
-  if (!collectTokenJoinedDsReadProducers(region.ops[cursor - 1], classes,
-                                         indices, reads))
+  if (!collectMemTokenMergedDsReadProducers(region.ops[cursor - 1], classes,
+                                            indices, reads))
     return findContiguousDsReadBurstBegin(classes, producerSlice, cursor);
   if (!rangeHasOnlyReadsAndProducers(classes, reads, producerSlice,
                                      reads.front(), store))
@@ -1230,7 +1241,7 @@ findBarrierDsWrite(Operation *barrier, unsigned barrierIndex,
                    const llvm::DenseMap<Operation *, unsigned> &indices) {
   SmallVector<unsigned, 2> stores;
   for (Value operand : barrier->getOperands()) {
-    if (!isa<waveamdmachine::MemTokenType>(operand.getType()))
+    if (!isMemToken(operand))
       continue;
     llvm::SmallPtrSet<Operation *, 8> seen;
     if (!collectTokenProducerIndices(operand, classes, indices, BPCDSWrite,
