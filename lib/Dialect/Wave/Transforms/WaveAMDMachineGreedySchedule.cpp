@@ -869,6 +869,13 @@ static void recordGapStats(const IssuePreview &preview, GreedyStats &stats) {
   }
 }
 
+static bool filledOnlyM0HazardGaps(const GreedyStats &stats) {
+  return stats.m0Gaps != 0 && stats.cheapHazardGaps == stats.m0Gaps &&
+         stats.filledGaps >= stats.m0Gaps && stats.unfilledGaps == 0 &&
+         stats.operandGaps == 0 && stats.resourceGaps == 0 &&
+         stats.memoryTokenGaps == 0;
+}
+
 static unsigned findZeroStallFiller(const BitVector &ready, unsigned next,
                                     const GreedyRegion &region,
                                     const IssueState &state,
@@ -879,6 +886,33 @@ static unsigned findZeroStallFiller(const BitVector &ready, unsigned next,
       continue;
     IssuePreview preview = previewIssue(state, region.ops[index], arch, cfg);
     if (preview.realInst && !stalls(preview))
+      return index;
+  }
+  return ready.size();
+}
+
+static unsigned
+findCheapHazardFiller(const BitVector &ready, unsigned next,
+                      const GreedyRegion &region, const IssueState &state,
+                      const waveamdmachine::ArchData &arch,
+                      const waveamdmachine::EventSimConfig &cfg) {
+  for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
+    if (!ready.test(index) || index == next)
+      continue;
+    IssuePreview preview = previewIssue(state, region.ops[index], arch, cfg);
+    if (preview.realInst && preview.hazardWaitInsts == 0)
+      return index;
+  }
+  return ready.size();
+}
+
+static unsigned findFirstReadyNoInst(const BitVector &ready,
+                                     const GreedyRegion &region) {
+  for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
+    if (!ready.test(index))
+      continue;
+    if (waveamdmachine::classifyOp(region.ops[index]) ==
+        waveamdmachine::SchedClass::NoInst)
       return index;
   }
   return ready.size();
@@ -939,6 +973,8 @@ static unsigned selectReadyNode(const GreedyRegion &region,
   recordGapStats(preview, stats);
   unsigned filler =
       findZeroStallFiller(ready, next, region, state, arch, config);
+  if (filler == region.ops.size() && preview.hazardWaitInsts != 0)
+    filler = findCheapHazardFiller(ready, next, region, state, arch, config);
   if (filler == region.ops.size()) {
     ++stats.unfilledGaps;
     return next;
@@ -947,6 +983,26 @@ static unsigned selectReadyNode(const GreedyRegion &region,
   ++stats.filledGaps;
   preview = previewIssue(state, region.ops[filler], arch, config);
   return filler;
+}
+
+static void drainReadyNoInsts(const GreedyRegion &region,
+                              const GraphTables &graph,
+                              const waveamdmachine::ArchData &arch,
+                              const waveamdmachine::EventSimConfig &config,
+                              IssueState &state, BitVector &ready,
+                              BitVector &scheduled,
+                              SmallVectorImpl<unsigned> &pending,
+                              SmallVectorImpl<unsigned> &order) {
+  while (true) {
+    unsigned selected = findFirstReadyNoInst(ready, region);
+    if (selected == region.ops.size())
+      return;
+    IssuePreview preview =
+        previewIssue(state, region.ops[selected], arch, config);
+    order.push_back(selected);
+    commitIssue(state, region.ops[selected], preview, arch, config);
+    markScheduled(selected, graph, ready, scheduled, pending);
+  }
 }
 
 static GreedyResult
@@ -963,6 +1019,10 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
 
   IssueState state;
   while (result.order.size() != region.ops.size()) {
+    drainReadyNoInsts(region, graph, arch, config, state, ready, scheduled,
+                      pending, result.order);
+    if (result.order.size() == region.ops.size())
+      break;
     if (!ready.any()) {
       recordDependencyCycle(graph, scheduled, pending, result);
       return result;
@@ -1288,11 +1348,16 @@ struct WaveAMDMachineSchedulePass
       return region.first->emitError(
           "waveamd-machine-schedule failed: reason=simulation_failed_greedy");
 
-    StringRef action = *greedyScore < *originalScore ? "apply" : "keep";
-    StringRef reason = *greedyScore < *originalScore ? "better" : "not_better";
+    bool apply = *greedyScore < *originalScore;
+    StringRef reason = apply ? "better" : "not_better";
+    if (!apply && filledOnlyM0HazardGaps(greedy.stats)) {
+      apply = true;
+      reason = "m0_hazard";
+    }
+    StringRef action = apply ? "apply" : "keep";
     printDecision(region, *originalScore, *greedyScore, action, reason,
                   greedy.stats);
-    if (*greedyScore < *originalScore)
+    if (apply)
       applyOrder(region, greedy.order);
     return success();
   }
@@ -1627,6 +1692,10 @@ struct WaveAMDMachineScheduleReportPass
           greedyScore->cycles < originalScore->cycles) {
         action = "apply";
         reason = "better";
+      } else if (succeeded(originalScore) && succeeded(greedyScore) &&
+                 filledOnlyM0HazardGaps(greedy.stats)) {
+        action = "apply";
+        reason = "m0_hazard";
       }
     }
     printCandidate("greedy", region, greedy.order, originalScore, greedyScore,

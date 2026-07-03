@@ -112,11 +112,11 @@ def check_small_scale_lds_dma() -> None:
     label = "scale_lds_dma_gap_fill"
     text = run_schedule_report(scale_lds_dma_stagger_mlir(12, 64, label))
     seq, filled_gaps, memory_token_gaps = greedy_order_sequence(text, 12, 64)
-    require(label, filled_gaps == 19, f"expected 19 filled gaps, got {filled_gaps}")
+    require(label, filled_gaps == 0, f"expected no filled gaps, got {filled_gaps}")
     require(
         label,
-        memory_token_gaps == 19,
-        f"expected 19 memory-token gaps, got {memory_token_gaps}",
+        memory_token_gaps == 0,
+        f"expected no memory-token gaps, got {memory_token_gaps}",
     )
     require(label, seq.count("dma") == 12, f"expected 12 DMA ops, got {seq}")
     require(label, seq.count("mfma") == 64, "missing scale MFMA ops")
@@ -130,8 +130,8 @@ def check_small_scale_lds_dma() -> None:
         first_mfma > last_dma,
         f"greedy should keep DMA issuers before compute, got {seq[:16]}",
     )
-    require(label, join > first_mfma, "token join should wait behind gap-fill compute")
-    require(label, join < len(seq) - 1, "token join should not stay after all compute")
+    require(label, join == last_dma + 1, "token join should drain after DMA issuers")
+    require(label, first_mfma == join + 1, "compute should follow transient token join")
     print(f"{label}: ok")
 
 
@@ -139,11 +139,11 @@ def check_large_scale_lds_dma() -> None:
     label = "large_scale_lds_dma_gap_fill"
     text = run_schedule_report(scale_lds_dma_stagger_mlir(32, 64, label))
     seq, filled_gaps, memory_token_gaps = greedy_order_sequence(text, 32, 64)
-    require(label, filled_gaps == 19, f"expected 19 filled gaps, got {filled_gaps}")
+    require(label, filled_gaps == 0, f"expected no filled gaps, got {filled_gaps}")
     require(
         label,
-        memory_token_gaps == 19,
-        f"expected 19 memory-token gaps, got {memory_token_gaps}",
+        memory_token_gaps == 0,
+        f"expected no memory-token gaps, got {memory_token_gaps}",
     )
     require(label, seq.count("dma") == 32, f"expected 32 DMA ops, got {seq}")
     require(label, seq.count("mfma") == 64, "missing scale MFMA ops")
@@ -156,8 +156,8 @@ def check_large_scale_lds_dma() -> None:
         first_mfma > last_dma,
         f"greedy should keep DMA issuers before compute, got {seq[:36]}",
     )
-    require(label, join > first_mfma, "token join should wait behind gap-fill compute")
-    require(label, join < len(seq) - 1, "token join should not stay after all compute")
+    require(label, join == last_dma + 1, "token join should drain after DMA issuers")
+    require(label, first_mfma == join + 1, "compute should follow transient token join")
     print(f"{label}: ok")
 
 

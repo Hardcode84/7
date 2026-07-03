@@ -177,7 +177,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 10035",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 10340",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
@@ -196,10 +196,10 @@ def main() -> int:
         "matmul_greedy_report",
         text,
         r"selected func=wmma_f16_matmul_tiled region=1 name=greedy "
-        r"original_cycles=2215 selected_cycles=2113 delta=-102 action=apply "
+        r"original_cycles=2215 selected_cycles=2212 delta=-3 action=apply "
         r"reason=better",
     )
-    require("matmul_greedy_report", text, r"memory_token_gaps=6")
+    require("matmul_greedy_report", text, r"memory_token_gaps=2")
     reject("matmul_greedy_report", text, r"name=beam_0")
     reject("matmul_greedy_report", text, r"pressure_fallback")
 

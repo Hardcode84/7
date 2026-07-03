@@ -38,6 +38,37 @@ func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @m0_fill_through_noinst(%base: !waveamdmachine.reg<sgpr, 1>,
+                                  %off: !waveamdmachine.reg<vgpr, 1>,
+                                  %ptr: !waveamdmachine.reg<sgpr, 2>,
+                                  %wide: !waveamdmachine.reg<vgpr, 2>,
+                                  %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b32 %off, %ptr, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %parts:2 = waveamdmachine.tuple_to_elements %wide
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>)
+  %x = waveamdmachine.v_add_u32 %parts#0, %parts#1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @m0_fill_through_noinst
+// IR: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements
+// IR-NEXT: [[M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: [[FILL:%.*]] = waveamdmachine.v_add_u32 [[PARTS]]#0, [[PARTS]]#1
+// IR-NEXT: waveamdmachine.global_load_lds_b32 {{.*}}, [[M0]] after
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @barrier_keep(%off: !waveamdmachine.reg<vgpr, 1>,
                         %base: !waveamdmachine.reg<sgpr, 2>,
                         %a: !waveamdmachine.reg<vgpr, 1>,
