@@ -195,6 +195,7 @@ tools = [
     ToolSubst("split-file", unresolved="fatal"),
     ToolSubst("llvm-nm", unresolved="fatal"),
     ToolSubst("wave-calibrate-report", unresolved="fatal"),
+    ToolSubst("wave-instruction-state-report", unresolved="fatal"),
     ToolSubst("wavec", unresolved="fatal"),
     ToolSubst("wave-opt", unresolved="fatal"),
     ToolSubst("wave-sim-report", unresolved="fatal"),

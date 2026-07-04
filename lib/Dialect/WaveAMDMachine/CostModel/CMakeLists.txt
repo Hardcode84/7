@@ -3,6 +3,7 @@ add_mlir_library(MLIRWaveAMDMachineCostModel
   CalibrationData.cpp
   EventSimulator.cpp
   FunctionalUnit.cpp
+  InstructionExecutionState.cpp
   LatencyTable.cpp
   MachineState.cpp
   MemoryCounterTiming.cpp
