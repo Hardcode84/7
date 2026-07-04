@@ -306,6 +306,60 @@ ATT result from one traced CU/SE:
 | `s_waitcnt vmcnt(*)` | 25292 | 12960 | +12332 |
 | `s_waitcnt lgkmcnt(*)` | 49544 | 55096 | -5552 |
 
+Exact bad placements:
+
+1. Main global-to-LDS prefetch group after the second barrier.
+
+   | Branch | Load PCs | Span bytes | MFMA gaps between loads | ATT load cycles |
+   |---|---|---:|---|---:|
+   | current | `0x2b58..0x2c8c` | 308 | `1,1,1,1,1,1,1,1,1,1,1` | 581676 |
+   | master | `0x2b4c..0x2f74` | 1064 | `0,4,6,6,6,6,6,6,6,6,6` | 274804 |
+
+   Current issues twelve `buffer_load_dwordx4 ... lds` almost one-per-MFMA:
+
+   ```text
+   0x2b48 mfma
+   0x2b58 buffer_load_dwordx4 ... lds
+   0x2b64 mfma
+   0x2b74 buffer_load_dwordx4 ... lds
+   ...
+   0x2c7c mfma
+   0x2c8c buffer_load_dwordx4 ... lds
+   ```
+
+   Master spreads the same prefetches across the MFMA body:
+
+   ```text
+   0x2b4c buffer_load_dwordx4 ... lds
+   0x2b5c buffer_load_dwordx4 ... lds
+   0x2b64..0x2b98 mfma
+   0x2ba8 buffer_load_dwordx4 ... lds
+   ...
+   0x2f64 mfma
+   0x2f74 buffer_load_dwordx4 ... lds
+   ```
+
+2. Final four prefetches are on the wrong side of the barrier.
+
+   | Branch | Barrier PC | Load PCs | Placement | Barrier cycles | Load cycles |
+   |---|---:|---|---|---:|---:|
+   | current | `0x304c` | `0x3050,0x3060,0x3070,0x3080` | after barrier | 145384 | 43712 |
+   | master | `0x3090` | `0x3054,0x3064,0x3074,0x3084` | before barrier | 79224 | 89796 |
+
+   Current waits `vmcnt(20)`, barriers, then starts four async LDS DMA loads.
+   Master issues those four async loads first, waits `vmcnt(24)`, then barriers.
+   Master pays more cycles on those load issue PCs, but hides more work before
+   the barrier and reaches a much smaller barrier duration.
+
+3. Guarded scalar `buffer_load_dword` group gained four current-only waits.
+
+   | Branch | Scalar load PCs | Intervening waits | ATT wait cycles |
+   |---|---|---|---:|
+   | current | `0x2af4,0x2b00,0x2b0c,0x2b18` | four `s_waitcnt vmcnt(23)` | 4032 |
+   | master | `0x2b00,0x2b08,0x2b10,0x2b18` | none | 0 |
+
+   This is visible ASM drift, but it is too small to explain the regression.
+
 Interpretation:
 
 - Static wait count grew in both classes, especially `lgkmcnt`.
@@ -319,7 +373,10 @@ Interpretation:
   until proven otherwise. Do not remove physical-register overlap waits just to
   recover perf without a correctness proof.
 
-Likely next debug target: scheduling of the global-to-LDS prefetch group
-relative to MFMA and the following barrier. Check whether new waitcnt/register
-overlap constraints force worse phasing or outstanding-load pressure, then fix
-the schedule or allocation pressure without weakening hazard correctness.
+Likely scheduler culprit: the greedy gap filler treats a memory-token stall as
+fillable by any ready real instruction. When the next original op is a barrier
+waiting on memory tokens, ready global-to-LDS prefetches become legal fillers.
+Original-order filler selection can then pull many async LDS DMA loads into a
+tight window instead of preserving master-like stagger. Fix target is scheduler
+placement/scoring for `buffer_load_dwordx4 ... lds` around MFMA and barriers,
+not weakening waitcnt/register-overlap correctness.
