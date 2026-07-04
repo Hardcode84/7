@@ -352,17 +352,6 @@ static Value createLDSByteImm(OpBuilder &builder, Location loc,
   return createLDSImm(builder, loc, bytes);
 }
 
-static Value addSGPRByteOffset(OpBuilder &builder, Location loc, Value value,
-                               unsigned bytes) {
-  if (bytes == 0)
-    return value;
-  Value offset = createLDSByteImm(builder, loc, bytes);
-  return waveamdmachine::SAddI32Op::create(
-             builder, loc, getVirtualSGPR1(builder.getContext()),
-             getSCCType(builder.getContext()), value, offset)
-      .getResult();
-}
-
 static Value addVGPRByteOffset(OpBuilder &builder, Location loc, Value value,
                                unsigned bytes) {
   if (bytes == 0)
@@ -376,26 +365,103 @@ static Value addVGPRByteOffset(OpBuilder &builder, Location loc, Value value,
       value, offset);
 }
 
+static std::optional<unsigned> getLDSByteImm(Value value) {
+  auto imm = value.getDefiningOp<waveamdmachine::ImmOp>();
+  if (!imm || imm.getValue() > std::numeric_limits<unsigned>::max())
+    return std::nullopt;
+  return static_cast<unsigned>(imm.getValue());
+}
+
+struct FoldedSGPROffset {
+  Value base;
+  unsigned bytes = 0;
+};
+
+static std::optional<unsigned> checkedAddBytes(unsigned lhs, unsigned rhs) {
+  uint64_t sum = static_cast<uint64_t>(lhs) + rhs;
+  if (sum > std::numeric_limits<unsigned>::max())
+    return std::nullopt;
+  return static_cast<unsigned>(sum);
+}
+
+static std::optional<FoldedSGPROffset> foldSGPRByteOffsets(Value value) {
+  FoldedSGPROffset folded{value, 0};
+  while (auto add = folded.base.getDefiningOp<waveamdmachine::SAddI32Op>()) {
+    std::optional<unsigned> rhs = getLDSByteImm(add.getRhs());
+    if (!rhs)
+      break;
+    std::optional<unsigned> bytes = checkedAddBytes(folded.bytes, *rhs);
+    if (!bytes)
+      return std::nullopt;
+    folded.base = add.getLhs();
+    folded.bytes = *bytes;
+  }
+  return folded;
+}
+
+static Value materializeM0FromSGPROffset(OpBuilder &builder, Location loc,
+                                         FoldedSGPROffset folded) {
+  if (folded.bytes == 0)
+    return waveamdmachine::SMovM0Op::create(
+               builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
+               folded.base)
+        .getResult();
+  Value offset = createLDSByteImm(builder, loc, folded.bytes);
+  return waveamdmachine::SAddM0I32Op::create(
+             builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
+             getSCCType(builder.getContext()), folded.base, offset)
+      .getM0();
+}
+
 static FailureOr<Value> shiftM0Value(OpBuilder &builder, Location loc, Value m0,
                                      unsigned bytes) {
   if (auto mov = m0.getDefiningOp<waveamdmachine::SMovM0Op>()) {
-    Value shifted = addSGPRByteOffset(builder, loc, mov.getSource(), bytes);
-    return waveamdmachine::SMovM0Op::create(
-               builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
-               shifted)
-        .getResult();
+    std::optional<FoldedSGPROffset> folded =
+        foldSGPRByteOffsets(mov.getSource());
+    if (!folded)
+      return failure();
+    std::optional<unsigned> shifted = checkedAddBytes(folded->bytes, bytes);
+    if (!shifted)
+      return failure();
+    folded->bytes = *shifted;
+    return materializeM0FromSGPROffset(builder, loc, *folded);
   }
   if (auto add = m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    FoldedSGPROffset folded{add.getLhs(), 0};
+    if (std::optional<unsigned> rhs = getLDSByteImm(add.getRhs())) {
+      std::optional<unsigned> total = checkedAddBytes(*rhs, bytes);
+      if (!total)
+        return failure();
+      folded.bytes = *total;
+      return materializeM0FromSGPROffset(builder, loc, folded);
+    }
     waveamdmachine::SAddI32Op sum = waveamdmachine::SAddI32Op::create(
         builder, loc, getVirtualSGPR1(builder.getContext()),
         getSCCType(builder.getContext()), add.getLhs(), add.getRhs());
-    Value shifted = addSGPRByteOffset(builder, loc, sum.getResult(), bytes);
-    return waveamdmachine::SMovM0Op::create(
-               builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
-               shifted)
-        .getResult();
+    folded.base = sum.getResult();
+    folded.bytes = bytes;
+    return materializeM0FromSGPROffset(builder, loc, folded);
   }
   return failure();
+}
+
+static bool allResultsUnused(Operation *op) {
+  return llvm::all_of(op->getResults(),
+                      [](Value result) { return result.use_empty(); });
+}
+
+static bool isErasableAddressOp(Operation *op) {
+  return op && isa<waveamdmachine::SMovM0Op, waveamdmachine::SAddM0I32Op,
+                   waveamdmachine::SAddI32Op, waveamdmachine::ImmOp>(op);
+}
+
+static void eraseDeadAddressOp(Operation *op) {
+  if (!isErasableAddressOp(op) || !allResultsUnused(op))
+    return;
+  SmallVector<Value, 4> operands(op->operand_begin(), op->operand_end());
+  op->erase();
+  for (Value operand : operands)
+    eraseDeadAddressOp(operand.getDefiningOp());
 }
 
 static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
@@ -404,11 +470,13 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
     if (!isa<waveamdmachine::M0Type>(operand.get().getType()))
       continue;
     builder.setInsertionPoint(op);
+    Value oldM0 = operand.get();
     FailureOr<Value> shifted =
-        shiftM0Value(builder, op->getLoc(), operand.get(), bytes);
+        shiftM0Value(builder, op->getLoc(), oldM0, bytes);
     if (failed(shifted))
       return op->emitError("cannot shift dynamic LDS M0 address");
     operand.set(*shifted);
+    eraseDeadAddressOp(oldM0.getDefiningOp());
     return success();
   }
 
