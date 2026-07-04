@@ -431,7 +431,6 @@ def WaveAMDMMAReusePreschedule
     from the previously chosen MMA, using original order as the tie-breaker.
   }];
   let dependentDialects = [
-    "func::FuncDialect",
     "waveamdmachine::WaveAMDMachineDialect"
   ];
 }

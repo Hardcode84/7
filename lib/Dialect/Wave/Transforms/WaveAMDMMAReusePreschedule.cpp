@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
@@ -182,28 +181,13 @@ static bool prescheduleBlock(Block &block) {
   return changed;
 }
 
-static SmallVector<Block *, 16> collectBlocks(func::FuncOp func) {
-  SmallVector<Block *, 16> blocks;
-  func->walk([&](Operation *op) {
-    for (Region &region : op->getRegions())
-      for (Block &block : region)
-        blocks.push_back(&block);
-  });
-  return blocks;
-}
-
 struct WaveAMDMMAReusePreschedulePass
     : public wave::impl::WaveAMDMMAReusePrescheduleBase<
           WaveAMDMMAReusePreschedulePass> {
   using WaveAMDMMAReusePrescheduleBase::WaveAMDMMAReusePrescheduleBase;
 
   void runOnOperation() override {
-    getOperation()->walk([&](func::FuncOp func) {
-      if (func.isExternal())
-        return;
-      for (Block *block : collectBlocks(func))
-        prescheduleBlock(*block);
-    });
+    getOperation()->walk([&](Block *block) { prescheduleBlock(*block); });
   }
 };
 
