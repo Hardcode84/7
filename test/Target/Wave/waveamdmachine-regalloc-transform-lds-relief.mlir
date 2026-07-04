@@ -181,12 +181,10 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
-    // CHECK: [[DYN:%.*]] = waveamdmachine.imm 1024
-    // CHECK: [[FULL:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[BASE]], [[DYN]]
-    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
     // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
     // CHECK-NOT: offset 1024
-    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
     // CHECK: waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
     // CHECK-NOT: offset 1024
     func.func @lds_relief_accounts_dynamic_lds()
@@ -255,16 +253,10 @@ module attributes {transform.with_named_sequence} {
     // CHECK-LABEL: func.func @lds_relief_after_fixed_and_dynamic_lds(
     // CHECK-SAME: wave.dynamic_lds_size = 512 : i64
     // CHECK-SAME: wave.lds_size = 2048 : i64
-    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
-    // CHECK: [[BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
-    // CHECK: [[LDS:%.*]] = waveamdmachine.imm 2560
-    // CHECK: [[FULL:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[BASE]], [[LDS]]
-    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
-    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
-    // CHECK-NOT: offset 2560
-    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[FULL]]
-    // CHECK: waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
-    // CHECK-NOT: offset 2560
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state
+    // CHECK-NOT: waveamdmachine.lds_spill_bytes
+    // CHECK-NOT: waveamdmachine.ds_store_addtid_b32
+    // CHECK-NOT: waveamdmachine.ds_load_addtid_b32
     func.func @lds_relief_after_fixed_and_dynamic_lds()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     wave.lds_size = 2048 : i64,

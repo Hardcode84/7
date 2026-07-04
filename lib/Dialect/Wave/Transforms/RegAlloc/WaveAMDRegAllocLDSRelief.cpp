@@ -84,6 +84,8 @@ getLDSPlansForValue(const LDSReliefPlanningState &planning,
                     waveamdmachine::RegType type, unsigned extraReservedBytes) {
   if (type.getWidth() == 0)
     return std::nullopt;
+  if (planning.fixedLDS != 0 && planning.dynamicLDS != 0)
+    return std::nullopt;
   SmallVector<wave::regalloc::LDSSpillPlan, 4> plans;
   plans.reserve(type.getWidth());
   unsigned reserved = planning.committedBytes + extraReservedBytes;
@@ -294,7 +296,7 @@ getLDSBaseBytes(func::FuncOp func, const LDSReliefCandidate &candidate) {
   std::optional<unsigned> baseBytes;
   for (const LDSReliefSlot &slot : candidate.slots) {
     for (wave::regalloc::LDSSpillPlan plan : slot.plan) {
-      unsigned planBase = plan.existingFixedBytes + plan.existingDynamicBytes;
+      unsigned planBase = plan.existingFixedBytes;
       if (!baseBytes) {
         baseBytes = planBase;
         continue;
@@ -343,6 +345,110 @@ static LDSAddTidContext materializeLDSAddTidContext(OpBuilder &builder,
     markLDSAddTidBase(waveOffset, builder, ldsBaseBytes);
   }
   return LDSAddTidContext{waveBase};
+}
+
+static Value createLDSByteImm(OpBuilder &builder, Location loc,
+                              unsigned bytes) {
+  return createLDSImm(builder, loc, bytes);
+}
+
+static Value addSGPRByteOffset(OpBuilder &builder, Location loc, Value value,
+                               unsigned bytes) {
+  if (bytes == 0)
+    return value;
+  Value offset = createLDSByteImm(builder, loc, bytes);
+  return waveamdmachine::SAddI32Op::create(
+             builder, loc, getVirtualSGPR1(builder.getContext()),
+             getSCCType(builder.getContext()), value, offset)
+      .getResult();
+}
+
+static Value addVGPRByteOffset(OpBuilder &builder, Location loc, Value value,
+                               unsigned bytes) {
+  if (bytes == 0)
+    return value;
+  Value offset = createLDSByteImm(builder, loc, bytes);
+  return waveamdmachine::VAddU32Op::create(
+      builder, loc,
+      waveamdmachine::RegType::get(builder.getContext(),
+                                   waveamdmachine::RegClass::VGPR,
+                                   /*width=*/1, /*index=*/-1),
+      value, offset);
+}
+
+static FailureOr<Value> shiftM0Value(OpBuilder &builder, Location loc, Value m0,
+                                     unsigned bytes) {
+  if (auto mov = m0.getDefiningOp<waveamdmachine::SMovM0Op>()) {
+    Value shifted = addSGPRByteOffset(builder, loc, mov.getSource(), bytes);
+    return waveamdmachine::SMovM0Op::create(
+               builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
+               shifted)
+        .getResult();
+  }
+  if (auto add = m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    waveamdmachine::SAddI32Op sum = waveamdmachine::SAddI32Op::create(
+        builder, loc, getVirtualSGPR1(builder.getContext()),
+        getSCCType(builder.getContext()), add.getLhs(), add.getRhs());
+    Value shifted = addSGPRByteOffset(builder, loc, sum.getResult(), bytes);
+    return waveamdmachine::SMovM0Op::create(
+               builder, loc, waveamdmachine::M0Type::get(builder.getContext()),
+               shifted)
+        .getResult();
+  }
+  return failure();
+}
+
+static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
+                                            unsigned bytes) {
+  for (OpOperand &operand : op->getOpOperands()) {
+    if (!isa<waveamdmachine::M0Type>(operand.get().getType()))
+      continue;
+    builder.setInsertionPoint(op);
+    FailureOr<Value> shifted =
+        shiftM0Value(builder, op->getLoc(), operand.get(), bytes);
+    if (failed(shifted))
+      return op->emitError("cannot shift dynamic LDS M0 address");
+    operand.set(*shifted);
+    return success();
+  }
+
+  if (op->getNumOperands() == 0)
+    return success();
+  Value addr = op->getOperand(0);
+  if (!waveamdmachine::isVGPRValue(addr))
+    return success();
+  builder.setInsertionPoint(op);
+  op->setOperand(0, addVGPRByteOffset(builder, op->getLoc(), addr, bytes));
+  return success();
+}
+
+static LogicalResult shiftDynamicLDSAddresses(func::FuncOp func,
+                                              OpBuilder &builder,
+                                              unsigned bytes) {
+  if (bytes == 0)
+    return success();
+  SmallVector<Operation *, 64> ldsOps;
+  func.walk([&](Operation *op) {
+    if (wave::regalloc::isRegAllocTempOp(op))
+      return;
+    if (!op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() &&
+        !op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>() &&
+        !op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>())
+      return;
+    ldsOps.push_back(op);
+  });
+  for (Operation *op : ldsOps)
+    if (failed(shiftLDSAddressOperand(builder, op, bytes)))
+      return failure();
+  return success();
+}
+
+static bool shouldShiftDynamicLDS(const LDSReliefCandidate &candidate) {
+  if (candidate.slots.empty() || candidate.slots.front().plan.empty())
+    return false;
+  const wave::regalloc::LDSSpillPlan &plan =
+      candidate.slots.front().plan.front();
+  return plan.existingFixedBytes == 0 && plan.existingDynamicBytes != 0;
 }
 
 static FailureOr<int64_t>
@@ -468,6 +574,9 @@ static void reserveLDSSpillBytes(func::FuncOp func, OpBuilder &builder,
 
 static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
                                           const LDSReliefCandidate &candidate) {
+  if (shouldShiftDynamicLDS(candidate) &&
+      failed(shiftDynamicLDSAddresses(func, builder, candidate.reservedBytes)))
+    return failure();
   FailureOr<unsigned> ldsBaseBytes = getLDSBaseBytes(func, candidate);
   if (failed(ldsBaseBytes))
     return failure();
