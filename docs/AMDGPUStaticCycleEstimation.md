@@ -426,22 +426,16 @@ deprioritize iglp pattern matching.
 
 ### Architecture options
 
-Three layered approaches, in increasing build cost:
+The active in-tree path is WaveAMDMachine replay:
 
-1. **Wrap `llvm-mca`.** Pipe the assembled `.s` from `wave-translate`
-   into MCA via its library API. Single-wave cycle estimate at
-   SchedModel granularity, free. Limit: no multi-wave, no cache.
-   Expose as a `wave.transform.estimate_cycles` op.
-2. **MIR-level analysis pass over WaveAMDMachine IR.** Walk ops,
-   sum `SchedWrite` class latencies from the same TableGen data
-   MCA uses, apply hazard rules from `GCNHazardRecognizer`. Lets
-   the estimator model multi-wave effects MCA can't.
-3. **Cycle simulator.** Per-SIMD state, multiple wave PCs,
-   round-robin issue. Most accurate, most build cost. Pays off
-   if (1) and (2) prove insufficient for ranking.
+1. `InstructionExecutionState` models one wave's issue, value readiness,
+   waitcnt drains, token dependencies, and M0 gaps.
+2. `EventSimulator` replays a linear order through that state.
+3. `wave-sim-report` and `wave.transform.estimate_cycles` expose the estimate
+   to tools and transform-dialect scoring.
 
-Recommended: start at (1) for a baseline; if it ranks autotune
-trials well, ship. If accuracy is insufficient, layer (2) on top.
+Wrapping `llvm-mca` remains useful as an external cross-check, not the current
+implementation path.
 
 ### Multi-wave correction formula
 

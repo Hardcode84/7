@@ -311,29 +311,11 @@ Not this scheduler's job:
 
 These may still affect final ISA. They are not cheap pre-RA legality facts.
 
-## Scoring and Apply Rule
+## Apply Rule
 
-Build two complete orders per region:
-
-- original order;
-- greedy gap-fill order.
-
-Run `simulateEventTimeline` on both. Final score is:
-
-```
-score = simulatedCycles + supplementalCheapHazardCycles
-```
-
-`supplementalCheapHazardCycles` is zero for hazards modeled by the simulator.
-For M0 instruction-gap hazards, one missing real-instruction gap is one
-supplemental cycle. Use the same shared helper as `waveamd-insert-hazard-waits`
-for this cost.
-
-Apply the greedy order only when:
-
-- the greedy order differs from original;
-- both original and greedy orders simulate successfully;
-- greedy score is strictly lower than original score.
+The mutating pass builds one greedy gap-fill order per region. If the order
+differs from original, it applies the order. Event-simulator scoring is
+available in the report pass; it is not a mutating-pass gate.
 
 ## Diagnostics
 
@@ -341,10 +323,9 @@ Keep diagnostics simple and scheduler-local:
 
 ```
 waveamd-machine-schedule region func=foo index=3 ops=42
-  original_cycles=220 greedy_cycles=196 action=apply reason=better
-  filled_gaps=8 unfilled_gaps=2
+  action=apply reason=greedy filled_gaps=8 unfilled_gaps=2
   operand_gaps=3 resource_gaps=4 cheap_hazard_gaps=1
-  m0_gaps=1 memory_token_gaps=1
+  m0_gaps=1 memory_token_gaps=1 barrier_memory_gaps=0
 ```
 
 Verbose move trace:
@@ -360,16 +341,15 @@ Do not attach move diagnostics to IR.
 Summary actions:
 
 - `apply`: greedy order used.
-- `keep`: original order used because greedy is same or not better.
+- `keep`: original order used because greedy is the same.
 - `fail`: pass failure.
 
 Summary reasons:
 
-- `better`
 - `same_order`
-- `not_better`
-- `simulation_failed_original`
-- `simulation_failed_greedy`
+- `greedy`
+- `m0_hazard`
+- `barrier_memory`
 - `dependency_cycle`
 - `missing_target`
 - `malformed_target`
@@ -377,9 +357,9 @@ Summary reasons:
 - `unsupported_op`
 - `unsupported_option`
 
-`waveamd-machine-schedule-report` reports the new greedy order, stall reasons,
-and rejected fillers. Do not keep the old candidate portfolio as the report
-contract.
+`waveamd-machine-schedule-report` prints original/greedy candidate orders,
+scores, stats, and the selected order. Rejected-filler traces are not part of
+the current report contract.
 
 Cheap hazard constants live in one helper shared by this scheduler and
 `waveamd-insert-hazard-waits`.
@@ -472,8 +452,8 @@ unavailable. Run at least two independent reviews before accepting refreshed
 ASM:
 
 - Scheduler-legality review: every changed hunk must trace to a changed region
-  with scheduler diagnostics: stalled op, filler op, reason, original cycles,
-  greedy cycles, and `action=apply reason=better`.
+  with scheduler diagnostics: action, reason, order/stats, and report-mode
+  scores when available.
 - ASM-invariant review: inspect regenerated `.s`, not just diff size.
 
 Expected drift:
@@ -495,8 +475,7 @@ Red flags:
 - new `s_delay_alu`, `s_setprio`, long nop run, or nop crossing a
   wait/barrier/MFMA boundary without scheduler justification;
 - new spill/scratch use;
-- scheduler diagnostics show `keep`, `same_order`, or `not_better` for the
-  changed region.
+- scheduler diagnostics show `keep` / `same_order` for the changed region.
 
 gfx950 pattern checks:
 
@@ -516,7 +495,8 @@ gfx950 pattern checks:
 
 ## Failure Modes
 
-- **Local greedy hurts global schedule.** Simulator score must reject the order.
+- **Local greedy hurts global schedule.** Report-mode score and hardware review
+  must catch it; the mutating pass does not score-gate apply.
 - **Hazard drift.** Share constants with hazard insertion.
 - **No-inst false fill.** Only real machine instructions decrement cheap
   hazard counters.

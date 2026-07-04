@@ -26,19 +26,15 @@ thread pool.
 
 ### Pipeline as IR
 
-`lib/Target/Wave/pipelines/pipelines.mlir` holds
-`@waveamd_backend` (the full backend: `waveamd-to-machine`,
-`waveamd-abi-lowering`, `waveamd-decompose-mem-tuples`,
-`waveamd-narrow-wide-int`, `waveamd-form-fused-int`,
-`waveamd-clear-regalloc-assignments`, `waveamd-preserve-hw-regs`,
-`canonicalize`, `cse`, `waveamd-reg-alloc`,
-`waveamd-decompose-mem-tuples`, `waveamd-insert-ticket-waits`,
-`waveamd-insert-hazard-waits`, `waveamd-resource-info`,
-`waveamd-metadata`) and `@compile_kernels` (the backend +
-`wave-compile-kernels`). The default entry is
-`@__transform_main`, which `wave-translate` picks up implicitly.
-Tests select richer entries by name via
-`transform-interpreter{entry-point=…}`.
+`lib/Target/Wave/pipelines/pipelines.mlir` holds the backend named
+sequences. `@waveamd_backend_lower` lowers to prepared WaveAMDMachine IR,
+`@waveamd_regalloc_transform_loop` runs alias-state build, linear scan, and
+ordered relief transforms, `@waveamd_backend_post_regalloc` inserts waits,
+resource info, verification, and metadata, and `@waveamd_backend` adds the
+pre-scheduler reuse/repair/schedule/barrier-cleanup stage around those pieces.
+`@compile_kernels` runs the backend plus `wave-compile-kernels`. The default
+entry is `@__transform_main`, which `wave-translate` picks up implicitly.
+Tests select richer entries by name via `transform-interpreter{entry-point=…}`.
 
 `wave-set-target-attr` runs ahead of the interpreter and stamps
 `waveamdmachine.target` plus pre-loads every dialect a downstream
@@ -82,24 +78,18 @@ One generic op rather than a family of typed measurement ops:
 Reads a named `IntegerAttr` off each payload op and yields it as
 a `!transform.param<i64>`. `waveamd-resource-info` already
 attaches per-kernel `waveamdmachine.{vgpr,sgpr,lds}_count{,_max}`
-attributes, and `waveamd-reg-alloc` with `mark-overflow=true`
-attaches `waveamdmachine.regalloc_overflowed_count` (always set
-to `0` when none overflowed, so consumers don't have to
-distinguish absent-vs-zero). Composing these with upstream
+attributes. Composing these with upstream
 `transform.match.param.cmpi`, `transform.param.constant`,
 `transform.print` covers what the sketched
 `measure_vgpr_pressure` / `measure_sgpr_pressure` /
 `measure_lds_bytes` ops were meant to do, without growing the op
 table for each attribute we already write down.
 
-Soft-fail tuning of overflow: `waveamd-reg-alloc` gains
-`mark-overflow=true` (set `waveamdmachine.regalloc_overflowed = 1`
-on the func, keep the rest of allocation virtual, return
-success) and `vgpr-limit` / `sgpr-limit` overrides for testing.
-Downstream `waveamd-resource-info` chokes on partially-allocated
-funcs by design -- the tune body's `match.param.cmpi eq %count,
-%zero` silenceably bails on overflowed trials *before* reaching
-resource-info.
+Regalloc overflow is now represented by the transform-loop state and the
+standard overflow attributes read by post-regalloc consumers. Downstream
+`waveamd-resource-info` rejects overflowed or partially allocated funcs by
+design, so tune bodies must prune bad trials before running post-regalloc
+resource consumers.
 
 ### Alternatives + grid + score
 
@@ -178,11 +168,9 @@ read-only source module.
   `transform.checkpoint %m` / `transform.restore_from %ckpt` pair
   would let the body fork only the K-dependent suffix. Not built.
 - **Pre-regalloc pressure estimation.** Trials measure VGPR
-  count by running the full backend through reg-alloc.
-  Soft-failing via `mark-overflow` already removes the
-  expensive-on-overflow case (regalloc keeps going instead of
-  crashing the pass), but the trial still pays for everything up
-  to and including reg-alloc. An abstract evaluator over
+  count by running the backend through the regalloc transform loop.
+  The trial still pays for everything up to and including regalloc.
+  An abstract evaluator over
   WaveAMDMachine IR would prune faster, at the cost of drifting
   from the allocator. Not built.
 - **Diagnostics on no-feasible.** The tune op silenceably
@@ -200,11 +188,10 @@ read-only source module.
 - **Hazard catalog.** A hypothetical `count_inserted_nops`
   measurement op is still a natural fit on top of
   `hazard-mitigation`; today nothing in autotune leans on it.
-- **Gap-walking regalloc.** `mark-overflow` on
-  `waveamd-reg-alloc` (the production allocator, not a separate
-  estimator) is what makes the autotune budget loop work end-to-
-  end. A future pre-allocator pressure estimator would reuse the
-  same free-list bookkeeping.
+- **Gap-walking regalloc.** The production path is the
+  `waveamd_regalloc_transform_loop` sequence, not a separate estimator. A
+  future pre-allocator pressure estimator would reuse the same free-list
+  bookkeeping.
 
 ## Prior art
 

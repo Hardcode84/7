@@ -314,8 +314,3 @@ Failure modes:
 - `rocprofv2 --plugin att` from system ROCm is the old path here. Its installed
   Python wrapper imports the viewer before help/output and currently fails if
   `websockets` is absent. Prefer The Rock `rocprofv3 --att`.
-
-## Scheduler validation
-
-Current gfx1100 matmul baseline-vs-scheduled sweep lives in
-`docs/Gfx1100SchedulerValidation.md`.

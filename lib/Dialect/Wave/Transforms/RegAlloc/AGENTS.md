@@ -11,13 +11,13 @@ Scope: WaveAMD regalloc implementation files in this directory.
 - Driver order is fixed:
 
 ```text
-build-alias-state -> linear-scan -> AGPR -> Remat -> LDS -> Scratch
+build-alias-state -> linear-scan -> AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 ```
 
 - Relief order is strict:
 
 ```text
-AGPR -> Remat -> LDS -> Scratch
+AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 ```
 
 - First relief transform that rewrites IR wins. Restart from alias-state build.

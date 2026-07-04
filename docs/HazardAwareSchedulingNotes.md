@@ -6,7 +6,8 @@ hazards, then inserts mitigation after register allocation.
 
 Scheduler integration should be optional scoring help, not the sole
 correctness mechanism. If scheduling cannot prove a hazard is covered,
-fallback is to keep the order or let hazard-wait insertion add NOPs.
+fallback is to keep the order. Hazard waits then run local repair passes
+before final NOP insertion.
 
 ## Useful split
 

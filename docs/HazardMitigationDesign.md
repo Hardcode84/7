@@ -19,14 +19,18 @@ mutable local copy of the incoming state. The lattice carries the
 LGKM pending bit, active SSA-value hazards, and physical-register
 hazard windows.
 
-Primary hazard classes modeled today:
+Primary hazard classes modeled today include:
 
 | Hazard | Producer | Consumer | Gap |
 |---|---|---|---|
 | VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle on non-CDNA4 targets (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
 | TRANS forwarding on gfx940-family | `WriteTrans32` VALU op | non-TRANS `VALUOp`-trait op reading the TRANS result | 1 instruction |
 | M0 read after `s_mov_m0` | `s_mov_m0` | any op with a `!m0`-typed operand | 1 instruction |
-| VMEM store after 4-pass MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | 7 instructions on CDNA3, 8 on CDNA4 and other targets |
+| VMEM store after MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | pass-count-derived XDL result latency |
+| MFMA physical result write | allocated MFMA result span | later read/write of the same span | pass-count-derived XDL result latency |
+| MFMA SrcC WAR | allocated MFMA accumulator span | later write of the same span | pass-count-derived XDL SrcC latency |
+| VALU physical write | allocated VGPR/SGPR/VCC/EXEC result | later consumers sensitive to that class | target-specific VALU write latency |
+| Store write-data | selected stores | later physical span users | target-specific store-data latency |
 
 ## Lattice Shape
 
@@ -35,22 +39,25 @@ Primary hazard classes modeled today:
 - `lgkmPending` / `lgkmToValu`: lgkm issuers increment pending count;
   draining waits arm the VALU gap only on targets that need it.
 - `DenseMap<Value, ValueHazards>`: active hazards carried by SSA
-  value. Today `ValueHazards` has `m0` and `mfmaStore` countdowns.
+  value. `ValueHazards` tracks M0 and MFMA-store countdowns.
 - `SmallVector<PhysicalHazard>`: post-regalloc hazards keyed by
   physical register span.
+- VCC and EXEC-to-MFMA counters for hazards that are singleton-like but not
+  represented as ordinary SSA value hazards.
 
 Joins take max LGKM state and max countdown per `(Value, hazard)`.
 Each counted instruction decrements all active SSA countdowns. Producer
-ops seed result hazards: `s_mov_m0` seeds `m0 = 1`, and MFMA ops seed
-`mfmaStore = 7/8`. No-machine-inst forwarding ops conservatively copy
-operand hazards to results.
+ops seed result hazards: `s_mov_m0` seeds the M0 gap, and MFMA ops seed
+pass-count-derived result hazards. No-machine-inst forwarding ops
+conservatively copy operand hazards to results.
 
-Constants for the gaps live in `HazardConfig` (`m0PipelineDelay = 1`,
-`mfmaResultLatency = 7/8` for CDNA3/CDNA4 4-pass MFMA store use).
-CDNA4 disables the LGKM-to-VALU gap; LLVM and CDNA4 docs have no
-matching post-`s_waitcnt` VALU hazard. `valuDep1` is the `s_delay_alu`
-encoding for "wait one VALU cycle", computed once at pass start.
-The gfx940-family TRANS forwarding gap is one wait state.
+Constants for the gaps live in `HazardConfig`: M0 pipeline delay, VALU write
+latencies, TRANS forwarding wait states, LGKM wait behavior, and target ISA
+state used to derive MFMA pass-count latencies. CDNA4 disables the
+LGKM-to-VALU gap; LLVM and CDNA4 docs have no matching post-`s_waitcnt` VALU
+hazard. `valuDep1` is the `s_delay_alu` encoding for "wait one VALU cycle",
+computed once at pass start. The gfx940-family TRANS forwarding gap is one
+wait state.
 
 ## Trait-based classification
 
@@ -65,10 +72,11 @@ classification decision:
   `LDSLoadOp`, `LDSStoreOp`,
   `WaitcntOp`, `TokenOp`, `TokenJoinOp` -- pre-existing functional
   classifiers used both here and in other passes.
-- `MFMAOp` -- the MFMA producer set for the VMEM-store hazard.
+- `MFMAOp` -- the MFMA producer set. MFMA variants also need schedule-class
+  pass-count support.
 
-Adding a new MFMA variant requires only tagging it with `MFMAOp`; the
-hazard pass sees it automatically.
+Adding a new MFMA variant requires `MFMAOp` tagging plus valid MMA
+schedule-class/pass-count support; missing pass-count data is a hard error.
 
 ## Dataflow Edges
 
@@ -108,10 +116,10 @@ op classification from the local WaveAMDMachine dialect.
 
 ## Deferred work
 
-**Hazard-aware code motion.** The dataflow tells us which consumer
-still needs waits, but not which movable instructions should fill the
-gap. A later pass can use the same state to try local code motion
-before falling back to `s_nop`.
+**Hazard-aware code motion.** `waveamd-hazard-repair` handles the
+pre-scheduler local repair pass. `waveamd-insert-hazard-waits` also contracts
+some barrier drains, fills LGKM/VALU gaps, and hoists M0 moves before final
+NOP insertion.
 
 **Tablegen-described catalog.** A generated hazard catalog only pays
 off once we ship 10+ hazard kinds with multiple subcases each. Three

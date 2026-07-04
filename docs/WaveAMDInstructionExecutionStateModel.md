@@ -9,7 +9,7 @@ User-facing API:
 ```cpp
 struct InstructionExecutionState {
   FailureOr<InstructionStall> query(Operation *op) const;
-  FailureOr<InstructionCommit> commit(Operation *op);
+  FailureOr<InstructionCommitResult> commit(Operation *op);
 };
 ```
 
@@ -104,27 +104,28 @@ Primary cross-checks:
 ## Public Types
 
 ```cpp
-enum class StallKind : uint8_t {
+enum class InstructionStallKind : uint8_t {
   None,
   IssueBackpressure,
+  OperandValue,
   MemoryValue,
   MemoryToken,
+  Waitcnt,
   M0ReadWrite,
-  OperandValue,
 };
 
-struct StallComponent {
-  StallKind kind = StallKind::None;
+struct InstructionStallComponent {
+  InstructionStallKind kind = InstructionStallKind::None;
   int64_t cycles = 0;
 };
 
 struct InstructionStall {
-  StallKind kind = StallKind::None;
+  InstructionStallKind kind = InstructionStallKind::None;
   int64_t cycles = 0;
-  SmallVector<StallComponent, 4> components;
+  SmallVector<InstructionStallComponent, 4> components;
 };
 
-struct InstructionCommit {
+struct InstructionCommitResult {
   InstructionStall stall;
   int64_t issueCycle = 0;
   int64_t nextIssueCycle = 0;
@@ -134,15 +135,9 @@ struct InstructionCommit {
 ```
 
 `InstructionStall::kind` is the primary reason. `components` keeps diagnostics
-lossless when multiple reasons tie or overlap.
-
-Tie order for primary reason:
-
-1. `MemoryToken`
-2. `MemoryValue`
-3. `M0ReadWrite`
-4. `OperandValue`
-5. `IssueBackpressure`
+lossless when multiple reasons tie or overlap. Largest stall wins. Ties keep
+component insertion order: operand value, memory token, waitcnt, issue
+backpressure, then M0.
 
 Unsupported ops are not a stall kind. `query` / `commit` return failure with a
 diagnostic.
@@ -153,14 +148,14 @@ The state should not inspect op internals repeatedly. First step in `query` and
 `commit` is lowering the op into a compact summary:
 
 ```cpp
-enum class PipeKind : uint8_t {
+enum class InstructionPipeKind : uint8_t {
   None,
   VALU,
   SALU,
   XDL,
 };
 
-enum class WaitCounterKind : uint8_t {
+enum class InstructionWaitCounterKind : uint8_t {
   None,
   Vmem,
   Vscnt,
@@ -168,79 +163,58 @@ enum class WaitCounterKind : uint8_t {
   Expcnt,
 };
 
-enum class EventClass : uint8_t {
+enum class InstructionEventClass : uint8_t {
   None,
   VmemLoad,
   VmemStore,
   LdsDs,
   Smem,
-  Flat,
   Export,
 };
 
 struct InstructionDesc {
-  Operation *op = nullptr;
-  SchedClass schedClass = SchedClass::NoInst;
-  FunctionalUnit fu = FunctionalUnit::None;
-  PipeKind pipe = PipeKind::None;
-  WaitCounterKind counter = WaitCounterKind::None;
-  EventClass eventClass = EventClass::None;
-  unsigned issueCount = 0;
-  int valueLatency = 0;
-  int tokenLatency = 0;
-  int retireLatency = 0;
-  bool realInstruction = false;
-  bool readsM0 = false;
-  bool writesM0 = false;
+  int64_t latency = 0;
+  int64_t memoryCounterLatency = 0;
+  int64_t memoryValueLatency = 0;
+  unsigned issueCount = 1;
+  InstructionPipeKind pipe = InstructionPipeKind::None;
+  InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
+  InstructionEventClass eventClass = InstructionEventClass::None;
+  bool noMachineInst = false;
   bool waitcnt = false;
+  bool m0Writer = false;
+  bool m0Consumer = false;
   bool tokenConsumer = false;
-  bool tokenIssuerMustWaitBeforeIssue = false;
+  bool waitsForTokenDeps = false;
+  bool hasMemoryValue = false;
 };
 ```
 
-`tokenIssuerMustWaitBeforeIssue` is policy, not alias analysis. Read-only
-issuers may carry source-token deps into their result token instead of waiting
-before issue. The result token must preserve skipped deps.
+`waitsForTokenDeps` is policy, not alias analysis. Read-only issuers may carry
+source-token deps into their result token instead of waiting before issue. The
+result token must preserve skipped deps.
 
 ## State
 
 ```cpp
-struct PipeState {
-  int64_t nextIssueCycle = 0;
-  SmallVector<int64_t, 8> pendingIssues;
-  unsigned maxInFlight = 0;
-};
-
-using EventId = uint32_t;
+using EventId = uint64_t;
 
 struct PendingEvent {
-  EventId id = 0;
   Operation *op = nullptr;
-  WaitCounterKind counter = WaitCounterKind::None;
-  EventClass eventClass = EventClass::None;
-  int64_t issueCycle = 0;
-  int64_t valueReadyCycle = 0;
-  int64_t tokenReadyCycle = 0;
+  EventId id = 0;
   int64_t retireCycle = 0;
-  SmallVector<Value, 2> valueResults;
-  Value tokenResult;
-};
-
-struct TokenDeps {
-  SmallVector<EventId, 4> events;
+  InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
+  InstructionEventClass eventClass = InstructionEventClass::None;
 };
 
 struct InstructionExecutionState {
   int64_t currentCycle = 0;
-  PipeState valu;
-  PipeState salu;
-  PipeState xdl;
-  SmallVector<PendingEvent, 16> vmemQueue;
-  SmallVector<PendingEvent, 16> vscntQueue;
-  SmallVector<PendingEvent, 16> lgkmQueue;
-  SmallVector<PendingEvent, 16> expcntQueue;
   DenseMap<Value, int64_t> valueReadyAt;
-  DenseMap<Value, TokenDeps> tokenDeps;
+  DenseMap<Value, EventId> valueEvent;
+  DenseMap<Value, SmallVector<EventId, 4>> tokenEvents;
+  DenseMap<EventId, PendingEvent> events;
+  std::array<SmallVector<EventId, 8>, 4> waitQueues;
+  std::array<SmallVector<int64_t, 8>, 3> pipeQueues;
   bool m0GapArmed = false;
 };
 ```
@@ -248,9 +222,8 @@ struct InstructionExecutionState {
 `currentCycle` means next issue attempt cycle. After a commit, it points at the
 next instruction's earliest issue attempt.
 
-Queues hold issued wait-counter events until their retire cycle passes. Token
-deps may refer to retired entries until the token value dies; keep an
-id-to-entry archive if active queues get compacted.
+Queues hold issued wait-counter events until their retire cycle passes. Value
+readiness and token deps live in maps keyed by SSA values.
 
 `m0GapArmed` is set by a SALU M0 write when the next selected M0 consumer needs
 one independent real instruction first. Pseudos do not clear it.
@@ -294,14 +267,14 @@ InstructionExecutionState::query(Operation *op) const {
 Memory value wait:
 
 - If an operand is produced by a queued memory event, wait until that entry's
-  `valueReadyCycle`.
+  ready cycle in `valueReadyAt`.
 - Non-memory producer latency still uses `valueReadyAt`.
 
 Memory token wait:
 
-- For token operands, collect `TokenDeps`.
+- For token operands, collect event ids from `tokenEvents`.
 - If the instruction must wait before issue, wait until all referenced entries
-  reach `tokenReadyCycle` or `retireCycle`, per op policy.
+  reach `retireCycle`.
 - If the instruction may issue read-only, do not stall; carry deps into the
   result token on commit.
 
@@ -331,7 +304,7 @@ that prevents scheduler/simulator divergence.
 Pseudo-code:
 
 ```cpp
-FailureOr<InstructionCommit>
+FailureOr<InstructionCommitResult>
 InstructionExecutionState::commit(Operation *op) {
   FailureOr<InstructionStall> maybeStall = query(op);
   if (failed(maybeStall))

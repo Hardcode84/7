@@ -7,9 +7,10 @@ pressure.
 ## Placement
 
 Run after `waveamd-to-machine`, post-selection `canonicalize`/`cse`/LICM,
-ABI lowering, and memory tuple decomposition. Run before scheduling, ticket
-waits, hardware-register preservation, regalloc, hazard waits, resource info,
-metadata, and asm emission.
+ABI lowering, and memory tuple decomposition. Run before cross-lane peepholes,
+machine cleanup, pre-scheduler repair/scheduling, hardware-register
+preservation, regalloc, ticket waits, hazard waits, resource info, metadata,
+and asm emission.
 
 This placement keeps pointer/index-expression planning ahead of the peephole.
 The pass must not hide constants or uniform offsets from memory address slot
@@ -29,8 +30,9 @@ from MCInst/MCInstPrinter.
 
 ## Match Boundary
 
-Match inside one block. No cross-block matching, no region boundary crossing,
-no general reassociation.
+Match inside one block. No cross-block matching, no region boundary crossing.
+Simple `2 -> 1` peepholes do not reassociate. The local add-chain factoring
+patterns may factor common same-block add bases when all users are rewritten.
 
 Match from a fixed whitelist of known-pure machine ops. Every erased op must
 have one data result and no flag/token/result state to preserve. Most erased
@@ -39,7 +41,7 @@ erasing it. Reject any candidate that would delete a value with non-matched
 users.
 
 Commutative operands may be swapped only for that instruction. Do not rebuild
-larger expression trees to make a pattern fit.
+larger expression trees outside the local add-base factoring patterns.
 
 ## Uniform Values
 
@@ -82,6 +84,18 @@ Match machine integer semantics, not source-language intent.
 
 Commuted outer operands are legal when the outer op is commutative and the
 result still satisfies constant-bus and copy rules.
+
+## Local Add-Base Factoring
+
+The pass can factor repeated same-block address-style add bases when a direct
+ternary replacement is not legal:
+
+- scalar `s_add_i32(common, varying)` feeding `v_add_u32(..., common_vgpr)`;
+- `v_add_u32` / `v_add3_u32` chains with a common tail across multiple roots.
+
+Hard boundaries stop factoring: terminators, nested regions, waitcnts, EXEC
+writes, labels, barriers, setprio, branch ops, and explicit EXEC moves. Roots
+with non-matched users are rejected.
 
 ## Profitability
 

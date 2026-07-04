@@ -177,7 +177,7 @@ The dialect should contain operations for:
 - **Implemented:** `ballot`, `read_first`, dynamic `shuffle`, and
   scalar-to-wave `splat`.
 - **Implemented:** tokenized `load`, `store`, `barrier`, `ptr_add`,
-  `index_expr`, and LDS-base ops.
+  `index_expr`, and `shared_memory_base`.
 - **Implemented in WaveAMD:** buffer pointers, fragment pack/unpack/fill,
   matrix multiply-accumulate, and global/buffer-to-LDS DMA.
 - **Proposed:** mask algebra such as `and`, `or`, `not`, `any`, `all`,
@@ -187,8 +187,10 @@ The dialect should contain operations for:
 - **Proposed:** lane permutations and DPP/permlane-style communication;
 - **Proposed:** higher-level wave-cooperative memory clauses beyond current
   tokenized load/store/DMA;
-- **Proposed:** standard MLIR `scf.if` and `scf.while` lowering for uniform
-  structured control.
+- **Implemented:** standard MLIR `scf.if` lowering for uniform structured
+  control.
+- **Proposed:** standard MLIR `scf.while` lowering for uniform structured
+  control.
 - **Proposed:** source-level packed-data operations beyond the current
   target-level packed-math machine ops.
 
@@ -199,8 +201,8 @@ The dialect should lower in stages:
 1. High-level source dialects lower work-item or domain-specific constructs to
    explicit wave operations, custom `where` regions, and standard `scf`
    structured control.
-2. Wave canonicalization consumes `where` and `scf.for`/`scf.if`/
-   `scf.while` together, simplifies mask regions, folds uniform broadcasts,
+2. Wave canonicalization consumes `where` and `scf.for`/`scf.if` together,
+   simplifies mask regions, folds uniform broadcasts,
    specializes wave-size-polymorphic code, and selects legal operation forms.
 3. Conversion to LLVM IR lowers wave values to divergent scalar IR values,
    masks to `i32` or `i64`, and structured regions to AMDGPU control-flow
@@ -222,8 +224,8 @@ is a subgroup-sized SIMD program with:
 - lane-varying values;
 - logical lane masks;
 - structured predication through `where`;
-- uniform structured control through `scf.for`, `scf.if`, and
-  `scf.while`;
+- uniform structured control through `scf.for` and `scf.if`, with `scf.while`
+  as proposed follow-up;
 - explicit cross-lane operations, reductions, scans, and masked memory.
 
 AMDGPU should then be one target-specific lowering of that model, where logical
@@ -275,8 +277,9 @@ mask selection and the predicate. Divergent control is represented with
 
 This maps well to the proposed structured split:
 
-- `scf.for`, `scf.if`, and `scf.while` represent uniform structured
-  control and can lower to uniform branches or scalar-control forms;
+- `scf.for` and `scf.if` represent implemented uniform structured control and
+  can lower to uniform branches or scalar-control forms; `scf.while` is the
+  proposed loop counterpart;
 - `where(mask)` represents lane-varying predication and can lower either to
   predicated vISA operations or to `GOTO`-style divergent control when a
   region cannot be represented as straight-line predication;
@@ -474,8 +477,8 @@ This suggests the following split for a prototype under `mlir/lib/Target/Wave`:
   is useful for early experiments, but the long-term design should reuse AMDGPU
   register classes, subtarget register limits, occupancy calculations, and spill
   behavior instead of maintaining a parallel model. Current RegAlloc semantics
-  and the rewrite design are captured in
-  [`WaveAMDRegAllocSemantics.md`](WaveAMDRegAllocSemantics.md).
+  and rewrite design are captured in
+  [`WaveAMDRegAllocDesign.md`](WaveAMDRegAllocDesign.md).
 
 `AMDGPUABI.cpp`
   Own an MLIR ABI-lowering pass for kernel arguments, kernarg layout,
@@ -600,10 +603,10 @@ families:
   `mask<W>`. It changes the active-lane mask for the dynamic extent of the
   region and may have an `otherwise` region for the complementary lanes.
 
-`scf.for`, `scf.if`, and `scf.while`
-  Standard MLIR structured control-flow operations for uniform control. Their
-  bounds and conditions are ordinary scalar values, so the whole wave follows
-  the same control path.
+`scf.for` and `scf.if`
+  Standard MLIR structured control-flow operations for implemented uniform
+  control. Their bounds and conditions are ordinary scalar values, so the whole
+  wave follows the same control path. `scf.while` is the proposed extension.
 
 This split keeps the dialect small. It does not need custom loop and branch
 operations for ordinary uniform control, and it does not abuse `scf.if` to
@@ -629,10 +632,10 @@ This lowers naturally to the existing AMDGPU control-flow pipeline:
   mask.
 - The end of the construct restores or merges the saved mask.
 
-Loops over masks should be expressed as uniform `scf.while` control around
-explicit mask operations. For example, a source-level `while_any` construct can
-lower to an `scf.while` whose condition is `any(todo)`, with a nested
-`where` for the lanes selected in each iteration:
+Once uniform `scf.while` lowering exists, loops over masks should be expressed
+as uniform control around explicit mask operations. For example, a source-level
+`while_any` construct can lower to an `scf.while` whose condition is
+`any(todo)`, with a nested `where` for the lanes selected in each iteration:
 
 ```cpp
 mask<32> todo = active;
@@ -674,8 +677,9 @@ Reductions and scans
 
 Memory
   **Implemented:** tokenized `load`, `store`, `barrier`, `ptr_add`,
-  `index_expr`, LDS base, and WaveAMD global/buffer-to-LDS DMA. Scalar loads
-  over uniform addresses remain scalar memory operations when legal.
+  `index_expr`, `shared_memory_base`, and WaveAMD global/buffer-to-LDS DMA.
+  Scalar loads over uniform addresses remain scalar memory operations when
+  legal.
   **Proposed:** higher-level coalesced global accesses, LDS tiling helpers,
   scratch operations, and memory clauses. Memory ordering is represented by
   explicit memory tokens, not by implicit alias analysis.
@@ -1071,8 +1075,9 @@ Mask lowering
   regions.
 
 Control-flow lowering
-  Lower uniform `scf.for`, `scf.if`, and `scf.while` as ordinary scalar
-  structured control. Lower structured `where` regions to
+  Lower uniform `scf.for` and `scf.if` as ordinary scalar structured control.
+  Reserve `scf.while` for the proposed uniform-loop extension. Lower
+  structured `where` regions to
   `llvm.amdgcn.if`, `llvm.amdgcn.else`, and `llvm.amdgcn.end.cf` or an
   equivalent target intrinsic sequence. The existing AMDGPU backend can then
   emit `SI_IF`, `SI_ELSE`, `SI_END_CF`, and finally scalar `EXEC`
@@ -1114,8 +1119,8 @@ The verifier should check that:
   operations.
 - A `mask<W>` is only used with wave values of the same width.
 - `where` regions are structured and do not leak temporary active-mask state.
-- `scf.if` and `scf.while` conditions are scalar-uniform `bool` values,
-  not `mask<W>` values.
+- `scf.if` conditions are scalar-uniform `bool` values, not `mask<W>` values.
+  The same rule applies to proposed `scf.while` support.
 - `scf.for` bounds and steps are scalar-uniform values.
 - Control flow does not branch into or out of a `where` region except through
   structured region entry and exit.
@@ -1173,9 +1178,9 @@ Required source concepts:
 - `mem_token` for explicit memory dependencies;
 - fixed wave-size kernel attributes;
 - custom `where` without arbitrary unstructured mask mutation;
-- standard MLIR `scf.for` for uniform structured loops;
-- proposed standard MLIR `scf.if` and `scf.while` lowering for other uniform
-  structured control.
+- standard MLIR `scf.for` and `scf.if` for uniform structured control;
+- proposed standard MLIR `scf.while` lowering for other uniform structured
+  control.
 
 Required operations:
 

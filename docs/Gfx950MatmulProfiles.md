@@ -143,6 +143,7 @@ use_dma_lds=true
 matrix_intrinsic=mfma_gfx950
 input_type=mxfp4
 output_type=f16
+mxfp4_scale_path=regs
 cta_swizzle_xcds=8
 cta_group_m=4
 ```

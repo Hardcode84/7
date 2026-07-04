@@ -157,7 +157,7 @@ does too:
 ```c
 for index i in 0..n { ... }            // i : index (uniform), iterates [0, n)
 for uint32_t k in 0..K step BK { ... } // sized IV; lb/ub/step unify to it
-while (c) { ... }                      // c : bool (uniform) -> scf.while
+while (c) { ... }                      // parsed/typed; lowering rejects today
 ```
 
 Declare the IV type to match the bounds and skip casts: `for uint32_t i in
@@ -445,7 +445,8 @@ not legal, decides it.
 
 ## Stages
 
-v1 scope: saxpy + `if`/`for`/`while` plus fragment/MMA primitives.
+v1 lowering scope: saxpy + `if`/`for` plus fragment/MMA primitives.
+`while` remains parser/sema-only until lowering support lands.
 
 0. **Freeze the grammar** (EBNF) for the v1 subset -- drafted in
    [CFrontendGrammar.md](CFrontendGrammar.md). Pins the lexer rules (`<...>`
@@ -455,7 +456,8 @@ v1 scope: saxpy + `if`/`for`/`while` plus fragment/MMA primitives.
    verified through `wave-opt`) -- the FileCheck target.
 2. **Lexer + parser + AST**: ptr/scalar/`simd<>`/`mask<>`/`vector<>` types,
    function decl, var decls, arithmetic + compare, `where`/`otherwise`,
-   `if`/`else`, range `for <int> i in 0..n step s`, `while`, builtins
+   `if`/`else`, range `for <int> i in 0..n step s`, parser/sema `while`,
+   builtins
    `lane_id`/`wave_id_in_grid`/`load`/`store`/`barrier`.
 3. **Sema / type checker** enforcing the Type Rules. The only "analysis" --
    type propagation, not a fixpoint.

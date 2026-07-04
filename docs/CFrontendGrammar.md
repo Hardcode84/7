@@ -1,9 +1,9 @@
 # wave C-family frontend: v1 grammar
 
-Stage-0 artifact for [CFrontendDesign.md](CFrontendDesign.md). Covers the
-v1 subset: saxpy + `if`/`where`/`for`/`while`, explicit memory tokens, and
-fragment/MMA primitives. No user functions beyond `kernel`, no
-value-returning kernels.
+Stage-0 artifact for [CFrontendDesign.md](CFrontendDesign.md). Covers saxpy +
+`if`/`where`/`for`, parser/sema-only `while`, explicit memory tokens, and
+fragment/MMA primitives. No user functions beyond `kernel`, no value-returning
+kernels.
 
 Notation: ISO EBNF. `=` defines, `,` concatenates, `|` alternates, `{ }`
 is zero-or-more, `[ ]` is optional, `" "` is a terminal, `(* *)` is a
@@ -239,5 +239,7 @@ fragment<2,float,16,16,32,8> acc = fragment_fill<fragment<2,float,16,16,32,8>>(0
   `++`/`--`, no unary `+`; one prefix unary only (`- ! ~`).
 - Assignment is a statement: single-name LHS, no chaining (`a = b = c`), no
   assignment in conditions.
-- Preprocessor (`#include`/`#define`): not part of the language.
+- Preprocessor directives are outside the grammar. The `wavec` driver still
+  supports Clang preprocessing flags such as `-D`, `-U`, `-I`, `-include`,
+  and `-E`.
 ```

@@ -1,170 +1,125 @@
-# WaveAMD RegAlloc Design
+# WaveAMD RegAlloc
 
-Regalloc is a linear-scan allocator with explicit alias components and
-forced bank promotion:
-
-```text
-SGPR -> VGPR -> AGPR
-```
-
-If one bank overflows, move selected live ranges into the next bank.
-Operations still keep their required operand/result banks. If a value is
-stored in a bank an operation cannot use directly, insert explicit move
-ops. Those move temps are normal register values and go through the same
-allocator and promotion logic.
-
-## Core Rules
-
-- Flatten IR once. Each operation gets a monotonically increasing
-  position.
-- Every normal register dword has one live interval.
-- Width-N SSA values own N scalar dword intervals.
-- Alias constraints are explicit before allocation.
-- Alias components choose one storage bank.
-- Required op banks are interface constraints, not storage constraints.
-- Bank mismatch is repaired with explicit moves.
-- Inserted move values are allocated like any other value.
-
-Tokens and singleton hardware resources are not promoted. SCC, VCC, M0,
-EXEC, memory tokens, barriers, and control-only values stay in separate
-resource checks.
-
-## Flattening
-
-Build `FunctionInventory`:
+WaveAMD regalloc assigns physical register indices to WaveAMDMachine register
+values through an inspectable transform loop:
 
 ```text
-op -> position
-value -> def position, use positions
-op operand/result -> required interface bank
-fixed physical value -> precolored interval
-reserved ABI register -> prefilled physical live range
+build-alias-state -> linear-scan -> AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 ```
 
-Positions are operation indices. Block arguments use the parent region
-entry position or the slot position that defines their storage.
+Each iteration rebuilds state from current IR, runs deterministic linear scan,
+then either commits physical assignments or lets one ordered relief transform
+rewrite IR. First relief rewrite wins, clears state, and restarts from alias
+state. No hidden C++ plan survives an IR rewrite.
 
-Flatten nested regions in the execution order used by machine IR.
-`uniform_loop` body positions sit between loop entry and loop exit.
-Conservative liveness across the backedge is acceptable; aliasing carries
-the storage constraint.
+## Contract
 
-## Scalar Intervals
+Tracked values have type `!waveamdmachine.reg<sgpr|vgpr|agpr, width>` with no
+physical index. Successful allocation rewrites tracked results to
+`!waveamdmachine.reg<class, width, index>`.
 
-Each width-N register value lowers to N scalar dword intervals:
+`width` is a count of contiguous 32-bit registers. `index` is the physical base;
+the occupied range is `[index, index + width)`.
+
+Values already carrying a physical index inside allocation scope are fixed
+constraints. Ordinary allocation must not overlap fixed live ranges or use ABI
+reserved registers for the wrong purpose.
+
+SCC, VCC, EXEC, M0, memory tokens, barriers, and control-only values are not
+normal register-allocation classes. Inputs must satisfy their liveness and
+hazard constraints through separate passes.
+
+The module must carry `waveamdmachine.target`. The transform loop processes
+non-external `func.func` payload functions independently.
+
+## Budgets
+
+Register budgets come from the target. VGPR allocation is capped to the
+addressable VGPR namespace, `v0` through `v255`.
+
+`waveamdmachine.target_waves` narrows SGPR/VGPR budgets to the occupancy budget
+for that wave count. It also enables positional VGPR-family accounting where
+AGPRs count against VGPR occupancy:
 
 ```text
-value %x : reg<vgpr, 4>
-  x[0] interval
-  x[1] interval
-  x[2] interval
-  x[3] interval
+live_vgpr_dwords(position) + live_agpr_dwords(position) <= limit
 ```
 
-Each scalar interval has:
+`wave.kernel` reserves the kernel-entry prefix:
 
-```text
-value
-subindex
-start
-end
-preferred bank
-storage bank
-required interface bank per use/def
-fixed phys index, optional
-alias component id
-vertical offset
-```
+- SGPRs for the kernarg segment pointer.
+- Optional kernarg preload SGPRs.
+- SGPRs for workgroup IDs.
+- VGPR0 for workitem ID X.
 
-Starts can be widened by alias constraints. Ends stay per-subinterval.
-Tuple lanes and wide-value lanes can die early and free subregisters.
+Ordinary allocation starts after the reserved prefix. Entry ops that materialize
+those resources may use reserved registers. Other values may not.
 
-## Horizontal Aliasing
+Virtual AGPR allocation requires target AGPR support. Fixed AGPR values remain
+fixed constraints.
 
-Horizontal aliasing means multiple SSA values are the same storage slot.
+## State
 
-Required edges:
+Regalloc state is a function attribute. It contains:
 
-- `uniform_loop` init, body block argument, `continue_if` carry, and loop
-  result for the same carry slot.
-- Branch/if yielded values and corresponding region result, when machine
-  semantics require same storage.
-- MFMA accumulator input and result when the op is in-place.
-- Tuple round trips at the same slot.
+- operation positions;
+- stable value IDs;
+- value ranges and register classes;
+- alias sets and per-member dword offsets;
+- fixed reservations;
+- linear-scan assignments or one failure record;
+- per-stage metadata counters.
 
-Example:
+State is ephemeral. Every IR rewrite clears it; the next iteration rebuilds it.
+Do not preserve alias sets across rewrites.
 
-```text
-loop carries(%init)
-^bb0(%arg):
-  continue_if ... carries(%next)
-} -> %result
-```
+Value IDs are structural:
 
-The slot component is:
+- op result: operation path plus result number;
+- block argument: region path, block number, argument number.
 
-```text
-%init, %arg, %next, %result
-```
+Marker ops must not consume tracked values only to name them. Such operands are
+real uses and corrupt liveness.
 
-If two loop carry slots receive the same SSA init, duplicate storage first.
-Two logical loop variables must not alias because SSA identity happened to
-be shared at entry.
+## Liveness And Aliasing
 
-## Vertical Aliasing
+Positions use flattened program order with explicit loop-body positions.
+`uniform_loop` body positions sit between loop entry and loop exit. External
+loop operands used in the body remain live across the backedge.
 
-Vertical aliasing means scalar intervals occupy one contiguous physical
-range.
+Each width-N register value lowers to N scalar dword intervals. Tuple lanes and
+wide-value lanes can die independently.
 
-Required edges:
+Horizontal aliasing means multiple SSA values share one storage slot. Required
+alias edges include:
 
-- Width-N SSA value lanes form offsets `[0, N)`.
-- Tuple construction/extraction maps element intervals to cumulative
-  offsets in the tuple base.
-- Fixed physical tuple values pin their base and all offsets.
+- `uniform_loop` init, body block argument, `continue_if` carry, and result for
+  the same carry slot;
+- branch/if yielded values and corresponding region result when machine
+  semantics require shared storage;
+- MFMA accumulator input/result when the op is in-place;
+- tuple round trips at matching offsets.
 
-Vertical aliasing forces equal base plus offset. It does not force equal
-end positions.
+Vertical aliasing means scalar intervals occupy one contiguous physical range:
 
-Example:
+- width-N value lanes have offsets `[0, N)`;
+- tuple elements map to cumulative offsets in the tuple base;
+- fixed physical tuple values pin their base and all offsets.
 
-```text
-%tuple = tuple_from_elements %a:4, %b:2, %c:2 -> reg<..., 8>
-```
+Alias sets allocate as one unit. One alias set has one storage bank and one
+physical base plus per-value offsets. Liveness at a position is the live subset
+of the set.
 
-Offsets:
+If two loop carry slots receive the same SSA init value, duplicate storage
+first. SSA identity at loop entry must not merge two logical loop variables.
 
-```text
-%a -> base + 0
-%b -> base + 4
-%c -> base + 6
-```
+MFMA accumulator chains may alias input, result, and loop-carried accumulator
+storage when operand/result semantics allow it. One accumulator SSA value
+feeding multiple chains gives each chain independent storage.
 
-## Components
+## Interface Banks
 
-After horizontal and vertical union, allocate components.
-
-A component contains:
-
-```text
-scalar intervals
-vertical width
-fixed base, optional
-preferred bank
-storage bank
-promotion state
-start = min scalar starts
-end = max scalar ends
-```
-
-Component liveness at a position is the live subset of its scalar
-intervals. A width-8 tuple with only lanes 0-3 live occupies four dwords,
-not eight.
-
-One component has one storage bank. Boundaries where an op needs another
-bank get move temps.
-
-## Bank Model
+Storage bank and op interface bank are separate facts.
 
 Storage bank order:
 
@@ -172,253 +127,237 @@ Storage bank order:
 SGPR < VGPR < AGPR
 ```
 
-Normal values start in their preferred bank:
+Normal values start in their preferred bank. Relief may force storage into a
+different bank, but op operands/results still require the bank dictated by the
+machine operation.
+
+Bridge directions:
 
 ```text
-scalar producers -> SGPR
-vector/memory/scale values -> VGPR
-MFMA accumulators/results -> current lowering choice
-fixed values -> fixed bank
-```
-
-Promotion moves storage upward only:
-
-```text
-SGPR storage can be forced to VGPR.
-VGPR storage can be forced to AGPR.
-AGPR storage cannot promote further.
-```
-
-This is storage policy, not op legality. Op legality is repaired by moves.
-
-## Interface Banks
-
-Each op operand/result has a required interface bank:
-
-```text
-s_add_i32 operands/results: SGPR
-v_add_u32 operands/results: VGPR
-memory address/data operands: VGPR or SGPR as the op requires
-mfma data/acc/result operands: op-defined machine interface bank
-mfma scale operands: VGPR
-v_accvgpr_read input: AGPR, result: VGPR
-v_accvgpr_write input: VGPR, result: AGPR
-```
-
-If storage bank matches interface bank, wire the value directly.
-
-If storage bank differs, insert bridge ops:
-
-```text
-SGPR storage -> VGPR interface: scalar-to-vector copy/materialization
-VGPR storage -> SGPR interface: readfirstlane or scalar copy only when legal
+SGPR storage -> VGPR interface: scalar-to-vector materialization
+VGPR storage -> SGPR interface: v_readfirstlane_b32 when legal
 VGPR storage -> AGPR interface: v_accvgpr_write_b32_tuple
 AGPR storage -> VGPR interface: v_accvgpr_read_b32_tuple
 ```
 
-Some bridge directions are not always legal. If no bridge exists, the
-component cannot be promoted past that boundary.
+Some bridge directions are not legal for all values. If no legal bridge exists,
+that value is not a candidate for that relief path.
 
-## Allocation Loop
+Inserted bridge, remat, spill-store, and spill-load values are normal IR. The
+next iteration sees their pressure through rebuilt state.
 
-Linear scan allocates physical storage for the current component storage
-bank.
+## Linear Scan
 
-High-level loop:
+Linear scan consumes alias state only.
 
-```text
-build inventory
-build intervals
-build alias components
-assign preferred storage banks
+Success produces a complete assignment map for every allocatable alias set and
+applies physical register indices. Failure produces one failure record:
 
-while true:
-  insert required move temps for current storage choices
-  rebuild inventory/intervals/components for new temps
-  clear physical assignments
+- failed alias set;
+- failure position;
+- register class or combined VGPR/AGPR mode;
+- live pressure and limit;
+- requested width;
+- overlapping alias sets at the point;
+- deterministic diagnostics.
 
-  for component event in position order:
-    expire dead scalar intervals
-    if component already assigned:
-      place live subintervals in existing base
-      continue
-    if fixed:
-      validate fixed placement
-      continue
-    if free range exists in storage bank:
-      assign base
-      continue
+Linear scan does not choose AGPR/remat/LDS/scratch. It reports pressure; ordered
+transforms decide whether they can rewrite IR.
 
-    candidate = choose live component to promote from this bank
-    if no candidate:
-      report overflow
-    promote candidate to next bank
-    restart from earliest affected position
-```
+Physical occupancy is class-local:
 
-Inserted bridge values can create new pressure. They are not special. If
-they overflow a bank, the same promotion loop chooses another component
-to move up.
+- one live-slot set per physical dword;
+- reserved prefixes unavailable to ordinary groups;
+- fixed groups placed before virtual groups;
+- a candidate base fits when occupied dword live sets do not intersect the
+  group's live slots.
 
-## Promotion Candidate Choice
+## Relief Stages
 
-On bank pressure failure, scan live components in the overflowing bank
-plus the request.
-
-Candidate must:
-
-- Be promotable to the next bank.
-- Free pressure at the failure position.
-- Fit the target bank over its live positions.
-- Satisfy target-wave VGPR-family pressure positionally.
-- Have legal bridges for every interface mismatch after promotion.
-
-Cost:
+Relief order is strict:
 
 ```text
-primary: fewer inserted move ops
-then: more pressure relief at failure point
-then: longer live overlap with pressure region
-then: lower target-bank pressure increase
-then: stable order
+AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 ```
 
-Candidate choice is best effort. If promotion creates move temps that
-cause another overflow, the next iteration handles it.
+Each stage reads current IR plus the latest failure record. A stage either
+rewrites IR immediately or declines. Relief size is not a filter; a legal
+rewrite may be accepted even when it does not solve the whole failure alone.
 
-## Move Insertion
+Candidate ranking is local to one stage:
 
-Move insertion is deterministic from component storage bank and op
-interface bank.
+- legality and resource budgets first;
+- bridge count;
+- loop-scaled bridge or load/store cost;
+- latency or instability penalties when local and deterministic;
+- stable tie-breakers.
 
-For each operand:
+There is no global ranking across relief stages.
 
-```text
-if storage bank == required operand bank:
-  use original value
-else:
-  insert bridge before user
-  use bridge result
-```
+### AGPR
 
-For each result:
+AGPR relief moves eligible VGPR-family pressure into AGPR storage.
 
-```text
-if storage bank == produced result bank:
-  result is component storage
-else:
-  create op result temp in required bank
-  insert bridge into component storage bank
-```
+Legality:
 
-Examples:
+- target has AGPRs;
+- no fixed physical values or ABI-reserved entry values;
+- no unpromotable AGPR write users;
+- AGPR value can be defined directly or through `v_accvgpr_write_b32_tuple`;
+- every non-AGPR user can read through `v_accvgpr_read_b32_tuple`;
+- target VGPR-family accounting still fits positionally.
 
-```text
-value stored in AGPR
-v_add_u32 needs VGPR
-insert v_accvgpr_read before v_add
-v_add consumes VGPR temp
-```
+MFMA accumulator/interface-compatible aliases need no bridges. AGPR is pressure
+relief; do not demote AGPR back to VGPR as a spill strategy.
 
-```text
-s_add_i32 produces SGPR
-component forced to VGPR
-emit s_add result as SGPR temp
-copy/materialize SGPR temp into VGPR storage
-```
+### Remat
 
-```text
-VGPR value forced to AGPR
-store needs VGPR data operand
-insert v_accvgpr_read before store
-store consumes VGPR temp
-```
+Remat rebuilds cheap pure WaveAMDMachine DAGs.
 
-Move temps have normal intervals. They can be promoted too if pressure
-requires it.
+Candidate is the failed alias set or an overlapping alias set live at the
+failure point. The stage finds a cheap pure expression DAG rooted at the
+candidate value and clones it at consumers after the pressure point. Rebuilt
+values are normal IR and can be candidates in later iterations.
 
-## Tuple And Loop Moves
+Leaves need not all be live at the rebuild point. Extending cheaper leaves
+across the failure point is legal when rebuilt IR lowers pressure there.
 
-Tuple ops are storage views. They should not create moves by themselves.
+Fixed hardware inputs such as `v_workitem_id_x`, workgroup IDs, and fixed
+kernarg preload sources are anchored values. Reuse only when availability and
+pressure are modeled.
 
-If tuple endpoints have different storage banks, the component builder is
-wrong or the tuple is not a pure alias. Insert explicit copies before
-building tuple alias edges.
+### SGPRToVGPR
 
-Loop carry slots have one storage bank for init, body arg, carry, and
-result. If a loop body op needs a different interface bank, insert a
-bridge inside the body at that use/def boundary.
+SGPRToVGPR relieves SGPR pressure by storing uniform values in VGPRs.
 
-## Target-Wave Accounting
+Legality:
 
-VGPR and AGPR share occupancy budget on targets where AGPR counts against
-VGPRs. Enforce this positionally:
+- no fixed physical values;
+- no ABI-reserved entry values;
+- no unsupported block arguments;
+- width support is explicit;
+- source value has a legal scalar-to-vector bridge;
+- every SGPR use has a legal readback or direct replacement.
 
-```text
-live_vgpr_dwords(position) + live_agpr_dwords(position) <= limit
-```
+Materialization inserts vector materialization after the SGPR def and
+`v_readfirstlane_b32` before SGPR users that need readback. Bridge temps are
+marked so the allocator can avoid cyclic re-promotion.
 
-Do not subtract peak AGPR pressure from all VGPR allocation. That rejects
-scratch values that do not overlap the AGPR peak.
+### LDS
 
-Reserved ABI registers are prefilled occupancy. Fixed entry registers in
-the reserved prefix do not double-count.
+LDS relief stores VGPR alias sets in compiler-owned shared memory.
 
-## Diagnostics
+Legality:
 
-Overflow diagnostics should expose allocator state:
+- target has enough LDS after existing static and dynamic LDS usage;
+- extra LDS does not violate requested `target_waves`;
+- value is lane-local and reloadable through VGPR LDS ops;
+- live range does not cross unsupported region boundaries;
+- spill slot address does not create worse pressure than it relieves;
+- value width has load/store support.
 
-```text
-bank
-position
-limit
-live dwords
-request component
-overlapping components
-promotable candidates
-best rejected candidates and rejection reason
-inserted move pressure, if relevant
-```
+Current LDS spills split VGPR values by dword into DS addtid slots. Spill LDS is
+compiler-owned and disjoint from user LDS. Spill memory ordering uses explicit
+tokens for each spill slot chain.
 
-Promotion diagnostics:
+### Scratch
 
-```text
-component
-source bank
-target bank
-relief dwords
-inserted move count
-target-bank live increase
-fit failure, if rejected
-```
+Scratch relief stores VGPR alias sets in private memory.
 
-## Migration Plan
+Legality:
 
-1. Build component data beside current allocator.
-2. Add tests for scalar intervals and alias components.
-3. Replace tuple and loop alias logic with component builder output.
-4. Implement storage bank promotion as generic rebanking.
-5. Move AGPR bank-spill rewrite into generic move insertion.
-6. Let inserted bridge temps run through the same allocator.
-7. Delete special AGPR candidate discovery.
+- scratch lowering exists for the target;
+- function can use flat scratch/private segment metadata;
+- value width has load/store support;
+- address calculation has legal SGPR/VGPR temporaries.
 
-## Risks
+Scratch updates private segment size, flat-scratch usage, and metadata. It has
+unlimited capacity and is last by stage order.
 
-- Bridge legality must be local and explicit. Some bank crossings are not
-  legal for all values.
-- Move insertion can cascade. Bound iterations and record rejected
-  promotion choices.
-- Promoting SGPR storage into VGPR can duplicate scalar values across
-  lanes. This is only valid when the bridge semantics are valid.
-- AGPR is expensive as generic overflow storage because most non-MFMA uses
-  need reads back to VGPR.
-- Conservative region liveness can overpromote. Correctness first.
+## Memory Spill Rules
 
-## Expected Payoff
+LDS and scratch share the memory-spill rewrite shape:
 
-- Allocator policy is simple: try bank, promote on pressure, restart.
-- AGPR bank spill is not special.
-- Loop-carried AGPR cases stop needing bespoke discovery.
-- Move temps explain their own pressure.
-- Target-wave accounting matches actual overlap.
-- Tuple and carry aliasing become one graph problem.
+- spill whole alias sets;
+- insert real stores after definitions;
+- insert reloads before uses;
+- thread explicit memory-token edges;
+- update LDS/private resource metadata;
+- let ticket waits and hazard waits run after regalloc.
+
+First-order region rules stay conservative:
+
+- no spilling values across `exec_if` boundaries unless placement is
+  dominance-safe;
+- loop-carried spill placement must preserve carry-slot semantics;
+- no memory spilling block arguments unless the stage has an explicit placement
+  rule;
+- multiple region exits require dominated reload placement.
+
+## Overflow And Diagnostics
+
+Default mode is hard fail. If allocation cannot produce a legal result, the
+transform loop emits an error and fails.
+
+Soft overflow markers are a diagnostic IR contract. The current transform loop
+does not populate them; transform sequences that deliberately continue after an
+overflow must set them before post-regalloc consumers run:
+
+- `waveamdmachine.regalloc_overflowed = 1 : i64` on the function;
+- `waveamdmachine.regalloc_overflowed_count = N : i64` on the module.
+
+Overflowed functions are diagnostic IR only, not valid input to production
+post-regalloc passes.
+
+Regalloc reports use MLIR optimization remarks under category
+`waveamdmachine-regalloc`.
+
+Remark names:
+
+- `regalloc-summary`;
+- `regalloc-interval`;
+- `regalloc-lds-plan`;
+- `regalloc-scratch-plan`;
+- `regalloc-pressure-failure`.
+
+`regalloc-pressure-failure` contains the overflowing class, class budget,
+reserved prefix size, live dwords, program position, requested width, active
+overlaps, and memory-spill rejection counts when available. Stage byte counters
+are tracked as `wave.regalloc.*.dwords`.
+
+## Verification
+
+Post-regalloc verification is the final gate:
+
+- all pass-owned results are physical;
+- aliases in one interval have consistent base plus offsets;
+- no class-local live physical interference;
+- reserved ABI prefix is used only by allowed entry values;
+- overflowed functions are rejected by production consumers.
+
+Consumer scopes:
+
+- resource info requires physical results;
+- assembly requires all register values physical;
+- hazard waits depend on physical spans for operands they inspect;
+- metadata comes from final IR, not allocator state.
+
+## Non-Goals
+
+- No direct SGPR, SCC, VCC, EXEC, or M0 spilling to memory.
+- No occupancy choice. `waveamdmachine.target_waves` is an input constraint.
+- No implicit alias analysis for spill memory. Ordering is explicit token edges.
+- No hidden post-assembly repair.
+- No provider-specific logic in linear scan.
+- No deferred relief plans materialized after later scans.
+- No string round-tripping of structural regalloc state.
+
+## Coverage And Costs
+
+Coverage comes from RegAlloc LIT tests, integration tests for tuple subranges,
+target-waves, AGPR MFMA accumulators, bridge codegen, and post-regalloc
+consumers: resource info, hazard waits, metadata, and assembly translation.
+
+Compile-time cost grows with alias-set count, live-range density, physical
+register scan length, and retry count. Dense live-slot sets and rebuilds after
+IR rewrites are the main memory costs for large generated kernels.
