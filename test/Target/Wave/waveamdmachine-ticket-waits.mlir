@@ -175,6 +175,27 @@ func.func @gfx950_joined_lds_read_token_does_not_wait_before_read(%x: !waveamdma
   return
 }
 
+// CHECK-LABEL: func.func @def_overlap_waits_on_pending_lgkm_load
+// CHECK: waveamdmachine.ds_read_tr_b64_b8
+// CHECK-NEXT: waveamdmachine.tuple_to_elements
+// CHECK-NEXT: waveamdmachine.s_waitcnt lgkmcnt(0)
+// CHECK-NEXT: waveamdmachine.v_lshrrev_b32
+func.func @def_overlap_waits_on_pending_lgkm_load(
+    %addr: !waveamdmachine.reg<vgpr, 1, 0>,
+    %x: !waveamdmachine.reg<vgpr, 1, 1>) {
+  %six = waveamdmachine.imm 6 : !waveamdmachine.imm
+  %loaded, %tok = waveamdmachine.ds_read_tr_b64_b8 %addr
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+        -> (!waveamdmachine.reg<vgpr, 2, 88>, !waveamdmachine.mem.token)
+  %lo, %hi = waveamdmachine.tuple_to_elements %loaded
+      : (!waveamdmachine.reg<vgpr, 2, 88>)
+        -> (!waveamdmachine.reg<vgpr, 1, 88>, !waveamdmachine.reg<vgpr, 1, 89>)
+  %clobber = waveamdmachine.v_lshrrev_b32 %x, %six
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1, 89>
+  return
+}
+
 // CHECK-LABEL: func.func @read_only_issuer_token_preserves_cross_counter_dep
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK-NEXT: waveamdmachine.global_load_b32

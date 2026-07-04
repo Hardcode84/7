@@ -906,6 +906,7 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x20000, v3
 		v_add_u32_e32 v3, v3, v2
 		ds_read_b64_tr_b8 v[8:9], v3
+		s_waitcnt lgkmcnt(0)
 		v_add_u32_e32 v9, 0x20000, v2
 		v_lshl_add_u32 v9, v13, 10, v9
 		ds_read_b64_tr_b8 v[112:113], v9 offset:2048

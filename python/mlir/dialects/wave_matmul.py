@@ -1171,6 +1171,10 @@ def _join_tokens(bld: dsl.FunctionBuilder, tokens: list[dsl.Value]) -> dsl.Value
     return bld.join(*tokens)
 
 
+def _dep_or_token(bld: dsl.FunctionBuilder, dep: dsl.Value | None) -> dsl.Value:
+    return dep if dep is not None else bld.token()
+
+
 def _dma_issue(
     bld: dsl.FunctionBuilder,
     a_ptrs: tuple[dsl.Value, ...],
@@ -1483,6 +1487,7 @@ class _Mxfp4ScaleSet:
 class _DeferredScaleStore:
     raw: dsl.Value
     dest: dsl.Value
+    load_token: dsl.Value
     dep: dsl.Value | None
 
 
@@ -1741,7 +1746,7 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
         )
         bld.yield_([_join_tokens(bld, a_tokens)])
         with active_a.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, dep)])
     with bld.where(
         _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords),
         [dsl.mem_token_type()],
@@ -1761,7 +1766,7 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
         )
         bld.yield_([_join_tokens(bld, b_tokens)])
         with active_b.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, dep)])
     return bld.join(active_a.results[0], active_b.results[0])
 
 
@@ -2046,13 +2051,13 @@ def _flush_deferred_mxfp4_scale_reg_batch(
         _flush_mxfp4_scale_reg_stores(bld, list(batch.a_loaded), batch.dep, a_tokens)
         bld.yield_([_join_tokens(bld, a_tokens)])
         with active_a.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, batch.dep)])
     with bld.where(batch.b_mask, [dsl.mem_token_type()]) as active_b:
         b_tokens: list[dsl.Value] = []
         _flush_mxfp4_scale_reg_stores(bld, list(batch.b_loaded), batch.dep, b_tokens)
         bld.yield_([_join_tokens(bld, b_tokens)])
         with active_b.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, batch.dep)])
     token = bld.join(active_a.results[0], active_b.results[0])
     return bld.barrier(token) if batch.barrier_after else token
 
@@ -2102,7 +2107,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
         _flush_mxfp4_scale_reg_stores(bld, a_loaded, dep, a_tokens)
         bld.yield_([_join_tokens(bld, a_tokens)])
         with active_a.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, dep)])
     with bld.where(
         _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords),
         [dsl.mem_token_type()],
@@ -2126,7 +2131,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
         _flush_mxfp4_scale_reg_stores(bld, b_loaded, dep, b_tokens)
         bld.yield_([_join_tokens(bld, b_tokens)])
         with active_b.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, dep)])
     token = bld.join(active_a.results[0], active_b.results[0])
     return staged, bld.barrier(token) if barrier_after else token
 
@@ -2148,7 +2153,7 @@ def _stage_mxfp4_b_scale_reg_load_deferred(
     layout: _Mxfp4ScaleLayout,
     load_type: dsl.Type,
     lds: dsl.Value,
-) -> tuple[dsl.Value, dsl.Value]:
+) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
     a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
     b_scale_base = cfg.BM * a_tiles_per_wave
     scale_tile = b_scale_base + layout.n_wave
@@ -2164,15 +2169,18 @@ def _stage_mxfp4_b_scale_reg_load_deferred(
         scale_tile * 512 + layout.lane_scale_group * 128 + row_quad,
         bindings=layout.bindings,
     )
-    raw, _ = bld.load(bld.ptr_add(coords.b_scale_base, global_off), load_type)
-    return raw, bld.ptr_add(lds, lds_off)
+    raw, load_token = bld.load(bld.ptr_add(coords.b_scale_base, global_off), load_type)
+    return raw, bld.ptr_add(lds, lds_off), load_token
 
 
 def _flush_deferred_mxfp4_scale_store(
     bld: dsl.FunctionBuilder,
     store: _DeferredScaleStore,
 ) -> dsl.Value:
-    return bld.store(store.raw, store.dest, after=store.dep)
+    deps = [store.load_token]
+    if store.dep is not None:
+        deps.append(store.dep)
+    return bld.store(store.raw, store.dest, after=_join_tokens(bld, deps))
 
 
 def _stage_mxfp4_scale_tiles_dma_after_dep(
@@ -2204,7 +2212,7 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
         _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, a_tokens)
         bld.yield_([_join_tokens(bld, a_tokens)])
         with active_a.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, dep)])
     with bld.where(
         _mxfp4_b_scale_dma_mask(bld, cfg, coords),
         [dsl.mem_token_type()],
@@ -2213,7 +2221,7 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
         _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, b_tokens)
         bld.yield_([_join_tokens(bld, b_tokens)])
         with active_b.otherwise():
-            bld.yield_([bld.token()])
+            bld.yield_([_dep_or_token(bld, dep)])
     return bld.join(active_a.results[0], active_b.results[0])
 
 
@@ -2779,13 +2787,14 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
         )
         bld.yield_([_join_tokens(bld, a_tokens)])
         with active_a.otherwise():
-            bld.yield_([bld.token()])
-    raw, dest = _stage_mxfp4_b_scale_reg_load_deferred(
+            bld.yield_([dep])
+    raw, dest, load_token = _stage_mxfp4_b_scale_reg_load_deferred(
         bld, cfg, coords, layout, load_type, lds
     )
     return active_a.results[0], _DeferredScaleStore(
         raw=raw,
         dest=dest,
+        load_token=load_token,
         dep=dep,
     )
 
@@ -3680,6 +3689,7 @@ def _emit_dma_step(
                 barrier_before_read=barrier_before_scale_read,
             )
             scale_tokens.append(right_scale_token)
+            scale_read_token = _join_tokens(bld, [left_scale_token, right_scale_token])
             if _use_mxfp4_delayed_b_scale_lw(cfg):
                 next_a_scale_token, delayed_b_scale = (
                     _stage_mxfp4_scale_batch_delayed_b_lw(
@@ -3688,7 +3698,7 @@ def _emit_dma_step(
                         coords,
                         next_scale_step,
                         _scale_buffer_offset(bld, cfg, next_scale_step),
-                        right_scale_token,
+                        scale_read_token,
                     )
                 )
                 right_head = _emit_mxfp4_mma_grid_scale_sets_slice(
@@ -3727,7 +3737,7 @@ def _emit_dma_step(
                             coords,
                             next_scale_step,
                             _scale_buffer_offset(bld, cfg, next_scale_step),
-                            dep=bld.barrier(right_scale_token),
+                            dep=bld.barrier(scale_read_token),
                             barrier_after=False,
                         )
                     )
@@ -3742,7 +3752,7 @@ def _emit_dma_step(
                         coords,
                         next_scale_step,
                         _scale_buffer_offset(bld, cfg, next_scale_step),
-                        right_scale_token,
+                        scale_read_token,
                         barrier_after=False,
                     )
                 new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(

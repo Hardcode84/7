@@ -430,6 +430,29 @@ static bool isMemToken(Value value) {
   return isa<waveamdmachine::MemTokenType>(value.getType());
 }
 
+struct RegSpan {
+  waveamdmachine::RegClass regClass;
+  int64_t begin = 0;
+  int64_t end = 0;
+};
+
+static std::optional<RegSpan> getAllocatedRegSpan(Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getIndex() < 0)
+    return std::nullopt;
+  return RegSpan{type.getRegClass(), type.getIndex(),
+                 type.getIndex() + type.getWidth()};
+}
+
+static bool overlaps(RegSpan lhs, RegSpan rhs) {
+  return lhs.regClass == rhs.regClass && lhs.begin < rhs.end &&
+         rhs.begin < lhs.end;
+}
+
+static bool emitsMachineInst(Operation *op) {
+  return !op->hasTrait<OpTrait::waveamdmachine::NoMachineInst>();
+}
+
 // Operand reads here are branch arguments, not value uses; framework
 // hooks remap tokens to successors instead.
 static bool isControlFlowOp(Operation *op) {
@@ -539,6 +562,24 @@ static void requireIssuerToken(WaitRequirement &req, Value value,
   }
 }
 
+static void requireOverlappingRegisterDefs(WaitRequirement &req, Operation *op,
+                                           const WaitState &state) {
+  if (!emitsMachineInst(op))
+    return;
+  for (Value result : op->getResults()) {
+    std::optional<RegSpan> resultSpan = getAllocatedRegSpan(result);
+    if (!resultSpan)
+      continue;
+    for (const Token &t : state.tokens) {
+      if (t.isUnknown())
+        continue;
+      std::optional<RegSpan> pendingSpan = getAllocatedRegSpan(t.id);
+      if (pendingSpan && overlaps(*resultSpan, *pendingSpan))
+        req.requireDrain(t.counter, waitPosition(state, t));
+    }
+  }
+}
+
 static bool hasSameAllocatedReg(Value lhs, Value rhs) {
   waveamdmachine::RegType lhsType =
       dyn_cast<waveamdmachine::RegType>(lhs.getType());
@@ -617,6 +658,7 @@ static WaitRequirement computeRequirement(Operation *op,
     }
     requireValue(req, operand.get(), state);
   }
+  requireOverlappingRegisterDefs(req, op, state);
   return req;
 }
 
