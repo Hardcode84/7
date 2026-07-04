@@ -3970,13 +3970,12 @@ def _store_final_tiles(
         scale_tokens=scale_tokens,
         scale_ready_token=state.scale_token,
     )
-    if scale_tokens:
-        bld.wait(scale_tokens[-1])
+    store_after = scale_tokens[-1] if scale_tokens else None
     for acc, c_ptr in zip(final_accs, c_ptrs, strict=True):
         if cfg.output_type == "f16":
-            _fragment_store_f16(bld, cfg, acc, c_ptr)
+            _fragment_store_f16(bld, cfg, acc, c_ptr, after=store_after)
         else:
-            bld.fragment_store(acc, c_ptr)
+            bld.fragment_store(acc, c_ptr, after=store_after)
 
 
 def _can_split_mxfp4_epilogue(cfg: _MatmulConfig, state: _LoopState) -> bool:
@@ -4024,11 +4023,14 @@ def _store_final_mxfp4_tiles_split(
     left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
         bld, cfg, state.afs, state.bfs, state.accs, scale_sets, 0, n_mid
     )
-    bld.wait(scale_token)
+    scale_read_done = scale_token
     if _can_coalesce_mxfp4_epilogue(cfg):
-        _store_acc_tiles_lds_coalesced(bld, cfg, coords, left_accs, c_ptrs, 0, n_mid)
+        scale_read_done = bld.barrier(scale_token)
+        _store_acc_tiles_lds_coalesced(
+            bld, cfg, coords, left_accs, c_ptrs, 0, n_mid, after=scale_read_done
+        )
     else:
-        _store_acc_tiles(bld, cfg, left_accs, c_ptrs, 0, n_mid)
+        _store_acc_tiles(bld, cfg, left_accs, c_ptrs, 0, n_mid, after=scale_token)
 
     right_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
         bld,
@@ -4042,10 +4044,19 @@ def _store_final_mxfp4_tiles_split(
     )
     if _can_coalesce_mxfp4_epilogue(cfg):
         _store_acc_tiles_lds_coalesced(
-            bld, cfg, coords, right_accs, c_ptrs, n_mid, cfg.wave_n_tiles
+            bld,
+            cfg,
+            coords,
+            right_accs,
+            c_ptrs,
+            n_mid,
+            cfg.wave_n_tiles,
+            after=scale_read_done,
         )
     else:
-        _store_acc_tiles(bld, cfg, right_accs, c_ptrs, n_mid, cfg.wave_n_tiles)
+        _store_acc_tiles(
+            bld, cfg, right_accs, c_ptrs, n_mid, cfg.wave_n_tiles, after=scale_token
+        )
 
 
 def _store_acc_tiles(
@@ -4055,14 +4066,18 @@ def _store_acc_tiles(
     c_ptrs: tuple[dsl.Value, ...],
     n_begin: int,
     n_end: int,
+    *,
+    after: dsl.Value | None = None,
 ) -> None:
     for i in range(cfg.wave_m_tiles):
         for j in range(n_begin, n_end):
             acc_idx = i * cfg.wave_n_tiles + j
             if cfg.output_type == "f16":
-                _fragment_store_f16(bld, cfg, accs[acc_idx], c_ptrs[acc_idx])
+                _fragment_store_f16(
+                    bld, cfg, accs[acc_idx], c_ptrs[acc_idx], after=after
+                )
             else:
-                bld.fragment_store(accs[acc_idx], c_ptrs[acc_idx])
+                bld.fragment_store(accs[acc_idx], c_ptrs[acc_idx], after=after)
 
 
 def _store_acc_tiles_lds_coalesced(
@@ -4073,6 +4088,8 @@ def _store_acc_tiles_lds_coalesced(
     c_ptrs: tuple[dsl.Value, ...],
     n_begin: int,
     n_end: int,
+    *,
+    after: dsl.Value | None = None,
 ) -> None:
     lds = bld.shared_memory_base(dsl.f16())
     wi = dsl.sym("__wave_dsl_epilogue_wi")
@@ -4092,6 +4109,7 @@ def _store_acc_tiles_lds_coalesced(
                 bld.store(
                     _pack_fragment_f16(bld, cfg, accs[acc_idx]),
                     bld.ptr_add(lds, lds_off),
+                    after=after,
                 )
             )
     ready = bld.barrier(_join_tokens(bld, lds_tokens))

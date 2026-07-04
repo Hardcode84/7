@@ -349,7 +349,6 @@ public:
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
   LogicalResult selectToken(TokenOp op);
   LogicalResult selectTokenJoin(Operation *op);
-  LogicalResult selectWait(WaitOp op);
   LogicalResult selectWhere(WhereOp op);
   LogicalResult selectRegion(Region &region);
   LogicalResult selectSharedMemoryBase(SharedMemoryBaseOp op);

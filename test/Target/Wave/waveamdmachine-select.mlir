@@ -310,7 +310,6 @@ func.func @select_lane_pointer(%out: !wave.ptr<#wave.global, i32>, %limit: i32)
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 

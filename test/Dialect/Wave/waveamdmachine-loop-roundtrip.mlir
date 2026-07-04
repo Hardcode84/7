@@ -47,7 +47,7 @@ func.func @uniform_loop_with_entry_cond(%lo: !waveamdmachine.reg<sgpr, 1>, %hi: 
 // CHECK:   %[[NEXT:.+]] = waveamdmachine.token_join %[[ARG]] : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
 // CHECK:   waveamdmachine.continue_if %{{.+}} : !waveamdmachine.reg<scc, 1> carries(%[[NEXT]] : !waveamdmachine.mem.token)
 // CHECK: } -> !waveamdmachine.mem.token
-// CHECK: waveamdmachine.wait %[[RES]] : (!waveamdmachine.mem.token) -> ()
+// CHECK: waveamdmachine.s_barrier %[[RES]] : (!waveamdmachine.mem.token) -> ()
 func.func @uniform_loop_mem_token_carry(%scc: !waveamdmachine.reg<scc, 1>) {
   %tok = waveamdmachine.token : !waveamdmachine.mem.token
   %r = waveamdmachine.uniform_loop carries(%tok : !waveamdmachine.mem.token) {
@@ -55,7 +55,7 @@ func.func @uniform_loop_mem_token_carry(%scc: !waveamdmachine.reg<scc, 1>) {
     %next = waveamdmachine.token_join %arg : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
     waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %r : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %r : (!waveamdmachine.mem.token) -> ()
   return
 }
 

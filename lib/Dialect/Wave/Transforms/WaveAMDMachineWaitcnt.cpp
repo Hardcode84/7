@@ -439,7 +439,6 @@ static bool isControlFlowOp(Operation *op) {
 
 enum class OpKind {
   Skip,    // s_waitcnt, control-flow: handled separately.
-  Wait,    // waveamdmachine.wait: drain operand tokens.
   Issuer,  // VMEM/SMEM/LDS load or store: drain, then issue.
   Barrier, // s_barrier: drain AND derive result tokens.
   TokenOp, // waveamdmachine.after / token_join: derive only.
@@ -450,8 +449,6 @@ enum class OpKind {
 static OpKind classifyOp(Operation *op) {
   if (isWaitcntOp(op) || isControlFlowOp(op))
     return OpKind::Skip;
-  if (llvm::isa<waveamdmachine::WaitOp>(op))
-    return OpKind::Wait;
   if (isMemoryIssuer(op))
     return OpKind::Issuer;
   if (llvm::isa<waveamdmachine::SBarrierOp>(op))
@@ -731,7 +728,6 @@ static void runTransfer(Operation *op, WaitState &state,
   case OpKind::TokenOp:
     deriveResultTokens(op, state);
     return;
-  case OpKind::Wait:
   case OpKind::Endpgm:
   case OpKind::Generic:
     applyDrain(op, state, isaVer, emit);

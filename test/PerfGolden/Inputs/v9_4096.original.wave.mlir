@@ -282,7 +282,6 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %263 = wave.join %255, %262 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
       %264 = wave.join %263 : !wave.mem.token -> !wave.mem.token
       %265 = wave.binary addi %193, %193 overflow<nsw> : i32, i32 -> i32
-      wave.wait %173 : !wave.mem.token
       %266 = wave.barrier %173 : (!wave.mem.token) -> !wave.mem.token
       %267 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 528*floor(1/8*Mod(Mod(wi, 64), 16)) + 8448*Mod(floor(1/8*floor(1/128*wi) + 1/128*Mod(Mod(wi, 64), 16)), 2) + 4224*Mod(floor(1/4*floor(1/128*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 2112*Mod(floor(1/2*floor(1/128*wi) + 1/32*Mod(Mod(wi, 64), 16)), 2) + 1056*Mod(floor(1/128*wi), 2) + 256*Mod(floor(1/4*Mod(Mod(wi, 64), 16)), 2) + 128*Mod(floor(1/2*Mod(Mod(wi, 64), 16)), 2) + 64*Mod(Mod(Mod(wi, 64), 16), 2)"> ["wi"](%47) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
       %268 = wave.ptr_add %90, %267 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
@@ -509,7 +508,6 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
         %1401 = waveamd.mma "mfma.f32.16x16x32.f16" %1338, %1330, %1355 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1402 = waveamd.mma "mfma.f32.16x16x32.f16" %1339, %1331, %1401 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1403 = waveamd.fragment_unpack %1402 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        wave.wait %arg59 : !wave.mem.token
         %1404 = wave.barrier %arg59 : (!wave.mem.token) -> !wave.mem.token
         %1405 = wave.ptr_add %174, %283 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
         %value_158, %token_159 = waveamd.transpose_load %1405 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
@@ -722,7 +720,6 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
         %1597 = waveamd.mma "mfma.f32.16x16x32.f16" %1534, %1330, %1551 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1598 = waveamd.mma "mfma.f32.16x16x32.f16" %1535, %1331, %1597 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1599 = waveamd.fragment_unpack %1598 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        wave.wait %arg60 : !wave.mem.token
         %1600 = wave.barrier %arg60 : (!wave.mem.token) -> !wave.mem.token
         %1601 = wave.ptr_add %194, %267 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
         %value_190, %token_191 = wave.load %1601 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
@@ -938,7 +935,6 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
         %1788 = waveamd.mma "mfma.f32.16x16x32.f16" %1725, %1717, %1742 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1789 = waveamd.mma "mfma.f32.16x16x32.f16" %1726, %1718, %1788 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1790 = waveamd.fragment_unpack %1789 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        wave.wait %arg61 : !wave.mem.token
         %1791 = wave.barrier %arg61 : (!wave.mem.token) -> !wave.mem.token
         %1792 = wave.ptr_add %247, %283 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
         %value_238, %token_239 = waveamd.transpose_load %1792 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
@@ -1151,7 +1147,6 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
         %1984 = waveamd.mma "mfma.f32.16x16x32.f16" %1921, %1717, %1938 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1985 = waveamd.mma "mfma.f32.16x16x32.f16" %1922, %1718, %1984 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1986 = waveamd.fragment_unpack %1985 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        wave.wait %1527 : !wave.mem.token
         %1987 = wave.barrier %1527 : (!wave.mem.token) -> !wave.mem.token
         %value_270, %token_271 = wave.load %268 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
         %value_272, %token_273 = wave.load %270 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
@@ -1345,7 +1340,6 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %465 = waveamd.mma "mfma.f32.16x16x32.f16" %402, %394, %419 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %466 = waveamd.mma "mfma.f32.16x16x32.f16" %403, %395, %465 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %467 = waveamd.fragment_unpack %466 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      wave.wait %387#50, %387#51, %387#52 : !wave.mem.token, !wave.mem.token, !wave.mem.token
       %468 = wave.barrier %387#50, %387#51, %387#52 : (!wave.mem.token, !wave.mem.token, !wave.mem.token) -> !wave.mem.token
       %469 = wave.ptr_add %174, %283 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
       %value_46, %token_47 = waveamd.transpose_load %469 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)

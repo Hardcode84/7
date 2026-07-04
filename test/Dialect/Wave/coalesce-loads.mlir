@@ -143,7 +143,7 @@ func.func @same_dependency_join_tokens(%in: !wave.ptr<#wave.global, f16>)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
   %joined = wave.join %t0, %t1
       : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-  wave.wait %joined : !wave.mem.token
+  %bar = wave.barrier %joined : (!wave.mem.token) -> !wave.mem.token
   return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
 }
 
@@ -170,7 +170,8 @@ func.func @same_dependency_split_join_stays(%in: !wave.ptr<#wave.global, f16>)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
   %j0 = wave.join %t0 : !wave.mem.token -> !wave.mem.token
   %j1 = wave.join %t1 : !wave.mem.token -> !wave.mem.token
-  wave.wait %j0, %j1 : !wave.mem.token, !wave.mem.token
+  %bar = wave.barrier %j0, %j1
+      : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
   return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
 }
 

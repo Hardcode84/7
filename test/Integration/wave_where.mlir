@@ -113,7 +113,6 @@ gpu.module @kernels {
           -> !wave.mem.token
       wave.yield %token : !wave.mem.token
     } : !wave.mask<@W@> -> !wave.mem.token
-    wave.wait %store_token : !wave.mem.token
     return
   }
 

@@ -25,14 +25,14 @@ static inline bool isWaveAMDMachineOpForScheduling(Operation *op) {
 }
 
 static inline bool isSupportedSchedulerPseudo(Operation *op) {
-  return isa<
-      waveamdmachine::ArgOp, waveamdmachine::KernargPreloadOp,
-      waveamdmachine::UninitOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
-      waveamdmachine::TokenJoinOp, waveamdmachine::AfterOp,
-      waveamdmachine::WaitOp, waveamdmachine::SWorkgroupIdXOp,
-      waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::TupleToElementsOp,
-      waveamdmachine::TupleFromElementsOp, waveamdmachine::UpdateTupleOp>(op);
+  return isa<waveamdmachine::ArgOp, waveamdmachine::KernargPreloadOp,
+             waveamdmachine::UninitOp, waveamdmachine::ImmOp,
+             waveamdmachine::TokenOp, waveamdmachine::TokenJoinOp,
+             waveamdmachine::AfterOp, waveamdmachine::SWorkgroupIdXOp,
+             waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
+             waveamdmachine::VWorkitemIdXOp, waveamdmachine::TupleToElementsOp,
+             waveamdmachine::TupleFromElementsOp,
+             waveamdmachine::UpdateTupleOp>(op);
 }
 
 static inline bool isSupportedSchedulerSALU(Operation *op) {

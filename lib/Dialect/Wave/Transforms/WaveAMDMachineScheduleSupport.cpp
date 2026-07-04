@@ -90,11 +90,11 @@ static bool isHardBoundary(Operation *op) {
           waveamdmachine::SSetprioOp, waveamdmachine::SCBranchExeczOp,
           waveamdmachine::SCBranchScc0Op, waveamdmachine::SCBranchScc1Op,
           waveamdmachine::SGetregShaderCyclesOp, waveamdmachine::SNopOp,
-          waveamdmachine::WaitOp, waveamdmachine::SDelayAluOp,
-          waveamdmachine::SAndSaveexecB32Op, waveamdmachine::SAndn2ExecB32Op,
-          waveamdmachine::SAndSaveexecB64Op, waveamdmachine::SAndn2ExecB64Op,
-          waveamdmachine::SMovExecLoOp, waveamdmachine::SMovExecB64Op,
-          waveamdmachine::SEndpgmOp, waveamdmachine::SSetpcB64Op>(op))
+          waveamdmachine::SDelayAluOp, waveamdmachine::SAndSaveexecB32Op,
+          waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndSaveexecB64Op,
+          waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SMovExecLoOp,
+          waveamdmachine::SMovExecB64Op, waveamdmachine::SEndpgmOp,
+          waveamdmachine::SSetpcB64Op>(op))
     return true;
   return hasUnknownMemoryEffects(op);
 }

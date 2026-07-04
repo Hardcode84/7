@@ -455,8 +455,8 @@ static int64_t valueReadyCycle(const IssueState &state, Operation *op) {
 }
 
 static bool waitsForMemoryTokens(Operation *op) {
-  if (isa<waveamdmachine::SBarrierOp, waveamdmachine::WaitOp,
-          waveamdmachine::TokenJoinOp, waveamdmachine::AfterOp>(op))
+  if (isa<waveamdmachine::SBarrierOp, waveamdmachine::TokenJoinOp,
+          waveamdmachine::AfterOp>(op))
     return true;
   return false;
 }
@@ -909,8 +909,6 @@ static unsigned findFirstReadyNoInst(const BitVector &ready,
                                      const GreedyRegion &region) {
   for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
     if (!ready.test(index))
-      continue;
-    if (isa<waveamdmachine::WaitOp>(region.ops[index]))
       continue;
     if (waveamdmachine::classifyOp(region.ops[index]) ==
         waveamdmachine::SchedClass::NoInst)

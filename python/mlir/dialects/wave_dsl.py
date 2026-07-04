@@ -947,9 +947,6 @@ class FunctionBuilder:
         op = wave.LoadOp(result_type, mem_token_type(), ptr, dependency=after)
         return op.value, op.token
 
-    def wait(self, *tokens: Value) -> None:
-        wave.WaitOp(list(tokens))
-
     def token(self) -> Value:
         return wave.TokenOp(mem_token_type()).result
 

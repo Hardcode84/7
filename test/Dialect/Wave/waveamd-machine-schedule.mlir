@@ -115,7 +115,7 @@ func.func @token_loop_carry_edges(%off: !waveamdmachine.reg<vgpr, 1>,
         : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
     waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %result : (!waveamdmachine.mem.token) -> ()
   return
 }
 

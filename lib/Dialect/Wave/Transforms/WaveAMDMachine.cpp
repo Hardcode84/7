@@ -2938,7 +2938,6 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
       .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
-      .Case<WaitOp>([&](auto o) { return selectWait(o); })
       .Case<WhereOp>([&](auto o) { return selectWhere(o); })
       .Case<StoreOp>([&](auto o) { return selectStore(*this, o); })
       .Case<LoadOp>([&](auto o) { return selectLoad(*this, o); })
@@ -6827,15 +6826,6 @@ LogicalResult WaveAMDMachineSelector::selectTokenJoin(Operation *op) {
     operands.push_back(expect(dependency, op));
   values[op->getResult(0)] = waveamdmachine::TokenJoinOp::create(
       builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
-  eraseIfTopLevel(op);
-  return success();
-}
-
-LogicalResult WaveAMDMachineSelector::selectWait(WaitOp op) {
-  SmallVector<Value> operands;
-  for (Value dependency : op.getDependencies())
-    operands.push_back(expect(dependency, op));
-  waveamdmachine::WaitOp::create(builder, op.getLoc(), operands);
   eraseIfTopLevel(op);
   return success();
 }

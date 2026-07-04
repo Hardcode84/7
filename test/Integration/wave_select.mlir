@@ -85,7 +85,6 @@ gpu.module @kernels {
       wave.yield %tok : !wave.mem.token
     } : !wave.mask<@W@> -> !wave.mem.token
     %joined = wave.join %t0, %t1 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-    wave.wait %joined : !wave.mem.token
     return
   }
 }

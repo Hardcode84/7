@@ -667,13 +667,6 @@ def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_WaitOp : WaveAMDMachine_Op<"wait",
-    [WaveAMDMachine_NoMachineInst, WaveAMDMachine_NoAsmEmission]> {
-  let summary = "wait for machine memory token dependencies";
-  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
-  let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
-}
-
 def WaveAMDMachine_LabelOp : WaveAMDMachine_Op<"label"> {
   let summary = "assembly label";
   let arguments = (ins StrAttr:$name);

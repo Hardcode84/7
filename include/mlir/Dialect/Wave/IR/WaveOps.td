@@ -436,12 +436,6 @@ def Wave_JoinOp : Wave_Op<"join", [Pure]> {
   let hasFolder = 1;
 }
 
-def Wave_WaitOp : Wave_Op<"wait", []> {
-  let summary = "wait for explicit memory dependencies";
-  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
-  let assemblyFormat = "$dependencies attr-dict `:` type($dependencies)";
-}
-
 def Wave_SharedMemoryBaseOp : Wave_Op<"shared_memory_base", [Pure]> {
   let summary = "base pointer to the kernel's workgroup-local shared memory";
   let description = [{

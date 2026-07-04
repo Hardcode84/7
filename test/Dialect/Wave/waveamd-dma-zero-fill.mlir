@@ -15,7 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: [[TYPED_OOB:%.*]] = wave.ptr_cast [[OOB]] : !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
 // CHECK: [[SELECTED:%.*]] = wave.select [[MASK]], [[SRC]], [[TYPED_OOB]]
 // CHECK: [[TOK:%.*]] = waveamd.dma_load_lds [[SELECTED]]
-// CHECK: wave.wait [[TOK]]
+// CHECK: wave.barrier [[TOK]]
 // MACHINE-LABEL: func.func @zero_fill_marked_buffer
 // MACHINE: waveamdmachine.buffer_load_lds_b128
 func.func @zero_fill_marked_buffer(%in: !wave.ptr<#wave.global, i32>,
@@ -41,7 +41,7 @@ func.func @zero_fill_marked_buffer(%in: !wave.ptr<#wave.global, i32>,
            !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
     wave.yield %tok1 : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
+  %bar = wave.barrier %tok : (!wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -77,7 +77,7 @@ func.func @keep_unmarked_dma(%in: !wave.ptr<#wave.global, i32>,
            !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
     wave.yield %tok1 : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
+  %bar = wave.barrier %tok : (!wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -110,7 +110,7 @@ func.func @keep_global_source(%in: !wave.ptr<#wave.global, i32>,
            !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
     wave.yield %tok1 : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
+  %bar = wave.barrier %tok : (!wave.mem.token) -> !wave.mem.token
   return
 }
 

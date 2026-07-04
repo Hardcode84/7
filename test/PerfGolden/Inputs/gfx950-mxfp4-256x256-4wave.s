@@ -1145,6 +1145,7 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], a[56:59], v[232:235], v[224:227], v250, v8 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], a[56:59], v[236:239], v[228:231], v250, v8 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_waitcnt lgkmcnt(0)
+		s_barrier
 		v_cvt_pk_f16_f32 v8, v4, v5
 		v_cvt_pk_f16_f32 v9, v6, v7
 		ds_write_b64 v3, v[8:9]

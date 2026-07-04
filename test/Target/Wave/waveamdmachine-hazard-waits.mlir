@@ -558,7 +558,6 @@ func.func @single_token_loop_barrier_drain_contracted(
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
   return
 }
 
@@ -584,7 +583,6 @@ func.func @single_token_loop_barrier_partial_vmcnt_kept(
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
   return
 }
 
@@ -610,7 +608,6 @@ func.func @single_token_loop_barrier_real_vmcnt_drain_kept(
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
   return
 }
 
@@ -638,7 +635,6 @@ func.func @kept_barrier_satisfies_m0_delay(
         -> !waveamdmachine.mem.token
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1> carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
   return
 }
 
@@ -659,7 +655,6 @@ func.func @multi_token_loop_barrier_drain_kept(
         -> !waveamdmachine.mem.token
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1> carries(%barrier : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  waveamdmachine.wait %result : (!waveamdmachine.mem.token) -> ()
   return
 }
 

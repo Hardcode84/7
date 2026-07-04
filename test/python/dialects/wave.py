@@ -20,12 +20,12 @@ def test_generic_wave_kernel():
             vx = f.splat(x)
             ptrs = f.ptr_add(out, lane, w.simd_type(w.ptr_type(w.i32())))
             token = f.store(vx, ptrs)
-            f.wait(token)
+            f.barrier(token)
         # CHECK: func.func @generic_wave_kernel
         # CHECK: wave.lane_id
         # CHECK: wave.splat
         # CHECK: wave.store
-        # CHECK: wave.wait
+        # CHECK: wave.barrier
         print(m.module)
 
 
@@ -69,13 +69,13 @@ def test_waveamd_matrix_kernel():
             result = f.mma("wmma.i32.16x16x16.iu8", a, b, acc)
             ptr = f.ptr_add(out, base)
             token = f.fragment_store(result, ptr)
-            f.wait(token)
+            f.barrier(token)
         # CHECK: func.func @matrix_kernel
         # CHECK: waveamd.fragment_fill
         # CHECK: waveamd.mma
         # CHECK: waveamd.fragment_unpack
         # CHECK: wave.store
-        # CHECK: wave.wait
+        # CHECK: wave.barrier
         print(m.module)
 
 

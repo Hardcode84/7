@@ -118,7 +118,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-LABEL: func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers
 // CHECK: waveamdmachine.ds_store_b8
 // CHECK: waveamdmachine.s_waitcnt lgkmcnt(0)
-// CHECK-NEXT: waveamdmachine.wait
+// CHECK-NEXT: waveamdmachine.s_barrier
 // CHECK: waveamdmachine.ds_read_tr_b64_b4
 // CHECK-NEXT: waveamdmachine.ds_read_tr_b64_b8
 // CHECK: waveamdmachine.s_waitcnt lgkmcnt(1)
@@ -127,7 +127,7 @@ func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers(%x: !waveamdmachine.reg
   %store = waveamdmachine.ds_store_b8 %x, %x
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.mem.token
-  waveamdmachine.wait %store : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %store : (!waveamdmachine.mem.token) -> ()
   %b4, %tok4 = waveamdmachine.ds_read_tr_b64_b4 %x
       : (!waveamdmachine.reg<vgpr, 1>)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
@@ -179,7 +179,7 @@ func.func @gfx950_joined_lds_read_token_does_not_wait_before_read(%x: !waveamdma
 // CHECK: waveamdmachine.ds_load_b32
 // CHECK-NEXT: waveamdmachine.global_load_b32
 // CHECK-NEXT: waveamdmachine.s_waitcnt vmcnt(0) lgkmcnt(0)
-// CHECK-NEXT: waveamdmachine.wait
+// CHECK-NEXT: waveamdmachine.s_barrier
 func.func @read_only_issuer_token_preserves_cross_counter_dep(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>) {
@@ -190,7 +190,7 @@ func.func @read_only_issuer_token_preserves_cross_counter_dep(
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
          !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
-  waveamdmachine.wait %global_tok : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %global_tok : (!waveamdmachine.mem.token) -> ()
   return
 }
 

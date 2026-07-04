@@ -138,7 +138,6 @@ func.func @where_otherwise_yields_token(%out: !wave.ptr<#wave.global, i32>,
         -> !wave.mem.token
     wave.yield %else_tok : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -196,7 +195,6 @@ func.func @where_otherwise_recomputes_else_address(
         -> !wave.mem.token
     wave.yield %token : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  wave.wait %stored : !wave.mem.token
   return
 }
 
@@ -224,7 +222,6 @@ func.func @where_yields_pointer(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -259,7 +256,6 @@ func.func @where_otherwise_yields_same_base_pointer(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -286,7 +282,6 @@ func.func @where_yields_large_pointer_offset(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -312,7 +307,6 @@ func.func @where_yields_negative_pointer_offset(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -347,7 +341,6 @@ func.func @where_otherwise_yields_large_pointer_offset(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 

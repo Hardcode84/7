@@ -36,7 +36,6 @@ func.func @scalar_integer_arith_codegen(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %v -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -55,7 +54,6 @@ func.func @scalar_i32_dynamic_pow2_divsi_codegen(
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -74,7 +72,6 @@ func.func @scalar_i32_const_pow2_divsi_codegen(
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -106,7 +103,6 @@ func.func @scalar_i64_div_rem_codegen(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %v -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 
@@ -131,7 +127,6 @@ func.func @scalar_i64_dynamic_pow2_divsi_codegen(
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  wave.wait %tok : !wave.mem.token
   return
 }
 

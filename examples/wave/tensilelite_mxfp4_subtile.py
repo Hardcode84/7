@@ -1103,7 +1103,6 @@ def _emit_stage_final(
 ) -> tuple[dsl.Value, ...]:
     a_k1: list[dsl.Value] = []
     b_k1: list[dsl.Value] = []
-    read_tokens: list[dsl.Value] = []
     a_read_index = 0
     b_read_index = 0
 
@@ -1111,16 +1110,14 @@ def _emit_stage_final(
         nonlocal a_read_index, b_read_index
         if a_read_index < cfg.wave_m_tiles:
             ptr = current_data.a_read[cfg.wave_m_tiles + a_read_index]
-            frag, token = _load_data_frag(bld, ptr, 0, current.ready)
+            frag, _ = _load_data_frag(bld, ptr, 0, current.ready)
             a_k1.append(frag)
-            read_tokens.append(token)
             a_read_index += 1
             return
         if b_read_index < cfg.wave_n_tiles:
             ptr = current_data.b_read[cfg.wave_n_tiles + b_read_index]
-            frag, token = _load_data_frag(bld, ptr, 1, current.ready)
+            frag, _ = _load_data_frag(bld, ptr, 1, current.ready)
             b_k1.append(frag)
-            read_tokens.append(token)
             b_read_index += 1
 
     next_accs = _emit_mma_k_tile(
@@ -1136,7 +1133,6 @@ def _emit_stage_final(
     )
     while a_read_index < cfg.wave_m_tiles or b_read_index < cfg.wave_n_tiles:
         read_next_local(0)
-    bld.wait(_join_tokens(bld, read_tokens))
     return _emit_mma_k_tile(
         bld,
         cfg,
@@ -1167,8 +1163,6 @@ def _emit_stage_with_next(
     )
     a_k1: list[dsl.Value] = []
     b_k1: list[dsl.Value] = []
-    local_read_tokens: list[dsl.Value] = []
-    next_read_tokens: list[dsl.Value] = []
     next_ready: dsl.Value | None = None
     next_reads: _StageReadEmitter | None = None
     a_read_index = 0
@@ -1178,16 +1172,14 @@ def _emit_stage_with_next(
         nonlocal a_read_index, b_read_index
         if a_read_index < cfg.wave_m_tiles:
             ptr = current_data.a_read[cfg.wave_m_tiles + a_read_index]
-            frag, token = _load_data_frag(bld, ptr, 0, current.ready)
+            frag, _ = _load_data_frag(bld, ptr, 0, current.ready)
             a_k1.append(frag)
-            local_read_tokens.append(token)
             a_read_index += 1
             return True
         if b_read_index < cfg.wave_n_tiles:
             ptr = current_data.b_read[cfg.wave_n_tiles + b_read_index]
-            frag, token = _load_data_frag(bld, ptr, 1, current.ready)
+            frag, _ = _load_data_frag(bld, ptr, 1, current.ready)
             b_k1.append(frag)
-            local_read_tokens.append(token)
             b_read_index += 1
             return True
         return False
@@ -1232,8 +1224,6 @@ def _emit_stage_with_next(
         )
     assert next_reads is not None
     next_state = next_reads.finish()
-    next_read_tokens = next_reads.tokens
-    bld.wait(_join_tokens(bld, local_read_tokens))
     next_accs = _emit_mma_k_tile(
         bld,
         cfg,
@@ -1244,7 +1234,6 @@ def _emit_stage_with_next(
         current.b_scales,
         1,
     )
-    bld.wait(_join_tokens(bld, next_read_tokens))
     return next_accs, next_state
 
 
@@ -1266,7 +1255,6 @@ def _emit_stage_with_next_ready(
     )
     a_k1: list[dsl.Value] = []
     b_k1: list[dsl.Value] = []
-    local_read_tokens: list[dsl.Value] = []
     a_read_index = 0
     b_read_index = 0
 
@@ -1274,16 +1262,14 @@ def _emit_stage_with_next_ready(
         nonlocal a_read_index, b_read_index
         if a_read_index < cfg.wave_m_tiles:
             ptr = current_data.a_read[cfg.wave_m_tiles + a_read_index]
-            frag, token = _load_data_frag(bld, ptr, 0, current.ready)
+            frag, _ = _load_data_frag(bld, ptr, 0, current.ready)
             a_k1.append(frag)
-            local_read_tokens.append(token)
             a_read_index += 1
             return True
         if b_read_index < cfg.wave_n_tiles:
             ptr = current_data.b_read[cfg.wave_n_tiles + b_read_index]
-            frag, token = _load_data_frag(bld, ptr, 1, current.ready)
+            frag, _ = _load_data_frag(bld, ptr, 1, current.ready)
             b_k1.append(frag)
-            local_read_tokens.append(token)
             b_read_index += 1
             return True
         return False
@@ -1308,7 +1294,6 @@ def _emit_stage_with_next_ready(
         pass
     dma.emit_remaining()
     next_ready = bld.barrier(*dma.tokens)
-    bld.wait(_join_tokens(bld, local_read_tokens))
     next_accs = _emit_mma_k_tile(
         bld,
         cfg,
@@ -1346,11 +1331,8 @@ def _step(
     tokens = _issue_data_dma(bld, data, dep)
     tokens.extend(_stage_scales(bld, cfg, coords, a_scale, b_scale, step, dep))
     ready = bld.barrier(*tokens)
-    a_frags, b_frags, data_read_tokens = _read_data_frags(bld, cfg, data, ready)
-    a_scales, b_scales, scale_read_tokens = _read_scale_groups(
-        bld, cfg, coords, step, ready
-    )
-    bld.wait(_join_tokens(bld, [*data_read_tokens, *scale_read_tokens]))
+    a_frags, b_frags, _ = _read_data_frags(bld, cfg, data, ready)
+    a_scales, b_scales, _ = _read_scale_groups(bld, cfg, coords, step, ready)
     return _emit_mma_step(bld, cfg, accs, a_frags, b_frags, a_scales, b_scales)
 
 
@@ -1365,8 +1347,7 @@ def _stage_initial(
     step: dsl.Value,
 ) -> tuple[DataPtrs, StageState]:
     data, ready = _stage_ready(bld, cfg, coords, a_base, b_base, a_scale, b_scale, step)
-    state, read_tokens = _read_stage_k0(bld, cfg, coords, data, step, ready)
-    bld.wait(_join_tokens(bld, read_tokens))
+    state, _ = _read_stage_k0(bld, cfg, coords, data, step, ready)
     return data, state
 
 
@@ -1441,7 +1422,7 @@ def _emit_tensilelite_main_loop(
             loop_current,
             loop_accs,
         )
-        loop_lookahead, lookahead_read_tokens = _read_stage_k0(
+        loop_lookahead, _ = _read_stage_k0(
             bld,
             cfg,
             coords,
@@ -1449,7 +1430,6 @@ def _emit_tensilelite_main_loop(
             lookahead_step,
             loop_lookahead_ready,
         )
-        bld.wait(_join_tokens(bld, lookahead_read_tokens))
         next_lookahead_step = bld.addi(loop.induction_variable, one)
         next_lookahead_data = _data_ptrs(
             bld, cfg, coords, a_base, b_base, next_lookahead_step
@@ -1523,10 +1503,9 @@ def _emit_tensilelite_pipeline(
         )
     )
     accs = _emit_stage_final(bld, cfg, current_data, current, accs)
-    lookahead, lookahead_read_tokens = _read_stage_k0(
+    lookahead, _ = _read_stage_k0(
         bld, cfg, coords, lookahead_data, trip_count, lookahead_ready
     )
-    bld.wait(_join_tokens(bld, lookahead_read_tokens))
     return _emit_stage_final(bld, cfg, lookahead_data, lookahead, accs)
 
 
@@ -1571,7 +1550,6 @@ def _store_results(
     cta_off = wg_m * (
         cfg.n_blocks * cfg.waves_per_workgroup * cfg.tiles_per_wave * 256
     ) + wg_n * (cfg.waves_per_workgroup * cfg.tiles_per_wave * 256)
-    tokens: list[dsl.Value] = []
     for i in range(cfg.wave_m_tiles):
         for j in range(cfg.wave_n_tiles):
             tile = i * cfg.wave_n_tiles + j
@@ -1579,10 +1557,7 @@ def _store_results(
                 cta_off + wave * (cfg.tiles_per_wave * 256) + tile * 256,
                 bindings,
             )
-            tokens.append(
-                _store_fragment_f16(bld, cfg, accs[tile], bld.ptr_add(c_base, off))
-            )
-    bld.wait(_join_tokens(bld, tokens))
+            _store_fragment_f16(bld, cfg, accs[tile], bld.ptr_add(c_base, off))
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: Config) -> None:

@@ -9,7 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: otherwise
 // CHECK: waveamdmachine.global_store_b32
 // CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
-// CHECK-NEXT: waveamdmachine.wait
+// CHECK-NEXT: waveamdmachine.s_barrier
 func.func @exec_if_token_result(%cond: !waveamdmachine.reg<sgpr, 1>,
                                 %off: !waveamdmachine.reg<vgpr, 1>,
                                 %val: !waveamdmachine.reg<vgpr, 1>,
@@ -25,7 +25,7 @@ func.func @exec_if_token_result(%cond: !waveamdmachine.reg<sgpr, 1>,
            !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
     waveamdmachine.yield %else : !waveamdmachine.mem.token
   } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.mem.token
-  waveamdmachine.wait %tok : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %tok : (!waveamdmachine.mem.token) -> ()
   return
 }
 
@@ -35,7 +35,7 @@ func.func @exec_if_token_result(%cond: !waveamdmachine.reg<sgpr, 1>,
 // CHECK: waveamdmachine.global_store_b32
 // CHECK: otherwise
 // CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
-// CHECK-NEXT: waveamdmachine.wait
+// CHECK-NEXT: waveamdmachine.s_barrier
 func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
                                     %off: !waveamdmachine.reg<vgpr, 1>,
                                     %val: !waveamdmachine.reg<vgpr, 1>,
@@ -51,7 +51,7 @@ func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
   } otherwise {
     waveamdmachine.yield
   } : !waveamdmachine.reg<sgpr, 1>
-  waveamdmachine.wait %old : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %old : (!waveamdmachine.mem.token) -> ()
   return
 }
 
