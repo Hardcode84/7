@@ -37,6 +37,82 @@ func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @m0_fill_keeps_same_counter_order(%base: !waveamdmachine.reg<sgpr, 1>,
+                                            %off0: !waveamdmachine.reg<vgpr, 1>,
+                                            %off1: !waveamdmachine.reg<vgpr, 1>,
+                                            %ptr: !waveamdmachine.reg<sgpr, 2>,
+                                            %dep0: !waveamdmachine.mem.token,
+                                            %dep1: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok0 = waveamdmachine.global_load_lds_b32 %off0, %ptr, %m0 after %dep0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %loaded, %tok1 = waveamdmachine.global_load_b32 %off1, %ptr after %dep1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  return
+}
+}
+
+// IR-LABEL: func.func @m0_fill_keeps_same_counter_order
+// IR: [[M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: waveamdmachine.global_load_lds_b32 {{.*}}, [[M0]] after
+// IR-NEXT: waveamdmachine.global_load_b32
+// DIAG: waveamd-machine-schedule region func=m0_fill_keeps_same_counter_order
+// DIAG-SAME: action=keep reason=same_order
+// DIAG-SAME: unfilled_gaps=1
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @m0_fill_keeps_same_counter_order_through_loop_arg(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %value: !waveamdmachine.reg<vgpr, 1>,
+    %scc: !waveamdmachine.reg<scc, 1>) {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %init = waveamdmachine.global_load_lds_b32 %off, %ptr, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %result = waveamdmachine.uniform_loop if %scc : !waveamdmachine.reg<scc, 1>
+      carries(%init : !waveamdmachine.mem.token) {
+  ^bb0(%tok: !waveamdmachine.mem.token):
+    %next_m0 = waveamdmachine.s_mov_m0 %base
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+    %next = waveamdmachine.global_load_lds_b32 %off, %ptr, %next_m0 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+    %store = waveamdmachine.ds_store_b32 %addr, %value after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.mem.token)
+  } -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @m0_fill_keeps_same_counter_order_through_loop_arg
+// IR: ^bb0([[TOK:%.*]]: !waveamdmachine.mem.token):
+// IR-NEXT: [[M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: waveamdmachine.global_load_lds_b32 {{.*}}, [[M0]] after [[TOK]]
+// IR-NEXT: waveamdmachine.ds_store_b32 {{.*}} after [[TOK]]
+// DIAG: waveamd-machine-schedule region func=m0_fill_keeps_same_counter_order_through_loop_arg
+// DIAG-SAME: action=keep reason=same_order
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @m0_fill_through_noinst(%base: !waveamdmachine.reg<sgpr, 1>,
                                   %off: !waveamdmachine.reg<vgpr, 1>,
                                   %ptr: !waveamdmachine.reg<sgpr, 2>,

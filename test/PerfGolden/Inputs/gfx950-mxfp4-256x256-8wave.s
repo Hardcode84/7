@@ -834,38 +834,39 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], v[44:47], v[104:107], v[236:239], v250, v254 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[240:243], v[44:47], v[108:111], v[240:243], v250, v254 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 m0, s12
-		s_waitcnt vmcnt(0)
-		s_barrier
+		s_add_i32 s36, s36, 1
 		buffer_load_dwordx4 v15, s[8:11], s49 offen lds
 		s_mov_b32 m0, s14
-		s_add_i32 s36, s36, 1
+		s_and_b32 s50, s36, 1
 		buffer_load_dwordx4 v112, s[8:11], s49 offen lds
 		s_mov_b32 m0, s15
-		s_and_b32 s50, s36, 1
+		s_lshl_b32 s50, s50, 16
 		buffer_load_dwordx4 v113, s[8:11], s49 offen lds
 		s_mov_b32 m0, s28
-		s_lshl_b32 s50, s50, 16
+		v_add_u32_e32 v16, s50, v11
 		buffer_load_dwordx4 v114, s[8:11], s49 offen lds
 		s_mov_b32 m0, s29
-		v_add_u32_e32 v16, s50, v11
+		v_add3_u32 v48, v16, v12, v0
 		buffer_load_dwordx4 v9, s[0:3], s49 offen lds
 		s_mov_b32 m0, s30
-		v_add3_u32 v48, v16, v12, v0
+		v_add_u32_e32 v16, s50, v12
 		buffer_load_dwordx4 v115, s[0:3], s49 offen lds
 		s_mov_b32 m0, s31
-		ds_read_b128 v[16:19], v48
+		v_add3_u32 v118, v16, v14, v0
 		buffer_load_dwordx4 v116, s[0:3], s49 offen lds
 		s_mov_b32 m0, s32
-		ds_read_b128 v[20:23], v48 offset:1024
+		s_add_i32 s12, s12, 0x10000
 		buffer_load_dwordx4 v117, s[0:3], s49 offen lds
+		s_waitcnt vmcnt(8)
+		s_barrier
+		ds_read_b128 v[16:19], v48
+		ds_read_b128 v[20:23], v48 offset:1024
 		ds_read_b128 v[24:27], v48 offset:2048
 		ds_read_b128 v[28:31], v48 offset:3072
 		ds_read_b128 v[32:35], v48 offset:16384
 		ds_read_b128 v[36:39], v48 offset:17408
 		ds_read_b128 v[40:43], v48 offset:18432
 		ds_read_b128 v[44:47], v48 offset:19456
-		v_add_u32_e32 v48, s50, v12
-		v_add3_u32 v118, v48, v14, v0
 		ds_read_b128 v[48:51], v118 offset:32768
 		ds_read_b128 v[52:55], v118 offset:33792
 		ds_read_b128 v[56:59], v118 offset:34816
@@ -882,7 +883,6 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[100:103], v118 offset:54272
 		ds_read_b128 v[104:107], v118 offset:55296
 		ds_read_b128 v[108:111], v118 offset:56320
-		s_add_i32 s12, s12, 0x10000
 		s_and_b32 s12, s12, 0x1ffff
 		s_add_i32 s14, s14, 0x10000
 		s_and_b32 s14, s14, 0x1ffff

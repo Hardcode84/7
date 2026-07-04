@@ -22,6 +22,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
@@ -104,6 +105,13 @@ struct GraphTables {
   SmallVector<ScheduleEdge, 32> edges;
   SmallVector<SmallVector<unsigned, 4>, 16> successors;
   SmallVector<unsigned, 16> pendingPreds;
+};
+
+using MemoryKind = waveamdmachine::MemoryCounterKind;
+using MemoryKindSet = SmallVector<MemoryKind, 4>;
+
+struct ValueOriginMap {
+  DenseMap<Value, SmallVector<Value, 4>> sources;
 };
 
 struct IssueState {
@@ -572,6 +580,134 @@ static bool hasNonMemoryCycleWait(const IssuePreview &preview) {
          preview.cmaIssueWaitCycles != 0 || preview.ldsDmaWaitCycles != 0;
 }
 
+static bool appendMemoryKind(SmallVectorImpl<MemoryKind> &kinds,
+                             MemoryKind kind) {
+  if (kind == MemoryKind::None || llvm::is_contained(kinds, kind))
+    return false;
+  kinds.push_back(kind);
+  return true;
+}
+
+static void appendValueAliases(ValueOriginMap &origins, OperandRange sources,
+                               ValueRange targets) {
+  for (auto [index, source] : llvm::enumerate(sources)) {
+    if (index >= targets.size())
+      break;
+    Value target = targets[index];
+    if (source.getType() != target.getType())
+      continue;
+    origins.sources[target].push_back(source);
+  }
+}
+
+static ValueOriginMap buildValueOriginMap(func::FuncOp func) {
+  ValueOriginMap origins;
+  func.walk([&](RegionBranchOpInterface branch) {
+    SmallVector<RegionSuccessor> successors;
+    branch.getSuccessorRegions(RegionBranchPoint::parent(), successors);
+    for (RegionSuccessor successor : successors)
+      appendValueAliases(origins, branch.getEntrySuccessorOperands(successor),
+                         branch.getSuccessorInputs(successor));
+
+    for (Region &region : branch->getRegions()) {
+      for (Block &block : region) {
+        auto terminator = dyn_cast_or_null<RegionBranchTerminatorOpInterface>(
+            block.getTerminator());
+        if (!terminator)
+          continue;
+        successors.clear();
+        branch.getSuccessorRegions(RegionBranchPoint(terminator), successors);
+        for (RegionSuccessor successor : successors)
+          appendValueAliases(origins,
+                             terminator.getSuccessorOperands(successor),
+                             branch.getSuccessorInputs(successor));
+      }
+    }
+  });
+  return origins;
+}
+
+static void collectTokenMemoryKinds(Value value, const ValueOriginMap &origins,
+                                    SmallVectorImpl<MemoryKind> &kinds,
+                                    SmallPtrSetImpl<Value> &visited) {
+  if (!isMemToken(value))
+    return;
+  if (!visited.insert(value).second)
+    return;
+
+  auto originIt = origins.sources.find(value);
+  if (originIt != origins.sources.end())
+    for (Value source : originIt->second)
+      collectTokenMemoryKinds(source, origins, kinds, visited);
+
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return;
+  appendMemoryKind(kinds, waveamdmachine::getMemoryCounterKind(def));
+
+  for (Value operand : def->getOperands())
+    collectTokenMemoryKinds(operand, origins, kinds, visited);
+}
+
+static void collectValueMemoryKinds(Value value, const ValueOriginMap &origins,
+                                    SmallVectorImpl<MemoryKind> &kinds,
+                                    SmallPtrSetImpl<Value> &visited) {
+  if (isMemToken(value)) {
+    collectTokenMemoryKinds(value, origins, kinds, visited);
+    return;
+  }
+  if (!visited.insert(value).second)
+    return;
+
+  auto originIt = origins.sources.find(value);
+  if (originIt != origins.sources.end())
+    for (Value source : originIt->second)
+      collectValueMemoryKinds(source, origins, kinds, visited);
+
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return;
+  appendMemoryKind(kinds, waveamdmachine::getMemoryCounterKind(def));
+}
+
+static MemoryKindSet collectFillerMemoryKinds(Operation *op,
+                                              const ValueOriginMap &origins) {
+  MemoryKindSet kinds;
+  appendMemoryKind(kinds, waveamdmachine::getMemoryCounterKind(op));
+
+  SmallPtrSet<Value, 16> visited;
+  for (Value operand : op->getOperands())
+    collectValueMemoryKinds(operand, origins, kinds, visited);
+  return kinds;
+}
+
+static bool containsMemoryKind(ArrayRef<MemoryKind> kinds, MemoryKind kind) {
+  return kind != MemoryKind::None && llvm::is_contained(kinds, kind);
+}
+
+static bool crossesSameMemoryProducer(const GreedyRegion &region,
+                                      const BitVector &scheduled, unsigned next,
+                                      unsigned filler,
+                                      ArrayRef<MemoryKind> fillerKinds) {
+  for (unsigned index : llvm::seq(next, filler)) {
+    if (scheduled.test(index))
+      continue;
+    if (containsMemoryKind(fillerKinds, waveamdmachine::getMemoryCounterKind(
+                                            region.ops[index])))
+      return true;
+  }
+  return false;
+}
+
+static bool canUseStallFiller(const GreedyRegion &region,
+                              const BitVector &scheduled, unsigned next,
+                              unsigned filler, const ValueOriginMap &origins) {
+  MemoryKindSet fillerKinds =
+      collectFillerMemoryKinds(region.ops[filler], origins);
+  return !crossesSameMemoryProducer(region, scheduled, next, filler,
+                                    fillerKinds);
+}
+
 static FillableStall getFillableStall(const IssuePreview &preview) {
   if (preview.memoryWaitCycles != 0)
     return {FillableStallKind::MemoryToken, preview.issueCycle};
@@ -591,12 +727,17 @@ static bool fillsStall(FillableStall stall, const IssuePreview &candidate) {
   return true;
 }
 
-static FailureOr<unsigned> findStallFiller(
-    const BitVector &ready, unsigned next, const GreedyRegion &region,
-    const IssueState &state, const waveamdmachine::ArchData &arch,
-    const waveamdmachine::EventSimConfig &cfg, FillableStall stall) {
+static FailureOr<unsigned>
+findStallFiller(const BitVector &ready, unsigned next,
+                const GreedyRegion &region, const IssueState &state,
+                const BitVector &scheduled,
+                const waveamdmachine::ArchData &arch,
+                const waveamdmachine::EventSimConfig &cfg, FillableStall stall,
+                const ValueOriginMap &origins) {
   for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
     if (!ready.test(index) || index == next)
+      continue;
+    if (!canUseStallFiller(region, scheduled, next, index, origins))
       continue;
     FailureOr<IssuePreview> preview =
         previewIssue(state, region.ops[index], arch, cfg);
@@ -734,14 +875,13 @@ static bool nextStillReady(const BitVector &ready, const BitVector &scheduled,
   return !scheduled.test(next) && ready.test(next);
 }
 
-static FailureOr<bool>
-fillStallBeforeNext(const GreedyRegion &region, const GraphTables &graph,
-                    const waveamdmachine::ArchData &arch,
-                    const waveamdmachine::EventSimConfig &config,
-                    IssueState &state, BitVector &ready, BitVector &scheduled,
-                    SmallVectorImpl<unsigned> &pending,
-                    SmallVectorImpl<unsigned> &order, GreedyStats &stats,
-                    unsigned next, IssuePreview &nextPreview) {
+static FailureOr<bool> fillStallBeforeNext(
+    const GreedyRegion &region, const GraphTables &graph,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, IssueState &state,
+    BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
+    SmallVectorImpl<unsigned> &order, GreedyStats &stats, unsigned next,
+    IssuePreview &nextPreview, const ValueOriginMap &origins) {
   while (true) {
     FailureOr<bool> readyNow =
         previewNextIssue(region, arch, config, state, next, nextPreview);
@@ -752,8 +892,8 @@ fillStallBeforeNext(const GreedyRegion &region, const GraphTables &graph,
 
     recordGapStats(region.ops[next], nextPreview, stats);
     FillableStall stall = getFillableStall(nextPreview);
-    FailureOr<unsigned> filler =
-        findStallFiller(ready, next, region, state, arch, config, stall);
+    FailureOr<unsigned> filler = findStallFiller(
+        ready, next, region, state, scheduled, arch, config, stall, origins);
     if (failed(filler))
       return failure();
     if (*filler == region.ops.size()) {
@@ -799,11 +939,11 @@ scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
                      const waveamdmachine::EventSimConfig &config,
                      IssueState &state, BitVector &ready, BitVector &scheduled,
                      SmallVectorImpl<unsigned> &pending, GreedyResult &result,
-                     unsigned next) {
+                     unsigned next, const ValueOriginMap &origins) {
   IssuePreview preview;
-  FailureOr<bool> filled =
-      fillStallBeforeNext(region, graph, arch, config, state, ready, scheduled,
-                          pending, result.order, result.stats, next, preview);
+  FailureOr<bool> filled = fillStallBeforeNext(
+      region, graph, arch, config, state, ready, scheduled, pending,
+      result.order, result.stats, next, preview, origins);
   if (failed(filled))
     return failure();
   if (!*filled)
@@ -821,7 +961,8 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                 const waveamdmachine::ArchData &arch,
                 const waveamdmachine::EventSimConfig &config, IssueState &state,
                 BitVector &ready, BitVector &scheduled,
-                SmallVectorImpl<unsigned> &pending, GreedyResult &result) {
+                SmallVectorImpl<unsigned> &pending, GreedyResult &result,
+                const ValueOriginMap &origins) {
   if (failed(drainReadyNoInsts(region, graph, arch, config, state, ready,
                                scheduled, pending, result.order)))
     return failure();
@@ -838,13 +979,14 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                                         ready, scheduled, pending,
                                         result.order);
   return scheduleOriginalNext(region, graph, arch, config, state, ready,
-                              scheduled, pending, result, next);
+                              scheduled, pending, result, next, origins);
 }
 
 static GreedyResult
 buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
                  const waveamdmachine::ArchData &arch,
-                 const waveamdmachine::EventSimConfig &config) {
+                 const waveamdmachine::EventSimConfig &config,
+                 const ValueOriginMap &origins) {
   GreedyResult result;
   SmallVector<unsigned, 16> pending = graph.pendingPreds;
   BitVector ready(region.ops.size());
@@ -855,8 +997,9 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
 
   IssueState state(arch, buildInstructionConfig(arch, config));
   while (result.order.size() != region.ops.size()) {
-    FailureOr<GreedyStepStatus> step = buildGreedyStep(
-        region, graph, arch, config, state, ready, scheduled, pending, result);
+    FailureOr<GreedyStepStatus> step =
+        buildGreedyStep(region, graph, arch, config, state, ready, scheduled,
+                        pending, result, origins);
     if (failed(step))
       return failGreedyModel(result);
     if (*step == GreedyStepStatus::Done)
@@ -1057,8 +1200,9 @@ struct WaveAMDMachineSchedulePass
         RegionCollector().collect(func);
     if (failed(collected))
       return WalkResult::interrupt();
+    ValueOriginMap origins = buildValueOriginMap(func);
     for (const GreedyRegion &region : *collected)
-      if (failed(processRegion(region, *arch.arch, modelConfig)))
+      if (failed(processRegion(region, *arch.arch, modelConfig, origins)))
         return WalkResult::interrupt();
     return WalkResult::advance();
   }
@@ -1107,7 +1251,8 @@ struct WaveAMDMachineSchedulePass
 
   LogicalResult processRegion(const GreedyRegion &region,
                               const waveamdmachine::ArchData &arch,
-                              const waveamdmachine::EventSimConfig &config) {
+                              const waveamdmachine::EventSimConfig &config,
+                              const ValueOriginMap &origins) {
     if (maxRegionOps >= 0 &&
         region.ops.size() > static_cast<unsigned>(maxRegionOps))
       return success();
@@ -1116,7 +1261,8 @@ struct WaveAMDMachineSchedulePass
     if (failed(buildGraph(region, graph)))
       return failure();
 
-    GreedyResult greedy = buildGreedyOrder(region, graph, arch, config);
+    GreedyResult greedy =
+        buildGreedyOrder(region, graph, arch, config, origins);
     if (!greedy.success)
       return emitGreedyFailure(region, greedy);
 
@@ -1310,8 +1456,10 @@ struct WaveAMDMachineScheduleReportPass
     if (!arch.arch)
       return reportMissingArch(*collected, func, arch);
 
+    ValueOriginMap origins = buildValueOriginMap(func);
     for (const GreedyRegion &region : *collected)
-      if (failed(reportRegion(region, *arch.arch, modelConfig, parsedOrder)))
+      if (failed(reportRegion(region, *arch.arch, modelConfig, parsedOrder,
+                              origins)))
         return WalkResult::interrupt();
     return WalkResult::advance();
   }
@@ -1370,11 +1518,13 @@ struct WaveAMDMachineScheduleReportPass
                         ArrayRef<unsigned> originalOrder,
                         FailureOr<OrderScore> originalScore,
                         const waveamdmachine::ArchData &arch,
-                        const waveamdmachine::EventSimConfig &config) {
+                        const waveamdmachine::EventSimConfig &config,
+                        const ValueOriginMap &origins) {
     if (!printCandidates)
       return success();
 
-    GreedyResult greedy = buildGreedyOrder(region, graph, arch, config);
+    GreedyResult greedy =
+        buildGreedyOrder(region, graph, arch, config, origins);
     if (!greedy.success)
       return region.first->emitError(
                  "waveamd-machine-schedule-report failed: reason=")
@@ -1438,7 +1588,8 @@ struct WaveAMDMachineScheduleReportPass
   LogicalResult reportRegion(const GreedyRegion &region,
                              const waveamdmachine::ArchData &arch,
                              const waveamdmachine::EventSimConfig &config,
-                             ArrayRef<unsigned> parsedOrder) {
+                             ArrayRef<unsigned> parsedOrder,
+                             const ValueOriginMap &origins) {
     if (printRegions)
       printReportRegion(region);
     if (printClasses)
@@ -1468,7 +1619,7 @@ struct WaveAMDMachineScheduleReportPass
                                  parsedOrder)))
       return failure();
     return printCandidateSection(region, graph, originalOrder, originalScore,
-                                 arch, config);
+                                 arch, config, origins);
   }
 
   static FailureOr<OrderScore>

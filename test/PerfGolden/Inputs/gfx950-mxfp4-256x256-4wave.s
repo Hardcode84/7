@@ -806,19 +806,19 @@ wmma_f16_matmul_tiled:
 .Lwmma_f16_matmul_tiled.exec_endif_7:
 		s_mov_b64 exec, s[54:55]
 		s_mov_b32 m0, s32
-		s_waitcnt vmcnt(20)
-		s_barrier
+		s_add_i32 s42, s42, 1
 		buffer_load_dwordx4 v28, s[0:3], s40 offen lds
 		s_mov_b32 m0, s34
-		s_add_i32 s42, s42, 1
+		s_and_b32 s41, s42, 1
 		buffer_load_dwordx4 v30, s[0:3], s40 offen lds
 		s_mov_b32 m0, s36
-		s_and_b32 s41, s42, 1
+		s_lshl_b32 s41, s41, 16
 		buffer_load_dwordx4 v32, s[0:3], s40 offen lds
 		s_mov_b32 m0, s38
-		s_lshl_b32 s41, s41, 16
-		buffer_load_dwordx4 v34, s[0:3], s40 offen lds
 		v_add_u32_e32 v38, s41, v3
+		buffer_load_dwordx4 v34, s[0:3], s40 offen lds
+		s_waitcnt vmcnt(24)
+		s_barrier
 		v_add3_u32 v38, v38, v10, v14
 		ds_read_b128 a[4:7], v38
 		ds_read_b128 a[8:11], v38 offset:1024
