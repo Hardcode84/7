@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -392,17 +391,12 @@ struct WaveAMDPackVGPRZeroMovesPass
     for (waveamdmachine::VMovB32TupleOp op : moves)
       packMove(op);
 
-    SmallVector<func::FuncOp> funcs;
-    root->walk([&](func::FuncOp func) { funcs.push_back(func); });
-    for (func::FuncOp func : funcs) {
-      DominanceInfo dom(func);
-      SmallVector<waveamdmachine::TupleFromElementsOp> tuples;
-      func.walk([&](waveamdmachine::TupleFromElementsOp op) {
-        tuples.push_back(op);
-      });
-      for (waveamdmachine::TupleFromElementsOp op : tuples)
-        packTupleElements(op, dom);
-    }
+    DominanceInfo dom(root);
+    SmallVector<waveamdmachine::TupleFromElementsOp> tuples;
+    root->walk(
+        [&](waveamdmachine::TupleFromElementsOp op) { tuples.push_back(op); });
+    for (waveamdmachine::TupleFromElementsOp op : tuples)
+      packTupleElements(op, dom);
     eraseDeadScalarB32Moves(root);
   }
 };

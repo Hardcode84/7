@@ -327,7 +327,6 @@ def WaveAMDElideSCCBoolRoundtrip
     which will reinsert save/reload code only where a real SCC clobber exists.
   }];
   let dependentDialects = [
-    "func::FuncDialect",
     "waveamdmachine::WaveAMDMachineDialect"
   ];
 }

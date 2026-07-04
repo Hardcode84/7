@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -80,24 +79,11 @@ struct SCCBoolRoundtripPattern : public OpRewritePattern<SCmpLgU32Op> {
   }
 };
 
-static bool hasRoundtripCandidate(func::FuncOp func) {
-  WalkResult result = func.walk([&](SCmpLgU32Op op) {
-    if (op.getLhs().getDefiningOp<SCSelectB32Op>() ||
-        op.getRhs().getDefiningOp<SCSelectB32Op>())
-      return WalkResult::interrupt();
-    return WalkResult::advance();
-  });
-  return result.wasInterrupted();
-}
-
-static LogicalResult runOnFunc(func::FuncOp func) {
-  if (!hasRoundtripCandidate(func))
-    return success();
-
-  RewritePatternSet patterns(func.getContext());
-  patterns.add<SCCBoolRoundtripPattern>(func.getContext());
+static LogicalResult runOnOp(Operation *root) {
+  RewritePatternSet patterns(root->getContext());
+  patterns.add<SCCBoolRoundtripPattern>(root->getContext());
   return applyPatternsGreedily(
-      func, std::move(patterns),
+      root, std::move(patterns),
       GreedyRewriteConfig().enableFolding(false).setRegionSimplificationLevel(
           GreedySimplifyRegionLevel::Disabled));
 }
@@ -106,12 +92,7 @@ struct WaveAMDElideSCCBoolRoundtripPass
     : public wave::impl::WaveAMDElideSCCBoolRoundtripBase<
           WaveAMDElideSCCBoolRoundtripPass> {
   void runOnOperation() override {
-    WalkResult result = getOperation()->walk([&](func::FuncOp func) {
-      if (failed(runOnFunc(func)))
-        return WalkResult::interrupt();
-      return WalkResult::advance();
-    });
-    if (result.wasInterrupted())
+    if (failed(runOnOp(getOperation())))
       signalPassFailure();
   }
 };
