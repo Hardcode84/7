@@ -76,16 +76,16 @@ func.func @fixed_pressure() {
 }
 }
 
-// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=86 issued_ops=3
-// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=85 issued_ops=3
+// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=326 issued_ops=3
+// LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=325 issued_ops=3
 
 // BUDGET: waveamd-machine-schedule-report unsupported option: pressure-vgpr-budget
 
 // LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles={{[0-9]+}} issued_ops=12
 // LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles={{[0-9]+}} issued_ops=12
 
-// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=original cycles=85 issued_ops=3
-// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=candidate cycles=86 issued_ops=3
+// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=original cycles=325 issued_ops=3
+// GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=candidate cycles=326 issued_ops=3
 
 // EQUAL: waveamd-machine-schedule-report score func=candidate_equal region=0 order=original cycles=6 issued_ops=2
 // EQUAL: waveamd-machine-schedule-report score func=candidate_equal region=0 order=candidate cycles=6 issued_ops=2

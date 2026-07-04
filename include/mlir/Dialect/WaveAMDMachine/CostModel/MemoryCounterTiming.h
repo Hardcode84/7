@@ -54,6 +54,11 @@ int getMemoryValueLatency(const ArchData &arch, Operation *op,
                           const MemoryValueLatencies &overrides = {},
                           const CalibrationData *calibration = nullptr);
 
+int getMemoryValueLatency(const ArchData &arch, Operation *op,
+                          const MemoryCounterLatencies &counterOverrides,
+                          const MemoryValueLatencies &valueOverrides,
+                          const CalibrationData *calibration = nullptr);
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_MEMORYCOUNTERTIMING_H

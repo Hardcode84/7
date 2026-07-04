@@ -215,6 +215,7 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[28:31], v0 offset:50176
 		ds_read_b128 v[32:35], v0 offset:51200
 		ds_read_b128 v[36:39], v0 offset:52224
+		v_lshlrev_b32_e32 v0, 3, v2
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[12:15], v[8:11], v[4:7]
 		s_waitcnt lgkmcnt(2)
@@ -235,11 +236,10 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[96:99], v[24:27], v[28:31], v[96:99]
 		v_mfma_f32_16x16x32_f16 v[100:103], v[24:27], v[32:35], v[100:103]
 		v_mfma_f32_16x16x32_f16 v[104:107], v[24:27], v[36:39], v[104:107]
-		v_cvt_pk_f16_f32 v8, v4, v5
-		v_cvt_pk_f16_f32 v9, v6, v7
-		v_lshlrev_b32_e32 v0, 3, v2
+		v_cvt_pk_f16_f32 v2, v4, v5
+		v_cvt_pk_f16_f32 v3, v6, v7
 		v_lshl_add_u32 v0, v1, 13, v0
-		buffer_store_dwordx2 v[8:9], v0, s[16:19], 0 offen
+		buffer_store_dwordx2 v[2:3], v0, s[16:19], 0 offen
 		v_cvt_pk_f16_f32 v2, v48, v49
 		v_cvt_pk_f16_f32 v3, v50, v51
 		buffer_store_dwordx2 v[2:3], v0, s[16:19], 0 offen offset:512

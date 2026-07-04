@@ -16,13 +16,9 @@
 #include "mlir/IR/Operation.h"
 #include "llvm/Support/ErrorHandling.h"
 
-#include <algorithm>
-
 namespace mlir::waveamdmachine {
 
 namespace {
-
-static constexpr int kDefaultVMEMValueLatency = 80;
 
 static WaitcntInfo getWaitcntInfo(Operation *op) {
   if (auto info = dyn_cast<WaitcntInfoOpInterface>(op))
@@ -107,16 +103,26 @@ bool hasMemoryValueLatency(Operation *op) {
 int getMemoryValueLatency(const ArchData &arch, Operation *op,
                           const MemoryValueLatencies &overrides,
                           const CalibrationData *calibration) {
-  SchedClass cls = classifyOp(op);
-  int defaultLatency = getConfiguredLatency(arch, cls, calibration);
-  if (getWaitcntInfo(op).counter == WaitcntCounter::Vmem) {
-    int valueLatency = std::min(defaultLatency, kDefaultVMEMValueLatency);
-    return overrideOrDefault(overrides.vmemLoad, valueLatency);
-  }
+  return getMemoryValueLatency(arch, op, MemoryCounterLatencies{}, overrides,
+                               calibration);
+}
+
+int getMemoryValueLatency(const ArchData &arch, Operation *op,
+                          const MemoryCounterLatencies &counterOverrides,
+                          const MemoryValueLatencies &valueOverrides,
+                          const CalibrationData *calibration) {
+  if (getWaitcntInfo(op).counter == WaitcntCounter::Vmem)
+    return overrideOrDefault(
+        valueOverrides.vmemLoad,
+        getMemoryCounterLatency(arch, op, counterOverrides, calibration));
   if (isLDSLoad(op))
-    return overrideOrDefault(overrides.lds, defaultLatency);
+    return overrideOrDefault(
+        valueOverrides.lds,
+        getMemoryCounterLatency(arch, op, counterOverrides, calibration));
   if (isSMEMLoad(op))
-    return overrideOrDefault(overrides.smemLoad, defaultLatency);
+    return overrideOrDefault(
+        valueOverrides.smemLoad,
+        getMemoryCounterLatency(arch, op, counterOverrides, calibration));
   llvm_unreachable("op has no memory value timing");
 }
 

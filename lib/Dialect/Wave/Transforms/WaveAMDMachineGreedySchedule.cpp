@@ -566,7 +566,8 @@ static IssuePreview previewIssue(const IssueState &state, Operation *op,
   preview.memoryValueReadyCycle =
       preview.hasMemoryValue
           ? lastIssue + waveamdmachine::getMemoryValueLatency(
-                            arch, op, config.valueLatencies, config.calibration)
+                            arch, op, config.counterLatencies,
+                            config.valueLatencies, config.calibration)
           : preview.readyCycle;
   if (preview.memoryIssuer)
     preview.memoryReadyCycle =

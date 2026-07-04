@@ -256,9 +256,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WAIT: counter_drained cycle=20 wave=0 simd=0 op=waveamdmachine.s_waitcnt
 
 // COUNTER: issue cycle=0 wave=0 simd=0 fu=LGKM op=waveamdmachine.s_load_b32
+// COUNTER: issue cycle=7 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
 // COUNTER-DAG: counter_drained cycle=7 wave=0 simd=0 fu=LGKM counter=lgkm op=waveamdmachine.s_load_b32
 // COUNTER-DAG: counter_drained cycle=7 wave=0 simd=0 op=waveamdmachine.s_waitcnt
-// COUNTER: issue cycle=20 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
 
 // LAT: op_latencies:
 // LAT: op_index=0 op=waveamdmachine.imm class=NoInst fu=None latency=0 issues=1
@@ -334,8 +334,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // VMEMVALUE: func: vmem_value_ready
 // VMEMVALUE: issue cycle=0 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
-// VMEMVALUE: issue cycle=80 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
-// VMEMVALUE: value_ready cycle=80 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
+// VMEMVALUE: issue cycle=320 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
+// VMEMVALUE: value_ready cycle=320 wave=0 simd=0 fu=VMEM op=waveamdmachine.global_load_b32
 
 // UIF: func: uniform_if_report
 // UIF: total_cycles: 4

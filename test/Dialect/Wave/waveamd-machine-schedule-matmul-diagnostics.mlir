@@ -33,9 +33,9 @@ func.func @matmul_loop_candidate(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 }
 
-// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=86 delta=0 issued_ops=6 action=keep reason=original
-// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=greedy cycles=86 delta=0 issued_ops=6 action=apply reason=greedy filled_gaps=1
-// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=greedy original_cycles=86 selected_cycles=86 delta=0 action=apply reason=greedy
+// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=original cycles=326 delta=0 issued_ops=6 action=keep reason=original
+// DIAG: waveamd-machine-schedule-report candidate func=matmul_loop_candidate region=1 name=greedy cycles=326 delta=0 issued_ops=6 action=apply reason=greedy filled_gaps=1
+// DIAG: waveamd-machine-schedule-report selected func=matmul_loop_candidate region=1 name=greedy original_cycles=326 selected_cycles=326 delta=0 action=apply reason=greedy
 
 // -----
 
@@ -85,7 +85,7 @@ func.func @ds_read_burst_counter(%a: !waveamdmachine.reg<vgpr, 4>,
 }
 }
 
-// DIAG: waveamd-machine-schedule-report candidate func=ds_read_burst_counter region=0 name=original cycles=16 delta=0 issued_ops=4 action=keep reason=original
+// DIAG: waveamd-machine-schedule-report candidate func=ds_read_burst_counter region=0 name=original cycles=28 delta=0 issued_ops=4 action=keep reason=original
 
 // -----
 

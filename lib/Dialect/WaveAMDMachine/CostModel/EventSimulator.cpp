@@ -917,7 +917,8 @@ LogicalResult EventSimulator::executeIssued(WaveState &wave, Operation *op,
   bool hasMemoryValue = hasMemoryValueLatency(op);
   int64_t memoryValueReady =
       hasMemoryValue
-          ? lastIssue + getMemoryValueLatency(arch, op, config.valueLatencies,
+          ? lastIssue + getMemoryValueLatency(arch, op, config.counterLatencies,
+                                              config.valueLatencies,
                                               config.calibration)
           : ready;
 

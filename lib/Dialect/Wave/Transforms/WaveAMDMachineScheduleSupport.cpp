@@ -1640,7 +1640,8 @@ computeNodeMetrics(const ScheduleRegion &region, const GraphTables &tables,
     metrics[index].fu = waveamdmachine::funit(arch, cls);
     if (waveamdmachine::hasMemoryValueLatency(op))
       metrics[index].latency = waveamdmachine::getMemoryValueLatency(
-          arch, op, modelConfig.valueLatencies, modelConfig.calibration);
+          arch, op, modelConfig.counterLatencies, modelConfig.valueLatencies,
+          modelConfig.calibration);
     metrics[index].memory = isMemoryIssuer(op);
     unsigned issueCount = getIssueCount(op);
     metrics[index].issueCount = issueCount;
@@ -2483,7 +2484,8 @@ previewLocalIssue(const LocalIssueState &state, Operation *op,
   preview.memoryValueReady =
       preview.hasMemoryValue
           ? lastIssue + waveamdmachine::getMemoryValueLatency(
-                            arch, op, config.valueLatencies, config.calibration)
+                            arch, op, config.counterLatencies,
+                            config.valueLatencies, config.calibration)
           : preview.readyCycle;
   return preview;
 }
