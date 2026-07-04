@@ -237,39 +237,47 @@ is stall plus execution time for the instruction. A high duration on
 issuing the async global-to-LDS load. The data can still complete later, and the
 real drain can appear at a later wait or barrier.
 
-### July 2026 Current-vs-Master Result
+### July 2026 Current-vs-Master Refresh
 
 Setup:
 
-- Current branch: `new-scheduler`.
+- Current branch: `new-scheduler` at
+  `4bb07303 Schedule fresh machine-selected kernels`.
 - Baseline: `master` at `6d5b5783 Add WaveAMD hazard repair pass`.
 - Shape: `M=N=4096`, `K=32768`, scheduled
   `gfx950-mxfp4-256x256-4wave`.
-- Both runs used `224` VGPR, `64` SGPR, no scratch, same grid/workgroup shape.
+- Rebuilt both worktrees with:
+  `cmake --build build --target wave-opt wave-translate WavePythonModules -j "$(nproc)"`.
+- Current artifacts:
+  `build/att-investigation/current-post-stamp/current_k32768.{csv,s,mlir}`.
+- Master artifacts:
+  `/tmp/wave-master-att/build/att-investigation/master/master_k32768.{csv,s,mlir}`.
+- Fresh ATT artifacts:
+  `build/att-investigation/fresh-att/{current-rocprof*,reports}` and
+  `/tmp/wave-master-att/build/att-investigation/fresh-att/{master-rocprof*,reports}`.
+- Resource metadata matches: group/private segment size `0`,
+  `.amdhsa_next_free_vgpr 448`, `.amdhsa_next_free_sgpr 56`,
+  `.amdhsa_accum_offset 256`.
 
 Focused sweep result:
 
 | Branch | Time us | TFLOP/s |
 |---|---:|---:|
-| current | 275.083 | 3997.0 |
-| master | 263.590 | 4171.3 |
+| current | 273.489 | 4020.31 |
+| master | 263.132 | 4178.56 |
+| delta | +10.357 | -158.25 |
 
 Static ASM:
 
-| Item | Current | Master |
-|---|---:|---:|
-| `v_mfma_scale_f32_16x16x128_f8f6f4` | 384 | 384 |
-| `buffer_load_dwordx4` | 48 | 48 |
-| `ds_read_b128` | 160 | 160 |
-| `s_waitcnt` | 99 | 73 |
-| `s_barrier` | 10 | 9 |
-
-Wait-count split:
-
-| Wait class | Current | Master | Delta |
+| Item | Current | Master | Delta |
 |---|---:|---:|---:|
+| `v_mfma_scale_f32_16x16x128_f8f6f4` | 384 | 384 | 0 |
+| `buffer_load_dwordx4 ... lds` | 48 | 48 | 0 |
+| `ds_read_b128` | 160 | 160 | 0 |
+| `s_waitcnt` | 99 | 73 | +26 |
 | `vmcnt` waits | 18 | 10 | +8 |
 | `lgkmcnt` waits | 81 | 63 | +18 |
+| `s_barrier` | 10 | 9 | +1 |
 
 Loop-head static difference:
 
@@ -284,7 +292,7 @@ current:
   ds_read_b64_tr_b8
   s_waitcnt vmcnt(20)
   ...
-  s_waitcnt lgkmcnt(4)
+  s_waitcnt lgkmcnt(3)
   v_mfma_scale...
 
 master:
@@ -296,87 +304,140 @@ master:
   v_mfma_scale...
 ```
 
-ATT result from one traced CU/SE:
+Current serializes part of the scale-read setup with `vmcnt` waits and one
+early `lgkmcnt(1)`. Master issues the scale DS reads as a group and waits once
+before MFMA.
 
-| Category | Current cycles | Master cycles | Delta |
+Fresh ATT:
+
+- Three captures per branch, `rocprofv3 --att`, `--att-target-cu 1`,
+  `--att-shader-engine-mask 0x1`, `--att-simd-select 0x3`, one kernel launch.
+- Per-wave rows resolved completely: current `81914`, master `81642`, zero
+  unresolved rows.
+- Numbers below are mean cycles per traced wave unless the unit says `us`.
+
+| Metric | Current | Master | Delta |
 |---|---:|---:|---:|
-| Mean wave lifetime | 638909 | 564283 | +13.2% |
-| `buffer_load_dwordx4 ... lds` | 664228 | 399204 | +265024 |
-| `s_barrier` | 186552 | 112444 | +74108 |
-| `s_waitcnt vmcnt(*)` | 25292 | 12960 | +12332 |
-| `s_waitcnt lgkmcnt(*)` | 49544 | 55096 | -5552 |
+| Profiled launch time us | 426.723 | 395.896 | +30.827 |
+| Total ATT duration | 615933 | 542537 | +73396 |
+| `buffer_load_dwordx4 ... lds` | 169723 | 86430 | +83294 |
+| Main 12-load LDS-DMA train | 161851 | 67789 | +94063 |
+| Final 4 LDS-DMA loads | 4839 | 15843 | -11003 |
+| `s_waitcnt vmcnt(*)` | 7761 | 4368 | +3393 |
+| `s_waitcnt lgkmcnt(*)` | 13630 | 13945 | -315 |
+| `s_barrier` | 22945 | 22189 | +756 |
+
+Wait-window ATT duration:
+
+| Window class | Current | Master | Delta |
+|---|---:|---:|---:|
+| All waits | 21391 | 18313 | +3077 |
+| VMEM-load windows | 7317 | 4120 | +3197 |
+| LDS windows | 13630 | 13945 | -315 |
+| Prologue waits | 19596 | 15662 | +3934 |
 
 Exact bad placements:
 
 1. Main global-to-LDS prefetch group after the second barrier.
 
-   | Branch | Load PCs | Span bytes | MFMA gaps between loads | ATT load cycles |
-   |---|---|---:|---|---:|
-   | current | `0x2b58..0x2c8c` | 308 | `1,1,1,1,1,1,1,1,1,1,1` | 581676 |
-   | master | `0x2b4c..0x2f74` | 1064 | `0,4,6,6,6,6,6,6,6,6,6` | 274804 |
-
-   Current issues twelve `buffer_load_dwordx4 ... lds` almost one-per-MFMA:
+   Current still issues twelve `buffer_load_dwordx4 ... lds` almost
+   one-per-MFMA:
 
    ```text
-   0x2b48 mfma
-   0x2b58 buffer_load_dwordx4 ... lds
-   0x2b64 mfma
-   0x2b74 buffer_load_dwordx4 ... lds
+   v_mfma_scale...
+   buffer_load_dwordx4 v20, s[8:11], s40 offen lds
+   v_mfma_scale...
+   buffer_load_dwordx4 v21, s[8:11], s40 offen lds
    ...
-   0x2c7c mfma
-   0x2c8c buffer_load_dwordx4 ... lds
+   v_mfma_scale...
+   buffer_load_dwordx4 v31, s[0:3], s40 offen lds
+   v_mfma_scale...
+   buffer_load_dwordx4 v33, s[0:3], s40 offen lds
    ```
 
-   Master spreads the same prefetches across the MFMA body:
+   Master starts with two loads, then spreads the rest across more MFMA work:
 
    ```text
-   0x2b4c buffer_load_dwordx4 ... lds
-   0x2b5c buffer_load_dwordx4 ... lds
-   0x2b64..0x2b98 mfma
-   0x2ba8 buffer_load_dwordx4 ... lds
+   buffer_load_dwordx4 v12, s[20:23], s40 offen lds
+   buffer_load_dwordx4 v20, s[20:23], s40 offen lds
+   v_mfma_scale...
+   v_mfma_scale...
+   v_mfma_scale...
+   buffer_load_dwordx4 v22, s[20:23], s40 offen lds
    ...
-   0x2f64 mfma
-   0x2f74 buffer_load_dwordx4 ... lds
+   v_mfma_scale...
+   buffer_load_dwordx4 v31, s[24:27], s40 offen lds
+   v_mfma_scale...
+   buffer_load_dwordx4 v33, s[24:27], s40 offen lds
    ```
 
-2. Final four prefetches are on the wrong side of the barrier.
+   ATT confirms this is the regression center.
 
-   | Branch | Barrier PC | Load PCs | Placement | Barrier cycles | Load cycles |
-   |---|---:|---|---|---:|---:|
-   | current | `0x304c` | `0x3050,0x3060,0x3070,0x3080` | after barrier | 145384 | 43712 |
-   | master | `0x3090` | `0x3054,0x3064,0x3074,0x3084` | before barrier | 79224 | 89796 |
+   | Branch | Static span | Load gaps | ATT duration | Worst load |
+   |---|---:|---|---:|---|
+   | current | 33 slots | `3,3,3,3,3,3,3,3,3,3,3` | 161851 | `0x2c38`, 322 cycles/hit |
+   | master | 81 slots | `3,6,8,8,8,8,8,8,8,8,8` | 67789 | `0x2e30`, 160 cycles/hit |
 
-   Current waits `vmcnt(20)`, barriers, then starts four async LDS DMA loads.
-   Master issues those four async loads first, waits `vmcnt(24)`, then barriers.
-   Master pays more cycles on those load issue PCs, but hides more work before
-   the barrier and reaches a much smaller barrier duration.
+2. Final four prefetches are no longer the current bad placement.
+
+   Current:
+
+   ```text
+   buffer_load_dwordx4 v28, s[0:3], s40 offen lds
+   buffer_load_dwordx4 v30, s[0:3], s40 offen lds
+   buffer_load_dwordx4 v32, s[0:3], s40 offen lds
+   buffer_load_dwordx4 v34, s[0:3], s40 offen lds
+   s_waitcnt vmcnt(24)
+   s_barrier
+   ```
+
+   Master:
+
+   ```text
+   buffer_load_dwordx4 v28, s[24:27], s40 offen lds
+   buffer_load_dwordx4 v30, s[24:27], s40 offen lds
+   buffer_load_dwordx4 v32, s[24:27], s40 offen lds
+   buffer_load_dwordx4 v34, s[24:27], s40 offen lds
+   s_waitcnt vmcnt(24)
+   s_barrier
+   ```
+
+   Older ATT notes blamed after-barrier placement here. That conclusion is
+   stale for `4bb07303`. Fresh ATT has current faster on these four issue PCs
+   (`4839` versus `15843` cycles per traced wave), while the following barrier
+   is only `2194` cycles worse on current.
 
 3. Guarded scalar `buffer_load_dword` group gained four current-only waits.
 
-   | Branch | Scalar load PCs | Intervening waits | ATT wait cycles |
-   |---|---|---|---:|
-   | current | `0x2af4,0x2b00,0x2b0c,0x2b18` | four `s_waitcnt vmcnt(23)` | 4032 |
-   | master | `0x2b00,0x2b08,0x2b10,0x2b18` | none | 0 |
-
-   This is visible ASM drift, but it is too small to explain the regression.
+   Current has four `s_waitcnt vmcnt(23)` before the guarded scalar
+   `buffer_load_dword` group. Master has none. This is visible ASM drift, but
+   probably too small to explain the full gap alone.
+   Fresh ATT measures `buffer_load` VGPR/scalar issue at `11493` cycles on
+   current versus `9592` on master.
 
 Interpretation:
 
-- Static wait count grew in both classes, especially `lgkmcnt`.
-- ATT duration does not blame direct `lgkmcnt` waits; current has lower
-  `lgkmcnt` wait duration than master.
-- Current-only `vmcnt(23/22/21/20)` waits are real, but their direct ATT
-  duration is small relative to the regression.
-- Main runtime delta is issue-side duration on global-to-LDS
-  `buffer_load_dwordx4 ... lds`, followed by a larger barrier cost.
+- Perf gap persists: current is `10.357 us` slower, `158.25 TFLOP/s` lower.
+- Static counts and resource metadata match. Difference is schedule placement,
+  not instruction count or occupancy.
+- Current-only `vmcnt(23/22/21/20)` waits are real, but direct `vmcnt` wait
+  delta is `3393` cycles per traced wave. It is secondary.
+- Direct `lgkmcnt` wait time is not the regression. Current is slightly lower
+  than master in fresh ATT.
+- Main cause is the compressed global-to-LDS prefetch train. The async loads are
+  not waiting for data completion at the load PC; ATT duration shows issue-side
+  stall/backpressure while injecting too many same-kind memory ops too tightly.
+- Final-four after-barrier placement is fixed; do not chase it.
 - Treat waitcnt changes as symptoms of changed memory-token/register scheduling
   until proven otherwise. Do not remove physical-register overlap waits just to
   recover perf without a correctness proof.
 
-Likely scheduler culprit: the greedy gap filler treats a memory-token stall as
-fillable by any ready real instruction. When the next original op is a barrier
-waiting on memory tokens, ready global-to-LDS prefetches become legal fillers.
-Original-order filler selection can then pull many async LDS DMA loads into a
-tight window instead of preserving master-like stagger. Fix target is scheduler
-placement/scoring for `buffer_load_dwordx4 ... lds` around MFMA and barriers,
-not weakening waitcnt/register-overlap correctness.
+Scheduler implication:
+
+- Stall fill must not pessimize memory counters.
+- Track candidate memory type through token values, branch interfaces, and block
+  args.
+- Do not move a memory op over producers of the same memory type.
+- Preserve same-kind spacing without overfitting `buffer_load_dwordx4 ... lds`.
+- Barriers can consume multiple memory kinds; model the token set, not a single
+  flag.
