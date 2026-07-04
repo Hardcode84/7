@@ -928,8 +928,6 @@ _a4w4_kernel:
 		s_waitcnt vmcnt(19)
 		ds_write_b32 v48, v42 offset:5952
 		s_add_i32 m0, s21, 0x18b80
-		s_waitcnt lgkmcnt(1)
-		s_barrier
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b64_tr_b8 v[44:45], v49 offset:3904
@@ -1147,8 +1145,6 @@ _a4w4_kernel:
 		ds_write_b32 v48, v43 offset:5952
 		s_add_i32 m0, s21, 0x1cd60
 		s_add_i32 s18, s18, s15
-		s_waitcnt lgkmcnt(1)
-		s_barrier
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b64_tr_b8 v[56:57], v49 offset:3904
@@ -1345,8 +1341,6 @@ _a4w4_kernel:
 		v_lshlrev_b32_e32 v8, 12, v19
 		v_add3_u32 v2, v2, v8, v54
 		v_lshlrev_b32_e32 v8, 7, v15
-		s_waitcnt lgkmcnt(1)
-		s_barrier
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b64_tr_b8 v[14:15], v49 offset:3904

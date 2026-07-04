@@ -205,7 +205,9 @@ module attributes {transform.with_named_sequence} {
         options = { "apply-schedule" = true,
                     "require-selected-input" = true }
         to %rrepair : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rs)
+    %rbar = transform.apply_registered_pass "waveamd-barrier-cleanup"
+        to %rs : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rbar)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op
   }

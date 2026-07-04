@@ -6,6 +6,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   RegAlloc/WaveAMDRegPressureRelief.cpp
   RegAlloc/WaveAMDResourceInfo.cpp
   WaveAMDABILowering.cpp
+  WaveAMDBarrierCleanup.cpp
   WaveAMDBufferRsrcToTuples.cpp
   WaveAMDCrossLanePeepholes.cpp
   WaveAMDDecomposeMemTuples.cpp

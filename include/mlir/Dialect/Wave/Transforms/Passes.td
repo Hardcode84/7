@@ -465,6 +465,18 @@ def WaveAMDMachineSchedule
   ];
 }
 
+def WaveAMDBarrierCleanup
+    : Pass<"waveamd-barrier-cleanup"> {
+  let summary = "Remove redundant WaveAMDMachine barriers";
+  let description = [{
+    Removes redundant machine barriers while preserving explicit memory-token
+    ordering.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMachineScheduleReport
     : Pass<"waveamd-machine-schedule-report"> {
   let summary = "Print WaveAMDMachine scheduler diagnostics";
