@@ -177,7 +177,7 @@ def main() -> int:
     require(
         "matmul_pressure_disabled",
         text,
-        r"sim_cycles waves=2 simds=2 start_delay=0: 10340",
+        r"sim_cycles waves=2 simds=2 start_delay=0: 10345",
     )
     reject("matmul_pressure_disabled", text, r"waveamd-machine-schedule-report")
 
@@ -197,7 +197,7 @@ def main() -> int:
         text,
         r"selected func=wmma_f16_matmul_tiled region=1 name=greedy "
         r"original_cycles=2215 selected_cycles=2212 delta=-3 action=apply "
-        r"reason=better",
+        r"reason=barrier_memory",
     )
     require("matmul_greedy_report", text, r"memory_token_gaps=2")
     reject("matmul_greedy_report", text, r"name=beam_0")
@@ -216,13 +216,14 @@ def main() -> int:
     require(
         "fa_seq32_d16_u4_greedy_report",
         text,
-        r"skipped func=flash_attention_f32 region=0 reason=max_region_ops "
-        r"ops=1574 instruction_ops=1530 limit=512",
+        r"selected func=flash_attention_f32 region=0 name=greedy "
+        r"original_cycles=30801 selected_cycles=21669 delta=-9132 "
+        r"action=apply reason=barrier_memory",
     )
     require(
         "fa_seq32_d16_u4_greedy_report",
         text,
-        r"sim_cycles waves=1 simds=1 start_delay=0: 35683",
+        r"sim_cycles waves=1 simds=1 start_delay=0: 22209",
     )
     reject("fa_seq32_d16_u4_greedy_report", text, r"name=beam_0")
     reject("fa_seq32_d16_u4_greedy_report", text, r"pressure_fallback")

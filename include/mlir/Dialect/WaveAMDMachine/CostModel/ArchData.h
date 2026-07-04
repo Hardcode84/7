@@ -60,6 +60,9 @@ struct ArchData {
   // SIMD issue period in cycles. RDNA issues every cycle (=1).
   // CDNA issues one wave64 over SIMD16 every 4 cycles (=4).
   int simdIssuePeriod;
+
+  // Default LDS counter drain latency used when no calibration/override exists.
+  int ldsCounterLatency;
 };
 
 // Lookup by IsaVersion. Aborts (report_fatal_error) on unsupported

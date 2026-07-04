@@ -1276,8 +1276,8 @@ def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     matmul_report = matmul.schedule_report_options(matmul_variant, matmul_args)
     require(
         "calibration_scheduler_region_cap",
-        matmul_pass["max-region-ops"] == 512,
-        "matmul apply pipeline missing scheduler region cap",
+        "max-region-ops" not in matmul_pass,
+        "matmul apply pipeline should not set scheduler region cap",
     )
     require(
         "calibration_scheduler_region_cap",
@@ -1293,13 +1293,13 @@ def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     fa_report = fa.schedule_report_options(fa_variant, fa_args)
     require(
         "calibration_scheduler_region_cap",
-        fa_pass["max-region-ops"] == 512,
-        "FA apply pipeline missing scheduler region cap",
+        "max-region-ops" not in fa_pass,
+        "FA apply pipeline should not set scheduler region cap",
     )
     require(
         "calibration_scheduler_region_cap",
-        fa_report["max-region-ops"] == 512,
-        "FA report pipeline missing scheduler region cap",
+        "max-region-ops" not in fa_report,
+        "FA report pipeline should not set scheduler region cap",
     )
     print("calibration_scheduler_region_cap: ok")
 

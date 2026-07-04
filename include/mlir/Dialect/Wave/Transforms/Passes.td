@@ -443,7 +443,8 @@ def WaveAMDMachineSchedule
     Scheduler pass over `waveamdmachine` IR. The default mode is a no-op that
     still validates target and model options. With `apply-schedule`, it scans
     straight-line machine regions, keeps original order when it does not stall,
-    and moves the first legal zero-stall ready instruction into modeled gaps.
+    and moves legal zero-stall ready instructions into modeled gaps until the
+    blocked op no longer stalls or no filler remains.
 
     Intended placement is before ticket-wait and hazard-wait insertion. Nested
     region ops split local scheduling regions; block terminators finish the
@@ -467,8 +468,6 @@ def WaveAMDMachineSchedule
            "Skip scheduling regions above this op count; -1 disables the cap.">,
     Option<"maxBeamWork", "max-beam-work", "int", /*default=*/"-1",
            "Unsupported legacy beam-search work cap.">,
-    Option<"calibrationFile", "calibration-file", "std::string", /*default=*/"\"\"",
-           "JSON latency calibration overlay consumed by scheduler scoring.">,
     Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
            "Unsupported legacy pressure-aware scheduler option.">,
     Option<"modelWaves", "model-waves", "int", /*default=*/"0",
@@ -477,12 +476,6 @@ def WaveAMDMachineSchedule
            "SIMD count used by model-scored local scheduling; 0 derives from target.">,
     Option<"modelStartDelay", "model-start-delay", "int", /*default=*/"0",
            "Cycle delay between modeled waves.">,
-    Option<"modelVmemValueLatency", "model-vmem-value-latency", "int", /*default=*/"-1",
-           "VMEM-load value-ready latency used by model-scored local scheduling.">,
-    Option<"modelSmemValueLatency", "model-smem-value-latency", "int", /*default=*/"-1",
-           "SMEM-load value-ready latency used by model-scored local scheduling.">,
-    Option<"modelLdsValueLatency", "model-lds-value-latency", "int", /*default=*/"-1",
-           "LDS-load value-ready latency used by model-scored local scheduling.">,
     Option<"pressureVgprBudget", "pressure-vgpr-budget", "int", /*default=*/"-1",
            "Unsupported legacy pressure-policy option.">,
     Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",
@@ -528,8 +521,6 @@ def WaveAMDMachineScheduleReport
            "Skip scheduling diagnostics above this region op count; -1 disables the cap.">,
     Option<"maxBeamWork", "max-beam-work", "int", /*default=*/"-1",
            "Unsupported legacy beam-search work cap.">,
-    Option<"calibrationFile", "calibration-file", "std::string", /*default=*/"\"\"",
-           "JSON latency calibration overlay consumed by scheduler diagnostics.">,
     Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
            "Unsupported legacy pressure-aware scheduler option.">,
     Option<"modelWaves", "model-waves", "int", /*default=*/"0",
@@ -538,12 +529,6 @@ def WaveAMDMachineScheduleReport
            "SIMD count used by model-scored local scheduling; 0 derives from target.">,
     Option<"modelStartDelay", "model-start-delay", "int", /*default=*/"0",
            "Cycle delay between modeled waves.">,
-    Option<"modelVmemValueLatency", "model-vmem-value-latency", "int", /*default=*/"-1",
-           "VMEM-load value-ready latency used by model-scored local scheduling.">,
-    Option<"modelSmemValueLatency", "model-smem-value-latency", "int", /*default=*/"-1",
-           "SMEM-load value-ready latency used by model-scored local scheduling.">,
-    Option<"modelLdsValueLatency", "model-lds-value-latency", "int", /*default=*/"-1",
-           "LDS-load value-ready latency used by model-scored local scheduling.">,
     Option<"pressureVgprBudget", "pressure-vgpr-budget", "int", /*default=*/"-1",
            "Unsupported legacy pressure-policy option.">,
     Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",

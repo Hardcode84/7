@@ -26,6 +26,7 @@ static constexpr ArchData kGfx803{
     /*wave64IssueMultiplier=*/1,
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
+    /*ldsCounterLatency=*/5,
 };
 
 // CDNA3 / MI300. LLVM AMDGPUBaseInfo gives 8 waves/EU,
@@ -42,6 +43,7 @@ static constexpr ArchData kGfx942{
     /*wave64IssueMultiplier=*/1,
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
+    /*ldsCounterLatency=*/5,
 };
 
 // CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
@@ -57,6 +59,7 @@ static constexpr ArchData kGfx950{
     /*wave64IssueMultiplier=*/1,
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
+    /*ldsCounterLatency=*/20,
 };
 
 // RDNA3 Navi31 (RX 7900 series). FeatureGFX10_3Insts +
@@ -73,6 +76,7 @@ static constexpr ArchData kGfx1100{
     /*wave64IssueMultiplier=*/2,
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/1,
+    /*ldsCounterLatency=*/20,
 };
 
 // RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default.
@@ -88,6 +92,7 @@ static constexpr ArchData kGfx1200{
     /*wave64IssueMultiplier=*/2,
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/1,
+    /*ldsCounterLatency=*/20,
 };
 
 // Compile-time invariants. Anything failing here means a typo in
@@ -110,6 +115,8 @@ template <const ArchData &A> static constexpr bool sane() {
                 "issuesPerCUPerCycle out of range");
   static_assert(A.simdIssuePeriod == 1 || A.simdIssuePeriod == 4,
                 "simdIssuePeriod is 1 (RDNA) or 4 (CDNA wave64)");
+  static_assert(A.ldsCounterLatency >= 0 && A.ldsCounterLatency <= 512,
+                "ldsCounterLatency out of range");
   return true;
 }
 

@@ -243,22 +243,6 @@ def add_pressure_budget_options(
             options[option] = value
 
 
-def add_mutating_scheduler_options(
-    options: dict[str, bool | int | str], args: argparse.Namespace
-) -> None:
-    options["max-region-ops"] = 512
-    if args.calibration_file:
-        options["calibration-file"] = str(args.calibration_file)
-
-
-def add_report_scheduler_options(
-    options: dict[str, bool | int | str], args: argparse.Namespace
-) -> None:
-    options["max-region-ops"] = 512
-    if args.calibration_file:
-        options["calibration-file"] = str(args.calibration_file)
-
-
 def add_schedule_model_options(
     options: dict[str, bool | int | str], variant: Variant, args: argparse.Namespace
 ) -> None:
@@ -538,7 +522,6 @@ def scheduler_policy_options(
     if not variant.apply_schedule:
         return {}
     options: dict[str, bool | int | str] = {}
-    add_report_scheduler_options(options, args)
     add_schedule_model_options(options, variant, args)
     return {name: value for name, value in options.items() if value is not False}
 
@@ -549,7 +532,6 @@ def schedule_pass_policy_options(
     if not variant.apply_schedule:
         return {}
     options: dict[str, bool | int | str] = {}
-    add_mutating_scheduler_options(options, args)
     add_schedule_model_options(options, variant, args)
     return {name: value for name, value in options.items() if value is not False}
 

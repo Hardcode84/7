@@ -31,7 +31,7 @@ func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,
 // CAP: [[M0:%.*]] = waveamdmachine.s_mov_m0
 // CAP-NEXT: waveamdmachine.global_load_lds_b32 {{.*}}, [[M0]] after
 // DIAG: waveamd-machine-schedule region func=m0_fill
-// DIAG-SAME: action=apply reason=better
+// DIAG-SAME: action=apply reason=m0_hazard
 // DIAG-SAME: filled_gaps=1
 // DIAG-SAME: m0_gaps=1
 
@@ -68,6 +68,72 @@ func.func @m0_fill_through_noinst(%base: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @valu_addr_gap_not_overfilled(%base: !waveamdmachine.reg<vgpr, 1>,
+                                        %offset: !waveamdmachine.reg<vgpr, 1>,
+                                        %lhs: !waveamdmachine.reg<sgpr, 1>,
+                                        %rhs: !waveamdmachine.reg<sgpr, 1>,
+                                        %tok: !waveamdmachine.mem.token) {
+  %addr = waveamdmachine.v_add_u32 %base, %offset
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %ld, %next = waveamdmachine.ds_load_b32 %addr after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %sum, %scc = waveamdmachine.s_add_i32 %lhs, %rhs
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+}
+
+// IR-LABEL: func.func @valu_addr_gap_not_overfilled
+// IR: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: {{%.*}}, {{%.*}} = waveamdmachine.ds_load_b32 [[ADDR]]
+// IR-NEXT: waveamdmachine.s_add_i32
+// DIAG: waveamd-machine-schedule region func=valu_addr_gap_not_overfilled
+// DIAG-SAME: action=keep reason=same_order
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
+                                   %s0: !waveamdmachine.reg<sgpr, 1>,
+                                   %s1: !waveamdmachine.reg<sgpr, 1>,
+                                   %s2: !waveamdmachine.reg<sgpr, 1>,
+                                   %tok: !waveamdmachine.mem.token) {
+  %ld0, %t0 = waveamdmachine.ds_load_b32 %addr after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %ld1, %t1 = waveamdmachine.ds_load_b32 %addr after %t0 offset 4
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %bt = waveamdmachine.s_barrier %t1
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %x, %sx = waveamdmachine.s_lshl_b32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %y, %sy = waveamdmachine.s_add_i32 %x, %s2
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+}
+
+// IR-LABEL: func.func @barrier_memory_gap_fill
+// IR: waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.ds_load_b32
+// IR-NEXT: [[SHIFT:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+// IR-NEXT: waveamdmachine.s_add_i32 [[SHIFT]]
+// IR-NEXT: waveamdmachine.s_barrier
+// DIAG: waveamd-machine-schedule region func=barrier_memory_gap_fill
+// DIAG-SAME: action=apply reason=barrier_memory
+// DIAG-SAME: filled_gaps=2
+// DIAG-SAME: memory_token_gaps={{[2-9][0-9]*}}
+// DIAG-SAME: filled_barrier_memory_gaps=2
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @barrier_keep(%off: !waveamdmachine.reg<vgpr, 1>,
                         %base: !waveamdmachine.reg<sgpr, 2>,
@@ -90,11 +156,12 @@ func.func @barrier_keep(%off: !waveamdmachine.reg<vgpr, 1>,
 // IR-LABEL: func.func @barrier_keep
 // IR: [[TOK0:%.*]] = waveamdmachine.token
 // IR-NEXT: {{%.*}}, [[TOK1:%.*]] = waveamdmachine.global_load_b32
-// IR-NEXT: {{%.*}} = waveamdmachine.s_barrier [[TOK1]]
 // IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: {{%.*}} = waveamdmachine.s_barrier [[TOK1]]
 // DIAG: waveamd-machine-schedule region func=barrier_keep
-// DIAG-SAME: action=keep reason=not_better
+// DIAG-SAME: action=apply reason=barrier_memory
 // DIAG-SAME: filled_gaps=1
 // DIAG-SAME: memory_token_gaps={{[1-9][0-9]*}}
+// DIAG-SAME: filled_barrier_memory_gaps=1
 
 // ERR: waveamd-machine-schedule unsupported option: beam-search

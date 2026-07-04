@@ -1,6 +1,4 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=LOWER
-// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3 model-vmem-value-latency=20' 2>&1 | FileCheck %s --check-prefix=LOWER-VALUE
-// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3 calibration-file=%S/../../CostModel/Inputs/calibration-with-overrides.json' 2>&1 | FileCheck %s --check-prefix=LOWER-CALIB
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3 model-waves=4 model-simds=4 model-start-delay=0' 2>&1 | FileCheck %s --check-prefix=LOWER-MW
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_greater score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=GREATER
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_equal score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=EQUAL
@@ -82,12 +80,6 @@ func.func @fixed_pressure() {
 // LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=85 issued_ops=3
 
 // BUDGET: waveamd-machine-schedule-report unsupported option: pressure-vgpr-budget
-
-// LOWER-VALUE: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=26 issued_ops=3
-// LOWER-VALUE: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=25 issued_ops=3
-
-// LOWER-CALIB: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=86 issued_ops=3
-// LOWER-CALIB: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=85 issued_ops=3
 
 // LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles={{[0-9]+}} issued_ops=12
 // LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles={{[0-9]+}} issued_ops=12

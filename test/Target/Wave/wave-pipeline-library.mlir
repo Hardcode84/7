@@ -126,6 +126,5 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-schedule"
 // PIPELINE-NEXT: options = { "apply-schedule" = true,
-// PIPELINE-NEXT: "max-region-ops" = 512,
 // PIPELINE-NEXT: "require-selected-input" = true }
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
