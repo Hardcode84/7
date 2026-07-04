@@ -164,4 +164,37 @@ func.func @barrier_keep(%off: !waveamdmachine.reg<vgpr, 1>,
 // DIAG-SAME: memory_token_gaps={{[1-9][0-9]*}}
 // DIAG-SAME: filled_barrier_memory_gaps=1
 
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @wait_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
+                                %s0: !waveamdmachine.reg<sgpr, 1>,
+                                %s1: !waveamdmachine.reg<sgpr, 1>,
+                                %s2: !waveamdmachine.reg<sgpr, 1>,
+                                %s3: !waveamdmachine.reg<sgpr, 1>,
+                                %tok: !waveamdmachine.mem.token) {
+  %ld, %t0 = waveamdmachine.ds_load_b32 %addr after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  waveamdmachine.wait %t0 : (!waveamdmachine.mem.token) -> ()
+  %x, %sx = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %y, %sy = waveamdmachine.s_lshl_b32 %s2, %s3
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+}
+
+// IR-LABEL: func.func @wait_memory_gap_fill
+// IR: [[LD:%.*]], [[TOK:%.*]] = waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_lshl_b32
+// IR-NEXT: waveamdmachine.wait [[TOK]]
+// DIAG: waveamd-machine-schedule region func=wait_memory_gap_fill
+// DIAG-SAME: action=apply reason=greedy
+// DIAG-SAME: filled_gaps=2
+// DIAG-SAME: memory_token_gaps={{[2-9][0-9]*}}
+
 // ERR: waveamd-machine-schedule unsupported option: beam-search

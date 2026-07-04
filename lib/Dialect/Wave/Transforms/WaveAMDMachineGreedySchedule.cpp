@@ -910,6 +910,8 @@ static unsigned findFirstReadyNoInst(const BitVector &ready,
   for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
     if (!ready.test(index))
       continue;
+    if (isa<waveamdmachine::WaitOp>(region.ops[index]))
+      continue;
     if (waveamdmachine::classifyOp(region.ops[index]) ==
         waveamdmachine::SchedClass::NoInst)
       return index;
