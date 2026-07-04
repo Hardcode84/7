@@ -32,7 +32,6 @@ from flash_attention import flash_attention_f32_flops  # noqa: E402
 class Variant:
     name: str
     apply_schedule: bool
-    schedule_model: str = "single"
 
 
 @dataclass
@@ -59,38 +58,7 @@ class VariantResult:
 VARIANTS = {
     "baseline": Variant("baseline", apply_schedule=False),
     "scheduled": Variant("scheduled", apply_schedule=True),
-    "scheduled_multiwave": Variant(
-        "scheduled_multiwave", apply_schedule=True, schedule_model="multi"
-    ),
 }
-
-PRESSURE_BUDGET_OPTIONS = (
-    ("pressure-vgpr-budget", "pressure_vgpr_budget"),
-    ("pressure-sgpr-budget", "pressure_sgpr_budget"),
-    ("pressure-critical-vgpr-budget", "pressure_critical_vgpr_budget"),
-    ("pressure-critical-sgpr-budget", "pressure_critical_sgpr_budget"),
-)
-
-
-def add_pressure_budget_options(
-    options: dict[str, bool | int | str], args: argparse.Namespace
-) -> None:
-    for option, attr in PRESSURE_BUDGET_OPTIONS:
-        value = getattr(args, attr)
-        if value >= 0:
-            options[option] = value
-
-
-def add_schedule_model_options(
-    options: dict[str, bool | int | str], variant: Variant, args: argparse.Namespace
-) -> None:
-    if variant.schedule_model == "single":
-        return
-    if variant.schedule_model != "multi":
-        sys.exit(f"unknown schedule model: {variant.schedule_model}")
-    options["model-waves"] = args.model_waves
-    options["model-simds"] = args.model_simds
-    options["model-start-delay"] = args.model_start_delay
 
 
 def run(
@@ -176,9 +144,7 @@ def scheduler_policy_options(
 ) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int | str] = {}
-    add_schedule_model_options(options, variant, args)
-    return {name: value for name, value in options.items() if value is not False}
+    return {}
 
 
 def schedule_pass_policy_options(
@@ -186,9 +152,7 @@ def schedule_pass_policy_options(
 ) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int | str] = {}
-    add_schedule_model_options(options, variant, args)
-    return {name: value for name, value in options.items() if value is not False}
+    return {}
 
 
 def schedule_pass_options(
@@ -408,9 +372,6 @@ def run_sim_report(
         [
             str(wave_sim),
             f"--func={KERNEL_NAME}",
-            f"--waves={args.sim_waves}",
-            f"--simds={args.sim_simds}",
-            f"--start-delay={args.sim_start_delay}",
             *(
                 [f"--calibration-file={args.calibration_file}"]
                 if args.calibration_file
@@ -513,10 +474,7 @@ def matmul_equiv_tflops(flops: int, micros: float) -> float:
 
 def print_result(result: VariantResult, args: argparse.Namespace) -> None:
     print(f"variant: {result.name}")
-    print(
-        f"  sim_cycles waves={args.sim_waves} simds={args.sim_simds} "
-        f"start_delay={args.sim_start_delay}: {result.sim_cycles}"
-    )
+    print(f"  sim_cycles: {result.sim_cycles}")
     if result.hw_cycles_samples and result.hw_us_samples:
         flops = flash_attention_f32_flops(
             args.block_m, args.block_n, args.head_dim, args.seq_n
@@ -602,23 +560,11 @@ def build_argparser() -> argparse.ArgumentParser:
         "--variants",
         type=parse_variants,
         default=parse_variants("baseline,scheduled"),
-        help="comma-separated variants: baseline, scheduled, scheduled_multiwave",
+        help="comma-separated variants: baseline, scheduled",
     )
-    ap.add_argument("--sim-waves", type=int, default=1)
-    ap.add_argument("--sim-simds", type=int, default=1)
-    ap.add_argument("--sim-start-delay", type=int, default=0)
-    ap.add_argument("--model-waves", type=int, default=4)
-    ap.add_argument("--model-simds", type=int, default=4)
-    ap.add_argument("--model-start-delay", type=int, default=0)
     ap.add_argument("--print-candidates", action="store_true")
     ap.add_argument("--print-score", action="store_true")
     ap.add_argument("--print-regions", action="store_true")
-    ap.add_argument("--beam-search", action="store_true")
-    ap.add_argument("--no-pressure-aware-schedule", action="store_true")
-    ap.add_argument("--pressure-vgpr-budget", type=int, default=-1)
-    ap.add_argument("--pressure-sgpr-budget", type=int, default=-1)
-    ap.add_argument("--pressure-critical-vgpr-budget", type=int, default=-1)
-    ap.add_argument("--pressure-critical-sgpr-budget", type=int, default=-1)
     ap.add_argument("--calibration-file", type=Path, default=None)
     ap.add_argument("--target-waves", type=int, default=0)
     ap.add_argument("--tile-loop-unroll", type=int, default=0)
@@ -649,10 +595,6 @@ def validate_args(args: argparse.Namespace, chip: str) -> None:
         "seq_n",
         "iters",
         "repeats",
-        "sim_waves",
-        "sim_simds",
-        "model_waves",
-        "model_simds",
     )
     for name in positive:
         exit_if(
@@ -666,8 +608,6 @@ def validate_args(args: argparse.Namespace, chip: str) -> None:
         args.calibration_file is not None and not args.calibration_file.exists(),
         f"--calibration-file does not exist: {args.calibration_file}",
     )
-    for _, name in PRESSURE_BUDGET_OPTIONS:
-        exit_if(getattr(args, name) < -1, f"--{name.replace('_', '-')} must be >= -1")
     exit_if(
         bool(args.head_dim & (args.head_dim - 1)), "--head-dim must be a power of two"
     )

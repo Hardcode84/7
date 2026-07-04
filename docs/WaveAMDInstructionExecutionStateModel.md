@@ -2,8 +2,7 @@
 
 ## Goal
 
-Replace scheduler-local issue preview and event-simulator execution logic with
-one small state model.
+Use one small state model for scheduler issue preview and simulator replay.
 
 User-facing API:
 
@@ -31,20 +30,13 @@ include/mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h
 lib/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.cpp
 ```
 
-Do not edit the old cost model or event simulator while building the new model.
-Those users move over once the API is validated.
+Scheduler and simulator users call this API directly.
 
 Allowed reuse:
 
 - `ArchData`, `SchedClass`, `FunctionalUnit`.
 - `OpClassifier` and memory-counter classification helpers.
 - WaveAMDMachine op traits and typed SSA values.
-
-Avoid reuse:
-
-- Event-simulator program flattening or event queues.
-- Scheduler-local `IssueState` / `IssuePreview`.
-- Candidate-policy code from `WaveAMDMachineSchedule*.cpp`.
 
 ## Scope
 
@@ -500,7 +492,7 @@ Unit tests for the new file:
 - Unsupported targets (`gfx12`, GFX125x) fail instead of silently using another
   model.
 
-Integration tests after scheduler/simulator migration:
+Integration tests:
 
 - Greedy scheduler and event simulator report the same stalls on one linear
   region.
@@ -509,14 +501,9 @@ Integration tests after scheduler/simulator migration:
 - Unsupported op fails loudly with op name and region location.
 - Coverage includes one target each for `gfx942`, `gfx950`, and `gfx11*`.
 
-## Migration Plan
+## Current Users
 
-1. Add `InstructionExecutionState` files and unit tests.
-2. Add a debug-only state dump for scheduler/simulator diffing.
-3. Port greedy scheduler issue preview to `query` / `commit`.
-4. Port event simulator replay to `commit`.
-5. Delete scheduler-local issue state once diagnostics match.
-6. Delete or quarantine old event-simulator execution core.
-
-Do not do policy rewrites during steps 1-4. First make both existing users ask
-the same state object the same question.
+- `WaveAMDMachineGreedySchedule.cpp` uses copied state for preview and the live
+  state for commit.
+- `EventSimulator.cpp` replays functions and operation lists through
+  `InstructionExecutionState`.

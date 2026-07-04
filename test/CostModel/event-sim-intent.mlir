@@ -1,4 +1,4 @@
-// RUN: wave-sim-report --func=prio_bias --waves=2 --timeline %s | FileCheck %s --check-prefix=PRIO
+// RUN: wave-sim-report --func=prio_bias --timeline %s | FileCheck %s --check-prefix=PRIO
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @prio_bias() {
@@ -15,9 +15,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 }
 
 // PRIO: func: prio_bias
-// PRIO: total_cycles: 8
-// PRIO: issued_ops: 6
-// PRIO: issue cycle=0 wave=0 simd=0 fu=SALU op=waveamdmachine.s_setprio
-// PRIO: issue cycle=1 wave=0 simd=0 fu=SALU op=waveamdmachine.s_mov_b32_value
-// PRIO: issue cycle=2 wave=1 simd=0 fu=SALU op=waveamdmachine.s_setprio
-// PRIO: issue cycle=3 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
+// PRIO: total_cycles: 5
+// PRIO: issued_ops: 3
+// PRIO: issue cycle=0 fu=SALU op=waveamdmachine.s_setprio
+// PRIO: issue cycle=1 fu=SALU op=waveamdmachine.s_mov_b32_value
+// PRIO: issue cycle=3 fu=SALU op=waveamdmachine.s_add_i32

@@ -29,10 +29,7 @@ struct ArchData;
 class CalibrationData;
 
 struct EventSimConfig {
-  int waves = 1;
-  int simds = 1;
   int waveSize = 0;
-  int startDelay = 0;
   int64_t tripCountOverride = -1;
   const CalibrationData *calibration = nullptr;
   bool recordTimeline = false;
@@ -60,8 +57,6 @@ enum class EventSimEventKind : uint8_t {
 struct EventSimEvent {
   int64_t cycle = 0;
   EventSimEventKind kind = EventSimEventKind::OpIssued;
-  int wave = 0;
-  int simd = 0;
   Operation *op = nullptr;
   FunctionalUnit fu = FunctionalUnit::None;
   EventSimCounter counter = EventSimCounter::None;
@@ -70,7 +65,7 @@ struct EventSimEvent {
 struct EventSimResult {
   int64_t totalCycles = 0;
   int64_t issuedOps = 0;
-  SmallVector<int64_t> waveCompletedCycles;
+  int64_t completedCycle = 0;
   SmallVector<EventSimEvent> events;
 };
 

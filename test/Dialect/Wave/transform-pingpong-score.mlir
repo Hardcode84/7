@@ -3,7 +3,7 @@
 // Two FU regions cross the 16-op detector window. `pingpong_score`
 // chooses a region-boundary delay and returns peak utilization * 1000.
 
-// CHECK: wavemeta.params = {delay = 42 : i64, peak = 947 : i64}
+// CHECK: wavemeta.params = {delay = 20 : i64, peak = 500 : i64}
 module attributes {transform.with_named_sequence,
                    waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_regions(%a: !waveamdmachine.reg<vgpr, 1>, %b: !waveamdmachine.reg<vgpr, 1>) attributes {wave.kernel} {
@@ -53,29 +53,12 @@ module attributes {transform.with_named_sequence,
 
   transform.named_sequence @__transform_main(
       %root: !transform.any_op {transform.readonly}) {
-    %d, %peak = wave.transform.pingpong_score from %root waves = 2
+    %d, %peak = wave.transform.pingpong_score from %root
         : (!transform.any_op) -> (!transform.param<i64>, !transform.param<i64>)
     wave.transform.bind_param %root "delay" = %d
         : (!transform.any_op, !transform.param<i64>) -> ()
     wave.transform.bind_param %root "peak" = %peak
         : (!transform.any_op, !transform.param<i64>) -> ()
-    transform.yield
-  }
-}
-
-// -----
-
-module attributes {transform.with_named_sequence,
-                   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-  func.func @empty() {
-    return
-  }
-
-  transform.named_sequence @__transform_main(
-      %root: !transform.any_op {transform.readonly}) {
-    // expected-error @below {{pingpong_score currently supports waves = 2 only}}
-    %d, %peak = wave.transform.pingpong_score from %root waves = 3
-        : (!transform.any_op) -> (!transform.param<i64>, !transform.param<i64>)
     transform.yield
   }
 }

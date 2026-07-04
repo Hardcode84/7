@@ -51,22 +51,10 @@ static llvm::cl::opt<std::string>
     archName("arch", llvm::cl::desc("gfx target, overrides module attr"),
              llvm::cl::init(""));
 
-static llvm::cl::opt<int> waves("waves", llvm::cl::desc("waves to simulate"),
-                                llvm::cl::init(1));
-
-static llvm::cl::opt<int>
-    simds("simds", llvm::cl::desc("SIMDs to distribute waves across"),
-          llvm::cl::init(1));
-
 static llvm::cl::opt<int>
     waveSize("wave-size",
              llvm::cl::desc("wavefront width for issue timing; 0 uses arch"),
              llvm::cl::init(0));
-
-static llvm::cl::opt<int>
-    startDelay("start-delay",
-               llvm::cl::desc("cycle delay between consecutive waves"),
-               llvm::cl::init(0));
 
 static llvm::cl::opt<int64_t>
     tripCount("trip-count",
@@ -245,8 +233,7 @@ static SmallVector<Operation *> flattenOps(func::FuncOp func) {
 }
 
 static void printEvent(const EventSimEvent &event) {
-  llvm::outs() << eventKindName(event.kind) << " cycle=" << event.cycle
-               << " wave=" << event.wave << " simd=" << event.simd;
+  llvm::outs() << eventKindName(event.kind) << " cycle=" << event.cycle;
   if (event.fu != FunctionalUnit::None)
     llvm::outs() << " fu=" << getFunctionalUnitName(event.fu);
   if (event.counter != EventSimCounter::None)
@@ -307,10 +294,7 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
 
 static EventSimConfig buildConfig(const CalibrationData *calibration) {
   EventSimConfig config;
-  config.waves = std::max(1, waves.getValue());
-  config.simds = std::max(1, simds.getValue());
   config.waveSize = waveSize.getValue();
-  config.startDelay = std::max(0, startDelay.getValue());
   config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
   config.calibration = calibration;
   config.recordTimeline = timeline.getValue();
@@ -362,18 +346,13 @@ static void printSimulationReport(func::FuncOp func, const ArchData &arch,
                                   const EventSimResult &result) {
   llvm::outs() << "func: " << func.getName() << "\n";
   llvm::outs() << "arch: " << arch.name << "\n";
-  llvm::outs() << "waves: " << config.waves << "\n";
-  llvm::outs() << "simds: " << config.simds << "\n";
   if (config.waveSize != 0)
     llvm::outs() << "wave_size: " << config.waveSize << "\n";
-  llvm::outs() << "start_delay: " << config.startDelay << "\n";
   if (config.tripCountOverride >= 0)
     llvm::outs() << "trip_count_override: " << config.tripCountOverride << "\n";
   llvm::outs() << "total_cycles: " << result.totalCycles << "\n";
   llvm::outs() << "issued_ops: " << result.issuedOps << "\n";
-  for (size_t i = 0; i < result.waveCompletedCycles.size(); ++i)
-    llvm::outs() << "wave_" << i
-                 << "_completed: " << result.waveCompletedCycles[i] << "\n";
+  llvm::outs() << "completed: " << result.completedCycle << "\n";
 }
 
 static void printOptionalReports(func::FuncOp func, const ArchData &arch,

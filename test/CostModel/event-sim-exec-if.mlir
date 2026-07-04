@@ -23,13 +23,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 }
 
 // CHECK: func: exec_if_region
-// CHECK: issued_ops: 8
-// CHECK: issue cycle=0 wave=0 simd=0 fu=SALU op=waveamdmachine.exec_if
-// CHECK: issue cycle=1 wave=0 simd=0 fu=BRANCH op=waveamdmachine.exec_if
-// CHECK: issue cycle=2 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
-// CHECK: value_ready cycle=7 wave=0 simd=0 op=waveamdmachine.yield
-// CHECK: issue cycle=8 wave=0 simd=0 fu=BRANCH op=waveamdmachine.exec_if
-// CHECK: issue cycle=9 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
-// CHECK: issue cycle=14 wave=0 simd=0 fu=SALU op=waveamdmachine.exec_if
-// CHECK: value_ready cycle=14 wave=0 simd=0 op=waveamdmachine.yield
-// CHECK: issue cycle=15 wave=0 simd=0 fu=VALU op=waveamdmachine.v_add_u32
+// CHECK: issued_ops: 3
+// CHECK: issue cycle=0 fu=VALU op=waveamdmachine.v_add_u32
+// CHECK: issue cycle=5 fu=VALU op=waveamdmachine.v_add_u32
+// CHECK: issue cycle=10 fu=VALU op=waveamdmachine.v_add_u32
+// CHECK: value_ready cycle=10 op=waveamdmachine.yield

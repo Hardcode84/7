@@ -12,10 +12,9 @@
 #include "../Transforms/RegAlloc/WaveAMDRegAllocTransformState.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
-#include "mlir/Dialect/WaveAMDMachine/CostModel/PressureAnalysis.h"
-#include "mlir/Dialect/WaveAMDMachine/CostModel/RegionProfile.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -36,7 +35,6 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/TargetParser/TargetParser.h"
-#include <cmath>
 #include <limits>
 #include <optional>
 
@@ -454,16 +452,15 @@ resolveArch(Operation *target) {
   return &waveamdmachine::getArchData(isa);
 }
 
-// Sum totalCycles across all func.func in a target. For a single
-// func target this is just that func's cycles.
 static FailureOr<int64_t> sumFuncCycles(Operation *target,
                                         const waveamdmachine::ArchData &arch) {
   int64_t total = 0;
   auto runOne = [&](func::FuncOp f) -> LogicalResult {
-    waveamdmachine::PressureAnalysisResult res;
-    if (failed(waveamdmachine::runPressureAnalysis(f, arch, res)))
+    waveamdmachine::EventSimConfig config;
+    waveamdmachine::EventSimResult result;
+    if (failed(waveamdmachine::simulateEventTimeline(f, arch, config, result)))
       return failure();
-    total += res.totalCycles;
+    total += result.totalCycles;
     return success();
   };
   if (auto f = dyn_cast<func::FuncOp>(target))
@@ -493,7 +490,7 @@ wave::TransformEstimateCyclesOp::apply(transform::TransformRewriter &rewriter,
                 "or arch is unsupported";
     auto cycles = sumFuncCycles(target, **arch);
     if (failed(cycles))
-      return emitDefiniteFailure() << "PressureAnalysis failed on target";
+      return emitDefiniteFailure() << "cycle estimate failed on target";
     values.push_back(b.getI64IntegerAttr(*cycles));
   }
   results.setParams(cast<OpResult>(getResult()), values);
@@ -576,28 +573,103 @@ void wave::TransformPressureReportOp::getEffects(
 
 namespace {
 
-static FailureOr<waveamdmachine::PingpongPick>
-scorePingpongFunc(func::FuncOp f, const waveamdmachine::ArchData &arch) {
-  waveamdmachine::PressureAnalysisResult res;
-  if (failed(waveamdmachine::runPressureAnalysis(f, arch, res)))
-    return failure();
-  SmallVector<waveamdmachine::RegionProfile> regions =
-      waveamdmachine::partitionRegions(f, res, arch);
-  return waveamdmachine::findOptimalPingpongDelay(regions, arch);
+struct SimpleRegion {
+  Operation *begin = nullptr;
+  waveamdmachine::FunctionalUnit fu = waveamdmachine::FunctionalUnit::None;
+  int64_t issueOps = 0;
+};
+
+struct SimplePingpongPick {
+  int64_t delay = 0;
+  int64_t peakPermille = 0;
+};
+
+static void maybeAppendRegion(SimpleRegion &current,
+                              SmallVectorImpl<SimpleRegion> &regions) {
+  if (current.begin && current.issueOps >= 16)
+    regions.push_back(current);
+  current = {};
 }
 
-static FailureOr<waveamdmachine::PingpongPick>
+static void collectSimpleRegions(Block &block,
+                                 const waveamdmachine::ArchData &arch,
+                                 SmallVectorImpl<SimpleRegion> &regions);
+
+static void collectSimpleRegionOp(Operation &op,
+                                  const waveamdmachine::ArchData &arch,
+                                  SmallVectorImpl<SimpleRegion> &regions,
+                                  SimpleRegion &current) {
+  if (op.getNumRegions() != 0) {
+    maybeAppendRegion(current, regions);
+    for (Region &region : op.getRegions())
+      for (Block &nested : region)
+        collectSimpleRegions(nested, arch, regions);
+    return;
+  }
+  if (!isa<waveamdmachine::WaveAMDMachineDialect>(op.getDialect()))
+    return;
+  waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(&op);
+  if (cls == waveamdmachine::SchedClass::NoInst)
+    return;
+  waveamdmachine::FunctionalUnit fu = waveamdmachine::funit(arch, cls);
+  if (fu == waveamdmachine::FunctionalUnit::None)
+    return;
+  if (current.begin && current.fu != fu)
+    maybeAppendRegion(current, regions);
+  if (!current.begin) {
+    current.begin = &op;
+    current.fu = fu;
+  }
+  ++current.issueOps;
+}
+
+static void collectSimpleRegions(Block &block,
+                                 const waveamdmachine::ArchData &arch,
+                                 SmallVectorImpl<SimpleRegion> &regions) {
+  SimpleRegion current;
+  for (Operation &op : block)
+    collectSimpleRegionOp(op, arch, regions, current);
+  maybeAppendRegion(current, regions);
+}
+
+static SmallVector<SimpleRegion>
+partitionSimpleRegions(func::FuncOp f, const waveamdmachine::ArchData &arch) {
+  SmallVector<SimpleRegion> regions;
+  for (Block &block : f.getBody())
+    collectSimpleRegions(block, arch, regions);
+  return regions;
+}
+
+static FailureOr<SimplePingpongPick>
+scorePingpongFunc(func::FuncOp f, const waveamdmachine::ArchData &arch) {
+  SmallVector<SimpleRegion> regions = partitionSimpleRegions(f, arch);
+  SimplePingpongPick pick;
+  if (regions.empty())
+    return pick;
+
+  int64_t total = 0;
+  int64_t peak = 0;
+  for (const SimpleRegion &region : regions) {
+    total += region.issueOps;
+    peak = std::max(peak, region.issueOps);
+  }
+  pick.delay = regions.front().issueOps;
+  pick.peakPermille = total == 0 ? 0 : (peak * 1000) / total;
+  return pick;
+}
+
+static FailureOr<SimplePingpongPick>
 scorePingpongTarget(Operation *target, const waveamdmachine::ArchData &arch) {
   if (auto f = dyn_cast<func::FuncOp>(target))
     return scorePingpongFunc(f, arch);
 
   bool sawFunc = false;
-  waveamdmachine::PingpongPick best;
+  SimplePingpongPick best;
   WalkResult walk = target->walk([&](func::FuncOp f) {
-    FailureOr<waveamdmachine::PingpongPick> pick = scorePingpongFunc(f, arch);
+    FailureOr<SimplePingpongPick> pick = scorePingpongFunc(f, arch);
     if (failed(pick))
       return WalkResult::interrupt();
-    if (!sawFunc || pick->predictedPeakUtil > best.predictedPeakUtil)
+    if (!sawFunc || pick->peakPermille > best.peakPermille)
       best = *pick;
     sawFunc = true;
     return WalkResult::advance();
@@ -613,10 +685,6 @@ DiagnosedSilenceableFailure
 wave::TransformPingpongScoreOp::apply(transform::TransformRewriter &rewriter,
                                       transform::TransformResults &results,
                                       transform::TransformState &state) {
-  if (getWaves() != 2)
-    return emitDefiniteFailure()
-           << "pingpong_score currently supports waves = 2 only";
-
   Builder b(getContext());
   SmallVector<Attribute> delays;
   SmallVector<Attribute> peaks;
@@ -626,13 +694,11 @@ wave::TransformPingpongScoreOp::apply(transform::TransformRewriter &rewriter,
       return emitDefiniteFailure()
              << "target has no enclosing module with `waveamdmachine.target` "
                 "or arch is unsupported";
-    FailureOr<waveamdmachine::PingpongPick> pick =
-        scorePingpongTarget(target, **arch);
+    FailureOr<SimplePingpongPick> pick = scorePingpongTarget(target, **arch);
     if (failed(pick))
       return emitDefiniteFailure() << "region partition failed";
-    int64_t peak = std::llround(pick->predictedPeakUtil * 1000.0);
     delays.push_back(b.getI64IntegerAttr(pick->delay));
-    peaks.push_back(b.getI64IntegerAttr(peak));
+    peaks.push_back(b.getI64IntegerAttr(pick->peakPermille));
   }
   results.setParams(cast<OpResult>(getDelay()), delays);
   results.setParams(cast<OpResult>(getPeak()), peaks);
@@ -657,11 +723,7 @@ namespace {
 static LogicalResult insertBarriersInFunc(func::FuncOp f,
                                           const waveamdmachine::ArchData &arch,
                                           int64_t prio) {
-  waveamdmachine::PressureAnalysisResult res;
-  if (failed(waveamdmachine::runPressureAnalysis(f, arch, res)))
-    return failure();
-  SmallVector<waveamdmachine::RegionProfile> regions =
-      waveamdmachine::partitionRegions(f, res, arch);
+  SmallVector<SimpleRegion> regions = partitionSimpleRegions(f, arch);
   OpBuilder b(f.getContext());
   Block &entry = f.getBody().front();
   b.setInsertionPointToStart(&entry);

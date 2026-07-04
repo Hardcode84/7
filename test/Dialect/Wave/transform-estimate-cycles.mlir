@@ -33,9 +33,7 @@ module attributes {transform.with_named_sequence,
 
 // -----
 
-// Same two ops on gfx942: WriteSALU latency = 1 (SICommon :177).
-// op A issues at 0, completes at 1. op B waits 1 cycle for op
-// A's result, issues at 1, completes at 2. Total = 2.
+// Same two ops on gfx942 use CDNA SALU timing. Total = 8.
 
 module attributes {transform.with_named_sequence,
                    waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
@@ -54,7 +52,7 @@ module attributes {transform.with_named_sequence,
       %root: !transform.any_op {transform.readonly}) {
     %c = wave.transform.estimate_cycles from %root
         : (!transform.any_op) -> !transform.param<i64>
-    %k = transform.param.constant 2 : i64 -> !transform.param<i64>
+    %k = transform.param.constant 8 : i64 -> !transform.param<i64>
     transform.match.param.cmpi eq %c, %k : !transform.param<i64>
     transform.yield
   }
@@ -82,12 +80,8 @@ module attributes {transform.with_named_sequence,
 
 // -----
 
-// uniform_loop with explicit trip_count attribute. Per-iter body
-// cost gets multiplied by T = 3: C1 (cold-trajectory body walk)
-// + (T-1) * Ss (hot-trajectory body walk). Single SALU op per
-// iter on gfx1100 (latency=2): C1=2 (single op completes at 2),
-// Ss=3 (hot fuPending=1 from prior iter's issue forces wait 1
-// before issue; complete at 1+2=3). Total = 2 + 2*3 = 8.
+// uniform_loop with explicit trip_count attribute uses one live state.
+// Three dependent SALU loop iterations complete at cycles 2, 4, 6.
 
 module attributes {transform.with_named_sequence,
                    waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -109,7 +103,7 @@ module attributes {transform.with_named_sequence,
       %root: !transform.any_op {transform.readonly}) {
     %c = wave.transform.estimate_cycles from %root
         : (!transform.any_op) -> !transform.param<i64>
-    %k = transform.param.constant 8 : i64 -> !transform.param<i64>
+    %k = transform.param.constant 6 : i64 -> !transform.param<i64>
     transform.match.param.cmpi eq %c, %k : !transform.param<i64>
     transform.yield
   }
@@ -253,7 +247,7 @@ module attributes {transform.with_named_sequence,
       %root: !transform.any_op {transform.readonly}) {
     %c = wave.transform.estimate_cycles from %root
         : (!transform.any_op) -> !transform.param<i64>
-    %k = transform.param.constant 18 : i64 -> !transform.param<i64>
+    %k = transform.param.constant 15 : i64 -> !transform.param<i64>
     transform.match.param.cmpi eq %c, %k : !transform.param<i64>
     transform.yield
   }

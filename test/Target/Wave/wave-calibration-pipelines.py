@@ -837,7 +837,7 @@ def check_matmul_dma_sim_trip_count(matmul) -> None:
             return "total_cycles: 7\n"
 
         matmul.run = fake_run
-        matmul.run_sim_reports(Path("build"), Path("machine.mlir"), report_args)
+        matmul.run_sim_report(Path("build"), Path("machine.mlir"), report_args)
     finally:
         matmul.run = old_run
     require("matmul_dma_sim_trip_count", bool(captured), "sim report not called")

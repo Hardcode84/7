@@ -460,32 +460,8 @@ def WaveAMDMachineSchedule
            "Apply strictly better greedy gap-fill schedules.">,
     Option<"requireSelectedInput", "require-selected-input", "bool", /*default=*/"false",
            "Only schedule functions stamped by waveamd-to-machine.">,
-    Option<"barrieredLdsDmaHoist", "barriered-lds-dma-hoist", "bool", /*default=*/"false",
-           "Unsupported legacy barrier-pipeline scheduler option.">,
-    Option<"beamSearch", "beam-search", "bool", /*default=*/"false",
-           "Unsupported legacy beam-search scheduler option.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
-           "Skip scheduling regions above this op count; -1 disables the cap.">,
-    Option<"maxBeamWork", "max-beam-work", "int", /*default=*/"-1",
-           "Unsupported legacy beam-search work cap.">,
-    Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
-           "Unsupported legacy pressure-aware scheduler option.">,
-    Option<"modelWaves", "model-waves", "int", /*default=*/"0",
-           "Wave count used by model-scored local scheduling; 0 derives from target_waves.">,
-    Option<"modelSimds", "model-simds", "int", /*default=*/"0",
-           "SIMD count used by model-scored local scheduling; 0 derives from target.">,
-    Option<"modelStartDelay", "model-start-delay", "int", /*default=*/"0",
-           "Cycle delay between modeled waves.">,
-    Option<"pressureVgprBudget", "pressure-vgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureCriticalVgprBudget", "pressure-critical-vgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureTargetWavesOverride", "pressure-target-waves-override", "int", /*default=*/"-2",
-           "Unsupported legacy pressure-policy option.">
+           "Skip scheduling regions above this op count; -1 disables the cap.">
   ];
 }
 
@@ -495,7 +471,7 @@ def WaveAMDMachineScheduleReport
   let description = [{
     Non-mutating diagnostics pass for the greedy gap-fill scheduler. It shares
     region discovery, dependence construction, stall modeling, greedy order
-    construction, and event-simulator scoring with `waveamd-machine-schedule`.
+    construction, and instruction-state scoring with `waveamd-machine-schedule`.
 
     Functions may override the region cap with integer attribute
     `waveamdmachine.schedule_max_region_ops`; `-1` disables that cap.
@@ -510,35 +486,13 @@ def WaveAMDMachineScheduleReport
     Option<"printDeps", "print-deps", "bool", /*default=*/"false",
            "Print local scheduling dependences to stderr.">,
     Option<"printScore", "print-score", "bool", /*default=*/"false",
-           "Print event-simulator scores for local scheduling regions.">,
+           "Print instruction-state scores for local scheduling regions.">,
     Option<"printCandidates", "print-candidates", "bool", /*default=*/"false",
            "Print model-scored scheduler candidate orders to stderr.">,
     Option<"printClasses", "print-classes", "bool", /*default=*/"false",
            "Print scheduler class, functional unit, and latency for each local-region op.">,
-    Option<"beamSearch", "beam-search", "bool", /*default=*/"false",
-           "Unsupported legacy beam-search scheduler option.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
            "Skip scheduling diagnostics above this region op count; -1 disables the cap.">,
-    Option<"maxBeamWork", "max-beam-work", "int", /*default=*/"-1",
-           "Unsupported legacy beam-search work cap.">,
-    Option<"pressureAwareSelection", "pressure-aware-selection", "bool", /*default=*/"false",
-           "Unsupported legacy pressure-aware scheduler option.">,
-    Option<"modelWaves", "model-waves", "int", /*default=*/"0",
-           "Wave count used by model-scored local scheduling; 0 derives from target_waves.">,
-    Option<"modelSimds", "model-simds", "int", /*default=*/"0",
-           "SIMD count used by model-scored local scheduling; 0 derives from target.">,
-    Option<"modelStartDelay", "model-start-delay", "int", /*default=*/"0",
-           "Cycle delay between modeled waves.">,
-    Option<"pressureVgprBudget", "pressure-vgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureSgprBudget", "pressure-sgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureCriticalVgprBudget", "pressure-critical-vgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureCriticalSgprBudget", "pressure-critical-sgpr-budget", "int", /*default=*/"-1",
-           "Unsupported legacy pressure-policy option.">,
-    Option<"pressureTargetWavesOverride", "pressure-target-waves-override", "int", /*default=*/"-2",
-           "Unsupported legacy pressure-policy option.">,
     Option<"scoreFunc", "score-func", "std::string", /*default=*/"\"\"",
            "Function name whose local region should score a candidate order.">,
     Option<"scoreRegion", "score-region", "int", /*default=*/"-1",

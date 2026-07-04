@@ -279,28 +279,19 @@ def Wave_TransformRegAllocScratchReliefOp
   }];
 }
 
-// Runs dense-dataflow PressureAnalysis on each payload op
-// (func.func or builtin.module) and yields totalCycles as a
-// `!transform.param<i64>`. The arch is read from the enclosing
-// module's `waveamdmachine.target` attribute (set by
-// `wave-set-target-attr`). For module targets, the result is the
-// sum over contained funcs.
-//
-// totalCycles is currently a straight-line accumulator -- loop
-// bodies walked once. Trip-count multiplication lands separately;
-// callers should treat the number as ranking-grade until then.
+// Runs the single-wave instruction execution model on each payload op and
+// yields totalCycles as a `!transform.param<i64>`.
 def Wave_TransformEstimateCyclesOp
     : Op<Wave_Dialect, "transform.estimate_cycles", [
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<TransformOpInterface>]> {
   let summary = "Single-wave cycle estimate as a transform param";
   let description = [{
-    For each payload op associated with `$target`, run the
-    PressureAnalysis dataflow and append the resulting totalCycles
-    to the output parameter. Target ops must be `func.func` or
-    `builtin.module` (for modules, the result is the sum over
-    contained funcs). Reads the arch from the enclosing module's
-    `waveamdmachine.target` attribute.
+    For each payload op associated with `$target`, run the instruction
+    execution state model and append the resulting totalCycles to the output
+    parameter. Target ops must be `func.func` or `builtin.module` (for modules,
+    the result is the sum over contained funcs). Reads the arch from the
+    enclosing module's `waveamdmachine.target` attribute.
 
     Definite failure if the attribute is missing or names an
     unsupported arch.
@@ -342,49 +333,41 @@ def Wave_TransformPressureReportOp
   }];
 }
 
-// Run the ping-pong delay search and return delay plus peak*1000.
+// Partition long contiguous FU runs and return a coarse delay plus peak*1000.
 def Wave_TransformPingpongScoreOp
     : Op<Wave_Dialect, "transform.pingpong_score", [
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<TransformOpInterface>]> {
-  let summary = "Score the best two-wave ping-pong delay";
+  let summary = "Score coarse ping-pong region balance";
   let description = [{
-    For each payload op associated with `$target`, runs
-    PressureAnalysis, partitions each kernel into FU regions, searches
-    candidate two-wave offsets, and returns the selected delay plus the
-    predicted peak utilization scaled by 1000.
+    For each payload op associated with `$target`, partitions each kernel into
+    long contiguous FU regions and returns the first-region delay plus peak
+    region share scaled by 1000.
 
     Definite failure if the enclosing module's
-    `waveamdmachine.target` attribute is missing or names an unsupported
-    arch. Currently supports `waves = 2` only.
+    `waveamdmachine.target` attribute is missing or names an unsupported arch.
   }];
-  let arguments = (ins TransformHandleTypeInterface:$target,
-                       DefaultValuedAttr<I64Attr, "2">:$waves);
+  let arguments = (ins TransformHandleTypeInterface:$target);
   let results = (outs TransformParamTypeInterface:$delay,
                       TransformParamTypeInterface:$peak);
   let assemblyFormat = [{
-    `from` $target (`waves` `=` $waves^)? attr-dict
-        `:` functional-type($target, results)
+    `from` $target attr-dict `:` functional-type($target, results)
   }];
 }
 
-// Insert ping-pong sync primitives at auto-detected region
-// boundaries. Barrier-insertion-only: partitions each kernel func
-// (RegionProfile sliding-window detector) and drops an s_barrier
-// between adjacent FU-regions, plus an s_setprio at func entry.
-// Phase/role partitioning (body cloning, wave_id predication) is a
-// later transform. gfx<=11 path -- s_barrier only.
+// Insert sync primitives at auto-detected long FU-run boundaries.
 def Wave_TransformInsertPingpongBarriersOp
     : Op<Wave_Dialect, "transform.insert_pingpong_barriers", [
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<TransformOpInterface>]> {
   let summary = "Insert s_barrier / s_setprio at region boundaries";
   let description = [{
-    For each func.func payload op, partition the body into per-FU
-    regions and emit a waveamdmachine.s_barrier before every region
-    after the first. `prio` (default 3) sets an s_setprio at func
-    entry. Reads arch from the enclosing module `waveamdmachine.target`.
-    Definite failure if arch missing/unsupported. gfx<=11 only.
+    For each func.func payload op, partition the body into long contiguous
+    per-FU regions and emit a waveamdmachine.s_barrier before every region
+    after the first. `prio` (default 3) sets an s_setprio at func entry. Reads
+    arch from the enclosing module `waveamdmachine.target`.
+
+    Definite failure if arch missing/unsupported.
   }];
   let arguments = (ins TransformHandleTypeInterface:$target,
                        DefaultValuedAttr<I64Attr, "3">:$prio);

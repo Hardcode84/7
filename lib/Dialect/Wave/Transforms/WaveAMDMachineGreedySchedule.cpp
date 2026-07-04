@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/CalibrationData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
@@ -31,7 +32,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <limits>
 #include <optional>
 
 namespace mlir::wave {
@@ -47,13 +47,10 @@ namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 
-static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
 static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
 static constexpr StringLiteral kReportPrefix =
     "waveamd-machine-schedule-report";
-static constexpr size_t kNumScheduleFUs =
-    static_cast<size_t>(waveamdmachine::FunctionalUnit::NumFunctionalUnits);
 
 enum class EdgeKind : uint8_t {
   Ssa,
@@ -68,6 +65,12 @@ enum class FillableStallKind : uint8_t {
   Cycle,
   MemoryToken,
   M0Hazard,
+};
+
+enum class GreedyStepStatus : uint8_t {
+  Continue,
+  Done,
+  Blocked,
 };
 
 struct ScheduleEdge {
@@ -103,19 +106,12 @@ struct GraphTables {
   SmallVector<unsigned, 16> pendingPreds;
 };
 
-struct ValueHazards {
-  unsigned m0 = 0;
-};
-
 struct IssueState {
-  DenseMap<Value, int64_t> readyAt;
-  DenseMap<Value, int64_t> memoryReadyAt;
-  DenseMap<Value, ValueHazards> hazards;
-  DenseMap<int64_t, unsigned> cuIssueCounts;
-  DenseMap<int64_t, unsigned> cmaIssueCounts;
-  std::array<int64_t, kNumScheduleFUs> fuReady = {};
-  int64_t issueReady = 0;
-  int64_t ldsDmaReady = 0;
+  IssueState(const waveamdmachine::ArchData &arch,
+             waveamdmachine::InstructionExecutionConfig config)
+      : model(arch, config) {}
+
+  waveamdmachine::InstructionExecutionState model;
 };
 
 struct IssuePreview {
@@ -167,17 +163,8 @@ struct OrderScore {
   int64_t issuedOps = 0;
 };
 
-struct UnsupportedOption {
-  bool enabled = false;
-  StringRef name;
-};
-
 static bool isMemToken(Value value) {
   return isa<waveamdmachine::MemTokenType>(value.getType());
-}
-
-static bool isM0(Value value) {
-  return isa<waveamdmachine::M0Type>(value.getType());
 }
 
 enum class SingletonKind : uint8_t {
@@ -223,13 +210,6 @@ static LogicalResult validateRegionMember(Operation *op) {
   return success();
 }
 
-static Attribute findTargetWavesAttr(Operation *op) {
-  for (Operation *cur = op; cur; cur = cur->getParentOp())
-    if (Attribute attr = cur->getAttr(kTargetWavesAttr))
-      return attr;
-  return {};
-}
-
 static ArchResolution resolveArch(Operation *op) {
   ModuleOp mod = waveamdmachine::findAMDGPUTargetModule(op);
   if (!mod)
@@ -254,78 +234,6 @@ static LogicalResult reportArchFailure(Operation *op, ArchResolution arch) {
          << arch.reason;
 }
 
-static LogicalResult
-configureModel(Operation *op, int modelWaves, int modelSimds,
-               int modelStartDelay,
-               waveamdmachine::EventSimConfig &modelConfig) {
-  if (modelWaves < 0)
-    return op->emitError("model-waves must be non-negative");
-  if (modelSimds < 0)
-    return op->emitError("model-simds must be non-negative");
-  if (modelStartDelay < 0)
-    return op->emitError("model-start-delay must be non-negative");
-
-  modelConfig.waves = modelWaves;
-  modelConfig.simds = modelSimds;
-  modelConfig.startDelay = modelStartDelay;
-  modelConfig.completePendingLdsDmaCounters = true;
-  modelConfig.ldsDmaIssueInterval = -1;
-  modelConfig.cmaIssueInterval = -1;
-  return success();
-}
-
-static FailureOr<int> validateTargetWaves(Operation *op, ArchResolution arch,
-                                          int64_t targetWaves,
-                                          StringRef sourceName) {
-  if (targetWaves <= 0 ||
-      targetWaves > static_cast<int64_t>(std::numeric_limits<int>::max()))
-    return op->emitError() << sourceName << " must be positive";
-  if (arch.arch && targetWaves > arch.arch->wavesPerSIMD)
-    return op->emitError() << sourceName << " exceeds target wave capacity";
-  return static_cast<int>(targetWaves);
-}
-
-static LogicalResult
-finalizeModel(Operation *op, ArchResolution arch,
-              waveamdmachine::EventSimConfig &modelConfig) {
-  if (modelConfig.waves > 0 && modelConfig.simds > 0)
-    return success();
-
-  int simds = modelConfig.simds;
-  if (simds == 0)
-    simds = arch.arch ? arch.arch->simdsPerCU : 1;
-
-  int waves = modelConfig.waves;
-  if (waves == 0) {
-    Attribute attr = findTargetWavesAttr(op);
-    if (attr && arch.arch) {
-      auto intAttr = dyn_cast<IntegerAttr>(attr);
-      if (!intAttr)
-        return op->emitError()
-               << kTargetWavesAttr << " must be an integer attribute";
-      FailureOr<int> targetWaves =
-          validateTargetWaves(op, arch, intAttr.getInt(), kTargetWavesAttr);
-      if (failed(targetWaves))
-        return failure();
-      waves = *targetWaves * simds;
-    } else {
-      waves = 1;
-    }
-  }
-
-  modelConfig.waves = waves;
-  modelConfig.simds = simds;
-  return success();
-}
-
-static LogicalResult checkUnsupportedOptions(Operation *op, StringRef passName,
-                                             ArrayRef<UnsupportedOption> opts) {
-  for (const UnsupportedOption &opt : opts)
-    if (opt.enabled)
-      return op->emitError() << passName << " unsupported option: " << opt.name;
-  return success();
-}
-
 static int getModelLatency(const waveamdmachine::ArchData &arch,
                            waveamdmachine::SchedClass cls,
                            const waveamdmachine::EventSimConfig &config) {
@@ -336,245 +244,80 @@ static int getModelLatency(const waveamdmachine::ArchData &arch,
   return waveamdmachine::getLatency(arch, cls);
 }
 
+static waveamdmachine::InstructionExecutionConfig
+buildInstructionConfig(const waveamdmachine::ArchData &arch,
+                       const waveamdmachine::EventSimConfig &config) {
+  waveamdmachine::InstructionExecutionConfig stateConfig;
+  stateConfig.calibration = config.calibration;
+  stateConfig.counterLatencies = config.counterLatencies;
+  stateConfig.valueLatencies = config.valueLatencies;
+  stateConfig.issuePeriod =
+      waveamdmachine::getEventSimIssuePeriod(arch, config);
+  return stateConfig;
+}
+
 static unsigned getIssueCount(Operation *op) {
   if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
-    return info.getWaitcntInfo().issueCount;
-  return 0;
+    return std::max(1u, info.getWaitcntInfo().issueCount);
+  return 1;
 }
 
-static unsigned getIssueSlots(waveamdmachine::SchedClass cls,
-                              unsigned issueCount) {
-  if (cls == waveamdmachine::SchedClass::NoInst)
-    return 0;
-  return std::max(1u, issueCount);
-}
-
-static int64_t issueCycleAt(int64_t start, unsigned issue, int period) {
-  return start + static_cast<int64_t>(issue) * period;
-}
-
-static int64_t cuIssueReadyCycle(const IssueState &state,
-                                 const waveamdmachine::ArchData &arch,
-                                 int64_t cycle, unsigned issues, int period) {
-  unsigned cap = static_cast<unsigned>(arch.issuesPerCUPerCycle);
-  while (true) {
-    std::optional<int64_t> nextStart;
-    for (unsigned issue : llvm::seq<unsigned>(0, issues)) {
-      int64_t current = issueCycleAt(cycle, issue, period);
-      if (state.cuIssueCounts.lookup(current) < cap)
-        continue;
-      nextStart = current - static_cast<int64_t>(issue) * period + 1;
+static void recordPreviewStall(IssuePreview &preview,
+                               const waveamdmachine::InstructionStall &stall) {
+  for (const waveamdmachine::InstructionStallComponent &component :
+       stall.components) {
+    switch (component.kind) {
+    case waveamdmachine::InstructionStallKind::OperandValue:
+    case waveamdmachine::InstructionStallKind::MemoryValue:
+      preview.operandWaitCycles =
+          std::max(preview.operandWaitCycles, component.cycles);
+      break;
+    case waveamdmachine::InstructionStallKind::MemoryToken:
+    case waveamdmachine::InstructionStallKind::Waitcnt:
+      preview.memoryWaitCycles =
+          std::max(preview.memoryWaitCycles, component.cycles);
+      break;
+    case waveamdmachine::InstructionStallKind::IssueBackpressure:
+      preview.fuWaitCycles = std::max(preview.fuWaitCycles, component.cycles);
+      break;
+    case waveamdmachine::InstructionStallKind::M0ReadWrite:
+      preview.hazardWaitInsts =
+          std::max<unsigned>(preview.hazardWaitInsts, component.cycles);
+      break;
+    case waveamdmachine::InstructionStallKind::None:
       break;
     }
-    if (!nextStart)
-      return cycle;
-    cycle = std::max<int64_t>(cycle + 1, *nextStart);
   }
 }
 
-static int64_t cmaIssueReadyCycle(const IssueState &state,
-                                  const waveamdmachine::ArchData &arch,
-                                  const waveamdmachine::EventSimConfig &config,
-                                  int64_t cycle, Operation *op,
-                                  waveamdmachine::SchedClass cls,
-                                  unsigned issues) {
-  int interval = waveamdmachine::getEventSimCmaIssueInterval(arch, config);
-  unsigned cmaIssues =
-      waveamdmachine::getEventSimCmaIssueCount(op, cls, issues);
-  if (interval <= 0 || cmaIssues == 0)
-    return cycle;
-
-  unsigned cap = waveamdmachine::getEventSimCmaIssueCapacity(arch);
-  while (true) {
-    std::optional<int64_t> nextStart;
-    for (unsigned issue : llvm::seq<unsigned>(0, cmaIssues)) {
-      int64_t begin = issueCycleAt(cycle, issue, interval);
-      for (unsigned offset :
-           llvm::seq<unsigned>(0, static_cast<unsigned>(interval))) {
-        int64_t current = begin + offset;
-        if (state.cmaIssueCounts.lookup(current) < cap)
-          continue;
-        nextStart = current - static_cast<int64_t>(issue) * interval -
-                    static_cast<int64_t>(offset) + 1;
-        break;
-      }
-      if (nextStart)
-        break;
-    }
-    if (!nextStart)
-      return cycle;
-    cycle = std::max<int64_t>(cycle + 1, *nextStart);
-  }
-}
-
-static void consumeCuIssueSlots(IssueState &state,
-                                const waveamdmachine::ArchData &arch,
-                                int64_t cycle, unsigned issues, int period) {
-  for (unsigned issue : llvm::seq<unsigned>(0, issues)) {
-    int64_t current = issueCycleAt(cycle, issue, period);
-    unsigned &count = state.cuIssueCounts[current];
-    assert(count < static_cast<unsigned>(arch.issuesPerCUPerCycle) &&
-           "CU issue cap exceeded");
-    ++count;
-  }
-}
-
-static void consumeCmaIssueSlots(IssueState &state,
-                                 const waveamdmachine::ArchData &arch,
-                                 const waveamdmachine::EventSimConfig &config,
-                                 int64_t cycle, Operation *op,
-                                 waveamdmachine::SchedClass cls,
-                                 unsigned issues) {
-  int interval = waveamdmachine::getEventSimCmaIssueInterval(arch, config);
-  unsigned cmaIssues =
-      waveamdmachine::getEventSimCmaIssueCount(op, cls, issues);
-  if (interval <= 0 || cmaIssues == 0)
-    return;
-
-  unsigned cap = waveamdmachine::getEventSimCmaIssueCapacity(arch);
-  for (unsigned issue : llvm::seq<unsigned>(0, cmaIssues)) {
-    int64_t begin = issueCycleAt(cycle, issue, interval);
-    for (unsigned offset :
-         llvm::seq<unsigned>(0, static_cast<unsigned>(interval))) {
-      int64_t current = begin + offset;
-      unsigned &count = state.cmaIssueCounts[current];
-      assert(count < cap && "CMA issue cap exceeded");
-      ++count;
-    }
-  }
-}
-
-static int64_t valueReadyCycle(const IssueState &state, Operation *op) {
-  int64_t ready = 0;
-  for (Value operand : op->getOperands()) {
-    if (isMemToken(operand))
-      continue;
-    ready = std::max(ready, state.readyAt.lookup(operand));
-  }
-  return ready;
-}
-
-static bool waitsForMemoryTokens(Operation *op) {
-  if (isa<waveamdmachine::SBarrierOp, waveamdmachine::TokenJoinOp,
-          waveamdmachine::AfterOp>(op))
-    return true;
-  return false;
-}
-
-static int64_t memoryReadyCycle(const IssueState &state, Operation *op) {
-  if (!waitsForMemoryTokens(op))
-    return 0;
-  int64_t ready = 0;
-  for (Value operand : op->getOperands())
-    if (isMemToken(operand))
-      ready = std::max(ready, state.memoryReadyAt.lookup(operand));
-  return ready;
-}
-
-static ValueHazards joinOperandHazards(const IssueState &state, Operation *op) {
-  ValueHazards joined;
-  for (Value operand : op->getOperands()) {
-    ValueHazards hazards = state.hazards.lookup(operand);
-    joined.m0 = std::max(joined.m0, hazards.m0);
-  }
-  return joined;
-}
-
-static unsigned getRequiredM0Wait(Operation *op, const IssueState &state) {
-  unsigned wait = 0;
-  for (Value operand : op->getOperands())
-    if (isM0(operand))
-      wait = std::max(wait, state.hazards.lookup(operand).m0);
-  return wait;
-}
-
-static void decrementHazards(IssueState &state, unsigned count) {
-  if (count == 0)
-    return;
-  for (auto &it : state.hazards)
-    it.second.m0 = it.second.m0 > count ? it.second.m0 - count : 0;
-}
-
-static void seedProducedHazards(IssueState &state, Operation *op) {
-  auto hazardOp = dyn_cast<waveamdmachine::M0WriteHazardOpInterface>(op);
-  if (!hazardOp)
-    return;
-  Value value = hazardOp.getM0HazardValue();
-  state.hazards[value].m0 = std::max(state.hazards[value].m0, 1u);
-}
-
-static IssuePreview previewIssue(const IssueState &state, Operation *op,
-                                 const waveamdmachine::ArchData &arch,
-                                 const waveamdmachine::EventSimConfig &config) {
+static FailureOr<IssuePreview>
+previewIssue(const IssueState &state, Operation *op,
+             const waveamdmachine::ArchData &arch,
+             const waveamdmachine::EventSimConfig &config) {
   IssuePreview preview;
-  int64_t start = state.issueReady;
   preview.cls = waveamdmachine::classifyOp(op);
   preview.realInst = preview.cls != waveamdmachine::SchedClass::NoInst;
-  preview.hazardWaitInsts = getRequiredM0Wait(op, state);
-  preview.operandWaitCycles =
-      std::max<int64_t>(0, valueReadyCycle(state, op) - start);
-  preview.memoryWaitCycles =
-      std::max<int64_t>(0, memoryReadyCycle(state, op) - start);
-
-  int64_t ready = start + preview.issueWaitCycles;
-  ready = std::max<int64_t>(ready, valueReadyCycle(state, op));
-  ready = std::max<int64_t>(ready, memoryReadyCycle(state, op));
-
-  if (!preview.realInst) {
-    preview.issueCycle = ready;
-    preview.readyCycle = ready;
-    preview.nextIssueCycle = start;
-    preview.memoryReadyCycle = ready;
-    preview.memoryValueReadyCycle = ready;
-    return preview;
-  }
-
-  preview.fu = waveamdmachine::funit(arch, preview.cls);
-  preview.issues = getIssueSlots(preview.cls, getIssueCount(op));
+  preview.fu = preview.realInst ? waveamdmachine::funit(arch, preview.cls)
+                                : waveamdmachine::FunctionalUnit::None;
+  preview.issues = preview.realInst ? getIssueCount(op) : 0;
   preview.memoryIssuer = waveamdmachine::getMemoryCounterKind(op) !=
                          waveamdmachine::MemoryCounterKind::None;
   preview.hasMemoryValue = waveamdmachine::hasMemoryValueLatency(op);
-  int period = waveamdmachine::getEventSimIssuePeriod(arch, config);
-  int latency = getModelLatency(arch, preview.cls, config);
 
-  preview.fuWaitCycles = std::max<int64_t>(
-      0, state.fuReady[static_cast<size_t>(preview.fu)] - start);
-  ready = std::max(ready, state.fuReady[static_cast<size_t>(preview.fu)]);
-  if (waveamdmachine::isLdsDmaIssuer(op)) {
-    int interval = waveamdmachine::getEventSimLdsDmaIssueInterval(arch, config);
-    if (interval > 0) {
-      preview.ldsDmaWaitCycles =
-          std::max<int64_t>(0, state.ldsDmaReady - start);
-      ready = std::max(ready, state.ldsDmaReady);
-    }
-  }
+  IssueState trial = state;
+  FailureOr<waveamdmachine::InstructionCommitResult> commit =
+      trial.model.commit(op);
+  if (failed(commit))
+    return failure();
 
-  int64_t beforeCma = ready;
-  int64_t cmaReady = cmaIssueReadyCycle(state, arch, config, beforeCma, op,
-                                        preview.cls, preview.issues);
-  preview.cmaIssueWaitCycles = std::max<int64_t>(0, cmaReady - beforeCma);
-  int64_t cuReady =
-      cuIssueReadyCycle(state, arch, cmaReady, preview.issues, period);
-  preview.cuIssueWaitCycles = std::max<int64_t>(0, cuReady - cmaReady);
-  preview.issueCycle = cuReady;
-
-  int64_t lastIssue =
-      preview.issueCycle + static_cast<int64_t>(preview.issues - 1) * period;
-  preview.nextIssueCycle =
-      preview.issueCycle + static_cast<int64_t>(preview.issues) * period;
-  preview.readyCycle = lastIssue + latency;
-  preview.memoryValueReadyCycle =
-      preview.hasMemoryValue
-          ? lastIssue + waveamdmachine::getMemoryValueLatency(
-                            arch, op, config.counterLatencies,
-                            config.valueLatencies, config.calibration)
-          : preview.readyCycle;
-  if (preview.memoryIssuer)
-    preview.memoryReadyCycle =
-        lastIssue + waveamdmachine::getMemoryCounterLatency(
-                        arch, op, config.counterLatencies, config.calibration);
-  else
-    preview.memoryReadyCycle = preview.readyCycle;
+  recordPreviewStall(preview, commit->stall);
+  preview.issueCycle = commit->issueCycle;
+  preview.readyCycle = commit->valueReadyCycle;
+  preview.nextIssueCycle = commit->nextIssueCycle;
+  preview.memoryReadyCycle = commit->tokenReadyCycle;
+  preview.memoryValueReadyCycle = commit->valueReadyCycle;
+  (void)arch;
+  (void)config;
   return preview;
 }
 
@@ -585,54 +328,12 @@ static bool stalls(const IssuePreview &preview) {
          preview.ldsDmaWaitCycles != 0 || preview.hazardWaitInsts != 0;
 }
 
-static void commitNoInst(IssueState &state, Operation *op,
-                         const IssuePreview &preview) {
-  ValueHazards inherited = joinOperandHazards(state, op);
-  int64_t valueReady = valueReadyCycle(state, op);
-  int64_t memoryReady = memoryReadyCycle(state, op);
-  for (Value result : op->getResults()) {
-    state.readyAt[result] = valueReady;
-    if (isMemToken(result))
-      state.memoryReadyAt[result] = memoryReady;
-    if (isM0(result))
-      state.hazards[result] = inherited;
-  }
-  seedProducedHazards(state, op);
+static LogicalResult commitIssue(IssueState &state, Operation *op,
+                                 const IssuePreview &preview) {
   (void)preview;
-}
-
-static void commitIssue(IssueState &state, Operation *op,
-                        const IssuePreview &preview,
-                        const waveamdmachine::ArchData &arch,
-                        const waveamdmachine::EventSimConfig &config) {
-  if (!preview.realInst) {
-    commitNoInst(state, op, preview);
-    return;
-  }
-
-  int period = waveamdmachine::getEventSimIssuePeriod(arch, config);
-  state.issueReady = preview.nextIssueCycle;
-  state.fuReady[static_cast<size_t>(preview.fu)] = preview.nextIssueCycle;
-  consumeCuIssueSlots(state, arch, preview.issueCycle, preview.issues, period);
-  consumeCmaIssueSlots(state, arch, config, preview.issueCycle, op, preview.cls,
-                       preview.issues);
-  if (waveamdmachine::isLdsDmaIssuer(op)) {
-    int interval = waveamdmachine::getEventSimLdsDmaIssueInterval(arch, config);
-    if (interval > 0)
-      state.ldsDmaReady =
-          preview.issueCycle + static_cast<int64_t>(preview.issues) * interval;
-  }
-
-  decrementHazards(state, 1);
-  for (Value result : op->getResults()) {
-    int64_t resultReady = preview.readyCycle;
-    if (preview.hasMemoryValue && !isMemToken(result))
-      resultReady = preview.memoryValueReadyCycle;
-    state.readyAt[result] = resultReady;
-    if (isMemToken(result))
-      state.memoryReadyAt[result] = preview.memoryReadyCycle;
-  }
-  seedProducedHazards(state, op);
+  if (failed(state.model.commit(op)))
+    return failure();
+  return success();
 }
 
 static void addEdge(GraphTables &graph, unsigned src, unsigned dst,
@@ -890,17 +591,18 @@ static bool fillsStall(FillableStall stall, const IssuePreview &candidate) {
   return true;
 }
 
-static unsigned findStallFiller(const BitVector &ready, unsigned next,
-                                const GreedyRegion &region,
-                                const IssueState &state,
-                                const waveamdmachine::ArchData &arch,
-                                const waveamdmachine::EventSimConfig &cfg,
-                                FillableStall stall) {
+static FailureOr<unsigned> findStallFiller(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const IssueState &state, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &cfg, FillableStall stall) {
   for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
     if (!ready.test(index) || index == next)
       continue;
-    IssuePreview preview = previewIssue(state, region.ops[index], arch, cfg);
-    if (fillsStall(stall, preview))
+    FailureOr<IssuePreview> preview =
+        previewIssue(state, region.ops[index], arch, cfg);
+    if (failed(preview))
+      return failure();
+    if (fillsStall(stall, *preview))
       return index;
   }
   return ready.size();
@@ -953,37 +655,86 @@ static void recordDependencyCycle(const GraphTables &graph,
   }
 }
 
-static void scheduleReadyNode(
+static LogicalResult scheduleReadyNode(
     unsigned selected, const GreedyRegion &region, const GraphTables &graph,
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, IssueState &state,
     BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
     SmallVectorImpl<unsigned> &order, const IssuePreview &preview) {
   order.push_back(selected);
-  commitIssue(state, region.ops[selected], preview, arch, config);
+  if (failed(commitIssue(state, region.ops[selected], preview)))
+    return failure();
   markScheduled(selected, graph, ready, scheduled, pending);
+  (void)arch;
+  (void)config;
+  return success();
 }
 
-static void drainReadyNoInsts(const GreedyRegion &region,
-                              const GraphTables &graph,
-                              const waveamdmachine::ArchData &arch,
-                              const waveamdmachine::EventSimConfig &config,
-                              IssueState &state, BitVector &ready,
-                              BitVector &scheduled,
-                              SmallVectorImpl<unsigned> &pending,
-                              SmallVectorImpl<unsigned> &order) {
+static LogicalResult
+drainReadyNoInsts(const GreedyRegion &region, const GraphTables &graph,
+                  const waveamdmachine::ArchData &arch,
+                  const waveamdmachine::EventSimConfig &config,
+                  IssueState &state, BitVector &ready, BitVector &scheduled,
+                  SmallVectorImpl<unsigned> &pending,
+                  SmallVectorImpl<unsigned> &order) {
   while (true) {
     unsigned selected = findFirstReadyNoInst(ready, region);
     if (selected == region.ops.size())
-      return;
-    IssuePreview preview =
+      return success();
+    FailureOr<IssuePreview> preview =
         previewIssue(state, region.ops[selected], arch, config);
-    scheduleReadyNode(selected, region, graph, arch, config, state, ready,
-                      scheduled, pending, order, preview);
+    if (failed(preview))
+      return failure();
+    if (failed(scheduleReadyNode(selected, region, graph, arch, config, state,
+                                 ready, scheduled, pending, order, *preview)))
+      return failure();
   }
 }
 
-static bool
+static FailureOr<bool> previewNextIssue(
+    const GreedyRegion &region, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const IssueState &state,
+    unsigned next, IssuePreview &nextPreview) {
+  FailureOr<IssuePreview> preview =
+      previewIssue(state, region.ops[next], arch, config);
+  if (failed(preview))
+    return failure();
+  nextPreview = *preview;
+  return !stalls(nextPreview);
+}
+
+static LogicalResult
+scheduleStallFiller(const GreedyRegion &region, const GraphTables &graph,
+                    const waveamdmachine::ArchData &arch,
+                    const waveamdmachine::EventSimConfig &config,
+                    IssueState &state, BitVector &ready, BitVector &scheduled,
+                    SmallVectorImpl<unsigned> &pending,
+                    SmallVectorImpl<unsigned> &order, unsigned filler) {
+  FailureOr<IssuePreview> fillerPreview =
+      previewIssue(state, region.ops[filler], arch, config);
+  if (failed(fillerPreview))
+    return failure();
+  if (failed(scheduleReadyNode(filler, region, graph, arch, config, state,
+                               ready, scheduled, pending, order,
+                               *fillerPreview)))
+    return failure();
+  return drainReadyNoInsts(region, graph, arch, config, state, ready, scheduled,
+                           pending, order);
+}
+
+static void recordFilledStall(Operation *op, const IssuePreview &nextPreview,
+                              GreedyStats &stats) {
+  ++stats.filledGaps;
+  if (nextPreview.memoryWaitCycles != 0 && isa<waveamdmachine::SBarrierOp>(op))
+    ++stats.filledBarrierMemoryGaps;
+}
+
+static bool nextStillReady(const BitVector &ready, const BitVector &scheduled,
+                           unsigned next) {
+  return !scheduled.test(next) && ready.test(next);
+}
+
+static FailureOr<bool>
 fillStallBeforeNext(const GreedyRegion &region, const GraphTables &graph,
                     const waveamdmachine::ArchData &arch,
                     const waveamdmachine::EventSimConfig &config,
@@ -992,32 +743,102 @@ fillStallBeforeNext(const GreedyRegion &region, const GraphTables &graph,
                     SmallVectorImpl<unsigned> &order, GreedyStats &stats,
                     unsigned next, IssuePreview &nextPreview) {
   while (true) {
-    nextPreview = previewIssue(state, region.ops[next], arch, config);
-    if (!stalls(nextPreview))
+    FailureOr<bool> readyNow =
+        previewNextIssue(region, arch, config, state, next, nextPreview);
+    if (failed(readyNow))
+      return failure();
+    if (*readyNow)
       return true;
 
     recordGapStats(region.ops[next], nextPreview, stats);
     FillableStall stall = getFillableStall(nextPreview);
-    unsigned filler =
+    FailureOr<unsigned> filler =
         findStallFiller(ready, next, region, state, arch, config, stall);
-    if (filler == region.ops.size()) {
+    if (failed(filler))
+      return failure();
+    if (*filler == region.ops.size()) {
       ++stats.unfilledGaps;
       return true;
     }
 
-    ++stats.filledGaps;
-    if (nextPreview.memoryWaitCycles != 0 &&
-        isa<waveamdmachine::SBarrierOp>(region.ops[next]))
-      ++stats.filledBarrierMemoryGaps;
-    IssuePreview fillerPreview =
-        previewIssue(state, region.ops[filler], arch, config);
-    scheduleReadyNode(filler, region, graph, arch, config, state, ready,
-                      scheduled, pending, order, fillerPreview);
-    drainReadyNoInsts(region, graph, arch, config, state, ready, scheduled,
-                      pending, order);
-    if (scheduled.test(next) || !ready.test(next))
+    recordFilledStall(region.ops[next], nextPreview, stats);
+    if (failed(scheduleStallFiller(region, graph, arch, config, state, ready,
+                                   scheduled, pending, order, *filler)))
+      return failure();
+    if (!nextStillReady(ready, scheduled, next))
       return false;
   }
+}
+
+static GreedyResult failGreedyModel(GreedyResult &result) {
+  result.failureReason = "model_failed";
+  return result;
+}
+
+static FailureOr<GreedyStepStatus> scheduleFirstReadyByOriginal(
+    const GreedyRegion &region, const GraphTables &graph,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, IssueState &state,
+    BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
+    SmallVectorImpl<unsigned> &order) {
+  unsigned selected = findFirstReadyByOriginal(ready);
+  FailureOr<IssuePreview> selectedPreview =
+      previewIssue(state, region.ops[selected], arch, config);
+  if (failed(selectedPreview))
+    return failure();
+  if (failed(scheduleReadyNode(selected, region, graph, arch, config, state,
+                               ready, scheduled, pending, order,
+                               *selectedPreview)))
+    return failure();
+  return GreedyStepStatus::Continue;
+}
+
+static FailureOr<GreedyStepStatus>
+scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
+                     const waveamdmachine::ArchData &arch,
+                     const waveamdmachine::EventSimConfig &config,
+                     IssueState &state, BitVector &ready, BitVector &scheduled,
+                     SmallVectorImpl<unsigned> &pending, GreedyResult &result,
+                     unsigned next) {
+  IssuePreview preview;
+  FailureOr<bool> filled =
+      fillStallBeforeNext(region, graph, arch, config, state, ready, scheduled,
+                          pending, result.order, result.stats, next, preview);
+  if (failed(filled))
+    return failure();
+  if (!*filled)
+    return GreedyStepStatus::Continue;
+  if (scheduled.test(next))
+    return GreedyStepStatus::Continue;
+  if (failed(scheduleReadyNode(next, region, graph, arch, config, state, ready,
+                               scheduled, pending, result.order, preview)))
+    return failure();
+  return GreedyStepStatus::Continue;
+}
+
+static FailureOr<GreedyStepStatus>
+buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
+                const waveamdmachine::ArchData &arch,
+                const waveamdmachine::EventSimConfig &config, IssueState &state,
+                BitVector &ready, BitVector &scheduled,
+                SmallVectorImpl<unsigned> &pending, GreedyResult &result) {
+  if (failed(drainReadyNoInsts(region, graph, arch, config, state, ready,
+                               scheduled, pending, result.order)))
+    return failure();
+  if (result.order.size() == region.ops.size())
+    return GreedyStepStatus::Done;
+  if (!ready.any()) {
+    recordDependencyCycle(graph, scheduled, pending, result);
+    return GreedyStepStatus::Blocked;
+  }
+
+  unsigned next = findFirstUnscheduled(scheduled);
+  if (!ready.test(next))
+    return scheduleFirstReadyByOriginal(region, graph, arch, config, state,
+                                        ready, scheduled, pending,
+                                        result.order);
+  return scheduleOriginalNext(region, graph, arch, config, state, ready,
+                              scheduled, pending, result, next);
 }
 
 static GreedyResult
@@ -1032,36 +853,16 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
     if (count == 0)
       ready.set(index);
 
-  IssueState state;
+  IssueState state(arch, buildInstructionConfig(arch, config));
   while (result.order.size() != region.ops.size()) {
-    drainReadyNoInsts(region, graph, arch, config, state, ready, scheduled,
-                      pending, result.order);
-    if (result.order.size() == region.ops.size())
+    FailureOr<GreedyStepStatus> step = buildGreedyStep(
+        region, graph, arch, config, state, ready, scheduled, pending, result);
+    if (failed(step))
+      return failGreedyModel(result);
+    if (*step == GreedyStepStatus::Done)
       break;
-    if (!ready.any()) {
-      recordDependencyCycle(graph, scheduled, pending, result);
+    if (*step == GreedyStepStatus::Blocked)
       return result;
-    }
-
-    IssuePreview preview;
-    unsigned next = findFirstUnscheduled(scheduled);
-    if (!ready.test(next)) {
-      unsigned selected = findFirstReadyByOriginal(ready);
-      preview = previewIssue(state, region.ops[selected], arch, config);
-      scheduleReadyNode(selected, region, graph, arch, config, state, ready,
-                        scheduled, pending, result.order, preview);
-      continue;
-    }
-
-    if (!fillStallBeforeNext(region, graph, arch, config, state, ready,
-                             scheduled, pending, result.order, result.stats,
-                             next, preview))
-      continue;
-
-    if (scheduled.test(next))
-      continue;
-    scheduleReadyNode(next, region, graph, arch, config, state, ready,
-                      scheduled, pending, result.order, preview);
   }
 
   result.success = true;
@@ -1074,28 +875,6 @@ static void materializeOrder(const GreedyRegion &region,
   ops.clear();
   for (unsigned index : order)
     ops.push_back(region.ops[index]);
-}
-
-static int64_t estimateM0HazardCycles(ArrayRef<Operation *> ops) {
-  IssueState state;
-  int64_t cycles = 0;
-  for (Operation *op : ops) {
-    unsigned wait = getRequiredM0Wait(op, state);
-    cycles += wait;
-    decrementHazards(state, wait);
-    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
-    if (cls == waveamdmachine::SchedClass::NoInst) {
-      ValueHazards inherited = joinOperandHazards(state, op);
-      for (Value result : op->getResults())
-        if (isM0(result))
-          state.hazards[result] = inherited;
-      seedProducedHazards(state, op);
-      continue;
-    }
-    decrementHazards(state, 1);
-    seedProducedHazards(state, op);
-  }
-  return cycles;
 }
 
 static FailureOr<OrderScore>
@@ -1111,7 +890,7 @@ evaluateOrderScore(ArrayRef<Operation *> ops,
   if (failed(waveamdmachine::simulateEventTimeline(ops, arch, config, result)))
     return failure();
   OrderScore score;
-  score.cycles = result.totalCycles + estimateM0HazardCycles(ops);
+  score.cycles = result.totalCycles;
   score.issuedOps = result.issuedOps;
   return score;
 }
@@ -1243,35 +1022,21 @@ struct WaveAMDMachineSchedulePass
 
   void runOnOperation() override {
     Operation *root = getOperation();
-    if (failed(validateOldOptions(root)))
+    if (failed(validateOptions(root)))
       return signalPassFailure();
 
     waveamdmachine::EventSimConfig modelConfig;
-    if (failed(configureModel(root, modelWaves, modelSimds, modelStartDelay,
-                              modelConfig)))
-      return signalPassFailure();
-
+    modelConfig.completePendingLdsDmaCounters = true;
     WalkResult walk = root->walk(
         [&](func::FuncOp func) { return processFunction(func, modelConfig); });
     if (walk.wasInterrupted())
       return signalPassFailure();
   }
 
-  LogicalResult validateOldOptions(Operation *op) {
+  LogicalResult validateOptions(Operation *op) {
     if (maxRegionOps < -1)
       return op->emitError("max-region-ops must be -1 or non-negative");
-    UnsupportedOption opts[] = {
-        {barrieredLdsDmaHoist, "barriered-lds-dma-hoist"},
-        {beamSearch, "beam-search"},
-        {maxBeamWork != -1, "max-beam-work"},
-        {pressureAwareSelection, "pressure-aware-selection"},
-        {pressureVgprBudget != -1, "pressure-vgpr-budget"},
-        {pressureSgprBudget != -1, "pressure-sgpr-budget"},
-        {pressureCriticalVgprBudget != -1, "pressure-critical-vgpr-budget"},
-        {pressureCriticalSgprBudget != -1, "pressure-critical-sgpr-budget"},
-        {pressureTargetWavesOverride != -2, "pressure-target-waves-override"},
-    };
-    return checkUnsupportedOptions(op, "waveamd-machine-schedule", opts);
+    return success();
   }
 
   WalkResult
@@ -1284,9 +1049,6 @@ struct WaveAMDMachineSchedulePass
     if (failed(reportArchFailure(func, arch)))
       return WalkResult::interrupt();
 
-    waveamdmachine::EventSimConfig funcConfig = modelConfig;
-    if (failed(finalizeModel(func, arch, funcConfig)))
-      return WalkResult::interrupt();
     if (!applySchedule)
       return WalkResult::advance();
     func->removeAttr(kScheduleInputAttr);
@@ -1296,7 +1058,7 @@ struct WaveAMDMachineSchedulePass
     if (failed(collected))
       return WalkResult::interrupt();
     for (const GreedyRegion &region : *collected)
-      if (failed(processRegion(region, *arch.arch, funcConfig)))
+      if (failed(processRegion(region, *arch.arch, modelConfig)))
         return WalkResult::interrupt();
     return WalkResult::advance();
   }
@@ -1505,10 +1267,7 @@ struct WaveAMDMachineScheduleReportPass
       return signalPassFailure();
 
     waveamdmachine::EventSimConfig modelConfig;
-    if (failed(configureModel(root, modelWaves, modelSimds, modelStartDelay,
-                              modelConfig)))
-      return signalPassFailure();
-
+    modelConfig.completePendingLdsDmaCounters = true;
     FailureOr<SmallVector<unsigned, 16>> parsedOrder =
         parseScoreOrder(StringRef(scoreOrder));
     if (failed(parsedOrder)) {
@@ -1531,19 +1290,6 @@ struct WaveAMDMachineScheduleReportPass
   LogicalResult validateOptions(Operation *op) {
     if (maxRegionOps < -1)
       return op->emitError("max-region-ops must be -1 or non-negative");
-    UnsupportedOption opts[] = {
-        {beamSearch, "beam-search"},
-        {maxBeamWork != -1, "max-beam-work"},
-        {pressureAwareSelection, "pressure-aware-selection"},
-        {pressureVgprBudget != -1, "pressure-vgpr-budget"},
-        {pressureSgprBudget != -1, "pressure-sgpr-budget"},
-        {pressureCriticalVgprBudget != -1, "pressure-critical-vgpr-budget"},
-        {pressureCriticalSgprBudget != -1, "pressure-critical-sgpr-budget"},
-        {pressureTargetWavesOverride != -2, "pressure-target-waves-override"},
-    };
-    if (failed(checkUnsupportedOptions(op, "waveamd-machine-schedule-report",
-                                       opts)))
-      return failure();
     if (!scoreOrder.empty() && scoreRegion < 0)
       return op->emitError("score-order requires score-region");
     return success();
@@ -1564,12 +1310,8 @@ struct WaveAMDMachineScheduleReportPass
     if (!arch.arch)
       return reportMissingArch(*collected, func, arch);
 
-    waveamdmachine::EventSimConfig funcConfig = modelConfig;
-    if (failed(finalizeModel(func, arch, funcConfig)))
-      return WalkResult::interrupt();
-
     for (const GreedyRegion &region : *collected)
-      if (failed(reportRegion(region, *arch.arch, funcConfig, parsedOrder)))
+      if (failed(reportRegion(region, *arch.arch, modelConfig, parsedOrder)))
         return WalkResult::interrupt();
     return WalkResult::advance();
   }

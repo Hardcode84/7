@@ -1,11 +1,8 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=LOWER
-// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3 model-waves=4 model-simds=4 model-start-delay=0' 2>&1 | FileCheck %s --check-prefix=LOWER-MW
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_greater score-region=0 score-order=0,2,1,3' 2>&1 | FileCheck %s --check-prefix=GREATER
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_equal score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=EQUAL
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_invalid score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=INVALID
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=wmma_latency score-region=0 score-order=0,1' 2>&1 | FileCheck %s --check-prefix=WMMA
-// RUN: not wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_lower score-region=0 score-order=0,2,1,3 pressure-vgpr-budget=2 pressure-sgpr-budget=0 pressure-critical-vgpr-budget=4 pressure-critical-sgpr-budget=0' 2>&1 | FileCheck %s --check-prefix=BUDGET
-// RUN: not wave-opt %s --waveamd-machine-schedule-report='score-func=fixed_pressure score-region=0 score-order=0,1,2 pressure-vgpr-budget=1 pressure-sgpr-budget=0 pressure-target-waves-override=-1' 2>&1 | FileCheck %s --check-prefix=FIXED
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -79,11 +76,6 @@ func.func @fixed_pressure() {
 // LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles=326 issued_ops=3
 // LOWER: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles=325 issued_ops=3
 
-// BUDGET: waveamd-machine-schedule-report unsupported option: pressure-vgpr-budget
-
-// LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=original cycles={{[0-9]+}} issued_ops=12
-// LOWER-MW: waveamd-machine-schedule-report score func=candidate_lower region=0 order=candidate cycles={{[0-9]+}} issued_ops=12
-
 // GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=original cycles=325 issued_ops=3
 // GREATER: waveamd-machine-schedule-report score func=candidate_greater region=0 order=candidate cycles=326 issued_ops=3
 
@@ -95,5 +87,3 @@ func.func @fixed_pressure() {
 
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=128 issued_ops=2
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=128 issued_ops=2
-
-// FIXED: waveamd-machine-schedule-report unsupported option: pressure-vgpr-budget

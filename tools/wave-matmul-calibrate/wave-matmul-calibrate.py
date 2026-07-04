@@ -40,13 +40,12 @@ DEFAULT_SIM_TRIP_COUNT = 32
 class Variant:
     name: str
     apply_schedule: bool
-    schedule_model: str = "single"
 
 
 @dataclass
 class VariantResult:
     name: str
-    sim_cycles: dict[tuple[int, int, int], int]
+    sim_cycles: int | None
     hw_cycles_samples: list[int]
     hw_us_samples: list[float]
     hw_check: str | None
@@ -67,19 +66,7 @@ class VariantResult:
 VARIANTS = {
     "baseline": Variant("baseline", apply_schedule=False),
     "scheduled": Variant("scheduled", apply_schedule=True),
-    "scheduled_multiwave": Variant(
-        "scheduled_multiwave",
-        apply_schedule=True,
-        schedule_model="multi",
-    ),
 }
-
-PRESSURE_BUDGET_OPTIONS = (
-    ("pressure-vgpr-budget", "pressure_vgpr_budget"),
-    ("pressure-sgpr-budget", "pressure_sgpr_budget"),
-    ("pressure-critical-vgpr-budget", "pressure_critical_vgpr_budget"),
-    ("pressure-critical-sgpr-budget", "pressure_critical_sgpr_budget"),
-)
 
 ProfileValue = bool | int | str
 
@@ -232,27 +219,6 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "cta_group_m": 4,
     },
 }
-
-
-def add_pressure_budget_options(
-    options: dict[str, bool | int | str], args: argparse.Namespace
-) -> None:
-    for option, attr in PRESSURE_BUDGET_OPTIONS:
-        value = getattr(args, attr)
-        if value >= 0:
-            options[option] = value
-
-
-def add_schedule_model_options(
-    options: dict[str, bool | int | str], variant: Variant, args: argparse.Namespace
-) -> None:
-    if variant.schedule_model == "single":
-        return
-    if variant.schedule_model != "multi":
-        sys.exit(f"unknown schedule model: {variant.schedule_model}")
-    options["model-waves"] = waves_per_workgroup(args)
-    options["model-simds"] = spread_simds(args)
-    options["model-start-delay"] = 0
 
 
 def run(
@@ -503,27 +469,12 @@ def effective_target_waves(args: argparse.Namespace) -> int:
     return max(args.target_waves, required_target_waves(args))
 
 
-def sim_report_specs(args: argparse.Namespace) -> list[tuple[int, int, int]]:
-    waves = waves_per_workgroup(args)
-    specs = [(1, 1, 0), (waves, 1, 0), (waves, spread_simds(args), 0)]
-    out: list[tuple[int, int, int]] = []
-    seen: set[tuple[int, int, int]] = set()
-    for spec in specs:
-        if spec in seen:
-            continue
-        out.append(spec)
-        seen.add(spec)
-    return out
-
-
 def scheduler_policy_options(
     variant: Variant, args: argparse.Namespace
 ) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int | str] = {}
-    add_schedule_model_options(options, variant, args)
-    return {name: value for name, value in options.items() if value is not False}
+    return {}
 
 
 def schedule_pass_policy_options(
@@ -531,9 +482,7 @@ def schedule_pass_policy_options(
 ) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    options: dict[str, bool | int | str] = {}
-    add_schedule_model_options(options, variant, args)
-    return {name: value for name, value in options.items() if value is not False}
+    return {}
 
 
 def schedule_pass_options(
@@ -909,31 +858,25 @@ def compute_dynamic_lds_bytes(args: argparse.Namespace) -> int:
     return lds_bytes if lds_bytes >= STATIC_LDS_LIMIT else 0
 
 
-def run_sim_reports(
+def run_sim_report(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
-) -> dict[tuple[int, int, int], int]:
+) -> int:
     wave_sim = build_dir / "bin/wave-sim-report"
     trip_count = compute_report_trip_count(args)
-    out: dict[tuple[int, int, int], int] = {}
-    for waves, simds, delay in sim_report_specs(args):
-        text = run(
-            [
-                str(wave_sim),
-                f"--func={kernel_name(args)}",
-                f"--waves={waves}",
-                f"--simds={simds}",
-                f"--start-delay={delay}",
-                f"--trip-count={trip_count}",
-                *(
-                    [f"--calibration-file={args.calibration_file}"]
-                    if args.calibration_file
-                    else []
-                ),
-                str(machine_mlir),
-            ]
-        )
-        out[(waves, simds, delay)] = parse_total_cycles(text)
-    return out
+    text = run(
+        [
+            str(wave_sim),
+            f"--func={kernel_name(args)}",
+            f"--trip-count={trip_count}",
+            *(
+                [f"--calibration-file={args.calibration_file}"]
+                if args.calibration_file
+                else []
+            ),
+            str(machine_mlir),
+        ]
+    )
+    return parse_total_cycles(text)
 
 
 def compile_runner(args: argparse.Namespace, tmp: Path) -> Path:
@@ -1055,18 +998,18 @@ def run_variant(
             asm = tmp / variant.name / f"{variant.name}.s"
             emit_asm.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(asm, emit_asm)
-        return VariantResult(variant.name, {}, [], [], None)
+        return VariantResult(variant.name, None, [], [], None)
     if runner is None and emit_asm is not None:
         asm = lower_asm(args.build_dir, source, pipeline, tmp, variant.name)
         emit_asm.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(asm, emit_asm)
-        return VariantResult(variant.name, {}, [], [], None)
+        return VariantResult(variant.name, None, [], [], None)
     machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
     if emit_asm is not None:
         asm = lower_asm(args.build_dir, source, pipeline, tmp, variant.name)
         emit_asm.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(asm, emit_asm)
-    sim_cycles = run_sim_reports(args.build_dir, machine, args)
+    sim_cycles = run_sim_report(args.build_dir, machine, args)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
     hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
@@ -1076,11 +1019,8 @@ def run_variant(
 
 def print_result(result: VariantResult) -> None:
     print(f"variant: {result.name}")
-    for (waves, simds, delay), cycles in sorted(result.sim_cycles.items()):
-        print(
-            f"  sim_cycles waves={waves} simds={simds} "
-            f"start_delay={delay}: {cycles}"
-        )
+    if result.sim_cycles is not None:
+        print(f"  sim_cycles: {result.sim_cycles}")
     if result.hw_cycles_samples and result.hw_us_samples:
         if len(result.hw_cycles_samples) > 1:
             cycles = ",".join(str(x) for x in result.hw_cycles_samples)
@@ -1102,9 +1042,8 @@ def print_delta(results: list[VariantResult]) -> None:
         if result.name == "baseline":
             continue
         print(f"delta: {result.name} - baseline")
-        for spec, cycles in sorted(result.sim_cycles.items()):
-            if spec in base.sim_cycles:
-                print(f"  sim_cycles {spec}: {cycles - base.sim_cycles[spec]:+d}")
+        if base.sim_cycles is not None and result.sim_cycles is not None:
+            print(f"  sim_cycles: {result.sim_cycles - base.sim_cycles:+d}")
         if base.hw_cycles is not None and result.hw_cycles is not None:
             delta = result.hw_cycles - base.hw_cycles
             pct = 100.0 * delta / max(base.hw_cycles, 1)
@@ -1204,7 +1143,7 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
         "--variants",
         type=parse_variants,
         default=parse_variants("baseline,scheduled"),
-        help="comma-separated variants: baseline, scheduled, scheduled_multiwave",
+        help="comma-separated variants: baseline, scheduled",
     )
     ap.add_argument("--print-candidates", action="store_true")
     ap.add_argument("--print-score", action="store_true")
@@ -1218,12 +1157,6 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
 
 
 def add_scheduler_args(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--beam-search", action="store_true")
-    ap.add_argument("--no-pressure-aware-schedule", action="store_true")
-    ap.add_argument("--pressure-vgpr-budget", type=int, default=-1)
-    ap.add_argument("--pressure-sgpr-budget", type=int, default=-1)
-    ap.add_argument("--pressure-critical-vgpr-budget", type=int, default=-1)
-    ap.add_argument("--pressure-critical-sgpr-budget", type=int, default=-1)
     ap.add_argument("--calibration-file", type=Path, default=None)
 
 
@@ -1288,12 +1221,6 @@ def validate_mxfp4_args(args: argparse.Namespace) -> None:
             sys.exit("--input-type=mxfp4 requires gfx950 MFMA")
     elif mxfp4_scale_path != "dma":
         sys.exit("--mxfp4-scale-path=regs requires --input-type=mxfp4")
-
-
-def validate_pressure_budget_args(args: argparse.Namespace) -> None:
-    for _, name in PRESSURE_BUDGET_OPTIONS:
-        if getattr(args, name) < -1:
-            sys.exit(f"--{name.replace('_', '-')} must be >= -1")
 
 
 def _require_arg(condition: bool, message: str) -> None:
@@ -1472,7 +1399,6 @@ def validate_args(args: argparse.Namespace) -> None:
     validate_tool_output_args(args)
     validate_example_args(args)
     validate_mxfp4_args(args)
-    validate_pressure_budget_args(args)
 
 
 def prepare_source(args: argparse.Namespace, chip: str, tmp: Path) -> Path | None:

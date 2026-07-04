@@ -205,11 +205,9 @@ analysis we reject: a local's def-use is fixed by the AST, no approximation.
 Memory ordering is explicit and programmer-threaded, mirroring the IR; the
 compiler never infers it (no `restrict`, no alias analysis -- that is the
 "rediscovery" the model rejects, model md 362). This matches the backend:
-the scheduler derives memory-ordering edges only from token SSA edges
-(`WaveAMDMachineScheduleSupport.cpp` `addValueEdges` 252-266, `isMemToken`
-at 263); un-tokened memory ops carry no ordering and may be reordered or
-overlapped freely (effects only delimit scheduling regions,
-`hasUnknownMemoryEffects` 61-70, used by `isHardBoundary` 72-92). Two dependency kinds exist; only one
+the scheduler derives memory-ordering edges only from token SSA edges in
+`WaveAMDMachineGreedySchedule.cpp`; un-tokened memory ops carry no ordering and
+may be reordered or overlapped freely. Two dependency kinds exist; only one
 needs a token:
 
 | Dependency | Carried by | Token? |
@@ -483,8 +481,8 @@ Internal:
   control flow), 362 (rediscovery rejection).
 - `include/mlir/Dialect/Wave/IR/WaveOps.td` 388-533 (token ops), 469-473
   (index_expr), 517-520 (vector payload).
-- `lib/Dialect/Wave/Transforms/WaveAMDMachineScheduleSupport.cpp` 252-266,
-  61-70 (memory edges are token-only).
+- `lib/Dialect/Wave/Transforms/WaveAMDMachineGreedySchedule.cpp` (memory edges
+  are token-only).
 - `python/mlir/dialects/wave_matmul.py` 1034-1116 (token threading).
 - `include/Wave-c/Dialects.h` (CAPI: types/attrs, no op builders).
 - LLVM tree: `mlir/.../SCF/IR/SCFOps.td` 162, 267-269 (`scf.for` IV types).

@@ -320,6 +320,31 @@ unsigned InstructionExecutionState::getPendingMemoryEventCount(
   return count;
 }
 
+int64_t InstructionExecutionState::getValueReadyCycle(Value value) const {
+  DenseMap<Value, int64_t>::const_iterator it = valueReadyAt.find(value);
+  if (it == valueReadyAt.end())
+    return currentCycle;
+  return it->second;
+}
+
+void InstructionExecutionState::bindValue(Value result, Value source) {
+  valueReadyAt[result] = getValueReadyCycle(source);
+
+  DenseMap<Value, EventId>::const_iterator valueEventIt =
+      valueEvent.find(source);
+  if (valueEventIt != valueEvent.end())
+    valueEvent[result] = valueEventIt->second;
+  else
+    valueEvent.erase(result);
+
+  DenseMap<Value, SmallVector<EventId, 4>>::const_iterator tokenIt =
+      tokenEvents.find(source);
+  if (tokenIt != tokenEvents.end())
+    tokenEvents[result] = tokenIt->second;
+  else
+    tokenEvents.erase(result);
+}
+
 unsigned InstructionExecutionState::getPipeInFlightCount(
     InstructionPipeKind kind) const {
   if (kind == InstructionPipeKind::None)

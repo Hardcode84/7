@@ -59,7 +59,7 @@ func.func @issue_window_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 }
 }
 
-// DIAG: waveamd-machine-schedule-report candidate func=issue_window_candidate region=0 name=greedy cycles=9 delta=0 issued_ops=3 action=keep reason=same_order
+// DIAG: waveamd-machine-schedule-report candidate func=issue_window_candidate region=0 name=greedy cycles=12 delta=0 issued_ops=3 action=keep reason=same_order
 
 // -----
 

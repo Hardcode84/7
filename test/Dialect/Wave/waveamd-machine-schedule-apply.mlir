@@ -1,7 +1,6 @@
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' | FileCheck %s --check-prefix=IR
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1 max-region-ops=2' | FileCheck %s --check-prefix=CAP
-// RUN: not wave-opt %s --waveamd-machine-schedule='apply-schedule=1 beam-search=1' 2>&1 | FileCheck %s --check-prefix=ERR
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,
@@ -198,5 +197,3 @@ func.func @single_barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // DIAG-SAME: filled_gaps=2
 // DIAG-SAME: memory_token_gaps={{[2-9][0-9]*}}
 // DIAG-SAME: filled_barrier_memory_gaps=2
-
-// ERR: waveamd-machine-schedule unsupported option: beam-search

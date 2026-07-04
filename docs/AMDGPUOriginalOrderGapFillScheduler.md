@@ -2,8 +2,8 @@
 
 ## Goal
 
-Replace the current mutating `waveamd-machine-schedule` implementation with a
-fresh greedy scheduler in a separate source file.
+Maintain `waveamd-machine-schedule` as a greedy gap-fill scheduler backed by
+the instruction execution-state model.
 
 Scheduling policy:
 
@@ -17,22 +17,17 @@ Scheduling policy:
 - If no filler is available, keep the original next instruction and let the
   wait/hazard passes repair the gap.
 
-Reuse boundary: do not build on the current scheduler candidate framework. Reuse
-the simulator/cost-model layer as the scoring and timing oracle. Normal dialect,
-target, and IR helper APIs are still fine; old scheduler policy code is not.
+Reuse boundary: scheduler policy owns dependence construction and candidate
+selection. Instruction timing and stalls come from
+`InstructionExecutionState`.
 
 ## File Boundary
 
-Put the new mutating scheduler in its own file, for example:
+Mutating scheduler and report pass live in:
 
 ```
 lib/Dialect/Wave/Transforms/WaveAMDMachineGreedySchedule.cpp
 ```
-
-The old scheduler files can stay temporarily for reference, but the mutating
-pass and report pass should not depend on their candidate builders, beam
-search, placement logic, candidate-selection policy, or local-issue helper
-state.
 
 The pass surface can stay `waveamd-machine-schedule` so pipelines do not churn.
 Default no-op behavior should stay: without `apply-schedule`, the pass validates
@@ -41,33 +36,19 @@ options and returns.
 Option compatibility:
 
 - Keep `apply-schedule`.
-- Keep target/model options needed by `simulateEventTimeline`.
-- Diagnose old search-policy options that no longer apply: beam search,
-  barrier scheduling, and old candidate portfolio knobs.
-- No-op mode still validates target/model options and diagnoses unknown options.
+- Keep `max-region-ops`.
+- No-op mode still validates current options and target support.
 
 ## Reuse
 
 Allowed reuse:
 
-- `waveamdmachine::simulateEventTimeline` for whole-order scoring.
+- `InstructionExecutionState` for issue preview, commit, and score timing.
 - `ArchData`, `SchedClass`, `classifyOp`, `getLatency`, `funit`, memory counter
   and value latency helpers.
 - `waveamdmachine.target` parsing and arch validation helpers.
 - WaveAMDMachine traits and op interfaces.
 - WaveMachine SSA singleton values for SCC/VCC/M0 ordering.
-
-Avoid reuse:
-
-- `WaveAMDMachineSchedule.cpp` policy code.
-- `WaveAMDMachineScheduleSupport.cpp` candidate evaluation policy.
-- `WaveAMDMachineScheduleBeam.cpp`.
-- Barrier-specific pipeline/hoist scheduling.
-- Existing `LocalIssueState` as an implementation dependency.
-
-Copying a small timing primitive is acceptable only when the simulator does not
-publish it and the scheduler needs a preview. Prefer promoting simulator helper
-APIs once the shape settles.
 
 ## Region Model
 
@@ -545,19 +526,9 @@ gfx950 pattern checks:
 - **Compile-time growth.** Search current ready set first; add original-distance
   cap only if needed.
 
-## Implementation Stages
+## Maintenance
 
-1. Add separate mutating scheduler file.
-2. Keep existing pass name and no-op default.
-3. Implement fresh region collector and dependency graph.
-4. Add hard validation for supported ops and singleton overlap.
-5. Implement loop-carry recurrence tracking outside ready counts.
-6. Implement incremental issue and memory preview/commit state.
-7. Add M0 cheap hazard state.
-8. Generate original and greedy orders.
-9. Score both orders with event simulator and supplemental cheap-hazard cost.
-10. Apply only strictly better greedy order.
-11. Rewrite report diagnostics around the new greedy scheduler.
-12. Rewrite old scheduler-option tests around the new option contract.
-13. Add focused lit tests.
-14. Run PerfGolden diagnostics and gfx950 drift review before enabling broadly.
+- Keep scheduler policy and instruction timing separate.
+- Add a focused lit case for every new stall kind or dependency edge.
+- Run PerfGolden diagnostics and gfx950 drift review before changing broad
+  scheduling policy.

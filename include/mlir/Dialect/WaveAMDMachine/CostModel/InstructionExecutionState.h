@@ -110,6 +110,8 @@ struct InstructionExecutionState {
   FailureOr<InstructionCommitResult> commit(Operation *op);
 
   int64_t getCurrentCycle() const { return currentCycle; }
+  int64_t getValueReadyCycle(Value value) const;
+  void bindValue(Value result, Value source);
   unsigned getPendingMemoryEventCount(InstructionWaitCounterKind kind) const;
   unsigned getPipeInFlightCount(InstructionPipeKind kind) const;
 
