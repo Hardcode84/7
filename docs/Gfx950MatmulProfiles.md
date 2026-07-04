@@ -166,7 +166,7 @@ bm=2
 bn=2
 wave_m_tiles=8
 wave_n_tiles=8
-wave_k_tiles=1
+wave_k_tiles=2
 target_waves=1
 use_buffer=true
 use_dma_lds=true
@@ -177,7 +177,7 @@ cta_swizzle_xcds=8
 cta_group_m=4
 ```
 
-This is a 256x256 CTA with 4 waves and one 128-wide MFMA K step per loop
+This is a 256x256 CTA with 4 waves and two 128-wide MFMA K steps per loop
 body. Example:
 
 ```bash
@@ -186,3 +186,140 @@ python tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
   --m=4096 --n=4096 --k=32768 \
   --variants=scheduled --iters=100 --warmup=10 --repeats=3 --no-check
 ```
+
+## MXFP4 4-Wave K=32768 ATT Investigation
+
+Use this workflow when `gfx950-mxfp4-256x256-4wave` regresses against a known
+good branch. Keep current and baseline HSACOs separate, run the same standalone
+runner arguments, and compare both static ASM and ATT duration by PC.
+
+Focused perf reproduction:
+
+```bash
+python tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py \
+  --kernels=mxfp4-4wave --k-values=32768 --skip-rebuild \
+  --artifact-dir=build/att-investigation/current/artifacts \
+  --csv=build/att-investigation/current/current_k32768.csv
+```
+
+For a baseline branch, use a separate worktree and the same command with a
+different `--artifact-dir` and `--csv`. Reuse the generated runner and HSACO for
+ATT so Python launch overhead does not enter the trace.
+
+Standalone runner shape:
+
+```bash
+wave-matmul-calibrate-runner \
+  --m 4096 --n 4096 --k 32768 --bm 2 --bn 2 \
+  --wave-m-tiles 8 --wave-n-tiles 8 --wave-k-tiles 2 --wave-size 64 \
+  --input-type mxfp4 --c-type f16 --kernel-abi matmul \
+  --dynamic-lds 135168 --iters 1 --warmup 0 --seed 0 --no-check \
+  <hsaco> wmma_f16_matmul_tiled
+```
+
+ATT collection:
+
+- `rocprofv3 --att` is the preferred frontend when it configures cleanly.
+- If it fails during `rocprofiler_configure_device_thread_trace_service`, use
+  the ROCprofiler SDK thread-trace API directly. The SDK sample in
+  `rocprofiler-sdk/samples/thread_trace` already decodes per-PC instruction
+  duration.
+- Start the thread-trace context on the HIP launch callback and stop it on
+  `hipEventSynchronize`/`hipDeviceSynchronize` exit. Stopping only at process
+  finalization can leave an empty trace because shader data is not flushed in
+  time.
+- Trace one CU/SE for comparable runs, e.g. `target_cu=1`,
+  `shader_engine_mask=1`, `buffer_size=268435456`.
+
+ATT decoder `duration` is not global-memory completion latency. For gfx10+ it
+is stall plus execution time for the instruction. A high duration on
+`buffer_load_dwordx4 ... lds` means issue-side stall or pipe/backpressure while
+issuing the async global-to-LDS load. The data can still complete later, and the
+real drain can appear at a later wait or barrier.
+
+### July 2026 Current-vs-Master Result
+
+Setup:
+
+- Current branch: `new-scheduler`.
+- Baseline: `master` at `6d5b5783 Add WaveAMD hazard repair pass`.
+- Shape: `M=N=4096`, `K=32768`, scheduled
+  `gfx950-mxfp4-256x256-4wave`.
+- Both runs used `224` VGPR, `64` SGPR, no scratch, same grid/workgroup shape.
+
+Focused sweep result:
+
+| Branch | Time us | TFLOP/s |
+|---|---:|---:|
+| current | 275.083 | 3997.0 |
+| master | 263.590 | 4171.3 |
+
+Static ASM:
+
+| Item | Current | Master |
+|---|---:|---:|
+| `v_mfma_scale_f32_16x16x128_f8f6f4` | 384 | 384 |
+| `buffer_load_dwordx4` | 48 | 48 |
+| `ds_read_b128` | 160 | 160 |
+| `s_waitcnt` | 99 | 73 |
+| `s_barrier` | 10 | 9 |
+
+Wait-count split:
+
+| Wait class | Current | Master | Delta |
+|---|---:|---:|---:|
+| `vmcnt` waits | 18 | 10 | +8 |
+| `lgkmcnt` waits | 81 | 63 | +18 |
+
+Loop-head static difference:
+
+```text
+current:
+  s_waitcnt vmcnt(23)
+  s_waitcnt vmcnt(22)
+  ds_read_b64_tr_b8
+  s_waitcnt vmcnt(21)
+  ds_read_b64_tr_b8
+  s_waitcnt lgkmcnt(1)
+  ds_read_b64_tr_b8
+  s_waitcnt vmcnt(20)
+  ...
+  s_waitcnt lgkmcnt(4)
+  v_mfma_scale...
+
+master:
+  ds_read_b64_tr_b8
+  ds_read_b64_tr_b8
+  ds_read_b64_tr_b8
+  ...
+  s_waitcnt lgkmcnt(3)
+  v_mfma_scale...
+```
+
+ATT result from one traced CU/SE:
+
+| Category | Current cycles | Master cycles | Delta |
+|---|---:|---:|---:|
+| Mean wave lifetime | 638909 | 564283 | +13.2% |
+| `buffer_load_dwordx4 ... lds` | 664228 | 399204 | +265024 |
+| `s_barrier` | 186552 | 112444 | +74108 |
+| `s_waitcnt vmcnt(*)` | 25292 | 12960 | +12332 |
+| `s_waitcnt lgkmcnt(*)` | 49544 | 55096 | -5552 |
+
+Interpretation:
+
+- Static wait count grew in both classes, especially `lgkmcnt`.
+- ATT duration does not blame direct `lgkmcnt` waits; current has lower
+  `lgkmcnt` wait duration than master.
+- Current-only `vmcnt(23/22/21/20)` waits are real, but their direct ATT
+  duration is small relative to the regression.
+- Main runtime delta is issue-side duration on global-to-LDS
+  `buffer_load_dwordx4 ... lds`, followed by a larger barrier cost.
+- Treat waitcnt changes as symptoms of changed memory-token/register scheduling
+  until proven otherwise. Do not remove physical-register overlap waits just to
+  recover perf without a correctness proof.
+
+Likely next debug target: scheduling of the global-to-LDS prefetch group
+relative to MFMA and the following barrier. Check whether new waitcnt/register
+overlap constraints force worse phasing or outstanding-load pressure, then fix
+the schedule or allocation pressure without weakening hazard correctness.
