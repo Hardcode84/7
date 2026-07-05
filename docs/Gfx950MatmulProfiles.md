@@ -214,7 +214,7 @@ Static ASM:
 Heavy work matches. The regression is placement, not missing MFMA or memory
 ops.
 
-ATT medians per capture, wave-normalized:
+ATT medians per capture, unweighted by dynamic hit count:
 
 | Metric | Current | Master | Delta |
 |---|---:|---:|---:|
@@ -229,6 +229,24 @@ ATT medians per capture, wave-normalized:
 | MFMA | 4205.4 | 4270.4 | -65.0 |
 | DS read | 1867.3 | 1491.4 | +375.9 |
 
+These rows are useful for spotting slow PCs, but they do not explain the
+kernel cycle delta because hot loop PCs execute 504/1008 times in the trace.
+Dynamic-weighted ATT (`wave_hitcount * wave_avg_duration / 4`) matches the
+measured cycle gap:
+
+| Metric | Current | Master | Delta |
+|---|---:|---:|---:|
+| Total dynamic ATT | 622226.7 | 584706.6 | +37520.1 |
+| `s_barrier` | 167242.9 | 134329.9 | +32913.0 |
+| `s_waitcnt` | 11865.9 | 8837.0 | +3028.8 |
+| `buffer_load_dwordx4` | 93272.1 | 92253.0 | +1019.1 |
+| `ds_read_b128` | 68328.0 | 64965.2 | +3362.8 |
+| `ds_read_b64_tr_b8` | 10950.9 | 6191.1 | +4759.9 |
+| MFMA | 182016.6 | 176966.1 | +5050.5 |
+
+The retained perf run delta is `+34644` cycles. The dynamic ATT delta is
+close enough to localize the loss.
+
 Wait-window medians:
 
 | Window | Current | Master | Delta |
@@ -242,10 +260,11 @@ Wait-window medians:
 | prologue VMEM-load | 6905 | 678 | +6227 |
 | prologue LDS | 9329 | 6300 | +3029 |
 
-Do not read only the `s_waitcnt` rows. Current has lower direct
-`s_waitcnt vmcnt(*)` duration, but ATT wait windows show a much larger
-producer-side prologue cost. The cost sits on VMEM-load and LDS producer
-windows, plus slower `buffer_load_dwordx4 ... lds` and DS-read instructions.
+Do not read the `VMEM-load` window as "buffer loads are slow". The largest
+prologue VMEM window is a combined `s_waitcnt vmcnt(8) lgkmcnt(0)` where
+static replay has eight VMEM ops still pending but drains zero VMEM ops. The
+same wait drains the 24 LDS `ds_read_b128` ops, so the window summary charges
+one wait to both VMEM-pending and LDS-drained classes.
 
 First scale block shape:
 
@@ -254,11 +273,22 @@ First scale block shape:
 | current | `buffer_loadx1 -> vmcnt(8) -> barrier -> ds_read_b128x24 -> vmcnt(8) lgkmcnt(0) -> barrier -> ds_read_b64_tr_b8x6 -> lgkmcnt(4) -> MFMAx16 -> lgkmcnt(1) -> MFMAx16 -> lgkmcnt(0) -> barrier -> MFMAx32 + buffer_loadx32` |
 | master | `buffer_loadx6 -> vmcnt(8) -> barrier -> ds_read_b128x24 -> vmcnt(8) lgkmcnt(0) -> barrier -> ds_read_b64_tr_b8x6 -> lgkmcnt(0) -> barrier -> MFMAx64 + buffer_loadx32` |
 
-Master waits for the scale reads, places the barrier before the full 64-MFMA
-scale block, then overlaps the next 32 global-to-LDS loads under that full
-MFMA block. Current issues half the MFMA block before that barrier, carries
-scale-read pressure through partial `lgkmcnt(4/1/0)` waits, then has only 32
-MFMA left to cover the next global-to-LDS train.
+The first scale-read barrier cluster accounts for the regression:
+
+| Cluster | Current | Master | Delta |
+|---|---:|---:|---:|
+| Combined wait after `ds_read_b128x24` | 6751.0 | 504.0 | +6247.0 |
+| Barrier before `ds_read_b64_tr_b8x6` | 25767.0 | 26349.9 | -582.9 |
+| Scale-read waits | 2579.0 | 5796.0 | -3217.0 |
+| Scale-read barrier | 36309.9 | 5186.9 | +31123.0 |
+| Next `vmcnt(8)` + barrier | 104041.9 | 100287.1 | +3754.8 |
+| Total | 175448.7 | 138123.8 | +37324.9 |
+
+Current saves about 3.2k dynamic cycles by using partial `lgkmcnt(4/1/0)`
+waits before 32 MFMA, then loses about 31.1k dynamic cycles at the following
+barrier (`0x2880`: 144 cycles/hit, master `0x2680`: 20.6 cycles/hit). The
+slow object is the barrier after MFMA consumers of the scale reads, not the
+global-to-LDS load train.
 
 Later scale/store block:
 
@@ -273,18 +303,20 @@ DS-read group.
 
 Scheduler implication:
 
-- The failed memory-token-consumer stall-fill rule was too late. The bad
-  choice is made before the barrier is the next stalled issue.
-- Scheduler needs a barrier/producer-window placement rule, not a rule tied to
-  one token-consumer form.
-- For a barrier that drains memory producers used by a following compute group,
-  place the barrier after the producer drain and before the whole compute group.
-  Do not let the compute group straddle that barrier.
-- Keep same-kind memory producer order explicit: do not move a memory op over
-  earlier producers of the same memory kind while trying to fill the window.
-- Model pressure on producer windows, not just direct `s_waitcnt` instruction
-  duration. ATT shows the regression as VMEM-load/LDS producer-window cost even
-  when the direct `s_waitcnt vmcnt(*)` row is lower.
+- Current `lower-before-schedule.mlir` already has
+  `ds_read_b64_tr_b8x6 -> MFMAx32 -> s_barrier`; machine scheduling preserved
+  that bad shape. The barrier placement bug is not created solely by the final
+  greedy scheduler.
+- The failed barrier-early experiment moved the barrier only after the first
+  four MFMA in this region and did not reproduce master. It was not a valid
+  proof against the barrier-skew hypothesis.
+- The scheduler/model needs to price barrier arrival skew. A barrier that joins
+  memory producers for a following compute group should not sit behind partial
+  consumers of those producers unless the model can prove the later barrier is
+  cheaper.
+- The previous VMEM-producer-window conclusion was an attribution artifact from
+  combined wait counters. Track drained counter class separately from pending
+  counter class when reading ATT window summaries.
 
 ## `gfx950-mxfp4-256x256-4wave`
 
