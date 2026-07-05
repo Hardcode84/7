@@ -191,22 +191,27 @@ static unsigned pipeIndex(InstructionPipeKind kind) {
   llvm_unreachable("pipe has no queue");
 }
 
-static unsigned memoryIssueIndex(MemoryIssueKind kind) {
-  switch (kind) {
-  case MemoryIssueKind::VmemLoad:
+static constexpr std::array<MemoryIssueResource, kMemoryIssueResourceCount>
+    kMemoryIssueResources = {
+        MemoryIssueResource::VmemLoad,     MemoryIssueResource::VmemStore,
+        MemoryIssueResource::LdsDmaAccept, MemoryIssueResource::Lds,
+        MemoryIssueResource::Smem,
+};
+
+static unsigned memoryIssueIndex(MemoryIssueResource resource) {
+  switch (resource) {
+  case MemoryIssueResource::VmemLoad:
     return 0;
-  case MemoryIssueKind::VmemStore:
+  case MemoryIssueResource::VmemStore:
     return 1;
-  case MemoryIssueKind::VmemLoadLds:
+  case MemoryIssueResource::LdsDmaAccept:
     return 2;
-  case MemoryIssueKind::Lds:
+  case MemoryIssueResource::Lds:
     return 3;
-  case MemoryIssueKind::Smem:
+  case MemoryIssueResource::Smem:
     return 4;
-  case MemoryIssueKind::None:
-    break;
   }
-  llvm_unreachable("memory issue kind has no queue");
+  llvm_unreachable("bad memory issue resource");
 }
 
 static unsigned maxInFlightForPipe(const InstructionExecutionConfig &config,
@@ -227,14 +232,15 @@ static unsigned maxInFlightForPipe(const InstructionExecutionConfig &config,
 }
 
 static unsigned maxInFlightForMemoryIssue(const ArchData &arch,
-                                          MemoryIssueKind kind) {
-  if (kind == MemoryIssueKind::VmemLoadLds)
+                                          MemoryIssueResource resource) {
+  if (resource == MemoryIssueResource::LdsDmaAccept)
     return static_cast<unsigned>(arch.ldsDmaIssueQueueDepth);
   return 0;
 }
 
-static int64_t memoryIssueLatency(const ArchData &arch, MemoryIssueKind kind) {
-  if (kind == MemoryIssueKind::VmemLoadLds)
+static int64_t memoryIssueLatency(const ArchData &arch,
+                                  MemoryIssueResource resource) {
+  if (resource == MemoryIssueResource::LdsDmaAccept)
     return arch.ldsDmaIssueLatency;
   return 0;
 }
@@ -464,7 +470,7 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.pipe = pipeFor(arch, cls);
   desc.issueCount = getIssueCount(op);
   desc.latency = getConfiguredLatency(arch, cls, config.calibration);
-  desc.memoryIssue = getMemoryIssueKind(op);
+  desc.memoryIssueResources = getMemoryIssueResources(op);
 
   MemoryCounterKind memoryCounter = getMemoryCounterKind(op);
   desc.counter = toInstructionCounter(memoryCounter);
@@ -509,8 +515,8 @@ InstructionExecutionState::query(Operation *op,
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                pipeReady - currentCycle);
 
-  int64_t memoryIssueReady =
-      memoryIssueReadyCycle(desc.memoryIssue, desc.issueCount, currentCycle);
+  int64_t memoryIssueReady = memoryIssueReadyCycle(
+      desc.memoryIssueResources, desc.issueCount, currentCycle);
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                memoryIssueReady - currentCycle);
 
@@ -625,16 +631,14 @@ int64_t InstructionExecutionState::pipeReadyCycle(InstructionPipeKind pipe,
   return pending[pending.size() - maxInFlight];
 }
 
-int64_t InstructionExecutionState::memoryIssueReadyCycle(MemoryIssueKind kind,
-                                                         unsigned issueCount,
-                                                         int64_t cycle) const {
-  unsigned maxInFlight = maxInFlightForMemoryIssue(arch, kind);
-  if (kind == MemoryIssueKind::None || maxInFlight == 0 ||
-      memoryIssueLatency(arch, kind) <= 0)
+int64_t InstructionExecutionState::memoryIssueReadyCycle(
+    MemoryIssueResource resource, unsigned issueCount, int64_t cycle) const {
+  unsigned maxInFlight = maxInFlightForMemoryIssue(arch, resource);
+  if (maxInFlight == 0 || memoryIssueLatency(arch, resource) <= 0)
     return cycle;
 
   SmallVector<int64_t, 8> pending;
-  for (int64_t ready : memoryIssueQueues[memoryIssueIndex(kind)])
+  for (int64_t ready : memoryIssueQueues[memoryIssueIndex(resource)])
     if (ready > cycle)
       pending.push_back(ready);
 
@@ -643,6 +647,17 @@ int64_t InstructionExecutionState::memoryIssueReadyCycle(MemoryIssueKind kind,
     return cycle;
   llvm::sort(pending);
   return pending[pending.size() + needed - maxInFlight - 1];
+}
+
+int64_t InstructionExecutionState::memoryIssueReadyCycle(
+    MemoryIssueResourceMask resources, unsigned issueCount,
+    int64_t cycle) const {
+  int64_t ready = cycle;
+  for (MemoryIssueResource resource : kMemoryIssueResources)
+    if (hasMemoryIssueResource(resources, resource))
+      ready =
+          std::max(ready, memoryIssueReadyCycle(resource, issueCount, cycle));
+  return ready;
 }
 
 int64_t InstructionExecutionState::getIssuePeriod() const {
@@ -752,17 +767,19 @@ void InstructionExecutionState::commitPipe(InstructionPipeKind pipe,
 
 void InstructionExecutionState::commitMemoryIssue(const InstructionDesc &desc,
                                                   int64_t issueCycle) {
-  if (desc.memoryIssue == MemoryIssueKind::None)
-    return;
-  int64_t latency = memoryIssueLatency(arch, desc.memoryIssue);
-  if (maxInFlightForMemoryIssue(arch, desc.memoryIssue) == 0 || latency <= 0)
-    return;
+  for (MemoryIssueResource resource : kMemoryIssueResources) {
+    if (!hasMemoryIssueResource(desc.memoryIssueResources, resource))
+      continue;
+    int64_t latency = memoryIssueLatency(arch, resource);
+    if (maxInFlightForMemoryIssue(arch, resource) == 0 || latency <= 0)
+      continue;
 
-  unsigned queue = memoryIssueIndex(desc.memoryIssue);
-  for (unsigned issue : llvm::seq<unsigned>(0, desc.issueCount)) {
-    int64_t issuedAt =
-        issueCycle + static_cast<int64_t>(issue) * getIssuePeriod();
-    memoryIssueQueues[queue].push_back(issuedAt + latency);
+    unsigned queue = memoryIssueIndex(resource);
+    for (unsigned issue : llvm::seq<unsigned>(0, desc.issueCount)) {
+      int64_t issuedAt =
+          issueCycle + static_cast<int64_t>(issue) * getIssuePeriod();
+      memoryIssueQueues[queue].push_back(issuedAt + latency);
+    }
   }
 }
 

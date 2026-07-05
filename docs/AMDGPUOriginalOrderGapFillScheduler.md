@@ -132,7 +132,7 @@ fuReady[fu]             // next available FU issue cycle
 issueReady              // next wave issue cycle
 cuIssueCounts[cycle]    // CU issue cap use
 cmaIssueCounts[cycle]   // CMA issue cap use
-ldsDmaReady             // LDS-DMA issue interval
+memoryIssueReady[kind]  // resource-specific memory issue queues
 valueHazards[value]     // cheap SSA-visible hazards
 ```
 
@@ -146,7 +146,6 @@ IssuePreview {
   issueWaitCycles
   cuIssueWaitCycles
   cmaIssueWaitCycles
-  ldsDmaWaitCycles
   hazardWaitInsts
   issueCycle
   readyCycle
@@ -161,7 +160,7 @@ Preview covers architectural stalls and memory stalls:
 
 - operand value not ready, including fixed producer latency such as MFMA result
   latency;
-- functional-unit, issue, CU, CMA, and LDS-DMA availability;
+- functional-unit, issue, CU, CMA, and memory issue resource availability;
 - memory token/wait readiness, including immediate wait/barrier token
   consumers.
 
@@ -204,7 +203,8 @@ After `schedule(node)`:
 - append node to the output order;
 - commit result ready cycles;
 - commit memory/token ready cycles;
-- commit FU/issue/CU/CMA/LDS-DMA state for real machine instructions;
+- commit FU/issue/CU/CMA and memory issue resource state for real machine
+  instructions;
 - advance cheap hazard state for real machine instructions;
 - seed new cheap hazards from producer ops;
 - remove node from `ready`;
@@ -227,7 +227,6 @@ stalls =
   issueWaitCycles != 0 ||
   cuIssueWaitCycles != 0 ||
   cmaIssueWaitCycles != 0 ||
-  ldsDmaWaitCycles != 0 ||
   hazardWaitInsts != 0
 ```
 

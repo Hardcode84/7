@@ -131,7 +131,6 @@ struct IssuePreview {
   int64_t issueWaitCycles = 0;
   int64_t cuIssueWaitCycles = 0;
   int64_t cmaIssueWaitCycles = 0;
-  int64_t ldsDmaWaitCycles = 0;
   unsigned hazardWaitInsts = 0;
   int64_t issueCycle = 0;
   int64_t readyCycle = 0;
@@ -339,7 +338,7 @@ static bool stalls(const IssuePreview &preview) {
   return preview.operandWaitCycles != 0 || preview.memoryWaitCycles != 0 ||
          preview.fuWaitCycles != 0 || preview.issueWaitCycles != 0 ||
          preview.cuIssueWaitCycles != 0 || preview.cmaIssueWaitCycles != 0 ||
-         preview.ldsDmaWaitCycles != 0 || preview.hazardWaitInsts != 0;
+         preview.hazardWaitInsts != 0;
 }
 
 static LogicalResult commitIssue(IssueState &state, Operation *op,
@@ -562,7 +561,7 @@ static void recordGapStats(Operation *op, const IssuePreview &preview,
       ++stats.barrierMemoryGaps;
   }
   if (preview.fuWaitCycles != 0 || preview.cuIssueWaitCycles != 0 ||
-      preview.cmaIssueWaitCycles != 0 || preview.ldsDmaWaitCycles != 0)
+      preview.cmaIssueWaitCycles != 0)
     ++stats.resourceGaps;
   if (preview.hazardWaitInsts != 0) {
     ++stats.cheapHazardGaps;
@@ -583,7 +582,7 @@ static bool filledBarrierMemoryGap(const GreedyStats &stats) {
 static bool hasNonMemoryCycleWait(const IssuePreview &preview) {
   return preview.operandWaitCycles != 0 || preview.fuWaitCycles != 0 ||
          preview.issueWaitCycles != 0 || preview.cuIssueWaitCycles != 0 ||
-         preview.cmaIssueWaitCycles != 0 || preview.ldsDmaWaitCycles != 0;
+         preview.cmaIssueWaitCycles != 0;
 }
 
 static bool appendMemoryKind(SmallVectorImpl<MemoryKind> &kinds,

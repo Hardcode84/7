@@ -119,7 +119,6 @@ private:
   using EventId = uint64_t;
   static constexpr unsigned kWaitCounterCount = 4;
   static constexpr unsigned kPipeCount = 3;
-  static constexpr unsigned kMemoryIssueCount = 5;
 
   struct PendingEvent {
     Operation *op = nullptr;
@@ -135,7 +134,7 @@ private:
     int64_t memoryValueLatency = 0;
     unsigned issueCount = 1;
     InstructionPipeKind pipe = InstructionPipeKind::None;
-    MemoryIssueKind memoryIssue = MemoryIssueKind::None;
+    MemoryIssueResourceMask memoryIssueResources = 0;
     InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
     InstructionEventClass eventClass = InstructionEventClass::None;
     bool noMachineInst = false;
@@ -156,8 +155,10 @@ private:
                             InstructionStallKind &stallKind) const;
   int64_t tokenReadyCycle(Operation *op) const;
   int64_t pipeReadyCycle(InstructionPipeKind pipe, int64_t cycle) const;
-  int64_t memoryIssueReadyCycle(MemoryIssueKind kind, unsigned issueCount,
-                                int64_t cycle) const;
+  int64_t memoryIssueReadyCycle(MemoryIssueResource resource,
+                                unsigned issueCount, int64_t cycle) const;
+  int64_t memoryIssueReadyCycle(MemoryIssueResourceMask resources,
+                                unsigned issueCount, int64_t cycle) const;
   int64_t getIssuePeriod() const;
   int64_t getInstructionSpan(const InstructionDesc &desc) const;
   int64_t getResultReadyCycle(Operation *op, const InstructionDesc &desc,
@@ -182,7 +183,8 @@ private:
   DenseMap<EventId, PendingEvent> events;
   std::array<SmallVector<EventId, 8>, kWaitCounterCount> waitQueues;
   std::array<SmallVector<int64_t, 8>, kPipeCount> pipeQueues;
-  std::array<SmallVector<int64_t, 8>, kMemoryIssueCount> memoryIssueQueues;
+  std::array<SmallVector<int64_t, 8>, kMemoryIssueResourceCount>
+      memoryIssueQueues;
   InstructionExecutionConfig config;
   const ArchData &arch;
   int64_t currentCycle = 0;

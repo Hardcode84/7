@@ -60,27 +60,27 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
-static MemoryIssueKind getVmemIssueKind(WaitcntCounter counter) {
+static MemoryIssueResource getVmemIssueResource(WaitcntCounter counter) {
   if (counter == WaitcntCounter::Vscnt)
-    return MemoryIssueKind::VmemStore;
-  return MemoryIssueKind::VmemLoad;
+    return MemoryIssueResource::VmemStore;
+  return MemoryIssueResource::VmemLoad;
 }
 
-static MemoryIssueKind getWaitcntIssueKind(WaitcntInfo info) {
+static MemoryIssueResourceMask getWaitcntIssueResources(WaitcntInfo info) {
   switch (info.event) {
   case WaitcntEvent::Vmem:
   case WaitcntEvent::Flat:
-    return getVmemIssueKind(info.counter);
+    return getMemoryIssueResourceMask(getVmemIssueResource(info.counter));
   case WaitcntEvent::VmemStore:
-    return MemoryIssueKind::VmemStore;
+    return getMemoryIssueResourceMask(MemoryIssueResource::VmemStore);
   case WaitcntEvent::Lds:
   case WaitcntEvent::Gds:
   case WaitcntEvent::Message:
-    return MemoryIssueKind::Lds;
+    return getMemoryIssueResourceMask(MemoryIssueResource::Lds);
   case WaitcntEvent::Smem:
-    return MemoryIssueKind::Smem;
+    return getMemoryIssueResourceMask(MemoryIssueResource::Smem);
   case WaitcntEvent::None:
-    return MemoryIssueKind::None;
+    return 0;
   }
   llvm_unreachable("bad waitcnt event");
 }
@@ -101,10 +101,12 @@ MemoryCounterKind getMemoryCounterKind(Operation *op) {
   return MemoryCounterKind::None;
 }
 
-MemoryIssueKind getMemoryIssueKind(Operation *op) {
+MemoryIssueResourceMask getMemoryIssueResources(Operation *op) {
+  MemoryIssueResourceMask resources =
+      getWaitcntIssueResources(getWaitcntInfo(op));
   if (op->hasTrait<traits::LDSDmaOp>() && op->hasTrait<traits::VMEMLoadOp>())
-    return MemoryIssueKind::VmemLoadLds;
-  return getWaitcntIssueKind(getWaitcntInfo(op));
+    resources |= getMemoryIssueResourceMask(MemoryIssueResource::LdsDmaAccept);
+  return resources;
 }
 
 bool isLdsDmaIssuer(Operation *op) { return op->hasTrait<traits::LDSDmaOp>(); }

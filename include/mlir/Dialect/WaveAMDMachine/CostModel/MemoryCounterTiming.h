@@ -27,14 +27,28 @@ enum class MemoryCounterKind : uint8_t {
   Vscnt,
 };
 
-enum class MemoryIssueKind : uint8_t {
-  None,
+enum class MemoryIssueResource : uint8_t {
   VmemLoad,
   VmemStore,
-  VmemLoadLds,
+  LdsDmaAccept,
   Lds,
   Smem,
 };
+
+using MemoryIssueResourceMask = uint8_t;
+
+static constexpr unsigned kMemoryIssueResourceCount = 5;
+
+constexpr MemoryIssueResourceMask
+getMemoryIssueResourceMask(MemoryIssueResource resource) {
+  return static_cast<MemoryIssueResourceMask>(
+      1u << static_cast<unsigned>(resource));
+}
+
+constexpr bool hasMemoryIssueResource(MemoryIssueResourceMask resources,
+                                      MemoryIssueResource resource) {
+  return resources & getMemoryIssueResourceMask(resource);
+}
 
 struct MemoryCounterLatencies {
   int vmemLoad = -1;
@@ -51,7 +65,7 @@ struct MemoryValueLatencies {
 
 MemoryCounterKind getMemoryCounterKind(Operation *op);
 
-MemoryIssueKind getMemoryIssueKind(Operation *op);
+MemoryIssueResourceMask getMemoryIssueResources(Operation *op);
 
 bool isLdsDmaIssuer(Operation *op);
 
