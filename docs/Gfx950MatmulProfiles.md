@@ -307,9 +307,9 @@ Scheduler implication:
   `ds_read_b64_tr_b8x6 -> MFMAx32 -> s_barrier`; machine scheduling preserved
   that bad shape. The barrier placement bug is not created solely by the final
   greedy scheduler.
-- The failed barrier-early experiment moved the barrier only after the first
-  four MFMA in this region and did not reproduce master. It was not a valid
-  proof against the barrier-skew hypothesis.
+- Moving the full scale-read barrier before the independent MFMA group
+  reproduces most of the missing performance. See the manual split-barrier
+  experiment below.
 - The scheduler/model needs to price barrier arrival skew. A barrier that joins
   memory producers for a following compute group should not sit behind partial
   consumers of those producers unless the model can prove the later barrier is
@@ -317,6 +317,80 @@ Scheduler implication:
 - The previous VMEM-producer-window conclusion was an attribution artifact from
   combined wait counters. Track drained counter class separately from pending
   counter class when reading ATT window summaries.
+
+Manual split-barrier experiment, July 5 2026:
+
+Source was the current checked-in
+`test/PerfGolden/Inputs/gfx950-mxfp4-256x256-8wave.s`, copied under
+`build/manual-split-barrier/` and assembled with `llvm-mc` + `ld.lld`.
+Perf used `M=N=4096`, `K=32768`, `--iters 200`, `--warmup 25`,
+`--repeats 9`, `--no-check`, and the existing generated runner.
+
+Variants:
+
+| Variant | Hot scale-read shape |
+|---|---|
+| current | `ds_read_b64_tr_b8x6 -> lgkmcnt(4) -> MFMAx16 -> lgkmcnt(1) -> MFMAx16 -> lgkmcnt(0) -> barrier` |
+| early hardware-barrier proxy | `ds_read_b64_tr_b8x6 -> lgkmcnt(0) -> barrier -> MFMAx32` |
+| software split probe | `ds_read_b64_tr_b8x6 -> lgkmcnt(0) -> LDS-counter arrive -> MFMAx32 -> LDS-counter poll` |
+
+Perf:
+
+| Variant | Samples | Median cycles | Delta |
+|---|---|---:|---:|
+| current | `190841,189709,190266,190983,187487,190727,189529,188966,188159` | 189709 | baseline |
+| early hardware-barrier proxy | `180973,181858,181128,181687,181260,181630,182299,182409,181199` | 181630 | -8079 |
+| software split probe | `183945,184169,181393,182322,183963,182618,183741,182661,183294` | 183294 | -6415 |
+
+ATT, early hardware-barrier proxy:
+
+| PC | Instruction | Hits | Avg stall |
+|---|---|---:|---:|
+| `0x261c` | `s_waitcnt vmcnt(8) lgkmcnt(0)` | 120 | 52.333 |
+| `0x2620` | `s_barrier` | 240 | 101.683 |
+| `0x2674` | `s_waitcnt lgkmcnt(0)` | 120 | 46.000 |
+| `0x2678` | moved scale-read `s_barrier` | 240 | 17.350 |
+| `0x267c` | first MFMA after moved barrier | 120 | 284.833 |
+| `0x2ef0` | later post-MFMA `s_barrier` | 240 | 404.417 |
+
+ATT, software split probe:
+
+| PC | Instruction | Hits | Avg stall |
+|---|---|---:|---:|
+| `0x2654` | `s_waitcnt vmcnt(8) lgkmcnt(0)` | 120 | 52.333 |
+| `0x2658` | `s_barrier` | 240 | 98.917 |
+| `0x26ac` | `s_waitcnt lgkmcnt(0)` | 120 | 46.000 |
+| `0x26d4` | arrive `ds_add_u32` | 120 | 8.633 |
+| `0x26e0` | first MFMA after arrive | 120 | 231.133 |
+| `0x28f0` | poll `ds_read_b32` | 120 | 2.200 |
+| `0x28f8` | poll `s_waitcnt lgkmcnt(0)` | 120 | 46.000 |
+| `0x28fc` | `v_readfirstlane_b32` | 120 | 3.000 |
+| `0x2904` | poll branch | 120 | 0.000 |
+| `0x2c74` | next MFMA block after poll | 120 | 73.267 |
+| `0x2f7c` | later post-MFMA `s_barrier` | 240 | 411.017 |
+
+Window summaries from the single ATT captures:
+
+| Variant | All ATT duration/wave | LDS duration/wave | Loop duration/wave | Prologue duration/wave | Epilogue duration/wave |
+|---|---:|---:|---:|---:|---:|
+| early hardware-barrier proxy | 5806 | 3173 | 146 | 4645 | 1015 |
+| software split probe | 7115 | 4564 | 1380 | 4637 | 1098 |
+
+Takeaways:
+
+- Split arrive/wait semantics would help this kernel. The early hardware
+  proxy recovers `8079` cycles, and the software split probe recovers `6415`.
+- Software split overhead is visible: roughly `1664` cycles versus the early
+  hardware-barrier proxy.
+- The software probe is not production-legal. LDS address `0x3ff00` deadlocked
+  even with expected count 1, so the running probe used `0xfc00`, which likely
+  aliases live LDS storage.
+- Large-K checker failed the same way for current and both manual variants, so
+  these runs are timing probes only. This matches the existing `--no-check`
+  sweep policy for this shape.
+- GFX9 has no real split barrier. Emulation would need allocated scratch LDS,
+  generation counters, full-EXEC lane election, and memory-order proof. Treat
+  it as a measurement tool unless the IR explicitly reserves the counter.
 
 ## `gfx950-mxfp4-256x256-4wave`
 
