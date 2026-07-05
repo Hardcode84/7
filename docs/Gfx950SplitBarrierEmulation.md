@@ -25,8 +25,9 @@ static barrier site captures its init result as an SSA value. `barrier_arrive`
 produces the arrival ticket and normal mem token consumed by `barrier_wait`;
 users of the original monolithic barrier token consume the wait result.
 
-The first implementation is gfx950-only and uses LDS atomics. Other targets keep
-`waveamdmachine.s_barrier`.
+The split IR rewrite is target-independent once the workgroup wave count is
+known. LDS materialization is gfx950-only; other targets keep
+`waveamdmachine.s_barrier` in the default backend until they have a materializer.
 
 ## Current Problem
 
@@ -132,7 +133,6 @@ The split pass:
 
 Eligibility:
 
-- target is gfx950;
 - barrier is in uniform machine control;
 - expected waves per workgroup is known;
 - function has fixed LDS accounting available;
@@ -170,7 +170,8 @@ production path must never alias user LDS or regalloc spill LDS.
 Expected wave count is workgroup-wide:
 
 ```text
-ceil(flat_workgroup_size / wavefront_size)
+flat_workgroup_size = workgroup_size_x * workgroup_size_y * workgroup_size_z
+expected_waves = ceil(flat_workgroup_size / wavefront_size)
 ```
 
 Use `wave.waves_per_workgroup` only when present and consistent with the known
@@ -240,6 +241,42 @@ have issued their arrives.
 No counter reset is needed. Loop-carried barriers reuse the same LDS state
 without a reset/arrive race. The v1 lowering may reject kernels whose dynamic
 barrier count can overflow 32-bit monotonic counters.
+
+### AMDGCN Lowering Sketch
+
+One static split barrier lowers to one LDS dword. Register names below are
+schematic; materialization should reuse normal register allocation.
+
+```asm
+; kernel entry: initialize split-barrier state
+; one elected lane per wave writes the same zero.
+v_mov_b32_e32 v_state, <barrier_lds_offset>
+v_mov_b32_e32 v_zero, 0
+ds_write_b32 v_state, v_zero
+s_waitcnt lgkmcnt(0)
+s_barrier
+
+; barrier_arrive
+; ticket result stays live until barrier_wait.
+v_mov_b32_e32 v_one, 1
+ds_add_rtn_u32 v_ticket, v_state, v_one
+; no s_waitcnt here
+
+; independent scheduled work can sit here
+
+; barrier_wait
+s_waitcnt lgkmcnt(0)
+v_readfirstlane_b32 s_ticket, v_ticket
+s_and_b32 s_base, s_ticket, -<expected_waves>
+s_add_i32 s_target, s_base, <expected_waves>
+
+.Lpoll:
+ds_read_b32 v_seen, v_state
+s_waitcnt lgkmcnt(0)
+v_readfirstlane_b32 s_seen, v_seen
+s_cmp_lt_u32 s_seen, s_target
+s_cbranch_scc1 .Lpoll
+```
 
 ## Scheduler Model
 

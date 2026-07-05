@@ -434,6 +434,20 @@ def WaveAMDMMAReusePreschedule
   ];
 }
 
+def WaveAMDSplitBarriers
+    : Pass<"waveamd-split-barriers"> {
+  let summary = "Split eligible WaveAMDMachine barriers";
+  let description = [{
+    Rewrites eligible `waveamdmachine.s_barrier` ops into
+    `barrier_init` / `barrier_arrive` / `barrier_wait` pseudos so scheduling
+    can move independent work between arrive and wait.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply greedy gap-fill WaveAMDMachine scheduling";
