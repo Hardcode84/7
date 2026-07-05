@@ -2760,10 +2760,12 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
     scale_step: dsl.Value | int,
     scale_lds_offset: dsl.Value | int,
     scale_after: dsl.Value,
+    *,
+    barrier_before: bool = True,
 ) -> tuple[dsl.Value, _DeferredScaleStore]:
     if not _use_mxfp4_delayed_b_scale_lw(cfg):
         raise ValueError("delayed B-scale LW requires packed k1 regs scale staging")
-    dep = bld.barrier(scale_after)
+    dep = bld.barrier(scale_after) if barrier_before else scale_after
     raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, 0)
     layout = _mxfp4_scale_layout(cfg, coords, raw_step)
     lds = _scale_shared_memory_base(bld, cfg, scale_lds_offset)
@@ -3665,16 +3667,6 @@ def _emit_dma_step(
                 barrier_before_read=barrier_before_scale_read,
             )
             scale_tokens.append(left_scale_token)
-            left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
-                bld,
-                cfg,
-                state.afs,
-                state.bfs,
-                state.accs,
-                left_scale_sets,
-                0,
-                n_mid,
-            )
             right_scale_sets, right_scale_token = _read_mxfp4_scale_batch_region(
                 bld,
                 cfg,
@@ -3690,6 +3682,17 @@ def _emit_dma_step(
             )
             scale_tokens.append(right_scale_token)
             scale_read_token = _join_tokens(bld, [left_scale_token, right_scale_token])
+            scale_read_done = bld.barrier(scale_read_token)
+            left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
+                bld,
+                cfg,
+                state.afs,
+                state.bfs,
+                state.accs,
+                left_scale_sets,
+                0,
+                n_mid,
+            )
             if _use_mxfp4_delayed_b_scale_lw(cfg):
                 next_a_scale_token, delayed_b_scale = (
                     _stage_mxfp4_scale_batch_delayed_b_lw(
@@ -3698,7 +3701,8 @@ def _emit_dma_step(
                         coords,
                         next_scale_step,
                         _scale_buffer_offset(bld, cfg, next_scale_step),
-                        scale_read_token,
+                        scale_read_done,
+                        barrier_before=False,
                     )
                 )
                 right_head = _emit_mxfp4_mma_grid_scale_sets_slice(
@@ -3737,7 +3741,7 @@ def _emit_dma_step(
                             coords,
                             next_scale_step,
                             _scale_buffer_offset(bld, cfg, next_scale_step),
-                            dep=bld.barrier(scale_read_token),
+                            dep=scale_read_done,
                             barrier_after=False,
                         )
                     )
@@ -3752,8 +3756,9 @@ def _emit_dma_step(
                         coords,
                         next_scale_step,
                         _scale_buffer_offset(bld, cfg, next_scale_step),
-                        scale_read_token,
+                        scale_read_done,
                         barrier_after=False,
+                        barrier_before=False,
                     )
                 new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
                     bld,
