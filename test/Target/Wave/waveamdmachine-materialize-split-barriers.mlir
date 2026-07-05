@@ -3,7 +3,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @materialize_split_barrier(
-// CHECK-SAME: wave.lds_size = 20 : i64
+// CHECK-SAME: wave.lds_size = 32 : i64
 // CHECK: [[ZERO_IMM:%.*]] = waveamdmachine.imm 0 :
 // CHECK-NEXT: [[ZERO:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO_IMM]]
 // CHECK-NEXT: [[ONE:%.*]] = waveamdmachine.s_mov_b64_imm 1
@@ -71,10 +71,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @dynamic_vgpr_shift(
 // CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
-// CHECK-SAME: wave.lds_size = 4 : i64
+// CHECK-SAME: wave.lds_size = 16 : i64
 // CHECK: [[ADDR:%.*]] = waveamdmachine.v_workitem_id_x
-// CHECK: [[FOUR:%.*]] = waveamdmachine.imm 4
-// CHECK-NEXT: [[SHIFT:%.*]] = waveamdmachine.v_add_u32 [[ADDR]], [[FOUR]]
+// CHECK: [[SIXTEEN:%.*]] = waveamdmachine.imm 16
+// CHECK-NEXT: [[SHIFT:%.*]] = waveamdmachine.v_add_u32 [[ADDR]], [[SIXTEEN]]
 // CHECK-NEXT: waveamdmachine.ds_store_b32 [[SHIFT]]
 func.func @dynamic_vgpr_shift()
     attributes {wave.kernel, wave.dynamic_lds_size = 1024 : i64,
@@ -108,10 +108,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @dynamic_m0_shift(
 // CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
-// CHECK-SAME: wave.lds_size = 4 : i64
+// CHECK-SAME: wave.lds_size = 16 : i64
 // CHECK: [[BASE:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
-// CHECK: [[FOUR:%.*]] = waveamdmachine.imm 4
-// CHECK: [[M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[BASE]], [[FOUR]]
+// CHECK: [[SIXTEEN:%.*]] = waveamdmachine.imm 16
+// CHECK: [[M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[BASE]], [[SIXTEEN]]
 // CHECK-NOT: waveamdmachine.s_mov_m0 [[BASE]]
 // CHECK: waveamdmachine.buffer_load_lds_b32 {{%.*}}, {{%.*}}, {{%.*}}, [[M0]]
 func.func @dynamic_m0_shift()

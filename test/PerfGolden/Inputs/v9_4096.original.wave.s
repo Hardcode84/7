@@ -1439,7 +1439,7 @@ v9_beyond_hotloop:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel v9_beyond_hotloop
-		.amdhsa_group_segment_fixed_size 135000
+		.amdhsa_group_segment_fixed_size 135008
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 48
 		.amdhsa_user_sgpr_count 13
@@ -1514,7 +1514,7 @@ amdhsa.kernels:
         .offset:         40
         .size:           4
         .value_kind:     by_value
-    .group_segment_fixed_size: 135000
+    .group_segment_fixed_size: 135008
     .kernarg_segment_align: 8
     .kernarg_segment_size: 48
     .max_flat_workgroup_size: 512

@@ -402,9 +402,9 @@ static void restoreExec(OpBuilder &builder, Location loc,
 static FailureOr<LDSReservation> reserveLDSForBarriers(func::FuncOp func,
                                                        MachineTypes types,
                                                        unsigned barrierCount) {
-  if (barrierCount > std::numeric_limits<unsigned>::max() / 4)
+  if (barrierCount > (std::numeric_limits<unsigned>::max() - 15) / 4)
     return func.emitError("too many split barriers");
-  unsigned reservedBytes = barrierCount * 4;
+  unsigned reservedBytes = static_cast<unsigned>(alignTo(barrierCount * 4, 16));
 
   FailureOr<unsigned> dynamicBytes = getDynamicLDSBytes(func);
   if (failed(dynamicBytes))

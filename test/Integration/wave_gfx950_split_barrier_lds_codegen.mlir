@@ -25,7 +25,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_cbranch_scc1 .Lsplit_barrier_lds_codegen.loop_head_0
 // ASM-NEXT: .Lsplit_barrier_lds_codegen.loop_exit_0:
 // ASM-NEXT: s_mov_b64 exec
-// ASM: .amdhsa_group_segment_fixed_size 1028
+// ASM: .amdhsa_group_segment_fixed_size 1040
 func.func @split_barrier_lds_codegen()
     attributes {wave.kernel, wave.lds_size = 1024 : i64,
                 wave.workgroup_size = array<i32: 256, 1, 1>,

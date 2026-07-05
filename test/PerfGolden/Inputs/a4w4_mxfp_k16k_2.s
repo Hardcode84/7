@@ -3382,7 +3382,7 @@ _a4w4_kernel:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel _a4w4_kernel
-		.amdhsa_group_segment_fixed_size 138184
+		.amdhsa_group_segment_fixed_size 138192
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 72
 		.amdhsa_user_sgpr_count 16
@@ -3475,7 +3475,7 @@ amdhsa.kernels:
         .offset:         64
         .size:           4
         .value_kind:     by_value
-    .group_segment_fixed_size: 138184
+    .group_segment_fixed_size: 138192
     .kernarg_segment_align: 8
     .kernarg_segment_size: 72
     .max_flat_workgroup_size: 256

@@ -91,9 +91,9 @@
 // F16-PERF-ASM-NOT: s_and_b32 {{s[0-9]+}}, {{s[0-9]+}}, 3
 // F16-PERF-ASM-NOT: s_lshl_b32 {{s[0-9]+}}, {{s[0-9]+}}, 15
 // F16-PERF-ASM: ds_add_rtn_u32
-// F16-PERF-ASM: s_add_i32 m0, s{{[0-9]+}}, 12
+// F16-PERF-ASM: s_add_i32 m0, s{{[0-9]+}}, 16
 // F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
-// F16-PERF-ASM: s_add_i32 m0, s{{[0-9]+}}, 12
+// F16-PERF-ASM: s_add_i32 m0, s{{[0-9]+}}, 16
 // F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
 // F16-PERF-ASM: v_mfma_f32_16x16x32_f16
 // F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_2:
@@ -178,7 +178,7 @@
 // ASMBF16: v_mfma_f32_16x16x32_bf16
 
 // ASMDYN-LABEL: wmma_f16_matmul_tiled:
-// ASMDYN: .amdhsa_group_segment_fixed_size 8
+// ASMDYN: .amdhsa_group_segment_fixed_size 16
 
 // ASMMXFP4: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASMMXFP4-LABEL: wmma_f16_matmul_tiled:
@@ -201,7 +201,7 @@
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, v{{[0-9]+}} op_sel_hi:[0,0,0] cbsz:4 blgp:4
-// ASMMXFP4: .amdhsa_group_segment_fixed_size 6168
+// ASMMXFP4: .amdhsa_group_segment_fixed_size 6176
 // ASMMXFP4: .amdhsa_kernarg_size 48
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
 
@@ -229,7 +229,7 @@
 // ASMMXFP4-DMA-K2-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(0)
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8200
+// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8208
 
 // ASMMXFP4-SCALEPACK-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-SCALEPACK-COUNT-3: ds_read_b64_tr_b8

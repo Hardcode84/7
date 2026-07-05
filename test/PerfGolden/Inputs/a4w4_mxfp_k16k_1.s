@@ -20,7 +20,7 @@ _a4w4_kernel:
 	; wave backend: WaveAMDMachine MLIR pipeline finalized
 		v_readfirstlane_b32 s17, v0
 		s_lshl_b32 s17, s17, 2
-		s_add_i32 s17, s17, 0x24c88
+		s_add_i32 s17, s17, 0x24c90
 		v_mov_b32_e32 v4, 0
 		s_mov_b32 s18, 1
 		s_mov_b32 s19, 0
@@ -3988,7 +3988,7 @@ _a4w4_kernel:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel _a4w4_kernel
-		.amdhsa_group_segment_fixed_size 162952
+		.amdhsa_group_segment_fixed_size 162960
 		.amdhsa_private_segment_fixed_size 32
 		.amdhsa_kernarg_size 72
 		.amdhsa_user_sgpr_count 16
@@ -4081,7 +4081,7 @@ amdhsa.kernels:
         .offset:         64
         .size:           4
         .value_kind:     by_value
-    .group_segment_fixed_size: 162952
+    .group_segment_fixed_size: 162960
     .kernarg_segment_align: 8
     .kernarg_segment_size: 72
     .max_flat_workgroup_size: 256
