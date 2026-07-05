@@ -135,10 +135,15 @@ Eligibility:
 
 Initial implementation can reject:
 
-- dynamic LDS layouts that cannot reserve fixed slots;
+- dynamic LDS layouts whose addresses cannot be shifted safely;
 - unknown workgroup shape;
 - barriers under non-uniform control;
 - token joins that make arrive-to-wait matching ambiguous.
+
+For dynamic LDS, materialization reserves barrier state before the dynamic
+segment and shifts existing LDS addresses by the reserved byte count. Both
+VGPR-addressed DS ops and M0-based LDS DMA forms must be adjusted before new
+barrier DS ops are inserted.
 
 ## LDS State
 
@@ -146,12 +151,11 @@ Each static split barrier reserves LDS state:
 
 | Field | Size | Purpose |
 |---|---:|---|
-| `arrivals` | 4 bytes | monotonic count of arrived waves |
-| `waiters` | 4 bytes | monotonic count of waves that reached wait |
+| `arrivals` | 4 bytes | monotonic count of arrived waves and ticket source |
 
-Two dwords per barrier site is the minimum protocol. There is no LDS slot attr
-on `barrier_init`; these offsets are assigned during materialization. Padding
-may be added to avoid known hot LDS-bank conflicts once measured.
+One dword per barrier site is the protocol state. There is no LDS slot attr on
+`barrier_init`; offsets are assigned during materialization. Padding may be
+added to avoid known hot LDS-bank conflicts once measured.
 
 Reservation must be part of normal LDS accounting. The materialization path
 must update the function's fixed LDS size before regalloc LDS relief plans its
@@ -175,7 +179,7 @@ register-pressure target.
 At kernel entry:
 
 1. Elect one active lane per wave.
-2. Store zero to every split-barrier `arrivals` and `waiters` slot.
+2. Store zero to every split-barrier `arrivals` slot.
 3. Drain LDS stores.
 4. Execute one real `s_barrier`.
 
@@ -187,43 +191,46 @@ barrier prevents a later zero store from racing with the first arrive.
 For each dynamic barrier instance:
 
 1. Elect one lane per wave under full EXEC.
-2. Issue non-returning `ds_add_u32 arrivals, 1` for the elected lane.
+2. Issue `ds_add_rtn_u32 arrivals, 1` for the elected lane.
 3. Restore EXEC.
 
-Arrive must not wait on the atomic result, because there is no result. It also
-must not force `s_waitcnt lgkmcnt(0)` for the original barrier dependencies.
-The arrive token carries those dependencies forward; the counter update is only
-the convergence signal.
+Arrive must not consume the returned ticket. It also must not force
+`s_waitcnt lgkmcnt(0)` for the original barrier dependencies. The arrive token
+carries those dependencies forward; the counter update is the convergence
+signal and the returned value is the dynamic barrier ticket.
 
 This is the key limitation: arrival can be observed before older LDS/VMEM
 dependencies have drained. Correctness comes from the wait result token still
 depending on the original pre-barrier tokens. Post-barrier memory consumers
 cannot issue until the normal waitcnt path drains those dependencies.
 
+The materialized ticket VGPR is live from arrive to wait. This is intentional:
+the return latency can be hidden by work scheduled between the split ops, but
+the scheduler must account for the pressure cost of widening that gap.
+
 ### Wait
 
 `barrier_wait` takes the synchronization cost:
 
-1. Elect one lane per wave under full EXEC.
-2. Issue `ds_add_rtn_u32 waiters, 1`.
-3. `s_waitcnt lgkmcnt(0)` and scalarize the returned ticket.
-4. Compute `target = ((ticket / expected_waves) + 1) * expected_waves`.
-5. Poll until both monotonic counters reach `target`:
+1. Elect the same one lane per wave under full EXEC.
+2. `s_waitcnt lgkmcnt(0)` and scalarize the arrival ticket.
+3. Compute `target = ((ticket / expected_waves) + 1) * expected_waves`.
+4. Poll until the monotonic counter reaches `target`:
    - `ds_read_b32 arrivals`;
-   - `ds_read_b32 waiters`;
    - `s_waitcnt lgkmcnt(0)`;
-   - scalarize both values;
-   - branch back while `arrivals < target || waiters < target`.
-6. Restore EXEC.
+   - scalarize the value;
+   - branch back while `arrivals < target`.
+5. Restore EXEC.
 
 The wait result token is produced after the successful poll. Downstream memory
 operations depend on that token, so ticket waits still see an explicit
 post-barrier ordering edge.
 
-`waiters >= target` prevents a fast wave from leaving wait and taking the next
-dynamic wait ticket before every wave has reached the current wait. `arrivals >=
-target` compensates for the non-returning arrive atomic: all arrivals must be
-visible before release.
+The arrival ticket fixes the dynamic barrier generation before wait-side skew
+can appear. A fast wave that reaches the next dynamic arrive takes a later
+ticket generation and cannot satisfy a slow wave's current `target` early.
+`arrivals >= target` releases exactly when all waves in the ticket generation
+have issued their arrives.
 
 No counter reset is needed. Loop-carried barriers reuse the same LDS state
 without a reset/arrive race. The v1 lowering may reject kernels whose dynamic
@@ -248,13 +255,13 @@ post-barrier LDS/VMEM consumers
 ```
 
 `barrier_arrive` must not be modeled as a zero-cost marker. It issues
-non-returning LDS atomic traffic and can worsen LGKM pressure. It is a
-non-draining token consumer: source token producers must be scheduled before it,
-but source-token readiness must be carried to the result token instead of paid
-with an arrive-side wait.
+returning LDS atomic traffic and can worsen LGKM pressure. It is a non-draining
+token consumer: source token producers must be scheduled before it, but
+source-token readiness must be carried to the result token instead of paid with
+an arrive-side wait.
 
-`barrier_wait` is a ticket + poll loop after materialization, but the scheduler
-only needs a conservative placeholder:
+`barrier_wait` is a ticket read + poll loop after materialization, but the
+scheduler only needs a conservative placeholder:
 
 - it depends on the arrive token;
 - it produces the post-barrier token;
@@ -275,10 +282,10 @@ allocator path.
 
 After materialization, existing passes see real machine ops:
 
-- non-returning arrive atomics produce LGKM events without return-value waits;
-- wait-side ticket atomics and poll reads produce LGKM events;
-- `s_waitcnt lgkmcnt(0)` is inserted for wait-side return/poll scalarization,
-  not immediately at arrive;
+- returning arrive atomics produce LGKM events whose result is consumed at wait;
+- poll reads produce LGKM events;
+- `s_waitcnt lgkmcnt(0)` is inserted for arrival-ticket and poll
+  scalarization, not immediately at arrive;
 - `v_readfirstlane_b32` hazards are handled by the existing hazard pass.
 - EXEC save/restore is visible to regalloc and final operand verification.
 
@@ -289,6 +296,8 @@ The split pseudos should not reach ASM emission.
 - Memory ordering remains token-only. No alias inference.
 - `barrier_arrive` does not drain original dependency tokens. It forwards them
   to the wait result.
+- `barrier_arrive` materializes the arrival ticket, but the ticket is not a
+  memory-ordering token.
 - `barrier_wait` is the only producer of the post-barrier token.
 - All waves in the workgroup must execute each dynamic arrive/wait pair.
 - Loop-carried barriers reuse the same LDS counters and rely on monotonic
@@ -306,8 +315,8 @@ Required lit coverage:
 - verifier rejects post-barrier users of arrive tokens;
 - verifier rejects mismatched wait/init pairs;
 - scheduler moves independent work between arrive and wait;
-- materializer emits LDS init, non-returning atomic arrive, wait-side ticket
-  atomic, counter polls, and updates LDS size;
+- materializer emits LDS init, returning atomic arrive, arrival-ticket
+  scalarization, counter polls, and updates LDS size;
 - waitcnt pass inserts the needed LGKM waits after materialization;
 - arrive materialization does not create an immediate `lgkmcnt(0)`;
 - unsupported targets keep `s_barrier`.
@@ -321,9 +330,9 @@ Required end-to-end coverage:
 ```text
 ds_read_b64_tr_b8...
 s_waitcnt lgkmcnt(nonzero or hidden by work)
-barrier_arrive ds_add_u32
+barrier_arrive ds_add_rtn_u32
 MFMA/SALU/VALU work
-barrier_wait ticket + LDS poll
+barrier_wait ticket read + LDS poll
 post-barrier consumer
 ```
 
@@ -332,8 +341,6 @@ manual split-barrier probe shape. ASM drift alone is not proof.
 
 ## Open Questions
 
-- Exact DS atomic opcode set to expose in WaveAMDMachine. Arrive needs
-  non-returning `ds_add_u32`; wait needs a returning ticket op.
 - Whether `barrier_arrive` needs a distinct cost class or can start as
   `WriteLDS`.
 - Whether to batch all `barrier_init` materialization behind one startup
