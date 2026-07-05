@@ -448,6 +448,20 @@ def WaveAMDSplitBarriers
   ];
 }
 
+def WaveAMDMaterializeSplitBarriers
+    : Pass<"waveamd-materialize-split-barriers"> {
+  let summary = "Lower WaveAMDMachine split barriers to LDS atomics";
+  let description = [{
+    Lowers split-barrier pseudos to LDS counter init, returning arrive atomics,
+    and wait-side poll loops. Updates LDS accounting and shifts existing
+    dynamic LDS addresses when barrier state is reserved as a prefix.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply greedy gap-fill WaveAMDMachine scheduling";

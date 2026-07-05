@@ -660,7 +660,8 @@ def WaveAMDMachine_TokenJoinOp : WaveAMDMachine_Op<"token_join",
 }
 
 def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
-    [Pure, WaveAMDMachine_TokenJoinTrait]> {
+    [Pure, WaveAMDMachine_TokenJoinTrait, WaveAMDMachine_NoMachineInst,
+     WaveAMDMachine_NoAsmEmission]> {
   let summary = "derive a machine memory token after dependencies";
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let results = (outs WaveAMDMachine_MemToken:$result);
@@ -2780,6 +2781,11 @@ def WaveAMDMachine_BarrierArriveOp
     : WaveAMDMachine_Op<"barrier_arrive">,
       WaveAMDMachine_LDSInfo<"1"> {
   let summary = "producer side of a split barrier";
+  let description = [{
+    Valid only at wave-uniform barrier points. All lanes in each participating
+    wave must reach the arrive/wait pair together; materialization elects lane
+    0 by masking EXEC.
+  }];
   let arguments = (ins WaveAMDMachine_Barrier:$barrier,
                        Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let results = (outs WaveAMDMachine_VGPR1:$ticket,
@@ -2792,6 +2798,11 @@ def WaveAMDMachine_BarrierArriveOp
 
 def WaveAMDMachine_BarrierWaitOp : WaveAMDMachine_Op<"barrier_wait"> {
   let summary = "consumer side of a split barrier";
+  let description = [{
+    Valid only at wave-uniform barrier points. All lanes in each participating
+    wave must reach the arrive/wait pair together; materialization elects lane
+    0 by masking EXEC.
+  }];
   let arguments = (ins WaveAMDMachine_Barrier:$barrier,
                        WaveAMDMachine_VGPR1:$ticket,
                        WaveAMDMachine_MemToken:$arrival);
@@ -2805,9 +2816,11 @@ def WaveAMDMachine_BarrierWaitOp : WaveAMDMachine_Op<"barrier_wait"> {
 def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {
   let summary = "workgroup-wide barrier";
   let description = [{
-    Synchronizes all waves of the workgroup. Surrounding waitcnts must
-    be inserted by `wave-amd-insert-ticket-waits` based on the
-    dependencies passed through the higher-level `wave.barrier`.
+    Synchronizes all waves of the workgroup. Valid only at wave-uniform barrier
+    points: all lanes in each participating wave must reach the barrier
+    together. Surrounding waitcnts must be inserted by
+    `wave-amd-insert-ticket-waits` based on the dependencies passed through the
+    higher-level `wave.barrier`.
   }];
 
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
