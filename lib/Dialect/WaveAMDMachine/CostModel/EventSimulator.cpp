@@ -58,15 +58,6 @@ int getEventSimIssuePeriod(const ArchData &arch, const EventSimConfig &config) {
   return period;
 }
 
-int getEventSimLdsDmaIssueInterval(const ArchData &arch,
-                                   const EventSimConfig &config) {
-  if (config.ldsDmaIssueInterval > 0)
-    return config.ldsDmaIssueInterval;
-  if (config.ldsDmaIssueInterval < 0)
-    return getEventSimIssuePeriod(arch, config);
-  return 0;
-}
-
 int getEventSimCmaIssueInterval(const ArchData &arch,
                                 const EventSimConfig &config) {
   if (config.cmaIssueInterval > 0)
@@ -373,11 +364,6 @@ private:
     int latency = getMemoryCounterLatency(arch, op, config.counterLatencies,
                                           config.calibration);
     int period = getEventSimIssuePeriod(arch, config);
-    if (isLdsDmaIssuer(op)) {
-      int interval = getEventSimLdsDmaIssueInterval(arch, config);
-      if (interval > 0)
-        period = interval;
-    }
 
     for (unsigned issue : llvm::seq<unsigned>(0, getIssueCount(op))) {
       int64_t ready =

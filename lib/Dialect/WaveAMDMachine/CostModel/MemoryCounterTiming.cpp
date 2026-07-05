@@ -13,12 +13,15 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/Support/ErrorHandling.h"
 
 namespace mlir::waveamdmachine {
 
 namespace {
+
+namespace traits = ::mlir::OpTrait::waveamdmachine;
 
 static WaitcntInfo getWaitcntInfo(Operation *op) {
   if (auto info = dyn_cast<WaitcntInfoOpInterface>(op))
@@ -57,6 +60,31 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
+static MemoryIssueKind getVmemIssueKind(WaitcntCounter counter) {
+  if (counter == WaitcntCounter::Vscnt)
+    return MemoryIssueKind::VmemStore;
+  return MemoryIssueKind::VmemLoad;
+}
+
+static MemoryIssueKind getWaitcntIssueKind(WaitcntInfo info) {
+  switch (info.event) {
+  case WaitcntEvent::Vmem:
+  case WaitcntEvent::Flat:
+    return getVmemIssueKind(info.counter);
+  case WaitcntEvent::VmemStore:
+    return MemoryIssueKind::VmemStore;
+  case WaitcntEvent::Lds:
+  case WaitcntEvent::Gds:
+  case WaitcntEvent::Message:
+    return MemoryIssueKind::Lds;
+  case WaitcntEvent::Smem:
+    return MemoryIssueKind::Smem;
+  case WaitcntEvent::None:
+    return MemoryIssueKind::None;
+  }
+  llvm_unreachable("bad waitcnt event");
+}
+
 } // namespace
 
 MemoryCounterKind getMemoryCounterKind(Operation *op) {
@@ -73,9 +101,13 @@ MemoryCounterKind getMemoryCounterKind(Operation *op) {
   return MemoryCounterKind::None;
 }
 
-bool isLdsDmaIssuer(Operation *op) {
-  return op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
+MemoryIssueKind getMemoryIssueKind(Operation *op) {
+  if (op->hasTrait<traits::LDSDmaOp>() && op->hasTrait<traits::VMEMLoadOp>())
+    return MemoryIssueKind::VmemLoadLds;
+  return getWaitcntIssueKind(getWaitcntInfo(op));
 }
+
+bool isLdsDmaIssuer(Operation *op) { return op->hasTrait<traits::LDSDmaOp>(); }
 
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const MemoryCounterLatencies &overrides,

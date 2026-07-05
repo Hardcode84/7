@@ -110,11 +110,6 @@ static llvm::cl::opt<int>
                     llvm::cl::desc("override LDS-load value-ready latency"),
                     llvm::cl::init(-1));
 
-static llvm::cl::opt<int> ldsDmaIssueInterval(
-    "lds-dma-issue-interval",
-    llvm::cl::desc("override LDS-DMA issue interval; -1 uses issue period"),
-    llvm::cl::init(0));
-
 static llvm::cl::opt<int>
     cmaIssueInterval("cma-issue-interval",
                      llvm::cl::desc("override CMA issue interval; -1 uses "
@@ -253,7 +248,6 @@ static bool validateLatencyOverrides() {
          isValidLatencyOverride(vmemValueLatency) &&
          isValidLatencyOverride(smemValueLatency) &&
          isValidLatencyOverride(ldsValueLatency) &&
-         isValidLatencyOverride(ldsDmaIssueInterval) &&
          isValidLatencyOverride(cmaIssueInterval);
 }
 
@@ -305,7 +299,6 @@ static EventSimConfig buildConfig(const CalibrationData *calibration) {
   config.valueLatencies.vmemLoad = vmemValueLatency;
   config.valueLatencies.smemLoad = smemValueLatency;
   config.valueLatencies.lds = ldsValueLatency;
-  config.ldsDmaIssueInterval = ldsDmaIssueInterval;
   config.cmaIssueInterval = cmaIssueInterval;
   return config;
 }

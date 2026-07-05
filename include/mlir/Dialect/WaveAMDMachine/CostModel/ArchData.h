@@ -63,6 +63,10 @@ struct ArchData {
 
   // Default LDS counter drain latency used when no calibration/override exists.
   int ldsCounterLatency;
+
+  // LDS-DMA issue-side accept queue. Zero depth/latency disables the model.
+  int ldsDmaIssueQueueDepth;
+  int ldsDmaIssueLatency;
 };
 
 // Lookup by IsaVersion. Aborts (report_fatal_error) on unsupported

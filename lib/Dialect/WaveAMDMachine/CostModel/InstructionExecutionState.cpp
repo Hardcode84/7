@@ -191,6 +191,24 @@ static unsigned pipeIndex(InstructionPipeKind kind) {
   llvm_unreachable("pipe has no queue");
 }
 
+static unsigned memoryIssueIndex(MemoryIssueKind kind) {
+  switch (kind) {
+  case MemoryIssueKind::VmemLoad:
+    return 0;
+  case MemoryIssueKind::VmemStore:
+    return 1;
+  case MemoryIssueKind::VmemLoadLds:
+    return 2;
+  case MemoryIssueKind::Lds:
+    return 3;
+  case MemoryIssueKind::Smem:
+    return 4;
+  case MemoryIssueKind::None:
+    break;
+  }
+  llvm_unreachable("memory issue kind has no queue");
+}
+
 static unsigned maxInFlightForPipe(const InstructionExecutionConfig &config,
                                    InstructionPipeKind pipe) {
   if (!config.enablePipeBackpressure)
@@ -206,6 +224,19 @@ static unsigned maxInFlightForPipe(const InstructionExecutionConfig &config,
     return 0;
   }
   llvm_unreachable("bad pipe kind");
+}
+
+static unsigned maxInFlightForMemoryIssue(const ArchData &arch,
+                                          MemoryIssueKind kind) {
+  if (kind == MemoryIssueKind::VmemLoadLds)
+    return static_cast<unsigned>(arch.ldsDmaIssueQueueDepth);
+  return 0;
+}
+
+static int64_t memoryIssueLatency(const ArchData &arch, MemoryIssueKind kind) {
+  if (kind == MemoryIssueKind::VmemLoadLds)
+    return arch.ldsDmaIssueLatency;
+  return 0;
 }
 
 static void appendUniqueEvents(SmallVectorImpl<uint64_t> &events,
@@ -409,6 +440,7 @@ InstructionExecutionState::commit(Operation *op) {
   int64_t valueReadyCycle = getResultReadyCycle(op, desc, result.issueCycle);
   commitResults(op, desc, result.issueCycle, newEvents);
   commitPipe(desc.pipe, valueReadyCycle);
+  commitMemoryIssue(desc, result.issueCycle);
   commitM0(desc);
 
   currentCycle = result.issueCycle + getInstructionSpan(desc);
@@ -432,6 +464,7 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.pipe = pipeFor(arch, cls);
   desc.issueCount = getIssueCount(op);
   desc.latency = getConfiguredLatency(arch, cls, config.calibration);
+  desc.memoryIssue = getMemoryIssueKind(op);
 
   MemoryCounterKind memoryCounter = getMemoryCounterKind(op);
   desc.counter = toInstructionCounter(memoryCounter);
@@ -475,6 +508,11 @@ InstructionExecutionState::query(Operation *op,
   int64_t pipeReady = pipeReadyCycle(desc.pipe, currentCycle);
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                pipeReady - currentCycle);
+
+  int64_t memoryIssueReady =
+      memoryIssueReadyCycle(desc.memoryIssue, desc.issueCount, currentCycle);
+  addComponent(stall, InstructionStallKind::IssueBackpressure,
+               memoryIssueReady - currentCycle);
 
   if (desc.m0Consumer && m0GapArmed)
     addComponent(stall, InstructionStallKind::M0ReadWrite, 1);
@@ -587,6 +625,26 @@ int64_t InstructionExecutionState::pipeReadyCycle(InstructionPipeKind pipe,
   return pending[pending.size() - maxInFlight];
 }
 
+int64_t InstructionExecutionState::memoryIssueReadyCycle(MemoryIssueKind kind,
+                                                         unsigned issueCount,
+                                                         int64_t cycle) const {
+  unsigned maxInFlight = maxInFlightForMemoryIssue(arch, kind);
+  if (kind == MemoryIssueKind::None || maxInFlight == 0 ||
+      memoryIssueLatency(arch, kind) <= 0)
+    return cycle;
+
+  SmallVector<int64_t, 8> pending;
+  for (int64_t ready : memoryIssueQueues[memoryIssueIndex(kind)])
+    if (ready > cycle)
+      pending.push_back(ready);
+
+  unsigned needed = std::min(std::max(1u, issueCount), maxInFlight);
+  if (pending.size() + needed <= maxInFlight)
+    return cycle;
+  llvm::sort(pending);
+  return pending[pending.size() + needed - maxInFlight - 1];
+}
+
 int64_t InstructionExecutionState::getIssuePeriod() const {
   if (config.issuePeriod > 0)
     return config.issuePeriod;
@@ -692,6 +750,22 @@ void InstructionExecutionState::commitPipe(InstructionPipeKind pipe,
   pipeQueues[pipeIndex(pipe)].push_back(readyCycle);
 }
 
+void InstructionExecutionState::commitMemoryIssue(const InstructionDesc &desc,
+                                                  int64_t issueCycle) {
+  if (desc.memoryIssue == MemoryIssueKind::None)
+    return;
+  int64_t latency = memoryIssueLatency(arch, desc.memoryIssue);
+  if (maxInFlightForMemoryIssue(arch, desc.memoryIssue) == 0 || latency <= 0)
+    return;
+
+  unsigned queue = memoryIssueIndex(desc.memoryIssue);
+  for (unsigned issue : llvm::seq<unsigned>(0, desc.issueCount)) {
+    int64_t issuedAt =
+        issueCycle + static_cast<int64_t>(issue) * getIssuePeriod();
+    memoryIssueQueues[queue].push_back(issuedAt + latency);
+  }
+}
+
 void InstructionExecutionState::commitM0(const InstructionDesc &desc) {
   if (desc.m0Writer) {
     m0GapArmed = true;
@@ -709,6 +783,11 @@ void InstructionExecutionState::pruneRetiredEvents(int64_t cycle) {
         queue.end());
   }
   for (SmallVector<int64_t, 8> &queue : pipeQueues) {
+    queue.erase(std::remove_if(queue.begin(), queue.end(),
+                               [&](int64_t ready) { return ready <= cycle; }),
+                queue.end());
+  }
+  for (SmallVector<int64_t, 8> &queue : memoryIssueQueues) {
     queue.erase(std::remove_if(queue.begin(), queue.end(),
                                [&](int64_t ready) { return ready <= cycle; }),
                 queue.end());

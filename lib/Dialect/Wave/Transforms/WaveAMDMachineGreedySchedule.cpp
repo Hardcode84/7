@@ -264,6 +264,12 @@ buildInstructionConfig(const waveamdmachine::ArchData &arch,
   return stateConfig;
 }
 
+static waveamdmachine::EventSimConfig buildModelConfig() {
+  waveamdmachine::EventSimConfig modelConfig;
+  modelConfig.completePendingLdsDmaCounters = true;
+  return modelConfig;
+}
+
 static unsigned getIssueCount(Operation *op) {
   if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
     return std::max(1u, info.getWaitcntInfo().issueCount);
@@ -1168,8 +1174,7 @@ struct WaveAMDMachineSchedulePass
     if (failed(validateOptions(root)))
       return signalPassFailure();
 
-    waveamdmachine::EventSimConfig modelConfig;
-    modelConfig.completePendingLdsDmaCounters = true;
+    waveamdmachine::EventSimConfig modelConfig = buildModelConfig();
     WalkResult walk = root->walk(
         [&](func::FuncOp func) { return processFunction(func, modelConfig); });
     if (walk.wasInterrupted())
@@ -1412,8 +1417,7 @@ struct WaveAMDMachineScheduleReportPass
     if (failed(validateOptions(root)))
       return signalPassFailure();
 
-    waveamdmachine::EventSimConfig modelConfig;
-    modelConfig.completePendingLdsDmaCounters = true;
+    waveamdmachine::EventSimConfig modelConfig = buildModelConfig();
     FailureOr<SmallVector<unsigned, 16>> parsedOrder =
         parseScoreOrder(StringRef(scoreOrder));
     if (failed(parsedOrder)) {

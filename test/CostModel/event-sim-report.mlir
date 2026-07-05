@@ -17,7 +17,7 @@
 // RUN: wave-sim-report --func=vmem_value_ready --timeline %s | FileCheck %s --check-prefix=VMEMVALUE
 // RUN: wave-sim-report --func=uniform_if_report %s | FileCheck %s --check-prefix=UIF
 // RUN: wave-sim-report --func=cma_matrix_cap --arch=gfx950 --timeline %s | FileCheck %s --check-prefix=CMA
-// RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --lds-dma-issue-interval=8 --timeline %s | FileCheck %s --check-prefix=LDSDMA
+// RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --timeline %s | FileCheck %s --check-prefix=LDSDMA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {

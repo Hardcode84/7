@@ -84,21 +84,23 @@ def scale_lds_dma_stagger_mlir(dma_count: int, mfma_count: int, func_name: str) 
 
 def greedy_order_sequence(
     text: str, dma_count: int, mfma_count: int
-) -> tuple[list[str], int, int]:
+) -> tuple[list[str], int, int, int]:
     cats = ["other"] + ["dma"] * dma_count + ["join"] + ["mfma"] * mfma_count
     match = re.search(
         r"name=greedy[^\n]* filled_gaps=([0-9]+)[^\n]*"
+        r" resource_gaps=([0-9]+)[^\n]*"
         r" memory_token_gaps=([0-9]+)[^\n]* order=([0-9,]+)",
         text,
     )
     if not match:
         print(text[-4000:], file=sys.stderr)
         raise SystemExit("missing greedy candidate")
-    order = [int(piece) for piece in match.group(3).split(",")]
+    order = [int(piece) for piece in match.group(4).split(",")]
     return (
         [cats[index] for index in order if cats[index] != "other"],
         int(match.group(1)),
         int(match.group(2)),
+        int(match.group(3)),
     )
 
 
@@ -111,8 +113,16 @@ def require(label: str, condition: bool, message: str) -> None:
 def check_small_scale_lds_dma() -> None:
     label = "scale_lds_dma_gap_fill"
     text = run_schedule_report(scale_lds_dma_stagger_mlir(12, 64, label))
-    seq, filled_gaps, memory_token_gaps = greedy_order_sequence(text, 12, 64)
-    require(label, filled_gaps == 0, f"expected no filled gaps, got {filled_gaps}")
+    seq, filled_gaps, resource_gaps, memory_token_gaps = greedy_order_sequence(
+        text, 12, 64
+    )
+    require(label, filled_gaps > 0, "expected resource gap fill")
+    require(
+        label,
+        resource_gaps >= filled_gaps,
+        "expected resource gaps to dominate, "
+        f"got filled={filled_gaps} resource={resource_gaps}",
+    )
     require(
         label,
         memory_token_gaps == 0,
@@ -126,20 +136,31 @@ def check_small_scale_lds_dma() -> None:
     last_dma = max(index for index, op in enumerate(seq) if op == "dma")
     join = seq.index("join")
     require(
-        label,
-        first_mfma > last_dma,
-        f"greedy should keep DMA issuers before compute, got {seq[:16]}",
+        label, first_mfma == 7, f"compute should start after queue fill: {seq[:16]}"
     )
+    require(label, first_mfma < last_dma, f"compute should fill DMA stall: {seq[:32]}")
     require(label, join == last_dma + 1, "token join should drain after DMA issuers")
-    require(label, first_mfma == join + 1, "compute should follow transient token join")
+    require(
+        label,
+        filled_gaps == seq[:join].count("mfma"),
+        "filled gaps should be MFMA before join",
+    )
     print(f"{label}: ok")
 
 
 def check_large_scale_lds_dma() -> None:
     label = "large_scale_lds_dma_gap_fill"
     text = run_schedule_report(scale_lds_dma_stagger_mlir(32, 64, label))
-    seq, filled_gaps, memory_token_gaps = greedy_order_sequence(text, 32, 64)
-    require(label, filled_gaps == 0, f"expected no filled gaps, got {filled_gaps}")
+    seq, filled_gaps, resource_gaps, memory_token_gaps = greedy_order_sequence(
+        text, 32, 64
+    )
+    require(label, filled_gaps > 0, "expected resource gap fill")
+    require(
+        label,
+        resource_gaps >= filled_gaps,
+        "expected resource gaps to dominate, "
+        f"got filled={filled_gaps} resource={resource_gaps}",
+    )
     require(
         label,
         memory_token_gaps == 0,
@@ -152,12 +173,15 @@ def check_large_scale_lds_dma() -> None:
     last_dma = max(index for index, op in enumerate(seq) if op == "dma")
     join = seq.index("join")
     require(
-        label,
-        first_mfma > last_dma,
-        f"greedy should keep DMA issuers before compute, got {seq[:36]}",
+        label, first_mfma == 7, f"compute should start after queue fill: {seq[:16]}"
     )
+    require(label, first_mfma < last_dma, f"compute should fill DMA stall: {seq[:48]}")
     require(label, join == last_dma + 1, "token join should drain after DMA issuers")
-    require(label, first_mfma == join + 1, "compute should follow transient token join")
+    require(
+        label,
+        filled_gaps == seq[:join].count("mfma"),
+        "filled gaps should be MFMA before join",
+    )
     print(f"{label}: ok")
 
 

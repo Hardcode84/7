@@ -27,6 +27,15 @@ enum class MemoryCounterKind : uint8_t {
   Vscnt,
 };
 
+enum class MemoryIssueKind : uint8_t {
+  None,
+  VmemLoad,
+  VmemStore,
+  VmemLoadLds,
+  Lds,
+  Smem,
+};
+
 struct MemoryCounterLatencies {
   int vmemLoad = -1;
   int vmemStore = -1;
@@ -41,6 +50,8 @@ struct MemoryValueLatencies {
 };
 
 MemoryCounterKind getMemoryCounterKind(Operation *op);
+
+MemoryIssueKind getMemoryIssueKind(Operation *op);
 
 bool isLdsDmaIssuer(Operation *op);
 

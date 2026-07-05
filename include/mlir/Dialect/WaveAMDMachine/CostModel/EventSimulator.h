@@ -34,7 +34,6 @@ struct EventSimConfig {
   const CalibrationData *calibration = nullptr;
   bool recordTimeline = false;
   bool completePendingLdsDmaCounters = false;
-  int ldsDmaIssueInterval = 0;
   int cmaIssueInterval = 0;
   MemoryCounterLatencies counterLatencies;
   MemoryValueLatencies valueLatencies;
@@ -72,9 +71,6 @@ struct EventSimResult {
 bool isEventSimCmaClass(SchedClass cls);
 
 int getEventSimIssuePeriod(const ArchData &arch, const EventSimConfig &config);
-
-int getEventSimLdsDmaIssueInterval(const ArchData &arch,
-                                   const EventSimConfig &config);
 
 int getEventSimCmaIssueInterval(const ArchData &arch,
                                 const EventSimConfig &config);

@@ -119,6 +119,7 @@ private:
   using EventId = uint64_t;
   static constexpr unsigned kWaitCounterCount = 4;
   static constexpr unsigned kPipeCount = 3;
+  static constexpr unsigned kMemoryIssueCount = 5;
 
   struct PendingEvent {
     Operation *op = nullptr;
@@ -134,6 +135,7 @@ private:
     int64_t memoryValueLatency = 0;
     unsigned issueCount = 1;
     InstructionPipeKind pipe = InstructionPipeKind::None;
+    MemoryIssueKind memoryIssue = MemoryIssueKind::None;
     InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
     InstructionEventClass eventClass = InstructionEventClass::None;
     bool noMachineInst = false;
@@ -154,6 +156,8 @@ private:
                             InstructionStallKind &stallKind) const;
   int64_t tokenReadyCycle(Operation *op) const;
   int64_t pipeReadyCycle(InstructionPipeKind pipe, int64_t cycle) const;
+  int64_t memoryIssueReadyCycle(MemoryIssueKind kind, unsigned issueCount,
+                                int64_t cycle) const;
   int64_t getIssuePeriod() const;
   int64_t getInstructionSpan(const InstructionDesc &desc) const;
   int64_t getResultReadyCycle(Operation *op, const InstructionDesc &desc,
@@ -166,6 +170,7 @@ private:
   void commitResults(Operation *op, const InstructionDesc &desc,
                      int64_t issueCycle, ArrayRef<EventId> newEvents);
   void commitPipe(InstructionPipeKind pipe, int64_t readyCycle);
+  void commitMemoryIssue(const InstructionDesc &desc, int64_t issueCycle);
   void commitM0(const InstructionDesc &desc);
   void pruneRetiredEvents(int64_t cycle);
   SmallVector<EventId, 4> collectTokenDeps(Operation *op) const;
@@ -177,6 +182,7 @@ private:
   DenseMap<EventId, PendingEvent> events;
   std::array<SmallVector<EventId, 8>, kWaitCounterCount> waitQueues;
   std::array<SmallVector<int64_t, 8>, kPipeCount> pipeQueues;
+  std::array<SmallVector<int64_t, 8>, kMemoryIssueCount> memoryIssueQueues;
   InstructionExecutionConfig config;
   const ArchData &arch;
   int64_t currentCycle = 0;

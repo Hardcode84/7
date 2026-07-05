@@ -27,6 +27,8 @@ static constexpr ArchData kGfx803{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
     /*ldsCounterLatency=*/5,
+    /*ldsDmaIssueQueueDepth=*/0,
+    /*ldsDmaIssueLatency=*/0,
 };
 
 // CDNA3 / MI300. LLVM AMDGPUBaseInfo gives 8 waves/EU,
@@ -44,6 +46,8 @@ static constexpr ArchData kGfx942{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
     /*ldsCounterLatency=*/5,
+    /*ldsDmaIssueQueueDepth=*/0,
+    /*ldsDmaIssueLatency=*/0,
 };
 
 // CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
@@ -60,6 +64,8 @@ static constexpr ArchData kGfx950{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
     /*ldsCounterLatency=*/20,
+    /*ldsDmaIssueQueueDepth=*/7,
+    /*ldsDmaIssueLatency=*/180,
 };
 
 // RDNA3 Navi31 (RX 7900 series). FeatureGFX10_3Insts +
@@ -77,6 +83,8 @@ static constexpr ArchData kGfx1100{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/1,
     /*ldsCounterLatency=*/20,
+    /*ldsDmaIssueQueueDepth=*/0,
+    /*ldsDmaIssueLatency=*/0,
 };
 
 // RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default.
@@ -93,7 +101,21 @@ static constexpr ArchData kGfx1200{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/1,
     /*ldsCounterLatency=*/20,
+    /*ldsDmaIssueQueueDepth=*/0,
+    /*ldsDmaIssueLatency=*/0,
 };
+
+template <const ArchData &A> static constexpr bool saneLdsDmaIssue() {
+  static_assert(A.ldsDmaIssueQueueDepth >= 0,
+                "ldsDmaIssueQueueDepth below range");
+  static_assert(A.ldsDmaIssueQueueDepth <= 64,
+                "ldsDmaIssueQueueDepth above range");
+  static_assert(A.ldsDmaIssueLatency >= 0, "ldsDmaIssueLatency below range");
+  static_assert(A.ldsDmaIssueLatency <= 512, "ldsDmaIssueLatency above range");
+  static_assert((A.ldsDmaIssueQueueDepth == 0) == (A.ldsDmaIssueLatency == 0),
+                "LDS-DMA issue model requires depth and latency");
+  return true;
+}
 
 // Compile-time invariants. Anything failing here means a typo in
 // the table above slipped past review.
@@ -117,6 +139,7 @@ template <const ArchData &A> static constexpr bool sane() {
                 "simdIssuePeriod is 1 (RDNA) or 4 (CDNA wave64)");
   static_assert(A.ldsCounterLatency >= 0 && A.ldsCounterLatency <= 512,
                 "ldsCounterLatency out of range");
+  static_assert(saneLdsDmaIssue<A>());
   return true;
 }
 

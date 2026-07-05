@@ -5,6 +5,7 @@
 // RUN: wave-instruction-state-report --func=barrier_does_not_drain --vmem-counter-latency=7 %s | FileCheck %s --check-prefix=BARRIER
 // RUN: wave-instruction-state-report --func=m0_gap %s | FileCheck %s --check-prefix=M0
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --pipe-backpressure --salu-max-in-flight=1 %s | FileCheck %s --check-prefix=PIPE
+// RUN: wave-instruction-state-report --func=lds_dma_issue_backpressure --arch=gfx950 %s | FileCheck %s --check-prefix=LDSDMA
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx942 %s | FileCheck %s --check-prefix=CDNA3
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx950 %s | FileCheck %s --check-prefix=CDNA4
 
@@ -89,6 +90,45 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
     return
   }
+
+  func.func @lds_dma_issue_backpressure(%off: !waveamdmachine.reg<vgpr, 1>,
+                                        %base: !waveamdmachine.reg<sgpr, 2>,
+                                        %m0: !waveamdmachine.m0) {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %tok0 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok1 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok2 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok3 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok4 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok5 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok6 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %tok7 = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -116,6 +156,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PIPE: func: salu_pipe_cap
 // PIPE: query op_index=1 cycle=1 op=waveamdmachine.s_add_i32 stall=issue_backpressure cycles=1 components=issue_backpressure:1
+
+// LDSDMA: func: lds_dma_issue_backpressure
+// LDSDMA: query op_index=8 cycle=28 op=waveamdmachine.global_load_lds_b128 stall=issue_backpressure cycles=152 components=issue_backpressure:152
+// LDSDMA: commit op_index=8 issue=180 next=184
 
 // CDNA3: arch: gfx942
 // CDNA3: query op_index=0 cycle=0 op=waveamdmachine.s_add_i32 stall=none cycles=0
