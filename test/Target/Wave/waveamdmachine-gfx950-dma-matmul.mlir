@@ -178,7 +178,7 @@
 // ASMBF16: v_mfma_f32_16x16x32_bf16
 
 // ASMDYN-LABEL: wmma_f16_matmul_tiled:
-// ASMDYN: .amdhsa_group_segment_fixed_size 16
+// ASMDYN: .amdhsa_group_segment_fixed_size 0
 
 // ASMMXFP4: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASMMXFP4-LABEL: wmma_f16_matmul_tiled:
@@ -201,7 +201,7 @@
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, v{{[0-9]+}} op_sel_hi:[0,0,0] cbsz:4 blgp:4
-// ASMMXFP4: .amdhsa_group_segment_fixed_size 6176
+// ASMMXFP4: .amdhsa_group_segment_fixed_size 6160
 // ASMMXFP4: .amdhsa_kernarg_size 48
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
 

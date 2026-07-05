@@ -159,6 +159,22 @@ collapseBarriers(waveamdmachine::SBarrierOp first,
   return replacement;
 }
 
+static waveamdmachine::SBarrierOp
+getPreviousBarrier(waveamdmachine::SBarrierOp barrier) {
+  Operation *cursor = barrier->getPrevNode();
+  while (cursor && isFlatNoInst(cursor))
+    cursor = cursor->getPrevNode();
+  return dyn_cast_or_null<waveamdmachine::SBarrierOp>(cursor);
+}
+
+static FailureOr<waveamdmachine::SBarrierOp>
+tryCollapseWithPrevious(waveamdmachine::SBarrierOp barrier) {
+  waveamdmachine::SBarrierOp previous = getPreviousBarrier(barrier);
+  if (!previous)
+    return failure();
+  return collapseBarriers(previous, barrier);
+}
+
 static FailureOr<waveamdmachine::SBarrierOp>
 tryCollapseFrom(waveamdmachine::SBarrierOp first) {
   Operation *cursor = first->getNextNode();
@@ -171,24 +187,157 @@ tryCollapseFrom(waveamdmachine::SBarrierOp first) {
   return collapseBarriers(first, second);
 }
 
+struct SplitBarrierDepCollector {
+  bool collect(Value token) {
+    if (!isMemToken(token))
+      return true;
+    if (token == arrive.getToken()) {
+      sawArriveToken = true;
+      if (!visiting.insert(token).second)
+        return true;
+      return collectOperands(arrive);
+    }
+    if (!visiting.insert(token).second)
+      return true;
+
+    Operation *def = token.getDefiningOp();
+    if (!def || !isBetween(def, arrive, wait))
+      return addUnique(token, deps, seen);
+    return collectBetweenDef(def);
+  }
+
+  bool collectOperands(Operation *op) {
+    for (Value operand : op->getOperands())
+      if (isMemToken(operand) && !collect(operand))
+        return false;
+    return true;
+  }
+
+  bool collectBetweenDef(Operation *def) {
+    if (!isFlattenableTokenProducer(def))
+      return false;
+    return collectOperands(def);
+  }
+
+  waveamdmachine::BarrierArriveOp arrive;
+  waveamdmachine::BarrierWaitOp wait;
+  SmallVectorImpl<Value> &deps;
+  llvm::SmallDenseSet<Value, 16> &seen;
+  llvm::SmallDenseSet<Value, 16> &visiting;
+  bool sawArriveToken = false;
+};
+
+static FailureOr<SmallVector<Value, 8>>
+collectMergedDeps(waveamdmachine::BarrierArriveOp arrive,
+                  waveamdmachine::BarrierWaitOp wait) {
+  SmallVector<Value, 8> deps;
+  llvm::SmallDenseSet<Value, 16> seen;
+  llvm::SmallDenseSet<Value, 16> visiting;
+  SplitBarrierDepCollector collector{arrive, wait, deps, seen, visiting};
+  if (!collector.collect(wait.getArrival()) || !collector.sawArriveToken)
+    return failure();
+  return deps;
+}
+
+static bool hasOnlyWaitUsers(Value value, waveamdmachine::BarrierWaitOp wait) {
+  for (OpOperand &use : value.getUses())
+    if (use.getOwner() != wait.getOperation())
+      return false;
+  return true;
+}
+
+static bool isMatchingWait(waveamdmachine::BarrierArriveOp arrive,
+                           waveamdmachine::BarrierWaitOp wait) {
+  if (wait.getBarrier() != arrive.getBarrier())
+    return false;
+  if (!arrive.getBarrier().getDefiningOp<waveamdmachine::BarrierInitOp>())
+    return false;
+  if (wait.getTicket() != arrive.getTicket())
+    return false;
+  return hasOnlyWaitUsers(arrive.getTicket(), wait);
+}
+
+static bool needsTokenResult(waveamdmachine::BarrierArriveOp arrive,
+                             waveamdmachine::BarrierWaitOp wait) {
+  if (!wait.getToken().use_empty())
+    return true;
+  return !hasOnlyWaitUsers(arrive.getToken(), wait);
+}
+
+static FailureOr<waveamdmachine::SBarrierOp>
+mergeSplitBarrier(waveamdmachine::BarrierArriveOp arrive,
+                  waveamdmachine::BarrierWaitOp wait) {
+  if (!isMatchingWait(arrive, wait))
+    return failure();
+
+  FailureOr<SmallVector<Value, 8>> deps = collectMergedDeps(arrive, wait);
+  if (failed(deps))
+    return failure();
+
+  OpBuilder builder(arrive);
+  SmallVector<Type, 1> resultTypes;
+  if (needsTokenResult(arrive, wait))
+    resultTypes.push_back(
+        waveamdmachine::MemTokenType::get(arrive.getContext()));
+
+  auto replacement = waveamdmachine::SBarrierOp::create(
+      builder, arrive.getLoc(), resultTypes, *deps);
+  replacement->setAttrs(arrive->getAttrs());
+  Value barrier = arrive.getBarrier();
+  if (!resultTypes.empty()) {
+    Value token = replacement->getResult(0);
+    arrive.getToken().replaceAllUsesWith(token);
+    wait.getToken().replaceAllUsesWith(token);
+  }
+  wait->erase();
+  arrive->erase();
+  if (auto init = barrier.getDefiningOp<waveamdmachine::BarrierInitOp>())
+    if (init->use_empty())
+      init.erase();
+  FailureOr<waveamdmachine::SBarrierOp> collapsed =
+      tryCollapseWithPrevious(replacement);
+  if (succeeded(collapsed))
+    return collapsed;
+  return replacement;
+}
+
+static FailureOr<waveamdmachine::SBarrierOp>
+tryMergeSplitFrom(waveamdmachine::BarrierArriveOp arrive) {
+  Operation *cursor = arrive->getNextNode();
+  while (cursor && isFlatNoInst(cursor))
+    cursor = cursor->getNextNode();
+
+  auto wait = dyn_cast_or_null<waveamdmachine::BarrierWaitOp>(cursor);
+  if (!wait)
+    return failure();
+  return mergeSplitBarrier(arrive, wait);
+}
+
 static bool collapseBlock(Block &block) {
   bool changed = false;
   Operation *op = block.empty() ? nullptr : &block.front();
   while (op) {
-    auto first = dyn_cast<waveamdmachine::SBarrierOp>(op);
-    if (!first) {
-      op = op->getNextNode();
-      continue;
-    }
-
-    FailureOr<waveamdmachine::SBarrierOp> replacement = tryCollapseFrom(first);
-    if (failed(replacement)) {
+    if (auto first = dyn_cast<waveamdmachine::SBarrierOp>(op)) {
+      FailureOr<waveamdmachine::SBarrierOp> replacement =
+          tryCollapseFrom(first);
+      if (succeeded(replacement)) {
+        changed = true;
+        op = replacement->getOperation();
+        continue;
+      }
       op = first->getNextNode();
-      continue;
+    } else if (auto arrive = dyn_cast<waveamdmachine::BarrierArriveOp>(op)) {
+      FailureOr<waveamdmachine::SBarrierOp> replacement =
+          tryMergeSplitFrom(arrive);
+      if (succeeded(replacement)) {
+        changed = true;
+        op = replacement->getOperation();
+        continue;
+      }
+      op = arrive->getNextNode();
+    } else {
+      op = op->getNextNode();
     }
-
-    changed = true;
-    op = replacement->getOperation();
   }
   return changed;
 }

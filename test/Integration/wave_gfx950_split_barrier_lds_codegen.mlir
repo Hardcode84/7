@@ -42,6 +42,9 @@ func.func @split_barrier_lds_codegen()
   %ticket, %arrived = waveamdmachine.barrier_arrive %state after %store
       : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %sum = waveamdmachine.v_add_u32 %addr, %addr
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1>
   %ready = waveamdmachine.barrier_wait %state, %ticket after %arrived
       : (!waveamdmachine.barrier, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
