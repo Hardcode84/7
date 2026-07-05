@@ -2484,6 +2484,37 @@ def WaveAMDMachine_DsStoreB32Op
   }];
 }
 
+def WaveAMDMachine_DsAddU32Op
+    : WaveAMDMachine_DsMemoryOp<"ds_add_u32", [WaveAMDMachine_LDSStore]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS non-returning atomic add";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsAddRtnU32Op
+    : WaveAMDMachine_DsMemoryOp<"ds_add_rtn_u32", [WaveAMDMachine_LDSStore]>,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "LDS returning atomic add";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       WaveAMDMachine_VGPR1:$value,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$offset);
+  let results = (outs WaveAMDMachine_VGPR1:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_DsStoreAddTidB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_store_addtid_b32", [WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,

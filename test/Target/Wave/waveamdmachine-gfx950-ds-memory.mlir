@@ -41,4 +41,29 @@ func.func @gfx950_ds_memory_ops() attributes {wave.kernel, waveamdmachine.lds_si
   return
 }
 
+// ROUNDTRIP-LABEL: func.func @gfx950_ds_atomics
+// ROUNDTRIP: %[[ADDR:.*]] = waveamdmachine.v_mbcnt_lo
+// ROUNDTRIP: %[[ADD:.*]] = waveamdmachine.ds_add_u32 %[[ADDR]], {{%.*}} offset 8
+// ROUNDTRIP: waveamdmachine.ds_add_rtn_u32 %[[ADDR]], {{%.*}} after %[[ADD]] offset 12
+
+// ASM-LABEL: gfx950_ds_atomics:
+// ASM: ds_add_u32 {{v[0-9]+}}, {{v[0-9]+}} offset:8
+// ASM: ds_add_rtn_u32 {{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}} offset:12
+// ASM: s_endpgm
+func.func @gfx950_ds_atomics() attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+  %addr = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %value = waveamdmachine.v_mov_b32_tuple %one
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %add = waveamdmachine.ds_add_u32 %addr, %value offset 8
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.mem.token
+  %old, %rtn = waveamdmachine.ds_add_rtn_u32 %addr, %value after %add offset 12
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

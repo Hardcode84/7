@@ -866,6 +866,8 @@ private:
   unsigned dsSwizzleB32() const { return opcodes.dsSwizzleB32; }
   unsigned dsPermuteB32() const { return opcodes.dsPermuteB32; }
   unsigned dsBpermuteB32() const { return opcodes.dsBpermuteB32; }
+  unsigned dsAddU32() const { return opcodes.dsAddU32; }
+  unsigned dsAddRtnU32() const { return opcodes.dsAddRtnU32; }
 
   unsigned dsReadU8() const {
     if (isGfx8Or9())
@@ -1976,6 +1978,21 @@ private:
   LogicalResult emitDsStore(Operation &op, unsigned opcode) {
     return emitMC(opcode,
                   {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitDsAdd(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitDsAddRtn(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   toMCOperand(op.getOperand(1)),
                    llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
                    llvm::MCOperand::createImm(0)});
   }
@@ -3310,6 +3327,10 @@ private:
       return emitDsStore(op, dsWriteB16());
     if (isa<waveamdmachine::DsStoreB8Op>(op))
       return emitDsStore(op, dsWriteB8());
+    if (isa<waveamdmachine::DsAddU32Op>(op))
+      return emitDsAdd(op, dsAddU32());
+    if (isa<waveamdmachine::DsAddRtnU32Op>(op))
+      return emitDsAddRtn(op, dsAddRtnU32());
     if (isa<waveamdmachine::DsStoreAddTidB32Op>(op)) {
       if (isaVersion.Major < 9)
         return op.emitError("ds_store_addtid_b32 requires gfx9+");
