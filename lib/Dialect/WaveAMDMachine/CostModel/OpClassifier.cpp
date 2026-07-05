@@ -81,7 +81,7 @@ static SchedClass classifyMappedOp(Operation *op) {
             UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
-      .Case<SBarrierOp>(
+      .Case<BarrierWaitOp, SBarrierOp>(
           [](auto) { return SchedClass::WriteBarrier; })
       // Branches / control flow / endpgm. UniformLoopOp + ContinueIfOp
       // are NoInst above -- region-structural, real branches come from

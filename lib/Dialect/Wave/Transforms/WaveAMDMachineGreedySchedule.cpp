@@ -545,10 +545,25 @@ static unsigned findFirstUnscheduled(const BitVector &scheduled) {
 }
 
 static unsigned findFirstReadyByOriginal(const BitVector &ready) {
-  for (unsigned index : llvm::seq<unsigned>(0, ready.size()))
+  for (unsigned index : llvm::seq(ready.size()))
     if (ready.test(index))
       return index;
   return ready.size();
+}
+
+static unsigned findFirstReadyBarrierArrive(const BitVector &ready,
+                                            const GreedyRegion &region) {
+  for (unsigned index : llvm::seq(ready.size())) {
+    if (!ready.test(index))
+      continue;
+    if (isa<waveamdmachine::BarrierArriveOp>(region.ops[index]))
+      return index;
+  }
+  return ready.size();
+}
+
+static bool isBarrierOp(Operation *op) {
+  return isa<waveamdmachine::BarrierWaitOp, waveamdmachine::SBarrierOp>(op);
 }
 
 static void recordGapStats(Operation *op, const IssuePreview &preview,
@@ -557,7 +572,7 @@ static void recordGapStats(Operation *op, const IssuePreview &preview,
     ++stats.operandGaps;
   if (preview.memoryWaitCycles != 0) {
     ++stats.memoryTokenGaps;
-    if (isa<waveamdmachine::SBarrierOp>(op))
+    if (isBarrierOp(op))
       ++stats.barrierMemoryGaps;
   }
   if (preview.fuWaitCycles != 0 || preview.cuIssueWaitCycles != 0 ||
@@ -739,7 +754,7 @@ findStallFiller(const BitVector &ready, unsigned next,
                 const waveamdmachine::ArchData &arch,
                 const waveamdmachine::EventSimConfig &cfg, FillableStall stall,
                 const ValueOriginMap &origins) {
-  for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
+  for (unsigned index : llvm::seq(ready.size())) {
     if (!ready.test(index) || index == next)
       continue;
     if (!canUseStallFiller(region, scheduled, next, index, origins))
@@ -756,7 +771,7 @@ findStallFiller(const BitVector &ready, unsigned next,
 
 static unsigned findFirstReadyNoInst(const BitVector &ready,
                                      const GreedyRegion &region) {
-  for (unsigned index : llvm::seq<unsigned>(0, ready.size())) {
+  for (unsigned index : llvm::seq(ready.size())) {
     if (!ready.test(index))
       continue;
     if (waveamdmachine::classifyOp(region.ops[index]) ==
@@ -871,7 +886,7 @@ scheduleStallFiller(const GreedyRegion &region, const GraphTables &graph,
 static void recordFilledStall(Operation *op, const IssuePreview &nextPreview,
                               GreedyStats &stats) {
   ++stats.filledGaps;
-  if (nextPreview.memoryWaitCycles != 0 && isa<waveamdmachine::SBarrierOp>(op))
+  if (nextPreview.memoryWaitCycles != 0 && isBarrierOp(op))
     ++stats.filledBarrierMemoryGaps;
 }
 
@@ -920,13 +935,12 @@ static GreedyResult failGreedyModel(GreedyResult &result) {
   return result;
 }
 
-static FailureOr<GreedyStepStatus> scheduleFirstReadyByOriginal(
-    const GreedyRegion &region, const GraphTables &graph,
+static FailureOr<GreedyStepStatus> scheduleReadyByIndex(
+    unsigned selected, const GreedyRegion &region, const GraphTables &graph,
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, IssueState &state,
     BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
     SmallVectorImpl<unsigned> &order) {
-  unsigned selected = findFirstReadyByOriginal(ready);
   FailureOr<IssuePreview> selectedPreview =
       previewIssue(state, region.ops[selected], arch, config);
   if (failed(selectedPreview))
@@ -936,6 +950,17 @@ static FailureOr<GreedyStepStatus> scheduleFirstReadyByOriginal(
                                *selectedPreview)))
     return failure();
   return GreedyStepStatus::Continue;
+}
+
+static FailureOr<GreedyStepStatus> scheduleFirstReadyByOriginal(
+    const GreedyRegion &region, const GraphTables &graph,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, IssueState &state,
+    BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
+    SmallVectorImpl<unsigned> &order) {
+  unsigned selected = findFirstReadyByOriginal(ready);
+  return scheduleReadyByIndex(selected, region, graph, arch, config, state,
+                              ready, scheduled, pending, order);
 }
 
 static FailureOr<GreedyStepStatus>
@@ -977,6 +1002,11 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
     recordDependencyCycle(graph, scheduled, pending, result);
     return GreedyStepStatus::Blocked;
   }
+
+  unsigned eagerArrive = findFirstReadyBarrierArrive(ready, region);
+  if (eagerArrive != region.ops.size())
+    return scheduleReadyByIndex(eagerArrive, region, graph, arch, config, state,
+                                ready, scheduled, pending, result.order);
 
   unsigned next = findFirstUnscheduled(scheduled);
   if (!ready.test(next))

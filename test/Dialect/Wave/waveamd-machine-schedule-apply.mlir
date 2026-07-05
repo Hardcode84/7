@@ -1,5 +1,6 @@
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' | FileCheck %s --check-prefix=IR
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
+// RUN: wave-opt %s --split-input-file --waveamd-machine-schedule-report='print-classes=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=CLASS
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1 max-region-ops=2' | FileCheck %s --check-prefix=CAP
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -206,6 +207,60 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // DIAG-SAME: filled_gaps=2
 // DIAG-SAME: memory_token_gaps={{[2-9][0-9]*}}
 // DIAG-SAME: filled_barrier_memory_gaps=2
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @split_barrier_arrive_eager_wait_fill(
+    %addr_base: !waveamdmachine.reg<vgpr, 1>,
+    %addr_off: !waveamdmachine.reg<vgpr, 1>,
+    %value: !waveamdmachine.reg<vgpr, 1>,
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>,
+    %s2: !waveamdmachine.reg<sgpr, 1>,
+    %s3: !waveamdmachine.reg<sgpr, 1>) {
+  %state = waveamdmachine.barrier_init : !waveamdmachine.barrier
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %addr = waveamdmachine.v_add_u32 %addr_base, %addr_off
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %stored = waveamdmachine.ds_store_b32 %addr, %value after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %x, %sx = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %ticket, %arrived = waveamdmachine.barrier_arrive %state after %stored
+      : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %ready = waveamdmachine.barrier_wait %state, %ticket after %arrived
+      : (!waveamdmachine.barrier, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %y, %sy = waveamdmachine.s_lshl_b32 %s2, %s3
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+}
+
+// IR-LABEL: func.func @split_barrier_arrive_eager_wait_fill
+// IR: [[STATE:%.*]] = waveamdmachine.barrier_init
+// IR-NEXT: [[ROOT:%.*]] = waveamdmachine.token
+// IR-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: [[STORED:%.*]] = waveamdmachine.ds_store_b32 [[ADDR]]{{.*}} after [[ROOT]]
+// IR-NEXT: [[TICKET:%.*]], [[ARRIVED:%.*]] = waveamdmachine.barrier_arrive [[STATE]] after [[STORED]]
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_lshl_b32
+// IR-NEXT: {{%.*}} = waveamdmachine.barrier_wait [[STATE]], [[TICKET]] after [[ARRIVED]]
+// DIAG: waveamd-machine-schedule region func=split_barrier_arrive_eager_wait_fill
+// DIAG-SAME: action=apply reason=greedy
+// DIAG-SAME: filled_gaps=1
+// CLASS: op func=split_barrier_arrive_eager_wait_fill{{.*}}name=waveamdmachine.barrier_arrive
+// CLASS-SAME: class=WriteLDS fu=LGKM
+// CLASS: op func=split_barrier_arrive_eager_wait_fill{{.*}}name=waveamdmachine.barrier_wait
+// CLASS-SAME: class=WriteBarrier fu=BRANCH
 
 // -----
 
