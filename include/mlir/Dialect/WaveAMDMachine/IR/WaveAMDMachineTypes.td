@@ -68,6 +68,14 @@ def WaveAMDMachine_MemTokenType : WaveAMDMachine_Type<"MemToken", "mem.token"> {
   }];
 }
 
+def WaveAMDMachine_BarrierType : WaveAMDMachine_Type<"Barrier", "barrier"> {
+  let summary = "static split-barrier handle";
+  let description = [{
+    A `!waveamdmachine.barrier` value names one static split-barrier site.
+    Materialization assigns LDS state after all split sites are known.
+  }];
+}
+
 def WaveAMDMachine_M0Type : WaveAMDMachine_Type<"M0", "m0"> {
   let summary = "AMDGPU M0 state";
   let description = [{
@@ -88,6 +96,10 @@ def WaveAMDMachine_Imm
 def WaveAMDMachine_MemToken
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::MemTokenType>($_self)">,
            "WaveAMDMachine memory token type">;
+
+def WaveAMDMachine_Barrier
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::BarrierType>($_self)">,
+           "WaveAMDMachine barrier handle type">;
 
 def WaveAMDMachine_M0
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::M0Type>($_self)">,

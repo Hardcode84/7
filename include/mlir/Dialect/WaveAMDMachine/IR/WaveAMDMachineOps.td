@@ -2769,6 +2769,39 @@ def WaveAMDMachine_DsBpermuteB32Op
   let summary = "DS lane broadcast permute";
 }
 
+def WaveAMDMachine_BarrierInitOp : WaveAMDMachine_Op<"barrier_init",
+    [WaveAMDMachine_NoMachineInst]> {
+  let summary = "static split-barrier handle";
+  let results = (outs WaveAMDMachine_Barrier:$barrier);
+  let assemblyFormat = "attr-dict `:` type($barrier)";
+}
+
+def WaveAMDMachine_BarrierArriveOp
+    : WaveAMDMachine_Op<"barrier_arrive">,
+      WaveAMDMachine_LDSInfo<"1"> {
+  let summary = "producer side of a split barrier";
+  let arguments = (ins WaveAMDMachine_Barrier:$barrier,
+                       Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let results = (outs WaveAMDMachine_VGPR1:$ticket,
+                      WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $barrier (`after` $dependencies^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_BarrierWaitOp : WaveAMDMachine_Op<"barrier_wait"> {
+  let summary = "consumer side of a split barrier";
+  let arguments = (ins WaveAMDMachine_Barrier:$barrier,
+                       WaveAMDMachine_VGPR1:$ticket,
+                       WaveAMDMachine_MemToken:$arrival);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $barrier `,` $ticket `after` $arrival attr-dict `:`
+    functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {
   let summary = "workgroup-wide barrier";
   let description = [{

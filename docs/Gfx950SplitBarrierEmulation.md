@@ -10,19 +10,20 @@ Target shape:
 ```mlir
 %state = waveamdmachine.barrier_init
 ...
-%arrived = waveamdmachine.barrier_arrive %state after %deps
+%ticket, %arrived = waveamdmachine.barrier_arrive %state after %deps
     : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
-      -> !waveamdmachine.mem.token
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
 ...
-%ready = waveamdmachine.barrier_wait %state after %arrived
-    : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
+%ready = waveamdmachine.barrier_wait %state, %ticket after %arrived
+    : (!waveamdmachine.barrier, !waveamdmachine.reg<vgpr, 1>,
+       !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
 ```
 
 `barrier_init` is created at kernel entry by the split pass. Each converted
 static barrier site captures its init result as an SSA value. `barrier_arrive`
-produces the normal mem token consumed by `barrier_wait`; users of the original
-monolithic barrier token consume the wait result.
+produces the arrival ticket and normal mem token consumed by `barrier_wait`;
+users of the original monolithic barrier token consume the wait result.
 
 The first implementation is gfx950-only and uses LDS atomics. Other targets keep
 `waveamdmachine.s_barrier`.
@@ -76,15 +77,18 @@ one real startup `s_barrier`.
 - the `barrier_init` handle;
 - zero or more pre-barrier memory dependency tokens.
 
-It returns one `!waveamdmachine.mem.token`.
+It returns:
 
-That token is an arrival token, not a post-barrier token. It has the ordinary
-mem-token type so the existing scheduler and waitcnt machinery can reuse the
-same dataflow path, but the verifier must restrict uses:
+- one `!waveamdmachine.reg<vgpr, 1>` arrival ticket;
+- one `!waveamdmachine.mem.token` arrival token.
 
-- direct use by the matching `barrier_wait`;
+The token is not a post-barrier token. It has the ordinary mem-token type so
+the existing scheduler and waitcnt machinery can reuse the same dataflow path,
+but split-barrier validation must restrict uses:
+
+- direct use of the ticket and token by the matching `barrier_wait`;
 - token-only plumbing that is proven to feed the matching wait;
-- no original post-barrier memory consumer may use the arrive token.
+- no original post-barrier memory consumer may use the arrive ticket or token.
 
 The split pass rewrites all original barrier users to the wait result.
 
@@ -93,13 +97,14 @@ The split pass rewrites all original barrier users to the wait result.
 `barrier_wait` consumes:
 
 - the same `barrier_init` handle;
+- the arrival ticket from `barrier_arrive`;
 - the arrival token from `barrier_arrive`.
 
 It returns the post-barrier `!waveamdmachine.mem.token`. This result replaces
 the original `s_barrier` result. Later LDS, VMEM, SMEM, and stores that were
 ordered after the original barrier depend on this token.
 
-`barrier_wait` must not accept an arbitrary token. Its token operand must come
+`barrier_wait` must not accept arbitrary ticket/token operands. Both must come
 from the matching arrive path.
 
 ## Split Pass
@@ -312,8 +317,8 @@ Required lit coverage:
 
 - split pass rewrites `s_barrier` into init/arrive/wait and rewires original
   token users to wait;
-- verifier rejects post-barrier users of arrive tokens;
-- verifier rejects mismatched wait/init pairs;
+- validation rejects post-barrier users of arrive tokens;
+- validation rejects mismatched wait/init pairs;
 - scheduler moves independent work between arrive and wait;
 - materializer emits LDS init, returning atomic arrive, arrival-ticket
   scalarization, counter polls, and updates LDS size;
