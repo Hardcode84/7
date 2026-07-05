@@ -195,7 +195,12 @@ def main() -> int:
         text,
         r"selected func=wmma_f16_matmul_tiled region=1 name=greedy " r".*action=apply",
     )
-    require("matmul_greedy_report", text, r"memory_token_gaps=2")
+    require(
+        "matmul_greedy_report",
+        text,
+        r"candidate func=wmma_f16_matmul_tiled region=1 name=greedy "
+        r".*operand_gaps=3 .*memory_token_gaps=0",
+    )
 
     text = run_case(
         "fa_seq32_d16_u4_greedy_report",

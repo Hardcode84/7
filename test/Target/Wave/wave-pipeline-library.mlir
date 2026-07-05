@@ -119,12 +119,30 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: wave.transform.regalloc_scratch_relief from
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE: transform.named_sequence @waveamd_backend
-// PIPELINE: transform.apply_registered_pass "waveamd-mma-reuse-preschedule"
+// PIPELINE: transform.named_sequence @waveamd_backend_preschedule
+// PIPELINE: transform.include @waveamd_backend_lower
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-split-barriers"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-mma-reuse-preschedule"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-hazard-repair"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE: transform.named_sequence @waveamd_backend_postschedule
+// PIPELINE: transform.apply_registered_pass "waveamd-barrier-cleanup"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-materialize-split-barriers"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.include @waveamd_backend_finish
+// PIPELINE: transform.named_sequence @waveamd_backend_unscheduled
+// PIPELINE: transform.include @waveamd_backend_preschedule
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.include @waveamd_backend_postschedule
+// PIPELINE: transform.named_sequence @waveamd_backend
+// PIPELINE: transform.include @waveamd_backend_preschedule
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-schedule"
 // PIPELINE-NEXT: options = { "apply-schedule" = true,
 // PIPELINE-NEXT: "require-selected-input" = true }
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.include @waveamd_backend_postschedule

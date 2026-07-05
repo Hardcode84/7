@@ -99,14 +99,62 @@ def require_sequence(ir, parsed, label: str, name: str):
 
 def check_backend_entry(label: str, ir, entry) -> None:
     includes = included_sequences(ir, entry)
-    require(label, "waveamd_backend_lower" in includes, "no lower include")
-    require(label, "waveamd_backend_finish" in includes, "no finish include")
+    require(
+        label,
+        "waveamd_backend_preschedule" in includes,
+        "no preschedule include",
+    )
+    require(
+        label,
+        "waveamd_backend_postschedule" in includes,
+        "no postschedule include",
+    )
+    require(
+        label,
+        includes.index("waveamd_backend_preschedule")
+        < includes.index("waveamd_backend_postschedule"),
+        "backend include order drifted",
+    )
     entry_passes = applied_passes(ir, entry)
+    require_pass_order(
+        label,
+        entry_passes,
+        ["waveamd-machine-schedule-report", "waveamd-machine-schedule"],
+        "scheduler report/order drifted",
+    )
     require(
         label,
         "waveamd-insert-hazard-waits" not in entry_passes,
         "entry spells hazard waits",
     )
+
+
+def check_preschedule(label: str, ir, preschedule) -> None:
+    includes = included_sequences(ir, preschedule)
+    require(label, "waveamd_backend_lower" in includes, "no lower include")
+    preschedule_passes = applied_passes(ir, preschedule)
+    require_pass_order(
+        label,
+        preschedule_passes,
+        [
+            "waveamd-split-barriers",
+            "waveamd-mma-reuse-preschedule",
+            "waveamd-hazard-repair",
+        ],
+        "preschedule pass order drifted",
+    )
+
+
+def check_postschedule(label: str, ir, postschedule) -> None:
+    postschedule_passes = applied_passes(ir, postschedule)
+    require_pass_order(
+        label,
+        postschedule_passes,
+        ["waveamd-barrier-cleanup", "waveamd-materialize-split-barriers"],
+        "postschedule pass order drifted",
+    )
+    includes = included_sequences(ir, postschedule)
+    require(label, "waveamd_backend_finish" in includes, "no finish include")
 
 
 def check_backend_lower(label: str, lower_passes: list[str]) -> None:
@@ -202,6 +250,10 @@ def check_calibration_entry(label: str, module) -> None:
         register_dialects(ctx)
         parsed = ir.Module.parse(text)
         entry = require_sequence(ir, parsed, label, "__transform_main")
+        preschedule = require_sequence(ir, parsed, label, "waveamd_backend_preschedule")
+        postschedule = require_sequence(
+            ir, parsed, label, "waveamd_backend_postschedule"
+        )
         lower = require_sequence(ir, parsed, label, "waveamd_backend_lower")
         finish = require_sequence(ir, parsed, label, "waveamd_backend_finish")
         transform_finish = require_sequence(
@@ -210,6 +262,8 @@ def check_calibration_entry(label: str, module) -> None:
         post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
         require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
         check_backend_entry(label, ir, entry)
+        check_preschedule(label, ir, preschedule)
+        check_postschedule(label, ir, postschedule)
         check_backend_lower(label, applied_passes(ir, lower))
         check_default_finish(label, ir, finish)
         check_transform_finish(label, ir, transform_finish)

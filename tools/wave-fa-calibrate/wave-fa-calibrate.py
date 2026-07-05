@@ -233,13 +233,13 @@ def append_calibration_entry(
     block = seq.body
     root = block.arguments[0]
     with ir.InsertionPoint(block):
-        lowered = transform.IncludeOp(
+        prescheduled = transform.IncludeOp(
             [any_op],
-            "waveamd_backend_lower",
+            "waveamd_backend_preschedule",
             transform.FailurePropagationMode.Propagate,
             [root],
         ).result
-        finish_input = lowered
+        finish_input = prescheduled
         if report_options:
             finish_input = transform.ApplyRegisteredPassOp(
                 any_op,
@@ -256,7 +256,7 @@ def append_calibration_entry(
             ).result
         finish_input = transform.IncludeOp(
             [any_op],
-            "waveamd_backend_finish",
+            "waveamd_backend_postschedule",
             transform.FailurePropagationMode.Propagate,
             [finish_input],
         ).result

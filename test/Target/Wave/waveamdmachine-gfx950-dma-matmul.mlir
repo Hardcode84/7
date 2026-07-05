@@ -86,17 +86,19 @@
 // PROFILE256: waveamd.mma "mfma.f32.16x16x32.f16"
 
 // F16-PERF-ASM-LABEL: wmma_f16_matmul_tiled:
-// F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
+// F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_1:
 // F16-PERF-ASM-NOT: s_lshl_b32 {{s[0-9]+}}, {{s[0-9]+}}, 0
 // F16-PERF-ASM-NOT: s_and_b32 {{s[0-9]+}}, {{s[0-9]+}}, 3
 // F16-PERF-ASM-NOT: s_lshl_b32 {{s[0-9]+}}, {{s[0-9]+}}, 15
-// F16-PERF-ASM: s_mov_b32 m0, s{{[0-9]+}}
+// F16-PERF-ASM: ds_add_rtn_u32
+// F16-PERF-ASM: s_add_i32 m0, s{{[0-9]+}}, 12
 // F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
-// F16-PERF-ASM: s_mov_b32 m0, s{{[0-9]+}}
+// F16-PERF-ASM: s_add_i32 m0, s{{[0-9]+}}, 12
 // F16-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
 // F16-PERF-ASM: v_mfma_f32_16x16x32_f16
-// F16-PERF-ASM: s_waitcnt vmcnt(0)
-// F16-PERF-ASM-NEXT: s_barrier
+// F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_2:
+// F16-PERF-ASM: ds_read_b32
+// F16-PERF-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_2
 // F16-PERF-ASM: ds_read_b128
 
 // PROFILEMXFP4-4W-LABEL: func.func @wmma_f16_matmul_tiled
@@ -108,17 +110,23 @@
 
 // MXFP4-4W-SCALE-ASM-LABEL: wmma_f16_matmul_tiled:
 // MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
-// MXFP4-4W-SCALE-ASM: s_barrier
+// MXFP4-4W-SCALE-ASM: ds_read_b32
+// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
+// MXFP4-4W-SCALE-ASM: ds_read_b128
+// MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_1:
+// MXFP4-4W-SCALE-ASM: ds_add_rtn_u32
+// MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_2:
+// MXFP4-4W-SCALE-ASM: ds_read_b32
+// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_2
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8
-// MXFP4-4W-SCALE-ASM-NOT: s_barrier
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:2560
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
-// MXFP4-4W-SCALE-ASM: s_waitcnt lgkmcnt(0)
-// MXFP4-4W-SCALE-ASM-NEXT: s_barrier
+// MXFP4-4W-SCALE-ASM: ds_add_rtn_u32
+// MXFP4-4W-SCALE-ASM: ds_read_b32
 // MXFP4-4W-SCALE-ASM: buffer_load_dword
 // MXFP4-4W-SCALE-ASM: buffer_load_dwordx4 {{.*}} lds
 // MXFP4-4W-SCALE-ASM: ds_read_b128
-// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
+// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_1
 
 // PROFILEMXFP4-DMA-OVERLAP-LABEL: func.func @wmma_f16_matmul_tiled
 // PROFILEMXFP4-DMA-OVERLAP-SAME: wave.workgroup_size = array<i32: 512, 1, 1>
@@ -151,27 +159,26 @@
 // MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
 // MXFP4-PERF-ASM-DAG: v_lshl_add_u32 v{{[0-9]+}}, v{{[0-9]+}}, 12, s{{[0-9]+}}
 // MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
-// MXFP4-PERF-ASM: s_waitcnt vmcnt(8)
-// MXFP4-PERF-ASM-NEXT: s_barrier
-// MXFP4-PERF-ASM-NOT: s_waitcnt vmcnt
-// MXFP4-PERF-ASM-NOT: s_and_saveexec
-// MXFP4-PERF-ASM-NOT: s_cbranch_execz
+// MXFP4-PERF-ASM: ds_read_b32
+// MXFP4-PERF-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
+// MXFP4-PERF-ASM: ds_read_b128
+// MXFP4-PERF-ASM: ds_add_rtn_u32
+// MXFP4-PERF-ASM: ds_read_b32
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:4096
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
-// MXFP4-PERF-ASM: s_waitcnt lgkmcnt(0)
-// MXFP4-PERF-ASM-NEXT: s_barrier
 // MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
-// ASMPIPE: s_waitcnt vmcnt(8)
-// ASMPIPE-NEXT: s_barrier
+// ASMPIPE: ds_add_rtn_u32
+// ASMPIPE: ds_read_b32
+// ASMPIPE: s_cbranch_scc1
 
 // ASMBF16-LABEL: wmma_f16_matmul_tiled:
 // ASMBF16: v_mfma_f32_16x16x32_bf16
 
 // ASMDYN-LABEL: wmma_f16_matmul_tiled:
-// ASMDYN: .amdhsa_group_segment_fixed_size 0
+// ASMDYN: .amdhsa_group_segment_fixed_size 8
 
 // ASMMXFP4: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASMMXFP4-LABEL: wmma_f16_matmul_tiled:
@@ -194,7 +201,7 @@
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, v{{[0-9]+}} op_sel_hi:[0,0,0] cbsz:4 blgp:4
-// ASMMXFP4: .amdhsa_group_segment_fixed_size 6144
+// ASMMXFP4: .amdhsa_group_segment_fixed_size 6168
 // ASMMXFP4: .amdhsa_kernarg_size 48
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
 
@@ -209,7 +216,7 @@
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6144
+// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6160
 
 // ASMMXFP4-DMA-K2-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-DMA-K2-COUNT-4: global_load_lds_dwordx4
@@ -222,7 +229,7 @@
 // ASMMXFP4-DMA-K2-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(0)
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8192
+// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8200
 
 // ASMMXFP4-SCALEPACK-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-SCALEPACK-COUNT-3: ds_read_b64_tr_b8
