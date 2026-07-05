@@ -143,7 +143,7 @@ use_dma_lds=true
 matrix_intrinsic=mfma_gfx950
 input_type=mxfp4
 output_type=f16
-mxfp4_scale_path=regs
+mxfp4_scale_path=dma
 cta_swizzle_xcds=8
 cta_group_m=4
 ```
@@ -157,6 +157,134 @@ python tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
   --m=4096 --n=4096 --k=32768 \
   --variants=scheduled --iters=200 --warmup=20 --repeats=3 --no-check
 ```
+
+## MXFP4 8-Wave K=32768 ATT Investigation
+
+Use this when `gfx950-mxfp4-256x256-8wave` regresses against master. Keep the
+HSACOs and runner artifacts per worktree and compare sweep throughput before
+interpreting ATT.
+
+Setup, July 5 2026:
+
+- Current branch: `new-scheduler` at `c8daea2f`.
+- Baseline: `origin/master` at `6d5b5783`.
+- Shape: `M=N=4096`, `K=32768`, scheduled
+  `gfx950-mxfp4-256x256-8wave`.
+- Rebuilt both worktrees with:
+  `cmake --build build --target wave-opt wave-translate WavePythonModules -j "$(nproc)"`.
+- Current artifacts:
+  `build/att-investigation/mxfp4-8wave-master-refresh/current/`.
+- Master artifacts:
+  `/tmp/wave-master-att/build/att-investigation/mxfp4-8wave-master-refresh/master/`.
+
+Focused sweep:
+
+| Branch | Time us | TFLOP/s | Cycles |
+|---|---:|---:|---:|
+| current | 291.935 | 3766.29 | 642258 |
+| master | 276.188 | 3981.03 | 607614 |
+| delta | +15.747 | -214.74 | +34644 |
+
+ATT collection:
+
+- Three captures per branch with `rocprofv3 --att`,
+  `--kernel-include-regex wmma_f16_matmul_tiled`, `--att-target-cu 1`,
+  `--att-shader-engine-mask 0x1`, `--att-simd-select 0x3`,
+  `--att-buffer-size 268435456`.
+- Each capture ran the generated runner through `wave-matmul-calibrate.py`
+  with `--run-hsaco`, `--iters 1`, `--warmup 0`, `--repeats 1`, `--no-check`.
+- Imports used `tools/wave-att-import/wave-att-import.py --trip-count 127`.
+- Current imports resolved `121392` wave rows per capture; master resolved
+  `123916`. Unresolved rows: `0`.
+
+Static ASM:
+
+| Item | Current | Master | Delta |
+|---|---:|---:|---:|
+| instructions | 1204 | 1210 | -6 |
+| `v_mfma_scale_f32_16x16x128_f8f6f4` | 192 | 192 | 0 |
+| `buffer_load_dwordx4 ... lds` | 96 | 96 | 0 |
+| `ds_read_b128` | 72 | 72 | 0 |
+| `ds_read_b64_tr_b8` | 18 | 18 | 0 |
+| `buffer_store_dwordx2` | 32 | 32 | 0 |
+| `s_waitcnt` | 19 | 16 | +3 |
+| `s_barrier` | 7 | 7 | 0 |
+| `s_nop` | 122 | 131 | -9 |
+
+Heavy work matches. The regression is placement, not missing MFMA or memory
+ops.
+
+ATT medians per capture, wave-normalized:
+
+| Metric | Current | Master | Delta |
+|---|---:|---:|---:|
+| Profiled launch time us | 422.044 | 404.523 | +17.521 |
+| Total ATT duration | 21363.7 | 20692.5 | +671.1 |
+| Stall duration | 17049.5 | 16269.4 | +780.1 |
+| `buffer_load_dwordx4 ... lds` | 6685.5 | 5880.2 | +805.3 |
+| `buffer_store_dwordx2` | 1712.0 | 1610.0 | +102.0 |
+| `s_waitcnt vmcnt(*)` | 654.7 | 1149.9 | -495.2 |
+| `s_waitcnt lgkmcnt(*)` | 243.5 | 196.0 | +47.5 |
+| `s_barrier` | 2196.6 | 2524.0 | -327.5 |
+| MFMA | 4205.4 | 4270.4 | -65.0 |
+| DS read | 1867.3 | 1491.4 | +375.9 |
+
+Wait-window medians:
+
+| Window | Current | Master | Delta |
+|---|---:|---:|---:|
+| all | 18617 | 9341 | +9276 |
+| prologue | 16234 | 6978 | +9256 |
+| loop | 1901 | 1248 | +653 |
+| epilogue | 626 | 1115 | -489 |
+| VMEM-load class | 8802 | 2258 | +6544 |
+| LDS class | 9552 | 6450 | +3102 |
+| prologue VMEM-load | 6905 | 678 | +6227 |
+| prologue LDS | 9329 | 6300 | +3029 |
+
+Do not read only the `s_waitcnt` rows. Current has lower direct
+`s_waitcnt vmcnt(*)` duration, but ATT wait windows show a much larger
+producer-side prologue cost. The cost sits on VMEM-load and LDS producer
+windows, plus slower `buffer_load_dwordx4 ... lds` and DS-read instructions.
+
+First scale block shape:
+
+| Branch | Shape |
+|---|---|
+| current | `buffer_loadx1 -> vmcnt(8) -> barrier -> ds_read_b128x24 -> vmcnt(8) lgkmcnt(0) -> barrier -> ds_read_b64_tr_b8x6 -> lgkmcnt(4) -> MFMAx16 -> lgkmcnt(1) -> MFMAx16 -> lgkmcnt(0) -> barrier -> MFMAx32 + buffer_loadx32` |
+| master | `buffer_loadx6 -> vmcnt(8) -> barrier -> ds_read_b128x24 -> vmcnt(8) lgkmcnt(0) -> barrier -> ds_read_b64_tr_b8x6 -> lgkmcnt(0) -> barrier -> MFMAx64 + buffer_loadx32` |
+
+Master waits for the scale reads, places the barrier before the full 64-MFMA
+scale block, then overlaps the next 32 global-to-LDS loads under that full
+MFMA block. Current issues half the MFMA block before that barrier, carries
+scale-read pressure through partial `lgkmcnt(4/1/0)` waits, then has only 32
+MFMA left to cover the next global-to-LDS train.
+
+Later scale/store block:
+
+| Branch | Shape |
+|---|---|
+| current | `ds_read_b64_tr_b8x1 -> lgkmcnt(0) -> ds_read_b64_tr_b8x5 -> lgkmcnt(4) -> MFMAx4 -> lgkmcnt(3) -> MFMAx28 -> lgkmcnt(1) -> MFMAx4 -> lgkmcnt(0) -> MFMAx28 -> vmcnt(0) -> barrier` |
+| master | `ds_read_b64_tr_b8x5 -> lgkmcnt(2) -> MFMAx16 + ds_read_b64_tr_b8x1 -> lgkmcnt(2) -> MFMAx16 -> lgkmcnt(1) -> MFMAx16 -> lgkmcnt(0) -> MFMAx16 + next ds_read_b128x24` |
+
+Master also overlaps the next DS-read group with the tail of the MFMA block.
+Current serializes with another `vmcnt(0)` barrier boundary before the next
+DS-read group.
+
+Scheduler implication:
+
+- The failed memory-token-consumer stall-fill rule was too late. The bad
+  choice is made before the barrier is the next stalled issue.
+- Scheduler needs a barrier/producer-window placement rule, not a rule tied to
+  one token-consumer form.
+- For a barrier that drains memory producers used by a following compute group,
+  place the barrier after the producer drain and before the whole compute group.
+  Do not let the compute group straddle that barrier.
+- Keep same-kind memory producer order explicit: do not move a memory op over
+  earlier producers of the same memory kind while trying to fill the window.
+- Model pressure on producer windows, not just direct `s_waitcnt` instruction
+  duration. ATT shows the regression as VMEM-load/LDS producer-window cost even
+  when the direct `s_waitcnt vmcnt(*)` row is lower.
 
 ## `gfx950-mxfp4-256x256-4wave`
 
