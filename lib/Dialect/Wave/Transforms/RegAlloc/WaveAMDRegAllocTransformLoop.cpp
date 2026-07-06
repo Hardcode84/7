@@ -1040,7 +1040,9 @@ private:
     std::array<ClassLaneAssignments, kRegClassCount> byClassLane;
     BitVector live;
     DenseMap<unsigned, unsigned> bySet;
+    mutable SmallVector<unsigned> queryMarks;
     unsigned stale = 0;
+    mutable unsigned queryGeneration = 1;
 
     static bool
     endHeapCompare(ArrayRef<wave::RegAllocTransformAssignment> assignments,
@@ -1132,6 +1134,23 @@ private:
 
     bool contains(unsigned setId) const { return bySet.contains(setId); }
 
+    void startQuery() const {
+      ++queryGeneration;
+      if (queryGeneration != 0)
+        return;
+      std::fill(queryMarks.begin(), queryMarks.end(), 0);
+      queryGeneration = 1;
+    }
+
+    bool markFirstVisit(unsigned assignmentIndex) const {
+      if (assignmentIndex >= queryMarks.size())
+        queryMarks.resize(assignmentIndex + 1, 0);
+      if (queryMarks[assignmentIndex] == queryGeneration)
+        return false;
+      queryMarks[assignmentIndex] = queryGeneration;
+      return true;
+    }
+
     template <typename Fn>
     void forOrdered(ArrayRef<wave::RegAllocTransformAssignment> assignments,
                     Fn &&fn) const {
@@ -1172,13 +1191,11 @@ private:
       if (base >= lanes.size())
         return false;
       unsigned end = std::min<unsigned>(base + width, lanes.size());
-      SmallVector<unsigned, 8> checked;
+      startQuery();
       for (unsigned lane : llvm::seq<unsigned>(base, end)) {
         for (unsigned assignmentIndex : lanes[lane]) {
-          if (!isLive(assignmentIndex) ||
-              llvm::is_contained(checked, assignmentIndex))
+          if (!isLive(assignmentIndex) || !markFirstVisit(assignmentIndex))
             continue;
-          checked.push_back(assignmentIndex);
           if (predicate(assignments[assignmentIndex]))
             return true;
         }
@@ -1425,10 +1442,13 @@ private:
     wave::RegAllocTransformBudget budget = getBudget(set.regClass);
     if (set.fixedBase)
       return allocateFixedSet(set, budget);
-    std::optional<unsigned> base = findFreeBase(set, budget.limit);
     std::optional<ReusableInputBase> reusableBase =
         findReusableInputBase(set, budget.limit);
-    if (reusableBase && (!base || reusableBase->base < *base))
+    std::optional<unsigned> beforeBase;
+    if (reusableBase)
+      beforeBase = reusableBase->base;
+    std::optional<unsigned> base = findFreeBase(set, budget.limit, beforeBase);
+    if (!base && reusableBase)
       base = reusableBase->base;
     if (!base) {
       recordPressureFailure(set, budget, getFixedReservationOverlaps(set));
@@ -1470,11 +1490,18 @@ private:
   }
 
   std::optional<unsigned>
-  findFreeBase(const wave::RegAllocTransformAliasSet &set, unsigned limit) {
+  findFreeBase(const wave::RegAllocTransformAliasSet &set, unsigned limit,
+               std::optional<unsigned> beforeBase = std::nullopt) {
     if (set.width > limit)
       return std::nullopt;
+    unsigned maxBase = limit - set.width;
+    if (beforeBase) {
+      if (*beforeBase == 0)
+        return std::nullopt;
+      maxBase = std::min(maxBase, *beforeBase - 1);
+    }
     unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(set.width));
-    for (unsigned base = 0; base <= limit - set.width; base += align)
+    for (unsigned base = 0; base <= maxBase; base += align)
       if (!conflictsWithActive(set, base) &&
           !conflictsWithFixedReservation(set, base))
         return base;
