@@ -1358,7 +1358,14 @@ private:
   }
 
   wave::RegAllocTransformBudget getBudget(waveamdmachine::RegClass regClass) {
-    return wave::getRegAllocTransformBudget(func, regClass);
+    unsigned index = getRegClassIndex(regClass);
+    if (!budgetCache[index]) {
+      wave::RegAllocTransformBudget budget =
+          wave::getRegAllocTransformBudget(func, regClass);
+      budgetCache[index] = budget;
+      return budget;
+    }
+    return *budgetCache[index];
   }
 
   LogicalResult allocateFixedSet(const wave::RegAllocTransformAliasSet &set,
@@ -2030,6 +2037,8 @@ private:
   DenseMap<unsigned, unsigned> assignmentIndexBySet;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
+  std::array<std::optional<wave::RegAllocTransformBudget>, kRegClassCount>
+      budgetCache;
   std::optional<RegAllocScanFailure> scanFailure;
   DictionaryAttr state;
   func::FuncOp func;
