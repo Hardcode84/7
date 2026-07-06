@@ -1260,9 +1260,29 @@ private:
 
   LogicalResult buildSetIndex() {
     setIndexById.clear();
+    sparseSetIndexById.clear();
+    if (sets.empty())
+      return success();
+
+    unsigned maxSetId = 0;
+    for (const wave::RegAllocTransformAliasSet &set : sets)
+      maxSetId = std::max(maxSetId, set.id);
+
+    constexpr unsigned kInvalidSetIndex = std::numeric_limits<unsigned>::max();
+    if (maxSetId <= sets.size() * 4) {
+      setIndexById.assign(maxSetId + 1, kInvalidSetIndex);
+      for (auto [index, set] : llvm::enumerate(sets)) {
+        unsigned &entry = setIndexById[set.id];
+        if (entry != kInvalidSetIndex)
+          return func.emitError("regalloc state has duplicate alias set id");
+        entry = static_cast<unsigned>(index);
+      }
+      return success();
+    }
+
     for (auto [index, set] : llvm::enumerate(sets)) {
       auto inserted =
-          setIndexById.insert({set.id, static_cast<unsigned>(index)});
+          sparseSetIndexById.insert({set.id, static_cast<unsigned>(index)});
       if (!inserted.second)
         return func.emitError("regalloc state has duplicate alias set id");
     }
@@ -1659,8 +1679,15 @@ private:
   }
 
   const wave::RegAllocTransformAliasSet *getSetById(unsigned setId) {
-    auto it = setIndexById.find(setId);
-    if (it == setIndexById.end())
+    if (setId < setIndexById.size()) {
+      unsigned index = setIndexById[setId];
+      if (index == std::numeric_limits<unsigned>::max())
+        return nullptr;
+      assert(index < sets.size() && "alias set index out of range");
+      return &sets[index];
+    }
+    auto it = sparseSetIndexById.find(setId);
+    if (it == sparseSetIndexById.end())
       return nullptr;
     assert(it->second < sets.size() && "alias set index out of range");
     return &sets[it->second];
@@ -2092,11 +2119,12 @@ private:
   SmallVector<wave::RegAllocTransformValue> values;
   SmallVector<wave::RegAllocTransformAliasSet> sets;
   SmallVector<Value> payloadValues;
+  SmallVector<unsigned> setIndexById;
   FixedReservations fixedReservations;
   ActiveAssignments active;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
   DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
-  DenseMap<unsigned, unsigned> setIndexById;
+  DenseMap<unsigned, unsigned> sparseSetIndexById;
   DenseMap<unsigned, unsigned> assignmentIndexBySet;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
