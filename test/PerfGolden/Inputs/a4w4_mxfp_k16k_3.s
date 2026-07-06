@@ -213,9 +213,8 @@ _a4w4_kernel:
 		v_add3_u32 v23, s22, v2, v8
 		v_add3_u32 v23, v23, v11, v14
 		v_add3_u32 v23, v23, v16, v18
-		v_add3_u32 v23, v23, v20, v22
 		s_add_i32 m0, s21, 0x1080
-		s_nop 0
+		v_add3_u32 v23, v23, v20, v22
 		buffer_load_dwordx4 v23, s[24:27], 0 offen lds
 		s_mov_b32 s23, 0
 		s_lshl_b32 s36, s14, 3
@@ -1155,13 +1154,11 @@ _a4w4_kernel:
 		s_add_i32 m0, s21, 0x1dde0
 		s_nop 0
 		buffer_load_dwordx4 v31, s[32:35], 0 offen lds
-		s_add_i32 s16, s16, s14
 		s_add_i32 m0, s21, 0x1ee60
-		s_nop 0
+		s_add_i32 s16, s16, s14
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
-		s_add_i32 s13, s13, 0x100
 		s_add_i32 m0, s21, 0x1fee0
-		s_nop 0
+		s_add_i32 s13, s13, 0x100
 		buffer_load_dwordx4 v30, s[32:35], 0 offen lds
 		s_add_i32 s1, s1, 0x100
 		buffer_load_dword v35, v34, s[40:43], 0 offen

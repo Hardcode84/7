@@ -215,9 +215,8 @@ _a4w4_kernel:
 		v_add3_u32 v24, s22, v2, v8
 		v_add3_u32 v24, v24, v12, v14
 		v_add3_u32 v24, v24, v17, v19
-		v_add3_u32 v24, v24, v21, v23
 		s_add_i32 m0, s21, 0x1080
-		s_nop 0
+		v_add3_u32 v24, v24, v21, v23
 		buffer_load_dwordx4 v24, s[24:27], 0 offen lds
 		s_mov_b32 s23, 0
 		s_lshl_b32 s36, s14, 3

@@ -148,10 +148,9 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[104:105], 0
 		v_mov_b64_e32 v[106:107], 0
 .Lwmma_f16_matmul_tiled.loop_head_0:
-		s_lshl_b32 s7, s6, 6
 		s_add_i32 m0, s4, 16
+		s_lshl_b32 s7, s6, 6
 		s_waitcnt lgkmcnt(0)
-		s_nop 0
 		buffer_load_dwordx4 v13, s[16:19], s7 offen lds
 		s_add_i32 m0, s5, 16
 		s_nop 0

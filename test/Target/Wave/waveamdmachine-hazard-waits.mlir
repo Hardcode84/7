@@ -1323,6 +1323,91 @@ func.func @m0_move_hoisted_to_fill_gap(
   return
 }
 
+// CHECK-LABEL: func.func @m0_add_hoisted_to_fill_gap
+// CHECK: waveamdmachine.s_add_m0_i32
+// CHECK-NEXT: waveamdmachine.v_add_u32
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+func.func @m0_add_hoisted_to_fill_gap(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %s: !waveamdmachine.reg<sgpr, 1, 0>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+    %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+    %inc: !waveamdmachine.reg<sgpr, 1, 10>,
+    %dep: !waveamdmachine.mem.token) {
+  %vaddr = waveamdmachine.v_add_u32 %off, %s
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 1, 1>
+  %m0, %scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+      : (!waveamdmachine.reg<sgpr, 1, 9>,
+         !waveamdmachine.reg<sgpr, 1, 10>)
+      -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.buffer_load_lds_b128 %vaddr, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<sgpr, 4, 4>,
+         !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @m0_add_hoisted_over_dead_scc_salu
+// CHECK: waveamdmachine.s_add_m0_i32
+// CHECK-NEXT: waveamdmachine.s_lshl_b32
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+func.func @m0_add_hoisted_over_dead_scc_salu(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+    %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+    %inc: !waveamdmachine.reg<sgpr, 1, 10>,
+    %x: !waveamdmachine.reg<sgpr, 1, 11>,
+    %shift: !waveamdmachine.imm,
+    %dep: !waveamdmachine.mem.token) {
+  %soff, %shift_scc = waveamdmachine.s_lshl_b32 %x, %shift
+      : (!waveamdmachine.reg<sgpr, 1, 11>, !waveamdmachine.imm)
+      -> (!waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.reg<scc, 1>)
+  %m0, %scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+      : (!waveamdmachine.reg<sgpr, 1, 9>,
+         !waveamdmachine.reg<sgpr, 1, 10>)
+      -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.buffer_load_lds_b128 %off, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4, 4>,
+         !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @m0_add_live_scc_not_hoisted_over_salu
+// CHECK: waveamdmachine.s_lshl_b32
+// CHECK-NEXT: waveamdmachine.s_add_m0_i32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: waveamdmachine.s_cselect_b32
+func.func @m0_add_live_scc_not_hoisted_over_salu(
+    %off: !waveamdmachine.reg<vgpr, 1, 0>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+    %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+    %inc: !waveamdmachine.reg<sgpr, 1, 10>,
+    %x: !waveamdmachine.reg<sgpr, 1, 11>,
+    %shift: !waveamdmachine.imm,
+    %dep: !waveamdmachine.mem.token) {
+  %soff, %shift_scc = waveamdmachine.s_lshl_b32 %x, %shift
+      : (!waveamdmachine.reg<sgpr, 1, 11>, !waveamdmachine.imm)
+      -> (!waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.reg<scc, 1>)
+  %m0, %scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+      : (!waveamdmachine.reg<sgpr, 1, 9>,
+         !waveamdmachine.reg<sgpr, 1, 10>)
+      -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.buffer_load_lds_b128 %off, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4, 4>,
+         !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %selected = waveamdmachine.s_cselect_b32 %scc, %dst, %inc
+      : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1, 9>,
+         !waveamdmachine.reg<sgpr, 1, 10>)
+      -> !waveamdmachine.reg<sgpr, 1, 12>
+  return
+}
+
 // CHECK-LABEL: func.func @m0_move_not_hoisted_over_source_def
 // CHECK: waveamdmachine.s_add_i32
 // CHECK-NEXT: waveamdmachine.s_mov_m0

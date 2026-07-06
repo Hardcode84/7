@@ -1537,18 +1537,36 @@ private:
     return llvm::is_contained(resources, resource);
   }
 
-  static bool resourceEffectsConflict(Operation *candidate,
-                                      Operation *crossed) {
+  static bool hasDeadSCCWrite(Operation *op) {
+    bool foundSCC = false;
+    for (Value result : op->getResults()) {
+      std::optional<wave::HardwareResourceKind> kind =
+          wave::getHardwareResourceForValue(result);
+      if (kind != wave::HardwareResourceKind::SCC)
+        continue;
+      foundSCC = true;
+      if (!result.use_empty())
+        return false;
+    }
+    return foundSCC;
+  }
+
+  static bool resourceEffectsConflict(Operation *candidate, Operation *crossed,
+                                      bool ignoreDeadCandidateSCCWrites) {
     wave::HardwareResourceEffects candidateEffects =
         wave::getHardwareResourceEffects(candidate);
     wave::HardwareResourceEffects crossedEffects =
         wave::getHardwareResourceEffects(crossed);
+    bool ignoreSCCWriteWrite =
+        ignoreDeadCandidateSCCWrites && hasDeadSCCWrite(candidate);
     for (wave::HardwareResourceKind resource : candidateEffects.reads)
       if (hasResource(crossedEffects.writes, resource))
         return true;
     for (wave::HardwareResourceKind resource : candidateEffects.writes)
       if (hasResource(crossedEffects.reads, resource) ||
-          hasResource(crossedEffects.writes, resource))
+          (hasResource(crossedEffects.writes, resource) &&
+           !(ignoreSCCWriteWrite &&
+             resource == wave::HardwareResourceKind::SCC)))
         return true;
     return false;
   }
@@ -1633,7 +1651,8 @@ private:
     return std::nullopt;
   }
 
-  static bool canMoveBefore(Operation *candidate, Operation *insertBefore) {
+  static bool canMoveBefore(Operation *candidate, Operation *insertBefore,
+                            bool ignoreDeadCandidateSCCWrites = false) {
     if (candidate->getBlock() != insertBefore->getBlock())
       return false;
     if (!operandsAvailableBefore(candidate, insertBefore))
@@ -1641,7 +1660,8 @@ private:
 
     for (Operation *crossed = insertBefore; crossed != candidate;
          crossed = crossed->getNextNode()) {
-      if (resourceEffectsConflict(candidate, crossed))
+      if (resourceEffectsConflict(candidate, crossed,
+                                  ignoreDeadCandidateSCCWrites))
         return false;
       if (physicalRegsConflict(candidate, crossed))
         return false;
@@ -1659,13 +1679,16 @@ private:
     return isLgkmFillerSearchBoundary(op) || isM0Consumer(op);
   }
 
-  static Operation *getSingleUseM0Consumer(waveamdmachine::SMovM0Op mov) {
-    if (!mov.getResult().hasOneUse())
+  static Operation *
+  getSingleUseM0Consumer(waveamdmachine::M0WriteHazardOpInterface writer) {
+    Value m0 = writer.getM0HazardValue();
+    Operation *op = writer.getOperation();
+    if (!m0.hasOneUse())
       return nullptr;
-    Operation *consumer = *mov.getResult().user_begin();
-    if (consumer->getBlock() != mov->getBlock())
+    Operation *consumer = *m0.user_begin();
+    if (consumer->getBlock() != op->getBlock())
       return nullptr;
-    if (!mov->isBeforeInBlock(consumer))
+    if (!op->isBeforeInBlock(consumer))
       return nullptr;
     return consumer;
   }
@@ -1679,40 +1702,44 @@ private:
     return count;
   }
 
-  static bool hoistOneM0Move(waveamdmachine::SMovM0Op mov,
-                             const HazardConfig &cfg) {
-    Operation *consumer = getSingleUseM0Consumer(mov);
+  static bool hoistOneM0Write(waveamdmachine::M0WriteHazardOpInterface writer,
+                              const HazardConfig &cfg) {
+    Operation *op = writer.getOperation();
+    Operation *consumer = getSingleUseM0Consumer(writer);
     if (!consumer)
       return false;
 
-    unsigned gap = countMachineOpsBetween(mov, consumer);
+    unsigned gap = countMachineOpsBetween(op, consumer);
     if (gap >= cfg.m0PipelineDelay)
       return false;
 
     unsigned movedSlots = 0;
     unsigned missingSlots = cfg.m0PipelineDelay - gap;
-    for (Operation *insertBefore = mov->getPrevNode(); insertBefore;
+    for (Operation *insertBefore = op->getPrevNode(); insertBefore;
          insertBefore = insertBefore->getPrevNode()) {
       if (isM0HoistSearchBoundary(insertBefore))
         break;
-      if (!canMoveBefore(mov, insertBefore))
+      if (!canMoveBefore(op, insertBefore,
+                         /*ignoreDeadCandidateSCCWrites=*/true))
         break;
       if (!emitsNoMachineInst(*insertBefore))
         ++movedSlots;
       if (movedSlots < missingSlots)
         continue;
-      mov->moveBefore(insertBefore);
+      op->moveBefore(insertBefore);
       return true;
     }
     return false;
   }
 
-  static void hoistM0MovesToFillPipelineGaps(func::FuncOp func,
-                                             const HazardConfig &cfg) {
-    SmallVector<waveamdmachine::SMovM0Op> moves;
-    func.walk([&](waveamdmachine::SMovM0Op mov) { moves.push_back(mov); });
-    for (waveamdmachine::SMovM0Op mov : moves)
-      (void)hoistOneM0Move(mov, cfg);
+  static void hoistM0WritesToFillPipelineGaps(func::FuncOp func,
+                                              const HazardConfig &cfg) {
+    SmallVector<waveamdmachine::M0WriteHazardOpInterface> writes;
+    func.walk([&](waveamdmachine::M0WriteHazardOpInterface writer) {
+      writes.push_back(writer);
+    });
+    for (waveamdmachine::M0WriteHazardOpInterface writer : writes)
+      (void)hoistOneM0Write(writer, cfg);
   }
 
   static Operation *findMovableLgkmFiller(Operation *target) {
@@ -1802,7 +1829,7 @@ private:
 
     (void)contractTokenOnlyBarrierDrains(func, cfg);
     fillLgkmValuGaps(func, cfg);
-    hoistM0MovesToFillPipelineGaps(func, cfg);
+    hoistM0WritesToFillPipelineGaps(func, cfg);
 
     DataFlowSolver solver;
     loadBaselineAnalyses(solver);
