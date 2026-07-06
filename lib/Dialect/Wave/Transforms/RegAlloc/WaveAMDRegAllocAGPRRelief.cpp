@@ -71,30 +71,72 @@ struct AGPRReliefFitState {
   wave::RegAllocTransformBudget budget;
 };
 
-static bool
-assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
-                      unsigned base, unsigned width) {
-  unsigned end = base + width;
-  unsigned assignedEnd = assignment.base + assignment.width;
-  return base < assignedEnd && assignment.base < end;
-}
+struct ActiveAGPRReliefAssignments {
+  SmallVector<wave::RegAllocTransformAssignment> assignments;
+  SmallVector<unsigned, 256> laneUseCounts;
+
+  ActiveAGPRReliefAssignments(unsigned limit) : laneUseCounts(limit, 0) {}
+
+  void expire(unsigned position) {
+    llvm::erase_if(assignments,
+                   [&](const wave::RegAllocTransformAssignment &assigned) {
+                     if (assigned.end >= position)
+                       return false;
+                     dropLaneUse(assigned.base, assigned.width);
+                     return true;
+                   });
+  }
+
+  bool rangeIsFree(unsigned base, unsigned width) const {
+    if (base > laneUseCounts.size() || width > laneUseCounts.size() - base)
+      return false;
+    for (unsigned lane : llvm::seq(base, base + width))
+      if (laneUseCounts[lane] != 0)
+        return false;
+    return true;
+  }
+
+  std::optional<unsigned> findFreeBase(const AGPRReliefInterval &interval,
+                                       unsigned limit) const {
+    if (interval.width > limit)
+      return std::nullopt;
+    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(interval.width));
+    for (unsigned base = 0; base <= limit - interval.width; base += align)
+      if (rangeIsFree(base, interval.width))
+        return base;
+    return std::nullopt;
+  }
+
+  void add(const AGPRReliefInterval &interval, unsigned base) {
+    addLaneUse(base, interval.width);
+    assignments.push_back({waveamdmachine::RegClass::AGPR, interval.id, base,
+                           interval.width, interval.start, interval.end});
+  }
+
+private:
+  void addLaneUse(unsigned base, unsigned width) {
+    assert(base <= laneUseCounts.size() && "AGPR assignment base out of range");
+    assert(width <= laneUseCounts.size() - base &&
+           "AGPR assignment width out of range");
+    for (unsigned lane : llvm::seq(base, base + width))
+      ++laneUseCounts[lane];
+  }
+
+  void dropLaneUse(unsigned base, unsigned width) {
+    assert(base <= laneUseCounts.size() && "AGPR assignment base out of range");
+    assert(width <= laneUseCounts.size() - base &&
+           "AGPR assignment width out of range");
+    for (unsigned lane : llvm::seq(base, base + width)) {
+      assert(laneUseCounts[lane] != 0 && "AGPR lane use underflow");
+      --laneUseCounts[lane];
+    }
+  }
+};
 
 static std::optional<unsigned>
 findFreeAGPRBase(const AGPRReliefInterval &interval,
-                 ArrayRef<wave::RegAllocTransformAssignment> active,
-                 unsigned limit) {
-  if (interval.width > limit)
-    return std::nullopt;
-  unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(interval.width));
-  for (unsigned base = 0; base <= limit - interval.width; base += align) {
-    bool blocked = llvm::any_of(
-        active, [&](const wave::RegAllocTransformAssignment &assigned) {
-          return assignedRangesOverlap(assigned, base, interval.width);
-        });
-    if (!blocked)
-      return base;
-  }
-  return std::nullopt;
+                 const ActiveAGPRReliefAssignments &active, unsigned limit) {
+  return active.findFreeBase(interval, limit);
 }
 
 static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
@@ -102,34 +144,23 @@ static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
   return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
 }
 
-static bool assignAGPRReliefInterval(
-    const AGPRReliefInterval &interval,
-    SmallVectorImpl<wave::RegAllocTransformAssignment> &active, unsigned limit,
-    unsigned &footprint) {
-  llvm::erase_if(active,
-                 [&](const wave::RegAllocTransformAssignment &assigned) {
-                   return assigned.end < interval.start;
-                 });
+static bool assignAGPRReliefInterval(const AGPRReliefInterval &interval,
+                                     ActiveAGPRReliefAssignments &active,
+                                     unsigned limit, unsigned &footprint) {
+  active.expire(interval.start);
   if (interval.fixedBase) {
-    if (*interval.fixedBase + interval.width > limit)
+    if (interval.width > limit || *interval.fixedBase > limit - interval.width)
       return false;
-    if (llvm::any_of(active,
-                     [&](const wave::RegAllocTransformAssignment &assigned) {
-                       return assignedRangesOverlap(
-                           assigned, *interval.fixedBase, interval.width);
-                     }))
+    if (!active.rangeIsFree(*interval.fixedBase, interval.width))
       return false;
-    active.push_back({waveamdmachine::RegClass::AGPR, interval.id,
-                      *interval.fixedBase, interval.width, interval.start,
-                      interval.end});
+    active.add(interval, *interval.fixedBase);
     footprint = std::max(footprint, *interval.fixedBase + interval.width);
     return true;
   }
   std::optional<unsigned> base = findFreeAGPRBase(interval, active, limit);
   if (!base)
     return false;
-  active.push_back({waveamdmachine::RegClass::AGPR, interval.id, *base,
-                    interval.width, interval.start, interval.end});
+  active.add(interval, *base);
   footprint = std::max(footprint, *base + interval.width);
   return true;
 }
@@ -138,7 +169,7 @@ static bool
 canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
                                ArrayRef<AGPRReliefInterval> overlayIntervals,
                                unsigned limit, unsigned &footprint) {
-  SmallVector<wave::RegAllocTransformAssignment> active;
+  ActiveAGPRReliefAssignments active(limit);
   footprint = 0;
   size_t index = 0;
   size_t overlayIndex = 0;
