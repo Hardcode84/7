@@ -1248,6 +1248,20 @@ hasInferredNonNegativeLowerBound(WaveAMDMachineSelector &S,
   return range && hasNonNegativeLowerBound(*range);
 }
 
+static bool
+explicitPredicatesProveNonNegative(WaveAMDMachineSelector &S,
+                                   sym::ExprHandle expr,
+                                   ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(S.symbolStore(), 0);
+  if (failed(zero))
+    return false;
+  FailureOr<sym::PredHandle> nonNegative =
+      sym::composePredCmp(S.symbolStore(), expr, sym::PredCmpOp::Ge, *zero);
+  return succeeded(nonNegative) &&
+         sym::checkPredicate(S.symbolStore(), *nonNegative, assumptions) ==
+             sym::CheckResult::True;
+}
+
 static bool isNonNegativeAddExpr(WaveAMDMachineSelector &S,
                                  sym::ExprHandle expr,
                                  ArrayRef<sym::PredHandle> assumptions) {
@@ -1284,28 +1298,56 @@ static bool isNonNegativeModExpr(sym::ExprHandle expr) {
   return divisor && *divisor > 0;
 }
 
+static bool isNonNegativeXorExpr(WaveAMDMachineSelector &S,
+                                 sym::ExprHandle expr,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  return isProvablyNonNegativeByShape(S, view.getBinaryLhs(), assumptions) &&
+         isProvablyNonNegativeByShape(S, view.getBinaryRhs(), assumptions);
+}
+
 static bool
-isProvablyNonNegativeByShape(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                             ArrayRef<sym::PredHandle> assumptions) {
-  if (hasInferredNonNegativeLowerBound(S, expr, assumptions))
-    return true;
+isNonNegativeLeafOrRoundedExpr(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                               ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
   case sym::ExprKind::Rational:
     return isNonNegativeLiteral(expr);
-  case sym::ExprKind::Add:
-    return isNonNegativeAddExpr(S, expr, assumptions);
-  case sym::ExprKind::Mul:
-    return isNonNegativeMulExpr(S, expr, assumptions);
-  case sym::ExprKind::Mod:
-    return isNonNegativeModExpr(expr);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
     return isProvablyNonNegativeByShape(S, view.getUnaryArg(), assumptions);
   default:
     return false;
   }
+}
+
+static bool isNonNegativeCompoundExpr(WaveAMDMachineSelector &S,
+                                      sym::ExprHandle expr,
+                                      ArrayRef<sym::PredHandle> assumptions) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return isNonNegativeAddExpr(S, expr, assumptions);
+  case sym::ExprKind::Mul:
+    return isNonNegativeMulExpr(S, expr, assumptions);
+  case sym::ExprKind::Xor:
+    return isNonNegativeXorExpr(S, expr, assumptions);
+  case sym::ExprKind::Mod:
+    return isNonNegativeModExpr(expr);
+  default:
+    return isNonNegativeLeafOrRoundedExpr(S, expr, assumptions);
+  }
+}
+
+static bool
+isProvablyNonNegativeByShape(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                             ArrayRef<sym::PredHandle> assumptions) {
+  if (hasInferredNonNegativeLowerBound(S, expr, assumptions))
+    return true;
+  if (explicitPredicatesProveNonNegative(S, expr, assumptions))
+    return true;
+  return isNonNegativeCompoundExpr(S, expr, assumptions);
 }
 
 static LogicalResult requireNonNegativeRoundedExpr(

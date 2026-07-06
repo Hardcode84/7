@@ -2126,13 +2126,18 @@ hasInferredNonNegativeLowerBound(WaveAMDMachineSelector &S,
   return range && hasNonNegativeLowerBound(*range);
 }
 
-static bool hasNonNegativeBoundedRange(WaveAMDMachineSelector &S,
-                                       sym::ExprHandle expr,
-                                       ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<sym::InferredRange> range =
-      sym::inferRange(S.symbolStore(), expr, assumptions);
-  return range && hasNonNegativeLowerBound(*range) && range->upper &&
-         range->upper->denominator > 0;
+static bool
+explicitPredicatesProveNonNegative(WaveAMDMachineSelector &S,
+                                   sym::ExprHandle expr,
+                                   ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(S.symbolStore(), 0);
+  if (failed(zero))
+    return false;
+  FailureOr<sym::PredHandle> nonNegative =
+      sym::composePredCmp(S.symbolStore(), expr, sym::PredCmpOp::Ge, *zero);
+  return succeeded(nonNegative) &&
+         sym::checkPredicate(S.symbolStore(), *nonNegative, assumptions) ==
+             sym::CheckResult::True;
 }
 
 static bool
@@ -2184,8 +2189,9 @@ static bool isNonNegativeXorExpr(WaveAMDMachineSelector &S,
                                  sym::ExprHandle expr,
                                  ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
-  return hasNonNegativeBoundedRange(S, view.getBinaryLhs(), assumptions) &&
-         hasNonNegativeBoundedRange(S, view.getBinaryRhs(), assumptions);
+  return isProvablyNonNegativeForWideShift(S, view.getBinaryLhs(),
+                                           assumptions) &&
+         isProvablyNonNegativeForWideShift(S, view.getBinaryRhs(), assumptions);
 }
 
 static bool isNonNegativeModExpr(sym::ExprHandle expr) {
@@ -2224,6 +2230,8 @@ isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
                                   sym::ExprHandle expr,
                                   ArrayRef<sym::PredHandle> assumptions) {
   if (hasInferredNonNegativeLowerBound(S, expr, assumptions))
+    return true;
+  if (explicitPredicatesProveNonNegative(S, expr, assumptions))
     return true;
   return isProvablyNonNegativeForWideShiftByShape(S, expr, assumptions);
 }

@@ -445,6 +445,47 @@ func.func @shared_nested_index_expr_producer_range()
   return
 }
 
+// SELECT-LABEL: func.func @shared_floor_nested_xor_nonnegative
+// SELECT: waveamdmachine.ds_load_b32
+// ASM-LABEL: shared_floor_nested_xor_nonnegative:
+// ASM: ds_load_b32
+func.func @shared_floor_nested_xor_nonnegative()
+    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %off = wave.index_expr <"floor(1/8*xor(32*Mod(floor(1/4*lane), 2), xor(16*Mod(floor(1/2*lane), 2), 8*Mod(lane, 2))))">
+      assuming [#wave.pred<"lane >= 0 & -31 + lane <= 0">] ["lane"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+// SELECT-LABEL: func.func @shared_floor_nested_xor_offset_bits
+// SELECT: waveamdmachine.ds_load_b32
+// ASM-LABEL: shared_floor_nested_xor_offset_bits:
+// ASM: ds_load_b32
+func.func @shared_floor_nested_xor_offset_bits()
+    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %raw = wave.index_expr <"16*lane"> assuming [#wave.pred<"lane >= 0 & -31 + lane <= 0">] ["lane"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %off = wave.index_expr <"floor(1/64*xor(32*Mod(floor(1/128*raw), 2), xor(16*Mod(floor(1/64*raw), 2), xor(64 + 4*Mod(floor(1/16*raw), 2), 8*Mod(floor(1/32*raw), 2)))))">
+      ["raw"](%raw) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
 // SELECT-LABEL: func.func @global_load_constant_overflow
 // SELECT: waveamdmachine.global_load_b32_addr64
 // ASM-LABEL: global_load_constant_overflow:
