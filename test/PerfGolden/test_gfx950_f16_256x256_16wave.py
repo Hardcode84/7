@@ -40,6 +40,7 @@ def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -
         "--k=8192",
         "--variants=scheduled",
         "--skip-hw",
+        "--enable-split-barriers",
         f"--emit-asm={generated_out}",
     ]
     if emit_mlir is not None:

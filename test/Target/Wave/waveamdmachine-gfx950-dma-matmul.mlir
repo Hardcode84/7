@@ -89,9 +89,9 @@
 // F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_exit_0:
 // F16-PERF-ASM: ds_add_rtn_u32
 // F16-PERF-ASM: v_mfma_f32_16x16x32_f16
-// F16-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_2:
+// F16-PERF-ASM: [[F16_LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // F16-PERF-ASM: ds_read_b32
-// F16-PERF-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_2
+// F16-PERF-ASM: s_cbranch_scc1 [[F16_LOOP]]
 // F16-PERF-ASM: ds_read_b128
 
 // PROFILEMXFP4-4W-LABEL: func.func @wmma_f16_matmul_tiled
@@ -102,22 +102,14 @@
 // PROFILEMXFP4-4W: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 
 // MXFP4-4W-SCALE-ASM-LABEL: wmma_f16_matmul_tiled:
-// MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
-// MXFP4-4W-SCALE-ASM: ds_read_b32
-// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
-// MXFP4-4W-SCALE-ASM: ds_read_b128
-// MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_1:
+// MXFP4-4W-SCALE-ASM: [[MXFP4_4W_LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:2560
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
 // MXFP4-4W-SCALE-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
-// MXFP4-4W-SCALE-ASM: ds_add_rtn_u32
 // MXFP4-4W-SCALE-ASM: buffer_load_dwordx4 {{.*}} lds
-// MXFP4-4W-SCALE-ASM: .Lwmma_f16_matmul_tiled.loop_head_2:
-// MXFP4-4W-SCALE-ASM: ds_read_b32
-// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_2
 // MXFP4-4W-SCALE-ASM: ds_read_b128
-// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_1
+// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 [[MXFP4_4W_LOOP]]
 
 // PROFILEMXFP4-DMA-OVERLAP-LABEL: func.func @wmma_f16_matmul_tiled
 // PROFILEMXFP4-DMA-OVERLAP-SAME: wave.workgroup_size = array<i32: 512, 1, 1>
@@ -149,30 +141,23 @@
 // MXFP4-PERF-ASM-LABEL: wmma_f16_matmul_tiled:
 // MXFP4-PERF-ASM-DAG: v_lshlrev_b32_e32 v{{[0-9]+}}, 12, v{{[0-9]+}}
 // MXFP4-PERF-ASM-DAG: v_lshl_add_u32 v{{[0-9]+}}, v{{[0-9]+}}, 12, s{{[0-9]+}}
-// MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
+// MXFP4-PERF-ASM: [[MXFP4_LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // MXFP4-PERF-ASM: s_barrier
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:4096
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
-// MXFP4-PERF-ASM: ds_add_rtn_u32
-// MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
-// MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_1:
-// MXFP4-PERF-ASM: ds_read_b32
-// MXFP4-PERF-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_1
-// MXFP4-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
 // MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 // MXFP4-PERF-ASM: ds_add_rtn_u32
-// MXFP4-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
-// MXFP4-PERF-ASM: .Lwmma_f16_matmul_tiled.loop_head_2:
+// MXFP4-PERF-ASM: [[MXFP4_WAIT:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // MXFP4-PERF-ASM: ds_read_b32
-// MXFP4-PERF-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_2
-// MXFP4-PERF-ASM: ds_read_b128
-// MXFP4-PERF-ASM: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
+// MXFP4-PERF-ASM: s_cbranch_scc1 [[MXFP4_WAIT]]
+// MXFP4-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
+// MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
-// ASMPIPE: ds_add_rtn_u32
-// ASMPIPE: ds_read_b32
-// ASMPIPE: s_cbranch_scc1
+// ASMPIPE: s_barrier
+// ASMPIPE: ds_read_b128
+// ASMPIPE: v_mfma_f32_16x16x32_f16
 
 // ASMBF16-LABEL: wmma_f16_matmul_tiled:
 // ASMBF16: v_mfma_f32_16x16x32_bf16
@@ -252,5 +237,4 @@
 // ASMMXFP4-DMA-PIPE: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE: ds_read_b128
-// ASMPIPE: buffer_load_dwordx4
 // ASMPIPE: v_mfma_f32_16x16x32_f16

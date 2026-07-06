@@ -9,7 +9,7 @@
 // F16-LABEL: .Lwmma_f16_matmul_tiled.loop_exit_0:
 // F16: ds_add_rtn_u32
 // F16: v_mfma_f32_16x16x32_f16
-// F16: .Lwmma_f16_matmul_tiled.loop_head_2:
+// F16: [[F16_LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // F16: ds_read_b32
-// F16: s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_2
+// F16: s_cbranch_scc1 [[F16_LOOP]]
 // F16: ds_read_b128

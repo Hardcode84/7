@@ -143,6 +143,9 @@ struct IssuePreview {
   bool hasMemoryValue = false;
 };
 
+static void bindValueOrigins(waveamdmachine::InstructionExecutionState &model,
+                             const ValueOriginMap &origins);
+
 struct GreedyStats {
   unsigned filledGaps = 0;
   unsigned unfilledGaps = 0;
@@ -153,12 +156,6 @@ struct GreedyStats {
   unsigned memoryTokenGaps = 0;
   unsigned barrierMemoryGaps = 0;
   unsigned filledBarrierMemoryGaps = 0;
-};
-
-struct BarrierArriveWindowStats {
-  unsigned computeOps = 0;
-  unsigned memoryOps = 0;
-  unsigned otherOps = 0;
 };
 
 struct GreedyResult {
@@ -312,7 +309,8 @@ static void recordPreviewStall(IssuePreview &preview,
 static FailureOr<IssuePreview>
 previewIssue(const IssueState &state, Operation *op,
              const waveamdmachine::ArchData &arch,
-             const waveamdmachine::EventSimConfig &config) {
+             const waveamdmachine::EventSimConfig &config,
+             const ValueOriginMap &origins) {
   IssuePreview preview;
   preview.cls = waveamdmachine::classifyOp(op);
   preview.realInst = preview.cls != waveamdmachine::SchedClass::NoInst;
@@ -324,6 +322,7 @@ previewIssue(const IssueState &state, Operation *op,
   preview.hasMemoryValue = waveamdmachine::hasMemoryValueLatency(op);
 
   IssueState trial = state;
+  bindValueOrigins(trial.model, origins);
   FailureOr<waveamdmachine::InstructionCommitResult> commit =
       trial.model.commit(op);
   if (failed(commit))
@@ -348,8 +347,10 @@ static bool stalls(const IssuePreview &preview) {
 }
 
 static LogicalResult commitIssue(IssueState &state, Operation *op,
-                                 const IssuePreview &preview) {
+                                 const IssuePreview &preview,
+                                 const ValueOriginMap &origins) {
   (void)preview;
+  bindValueOrigins(state.model, origins);
   if (failed(state.model.commit(op)))
     return failure();
   return success();
@@ -557,36 +558,8 @@ static unsigned findFirstReadyByOriginal(const BitVector &ready) {
   return ready.size();
 }
 
-static bool isMatchingBarrierWait(waveamdmachine::BarrierArriveOp arrive,
-                                  waveamdmachine::BarrierWaitOp wait) {
-  return wait.getBarrier() == arrive.getBarrier() &&
-         wait.getTicket() == arrive.getTicket() &&
-         wait.getArrival() == arrive.getToken();
-}
-
-static bool hasMatchingBarrierWait(const GreedyRegion &region,
-                                   unsigned arriveIndex) {
-  auto arrive = cast<waveamdmachine::BarrierArriveOp>(region.ops[arriveIndex]);
-  for (unsigned index : llvm::seq<unsigned>(arriveIndex + 1, region.ops.size()))
-    if (auto wait = dyn_cast<waveamdmachine::BarrierWaitOp>(region.ops[index]))
-      if (isMatchingBarrierWait(arrive, wait))
-        return true;
-  return false;
-}
-
 static bool isBarrierOp(Operation *op) {
   return isa<waveamdmachine::BarrierWaitOp, waveamdmachine::SBarrierOp>(op);
-}
-
-static bool isSplitBarrierOp(Operation *op) {
-  return isa<waveamdmachine::BarrierArriveOp, waveamdmachine::BarrierWaitOp>(
-      op);
-}
-
-static bool isComputeWindowOp(waveamdmachine::FunctionalUnit fu) {
-  return fu == waveamdmachine::FunctionalUnit::VALU ||
-         fu == waveamdmachine::FunctionalUnit::MFMA_XDL ||
-         fu == waveamdmachine::FunctionalUnit::TRANS;
 }
 
 static void recordGapStats(Operation *op, const IssuePreview &preview,
@@ -670,6 +643,31 @@ static ValueOriginMap buildValueOriginMap(func::FuncOp func) {
   return origins;
 }
 
+static void collectOriginLeaves(Value value, const ValueOriginMap &origins,
+                                SmallVectorImpl<Value> &leaves,
+                                SmallPtrSetImpl<Value> &visited) {
+  if (!visited.insert(value).second)
+    return;
+  auto originIt = origins.sources.find(value);
+  if (originIt == origins.sources.end()) {
+    leaves.push_back(value);
+    return;
+  }
+  for (Value source : originIt->second)
+    collectOriginLeaves(source, origins, leaves, visited);
+}
+
+static void bindValueOrigins(waveamdmachine::InstructionExecutionState &model,
+                             const ValueOriginMap &origins) {
+  for (const auto &entry : origins.sources) {
+    SmallVector<Value, 4> leaves;
+    SmallPtrSet<Value, 16> visited;
+    collectOriginLeaves(entry.first, origins, leaves, visited);
+    if (!leaves.empty())
+      model.bindValue(entry.first, leaves);
+  }
+}
+
 static void collectTokenMemoryKinds(Value value, const ValueOriginMap &origins,
                                     SmallVectorImpl<MemoryKind> &kinds,
                                     SmallPtrSetImpl<Value> &visited) {
@@ -751,93 +749,92 @@ static bool canUseStallFiller(const GreedyRegion &region,
                                     fillerKinds);
 }
 
-static BarrierArriveWindowStats getBarrierArriveWindowStats(
-    const GreedyRegion &region, const BitVector &scheduled, unsigned next,
-    unsigned arrive, const waveamdmachine::ArchData &arch) {
-  BarrierArriveWindowStats stats;
-  for (unsigned index : llvm::seq(next, arrive)) {
-    if (scheduled.test(index) || isSplitBarrierOp(region.ops[index]))
-      continue;
-    waveamdmachine::SchedClass cls =
-        waveamdmachine::classifyOp(region.ops[index]);
-    if (cls == waveamdmachine::SchedClass::NoInst)
-      continue;
-    MemoryKind memoryKind =
-        waveamdmachine::getMemoryCounterKind(region.ops[index]);
-    if (memoryKind != MemoryKind::None) {
-      ++stats.memoryOps;
-      continue;
+struct LocalProjection {
+  int64_t cycles = 0;
+  int64_t memoryWaitCycles = 0;
+  int64_t issueBackpressureCycles = 0;
+};
+
+static void addProjectionStall(LocalProjection &projection,
+                               const waveamdmachine::InstructionStall &stall) {
+  for (const waveamdmachine::InstructionStallComponent &component :
+       stall.components) {
+    switch (component.kind) {
+    case waveamdmachine::InstructionStallKind::MemoryToken:
+    case waveamdmachine::InstructionStallKind::Waitcnt:
+      projection.memoryWaitCycles += component.cycles;
+      break;
+    case waveamdmachine::InstructionStallKind::IssueBackpressure:
+      projection.issueBackpressureCycles += component.cycles;
+      break;
+    default:
+      break;
     }
-    if (isComputeWindowOp(waveamdmachine::funit(arch, cls)))
-      ++stats.computeOps;
-    else
-      ++stats.otherOps;
   }
-  return stats;
 }
 
-static std::optional<unsigned> getBarrierArrivePullScore(
+static FailureOr<LocalProjection>
+projectIssueOrder(const IssueState &state, ArrayRef<Operation *> ops,
+                  const ValueOriginMap &origins) {
+  IssueState trial = state;
+  int64_t startCycle = trial.model.getCurrentCycle();
+  LocalProjection projection;
+  for (Operation *op : ops) {
+    bindValueOrigins(trial.model, origins);
+    FailureOr<waveamdmachine::InstructionCommitResult> commit =
+        trial.model.commit(op);
+    if (failed(commit))
+      return failure();
+    addProjectionStall(projection, commit->stall);
+  }
+  projection.cycles = trial.model.getCurrentCycle() - startCycle;
+  return projection;
+}
+
+static FailureOr<bool> canIssueTokenConsumerBeforeNext(
     const GreedyRegion &region, const BitVector &scheduled, unsigned next,
-    unsigned arrive, const waveamdmachine::ArchData &arch) {
-  if (arrive <= next || !hasMatchingBarrierWait(region, arrive))
-    return std::nullopt;
-
-  MemoryKindSet arriveKinds;
-  appendMemoryKind(arriveKinds,
-                   waveamdmachine::getMemoryCounterKind(region.ops[arrive]));
-  if (crossesSameMemoryProducer(region, scheduled, next, arrive, arriveKinds))
-    return std::nullopt;
-
-  BarrierArriveWindowStats stats =
-      getBarrierArriveWindowStats(region, scheduled, next, arrive, arch);
-  if (stats.computeOps != 0 && stats.memoryOps != 0)
-    return std::nullopt;
-  if (stats.computeOps >= 16)
-    return stats.computeOps * 4 + stats.otherOps;
-  if (stats.computeOps == 0 && stats.memoryOps >= 4)
-    return stats.memoryOps * 4 + stats.otherOps;
-  return std::nullopt;
-}
-
-static unsigned
-findBestReadyBarrierArrive(const BitVector &ready, const GreedyRegion &region,
-                           const BitVector &scheduled,
-                           const waveamdmachine::ArchData &arch) {
-  unsigned next = findFirstUnscheduled(scheduled);
-  unsigned best = region.ops.size();
-  unsigned bestScore = 0;
-  for (unsigned index : llvm::seq(ready.size())) {
-    if (!ready.test(index) ||
-        !isa<waveamdmachine::BarrierArriveOp>(region.ops[index]))
-      continue;
-    std::optional<unsigned> score =
-        getBarrierArrivePullScore(region, scheduled, next, index, arch);
-    if (!score || *score <= bestScore)
-      continue;
-    best = index;
-    bestScore = *score;
-  }
-  return best;
-}
-
-static Operation *getLastRealScheduledOp(const GreedyRegion &region,
-                                         ArrayRef<unsigned> order) {
-  for (unsigned index : llvm::reverse(order))
-    if (waveamdmachine::classifyOp(region.ops[index]) !=
-        waveamdmachine::SchedClass::NoInst)
-      return region.ops[index];
-  return nullptr;
-}
-
-static bool followsAdjacentBarrierArrive(const GreedyRegion &region,
-                                         ArrayRef<unsigned> order,
-                                         unsigned waitIndex) {
-  auto wait = dyn_cast<waveamdmachine::BarrierWaitOp>(region.ops[waitIndex]);
-  if (!wait)
+    unsigned consumer, const IssueState &state, const ValueOriginMap &origins) {
+  MemoryKindSet consumerKinds =
+      collectFillerMemoryKinds(region.ops[consumer], origins);
+  if (crossesSameMemoryProducer(region, scheduled, next, consumer,
+                                consumerKinds))
     return false;
-  auto arrive = dyn_cast_or_null<waveamdmachine::BarrierArriveOp>(
-      getLastRealScheduledOp(region, order));
-  return arrive && isMatchingBarrierWait(arrive, wait);
+
+  std::array<Operation *, 2> original = {region.ops[next],
+                                         region.ops[consumer]};
+  std::array<Operation *, 2> moved = {region.ops[consumer], region.ops[next]};
+  FailureOr<LocalProjection> originalProjection =
+      projectIssueOrder(state, original, origins);
+  if (failed(originalProjection))
+    return failure();
+  FailureOr<LocalProjection> movedProjection =
+      projectIssueOrder(state, moved, origins);
+  if (failed(movedProjection))
+    return failure();
+
+  return movedProjection->memoryWaitCycles <=
+             originalProjection->memoryWaitCycles &&
+         movedProjection->issueBackpressureCycles <=
+             originalProjection->issueBackpressureCycles;
+}
+
+static FailureOr<unsigned>
+findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
+                       const BitVector &scheduled, unsigned next,
+                       const IssueState &state, const ValueOriginMap &origins) {
+  for (unsigned index : llvm::seq(next + 1, ready.size())) {
+    if (!ready.test(index))
+      continue;
+    if (!waveamdmachine::waitsForMemoryTokenDepsBeforeIssue(region.ops[index]))
+      continue;
+    FailureOr<bool> canMove = canIssueTokenConsumerBeforeNext(
+        region, scheduled, next, index, state, origins);
+    if (failed(canMove))
+      return failure();
+    if (*canMove)
+      return index;
+  }
+  return region.ops.size();
 }
 
 static FillableStall getFillableStall(const IssuePreview &preview) {
@@ -872,7 +869,7 @@ findStallFiller(const BitVector &ready, unsigned next,
     if (!canUseStallFiller(region, scheduled, next, index, origins))
       continue;
     FailureOr<IssuePreview> preview =
-        previewIssue(state, region.ops[index], arch, cfg);
+        previewIssue(state, region.ops[index], arch, cfg, origins);
     if (failed(preview))
       return failure();
     if (fillsStall(stall, *preview))
@@ -933,9 +930,10 @@ static LogicalResult scheduleReadyNode(
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, IssueState &state,
     BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
-    SmallVectorImpl<unsigned> &order, const IssuePreview &preview) {
+    SmallVectorImpl<unsigned> &order, const IssuePreview &preview,
+    const ValueOriginMap &origins) {
   order.push_back(selected);
-  if (failed(commitIssue(state, region.ops[selected], preview)))
+  if (failed(commitIssue(state, region.ops[selected], preview, origins)))
     return failure();
   markScheduled(selected, graph, ready, scheduled, pending);
   (void)arch;
@@ -943,23 +941,23 @@ static LogicalResult scheduleReadyNode(
   return success();
 }
 
-static LogicalResult
-drainReadyNoInsts(const GreedyRegion &region, const GraphTables &graph,
-                  const waveamdmachine::ArchData &arch,
-                  const waveamdmachine::EventSimConfig &config,
-                  IssueState &state, BitVector &ready, BitVector &scheduled,
-                  SmallVectorImpl<unsigned> &pending,
-                  SmallVectorImpl<unsigned> &order) {
+static LogicalResult drainReadyNoInsts(
+    const GreedyRegion &region, const GraphTables &graph,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, IssueState &state,
+    BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
+    SmallVectorImpl<unsigned> &order, const ValueOriginMap &origins) {
   while (true) {
     unsigned selected = findFirstReadyNoInst(ready, region);
     if (selected == region.ops.size())
       return success();
     FailureOr<IssuePreview> preview =
-        previewIssue(state, region.ops[selected], arch, config);
+        previewIssue(state, region.ops[selected], arch, config, origins);
     if (failed(preview))
       return failure();
     if (failed(scheduleReadyNode(selected, region, graph, arch, config, state,
-                                 ready, scheduled, pending, order, *preview)))
+                                 ready, scheduled, pending, order, *preview,
+                                 origins)))
       return failure();
   }
 }
@@ -967,9 +965,9 @@ drainReadyNoInsts(const GreedyRegion &region, const GraphTables &graph,
 static FailureOr<bool> previewNextIssue(
     const GreedyRegion &region, const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const IssueState &state,
-    unsigned next, IssuePreview &nextPreview) {
+    unsigned next, IssuePreview &nextPreview, const ValueOriginMap &origins) {
   FailureOr<IssuePreview> preview =
-      previewIssue(state, region.ops[next], arch, config);
+      previewIssue(state, region.ops[next], arch, config, origins);
   if (failed(preview))
     return failure();
   nextPreview = *preview;
@@ -982,17 +980,18 @@ scheduleStallFiller(const GreedyRegion &region, const GraphTables &graph,
                     const waveamdmachine::EventSimConfig &config,
                     IssueState &state, BitVector &ready, BitVector &scheduled,
                     SmallVectorImpl<unsigned> &pending,
-                    SmallVectorImpl<unsigned> &order, unsigned filler) {
+                    SmallVectorImpl<unsigned> &order, unsigned filler,
+                    const ValueOriginMap &origins) {
   FailureOr<IssuePreview> fillerPreview =
-      previewIssue(state, region.ops[filler], arch, config);
+      previewIssue(state, region.ops[filler], arch, config, origins);
   if (failed(fillerPreview))
     return failure();
   if (failed(scheduleReadyNode(filler, region, graph, arch, config, state,
-                               ready, scheduled, pending, order,
-                               *fillerPreview)))
+                               ready, scheduled, pending, order, *fillerPreview,
+                               origins)))
     return failure();
   return drainReadyNoInsts(region, graph, arch, config, state, ready, scheduled,
-                           pending, order);
+                           pending, order, origins);
 }
 
 static void recordFilledStall(Operation *op, const IssuePreview &nextPreview,
@@ -1015,11 +1014,14 @@ static FailureOr<bool> fillStallBeforeNext(
     SmallVectorImpl<unsigned> &order, GreedyStats &stats, unsigned next,
     IssuePreview &nextPreview, const ValueOriginMap &origins) {
   while (true) {
-    FailureOr<bool> readyNow =
-        previewNextIssue(region, arch, config, state, next, nextPreview);
+    FailureOr<bool> readyNow = previewNextIssue(region, arch, config, state,
+                                                next, nextPreview, origins);
     if (failed(readyNow))
       return failure();
     if (*readyNow)
+      return true;
+    if (isa<waveamdmachine::BarrierWaitOp>(region.ops[next]) &&
+        nextPreview.memoryWaitCycles == 0)
       return true;
 
     recordGapStats(region.ops[next], nextPreview, stats);
@@ -1035,7 +1037,8 @@ static FailureOr<bool> fillStallBeforeNext(
 
     recordFilledStall(region.ops[next], nextPreview, stats);
     if (failed(scheduleStallFiller(region, graph, arch, config, state, ready,
-                                   scheduled, pending, order, *filler)))
+                                   scheduled, pending, order, *filler,
+                                   origins)))
       return failure();
     if (!nextStillReady(ready, scheduled, next))
       return false;
@@ -1052,14 +1055,14 @@ static FailureOr<GreedyStepStatus> scheduleReadyByIndex(
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, IssueState &state,
     BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
-    SmallVectorImpl<unsigned> &order) {
+    SmallVectorImpl<unsigned> &order, const ValueOriginMap &origins) {
   FailureOr<IssuePreview> selectedPreview =
-      previewIssue(state, region.ops[selected], arch, config);
+      previewIssue(state, region.ops[selected], arch, config, origins);
   if (failed(selectedPreview))
     return failure();
   if (failed(scheduleReadyNode(selected, region, graph, arch, config, state,
                                ready, scheduled, pending, order,
-                               *selectedPreview)))
+                               *selectedPreview, origins)))
     return failure();
   return GreedyStepStatus::Continue;
 }
@@ -1069,10 +1072,10 @@ static FailureOr<GreedyStepStatus> scheduleFirstReadyByOriginal(
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, IssueState &state,
     BitVector &ready, BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
-    SmallVectorImpl<unsigned> &order) {
+    SmallVectorImpl<unsigned> &order, const ValueOriginMap &origins) {
   unsigned selected = findFirstReadyByOriginal(ready);
   return scheduleReadyByIndex(selected, region, graph, arch, config, state,
-                              ready, scheduled, pending, order);
+                              ready, scheduled, pending, order, origins);
 }
 
 static FailureOr<GreedyStepStatus>
@@ -1093,7 +1096,8 @@ scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
   if (scheduled.test(next))
     return GreedyStepStatus::Continue;
   if (failed(scheduleReadyNode(next, region, graph, arch, config, state, ready,
-                               scheduled, pending, result.order, preview)))
+                               scheduled, pending, result.order, preview,
+                               origins)))
     return failure();
   return GreedyStepStatus::Continue;
 }
@@ -1104,9 +1108,9 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                 const waveamdmachine::EventSimConfig &config, IssueState &state,
                 BitVector &ready, BitVector &scheduled,
                 SmallVectorImpl<unsigned> &pending, GreedyResult &result,
-                const ValueOriginMap &origins, bool &usedBarrierArriveWindow) {
+                const ValueOriginMap &origins) {
   if (failed(drainReadyNoInsts(region, graph, arch, config, state, ready,
-                               scheduled, pending, result.order)))
+                               scheduled, pending, result.order, origins)))
     return failure();
   if (result.order.size() == region.ops.size())
     return GreedyStepStatus::Done;
@@ -1115,26 +1119,22 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
     return GreedyStepStatus::Blocked;
   }
 
-  unsigned eagerArrive =
-      usedBarrierArriveWindow
-          ? region.ops.size()
-          : findBestReadyBarrierArrive(ready, region, scheduled, arch);
-  if (eagerArrive != region.ops.size()) {
-    usedBarrierArriveWindow = true;
-    return scheduleReadyByIndex(eagerArrive, region, graph, arch, config, state,
-                                ready, scheduled, pending, result.order);
-  }
-
   unsigned next = findFirstUnscheduled(scheduled);
-  if (ready.test(next) &&
-      followsAdjacentBarrierArrive(region, result.order, next))
-    return scheduleReadyByIndex(next, region, graph, arch, config, state, ready,
-                                scheduled, pending, result.order);
+  if (ready.test(next)) {
+    FailureOr<unsigned> consumer =
+        findReadyTokenConsumer(ready, region, scheduled, next, state, origins);
+    if (failed(consumer))
+      return failure();
+    if (*consumer != region.ops.size())
+      return scheduleReadyByIndex(*consumer, region, graph, arch, config, state,
+                                  ready, scheduled, pending, result.order,
+                                  origins);
+  }
 
   if (!ready.test(next))
     return scheduleFirstReadyByOriginal(region, graph, arch, config, state,
-                                        ready, scheduled, pending,
-                                        result.order);
+                                        ready, scheduled, pending, result.order,
+                                        origins);
   return scheduleOriginalNext(region, graph, arch, config, state, ready,
                               scheduled, pending, result, next, origins);
 }
@@ -1153,11 +1153,10 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
       ready.set(index);
 
   IssueState state(arch, buildInstructionConfig(arch, config));
-  bool usedBarrierArriveWindow = false;
   while (result.order.size() != region.ops.size()) {
     FailureOr<GreedyStepStatus> step =
         buildGreedyStep(region, graph, arch, config, state, ready, scheduled,
-                        pending, result, origins, usedBarrierArriveWindow);
+                        pending, result, origins);
     if (failed(step))
       return failGreedyModel(result);
     if (*step == GreedyStepStatus::Done)

@@ -9,7 +9,9 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -102,7 +104,8 @@ static bool isEligibleBarrier(waveamdmachine::SBarrierOp barrier) {
   return true;
 }
 
-static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize) {
+static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize,
+                               const waveamdmachine::ArchData &arch) {
   if (func.isExternal())
     return success();
   if (!func->hasAttr(kEnableSplitBarriersAttr))
@@ -110,6 +113,8 @@ static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize) {
 
   std::optional<unsigned> expectedWaves = getExpectedWaves(func, wavefrontSize);
   if (!expectedWaves)
+    return success();
+  if (*expectedWaves <= static_cast<unsigned>(arch.simdsPerCU))
     return success();
 
   SmallVector<waveamdmachine::SBarrierOp> barriers;
@@ -158,9 +163,19 @@ struct WaveAMDSplitBarriersPass
         waveamdmachine::getAMDGPUWavefrontSize(root, "waveamd-split-barriers");
     if (failed(wavefrontSize))
       return signalPassFailure();
+    FailureOr<llvm::AMDGPU::IsaVersion> isa =
+        waveamdmachine::getAMDGPUTargetIsaVersion(root,
+                                                  "waveamd-split-barriers");
+    if (failed(isa))
+      return signalPassFailure();
+    if (!waveamdmachine::isArchSupported(*isa)) {
+      root->emitError("waveamd-split-barriers unsupported target");
+      return signalPassFailure();
+    }
+    const waveamdmachine::ArchData &arch = waveamdmachine::getArchData(*isa);
 
     WalkResult result = root->walk([&](func::FuncOp func) {
-      if (failed(splitFunc(func, *wavefrontSize)))
+      if (failed(splitFunc(func, *wavefrontSize, arch)))
         return WalkResult::interrupt();
       return WalkResult::advance();
     });

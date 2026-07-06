@@ -113,8 +113,8 @@ func.func @cma_dma_place_candidate(%a: !waveamdmachine.reg<vgpr, 4>,
 }
 }
 
-// DIAG: waveamd-machine-schedule-report candidate func=cma_dma_place_candidate region=0 name=greedy cycles=88 delta=0 issued_ops=3 action=keep reason=same_order
-// DIAG: waveamd-machine-schedule-report selected func=cma_dma_place_candidate region=0 name=original original_cycles=88 selected_cycles=88 delta=0 action=keep reason=same_order
+// DIAG: waveamd-machine-schedule-report candidate func=cma_dma_place_candidate region=0 name=greedy cycles=80 delta=-8 issued_ops=3 action=apply reason=better
+// DIAG: waveamd-machine-schedule-report selected func=cma_dma_place_candidate region=0 name=greedy original_cycles=88 selected_cycles=80 delta=-8 action=apply reason=better
 
 // -----
 

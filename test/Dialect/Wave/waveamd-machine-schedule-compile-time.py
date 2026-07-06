@@ -162,8 +162,8 @@ def check_gfx950_mfma_dma_report() -> None:
     require(
         "gfx950_mfma_dma_report",
         text,
-        r"selected func=gfx950_mfma_dma region=0 name=original "
-        r".*action=keep reason=same_order",
+        r"selected func=gfx950_mfma_dma region=0 name=greedy "
+        r".*action=apply reason=better",
     )
     reject("gfx950_mfma_dma_report", text, r"unsupported op")
 
@@ -200,7 +200,7 @@ def main() -> int:
         "matmul_greedy_report",
         text,
         r"candidate func=wmma_f16_matmul_tiled region=1 name=greedy "
-        r".*operand_gaps=2 .*memory_token_gaps=0",
+        r".*operand_gaps=1 .*memory_token_gaps=2",
     )
 
     text = run_case(

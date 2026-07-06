@@ -96,6 +96,7 @@ struct InstructionExecutionConfig {
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa);
 
+bool waitsForMemoryTokenDepsBeforeIssue(Operation *op);
 llvm::StringRef getInstructionStallKindName(InstructionStallKind kind);
 llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind);
 llvm::StringRef
@@ -112,6 +113,7 @@ struct InstructionExecutionState {
   int64_t getCurrentCycle() const { return currentCycle; }
   int64_t getValueReadyCycle(Value value) const;
   void bindValue(Value result, Value source);
+  void bindValue(Value result, ArrayRef<Value> sources);
   unsigned getPendingMemoryEventCount(InstructionWaitCounterKind kind) const;
   unsigned getPipeInFlightCount(InstructionPipeKind kind) const;
 

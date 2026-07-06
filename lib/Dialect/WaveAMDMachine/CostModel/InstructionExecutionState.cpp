@@ -106,18 +106,6 @@ static bool hasMemoryTokenOperand(Operation *op) {
   return false;
 }
 
-static bool waitsForTokenDepsBeforeIssue(Operation *op) {
-  if (!hasMemoryTokenOperand(op))
-    return false;
-  if (isa<SBarrierOp>(op))
-    return true;
-  if (op->hasTrait<traits::LDSDmaOp>())
-    return true;
-  if (op->hasTrait<traits::VMEMStoreOp>() || op->hasTrait<traits::LDSStoreOp>())
-    return true;
-  return false;
-}
-
 static bool consumesM0ThroughHazard(Operation *op) {
   bool hasM0Operand = llvm::any_of(op->getOperands(), [](Value operand) {
     return isa<M0Type>(operand.getType());
@@ -273,6 +261,18 @@ bool isInstructionExecutionStateArchSupported(
   return isaEq(isa, {9, 4, 2}) || isaEq(isa, {9, 5, 0}) || isa.Major == 11;
 }
 
+bool waitsForMemoryTokenDepsBeforeIssue(Operation *op) {
+  if (!hasMemoryTokenOperand(op))
+    return false;
+  if (isa<SBarrierOp, BarrierArriveOp>(op))
+    return true;
+  if (op->hasTrait<traits::LDSDmaOp>())
+    return true;
+  if (op->hasTrait<traits::VMEMStoreOp>() || op->hasTrait<traits::LDSStoreOp>())
+    return true;
+  return false;
+}
+
 llvm::StringRef getInstructionStallKindName(InstructionStallKind kind) {
   switch (kind) {
   case InstructionStallKind::None:
@@ -365,19 +365,37 @@ int64_t InstructionExecutionState::getValueReadyCycle(Value value) const {
 }
 
 void InstructionExecutionState::bindValue(Value result, Value source) {
-  valueReadyAt[result] = getValueReadyCycle(source);
+  bindValue(result, ArrayRef<Value>(source));
+}
 
-  DenseMap<Value, EventId>::const_iterator valueEventIt =
-      valueEvent.find(source);
-  if (valueEventIt != valueEvent.end())
-    valueEvent[result] = valueEventIt->second;
+void InstructionExecutionState::bindValue(Value result,
+                                          ArrayRef<Value> sources) {
+  int64_t ready = currentCycle;
+  SmallVector<EventId, 4> tokenDeps;
+  std::optional<EventId> sourceValueEvent;
+
+  for (Value source : sources) {
+    ready = std::max(ready, getValueReadyCycle(source));
+
+    DenseMap<Value, EventId>::const_iterator valueEventIt =
+        valueEvent.find(source);
+    if (valueEventIt != valueEvent.end())
+      sourceValueEvent = valueEventIt->second;
+
+    DenseMap<Value, SmallVector<EventId, 4>>::const_iterator tokenIt =
+        tokenEvents.find(source);
+    if (tokenIt != tokenEvents.end())
+      appendUniqueEvents(tokenDeps, tokenIt->second);
+  }
+
+  valueReadyAt[result] = ready;
+  if (sourceValueEvent)
+    valueEvent[result] = *sourceValueEvent;
   else
     valueEvent.erase(result);
 
-  DenseMap<Value, SmallVector<EventId, 4>>::const_iterator tokenIt =
-      tokenEvents.find(source);
-  if (tokenIt != tokenEvents.end())
-    tokenEvents[result] = tokenIt->second;
+  if (!tokenDeps.empty())
+    tokenEvents[result] = std::move(tokenDeps);
   else
     tokenEvents.erase(result);
 }
@@ -463,7 +481,7 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.waitcnt = op->hasTrait<traits::WaitcntOp>();
   desc.m0Writer = writesM0ThroughHazard(op);
   desc.m0Consumer = consumesM0ThroughHazard(op);
-  desc.waitsForTokenDeps = waitsForTokenDepsBeforeIssue(op);
+  desc.waitsForTokenDeps = waitsForMemoryTokenDepsBeforeIssue(op);
 
   SchedClass cls = classifyOp(op);
   desc.noMachineInst = cls == SchedClass::NoInst;

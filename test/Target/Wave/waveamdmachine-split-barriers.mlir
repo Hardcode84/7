@@ -10,8 +10,8 @@
 // CHECK-NOT: waveamdmachine.s_barrier
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @split_barrier()
-      attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
-                  wave.waves_per_workgroup = 4 : i64,
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>,
+                  wave.waves_per_workgroup = 8 : i64,
                   waveamdmachine.enable_split_barriers} {
     %root = waveamdmachine.token : !waveamdmachine.mem.token
     %ready = waveamdmachine.s_barrier %root
@@ -31,8 +31,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NOT: waveamdmachine.s_barrier
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @split_barrier_no_result()
-      attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
-                  wave.waves_per_workgroup = 4 : i64,
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>,
+                  wave.waves_per_workgroup = 8 : i64,
                   waveamdmachine.enable_split_barriers} {
     %root = waveamdmachine.token : !waveamdmachine.mem.token
     waveamdmachine.s_barrier %root : (!waveamdmachine.mem.token) -> ()
@@ -52,8 +52,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NOT: waveamdmachine.s_barrier
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @split_barrier_multi_result()
-      attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
-                  wave.waves_per_workgroup = 4 : i64,
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>,
+                  wave.waves_per_workgroup = 8 : i64,
                   waveamdmachine.enable_split_barriers} {
     %left = waveamdmachine.token : !waveamdmachine.mem.token
     %right = waveamdmachine.token : !waveamdmachine.mem.token
@@ -76,8 +76,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NOT: waveamdmachine.s_barrier
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @split_barrier_3d_workgroup()
-      attributes {wave.kernel, wave.workgroup_size = array<i32: 16, 8, 2>,
-                  wave.waves_per_workgroup = 4 : i64,
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 16, 16, 2>,
+                  wave.waves_per_workgroup = 8 : i64,
                   waveamdmachine.enable_split_barriers} {
     %root = waveamdmachine.token : !waveamdmachine.mem.token
     %ready = waveamdmachine.s_barrier %root
@@ -97,6 +97,23 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @splits_non_gfx950()
       attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
                   wave.waves_per_workgroup = 8 : i64,
+                  waveamdmachine.enable_split_barriers} {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %ready = waveamdmachine.s_barrier %root
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    return
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @keeps_four_wave_gfx950(
+// CHECK: waveamdmachine.s_barrier
+// CHECK-NOT: waveamdmachine.barrier_init
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @keeps_four_wave_gfx950()
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
+                  wave.waves_per_workgroup = 4 : i64,
                   waveamdmachine.enable_split_barriers} {
     %root = waveamdmachine.token : !waveamdmachine.mem.token
     %ready = waveamdmachine.s_barrier %root
