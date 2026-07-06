@@ -2186,9 +2186,10 @@ static void appendIndexExprProducerRangePredicate(
     appendUniquePredicate(assumptions, *assumption);
 }
 
-void mlir::wave::appendAssumePredicates(
-    sym::Store &store, Value binding, StringRef name,
-    SmallVectorImpl<sym::PredHandle> &assumptions) {
+static void
+appendAssumePredicatesImpl(sym::Store &store, Value binding, StringRef name,
+                           SmallVectorImpl<sym::PredHandle> &assumptions,
+                           bool includeProducerRange) {
   FailureOr<sym::ExprHandle> replacement = sym::composeExprSym(store, name);
   if (failed(replacement))
     return;
@@ -2208,7 +2209,27 @@ void mlir::wave::appendAssumePredicates(
     }
     binding = assume.getValue();
   }
-  appendIndexExprProducerRangePredicate(store, binding, name, assumptions);
+  if (includeProducerRange)
+    appendIndexExprProducerRangePredicate(store, binding, name, assumptions);
+}
+
+void mlir::wave::appendAssumePredicates(
+    sym::Store &store, Value binding, StringRef name,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  appendAssumePredicatesImpl(store, binding, name, assumptions,
+                             /*includeProducerRange=*/true);
+}
+
+static void appendRangePredicatesForInference(
+    sym::Store &store, Value binding, StringRef name,
+    const ConstantIntRanges &range,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  appendAssumePredicatesImpl(store, binding, name, assumptions,
+                             /*includeProducerRange=*/false);
+  std::optional<sym::PredHandle> assumption =
+      buildIndexExprRangeAssumption(store, name, range);
+  if (assumption)
+    appendUniquePredicate(assumptions, *assumption);
 }
 
 static std::optional<ConstantIntRanges>
@@ -2317,7 +2338,7 @@ void IndexExprOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
   for (auto [nameAttr, binding, range] :
        llvm::zip(getNames(), getBindings(), argRanges)) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
-    appendRangeAndAssumePredicates(store, binding, name, range, assumptions);
+    appendRangePredicatesForInference(store, binding, name, range, assumptions);
   }
   std::optional<ConstantIntRanges> range = buildIndexExprResultRange(
       store, getExpr().getValue(), getResult().getType(), assumptions);
