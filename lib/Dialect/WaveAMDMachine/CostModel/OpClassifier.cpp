@@ -121,7 +121,8 @@ static SchedClass classifyMappedOp(Operation *op) {
             SLshlB64Op, SLshrB32Op, SLshrB64Op, SAshrI32Op, SAshrI64Op,
             SMovB32Op, SMovB32TupleOp, SMovB32ValueOp, SMovB64ImmOp,
             SMovExecB64Op, SMovExecLoOp, SMovM0Op, SMovVccB32Op, SMulI32Op,
-            SMulHiU32Op, SMulU64Op, SNopOp, SFf1I32B32Op, SFf1I32B64Op,
+            SMulHiU32Op, SMulU64Op, SNopOp, SSleepOp, SFf1I32B32Op,
+            SFf1I32B64Op,
             SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SReadVccB32Op,
             SSetprioOp, SGetregShaderCyclesOp, SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })

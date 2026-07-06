@@ -18,12 +18,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: v_readfirstlane_b32
 // ASM: s_add_i32
 // ASM: s_and_saveexec_b64
-// ASM-NEXT: .Lsplit_barrier_lds_codegen.loop_head_0:
 // ASM: ds_read_b32
 // ASM: s_xor_b32
 // ASM: s_cmp_ge_u32 {{.*}}, 0x80000000
-// ASM: s_cbranch_scc1 .Lsplit_barrier_lds_codegen.loop_head_0
-// ASM-NEXT: .Lsplit_barrier_lds_codegen.loop_exit_0:
+// ASM: s_cbranch_scc0 [[ELSE:.Lsplit_barrier_lds_codegen.if_else_[0-9]+]]
+// ASM-NEXT: [[LOOP:.Lsplit_barrier_lds_codegen.loop_head_[0-9]+]]:
+// ASM-NEXT: s_sleep 1
+// ASM-NEXT: ds_read_b32
+// ASM: s_cmp_ge_u32 {{.*}}, 0x80000000
+// ASM: s_cbranch_scc1 [[LOOP]]
+// ASM-NEXT: [[EXIT:.Lsplit_barrier_lds_codegen.loop_exit_[0-9]+]]:
+// ASM-NEXT: s_branch [[END:.Lsplit_barrier_lds_codegen.if_end_[0-9]+]]
+// ASM-NEXT: [[ELSE]]:
+// ASM-NEXT: [[END]]:
 // ASM-NEXT: s_mov_b64 exec
 // ASM: .amdhsa_group_segment_fixed_size 1040
 func.func @split_barrier_lds_codegen()

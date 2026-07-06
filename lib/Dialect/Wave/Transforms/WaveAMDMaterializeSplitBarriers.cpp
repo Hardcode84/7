@@ -59,6 +59,13 @@ struct MachineTypes {
   Type m0;
 };
 
+static constexpr uint64_t kBarrierPollSleep = 1;
+
+struct BarrierPoll {
+  Value token;
+  Value cont;
+};
+
 static bool isPowerOfTwo(unsigned value) {
   return value != 0 && (value & (value - 1)) == 0;
 }
@@ -532,21 +539,11 @@ static LogicalResult materializeArrive(OpBuilder &builder,
   return success();
 }
 
-static Value materializePollLoop(OpBuilder &builder, Location loc,
-                                 MachineTypes types, BarrierSlot slot,
-                                 Value target, Value arrivalToken,
-                                 unsigned wavefrontSize) {
-  Value savedExec = enterOneLanePerWave(builder, loc, types, wavefrontSize);
-  waveamdmachine::UniformLoopOp loop = waveamdmachine::UniformLoopOp::create(
-      builder, loc, TypeRange{types.token}, Value(), ValueRange{arrivalToken});
-  SmallVector<Location, 1> argLocs(1, loc);
-  Block *body = builder.createBlock(&loop.getBody(), loop.getBody().end(),
-                                    TypeRange{types.token}, argLocs);
-  builder.setInsertionPointToStart(body);
-
-  Value addr = makeBarrierAddress(builder, loc, types, slot);
+static BarrierPoll materializePoll(OpBuilder &builder, Location loc,
+                                   MachineTypes types, Value addr, Value target,
+                                   Value dependency) {
   waveamdmachine::DsLoadB32Op seen = waveamdmachine::DsLoadB32Op::create(
-      builder, loc, types.vgpr1, types.token, addr, body->getArgument(0), 0);
+      builder, loc, types.vgpr1, types.token, addr, dependency, 0);
   Value seenScalar = waveamdmachine::VReadfirstlaneB32Op::create(
                          builder, loc, types.sgpr1, seen.getResult())
                          .getResult();
@@ -565,11 +562,47 @@ static Value materializePollLoop(OpBuilder &builder, Location loc,
                    builder, loc, types.scc, delta,
                    makeImm(builder, loc, types, 0x80000000u))
                    .getResult();
-  waveamdmachine::ContinueIfOp::create(builder, loc, cont,
-                                       ValueRange{seen.getToken()});
+  return {seen.getToken(), cont};
+}
+
+static Value materializePollLoop(OpBuilder &builder, Location loc,
+                                 MachineTypes types, BarrierSlot slot,
+                                 Value target, Value arrivalToken,
+                                 unsigned wavefrontSize) {
+  Value savedExec = enterOneLanePerWave(builder, loc, types, wavefrontSize);
+  Value addr = makeBarrierAddress(builder, loc, types, slot);
+  BarrierPoll firstPoll =
+      materializePoll(builder, loc, types, addr, target, arrivalToken);
+
+  waveamdmachine::UniformIfOp slowPath = waveamdmachine::UniformIfOp::create(
+      builder, loc, TypeRange{types.token}, firstPoll.cont);
+  Block *thenBlock = builder.createBlock(&slowPath.getThenRegion());
+  builder.setInsertionPointToStart(thenBlock);
+
+  waveamdmachine::UniformLoopOp loop = waveamdmachine::UniformLoopOp::create(
+      builder, loc, TypeRange{types.token}, Value(),
+      ValueRange{firstPoll.token});
+  SmallVector<Location, 1> argLocs(1, loc);
+  Block *body = builder.createBlock(&loop.getBody(), loop.getBody().end(),
+                                    TypeRange{types.token}, argLocs);
+  builder.setInsertionPointToStart(body);
+
+  waveamdmachine::SSleepOp::create(
+      builder, loc, makeImm(builder, loc, types, kBarrierPollSleep));
+  BarrierPoll loopPoll =
+      materializePoll(builder, loc, types, addr, target, body->getArgument(0));
+  waveamdmachine::ContinueIfOp::create(builder, loc, loopPoll.cont,
+                                       ValueRange{loopPoll.token});
   builder.setInsertionPointAfter(loop);
+  waveamdmachine::YieldOp::create(builder, loc, loop.getResult(0));
+
+  Block *elseBlock = builder.createBlock(&slowPath.getElseRegion());
+  builder.setInsertionPointToStart(elseBlock);
+  waveamdmachine::YieldOp::create(builder, loc, firstPoll.token);
+
+  builder.setInsertionPointAfter(slowPath);
   restoreExec(builder, loc, wavefrontSize, savedExec);
-  return loop.getResult(0);
+  return slowPath.getResult(0);
 }
 
 static LogicalResult materializeWait(OpBuilder &builder,

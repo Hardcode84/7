@@ -1251,6 +1251,9 @@ def WaveAMDMachine_SWaitcntVscntOp
 def WaveAMDMachine_SNopOp
     : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm,
                                    [WaveAMDMachine_SALU]>;
+def WaveAMDMachine_SSleepOp
+    : WaveAMDMachine_UnaryNoResult<"s_sleep", WaveAMDMachine_Imm,
+                                   [WaveAMDMachine_SALU]>;
 // Set wave issue priority (0..3). Free, dynamic nudge for the HW
 // issue arbiter -- prefer this over cycle counting when biasing
 // multi-wave co-execution (e.g. ping-pong phase entry: the wave

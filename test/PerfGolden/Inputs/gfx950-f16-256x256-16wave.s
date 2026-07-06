@@ -228,16 +228,26 @@ wmma_f16_matmul_tiled:
 		s_and_b32 s0, s0, -16
 		s_add_i32 s0, s0, 16
 		s_and_saveexec_b64 s[2:3], s[12:13]
-.Lwmma_f16_matmul_tiled.loop_head_1:
 		ds_read_b32 v9, v1
 		s_waitcnt lgkmcnt(0)
 		v_readfirstlane_b32 s1, v9
-		s_xor_b32 s4, s0, -1
-		s_add_i32 s4, s4, 1
-		s_add_i32 s1, s1, s4
+		s_xor_b32 s0, s0, -1
+		s_add_i32 s0, s0, 1
+		s_add_i32 s1, s1, s0
+		s_cmp_ge_u32 s1, 0x80000000
+		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.if_else_0
+.Lwmma_f16_matmul_tiled.loop_head_1:
+		s_sleep 1
+		ds_read_b32 v9, v1
+		s_waitcnt lgkmcnt(0)
+		v_readfirstlane_b32 s1, v9
+		s_add_i32 s1, s1, s0
 		s_cmp_ge_u32 s1, 0x80000000
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_1
 .Lwmma_f16_matmul_tiled.loop_exit_1:
+		s_branch .Lwmma_f16_matmul_tiled.if_end_0
+.Lwmma_f16_matmul_tiled.if_else_0:
+.Lwmma_f16_matmul_tiled.if_end_0:
 		s_mov_b64 exec, s[2:3]
 		v_add_u32_e32 v1, 0x10000, v8
 		v_add3_u32 v1, v1, v11, v0

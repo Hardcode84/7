@@ -510,6 +510,7 @@ private:
   unsigned sLoadB256() const { return opcodes.sLoadB256; }
   unsigned sWaitcnt() const { return opcodes.sWaitcnt; }
   unsigned sNop() const { return opcodes.sNop; }
+  unsigned sSleep() const { return opcodes.sSleep; }
   unsigned sSetprio() const { return opcodes.sSetprio; }
   unsigned sBarrier() const { return opcodes.sBarrier; }
   unsigned sEndpgm() const { return opcodes.sEndpgm; }
@@ -3094,6 +3095,8 @@ private:
     }
     if (isa<waveamdmachine::SNopOp>(op))
       return emitMCValues(sNop(), op.getOperands());
+    if (isa<waveamdmachine::SSleepOp>(op))
+      return emitMCValues(sSleep(), op.getOperands());
     if (isa<waveamdmachine::SSetprioOp>(op))
       return emitMCValues(sSetprio(), op.getOperands());
     if (isa<waveamdmachine::SDelayAluOp>(op)) {

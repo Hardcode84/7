@@ -25,8 +25,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: [[TARGET:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[BASE]], [[COUNT]]
 // CHECK: [[POLL_ONE:%.*]] = waveamdmachine.s_mov_b64_imm 1
 // CHECK-NEXT: [[POLL_SAVE:%.*]], {{%.*}} = waveamdmachine.s_and_saveexec_b64 [[POLL_ONE]]
-// CHECK-NEXT: [[READY:%.*]] = waveamdmachine.uniform_loop carries([[ATOMIC]]
+// CHECK: [[FAST_SEEN:%.*]], [[FAST_POLL:%.*]] = waveamdmachine.ds_load_b32 {{%.*}} after [[ATOMIC]]
+// CHECK-NEXT: [[FAST_SEEN_SCALAR:%.*]] = waveamdmachine.v_readfirstlane_b32 [[FAST_SEEN]]
+// CHECK: [[FAST_DELTA:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[FAST_SEEN_SCALAR]]
+// CHECK-NEXT: [[FAST_HALF:%.*]] = waveamdmachine.imm 2147483648 :
+// CHECK-NEXT: [[FAST_CONT:%.*]] = waveamdmachine.s_cmp_ge_u32 [[FAST_DELTA]], [[FAST_HALF]]
+// CHECK-NEXT: [[READY:%.*]] = waveamdmachine.uniform_if [[FAST_CONT]] {
+// CHECK-NEXT: [[LOOP_READY:%.*]] = waveamdmachine.uniform_loop carries([[FAST_POLL]] : !waveamdmachine.mem.token) {
 // CHECK: ^bb0([[POLL_ARG:%.*]]: !waveamdmachine.mem.token):
+// CHECK-NEXT: [[SLEEP:%.*]] = waveamdmachine.imm 1 :
+// CHECK-NEXT: waveamdmachine.s_sleep [[SLEEP]]
 // CHECK: [[SEEN:%.*]], [[POLL:%.*]] = waveamdmachine.ds_load_b32 {{%.*}} after [[POLL_ARG]]
 // CHECK-NEXT: [[SEEN_SCALAR:%.*]] = waveamdmachine.v_readfirstlane_b32 [[SEEN]]
 // CHECK-NEXT: [[ALL_ONES:%.*]] = waveamdmachine.imm 4294967295 :
@@ -37,6 +45,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NEXT: [[HALF:%.*]] = waveamdmachine.imm 2147483648 :
 // CHECK-NEXT: [[CONT:%.*]] = waveamdmachine.s_cmp_ge_u32 [[DELTA]], [[HALF]]
 // CHECK-NEXT: waveamdmachine.continue_if [[CONT]] : !waveamdmachine.reg<scc, 1> carries([[POLL]]
+// CHECK: waveamdmachine.yield [[LOOP_READY]]
+// CHECK: } otherwise {
+// CHECK-NEXT: waveamdmachine.yield [[FAST_POLL]]
 // CHECK: waveamdmachine.s_mov_exec_b64 [[POLL_SAVE]]
 // CHECK-NEXT: waveamdmachine.token_join [[READY]]
 func.func @materialize_split_barrier()
