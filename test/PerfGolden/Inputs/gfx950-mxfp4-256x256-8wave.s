@@ -688,10 +688,10 @@ wmma_f16_matmul_tiled:
 		s_add_i32 s52, s52, 8
 		s_and_saveexec_b64 s[54:55], s[16:17]
 		ds_read_b32 v14, v17
-		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s53, v14
 		s_xor_b32 s52, s52, -1
 		s_add_i32 s52, s52, 1
+		s_waitcnt lgkmcnt(0)
+		v_readfirstlane_b32 s53, v14
 		s_add_i32 s53, s53, s52
 		s_cmp_ge_u32 s53, 0x80000000
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.if_else_0
@@ -1068,10 +1068,10 @@ wmma_f16_matmul_tiled:
 		s_add_i32 s0, s0, 8
 		s_and_saveexec_b64 s[2:3], s[16:17]
 		ds_read_b32 v8, v15
-		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s1, v8
 		s_xor_b32 s0, s0, -1
 		s_add_i32 s0, s0, 1
+		s_waitcnt lgkmcnt(0)
+		v_readfirstlane_b32 s1, v8
 		s_add_i32 s1, s1, s0
 		s_cmp_ge_u32 s1, 0x80000000
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.if_else_1

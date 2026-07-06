@@ -229,10 +229,10 @@ wmma_f16_matmul_tiled:
 		s_add_i32 s0, s0, 16
 		s_and_saveexec_b64 s[2:3], s[12:13]
 		ds_read_b32 v9, v1
-		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s1, v9
 		s_xor_b32 s0, s0, -1
 		s_add_i32 s0, s0, 1
+		s_waitcnt lgkmcnt(0)
+		v_readfirstlane_b32 s1, v9
 		s_add_i32 s1, s1, s0
 		s_cmp_ge_u32 s1, 0x80000000
 		s_cbranch_scc0 .Lwmma_f16_matmul_tiled.if_else_0

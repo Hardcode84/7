@@ -539,22 +539,32 @@ static LogicalResult materializeArrive(OpBuilder &builder,
   return success();
 }
 
-static BarrierPoll materializePoll(OpBuilder &builder, Location loc,
-                                   MachineTypes types, Value addr, Value target,
-                                   Value dependency) {
-  waveamdmachine::DsLoadB32Op seen = waveamdmachine::DsLoadB32Op::create(
-      builder, loc, types.vgpr1, types.token, addr, dependency, 0);
-  Value seenScalar = waveamdmachine::VReadfirstlaneB32Op::create(
-                         builder, loc, types.sgpr1, seen.getResult())
-                         .getResult();
+static waveamdmachine::DsLoadB32Op
+materializePollLoad(OpBuilder &builder, Location loc, MachineTypes types,
+                    Value addr, Value dependency) {
+  return waveamdmachine::DsLoadB32Op::create(builder, loc, types.vgpr1,
+                                             types.token, addr, dependency, 0);
+}
+
+static Value materializeNegTarget(OpBuilder &builder, Location loc,
+                                  MachineTypes types, Value target) {
   Value notTarget = waveamdmachine::SXorB32Op::create(
                         builder, loc, types.sgpr1, types.scc, target,
                         makeImm(builder, loc, types, 0xffffffffu))
                         .getResult();
-  Value negTarget = waveamdmachine::SAddI32Op::create(
-                        builder, loc, types.sgpr1, types.scc, notTarget,
-                        makeImm(builder, loc, types, 1))
-                        .getResult();
+  return waveamdmachine::SAddI32Op::create(builder, loc, types.sgpr1, types.scc,
+                                           notTarget,
+                                           makeImm(builder, loc, types, 1))
+      .getResult();
+}
+
+static BarrierPoll finishPoll(OpBuilder &builder, Location loc,
+                              MachineTypes types,
+                              waveamdmachine::DsLoadB32Op seen,
+                              Value negTarget) {
+  Value seenScalar = waveamdmachine::VReadfirstlaneB32Op::create(
+                         builder, loc, types.sgpr1, seen.getResult())
+                         .getResult();
   Value delta = waveamdmachine::SAddI32Op::create(
                     builder, loc, types.sgpr1, types.scc, seenScalar, negTarget)
                     .getResult();
@@ -571,8 +581,10 @@ static Value materializePollLoop(OpBuilder &builder, Location loc,
                                  unsigned wavefrontSize) {
   Value savedExec = enterOneLanePerWave(builder, loc, types, wavefrontSize);
   Value addr = makeBarrierAddress(builder, loc, types, slot);
-  BarrierPoll firstPoll =
-      materializePoll(builder, loc, types, addr, target, arrivalToken);
+  waveamdmachine::DsLoadB32Op firstSeen =
+      materializePollLoad(builder, loc, types, addr, arrivalToken);
+  Value negTarget = materializeNegTarget(builder, loc, types, target);
+  BarrierPoll firstPoll = finishPoll(builder, loc, types, firstSeen, negTarget);
 
   waveamdmachine::UniformIfOp slowPath = waveamdmachine::UniformIfOp::create(
       builder, loc, TypeRange{types.token}, firstPoll.cont);
@@ -589,8 +601,9 @@ static Value materializePollLoop(OpBuilder &builder, Location loc,
 
   waveamdmachine::SSleepOp::create(
       builder, loc, makeImm(builder, loc, types, kBarrierPollSleep));
-  BarrierPoll loopPoll =
-      materializePoll(builder, loc, types, addr, target, body->getArgument(0));
+  waveamdmachine::DsLoadB32Op loopSeen =
+      materializePollLoad(builder, loc, types, addr, body->getArgument(0));
+  BarrierPoll loopPoll = finishPoll(builder, loc, types, loopSeen, negTarget);
   waveamdmachine::ContinueIfOp::create(builder, loc, loopPoll.cont,
                                        ValueRange{loopPoll.token});
   builder.setInsertionPointAfter(loop);
