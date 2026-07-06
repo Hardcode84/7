@@ -1921,6 +1921,8 @@ static bool isCmpAndTree(sym::PredHandle pred) {
 
 static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
                                ArrayRef<sym::PredHandle> assumptions) {
+  if (llvm::is_contained(assumptions, pred))
+    return true;
   sym::PredView view(pred);
   if (view.getKind() == sym::PredKind::And) {
     for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
