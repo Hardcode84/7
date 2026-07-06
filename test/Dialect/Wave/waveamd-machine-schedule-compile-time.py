@@ -200,7 +200,7 @@ def main() -> int:
         "matmul_greedy_report",
         text,
         r"candidate func=wmma_f16_matmul_tiled region=1 name=greedy "
-        r".*operand_gaps=3 .*memory_token_gaps=0",
+        r".*operand_gaps=2 .*memory_token_gaps=0",
     )
 
     text = run_case(

@@ -155,6 +155,12 @@ struct GreedyStats {
   unsigned filledBarrierMemoryGaps = 0;
 };
 
+struct BarrierArriveWindowStats {
+  unsigned computeOps = 0;
+  unsigned memoryOps = 0;
+  unsigned otherOps = 0;
+};
+
 struct GreedyResult {
   SmallVector<unsigned, 16> order;
   SmallVector<unsigned, 8> pendingNodes;
@@ -551,19 +557,36 @@ static unsigned findFirstReadyByOriginal(const BitVector &ready) {
   return ready.size();
 }
 
-static unsigned findFirstReadyBarrierArrive(const BitVector &ready,
-                                            const GreedyRegion &region) {
-  for (unsigned index : llvm::seq(ready.size())) {
-    if (!ready.test(index))
-      continue;
-    if (isa<waveamdmachine::BarrierArriveOp>(region.ops[index]))
-      return index;
-  }
-  return ready.size();
+static bool isMatchingBarrierWait(waveamdmachine::BarrierArriveOp arrive,
+                                  waveamdmachine::BarrierWaitOp wait) {
+  return wait.getBarrier() == arrive.getBarrier() &&
+         wait.getTicket() == arrive.getTicket() &&
+         wait.getArrival() == arrive.getToken();
+}
+
+static bool hasMatchingBarrierWait(const GreedyRegion &region,
+                                   unsigned arriveIndex) {
+  auto arrive = cast<waveamdmachine::BarrierArriveOp>(region.ops[arriveIndex]);
+  for (unsigned index : llvm::seq<unsigned>(arriveIndex + 1, region.ops.size()))
+    if (auto wait = dyn_cast<waveamdmachine::BarrierWaitOp>(region.ops[index]))
+      if (isMatchingBarrierWait(arrive, wait))
+        return true;
+  return false;
 }
 
 static bool isBarrierOp(Operation *op) {
   return isa<waveamdmachine::BarrierWaitOp, waveamdmachine::SBarrierOp>(op);
+}
+
+static bool isSplitBarrierOp(Operation *op) {
+  return isa<waveamdmachine::BarrierArriveOp, waveamdmachine::BarrierWaitOp>(
+      op);
+}
+
+static bool isComputeWindowOp(waveamdmachine::FunctionalUnit fu) {
+  return fu == waveamdmachine::FunctionalUnit::VALU ||
+         fu == waveamdmachine::FunctionalUnit::MFMA_XDL ||
+         fu == waveamdmachine::FunctionalUnit::TRANS;
 }
 
 static void recordGapStats(Operation *op, const IssuePreview &preview,
@@ -726,6 +749,95 @@ static bool canUseStallFiller(const GreedyRegion &region,
       collectFillerMemoryKinds(region.ops[filler], origins);
   return !crossesSameMemoryProducer(region, scheduled, next, filler,
                                     fillerKinds);
+}
+
+static BarrierArriveWindowStats getBarrierArriveWindowStats(
+    const GreedyRegion &region, const BitVector &scheduled, unsigned next,
+    unsigned arrive, const waveamdmachine::ArchData &arch) {
+  BarrierArriveWindowStats stats;
+  for (unsigned index : llvm::seq(next, arrive)) {
+    if (scheduled.test(index) || isSplitBarrierOp(region.ops[index]))
+      continue;
+    waveamdmachine::SchedClass cls =
+        waveamdmachine::classifyOp(region.ops[index]);
+    if (cls == waveamdmachine::SchedClass::NoInst)
+      continue;
+    MemoryKind memoryKind =
+        waveamdmachine::getMemoryCounterKind(region.ops[index]);
+    if (memoryKind != MemoryKind::None) {
+      ++stats.memoryOps;
+      continue;
+    }
+    if (isComputeWindowOp(waveamdmachine::funit(arch, cls)))
+      ++stats.computeOps;
+    else
+      ++stats.otherOps;
+  }
+  return stats;
+}
+
+static std::optional<unsigned> getBarrierArrivePullScore(
+    const GreedyRegion &region, const BitVector &scheduled, unsigned next,
+    unsigned arrive, const waveamdmachine::ArchData &arch) {
+  if (arrive <= next || !hasMatchingBarrierWait(region, arrive))
+    return std::nullopt;
+
+  MemoryKindSet arriveKinds;
+  appendMemoryKind(arriveKinds,
+                   waveamdmachine::getMemoryCounterKind(region.ops[arrive]));
+  if (crossesSameMemoryProducer(region, scheduled, next, arrive, arriveKinds))
+    return std::nullopt;
+
+  BarrierArriveWindowStats stats =
+      getBarrierArriveWindowStats(region, scheduled, next, arrive, arch);
+  if (stats.computeOps != 0 && stats.memoryOps != 0)
+    return std::nullopt;
+  if (stats.computeOps >= 16)
+    return stats.computeOps * 4 + stats.otherOps;
+  if (stats.computeOps == 0 && stats.memoryOps >= 4)
+    return stats.memoryOps * 4 + stats.otherOps;
+  return std::nullopt;
+}
+
+static unsigned
+findBestReadyBarrierArrive(const BitVector &ready, const GreedyRegion &region,
+                           const BitVector &scheduled,
+                           const waveamdmachine::ArchData &arch) {
+  unsigned next = findFirstUnscheduled(scheduled);
+  unsigned best = region.ops.size();
+  unsigned bestScore = 0;
+  for (unsigned index : llvm::seq(ready.size())) {
+    if (!ready.test(index) ||
+        !isa<waveamdmachine::BarrierArriveOp>(region.ops[index]))
+      continue;
+    std::optional<unsigned> score =
+        getBarrierArrivePullScore(region, scheduled, next, index, arch);
+    if (!score || *score <= bestScore)
+      continue;
+    best = index;
+    bestScore = *score;
+  }
+  return best;
+}
+
+static Operation *getLastRealScheduledOp(const GreedyRegion &region,
+                                         ArrayRef<unsigned> order) {
+  for (unsigned index : llvm::reverse(order))
+    if (waveamdmachine::classifyOp(region.ops[index]) !=
+        waveamdmachine::SchedClass::NoInst)
+      return region.ops[index];
+  return nullptr;
+}
+
+static bool followsAdjacentBarrierArrive(const GreedyRegion &region,
+                                         ArrayRef<unsigned> order,
+                                         unsigned waitIndex) {
+  auto wait = dyn_cast<waveamdmachine::BarrierWaitOp>(region.ops[waitIndex]);
+  if (!wait)
+    return false;
+  auto arrive = dyn_cast_or_null<waveamdmachine::BarrierArriveOp>(
+      getLastRealScheduledOp(region, order));
+  return arrive && isMatchingBarrierWait(arrive, wait);
 }
 
 static FillableStall getFillableStall(const IssuePreview &preview) {
@@ -992,7 +1104,7 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                 const waveamdmachine::EventSimConfig &config, IssueState &state,
                 BitVector &ready, BitVector &scheduled,
                 SmallVectorImpl<unsigned> &pending, GreedyResult &result,
-                const ValueOriginMap &origins) {
+                const ValueOriginMap &origins, bool &usedBarrierArriveWindow) {
   if (failed(drainReadyNoInsts(region, graph, arch, config, state, ready,
                                scheduled, pending, result.order)))
     return failure();
@@ -1003,12 +1115,22 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
     return GreedyStepStatus::Blocked;
   }
 
-  unsigned eagerArrive = findFirstReadyBarrierArrive(ready, region);
-  if (eagerArrive != region.ops.size())
+  unsigned eagerArrive =
+      usedBarrierArriveWindow
+          ? region.ops.size()
+          : findBestReadyBarrierArrive(ready, region, scheduled, arch);
+  if (eagerArrive != region.ops.size()) {
+    usedBarrierArriveWindow = true;
     return scheduleReadyByIndex(eagerArrive, region, graph, arch, config, state,
                                 ready, scheduled, pending, result.order);
+  }
 
   unsigned next = findFirstUnscheduled(scheduled);
+  if (ready.test(next) &&
+      followsAdjacentBarrierArrive(region, result.order, next))
+    return scheduleReadyByIndex(next, region, graph, arch, config, state, ready,
+                                scheduled, pending, result.order);
+
   if (!ready.test(next))
     return scheduleFirstReadyByOriginal(region, graph, arch, config, state,
                                         ready, scheduled, pending,
@@ -1031,10 +1153,11 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
       ready.set(index);
 
   IssueState state(arch, buildInstructionConfig(arch, config));
+  bool usedBarrierArriveWindow = false;
   while (result.order.size() != region.ops.size()) {
     FailureOr<GreedyStepStatus> step =
         buildGreedyStep(region, graph, arch, config, state, ready, scheduled,
-                        pending, result, origins);
+                        pending, result, origins, usedBarrierArriveWindow);
     if (failed(step))
       return failGreedyModel(result);
     if (*step == GreedyStepStatus::Done)

@@ -211,7 +211,7 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @split_barrier_arrive_eager_wait_fill(
+func.func @split_barrier_arrive_small_window_keep(
     %addr_base: !waveamdmachine.reg<vgpr, 1>,
     %addr_off: !waveamdmachine.reg<vgpr, 1>,
     %value: !waveamdmachine.reg<vgpr, 1>,
@@ -245,22 +245,105 @@ func.func @split_barrier_arrive_eager_wait_fill(
 }
 }
 
-// IR-LABEL: func.func @split_barrier_arrive_eager_wait_fill
+// IR-LABEL: func.func @split_barrier_arrive_small_window_keep
 // IR: [[STATE:%.*]] = waveamdmachine.barrier_init
 // IR-NEXT: [[ROOT:%.*]] = waveamdmachine.token
 // IR-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
 // IR-NEXT: [[STORED:%.*]] = waveamdmachine.ds_store_b32 [[ADDR]]{{.*}} after [[ROOT]]
-// IR-NEXT: [[TICKET:%.*]], [[ARRIVED:%.*]] = waveamdmachine.barrier_arrive [[STATE]] after [[STORED]]
 // IR-NEXT: waveamdmachine.s_add_i32
-// IR-NEXT: waveamdmachine.s_lshl_b32
+// IR-NEXT: [[TICKET:%.*]], [[ARRIVED:%.*]] = waveamdmachine.barrier_arrive [[STATE]] after [[STORED]]
 // IR-NEXT: {{%.*}} = waveamdmachine.barrier_wait [[STATE]], [[TICKET]] after [[ARRIVED]]
-// DIAG: waveamd-machine-schedule region func=split_barrier_arrive_eager_wait_fill
-// DIAG-SAME: action=apply reason=greedy
-// DIAG-SAME: filled_gaps=1
-// CLASS: op func=split_barrier_arrive_eager_wait_fill{{.*}}name=waveamdmachine.barrier_arrive
+// IR-NEXT: waveamdmachine.s_lshl_b32
+// DIAG: waveamd-machine-schedule region func=split_barrier_arrive_small_window_keep
+// DIAG-SAME: action=keep reason=same_order
+// CLASS: op func=split_barrier_arrive_small_window_keep{{.*}}name=waveamdmachine.barrier_arrive
 // CLASS-SAME: class=WriteLDS fu=LGKM
-// CLASS: op func=split_barrier_arrive_eager_wait_fill{{.*}}name=waveamdmachine.barrier_wait
+// CLASS: op func=split_barrier_arrive_small_window_keep{{.*}}name=waveamdmachine.barrier_wait
 // CLASS-SAME: class=WriteBarrier fu=BRANCH
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @split_barrier_arrive_compute_window(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %value: !waveamdmachine.reg<vgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>) {
+  %state = waveamdmachine.barrier_init : !waveamdmachine.barrier
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %stored = waveamdmachine.ds_store_b32 %addr, %value after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %v0 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v4 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v5 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v6 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v7 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v8 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v9 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v10 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v11 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v12 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v13 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v14 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v15 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %ticket, %arrived = waveamdmachine.barrier_arrive %state after %stored
+      : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %ready = waveamdmachine.barrier_wait %state, %ticket after %arrived
+      : (!waveamdmachine.barrier, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @split_barrier_arrive_compute_window
+// IR: [[STATE:%.*]] = waveamdmachine.barrier_init
+// IR-NEXT: [[ROOT:%.*]] = waveamdmachine.token
+// IR-NEXT: [[STORED:%.*]] = waveamdmachine.ds_store_b32{{.*}} after [[ROOT]]
+// IR-NEXT: [[TICKET:%.*]], [[ARRIVED:%.*]] = waveamdmachine.barrier_arrive [[STATE]] after [[STORED]]
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR: waveamdmachine.v_add_u32
+// IR: {{%.*}} = waveamdmachine.barrier_wait [[STATE]], [[TICKET]] after [[ARRIVED]]
+// DIAG: waveamd-machine-schedule region func=split_barrier_arrive_compute_window
+// DIAG-SAME: action=apply reason=greedy
 
 // -----
 

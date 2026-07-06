@@ -114,8 +114,9 @@ static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize) {
 
   SmallVector<waveamdmachine::SBarrierOp> barriers;
   func.walk([&](waveamdmachine::SBarrierOp barrier) {
-    if (isEligibleBarrier(barrier))
-      barriers.push_back(barrier);
+    if (!isEligibleBarrier(barrier))
+      return;
+    barriers.push_back(barrier);
   });
   if (barriers.empty())
     return success();

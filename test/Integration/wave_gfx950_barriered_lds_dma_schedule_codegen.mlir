@@ -6,10 +6,8 @@
 // RUN:   --variants=scheduled --skip-hw --enable-split-barriers --emit-asm=%t.s
 // RUN: FileCheck %s --input-file=%t.s --check-prefix=F16
 //
-// F16-LABEL: .Lwmma_f16_matmul_tiled.loop_head_1:
+// F16-LABEL: .Lwmma_f16_matmul_tiled.loop_exit_0:
 // F16: ds_add_rtn_u32
-// F16: buffer_load_dwordx4 {{.*}} lds
-// F16: buffer_load_dwordx4 {{.*}} lds
 // F16: v_mfma_f32_16x16x32_f16
 // F16: .Lwmma_f16_matmul_tiled.loop_head_2:
 // F16: ds_read_b32

@@ -392,6 +392,68 @@ Takeaways:
   generation counters, full-EXEC lane election, and memory-order proof. Treat
   it as a measurement tool unless the IR explicitly reserves the counter.
 
+Split-barrier scheduler experiment, July 6 2026:
+
+Branch state: split barriers disabled by default. Perf below used the opt-in
+`--enable-split-barriers` flag, `M=N=4096`, `K=32768`, `--iters 200`,
+`--warmup 25`, `--repeats 9`, `--no-check`, and ROCm tools from the active
+conda env.
+
+Baseline with split barriers disabled:
+
+| Kernel | us | TFLOP/s |
+|---|---:|---:|
+| MXFP4 4-wave | 305.832 | 3595.15 |
+| MXFP4 8-wave | 347.643 | 3162.76 |
+
+ATT baseline hot repeated barriers:
+
+| Kernel | Ordinal | PC | Hits | Avg stall | Shape |
+|---|---:|---|---:|---:|---|
+| 8-wave | 1 | `0x261c` | 1008 | 101.183 | loop-head barrier after `vmcnt(8) lgkmcnt(0)` |
+| 8-wave | 2 | `0x287c` | 1008 | 140.992 | scale-read/MFMA barrier before next DMA train |
+| 8-wave | 3 | `0x2ef8` | 1008 | 296.778 | loop-tail barrier before `ds_read_b128` |
+| 4-wave | 3 | `0x30e0` | 504 | 269.222 | loop-tail barrier before `ds_read_b128` |
+
+Manual selective split sweep:
+
+| Kernel | Split ordinals | us | TFLOP/s |
+|---|---|---:|---:|
+| 8-wave | `1` | 300.146 | 3663.26 |
+| 8-wave | `2` | 278.908 | 3942.20 |
+| 8-wave | `3` | 297.559 | 3695.11 |
+| 8-wave | `1,3` | 307.331 | 3577.61 |
+| 8-wave | `2,3` | 289.354 | 3799.88 |
+| 8-wave | `1,2,3` | 299.613 | 3669.77 |
+| 4-wave | `1` | 272.093 | 4040.94 |
+| 4-wave | `2` | 272.608 | 4033.31 |
+| 4-wave | `3` | 270.087 | 4070.95 |
+| 4-wave | `1,3` | 273.513 | 4019.96 |
+| 4-wave | `2,3` | 273.943 | 4013.65 |
+| 4-wave | `1,2,3` | killed | n/a |
+
+Key result: largest ATT barrier is not automatically the best split target.
+8-wave ordinal 3 has the largest standalone stall, but ordinal 2 wins because
+its arrive is hidden under a pure MFMA window. Stacking split barriers gives
+back overhead and can wedge.
+
+Final scheduler rule:
+
+- Pull `barrier_arrive` only over a real independent window.
+- Reject if the pull crosses same-counter memory producers.
+- Accept either a compute-only window (`>=16` VALU/MFMA/trans ops) or a
+  memory-only window (`>=4` memory ops). Reject mixed compute+memory windows.
+- Keep at most one eager arrive window per straight-line greedy region.
+- If arrive was not pulled, schedule its matching wait immediately; later
+  cleanup folds the adjacent pair back to `s_barrier`.
+
+Final focused sweep with generic scheduler rule:
+
+| Kernel | us | TFLOP/s | Cycles |
+|---|---:|---:|---:|
+| MXFP4 4-wave | 270.299 | 4067.76 | 594657 |
+| MXFP4 8-wave | 276.287 | 3979.60 | 607832 |
+
 ## `gfx950-mxfp4-256x256-4wave`
 
 Lower-occupancy MXFP4 GEMM profile for 4096x4096xK:
