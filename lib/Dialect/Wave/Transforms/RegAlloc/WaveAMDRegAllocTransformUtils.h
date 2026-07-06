@@ -120,8 +120,21 @@ bool isStateValueLiveAt(Value value, unsigned position,
 int64_t getRematReliefLoopCostScale(Operation *op);
 int64_t getParentLoopCostScale(Operation *op);
 int64_t getMemoryBridgeCostScale(Operation *anchor, bool beforeAnchor);
+waveamdmachine::KilledOperandReuseOpInterface
+getKilledOperandReuseCandidate(Operation *op);
+bool isKilledOperandReuseCandidate(Operation *op);
 bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand);
+bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand,
+                                    const llvm::AMDGPU::IsaVersion &isa);
+bool canReuseKilledOperandForResult(
+    waveamdmachine::KilledOperandReuseOpInterface reuse, OpOperand &operand,
+    const llvm::AMDGPU::IsaVersion &isa);
 bool requiresKilledOperandReuseForResult(Operation *op, OpOperand &operand);
+bool requiresKilledOperandReuseForResult(Operation *op, OpOperand &operand,
+                                         const llvm::AMDGPU::IsaVersion &isa);
+bool requiresKilledOperandReuseForResult(
+    waveamdmachine::KilledOperandReuseOpInterface reuse, OpOperand &operand,
+    const llvm::AMDGPU::IsaVersion &isa);
 
 std::optional<unsigned> getUnsignedIntegerAttr(Operation *op, StringRef name);
 Attribute findAncestorAttr(Operation *op, StringRef name);

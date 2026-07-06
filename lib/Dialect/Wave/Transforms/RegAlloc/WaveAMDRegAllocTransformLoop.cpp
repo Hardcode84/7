@@ -340,14 +340,37 @@ private:
     return tracked;
   }
 
+  const llvm::AMDGPU::IsaVersion *getKilledOperandReuseIsa() {
+    if (killedOperandReuseIsa)
+      return &*killedOperandReuseIsa;
+    if (killedOperandReuseIsaFailed)
+      return nullptr;
+    FailureOr<llvm::AMDGPU::IsaVersion> isa =
+        waveamdmachine::getAMDGPUTargetIsaVersion(
+            func, "waveamd regalloc required killed operand reuse");
+    if (failed(isa)) {
+      killedOperandReuseIsaFailed = true;
+      return nullptr;
+    }
+    killedOperandReuseIsa = *isa;
+    return &*killedOperandReuseIsa;
+  }
+
   void collectRequiredKilledOperandAliases(Operation *op) {
     Value result = getSingleTrackedResult(op);
     if (!result)
       return;
+    waveamdmachine::KilledOperandReuseOpInterface reuse =
+        wave::regalloc_detail::getKilledOperandReuseCandidate(op);
+    if (!reuse)
+      return;
+    const llvm::AMDGPU::IsaVersion *targetIsa = getKilledOperandReuseIsa();
+    if (!targetIsa)
+      return;
     unsigned position = positions.lookup(op);
     for (OpOperand &operand : op->getOpOperands()) {
-      if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(op,
-                                                                      operand))
+      if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(
+              reuse, operand, *targetIsa))
         continue;
       if (!valueRangeEndsAt(operand.get(), position))
         continue;
@@ -662,9 +685,11 @@ private:
   DenseMap<Value, unsigned> externalLoopUseEnds;
   DenseMap<Operation *, unsigned> positions;
   DenseMap<Value, unsigned> valueIds;
+  std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
   func::FuncOp func;
   Builder &builder;
   bool coalesceMFMAAccResult = true;
+  bool killedOperandReuseIsaFailed = false;
 };
 
 struct RegAllocScanFailure {

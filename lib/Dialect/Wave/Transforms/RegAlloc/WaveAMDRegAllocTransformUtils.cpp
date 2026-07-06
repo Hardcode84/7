@@ -101,34 +101,65 @@ static bool hasSingleTrackedGPRResult(Operation *op) {
   return found;
 }
 
-bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
+waveamdmachine::KilledOperandReuseOpInterface
+getKilledOperandReuseCandidate(Operation *op) {
   if (!op || op->getNumRegions() != 0)
-    return false;
+    return {};
   if (!hasSingleTrackedGPRResult(op))
-    return false;
-  waveamdmachine::KilledOperandReuseOpInterface reuse =
-      dyn_cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
-  if (!reuse)
+    return {};
+  return dyn_cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
+}
+
+bool isKilledOperandReuseCandidate(Operation *op) {
+  return static_cast<bool>(getKilledOperandReuseCandidate(op));
+}
+
+bool canReuseKilledOperandForResult(
+    waveamdmachine::KilledOperandReuseOpInterface reuse, OpOperand &operand,
+    const llvm::AMDGPU::IsaVersion &isa) {
+  return reuse && reuse.canReuseKilledOperandForResult(isa, operand);
+}
+
+bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand,
+                                    const llvm::AMDGPU::IsaVersion &isa) {
+  return canReuseKilledOperandForResult(getKilledOperandReuseCandidate(op),
+                                        operand, isa);
+}
+
+bool canReuseKilledOperandForResult(Operation *op, OpOperand &operand) {
+  if (!isKilledOperandReuseCandidate(op))
     return false;
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       waveamdmachine::getAMDGPUTargetIsaVersion(
           op, "waveamd regalloc killed operand reuse");
   if (failed(isa))
     return false;
-  return reuse.canReuseKilledOperandForResult(*isa, operand);
+  return canReuseKilledOperandForResult(op, operand, *isa);
+}
+
+bool requiresKilledOperandReuseForResult(Operation *op, OpOperand &operand,
+                                         const llvm::AMDGPU::IsaVersion &isa) {
+  return requiresKilledOperandReuseForResult(getKilledOperandReuseCandidate(op),
+                                             operand, isa);
+}
+
+bool requiresKilledOperandReuseForResult(
+    waveamdmachine::KilledOperandReuseOpInterface reuse, OpOperand &operand,
+    const llvm::AMDGPU::IsaVersion &isa) {
+  if (!canReuseKilledOperandForResult(reuse, operand, isa))
+    return false;
+  return reuse.requiresKilledOperandReuseForResult(isa, operand);
 }
 
 bool requiresKilledOperandReuseForResult(Operation *op, OpOperand &operand) {
-  if (!canReuseKilledOperandForResult(op, operand))
+  if (!isKilledOperandReuseCandidate(op))
     return false;
-  waveamdmachine::KilledOperandReuseOpInterface reuse =
-      cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       waveamdmachine::getAMDGPUTargetIsaVersion(
           op, "waveamd regalloc required killed operand reuse");
   if (failed(isa))
     return false;
-  return reuse.requiresKilledOperandReuseForResult(*isa, operand);
+  return requiresKilledOperandReuseForResult(op, operand, *isa);
 }
 
 static Block *getBlockAt(Region &region, int64_t index) {

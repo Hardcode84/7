@@ -330,17 +330,55 @@ static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
   return success();
 }
 
+struct KilledOperandReuseIsaCache {
+  KilledOperandReuseIsaCache(func::FuncOp func) : func(func) {}
+
+  const llvm::AMDGPU::IsaVersion *get() {
+    if (isa)
+      return &*isa;
+    if (failed)
+      return nullptr;
+    FailureOr<llvm::AMDGPU::IsaVersion> parsed =
+        waveamdmachine::getAMDGPUTargetIsaVersion(
+            func, "waveamd regalloc required killed operand reuse");
+    if (mlir::failed(parsed)) {
+      failed = true;
+      return nullptr;
+    }
+    isa = *parsed;
+    return &*isa;
+  }
+
+  std::optional<llvm::AMDGPU::IsaVersion> isa;
+  func::FuncOp func;
+  bool failed = false;
+};
+
+static void collectRequiredKilledOperandInputCopies(
+    Operation *op, KilledOperandReuseIsaCache &isaCache,
+    SmallVectorImpl<std::pair<Operation *, unsigned>> &operands) {
+  waveamdmachine::KilledOperandReuseOpInterface reuse =
+      wave::regalloc_detail::getKilledOperandReuseCandidate(op);
+  if (!reuse)
+    return;
+  const llvm::AMDGPU::IsaVersion *targetIsa = isaCache.get();
+  if (!targetIsa)
+    return;
+  for (OpOperand &operand : op->getOpOperands()) {
+    if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(
+            reuse, operand, *targetIsa))
+      continue;
+    if (llvm::hasSingleElement(operand.get().getUses()))
+      continue;
+    operands.push_back({op, operand.getOperandNumber()});
+  }
+}
+
 static LogicalResult splitRequiredKilledOperandInputs(func::FuncOp func) {
   SmallVector<std::pair<Operation *, unsigned>> operands;
+  KilledOperandReuseIsaCache isaCache(func);
   func.walk([&](Operation *op) {
-    for (OpOperand &operand : op->getOpOperands()) {
-      if (!wave::regalloc_detail::requiresKilledOperandReuseForResult(op,
-                                                                      operand))
-        continue;
-      if (llvm::hasSingleElement(operand.get().getUses()))
-        continue;
-      operands.push_back({op, operand.getOperandNumber()});
-    }
+    collectRequiredKilledOperandInputCopies(op, isaCache, operands);
   });
 
   OpBuilder builder(func.getContext());
