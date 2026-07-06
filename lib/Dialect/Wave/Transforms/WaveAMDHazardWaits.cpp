@@ -1033,6 +1033,12 @@ static bool needsValuMitigation(Operation *op, const HazardState &state) {
 
 using HazardWaitMap = DenseMap<Operation *, unsigned>;
 
+struct BlockHazardTrace {
+  HazardWaitMap waits;
+  DenseMap<Operation *, HazardState> before;
+  unsigned totalWaits = 0;
+};
+
 static unsigned getRequiredMitigation(Operation *op, HazardState &state,
                                       const HazardConfig &cfg) {
   unsigned count = 0;
@@ -1049,17 +1055,20 @@ static unsigned getRequiredMitigation(Operation *op, HazardState &state,
   return count;
 }
 
-static HazardWaitMap computeBlockHazardWaits(Block &block,
-                                             const HazardConfig &cfg) {
+static BlockHazardTrace computeBlockHazardTrace(Block &block,
+                                                const HazardConfig &cfg) {
   HazardState state;
-  HazardWaitMap waits;
+  BlockHazardTrace trace;
   for (Operation &op : block) {
+    trace.before.try_emplace(&op, state);
     unsigned wait = getRequiredMitigation(&op, state, cfg);
-    if (wait)
-      waits[&op] = wait;
+    if (wait) {
+      trace.waits[&op] = wait;
+      trace.totalWaits += wait;
+    }
     transferHazards(&op, state, cfg);
   }
-  return waits;
+  return trace;
 }
 
 static bool touchesBlockedSingletonReg(Operation *op) {
@@ -1118,21 +1127,6 @@ static bool resultsRemainAvailableBefore(Operation *candidate,
   return true;
 }
 
-static bool hazardsDoNotWorsen(const HazardWaitMap &oldWaits,
-                               const HazardWaitMap &newWaits) {
-  for (auto [op, wait] : newWaits)
-    if (wait > oldWaits.lookup(op))
-      return false;
-  return true;
-}
-
-static unsigned sumHazardWaits(const HazardWaitMap &waits) {
-  unsigned total = 0;
-  for (const auto &entry : waits)
-    total += entry.second;
-  return total;
-}
-
 static bool hasCloserHazard(Operation *candidate, Operation *target,
                             const HazardWaitMap &waits) {
   if (target->isBeforeInBlock(candidate)) {
@@ -1160,69 +1154,136 @@ static void restoreCandidatePosition(Operation *candidate,
     candidate->moveBefore(block, block->end());
 }
 
-static bool tryMoveRepairCandidate(Operation *candidate, Operation *target,
-                                   const HazardWaitMap &oldWaits,
-                                   const HazardConfig &cfg) {
+static bool movedHazardsAccepted(Operation *startOp, HazardState state,
+                                 Operation *candidate, Operation *target,
+                                 unsigned oldTargetWait,
+                                 const BlockHazardTrace &oldTrace,
+                                 const HazardConfig &cfg) {
+  bool targetImproved = false;
+  bool candidateClear = false;
+  for (Operation *op = startOp; op; op = op->getNextNode()) {
+    unsigned wait = getRequiredMitigation(op, state, cfg);
+    if (wait > oldTrace.waits.lookup(op))
+      return false;
+    if (op == target)
+      targetImproved = wait < oldTargetWait;
+    if (op == candidate)
+      candidateClear = wait == 0;
+    transferHazards(op, state, cfg);
+  }
+  return targetImproved && candidateClear;
+}
+
+static bool canTryMoveRepairCandidate(Operation *candidate, Operation *target,
+                                      const BlockHazardTrace &oldTrace) {
   if (candidate->getBlock() != target->getBlock())
     return false;
   if (candidate == target)
     return false;
-  if (hasCloserHazard(candidate, target, oldWaits))
+  if (hasCloserHazard(candidate, target, oldTrace.waits))
     return false;
   if (!operandsAvailableBefore(candidate, target))
     return false;
   if (!resultsRemainAvailableBefore(candidate, target))
     return false;
+  return true;
+}
 
-  Block *block = candidate->getBlock();
+static Operation *getMovedRepairStart(Operation *candidate,
+                                      Operation *restoreBefore,
+                                      Operation *target,
+                                      bool candidateAfterTarget) {
+  if (candidateAfterTarget || restoreBefore == target)
+    return candidate;
+  return restoreBefore;
+}
+
+static bool tryMoveRepairCandidate(Operation *candidate, Operation *target,
+                                   const BlockHazardTrace &oldTrace,
+                                   const HazardConfig &cfg) {
+  if (!canTryMoveRepairCandidate(candidate, target, oldTrace))
+    return false;
+
+  bool candidateAfterTarget = target->isBeforeInBlock(candidate);
+  auto beforeIt =
+      oldTrace.before.find(candidateAfterTarget ? target : candidate);
+  assert(beforeIt != oldTrace.before.end() && "missing hazard prefix state");
+  HazardState prefixState = beforeIt->second;
   Operation *restoreBefore = candidate->getNextNode();
   Operation *restoreAfter = candidate->getPrevNode();
-  unsigned oldTargetWait = oldWaits.lookup(target);
+  unsigned oldTargetWait = oldTrace.waits.lookup(target);
   candidate->moveBefore(target);
 
-  HazardWaitMap newWaits = computeBlockHazardWaits(*block, cfg);
-  bool accept = newWaits.lookup(target) < oldTargetWait &&
-                newWaits.lookup(candidate) == 0 &&
-                hazardsDoNotWorsen(oldWaits, newWaits);
+  Operation *startOp = getMovedRepairStart(candidate, restoreBefore, target,
+                                           candidateAfterTarget);
+  bool accept = movedHazardsAccepted(startOp, prefixState, candidate, target,
+                                     oldTargetWait, oldTrace, cfg);
   if (!accept)
-    restoreCandidatePosition(candidate, restoreBefore, restoreAfter, block);
+    restoreCandidatePosition(candidate, restoreBefore, restoreAfter,
+                             candidate->getBlock());
   return accept;
+}
+
+static void collectRepairBlockOps(Block &block,
+                                  SmallVectorImpl<Operation *> &candidates,
+                                  SmallVectorImpl<Operation *> &ops) {
+  for (Operation &op : block) {
+    if (isRepairCandidate(&op))
+      candidates.push_back(&op);
+    ops.push_back(&op);
+  }
+}
+
+struct RepairStepResult {
+  bool moved = false;
+  bool stop = false;
+};
+
+static RepairStepResult tryRepairHazardOp(Operation *op,
+                                          ArrayRef<Operation *> candidates,
+                                          const BlockHazardTrace &trace,
+                                          const HazardConfig &cfg,
+                                          unsigned &moves, unsigned maxMoves) {
+  if (!trace.waits.lookup(op))
+    return {};
+  for (Operation *candidate : candidates) {
+    if (!tryMoveRepairCandidate(candidate, op, trace, cfg))
+      continue;
+    if (++moves > maxMoves) {
+      op->getBlock()->getParentOp()->emitWarning(
+          "waveamd-hazard-repair did not converge");
+      return {/*moved=*/true, /*stop=*/true};
+    }
+    return {/*moved=*/true, /*stop=*/false};
+  }
+  return {};
 }
 
 static bool repairBlock(Block &block, const HazardConfig &cfg) {
   bool changed = false;
   unsigned moves = 0;
-  unsigned maxMoves = sumHazardWaits(computeBlockHazardWaits(block, cfg));
-  bool progress = true;
-  while (progress) {
-    progress = false;
+  BlockHazardTrace trace = computeBlockHazardTrace(block, cfg);
+  unsigned maxMoves = trace.totalWaits;
+  while (true) {
+    bool progress = false;
     SmallVector<Operation *, 16> candidates;
     SmallVector<Operation *, 16> ops;
-    for (Operation &op : block) {
-      if (isRepairCandidate(&op))
-        candidates.push_back(&op);
-      ops.push_back(&op);
-    }
+    collectRepairBlockOps(block, candidates, ops);
 
-    HazardWaitMap waits = computeBlockHazardWaits(block, cfg);
     for (Operation *op : ops) {
-      if (!waits.lookup(op))
+      RepairStepResult result =
+          tryRepairHazardOp(op, candidates, trace, cfg, moves, maxMoves);
+      if (!result.moved)
         continue;
-      for (Operation *candidate : candidates) {
-        if (!tryMoveRepairCandidate(candidate, op, waits, cfg))
-          continue;
-        changed = true;
-        progress = true;
-        if (++moves > maxMoves) {
-          block.getParentOp()->emitWarning(
-              "waveamd-hazard-repair did not converge");
-          return changed;
-        }
-        break;
-      }
-      if (progress)
-        break;
+      changed = true;
+      progress = true;
+      if (result.stop)
+        return changed;
+      break;
     }
+    if (!progress)
+      break;
+    trace = computeBlockHazardTrace(block, cfg);
   }
   return changed;
 }
