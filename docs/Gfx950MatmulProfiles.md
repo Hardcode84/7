@@ -396,15 +396,22 @@ Split-barrier scheduler experiment, July 6 2026:
 
 Branch state: split barriers disabled by default. Perf below used the opt-in
 `--enable-split-barriers` flag, `M=N=4096`, `K=32768`, `--iters 200`,
-`--warmup 25`, `--repeats 9`, `--no-check`, and ROCm tools from the active
+`--warmup 20`, `--repeats 3`, `--no-check`, and ROCm tools from the active
 conda env.
 
-Baseline with split barriers disabled:
+Back-to-back sweep, split barriers disabled:
 
 | Kernel | us | TFLOP/s |
 |---|---:|---:|
-| MXFP4 4-wave | 305.832 | 3595.15 |
-| MXFP4 8-wave | 347.643 | 3162.76 |
+| MXFP4 4-wave | 261.671 | 4201.89 |
+| MXFP4 8-wave | 290.426 | 3785.86 |
+
+Same sweep with `--enable-split-barriers`:
+
+| Kernel | us | TFLOP/s | TFLOP/s delta |
+|---|---:|---:|---:|
+| MXFP4 4-wave | 270.571 | 4063.67 | -3.29% |
+| MXFP4 8-wave | 277.646 | 3960.12 | +4.60% |
 
 ATT baseline hot repeated barriers:
 
@@ -434,8 +441,10 @@ Manual selective split sweep:
 
 Key result: largest ATT barrier is not automatically the best split target.
 8-wave ordinal 3 has the largest standalone stall, but ordinal 2 wins because
-its arrive is hidden under a pure MFMA window. Stacking split barriers gives
-back overhead and can wedge.
+its arrive is hidden under a pure MFMA window. The corrected disabled baseline
+changes the 4-wave conclusion: split barriers regress 4-wave and only help
+8-wave in this sweep. Stacking split barriers gives back overhead and can
+wedge.
 
 Final scheduler rule:
 
@@ -447,12 +456,18 @@ Final scheduler rule:
 - If arrive was not pulled, schedule its matching wait immediately; later
   cleanup folds the adjacent pair back to `s_barrier`.
 
-Final focused sweep with generic scheduler rule:
+Final focused A/B with generic scheduler rule:
 
-| Kernel | us | TFLOP/s | Cycles |
-|---|---:|---:|---:|
-| MXFP4 4-wave | 270.299 | 4067.76 | 594657 |
-| MXFP4 8-wave | 276.287 | 3979.60 | 607832 |
+| Kernel | Split barriers | us | TFLOP/s | Cycles |
+|---|---|---:|---:|---:|
+| MXFP4 4-wave | disabled | 261.671 | 4201.89 | 575676 |
+| MXFP4 4-wave | enabled | 270.571 | 4063.67 | 595257 |
+| MXFP4 8-wave | disabled | 290.426 | 3785.86 | 638937 |
+| MXFP4 8-wave | enabled | 277.646 | 3960.12 | 610821 |
+
+Implication: current generic rule is not a 4-wave win. Keep split barriers
+disabled by default; use this heuristic only as an 8-wave improvement candidate
+until 4-wave is gated or fixed by the scheduler model.
 
 ## `gfx950-mxfp4-256x256-4wave`
 
