@@ -1006,9 +1006,13 @@ public:
 
 private:
   struct ActiveAssignments {
+    using LaneAssignments = SmallVector<unsigned, 4>;
+    using ClassLaneAssignments = SmallVector<LaneAssignments, 64>;
+
     SmallVector<unsigned> ordered;
     SmallVector<unsigned> byEnd;
     std::array<SmallVector<unsigned>, kRegClassCount> byClass;
+    std::array<ClassLaneAssignments, kRegClassCount> byClassLane;
     BitVector live;
     DenseMap<unsigned, unsigned> bySet;
     unsigned stale = 0;
@@ -1031,7 +1035,14 @@ private:
       const wave::RegAllocTransformAssignment &assignment =
           assignments[assignmentIndex];
       ordered.push_back(assignmentIndex);
-      byClass[getRegClassIndex(assignment.regClass)].push_back(assignmentIndex);
+      unsigned classIndex = getRegClassIndex(assignment.regClass);
+      byClass[classIndex].push_back(assignmentIndex);
+      ClassLaneAssignments &lanes = byClassLane[classIndex];
+      unsigned end = assignment.base + assignment.width;
+      if (end > lanes.size())
+        lanes.resize(end);
+      for (unsigned lane : llvm::seq<unsigned>(assignment.base, end))
+        lanes[lane].push_back(assignmentIndex);
       if (assignmentIndex >= live.size())
         live.resize(assignmentIndex + 1, false);
       live.set(assignmentIndex);
@@ -1071,6 +1082,9 @@ private:
       eraseInactive(ordered, assignments);
       for (SmallVector<unsigned> &classAssignments : byClass)
         eraseInactive(classAssignments, assignments);
+      for (ClassLaneAssignments &classLanes : byClassLane)
+        for (LaneAssignments &laneAssignments : classLanes)
+          eraseInactive(laneAssignments, assignments);
       stale = 0;
     }
 
@@ -1119,6 +1133,30 @@ private:
           continue;
         if (predicate(assignments[assignmentIndex]))
           return true;
+      }
+      return false;
+    }
+
+    template <typename Predicate>
+    bool anyRegClassOverlappingRange(
+        waveamdmachine::RegClass regClass, unsigned base, unsigned width,
+        ArrayRef<wave::RegAllocTransformAssignment> assignments,
+        Predicate &&predicate) const {
+      const ClassLaneAssignments &lanes =
+          byClassLane[getRegClassIndex(regClass)];
+      if (base >= lanes.size())
+        return false;
+      unsigned end = std::min<unsigned>(base + width, lanes.size());
+      SmallVector<unsigned, 8> checked;
+      for (unsigned lane : llvm::seq<unsigned>(base, end)) {
+        for (unsigned assignmentIndex : lanes[lane]) {
+          if (!isLive(assignmentIndex) ||
+              llvm::is_contained(checked, assignmentIndex))
+            continue;
+          checked.push_back(assignmentIndex);
+          if (predicate(assignments[assignmentIndex]))
+            return true;
+        }
       }
       return false;
     }
@@ -1564,8 +1602,8 @@ private:
 
   bool conflictsWithActive(const wave::RegAllocTransformAliasSet &set,
                            unsigned base) {
-    return active.anyRegClass(
-        set.regClass, assignments,
+    return active.anyRegClassOverlappingRange(
+        set.regClass, base, set.width, assignments,
         [&](const wave::RegAllocTransformAssignment &assigned) {
           if (!assignedRangesOverlap(assigned, base, set.width) ||
               !activeAssignmentConflicts(set, assigned, base))
@@ -1576,8 +1614,8 @@ private:
 
   bool conflictsWithActiveIgnoring(const wave::RegAllocTransformAliasSet &set,
                                    unsigned base, unsigned ignoredSetId) {
-    return active.anyRegClass(
-        set.regClass, assignments,
+    return active.anyRegClassOverlappingRange(
+        set.regClass, base, set.width, assignments,
         [&](const wave::RegAllocTransformAssignment &assigned) {
           if (assigned.set == ignoredSetId)
             return false;
