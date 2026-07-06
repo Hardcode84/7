@@ -76,6 +76,7 @@ def matmul_base_cmd() -> list[str]:
         "--bn=2",
         "--variants=scheduled",
         "--skip-hw",
+        "--enable-split-barriers",
     ]
 
 

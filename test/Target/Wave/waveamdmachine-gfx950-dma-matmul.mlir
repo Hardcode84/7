@@ -13,17 +13,17 @@
 // RUN:   | FileCheck %s --check-prefix=ASMBUF
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-f16-256x256-16wave --m=1024 --n=512 --k=64 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=PROFILE256
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-f16-256x256-16wave --m=4096 --n=4096 --k=8192 --kernel-only --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-f16-256x256-16wave --m=4096 --n=4096 --k=8192 --kernel-only --enable-split-barriers --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=F16-PERF-ASM
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=256 --kernel-only 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=PROFILEMXFP4-4W
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=1024 --kernel-only --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-4wave --m=1024 --n=1024 --k=1024 --kernel-only --enable-split-barriers --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=MXFP4-4W-SCALE-ASM
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-8wave --m=1024 --n=1024 --k=768 --kernel-only 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=PROFILEMXFP4-DMA-OVERLAP
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-8wave --m=4096 --n=4096 --k=32768 --kernel-only --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-mxfp4-256x256-8wave --m=4096 --n=4096 --k=32768 --kernel-only --enable-split-barriers --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=MXFP4-PERF-ASM
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --kernel-profile=gfx950-sw-pipeline --m=128 --n=128 --k=192 --enable-split-barriers --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMPIPE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=32 --matrix-intrinsic=mfma_gfx950 --input-type=bf16 --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMBF16
@@ -201,7 +201,7 @@
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4: v_mfma_scale_f32_16x16x128_f8f6f4 v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{\[[0-9]+:[0-9]+\]}}, v{{[0-9]+}}, v{{[0-9]+}} op_sel_hi:[0,0,0] cbsz:4 blgp:4
-// ASMMXFP4: .amdhsa_group_segment_fixed_size 6160
+// ASMMXFP4: .amdhsa_group_segment_fixed_size 6144
 // ASMMXFP4: .amdhsa_kernarg_size 48
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
 
@@ -216,7 +216,7 @@
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6160
+// ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6144
 
 // ASMMXFP4-DMA-K2-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-DMA-K2-COUNT-4: global_load_lds_dwordx4
@@ -229,7 +229,7 @@
 // ASMMXFP4-DMA-K2-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(0)
 // ASMMXFP4-DMA-K2: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8208
+// ASMMXFP4-DMA-K2: .amdhsa_group_segment_fixed_size 8192
 
 // ASMMXFP4-SCALEPACK-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-SCALEPACK-COUNT-3: ds_read_b64_tr_b8

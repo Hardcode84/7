@@ -61,6 +61,7 @@ from mlir.ir import (
     IntegerType,
     Module,
     StringAttr,
+    UnitAttr,
 )
 
 
@@ -140,6 +141,7 @@ class _MatmulConfig:
     cta_swizzle_xcds: int = 1
     cta_group_m: int = 1
     target_waves: int | None = None
+    enable_split_barriers: bool = False
 
     def __post_init__(self) -> None:
         _validate_positive_shape(self)
@@ -399,6 +401,7 @@ _F32_PTR_HELPER = "wave_memref_to_ptr_global_f32"
 _PRINT_HELPER = "printMemrefF32"
 _PRINT_F16_HELPER = "printMemrefF16"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
+_ENABLE_SPLIT_BARRIERS_ATTR = "waveamdmachine.enable_split_barriers"
 _DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
 _STATIC_LDS_LIMIT = 64 * 1024
 _MXFP4_SCALE_PACK = 4
@@ -434,6 +437,8 @@ def _kernel_attrs(
     cfg: _MatmulConfig, target_waves: int | None
 ) -> dict[str, dsl.Attribute]:
     attrs = _target_waves_attrs(target_waves)
+    if cfg.enable_split_barriers:
+        attrs[_ENABLE_SPLIT_BARRIERS_ATTR] = UnitAttr.get()
     dynamic_lds = _dynamic_lds_bytes(cfg)
     if dynamic_lds:
         attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(dynamic_lds)
@@ -4598,6 +4603,7 @@ def _make_matmul_config(
     cta_swizzle_xcds: int,
     cta_group_m: int,
     target_waves: int | None = None,
+    enable_split_barriers: bool = False,
 ) -> _MatmulConfig:
     return _MatmulConfig(
         M=M,
@@ -4619,6 +4625,7 @@ def _make_matmul_config(
         cta_swizzle_xcds=cta_swizzle_xcds,
         cta_group_m=cta_group_m,
         target_waves=target_waves,
+        enable_split_barriers=enable_split_barriers,
     )
 
 
@@ -4694,6 +4701,7 @@ def build_wmma_f16_matmul_module(
     cta_group_m: int = 1,
     skip_specialize: bool = False,
     target_waves: int | None = None,
+    enable_split_barriers: bool = False,
     include_host: bool = True,
 ) -> Module:
     """Return an MLIR module for tiled matmul."""
@@ -4717,6 +4725,7 @@ def build_wmma_f16_matmul_module(
         cta_swizzle_xcds=cta_swizzle_xcds,
         cta_group_m=cta_group_m,
         target_waves=target_waves,
+        enable_split_barriers=enable_split_barriers,
     )
     bld = dsl.ModuleBuilder()
     with bld:

@@ -26,6 +26,9 @@ using namespace mlir::wave;
 
 namespace {
 
+static constexpr StringLiteral kEnableSplitBarriersAttr =
+    "waveamdmachine.enable_split_barriers";
+
 static bool isPowerOfTwo(unsigned value) {
   return value != 0 && (value & (value - 1)) == 0;
 }
@@ -101,6 +104,8 @@ static bool isEligibleBarrier(waveamdmachine::SBarrierOp barrier) {
 
 static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize) {
   if (func.isExternal())
+    return success();
+  if (!func->hasAttr(kEnableSplitBarriersAttr))
     return success();
 
   std::optional<unsigned> expectedWaves = getExpectedWaves(func, wavefrontSize);

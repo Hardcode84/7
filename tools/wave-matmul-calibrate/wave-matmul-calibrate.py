@@ -368,6 +368,9 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     )
     append_option_if(cmd, cta_group_m != 1, f"--cta-group-m={cta_group_m}")
     append_target_waves(cmd, args)
+    append_option_if(
+        cmd, getattr(args, "enable_split_barriers", False), "--enable-split-barriers"
+    )
     return cmd
 
 
@@ -1122,6 +1125,11 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--cta-swizzle-xcds", type=int, default=1)
     ap.add_argument("--cta-group-m", type=int, default=1)
+    ap.add_argument(
+        "--enable-split-barriers",
+        action="store_true",
+        help="stamp waveamdmachine.enable_split_barriers on generated matmul kernels",
+    )
 
 
 def add_runtime_args(ap: argparse.ArgumentParser) -> None:

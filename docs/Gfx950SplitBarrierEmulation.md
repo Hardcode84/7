@@ -122,6 +122,9 @@ waveamd-materialize-split-barriers
 waveamd_backend_finish
 ```
 
+Split is opt-in per function: add `waveamdmachine.enable_split_barriers`.
+Absent attr keeps monolithic `waveamdmachine.s_barrier`.
+
 The split pass:
 
 1. Finds eligible `waveamdmachine.s_barrier` ops.

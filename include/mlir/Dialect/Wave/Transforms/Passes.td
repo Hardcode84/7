@@ -438,7 +438,8 @@ def WaveAMDSplitBarriers
     : Pass<"waveamd-split-barriers"> {
   let summary = "Split eligible WaveAMDMachine barriers";
   let description = [{
-    Rewrites eligible `waveamdmachine.s_barrier` ops into
+    Rewrites eligible `waveamdmachine.s_barrier` ops in functions marked with
+    `waveamdmachine.enable_split_barriers` into
     `barrier_init` / `barrier_arrive` / `barrier_wait` pseudos so scheduling
     can move independent work between arrive and wait.
   }];

@@ -213,6 +213,11 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="stamp waveamdmachine.target_waves on the kernel; 0 omits it",
     )
     parser.add_argument(
+        "--enable-split-barriers",
+        action="store_true",
+        help="stamp waveamdmachine.enable_split_barriers on the kernel",
+    )
+    parser.add_argument(
         "--cta-swizzle-xcds",
         type=int,
         default=1,
@@ -368,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         cta_swizzle_xcds=args.cta_swizzle_xcds,
         cta_group_m=args.cta_group_m,
         target_waves=args.target_waves or None,
+        enable_split_barriers=args.enable_split_barriers,
         include_host=not args.kernel_only,
     )
     module_text = str(module)
