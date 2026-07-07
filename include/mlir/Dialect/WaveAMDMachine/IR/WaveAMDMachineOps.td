@@ -581,6 +581,36 @@ class WaveAMDMachine_PackedTernaryResult<string mnemonic>
       "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
 }
 
+class WaveAMDMachine_PackedF32BinaryResult<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = "isa.Major == 8 || isa.Major == 9 || isa.Major == 12";
+  let arguments = (ins WaveAMDMachine_VGPR2:$lhs,
+                       WaveAMDMachine_VGPR2:$rhs,
+                       DefaultValuedAttr<BoolAttr, "false">:$clamp,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
+                                         "0">:$op_sel,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
+                                         "3">:$op_sel_hi);
+  let results = (outs WaveAMDMachine_VGPR2:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+class WaveAMDMachine_PackedF32TernaryResult<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = "isa.Major == 8 || isa.Major == 9 || isa.Major == 12";
+  let arguments = (ins WaveAMDMachine_VGPR2:$a,
+                       WaveAMDMachine_VGPR2:$b,
+                       WaveAMDMachine_VGPR2:$c,
+                       DefaultValuedAttr<BoolAttr, "false">:$clamp,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel3Attr,
+                                         "0">:$op_sel,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel3Attr,
+                                         "7">:$op_sel_hi);
+  let results = (outs WaveAMDMachine_VGPR2:$result);
+  let assemblyFormat =
+      "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
+}
+
 class WaveAMDMachine_UnaryNoResult<string mnemonic, Type operandType,
                                 list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic, traits> {
@@ -974,6 +1004,12 @@ def WaveAMDMachine_VPkMulF16Op
     : WaveAMDMachine_PackedBinaryResult<"v_pk_mul_f16">;
 def WaveAMDMachine_VPkFmaF16Op
     : WaveAMDMachine_PackedTernaryResult<"v_pk_fma_f16">;
+def WaveAMDMachine_VPkAddF32Op
+    : WaveAMDMachine_PackedF32BinaryResult<"v_pk_add_f32">;
+def WaveAMDMachine_VPkMulF32Op
+    : WaveAMDMachine_PackedF32BinaryResult<"v_pk_mul_f32">;
+def WaveAMDMachine_VPkFmaF32Op
+    : WaveAMDMachine_PackedF32TernaryResult<"v_pk_fma_f32">;
 class WaveAMDMachine_VCmpVcc<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]>,
       WaveAMDMachine_VCmpLegality {

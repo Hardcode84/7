@@ -125,6 +125,10 @@ static bool isSimdPackedF16(Type type) {
   return getSimdPackedF16Length(type).has_value();
 }
 
+static bool isSimdPackedF32(Type type) {
+  return getSimdPackedF32Length(type).has_value();
+}
+
 static FailureOr<llvm::AMDGPU::IsaVersion>
 getTargetIsaVersion(Operation *op, StringRef feature) {
   return waveamdmachine::getAMDGPUTargetIsaVersion(op, feature);
@@ -138,6 +142,17 @@ static LogicalResult requirePackedF16Target(Operation *op, StringRef kind) {
   if (!waveamdmachine::VPkAddF16Op::isSupportedOnIsa(*isa))
     return op->emitError("packed f16 ")
            << kind << " lowering requires gfx9/gfx11";
+  return success();
+}
+
+static LogicalResult requirePackedF32Target(Operation *op, StringRef kind) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f32 lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::VPkAddF32Op::isSupportedOnIsa(*isa))
+    return op->emitError("packed f32 ")
+           << kind << " lowering requires gfx8/gfx9/gfx12";
   return success();
 }
 
@@ -3842,6 +3857,50 @@ static unsigned getPackedF16WordCount(unsigned vectorLength) {
   return (vectorLength + 1) / 2;
 }
 
+static unsigned getPackedF32PairCount(unsigned vectorLength) {
+  return (vectorLength + 1) / 2;
+}
+
+static FailureOr<SmallVector<Value>>
+splitVGPRMaterializedDwordPairs(WaveAMDMachineSelector &S, Operation *op,
+                                Value value, unsigned pairCount,
+                                StringRef name) {
+  FailureOr<SmallVector<Value>> words =
+      splitVGPRMaterializedWords(S, op, value, pairCount * 2, name);
+  if (failed(words))
+    return failure();
+
+  SmallVector<Value> pairs;
+  pairs.reserve(pairCount);
+  for (unsigned index : llvm::seq<unsigned>(0, pairCount))
+    pairs.push_back(joinVGPRWords(
+        S, op->getLoc(), ArrayRef<Value>{words->data() + index * 2, 2}));
+  return pairs;
+}
+
+static Value joinVGPRDwordPairs(WaveAMDMachineSelector &S, Location loc,
+                                ArrayRef<Value> pairs) {
+  assert(!pairs.empty() && "expected at least one VGPR pair");
+  if (pairs.size() == 1)
+    return pairs.front();
+
+  SmallVector<Value> words;
+  words.reserve(pairs.size() * 2);
+  for (Value pair : pairs) {
+    auto regType = cast<waveamdmachine::RegType>(pair.getType());
+    assert(regType.getRegClass() == waveamdmachine::RegClass::VGPR &&
+           regType.getWidth() == 2 && "expected VGPR2 pair");
+    Type elementType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+    SmallVector<Type> elementTypes(2, elementType);
+    waveamdmachine::TupleToElementsOp split =
+        waveamdmachine::TupleToElementsOp::create(S.builder, loc, elementTypes,
+                                                  pair);
+    words.append(split.getElements().begin(), split.getElements().end());
+  }
+  return joinVGPRWords(S, loc, words);
+}
+
 template <typename MachineOp, typename WaveOp>
 static LogicalResult selectPackedF16Binary(WaveAMDMachineSelector &S, WaveOp op,
                                            StringRef kind, Value lhs,
@@ -3876,6 +3935,45 @@ static LogicalResult selectPackedF16Binary(WaveAMDMachineSelector &S, WaveOp op,
     resultWords.push_back(selected);
   }
   S.values[op.getResult()] = joinVGPRWords(S, op.getLoc(), resultWords);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+template <typename MachineOp, typename WaveOp>
+static LogicalResult selectPackedF32Binary(WaveAMDMachineSelector &S, WaveOp op,
+                                           StringRef kind, Value lhs,
+                                           Value rhs) {
+  if (failed(requirePackedF32Target(op.getOperation(), kind)))
+    return failure();
+
+  std::optional<unsigned> vectorLength =
+      getSimdPackedF32Length(op.getResult().getType());
+  if (!vectorLength || *vectorLength < 2)
+    return op.emitError("packed f32 ")
+           << kind << " lowering requires !wave.simd<vector<2^nxf32>, W> "
+           << "with at least two elements";
+  unsigned pairCount = getPackedF32PairCount(*vectorLength);
+  FailureOr<SmallVector<Value>> lhsPairs = splitVGPRMaterializedDwordPairs(
+      S, op.getOperation(), S.expect(lhs, op), pairCount, "lhs");
+  if (failed(lhsPairs))
+    return failure();
+  FailureOr<SmallVector<Value>> rhsPairs = splitVGPRMaterializedDwordPairs(
+      S, op.getOperation(), S.expect(rhs, op), pairCount, "rhs");
+  if (failed(rhsPairs))
+    return failure();
+
+  Type vgpr2Type =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  SmallVector<Value> resultPairs;
+  resultPairs.reserve(pairCount);
+  for (unsigned index : llvm::seq<unsigned>(0, pairCount)) {
+    Value selected =
+        MachineOp::create(S.builder, op.getLoc(), vgpr2Type, (*lhsPairs)[index],
+                          (*rhsPairs)[index], false, 0, 3)
+            .getResult();
+    resultPairs.push_back(selected);
+  }
+  S.values[op.getResult()] = joinVGPRDwordPairs(S, op.getLoc(), resultPairs);
   S.eraseIfTopLevel(op);
   return success();
 }
@@ -3922,23 +4020,72 @@ static LogicalResult selectPackedF16Ternary(WaveAMDMachineSelector &S,
   return success();
 }
 
-template <typename F32MachineOp, typename PackedMachineOp, typename WaveOp>
+template <typename MachineOp, typename WaveOp>
+static LogicalResult selectPackedF32Ternary(WaveAMDMachineSelector &S,
+                                            WaveOp op, StringRef kind, Value a,
+                                            Value b, Value c) {
+  if (failed(requirePackedF32Target(op.getOperation(), kind)))
+    return failure();
+
+  std::optional<unsigned> vectorLength =
+      getSimdPackedF32Length(op.getResult().getType());
+  if (!vectorLength || *vectorLength < 2)
+    return op.emitError("packed f32 ")
+           << kind << " lowering requires !wave.simd<vector<2^nxf32>, W> "
+           << "with at least two elements";
+  unsigned pairCount = getPackedF32PairCount(*vectorLength);
+  FailureOr<SmallVector<Value>> aPairs = splitVGPRMaterializedDwordPairs(
+      S, op.getOperation(), S.expect(a, op), pairCount, "lhs");
+  if (failed(aPairs))
+    return failure();
+  FailureOr<SmallVector<Value>> bPairs = splitVGPRMaterializedDwordPairs(
+      S, op.getOperation(), S.expect(b, op), pairCount, "rhs");
+  if (failed(bPairs))
+    return failure();
+  FailureOr<SmallVector<Value>> cPairs = splitVGPRMaterializedDwordPairs(
+      S, op.getOperation(), S.expect(c, op), pairCount, "acc");
+  if (failed(cPairs))
+    return failure();
+
+  Type vgpr2Type =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
+  SmallVector<Value> resultPairs;
+  resultPairs.reserve(pairCount);
+  for (unsigned index : llvm::seq<unsigned>(0, pairCount)) {
+    Value selected =
+        MachineOp::create(S.builder, op.getLoc(), vgpr2Type, (*aPairs)[index],
+                          (*bPairs)[index], (*cPairs)[index], false, 0, 7)
+            .getResult();
+    resultPairs.push_back(selected);
+  }
+  S.values[op.getResult()] = joinVGPRDwordPairs(S, op.getLoc(), resultPairs);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+template <typename F32MachineOp, typename PackedF16MachineOp,
+          typename PackedF32MachineOp, typename WaveOp>
 static LogicalResult selectFloatBinary(WaveAMDMachineSelector &S, WaveOp op,
                                        StringRef kind) {
   Type resultType = op.getResult().getType();
   if (isSimdF32(resultType))
     return selectF32<F32MachineOp>(S, op, op.getLhs(), op.getRhs());
   if (isSimdPackedF16(resultType))
-    return selectPackedF16Binary<PackedMachineOp>(S, op, kind, op.getLhs(),
-                                                  op.getRhs());
+    return selectPackedF16Binary<PackedF16MachineOp>(S, op, kind, op.getLhs(),
+                                                     op.getRhs());
+  if (isSimdPackedF32(resultType))
+    return selectPackedF32Binary<PackedF32MachineOp>(S, op, kind, op.getLhs(),
+                                                     op.getRhs());
   return op.emitError("WaveAMDMachine ")
          << kind << " lowering supports only !wave.simd<f32, W> or "
-         << "!wave.simd<vector<2^nxf16>, W>";
+         << "!wave.simd<vector<2^nxf16>, W> or "
+         << "!wave.simd<vector<2^nxf32>, W>";
 }
 
 LogicalResult WaveAMDMachineSelector::selectFAdd(FAddOp op) {
   return selectFloatBinary<waveamdmachine::VAddF32Op,
-                           waveamdmachine::VPkAddF16Op>(*this, op, "fadd");
+                           waveamdmachine::VPkAddF16Op,
+                           waveamdmachine::VPkAddF32Op>(*this, op, "fadd");
 }
 
 LogicalResult WaveAMDMachineSelector::selectFSub(FSubOp op) {
@@ -3948,7 +4095,8 @@ LogicalResult WaveAMDMachineSelector::selectFSub(FSubOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectFMul(FMulOp op) {
   return selectFloatBinary<waveamdmachine::VMulF32Op,
-                           waveamdmachine::VPkMulF16Op>(*this, op, "fmul");
+                           waveamdmachine::VPkMulF16Op,
+                           waveamdmachine::VPkMulF32Op>(*this, op, "fmul");
 }
 
 LogicalResult WaveAMDMachineSelector::selectFMax(FMaxOp op) {
@@ -3959,11 +4107,16 @@ LogicalResult WaveAMDMachineSelector::selectFMax(FMaxOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectFma(FmaOp op) {
-  if (!isSimdPackedF16(op.getResult().getType()))
-    return op.emitError("WaveAMDMachine fma lowering supports only "
-                        "!wave.simd<vector<2^nxf16>, W>");
-  return selectPackedF16Ternary<waveamdmachine::VPkFmaF16Op>(
-      *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
+  Type resultType = op.getResult().getType();
+  if (isSimdPackedF16(resultType))
+    return selectPackedF16Ternary<waveamdmachine::VPkFmaF16Op>(
+        *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
+  if (isSimdPackedF32(resultType))
+    return selectPackedF32Ternary<waveamdmachine::VPkFmaF32Op>(
+        *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
+  return op.emitError("WaveAMDMachine fma lowering supports only "
+                      "!wave.simd<vector<2^nxf16>, W> or "
+                      "!wave.simd<vector<2^nxf32>, W>");
 }
 
 LogicalResult WaveAMDMachineSelector::selectFExp2(FExp2Op op) {
@@ -7498,6 +7651,99 @@ materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   return DmaSourceAddress{*buckets, base};
 }
 
+struct DmaSourcePointer {
+  PointerOffset offset;
+  Value base;
+  bool isBuffer = false;
+};
+
+struct SelectedDmaSourcePointers {
+  DmaSourcePointer active;
+  DmaSourcePointer inactive;
+  SelectOp select;
+};
+
+static FailureOr<DmaSourcePointer>
+lookupDmaSourcePointer(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                       Value source, StringRef label) {
+  auto baseIt = S.pointerBases.find(source);
+  auto offsetIt = S.pointerIndexOffsets.find(source);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
+    return op.emitError(label) << " DMA source has no pointer metadata";
+  return DmaSourcePointer{offsetIt->second, baseIt->second,
+                          S.pointerBuffers.lookup(source)};
+}
+
+static bool isZeroSOffset(WaveAMDMachineSelector &S,
+                          const WaveAMDMachineSelector::BucketedOperands &b) {
+  return !b.soffset || isZeroImm(S, b.soffset);
+}
+
+static FailureOr<std::optional<SelectedDmaSourcePointers>>
+matchSelectedBufferDmaSources(WaveAMDMachineSelector &S,
+                              waveamd::DmaLoadLdsOp op) {
+  if (!op.getZeroFillInactive().value_or(false))
+    return std::optional<SelectedDmaSourcePointers>{};
+  auto select = op.getSource().getDefiningOp<SelectOp>();
+  if (!select || !isa<MaskType>(select.getCondition().getType()))
+    return std::optional<SelectedDmaSourcePointers>{};
+
+  FailureOr<DmaSourcePointer> active =
+      lookupDmaSourcePointer(S, op, select.getTrueValue(), "active");
+  FailureOr<DmaSourcePointer> inactive =
+      lookupDmaSourcePointer(S, op, select.getFalseValue(), "inactive");
+  if (failed(active) || failed(inactive))
+    return failure();
+  if (!active->isBuffer || !inactive->isBuffer ||
+      active->base != inactive->base)
+    return std::optional<SelectedDmaSourcePointers>{};
+  return std::optional<SelectedDmaSourcePointers>{
+      SelectedDmaSourcePointers{*active, *inactive, select}};
+}
+
+static FailureOr<DmaSourceAddress> materializeBufferDmaSourceAddress(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+    const DmaSourcePointer &source,
+    const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan =
+      planDmaSourceAddress(S, op, source.offset, /*isBuffer=*/true, spec);
+  if (failed(plan))
+    return failure();
+  return materializeDmaSourceAddress(S, op, source.base, *plan,
+                                     /*isBuffer=*/true, spec);
+}
+
+static FailureOr<std::optional<DmaSourceAddress>>
+materializeSelectedBufferDmaSourceAddress(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+    const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<std::optional<SelectedDmaSourcePointers>> pointers =
+      matchSelectedBufferDmaSources(S, op);
+  if (failed(pointers))
+    return failure();
+  if (!*pointers)
+    return std::optional<DmaSourceAddress>{};
+
+  FailureOr<DmaSourceAddress> activeSource =
+      materializeBufferDmaSourceAddress(S, op, (*pointers)->active, spec);
+  FailureOr<DmaSourceAddress> inactiveSource =
+      materializeBufferDmaSourceAddress(S, op, (*pointers)->inactive, spec);
+  if (failed(activeSource) || failed(inactiveSource))
+    return failure();
+  if (inactiveSource->buckets.instOffset != 0 ||
+      !isZeroSOffset(S, inactiveSource->buckets))
+    return std::optional<DmaSourceAddress>{};
+
+  FailureOr<Value> selectedVOffset = createLaneSelect(
+      S, op, S.expect((*pointers)->select.getCondition(), op),
+      activeSource->buckets.voffset, inactiveSource->buckets.voffset,
+      /*width=*/1);
+  if (failed(selectedVOffset))
+    return failure();
+  activeSource->buckets.voffset = *selectedVOffset;
+  return std::optional<DmaSourceAddress>{*activeSource};
+}
+
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
                                                        int64_t bytes) {
   if (isBuffer)
@@ -7554,6 +7800,55 @@ static Value createDmaLoadLdsMachineOp(WaveAMDMachineSelector &S,
   return createGlobalDmaLoadLdsMachineOp(S, op, source, m0);
 }
 
+static FailureOr<Value> materializeDmaLoadLdsM0(WaveAMDMachineSelector &S,
+                                                waveamd::DmaLoadLdsOp op,
+                                                const DmaPointers &ptrs) {
+  return materializeDmaM0(S, op, ptrs.dstBase, ptrs.dstOffset);
+}
+
+static void bindDmaLoadLdsToken(WaveAMDMachineSelector &S,
+                                waveamd::DmaLoadLdsOp op, Value token) {
+  S.values[op.getToken()] = token;
+  S.eraseIfTopLevel(op);
+}
+
+static FailureOr<std::optional<Value>>
+trySelectBufferDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                          const DmaPointers &ptrs,
+                          const waveamdmachine::AddressFieldSpec &spec,
+                          bool isBuffer) {
+  if (!isBuffer)
+    return std::optional<Value>{};
+  FailureOr<std::optional<DmaSourceAddress>> selectedSource =
+      materializeSelectedBufferDmaSourceAddress(S, op, spec);
+  if (failed(selectedSource))
+    return failure();
+  if (!*selectedSource)
+    return std::optional<Value>{};
+  FailureOr<Value> m0 = materializeDmaLoadLdsM0(S, op, ptrs);
+  if (failed(m0))
+    return failure();
+  return std::optional<Value>{
+      createDmaLoadLdsMachineOp(S, op, **selectedSource, *m0, isBuffer)};
+}
+
+static LogicalResult
+selectPlannedDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                        const DmaPointers &ptrs, AddressPlan &sourcePlan,
+                        const waveamdmachine::AddressFieldSpec &spec,
+                        bool isBuffer) {
+  FailureOr<Value> m0 = materializeDmaLoadLdsM0(S, op, ptrs);
+  if (failed(m0))
+    return failure();
+  FailureOr<DmaSourceAddress> source = materializeDmaSourceAddress(
+      S, op, ptrs.srcBase, sourcePlan, isBuffer, spec);
+  if (failed(source))
+    return failure();
+  bindDmaLoadLdsToken(S, op,
+                      createDmaLoadLdsMachineOp(S, op, *source, *m0, isBuffer));
+  return success();
+}
+
 LogicalResult
 WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
@@ -7564,6 +7859,15 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
   bool isBuffer = pointerBuffers.lookup(op.getSource());
   waveamdmachine::AddressFieldSpec spec =
       dmaAddressSpec(isBuffer, op.getBytes());
+  FailureOr<std::optional<Value>> selectedToken =
+      trySelectBufferDmaLoadLds(*this, op, *ptrs, spec, isBuffer);
+  if (failed(selectedToken))
+    return failure();
+  if (*selectedToken) {
+    bindDmaLoadLdsToken(*this, op, **selectedToken);
+    return success();
+  }
+
   FailureOr<AddressPlan> sourcePlan =
       planDmaSourceAddress(*this, op, ptrs->srcOffset, isBuffer, spec);
   if (failed(sourcePlan))
@@ -7574,18 +7878,7 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
     return failure();
   if (*selectedFallback)
     return success();
-  FailureOr<Value> m0 =
-      materializeDmaM0(*this, op, ptrs->dstBase, ptrs->dstOffset);
-  if (failed(m0))
-    return failure();
-  FailureOr<DmaSourceAddress> source = materializeDmaSourceAddress(
-      *this, op, ptrs->srcBase, *sourcePlan, isBuffer, spec);
-  if (failed(source))
-    return failure();
-  Value token = createDmaLoadLdsMachineOp(*this, op, *source, *m0, isBuffer);
-  values[op.getToken()] = token;
-  eraseIfTopLevel(op);
-  return success();
+  return selectPlannedDmaLoadLds(*this, op, *ptrs, *sourcePlan, spec, isBuffer);
 }
 
 // Ensure `v` is an SGPR1 by inserting a v_readfirstlane_b32 if it is

@@ -123,4 +123,25 @@ func.func @gfx950_f16_math_forms_rne_cvt(%a0: !wave.simd<f32, 64>,
   return %r0 : f32
 }
 
+// CHECK-LABEL: func.func @gfx950_f32_math_forms
+// CHECK: waveamdmachine.v_pk_add_f32
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK: return
+func.func @gfx950_f32_math_forms(%a0: !wave.simd<f32, 64>,
+                                 %a1: !wave.simd<f32, 64>,
+                                 %b0: !wave.simd<f32, 64>,
+                                 %b1: !wave.simd<f32, 64>) -> f32 {
+  %s0 = wave.fadd %a0, %b0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s1 = wave.fadd %a1, %b1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %m0 = wave.fmul %s0, %b0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %m1 = wave.fmul %s1, %b1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %r0 = wave.read_first %m0 : !wave.simd<f32, 64> -> f32
+  %r1 = wave.read_first %m1 : !wave.simd<f32, 64> -> f32
+  return %r0 : f32
+}
+
 }

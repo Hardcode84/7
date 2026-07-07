@@ -497,8 +497,16 @@ func.func @cast_wrong_policy_type(%x: f32) {
 // -----
 
 func.func @fadd_packed_bad_element(%a: !wave.simd<vector<2xi16>, 32>, %b: !wave.simd<vector<2xi16>, 32>) {
-  // expected-error @+1 {{SIMD element type must be f32, f16, or vector<2^nxf16>}}
+  // expected-error @+1 {{SIMD element type must be f32, f16, vector<2^nxf16>, or vector<2^nxf32> with at least two f32 elements}}
   %r = wave.fadd %a, %b : !wave.simd<vector<2xi16>, 32>, !wave.simd<vector<2xi16>, 32> -> !wave.simd<vector<2xi16>, 32>
+  return
+}
+
+// -----
+
+func.func @fadd_packed_f32_too_short(%a: !wave.simd<vector<1xf32>, 32>, %b: !wave.simd<vector<1xf32>, 32>) {
+  // expected-error @+1 {{SIMD element type must be f32, f16, vector<2^nxf16>, or vector<2^nxf32> with at least two f32 elements}}
+  %r = wave.fadd %a, %b : !wave.simd<vector<1xf32>, 32>, !wave.simd<vector<1xf32>, 32> -> !wave.simd<vector<1xf32>, 32>
   return
 }
 

@@ -8,10 +8,12 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir::wave {
@@ -64,16 +66,43 @@ static waveamd::MakeBufferOp findMakeBuffer(Value value) {
   }
 }
 
-static FailureOr<BufferSentinel> findBufferSentinel(Value source) {
+static FailureOr<BufferSentinel> findBufferSentinel(Value source,
+                                                    DenseSet<Value> &seen);
+
+static FailureOr<BufferSentinel>
+findScfForIterArgBufferSentinel(BlockArgument arg, DenseSet<Value> &seen) {
+  auto loop = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
+  if (!loop)
+    return failure();
+  if (arg.getArgNumber() == 0)
+    return failure();
+
+  unsigned iterIndex = arg.getArgNumber() - 1;
+  if (iterIndex >= loop.getNumRegionIterArgs())
+    return failure();
+  return findBufferSentinel(loop.getInitArgs()[iterIndex], seen);
+}
+
+static FailureOr<BufferSentinel> findBufferSentinel(Value source,
+                                                    DenseSet<Value> &seen) {
+  if (!seen.insert(source).second)
+    return failure();
   if (!isBufferSimdPointer(source.getType()))
     return failure();
   Value base = stripPtrAdds(source);
+  if (auto arg = dyn_cast<BlockArgument>(base))
+    return findScfForIterArgBufferSentinel(arg, seen);
   if (!isa<PtrType>(base.getType()))
     return failure();
   waveamd::MakeBufferOp makeBuffer = findMakeBuffer(base);
   if (!makeBuffer)
     return failure();
   return BufferSentinel{base, makeBuffer.getRange()};
+}
+
+static FailureOr<BufferSentinel> findBufferSentinel(Value source) {
+  DenseSet<Value> seen;
+  return findBufferSentinel(source, seen);
 }
 
 static bool canMoveOut(Operation *op,

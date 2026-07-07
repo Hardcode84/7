@@ -114,6 +114,26 @@ func.func @f16_leaf_pack(%a0: !wave.simd<f16, 32>,
   return %s0, %s1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
 }
 
+// CHECK-LABEL: func.func @f32_leaf_pack
+// CHECK-SAME: ([[A0:%.*]]: !wave.simd<f32, 32>, [[A1:%.*]]: !wave.simd<f32, 32>, [[B0:%.*]]: !wave.simd<f32, 32>, [[B1:%.*]]: !wave.simd<f32, 32>)
+// CHECK: [[LHS:%.*]] = wave.pack [[A0]], [[A1]]
+// CHECK-SAME: -> !wave.simd<vector<2xf32>, 32>
+// CHECK: [[RHS:%.*]] = wave.pack [[B0]], [[B1]]
+// CHECK-SAME: -> !wave.simd<vector<2xf32>, 32>
+// CHECK: [[ADD:%.*]] = wave.fadd [[LHS]], [[RHS]]
+// CHECK-SAME: -> !wave.simd<vector<2xf32>, 32>
+func.func @f32_leaf_pack(%a0: !wave.simd<f32, 32>,
+                         %a1: !wave.simd<f32, 32>,
+                         %b0: !wave.simd<f32, 32>,
+                         %b1: !wave.simd<f32, 32>)
+    -> (!wave.simd<f32, 32>, !wave.simd<f32, 32>) {
+  %s0 = wave.fadd %a0, %b0
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %s1 = wave.fadd %a1, %b1
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  return %s0, %s1 : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+}
+
 // CHECK-LABEL: func.func @policy_mismatch
 // CHECK-NOT: vector<2xf
 // CHECK: wave.cast fpconvert

@@ -572,6 +572,9 @@ private:
   bool supportsPackedF16() const {
     return isaVersion.Major == 9 || isaVersion.Major == 11;
   }
+  bool supportsPackedF32() const {
+    return isGfx8Or9() || isaVersion.Major == 12;
+  }
   unsigned vCvtPkRtzF16F32() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::V_CVT_PKRTZ_F16_F32_e64_vi;
@@ -605,6 +608,27 @@ private:
     if (isGfx8Or9())
       return llvm::AMDGPU::V_PK_FMA_F16_vi;
     return gfx11Opcode(llvm::AMDGPU::V_PK_FMA_F16_gfx11);
+  }
+  unsigned vPkAddF32() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_PK_ADD_F32_vi;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_PK_ADD_F32_gfx12;
+    llvm_unreachable("v_pk_add_f32 is unsupported on this ISA");
+  }
+  unsigned vPkMulF32() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_PK_MUL_F32_vi;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_PK_MUL_F32_gfx12;
+    llvm_unreachable("v_pk_mul_f32 is unsupported on this ISA");
+  }
+  unsigned vPkFmaF32() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_PK_FMA_F32_vi;
+    if (isaVersion.Major == 12)
+      return llvm::AMDGPU::V_PK_FMA_F32_gfx12;
+    llvm_unreachable("v_pk_fma_f32 is unsupported on this ISA");
   }
   unsigned vCmpEqU32() const { return opcodes.vCmpEqU32; }
   unsigned vCmpNeU32() const { return opcodes.vCmpNeU32; }
@@ -2719,6 +2743,18 @@ private:
       if (!supportsPackedF16())
         return op.emitError("v_pk_fma_f16 requires gfx9/gfx11");
       return emitPackedTernary(vPkFmaF16(), op);
+    }
+    if (isa<waveamdmachine::VPkAddF32Op, waveamdmachine::VPkMulF32Op>(op)) {
+      if (!supportsPackedF32())
+        return op.emitError("v_pk_*_f32 requires gfx8/gfx9/gfx12");
+      unsigned opcode =
+          isa<waveamdmachine::VPkAddF32Op>(op) ? vPkAddF32() : vPkMulF32();
+      return emitPackedBinary(opcode, op);
+    }
+    if (isa<waveamdmachine::VPkFmaF32Op>(op)) {
+      if (!supportsPackedF32())
+        return op.emitError("v_pk_fma_f32 requires gfx8/gfx9/gfx12");
+      return emitPackedTernary(vPkFmaF32(), op);
     }
     if (isa<waveamdmachine::VCmpxEqU32Op, waveamdmachine::VCmpxNeU32Op,
             waveamdmachine::VCmpxLtU32Op, waveamdmachine::VCmpxLeU32Op,

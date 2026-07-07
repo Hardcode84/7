@@ -273,6 +273,8 @@ func.func @global_dma_lds_wide_source_base_adjust(
 
 // SELECT-LABEL: func.func @global_dma_lds_addr64_fallback
 // SELECT-NOT: waveamdmachine.global_load_lds_b128
+// SELECT-NOT: waveamdmachine.s_mov_m0
+// SELECT-NOT: waveamdmachine.s_add_m0_i32
 // SELECT: waveamdmachine.v_mbcnt_lo
 // SELECT: waveamdmachine.v_mbcnt_hi
 // SELECT: waveamdmachine.global_load_b32_addr64
@@ -280,6 +282,8 @@ func.func @global_dma_lds_wide_source_base_adjust(
 // SELECT: waveamdmachine.global_load_b32_addr64
 // SELECT: waveamdmachine.global_load_b32_addr64
 // SELECT: waveamdmachine.ds_store_tuple_b32
+// SELECT-NOT: waveamdmachine.s_mov_m0
+// SELECT-NOT: waveamdmachine.s_add_m0_i32
 func.func @global_dma_lds_addr64_fallback(
     %in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {

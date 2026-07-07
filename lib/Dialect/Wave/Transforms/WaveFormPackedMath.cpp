@@ -47,6 +47,7 @@ struct PackedPair {
 
 struct PackedMathCapabilities {
   bool packedF16Math = true;
+  bool packedF32Math = true;
   bool packedF32ToF16Rtz = true;
   bool packedF32ToF16Rne = false;
 };
@@ -100,7 +101,10 @@ static CastRounding getFpConvertRounding(CastOp op) {
 }
 
 static std::optional<PairKind> getFloatMathKind(Operation *op) {
-  if (op->getNumResults() == 0 || !isScalarSimdF16(op->getResult(0).getType()))
+  if (op->getNumResults() == 0)
+    return std::nullopt;
+  Type resultType = op->getResult(0).getType();
+  if (!isScalarSimdF16(resultType) && !isScalarSimdF32(resultType))
     return std::nullopt;
   if (isa<FAddOp>(op))
     return PairKind::FAdd;
@@ -133,7 +137,12 @@ static bool isCandidateSupported(Operation *op,
       return capabilities.packedF32ToF16Rne;
     return false;
   }
-  return capabilities.packedF16Math;
+  Type resultType = op->getResult(0).getType();
+  if (isScalarSimdF16(resultType))
+    return capabilities.packedF16Math;
+  if (isScalarSimdF32(resultType))
+    return capabilities.packedF32Math;
+  return false;
 }
 
 static bool isCommutative(PairKind kind) {
@@ -209,6 +218,10 @@ getPackedMathCapabilities(Operation *op) {
       waveamdmachine::VPkAddF16Op::isSupportedOnIsa(*isa) &&
       waveamdmachine::VPkMulF16Op::isSupportedOnIsa(*isa) &&
       waveamdmachine::VPkFmaF16Op::isSupportedOnIsa(*isa);
+  capabilities.packedF32Math =
+      waveamdmachine::VPkAddF32Op::isSupportedOnIsa(*isa) &&
+      waveamdmachine::VPkMulF32Op::isSupportedOnIsa(*isa) &&
+      waveamdmachine::VPkFmaF32Op::isSupportedOnIsa(*isa);
   capabilities.packedF32ToF16Rtz =
       waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa);
   capabilities.packedF32ToF16Rne =

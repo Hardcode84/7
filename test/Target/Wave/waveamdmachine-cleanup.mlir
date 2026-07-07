@@ -35,6 +35,30 @@ func.func @hoist_exec_if_local_addr(%cond: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_packed_f32_mul_add_separate(
+// CHECK: [[MUL:%.*]] = waveamdmachine.v_pk_mul_f32
+// CHECK: waveamdmachine.v_pk_add_f32 [[MUL]],
+// CHECK-NOT: waveamdmachine.v_pk_fma_f32
+// CHECK: return
+func.func @keep_packed_f32_mul_add_separate(%a: !waveamdmachine.reg<vgpr, 2>,
+                                            %b: !waveamdmachine.reg<vgpr, 2>,
+                                            %c: !waveamdmachine.reg<vgpr, 2>)
+    -> !waveamdmachine.reg<vgpr, 2> {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %add = waveamdmachine.v_pk_add_f32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  return %add : !waveamdmachine.reg<vgpr, 2>
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950:sramecc-"} {
 
 // CHECK-LABEL: func.func @d16_byte_pack_preserves_low_sramecc_off(
