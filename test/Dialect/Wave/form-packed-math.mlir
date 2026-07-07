@@ -134,6 +134,21 @@ func.func @f32_leaf_pack(%a0: !wave.simd<f32, 32>,
   return %s0, %s1 : !wave.simd<f32, 32>, !wave.simd<f32, 32>
 }
 
+// CHECK-LABEL: func.func @fadd_fastmath_preserved
+// CHECK: [[ADD:%.*]] = wave.fadd {{.*}} fastmath<nnan,contract>
+// CHECK-SAME: -> !wave.simd<vector<2xf32>, 32>
+func.func @fadd_fastmath_preserved(%a0: !wave.simd<f32, 32>,
+                                   %a1: !wave.simd<f32, 32>,
+                                   %b0: !wave.simd<f32, 32>,
+                                   %b1: !wave.simd<f32, 32>)
+    -> (!wave.simd<f32, 32>, !wave.simd<f32, 32>) {
+  %s0 = wave.fadd %a0, %b0 fastmath<nnan,contract>
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %s1 = wave.fadd %a1, %b1 fastmath<nnan,contract>
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  return %s0, %s1 : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+}
+
 // CHECK-LABEL: func.func @policy_mismatch
 // CHECK-NOT: vector<2xf
 // CHECK: wave.cast fpconvert

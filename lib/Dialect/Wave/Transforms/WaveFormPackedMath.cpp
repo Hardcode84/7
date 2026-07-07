@@ -382,14 +382,17 @@ private:
           .getResult();
     if (isa<FAddOp>(op))
       return FAddOp::create(builder, loc, packedType, packedOperands[0],
-                            packedOperands[1])
+                            packedOperands[1],
+                            cast<FAddOp>(op).getFastmathAttr())
           .getResult();
     if (isa<FMulOp>(op))
       return FMulOp::create(builder, loc, packedType, packedOperands[0],
-                            packedOperands[1])
+                            packedOperands[1],
+                            cast<FMulOp>(op).getFastmathAttr())
           .getResult();
     return FmaOp::create(builder, loc, packedType, packedOperands[0],
-                         packedOperands[1], packedOperands[2])
+                         packedOperands[1], packedOperands[2],
+                         cast<FmaOp>(op).getFastmathAttr())
         .getResult();
   }
 

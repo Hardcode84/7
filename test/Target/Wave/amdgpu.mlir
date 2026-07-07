@@ -19,6 +19,19 @@ func.func @wave_add(%x: i32) -> i32 {
   return %first : i32
 }
 
+// CHECK-LABEL: wave_fma_f32:
+func.func @wave_fma_f32(%x: f32, %y: f32, %z: f32) -> f32 {
+  %vx = wave.splat %x : f32 -> !wave.simd<f32, 32>
+  %vy = wave.splat %y : f32 -> !wave.simd<f32, 32>
+  %vz = wave.splat %z : f32 -> !wave.simd<f32, 32>
+  // CHECK: v_fma_f32
+  %fma = wave.fma %vx, %vy, %vz
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32>, !wave.simd<f32, 32>
+        -> !wave.simd<f32, 32>
+  %first = wave.read_first %fma : !wave.simd<f32, 32> -> f32
+  return %first : f32
+}
+
 // CHECK-LABEL: wave_signed_cmp:
 func.func @wave_signed_cmp(%limit: i32) -> i32 {
   // CHECK: v_mbcnt_lo_u32_b32 [[SIGNED_LANE:v[0-9]+]], -1, 0

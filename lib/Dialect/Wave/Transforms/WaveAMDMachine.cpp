@@ -4108,6 +4108,9 @@ LogicalResult WaveAMDMachineSelector::selectFMax(FMaxOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectFma(FmaOp op) {
   Type resultType = op.getResult().getType();
+  if (isSimdF32(resultType))
+    return selectF32<waveamdmachine::VFmaF32Op>(*this, op, op.getLhs(),
+                                                op.getRhs(), op.getAcc());
   if (isSimdPackedF16(resultType))
     return selectPackedF16Ternary<waveamdmachine::VPkFmaF16Op>(
         *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
@@ -4115,6 +4118,7 @@ LogicalResult WaveAMDMachineSelector::selectFma(FmaOp op) {
     return selectPackedF32Ternary<waveamdmachine::VPkFmaF32Op>(
         *this, op, "fma", op.getLhs(), op.getRhs(), op.getAcc());
   return op.emitError("WaveAMDMachine fma lowering supports only "
+                      "!wave.simd<f32, W> or "
                       "!wave.simd<vector<2^nxf16>, W> or "
                       "!wave.simd<vector<2^nxf32>, W>");
 }

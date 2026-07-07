@@ -256,6 +256,36 @@ func.func @binary_simd_constant_fold() -> !wave.simd<i32, 32> {
   return %sum : !wave.simd<i32, 32>
 }
 
+// CHECK-LABEL: func.func @fadd_fmul_contract_fuses
+// CHECK-SAME: (%[[A:.*]]: !wave.simd<f32, 32>, %[[B:.*]]: !wave.simd<f32, 32>, %[[C:.*]]: !wave.simd<f32, 32>)
+// CHECK-NOT: wave.fmul
+// CHECK: %[[FMA:.*]] = wave.fma %[[A]], %[[B]], %[[C]] fastmath<contract>
+// CHECK: return %[[FMA]]
+func.func @fadd_fmul_contract_fuses(%a: !wave.simd<f32, 32>,
+                                    %b: !wave.simd<f32, 32>,
+                                    %c: !wave.simd<f32, 32>)
+    -> !wave.simd<f32, 32> {
+  %mul = wave.fmul %a, %b fastmath<nnan,contract>
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %sum = wave.fadd %mul, %c fastmath<contract>
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  return %sum : !wave.simd<f32, 32>
+}
+
+// CHECK-LABEL: func.func @fadd_fmul_without_mul_contract_stays_split
+// CHECK-NOT: wave.fma
+// CHECK: wave.fmul
+// CHECK: wave.fadd
+func.func @fadd_fmul_without_mul_contract_stays_split(
+    %a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>,
+    %c: !wave.simd<f32, 32>) -> !wave.simd<f32, 32> {
+  %mul = wave.fmul %a, %b fastmath<nnan>
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  %sum = wave.fadd %c, %mul fastmath<contract>
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.simd<f32, 32>
+  return %sum : !wave.simd<f32, 32>
+}
+
 // CHECK-LABEL: func.func @cast_scalar_constant_fold
 // CHECK-NOT: wave.cast
 // CHECK-DAG: %[[C255_I64:.*]] = wave.constant 255 : i64

@@ -944,6 +944,9 @@ def WaveAMDMachine_VSubF32Op
 def WaveAMDMachine_VMulF32Op
     : WaveAMDMachine_BinaryResult<"v_mul_f32", WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VFmaF32Op
+    : WaveAMDMachine_TernaryResult<"v_fma_f32", WaveAMDMachine_VGPR1,
+                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VMaxF32Op
     : WaveAMDMachine_BinaryResult<"v_max_f32", WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;

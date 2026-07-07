@@ -272,33 +272,49 @@ def Wave_ExtractOp : Wave_Op<"extract", [Pure]> {
   let hasVerifier = 1;
 }
 
-class Wave_FloatSimdBinary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
-  let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs);
+class Wave_FloatSimdBinary<string mnemonic>
+    : Wave_Op<mnemonic,
+              [Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
+  let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs,
+                       DefaultValuedAttr<
+                         Arith_FastMathAttr,
+                         "::mlir::arith::FastMathFlags::none">:$fastmath);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = [{
-    $lhs `,` $rhs attr-dict
+    $lhs `,` $rhs (`fastmath` `` $fastmath^)? attr-dict
     `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->`
     qualified(type($result))
   }];
   let hasVerifier = 1;
 }
 
-class Wave_FloatSimdTernary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
-  let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs, Wave_Simd:$acc);
+class Wave_FloatSimdTernary<string mnemonic>
+    : Wave_Op<mnemonic,
+              [Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
+  let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs, Wave_Simd:$acc,
+                       DefaultValuedAttr<
+                         Arith_FastMathAttr,
+                         "::mlir::arith::FastMathFlags::none">:$fastmath);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = [{
-    $lhs `,` $rhs `,` $acc attr-dict
+    $lhs `,` $rhs `,` $acc (`fastmath` `` $fastmath^)? attr-dict
     `:` qualified(type($lhs)) `,` qualified(type($rhs)) `,`
     qualified(type($acc)) `->` qualified(type($result))
   }];
   let hasVerifier = 1;
 }
 
-class Wave_FloatSimdUnary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
-  let arguments = (ins Wave_Simd:$source);
+class Wave_FloatSimdUnary<string mnemonic>
+    : Wave_Op<mnemonic,
+              [Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
+  let arguments = (ins Wave_Simd:$source,
+                       DefaultValuedAttr<
+                         Arith_FastMathAttr,
+                         "::mlir::arith::FastMathFlags::none">:$fastmath);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = [{
-    $source attr-dict `:` qualified(type($source)) `->`
+    $source (`fastmath` `` $fastmath^)? attr-dict `:`
+    qualified(type($source)) `->`
     qualified(type($result))
   }];
   let hasVerifier = 1;
@@ -306,6 +322,7 @@ class Wave_FloatSimdUnary<string mnemonic> : Wave_Op<mnemonic, [Pure]> {
 
 def Wave_FAddOp : Wave_FloatSimdBinary<"fadd"> {
   let summary = "lane-wise floating-point add";
+  let hasCanonicalizer = 1;
 }
 
 def Wave_FSubOp : Wave_FloatSimdBinary<"fsub"> {

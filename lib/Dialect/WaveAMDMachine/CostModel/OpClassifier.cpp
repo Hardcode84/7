@@ -100,6 +100,8 @@ static SchedClass classifyMappedOp(Operation *op) {
           return SchedClass::WriteSALU;
         return SchedClass::Write32Bit;
       })
+      .Case<VFmaF32Op>(
+          [](auto) { return SchedClass::WriteFloatFMA; })
       .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtF32U32Op, VCvtU32F32Op,
             VCvtPkRtzF16F32Op, VCvtPkF16F32Op, VCvtPkBF16F32Op,
             VPkAddF16Op, VPkMulF16Op, VPkFmaF16Op, VPkAddF32Op,

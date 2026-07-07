@@ -11,8 +11,10 @@ func.func @waveamdmachine_f32_ops(%a: !waveamdmachine.reg<vgpr, 1>,
   %sub = waveamdmachine.v_sub_f32 %add, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   // CHECK: [[MUL:%.*]] = waveamdmachine.v_mul_f32 [[SUB]], [[A]] : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %mul = waveamdmachine.v_mul_f32 %sub, %a : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-  // CHECK: [[MAX:%.*]] = waveamdmachine.v_max_f32 [[MUL]], [[ADD]] : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-  %max = waveamdmachine.v_max_f32 %mul, %add : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  // CHECK: [[FMA:%.*]] = waveamdmachine.v_fma_f32 [[MUL]], [[A]], [[B]] : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %fma = waveamdmachine.v_fma_f32 %mul, %a, %b : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  // CHECK: [[MAX:%.*]] = waveamdmachine.v_max_f32 [[FMA]], [[ADD]] : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %max = waveamdmachine.v_max_f32 %fma, %add : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   // CHECK: [[EXP:%.*]] = waveamdmachine.v_exp_f32 [[MAX]] : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %exp = waveamdmachine.v_exp_f32 %max : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   // CHECK: [[RCP:%.*]] = waveamdmachine.v_rcp_f32 [[EXP]] : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>

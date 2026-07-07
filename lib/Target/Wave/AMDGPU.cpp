@@ -545,6 +545,7 @@ private:
   unsigned vAddF32() const { return opcodes.vAddF32; }
   unsigned vSubF32() const { return opcodes.vSubF32; }
   unsigned vMulF32() const { return opcodes.vMulF32; }
+  unsigned vFmaF32() const { return opcodes.vFmaF32; }
   unsigned vMaxF32() const { return opcodes.vMaxF32; }
   unsigned vExpF32() const { return opcodes.vExpF32; }
   unsigned vRcpF32() const { return opcodes.vRcpF32; }
@@ -1865,6 +1866,15 @@ private:
          llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitFmaF32(Operation &op) {
+    return emitMC(vFmaF32(),
+                  {toMCOperand(op.getResult(0)), llvm::MCOperand::createImm(0),
+                   toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0),
+                   toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
+                   toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
+                   llvm::MCOperand::createImm(0)});
+  }
+
   LogicalResult emitPackedCvtVOP3(unsigned opcode, Operation &op) {
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), llvm::MCOperand::createImm(0),
@@ -2681,6 +2691,8 @@ private:
                     {toMCOperand(result()), toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
     }
+    if (isa<waveamdmachine::VFmaF32Op>(op))
+      return emitFmaF32(op);
     if (isa<waveamdmachine::VExpF32Op, waveamdmachine::VRcpF32Op,
             waveamdmachine::VRcpIFlagF32Op>(op)) {
       unsigned opcode = isa<waveamdmachine::VExpF32Op>(op)   ? vExpF32()

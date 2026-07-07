@@ -1760,6 +1760,46 @@ LogicalResult FmaOp::verify() {
                                     /*allowPackedF32=*/true);
 }
 
+static bool hasContract(arith::FastMathFlags flags) {
+  return arith::bitEnumContainsAll(flags, arith::FastMathFlags::contract);
+}
+
+namespace {
+struct FuseFAddFMul final : OpRewritePattern<FAddOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(FAddOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!hasContract(op.getFastmath()))
+      return failure();
+
+    Value acc;
+    FMulOp mul;
+    if ((mul = op.getLhs().getDefiningOp<FMulOp>()))
+      acc = op.getRhs();
+    else if ((mul = op.getRhs().getDefiningOp<FMulOp>()))
+      acc = op.getLhs();
+    else
+      return failure();
+
+    if (!hasContract(mul.getFastmath()))
+      return failure();
+
+    arith::FastMathFlags flags = op.getFastmath() & mul.getFastmath();
+    arith::FastMathFlagsAttr flagsAttr =
+        arith::FastMathFlagsAttr::get(op.getContext(), flags);
+    rewriter.replaceOpWithNewOp<FmaOp>(op, op.getType(), mul.getLhs(),
+                                       mul.getRhs(), acc, flagsAttr);
+    return success();
+  }
+};
+} // namespace
+
+void FAddOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *context) {
+  patterns.add<FuseFAddFMul>(context);
+}
+
 LogicalResult FExp2Op::verify() {
   return verifyWaveFloatSimdUnary(getOperation(), getSource().getType(),
                                   getResult().getType());
