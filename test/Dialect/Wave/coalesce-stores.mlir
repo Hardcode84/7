@@ -337,3 +337,49 @@ func.func @mismatched_symbol_binding_stays(%out: !wave.ptr<#wave.global, f32>,
       -> !wave.mem.token
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @store_pair_same_cache
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, f16>, [[A:%.*]]: !wave.simd<f16, 32>, [[B:%.*]]: !wave.simd<f16, 32>)
+// CHECK: [[PACK:%.*]] = wave.pack [[A]], [[B]]
+// CHECK: wave.store [[PACK]] -> [[OUT]] {cache = #waveamd.store_cache<cs>}
+func.func @store_pair_same_cache(%out: !wave.ptr<#wave.global, f16>,
+                                 %a: !wave.simd<f16, 32>,
+                                 %b: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out {cache = #waveamd.store_cache<cs>}
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %t0 {cache = #waveamd.store_cache<cs>}
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @store_pair_mismatched_cache_stays
+// CHECK-NOT: wave.pack
+// CHECK: wave.store {{.*}} {cache = #waveamd.store_cache<cg>}
+// CHECK: wave.store {{.*}} {cache = #waveamd.store_cache<cs>}
+func.func @store_pair_mismatched_cache_stays(%out: !wave.ptr<#wave.global, f16>,
+                                             %a: !wave.simd<f16, 32>,
+                                             %b: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out {cache = #waveamd.store_cache<cg>}
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %t0 {cache = #waveamd.store_cache<cs>}
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}

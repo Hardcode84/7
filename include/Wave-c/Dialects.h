@@ -120,6 +120,16 @@ MLIR_CAPI_EXPORTED bool
 mlirWaveAMDAttributeIsABufferAddressSpace(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveAMDBufferAddressSpaceAttrGet(MlirContext ctx);
+MLIR_CAPI_EXPORTED bool mlirWaveAMDAttributeIsALoadCache(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirWaveAMDLoadCacheAttrGet(MlirContext ctx,
+                                                             uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t
+mlirWaveAMDLoadCacheAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED bool mlirWaveAMDAttributeIsAStoreCache(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirWaveAMDStoreCacheAttrGet(MlirContext ctx,
+                                                              uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t
+mlirWaveAMDStoreCacheAttrGetValue(MlirAttribute attr);
 
 //===----------------------------------------------------------------------===//
 // WaveMeta types

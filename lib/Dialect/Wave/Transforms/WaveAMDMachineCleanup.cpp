@@ -16,6 +16,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <array>
 #include <limits>
@@ -31,6 +32,13 @@ using namespace mlir::waveamdmachine;
 
 namespace {
 namespace traits = OpTrait::waveamdmachine;
+
+static constexpr llvm::StringLiteral kMemoryCacheAttrName = "cache";
+
+static void copyCacheAttr(Operation *dst, Operation *src) {
+  if (Attribute cache = src->getAttr(kMemoryCacheAttrName))
+    dst->setAttr(kMemoryCacheAttrName, cache);
+}
 
 struct ScaledLoopStep {
   SAddI32Op add;
@@ -727,6 +735,7 @@ static Value createD16Low(OpBuilder &builder, BufferLoadU8Op load,
       builder, load.getLoc(), load.getResult().getType(), tokenType,
       load.getOffset(), load.getDescriptor(), load.getSoffset(),
       load.getDependency(), load.getInstOffset());
+  copyCacheAttr(d16.getOperation(), load.getOperation());
   it->second = d16.getResult();
   state.oldLoads.push_back(load.getOperation());
   load.getResult().replaceAllUsesWith(d16.getResult());
@@ -748,6 +757,7 @@ static Value createD16Hi(OpBuilder &builder, BufferLoadU8Op load,
       builder, load.getLoc(), load.getResult().getType(), tokenType,
       load.getOffset(), preserved, load.getDescriptor(), load.getSoffset(),
       load.getDependency(), load.getInstOffset());
+  copyCacheAttr(d16.getOperation(), load.getOperation());
   it->second = d16.getResult();
   state.oldLoads.push_back(load.getOperation());
   load.getResult().replaceAllUsesWith(d16.getResult());

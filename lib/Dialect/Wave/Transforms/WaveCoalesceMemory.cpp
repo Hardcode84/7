@@ -14,6 +14,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <optional>
 
@@ -27,6 +28,8 @@ using namespace mlir::wave;
 
 namespace {
 
+static constexpr llvm::StringLiteral kMemoryCacheAttrName = "cache";
+
 enum class MemoryGroupKind { Load, Store };
 
 struct MemoryGroup {
@@ -35,6 +38,7 @@ struct MemoryGroup {
   MemoryAddress address;
   Value accessPtr;
   Type scalarElementType;
+  Attribute cache;
   Operation *firstOp = nullptr;
   Operation *lastOp = nullptr;
   int64_t simdWidth = 0;
@@ -90,6 +94,10 @@ static Value getMemoryDependency(Operation *op) {
   if (LoadOp load = dyn_cast<LoadOp>(op))
     return load.getDependency();
   return cast<StoreOp>(op).getDependency();
+}
+
+static Attribute getMemoryCache(Operation *op) {
+  return op->getAttr(kMemoryCacheAttrName);
 }
 
 static Value getMemoryToken(Operation *op) {
@@ -165,8 +173,15 @@ static bool valueAvailableBefore(Value value, Operation *op) {
   return def->isBeforeInBlock(op);
 }
 
+static bool hasOnlyMergeableAttrs(Operation *op) {
+  for (NamedAttribute attr : op->getAttrs())
+    if (attr.getName().getValue() != kMemoryCacheAttrName)
+      return false;
+  return true;
+}
+
 static std::optional<Type> getScalarElementType(Operation *op) {
-  if (!op->getAttrs().empty())
+  if (!hasOnlyMergeableAttrs(op))
     return std::nullopt;
 
   SimdType simdType = dyn_cast<SimdType>(getMemoryPayload(op).getType());
@@ -220,6 +235,7 @@ getMemorySeed(Operation *op, WaveDialect &dialect) {
   group.address = std::move(**address);
   group.accessPtr = getMemoryPtr(op);
   group.scalarElementType = *scalarElementType;
+  group.cache = getMemoryCache(op);
   group.firstOp = op;
   group.lastOp = op;
   group.simdWidth = cast<SimdType>(getMemoryPayload(op).getType()).getWidth();
@@ -231,7 +247,8 @@ getMemorySeed(Operation *op, WaveDialect &dialect) {
 static bool compatibleGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
   return lhs.kind == rhs.kind &&
          lhs.scalarElementType == rhs.scalarElementType &&
-         lhs.simdWidth == rhs.simdWidth && lhs.address.base == rhs.address.base;
+         lhs.simdWidth == rhs.simdWidth &&
+         lhs.address.base == rhs.address.base && lhs.cache == rhs.cache;
 }
 
 static bool mergeableGroupWidth(const MemoryGroup &lhs,
@@ -279,6 +296,7 @@ buildMergedGroup(std::pair<const MemoryGroup *, const MemoryGroup *> ordered,
   merged.address = addressOrdered.lo->address;
   merged.accessPtr = addressOrdered.lo->accessPtr;
   merged.scalarElementType = ordered.first->scalarElementType;
+  merged.cache = ordered.first->cache;
   merged.firstOp = ordered.first->firstOp;
   merged.lastOp = ordered.second->lastOp;
   merged.simdWidth = ordered.first->simdWidth;
@@ -392,7 +410,7 @@ static void rewriteStoreGroup(IRRewriter &rewriter, MemoryGroup &group) {
                                ValueRange(group.payloads));
   StoreOp store = StoreOp::create(
       rewriter, last.getLoc(), last.getToken().getType(), pack.getResult(),
-      group.accessPtr, getMemoryDependency(group.firstOp));
+      group.accessPtr, getMemoryDependency(group.firstOp), group.cache);
   replaceGroupTokens(rewriter, group, store.getToken());
   for (Operation *op : llvm::reverse(group.ops))
     rewriter.eraseOp(op);
@@ -405,7 +423,7 @@ static void rewriteLoadGroup(IRRewriter &rewriter, MemoryGroup &group) {
   rewriter.setInsertionPoint(first);
   LoadOp load = LoadOp::create(rewriter, first.getLoc(), packedType,
                                first.getToken().getType(), group.accessPtr,
-                               getMemoryDependency(group.firstOp));
+                               getMemoryDependency(group.firstOp), group.cache);
 
   rewriter.setInsertionPointAfter(load);
   for (auto [idx, oldValue] : llvm::enumerate(group.payloads)) {

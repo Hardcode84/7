@@ -75,6 +75,7 @@ static constexpr llvm::StringLiteral kSGPRSpillCountAttr =
     "waveamdmachine.sgpr_spill_count";
 static constexpr llvm::StringLiteral kVGPRSpillCountAttr =
     "waveamdmachine.vgpr_spill_count";
+static constexpr llvm::StringLiteral kMemoryCacheAttrName = "cache";
 // Text ISA names only v0..v255/a0..a255.
 static constexpr unsigned kTextAsmVectorRegisterLimit = 256;
 
@@ -967,6 +968,67 @@ private:
     return fallback;
   }
 
+  unsigned streamingCPol() const {
+    if (isGfx940Plus())
+      return llvm::AMDGPU::CPol::NT;
+    return llvm::AMDGPU::CPol::GLC | llvm::AMDGPU::CPol::SLC;
+  }
+
+  FailureOr<unsigned> getLoadCacheCPol(Operation &op) const {
+    Attribute cache = op.getAttr(kMemoryCacheAttrName);
+    if (!cache)
+      return 0u;
+    auto attr = dyn_cast<waveamd::LoadCacheAttr>(cache);
+    if (!attr) {
+      op.emitError("load cache modifier must use #waveamd.load_cache");
+      return failure();
+    }
+
+    switch (attr.getValue()) {
+    case waveamd::LoadCacheKind::None:
+    case waveamd::LoadCacheKind::CA:
+      return 0u;
+    case waveamd::LoadCacheKind::CG:
+      return llvm::AMDGPU::CPol::GLC;
+    case waveamd::LoadCacheKind::CS:
+      return streamingCPol();
+    case waveamd::LoadCacheKind::CV:
+      return llvm::AMDGPU::CPol::GLC |
+             (isGfx11() ? llvm::AMDGPU::CPol::DLC : 0);
+    }
+    llvm_unreachable("unknown load cache modifier");
+  }
+
+  FailureOr<unsigned> getStoreCacheCPol(Operation &op) const {
+    Attribute cache = op.getAttr(kMemoryCacheAttrName);
+    if (!cache)
+      return 0u;
+    auto attr = dyn_cast<waveamd::StoreCacheAttr>(cache);
+    if (!attr) {
+      op.emitError("store cache modifier must use #waveamd.store_cache");
+      return failure();
+    }
+
+    switch (attr.getValue()) {
+    case waveamd::StoreCacheKind::None:
+    case waveamd::StoreCacheKind::WB:
+      return 0u;
+    case waveamd::StoreCacheKind::CG:
+      return llvm::AMDGPU::CPol::GLC;
+    case waveamd::StoreCacheKind::CS:
+      return streamingCPol();
+    case waveamd::StoreCacheKind::WT:
+      return llvm::AMDGPU::CPol::SLC;
+    }
+    llvm_unreachable("unknown store cache modifier");
+  }
+
+  LogicalResult rejectCacheAttr(Operation &op, StringRef opKind) const {
+    if (op.getAttr(kMemoryCacheAttrName))
+      return op.emitError(opKind) << " does not support cache modifiers";
+    return success();
+  }
+
   FailureOr<unsigned> getFixedLDSSize(func::FuncOp func) const {
     unsigned total = getIntAttr(func, "waveamdmachine.lds_size", 0);
     unsigned dynamic = getIntAttr(func, "waveamdmachine.dynamic_lds_size", 0);
@@ -1812,47 +1874,62 @@ private:
   //   DS_WRITE_*:     vaddr, vdata, offset, gds
   LogicalResult emitGlobalLoad(Operation &op, unsigned opcode) {
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getLoadCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(1)),
                    toMCOperand(op.getOperand(0)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult emitGlobalStore(Operation &op, unsigned opcode) {
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getStoreCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
                    toMCOperand(op.getOperand(2)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult emitGlobalAddrLoad(Operation &op, unsigned opcode) {
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getLoadCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult emitGlobalAddrStore(Operation &op, unsigned opcode) {
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getStoreCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult emitBufferLoad(Operation &op, unsigned opcode) {
     if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(2))))
       return failure();
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getLoadCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
                    toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult emitBufferLoadD16Hi(Operation &op, unsigned opcode) {
@@ -1861,14 +1938,19 @@ private:
     if (!waveamdmachine::isSamePhysicalReg(op.getResult(0), op.getOperand(1)))
       return op.emitError("D16 high load result must reuse preserved operand");
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getLoadCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
                    toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult emitScratchLoad(Operation &op) {
+    if (failed(rejectCacheAttr(op, "scratch load")))
+      return failure();
     if (failed(rejectNonZeroLiteralScratchVaddr(op, op.getOperand(0))) ||
         failed(rejectNonZeroLiteralScratchSaddr(op, op.getOperand(1))))
       return failure();
@@ -1897,6 +1979,8 @@ private:
   }
 
   LogicalResult emitScratchStore(Operation &op) {
+    if (failed(rejectCacheAttr(op, "scratch store")))
+      return failure();
     if (failed(rejectNonZeroLiteralScratchVaddr(op, op.getOperand(0))) ||
         failed(rejectNonZeroLiteralScratchSaddr(op, op.getOperand(2))))
       return failure();
@@ -1926,6 +2010,8 @@ private:
   }
 
   LogicalResult emitBufferLoadLds(Operation &op, unsigned opcode) {
+    if (failed(rejectCacheAttr(op, "buffer LDS load")))
+      return failure();
     if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(2))))
       return failure();
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
@@ -1941,11 +2027,14 @@ private:
     if (failed(rejectNonZeroLiteralSoffset(op, op.getOperand(3))))
       return failure();
     int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
+    FailureOr<unsigned> cpol = getStoreCacheCPol(op);
+    if (failed(cpol))
+      return failure();
     return emitMC(opcode,
                   {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
                    toMCOperand(op.getOperand(2)), toMCOperand(op.getOperand(3)),
                    llvm::MCOperand::createImm(instOffset),
-                   llvm::MCOperand::createImm(0)});
+                   llvm::MCOperand::createImm(*cpol)});
   }
 
   LogicalResult rejectNonZeroLiteralSoffset(Operation &op, Value soffset) {
@@ -3259,6 +3348,8 @@ private:
     if (isa<waveamdmachine::ScratchStoreB32Op>(op))
       return emitScratchStore(op);
     if (isa<waveamdmachine::GlobalLoadLdsB32Op>(op)) {
+      if (failed(rejectCacheAttr(op, "global LDS load")))
+        return failure();
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       int64_t aux = getIntAttr(&op, "aux", 0);
       return emitMC(globalLoadLdsB32(), {toMCOperand(op.getOperand(1)),
@@ -3267,6 +3358,8 @@ private:
                                          llvm::MCOperand::createImm(aux)});
     }
     if (isa<waveamdmachine::GlobalLoadLdsB128Op>(op)) {
+      if (failed(rejectCacheAttr(op, "global LDS load")))
+        return failure();
       int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
       int64_t aux = getIntAttr(&op, "aux", 0);
       return emitMC(globalLoadLdsB128(),

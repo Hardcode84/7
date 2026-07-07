@@ -40,6 +40,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     ExprAttr,
     FragmentType,
     GlobalAddressSpaceAttr,
+    LoadCacheAttr,
     MaskType,
     MemTokenType,
     PredAttr,
@@ -47,6 +48,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     PtrType,
     SharedAddressSpaceAttr,
     SimdType,
+    StoreCacheAttr,
     register_dialects,
     register_passes,
 )
@@ -237,6 +239,14 @@ def private_address_space() -> Attribute:
 
 def buffer_address_space() -> Attribute:
     return BufferAddressSpaceAttr.get(context=_current_context())
+
+
+def load_cache(kind: int) -> Attribute:
+    return LoadCacheAttr.get(kind, context=_current_context())
+
+
+def store_cache(kind: int) -> Attribute:
+    return StoreCacheAttr.get(kind, context=_current_context())
 
 
 def ptr_type(
@@ -927,8 +937,17 @@ class FunctionBuilder:
                 result_type = base.type
         return wave.PtrAddOp(result_type, base, offset).result
 
-    def store(self, value: Value, ptr: Value, *, after: Value | None = None) -> Value:
-        return wave.StoreOp(mem_token_type(), value, ptr, dependency=after).token
+    def store(
+        self,
+        value: Value,
+        ptr: Value,
+        *,
+        after: Value | None = None,
+        cache: Attribute | None = None,
+    ) -> Value:
+        return wave.StoreOp(
+            mem_token_type(), value, ptr, dependency=after, cache=cache
+        ).token
 
     def load(
         self,
@@ -936,6 +955,7 @@ class FunctionBuilder:
         result_type: Type,
         *,
         after: Value | None = None,
+        cache: Attribute | None = None,
     ) -> tuple[Value, Value]:
         """Emit ``wave.load`` and return ``(value, token)``.
 
@@ -944,7 +964,9 @@ class FunctionBuilder:
         dword load; a ``!wave.simd<vector<R x T>, W>`` produces ``R``
         consecutive dword loads merged into one VGPR tuple.
         """
-        op = wave.LoadOp(result_type, mem_token_type(), ptr, dependency=after)
+        op = wave.LoadOp(
+            result_type, mem_token_type(), ptr, dependency=after, cache=cache
+        )
         return op.value, op.token
 
     def token(self) -> Value:
@@ -1307,6 +1329,7 @@ __all__ = [
     "GlobalAddressSpaceAttr",
     "IndexType",
     "IntegerType",
+    "LoadCacheAttr",
     "MaskType",
     "MemRefType",
     "MemTokenType",
@@ -1316,6 +1339,7 @@ __all__ = [
     "PtrType",
     "SharedAddressSpaceAttr",
     "SimdType",
+    "StoreCacheAttr",
     "bf16",
     "buffer_address_space",
     "buffer_ptr_type",
@@ -1328,6 +1352,7 @@ __all__ = [
     "i8",
     "i32",
     "index_type",
+    "load_cache",
     "mask_type",
     "mem_token_type",
     "mod",
@@ -1339,6 +1364,7 @@ __all__ = [
     "shared_address_space",
     "simd_ptr_type",
     "simd_type",
+    "store_cache",
     "sym",
     "sym_ctx",
     "unranked_memref_type",

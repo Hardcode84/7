@@ -536,7 +536,8 @@ def Wave_StoreOp : Wave_Op<"store"> {
 
   let arguments = (ins Wave_Simd:$value,
                        Arg<AnyType, "", [MemWrite]>:$ptr,
-                       Optional<Wave_MemToken>:$dependency);
+                       Optional<Wave_MemToken>:$dependency,
+                       OptionalAttr<AnyAttr>:$cache);
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = "$value `->` $ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
@@ -566,7 +567,8 @@ def Wave_LoadOp : Wave_Op<"load"> {
   }];
 
   let arguments = (ins Arg<AnyType, "", [MemRead]>:$ptr,
-                       Optional<Wave_MemToken>:$dependency);
+                       Optional<Wave_MemToken>:$dependency,
+                       OptionalAttr<AnyAttr>:$cache);
   let results = (outs Wave_Simd:$value, Wave_MemToken:$token);
   let assemblyFormat = "$ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;

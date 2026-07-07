@@ -19,6 +19,7 @@ using namespace mlir;
 using namespace mlir::waveamd;
 
 #include "mlir/Dialect/Wave/IR/WaveAMDOpsDialect.cpp.inc"
+#include "mlir/Dialect/Wave/IR/WaveAMDOpsEnums.cpp.inc"
 
 void WaveAMDDialect::initialize() {
   registerAttributes();

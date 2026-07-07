@@ -116,6 +116,27 @@ def test_waveamd_load_and_fragment_pack():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_cache_attrs
+@run
+def test_cache_attrs():
+    with w.module() as m:
+        with m.function("cache_kernel", [w.ptr_type(w.i32())], kernel=True) as f:
+            (ptr,) = f.args
+            lane = f.lane_id()
+            ptrs = f.ptr_add(ptr, lane, w.simd_ptr_type(w.i32()))
+            load_cache = w.load_cache(w.LoadCacheAttr.CG)
+            store_cache = w.store_cache(w.StoreCacheAttr.WT)
+            assert w.LoadCacheAttr.isinstance(load_cache)
+            assert w.StoreCacheAttr.isinstance(store_cache)
+            assert w.LoadCacheAttr(load_cache).value == w.LoadCacheAttr.CG
+            assert w.StoreCacheAttr(store_cache).value == w.StoreCacheAttr.WT
+            value, tok = f.load(ptrs, w.simd_type(w.i32()), cache=load_cache)
+            f.store(value, ptrs, after=tok, cache=store_cache)
+        # CHECK: wave.load {{.*}} {cache = #waveamd.load_cache<cg>}
+        # CHECK: wave.store {{.*}} {cache = #waveamd.store_cache<wt>}
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_typed_bindings
 @run
 def test_typed_bindings():

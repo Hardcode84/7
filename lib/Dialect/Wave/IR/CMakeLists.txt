@@ -25,6 +25,7 @@ add_mlir_dialect_library(MLIRWaveDialect
 
   DEPENDS
   MLIRWaveAMDAttributesIncGen
+  MLIRWaveAMDEnumsIncGen
   MLIRWaveAMDOpsIncGen
   MLIRWaveAttributesIncGen
   MLIRWaveEnumsIncGen
@@ -70,6 +71,7 @@ add_mlir_dialect_library(MLIRWaveAMDDialect
 
   DEPENDS
   MLIRWaveAMDAttributesIncGen
+  MLIRWaveAMDEnumsIncGen
   MLIRWaveAMDOpsIncGen
 
   LINK_LIBS PUBLIC

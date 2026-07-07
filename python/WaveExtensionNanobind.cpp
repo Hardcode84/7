@@ -29,6 +29,44 @@ static void bindAddressSpaceAttr(nb::module_ &m, const char *name,
           nb::arg("cls"), nb::arg("context"));
 }
 
+static void bindLoadCacheAttr(nb::module_ &m) {
+  auto cls = mlir_attribute_subclass(m, "LoadCacheAttr",
+                                     mlirWaveAMDAttributeIsALoadCache);
+  cls.def_classmethod(
+         "get",
+         [](nb::object &cls, uint32_t value, MlirContext ctx) {
+           return cls(mlirWaveAMDLoadCacheAttrGet(ctx, value));
+         },
+         nb::arg("cls"), nb::arg("value"), nb::arg("context"))
+      .def_property_readonly("value", [](MlirAttribute self) {
+        return mlirWaveAMDLoadCacheAttrGetValue(self);
+      });
+  cls.get_class().attr("NONE") = nb::int_(0);
+  cls.get_class().attr("CA") = nb::int_(1);
+  cls.get_class().attr("CG") = nb::int_(2);
+  cls.get_class().attr("CS") = nb::int_(3);
+  cls.get_class().attr("CV") = nb::int_(4);
+}
+
+static void bindStoreCacheAttr(nb::module_ &m) {
+  auto cls = mlir_attribute_subclass(m, "StoreCacheAttr",
+                                     mlirWaveAMDAttributeIsAStoreCache);
+  cls.def_classmethod(
+         "get",
+         [](nb::object &cls, uint32_t value, MlirContext ctx) {
+           return cls(mlirWaveAMDStoreCacheAttrGet(ctx, value));
+         },
+         nb::arg("cls"), nb::arg("value"), nb::arg("context"))
+      .def_property_readonly("value", [](MlirAttribute self) {
+        return mlirWaveAMDStoreCacheAttrGetValue(self);
+      });
+  cls.get_class().attr("NONE") = nb::int_(0);
+  cls.get_class().attr("WB") = nb::int_(1);
+  cls.get_class().attr("CG") = nb::int_(2);
+  cls.get_class().attr("CS") = nb::int_(3);
+  cls.get_class().attr("WT") = nb::int_(4);
+}
+
 // Single `register_dialects(context, load=True)` entry point that exposes
 // the user-facing `wave` / `waveamd` / `wavemeta` dialects and the
 // lower-level `waveamdmachine` dialect. Callers normally only need the
@@ -302,6 +340,8 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindAddressSpaceAttr(m, "BufferAddressSpaceAttr",
                        mlirWaveAMDAttributeIsABufferAddressSpace,
                        mlirWaveAMDBufferAddressSpaceAttrGet);
+  bindLoadCacheAttr(m);
+  bindStoreCacheAttr(m);
 
   // WaveMeta types.
   bindPTupleType(m);

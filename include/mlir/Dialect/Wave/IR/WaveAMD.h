@@ -15,6 +15,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "mlir/Dialect/Wave/IR/WaveAMDOpsDialect.h.inc"
+#include "mlir/Dialect/Wave/IR/WaveAMDOpsEnums.h.inc"
 
 #define GET_ATTRDEF_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveAMDOpsAttributes.h.inc"

@@ -14,6 +14,8 @@
 
 #include "WaveAMDMachineSelector.h"
 
+#include "llvm/ADT/StringRef.h"
+
 using namespace mlir;
 using namespace mlir::wave;
 using namespace mlir::waveamd;
@@ -22,6 +24,25 @@ using namespace mlir::wave::wmsel;
 namespace mlir::wave::wmsel {
 
 namespace {
+
+static constexpr llvm::StringLiteral kMemoryCacheAttrName = "cache";
+
+static Attribute getCacheAttr(Operation *op) {
+  return op->getAttr(kMemoryCacheAttrName);
+}
+
+static Operation *attachCache(Operation *op, Attribute cache) {
+  if (cache)
+    op->setAttr(kMemoryCacheAttrName, cache);
+  return op;
+}
+
+static LogicalResult rejectSharedCache(Operation *op) {
+  if (getCacheAttr(op))
+    return op->emitError(
+        "cache modifier is only supported for global or buffer memory");
+  return success();
+}
 
 static FailureOr<MemoryPayloadShape> getPayloadShape(Operation *op,
                                                      SimdType simdType) {
@@ -126,6 +147,8 @@ LogicalResult selectSharedStore(WaveAMDMachineSelector &S, StoreOp op,
                                 Value base, const PointerOffset &offset,
                                 unsigned registers, bool useB8Op,
                                 bool useB16Op) {
+  if (failed(rejectSharedCache(op.getOperation())))
+    return failure();
   waveamdmachine::AddressFieldSpec spec =
       sharedStoreSpec(registers, useB8Op, useB16Op);
   FailureOr<MaterializedLdsAddress> sharedAddr =
@@ -154,46 +177,65 @@ static Operation *buildOneGlobalOrBufferStore(WaveAMDMachineSelector &S,
                                               Value dep, int64_t instOffset,
                                               bool isTuple) {
   Type tokenType = getMemTokenType(op.getContext());
+  Attribute cache = getCacheAttr(op.getOperation());
   if (isTuple) {
     if (isBuffer)
-      return waveamdmachine::BufferStoreTupleB32Op::create(
-          S.builder, op.getLoc(), tokenType, voffset, value, base, soffset, dep,
-          instOffset);
-    return waveamdmachine::GlobalStoreTupleB32Op::create(
-        S.builder, op.getLoc(), tokenType, voffset, value, base, dep,
-        instOffset);
+      return attachCache(waveamdmachine::BufferStoreTupleB32Op::create(
+                             S.builder, op.getLoc(), tokenType, voffset, value,
+                             base, soffset, dep, instOffset),
+                         cache);
+    return attachCache(waveamdmachine::GlobalStoreTupleB32Op::create(
+                           S.builder, op.getLoc(), tokenType, voffset, value,
+                           base, dep, instOffset),
+                       cache);
   }
   if (isBuffer)
-    return waveamdmachine::BufferStoreB32Op::create(
-        S.builder, op.getLoc(), tokenType, voffset, value, base, soffset, dep,
-        instOffset);
-  return waveamdmachine::GlobalStoreB32Op::create(
-      S.builder, op.getLoc(), tokenType, voffset, value, base, dep, instOffset);
+    return attachCache(waveamdmachine::BufferStoreB32Op::create(
+                           S.builder, op.getLoc(), tokenType, voffset, value,
+                           base, soffset, dep, instOffset),
+                       cache);
+  return attachCache(waveamdmachine::GlobalStoreB32Op::create(
+                         S.builder, op.getLoc(), tokenType, voffset, value,
+                         base, dep, instOffset),
+                     cache);
 }
 
 static Operation *buildFullAddressStore(WaveAMDMachineSelector &S, StoreOp op,
                                         Type tokenType, Value addr, Value value,
                                         Value dep, unsigned registers,
                                         bool useB8Op, bool useB16Op) {
+  Attribute cache = getCacheAttr(op.getOperation());
   if (useB8Op)
-    return waveamdmachine::GlobalStoreB8Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+    return attachCache(
+        waveamdmachine::GlobalStoreB8Addr64Op::create(
+            S.builder, op.getLoc(), tokenType, addr, value, dep, 0),
+        cache);
   if (useB16Op)
-    return waveamdmachine::GlobalStoreB16Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+    return attachCache(
+        waveamdmachine::GlobalStoreB16Addr64Op::create(
+            S.builder, op.getLoc(), tokenType, addr, value, dep, 0),
+        cache);
   switch (registers) {
   case 1:
-    return waveamdmachine::GlobalStoreB32Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+    return attachCache(
+        waveamdmachine::GlobalStoreB32Addr64Op::create(
+            S.builder, op.getLoc(), tokenType, addr, value, dep, 0),
+        cache);
   case 2:
-    return waveamdmachine::GlobalStoreB64Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+    return attachCache(
+        waveamdmachine::GlobalStoreB64Addr64Op::create(
+            S.builder, op.getLoc(), tokenType, addr, value, dep, 0),
+        cache);
   case 3:
-    return waveamdmachine::GlobalStoreB96Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+    return attachCache(
+        waveamdmachine::GlobalStoreB96Addr64Op::create(
+            S.builder, op.getLoc(), tokenType, addr, value, dep, 0),
+        cache);
   case 4:
-    return waveamdmachine::GlobalStoreB128Addr64Op::create(
-        S.builder, op.getLoc(), tokenType, addr, value, dep, 0);
+    return attachCache(
+        waveamdmachine::GlobalStoreB128Addr64Op::create(
+            S.builder, op.getLoc(), tokenType, addr, value, dep, 0),
+        cache);
   default:
     return nullptr;
   }
@@ -212,6 +254,7 @@ static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
   Value value = S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getValue(), op));
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type tokenType = getMemTokenType(op.getContext());
+  Attribute cache = getCacheAttr(op.getOperation());
   SmallVector<Value> tokens;
   if (Operation *store = buildFullAddressStore(
           S, op, tokenType, *addr, value, dep, registers, useB8Op, useB16Op)) {
@@ -222,9 +265,11 @@ static LogicalResult selectFullAddressStore(WaveAMDMachineSelector &S,
     auto split = waveamdmachine::TupleToElementsOp::create(
         S.builder, op.getLoc(), elementTypes, value);
     for (auto [idx, element] : llvm::enumerate(split.getElements())) {
-      Operation *store = waveamdmachine::GlobalStoreB32Addr64Op::create(
-          S.builder, op.getLoc(), tokenType, *addr, element, dep,
-          static_cast<int64_t>(idx) * 4);
+      Operation *store =
+          attachCache(waveamdmachine::GlobalStoreB32Addr64Op::create(
+                          S.builder, op.getLoc(), tokenType, *addr, element,
+                          dep, static_cast<int64_t>(idx) * 4),
+                      cache);
       tokens.push_back(store->getResult(0));
     }
   }
@@ -275,6 +320,7 @@ emitGlobalOrBufferStore(WaveAMDMachineSelector &S, StoreOp op, Value base,
                                         b.soffset, dep, b.instOffset,
                                         /*isTuple=*/registers != 1);
   }
+  attachCache(store, getCacheAttr(op.getOperation()));
   S.values[op.getToken()] = store->getResult(0);
   S.eraseIfTopLevel(op);
   return success();
@@ -361,6 +407,8 @@ static Operation *buildSharedLoad(WaveAMDMachineSelector &S, LoadOp op,
 LogicalResult selectSharedLoad(WaveAMDMachineSelector &S, LoadOp op, Value base,
                                const PointerOffset &offset, unsigned registers,
                                bool useB8Op, bool useB16Op) {
+  if (failed(rejectSharedCache(op.getOperation())))
+    return failure();
   waveamdmachine::AddressFieldSpec spec =
       sharedLoadSpec(registers, useB8Op, useB16Op);
   FailureOr<MaterializedLdsAddress> sharedAddr =
@@ -407,21 +455,26 @@ static Operation *buildBufferLoad(WaveAMDMachineSelector &S, LoadOp op,
                                   WaveAMDMachineSelector::BucketedOperands b,
                                   Value base, Value dep, bool useB8Op,
                                   bool useB16Op, unsigned registers) {
+  Attribute cache = getCacheAttr(op.getOperation());
   if (useB8Op)
-    return waveamdmachine::BufferLoadU8Op::create(
-        S.builder, op.getLoc(), resultType, tokenType, b.voffset, base,
-        b.soffset, dep, b.instOffset);
+    return attachCache(waveamdmachine::BufferLoadU8Op::create(
+                           S.builder, op.getLoc(), resultType, tokenType,
+                           b.voffset, base, b.soffset, dep, b.instOffset),
+                       cache);
   if (useB16Op)
-    return waveamdmachine::BufferLoadB16Op::create(
-        S.builder, op.getLoc(), resultType, tokenType, b.voffset, base,
-        b.soffset, dep, b.instOffset);
+    return attachCache(waveamdmachine::BufferLoadB16Op::create(
+                           S.builder, op.getLoc(), resultType, tokenType,
+                           b.voffset, base, b.soffset, dep, b.instOffset),
+                       cache);
   if (registers == 1)
-    return waveamdmachine::BufferLoadB32Op::create(
-        S.builder, op.getLoc(), resultType, tokenType, b.voffset, base,
-        b.soffset, dep, b.instOffset);
-  return waveamdmachine::BufferLoadTupleB32Op::create(
-      S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, b.soffset,
-      dep, b.instOffset);
+    return attachCache(waveamdmachine::BufferLoadB32Op::create(
+                           S.builder, op.getLoc(), resultType, tokenType,
+                           b.voffset, base, b.soffset, dep, b.instOffset),
+                       cache);
+  return attachCache(waveamdmachine::BufferLoadTupleB32Op::create(
+                         S.builder, op.getLoc(), resultType, tokenType,
+                         b.voffset, base, b.soffset, dep, b.instOffset),
+                     cache);
 }
 
 static Operation *buildGlobalLoad(WaveAMDMachineSelector &S, LoadOp op,
@@ -429,21 +482,26 @@ static Operation *buildGlobalLoad(WaveAMDMachineSelector &S, LoadOp op,
                                   WaveAMDMachineSelector::BucketedOperands b,
                                   Value base, Value dep, bool useB8Op,
                                   bool useB16Op, unsigned registers) {
+  Attribute cache = getCacheAttr(op.getOperation());
   if (useB8Op)
-    return waveamdmachine::GlobalLoadU8Op::create(
-        S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, dep,
-        b.instOffset);
+    return attachCache(waveamdmachine::GlobalLoadU8Op::create(
+                           S.builder, op.getLoc(), resultType, tokenType,
+                           b.voffset, base, dep, b.instOffset),
+                       cache);
   if (useB16Op)
-    return waveamdmachine::GlobalLoadB16Op::create(
-        S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, dep,
-        b.instOffset);
+    return attachCache(waveamdmachine::GlobalLoadB16Op::create(
+                           S.builder, op.getLoc(), resultType, tokenType,
+                           b.voffset, base, dep, b.instOffset),
+                       cache);
   if (registers == 1)
-    return waveamdmachine::GlobalLoadB32Op::create(
-        S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, dep,
-        b.instOffset);
-  return waveamdmachine::GlobalLoadTupleB32Op::create(
-      S.builder, op.getLoc(), resultType, tokenType, b.voffset, base, dep,
-      b.instOffset);
+    return attachCache(waveamdmachine::GlobalLoadB32Op::create(
+                           S.builder, op.getLoc(), resultType, tokenType,
+                           b.voffset, base, dep, b.instOffset),
+                       cache);
+  return attachCache(waveamdmachine::GlobalLoadTupleB32Op::create(
+                         S.builder, op.getLoc(), resultType, tokenType,
+                         b.voffset, base, dep, b.instOffset),
+                     cache);
 }
 
 LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
@@ -458,28 +516,37 @@ LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type tokenType = getMemTokenType(op.getContext());
   Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
+  Attribute cache = getCacheAttr(op.getOperation());
   SmallVector<Value> elements;
   SmallVector<Value> tokens;
   if (useB8Op) {
-    Operation *load = waveamdmachine::GlobalLoadU8Addr64Op::create(
-        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
+    Operation *load = attachCache(
+        waveamdmachine::GlobalLoadU8Addr64Op::create(
+            S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0),
+        cache);
     elements.push_back(load->getResult(0));
     tokens.push_back(load->getResult(1));
   } else if (useB16Op) {
-    Operation *load = waveamdmachine::GlobalLoadB16Addr64Op::create(
-        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
+    Operation *load = attachCache(
+        waveamdmachine::GlobalLoadB16Addr64Op::create(
+            S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0),
+        cache);
     elements.push_back(load->getResult(0));
     tokens.push_back(load->getResult(1));
   } else if (registers == 1) {
-    Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
-        S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0);
+    Operation *load = attachCache(
+        waveamdmachine::GlobalLoadB32Addr64Op::create(
+            S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0),
+        cache);
     elements.push_back(load->getResult(0));
     tokens.push_back(load->getResult(1));
   } else {
     for (unsigned idx : llvm::seq<unsigned>(0, registers)) {
-      Operation *load = waveamdmachine::GlobalLoadB32Addr64Op::create(
-          S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep,
-          static_cast<int64_t>(idx) * 4);
+      Operation *load =
+          attachCache(waveamdmachine::GlobalLoadB32Addr64Op::create(
+                          S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep,
+                          static_cast<int64_t>(idx) * 4),
+                      cache);
       elements.push_back(load->getResult(0));
       tokens.push_back(load->getResult(1));
     }

@@ -29,6 +29,17 @@ using namespace mlir;
 
 namespace {
 
+static constexpr llvm::StringLiteral kMemoryCacheAttrName = "cache";
+
+static Attribute getCacheAttr(Operation *op) {
+  return op->getAttr(kMemoryCacheAttrName);
+}
+
+static void setCacheAttr(Operation *op, Attribute cache) {
+  if (cache)
+    op->setAttr(kMemoryCacheAttrName, cache);
+}
+
 static waveamdmachine::RegType vgprNType(MLIRContext *ctx, unsigned width) {
   return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
                                       width,
@@ -320,6 +331,7 @@ decomposeGlobalLoad(waveamdmachine::GlobalLoadTupleB32Op op,
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();
+  Attribute cache = getCacheAttr(op);
   SmallVector<Value> elements;
   SmallVector<Value> tokens;
   elements.reserve(plan.size());
@@ -329,6 +341,7 @@ decomposeGlobalLoad(waveamdmachine::GlobalLoadTupleB32Op op,
     Operation *chunk = createGlobalLoadChunk(builder, op.getLoc(), w, tokenType,
                                              op.getOffset(), op.getBase(), dep,
                                              baseInstOffset + cumByteOffset);
+    setCacheAttr(chunk, cache);
     elements.push_back(chunk->getResult(0));
     tokens.push_back(chunk->getResult(1));
     cumByteOffset += static_cast<int64_t>(w) * 4;
@@ -353,6 +366,7 @@ decomposeBufferLoad(waveamdmachine::BufferLoadTupleB32Op op,
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();
+  Attribute cache = getCacheAttr(op);
   SmallVector<Value> elements;
   SmallVector<Value> tokens;
   elements.reserve(plan.size());
@@ -362,6 +376,7 @@ decomposeBufferLoad(waveamdmachine::BufferLoadTupleB32Op op,
     Operation *chunk = createBufferLoadChunk(
         builder, op.getLoc(), w, tokenType, op.getOffset(), op.getDescriptor(),
         op.getSoffset(), dep, baseInstOffset + cumByteOffset);
+    setCacheAttr(chunk, cache);
     elements.push_back(chunk->getResult(0));
     tokens.push_back(chunk->getResult(1));
     cumByteOffset += static_cast<int64_t>(w) * 4;
@@ -450,6 +465,7 @@ decomposeGlobalStore(waveamdmachine::GlobalStoreTupleB32Op op,
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();
+  Attribute cache = getCacheAttr(op);
   SmallVector<Value> tokens;
   tokens.reserve(plan.size());
   int64_t cumByteOffset = 0;
@@ -457,6 +473,7 @@ decomposeGlobalStore(waveamdmachine::GlobalStoreTupleB32Op op,
     Operation *chunk = createGlobalStoreChunk(
         builder, op.getLoc(), w, tokenType, op.getOffset(), element,
         op.getBase(), dep, baseInstOffset + cumByteOffset);
+    setCacheAttr(chunk, cache);
     tokens.push_back(chunk->getResult(0));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }
@@ -482,6 +499,7 @@ decomposeBufferStore(waveamdmachine::BufferStoreTupleB32Op op,
   Type tokenType = memTokenType(op.getContext());
   int64_t baseInstOffset = op.getInstOffset();
   Value dep = op.getDependency();
+  Attribute cache = getCacheAttr(op);
   SmallVector<Value> tokens;
   tokens.reserve(plan.size());
   int64_t cumByteOffset = 0;
@@ -490,6 +508,7 @@ decomposeBufferStore(waveamdmachine::BufferStoreTupleB32Op op,
         builder, op.getLoc(), w, tokenType, op.getOffset(), element,
         op.getDescriptor(), op.getSoffset(), dep,
         baseInstOffset + cumByteOffset);
+    setCacheAttr(chunk, cache);
     tokens.push_back(chunk->getResult(0));
     cumByteOffset += static_cast<int64_t>(w) * 4;
   }

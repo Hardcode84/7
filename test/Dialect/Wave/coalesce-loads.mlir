@@ -316,3 +316,47 @@ func.func @unsafe_insertion_point_stays(%in: !wave.ptr<#wave.global, f16>)
       -> (!wave.simd<f16, 32>, !wave.mem.token)
   return %lo, %hi : !wave.simd<f16, 32>, !wave.simd<f16, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @load_pair_same_cache
+// CHECK-SAME: ([[IN:%.*]]: !wave.ptr<#wave.global, f16>)
+// CHECK: [[LOAD:%.*]], {{%.*}} = wave.load [[IN]] {cache = #waveamd.load_cache<cg>} : (!wave.ptr<#wave.global, f16>) -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+// CHECK: [[LO:%.*]] = wave.extract [[LOAD]][0]
+// CHECK: [[HI:%.*]] = wave.extract [[LOAD]][1]
+// CHECK: return [[LO]], [[HI]]
+func.func @load_pair_same_cache(%in: !wave.ptr<#wave.global, f16>)
+    -> (!wave.simd<f16, 32>, !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %in, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %v0, %t0 = wave.load %in {cache = #waveamd.load_cache<cg>}
+      : (!wave.ptr<#wave.global, f16>)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %t0 {cache = #waveamd.load_cache<cg>}
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @load_pair_mismatched_cache_stays
+// CHECK-NOT: vector<2xf16>
+// CHECK: wave.load {{.*}} {cache = #waveamd.load_cache<cg>}
+// CHECK: wave.load {{.*}} {cache = #waveamd.load_cache<cs>}
+func.func @load_pair_mismatched_cache_stays(%in: !wave.ptr<#wave.global, f16>)
+    -> (!wave.simd<f16, 32>, !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %in, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %v0, %t0 = wave.load %in {cache = #waveamd.load_cache<cg>}
+      : (!wave.ptr<#wave.global, f16>)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %t0 {cache = #waveamd.load_cache<cs>}
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}

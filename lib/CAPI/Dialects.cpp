@@ -308,6 +308,34 @@ MlirAttribute mlirWaveAMDBufferAddressSpaceAttrGet(MlirContext ctx) {
   return wrap(waveamd::BufferAddressSpaceAttr::get(unwrap(ctx)));
 }
 
+bool mlirWaveAMDAttributeIsALoadCache(MlirAttribute attr) {
+  return llvm::isa<waveamd::LoadCacheAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveAMDLoadCacheAttrGet(MlirContext ctx, uint32_t value) {
+  return wrap(waveamd::LoadCacheAttr::get(
+      unwrap(ctx), static_cast<waveamd::LoadCacheKind>(value)));
+}
+
+uint32_t mlirWaveAMDLoadCacheAttrGetValue(MlirAttribute attr) {
+  return static_cast<uint32_t>(
+      llvm::cast<waveamd::LoadCacheAttr>(unwrap(attr)).getValue());
+}
+
+bool mlirWaveAMDAttributeIsAStoreCache(MlirAttribute attr) {
+  return llvm::isa<waveamd::StoreCacheAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveAMDStoreCacheAttrGet(MlirContext ctx, uint32_t value) {
+  return wrap(waveamd::StoreCacheAttr::get(
+      unwrap(ctx), static_cast<waveamd::StoreCacheKind>(value)));
+}
+
+uint32_t mlirWaveAMDStoreCacheAttrGetValue(MlirAttribute attr) {
+  return static_cast<uint32_t>(
+      llvm::cast<waveamd::StoreCacheAttr>(unwrap(attr)).getValue());
+}
+
 //===----------------------------------------------------------------------===//
 // WaveMeta types
 //===----------------------------------------------------------------------===//
