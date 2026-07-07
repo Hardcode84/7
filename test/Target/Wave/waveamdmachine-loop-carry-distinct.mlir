@@ -21,4 +21,25 @@ func.func @loop_vgpr_carry_init_distinct_from_invariant_use(
   return
 }
 
+// CHECK-LABEL: func.func @workitem_id_loop_carry
+// CHECK: %[[WI:.+]] = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+// CHECK: %[[INIT:.+]] = waveamdmachine.v_mov_b32_tuple %[[WI]] : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<vgpr, 1>
+// CHECK: waveamdmachine.uniform_loop {{.*}} carries({{.*}}, %[[INIT]] : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[CARRY:.*]]: !waveamdmachine.reg<vgpr, 1>):
+// CHECK: %[[NEXT:.+]] = waveamdmachine.v_add_u32 {{.*}}, %[[CARRY]]
+// CHECK: waveamdmachine.continue_if {{.*}} carries({{.*}}, %[[NEXT]] : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+func.func @workitem_id_loop_carry(%n: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %one = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %res = scf.for %i = %c0 to %n step %c1 iter_args(%base = %wi)
+      -> (!wave.simd<i32, 32>) : i32 {
+    %next = wave.binary addi %base, %one
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    scf.yield %next : !wave.simd<i32, 32>
+  }
+  return
+}
+
 }

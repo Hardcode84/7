@@ -407,27 +407,65 @@ static bool isSGPR1Value(Value value) {
          regType.getWidth() == 1;
 }
 
-static bool isPinnedSGPR1Value(Value value) {
+static bool isPinnedRegValue(Value value) {
   auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
-  return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
-         regType.getWidth() == 1 && regType.getIndex() >= 0;
+  return regType && regType.getIndex() >= 0;
 }
 
-static Value materializeLoopCarrySGPR1(WaveAMDMachineSelector &S, Location loc,
-                                       Value value) {
-  Value sgpr = S.materializeSGPR1(loc, value);
-  if (!isPinnedSGPR1Value(sgpr))
-    return sgpr;
+static waveamdmachine::RegType getVirtualRegType(WaveAMDMachineSelector &S,
+                                                 waveamdmachine::RegType type) {
+  return getRegType(S.builder.getContext(), type.getRegClass(),
+                    type.getWidth());
+}
 
-  // Pinned entry SGPRs are valid live-ins, but loop carries are reassigned on
-  // the backedge. Copy pinned starts into virtual SGPRs so init and next-IV
-  // carry types stay identical.
-  return waveamdmachine::SMovB32ValueOp::create(
-             S.builder, loc,
-             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
-                        1),
-             sgpr)
-      .getResult();
+static FailureOr<Value> copyPinnedLoopInit(WaveAMDMachineSelector &S,
+                                           scf::ForOp op, Value value) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || !isPinnedRegValue(value))
+    return value;
+
+  Location loc = op.getLoc();
+  waveamdmachine::RegType resultType = getVirtualRegType(S, type);
+  switch (type.getRegClass()) {
+  case waveamdmachine::RegClass::SGPR:
+    if (type.getWidth() == 1)
+      return waveamdmachine::SMovB32ValueOp::create(S.builder, loc, resultType,
+                                                    value)
+          .getResult();
+    return waveamdmachine::SMovB32TupleOp::create(S.builder, loc, resultType,
+                                                  value)
+        .getResult();
+  case waveamdmachine::RegClass::VGPR:
+    return waveamdmachine::VMovB32TupleOp::create(S.builder, loc, resultType,
+                                                  value)
+        .getResult();
+  case waveamdmachine::RegClass::AGPR: {
+    Type vgprType = getRegType(S.builder.getContext(),
+                               waveamdmachine::RegClass::VGPR, type.getWidth());
+    Value vgpr = waveamdmachine::VAccvgprReadB32TupleOp::create(
+        S.builder, loc, vgprType, value);
+    return waveamdmachine::VAccvgprWriteB32TupleOp::create(S.builder, loc,
+                                                           resultType, vgpr)
+        .getResult();
+  }
+  case waveamdmachine::RegClass::SCC:
+  case waveamdmachine::RegClass::VCC:
+    op.emitError("cannot copy pinned loop carry flag register");
+    return failure();
+  }
+  return failure();
+}
+
+static LogicalResult normalizePinnedLoopInits(WaveAMDMachineSelector &S,
+                                              scf::ForOp op,
+                                              MutableArrayRef<Value> inits) {
+  for (Value &init : inits) {
+    FailureOr<Value> copy = copyPinnedLoopInit(S, op, init);
+    if (failed(copy))
+      return failure();
+    init = *copy;
+  }
+  return success();
 }
 
 static bool isZeroValue(WaveAMDMachineSelector &S, Value value) {
@@ -497,8 +535,7 @@ static Value createLoopLtCmp(WaveAMDMachineSelector &S, Location loc, Value lhs,
 static Value createLoopIvInit(WaveAMDMachineSelector &S, Location loc,
                               Value lower, bool wideIv) {
   return wideIv ? signExtendSGPR2(S, loc, lower)
-                : materializeLoopCarrySGPR1(S, loc,
-                                            narrowLoopValue(S, loc, lower));
+                : S.materializeSGPR1(loc, narrowLoopValue(S, loc, lower));
 }
 
 static Value createLoopStep(WaveAMDMachineSelector &S, Location loc, Value step,
@@ -580,6 +617,8 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
     inits.push_back(snap.carry);
   for (const StridedBaseCarry &group : stridedBaseGroups)
     inits.push_back(group.base);
+  if (failed(normalizePinnedLoopInits(S, op, inits)))
+    return failure();
 
   Value entryCond;
   if (!canSkipLoopEntryCheck(S, op))
