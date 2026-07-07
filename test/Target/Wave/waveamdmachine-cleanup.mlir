@@ -2,6 +2,93 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @reuse_uniform_workitem_shift(
+// CHECK-SAME: [[LANE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-DAG: [[S6:%.*]] = waveamdmachine.imm 6
+// CHECK-DAG: [[S14:%.*]] = waveamdmachine.imm 14
+// CHECK: [[WI:%.*]] = waveamdmachine.v_workitem_id_x
+// CHECK: [[FIRST:%.*]] = waveamdmachine.v_readfirstlane_b32 [[WI]]
+// CHECK: [[WAVE:%.*]], %{{.*}} = waveamdmachine.s_lshr_b32 [[FIRST]], [[S6]]
+// CHECK: [[VEC:%.*]] = waveamdmachine.v_lshrrev_b32 [[WI]], [[S6]]
+// CHECK: [[ADDR:%.*]] = waveamdmachine.v_lshl_add_u32 [[WAVE]], [[S14]], [[LANE]]
+// CHECK: return [[ADDR]], [[VEC]]
+func.func @reuse_uniform_workitem_shift(%lane: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %s6 = waveamdmachine.imm 6 : !waveamdmachine.imm
+  %s14 = waveamdmachine.imm 14 : !waveamdmachine.imm
+  %wi = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+  %first = waveamdmachine.v_readfirstlane_b32 %wi
+      : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<sgpr, 1>
+  %wave, %scc = waveamdmachine.s_lshr_b32 %first, %s6
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %wide = waveamdmachine.v_lshrrev_b32 %wi, %s6
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %addr = waveamdmachine.v_lshl_add_u32 %wide, %s14, %lane
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return %addr, %wide
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @keep_lane_varying_workitem_shift(
+// CHECK-SAME: [[LANE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-DAG: [[S5:%.*]] = waveamdmachine.imm 5
+// CHECK-DAG: [[S14:%.*]] = waveamdmachine.imm 14
+// CHECK: [[WI:%.*]] = waveamdmachine.v_workitem_id_x
+// CHECK: [[WIDE:%.*]] = waveamdmachine.v_lshrrev_b32 [[WI]], [[S5]]
+// CHECK: [[ADDR:%.*]] = waveamdmachine.v_lshl_add_u32 [[WIDE]], [[S14]], [[LANE]]
+// CHECK: return [[ADDR]]
+func.func @keep_lane_varying_workitem_shift(%lane: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %s5 = waveamdmachine.imm 5 : !waveamdmachine.imm
+  %s14 = waveamdmachine.imm 14 : !waveamdmachine.imm
+  %wi = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+  %first = waveamdmachine.v_readfirstlane_b32 %wi
+      : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<sgpr, 1>
+  %wave, %scc = waveamdmachine.s_lshr_b32 %first, %s5
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %wide = waveamdmachine.v_lshrrev_b32 %wi, %s5
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %addr = waveamdmachine.v_lshl_add_u32 %wide, %s14, %lane
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return %addr : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @keep_non_x_linear_workitem_shift(
+// CHECK-SAME: [[LANE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-DAG: [[S6:%.*]] = waveamdmachine.imm 6
+// CHECK-DAG: [[S14:%.*]] = waveamdmachine.imm 14
+// CHECK: [[WI:%.*]] = waveamdmachine.v_workitem_id_x
+// CHECK: [[WIDE:%.*]] = waveamdmachine.v_lshrrev_b32 [[WI]], [[S6]]
+// CHECK: [[ADDR:%.*]] = waveamdmachine.v_lshl_add_u32 [[WIDE]], [[S14]], [[LANE]]
+// CHECK: return [[ADDR]]
+func.func @keep_non_x_linear_workitem_shift(%lane: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1>
+    attributes {wave.workgroup_size = array<i32: 16, 4, 1>} {
+  %s6 = waveamdmachine.imm 6 : !waveamdmachine.imm
+  %s14 = waveamdmachine.imm 14 : !waveamdmachine.imm
+  %wi = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+  %first = waveamdmachine.v_readfirstlane_b32 %wi
+      : (!waveamdmachine.reg<vgpr, 1, 0>) -> !waveamdmachine.reg<sgpr, 1>
+  %wave, %scc = waveamdmachine.s_lshr_b32 %first, %s6
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %wide = waveamdmachine.v_lshrrev_b32 %wi, %s6
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %addr = waveamdmachine.v_lshl_add_u32 %wide, %s14, %lane
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return %addr : !waveamdmachine.reg<vgpr, 1>
+}
+
 // CHECK-LABEL: func.func @fold_vcc_cndmask(
 // CHECK-SAME: [[A:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-SAME: [[B:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>

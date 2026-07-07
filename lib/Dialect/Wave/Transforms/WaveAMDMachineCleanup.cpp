@@ -10,13 +10,16 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <array>
 #include <limits>
@@ -354,6 +357,158 @@ static bool valueAvailableBefore(Value value, Operation *op) {
   if (def->getBlock() != op->getBlock())
     return true;
   return def->isBeforeInBlock(op);
+}
+
+static bool valueDefinedBeforeInBlock(Value value, Operation *op) {
+  Operation *def = value.getDefiningOp();
+  return def && def->getBlock() == op->getBlock() && def->isBeforeInBlock(op);
+}
+
+static bool isUniformWorkitemShift(unsigned shift, unsigned wavefrontSize) {
+  return shift >= llvm::Log2_32(wavefrontSize);
+}
+
+static bool hasXLinearWorkgroupShape(func::FuncOp func) {
+  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+    DenseI32ArrayAttr attr = func->getAttrOfType<DenseI32ArrayAttr>(name);
+    if (!attr)
+      continue;
+    if (attr.empty() || attr.size() > 3)
+      return false;
+    for (auto indexed : llvm::enumerate(attr.asArrayRef())) {
+      if (indexed.value() <= 0)
+        return false;
+      if (indexed.index() > 0 && indexed.value() != 1)
+        return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+struct WorkitemShift {
+  Value source;
+  unsigned shift = 0;
+};
+
+static std::optional<WorkitemShift> matchWorkitemShift(Value value,
+                                                       unsigned wavefrontSize) {
+  auto shiftOp = value.getDefiningOp<VLshrrevB32Op>();
+  if (!shiftOp)
+    return std::nullopt;
+  std::optional<int64_t> amount = getImmValue(shiftOp.getRhs());
+  if (!amount || *amount < 0 || *amount >= 32)
+    return std::nullopt;
+  if (!isUniformWorkitemShift(*amount, wavefrontSize))
+    return std::nullopt;
+  Value source = shiftOp.getLhs();
+  if (!source.getDefiningOp<VWorkitemIdXOp>())
+    return std::nullopt;
+  return WorkitemShift{source, static_cast<unsigned>(*amount)};
+}
+
+static std::optional<WorkitemShift>
+matchScalarWorkitemShift(SLshrB32Op shiftOp, unsigned wavefrontSize) {
+  std::optional<int64_t> amount = getImmValue(shiftOp.getRhs());
+  if (!amount || *amount < 0 || *amount >= 32)
+    return std::nullopt;
+  if (!isUniformWorkitemShift(*amount, wavefrontSize))
+    return std::nullopt;
+  auto firstLane = shiftOp.getLhs().getDefiningOp<VReadfirstlaneB32Op>();
+  if (!firstLane)
+    return std::nullopt;
+  Value source = firstLane.getSource();
+  if (!source.getDefiningOp<VWorkitemIdXOp>())
+    return std::nullopt;
+  return WorkitemShift{source, static_cast<unsigned>(*amount)};
+}
+
+using ScalarWorkitemShiftMap =
+    DenseMap<Value, SmallVector<std::pair<unsigned, Value>, 2>>;
+
+static Value findScalarWorkitemShift(const ScalarWorkitemShiftMap &shifts,
+                                     WorkitemShift match, Operation *op) {
+  auto it = shifts.find(match.source);
+  if (it == shifts.end())
+    return {};
+  for (auto [shift, value] : it->second)
+    if (shift == match.shift && valueDefinedBeforeInBlock(value, op))
+      return value;
+  return {};
+}
+
+static bool isVOP3IntOp(Operation *op) {
+  return isa<VAdd3U32Op, VMadI32I24Op, VMadU32U24Op, VLshlAddU32Op,
+             VAddLshlU32Op, VAndOrB32Op, VOr3B32Op, VXadU32Op, VBitOp3B32Op>(
+      op);
+}
+
+static bool canReplaceVOP3IntOperand(Operation *op, unsigned operand,
+                                     Value replacement,
+                                     const llvm::AMDGPU::IsaVersion &isa) {
+  SmallVector<Value, 3> operands(op->operand_begin(), op->operand_end());
+  if (operands.size() != 3)
+    return false;
+  operands[operand] = replacement;
+  return canUseConstantBus(operands, isa, [](Value, Value) { return false; });
+}
+
+static bool reuseUniformWorkitemShiftOperands(
+    Operation *op, const ScalarWorkitemShiftMap &scalarShifts,
+    unsigned wavefrontSize, const llvm::AMDGPU::IsaVersion &isa) {
+  if (!isVOP3IntOp(op))
+    return false;
+
+  bool changed = false;
+  for (unsigned index : llvm::seq<unsigned>(0, op->getNumOperands())) {
+    std::optional<WorkitemShift> match =
+        matchWorkitemShift(op->getOperand(index), wavefrontSize);
+    if (!match)
+      continue;
+    Value replacement = findScalarWorkitemShift(scalarShifts, *match, op);
+    if (!replacement)
+      continue;
+    if (!canReplaceVOP3IntOperand(op, index, replacement, isa))
+      continue;
+    op->setOperand(index, replacement);
+    changed = true;
+  }
+  return changed;
+}
+
+static FailureOr<bool> reuseUniformWorkitemShiftOperands(func::FuncOp func) {
+  FailureOr<llvm::AMDGPU::IsaVersion> targetIsa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(
+          func, "uniform workitem shift cleanup");
+  FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
+      func, "uniform workitem shift cleanup");
+  if (failed(targetIsa) || failed(wavefrontSize))
+    return failure();
+  if (!hasXLinearWorkgroupShape(func))
+    return false;
+
+  ScalarWorkitemShiftMap scalarShifts;
+  func.walk([&](SLshrB32Op op) {
+    std::optional<WorkitemShift> match =
+        matchScalarWorkitemShift(op, *wavefrontSize);
+    if (!match)
+      return;
+    scalarShifts[match->source].push_back({match->shift, op.getResult()});
+  });
+  if (scalarShifts.empty())
+    return false;
+
+  SmallVector<Operation *> users;
+  func.walk([&](Operation *op) {
+    if (isVOP3IntOp(op))
+      users.push_back(op);
+  });
+
+  bool changed = false;
+  for (Operation *op : users)
+    changed |= reuseUniformWorkitemShiftOperands(op, scalarShifts,
+                                                 *wavefrontSize, *targetIsa);
+  return changed;
 }
 
 struct BytePackLane {
@@ -1257,6 +1412,13 @@ struct WaveAMDMachineCleanupPass
         changed |= hoistFunction(func);
         changed |= scaleLoopCarries(func);
         changed |= foldVccCndmask(func);
+        FailureOr<bool> uniformShiftChanged =
+            reuseUniformWorkitemShiftOperands(func);
+        if (failed(uniformShiftChanged)) {
+          failedPass = true;
+          return;
+        }
+        changed |= *uniformShiftChanged;
       }
     });
     if (failedPass)
