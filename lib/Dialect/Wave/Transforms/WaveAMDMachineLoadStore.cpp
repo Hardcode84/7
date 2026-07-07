@@ -97,50 +97,130 @@ static Operation *buildSharedStore(WaveAMDMachineSelector &S, StoreOp op,
       S.builder, op.getLoc(), tokenType, addr, value, dep, offset);
 }
 
-static FailureOr<sym::ExprHandle>
-appendAddressExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs,
-                  sym::ExprHandle rhs, ArrayRef<sym::PredHandle> assumptions) {
-  if (!lhs)
-    return rhs;
-  if (!rhs)
-    return lhs;
-  FailureOr<sym::ExprHandle> expr =
-      sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add, rhs);
-  if (failed(expr))
+struct SelectedBufferSourcePlans {
+  SelectedBufferSources sources;
+  AddressPlan active;
+  AddressPlan inactive;
+};
+
+static FailureOr<std::optional<AddressPlan>>
+planSelectedBufferSourceAddress(WaveAMDMachineSelector &S, Operation *user,
+                                const BufferSelectedSourcePointer &source,
+                                const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, user, source.offset, spec);
+  if (failed(plan))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), *expr, assumptions);
-  return succeeded(simplified) ? *simplified : *expr;
+  if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
+                                                /*includeInstOffset=*/true)))
+    return failure();
+  if (!hasOnlyVOffsetField(*plan))
+    return std::optional<AddressPlan>{};
+  return std::optional<AddressPlan>{*plan};
 }
 
-static LogicalResult foldBufferAddressFields(WaveAMDMachineSelector &S,
-                                             AddressPlan &plan) {
-  FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
-      S, plan.voffsetExpr, plan.soffsetExpr, plan.assumptions);
-  if (failed(voffset))
+static FailureOr<std::optional<SelectedBufferSourcePlans>>
+planSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user, Value ptr,
+                          const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<std::optional<SelectedBufferSources>> sources =
+      matchSelectedBufferSources(S, user, ptr, /*requirePtrAdd=*/true);
+  if (failed(sources))
     return failure();
-  voffset = appendAddressExpr(S, *voffset, plan.fullAddressRemainderExpr,
-                              plan.assumptions);
-  if (failed(voffset))
+  if (!*sources)
+    return std::optional<SelectedBufferSourcePlans>{};
+
+  FailureOr<std::optional<AddressPlan>> activePlan =
+      planSelectedBufferSourceAddress(S, user, (*sources)->active, spec);
+  FailureOr<std::optional<AddressPlan>> inactivePlan =
+      planSelectedBufferSourceAddress(S, user, (*sources)->inactive, spec);
+  if (failed(activePlan) || failed(inactivePlan))
     return failure();
-  if (plan.instOffset != 0) {
-    FailureOr<sym::ExprHandle> instOffset =
-        sym::composeExprInt(S.symbolStore(), plan.instOffset);
-    if (failed(instOffset))
+  if (!*activePlan || !*inactivePlan ||
+      !isBufferSelectedSourceOobPlan(S, **inactivePlan))
+    return std::optional<SelectedBufferSourcePlans>{};
+  return std::optional<SelectedBufferSourcePlans>{
+      SelectedBufferSourcePlans{**sources, **activePlan, **inactivePlan}};
+}
+
+static std::optional<WaveAMDMachineSelector::BucketedOperands>
+selectedBufferSourceBucketsForVOffset(WaveAMDMachineSelector &S,
+                                      Operation *user, Value ptr) {
+  std::optional<Value> selectedVOffset = lookupSelectedPointerVOffset(S, ptr);
+  if (!selectedVOffset)
+    return std::nullopt;
+  WaveAMDMachineSelector::BucketedOperands out;
+  out.voffset = *selectedVOffset;
+  out.soffset = createImm(S.builder, user->getLoc(), 0);
+  return out;
+}
+
+static FailureOr<WaveAMDMachineSelector::BucketedOperands>
+materializeSelectedBufferSourceBuckets(
+    WaveAMDMachineSelector &S, Operation *user,
+    SelectedBufferSourcePlans &plans,
+    const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> active =
+      materializePlanBuckets(S, user, plans.active, spec);
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> inactive =
+      materializePlanBuckets(S, user, plans.inactive, spec);
+  if (failed(active) || failed(inactive))
+    return failure();
+
+  FailureOr<Value> selectedVOffset = createLaneSelect(
+      S, user, S.expect(plans.sources.select.getCondition(), user),
+      active->voffset, inactive->voffset, /*width=*/1);
+  if (failed(selectedVOffset))
+    return failure();
+  active->voffset = *selectedVOffset;
+  active->soffset = createImm(S.builder, user->getLoc(), 0);
+  active->instOffset = 0;
+  return *active;
+}
+
+static FailureOr<std::optional<WaveAMDMachineSelector::BucketedOperands>>
+materializeSelectedBufferSourceBuckets(
+    WaveAMDMachineSelector &S, Operation *user, Value ptr,
+    const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<std::optional<SelectedBufferSourcePlans>> plans =
+      planSelectedBufferSources(S, user, ptr, spec);
+  if (failed(plans))
+    return failure();
+  if (!*plans)
+    return std::optional<WaveAMDMachineSelector::BucketedOperands>{};
+
+  if (std::optional<WaveAMDMachineSelector::BucketedOperands> selected =
+          selectedBufferSourceBucketsForVOffset(S, user, ptr))
+    return selected;
+
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializeSelectedBufferSourceBuckets(S, user, **plans, spec);
+  if (failed(buckets))
+    return failure();
+  return std::optional<WaveAMDMachineSelector::BucketedOperands>{*buckets};
+}
+
+static FailureOr<std::optional<WaveAMDMachineSelector::BucketedOperands>>
+materializeSelectedBufferSourceBucketsIfBuffer(
+    WaveAMDMachineSelector &S, Operation *user, Value ptr, bool isBuffer,
+    const waveamdmachine::AddressFieldSpec &spec) {
+  if (!isBuffer)
+    return std::optional<WaveAMDMachineSelector::BucketedOperands>{};
+  return materializeSelectedBufferSourceBuckets(S, user, ptr, spec);
+}
+
+static FailureOr<AddressPlan>
+planGlobalOrBufferAddress(WaveAMDMachineSelector &S, Operation *user,
+                          const PointerOffset &offset, bool isBuffer,
+                          const waveamdmachine::AddressFieldSpec &spec) {
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, user, offset, spec);
+  if (failed(plan))
+    return failure();
+  if (isBuffer && plan->fullAddressRemainderExpr)
+    if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
+                                                  /*includeInstOffset=*/true)))
       return failure();
-    voffset = appendAddressExpr(S, *voffset, *instOffset, plan.assumptions);
-    if (failed(voffset))
-      return failure();
-  }
-  if (!S.slotFitsU32(*voffset, plan.assumptions))
-    return success();
-  plan.voffsetExpr = *voffset;
-  plan.voffsetNeedsWide = needsWideAddressMaterialization(*voffset, plan);
-  plan.instOffset = 0;
-  plan.soffsetExpr = {};
-  plan.soffsetNeedsWide = false;
-  plan.fullAddressRemainderExpr = {};
-  return success();
+  if (isBuffer && plan->fullAddressRemainderExpr)
+    return emitBufferAddressFieldError(user);
+  return *plan;
 }
 
 LogicalResult selectSharedStore(WaveAMDMachineSelector &S, StoreOp op,
@@ -330,14 +410,19 @@ static LogicalResult selectGlobalOrBufferStore(
     WaveAMDMachineSelector &S, StoreOp op, Value base, Value globalBase,
     const PointerOffset &offset, bool isBuffer, unsigned registers,
     bool useB8Op, bool useB16Op, const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
+  FailureOr<std::optional<WaveAMDMachineSelector::BucketedOperands>>
+      selectedBuckets = materializeSelectedBufferSourceBucketsIfBuffer(
+          S, op, op.getPtr(), isBuffer, spec);
+  if (failed(selectedBuckets))
+    return failure();
+  if (*selectedBuckets)
+    return emitGlobalOrBufferStore(S, op, base, **selectedBuckets, isBuffer,
+                                   registers, useB8Op, useB16Op);
+
+  FailureOr<AddressPlan> plan =
+      planGlobalOrBufferAddress(S, op, offset, isBuffer, spec);
   if (failed(plan))
     return failure();
-  if (isBuffer && plan->fullAddressRemainderExpr)
-    if (failed(foldBufferAddressFields(S, *plan)))
-      return failure();
-  if (plan->fullAddressRemainderExpr && isBuffer)
-    return emitBufferAddressFieldError(op.getOperation());
   if (plan->fullAddressRemainderExpr)
     return selectFullAddressStore(S, op, globalBase, *plan, registers, useB8Op,
                                   useB16Op);
@@ -592,14 +677,19 @@ static LogicalResult selectGlobalOrBufferLoad(
     WaveAMDMachineSelector &S, LoadOp op, Value base, Value globalBase,
     const PointerOffset &offset, bool isBuffer, unsigned registers,
     bool useB8Op, bool useB16Op, const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
+  FailureOr<std::optional<WaveAMDMachineSelector::BucketedOperands>>
+      selectedBuckets = materializeSelectedBufferSourceBucketsIfBuffer(
+          S, op, op.getPtr(), isBuffer, spec);
+  if (failed(selectedBuckets))
+    return failure();
+  if (*selectedBuckets)
+    return emitGlobalOrBufferLoad(S, op, base, **selectedBuckets, isBuffer,
+                                  registers, useB8Op, useB16Op);
+
+  FailureOr<AddressPlan> plan =
+      planGlobalOrBufferAddress(S, op, offset, isBuffer, spec);
   if (failed(plan))
     return failure();
-  if (isBuffer && plan->fullAddressRemainderExpr)
-    if (failed(foldBufferAddressFields(S, *plan)))
-      return failure();
-  if (plan->fullAddressRemainderExpr && isBuffer)
-    return emitBufferAddressFieldError(op.getOperation());
   if (plan->fullAddressRemainderExpr)
     return selectFullAddressLoad(S, op, globalBase, *plan, registers, useB8Op,
                                  useB16Op);

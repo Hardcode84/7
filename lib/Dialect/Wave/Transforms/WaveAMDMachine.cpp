@@ -7493,9 +7493,6 @@ static FailureOr<Value> materializeDmaM0(WaveAMDMachineSelector &S,
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,
                                                        int64_t bytes);
 
-static LogicalResult foldBufferDmaAddressFields(WaveAMDMachineSelector &S,
-                                                AddressPlan &plan);
-
 static FailureOr<AddressPlan>
 planDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
                      const PointerOffset &offset, bool isBuffer,
@@ -7504,30 +7501,10 @@ planDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   if (failed(plan))
     return failure();
   if (isBuffer && (plan->soffsetExpr || plan->fullAddressRemainderExpr))
-    if (failed(foldBufferDmaAddressFields(S, *plan)))
+    if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
+                                                  /*includeInstOffset=*/false)))
       return failure();
   return *plan;
-}
-
-static LogicalResult foldBufferDmaAddressFields(WaveAMDMachineSelector &S,
-                                                AddressPlan &plan) {
-  // Buffer DMA dynamic soffset is slow; fold into vaddr when proven safe.
-  FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
-      S, plan.voffsetExpr, plan.soffsetExpr, plan.assumptions);
-  if (failed(voffset))
-    return failure();
-  voffset = appendAddressExpr(S, *voffset, plan.fullAddressRemainderExpr,
-                              plan.assumptions);
-  if (failed(voffset))
-    return failure();
-  if (S.slotFitsU32(*voffset, plan.assumptions)) {
-    plan.voffsetExpr = *voffset;
-    plan.voffsetNeedsWide = needsWideAddressMaterialization(*voffset, plan);
-    plan.soffsetExpr = {};
-    plan.soffsetNeedsWide = false;
-    plan.fullAddressRemainderExpr = {};
-  }
-  return success();
 }
 
 static FailureOr<DmaSourceAddress> materializeGlobalDmaUniformSourceAddress(
@@ -7655,59 +7632,14 @@ materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   return DmaSourceAddress{*buckets, base};
 }
 
-struct DmaSourcePointer {
-  PointerOffset offset;
-  Value base;
-  bool isBuffer = false;
-};
-
-struct SelectedDmaSourcePointers {
-  DmaSourcePointer active;
-  DmaSourcePointer inactive;
-  SelectOp select;
-};
-
-static FailureOr<DmaSourcePointer>
-lookupDmaSourcePointer(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
-                       Value source, StringRef label) {
-  auto baseIt = S.pointerBases.find(source);
-  auto offsetIt = S.pointerIndexOffsets.find(source);
-  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
-    return op.emitError(label) << " DMA source has no pointer metadata";
-  return DmaSourcePointer{offsetIt->second, baseIt->second,
-                          S.pointerBuffers.lookup(source)};
-}
-
 static bool isZeroSOffset(WaveAMDMachineSelector &S,
                           const WaveAMDMachineSelector::BucketedOperands &b) {
   return !b.soffset || isZeroImm(S, b.soffset);
 }
 
-static FailureOr<std::optional<SelectedDmaSourcePointers>>
-matchSelectedBufferDmaSources(WaveAMDMachineSelector &S,
-                              waveamd::DmaLoadLdsOp op) {
-  if (!op.getZeroFillInactive().value_or(false))
-    return std::optional<SelectedDmaSourcePointers>{};
-  auto select = op.getSource().getDefiningOp<SelectOp>();
-  if (!select || !isa<MaskType>(select.getCondition().getType()))
-    return std::optional<SelectedDmaSourcePointers>{};
-
-  FailureOr<DmaSourcePointer> active =
-      lookupDmaSourcePointer(S, op, select.getTrueValue(), "active");
-  FailureOr<DmaSourcePointer> inactive =
-      lookupDmaSourcePointer(S, op, select.getFalseValue(), "inactive");
-  if (failed(active) || failed(inactive))
-    return failure();
-  if (!active->isBuffer || !inactive->isBuffer ||
-      active->base != inactive->base)
-    return std::optional<SelectedDmaSourcePointers>{};
-  return std::optional<SelectedDmaSourcePointers>{
-      SelectedDmaSourcePointers{*active, *inactive, select}};
-}
-
 static FailureOr<DmaSourceAddress> materializeBufferDmaSourceAddress(
     WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
-    const DmaSourcePointer &source,
+    const BufferSelectedSourcePointer &source,
     const waveamdmachine::AddressFieldSpec &spec) {
   FailureOr<AddressPlan> plan =
       planDmaSourceAddress(S, op, source.offset, /*isBuffer=*/true, spec);
@@ -7721,8 +7653,12 @@ static FailureOr<std::optional<DmaSourceAddress>>
 materializeSelectedBufferDmaSourceAddress(
     WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
     const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<std::optional<SelectedDmaSourcePointers>> pointers =
-      matchSelectedBufferDmaSources(S, op);
+  if (!op.getZeroFillInactive().value_or(false))
+    return std::optional<DmaSourceAddress>{};
+
+  FailureOr<std::optional<SelectedBufferSources>> pointers =
+      matchSelectedBufferSources(S, op, op.getSource(),
+                                 /*requirePtrAdd=*/false);
   if (failed(pointers))
     return failure();
   if (!*pointers)

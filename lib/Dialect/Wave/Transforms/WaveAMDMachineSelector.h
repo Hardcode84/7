@@ -75,6 +75,20 @@ struct AddressPlan {
   bool soffsetNeedsWide = false;
 };
 
+inline constexpr int64_t kBufferSelectedSourceOobOffset = int64_t{1} << 31;
+
+struct BufferSelectedSourcePointer {
+  PointerOffset offset;
+  Value base;
+  bool isBuffer = false;
+};
+
+struct SelectedBufferSources {
+  BufferSelectedSourcePointer active;
+  BufferSelectedSourcePointer inactive;
+  SelectOp select;
+};
+
 // Small free helpers used by every selection TU.
 
 inline mlir::waveamdmachine::RegType
@@ -219,6 +233,22 @@ Value createI64Cmp(WaveAMDMachineSelector &S, Location loc,
 FailureOr<Value> createLaneSelect(WaveAMDMachineSelector &S, Operation *op,
                                   Value condition, Value trueValue,
                                   Value falseValue, unsigned width);
+
+LogicalResult foldBufferAddressFieldsIntoVOffset(WaveAMDMachineSelector &S,
+                                                 AddressPlan &plan,
+                                                 bool includeInstOffset);
+
+FailureOr<std::optional<SelectedBufferSources>>
+matchSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user,
+                           Value ptr, bool requirePtrAdd);
+
+bool hasOnlyVOffsetField(const AddressPlan &plan);
+
+bool isBufferSelectedSourceOobPlan(WaveAMDMachineSelector &S,
+                                   const AddressPlan &plan);
+
+std::optional<Value> lookupSelectedPointerVOffset(WaveAMDMachineSelector &S,
+                                                  Value ptr);
 
 // scf.for lowering cluster. Defined in `WaveAMDMachineScfFor.cpp` as free
 // helpers taking the selector by reference, mirroring the IXS-cluster

@@ -22,6 +22,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDMachineLoadStore.cpp
   WaveAMDMachineLoopCarryPlan.cpp
   WaveAMDMachineScfFor.cpp
+  WaveAMDMachineSelectedBufferSources.cpp
   WaveAMDMachineWaitcnt.cpp
   WaveAMDMaterializeSplitBarriers.cpp
   WaveAMDMetadata.cpp
