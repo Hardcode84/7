@@ -208,3 +208,51 @@ func.func @shared_dma_wide_iv_stride_mul(%in: !wave.ptr<#wave.global, i32>)
   return
 }
 }
+
+// CHECK-LABEL: func.func @drop_dead_simd_offset_carries_machine
+// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK-SAME: carries(%{{.*}}, %{{.*}} : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.mem.token)
+// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 1>, %[[TOK:.*]]: !waveamdmachine.mem.token):
+// CHECK: waveamdmachine.s_lshl_b32 %{{.*}}
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.global_load_b32 {{.*}} after %[[TOK]]
+// CHECK: waveamdmachine.global_store_b32
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @drop_dead_simd_offset_carries_machine(
+    %a: !wave.ptr<#wave.global, i32>, %n: i32) attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %c64 = arith.constant 64 : i32
+  %c128 = arith.constant 128 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %s64 = wave.splat %c64 : i32 -> !wave.simd<i32, 64>
+  %s128 = wave.splat %c128 : i32 -> !wave.simd<i32, 64>
+  %init0 = wave.binary addi %wi, %s64 overflow<nsw>
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %init1 = wave.binary addi %wi, %s128 overflow<nsw>
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %tok0 = wave.token : !wave.mem.token
+  %unused:3 = scf.for %i = %c1 to %n step %c1
+      iter_args(%off0 = %init0, %off1 = %init1, %tok = %tok0)
+      -> (!wave.simd<i32, 64>, !wave.simd<i32, 64>, !wave.mem.token) : i32 {
+    %bounded = wave.assume %off0 as "x"
+        [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">]
+        : !wave.simd<i32, 64>
+    %p = wave.ptr_add %a, %bounded
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+    %v, %t = wave.load %p after %tok
+        : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
+        -> (!wave.simd<i32, 64>, !wave.mem.token)
+    %st = wave.store %v -> %p after %t
+        : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+           !wave.mem.token) -> !wave.mem.token
+    %next0 = wave.binary addi %off0, %s64 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %next1 = wave.binary addi %off1, %s64 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    scf.yield %next0, %next1, %st
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64>, !wave.mem.token
+  }
+  return
+}
+}

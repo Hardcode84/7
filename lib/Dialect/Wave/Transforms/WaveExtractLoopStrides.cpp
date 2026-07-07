@@ -18,7 +18,9 @@
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 
 #include <algorithm>
@@ -86,6 +88,18 @@ struct LoopCyclicOffsetCandidate {
   BoundExpr base;
   int64_t increment = 0;
   int64_t ring = 0;
+};
+
+struct OffsetCarryCandidate {
+  BinaryOp update;
+  Value init;
+  Value stride;
+  BlockArgument arg;
+  unsigned index = 0;
+};
+
+struct LoopOffsetCarryCandidate {
+  SmallVector<OffsetCarryCandidate> carries;
 };
 
 static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
@@ -1051,12 +1065,113 @@ findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
   return std::optional<LoopCyclicOffsetCandidate>{};
 }
 
+static Type getOffsetElementType(Type type) {
+  if (auto simd = dyn_cast<SimdType>(type))
+    return simd.getElementType();
+  return type;
+}
+
+static bool isIntegerOffsetCarryType(Type type) {
+  Type elementType = getOffsetElementType(type);
+  return elementType.isIndex() || isa<IntegerType>(elementType);
+}
+
+static bool hasOnlyYieldUse(Value value, scf::YieldOp yield) {
+  if (!value.hasOneUse())
+    return false;
+  return *value.getUsers().begin() == yield.getOperation();
+}
+
+static Value getAdditiveStride(BlockArgument arg, BinaryOp update) {
+  if (update.getKind() != BinaryKind::AddI)
+    return {};
+  if (update.getLhs() == arg)
+    return update.getRhs();
+  if (update.getRhs() == arg)
+    return update.getLhs();
+  return {};
+}
+
+static bool hasUnitStep(scf::ForOp loop) {
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  return step && *step == 1;
+}
+
+static bool isOffsetCarryArgForLoop(scf::ForOp loop, BlockArgument arg) {
+  Type elementType = getOffsetElementType(arg.getType());
+  return isIntegerOffsetCarryType(arg.getType()) &&
+         elementType == loop.getInductionVar().getType();
+}
+
+static BinaryOp getYieldedUpdate(scf::ForOp loop, unsigned index) {
+  scf::YieldOp yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  BinaryOp update = yield.getOperand(index).getDefiningOp<BinaryOp>();
+  if (!update || !isImmediateBodyOp(loop, update))
+    return {};
+  if (!hasOnlyYieldUse(update.getResult(), yield))
+    return {};
+  return update;
+}
+
+static Value getLoopInvariantAdditiveStride(scf::ForOp loop, BlockArgument arg,
+                                            BinaryOp update) {
+  Value stride = getAdditiveStride(arg, update);
+  if (!stride || isDefinedInside(loop, stride))
+    return {};
+  return stride;
+}
+
+static LogicalResult buildOffsetCarryCandidate(scf::ForOp loop, unsigned index,
+                                               OffsetCarryCandidate &candidate,
+                                               bool &matched) {
+  matched = false;
+  if (!hasUnitStep(loop))
+    return success();
+  if (!loop.getResult(index).use_empty())
+    return success();
+
+  BlockArgument arg = loop.getRegionIterArgs()[index];
+  if (!isOffsetCarryArgForLoop(loop, arg))
+    return success();
+
+  BinaryOp update = getYieldedUpdate(loop, index);
+  if (!update)
+    return success();
+
+  Value stride = getLoopInvariantAdditiveStride(loop, arg, update);
+  if (!stride)
+    return success();
+  if (getOffsetElementType(stride.getType()) !=
+      getOffsetElementType(arg.getType()))
+    return success();
+
+  candidate.update = update;
+  candidate.init = loop.getInitArgs()[index];
+  candidate.stride = stride;
+  candidate.arg = arg;
+  candidate.index = index;
+  matched = true;
+  return success();
+}
+
+static FailureOr<std::optional<LoopOffsetCarryCandidate>>
+findOffsetCarryCandidate(scf::ForOp loop) {
+  LoopOffsetCarryCandidate candidate;
+  for (unsigned index : llvm::seq<unsigned>(0, loop.getNumResults())) {
+    OffsetCarryCandidate offsetCarry;
+    bool matched = false;
+    if (failed(buildOffsetCarryCandidate(loop, index, offsetCarry, matched)))
+      return failure();
+    if (matched)
+      candidate.carries.push_back(offsetCarry);
+  }
+  if (candidate.carries.empty())
+    return std::optional<LoopOffsetCarryCandidate>{};
+  return std::optional<LoopOffsetCarryCandidate>(std::move(candidate));
+}
+
 static bool isScalarOffset(Type type) {
-  if (type.isIndex())
-    return true;
-  if (isa<IntegerType>(type))
-    return true;
-  return false;
+  return isIntegerOffsetCarryType(type) && !isa<SimdType>(type);
 }
 
 static bool needsSimdOffset(Type resultType, Type baseType, Type offsetType) {
@@ -1179,6 +1294,84 @@ static LogicalResult cloneBodyWithCarriedCyclicOffset(
   return success();
 }
 
+static bool hasNonUpdateUse(OffsetCarryCandidate &candidate) {
+  for (Operation *user : candidate.arg.getUsers())
+    if (user != candidate.update.getOperation())
+      return true;
+  return false;
+}
+
+static Type getScaledStrideType(const OffsetCarryCandidate &candidate) {
+  if (isa<SimdType>(candidate.stride.getType()))
+    return candidate.arg.getType();
+  return getOffsetElementType(candidate.arg.getType());
+}
+
+static Value createOffsetTrip(IRRewriter &rewriter, scf::ForOp loop) {
+  Value iv = loop.getInductionVar();
+  if (std::optional<int64_t> lower = getConstantIntValue(loop.getLowerBound()))
+    if (*lower == 0)
+      return iv;
+  return BinaryOp::create(rewriter, loop.getLoc(), iv.getType(),
+                          BinaryKind::SubI, iv, loop.getLowerBound());
+}
+
+static Value createOffsetCarryValue(IRRewriter &rewriter, Location loc,
+                                    const OffsetCarryCandidate &candidate,
+                                    Value trip) {
+  Type scaledType = getScaledStrideType(candidate);
+  Value scaled = BinaryOp::create(rewriter, loc, scaledType, BinaryKind::MulI,
+                                  candidate.stride, trip);
+  return BinaryOp::create(rewriter, loc, candidate.arg.getType(),
+                          BinaryKind::AddI, candidate.init, scaled);
+}
+
+static LogicalResult cloneBodyWithoutOffsetCarries(
+    IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
+    LoopOffsetCarryCandidate candidate, const llvm::BitVector &removed,
+    ArrayRef<unsigned> newIndex) {
+  Block &srcBody = *src.getBody();
+  Block &dstBody = *dst.getBody();
+
+  IRMapping map;
+  map.map(src.getInductionVar(), dst.getInductionVar());
+  for (auto [oldIndex, oldArg] : llvm::enumerate(src.getRegionIterArgs())) {
+    if (removed.test(oldIndex))
+      continue;
+    map.map(oldArg, dst.getRegionIterArgs()[newIndex[oldIndex]]);
+  }
+
+  llvm::SmallPtrSet<Operation *, 8> skippedUpdates;
+  rewriter.setInsertionPointToStart(&dstBody);
+  Value trip;
+  for (OffsetCarryCandidate &carry : candidate.carries) {
+    skippedUpdates.insert(carry.update.getOperation());
+    if (!hasNonUpdateUse(carry))
+      continue;
+    if (!trip)
+      trip = createOffsetTrip(rewriter, dst);
+    Value current =
+        createOffsetCarryValue(rewriter, carry.update.getLoc(), carry, trip);
+    map.map(carry.arg, current);
+  }
+
+  for (Operation &op : srcBody.without_terminator()) {
+    if (skippedUpdates.contains(&op))
+      continue;
+    rewriter.clone(op, map);
+  }
+
+  SmallVector<Value> yielded;
+  scf::YieldOp srcYield = cast<scf::YieldOp>(srcBody.getTerminator());
+  for (auto [index, value] : llvm::enumerate(srcYield.getOperands())) {
+    if (removed.test(index))
+      continue;
+    yielded.push_back(map.lookupOrDefault(value));
+  }
+  scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
+  return success();
+}
+
 static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
   for (NamedAttribute attr : src->getAttrs())
     dst->setAttr(attr.getName(), attr.getValue());
@@ -1238,6 +1431,44 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
   return success();
 }
 
+static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
+                                 LoopOffsetCarryCandidate candidate) {
+  llvm::BitVector removed(loop.getNumResults());
+  for (const OffsetCarryCandidate &carry : candidate.carries)
+    removed.set(carry.index);
+
+  unsigned removedIndex = std::numeric_limits<unsigned>::max();
+  SmallVector<unsigned> newIndex(loop.getNumResults(), removedIndex);
+  SmallVector<Value> initArgs;
+  for (unsigned index : llvm::seq<unsigned>(0, loop.getNumResults())) {
+    if (removed.test(index))
+      continue;
+    newIndex[index] = initArgs.size();
+    initArgs.push_back(loop.getInitArgs()[index]);
+  }
+
+  rewriter.setInsertionPoint(loop);
+  scf::ForOp newLoop =
+      scf::ForOp::create(rewriter, loop.getLoc(), loop.getLowerBound(),
+                         loop.getUpperBound(), loop.getStep(), initArgs);
+  copyLoopAttrs(loop, newLoop);
+  if (failed(cloneBodyWithoutOffsetCarries(rewriter, loop, newLoop, candidate,
+                                           removed, newIndex)))
+    return failure();
+
+  for (unsigned index : llvm::seq<unsigned>(0, loop.getNumResults())) {
+    if (removed.test(index)) {
+      assert(loop.getResult(index).use_empty() &&
+             "removed offset carry result must be unused");
+      continue;
+    }
+    loop.getResult(index).replaceAllUsesWith(
+        newLoop.getResult(newIndex[index]));
+  }
+  rewriter.eraseOp(loop);
+  return success();
+}
+
 static FailureOr<bool> rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop,
                                       sym::Store &store,
                                       DataFlowSolver &solver) {
@@ -1267,6 +1498,36 @@ static FailureOr<bool> rewriteOneCyclicOffset(IRRewriter &rewriter,
   return true;
 }
 
+static FailureOr<bool> rewriteOneOffsetCarry(IRRewriter &rewriter,
+                                             scf::ForOp loop) {
+  FailureOr<std::optional<LoopOffsetCarryCandidate>> candidate =
+      findOffsetCarryCandidate(loop);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return false;
+  if (failed(rewriteLoop(rewriter, loop, **candidate)))
+    return failure();
+  return true;
+}
+
+static FailureOr<bool> rewriteOneStrideExtraction(IRRewriter &rewriter,
+                                                  scf::ForOp loop,
+                                                  WaveDialect *dialect,
+                                                  DataFlowSolver &solver) {
+  FailureOr<bool> rewritten =
+      rewriteOneLoop(rewriter, loop, dialect->getSymbolStore(), solver);
+  if (failed(rewritten) || *rewritten)
+    return rewritten;
+
+  rewritten =
+      rewriteOneCyclicOffset(rewriter, loop, dialect->getSymbolStore(), solver);
+  if (failed(rewritten) || *rewritten)
+    return rewritten;
+
+  return rewriteOneOffsetCarry(rewriter, loop);
+}
+
 struct WaveExtractLoopStridesPass
     : public wave::impl::WaveExtractLoopStridesBase<
           WaveExtractLoopStridesPass> {
@@ -1292,10 +1553,7 @@ struct WaveExtractLoopStridesPass
       }
       WalkResult result = root->walk([&](scf::ForOp loop) {
         FailureOr<bool> rewritten =
-            rewriteOneLoop(rewriter, loop, dialect->getSymbolStore(), solver);
-        if (succeeded(rewritten) && !*rewritten)
-          rewritten = rewriteOneCyclicOffset(rewriter, loop,
-                                             dialect->getSymbolStore(), solver);
+            rewriteOneStrideExtraction(rewriter, loop, dialect, solver);
         if (failed(rewritten)) {
           signalPassFailure();
           return WalkResult::interrupt();

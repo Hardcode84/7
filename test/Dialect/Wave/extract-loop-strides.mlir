@@ -424,3 +424,54 @@ func.func @simd_stride_scalar_base(%a: !wave.ptr<#wave.global, f16>, %n: i32)
   }
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @drop_dead_simd_offset_carries
+// CHECK-SAME: %[[A:.*]]: !wave.ptr<#wave.global, i32>
+// CHECK: %[[WI:.*]] = wave.workitem_id 0
+// CHECK: %[[INIT:.*]] = wave.binary addi %[[WI]],
+// CHECK: %[[TOK:.*]] = wave.token
+// CHECK: scf.for %[[IV:[^ ]+]] =
+// CHECK-SAME: iter_args(%[[TOK_ARG:[^ ]+]] = %[[TOK]]) -> (!wave.mem.token)
+// CHECK: %[[TRIP:.*]] = wave.binary subi %[[IV]],
+// CHECK: %[[SCALED:.*]] = wave.binary muli {{.*}}, %[[TRIP]]
+// CHECK: %[[OFF:.*]] = wave.binary addi %[[INIT]], %[[SCALED]]
+// CHECK: %[[BOUNDED:.*]] = wave.assume %[[OFF]]
+// CHECK: %[[PTR:.*]] = wave.ptr_add %[[A]], %[[BOUNDED]]
+// CHECK: %{{.*}}, %[[LOAD_TOK:.*]] = wave.load %[[PTR]] after %[[TOK_ARG]]
+// CHECK: scf.yield %[[LOAD_TOK]] : !wave.mem.token
+func.func @drop_dead_simd_offset_carries(
+    %a: !wave.ptr<#wave.global, i32>, %n: i32) attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %c64 = arith.constant 64 : i32
+  %c128 = arith.constant 128 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %s64 = wave.splat %c64 : i32 -> !wave.simd<i32, 32>
+  %s128 = wave.splat %c128 : i32 -> !wave.simd<i32, 32>
+  %init0 = wave.binary addi %wi, %s64 overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %init1 = wave.binary addi %wi, %s128 overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %tok0 = wave.token : !wave.mem.token
+  %unused:3 = scf.for %i = %c1 to %n step %c1
+      iter_args(%off0 = %init0, %off1 = %init1, %tok = %tok0)
+      -> (!wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.mem.token) : i32 {
+    %bounded = wave.assume %off0 as "x"
+        [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">]
+        : !wave.simd<i32, 32>
+    %p = wave.ptr_add %a, %bounded
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    %v, %t = wave.load %p after %tok
+        : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+    %next0 = wave.binary addi %off0, %s64 overflow<nsw>
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %next1 = wave.binary addi %off1, %s64 overflow<nsw>
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    scf.yield %next0, %next1, %t
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.mem.token
+  }
+  return
+}
