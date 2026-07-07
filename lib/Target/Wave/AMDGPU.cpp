@@ -521,6 +521,7 @@ private:
   unsigned vMovB32() const { return opcodes.vMovB32; }
   unsigned vMovB64() const { return opcodes.vMovB64; }
   unsigned vCndmaskB32() const { return opcodes.vCndmaskB32; }
+  unsigned vCndmaskB32Vcc() const { return opcodes.vCndmaskB32Vcc; }
   unsigned vAndB32() const { return opcodes.vAndB32; }
   unsigned vOrB32() const { return opcodes.vOrB32; }
   unsigned vXorB32() const { return opcodes.vXorB32; }
@@ -2467,6 +2468,20 @@ private:
           return failure();
       return success();
     }
+    if (isa<waveamdmachine::VCndmaskB32VccOp>(op)) {
+      if (failed(requireOperandLegality(op, "v_cndmask_b32_vcc")))
+        return failure();
+      waveamdmachine::RegType regType =
+          cast<waveamdmachine::RegType>(result().getType());
+      Value falseValue = op.getOperand(0);
+      Value trueValue = op.getOperand(1);
+      for (unsigned i : llvm::seq<unsigned>(0, regType.getWidth()))
+        if (failed(emitMC(vCndmaskB32Vcc(), {toMCVGPRComponent(result(), i),
+                                             toMCB32Component(falseValue, i),
+                                             toMCB32Component(trueValue, i)})))
+          return failure();
+      return success();
+    }
     if (isa<waveamdmachine::SMovB32TupleOp>(op)) {
       auto regType = cast<waveamdmachine::RegType>(result().getType());
       Value src = op.getOperand(0);
@@ -2841,6 +2856,8 @@ private:
       if (!writesVcc)
         return success();
       auto resultType = cast<waveamdmachine::RegType>(result().getType());
+      if (result().use_empty())
+        return success();
       if (resultType.getWidth() == 2)
         return emitMC(sMovB64(),
                       {toMCOperand(result()),

@@ -1176,6 +1176,71 @@ static bool scaleLoopCarries(func::FuncOp func) {
   return changed;
 }
 
+static bool isVccCompare(Operation *op) {
+  return isa_and_nonnull<VCmpEqU32VccOp, VCmpNeU32VccOp, VCmpLtU32VccOp,
+                         VCmpLeU32VccOp, VCmpGtU32VccOp, VCmpGeU32VccOp,
+                         VCmpLtI32VccOp, VCmpLeI32VccOp, VCmpGtI32VccOp,
+                         VCmpGeI32VccOp>(op);
+}
+
+static bool writesVcc(Operation *op) {
+  HardwareResourceEffects effects = getHardwareResourceEffects(op);
+  return llvm::is_contained(effects.writes, HardwareResourceKind::VCC);
+}
+
+static bool hasInterveningVccWriter(Operation *from, Operation *to) {
+  for (Operation *op = from->getNextNode(); op && op != to;
+       op = op->getNextNode())
+    if (writesVcc(op))
+      return true;
+  return false;
+}
+
+static bool isVGPR(Value value) {
+  RegType type = dyn_cast<RegType>(value.getType());
+  return type && type.getRegClass() == RegClass::VGPR;
+}
+
+static Value ensureVccCndmaskTrueVGPR(OpBuilder &builder,
+                                      VCndmaskB32TupleOp select) {
+  Value trueValue = select.getTrueValue();
+  if (isVGPR(trueValue))
+    return trueValue;
+  return VMovB32TupleOp::create(builder, select.getLoc(),
+                                select.getResult().getType(), trueValue)
+      .getResult();
+}
+
+static bool foldVccCndmask(func::FuncOp func) {
+  SmallVector<VCndmaskB32TupleOp> selects;
+  func.walk([&](VCndmaskB32TupleOp op) { selects.push_back(op); });
+
+  OpBuilder builder(func.getContext());
+  bool changed = false;
+  for (VCndmaskB32TupleOp select : selects) {
+    Value condition = select.getCondition();
+    if (!condition.hasOneUse())
+      continue;
+    Operation *compare = condition.getDefiningOp();
+    if (!isVccCompare(compare) || compare->getBlock() != select->getBlock())
+      continue;
+    if (hasInterveningVccWriter(compare, select))
+      continue;
+
+    builder.setInsertionPoint(select);
+    Value trueValue = ensureVccCndmaskTrueVGPR(builder, select);
+    Value replacement =
+        VCndmaskB32VccOp::create(
+            builder, select.getLoc(), select.getResult().getType(),
+            select.getFalseValue(), trueValue, compare->getResult(1))
+            .getResult();
+    select.getResult().replaceAllUsesWith(replacement);
+    select.erase();
+    changed = true;
+  }
+  return changed;
+}
+
 struct WaveAMDMachineCleanupPass
     : public wave::impl::WaveAMDMachineCleanupBase<WaveAMDMachineCleanupPass> {
   void runOnOperation() override {
@@ -1191,6 +1256,7 @@ struct WaveAMDMachineCleanupPass
         changed = *d16Changed;
         changed |= hoistFunction(func);
         changed |= scaleLoopCarries(func);
+        changed |= foldVccCndmask(func);
       }
     });
     if (failedPass)

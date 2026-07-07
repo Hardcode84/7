@@ -596,6 +596,16 @@ LogicalResult VCndmaskB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult VCndmaskB32VccOp::verify() {
+  RegType resultType = cast<RegType>(getResult().getType());
+  if (failed(verifyCndmaskSource(*this, getFalseValue(), resultType.getWidth(),
+                                 "false")) ||
+      failed(verifyCndmaskSource(*this, getTrueValue(), resultType.getWidth(),
+                                 "true")))
+    return failure();
+  return success();
+}
+
 LogicalResult VAccvgprReadB32TupleOp::verify() {
   auto sourceType = cast<RegType>(getSource().getType());
   auto resultType = cast<RegType>(getResult().getType());

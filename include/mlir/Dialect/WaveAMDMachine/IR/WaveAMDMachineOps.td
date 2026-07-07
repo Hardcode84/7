@@ -193,6 +193,8 @@ class WaveAMDMachine_VOP2AnyVGPRLegality
     : WaveAMDMachine_OperandLegality<"0", "0x3">;
 class WaveAMDMachine_VOP2ValueVGPRLegality
     : WaveAMDMachine_OperandLegality<"0", "0", "0x1">;
+class WaveAMDMachine_VOP2CndmaskVccLegality
+    : WaveAMDMachine_OperandLegality<"0x3", "0", "0x2">;
 class WaveAMDMachine_VOP3IntLegality
     : WaveAMDMachine_OperandLegality<"0x7">;
 class WaveAMDMachine_VCmpLegality
@@ -766,6 +768,20 @@ def WaveAMDMachine_VCndmaskB32TupleOp
   let arguments = (ins WaveAMDMachine_RegOrImm:$false_value,
                        WaveAMDMachine_RegOrImm:$true_value,
                        WaveAMDMachine_SGPR:$condition);
+  let results = (outs WaveAMDMachine_VGPR:$result);
+  let assemblyFormat =
+      "$false_value `,` $true_value `,` $condition attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def WaveAMDMachine_VCndmaskB32VccOp
+    : WaveAMDMachine_Op<"v_cndmask_b32_vcc",
+                        [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_VOP2CndmaskVccLegality {
+  let summary = "vector lane select using VCC";
+  let arguments = (ins WaveAMDMachine_RegOrImm:$false_value,
+                       WaveAMDMachine_RegOrImm:$true_value,
+                       WaveAMDMachine_VCC:$condition);
   let results = (outs WaveAMDMachine_VGPR:$result);
   let assemblyFormat =
       "$false_value `,` $true_value `,` $condition attr-dict `:` functional-type(operands, results)";

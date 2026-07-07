@@ -2,6 +2,23 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+func.func @bad_vcc_cndmask_true_sgpr(%false: !waveamdmachine.reg<vgpr, 1, 0>,
+                                     %true: !waveamdmachine.reg<sgpr, 1, 0>,
+                                     %cond: !waveamdmachine.reg<vcc, 1>)
+    -> !waveamdmachine.reg<vgpr, 1, 1> {
+  // expected-error @below {{v_cndmask_b32_vcc needs value operand in VGPR}}
+  %out = waveamdmachine.v_cndmask_b32_vcc %false, %true, %cond
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 0>,
+         !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 func.func @bad_vop2_any_vgpr(%lhs: !waveamdmachine.reg<sgpr, 1, 0>,
                              %rhs: !waveamdmachine.reg<sgpr, 1, 1>)
     -> !waveamdmachine.reg<vgpr, 1, 0> {
