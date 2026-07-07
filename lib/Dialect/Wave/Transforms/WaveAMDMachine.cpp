@@ -109,6 +109,11 @@ static bool isSimdVectorElement(Type type, Type elementType) {
          vectorType.getElementType() == elementType;
 }
 
+static bool isSimdScalarElement(Type type, Type elementType) {
+  SimdType simdType = dyn_cast<SimdType>(type);
+  return simdType && simdType.getElementType() == elementType;
+}
+
 static std::optional<unsigned> getSimdPackedF16Length(Type type) {
   return getSimdPow2VectorLength(type, Float16Type::get(type.getContext()));
 }
@@ -4307,6 +4312,7 @@ struct WordAlignedExtractPackWord {
 
 static std::optional<SmallVector<WordAlignedExtractPackWord>>
 matchWordAlignedExtractPack(PackOp op);
+static FailureOr<bool> canSkipF16ExtractForCasts(ExtractOp op);
 
 static bool isExtractFrom(Value value, Value source, unsigned index) {
   ExtractOp extract = value.getDefiningOp<ExtractOp>();
@@ -4381,6 +4387,12 @@ static bool isUsedOnlyByWordAlignedExtractPacks(ExtractOp op) {
       return false;
   }
   return true;
+}
+
+static FailureOr<bool> canDeferExtractSelection(ExtractOp op) {
+  if (isUsedOnlyByWordAlignedExtractPacks(op))
+    return true;
+  return canSkipF16ExtractForCasts(op);
 }
 
 static FailureOr<std::optional<SmallVector<Value>>>
@@ -4599,7 +4611,10 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
-  if (isUsedOnlyByWordAlignedExtractPacks(op)) {
+  FailureOr<bool> defer = canDeferExtractSelection(op);
+  if (failed(defer))
+    return failure();
+  if (*defer) {
     eraseIfTopLevel(op);
     return success();
   }
@@ -4748,6 +4763,10 @@ static FailureOr<unsigned> getPackedF16ToF32VectorLength(CastOp op) {
                         "!wave.simd<vector<2^nxf16>, W> to "
                         "!wave.simd<vector<2^nxf32>, W>");
   return *sourceLength;
+}
+
+static bool supportsF16ToF32HalfSelect(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 8 || isa.Major == 9;
 }
 
 static Value createUninitVGPR1(WaveAMDMachineSelector &S, Location loc) {
@@ -4907,7 +4926,7 @@ static LogicalResult selectPackedF16ToF32Cast(WaveAMDMachineSelector &S,
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
   SmallVector<Value> resultWords;
   resultWords.reserve(*vectorLength);
-  bool useSdwaHalfSelect = isa->Major == 8 || isa->Major == 9;
+  bool useSdwaHalfSelect = supportsF16ToF32HalfSelect(*isa);
   for (unsigned index : llvm::seq<unsigned>(0, *vectorLength)) {
     Value lane = (*sourceWords)[index / 2];
     if (useSdwaHalfSelect) {
@@ -4933,6 +4952,67 @@ static LogicalResult selectPackedF16ToF32Cast(WaveAMDMachineSelector &S,
   return success();
 }
 
+static bool isF16ToF32Cast(CastOp op) {
+  Type f16Type = Float16Type::get(op.getContext());
+  Type f32Type = Float32Type::get(op.getContext());
+  return getFpConvertRounding(op) == CastRounding::RNE &&
+         isSimdScalarElement(op.getSource().getType(), f16Type) &&
+         isSimdScalarElement(op.getResult().getType(), f32Type);
+}
+
+static bool isUsedOnlyByF16ToF32Casts(ExtractOp op) {
+  for (Operation *user : op.getResult().getUsers()) {
+    CastOp cast = dyn_cast<CastOp>(user);
+    if (!cast || !isF16ToF32Cast(cast))
+      return false;
+  }
+  return !op.getResult().use_empty();
+}
+
+static FailureOr<bool> canSkipF16ExtractForCasts(ExtractOp op) {
+  if (!isUsedOnlyByF16ToF32Casts(op))
+    return false;
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f16 extract cast lowering");
+  if (failed(isa))
+    return failure();
+  return supportsF16ToF32HalfSelect(*isa);
+}
+
+static FailureOr<std::optional<Value>>
+trySelectPackedF16ExtractToF32Cast(WaveAMDMachineSelector &S, CastOp op,
+                                   const llvm::AMDGPU::IsaVersion &isa) {
+  if (!supportsF16ToF32HalfSelect(isa))
+    return std::optional<Value>();
+  ExtractOp extract = op.getSource().getDefiningOp<ExtractOp>();
+  if (!extract)
+    return std::optional<Value>();
+  FailureOr<MemoryPayloadShape> shape = getSimdVectorPayloadShape(
+      extract, extract.getSource().getType(), "packed f16 scalar cast source");
+  if (failed(shape))
+    return failure();
+  if (shape->elementBits != 16)
+    return std::optional<Value>();
+
+  unsigned bitOffset = extract.getIndex() * shape->elementBits;
+  unsigned wordIndex = bitOffset / 32;
+  if (wordIndex >= shape->registers)
+    return op.emitError("packed f16 scalar cast source index out of range");
+  FailureOr<SmallVector<Value>> sourceWords = splitVGPRMaterializedWords(
+      S, op.getOperation(), S.expect(extract.getSource(), op), shape->registers,
+      "packed f16 scalar cast source");
+  if (failed(sourceWords))
+    return failure();
+
+  Value word = (*sourceWords)[wordIndex];
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  if ((bitOffset % 32) == 0)
+    return std::optional<Value>(waveamdmachine::VCvtF32F16E32Op::create(
+        S.builder, op.getLoc(), vgprType, word));
+  return std::optional<Value>(waveamdmachine::VCvtF32F16SdwaOp::create(
+      S.builder, op.getLoc(), vgprType, word, S.builder.getI64IntegerAttr(5)));
+}
+
 static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
                                            Type sourceElement,
                                            Type resultElement,
@@ -4941,18 +5021,38 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
     return op.emitError(
         "WaveAMDMachine fpconvert lowering supports only rne rounding");
 
-  Value source =
-      S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
   Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
   if (sourceElement.isF32() && resultElement.isF16()) {
+    Value source =
+        S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
     S.values[op.getResult()] = waveamdmachine::VCvtF16F32Op::create(
         S.builder, op.getLoc(), vgprType, source);
     S.eraseIfTopLevel(op);
     return success();
   }
   if (sourceElement.isF16() && resultElement.isF32()) {
-    S.values[op.getResult()] = waveamdmachine::VCvtF32F16Op::create(
-        S.builder, op.getLoc(), vgprType, source);
+    FailureOr<llvm::AMDGPU::IsaVersion> isa =
+        getTargetIsaVersion(op, "scalar f16 to f32 lowering");
+    if (failed(isa))
+      return failure();
+    FailureOr<std::optional<Value>> packedExtract =
+        trySelectPackedF16ExtractToF32Cast(S, op, *isa);
+    if (failed(packedExtract))
+      return failure();
+    if (*packedExtract)
+      S.values[op.getResult()] = **packedExtract;
+    else {
+      Value source =
+          S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
+      S.values[op.getResult()] =
+          supportsF16ToF32HalfSelect(*isa)
+              ? waveamdmachine::VCvtF32F16E32Op::create(S.builder, op.getLoc(),
+                                                        vgprType, source)
+                    .getResult()
+              : waveamdmachine::VCvtF32F16Op::create(S.builder, op.getLoc(),
+                                                     vgprType, source)
+                    .getResult();
+    }
     S.eraseIfTopLevel(op);
     return success();
   }

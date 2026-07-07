@@ -53,6 +53,19 @@ func.func @cast_f32_to_f16_wave64(%x: !wave.simd<f32, 64>) attributes {wave.kern
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// SELECT-LABEL: func.func @cast_f16_to_f32_gfx950
+// SELECT: waveamdmachine.v_cvt_f32_f16_e32 {{.*}} : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+func.func @cast_f16_to_f32_gfx950(%x: !wave.simd<f16, 64>) attributes {wave.kernel} {
+  %f = wave.cast fpconvert %x : !wave.simd<f16, 64> -> !wave.simd<f32, 64>
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @cast_f32_to_f16_unsupported_rounding(%x: !wave.simd<f32, 32>) attributes {wave.kernel} {
   // expected-error @+1 {{WaveAMDMachine fpconvert lowering supports only rne rounding}}

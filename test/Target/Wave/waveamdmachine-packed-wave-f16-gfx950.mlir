@@ -78,4 +78,23 @@ func.func @packed_wave_cast_v1(%src: !wave.simd<vector<1xf32>, 64>) {
   return
 }
 
+// SELECT-LABEL: func.func @packed_extract_scalar_casts
+// SELECT: waveamdmachine.tuple_to_elements
+// SELECT-NOT: waveamdmachine.v_lshrrev_b32
+// SELECT-NOT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.v_cvt_f32_f16_e32
+// SELECT: waveamdmachine.v_cvt_f32_f16_sdwa
+// SELECT: return
+func.func @packed_extract_scalar_casts(%src: !wave.simd<vector<4xf16>, 64>) {
+  %lo = wave.extract %src[0]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %hi = wave.extract %src[1]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %flo = wave.cast fpconvert %lo
+      : !wave.simd<f16, 64> -> !wave.simd<f32, 64>
+  %fhi = wave.cast fpconvert %hi
+      : !wave.simd<f16, 64> -> !wave.simd<f32, 64>
+  return
+}
+
 }

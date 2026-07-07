@@ -1374,8 +1374,6 @@ static bool foldVccCndmask(func::FuncOp func) {
   bool changed = false;
   for (VCndmaskB32TupleOp select : selects) {
     Value condition = select.getCondition();
-    if (!condition.hasOneUse())
-      continue;
     Operation *compare = condition.getDefiningOp();
     if (!isVccCompare(compare) || compare->getBlock() != select->getBlock())
       continue;
