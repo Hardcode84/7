@@ -52,4 +52,27 @@ func.func @uniform_buffer_pointer_carry(%a: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// CHECK-LABEL: func.func @workgroup_id_loop_lower
+// CHECK: %[[WG:.*]] = waveamdmachine.s_workgroup_id_x : !waveamdmachine.reg<sgpr, 1, {{[0-9]+}}>
+// CHECK: %[[INIT:.*]] = waveamdmachine.s_mov_b32_value %[[WG]] : (!waveamdmachine.reg<sgpr, 1, {{[0-9]+}}>) -> !waveamdmachine.reg<sgpr, 1>
+// CHECK: waveamdmachine.uniform_loop {{.*}} carries(%[[INIT]] : !waveamdmachine.reg<sgpr, 1>)
+// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK: %[[NEXT:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[IV]],
+// CHECK: waveamdmachine.continue_if {{.*}} carries(%[[NEXT]] : !waveamdmachine.reg<sgpr, 1>)
+func.func @workgroup_id_loop_lower(%out: !wave.ptr<#wave.global, i32>,
+                                   %n: i32) attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %wg = wave.workgroup_id 0
+  scf.for %i = %wg to %n step %c1 : i32 {
+    %ptrs = wave.ptr_add %out, %lane
+        : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    %tok = wave.store %lane -> %ptrs
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+        -> !wave.mem.token
+  }
+  return
+}
+
 }

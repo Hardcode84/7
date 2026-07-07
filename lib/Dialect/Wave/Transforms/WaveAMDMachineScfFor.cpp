@@ -407,6 +407,29 @@ static bool isSGPR1Value(Value value) {
          regType.getWidth() == 1;
 }
 
+static bool isPinnedSGPR1Value(Value value) {
+  auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+         regType.getWidth() == 1 && regType.getIndex() >= 0;
+}
+
+static Value materializeLoopCarrySGPR1(WaveAMDMachineSelector &S, Location loc,
+                                       Value value) {
+  Value sgpr = S.materializeSGPR1(loc, value);
+  if (!isPinnedSGPR1Value(sgpr))
+    return sgpr;
+
+  // Pinned entry SGPRs are valid live-ins, but loop carries are reassigned on
+  // the backedge. Copy pinned starts into virtual SGPRs so init and next-IV
+  // carry types stay identical.
+  return waveamdmachine::SMovB32ValueOp::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
+                        1),
+             sgpr)
+      .getResult();
+}
+
 static bool isZeroValue(WaveAMDMachineSelector &S, Value value) {
   if (std::optional<int64_t> imm = S.getImmediateValue(value))
     return *imm == 0;
@@ -474,7 +497,8 @@ static Value createLoopLtCmp(WaveAMDMachineSelector &S, Location loc, Value lhs,
 static Value createLoopIvInit(WaveAMDMachineSelector &S, Location loc,
                               Value lower, bool wideIv) {
   return wideIv ? signExtendSGPR2(S, loc, lower)
-                : S.materializeSGPR1(loc, narrowLoopValue(S, loc, lower));
+                : materializeLoopCarrySGPR1(S, loc,
+                                            narrowLoopValue(S, loc, lower));
 }
 
 static Value createLoopStep(WaveAMDMachineSelector &S, Location loc, Value step,
