@@ -69,7 +69,7 @@
 // ASM: .p2align 8
 // ASM: [[ENTRY]]:
 // ASM-NOT: s_load_dword
-// ASM: v_xor_b32_e32
+// ASM: v_bitop3_b32 {{.*}} bitop3:0x48
 // ASM: global_load_lds_dwordx4
 // ASM: v_mfma_f32_16x16x32_f16
 // ASM: .amdhsa_user_sgpr_kernarg_preload_length 7

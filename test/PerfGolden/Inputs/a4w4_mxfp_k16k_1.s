@@ -382,39 +382,31 @@ _a4w4_kernel:
 		v_lshlrev_b32_e32 v69, 2, v37
 		v_add_u32_e32 v70, 32, v18
 		v_lshlrev_b32_e32 v71, 1, v40
-		v_xor_b32_e32 v70, v70, v71
-		v_xor_b32_e32 v70, v69, v70
-		v_xor_b32_e32 v70, v68, v70
-		v_xor_b32_e32 v70, v67, v70
+		v_bitop3_b32 v70, v69, v70, v71 bitop3:0x96
+		v_bitop3_b32 v70, v67, v68, v70 bitop3:0x96
 		v_mul_lo_u32 v72, s19, v70
-		v_add3_u32 v73, s65, v72, v31
-		v_add3_u32 v73, v73, v65, v66
-		v_add_u32_e32 v74, 64, v18
-		v_xor_b32_e32 v74, v74, v71
-		v_xor_b32_e32 v74, v69, v74
-		v_xor_b32_e32 v74, v68, v74
-		v_xor_b32_e32 v74, v67, v74
-		v_mul_lo_u32 v75, s19, v74
-		v_add3_u32 v76, s65, v75, v31
-		v_add3_u32 v76, v76, v65, v66
-		v_add_u32_e32 v77, 0x60, v18
-		v_xor_b32_e32 v77, v77, v71
-		v_xor_b32_e32 v77, v69, v77
-		v_xor_b32_e32 v77, v68, v77
-		v_xor_b32_e32 v77, v67, v77
-		v_mul_lo_u32 v78, s19, v77
-		v_add3_u32 v79, s65, v78, v31
-		v_add3_u32 v79, v79, v65, v66
+		v_add3_u32 v73, v31, v65, v66
+		v_add3_u32 v74, v72, v73, s65
+		v_add_u32_e32 v75, 64, v18
+		v_bitop3_b32 v75, v69, v75, v71 bitop3:0x96
+		v_bitop3_b32 v75, v67, v68, v75 bitop3:0x96
+		v_mul_lo_u32 v76, s19, v75
+		v_add3_u32 v77, v76, v73, s65
+		v_add_u32_e32 v78, 0x60, v18
+		v_bitop3_b32 v78, v69, v78, v71 bitop3:0x96
+		v_bitop3_b32 v78, v67, v68, v78 bitop3:0x96
+		v_mul_lo_u32 v79, s19, v78
+		v_add3_u32 v73, v79, v73, s65
 		buffer_load_ubyte v80, v54, s[36:39], 0 offen
-		buffer_load_ubyte v54, v73, s[36:39], 0 offen
-		buffer_load_ubyte v73, v76, s[36:39], 0 offen
-		buffer_load_ubyte v76, v79, s[36:39], 0 offen
+		buffer_load_ubyte v54, v74, s[36:39], 0 offen
+		buffer_load_ubyte v74, v77, s[36:39], 0 offen
+		buffer_load_ubyte v77, v73, s[36:39], 0 offen
 		s_add_i32 s19, s3, 0x80
 		s_add_i32 s19, s19, s4
 		s_add_i32 m0, s2, 0x8000
-		v_add3_u32 v79, s19, v20, v22
-		buffer_load_dwordx4 v79, s[24:27], 0 offen lds
-		v_add_u32_e32 v79, s20, v19
+		v_add3_u32 v73, s19, v20, v22
+		buffer_load_dwordx4 v73, s[24:27], 0 offen lds
+		v_add_u32_e32 v73, s20, v19
 		s_add_i32 s8, s8, 0x80
 		s_add_i32 s8, s8, s3
 		s_add_i32 s8, s8, s4
@@ -487,52 +479,42 @@ _a4w4_kernel:
 		v_add3_u32 v81, v82, v43, v31
 		v_add3_u32 v81, v81, v65, v66
 		v_mul_lo_u32 v82, s18, v70
-		v_add3_u32 v83, v31, v65, v66
-		v_add3_u32 v84, v82, v83, s52
-		v_mul_lo_u32 v85, s18, v74
-		v_add3_u32 v86, v85, v83, s52
-		v_mul_lo_u32 v87, s18, v77
-		v_add3_u32 v83, v87, v83, s52
-		v_add_u32_e32 v88, 0x80, v18
-		v_xor_b32_e32 v88, v88, v71
-		v_xor_b32_e32 v88, v69, v88
-		v_xor_b32_e32 v88, v68, v88
-		v_xor_b32_e32 v88, v67, v88
-		v_mul_lo_u32 v89, s18, v88
-		v_add3_u32 v90, s52, v89, v31
-		v_add3_u32 v90, v90, v65, v66
+		v_add3_u32 v83, s52, v82, v31
+		v_add3_u32 v83, v83, v65, v66
+		v_mul_lo_u32 v84, s18, v75
+		v_add3_u32 v85, v31, v65, v66
+		v_add3_u32 v86, v84, v85, s52
+		v_mul_lo_u32 v87, s18, v78
+		v_add3_u32 v88, v87, v85, s52
+		v_add_u32_e32 v89, 0x80, v18
+		v_bitop3_b32 v89, v69, v89, v71 bitop3:0x96
+		v_bitop3_b32 v89, v67, v68, v89 bitop3:0x96
+		v_mul_lo_u32 v90, s18, v89
+		v_add3_u32 v85, v90, v85, s52
 		v_add_u32_e32 v91, 0xa0, v18
-		v_xor_b32_e32 v91, v91, v71
-		v_xor_b32_e32 v91, v69, v91
-		v_xor_b32_e32 v91, v68, v91
-		v_xor_b32_e32 v91, v67, v91
+		v_bitop3_b32 v91, v69, v91, v71 bitop3:0x96
+		v_bitop3_b32 v91, v67, v68, v91 bitop3:0x96
 		v_mul_lo_u32 v92, s18, v91
-		v_add3_u32 v93, s52, v92, v31
-		v_add3_u32 v93, v93, v65, v66
-		v_add_u32_e32 v94, 0xc0, v18
-		v_xor_b32_e32 v94, v94, v71
-		v_xor_b32_e32 v94, v69, v94
-		v_xor_b32_e32 v94, v68, v94
-		v_xor_b32_e32 v94, v67, v94
-		v_mul_lo_u32 v95, s18, v94
-		v_add3_u32 v96, s52, v95, v31
-		v_add3_u32 v96, v96, v65, v66
-		v_add_u32_e32 v97, 0xe0, v18
-		v_xor_b32_e32 v71, v97, v71
-		v_xor_b32_e32 v69, v69, v71
-		v_xor_b32_e32 v68, v68, v69
-		v_xor_b32_e32 v68, v67, v68
+		v_add3_u32 v93, v31, v65, v66
+		v_add3_u32 v94, v92, v93, s52
+		v_add_u32_e32 v95, 0xc0, v18
+		v_bitop3_b32 v95, v69, v95, v71 bitop3:0x96
+		v_bitop3_b32 v95, v67, v68, v95 bitop3:0x96
+		v_mul_lo_u32 v96, s18, v95
+		v_add3_u32 v97, v96, v93, s52
+		v_add_u32_e32 v98, 0xe0, v18
+		v_bitop3_b32 v69, v69, v98, v71 bitop3:0x96
+		v_bitop3_b32 v68, v67, v68, v69 bitop3:0x96
 		v_mul_lo_u32 v69, s18, v68
-		v_add3_u32 v71, s52, v69, v31
-		v_add3_u32 v71, v71, v65, v66
-		buffer_load_ubyte v97, v81, s[32:35], 0 offen
-		buffer_load_ubyte v81, v84, s[32:35], 0 offen
-		buffer_load_ubyte v84, v86, s[32:35], 0 offen
-		buffer_load_ubyte v86, v83, s[32:35], 0 offen
-		buffer_load_ubyte v83, v90, s[32:35], 0 offen
-		buffer_load_ubyte v90, v93, s[32:35], 0 offen
-		buffer_load_ubyte v93, v96, s[32:35], 0 offen
-		buffer_load_ubyte v96, v71, s[32:35], 0 offen
+		v_add3_u32 v71, v69, v93, s52
+		buffer_load_ubyte v93, v81, s[32:35], 0 offen
+		buffer_load_ubyte v81, v83, s[32:35], 0 offen
+		buffer_load_ubyte v83, v86, s[32:35], 0 offen
+		buffer_load_ubyte v86, v88, s[32:35], 0 offen
+		buffer_load_ubyte v88, v85, s[32:35], 0 offen
+		buffer_load_ubyte v85, v94, s[32:35], 0 offen
+		buffer_load_ubyte v94, v97, s[32:35], 0 offen
+		buffer_load_ubyte v97, v71, s[32:35], 0 offen
 		s_add_i32 s18, s57, 8
 		v_add3_u32 v71, s18, v33, v52
 		v_add3_u32 v71, v71, v55, v57
@@ -540,8 +522,8 @@ _a4w4_kernel:
 		v_add3_u32 v71, v71, v65, v66
 		v_add3_u32 v98, v31, v65, v66
 		v_add3_u32 v99, v72, v98, s18
-		v_add3_u32 v100, v75, v98, s18
-		v_add3_u32 v98, v78, v98, s18
+		v_add3_u32 v100, v76, v98, s18
+		v_add3_u32 v98, v79, v98, s18
 		buffer_load_ubyte v101, v71, s[36:39], 0 offen
 		buffer_load_ubyte v71, v99, s[36:39], 0 offen
 		buffer_load_ubyte v99, v100, s[36:39], 0 offen
@@ -574,8 +556,8 @@ _a4w4_kernel:
 		v_add3_u32 v98, v98, v65, v66
 		v_add3_u32 v102, v31, v65, v66
 		v_add3_u32 v103, v72, v102, s16
-		v_add3_u32 v104, v75, v102, s16
-		v_add3_u32 v102, v78, v102, s16
+		v_add3_u32 v104, v76, v102, s16
+		v_add3_u32 v102, v79, v102, s16
 		buffer_load_ubyte v105, v98, s[36:39], 0 offen
 		buffer_load_ubyte v98, v103, s[36:39], 0 offen
 		buffer_load_ubyte v103, v104, s[36:39], 0 offen
@@ -650,8 +632,7 @@ _a4w4_kernel:
 		v_lshlrev_b32_e32 v117, 3, v18
 		v_add_u32_e32 v118, 32, v31
 		v_xor_b32_e32 v118, v118, v66
-		v_xor_b32_e32 v118, v65, v118
-		v_xor_b32_e32 v118, v117, v118
+		v_bitop3_b32 v118, v117, v65, v118 bitop3:0x96
 		v_xor_b32_e32 v119, v67, v118
 		v_lshl_add_u32 v120, v119, 3, v116
 		ds_read_u8 v121, v120
@@ -660,8 +641,7 @@ _a4w4_kernel:
 		ds_read_u8 v123, v119
 		v_add_u32_e32 v124, 64, v31
 		v_xor_b32_e32 v124, v124, v66
-		v_xor_b32_e32 v124, v65, v124
-		v_xor_b32_e32 v124, v117, v124
+		v_bitop3_b32 v124, v117, v65, v124 bitop3:0x96
 		v_xor_b32_e32 v125, v67, v124
 		v_lshl_add_u32 v126, v125, 3, v116
 		ds_read_u8 v127, v126
@@ -669,45 +649,36 @@ _a4w4_kernel:
 		ds_read_u8 v128, v125
 		v_add_u32_e32 v129, 0x60, v31
 		v_xor_b32_e32 v129, v129, v66
-		v_xor_b32_e32 v129, v65, v129
-		v_xor_b32_e32 v129, v117, v129
+		v_bitop3_b32 v129, v117, v65, v129 bitop3:0x96
 		v_xor_b32_e32 v130, v67, v129
 		v_lshl_add_u32 v131, v130, 3, v116
 		ds_read_u8 v132, v131
 		v_lshl_add_u32 v130, v130, 3, v122
 		ds_read_u8 v133, v130
 		v_add_u32_e32 v134, 0x80, v31
-		v_xor_b32_e32 v134, v134, v66
-		v_xor_b32_e32 v134, v65, v134
-		v_xor_b32_e32 v134, v117, v134
-		v_xor_b32_e32 v134, v67, v134
+		v_bitop3_b32 v134, v65, v134, v66 bitop3:0x96
+		v_bitop3_b32 v134, v67, v117, v134 bitop3:0x96
 		v_lshl_add_u32 v135, v134, 3, v116
 		ds_read_u8 v136, v135
 		v_lshl_add_u32 v134, v134, 3, v122
 		ds_read_u8 v137, v134
 		v_add_u32_e32 v138, 0xa0, v31
-		v_xor_b32_e32 v138, v138, v66
-		v_xor_b32_e32 v138, v65, v138
-		v_xor_b32_e32 v138, v117, v138
-		v_xor_b32_e32 v138, v67, v138
+		v_bitop3_b32 v138, v65, v138, v66 bitop3:0x96
+		v_bitop3_b32 v138, v67, v117, v138 bitop3:0x96
 		v_lshl_add_u32 v139, v138, 3, v116
 		ds_read_u8 v140, v139
 		v_lshl_add_u32 v138, v138, 3, v122
 		ds_read_u8 v141, v138
 		v_add_u32_e32 v142, 0xc0, v31
-		v_xor_b32_e32 v142, v142, v66
-		v_xor_b32_e32 v142, v65, v142
-		v_xor_b32_e32 v142, v117, v142
-		v_xor_b32_e32 v142, v67, v142
+		v_bitop3_b32 v142, v65, v142, v66 bitop3:0x96
+		v_bitop3_b32 v142, v67, v117, v142 bitop3:0x96
 		v_lshl_add_u32 v143, v142, 3, v116
 		ds_read_u8 v144, v143
 		v_lshl_add_u32 v142, v142, 3, v122
 		ds_read_u8 v145, v142
 		v_add_u32_e32 v146, 0xe0, v31
-		v_xor_b32_e32 v146, v146, v66
-		v_xor_b32_e32 v146, v65, v146
-		v_xor_b32_e32 v117, v117, v146
-		v_xor_b32_e32 v67, v67, v117
+		v_bitop3_b32 v146, v65, v146, v66 bitop3:0x96
+		v_bitop3_b32 v67, v67, v117, v146 bitop3:0x96
 		v_lshl_add_u32 v117, v67, 3, v116
 		ds_read_u8 v146, v117
 		v_lshl_add_u32 v67, v67, 3, v122
@@ -746,11 +717,11 @@ _a4w4_kernel:
 		v_add_u32_e32 v154, 0x20000, v31
 		v_add3_u32 v154, v154, v65, v66
 		v_lshl_add_u32 v70, v70, 3, v154
-		v_lshl_add_u32 v74, v74, 3, v154
-		v_lshl_add_u32 v77, v77, 3, v154
-		v_lshl_add_u32 v88, v88, 3, v154
+		v_lshl_add_u32 v75, v75, 3, v154
+		v_lshl_add_u32 v78, v78, 3, v154
+		v_lshl_add_u32 v89, v89, 3, v154
 		v_lshl_add_u32 v91, v91, 3, v154
-		v_lshl_add_u32 v94, v94, 3, v154
+		v_lshl_add_u32 v95, v95, 3, v154
 		v_lshl_add_u32 v68, v68, 3, v154
 		v_add3_u32 v154, v31, v65, v66
 		v_add3_u32 v155, v31, v65, v66
@@ -1114,9 +1085,9 @@ _a4w4_kernel:
 		s_waitcnt vmcnt(34)
 		ds_write_b8 v70, v54 offset:2048
 		s_waitcnt vmcnt(33)
-		ds_write_b8 v74, v73 offset:2048
+		ds_write_b8 v75, v74 offset:2048
 		s_waitcnt vmcnt(32)
-		ds_write_b8 v77, v76 offset:2048
+		ds_write_b8 v78, v77 offset:2048
 		s_add_i32 s69, s5, s62
 		s_mov_b32 m0, s2
 		v_add3_u32 v54, s69, v20, v22
@@ -1124,8 +1095,8 @@ _a4w4_kernel:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_u8 v54, v148 offset:2048
-		ds_read_u8 v73, v64 offset:2048
-		ds_read_u8 v76, v114 offset:2048
+		ds_read_u8 v74, v64 offset:2048
+		ds_read_u8 v77, v114 offset:2048
 		ds_read_u8 v80, v112 offset:2048
 		ds_read_u8 v110, v151 offset:2048
 		ds_read_u8 v118, v124 offset:2048
@@ -1163,26 +1134,26 @@ _a4w4_kernel:
 		s_waitcnt lgkmcnt(7)
 		v_and_b32_e32 v54, 0xff, v54
 		s_waitcnt lgkmcnt(6)
-		v_and_b32_e32 v73, 0xff, v73
-		v_lshlrev_b32_e32 v73, 8, v73
-		v_or_b32_e32 v54, v54, v73
+		v_and_b32_e32 v74, 0xff, v74
+		v_lshlrev_b32_e32 v74, 8, v74
+		v_or_b32_e32 v54, v54, v74
 		s_waitcnt lgkmcnt(5)
-		v_and_b32_e32 v73, 0xff, v76
-		v_lshlrev_b32_e32 v73, 16, v73
+		v_and_b32_e32 v74, 0xff, v77
+		v_lshlrev_b32_e32 v74, 16, v74
 		buffer_load_dwordx4 v128, s[24:27], 0 offen lds
 		s_add_i32 m0, s2, 0x10000
 		s_add_i32 s69, s49, s67
-		v_add3_u32 v76, s69, v27, v22
+		v_add3_u32 v77, s69, v27, v22
 		s_waitcnt lgkmcnt(4)
 		v_and_b32_e32 v80, 0xff, v80
 		v_lshlrev_b32_e32 v80, 24, v80
-		v_or3_b32 v54, v54, v73, v80
+		v_or3_b32 v54, v54, v74, v80
 		s_waitcnt lgkmcnt(3)
-		v_and_b32_e32 v73, 0xff, v110
+		v_and_b32_e32 v74, 0xff, v110
 		s_waitcnt lgkmcnt(2)
 		v_and_b32_e32 v80, 0xff, v118
 		v_lshlrev_b32_e32 v80, 8, v80
-		v_or_b32_e32 v73, v73, v80
+		v_or_b32_e32 v74, v74, v80
 		s_waitcnt lgkmcnt(1)
 		v_and_b32_e32 v80, 0xff, v122
 		v_lshlrev_b32_e32 v80, 16, v80
@@ -1190,31 +1161,31 @@ _a4w4_kernel:
 		s_add_i32 m0, s2, 0x11000
 		s_add_i32 s69, s51, s67
 		v_add3_u32 v110, s69, v27, v22
-		buffer_load_dwordx4 v76, s[28:31], 0 offen lds
+		buffer_load_dwordx4 v77, s[28:31], 0 offen lds
 		s_add_i32 m0, s2, 0x12000
 		s_add_i32 s69, s53, s67
-		v_add3_u32 v76, s69, v27, v22
+		v_add3_u32 v77, s69, v27, v22
 		buffer_load_dwordx4 v110, s[28:31], 0 offen lds
 		s_add_i32 m0, s2, 0x13000
 		s_add_i32 s69, s56, s66
 		v_add3_u32 v110, s69, v30, v32
-		buffer_load_dwordx4 v76, s[28:31], 0 offen lds
-		v_add3_u32 v76, v110, v36, v39
-		v_add3_u32 v76, v76, v42, v44
-		v_add3_u32 v76, v76, v46, v48
-		buffer_load_dwordx2 v[128:129], v76, s[32:35], 0 offen
+		buffer_load_dwordx4 v77, s[28:31], 0 offen lds
+		v_add3_u32 v77, v110, v36, v39
+		v_add3_u32 v77, v77, v42, v44
+		v_add3_u32 v77, v77, v46, v48
+		buffer_load_dwordx2 v[128:129], v77, s[32:35], 0 offen
 		s_add_i32 s69, s57, s68
-		v_add3_u32 v76, s69, v49, v53
-		v_add3_u32 v76, v76, v56, v58
-		v_add3_u32 v76, v76, v60, v61
-		v_add3_u32 v76, v76, v62, v63
-		buffer_load_dword v110, v76, s[36:39], 0 offen
+		v_add3_u32 v77, s69, v49, v53
+		v_add3_u32 v77, v77, v56, v58
+		v_add3_u32 v77, v77, v60, v61
+		v_add3_u32 v77, v77, v62, v63
+		buffer_load_dword v110, v77, s[36:39], 0 offen
 		s_waitcnt vmcnt(34)
 		s_barrier
 		s_waitcnt lgkmcnt(0)
-		v_and_b32_e32 v76, 0xff, v127
-		v_lshlrev_b32_e32 v76, 24, v76
-		v_or3_b32 v73, v73, v80, v76
+		v_and_b32_e32 v77, 0xff, v127
+		v_lshlrev_b32_e32 v77, 24, v77
+		v_or3_b32 v74, v74, v80, v77
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[124:127], a[64:67], a[0:3], a[124:127], v54, v113 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[72:75], a[0:3], a[128:131], v54, v113 op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[144:147], a[72:75], a[8:11], a[144:147], v54, v113 op_sel_hi:[1,1,0] cbsz:4 blgp:4
@@ -1223,22 +1194,22 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[76:79], a[4:7], a[128:131], v54, v113 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[144:147], a[76:79], a[12:15], a[144:147], v54, v113 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[140:143], a[68:71], a[12:15], a[140:143], v54, v113 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], a[80:83], a[0:3], a[132:135], v73, v113 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], a[88:91], a[0:3], a[136:139], v73, v113 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], a[88:91], a[8:11], a[152:155], v73, v113 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], a[80:83], a[8:11], a[148:151], v73, v113 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], a[84:87], a[4:7], a[132:135], v73, v113 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], v[144:147], a[4:7], a[136:139], v73, v113 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], v[144:147], a[12:15], a[152:155], v73, v113 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], a[84:87], a[12:15], a[148:151], v73, v113 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[164:167], a[80:83], a[16:19], a[164:167], v73, v115 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[168:171], a[88:91], a[16:19], a[168:171], v73, v115 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[184:187], a[88:91], a[24:27], a[184:187], v73, v115 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[180:183], a[80:83], a[24:27], a[180:183], v73, v115 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[164:167], a[84:87], a[20:23], a[164:167], v73, v115 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[168:171], v[144:147], a[20:23], a[168:171], v73, v115 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[184:187], v[144:147], a[28:31], a[184:187], v73, v115 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[180:183], a[84:87], a[28:31], a[180:183], v73, v115 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], a[80:83], a[0:3], a[132:135], v74, v113 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], a[88:91], a[0:3], a[136:139], v74, v113 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], a[88:91], a[8:11], a[152:155], v74, v113 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], a[80:83], a[8:11], a[148:151], v74, v113 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], a[84:87], a[4:7], a[132:135], v74, v113 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], v[144:147], a[4:7], a[136:139], v74, v113 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], v[144:147], a[12:15], a[152:155], v74, v113 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], a[84:87], a[12:15], a[148:151], v74, v113 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[164:167], a[80:83], a[16:19], a[164:167], v74, v115 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[168:171], a[88:91], a[16:19], a[168:171], v74, v115 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[184:187], a[88:91], a[24:27], a[184:187], v74, v115 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[180:183], a[80:83], a[24:27], a[180:183], v74, v115 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[164:167], a[84:87], a[20:23], a[164:167], v74, v115 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[168:171], v[144:147], a[20:23], a[168:171], v74, v115 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[184:187], v[144:147], a[28:31], a[184:187], v74, v115 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[180:183], a[84:87], a[28:31], a[180:183], v74, v115 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[156:159], a[64:67], a[16:19], a[156:159], v54, v115 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[160:163], a[72:75], a[16:19], a[160:163], v54, v115 op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[176:179], a[72:75], a[24:27], a[176:179], v54, v115 op_sel_hi:[1,1,0] cbsz:4 blgp:4
@@ -1255,22 +1226,22 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[192:195], a[76:79], a[36:39], a[192:195], v54, v121 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[208:211], a[76:79], a[44:47], a[208:211], v54, v121 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[204:207], a[68:71], a[44:47], a[204:207], v54, v121 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[196:199], a[80:83], a[32:35], a[196:199], v73, v121 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[200:203], a[88:91], a[32:35], a[200:203], v73, v121 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[216:219], a[88:91], a[40:43], a[216:219], v73, v121 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[212:215], a[80:83], a[40:43], a[212:215], v73, v121 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[196:199], a[84:87], a[36:39], a[196:199], v73, v121 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[200:203], v[144:147], a[36:39], a[200:203], v73, v121 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[216:219], v[144:147], a[44:47], a[216:219], v73, v121 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[212:215], a[84:87], a[44:47], a[212:215], v73, v121 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[228:231], a[80:83], a[48:51], a[228:231], v73, v123 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[232:235], a[88:91], a[48:51], a[232:235], v73, v123 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[248:251], a[88:91], a[56:59], a[248:251], v73, v123 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[244:247], a[80:83], a[56:59], a[244:247], v73, v123 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[228:231], a[84:87], a[52:55], a[228:231], v73, v123 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[232:235], v[144:147], a[52:55], a[232:235], v73, v123 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[248:251], v[144:147], a[60:63], a[248:251], v73, v123 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[244:247], a[84:87], a[60:63], a[244:247], v73, v123 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[196:199], a[80:83], a[32:35], a[196:199], v74, v121 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[200:203], a[88:91], a[32:35], a[200:203], v74, v121 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[216:219], a[88:91], a[40:43], a[216:219], v74, v121 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[212:215], a[80:83], a[40:43], a[212:215], v74, v121 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[196:199], a[84:87], a[36:39], a[196:199], v74, v121 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[200:203], v[144:147], a[36:39], a[200:203], v74, v121 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[216:219], v[144:147], a[44:47], a[216:219], v74, v121 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[212:215], a[84:87], a[44:47], a[212:215], v74, v121 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[228:231], a[80:83], a[48:51], a[228:231], v74, v123 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[232:235], a[88:91], a[48:51], a[232:235], v74, v123 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[248:251], a[88:91], a[56:59], a[248:251], v74, v123 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[244:247], a[80:83], a[56:59], a[244:247], v74, v123 op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[228:231], a[84:87], a[52:55], a[228:231], v74, v123 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[232:235], v[144:147], a[52:55], a[232:235], v74, v123 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[248:251], v[144:147], a[60:63], a[248:251], v74, v123 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[244:247], a[84:87], a[60:63], a[244:247], v74, v123 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[220:223], a[64:67], a[48:51], a[220:223], v54, v123 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[224:227], a[72:75], a[48:51], a[224:227], v54, v123 op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[240:243], a[72:75], a[56:59], a[240:243], v54, v123 op_sel_hi:[1,1,0] cbsz:4 blgp:4
@@ -1304,21 +1275,21 @@ _a4w4_kernel:
 		ds_read_b128 a[88:91], v106 offset:28672
 		ds_read_b128 v[144:147], v106 offset:28736
 		s_waitcnt vmcnt(33)
-		ds_write_b8 v0, v97
+		ds_write_b8 v0, v93
 		s_waitcnt vmcnt(32)
 		ds_write_b8 v70, v81
 		s_waitcnt vmcnt(31)
-		ds_write_b8 v74, v84
+		ds_write_b8 v75, v83
 		s_waitcnt vmcnt(30)
-		ds_write_b8 v77, v86
+		ds_write_b8 v78, v86
 		s_waitcnt vmcnt(29)
-		ds_write_b8 v88, v83
+		ds_write_b8 v89, v88
 		s_waitcnt vmcnt(28)
-		ds_write_b8 v91, v90
+		ds_write_b8 v91, v85
 		s_waitcnt vmcnt(27)
-		ds_write_b8 v94, v93
+		ds_write_b8 v95, v94
 		s_waitcnt vmcnt(26)
-		ds_write_b8 v68, v96
+		ds_write_b8 v68, v97
 		s_add_i32 s69, s59, s67
 		s_add_i32 m0, s2, 0x18000
 		v_add3_u32 v54, s69, v27, v22
@@ -1330,9 +1301,9 @@ _a4w4_kernel:
 		s_waitcnt vmcnt(25)
 		ds_write_b8 v70, v71 offset:2048
 		s_waitcnt vmcnt(24)
-		ds_write_b8 v74, v99 offset:2048
+		ds_write_b8 v75, v99 offset:2048
 		s_waitcnt vmcnt(23)
-		ds_write_b8 v77, v100 offset:2048
+		ds_write_b8 v78, v100 offset:2048
 		s_add_i32 s69, s61, s67
 		s_add_i32 m0, s2, 0x19000
 		v_add3_u32 v54, s69, v27, v22
@@ -1342,11 +1313,11 @@ _a4w4_kernel:
 		ds_read_u8 v71, v109
 		ds_read_u8 v81, v51
 		ds_read_u8 v83, v120
-		ds_read_u8 v84, v119
+		ds_read_u8 v85, v119
 		ds_read_u8 v86, v126
-		ds_read_u8 v90, v125
+		ds_read_u8 v88, v125
 		ds_read_u8 v93, v131
-		ds_read_u8 v96, v130
+		ds_read_u8 v94, v130
 		ds_read_u8 v97, v135
 		ds_read_u8 v99, v134
 		ds_read_u8 v100, v139
@@ -1376,13 +1347,13 @@ _a4w4_kernel:
 		v_add3_u32 v54, v54, v55, v57
 		v_add3_u32 v54, v54, v59, v31
 		v_add3_u32 v54, v54, v65, v66
-		v_add3_u32 v73, v72, v154, s69
-		v_add3_u32 v76, v75, v154, s69
-		v_add3_u32 v141, v78, v154, s69
+		v_add3_u32 v74, v72, v154, s69
+		v_add3_u32 v77, v76, v154, s69
+		v_add3_u32 v141, v79, v154, s69
 		buffer_load_ubyte v80, v54, s[36:39], 0 offen
-		buffer_load_ubyte v54, v73, s[36:39], 0 offen
-		buffer_load_ubyte v73, v76, s[36:39], 0 offen
-		buffer_load_ubyte v76, v141, s[36:39], 0 offen
+		buffer_load_ubyte v54, v74, s[36:39], 0 offen
+		buffer_load_ubyte v74, v77, s[36:39], 0 offen
+		buffer_load_ubyte v77, v141, s[36:39], 0 offen
 		s_waitcnt vmcnt(26)
 		s_barrier
 		s_waitcnt lgkmcnt(14)
@@ -1392,16 +1363,16 @@ _a4w4_kernel:
 		v_or_b32_e32 v71, v71, v81
 		v_and_b32_e32 v81, 0xff, v83
 		v_lshlrev_b32_e32 v81, 16, v81
-		v_and_b32_e32 v83, 0xff, v84
+		v_and_b32_e32 v83, 0xff, v85
 		v_lshlrev_b32_e32 v83, 24, v83
 		v_or3_b32 v141, v71, v81, v83
 		v_and_b32_e32 v71, 0xff, v86
-		v_and_b32_e32 v81, 0xff, v90
+		v_and_b32_e32 v81, 0xff, v88
 		v_lshlrev_b32_e32 v81, 8, v81
 		v_or_b32_e32 v71, v71, v81
 		v_and_b32_e32 v81, 0xff, v93
 		v_lshlrev_b32_e32 v81, 16, v81
-		v_and_b32_e32 v83, 0xff, v96
+		v_and_b32_e32 v83, 0xff, v94
 		v_lshlrev_b32_e32 v83, 24, v83
 		v_or3_b32 v149, v71, v81, v83
 		v_and_b32_e32 v71, 0xff, v97
@@ -1451,9 +1422,9 @@ _a4w4_kernel:
 		v_and_b32_e32 v83, 0xff, v137
 		v_lshlrev_b32_e32 v83, 16, v83
 		s_waitcnt lgkmcnt(0)
-		v_and_b32_e32 v84, 0xff, v140
-		v_lshlrev_b32_e32 v84, 24, v84
-		v_or3_b32 v81, v81, v83, v84
+		v_and_b32_e32 v85, 0xff, v140
+		v_lshlrev_b32_e32 v85, 24, v85
+		v_or3_b32 v81, v81, v83, v85
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[252:255], a[64:67], a[0:3], v[252:255], v71, v141 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[96:99], a[72:75], a[0:3], a[96:99], v71, v141 op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], a[72:75], a[8:11], v[168:171], v71, v141 op_sel_hi:[1,1,0] cbsz:4 blgp:4
@@ -1531,9 +1502,9 @@ _a4w4_kernel:
 		s_waitcnt vmcnt(24)
 		ds_write_b8 v70, v98 offset:2048
 		s_waitcnt vmcnt(23)
-		ds_write_b8 v74, v103 offset:2048
+		ds_write_b8 v75, v103 offset:2048
 		s_waitcnt vmcnt(22)
-		ds_write_b8 v77, v104 offset:2048
+		ds_write_b8 v78, v104 offset:2048
 		s_add_i32 s69, s19, s62
 		s_add_i32 m0, s2, 0x8000
 		v_add3_u32 v71, s69, v20, v22
@@ -1543,38 +1514,38 @@ _a4w4_kernel:
 		ds_read_u8 v71, v148 offset:2048
 		ds_read_u8 v81, v64 offset:2048
 		ds_read_u8 v83, v114 offset:2048
-		ds_read_u8 v84, v112 offset:2048
+		ds_read_u8 v85, v112 offset:2048
 		ds_read_u8 v86, v151 offset:2048
-		ds_read_u8 v90, v124 offset:2048
+		ds_read_u8 v88, v124 offset:2048
 		ds_read_u8 v93, v116 offset:2048
 		ds_read_u8 v98, v111 offset:2048
 		s_add_i32 s69, s8, s62
 		s_add_i32 m0, s2, 0x9000
-		v_add3_u32 v96, s69, v20, v22
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		v_add3_u32 v94, s69, v20, v22
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 s69, s10, s62
 		s_add_i32 m0, s2, 0xa000
-		v_add3_u32 v96, s69, v20, v22
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		v_add3_u32 v94, s69, v20, v22
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 s69, s22, s62
 		s_add_i32 m0, s2, 0xb000
-		v_add3_u32 v96, s69, v20, v22
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		v_add3_u32 v94, s69, v20, v22
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 s69, s40, s62
 		s_add_i32 m0, s2, 0xc000
-		v_add3_u32 v96, s69, v20, v22
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		v_add3_u32 v94, s69, v20, v22
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 s69, s42, s62
 		s_add_i32 m0, s2, 0xd000
-		v_add3_u32 v96, s69, v20, v22
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		v_add3_u32 v94, s69, v20, v22
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 s69, s44, s62
 		s_add_i32 m0, s2, 0xe000
-		v_add3_u32 v96, s69, v20, v22
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		v_add3_u32 v94, s69, v20, v22
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 s69, s3, s62
 		s_add_i32 m0, s2, 0xf000
-		v_add3_u32 v96, s69, v20, v22
+		v_add3_u32 v94, s69, v20, v22
 		s_add_i32 s69, s4, s67
 		v_add3_u32 v97, s69, v27, v22
 		s_waitcnt lgkmcnt(7)
@@ -1586,18 +1557,18 @@ _a4w4_kernel:
 		s_waitcnt lgkmcnt(5)
 		v_and_b32_e32 v81, 0xff, v83
 		v_lshlrev_b32_e32 v81, 16, v81
-		buffer_load_dwordx4 v96, s[24:27], 0 offen lds
+		buffer_load_dwordx4 v94, s[24:27], 0 offen lds
 		s_add_i32 m0, s2, 0x14000
 		s_add_i32 s69, s14, s67
 		v_add3_u32 v83, s69, v27, v22
 		s_waitcnt lgkmcnt(4)
-		v_and_b32_e32 v84, 0xff, v84
-		v_lshlrev_b32_e32 v84, 24, v84
-		v_or3_b32 v103, v71, v81, v84
+		v_and_b32_e32 v85, 0xff, v85
+		v_lshlrev_b32_e32 v85, 24, v85
+		v_or3_b32 v103, v71, v81, v85
 		s_waitcnt lgkmcnt(3)
 		v_and_b32_e32 v71, 0xff, v86
 		s_waitcnt lgkmcnt(2)
-		v_and_b32_e32 v81, 0xff, v90
+		v_and_b32_e32 v81, 0xff, v88
 		v_lshlrev_b32_e32 v81, 8, v81
 		v_or_b32_e32 v104, v71, v81
 		s_waitcnt lgkmcnt(1)
@@ -1621,28 +1592,28 @@ _a4w4_kernel:
 		v_add3_u32 v71, v71, v65, v66
 		v_add3_u32 v81, s69, v82, v31
 		v_add3_u32 v83, v81, v65, v66
-		v_add3_u32 v86, v85, v155, s69
-		v_add3_u32 v90, v87, v155, s69
-		v_add3_u32 v93, v89, v155, s69
-		v_add3_u32 v96, v92, v156, s69
-		v_add3_u32 v99, v95, v156, s69
+		v_add3_u32 v85, v84, v155, s69
+		v_add3_u32 v88, v87, v155, s69
+		v_add3_u32 v94, v90, v155, s69
+		v_add3_u32 v97, v92, v156, s69
+		v_add3_u32 v99, v96, v156, s69
 		v_add3_u32 v100, v69, v156, s69
-		buffer_load_ubyte v97, v71, s[32:35], 0 offen
+		buffer_load_ubyte v93, v71, s[32:35], 0 offen
 		buffer_load_ubyte v81, v83, s[32:35], 0 offen
-		buffer_load_ubyte v84, v86, s[32:35], 0 offen
-		buffer_load_ubyte v86, v90, s[32:35], 0 offen
-		buffer_load_ubyte v83, v93, s[32:35], 0 offen
-		buffer_load_ubyte v90, v96, s[32:35], 0 offen
-		buffer_load_ubyte v93, v99, s[32:35], 0 offen
-		buffer_load_ubyte v96, v100, s[32:35], 0 offen
+		buffer_load_ubyte v83, v85, s[32:35], 0 offen
+		buffer_load_ubyte v86, v88, s[32:35], 0 offen
+		buffer_load_ubyte v88, v94, s[32:35], 0 offen
+		buffer_load_ubyte v85, v97, s[32:35], 0 offen
+		buffer_load_ubyte v94, v99, s[32:35], 0 offen
+		buffer_load_ubyte v97, v100, s[32:35], 0 offen
 		s_add_i32 s69, s18, s68
 		v_add3_u32 v71, s69, v33, v52
 		v_add3_u32 v71, v71, v55, v57
 		v_add3_u32 v71, v71, v59, v31
 		v_add3_u32 v71, v71, v65, v66
 		v_add3_u32 v99, v72, v157, s69
-		v_add3_u32 v100, v75, v157, s69
-		v_add3_u32 v115, v78, v157, s69
+		v_add3_u32 v100, v76, v157, s69
+		v_add3_u32 v115, v79, v157, s69
 		buffer_load_ubyte v101, v71, s[36:39], 0 offen
 		buffer_load_ubyte v71, v99, s[36:39], 0 offen
 		buffer_load_ubyte v99, v100, s[36:39], 0 offen
@@ -1795,8 +1766,8 @@ _a4w4_kernel:
 		v_add3_u32 v98, v98, v59, v31
 		v_add3_u32 v98, v98, v65, v66
 		v_add3_u32 v103, v72, v158, s69
-		v_add3_u32 v104, v75, v158, s69
-		v_add3_u32 v159, v78, v158, s69
+		v_add3_u32 v104, v76, v158, s69
+		v_add3_u32 v159, v79, v158, s69
 		buffer_load_ubyte v105, v98, s[36:39], 0 offen
 		buffer_load_ubyte v98, v103, s[36:39], 0 offen
 		buffer_load_ubyte v103, v104, s[36:39], 0 offen
@@ -1958,8 +1929,8 @@ _a4w4_kernel:
 		ds_read_b128 v[156:159], v106 offset:45120
 		ds_write_b8 v0, v80 offset:2048
 		ds_write_b8 v70, v54 offset:2048
-		ds_write_b8 v74, v73 offset:2048
-		ds_write_b8 v77, v76 offset:2048
+		ds_write_b8 v75, v74 offset:2048
+		ds_write_b8 v78, v77 offset:2048
 		v_cmp_lt_i32_e64 vcc, v23, s12
 		s_mov_b64 s[2:3], vcc
 		v_cmp_lt_i32_e64 vcc, v24, s12
@@ -2092,14 +2063,14 @@ _a4w4_kernel:
 		ds_read_b128 v[144:147], v106 offset:24640
 		ds_read_b128 v[152:155], v106 offset:28672
 		ds_read_b128 v[156:159], v106 offset:28736
-		ds_write_b8 v0, v97
+		ds_write_b8 v0, v93
 		ds_write_b8 v70, v81
-		ds_write_b8 v74, v84
-		ds_write_b8 v77, v86
-		ds_write_b8 v88, v83
-		ds_write_b8 v91, v90
-		ds_write_b8 v94, v93
-		ds_write_b8 v68, v96
+		ds_write_b8 v75, v83
+		ds_write_b8 v78, v86
+		ds_write_b8 v89, v88
+		ds_write_b8 v91, v85
+		ds_write_b8 v95, v94
+		ds_write_b8 v68, v97
 		v_cmp_lt_i32_e64 vcc, v2, s12
 		s_mov_b64 s[18:19], vcc
 		v_cmp_lt_i32_e64 vcc, v3, s12
@@ -2112,8 +2083,8 @@ _a4w4_kernel:
 		s_barrier
 		ds_write_b8 v0, v101 offset:2048
 		ds_write_b8 v70, v71 offset:2048
-		ds_write_b8 v74, v99 offset:2048
-		ds_write_b8 v77, v100 offset:2048
+		ds_write_b8 v75, v99 offset:2048
+		ds_write_b8 v78, v100 offset:2048
 		v_cmp_lt_i32_e64 vcc, v10, s12
 		s_mov_b64 s[28:29], vcc
 		v_cmp_lt_i32_e64 vcc, v11, s12
@@ -2294,9 +2265,9 @@ _a4w4_kernel:
 		s_waitcnt vmcnt(2)
 		ds_write_b8 v70, v98 offset:2048
 		s_waitcnt vmcnt(1)
-		ds_write_b8 v74, v103 offset:2048
+		ds_write_b8 v75, v103 offset:2048
 		s_waitcnt vmcnt(0)
-		ds_write_b8 v77, v104 offset:2048
+		ds_write_b8 v78, v104 offset:2048
 		v_cmp_lt_i32_e64 vcc, v14, s12
 		s_mov_b64 s[36:37], vcc
 		v_cmp_lt_i32_e64 vcc, v15, s12
@@ -2315,7 +2286,7 @@ _a4w4_kernel:
 		ds_read_u8 v14, v124 offset:2048
 		ds_read_u8 v15, v116 offset:2048
 		ds_read_u8 v16, v111 offset:2048
-		v_cmp_lt_i32_e64 vcc, v79, s13
+		v_cmp_lt_i32_e64 vcc, v73, s13
 		s_mov_b64 s[44:45], vcc
 		v_cvt_pk_bf16_f32 v64, v252, v253
 		v_cvt_pk_bf16_f32 v65, v254, v255
@@ -2542,8 +2513,7 @@ _a4w4_kernel:
 		buffer_store_dwordx4 v[64:67], v29, s[8:11], 0 offen
 		s_and_b32 s46, s4, s44
 		s_and_b32 s47, s5, s45
-		v_xor_b32_e32 v22, v21, v22
-		v_xor_b32_e32 v22, v20, v22
+		v_bitop3_b32 v22, v20, v21, v22 bitop3:0x96
 		v_mul_lo_u32 v22, s17, v22
 		v_lshlrev_b32_e32 v22, 1, v22
 		v_add_u32_e32 v29, s12, v22
@@ -2555,8 +2525,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s7, s45
 		v_add_u32_e32 v29, 32, v40
 		v_xor_b32_e32 v29, v29, v108
-		v_xor_b32_e32 v29, v21, v29
-		v_xor_b32_e32 v29, v20, v29
+		v_bitop3_b32 v29, v20, v21, v29 bitop3:0x96
 		v_mul_lo_u32 v29, s17, v29
 		v_lshlrev_b32_e32 v29, 1, v29
 		v_add_u32_e32 v32, s12, v29
@@ -2568,8 +2537,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s15, s45
 		v_add_u32_e32 v32, 48, v40
 		v_xor_b32_e32 v32, v32, v108
-		v_xor_b32_e32 v32, v21, v32
-		v_xor_b32_e32 v32, v20, v32
+		v_bitop3_b32 v32, v20, v21, v32 bitop3:0x96
 		v_mul_lo_u32 v32, s17, v32
 		v_lshlrev_b32_e32 v32, 1, v32
 		v_add_u32_e32 v33, s12, v32
@@ -2581,8 +2549,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s19, s45
 		v_add_u32_e32 v33, 64, v40
 		v_xor_b32_e32 v33, v33, v108
-		v_xor_b32_e32 v33, v21, v33
-		v_xor_b32_e32 v33, v20, v33
+		v_bitop3_b32 v33, v20, v21, v33 bitop3:0x96
 		v_mul_lo_u32 v33, s17, v33
 		v_lshlrev_b32_e32 v33, 1, v33
 		v_add_u32_e32 v34, s12, v33
@@ -2594,8 +2561,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s23, s45
 		v_add_u32_e32 v34, 0x50, v40
 		v_xor_b32_e32 v34, v34, v108
-		v_xor_b32_e32 v34, v21, v34
-		v_xor_b32_e32 v34, v20, v34
+		v_bitop3_b32 v34, v20, v21, v34 bitop3:0x96
 		v_mul_lo_u32 v34, s17, v34
 		v_lshlrev_b32_e32 v34, 1, v34
 		v_add_u32_e32 v35, s12, v34
@@ -2607,8 +2573,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s25, s45
 		v_add_u32_e32 v35, 0x60, v40
 		v_xor_b32_e32 v35, v35, v108
-		v_xor_b32_e32 v35, v21, v35
-		v_xor_b32_e32 v35, v20, v35
+		v_bitop3_b32 v35, v20, v21, v35 bitop3:0x96
 		v_mul_lo_u32 v35, s17, v35
 		v_lshlrev_b32_e32 v35, 1, v35
 		v_add_u32_e32 v36, s12, v35
@@ -2620,8 +2585,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s27, s45
 		v_add_u32_e32 v36, 0x70, v40
 		v_xor_b32_e32 v36, v36, v108
-		v_xor_b32_e32 v36, v21, v36
-		v_xor_b32_e32 v36, v20, v36
+		v_bitop3_b32 v36, v20, v21, v36 bitop3:0x96
 		v_mul_lo_u32 v36, s17, v36
 		v_lshlrev_b32_e32 v36, 1, v36
 		v_add_u32_e32 v37, s12, v36
@@ -2633,8 +2597,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s29, s45
 		v_add_u32_e32 v37, 0x80, v40
 		v_xor_b32_e32 v37, v37, v108
-		v_xor_b32_e32 v37, v21, v37
-		v_xor_b32_e32 v37, v20, v37
+		v_bitop3_b32 v37, v20, v21, v37 bitop3:0x96
 		v_mul_lo_u32 v37, s17, v37
 		v_lshlrev_b32_e32 v37, 1, v37
 		v_add_u32_e32 v38, s12, v37
@@ -2646,8 +2609,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s31, s45
 		v_add_u32_e32 v38, 0x90, v40
 		v_xor_b32_e32 v38, v38, v108
-		v_xor_b32_e32 v38, v21, v38
-		v_xor_b32_e32 v38, v20, v38
+		v_bitop3_b32 v38, v20, v21, v38 bitop3:0x96
 		v_mul_lo_u32 v38, s17, v38
 		v_lshlrev_b32_e32 v38, 1, v38
 		v_add_u32_e32 v39, s12, v38
@@ -2659,8 +2621,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s33, s45
 		v_add_u32_e32 v39, 0xa0, v40
 		v_xor_b32_e32 v39, v39, v108
-		v_xor_b32_e32 v39, v21, v39
-		v_xor_b32_e32 v39, v20, v39
+		v_bitop3_b32 v39, v20, v21, v39 bitop3:0x96
 		v_mul_lo_u32 v39, s17, v39
 		v_lshlrev_b32_e32 v39, 1, v39
 		v_add_u32_e32 v41, s12, v39
@@ -2672,8 +2633,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s35, s45
 		v_add_u32_e32 v41, 0xb0, v40
 		v_xor_b32_e32 v41, v41, v108
-		v_xor_b32_e32 v41, v21, v41
-		v_xor_b32_e32 v41, v20, v41
+		v_bitop3_b32 v41, v20, v21, v41 bitop3:0x96
 		v_mul_lo_u32 v41, s17, v41
 		v_lshlrev_b32_e32 v41, 1, v41
 		v_add_u32_e32 v42, s12, v41
@@ -2685,8 +2645,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s37, s45
 		v_add_u32_e32 v42, 0xc0, v40
 		v_xor_b32_e32 v42, v42, v108
-		v_xor_b32_e32 v42, v21, v42
-		v_xor_b32_e32 v42, v20, v42
+		v_bitop3_b32 v42, v20, v21, v42 bitop3:0x96
 		v_mul_lo_u32 v42, s17, v42
 		v_lshlrev_b32_e32 v42, 1, v42
 		v_add_u32_e32 v43, s12, v42
@@ -2698,8 +2657,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s39, s45
 		v_add_u32_e32 v43, 0xd0, v40
 		v_xor_b32_e32 v43, v43, v108
-		v_xor_b32_e32 v43, v21, v43
-		v_xor_b32_e32 v43, v20, v43
+		v_bitop3_b32 v43, v20, v21, v43 bitop3:0x96
 		v_mul_lo_u32 v43, s17, v43
 		v_lshlrev_b32_e32 v43, 1, v43
 		v_add_u32_e32 v44, s12, v43
@@ -2711,8 +2669,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s41, s45
 		v_add_u32_e32 v44, 0xe0, v40
 		v_xor_b32_e32 v44, v44, v108
-		v_xor_b32_e32 v44, v21, v44
-		v_xor_b32_e32 v44, v20, v44
+		v_bitop3_b32 v44, v20, v21, v44 bitop3:0x96
 		v_mul_lo_u32 v44, s17, v44
 		v_lshlrev_b32_e32 v44, 1, v44
 		v_add_u32_e32 v45, s12, v44
@@ -2724,8 +2681,7 @@ _a4w4_kernel:
 		s_and_b32 s47, s43, s45
 		v_add_u32_e32 v40, 0xf0, v40
 		v_xor_b32_e32 v40, v40, v108
-		v_xor_b32_e32 v21, v21, v40
-		v_xor_b32_e32 v20, v20, v21
+		v_bitop3_b32 v20, v20, v21, v40 bitop3:0x96
 		v_mul_lo_u32 v20, s17, v20
 		v_lshlrev_b32_e32 v20, 1, v20
 		v_add_u32_e32 v21, s12, v20

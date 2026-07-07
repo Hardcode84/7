@@ -25,6 +25,7 @@ defvar WaveAMDMachine_Gfx90APlus =
 defvar WaveAMDMachine_Gfx940Plus =
     "isa.Major == 9 && (isa.Minor == 4 || " #
     "(isa.Minor == 5 && isa.Stepping == 0))";
+defvar WaveAMDMachine_BitOp3Target = WaveAMDMachine_Gfx940Plus;
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
 defvar WaveAMDMachine_VMovB64Target =
@@ -408,6 +409,8 @@ def WaveAMDMachine_SDWAWordSelAttr
     : ConfinedAttr<I64Attr, [IntMinValue<4>, IntMaxValue<5>]>;
 def WaveAMDMachine_ScaleIndexAttr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
+def WaveAMDMachine_BitOp3Attr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<255>]>;
 def WaveAMDMachine_NonNegativeI64Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>]>;
 
@@ -953,6 +956,18 @@ def WaveAMDMachine_VOr3B32Op
 def WaveAMDMachine_VXadU32Op
     : WaveAMDMachine_TernaryIntResult<"v_xad_u32">,
       WaveAMDMachine_VOP3IntLegality;
+def WaveAMDMachine_VBitOp3B32Op
+    : WaveAMDMachine_Op<"v_bitop3_b32", [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_VOP3IntLegality {
+  let archPredicate = WaveAMDMachine_BitOp3Target;
+  let arguments = (ins WaveAMDMachine_RegOrImm:$a,
+                       WaveAMDMachine_RegOrImm:$b,
+                       WaveAMDMachine_RegOrImm:$c,
+                       WaveAMDMachine_BitOp3Attr:$bitop3);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat =
+      "$a `,` $b `,` $c `bitop3` $bitop3 attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VAddF32Op
     : WaveAMDMachine_BinaryResult<"v_add_f32", WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;

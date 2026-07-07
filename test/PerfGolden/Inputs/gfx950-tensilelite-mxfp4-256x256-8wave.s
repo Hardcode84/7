@@ -52,9 +52,7 @@ wmma_f16_matmul_tiled:
 		v_lshrrev_b32_e32 v5, 2, v4
 		v_lshlrev_b32_e32 v5, 12, v5
 		v_lshrrev_b32_e32 v6, 3, v4
-		v_and_b32_e32 v6, 3, v6
-		v_and_b32_e32 v7, 3, v4
-		v_xor_b32_e32 v6, v6, v7
+		v_bitop3_b32 v6, v6, 3, v4 bitop3:0x48
 		v_lshlrev_b32_e32 v6, 4, v6
 		v_add3_u32 v3, v3, v5, v6
 		s_add_i32 s10, s9, 0x80000
@@ -147,8 +145,7 @@ wmma_f16_matmul_tiled:
 		scratch_store_dword off, v10, s33 offset:108
 		v_lshrrev_b32_e32 v4, 4, v4
 		v_lshrrev_b32_e32 v9, 1, v9
-		v_and_b32_e32 v9, 3, v9
-		v_xor_b32_e32 v4, v4, v9
+		v_bitop3_b32 v4, v4, v9, 3 bitop3:0x78
 		v_lshlrev_b32_e32 v4, 4, v4
 		s_mov_b32 s33, 0
 		scratch_store_dword off, v4, s33 offset:112

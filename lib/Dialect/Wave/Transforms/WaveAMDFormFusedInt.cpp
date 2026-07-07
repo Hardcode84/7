@@ -23,6 +23,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace mlir::wave {
@@ -799,6 +800,132 @@ tryFuseShiftAddFanout(PatternRewriter &rewriter, VLshlrevB32Op op,
   return success();
 }
 
+struct BitOp3Candidate {
+  SmallVector<Operation *, 4> deadOps;
+  SmallVector<Value, 3> sources;
+  unsigned bitOpCount = 0;
+};
+
+static bool isBitOp3SourceOp(Operation *op) {
+  return isa_and_nonnull<VAndB32Op, VOrB32Op, VXorB32Op>(op);
+}
+
+static std::optional<uint8_t> getConstantTruthTable(Value value) {
+  std::optional<int64_t> imm = getMachineImmValue(value);
+  if (!imm)
+    return std::nullopt;
+  if (*imm == 0)
+    return 0;
+  if (static_cast<uint32_t>(*imm) == std::numeric_limits<uint32_t>::max())
+    return 0xff;
+  return std::nullopt;
+}
+
+static std::optional<uint8_t> getSourceTruthTable(Value value,
+                                                  BitOp3Candidate &candidate) {
+  constexpr std::array<uint8_t, 3> srcBits = {0xf0, 0xcc, 0xaa};
+  for (auto [index, source] : llvm::enumerate(candidate.sources))
+    if (source == value)
+      return srcBits[index];
+  if (candidate.sources.size() == srcBits.size())
+    return std::nullopt;
+  uint8_t bits = srcBits[candidate.sources.size()];
+  candidate.sources.push_back(value);
+  return bits;
+}
+
+static std::optional<uint8_t> matchBitOp3Value(Value value, Operation *root,
+                                               BitOp3Candidate &candidate);
+
+static std::optional<uint8_t> combineBitOp3Tables(Operation *op, uint8_t lhs,
+                                                  uint8_t rhs) {
+  if (isa<VAndB32Op>(op))
+    return lhs & rhs;
+  if (isa<VOrB32Op>(op))
+    return lhs | rhs;
+  if (isa<VXorB32Op>(op))
+    return lhs ^ rhs;
+  return std::nullopt;
+}
+
+static std::optional<uint8_t> matchBitOp3Op(Operation *op, Operation *root,
+                                            BitOp3Candidate &candidate) {
+  if (op != root && !op->getResult(0).hasOneUse())
+    return std::nullopt;
+
+  std::optional<uint8_t> lhs =
+      matchBitOp3Value(op->getOperand(0), root, candidate);
+  std::optional<uint8_t> rhs =
+      matchBitOp3Value(op->getOperand(1), root, candidate);
+  if (!lhs || !rhs)
+    return std::nullopt;
+
+  std::optional<uint8_t> table = combineBitOp3Tables(op, *lhs, *rhs);
+  if (!table)
+    return std::nullopt;
+  ++candidate.bitOpCount;
+  if (op != root)
+    candidate.deadOps.push_back(op);
+  return table;
+}
+
+static std::optional<uint8_t> matchBitOp3Value(Value value, Operation *root,
+                                               BitOp3Candidate &candidate) {
+  if (std::optional<uint8_t> table = getConstantTruthTable(value))
+    return table;
+
+  Operation *def = value.getDefiningOp();
+  if (isBitOp3SourceOp(def) && def->getBlock() == root->getBlock()) {
+    BitOp3Candidate trial = candidate;
+    if (std::optional<uint8_t> table = matchBitOp3Op(def, root, trial)) {
+      candidate = std::move(trial);
+      return table;
+    }
+  }
+
+  return getSourceTruthTable(value, candidate);
+}
+
+static void eraseDeadBitOps(PatternRewriter &rewriter,
+                            ArrayRef<Operation *> ops) {
+  for (Operation *op : llvm::reverse(ops))
+    if (op->use_empty())
+      rewriter.eraseOp(op);
+}
+
+static LogicalResult tryFuseBitOp3(PatternRewriter &rewriter, Operation *op,
+                                   const llvm::AMDGPU::IsaVersion &isa,
+                                   unsigned minBitOps = 2) {
+  if (!VBitOp3B32Op::isSupportedOnIsa(isa))
+    return failure();
+
+  BitOp3Candidate candidate;
+  std::optional<uint8_t> table = matchBitOp3Op(op, op, candidate);
+  if (!table || candidate.bitOpCount < minBitOps || candidate.sources.empty())
+    return failure();
+
+  rewriter.setInsertionPoint(op);
+  while (candidate.sources.size() < 3) {
+    Value zero = ImmOp::create(rewriter, op->getLoc(),
+                               ImmType::get(op->getContext()), 0);
+    candidate.sources.push_back(zero);
+  }
+
+  std::array<Value, 3> operands = {candidate.sources[0], candidate.sources[1],
+                                   candidate.sources[2]};
+  if (!canCreateTernary<VBitOp3B32Op>(operands, isa))
+    return failure();
+
+  VBitOp3B32Op fused = VBitOp3B32Op::create(
+      rewriter, op->getLoc(), op->getResult(0).getType(), operands[0],
+      operands[1], operands[2], rewriter.getI64IntegerAttr(*table));
+  fused->setAttrs(op->getAttrs());
+  fused->setAttr("bitop3", rewriter.getI64IntegerAttr(*table));
+  rewriter.replaceOp(op, fused.getResult());
+  eraseDeadBitOps(rewriter, candidate.deadOps);
+  return success();
+}
+
 class DataFlowListener : public RewriterBase::Listener {
 public:
   DataFlowListener(DataFlowSolver &solver) : solver(solver) {}
@@ -944,13 +1071,28 @@ struct OrFusionPattern : public OpRewritePattern<VOrB32Op> {
 
   LogicalResult matchAndRewrite(VOrB32Op op,
                                 PatternRewriter &rewriter) const override {
+    if (succeeded(tryFuseBitOp3(rewriter, op, isa, 3)))
+      return success();
     if (succeeded(
             tryFuseNestedBinary<VAndB32Op, VAndOrB32Op>(rewriter, op, isa)))
       return success();
     if (succeeded(tryFuseNestedBinary<VOrB32Op, VOr3B32Op>(rewriter, op, isa)))
       return success();
 
-    return failure();
+    return tryFuseBitOp3(rewriter, op, isa);
+  }
+
+  llvm::AMDGPU::IsaVersion isa;
+};
+
+template <typename OpTy>
+struct BitOp3FusionPattern : public OpRewritePattern<OpTy> {
+  BitOp3FusionPattern(MLIRContext *context, const llvm::AMDGPU::IsaVersion &isa)
+      : OpRewritePattern<OpTy>(context), isa(isa) {}
+
+  LogicalResult matchAndRewrite(OpTy op,
+                                PatternRewriter &rewriter) const override {
+    return tryFuseBitOp3(rewriter, op.getOperation(), isa);
   }
 
   llvm::AMDGPU::IsaVersion isa;
@@ -959,7 +1101,8 @@ struct OrFusionPattern : public OpRewritePattern<VOrB32Op> {
 static bool hasFusedIntCandidate(func::FuncOp func) {
   bool found = false;
   WalkResult result = func.walk([&](Operation *op) {
-    if (!isa<VAddU32Op, VAdd3U32Op, VLshlrevB32Op, VOrB32Op, SMovM0Op>(op))
+    if (!isa<VAddU32Op, VAdd3U32Op, VLshlrevB32Op, VAndB32Op, VOrB32Op,
+             VXorB32Op, SMovM0Op>(op))
       return WalkResult::advance();
     found = true;
     return WalkResult::interrupt();
@@ -990,6 +1133,8 @@ static LogicalResult runOnFunc(func::FuncOp func) {
       .add<AddChainFactorPattern<VAddU32Op>, AddChainFactorPattern<VAdd3U32Op>>(
           func.getContext(), *isa);
   patterns.add<AddFusionPattern, LshlFusionPattern, OrFusionPattern>(
+      func.getContext(), *isa);
+  patterns.add<BitOp3FusionPattern<VAndB32Op>, BitOp3FusionPattern<VXorB32Op>>(
       func.getContext(), *isa);
   DataFlowListener listener(solver);
   return applyPatternsGreedily(

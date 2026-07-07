@@ -1003,16 +1003,14 @@ v9_beyond_hotloop:
 		v_lshlrev_b32_e32 v14, 2, v14
 		v_add_u32_e32 v25, 32, v14
 		v_lshlrev_b32_e32 v0, 3, v0
-		v_xor_b32_e32 v25, v25, v0
-		v_xor_b32_e32 v25, v24, v25
+		v_bitop3_b32 v25, v24, v25, v0 bitop3:0x96
 		v_lshl_add_u32 v30, v25, 1, v11
 		v_cndmask_b32_e64 v30, v120, v30, s[28:29]
 		buffer_store_dwordx2 v[4:5], v30, s[20:23], 0 offen
 		s_and_b32 s28, s2, s24
 		s_and_b32 s29, s3, s25
 		v_add_u32_e32 v4, 64, v14
-		v_xor_b32_e32 v4, v4, v0
-		v_xor_b32_e32 v4, v24, v4
+		v_bitop3_b32 v4, v24, v4, v0 bitop3:0x96
 		v_lshl_add_u32 v5, v4, 1, v11
 		v_cndmask_b32_e64 v5, v120, v5, s[28:29]
 		buffer_store_dwordx2 v[6:7], v5, s[20:23], 0 offen
@@ -1027,8 +1025,7 @@ v9_beyond_hotloop:
 		v_add3_u32 v5, s0, v9, v13
 		v_add3_u32 v5, v5, v20, v21
 		v_add_u32_e32 v6, 0x60, v14
-		v_xor_b32_e32 v0, v6, v0
-		v_xor_b32_e32 v0, v24, v0
+		v_bitop3_b32 v0, v24, v6, v0 bitop3:0x96
 		v_lshlrev_b32_e32 v0, 1, v0
 		v_add3_u32 v5, v5, v22, v0
 		v_cndmask_b32_e64 v5, v120, v5, s[28:29]
@@ -1042,10 +1039,8 @@ v9_beyond_hotloop:
 		v_add_u32_e32 v8, 64, v12
 		v_lshlrev_b32_e32 v2, 1, v2
 		v_xor_b32_e32 v8, v8, v2
-		v_xor_b32_e32 v8, v3, v8
-		v_xor_b32_e32 v8, v7, v8
-		v_xor_b32_e32 v8, v6, v8
-		v_xor_b32_e32 v8, v5, v8
+		v_bitop3_b32 v8, v7, v3, v8 bitop3:0x96
+		v_bitop3_b32 v8, v5, v6, v8 bitop3:0x96
 		v_mul_lo_u32 v8, s12, v8
 		v_lshlrev_b32_e32 v8, 1, v8
 		v_add_u32_e32 v10, s14, v8
@@ -1072,10 +1067,8 @@ v9_beyond_hotloop:
 		s_and_b32 s29, s7, s17
 		v_add_u32_e32 v10, 0x80, v12
 		v_xor_b32_e32 v10, v10, v2
-		v_xor_b32_e32 v10, v3, v10
-		v_xor_b32_e32 v10, v7, v10
-		v_xor_b32_e32 v10, v6, v10
-		v_xor_b32_e32 v10, v5, v10
+		v_bitop3_b32 v10, v7, v3, v10 bitop3:0x96
+		v_bitop3_b32 v10, v5, v6, v10 bitop3:0x96
 		v_mul_lo_u32 v10, s12, v10
 		v_lshlrev_b32_e32 v10, 1, v10
 		v_add_u32_e32 v11, s14, v10
@@ -1102,10 +1095,8 @@ v9_beyond_hotloop:
 		s_and_b32 s29, s11, s17
 		v_add_u32_e32 v11, 0xc0, v12
 		v_xor_b32_e32 v2, v11, v2
-		v_xor_b32_e32 v2, v3, v2
-		v_xor_b32_e32 v2, v7, v2
-		v_xor_b32_e32 v2, v6, v2
-		v_xor_b32_e32 v2, v5, v2
+		v_bitop3_b32 v2, v7, v3, v2 bitop3:0x96
+		v_bitop3_b32 v2, v5, v6, v2 bitop3:0x96
 		v_mul_lo_u32 v2, s12, v2
 		v_lshl_add_u32 v3, v2, 1, s0
 		v_add_u32_e32 v5, v3, v31

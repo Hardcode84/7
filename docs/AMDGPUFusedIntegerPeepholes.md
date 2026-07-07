@@ -78,6 +78,7 @@ Match machine integer semantics, not source-language intent.
 | `v_lshlrev_b32(v_add_u32(x, y), k)` | `v_add_lshl_u32 x, y, k` | Add result single-use, no carry/VCC form. |
 | `v_or_b32(v_and_b32(x, y), z)` | `v_and_or_b32 x, y, z` | Bitwise only. |
 | `v_or_b32(v_or_b32(x, y), z)` | `v_or3_b32 x, y, z` | Existing nested OR edge only. |
+| `v_and_b32` / `v_or_b32` / `v_xor_b32` tree | `v_bitop3_b32 x, y, z bitop3 imm` | gfx940+; at least two source ops, same block, max three variable sources. |
 | `v_add_u32(v_xor_b32(x, y), z)` | `v_xad_u32 x, y, z` | XOR result single-use; add is modulo. |
 | `v_add_u32(v_mul_lo_u32(x, y), z)` | `v_mad_u32_u24 x, y, z` | `x` and `y` proven in unsigned 24-bit range. |
 | `v_add_u32(v_mul_lo_u32(x, y), z)` | `v_mad_i32_i24 x, y, z` | `x` and `y` proven in signed 24-bit range. |

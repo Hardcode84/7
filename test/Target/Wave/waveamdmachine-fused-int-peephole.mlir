@@ -763,3 +763,80 @@ func.func @v_add3_common_tail_exec_boundary_reject(
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @bitop3_xor_and_or
+// CHECK-NOT: waveamdmachine.v_and_b32
+// CHECK-NOT: waveamdmachine.v_or_b32
+// CHECK-NOT: waveamdmachine.v_xor_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_bitop3_b32 {{.*}} bitop3 58
+// CHECK: return [[OUT]]
+func.func @bitop3_xor_and_or(%a: !waveamdmachine.reg<vgpr, 1>,
+                             %b: !waveamdmachine.reg<vgpr, 1>,
+                             %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %and = waveamdmachine.v_and_b32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %or = waveamdmachine.v_or_b32 %c, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_xor_b32 %and, %or
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @bitop3_or_and_xor
+// CHECK-NOT: waveamdmachine.v_and_b32
+// CHECK-NOT: waveamdmachine.v_xor_b32
+// CHECK-NOT: waveamdmachine.v_and_or_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_bitop3_b32 {{.*}} bitop3 218
+// CHECK: return [[OUT]]
+func.func @bitop3_or_and_xor(%a: !waveamdmachine.reg<vgpr, 1>,
+                             %b: !waveamdmachine.reg<vgpr, 1>,
+                             %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %and = waveamdmachine.v_and_b32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %xor = waveamdmachine.v_xor_b32 %c, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_or_b32 %and, %xor
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @bitop3_gfx11_reject
+// CHECK-NOT: waveamdmachine.v_bitop3_b32
+// CHECK: waveamdmachine.v_and_b32
+// CHECK: waveamdmachine.v_or_b32
+// CHECK: waveamdmachine.v_xor_b32
+func.func @bitop3_gfx11_reject(%a: !waveamdmachine.reg<vgpr, 1>,
+                               %b: !waveamdmachine.reg<vgpr, 1>,
+                               %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %and = waveamdmachine.v_and_b32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %or = waveamdmachine.v_or_b32 %c, %a
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_xor_b32 %and, %or
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
+}
