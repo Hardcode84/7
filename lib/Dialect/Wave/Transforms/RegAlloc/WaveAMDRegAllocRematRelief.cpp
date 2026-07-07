@@ -91,7 +91,8 @@ static bool isCheapRematRoot(Operation *op) {
              waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
              waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
              waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
-             waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op>(op) ||
+             waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
+             waveamdmachine::VBitOp3B32Op>(op) ||
          (op && op->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>());
 }
 
