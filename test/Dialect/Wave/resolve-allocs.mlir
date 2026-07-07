@@ -90,7 +90,7 @@ func.func @scf_nested_alloc_overlaps_outer(%out: !wave.ptr<#wave.global, i32>)
   %c1 = arith.constant 1 : index
   %c4 = arith.constant 4 : index
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  // CHECK: %[[OUTER:.*]] = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %outer = wave.alloc() {align = 16 : i64, bytesize = 32 : i64}
       : !wave.ptr<#wave.shared, i32>
   scf.for %i = %c0 to %c4 step %c1 {
@@ -180,5 +180,74 @@ func.func @scf_for_iter_arg_extends_alloc()
   %carried_p = wave.ptr_add %carried, %lane
       : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @loop_entry_use_overlaps_later_alloc
+// CHECK-SAME: wave.lds_size = 32 : i64
+// CHECK-NOT: wave.alloc
+func.func @loop_entry_use_overlaps_later_alloc(%n: index)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %outer = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  scf.for %i = %c0 to %n step %c1 {
+    %outer_p = wave.ptr_add %outer, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %t0 = wave.store %lane -> %outer_p
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+        -> !wave.mem.token
+    // CHECK: wave.shared_memory_base {offset = 16 : i64} : !wave.ptr<#wave.shared, i32>
+    %inner = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %inner_p = wave.ptr_add %inner, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %t1 = wave.store %lane -> %inner_p after %t0
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @same_loop_sequential_allocs
+// CHECK-SAME: wave.lds_size = 16 : i64
+// CHECK-NOT: wave.alloc
+func.func @same_loop_sequential_allocs(%n: index)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 {
+    // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+    %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %ap = wave.ptr_add %a, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %ta = wave.store %lane -> %ap
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+        -> !wave.mem.token
+
+    // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+    %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %bp = wave.ptr_add %b, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %tb = wave.store %lane -> %bp after %ta
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+  }
   return
 }

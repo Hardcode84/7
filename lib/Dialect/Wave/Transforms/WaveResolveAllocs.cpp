@@ -58,17 +58,6 @@ static FailureOr<int64_t> alignUp(int64_t value, int64_t align) {
   return value + add;
 }
 
-static Operation *getFunctionBodyAnchor(Operation *op, func::FuncOp func) {
-  Operation *anchor = op;
-  while (anchor && anchor->getParentOp() != func) {
-    Operation *parent = anchor->getParentOp();
-    if (!parent)
-      break;
-    anchor = parent;
-  }
-  return anchor;
-}
-
 class OperationOrder {
 public:
   explicit OperationOrder(func::FuncOp func) {
@@ -80,11 +69,6 @@ public:
     auto it = positions.find(op);
     assert(it != positions.end() && "operation missing from order");
     return it->second;
-  }
-
-  unsigned intervalPosition(func::FuncOp func, Operation *op) const {
-    Operation *anchor = getFunctionBodyAnchor(op, func);
-    return lookup(anchor ? anchor : op);
   }
 
 private:
@@ -157,13 +141,13 @@ appendForwardedAliases(Operation *user, Value value, unsigned index,
 }
 
 static void
-extendIntervalsThroughAliases(func::FuncOp func, const OperationOrder &order,
+extendIntervalsThroughAliases(const OperationOrder &order,
                               SmallVectorImpl<AllocInterval> &allocs) {
   DenseMap<Value, SmallVector<unsigned, 1>> aliases;
   SmallVector<std::pair<Value, unsigned>, 16> worklist;
   for (auto [index, interval] : llvm::enumerate(allocs)) {
     appendAlias(aliases, interval.op.getResult(), index, worklist);
-    unsigned start = order.intervalPosition(func, interval.op);
+    unsigned start = order.lookup(interval.op);
     interval.start = start;
     interval.end = start;
   }
@@ -172,8 +156,22 @@ extendIntervalsThroughAliases(func::FuncOp func, const OperationOrder &order,
     auto [value, index] = worklist.pop_back_val();
     for (OpOperand &use : value.getUses()) {
       Operation *user = use.getOwner();
-      allocs[index].end =
-          std::max(allocs[index].end, order.intervalPosition(func, user));
+      AllocInterval &interval = allocs[index];
+      interval.end = std::max(interval.end, order.lookup(user));
+      for (Operation *parent = user->getParentOp(); parent;
+           parent = parent->getParentOp()) {
+        auto loop = dyn_cast<scf::ForOp>(parent);
+        if (!loop)
+          continue;
+        unsigned loopPos = order.lookup(loop);
+        if (interval.start < loopPos)
+          interval.end = std::max(
+              interval.end, order.lookup(loop.getBody()->getTerminator()));
+      }
+      if (auto yield = dyn_cast<scf::YieldOp>(user)) {
+        if (auto loop = dyn_cast<scf::ForOp>(yield->getParentOp()))
+          interval.start = std::min(interval.start, order.lookup(loop));
+      }
       appendForwardedAliases(user, value, index, aliases, worklist);
     }
   }
@@ -264,7 +262,7 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
     allocs.push_back({op, bytes, align});
   }
 
-  extendIntervalsThroughAliases(func, order, allocs);
+  extendIntervalsThroughAliases(order, allocs);
   FailureOr<int64_t> plannedBytes = assignOffsets(allocs, fixedBytes);
   if (failed(plannedBytes))
     return func.emitError("failed to place wave.alloc storage");
