@@ -404,6 +404,8 @@ def WaveAMDMachine_PackedOpSel2Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_PackedOpSel3Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<7>]>;
+def WaveAMDMachine_SDWAWordSelAttr
+    : ConfinedAttr<I64Attr, [IntMinValue<4>, IntMaxValue<5>]>;
 def WaveAMDMachine_ScaleIndexAttr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_NonNegativeI64Attr
@@ -994,6 +996,22 @@ def WaveAMDMachine_VCvtF32F16Op
     : WaveAMDMachine_UnaryResult<"v_cvt_f32_f16", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
                               [WaveAMDMachine_VALU, Pure]>;
+def WaveAMDMachine_VCvtF32F16E32Op
+    : WaveAMDMachine_UnaryResult<"v_cvt_f32_f16_e32", WaveAMDMachine_VGPR1,
+                              WaveAMDMachine_VGPR1,
+                              [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = "isa.Major == 8 || isa.Major == 9";
+}
+def WaveAMDMachine_VCvtF32F16SdwaOp
+    : WaveAMDMachine_Op<"v_cvt_f32_f16_sdwa",
+                        [WaveAMDMachine_VALU, Pure]> {
+  let archPredicate = "isa.Major == 8 || isa.Major == 9";
+  let arguments = (ins WaveAMDMachine_VGPR1:$source,
+                       DefaultValuedAttr<WaveAMDMachine_SDWAWordSelAttr,
+                                         "5">:$src0_sel);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VCvtPkRtzF16F32Op
     : WaveAMDMachine_BinaryResult<"v_cvt_pk_rtz_f16_f32",
                                WaveAMDMachine_VGPR1,

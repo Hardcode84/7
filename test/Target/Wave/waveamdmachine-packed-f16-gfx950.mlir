@@ -7,9 +7,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ROUND-LABEL: func.func @packed_f16_gfx950
 // ROUND: waveamdmachine.v_cvt_pk_rtz_f16_f32
 // ROUND: waveamdmachine.v_cvt_pk_f16_f32
+// ROUND: waveamdmachine.v_cvt_f32_f16_e32
+// ROUND: waveamdmachine.v_cvt_f32_f16_sdwa
 // ASM-LABEL: packed_f16_gfx950:
 // ASM: v_cvt_pkrtz_f16_f32
 // ASM: v_cvt_pk_f16_f32
+// ASM: v_cvt_f32_f16_e32
+// ASM: v_cvt_f32_f16_sdwa {{.*}} dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 func.func @packed_f16_gfx950(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {
   %base = waveamdmachine.arg {index = 0 : i64, pointer = true}
@@ -27,7 +31,14 @@ func.func @packed_f16_gfx950(%out: !wave.ptr<#wave.global, i32>)
   %sum = waveamdmachine.v_pk_add_f16 %rtz, %rne
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
-  %store = waveamdmachine.global_store_b32 %a, %sum, %base
+  %lo = waveamdmachine.v_cvt_f32_f16_e32 %sum
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %hi = waveamdmachine.v_cvt_f32_f16_sdwa %sum
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %wide = waveamdmachine.v_add_f32 %lo, %hi
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %store = waveamdmachine.global_store_b32 %a, %wide, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
   waveamdmachine.s_endpgm

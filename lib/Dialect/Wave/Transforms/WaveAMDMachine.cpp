@@ -4898,13 +4898,28 @@ static LogicalResult selectPackedF16ToF32Cast(WaveAMDMachineSelector &S,
       "source");
   if (failed(sourceWords))
     return failure();
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "packed f16 to f32 lowering");
+  if (failed(isa))
+    return failure();
 
   Type vgprType =
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
   SmallVector<Value> resultWords;
   resultWords.reserve(*vectorLength);
+  bool useSdwaHalfSelect = isa->Major == 8 || isa->Major == 9;
   for (unsigned index : llvm::seq<unsigned>(0, *vectorLength)) {
     Value lane = (*sourceWords)[index / 2];
+    if (useSdwaHalfSelect) {
+      if (index % 2)
+        resultWords.push_back(waveamdmachine::VCvtF32F16SdwaOp::create(
+            S.builder, op.getLoc(), vgprType, lane,
+            S.builder.getI64IntegerAttr(5)));
+      else
+        resultWords.push_back(waveamdmachine::VCvtF32F16E32Op::create(
+            S.builder, op.getLoc(), vgprType, lane));
+      continue;
+    }
     if (index % 2)
       lane = waveamdmachine::VLshrrevB32Op::create(
           S.builder, op.getLoc(), vgprType, lane,

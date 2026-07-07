@@ -79,6 +79,10 @@ static constexpr llvm::StringLiteral kMemoryCacheAttrName = "cache";
 // Text ISA names only v0..v255/a0..a255.
 static constexpr unsigned kTextAsmVectorRegisterLimit = 256;
 
+static constexpr unsigned kSdwaUnusedPad = 0;
+static constexpr unsigned kSdwaWord1 = 5;
+static constexpr unsigned kSdwaDword = 6;
+
 static bool isSupportedBackendIsa(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 8 || isa.Major == 9 || isa.Major == 11;
 }
@@ -562,6 +566,18 @@ private:
     if (isGfx8Or9())
       return llvm::AMDGPU::V_CVT_F32_F16_e64_vi;
     return gfx11Opcode(llvm::AMDGPU::V_CVT_F32_F16V_CVT_F32_F16_t16_e64_gfx11);
+  }
+  unsigned vCvtF32F16E32() const {
+    if (isGfx8Or9())
+      return llvm::AMDGPU::V_CVT_F32_F16_e32_vi;
+    llvm_unreachable("v_cvt_f32_f16_e32 requires gfx8/gfx9");
+  }
+  unsigned vCvtF32F16Sdwa() const {
+    if (isaVersion.Major == 8)
+      return llvm::AMDGPU::V_CVT_F32_F16_sdwa_vi;
+    if (isaVersion.Major == 9)
+      return llvm::AMDGPU::V_CVT_F32_F16_sdwa_gfx9;
+    llvm_unreachable("v_cvt_f32_f16_sdwa requires gfx8/gfx9");
   }
   bool usesTrue16Cvt() const { return isGfx11(); }
   bool supportsCvtPkRtzF16F32() const { return isGfx8Or9() || isGfx11(); }
@@ -1884,6 +1900,19 @@ private:
                    llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitCvtF32F16Sdwa(Operation &op) {
+    unsigned src0Sel = getIntAttr(&op, "src0_sel", kSdwaWord1);
+    SmallVector<llvm::MCOperand> operands = {
+        toMCOperand(op.getResult(0)), llvm::MCOperand::createImm(0),
+        toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)};
+    if (isaVersion.Major == 9)
+      operands.push_back(llvm::MCOperand::createImm(0));
+    operands.push_back(llvm::MCOperand::createImm(kSdwaDword));
+    operands.push_back(llvm::MCOperand::createImm(kSdwaUnusedPad));
+    operands.push_back(llvm::MCOperand::createImm(src0Sel));
+    return emitMC(vCvtF32F16Sdwa(), operands);
+  }
+
   LogicalResult emitTernaryInt(unsigned opcode, Operation &op) {
     if (failed(requireOperandLegality(op, op.getName().stripDialect())))
       return failure();
@@ -2722,6 +2751,11 @@ private:
       return emitMC(opcode,
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
     }
+    if (isa<waveamdmachine::VCvtF32F16E32Op>(op))
+      return emitMC(vCvtF32F16E32(),
+                    {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    if (isa<waveamdmachine::VCvtF32F16SdwaOp>(op))
+      return emitCvtF32F16Sdwa(op);
     if (isa<waveamdmachine::VCvtF16F32Op, waveamdmachine::VCvtF32F16Op>(op)) {
       bool f16FromF32 = isa<waveamdmachine::VCvtF16F32Op>(op);
       unsigned opcode = f16FromF32 ? vCvtF16F32() : vCvtF32F16();

@@ -6,7 +6,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // SELECT-LABEL: func.func @packed_wave_math_v4
 // SELECT-COUNT-2: waveamdmachine.v_cvt_pk_f16_f32
 // SELECT-COUNT-2: waveamdmachine.v_cvt_pk_rtz_f16_f32
-// SELECT-COUNT-4: waveamdmachine.v_cvt_f32_f16
+// SELECT: waveamdmachine.v_cvt_f32_f16_e32
+// SELECT: waveamdmachine.v_cvt_f32_f16_sdwa
+// SELECT: waveamdmachine.v_cvt_f32_f16_e32
+// SELECT: waveamdmachine.v_cvt_f32_f16_sdwa
 // SELECT-COUNT-2: waveamdmachine.v_pk_add_f16
 // SELECT-COUNT-2: waveamdmachine.v_pk_mul_f16
 // SELECT-COUNT-2: waveamdmachine.v_pk_fma_f16
@@ -64,7 +67,7 @@ func.func @packed_wave_splat_tuple_operand(%u: vector<4xf16>,
 // SELECT-LABEL: func.func @packed_wave_cast_v1
 // SELECT: waveamdmachine.v_cvt_pk_f16_f32
 // SELECT: waveamdmachine.v_cvt_pk_rtz_f16_f32
-// SELECT: waveamdmachine.v_cvt_f32_f16
+// SELECT: waveamdmachine.v_cvt_f32_f16_e32
 func.func @packed_wave_cast_v1(%src: !wave.simd<vector<1xf32>, 64>) {
   %rne = wave.cast fpconvert %src
       : !wave.simd<vector<1xf32>, 64> -> !wave.simd<vector<1xf16>, 64>
