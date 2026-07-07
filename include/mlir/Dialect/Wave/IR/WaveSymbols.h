@@ -334,6 +334,8 @@ bool provablyInRange(Store &store, ExprHandle expr,
                      int64_t hi);
 bool provablyFitsU32(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions);
+bool positiveAddendsFitU32(Store &store, ExprHandle expr,
+                           llvm::ArrayRef<PredHandle> assumptions);
 std::optional<InferredRange> inferRange(Store &store, ExprHandle expr,
                                         llvm::ArrayRef<PredHandle> assumptions);
 std::optional<int64_t>

@@ -15,6 +15,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
@@ -37,6 +38,8 @@ using namespace mlir;
 using namespace mlir::wave;
 
 namespace {
+
+static constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
 
 struct NamedBinding {
   std::string name;
@@ -150,6 +153,11 @@ static std::string uniqueName(llvm::StringSet<> &used, StringRef stem) {
 
 static void collectUsedNames(const ExpandedIndexExpr &expr,
                              llvm::StringSet<> &used) {
+  for (StringRef name : expr.names)
+    used.insert(name);
+}
+
+static void collectUsedNames(const BoundExpr &expr, llvm::StringSet<> &used) {
   for (StringRef name : expr.names)
     used.insert(name);
 }
@@ -898,6 +906,188 @@ static void collectDeadProducers(scf::ForOp loop, IndexExprOp indexExpr,
   }
 }
 
+static unsigned bitWidth(Type type) {
+  if (VectorType vector = dyn_cast<VectorType>(type)) {
+    Type elementType = vector.getElementType();
+    if (elementType.isIntOrFloat())
+      return elementType.getIntOrFloatBitWidth() * vector.getNumElements();
+  }
+  if (type.isIntOrFloat())
+    return type.getIntOrFloatBitWidth();
+  return 32;
+}
+
+static Type getPointerLikeElementType(Type type) {
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  PtrType ptr = dyn_cast<PtrType>(type);
+  return ptr ? ptr.getElementType() : Type();
+}
+
+static unsigned elementSizeBytes(Type pointerLikeType) {
+  Type elementType = getPointerLikeElementType(pointerLikeType);
+  if (!elementType)
+    return 1;
+  return (bitWidth(elementType) + 7) / 8;
+}
+
+static bool isOffsetStridedPointer(Type type) {
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  PtrType ptr = dyn_cast<PtrType>(type);
+  return ptr && isa<SharedAddressSpaceAttr, waveamd::BufferAddressSpaceAttr>(
+                    ptr.getAddressSpace());
+}
+
+static bool isNormalizedUnitLoop(scf::ForOp loop) {
+  std::optional<int64_t> lower = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  return lower && *lower == 0 && step && *step == 1;
+}
+
+static void
+appendBoundExprAssumptions(sym::Store &store, DataFlowSolver &solver,
+                           const BoundExpr &expr,
+                           SmallVectorImpl<sym::PredHandle> &assumptions) {
+  llvm::append_range(assumptions, expr.assumptions);
+  for (auto [name, binding] : llvm::zip(expr.names, expr.bindings)) {
+    std::optional<ConstantIntRanges> range = finiteSignedRange(solver, binding);
+    if (range)
+      appendRangeAndAssumePredicates(store, binding, name, *range, assumptions);
+    else
+      appendAssumePredicates(store, binding, name, assumptions);
+  }
+}
+
+static FailureOr<sym::ExprHandle>
+scaleByteExpr(sym::Store &store, sym::ExprHandle expr, int64_t byteScale,
+              ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> scaled = scaleExpr(store, expr, byteScale);
+  if (failed(scaled))
+    return failure();
+  return simplifyExpanded(store, *scaled, assumptions);
+}
+
+static bool fitsU32(sym::Store &store, sym::ExprHandle expr,
+                    ArrayRef<sym::PredHandle> assumptions) {
+  return sym::provablyFitsU32(store, expr, assumptions);
+}
+
+static FailureOr<sym::ExprHandle>
+buildTripCountUpperExpr(sym::Store &store, DataFlowSolver &solver,
+                        scf::ForOp loop, llvm::StringSet<> &used,
+                        SmallVectorImpl<sym::PredHandle> &assumptions) {
+  if (std::optional<llvm::APInt> trip = loop.getStaticTripCount()) {
+    if (trip->getActiveBits() > 63)
+      return failure();
+    return sym::composeExprInt(store,
+                               static_cast<int64_t>(trip->getZExtValue()));
+  }
+
+  if (!isNormalizedUnitLoop(loop))
+    return failure();
+
+  std::string name = uniqueName(used, "ptr_trip");
+  if (std::optional<int64_t> upper =
+          getConstantIntValue(loop.getUpperBound())) {
+    FailureOr<sym::PredHandle> range =
+        sym::rangeAssumption(store, name, *upper, *upper);
+    if (failed(range))
+      return failure();
+    assumptions.push_back(*range);
+    return symbolExpr(store, name);
+  }
+
+  size_t oldSize = assumptions.size();
+  std::optional<ConstantIntRanges> range =
+      finiteSignedRange(solver, loop.getUpperBound());
+  if (range)
+    appendRangeAndAssumePredicates(store, loop.getUpperBound(), name, *range,
+                                   assumptions);
+  else
+    appendAssumePredicates(store, loop.getUpperBound(), name, assumptions);
+  if (assumptions.size() == oldSize)
+    return failure();
+  return symbolExpr(store, name);
+}
+
+static FailureOr<sym::ExprHandle>
+buildAccumulatedByteExpr(sym::Store &store, DataFlowSolver &solver,
+                         scf::ForOp loop, const BoundExpr &base,
+                         const BoundExpr &stride, sym::ExprHandle baseBytes,
+                         sym::ExprHandle strideBytes,
+                         SmallVectorImpl<sym::PredHandle> &assumptions) {
+  llvm::StringSet<> used;
+  collectUsedNames(base, used);
+  collectUsedNames(stride, used);
+  FailureOr<sym::ExprHandle> trip =
+      buildTripCountUpperExpr(store, solver, loop, used, assumptions);
+  if (failed(trip))
+    return failure();
+
+  FailureOr<sym::ExprHandle> advance =
+      sym::composeExprBinary(store, *trip, sym::ExprBinaryOp::Mul, strideBytes);
+  if (failed(advance))
+    return failure();
+  FailureOr<sym::ExprHandle> total = sym::composeExprBinary(
+      store, baseBytes, sym::ExprBinaryOp::Add, *advance);
+  if (failed(total))
+    return failure();
+  return simplifyExpanded(store, *total, assumptions);
+}
+
+static bool canUseOffsetStridedCarry(scf::ForOp loop,
+                                     sym::ExprHandle strideBytes) {
+  std::optional<int64_t> stride = sym::getIntegerLiteralValue(strideBytes);
+  return stride && *stride > 0 && *stride <= u32Max &&
+         isNormalizedUnitLoop(loop);
+}
+
+static bool
+proveAccumulatingCarryFitsU32(sym::Store &store, DataFlowSolver &solver,
+                              scf::ForOp loop, const BoundExpr &base,
+                              const BoundExpr &stride, int64_t byteScale) {
+  SmallVector<sym::PredHandle> baseAssumptions;
+  appendBoundExprAssumptions(store, solver, base, baseAssumptions);
+  FailureOr<sym::ExprHandle> baseBytes =
+      scaleByteExpr(store, base.expr, byteScale, baseAssumptions);
+  if (failed(baseBytes) || !fitsU32(store, *baseBytes, baseAssumptions))
+    return false;
+
+  SmallVector<sym::PredHandle> assumptions(baseAssumptions.begin(),
+                                           baseAssumptions.end());
+  appendBoundExprAssumptions(store, solver, stride, assumptions);
+  FailureOr<sym::ExprHandle> strideBytes =
+      scaleByteExpr(store, stride.expr, byteScale, assumptions);
+  if (failed(strideBytes))
+    return false;
+
+  if (canUseOffsetStridedCarry(loop, *strideBytes))
+    return true;
+
+  std::optional<int64_t> strideLiteral =
+      sym::getIntegerLiteralValue(*strideBytes);
+  if (!strideLiteral || *strideLiteral < 0)
+    return false;
+  if (*strideLiteral == 0)
+    return true;
+
+  FailureOr<sym::ExprHandle> total = buildAccumulatedByteExpr(
+      store, solver, loop, base, stride, *baseBytes, *strideBytes, assumptions);
+  return succeeded(total) && fitsU32(store, *total, assumptions);
+}
+
+static bool canExtractPointerCarry(scf::ForOp loop, PtrAddOp ptrAdd,
+                                   const BoundExpr &base,
+                                   const BoundExpr &stride, sym::Store &store,
+                                   DataFlowSolver &solver) {
+  if (!isOffsetStridedPointer(ptrAdd.getType()))
+    return true;
+  return proveAccumulatingCarryFitsU32(
+      store, solver, loop, base, stride,
+      static_cast<int64_t>(elementSizeBytes(ptrAdd.getType())));
+}
+
 static LogicalResult buildCandidate(scf::ForOp loop, PtrAddOp ptrAdd,
                                     sym::Store &store, DataFlowSolver &solver,
                                     LoopStrideCandidate &candidate,
@@ -925,6 +1115,8 @@ static LogicalResult buildCandidate(scf::ForOp loop, PtrAddOp ptrAdd,
   FailureOr<BoundExpr> stride =
       buildStrideExpr(*expanded, *ivName, loop, store);
   if (failed(base) || failed(stride))
+    return success();
+  if (!canExtractPointerCarry(loop, ptrAdd, *base, *stride, store, solver))
     return success();
 
   candidate.ptrAdd = ptrAdd;

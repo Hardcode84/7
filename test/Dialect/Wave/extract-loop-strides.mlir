@@ -224,6 +224,36 @@ func.func @extract_shared_pointer_carry(%lds: !wave.ptr<#wave.shared, i8>,
 
 // -----
 
+// CHECK-LABEL: func.func @reject_shared_symbolic_pointer_carry
+// CHECK: %[[STRIDE:.*]] = wave.assume
+// CHECK: %[[WI:.*]] = wave.workitem_id 0
+// CHECK: scf.for %[[IV:[^ ]+]] =
+// CHECK-NOT: iter_args
+// CHECK: %[[OFF:.*]] = wave.index_expr <"i*s + 8*Mod(wi, 64)"> ["s", "i", "wi"](%[[STRIDE]], %[[IV]], %[[WI]])
+// CHECK: wave.ptr_add %{{.*}}, %[[OFF]]
+func.func @reject_shared_symbolic_pointer_carry(
+    %lds: !wave.ptr<#wave.shared, i8>, %stride_raw: i32, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %stride = wave.assume %stride_raw as "s"
+      [#wave.pred<"s >= 0">, #wave.pred<"s <= 16">] : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %off = wave.index_expr <"s*i + 8*Mod(wi, 64)"> ["s", "i", "wi"](%stride, %i, %wi)
+        : (i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+    %p = wave.ptr_add %lds, %off
+        : !wave.ptr<#wave.shared, i8>, !wave.simd<index, 64>
+        -> !wave.simd<!wave.ptr<#wave.shared, i8>, 64>
+    %v, %t = wave.load %p
+        : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>)
+        -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @extract_cyclic_offset_carry
 // CHECK: %[[BASE_B:.*]] = wave.ptr_add %arg0, %{{.*}} : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
 // CHECK: %[[INIT:.*]] = wave.index_expr <"16384"> []() : () -> index

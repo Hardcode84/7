@@ -209,6 +209,48 @@ func.func @shared_dma_wide_iv_stride_mul(%in: !wave.ptr<#wave.global, i32>)
 }
 }
 
+// CHECK-LABEL: func.func @reject_shared_symbolic_pointer_carry_machine
+// CHECK: %[[STRIDE:.*]] = waveamdmachine.arg {index = 0 : i64, pointer = false}
+// CHECK: %[[WI:.*]] = waveamdmachine.v_workitem_id_x
+// CHECK: waveamdmachine.uniform_loop
+// CHECK-SAME: carries(%{{.*}} : !waveamdmachine.reg<sgpr, 1>)
+// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_and_b32 %[[WI]]
+// CHECK: %[[LANE_BYTES:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
+// CHECK: %[[SCALED:.*]] = waveamdmachine.s_mul_i32 %[[STRIDE]], %[[IV]]
+// CHECK: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[SCALED]], %[[LANE_BYTES]]
+// CHECK: waveamdmachine.ds_load_tuple_b32 %[[ADDR]]
+// CHECK: waveamdmachine.ds_store_tuple_b32 %[[ADDR]]
+// CHECK: waveamdmachine.continue_if
+// CHECK-SAME: carries(%{{.*}} : !waveamdmachine.reg<sgpr, 1>)
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @reject_shared_symbolic_pointer_carry_machine(
+    %stride_raw: i32, %n: i32)
+    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %stride = wave.assume %stride_raw as "s"
+      [#wave.pred<"s >= 0">, #wave.pred<"s <= 16">] : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %off = wave.index_expr <"s*i + 8*Mod(wi, 64)"> ["s", "i", "wi"](%stride, %i, %wi)
+        : (i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+    %p = wave.ptr_add %lds, %off
+        : !wave.ptr<#wave.shared, i8>, !wave.simd<index, 64>
+        -> !wave.simd<!wave.ptr<#wave.shared, i8>, 64>
+    %v, %t = wave.load %p
+        : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>)
+        -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
+    wave.store %v -> %p after %t
+        : (!wave.simd<vector<4xi32>, 64>,
+           !wave.simd<!wave.ptr<#wave.shared, i8>, 64>, !wave.mem.token)
+        -> !wave.mem.token
+  }
+  return
+}
+}
+
 // CHECK-LABEL: func.func @drop_dead_simd_offset_carries_machine
 // CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
 // CHECK-SAME: carries(%{{.*}}, %{{.*}} : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.mem.token)

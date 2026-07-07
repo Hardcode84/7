@@ -13,6 +13,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
@@ -970,11 +971,320 @@ bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
          compareRationalToInteger(*range->upper, hi) <= 0;
 }
 
+static std::optional<uint64_t> checkedAddU32Bound(uint64_t lhs, uint64_t rhs) {
+  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
+  if (lhs > u32Max || rhs > u32Max || lhs > u32Max - rhs)
+    return std::nullopt;
+  return lhs + rhs;
+}
+
+static std::optional<uint64_t> checkedMulU32Bound(uint64_t lhs, uint64_t rhs) {
+  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
+  if (lhs != 0 && rhs > u32Max / lhs)
+    return std::nullopt;
+  return lhs * rhs;
+}
+
+static std::optional<uint64_t>
+exprU32UpperBound(Store &store, ExprHandle expr,
+                  ArrayRef<PredHandle> assumptions);
+
+static std::optional<uint64_t>
+addExprU32UpperBound(Store &store, ExprHandle expr,
+                     ArrayRef<PredHandle> assumptions) {
+  uint64_t bound = 0;
+  ExprView view(expr);
+  std::optional<int64_t> constant =
+      sym::getIntegerLiteralValue(view.getAddConstant());
+  if (!constant || *constant < 0)
+    return std::nullopt;
+  bound = static_cast<uint64_t>(*constant);
+
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    AddTerm addTerm = view.getAddTerm(index);
+    std::optional<int64_t> coeff =
+        sym::getIntegerLiteralValue(addTerm.coefficient);
+    if (!coeff || *coeff < 0)
+      return std::nullopt;
+    std::optional<uint64_t> term =
+        exprU32UpperBound(store, addTerm.term, assumptions);
+    if (!term)
+      return std::nullopt;
+    std::optional<uint64_t> scaled =
+        checkedMulU32Bound(static_cast<uint64_t>(*coeff), *term);
+    if (!scaled)
+      return std::nullopt;
+    std::optional<uint64_t> next = checkedAddU32Bound(bound, *scaled);
+    if (!next)
+      return std::nullopt;
+    bound = *next;
+  }
+  return bound;
+}
+
+static std::optional<uint64_t>
+positiveAddendsU32UpperBound(Store &store, ExprHandle expr,
+                             ArrayRef<PredHandle> assumptions) {
+  uint64_t bound = 0;
+  ExprView view(expr);
+  std::optional<int64_t> constant =
+      sym::getIntegerLiteralValue(view.getAddConstant());
+  if (!constant)
+    return std::nullopt;
+  if (*constant > 0)
+    bound = static_cast<uint64_t>(*constant);
+
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    AddTerm addTerm = view.getAddTerm(index);
+    std::optional<int64_t> coeff =
+        sym::getIntegerLiteralValue(addTerm.coefficient);
+    if (!coeff)
+      return std::nullopt;
+    if (*coeff <= 0)
+      continue;
+    std::optional<uint64_t> term =
+        exprU32UpperBound(store, addTerm.term, assumptions);
+    if (!term)
+      return std::nullopt;
+    std::optional<uint64_t> scaled =
+        checkedMulU32Bound(static_cast<uint64_t>(*coeff), *term);
+    if (!scaled)
+      return std::nullopt;
+    std::optional<uint64_t> next = checkedAddU32Bound(bound, *scaled);
+    if (!next)
+      return std::nullopt;
+    bound = *next;
+  }
+  return bound;
+}
+
+static std::optional<uint64_t>
+mulExprU32UpperBound(Store &store, ExprHandle expr,
+                     ArrayRef<PredHandle> assumptions) {
+  ExprView view(expr);
+  std::optional<int64_t> coeff =
+      sym::getIntegerLiteralValue(view.getMulCoefficient());
+  if (!coeff || *coeff < 0)
+    return std::nullopt;
+  uint64_t bound = static_cast<uint64_t>(*coeff);
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    MulFactor factor = view.getMulFactor(index);
+    if (factor.exponent <= 0)
+      return std::nullopt;
+    std::optional<uint64_t> factorBound =
+        exprU32UpperBound(store, factor.base, assumptions);
+    if (!factorBound)
+      return std::nullopt;
+    for (int32_t exp = 0; exp < factor.exponent; ++exp) {
+      std::optional<uint64_t> next = checkedMulU32Bound(bound, *factorBound);
+      if (!next)
+        return std::nullopt;
+      bound = *next;
+    }
+  }
+  return bound;
+}
+
+static std::optional<uint64_t>
+xorExprU32UpperBound(Store &store, ExprHandle expr,
+                     ArrayRef<PredHandle> assumptions) {
+  ExprView view(expr);
+  std::optional<uint64_t> lhs =
+      exprU32UpperBound(store, view.getBinaryLhs(), assumptions);
+  std::optional<uint64_t> rhs =
+      exprU32UpperBound(store, view.getBinaryRhs(), assumptions);
+  if (!lhs || !rhs)
+    return std::nullopt;
+  uint64_t maxOperand = std::max(*lhs, *rhs);
+  if (maxOperand == 0)
+    return uint64_t{0};
+  return llvm::PowerOf2Ceil(maxOperand + 1) - 1;
+}
+
+static std::optional<uint64_t>
+piecewiseExprU32UpperBound(Store &store, ExprHandle expr,
+                           ArrayRef<PredHandle> assumptions) {
+  ExprView view(expr);
+  std::optional<uint64_t> maxBound;
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount())) {
+    std::optional<uint64_t> bound = exprU32UpperBound(
+        store, view.getPiecewiseCase(index).value, assumptions);
+    if (!bound)
+      return std::nullopt;
+    maxBound = maxBound ? std::max(*maxBound, *bound) : *bound;
+  }
+  return maxBound;
+}
+
+static std::optional<uint64_t>
+exprU32UpperBound(Store &store, ExprHandle expr,
+                  ArrayRef<PredHandle> assumptions) {
+  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
+  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(expr)) {
+    if (*value < 0 || static_cast<uint64_t>(*value) > u32Max)
+      return std::nullopt;
+    return static_cast<uint64_t>(*value);
+  }
+  if (std::optional<int64_t> upper = sym::inferNonNegativeUpperBound(
+          store, expr, assumptions, static_cast<int64_t>(u32Max)))
+    return static_cast<uint64_t>(*upper);
+
+  ExprView view(expr);
+  switch (view.getKind()) {
+  case ExprKind::Add:
+    return addExprU32UpperBound(store, expr, assumptions);
+  case ExprKind::Mul:
+    return mulExprU32UpperBound(store, expr, assumptions);
+  case ExprKind::Xor:
+    return xorExprU32UpperBound(store, expr, assumptions);
+  case ExprKind::Piecewise:
+    return piecewiseExprU32UpperBound(store, expr, assumptions);
+  default:
+    break;
+  }
+  return std::nullopt;
+}
+
+struct I64RangeBounds {
+  std::optional<int64_t> lower;
+  std::optional<int64_t> upper;
+};
+
+static ExprHandle canonicalExpr(Store &store, ExprHandle value,
+                                ArrayRef<PredHandle> assumptions = {}) {
+  FailureOr<ExprHandle> expanded = sym::expandExpr(store, value);
+  if (succeeded(expanded))
+    value = *expanded;
+  FailureOr<ExprHandle> simplified =
+      assumptions.empty() ? sym::simplifyExpr(store, value)
+                          : sym::simplifyExpr(store, value, assumptions);
+  return succeeded(simplified) ? *simplified : value;
+}
+
+static std::optional<int64_t>
+offsetFromTarget(Store &store, ExprHandle target, ExprHandle lhs,
+                 ExprHandle rhs, ArrayRef<PredHandle> assumptions) {
+  FailureOr<ExprHandle> negRhs = sym::composeExprNeg(store, rhs);
+  if (failed(negRhs))
+    return std::nullopt;
+  FailureOr<ExprHandle> diff =
+      sym::composeExprBinary(store, lhs, ExprBinaryOp::Add, *negRhs);
+  if (failed(diff))
+    return std::nullopt;
+  FailureOr<ExprHandle> negTarget = sym::composeExprNeg(store, target);
+  if (failed(negTarget))
+    return std::nullopt;
+  FailureOr<ExprHandle> delta =
+      sym::composeExprBinary(store, canonicalExpr(store, *diff, assumptions),
+                             ExprBinaryOp::Add, *negTarget);
+  if (failed(delta))
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(canonicalExpr(store, *delta, assumptions));
+}
+
+static void tightenLower(I64RangeBounds &bounds, int64_t bound) {
+  bounds.lower = bounds.lower ? std::max(*bounds.lower, bound) : bound;
+}
+
+static void tightenUpper(I64RangeBounds &bounds, int64_t bound) {
+  bounds.upper = bounds.upper ? std::min(*bounds.upper, bound) : bound;
+}
+
+static void applyCmpBound(PredCmpOp op, int64_t bound, I64RangeBounds &bounds) {
+  switch (op) {
+  case PredCmpOp::Le:
+    tightenUpper(bounds, bound);
+    break;
+  case PredCmpOp::Lt:
+    if (std::optional<int64_t> strict = llvm::checkedSub(bound, int64_t{1}))
+      tightenUpper(bounds, *strict);
+    break;
+  case PredCmpOp::Ge:
+    tightenLower(bounds, bound);
+    break;
+  case PredCmpOp::Gt:
+    if (std::optional<int64_t> strict = llvm::checkedAdd(bound, int64_t{1}))
+      tightenLower(bounds, *strict);
+    break;
+  case PredCmpOp::Eq:
+    tightenLower(bounds, bound);
+    tightenUpper(bounds, bound);
+    break;
+  case PredCmpOp::Ne:
+    break;
+  }
+}
+
+static void collectTargetRange(Store &store, ExprHandle target, PredHandle pred,
+                               ArrayRef<PredHandle> assumptions,
+                               I64RangeBounds &bounds) {
+  PredView view(pred);
+  if (view.getKind() == PredKind::And) {
+    for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+      collectTargetRange(store, target, view.getLogicArg(index), assumptions,
+                         bounds);
+    return;
+  }
+  if (view.getKind() != PredKind::Cmp)
+    return;
+  std::optional<PredCmpOp> op = view.getCmpOp();
+  std::optional<int64_t> offset = offsetFromTarget(
+      store, target, view.getCmpLhs(), view.getCmpRhs(), assumptions);
+  if (!op || !offset)
+    return;
+  std::optional<int64_t> bound = llvm::checkedSub(int64_t{0}, *offset);
+  if (bound)
+    applyCmpBound(*op, *bound, bounds);
+}
+
+static bool provenRangeFitsU32(Store &store, ExprHandle expr,
+                               ArrayRef<PredHandle> assumptions) {
+  I64RangeBounds bounds;
+  ExprHandle target = canonicalExpr(store, expr, assumptions);
+  for (PredHandle pred : assumptions)
+    collectTargetRange(store, target, pred, assumptions, bounds);
+  constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
+  return bounds.lower && bounds.upper && *bounds.lower >= 0 &&
+         *bounds.upper <= u32Max;
+}
+
+static bool explicitPredicatesProveU32(Store &store, ExprHandle expr,
+                                       ArrayRef<PredHandle> assumptions) {
+  FailureOr<ExprHandle> zero = sym::composeExprInt(store, 0);
+  FailureOr<ExprHandle> u32MaxExpr =
+      sym::composeExprInt(store, (int64_t{1} << 32) - 1);
+  if (failed(zero) || failed(u32MaxExpr))
+    return false;
+  FailureOr<PredHandle> nonNegative =
+      sym::composePredCmp(store, expr, PredCmpOp::Ge, *zero);
+  FailureOr<PredHandle> inUpper =
+      sym::composePredCmp(store, expr, PredCmpOp::Le, *u32MaxExpr);
+  return succeeded(nonNegative) && succeeded(inUpper) &&
+         sym::checkPredicate(store, *nonNegative, assumptions) ==
+             CheckResult::True &&
+         sym::checkPredicate(store, *inUpper, assumptions) == CheckResult::True;
+}
+
 bool mlir::wave::sym::provablyFitsU32(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions) {
-  return inferNonNegativeUpperBound(store, expr, assumptions,
-                                    (int64_t{1} << 32) - 1)
-      .has_value();
+  if (provenRangeFitsU32(store, expr, assumptions))
+    return true;
+  if (explicitPredicatesProveU32(store, expr, assumptions))
+    return true;
+  if (std::optional<uint64_t> bound =
+          exprU32UpperBound(store, expr, assumptions))
+    return *bound <= (uint64_t{1} << 32) - 1;
+  return false;
+}
+
+bool mlir::wave::sym::positiveAddendsFitU32(Store &store, ExprHandle expr,
+                                            ArrayRef<PredHandle> assumptions) {
+  if (ExprView(expr).getKind() != ExprKind::Add)
+    return false;
+  if (std::optional<uint64_t> bound =
+          positiveAddendsU32UpperBound(store, expr, assumptions))
+    return *bound <= (uint64_t{1} << 32) - 1;
+  return false;
 }
 
 std::optional<InferredRange>
