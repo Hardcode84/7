@@ -16,7 +16,7 @@
 //
 // ASM-LABEL: wmma_f16_matmul_tiled:
 // ASM: buffer_load_dword v{{[0-9]+}},
-// ASM: ds_write_b32
+// ASM: ds_write{{.*}}_b32
 // ASM: .Lwmma_f16_matmul_tiled.loop_head_0:
 // ASM: ds_read_b64_tr_b8
 // ASM: v_mfma_scale_f32_16x16x128_f8f6f4

@@ -159,6 +159,8 @@ def check_postschedule(label: str, ir, postschedule) -> None:
 
 def check_backend_lower(label: str, lower_passes: list[str]) -> None:
     try:
+        decompose = lower_passes.index("waveamd-decompose-mem-tuples")
+        pair_ds = lower_passes.index("waveamd-pair-ds-ops")
         fused = lower_passes.index("waveamd-form-fused-int")
         cross_lane = lower_passes.index("waveamd-cross-lane-peepholes")
         cleanup = lower_passes.index("waveamd-machine-cleanup")
@@ -170,7 +172,9 @@ def check_backend_lower(label: str, lower_passes: list[str]) -> None:
         require(label, False, f"missing lower pass: {err}")
     require(
         label,
-        fused
+        decompose
+        < pair_ds
+        < fused
         < cross_lane
         < cleanup
         < cleanup_canon
@@ -228,6 +232,7 @@ def check_post_regalloc(label: str, post_passes: list[str]) -> None:
         post_passes,
         [
             "waveamd-decompose-mem-tuples",
+            "waveamd-pair-ds-ops",
             "waveamd-pack-vgpr-zero-moves",
             "waveamd-insert-ticket-waits",
             "waveamd-insert-hazard-waits",

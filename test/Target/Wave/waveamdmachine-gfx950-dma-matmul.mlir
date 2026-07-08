@@ -223,11 +223,11 @@
 
 // ASMMXFP4-EPILOGUE-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-EPILOGUE: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-EPILOGUE: ds_write_b64
+// ASMMXFP4-EPILOGUE: ds_write{{.*}}_b64
 // ASMMXFP4-EPILOGUE: ds_read_b128
 // ASMMXFP4-EPILOGUE: buffer_store_dwordx4
 // ASMMXFP4-EPILOGUE: v_mfma_scale_f32_16x16x128_f8f6f4
-// ASMMXFP4-EPILOGUE: ds_write_b64
+// ASMMXFP4-EPILOGUE: ds_write{{.*}}_b64
 // ASMMXFP4-EPILOGUE: ds_read_b128
 // ASMMXFP4-EPILOGUE: buffer_store_dwordx4
 

@@ -29,6 +29,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDMMAReusePreschedule.cpp
   WaveAMDNarrowWideInt.cpp
   WaveAMDPackVGPRZeroMoves.cpp
+  WaveAMDPairDsOps.cpp
   WaveAMDPreserveHardwareRegs.cpp
   WaveAMDSplitBarriers.cpp
   WaveAMDVerifyMachineOperands.cpp

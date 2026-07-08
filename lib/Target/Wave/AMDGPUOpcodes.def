@@ -164,10 +164,18 @@
   X(dsReadB64TrB16, DS_READ_B64_TR_B16_vi, DS_READ_B64_TR_B16)                 \
   X(dsReadB96, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)                         \
   X(dsReadB128, DS_READ_B128_vi_gfx9, DS_READ_B128_gfx11)                      \
+  X(dsRead2B32, DS_READ2_B32_vi_gfx9, DS_READ2_B32_gfx11)                      \
+  X(dsRead2B64, DS_READ2_B64_vi_gfx9, DS_READ2_B64_gfx11)                      \
+  X(dsRead2St64B32, DS_READ2ST64_B32_vi_gfx9, DS_READ2ST64_B32_gfx11)          \
+  X(dsRead2St64B64, DS_READ2ST64_B64_vi_gfx9, DS_READ2ST64_B64_gfx11)          \
   X(dsWriteB8, DS_WRITE_B8_vi_gfx9, DS_WRITE_B8_gfx11)                         \
   X(dsWriteB64, DS_WRITE_B64_vi_gfx9, DS_WRITE_B64_gfx11)                      \
   X(dsWriteB96, DS_WRITE_B96_vi_gfx9, DS_WRITE_B96_gfx11)                      \
   X(dsWriteB128, DS_WRITE_B128_vi_gfx9, DS_WRITE_B128_gfx11)                   \
+  X(dsWrite2B32, DS_WRITE2_B32_vi_gfx9, DS_WRITE2_B32_gfx11)                   \
+  X(dsWrite2B64, DS_WRITE2_B64_vi_gfx9, DS_WRITE2_B64_gfx11)                   \
+  X(dsWrite2St64B32, DS_WRITE2ST64_B32_vi_gfx9, DS_WRITE2ST64_B32_gfx11)       \
+  X(dsWrite2St64B64, DS_WRITE2ST64_B64_vi_gfx9, DS_WRITE2ST64_B64_gfx11)       \
   X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN_vi,                          \
     BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)                                         \
   X(dsReadB32, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)                         \

@@ -54,6 +54,10 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-to-machine"
 // PIPELINE: transform.apply_registered_pass "waveamd-buffer-rsrc-to-tuples"
+// PIPELINE: transform.apply_registered_pass "waveamd-decompose-mem-tuples"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-pair-ds-ops"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE: transform.apply_registered_pass "waveamd-form-fused-int"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-cross-lane-peepholes"
@@ -72,6 +76,8 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE: transform.named_sequence @waveamd_backend_post_regalloc
 // PIPELINE: transform.apply_registered_pass "waveamd-decompose-mem-tuples"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-pair-ds-ops"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

@@ -413,6 +413,8 @@ def WaveAMDMachine_BitOp3Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<255>]>;
 def WaveAMDMachine_NonNegativeI64Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>]>;
+def WaveAMDMachine_Offset8Attr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<255>]>;
 
 // Any allocatable register class (SGPR, VGPR, AGPR). Excludes hardware flags.
 def WaveAMDMachine_GPR
@@ -2508,6 +2510,24 @@ def WaveAMDMachine_DsLoadB32Op
   }];
 }
 
+def WaveAMDMachine_DsLoad2B32Op
+    : WaveAMDMachine_DsMemoryOp<"ds_load2_b32", [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
+  let summary = "LDS paired 32-bit load";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       WaveAMDMachine_Offset8Attr:$offset0,
+                       WaveAMDMachine_Offset8Attr:$offset1,
+                       DefaultValuedAttr<BoolAttr, "false">:$st64);
+  let results = (outs WaveAMDMachine_AVGPR2:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? `offsets` `(` $offset0 `,` $offset1 `)`
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 def WaveAMDMachine_DsLoadAddTidB32Op
     : WaveAMDMachine_DsMemoryOp<"ds_load_addtid_b32", [WaveAMDMachine_LDSLoad]>,
       WaveAMDMachine_LDSInfo<"1">,
@@ -2572,6 +2592,26 @@ def WaveAMDMachine_DsStoreB32Op
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsStore2B32Op
+    : WaveAMDMachine_DsMemoryOp<"ds_store2_b32", [WaveAMDMachine_LDSStore]>,
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget> {
+  let summary = "LDS paired 32-bit store";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       WaveAMDMachine_AVGPR1:$value0,
+                       WaveAMDMachine_AVGPR1:$value1,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       WaveAMDMachine_Offset8Attr:$offset0,
+                       WaveAMDMachine_Offset8Attr:$offset1,
+                       DefaultValuedAttr<BoolAttr, "false">:$st64);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr `,` $value0 `,` $value1 (`after` $dependency^)?
+    `offsets` `(` $offset0 `,` $offset1 `)`
     attr-dict `:` functional-type(operands, results)
   }];
 }
@@ -2649,6 +2689,24 @@ def WaveAMDMachine_DsLoadB64Op
                       Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsLoad2B64Op
+    : WaveAMDMachine_DsMemoryOp<"ds_load2_b64", [WaveAMDMachine_LDSLoad]>,
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
+  let summary = "LDS paired 64-bit load";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       WaveAMDMachine_Offset8Attr:$offset0,
+                       WaveAMDMachine_Offset8Attr:$offset1,
+                       DefaultValuedAttr<BoolAttr, "false">:$st64);
+  let results = (outs WaveAMDMachine_AVGPR4:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr (`after` $dependency^)? `offsets` `(` $offset0 `,` $offset1 `)`
     attr-dict `:` functional-type(operands, results)
   }];
 }
@@ -2768,6 +2826,26 @@ def WaveAMDMachine_DsStoreB64Op
   let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_DsStore2B64Op
+    : WaveAMDMachine_DsMemoryOp<"ds_store2_b64", [WaveAMDMachine_LDSStore]>,
+      WaveAMDMachine_LDSInfo<"1">,
+      WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget> {
+  let summary = "LDS paired 64-bit store";
+  let arguments = (ins WaveAMDMachine_VGPR1:$addr,
+                       WaveAMDMachine_AVGPR2:$value0,
+                       WaveAMDMachine_AVGPR2:$value1,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       WaveAMDMachine_Offset8Attr:$offset0,
+                       WaveAMDMachine_Offset8Attr:$offset1,
+                       DefaultValuedAttr<BoolAttr, "false">:$st64);
+  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $addr `,` $value0 `,` $value1 (`after` $dependency^)?
+    `offsets` `(` $offset0 `,` $offset1 `)`
     attr-dict `:` functional-type(operands, results)
   }];
 }

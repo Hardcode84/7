@@ -879,10 +879,18 @@ private:
   unsigned dsReadB64TrB16() const { return opcodes.dsReadB64TrB16; }
   unsigned dsReadB96() const { return opcodes.dsReadB96; }
   unsigned dsReadB128() const { return opcodes.dsReadB128; }
+  unsigned dsRead2B32() const { return opcodes.dsRead2B32; }
+  unsigned dsRead2B64() const { return opcodes.dsRead2B64; }
+  unsigned dsRead2St64B32() const { return opcodes.dsRead2St64B32; }
+  unsigned dsRead2St64B64() const { return opcodes.dsRead2St64B64; }
   unsigned dsWriteB8() const { return opcodes.dsWriteB8; }
   unsigned dsWriteB64() const { return opcodes.dsWriteB64; }
   unsigned dsWriteB96() const { return opcodes.dsWriteB96; }
   unsigned dsWriteB128() const { return opcodes.dsWriteB128; }
+  unsigned dsWrite2B32() const { return opcodes.dsWrite2B32; }
+  unsigned dsWrite2B64() const { return opcodes.dsWrite2B64; }
+  unsigned dsWrite2St64B32() const { return opcodes.dsWrite2St64B32; }
+  unsigned dsWrite2St64B64() const { return opcodes.dsWrite2St64B64; }
 
   unsigned globalLoadLdsB32() const {
     return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_gfx940
@@ -2139,10 +2147,27 @@ private:
                    llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitDsLoad2(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset0", 0)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset1", 0)),
+                   llvm::MCOperand::createImm(0)});
+  }
+
   LogicalResult emitDsStore(Operation &op, unsigned opcode) {
     return emitMC(opcode,
                   {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
                    llvm::MCOperand::createImm(getIntAttr(&op, "offset", 0)),
+                   llvm::MCOperand::createImm(0)});
+  }
+
+  LogicalResult emitDsStore2(Operation &op, unsigned opcode) {
+    return emitMC(opcode,
+                  {toMCOperand(op.getOperand(0)), toMCOperand(op.getOperand(1)),
+                   toMCOperand(op.getOperand(2)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset0", 0)),
+                   llvm::MCOperand::createImm(getIntAttr(&op, "offset1", 0)),
                    llvm::MCOperand::createImm(0)});
   }
 
@@ -3498,8 +3523,18 @@ private:
     }
     if (isa<waveamdmachine::DsLoadB32Op>(op))
       return emitDsLoad(op, dsReadB32());
+    if (isa<waveamdmachine::DsLoad2B32Op>(op)) {
+      unsigned opcode =
+          getBoolAttr(&op, "st64", false) ? dsRead2St64B32() : dsRead2B32();
+      return emitDsLoad2(op, opcode);
+    }
     if (isa<waveamdmachine::DsLoadB64Op>(op))
       return emitDsLoad(op, dsReadB64());
+    if (isa<waveamdmachine::DsLoad2B64Op>(op)) {
+      unsigned opcode =
+          getBoolAttr(&op, "st64", false) ? dsRead2St64B64() : dsRead2B64();
+      return emitDsLoad2(op, opcode);
+    }
     if (isa<waveamdmachine::DsReadTrB64B4Op>(op)) {
       if (!waveamdmachine::DsReadTrB64B4Op::isSupportedOnIsa(isaVersion))
         return op.emitError("ds_read_tr_b64_b4 requires gfx950");
@@ -3545,8 +3580,18 @@ private:
     }
     if (isa<waveamdmachine::DsStoreB32Op>(op))
       return emitDsStore(op, dsWriteB32());
+    if (isa<waveamdmachine::DsStore2B32Op>(op)) {
+      unsigned opcode =
+          getBoolAttr(&op, "st64", false) ? dsWrite2St64B32() : dsWrite2B32();
+      return emitDsStore2(op, opcode);
+    }
     if (isa<waveamdmachine::DsStoreB64Op>(op))
       return emitDsStore(op, dsWriteB64());
+    if (isa<waveamdmachine::DsStore2B64Op>(op)) {
+      unsigned opcode =
+          getBoolAttr(&op, "st64", false) ? dsWrite2St64B64() : dsWrite2B64();
+      return emitDsStore2(op, opcode);
+    }
     if (isa<waveamdmachine::DsStoreB96Op>(op))
       return emitDsStore(op, dsWriteB96());
     if (isa<waveamdmachine::DsStoreB128Op>(op))

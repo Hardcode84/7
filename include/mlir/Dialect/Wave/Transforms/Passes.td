@@ -273,6 +273,21 @@ def WaveAMDDecomposeMemTuples
   ];
 }
 
+def WaveAMDPairDsOps
+    : Pass<"waveamd-pair-ds-ops"> {
+  let summary = "Pair eligible WaveAMDMachine LDS b32/b64 DS ops";
+  let description = [{
+    Forms `ds_load2_*` / `ds_store2_*` for same-block b32/b64 LDS ops with
+    the same address and explicit token ordering. Direct token chains become a
+    single op at the earlier load or later store. Independent ops with the same
+    input token are paired only when their result tokens flow to the same final
+    consumer, including through RegionBranchOpInterface terminators.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDPackVGPRZeroMoves
     : Pass<"waveamd-pack-vgpr-zero-moves"> {
   let summary = "Pack post-regalloc VGPR moves into v_mov_b64 chunks";

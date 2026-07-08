@@ -91,7 +91,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r2 = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %r1
         : (!transform.any_op) -> !transform.any_op
-    %rnwi = transform.apply_registered_pass "waveamd-narrow-wide-int" to %r2
+    %rpds = transform.apply_registered_pass "waveamd-pair-ds-ops" to %r2
+        : (!transform.any_op) -> !transform.any_op
+    %rnwi = transform.apply_registered_pass "waveamd-narrow-wide-int" to %rpds
         : (!transform.any_op) -> !transform.any_op
     %rfi = transform.apply_registered_pass "waveamd-form-fused-int" to %rnwi
         : (!transform.any_op) -> !transform.any_op
@@ -116,7 +118,9 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rd = transform.apply_registered_pass "waveamd-decompose-mem-tuples" to %root
         : (!transform.any_op) -> !transform.any_op
-    %rpz = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rd
+    %rpds = transform.apply_registered_pass "waveamd-pair-ds-ops" to %rd
+        : (!transform.any_op) -> !transform.any_op
+    %rpz = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rpds
         : (!transform.any_op) -> !transform.any_op
     // Preserve structured exec_if until waits see real control flow.
     %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rpz
