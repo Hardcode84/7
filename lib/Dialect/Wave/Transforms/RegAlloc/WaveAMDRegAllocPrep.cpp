@@ -252,6 +252,21 @@ static Operation *ancestorInBlock(Operation *op, Block *block) {
   return op;
 }
 
+static bool operationIsInside(Operation *root, Operation *op) {
+  for (Operation *cur = op; cur; cur = cur->getParentOp())
+    if (cur == root)
+      return true;
+  return false;
+}
+
+static bool valueIsDefinedInside(Operation *root, Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return operationIsInside(root, def);
+  if (BlockArgument arg = dyn_cast<BlockArgument>(value))
+    return operationIsInside(root, arg.getOwner()->getParentOp());
+  return false;
+}
+
 static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
   Block *block = loop->getBlock();
   for (OpOperand &use : value.getUses()) {
@@ -279,6 +294,15 @@ static bool shouldRematerializeLoopInit(Value init,
   return hasUseBeforeLoop(init, loop);
 }
 
+static bool needsLocalNestedLoopInit(waveamdmachine::UniformLoopOp loop,
+                                     Value init) {
+  if (!trackedRegType(init))
+    return false;
+  waveamdmachine::UniformLoopOp parentLoop =
+      loop->getParentOfType<waveamdmachine::UniformLoopOp>();
+  return parentLoop && !valueIsDefinedInside(parentLoop.getOperation(), init);
+}
+
 static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
   SmallVector<waveamdmachine::UniformLoopOp> loops;
   func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
@@ -292,8 +316,9 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
         continue;
       }
       bool repeatedInit = !seen.insert(init).second;
+      bool localNestedInit = needsLocalNestedLoopInit(loop, init);
       bool rematInit = shouldRematerializeLoopInit(init, loop);
-      if (!repeatedInit && !rematInit)
+      if (!repeatedInit && !localNestedInit && !rematInit)
         continue;
       Operation *def = init.getDefiningOp();
       FailureOr<Value> dup =
@@ -403,21 +428,6 @@ static Operation *topLevelBodyOp(Block &body, Operation *op) {
   while (op && op->getBlock() != &body)
     op = op->getParentOp();
   return op;
-}
-
-static bool operationIsInside(Operation *root, Operation *op) {
-  for (Operation *cur = op; cur; cur = cur->getParentOp())
-    if (cur == root)
-      return true;
-  return false;
-}
-
-static bool valueIsDefinedInside(Operation *root, Value value) {
-  if (Operation *def = value.getDefiningOp())
-    return operationIsInside(root, def);
-  if (auto arg = dyn_cast<BlockArgument>(value))
-    return operationIsInside(root, arg.getOwner()->getParentOp());
-  return false;
 }
 
 static bool hasUseAfter(BlockArgument arg, Operation *op) {
