@@ -31,22 +31,22 @@ wmma_f16_matmul_tiled:
 		s_mov_b32 s1, s5
 		s_mov_b32 s2, s18
 		s_mov_b32 s3, s19
-		s_lshr_b32 s4, s9, 3
-		s_lshl_b32 s5, s10, 1
-		s_add_i32 s4, s5, s4
-		s_and_b32 s5, s9, 7
-		s_lshl_b32 s5, s5, 5
+		s_lshl_b32 s4, s10, 1
+		s_lshr_b32 s5, s9, 3
 		s_add_i32 s4, s4, s5
-		s_lshr_b32 s5, s4, 6
-		s_lshl_b32 s8, s5, 23
+		s_and_b32 s5, s9, 7
+		s_lshl_b32 s8, s5, 5
+		s_add_i32 s4, s4, s8
 		s_and_b32 s4, s4, 63
-		s_lshr_b32 s9, s4, 2
-		s_lshl_b32 s10, s9, 17
-		s_add_i32 s8, s8, s10
+		s_lshr_b32 s8, s4, 2
+		s_lshl_b32 s9, s8, 17
+		s_lshr_b32 s5, s5, 1
+		s_lshl_b32 s10, s5, 23
+		s_add_i32 s9, s9, s10
 		s_and_b32 s4, s4, 3
 		s_lshl_b32 s10, s4, 21
-		s_add_i32 s8, s8, s10
-		s_add_u32 s20, s6, s8
+		s_add_i32 s9, s9, s10
+		s_add_u32 s20, s6, s9
 		s_addc_u32 s21, s7, 0
 		s_mov_b32 s22, 0x20000
 		s_mov_b32 s23, s19
@@ -65,12 +65,12 @@ wmma_f16_matmul_tiled:
 		v_lshl_add_u32 v8, v9, 4, v8
 		s_lshl_b32 s5, s5, 24
 		s_lshl_b32 s4, s4, 22
-		s_add_i32 s8, s5, s4
-		v_add_u32_e32 v9, s8, v8
+		s_add_i32 s9, s5, s4
+		v_add_u32_e32 v9, s9, v8
 		s_add_i32 m0, s7, 16
 		s_nop 0
 		buffer_load_dwordx4 v9, s[16:19], 0 offen lds
-		s_lshl_b32 s8, s9, 22
+		s_lshl_b32 s8, s8, 22
 		v_add_u32_e32 v10, s8, v8
 		s_add_i32 m0, s7, 0x4010
 		s_nop 0
