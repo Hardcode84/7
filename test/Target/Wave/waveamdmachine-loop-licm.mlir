@@ -13,6 +13,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: ^bb0
 // CHECK: waveamdmachine.s_cmp_lg_u32
 // CHECK-NEXT: waveamdmachine.uniform_loop if
+// CHECK-LABEL: func.func @licm_keeps_copy_tuple_carry_init
+// CHECK: waveamdmachine.uniform_loop
+// CHECK-NEXT: ^bb0
+// CHECK-NEXT: %[[SEED:.+]] = waveamdmachine.copy_tuple
+// CHECK-NEXT: waveamdmachine.uniform_loop carries(%[[SEED]]
 func.func @licm(%a: !waveamdmachine.reg<sgpr, 1>, %n: !waveamdmachine.reg<sgpr, 1>) attributes {wave.kernel} {
   %z = waveamdmachine.imm 0 : !waveamdmachine.imm
   %s = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -46,6 +51,49 @@ func.func @licm_keeps_scc_reload(%a: !waveamdmachine.reg<sgpr, 1>, %n: !waveamdm
     %next_i, %next_i_scc = waveamdmachine.s_add_i32 %iv, %s : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
     %outer_back = waveamdmachine.s_cmp_lt_i32 %next_i, %n : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<scc, 1>
     waveamdmachine.continue_if %outer_back : !waveamdmachine.reg<scc, 1> carries(%next_i : !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.reg<sgpr, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @licm_keeps_copy_tuple_carry_init(%n: !waveamdmachine.reg<sgpr, 1>) attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %zero_v = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %lo = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %outer_entry = waveamdmachine.s_cmp_lt_i32 %lo, %n
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+      -> !waveamdmachine.reg<scc, 1>
+  %outer = waveamdmachine.uniform_loop if %outer_entry
+      : !waveamdmachine.reg<scc, 1>
+      carries(%lo : !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%i: !waveamdmachine.reg<sgpr, 1>):
+    %seed = waveamdmachine.copy_tuple %zero_v
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %inner = waveamdmachine.uniform_loop
+        carries(%seed : !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%acc: !waveamdmachine.reg<vgpr, 1>):
+      %next_acc = waveamdmachine.v_add_u32 %acc, %acc
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+      %inner_back = waveamdmachine.s_cmp_lg_u32 %lo, %lo
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.continue_if %inner_back
+          : !waveamdmachine.reg<scc, 1>
+          carries(%next_acc : !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>
+    %next_i, %scc = waveamdmachine.s_add_i32 %i, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %outer_back = waveamdmachine.s_cmp_lt_i32 %next_i, %n
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+    waveamdmachine.continue_if %outer_back
+        : !waveamdmachine.reg<scc, 1>
+        carries(%next_i : !waveamdmachine.reg<sgpr, 1>)
   } -> !waveamdmachine.reg<sgpr, 1>
   waveamdmachine.s_endpgm
   return

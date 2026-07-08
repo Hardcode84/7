@@ -855,7 +855,10 @@ def WaveAMDMachine_TupleFromElementsOp
 
 def WaveAMDMachine_CopyTupleOp
     : WaveAMDMachine_UnaryResult<"copy_tuple", WaveAMDMachine_GPR,
-                                 WaveAMDMachine_GPR, [Pure]> {
+                                 WaveAMDMachine_GPR,
+                                 [AlwaysSpeculatable,
+                                  DeclareOpInterfaceMethods<
+                                      MemoryEffectsOpInterface>]> {
   let summary = "copy a SGPR/VGPR tuple after register allocation";
   let hasVerifier = 1;
 }

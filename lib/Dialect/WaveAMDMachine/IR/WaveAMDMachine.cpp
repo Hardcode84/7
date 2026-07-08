@@ -13,6 +13,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -853,6 +854,30 @@ LogicalResult MfmaF32_32x32x16_BF16Op::verify() {
 
 LogicalResult MfmaScaleF32_16x16x128_F4F4Op::verify() {
   return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/4, /*hasScale=*/true);
+}
+
+static bool isUniformLoopInitUse(OpOperand &use, UniformLoopOp loop) {
+  if (use.getOwner() != loop.getOperation())
+    return false;
+  for (OpOperand &init : loop.getInitsMutable())
+    if (&init == &use)
+      return true;
+  return false;
+}
+
+void CopyTupleOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  UniformLoopOp parentLoop = getOperation()->getParentOfType<UniformLoopOp>();
+  if (!parentLoop)
+    return;
+  for (OpOperand &use : getResult().getUses()) {
+    UniformLoopOp loop = dyn_cast<UniformLoopOp>(use.getOwner());
+    if (loop && parentLoop->isProperAncestor(loop.getOperation()) &&
+        isUniformLoopInitUse(use, loop)) {
+      effects.emplace_back(MemoryEffects::Write::get());
+      return;
+    }
+  }
 }
 
 static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
