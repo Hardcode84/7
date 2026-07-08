@@ -743,14 +743,19 @@ def WaveAMDMachine_VWorkitemIdXOp
 
 def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
-                              WaveAMDMachine_VGPR, [WaveAMDMachine_VALU, Pure]> {
+                              WaveAMDMachine_VGPR,
+                              [WaveAMDMachine_VALU, AlwaysSpeculatable,
+                               DeclareOpInterfaceMethods<
+                                   MemoryEffectsOpInterface>]> {
   let hasVerifier = 1;
 }
 
 def WaveAMDMachine_VMovB64TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b64_tuple", WaveAMDMachine_RegOrImm,
                               WaveAMDMachine_VGPR2,
-                              [WaveAMDMachine_VALU, Pure]> {
+                              [WaveAMDMachine_VALU, AlwaysSpeculatable,
+                               DeclareOpInterfaceMethods<
+                                   MemoryEffectsOpInterface>]> {
   let archPredicate = WaveAMDMachine_VMovB64Target;
   let hasVerifier = 1;
 }
@@ -1267,7 +1272,10 @@ def WaveAMDMachine_SMovVccB32Op
 // allocator-assigned SGPR. Used by the selector to lift loop-IV
 // initialisers out of `waveamdmachine.imm` into a real carry register.
 def WaveAMDMachine_SMovB32ValueOp
-    : WaveAMDMachine_Op<"s_mov_b32_value", [WaveAMDMachine_SALU, Pure]> {
+    : WaveAMDMachine_Op<"s_mov_b32_value",
+                        [WaveAMDMachine_SALU, AlwaysSpeculatable,
+                         DeclareOpInterfaceMethods<
+                             MemoryEffectsOpInterface>]> {
   let summary = "scalar 32-bit move producing an SGPR value";
   let arguments = (ins WaveAMDMachine_RegOrImm:$source);
   let results = (outs WaveAMDMachine_SGPR1:$result);
@@ -1280,7 +1288,9 @@ def WaveAMDMachine_SMovB32ValueOp
 def WaveAMDMachine_SMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"s_mov_b32_tuple", WaveAMDMachine_RegOrImm,
                               WaveAMDMachine_SGPR,
-                              [WaveAMDMachine_SALU, Pure]> {
+                              [WaveAMDMachine_SALU, AlwaysSpeculatable,
+                               DeclareOpInterfaceMethods<
+                                   MemoryEffectsOpInterface>]> {
   let hasVerifier = 1;
 }
 def WaveAMDMachine_SLoadB32Op : WaveAMDMachine_UnaryResult<"s_load_b32",

@@ -865,19 +865,49 @@ static bool isUniformLoopInitUse(OpOperand &use, UniformLoopOp loop) {
   return false;
 }
 
-void CopyTupleOp::getEffects(
-    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  UniformLoopOp parentLoop = getOperation()->getParentOfType<UniformLoopOp>();
+static bool hasNestedUniformLoopInitUse(Operation *op, Value value) {
+  UniformLoopOp parentLoop = op->getParentOfType<UniformLoopOp>();
   if (!parentLoop)
-    return;
-  for (OpOperand &use : getResult().getUses()) {
+    return false;
+  for (OpOperand &use : value.getUses()) {
     UniformLoopOp loop = dyn_cast<UniformLoopOp>(use.getOwner());
     if (loop && parentLoop->isProperAncestor(loop.getOperation()) &&
-        isUniformLoopInitUse(use, loop)) {
-      effects.emplace_back(MemoryEffects::Write::get());
-      return;
-    }
+        isUniformLoopInitUse(use, loop))
+      return true;
   }
+  return false;
+}
+
+static void addNestedUniformLoopInitEffect(
+    Operation *op, Value value,
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  if (hasNestedUniformLoopInitUse(op, value))
+    effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void CopyTupleOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addNestedUniformLoopInitEffect(getOperation(), getResult(), effects);
+}
+
+void SMovB32ValueOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addNestedUniformLoopInitEffect(getOperation(), getResult(), effects);
+}
+
+void SMovB32TupleOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addNestedUniformLoopInitEffect(getOperation(), getResult(), effects);
+}
+
+void VMovB32TupleOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addNestedUniformLoopInitEffect(getOperation(), getResult(), effects);
+}
+
+void VMovB64TupleOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  addNestedUniformLoopInitEffect(getOperation(), getResult(), effects);
 }
 
 static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
