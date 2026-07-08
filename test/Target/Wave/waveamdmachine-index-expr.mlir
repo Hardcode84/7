@@ -260,6 +260,56 @@ func.func @divisibility_drives_const_fold(%out: !wave.ptr<#wave.global, i32>, %u
   return
 }
 
+// CHECK-LABEL: func.func @non_power_of_two_mod_uniform
+// CHECK-DAG: %[[RAW:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK: %[[MAGIC:.*]] = waveamdmachine.imm 2863311531
+// CHECK: %[[HI:.*]] = waveamdmachine.s_mul_hi_u32 %[[RAW]], %[[MAGIC]]
+// CHECK: %[[SHIFT:.*]] = waveamdmachine.imm 1
+// CHECK: %[[Q:.*]], %{{.*}} = waveamdmachine.s_lshr_b32 %[[HI]], %[[SHIFT]]
+// CHECK: %[[DIVISOR:.*]] = waveamdmachine.imm 3
+// CHECK: %[[SCALED:.*]] = waveamdmachine.s_mul_i32 %[[Q]], %[[DIVISOR]]
+// CHECK: waveamdmachine.s_xor_b32 %[[SCALED]],
+// CHECK: waveamdmachine.s_add_i32 %[[RAW]],
+func.func @non_power_of_two_mod_uniform(%out: !wave.ptr<#wave.global, i32>,
+                                        %raw_in: i32)
+    attributes {wave.kernel} {
+  %raw = wave.assume %raw_in as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %off = wave.index_expr <"Mod(raw, 3)"> ["raw"](%raw) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %tok = wave.store %lane -> %ptr
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @non_power_of_two_mod_lane
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[MAGIC:.*]] = waveamdmachine.imm 2863311531
+// CHECK: %[[HI:.*]] = waveamdmachine.v_mul_hi_u32 %[[LANE]], %[[MAGIC]]
+// CHECK: %[[SHIFT:.*]] = waveamdmachine.imm 1
+// CHECK: %[[Q:.*]] = waveamdmachine.v_lshrrev_b32 %[[HI]], %[[SHIFT]]
+// CHECK: %[[DIVISOR:.*]] = waveamdmachine.imm 3
+// CHECK: %[[SCALED:.*]] = waveamdmachine.v_mul_lo_u32 %[[Q]], %[[DIVISOR]]
+// CHECK: waveamdmachine.v_xor_b32 %[[SCALED]],
+// CHECK: waveamdmachine.v_add_u32 %[[LANE]],
+func.func @non_power_of_two_mod_lane(%out: !wave.ptr<#wave.global, i32>,
+                                     %x: i32)
+    attributes {wave.kernel} {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %off = wave.index_expr <"Mod(lid, 3)"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %vx -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @floor_fractional_add_global
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[NUM:.*]] = waveamdmachine.v_add_u32 %{{.*}}, %[[LANE]]

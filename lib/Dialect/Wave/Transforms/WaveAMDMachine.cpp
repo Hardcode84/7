@@ -32,6 +32,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -1701,10 +1702,35 @@ static FailureOr<int64_t> getStaticWideModDivisor(WaveAMDMachineSelector &S,
     return user->emitError(
         "full-address index_expr mod needs a static integer divisor");
   std::optional<int64_t> divisor = llvm::checkedMul(lhs.denominator, *rhsNum);
-  if (!divisor || !isPositivePowerOfTwo(*divisor))
+  if (!divisor || *divisor <= 0)
     return user->emitError(
-        "full-address index_expr mod needs a power-of-two integer divisor");
+        "full-address index_expr mod needs a positive static integer divisor");
   return *divisor;
+}
+
+static FailureOr<Value> materializeNarrowModAsWide(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+  llvm::DenseSet<StringRef> liveSymbols;
+  sym::walkSymbolNames(expr, [&](StringRef name) { liveSymbols.insert(name); });
+  llvm::StringMap<Value> subs;
+  for (const WideSymbolBinding &binding : bindings) {
+    if (!liveSymbols.contains(binding.name))
+      continue;
+    std::optional<Value> low = zeroExtendedLowDword(S, binding.selected);
+    if (!low)
+      return user->emitError("full-address index_expr non-power-of-two mod "
+                             "needs 32-bit bindings");
+    subs[binding.name] = *low;
+  }
+  FailureOr<Value> value =
+      materializeIndexExprNode(S, expr, user, subs, assumptions, addOrder);
+  if (failed(value))
+    return failure();
+  if (symbolsAreUniform)
+    return ensureSGPR2(S, user->getLoc(), *value);
+  return ensureVGPR2(S, user->getLoc(), *value);
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalMod(
@@ -1721,6 +1747,17 @@ static FailureOr<WideRationalValue> materializeWideRationalMod(
   FailureOr<int64_t> divisor = getStaticWideModDivisor(S, *lhs, *rhs, user);
   if (failed(divisor))
     return failure();
+  if (!isPositivePowerOfTwo(*divisor)) {
+    if (lhs->denominator != 1)
+      return user->emitError("full-address index_expr non-power-of-two mod "
+                             "needs an integer-valued lhs");
+    FailureOr<Value> value = materializeNarrowModAsWide(
+        S, expr, user, bindings, assumptions, symbolsAreUniform,
+        IndexExprAddOrder::UniformFirst);
+    if (failed(value))
+      return failure();
+    return WideRationalValue{*value, 1};
+  }
   Value numerator =
       andWideMask(S, user->getLoc(), lhs->numerator, *divisor - 1);
   return WideRationalValue{numerator, lhs->denominator};
@@ -1978,7 +2015,7 @@ static FailureOr<Value>
 materializeWideMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                    Operation *user, ArrayRef<WideSymbolBinding> bindings,
                    ArrayRef<sym::PredHandle> assumptions,
-                   bool symbolsAreUniform, IndexExprAddOrder) {
+                   bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> lhs = materializeWideRationalIndexExprNode(
       S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
@@ -1989,6 +2026,9 @@ materializeWideMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   FailureOr<int64_t> divisor = getStaticWideModDivisor(S, *lhs, *rhs, user);
   if (failed(divisor))
     return failure();
+  if (!isPositivePowerOfTwo(*divisor))
+    return materializeNarrowModAsWide(S, expr, user, bindings, assumptions,
+                                      symbolsAreUniform, addOrder);
   if (!isIntegerValuedRationalPow2Expr(view.getBinaryLhs(), lhs->denominator))
     return user->emitError(
         "full-address index_expr mod needs an integer-valued lhs");

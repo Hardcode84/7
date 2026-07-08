@@ -14,7 +14,9 @@
 
 #include "WaveAMDMachineSelector.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/Support/CheckedArithmetic.h"
+#include "llvm/Support/DivisionByConstantInfo.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <limits>
@@ -68,6 +70,10 @@ static bool canMaterializeIntegerRationalExpr(sym::ExprHandle expr);
 static FailureOr<Value> materializeIntegerRationalExpr(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
     const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions);
+static bool isPositivePowerOfTwo(int64_t value);
+static bool isProvablyNonNegativeByShape(WaveAMDMachineSelector &S,
+                                         sym::ExprHandle expr,
+                                         ArrayRef<sym::PredHandle> assumptions);
 
 static bool isHoistScope(Operation *op) { return isa<LoopLikeOpInterface>(op); }
 
@@ -612,8 +618,113 @@ FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return acc ? *acc : createImm(S.builder, loc, 1);
 }
 
-// mod(lhs, rhs). Only power-of-two `rhs` is supported: the modulus is
-// a bitwise AND with `rhs - 1`.
+static Value addIndexValues(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                            Value rhs) {
+  if (S.isUniformValue(lhs) && S.isUniformValue(rhs))
+    return S.addUniformBytes(loc, lhs, rhs);
+  return S.addByteOffsets(loc, lhs, rhs);
+}
+
+static Value xorPreservingDomain(WaveAMDMachineSelector &S, Location loc,
+                                 Value value, int64_t rhs) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value))
+    return createImm(S.builder, loc,
+                     static_cast<int64_t>(static_cast<uint32_t>(*imm) ^
+                                          static_cast<uint32_t>(rhs)));
+  Value rhsValue = createImm(S.builder, loc, rhs);
+  if (S.isUniformValue(value))
+    return waveamdmachine::SXorB32Op::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::SGPR),
+               getSCCType(S.builder.getContext()), S.ensureSGPR1(loc, value),
+               rhsValue)
+        .getResult();
+  value = S.ensureVGPRForVSrc1(loc, value);
+  return waveamdmachine::VXorB32Op::create(
+      S.builder, loc,
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR), value,
+      rhsValue);
+}
+
+static Value subIndexValues(WaveAMDMachineSelector &S, Location loc, Value lhs,
+                            Value rhs) {
+  std::optional<int64_t> lhsImm = S.getImmediateValue(lhs);
+  std::optional<int64_t> rhsImm = S.getImmediateValue(rhs);
+  if (lhsImm && rhsImm) {
+    uint32_t diff =
+        static_cast<uint32_t>(*lhsImm) - static_cast<uint32_t>(*rhsImm);
+    return createImm(S.builder, loc, static_cast<int64_t>(diff));
+  }
+  Value notRhs = xorPreservingDomain(S, loc, rhs, -1);
+  Value negRhs = addIndexValues(S, loc, notRhs, createImm(S.builder, loc, 1));
+  return addIndexValues(S, loc, lhs, negRhs);
+}
+
+static Value mulHiU32(WaveAMDMachineSelector &S, Location loc, Value value,
+                      uint32_t multiplier) {
+  if (std::optional<int64_t> imm = S.getImmediateValue(value)) {
+    uint64_t product = static_cast<uint64_t>(static_cast<uint32_t>(*imm)) *
+                       static_cast<uint64_t>(multiplier);
+    return createImm(S.builder, loc, static_cast<int64_t>(product >> 32));
+  }
+  Value rhs = createImm(S.builder, loc, static_cast<int64_t>(multiplier));
+  if (S.isUniformValue(value))
+    return waveamdmachine::SMulHiU32Op::create(
+        S.builder, loc,
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+        S.ensureSGPR1(loc, value), rhs);
+  value = S.ensureVGPRForVSrc1(loc, value);
+  return waveamdmachine::VMulHiU32Op::create(
+      S.builder, loc,
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR), value,
+      rhs);
+}
+
+static Value materializeUnsignedMagicQuotient(WaveAMDMachineSelector &S,
+                                              Location loc, Value numerator,
+                                              uint32_t divisor) {
+  llvm::UnsignedDivisionByConstantInfo magics =
+      llvm::UnsignedDivisionByConstantInfo::get(
+          APInt(32, divisor), /*LeadingZeros=*/0,
+          /*AllowEvenDivisorOptimization=*/true,
+          /*AllowWidenOptimization=*/false);
+  Value q = numerator;
+  if (magics.PreShift != 0)
+    q = S.shrPow2(loc, q, magics.PreShift);
+  q = mulHiU32(S, loc, q, static_cast<uint32_t>(magics.Magic.getZExtValue()));
+  if (magics.IsAdd) {
+    Value npq = subIndexValues(S, loc, numerator, q);
+    npq = S.shrPow2(loc, npq, 1);
+    q = addIndexValues(S, loc, npq, q);
+  }
+  if (magics.PostShift != 0)
+    q = S.shrPow2(loc, q, magics.PostShift);
+  return q;
+}
+
+static FailureOr<Value> materializeStaticMod(WaveAMDMachineSelector &S,
+                                             Operation *user, Value numerator,
+                                             int64_t divisor) {
+  if (divisor == 1)
+    return createImm(S.builder, user->getLoc(), 0);
+  if (isPositivePowerOfTwo(divisor))
+    return S.andMask(user->getLoc(), numerator, divisor - 1);
+  if (!llvm::isUInt<32>(divisor))
+    return user->emitError("wave.index_expr non-power-of-two mod divisor "
+                           "must fit u32");
+  Value quotient = materializeUnsignedMagicQuotient(
+      S, user->getLoc(), numerator, static_cast<uint32_t>(divisor));
+  Value divisorValue = createImm(S.builder, user->getLoc(), divisor);
+  Value scaled =
+      S.isUniformValue(quotient)
+          ? S.mulUniformValues(user->getLoc(), quotient, divisorValue)
+          : S.mulIndexValues(user->getLoc(), quotient, divisorValue);
+  return subIndexValues(S, user->getLoc(), numerator, scaled);
+}
+
+// mod(lhs, rhs). Power-of-two rhs stays a mask; other static rhs values use
+// unsigned constant-division remainder.
 FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 Operation *user,
                                 const llvm::StringMap<Value> &subs,
@@ -623,14 +734,18 @@ FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   sym::ExprHandle lhs = view.getBinaryLhs();
   sym::ExprHandle rhs = view.getBinaryRhs();
   std::optional<int64_t> rhsInt = staticIntLiteral(rhs);
-  if (!rhsInt || *rhsInt <= 0 || (*rhsInt & (*rhsInt - 1)) != 0)
+  if (!rhsInt || *rhsInt <= 0)
+    return user->emitError("wave.index_expr mod needs a positive static "
+                           "integer divisor");
+  if (!isPositivePowerOfTwo(*rhsInt) &&
+      !isProvablyNonNegativeByShape(S, lhs, assumptions))
     return user->emitError(
-        "wave.index_expr mod needs a power-of-two integer divisor");
+        "wave.index_expr non-power-of-two mod needs nonnegative dividend");
   FailureOr<Value> lhsValue =
       materializeIndexExprNode(S, lhs, user, subs, assumptions, addOrder);
   if (failed(lhsValue))
     return failure();
-  return S.andMask(user->getLoc(), *lhsValue, *rhsInt - 1);
+  return materializeStaticMod(S, user, *lhsValue, *rhsInt);
 }
 
 std::optional<Value> foldXorImmediates(WaveAMDMachineSelector &S, Location loc,
@@ -1452,9 +1567,9 @@ static FailureOr<int64_t> getStaticModDivisor(WaveAMDMachineSelector &S,
     return user->emitError(
         "wave.index_expr mod needs a static integer divisor");
   std::optional<int64_t> divisor = llvm::checkedMul(*lhsDen, *rhsNum);
-  if (!divisor || *divisor <= 0 || (*divisor & (*divisor - 1)) != 0)
+  if (!divisor || *divisor <= 0)
     return user->emitError(
-        "wave.index_expr mod needs a power-of-two integer divisor");
+        "wave.index_expr mod needs a positive static integer divisor");
   return *divisor;
 }
 
@@ -1474,12 +1589,19 @@ materializeRationalMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   FailureOr<int64_t> divisor = getStaticModDivisor(S, *lhs, *rhs, user);
   if (failed(divisor))
     return failure();
+  if (!isPositivePowerOfTwo(*divisor) &&
+      !isProvablyNonNegativeByShape(S, view.getBinaryLhs(), assumptions))
+    return user->emitError(
+        "wave.index_expr non-power-of-two mod needs nonnegative dividend");
   FailureOr<Value> lhsNumerator =
       materializeValue(S, user->getLoc(), lhs->numerator, user);
   if (failed(lhsNumerator))
     return failure();
-  Value numerator = S.andMask(user->getLoc(), *lhsNumerator, *divisor - 1);
-  return RationalIndexValue{numerator, lhs->denominator};
+  FailureOr<Value> numerator =
+      materializeStaticMod(S, user, *lhsNumerator, *divisor);
+  if (failed(numerator))
+    return failure();
+  return RationalIndexValue{*numerator, lhs->denominator};
 }
 
 static FailureOr<RationalIndexValue>

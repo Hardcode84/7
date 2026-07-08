@@ -44,6 +44,25 @@ func.func @global_raw_constant_overflow(%out: !wave.ptr<#wave.global, i32>) attr
   return
 }
 
+// SELECT-LABEL: func.func @global_non_power_of_two_mod_addr64
+// SELECT: waveamdmachine.s_mov_b64_imm 4294967296
+// SELECT: waveamdmachine.s_mul_hi_u32
+// SELECT: waveamdmachine.global_store_b32_addr64
+func.func @global_non_power_of_two_mod_addr64(
+    %out: !wave.ptr<#wave.global, i32>, %raw_in: i32)
+    attributes {wave.kernel} {
+  %raw = wave.assume %raw_in as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %off = wave.index_expr <"1073741824 + Mod(raw, 3)"> ["raw"](%raw)
+      : (i32) -> index
+  %ptr = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %tok = wave.store %lane -> %ptr
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_raw_unbounded_offset_addr64
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_raw_unbounded_offset_addr64:
