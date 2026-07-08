@@ -68,6 +68,21 @@ func.func @signed_dynamic_i32_nonnegative_positive(%x: i32, %d: i32)
 
 // -----
 
+// CHECK-LABEL: func.func @signed_const_i32_rem3_nonnegative
+// CHECK-SAME: ([[X:%.*]]: i32)
+// CHECK: [[NONNEG:%.*]] = wave.assume [[X]]
+// CHECK-NOT: arith.cmpi slt
+// CHECK: wave.binary mulhui [[NONNEG]]
+// CHECK-NOT: remsi
+func.func @signed_const_i32_rem3_nonnegative(%x: i32) -> i32 {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %three = arith.constant 3 : i32
+  %r = wave.binary remsi %nonneg, %three : i32, i32 -> i32
+  return %r : i32
+}
+
+// -----
+
 // CHECK-LABEL: func.func @signed_const_pow2_i32_nonnegative
 // CHECK-SAME: ([[X:%.*]]: i32)
 // CHECK: [[NONNEG:%.*]] = wave.assume [[X]]
@@ -185,6 +200,89 @@ func.func @unsigned_dynamic_pow2_rem_simd(%x: !wave.simd<i32, 32>, %d: i32)
   %r = wave.binary remui %x, %splat
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   return %r : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_loop_index_rem3_nonnegative
+// CHECK: scf.for [[IV:%[^ ]+]] =
+// CHECK-NOT: arith.cmpi slt
+// CHECK: wave.binary subi [[IV]],
+// CHECK-NOT: remsi
+func.func @signed_loop_index_rem3_nonnegative(%ub: index) -> index {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %sum = scf.for %i = %c0 to %ub step %c1 iter_args(%acc = %c0) -> index {
+    %r = wave.binary remsi %i, %c3 : index, index -> index
+    %next = arith.addi %acc, %r : index
+    scf.yield %next : index
+  }
+  return %sum : index
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_loop_i32_index_cast_rem3_nonnegative
+// CHECK: scf.for [[IV:%[^ ]+]] =
+// CHECK: arith.index_cast [[IV]]
+// CHECK-NOT: arith.cmpi slt
+// CHECK: wave.binary mulhui
+// CHECK-NOT: remsi
+func.func @signed_loop_i32_index_cast_rem3_nonnegative(%trip: i32) -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : i32
+  %trip_idx = arith.index_cast %trip : i32 to index
+  %sum = scf.for %i = %c0 to %trip_idx step %c1
+      iter_args(%acc = %trip) -> i32 {
+    %i32 = arith.index_cast %i : index to i32
+    %r = wave.binary remsi %i32, %c3 : i32, i32 -> i32
+    %next = arith.addi %acc, %r : i32
+    scf.yield %next : i32
+  }
+  return %sum : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_unsigned_loop_i32_rem3_bounded_nonnegative
+// CHECK: scf.for unsigned [[IV:%[^ ]+]] =
+// CHECK-NOT: arith.cmpi slt
+// CHECK: wave.binary mulhui
+// CHECK-NOT: remsi
+func.func @signed_unsigned_loop_i32_rem3_bounded_nonnegative() -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c3 = arith.constant 3 : i32
+  %c42 = arith.constant 42 : i32
+  %sum = scf.for unsigned %i = %c0 to %c42 step %c1
+      iter_args(%acc = %c0) -> i32 : i32 {
+    %r = wave.binary remsi %i, %c3 : i32, i32 -> i32
+    %next = arith.addi %acc, %r : i32
+    scf.yield %next : i32
+  }
+  return %sum : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_unsigned_loop_i32_rem3_high_unsigned_bound
+// CHECK: scf.for unsigned [[IV:%[^ ]+]] =
+// CHECK: arith.cmpi slt
+// CHECK-NOT: remsi
+func.func @signed_unsigned_loop_i32_rem3_high_unsigned_bound() -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c3 = arith.constant 3 : i32
+  %c_minus1 = arith.constant -1 : i32
+  %sum = scf.for unsigned %i = %c0 to %c_minus1 step %c1
+      iter_args(%acc = %c0) -> i32 : i32 {
+    %r = wave.binary remsi %i, %c3 : i32, i32 -> i32
+    %next = arith.addi %acc, %r : i32
+    scf.yield %next : i32
+  }
+  return %sum : i32
 }
 
 // -----

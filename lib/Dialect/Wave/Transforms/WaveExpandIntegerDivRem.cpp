@@ -13,6 +13,7 @@
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Matchers.h"
@@ -23,6 +24,7 @@
 #include "llvm/Support/DivisionByConstantInfo.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <limits>
 #include <optional>
 
 namespace mlir::wave {
@@ -215,8 +217,14 @@ static Value createCtz(OpBuilder &builder, Location loc, Value value) {
 }
 
 static Value createUMulHi(OpBuilder &builder, Location loc, Type type,
-                          Value value, uint64_t multiplier) {
+                          Value value, uint64_t multiplier,
+                          bool useNativeI32MulHi = false) {
   unsigned bits = elementBits(type);
+  if (useNativeI32MulHi && bits == 32)
+    return createMulHU(builder, loc, type, value,
+                       createScalarConstant(
+                           builder, loc, scalarElementType(type), multiplier));
+
   unsigned halfBits = bits / 2;
   uint64_t halfMask =
       halfBits == 64 ? ~uint64_t{0} : ((uint64_t{1} << halfBits) - 1);
@@ -251,7 +259,8 @@ static Value createUMulHi(OpBuilder &builder, Location loc, Type type,
 
 static Value createUnsignedMagicQuotient(OpBuilder &builder, Location loc,
                                          Type type, Value numerator,
-                                         uint64_t divisor) {
+                                         uint64_t divisor,
+                                         bool useNativeI32MulHi = false) {
   unsigned bits = elementBits(type);
   llvm::UnsignedDivisionByConstantInfo magics =
       llvm::UnsignedDivisionByConstantInfo::get(
@@ -263,7 +272,8 @@ static Value createUnsignedMagicQuotient(OpBuilder &builder, Location loc,
   if (magics.PreShift != 0)
     q = createShrU(builder, loc, type, q,
                    createShiftAmount(builder, loc, type, magics.PreShift));
-  q = createUMulHi(builder, loc, type, q, magics.Magic.getZExtValue());
+  q = createUMulHi(builder, loc, type, q, magics.Magic.getZExtValue(),
+                   useNativeI32MulHi);
   if (magics.IsAdd) {
     Value npq = createSub(builder, loc, type, numerator, q);
     npq = createShrU(builder, loc, type, npq,
@@ -278,7 +288,8 @@ static Value createUnsignedMagicQuotient(OpBuilder &builder, Location loc,
 
 static std::optional<DivRemValues>
 tryCreateUnsignedConstDivRem(OpBuilder &builder, Location loc, Type type,
-                             Value numerator, uint64_t divisor) {
+                             Value numerator, uint64_t divisor,
+                             bool useNativeI32MulHi = false) {
   unsigned bits = elementBits(type);
   divisor = maskToBits(divisor, bits);
   if (divisor == 0)
@@ -296,8 +307,8 @@ tryCreateUnsignedConstDivRem(OpBuilder &builder, Location loc, Type type,
     return DivRemValues{quotient, remainder};
   }
 
-  Value quotient =
-      createUnsignedMagicQuotient(builder, loc, type, numerator, divisor);
+  Value quotient = createUnsignedMagicQuotient(builder, loc, type, numerator,
+                                               divisor, useNativeI32MulHi);
   Value scaled = createMul(
       builder, loc, type, quotient,
       createScalarConstant(builder, loc, scalarElementType(type), divisor));
@@ -379,8 +390,8 @@ static bool isSignedI32RangeWithLowerBound(const ConstantIntRanges &range,
   return range.smin().sge(lowerBound) && range.smax().sle(upperBound);
 }
 
-static std::optional<ConstantIntRanges>
-finiteSignedRange(DataFlowSolver &solver, Value value) {
+static std::optional<ConstantIntRanges> integerRange(DataFlowSolver &solver,
+                                                     Value value) {
   const dataflow::IntegerValueRangeLattice *lattice =
       solver.lookupState<dataflow::IntegerValueRangeLattice>(value);
   if (!lattice)
@@ -388,8 +399,13 @@ finiteSignedRange(DataFlowSolver &solver, Value value) {
   IntegerValueRange ivr = lattice->getValue();
   if (ivr.isUninitialized())
     return std::nullopt;
-  ConstantIntRanges range = ivr.getValue();
-  if (isFullSignedRange(range))
+  return ivr.getValue();
+}
+
+static std::optional<ConstantIntRanges>
+finiteSignedRange(DataFlowSolver &solver, Value value) {
+  std::optional<ConstantIntRanges> range = integerRange(solver, value);
+  if (!range || isFullSignedRange(*range))
     return std::nullopt;
   return range;
 }
@@ -398,6 +414,19 @@ static bool hasLowerBoundAtLeast(const sym::InferredRange &range,
                                  int64_t lower) {
   return range.lower && range.lower->denominator > 0 &&
          range.lower->numerator >= lower * range.lower->denominator;
+}
+
+static bool hasUpperBoundAtMost(const sym::InferredRange &range,
+                                int64_t upper) {
+  if (!range.upper || range.upper->denominator <= 0)
+    return false;
+  if (upper == std::numeric_limits<int64_t>::max())
+    return true;
+  int64_t quotient = range.upper->numerator / range.upper->denominator;
+  int64_t remainder = range.upper->numerator % range.upper->denominator;
+  if (remainder != 0 && range.upper->numerator > 0)
+    ++quotient;
+  return quotient <= upper;
 }
 
 static bool isAssumedAtLeast(sym::Store &store, Value value, int64_t lower) {
@@ -414,6 +443,26 @@ static bool isAssumedAtLeast(sym::Store &store, Value value, int64_t lower) {
     std::optional<sym::InferredRange> range =
         sym::inferRange(store, *expr, assumptions);
     if (range && hasLowerBoundAtLeast(*range, lower))
+      return true;
+    value = assume.getValue();
+  }
+  return false;
+}
+
+static bool isAssumedAtMost(sym::Store &store, Value value, int64_t upper) {
+  while (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
+    FailureOr<sym::ExprHandle> expr =
+        sym::composeExprSym(store, assume.getName());
+    if (failed(expr))
+      return false;
+    SmallVector<sym::PredHandle, 4> assumptions;
+    for (Attribute attr : assume.getAssumptions())
+      assumptions.push_back(cast<PredAttr>(attr).getValue());
+    appendAssumePredicates(store, assume.getValue(), assume.getName(),
+                           assumptions);
+    std::optional<sym::InferredRange> range =
+        sym::inferRange(store, *expr, assumptions);
+    if (range && hasUpperBoundAtMost(*range, upper))
       return true;
     value = assume.getValue();
   }
@@ -438,24 +487,156 @@ static bool isIndexExprProvenAtLeast(sym::Store &store, Value value,
   return range && hasLowerBoundAtLeast(*range, lower);
 }
 
+static bool isIndexExprProvenAtMost(sym::Store &store, Value value,
+                                    int64_t upper) {
+  IndexExprOp index = value.getDefiningOp<IndexExprOp>();
+  if (!index)
+    return false;
+
+  SmallVector<sym::PredHandle, 4> assumptions;
+  appendIndexExprPredicates(index, assumptions);
+  for (auto [nameAttr, binding] :
+       llvm::zip(index.getNames(), index.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    appendAssumePredicates(store, binding, name, assumptions);
+  }
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, index.getExpr().getValue(), assumptions);
+  return range && hasUpperBoundAtMost(*range, upper);
+}
+
 static bool isProvenSignedLowerBound(DataFlowSolver &solver, sym::Store &store,
-                                     Value value, int64_t lower) {
+                                     Value value, int64_t lower);
+static bool isProvenSignedUpperBound(DataFlowSolver &solver, sym::Store &store,
+                                     Value value, int64_t upper);
+
+static bool isConstantPositive(Value value) {
+  std::optional<APInt> constant =
+      getConstantAPInt(value, elementBits(value.getType()));
+  return constant &&
+         constant->sgt(APInt(constant->getBitWidth(), 0, /*isSigned=*/true));
+}
+
+static bool isProvenUnsignedUpperAtMostSignedMin(DataFlowSolver &solver,
+                                                 sym::Store &store,
+                                                 Value value) {
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return isProvenUnsignedUpperAtMostSignedMin(solver, store,
+                                                splat.getSource());
+
+  unsigned bits = elementBits(value.getType());
+  APInt signedMin = APInt::getSignedMinValue(bits);
+  if (std::optional<APInt> constant = getConstantAPInt(value, bits))
+    return constant->ule(signedMin);
+
+  if (std::optional<ConstantIntRanges> range = integerRange(solver, value))
+    if (range->umax().ule(signedMin))
+      return true;
+
+  int64_t signedMax = APInt::getSignedMaxValue(bits).getSExtValue();
+  return isProvenSignedLowerBound(solver, store, value, 0) &&
+         isProvenSignedUpperBound(solver, store, value, signedMax);
+}
+
+static bool isScfForIvProvenAtLeast(DataFlowSolver &solver, sym::Store &store,
+                                    Value value, int64_t lower) {
+  scf::ForOp loop = scf::getForInductionVarOwner(value);
+  if (!loop)
+    return false;
+  if (!isConstantPositive(loop.getStep()))
+    return false;
+  if (loop.getUnsignedCmp())
+    return isProvenSignedLowerBound(solver, store, loop.getLowerBound(),
+                                    lower) &&
+           isProvenUnsignedUpperAtMostSignedMin(solver, store,
+                                                loop.getUpperBound());
+  return isProvenSignedLowerBound(solver, store, loop.getLowerBound(), lower);
+}
+
+static bool isSignedIndexCastFromNoWiderInt(Value value, unsigned bits) {
+  arith::IndexCastOp cast = value.getDefiningOp<arith::IndexCastOp>();
+  if (!cast)
+    return false;
+  Type sourceType = scalarElementType(cast.getIn().getType());
+  IntegerType sourceInt = dyn_cast<IntegerType>(sourceType);
+  return sourceInt && sourceInt.getWidth() <= bits;
+}
+
+static bool isNarrowSignedIndexCastOfNonNegativeLoopIv(DataFlowSolver &solver,
+                                                       sym::Store &store,
+                                                       arith::IndexCastOp cast,
+                                                       int64_t lower) {
+  if (lower > 0)
+    return false;
+  Value source = cast.getIn();
+  if (elementBits(source.getType()) <= elementBits(cast.getType()))
+    return isProvenSignedLowerBound(solver, store, source, lower);
+
+  scf::ForOp loop = scf::getForInductionVarOwner(source);
+  if (!loop || loop.getUnsignedCmp() || !isConstantPositive(loop.getStep()))
+    return false;
+  if (!isProvenSignedLowerBound(solver, store, loop.getLowerBound(), 0))
+    return false;
+  return isSignedIndexCastFromNoWiderInt(loop.getUpperBound(),
+                                         elementBits(cast.getType()));
+}
+
+static bool isNonNegativeWaveId(Value value) {
+  return value.getDefiningOp<LaneIdOp>() ||
+         value.getDefiningOp<WorkgroupIdOp>() ||
+         value.getDefiningOp<WorkitemIdOp>();
+}
+
+static bool isProvenSignedLowerBoundFromDef(DataFlowSolver &solver,
+                                            sym::Store &store, Value value,
+                                            int64_t lower) {
   if (SplatOp splat = value.getDefiningOp<SplatOp>())
     return isProvenSignedLowerBound(solver, store, splat.getSource(), lower);
-  if (lower <= 0 && (value.getDefiningOp<LaneIdOp>() ||
-                     value.getDefiningOp<WorkgroupIdOp>() ||
-                     value.getDefiningOp<WorkitemIdOp>()))
+  if (arith::IndexCastOp cast = value.getDefiningOp<arith::IndexCastOp>())
+    if (isNarrowSignedIndexCastOfNonNegativeLoopIv(solver, store, cast, lower))
+      return true;
+  return lower <= 0 && isNonNegativeWaveId(value);
+}
+
+static bool isProvenSignedLowerBoundByPredicate(DataFlowSolver &solver,
+                                                sym::Store &store, Value value,
+                                                int64_t lower) {
+  if (isAssumedAtLeast(store, value, lower))
+    return true;
+  if (isIndexExprProvenAtLeast(store, value, lower))
+    return true;
+  return isScfForIvProvenAtLeast(solver, store, value, lower);
+}
+
+static bool isProvenSignedLowerBound(DataFlowSolver &solver, sym::Store &store,
+                                     Value value, int64_t lower) {
+  if (isProvenSignedLowerBoundFromDef(solver, store, value, lower))
     return true;
   if (std::optional<APInt> constant =
           getConstantAPInt(value, elementBits(value.getType())))
     return constant->sge(APInt(constant->getBitWidth(), lower,
                                /*isSigned=*/true));
-  if (isAssumedAtLeast(store, value, lower))
-    return true;
-  if (isIndexExprProvenAtLeast(store, value, lower))
+  if (isProvenSignedLowerBoundByPredicate(solver, store, value, lower))
     return true;
   std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value);
   return range && range->smin().sge(APInt(range->smin().getBitWidth(), lower,
+                                          /*isSigned=*/true));
+}
+
+static bool isProvenSignedUpperBound(DataFlowSolver &solver, sym::Store &store,
+                                     Value value, int64_t upper) {
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return isProvenSignedUpperBound(solver, store, splat.getSource(), upper);
+  if (std::optional<APInt> constant =
+          getConstantAPInt(value, elementBits(value.getType())))
+    return constant->sle(
+        APInt(constant->getBitWidth(), upper, /*isSigned=*/true));
+  if (isAssumedAtMost(store, value, upper))
+    return true;
+  if (isIndexExprProvenAtMost(store, value, upper))
+    return true;
+  std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value);
+  return range && range->smax().sle(APInt(range->smax().getBitWidth(), upper,
                                           /*isSigned=*/true));
 }
 
@@ -642,13 +823,15 @@ tryCreateDynamicPow2Value(OpBuilder &builder, Location loc, Type type,
 
 static DivRemValues createUnsignedDivRem(OpBuilder &builder, Location loc,
                                          Type type, Value numerator,
-                                         Value divisor) {
+                                         Value divisor,
+                                         bool useNativeI32ConstMulHi = false) {
   numerator = asType(builder, loc, numerator, type);
   divisor = asType(builder, loc, divisor, type);
   if (std::optional<APInt> constant =
           getConstantAPInt(divisor, elementBits(type)))
     if (std::optional<DivRemValues> result = tryCreateUnsignedConstDivRem(
-            builder, loc, type, numerator, constant->getZExtValue()))
+            builder, loc, type, numerator, constant->getZExtValue(),
+            useNativeI32ConstMulHi))
       return *result;
   if (elementBits(type) == 32)
     return createUnsignedI32DivRem(builder, loc, type, numerator, divisor);
@@ -788,9 +971,9 @@ tryCreateSignedAsUnsignedValue(IRRewriter &rewriter, BinaryOp op,
       !isProvenPositive(solver, store, op.getRhs()))
     return std::nullopt;
 
-  DivRemValues result =
-      createUnsignedDivRem(rewriter, op.getLoc(), op.getResult().getType(),
-                           op.getLhs(), op.getRhs());
+  DivRemValues result = createUnsignedDivRem(
+      rewriter, op.getLoc(), op.getResult().getType(), op.getLhs(), op.getRhs(),
+      /*useNativeI32ConstMulHi=*/true);
   return kind == BinaryKind::DivSI ? result.quotient : result.remainder;
 }
 
