@@ -23,6 +23,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
@@ -818,6 +819,31 @@ static FailureOr<bool> canIssueTokenConsumerBeforeNext(
              originalProjection->issueBackpressureCycles;
 }
 
+static unsigned findReadyBarrierPairFiller(const BitVector &ready,
+                                           const GreedyRegion &region,
+                                           const BitVector &scheduled,
+                                           unsigned next) {
+  if (!isa<waveamdmachine::SBarrierOp>(region.ops[next]))
+    return region.ops.size();
+
+  unsigned filler = region.ops.size();
+  for (unsigned index : llvm::seq(next + 1, ready.size())) {
+    Operation *op = region.ops[index];
+    if (isa<waveamdmachine::SBarrierOp>(op))
+      return scheduled.test(index) ? region.ops.size() : filler;
+    if (!isPure(op))
+      return region.ops.size();
+    if (scheduled.test(index))
+      continue;
+    if (filler == region.ops.size()) {
+      if (!ready.test(index))
+        return region.ops.size();
+      filler = index;
+    }
+  }
+  return region.ops.size();
+}
+
 static FailureOr<unsigned>
 findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
                        const BitVector &scheduled, unsigned next,
@@ -827,6 +853,12 @@ findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
       continue;
     if (!waveamdmachine::waitsForMemoryTokenDepsBeforeIssue(region.ops[index]))
       continue;
+    if (findReadyBarrierPairFiller(ready, region, scheduled, index) !=
+        region.ops.size())
+      return region.ops.size();
+    if (isa<waveamdmachine::SBarrierOp>(region.ops[next]) &&
+        isa<waveamdmachine::SBarrierOp>(region.ops[index]))
+      return region.ops.size();
     FailureOr<bool> canMove = canIssueTokenConsumerBeforeNext(
         region, scheduled, next, index, state, origins);
     if (failed(canMove))
@@ -1127,6 +1159,13 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
       return failure();
     if (*consumer != region.ops.size())
       return scheduleReadyByIndex(*consumer, region, graph, arch, config, state,
+                                  ready, scheduled, pending, result.order,
+                                  origins);
+
+    unsigned filler =
+        findReadyBarrierPairFiller(ready, region, scheduled, next);
+    if (filler != region.ops.size())
+      return scheduleReadyByIndex(filler, region, graph, arch, config, state,
                                   ready, scheduled, pending, result.order,
                                   origins);
   }

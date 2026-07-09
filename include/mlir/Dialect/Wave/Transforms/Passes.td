@@ -500,6 +500,9 @@ def WaveAMDMachineSchedule
     and moves legal zero-stall ready instructions into modeled gaps until the
     blocked op no longer stalls or no filler remains.
 
+    Pure work between redundant full barriers moves before the pair so barrier
+    cleanup can merge it without draining memory early.
+
     Intended placement is before ticket-wait and hazard-wait insertion. Nested
     region ops split local scheduling regions; block terminators finish the
     block and are not scheduled. Only scheduler-supported WaveAMDMachine ops may
@@ -511,7 +514,7 @@ def WaveAMDMachineSchedule
   ];
   let options = [
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
-           "Apply strictly better greedy gap-fill schedules.">,
+           "Apply greedy local schedules.">,
     Option<"requireSelectedInput", "require-selected-input", "bool", /*default=*/"false",
            "Only schedule functions stamped by waveamd-to-machine.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",

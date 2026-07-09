@@ -1043,8 +1043,6 @@ tlx_addmm_glu_kernel_optimized:
 		s_cmp_lt_i32 s16, s2
 		s_cbranch_scc1 .Ltlx_addmm_glu_kernel_optimized.loop_head_0
 .Ltlx_addmm_glu_kernel_optimized.loop_exit_0:
-		s_waitcnt vmcnt(0)
-		s_barrier
 		s_waitcnt lgkmcnt(14)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[80:83], v[40:43], v[4:7]
 		s_waitcnt lgkmcnt(10)
@@ -1116,6 +1114,8 @@ tlx_addmm_glu_kernel_optimized:
 		s_add_i32 s3, s3, 1
 		s_cmp_lg_u32 s2, 0
 		s_cselect_b32 s1, s3, s1
+		s_waitcnt vmcnt(0)
+		s_barrier
 		s_mul_i32 s2, 0x4200, s1
 		v_add_u32_e32 v0, s2, v39
 		ds_read_b128 v[40:43], v0

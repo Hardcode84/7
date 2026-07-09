@@ -1,4 +1,5 @@
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' | FileCheck %s --check-prefix=IR
+// RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' --waveamd-barrier-cleanup | FileCheck %s --check-prefix=CLEANUP
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule-report='print-classes=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=CLASS
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1 max-region-ops=2' | FileCheck %s --check-prefix=CAP
@@ -207,6 +208,49 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // DIAG-SAME: filled_gaps=2
 // DIAG-SAME: memory_token_gaps={{[2-9][0-9]*}}
 // DIAG-SAME: filled_barrier_memory_gaps=2
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @cluster_barrier_pair_after_compute(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %x: !waveamdmachine.reg<sgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>,
+    %tok0: !waveamdmachine.mem.token,
+    %tok1: !waveamdmachine.mem.token) {
+  %mma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %barrier0 = waveamdmachine.s_barrier %tok0
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %sum, %scc = waveamdmachine.s_add_i32 %x, %y
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %barrier1 = waveamdmachine.s_barrier %tok1
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %joined = waveamdmachine.token_join %barrier0, %barrier1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @cluster_barrier_pair_after_compute
+// IR: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: [[BARRIER0:%.*]] = waveamdmachine.s_barrier
+// IR-NEXT: [[BARRIER1:%.*]] = waveamdmachine.s_barrier
+// IR-NEXT: waveamdmachine.token_join [[BARRIER0]], [[BARRIER1]]
+// DIAG: waveamd-machine-schedule region func=cluster_barrier_pair_after_compute
+// DIAG-SAME: action=apply reason=greedy
+// CLEANUP-LABEL: func.func @cluster_barrier_pair_after_compute
+// CLEANUP: waveamdmachine.mfma_f32_16x16x32_f16
+// CLEANUP-NEXT: waveamdmachine.s_add_i32
+// CLEANUP-NEXT: [[BARRIER:%.*]] = waveamdmachine.s_barrier
+// CLEANUP-NOT: waveamdmachine.s_barrier
+// CLEANUP: return
 
 // -----
 
