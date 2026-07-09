@@ -1019,12 +1019,6 @@ private:
     return fallback;
   }
 
-  unsigned streamingCPol() const {
-    if (isGfx940Plus())
-      return llvm::AMDGPU::CPol::NT;
-    return llvm::AMDGPU::CPol::GLC | llvm::AMDGPU::CPol::SLC;
-  }
-
   FailureOr<unsigned> getLoadCacheCPol(Operation &op) const {
     Attribute cache = op.getAttr(kMemoryCacheAttrName);
     if (!cache)
@@ -1035,6 +1029,20 @@ private:
       return failure();
     }
 
+    // CDNA3/4 cpol bits encode SC0/NT/SC1.
+    if (isGfx940Plus()) {
+      switch (attr.getValue()) {
+      case waveamd::LoadCacheKind::None:
+      case waveamd::LoadCacheKind::CA:
+        return 0u;
+      case waveamd::LoadCacheKind::CG:
+      case waveamd::LoadCacheKind::CS:
+        return llvm::AMDGPU::CPol::SC0 | llvm::AMDGPU::CPol::NT;
+      case waveamd::LoadCacheKind::CV:
+        return llvm::AMDGPU::CPol::SC0 | llvm::AMDGPU::CPol::SC1;
+      }
+    }
+
     switch (attr.getValue()) {
     case waveamd::LoadCacheKind::None:
     case waveamd::LoadCacheKind::CA:
@@ -1042,7 +1050,7 @@ private:
     case waveamd::LoadCacheKind::CG:
       return llvm::AMDGPU::CPol::GLC;
     case waveamd::LoadCacheKind::CS:
-      return streamingCPol();
+      return llvm::AMDGPU::CPol::GLC | llvm::AMDGPU::CPol::SLC;
     case waveamd::LoadCacheKind::CV:
       return llvm::AMDGPU::CPol::GLC |
              (isGfx11() ? llvm::AMDGPU::CPol::DLC : 0);
@@ -1060,6 +1068,19 @@ private:
       return failure();
     }
 
+    if (isGfx940Plus()) {
+      switch (attr.getValue()) {
+      case waveamd::StoreCacheKind::None:
+      case waveamd::StoreCacheKind::WB:
+      case waveamd::StoreCacheKind::CG:
+        return 0u;
+      case waveamd::StoreCacheKind::CS:
+        return llvm::AMDGPU::CPol::SC0 | llvm::AMDGPU::CPol::NT;
+      case waveamd::StoreCacheKind::WT:
+        return llvm::AMDGPU::CPol::SC0 | llvm::AMDGPU::CPol::SC1;
+      }
+    }
+
     switch (attr.getValue()) {
     case waveamd::StoreCacheKind::None:
     case waveamd::StoreCacheKind::WB:
@@ -1067,7 +1088,7 @@ private:
     case waveamd::StoreCacheKind::CG:
       return llvm::AMDGPU::CPol::GLC;
     case waveamd::StoreCacheKind::CS:
-      return streamingCPol();
+      return llvm::AMDGPU::CPol::GLC | llvm::AMDGPU::CPol::SLC;
     case waveamd::StoreCacheKind::WT:
       return llvm::AMDGPU::CPol::SLC;
     }

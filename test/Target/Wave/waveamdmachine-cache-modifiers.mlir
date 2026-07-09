@@ -1,6 +1,8 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
+// RUN: sed -e 's/gfx1100/gfx950/g' -e 's/, 32>/, 64>/g' %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=GFX950
+// RUN: sed -e 's/gfx1100/gfx950/g' -e 's/, 32>/, 64>/g' %s | wave-translate --wave-to-amdgpu-asm - | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -33,6 +35,14 @@ func.func @select_cache_modifiers(%in: !wave.ptr<#wave.global, i32>,
 // ASM: buffer_load_b32{{.*}}glc
 // ASM: buffer_store_b32{{.*}}slc
 // ASM: s_endpgm
+// GFX950-LABEL: cache_modifiers_asm:
+// GFX950: global_load_dword{{.*}}sc0{{.*}}nt
+// GFX950: global_store_dword{{.*}}sc0{{.*}}nt
+// GFX950: buffer_load_dword{{.*}}sc0{{.*}}nt
+// GFX950: buffer_store_dword{{.*}}sc0{{.*}}sc1
+// GFX950: buffer_load_dword{{.*}}sc0{{.*}}sc1
+// GFX950: buffer_store_dword{{.*}}offen{{ *$}}
+// GFX950: s_endpgm
 func.func @cache_modifiers_asm() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
@@ -56,6 +66,17 @@ func.func @cache_modifiers_asm() attributes {wave.kernel} {
   %buf_store_tok = waveamdmachine.buffer_store_b32 %off, %buf, %desc, %zero after %buf_tok
       {cache = #waveamd.store_cache<wt>}
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 4>,
+         !waveamdmachine.reg<sgpr, 4, 4>, !waveamdmachine.imm,
+         !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  %cv, %cv_tok = waveamdmachine.buffer_load_b32 %off, %desc, %zero after %buf_store_tok
+      {cache = #waveamd.load_cache<cv>}
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4, 4>,
+         !waveamdmachine.imm, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1, 5>, !waveamdmachine.mem.token)
+  %cg_store_tok = waveamdmachine.buffer_store_b32 %off, %cv, %desc, %zero after %cv_tok
+      {cache = #waveamd.store_cache<cg>}
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 5>,
          !waveamdmachine.reg<sgpr, 4, 4>, !waveamdmachine.imm,
          !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
