@@ -607,7 +607,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
         %1426 = wave.cmpi slt %123, %1425 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
         %1427 = wave.binary muli %1339, %c4224_i32 overflow<nsw> : i32, i32 -> i32
         %1428 = wave.barrier %297 : (!wave.mem.token) -> !wave.mem.token
-        %1429 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%44, %1343, %135) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+        %1429 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%44, %135, %1343) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
         %1430 = wave.assume %1429 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
         %1431 = wave.ptr_add %137, %1430 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
         %1432 = wave.binary addi %1427, %143 overflow<nsw> : i32, i32 -> i32
@@ -616,7 +616,7 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
           %1577 = waveamd.dma_load_lds %1431 -> %1433 after %1428 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
           wave.yield %1577 : !wave.mem.token
         } : !wave.mask<64> -> !wave.mem.token
-        %1435 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%44, %1343, %136) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+        %1435 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%44, %136, %1343) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
         %1436 = wave.assume %1435 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
         %1437 = wave.ptr_add %137, %1436 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
         %1438 = wave.binary addi %1427, %152 overflow<nsw> : i32, i32 -> i32
