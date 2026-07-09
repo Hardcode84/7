@@ -1,14 +1,14 @@
 module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave.num_ctas = 1 : i32, tlx_wave.num_warps = 8 : i32, tlx_wave.source_target = "hip:gfx950", tlx_wave.threads_per_warp = 64 : i32, waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   gpu.module @kernels {
     func.func @tlx_addmm_glu_kernel_optimized_async(%arg0: !wave.ptr<#wave.global, f16>, %arg1: !wave.ptr<#wave.global, f16>, %arg2: !wave.ptr<#wave.global, f16>, %arg3: !wave.ptr<#wave.global, f16>, %arg4: !wave.ptr<#wave.global, f16>, %arg5: i32, %arg6: i32, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32) attributes {gpu.kernel, gpu.known_block_size = array<i32: 512, 1, 1>, tlx_wave.converter.stage = "structural-emission", tlx_wave.num_warps = 8 : i32, tlx_wave.ttgir.noinline = false, tlx_wave.wave_size = 64 : i32, wave.kernel, wave.waves_per_workgroup = 8 : i64, wave.workgroup_size = array<i32: 512, 1, 1>, waveamdmachine.target_waves = 2 : i64} {
-      %0 = wave.constant 0 : i32 -> !wave.simd<i32, 64>
-      %1 = wave.constant 1 : i32 -> !wave.simd<i32, 64>
-      %2 = wave.constant 8192 : i32 -> !wave.simd<i32, 64>
-      %3 = wave.constant 4096 : i32 -> !wave.simd<i32, 64>
-      %4 = wave.constant 2048 : i32 -> !wave.simd<i32, 64>
-      %5 = wave.constant 1024 : i32 -> !wave.simd<i32, 64>
-      %6 = wave.constant 512 : i32 -> !wave.simd<i32, 64>
-      %7 = wave.constant 1073741824 : index -> !wave.simd<index, 64>
+      %0 = wave.constant 1073741824 : index -> !wave.simd<index, 64>
+      %1 = wave.constant 0 : i32 -> !wave.simd<i32, 64>
+      %2 = wave.constant 1 : i32 -> !wave.simd<i32, 64>
+      %3 = wave.constant 8192 : i32 -> !wave.simd<i32, 64>
+      %4 = wave.constant 4096 : i32 -> !wave.simd<i32, 64>
+      %5 = wave.constant 2048 : i32 -> !wave.simd<i32, 64>
+      %6 = wave.constant 1024 : i32 -> !wave.simd<i32, 64>
+      %7 = wave.constant 512 : i32 -> !wave.simd<i32, 64>
       %8 = wave.constant 120 : i32 -> !wave.simd<i32, 64>
       %9 = wave.constant 112 : i32 -> !wave.simd<i32, 64>
       %10 = wave.constant 104 : i32 -> !wave.simd<i32, 64>
@@ -76,15 +76,15 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %41 = scf.if %40 -> (i32) {
         scf.yield %32 : i32
       } else {
-        %1126 = wave.binary remui %32, %c8_i32 : i32, i32 -> i32
-        %1127 = wave.binary divui %32, %c8_i32 : i32, i32 -> i32
-        %1128 = wave.binary divui %1127, %c4_i32 : i32, i32 -> i32
-        %1129 = wave.binary muli %1128, %c32_i32 overflow<nsw> : i32, i32 -> i32
-        %1130 = wave.binary muli %1126, %c4_i32 overflow<nsw> : i32, i32 -> i32
-        %1131 = wave.binary addi %1129, %1130 overflow<nsw> : i32, i32 -> i32
-        %1132 = wave.binary remui %1127, %c4_i32 : i32, i32 -> i32
-        %1133 = wave.binary addi %1131, %1132 overflow<nsw> : i32, i32 -> i32
-        scf.yield %1133 : i32
+        %1114 = wave.binary remui %32, %c8_i32 : i32, i32 -> i32
+        %1115 = wave.binary divui %32, %c8_i32 : i32, i32 -> i32
+        %1116 = wave.binary divui %1115, %c4_i32 : i32, i32 -> i32
+        %1117 = wave.binary muli %1116, %c32_i32 overflow<nsw> : i32, i32 -> i32
+        %1118 = wave.binary muli %1114, %c4_i32 overflow<nsw> : i32, i32 -> i32
+        %1119 = wave.binary addi %1117, %1118 overflow<nsw> : i32, i32 -> i32
+        %1120 = wave.binary remui %1115, %c4_i32 : i32, i32 -> i32
+        %1121 = wave.binary addi %1119, %1120 overflow<nsw> : i32, i32 -> i32
+        scf.yield %1121 : i32
       }
       %42 = wave.binary muli %36, %c4_i32 overflow<nsw> : i32, i32 -> i32
       %43 = wave.binary divsi %41, %42 : i32, i32 -> i32
@@ -243,1155 +243,1185 @@ module attributes {gpu.container_module, tlx_wave.new_converter = true, tlx_wave
       %196 = wave.assume %195 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
       %197 = wave.ptr_add %188, %196 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
       %198 = wave.ptr_add %190, %194 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %199 = wave.ptr_add %188, %7 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %200 = wave.select %184, %197, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %201 = waveamd.dma_load_lds %200 -> %198 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %202 = wave.index_expr <"s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %187) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %203 = wave.assume %202 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %204 = wave.ptr_add %188, %203 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %205 = wave.binary addi %194, %c2112_i32 overflow<nsw> : i32, i32 -> i32
-      %206 = wave.ptr_add %190, %205 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %207 = wave.select %184, %204, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %208 = waveamd.dma_load_lds %207 -> %206 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %209 = wave.join %201, %208 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %210 = wave.cmpi slt %181, %183 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %211 = wave.cmpi slt %182, %183 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %212 = waveamd.make_buffer %arg1, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
-      %213 = wave.ptr_cast %172 : !wave.ptr<#wave.shared, f16> -> !wave.ptr<#wave.shared, i32>
-      %214 = wave.index_expr <"s1 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1"](%53, %30, %165) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %215 = wave.assume %214 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %216 = wave.ptr_add %212, %215 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %217 = wave.ptr_add %213, %194 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %218 = wave.ptr_add %212, %7 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %219 = wave.select %210, %216, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %220 = waveamd.dma_load_lds %219 -> %217 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %221 = wave.index_expr <"s1 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1"](%53, %30, %165) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %222 = wave.assume %221 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %223 = wave.ptr_add %212, %222 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %224 = wave.ptr_add %213, %205 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %225 = wave.select %211, %223, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %226 = waveamd.dma_load_lds %225 -> %224 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %227 = wave.join %220, %226 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %228 = wave.join %209, %227 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %229 = wave.binary subi %arg7, %c64_i32 : i32, i32 -> i32
-      %230 = wave.splat %229 : i32 -> !wave.simd<i32, 64>
-      %231 = wave.cmpi slt %174, %230 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %232 = wave.index_expr <"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741752 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %186) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %199 = wave.where %184 {
+        %1114 = waveamd.dma_load_lds %197 -> %198 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %200 = wave.index_expr <"s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %187) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %201 = wave.assume %200 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %202 = wave.ptr_add %188, %201 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %203 = wave.binary addi %194, %c2112_i32 overflow<nsw> : i32, i32 -> i32
+      %204 = wave.ptr_add %190, %203 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %205 = wave.where %184 {
+        %1114 = waveamd.dma_load_lds %202 -> %204 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %206 = wave.join %199, %205 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %207 = wave.cmpi slt %181, %183 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %208 = wave.cmpi slt %182, %183 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %209 = waveamd.make_buffer %arg1, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
+      %210 = wave.ptr_cast %172 : !wave.ptr<#wave.shared, f16> -> !wave.ptr<#wave.shared, i32>
+      %211 = wave.index_expr <"s1 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1"](%53, %30, %165) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %212 = wave.assume %211 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %213 = wave.ptr_add %209, %212 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %214 = wave.ptr_add %210, %194 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %215 = wave.where %207 {
+        %1114 = waveamd.dma_load_lds %213 -> %214 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %216 = wave.index_expr <"s1 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1"](%53, %30, %165) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %217 = wave.assume %216 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %218 = wave.ptr_add %209, %217 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %219 = wave.ptr_add %210, %203 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %220 = wave.where %208 {
+        %1114 = waveamd.dma_load_lds %218 -> %219 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %221 = wave.join %215, %220 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %222 = wave.join %206, %221 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %223 = wave.binary subi %arg7, %c64_i32 : i32, i32 -> i32
+      %224 = wave.splat %223 : i32 -> !wave.simd<i32, 64>
+      %225 = wave.cmpi slt %174, %224 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %226 = wave.index_expr <"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741752 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %186) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %227 = wave.assume %226 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %228 = wave.ptr_add %188, %227 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %229 = wave.binary addi %c4224_i32, %194 overflow<nsw> : i32, i32 -> i32
+      %230 = wave.ptr_add %190, %229 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %231 = wave.where %225 {
+        %1114 = waveamd.dma_load_lds %228 -> %230 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %232 = wave.index_expr <"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741752 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %187) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
       %233 = wave.assume %232 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
       %234 = wave.ptr_add %188, %233 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %235 = wave.binary addi %c4224_i32, %194 overflow<nsw> : i32, i32 -> i32
+      %235 = wave.binary addi %c4224_i32, %203 overflow<nsw> : i32, i32 -> i32
       %236 = wave.ptr_add %190, %235 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %237 = wave.select %231, %234, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %238 = waveamd.dma_load_lds %237 -> %236 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %239 = wave.index_expr <"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"64 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741752 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %187) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %240 = wave.assume %239 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %241 = wave.ptr_add %188, %240 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %242 = wave.binary addi %c4224_i32, %205 overflow<nsw> : i32, i32 -> i32
-      %243 = wave.ptr_add %190, %242 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %244 = wave.select %231, %241, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %245 = waveamd.dma_load_lds %244 -> %243 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %246 = wave.join %238, %245 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %247 = wave.cmpi slt %181, %230 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %248 = wave.cmpi slt %182, %230 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %249 = wave.assume %arg9 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
-      %250 = wave.binary muli %249, %c64_i32 overflow<nsw> : i32, i32 -> i32
-      %251 = wave.index_expr <"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %249, %165, %250) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
-      %252 = wave.assume %251 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %253 = wave.ptr_add %212, %252 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %254 = wave.ptr_add %213, %235 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %255 = wave.select %247, %253, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %256 = waveamd.dma_load_lds %255 -> %254 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %257 = wave.index_expr <"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %249, %165, %250) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>, i32) -> !wave.simd<index, 64>
-      %258 = wave.assume %257 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %259 = wave.ptr_add %212, %258 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %260 = wave.ptr_add %213, %242 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %261 = wave.select %248, %259, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %262 = waveamd.dma_load_lds %261 -> %260 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %263 = wave.join %256, %262 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %264 = wave.join %246, %263 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %265 = wave.binary subi %arg7, %c128_i32 : i32, i32 -> i32
-      %266 = wave.splat %265 : i32 -> !wave.simd<i32, 64>
-      %267 = wave.cmpi slt %174, %266 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %268 = wave.index_expr <"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741688 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %186) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %269 = wave.assume %268 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %270 = wave.ptr_add %188, %269 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %271 = wave.binary addi %c8448_i32, %194 overflow<nsw> : i32, i32 -> i32
-      %272 = wave.ptr_add %190, %271 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %273 = wave.select %267, %270, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %274 = waveamd.dma_load_lds %273 -> %272 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %275 = wave.index_expr <"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741688 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %187) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %237 = wave.where %225 {
+        %1114 = waveamd.dma_load_lds %234 -> %236 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %238 = wave.join %231, %237 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %239 = wave.cmpi slt %181, %224 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %240 = wave.cmpi slt %182, %224 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %241 = wave.assume %arg9 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
+      %242 = wave.binary muli %241, %c64_i32 overflow<nsw> : i32, i32 -> i32
+      %243 = wave.index_expr <"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %241, %242, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %244 = wave.assume %243 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %245 = wave.ptr_add %209, %244 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %246 = wave.ptr_add %210, %229 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %247 = wave.where %239 {
+        %1114 = waveamd.dma_load_lds %245 -> %246 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %248 = wave.index_expr <"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %241, %242, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %249 = wave.assume %248 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %250 = wave.ptr_add %209, %249 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %251 = wave.ptr_add %210, %235 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %252 = wave.where %240 {
+        %1114 = waveamd.dma_load_lds %250 -> %251 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %253 = wave.join %247, %252 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %254 = wave.join %238, %253 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %255 = wave.binary subi %arg7, %c128_i32 : i32, i32 -> i32
+      %256 = wave.splat %255 : i32 -> !wave.simd<i32, 64>
+      %257 = wave.cmpi slt %174, %256 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %258 = wave.index_expr <"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741688 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %186) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %259 = wave.assume %258 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %260 = wave.ptr_add %188, %259 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %261 = wave.binary addi %c8448_i32, %194 overflow<nsw> : i32, i32 -> i32
+      %262 = wave.ptr_add %190, %261 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %263 = wave.where %257 {
+        %1114 = waveamd.dma_load_lds %260 -> %262 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %264 = wave.index_expr <"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"128 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741688 + s0 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0"](%53, %187) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %265 = wave.assume %264 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %266 = wave.ptr_add %188, %265 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %267 = wave.binary addi %c8448_i32, %203 overflow<nsw> : i32, i32 -> i32
+      %268 = wave.ptr_add %190, %267 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %269 = wave.where %257 {
+        %1114 = waveamd.dma_load_lds %266 -> %268 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %270 = wave.join %263, %269 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %271 = wave.cmpi slt %181, %256 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %272 = wave.cmpi slt %182, %256 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %273 = wave.assume %arg9 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
+      %274 = wave.binary muli %273, %c128_i32 overflow<nsw> : i32, i32 -> i32
+      %275 = wave.index_expr <"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %273, %274, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
       %276 = wave.assume %275 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %277 = wave.ptr_add %188, %276 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %278 = wave.binary addi %c8448_i32, %205 overflow<nsw> : i32, i32 -> i32
-      %279 = wave.ptr_add %190, %278 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %280 = wave.select %267, %277, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %281 = waveamd.dma_load_lds %280 -> %279 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %282 = wave.join %274, %281 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %283 = wave.cmpi slt %181, %266 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %284 = wave.cmpi slt %182, %266 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %285 = wave.assume %arg9 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
-      %286 = wave.binary muli %285, %c128_i32 overflow<nsw> : i32, i32 -> i32
-      %287 = wave.index_expr <"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %285, %286, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %288 = wave.assume %287 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %289 = wave.ptr_add %212, %288 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %290 = wave.ptr_add %213, %271 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %291 = wave.select %283, %289, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %292 = waveamd.dma_load_lds %291 -> %290 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %293 = wave.index_expr <"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %285, %286, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %294 = wave.assume %293 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-      %295 = wave.ptr_add %212, %294 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %296 = wave.ptr_add %213, %278 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %297 = wave.select %284, %295, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %298 = waveamd.dma_load_lds %297 -> %296 after %189 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %299 = wave.join %292, %298 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %300 = wave.join %282, %299 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %301 = wave.barrier %228, %264 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
-      %302 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 256*Mod(floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %277 = wave.ptr_add %209, %276 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %278 = wave.ptr_add %210, %261 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %279 = wave.where %271 {
+        %1114 = waveamd.dma_load_lds %277 -> %278 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %280 = wave.index_expr <"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %273, %274, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %281 = wave.assume %280 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+      %282 = wave.ptr_add %209, %281 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %283 = wave.ptr_add %210, %267 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %284 = wave.where %272 {
+        %1114 = waveamd.dma_load_lds %282 -> %283 after %189 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+        wave.yield %1114 : !wave.mem.token
+      } : !wave.mask<64> -> !wave.mem.token
+      %285 = wave.join %279, %284 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %286 = wave.join %270, %285 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %287 = wave.barrier %222, %254 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
+      %288 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 256*Mod(floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %289 = wave.ptr_add %171, %288 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value, %token = wave.load %289 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %290 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 256*Mod(floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %291 = wave.ptr_add %171, %290 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_0, %token_1 = wave.load %291 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %292 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 128*Mod(1 + floor(1/512*wi), 2) + 256*Mod(floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %293 = wave.ptr_add %171, %292 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_2, %token_3 = wave.load %293 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %294 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 128*Mod(1 + floor(1/512*wi), 2) + 256*Mod(floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %295 = wave.ptr_add %171, %294 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_4, %token_5 = wave.load %295 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %296 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %297 = wave.ptr_add %171, %296 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_6, %token_7 = wave.load %297 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %298 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %299 = wave.ptr_add %171, %298 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_8, %token_9 = wave.load %299 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %300 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 128*Mod(1 + floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %301 = wave.ptr_add %171, %300 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_10, %token_11 = wave.load %301 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %302 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 128*Mod(1 + floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
       %303 = wave.ptr_add %171, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value, %token = wave.load %303 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %304 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 256*Mod(floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %305 = wave.ptr_add %171, %304 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_0, %token_1 = wave.load %305 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %306 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 128*Mod(1 + floor(1/512*wi), 2) + 256*Mod(floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %307 = wave.ptr_add %171, %306 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_2, %token_3 = wave.load %307 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %308 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 128*Mod(1 + floor(1/512*wi), 2) + 256*Mod(floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %309 = wave.ptr_add %171, %308 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_4, %token_5 = wave.load %309 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %310 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %311 = wave.ptr_add %171, %310 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_6, %token_7 = wave.load %311 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %312 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/1024*wi), 2) + 128*Mod(floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %313 = wave.ptr_add %171, %312 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_8, %token_9 = wave.load %313 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %314 = wave.index_expr <"8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 128*Mod(1 + floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %315 = wave.ptr_add %171, %314 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_10, %token_11 = wave.load %315 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %316 = wave.index_expr <"32 + 8*floor(1/16*Mod(wi, 64)) + 256*Mod(1 + floor(1/2 + 1/4*floor(1/256*wi) + 1/64*Mod(Mod(wi, 64), 16)), 2) + 128*Mod(1 + floor(1/512*wi), 2) + 64*Mod(floor(1/256*wi), 2) + 528*Mod(Mod(wi, 64), 16)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %317 = wave.ptr_add %171, %316 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_12, %token_13 = wave.load %317 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %318 = wave.join %token, %token_1, %token_3, %token_5, %token_7, %token_9, %token_11, %token_13 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %319 = wave.index_expr <"128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %320 = wave.ptr_add %172, %319 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_14, %token_15 = waveamd.transpose_load %320 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %321 = wave.extract %value_14[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %322 = wave.extract %value_14[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %323 = wave.extract %value_14[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %324 = wave.extract %value_14[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %325 = wave.index_expr <"4224 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %326 = wave.ptr_add %172, %325 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_16, %token_17 = waveamd.transpose_load %326 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %327 = wave.extract %value_16[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %328 = wave.extract %value_16[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %329 = wave.extract %value_16[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %330 = wave.extract %value_16[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %331 = wave.pack %321, %322, %323, %324, %327, %328, %329, %330 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %332 = wave.index_expr <"256 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %333 = wave.ptr_add %172, %332 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_18, %token_19 = waveamd.transpose_load %333 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %334 = wave.extract %value_18[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %335 = wave.extract %value_18[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %336 = wave.extract %value_18[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %337 = wave.extract %value_18[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %338 = wave.index_expr <"4480 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %339 = wave.ptr_add %172, %338 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_20, %token_21 = waveamd.transpose_load %339 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %340 = wave.extract %value_20[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %341 = wave.extract %value_20[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %342 = wave.extract %value_20[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %343 = wave.extract %value_20[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %344 = wave.pack %334, %335, %336, %337, %340, %341, %342, %343 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %345 = wave.index_expr <"64 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %346 = wave.ptr_add %172, %345 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_22, %token_23 = waveamd.transpose_load %346 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %347 = wave.extract %value_22[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %348 = wave.extract %value_22[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %349 = wave.extract %value_22[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %350 = wave.extract %value_22[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %351 = wave.index_expr <"4288 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %352 = wave.ptr_add %172, %351 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_24, %token_25 = waveamd.transpose_load %352 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %353 = wave.extract %value_24[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %354 = wave.extract %value_24[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %355 = wave.extract %value_24[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %356 = wave.extract %value_24[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %357 = wave.pack %347, %348, %349, %350, %353, %354, %355, %356 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %358 = wave.index_expr <"320 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %359 = wave.ptr_add %172, %358 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_26, %token_27 = waveamd.transpose_load %359 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %360 = wave.extract %value_26[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %361 = wave.extract %value_26[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %362 = wave.extract %value_26[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %363 = wave.extract %value_26[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %364 = wave.index_expr <"4544 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %365 = wave.ptr_add %172, %364 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_28, %token_29 = waveamd.transpose_load %365 after %301 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %366 = wave.extract %value_28[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %367 = wave.extract %value_28[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %368 = wave.extract %value_28[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %369 = wave.extract %value_28[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %370 = wave.pack %360, %361, %362, %363, %366, %367, %368, %369 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %371 = wave.join %token_15, %token_17, %token_19, %token_21, %token_23, %token_25, %token_27, %token_29 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %372 = wave.binary subi %170, %c3_i32 overflow<nsw> : i32, i32 -> i32
-      %373:26 = scf.for %arg12 = %c0_i32 to %372 step %c1_i32 iter_args(%arg13 = %value, %arg14 = %value_0, %arg15 = %value_2, %arg16 = %value_4, %arg17 = %value_6, %arg18 = %value_8, %arg19 = %value_10, %arg20 = %value_12, %arg21 = %331, %arg22 = %344, %arg23 = %357, %arg24 = %370, %arg25 = %28, %arg26 = %28, %arg27 = %28, %arg28 = %28, %arg29 = %28, %arg30 = %28, %arg31 = %28, %arg32 = %28, %arg33 = %300, %arg34 = %300, %arg35 = %371, %arg36 = %318, %arg37 = %189, %arg38 = %189) -> (!wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token)  : i32 {
-        %1126 = wave.binary remui %arg12, %c3_i32 : i32, i32 -> i32
-        %1127 = wave.binary addi %arg12, %c1_i32 overflow<nsw> : i32, i32 -> i32
-        %1128 = wave.binary remui %1127, %c3_i32 : i32, i32 -> i32
-        %1129 = wave.binary addi %arg12, %c3_i32 overflow<nsw> : i32, i32 -> i32
-        %1130 = wave.binary muli %1129, %c64_i32 overflow<nsw> : i32, i32 -> i32
-        %1131 = waveamd.fragment_pack %arg13 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1132 = waveamd.fragment_pack %arg14 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1133 = waveamd.fragment_pack %arg15 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1134 = waveamd.fragment_pack %arg16 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1135 = waveamd.fragment_pack %arg17 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1136 = waveamd.fragment_pack %arg18 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1137 = waveamd.fragment_pack %arg19 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1138 = waveamd.fragment_pack %arg20 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-        %1139 = waveamd.fragment_pack %arg21 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-        %1140 = waveamd.fragment_pack %arg22 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-        %1141 = waveamd.fragment_pack %arg23 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-        %1142 = waveamd.fragment_pack %arg24 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-        %1143 = waveamd.fragment_pack %arg25 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1144 = waveamd.fragment_pack %arg26 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1145 = waveamd.fragment_pack %arg27 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1146 = waveamd.fragment_pack %arg28 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1147 = waveamd.fragment_pack %arg29 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1148 = waveamd.fragment_pack %arg30 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1149 = waveamd.fragment_pack %arg31 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1150 = waveamd.fragment_pack %arg32 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1151 = waveamd.mma "mfma.f32.16x16x32.f16" %1139, %1131, %1143 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1152 = waveamd.mma "mfma.f32.16x16x32.f16" %1140, %1132, %1151 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %value_12, %token_13 = wave.load %303 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %304 = wave.join %token, %token_1, %token_3, %token_5, %token_7, %token_9, %token_11, %token_13 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %305 = wave.index_expr <"128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %306 = wave.ptr_add %172, %305 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_14, %token_15 = waveamd.transpose_load %306 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %307 = wave.extract %value_14[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %308 = wave.extract %value_14[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %309 = wave.extract %value_14[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %310 = wave.extract %value_14[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %311 = wave.index_expr <"4224 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %312 = wave.ptr_add %172, %311 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_16, %token_17 = waveamd.transpose_load %312 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %313 = wave.extract %value_16[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %314 = wave.extract %value_16[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %315 = wave.extract %value_16[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %316 = wave.extract %value_16[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %317 = wave.pack %307, %308, %309, %310, %313, %314, %315, %316 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %318 = wave.index_expr <"256 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %319 = wave.ptr_add %172, %318 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_18, %token_19 = waveamd.transpose_load %319 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %320 = wave.extract %value_18[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %321 = wave.extract %value_18[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %322 = wave.extract %value_18[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %323 = wave.extract %value_18[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %324 = wave.index_expr <"4480 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %325 = wave.ptr_add %172, %324 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_20, %token_21 = waveamd.transpose_load %325 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %326 = wave.extract %value_20[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %327 = wave.extract %value_20[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %328 = wave.extract %value_20[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %329 = wave.extract %value_20[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %330 = wave.pack %320, %321, %322, %323, %326, %327, %328, %329 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %331 = wave.index_expr <"64 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %332 = wave.ptr_add %172, %331 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_22, %token_23 = waveamd.transpose_load %332 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %333 = wave.extract %value_22[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %334 = wave.extract %value_22[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %335 = wave.extract %value_22[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %336 = wave.extract %value_22[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %337 = wave.index_expr <"4288 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %338 = wave.ptr_add %172, %337 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_24, %token_25 = waveamd.transpose_load %338 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %339 = wave.extract %value_24[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %340 = wave.extract %value_24[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %341 = wave.extract %value_24[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %342 = wave.extract %value_24[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %343 = wave.pack %333, %334, %335, %336, %339, %340, %341, %342 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %344 = wave.index_expr <"320 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %345 = wave.ptr_add %172, %344 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_26, %token_27 = waveamd.transpose_load %345 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %346 = wave.extract %value_26[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %347 = wave.extract %value_26[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %348 = wave.extract %value_26[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %349 = wave.extract %value_26[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %350 = wave.index_expr <"4544 + 128*floor(1/32*Mod(wi, 64)) + 528*floor(1/4*Mod(Mod(wi, 64), 16)) + 16*Mod(floor(1/64*wi), 4) + 2112*Mod(floor(1/16*Mod(wi, 64)), 2) + 4*Mod(Mod(Mod(wi, 64), 16), 4)"> ["wi"](%53) : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %351 = wave.ptr_add %172, %350 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_28, %token_29 = waveamd.transpose_load %351 after %287 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %352 = wave.extract %value_28[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %353 = wave.extract %value_28[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %354 = wave.extract %value_28[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %355 = wave.extract %value_28[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %356 = wave.pack %346, %347, %348, %349, %352, %353, %354, %355 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %357 = wave.join %token_15, %token_17, %token_19, %token_21, %token_23, %token_25, %token_27, %token_29 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %358 = wave.binary subi %170, %c3_i32 overflow<nsw> : i32, i32 -> i32
+      %359:22 = scf.for %arg12 = %c0_i32 to %358 step %c1_i32 iter_args(%arg13 = %value, %arg14 = %value_0, %arg15 = %value_2, %arg16 = %value_4, %arg17 = %value_6, %arg18 = %value_8, %arg19 = %value_10, %arg20 = %value_12, %arg21 = %317, %arg22 = %330, %arg23 = %343, %arg24 = %356, %arg25 = %28, %arg26 = %28, %arg27 = %28, %arg28 = %28, %arg29 = %28, %arg30 = %28, %arg31 = %28, %arg32 = %28, %arg33 = %286, %arg34 = %286) -> (!wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.mem.token, !wave.mem.token)  : i32 {
+        %1114 = wave.binary remui %arg12, %c3_i32 : i32, i32 -> i32
+        %1115 = wave.binary addi %arg12, %c1_i32 overflow<nsw> : i32, i32 -> i32
+        %1116 = wave.binary remui %1115, %c3_i32 : i32, i32 -> i32
+        %1117 = wave.binary addi %arg12, %c3_i32 overflow<nsw> : i32, i32 -> i32
+        %1118 = wave.binary muli %1117, %c64_i32 overflow<nsw> : i32, i32 -> i32
+        %1119 = waveamd.fragment_pack %arg13 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1120 = waveamd.fragment_pack %arg14 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1121 = waveamd.fragment_pack %arg15 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1122 = waveamd.fragment_pack %arg16 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1123 = waveamd.fragment_pack %arg17 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1124 = waveamd.fragment_pack %arg18 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1125 = waveamd.fragment_pack %arg19 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1126 = waveamd.fragment_pack %arg20 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+        %1127 = waveamd.fragment_pack %arg21 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+        %1128 = waveamd.fragment_pack %arg22 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+        %1129 = waveamd.fragment_pack %arg23 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+        %1130 = waveamd.fragment_pack %arg24 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+        %1131 = waveamd.fragment_pack %arg25 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1132 = waveamd.fragment_pack %arg26 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1133 = waveamd.fragment_pack %arg27 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1134 = waveamd.fragment_pack %arg28 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1135 = waveamd.fragment_pack %arg29 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1136 = waveamd.fragment_pack %arg30 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1137 = waveamd.fragment_pack %arg31 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1138 = waveamd.fragment_pack %arg32 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1139 = waveamd.mma "mfma.f32.16x16x32.f16" %1127, %1119, %1131 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1140 = waveamd.mma "mfma.f32.16x16x32.f16" %1128, %1120, %1139 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1141 = waveamd.fragment_unpack %1140 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+        %1142 = waveamd.mma "mfma.f32.16x16x32.f16" %1129, %1119, %1132 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1143 = waveamd.mma "mfma.f32.16x16x32.f16" %1130, %1120, %1142 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1144 = waveamd.fragment_unpack %1143 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+        %1145 = waveamd.mma "mfma.f32.16x16x32.f16" %1127, %1121, %1133 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1146 = waveamd.mma "mfma.f32.16x16x32.f16" %1128, %1122, %1145 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1147 = waveamd.fragment_unpack %1146 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+        %1148 = waveamd.mma "mfma.f32.16x16x32.f16" %1129, %1121, %1134 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1149 = waveamd.mma "mfma.f32.16x16x32.f16" %1130, %1122, %1148 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1150 = waveamd.fragment_unpack %1149 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+        %1151 = waveamd.mma "mfma.f32.16x16x32.f16" %1127, %1123, %1135 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1152 = waveamd.mma "mfma.f32.16x16x32.f16" %1128, %1124, %1151 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1153 = waveamd.fragment_unpack %1152 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1154 = waveamd.mma "mfma.f32.16x16x32.f16" %1141, %1131, %1144 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1155 = waveamd.mma "mfma.f32.16x16x32.f16" %1142, %1132, %1154 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1154 = waveamd.mma "mfma.f32.16x16x32.f16" %1129, %1123, %1136 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1155 = waveamd.mma "mfma.f32.16x16x32.f16" %1130, %1124, %1154 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1156 = waveamd.fragment_unpack %1155 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1157 = waveamd.mma "mfma.f32.16x16x32.f16" %1139, %1133, %1145 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1158 = waveamd.mma "mfma.f32.16x16x32.f16" %1140, %1134, %1157 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1157 = waveamd.mma "mfma.f32.16x16x32.f16" %1127, %1125, %1137 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1158 = waveamd.mma "mfma.f32.16x16x32.f16" %1128, %1126, %1157 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1159 = waveamd.fragment_unpack %1158 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1160 = waveamd.mma "mfma.f32.16x16x32.f16" %1141, %1133, %1146 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1161 = waveamd.mma "mfma.f32.16x16x32.f16" %1142, %1134, %1160 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1160 = waveamd.mma "mfma.f32.16x16x32.f16" %1129, %1125, %1138 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+        %1161 = waveamd.mma "mfma.f32.16x16x32.f16" %1130, %1126, %1160 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
         %1162 = waveamd.fragment_unpack %1161 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1163 = waveamd.mma "mfma.f32.16x16x32.f16" %1139, %1135, %1147 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1164 = waveamd.mma "mfma.f32.16x16x32.f16" %1140, %1136, %1163 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1165 = waveamd.fragment_unpack %1164 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1166 = waveamd.mma "mfma.f32.16x16x32.f16" %1141, %1135, %1148 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1167 = waveamd.mma "mfma.f32.16x16x32.f16" %1142, %1136, %1166 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1168 = waveamd.fragment_unpack %1167 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1169 = waveamd.mma "mfma.f32.16x16x32.f16" %1139, %1137, %1149 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1170 = waveamd.mma "mfma.f32.16x16x32.f16" %1140, %1138, %1169 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1171 = waveamd.fragment_unpack %1170 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1172 = waveamd.mma "mfma.f32.16x16x32.f16" %1141, %1137, %1150 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1173 = waveamd.mma "mfma.f32.16x16x32.f16" %1142, %1138, %1172 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-        %1174 = waveamd.fragment_unpack %1173 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-        %1175 = wave.binary subi %arg7, %1130 : i32, i32 -> i32
-        %1176 = wave.splat %1175 : i32 -> !wave.simd<i32, 64>
-        %1177 = wave.cmpi slt %174, %1176 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-        %1178 = wave.binary muli %1126, %c4224_i32 overflow<nsw> : i32, i32 -> i32
-        %1179 = wave.barrier %arg36, %arg37 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
-        %1180 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%53, %1130, %186) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-        %1181 = wave.assume %1180 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-        %1182 = wave.ptr_add %188, %1181 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1183 = wave.binary addi %1178, %194 overflow<nsw> : i32, i32 -> i32
-        %1184 = wave.ptr_add %190, %1183 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-        %1185 = wave.select %1177, %1182, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1186 = waveamd.dma_load_lds %1185 -> %1184 after %1179 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-        %1187 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%53, %1130, %187) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-        %1188 = wave.assume %1187 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-        %1189 = wave.ptr_add %188, %1188 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1190 = wave.binary addi %1178, %205 overflow<nsw> : i32, i32 -> i32
-        %1191 = wave.ptr_add %190, %1190 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-        %1192 = wave.select %1177, %1189, %199 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1193 = waveamd.dma_load_lds %1192 -> %1191 after %1179 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-        %1194 = wave.join %1186, %1193 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-        %1195 = wave.cmpi slt %181, %1176 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-        %1196 = wave.cmpi slt %182, %1176 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-        %1197 = wave.assume %arg9 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
-        %1198 = wave.binary muli %1130, %1197 overflow<nsw> : i32, i32 -> i32
-        %1199 = wave.barrier %arg35, %arg38 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
-        %1200 = wave.index_expr <"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %1197, %1198, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-        %1201 = wave.assume %1200 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-        %1202 = wave.ptr_add %212, %1201 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1203 = wave.ptr_add %213, %1183 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-        %1204 = wave.select %1195, %1202, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1205 = waveamd.dma_load_lds %1204 -> %1203 after %1199 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-        %1206 = wave.index_expr <"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %1197, %1198, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-        %1207 = wave.assume %1206 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
-        %1208 = wave.ptr_add %212, %1207 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1209 = wave.ptr_add %213, %1190 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-        %1210 = wave.select %1196, %1208, %218 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-        %1211 = waveamd.dma_load_lds %1210 -> %1209 after %1199 {bytes = 16 : i64, zero_fill_inactive} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-        %1212 = wave.join %1205, %1211 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-        %1213 = wave.join %1194, %1212 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-        %1214 = wave.binary muli %1128, %c8448_i32 overflow<nsw> : i32, i32 -> i32
-        %1215 = wave.ptr_add %171, %1214 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
-        %1216 = wave.ptr_add %1215, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_114, %token_115 = wave.load %1216 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1217 = wave.ptr_add %1215, %304 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_116, %token_117 = wave.load %1217 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1218 = wave.ptr_add %1215, %306 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_118, %token_119 = wave.load %1218 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1219 = wave.ptr_add %1215, %308 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_120, %token_121 = wave.load %1219 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1220 = wave.ptr_add %1215, %310 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_122, %token_123 = wave.load %1220 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1221 = wave.ptr_add %1215, %312 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_124, %token_125 = wave.load %1221 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1222 = wave.ptr_add %1215, %314 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_126, %token_127 = wave.load %1222 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1223 = wave.ptr_add %1215, %316 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_128, %token_129 = wave.load %1223 after %1179 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-        %1224 = wave.join %token_115, %token_117, %token_119, %token_121, %token_123, %token_125, %token_127, %token_129 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-        %1225 = wave.ptr_add %172, %1214 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
-        %1226 = wave.ptr_add %1225, %319 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_130, %token_131 = waveamd.transpose_load %1226 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1227 = wave.extract %value_130[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1228 = wave.extract %value_130[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1229 = wave.extract %value_130[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1230 = wave.extract %value_130[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1231 = wave.ptr_add %1225, %325 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_132, %token_133 = waveamd.transpose_load %1231 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1232 = wave.extract %value_132[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1233 = wave.extract %value_132[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1234 = wave.extract %value_132[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1235 = wave.extract %value_132[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1236 = wave.pack %1227, %1228, %1229, %1230, %1232, %1233, %1234, %1235 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-        %1237 = wave.ptr_add %1225, %332 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_134, %token_135 = waveamd.transpose_load %1237 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1238 = wave.extract %value_134[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1239 = wave.extract %value_134[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1240 = wave.extract %value_134[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1241 = wave.extract %value_134[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1242 = wave.ptr_add %1225, %338 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_136, %token_137 = waveamd.transpose_load %1242 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1243 = wave.extract %value_136[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1244 = wave.extract %value_136[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1245 = wave.extract %value_136[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1246 = wave.extract %value_136[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1247 = wave.pack %1238, %1239, %1240, %1241, %1243, %1244, %1245, %1246 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-        %1248 = wave.ptr_add %1225, %345 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_138, %token_139 = waveamd.transpose_load %1248 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1249 = wave.extract %value_138[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1250 = wave.extract %value_138[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1251 = wave.extract %value_138[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1252 = wave.extract %value_138[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1253 = wave.ptr_add %1225, %351 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_140, %token_141 = waveamd.transpose_load %1253 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1254 = wave.extract %value_140[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1255 = wave.extract %value_140[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1256 = wave.extract %value_140[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1257 = wave.extract %value_140[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1258 = wave.pack %1249, %1250, %1251, %1252, %1254, %1255, %1256, %1257 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-        %1259 = wave.ptr_add %1225, %358 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_142, %token_143 = waveamd.transpose_load %1259 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1260 = wave.extract %value_142[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1261 = wave.extract %value_142[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1262 = wave.extract %value_142[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1263 = wave.extract %value_142[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1264 = wave.ptr_add %1225, %364 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-        %value_144, %token_145 = waveamd.transpose_load %1264 after %1199 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-        %1265 = wave.extract %value_144[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1266 = wave.extract %value_144[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1267 = wave.extract %value_144[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1268 = wave.extract %value_144[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-        %1269 = wave.pack %1260, %1261, %1262, %1263, %1265, %1266, %1267, %1268 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-        %1270 = wave.join %token_131, %token_133, %token_135, %token_137, %token_139, %token_141, %token_143, %token_145 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-        %1271 = wave.barrier %1224, %1270, %arg33 : (!wave.mem.token, !wave.mem.token, !wave.mem.token) -> !wave.mem.token
-        scf.yield %value_114, %value_116, %value_118, %value_120, %value_122, %value_124, %value_126, %value_128, %1236, %1247, %1258, %1269, %1153, %1156, %1159, %1162, %1165, %1168, %1171, %1174, %1213, %1271, %1199, %1179, %1271, %1271 : !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token
+        %1163 = wave.binary subi %arg7, %1118 : i32, i32 -> i32
+        %1164 = wave.splat %1163 : i32 -> !wave.simd<i32, 64>
+        %1165 = wave.cmpi slt %174, %1164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+        %1166 = wave.binary muli %1114, %c4224_i32 overflow<nsw> : i32, i32 -> i32
+        %1167 = wave.barrier %304 : (!wave.mem.token) -> !wave.mem.token
+        %1168 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%53, %1118, %186) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+        %1169 = wave.assume %1168 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+        %1170 = wave.ptr_add %188, %1169 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+        %1171 = wave.binary addi %1166, %194 overflow<nsw> : i32, i32 -> i32
+        %1172 = wave.ptr_add %190, %1171 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+        %1173 = wave.where %1165 {
+          %1254 = waveamd.dma_load_lds %1170 -> %1172 after %1167 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+          wave.yield %1254 : !wave.mem.token
+        } : !wave.mask<64> -> !wave.mem.token
+        %1174 = wave.index_expr <"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2)"> assuming [#wave.pred<"s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) >= 0">, #wave.pred<"-1073741816 + s0 + s1 + 8*Mod(wi, 2) + 32*Mod(floor(1/4*wi), 2) + 16*Mod(floor(1/2*wi), 2) <= 0">] ["wi", "s0", "s1"](%53, %1118, %187) : (!wave.simd<i32, 64>, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+        %1175 = wave.assume %1174 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+        %1176 = wave.ptr_add %188, %1175 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+        %1177 = wave.binary addi %1166, %203 overflow<nsw> : i32, i32 -> i32
+        %1178 = wave.ptr_add %190, %1177 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+        %1179 = wave.where %1165 {
+          %1254 = waveamd.dma_load_lds %1176 -> %1178 after %1167 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+          wave.yield %1254 : !wave.mem.token
+        } : !wave.mask<64> -> !wave.mem.token
+        %1180 = wave.join %1173, %1179 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+        %1181 = wave.cmpi slt %181, %1164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+        %1182 = wave.cmpi slt %182, %1164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+        %1183 = wave.assume %arg9 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
+        %1184 = wave.binary muli %1118, %1183 overflow<nsw> : i32, i32 -> i32
+        %1185 = wave.barrier %357 : (!wave.mem.token) -> !wave.mem.token
+        %1186 = wave.index_expr <"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %1183, %1184, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+        %1187 = wave.assume %1186 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+        %1188 = wave.ptr_add %209, %1187 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+        %1189 = wave.ptr_add %210, %1171 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+        %1190 = wave.where %1181 {
+          %1254 = waveamd.dma_load_lds %1188 -> %1189 after %1185 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+          wave.yield %1254 : !wave.mem.token
+        } : !wave.mask<64> -> !wave.mem.token
+        %1191 = wave.index_expr <"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2))"> assuming [#wave.pred<"s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) >= 0">, #wave.pred<"-1073741816 + s1 + s2 + s0*(4*Mod(1 + floor(1/512*wi), 2) + 8*Mod(floor(1/256*wi), 2) + 2*Mod(floor(1/128*wi), 2) + Mod(floor(1/64*wi), 2) + 32*Mod(floor(1/32*wi), 2) + 16*Mod(floor(1/16*wi), 2)) <= 0">] ["wi", "s0", "s1", "s2"](%53, %1183, %1184, %165) : (!wave.simd<i32, 64>, i32, i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+        %1192 = wave.assume %1191 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741816 + x <= 0">] : !wave.simd<index, 64>
+        %1193 = wave.ptr_add %209, %1192 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+        %1194 = wave.ptr_add %210, %1177 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+        %1195 = wave.where %1182 {
+          %1254 = waveamd.dma_load_lds %1193 -> %1194 after %1185 {bytes = 16 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+          wave.yield %1254 : !wave.mem.token
+        } : !wave.mask<64> -> !wave.mem.token
+        %1196 = wave.join %1190, %1195 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+        %1197 = wave.join %1180, %1196 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+        %1198 = wave.barrier %arg33 : (!wave.mem.token) -> !wave.mem.token
+        %1199 = wave.binary muli %1116, %c8448_i32 overflow<nsw> : i32, i32 -> i32
+        %1200 = wave.ptr_add %171, %1199 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
+        %1201 = wave.ptr_add %1200, %288 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_114, %token_115 = wave.load %1201 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1202 = wave.ptr_add %1200, %290 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_116, %token_117 = wave.load %1202 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1203 = wave.ptr_add %1200, %292 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_118, %token_119 = wave.load %1203 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1204 = wave.ptr_add %1200, %294 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_120, %token_121 = wave.load %1204 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1205 = wave.ptr_add %1200, %296 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_122, %token_123 = wave.load %1205 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1206 = wave.ptr_add %1200, %298 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_124, %token_125 = wave.load %1206 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1207 = wave.ptr_add %1200, %300 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_126, %token_127 = wave.load %1207 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1208 = wave.ptr_add %1200, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_128, %token_129 = wave.load %1208 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+        %1209 = wave.ptr_add %172, %1199 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
+        %1210 = wave.ptr_add %1209, %305 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_130, %token_131 = waveamd.transpose_load %1210 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1211 = wave.extract %value_130[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1212 = wave.extract %value_130[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1213 = wave.extract %value_130[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1214 = wave.extract %value_130[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1215 = wave.ptr_add %1209, %311 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_132, %token_133 = waveamd.transpose_load %1215 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1216 = wave.extract %value_132[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1217 = wave.extract %value_132[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1218 = wave.extract %value_132[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1219 = wave.extract %value_132[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1220 = wave.pack %1211, %1212, %1213, %1214, %1216, %1217, %1218, %1219 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+        %1221 = wave.ptr_add %1209, %318 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_134, %token_135 = waveamd.transpose_load %1221 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1222 = wave.extract %value_134[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1223 = wave.extract %value_134[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1224 = wave.extract %value_134[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1225 = wave.extract %value_134[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1226 = wave.ptr_add %1209, %324 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_136, %token_137 = waveamd.transpose_load %1226 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1227 = wave.extract %value_136[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1228 = wave.extract %value_136[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1229 = wave.extract %value_136[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1230 = wave.extract %value_136[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1231 = wave.pack %1222, %1223, %1224, %1225, %1227, %1228, %1229, %1230 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+        %1232 = wave.ptr_add %1209, %331 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_138, %token_139 = waveamd.transpose_load %1232 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1233 = wave.extract %value_138[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1234 = wave.extract %value_138[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1235 = wave.extract %value_138[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1236 = wave.extract %value_138[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1237 = wave.ptr_add %1209, %337 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_140, %token_141 = waveamd.transpose_load %1237 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1238 = wave.extract %value_140[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1239 = wave.extract %value_140[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1240 = wave.extract %value_140[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1241 = wave.extract %value_140[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1242 = wave.pack %1233, %1234, %1235, %1236, %1238, %1239, %1240, %1241 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+        %1243 = wave.ptr_add %1209, %344 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_142, %token_143 = waveamd.transpose_load %1243 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1244 = wave.extract %value_142[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1245 = wave.extract %value_142[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1246 = wave.extract %value_142[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1247 = wave.extract %value_142[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1248 = wave.ptr_add %1209, %350 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+        %value_144, %token_145 = waveamd.transpose_load %1248 after %1198 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+        %1249 = wave.extract %value_144[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1250 = wave.extract %value_144[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1251 = wave.extract %value_144[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1252 = wave.extract %value_144[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+        %1253 = wave.pack %1244, %1245, %1246, %1247, %1249, %1250, %1251, %1252 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+        scf.yield %value_114, %value_116, %value_118, %value_120, %value_122, %value_124, %value_126, %value_128, %1220, %1231, %1242, %1253, %1141, %1144, %1147, %1150, %1153, %1156, %1159, %1162, %1197, %1198 : !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<8xf16>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.mem.token, !wave.mem.token
       }
-      %374 = wave.alloc() {align = 16 : i64, bytesize = 33792 : i64} : !wave.ptr<#wave.shared, f16>
-      %375 = wave.splat %31 : i32 -> !wave.simd<i32, 64>
-      %376 = wave.binary muli %148, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %377 = wave.binary muli %149, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %378 = wave.binary muli %150, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %379 = wave.binary muli %151, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %380 = wave.binary muli %152, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %381 = wave.binary muli %153, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %382 = wave.binary muli %154, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %383 = wave.binary muli %155, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %384 = wave.binary muli %156, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %385 = wave.binary muli %157, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %386 = wave.binary muli %158, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %387 = wave.binary muli %159, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %388 = wave.binary muli %160, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %389 = wave.binary muli %161, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %390 = wave.binary muli %162, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %391 = wave.binary muli %163, %375 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %392 = waveamd.make_buffer %arg3, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
-      %393 = wave.ptr_cast %374 : !wave.ptr<#wave.shared, f16> -> !wave.ptr<#wave.shared, i32>
-      %394 = wave.binary muli %193, %c66_i32 overflow<nsw> : i32, i32 -> i32
-      %395 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%376, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %396 = wave.assume %395 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %397 = wave.ptr_add %392, %396 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %398 = wave.ptr_add %393, %394 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %399 = waveamd.dma_load_lds %397 -> %398 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %400 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%377, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %401 = wave.assume %400 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %402 = wave.ptr_add %392, %401 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %403 = wave.binary addi %394, %c528_i32 overflow<nsw> : i32, i32 -> i32
-      %404 = wave.ptr_add %393, %403 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %405 = waveamd.dma_load_lds %402 -> %404 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %406 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%378, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %407 = wave.assume %406 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %408 = wave.ptr_add %392, %407 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %409 = wave.binary addi %394, %c1056_i32 overflow<nsw> : i32, i32 -> i32
-      %410 = wave.ptr_add %393, %409 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %411 = waveamd.dma_load_lds %408 -> %410 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %412 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%379, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %413 = wave.assume %412 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %414 = wave.ptr_add %392, %413 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %415 = wave.binary addi %394, %c1584_i32 overflow<nsw> : i32, i32 -> i32
-      %416 = wave.ptr_add %393, %415 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %417 = waveamd.dma_load_lds %414 -> %416 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %418 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%380, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %419 = wave.assume %418 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %420 = wave.ptr_add %392, %419 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %421 = wave.binary addi %394, %c2112_i32 overflow<nsw> : i32, i32 -> i32
-      %422 = wave.ptr_add %393, %421 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %423 = waveamd.dma_load_lds %420 -> %422 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %424 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%381, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %425 = wave.assume %424 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %426 = wave.ptr_add %392, %425 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %427 = wave.binary addi %394, %c2640_i32 overflow<nsw> : i32, i32 -> i32
-      %428 = wave.ptr_add %393, %427 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %429 = waveamd.dma_load_lds %426 -> %428 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %430 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%382, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %431 = wave.assume %430 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %432 = wave.ptr_add %392, %431 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %433 = wave.binary addi %394, %c3168_i32 overflow<nsw> : i32, i32 -> i32
-      %434 = wave.ptr_add %393, %433 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %435 = waveamd.dma_load_lds %432 -> %434 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %436 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%383, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %437 = wave.assume %436 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %438 = wave.ptr_add %392, %437 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %439 = wave.binary addi %394, %c3696_i32 overflow<nsw> : i32, i32 -> i32
-      %440 = wave.ptr_add %393, %439 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %441 = waveamd.dma_load_lds %438 -> %440 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %442 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%384, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %443 = wave.assume %442 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %444 = wave.ptr_add %392, %443 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %445 = wave.binary addi %394, %c4224_i32 overflow<nsw> : i32, i32 -> i32
-      %446 = wave.ptr_add %393, %445 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %447 = waveamd.dma_load_lds %444 -> %446 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %448 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%385, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %449 = wave.assume %448 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %450 = wave.ptr_add %392, %449 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %451 = wave.binary addi %394, %c4752_i32 overflow<nsw> : i32, i32 -> i32
-      %452 = wave.ptr_add %393, %451 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %453 = waveamd.dma_load_lds %450 -> %452 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %454 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%386, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %455 = wave.assume %454 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %456 = wave.ptr_add %392, %455 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %457 = wave.binary addi %394, %c5280_i32 overflow<nsw> : i32, i32 -> i32
-      %458 = wave.ptr_add %393, %457 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %459 = waveamd.dma_load_lds %456 -> %458 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %460 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%387, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %461 = wave.assume %460 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %462 = wave.ptr_add %392, %461 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %463 = wave.binary addi %394, %c5808_i32 overflow<nsw> : i32, i32 -> i32
-      %464 = wave.ptr_add %393, %463 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %465 = waveamd.dma_load_lds %462 -> %464 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %466 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%388, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %467 = wave.assume %466 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %468 = wave.ptr_add %392, %467 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %469 = wave.binary addi %394, %c6336_i32 overflow<nsw> : i32, i32 -> i32
-      %470 = wave.ptr_add %393, %469 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %471 = waveamd.dma_load_lds %468 -> %470 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %472 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%389, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %473 = wave.assume %472 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %474 = wave.ptr_add %392, %473 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %475 = wave.binary addi %394, %c6864_i32 overflow<nsw> : i32, i32 -> i32
-      %476 = wave.ptr_add %393, %475 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %477 = waveamd.dma_load_lds %474 -> %476 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %478 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%390, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %479 = wave.assume %478 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %480 = wave.ptr_add %392, %479 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %481 = wave.binary addi %394, %c7392_i32 overflow<nsw> : i32, i32 -> i32
-      %482 = wave.ptr_add %393, %481 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %483 = waveamd.dma_load_lds %480 -> %482 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %484 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%391, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
-      %485 = wave.assume %484 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
-      %486 = wave.ptr_add %392, %485 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %487 = wave.binary addi %394, %c7920_i32 overflow<nsw> : i32, i32 -> i32
-      %488 = wave.ptr_add %393, %487 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
-      %489 = waveamd.dma_load_lds %486 -> %488 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-      %490 = wave.join %399, %405, %411, %417, %423, %429, %435, %441, %447, %453, %459, %465, %471, %477, %483, %489 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %491 = waveamd.fragment_pack %373#0 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %492 = waveamd.fragment_pack %373#1 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %493 = waveamd.fragment_pack %373#2 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %494 = waveamd.fragment_pack %373#3 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %495 = waveamd.fragment_pack %373#4 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %496 = waveamd.fragment_pack %373#5 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %497 = waveamd.fragment_pack %373#6 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %498 = waveamd.fragment_pack %373#7 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %499 = waveamd.fragment_pack %373#8 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %500 = waveamd.fragment_pack %373#9 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %501 = waveamd.fragment_pack %373#10 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %502 = waveamd.fragment_pack %373#11 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %503 = waveamd.fragment_pack %373#12 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %504 = waveamd.fragment_pack %373#13 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %505 = waveamd.fragment_pack %373#14 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %506 = waveamd.fragment_pack %373#15 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %507 = waveamd.fragment_pack %373#16 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %508 = waveamd.fragment_pack %373#17 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %509 = waveamd.fragment_pack %373#18 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %510 = waveamd.fragment_pack %373#19 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %511 = waveamd.mma "mfma.f32.16x16x32.f16" %499, %491, %503 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %512 = waveamd.mma "mfma.f32.16x16x32.f16" %500, %492, %511 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %513 = waveamd.fragment_unpack %512 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %514 = waveamd.mma "mfma.f32.16x16x32.f16" %501, %491, %504 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %515 = waveamd.mma "mfma.f32.16x16x32.f16" %502, %492, %514 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %516 = waveamd.fragment_unpack %515 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %517 = waveamd.mma "mfma.f32.16x16x32.f16" %499, %493, %505 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %518 = waveamd.mma "mfma.f32.16x16x32.f16" %500, %494, %517 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %519 = waveamd.fragment_unpack %518 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %520 = waveamd.mma "mfma.f32.16x16x32.f16" %501, %493, %506 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %521 = waveamd.mma "mfma.f32.16x16x32.f16" %502, %494, %520 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %522 = waveamd.fragment_unpack %521 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %523 = waveamd.mma "mfma.f32.16x16x32.f16" %499, %495, %507 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %524 = waveamd.mma "mfma.f32.16x16x32.f16" %500, %496, %523 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %525 = waveamd.fragment_unpack %524 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %526 = waveamd.mma "mfma.f32.16x16x32.f16" %501, %495, %508 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %527 = waveamd.mma "mfma.f32.16x16x32.f16" %502, %496, %526 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %528 = waveamd.fragment_unpack %527 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %529 = waveamd.mma "mfma.f32.16x16x32.f16" %499, %497, %509 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %530 = waveamd.mma "mfma.f32.16x16x32.f16" %500, %498, %529 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %531 = waveamd.fragment_unpack %530 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %532 = waveamd.mma "mfma.f32.16x16x32.f16" %501, %497, %510 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %533 = waveamd.mma "mfma.f32.16x16x32.f16" %502, %498, %532 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %534 = waveamd.fragment_unpack %533 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %535 = wave.barrier %373#22, %373#23, %373#20, %490 : (!wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token) -> !wave.mem.token
-      %536 = wave.binary subi %170, %c2_i32 overflow<nsw> : i32, i32 -> i32
-      %537 = wave.binary remsi %536, %c3_i32 : i32, i32 -> i32
-      %538 = wave.binary muli %537, %c8448_i32 overflow<nsw> : i32, i32 -> i32
-      %539 = wave.ptr_add %171, %538 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
-      %540 = wave.barrier %373#21, %301 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
-      %541 = wave.join %535, %540 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %542 = wave.ptr_add %539, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_30, %token_31 = wave.load %542 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %543 = wave.ptr_add %539, %304 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_32, %token_33 = wave.load %543 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %544 = wave.ptr_add %539, %306 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_34, %token_35 = wave.load %544 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %545 = wave.ptr_add %539, %308 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_36, %token_37 = wave.load %545 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %546 = wave.ptr_add %539, %310 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_38, %token_39 = wave.load %546 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %547 = wave.ptr_add %539, %312 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_40, %token_41 = wave.load %547 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %548 = wave.ptr_add %539, %314 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_42, %token_43 = wave.load %548 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %549 = wave.ptr_add %539, %316 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_44, %token_45 = wave.load %549 after %541 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %550 = wave.ptr_add %172, %538 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
-      %551 = wave.barrier %373#21, %301 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
-      %552 = wave.join %535, %551 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %553 = wave.ptr_add %550, %319 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_46, %token_47 = waveamd.transpose_load %553 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %554 = wave.extract %value_46[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %555 = wave.extract %value_46[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %556 = wave.extract %value_46[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %557 = wave.extract %value_46[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %558 = wave.ptr_add %550, %325 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_48, %token_49 = waveamd.transpose_load %558 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %559 = wave.extract %value_48[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %560 = wave.extract %value_48[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %561 = wave.extract %value_48[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %562 = wave.extract %value_48[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %563 = wave.pack %554, %555, %556, %557, %559, %560, %561, %562 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %564 = wave.ptr_add %550, %332 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_50, %token_51 = waveamd.transpose_load %564 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %565 = wave.extract %value_50[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %566 = wave.extract %value_50[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %567 = wave.extract %value_50[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %568 = wave.extract %value_50[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %569 = wave.ptr_add %550, %338 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_52, %token_53 = waveamd.transpose_load %569 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %570 = wave.extract %value_52[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %571 = wave.extract %value_52[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %572 = wave.extract %value_52[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %573 = wave.extract %value_52[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %574 = wave.pack %565, %566, %567, %568, %570, %571, %572, %573 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %575 = wave.ptr_add %550, %345 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_54, %token_55 = waveamd.transpose_load %575 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %576 = wave.extract %value_54[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %577 = wave.extract %value_54[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %578 = wave.extract %value_54[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %579 = wave.extract %value_54[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %580 = wave.ptr_add %550, %351 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_56, %token_57 = waveamd.transpose_load %580 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %581 = wave.extract %value_56[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %582 = wave.extract %value_56[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %583 = wave.extract %value_56[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %584 = wave.extract %value_56[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %585 = wave.pack %576, %577, %578, %579, %581, %582, %583, %584 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %586 = wave.ptr_add %550, %358 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_58, %token_59 = waveamd.transpose_load %586 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %587 = wave.extract %value_58[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %588 = wave.extract %value_58[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %589 = wave.extract %value_58[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %590 = wave.extract %value_58[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %591 = wave.ptr_add %550, %364 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_60, %token_61 = waveamd.transpose_load %591 after %552 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %592 = wave.extract %value_60[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %593 = wave.extract %value_60[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %594 = wave.extract %value_60[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %595 = wave.extract %value_60[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %596 = wave.pack %587, %588, %589, %590, %592, %593, %594, %595 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %597 = waveamd.fragment_pack %value_30 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %598 = waveamd.fragment_pack %value_32 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %599 = waveamd.fragment_pack %value_34 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %600 = waveamd.fragment_pack %value_36 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %601 = waveamd.fragment_pack %value_38 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %602 = waveamd.fragment_pack %value_40 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %603 = waveamd.fragment_pack %value_42 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %604 = waveamd.fragment_pack %value_44 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %605 = waveamd.fragment_pack %563 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %606 = waveamd.fragment_pack %574 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %607 = waveamd.fragment_pack %585 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %608 = waveamd.fragment_pack %596 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %609 = waveamd.fragment_pack %513 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %610 = waveamd.fragment_pack %516 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %611 = waveamd.fragment_pack %519 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %612 = waveamd.fragment_pack %522 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %613 = waveamd.fragment_pack %525 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %614 = waveamd.fragment_pack %528 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %615 = waveamd.fragment_pack %531 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %616 = waveamd.fragment_pack %534 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %617 = waveamd.mma "mfma.f32.16x16x32.f16" %605, %597, %609 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %618 = waveamd.mma "mfma.f32.16x16x32.f16" %606, %598, %617 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %360 = wave.alloc() {align = 16 : i64, bytesize = 33792 : i64} : !wave.ptr<#wave.shared, f16>
+      %361 = wave.splat %31 : i32 -> !wave.simd<i32, 64>
+      %362 = wave.binary muli %148, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %363 = wave.binary muli %149, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %364 = wave.binary muli %150, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %365 = wave.binary muli %151, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %366 = wave.binary muli %152, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %367 = wave.binary muli %153, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %368 = wave.binary muli %154, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %369 = wave.binary muli %155, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %370 = wave.binary muli %156, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %371 = wave.binary muli %157, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %372 = wave.binary muli %158, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %373 = wave.binary muli %159, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %374 = wave.binary muli %160, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %375 = wave.binary muli %161, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %376 = wave.binary muli %162, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %377 = wave.binary muli %163, %361 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %378 = waveamd.make_buffer %arg3, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
+      %379 = wave.ptr_cast %360 : !wave.ptr<#wave.shared, f16> -> !wave.ptr<#wave.shared, i32>
+      %380 = wave.binary muli %193, %c66_i32 overflow<nsw> : i32, i32 -> i32
+      %381 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%362, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %382 = wave.assume %381 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %383 = wave.ptr_add %378, %382 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %384 = wave.ptr_add %379, %380 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %385 = waveamd.dma_load_lds %383 -> %384 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %386 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%363, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %387 = wave.assume %386 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %388 = wave.ptr_add %378, %387 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %389 = wave.binary addi %380, %c528_i32 overflow<nsw> : i32, i32 -> i32
+      %390 = wave.ptr_add %379, %389 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %391 = waveamd.dma_load_lds %388 -> %390 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %392 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%364, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %393 = wave.assume %392 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %394 = wave.ptr_add %378, %393 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %395 = wave.binary addi %380, %c1056_i32 overflow<nsw> : i32, i32 -> i32
+      %396 = wave.ptr_add %379, %395 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %397 = waveamd.dma_load_lds %394 -> %396 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %398 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%365, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %399 = wave.assume %398 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %400 = wave.ptr_add %378, %399 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %401 = wave.binary addi %380, %c1584_i32 overflow<nsw> : i32, i32 -> i32
+      %402 = wave.ptr_add %379, %401 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %403 = waveamd.dma_load_lds %400 -> %402 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %404 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%366, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %405 = wave.assume %404 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %406 = wave.ptr_add %378, %405 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %407 = wave.binary addi %380, %c2112_i32 overflow<nsw> : i32, i32 -> i32
+      %408 = wave.ptr_add %379, %407 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %409 = waveamd.dma_load_lds %406 -> %408 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %410 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%367, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %411 = wave.assume %410 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %412 = wave.ptr_add %378, %411 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %413 = wave.binary addi %380, %c2640_i32 overflow<nsw> : i32, i32 -> i32
+      %414 = wave.ptr_add %379, %413 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %415 = waveamd.dma_load_lds %412 -> %414 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %416 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%368, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %417 = wave.assume %416 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %418 = wave.ptr_add %378, %417 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %419 = wave.binary addi %380, %c3168_i32 overflow<nsw> : i32, i32 -> i32
+      %420 = wave.ptr_add %379, %419 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %421 = waveamd.dma_load_lds %418 -> %420 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %422 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%369, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %423 = wave.assume %422 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %424 = wave.ptr_add %378, %423 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %425 = wave.binary addi %380, %c3696_i32 overflow<nsw> : i32, i32 -> i32
+      %426 = wave.ptr_add %379, %425 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %427 = waveamd.dma_load_lds %424 -> %426 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %428 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%370, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %429 = wave.assume %428 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %430 = wave.ptr_add %378, %429 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %431 = wave.binary addi %380, %c4224_i32 overflow<nsw> : i32, i32 -> i32
+      %432 = wave.ptr_add %379, %431 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %433 = waveamd.dma_load_lds %430 -> %432 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %434 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%371, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %435 = wave.assume %434 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %436 = wave.ptr_add %378, %435 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %437 = wave.binary addi %380, %c4752_i32 overflow<nsw> : i32, i32 -> i32
+      %438 = wave.ptr_add %379, %437 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %439 = waveamd.dma_load_lds %436 -> %438 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %440 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%372, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %441 = wave.assume %440 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %442 = wave.ptr_add %378, %441 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %443 = wave.binary addi %380, %c5280_i32 overflow<nsw> : i32, i32 -> i32
+      %444 = wave.ptr_add %379, %443 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %445 = waveamd.dma_load_lds %442 -> %444 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %446 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%373, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %447 = wave.assume %446 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %448 = wave.ptr_add %378, %447 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %449 = wave.binary addi %380, %c5808_i32 overflow<nsw> : i32, i32 -> i32
+      %450 = wave.ptr_add %379, %449 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %451 = waveamd.dma_load_lds %448 -> %450 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %452 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%374, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %453 = wave.assume %452 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %454 = wave.ptr_add %378, %453 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %455 = wave.binary addi %380, %c6336_i32 overflow<nsw> : i32, i32 -> i32
+      %456 = wave.ptr_add %379, %455 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %457 = waveamd.dma_load_lds %454 -> %456 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %458 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%375, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %459 = wave.assume %458 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %460 = wave.ptr_add %378, %459 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %461 = wave.binary addi %380, %c6864_i32 overflow<nsw> : i32, i32 -> i32
+      %462 = wave.ptr_add %379, %461 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %463 = waveamd.dma_load_lds %460 -> %462 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %464 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%376, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %465 = wave.assume %464 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %466 = wave.ptr_add %378, %465 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %467 = wave.binary addi %380, %c7392_i32 overflow<nsw> : i32, i32 -> i32
+      %468 = wave.ptr_add %379, %467 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %469 = waveamd.dma_load_lds %466 -> %468 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %470 = wave.index_expr <"s0 + s1"> assuming [#wave.pred<"s0 + s1 >= 0">, #wave.pred<"-1073741822 + s0 + s1 <= 0">] ["s0", "s1"](%377, %166) : (!wave.simd<i32, 64>, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+      %471 = wave.assume %470 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741822 + x <= 0">] : !wave.simd<index, 64>
+      %472 = wave.ptr_add %378, %471 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %473 = wave.binary addi %380, %c7920_i32 overflow<nsw> : i32, i32 -> i32
+      %474 = wave.ptr_add %379, %473 : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
+      %475 = waveamd.dma_load_lds %472 -> %474 after %189 {bytes = 4 : i64} : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>, !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+      %476 = wave.join %385, %391, %397, %403, %409, %415, %421, %427, %433, %439, %445, %451, %457, %463, %469, %475 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %477 = waveamd.fragment_pack %359#0 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %478 = waveamd.fragment_pack %359#1 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %479 = waveamd.fragment_pack %359#2 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %480 = waveamd.fragment_pack %359#3 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %481 = waveamd.fragment_pack %359#4 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %482 = waveamd.fragment_pack %359#5 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %483 = waveamd.fragment_pack %359#6 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %484 = waveamd.fragment_pack %359#7 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %485 = waveamd.fragment_pack %359#8 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %486 = waveamd.fragment_pack %359#9 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %487 = waveamd.fragment_pack %359#10 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %488 = waveamd.fragment_pack %359#11 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %489 = waveamd.fragment_pack %359#12 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %490 = waveamd.fragment_pack %359#13 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %491 = waveamd.fragment_pack %359#14 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %492 = waveamd.fragment_pack %359#15 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %493 = waveamd.fragment_pack %359#16 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %494 = waveamd.fragment_pack %359#17 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %495 = waveamd.fragment_pack %359#18 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %496 = waveamd.fragment_pack %359#19 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %497 = waveamd.mma "mfma.f32.16x16x32.f16" %485, %477, %489 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %498 = waveamd.mma "mfma.f32.16x16x32.f16" %486, %478, %497 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %499 = waveamd.fragment_unpack %498 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %500 = waveamd.mma "mfma.f32.16x16x32.f16" %487, %477, %490 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %501 = waveamd.mma "mfma.f32.16x16x32.f16" %488, %478, %500 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %502 = waveamd.fragment_unpack %501 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %503 = waveamd.mma "mfma.f32.16x16x32.f16" %485, %479, %491 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %504 = waveamd.mma "mfma.f32.16x16x32.f16" %486, %480, %503 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %505 = waveamd.fragment_unpack %504 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %506 = waveamd.mma "mfma.f32.16x16x32.f16" %487, %479, %492 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %507 = waveamd.mma "mfma.f32.16x16x32.f16" %488, %480, %506 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %508 = waveamd.fragment_unpack %507 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %509 = waveamd.mma "mfma.f32.16x16x32.f16" %485, %481, %493 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %510 = waveamd.mma "mfma.f32.16x16x32.f16" %486, %482, %509 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %511 = waveamd.fragment_unpack %510 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %512 = waveamd.mma "mfma.f32.16x16x32.f16" %487, %481, %494 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %513 = waveamd.mma "mfma.f32.16x16x32.f16" %488, %482, %512 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %514 = waveamd.fragment_unpack %513 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %515 = waveamd.mma "mfma.f32.16x16x32.f16" %485, %483, %495 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %516 = waveamd.mma "mfma.f32.16x16x32.f16" %486, %484, %515 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %517 = waveamd.fragment_unpack %516 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %518 = waveamd.mma "mfma.f32.16x16x32.f16" %487, %483, %496 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %519 = waveamd.mma "mfma.f32.16x16x32.f16" %488, %484, %518 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %520 = waveamd.fragment_unpack %519 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %521 = wave.barrier %359#20, %476 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
+      %522 = wave.binary subi %170, %c2_i32 overflow<nsw> : i32, i32 -> i32
+      %523 = wave.binary remsi %522, %c3_i32 : i32, i32 -> i32
+      %524 = wave.binary muli %523, %c8448_i32 overflow<nsw> : i32, i32 -> i32
+      %525 = wave.ptr_add %171, %524 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
+      %526 = wave.barrier %359#21, %287 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
+      %527 = wave.join %304, %521, %526 : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %528 = wave.ptr_add %525, %288 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_30, %token_31 = wave.load %528 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %529 = wave.ptr_add %525, %290 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_32, %token_33 = wave.load %529 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %530 = wave.ptr_add %525, %292 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_34, %token_35 = wave.load %530 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %531 = wave.ptr_add %525, %294 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_36, %token_37 = wave.load %531 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %532 = wave.ptr_add %525, %296 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_38, %token_39 = wave.load %532 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %533 = wave.ptr_add %525, %298 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_40, %token_41 = wave.load %533 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %534 = wave.ptr_add %525, %300 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_42, %token_43 = wave.load %534 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %535 = wave.ptr_add %525, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_44, %token_45 = wave.load %535 after %527 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %536 = wave.join %token_31, %token_33, %token_35, %token_37, %token_39, %token_41, %token_43, %token_45 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %537 = wave.ptr_add %172, %524 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
+      %538 = wave.barrier %359#21, %287 : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
+      %539 = wave.join %357, %521, %538 : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %540 = wave.ptr_add %537, %305 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_46, %token_47 = waveamd.transpose_load %540 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %541 = wave.extract %value_46[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %542 = wave.extract %value_46[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %543 = wave.extract %value_46[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %544 = wave.extract %value_46[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %545 = wave.ptr_add %537, %311 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_48, %token_49 = waveamd.transpose_load %545 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %546 = wave.extract %value_48[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %547 = wave.extract %value_48[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %548 = wave.extract %value_48[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %549 = wave.extract %value_48[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %550 = wave.pack %541, %542, %543, %544, %546, %547, %548, %549 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %551 = wave.ptr_add %537, %318 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_50, %token_51 = waveamd.transpose_load %551 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %552 = wave.extract %value_50[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %553 = wave.extract %value_50[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %554 = wave.extract %value_50[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %555 = wave.extract %value_50[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %556 = wave.ptr_add %537, %324 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_52, %token_53 = waveamd.transpose_load %556 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %557 = wave.extract %value_52[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %558 = wave.extract %value_52[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %559 = wave.extract %value_52[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %560 = wave.extract %value_52[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %561 = wave.pack %552, %553, %554, %555, %557, %558, %559, %560 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %562 = wave.ptr_add %537, %331 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_54, %token_55 = waveamd.transpose_load %562 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %563 = wave.extract %value_54[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %564 = wave.extract %value_54[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %565 = wave.extract %value_54[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %566 = wave.extract %value_54[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %567 = wave.ptr_add %537, %337 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_56, %token_57 = waveamd.transpose_load %567 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %568 = wave.extract %value_56[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %569 = wave.extract %value_56[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %570 = wave.extract %value_56[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %571 = wave.extract %value_56[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %572 = wave.pack %563, %564, %565, %566, %568, %569, %570, %571 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %573 = wave.ptr_add %537, %344 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_58, %token_59 = waveamd.transpose_load %573 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %574 = wave.extract %value_58[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %575 = wave.extract %value_58[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %576 = wave.extract %value_58[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %577 = wave.extract %value_58[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %578 = wave.ptr_add %537, %350 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_60, %token_61 = waveamd.transpose_load %578 after %539 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %579 = wave.extract %value_60[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %580 = wave.extract %value_60[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %581 = wave.extract %value_60[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %582 = wave.extract %value_60[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %583 = wave.pack %574, %575, %576, %577, %579, %580, %581, %582 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %584 = wave.join %token_47, %token_49, %token_51, %token_53, %token_55, %token_57, %token_59, %token_61 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %585 = waveamd.fragment_pack %value_30 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %586 = waveamd.fragment_pack %value_32 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %587 = waveamd.fragment_pack %value_34 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %588 = waveamd.fragment_pack %value_36 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %589 = waveamd.fragment_pack %value_38 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %590 = waveamd.fragment_pack %value_40 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %591 = waveamd.fragment_pack %value_42 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %592 = waveamd.fragment_pack %value_44 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %593 = waveamd.fragment_pack %550 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %594 = waveamd.fragment_pack %561 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %595 = waveamd.fragment_pack %572 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %596 = waveamd.fragment_pack %583 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %597 = waveamd.fragment_pack %499 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %598 = waveamd.fragment_pack %502 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %599 = waveamd.fragment_pack %505 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %600 = waveamd.fragment_pack %508 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %601 = waveamd.fragment_pack %511 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %602 = waveamd.fragment_pack %514 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %603 = waveamd.fragment_pack %517 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %604 = waveamd.fragment_pack %520 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %605 = waveamd.mma "mfma.f32.16x16x32.f16" %593, %585, %597 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %606 = waveamd.mma "mfma.f32.16x16x32.f16" %594, %586, %605 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %607 = waveamd.fragment_unpack %606 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %608 = waveamd.mma "mfma.f32.16x16x32.f16" %595, %585, %598 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %609 = waveamd.mma "mfma.f32.16x16x32.f16" %596, %586, %608 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %610 = waveamd.fragment_unpack %609 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %611 = waveamd.mma "mfma.f32.16x16x32.f16" %593, %587, %599 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %612 = waveamd.mma "mfma.f32.16x16x32.f16" %594, %588, %611 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %613 = waveamd.fragment_unpack %612 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %614 = waveamd.mma "mfma.f32.16x16x32.f16" %595, %587, %600 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %615 = waveamd.mma "mfma.f32.16x16x32.f16" %596, %588, %614 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %616 = waveamd.fragment_unpack %615 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %617 = waveamd.mma "mfma.f32.16x16x32.f16" %593, %589, %601 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %618 = waveamd.mma "mfma.f32.16x16x32.f16" %594, %590, %617 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %619 = waveamd.fragment_unpack %618 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %620 = waveamd.mma "mfma.f32.16x16x32.f16" %607, %597, %610 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %621 = waveamd.mma "mfma.f32.16x16x32.f16" %608, %598, %620 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %620 = waveamd.mma "mfma.f32.16x16x32.f16" %595, %589, %602 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %621 = waveamd.mma "mfma.f32.16x16x32.f16" %596, %590, %620 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %622 = waveamd.fragment_unpack %621 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %623 = waveamd.mma "mfma.f32.16x16x32.f16" %605, %599, %611 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %624 = waveamd.mma "mfma.f32.16x16x32.f16" %606, %600, %623 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %623 = waveamd.mma "mfma.f32.16x16x32.f16" %593, %591, %603 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %624 = waveamd.mma "mfma.f32.16x16x32.f16" %594, %592, %623 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %625 = waveamd.fragment_unpack %624 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %626 = waveamd.mma "mfma.f32.16x16x32.f16" %607, %599, %612 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %627 = waveamd.mma "mfma.f32.16x16x32.f16" %608, %600, %626 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %626 = waveamd.mma "mfma.f32.16x16x32.f16" %595, %591, %604 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %627 = waveamd.mma "mfma.f32.16x16x32.f16" %596, %592, %626 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %628 = waveamd.fragment_unpack %627 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %629 = waveamd.mma "mfma.f32.16x16x32.f16" %605, %601, %613 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %630 = waveamd.mma "mfma.f32.16x16x32.f16" %606, %602, %629 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %631 = waveamd.fragment_unpack %630 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %632 = waveamd.mma "mfma.f32.16x16x32.f16" %607, %601, %614 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %633 = waveamd.mma "mfma.f32.16x16x32.f16" %608, %602, %632 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %634 = waveamd.fragment_unpack %633 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %635 = waveamd.mma "mfma.f32.16x16x32.f16" %605, %603, %615 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %636 = waveamd.mma "mfma.f32.16x16x32.f16" %606, %604, %635 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %637 = waveamd.fragment_unpack %636 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %638 = waveamd.mma "mfma.f32.16x16x32.f16" %607, %603, %616 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %639 = waveamd.mma "mfma.f32.16x16x32.f16" %608, %604, %638 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %640 = waveamd.fragment_unpack %639 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %641 = wave.binary addi %170, %c-1_i32 overflow<nsw> : i32, i32 -> i32
-      %642 = wave.binary remsi %641, %c3_i32 : i32, i32 -> i32
-      %643 = wave.binary muli %642, %c8448_i32 overflow<nsw> : i32, i32 -> i32
-      %644 = wave.ptr_add %171, %643 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
-      %645 = wave.join %540, %535 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %646 = wave.ptr_add %644, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_62, %token_63 = wave.load %646 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %647 = wave.ptr_add %644, %304 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_64, %token_65 = wave.load %647 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %648 = wave.ptr_add %644, %306 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_66, %token_67 = wave.load %648 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %649 = wave.ptr_add %644, %308 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_68, %token_69 = wave.load %649 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %650 = wave.ptr_add %644, %310 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_70, %token_71 = wave.load %650 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %651 = wave.ptr_add %644, %312 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_72, %token_73 = wave.load %651 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %652 = wave.ptr_add %644, %314 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_74, %token_75 = wave.load %652 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %653 = wave.ptr_add %644, %316 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_76, %token_77 = wave.load %653 after %645 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
-      %654 = wave.ptr_add %172, %643 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
-      %655 = wave.join %551, %535 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-      %656 = wave.ptr_add %654, %319 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_78, %token_79 = waveamd.transpose_load %656 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %657 = wave.extract %value_78[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %658 = wave.extract %value_78[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %659 = wave.extract %value_78[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %660 = wave.extract %value_78[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %661 = wave.ptr_add %654, %325 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_80, %token_81 = waveamd.transpose_load %661 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %662 = wave.extract %value_80[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %663 = wave.extract %value_80[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %664 = wave.extract %value_80[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %665 = wave.extract %value_80[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %666 = wave.pack %657, %658, %659, %660, %662, %663, %664, %665 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %667 = wave.ptr_add %654, %332 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_82, %token_83 = waveamd.transpose_load %667 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %668 = wave.extract %value_82[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %669 = wave.extract %value_82[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %670 = wave.extract %value_82[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %671 = wave.extract %value_82[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %672 = wave.ptr_add %654, %338 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_84, %token_85 = waveamd.transpose_load %672 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %673 = wave.extract %value_84[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %674 = wave.extract %value_84[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %675 = wave.extract %value_84[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %676 = wave.extract %value_84[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %677 = wave.pack %668, %669, %670, %671, %673, %674, %675, %676 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %678 = wave.ptr_add %654, %345 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_86, %token_87 = waveamd.transpose_load %678 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %679 = wave.extract %value_86[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %680 = wave.extract %value_86[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %681 = wave.extract %value_86[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %682 = wave.extract %value_86[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %683 = wave.ptr_add %654, %351 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_88, %token_89 = waveamd.transpose_load %683 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %684 = wave.extract %value_88[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %685 = wave.extract %value_88[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %686 = wave.extract %value_88[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %687 = wave.extract %value_88[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %688 = wave.pack %679, %680, %681, %682, %684, %685, %686, %687 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %689 = wave.ptr_add %654, %358 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_90, %token_91 = waveamd.transpose_load %689 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %690 = wave.extract %value_90[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %691 = wave.extract %value_90[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %692 = wave.extract %value_90[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %693 = wave.extract %value_90[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %694 = wave.ptr_add %654, %364 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_92, %token_93 = waveamd.transpose_load %694 after %655 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %695 = wave.extract %value_92[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %696 = wave.extract %value_92[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %697 = wave.extract %value_92[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %698 = wave.extract %value_92[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
-      %699 = wave.pack %690, %691, %692, %693, %695, %696, %697, %698 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
-      %700 = waveamd.fragment_pack %value_62 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %701 = waveamd.fragment_pack %value_64 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %702 = waveamd.fragment_pack %value_66 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %703 = waveamd.fragment_pack %value_68 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %704 = waveamd.fragment_pack %value_70 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %705 = waveamd.fragment_pack %value_72 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %706 = waveamd.fragment_pack %value_74 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %707 = waveamd.fragment_pack %value_76 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
-      %708 = waveamd.fragment_pack %666 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %709 = waveamd.fragment_pack %677 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %710 = waveamd.fragment_pack %688 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %711 = waveamd.fragment_pack %699 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
-      %712 = waveamd.fragment_pack %619 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %713 = waveamd.fragment_pack %622 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %714 = waveamd.fragment_pack %625 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %715 = waveamd.fragment_pack %628 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %716 = waveamd.fragment_pack %631 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %717 = waveamd.fragment_pack %634 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %718 = waveamd.fragment_pack %637 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %719 = waveamd.fragment_pack %640 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %720 = waveamd.mma "mfma.f32.16x16x32.f16" %708, %700, %712 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %721 = waveamd.mma "mfma.f32.16x16x32.f16" %709, %701, %720 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %629 = wave.binary addi %170, %c-1_i32 overflow<nsw> : i32, i32 -> i32
+      %630 = wave.binary remsi %629, %c3_i32 : i32, i32 -> i32
+      %631 = wave.binary muli %630, %c8448_i32 overflow<nsw> : i32, i32 -> i32
+      %632 = wave.ptr_add %171, %631 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
+      %633 = wave.join %526, %304, %536 : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %634 = wave.ptr_add %632, %288 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_62, %token_63 = wave.load %634 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %635 = wave.ptr_add %632, %290 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_64, %token_65 = wave.load %635 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %636 = wave.ptr_add %632, %292 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_66, %token_67 = wave.load %636 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %637 = wave.ptr_add %632, %294 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_68, %token_69 = wave.load %637 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %638 = wave.ptr_add %632, %296 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_70, %token_71 = wave.load %638 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %639 = wave.ptr_add %632, %298 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_72, %token_73 = wave.load %639 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %640 = wave.ptr_add %632, %300 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_74, %token_75 = wave.load %640 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %641 = wave.ptr_add %632, %302 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_76, %token_77 = wave.load %641 after %633 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<8xf16>, 64>, !wave.mem.token)
+      %642 = wave.ptr_add %172, %631 : !wave.ptr<#wave.shared, f16>, i32 -> !wave.ptr<#wave.shared, f16>
+      %643 = wave.join %538, %357, %584 : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      %644 = wave.ptr_add %642, %305 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_78, %token_79 = waveamd.transpose_load %644 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %645 = wave.extract %value_78[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %646 = wave.extract %value_78[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %647 = wave.extract %value_78[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %648 = wave.extract %value_78[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %649 = wave.ptr_add %642, %311 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_80, %token_81 = waveamd.transpose_load %649 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %650 = wave.extract %value_80[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %651 = wave.extract %value_80[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %652 = wave.extract %value_80[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %653 = wave.extract %value_80[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %654 = wave.pack %645, %646, %647, %648, %650, %651, %652, %653 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %655 = wave.ptr_add %642, %318 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_82, %token_83 = waveamd.transpose_load %655 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %656 = wave.extract %value_82[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %657 = wave.extract %value_82[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %658 = wave.extract %value_82[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %659 = wave.extract %value_82[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %660 = wave.ptr_add %642, %324 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_84, %token_85 = waveamd.transpose_load %660 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %661 = wave.extract %value_84[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %662 = wave.extract %value_84[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %663 = wave.extract %value_84[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %664 = wave.extract %value_84[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %665 = wave.pack %656, %657, %658, %659, %661, %662, %663, %664 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %666 = wave.ptr_add %642, %331 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_86, %token_87 = waveamd.transpose_load %666 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %667 = wave.extract %value_86[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %668 = wave.extract %value_86[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %669 = wave.extract %value_86[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %670 = wave.extract %value_86[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %671 = wave.ptr_add %642, %337 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_88, %token_89 = waveamd.transpose_load %671 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %672 = wave.extract %value_88[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %673 = wave.extract %value_88[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %674 = wave.extract %value_88[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %675 = wave.extract %value_88[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %676 = wave.pack %667, %668, %669, %670, %672, %673, %674, %675 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %677 = wave.ptr_add %642, %344 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_90, %token_91 = waveamd.transpose_load %677 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %678 = wave.extract %value_90[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %679 = wave.extract %value_90[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %680 = wave.extract %value_90[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %681 = wave.extract %value_90[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %682 = wave.ptr_add %642, %350 : !wave.ptr<#wave.shared, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_92, %token_93 = waveamd.transpose_load %682 after %643 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %683 = wave.extract %value_92[0] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %684 = wave.extract %value_92[1] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %685 = wave.extract %value_92[2] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %686 = wave.extract %value_92[3] : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+      %687 = wave.pack %678, %679, %680, %681, %683, %684, %685, %686 : !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<vector<8xf16>, 64>
+      %688 = waveamd.fragment_pack %value_62 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %689 = waveamd.fragment_pack %value_64 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %690 = waveamd.fragment_pack %value_66 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %691 = waveamd.fragment_pack %value_68 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %692 = waveamd.fragment_pack %value_70 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %693 = waveamd.fragment_pack %value_72 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %694 = waveamd.fragment_pack %value_74 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %695 = waveamd.fragment_pack %value_76 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+      %696 = waveamd.fragment_pack %654 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %697 = waveamd.fragment_pack %665 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %698 = waveamd.fragment_pack %676 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %699 = waveamd.fragment_pack %687 : !wave.simd<vector<8xf16>, 64> -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+      %700 = waveamd.fragment_pack %607 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %701 = waveamd.fragment_pack %610 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %702 = waveamd.fragment_pack %613 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %703 = waveamd.fragment_pack %616 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %704 = waveamd.fragment_pack %619 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %705 = waveamd.fragment_pack %622 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %706 = waveamd.fragment_pack %625 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %707 = waveamd.fragment_pack %628 : !wave.simd<vector<4xf32>, 64> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %708 = waveamd.mma "mfma.f32.16x16x32.f16" %696, %688, %700 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %709 = waveamd.mma "mfma.f32.16x16x32.f16" %697, %689, %708 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %710 = waveamd.fragment_unpack %709 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %711 = waveamd.mma "mfma.f32.16x16x32.f16" %698, %688, %701 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %712 = waveamd.mma "mfma.f32.16x16x32.f16" %699, %689, %711 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %713 = waveamd.fragment_unpack %712 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %714 = waveamd.mma "mfma.f32.16x16x32.f16" %696, %690, %702 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %715 = waveamd.mma "mfma.f32.16x16x32.f16" %697, %691, %714 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %716 = waveamd.fragment_unpack %715 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %717 = waveamd.mma "mfma.f32.16x16x32.f16" %698, %690, %703 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %718 = waveamd.mma "mfma.f32.16x16x32.f16" %699, %691, %717 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %719 = waveamd.fragment_unpack %718 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
+      %720 = waveamd.mma "mfma.f32.16x16x32.f16" %696, %692, %704 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %721 = waveamd.mma "mfma.f32.16x16x32.f16" %697, %693, %720 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %722 = waveamd.fragment_unpack %721 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %723 = waveamd.mma "mfma.f32.16x16x32.f16" %710, %700, %713 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %724 = waveamd.mma "mfma.f32.16x16x32.f16" %711, %701, %723 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %723 = waveamd.mma "mfma.f32.16x16x32.f16" %698, %692, %705 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %724 = waveamd.mma "mfma.f32.16x16x32.f16" %699, %693, %723 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %725 = waveamd.fragment_unpack %724 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %726 = waveamd.mma "mfma.f32.16x16x32.f16" %708, %702, %714 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %727 = waveamd.mma "mfma.f32.16x16x32.f16" %709, %703, %726 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %726 = waveamd.mma "mfma.f32.16x16x32.f16" %696, %694, %706 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %727 = waveamd.mma "mfma.f32.16x16x32.f16" %697, %695, %726 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %728 = waveamd.fragment_unpack %727 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %729 = waveamd.mma "mfma.f32.16x16x32.f16" %710, %702, %715 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %730 = waveamd.mma "mfma.f32.16x16x32.f16" %711, %703, %729 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %729 = waveamd.mma "mfma.f32.16x16x32.f16" %698, %694, %707 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+      %730 = waveamd.mma "mfma.f32.16x16x32.f16" %699, %695, %729 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
       %731 = waveamd.fragment_unpack %730 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %732 = waveamd.mma "mfma.f32.16x16x32.f16" %708, %704, %716 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %733 = waveamd.mma "mfma.f32.16x16x32.f16" %709, %705, %732 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %734 = waveamd.fragment_unpack %733 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %735 = waveamd.mma "mfma.f32.16x16x32.f16" %710, %704, %717 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %736 = waveamd.mma "mfma.f32.16x16x32.f16" %711, %705, %735 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %737 = waveamd.fragment_unpack %736 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %738 = waveamd.mma "mfma.f32.16x16x32.f16" %708, %706, %718 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %739 = waveamd.mma "mfma.f32.16x16x32.f16" %709, %707, %738 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %740 = waveamd.fragment_unpack %739 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %741 = waveamd.mma "mfma.f32.16x16x32.f16" %710, %706, %719 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %742 = waveamd.mma "mfma.f32.16x16x32.f16" %711, %707, %741 : !waveamd.fragment<0, f16, 16, 16, 64, 4>, !waveamd.fragment<1, f16, 16, 16, 64, 4>, !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
-      %743 = waveamd.fragment_unpack %742 : !waveamd.fragment<2, f32, 16, 16, 64, 4> -> !wave.simd<vector<4xf32>, 64>
-      %744 = waveamd.make_buffer %arg2, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
-      %745 = wave.assume %167 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %746 = wave.ptr_add %744, %745 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %value_94, %token_95 = wave.load %746 : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %747 = wave.assume %168 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %748 = wave.ptr_add %744, %747 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %value_96, %token_97 = wave.load %748 : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %749 = wave.cast fpconvert %value_94 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %750 = wave.cast fpconvert %value_96 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %751 = wave.fadd %722, %749 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %752 = wave.fadd %725, %750 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %753 = wave.fadd %728, %749 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %754 = wave.fadd %731, %750 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %755 = wave.fadd %734, %749 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %756 = wave.fadd %737, %750 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %757 = wave.fadd %740, %749 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %758 = wave.fadd %743, %750 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %759 = wave.binary xori %100, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %760 = wave.binary xori %759, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %761 = wave.binary xori %760, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %762 = wave.binary xori %761, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %763 = wave.binary muli %58, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %764 = wave.binary muli %62, %26 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %765 = wave.binary xori %763, %764 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %766 = wave.binary muli %66, %24 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %767 = wave.binary xori %765, %766 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %768 = wave.binary muli %69, %23 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %769 = wave.binary xori %767, %768 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %770 = wave.binary remui %769, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %771 = wave.binary divui %769, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %732 = waveamd.make_buffer %arg2, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
+      %733 = wave.assume %167 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %734 = wave.ptr_add %732, %733 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %value_94, %token_95 = wave.load %734 : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %735 = wave.assume %168 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %736 = wave.ptr_add %732, %735 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %value_96, %token_97 = wave.load %736 : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %737 = wave.cast fpconvert %value_94 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %738 = wave.cast fpconvert %value_96 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %739 = wave.fadd %710, %737 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %740 = wave.fadd %713, %738 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %741 = wave.fadd %716, %737 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %742 = wave.fadd %719, %738 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %743 = wave.fadd %722, %737 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %744 = wave.fadd %725, %738 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %745 = wave.fadd %728, %737 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %746 = wave.fadd %731, %738 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %747 = wave.binary xori %100, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %748 = wave.binary xori %747, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %749 = wave.binary xori %748, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %750 = wave.binary xori %749, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %751 = wave.binary muli %58, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %752 = wave.binary muli %62, %26 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %753 = wave.binary xori %751, %752 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %754 = wave.binary muli %66, %24 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %755 = wave.binary xori %753, %754 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %756 = wave.binary muli %69, %23 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %757 = wave.binary xori %755, %756 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %758 = wave.binary remui %757, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %759 = wave.binary divui %757, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %760 = wave.binary remui %759, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %761 = wave.binary muli %760, %25 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %762 = wave.binary addi %758, %761 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %763 = wave.binary divui %757, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %764 = wave.binary remui %763, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %765 = wave.binary muli %764, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %766 = wave.binary addi %762, %765 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %767 = wave.binary divui %757, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %768 = wave.binary remui %767, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %769 = wave.binary muli %768, %26 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %770 = wave.binary addi %766, %769 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %771 = wave.binary divui %757, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %772 = wave.binary remui %771, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %773 = wave.binary muli %772, %25 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %773 = wave.binary muli %772, %24 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %774 = wave.binary addi %770, %773 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %775 = wave.binary divui %769, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %775 = wave.binary divui %757, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %776 = wave.binary remui %775, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %777 = wave.binary muli %776, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %777 = wave.binary muli %776, %23 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %778 = wave.binary addi %774, %777 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %779 = wave.binary divui %769, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %779 = wave.binary divui %757, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %780 = wave.binary remui %779, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %781 = wave.binary muli %780, %26 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %781 = wave.binary muli %780, %22 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %782 = wave.binary addi %778, %781 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %783 = wave.binary divui %769, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %784 = wave.binary remui %783, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %785 = wave.binary muli %784, %24 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %786 = wave.binary addi %782, %785 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %787 = wave.binary divui %769, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %788 = wave.binary remui %787, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %789 = wave.binary muli %788, %23 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %790 = wave.binary addi %786, %789 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %791 = wave.binary divui %769, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %792 = wave.binary remui %791, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %793 = wave.binary muli %792, %22 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %794 = wave.binary addi %790, %793 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %795 = wave.binary remui %762, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %796 = wave.binary muli %795, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %797 = wave.binary addi %794, %796 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %798 = wave.binary divui %762, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %783 = wave.binary remui %750, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %784 = wave.binary muli %783, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %785 = wave.binary addi %782, %784 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %786 = wave.binary divui %750, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %787 = wave.binary remui %786, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %788 = wave.binary muli %787, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %789 = wave.binary addi %785, %788 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %790 = wave.binary divui %750, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %791 = wave.binary remui %790, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %792 = wave.binary muli %791, %7 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %793 = wave.binary addi %789, %792 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %794 = wave.binary divui %750, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %795 = wave.binary remui %794, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %796 = wave.binary muli %795, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %797 = wave.binary addi %793, %796 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %798 = wave.binary divui %750, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %799 = wave.binary remui %798, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %800 = wave.binary muli %799, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %800 = wave.binary muli %799, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %801 = wave.binary addi %797, %800 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %802 = wave.binary divui %762, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %802 = wave.binary divui %750, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %803 = wave.binary remui %802, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %804 = wave.binary muli %803, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %804 = wave.binary muli %803, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %805 = wave.binary addi %801, %804 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %806 = wave.binary divui %762, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %806 = wave.binary divui %750, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %807 = wave.binary remui %806, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %808 = wave.binary muli %807, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %808 = wave.binary muli %807, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %809 = wave.binary addi %805, %808 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %810 = wave.binary divui %762, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %811 = wave.binary remui %810, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %812 = wave.binary muli %811, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %813 = wave.binary addi %809, %812 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %814 = wave.binary divui %762, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %815 = wave.binary remui %814, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %816 = wave.binary muli %815, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %817 = wave.binary addi %813, %816 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %818 = wave.binary divui %762, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %819 = wave.binary remui %818, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %820 = wave.binary muli %819, %2 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %821 = wave.binary addi %817, %820 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %822 = wave.binary divui %821, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %823 = wave.binary muli %822, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %824 = wave.binary addi %821, %823 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %825 = wave.assume %824 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %826 = wave.binary xori %22, %763 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %827 = wave.binary xori %826, %764 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %828 = wave.binary xori %827, %766 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %829 = wave.binary xori %828, %768 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %830 = wave.binary remui %829, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %831 = wave.binary divui %829, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %810 = wave.binary divui %809, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %811 = wave.binary muli %810, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %812 = wave.binary addi %809, %811 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %813 = wave.assume %812 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %814 = wave.binary xori %22, %751 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %815 = wave.binary xori %814, %752 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %816 = wave.binary xori %815, %754 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %817 = wave.binary xori %816, %756 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %818 = wave.binary remui %817, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %819 = wave.binary divui %817, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %820 = wave.binary remui %819, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %821 = wave.binary muli %820, %25 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %822 = wave.binary addi %818, %821 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %823 = wave.binary divui %817, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %824 = wave.binary remui %823, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %825 = wave.binary muli %824, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %826 = wave.binary addi %822, %825 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %827 = wave.binary divui %817, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %828 = wave.binary remui %827, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %829 = wave.binary muli %828, %26 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %830 = wave.binary addi %826, %829 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %831 = wave.binary divui %817, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %832 = wave.binary remui %831, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %833 = wave.binary muli %832, %25 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %833 = wave.binary muli %832, %24 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %834 = wave.binary addi %830, %833 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %835 = wave.binary divui %829, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %835 = wave.binary divui %817, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %836 = wave.binary remui %835, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %837 = wave.binary muli %836, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %837 = wave.binary muli %836, %23 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %838 = wave.binary addi %834, %837 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %839 = wave.binary divui %829, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %839 = wave.binary divui %817, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %840 = wave.binary remui %839, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %841 = wave.binary muli %840, %26 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %841 = wave.binary muli %840, %22 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %842 = wave.binary addi %838, %841 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %843 = wave.binary divui %829, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %844 = wave.binary remui %843, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %845 = wave.binary muli %844, %24 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %846 = wave.binary addi %842, %845 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %847 = wave.binary divui %829, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %848 = wave.binary remui %847, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %849 = wave.binary muli %848, %23 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %850 = wave.binary addi %846, %849 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %851 = wave.binary divui %829, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %852 = wave.binary remui %851, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %853 = wave.binary muli %852, %22 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %854 = wave.binary addi %850, %853 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %855 = wave.binary addi %854, %796 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %856 = wave.binary addi %855, %800 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %857 = wave.binary addi %856, %804 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %858 = wave.binary addi %857, %808 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %859 = wave.binary addi %858, %812 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %860 = wave.binary addi %859, %816 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %861 = wave.binary addi %860, %820 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %862 = wave.binary divui %861, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %863 = wave.binary muli %862, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %864 = wave.binary addi %861, %863 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %865 = wave.assume %864 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %866 = wave.binary xori %23, %100 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %867 = wave.binary xori %866, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %868 = wave.binary xori %867, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %869 = wave.binary xori %868, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %870 = wave.binary xori %869, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %843 = wave.binary addi %842, %784 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %844 = wave.binary addi %843, %788 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %845 = wave.binary addi %844, %792 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %846 = wave.binary addi %845, %796 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %847 = wave.binary addi %846, %800 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %848 = wave.binary addi %847, %804 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %849 = wave.binary addi %848, %808 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %850 = wave.binary divui %849, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %851 = wave.binary muli %850, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %852 = wave.binary addi %849, %851 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %853 = wave.assume %852 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %854 = wave.binary xori %23, %100 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %855 = wave.binary xori %854, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %856 = wave.binary xori %855, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %857 = wave.binary xori %856, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %858 = wave.binary xori %857, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %859 = wave.binary remui %858, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %860 = wave.binary muli %859, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %861 = wave.binary addi %782, %860 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %862 = wave.binary divui %858, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %863 = wave.binary remui %862, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %864 = wave.binary muli %863, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %865 = wave.binary addi %861, %864 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %866 = wave.binary divui %858, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %867 = wave.binary remui %866, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %868 = wave.binary muli %867, %7 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %869 = wave.binary addi %865, %868 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %870 = wave.binary divui %858, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %871 = wave.binary remui %870, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %872 = wave.binary muli %871, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %873 = wave.binary addi %794, %872 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %874 = wave.binary divui %870, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %872 = wave.binary muli %871, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %873 = wave.binary addi %869, %872 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %874 = wave.binary divui %858, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %875 = wave.binary remui %874, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %876 = wave.binary muli %875, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %876 = wave.binary muli %875, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %877 = wave.binary addi %873, %876 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %878 = wave.binary divui %870, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %878 = wave.binary divui %858, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %879 = wave.binary remui %878, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %880 = wave.binary muli %879, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %880 = wave.binary muli %879, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %881 = wave.binary addi %877, %880 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %882 = wave.binary divui %870, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %882 = wave.binary divui %858, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %883 = wave.binary remui %882, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %884 = wave.binary muli %883, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %884 = wave.binary muli %883, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %885 = wave.binary addi %881, %884 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %886 = wave.binary divui %870, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %887 = wave.binary remui %886, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %888 = wave.binary muli %887, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %889 = wave.binary addi %885, %888 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %890 = wave.binary divui %870, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %891 = wave.binary remui %890, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %892 = wave.binary muli %891, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %893 = wave.binary addi %889, %892 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %894 = wave.binary divui %870, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %895 = wave.binary remui %894, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %896 = wave.binary muli %895, %2 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %897 = wave.binary addi %893, %896 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %898 = wave.binary divui %897, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %899 = wave.binary muli %898, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %900 = wave.binary addi %897, %899 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %901 = wave.assume %900 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %902 = wave.binary addi %854, %872 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %903 = wave.binary addi %902, %876 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %904 = wave.binary addi %903, %880 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %905 = wave.binary addi %904, %884 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %906 = wave.binary addi %905, %888 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %907 = wave.binary addi %906, %892 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %908 = wave.binary addi %907, %896 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %909 = wave.binary divui %908, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %910 = wave.binary muli %909, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %911 = wave.binary addi %908, %910 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %912 = wave.assume %911 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %913 = wave.binary xori %22, %100 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %914 = wave.binary xori %913, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %915 = wave.binary xori %914, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %916 = wave.binary xori %915, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %917 = wave.binary xori %916, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %886 = wave.binary divui %885, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %887 = wave.binary muli %886, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %888 = wave.binary addi %885, %887 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %889 = wave.assume %888 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %890 = wave.binary addi %842, %860 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %891 = wave.binary addi %890, %864 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %892 = wave.binary addi %891, %868 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %893 = wave.binary addi %892, %872 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %894 = wave.binary addi %893, %876 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %895 = wave.binary addi %894, %880 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %896 = wave.binary addi %895, %884 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %897 = wave.binary divui %896, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %898 = wave.binary muli %897, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %899 = wave.binary addi %896, %898 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %900 = wave.assume %899 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %901 = wave.binary xori %22, %100 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %902 = wave.binary xori %901, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %903 = wave.binary xori %902, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %904 = wave.binary xori %903, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %905 = wave.binary xori %904, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %906 = wave.binary remui %905, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %907 = wave.binary muli %906, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %908 = wave.binary addi %782, %907 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %909 = wave.binary divui %905, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %910 = wave.binary remui %909, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %911 = wave.binary muli %910, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %912 = wave.binary addi %908, %911 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %913 = wave.binary divui %905, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %914 = wave.binary remui %913, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %915 = wave.binary muli %914, %7 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %916 = wave.binary addi %912, %915 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %917 = wave.binary divui %905, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %918 = wave.binary remui %917, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %919 = wave.binary muli %918, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %920 = wave.binary addi %794, %919 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %921 = wave.binary divui %917, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %919 = wave.binary muli %918, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %920 = wave.binary addi %916, %919 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %921 = wave.binary divui %905, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %922 = wave.binary remui %921, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %923 = wave.binary muli %922, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %923 = wave.binary muli %922, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %924 = wave.binary addi %920, %923 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %925 = wave.binary divui %917, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %925 = wave.binary divui %905, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %926 = wave.binary remui %925, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %927 = wave.binary muli %926, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %927 = wave.binary muli %926, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %928 = wave.binary addi %924, %927 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %929 = wave.binary divui %917, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %929 = wave.binary divui %905, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %930 = wave.binary remui %929, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %931 = wave.binary muli %930, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %931 = wave.binary muli %930, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %932 = wave.binary addi %928, %931 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %933 = wave.binary divui %917, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %934 = wave.binary remui %933, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %935 = wave.binary muli %934, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %936 = wave.binary addi %932, %935 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %937 = wave.binary divui %917, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %938 = wave.binary remui %937, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %939 = wave.binary muli %938, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %940 = wave.binary addi %936, %939 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %941 = wave.binary divui %917, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %942 = wave.binary remui %941, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %943 = wave.binary muli %942, %2 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %944 = wave.binary addi %940, %943 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %945 = wave.binary divui %944, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %946 = wave.binary muli %945, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %947 = wave.binary addi %944, %946 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %948 = wave.assume %947 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %949 = wave.binary addi %854, %919 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %950 = wave.binary addi %949, %923 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %951 = wave.binary addi %950, %927 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %952 = wave.binary addi %951, %931 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %953 = wave.binary addi %952, %935 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %954 = wave.binary addi %953, %939 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %955 = wave.binary addi %954, %943 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %956 = wave.binary divui %955, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %957 = wave.binary muli %956, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %958 = wave.binary addi %955, %957 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %959 = wave.assume %958 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %960 = wave.binary xori %11, %100 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %961 = wave.binary xori %960, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %962 = wave.binary xori %961, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %963 = wave.binary xori %962, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %964 = wave.binary xori %963, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %933 = wave.binary divui %932, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %934 = wave.binary muli %933, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %935 = wave.binary addi %932, %934 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %936 = wave.assume %935 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %937 = wave.binary addi %842, %907 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %938 = wave.binary addi %937, %911 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %939 = wave.binary addi %938, %915 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %940 = wave.binary addi %939, %919 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %941 = wave.binary addi %940, %923 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %942 = wave.binary addi %941, %927 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %943 = wave.binary addi %942, %931 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %944 = wave.binary divui %943, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %945 = wave.binary muli %944, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %946 = wave.binary addi %943, %945 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %947 = wave.assume %946 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %948 = wave.binary xori %11, %100 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %949 = wave.binary xori %948, %103 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %950 = wave.binary xori %949, %107 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %951 = wave.binary xori %950, %109 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %952 = wave.binary xori %951, %111 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %953 = wave.binary remui %952, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %954 = wave.binary muli %953, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %955 = wave.binary addi %782, %954 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %956 = wave.binary divui %952, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %957 = wave.binary remui %956, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %958 = wave.binary muli %957, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %959 = wave.binary addi %955, %958 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %960 = wave.binary divui %952, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %961 = wave.binary remui %960, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %962 = wave.binary muli %961, %7 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %963 = wave.binary addi %959, %962 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %964 = wave.binary divui %952, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %965 = wave.binary remui %964, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %966 = wave.binary muli %965, %21 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %967 = wave.binary addi %794, %966 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %968 = wave.binary divui %964, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %966 = wave.binary muli %965, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %967 = wave.binary addi %963, %966 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %968 = wave.binary divui %952, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %969 = wave.binary remui %968, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %970 = wave.binary muli %969, %20 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %970 = wave.binary muli %969, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %971 = wave.binary addi %967, %970 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %972 = wave.binary divui %964, %19 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %972 = wave.binary divui %952, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %973 = wave.binary remui %972, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %974 = wave.binary muli %973, %6 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %974 = wave.binary muli %973, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %975 = wave.binary addi %971, %974 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %976 = wave.binary divui %964, %26 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %976 = wave.binary divui %952, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %977 = wave.binary remui %976, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %978 = wave.binary muli %977, %5 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %978 = wave.binary muli %977, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
       %979 = wave.binary addi %975, %978 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %980 = wave.binary divui %964, %24 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %981 = wave.binary remui %980, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %982 = wave.binary muli %981, %4 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %983 = wave.binary addi %979, %982 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %984 = wave.binary divui %964, %23 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %985 = wave.binary remui %984, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %986 = wave.binary muli %985, %3 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %987 = wave.binary addi %983, %986 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %988 = wave.binary divui %964, %22 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %989 = wave.binary remui %988, %25 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %990 = wave.binary muli %989, %2 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %991 = wave.binary addi %987, %990 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %992 = wave.binary divui %991, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %993 = wave.binary muli %992, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %994 = wave.binary addi %991, %993 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %995 = wave.assume %994 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %996 = wave.binary addi %854, %966 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %997 = wave.binary addi %996, %970 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %998 = wave.binary addi %997, %974 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %999 = wave.binary addi %998, %978 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1000 = wave.binary addi %999, %982 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1001 = wave.binary addi %1000, %986 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1002 = wave.binary addi %1001, %990 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1003 = wave.binary divui %1002, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1004 = wave.binary muli %1003, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1005 = wave.binary addi %1002, %1004 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1006 = wave.assume %1005 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
-      %1007 = wave.ptr_add %374, %825 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_98, %token_99 = wave.load %1007 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1008 = wave.ptr_add %374, %865 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_100, %token_101 = wave.load %1008 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1009 = wave.ptr_add %374, %901 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_102, %token_103 = wave.load %1009 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1010 = wave.ptr_add %374, %912 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_104, %token_105 = wave.load %1010 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1011 = wave.ptr_add %374, %948 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_106, %token_107 = wave.load %1011 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1012 = wave.ptr_add %374, %959 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_108, %token_109 = wave.load %1012 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1013 = wave.ptr_add %374, %995 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_110, %token_111 = wave.load %1013 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1014 = wave.ptr_add %374, %1006 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
-      %value_112, %token_113 = wave.load %1014 after %535 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
-      %1015 = wave.cast fpconvert %value_98 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1016 = wave.cast fpconvert %value_100 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1017 = wave.cast fpconvert %value_102 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1018 = wave.cast fpconvert %value_104 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1019 = wave.cast fpconvert %value_106 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1020 = wave.cast fpconvert %value_108 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1021 = wave.cast fpconvert %value_110 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1022 = wave.cast fpconvert %value_112 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1023 = wave.fma %751, %1015, %751 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1024 = wave.fma %752, %1016, %752 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1025 = wave.fma %753, %1017, %753 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1026 = wave.fma %754, %1018, %754 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1027 = wave.fma %755, %1019, %755 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1028 = wave.fma %756, %1020, %756 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1029 = wave.fma %757, %1021, %757 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1030 = wave.fma %758, %1022, %758 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
-      %1031 = wave.cmpi slt %135, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1032 = wave.cmpi slt %136, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1033 = wave.cmpi slt %137, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1034 = wave.cmpi slt %138, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1035 = wave.select %1031, %1, %0 : !wave.mask<64>, !wave.simd<i32, 64>
-      %1036 = wave.select %1032, %1, %0 : !wave.mask<64>, !wave.simd<i32, 64>
-      %1037 = wave.select %1033, %1, %0 : !wave.mask<64>, !wave.simd<i32, 64>
-      %1038 = wave.select %1034, %1, %0 : !wave.mask<64>, !wave.simd<i32, 64>
-      %1039 = wave.cmpi slt %143, %164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1040 = wave.cmpi slt %144, %164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1041 = wave.select %1039, %1, %0 : !wave.mask<64>, !wave.simd<i32, 64>
-      %1042 = wave.select %1040, %1, %0 : !wave.mask<64>, !wave.simd<i32, 64>
-      %1043 = wave.binary andi %1035, %1041 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1044 = wave.binary andi %1035, %1042 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1045 = wave.binary andi %1036, %1041 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1046 = wave.binary andi %1036, %1042 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1047 = wave.binary andi %1037, %1041 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1048 = wave.binary andi %1037, %1042 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1049 = wave.binary andi %1038, %1041 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1050 = wave.binary andi %1038, %1042 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1051 = wave.assume %arg11 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
-      %1052 = wave.binary muli %52, %1051 overflow<nsw> : i32, i32 -> i32
-      %1053 = wave.splat %1051 : i32 -> !wave.simd<i32, 64>
-      %1054 = wave.binary muli %112, %1053 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1055 = wave.binary muli %113, %1053 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1056 = wave.binary muli %114, %1053 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1057 = wave.binary muli %115, %1053 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1058 = wave.binary addi %1052, %139 overflow<nsw> : i32, i32 -> i32
-      %1059 = wave.binary addi %1054, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1060 = wave.binary addi %1054, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1061 = wave.binary addi %1055, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1062 = wave.binary addi %1055, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1063 = wave.binary addi %1056, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1064 = wave.binary addi %1056, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1065 = wave.binary addi %1057, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1066 = wave.binary addi %1057, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1067 = wave.splat %1058 : i32 -> !wave.simd<i32, 64>
-      %1068 = wave.binary addi %1067, %1059 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1069 = wave.binary addi %1067, %1060 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1070 = wave.binary addi %1067, %1061 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1071 = wave.binary addi %1067, %1062 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1072 = wave.binary addi %1067, %1063 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1073 = wave.binary addi %1067, %1064 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1074 = wave.binary addi %1067, %1065 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1075 = wave.binary addi %1067, %1066 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-      %1076 = wave.cast fpconvert %1023 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1077 = wave.cast fpconvert %1024 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1078 = wave.cast fpconvert %1025 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1079 = wave.cast fpconvert %1026 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1080 = wave.cast fpconvert %1027 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1081 = wave.cast fpconvert %1028 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1082 = wave.cast fpconvert %1029 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1083 = wave.cast fpconvert %1030 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
-      %1084 = waveamd.make_buffer %arg4, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
-      %1085 = wave.cmpi ne %1043, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1086 = wave.assume %1068 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1087 = wave.ptr_add %1084, %1086 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1088 = wave.ptr_add %1084, %7 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1089 = wave.select %1085, %1087, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1090 = wave.store %1076 -> %1089 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1091 = wave.cmpi ne %1044, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1092 = wave.assume %1069 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1093 = wave.ptr_add %1084, %1092 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1094 = wave.select %1091, %1093, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1095 = wave.store %1077 -> %1094 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1096 = wave.cmpi ne %1045, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1097 = wave.assume %1070 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1098 = wave.ptr_add %1084, %1097 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1099 = wave.select %1096, %1098, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1100 = wave.store %1078 -> %1099 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1101 = wave.cmpi ne %1046, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1102 = wave.assume %1071 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1103 = wave.ptr_add %1084, %1102 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1104 = wave.select %1101, %1103, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1105 = wave.store %1079 -> %1104 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1106 = wave.cmpi ne %1047, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1107 = wave.assume %1072 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1108 = wave.ptr_add %1084, %1107 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1109 = wave.select %1106, %1108, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1110 = wave.store %1080 -> %1109 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1111 = wave.cmpi ne %1048, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1112 = wave.assume %1073 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1113 = wave.ptr_add %1084, %1112 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1114 = wave.select %1111, %1113, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1115 = wave.store %1081 -> %1114 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1116 = wave.cmpi ne %1049, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1117 = wave.assume %1074 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1118 = wave.ptr_add %1084, %1117 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1119 = wave.select %1116, %1118, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1120 = wave.store %1082 -> %1119 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
-      %1121 = wave.cmpi ne %1050, %0 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-      %1122 = wave.assume %1075 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
-      %1123 = wave.ptr_add %1084, %1122 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1124 = wave.select %1121, %1123, %1088 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
-      %1125 = wave.store %1083 -> %1124 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %980 = wave.binary divui %979, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %981 = wave.binary muli %980, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %982 = wave.binary addi %979, %981 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %983 = wave.assume %982 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %984 = wave.binary addi %842, %954 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %985 = wave.binary addi %984, %958 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %986 = wave.binary addi %985, %962 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %987 = wave.binary addi %986, %966 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %988 = wave.binary addi %987, %970 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %989 = wave.binary addi %988, %974 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %990 = wave.binary addi %989, %978 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %991 = wave.binary divui %990, %21 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %992 = wave.binary muli %991, %19 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %993 = wave.binary addi %990, %992 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %994 = wave.assume %993 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-16891 + x <= 0">] : !wave.simd<i32, 64>
+      %995 = wave.ptr_add %360, %813 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_98, %token_99 = wave.load %995 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %996 = wave.ptr_add %360, %853 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_100, %token_101 = wave.load %996 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %997 = wave.ptr_add %360, %889 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_102, %token_103 = wave.load %997 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %998 = wave.ptr_add %360, %900 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_104, %token_105 = wave.load %998 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %999 = wave.ptr_add %360, %936 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_106, %token_107 = wave.load %999 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %1000 = wave.ptr_add %360, %947 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_108, %token_109 = wave.load %1000 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %1001 = wave.ptr_add %360, %983 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_110, %token_111 = wave.load %1001 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %1002 = wave.ptr_add %360, %994 : !wave.ptr<#wave.shared, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#wave.shared, f16>, 64>
+      %value_112, %token_113 = wave.load %1002 after %521 : (!wave.simd<!wave.ptr<#wave.shared, f16>, 64>, !wave.mem.token) -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+      %1003 = wave.cast fpconvert %value_98 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1004 = wave.cast fpconvert %value_100 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1005 = wave.cast fpconvert %value_102 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1006 = wave.cast fpconvert %value_104 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1007 = wave.cast fpconvert %value_106 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1008 = wave.cast fpconvert %value_108 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1009 = wave.cast fpconvert %value_110 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1010 = wave.cast fpconvert %value_112 : !wave.simd<vector<4xf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1011 = wave.fma %739, %1003, %739 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1012 = wave.fma %740, %1004, %740 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1013 = wave.fma %741, %1005, %741 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1014 = wave.fma %742, %1006, %742 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1015 = wave.fma %743, %1007, %743 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1016 = wave.fma %744, %1008, %744 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1017 = wave.fma %745, %1009, %745 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1018 = wave.fma %746, %1010, %746 fastmath<contract> : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf32>, 64>
+      %1019 = wave.cmpi slt %135, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1020 = wave.cmpi slt %136, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1021 = wave.cmpi slt %137, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1022 = wave.cmpi slt %138, %145 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1023 = wave.select %1019, %2, %1 : !wave.mask<64>, !wave.simd<i32, 64>
+      %1024 = wave.select %1020, %2, %1 : !wave.mask<64>, !wave.simd<i32, 64>
+      %1025 = wave.select %1021, %2, %1 : !wave.mask<64>, !wave.simd<i32, 64>
+      %1026 = wave.select %1022, %2, %1 : !wave.mask<64>, !wave.simd<i32, 64>
+      %1027 = wave.cmpi slt %143, %164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1028 = wave.cmpi slt %144, %164 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1029 = wave.select %1027, %2, %1 : !wave.mask<64>, !wave.simd<i32, 64>
+      %1030 = wave.select %1028, %2, %1 : !wave.mask<64>, !wave.simd<i32, 64>
+      %1031 = wave.binary andi %1023, %1029 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1032 = wave.binary andi %1023, %1030 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1033 = wave.binary andi %1024, %1029 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1034 = wave.binary andi %1024, %1030 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1035 = wave.binary andi %1025, %1029 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1036 = wave.binary andi %1025, %1030 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1037 = wave.binary andi %1026, %1029 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1038 = wave.binary andi %1026, %1030 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1039 = wave.assume %arg11 as "x" [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x >= 0">] : i32
+      %1040 = wave.binary muli %52, %1039 overflow<nsw> : i32, i32 -> i32
+      %1041 = wave.splat %1039 : i32 -> !wave.simd<i32, 64>
+      %1042 = wave.binary muli %112, %1041 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1043 = wave.binary muli %113, %1041 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1044 = wave.binary muli %114, %1041 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1045 = wave.binary muli %115, %1041 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1046 = wave.binary addi %1040, %139 overflow<nsw> : i32, i32 -> i32
+      %1047 = wave.binary addi %1042, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1048 = wave.binary addi %1042, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1049 = wave.binary addi %1043, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1050 = wave.binary addi %1043, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1051 = wave.binary addi %1044, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1052 = wave.binary addi %1044, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1053 = wave.binary addi %1045, %82 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1054 = wave.binary addi %1045, %83 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1055 = wave.splat %1046 : i32 -> !wave.simd<i32, 64>
+      %1056 = wave.binary addi %1055, %1047 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1057 = wave.binary addi %1055, %1048 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1058 = wave.binary addi %1055, %1049 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1059 = wave.binary addi %1055, %1050 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1060 = wave.binary addi %1055, %1051 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1061 = wave.binary addi %1055, %1052 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1062 = wave.binary addi %1055, %1053 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1063 = wave.binary addi %1055, %1054 overflow<nsw> : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+      %1064 = wave.cast fpconvert %1011 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1065 = wave.cast fpconvert %1012 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1066 = wave.cast fpconvert %1013 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1067 = wave.cast fpconvert %1014 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1068 = wave.cast fpconvert %1015 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1069 = wave.cast fpconvert %1016 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1070 = wave.cast fpconvert %1017 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1071 = wave.cast fpconvert %1018 : !wave.simd<vector<4xf32>, 64> -> !wave.simd<vector<4xf16>, 64>
+      %1072 = waveamd.make_buffer %arg4, %c2147483647_i32 : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
+      %1073 = wave.cmpi ne %1031, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1074 = wave.assume %1056 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1075 = wave.ptr_add %1072, %1074 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1076 = wave.ptr_add %1072, %0 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1077 = wave.select %1073, %1075, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1078 = wave.store %1064 -> %1077 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1079 = wave.cmpi ne %1032, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1080 = wave.assume %1057 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1081 = wave.ptr_add %1072, %1080 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1082 = wave.select %1079, %1081, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1083 = wave.store %1065 -> %1082 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1084 = wave.cmpi ne %1033, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1085 = wave.assume %1058 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1086 = wave.ptr_add %1072, %1085 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1087 = wave.select %1084, %1086, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1088 = wave.store %1066 -> %1087 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1089 = wave.cmpi ne %1034, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1090 = wave.assume %1059 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1091 = wave.ptr_add %1072, %1090 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1092 = wave.select %1089, %1091, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1093 = wave.store %1067 -> %1092 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1094 = wave.cmpi ne %1035, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1095 = wave.assume %1060 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1096 = wave.ptr_add %1072, %1095 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1097 = wave.select %1094, %1096, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1098 = wave.store %1068 -> %1097 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1099 = wave.cmpi ne %1036, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1100 = wave.assume %1061 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1101 = wave.ptr_add %1072, %1100 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1102 = wave.select %1099, %1101, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1103 = wave.store %1069 -> %1102 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1104 = wave.cmpi ne %1037, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1105 = wave.assume %1062 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1106 = wave.ptr_add %1072, %1105 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1107 = wave.select %1104, %1106, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1108 = wave.store %1070 -> %1107 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
+      %1109 = wave.cmpi ne %1038, %1 : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+      %1110 = wave.assume %1063 as "x" [#wave.pred<"x >= 0">, #wave.pred<"-1073741820 + x <= 0">] : !wave.simd<i32, 64>
+      %1111 = wave.ptr_add %1072, %1110 : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1112 = wave.select %1109, %1111, %1076 : !wave.mask<64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+      %1113 = wave.store %1071 -> %1112 : (!wave.simd<vector<4xf16>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>) -> !wave.mem.token
       return
     }
   }
