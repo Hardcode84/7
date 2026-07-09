@@ -376,6 +376,18 @@ def WaveAMDHoistTuples
   ];
 }
 
+def WaveAMDLateTuples
+    : Pass<"waveamd-late-tuples"> {
+  let summary = "Sink WaveAMDMachine tuple aliases after scheduling";
+  let description = [{
+    Moves `tuple_to_elements` and `tuple_from_elements` to the latest same-block
+    position that still dominates all tuple users.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDBufferRsrcToTuples
     : Pass<"waveamd-buffer-rsrc-to-tuples"> {
   let summary = "Convert buffer descriptor pseudo ops to tuple aliases";

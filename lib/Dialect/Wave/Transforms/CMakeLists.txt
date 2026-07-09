@@ -15,6 +15,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDFormFusedInt.cpp
   WaveAMDHazardWaits.cpp
   WaveAMDHoistTuples.cpp
+  WaveAMDLateTuples.cpp
   WaveAMDMachine.cpp
   WaveAMDMachineCleanup.cpp
   WaveAMDMachineGreedySchedule.cpp

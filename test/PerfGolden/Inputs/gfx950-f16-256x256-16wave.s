@@ -49,7 +49,6 @@ wmma_f16_matmul_tiled:
 		s_add_u32 s20, s6, s9
 		s_addc_u32 s21, s7, 0
 		s_mov_b32 s22, 0x20000
-		s_mov_b32 s23, s19
 		v_readfirstlane_b32 s6, v0
 		v_mov_b64_e32 v[4:5], 0
 		v_mov_b64_e32 v[6:7], 0
@@ -283,6 +282,7 @@ wmma_f16_matmul_tiled:
 		v_cvt_pk_f16_f32 v2, v4, v5
 		v_cvt_pk_f16_f32 v3, v6, v7
 		v_lshl_add_u32 v0, s6, 13, v0
+		s_mov_b32 s23, s19
 		buffer_store_dwordx2 v[2:3], v0, s[20:23], 0 offen
 		v_cvt_pk_f16_f32 v2, v48, v49
 		v_cvt_pk_f16_f32 v3, v50, v51

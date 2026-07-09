@@ -55,11 +55,11 @@ func.func @select_lane_index_read_first_return(%limit: i32, %a: index,
 // ASM-LABEL: select_lane_index_constants:
 // ASM: v_cmp_lt_u32_e64 [[MASK:s[0-9]+]],
 // ASM-DAG: v_mov_b32_e32 [[TWO_LO:v[0-9]+]], 2
-// ASM-DAG: v_mov_b32_e32 [[TWO_HI:v[0-9]+]], 0
-// ASM-DAG: v_mov_b32_e32 [[ONE_HI:v[0-9]+]], 0
+// ASM-DAG: v_mov_b32_e32 {{v[0-9]+}}, 0
+// ASM-DAG: v_mov_b32_e32 {{v[0-9]+}}, 0
 // ASM-DAG: v_mov_b32_e32 [[ONE_LO:v[0-9]+]], 1
 // ASM: v_cndmask_b32_e64 {{v[0-9]+}}, [[TWO_LO]], [[ONE_LO]], [[MASK]]
-// ASM-NEXT: v_cndmask_b32_e64 {{v[0-9]+}}, [[TWO_HI]], [[ONE_HI]], [[MASK]]
+// ASM-NEXT: v_cndmask_b32_e64 {{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}}, [[MASK]]
 func.func @select_lane_index_constants(%limit: i32) -> index {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>

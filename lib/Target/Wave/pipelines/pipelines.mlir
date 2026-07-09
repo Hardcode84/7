@@ -146,7 +146,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rcs = transform.apply_registered_pass "cse" to %rc
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rcs)
+    %rlt = transform.apply_registered_pass "waveamd-late-tuples" to %rcs
+        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rlt)
         : (!transform.any_op) -> !transform.any_op
     %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r5)
         : (!transform.any_op) -> !transform.any_op
