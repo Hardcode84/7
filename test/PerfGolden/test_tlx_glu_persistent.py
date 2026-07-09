@@ -2,14 +2,14 @@
 #
 # RUN: %PYTHON %s --build-dir %wave_obj_root --generated-out %t.s | FileCheck %s
 
-# CHECK: perf-golden: tlx_glu_optimized_async_canonical_cse: asm matches golden
+# CHECK: perf-golden: tlx_glu_persistent: asm matches golden
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-NAME = "tlx_glu_optimized_async_canonical_cse"
+NAME = "tlx_glu_persistent"
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE / "Inputs"))
@@ -21,7 +21,7 @@ GOLDEN = HERE / "Inputs" / f"{NAME}.s"
 normalize_asm = perf_golden_mlir.normalize_asm
 
 
-def test_tlx_glu_optimized_async_canonical_cse() -> None:
+def test_tlx_glu_persistent() -> None:
     perf_golden_mlir.check_asm(NAME, _SOURCE, GOLDEN, REPO_ROOT / "build")
 
 
