@@ -884,6 +884,8 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_cmp_lt_i32 0, s15
 		s_cbranch_scc0 .Ltlx_addmm_glu_kernel_optimized_async.loop_exit_0
 .Ltlx_addmm_glu_kernel_optimized_async.loop_head_0:
+		s_waitcnt lgkmcnt(8)
+		s_barrier
 		s_add_i32 s20, s22, 3
 		s_mul_i32 s20, s20, 64
 		s_waitcnt lgkmcnt(6)
@@ -910,8 +912,9 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_add_i32 s20, s14, s20
 		v_cmp_lt_i32_e64 vcc, v31, s20
 		s_lshl_b32 s23, s22, 7
-		s_mul_hi_u32 s24, s22, 0xaaaaaaab
+		s_nop 0
 		v_cndmask_b32_e32 v56, v49, v30, vcc
+		s_mul_hi_u32 s24, s22, 0xaaaaaaab
 		s_lshr_b32 s24, s24, 1
 		s_mul_i32 s24, s24, 3
 		s_xor_b32 s24, s24, -1
@@ -925,6 +928,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_add_i32 m0, s24, 0x2100
 		s_nop 0
 		buffer_load_dwordx4 v57, s[28:31], s23 offen lds
+		s_barrier
 		s_mul_i32 s23, s17, s22
 		s_lshl_b32 s23, s23, 7
 		s_add_i32 s25, s5, s23

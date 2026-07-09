@@ -804,9 +804,10 @@ tlx_addmm_glu_kernel_optimized:
 		s_cmp_lt_i32 0, s1
 		s_cbranch_scc0 .Ltlx_addmm_glu_kernel_optimized.loop_exit_0
 .Ltlx_addmm_glu_kernel_optimized.loop_head_0:
+		s_waitcnt lgkmcnt(14)
+		s_barrier
 		s_add_i32 s13, s16, 3
 		s_mul_i32 s13, s13, 64
-		s_waitcnt lgkmcnt(14)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[76:79], v[40:43], v[4:7]
 		s_waitcnt lgkmcnt(10)
 		v_mfma_f32_16x16x32_f16 v[108:111], v[84:87], v[40:43], v[108:111]
@@ -848,8 +849,9 @@ tlx_addmm_glu_kernel_optimized:
 		s_add_i32 s13, s14, s13
 		v_cmp_lt_i32_e64 vcc, v27, s13
 		s_lshl_b32 s15, s16, 7
-		s_mul_hi_u32 s28, s16, 0xaaaaaaab
+		s_nop 0
 		v_cndmask_b32_e32 v3, v39, v18, vcc
+		s_mul_hi_u32 s28, s16, 0xaaaaaaab
 		s_lshr_b32 s28, s28, 1
 		s_mul_i32 s28, s28, 3
 		s_xor_b32 s28, s28, -1
@@ -864,6 +866,7 @@ tlx_addmm_glu_kernel_optimized:
 		s_add_i32 m0, s29, 0x2100
 		v_cndmask_b32_e32 v3, v39, v75, vcc
 		buffer_load_dwordx4 v3, s[20:23], s15 offen lds
+		s_barrier
 		s_mul_i32 s15, s17, s16
 		s_lshl_b32 s15, s15, 7
 		s_add_i32 s29, s3, s15
@@ -940,14 +943,11 @@ tlx_addmm_glu_kernel_optimized:
 		s_cmp_lt_i32 s16, s1
 		s_cbranch_scc1 .Ltlx_addmm_glu_kernel_optimized.loop_head_0
 .Ltlx_addmm_glu_kernel_optimized.loop_exit_0:
-		s_waitcnt vmcnt(0) lgkmcnt(14)
+		s_waitcnt vmcnt(0) lgkmcnt(0)
 		s_barrier
 		v_mfma_f32_16x16x32_f16 v[4:7], v[76:79], v[40:43], v[4:7]
-		s_waitcnt lgkmcnt(10)
 		v_mfma_f32_16x16x32_f16 v[108:111], v[84:87], v[40:43], v[108:111]
-		s_waitcnt lgkmcnt(6)
 		v_mfma_f32_16x16x32_f16 v[112:115], v[92:95], v[40:43], v[112:115]
-		s_waitcnt lgkmcnt(2)
 		v_mfma_f32_16x16x32_f16 v[116:119], v[100:103], v[40:43], v[116:119]
 		v_mfma_f32_16x16x32_f16 v[132:135], v[100:103], v[48:51], v[132:135]
 		v_mfma_f32_16x16x32_f16 v[120:123], v[76:79], v[48:51], v[120:123]
@@ -964,7 +964,6 @@ tlx_addmm_glu_kernel_optimized:
 		v_mfma_f32_16x16x32_f16 v[4:7], v[80:83], v[44:47], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[108:111], v[88:91], v[44:47], v[108:111]
 		v_mfma_f32_16x16x32_f16 v[112:115], v[96:99], v[44:47], v[112:115]
-		s_waitcnt lgkmcnt(0)
 		v_mfma_f32_16x16x32_f16 v[116:119], v[104:107], v[44:47], v[116:119]
 		v_mfma_f32_16x16x32_f16 v[132:135], v[104:107], v[52:55], v[132:135]
 		v_mfma_f32_16x16x32_f16 v[120:123], v[80:83], v[52:55], v[120:123]
