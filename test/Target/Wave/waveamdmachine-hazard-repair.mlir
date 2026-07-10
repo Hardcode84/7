@@ -1,4 +1,5 @@
 // RUN: wave-opt --split-input-file %s --waveamd-hazard-repair | FileCheck %s
+// RUN: wave-opt --split-input-file %s --waveamd-hazard-repair='hoist-m0-across-regions=0' | FileCheck %s --check-prefix=NO-CROSS
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @m0_gap_filled_by_later_valu
@@ -181,14 +182,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
-  // CHECK-LABEL: func.func @outer_region_filler_pulled
-  // CHECK-NOT: waveamdmachine.v_add_u32
-  // CHECK: waveamdmachine.v_xor_b32
+  // CHECK-LABEL: func.func @outer_region_m0_hoisted
+  // CHECK: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.v_xor_b32
+  // CHECK-NEXT: [[M0:%.*]] = waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.exec_if
-  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
-  // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
   // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
-  func.func @outer_region_filler_pulled(
+  func.func @outer_region_m0_hoisted(
       %cond: !waveamdmachine.reg<sgpr, 1, 0>,
       %off0: !waveamdmachine.reg<vgpr, 1, 1>,
       %off1: !waveamdmachine.reg<vgpr, 1, 2>,
@@ -218,13 +218,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
-  // CHECK-LABEL: func.func @outer_uniform_if_filler_pulled
-  // CHECK-NOT: waveamdmachine.v_add_u32
-  // CHECK: waveamdmachine.uniform_if
-  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
-  // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-LABEL: func.func @outer_uniform_if_m0_hoisted
+  // CHECK: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.uniform_if
   // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
-  func.func @outer_uniform_if_filler_pulled(
+  func.func @outer_uniform_if_m0_hoisted(
       %cond: !waveamdmachine.reg<scc, 1>,
       %off0: !waveamdmachine.reg<vgpr, 1, 1>,
       %off1: !waveamdmachine.reg<vgpr, 1, 2>,
@@ -289,8 +288,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
   // CHECK-LABEL: func.func @outer_result_user_blocks_pull
   // CHECK: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: [[M0:%.*]] = waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.exec_if
-  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
   func.func @outer_result_user_blocks_pull(
       %cond: !waveamdmachine.reg<sgpr, 1, 0>,
@@ -326,8 +325,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK: [[M0A:%.*]] = waveamdmachine.s_mov_m0
   // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
   // CHECK-NEXT: [[TOK:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, [[M0A]]
-  // CHECK: waveamdmachine.exec_if
-  // CHECK: [[M0B:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[M0B:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.exec_if
   // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0B]] after [[TOK]]
   func.func @outer_source_hazard_blocks_pull(
       %cond: !waveamdmachine.reg<sgpr, 1, 0>,
@@ -361,6 +360,90 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
              !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
       waveamdmachine.yield %loaded : !waveamdmachine.mem.token
     } : !waveamdmachine.reg<sgpr, 1, 0> -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @m0_add_hoisted_before_exec_if
+  // CHECK: [[M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32
+  // CHECK-NEXT: [[TOK:%.*]] = waveamdmachine.exec_if
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, [[M0]]
+  // NO-CROSS-LABEL: func.func @m0_add_hoisted_before_exec_if
+  // NO-CROSS: waveamdmachine.exec_if
+  // NO-CROSS-NEXT: waveamdmachine.s_add_m0_i32
+  func.func @m0_add_hoisted_before_exec_if(
+      %cond: !waveamdmachine.reg<sgpr, 1, 0>,
+      %off: !waveamdmachine.reg<vgpr, 1, 1>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %inc = waveamdmachine.imm 8448 : !waveamdmachine.imm
+    %tok = waveamdmachine.exec_if %cond {
+      %m0, %scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+          : (!waveamdmachine.reg<sgpr, 1, 9>, !waveamdmachine.imm)
+          -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %off, %desc, %soff, %m0 after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 1>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<sgpr, 1, 0> -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @m0_mov_hoisted_before_uniform_if
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[TOK:%.*]] = waveamdmachine.uniform_if
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, [[M0]]
+  func.func @m0_mov_hoisted_before_uniform_if(
+      %cond: !waveamdmachine.reg<scc, 1>,
+      %off: !waveamdmachine.reg<vgpr, 1, 1>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %tok = waveamdmachine.uniform_if %cond {
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %off, %desc, %soff, %m0 after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 1>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } otherwise {
+      waveamdmachine.yield %dep : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @m0_not_hoisted_across_loop
+  // CHECK: waveamdmachine.uniform_loop
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.global_load_lds_b128 {{.*}}, {{.*}}, [[M0]]
+  func.func @m0_not_hoisted_across_loop(
+      %cond: !waveamdmachine.reg<scc, 1>,
+      %off: !waveamdmachine.reg<vgpr, 1, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2, 4>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %tok = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%dep : !waveamdmachine.mem.token) {
+    ^bb0(%iter: !waveamdmachine.mem.token):
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.global_load_lds_b128
+          %off, %base, %m0 after %iter
+          : (!waveamdmachine.reg<vgpr, 1, 1>,
+             !waveamdmachine.reg<sgpr, 2, 4>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%loaded : !waveamdmachine.mem.token)
+    } -> !waveamdmachine.mem.token
     return
   }
 }

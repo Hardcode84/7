@@ -1200,6 +1200,105 @@ static bool canPullIntoRegion(Operation *parent) {
          !parent->hasTrait<OpTrait::IsIsolatedFromAbove>();
 }
 
+static bool touchesM0(Operation *op) {
+  wave::HardwareResourceEffects effects = wave::getHardwareResourceEffects(op);
+  return llvm::is_contained(effects.reads, wave::HardwareResourceKind::M0) ||
+         llvm::is_contained(effects.writes, wave::HardwareResourceKind::M0);
+}
+
+static bool hasOnlyDeadAuxiliaryResourceResults(Operation *op) {
+  wave::HardwareResourceEffects effects = wave::getHardwareResourceEffects(op);
+  for (wave::HardwareResourceKind kind : effects.writes) {
+    if (kind == wave::HardwareResourceKind::M0)
+      continue;
+    bool hasResult = false;
+    for (Value result : op->getResults()) {
+      if (wave::getHardwareResourceForValue(result) != kind)
+        continue;
+      hasResult = true;
+      if (!result.use_empty())
+        return false;
+    }
+    if (!hasResult)
+      return false;
+  }
+  return true;
+}
+
+static Operation *getSingleUseM0Consumer(Operation *writer) {
+  auto m0Writer = dyn_cast<waveamdmachine::M0WriteHazardOpInterface>(writer);
+  if (!m0Writer)
+    return nullptr;
+  Value m0 = m0Writer.getM0HazardValue();
+  if (!m0.hasOneUse())
+    return nullptr;
+  Operation *consumer = *m0.user_begin();
+  if (consumer->getBlock() != writer->getBlock() ||
+      !writer->isBeforeInBlock(consumer))
+    return nullptr;
+  return consumer;
+}
+
+static unsigned countMachineOpsBetween(Operation *begin, Operation *end) {
+  unsigned count = 0;
+  for (Operation *op = begin->getNextNode(); op && op != end;
+       op = op->getNextNode())
+    if (!emitsNoMachineInst(*op))
+      ++count;
+  return count;
+}
+
+static bool canCrossBlockPrefix(Operation *nested) {
+  for (Operation &op : *nested->getBlock()) {
+    if (&op == nested)
+      return true;
+    if (!emitsNoMachineInst(op) || touchesM0(&op))
+      return false;
+  }
+  llvm_unreachable("nested operation missing from parent block");
+}
+
+static Operation *findM0RegionHoistPoint(Operation *writer, Operation *consumer,
+                                         const HazardConfig &cfg,
+                                         DominanceInfo &dom) {
+  unsigned gap = countMachineOpsBetween(writer, consumer);
+  if (gap >= cfg.m0PipelineDelay)
+    return nullptr;
+  if (!hasOnlyDeadAuxiliaryResourceResults(writer))
+    return nullptr;
+
+  Operation *nested = writer;
+  while (gap < cfg.m0PipelineDelay) {
+    if (!canCrossBlockPrefix(nested))
+      return nullptr;
+    Operation *parent = nested->getBlock()->getParentOp();
+    if (!canPullIntoRegion(parent) || touchesM0(parent) ||
+        !operandsDominateTarget(writer, parent, dom))
+      return nullptr;
+    nested = parent;
+    if (!emitsNoMachineInst(*parent))
+      ++gap;
+  }
+  return nested;
+}
+
+static void hoistM0WritesAcrossRegions(Operation *root, const HazardConfig &cfg,
+                                       DominanceInfo &dom) {
+  SmallVector<Operation *> writers;
+  root->walk([&](waveamdmachine::M0WriteHazardOpInterface writer) {
+    writers.push_back(writer.getOperation());
+  });
+  for (Operation *writer : writers) {
+    Operation *consumer = getSingleUseM0Consumer(writer);
+    if (!consumer)
+      continue;
+    Operation *insertBefore =
+        findM0RegionHoistPoint(writer, consumer, cfg, dom);
+    if (insertBefore)
+      writer->moveBefore(insertBefore);
+  }
+}
+
 static bool canPullOuterRepairCandidate(Operation *candidate, Operation *target,
                                         DominanceInfo &dom) {
   Operation *parent = target->getBlock()->getParentOp();
@@ -1394,6 +1493,8 @@ public:
 
 struct WaveAMDHazardRepairPass
     : public wave::impl::WaveAMDHazardRepairBase<WaveAMDHazardRepairPass> {
+  using WaveAMDHazardRepairBase::WaveAMDHazardRepairBase;
+
   void runOnOperation() override {
     Operation *root = getOperation();
     FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
@@ -1403,6 +1504,8 @@ struct WaveAMDHazardRepairPass
 
     HazardConfig cfg = makeHazardConfig(**sti);
     DominanceInfo dom(root);
+    if (hoistM0AcrossRegions)
+      hoistM0WritesAcrossRegions(root, cfg, dom);
     root->walk([&](Block *block) { (void)repairBlock(*block, cfg, dom); });
   }
 };
@@ -1719,33 +1822,10 @@ private:
     return isLgkmFillerSearchBoundary(op) || isM0Consumer(op);
   }
 
-  static Operation *
-  getSingleUseM0Consumer(waveamdmachine::M0WriteHazardOpInterface writer) {
-    Value m0 = writer.getM0HazardValue();
-    Operation *op = writer.getOperation();
-    if (!m0.hasOneUse())
-      return nullptr;
-    Operation *consumer = *m0.user_begin();
-    if (consumer->getBlock() != op->getBlock())
-      return nullptr;
-    if (!op->isBeforeInBlock(consumer))
-      return nullptr;
-    return consumer;
-  }
-
-  static unsigned countMachineOpsBetween(Operation *begin, Operation *end) {
-    unsigned count = 0;
-    for (Operation *op = begin->getNextNode(); op && op != end;
-         op = op->getNextNode())
-      if (!emitsNoMachineInst(*op))
-        ++count;
-    return count;
-  }
-
   static bool hoistOneM0Write(waveamdmachine::M0WriteHazardOpInterface writer,
                               const HazardConfig &cfg) {
     Operation *op = writer.getOperation();
-    Operation *consumer = getSingleUseM0Consumer(writer);
+    Operation *consumer = getSingleUseM0Consumer(op);
     if (!consumer)
       return false;
 

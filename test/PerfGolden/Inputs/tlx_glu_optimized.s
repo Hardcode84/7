@@ -542,20 +542,18 @@ tlx_addmm_glu_kernel_optimized:
 		v_lshl_add_u32 v6, v32, 6, v6
 		v_and_b32_e32 v30, 1, v30
 		v_lshl_add_u32 v6, v30, 5, v6
+		s_mov_b32 m0, s2
 		s_and_saveexec_b64 s[36:37], s[22:23]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_0
-		s_mov_b32 m0, s2
-		s_nop 0
 		buffer_load_dwordx4 v6, s[28:31], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_0:
 		s_mov_b64 exec, s[36:37]
 		v_lshl_add_u32 v5, v29, 1, v5
 		v_lshl_add_u32 v5, v32, 6, v5
 		v_lshl_add_u32 v5, v30, 5, v5
+		s_add_i32 m0, s2, 0x2100
 		s_and_saveexec_b64 s[36:37], s[22:23]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_1
-		s_add_i32 m0, s2, 0x2100
-		s_nop 0
 		buffer_load_dwordx4 v5, s[28:31], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_1:
 		s_mov_b64 exec, s[36:37]
@@ -570,152 +568,152 @@ tlx_addmm_glu_kernel_optimized:
 		v_mul_lo_u32 v29, s17, v26
 		v_lshl_add_u32 v28, v29, 1, v28
 		v_mul_lo_u32 v29, s17, v27
+		v_lshl_add_u32 v33, v29, 5, v28
 		v_cmp_lt_i32_e64 vcc, v9, s14
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0xc5e0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_2
-		s_add_i32 m0, s2, 0xc5e0
-		v_lshl_add_u32 v33, v29, 5, v28
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_2:
 		s_mov_b64 exec, s[36:37]
 		v_lshlrev_b32_e32 v29, 5, v29
+		v_add3_u32 v33, v28, v29, s26
 		v_cmp_lt_i32_e64 vcc, v12, s14
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0xe6e0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_3
-		s_add_i32 m0, s2, 0xe6e0
-		v_add3_u32 v33, v28, v29, s26
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_3:
 		s_mov_b64 exec, s[36:37]
+		v_add3_u32 v33, v28, v29, s21
 		v_cmp_lt_i32_e64 vcc, v13, s14
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x107e0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_4
-		s_add_i32 m0, s2, 0x107e0
-		v_add3_u32 v33, v28, v29, s21
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_4:
 		s_mov_b64 exec, s[36:37]
 		s_mul_i32 s3, 0x48, s17
+		v_add3_u32 v33, v28, v29, s3
 		v_cmp_lt_i32_e64 vcc, v21, s14
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x128e0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_5
-		s_add_i32 m0, s2, 0x128e0
-		v_add3_u32 v33, v28, v29, s3
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_5:
 		s_mov_b64 exec, s[36:37]
 		s_add_i32 s3, s14, 0xffffffc0
 		v_cmp_lt_i32_e64 vcc, v20, s3
 		s_mov_b64 s[4:5], vcc
+		v_add_u32_e32 v33, 0x80, v6
+		s_add_i32 m0, s2, 0x4200
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_6
-		s_add_i32 m0, s2, 0x4200
-		v_add_u32_e32 v33, 0x80, v6
 		buffer_load_dwordx4 v33, s[28:31], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_6:
 		s_mov_b64 exec, s[36:37]
+		v_add_u32_e32 v33, 0x80, v5
+		s_add_i32 m0, s2, 0x6300
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_7
-		s_add_i32 m0, s2, 0x6300
-		v_add_u32_e32 v33, 0x80, v5
 		buffer_load_dwordx4 v33, s[28:31], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_7:
 		s_mov_b64 exec, s[36:37]
+		v_add3_u32 v33, v28, v29, s20
 		v_cmp_lt_i32_e64 vcc, v9, s3
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x149e0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_8
-		s_add_i32 m0, s2, 0x149e0
-		v_add3_u32 v33, v28, v29, s20
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_8:
 		s_mov_b64 exec, s[36:37]
 		s_mul_i32 s4, 0x88, s17
-		v_cmp_lt_i32_e64 vcc, v12, s3
-		s_mov_b64 s[20:21], vcc
-		s_and_saveexec_b64 s[36:37], s[20:21]
-		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_9
-		s_add_i32 m0, s2, 0x16ae0
 		v_add3_u32 v33, v28, v29, s4
+		v_cmp_lt_i32_e64 vcc, v12, s3
+		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x16ae0
+		s_and_saveexec_b64 s[36:37], s[4:5]
+		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_9
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_9:
 		s_mov_b64 exec, s[36:37]
+		v_add3_u32 v33, v28, v29, s12
 		v_cmp_lt_i32_e64 vcc, v13, s3
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x18be0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_10
-		s_add_i32 m0, s2, 0x18be0
-		v_add3_u32 v33, v28, v29, s12
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_10:
 		s_mov_b64 exec, s[36:37]
 		s_mul_i32 s4, 0xc8, s17
-		v_cmp_lt_i32_e64 vcc, v21, s3
-		s_mov_b64 s[12:13], vcc
-		s_and_saveexec_b64 s[36:37], s[12:13]
-		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_11
-		s_add_i32 m0, s2, 0x1ace0
 		v_add3_u32 v33, v28, v29, s4
+		v_cmp_lt_i32_e64 vcc, v21, s3
+		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x1ace0
+		s_and_saveexec_b64 s[36:37], s[4:5]
+		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_11
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_11:
 		s_mov_b64 exec, s[36:37]
 		s_add_i32 s3, s14, 0xffffff80
 		v_cmp_lt_i32_e64 vcc, v20, s3
 		s_mov_b64 s[4:5], vcc
+		v_add_u32_e32 v6, 0x100, v6
+		s_add_i32 m0, s2, 0x8400
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_12
-		s_add_i32 m0, s2, 0x8400
-		v_add_u32_e32 v6, 0x100, v6
 		buffer_load_dwordx4 v6, s[28:31], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_12:
 		s_mov_b64 exec, s[36:37]
+		v_add_u32_e32 v5, 0x100, v5
+		s_add_i32 m0, s2, 0xa500
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_13
-		s_add_i32 m0, s2, 0xa500
-		v_add_u32_e32 v5, 0x100, v5
 		buffer_load_dwordx4 v5, s[28:31], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_13:
 		s_mov_b64 exec, s[36:37]
+		v_add3_u32 v5, v28, v29, s1
 		v_cmp_lt_i32_e64 vcc, v9, s3
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x1cde0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_14
-		s_add_i32 m0, s2, 0x1cde0
-		v_add3_u32 v5, v28, v29, s1
 		buffer_load_dwordx4 v5, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_14:
 		s_mov_b64 exec, s[36:37]
 		s_mul_i32 s1, 0x108, s17
+		v_add3_u32 v5, v28, v29, s1
 		v_cmp_lt_i32_e64 vcc, v12, s3
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x1eee0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_15
-		s_add_i32 m0, s2, 0x1eee0
-		v_add3_u32 v5, v28, v29, s1
 		buffer_load_dwordx4 v5, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_15:
 		s_mov_b64 exec, s[36:37]
 		s_mul_i32 s1, 0x140, s17
+		v_add3_u32 v5, v28, v29, s1
 		v_cmp_lt_i32_e64 vcc, v13, s3
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x20fe0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_16
-		s_add_i32 m0, s2, 0x20fe0
-		v_add3_u32 v5, v28, v29, s1
 		buffer_load_dwordx4 v5, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_16:
 		s_mov_b64 exec, s[36:37]
 		s_mul_i32 s1, 0x148, s17
+		v_add3_u32 v5, v28, v29, s1
 		v_cmp_lt_i32_e64 vcc, v21, s3
 		s_mov_b64 s[4:5], vcc
+		s_add_i32 m0, s2, 0x230e0
 		s_and_saveexec_b64 s[36:37], s[4:5]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_17
-		s_add_i32 m0, s2, 0x230e0
-		v_add3_u32 v5, v28, v29, s1
 		buffer_load_dwordx4 v5, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_17:
 		s_mov_b64 exec, s[36:37]
@@ -874,18 +872,16 @@ tlx_addmm_glu_kernel_optimized:
 		s_add_i32 s22, s22, 1
 		s_add_i32 s22, s16, s22
 		s_mul_i32 s23, 0x4200, s22
+		s_add_i32 m0, s2, s23
 		s_and_saveexec_b64 s[36:37], s[20:21]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_18
-		s_add_i32 m0, s2, s23
-		s_nop 0
 		buffer_load_dwordx4 v18, s[28:31], s13 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_18:
 		s_mov_b64 exec, s[36:37]
 		s_add_i32 s23, s2, s23
+		s_add_i32 m0, s23, 0x2100
 		s_and_saveexec_b64 s[36:37], s[20:21]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_19
-		s_add_i32 m0, s23, 0x2100
-		s_nop 0
 		buffer_load_dwordx4 v77, s[28:31], s13 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_19:
 		s_mov_b64 exec, s[36:37]
@@ -894,42 +890,42 @@ tlx_addmm_glu_kernel_optimized:
 		s_mul_i32 s20, s17, s16
 		s_lshl_b32 s20, s20, 7
 		s_add_i32 s21, s3, s20
+		v_add3_u32 v3, v28, v29, s21
 		v_cmp_lt_i32_e64 vcc, v9, s15
 		s_mov_b64 s[22:23], vcc
+		s_add_i32 m0, s13, 0xc5e0
 		s_and_saveexec_b64 s[36:37], s[22:23]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_20
-		s_add_i32 m0, s13, 0xc5e0
-		v_add3_u32 v3, v28, v29, s21
 		buffer_load_dwordx4 v3, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_20:
 		s_mov_b64 exec, s[36:37]
 		s_add_i32 s21, s4, s20
+		v_add3_u32 v3, v28, v29, s21
 		v_cmp_lt_i32_e64 vcc, v12, s15
 		s_mov_b64 s[22:23], vcc
+		s_add_i32 m0, s13, 0xe6e0
 		s_and_saveexec_b64 s[36:37], s[22:23]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_21
-		s_add_i32 m0, s13, 0xe6e0
-		v_add3_u32 v3, v28, v29, s21
 		buffer_load_dwordx4 v3, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_21:
 		s_mov_b64 exec, s[36:37]
 		s_add_i32 s21, s5, s20
+		v_add3_u32 v3, v28, v29, s21
 		v_cmp_lt_i32_e64 vcc, v13, s15
 		s_mov_b64 s[22:23], vcc
+		s_add_i32 m0, s13, 0x107e0
 		s_and_saveexec_b64 s[36:37], s[22:23]
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_22
-		s_add_i32 m0, s13, 0x107e0
-		v_add3_u32 v3, v28, v29, s21
 		buffer_load_dwordx4 v3, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_22:
 		s_mov_b64 exec, s[36:37]
 		s_add_i32 s20, s12, s20
-		v_cmp_lt_i32_e64 vcc, v21, s15
-		s_mov_b64 s[22:23], vcc
-		s_and_saveexec_b64 s[36:37], s[22:23]
-		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_23
-		s_add_i32 m0, s13, 0x128e0
 		v_add3_u32 v3, v28, v29, s20
+		v_cmp_lt_i32_e64 vcc, v21, s15
+		s_mov_b64 s[20:21], vcc
+		s_add_i32 m0, s13, 0x128e0
+		s_and_saveexec_b64 s[36:37], s[20:21]
+		s_cbranch_execz .Ltlx_addmm_glu_kernel_optimized.exec_endif_23
 		buffer_load_dwordx4 v3, s[32:35], 0 offen lds
 .Ltlx_addmm_glu_kernel_optimized.exec_endif_23:
 		s_mov_b64 exec, s[36:37]

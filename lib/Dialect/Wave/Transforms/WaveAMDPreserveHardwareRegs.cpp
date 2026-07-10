@@ -12,6 +12,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -62,6 +63,35 @@ static FailureOr<Value> failureWithError(Operation *op, StringRef message) {
 static SmallVector<wave::HardwareResourceKind, 4>
 getWrittenResources(Operation *op) {
   return wave::getHardwareResourceEffects(op).writes;
+}
+
+static bool writesResource(Operation *op, wave::HardwareResourceKind kind) {
+  return llvm::is_contained(getWrittenResources(op), kind);
+}
+
+static bool canCarryIntoRegions(Operation *op) {
+  return op && op->getBlock() && !isa<LoopLikeOpInterface>(op) &&
+         !op->hasTrait<OpTrait::IsIsolatedFromAbove>();
+}
+
+static bool resourceUnchangedBeforeUse(Operation *owner, Operation *user,
+                                       wave::HardwareResourceKind kind) {
+  if (!owner->isAncestor(user))
+    return false;
+  Operation *nested = user;
+  while (nested != owner) {
+    for (Operation &op : *nested->getBlock()) {
+      if (&op == nested)
+        break;
+      if (writesResource(&op, kind))
+        return false;
+    }
+    Operation *parent = nested->getBlock()->getParentOp();
+    if (!canCarryIntoRegions(parent) || writesResource(parent, kind))
+      return false;
+    nested = parent;
+  }
+  return true;
 }
 
 struct ResourceBlockInfo {
@@ -278,10 +308,21 @@ private:
           wave::getHardwareResourceForValue(value);
       if (!kind)
         continue;
+      if (canCarryM0Capture(op, value, *kind))
+        continue;
       if (failed(ensureSavedForNestedUse(value, *kind, op)))
         return failure();
     }
     return success();
+  }
+
+  bool canCarryM0Capture(Operation *owner, Value value,
+                         wave::HardwareResourceKind kind) const {
+    if (kind != wave::HardwareResourceKind::M0 || saved.contains(value) ||
+        current[resourceIndex(kind)] != value || !value.hasOneUse() ||
+        info.lastUse.lookup(value) != currentIndex)
+      return false;
+    return resourceUnchangedBeforeUse(owner, *value.user_begin(), kind);
   }
 
   LogicalResult preserveNestedRegions(Operation *op) {

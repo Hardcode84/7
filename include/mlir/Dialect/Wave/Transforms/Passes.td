@@ -253,10 +253,16 @@ def WaveAMDHazardRepair
     new or larger hazard elsewhere in the block. Fillers with singleton
     operands or live singleton results are left in place. A non-loop,
     non-isolated region may pull a dominating outer operand producer when all
-    result users remain in that region.
+    result users remain in that region, or hoist an M0 writer when its entry
+    instruction supplies the missing hazard slot.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
+  ];
+  let options = [
+    Option<"hoistM0AcrossRegions", "hoist-m0-across-regions", "bool",
+           /*default=*/"true",
+           "Hoist M0 writers across eligible region entries.">
   ];
 }
 

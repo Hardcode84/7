@@ -152,7 +152,8 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rpack = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rprep
         : (!transform.any_op) -> !transform.any_op
-    %rrepair = transform.apply_registered_pass "waveamd-hazard-repair" to %rpack
+    %rrepair = transform.apply_registered_pass "waveamd-hazard-repair" with
+        options = { "hoist-m0-across-regions" = false } to %rpack
         : (!transform.any_op) -> !transform.any_op
     %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rrepair)
         : (!transform.any_op) -> !transform.any_op

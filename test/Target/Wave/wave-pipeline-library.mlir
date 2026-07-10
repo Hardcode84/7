@@ -107,6 +107,7 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-hazard-repair"
+// PIPELINE-NEXT: options = { "hoist-m0-across-regions" = false }
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.include @waveamd_regalloc_transform_loop
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

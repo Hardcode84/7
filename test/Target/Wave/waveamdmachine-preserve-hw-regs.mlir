@@ -28,6 +28,98 @@ func.func @preserve_scc(%a: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @carry_m0_into_exec_if
+// CHECK: %[[M0:.+]], {{%.*}} = waveamdmachine.s_add_m0_i32
+// CHECK-NEXT: %[[TOK:.+]] = waveamdmachine.exec_if
+// CHECK-NOT: waveamdmachine.s_mov_m0
+// CHECK: waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, %[[M0]]
+func.func @carry_m0_into_exec_if(
+    %cond: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %inc = waveamdmachine.imm 8448 : !waveamdmachine.imm
+  %m0, %scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+      -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.exec_if %cond {
+    %loaded = waveamdmachine.buffer_load_lds_b128
+        %off, %desc, %soff, %m0 after %dep
+        : (!waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @reload_m0_after_nested_clobber
+// CHECK: %[[OUTER:.+]] = waveamdmachine.s_mov_m0 [[DST0:%.*]]
+// CHECK: waveamdmachine.exec_if
+// CHECK: waveamdmachine.s_mov_m0 [[DST1:%.*]]
+// CHECK: %[[RELOAD:.+]] = waveamdmachine.s_mov_m0 [[DST0]]
+// CHECK: waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, %[[RELOAD]]
+func.func @reload_m0_after_nested_clobber(
+    %cond: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dst0: !waveamdmachine.reg<sgpr, 1>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.exec_if %cond {
+    %clobber = waveamdmachine.s_mov_m0 %dst1
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+    %loaded = waveamdmachine.buffer_load_lds_b128
+        %off, %desc, %soff, %m0 after %dep
+        : (!waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+  } : !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @reload_m0_in_loop
+// CHECK: %[[OUTER:.+]] = waveamdmachine.s_mov_m0 [[DST:%.*]]
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: %[[RELOAD:.+]] = waveamdmachine.s_mov_m0 [[DST]]
+// CHECK: waveamdmachine.global_load_lds_b128 {{.*}}, {{.*}}, %[[RELOAD]]
+func.func @reload_m0_in_loop(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%dep : !waveamdmachine.mem.token) {
+  ^bb0(%iter: !waveamdmachine.mem.token):
+    %loaded = waveamdmachine.global_load_lds_b128
+        %off, %base, %m0 after %iter
+        : (!waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%loaded : !waveamdmachine.mem.token)
+  } -> !waveamdmachine.mem.token
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CHECK-LABEL: func.func @preserve_nested_scc_capture
