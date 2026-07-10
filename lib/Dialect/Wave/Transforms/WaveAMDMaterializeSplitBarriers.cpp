@@ -316,20 +316,43 @@ static Value addVGPRByteOffset(OpBuilder &builder, Location loc,
       .getResult();
 }
 
+static bool canShiftM0AtDef(Value m0, Operation *consumer) {
+  Operation *def = m0.getDefiningOp();
+  if (!isErasableAddressOp(def) || def->getBlock() != consumer->getBlock() ||
+      !m0.hasOneUse())
+    return false;
+  return llvm::all_of(def->getResults(), [&](Value result) {
+    return result == m0 || result.use_empty();
+  });
+}
+
+static DenseSet<Value>
+collectM0ValuesShiftedAtDef(ArrayRef<Operation *> ldsOps) {
+  DenseSet<Value> values;
+  for (Operation *op : ldsOps)
+    for (Value operand : op->getOperands())
+      if (isa<waveamdmachine::M0Type>(operand.getType()) &&
+          canShiftM0AtDef(operand, op))
+        values.insert(operand);
+  return values;
+}
+
 static LogicalResult shiftLDSAddressOperand(OpBuilder &builder,
                                             MachineTypes types, Operation *op,
-                                            unsigned bytes) {
+                                            unsigned bytes,
+                                            const DenseSet<Value> &m0AtDefs) {
   for (OpOperand &operand : op->getOpOperands()) {
     if (!isa<waveamdmachine::M0Type>(operand.get().getType()))
       continue;
-    builder.setInsertionPoint(op);
     Value oldM0 = operand.get();
+    Operation *oldDef = oldM0.getDefiningOp();
+    builder.setInsertionPoint(m0AtDefs.contains(oldM0) ? oldDef : op);
     FailureOr<Value> shifted =
         shiftM0Value(builder, op->getLoc(), types, oldM0, bytes);
     if (failed(shifted))
       return op->emitError("cannot shift dynamic LDS M0 address");
     operand.set(*shifted);
-    eraseDeadAddressOp(oldM0.getDefiningOp());
+    eraseDeadAddressOp(oldDef);
     return success();
   }
 
@@ -358,9 +381,11 @@ static LogicalResult shiftExistingLDSAddresses(func::FuncOp func,
       ldsOps.push_back(op);
   });
 
+  DenseSet<Value> m0AtDefs = collectM0ValuesShiftedAtDef(ldsOps);
+
   OpBuilder builder(func.getContext());
   for (Operation *op : ldsOps)
-    if (failed(shiftLDSAddressOperand(builder, types, op, bytes)))
+    if (failed(shiftLDSAddressOperand(builder, types, op, bytes, m0AtDefs)))
       return failure();
   return success();
 }

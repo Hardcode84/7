@@ -122,9 +122,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-SAME: wave.lds_size = 16 : i64
 // CHECK: [[BASE:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
 // CHECK: [[SIXTEEN:%.*]] = waveamdmachine.imm 16
-// CHECK: [[M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[BASE]], [[SIXTEEN]]
+// CHECK-NEXT: [[M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[BASE]], [[SIXTEEN]]
+// CHECK-NEXT: [[FILLER:%.*]] = waveamdmachine.v_add_u32
 // CHECK-NOT: waveamdmachine.s_mov_m0 [[BASE]]
-// CHECK: waveamdmachine.buffer_load_lds_b32 {{%.*}}, {{%.*}}, {{%.*}}, [[M0]]
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b32 [[FILLER]], {{%.*}}, {{%.*}}, [[M0]]
 func.func @dynamic_m0_shift()
     attributes {wave.kernel, wave.dynamic_lds_size = 1024 : i64,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
@@ -137,9 +138,12 @@ func.func @dynamic_m0_shift()
   %root = waveamdmachine.token : !waveamdmachine.mem.token
   %m0 = waveamdmachine.s_mov_m0 %base
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
-  %dma = waveamdmachine.buffer_load_lds_b32 %addr, %desc, %zero, %m0
+  %filler = waveamdmachine.v_add_u32 %addr, %addr
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %dma = waveamdmachine.buffer_load_lds_b32 %filler, %desc, %zero, %m0
       after %root
-      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4>,
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
          !waveamdmachine.imm, !waveamdmachine.m0,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   %ticket, %arrived = waveamdmachine.barrier_arrive %state after %dma
@@ -150,6 +154,52 @@ func.func @dynamic_m0_shift()
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   %joined = waveamdmachine.token_join %ready
       : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @shared_m0_shift(
+// CHECK: [[FILL0:%.*]] = waveamdmachine.v_add_u32
+// CHECK-NEXT: [[SIXTEEN0:%.*]] = waveamdmachine.imm 16
+// CHECK-NEXT: [[M0A:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 {{%.*}}, [[SIXTEEN0]]
+// CHECK-NEXT: [[DMA0:%.*]] = waveamdmachine.buffer_load_lds_b32 [[FILL0]], {{%.*}}, {{%.*}}, [[M0A]]
+// CHECK-NEXT: [[FILL1:%.*]] = waveamdmachine.v_xor_b32
+// CHECK-NEXT: [[SIXTEEN1:%.*]] = waveamdmachine.imm 16
+// CHECK-NEXT: [[M0B:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 {{%.*}}, [[SIXTEEN1]]
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b32 [[FILL1]], {{%.*}}, {{%.*}}, [[M0B]] after [[DMA0]]
+func.func @shared_m0_shift()
+    attributes {wave.kernel, wave.dynamic_lds_size = 1024 : i64,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                wave.waves_per_workgroup = 4 : i64} {
+  %state = waveamdmachine.barrier_init : !waveamdmachine.barrier
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+  %addr = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %filler0 = waveamdmachine.v_add_u32 %addr, %addr
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %dma0 = waveamdmachine.buffer_load_lds_b32
+      %filler0, %desc, %zero, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %filler1 = waveamdmachine.v_xor_b32 %addr, %addr
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %dma1 = waveamdmachine.buffer_load_lds_b32
+      %filler1, %desc, %zero, %m0 after %dma0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   return
 }
 

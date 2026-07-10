@@ -251,7 +251,9 @@ def WaveAMDHazardRepair
     Runs before model scheduling. Scans each block and moves pure VALU/SALU ops
     into hazard gaps when SSA dominance holds and the move does not introduce a
     new or larger hazard elsewhere in the block. Fillers with singleton
-    operands or live singleton results are left in place.
+    operands or live singleton results are left in place. A non-loop,
+    non-isolated region may pull a dominating outer operand producer when all
+    result users remain in that region.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

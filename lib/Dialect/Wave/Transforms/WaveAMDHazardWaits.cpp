@@ -26,6 +26,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
@@ -1224,6 +1225,93 @@ static bool tryMoveRepairCandidate(Operation *candidate, Operation *target,
   return accept;
 }
 
+static bool operandsDominateTarget(Operation *candidate, Operation *target,
+                                   DominanceInfo &dom) {
+  return llvm::all_of(candidate->getOperands(), [&](Value operand) {
+    return dom.dominates(operand, target);
+  });
+}
+
+static bool resultsRemainDominated(Operation *candidate, Operation *target,
+                                   DominanceInfo &dom) {
+  for (Value result : candidate->getResults())
+    for (Operation *user : result.getUsers())
+      if (user != target && !dom.properlyDominates(target, user))
+        return false;
+  return true;
+}
+
+static bool hazardsDoNotIncrease(const BlockHazardTrace &before,
+                                 const BlockHazardTrace &after) {
+  for (auto [op, wait] : after.waits)
+    if (wait > before.waits.lookup(op))
+      return false;
+  return true;
+}
+
+static bool canPullIntoRegion(Operation *parent) {
+  return parent && parent->getBlock() && !isa<LoopLikeOpInterface>(parent) &&
+         !parent->hasTrait<OpTrait::IsIsolatedFromAbove>();
+}
+
+static bool canPullOuterRepairCandidate(Operation *candidate, Operation *target,
+                                        DominanceInfo &dom) {
+  Operation *parent = target->getBlock()->getParentOp();
+  if (!canPullIntoRegion(parent))
+    return false;
+  if (candidate->getBlock() != parent->getBlock())
+    return false;
+  if (!candidate->isBeforeInBlock(parent))
+    return false;
+  if (!dom.properlyDominates(candidate, target))
+    return false;
+  if (llvm::none_of(candidate->getResults(), [&](Value result) {
+        return llvm::is_contained(target->getOperands(), result);
+      }))
+    return false;
+  return operandsDominateTarget(candidate, target, dom) &&
+         resultsRemainDominated(candidate, target, dom);
+}
+
+static bool tryPullOuterRepairCandidate(Operation *candidate, Operation *target,
+                                        const BlockHazardTrace &targetTrace,
+                                        const HazardConfig &cfg,
+                                        DominanceInfo &dom) {
+  if (!canPullOuterRepairCandidate(candidate, target, dom))
+    return false;
+
+  Block *sourceBlock = candidate->getBlock();
+  BlockHazardTrace sourceTrace = computeBlockHazardTrace(*sourceBlock, cfg);
+  Operation *restoreBefore = candidate->getNextNode();
+  Operation *restoreAfter = candidate->getPrevNode();
+  unsigned oldTargetWait = targetTrace.waits.lookup(target);
+  candidate->moveBefore(target);
+
+  BlockHazardTrace movedTargetTrace =
+      computeBlockHazardTrace(*target->getBlock(), cfg);
+  BlockHazardTrace movedSourceTrace =
+      computeBlockHazardTrace(*sourceBlock, cfg);
+  bool accept = movedTargetTrace.waits.lookup(target) < oldTargetWait &&
+                movedTargetTrace.waits.lookup(candidate) == 0 &&
+                hazardsDoNotIncrease(targetTrace, movedTargetTrace) &&
+                hazardsDoNotIncrease(sourceTrace, movedSourceTrace);
+  if (!accept)
+    restoreCandidatePosition(candidate, restoreBefore, restoreAfter,
+                             sourceBlock);
+  return accept;
+}
+
+static void
+collectOuterRepairCandidates(Block &block,
+                             SmallVectorImpl<Operation *> &candidates) {
+  Operation *parent = block.getParentOp();
+  if (!canPullIntoRegion(parent))
+    return;
+  for (Operation *op = parent->getPrevNode(); op; op = op->getPrevNode())
+    if (isRepairCandidate(op))
+      candidates.push_back(op);
+}
+
 static void collectRepairBlockOps(Block &block,
                                   SmallVectorImpl<Operation *> &candidates,
                                   SmallVectorImpl<Operation *> &ops) {
@@ -1232,6 +1320,7 @@ static void collectRepairBlockOps(Block &block,
       candidates.push_back(&op);
     ops.push_back(&op);
   }
+  collectOuterRepairCandidates(block, candidates);
 }
 
 struct RepairStepResult {
@@ -1239,15 +1328,18 @@ struct RepairStepResult {
   bool stop = false;
 };
 
-static RepairStepResult tryRepairHazardOp(Operation *op,
-                                          ArrayRef<Operation *> candidates,
-                                          const BlockHazardTrace &trace,
-                                          const HazardConfig &cfg,
-                                          unsigned &moves, unsigned maxMoves) {
+static RepairStepResult
+tryRepairHazardOp(Operation *op, ArrayRef<Operation *> candidates,
+                  const BlockHazardTrace &trace, const HazardConfig &cfg,
+                  DominanceInfo &dom, unsigned &moves, unsigned maxMoves) {
   if (!trace.waits.lookup(op))
     return {};
   for (Operation *candidate : candidates) {
-    if (!tryMoveRepairCandidate(candidate, op, trace, cfg))
+    bool moved =
+        candidate->getBlock() == op->getBlock()
+            ? tryMoveRepairCandidate(candidate, op, trace, cfg)
+            : tryPullOuterRepairCandidate(candidate, op, trace, cfg, dom);
+    if (!moved)
       continue;
     if (++moves > maxMoves) {
       op->getBlock()->getParentOp()->emitWarning(
@@ -1259,7 +1351,8 @@ static RepairStepResult tryRepairHazardOp(Operation *op,
   return {};
 }
 
-static bool repairBlock(Block &block, const HazardConfig &cfg) {
+static bool repairBlock(Block &block, const HazardConfig &cfg,
+                        DominanceInfo &dom) {
   bool changed = false;
   unsigned moves = 0;
   BlockHazardTrace trace = computeBlockHazardTrace(block, cfg);
@@ -1272,7 +1365,7 @@ static bool repairBlock(Block &block, const HazardConfig &cfg) {
 
     for (Operation *op : ops) {
       RepairStepResult result =
-          tryRepairHazardOp(op, candidates, trace, cfg, moves, maxMoves);
+          tryRepairHazardOp(op, candidates, trace, cfg, dom, moves, maxMoves);
       if (!result.moved)
         continue;
       changed = true;
@@ -1363,7 +1456,8 @@ struct WaveAMDHazardRepairPass
       return signalPassFailure();
 
     HazardConfig cfg = makeHazardConfig(**sti);
-    root->walk([&](Block *block) { (void)repairBlock(*block, cfg); });
+    DominanceInfo dom(root);
+    root->walk([&](Block *block) { (void)repairBlock(*block, cfg, dom); });
   }
 };
 

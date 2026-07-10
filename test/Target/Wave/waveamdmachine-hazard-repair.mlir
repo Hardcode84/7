@@ -180,4 +180,187 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
            !waveamdmachine.reg<vgpr, 1, 12>) -> !waveamdmachine.reg<vgpr, 1, 15>
     return
   }
+
+  // CHECK-LABEL: func.func @outer_region_filler_pulled
+  // CHECK-NOT: waveamdmachine.v_add_u32
+  // CHECK: waveamdmachine.v_xor_b32
+  // CHECK-NEXT: waveamdmachine.exec_if
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
+  func.func @outer_region_filler_pulled(
+      %cond: !waveamdmachine.reg<sgpr, 1, 0>,
+      %off0: !waveamdmachine.reg<vgpr, 1, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %addr = waveamdmachine.v_add_u32 %off0, %off1
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+    %dead = waveamdmachine.v_xor_b32 %off0, %off1
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 4>
+    %tok = waveamdmachine.exec_if %cond {
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %addr, %desc, %soff, %m0 after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 3>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<sgpr, 1, 0> -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @outer_uniform_if_filler_pulled
+  // CHECK-NOT: waveamdmachine.v_add_u32
+  // CHECK: waveamdmachine.uniform_if
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
+  func.func @outer_uniform_if_filler_pulled(
+      %cond: !waveamdmachine.reg<scc, 1>,
+      %off0: !waveamdmachine.reg<vgpr, 1, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %addr = waveamdmachine.v_add_u32 %off0, %off1
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+    %tok = waveamdmachine.uniform_if %cond {
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %addr, %desc, %soff, %m0 after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 3>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } otherwise {
+      waveamdmachine.yield %dep : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @outer_loop_filler_not_pulled
+  // CHECK: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.uniform_loop
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
+  func.func @outer_loop_filler_not_pulled(
+      %cond: !waveamdmachine.reg<scc, 1>,
+      %off0: !waveamdmachine.reg<vgpr, 1, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %addr = waveamdmachine.v_add_u32 %off0, %off1
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+    %tok = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%dep : !waveamdmachine.mem.token) {
+    ^bb0(%iter: !waveamdmachine.mem.token):
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %addr, %desc, %soff, %m0 after %iter
+          : (!waveamdmachine.reg<vgpr, 1, 3>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%loaded : !waveamdmachine.mem.token)
+    } -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @outer_result_user_blocks_pull
+  // CHECK: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.exec_if
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0]]
+  func.func @outer_result_user_blocks_pull(
+      %cond: !waveamdmachine.reg<sgpr, 1, 0>,
+      %off0: !waveamdmachine.reg<vgpr, 1, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %addr = waveamdmachine.v_add_u32 %off0, %off1
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+    %tok = waveamdmachine.exec_if %cond {
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %addr, %desc, %soff, %m0 after %dep
+          : (!waveamdmachine.reg<vgpr, 1, 3>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<sgpr, 1, 0> -> !waveamdmachine.mem.token
+    %use = waveamdmachine.v_xor_b32 %addr, %off0
+        : (!waveamdmachine.reg<vgpr, 1, 3>,
+           !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<vgpr, 1, 10>
+    return
+  }
+
+  // CHECK-LABEL: func.func @outer_source_hazard_blocks_pull
+  // CHECK: [[M0A:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: [[TOK:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, [[M0A]]
+  // CHECK: waveamdmachine.exec_if
+  // CHECK: [[M0B:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[ADDR]], {{.*}}, {{.*}}, [[M0B]] after [[TOK]]
+  func.func @outer_source_hazard_blocks_pull(
+      %cond: !waveamdmachine.reg<sgpr, 1, 0>,
+      %off0: !waveamdmachine.reg<vgpr, 1, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst0: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dst1: !waveamdmachine.reg<sgpr, 1, 10>,
+      %dep: !waveamdmachine.mem.token) {
+    %m0a = waveamdmachine.s_mov_m0 %dst0
+        : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+    %addr = waveamdmachine.v_add_u32 %off0, %off1
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+    %tok0 = waveamdmachine.buffer_load_lds_b128
+        %off0, %desc, %soff, %m0a after %dep
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<sgpr, 4, 4>,
+           !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %tok1 = waveamdmachine.exec_if %cond {
+      %m0b = waveamdmachine.s_mov_m0 %dst1
+          : (!waveamdmachine.reg<sgpr, 1, 10>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %addr, %desc, %soff, %m0b after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 3>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<sgpr, 1, 0> -> !waveamdmachine.mem.token
+    return
+  }
 }
