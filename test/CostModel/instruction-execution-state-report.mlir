@@ -9,6 +9,9 @@
 // RUN: wave-instruction-state-report --func=trans_forwarding_gap --arch=gfx950 %s | FileCheck %s --check-prefix=TRANS
 // RUN: wave-instruction-state-report --func=readfirstlane_gap --arch=gfx950 %s | FileCheck %s --check-prefix=READLANE
 // RUN: wave-instruction-state-report --func=vcc_gap --arch=gfx950 %s | FileCheck %s --check-prefix=VCC
+// RUN: wave-instruction-state-report --func=noinst_memory_alias_zero_cycle --arch=gfx950 --vmem-value-latency=20 %s | FileCheck %s --check-prefix=ALIAS
+// RUN: wave-instruction-state-report --func=noinst_token_alias --arch=gfx950 --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=TOKENALIAS
+// RUN: wave-instruction-state-report --func=noinst_issue_hazard_alias --arch=gfx950 %s | FileCheck %s --check-prefix=HAZARDALIAS
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx942 %s | FileCheck %s --check-prefix=CDNA3
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx950 %s | FileCheck %s --check-prefix=CDNA4
 
@@ -167,6 +170,55 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
            !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
     return
   }
+
+  func.func @noinst_memory_alias_zero_cycle(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>,
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>) {
+    %loaded, %token = waveamdmachine.global_load_b64 %off, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+    %parts:2 = waveamdmachine.tuple_to_elements %loaded
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>)
+    %independent = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %use = waveamdmachine.v_add_u32 %parts#0, %parts#1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @noinst_token_alias(%off: !waveamdmachine.reg<vgpr, 1>,
+                                %base: !waveamdmachine.reg<sgpr, 2>,
+                                %value: !waveamdmachine.reg<vgpr, 1>) {
+    %loaded, %loaded_token = waveamdmachine.global_load_b32 %off, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %joined = waveamdmachine.token_join %loaded_token
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %stored = waveamdmachine.global_store_b32 %off, %value, %base after %joined
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    return
+  }
+
+  func.func @noinst_issue_hazard_alias(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>) {
+    %sum = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %alias = waveamdmachine.tuple_from_elements %sum
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %first = waveamdmachine.v_readfirstlane_b32 %alias
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -204,6 +256,17 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // READLANE: query op_index=1 cycle=4 op=waveamdmachine.v_readfirstlane_b32 stall=instruction_hazard cycles=1 components=instruction_hazard:1
 
 // VCC: query op_index=2 cycle=8 op=waveamdmachine.v_cndmask_b32_vcc stall=instruction_hazard cycles=1 components=instruction_hazard:1
+
+// ALIAS: query op_index=1 cycle=4 op=waveamdmachine.tuple_to_elements stall=none cycles=0 components=none
+// ALIAS: commit op_index=1 issue=4 next=4 value_ready=20
+// ALIAS: commit op_index=2 issue=4 next=8
+// ALIAS: query op_index=3 cycle=8 op=waveamdmachine.v_add_u32 stall=memory_value cycles=12 components=memory_value:12
+
+// TOKENALIAS: commit op_index=1 issue=4 next=4 value_ready=4 token_ready=20
+// TOKENALIAS: query op_index=2 cycle=4 op=waveamdmachine.global_store_b32 stall=memory_token cycles=16 components=memory_token:16
+
+// HAZARDALIAS: query op_index=1 cycle=4 op=waveamdmachine.tuple_from_elements stall=none cycles=0 components=none
+// HAZARDALIAS: query op_index=2 cycle=4 op=waveamdmachine.v_readfirstlane_b32 stall=instruction_hazard cycles=1 components=instruction_hazard:1
 
 // CDNA3: arch: gfx942
 // CDNA3: query op_index=0 cycle=0 op=waveamdmachine.s_add_i32 stall=none cycles=0

@@ -217,7 +217,7 @@ private:
   int64_t getResultReadyCycle(Operation *op, const InstructionDesc &desc,
                               int64_t issueCycle) const;
   int64_t getTokenReadyCycle(Operation *op, ArrayRef<EventId> newEvents) const;
-  void commitNoMachineInst(Operation *op);
+  int64_t commitNoMachineInst(Operation *op);
   SmallVector<EventId, 4> commitMemoryEvents(Operation *op,
                                              const InstructionDesc &desc,
                                              int64_t issueCycle);
@@ -226,7 +226,6 @@ private:
   void commitPipe(InstructionPipeKind pipe, int64_t readyCycle);
   void commitMemoryIssue(const InstructionDesc &desc, int64_t issueCycle);
   void commitIssueSlotHazards(Operation *op, const InstructionDesc &desc);
-  void commitIssueSlotAliases(Operation *op);
   void commitIssueSlotProducer(Operation *op, const InstructionDesc &desc);
   void commitM0(const InstructionDesc &desc);
   void commitStoreData(const InstructionDesc &desc);

@@ -580,12 +580,10 @@ InstructionExecutionState::commit(Operation *op) {
   result.issueCycle = currentCycle;
 
   if (desc.noMachineInst) {
-    commitNoMachineInst(op);
-    commitIssueSlotHazards(op, desc);
+    result.valueReadyCycle = commitNoMachineInst(op);
     commitM0(desc);
     commitStoreData(desc);
     result.nextIssueCycle = currentCycle;
-    result.valueReadyCycle = currentCycle;
     result.tokenReadyCycle = tokenReadyCycle(op);
     return result;
   }
@@ -655,9 +653,11 @@ InstructionExecutionState::query(Operation *op,
                                  const InstructionDesc &desc) const {
   InstructionStall stall;
 
-  InstructionStallKind operandKind = InstructionStallKind::OperandValue;
-  int64_t operandsReady = operandReadyCycle(op, operandKind);
-  addComponent(stall, operandKind, operandsReady - currentCycle);
+  if (!op->hasTrait<traits::NoMachineInst>()) {
+    InstructionStallKind operandKind = InstructionStallKind::OperandValue;
+    int64_t operandsReady = operandReadyCycle(op, operandKind);
+    addComponent(stall, operandKind, operandsReady - currentCycle);
+  }
 
   if (desc.waitsForTokenDeps) {
     int64_t tokenReady = tokenReadyCycle(op);
@@ -893,14 +893,15 @@ int64_t InstructionExecutionState::getTokenReadyCycle(
   return ready;
 }
 
-void InstructionExecutionState::commitNoMachineInst(Operation *op) {
-  SmallVector<EventId, 4> deps = collectTokenDeps(op);
+int64_t InstructionExecutionState::commitNoMachineInst(Operation *op) {
+  SmallVector<Value, 8> sources(op->operand_begin(), op->operand_end());
+  int64_t ready = currentCycle;
   for (Value result : op->getResults()) {
-    valueReadyAt[result] = currentCycle;
+    bindValue(result, sources);
     if (!isMemToken(result))
-      continue;
-    tokenEvents[result] = deps;
+      ready = std::max(ready, getValueReadyCycle(result));
   }
+  return ready;
 }
 
 SmallVector<InstructionExecutionState::EventId, 4>
@@ -978,25 +979,8 @@ void InstructionExecutionState::commitMemoryIssue(const InstructionDesc &desc,
 
 void InstructionExecutionState::commitIssueSlotHazards(
     Operation *op, const InstructionDesc &desc) {
-  if (desc.noMachineInst) {
-    commitIssueSlotAliases(op);
-    return;
-  }
   if (desc.legacyVALU && !issueSlotHazardConfig.empty())
     commitIssueSlotProducer(op, desc);
-}
-
-void InstructionExecutionState::commitIssueSlotAliases(Operation *op) {
-  IssueSlotHazards hazards;
-  for (Value operand : op->getOperands()) {
-    DenseMap<Value, IssueSlotHazards>::const_iterator it =
-        issueSlotHazards.find(operand);
-    if (it != issueSlotHazards.end())
-      hazards.join(it->second);
-  }
-  if (!hazards.empty())
-    for (Value result : op->getResults())
-      issueSlotHazards[result] = hazards;
 }
 
 void InstructionExecutionState::commitIssueSlotProducer(

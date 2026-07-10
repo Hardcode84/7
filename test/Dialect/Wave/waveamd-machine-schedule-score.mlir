@@ -3,6 +3,7 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_equal score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=EQUAL
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_invalid score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=INVALID
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=wmma_latency score-region=0 score-order=0,1' 2>&1 | FileCheck %s --check-prefix=WMMA
+// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=noinst_alias print-score=1' 2>&1 | FileCheck %s --check-prefix=ALIAS
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -59,6 +60,25 @@ func.func @wmma_latency(%a: !waveamdmachine.reg<vgpr, 8>,
   return
 }
 
+func.func @noinst_alias(%off: !waveamdmachine.reg<vgpr, 1>,
+                        %base: !waveamdmachine.reg<sgpr, 2>,
+                        %a: !waveamdmachine.reg<vgpr, 1>,
+                        %b: !waveamdmachine.reg<vgpr, 1>) {
+  %loaded, %token = waveamdmachine.global_load_b64 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %parts:2 = waveamdmachine.tuple_to_elements %loaded
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %independent = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use = waveamdmachine.v_add_u32 %parts#0, %independent
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 func.func @fixed_pressure() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %fixed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
@@ -87,3 +107,5 @@ func.func @fixed_pressure() {
 
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=128 issued_ops=2
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=128 issued_ops=2
+
+// ALIAS: waveamd-machine-schedule-report score func=noinst_alias region=0 order=original cycles=325 issued_ops=3

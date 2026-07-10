@@ -2443,12 +2443,6 @@ _a4w4_kernel:
 		ds_read_b128 v[64:67], v1 offset:3328
 		ds_read_b128 v[72:75], v1 offset:5120
 		ds_read_b128 v[88:91], v1 offset:5376
-		s_waitcnt lgkmcnt(0)
-		s_barrier
-		ds_write_b128 v6, v[96:99] offset:3072
-		ds_write_b128 v6, v[100:103] offset:7168
-		ds_write_b128 v6, v[104:107] offset:11264
-		ds_write_b128 v6, v[108:111] offset:15360
 		v_mov_b32_e32 v34, 0x80000000
 		v_cmp_lt_i32_e64 vcc, v62, s12
 		s_mov_b64 s[10:11], vcc
@@ -2456,16 +2450,10 @@ _a4w4_kernel:
 		v_lshlrev_b32_e32 v46, 2, v29
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[92:95], v1 offset:3072
-		ds_read_b128 v[96:99], v1 offset:3328
-		ds_read_b128 v[100:103], v1 offset:5120
-		ds_read_b128 v[104:107], v1 offset:5376
-		s_waitcnt lgkmcnt(0)
-		s_barrier
-		ds_write_b128 v6, v[112:115] offset:3072
-		ds_write_b128 v6, v[116:119] offset:7168
-		ds_write_b128 v6, v[120:123] offset:11264
-		ds_write_b128 v6, v[124:127] offset:15360
+		ds_write_b128 v6, v[96:99] offset:3072
+		ds_write_b128 v6, v[100:103] offset:7168
+		ds_write_b128 v6, v[104:107] offset:11264
+		ds_write_b128 v6, v[108:111] offset:15360
 		v_add_u32_e32 v47, 16, v35
 		v_xor_b32_e32 v47, v47, v45
 		v_bitop3_b32 v47, v44, v46, v47 bitop3:0x96
@@ -2473,16 +2461,10 @@ _a4w4_kernel:
 		s_mov_b64 s[14:15], vcc
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[108:111], v1 offset:3072
-		ds_read_b128 v[112:115], v1 offset:3328
-		ds_read_b128 v[116:119], v1 offset:5120
-		ds_read_b128 v[120:123], v1 offset:5376
-		s_waitcnt lgkmcnt(0)
-		s_barrier
-		ds_write_b128 v6, v[128:131] offset:3072
-		ds_write_b128 v6, v[132:135] offset:7168
-		ds_write_b128 v6, v[136:139] offset:11264
-		ds_write_b128 v6, v[140:143] offset:15360
+		ds_read_b128 v[92:95], v1 offset:3072
+		ds_read_b128 v[96:99], v1 offset:3328
+		ds_read_b128 v[100:103], v1 offset:5120
+		ds_read_b128 v[104:107], v1 offset:5376
 		v_add_u32_e32 v2, 32, v35
 		v_xor_b32_e32 v2, v2, v45
 		v_bitop3_b32 v2, v44, v46, v2 bitop3:0x96
@@ -2490,23 +2472,56 @@ _a4w4_kernel:
 		s_mov_b64 s[18:19], vcc
 		s_waitcnt lgkmcnt(0)
 		s_barrier
+		ds_write_b128 v6, v[112:115] offset:3072
+		ds_write_b128 v6, v[116:119] offset:7168
+		ds_write_b128 v6, v[120:123] offset:11264
+		ds_write_b128 v6, v[124:127] offset:15360
+		v_add_u32_e32 v8, 48, v35
+		v_xor_b32_e32 v8, v8, v45
+		v_bitop3_b32 v8, v44, v46, v8 bitop3:0x96
+		v_cmp_lt_i32_e64 vcc, v16, s12
+		s_mov_b64 s[20:21], vcc
+		s_waitcnt lgkmcnt(0)
+		s_barrier
+		ds_read_b128 v[108:111], v1 offset:3072
+		ds_read_b128 v[112:115], v1 offset:3328
+		ds_read_b128 v[116:119], v1 offset:5120
+		ds_read_b128 v[120:123], v1 offset:5376
+		v_add_u32_e32 v16, 64, v35
+		v_xor_b32_e32 v16, v16, v45
+		v_bitop3_b32 v16, v44, v46, v16 bitop3:0x96
+		v_cmp_lt_i32_e64 vcc, v9, s12
+		s_mov_b64 s[24:25], vcc
+		s_waitcnt lgkmcnt(0)
+		s_barrier
+		ds_write_b128 v6, v[128:131] offset:3072
+		ds_write_b128 v6, v[132:135] offset:7168
+		ds_write_b128 v6, v[136:139] offset:11264
+		ds_write_b128 v6, v[140:143] offset:15360
+		v_add_u32_e32 v9, 0x50, v35
+		v_xor_b32_e32 v9, v9, v45
+		v_bitop3_b32 v9, v44, v46, v9 bitop3:0x96
+		v_cmp_lt_i32_e64 vcc, v10, s12
+		s_mov_b64 s[28:29], vcc
+		s_waitcnt lgkmcnt(0)
+		s_barrier
 		ds_read_b128 v[124:127], v1 offset:3072
 		ds_read_b128 v[128:131], v1 offset:3328
 		ds_read_b128 v[132:135], v1 offset:5120
 		ds_read_b128 v[136:139], v1 offset:5376
-		s_waitcnt lgkmcnt(0)
-		s_barrier
 		s_mul_i32 s1, s1, s17
 		s_lshl_b32 s1, s1, 11
 		s_add_i32 s16, s0, s1
-		s_mul_i32 s20, s22, s17
-		s_lshl_b32 s20, s20, 9
-		s_add_i32 s16, s16, s20
-		v_mul_lo_u32 v8, s17, v24
-		v_lshlrev_b32_e32 v8, 4, v8
+		s_mul_i32 s22, s22, s17
+		s_waitcnt lgkmcnt(0)
+		s_barrier
+		s_lshl_b32 s22, s22, 9
+		s_add_i32 s16, s16, s22
+		v_mul_lo_u32 v10, s17, v24
+		v_lshlrev_b32_e32 v10, 4, v10
 		v_mul_lo_u32 v24, s17, v29
 		v_lshlrev_b32_e32 v24, 3, v24
-		v_add3_u32 v29, s16, v8, v24
+		v_add3_u32 v29, s16, v10, v24
 		v_mul_lo_u32 v32, s17, v32
 		v_lshlrev_b32_e32 v32, 2, v32
 		v_mul_lo_u32 v62, s17, v35
@@ -2517,11 +2532,11 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v29, v34, v29, s[8:9]
 		v_mov_b64_e32 v[140:141], v[40:41]
 		v_mov_b64_e32 v[142:143], v[64:65]
-		s_mov_b32 s28, s6
-		s_mov_b32 s29, s7
-		s_mov_b32 s30, s26
-		s_mov_b32 s31, s27
-		buffer_store_dwordx4 v[140:143], v29, s[28:31], 0 offen
+		s_mov_b32 s32, s6
+		s_mov_b32 s33, s7
+		s_mov_b32 s34, s26
+		s_mov_b32 s35, s27
+		buffer_store_dwordx4 v[140:143], v29, s[32:35], 0 offen
 		s_and_b32 s6, s10, s4
 		s_and_b32 s7, s11, s5
 		v_mul_lo_u32 v29, s17, v47
@@ -2532,7 +2547,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v40, v34, v40, s[6:7]
 		v_mov_b64_e32 v[140:141], v[72:73]
 		v_mov_b64_e32 v[142:143], v[88:89]
-		buffer_store_dwordx4 v[140:143], v40, s[28:31], 0 offen
+		buffer_store_dwordx4 v[140:143], v40, s[32:35], 0 offen
 		s_and_b32 s6, s14, s4
 		s_and_b32 s7, s15, s5
 		v_mul_lo_u32 v2, s17, v2
@@ -2543,10 +2558,43 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v40, v34, v40, s[6:7]
 		v_mov_b64_e32 v[140:141], v[42:43]
 		v_mov_b64_e32 v[142:143], v[66:67]
-		buffer_store_dwordx4 v[140:143], v40, s[28:31], 0 offen
+		buffer_store_dwordx4 v[140:143], v40, s[32:35], 0 offen
 		s_and_b32 s6, s18, s4
 		s_and_b32 s7, s19, s5
-		v_add_u32_e32 v40, 48, v35
+		v_mul_lo_u32 v8, s17, v8
+		v_lshlrev_b32_e32 v8, 1, v8
+		v_add_u32_e32 v40, s16, v8
+		v_add3_u32 v40, v40, v26, v4
+		v_add3_u32 v40, v40, v31, v33
+		v_cndmask_b32_e64 v40, v34, v40, s[6:7]
+		v_mov_b64_e32 v[64:65], v[74:75]
+		v_mov_b64_e32 v[66:67], v[90:91]
+		buffer_store_dwordx4 v[64:67], v40, s[32:35], 0 offen
+		s_and_b32 s6, s20, s4
+		s_and_b32 s7, s21, s5
+		v_mul_lo_u32 v16, s17, v16
+		v_lshlrev_b32_e32 v16, 1, v16
+		v_add_u32_e32 v40, s16, v16
+		v_add3_u32 v40, v40, v26, v4
+		v_add3_u32 v40, v40, v31, v33
+		v_cndmask_b32_e64 v40, v34, v40, s[6:7]
+		v_mov_b64_e32 v[64:65], v[92:93]
+		v_mov_b64_e32 v[66:67], v[96:97]
+		buffer_store_dwordx4 v[64:67], v40, s[32:35], 0 offen
+		s_and_b32 s6, s24, s4
+		s_and_b32 s7, s25, s5
+		v_mul_lo_u32 v9, s17, v9
+		v_lshlrev_b32_e32 v9, 1, v9
+		v_add_u32_e32 v40, s16, v9
+		v_add3_u32 v40, v40, v26, v4
+		v_add3_u32 v40, v40, v31, v33
+		v_cndmask_b32_e64 v40, v34, v40, s[6:7]
+		v_mov_b64_e32 v[64:65], v[100:101]
+		v_mov_b64_e32 v[66:67], v[104:105]
+		buffer_store_dwordx4 v[64:67], v40, s[32:35], 0 offen
+		s_and_b32 s6, s28, s4
+		s_and_b32 s7, s29, s5
+		v_add_u32_e32 v40, 0x60, v35
 		v_xor_b32_e32 v40, v40, v45
 		v_bitop3_b32 v40, v44, v46, v40 bitop3:0x96
 		v_mul_lo_u32 v40, s17, v40
@@ -2555,61 +2603,13 @@ _a4w4_kernel:
 		v_add3_u32 v41, v41, v26, v4
 		v_add3_u32 v41, v41, v31, v33
 		v_cndmask_b32_e64 v41, v34, v41, s[6:7]
-		v_mov_b64_e32 v[64:65], v[74:75]
-		v_mov_b64_e32 v[66:67], v[90:91]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
-		v_cmp_lt_i32_e64 vcc, v16, s12
+		v_mov_b64_e32 v[64:65], v[94:95]
+		v_mov_b64_e32 v[66:67], v[98:99]
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
+		v_cmp_lt_i32_e64 vcc, v11, s12
 		s_mov_b64 s[6:7], vcc
 		s_and_b32 s8, s6, s4
 		s_and_b32 s9, s7, s5
-		v_add_u32_e32 v16, 64, v35
-		v_xor_b32_e32 v16, v16, v45
-		v_bitop3_b32 v16, v44, v46, v16 bitop3:0x96
-		v_mul_lo_u32 v16, s17, v16
-		v_lshlrev_b32_e32 v16, 1, v16
-		v_add_u32_e32 v41, s16, v16
-		v_add3_u32 v41, v41, v26, v4
-		v_add3_u32 v41, v41, v31, v33
-		v_cndmask_b32_e64 v41, v34, v41, s[8:9]
-		v_mov_b64_e32 v[64:65], v[92:93]
-		v_mov_b64_e32 v[66:67], v[96:97]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
-		v_cmp_lt_i32_e64 vcc, v9, s12
-		s_mov_b64 s[8:9], vcc
-		s_and_b32 s22, s8, s4
-		s_and_b32 s23, s9, s5
-		v_add_u32_e32 v9, 0x50, v35
-		v_xor_b32_e32 v9, v9, v45
-		v_bitop3_b32 v9, v44, v46, v9 bitop3:0x96
-		v_mul_lo_u32 v9, s17, v9
-		v_lshlrev_b32_e32 v9, 1, v9
-		v_add_u32_e32 v41, s16, v9
-		v_add3_u32 v41, v41, v26, v4
-		v_add3_u32 v41, v41, v31, v33
-		v_cndmask_b32_e64 v41, v34, v41, s[22:23]
-		v_mov_b64_e32 v[64:65], v[100:101]
-		v_mov_b64_e32 v[66:67], v[104:105]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
-		v_cmp_lt_i32_e64 vcc, v10, s12
-		s_mov_b64 s[22:23], vcc
-		s_and_b32 s24, s22, s4
-		s_and_b32 s25, s23, s5
-		v_add_u32_e32 v10, 0x60, v35
-		v_xor_b32_e32 v10, v10, v45
-		v_bitop3_b32 v10, v44, v46, v10 bitop3:0x96
-		v_mul_lo_u32 v10, s17, v10
-		v_lshlrev_b32_e32 v10, 1, v10
-		v_add_u32_e32 v41, s16, v10
-		v_add3_u32 v41, v41, v26, v4
-		v_add3_u32 v41, v41, v31, v33
-		v_cndmask_b32_e64 v41, v34, v41, s[24:25]
-		v_mov_b64_e32 v[64:65], v[94:95]
-		v_mov_b64_e32 v[66:67], v[98:99]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
-		v_cmp_lt_i32_e64 vcc, v11, s12
-		s_mov_b64 s[24:25], vcc
-		s_and_b32 s26, s24, s4
-		s_and_b32 s27, s25, s5
 		v_add_u32_e32 v11, 0x70, v35
 		v_xor_b32_e32 v11, v11, v45
 		v_bitop3_b32 v11, v44, v46, v11 bitop3:0x96
@@ -2618,14 +2618,14 @@ _a4w4_kernel:
 		v_add_u32_e32 v41, s16, v11
 		v_add3_u32 v41, v41, v26, v4
 		v_add3_u32 v41, v41, v31, v33
-		v_cndmask_b32_e64 v41, v34, v41, s[26:27]
+		v_cndmask_b32_e64 v41, v34, v41, s[8:9]
 		v_mov_b64_e32 v[64:65], v[102:103]
 		v_mov_b64_e32 v[66:67], v[106:107]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v21, s12
-		s_mov_b64 s[26:27], vcc
-		s_and_b32 s32, s26, s4
-		s_and_b32 s33, s27, s5
+		s_mov_b64 s[8:9], vcc
+		s_and_b32 s26, s8, s4
+		s_and_b32 s27, s9, s5
 		v_add_u32_e32 v21, 0x80, v35
 		v_xor_b32_e32 v21, v21, v45
 		v_bitop3_b32 v21, v44, v46, v21 bitop3:0x96
@@ -2634,14 +2634,14 @@ _a4w4_kernel:
 		v_add_u32_e32 v41, s16, v21
 		v_add3_u32 v41, v41, v26, v4
 		v_add3_u32 v41, v41, v31, v33
-		v_cndmask_b32_e64 v41, v34, v41, s[32:33]
+		v_cndmask_b32_e64 v41, v34, v41, s[26:27]
 		v_mov_b64_e32 v[64:65], v[108:109]
 		v_mov_b64_e32 v[66:67], v[112:113]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v22, s12
-		s_mov_b64 s[32:33], vcc
-		s_and_b32 s34, s32, s4
-		s_and_b32 s35, s33, s5
+		s_mov_b64 s[26:27], vcc
+		s_and_b32 s30, s26, s4
+		s_and_b32 s31, s27, s5
 		v_add_u32_e32 v22, 0x90, v35
 		v_xor_b32_e32 v22, v22, v45
 		v_bitop3_b32 v22, v44, v46, v22 bitop3:0x96
@@ -2650,14 +2650,14 @@ _a4w4_kernel:
 		v_add_u32_e32 v41, s16, v22
 		v_add3_u32 v41, v41, v26, v4
 		v_add3_u32 v41, v41, v31, v33
-		v_cndmask_b32_e64 v41, v34, v41, s[34:35]
+		v_cndmask_b32_e64 v41, v34, v41, s[30:31]
 		v_mov_b64_e32 v[64:65], v[116:117]
 		v_mov_b64_e32 v[66:67], v[120:121]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v17, s12
-		s_mov_b64 s[34:35], vcc
-		s_and_b32 s36, s34, s4
-		s_and_b32 s37, s35, s5
+		s_mov_b64 s[30:31], vcc
+		s_and_b32 s36, s30, s4
+		s_and_b32 s37, s31, s5
 		v_add_u32_e32 v17, 0xa0, v35
 		v_xor_b32_e32 v17, v17, v45
 		v_bitop3_b32 v17, v44, v46, v17 bitop3:0x96
@@ -2669,7 +2669,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v41, v34, v41, s[36:37]
 		v_mov_b64_e32 v[64:65], v[110:111]
 		v_mov_b64_e32 v[66:67], v[114:115]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v18, s12
 		s_mov_b64 s[36:37], vcc
 		s_and_b32 s38, s36, s4
@@ -2685,7 +2685,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v41, v34, v41, s[38:39]
 		v_mov_b64_e32 v[64:65], v[118:119]
 		v_mov_b64_e32 v[66:67], v[122:123]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v3, s12
 		s_mov_b64 s[38:39], vcc
 		s_and_b32 s40, s38, s4
@@ -2701,7 +2701,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v41, v34, v41, s[40:41]
 		v_mov_b64_e32 v[64:65], v[124:125]
 		v_mov_b64_e32 v[66:67], v[128:129]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v20, s12
 		s_mov_b64 s[40:41], vcc
 		s_and_b32 s42, s40, s4
@@ -2717,7 +2717,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v41, v34, v41, s[42:43]
 		v_mov_b64_e32 v[64:65], v[132:133]
 		v_mov_b64_e32 v[66:67], v[136:137]
-		buffer_store_dwordx4 v[64:67], v41, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v41, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v61, s12
 		s_mov_b64 s[42:43], vcc
 		s_and_b32 s44, s42, s4
@@ -2733,7 +2733,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v42, v34, v42, s[44:45]
 		v_mov_b64_e32 v[64:65], v[126:127]
 		v_mov_b64_e32 v[66:67], v[130:131]
-		buffer_store_dwordx4 v[64:67], v42, s[28:31], 0 offen
+		buffer_store_dwordx4 v[64:67], v42, s[32:35], 0 offen
 		v_cmp_lt_i32_e64 vcc, v23, s12
 		s_mov_b64 s[44:45], vcc
 		s_and_b32 s46, s44, s4
@@ -2749,7 +2749,7 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v35, v34, v35, s[46:47]
 		v_mov_b64_e32 v[44:45], v[134:135]
 		v_mov_b64_e32 v[46:47], v[138:139]
-		buffer_store_dwordx4 v[44:47], v35, s[28:31], 0 offen
+		buffer_store_dwordx4 v[44:47], v35, s[32:35], 0 offen
 		v_and_b32_e32 v0, 0xff, v0
 		v_and_b32_e32 v12, 0xff, v12
 		v_lshlrev_b32_e32 v12, 8, v12
@@ -3036,12 +3036,6 @@ _a4w4_kernel:
 		ds_read_b128 v[92:95], v1 offset:3328
 		ds_read_b128 v[96:99], v1 offset:5120
 		ds_read_b128 v[100:103], v1 offset:5376
-		s_waitcnt lgkmcnt(0)
-		s_barrier
-		ds_write_b128 v6, v[12:15] offset:3072
-		ds_write_b128 v6, v[36:39] offset:7168
-		ds_write_b128 v6, v[44:47] offset:11264
-		ds_write_b128 v6, v[48:51] offset:15360
 		v_cmp_lt_i32_e64 vcc, v0, s13
 		s_mov_b64 s[4:5], vcc
 		s_and_b32 s12, s2, s4
@@ -3049,138 +3043,144 @@ _a4w4_kernel:
 		s_add_i32 s0, s0, 0x100
 		s_waitcnt lgkmcnt(0)
 		s_barrier
+		ds_write_b128 v6, v[12:15] offset:3072
+		ds_write_b128 v6, v[36:39] offset:7168
+		ds_write_b128 v6, v[44:47] offset:11264
+		ds_write_b128 v6, v[48:51] offset:15360
+		s_add_i32 s0, s0, s1
+		s_add_i32 s0, s0, s22
+		v_add3_u32 v0, s0, v10, v24
+		v_add3_u32 v0, v0, v32, v62
+		s_waitcnt lgkmcnt(0)
+		s_barrier
 		ds_read_b128 v[12:15], v1 offset:3072
 		ds_read_b128 v[36:39], v1 offset:3328
 		ds_read_b128 v[44:47], v1 offset:5120
 		ds_read_b128 v[48:51], v1 offset:5376
+		v_add3_u32 v0, v0, v26, v4
+		v_add3_u32 v0, v0, v31, v33
+		v_cndmask_b32_e64 v0, v34, v0, s[12:13]
+		v_mov_b64_e32 v[60:61], v[88:89]
+		v_mov_b64_e32 v[62:63], v[92:93]
+		buffer_store_dwordx4 v[60:63], v0, s[32:35], 0 offen
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_write_b128 v6, v[52:55] offset:3072
 		ds_write_b128 v6, v[56:59] offset:7168
 		ds_write_b128 v6, v[64:67] offset:11264
 		ds_write_b128 v6, v[68:71] offset:15360
-		s_add_i32 s0, s0, s1
-		s_add_i32 s0, s0, s20
-		v_add3_u32 v0, s0, v8, v24
-		v_add3_u32 v0, v0, v32, v62
+		s_and_b32 s2, s10, s4
+		s_and_b32 s3, s11, s5
+		v_add3_u32 v0, v26, v4, v31
+		v_add_u32_e32 v0, v0, v33
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b128 v[52:55], v1 offset:3072
 		ds_read_b128 v[56:59], v1 offset:3328
 		ds_read_b128 v[60:63], v1 offset:5120
 		ds_read_b128 v[64:67], v1 offset:5376
+		v_add3_u32 v5, v29, v0, s0
+		v_cndmask_b32_e64 v5, v34, v5, s[2:3]
+		v_mov_b64_e32 v[68:69], v[96:97]
+		v_mov_b64_e32 v[70:71], v[100:101]
+		buffer_store_dwordx4 v[68:71], v5, s[32:35], 0 offen
+		s_and_b32 s2, s14, s4
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_write_b128 v6, v[72:75] offset:3072
 		ds_write_b128 v6, v[76:79] offset:7168
 		ds_write_b128 v6, v[80:83] offset:11264
 		ds_write_b128 v6, v[84:87] offset:15360
-		v_add3_u32 v0, v0, v26, v4
-		v_add3_u32 v0, v0, v31, v33
-		v_cndmask_b32_e64 v0, v34, v0, s[12:13]
-		v_mov_b64_e32 v[68:69], v[88:89]
-		v_mov_b64_e32 v[70:71], v[92:93]
-		buffer_store_dwordx4 v[68:71], v0, s[28:31], 0 offen
+		s_and_b32 s3, s15, s5
+		v_add3_u32 v2, v2, v0, s0
+		v_cndmask_b32_e64 v2, v34, v2, s[2:3]
+		v_mov_b64_e32 v[68:69], v[90:91]
+		v_mov_b64_e32 v[70:71], v[94:95]
+		buffer_store_dwordx4 v[68:71], v2, s[32:35], 0 offen
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b128 v[68:71], v1 offset:3072
 		ds_read_b128 v[72:75], v1 offset:3328
 		ds_read_b128 v[76:79], v1 offset:5120
 		ds_read_b128 v[80:83], v1 offset:5376
-		s_waitcnt lgkmcnt(0)
-		s_barrier
-		s_and_b32 s2, s10, s4
-		s_and_b32 s3, s11, s5
-		v_add3_u32 v0, v26, v4, v31
-		v_add_u32_e32 v0, v0, v33
-		v_add3_u32 v1, v29, v0, s0
-		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
-		v_mov_b64_e32 v[84:85], v[96:97]
-		v_mov_b64_e32 v[86:87], v[100:101]
-		buffer_store_dwordx4 v[84:87], v1, s[28:31], 0 offen
-		s_and_b32 s2, s14, s4
-		s_and_b32 s3, s15, s5
-		v_add3_u32 v1, v2, v0, s0
-		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
-		v_mov_b64_e32 v[84:85], v[90:91]
-		v_mov_b64_e32 v[86:87], v[94:95]
-		buffer_store_dwordx4 v[84:87], v1, s[28:31], 0 offen
 		s_and_b32 s2, s18, s4
 		s_and_b32 s3, s19, s5
-		v_add3_u32 v0, v40, v0, s0
+		v_add3_u32 v0, v8, v0, s0
 		v_cndmask_b32_e64 v0, v34, v0, s[2:3]
+		s_waitcnt lgkmcnt(0)
+		s_barrier
 		v_mov_b64_e32 v[84:85], v[98:99]
 		v_mov_b64_e32 v[86:87], v[102:103]
-		buffer_store_dwordx4 v[84:87], v0, s[28:31], 0 offen
-		s_and_b32 s2, s6, s4
-		s_and_b32 s3, s7, s5
+		buffer_store_dwordx4 v[84:87], v0, s[32:35], 0 offen
+		s_and_b32 s2, s20, s4
+		s_and_b32 s3, s21, s5
 		v_add3_u32 v0, v26, v4, v31
 		v_add_u32_e32 v0, v0, v33
 		v_add3_u32 v1, v16, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[84:85], v[12:13]
 		v_mov_b64_e32 v[86:87], v[36:37]
-		buffer_store_dwordx4 v[84:87], v1, s[28:31], 0 offen
-		s_and_b32 s2, s8, s4
-		s_and_b32 s3, s9, s5
+		buffer_store_dwordx4 v[84:87], v1, s[32:35], 0 offen
+		s_and_b32 s2, s24, s4
+		s_and_b32 s3, s25, s5
 		v_add3_u32 v1, v9, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[84:85], v[44:45]
 		v_mov_b64_e32 v[86:87], v[48:49]
-		buffer_store_dwordx4 v[84:87], v1, s[28:31], 0 offen
-		s_and_b32 s2, s22, s4
-		s_and_b32 s3, s23, s5
-		v_add3_u32 v0, v10, v0, s0
+		buffer_store_dwordx4 v[84:87], v1, s[32:35], 0 offen
+		s_and_b32 s2, s28, s4
+		s_and_b32 s3, s29, s5
+		v_add3_u32 v0, v40, v0, s0
 		v_cndmask_b32_e64 v0, v34, v0, s[2:3]
 		v_mov_b64_e32 v[84:85], v[14:15]
 		v_mov_b64_e32 v[86:87], v[38:39]
-		buffer_store_dwordx4 v[84:87], v0, s[28:31], 0 offen
-		s_and_b32 s2, s24, s4
-		s_and_b32 s3, s25, s5
+		buffer_store_dwordx4 v[84:87], v0, s[32:35], 0 offen
+		s_and_b32 s2, s6, s4
+		s_and_b32 s3, s7, s5
 		v_add3_u32 v0, v26, v4, v31
 		v_add_u32_e32 v0, v0, v33
 		v_add3_u32 v1, v11, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[8:9], v[46:47]
 		v_mov_b64_e32 v[10:11], v[50:51]
-		buffer_store_dwordx4 v[8:11], v1, s[28:31], 0 offen
-		s_and_b32 s2, s26, s4
-		s_and_b32 s3, s27, s5
+		buffer_store_dwordx4 v[8:11], v1, s[32:35], 0 offen
+		s_and_b32 s2, s8, s4
+		s_and_b32 s3, s9, s5
 		v_add3_u32 v1, v21, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[8:9], v[52:53]
 		v_mov_b64_e32 v[10:11], v[56:57]
-		buffer_store_dwordx4 v[8:11], v1, s[28:31], 0 offen
-		s_and_b32 s2, s32, s4
-		s_and_b32 s3, s33, s5
+		buffer_store_dwordx4 v[8:11], v1, s[32:35], 0 offen
+		s_and_b32 s2, s26, s4
+		s_and_b32 s3, s27, s5
 		v_add3_u32 v0, v22, v0, s0
 		v_cndmask_b32_e64 v0, v34, v0, s[2:3]
 		v_mov_b64_e32 v[8:9], v[60:61]
 		v_mov_b64_e32 v[10:11], v[64:65]
-		buffer_store_dwordx4 v[8:11], v0, s[28:31], 0 offen
-		s_and_b32 s2, s34, s4
-		s_and_b32 s3, s35, s5
+		buffer_store_dwordx4 v[8:11], v0, s[32:35], 0 offen
+		s_and_b32 s2, s30, s4
+		s_and_b32 s3, s31, s5
 		v_add3_u32 v0, v26, v4, v31
 		v_add_u32_e32 v0, v0, v33
 		v_add3_u32 v1, v17, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[8:9], v[54:55]
 		v_mov_b64_e32 v[10:11], v[58:59]
-		buffer_store_dwordx4 v[8:11], v1, s[28:31], 0 offen
+		buffer_store_dwordx4 v[8:11], v1, s[32:35], 0 offen
 		s_and_b32 s2, s36, s4
 		s_and_b32 s3, s37, s5
 		v_add3_u32 v1, v18, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[8:9], v[62:63]
 		v_mov_b64_e32 v[10:11], v[66:67]
-		buffer_store_dwordx4 v[8:11], v1, s[28:31], 0 offen
+		buffer_store_dwordx4 v[8:11], v1, s[32:35], 0 offen
 		s_and_b32 s2, s38, s4
 		s_and_b32 s3, s39, s5
 		v_add3_u32 v0, v3, v0, s0
 		v_cndmask_b32_e64 v0, v34, v0, s[2:3]
 		v_mov_b64_e32 v[8:9], v[68:69]
 		v_mov_b64_e32 v[10:11], v[72:73]
-		buffer_store_dwordx4 v[8:11], v0, s[28:31], 0 offen
+		buffer_store_dwordx4 v[8:11], v0, s[32:35], 0 offen
 		s_and_b32 s2, s40, s4
 		s_and_b32 s3, s41, s5
 		v_add3_u32 v0, v26, v4, v31
@@ -3189,21 +3189,21 @@ _a4w4_kernel:
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[4:5], v[76:77]
 		v_mov_b64_e32 v[6:7], v[80:81]
-		buffer_store_dwordx4 v[4:7], v1, s[28:31], 0 offen
+		buffer_store_dwordx4 v[4:7], v1, s[32:35], 0 offen
 		s_and_b32 s2, s42, s4
 		s_and_b32 s3, s43, s5
 		v_add3_u32 v1, v41, v0, s0
 		v_cndmask_b32_e64 v1, v34, v1, s[2:3]
 		v_mov_b64_e32 v[4:5], v[70:71]
 		v_mov_b64_e32 v[6:7], v[74:75]
-		buffer_store_dwordx4 v[4:7], v1, s[28:31], 0 offen
+		buffer_store_dwordx4 v[4:7], v1, s[32:35], 0 offen
 		s_and_b32 s2, s44, s4
 		s_and_b32 s3, s45, s5
 		v_add3_u32 v0, v23, v0, s0
 		v_cndmask_b32_e64 v0, v34, v0, s[2:3]
 		v_mov_b64_e32 v[4:5], v[78:79]
 		v_mov_b64_e32 v[6:7], v[82:83]
-		buffer_store_dwordx4 v[4:7], v0, s[28:31], 0 offen
+		buffer_store_dwordx4 v[4:7], v0, s[32:35], 0 offen
 		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	_a4w4_kernel, .-_a4w4_kernel
