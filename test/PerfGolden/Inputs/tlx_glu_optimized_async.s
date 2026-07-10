@@ -934,8 +934,6 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_cmp_lt_i32 0, s4
 		s_cbranch_scc0 .Ltlx_addmm_glu_kernel_optimized_async.loop_exit_0
 .Ltlx_addmm_glu_kernel_optimized_async.loop_head_0:
-		s_waitcnt lgkmcnt(8)
-		s_barrier
 		s_lshl_b32 s16, s22, 7
 		s_add_i32 s20, s22, 3
 		s_mul_i32 s20, s20, 64
@@ -963,6 +961,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_add_i32 s20, s14, s20
 		v_cmp_lt_i32_e64 vcc, v16, s20
 		s_mov_b64 s[26:27], vcc
+		s_barrier
 		s_mul_hi_u32 s23, s22, 0xaaaaaaab
 		s_lshr_b32 s23, s23, 1
 		s_mul_i32 s23, s23, 3
@@ -985,7 +984,6 @@ tlx_addmm_glu_kernel_optimized_async:
 		buffer_load_dwordx4 v55, s[28:31], s16 offen lds
 .Ltlx_addmm_glu_kernel_optimized_async.exec_endif_13:
 		s_mov_b64 exec, s[46:47]
-		s_barrier
 		s_mul_i32 s16, s17, s22
 		s_lshl_b32 s16, s16, 7
 		s_add_i32 s25, s5, s16
@@ -1177,9 +1175,9 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_lshr_b32 s4, s4, 16
 		s_add_i32 s4, s5, s4
 		s_lshr_b32 s5, s9, 16
-		s_add_i32 s4, s4, s5
 		s_waitcnt vmcnt(0)
 		s_barrier
+		s_add_i32 s4, s4, s5
 		s_lshr_b32 s5, s8, 16
 		s_add_i32 s4, s4, s5
 		s_lshr_b32 s4, s4, 1
@@ -1201,7 +1199,6 @@ tlx_addmm_glu_kernel_optimized_async:
 		ds_read_b128 v[76:79], v0 offset:576
 		ds_read_b128 v[80:83], v0 offset:768
 		ds_read_b128 v[84:87], v0 offset:832
-		s_barrier
 		v_add_u32_e32 v0, s2, v49
 		ds_read_b64_tr_b16 v[88:89], v0 offset:50656
 		ds_read_b64_tr_b16 v[90:91], v0 offset:59104
@@ -1669,7 +1666,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_mov_b32 s21, s11
 		s_mov_b32 s22, s30
 		s_mov_b32 s23, s31
-		buffer_store_dwordx2 v[4:5], v9, s[20:23], 0 offen
+		buffer_store_dwordx2 v[4:5], v9, s[20:23], 0 offen sc0 nt
 		v_cmp_lt_i32_e64 vcc, v19, s13
 		s_mov_b64 s[6:7], vcc
 		s_and_b32 s10, s4, s6
@@ -1681,7 +1678,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v4, v4, v1, v12
 		v_add3_u32 v4, v4, v13, v8
 		v_cndmask_b32_e64 v4, v18, v4, s[10:11]
-		buffer_store_dwordx2 v[6:7], v4, s[20:23], 0 offen
+		buffer_store_dwordx2 v[6:7], v4, s[20:23], 0 offen sc0 nt
 		v_cmp_lt_i32_e64 vcc, v50, s12
 		s_mov_b64 s[4:5], vcc
 		s_and_b32 s10, s4, s2
@@ -1694,7 +1691,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v4, v4, v1, v12
 		v_add3_u32 v4, v4, v13, v8
 		v_cndmask_b32_e64 v4, v18, v4, s[10:11]
-		buffer_store_dwordx2 v[10:11], v4, s[20:23], 0 offen
+		buffer_store_dwordx2 v[10:11], v4, s[20:23], 0 offen sc0 nt
 		s_and_b32 s10, s4, s6
 		s_and_b32 s11, s5, s7
 		s_add_i32 s4, s8, 0x80
@@ -1705,7 +1702,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v4, v4, v1, v12
 		v_add3_u32 v4, v4, v13, v8
 		v_cndmask_b32_e64 v4, v18, v4, s[10:11]
-		buffer_store_dwordx2 v[14:15], v4, s[20:23], 0 offen
+		buffer_store_dwordx2 v[14:15], v4, s[20:23], 0 offen sc0 nt
 		v_cmp_lt_i32_e64 vcc, v3, s12
 		s_mov_b64 s[4:5], vcc
 		s_and_b32 s10, s4, s2
@@ -1718,7 +1715,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v3, v3, v1, v12
 		v_add3_u32 v3, v3, v13, v8
 		v_cndmask_b32_e64 v3, v18, v3, s[10:11]
-		buffer_store_dwordx2 v[16:17], v3, s[20:23], 0 offen
+		buffer_store_dwordx2 v[16:17], v3, s[20:23], 0 offen sc0 nt
 		s_and_b32 s10, s4, s6
 		s_and_b32 s11, s5, s7
 		s_add_i32 s4, s8, 0x80
@@ -1729,7 +1726,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v3, v3, v1, v12
 		v_add3_u32 v3, v3, v13, v8
 		v_cndmask_b32_e64 v3, v18, v3, s[10:11]
-		buffer_store_dwordx2 v[20:21], v3, s[20:23], 0 offen
+		buffer_store_dwordx2 v[20:21], v3, s[20:23], 0 offen sc0 nt
 		v_cmp_lt_i32_e64 vcc, v27, s12
 		s_mov_b64 s[4:5], vcc
 		s_and_b32 s10, s4, s2
@@ -1742,7 +1739,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v3, v3, v1, v12
 		v_add3_u32 v3, v3, v13, v8
 		v_cndmask_b32_e64 v3, v18, v3, s[10:11]
-		buffer_store_dwordx2 v[22:23], v3, s[20:23], 0 offen
+		buffer_store_dwordx2 v[22:23], v3, s[20:23], 0 offen sc0 nt
 		s_and_b32 s10, s4, s6
 		s_and_b32 s11, s5, s7
 		s_add_i32 s2, s2, 0x80
@@ -1753,7 +1750,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v0, v0, v1, v12
 		v_add3_u32 v0, v0, v13, v8
 		v_cndmask_b32_e64 v0, v18, v0, s[10:11]
-		buffer_store_dwordx2 v[24:25], v0, s[20:23], 0 offen
+		buffer_store_dwordx2 v[24:25], v0, s[20:23], 0 offen sc0 nt
 		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	tlx_addmm_glu_kernel_optimized_async, .-tlx_addmm_glu_kernel_optimized_async
