@@ -170,6 +170,15 @@ static bool canAliasInterval(const wave::WaveAMDLiveInterval &interval,
   return canAliasTypes(interval.type, valueType, offset);
 }
 
+static bool canFitIntervalAt(const wave::WaveAMDLiveInterval &base,
+                             const wave::WaveAMDLiveInterval &nested,
+                             int64_t offset) {
+  if (offset < 0 || base.type.getRegClass() != nested.type.getRegClass())
+    return false;
+  return static_cast<uint64_t>(offset) + nested.type.getWidth() <=
+         static_cast<uint64_t>(base.type.getWidth());
+}
+
 static FailureOr<unsigned>
 getIntervalSlotOffset(Value value, const wave::WaveAMDLiveInterval &interval,
                       Operation *errOp) {
@@ -179,63 +188,109 @@ getIntervalSlotOffset(Value value, const wave::WaveAMDLiveInterval &interval,
   return errOp->emitError("live interval table is missing value slot");
 }
 
-static LogicalResult
-verifySelfCoalesceSlot(Value extra, const wave::WaveAMDLiveInterval &interval,
-                       unsigned slotOffset, Operation *errOp) {
-  FailureOr<unsigned> existingSlot =
-      getIntervalSlotOffset(extra, interval, errOp);
-  if (failed(existingSlot))
-    return failure();
-  if (*existingSlot == slotOffset)
-    return success();
-  return errOp->emitError("coalesce: alias slot offset mismatch, existing ")
-         << *existingSlot << " requested " << slotOffset;
+static void clearInterval(wave::WaveAMDLiveInterval &interval) {
+  interval.values.clear();
+  interval.slotOffsets.clear();
+  interval.valueStarts.clear();
+  interval.valueEnds.clear();
 }
 
-// Merge `extra` into `primary`; `slotOffset` pins tuple elements under base.
+static void mergeIntervalAt(SmallVectorImpl<wave::WaveAMDLiveInterval> &bucket,
+                            DenseMap<Value, unsigned> &table, unsigned dstIdx,
+                            unsigned srcIdx, unsigned shift, Value usedValue,
+                            unsigned pos) {
+  wave::WaveAMDLiveInterval &dst = bucket[dstIdx];
+  wave::WaveAMDLiveInterval &src = bucket[srcIdx];
+  updateEnvelope(dst, src.start, std::max(src.end, pos));
+  for (auto [value, offset, start, end] :
+       llvm::zip(src.values, src.slotOffsets, src.valueStarts, src.valueEnds)) {
+    dst.values.push_back(value);
+    dst.slotOffsets.push_back(shift + offset);
+    dst.valueStarts.push_back(start);
+    dst.valueEnds.push_back(value == usedValue ? bumpEnd(end, pos) : end);
+    table[value] = dstIdx;
+  }
+  clearInterval(src);
+}
+
+static LogicalResult appendAliasValue(wave::WaveAMDLiveInterval &primary,
+                                      DenseMap<Value, unsigned> &table,
+                                      unsigned primaryIndex, Value extra,
+                                      waveamdmachine::RegType extraType,
+                                      unsigned requestedSlot, unsigned pos) {
+  if (!canAliasInterval(primary, extraType, requestedSlot))
+    return success();
+  appendIntervalValue(primary, extra, requestedSlot, pos, pos);
+  table[extra] = primaryIndex;
+  return success();
+}
+
+static LogicalResult
+mergeAliasIntervals(SmallVectorImpl<wave::WaveAMDLiveInterval> &bucket,
+                    DenseMap<Value, unsigned> &table, unsigned primaryIndex,
+                    unsigned extraIndex, Value extra, int64_t requestedSlot,
+                    unsigned pos, Operation *errOp) {
+  wave::WaveAMDLiveInterval &primary = bucket[primaryIndex];
+  wave::WaveAMDLiveInterval &extraInterval = bucket[extraIndex];
+  FailureOr<unsigned> extraSlot =
+      getIntervalSlotOffset(extra, extraInterval, errOp);
+  if (failed(extraSlot))
+    return failure();
+  if (extraIndex == primaryIndex) {
+    if (static_cast<int64_t>(*extraSlot) == requestedSlot)
+      return success();
+    return errOp->emitError("coalesce: alias slot offset mismatch, existing ")
+           << *extraSlot << " requested " << requestedSlot;
+  }
+
+  int64_t extraShift = requestedSlot - *extraSlot;
+  if (canFitIntervalAt(primary, extraInterval, extraShift)) {
+    mergeIntervalAt(bucket, table, primaryIndex, extraIndex,
+                    static_cast<unsigned>(extraShift), extra, pos);
+    return success();
+  }
+
+  int64_t primaryShift = *extraSlot - requestedSlot;
+  if (!canFitIntervalAt(extraInterval, primary, primaryShift))
+    return errOp->emitError("coalesce: alias interval envelope mismatch");
+  extendIntervalValue(extraInterval, extra, pos);
+  mergeIntervalAt(bucket, table, extraIndex, primaryIndex,
+                  static_cast<unsigned>(primaryShift), extra, pos);
+  return success();
+}
+
+// `delta` pins extra relative to primary, independent of either interval root.
 static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
                               wave::WaveAMDLiveIntervalSet &intervals,
-                              Operation *errOp, unsigned slotOffset = 0) {
+                              Operation *errOp, int64_t delta = 0) {
   std::optional<waveamdmachine::RegType> rt =
       wave::getTrackedWaveAMDRegType(primary);
   if (!rt)
     return success();
   std::optional<waveamdmachine::RegType> extraRt =
       wave::getTrackedWaveAMDRegType(extra);
-  if (!extraRt || rt->getRegClass() != extraRt->getRegClass())
+  if (!extraRt)
+    return success();
+  if (rt->getRegClass() != extraRt->getRegClass())
     return success();
   auto [bucket, table] = intervalsFor(*rt, intervals);
   auto primIt = table->find(primary);
   if (primIt == table->end())
     return errOp->emitError("coalesce: primary has no interval");
   unsigned primIdx = primIt->second;
-  if (!canAliasInterval((*bucket)[primIdx], *extraRt, slotOffset))
+  wave::WaveAMDLiveInterval &prim = (*bucket)[primIdx];
+  FailureOr<unsigned> primarySlot = getIntervalSlotOffset(primary, prim, errOp);
+  if (failed(primarySlot))
+    return failure();
+  int64_t requestedSlot = static_cast<int64_t>(*primarySlot) + delta;
+  if (requestedSlot < 0)
     return success();
   auto extraIt = table->find(extra);
-  if (extraIt == table->end()) {
-    appendIntervalValue((*bucket)[primIdx], extra, slotOffset, pos, pos);
-    (*table)[extra] = primIdx;
-    return success();
-  }
-  unsigned extraIdx = extraIt->second;
-  if (extraIdx == primIdx)
-    return verifySelfCoalesceSlot(extra, (*bucket)[primIdx], slotOffset, errOp);
-  wave::WaveAMDLiveInterval &prim = (*bucket)[primIdx];
-  wave::WaveAMDLiveInterval &ex = (*bucket)[extraIdx];
-  updateEnvelope(prim, ex.start, std::max(ex.end, pos));
-  for (auto [v, off, start, end] :
-       llvm::zip(ex.values, ex.slotOffsets, ex.valueStarts, ex.valueEnds)) {
-    prim.values.push_back(v);
-    prim.slotOffsets.push_back(slotOffset + off);
-    prim.valueStarts.push_back(start);
-    prim.valueEnds.push_back(bumpEnd(end, pos));
-    (*table)[v] = primIdx;
-  }
-  ex.values.clear();
-  ex.slotOffsets.clear();
-  ex.valueStarts.clear();
-  ex.valueEnds.clear();
-  return success();
+  if (extraIt == table->end())
+    return appendAliasValue(prim, *table, primIdx, extra, *extraRt,
+                            static_cast<unsigned>(requestedSlot), pos);
+  return mergeAliasIntervals(*bucket, *table, primIdx, extraIt->second, extra,
+                             requestedSlot, pos, errOp);
 }
 
 static bool operationIsInside(Operation *root, Operation *op) {
@@ -425,16 +480,13 @@ private:
       auto rt = wave::getTrackedWaveAMDRegType(init);
       if (!rt)
         continue;
-      auto [bucket, table] = intervalsFor(*rt, result.intervals);
+      DenseMap<Value, unsigned> *table =
+          intervalsFor(*rt, result.intervals).second;
       // Pre-pinned inits have no interval; carry/result already share phys.
       if (!table->contains(init))
         continue;
-      FailureOr<unsigned> initSlot =
-          getIntervalSlotOffset(init, (*bucket)[table->lookup(init)], loop);
-      if (failed(initSlot))
-        return failure();
-      if (failed(coalesce(init, body.getArgument(i), pos, result.intervals,
-                          loop, *initSlot)))
+      if (failed(
+              coalesce(init, body.getArgument(i), pos, result.intervals, loop)))
         return failure();
     }
     return success();
@@ -447,49 +499,15 @@ private:
       auto rt = wave::getTrackedWaveAMDRegType(init);
       if (!rt)
         continue;
-      auto [bucket, table] = intervalsFor(*rt, result.intervals);
+      DenseMap<Value, unsigned> *table =
+          intervalsFor(*rt, result.intervals).second;
       if (!table->contains(init))
         continue;
       (void)ensureInterval(resultValue, pos, result.intervals, loop,
                            includeAllocated);
-      FailureOr<unsigned> initSlot =
-          getIntervalSlotOffset(init, (*bucket)[table->lookup(init)], loop);
-      if (failed(initSlot))
-        return failure();
-      if (failed(coalesce(init, resultValue, pos, result.intervals, loop,
-                          *initSlot)))
+      if (failed(coalesce(init, resultValue, pos, result.intervals, loop)))
         return failure();
     }
-    return success();
-  }
-
-  LogicalResult mergeLoopBackEdgeInterval(waveamdmachine::UniformLoopOp loop,
-                                          wave::WaveAMDLiveInterval &loopIv,
-                                          wave::WaveAMDLiveInterval &carryIv,
-                                          unsigned initSlot, unsigned carrySlot,
-                                          unsigned loopIndex,
-                                          DenseMap<Value, unsigned> &table) {
-    updateEnvelope(loopIv, carryIv.start, carryIv.end);
-    for (auto [v, off, start, end] :
-         llvm::zip(carryIv.values, carryIv.slotOffsets, carryIv.valueStarts,
-                   carryIv.valueEnds)) {
-      int64_t shifted = static_cast<int64_t>(off) -
-                        static_cast<int64_t>(carrySlot) +
-                        static_cast<int64_t>(initSlot);
-      if (shifted < 0 ||
-          !canAliasInterval(loopIv, cast<waveamdmachine::RegType>(v.getType()),
-                            static_cast<unsigned>(shifted)))
-        return loop.emitError("loop carry alias slot offset mismatch");
-      loopIv.values.push_back(v);
-      loopIv.slotOffsets.push_back(static_cast<unsigned>(shifted));
-      loopIv.valueStarts.push_back(start);
-      loopIv.valueEnds.push_back(end);
-      table[v] = loopIndex;
-    }
-    carryIv.values.clear();
-    carryIv.slotOffsets.clear();
-    carryIv.valueStarts.clear();
-    carryIv.valueEnds.clear();
     return success();
   }
 
@@ -503,27 +521,14 @@ private:
       auto rt = wave::getTrackedWaveAMDRegType(init);
       if (!rt)
         continue;
-      auto [bucket, table] = intervalsFor(*rt, result.intervals);
+      DenseMap<Value, unsigned> *table =
+          intervalsFor(*rt, result.intervals).second;
       auto initIt = table->find(init);
       auto carryIt = table->find(carry);
       if (carryIt == table->end() || initIt == table->end())
         continue;
-      wave::WaveAMDLiveInterval &loopIv = (*bucket)[initIt->second];
-      wave::WaveAMDLiveInterval &carryIv = (*bucket)[carryIt->second];
-      FailureOr<unsigned> initSlot = getIntervalSlotOffset(init, loopIv, loop);
-      if (failed(initSlot))
-        return failure();
-      FailureOr<unsigned> carrySlot =
-          getIntervalSlotOffset(carry, carryIv, loop);
-      if (failed(carrySlot))
-        return failure();
-      if (carryIt->second == initIt->second) {
-        if (*carrySlot != *initSlot)
-          return loop.emitError("loop carry alias slot offset mismatch");
-        continue;
-      }
-      if (failed(mergeLoopBackEdgeInterval(loop, loopIv, carryIv, *initSlot,
-                                           *carrySlot, initIt->second, *table)))
+      if (failed(coalesce(init, carry, result.positions.lookup(term),
+                          result.intervals, loop)))
         return failure();
     }
     return success();
@@ -804,12 +809,7 @@ private:
       return success();
     if (!intervalValueEndsAt((*bucket)[accIt->second], alias->acc, pos))
       return success();
-    FailureOr<unsigned> accSlot =
-        getIntervalSlotOffset(alias->acc, (*bucket)[accIt->second], &op);
-    if (failed(accSlot))
-      return failure();
-    return coalesce(alias->acc, alias->result, pos, result.intervals, &op,
-                    *accSlot);
+    return coalesce(alias->acc, alias->result, pos, result.intervals, &op);
   }
 
   LogicalResult coalesceMFMAAccumulatorOps() {

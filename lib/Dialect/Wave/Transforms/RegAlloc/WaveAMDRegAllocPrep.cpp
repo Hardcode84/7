@@ -19,6 +19,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 #include <optional>
 
 using namespace mlir;
@@ -399,9 +400,10 @@ static void collectRequiredKilledOperandInputCopies(
   }
 }
 
-static LogicalResult splitRequiredKilledOperandInputs(func::FuncOp func) {
+static LogicalResult
+splitRequiredKilledOperandInputs(func::FuncOp func,
+                                 KilledOperandReuseIsaCache &isaCache) {
   SmallVector<std::pair<Operation *, unsigned>> operands;
-  KilledOperandReuseIsaCache isaCache(func);
   func.walk([&](Operation *op) {
     collectRequiredKilledOperandInputCopies(op, isaCache, operands);
   });
@@ -497,47 +499,92 @@ static bool feedsLoopCarry(Value v) {
 
 using ToElementsSourceMap = DenseMap<Value, std::pair<Value, unsigned>>;
 
-static bool isPerfectRoundTrip(waveamdmachine::TupleFromElementsOp op,
-                               const ToElementsSourceMap &source) {
+struct AlignedTupleView {
   Value sourceTuple;
-  unsigned cumOffset = 0;
-  for (Value element : op.getElements()) {
-    auto srcIt = source.find(element);
-    if (srcIt == source.end())
-      return false;
-    auto [srcTuple, srcSlot] = srcIt->second;
-    if (!sourceTuple)
-      sourceTuple = srcTuple;
-    else if (sourceTuple != srcTuple)
-      return false;
-    if (srcSlot != cumOffset)
-      return false;
-    cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
-  }
-  if (!sourceTuple)
+  unsigned sourceOffset = 0;
+};
+
+struct AlignedTupleViewState {
+  std::optional<unsigned> sourceOffset;
+  Value sourceTuple;
+  unsigned consumerOffset = 0;
+};
+
+static bool addAlignedTupleViewElement(Value element,
+                                       const ToElementsSourceMap &source,
+                                       AlignedTupleViewState &state) {
+  auto sourceIt = source.find(element);
+  if (sourceIt == source.end())
     return false;
-  int64_t fromW =
+  auto [elementSource, elementOffset] = sourceIt->second;
+  if (!state.sourceTuple)
+    state.sourceTuple = elementSource;
+  else if (state.sourceTuple != elementSource)
+    return false;
+  if (elementOffset < state.consumerOffset)
+    return false;
+  unsigned sourceOffset = elementOffset - state.consumerOffset;
+  if (state.sourceOffset && *state.sourceOffset != sourceOffset)
+    return false;
+  state.sourceOffset = sourceOffset;
+  state.consumerOffset +=
+      cast<waveamdmachine::RegType>(element.getType()).getWidth();
+  return true;
+}
+
+static std::optional<AlignedTupleView>
+getAlignedTupleView(waveamdmachine::TupleFromElementsOp op,
+                    const ToElementsSourceMap &source) {
+  AlignedTupleViewState state;
+  for (Value element : op.getElements())
+    if (!addAlignedTupleViewElement(element, source, state))
+      return std::nullopt;
+  if (!state.sourceTuple)
+    return std::nullopt;
+  if (!state.sourceOffset)
+    return std::nullopt;
+  unsigned tupleWidth =
       cast<waveamdmachine::RegType>(op.getTuple().getType()).getWidth();
-  int64_t srcW =
-      cast<waveamdmachine::RegType>(sourceTuple.getType()).getWidth();
-  return fromW == srcW;
+  unsigned sourceWidth =
+      cast<waveamdmachine::RegType>(state.sourceTuple.getType()).getWidth();
+  if (state.consumerOffset != tupleWidth)
+    return std::nullopt;
+  if (*state.sourceOffset + tupleWidth > sourceWidth)
+    return std::nullopt;
+  unsigned alignment = std::max<unsigned>(1, llvm::PowerOf2Ceil(tupleWidth));
+  if (*state.sourceOffset % alignment != 0)
+    return std::nullopt;
+  return AlignedTupleView{state.sourceTuple, *state.sourceOffset};
 }
 
-static bool hasFixedElement(ValueRange elements) {
-  return llvm::any_of(elements, [](Value element) {
-    return cast<waveamdmachine::RegType>(element.getType()).getIndex() >= 0;
-  });
+static bool addFixedBaseConstraint(Value value, unsigned offset,
+                                   std::optional<int64_t> &fixedBase) {
+  int64_t index = cast<waveamdmachine::RegType>(value.getType()).getIndex();
+  if (index < 0)
+    return true;
+  if (index < offset)
+    return false;
+  int64_t base = index - offset;
+  if (fixedBase && *fixedBase != base)
+    return false;
+  fixedBase = base;
+  return true;
 }
 
-static std::optional<unsigned>
-slotInTupleElements(waveamdmachine::TupleFromElementsOp op, Value needle) {
-  unsigned cumOffset = 0;
+static bool hasFixedViewConflict(waveamdmachine::TupleFromElementsOp op,
+                                 AlignedTupleView view,
+                                 const ToElementsSourceMap &source) {
+  std::optional<int64_t> fixedBase;
+  if (!addFixedBaseConstraint(view.sourceTuple, 0, fixedBase) ||
+      !addFixedBaseConstraint(op.getTuple(), view.sourceOffset, fixedBase))
+    return true;
   for (Value element : op.getElements()) {
-    if (element == needle)
-      return cumOffset;
-    cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
+    auto sourceIt = source.find(element);
+    assert(sourceIt != source.end() && "aligned view element lacks source");
+    if (!addFixedBaseConstraint(element, sourceIt->second.second, fixedBase))
+      return true;
   }
-  return std::nullopt;
+  return false;
 }
 
 static bool hasSingleUseBy(Value value, Operation *user) {
@@ -545,75 +592,197 @@ static bool hasSingleUseBy(Value value, Operation *user) {
          value.use_begin()->getOwner() == user;
 }
 
-static bool
-splitElementFitsConsumer(waveamdmachine::TupleFromElementsOp consumer,
-                         Value splitElement, Value sourceTuple,
-                         unsigned slotDelta,
-                         const ToElementsSourceMap &toElementsSource) {
-  auto splitIt = toElementsSource.find(splitElement);
-  if (splitIt == toElementsSource.end())
-    return false;
-  if (splitIt->second.first != sourceTuple)
-    return false;
-  if (!hasSingleUseBy(splitElement, consumer.getOperation()))
-    return false;
-  std::optional<unsigned> slot = slotInTupleElements(consumer, splitElement);
-  if (!slot)
-    return false;
-  return *slot == splitIt->second.second + slotDelta;
+static DenseMap<Value, unsigned>
+getTupleElementSlots(waveamdmachine::TupleFromElementsOp op) {
+  DenseMap<Value, unsigned> slots;
+  unsigned offset = 0;
+  for (Value element : op.getElements()) {
+    slots.try_emplace(element, offset);
+    offset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
+  }
+  return slots;
+}
+
+static std::optional<unsigned>
+getReanchorShift(waveamdmachine::TupleFromElementsOp op, Value element,
+                 const ToElementsSourceMap &source,
+                 const DenseMap<Value, unsigned> &consumerSlots) {
+  auto sourceIt = source.find(element);
+  if (sourceIt == source.end())
+    return std::nullopt;
+  auto slotIt = consumerSlots.find(element);
+  if (slotIt == consumerSlots.end())
+    return std::nullopt;
+  if (!hasSingleUseBy(element, op.getOperation()))
+    return std::nullopt;
+  if (slotIt->second < sourceIt->second.second)
+    return std::nullopt;
+  return slotIt->second - sourceIt->second.second;
 }
 
 static bool
-canReanchorSingleUseSplitElement(waveamdmachine::TupleFromElementsOp consumer,
-                                 Value element, unsigned consumerSlot,
-                                 const ToElementsSourceMap &toElementsSource) {
-  auto sourceIt = toElementsSource.find(element);
-  if (sourceIt == toElementsSource.end())
-    return false;
-  Value sourceTuple = sourceIt->second.first;
-  unsigned sourceSlot = sourceIt->second.second;
-  auto split = element.getDefiningOp<waveamdmachine::TupleToElementsOp>();
-  if (!split || split.getTuple() != sourceTuple)
+isReanchorableSource(waveamdmachine::TupleFromElementsOp op, Value sourceTuple,
+                     Value representative, const ToElementsSourceMap &source,
+                     const DenseMap<Value, unsigned> &consumerSlots) {
+  auto split =
+      representative.getDefiningOp<waveamdmachine::TupleToElementsOp>();
+  if (!split)
     return false;
   if (!hasSingleUseBy(sourceTuple, split.getOperation()))
     return false;
-  if (consumerSlot < sourceSlot)
-    return false;
-  unsigned slotDelta = consumerSlot - sourceSlot;
-  for (Value splitElement : split.getElements())
-    if (!splitElementFitsConsumer(consumer, splitElement, sourceTuple,
-                                  slotDelta, toElementsSource))
+  std::optional<unsigned> shift;
+  for (Value element : split.getElements()) {
+    std::optional<unsigned> elementShift =
+        getReanchorShift(op, element, source, consumerSlots);
+    if (!elementShift)
       return false;
-  return true;
+    if (shift && *shift != *elementShift)
+      return false;
+    shift = elementShift;
+  }
+  return shift.has_value();
 }
 
-static bool hasSlotMismatch(DenseMap<Value, unsigned> &anchorSlot,
+static DenseSet<Value>
+getReanchorableSources(waveamdmachine::TupleFromElementsOp op,
+                       const ToElementsSourceMap &source,
+                       const DenseMap<Value, unsigned> &consumerSlots) {
+  DenseMap<Value, Value> representatives;
+  for (Value element : op.getElements()) {
+    auto sourceIt = source.find(element);
+    if (sourceIt != source.end())
+      representatives.try_emplace(sourceIt->second.first, element);
+  }
+
+  DenseSet<Value> result;
+  for (auto [sourceTuple, representative] : representatives)
+    if (isReanchorableSource(op, sourceTuple, representative, source,
+                             consumerSlots))
+      result.insert(sourceTuple);
+  return result;
+}
+
+static bool isStorageClobberUse(OpOperand &use,
+                                KilledOperandReuseIsaCache &isaCache) {
+  Operation *user = use.getOwner();
+  if (isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp,
+          waveamdmachine::UpdateTupleOp>(user))
+    return true;
+  if (auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(user))
+    if (user->hasTrait<OpTrait::waveamdmachine::MFMAOp>() &&
+        mma.getAcc() == use.get())
+      return true;
+  waveamdmachine::KilledOperandReuseOpInterface reuse =
+      wave::regalloc_detail::getKilledOperandReuseCandidate(user);
+  if (!reuse)
+    return false;
+  const llvm::AMDGPU::IsaVersion *isa = isaCache.get();
+  return isa && wave::regalloc_detail::requiresKilledOperandReuseForResult(
+                    reuse, use, *isa);
+}
+
+static bool
+hasAlignedViewLifetimeConflict(waveamdmachine::TupleFromElementsOp op,
+                               AlignedTupleView view,
+                               KilledOperandReuseIsaCache &isaCache) {
+  if (llvm::none_of(op.getTuple().getUses(), [&](OpOperand &use) {
+        return isStorageClobberUse(use, isaCache);
+      }))
+    return false;
+  auto split = op.getElements()
+                   .front()
+                   .getDefiningOp<waveamdmachine::TupleToElementsOp>();
+  if (!split || split.getTuple() != view.sourceTuple ||
+      !hasSingleUseBy(view.sourceTuple, split.getOperation()))
+    return true;
+  return llvm::any_of(op.getElements(), [&](Value element) {
+    return !hasSingleUseBy(element, op.getOperation());
+  });
+}
+
+static bool hasSlotMismatch(const DenseMap<Value, unsigned> &anchorSlot,
                             Value element, unsigned slot) {
   auto anchorIt = anchorSlot.find(element);
   return anchorIt != anchorSlot.end() && anchorIt->second != slot;
 }
 
-static bool hasDragInConflict(bool perfectRT, Value element,
-                              const ToElementsSourceMap &toElementsSource,
-                              bool singleUseSplitConcat) {
-  return !perfectRT && toElementsSource.contains(element) &&
-         !singleUseSplitConcat;
-}
-
-static bool breaksUnfixedRoundTrip(waveamdmachine::TupleFromElementsOp op,
-                                   waveamdmachine::RegType tupleType,
-                                   bool perfectRT) {
-  return perfectRT && tupleType.getIndex() < 0 &&
-         hasFixedElement(op.getElements());
-}
-
 static bool needsTupleElementCopy(Value element, bool slotMismatch, bool reuse,
                                   bool dragInConflict,
-                                  bool fixedElementInUnfixedTuple,
-                                  bool brokenRoundTripElement) {
+                                  bool fixedElementInUnfixedTuple) {
   return slotMismatch || reuse || dragInConflict ||
-         fixedElementInUnfixedTuple || brokenRoundTripElement ||
-         feedsLoopCarry(element);
+         fixedElementInUnfixedTuple || feedsLoopCarry(element);
+}
+
+static bool canPreserveAlignedView(waveamdmachine::TupleFromElementsOp op,
+                                   AlignedTupleView view,
+                                   const ToElementsSourceMap &source,
+                                   KilledOperandReuseIsaCache &isaCache) {
+  if (hasFixedViewConflict(op, view, source))
+    return false;
+  return !hasAlignedViewLifetimeConflict(op, view, isaCache);
+}
+
+static bool isReanchoredElement(Value element,
+                                const ToElementsSourceMap &source,
+                                const DenseSet<Value> &reanchorableSources) {
+  auto sourceIt = source.find(element);
+  if (sourceIt == source.end())
+    return false;
+  return reanchorableSources.contains(sourceIt->second.first);
+}
+
+static bool hasSharingSlotConflict(const DenseMap<Value, unsigned> &anchorSlot,
+                                   Value element, unsigned slot,
+                                   bool preserveLayout) {
+  return !preserveLayout && hasSlotMismatch(anchorSlot, element, slot);
+}
+
+static bool hasSharingReuse(const DenseSet<Value> &consumed, Value element,
+                            bool preserveAlignedView) {
+  return !preserveAlignedView && consumed.contains(element);
+}
+
+static bool hasSourceDragConflict(Value element,
+                                  const ToElementsSourceMap &source,
+                                  bool preserveLayout) {
+  return !preserveLayout && source.contains(element);
+}
+
+static bool hasFixedElementConflict(Value element,
+                                    waveamdmachine::RegType tupleType,
+                                    bool preserveAlignedView) {
+  if (preserveAlignedView || tupleType.getIndex() >= 0)
+    return false;
+  return cast<waveamdmachine::RegType>(element.getType()).getIndex() >= 0;
+}
+
+static FailureOr<Value> rewriteTupleElementForSharing(
+    waveamdmachine::TupleFromElementsOp op, OpBuilder &builder, Value element,
+    unsigned slot, waveamdmachine::RegType tupleType, bool preserveAlignedView,
+    bool preserveLayout, DenseMap<Value, unsigned> &anchorSlot,
+    const ToElementsSourceMap &source,
+    DenseSet<Value> &consumedByFromElements) {
+  bool slotMismatch =
+      hasSharingSlotConflict(anchorSlot, element, slot, preserveLayout);
+  bool reuse =
+      hasSharingReuse(consumedByFromElements, element, preserveAlignedView);
+  bool dragInConflict = hasSourceDragConflict(element, source, preserveLayout);
+  bool fixedConflict =
+      hasFixedElementConflict(element, tupleType, preserveAlignedView);
+  if (!needsTupleElementCopy(element, slotMismatch, reuse, dragInConflict,
+                             fixedConflict)) {
+    if (!preserveAlignedView)
+      anchorSlot[element] = slot;
+    consumedByFromElements.insert(element);
+    return element;
+  }
+
+  FailureOr<Value> duplicate = duplicateRegValue(builder, op.getLoc(), element);
+  if (failed(duplicate))
+    return failure();
+  anchorSlot[*duplicate] = slot;
+  consumedByFromElements.insert(*duplicate);
+  return *duplicate;
 }
 
 static LogicalResult
@@ -621,55 +790,48 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
                               OpBuilder &builder,
                               DenseMap<Value, unsigned> &anchorSlot,
                               const ToElementsSourceMap &toElementsSource,
-                              DenseSet<Value> &consumedByFromElements) {
+                              DenseSet<Value> &consumedByFromElements,
+                              KilledOperandReuseIsaCache &isaCache) {
   builder.setInsertionPoint(op);
-  bool perfectRT = isPerfectRoundTrip(op, toElementsSource);
+  DenseMap<Value, unsigned> consumerSlots = getTupleElementSlots(op);
+  DenseSet<Value> reanchorableSources =
+      getReanchorableSources(op, toElementsSource, consumerSlots);
+  std::optional<AlignedTupleView> alignedView =
+      getAlignedTupleView(op, toElementsSource);
+  if (alignedView &&
+      !canPreserveAlignedView(op, *alignedView, toElementsSource, isaCache)) {
+    reanchorableSources.erase(alignedView->sourceTuple);
+    alignedView.reset();
+  }
   SmallVector<Value> newElements;
   newElements.reserve(op.getElements().size());
   bool changed = false;
   unsigned cumOffset = 0;
   waveamdmachine::RegType tupleType =
       cast<waveamdmachine::RegType>(op.getTuple().getType());
-  bool copyRoundTripElements = breaksUnfixedRoundTrip(op, tupleType, perfectRT);
+  bool preserveAlignedView = alignedView.has_value();
   for (Value element : op.getElements()) {
     unsigned slot = cumOffset;
-    waveamdmachine::RegType elementType =
-        cast<waveamdmachine::RegType>(element.getType());
-    unsigned width = elementType.getWidth();
-    Value use = element;
-    bool singleUseSplitConcat =
-        canReanchorSingleUseSplitElement(op, element, slot, toElementsSource);
-    bool slotMismatch =
-        hasSlotMismatch(anchorSlot, element, slot) && !singleUseSplitConcat;
-    bool reuse = consumedByFromElements.contains(element);
-    bool dragInConflict = hasDragInConflict(
-        perfectRT, element, toElementsSource, singleUseSplitConcat);
-    bool fixedElementInUnfixedTuple =
-        tupleType.getIndex() < 0 && elementType.getIndex() >= 0;
-    bool brokenRoundTripElement =
-        copyRoundTripElements && toElementsSource.contains(element);
-    if (needsTupleElementCopy(element, slotMismatch, reuse, dragInConflict,
-                              fixedElementInUnfixedTuple,
-                              brokenRoundTripElement)) {
-      FailureOr<Value> dup = duplicateRegValue(builder, op.getLoc(), element);
-      if (failed(dup))
-        return failure();
-      use = *dup;
-      anchorSlot[use] = slot;
-      changed = true;
-    } else {
-      anchorSlot[element] = slot;
-    }
-    consumedByFromElements.insert(use);
-    newElements.push_back(use);
-    cumOffset += width;
+    bool reanchorSource =
+        isReanchoredElement(element, toElementsSource, reanchorableSources);
+    bool preserveLayout = preserveAlignedView || reanchorSource;
+    FailureOr<Value> use = rewriteTupleElementForSharing(
+        op, builder, element, slot, tupleType, preserveAlignedView,
+        preserveLayout, anchorSlot, toElementsSource, consumedByFromElements);
+    if (failed(use))
+      return failure();
+    changed |= *use != element;
+    newElements.push_back(*use);
+    cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
   }
   if (changed)
     op.getElementsMutable().assign(newElements);
   return success();
 }
 
-static LogicalResult splitTupleElementSharing(func::FuncOp func) {
+static LogicalResult
+splitTupleElementSharing(func::FuncOp func,
+                         KilledOperandReuseIsaCache &isaCache) {
   OpBuilder builder(func.getContext());
   DenseMap<Value, unsigned> anchorSlot;
   ToElementsSourceMap toElementsSource;
@@ -685,8 +847,9 @@ static LogicalResult splitTupleElementSharing(func::FuncOp func) {
   SmallVector<waveamdmachine::TupleFromElementsOp> ops;
   func.walk([&](waveamdmachine::TupleFromElementsOp op) { ops.push_back(op); });
   for (waveamdmachine::TupleFromElementsOp op : ops) {
-    if (failed(rewriteFromElementsForSharing(
-            op, builder, anchorSlot, toElementsSource, consumedByFromElements)))
+    if (failed(rewriteFromElementsForSharing(op, builder, anchorSlot,
+                                             toElementsSource,
+                                             consumedByFromElements, isaCache)))
       return failure();
   }
   return success();
@@ -751,7 +914,8 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
     return failure();
   if (failed(splitDuplicateMFMAAccumulatorInputs(func)))
     return failure();
-  if (failed(splitRequiredKilledOperandInputs(func)))
+  KilledOperandReuseIsaCache isaCache(func);
+  if (failed(splitRequiredKilledOperandInputs(func, isaCache)))
     return failure();
-  return splitTupleElementSharing(func);
+  return splitTupleElementSharing(func, isaCache);
 }
