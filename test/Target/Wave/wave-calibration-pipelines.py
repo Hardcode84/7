@@ -139,6 +139,7 @@ def check_preschedule(label: str, ir, preschedule) -> None:
         [
             "waveamd-split-barriers",
             "waveamd-mma-reuse-preschedule",
+            "waveamd-scalar-mask-preschedule",
             "waveamd-hazard-repair",
         ],
         "preschedule pass order drifted",

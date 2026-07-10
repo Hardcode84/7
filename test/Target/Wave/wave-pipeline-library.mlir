@@ -134,6 +134,8 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-mma-reuse-preschedule"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-scalar-mask-preschedule"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-hazard-repair"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE: transform.named_sequence @waveamd_backend_postschedule

@@ -2448,6 +2448,7 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[224:227], v[16:19], v[164:167], v8, v248 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[224:227], v[232:235], v[168:171], v8, v248 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[228:231], v[232:235], v[200:203], v8, v248 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		s_cmp_lt_i32 s47, s4
 		s_mov_b32 s48, 0
 		scratch_load_dword v16, off, s48 offset:236
 		scratch_load_dword v17, off, s48 offset:240
@@ -2482,7 +2483,6 @@ wmma_f16_matmul_tiled:
 		scratch_load_dword v0, off, s48 offset:272
 		s_waitcnt vmcnt(0)
 		v_mov_b32_e32 v18, v0
-		s_cmp_lt_i32 s47, s4
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		s_add_i32 s0, s12, -1

@@ -198,8 +198,10 @@ module attributes {transform.with_named_sequence} {
         to %r0 : (!transform.any_op) -> !transform.any_op
     %rpre = transform.apply_registered_pass "waveamd-mma-reuse-preschedule"
         to %rsplit : (!transform.any_op) -> !transform.any_op
-    %rrepair = transform.apply_registered_pass "waveamd-hazard-repair"
+    %rmask = transform.apply_registered_pass "waveamd-scalar-mask-preschedule"
         to %rpre : (!transform.any_op) -> !transform.any_op
+    %rrepair = transform.apply_registered_pass "waveamd-hazard-repair"
+        to %rmask : (!transform.any_op) -> !transform.any_op
     transform.yield %rrepair : !transform.any_op
   }
 
