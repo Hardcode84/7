@@ -27,6 +27,7 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -103,8 +104,11 @@ struct ArchResolution {
 };
 
 struct GraphTables {
+  DenseMap<Operation *, unsigned> node;
   SmallVector<ScheduleEdge, 32> edges;
+  SmallVector<SmallVector<unsigned, 4>, 16> predecessors;
   SmallVector<SmallVector<unsigned, 4>, 16> successors;
+  SmallVector<unsigned, 16> memoryNodes;
   SmallVector<unsigned, 16> pendingPreds;
 };
 
@@ -157,6 +161,7 @@ struct GreedyStats {
   unsigned cheapHazardGaps = 0;
   unsigned m0Gaps = 0;
   unsigned storeDataGaps = 0;
+  unsigned vmemPrefetchMoves = 0;
   unsigned memoryTokenGaps = 0;
   unsigned barrierMemoryGaps = 0;
   unsigned filledBarrierMemoryGaps = 0;
@@ -377,6 +382,7 @@ static void addEdge(GraphTables &graph, unsigned src, unsigned dst,
   graph.edges.push_back({src, dst, kind, recurrence});
   if (recurrence)
     return;
+  graph.predecessors[dst].push_back(src);
   graph.successors[src].push_back(dst);
   ++graph.pendingPreds[dst];
 }
@@ -506,34 +512,43 @@ static void addLoopCarryEdges(const GreedyRegion &region, GraphTables &graph,
   }
 }
 
+static void indexGraphNodes(const GreedyRegion &region, GraphTables &graph) {
+  for (auto [index, op] : llvm::enumerate(region.ops)) {
+    graph.node[op] = index;
+    if (waveamdmachine::getMemoryCounterKind(op) != MemoryKind::None)
+      graph.memoryNodes.push_back(index);
+  }
+}
+
 static LogicalResult buildGraph(const GreedyRegion &region,
                                 GraphTables &graph) {
   graph.successors.resize(region.ops.size());
+  graph.predecessors.resize(region.ops.size());
   graph.pendingPreds.assign(region.ops.size(), 0);
 
-  DenseMap<Operation *, unsigned> node;
-  for (auto [index, op] : llvm::enumerate(region.ops))
-    node[op] = index;
+  indexGraphNodes(region, graph);
 
   for (auto [dst, op] : llvm::enumerate(region.ops)) {
     for (Value operand : op->getOperands()) {
       Operation *def = operand.getDefiningOp();
       if (!def)
         continue;
-      auto it = node.find(def);
-      if (it == node.end())
+      auto it = graph.node.find(def);
+      if (it == graph.node.end())
         continue;
       addEdge(graph, it->second, dst,
               isMemToken(operand) ? EdgeKind::MemToken : EdgeKind::Ssa);
     }
   }
 
-  if (failed(addSingletonEdges(region, graph, node)))
+  if (failed(addSingletonEdges(region, graph, graph.node)))
     return failure();
   addExecEdges(region, graph);
-  addLoopCarryEdges(region, graph, node);
+  addLoopCarryEdges(region, graph, graph.node);
   for (SmallVector<unsigned, 4> &succs : graph.successors)
     llvm::sort(succs);
+  for (SmallVector<unsigned, 4> &preds : graph.predecessors)
+    llvm::sort(preds);
   return success();
 }
 
@@ -810,6 +825,199 @@ projectIssueOrder(const IssueState &state, ArrayRef<Operation *> ops,
   }
   projection.cycles = trial.model.getCurrentCycle() - startCycle;
   return projection;
+}
+
+static unsigned findFirstRealDataConsumer(Operation *producer,
+                                          const GreedyRegion &region,
+                                          const GraphTables &graph,
+                                          const BitVector &scheduled) {
+  SmallVector<Value, 8> pending;
+  for (Value result : producer->getResults())
+    if (!isMemToken(result))
+      pending.push_back(result);
+
+  DenseSet<Value> seen;
+  unsigned first = region.ops.size();
+  while (!pending.empty()) {
+    Value value = pending.pop_back_val();
+    if (!seen.insert(value).second)
+      continue;
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      auto it = graph.node.find(user);
+      if (it == graph.node.end())
+        continue;
+      if (waveamdmachine::classifyOp(user) ==
+          waveamdmachine::SchedClass::NoInst) {
+        llvm::append_range(pending, user->getResults());
+        continue;
+      }
+      if (!scheduled.test(it->second))
+        first = std::min(first, it->second);
+    }
+  }
+  return first;
+}
+
+static bool collectPrefetchChain(unsigned node, unsigned candidate,
+                                 unsigned next, const GreedyRegion &region,
+                                 const GraphTables &graph,
+                                 const BitVector &scheduled, BitVector &chain) {
+  if (scheduled.test(node) || chain.test(node))
+    return true;
+  if (node == next)
+    return false;
+  Operation *op = region.ops[node];
+  if (node != candidate &&
+      waveamdmachine::classifyOp(op) != waveamdmachine::SchedClass::NoInst &&
+      !isPure(op))
+    return false;
+  for (unsigned predecessor : graph.predecessors[node])
+    if (!collectPrefetchChain(predecessor, candidate, next, region, graph,
+                              scheduled, chain))
+      return false;
+  chain.set(node);
+  return true;
+}
+
+static FailureOr<LocalProjection> projectPrefetchOrder(
+    const IssueState &state, unsigned next, const BitVector &chain,
+    unsigned consumer, bool prefetchFirst, const GreedyRegion &region,
+    const BitVector &scheduled, const ValueOriginMap &origins) {
+  SmallVector<Operation *, 32> ops;
+  if (!prefetchFirst)
+    ops.push_back(region.ops[next]);
+  for (unsigned index : llvm::seq<unsigned>(0, chain.size()))
+    if (chain.test(index))
+      ops.push_back(region.ops[index]);
+  if (prefetchFirst)
+    ops.push_back(region.ops[next]);
+  for (unsigned index : llvm::seq(next + 1, consumer)) {
+    if (chain.test(index) || scheduled.test(index))
+      continue;
+    ops.push_back(region.ops[index]);
+  }
+  ops.push_back(region.ops[consumer]);
+  return projectIssueOrder(state, ops, origins);
+}
+
+static bool hasPrefetchSlack(unsigned next, Operation *candidate,
+                             unsigned consumer, const BitVector &chain,
+                             const GreedyRegion &region,
+                             const BitVector &scheduled,
+                             const waveamdmachine::ArchData &arch,
+                             const waveamdmachine::EventSimConfig &config) {
+  int64_t issuePeriod = waveamdmachine::getEventSimIssuePeriod(arch, config);
+  int64_t slack = 0;
+  for (unsigned index : llvm::seq(next, consumer)) {
+    if (scheduled.test(index) || chain.test(index) ||
+        waveamdmachine::classifyOp(region.ops[index]) ==
+            waveamdmachine::SchedClass::NoInst)
+      continue;
+    slack +=
+        static_cast<int64_t>(getIssueCount(region.ops[index])) * issuePeriod;
+  }
+  int64_t nextSpan =
+      static_cast<int64_t>(getIssueCount(region.ops[next])) * issuePeriod;
+  int64_t valueLatency = waveamdmachine::getMemoryValueLatency(
+      arch, candidate, config.counterLatencies, config.valueLatencies,
+      config.calibration);
+  // Candidate can wait only when post-next work still covers its latency.
+  return slack - nextSpan >= valueLatency;
+}
+
+static unsigned findNextVmemValue(unsigned next, const GreedyRegion &region,
+                                  const GraphTables &graph,
+                                  const BitVector &scheduled) {
+  for (unsigned node : graph.memoryNodes) {
+    if (node <= next || scheduled.test(node))
+      continue;
+    if (waveamdmachine::getMemoryCounterKind(region.ops[node]) ==
+        MemoryKind::Vmem)
+      return node;
+  }
+  return region.ops.size();
+}
+
+static FailureOr<std::optional<unsigned>>
+findReadyPrefetchChainHead(unsigned candidate, unsigned next,
+                           const BitVector &ready, const GreedyRegion &region,
+                           const GraphTables &graph, const IssueState &state,
+                           const BitVector &scheduled,
+                           const waveamdmachine::ArchData &arch,
+                           const waveamdmachine::EventSimConfig &config,
+                           const ValueOriginMap &origins, BitVector &chain) {
+  Operation *op = region.ops[candidate];
+  if (!waveamdmachine::hasMemoryValueLatency(op) ||
+      !canUseStallFiller(region, scheduled, next, candidate, origins))
+    return std::optional<unsigned>{};
+  if (!collectPrefetchChain(candidate, candidate, next, region, graph,
+                            scheduled, chain))
+    return std::optional<unsigned>{};
+
+  int first = chain.find_first();
+  if (first < 0 || !ready.test(first))
+    return std::optional<unsigned>{};
+  FailureOr<IssuePreview> preview =
+      previewIssue(state, region.ops[first], arch, config, origins);
+  if (failed(preview))
+    return failure();
+  if (stalls(*preview))
+    return std::optional<unsigned>{};
+  return std::optional<unsigned>(first);
+}
+
+static FailureOr<bool>
+prefetchReducesCycles(const IssueState &state, unsigned next,
+                      const BitVector &chain, unsigned consumer,
+                      const GreedyRegion &region, const BitVector &scheduled,
+                      const ValueOriginMap &origins) {
+  FailureOr<LocalProjection> nextFirst =
+      projectPrefetchOrder(state, next, chain, consumer,
+                           /*prefetchFirst=*/false, region, scheduled, origins);
+  if (failed(nextFirst))
+    return failure();
+  FailureOr<LocalProjection> prefetchFirst =
+      projectPrefetchOrder(state, next, chain, consumer, /*prefetchFirst=*/true,
+                           region, scheduled, origins);
+  if (failed(prefetchFirst))
+    return failure();
+  return prefetchFirst->cycles < nextFirst->cycles;
+}
+
+static FailureOr<unsigned>
+findReadyVmemPrefetch(const BitVector &ready, unsigned next,
+                      const GreedyRegion &region, const GraphTables &graph,
+                      const IssueState &state, const BitVector &scheduled,
+                      const waveamdmachine::ArchData &arch,
+                      const waveamdmachine::EventSimConfig &config,
+                      const ValueOriginMap &origins) {
+  unsigned candidate = findNextVmemValue(next, region, graph, scheduled);
+  if (candidate == region.ops.size())
+    return candidate;
+
+  BitVector chain(region.ops.size());
+  FailureOr<std::optional<unsigned>> chainHead =
+      findReadyPrefetchChainHead(candidate, next, ready, region, graph, state,
+                                 scheduled, arch, config, origins, chain);
+  if (failed(chainHead))
+    return failure();
+  if (!*chainHead)
+    return region.ops.size();
+
+  Operation *op = region.ops[candidate];
+  unsigned consumer = findFirstRealDataConsumer(op, region, graph, scheduled);
+  if (consumer == region.ops.size() || consumer <= candidate ||
+      hasPrefetchSlack(next, op, consumer, chain, region, scheduled, arch,
+                       config))
+    return region.ops.size();
+  FailureOr<bool> profitable = prefetchReducesCycles(
+      state, next, chain, consumer, region, scheduled, origins);
+  if (failed(profitable))
+    return failure();
+  if (!*profitable)
+    return region.ops.size();
+  return **chainHead;
 }
 
 static FailureOr<bool> canIssueTokenConsumerBeforeNext(
@@ -1154,6 +1362,34 @@ scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
   return GreedyStepStatus::Continue;
 }
 
+static FailureOr<std::optional<unsigned>>
+findReadyAlternative(const BitVector &ready, unsigned next,
+                     const GreedyRegion &region, const GraphTables &graph,
+                     const IssueState &state, const BitVector &scheduled,
+                     const waveamdmachine::ArchData &arch,
+                     const waveamdmachine::EventSimConfig &config,
+                     const ValueOriginMap &origins, GreedyStats &stats) {
+  FailureOr<unsigned> consumer =
+      findReadyTokenConsumer(ready, region, scheduled, next, state, origins);
+  if (failed(consumer))
+    return failure();
+  if (*consumer != region.ops.size())
+    return std::optional<unsigned>(*consumer);
+
+  unsigned filler = findReadyBarrierPairFiller(ready, region, scheduled, next);
+  if (filler != region.ops.size())
+    return std::optional<unsigned>(filler);
+
+  FailureOr<unsigned> prefetch = findReadyVmemPrefetch(
+      ready, next, region, graph, state, scheduled, arch, config, origins);
+  if (failed(prefetch))
+    return failure();
+  if (*prefetch == region.ops.size())
+    return std::optional<unsigned>{};
+  ++stats.vmemPrefetchMoves;
+  return std::optional<unsigned>(*prefetch);
+}
+
 static FailureOr<GreedyStepStatus>
 buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                 const waveamdmachine::ArchData &arch,
@@ -1173,21 +1409,15 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
 
   unsigned next = findFirstUnscheduled(scheduled);
   if (ready.test(next)) {
-    FailureOr<unsigned> consumer =
-        findReadyTokenConsumer(ready, region, scheduled, next, state, origins);
-    if (failed(consumer))
+    FailureOr<std::optional<unsigned>> alternative =
+        findReadyAlternative(ready, next, region, graph, state, scheduled, arch,
+                             config, origins, result.stats);
+    if (failed(alternative))
       return failure();
-    if (*consumer != region.ops.size())
-      return scheduleReadyByIndex(*consumer, region, graph, arch, config, state,
-                                  ready, scheduled, pending, result.order,
-                                  origins);
-
-    unsigned filler =
-        findReadyBarrierPairFiller(ready, region, scheduled, next);
-    if (filler != region.ops.size())
-      return scheduleReadyByIndex(filler, region, graph, arch, config, state,
-                                  ready, scheduled, pending, result.order,
-                                  origins);
+    if (*alternative)
+      return scheduleReadyByIndex(**alternative, region, graph, arch, config,
+                                  state, ready, scheduled, pending,
+                                  result.order, origins);
   }
 
   if (!ready.test(next))
@@ -1279,6 +1509,7 @@ static void printDecision(const GreedyRegion &region, StringRef action,
                << " cheap_hazard_gaps=" << stats.cheapHazardGaps
                << " m0_gaps=" << stats.m0Gaps
                << " store_data_gaps=" << stats.storeDataGaps
+               << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
                << " memory_token_gaps=" << stats.memoryTokenGaps
                << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                << " filled_barrier_memory_gaps="
@@ -1462,6 +1693,8 @@ struct WaveAMDMachineSchedulePass
       reason = "store_data_hazard";
     else if (filledBarrierMemoryGap(greedy.stats))
       reason = "barrier_memory";
+    else if (greedy.stats.vmemPrefetchMoves != 0)
+      reason = "vmem_prefetch";
     printDecision(region, "apply", reason, greedy.stats);
     applyOrder(region, greedy.order);
     return success();
@@ -1773,6 +2006,8 @@ struct WaveAMDMachineScheduleReportPass
         reason = "store_data_hazard";
       else if (filledBarrierMemoryGap(greedy.stats))
         reason = "barrier_memory";
+      else if (greedy.stats.vmemPrefetchMoves != 0)
+        reason = "vmem_prefetch";
       else if (succeeded(originalScore) && succeeded(greedyScore) &&
                greedyScore->cycles < originalScore->cycles)
         reason = "better";
@@ -1873,6 +2108,7 @@ struct WaveAMDMachineScheduleReportPass
                  << " cheap_hazard_gaps=" << stats.cheapHazardGaps
                  << " m0_gaps=" << stats.m0Gaps
                  << " store_data_gaps=" << stats.storeDataGaps
+                 << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
                  << " memory_token_gaps=" << stats.memoryTokenGaps
                  << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                  << " filled_barrier_memory_gaps="

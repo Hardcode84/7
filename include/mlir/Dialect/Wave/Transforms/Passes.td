@@ -498,12 +498,16 @@ def WaveAMDMachineSchedule
   let description = [{
     Scheduler pass over `waveamdmachine` IR. The default mode is a no-op that
     still validates target and model options. With `apply-schedule`, it scans
-    straight-line machine regions, keeps original order when it does not stall,
-    and moves legal zero-stall ready instructions into modeled gaps until the
+    straight-line machine regions, uses original order as its baseline, and
+    moves legal zero-stall ready instructions into modeled gaps until the
     blocked op no longer stalls or no filler remains.
 
     Pure work between redundant full barriers moves before the pair so barrier
     cleanup can merge it without draining memory early.
+
+    VMEM loads move to their latest profitable issue point before first data
+    use. The event model supplies value latency; movement preserves SSA,
+    explicit token edges, and VMEM issue order.
 
     Intended placement is before ticket-wait and hazard-wait insertion. Nested
     region ops split local scheduling regions; block terminators finish the

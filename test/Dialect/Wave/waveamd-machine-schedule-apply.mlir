@@ -101,6 +101,46 @@ func.func @store_data_fill(
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @memory_prefetch(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>,
+    %c: !waveamdmachine.reg<vgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %x = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %y = waveamdmachine.v_add_u32 %x, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %load_off = waveamdmachine.v_add_u32 %off, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %loaded, %tok = waveamdmachine.global_load_b32 %load_off, %ptr after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %sum = waveamdmachine.v_add_u32 %y, %loaded
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @memory_prefetch
+// IR: [[OFF:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: [[LOADED:%.*]], {{%.*}} = waveamdmachine.global_load_b32 [[OFF]]
+// IR-NEXT: [[X:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: [[Y:%.*]] = waveamdmachine.v_add_u32 [[X]]
+// IR-NEXT: waveamdmachine.v_add_u32 [[Y]], [[LOADED]]
+// DIAG: waveamd-machine-schedule region func=memory_prefetch
+// DIAG-SAME: action=apply reason=vmem_prefetch
+// DIAG-SAME: vmem_prefetch_moves=2
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @m0_fill_keeps_same_counter_order(%base: !waveamdmachine.reg<sgpr, 1>,
                                             %off0: !waveamdmachine.reg<vgpr, 1>,

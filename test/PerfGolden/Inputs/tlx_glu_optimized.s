@@ -1252,13 +1252,25 @@ tlx_addmm_glu_kernel_optimized:
 		v_mfma_f32_16x16x32_f16 v[4:7], v[72:75], v[40:43], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[108:111], v[80:83], v[40:43], v[108:111]
 		v_mfma_f32_16x16x32_f16 v[112:115], v[88:91], v[40:43], v[112:115]
+		v_lshlrev_b32_e32 v3, 1, v35
+		s_mov_b32 s0, s6
+		s_mov_b32 s1, s7
+		s_mov_b32 s2, s22
+		s_mov_b32 s3, s23
+		buffer_load_dwordx2 v[10:11], v3, s[0:3], 0 offen
 		s_waitcnt lgkmcnt(0)
 		v_mfma_f32_16x16x32_f16 v[116:119], v[96:99], v[40:43], v[116:119]
 		v_mfma_f32_16x16x32_f16 v[132:135], v[96:99], v[48:51], v[132:135]
+		v_lshlrev_b32_e32 v3, 1, v20
+		buffer_load_dwordx2 v[12:13], v3, s[0:3], 0 offen
 		v_mfma_f32_16x16x32_f16 v[120:123], v[72:75], v[48:51], v[120:123]
 		v_mfma_f32_16x16x32_f16 v[124:127], v[80:83], v[48:51], v[124:127]
+		v_lshlrev_b32_e32 v3, 1, v21
+		buffer_load_dwordx2 v[20:21], v3, s[0:3], 0 offen
 		v_mfma_f32_16x16x32_f16 v[128:131], v[88:91], v[48:51], v[128:131]
 		v_mfma_f32_16x16x32_f16 v[144:147], v[88:91], v[56:59], v[144:147]
+		v_lshlrev_b32_e32 v2, 1, v2
+		buffer_load_dwordx2 v[26:27], v2, s[0:3], 0 offen
 		v_mfma_f32_16x16x32_f16 v[136:139], v[72:75], v[56:59], v[136:139]
 		v_mfma_f32_16x16x32_f16 v[140:143], v[80:83], v[56:59], v[140:143]
 		v_mfma_f32_16x16x32_f16 v[148:151], v[96:99], v[56:59], v[148:151]
@@ -1266,18 +1278,6 @@ tlx_addmm_glu_kernel_optimized:
 		v_mfma_f32_16x16x32_f16 v[152:155], v[72:75], v[64:67], v[152:155]
 		v_mfma_f32_16x16x32_f16 v[156:159], v[80:83], v[64:67], v[156:159]
 		v_mfma_f32_16x16x32_f16 v[160:163], v[88:91], v[64:67], v[160:163]
-		v_lshlrev_b32_e32 v3, 1, v35
-		s_mov_b32 s0, s6
-		s_mov_b32 s1, s7
-		s_mov_b32 s2, s22
-		s_mov_b32 s3, s23
-		buffer_load_dwordx2 v[10:11], v3, s[0:3], 0 offen
-		v_lshlrev_b32_e32 v3, 1, v20
-		buffer_load_dwordx2 v[12:13], v3, s[0:3], 0 offen
-		v_lshlrev_b32_e32 v3, 1, v21
-		buffer_load_dwordx2 v[20:21], v3, s[0:3], 0 offen
-		v_lshlrev_b32_e32 v2, 1, v2
-		buffer_load_dwordx2 v[26:27], v2, s[0:3], 0 offen
 		s_waitcnt vmcnt(3)
 		v_cvt_f32_f16_e32 v36, v10
 		v_cvt_f32_f16_sdwa v37, v10 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
