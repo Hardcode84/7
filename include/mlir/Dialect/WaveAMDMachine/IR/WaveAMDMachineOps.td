@@ -966,6 +966,17 @@ def WaveAMDMachine_VOr3B32Op
 def WaveAMDMachine_VXadU32Op
     : WaveAMDMachine_TernaryIntResult<"v_xad_u32">,
       WaveAMDMachine_VOP3IntLegality;
+def WaveAMDMachine_VPermB32Op
+    : WaveAMDMachine_Op<"v_perm_b32", [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_VOP3IntLegality {
+  let archPredicate = WaveAMDMachine_Gfx8To13;
+  let arguments = (ins WaveAMDMachine_RegOrImm:$src0,
+                       WaveAMDMachine_RegOrImm:$src1,
+                       WaveAMDMachine_RegOrImm:$selector);
+  let results = (outs WaveAMDMachine_VGPR1:$result);
+  let assemblyFormat =
+      "$src0 `,` $src1 `,` $selector attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VBitOp3B32Op
     : WaveAMDMachine_Op<"v_bitop3_b32", [WaveAMDMachine_VALU, Pure]>,
       WaveAMDMachine_VOP3IntLegality {

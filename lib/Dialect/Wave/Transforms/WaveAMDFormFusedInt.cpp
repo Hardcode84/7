@@ -800,6 +800,467 @@ tryFuseShiftAddFanout(PatternRewriter &rewriter, VLshlrevB32Op op,
   return success();
 }
 
+enum class PermuteBitKind : uint8_t { Zero, One, Source };
+
+struct PermuteBit {
+  Value source;
+  PermuteBitKind kind = PermuteBitKind::Zero;
+  uint8_t sourceBit = 0;
+};
+
+using PermuteBits = std::array<PermuteBit, 32>;
+
+struct BytePermutationCandidate {
+  SmallVector<Operation *, 8> deadOps;
+  unsigned instructionCount = 0;
+};
+
+struct BytePermutation {
+  SmallVector<Value, 2> sources;
+  uint32_t selector = 0;
+};
+
+static PermuteBits getConstantPermuteBits(uint32_t value) {
+  PermuteBits bits;
+  for (auto [index, bit] : llvm::enumerate(bits))
+    if (value & (uint32_t{1} << index))
+      bit.kind = PermuteBitKind::One;
+  return bits;
+}
+
+static PermuteBits getSourcePermuteBits(Value source) {
+  PermuteBits bits;
+  for (auto [index, bit] : llvm::enumerate(bits)) {
+    bit.source = source;
+    bit.kind = PermuteBitKind::Source;
+    bit.sourceBit = static_cast<uint8_t>(index);
+  }
+  return bits;
+}
+
+static bool isSamePermuteBit(const PermuteBit &lhs, const PermuteBit &rhs) {
+  if (lhs.kind != rhs.kind)
+    return false;
+  if (lhs.kind != PermuteBitKind::Source)
+    return true;
+  return lhs.source == rhs.source && lhs.sourceBit == rhs.sourceBit;
+}
+
+static std::optional<PermuteBits> andPermuteBits(const PermuteBits &lhs,
+                                                 const PermuteBits &rhs) {
+  PermuteBits result;
+  for (auto [lhsBit, rhsBit, resultBit] : llvm::zip(lhs, rhs, result)) {
+    if (lhsBit.kind == PermuteBitKind::Zero ||
+        rhsBit.kind == PermuteBitKind::Zero)
+      continue;
+    if (lhsBit.kind == PermuteBitKind::One) {
+      resultBit = rhsBit;
+      continue;
+    }
+    if (rhsBit.kind == PermuteBitKind::One ||
+        isSamePermuteBit(lhsBit, rhsBit)) {
+      resultBit = lhsBit;
+      continue;
+    }
+    return std::nullopt;
+  }
+  return result;
+}
+
+static std::optional<PermuteBits> orPermuteBits(const PermuteBits &lhs,
+                                                const PermuteBits &rhs) {
+  PermuteBits result;
+  for (auto [lhsBit, rhsBit, resultBit] : llvm::zip(lhs, rhs, result)) {
+    if (lhsBit.kind == PermuteBitKind::One ||
+        rhsBit.kind == PermuteBitKind::Zero) {
+      resultBit = lhsBit;
+      continue;
+    }
+    if (rhsBit.kind == PermuteBitKind::One ||
+        lhsBit.kind == PermuteBitKind::Zero) {
+      resultBit = rhsBit;
+      continue;
+    }
+    if (!isSamePermuteBit(lhsBit, rhsBit))
+      return std::nullopt;
+    resultBit = lhsBit;
+  }
+  return result;
+}
+
+static std::optional<PermuteBits> addPermuteBits(const PermuteBits &lhs,
+                                                 const PermuteBits &rhs) {
+  PermuteBits result;
+  for (auto [lhsBit, rhsBit, resultBit] : llvm::zip(lhs, rhs, result)) {
+    if (lhsBit.kind != PermuteBitKind::Zero &&
+        rhsBit.kind != PermuteBitKind::Zero)
+      return std::nullopt;
+    resultBit = lhsBit.kind == PermuteBitKind::Zero ? rhsBit : lhsBit;
+  }
+  return result;
+}
+
+static std::optional<unsigned> getShiftAmount(Value value) {
+  std::optional<int64_t> amount = getMachineImmValue(value);
+  if (!amount || *amount < 0 || *amount >= 32)
+    return std::nullopt;
+  return static_cast<unsigned>(*amount);
+}
+
+static PermuteBits shiftPermuteBits(const PermuteBits &input, unsigned amount,
+                                    bool left) {
+  PermuteBits result;
+  for (unsigned index = 0; index < 32; ++index) {
+    if (left) {
+      if (index + amount < 32)
+        result[index + amount] = input[index];
+      continue;
+    }
+    if (index >= amount)
+      result[index - amount] = input[index];
+  }
+  return result;
+}
+
+static bool isBytePermutationExpressionOp(Operation *op) {
+  return isa_and_nonnull<VAddU32Op, VAdd3U32Op, VAndB32Op, VOrB32Op,
+                         VLshlrevB32Op, VLshrrevB32Op, VLshlAddU32Op,
+                         VAddLshlU32Op, VAndOrB32Op, VOr3B32Op>(op);
+}
+
+static std::optional<PermuteBits>
+matchPermuteValue(Value value, Operation *root,
+                  BytePermutationCandidate &candidate);
+
+static std::optional<PermuteBits>
+matchPermuteBinary(Value lhsValue, Value rhsValue, Operation *root,
+                   BytePermutationCandidate &candidate,
+                   std::optional<PermuteBits> (*combine)(const PermuteBits &,
+                                                         const PermuteBits &)) {
+  std::optional<PermuteBits> lhs = matchPermuteValue(lhsValue, root, candidate);
+  if (!lhs)
+    return std::nullopt;
+  std::optional<PermuteBits> rhs = matchPermuteValue(rhsValue, root, candidate);
+  if (!rhs)
+    return std::nullopt;
+  return combine(*lhs, *rhs);
+}
+
+static std::optional<PermuteBits>
+matchPermuteShift(Value inputValue, Value amountValue, bool left,
+                  Operation *root, BytePermutationCandidate &candidate) {
+  std::optional<unsigned> amount = getShiftAmount(amountValue);
+  if (!amount)
+    return std::nullopt;
+  std::optional<PermuteBits> input =
+      matchPermuteValue(inputValue, root, candidate);
+  if (!input)
+    return std::nullopt;
+  return shiftPermuteBits(*input, *amount, left);
+}
+
+static std::optional<PermuteBits>
+matchAdd3Permute(VAdd3U32Op op, Operation *root,
+                 BytePermutationCandidate &candidate) {
+  std::optional<PermuteBits> ab =
+      matchPermuteBinary(op.getA(), op.getB(), root, candidate, addPermuteBits);
+  std::optional<PermuteBits> c = matchPermuteValue(op.getC(), root, candidate);
+  if (!ab || !c)
+    return std::nullopt;
+  return addPermuteBits(*ab, *c);
+}
+
+static std::optional<PermuteBits>
+matchLshlAddPermute(VLshlAddU32Op op, Operation *root,
+                    BytePermutationCandidate &candidate) {
+  std::optional<PermuteBits> shifted =
+      matchPermuteShift(op.getA(), op.getB(), true, root, candidate);
+  std::optional<PermuteBits> addend =
+      matchPermuteValue(op.getC(), root, candidate);
+  if (!shifted || !addend)
+    return std::nullopt;
+  return addPermuteBits(*shifted, *addend);
+}
+
+static std::optional<PermuteBits>
+matchAddLshlPermute(VAddLshlU32Op op, Operation *root,
+                    BytePermutationCandidate &candidate) {
+  std::optional<PermuteBits> sum =
+      matchPermuteBinary(op.getA(), op.getB(), root, candidate, addPermuteBits);
+  std::optional<unsigned> amount = getShiftAmount(op.getC());
+  if (!sum || !amount)
+    return std::nullopt;
+  return shiftPermuteBits(*sum, *amount, true);
+}
+
+static std::optional<PermuteBits>
+matchAndOrPermute(VAndOrB32Op op, Operation *root,
+                  BytePermutationCandidate &candidate) {
+  std::optional<PermuteBits> masked =
+      matchPermuteBinary(op.getA(), op.getB(), root, candidate, andPermuteBits);
+  std::optional<PermuteBits> other =
+      matchPermuteValue(op.getC(), root, candidate);
+  if (!masked || !other)
+    return std::nullopt;
+  return orPermuteBits(*masked, *other);
+}
+
+static std::optional<PermuteBits>
+matchOr3Permute(VOr3B32Op op, Operation *root,
+                BytePermutationCandidate &candidate) {
+  std::optional<PermuteBits> ab =
+      matchPermuteBinary(op.getA(), op.getB(), root, candidate, orPermuteBits);
+  std::optional<PermuteBits> c = matchPermuteValue(op.getC(), root, candidate);
+  if (!ab || !c)
+    return std::nullopt;
+  return orPermuteBits(*ab, *c);
+}
+
+static std::optional<PermuteBits>
+matchBasicPermuteOp(Operation *op, Operation *root,
+                    BytePermutationCandidate &candidate) {
+  if (VAndB32Op andOp = dyn_cast<VAndB32Op>(op))
+    return matchPermuteBinary(andOp.getLhs(), andOp.getRhs(), root, candidate,
+                              andPermuteBits);
+  if (VOrB32Op orOp = dyn_cast<VOrB32Op>(op))
+    return matchPermuteBinary(orOp.getLhs(), orOp.getRhs(), root, candidate,
+                              orPermuteBits);
+  if (VAddU32Op addOp = dyn_cast<VAddU32Op>(op))
+    return matchPermuteBinary(addOp.getLhs(), addOp.getRhs(), root, candidate,
+                              addPermuteBits);
+  if (VLshlrevB32Op shiftOp = dyn_cast<VLshlrevB32Op>(op))
+    return matchPermuteShift(shiftOp.getLhs(), shiftOp.getRhs(), true, root,
+                             candidate);
+  if (VLshrrevB32Op shiftOp = dyn_cast<VLshrrevB32Op>(op))
+    return matchPermuteShift(shiftOp.getLhs(), shiftOp.getRhs(), false, root,
+                             candidate);
+  return std::nullopt;
+}
+
+static std::optional<PermuteBits>
+matchFusedPermuteOp(Operation *op, Operation *root,
+                    BytePermutationCandidate &candidate) {
+  if (VAdd3U32Op addOp = dyn_cast<VAdd3U32Op>(op))
+    return matchAdd3Permute(addOp, root, candidate);
+  if (VLshlAddU32Op fusedOp = dyn_cast<VLshlAddU32Op>(op))
+    return matchLshlAddPermute(fusedOp, root, candidate);
+  if (VAddLshlU32Op fusedOp = dyn_cast<VAddLshlU32Op>(op))
+    return matchAddLshlPermute(fusedOp, root, candidate);
+  if (VAndOrB32Op fusedOp = dyn_cast<VAndOrB32Op>(op))
+    return matchAndOrPermute(fusedOp, root, candidate);
+  if (VOr3B32Op fusedOp = dyn_cast<VOr3B32Op>(op))
+    return matchOr3Permute(fusedOp, root, candidate);
+  return std::nullopt;
+}
+
+static std::optional<PermuteBits>
+matchPermuteOp(Operation *op, Operation *root,
+               BytePermutationCandidate &candidate) {
+  std::optional<PermuteBits> bits;
+  if (isa<VAddU32Op, VAndB32Op, VOrB32Op, VLshlrevB32Op, VLshrrevB32Op>(op))
+    bits = matchBasicPermuteOp(op, root, candidate);
+  else
+    bits = matchFusedPermuteOp(op, root, candidate);
+
+  if (!bits)
+    return std::nullopt;
+  ++candidate.instructionCount;
+  if (op != root)
+    candidate.deadOps.push_back(op);
+  return bits;
+}
+
+static std::optional<PermuteBits>
+matchPermuteValue(Value value, Operation *root,
+                  BytePermutationCandidate &candidate) {
+  if (std::optional<int64_t> immediate = getMachineImmValue(value))
+    return getConstantPermuteBits(static_cast<uint32_t>(*immediate));
+
+  Operation *def = value.getDefiningOp();
+  if (isBytePermutationExpressionOp(def) &&
+      def->getBlock() == root->getBlock() && def->getResult(0).hasOneUse()) {
+    BytePermutationCandidate trial = candidate;
+    if (std::optional<PermuteBits> bits = matchPermuteOp(def, root, trial)) {
+      candidate = std::move(trial);
+      return bits;
+    }
+  }
+
+  if (!isVGPRValue(value))
+    return std::nullopt;
+  return getSourcePermuteBits(value);
+}
+
+static std::optional<unsigned>
+getPermuteSourceIndex(Value source, BytePermutation &permutation) {
+  for (auto [index, existing] : llvm::enumerate(permutation.sources))
+    if (existing == source)
+      return index;
+  if (permutation.sources.size() == 2)
+    return std::nullopt;
+  permutation.sources.push_back(source);
+  return permutation.sources.size() - 1;
+}
+
+static std::optional<uint8_t> getConstantByteSelector(const PermuteBits &bits,
+                                                      unsigned outputByte,
+                                                      PermuteBitKind kind) {
+  for (unsigned bit = 1; bit < 8; ++bit)
+    if (bits[outputByte * 8 + bit].kind != kind)
+      return std::nullopt;
+  return kind == PermuteBitKind::Zero ? uint8_t{0x0c} : uint8_t{0xff};
+}
+
+static bool matchesSourceByteBit(const PermuteBit &bit, const PermuteBit &first,
+                                 unsigned offset) {
+  return bit.kind == PermuteBitKind::Source && bit.source == first.source &&
+         bit.sourceBit == first.sourceBit + offset;
+}
+
+static std::optional<uint8_t>
+getSourceByteSelector(const PermuteBits &bits, unsigned outputByte,
+                      BytePermutation &permutation) {
+  const PermuteBit &first = bits[outputByte * 8];
+  if (first.sourceBit % 8 != 0)
+    return std::nullopt;
+  for (unsigned bit = 1; bit < 8; ++bit)
+    if (!matchesSourceByteBit(bits[outputByte * 8 + bit], first, bit))
+      return std::nullopt;
+
+  std::optional<unsigned> sourceIndex =
+      getPermuteSourceIndex(first.source, permutation);
+  if (!sourceIndex)
+    return std::nullopt;
+  return static_cast<uint8_t>(first.sourceBit / 8 + *sourceIndex * 4);
+}
+
+static std::optional<uint8_t>
+getPermuteByteSelector(const PermuteBits &bits, unsigned outputByte,
+                       BytePermutation &permutation) {
+  PermuteBitKind kind = bits[outputByte * 8].kind;
+  if (kind == PermuteBitKind::Source)
+    return getSourceByteSelector(bits, outputByte, permutation);
+  return getConstantByteSelector(bits, outputByte, kind);
+}
+
+static std::optional<BytePermutation>
+getBytePermutation(const PermuteBits &bits) {
+  BytePermutation permutation;
+  for (unsigned outputByte = 0; outputByte < 4; ++outputByte) {
+    std::optional<uint8_t> byte =
+        getPermuteByteSelector(bits, outputByte, permutation);
+    if (!byte)
+      return std::nullopt;
+    permutation.selector |= uint32_t{*byte} << (outputByte * 8);
+  }
+  if (permutation.sources.empty())
+    return std::nullopt;
+  if (permutation.sources.size() == 1 && permutation.selector == 0x03020100)
+    return std::nullopt;
+  return permutation;
+}
+
+static bool isInlinePermuteSelector(uint32_t selector) {
+  int32_t signedSelector = static_cast<int32_t>(selector);
+  return signedSelector >= -16 && signedSelector <= 64;
+}
+
+static void eraseDeadPermuteOps(PatternRewriter &rewriter,
+                                ArrayRef<Operation *> ops) {
+  for (Operation *op : llvm::reverse(ops))
+    if (op->use_empty())
+      rewriter.eraseOp(op);
+}
+
+static bool hasBytePermutationExpressionUser(Operation *op) {
+  if (!op->getResult(0).hasOneUse())
+    return false;
+  Operation *user = *op->getResult(0).user_begin();
+  if (user->getBlock() != op->getBlock())
+    return false;
+  return isBytePermutationExpressionOp(user);
+}
+
+static bool needsPermuteSelectorMove(uint32_t selector,
+                                     const llvm::AMDGPU::IsaVersion &isa) {
+  if (isInlinePermuteSelector(selector))
+    return false;
+  return isa.Major == 8 || isa.Major == 9;
+}
+
+static Value createPermuteSelector(PatternRewriter &rewriter, Operation *op,
+                                   uint32_t selector, bool materialize) {
+  int64_t signedSelector = static_cast<int32_t>(selector);
+  Value value = ImmOp::create(rewriter, op->getLoc(),
+                              ImmType::get(op->getContext()), signedSelector);
+  if (!materialize)
+    return value;
+  Type sgpr1 = RegType::get(op->getContext(), RegClass::SGPR, 1, -1);
+  return SMovB32ValueOp::create(rewriter, op->getLoc(), sgpr1, value);
+}
+
+static VPermB32Op createBytePermutation(PatternRewriter &rewriter,
+                                        Operation *op,
+                                        const BytePermutation &permutation,
+                                        bool materializeSelector,
+                                        const llvm::AMDGPU::IsaVersion &isa) {
+  // Selector 0..3 reads src1; 4..7 reads src0.
+  Value src1 = permutation.sources.front();
+  Value src0 =
+      permutation.sources.size() == 2 ? permutation.sources.back() : src1;
+  Value selector = createPermuteSelector(rewriter, op, permutation.selector,
+                                         materializeSelector);
+  std::array<Value, 3> operands = {src0, src1, selector};
+  assert(canCreateTernary<VPermB32Op>(operands, isa) &&
+         "VGPR byte permutation must satisfy VOP3 constant-bus limits");
+  return VPermB32Op::create(rewriter, op->getLoc(), op->getResult(0).getType(),
+                            operands[0], operands[1], operands[2]);
+}
+
+static LogicalResult
+tryFormBytePermutation(PatternRewriter &rewriter, Operation *op,
+                       const llvm::AMDGPU::IsaVersion &isa) {
+  if (!VPermB32Op::isSupportedOnIsa(isa))
+    return failure();
+  if (hasBytePermutationExpressionUser(op))
+    return failure();
+
+  BytePermutationCandidate candidate;
+  std::optional<PermuteBits> bits = matchPermuteOp(op, op, candidate);
+  if (!bits)
+    return failure();
+  std::optional<BytePermutation> permutation = getBytePermutation(*bits);
+  if (!permutation)
+    return failure();
+
+  bool materializeSelector =
+      needsPermuteSelectorMove(permutation->selector, isa);
+  unsigned replacementCost = materializeSelector ? 2 : 1;
+  if (candidate.instructionCount <= replacementCost)
+    return failure();
+
+  VPermB32Op perm = createBytePermutation(rewriter, op, *permutation,
+                                          materializeSelector, isa);
+  perm->setAttrs(op->getAttrs());
+  rewriter.replaceOp(op, perm.getResult());
+  eraseDeadPermuteOps(rewriter, candidate.deadOps);
+  return success();
+}
+
+template <typename OpTy>
+struct BytePermutationPattern : public OpRewritePattern<OpTy> {
+  BytePermutationPattern(MLIRContext *context,
+                         const llvm::AMDGPU::IsaVersion &isa)
+      : OpRewritePattern<OpTy>(context, /*benefit=*/2), isa(isa) {}
+
+  LogicalResult matchAndRewrite(OpTy op,
+                                PatternRewriter &rewriter) const override {
+    return tryFormBytePermutation(rewriter, op.getOperation(), isa);
+  }
+
+  llvm::AMDGPU::IsaVersion isa;
+};
+
 struct BitOp3Candidate {
   SmallVector<Operation *, 4> deadOps;
   SmallVector<Value, 3> sources;
@@ -1101,8 +1562,9 @@ struct BitOp3FusionPattern : public OpRewritePattern<OpTy> {
 static bool hasFusedIntCandidate(func::FuncOp func) {
   bool found = false;
   WalkResult result = func.walk([&](Operation *op) {
-    if (!isa<VAddU32Op, VAdd3U32Op, VLshlrevB32Op, VAndB32Op, VOrB32Op,
-             VXorB32Op, SMovM0Op>(op))
+    if (!isa<VAddU32Op, VAdd3U32Op, VLshlrevB32Op, VLshrrevB32Op, VAndB32Op,
+             VOrB32Op, VXorB32Op, VLshlAddU32Op, VAddLshlU32Op, VAndOrB32Op,
+             VOr3B32Op, SMovM0Op>(op))
       return WalkResult::advance();
     found = true;
     return WalkResult::interrupt();
@@ -1132,6 +1594,15 @@ static LogicalResult runOnFunc(func::FuncOp func) {
   patterns
       .add<AddChainFactorPattern<VAddU32Op>, AddChainFactorPattern<VAdd3U32Op>>(
           func.getContext(), *isa);
+  patterns.add<
+      BytePermutationPattern<VAddU32Op>, BytePermutationPattern<VAdd3U32Op>,
+      BytePermutationPattern<VAndB32Op>, BytePermutationPattern<VOrB32Op>,
+      BytePermutationPattern<VLshlrevB32Op>,
+      BytePermutationPattern<VLshrrevB32Op>,
+      BytePermutationPattern<VLshlAddU32Op>,
+      BytePermutationPattern<VAddLshlU32Op>,
+      BytePermutationPattern<VAndOrB32Op>, BytePermutationPattern<VOr3B32Op>>(
+      func.getContext(), *isa);
   patterns.add<AddFusionPattern, LshlFusionPattern, OrFusionPattern>(
       func.getContext(), *isa);
   patterns.add<BitOp3FusionPattern<VAndB32Op>, BitOp3FusionPattern<VXorB32Op>>(

@@ -106,4 +106,19 @@ func.func @fused_int_wide_sources(%wide: !waveamdmachine.reg<vgpr, 2, 0>,
   return %first : !waveamdmachine.reg<sgpr, 1, 0>
 }
 
+// ROUND-LABEL: func.func @perm_b32
+// ROUND: waveamdmachine.v_perm_b32
+// ASM-LABEL: perm_b32:
+// ASM: v_perm_b32 v2, v1, v0, 0x5040100
+func.func @perm_b32(%a: !waveamdmachine.reg<vgpr, 1, 0>,
+                    %b: !waveamdmachine.reg<vgpr, 1, 1>)
+    -> !waveamdmachine.reg<vgpr, 1, 2> {
+  %selector = waveamdmachine.imm 84148480 : !waveamdmachine.imm
+  %result = waveamdmachine.v_perm_b32 %b, %a, %selector
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 2>
+  waveamdmachine.s_endpgm
+  return %result : !waveamdmachine.reg<vgpr, 1, 2>
+}
+
 }

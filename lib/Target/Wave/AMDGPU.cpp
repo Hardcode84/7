@@ -547,6 +547,7 @@ private:
   unsigned vAndOrB32() const { return opcodes.vAndOrB32; }
   unsigned vOr3B32() const { return opcodes.vOr3B32; }
   unsigned vXadU32() const { return opcodes.vXadU32; }
+  unsigned vPermB32() const { return opcodes.vPermB32; }
   unsigned vBitOp3B32() const { return opcodes.vBitOp3B32; }
   unsigned vAddF32() const { return opcodes.vAddF32; }
   unsigned vSubF32() const { return opcodes.vSubF32; }
@@ -2772,13 +2773,15 @@ private:
     }
     if (isa<waveamdmachine::VAdd3U32Op, waveamdmachine::VLshlAddU32Op,
             waveamdmachine::VAddLshlU32Op, waveamdmachine::VAndOrB32Op,
-            waveamdmachine::VOr3B32Op, waveamdmachine::VXadU32Op>(op)) {
+            waveamdmachine::VOr3B32Op, waveamdmachine::VXadU32Op,
+            waveamdmachine::VPermB32Op>(op)) {
       unsigned opcode = isa<waveamdmachine::VAdd3U32Op>(op)      ? vAdd3U32()
                         : isa<waveamdmachine::VLshlAddU32Op>(op) ? vLshlAddU32()
                         : isa<waveamdmachine::VAddLshlU32Op>(op) ? vAddLshlU32()
                         : isa<waveamdmachine::VAndOrB32Op>(op)   ? vAndOrB32()
                         : isa<waveamdmachine::VOr3B32Op>(op)     ? vOr3B32()
-                                                                 : vXadU32();
+                        : isa<waveamdmachine::VXadU32Op>(op)     ? vXadU32()
+                                                                 : vPermB32();
       return emitTernaryInt(opcode, op);
     }
     if (isa<waveamdmachine::VBitOp3B32Op>(op))

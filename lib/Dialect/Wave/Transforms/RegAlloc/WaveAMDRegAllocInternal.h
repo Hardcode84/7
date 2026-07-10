@@ -2089,8 +2089,9 @@ inline bool isMemorySpillSuppressedVGPRExpr(Operation *op) {
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
       waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
       waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
-      waveamdmachine::VBitOp3B32Op, waveamdmachine::VCndmaskB32TupleOp,
-      waveamdmachine::VCndmaskB32VccOp, waveamdmachine::VAccvgprReadB32TupleOp,
+      waveamdmachine::VPermB32Op, waveamdmachine::VBitOp3B32Op,
+      waveamdmachine::VCndmaskB32TupleOp, waveamdmachine::VCndmaskB32VccOp,
+      waveamdmachine::VAccvgprReadB32TupleOp,
       waveamdmachine::VAccvgprWriteB32TupleOp>(op);
 }
 
