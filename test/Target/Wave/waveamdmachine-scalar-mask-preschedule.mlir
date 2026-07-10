@@ -2,10 +2,12 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @sinks_vcc_compare_masks
-  // CHECK: [[CMP0:%.*]], %{{.*}} = waveamdmachine.v_cmp_ne_u32_vcc %arg0, %arg2
-  // CHECK-NEXT: [[IF0:%.*]] = waveamdmachine.exec_if [[CMP0]]
-  // CHECK: [[CMP1:%.*]], %{{.*}} = waveamdmachine.v_cmp_ne_u32_vcc %arg1, %arg2
-  // CHECK-NEXT: [[IF1:%.*]] = waveamdmachine.exec_if [[CMP1]]
+  // CHECK: %{{.*}}, [[VCC0:%.*]] = waveamdmachine.v_cmp_ne_u32_vcc %arg0, %arg2
+  // CHECK-NEXT: [[IF0:%.*]] = waveamdmachine.exec_if [[VCC0]]
+  // CHECK: } {mask_width = 64 : i64} : !waveamdmachine.reg<vcc, 1>
+  // CHECK: %{{.*}}, [[VCC1:%.*]] = waveamdmachine.v_cmp_ne_u32_vcc %arg1, %arg2
+  // CHECK-NEXT: [[IF1:%.*]] = waveamdmachine.exec_if [[VCC1]]
+  // CHECK: } {mask_width = 64 : i64} : !waveamdmachine.reg<vcc, 1>
   // CHECK: waveamdmachine.v_or_b32 [[IF0]], [[IF1]]
   func.func @sinks_vcc_compare_masks(
       %a0: !waveamdmachine.reg<vgpr, 1>,
@@ -37,6 +39,89 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %combined = waveamdmachine.v_or_b32 %load0, %load1
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  // CHECK-LABEL: func.func @direct_vcc_exec_mask
+  // CHECK: %{{.*}}, [[VCC:%.*]] = waveamdmachine.v_cmp_ne_u32_vcc %arg0, %arg1
+  // CHECK-NEXT: waveamdmachine.exec_if [[VCC]]
+  // CHECK: } {mask_width = 64 : i64} : !waveamdmachine.reg<vcc, 1>
+  func.func @direct_vcc_exec_mask(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %zero: !waveamdmachine.reg<vgpr, 1>) {
+    %mask, %vcc = waveamdmachine.v_cmp_ne_u32_vcc %a, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    waveamdmachine.exec_if %mask {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
+    return
+  }
+
+  // CHECK-LABEL: func.func @keeps_mask_across_live_vcc
+  // CHECK: [[MASK:%.*]], %{{.*}} = waveamdmachine.v_cmp_ne_u32_vcc
+  // CHECK-NEXT: [[SUM:%.*]], [[LIVE_VCC:%.*]] = waveamdmachine.v_add_u32_vcc
+  // CHECK-NEXT: waveamdmachine.exec_if [[MASK]]
+  // CHECK: } : !waveamdmachine.reg<sgpr, 2>
+  // CHECK-NEXT: waveamdmachine.v_cndmask_b32_vcc %arg0, [[SUM]], [[LIVE_VCC]]
+  func.func @keeps_mask_across_live_vcc(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>,
+      %zero: !waveamdmachine.reg<vgpr, 1>) {
+    %mask, %compare_vcc = waveamdmachine.v_cmp_ne_u32_vcc %a, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    %sum, %live_vcc = waveamdmachine.v_add_u32_vcc %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    waveamdmachine.exec_if %mask {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
+    %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %live_vcc
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  // CHECK-LABEL: func.func @keeps_reused_exec_mask
+  // CHECK: [[MASK:%.*]], %{{.*}} = waveamdmachine.v_cmp_ne_u32_vcc
+  // CHECK: waveamdmachine.exec_if [[MASK]]
+  // CHECK: waveamdmachine.exec_if [[MASK]]
+  // CHECK-NOT: mask_width
+  func.func @keeps_reused_exec_mask(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %zero: !waveamdmachine.reg<vgpr, 1>) {
+    %mask, %vcc = waveamdmachine.v_cmp_ne_u32_vcc %a, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    waveamdmachine.exec_if %mask {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
+    waveamdmachine.exec_if %mask {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
+    return
+  }
+
+  // CHECK-LABEL: func.func @keeps_else_mask_across_vcc_write
+  // CHECK: [[MASK:%.*]], %{{.*}} = waveamdmachine.v_cmp_ne_u32_vcc
+  // CHECK-NEXT: waveamdmachine.exec_if [[MASK]]
+  // CHECK: waveamdmachine.v_add_u32_vcc
+  // CHECK-NOT: mask_width
+  func.func @keeps_else_mask_across_vcc_write(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %zero: !waveamdmachine.reg<vgpr, 1>) {
+    %mask, %vcc0 = waveamdmachine.v_cmp_ne_u32_vcc %a, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    waveamdmachine.exec_if %mask {
+      %sum, %vcc1 = waveamdmachine.v_add_u32_vcc %a, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+      waveamdmachine.yield
+    } otherwise {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
     return
   }
 

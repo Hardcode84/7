@@ -420,11 +420,26 @@ static LogicalResult verifyExecIfYield(ExecIfOp op, Region &region,
   return success();
 }
 
+static LogicalResult verifyExecIfCondition(ExecIfOp op) {
+  RegType condType = cast<RegType>(op.getCondition().getType());
+  IntegerAttr maskWidth = op->getAttrOfType<IntegerAttr>("mask_width");
+  if (condType.getRegClass() == RegClass::SGPR) {
+    if (condType.getWidth() != 1 && condType.getWidth() != 2)
+      return op.emitOpError("condition must be SGPR1 or SGPR2");
+    if (maskWidth)
+      return op.emitOpError("SGPR condition must not set mask_width");
+    return success();
+  }
+  if (!maskWidth)
+    return op.emitOpError("VCC condition requires mask_width 32 or 64");
+  if (maskWidth.getInt() != 32 && maskWidth.getInt() != 64)
+    return op.emitOpError("VCC condition requires mask_width 32 or 64");
+  return success();
+}
+
 LogicalResult ExecIfOp::verify() {
-  RegType condType = cast<RegType>(getCondition().getType());
-  if (condType.getRegClass() != RegClass::SGPR ||
-      (condType.getWidth() != 1 && condType.getWidth() != 2))
-    return emitOpError("condition must be SGPR1 or SGPR2");
+  if (failed(verifyExecIfCondition(*this)))
+    return failure();
   bool hasElse = !getElseRegion().empty();
   if (failed(verifyExecIfYield(*this, getThenRegion(), "then", hasElse)))
     return failure();

@@ -367,6 +367,12 @@ def WaveAMDMachine_VCC
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VCC">,
            "WaveAMDMachine VCC state">;
 
+def WaveAMDMachine_ExecMask
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VCC)">,
+           "WaveAMDMachine SGPR or VCC EXEC mask">;
+
 def WaveAMDMachine_SGPR1OrImm
     : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
@@ -1479,7 +1485,8 @@ def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
   WaveAMDMachine_WritesExec
 ]> {
   let summary = "structured EXEC-masked region";
-  let arguments = (ins WaveAMDMachine_SGPR:$condition);
+  let arguments = (ins WaveAMDMachine_ExecMask:$condition,
+                       OptionalAttr<I64Attr>:$mask_width);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$thenRegion,
                         MaxSizedRegion<1>:$elseRegion);

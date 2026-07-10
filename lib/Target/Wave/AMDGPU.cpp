@@ -2359,32 +2359,38 @@ private:
     return llvm::MCOperand::createReg(mcSGPRReg(execIfSaveBase + slot, width));
   }
 
-  LogicalResult emitExecSave(Value condition, llvm::MCOperand save) {
-    unsigned width =
-        cast<waveamdmachine::RegType>(condition.getType()).getWidth();
+  llvm::MCOperand getExecMaskOperand(Value condition) {
+    if (isVCCType(condition.getType()))
+      return llvm::MCOperand::createReg(
+          namedPhysReg(wavefrontSize == 32 ? "vcc_lo" : "vcc"));
+    return toMCOperand(condition);
+  }
+
+  LogicalResult emitExecSave(Value condition, unsigned width,
+                             llvm::MCOperand save) {
+    llvm::MCOperand mask = getExecMaskOperand(condition);
     if (width == 2)
-      return emitMC(sAndSaveexecB64(), {save, toMCOperand(condition)});
+      return emitMC(sAndSaveexecB64(), {save, mask});
     if (isGfx8Or9()) {
       llvm::MCOperand execLo =
           llvm::MCOperand::createReg(namedPhysReg("exec_lo"));
       if (failed(emitMC(sMovB32(), {save, execLo})))
         return failure();
-      return emitMC(sAndB32(), {execLo, execLo, toMCOperand(condition)});
+      return emitMC(sAndB32(), {execLo, execLo, mask});
     }
-    return emitMC(llvm::AMDGPU::S_AND_SAVEEXEC_B32_gfx11,
-                  {save, toMCOperand(condition)});
+    return emitMC(llvm::AMDGPU::S_AND_SAVEEXEC_B32_gfx11, {save, mask});
   }
 
-  LogicalResult emitExecElse(Value condition, llvm::MCOperand save) {
-    unsigned width =
-        cast<waveamdmachine::RegType>(condition.getType()).getWidth();
+  LogicalResult emitExecElse(Value condition, unsigned width,
+                             llvm::MCOperand save) {
+    llvm::MCOperand mask = getExecMaskOperand(condition);
     if (width == 2)
-      return emitMC(sAndn2B64(),
-                    {llvm::MCOperand::createReg(namedPhysReg("exec")), save,
-                     toMCOperand(condition)});
-    return emitMC(sAndn2B32(),
-                  {llvm::MCOperand::createReg(namedPhysReg("exec_lo")), save,
-                   toMCOperand(condition)});
+      return emitMC(
+          sAndn2B64(),
+          {llvm::MCOperand::createReg(namedPhysReg("exec")), save, mask});
+    return emitMC(
+        sAndn2B32(),
+        {llvm::MCOperand::createReg(namedPhysReg("exec_lo")), save, mask});
   }
 
   LogicalResult emitExecRestore(unsigned width, llvm::MCOperand save) {
@@ -2455,8 +2461,7 @@ private:
   LogicalResult emitExecIf(waveamdmachine::ExecIfOp execIf) {
     unsigned id = execIfCounter++;
     Value condition = execIf.getCondition();
-    unsigned width =
-        cast<waveamdmachine::RegType>(condition.getType()).getWidth();
+    unsigned width = wave::getWaveAMDExecIfMaskDwords(execIf);
     unsigned savedCursor = execIfSaveCursor;
     unsigned saveSlot =
         wave::alignWaveAMDExecIfSaveSlot(execIfSaveCursor, width);
@@ -2468,13 +2473,13 @@ private:
         hasElse ? (funcLabelPrefix + ".exec_else_" + Twine(id)).str()
                 : endLabel;
     llvm::MCOperand save = getExecSaveOperand(saveSlot, width);
-    if (failed(emitExecSave(condition, save)) ||
+    if (failed(emitExecSave(condition, width, save)) ||
         failed(emitMC(sCbranchExecz(), {labelOperand(elseLabel)})) ||
         failed(emitExecIfRegion(execIf, execIf.getThenRegion())))
       return failure();
     if (hasElse) {
       os << elseLabel << ":\n";
-      if (failed(emitExecElse(condition, save)) ||
+      if (failed(emitExecElse(condition, width, save)) ||
           failed(emitMC(sCbranchExecz(), {labelOperand(endLabel)})) ||
           failed(emitExecIfRegion(execIf, execIf.getElseRegion())))
         return failure();

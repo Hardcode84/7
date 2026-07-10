@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveAMDHardwareResources.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -21,6 +22,90 @@ namespace mlir::wave {
 using namespace mlir;
 
 namespace {
+
+static bool isVCCCompare(Operation *op) {
+  return isa<waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
+             waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
+             waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp,
+             waveamdmachine::VCmpLtI32VccOp, waveamdmachine::VCmpLeI32VccOp,
+             waveamdmachine::VCmpGtI32VccOp, waveamdmachine::VCmpGeI32VccOp>(
+      op);
+}
+
+static bool hasLiveVCCWrite(Operation *op) {
+  wave::HardwareResourceEffects effects = wave::getHardwareResourceEffects(op);
+  if (!llvm::is_contained(effects.writes, wave::HardwareResourceKind::VCC))
+    return false;
+  bool hasVCCResult = false;
+  for (Value result : op->getResults()) {
+    if (wave::getHardwareResourceForValue(result) !=
+        wave::HardwareResourceKind::VCC)
+      continue;
+    hasVCCResult = true;
+    if (!result.use_empty())
+      return true;
+  }
+  return !hasVCCResult;
+}
+
+static bool hasLiveVCCWriteIn(Operation *root) {
+  return root
+      ->walk([&](Operation *op) {
+        if (hasLiveVCCWrite(op))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+static bool hasLiveVCCWriteBetween(Operation *first, Operation *last) {
+  for (Operation *op = first->getNextNode(); op && op != last;
+       op = op->getNextNode())
+    if (hasLiveVCCWriteIn(op))
+      return true;
+  return false;
+}
+
+static bool regionWritesVCC(Region &region) {
+  return region
+      .walk([&](Operation *op) {
+        wave::HardwareResourceEffects effects =
+            wave::getHardwareResourceEffects(op);
+        if (llvm::is_contained(effects.writes, wave::HardwareResourceKind::VCC))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+static Value getUnusedVCCResult(Value mask) {
+  Operation *compare = mask.getDefiningOp();
+  if (!compare || !isVCCCompare(compare) || compare->getResult(0) != mask)
+    return {};
+  Value vcc = compare->getResult(1);
+  return vcc.use_empty() ? vcc : Value();
+}
+
+static void useVCCExecMask(waveamdmachine::ExecIfOp execIf) {
+  Value mask = execIf.getCondition();
+  if (!mask.hasOneUse())
+    return;
+  Value vcc = getUnusedVCCResult(mask);
+  if (!vcc)
+    return;
+  Operation *compare = mask.getDefiningOp();
+  if (compare->getNextNode() != execIf)
+    return;
+  if (!execIf.getElseRegion().empty() &&
+      regionWritesVCC(execIf.getThenRegion()))
+    return;
+
+  auto maskType = cast<waveamdmachine::RegType>(mask.getType());
+  execIf->setAttr("mask_width",
+                  IntegerAttr::get(IntegerType::get(execIf.getContext(), 64),
+                                   maskType.getWidth() * 32));
+  execIf->setOperand(0, vcc);
+}
 
 static bool isScalarMaskSinkOp(Operation *op) {
   if (!isa<waveamdmachine::SCmpEqU32Op, waveamdmachine::SCmpLtU32Op,
@@ -51,6 +136,8 @@ static bool collectScalarMaskSinkClosure(Value value, Operation *anchor,
   if (!def || !isScalarMaskSinkOp(def))
     return true;
   if (def->getBlock() != anchor->getBlock() || !def->isBeforeInBlock(anchor))
+    return false;
+  if (isVCCCompare(def) && hasLiveVCCWriteBetween(def, anchor))
     return false;
   if (!seen.insert(def).second)
     return true;
@@ -95,6 +182,9 @@ struct WaveAMDScalarMaskPreschedulePass
     getOperation()->walk([&](Operation *op) { ops.push_back(op); });
     for (Operation *op : ops)
       sinkScalarMaskClosure(op);
+    for (Operation *op : ops)
+      if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
+        useVCCExecMask(execIf);
   }
 };
 

@@ -941,9 +941,8 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s77, s74, s77
 		s_mul_i32 s78, 0x2100, s77
 		v_cmp_lt_i32_e64 vcc, v31, s76
-		s_mov_b64 s[80:81], vcc
 		s_add_i32 m0, s71, s78
-		s_and_saveexec_b64 s[82:83], s[80:81]
+		s_and_saveexec_b64 s[82:83], vcc
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_persistent.exec_endif_9
 		buffer_load_dwordx4 v13, s[44:47], s75 offen lds
 .Ltlx_addmm_glu_kernel_persistent.exec_endif_9:
@@ -955,9 +954,8 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s78, s69, s77
 		v_add3_u32 v77, v10, v85, s78
 		v_cmp_lt_i32_e64 vcc, v11, s76
-		s_mov_b64 s[78:79], vcc
 		s_add_i32 m0, s75, 0x62e0
-		s_and_saveexec_b64 s[82:83], s[78:79]
+		s_and_saveexec_b64 s[82:83], vcc
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_persistent.exec_endif_10
 		buffer_load_dwordx4 v77, s[48:51], 0 offen lds
 .Ltlx_addmm_glu_kernel_persistent.exec_endif_10:
@@ -965,9 +963,8 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s77, s70, s77
 		v_add3_u32 v77, v10, v85, s77
 		v_cmp_lt_i32_e64 vcc, v12, s76
-		s_mov_b64 s[78:79], vcc
 		s_add_i32 m0, s75, 0x83e0
-		s_and_saveexec_b64 s[82:83], s[78:79]
+		s_and_saveexec_b64 s[82:83], vcc
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_persistent.exec_endif_11
 		buffer_load_dwordx4 v77, s[48:51], 0 offen lds
 .Ltlx_addmm_glu_kernel_persistent.exec_endif_11:

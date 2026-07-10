@@ -11,6 +11,10 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
+namespace mlir::waveamdmachine {
+class ExecIfOp;
+}
+
 namespace mlir::wave {
 
 struct WaveAMDExecIfSaveStackInfo {
@@ -19,6 +23,8 @@ struct WaveAMDExecIfSaveStackInfo {
 };
 
 unsigned alignWaveAMDExecIfSaveSlot(unsigned value, unsigned align);
+
+unsigned getWaveAMDExecIfMaskDwords(waveamdmachine::ExecIfOp execIf);
 
 WaveAMDExecIfSaveStackInfo getWaveAMDExecIfSaveStackInfo(func::FuncOp func);
 

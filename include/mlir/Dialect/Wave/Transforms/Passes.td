@@ -484,10 +484,12 @@ def WaveAMDMMAReusePreschedule
 
 def WaveAMDScalarMaskPreschedule
     : Pass<"waveamd-scalar-mask-preschedule"> {
-  let summary = "Sink single-use scalar masks before scheduling";
+  let summary = "Prepare single-use scalar masks for scheduling";
   let description = [{
     Sinks SCC/VCC compare chains to their sole consumer before hazard repair and
-    model scheduling. Register allocation then sees the repaired schedule.
+    model scheduling. Single-use compare masks feed `exec_if` directly through
+    VCC when no live VCC write crosses the mask. Register allocation then sees
+    the repaired schedule.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

@@ -22,15 +22,19 @@ unsigned alignWaveAMDExecIfSaveSlot(unsigned value, unsigned align) {
   return ((value + align - 1) / align) * align;
 }
 
-static unsigned getExecIfSaveWidth(waveamdmachine::ExecIfOp execIf) {
+unsigned getWaveAMDExecIfMaskDwords(waveamdmachine::ExecIfOp execIf) {
   auto type = cast<waveamdmachine::RegType>(execIf.getCondition().getType());
-  return type.getWidth();
+  if (type.getRegClass() == waveamdmachine::RegClass::SGPR)
+    return type.getWidth();
+  IntegerAttr width = execIf->getAttrOfType<IntegerAttr>("mask_width");
+  assert(width && "verified VCC exec_if must carry mask_width");
+  return width.getInt() / 32;
 }
 
 static void collectSaveStackInfo(Operation *op, unsigned cursor,
                                  WaveAMDExecIfSaveStackInfo &info) {
   if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op)) {
-    unsigned width = getExecIfSaveWidth(execIf);
+    unsigned width = getWaveAMDExecIfMaskDwords(execIf);
     unsigned saveSlot = alignWaveAMDExecIfSaveSlot(cursor, width);
     cursor = saveSlot + width;
     info.maxDwords = std::max(info.maxDwords, cursor);

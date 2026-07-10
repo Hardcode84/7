@@ -464,6 +464,36 @@ func.func @exec_if_bad_condition(%cond: !waveamdmachine.reg<sgpr, 4>) {
 
 // -----
 
+func.func @exec_if_vcc_missing_width(%cond: !waveamdmachine.reg<vcc, 1>) {
+  // expected-error @below {{VCC condition requires mask_width 32 or 64}}
+  waveamdmachine.exec_if %cond {
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<vcc, 1>
+  return
+}
+
+// -----
+
+func.func @exec_if_vcc_bad_width(%cond: !waveamdmachine.reg<vcc, 1>) {
+  // expected-error @below {{VCC condition requires mask_width 32 or 64}}
+  waveamdmachine.exec_if %cond {
+    waveamdmachine.yield
+  } {mask_width = 16 : i64} : !waveamdmachine.reg<vcc, 1>
+  return
+}
+
+// -----
+
+func.func @exec_if_sgpr_with_width(%cond: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{SGPR condition must not set mask_width}}
+  waveamdmachine.exec_if %cond {
+    waveamdmachine.yield
+  } {mask_width = 64 : i64} : !waveamdmachine.reg<sgpr, 2>
+  return
+}
+
+// -----
+
 func.func @exec_if_bad_terminator(%cond: !waveamdmachine.reg<sgpr, 1>) {
   // expected-error @below {{then region must terminate with yield}}
   waveamdmachine.exec_if %cond {
