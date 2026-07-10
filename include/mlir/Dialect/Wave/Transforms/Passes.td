@@ -73,6 +73,20 @@ def WaveCoalesceMemory : Pass<"wave-coalesce-memory"> {
   ];
 }
 
+def WaveCoalesceWhere : Pass<"wave-coalesce-where"> {
+  let summary = "Coalesce adjacent Wave where regions with the same mask";
+  let description = [{
+    Merges same-block, then-only `wave.where` regions with identical mask SSA
+    values. Speculatable operations between the regions sink into the merged
+    body when all uses remain inside it. Escaping dependency slices hoist
+    before the first region unless they depend on its results. Result and
+    memory-token order is preserved.
+  }];
+  let dependentDialects = [
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   let summary = "Combine chained Wave pointer offsets into one symbolic offset";
   let description = [{
