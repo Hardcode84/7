@@ -1086,6 +1086,55 @@ static unsigned findReadyBarrierPairFiller(const BitVector &ready,
   return region.ops.size();
 }
 
+static bool shareTokenJoin(waveamdmachine::SBarrierOp lhs,
+                           waveamdmachine::SBarrierOp rhs) {
+  for (Value result : lhs->getResults())
+    for (OpOperand &use : result.getUses()) {
+      Operation *user = use.getOwner();
+      if (user->hasTrait<traits::TokenJoinOp>() &&
+          llvm::any_of(user->getOperands(), [rhs](Value operand) {
+            return operand.getDefiningOp() == rhs;
+          }))
+        return true;
+    }
+  return false;
+}
+
+static FailureOr<unsigned> findReadyNoWaitBarrierRunContinuation(
+    const BitVector &ready, const GreedyRegion &region,
+    ArrayRef<unsigned> order, const IssueState &state,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config,
+    const ValueOriginMap &origins) {
+  SmallVector<waveamdmachine::SBarrierOp, 4> run;
+  for (unsigned scheduled : llvm::reverse(order)) {
+    Operation *op = region.ops[scheduled];
+    if (waveamdmachine::classifyOp(op) == waveamdmachine::SchedClass::NoInst)
+      continue;
+    auto barrier = dyn_cast<waveamdmachine::SBarrierOp>(op);
+    if (!barrier)
+      break;
+    run.push_back(barrier);
+  }
+
+  for (unsigned index : llvm::seq(ready.size())) {
+    auto candidate =
+        dyn_cast_if_present<waveamdmachine::SBarrierOp>(region.ops[index]);
+    if (!ready.test(index) || !candidate ||
+        llvm::none_of(run, [&](waveamdmachine::SBarrierOp barrier) {
+          return shareTokenJoin(barrier, candidate);
+        }))
+      continue;
+    FailureOr<IssuePreview> preview =
+        previewIssue(state, candidate, arch, config, origins);
+    if (failed(preview))
+      return failure();
+    if (preview->memoryWaitCycles == 0)
+      return index;
+  }
+  return region.ops.size();
+}
+
 static FailureOr<unsigned>
 findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
                        const BitVector &scheduled, unsigned next,
@@ -1139,6 +1188,9 @@ findStallFiller(const BitVector &ready, unsigned next,
                 const ValueOriginMap &origins) {
   for (unsigned index : llvm::seq(ready.size())) {
     if (!ready.test(index) || index == next)
+      continue;
+    if (isa<waveamdmachine::SBarrierOp>(region.ops[next]) &&
+        isa<waveamdmachine::SBarrierOp>(region.ops[index]))
       continue;
     if (!canUseStallFiller(region, scheduled, next, index, origins))
       continue;
@@ -1422,6 +1474,15 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
   }
 
   unsigned next = findFirstUnscheduled(scheduled);
+  FailureOr<unsigned> barrier = findReadyNoWaitBarrierRunContinuation(
+      ready, region, result.order, state, arch, config, origins);
+  if (failed(barrier))
+    return failure();
+  if (*barrier != region.ops.size())
+    return scheduleReadyByIndex(*barrier, region, graph, arch, config, state,
+                                ready, scheduled, pending, result.order,
+                                origins);
+
   if (ready.test(next)) {
     FailureOr<std::optional<unsigned>> alternative =
         findReadyAlternative(ready, next, region, graph, state, scheduled, arch,

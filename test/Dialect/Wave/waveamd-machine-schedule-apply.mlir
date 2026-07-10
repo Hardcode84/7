@@ -433,6 +433,73 @@ func.func @cluster_barrier_pair_after_compute(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @cluster_barrier_run_after_stall_fill(
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %addr2: !waveamdmachine.reg<vgpr, 1>,
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>,
+    %tok: !waveamdmachine.mem.token) {
+  %ld0, %t0 = waveamdmachine.ds_load_b32 %addr0 after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %ld1, %t1 = waveamdmachine.ds_load_b32 %addr1 after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %ld2, %t2 = waveamdmachine.ds_load_b32 %addr2 after %tok
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %b0 = waveamdmachine.s_barrier %t0
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %x, %sx = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %b1 = waveamdmachine.s_barrier %t1
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %j0 = waveamdmachine.token_join %b0, %b1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %a0 = waveamdmachine.v_add_u32 %addr0, %addr1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use0, %u0 = waveamdmachine.ds_load_b32 %a0 after %j0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %b2 = waveamdmachine.s_barrier %t2
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %j1 = waveamdmachine.token_join %b0, %b2
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %a1 = waveamdmachine.v_add_u32 %addr1, %addr2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use1, %u1 = waveamdmachine.ds_load_b32 %a1 after %j1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  return
+}
+}
+
+// IR-LABEL: func.func @cluster_barrier_run_after_stall_fill
+// IR: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: [[RUN_B0:%.*]] = waveamdmachine.s_barrier
+// IR-NEXT: [[RUN_B1:%.*]] = waveamdmachine.s_barrier
+// IR-NEXT: waveamdmachine.token_join [[RUN_B0]], [[RUN_B1]]
+// IR-NEXT: [[RUN_B2:%.*]] = waveamdmachine.s_barrier
+// IR-NEXT: waveamdmachine.token_join [[RUN_B0]], [[RUN_B2]]
+// DIAG: waveamd-machine-schedule region func=cluster_barrier_run_after_stall_fill
+// DIAG-SAME: action=apply reason=barrier_memory
+// CLEANUP-LABEL: func.func @cluster_barrier_run_after_stall_fill
+// CLEANUP: waveamdmachine.s_add_i32
+// CLEANUP-NEXT: waveamdmachine.v_add_u32
+// CLEANUP-NEXT: [[RUN_BARRIER:%.*]] = waveamdmachine.s_barrier
+// CLEANUP-NOT: waveamdmachine.s_barrier
+// CLEANUP: return
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @split_barrier_arrive_token_gap_fill(
     %addr_base: !waveamdmachine.reg<vgpr, 1>,
     %addr_off: !waveamdmachine.reg<vgpr, 1>,
