@@ -985,33 +985,17 @@ tlx_addmm_glu_kernel_optimized:
 		s_add_i32 s3, s3, 1
 		s_cmp_lg_u32 s2, 0
 		s_cselect_b32 s1, s3, s1
-		s_cselect_b32 s2, 1, 0
-		s_and_b32 s3, s1, 0xffff
-		s_lshr_b32 s4, s1, 16
-		s_mul_i32 s5, s3, 0xaaab
-		s_mul_i32 s3, s3, 0xaaaa
-		s_mul_i32 s12, s4, 0xaaab
-		s_mul_i32 s4, s4, 0xaaaa
-		s_lshr_b32 s5, s5, 16
-		s_and_b32 s13, s3, 0xffff
-		s_and_b32 s14, s12, 0xffff
-		s_add_i32 s5, s5, s13
-		s_add_i32 s5, s5, s14
-		s_lshr_b32 s3, s3, 16
-		s_add_i32 s3, s4, s3
-		s_lshr_b32 s4, s12, 16
-		s_add_i32 s3, s3, s4
-		s_lshr_b32 s4, s5, 16
-		s_add_i32 s3, s3, s4
-		s_lshr_b32 s3, s3, 1
-		s_mul_i32 s3, s3, 3
-		s_xor_b32 s3, s3, -1
-		s_add_i32 s3, s3, 1
-		s_add_i32 s1, s1, s3
-		s_xor_b32 s3, s1, -1
-		s_add_i32 s3, s3, 1
-		s_cmp_lg_u32 s2, 0
-		s_cselect_b32 s1, s3, s1
+		s_mul_hi_u32 s2, s1, 0xaaaaaaab
+		s_cselect_b32 s3, 1, 0
+		s_lshr_b32 s2, s2, 1
+		s_mul_i32 s2, s2, 3
+		s_xor_b32 s2, s2, -1
+		s_add_i32 s2, s2, 1
+		s_add_i32 s1, s1, s2
+		s_xor_b32 s2, s1, -1
+		s_add_i32 s2, s2, 1
+		s_cmp_lg_u32 s3, 0
+		s_cselect_b32 s1, s2, s1
 		s_waitcnt vmcnt(0)
 		s_barrier
 		s_mul_i32 s2, 0x4200, s1
@@ -1088,33 +1072,17 @@ tlx_addmm_glu_kernel_optimized:
 		s_add_i32 s2, s2, 1
 		s_cmp_lg_u32 s1, 0
 		s_cselect_b32 s0, s2, s0
-		s_cselect_b32 s1, 1, 0
-		s_and_b32 s2, s0, 0xffff
-		s_lshr_b32 s3, s0, 16
-		s_mul_i32 s4, s2, 0xaaab
-		s_mul_i32 s2, s2, 0xaaaa
-		s_mul_i32 s5, s3, 0xaaab
-		s_mul_i32 s3, s3, 0xaaaa
-		s_lshr_b32 s4, s4, 16
-		s_and_b32 s12, s2, 0xffff
-		s_and_b32 s13, s5, 0xffff
-		s_add_i32 s4, s4, s12
-		s_add_i32 s4, s4, s13
-		s_lshr_b32 s2, s2, 16
-		s_add_i32 s2, s3, s2
-		s_lshr_b32 s3, s5, 16
-		s_add_i32 s2, s2, s3
-		s_lshr_b32 s3, s4, 16
-		s_add_i32 s2, s2, s3
-		s_lshr_b32 s2, s2, 1
-		s_mul_i32 s2, s2, 3
-		s_xor_b32 s2, s2, -1
-		s_add_i32 s2, s2, 1
-		s_add_i32 s0, s0, s2
-		s_xor_b32 s2, s0, -1
-		s_add_i32 s2, s2, 1
-		s_cmp_lg_u32 s1, 0
-		s_cselect_b32 s0, s2, s0
+		s_mul_hi_u32 s1, s0, 0xaaaaaaab
+		s_cselect_b32 s2, 1, 0
+		s_lshr_b32 s1, s1, 1
+		s_mul_i32 s1, s1, 3
+		s_xor_b32 s1, s1, -1
+		s_add_i32 s1, s1, 1
+		s_add_i32 s0, s0, s1
+		s_xor_b32 s1, s0, -1
+		s_add_i32 s1, s1, 1
+		s_cmp_lg_u32 s2, 0
+		s_cselect_b32 s0, s1, s0
 		s_mul_i32 s1, 0x4200, s0
 		v_add_u32_e32 v0, s1, v39
 		ds_read_b128 v[44:47], v0

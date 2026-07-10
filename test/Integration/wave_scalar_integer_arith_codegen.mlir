@@ -73,6 +73,43 @@ func.func @scalar_i32_const_pow2_divsi_codegen(
   return
 }
 
+// ASM-LABEL: scalar_i32_const_signed_rem3_codegen:
+// ASM: s_mul_hi_u32
+// ASM: global_store_b32
+func.func @scalar_i32_const_signed_rem3_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %x: i32)
+    attributes {wave.kernel} {
+  %three = arith.constant 3 : i32
+  %rem = wave.binary remsi %x, %three : i32, i32 -> i32
+  %v = wave.splat %rem : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %v -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
+// ASM-LABEL: simd_i32_const_signed_rem3_codegen:
+// ASM: v_mul_hi_u32
+// ASM: global_store_b32
+func.func @simd_i32_const_signed_rem3_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %bias: i32)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %vbias = wave.splat %bias : i32 -> !wave.simd<i32, 32>
+  %numerator = wave.binary subi %lane, %vbias
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %minus_three = arith.constant -3 : i32
+  %divisor = wave.splat %minus_three : i32 -> !wave.simd<i32, 32>
+  %rem = wave.binary remsi %numerator, %divisor
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %tok = wave.store %rem -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: scalar_i64_div_rem_codegen:
 // ASM: s_lshr_b64
 // ASM: s_and_b32

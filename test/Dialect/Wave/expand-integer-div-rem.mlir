@@ -83,6 +83,86 @@ func.func @signed_const_i32_rem3_nonnegative(%x: i32) -> i32 {
 
 // -----
 
+// CHECK-LABEL: func.func @signed_const_i32_divrem_unknown_sign
+// CHECK-SAME: ([[X:%.*]]: i32)
+// CHECK: [[NEG:%.*]] = arith.cmpi slt, [[X]]
+// CHECK: [[ABS:%.*]] = wave.select [[NEG]]
+// CHECK-NOT: wave.binary andi
+// CHECK: [[HI:%.*]] = wave.binary mulhui [[ABS]]
+// CHECK-NOT: wave.binary andi
+// CHECK: return
+// CHECK-NOT: divsi
+// CHECK-NOT: remsi
+func.func @signed_const_i32_divrem_unknown_sign(%x: i32) -> (i32, i32) {
+  %three = arith.constant 3 : i32
+  %q = wave.binary divsi %x, %three : i32, i32 -> i32
+  %r = wave.binary remsi %x, %three : i32, i32 -> i32
+  return %q, %r : i32, i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_simd_i32_rem_negative_divisor
+// CHECK-SAME: ([[X:%.*]]: !wave.simd<i32, 32>)
+// CHECK: [[NEG:%.*]] = wave.cmpi slt [[X]]
+// CHECK: [[ABS:%.*]] = wave.select [[NEG]]
+// CHECK-NOT: wave.binary andi
+// CHECK: [[HI:%.*]] = wave.binary mulhui [[ABS]]
+// CHECK-NOT: wave.binary andi
+// CHECK: return
+// CHECK-NOT: remsi
+func.func @signed_const_simd_i32_rem_negative_divisor(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<i32, 32> {
+  %minus_three = arith.constant -3 : i32
+  %divisor = wave.splat %minus_three : i32 -> !wave.simd<i32, 32>
+  %r = wave.binary remsi %x, %divisor
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %r : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_i32_negative_numerator
+// CHECK: [[MINUS_SEVEN:%.*]] = arith.constant -7 : i32
+// CHECK: [[SEVEN:%.*]] = wave.constant 7 : i32
+// CHECK: [[ABS:%.*]] = wave.select {{%.*}}, [[SEVEN]], [[MINUS_SEVEN]]
+// CHECK: [[HI:%.*]] = wave.binary mulhui [[ABS]]
+// CHECK: wave.binary subi {{%.*}}, {{%.*}}
+// CHECK: return
+func.func @signed_const_i32_negative_numerator() -> (i32, i32) {
+  %minus_seven = arith.constant -7 : i32
+  %three = arith.constant 3 : i32
+  %q = wave.binary divsi %minus_seven, %three : i32, i32 -> i32
+  %r = wave.binary remsi %minus_seven, %three : i32, i32 -> i32
+  return %q, %r : i32, i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_const_i32_int_min_ones
+// CHECK: [[WAVE_ZERO:%.*]] = wave.constant 0 : i32
+// CHECK: [[MIN:%.*]] = arith.constant -2147483648 : i32
+// CHECK: [[ZERO:%.*]] = arith.constant 0 : i32
+// CHECK: [[WAVE_MIN:%.*]] = wave.constant -2147483648 : i32
+// CHECK: [[ABS:%.*]] = wave.select {{%.*}}, [[WAVE_MIN]], [[MIN]]
+// CHECK: [[WRAPPED_NEG:%.*]] = wave.binary subi [[ZERO]], [[ABS]]
+// CHECK: [[OVERFLOW_QUOT:%.*]] = wave.select {{%.*}}, [[WRAPPED_NEG]], [[ABS]]
+// CHECK: [[MINUS_ONE_REM:%.*]] = wave.select {{%.*}}, [[WAVE_ZERO]], [[ZERO]]
+// CHECK: return [[MIN]], [[ZERO]], [[OVERFLOW_QUOT]], [[MINUS_ONE_REM]]
+func.func @signed_const_i32_int_min_ones() -> (i32, i32, i32, i32) {
+  %min = arith.constant -2147483648 : i32
+  %one = arith.constant 1 : i32
+  %minus_one = arith.constant -1 : i32
+  %quot_one = wave.binary divsi %min, %one : i32, i32 -> i32
+  %rem_one = wave.binary remsi %min, %one : i32, i32 -> i32
+  %quot_minus_one = wave.binary divsi %min, %minus_one : i32, i32 -> i32
+  %rem_minus_one = wave.binary remsi %min, %minus_one : i32, i32 -> i32
+  return %quot_one, %rem_one, %quot_minus_one, %rem_minus_one
+      : i32, i32, i32, i32
+}
+
+// -----
+
 // CHECK-LABEL: func.func @signed_const_pow2_i32_nonnegative
 // CHECK-SAME: ([[X:%.*]]: i32)
 // CHECK: [[NONNEG:%.*]] = wave.assume [[X]]

@@ -118,33 +118,17 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s44, s44, 1
 		s_cmp_lg_u32 s43, 0
 		s_cselect_b32 s42, s44, s42
-		s_cselect_b32 s43, 1, 0
-		s_and_b32 s44, s42, 0xffff
-		s_lshr_b32 s45, s42, 16
-		s_mul_i32 s46, s44, 0xaaab
-		s_mul_i32 s44, s44, 0xaaaa
-		s_mul_i32 s47, s45, 0xaaab
-		s_mul_i32 s45, s45, 0xaaaa
-		s_lshr_b32 s46, s46, 16
-		s_and_b32 s48, s44, 0xffff
-		s_and_b32 s49, s47, 0xffff
-		s_add_i32 s46, s46, s48
-		s_add_i32 s46, s46, s49
-		s_lshr_b32 s44, s44, 16
-		s_add_i32 s44, s45, s44
-		s_lshr_b32 s45, s47, 16
-		s_add_i32 s44, s44, s45
-		s_lshr_b32 s45, s46, 16
-		s_add_i32 s44, s44, s45
-		s_lshr_b32 s44, s44, 1
-		s_mul_i32 s44, s44, 3
-		s_xor_b32 s44, s44, -1
-		s_add_i32 s44, s44, 1
-		s_add_i32 s42, s42, s44
-		s_xor_b32 s44, s42, -1
-		s_add_i32 s44, s44, 1
-		s_cmp_lg_u32 s43, 0
-		s_cselect_b32 s42, s44, s42
+		s_mul_hi_u32 s43, s42, 0xaaaaaaab
+		s_cselect_b32 s44, 1, 0
+		s_lshr_b32 s43, s43, 1
+		s_mul_i32 s43, s43, 3
+		s_xor_b32 s43, s43, -1
+		s_add_i32 s43, s43, 1
+		s_add_i32 s42, s42, s43
+		s_xor_b32 s43, s42, -1
+		s_add_i32 s43, s43, 1
+		s_cmp_lg_u32 s44, 0
+		s_cselect_b32 s42, s43, s42
 		s_add_i32 s21, s21, -1
 		s_cmp_lt_i32 s21, 0
 		s_cselect_b32 s43, 1, 0
@@ -152,33 +136,17 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s44, s44, 1
 		s_cmp_lg_u32 s43, 0
 		s_cselect_b32 s21, s44, s21
-		s_cselect_b32 s43, 1, 0
-		s_and_b32 s44, s21, 0xffff
-		s_lshr_b32 s45, s21, 16
-		s_mul_i32 s46, s44, 0xaaab
-		s_mul_i32 s44, s44, 0xaaaa
-		s_mul_i32 s47, s45, 0xaaab
-		s_mul_i32 s45, s45, 0xaaaa
-		s_lshr_b32 s46, s46, 16
-		s_and_b32 s48, s44, 0xffff
-		s_and_b32 s49, s47, 0xffff
-		s_add_i32 s46, s46, s48
-		s_add_i32 s46, s46, s49
-		s_lshr_b32 s44, s44, 16
-		s_add_i32 s44, s45, s44
-		s_lshr_b32 s45, s47, 16
-		s_add_i32 s44, s44, s45
-		s_lshr_b32 s45, s46, 16
-		s_add_i32 s44, s44, s45
-		s_lshr_b32 s44, s44, 1
-		s_mul_i32 s44, s44, 3
-		s_xor_b32 s44, s44, -1
-		s_add_i32 s44, s44, 1
-		s_add_i32 s21, s21, s44
-		s_xor_b32 s44, s21, -1
-		s_add_i32 s44, s44, 1
-		s_cmp_lg_u32 s43, 0
-		s_cselect_b32 s21, s44, s21
+		s_mul_hi_u32 s43, s21, 0xaaaaaaab
+		s_cselect_b32 s44, 1, 0
+		s_lshr_b32 s43, s43, 1
+		s_mul_i32 s43, s43, 3
+		s_xor_b32 s43, s43, -1
+		s_add_i32 s43, s43, 1
+		s_add_i32 s21, s21, s43
+		s_xor_b32 s43, s21, -1
+		s_add_i32 s43, s43, 1
+		s_cmp_lg_u32 s44, 0
+		s_cselect_b32 s21, s43, s21
 		s_cmp_lt_i32 s20, 0
 		s_cselect_b32 s22, s22, 0
 		s_add_i32 s22, s20, s22

@@ -885,8 +885,9 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   Value absLhs = createSelect(builder, loc, type, lhsNeg,
                               createNeg(builder, loc, type, lhs), lhs);
 
+  std::optional<APInt> rhsConst = getConstantAPInt(rhs, bits);
   Value absRhs;
-  if (std::optional<APInt> rhsConst = getConstantAPInt(rhs, bits)) {
+  if (rhsConst) {
     absRhs = createConstantLike(builder, loc, type,
                                 signedAbs(*rhsConst).getZExtValue());
   } else {
@@ -897,7 +898,8 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   }
 
   DivRemValues unsignedResult =
-      createUnsignedDivRem(builder, loc, type, absLhs, absRhs);
+      createUnsignedDivRem(builder, loc, type, absLhs, absRhs,
+                           /*useNativeI32ConstMulHi=*/rhsConst.has_value());
   Value signBits = createXor(builder, loc, type, lhs, rhs);
   Value quotientNeg = createCompare(builder, loc, arith::CmpIPredicate::slt,
                                     signBits, zero, type);
