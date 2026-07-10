@@ -1057,6 +1057,12 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_xor_b32 s4, s2, -1
 		s_waitcnt vmcnt(0)
 		s_barrier
+		s_mov_b32 s24, s6
+		s_mov_b32 s25, s7
+		s_mov_b32 s26, s30
+		s_mov_b32 s27, s31
+		buffer_load_dwordx2 v[22:23], v5, s[24:27], 0 offen
+		buffer_load_dwordx2 v[24:25], v2, s[24:27], 0 offen
 		ds_read_b128 v[32:35], v7
 		ds_read_b128 v[52:55], v7 offset:64
 		ds_read_b128 v[60:63], v7 offset:256
@@ -1107,15 +1113,15 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_cmp_lg_u32 s4, 0
 		s_cselect_b32 s2, s3, s2
 		s_mul_i32 s2, 0x4200, s2
-		v_add_u32_e32 v7, s2, v14
-		ds_read_b128 v[32:35], v7
-		ds_read_b128 v[52:55], v7 offset:64
-		ds_read_b128 v[60:63], v7 offset:256
-		ds_read_b128 v[64:67], v7 offset:320
-		ds_read_b128 v[68:71], v7 offset:512
-		ds_read_b128 v[72:75], v7 offset:576
-		ds_read_b128 v[76:79], v7 offset:768
-		ds_read_b128 v[80:83], v7 offset:832
+		v_add_u32_e32 v2, s2, v14
+		ds_read_b128 v[32:35], v2
+		ds_read_b128 v[52:55], v2 offset:64
+		ds_read_b128 v[60:63], v2 offset:256
+		ds_read_b128 v[64:67], v2 offset:320
+		ds_read_b128 v[68:71], v2 offset:512
+		ds_read_b128 v[72:75], v2 offset:576
+		ds_read_b128 v[76:79], v2 offset:768
+		ds_read_b128 v[80:83], v2 offset:832
 		v_add_u32_e32 v0, s2, v0
 		ds_read_b64_tr_b16 v[84:85], v0 offset:50656
 		ds_read_b64_tr_b16 v[86:87], v0 offset:59104
@@ -1123,20 +1129,14 @@ tlx_addmm_glu_kernel_optimized_async:
 		ds_read_b64_tr_b16 v[90:91], v0 offset:59616
 		ds_read_b64_tr_b16 v[92:93], v0 offset:50784
 		ds_read_b64_tr_b16 v[94:95], v0 offset:59232
-		s_mov_b32 s24, s6
-		s_mov_b32 s25, s7
-		s_mov_b32 s26, s30
-		s_mov_b32 s27, s31
-		buffer_load_dwordx2 v[22:23], v5, s[24:27], 0 offen
 		ds_read_b64_tr_b16 v[96:97], v0 offset:51296
 		ds_read_b64_tr_b16 v[98:99], v0 offset:59744
 		s_waitcnt lgkmcnt(6)
 		v_mfma_f32_16x16x32_f16 v[56:59], v[84:87], v[32:35], v[56:59]
-		buffer_load_dwordx2 v[24:25], v2, s[24:27], 0 offen
+		v_mfma_f32_16x16x32_f16 v[108:111], v[84:87], v[60:63], v[108:111]
 		s_waitcnt lgkmcnt(2)
 		v_mfma_f32_16x16x32_f16 v[104:107], v[92:95], v[32:35], v[104:107]
 		v_mfma_f32_16x16x32_f16 v[112:115], v[92:95], v[60:63], v[112:115]
-		v_mfma_f32_16x16x32_f16 v[108:111], v[84:87], v[60:63], v[108:111]
 		v_mfma_f32_16x16x32_f16 v[116:119], v[84:87], v[68:71], v[116:119]
 		v_mfma_f32_16x16x32_f16 v[120:123], v[92:95], v[68:71], v[120:123]
 		v_mfma_f32_16x16x32_f16 v[128:131], v[92:95], v[76:79], v[128:131]

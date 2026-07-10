@@ -138,6 +138,221 @@ func.func @memory_prefetch(
 // DIAG: waveamd-machine-schedule region func=memory_prefetch
 // DIAG-SAME: action=apply reason=vmem_prefetch
 // DIAG-SAME: vmem_prefetch_moves=2
+// DIAG-SAME: long_latency_vmem_prefetch_moves=2
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @long_latency_memory_prefetch(
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>)
+    attributes {waveamdmachine.target_waves = 2 : i64} {
+  %v0 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.v_add_u32 %v0, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.v_add_u32 %v1, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.v_add_u32 %v2, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v4 = waveamdmachine.v_add_u32 %v3, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v5 = waveamdmachine.v_add_u32 %v4, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v6 = waveamdmachine.v_add_u32 %v5, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v7 = waveamdmachine.v_add_u32 %v6, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v8 = waveamdmachine.v_add_u32 %v7, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v9 = waveamdmachine.v_add_u32 %v8, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v10 = waveamdmachine.v_add_u32 %v9, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v11 = waveamdmachine.v_add_u32 %v10, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v12 = waveamdmachine.v_add_u32 %v11, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v13 = waveamdmachine.v_add_u32 %v12, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v14 = waveamdmachine.v_add_u32 %v13, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v15 = waveamdmachine.v_add_u32 %v14, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v16 = waveamdmachine.v_add_u32 %v15, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v17 = waveamdmachine.v_add_u32 %v16, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v18 = waveamdmachine.v_add_u32 %v17, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v19 = waveamdmachine.v_add_u32 %v18, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v20 = waveamdmachine.v_add_u32 %v19, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %loaded0, %tok0 = waveamdmachine.global_load_b32 %off0, %ptr
+      {cache = #waveamd.load_cache<cs>}
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %loaded1, %tok1 = waveamdmachine.global_load_b32 %off1, %ptr
+      {cache = #waveamd.load_cache<cs>}
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %sum0 = waveamdmachine.v_add_u32 %v20, %loaded0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum1 = waveamdmachine.v_add_u32 %sum0, %loaded1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %packed = waveamdmachine.tuple_from_elements %sum1, %sum1, %sum1, %sum1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 4>
+  %selected = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %s0 : !waveamdmachine.reg<sgpr, 1>
+  } otherwise {
+    waveamdmachine.yield %s1 : !waveamdmachine.reg<sgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @long_latency_memory_prefetch
+// IR: [[LOADED0:%.*]], {{%.*}} = waveamdmachine.global_load_b32
+// IR-SAME: cache = #waveamd.load_cache<cs>
+// IR-NEXT: [[LOADED1:%.*]], {{%.*}} = waveamdmachine.global_load_b32
+// IR-SAME: cache = #waveamd.load_cache<cs>
+// IR-NEXT: [[V0:%.*]] = waveamdmachine.v_add_u32
+// IR: [[SUM0:%.*]] = waveamdmachine.v_add_u32 {{%.*}}, [[LOADED0]]
+// IR-NEXT: waveamdmachine.v_add_u32 [[SUM0]], [[LOADED1]]
+// DIAG: waveamd-machine-schedule region func=long_latency_memory_prefetch
+// DIAG-SAME: action=apply reason=vmem_prefetch
+// DIAG-SAME: long_latency_vmem_prefetch_moves=2
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @long_latency_prefetch_respects_pressure(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>)
+    attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 32 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 32>
+  %v0 = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v1 = waveamdmachine.v_add_u32 %v0, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v2 = waveamdmachine.v_add_u32 %v1, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v3 = waveamdmachine.v_add_u32 %v2, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v4 = waveamdmachine.v_add_u32 %v3, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v5 = waveamdmachine.v_add_u32 %v4, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v6 = waveamdmachine.v_add_u32 %v5, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v7 = waveamdmachine.v_add_u32 %v6, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v8 = waveamdmachine.v_add_u32 %v7, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v9 = waveamdmachine.v_add_u32 %v8, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v10 = waveamdmachine.v_add_u32 %v9, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v11 = waveamdmachine.v_add_u32 %v10, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v12 = waveamdmachine.v_add_u32 %v11, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v13 = waveamdmachine.v_add_u32 %v12, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v14 = waveamdmachine.v_add_u32 %v13, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v15 = waveamdmachine.v_add_u32 %v14, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v16 = waveamdmachine.v_add_u32 %v15, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v17 = waveamdmachine.v_add_u32 %v16, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v18 = waveamdmachine.v_add_u32 %v17, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v19 = waveamdmachine.v_add_u32 %v18, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %v20 = waveamdmachine.v_add_u32 %v19, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %loaded, %tok = waveamdmachine.global_load_b64 %off, %ptr
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
+  %parts:2 = waveamdmachine.tuple_to_elements %loaded
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %sum = waveamdmachine.v_add_u32 %v20, %parts#0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @long_latency_prefetch_respects_pressure
+// IR: waveamdmachine.v_mov_b32_tuple
+// IR-NEXT: [[V0:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: [[V1:%.*]] = waveamdmachine.v_add_u32 [[V0]]
+// IR-NEXT: [[LOADED:%.*]], {{%.*}} = waveamdmachine.global_load_b64
+// IR: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[LOADED]]
+// IR: waveamdmachine.v_add_u32 {{%.*}}, [[PARTS]]#0
+// DIAG: waveamd-machine-schedule region func=long_latency_prefetch_respects_pressure
+// DIAG-SAME: action=apply reason=vmem_prefetch
+// DIAG-SAME: long_latency_vmem_prefetch_moves=0
 
 // -----
 

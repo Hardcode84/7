@@ -8,6 +8,8 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "RegAlloc/WaveAMDRegAllocTransformState.h"
+#include "RegAlloc/WaveAMDRegLiveIntervals.h"
 #include "WaveAMDMachineScheduleEligibility.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
@@ -162,6 +164,7 @@ struct GreedyStats {
   unsigned m0Gaps = 0;
   unsigned storeDataGaps = 0;
   unsigned vmemPrefetchMoves = 0;
+  unsigned longLatencyVmemPrefetchMoves = 0;
   unsigned memoryTokenGaps = 0;
   unsigned barrierMemoryGaps = 0;
   unsigned filledBarrierMemoryGaps = 0;
@@ -940,6 +943,22 @@ static bool hasPrefetchSlack(unsigned next, Operation *candidate,
   return slack - nextSpan >= valueLatency;
 }
 
+static bool
+isLongLatencyVmemCandidate(Operation *candidate, Operation *next,
+                           const waveamdmachine::ArchData &arch,
+                           const waveamdmachine::EventSimConfig &config) {
+  int nextLatency =
+      getModelLatency(arch, waveamdmachine::classifyOp(next), config);
+  if (nextLatency <= 0)
+    return false;
+  int memoryLatency = waveamdmachine::getMemoryValueLatency(
+      arch, candidate, config.counterLatencies, config.valueLatencies,
+      config.calibration);
+  // Match LLVM's latency-based load preference; cache policy is orthogonal.
+  return static_cast<int64_t>(memoryLatency) >
+         10 * static_cast<int64_t>(nextLatency);
+}
+
 static unsigned findNextVmemValue(unsigned next, const GreedyRegion &region,
                                   const GraphTables &graph,
                                   const BitVector &scheduled) {
@@ -999,13 +1018,25 @@ prefetchReducesCycles(const IssueState &state, unsigned next,
   return prefetchFirst->cycles < nextFirst->cycles;
 }
 
-static FailureOr<unsigned>
-findReadyVmemPrefetch(const BitVector &ready, unsigned next,
-                      const GreedyRegion &region, const GraphTables &graph,
-                      const IssueState &state, const BitVector &scheduled,
-                      const waveamdmachine::ArchData &arch,
-                      const waveamdmachine::EventSimConfig &config,
-                      const ValueOriginMap &origins) {
+static bool isValidPrefetchConsumer(unsigned consumer, unsigned candidate,
+                                    unsigned regionSize) {
+  return consumer != regionSize && consumer > candidate;
+}
+
+static bool
+shouldPrioritizeLongLatencyVmem(bool enabled, Operation *candidate,
+                                Operation *next,
+                                const waveamdmachine::ArchData &arch,
+                                const waveamdmachine::EventSimConfig &config) {
+  return enabled && isLongLatencyVmemCandidate(candidate, next, arch, config);
+}
+
+static FailureOr<unsigned> findReadyVmemPrefetch(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const GraphTables &graph, const IssueState &state,
+    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    bool prioritizeLongLatencyVmem, bool &usedLongLatencyPriority) {
   unsigned candidate = findNextVmemValue(next, region, graph, scheduled);
   if (candidate == region.ops.size())
     return candidate;
@@ -1021,8 +1052,14 @@ findReadyVmemPrefetch(const BitVector &ready, unsigned next,
 
   Operation *op = region.ops[candidate];
   unsigned consumer = findFirstRealDataConsumer(op, region, graph, scheduled);
-  if (consumer == region.ops.size() || consumer <= candidate ||
-      hasPrefetchSlack(next, op, consumer, chain, region, scheduled, arch,
+  if (!isValidPrefetchConsumer(consumer, candidate, region.ops.size()))
+    return region.ops.size();
+  if (shouldPrioritizeLongLatencyVmem(prioritizeLongLatencyVmem, op,
+                                      region.ops[next], arch, config)) {
+    usedLongLatencyPriority = true;
+    return **chainHead;
+  }
+  if (hasPrefetchSlack(next, op, consumer, chain, region, scheduled, arch,
                        config))
     return region.ops.size();
   FailureOr<bool> profitable = prefetchReducesCycles(
@@ -1428,13 +1465,12 @@ scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
   return GreedyStepStatus::Continue;
 }
 
-static FailureOr<std::optional<unsigned>>
-findReadyAlternative(const BitVector &ready, unsigned next,
-                     const GreedyRegion &region, const GraphTables &graph,
-                     const IssueState &state, const BitVector &scheduled,
-                     const waveamdmachine::ArchData &arch,
-                     const waveamdmachine::EventSimConfig &config,
-                     const ValueOriginMap &origins, GreedyStats &stats) {
+static FailureOr<std::optional<unsigned>> findReadyAlternative(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const GraphTables &graph, const IssueState &state,
+    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    GreedyStats &stats, bool prioritizeLongLatencyVmem) {
   FailureOr<unsigned> consumer =
       findReadyTokenConsumer(ready, region, scheduled, next, state, origins);
   if (failed(consumer))
@@ -1446,13 +1482,17 @@ findReadyAlternative(const BitVector &ready, unsigned next,
   if (filler != region.ops.size())
     return std::optional<unsigned>(filler);
 
+  bool usedLongLatencyPriority = false;
   FailureOr<unsigned> prefetch = findReadyVmemPrefetch(
-      ready, next, region, graph, state, scheduled, arch, config, origins);
+      ready, next, region, graph, state, scheduled, arch, config, origins,
+      prioritizeLongLatencyVmem, usedLongLatencyPriority);
   if (failed(prefetch))
     return failure();
   if (*prefetch == region.ops.size())
     return std::optional<unsigned>{};
   ++stats.vmemPrefetchMoves;
+  if (usedLongLatencyPriority)
+    ++stats.longLatencyVmemPrefetchMoves;
   return std::optional<unsigned>(*prefetch);
 }
 
@@ -1462,7 +1502,7 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                 const waveamdmachine::EventSimConfig &config, IssueState &state,
                 BitVector &ready, BitVector &scheduled,
                 SmallVectorImpl<unsigned> &pending, GreedyResult &result,
-                const ValueOriginMap &origins) {
+                const ValueOriginMap &origins, bool prioritizeLongLatencyVmem) {
   if (failed(drainReadyNoInsts(region, graph, arch, config, state, ready,
                                scheduled, pending, result.order, origins)))
     return failure();
@@ -1484,9 +1524,9 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                                 origins);
 
   if (ready.test(next)) {
-    FailureOr<std::optional<unsigned>> alternative =
-        findReadyAlternative(ready, next, region, graph, state, scheduled, arch,
-                             config, origins, result.stats);
+    FailureOr<std::optional<unsigned>> alternative = findReadyAlternative(
+        ready, next, region, graph, state, scheduled, arch, config, origins,
+        result.stats, prioritizeLongLatencyVmem);
     if (failed(alternative))
       return failure();
     if (*alternative)
@@ -1507,7 +1547,8 @@ static GreedyResult
 buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
                  const waveamdmachine::ArchData &arch,
                  const waveamdmachine::EventSimConfig &config,
-                 const ValueOriginMap &origins) {
+                 const ValueOriginMap &origins,
+                 bool prioritizeLongLatencyVmem = true) {
   GreedyResult result;
   SmallVector<unsigned, 16> pending = graph.pendingPreds;
   BitVector ready(region.ops.size());
@@ -1520,7 +1561,7 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
   while (result.order.size() != region.ops.size()) {
     FailureOr<GreedyStepStatus> step =
         buildGreedyStep(region, graph, arch, config, state, ready, scheduled,
-                        pending, result, origins);
+                        pending, result, origins, prioritizeLongLatencyVmem);
     if (failed(step))
       return failGreedyModel(result);
     if (*step == GreedyStepStatus::Done)
@@ -1539,6 +1580,201 @@ static void materializeOrder(const GreedyRegion &region,
   ops.clear();
   for (unsigned index : order)
     ops.push_back(region.ops[index]);
+}
+
+struct PeakRegisterPressure {
+  unsigned sgpr = 0;
+  unsigned vgpr = 0;
+  unsigned agpr = 0;
+  unsigned vgprFamily = 0;
+};
+
+struct RegisterPressureLimits {
+  unsigned sgpr = 0;
+  unsigned vgpr = 0;
+  unsigned agpr = 0;
+  std::optional<unsigned> vgprFamily;
+};
+
+struct RegisterPressureEvent {
+  unsigned position = 0;
+  unsigned slot = 0;
+  int delta = 0;
+};
+
+static void
+appendRegisterPressureEvents(const WaveAMDLiveInterval &interval,
+                             unsigned eventCount,
+                             SmallVectorImpl<RegisterPressureEvent> &events) {
+  unsigned intervalWidth = interval.type.getWidth();
+  for (auto [value, slot, start, end] :
+       llvm::zip(interval.values, interval.slotOffsets, interval.valueStarts,
+                 interval.valueEnds)) {
+    unsigned valueWidth =
+        cast<waveamdmachine::RegType>(value.getType()).getWidth();
+    assert(start <= end && end + 1 < eventCount &&
+           slot + valueWidth <= intervalWidth && "invalid live interval range");
+    for (unsigned bit : llvm::seq<unsigned>(slot, slot + valueWidth)) {
+      events.push_back({start, bit, 1});
+      events.push_back({end + 1, bit, -1});
+    }
+  }
+}
+
+static void
+applyRegisterPressureEvents(ArrayRef<RegisterPressureEvent> events,
+                            unsigned intervalWidth,
+                            MutableArrayRef<int64_t> pressureChanges) {
+  SmallVector<unsigned, 16> slotUseCounts(intervalWidth, 0);
+  unsigned liveWidth = 0;
+  for (unsigned first = 0; first < events.size();) {
+    unsigned position = events[first].position;
+    unsigned oldLiveWidth = liveWidth;
+    unsigned last = first;
+    while (last < events.size() && events[last].position == position) {
+      RegisterPressureEvent event = events[last++];
+      unsigned &useCount = slotUseCounts[event.slot];
+      if (event.delta > 0) {
+        if (useCount++ == 0)
+          ++liveWidth;
+      } else {
+        assert(useCount > 0 && "live interval slot count underflow");
+        if (--useCount == 0)
+          --liveWidth;
+      }
+    }
+    pressureChanges[position] += static_cast<int64_t>(liveWidth) - oldLiveWidth;
+    first = last;
+  }
+  assert(liveWidth == 0 && "unbalanced live interval events");
+}
+
+static void
+addRegisterPressureChanges(ArrayRef<WaveAMDLiveInterval> intervals,
+                           MutableArrayRef<int64_t> pressureChanges) {
+  for (const WaveAMDLiveInterval &interval : intervals) {
+    if (interval.values.empty())
+      continue;
+
+    SmallVector<RegisterPressureEvent, 16> events;
+    appendRegisterPressureEvents(interval, pressureChanges.size(), events);
+    llvm::sort(events, [](const RegisterPressureEvent &lhs,
+                          const RegisterPressureEvent &rhs) {
+      return lhs.position < rhs.position;
+    });
+    applyRegisterPressureEvents(events, interval.type.getWidth(),
+                                pressureChanges);
+  }
+}
+
+static PeakRegisterPressure
+getPeakRegisterPressure(const WaveAMDLiveIntervalBuildResult &liveness) {
+  unsigned eventCount = liveness.orderedOps.size() + 1;
+  SmallVector<int64_t> sgprChanges(eventCount, 0);
+  SmallVector<int64_t> vgprChanges(eventCount, 0);
+  SmallVector<int64_t> agprChanges(eventCount, 0);
+  addRegisterPressureChanges(liveness.intervals.sgprs, sgprChanges);
+  addRegisterPressureChanges(liveness.intervals.vgprs, vgprChanges);
+  addRegisterPressureChanges(liveness.intervals.agprs, agprChanges);
+
+  PeakRegisterPressure peak;
+  int64_t sgpr = 0;
+  int64_t vgpr = 0;
+  int64_t agpr = 0;
+  for (unsigned position : llvm::seq<unsigned>(liveness.orderedOps.size())) {
+    sgpr += sgprChanges[position];
+    vgpr += vgprChanges[position];
+    agpr += agprChanges[position];
+    assert(sgpr >= 0 && vgpr >= 0 && agpr >= 0 &&
+           "register pressure underflow");
+    peak.sgpr = std::max(peak.sgpr, static_cast<unsigned>(sgpr));
+    peak.vgpr = std::max(peak.vgpr, static_cast<unsigned>(vgpr));
+    peak.agpr = std::max(peak.agpr, static_cast<unsigned>(agpr));
+    peak.vgprFamily =
+        std::max(peak.vgprFamily, static_cast<unsigned>(vgpr + agpr));
+  }
+  return peak;
+}
+
+static FailureOr<PeakRegisterPressure>
+getCandidateRegisterPressure(const GreedyRegion &region,
+                             ArrayRef<unsigned> order) {
+  SmallVector<Operation *, 16> ops;
+  materializeOrder(region, order, ops);
+  FailureOr<WaveAMDLiveIntervalBuildResult> liveness =
+      buildAllocatedWaveAMDLiveIntervals(
+          region.func, WaveAMDLiveIntervalOrderOverride{ops, region.block},
+          WaveAMDLiveIntervalAliasPolicy::Conservative);
+  if (failed(liveness))
+    return failure();
+  return getPeakRegisterPressure(*liveness);
+}
+
+static FailureOr<PeakRegisterPressure>
+getCurrentRegisterPressure(func::FuncOp func) {
+  FailureOr<WaveAMDLiveIntervalBuildResult> liveness =
+      buildAllocatedWaveAMDLiveIntervals(
+          func, WaveAMDLiveIntervalOrderOverride{},
+          WaveAMDLiveIntervalAliasPolicy::Conservative);
+  if (failed(liveness))
+    return failure();
+  return getPeakRegisterPressure(*liveness);
+}
+
+static FailureOr<RegisterPressureLimits>
+getRegisterPressureLimits(func::FuncOp func) {
+  RegisterPressureLimits limits;
+  limits.sgpr =
+      getRegAllocTransformBudget(func, waveamdmachine::RegClass::SGPR).limit;
+  limits.vgpr =
+      getRegAllocTransformBudget(func, waveamdmachine::RegClass::VGPR).limit;
+  limits.agpr =
+      getRegAllocTransformBudget(func, waveamdmachine::RegClass::AGPR).limit;
+  FailureOr<std::optional<RegAllocTransformBudget>> familyBudget =
+      getRegAllocTransformVGPRFamilyBudget(func);
+  if (failed(familyBudget))
+    return failure();
+  if (*familyBudget)
+    limits.vgprFamily = (*familyBudget)->limit;
+  return limits;
+}
+
+static bool isWithinRegisterPressureLimits(
+    PeakRegisterPressure candidate, const RegisterPressureLimits &limits,
+    std::optional<PeakRegisterPressure> current = std::nullopt) {
+  unsigned sgprLimit =
+      current ? std::max(limits.sgpr, current->sgpr) : limits.sgpr;
+  if (candidate.sgpr > sgprLimit)
+    return false;
+  if (limits.vgprFamily) {
+    unsigned familyLimit =
+        current ? std::max(*limits.vgprFamily, current->vgprFamily)
+                : *limits.vgprFamily;
+    return candidate.vgprFamily <= familyLimit;
+  }
+  unsigned vgprLimit =
+      current ? std::max(limits.vgpr, current->vgpr) : limits.vgpr;
+  unsigned agprLimit =
+      current ? std::max(limits.agpr, current->agpr) : limits.agpr;
+  return candidate.vgpr <= vgprLimit && candidate.agpr <= agprLimit;
+}
+
+static FailureOr<bool> isRegisterPressureSafe(const GreedyRegion &region,
+                                              ArrayRef<unsigned> order) {
+  FailureOr<PeakRegisterPressure> candidate =
+      getCandidateRegisterPressure(region, order);
+  FailureOr<RegisterPressureLimits> limits =
+      getRegisterPressureLimits(region.func);
+  if (failed(candidate) || failed(limits))
+    return failure();
+  if (isWithinRegisterPressureLimits(*candidate, *limits))
+    return true;
+
+  FailureOr<PeakRegisterPressure> current =
+      getCurrentRegisterPressure(region.func);
+  if (failed(current))
+    return failure();
+  return isWithinRegisterPressureLimits(*candidate, *limits, *current);
 }
 
 static FailureOr<OrderScore>
@@ -1585,6 +1821,8 @@ static void printDecision(const GreedyRegion &region, StringRef action,
                << " m0_gaps=" << stats.m0Gaps
                << " store_data_gaps=" << stats.storeDataGaps
                << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
+               << " long_latency_vmem_prefetch_moves="
+               << stats.longLatencyVmemPrefetchMoves
                << " memory_token_gaps=" << stats.memoryTokenGaps
                << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                << " filled_barrier_memory_gaps="
@@ -1791,6 +2029,19 @@ struct WaveAMDMachineSchedulePass
         buildGreedyOrder(region, graph, arch, config, origins);
     if (!greedy.success)
       return emitGreedyFailure(region, greedy);
+
+    if (greedy.stats.longLatencyVmemPrefetchMoves != 0) {
+      FailureOr<bool> pressureSafe =
+          isRegisterPressureSafe(region, greedy.order);
+      if (failed(pressureSafe))
+        return failure();
+      if (!*pressureSafe) {
+        greedy = buildGreedyOrder(region, graph, arch, config, origins,
+                                  /*prioritizeLongLatencyVmem=*/false);
+        if (!greedy.success)
+          return emitGreedyFailure(region, greedy);
+      }
+    }
 
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
     return applyGreedyOrder(region, originalOrder, greedy);

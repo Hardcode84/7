@@ -359,13 +359,18 @@ class LiveIntervalBuilder {
 public:
   LiveIntervalBuilder() = default;
   LiveIntervalBuilder(wave::WaveAMDLiveIntervalOrderOverride orderOverride,
-                      bool includeAllocated)
+                      bool includeAllocated,
+                      wave::WaveAMDLiveIntervalAliasPolicy aliasPolicy =
+                          wave::WaveAMDLiveIntervalAliasPolicy::Coalesce)
       : orderOverride(orderOverride), includeAllocated(includeAllocated),
-        hasOrderOverride(true) {}
+        hasOrderOverride(true), aliasPolicy(aliasPolicy) {}
   LiveIntervalBuilder(wave::WaveAMDLiveIntervalOrderOverride orderOverride)
       : orderOverride(orderOverride), hasOrderOverride(true) {}
   explicit LiveIntervalBuilder(bool includeAllocated)
       : includeAllocated(includeAllocated) {}
+  LiveIntervalBuilder(bool includeAllocated,
+                      wave::WaveAMDLiveIntervalAliasPolicy aliasPolicy)
+      : includeAllocated(includeAllocated), aliasPolicy(aliasPolicy) {}
 
   FailureOr<wave::WaveAMDLiveIntervalBuildResult> build(func::FuncOp func) {
     if (func.isExternal())
@@ -610,7 +615,8 @@ private:
   }
 
   LogicalResult processExecIf(waveamdmachine::ExecIfOp execIf, unsigned pos) {
-    if (failed(coalesceExecIfResults(execIf, pos)))
+    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Coalesce &&
+        failed(coalesceExecIfResults(execIf, pos)))
       return failure();
     if (failed(walkExecIfRegion(execIf.getThenRegion())))
       return failure();
@@ -661,7 +667,8 @@ private:
 
   LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf,
                                  unsigned pos) {
-    if (failed(coalesceUniformIfResults(uniformIf, pos)))
+    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Coalesce &&
+        failed(coalesceUniformIfResults(uniformIf, pos)))
       return failure();
     if (failed(walkExecIfRegion(uniformIf.getThenRegion())))
       return failure();
@@ -720,6 +727,8 @@ private:
   }
 
   LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos) {
+    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
+      return success();
     if (auto toElems = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
       return coalesceTupleElements(toElems, pos);
     if (auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
@@ -820,6 +829,8 @@ private:
   }
 
   bool tupleRenameHandlesOperandUses(Operation *op) {
+    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
+      return false;
     if (isa<waveamdmachine::TupleToElementsOp>(op))
       return true;
     auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op);
@@ -883,6 +894,8 @@ private:
   bool hasOrderOverride = false;
   bool usedOrderOverride = false;
   bool coalesceMFMAAccResult = true;
+  wave::WaveAMDLiveIntervalAliasPolicy aliasPolicy =
+      wave::WaveAMDLiveIntervalAliasPolicy::Coalesce;
 };
 
 } // namespace
@@ -914,5 +927,18 @@ mlir::wave::buildAllocatedWaveAMDLiveIntervals(
   if (!orderOverride.block)
     return buildAllocatedWaveAMDLiveIntervals(func);
   LiveIntervalBuilder builder(orderOverride, /*includeAllocated=*/true);
+  return builder.build(func);
+}
+
+FailureOr<wave::WaveAMDLiveIntervalBuildResult>
+mlir::wave::buildAllocatedWaveAMDLiveIntervals(
+    func::FuncOp func, WaveAMDLiveIntervalOrderOverride orderOverride,
+    WaveAMDLiveIntervalAliasPolicy aliasPolicy) {
+  if (!orderOverride.block) {
+    LiveIntervalBuilder builder(/*includeAllocated=*/true, aliasPolicy);
+    return builder.build(func);
+  }
+  LiveIntervalBuilder builder(orderOverride, /*includeAllocated=*/true,
+                              aliasPolicy);
   return builder.build(func);
 }

@@ -62,6 +62,12 @@ struct WaveAMDLiveIntervalOrderOverride {
   Block *block = nullptr;
 };
 
+// Pre-regalloc clients may conservatively model aliases as independent values.
+enum class WaveAMDLiveIntervalAliasPolicy {
+  Coalesce,
+  Conservative,
+};
+
 bool isWaveAMDReg(Value value);
 bool isWaveAMDSGPR(waveamdmachine::RegType type);
 bool isWaveAMDVGPR(waveamdmachine::RegType type);
@@ -90,6 +96,10 @@ buildWaveAMDLiveIntervals(func::FuncOp func,
 // Allocated variant keeps fixed-index registers in the pressure model.
 FailureOr<WaveAMDLiveIntervalBuildResult> buildAllocatedWaveAMDLiveIntervals(
     func::FuncOp func, WaveAMDLiveIntervalOrderOverride orderOverride);
+
+FailureOr<WaveAMDLiveIntervalBuildResult> buildAllocatedWaveAMDLiveIntervals(
+    func::FuncOp func, WaveAMDLiveIntervalOrderOverride orderOverride,
+    WaveAMDLiveIntervalAliasPolicy aliasPolicy);
 
 } // namespace wave
 } // namespace mlir
