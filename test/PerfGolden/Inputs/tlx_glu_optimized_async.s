@@ -1527,7 +1527,6 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_add3_u32 v0, v0, v23, v24
 		v_cndmask_b32_e64 v0, v51, v0, s[10:11]
 		buffer_store_dwordx2 v[20:21], v0, s[20:23], 0 offen sc0 nt
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	tlx_addmm_glu_kernel_optimized_async, .-tlx_addmm_glu_kernel_optimized_async
 	.section	.rodata,"a",@progbits
