@@ -50,6 +50,40 @@ static bool isCDNA3Or4(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 && (isa.Minor == 4 || isa.Minor == 5);
 }
 
+static std::optional<RegClass> getRegClass(Value value) {
+  if (RegType type = dyn_cast<RegType>(value.getType()))
+    return type.getRegClass();
+  return std::nullopt;
+}
+
+static bool hasRegClass(ValueRange values, RegClass regClass) {
+  return llvm::any_of(
+      values, [&](Value value) { return getRegClass(value) == regClass; });
+}
+
+static bool hasOnlyRegClass(ValueRange values, RegClass regClass) {
+  bool found = false;
+  for (Value value : values) {
+    std::optional<RegClass> valueClass = getRegClass(value);
+    if (!valueClass)
+      continue;
+    if (*valueClass != regClass)
+      return false;
+    found = true;
+  }
+  return found;
+}
+
+static bool isLegacyVALU(Operation *op) {
+  return op->hasTrait<traits::VALUOp>() && !op->hasTrait<traits::MFMAOp>();
+}
+
+static unsigned issueSlotsUntil(uint64_t readyAt, uint64_t currentIssueSlot) {
+  if (readyAt <= currentIssueSlot)
+    return 0;
+  return static_cast<unsigned>(readyAt - currentIssueSlot);
+}
+
 static bool isSGPROffset(Value value) {
   RegType regType = dyn_cast<RegType>(value.getType());
   return regType && regType.getRegClass() == RegClass::SGPR;
@@ -318,6 +352,15 @@ getStoreWriteDataHazard(Operation *op, const llvm::AMDGPU::IsaVersion &isa) {
   return StoreWriteDataHazard{op->getOperand(1), latency};
 }
 
+InstructionIssueSlotHazardConfig
+getInstructionIssueSlotHazardConfig(const llvm::AMDGPU::IsaVersion &isa) {
+  if (isCDNA3Or4(isa))
+    return {/*valuWriteVGPRScalarRead=*/1,
+            /*valuWriteSGPRValuRead=*/2,
+            /*transWriteVGPRValuRead=*/1};
+  return {};
+}
+
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa) {
   return isaEq(isa, {9, 4, 2}) || isaEq(isa, {9, 5, 0}) || isa.Major == 11;
@@ -349,6 +392,8 @@ llvm::StringRef getInstructionStallKindName(InstructionStallKind kind) {
     return "memory_token";
   case InstructionStallKind::Waitcnt:
     return "waitcnt";
+  case InstructionStallKind::InstructionHazard:
+    return "instruction_hazard";
   case InstructionStallKind::M0ReadWrite:
     return "m0_read_write";
   case InstructionStallKind::StoreWriteData:
@@ -408,7 +453,8 @@ llvm::StringRef getInstructionEventClassName(InstructionEventClass eventClass) {
 
 InstructionExecutionState::InstructionExecutionState(
     const ArchData &arch, InstructionExecutionConfig config)
-    : config(config), arch(arch) {}
+    : config(config), arch(arch),
+      issueSlotHazardConfig(getInstructionIssueSlotHazardConfig(arch.isa)) {}
 
 unsigned InstructionExecutionState::getPendingMemoryEventCount(
     InstructionWaitCounterKind kind) const {
@@ -437,6 +483,7 @@ void InstructionExecutionState::bindValue(Value result,
   int64_t ready = currentCycle;
   SmallVector<EventId, 4> tokenDeps;
   std::optional<EventId> sourceValueEvent;
+  IssueSlotHazards hazards;
 
   for (Value source : sources) {
     ready = std::max(ready, getValueReadyCycle(source));
@@ -450,6 +497,11 @@ void InstructionExecutionState::bindValue(Value result,
         tokenEvents.find(source);
     if (tokenIt != tokenEvents.end())
       appendUniqueEvents(tokenDeps, tokenIt->second);
+
+    DenseMap<Value, IssueSlotHazards>::const_iterator hazardIt =
+        issueSlotHazards.find(source);
+    if (hazardIt != issueSlotHazards.end())
+      hazards.join(hazardIt->second);
   }
 
   valueReadyAt[result] = ready;
@@ -462,6 +514,11 @@ void InstructionExecutionState::bindValue(Value result,
     tokenEvents[result] = std::move(tokenDeps);
   else
     tokenEvents.erase(result);
+
+  if (!hazards.empty())
+    issueSlotHazards[result] = hazards;
+  else
+    issueSlotHazards.erase(result);
 }
 
 unsigned InstructionExecutionState::getPipeInFlightCount(
@@ -510,12 +567,21 @@ InstructionExecutionState::commit(Operation *op) {
   currentCycle += queried->cycles;
   pruneRetiredEvents(currentCycle);
 
+  unsigned issueHazardWait = 0;
+  for (const InstructionStallComponent &component : queried->components)
+    if (component.kind == InstructionStallKind::InstructionHazard ||
+        component.kind == InstructionStallKind::M0ReadWrite ||
+        component.kind == InstructionStallKind::StoreWriteData)
+      issueHazardWait = std::max<unsigned>(issueHazardWait, component.cycles);
+  currentIssueSlot += issueHazardWait;
+
   InstructionCommitResult result;
   result.stall = *queried;
   result.issueCycle = currentCycle;
 
   if (desc.noMachineInst) {
     commitNoMachineInst(op);
+    commitIssueSlotHazards(op, desc);
     commitM0(desc);
     commitStoreData(desc);
     result.nextIssueCycle = currentCycle;
@@ -530,6 +596,8 @@ InstructionExecutionState::commit(Operation *op) {
   commitResults(op, desc, result.issueCycle, newEvents);
   commitPipe(desc.pipe, valueReadyCycle);
   commitMemoryIssue(desc, result.issueCycle);
+  currentIssueSlot += desc.issueCount;
+  commitIssueSlotHazards(op, desc);
   commitM0(desc);
   commitStoreData(desc);
 
@@ -556,6 +624,11 @@ InstructionExecutionState::describe(Operation *op) const {
 
   SchedClass cls = classifyOp(op);
   desc.noMachineInst = cls == SchedClass::NoInst;
+  desc.legacyVALU = isLegacyVALU(op);
+  desc.trans = cls == SchedClass::WriteTrans32;
+  desc.laneRead = desc.legacyVALU &&
+                  hasRegClass(op->getOperands(), RegClass::VGPR) &&
+                  hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
   desc.issueCount = getIssueCount(op);
   desc.latency = getConfiguredLatency(arch, cls, config.calibration);
@@ -613,8 +686,37 @@ InstructionExecutionState::query(Operation *op,
     addComponent(stall, InstructionStallKind::M0ReadWrite, 1);
   if (desc.storeDataProducer && storeDataGap)
     addComponent(stall, InstructionStallKind::StoreWriteData, storeDataGap);
+  addComponent(stall, InstructionStallKind::InstructionHazard,
+               issueSlotHazardWait(op, desc));
 
   return stall;
+}
+
+unsigned InstructionExecutionState::issueSlotHazardWait(
+    Operation *op, const InstructionDesc &desc) const {
+  if (!desc.legacyVALU || issueSlotHazardConfig.empty())
+    return 0;
+
+  unsigned wait = 0;
+  for (Value operand : op->getOperands()) {
+    DenseMap<Value, IssueSlotHazards>::const_iterator it =
+        issueSlotHazards.find(operand);
+    if (it == issueSlotHazards.end())
+      continue;
+    std::optional<RegClass> regClass = getRegClass(operand);
+    if (regClass == RegClass::VGPR) {
+      if (!desc.trans)
+        wait = std::max(wait, issueSlotsUntil(it->second.transWriteVGPRReadyAt,
+                                              currentIssueSlot));
+      if (desc.laneRead)
+        wait = std::max(wait, issueSlotsUntil(it->second.valuWriteVGPRReadyAt,
+                                              currentIssueSlot));
+    }
+    if (regClass == RegClass::VCC)
+      wait = std::max(wait, issueSlotsUntil(it->second.valuWriteVCCReadyAt,
+                                            currentIssueSlot));
+  }
+  return wait;
 }
 
 FailureOr<int64_t>
@@ -871,6 +973,47 @@ void InstructionExecutionState::commitMemoryIssue(const InstructionDesc &desc,
           issueCycle + static_cast<int64_t>(issue) * getIssuePeriod();
       memoryIssueQueues[queue].push_back(issuedAt + latency);
     }
+  }
+}
+
+void InstructionExecutionState::commitIssueSlotHazards(
+    Operation *op, const InstructionDesc &desc) {
+  if (desc.noMachineInst) {
+    commitIssueSlotAliases(op);
+    return;
+  }
+  if (desc.legacyVALU && !issueSlotHazardConfig.empty())
+    commitIssueSlotProducer(op, desc);
+}
+
+void InstructionExecutionState::commitIssueSlotAliases(Operation *op) {
+  IssueSlotHazards hazards;
+  for (Value operand : op->getOperands()) {
+    DenseMap<Value, IssueSlotHazards>::const_iterator it =
+        issueSlotHazards.find(operand);
+    if (it != issueSlotHazards.end())
+      hazards.join(it->second);
+  }
+  if (!hazards.empty())
+    for (Value result : op->getResults())
+      issueSlotHazards[result] = hazards;
+}
+
+void InstructionExecutionState::commitIssueSlotProducer(
+    Operation *op, const InstructionDesc &desc) {
+  for (Value result : op->getResults()) {
+    std::optional<RegClass> regClass = getRegClass(result);
+    if (regClass == RegClass::VGPR) {
+      IssueSlotHazards &hazards = issueSlotHazards[result];
+      hazards.valuWriteVGPRReadyAt =
+          currentIssueSlot + issueSlotHazardConfig.valuWriteVGPRScalarRead;
+      if (desc.trans)
+        hazards.transWriteVGPRReadyAt =
+            currentIssueSlot + issueSlotHazardConfig.transWriteVGPRValuRead;
+    }
+    if (regClass == RegClass::VCC)
+      issueSlotHazards[result].valuWriteVCCReadyAt =
+          currentIssueSlot + issueSlotHazardConfig.valuWriteSGPRValuRead;
   }
 }
 

@@ -148,7 +148,13 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rlt = transform.apply_registered_pass "waveamd-late-tuples" to %rcs
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rlt)
+    %rprep = transform.apply_registered_pass "waveamd-prepare-regalloc" to %rlt
+        : (!transform.any_op) -> !transform.any_op
+    %rpack = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rprep
+        : (!transform.any_op) -> !transform.any_op
+    %rrepair = transform.apply_registered_pass "waveamd-hazard-repair" to %rpack
+        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rrepair)
         : (!transform.any_op) -> !transform.any_op
     %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r5)
         : (!transform.any_op) -> !transform.any_op

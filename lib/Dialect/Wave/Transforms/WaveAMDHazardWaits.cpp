@@ -184,16 +184,6 @@ static bool isCDNA4Family(const llvm::AMDGPU::IsaVersion &isa) {
 
 static unsigned getValuWriteVGPRMfmaLatency() { return 2; }
 
-static unsigned
-getValuWriteVGPRReadlaneLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 1 : 0;
-}
-
-static unsigned
-getValuWriteSGPRValuReadLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  return isCDNA3Family(isa) || isCDNA4Family(isa) ? 2 : 0;
-}
-
 static unsigned getValuWriteSGPRVmemReadLatency() { return 5; }
 
 static unsigned
@@ -225,6 +215,8 @@ struct HazardConfig {
 static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
   llvm::AMDGPU::IsaVersion isaVersion =
       llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  waveamdmachine::InstructionIssueSlotHazardConfig issueHazards =
+      waveamdmachine::getInstructionIssueSlotHazardConfig(isaVersion);
   return HazardConfig{
       /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(sti),
       /*lgkmWaitNeedsValuGap=*/!isCDNA4Family(isaVersion),
@@ -240,12 +232,12 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       /*m0PipelineDelay=*/1,
       /*valuWriteVGPRMfmaLatency=*/getValuWriteVGPRMfmaLatency(),
       /*valuWriteVGPRReadlaneLatency=*/
-      getValuWriteVGPRReadlaneLatency(isaVersion),
+      issueHazards.valuWriteVGPRScalarRead,
       /*valuWriteSGPRValuReadLatency=*/
-      getValuWriteSGPRValuReadLatency(isaVersion),
+      issueHazards.valuWriteSGPRValuRead,
       /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
       /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
-      /*transForwardingWaitStates=*/1,
+      /*transForwardingWaitStates=*/issueHazards.transWriteVGPRValuRead,
   };
 }
 

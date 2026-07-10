@@ -60,6 +60,32 @@ func.func @scalar_zero_tuple_elements() {
   return
 }
 
+// PACK-LABEL: func.func @virtual_scalar_zero_tuple_elements
+// PACK: %[[PAIR0:.+]] = waveamdmachine.v_mov_b64_tuple
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2>
+// PACK: %[[PAIR1:.+]] = waveamdmachine.v_mov_b64_tuple
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 2>
+// PACK: waveamdmachine.tuple_from_elements %[[PAIR0]], %[[PAIR1]]
+// PACK-SAME: -> !waveamdmachine.reg<vgpr, 4>
+func.func @virtual_scalar_zero_tuple_elements() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %b = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %c = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %d = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %wide = waveamdmachine.tuple_from_elements %a, %b, %c, %d
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+
 // PACK-LABEL: func.func @distinct_scalar_zero_tuple_elements
 // PACK: %[[PAIR:.+]] = waveamdmachine.v_mov_b64_tuple
 // PACK-SAME: -> !waveamdmachine.reg<vgpr, 2, 24>

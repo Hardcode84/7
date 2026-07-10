@@ -6,6 +6,9 @@
 // RUN: wave-instruction-state-report --func=m0_gap %s | FileCheck %s --check-prefix=M0
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --pipe-backpressure --salu-max-in-flight=1 %s | FileCheck %s --check-prefix=PIPE
 // RUN: wave-instruction-state-report --func=lds_dma_issue_backpressure --arch=gfx950 %s | FileCheck %s --check-prefix=LDSDMA
+// RUN: wave-instruction-state-report --func=trans_forwarding_gap --arch=gfx950 %s | FileCheck %s --check-prefix=TRANS
+// RUN: wave-instruction-state-report --func=readfirstlane_gap --arch=gfx950 %s | FileCheck %s --check-prefix=READLANE
+// RUN: wave-instruction-state-report --func=vcc_gap --arch=gfx950 %s | FileCheck %s --check-prefix=VCC
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx942 %s | FileCheck %s --check-prefix=CDNA3
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx950 %s | FileCheck %s --check-prefix=CDNA4
 
@@ -129,6 +132,41 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
           -> !waveamdmachine.mem.token
     return
   }
+
+  func.func @trans_forwarding_gap(%a: !waveamdmachine.reg<vgpr, 1>,
+                                  %b: !waveamdmachine.reg<vgpr, 1>) {
+    %trans = waveamdmachine.v_rcp_f32 %a
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %use = waveamdmachine.v_mul_f32 %trans, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @readfirstlane_gap(%a: !waveamdmachine.reg<vgpr, 1>,
+                               %b: !waveamdmachine.reg<vgpr, 1>) {
+    %sum = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %first = waveamdmachine.v_readfirstlane_b32 %sum
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  func.func @vcc_gap(%a: !waveamdmachine.reg<vgpr, 1>,
+                     %b: !waveamdmachine.reg<vgpr, 1>,
+                     %c: !waveamdmachine.reg<vgpr, 1>) {
+    %mask, %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    %sum = waveamdmachine.v_add_u32 %a, %c
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %vcc
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -160,6 +198,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // LDSDMA: func: lds_dma_issue_backpressure
 // LDSDMA: query op_index=8 cycle=28 op=waveamdmachine.global_load_lds_b128 stall=issue_backpressure cycles=152 components=issue_backpressure:152
 // LDSDMA: commit op_index=8 issue=180 next=184
+
+// TRANS: query op_index=1 cycle=4 op=waveamdmachine.v_mul_f32 stall=instruction_hazard cycles=1 components=instruction_hazard:1
+
+// READLANE: query op_index=1 cycle=4 op=waveamdmachine.v_readfirstlane_b32 stall=instruction_hazard cycles=1 components=instruction_hazard:1
+
+// VCC: query op_index=2 cycle=8 op=waveamdmachine.v_cndmask_b32_vcc stall=instruction_hazard cycles=1 components=instruction_hazard:1
 
 // CDNA3: arch: gfx942
 // CDNA3: query op_index=0 cycle=0 op=waveamdmachine.s_add_i32 stall=none cycles=0

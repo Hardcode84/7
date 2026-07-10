@@ -195,10 +195,11 @@ static bool isPackableScalarMove(waveamdmachine::VMovB32TupleOp op) {
   auto resultType = dyn_cast<waveamdmachine::RegType>(op.getResult().getType());
   if (!resultType ||
       resultType.getRegClass() != waveamdmachine::RegClass::VGPR ||
-      resultType.getWidth() != 1 || resultType.getIndex() < 0 ||
-      !op.getResult().hasOneUse())
+      resultType.getWidth() != 1 || !op.getResult().hasOneUse())
     return false;
-  return isZeroImm(op.getSource()) ||
+  if (isZeroImm(op.getSource()))
+    return true;
+  return resultType.getIndex() >= 0 &&
          getAllocatedScalarVGPRIndex(op.getSource()).has_value();
 }
 
@@ -245,15 +246,30 @@ static bool sourcesDominatePack(waveamdmachine::VMovB32TupleOp first,
          valueDominates(second.getSource(), first, dom);
 }
 
+static bool isAllocatedPair(waveamdmachine::RegType first,
+                            waveamdmachine::RegType second) {
+  return first.getIndex() >= 0 && first.getIndex() % 2 == 0 &&
+         second.getIndex() == first.getIndex() + 1;
+}
+
+static bool isVirtualZeroPair(waveamdmachine::VMovB32TupleOp first,
+                              waveamdmachine::VMovB32TupleOp second,
+                              unsigned tupleOffset) {
+  auto firstType = cast<waveamdmachine::RegType>(first.getResult().getType());
+  auto secondType = cast<waveamdmachine::RegType>(second.getResult().getType());
+  return firstType.getIndex() < 0 && secondType.getIndex() < 0 &&
+         tupleOffset % 2 == 0 && hasZeroSources(first, second);
+}
+
 static bool canPackPair(waveamdmachine::VMovB32TupleOp first,
                         waveamdmachine::VMovB32TupleOp second,
                         waveamdmachine::TupleFromElementsOp tuple,
-                        DominanceInfo &dom) {
+                        unsigned tupleOffset, DominanceInfo &dom) {
   auto firstType = cast<waveamdmachine::RegType>(first.getResult().getType());
   auto secondType = cast<waveamdmachine::RegType>(second.getResult().getType());
-  return firstType.getIndex() % 2 == 0 &&
-         secondType.getIndex() == firstType.getIndex() + 1 &&
-         areAdjacentBefore(first, second, tuple) &&
+  bool pair = isAllocatedPair(firstType, secondType) ||
+              isVirtualZeroPair(first, second, tupleOffset);
+  return pair && areAdjacentBefore(first, second, tuple) &&
          sourcesDominatePack(first, second, dom) &&
          (hasZeroSources(first, second) ||
           hasContiguousVGPRSourcePair(first, second));
@@ -325,6 +341,7 @@ static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple,
   SmallVector<Value, 16> elements;
   SmallVector<waveamdmachine::VMovB32TupleOp, 16> movesToErase;
   ValueRange oldElements = tuple.getElements();
+  unsigned tupleOffset = 0;
 
   for (unsigned i = 0, e = oldElements.size(); i != e;) {
     waveamdmachine::VMovB32TupleOp first =
@@ -332,8 +349,12 @@ static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple,
     waveamdmachine::VMovB32TupleOp second =
         i + 1 == e ? waveamdmachine::VMovB32TupleOp()
                    : getPackableScalarMove(oldElements[i + 1]);
-    if (!first || !second || !canPackPair(first, second, tuple, dom)) {
-      elements.push_back(oldElements[i++]);
+    if (!first || !second ||
+        !canPackPair(first, second, tuple, tupleOffset, dom)) {
+      Value element = oldElements[i++];
+      elements.push_back(element);
+      tupleOffset +=
+          cast<waveamdmachine::RegType>(element.getType()).getWidth();
       continue;
     }
 
@@ -342,6 +363,7 @@ static bool packTupleElements(waveamdmachine::TupleFromElementsOp tuple,
     movesToErase.push_back(first);
     movesToErase.push_back(second);
     i += 2;
+    tupleOffset += 2;
   }
 
   if (movesToErase.empty())

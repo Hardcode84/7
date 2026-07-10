@@ -292,14 +292,13 @@ def WaveAMDPairDsOps
 
 def WaveAMDPackVGPRZeroMoves
     : Pass<"waveamd-pack-vgpr-zero-moves"> {
-  let summary = "Pack post-regalloc VGPR moves into v_mov_b64 chunks";
+  let summary = "Pack VGPR moves into v_mov_b64 chunks";
   let description = [{
+    Packs virtual adjacent zero fills so scheduling sees allocation copy work.
     Erases same-physical allocated `v_mov_b32_tuple` copies, rewrites allocated
     `v_mov_b32_tuple` zero fills into aligned
     `v_mov_b64_tuple` chunks plus scalar head/tail moves, and packs adjacent
-    scalar VGPR copies with contiguous source and destination pairs. Intended
-    placement is after register allocation and before ticket-wait / hazard-wait
-    insertion.
+    scalar VGPR copies with contiguous source and destination pairs.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
@@ -537,6 +536,19 @@ def WaveAMDMachineSchedule
            "Only schedule functions stamped by waveamd-to-machine.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
            "Skip scheduling regions above this op count; -1 disables the cap.">
+  ];
+}
+
+def WaveAMDPrepareRegAlloc
+    : Pass<"waveamd-prepare-regalloc"> {
+  let summary = "Expose register-allocation copies in WaveAMDMachine IR";
+  let description = [{
+    Materializes copies required by tuple aliases, loop carries, destructive
+    operands, and region yields before hazard repair and allocation.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 

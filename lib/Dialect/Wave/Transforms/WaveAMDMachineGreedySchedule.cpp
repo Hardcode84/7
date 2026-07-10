@@ -287,10 +287,32 @@ static unsigned getIssueCount(Operation *op) {
   return 1;
 }
 
+static bool
+recordHazardStall(IssuePreview &preview,
+                  const waveamdmachine::InstructionStallComponent &component) {
+  switch (component.kind) {
+  case waveamdmachine::InstructionStallKind::InstructionHazard:
+    break;
+  case waveamdmachine::InstructionStallKind::M0ReadWrite:
+    preview.m0Hazard = true;
+    break;
+  case waveamdmachine::InstructionStallKind::StoreWriteData:
+    preview.storeDataHazard = true;
+    break;
+  default:
+    return false;
+  }
+  preview.hazardWaitInsts =
+      std::max<unsigned>(preview.hazardWaitInsts, component.cycles);
+  return true;
+}
+
 static void recordPreviewStall(IssuePreview &preview,
                                const waveamdmachine::InstructionStall &stall) {
   for (const waveamdmachine::InstructionStallComponent &component :
        stall.components) {
+    if (recordHazardStall(preview, component))
+      continue;
     switch (component.kind) {
     case waveamdmachine::InstructionStallKind::OperandValue:
     case waveamdmachine::InstructionStallKind::MemoryValue:
@@ -305,18 +327,10 @@ static void recordPreviewStall(IssuePreview &preview,
     case waveamdmachine::InstructionStallKind::IssueBackpressure:
       preview.fuWaitCycles = std::max(preview.fuWaitCycles, component.cycles);
       break;
-    case waveamdmachine::InstructionStallKind::M0ReadWrite:
-      preview.hazardWaitInsts =
-          std::max<unsigned>(preview.hazardWaitInsts, component.cycles);
-      preview.m0Hazard = true;
-      break;
-    case waveamdmachine::InstructionStallKind::StoreWriteData:
-      preview.hazardWaitInsts =
-          std::max<unsigned>(preview.hazardWaitInsts, component.cycles);
-      preview.storeDataHazard = true;
-      break;
     case waveamdmachine::InstructionStallKind::None:
       break;
+    default:
+      llvm_unreachable("handled hazard stall");
     }
   }
 }

@@ -315,6 +315,81 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @trans_hazard_fill(%a: !waveamdmachine.reg<vgpr, 1>,
+                             %b: !waveamdmachine.reg<vgpr, 1>,
+                             %c: !waveamdmachine.reg<vgpr, 1>) {
+  %trans = waveamdmachine.v_rcp_f32 %a
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %use = waveamdmachine.v_mul_f32 %trans, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %fill = waveamdmachine.v_add_u32 %b, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @trans_hazard_fill
+// IR: [[TRANS:%.*]] = waveamdmachine.v_rcp_f32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_mul_f32 [[TRANS]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @readfirstlane_hazard_fill(%a: !waveamdmachine.reg<vgpr, 1>,
+                                     %b: !waveamdmachine.reg<vgpr, 1>,
+                                     %c: !waveamdmachine.reg<vgpr, 1>) {
+  %sum = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %first = waveamdmachine.v_readfirstlane_b32 %sum
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+  %fill = waveamdmachine.v_xor_b32 %b, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @readfirstlane_hazard_fill
+// IR: [[SUM:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_xor_b32
+// IR-NEXT: waveamdmachine.v_readfirstlane_b32 [[SUM]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @vcc_hazard_fill(%a: !waveamdmachine.reg<vgpr, 1>,
+                           %b: !waveamdmachine.reg<vgpr, 1>,
+                           %c: !waveamdmachine.reg<vgpr, 1>,
+                           %d: !waveamdmachine.reg<vgpr, 1>) {
+  %mask, %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  %sum = waveamdmachine.v_add_u32 %a, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %vcc
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %fill = waveamdmachine.v_xor_b32 %c, %d
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @vcc_hazard_fill
+// IR: {{%.*}}, [[VCC:%.*]] = waveamdmachine.v_cmp_ge_u32_vcc
+// IR-NEXT: [[SUM:%.*]] = waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_xor_b32
+// IR-NEXT: waveamdmachine.v_cndmask_b32_vcc {{.*}}, [[SUM]], [[VCC]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @cluster_barrier_pair_after_compute(
     %a: !waveamdmachine.reg<vgpr, 4>,
     %b: !waveamdmachine.reg<vgpr, 4>,
