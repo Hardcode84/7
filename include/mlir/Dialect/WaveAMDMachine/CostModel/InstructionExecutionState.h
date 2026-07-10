@@ -19,6 +19,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace mlir {
 class Operation;
@@ -37,6 +38,7 @@ enum class InstructionStallKind : uint8_t {
   MemoryToken,
   Waitcnt,
   M0ReadWrite,
+  StoreWriteData,
 };
 
 enum class InstructionPipeKind : uint8_t {
@@ -96,6 +98,13 @@ struct InstructionExecutionConfig {
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa);
 
+struct StoreWriteDataHazard {
+  Value data;
+  unsigned latency = 0;
+};
+
+std::optional<StoreWriteDataHazard>
+getStoreWriteDataHazard(Operation *op, const llvm::AMDGPU::IsaVersion &isa);
 bool waitsForMemoryTokenDepsBeforeIssue(Operation *op);
 llvm::StringRef getInstructionStallKindName(InstructionStallKind kind);
 llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind);
@@ -135,6 +144,7 @@ private:
     int64_t memoryCounterLatency = 0;
     int64_t memoryValueLatency = 0;
     unsigned issueCount = 1;
+    unsigned storeDataHazardLatency = 0;
     InstructionPipeKind pipe = InstructionPipeKind::None;
     MemoryIssueResourceMask memoryIssueResources = 0;
     InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
@@ -143,6 +153,7 @@ private:
     bool waitcnt = false;
     bool m0Writer = false;
     bool m0Consumer = false;
+    bool storeDataProducer = false;
     bool waitsForTokenDeps = false;
     bool hasMemoryValue = false;
   };
@@ -175,6 +186,7 @@ private:
   void commitPipe(InstructionPipeKind pipe, int64_t readyCycle);
   void commitMemoryIssue(const InstructionDesc &desc, int64_t issueCycle);
   void commitM0(const InstructionDesc &desc);
+  void commitStoreData(const InstructionDesc &desc);
   void pruneRetiredEvents(int64_t cycle);
   SmallVector<EventId, 4> collectTokenDeps(Operation *op) const;
   bool hasPendingEvent(EventId id, int64_t cycle) const;
@@ -191,6 +203,7 @@ private:
   const ArchData &arch;
   int64_t currentCycle = 0;
   EventId nextEventId = 1;
+  unsigned storeDataGap = 0;
   bool m0GapArmed = false;
 };
 

@@ -1606,61 +1606,54 @@ tlx_addmm_glu_kernel_optimized:
 		s_mov_b32 s2, s22
 		s_mov_b32 s3, s23
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v22
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v120, v121
 		v_cvt_pk_f16_f32 v5, v122, v123
 		v_cvt_pk_f16_f32 v6, v124, v125
 		v_cvt_pk_f16_f32 v7, v126, v127
-		v_mul_lo_u32 v0, s19, v22
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v24
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v128, v129
 		v_cvt_pk_f16_f32 v5, v130, v131
 		v_cvt_pk_f16_f32 v6, v132, v133
 		v_cvt_pk_f16_f32 v7, v134, v135
-		v_mul_lo_u32 v0, s19, v24
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v25
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v136, v137
 		v_cvt_pk_f16_f32 v5, v138, v139
 		v_cvt_pk_f16_f32 v6, v140, v141
 		v_cvt_pk_f16_f32 v7, v142, v143
-		v_mul_lo_u32 v0, s19, v25
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v14
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v56, v57
 		v_cvt_pk_f16_f32 v5, v58, v59
 		v_cvt_pk_f16_f32 v6, v60, v61
 		v_cvt_pk_f16_f32 v7, v62, v63
-		v_mul_lo_u32 v0, s19, v14
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v15
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v144, v145
 		v_cvt_pk_f16_f32 v5, v146, v147
 		v_cvt_pk_f16_f32 v6, v148, v149
 		v_cvt_pk_f16_f32 v7, v150, v151
-		v_mul_lo_u32 v0, s19, v15
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v16
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v40, v41
 		v_cvt_pk_f16_f32 v5, v42, v43
 		v_cvt_pk_f16_f32 v6, v44, v45
 		v_cvt_pk_f16_f32 v7, v46, v47
-		v_mul_lo_u32 v0, s19, v16
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
-		s_nop 1
+		v_mul_lo_u32 v0, s19, v17
+		v_lshl_add_u32 v0, v0, 1, v2
 		v_cvt_pk_f16_f32 v4, v64, v65
 		v_cvt_pk_f16_f32 v5, v66, v67
 		v_cvt_pk_f16_f32 v6, v68, v69
 		v_cvt_pk_f16_f32 v7, v70, v71
-		v_mul_lo_u32 v0, s19, v17
-		v_lshl_add_u32 v0, v0, 1, v2
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen
 		s_waitcnt vmcnt(0)
 		s_endpgm

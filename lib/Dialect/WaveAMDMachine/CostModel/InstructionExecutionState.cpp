@@ -18,6 +18,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -43,6 +44,54 @@ static bool isWaveAMDMachineOp(Operation *op) {
 
 static bool isMemToken(Value value) {
   return isa<MemTokenType>(value.getType());
+}
+
+static bool isCDNA3Or4(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && (isa.Minor == 4 || isa.Minor == 5);
+}
+
+static bool isSGPROffset(Value value) {
+  RegType regType = dyn_cast<RegType>(value.getType());
+  return regType && regType.getRegClass() == RegClass::SGPR;
+}
+
+static Value getWideBufferStoreSoffset(Operation *op) {
+  if (BufferStoreB96Op store = dyn_cast<BufferStoreB96Op>(op))
+    return store.getSoffset();
+  if (BufferStoreB128Op store = dyn_cast<BufferStoreB128Op>(op))
+    return store.getSoffset();
+  return {};
+}
+
+static bool isWideStoreWriteDataOp(Operation *op) {
+  return isa<GlobalStoreB96Op, GlobalStoreB128Op, GlobalStoreB96Addr64Op,
+             GlobalStoreB128Addr64Op, BufferStoreB96Op, BufferStoreB128Op>(op);
+}
+
+static bool
+reachesStoreWriteData(Value value,
+                      llvm::SmallPtrSetImpl<Operation *> &seenAliases) {
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (use.getOperandNumber() == 1 && isWideStoreWriteDataOp(user))
+      return true;
+    if (!user->hasTrait<traits::NoMachineInst>() ||
+        !seenAliases.insert(user).second)
+      continue;
+    for (Value result : user->getResults())
+      if (reachesStoreWriteData(result, seenAliases))
+        return true;
+  }
+  return false;
+}
+
+static bool producesStoreWriteData(Operation *op) {
+  if (!op->hasTrait<traits::VALUOp>())
+    return false;
+  llvm::SmallPtrSet<Operation *, 8> seenAliases;
+  return llvm::any_of(op->getResults(), [&](Value result) {
+    return reachesStoreWriteData(result, seenAliases);
+  });
 }
 
 static WaitcntInfo getWaitcntInfo(Operation *op) {
@@ -256,6 +305,19 @@ static void addComponent(InstructionStall &stall, InstructionStallKind kind,
 
 } // namespace
 
+std::optional<StoreWriteDataHazard>
+getStoreWriteDataHazard(Operation *op, const llvm::AMDGPU::IsaVersion &isa) {
+  if (!isWideStoreWriteDataOp(op))
+    return std::nullopt;
+  unsigned latency = 1;
+  if (isCDNA3Or4(isa)) {
+    Value soffset = getWideBufferStoreSoffset(op);
+    // SGPR SOFFSET shortens the measured gfx94x/gfx95x window.
+    latency = soffset && isSGPROffset(soffset) ? 1 : 2;
+  }
+  return StoreWriteDataHazard{op->getOperand(1), latency};
+}
+
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa) {
   return isaEq(isa, {9, 4, 2}) || isaEq(isa, {9, 5, 0}) || isa.Major == 11;
@@ -289,6 +351,8 @@ llvm::StringRef getInstructionStallKindName(InstructionStallKind kind) {
     return "waitcnt";
   case InstructionStallKind::M0ReadWrite:
     return "m0_read_write";
+  case InstructionStallKind::StoreWriteData:
+    return "store_write_data";
   }
   llvm_unreachable("bad stall kind");
 }
@@ -453,6 +517,7 @@ InstructionExecutionState::commit(Operation *op) {
   if (desc.noMachineInst) {
     commitNoMachineInst(op);
     commitM0(desc);
+    commitStoreData(desc);
     result.nextIssueCycle = currentCycle;
     result.valueReadyCycle = currentCycle;
     result.tokenReadyCycle = tokenReadyCycle(op);
@@ -466,6 +531,7 @@ InstructionExecutionState::commit(Operation *op) {
   commitPipe(desc.pipe, valueReadyCycle);
   commitMemoryIssue(desc, result.issueCycle);
   commitM0(desc);
+  commitStoreData(desc);
 
   currentCycle = result.issueCycle + getInstructionSpan(desc);
   pruneRetiredEvents(currentCycle);
@@ -481,6 +547,11 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.waitcnt = op->hasTrait<traits::WaitcntOp>();
   desc.m0Writer = writesM0ThroughHazard(op);
   desc.m0Consumer = consumesM0ThroughHazard(op);
+  if (std::optional<StoreWriteDataHazard> hazard =
+          getStoreWriteDataHazard(op, arch.isa))
+    desc.storeDataHazardLatency = hazard->latency;
+  if (storeDataGap)
+    desc.storeDataProducer = producesStoreWriteData(op);
   desc.waitsForTokenDeps = waitsForMemoryTokenDepsBeforeIssue(op);
 
   SchedClass cls = classifyOp(op);
@@ -540,6 +611,8 @@ InstructionExecutionState::query(Operation *op,
 
   if (desc.m0Consumer && m0GapArmed)
     addComponent(stall, InstructionStallKind::M0ReadWrite, 1);
+  if (desc.storeDataProducer && storeDataGap)
+    addComponent(stall, InstructionStallKind::StoreWriteData, storeDataGap);
 
   return stall;
 }
@@ -808,6 +881,14 @@ void InstructionExecutionState::commitM0(const InstructionDesc &desc) {
   }
   if (desc.waitcnt || !desc.noMachineInst)
     m0GapArmed = false;
+}
+
+void InstructionExecutionState::commitStoreData(const InstructionDesc &desc) {
+  if (desc.storeDataProducer && storeDataGap)
+    storeDataGap = 0;
+  else if (!desc.noMachineInst && storeDataGap)
+    --storeDataGap;
+  storeDataGap = std::max(storeDataGap, desc.storeDataHazardLatency);
 }
 
 void InstructionExecutionState::pruneRetiredEvents(int64_t cycle) {

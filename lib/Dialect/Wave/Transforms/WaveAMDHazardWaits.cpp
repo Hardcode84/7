@@ -21,6 +21,7 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -652,53 +653,6 @@ static bool isMfmaResultHazardConsumer(Operation *op) {
   return isVMEM(op) || issuesLdsWaitcnt(op) || isLegacyVALU(op);
 }
 
-struct StoreWriteDataHazard {
-  Value data;
-  unsigned latency;
-};
-
-static bool isSGPROffset(Value value) {
-  waveamdmachine::RegType regType =
-      dyn_cast<waveamdmachine::RegType>(value.getType());
-  return regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR;
-}
-
-static Value getWideBufferStoreSoffset(Operation *op) {
-  if (waveamdmachine::BufferStoreB96Op store =
-          dyn_cast<waveamdmachine::BufferStoreB96Op>(op))
-    return store.getSoffset();
-  if (waveamdmachine::BufferStoreB128Op store =
-          dyn_cast<waveamdmachine::BufferStoreB128Op>(op))
-    return store.getSoffset();
-  return {};
-}
-
-static unsigned
-getStoreWriteDataLatency(Operation *op,
-                         const llvm::AMDGPU::IsaVersion &isaVersion) {
-  if (!isCDNA3Family(isaVersion) && !isCDNA4Family(isaVersion))
-    return 1;
-  // LLVM gfx940-family keeps a shorter measured window for SGPR SOFFSET.
-  if (Value soffset = getWideBufferStoreSoffset(op);
-      soffset && isSGPROffset(soffset))
-    return 1;
-  return 2;
-}
-
-static std::optional<StoreWriteDataHazard>
-getStoreWriteDataHazard(Operation *op,
-                        const llvm::AMDGPU::IsaVersion &isaVersion) {
-  if (!llvm::isa<
-          waveamdmachine::GlobalStoreB96Op, waveamdmachine::GlobalStoreB128Op,
-          waveamdmachine::GlobalStoreB96Addr64Op,
-          waveamdmachine::GlobalStoreB128Addr64Op,
-          waveamdmachine::BufferStoreB96Op, waveamdmachine::BufferStoreB128Op>(
-          op))
-    return std::nullopt;
-  return StoreWriteDataHazard{op->getOperand(1),
-                              getStoreWriteDataLatency(op, isaVersion)};
-}
-
 static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
   return std::max(cfg.valuWriteVGPRMfmaLatency,
                   cfg.valuWriteVGPRReadlaneLatency);
@@ -936,8 +890,8 @@ static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
 
 static void addProducedStorePhysicalHazards(Operation *op, HazardState &state,
                                             const HazardConfig &cfg) {
-  std::optional<StoreWriteDataHazard> hazard =
-      getStoreWriteDataHazard(op, cfg.isaVersion);
+  std::optional<waveamdmachine::StoreWriteDataHazard> hazard =
+      waveamdmachine::getStoreWriteDataHazard(op, cfg.isaVersion);
   if (!hazard)
     return;
   if (std::optional<RegSpan> span = getAllocatedRegSpan(hazard->data))

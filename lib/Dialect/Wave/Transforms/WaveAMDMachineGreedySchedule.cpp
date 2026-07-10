@@ -66,7 +66,7 @@ enum class FillableStallKind : uint8_t {
   None,
   Cycle,
   MemoryToken,
-  M0Hazard,
+  InstructionHazard,
 };
 
 enum class GreedyStepStatus : uint8_t {
@@ -142,6 +142,8 @@ struct IssuePreview {
   bool realInst = false;
   bool memoryIssuer = false;
   bool hasMemoryValue = false;
+  bool m0Hazard = false;
+  bool storeDataHazard = false;
 };
 
 static void bindValueOrigins(waveamdmachine::InstructionExecutionState &model,
@@ -154,6 +156,7 @@ struct GreedyStats {
   unsigned resourceGaps = 0;
   unsigned cheapHazardGaps = 0;
   unsigned m0Gaps = 0;
+  unsigned storeDataGaps = 0;
   unsigned memoryTokenGaps = 0;
   unsigned barrierMemoryGaps = 0;
   unsigned filledBarrierMemoryGaps = 0;
@@ -300,6 +303,12 @@ static void recordPreviewStall(IssuePreview &preview,
     case waveamdmachine::InstructionStallKind::M0ReadWrite:
       preview.hazardWaitInsts =
           std::max<unsigned>(preview.hazardWaitInsts, component.cycles);
+      preview.m0Hazard = true;
+      break;
+    case waveamdmachine::InstructionStallKind::StoreWriteData:
+      preview.hazardWaitInsts =
+          std::max<unsigned>(preview.hazardWaitInsts, component.cycles);
+      preview.storeDataHazard = true;
       break;
     case waveamdmachine::InstructionStallKind::None:
       break;
@@ -577,13 +586,24 @@ static void recordGapStats(Operation *op, const IssuePreview &preview,
     ++stats.resourceGaps;
   if (preview.hazardWaitInsts != 0) {
     ++stats.cheapHazardGaps;
-    ++stats.m0Gaps;
+    if (preview.m0Hazard)
+      ++stats.m0Gaps;
+    if (preview.storeDataHazard)
+      ++stats.storeDataGaps;
   }
 }
 
 static bool filledOnlyM0HazardGaps(const GreedyStats &stats) {
-  return stats.m0Gaps != 0 && stats.cheapHazardGaps == stats.m0Gaps &&
+  return stats.m0Gaps != 0 && stats.storeDataGaps == 0 &&
+         stats.cheapHazardGaps == stats.m0Gaps &&
          stats.filledGaps >= stats.m0Gaps && stats.unfilledGaps == 0 &&
+         stats.resourceGaps == 0 && stats.memoryTokenGaps == 0;
+}
+
+static bool filledOnlyStoreDataHazardGaps(const GreedyStats &stats) {
+  return stats.storeDataGaps != 0 && stats.m0Gaps == 0 &&
+         stats.cheapHazardGaps == stats.storeDataGaps &&
+         stats.filledGaps >= stats.storeDataGaps && stats.unfilledGaps == 0 &&
          stats.resourceGaps == 0 && stats.memoryTokenGaps == 0;
 }
 
@@ -875,7 +895,7 @@ static FillableStall getFillableStall(const IssuePreview &preview) {
   if (hasNonMemoryCycleWait(preview))
     return {FillableStallKind::Cycle, preview.issueCycle};
   if (preview.hazardWaitInsts != 0)
-    return {FillableStallKind::M0Hazard, preview.issueCycle};
+    return {FillableStallKind::InstructionHazard, preview.issueCycle};
   return {};
 }
 
@@ -1258,6 +1278,7 @@ static void printDecision(const GreedyRegion &region, StringRef action,
                << " resource_gaps=" << stats.resourceGaps
                << " cheap_hazard_gaps=" << stats.cheapHazardGaps
                << " m0_gaps=" << stats.m0Gaps
+               << " store_data_gaps=" << stats.storeDataGaps
                << " memory_token_gaps=" << stats.memoryTokenGaps
                << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                << " filled_barrier_memory_gaps="
@@ -1437,6 +1458,8 @@ struct WaveAMDMachineSchedulePass
     StringRef reason = "greedy";
     if (filledOnlyM0HazardGaps(greedy.stats))
       reason = "m0_hazard";
+    else if (filledOnlyStoreDataHazardGaps(greedy.stats))
+      reason = "store_data_hazard";
     else if (filledBarrierMemoryGap(greedy.stats))
       reason = "barrier_memory";
     printDecision(region, "apply", reason, greedy.stats);
@@ -1746,6 +1769,8 @@ struct WaveAMDMachineScheduleReportPass
       reason = "greedy";
       if (filledOnlyM0HazardGaps(greedy.stats))
         reason = "m0_hazard";
+      else if (filledOnlyStoreDataHazardGaps(greedy.stats))
+        reason = "store_data_hazard";
       else if (filledBarrierMemoryGap(greedy.stats))
         reason = "barrier_memory";
       else if (succeeded(originalScore) && succeeded(greedyScore) &&
@@ -1847,6 +1872,7 @@ struct WaveAMDMachineScheduleReportPass
                  << " resource_gaps=" << stats.resourceGaps
                  << " cheap_hazard_gaps=" << stats.cheapHazardGaps
                  << " m0_gaps=" << stats.m0Gaps
+                 << " store_data_gaps=" << stats.storeDataGaps
                  << " memory_token_gaps=" << stats.memoryTokenGaps
                  << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                  << " filled_barrier_memory_gaps="

@@ -38,6 +38,69 @@ func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @store_data_fill(
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %data0: !waveamdmachine.reg<vgpr, 4>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<vgpr, 1>,
+    %stride: !waveamdmachine.reg<sgpr, 1>,
+    %index: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<vgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %tok0 = waveamdmachine.buffer_store_b128 %off0, %data0, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+        -> !waveamdmachine.mem.token
+  %p0 = waveamdmachine.v_cvt_pk_f16_f32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %p1 = waveamdmachine.v_cvt_pk_f16_f32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %p2 = waveamdmachine.v_cvt_pk_f16_f32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %p3 = waveamdmachine.v_cvt_pk_f16_f32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %data1 = waveamdmachine.tuple_from_elements %p0, %p1, %p2, %p3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 4>
+  %scaled = waveamdmachine.v_mul_lo_u32 %stride, %index
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %off1 = waveamdmachine.v_lshl_add_u32 %scaled, %one, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %tok1 = waveamdmachine.buffer_store_b128 %off1, %data1, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+        -> !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @store_data_fill
+// IR: waveamdmachine.buffer_store_b128
+// IR-NEXT: [[SCALED:%.*]] = waveamdmachine.v_mul_lo_u32
+// IR-NEXT: [[OFF:%.*]] = waveamdmachine.v_lshl_add_u32 [[SCALED]]
+// IR-NEXT: [[P0:%.*]] = waveamdmachine.v_cvt_pk_f16_f32
+// IR-NEXT: [[P1:%.*]] = waveamdmachine.v_cvt_pk_f16_f32
+// IR-NEXT: [[P2:%.*]] = waveamdmachine.v_cvt_pk_f16_f32
+// IR-NEXT: [[P3:%.*]] = waveamdmachine.v_cvt_pk_f16_f32
+// IR-NEXT: [[DATA:%.*]] = waveamdmachine.tuple_from_elements [[P0]], [[P1]], [[P2]], [[P3]]
+// IR-NEXT: waveamdmachine.buffer_store_b128 [[OFF]], [[DATA]]
+// DIAG: waveamd-machine-schedule region func=store_data_fill
+// DIAG-SAME: action=apply reason=store_data_hazard
+// DIAG-SAME: filled_gaps=2
+// DIAG-SAME: store_data_gaps=2
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @m0_fill_keeps_same_counter_order(%base: !waveamdmachine.reg<sgpr, 1>,
                                             %off0: !waveamdmachine.reg<vgpr, 1>,
