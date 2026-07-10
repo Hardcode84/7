@@ -15,13 +15,14 @@
 // `lgkmcnt(0)`. CFG joins merge with MIN -- a wait larger than the
 // path-minimum returns before the token drains. Tokens whose def block
 // doesn't dominate the successor collapse to a per-counter nullptr sentinel
-// at MIN of escaping positions. `s_endpgm` forces `vscnt(0)` so VMEM stores
-// don't leak past kernel exit.
+// at MIN of escaping positions. `s_endpgm` drains counters in hardware; on
+// supported VGPR-limited targets, ordinary stores can overlap VGPR release.
 //
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "RegAlloc/WaveAMDRegisterLimits.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Analysis/DataFlow/DenseAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
@@ -37,6 +38,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <cassert>
 #include <optional>
 
 namespace mlir::wave {
@@ -334,8 +336,7 @@ static void collapseEscaping(WaitState &state, Block *target,
 }
 
 // Bump same-counter positions, then seed position-0 entries for each
-// tagged result. No tagged result -> one anonymous (nullptr) entry so
-// `s_endpgm`'s vscnt drain can find untokenized stores.
+// tagged result. Untagged issues share one conservative counter aggregate.
 static bool issue(WaitState &state, Counter counter, unsigned count,
                   unsigned events, bool outOfOrder, bool writesMemory,
                   ValueRange tagged) {
@@ -344,8 +345,8 @@ static bool issue(WaitState &state, Counter counter, unsigned count,
   bumpCounter(state.tokens, counter, count);
   bool changed = false;
   if (tagged.empty()) {
-    changed |= insertOrReplace(state.tokens, Token{Value(), counter, events, 0,
-                                                   outOfOrder, writesMemory});
+    changed |= insertOrMin(state.tokens, Token{Value(), counter, events, 0,
+                                               outOfOrder, writesMemory});
   } else {
     for (Value v : tagged)
       changed |= insertOrReplace(
@@ -465,7 +466,7 @@ enum class OpKind {
   Issuer,  // VMEM/SMEM/LDS load or store: drain, then issue.
   Barrier, // s_barrier: drain AND derive result tokens.
   TokenOp, // waveamdmachine.after / token_join: derive only.
-  Endpgm,  // s_endpgm: implicit vscnt drain.
+  Endpgm,  // s_endpgm: implicit full drain.
   Generic, // any other op: drain its operands.
 };
 
@@ -638,15 +639,8 @@ static WaitRequirement computeRequirement(Operation *op,
   if (isControlFlowOp(op))
     return computeControlFlowRequirement(op, state);
   WaitRequirement req;
-  // No SSA edge from a store's token to the return path -- force vscnt
-  // drain when any VMEM store is still in flight.
-  if (llvm::isa<waveamdmachine::SEndpgmOp>(op)) {
-    for (const Token &t : state.tokens) {
-      if (t.counter == Counter::Vscnt)
-        req.requireDrain(Counter::Vscnt, waitPosition(state, t));
-    }
+  if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
     return req;
-  }
   bool issuer = isMemoryIssuer(op);
   for (OpOperand &operand : op->getOpOperands()) {
     if (isD16LowPreservedOperand(operand))
@@ -771,6 +765,8 @@ static void runTransfer(Operation *op, WaitState &state,
     deriveResultTokens(op, state);
     return;
   case OpKind::Endpgm:
+    state.tokens.clear();
+    return;
   case OpKind::Generic:
     applyDrain(op, state, isaVer, emit);
     return;
@@ -972,6 +968,75 @@ static void emitWaits(OpBuilder &builder, Operation *op,
   }
 }
 
+static void noteAllocatedVGPR(Value value, unsigned &count) {
+  waveamdmachine::RegType type =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  if (!type || type.getRegClass() != waveamdmachine::RegClass::VGPR ||
+      type.getIndex() < 0)
+    return;
+  unsigned end = static_cast<unsigned>(type.getIndex() + type.getWidth());
+  count = std::max(count, end);
+}
+
+static unsigned getAllocatedVGPRCount(func::FuncOp func) {
+  unsigned count = 0;
+  func.walk([&](Operation *op) {
+    for (Value value : llvm::concat<Value>(op->getOperands(), op->getResults()))
+      noteAllocatedVGPR(value, count);
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        for (BlockArgument arg : block.getArguments())
+          noteAllocatedVGPR(arg, count);
+  });
+  return count;
+}
+
+static FailureOr<bool>
+isVGPRLimited(func::FuncOp func, const llvm::AMDGPU::IsaVersion &isaVersion) {
+  if (!func->hasAttr(wave::WaveDialect::getKernelAttrName()) ||
+      !waveamdmachine::SSendmsgDeallocVgprsOp::isSupportedOnIsa(isaVersion))
+    return false;
+  FailureOr<wave::WaveAMDRegisterLimits> limits =
+      wave::getWaveAMDRegisterLimits(func);
+  if (failed(limits))
+    return failure();
+  assert(limits->maxWavesPerEU < limits->maxVGPRsForWaves.size() &&
+         "maximum-wave VGPR budget missing");
+  unsigned maxOccupancyVGPRs = limits->maxVGPRsForWaves[limits->maxWavesPerEU];
+  return getAllocatedVGPRCount(func) > maxOccupancyVGPRs;
+}
+
+static bool hasPendingEvent(const WaitState &state, Counter counter,
+                            waveamdmachine::WaitcntEvent event) {
+  return (activeEventMask(state.tokens, counter) & eventMask(event)) != 0;
+}
+
+static bool canDeallocVGPRs(const WaitState &state) {
+  return llvm::any_of(state.tokens,
+                      [](const Token &token) {
+                        return token.counter == Counter::Vscnt;
+                      }) &&
+         !hasPendingEvent(state, Counter::Vscnt,
+                          waveamdmachine::WaitcntEvent::ScratchStore);
+}
+
+static bool
+requiresNopBeforeDeallocVGPRs(const llvm::AMDGPU::IsaVersion &isaVersion) {
+  return !(isaVersion.Major == 12 && isaVersion.Minor == 5);
+}
+
+static void emitVGPRDealloc(OpBuilder &builder, Operation *endpgm,
+                            const llvm::AMDGPU::IsaVersion &isaVersion) {
+  builder.setInsertionPoint(endpgm);
+  if (requiresNopBeforeDeallocVGPRs(isaVersion)) {
+    Value zero = waveamdmachine::ImmOp::create(
+        builder, endpgm->getLoc(),
+        waveamdmachine::ImmType::get(builder.getContext()), 0);
+    waveamdmachine::SNopOp::create(builder, endpgm->getLoc(), zero);
+  }
+  waveamdmachine::SSendmsgDeallocVgprsOp::create(builder, endpgm->getLoc());
+}
+
 struct WaveAMDTicketWaitsPass
     : public wave::impl::WaveAMDTicketWaitsBase<WaveAMDTicketWaitsPass> {
   void runOnOperation() override {
@@ -991,6 +1056,9 @@ struct WaveAMDTicketWaitsPass
     FailureOr<llvm::AMDGPU::IsaVersion> isaVersion = getIsaVersion(func);
     if (failed(isaVersion))
       return failure();
+    FailureOr<bool> vgprLimited = isVGPRLimited(func, *isaVersion);
+    if (failed(vgprLimited))
+      return failure();
 
     DominanceInfo dom(func);
     DataFlowSolver solver;
@@ -999,23 +1067,24 @@ struct WaveAMDTicketWaitsPass
     if (failed(solver.initializeAndRun(func)))
       return failure();
 
-    rewriteWithSolver(func, solver, *isaVersion);
+    rewriteWithSolver(func, solver, *isaVersion, *vgprLimited);
     return success();
   }
 
   // Per-block local state so consecutive consumers see drains from the
   // wait we just emitted (the solver's per-op state does not).
   void rewriteWithSolver(func::FuncOp func, DataFlowSolver &solver,
-                         const llvm::AMDGPU::IsaVersion &isaVer) {
+                         const llvm::AMDGPU::IsaVersion &isaVer,
+                         bool vgprLimited) {
     OpBuilder builder(func.getContext());
     SmallVector<Block *> blocks;
     collectBlocks(func.getBody(), blocks);
     for (Block *block : blocks)
-      rewriteBlock(block, solver, isaVer, builder);
+      rewriteBlock(block, solver, isaVer, vgprLimited, builder);
   }
 
   void rewriteBlock(Block *block, DataFlowSolver &solver,
-                    const llvm::AMDGPU::IsaVersion &isaVer,
+                    const llvm::AMDGPU::IsaVersion &isaVer, bool vgprLimited,
                     OpBuilder &builder) {
     auto *blockLat =
         solver.lookupState<WaitLattice>(solver.getProgramPointBefore(block));
@@ -1028,15 +1097,20 @@ struct WaveAMDTicketWaitsPass
       ops.push_back(&op);
 
     for (Operation *op : ops)
-      rewriteOp(op, local, solver, isaVer, builder);
+      rewriteOp(op, local, solver, isaVer, vgprLimited, builder);
   }
 
   void rewriteOp(Operation *op, WaitState &local, DataFlowSolver &solver,
-                 const llvm::AMDGPU::IsaVersion &isaVer, OpBuilder &builder) {
+                 const llvm::AMDGPU::IsaVersion &isaVer, bool vgprLimited,
+                 OpBuilder &builder) {
     auto emit = [&](Operation *op, const WaitRequirement &req) {
       if (req.hasWait())
         emitWaits(builder, op, req);
     };
+    if (vgprLimited && llvm::isa<waveamdmachine::SEndpgmOp>(op) &&
+        canDeallocVGPRs(local))
+      emitVGPRDealloc(builder, op, isaVer);
+
     // Control-flow ops: framework hooks computed the post-op state.
     // Refresh `local` so a downstream consumer sees the joined region
     // result. Inner regions are visited separately via collectBlocks.

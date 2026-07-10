@@ -1403,7 +1403,6 @@ tlx_addmm_glu_kernel_persistent:
 		s_cmp_lt_i32 s2, s20
 		s_cbranch_scc1 .Ltlx_addmm_glu_kernel_persistent.loop_head_0
 .Ltlx_addmm_glu_kernel_persistent.loop_exit_0:
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	tlx_addmm_glu_kernel_persistent, .-tlx_addmm_glu_kernel_persistent
 	.section	.rodata,"a",@progbits

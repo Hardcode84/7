@@ -128,7 +128,8 @@ static SchedClass classifyMappedOp(Operation *op) {
             SMulHiU32Op, SMulU64Op, SNopOp, SSleepOp, SFf1I32B32Op,
             SFf1I32B64Op,
             SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SReadVccB32Op,
-            SSetprioOp, SGetregShaderCyclesOp, SXorB32Op, SXorB64Op>(
+            SSendmsgDeallocVgprsOp, SSetprioOp, SGetregShaderCyclesOp,
+            SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default([](Operation *op) {
         if (op->hasTrait<traits::VALUOp>())

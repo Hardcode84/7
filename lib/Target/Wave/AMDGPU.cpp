@@ -517,6 +517,7 @@ private:
   unsigned sNop() const { return opcodes.sNop; }
   unsigned sSleep() const { return opcodes.sSleep; }
   unsigned sSetprio() const { return opcodes.sSetprio; }
+  unsigned sSendmsg() const { return opcodes.sSendmsg; }
   unsigned sBarrier() const { return opcodes.sBarrier; }
   unsigned sEndpgm() const { return opcodes.sEndpgm; }
   unsigned sSetpcB64() const { return opcodes.sSetpcB64; }
@@ -3627,6 +3628,13 @@ private:
       return emitDsStore(op, dsWriteB128());
     if (isa<waveamdmachine::SBarrierOp>(op))
       return emitMC(sBarrier(), {});
+    if (isa<waveamdmachine::SSendmsgDeallocVgprsOp>(op)) {
+      if (!waveamdmachine::SSendmsgDeallocVgprsOp::isSupportedOnIsa(isaVersion))
+        return op.emitError("s_sendmsg_dealloc_vgprs unsupported on target");
+      return emitMC(sSendmsg(),
+                    {llvm::MCOperand::createImm(
+                        llvm::AMDGPU::SendMsg::ID_DEALLOC_VGPRS_GFX11Plus)});
+    }
     if (isa<waveamdmachine::SEndpgmOp>(op))
       return emitMC(sEndpgm(), {llvm::MCOperand::createImm(0)});
     if (isa<waveamdmachine::SSetpcB64Op>(op)) {

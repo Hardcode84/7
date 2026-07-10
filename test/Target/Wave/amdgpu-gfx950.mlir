@@ -13,7 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: [[ENTRY]]:
 // CHECK-NOT: s_load_dword
 // CHECK: buffer_store_dword
-// CHECK: s_waitcnt
+// CHECK-NOT: s_waitcnt
 // CHECK: s_endpgm
 func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel} {

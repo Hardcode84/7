@@ -460,7 +460,9 @@ def WaveAMDTicketWaits
     minimum waitcnt threshold required by SSA uses. This is the waitcnt pass
     intended for the staged WaveAMDMachine backend; the default pipeline runs
     it after register allocation and memory-tuple decomposition. Pipeline
-    hazards remain a separate concern.
+    hazards remain a separate concern. Terminal drains use `s_endpgm`'s
+    implicit wait; VGPR-limited targets can release VGPRs while non-scratch
+    stores finish.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

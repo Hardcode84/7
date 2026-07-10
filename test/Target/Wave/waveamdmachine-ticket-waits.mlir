@@ -113,6 +113,30 @@ func.func @bit_count_consumes_smem() {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+
+// CHECK-LABEL: func.func @gfx1250_dealloc_omits_nop
+// CHECK: waveamdmachine.global_store_b32
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK-NOT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.s_sendmsg_dealloc_vgprs
+// CHECK-NEXT: waveamdmachine.s_endpgm
+func.func @gfx1250_dealloc_omits_nop() attributes {wave.kernel} {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  waveamdmachine.global_store_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 97>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @gfx950_ds_byte_and_transpose_are_lgkm_issuers
@@ -242,11 +266,11 @@ func.func @existing_nonzero_smem_wait_not_sufficient(%x: !waveamdmachine.reg<vgp
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @store_uses_vscnt
+// CHECK-LABEL: func.func @store_drains_at_endpgm
 // CHECK: waveamdmachine.global_store_b32
-// CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
+// CHECK-NOT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.s_endpgm
-func.func @store_uses_vscnt(%offset: !waveamdmachine.reg<vgpr, 1>, %value: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>) {
+func.func @store_drains_at_endpgm(%offset: !waveamdmachine.reg<vgpr, 1>, %value: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>) {
   waveamdmachine.global_store_b32 %offset, %value, %base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> ()
   waveamdmachine.s_endpgm
   return
@@ -394,20 +418,102 @@ func.func @tight_then_loose_collapses(%x: !waveamdmachine.reg<vgpr, 1>) {
 
 // -----
 
-// Two consumers of the same `global_store_b32` both demand a
-// `vscnt(0)` drain (e.g., two `s_endpgm`-style flushes). The
-// post-emission cleanup must keep only the first.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// CHECK-LABEL: func.func @vscnt_dedupe
+// CHECK-LABEL: func.func @vgpr_limited_store_deallocates
 // CHECK: waveamdmachine.global_store_b32
-// CHECK: waveamdmachine.s_waitcnt_vscnt vscnt(0)
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.s_sendmsg_dealloc_vgprs
 // CHECK-NEXT: waveamdmachine.s_endpgm
-// CHECK-NOT: waveamdmachine.s_waitcnt_vscnt
-// CHECK: waveamdmachine.s_endpgm
-func.func @vscnt_dedupe(%off: !waveamdmachine.reg<vgpr, 1>, %val: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>) {
-  waveamdmachine.global_store_b32 %off, %val, %base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> ()
+func.func @vgpr_limited_store_deallocates() attributes {wave.kernel} {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  waveamdmachine.global_store_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 97>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
   waveamdmachine.s_endpgm
+  return
+}
+
+// CHECK-LABEL: func.func @max_occupancy_store_skips_dealloc
+// CHECK: waveamdmachine.global_store_b32
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK-NOT: waveamdmachine.s_sendmsg_dealloc_vgprs
+// CHECK-NEXT: waveamdmachine.s_endpgm
+func.func @max_occupancy_store_skips_dealloc() attributes {wave.kernel} {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 95>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  waveamdmachine.global_store_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 95>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// CHECK-LABEL: func.func @drained_store_skips_dealloc
+// CHECK: waveamdmachine.global_store_b32
+// CHECK-NEXT: waveamdmachine.s_waitcnt_vscnt vscnt(0)
+// CHECK-NOT: waveamdmachine.s_sendmsg_dealloc_vgprs
+// CHECK-NEXT: waveamdmachine.s_endpgm
+func.func @drained_store_skips_dealloc() attributes {wave.kernel} {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  waveamdmachine.global_store_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 97>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+  waveamdmachine.s_waitcnt_vscnt vscnt(0)
+  waveamdmachine.s_endpgm
+  return
+}
+
+// CHECK-LABEL: func.func @scratch_store_blocks_dealloc
+// CHECK: waveamdmachine.scratch_store_b32
+// CHECK: waveamdmachine.global_store_b32
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK-NOT: waveamdmachine.s_sendmsg_dealloc_vgprs
+// CHECK-NEXT: waveamdmachine.s_endpgm
+func.func @scratch_store_blocks_dealloc() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  waveamdmachine.scratch_store_b32 %zero, %value, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1, 97>,
+         !waveamdmachine.imm) -> ()
+  waveamdmachine.global_store_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 97>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @unsupported_dealloc_target
+// CHECK: waveamdmachine.global_store_b32
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK-NOT: waveamdmachine.s_sendmsg_dealloc_vgprs
+// CHECK-NEXT: waveamdmachine.s_endpgm
+func.func @unsupported_dealloc_target() attributes {wave.kernel} {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  waveamdmachine.global_store_b32 %off, %value, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 97>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
   waveamdmachine.s_endpgm
   return
 }

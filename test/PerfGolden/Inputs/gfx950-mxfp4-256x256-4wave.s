@@ -1635,7 +1635,6 @@ wmma_f16_matmul_tiled:
 		buffer_store_dwordx4 v[8:11], v0, s[24:27], s8 offen offset:3584
 .Lwmma_f16_matmul_tiled.exec_endif_9:
 		s_mov_b64 exec, s[52:53]
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	wmma_f16_matmul_tiled, .-wmma_f16_matmul_tiled
 	.section	.rodata,"a",@progbits

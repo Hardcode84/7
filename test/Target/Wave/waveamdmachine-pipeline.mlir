@@ -42,7 +42,7 @@ func.func @where_test(%limit: i32) -> i32 {
 // TICKET-NOT: waveamdmachine.s_delay_alu
 // TICKET: waveamdmachine.v_add_u32
 // TICKET: waveamdmachine.global_store_b32
-// TICKET: waveamdmachine.s_waitcnt_vscnt
+// TICKET-NOT: waveamdmachine.s_waitcnt
 // TICKET: waveamdmachine.s_endpgm
 // HAZARD-LABEL: func.func @kernel_test
 // HAZARD: waveamdmachine.s_waitcnt

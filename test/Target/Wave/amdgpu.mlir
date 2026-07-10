@@ -178,7 +178,7 @@ func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
   // CHECK: global_store_b32 [[OFFSET]], [[SUM]], [[OUT]]
   %ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  // CHECK: s_waitcnt_vscnt null, 0x0
+  // CHECK-NOT: s_waitcnt
   // CHECK: s_endpgm
   return
 }

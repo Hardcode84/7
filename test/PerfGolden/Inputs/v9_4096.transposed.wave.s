@@ -1212,7 +1212,6 @@ v9_beyond_hotloop:
 		v_add_u32_e32 v0, v1, v0
 		v_cndmask_b32_e64 v0, v126, v0, s[0:1]
 		buffer_store_dwordx2 v[48:49], v0, s[24:27], 0 offen
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	v9_beyond_hotloop, .-v9_beyond_hotloop
 	.section	.rodata,"a",@progbits

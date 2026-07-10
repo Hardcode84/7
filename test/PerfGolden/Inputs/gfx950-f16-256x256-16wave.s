@@ -325,7 +325,6 @@ wmma_f16_matmul_tiled:
 		v_cvt_pk_f16_f32 v2, v104, v105
 		v_cvt_pk_f16_f32 v3, v106, v107
 		buffer_store_dwordx2 v[2:3], v0, s[20:23], s0 offen offset:3584
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	wmma_f16_matmul_tiled, .-wmma_f16_matmul_tiled
 	.section	.rodata,"a",@progbits

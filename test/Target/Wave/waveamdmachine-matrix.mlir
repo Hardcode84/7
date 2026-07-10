@@ -33,7 +33,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: v_wmma_i32_16x16x16_iu8 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]]
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]]{{$}}
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]] offset:16
-// ASM: s_waitcnt_vscnt null, 0x0
+// ASM-NOT: s_waitcnt
 // ASM: s_endpgm
 func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %zero = arith.constant 0 : i32

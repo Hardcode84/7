@@ -72,6 +72,7 @@ static MemoryIssueResourceMask getWaitcntIssueResources(WaitcntInfo info) {
   case WaitcntEvent::Flat:
     return getMemoryIssueResourceMask(getVmemIssueResource(info.counter));
   case WaitcntEvent::VmemStore:
+  case WaitcntEvent::ScratchStore:
     return getMemoryIssueResourceMask(MemoryIssueResource::VmemStore);
   case WaitcntEvent::Lds:
   case WaitcntEvent::Gds:

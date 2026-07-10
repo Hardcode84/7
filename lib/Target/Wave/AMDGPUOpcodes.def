@@ -56,6 +56,7 @@
   X(sNop, S_NOP_vi, S_NOP_gfx11)                                               \
   X(sSleep, S_SLEEP_vi, S_SLEEP_gfx11)                                         \
   X(sSetprio, S_SETPRIO_vi, S_SETPRIO_gfx11)                                   \
+  X(sSendmsg, S_SENDMSG_vi, S_SENDMSG_gfx11)                                   \
   X(sBarrier, S_BARRIER_vi, S_BARRIER_gfx11)                                   \
   X(sEndpgm, S_ENDPGM_vi, S_ENDPGM_gfx11)                                      \
   X(sSetpcB64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                              \

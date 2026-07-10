@@ -160,6 +160,8 @@ class WaveAMDMachine_VMEMLoadInfo
     : WaveAMDMachine_WaitcntInfo<"Vmem", "Vmem">;
 class WaveAMDMachine_VMEMStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Vscnt", "VmemStore">;
+class WaveAMDMachine_ScratchStoreInfo
+    : WaveAMDMachine_WaitcntInfo<"Vscnt", "ScratchStore">;
 class WaveAMDMachine_LDSInfo<string count = "1">
     : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds", count>;
 class WaveAMDMachine_SMEMInfo<string count = "1">
@@ -219,6 +221,9 @@ class WaveAMDMachine_VMEMTupleLoadInfo
                                  WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_VMEMTupleStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Vscnt", "VmemStore",
+                                 WaveAMDMachine_ValueRegChunkCount>;
+class WaveAMDMachine_ScratchTupleStoreInfo
+    : WaveAMDMachine_WaitcntInfo<"Vscnt", "ScratchStore",
                                  WaveAMDMachine_ValueRegChunkCount>;
 class WaveAMDMachine_LDSTupleLoadInfo
     : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
@@ -1455,6 +1460,12 @@ def WaveAMDMachine_SMovM0Op
     }
   }];
 }
+def WaveAMDMachine_SSendmsgDeallocVgprsOp
+    : WaveAMDMachine_ZeroResult<"s_sendmsg_dealloc_vgprs",
+                                [WaveAMDMachine_SALU]> {
+  let archPredicate = "isa.Major >= 11";
+  let summary = "release VGPRs before terminal s_endpgm";
+}
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
@@ -2435,7 +2446,7 @@ def WaveAMDMachine_ScratchLoadTupleB32Op
 
 def WaveAMDMachine_ScratchStoreB32Op
     : WaveAMDMachine_ScratchMemoryOp<"scratch_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
-      WaveAMDMachine_VMEMStoreInfo {
+      WaveAMDMachine_ScratchStoreInfo {
   let summary = "scratch 32-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
                        WaveAMDMachine_VGPR1:$value,
@@ -2452,7 +2463,7 @@ def WaveAMDMachine_ScratchStoreB32Op
 
 def WaveAMDMachine_ScratchStoreTupleB32Op
     : WaveAMDMachine_ScratchMemoryOp<"scratch_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
-      WaveAMDMachine_VMEMTupleStoreInfo {
+      WaveAMDMachine_ScratchTupleStoreInfo {
   let summary = "scratch 32-bit store of a VGPR tuple";
   let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
                        WaveAMDMachine_VGPR:$value,

@@ -141,6 +141,11 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
+static InstructionEventClass getVmemEventClass(WaitcntCounter counter) {
+  return counter == WaitcntCounter::Vscnt ? InstructionEventClass::VmemStore
+                                          : InstructionEventClass::VmemLoad;
+}
+
 static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
   switch (kind) {
   case MemoryCounterKind::Vmem:
@@ -160,10 +165,9 @@ static InstructionEventClass toInstructionEventClass(Operation *op) {
   switch (info.event) {
   case WaitcntEvent::Vmem:
   case WaitcntEvent::Flat:
-    return info.counter == WaitcntCounter::Vscnt
-               ? InstructionEventClass::VmemStore
-               : InstructionEventClass::VmemLoad;
+    return getVmemEventClass(info.counter);
   case WaitcntEvent::VmemStore:
+  case WaitcntEvent::ScratchStore:
     return InstructionEventClass::VmemStore;
   case WaitcntEvent::Lds:
   case WaitcntEvent::Gds:

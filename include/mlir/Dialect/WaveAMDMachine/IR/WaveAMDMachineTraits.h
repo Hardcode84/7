@@ -25,6 +25,7 @@ enum class WaitcntEvent : unsigned {
   Flat = 1u << 4,
   Gds = 1u << 5,
   Message = 1u << 6,
+  ScratchStore = 1u << 7,
 };
 
 struct WaitcntInfo {

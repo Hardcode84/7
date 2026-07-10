@@ -1529,7 +1529,6 @@ tlx_addmm_glu_kernel_optimized:
 		v_cvt_pk_f16_f32 v6, v68, v69
 		v_cvt_pk_f16_f32 v7, v70, v71
 		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen sc0 nt
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	tlx_addmm_glu_kernel_optimized, .-tlx_addmm_glu_kernel_optimized
 	.section	.rodata,"a",@progbits

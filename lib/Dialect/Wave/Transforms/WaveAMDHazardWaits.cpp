@@ -1660,7 +1660,8 @@ private:
             waveamdmachine::SDelayAluOp, waveamdmachine::SAndSaveexecB32Op,
             waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndSaveexecB64Op,
             waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SMovExecLoOp,
-            waveamdmachine::SMovExecB64Op, waveamdmachine::SEndpgmOp,
+            waveamdmachine::SMovExecB64Op,
+            waveamdmachine::SSendmsgDeallocVgprsOp, waveamdmachine::SEndpgmOp,
             waveamdmachine::SSetpcB64Op>(op))
       return true;
     if (isa<waveamdmachine::M0WriteHazardOpInterface>(op))

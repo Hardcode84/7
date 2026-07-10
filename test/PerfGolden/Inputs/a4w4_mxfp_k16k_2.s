@@ -2518,7 +2518,6 @@ _a4w4_kernel:
 		v_mov_b64_e32 v[4:5], v[54:55]
 		v_mov_b64_e32 v[6:7], v[58:59]
 		buffer_store_dwordx4 v[4:7], v0, s[8:11], 0 offen
-		s_waitcnt vmcnt(0)
 		s_endpgm
 	.size	_a4w4_kernel, .-_a4w4_kernel
 	.section	.rodata,"a",@progbits
