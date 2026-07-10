@@ -1,7 +1,9 @@
-// RUN: wave-opt --wave-expand-integer-div-rem --waveamd-to-machine %s \
+// RUN: wave-opt --wave-strength-reduce-modulo --wave-expand-integer-div-rem \
+// RUN:   --waveamd-to-machine %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --wave-expand-integer-div-rem --waveamd-to-machine %s \
+// RUN: wave-opt --wave-strength-reduce-modulo --wave-expand-integer-div-rem \
+// RUN:   --waveamd-to-machine %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
@@ -160,6 +162,39 @@ func.func @scalar_i64_dynamic_pow2_divsi_codegen(
   %value = wave.ballot %mask : !wave.mask<32> -> i32
   %v = wave.splat %value : i32 -> !wave.simd<i32, 32>
   %tok = wave.store %v -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
+// ASM-LABEL: scalar_i32_loop_rem5_recurrence_codegen:
+// ASM: .Lscalar_i32_loop_rem5_recurrence_codegen.loop_head_0:
+// ASM-NOT: s_mul_i32
+// ASM: s_cmp_ge_u32
+// ASM-NEXT: s_cselect_b32
+// ASM-NOT: s_mul_i32
+// ASM: s_cmp_ge_u32
+// ASM-NEXT: s_cselect_b32
+// ASM-NOT: s_mul_i32
+// ASM: s_cbranch_scc1 .Lscalar_i32_loop_rem5_recurrence_codegen.loop_head_0
+func.func @scalar_i32_loop_rem5_recurrence_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %trip: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c5 = arith.constant 5 : i32
+  %c7 = arith.constant 7 : i32
+  %sum = scf.for unsigned %i = %c7 to %trip step %c1
+      iter_args(%acc = %c0) -> i32 : i32 {
+    %base = wave.binary remui %i, %c5 : i32, i32 -> i32
+    %shifted = wave.binary addi %i, %c2 overflow<nuw> : i32, i32 -> i32
+    %derived = wave.binary remui %shifted, %c5 : i32, i32 -> i32
+    %next = wave.binary addi %acc, %derived : i32, i32 -> i32
+    scf.yield %next : i32
+  }
+  %value = wave.splat %sum : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %value -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
   return

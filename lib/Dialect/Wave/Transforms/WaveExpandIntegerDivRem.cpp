@@ -24,11 +24,13 @@
 #include "llvm/Support/DivisionByConstantInfo.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <array>
 #include <limits>
 #include <optional>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEEXPANDINTEGERDIVREM
+#define GEN_PASS_DEF_WAVESTRENGTHREDUCEMODULO
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 } // namespace mlir::wave
 
@@ -993,6 +995,324 @@ static std::optional<Value> tryCreateSignedConstPow2Value(IRRewriter &rewriter,
                                           op.getLhs(), *rhsConst);
 }
 
+struct DerivedModulo {
+  BinaryOp op;
+  uint64_t increment;
+};
+
+struct ModuloRecurrence {
+  SmallVector<BinaryOp> baseOps;
+  SmallVector<DerivedModulo> derivedOps;
+  uint64_t divisor;
+  uint64_t step;
+  BinaryKind kind;
+};
+
+struct ModuloOffset {
+  BinaryOp add;
+  Value value;
+  bool addsInduction;
+};
+
+static bool isModulo(BinaryKind kind) {
+  return kind == BinaryKind::RemUI || kind == BinaryKind::RemSI;
+}
+
+static std::optional<uint64_t> getPositiveConstant(Value value, unsigned bits) {
+  std::optional<APInt> constant = getConstantAPInt(value, bits);
+  if (!constant || !constant->sgt(APInt(bits, 0)))
+    return std::nullopt;
+  return constant->getZExtValue();
+}
+
+static std::optional<uint64_t> getModuloDivisor(Value value, unsigned bits,
+                                                BinaryKind kind) {
+  std::optional<APInt> constant = getConstantAPInt(value, bits);
+  if (!constant || constant->isZero() ||
+      (kind == BinaryKind::RemSI && constant->isNegative()))
+    return std::nullopt;
+  return constant->getZExtValue();
+}
+
+static bool isRecurrenceLegal(scf::ForOp loop, BinaryKind kind,
+                              bool nonNegative, DataFlowSolver &solver,
+                              sym::Store &store) {
+  if (kind == BinaryKind::RemUI)
+    return loop.getUnsignedCmp() || nonNegative;
+  return nonNegative &&
+         (!loop.getUnsignedCmp() || isProvenUnsignedUpperAtMostSignedMin(
+                                        solver, store, loop.getUpperBound()));
+}
+
+static ModuloRecurrence *
+findModuloRecurrence(SmallVectorImpl<ModuloRecurrence> &recurrences,
+                     BinaryKind kind, uint64_t divisor) {
+  for (ModuloRecurrence &recurrence : recurrences)
+    if (recurrence.kind == kind && recurrence.divisor == divisor)
+      return &recurrence;
+  return nullptr;
+}
+
+static bool isBaseModuloValue(Value value, const ModuloRecurrence &recurrence) {
+  return llvm::any_of(recurrence.baseOps,
+                      [&](BinaryOp op) { return op.getResult() == value; });
+}
+
+static std::optional<ModuloOffset>
+matchModuloOffset(BinaryOp op, const ModuloRecurrence &recurrence,
+                  Value induction) {
+  BinaryOp add = op.getLhs().getDefiningOp<BinaryOp>();
+  if (!add || add.getKind() != BinaryKind::AddI)
+    return std::nullopt;
+  if (add.getLhs() == induction)
+    return ModuloOffset{add, add.getRhs(), true};
+  if (add.getRhs() == induction)
+    return ModuloOffset{add, add.getLhs(), true};
+  if (isBaseModuloValue(add.getLhs(), recurrence))
+    return ModuloOffset{add, add.getRhs(), false};
+  if (isBaseModuloValue(add.getRhs(), recurrence))
+    return ModuloOffset{add, add.getLhs(), false};
+  return std::nullopt;
+}
+
+static bool isModuloOffsetLegal(ModuloOffset offset,
+                                const ModuloRecurrence &recurrence,
+                                const APInt &constant, unsigned bits,
+                                bool inductionNonNegative) {
+  if (!offset.addsInduction) {
+    APInt maxValue = recurrence.kind == BinaryKind::RemSI
+                         ? APInt::getSignedMaxValue(bits)
+                         : APInt::getMaxValue(bits);
+    APInt baseMax(bits, recurrence.divisor - 1);
+    return constant.ule(maxValue - baseMax);
+  }
+
+  arith::IntegerOverflowFlags flags = offset.add.getOverflowFlags();
+  bool noUnsignedWrap =
+      bitEnumContainsAny(flags, arith::IntegerOverflowFlags::nuw);
+  bool noSignedWrap =
+      bitEnumContainsAny(flags, arith::IntegerOverflowFlags::nsw);
+  if (recurrence.kind == BinaryKind::RemSI)
+    return noSignedWrap;
+  return noUnsignedWrap || (inductionNonNegative && noSignedWrap);
+}
+
+static std::optional<uint64_t>
+getDerivedModuloIncrement(BinaryOp op, const ModuloRecurrence &recurrence,
+                          Value induction, bool inductionNonNegative) {
+  if (isBaseModuloValue(op.getLhs(), recurrence))
+    return 0;
+  std::optional<ModuloOffset> offset =
+      matchModuloOffset(op, recurrence, induction);
+  if (!offset)
+    return std::nullopt;
+
+  unsigned bits = elementBits(op.getType());
+  std::optional<APInt> constant = getConstantAPInt(offset->value, bits);
+  if (!constant ||
+      (recurrence.kind == BinaryKind::RemSI && constant->isNegative()))
+    return std::nullopt;
+  if (!isModuloOffsetLegal(*offset, recurrence, *constant, bits,
+                           inductionNonNegative))
+    return std::nullopt;
+  return constant->urem(APInt(bits, recurrence.divisor)).getZExtValue();
+}
+
+static std::optional<uint64_t>
+getBaseModuloDivisor(BinaryOp op, scf::ForOp loop, Type type, unsigned bits,
+                     bool nonNegative, DataFlowSolver &solver,
+                     sym::Store &store) {
+  if (!isModulo(op.getKind()))
+    return std::nullopt;
+  if (op.getType() != type)
+    return std::nullopt;
+  if (op.getLhs() != loop.getInductionVar())
+    return std::nullopt;
+  std::optional<uint64_t> divisor =
+      getModuloDivisor(op.getRhs(), bits, op.getKind());
+  if (!divisor || *divisor == 1)
+    return std::nullopt;
+  if (llvm::isPowerOf2_64(*divisor))
+    return std::nullopt;
+  if (!isRecurrenceLegal(loop, op.getKind(), nonNegative, solver, store))
+    return std::nullopt;
+  return divisor;
+}
+
+static void collectBaseModulo(BinaryOp op, scf::ForOp loop, Type type,
+                              unsigned bits, uint64_t step, bool nonNegative,
+                              DataFlowSolver &solver, sym::Store &store,
+                              SmallVectorImpl<ModuloRecurrence> &recurrences) {
+  std::optional<uint64_t> divisor =
+      getBaseModuloDivisor(op, loop, type, bits, nonNegative, solver, store);
+  if (!divisor)
+    return;
+  ModuloRecurrence *recurrence =
+      findModuloRecurrence(recurrences, op.getKind(), *divisor);
+  if (!recurrence) {
+    recurrences.push_back(ModuloRecurrence{/*baseOps=*/{}, /*derivedOps=*/{},
+                                           *divisor, step % *divisor,
+                                           op.getKind()});
+    recurrence = &recurrences.back();
+  }
+  recurrence->baseOps.push_back(op);
+}
+
+static ModuloRecurrence *
+findDerivedModuloRecurrence(BinaryOp op, Type type, unsigned bits,
+                            SmallVectorImpl<ModuloRecurrence> &recurrences) {
+  if (!isModulo(op.getKind()) || op.getType() != type)
+    return nullptr;
+  std::optional<uint64_t> divisor =
+      getModuloDivisor(op.getRhs(), bits, op.getKind());
+  if (!divisor)
+    return nullptr;
+  ModuloRecurrence *recurrence =
+      findModuloRecurrence(recurrences, op.getKind(), *divisor);
+  if (!recurrence || llvm::is_contained(recurrence->baseOps, op))
+    return nullptr;
+  return recurrence;
+}
+
+static void
+collectDerivedModulo(BinaryOp op, scf::ForOp loop, Type type, unsigned bits,
+                     bool nonNegative,
+                     SmallVectorImpl<ModuloRecurrence> &recurrences) {
+  ModuloRecurrence *recurrence =
+      findDerivedModuloRecurrence(op, type, bits, recurrences);
+  if (!recurrence)
+    return;
+  std::optional<uint64_t> increment = getDerivedModuloIncrement(
+      op, *recurrence, loop.getInductionVar(), nonNegative);
+  if (increment)
+    recurrence->derivedOps.push_back(DerivedModulo{op, *increment});
+}
+
+static SmallVector<ModuloRecurrence>
+collectModuloRecurrences(scf::ForOp loop, DataFlowSolver &solver,
+                         sym::Store &store) {
+  SmallVector<ModuloRecurrence> recurrences;
+  Type type = loop.getInductionVar().getType();
+  if (!isa<IndexType, IntegerType>(type) || elementBits(type) > 64)
+    return recurrences;
+
+  unsigned bits = elementBits(type);
+  std::optional<uint64_t> step = getPositiveConstant(loop.getStep(), bits);
+  if (!step)
+    return recurrences;
+  bool nonNegative = isProvenNonNegative(solver, store, loop.getLowerBound());
+
+  SmallVector<BinaryOp> ops;
+  loop.getBody()->walk([&](BinaryOp op) { ops.push_back(op); });
+  for (BinaryOp op : ops)
+    collectBaseModulo(op, loop, type, bits, *step, nonNegative, solver, store,
+                      recurrences);
+
+  if (recurrences.empty())
+    return recurrences;
+  for (BinaryOp op : ops)
+    collectDerivedModulo(op, loop, type, bits, nonNegative, recurrences);
+  return recurrences;
+}
+
+static Value createModuloIncrement(OpBuilder &builder, Location loc, Type type,
+                                   Value residue, BinaryKind kind,
+                                   uint64_t divisor, uint64_t increment) {
+  if (increment == 0)
+    return residue;
+  Value threshold = createConstantLike(builder, loc, type, divisor - increment);
+  arith::CmpIPredicate predicate = kind == BinaryKind::RemUI
+                                       ? arith::CmpIPredicate::uge
+                                       : arith::CmpIPredicate::sge;
+  Value wrap = createCompare(builder, loc, predicate, residue, threshold, type);
+  Value wrapped = createSub(builder, loc, type, residue, threshold);
+  Value advanced = createAdd(builder, loc, type, residue,
+                             createConstantLike(builder, loc, type, increment));
+  return createSelect(builder, loc, type, wrap, wrapped, advanced);
+}
+
+static LogicalResult
+rewriteModuloRecurrences(IRRewriter &rewriter, scf::ForOp loop,
+                         ArrayRef<ModuloRecurrence> recurrences,
+                         sym::Store &store) {
+  Type type = loop.getInductionVar().getType();
+  rewriter.setInsertionPoint(loop);
+  SmallVector<Value> initialResidues;
+  for (const ModuloRecurrence &recurrence : recurrences) {
+    Value divisor =
+        createConstantLike(rewriter, loop.getLoc(), type, recurrence.divisor);
+    initialResidues.push_back(createBinary(rewriter, loop.getLoc(), type,
+                                           recurrence.kind,
+                                           loop.getLowerBound(), divisor));
+  }
+
+  NewYieldValuesFn yieldValues =
+      [&](OpBuilder &builder, Location loc,
+          ArrayRef<BlockArgument> newArgs) -> SmallVector<Value> {
+    SmallVector<Value> values;
+    for (auto [recurrence, residue] : llvm::zip(recurrences, newArgs))
+      values.push_back(
+          createModuloIncrement(builder, loc, type, residue, recurrence.kind,
+                                recurrence.divisor, recurrence.step));
+    return values;
+  };
+  FailureOr<LoopLikeOpInterface> replacement = loop.replaceWithAdditionalYields(
+      rewriter, initialResidues, /*replaceInitOperandUsesInLoop=*/false,
+      yieldValues);
+  if (failed(replacement))
+    return failure();
+
+  scf::ForOp newLoop = cast<scf::ForOp>(replacement->getOperation());
+  ArrayRef<BlockArgument> residues =
+      newLoop.getBody()->getArguments().take_back(recurrences.size());
+  for (auto [recurrence, residue] : llvm::zip(recurrences, residues)) {
+    Value boundedResidue = residue;
+    if (recurrence.divisor - 1 <=
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      FailureOr<sym::PredHandle> range = sym::rangeAssumption(
+          store, "r", 0, static_cast<int64_t>(recurrence.divisor - 1));
+      if (failed(range))
+        return failure();
+      rewriter.setInsertionPointToStart(newLoop.getBody());
+      std::array<Attribute, 1> assumptions{
+          PredAttr::get(rewriter.getContext(), *range)};
+      boundedResidue = AssumeOp::create(rewriter, loop.getLoc(), type, residue,
+                                        rewriter.getStringAttr("r"),
+                                        rewriter.getArrayAttr(assumptions))
+                           .getResult();
+    }
+    for (BinaryOp op : recurrence.baseOps)
+      rewriter.replaceOp(op, boundedResidue);
+    for (const DerivedModulo &derived : recurrence.derivedOps) {
+      rewriter.setInsertionPoint(derived.op);
+      Value replacement = createModuloIncrement(
+          rewriter, derived.op->getLoc(), type, boundedResidue, recurrence.kind,
+          recurrence.divisor, derived.increment);
+      rewriter.replaceOp(derived.op, replacement);
+    }
+  }
+  return success();
+}
+
+static LogicalResult strengthReduceModuloRecurrences(Operation *root,
+                                                     IRRewriter &rewriter,
+                                                     DataFlowSolver &solver,
+                                                     sym::Store &store) {
+  SmallVector<scf::ForOp> loops;
+  root->walk([&](scf::ForOp loop) { loops.push_back(loop); });
+  for (scf::ForOp loop : llvm::reverse(loops)) {
+    if (!loop->getBlock())
+      continue;
+    SmallVector<ModuloRecurrence> recurrences =
+        collectModuloRecurrences(loop, solver, store);
+    if (recurrences.empty())
+      continue;
+    if (failed(rewriteModuloRecurrences(rewriter, loop, recurrences, store)))
+      return failure();
+  }
+  return success();
+}
+
 static Value expandDivRem(IRRewriter &rewriter, BinaryOp op,
                           DataFlowSolver &solver, sym::Store &store) {
   Type type = op.getResult().getType();
@@ -1018,6 +1338,27 @@ static Value expandDivRem(IRRewriter &rewriter, BinaryOp op,
     return result.quotient;
   return result.remainder;
 }
+
+class WaveStrengthReduceModuloPass
+    : public wave::impl::WaveStrengthReduceModuloBase<
+          WaveStrengthReduceModuloPass> {
+public:
+  void runOnOperation() override {
+    Operation *root = getOperation();
+    DataFlowSolver solver;
+    solver.load<dataflow::IntegerRangeAnalysis>();
+    if (failed(solver.initializeAndRun(root))) {
+      root->emitError("IntegerRangeAnalysis failed for modulo recurrence pass");
+      return signalPassFailure();
+    }
+
+    sym::Store &store =
+        root->getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
+    IRRewriter rewriter(root->getContext());
+    if (failed(strengthReduceModuloRecurrences(root, rewriter, solver, store)))
+      return signalPassFailure();
+  }
+};
 
 class WaveExpandIntegerDivRemPass
     : public wave::impl::WaveExpandIntegerDivRemBase<

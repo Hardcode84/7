@@ -1,4 +1,5 @@
-// RUN: wave-opt --split-input-file --wave-expand-integer-div-rem --canonicalize --cse %s | FileCheck %s
+// RUN: wave-opt --split-input-file --wave-strength-reduce-modulo \
+// RUN:   --wave-expand-integer-div-rem --canonicalize --cse %s | FileCheck %s
 
 // CHECK-LABEL: func.func @dynamic_unsigned_i32
 // CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
@@ -285,10 +286,17 @@ func.func @unsigned_dynamic_pow2_rem_simd(%x: !wave.simd<i32, 32>, %d: i32)
 // -----
 
 // CHECK-LABEL: func.func @signed_loop_index_rem3_nonnegative
-// CHECK: scf.for [[IV:%[^ ]+]] =
-// CHECK-NOT: arith.cmpi slt
-// CHECK: wave.binary subi [[IV]],
+// CHECK: [[LOOP:%.*]]:2 = scf.for [[IV:%[^ ]+]] =
+// CHECK-SAME: iter_args([[ACC:%.*]] = {{%.*}}, [[RESIDUE:%.*]] = {{%.*}})
+// CHECK: [[BOUNDED:%.*]] = wave.assume [[RESIDUE]] as "r"
+// CHECK-SAME: #wave.pred<"r >= 0 & -2 + r <= 0">
+// CHECK: [[NEXT:%.*]] = arith.addi [[ACC]], [[BOUNDED]]
+// CHECK: [[WRAP:%.*]] = arith.cmpi sge, [[RESIDUE]],
+// CHECK: [[NEXT_RESIDUE:%.*]] = wave.select [[WRAP]],
+// CHECK: scf.yield [[NEXT]], [[NEXT_RESIDUE]]
+// CHECK-NOT: wave.binary mulhui
 // CHECK-NOT: remsi
+// CHECK: return [[LOOP]]#0
 func.func @signed_loop_index_rem3_nonnegative(%ub: index) -> index {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -299,6 +307,92 @@ func.func @signed_loop_index_rem3_nonnegative(%ub: index) -> index {
     scf.yield %next : index
   }
   return %sum : index
+}
+
+// -----
+
+// CHECK-LABEL: func.func @unsigned_loop_i32_rem5_nonzero_lower
+// CHECK: [[INIT:%.*]] = wave.constant 2 : i32
+// CHECK: [[LOOP:%.*]]:2 = scf.for unsigned [[IV:%[^ ]+]] =
+// CHECK-SAME: iter_args([[ACC:%.*]] = {{%.*}}, [[RESIDUE:%.*]] = [[INIT]])
+// CHECK: [[BOUNDED:%.*]] = wave.assume [[RESIDUE]] as "r"
+// CHECK-SAME: #wave.pred<"r >= 0 & -4 + r <= 0">
+// CHECK: [[DERIVED_WRAP:%.*]] = arith.cmpi uge, [[BOUNDED]],
+// CHECK: [[DERIVED:%.*]] = wave.select [[DERIVED_WRAP]],
+// CHECK: [[NEXT:%.*]] = arith.addi {{%.*}}, [[DERIVED]]
+// CHECK: [[CARRY_WRAP:%.*]] = arith.cmpi uge, [[RESIDUE]],
+// CHECK: [[NEXT_RESIDUE:%.*]] = wave.select [[CARRY_WRAP]],
+// CHECK: scf.yield [[NEXT]], [[NEXT_RESIDUE]]
+// CHECK-NOT: wave.binary mulhui
+// CHECK-NOT: remui
+// CHECK: return [[LOOP]]#0
+func.func @unsigned_loop_i32_rem5_nonzero_lower(%ub: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c5 = arith.constant 5 : i32
+  %c7 = arith.constant 7 : i32
+  %sum = scf.for unsigned %i = %c7 to %ub step %c1
+      iter_args(%acc = %c0) -> i32 : i32 {
+    %base = wave.binary remui %i, %c5 : i32, i32 -> i32
+    %shifted = wave.binary addi %i, %c2 overflow<nuw> : i32, i32 -> i32
+    %derived = wave.binary remui %shifted, %c5 : i32, i32 -> i32
+    %next = arith.addi %acc, %derived : i32
+    scf.yield %next : i32
+  }
+  return %sum : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @unsigned_loop_i32_rem7_step2_nonzero_lower
+// CHECK: [[INIT:%.*]] = arith.constant 4 : i32
+// CHECK: [[LOOP:%.*]]:2 = scf.for unsigned [[IV:%[^ ]+]] =
+// CHECK-SAME: iter_args([[ACC:%.*]] = {{%.*}}, [[RESIDUE:%.*]] = [[INIT]])
+// CHECK: [[BOUNDED:%.*]] = wave.assume [[RESIDUE]] as "r"
+// CHECK-SAME: #wave.pred<"r >= 0 & -6 + r <= 0">
+// CHECK: [[NEXT:%.*]] = arith.addi [[ACC]], [[BOUNDED]]
+// CHECK: [[WRAP:%.*]] = arith.cmpi uge, [[RESIDUE]],
+// CHECK: [[NEXT_RESIDUE:%.*]] = wave.select [[WRAP]],
+// CHECK: scf.yield [[NEXT]], [[NEXT_RESIDUE]]
+// CHECK-NOT: wave.binary mulhui
+// CHECK-NOT: remui
+// CHECK: return [[LOOP]]#0
+func.func @unsigned_loop_i32_rem7_step2_nonzero_lower(%ub: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c2 = arith.constant 2 : i32
+  %c4 = arith.constant 4 : i32
+  %c7 = arith.constant 7 : i32
+  %sum = scf.for unsigned %i = %c4 to %ub step %c2
+      iter_args(%acc = %c0) -> i32 : i32 {
+    %residue = wave.binary remui %i, %c7 : i32, i32 -> i32
+    %next = arith.addi %acc, %residue : i32
+    scf.yield %next : i32
+  }
+  return %sum : i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @unsigned_remainder_signed_loop_crosses_zero
+// CHECK: [[LOOP:%.*]] = scf.for [[IV:%[^ ]+]] =
+// CHECK: wave.binary andi [[IV]],
+// CHECK: wave.binary muli
+// CHECK-NOT: remui
+// CHECK: return [[LOOP]]
+func.func @unsigned_remainder_signed_loop_crosses_zero() -> i32 {
+  %c_minus2 = arith.constant -2 : i32
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c3 = arith.constant 3 : i32
+  %sum = scf.for %i = %c_minus2 to %c2 step %c1
+      iter_args(%acc = %c0) -> i32 : i32 {
+    %residue = wave.binary remui %i, %c3 : i32, i32 -> i32
+    %next = arith.addi %acc, %residue : i32
+    scf.yield %next : i32
+  }
+  return %sum : i32
 }
 
 // -----
@@ -327,10 +421,17 @@ func.func @signed_loop_i32_index_cast_rem3_nonnegative(%trip: i32) -> i32 {
 // -----
 
 // CHECK-LABEL: func.func @signed_unsigned_loop_i32_rem3_bounded_nonnegative
-// CHECK: scf.for unsigned [[IV:%[^ ]+]] =
-// CHECK-NOT: arith.cmpi slt
-// CHECK: wave.binary mulhui
+// CHECK: [[LOOP:%.*]]:2 = scf.for unsigned [[IV:%[^ ]+]] =
+// CHECK-SAME: iter_args([[ACC:%.*]] = {{%.*}}, [[RESIDUE:%.*]] = {{%.*}})
+// CHECK: [[BOUNDED:%.*]] = wave.assume [[RESIDUE]] as "r"
+// CHECK-SAME: #wave.pred<"r >= 0 & -2 + r <= 0">
+// CHECK: [[NEXT:%.*]] = arith.addi [[ACC]], [[BOUNDED]]
+// CHECK: [[WRAP:%.*]] = arith.cmpi sge, [[RESIDUE]],
+// CHECK: [[NEXT_RESIDUE:%.*]] = wave.select [[WRAP]],
+// CHECK: scf.yield [[NEXT]], [[NEXT_RESIDUE]]
+// CHECK-NOT: wave.binary mulhui
 // CHECK-NOT: remsi
+// CHECK: return [[LOOP]]#0
 func.func @signed_unsigned_loop_i32_rem3_bounded_nonnegative() -> i32 {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32

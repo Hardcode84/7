@@ -20,7 +20,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rmeta = transform.apply_registered_pass "canonicalize" to %rm
         : (!transform.any_op) -> !transform.any_op
-    %rnorm = transform.apply_registered_pass "wave-normalize-pointer-offsets" to %rmeta
+    %rmod = transform.apply_registered_pass "wave-strength-reduce-modulo" to %rmeta
+        : (!transform.any_op) -> !transform.any_op
+    %rnorm = transform.apply_registered_pass "wave-normalize-pointer-offsets" to %rmod
         : (!transform.any_op) -> !transform.any_op
     %rgen0 = transform.apply_registered_pass "wave-generate-index-exprs" to %rnorm
         : (!transform.any_op) -> !transform.any_op

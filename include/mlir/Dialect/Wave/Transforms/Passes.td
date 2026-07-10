@@ -219,6 +219,19 @@ def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
   ];
 }
 
+def WaveStrengthReduceModulo : Pass<"wave-strength-reduce-modulo"> {
+  let summary = "Strength-reduce constant-modulo SCF inductions";
+  let description = [{
+    Carries residues for SCF induction variables modulo positive constants.
+    Constant-offset residues derive from the same carry.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "scf::SCFDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveExpandIntegerDivRem : Pass<"wave-expand-integer-div-rem"> {
   let summary = "Expand Wave integer div/rem into primitive integer ops";
   let description = [{
