@@ -221,10 +221,18 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK: [[DST:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[INC:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[CMP:%.*]] = waveamdmachine.s_cmp_lt_i32 [[DST]], [[INC]]
+    // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+    // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // CHECK: [[SAVED:%.*]] = waveamdmachine.s_cselect_b32 [[CMP]], [[ONE]], [[ZERO]]
+    // CHECK: [[SUM:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[DST]], [[INC]]
     // CHECK: [[DYN_SHIFT:%.*]] = waveamdmachine.imm 256
-    // CHECK: [[DMA_M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[DST]], [[DYN_SHIFT]]
-    // CHECK-NOT: waveamdmachine.s_mov_m0 [[DST]]
+    // CHECK: [[DMA_M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[SUM]], [[DYN_SHIFT]]
+    // CHECK: [[RELOAD_ZERO:%.*]] = waveamdmachine.imm 0
+    // CHECK: [[RELOADED:%.*]] = waveamdmachine.s_cmp_lg_u32 [[SAVED]], [[RELOAD_ZERO]]
     // CHECK: waveamdmachine.buffer_load_lds_b32 {{.*}}, {{.*}}, {{.*}}, [[DMA_M0]]
+    // CHECK: waveamdmachine.s_cbranch_scc1 [[RELOADED]]
     func.func @lds_relief_shifts_dynamic_dma_m0_once()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     wave.dynamic_lds_size = 1024 : i64,
@@ -233,6 +241,7 @@ module attributes {transform.with_named_sequence} {
       %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
       %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
       %dst = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %inc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
       %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
@@ -251,13 +260,19 @@ module attributes {transform.with_named_sequence} {
       %sum = waveamdmachine.v_add_u32 %a, %b
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
             -> !waveamdmachine.reg<vgpr, 1>
-      %m0 = waveamdmachine.s_mov_m0 %dst
-          : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+      %m0, %m0_scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+      %cmp = waveamdmachine.s_cmp_lt_i32 %dst, %inc
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<scc, 1>
       %dma = waveamdmachine.buffer_load_lds_b32 %spill, %desc, %zero, %m0
           after %tok3
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
              !waveamdmachine.imm, !waveamdmachine.m0,
              !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.s_cbranch_scc1 %cmp
+          : !waveamdmachine.reg<scc, 1>, "taken"
       %use = waveamdmachine.v_add_u32 %spill, %sum
           : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
             -> !waveamdmachine.reg<vgpr, 1>

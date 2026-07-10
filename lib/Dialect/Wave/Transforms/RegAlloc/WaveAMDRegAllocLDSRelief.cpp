@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocMemoryReliefUtils.h"
 #include "WaveAMDRegAllocTransformLoop.h"
@@ -162,7 +163,7 @@ struct LDSMemoryReliefTraits {
   }
 };
 
-static Value createLDSImm(OpBuilder &builder, Location loc, int64_t value) {
+static Value createImm(OpBuilder &builder, Location loc, int64_t value) {
   return waveamdmachine::ImmOp::create(
       builder, loc, waveamdmachine::ImmType::get(builder.getContext()),
       static_cast<uint64_t>(value));
@@ -330,14 +331,14 @@ static LDSAddTidContext materializeLDSAddTidContext(OpBuilder &builder,
 
   waveamdmachine::SLshlB32Op waveOffset = waveamdmachine::SLshlB32Op::create(
       builder, loc, getVirtualSGPR1(ctx), getSCCType(ctx),
-      firstLane.getResult(), createLDSImm(builder, loc, llvm::Log2_32(4)));
+      firstLane.getResult(), createImm(builder, loc, llvm::Log2_32(4)));
   markRegAllocTemp(waveOffset, builder);
 
   Value waveBase = waveOffset.getResult();
   if (ldsBaseBytes != 0) {
     waveamdmachine::SAddI32Op fullBase = waveamdmachine::SAddI32Op::create(
         builder, loc, getVirtualSGPR1(ctx), getSCCType(ctx), waveBase,
-        createLDSImm(builder, loc, ldsBaseBytes));
+        createImm(builder, loc, ldsBaseBytes));
     markRegAllocTemp(fullBase, builder);
     waveBase = fullBase.getResult();
     markLDSAddTidBase(fullBase, builder, ldsBaseBytes);
@@ -349,7 +350,7 @@ static LDSAddTidContext materializeLDSAddTidContext(OpBuilder &builder,
 
 static Value createLDSByteImm(OpBuilder &builder, Location loc,
                               unsigned bytes) {
-  return createLDSImm(builder, loc, bytes);
+  return createImm(builder, loc, bytes);
 }
 
 static Value addVGPRByteOffset(OpBuilder &builder, Location loc, Value value,
@@ -445,6 +446,83 @@ static FailureOr<Value> shiftM0Value(OpBuilder &builder, Location loc, Value m0,
   return failure();
 }
 
+static bool isSCCValue(Value value) {
+  return wave::getHardwareResourceForValue(value) ==
+         wave::HardwareResourceKind::SCC;
+}
+
+static bool isDefinedInside(Operation *owner, Value value) {
+  if (Operation *def = value.getDefiningOp())
+    return owner->isAncestor(def);
+  Block *block = cast<BlockArgument>(value).getOwner();
+  Operation *parent = block->getParentOp();
+  return parent == owner || (parent && owner->isAncestor(parent));
+}
+
+static Value findNestedSCCCapture(Operation *owner, Region &region) {
+  for (Block &block : region) {
+    for (Operation &nested : block) {
+      for (Value operand : nested.getOperands())
+        if (isSCCValue(operand) && !isDefinedInside(owner, operand))
+          return operand;
+      for (Region &child : nested.getRegions())
+        if (Value capture = findNestedSCCCapture(owner, child))
+          return capture;
+    }
+  }
+  return {};
+}
+
+static Value findSCCRead(Operation *op) {
+  for (Value operand : op->getOperands())
+    if (isSCCValue(operand))
+      return operand;
+  for (Region &region : op->getRegions())
+    if (Value capture = findNestedSCCCapture(op, region))
+      return capture;
+  return {};
+}
+
+static bool writesSCC(Operation *op) {
+  if (llvm::is_contained(wave::getHardwareResourceEffects(op).writes,
+                         wave::HardwareResourceKind::SCC))
+    return true;
+  return op
+      ->walk([&](Operation *nested) {
+        if (nested != op &&
+            llvm::is_contained(wave::getHardwareResourceEffects(nested).writes,
+                               wave::HardwareResourceKind::SCC))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+static Value findLiveSCCAt(Operation *point) {
+  for (Operation *op = point; op; op = op->getNextNode()) {
+    if (Value read = findSCCRead(op))
+      return read;
+    if (writesSCC(op))
+      return {};
+  }
+  return {};
+}
+
+static Operation *getAncestorInBlock(Operation *op, Block *block) {
+  while (op && op->getBlock() != block)
+    op = op->getParentOp();
+  return op;
+}
+
+static void replaceSCCUsesAtOrAfter(Value oldSCC, Value newSCC,
+                                    Operation *point) {
+  for (OpOperand &use : llvm::make_early_inc_range(oldSCC.getUses())) {
+    Operation *owner = getAncestorInBlock(use.getOwner(), point->getBlock());
+    if (owner && (owner == point || point->isBeforeInBlock(owner)))
+      use.set(newSCC);
+  }
+}
+
 static bool allResultsUnused(Operation *op) {
   return llvm::all_of(op->getResults(),
                       [](Value result) { return result.use_empty(); });
@@ -470,11 +548,29 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
     if (!isa<waveamdmachine::M0Type>(operand.get().getType()))
       continue;
     builder.setInsertionPoint(op);
+    Value liveSCC = findLiveSCCAt(op);
+    Value savedSCC;
+    if (liveSCC) {
+      Value one = createImm(builder, op->getLoc(), 1);
+      Value zero = createImm(builder, op->getLoc(), 0);
+      savedSCC = waveamdmachine::SCSelectB32Op::create(
+                     builder, op->getLoc(),
+                     getVirtualSGPR1(builder.getContext()), liveSCC, one, zero)
+                     .getResult();
+    }
     Value oldM0 = operand.get();
     FailureOr<Value> shifted =
         shiftM0Value(builder, op->getLoc(), oldM0, bytes);
     if (failed(shifted))
       return op->emitError("cannot shift dynamic LDS M0 address");
+    if (liveSCC) {
+      Value zero = createImm(builder, op->getLoc(), 0);
+      Value reloaded = waveamdmachine::SCmpLgU32Op::create(
+                           builder, op->getLoc(),
+                           getSCCType(builder.getContext()), savedSCC, zero)
+                           .getResult();
+      replaceSCCUsesAtOrAfter(liveSCC, reloaded, op);
+    }
     operand.set(*shifted);
     eraseDeadAddressOp(oldM0.getDefiningOp());
     return success();
