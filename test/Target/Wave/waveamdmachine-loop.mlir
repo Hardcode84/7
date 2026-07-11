@@ -124,6 +124,65 @@ func.func @loop_i64_carry_init_distinct_from_invariant_use(%step: i64)
   return
 }
 
+// SIMD splat inits need VGPR carries: backedges may become lane-varying.
+// SELECT-LABEL: func.func @loop_simd_splat_carries
+// SELECT: %[[SCALAR_INIT:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} : ({{.*}}) -> !waveamdmachine.reg<vgpr, 1>
+// SELECT: %[[VECTOR_INIT:.+]] = waveamdmachine.v_mov_b32_tuple {{.*}} : ({{.*}}) -> !waveamdmachine.reg<vgpr, 2>
+// SELECT: waveamdmachine.uniform_loop carries({{.*}}, %[[SCALAR_INIT]], %[[VECTOR_INIT]]
+// SELECT: ^bb0({{.*}}, %[[SCALAR_CARRY:.+]]: !waveamdmachine.reg<vgpr, 1>, %[[VECTOR_CARRY:.+]]: !waveamdmachine.reg<vgpr, 2>):
+// SELECT: waveamdmachine.v_add_u32 %[[SCALAR_CARRY]]
+func.func @loop_simd_splat_carries(
+    %scalar_init: i32, %vector_init: vector<4xf16>) attributes {wave.kernel} {
+  %lo = arith.constant 0 : i32
+  %hi = arith.constant 4 : i32
+  %one = arith.constant 1 : i32
+  %scalar_step = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %scalar_splat = wave.splat %scalar_init : i32 -> !wave.simd<i32, 32>
+  %vector_splat = wave.splat %vector_init
+      : vector<4xf16> -> !wave.simd<vector<4xf16>, 32>
+  %results:2 = scf.for %i = %lo to %hi step %one
+      iter_args(%scalar = %scalar_splat, %vector = %vector_splat)
+      -> (!wave.simd<i32, 32>, !wave.simd<vector<4xf16>, 32>) : i32 {
+    %next_scalar = wave.binary addi %scalar, %scalar_step
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    scf.yield %next_scalar, %vector
+        : !wave.simd<i32, 32>, !wave.simd<vector<4xf16>, 32>
+  }
+  return
+}
+
+// Separately extracted tuple elements alias the same incoming register, but
+// loop slots may diverge and therefore need independent writable storage.
+// REGALLOC-LABEL: func.func @loop_aliased_extract_carries
+// REGALLOC: %[[EXTRACT0:.+]]:2 = waveamdmachine.tuple_to_elements
+// REGALLOC-NEXT: %[[EXTRACT1:.+]]:2 = waveamdmachine.tuple_to_elements
+// REGALLOC: %[[INIT0:.+]] = waveamdmachine.copy_tuple %[[EXTRACT0]]#0
+// REGALLOC-NEXT: %[[INIT1:.+]] = waveamdmachine.copy_tuple %[[EXTRACT1]]#0
+// REGALLOC-NEXT: waveamdmachine.uniform_loop carries({{.*}}, %[[INIT0]], %[[INIT1]]
+func.func @loop_aliased_extract_carries() attributes {wave.kernel} {
+  %lo = arith.constant 0 : i32
+  %hi = arith.constant 4 : i32
+  %one = arith.constant 1 : i32
+  %step = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %vector = wave.pack %step, %step
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+        -> !wave.simd<vector<2xi32>, 32>
+  %init0 = wave.extract %vector[0]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %init1 = wave.extract %vector[0]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %results:2 = scf.for %i = %lo to %hi step %one
+      iter_args(%carry0 = %init0, %carry1 = %init1)
+      -> (!wave.simd<i32, 32>, !wave.simd<i32, 32>) : i32 {
+    %next0 = wave.binary addi %carry0, %step
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %next1 = wave.binary subi %carry1, %step
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    scf.yield %next0, %next1 : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+  }
+  return
+}
+
 // Index upper bounds may materialize as SGPR2 values. The IV must widen too.
 // SELECT-LABEL: func.func @loop_index_expr_upper_sgpr2
 // SELECT: %[[HI:.+]] = waveamdmachine.arg {{.*}} : !waveamdmachine.reg<sgpr, 2>

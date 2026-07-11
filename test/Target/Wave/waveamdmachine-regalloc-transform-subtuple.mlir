@@ -127,6 +127,77 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %loop : !waveamdmachine.reg<vgpr, 2>
   }
 
+  // A loop init that is also read as an invariant in the body needs separate
+  // writable carry storage.
+  // PREP-LABEL: func.func @tuple_loop_init_with_invariant_use(
+  // PREP: [[VIEW:%.*]] = waveamdmachine.tuple_from_elements
+  // PREP: [[INIT:%.*]] = waveamdmachine.copy_tuple [[VIEW]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[INIT]]
+  // PREP: waveamdmachine.v_mov_b32_tuple [[VIEW]]
+  // SCAN-LABEL: func.func @tuple_loop_init_with_invariant_use(
+  // SCAN-SAME: [[SRC:%[^:]+]]: !waveamdmachine.reg<vgpr, 2, [[#BASE:]]>
+  // SCAN: [[VIEW:%.*]] = waveamdmachine.tuple_from_elements
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE]]>
+  // SCAN: [[INIT:%.*]] = waveamdmachine.copy_tuple [[VIEW]]
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE+2]]>
+  // SCAN: waveamdmachine.uniform_loop
+  // SCAN-SAME: carries([[INIT]] : !waveamdmachine.reg<vgpr, 2, [[#BASE+2]]>)
+  // SCAN: ^bb0([[CARRY:%[^:]+]]: !waveamdmachine.reg<vgpr, 2, [[#BASE+2]]>):
+  // SCAN: waveamdmachine.v_mov_b32_tuple [[VIEW]]
+  // SCAN: waveamdmachine.v_mov_b32_tuple [[CARRY]]
+  func.func @tuple_loop_init_with_invariant_use(
+      %src: !waveamdmachine.reg<vgpr, 2>,
+      %cond: !waveamdmachine.reg<scc, 1>) -> !waveamdmachine.reg<vgpr, 2> {
+    %parts:2 = waveamdmachine.tuple_to_elements %src
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>)
+    %view = waveamdmachine.tuple_from_elements %parts#0, %parts#1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%view : !waveamdmachine.reg<vgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+      %invariant = waveamdmachine.v_mov_b32_tuple %view {registers = 2 : i64}
+          : (!waveamdmachine.reg<vgpr, 2>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      %next = waveamdmachine.v_mov_b32_tuple %carry {registers = 2 : i64}
+          : (!waveamdmachine.reg<vgpr, 2>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%next : !waveamdmachine.reg<vgpr, 2>)
+    } -> !waveamdmachine.reg<vgpr, 2>
+    return %loop : !waveamdmachine.reg<vgpr, 2>
+  }
+
+  // Forwarding an init unchanged is not an invariant body read.
+  // PREP-LABEL: func.func @loop_init_passthrough(
+  // PREP-SAME: [[SRC:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: waveamdmachine.continue_if
+  // PREP-SAME: carries([[SRC]]
+  // PREP: return
+  // SCAN-LABEL: func.func @loop_init_passthrough(
+  // SCAN-NOT: waveamdmachine.copy_tuple
+  // SCAN: return
+  func.func @loop_init_passthrough(
+      %src: !waveamdmachine.reg<vgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>) -> !waveamdmachine.reg<vgpr, 1> {
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%src : !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 1>):
+      %use = waveamdmachine.v_mov_b32_tuple %carry {registers = 1 : i64}
+          : (!waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%src : !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>
+    return %loop : !waveamdmachine.reg<vgpr, 1>
+  }
+
   // PREP-LABEL: func.func @loop_clobbering_live_parent_copies(
   // PREP: [[COPY0:%.*]] = waveamdmachine.copy_tuple
   // PREP: [[COPY1:%.*]] = waveamdmachine.copy_tuple

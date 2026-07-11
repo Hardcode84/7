@@ -143,17 +143,106 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
   return emitError(loc, "regalloc transform cannot duplicate register value");
 }
 
-static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
+using LoopInitAliasEdge = std::pair<Value, int64_t>;
+using LoopInitAliasGraph = DenseMap<Value, SmallVector<LoopInitAliasEdge, 4>>;
+
+static void addLoopInitAliasEdge(LoopInitAliasGraph &graph, Value tuple,
+                                 Value element, int64_t offset) {
+  graph[tuple].push_back({element, offset});
+  graph[element].push_back({tuple, -offset});
+}
+
+static LoopInitAliasGraph buildLoopInitAliasGraph(func::FuncOp func) {
+  LoopInitAliasGraph graph;
+  func.walk([&](Operation *op) {
+    auto collect = [&](Value tuple, ValueRange elements) {
+      int64_t offset = 0;
+      for (Value element : elements) {
+        addLoopInitAliasEdge(graph, tuple, element, offset);
+        offset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
+      }
+    };
+    if (auto toElements = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
+      collect(toElements.getTuple(), toElements.getElements());
+    if (auto fromElements = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
+      collect(fromElements.getTuple(), fromElements.getElements());
+    if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op)) {
+      addLoopInitAliasEdge(graph, update.getResult(), update.getBase(), 0);
+      for (auto [value, offset] :
+           llvm::zip_equal(update.getUpdates(), update.getOffsets()))
+        addLoopInitAliasEdge(graph, update.getResult(), value,
+                             cast<IntegerAttr>(offset).getInt());
+    }
+  });
+  return graph;
+}
+
+// Returns rhs' register offset relative to lhs when tuple aliasing constrains
+// both values to the same storage.
+static std::optional<int64_t>
+getLoopInitAliasOffset(const LoopInitAliasGraph &graph, Value lhs, Value rhs) {
+  if (lhs == rhs)
+    return 0;
+  DenseMap<Value, int64_t> offsets;
+  SmallVector<Value> worklist;
+  offsets.try_emplace(lhs, 0);
+  worklist.push_back(lhs);
+  while (!worklist.empty()) {
+    Value value = worklist.pop_back_val();
+    auto edges = graph.find(value);
+    if (edges == graph.end())
+      continue;
+    for (auto [next, delta] : edges->second) {
+      int64_t nextOffset = offsets.lookup(value) + delta;
+      if (next == rhs)
+        return nextOffset;
+      if (offsets.try_emplace(next, nextOffset).second)
+        worklist.push_back(next);
+    }
+  }
+  return std::nullopt;
+}
+
+static bool loopInitStorageOverlaps(const LoopInitAliasGraph &graph, Value lhs,
+                                    waveamdmachine::RegType lhsType,
+                                    Value rhs) {
+  std::optional<waveamdmachine::RegType> rhsType =
+      wave::getRegAllocTransformTrackedRegType(rhs);
+  if (!rhsType || lhsType.getRegClass() != rhsType->getRegClass())
+    return false;
+  std::optional<int64_t> rhsOffset = getLoopInitAliasOffset(graph, lhs, rhs);
+  if (!rhsOffset)
+    return false;
+  int64_t lhsEnd = lhsType.getWidth();
+  int64_t rhsEnd = *rhsOffset + rhsType->getWidth();
+  return std::max<int64_t>(0, *rhsOffset) < std::min(lhsEnd, rhsEnd);
+}
+
+static LogicalResult splitOverlappingLoopInits(func::FuncOp func) {
   SmallVector<waveamdmachine::UniformLoopOp> loops;
   func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
+  LoopInitAliasGraph aliasGraph = buildLoopInitAliasGraph(func);
   OpBuilder builder(func.getContext());
   for (waveamdmachine::UniformLoopOp loop : loops) {
-    DenseSet<Value> seen;
+    SmallVector<bool> needsCopy(loop.getInits().size(), false);
+    for (auto [lhsIndex, lhs] : llvm::enumerate(loop.getInits())) {
+      std::optional<waveamdmachine::RegType> lhsType =
+          wave::getRegAllocTransformTrackedRegType(lhs);
+      if (!lhsType)
+        continue;
+      for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < loop.getInits().size();
+           ++rhsIndex) {
+        Value rhs = loop.getInits()[rhsIndex];
+        if (!loopInitStorageOverlaps(aliasGraph, lhs, *lhsType, rhs))
+          continue;
+        needsCopy[lhsIndex] = true;
+        needsCopy[rhsIndex] = true;
+      }
+    }
+
     builder.setInsertionPoint(loop);
     for (auto [index, init] : llvm::enumerate(loop.getInits())) {
-      if (!wave::getRegAllocTransformTrackedRegType(init))
-        continue;
-      if (seen.insert(init).second)
+      if (!needsCopy[index])
         continue;
       FailureOr<Value> duplicate =
           duplicateRegValue(builder, loop.getLoc(), init);
@@ -2184,7 +2273,7 @@ static LogicalResult setRegAllocTransformState(func::FuncOp func,
   setMFMAAccumulatorCoalescingFlag(func, builder, coalesceMFMAAccResult);
   if (failed(wave::prepareWaveAMDRegAllocIR(func)))
     return failure();
-  if (failed(splitDuplicateLoopInits(func)))
+  if (failed(splitOverlappingLoopInits(func)))
     return failure();
   RegAllocAliasStateBuilder stateBuilder(func, builder, coalesceMFMAAccResult);
   FailureOr<DictionaryAttr> state = stateBuilder.build();

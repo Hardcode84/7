@@ -268,6 +268,18 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   return false;
 }
 
+static bool hasInvariantBodyRead(Value value,
+                                 waveamdmachine::UniformLoopOp loop) {
+  Operation *terminator = loop.getBody().front().getTerminator();
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (user != loop.getOperation() && user != terminator &&
+        operationIsInside(loop.getOperation(), user))
+      return true;
+  }
+  return false;
+}
+
 static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
   Block *block = loop->getBlock();
   for (OpOperand &use : value.getUses()) {
@@ -319,7 +331,8 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
       bool repeatedInit = !seen.insert(init).second;
       bool localNestedInit = needsLocalNestedLoopInit(loop, init);
       bool rematInit = shouldRematerializeLoopInit(init, loop);
-      if (!repeatedInit && !localNestedInit && !rematInit)
+      bool invariantLoopUse = hasInvariantBodyRead(init, loop);
+      if (!repeatedInit && !localNestedInit && !rematInit && !invariantLoopUse)
         continue;
       Operation *def = init.getDefiningOp();
       FailureOr<Value> dup =

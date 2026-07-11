@@ -705,6 +705,17 @@ static Value materializeWMCarryInit(WaveAMDMachineSelector &S, scf::ForOp op,
     carry = ensureSGPR2(S, op.getLoc(), carry);
   else if (isa<waveamdmachine::ImmType>(carry.getType()))
     carry = S.materializeSGPR1(op.getLoc(), carry);
+  if (isa<SimdType>(initArg.getType())) {
+    waveamdmachine::RegType regType =
+        dyn_cast<waveamdmachine::RegType>(carry.getType());
+    if (regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR) {
+      Type vgprType =
+          getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR,
+                     regType.getWidth());
+      carry = waveamdmachine::VMovB32TupleOp::create(S.builder, op.getLoc(),
+                                                     vgprType, carry);
+    }
+  }
   if (hasNonInitUseInLoopBody(op, initArg))
     return copyDistinctLoopCarry(S, op.getLoc(), carry);
   return carry;
