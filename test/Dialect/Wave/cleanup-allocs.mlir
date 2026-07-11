@@ -45,6 +45,7 @@ func.func @drop_unread_store_keep_dependency() -> !wave.mem.token
 // CHECK-LABEL: func.func @keep_read_through_view
 // CHECK: wave.store
 // CHECK: wave.load
+// CHECK: wave.alloc_release
 func.func @keep_read_through_view() attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
@@ -58,6 +59,8 @@ func.func @keep_read_through_view() attributes {wave.kernel} {
   %value:2 = wave.load %ptr after %tok
       : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
       -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %released = wave.alloc_release %alloc after %value#1
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 

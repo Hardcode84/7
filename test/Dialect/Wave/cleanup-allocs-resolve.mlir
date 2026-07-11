@@ -15,7 +15,9 @@ func.func @dead_alloc_before_resolve() -> !wave.mem.token
   %tok = wave.store %lane -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
       -> !wave.mem.token
+  %released = wave.alloc_release %alloc after %tok
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   // CHECK: [[TOK:%.*]] = wave.token : !wave.mem.token
   // CHECK: return [[TOK]] : !wave.mem.token
-  return %tok : !wave.mem.token
+  return %released : !wave.mem.token
 }

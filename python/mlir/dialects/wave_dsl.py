@@ -1004,6 +1004,10 @@ class FunctionBuilder:
         ty = ptr_type(element_type or i32(), shared_address_space())
         return wave.AllocOp(ty, bytesize=bytesize, align=align).result
 
+    def release_alloc(self, allocation: Value, *, after: Value) -> Value:
+        """End a ``wave.alloc`` lifetime after a memory dependency."""
+        return wave.AllocReleaseOp(mem_token_type(), allocation, after).token
+
     def barrier(self, *dependencies: Value) -> Value:
         """Emit a workgroup-wide barrier sequenced after ``dependencies``."""
         return wave.BarrierOp(mem_token_type(), list(dependencies)).token

@@ -270,11 +270,13 @@ wave.barrier after all store tokens
 parallel wave.load operations after the publish barrier
 wave.pack
 wave.barrier after all load tokens
+wave.alloc_release after the release barrier
 ```
 
 Stores are siblings, not a component-by-component chain. Loads are siblings and
 all depend on the publish barrier. The release barrier consumes all load tokens
-and exposes exchange completion to the generic allocation pipeline.
+and `wave.alloc_release` binds that completion token to the scratch allocation.
+The release result orders accesses to any later allocation sharing its storage.
 
 Scratch lifetime, overlapping offsets, reuse dependencies, and loop-carried
 reuse are general `wave.alloc` concerns. `wave.redistribute` neither changes nor

@@ -782,6 +782,16 @@ func.func @alloc_wrong_address_space() {
 
 // -----
 
+func.func @alloc_release_wrong_address_space(
+    %p: !wave.ptr<#wave.global, i32>, %dependency: !wave.mem.token) {
+  // expected-error @+1 {{allocation pointer must live in the shared address space}}
+  %released = wave.alloc_release %p after %dependency
+      : (!wave.ptr<#wave.global, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @alloc_zero_bytesize() {
   // expected-error @+1 {{bytesize must be positive}}
   %p = wave.alloc() {align = 4 : i64, bytesize = 0 : i64} : !wave.ptr<#wave.shared, i32>

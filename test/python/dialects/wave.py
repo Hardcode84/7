@@ -268,8 +268,10 @@ def test_waveamd_dma_load_lds():
 def test_workgroup_alloc():
     with w.module() as m:
         with m.function("alloc_kernel", [], kernel=True) as f:
-            f.workgroup_alloc(128, 16, w.i8())
+            allocation = f.workgroup_alloc(128, 16, w.i8())
+            f.release_alloc(allocation, after=f.token())
         # CHECK: wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared, i8>
+        # CHECK: wave.alloc_release
         print(m.module)
 
 

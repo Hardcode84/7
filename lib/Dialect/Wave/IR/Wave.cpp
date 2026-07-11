@@ -2886,6 +2886,14 @@ LogicalResult AllocOp::verify() {
   return success();
 }
 
+LogicalResult AllocReleaseOp::verify() {
+  PtrType ptrType = cast<PtrType>(getAllocation().getType());
+  if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
+    return emitOpError(
+        "allocation pointer must live in the shared address space");
+  return success();
+}
+
 LogicalResult PtrAddOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
   auto base = verifyPtrAddBase(getBase().getType(), emit);

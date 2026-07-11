@@ -484,6 +484,24 @@ def Wave_AllocOp : Wave_Op<"alloc"> {
   let hasVerifier = 1;
 }
 
+def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
+  let summary = "end a workgroup allocation lifetime";
+  let description = [{
+    Marks `$allocation` reusable after `$dependency`. The dependency must cover
+    every memory access through the allocation. The result forwards that
+    ordering to accesses of a later allocation that may share the same storage.
+
+    This is a logical lifetime operation. Allocation resolution removes it; it
+    emits no target instruction.
+  }];
+
+  let arguments = (ins Arg<Wave_Ptr, "", [MemFree]>:$allocation,
+                       Wave_MemToken:$dependency);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = "$allocation `after` $dependency attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def Wave_BarrierOp : Wave_Op<"barrier", [MemoryEffects<[MemWrite, MemRead]>]> {
   let summary = "workgroup-wide barrier";
   let description = [{

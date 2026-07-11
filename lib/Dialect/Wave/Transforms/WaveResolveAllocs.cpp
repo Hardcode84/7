@@ -13,13 +13,18 @@
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVERESOLVEALLOCS
@@ -32,19 +37,26 @@ using namespace mlir::wave;
 namespace {
 
 struct AllocInterval {
+  SmallVector<Operation *, 4> accesses;
+  SmallVector<Value, 4> completionTokens;
   AllocOp op;
+  AllocReleaseOp release;
   int64_t bytes = 0;
   int64_t align = 1;
   int64_t offset = 0;
   unsigned start = 0;
   unsigned end = 0;
+  bool hasUntrackedAccess = false;
 };
 
-struct ActiveAllocation {
+struct PlacedAllocation {
   int64_t offset = 0;
   int64_t bytes = 0;
-  unsigned end = 0;
+  unsigned index = 0;
 };
+
+using TokenOriginMap = DenseMap<Value, SmallVector<Value, 2>>;
+using MemoryEffectInstance = SideEffects::EffectInstance<MemoryEffects::Effect>;
 
 static FailureOr<int64_t> alignUp(int64_t value, int64_t align) {
   if (value < 0 || align <= 0)
@@ -87,26 +99,31 @@ static bool appendAlias(DenseMap<Value, SmallVector<unsigned, 1>> &aliases,
   return true;
 }
 
-static void
+static bool
 appendForAliases(scf::ForOp loop, Value value, unsigned index,
                  DenseMap<Value, SmallVector<unsigned, 1>> &aliases,
                  SmallVectorImpl<std::pair<Value, unsigned>> &worklist) {
+  bool forwarded = false;
   for (auto [i, init] : llvm::enumerate(loop.getInitArgs())) {
     if (init != value)
       continue;
+    forwarded = true;
     appendAlias(aliases, loop.getRegionIterArgs()[i], index, worklist);
     appendAlias(aliases, loop.getResult(i), index, worklist);
   }
+  return forwarded;
 }
 
-static void
+static bool
 appendYieldAliases(Operation *yield, Value value, unsigned index,
                    DenseMap<Value, SmallVector<unsigned, 1>> &aliases,
                    SmallVectorImpl<std::pair<Value, unsigned>> &worklist) {
   Operation *parent = yield->getParentOp();
+  bool forwarded = false;
   for (auto [i, operand] : llvm::enumerate(yield->getOperands())) {
     if (operand != value)
       continue;
+    forwarded = true;
     if (auto where = dyn_cast<WhereOp>(parent)) {
       appendAlias(aliases, where.getResult(i), index, worklist);
       continue;
@@ -120,71 +137,469 @@ appendYieldAliases(Operation *yield, Value value, unsigned index,
       appendAlias(aliases, loop.getResult(i), index, worklist);
     }
   }
+  return forwarded;
 }
 
-static void
+static bool
 appendForwardedAliases(Operation *user, Value value, unsigned index,
                        DenseMap<Value, SmallVector<unsigned, 1>> &aliases,
                        SmallVectorImpl<std::pair<Value, unsigned>> &worklist) {
+  bool forwarded = false;
   if (auto view = dyn_cast<ViewLikeOpInterface>(user)) {
-    if (view.getViewSource() == value)
+    if (view.getViewSource() == value) {
+      forwarded = true;
       appendAlias(aliases, view.getViewDest(), index, worklist);
+    }
   }
   if (auto select = dyn_cast<SelectOp>(user)) {
-    if (select.getTrueValue() == value || select.getFalseValue() == value)
+    if (select.getTrueValue() == value || select.getFalseValue() == value) {
+      forwarded = true;
       appendAlias(aliases, select.getResult(), index, worklist);
+    }
   }
   if (auto loop = dyn_cast<scf::ForOp>(user))
-    appendForAliases(loop, value, index, aliases, worklist);
+    forwarded |= appendForAliases(loop, value, index, aliases, worklist);
   if (isa<YieldOp, scf::YieldOp>(user))
-    appendYieldAliases(user, value, index, aliases, worklist);
+    forwarded |= appendYieldAliases(user, value, index, aliases, worklist);
+  return forwarded;
+}
+
+static void appendTokenOrigins(TokenOriginMap &origins, OperandRange sources,
+                               ValueRange targets) {
+  for (auto [index, source] : llvm::enumerate(sources)) {
+    if (index >= targets.size())
+      break;
+    Value target = targets[index];
+    if (!isa<MemTokenType>(source.getType()) ||
+        source.getType() != target.getType())
+      continue;
+    SmallVector<Value, 2> &targetOrigins = origins[target];
+    if (!llvm::is_contained(targetOrigins, source))
+      targetOrigins.push_back(source);
+  }
+}
+
+static TokenOriginMap buildTokenOrigins(func::FuncOp func) {
+  TokenOriginMap origins;
+  func.walk([&](RegionBranchOpInterface branch) {
+    SmallVector<RegionSuccessor> successors;
+    branch.getSuccessorRegions(RegionBranchPoint::parent(), successors);
+    for (RegionSuccessor successor : successors)
+      appendTokenOrigins(origins, branch.getEntrySuccessorOperands(successor),
+                         branch.getSuccessorInputs(successor));
+
+    for (Region &region : branch->getRegions()) {
+      for (Block &block : region) {
+        RegionBranchTerminatorOpInterface terminator =
+            dyn_cast<RegionBranchTerminatorOpInterface>(block.getTerminator());
+        if (!terminator)
+          continue;
+        successors.clear();
+        branch.getSuccessorRegions(RegionBranchPoint(terminator), successors);
+        for (RegionSuccessor successor : successors)
+          appendTokenOrigins(origins,
+                             terminator.getSuccessorOperands(successor),
+                             branch.getSuccessorInputs(successor));
+      }
+    }
+  });
+  return origins;
+}
+
+struct DependencyProof {
+  bool depends = false;
+  bool cyclic = false;
+};
+
+class TokenOrdering {
+public:
+  explicit TokenOrdering(TokenOriginMap origins)
+      : origins(std::move(origins)) {}
+
+  bool dependsOn(Value token, Value target) {
+    DenseSet<Value> active;
+    return prove(token, target, active).depends;
+  }
+
+  const TokenOriginMap &getOrigins() const { return origins; }
+
+private:
+  DependencyProof proveAllOrigins(ArrayRef<Value> sources, Value target,
+                                  DenseSet<Value> &active) {
+    if (sources.empty())
+      return {};
+    DependencyProof result{true, false};
+    for (Value source : sources) {
+      DependencyProof proof = prove(source, target, active);
+      if (!proof.depends && !proof.cyclic)
+        return {};
+      result.depends &= proof.depends;
+      result.cyclic |= proof.cyclic;
+    }
+    return result;
+  }
+
+  DependencyProof proveAnyOperand(Operation *op, Value target,
+                                  DenseSet<Value> &active) {
+    DependencyProof result;
+    for (Value operand : op->getOperands()) {
+      if (!isa<MemTokenType>(operand.getType()))
+        continue;
+      DependencyProof proof = prove(operand, target, active);
+      if (proof.depends && !proof.cyclic)
+        return {true, false};
+      result.depends |= proof.depends;
+      result.cyclic |= proof.cyclic;
+    }
+    return result;
+  }
+
+  DependencyProof prove(Value token, Value target, DenseSet<Value> &active) {
+    if (token == target)
+      return {true, false};
+    if (!isa<MemTokenType>(token.getType()))
+      return {};
+
+    std::pair<Value, Value> key{token, target};
+    auto cached = cache.find(key);
+    if (cached != cache.end())
+      return {cached->second, false};
+    // Backedge cycle provisional; non-cycle origins still must prove target.
+    if (!active.insert(token).second)
+      return {true, true};
+
+    // Region merge: every path. Op result: any dependency operand.
+    DependencyProof result;
+    auto origin = origins.find(token);
+    if (origin != origins.end())
+      result = proveAllOrigins(origin->second, target, active);
+    else if (Operation *def = token.getDefiningOp())
+      result = proveAnyOperand(def, target, active);
+
+    active.erase(token);
+    if (!result.cyclic)
+      cache.try_emplace(key, result.depends);
+    return result;
+  }
+
+  TokenOriginMap origins;
+  DenseMap<std::pair<Value, Value>, bool> cache;
+};
+
+static SmallVector<Value, 2> getTokenResults(Operation *op) {
+  SmallVector<Value, 2> tokens;
+  for (Value result : op->getResults())
+    if (isa<MemTokenType>(result.getType()))
+      tokens.push_back(result);
+  return tokens;
+}
+
+static LogicalResult associateReleases(ArrayRef<AllocReleaseOp> releases,
+                                       SmallVectorImpl<AllocInterval> &allocs) {
+  DenseMap<Value, unsigned> allocationIndices;
+  for (auto [index, interval] : llvm::enumerate(allocs))
+    allocationIndices.try_emplace(interval.op.getResult(), index);
+
+  for (AllocReleaseOp release : releases) {
+    auto index = allocationIndices.find(release.getAllocation());
+    if (index == allocationIndices.end())
+      return release.emitOpError(
+          "allocation must be a direct wave.alloc result");
+    AllocInterval &interval = allocs[index->second];
+    if (interval.release)
+      return release.emitOpError("allocation already has a wave.alloc_release");
+    interval.release = release;
+  }
+  return success();
+}
+
+static void initializeAllocationAliases(
+    const OperationOrder &order, SmallVectorImpl<AllocInterval> &allocs,
+    DenseMap<Value, SmallVector<unsigned, 1>> &aliases,
+    SmallVectorImpl<std::pair<Value, unsigned>> &worklist) {
+  for (auto [index, interval] : llvm::enumerate(allocs)) {
+    appendAlias(aliases, interval.op.getResult(), index, worklist);
+    interval.start = order.lookup(interval.op);
+    interval.end = interval.start;
+  }
+}
+
+static unsigned getRegionEnd(const OperationOrder &order, Region &region) {
+  unsigned end = order.lookup(region.getParentOp());
+  region.walk([&](Operation *op) { end = std::max(end, order.lookup(op)); });
+  return end;
+}
+
+static void extendIntervalForUse(const OperationOrder &order,
+                                 AllocInterval &interval, Operation *user) {
+  interval.end = std::max(interval.end, order.lookup(user));
+  for (Region *region = user->getParentRegion(); region;) {
+    Operation *parent = region->getParentOp();
+    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
+    if (branch && branch.isRepetitiveRegion(region->getRegionNumber()) &&
+        interval.start < order.lookup(parent))
+      interval.end = std::max(interval.end, getRegionEnd(order, *region));
+    region = parent->getParentRegion();
+  }
+  scf::YieldOp yield = dyn_cast<scf::YieldOp>(user);
+  if (!yield)
+    return;
+  scf::ForOp loop = dyn_cast<scf::ForOp>(yield->getParentOp());
+  if (loop)
+    interval.start = std::min(interval.start, order.lookup(loop));
+}
+
+static bool isTrackedMemoryUse(OpOperand &use) {
+  MemoryEffectOpInterface memory =
+      dyn_cast<MemoryEffectOpInterface>(use.getOwner());
+  if (!memory)
+    return false;
+  SmallVector<MemoryEffectInstance, 4> effects;
+  memory.getEffects(effects);
+  for (const MemoryEffectInstance &effect : effects) {
+    OpOperand *target = effect.getEffectValue<OpOperand *>();
+    if (target == &use &&
+        isa<MemoryEffects::Read, MemoryEffects::Write>(effect.getEffect()))
+      return true;
+  }
+  return false;
 }
 
 static void
-extendIntervalsThroughAliases(const OperationOrder &order,
-                              SmallVectorImpl<AllocInterval> &allocs) {
+recordAllocationUse(const OperationOrder &order, Value value, unsigned index,
+                    OpOperand &use,
+                    DenseMap<Value, SmallVector<unsigned, 1>> &aliases,
+                    SmallVectorImpl<std::pair<Value, unsigned>> &worklist,
+                    SmallVectorImpl<AllocInterval> &allocs) {
+  Operation *user = use.getOwner();
+  AllocInterval &interval = allocs[index];
+  extendIntervalForUse(order, interval, user);
+  if (isa<AllocReleaseOp>(user) ||
+      appendForwardedAliases(user, value, index, aliases, worklist))
+    return;
+  if (!llvm::is_contained(interval.accesses, user))
+    interval.accesses.push_back(user);
+  if (!isTrackedMemoryUse(use))
+    interval.hasUntrackedAccess = true;
+}
+
+static void collectAllocationUses(const OperationOrder &order,
+                                  SmallVectorImpl<AllocInterval> &allocs) {
   DenseMap<Value, SmallVector<unsigned, 1>> aliases;
   SmallVector<std::pair<Value, unsigned>, 16> worklist;
-  for (auto [index, interval] : llvm::enumerate(allocs)) {
-    appendAlias(aliases, interval.op.getResult(), index, worklist);
-    unsigned start = order.lookup(interval.op);
-    interval.start = start;
-    interval.end = start;
-  }
+  initializeAllocationAliases(order, allocs, aliases, worklist);
 
   while (!worklist.empty()) {
     auto [value, index] = worklist.pop_back_val();
-    for (OpOperand &use : value.getUses()) {
-      Operation *user = use.getOwner();
-      AllocInterval &interval = allocs[index];
-      interval.end = std::max(interval.end, order.lookup(user));
-      for (Operation *parent = user->getParentOp(); parent;
-           parent = parent->getParentOp()) {
-        auto loop = dyn_cast<scf::ForOp>(parent);
-        if (!loop)
-          continue;
-        unsigned loopPos = order.lookup(loop);
-        if (interval.start < loopPos)
-          interval.end = std::max(
-              interval.end, order.lookup(loop.getBody()->getTerminator()));
-      }
-      if (auto yield = dyn_cast<scf::YieldOp>(user)) {
-        if (auto loop = dyn_cast<scf::ForOp>(yield->getParentOp()))
-          interval.start = std::min(interval.start, order.lookup(loop));
-      }
-      appendForwardedAliases(user, value, index, aliases, worklist);
-    }
+    for (OpOperand &use : value.getUses())
+      recordAllocationUse(order, value, index, use, aliases, worklist, allocs);
   }
 }
 
-static FailureOr<int64_t> findAvailableOffset(ArrayRef<ActiveAllocation> active,
+static SmallVector<Value, 4> collectAccessTokens(AllocInterval &interval) {
+  SmallVector<Value, 4> accessTokens;
+  for (Operation *access : interval.accesses) {
+    SmallVector<Value, 2> tokens = getTokenResults(access);
+    if (tokens.empty())
+      interval.hasUntrackedAccess = true;
+    llvm::append_range(accessTokens, tokens);
+  }
+  return accessTokens;
+}
+
+static LogicalResult finalizeAllocationInterval(AllocInterval &interval,
+                                                TokenOrdering &ordering) {
+  SmallVector<Value, 4> accessTokens = collectAccessTokens(interval);
+  if (!interval.release) {
+    interval.completionTokens = std::move(accessTokens);
+    return success();
+  }
+
+  for (Value token : accessTokens)
+    if (!ordering.dependsOn(interval.release.getDependency(), token))
+      return interval.release.emitOpError(
+          "dependency does not cover every allocation access token");
+  if (interval.hasUntrackedAccess)
+    return interval.release.emitOpError(
+        "cannot release an allocation with an untracked pointer use");
+  interval.completionTokens.push_back(interval.release.getToken());
+  return success();
+}
+
+static LogicalResult
+collectAllocationIntervals(const OperationOrder &order, TokenOrdering &ordering,
+                           SmallVectorImpl<AllocInterval> &allocs) {
+  collectAllocationUses(order, allocs);
+  for (AllocInterval &interval : allocs) {
+    if (failed(finalizeAllocationInterval(interval, ordering)))
+      return failure();
+  }
+  return success();
+}
+
+static bool operationDependsOnAll(Operation *op, ArrayRef<Value> dependencies,
+                                  TokenOrdering &ordering) {
+  for (Value dependency : dependencies) {
+    bool ordered = false;
+    for (Value operand : op->getOperands()) {
+      if (!isa<MemTokenType>(operand.getType()) ||
+          !ordering.dependsOn(operand, dependency))
+        continue;
+      ordered = true;
+      break;
+    }
+    if (!ordered)
+      return false;
+  }
+  return true;
+}
+
+static bool appendLoopCarriedTokenIndex(Value token, scf::ForOp loop,
+                                        SmallVectorImpl<unsigned> &indices) {
+  BlockArgument argument = dyn_cast<BlockArgument>(token);
+  if (!argument)
+    return false;
+  for (auto [index, iterArg] : llvm::enumerate(loop.getRegionIterArgs())) {
+    if (iterArg != argument)
+      continue;
+    if (!llvm::is_contained(indices, index))
+      indices.push_back(index);
+    return true;
+  }
+  return false;
+}
+
+static void collectLoopCarriedTokenIndicesImpl(
+    Value token, scf::ForOp loop, const TokenOriginMap &origins,
+    SmallVectorImpl<unsigned> &indices, DenseSet<Value> &visited) {
+  if (!isa<MemTokenType>(token.getType()) || !visited.insert(token).second ||
+      appendLoopCarriedTokenIndex(token, loop, indices))
+    return;
+  auto origin = origins.find(token);
+  if (origin != origins.end()) {
+    for (Value source : origin->second)
+      collectLoopCarriedTokenIndicesImpl(source, loop, origins, indices,
+                                         visited);
+    return;
+  }
+  Operation *def = token.getDefiningOp();
+  if (!def)
+    return;
+  for (Value operand : def->getOperands())
+    if (isa<MemTokenType>(operand.getType()))
+      collectLoopCarriedTokenIndicesImpl(operand, loop, origins, indices,
+                                         visited);
+}
+
+static SmallVector<unsigned, 2>
+collectLoopCarriedTokenIndices(Value token, scf::ForOp loop,
+                               const TokenOriginMap &origins) {
+  SmallVector<unsigned, 2> indices;
+  DenseSet<Value> visited;
+  collectLoopCarriedTokenIndicesImpl(token, loop, origins, indices, visited);
+  return indices;
+}
+
+static SmallVector<unsigned, 2>
+collectAccessCarriedIndices(Operation *access, scf::ForOp loop,
+                            const TokenOriginMap &origins) {
+  SmallVector<unsigned, 2> carried;
+  for (Value operand : access->getOperands()) {
+    if (!isa<MemTokenType>(operand.getType()))
+      continue;
+    for (unsigned index :
+         collectLoopCarriedTokenIndices(operand, loop, origins))
+      if (!llvm::is_contained(carried, index))
+        carried.push_back(index);
+  }
+  return carried;
+}
+
+static bool yieldOrdersCompletion(scf::YieldOp yield,
+                                  ArrayRef<unsigned> carried, Value completion,
+                                  TokenOrdering &ordering) {
+  for (unsigned index : carried) {
+    if (index >= yield.getNumOperands())
+      continue;
+    if (ordering.dependsOn(yield.getOperand(index), completion))
+      return true;
+  }
+  return false;
+}
+
+static bool loopBackedgeOrders(const AllocInterval &later,
+                               const AllocInterval &earlier, scf::ForOp loop,
+                               TokenOrdering &ordering) {
+  if (later.hasUntrackedAccess || earlier.hasUntrackedAccess)
+    return false;
+  scf::YieldOp yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  for (Operation *access : earlier.accesses) {
+    SmallVector<unsigned, 2> carried =
+        collectAccessCarriedIndices(access, loop, ordering.getOrigins());
+    for (Value completion : later.completionTokens)
+      if (!yieldOrdersCompletion(yield, carried, completion, ordering))
+        return false;
+  }
+  return true;
+}
+
+static SmallVector<Region *, 2>
+getCommonEnclosingRepetitiveRegions(Operation *lhs, Operation *rhs) {
+  SmallPtrSet<Region *, 4> lhsRegions;
+  for (Region *region = lhs->getParentRegion(); region;) {
+    Operation *parent = region->getParentOp();
+    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
+    if (branch && branch.isRepetitiveRegion(region->getRegionNumber()))
+      lhsRegions.insert(region);
+    region = parent->getParentRegion();
+  }
+
+  SmallVector<Region *, 2> common;
+  for (Region *region = rhs->getParentRegion(); region;) {
+    Operation *parent = region->getParentOp();
+    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
+    if (branch && branch.isRepetitiveRegion(region->getRegionNumber()) &&
+        lhsRegions.contains(region))
+      common.push_back(region);
+    region = parent->getParentRegion();
+  }
+  return common;
+}
+
+static bool usesExplicitLifetime(const AllocInterval &earlier,
+                                 const AllocInterval &later) {
+  return earlier.release || later.release;
+}
+
+static bool canReuseStorage(const AllocInterval &earlier,
+                            const AllocInterval &later,
+                            TokenOrdering &ordering) {
+  if (earlier.end >= later.start)
+    return false;
+  if (!usesExplicitLifetime(earlier, later))
+    return true;
+  if (earlier.hasUntrackedAccess || later.hasUntrackedAccess)
+    return false;
+  for (Operation *access : later.accesses)
+    if (!operationDependsOnAll(access, earlier.completionTokens, ordering))
+      return false;
+  for (Region *region :
+       getCommonEnclosingRepetitiveRegions(earlier.op, later.op)) {
+    scf::ForOp loop = dyn_cast<scf::ForOp>(region->getParentOp());
+    if (!loop || !loopBackedgeOrders(later, earlier, loop, ordering))
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<int64_t> findAvailableOffset(ArrayRef<PlacedAllocation> active,
                                               int64_t baseOffset,
                                               const AllocInterval &interval) {
   FailureOr<int64_t> aligned = alignUp(baseOffset, interval.align);
   if (failed(aligned))
     return failure();
   int64_t offset = *aligned;
-  for (const ActiveAllocation &entry : active) {
+  for (const PlacedAllocation &entry : active) {
     if (offset <= std::numeric_limits<int64_t>::max() - interval.bytes &&
         offset + interval.bytes <= entry.offset)
       break;
@@ -201,7 +616,8 @@ static FailureOr<int64_t> findAvailableOffset(ArrayRef<ActiveAllocation> active,
 }
 
 static FailureOr<int64_t> assignOffsets(SmallVectorImpl<AllocInterval> &allocs,
-                                        int64_t baseOffset) {
+                                        int64_t baseOffset,
+                                        TokenOrdering &ordering) {
   SmallVector<unsigned> order;
   order.reserve(allocs.size());
   for (unsigned i = 0, e = allocs.size(); i != e; ++i)
@@ -212,15 +628,16 @@ static FailureOr<int64_t> assignOffsets(SmallVectorImpl<AllocInterval> &allocs,
     return lhs < rhs;
   });
 
-  SmallVector<ActiveAllocation, 8> active;
+  SmallVector<PlacedAllocation, 8> placed;
   int64_t highWater = baseOffset;
   for (unsigned index : order) {
     AllocInterval &interval = allocs[index];
-    llvm::erase_if(active, [&](const ActiveAllocation &entry) {
-      return entry.end < interval.start;
-    });
+    SmallVector<PlacedAllocation, 8> active;
+    for (const PlacedAllocation &entry : placed)
+      if (!canReuseStorage(allocs[entry.index], interval, ordering))
+        active.push_back(entry);
     llvm::sort(active,
-               [](const ActiveAllocation &lhs, const ActiveAllocation &rhs) {
+               [](const PlacedAllocation &lhs, const PlacedAllocation &rhs) {
                  return lhs.offset < rhs.offset;
                });
 
@@ -230,10 +647,49 @@ static FailureOr<int64_t> assignOffsets(SmallVectorImpl<AllocInterval> &allocs,
       return failure();
 
     interval.offset = *offset;
-    active.push_back({*offset, interval.bytes, interval.end});
+    placed.push_back({*offset, interval.bytes, index});
     highWater = std::max(highWater, *offset + interval.bytes);
   }
   return highWater;
+}
+
+static SmallVector<AllocInterval> buildAllocIntervals(ArrayRef<AllocOp> ops) {
+  SmallVector<AllocInterval> allocs;
+  allocs.reserve(ops.size());
+  for (AllocOp op : ops) {
+    int64_t bytes = op.getBytesizeAttr().getInt();
+    int64_t align = op.getAlignAttr().getInt();
+    assert(bytes > 0 && "wave.alloc verifier guarantees positive bytesize");
+    assert(align > 0 && "wave.alloc verifier guarantees positive alignment");
+    AllocInterval interval;
+    interval.op = op;
+    interval.bytes = bytes;
+    interval.align = align;
+    allocs.push_back(std::move(interval));
+  }
+  return allocs;
+}
+
+static void eraseAllocationReleases(IRRewriter &rewriter,
+                                    SmallVectorImpl<AllocInterval> &allocs) {
+  for (AllocInterval &interval : allocs) {
+    if (!interval.release)
+      continue;
+    rewriter.replaceAllUsesWith(interval.release.getToken(),
+                                interval.release.getDependency());
+    rewriter.eraseOp(interval.release);
+  }
+}
+
+static void rewriteAllocations(IRRewriter &rewriter,
+                               SmallVectorImpl<AllocInterval> &allocs) {
+  for (AllocInterval &interval : allocs) {
+    rewriter.setInsertionPoint(interval.op);
+    SharedMemoryBaseOp base = SharedMemoryBaseOp::create(
+        rewriter, interval.op.getLoc(), interval.op.getResult().getType(),
+        static_cast<uint64_t>(interval.offset));
+    rewriter.replaceOp(interval.op, base.getResult());
+  }
 }
 
 static LogicalResult resolveFuncAllocs(func::FuncOp func,
@@ -242,8 +698,10 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
     return success();
 
   SmallVector<AllocOp> ops;
+  SmallVector<AllocReleaseOp> releases;
   func.walk([&](AllocOp op) { ops.push_back(op); });
-  if (ops.empty())
+  func.walk([&](AllocReleaseOp op) { releases.push_back(op); });
+  if (ops.empty() && releases.empty())
     return success();
 
   IntegerAttr fixedAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size");
@@ -252,28 +710,18 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
     return func.emitError("wave.lds_size must be non-negative");
 
   OperationOrder order(func);
-  SmallVector<AllocInterval> allocs;
-  allocs.reserve(ops.size());
-  for (AllocOp op : ops) {
-    int64_t bytes = op.getBytesizeAttr().getInt();
-    int64_t align = op.getAlignAttr().getInt();
-    assert(bytes > 0 && "wave.alloc verifier guarantees positive bytesize");
-    assert(align > 0 && "wave.alloc verifier guarantees positive alignment");
-    allocs.push_back({op, bytes, align});
-  }
-
-  extendIntervalsThroughAliases(order, allocs);
-  FailureOr<int64_t> plannedBytes = assignOffsets(allocs, fixedBytes);
+  SmallVector<AllocInterval> allocs = buildAllocIntervals(ops);
+  if (failed(associateReleases(releases, allocs)))
+    return failure();
+  TokenOrdering ordering(buildTokenOrigins(func));
+  if (failed(collectAllocationIntervals(order, ordering, allocs)))
+    return failure();
+  FailureOr<int64_t> plannedBytes = assignOffsets(allocs, fixedBytes, ordering);
   if (failed(plannedBytes))
     return func.emitError("failed to place wave.alloc storage");
 
-  for (AllocInterval &interval : allocs) {
-    rewriter.setInsertionPoint(interval.op);
-    SharedMemoryBaseOp base = SharedMemoryBaseOp::create(
-        rewriter, interval.op.getLoc(), interval.op.getResult().getType(),
-        static_cast<uint64_t>(interval.offset));
-    rewriter.replaceOp(interval.op, base.getResult());
-  }
+  eraseAllocationReleases(rewriter, allocs);
+  rewriteAllocations(rewriter, allocs);
 
   OpBuilder builder(func.getContext());
   func->setAttr("wave.lds_size", builder.getI64IntegerAttr(*plannedBytes));

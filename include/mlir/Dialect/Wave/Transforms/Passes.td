@@ -134,7 +134,8 @@ def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
   let description = [{
     Follows allocation pointer aliases through views and region branch edges.
     If an allocation has no reads and no unknown pointer escapes, removes
-    writes to that allocation and repairs memory-token users.
+    writes and release markers for that allocation, then repairs memory-token
+    users.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -147,9 +148,12 @@ def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
 def WaveResolveAllocs : Pass<"wave-resolve-allocs"> {
   let summary = "Resolve Wave allocations to shared memory base offsets";
   let description = [{
-    Computes allocation live intervals, assigns non-overlapping byte offsets,
-    rewrites `wave.alloc` to `wave.shared_memory_base`, and updates fixed
-    function-level `wave.lds_size` to cover the assigned storage.
+    Computes allocation live intervals and assigns byte offsets. Release-marked
+    allocations share storage only when explicit memory-token edges order every
+    access, including loop backedges. Unmarked allocations retain lexical
+    last-use placement. Rewrites `wave.alloc` to `wave.shared_memory_base`,
+    removes `wave.alloc_release`, and updates fixed function-level
+    `wave.lds_size` to cover the assigned storage.
   }];
   let dependentDialects = [
     "func::FuncDialect",

@@ -73,6 +73,20 @@ func.func @memory_ops(%p: !wave.ptr<#wave.global, i32>)
 
 // -----
 
+// NORMALIZE-LABEL: func.func @allocation_release
+// NORMALIZE: [[ALLOC:%.*]] = wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared>
+// NORMALIZE: wave.alloc_release [[ALLOC]] after {{%.*}} : (!wave.ptr<#wave.shared>, !wave.mem.token) -> !wave.mem.token
+func.func @allocation_release() attributes {wave.kernel} {
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %dependency = wave.token : !wave.mem.token
+  %released = wave.alloc_release %alloc after %dependency
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
 // NORMALIZE-LABEL: func.func @loop_carry
 // NORMALIZE-SAME: ([[P:%.*]]: !wave.ptr<#wave.global>, [[N:%.*]]: index)
 // NORMALIZE: [[R:%.*]] = scf.for {{%.*}} = {{%.*}} to [[N]] step {{%.*}} iter_args([[CARRY:%.*]] = [[P]]) -> (!wave.ptr<#wave.global>)

@@ -35,6 +35,7 @@ struct AllocUseInfo {
   SmallVector<Value, 16> worklist;
   llvm::SetVector<Operation *> memoryOps;
   llvm::SetVector<Operation *> writes;
+  llvm::SetVector<Operation *> releases;
   bool hasRead = false;
   bool hasUnknown = false;
 };
@@ -244,6 +245,13 @@ static bool hasLiveNonTokenResult(Operation *op) {
 
 static bool classifyMemoryUse(AllocUseInfo &info, OpOperand &use) {
   Operation *owner = use.getOwner();
+  if (AllocReleaseOp release = dyn_cast<AllocReleaseOp>(owner)) {
+    if (release.getAllocation() == use.get()) {
+      info.releases.insert(owner);
+      return true;
+    }
+  }
+
   auto memory = dyn_cast<MemoryEffectOpInterface>(owner);
   if (!memory)
     return false;
@@ -300,7 +308,7 @@ static Value getSingleMemTokenOperand(Operation *op) {
   return dependency;
 }
 
-static void eraseWrite(IRRewriter &rewriter, Operation *op) {
+static void eraseTokenForwardingOp(IRRewriter &rewriter, Operation *op) {
   Value dependency = getSingleMemTokenOperand(op);
   for (Value result : op->getResults()) {
     if (!isa<MemTokenType>(result.getType()) || result.use_empty())
@@ -323,6 +331,7 @@ static LogicalResult cleanupFunc(func::FuncOp func, IRRewriter &rewriter) {
     return success();
 
   llvm::SetVector<Operation *> writes;
+  llvm::SetVector<Operation *> releases;
   llvm::SetVector<Operation *> blocked;
   for (AllocOp alloc : allocs) {
     AllocUseInfo info;
@@ -332,12 +341,15 @@ static LogicalResult cleanupFunc(func::FuncOp func, IRRewriter &rewriter) {
       continue;
     }
     writes.set_union(info.writes);
+    releases.set_union(info.releases);
   }
 
   for (Operation *write : writes) {
     if (!blocked.contains(write))
-      eraseWrite(rewriter, write);
+      eraseTokenForwardingOp(rewriter, write);
   }
+  for (Operation *release : releases)
+    eraseTokenForwardingOp(rewriter, release);
   return success();
 }
 
