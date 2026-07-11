@@ -258,14 +258,23 @@ func.func @long_latency_memory_prefetch(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @long_latency_prefetch_respects_pressure(
+func.func @long_latency_prefetch_respects_repeated_loop_carry_pressure(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %ptr: !waveamdmachine.reg<sgpr, 2>,
     %a: !waveamdmachine.reg<vgpr, 1>,
-    %b: !waveamdmachine.reg<vgpr, 1>)
-    attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
+    %b: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>)
+    attributes {waveamdmachine.vgpr_count_max = 96 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 32 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 32>
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%wide, %wide : !waveamdmachine.reg<vgpr, 32>,
+              !waveamdmachine.reg<vgpr, 32>) {
+  ^bb0(%carry0: !waveamdmachine.reg<vgpr, 32>,
+       %carry1: !waveamdmachine.reg<vgpr, 32>):
+  %loop_wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 32 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 32>
   %v0 = waveamdmachine.v_add_u32 %a, %b
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
@@ -339,18 +348,25 @@ func.func @long_latency_prefetch_respects_pressure(
   %sum = waveamdmachine.v_add_u32 %v20, %parts#0
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%carry0, %carry1 : !waveamdmachine.reg<vgpr, 32>,
+              !waveamdmachine.reg<vgpr, 32>)
+  } -> !waveamdmachine.reg<vgpr, 32>, !waveamdmachine.reg<vgpr, 32>
   return
 }
 }
 
-// IR-LABEL: func.func @long_latency_prefetch_respects_pressure
+// IR-LABEL: func.func @long_latency_prefetch_respects_repeated_loop_carry_pressure
 // IR: waveamdmachine.v_mov_b32_tuple
+// IR: waveamdmachine.uniform_loop
+// IR: ^bb0
+// IR-NEXT: waveamdmachine.v_mov_b32_tuple
 // IR-NEXT: [[V0:%.*]] = waveamdmachine.v_add_u32
 // IR-NEXT: [[V1:%.*]] = waveamdmachine.v_add_u32 [[V0]]
 // IR-NEXT: [[LOADED:%.*]], {{%.*}} = waveamdmachine.global_load_b64
 // IR: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[LOADED]]
 // IR: waveamdmachine.v_add_u32 {{%.*}}, [[PARTS]]#0
-// DIAG: waveamd-machine-schedule region func=long_latency_prefetch_respects_pressure
+// DIAG: waveamd-machine-schedule region func=long_latency_prefetch_respects_repeated_loop_carry_pressure index=1
 // DIAG-SAME: action=apply reason=vmem_prefetch
 // DIAG-SAME: long_latency_vmem_prefetch_moves=0
 

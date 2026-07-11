@@ -478,13 +478,35 @@ private:
       extendIntervalValue((*bucket)[it->second], value, pos);
   }
 
-  LogicalResult coalesceLoopEntryCarries(waveamdmachine::UniformLoopOp loop,
-                                         unsigned pos) {
+  SmallVector<Value> buildLoopCarryAnchors(waveamdmachine::UniformLoopOp loop) {
+    SmallVector<Value> anchors(loop.getInits());
+    if (aliasPolicy != wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
+      return anchors;
+    DenseSet<Value> seen;
     Block &body = loop.getBody().front();
-    for (auto [i, init] : llvm::enumerate(loop.getInits())) {
-      auto rt = wave::getTrackedWaveAMDRegType(init);
+    for (auto [index, init] : llvm::enumerate(loop.getInits())) {
+      if (!wave::getTrackedWaveAMDRegType(init) || seen.insert(init).second)
+        continue;
+      // Regalloc gives each repeated init its own loop-carried register.
+      anchors[index] = body.getArgument(index);
+    }
+    return anchors;
+  }
+
+  LogicalResult coalesceLoopEntryCarries(waveamdmachine::UniformLoopOp loop,
+                                         unsigned pos,
+                                         ArrayRef<Value> anchors) {
+    Block &body = loop.getBody().front();
+    for (auto [i, init, anchor] : llvm::enumerate(loop.getInits(), anchors)) {
+      std::optional<waveamdmachine::RegType> rt =
+          wave::getTrackedWaveAMDRegType(anchor);
       if (!rt)
         continue;
+      if (anchor != init) {
+        (void)ensureInterval(anchor, pos, result.intervals, loop,
+                             includeAllocated);
+        continue;
+      }
       DenseMap<Value, unsigned> *table =
           intervalsFor(*rt, result.intervals).second;
       // Pre-pinned inits have no interval; carry/result already share phys.
@@ -498,41 +520,42 @@ private:
   }
 
   LogicalResult coalesceLoopExitResults(waveamdmachine::UniformLoopOp loop,
-                                        unsigned pos) {
-    for (auto [i, init, resultValue] :
-         llvm::enumerate(loop.getInits(), loop.getResults())) {
-      auto rt = wave::getTrackedWaveAMDRegType(init);
+                                        unsigned pos, ArrayRef<Value> anchors) {
+    for (auto [anchor, resultValue] :
+         llvm::zip_equal(anchors, loop.getResults())) {
+      std::optional<waveamdmachine::RegType> rt =
+          wave::getTrackedWaveAMDRegType(anchor);
       if (!rt)
         continue;
       DenseMap<Value, unsigned> *table =
           intervalsFor(*rt, result.intervals).second;
-      if (!table->contains(init))
+      if (!table->contains(anchor))
         continue;
       (void)ensureInterval(resultValue, pos, result.intervals, loop,
                            includeAllocated);
-      if (failed(coalesce(init, resultValue, pos, result.intervals, loop)))
+      if (failed(coalesce(anchor, resultValue, pos, result.intervals, loop)))
         return failure();
     }
     return success();
   }
 
-  LogicalResult
-  coalesceLoopBackEdgeCarries(waveamdmachine::UniformLoopOp loop) {
+  LogicalResult coalesceLoopBackEdgeCarries(waveamdmachine::UniformLoopOp loop,
+                                            ArrayRef<Value> anchors) {
     Block &body = loop.getBody().front();
     auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
-    // Back-edge carry is a rename into the init interval.
-    for (auto [i, init, carry] :
-         llvm::enumerate(loop.getInits(), term.getCarries())) {
-      auto rt = wave::getTrackedWaveAMDRegType(init);
+    // Back-edge carry is a rename into its loop slot interval.
+    for (auto [anchor, carry] : llvm::zip_equal(anchors, term.getCarries())) {
+      std::optional<waveamdmachine::RegType> rt =
+          wave::getTrackedWaveAMDRegType(anchor);
       if (!rt)
         continue;
       DenseMap<Value, unsigned> *table =
           intervalsFor(*rt, result.intervals).second;
-      auto initIt = table->find(init);
+      auto initIt = table->find(anchor);
       auto carryIt = table->find(carry);
       if (carryIt == table->end() || initIt == table->end())
         continue;
-      if (failed(coalesce(init, carry, result.positions.lookup(term),
+      if (failed(coalesce(anchor, carry, result.positions.lookup(term),
                           result.intervals, loop)))
         return failure();
     }
@@ -551,16 +574,17 @@ private:
   }
 
   LogicalResult processLoop(waveamdmachine::UniformLoopOp loop, unsigned pos) {
+    SmallVector<Value> carryAnchors = buildLoopCarryAnchors(loop);
     // Entry/result aliases first; back-edge aliases after body intervals exist.
-    if (failed(coalesceLoopEntryCarries(loop, pos)))
+    if (failed(coalesceLoopEntryCarries(loop, pos, carryAnchors)))
       return failure();
     Block &body = loop.getBody().front();
     if (failed(walkBlock(body)))
       return failure();
-    if (failed(coalesceLoopBackEdgeCarries(loop)))
+    if (failed(coalesceLoopBackEdgeCarries(loop, carryAnchors)))
       return failure();
     unsigned loopEnd = cursor - 1;
-    if (failed(coalesceLoopExitResults(loop, loopEnd)))
+    if (failed(coalesceLoopExitResults(loop, loopEnd, carryAnchors)))
       return failure();
     extendExternalLoopUses(loop, loopEnd);
     return success();
