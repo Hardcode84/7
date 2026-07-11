@@ -185,6 +185,8 @@ The dialect should contain operations for:
 - **Proposed:** explicit crossings between uniform and lane-varying values,
   including `read_lane`, reductions, and `assert_uniform`;
 - **Proposed:** lane permutations and DPP/permlane-style communication;
+- **Proposed:** symbolic packet redistribution through one high-level op; see
+  [`WaveRedistributeDesign.md`](WaveRedistributeDesign.md);
 - **Proposed:** higher-level wave-cooperative memory clauses beyond current
   tokenized load/store/DMA;
 - **Implemented:** standard MLIR `scf.if` lowering for uniform structured
