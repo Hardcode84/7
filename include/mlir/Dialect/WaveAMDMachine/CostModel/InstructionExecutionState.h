@@ -107,12 +107,13 @@ struct StoreWriteDataHazard {
 
 struct InstructionIssueSlotHazardConfig {
   unsigned valuWriteVGPRScalarRead = 0;
+  unsigned valuWriteVGPRMfmaRead = 0;
   unsigned valuWriteSGPRValuRead = 0;
   unsigned transWriteVGPRValuRead = 0;
 
   bool empty() const {
-    return valuWriteVGPRScalarRead == 0 && valuWriteSGPRValuRead == 0 &&
-           transWriteVGPRValuRead == 0;
+    return valuWriteVGPRScalarRead == 0 && valuWriteVGPRMfmaRead == 0 &&
+           valuWriteSGPRValuRead == 0 && transWriteVGPRValuRead == 0;
   }
 };
 
@@ -120,6 +121,14 @@ std::optional<StoreWriteDataHazard>
 getStoreWriteDataHazard(Operation *op, const llvm::AMDGPU::IsaVersion &isa);
 InstructionIssueSlotHazardConfig
 getInstructionIssueSlotHazardConfig(const llvm::AMDGPU::IsaVersion &isa);
+unsigned getValuWriteVGPRMfmaHazardLatency();
+unsigned getXdlResultHazardLatency(const llvm::AMDGPU::IsaVersion &isa,
+                                   unsigned passes);
+unsigned getXdlSrcCOverlapHazardLatency(const llvm::AMDGPU::IsaVersion &isa,
+                                        unsigned passes);
+unsigned getXdlSrcCExactHazardLatency(const llvm::AMDGPU::IsaVersion &isa,
+                                      unsigned passes);
+bool isXdlResultHazardConsumer(Operation *op);
 bool waitsForMemoryTokenDepsBeforeIssue(Operation *op);
 llvm::StringRef getInstructionStallKindName(InstructionStallKind kind);
 llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind);
@@ -160,6 +169,7 @@ private:
     int64_t memoryValueLatency = 0;
     unsigned issueCount = 1;
     unsigned storeDataHazardLatency = 0;
+    unsigned mfmaPasses = 0;
     InstructionPipeKind pipe = InstructionPipeKind::None;
     MemoryIssueResourceMask memoryIssueResources = 0;
     InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
@@ -177,22 +187,35 @@ private:
   };
 
   struct IssueSlotHazards {
-    uint64_t valuWriteVGPRReadyAt = 0;
+    uint64_t valuWriteVGPRScalarReadyAt = 0;
+    uint64_t valuWriteVGPRMfmaReadyAt = 0;
     uint64_t transWriteVGPRReadyAt = 0;
     uint64_t valuWriteVCCReadyAt = 0;
+    uint64_t mfmaResultReadyAt = 0;
+    uint64_t mfmaSrcCOverlapReadyAt = 0;
+    uint64_t mfmaSrcCExactReadyAt = 0;
 
     bool empty() const {
-      return valuWriteVGPRReadyAt == 0 && transWriteVGPRReadyAt == 0 &&
-             valuWriteVCCReadyAt == 0;
+      return valuWriteVGPRScalarReadyAt == 0 && valuWriteVGPRMfmaReadyAt == 0 &&
+             transWriteVGPRReadyAt == 0 && valuWriteVCCReadyAt == 0 &&
+             mfmaResultReadyAt == 0 && mfmaSrcCOverlapReadyAt == 0 &&
+             mfmaSrcCExactReadyAt == 0;
     }
 
     void join(const IssueSlotHazards &rhs) {
-      valuWriteVGPRReadyAt =
-          std::max(valuWriteVGPRReadyAt, rhs.valuWriteVGPRReadyAt);
+      valuWriteVGPRScalarReadyAt =
+          std::max(valuWriteVGPRScalarReadyAt, rhs.valuWriteVGPRScalarReadyAt);
+      valuWriteVGPRMfmaReadyAt =
+          std::max(valuWriteVGPRMfmaReadyAt, rhs.valuWriteVGPRMfmaReadyAt);
       transWriteVGPRReadyAt =
           std::max(transWriteVGPRReadyAt, rhs.transWriteVGPRReadyAt);
       valuWriteVCCReadyAt =
           std::max(valuWriteVCCReadyAt, rhs.valuWriteVCCReadyAt);
+      mfmaResultReadyAt = std::max(mfmaResultReadyAt, rhs.mfmaResultReadyAt);
+      mfmaSrcCOverlapReadyAt =
+          std::max(mfmaSrcCOverlapReadyAt, rhs.mfmaSrcCOverlapReadyAt);
+      mfmaSrcCExactReadyAt =
+          std::max(mfmaSrcCExactReadyAt, rhs.mfmaSrcCExactReadyAt);
     }
   };
 
@@ -206,6 +229,15 @@ private:
                             InstructionStallKind &stallKind) const;
   unsigned issueSlotHazardWait(Operation *op,
                                const InstructionDesc &desc) const;
+  uint64_t mfmaOperandReadyAt(Operation *op, const InstructionDesc &desc,
+                              unsigned operandIndex,
+                              const IssueSlotHazards &hazards) const;
+  unsigned mfmaIssueSlotHazardWait(Operation *op, const InstructionDesc &desc,
+                                   unsigned operandIndex,
+                                   const IssueSlotHazards &hazards) const;
+  unsigned legacyValuIssueSlotHazardWait(Value operand,
+                                         const InstructionDesc &desc,
+                                         const IssueSlotHazards &hazards) const;
   int64_t tokenReadyCycle(Operation *op) const;
   int64_t pipeReadyCycle(InstructionPipeKind pipe, int64_t cycle) const;
   int64_t memoryIssueReadyCycle(MemoryIssueResource resource,

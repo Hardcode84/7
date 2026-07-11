@@ -624,6 +624,102 @@ func.func @compute_resource_stall_fill(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @mfma_result_hazard_fill(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %acc1: !waveamdmachine.reg<vgpr, 4>,
+    %acc2: !waveamdmachine.reg<vgpr, 4>,
+    %acc3: !waveamdmachine.reg<vgpr, 4>,
+    %acc4: !waveamdmachine.reg<vgpr, 4>,
+    %acc5: !waveamdmachine.reg<vgpr, 4>,
+    %acc6: !waveamdmachine.reg<vgpr, 4>,
+    %acc7: !waveamdmachine.reg<vgpr, 4>,
+    %acc8: !waveamdmachine.reg<vgpr, 4>) {
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %parts:4 = waveamdmachine.tuple_to_elements %r0
+      : (!waveamdmachine.reg<vgpr, 4>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r2 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc2
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r3 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc3
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r4 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc4
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r5 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc5
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r6 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc6
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r7 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc7
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r8 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc8
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %packed = waveamdmachine.v_cvt_pk_f16_f32 %parts#0, %parts#1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @mfma_result_hazard_fill
+// IR: [[R0:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements [[R0]]
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.v_cvt_pk_f16_f32 [[PARTS]]#0, [[PARTS]]#1
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @valu_to_mfma_hazard_fill(
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<vgpr, 1>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %fill0 = waveamdmachine.v_xor_b32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %fill1 = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @valu_to_mfma_hazard_fill
+// IR: [[A:%.*]] = waveamdmachine.v_mov_b32_tuple
+// IR-NEXT: waveamdmachine.v_xor_b32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16 [[A]]
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @compute_resource_barrier_boundary(
     %s0: !waveamdmachine.reg<sgpr, 1>,
     %s1: !waveamdmachine.reg<sgpr, 1>,

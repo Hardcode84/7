@@ -78,6 +78,21 @@ static bool isLegacyVALU(Operation *op) {
   return op->hasTrait<traits::VALUOp>() && !op->hasTrait<traits::MFMAOp>();
 }
 
+static unsigned getMfmaPassCount(SchedClass cls) {
+  switch (cls) {
+  case SchedClass::Write2PassMAI:
+    return 2;
+  case SchedClass::Write4PassMAI:
+    return 4;
+  case SchedClass::Write8PassMAI:
+    return 8;
+  case SchedClass::Write16PassMAI:
+    return 16;
+  default:
+    return 0;
+  }
+}
+
 static unsigned issueSlotsUntil(uint64_t readyAt, uint64_t currentIssueSlot) {
   if (readyAt <= currentIssueSlot)
     return 0;
@@ -360,9 +375,43 @@ InstructionIssueSlotHazardConfig
 getInstructionIssueSlotHazardConfig(const llvm::AMDGPU::IsaVersion &isa) {
   if (isCDNA3Or4(isa))
     return {/*valuWriteVGPRScalarRead=*/1,
+            /*valuWriteVGPRMfmaRead=*/getValuWriteVGPRMfmaHazardLatency(),
             /*valuWriteSGPRValuRead=*/2,
             /*transWriteVGPRValuRead=*/1};
   return {};
+}
+
+unsigned getValuWriteVGPRMfmaHazardLatency() { return 2; }
+
+unsigned getXdlResultHazardLatency(const llvm::AMDGPU::IsaVersion &isa,
+                                   unsigned passes) {
+  if (isa.Major == 9 && isa.Minor == 4)
+    return passes + 3;
+  if (isa.Major == 9 && isa.Minor == 5)
+    return passes + 3 + (passes != 2);
+  return 8;
+}
+
+unsigned getXdlSrcCOverlapHazardLatency(const llvm::AMDGPU::IsaVersion &isa,
+                                        unsigned passes) {
+  if (isa.Major == 9 && isa.Minor == 4)
+    return passes + 1;
+  if (isa.Major == 9 && isa.Minor == 5)
+    return passes + 2;
+  return 6;
+}
+
+unsigned getXdlSrcCExactHazardLatency(const llvm::AMDGPU::IsaVersion &isa,
+                                      unsigned passes) {
+  if (isa.Major == 9 && (isa.Minor == 4 || isa.Minor == 5) && passes == 2)
+    return 2;
+  return 0;
+}
+
+bool isXdlResultHazardConsumer(Operation *op) {
+  return op->hasTrait<traits::VMEMLoadOp>() ||
+         op->hasTrait<traits::VMEMStoreOp>() ||
+         getWaitcntInfo(op).event == WaitcntEvent::Lds || isLegacyVALU(op);
 }
 
 bool isInstructionExecutionStateArchSupported(
@@ -508,6 +557,10 @@ void InstructionExecutionState::bindValue(Value result,
       hazards.join(hazardIt->second);
   }
 
+  // Exact source-C forwarding requires one complete register alias.
+  if (sources.size() != 1 || result.getType() != sources.front().getType())
+    hazards.mfmaSrcCExactReadyAt = 0;
+
   valueReadyAt[result] = ready;
   if (sourceValueEvent)
     valueEvent[result] = *sourceValueEvent;
@@ -633,6 +686,8 @@ InstructionExecutionState::describe(Operation *op) const {
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
   desc.issueCount = getIssueCount(op);
+  if (op->hasTrait<traits::MFMAOp>())
+    desc.mfmaPasses = getMfmaPassCount(cls);
   desc.latency = getConfiguredLatency(arch, cls, config.calibration);
   desc.memoryIssueResources = getMemoryIssueResources(op);
 
@@ -696,29 +751,61 @@ InstructionExecutionState::query(Operation *op,
   return stall;
 }
 
-unsigned InstructionExecutionState::issueSlotHazardWait(
-    Operation *op, const InstructionDesc &desc) const {
+uint64_t InstructionExecutionState::mfmaOperandReadyAt(
+    Operation *op, const InstructionDesc &desc, unsigned operandIndex,
+    const IssueSlotHazards &hazards) const {
+  if (!desc.mfmaPasses)
+    return isXdlResultHazardConsumer(op) ? hazards.mfmaResultReadyAt : 0;
+  if (operandIndex != 2)
+    return hazards.mfmaResultReadyAt;
+  return hazards.mfmaSrcCExactReadyAt ? hazards.mfmaSrcCExactReadyAt
+                                      : hazards.mfmaSrcCOverlapReadyAt;
+}
+
+unsigned InstructionExecutionState::mfmaIssueSlotHazardWait(
+    Operation *op, const InstructionDesc &desc, unsigned operandIndex,
+    const IssueSlotHazards &hazards) const {
+  unsigned wait = issueSlotsUntil(
+      mfmaOperandReadyAt(op, desc, operandIndex, hazards), currentIssueSlot);
+  if (desc.mfmaPasses)
+    wait = std::max(wait, issueSlotsUntil(hazards.valuWriteVGPRMfmaReadyAt,
+                                          currentIssueSlot));
+  return wait;
+}
+
+unsigned InstructionExecutionState::legacyValuIssueSlotHazardWait(
+    Value operand, const InstructionDesc &desc,
+    const IssueSlotHazards &hazards) const {
   if (!desc.legacyVALU || issueSlotHazardConfig.empty())
     return 0;
-
   unsigned wait = 0;
-  for (Value operand : op->getOperands()) {
+  std::optional<RegClass> regClass = getRegClass(operand);
+  if (regClass == RegClass::VGPR) {
+    if (!desc.trans)
+      wait = std::max(wait, issueSlotsUntil(hazards.transWriteVGPRReadyAt,
+                                            currentIssueSlot));
+    if (desc.laneRead)
+      wait = std::max(wait, issueSlotsUntil(hazards.valuWriteVGPRScalarReadyAt,
+                                            currentIssueSlot));
+  }
+  if (regClass == RegClass::VCC)
+    wait = std::max(
+        wait, issueSlotsUntil(hazards.valuWriteVCCReadyAt, currentIssueSlot));
+  return wait;
+}
+
+unsigned InstructionExecutionState::issueSlotHazardWait(
+    Operation *op, const InstructionDesc &desc) const {
+  unsigned wait = 0;
+  for (auto [operandIndex, operand] : llvm::enumerate(op->getOperands())) {
     DenseMap<Value, IssueSlotHazards>::const_iterator it =
         issueSlotHazards.find(operand);
     if (it == issueSlotHazards.end())
       continue;
-    std::optional<RegClass> regClass = getRegClass(operand);
-    if (regClass == RegClass::VGPR) {
-      if (!desc.trans)
-        wait = std::max(wait, issueSlotsUntil(it->second.transWriteVGPRReadyAt,
-                                              currentIssueSlot));
-      if (desc.laneRead)
-        wait = std::max(wait, issueSlotsUntil(it->second.valuWriteVGPRReadyAt,
-                                              currentIssueSlot));
-    }
-    if (regClass == RegClass::VCC)
-      wait = std::max(wait, issueSlotsUntil(it->second.valuWriteVCCReadyAt,
-                                            currentIssueSlot));
+    wait = std::max(
+        wait, mfmaIssueSlotHazardWait(op, desc, operandIndex, it->second));
+    wait = std::max(wait,
+                    legacyValuIssueSlotHazardWait(operand, desc, it->second));
   }
   return wait;
 }
@@ -789,8 +876,15 @@ int64_t InstructionExecutionState::operandReadyCycle(
     Operation *op, InstructionStallKind &stallKind) const {
   int64_t ready = currentCycle;
   stallKind = InstructionStallKind::OperandValue;
-  for (Value operand : op->getOperands()) {
+  for (auto [operandIndex, operand] : llvm::enumerate(op->getOperands())) {
     if (isMemToken(operand))
+      continue;
+    DenseMap<Value, IssueSlotHazards>::const_iterator hazardIt =
+        issueSlotHazards.find(operand);
+    bool exactMfmaSrcC = op->hasTrait<traits::MFMAOp>() && operandIndex == 2 &&
+                         hazardIt != issueSlotHazards.end() &&
+                         hazardIt->second.mfmaSrcCExactReadyAt != 0;
+    if (exactMfmaSrcC)
       continue;
     DenseMap<Value, int64_t>::const_iterator it = valueReadyAt.find(operand);
     if (it == valueReadyAt.end() || it->second <= ready)
@@ -983,18 +1077,35 @@ void InstructionExecutionState::commitMemoryIssue(const InstructionDesc &desc,
 
 void InstructionExecutionState::commitIssueSlotHazards(
     Operation *op, const InstructionDesc &desc) {
-  if (desc.legacyVALU && !issueSlotHazardConfig.empty())
+  if (desc.mfmaPasses || (desc.legacyVALU && !issueSlotHazardConfig.empty()))
     commitIssueSlotProducer(op, desc);
 }
 
 void InstructionExecutionState::commitIssueSlotProducer(
     Operation *op, const InstructionDesc &desc) {
+  if (desc.mfmaPasses) {
+    for (Value result : op->getResults()) {
+      IssueSlotHazards &hazards = issueSlotHazards[result];
+      hazards.mfmaResultReadyAt =
+          currentIssueSlot +
+          getXdlResultHazardLatency(arch.isa, desc.mfmaPasses);
+      hazards.mfmaSrcCOverlapReadyAt =
+          currentIssueSlot +
+          getXdlSrcCOverlapHazardLatency(arch.isa, desc.mfmaPasses);
+      hazards.mfmaSrcCExactReadyAt =
+          currentIssueSlot +
+          getXdlSrcCExactHazardLatency(arch.isa, desc.mfmaPasses);
+    }
+    return;
+  }
   for (Value result : op->getResults()) {
     std::optional<RegClass> regClass = getRegClass(result);
     if (regClass == RegClass::VGPR) {
       IssueSlotHazards &hazards = issueSlotHazards[result];
-      hazards.valuWriteVGPRReadyAt =
+      hazards.valuWriteVGPRScalarReadyAt =
           currentIssueSlot + issueSlotHazardConfig.valuWriteVGPRScalarRead;
+      hazards.valuWriteVGPRMfmaReadyAt =
+          currentIssueSlot + issueSlotHazardConfig.valuWriteVGPRMfmaRead;
       if (desc.trans)
         hazards.transWriteVGPRReadyAt =
             currentIssueSlot + issueSlotHazardConfig.transWriteVGPRValuRead;

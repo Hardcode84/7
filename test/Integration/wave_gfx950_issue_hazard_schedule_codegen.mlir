@@ -126,4 +126,100 @@ func.func @compute_resource_schedule_codegen() attributes {wave.kernel} {
   return
 }
 
+// ASM-LABEL: mfma_result_hazard_schedule_codegen:
+// ASM: v_mfma_f32_16x16x32_f16 v[8:11]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[12:15]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[16:19]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[20:23]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[24:27]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[28:31]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[32:35]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[36:39]
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[40:43]
+// ASM-NEXT: v_cvt_pk_f16_f32 v44, v8, v9
+// ASM-NOT: s_nop
+// ASM: s_endpgm
+func.func @mfma_result_hazard_schedule_codegen() attributes {wave.kernel} {
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 0>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 4>
+  %acc0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 8>
+  %acc1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 12>
+  %acc2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 16>
+  %acc3 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 20>
+  %acc4 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 24>
+  %acc5 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 28>
+  %acc6 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 32>
+  %acc7 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 36>
+  %acc8 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 40>
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %parts:4 = waveamdmachine.tuple_to_elements %r0
+      : (!waveamdmachine.reg<vgpr, 4, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1, 8>,
+            !waveamdmachine.reg<vgpr, 1, 9>,
+            !waveamdmachine.reg<vgpr, 1, 10>,
+            !waveamdmachine.reg<vgpr, 1, 11>)
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 12>) -> !waveamdmachine.reg<vgpr, 4, 12>
+  %r2 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc2
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 16>) -> !waveamdmachine.reg<vgpr, 4, 16>
+  %r3 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc3
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 20>) -> !waveamdmachine.reg<vgpr, 4, 20>
+  %r4 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc4
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 24>) -> !waveamdmachine.reg<vgpr, 4, 24>
+  %r5 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc5
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 28>) -> !waveamdmachine.reg<vgpr, 4, 28>
+  %r6 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc6
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 32>) -> !waveamdmachine.reg<vgpr, 4, 32>
+  %r7 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc7
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 36>) -> !waveamdmachine.reg<vgpr, 4, 36>
+  %r8 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc8
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 40>) -> !waveamdmachine.reg<vgpr, 4, 40>
+  %packed = waveamdmachine.v_cvt_pk_f16_f32 %parts#0, %parts#1
+      : (!waveamdmachine.reg<vgpr, 1, 8>, !waveamdmachine.reg<vgpr, 1, 9>)
+        -> !waveamdmachine.reg<vgpr, 1, 44>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: valu_to_mfma_hazard_schedule_codegen:
+// ASM: v_mov_b32_e32 v0, 0
+// ASM-NEXT: v_mov_b32_e32 v1, 0
+// ASM-NEXT: v_mov_b32_e32 v2, 0
+// ASM-NEXT: v_mov_b32_e32 v3, 0
+// ASM-NEXT: v_xor_b32_e32 v14, v12, v13
+// ASM-NEXT: v_add_u32_e32 v15, v12, v13
+// ASM-NEXT: v_mfma_f32_16x16x32_f16 v[8:11], v[0:3]
+// ASM-NOT: s_nop
+// ASM: s_endpgm
+func.func @valu_to_mfma_hazard_schedule_codegen() attributes {wave.kernel} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %a = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4, 0>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 4>
+  %acc = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 8>
+  %x = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 12>
+  %y = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 13>
+  %r = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 4, 8>) -> !waveamdmachine.reg<vgpr, 4, 8>
+  %fill0 = waveamdmachine.v_xor_b32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 12>, !waveamdmachine.reg<vgpr, 1, 13>)
+        -> !waveamdmachine.reg<vgpr, 1, 14>
+  %fill1 = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 12>, !waveamdmachine.reg<vgpr, 1, 13>)
+        -> !waveamdmachine.reg<vgpr, 1, 15>
+  waveamdmachine.s_endpgm
+  return
+}
+
 }
