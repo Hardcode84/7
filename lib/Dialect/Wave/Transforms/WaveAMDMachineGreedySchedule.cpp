@@ -121,12 +121,33 @@ struct ValueOriginMap {
   DenseMap<Value, SmallVector<Value, 4>> sources;
 };
 
+struct ComputeResourcePreview {
+  waveamdmachine::FunctionalUnit fu = waveamdmachine::FunctionalUnit::None;
+  int64_t waitSlots = 0;
+  unsigned releaseSlots = 0;
+};
+
+struct ComputeResourceState {
+  explicit ComputeResourceState(const waveamdmachine::ArchData &arch)
+      : arch(&arch) {}
+
+  ComputeResourcePreview preview(Operation *op) const;
+  void commit(Operation *op);
+
+  std::array<int64_t, static_cast<size_t>(
+                          waveamdmachine::FunctionalUnit::NumFunctionalUnits)>
+      readyAt{};
+  const waveamdmachine::ArchData *arch = nullptr;
+  int64_t currentSlot = 0;
+};
+
 struct IssueState {
   IssueState(const waveamdmachine::ArchData &arch,
              waveamdmachine::InstructionExecutionConfig config)
-      : model(arch, config) {}
+      : model(arch, config), resources(arch) {}
 
   waveamdmachine::InstructionExecutionState model;
+  ComputeResourceState resources;
 };
 
 struct IssuePreview {
@@ -150,6 +171,7 @@ struct IssuePreview {
   bool hasMemoryValue = false;
   bool m0Hazard = false;
   bool storeDataHazard = false;
+  ComputeResourcePreview resource;
 };
 
 static void bindValueOrigins(waveamdmachine::InstructionExecutionState &model,
@@ -168,6 +190,8 @@ struct GreedyStats {
   unsigned memoryTokenGaps = 0;
   unsigned barrierMemoryGaps = 0;
   unsigned filledBarrierMemoryGaps = 0;
+  unsigned resourcePriorityMoves = 0;
+  unsigned resourceStallFills = 0;
 };
 
 struct GreedyResult {
@@ -290,6 +314,55 @@ static unsigned getIssueCount(Operation *op) {
   return 1;
 }
 
+static bool tracksComputeResource(waveamdmachine::FunctionalUnit fu) {
+  switch (fu) {
+  case waveamdmachine::FunctionalUnit::VALU:
+  case waveamdmachine::FunctionalUnit::SALU:
+  case waveamdmachine::FunctionalUnit::MFMA_XDL:
+  case waveamdmachine::FunctionalUnit::TRANS:
+    return true;
+  default:
+    return false;
+  }
+}
+
+ComputeResourcePreview ComputeResourceState::preview(Operation *op) const {
+  ComputeResourcePreview result;
+  waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+  if (cls == waveamdmachine::SchedClass::NoInst)
+    return result;
+
+  result.fu = waveamdmachine::funit(*arch, cls);
+  if (!tracksComputeResource(result.fu))
+    return result;
+
+  result.releaseSlots =
+      std::max(1, waveamdmachine::getResourceCycles(*arch, cls));
+  size_t index = static_cast<size_t>(result.fu);
+  result.waitSlots = std::max<int64_t>(0, readyAt[index] - currentSlot);
+  return result;
+}
+
+void ComputeResourceState::commit(Operation *op) {
+  waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+  if (cls == waveamdmachine::SchedClass::NoInst)
+    return;
+
+  ComputeResourcePreview resource = preview(op);
+  int64_t issueSlot = currentSlot + resource.waitSlots;
+  unsigned issueCount = getIssueCount(op);
+  if (!tracksComputeResource(resource.fu)) {
+    // Resource scheduling does not cross compute-island boundaries.
+    currentSlot = issueSlot + issueCount;
+    readyAt.fill(currentSlot);
+    return;
+  }
+  size_t index = static_cast<size_t>(resource.fu);
+  readyAt[index] =
+      issueSlot + std::max<unsigned>(resource.releaseSlots, issueCount);
+  currentSlot = issueSlot + issueCount;
+}
+
 static bool
 recordHazardStall(IssuePreview &preview,
                   const waveamdmachine::InstructionStallComponent &component) {
@@ -352,6 +425,7 @@ previewIssue(const IssueState &state, Operation *op,
   preview.memoryIssuer = waveamdmachine::getMemoryCounterKind(op) !=
                          waveamdmachine::MemoryCounterKind::None;
   preview.hasMemoryValue = waveamdmachine::hasMemoryValueLatency(op);
+  preview.resource = state.resources.preview(op);
 
   IssueState trial = state;
   bindValueOrigins(trial.model, origins);
@@ -385,6 +459,7 @@ static LogicalResult commitIssue(IssueState &state, Operation *op,
   bindValueOrigins(state.model, origins);
   if (failed(state.model.commit(op)))
     return failure();
+  state.resources.commit(op);
   return success();
 }
 
@@ -641,6 +716,10 @@ static bool filledOnlyStoreDataHazardGaps(const GreedyStats &stats) {
 
 static bool filledBarrierMemoryGap(const GreedyStats &stats) {
   return stats.filledBarrierMemoryGaps != 0;
+}
+
+static bool hasComputeResourceMoves(const GreedyStats &stats) {
+  return stats.resourcePriorityMoves != 0 || stats.resourceStallFills != 0;
 }
 
 static bool hasNonMemoryCycleWait(const IssuePreview &preview) {
@@ -1465,12 +1544,122 @@ scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
   return GreedyStepStatus::Continue;
 }
 
+static bool isPureComputeIslandOp(Operation *op,
+                                  const waveamdmachine::ArchData &arch) {
+  if (!isPure(op) || isBarrierOp(op) ||
+      waveamdmachine::getMemoryCounterKind(op) != MemoryKind::None)
+    return false;
+  waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+  return cls == waveamdmachine::SchedClass::NoInst ||
+         tracksComputeResource(waveamdmachine::funit(arch, cls));
+}
+
+static unsigned findComputeIslandEnd(unsigned next, const GreedyRegion &region,
+                                     const waveamdmachine::ArchData &arch) {
+  for (unsigned index :
+       llvm::seq(next, static_cast<unsigned>(region.ops.size())))
+    if (!isPureComputeIslandOp(region.ops[index], arch))
+      return index;
+  return region.ops.size();
+}
+
+static bool isReadyComputeResourceCandidate(const IssuePreview &preview) {
+  return !stalls(preview) && preview.resource.releaseSlots != 0 &&
+         preview.resource.waitSlots == 0;
+}
+
+static bool shouldPrioritizeComputeResource(const IssuePreview &next,
+                                            const IssuePreview &candidate,
+                                            unsigned selectedRelease) {
+  return candidate.resource.fu != next.resource.fu &&
+         candidate.resource.releaseSlots > next.resource.releaseSlots &&
+         candidate.resource.releaseSlots > selectedRelease;
+}
+
+static FailureOr<unsigned> findComputeResourceCandidate(
+    const BitVector &ready, unsigned next, unsigned islandEnd,
+    const GreedyRegion &region, const IssueState &state,
+    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    const IssuePreview &nextPreview, bool &fillsResourceStall) {
+  unsigned selected = region.ops.size();
+  unsigned selectedRelease = 0;
+  for (unsigned index : llvm::seq(next + 1, islandEnd)) {
+    if (scheduled.test(index) || !ready.test(index))
+      continue;
+    FailureOr<IssuePreview> candidate =
+        previewIssue(state, region.ops[index], arch, config, origins);
+    if (failed(candidate))
+      return failure();
+    if (!isReadyComputeResourceCandidate(*candidate))
+      continue;
+
+    if (nextPreview.resource.waitSlots != 0) {
+      fillsResourceStall = true;
+      return index;
+    }
+    if (!shouldPrioritizeComputeResource(nextPreview, *candidate,
+                                         selectedRelease))
+      continue;
+    selected = index;
+    selectedRelease = candidate->resource.releaseSlots;
+  }
+  return selected;
+}
+
+static FailureOr<unsigned> findReadyComputeResourceAlternative(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const IssueState &state, const BitVector &scheduled,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    bool &fillsResourceStall) {
+  fillsResourceStall = false;
+  if (!isPureComputeIslandOp(region.ops[next], arch))
+    return region.ops.size();
+
+  FailureOr<IssuePreview> nextPreview =
+      previewIssue(state, region.ops[next], arch, config, origins);
+  if (failed(nextPreview))
+    return failure();
+  if (stalls(*nextPreview) || nextPreview->resource.releaseSlots == 0)
+    return region.ops.size();
+
+  unsigned islandEnd = findComputeIslandEnd(next, region, arch);
+  return findComputeResourceCandidate(ready, next, islandEnd, region, state,
+                                      scheduled, arch, config, origins,
+                                      *nextPreview, fillsResourceStall);
+}
+
+static FailureOr<std::optional<unsigned>> findReadyComputeAlternative(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const IssueState &state, const BitVector &scheduled,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    GreedyStats &stats, bool prioritizeComputeResources) {
+  if (!prioritizeComputeResources)
+    return std::optional<unsigned>{};
+  bool fillsResourceStall = false;
+  FailureOr<unsigned> compute = findReadyComputeResourceAlternative(
+      ready, next, region, state, scheduled, arch, config, origins,
+      fillsResourceStall);
+  if (failed(compute))
+    return failure();
+  if (*compute == region.ops.size())
+    return std::optional<unsigned>{};
+  if (fillsResourceStall)
+    ++stats.resourceStallFills;
+  else
+    ++stats.resourcePriorityMoves;
+  return std::optional<unsigned>(*compute);
+}
+
 static FailureOr<std::optional<unsigned>> findReadyAlternative(
     const BitVector &ready, unsigned next, const GreedyRegion &region,
     const GraphTables &graph, const IssueState &state,
     const BitVector &scheduled, const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
-    GreedyStats &stats, bool prioritizeLongLatencyVmem) {
+    GreedyStats &stats, bool prioritizeLongLatencyVmem,
+    bool prioritizeComputeResources) {
   FailureOr<unsigned> consumer =
       findReadyTokenConsumer(ready, region, scheduled, next, state, origins);
   if (failed(consumer))
@@ -1488,12 +1677,16 @@ static FailureOr<std::optional<unsigned>> findReadyAlternative(
       prioritizeLongLatencyVmem, usedLongLatencyPriority);
   if (failed(prefetch))
     return failure();
-  if (*prefetch == region.ops.size())
-    return std::optional<unsigned>{};
-  ++stats.vmemPrefetchMoves;
-  if (usedLongLatencyPriority)
-    ++stats.longLatencyVmemPrefetchMoves;
-  return std::optional<unsigned>(*prefetch);
+  if (*prefetch != region.ops.size()) {
+    ++stats.vmemPrefetchMoves;
+    if (usedLongLatencyPriority)
+      ++stats.longLatencyVmemPrefetchMoves;
+    return std::optional<unsigned>(*prefetch);
+  }
+
+  return findReadyComputeAlternative(ready, next, region, state, scheduled,
+                                     arch, config, origins, stats,
+                                     prioritizeComputeResources);
 }
 
 static FailureOr<GreedyStepStatus>
@@ -1502,7 +1695,8 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                 const waveamdmachine::EventSimConfig &config, IssueState &state,
                 BitVector &ready, BitVector &scheduled,
                 SmallVectorImpl<unsigned> &pending, GreedyResult &result,
-                const ValueOriginMap &origins, bool prioritizeLongLatencyVmem) {
+                const ValueOriginMap &origins, bool prioritizeLongLatencyVmem,
+                bool prioritizeComputeResources) {
   if (failed(drainReadyNoInsts(region, graph, arch, config, state, ready,
                                scheduled, pending, result.order, origins)))
     return failure();
@@ -1526,7 +1720,7 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
   if (ready.test(next)) {
     FailureOr<std::optional<unsigned>> alternative = findReadyAlternative(
         ready, next, region, graph, state, scheduled, arch, config, origins,
-        result.stats, prioritizeLongLatencyVmem);
+        result.stats, prioritizeLongLatencyVmem, prioritizeComputeResources);
     if (failed(alternative))
       return failure();
     if (*alternative)
@@ -1548,7 +1742,8 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
                  const waveamdmachine::ArchData &arch,
                  const waveamdmachine::EventSimConfig &config,
                  const ValueOriginMap &origins,
-                 bool prioritizeLongLatencyVmem = true) {
+                 bool prioritizeLongLatencyVmem = true,
+                 bool prioritizeComputeResources = true) {
   GreedyResult result;
   SmallVector<unsigned, 16> pending = graph.pendingPreds;
   BitVector ready(region.ops.size());
@@ -1559,9 +1754,9 @@ buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
 
   IssueState state(arch, buildInstructionConfig(arch, config));
   while (result.order.size() != region.ops.size()) {
-    FailureOr<GreedyStepStatus> step =
-        buildGreedyStep(region, graph, arch, config, state, ready, scheduled,
-                        pending, result, origins, prioritizeLongLatencyVmem);
+    FailureOr<GreedyStepStatus> step = buildGreedyStep(
+        region, graph, arch, config, state, ready, scheduled, pending, result,
+        origins, prioritizeLongLatencyVmem, prioritizeComputeResources);
     if (failed(step))
       return failGreedyModel(result);
     if (*step == GreedyStepStatus::Done)
@@ -1777,6 +1972,18 @@ static FailureOr<bool> isRegisterPressureSafe(const GreedyRegion &region,
   return isWithinRegisterPressureLimits(*candidate, *limits, *current);
 }
 
+static FailureOr<bool> needsRegisterPressureFallback(const GreedyRegion &region,
+                                                     ArrayRef<unsigned> order,
+                                                     bool policyEnabled,
+                                                     bool orderChanged) {
+  if (!policyEnabled || !orderChanged)
+    return false;
+  FailureOr<bool> pressureSafe = isRegisterPressureSafe(region, order);
+  if (failed(pressureSafe))
+    return failure();
+  return !*pressureSafe;
+}
+
 static FailureOr<OrderScore>
 evaluateOrderScore(ArrayRef<Operation *> ops,
                    const waveamdmachine::ArchData &arch,
@@ -1826,7 +2033,9 @@ static void printDecision(const GreedyRegion &region, StringRef action,
                << " memory_token_gaps=" << stats.memoryTokenGaps
                << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                << " filled_barrier_memory_gaps="
-               << stats.filledBarrierMemoryGaps << "\n";
+               << stats.filledBarrierMemoryGaps
+               << " resource_priority_moves=" << stats.resourcePriorityMoves
+               << " resource_stall_fills=" << stats.resourceStallFills << "\n";
 }
 
 struct RegionCollector {
@@ -2008,6 +2217,8 @@ struct WaveAMDMachineSchedulePass
       reason = "barrier_memory";
     else if (greedy.stats.vmemPrefetchMoves != 0)
       reason = "vmem_prefetch";
+    else if (hasComputeResourceMoves(greedy.stats))
+      reason = "compute_resource";
     printDecision(region, "apply", reason, greedy.stats);
     applyOrder(region, greedy.order);
     return success();
@@ -2025,22 +2236,36 @@ struct WaveAMDMachineSchedulePass
     if (failed(buildGraph(region, graph)))
       return failure();
 
-    GreedyResult greedy =
-        buildGreedyOrder(region, graph, arch, config, origins);
-    if (!greedy.success)
-      return emitGreedyFailure(region, greedy);
+    bool prioritizeLongLatencyVmem = true;
+    bool prioritizeComputeResources = true;
+    GreedyResult greedy;
+    while (true) {
+      greedy = buildGreedyOrder(region, graph, arch, config, origins,
+                                prioritizeLongLatencyVmem,
+                                prioritizeComputeResources);
+      if (!greedy.success)
+        return emitGreedyFailure(region, greedy);
 
-    if (greedy.stats.longLatencyVmemPrefetchMoves != 0) {
-      FailureOr<bool> pressureSafe =
-          isRegisterPressureSafe(region, greedy.order);
-      if (failed(pressureSafe))
+      FailureOr<bool> dropVmemPriority = needsRegisterPressureFallback(
+          region, greedy.order, prioritizeLongLatencyVmem,
+          greedy.stats.longLatencyVmemPrefetchMoves != 0);
+      if (failed(dropVmemPriority))
         return failure();
-      if (!*pressureSafe) {
-        greedy = buildGreedyOrder(region, graph, arch, config, origins,
-                                  /*prioritizeLongLatencyVmem=*/false);
-        if (!greedy.success)
-          return emitGreedyFailure(region, greedy);
+      if (*dropVmemPriority) {
+        prioritizeLongLatencyVmem = false;
+        continue;
       }
+
+      FailureOr<bool> dropComputePriority = needsRegisterPressureFallback(
+          region, greedy.order, prioritizeComputeResources,
+          hasComputeResourceMoves(greedy.stats));
+      if (failed(dropComputePriority))
+        return failure();
+      if (*dropComputePriority) {
+        prioritizeComputeResources = false;
+        continue;
+      }
+      break;
     }
 
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
@@ -2083,7 +2308,9 @@ static void printReportClasses(const GreedyRegion &region,
                  << " name=" << op->getName().getStringRef()
                  << " class=" << waveamdmachine::getSchedClassName(cls)
                  << " fu=" << waveamdmachine::getFunctionalUnitName(fu)
-                 << " latency=" << getModelLatency(arch, cls, config) << "\n";
+                 << " latency=" << getModelLatency(arch, cls, config)
+                 << " resource_cycles="
+                 << waveamdmachine::getResourceCycles(arch, cls) << "\n";
   }
 }
 
@@ -2334,6 +2561,8 @@ struct WaveAMDMachineScheduleReportPass
         reason = "barrier_memory";
       else if (greedy.stats.vmemPrefetchMoves != 0)
         reason = "vmem_prefetch";
+      else if (hasComputeResourceMoves(greedy.stats))
+        reason = "compute_resource";
       else if (succeeded(originalScore) && succeeded(greedyScore) &&
                greedyScore->cycles < originalScore->cycles)
         reason = "better";
@@ -2438,7 +2667,10 @@ struct WaveAMDMachineScheduleReportPass
                  << " memory_token_gaps=" << stats.memoryTokenGaps
                  << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                  << " filled_barrier_memory_gaps="
-                 << stats.filledBarrierMemoryGaps << " order=";
+                 << stats.filledBarrierMemoryGaps
+                 << " resource_priority_moves=" << stats.resourcePriorityMoves
+                 << " resource_stall_fills=" << stats.resourceStallFills
+                 << " order=";
     printOrder(order);
     llvm::errs() << "\n";
   }

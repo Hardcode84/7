@@ -16,7 +16,7 @@
 
 namespace mlir::waveamdmachine {
 
-using ClassLatencies =
+using ClassCycles =
     std::array<int, static_cast<size_t>(SchedClass::NumSchedClasses)>;
 
 #include "LatencyTable.inc"
@@ -24,14 +24,17 @@ using ClassLatencies =
 namespace {
 struct ArchTable {
   llvm::AMDGPU::IsaVersion isa;
-  const ClassLatencies *table;
+  const ClassCycles *latencies;
+  const ClassCycles *resourceCycles;
 };
 } // namespace
 
 static constexpr ArchTable kArchTables[] = {
-    {{8, 0, 3}, &kLatencyGfx942},   {{9, 4, 2}, &kLatencyGfx942},
-    {{9, 5, 0}, &kLatencyGfx950},   {{11, 0, 0}, &kLatencyGfx1100},
-    {{12, 0, 0}, &kLatencyGfx1200},
+    {{8, 0, 3}, &kLatencyGfx942, &kResourceCyclesGfx942},
+    {{9, 4, 2}, &kLatencyGfx942, &kResourceCyclesGfx942},
+    {{9, 5, 0}, &kLatencyGfx950, &kResourceCyclesGfx950},
+    {{11, 0, 0}, &kLatencyGfx1100, &kResourceCyclesGfx1100},
+    {{12, 0, 0}, &kLatencyGfx1200, &kResourceCyclesGfx1200},
 };
 
 static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
@@ -39,10 +42,10 @@ static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
   return a.Major == b.Major && a.Minor == b.Minor && a.Stepping == b.Stepping;
 }
 
-static const ClassLatencies *selectTable(const llvm::AMDGPU::IsaVersion &isa) {
+static const ArchTable *selectTable(const llvm::AMDGPU::IsaVersion &isa) {
   for (const ArchTable &e : kArchTables)
     if (isaEq(e.isa, isa))
-      return e.table;
+      return &e;
   return nullptr;
 }
 
@@ -57,18 +60,28 @@ static bool isPlainVALUClass(SchedClass cls) {
   }
 }
 
-int getLatency(const ArchData &arch, SchedClass cls) {
-  const ClassLatencies *table = selectTable(arch.isa);
+static int getTableCycles(const ArchData &arch, SchedClass cls,
+                          const ClassCycles *ArchTable::*member) {
+  const ArchTable *table = selectTable(arch.isa);
   if (!table)
-    llvm::report_fatal_error(llvm::Twine("getLatency: no table for arch ") +
+    llvm::report_fatal_error(llvm::Twine("no scheduling table for arch ") +
                              arch.name);
   size_t idx = static_cast<size_t>(cls);
-  if (idx >= table->size())
-    llvm_unreachable("getLatency: invalid SchedClass");
-  int latency = (*table)[idx];
+  const ClassCycles &cycles = *(table->*member);
+  if (idx >= cycles.size())
+    llvm_unreachable("invalid SchedClass");
+  return cycles[idx];
+}
+
+int getLatency(const ArchData &arch, SchedClass cls) {
+  int latency = getTableCycles(arch, cls, &ArchTable::latencies);
   if (isPlainVALUClass(cls))
     return std::max(latency, arch.valuPipelineDepth);
   return latency;
+}
+
+int getResourceCycles(const ArchData &arch, SchedClass cls) {
+  return getTableCycles(arch, cls, &ArchTable::resourceCycles);
 }
 
 } // namespace mlir::waveamdmachine

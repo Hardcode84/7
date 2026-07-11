@@ -82,6 +82,7 @@ ARCHES: tuple[tuple[str, tuple[int, int, int], str, bool], ...] = (
 
 HWWRITERES_RE = re.compile(r"HWWriteRes<(\w+),\s*\[([^\]]*)\],\s*(\d+)>")
 HWVALUWRITERES_RE = re.compile(r"HWVALUWriteRes<(\w+),\s*(\d+)>")
+RELEASE_AT_CYCLES_RE = re.compile(r"let\s+ReleaseAtCycles\s*=\s*\[([^\]]*)\]\s+in")
 
 
 def find_sischedule_td() -> Path | None:
@@ -117,24 +118,53 @@ def primary_fu_from_resources(res_list_text: str) -> str | None:
     return None
 
 
+def resource_cycles_for_primary(
+    res_list_text: str, release_at_cycles: list[int] | None
+) -> int:
+    for index, resource in enumerate(res_list_text.split(",")):
+        name = resource.strip()
+        if name and name != "HWRC" and name in LLVM_RES_TO_OURS:
+            if release_at_cycles is not None and index < len(release_at_cycles):
+                return release_at_cycles[index]
+            return 1
+    return 1
+
+
 def parse_block(td_text: str, header_re: str) -> dict[str, dict[str, int | str | None]]:
     match = re.search(header_re, td_text)
     if not match:
         return {}
     body = extract_braced_block(td_text, match.end())
     result: dict[str, dict[str, int | str | None]] = {}
+    release_at_cycles: list[int] | None = None
     for raw in body.splitlines():
         line = raw.split("//", 1)[0].strip()
+        release_match = RELEASE_AT_CYCLES_RE.search(line)
+        if release_match:
+            values = release_match.group(1).strip()
+            release_at_cycles = (
+                [int(value.strip()) for value in values.split(",")] if values else []
+            )
+            line = line[release_match.end() :].strip()
         match = HWWRITERES_RE.search(line)
         if match:
             result[match.group(1)] = {
                 "cycles": int(match.group(3)),
                 "fu": primary_fu_from_resources(match.group(2)),
+                "resource_cycles": resource_cycles_for_primary(
+                    match.group(2), release_at_cycles
+                ),
             }
+            release_at_cycles = None
             continue
         match = HWVALUWRITERES_RE.search(line)
         if match:
-            result[match.group(1)] = {"cycles": int(match.group(2)), "fu": "VALU"}
+            result[match.group(1)] = {
+                "cycles": int(match.group(2)),
+                "fu": "VALU",
+                "resource_cycles": release_at_cycles[0] if release_at_cycles else 1,
+            }
+            release_at_cycles = None
     return result
 
 
@@ -197,7 +227,33 @@ def build_latency_tables(
     return tables
 
 
-def render_latency_inc(class_order: list[str], tables: dict[str, list[int]]) -> str:
+def resource_cycles_for_class(class_name: str, td_entries: dict[str, dict]) -> int:
+    llvm_class = CLASS_TO_LLVM[class_name]
+    if llvm_class is not None and llvm_class in td_entries:
+        return int(td_entries[llvm_class]["resource_cycles"])
+    if class_name in ("NoInst", "WaitcntPseudo"):
+        return 0
+    return 1
+
+
+def build_resource_cycle_tables(
+    class_order: list[str], td_tables: dict[str, dict[str, dict]]
+) -> dict[str, list[int]]:
+    tables: dict[str, list[int]] = {}
+    for arch_key, _, model_name, inherits in ARCHES:
+        td_entries = merged_td_entries(model_name, inherits, td_tables)
+        tables[arch_key] = [
+            resource_cycles_for_class(class_name, td_entries)
+            for class_name in class_order
+        ]
+    return tables
+
+
+def render_latency_inc(
+    class_order: list[str],
+    latency_tables: dict[str, list[int]],
+    resource_cycle_tables: dict[str, list[int]],
+) -> str:
     lines = [
         "//===- LatencyTable.inc - Generated AMDGPU latencies --------*- C++ -*-===//",
         "//",
@@ -213,8 +269,17 @@ def render_latency_inc(class_order: list[str], tables: dict[str, list[int]]) -> 
         "",
     ]
     for arch_key, _, _, _ in ARCHES:
-        lines.append(f"static constexpr ClassLatencies kLatency{arch_key} = {{")
-        for class_name, value in zip(class_order, tables[arch_key], strict=True):
+        lines.append(f"static constexpr ClassCycles kLatency{arch_key} = {{")
+        for class_name, value in zip(
+            class_order, latency_tables[arch_key], strict=True
+        ):
+            lines.append(f"    /*{class_name}=*/{value},")
+        lines.append("};")
+        lines.append("")
+        lines.append(f"static constexpr ClassCycles kResourceCycles{arch_key} = {{")
+        for class_name, value in zip(
+            class_order, resource_cycle_tables[arch_key], strict=True
+        ):
             lines.append(f"    /*{class_name}=*/{value},")
         lines.append("};")
         if arch_key != ARCHES[-1][0]:
@@ -311,7 +376,9 @@ def main() -> int:
     td_tables = parse_td(td_path)
     class_order = parse_sched_class_order(SCHED_CLASS_H)
     generated = render_latency_inc(
-        class_order, build_latency_tables(class_order, td_tables)
+        class_order,
+        build_latency_tables(class_order, td_tables),
+        build_resource_cycle_tables(class_order, td_tables),
     )
     generated += "\n"
 

@@ -530,6 +530,140 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @compute_resource_overlap(
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>,
+    %s2: !waveamdmachine.reg<sgpr, 1>,
+    %s3: !waveamdmachine.reg<sgpr, 1>,
+    %s4: !waveamdmachine.reg<sgpr, 1>,
+    %s5: !waveamdmachine.reg<sgpr, 1>,
+    %s6: !waveamdmachine.reg<sgpr, 1>,
+    %s7: !waveamdmachine.reg<sgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>) {
+  %x0, %cc0 = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %x1, %cc1 = waveamdmachine.s_add_i32 %s2, %s3
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %x2, %cc2 = waveamdmachine.s_add_i32 %s4, %s5
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %x3, %cc3 = waveamdmachine.s_add_i32 %s6, %s7
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %r0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+}
+
+// IR-LABEL: func.func @compute_resource_overlap
+// IR: [[R0:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: {{%.*}} = waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, [[R0]]
+// IR-NEXT: waveamdmachine.s_add_i32
+// DIAG: waveamd-machine-schedule region func=compute_resource_overlap
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_priority_moves=2
+// CLASS: waveamd-machine-schedule-report op func=compute_resource_overlap {{.*}}name=waveamdmachine.s_add_i32 class=WriteSALU fu=SALU latency=1 resource_cycles=1
+// CLASS: waveamd-machine-schedule-report op func=compute_resource_overlap {{.*}}name=waveamdmachine.mfma_f32_16x16x32_f16 class=Write4PassMAI fu=MFMA_XDL latency=4 resource_cycles=4
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @compute_resource_stall_fill(
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>,
+    %s2: !waveamdmachine.reg<sgpr, 1>,
+    %s3: !waveamdmachine.reg<sgpr, 1>,
+    %s4: !waveamdmachine.reg<sgpr, 1>,
+    %s5: !waveamdmachine.reg<sgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %acc1: !waveamdmachine.reg<vgpr, 4>) {
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %x0, %cc0 = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %x1, %cc1 = waveamdmachine.s_add_i32 %s2, %s3
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %x2, %cc2 = waveamdmachine.s_add_i32 %s4, %s5
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return
+}
+}
+
+// IR-LABEL: func.func @compute_resource_stall_fill
+// IR: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// DIAG: waveamd-machine-schedule region func=compute_resource_stall_fill
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_priority_moves=0
+// DIAG-SAME: resource_stall_fills=3
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @compute_resource_barrier_boundary(
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>,
+    %s2: !waveamdmachine.reg<sgpr, 1>,
+    %s3: !waveamdmachine.reg<sgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %token: !waveamdmachine.mem.token) {
+  %x0, %cc0 = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %x1, %cc1 = waveamdmachine.s_add_i32 %s2, %s3
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %ready = waveamdmachine.s_barrier %token
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+}
+
+// IR-LABEL: func.func @compute_resource_barrier_boundary
+// IR: {{%.*}} = waveamdmachine.s_barrier
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// DIAG: waveamd-machine-schedule region func=compute_resource_barrier_boundary
+// DIAG-SAME: resource_priority_moves=0
+// DIAG-SAME: resource_stall_fills=0
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @trans_hazard_fill(%a: !waveamdmachine.reg<vgpr, 1>,
                              %b: !waveamdmachine.reg<vgpr, 1>,
                              %c: !waveamdmachine.reg<vgpr, 1>) {

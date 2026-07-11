@@ -557,6 +557,12 @@ def WaveAMDMachineSchedule
     use. The event model supplies value latency; movement preserves SSA,
     explicit token edges, and VMEM issue order.
 
+    Within contiguous side-effect-free compute islands, ready instructions on
+    multi-cycle resources start early and independent instructions on other
+    resources fill their release slots. Resource occupancy comes from the
+    target scheduling model, and register-pressure growth disables this policy
+    for the affected region.
+
     Intended placement is before ticket-wait and hazard-wait insertion. Nested
     region ops split local scheduling regions; block terminators finish the
     block and are not scheduled. Only scheduler-supported WaveAMDMachine ops may
@@ -626,7 +632,7 @@ def WaveAMDMachineScheduleReport
     Option<"printCandidates", "print-candidates", "bool", /*default=*/"false",
            "Print model-scored scheduler candidate orders to stderr.">,
     Option<"printClasses", "print-classes", "bool", /*default=*/"false",
-           "Print scheduler class, functional unit, and latency for each local-region op.">,
+           "Print scheduler class, functional unit, latency, and resource cycles for each local-region op.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
            "Skip scheduling diagnostics above this region op count; -1 disables the cap.">,
     Option<"scoreFunc", "score-func", "std::string", /*default=*/"\"\"",

@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-static constexpr ClassLatencies kLatencyGfx942 = {
+static constexpr ClassCycles kLatencyGfx942 = {
     /*NoInst=*/0,
     /*WriteSALU=*/1,
     /*Write32Bit=*/1,
@@ -37,7 +37,34 @@ static constexpr ClassLatencies kLatencyGfx942 = {
     /*WaitcntPseudo=*/0,
 };
 
-static constexpr ClassLatencies kLatencyGfx950 = {
+static constexpr ClassCycles kResourceCyclesGfx942 = {
+    /*NoInst=*/0,
+    /*WriteSALU=*/1,
+    /*Write32Bit=*/1,
+    /*Write64Bit=*/1,
+    /*WriteFloatFMA=*/1,
+    /*WriteDouble=*/1,
+    /*WriteTrans32=*/1,
+    /*WriteSFPU=*/1,
+    /*Write2PassMAI=*/2,
+    /*Write4PassMAI=*/4,
+    /*Write8PassMAI=*/8,
+    /*Write16PassMAI=*/16,
+    /*WriteXDL2PassWMMA=*/1,
+    /*WriteXDL4PassWMMA=*/1,
+    /*Write4PassWMMA=*/1,
+    /*Write8PassWMMA=*/1,
+    /*Write16PassWMMA=*/1,
+    /*WriteVMEM=*/1,
+    /*WriteSMEM=*/1,
+    /*WriteLDS=*/1,
+    /*WriteBranch=*/1,
+    /*WriteBarrier=*/1,
+    /*WriteExport=*/1,
+    /*WaitcntPseudo=*/0,
+};
+
+static constexpr ClassCycles kLatencyGfx950 = {
     /*NoInst=*/0,
     /*WriteSALU=*/1,
     /*Write32Bit=*/1,
@@ -64,7 +91,34 @@ static constexpr ClassLatencies kLatencyGfx950 = {
     /*WaitcntPseudo=*/0,
 };
 
-static constexpr ClassLatencies kLatencyGfx1100 = {
+static constexpr ClassCycles kResourceCyclesGfx950 = {
+    /*NoInst=*/0,
+    /*WriteSALU=*/1,
+    /*Write32Bit=*/1,
+    /*Write64Bit=*/1,
+    /*WriteFloatFMA=*/1,
+    /*WriteDouble=*/1,
+    /*WriteTrans32=*/1,
+    /*WriteSFPU=*/1,
+    /*Write2PassMAI=*/2,
+    /*Write4PassMAI=*/4,
+    /*Write8PassMAI=*/8,
+    /*Write16PassMAI=*/16,
+    /*WriteXDL2PassWMMA=*/1,
+    /*WriteXDL4PassWMMA=*/1,
+    /*Write4PassWMMA=*/1,
+    /*Write8PassWMMA=*/1,
+    /*Write16PassWMMA=*/1,
+    /*WriteVMEM=*/1,
+    /*WriteSMEM=*/1,
+    /*WriteLDS=*/1,
+    /*WriteBranch=*/1,
+    /*WriteBarrier=*/1,
+    /*WriteExport=*/1,
+    /*WaitcntPseudo=*/0,
+};
+
+static constexpr ClassCycles kLatencyGfx1100 = {
     /*NoInst=*/0,
     /*WriteSALU=*/2,
     /*Write32Bit=*/5,
@@ -91,7 +145,34 @@ static constexpr ClassLatencies kLatencyGfx1100 = {
     /*WaitcntPseudo=*/0,
 };
 
-static constexpr ClassLatencies kLatencyGfx1200 = {
+static constexpr ClassCycles kResourceCyclesGfx1100 = {
+    /*NoInst=*/0,
+    /*WriteSALU=*/1,
+    /*Write32Bit=*/1,
+    /*Write64Bit=*/1,
+    /*WriteFloatFMA=*/1,
+    /*WriteDouble=*/1,
+    /*WriteTrans32=*/1,
+    /*WriteSFPU=*/1,
+    /*Write2PassMAI=*/1,
+    /*Write4PassMAI=*/1,
+    /*Write8PassMAI=*/1,
+    /*Write16PassMAI=*/1,
+    /*WriteXDL2PassWMMA=*/1,
+    /*WriteXDL4PassWMMA=*/1,
+    /*Write4PassWMMA=*/1,
+    /*Write8PassWMMA=*/1,
+    /*Write16PassWMMA=*/1,
+    /*WriteVMEM=*/1,
+    /*WriteSMEM=*/1,
+    /*WriteLDS=*/1,
+    /*WriteBranch=*/1,
+    /*WriteBarrier=*/1,
+    /*WriteExport=*/1,
+    /*WaitcntPseudo=*/0,
+};
+
+static constexpr ClassCycles kLatencyGfx1200 = {
     /*NoInst=*/0,
     /*WriteSALU=*/2,
     /*Write32Bit=*/5,
@@ -115,5 +196,32 @@ static constexpr ClassLatencies kLatencyGfx1200 = {
     /*WriteBranch=*/32,
     /*WriteBarrier=*/2000,
     /*WriteExport=*/16,
+    /*WaitcntPseudo=*/0,
+};
+
+static constexpr ClassCycles kResourceCyclesGfx1200 = {
+    /*NoInst=*/0,
+    /*WriteSALU=*/1,
+    /*Write32Bit=*/1,
+    /*Write64Bit=*/1,
+    /*WriteFloatFMA=*/1,
+    /*WriteDouble=*/1,
+    /*WriteTrans32=*/1,
+    /*WriteSFPU=*/1,
+    /*Write2PassMAI=*/1,
+    /*Write4PassMAI=*/1,
+    /*Write8PassMAI=*/1,
+    /*Write16PassMAI=*/1,
+    /*WriteXDL2PassWMMA=*/1,
+    /*WriteXDL4PassWMMA=*/1,
+    /*Write4PassWMMA=*/1,
+    /*Write8PassWMMA=*/1,
+    /*Write16PassWMMA=*/1,
+    /*WriteVMEM=*/1,
+    /*WriteSMEM=*/1,
+    /*WriteLDS=*/1,
+    /*WriteBranch=*/1,
+    /*WriteBarrier=*/1,
+    /*WriteExport=*/1,
     /*WaitcntPseudo=*/0,
 };

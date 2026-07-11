@@ -26,6 +26,9 @@ namespace mlir::waveamdmachine {
 // applicability is the caller's concern.
 int getLatency(const ArchData &arch, SchedClass cls);
 
+// Resource release interval from the target scheduling model.
+int getResourceCycles(const ArchData &arch, SchedClass cls);
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_LATENCYTABLE_H
