@@ -819,10 +819,8 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_cmp_lt_i32 0, s15
 		v_mov_b32_e32 v57, 0
 		v_mov_b64_e32 v[58:59], 0
-		v_mov_b32_e32 v104, v56
-		v_mov_b32_e32 v105, v57
-		v_mov_b32_e32 v106, v58
-		v_mov_b32_e32 v107, v59
+		v_mov_b64_e32 v[104:105], 0
+		v_mov_b64_e32 v[106:107], 0
 		v_mov_b64_e32 v[108:109], 0
 		v_mov_b64_e32 v[110:111], 0
 		v_mov_b64_e32 v[112:113], 0

@@ -26,6 +26,8 @@ using namespace mlir;
 
 namespace {
 
+enum class DuplicateRematPolicy { Never, AnyLegal, CopyCostBounded };
+
 static bool isReg(Value value) {
   return isa<waveamdmachine::RegType>(value.getType());
 }
@@ -122,6 +124,9 @@ static bool canRematerializeDuplicateRegValue(Value v,
     return false;
   if (isa<waveamdmachine::VWorkitemIdXOp>(def))
     return false;
+  wave::HardwareResourceEffects effects = wave::getHardwareResourceEffects(def);
+  if (!effects.reads.empty() || !effects.writes.empty())
+    return false;
   if (!visiting.insert(v).second)
     return false;
   bool canRemat = llvm::all_of(def->getOperands(), [&](Value operand) {
@@ -129,6 +134,55 @@ static bool canRematerializeDuplicateRegValue(Value v,
   });
   visiting.erase(v);
   return canRemat;
+}
+
+static bool consumeDuplicateRematerializationOpCost(Operation *op,
+                                                    unsigned &budget) {
+  if (op->hasTrait<OpTrait::waveamdmachine::NoMachineInst>())
+    return true;
+  bool charged = false;
+  for (Value result : op->getResults()) {
+    waveamdmachine::RegType type =
+        dyn_cast<waveamdmachine::RegType>(result.getType());
+    if (!type)
+      continue;
+    charged = true;
+    if (static_cast<unsigned>(type.getWidth()) > budget)
+      return false;
+    budget -= static_cast<unsigned>(type.getWidth());
+  }
+  if (charged)
+    return true;
+  if (budget == 0)
+    return false;
+  --budget;
+  return true;
+}
+
+static bool duplicateRematerializationFitsCost(Value v, unsigned &budget,
+                                               DenseSet<Operation *> &counted) {
+  Operation *def = v.getDefiningOp();
+  assert(def && "rematerialization legality requires an op result");
+  if (!counted.insert(def).second)
+    return true;
+  if (!consumeDuplicateRematerializationOpCost(def, budget))
+    return false;
+  for (Value operand : def->getOperands()) {
+    if (canUseOriginalDuplicateOperand(operand))
+      continue;
+    if (!duplicateRematerializationFitsCost(operand, budget, counted))
+      return false;
+  }
+  return true;
+}
+
+static bool canProfitablyRematerializeDuplicateRegValue(Value v) {
+  DenseSet<Value> visiting;
+  if (!canRematerializeDuplicateRegValue(v, visiting))
+    return false;
+  unsigned budget = cast<waveamdmachine::RegType>(v.getType()).getWidth();
+  DenseSet<Operation *> counted;
+  return duplicateRematerializationFitsCost(v, budget, counted);
 }
 
 static FailureOr<Value>
@@ -217,14 +271,20 @@ static Value copyRegDuplicate(OpBuilder &builder, Location loc, Value v,
       .getResult();
 }
 
-static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
-                                          Value v,
-                                          bool rematerializeVGPR = false) {
+static FailureOr<Value> duplicateRegValue(
+    OpBuilder &builder, Location loc, Value v,
+    DuplicateRematPolicy rematPolicy = DuplicateRematPolicy::Never) {
   auto rt = cast<waveamdmachine::RegType>(v.getType());
   waveamdmachine::RegType resultType = getUnassignedRegType(rt);
-  if (rematerializeVGPR && isVGPR(rt)) {
-    DenseSet<Value> visiting;
-    if (canRematerializeDuplicateRegValue(v, visiting)) {
+  if (rematPolicy != DuplicateRematPolicy::Never && isVGPR(rt)) {
+    bool canRematerialize = false;
+    if (rematPolicy == DuplicateRematPolicy::AnyLegal) {
+      DenseSet<Value> visiting;
+      canRematerialize = canRematerializeDuplicateRegValue(v, visiting);
+    } else {
+      canRematerialize = canProfitablyRematerializeDuplicateRegValue(v);
+    }
+    if (canRematerialize) {
       DenseMap<Value, Value> cache;
       return rematerializeDuplicateRegValue(builder, loc, v, cache);
     }
@@ -335,8 +395,11 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
       if (!repeatedInit && !localNestedInit && !rematInit && !invariantLoopUse)
         continue;
       Operation *def = init.getDefiningOp();
+      DuplicateRematPolicy rematPolicy =
+          rematInit ? DuplicateRematPolicy::AnyLegal
+                    : DuplicateRematPolicy::CopyCostBounded;
       FailureOr<Value> dup =
-          duplicateRegValue(builder, loop.getLoc(), init, rematInit);
+          duplicateRegValue(builder, loop.getLoc(), init, rematPolicy);
       if (failed(dup))
         return failure();
       loop.getInitsMutable()[i].assign(*dup);
@@ -346,6 +409,19 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
   return success();
 }
 
+static DenseSet<Value> collectRematerializableMFMAAccumulators(
+    ArrayRef<waveamdmachine::MMAOpInterface> ops) {
+  DenseSet<Value> rematerializeAccumulators;
+  for (waveamdmachine::MMAOpInterface op : ops) {
+    Value acc = op.getAcc();
+    if (!copyableRegType(acc) || llvm::hasSingleElement(acc.getUses()))
+      continue;
+    if (canProfitablyRematerializeDuplicateRegValue(acc))
+      rematerializeAccumulators.insert(acc);
+  }
+  return rematerializeAccumulators;
+}
+
 static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
   SmallVector<waveamdmachine::MMAOpInterface> ops;
   func.walk([&](waveamdmachine::MMAOpInterface op) {
@@ -353,18 +429,28 @@ static LogicalResult splitDuplicateMFMAAccumulatorInputs(func::FuncOp func) {
       ops.push_back(op);
   });
 
+  DenseSet<Value> rematerializeAccumulators =
+      collectRematerializableMFMAAccumulators(ops);
+
   OpBuilder builder(func.getContext());
   for (waveamdmachine::MMAOpInterface op : ops) {
     Value acc = op.getAcc();
     if (!copyableRegType(acc))
       continue;
-    if (llvm::hasSingleElement(acc.getUses()))
+    bool canRematerialize = rematerializeAccumulators.contains(acc);
+    if (llvm::hasSingleElement(acc.getUses()) && !canRematerialize)
       continue;
+    Operation *def = acc.getDefiningOp();
     builder.setInsertionPoint(op.getOperation());
-    FailureOr<Value> dup = duplicateRegValue(builder, op.getLoc(), acc);
+    DuplicateRematPolicy rematPolicy =
+        canRematerialize ? DuplicateRematPolicy::CopyCostBounded
+                         : DuplicateRematPolicy::Never;
+    FailureOr<Value> dup =
+        duplicateRegValue(builder, op.getLoc(), acc, rematPolicy);
     if (failed(dup))
       return failure();
     op.setAcc(*dup);
+    eraseDeadCheapRegOps({def});
   }
   return success();
 }

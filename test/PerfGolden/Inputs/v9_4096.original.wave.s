@@ -345,10 +345,8 @@ v9_beyond_hotloop:
 		s_lshl_b32 s31, s31, 1
 		v_mov_b32_e32 v5, 0
 		v_mov_b64_e32 v[6:7], 0
-		v_mov_b32_e32 v96, v4
-		v_mov_b32_e32 v97, v5
-		v_mov_b32_e32 v98, v6
-		v_mov_b32_e32 v99, v7
+		v_mov_b64_e32 v[96:97], 0
+		v_mov_b64_e32 v[98:99], 0
 		v_mov_b64_e32 v[100:101], 0
 		v_mov_b64_e32 v[102:103], 0
 		v_mov_b64_e32 v[104:105], 0

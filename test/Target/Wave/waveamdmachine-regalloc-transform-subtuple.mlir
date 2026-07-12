@@ -229,6 +229,184 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>
   }
 
+  // PREP-LABEL: func.func @rematerialize_profitable_duplicate_loop_inits(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP: [[ONE:%.*]] = waveamdmachine.imm 1
+  // PREP: [[LO0:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP: [[LO1:%.*]] = waveamdmachine.v_mov_b32_tuple [[ONE]]
+  // PREP: [[INIT:%.*]] = waveamdmachine.tuple_from_elements [[LO0]], [[LO1]]
+  // PREP: [[DUP0:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP: [[DUP1:%.*]] = waveamdmachine.v_mov_b32_tuple [[ONE]]
+  // PREP: [[DUP:%.*]] = waveamdmachine.tuple_from_elements [[DUP0]], [[DUP1]]
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[INIT]], [[DUP]]
+  func.func @rematerialize_profitable_duplicate_loop_inits(
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %lo0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %lo1 = waveamdmachine.v_mov_b32_tuple %one {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %init = waveamdmachine.tuple_from_elements %lo0, %lo1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %loop:2 = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%init, %init : !waveamdmachine.reg<vgpr, 2>,
+                !waveamdmachine.reg<vgpr, 2>) {
+    ^bb0(%lhs: !waveamdmachine.reg<vgpr, 2>,
+         %rhs: !waveamdmachine.reg<vgpr, 2>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%lhs, %rhs : !waveamdmachine.reg<vgpr, 2>,
+                  !waveamdmachine.reg<vgpr, 2>)
+    } -> !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<vgpr, 2>
+    return
+  }
+
+  // PREP-LABEL: func.func @copy_expensive_duplicate_loop_inits(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP: [[ONE:%.*]] = waveamdmachine.imm 1
+  // PREP: [[BASE:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP: [[INIT:%.*]] = waveamdmachine.v_add_u32 [[BASE]], [[ONE]]
+  // PREP-NOT: waveamdmachine.v_add_u32
+  // PREP: [[COPY:%.*]] = waveamdmachine.copy_tuple [[INIT]]
+  // PREP-NOT: waveamdmachine.v_add_u32
+  // PREP: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[INIT]], [[COPY]]
+  func.func @copy_expensive_duplicate_loop_inits(
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %base = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    %init = waveamdmachine.v_add_u32 %base, %one
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %loop:2 = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%init, %init : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%lhs: !waveamdmachine.reg<vgpr, 1>,
+         %rhs: !waveamdmachine.reg<vgpr, 1>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%lhs, %rhs : !waveamdmachine.reg<vgpr, 1>,
+                  !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  // PREP-LABEL: func.func @copy_hardware_resource_loop_inits(
+  // PREP: {{%.*}}, [[VCC:%.*]] = waveamdmachine.v_add_u32_vcc
+  // PREP: [[SELECTED:%.*]] = waveamdmachine.v_cndmask_b32_vcc {{.*}}, [[VCC]]
+  // PREP-NOT: waveamdmachine.v_cndmask_b32_vcc
+  // PREP: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SELECTED]]
+  // PREP: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[SELECTED]], [[COPY]]
+  func.func @copy_hardware_resource_loop_inits(
+      %lhs: !waveamdmachine.reg<vgpr, 1>,
+      %rhs: !waveamdmachine.reg<vgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    %sum, %vcc = waveamdmachine.v_add_u32_vcc %lhs, %rhs
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    %selected = waveamdmachine.v_cndmask_b32_vcc %lhs, %sum, %vcc
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %loop:2 = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%selected, %selected : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%lhs_iter: !waveamdmachine.reg<vgpr, 1>,
+         %rhs_iter: !waveamdmachine.reg<vgpr, 1>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%lhs_iter, %rhs_iter : !waveamdmachine.reg<vgpr, 1>,
+                  !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  // PREP-LABEL: func.func @rematerialize_shared_mfma_accumulators(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: [[ACC0:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[MMA0:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, [[ACC0]]
+  // PREP: [[ACC1:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[MMA1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, [[ACC1]]
+  func.func @rematerialize_shared_mfma_accumulators()
+      -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>) {
+    %lhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+    %rhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %init = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+    %mma0 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs, %rhs, %init
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %mma1 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs, %rhs, %init
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    return %mma0, %mma1
+        : !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>
+  }
+
+  // PREP-LABEL: func.func @copy_expensive_shared_mfma_accumulator(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP: [[BASE:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP: [[INIT:%.*]] = waveamdmachine.v_mov_b32_tuple [[BASE]]
+  // PREP-NOT: waveamdmachine.v_mov_b32_tuple
+  // PREP: [[COPY0:%.*]] = waveamdmachine.copy_tuple [[INIT]]
+  // PREP-NEXT: [[MMA0:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, [[COPY0]]
+  // PREP-NOT: waveamdmachine.v_mov_b32_tuple
+  // PREP: [[COPY1:%.*]] = waveamdmachine.copy_tuple [[INIT]]
+  // PREP-NEXT: [[MMA1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, [[COPY1]]
+  func.func @copy_expensive_shared_mfma_accumulator()
+      -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>) {
+    %lhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+    %rhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %base = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+    %init = waveamdmachine.v_mov_b32_tuple %base {registers = 4 : i64}
+        : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %mma0 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs, %rhs, %init
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %mma1 = waveamdmachine.mfma_f32_16x16x32_f16 %lhs, %rhs, %init
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    return %mma0, %mma1
+        : !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>
+  }
+
+  // PREP-LABEL: func.func @keep_single_mfma_accumulator(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP-NEXT: [[ACC:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[UNRELATED:%.*]] = waveamdmachine.v_add_u32
+  // PREP-NEXT: waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, [[ACC]]
+  func.func @keep_single_mfma_accumulator()
+      -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>) {
+    %lhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+    %rhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4>
+    %scalar_lhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %scalar_rhs = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %init = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4>
+    %unrelated = waveamdmachine.v_add_u32 %scalar_lhs, %scalar_rhs
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mma = waveamdmachine.mfma_f32_16x16x32_f16 %lhs, %rhs, %init
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    return %mma, %unrelated
+        : !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>
+  }
+
   // PREP-LABEL: func.func @unaligned_reconstruction_copies(
   // PREP: [[COPY0:%.*]] = waveamdmachine.copy_tuple
   // PREP: [[COPY1:%.*]] = waveamdmachine.copy_tuple

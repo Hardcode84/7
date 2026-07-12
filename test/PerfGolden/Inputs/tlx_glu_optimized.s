@@ -728,10 +728,8 @@ tlx_addmm_glu_kernel_optimized:
 		s_cmp_lt_i32 0, s3
 		v_mov_b32_e32 v45, 0
 		v_mov_b64_e32 v[46:47], 0
-		v_mov_b32_e32 v108, v44
-		v_mov_b32_e32 v109, v45
-		v_mov_b32_e32 v110, v46
-		v_mov_b32_e32 v111, v47
+		v_mov_b64_e32 v[108:109], 0
+		v_mov_b64_e32 v[110:111], 0
 		v_mov_b64_e32 v[112:113], 0
 		v_mov_b64_e32 v[114:115], 0
 		v_mov_b64_e32 v[116:117], 0
