@@ -49,4 +49,67 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     waveamdmachine.s_endpgm
     return
   }
+
+  // CHECK-LABEL: func.func @regalloc_transform_loop_lds_restores_cloned_body_m0(
+  // CHECK: [[DST:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1,
+  // CHECK: [[USER_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
+  // CHECK-NEXT: [[SPILL_M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[SPILL_M0]]
+  // CHECK-NEXT: [[RESTORED_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b32 [[RELOAD]], {{%.*}}, {{%.*}}, [[RESTORED_M0]]
+  func.func @regalloc_transform_loop_lds_restores_cloned_body_m0()
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                  waveamdmachine.vgpr_count_max = 4 : i64,
+                  waveamdmachine.agpr_count_max = 0 : i64} {
+    %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+    %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+    %dst = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+    %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+    %carry_init, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+        : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %hot, %tok2 = waveamdmachine.global_load_b32 %off, %base after %tok1
+        : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+        : (!waveamdmachine.imm, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<scc, 1>
+    %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%carry_init : !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 1>):
+      %a, %tok3 = waveamdmachine.global_load_b32 %off, %base after %tok2
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+      %dma = waveamdmachine.buffer_load_lds_b32
+          %carry, %desc, %zero, %m0 after %tok3
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+             !waveamdmachine.imm, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      %b, %tok4 = waveamdmachine.global_load_b32 %off, %base after %dma
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %sum = waveamdmachine.v_add_u32 %a, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use_hot = waveamdmachine.v_add_u32 %hot, %sum
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>
+    %use_result = waveamdmachine.v_add_u32 %loop, %hot
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.s_endpgm
+    return
+  }
 }

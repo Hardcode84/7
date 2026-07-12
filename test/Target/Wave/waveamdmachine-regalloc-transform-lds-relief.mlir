@@ -114,6 +114,122 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
+    // CHECK-LABEL: func.func @lds_relief_restores_live_mov_m0(
+    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+    // CHECK: [[DST:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[DMA_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
+    // CHECK: waveamdmachine.global_load_b32
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0
+    // CHECK-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
+    // CHECK-NEXT: [[RESTORED_STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0
+    // CHECK-NEXT: {{%.*}}, {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
+    // CHECK-NEXT: [[RESTORED_LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
+    // CHECK: waveamdmachine.buffer_load_lds_b32 {{.*}}, {{.*}}, {{.*}}, [[RESTORED_LOAD_M0]]
+    func.func @lds_relief_restores_live_mov_m0()
+        attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+      %dst = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+      %spill, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %a, %tok2 = waveamdmachine.global_load_b32 %off, %base after %tok1
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %b, %tok3 = waveamdmachine.global_load_b32 %off, %base after %tok2
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %sum = waveamdmachine.v_add_u32 %a, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %dma = waveamdmachine.buffer_load_lds_b32 %spill, %desc, %zero, %m0
+          after %tok3
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+             !waveamdmachine.imm, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      %use = waveamdmachine.v_add_u32 %spill, %sum
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.s_endpgm
+      return
+    }
+
+    // CHECK-LABEL: func.func @lds_relief_restores_live_add_m0_and_scc(
+    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+    // CHECK: [[DST:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[INC:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: [[DMA_M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[DST]], [[INC]]
+    // CHECK: [[CMP:%.*]] = waveamdmachine.s_cmp_lt_i32 [[DST]], [[INC]]
+    // CHECK: waveamdmachine.global_load_b32
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0
+    // CHECK-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
+    // CHECK: [[SAVED_SCC:%.*]] = waveamdmachine.s_cselect_b32 [[CMP]],
+    // CHECK: [[RESTORED_STORE_M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[DST]], [[INC]]
+    // CHECK: [[RESTORED_STORE_SCC:%.*]] = waveamdmachine.s_cmp_lg_u32 [[SAVED_SCC]],
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0
+    // CHECK-NEXT: {{%.*}}, {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
+    // CHECK: [[SAVED_RESTORED_SCC:%.*]] = waveamdmachine.s_cselect_b32 [[RESTORED_STORE_SCC]],
+    // CHECK: [[RESTORED_LOAD_M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[DST]], [[INC]]
+    // CHECK: [[RESTORED_LOAD_SCC:%.*]] = waveamdmachine.s_cmp_lg_u32 [[SAVED_RESTORED_SCC]],
+    // CHECK: waveamdmachine.buffer_load_lds_b32 {{.*}}, {{.*}}, {{.*}}, [[RESTORED_LOAD_M0]]
+    // CHECK: waveamdmachine.s_cbranch_scc1 [[RESTORED_LOAD_SCC]]
+    func.func @lds_relief_restores_live_add_m0_and_scc()
+        attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+      %dst = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %inc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+      %m0, %m0_scc = waveamdmachine.s_add_m0_i32 %dst, %inc
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+      %cmp = waveamdmachine.s_cmp_lt_i32 %dst, %inc
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<scc, 1>
+      %spill, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %a, %tok2 = waveamdmachine.global_load_b32 %off, %base after %tok1
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %b, %tok3 = waveamdmachine.global_load_b32 %off, %base after %tok2
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %sum = waveamdmachine.v_add_u32 %a, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %dma = waveamdmachine.buffer_load_lds_b32 %spill, %desc, %zero, %m0
+          after %tok3
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+             !waveamdmachine.imm, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.s_cbranch_scc1 %cmp
+          : !waveamdmachine.reg<scc, 1>, "taken"
+      %use = waveamdmachine.v_add_u32 %spill, %sum
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.s_endpgm
+      return
+    }
+
     // CHECK-LABEL: func.func @lds_relief_prefers_outside_loop_bridges(
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK: [[OFF:%.*]] = waveamdmachine.v_workitem_id_x

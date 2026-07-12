@@ -523,6 +523,149 @@ static void replaceSCCUsesAtOrAfter(Value oldSCC, Value newSCC,
   }
 }
 
+static bool isM0Value(Value value) {
+  return wave::getHardwareResourceForValue(value) ==
+         wave::HardwareResourceKind::M0;
+}
+
+static Value findNestedM0Capture(Operation *owner, Region &region) {
+  for (Block &block : region) {
+    for (Operation &nested : block) {
+      for (Value operand : nested.getOperands())
+        if (isM0Value(operand) && !isDefinedInside(owner, operand))
+          return operand;
+      for (Region &child : nested.getRegions())
+        if (Value capture = findNestedM0Capture(owner, child))
+          return capture;
+    }
+  }
+  return {};
+}
+
+static Value findM0Read(Operation *op) {
+  for (Value operand : op->getOperands())
+    if (isM0Value(operand))
+      return operand;
+  for (Region &region : op->getRegions())
+    if (Value capture = findNestedM0Capture(op, region))
+      return capture;
+  return {};
+}
+
+static bool writesM0(Operation *op) {
+  if (llvm::is_contained(wave::getHardwareResourceEffects(op).writes,
+                         wave::HardwareResourceKind::M0))
+    return true;
+  return op
+      ->walk([&](Operation *nested) {
+        if (nested != op &&
+            llvm::is_contained(wave::getHardwareResourceEffects(nested).writes,
+                               wave::HardwareResourceKind::M0))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+static Value findLiveM0At(Operation *point) {
+  for (Operation *op = point; op; op = op->getNextNode()) {
+    if (Value read = findM0Read(op))
+      return read;
+    if (writesM0(op))
+      return {};
+  }
+  return {};
+}
+
+static void replaceM0UsesAtOrAfter(Value oldM0, Value newM0, Operation *point) {
+  for (OpOperand &use : llvm::make_early_inc_range(oldM0.getUses())) {
+    Operation *owner = getAncestorInBlock(use.getOwner(), point->getBlock());
+    if (owner && (owner == point || point->isBeforeInBlock(owner)))
+      use.set(newM0);
+  }
+}
+
+static LogicalResult restoreLiveM0(OpBuilder &builder, Value liveM0,
+                                   Operation *point) {
+  if (!liveM0)
+    return success();
+
+  // LDS relief writes physical M0 outside SSA aliasing; recreate live user M0.
+  builder.setInsertionPoint(point);
+  Operation *restore = nullptr;
+  Value restoredM0;
+  Value liveSCC;
+  Value savedSCC;
+  if (waveamdmachine::SMovM0Op mov =
+          liveM0.getDefiningOp<waveamdmachine::SMovM0Op>()) {
+    waveamdmachine::SMovM0Op restored = waveamdmachine::SMovM0Op::create(
+        builder, point->getLoc(), liveM0.getType(), mov.getSource());
+    restore = restored;
+    restoredM0 = restored.getResult();
+  } else if (waveamdmachine::SAddM0I32Op add =
+                 liveM0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    liveSCC = findLiveSCCAt(point);
+    if (liveSCC && liveSCC != add.getScc()) {
+      Value one = createImm(builder, point->getLoc(), 1);
+      Value zero = createImm(builder, point->getLoc(), 0);
+      waveamdmachine::SCSelectB32Op saved =
+          waveamdmachine::SCSelectB32Op::create(
+              builder, point->getLoc(), getVirtualSGPR1(builder.getContext()),
+              liveSCC, one, zero);
+      markRegAllocTemp(saved, builder);
+      savedSCC = saved.getResult();
+    }
+    waveamdmachine::SAddM0I32Op restored = waveamdmachine::SAddM0I32Op::create(
+        builder, point->getLoc(), liveM0.getType(), add.getScc().getType(),
+        add.getLhs(), add.getRhs());
+    restore = restored;
+    restoredM0 = restored.getM0();
+    if (liveSCC == add.getScc()) {
+      replaceSCCUsesAtOrAfter(liveSCC, restored.getScc(), point);
+    } else if (savedSCC) {
+      Value zero = createImm(builder, point->getLoc(), 0);
+      waveamdmachine::SCmpLgU32Op reloaded =
+          waveamdmachine::SCmpLgU32Op::create(
+              builder, point->getLoc(), liveSCC.getType(), savedSCC, zero);
+      markRegAllocTemp(reloaded, builder);
+      replaceSCCUsesAtOrAfter(liveSCC, reloaded.getResult(), point);
+    }
+  } else {
+    return point->emitError("regalloc LDS relief cannot restore live M0 value");
+  }
+
+  markRegAllocTemp(restore, builder);
+  replaceM0UsesAtOrAfter(liveM0, restoredM0, point);
+  return success();
+}
+
+static Operation *getInsertionPointOp(OpBuilder &builder) {
+  Block *block = builder.getInsertionBlock();
+  if (!block || builder.getInsertionPoint() == block->end())
+    return nullptr;
+  return &*builder.getInsertionPoint();
+}
+
+static LogicalResult restoreGeneratedLDSM0(func::FuncOp func,
+                                           OpBuilder &builder) {
+  SmallVector<Operation *, 16> boundaries;
+  func.walk([&](Operation *op) {
+    if (wave::regalloc::isRegAllocTempOp(op) &&
+        isa<waveamdmachine::DsLoadAddTidB32Op,
+            waveamdmachine::DsStoreAddTidB32Op>(op))
+      boundaries.push_back(op);
+  });
+  // Loop cloning can append spills before their future users exist.
+  for (Operation *boundary : boundaries) {
+    Operation *point = boundary->getNextNode();
+    if (!point)
+      continue;
+    if (failed(restoreLiveM0(builder, findLiveM0At(point), point)))
+      return failure();
+  }
+  return success();
+}
+
 static bool allResultsUnused(Operation *op) {
   return llvm::all_of(op->getResults(),
                       [](Value result) { return result.use_empty(); });
@@ -655,10 +798,17 @@ static FailureOr<Value>
 storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
                 Location loc, Value value, waveamdmachine::RegType type,
                 Value token, ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+  Operation *point = getInsertionPointOp(builder);
+  Value liveM0 = point ? findLiveM0At(point) : Value{};
   unsigned width = type.getWidth();
-  if (width == 1)
-    return storeLDSScalarValue(builder, context, loc, value, token,
-                               plans.front());
+  if (width == 1) {
+    FailureOr<Value> stored =
+        storeLDSScalarValue(builder, context, loc, value, token, plans.front());
+    if (failed(stored) ||
+        (point && failed(restoreLiveM0(builder, liveM0, point))))
+      return failure();
+    return stored;
+  }
 
   SmallVector<Value> elements =
       wave::regalloc::splitMemorySpillValue(value, builder, loc);
@@ -672,7 +822,11 @@ storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
     tokens.push_back(*stored);
   }
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-  return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc);
+  Value joined =
+      wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc);
+  if (point && failed(restoreLiveM0(builder, liveM0, point)))
+    return failure();
+  return joined;
 }
 
 static FailureOr<Value> storeLDSValue(OpBuilder &builder,
@@ -704,10 +858,17 @@ static FailureOr<wave::regalloc::MemorySpillLoadResult>
 loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
              Type type, Value token,
              ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
+  Operation *point = getInsertionPointOp(builder);
+  Value liveM0 = point ? findLiveM0At(point) : Value{};
   unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
-  if (width == 1)
-    return loadLDSScalarValue(builder, context, loc, type, token,
-                              plans.front());
+  if (width == 1) {
+    FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
+        loadLDSScalarValue(builder, context, loc, type, token, plans.front());
+    if (failed(loaded) ||
+        (point && failed(restoreLiveM0(builder, liveM0, point))))
+      return failure();
+    return loaded;
+  }
 
   SmallVector<Type> elementTypes =
       wave::regalloc::getMemorySpillScalarRegTypes(type);
@@ -724,9 +885,12 @@ loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
     tokens.push_back(load->token);
   }
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
-  return wave::regalloc::MemorySpillLoadResult{
+  wave::regalloc::MemorySpillLoadResult result{
       wave::regalloc::joinMemorySpillValue(type, elements, builder, loc),
       wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc)};
+  if (point && failed(restoreLiveM0(builder, liveM0, point)))
+    return failure();
+  return result;
 }
 
 static void reserveLDSSpillBytes(func::FuncOp func, OpBuilder &builder,
@@ -762,8 +926,10 @@ static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
     return storeLDSValueAt(builder, context, loc, value, slot.type, token,
                            slot.plan);
   };
-  return materializeMemoryRelief<LDSReliefSlot>(builder, candidate, store, load,
-                                                reserve, loopStore);
+  if (failed(materializeMemoryRelief<LDSReliefSlot>(builder, candidate, store,
+                                                    load, reserve, loopStore)))
+    return failure();
+  return restoreGeneratedLDSM0(func, builder);
 }
 
 static unsigned countLDSReliefDwords(const LDSReliefCandidate &candidate) {
