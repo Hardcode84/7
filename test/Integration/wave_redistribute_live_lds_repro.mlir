@@ -1,10 +1,14 @@
-// RUN: not wave-translate --wave-to-amdgpu-asm %s 2>&1 \
-// RUN:   | FileCheck %s
+// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
+// RUN: wave-translate --wave-to-amdgpu-asm %s \
+// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
-// CHECK: error: waveamd-resource-info LDS usage 269216 bytes exceeds target-addressable capacity 163840 bytes
-
-// Unresolved live allocations remain invisible to redistribution capacity planning.
-// Early allocation resolution forbids valid reuse between disjoint lifetimes.
+// ASM-LABEL: redistribute_with_live_unresolved_lds:
+// ASM: ds_write_b16
+// ASM: ds_write_b64
+// ASM-COUNT-11: s_barrier
+// ASM: ds_read_b64
+// ASM: ds_read_u16
+// ASM: .amdhsa_group_segment_fixed_size 162720
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @redistribute_with_live_unresolved_lds(

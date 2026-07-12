@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
+#include "mlir/Dialect/Wave/Transforms/WaveLDSAllocation.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -1198,37 +1199,35 @@ static FailureOr<int64_t> getScratchLDSCapacity(func::FuncOp func) {
   return capacity;
 }
 
-static FailureOr<int64_t> getReservedLDSBytes(func::FuncOp func) {
-  FailureOr<int64_t> fixed = getNonNegativeLDSAttr(func, "wave.lds_size");
+static FailureOr<int64_t> getNonAllocationLDSBytes(func::FuncOp func) {
   FailureOr<int64_t> dynamic =
       getNonNegativeLDSAttr(func, "wave.dynamic_lds_size");
   FailureOr<int64_t> spill =
       getNonNegativeLDSAttr(func, "waveamdmachine.lds_spill_bytes");
-  if (failed(fixed) || failed(dynamic) || failed(spill))
+  if (failed(dynamic) || failed(spill))
     return failure();
-  // Scratch transfer alignment is capped at 128 bits.
-  std::optional<int64_t> alignedFixed = llvm::checkedAdd(*fixed, int64_t{15});
-  if (alignedFixed)
-    *alignedFixed = *alignedFixed / 16 * 16;
-  std::optional<int64_t> reserved =
-      alignedFixed ? llvm::checkedAdd(*alignedFixed, *dynamic) : std::nullopt;
-  reserved = reserved ? llvm::checkedAdd(*reserved, *spill) : std::nullopt;
+  std::optional<int64_t> reserved = llvm::checkedAdd(*dynamic, *spill);
   if (!reserved)
-    return func.emitError("aggregate reserved LDS byte count overflows i64");
+    return func.emitError("non-allocation LDS byte count overflows i64");
   return *reserved;
 }
 
 static FailureOr<std::optional<int64_t>>
-getRemainingScratchBytes(func::FuncOp func) {
+getRemainingScratchBytes(func::FuncOp func, RedistributeOp op, Value dependency,
+                         ArrayRef<Value> ignoredAllocations = {}) {
   if (!waveamdmachine::findAMDGPUTargetModule(func))
     return std::optional<int64_t>();
   FailureOr<int64_t> capacity = getScratchLDSCapacity(func);
-  FailureOr<int64_t> reserved = getReservedLDSBytes(func);
+  FailureOr<int64_t> reserved = getNonAllocationLDSBytes(func);
   if (failed(capacity) || failed(reserved))
     return failure();
   if (*reserved >= *capacity)
     return std::optional<int64_t>(0);
-  return std::optional<int64_t>(*capacity - *reserved);
+  FailureOr<int64_t> available = getWaveLDSLargestFreeRange(
+      func, op, *capacity - *reserved, dependency, ignoredAllocations);
+  if (failed(available))
+    return failure();
+  return std::optional<int64_t>(*available);
 }
 
 static std::pair<int64_t, int64_t>
@@ -1505,17 +1504,31 @@ struct ScratchLoads {
 
 struct ScratchSequence {
   Value completion;
+  Value allocation;
   Operation *cursor = nullptr;
-  int64_t scratchBytes = 0;
+};
+
+struct ScratchCapacity {
+  std::optional<int64_t> stageBytes;
+  std::optional<int64_t> overlapBytes;
+  Value dependency;
 };
 
 using ScratchSequenceMap = DenseMap<Block *, ScratchSequence>;
+
+static Value findPrecedingBarrier(RedistributeOp op) {
+  for (Operation *cursor = op->getPrevNode(); cursor;
+       cursor = cursor->getPrevNode())
+    if (BarrierOp barrier = dyn_cast<BarrierOp>(cursor))
+      return barrier.getToken();
+  return {};
+}
 
 static Value advanceScratchSequence(IRRewriter &rewriter, RedistributeOp op,
                                     ScratchSequenceMap &sequences) {
   auto it = sequences.find(op->getBlock());
   if (it == sequences.end())
-    return {};
+    return findPrecedingBarrier(op);
 
   Value dependency = it->second.completion;
   Operation *cursor = it->second.cursor->getNextNode();
@@ -1534,6 +1547,31 @@ static Value advanceScratchSequence(IRRewriter &rewriter, RedistributeOp op,
     dependency = barrier.getToken();
   }
   return dependency;
+}
+
+static FailureOr<ScratchCapacity>
+getScratchCapacity(IRRewriter &rewriter, RedistributeOp op, func::FuncOp func,
+                   ScratchSequenceMap &sequences) {
+  ScratchCapacity capacity;
+  capacity.dependency = advanceScratchSequence(rewriter, op, sequences);
+  SmallVector<Value, 1> ignoredAllocations;
+  auto previous = sequences.find(op->getBlock());
+  if (previous != sequences.end())
+    ignoredAllocations.push_back(previous->second.allocation);
+  FailureOr<std::optional<int64_t>> stageBytes = getRemainingScratchBytes(
+      func, op, capacity.dependency, ignoredAllocations);
+  if (failed(stageBytes))
+    return failure();
+  capacity.stageBytes = *stageBytes;
+  capacity.overlapBytes = *stageBytes;
+  if (ignoredAllocations.empty())
+    return capacity;
+  FailureOr<std::optional<int64_t>> overlapBytes =
+      getRemainingScratchBytes(func, op, capacity.dependency);
+  if (failed(overlapBytes))
+    return failure();
+  capacity.overlapBytes = *overlapBytes;
+  return capacity;
 }
 
 static FailureOr<ScratchLoads>
@@ -1611,13 +1649,12 @@ static Value retireScratchSequence(IRRewriter &rewriter, RedistributeOp op,
 
 static bool mustRetireScratch(RedistributeOp op,
                               const ScratchSequenceMap &sequences,
-                              std::optional<int64_t> scratchBudget,
+                              std::optional<int64_t> overlapBudget,
                               int64_t scratchBytes) {
-  if (!scratchBudget)
+  if (!overlapBudget)
     return false;
   auto previous = sequences.find(op->getBlock());
-  return previous != sequences.end() &&
-         previous->second.scratchBytes > *scratchBudget - scratchBytes;
+  return previous != sequences.end() && scratchBytes > *overlapBudget;
 }
 
 static FailureOr<ScratchLoads>
@@ -1661,13 +1698,14 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
   FailureOr<int64_t> scratchBytes = getScratchBytes(op);
   if (failed(scratchBytes))
     return failure();
-  FailureOr<std::optional<int64_t>> scratchBudget =
-      getRemainingScratchBytes(func);
-  if (failed(scratchBudget))
+  Type tokenType = MemTokenType::get(op.getContext());
+  FailureOr<ScratchCapacity> capacity =
+      getScratchCapacity(rewriter, op, func, sequences);
+  if (failed(capacity))
     return failure();
   int64_t waveWidth = cast<SimdType>(op.getSource().getType()).getWidth();
-  FailureOr<ScratchPlan> plan = buildScratchPlan(store, op, domain, waveWidth,
-                                                 *scratchBytes, *scratchBudget);
+  FailureOr<ScratchPlan> plan = buildScratchPlan(
+      store, op, domain, waveWidth, *scratchBytes, capacity->stageBytes);
   if (failed(plan))
     return failure();
   VectorType sourcePacket = getPacketType(op.getSource().getType());
@@ -1682,9 +1720,9 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                      static_cast<uint64_t>(transferBytes));
   RelationMaterializer materializer(rewriter, op, store, domain);
   SmallVector<Value> source = extractComponents(rewriter, op);
-  Type tokenType = MemTokenType::get(op.getContext());
-  Value dependency = advanceScratchSequence(rewriter, op, sequences);
-  if (mustRetireScratch(op, sequences, *scratchBudget, plan->scratchBytes))
+  Value dependency = capacity->dependency;
+  if (mustRetireScratch(op, sequences, capacity->overlapBytes,
+                        plan->scratchBytes))
     dependency = retireScratchSequence(rewriter, op, tokenType, dependency);
 
   FailureOr<sym::ExprHandle> sourceWithin =
@@ -1722,8 +1760,7 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
   AllocReleaseOp released =
       AllocReleaseOp::create(rewriter, op.getLoc(), tokenType, allocation,
                              completed, rewriter.getUnitAttr());
-  sequences[op->getBlock()] = {released.getToken(), released,
-                               plan->scratchBytes};
+  sequences[op->getBlock()] = {released.getToken(), allocation, released};
   rewriter.replaceOp(op, packed);
   return success();
 }

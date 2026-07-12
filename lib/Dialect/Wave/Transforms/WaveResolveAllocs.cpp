@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
+#include "mlir/Dialect/Wave/Transforms/WaveLDSAllocation.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -783,6 +784,126 @@ static LogicalResult analyzeAllocations(func::FuncOp func,
   return collectAllocationIntervals(order, *analysis.ordering, analysis.allocs);
 }
 
+static FailureOr<int64_t> getFixedLDSBytes(func::FuncOp func) {
+  IntegerAttr attr = func->getAttrOfType<IntegerAttr>("wave.lds_size");
+  int64_t bytes = attr ? attr.getInt() : 0;
+  if (bytes < 0)
+    return func.emitError("wave.lds_size must be non-negative");
+  return bytes;
+}
+
+static bool isRetiredAtPoint(AllocInterval &interval, Operation *point,
+                             unsigned position, Value dependency,
+                             const DenseSet<Value> &ignoredAllocations,
+                             TokenOrdering &ordering) {
+  if (interval.end >= position)
+    return false;
+  if (interval.hasUntrackedAccess)
+    return false;
+  if (ignoredAllocations.contains(interval.op.getResult()))
+    return true;
+  if (interval.completionTokens.empty())
+    return true;
+  if (!dependency)
+    return false;
+  if (!getCommonEnclosingRepetitiveRegions(interval.op, point).empty())
+    return false;
+  return llvm::all_of(interval.completionTokens, [&](Value completion) {
+    return interval.collectivelyComplete
+               ? ordering.dependsOn(dependency, completion)
+               : ordering.dependsOnThroughBarrier(dependency, completion);
+  });
+}
+
+static FailureOr<int64_t>
+findLargestAlignedGap(ArrayRef<PlacedAllocation> blocked, int64_t baseOffset,
+                      int64_t capacity) {
+  int64_t cursor = baseOffset;
+  int64_t largest = 0;
+  for (const PlacedAllocation &entry : blocked) {
+    FailureOr<int64_t> aligned = alignUp(cursor, 16);
+    if (failed(aligned) ||
+        entry.offset > std::numeric_limits<int64_t>::max() - entry.bytes)
+      return failure();
+    int64_t gapEnd = std::min(entry.offset, capacity);
+    if (*aligned < gapEnd)
+      largest = std::max(largest, gapEnd - *aligned);
+    cursor = std::max(cursor, entry.offset + entry.bytes);
+    if (cursor >= capacity)
+      return largest;
+  }
+  FailureOr<int64_t> aligned = alignUp(cursor, 16);
+  if (failed(aligned))
+    return failure();
+  if (*aligned < capacity)
+    largest = std::max(largest, capacity - *aligned);
+  return largest;
+}
+
+static LogicalResult analyzeCurrentAllocations(func::FuncOp func,
+                                               int64_t fixedBytes,
+                                               AllocationAnalysis &analysis) {
+  SmallVector<AllocOp> ops;
+  SmallVector<AllocReleaseOp> releases;
+  func.walk([&](AllocOp op) { ops.push_back(op); });
+  func.walk([&](AllocReleaseOp op) { releases.push_back(op); });
+  if (ops.empty())
+    return success();
+  if (failed(analyzeAllocations(func, ops, releases, analysis)))
+    return failure();
+  if (failed(assignOffsets(analysis.allocs, fixedBytes, *analysis.ordering)))
+    return func.emitError("failed to analyze wave.alloc placement");
+  return success();
+}
+
+static SmallVector<PlacedAllocation>
+collectBlockedAllocations(AllocationAnalysis &analysis, Operation *point,
+                          unsigned position, Value dependency,
+                          ArrayRef<Value> ignoredAllocations) {
+  DenseSet<Value> ignored;
+  for (Value allocation : ignoredAllocations)
+    ignored.insert(allocation);
+  SmallVector<PlacedAllocation> blocked;
+  for (auto [index, interval] : llvm::enumerate(analysis.allocs)) {
+    if (isRetiredAtPoint(interval, point, position, dependency, ignored,
+                         *analysis.ordering))
+      continue;
+    blocked.push_back(
+        {interval.offset, interval.bytes, static_cast<unsigned>(index)});
+  }
+  llvm::sort(blocked,
+             [](const PlacedAllocation &lhs, const PlacedAllocation &rhs) {
+               return lhs.offset < rhs.offset;
+             });
+  return blocked;
+}
+
+static FailureOr<int64_t>
+getLDSLargestFreeRangeImpl(func::FuncOp func, Operation *point,
+                           int64_t capacity, Value dependency,
+                           ArrayRef<Value> ignoredAllocations) {
+  FailureOr<int64_t> fixedBytes = getFixedLDSBytes(func);
+  if (failed(fixedBytes))
+    return failure();
+  if (capacity <= *fixedBytes)
+    return 0;
+
+  AllocationAnalysis analysis;
+  if (failed(analyzeCurrentAllocations(func, *fixedBytes, analysis)))
+    return failure();
+  SmallVector<PlacedAllocation> blocked;
+  if (!analysis.allocs.empty()) {
+    OperationOrder order(func);
+    blocked = collectBlockedAllocations(analysis, point, order.lookup(point),
+                                        dependency, ignoredAllocations);
+  }
+  FailureOr<int64_t> largest =
+      findLargestAlignedGap(blocked, *fixedBytes, capacity);
+  if (failed(largest))
+    return func.emitError("failed to analyze available LDS ranges");
+  return *largest;
+}
+
 static LogicalResult materializeAndReanalyzeRepeatedLifetimes(
     func::FuncOp func, ArrayRef<AllocOp> ops, ArrayRef<AllocReleaseOp> releases,
     IRRewriter &rewriter, AllocationAnalysis &analysis) {
@@ -807,10 +928,9 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
   if (ops.empty() && releases.empty())
     return success();
 
-  IntegerAttr fixedAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size");
-  int64_t fixedBytes = fixedAttr ? fixedAttr.getInt() : 0;
-  if (fixedBytes < 0)
-    return func.emitError("wave.lds_size must be non-negative");
+  FailureOr<int64_t> fixedBytes = getFixedLDSBytes(func);
+  if (failed(fixedBytes))
+    return failure();
 
   AllocationAnalysis analysis;
   if (failed(analyzeAllocations(func, ops, releases, analysis)))
@@ -820,7 +940,7 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
     return failure();
 
   FailureOr<int64_t> plannedBytes =
-      assignOffsets(analysis.allocs, fixedBytes, *analysis.ordering);
+      assignOffsets(analysis.allocs, *fixedBytes, *analysis.ordering);
   if (failed(plannedBytes))
     return func.emitError("failed to place wave.alloc storage");
 
@@ -853,3 +973,11 @@ struct WaveResolveAllocsPass
 };
 
 } // namespace
+
+FailureOr<int64_t>
+mlir::wave::getWaveLDSLargestFreeRange(func::FuncOp func, Operation *point,
+                                       int64_t capacity, Value dependency,
+                                       ArrayRef<Value> ignoredAllocations) {
+  return getLDSLargestFreeRangeImpl(func, point, capacity, dependency,
+                                    ignoredAllocations);
+}

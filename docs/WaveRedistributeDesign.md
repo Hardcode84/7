@@ -365,20 +365,24 @@ broadcasts. Minimum combined read/write conflict count wins; equal scores keep
 the simpler map. This follows Triton's rule: preserve common vectorization,
 then choose one shared map for both directions.
 
-Target lowering computes scratch capacity after fixed, dynamic, and spill LDS.
-One stage holds all source vector groups when that fits. Otherwise each
-destination vector group contributes its minimum contiguous source-group
-window. Greedy maximal destination prefixes form stages whose merged windows
-fit capacity. Each stage stores only its window, publishes it, and loads its
-destination prefix. Its local source-group origin is subtracted from load
-addresses before applying `P`.
+Target lowering asks generic allocation analysis for the largest aligned LDS
+range available at each redistribution. The query includes unresolved
+`wave.alloc` lifetimes, fixed LDS, dynamic LDS, spill LDS, explicit token
+ordering, and provisional generic placement without rewriting IR. One stage
+holds all source vector groups when that fits. Otherwise each destination
+vector group contributes its minimum contiguous source-group window. Greedy
+maximal destination prefixes form stages whose merged windows fit capacity.
+Each stage stores only its window, publishes it, and loads its destination
+prefix. Its local source-group origin is subtracted from load addresses before
+applying `P`.
 
 An `N`-stage exchange emits `N` publish barriers and `N - 1` barriers before
 overwriting scratch: `2N - 1` total. Vector width is fixed across stages;
 swizzling is scored per stage. Consecutive exchanges retain the one-barrier
-ping-pong path while their scratch high-water marks fit together. Otherwise a
+ping-pong path while the current stage fits beside prior scratch. A second
+capacity query omits that dead scratch range; when only that range fits, a
 barrier retires the earlier release and both allocations alias the same LDS.
-This is Triton's `reps` shape with rounds chosen from target capacity.
+This is Triton's `reps` shape with rounds chosen from live target capacity.
 
 Padding, multi-base physical partitions, and allocation placement remain
 generic scratch-allocation policies. They can extend `P` without changing the
@@ -604,6 +608,8 @@ No failure fabricates values or silently changes the relation.
   publish barrier per conversion.
 - Capacity-limited exchanges use staged source-group windows and stay within
   target-addressable LDS.
+- Live unresolved allocations reduce stage capacity without becoming a fixed
+  LDS prefix; explicitly retired ranges remain reusable.
 - Consecutive stages and capacity-forced allocation reuse cross explicit
   workgroup barriers.
 - Token-only lifetime order cannot alias workgroup storage; the path must cross
