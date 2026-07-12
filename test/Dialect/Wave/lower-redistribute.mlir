@@ -116,13 +116,14 @@ func.func @same_wave_uniform_if(%source: !wave.simd<vector<1xi32>, 32>,
 
 // CHECK-LABEL: func.func @cross_wave(
 // CHECK: %[[ALLOC:.*]] = wave.alloc()
-// CHECK-DAG: %[[STORE0:.*]] = wave.store
-// CHECK-DAG: %[[STORE1:.*]] = wave.store
-// CHECK: %[[PUBLISH:.*]] = wave.barrier %[[STORE0]], %[[STORE1]]
-// CHECK-DAG: %[[LOAD0:.*]], %[[LOADTOK0:.*]] = wave.load {{.*}} after %[[PUBLISH]]
-// CHECK-DAG: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH]]
+// CHECK: %[[STOREVAL:.*]] = wave.pack {{.*}} -> !wave.simd<vector<2xi32>, 32>
+// CHECK: %[[STORE:.*]] = wave.store %[[STOREVAL]]
+// CHECK: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
+// CHECK: %[[LOAD:.*]], %[[LOADTOK:.*]] = wave.load {{.*}} after %[[PUBLISH]] {{.*}} -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK: %[[LOAD0:.*]] = wave.extract %[[LOAD]][0]
+// CHECK: %[[LOAD1:.*]] = wave.extract %[[LOAD]][1]
 // CHECK: %[[PACK:.*]] = wave.pack %[[LOAD0]], %[[LOAD1]]
-// CHECK: %[[DONE:.*]] = wave.join %[[LOADTOK0]], %[[LOADTOK1]]
+// CHECK: %[[DONE:.*]] = wave.join %[[LOADTOK]]
 // CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
 // CHECK-NOT: wave.redistribute
 func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
@@ -131,6 +132,72 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
   %result = wave.redistribute %source,
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_swizzled_vector(
+// CHECK: %[[ALLOC:.*]] = wave.alloc() {align = 8 : i64, bytesize = 1024 : i64}
+// CHECK: wave.pack {{.*}} -> !wave.simd<vector<2xi32>, 32>
+// CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi32>, 32>
+// CHECK: wave.index_expr <"2*(64 + xor(8, item))">
+// CHECK: wave.pack {{.*}} -> !wave.simd<vector<2xi32>, 32>
+// CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi32>, 32>
+// CHECK: %[[PUBLISH:.*]] = wave.barrier
+// CHECK: wave.index_expr <"{{.*}}xor{{.*}}">
+// CHECK: %[[LOAD:.*]], %[[TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]] {{.*}} -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK: wave.extract %[[LOAD]][0]
+// CHECK: wave.extract %[[LOAD]][1]
+// CHECK: wave.join %[[TOKEN]]
+func.func @cross_wave_swizzled_vector(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<vector<2xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(floor(item / 2), 32)",
+       source_slot = "2*Mod(item, 2) + slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_swizzled_64_banks(
+// CHECK: wave.index_expr <"2*(64 + xor(16, item))">
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"
+} {
+  func.func @cross_wave_swizzled_64_banks(
+      %source: !wave.simd<vector<4xi32>, 32>)
+      -> !wave.simd<vector<2xi32>, 32>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %result = wave.redistribute %source,
+        <blocks = 1, items = 64, source_block = "block",
+         source_item = "xor(floor(item / 2), 32)",
+         source_slot = "2*Mod(item, 2) + slot">
+        : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+    return %result : !wave.simd<vector<2xi32>, 32>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_vector_select(
+// CHECK: %[[LOAD:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK: %[[LO:.*]] = wave.extract %[[LOAD]][0]
+// CHECK: %[[HI:.*]] = wave.extract %[[LOAD]][1]
+// CHECK-COUNT-2: wave.select {{.*}}, %[[HI]], %[[LO]]
+func.func @cross_wave_vector_select(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<vector<2xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)",
+       source_slot = "2*Mod(item, 2) + xor(slot, Mod(item, 2))">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
 }
 

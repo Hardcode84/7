@@ -278,8 +278,7 @@ Local lowering introduces no memory token or workgroup barrier.
 ## Workgroup LDS Lowering
 
 This path first proves `source_block == block`. Each block gets independent
-LDS. The correctness-first scratch layout gives every block-local source
-coordinate a unique cell:
+LDS. Logical source coordinates remain unique:
 
 ```text
 scratch_index(item, slot) = item * source_slots + slot
@@ -331,15 +330,40 @@ ordinary explicit-token contract.
 
 ### Scratch optimization
 
-The planner may replace the canonical layout with a proven bijection:
+The planner lowers them through one physical bijection:
 
 ```text
 physical_cell = P(item, slot)
 ```
 
-Store and load addressing use the same `P`. Swizzling, padding, row stride,
-bank-conflict avoidance, and vector packetization belong here. They do not
-change the redistribution relation.
+Store and load addressing use the same `P`. The current planner first chooses
+the largest power-of-two vector, at most 128 bits, that divides both packet
+widths. Finite relation evaluation must prove every destination vector reads
+one source item and one source vector group. Component order inside that group
+may differ. Finite selector inference uses direct extracts for fixed component
+orders and emits per-lane selection only when the relation requires it.
+
+Scratch uses a group-major AoSoA map:
+
+```text
+group = floor(slot / vec)
+phase = Mod(floor(group / per_phase), max_phase)
+physical_item = xor(item, phase * item_stride)
+P(item, slot) =
+  (group * items + physical_item) * vec + Mod(slot, vec)
+```
+
+`per_phase`, `max_phase`, and `item_stride` are powers of two. XOR changes only
+low item bits, so each candidate stays bijective over the static item domain.
+The planner enumerates legal candidates and scores every vector store and load
+against the target's 32- or 64-bank LDS phases. Repeated addresses count as
+broadcasts. Minimum combined read/write conflict count wins; equal scores keep
+the simpler map. This follows Triton's rule: preserve common vectorization,
+then choose one shared map for both directions.
+
+Padding, multi-base physical partitions, and allocation placement remain
+generic scratch-allocation policies. They can extend `P` without changing the
+operation or its redistribution relation.
 
 The storage codec must preserve `T` bits. Directly storable payloads use Wave
 memory operations. Other payloads require a structural, equal-bitwidth codec,
@@ -466,9 +490,9 @@ the same normalization. Values remain `!wave.simd<vector<...>, W>` during
 redistribution. WaveAMD fragments may be constructed immediately around MMA
 emission; they are not layout carriers.
 
-Shared-memory layouts do not enter this value-to-value operation. Their padded,
-swizzled, partitioned, or rotating physical offsets remain a separate memory
-layout problem.
+Shared-memory layouts do not enter this value-to-value operation. Lowering owns
+swizzled physical offsets; padded, partitioned, or rotating placement remains a
+scratch-allocation concern.
 
 ## Pass Placement
 
@@ -548,6 +572,10 @@ No failure fabricates values or silently changes the relation.
 - Cross-wave conversion emits sibling stores, publish barrier, sibling loads,
   joined logical release with explicit token edges, and no eager release
   barrier.
+- Cross-wave vectors use the widest common transaction up to 128 bits.
+- Conflict-heavy maps select different XOR phases on 32- and 64-bank targets.
+- Exact FA8K blocked-to-dot repro emits 16 `vector<8xbf16>` stores, 16 loads,
+  one barrier, and no component selects.
 - Three straight-line cross-wave conversions use two scratch slots and one
   publish barrier per conversion.
 - Token-only lifetime order cannot alias workgroup storage; the path must cross
@@ -597,6 +625,8 @@ measurement before golden replacement.
 - Current backend lowers same-block, block-independent relations and diagnoses
   missing cluster support otherwise.
 - Cross-wave lowering emits explicit LDS token and barrier edges.
+- Cross-wave scratch uses one target-scored vector/swizzle map for stores and
+  loads.
 - Scratch reuse and aggregate LDS capacity stay in generic allocation/resource
   planning.
 - Internal barriers do not become user-visible memory-ordering semantics.
