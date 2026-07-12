@@ -1,6 +1,6 @@
 // RUN: not wave-translate --wave-to-amdgpu-asm %s 2>&1 | FileCheck %s
 
-// CHECK: error: waveamd-resource-info LDS usage 65600 bytes exceeds target-addressable capacity 65536 bytes
+// CHECK: error: 'wave.redistribute' op remaining target LDS capacity 0 bytes cannot hold one 64-byte scratch vector group
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @redistribute_lds_overflow(%dst: !wave.ptr<#wave.global, i8>)

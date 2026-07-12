@@ -334,3 +334,24 @@ func.func @compose_cross_block_to_identity(
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return %second : !wave.simd<vector<1xi32>, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @capacity_reduces_vector_width(
+// CHECK: wave.alloc() {align = 4 : i64, bytesize = 256 : i64}
+// CHECK: wave.store
+// CHECK-COUNT-7: wave.barrier
+// CHECK: wave.load
+// CHECK: return
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @capacity_reduces_vector_width(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<vector<4xi32>, 32>
+    attributes {wave.lds_size = 65280 : i64,
+                wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  return %result : !wave.simd<vector<4xi32>, 32>
+}
+}

@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "RegAlloc/WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
@@ -22,6 +23,7 @@
 #include "llvm/Support/MathExtras.h"
 
 #include <array>
+#include <limits>
 #include <optional>
 
 namespace mlir::wave {
@@ -68,6 +70,28 @@ struct SourceCoordinate {
 struct ScratchAccessPattern {
   SmallVector<SourceCoordinate> loads;
   int64_t resultGroups;
+};
+
+struct ScratchStagePlan {
+  ScratchLayoutPlan layout;
+  int64_t firstResultGroup = 0;
+  int64_t resultGroupCount = 0;
+  int64_t firstSourceGroup = 0;
+  int64_t sourceGroupCount = 0;
+  int64_t scratchBytes = 0;
+};
+
+struct ScratchPlan {
+  SmallVector<ScratchStagePlan> stages;
+  SmallVector<std::optional<int64_t>> selectors;
+  int64_t vectorElements = 1;
+  int64_t scratchBytes = 0;
+};
+
+struct ScratchGeometry {
+  int64_t sourceGroups = 0;
+  int64_t resultGroups = 0;
+  int64_t groupBytes = 0;
 };
 
 static VectorType getPacketType(Type type) {
@@ -609,9 +633,8 @@ static int64_t scoreLoadLayout(const ScratchAccessPattern &pattern,
 static int64_t scoreScratchLayout(RedistributeOp op,
                                   const ScratchAccessPattern &pattern,
                                   const ScratchLayoutPlan &plan,
-                                  int64_t waveWidth, int64_t banks) {
-  int64_t sourceSlots =
-      getPacketType(op.getSource().getType()).getNumElements();
+                                  int64_t sourceSlots, int64_t waveWidth,
+                                  int64_t banks) {
   int64_t elementBits = getPacketType(op.getSource().getType())
                             .getElementType()
                             .getIntOrFloatBitWidth();
@@ -636,26 +659,16 @@ static bool exceedsScratchPlanningBudget(RedistributeOp op,
 }
 
 static FailureOr<ScratchLayoutPlan>
-selectScratchLayout(sym::Store &store, RedistributeOp op,
-                    const RelationDomain &domain, int64_t waveWidth) {
-  FailureOr<int64_t> vectorElements =
-      selectVectorElements(store, op, domain, /*maxVectorBits=*/128);
-  if (failed(vectorElements))
-    return failure();
+selectScratchLayout(RedistributeOp op, const ScratchAccessPattern &pattern,
+                    int64_t sourceSlots, int64_t vectorElements,
+                    int64_t waveWidth) {
   ScratchLayoutPlan best;
-  best.vectorElements = *vectorElements;
-  if (exceedsScratchPlanningBudget(op, best.vectorElements))
-    return best;
-  FailureOr<ScratchAccessPattern> pattern =
-      buildScratchAccessPattern(store, op, domain, best.vectorElements);
-  if (failed(pattern))
-    return failure();
+  best.vectorElements = vectorElements;
   int64_t banks = getSharedMemoryBankCount(op);
-  best.bankConflicts = scoreScratchLayout(op, *pattern, best, waveWidth, banks);
+  best.bankConflicts =
+      scoreScratchLayout(op, pattern, best, sourceSlots, waveWidth, banks);
 
   int64_t items = op.getRelation().getItems();
-  int64_t sourceSlots =
-      getPacketType(op.getSource().getType()).getNumElements();
   int64_t groups = sourceSlots / best.vectorElements;
   unsigned groupBits = groups > 1 ? llvm::Log2_64_Ceil(groups) : 0;
   // Low item bits stay inside every aligned power-of-two item tile.
@@ -670,8 +683,8 @@ selectScratchLayout(sym::Store &store, RedistributeOp op,
         candidate.groupShift = groupShift;
         candidate.phaseBits = phaseBits;
         candidate.itemShift = itemShift;
-        candidate.bankConflicts =
-            scoreScratchLayout(op, *pattern, candidate, waveWidth, banks);
+        candidate.bankConflicts = scoreScratchLayout(
+            op, pattern, candidate, sourceSlots, waveWidth, banks);
         if (candidate.bankConflicts < best.bankConflicts)
           best = candidate;
       }
@@ -1159,6 +1172,287 @@ static FailureOr<int64_t> getScratchBytes(RedistributeOp op) {
   return *bytes;
 }
 
+static FailureOr<int64_t> getNonNegativeLDSAttr(func::FuncOp func,
+                                                StringRef name) {
+  IntegerAttr attr = func->getAttrOfType<IntegerAttr>(name);
+  if (!attr)
+    return 0;
+  int64_t bytes = attr.getInt();
+  if (bytes < 0)
+    return func.emitError() << name << " must be non-negative";
+  return bytes;
+}
+
+static FailureOr<int64_t> getScratchLDSCapacity(func::FuncOp func) {
+  FailureOr<WaveAMDLocalMemoryLimits> limits =
+      getWaveAMDLocalMemoryLimits(func, "wave-lower-redistribute");
+  if (failed(limits))
+    return failure();
+
+  uint64_t capacity = limits->localMemoryBytes;
+  if (limits->addressableLocalMemoryBytes)
+    capacity =
+        std::min<uint64_t>(capacity, limits->addressableLocalMemoryBytes);
+  if (!capacity)
+    return func.emitError("wave-lower-redistribute target has no usable LDS");
+  return capacity;
+}
+
+static FailureOr<int64_t> getReservedLDSBytes(func::FuncOp func) {
+  FailureOr<int64_t> fixed = getNonNegativeLDSAttr(func, "wave.lds_size");
+  FailureOr<int64_t> dynamic =
+      getNonNegativeLDSAttr(func, "wave.dynamic_lds_size");
+  FailureOr<int64_t> spill =
+      getNonNegativeLDSAttr(func, "waveamdmachine.lds_spill_bytes");
+  if (failed(fixed) || failed(dynamic) || failed(spill))
+    return failure();
+  // Scratch transfer alignment is capped at 128 bits.
+  std::optional<int64_t> alignedFixed = llvm::checkedAdd(*fixed, int64_t{15});
+  if (alignedFixed)
+    *alignedFixed = *alignedFixed / 16 * 16;
+  std::optional<int64_t> reserved =
+      alignedFixed ? llvm::checkedAdd(*alignedFixed, *dynamic) : std::nullopt;
+  reserved = reserved ? llvm::checkedAdd(*reserved, *spill) : std::nullopt;
+  if (!reserved)
+    return func.emitError("aggregate reserved LDS byte count overflows i64");
+  return *reserved;
+}
+
+static FailureOr<std::optional<int64_t>>
+getRemainingScratchBytes(func::FuncOp func) {
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return std::optional<int64_t>();
+  FailureOr<int64_t> capacity = getScratchLDSCapacity(func);
+  FailureOr<int64_t> reserved = getReservedLDSBytes(func);
+  if (failed(capacity) || failed(reserved))
+    return failure();
+  if (*reserved >= *capacity)
+    return std::optional<int64_t>(0);
+  return std::optional<int64_t>(*capacity - *reserved);
+}
+
+static std::pair<int64_t, int64_t>
+getSourceGroupRange(const ScratchAccessPattern &pattern, int64_t items,
+                    int64_t resultGroup, int64_t vectorElements) {
+  int64_t first = std::numeric_limits<int64_t>::max();
+  int64_t last = 0;
+  for (int64_t item : llvm::seq<int64_t>(0, items)) {
+    int64_t sourceGroup =
+        pattern.loads[resultGroup * items + item].slot / vectorElements;
+    first = std::min(first, sourceGroup);
+    last = std::max(last, sourceGroup);
+  }
+  return {first, last};
+}
+
+static FailureOr<ScratchStagePlan>
+buildScratchStage(RedistributeOp op, const ScratchAccessPattern &pattern,
+                  int64_t firstResultGroup, int64_t resultGroupCount,
+                  int64_t firstSourceGroup, int64_t sourceGroupCount,
+                  int64_t vectorElements, int64_t groupBytes,
+                  int64_t waveWidth) {
+  int64_t items = op.getRelation().getItems();
+  ScratchAccessPattern localPattern;
+  localPattern.resultGroups = resultGroupCount;
+  localPattern.loads.reserve(resultGroupCount * items);
+  for (int64_t resultGroup : llvm::seq<int64_t>(
+           firstResultGroup, firstResultGroup + resultGroupCount)) {
+    for (int64_t item : llvm::seq<int64_t>(0, items)) {
+      SourceCoordinate source = pattern.loads[resultGroup * items + item];
+      source.slot -= firstSourceGroup * vectorElements;
+      localPattern.loads.push_back(source);
+    }
+  }
+
+  FailureOr<ScratchLayoutPlan> layout =
+      selectScratchLayout(op, localPattern, sourceGroupCount * vectorElements,
+                          vectorElements, waveWidth);
+  if (failed(layout))
+    return failure();
+  std::optional<int64_t> scratchBytes =
+      llvm::checkedMul(sourceGroupCount, groupBytes);
+  if (!scratchBytes)
+    return op.emitOpError("cross-wave stage byte size overflows i64");
+
+  ScratchStagePlan stage;
+  stage.layout = *layout;
+  stage.firstResultGroup = firstResultGroup;
+  stage.resultGroupCount = resultGroupCount;
+  stage.firstSourceGroup = firstSourceGroup;
+  stage.sourceGroupCount = sourceGroupCount;
+  stage.scratchBytes = *scratchBytes;
+  return stage;
+}
+
+static FailureOr<ScratchGeometry> getScratchGeometry(RedistributeOp op,
+                                                     int64_t vectorElements) {
+  int64_t sourceSlots =
+      getPacketType(op.getSource().getType()).getNumElements();
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  int64_t elementBytes = getPacketType(op.getSource().getType())
+                             .getElementType()
+                             .getIntOrFloatBitWidth() /
+                         8;
+  std::optional<int64_t> groupElements =
+      llvm::checkedMul(op.getRelation().getItems(), vectorElements);
+  std::optional<int64_t> groupBytes =
+      groupElements ? llvm::checkedMul(*groupElements, elementBytes)
+                    : std::nullopt;
+  if (!groupBytes)
+    return op.emitOpError("cross-wave scratch group byte size overflows i64");
+  return ScratchGeometry{sourceSlots / vectorElements,
+                         resultSlots / vectorElements, *groupBytes};
+}
+
+static FailureOr<ScratchPlan> buildUnscoredScratchPlan(
+    RedistributeOp op, int64_t vectorElements, int64_t fullScratchBytes,
+    std::optional<int64_t> scratchBudget, const ScratchGeometry &geometry,
+    SmallVector<std::optional<int64_t>> selectors) {
+  if (scratchBudget && fullScratchBytes > *scratchBudget)
+    return op.emitOpError(
+        "capacity-aware scratch staging exceeds relation planning limit");
+  ScratchStagePlan stage;
+  stage.layout.vectorElements = vectorElements;
+  stage.resultGroupCount = geometry.resultGroups;
+  stage.sourceGroupCount = geometry.sourceGroups;
+  stage.scratchBytes = fullScratchBytes;
+  ScratchPlan plan;
+  plan.stages.push_back(stage);
+  plan.selectors = std::move(selectors);
+  plan.vectorElements = vectorElements;
+  plan.scratchBytes = fullScratchBytes;
+  return plan;
+}
+
+static FailureOr<int64_t>
+getMaxScratchSourceGroups(RedistributeOp op, const ScratchGeometry &geometry,
+                          std::optional<int64_t> scratchBudget) {
+  if (!scratchBudget)
+    return geometry.sourceGroups;
+  int64_t groups = *scratchBudget / geometry.groupBytes;
+  if (!groups)
+    return op.emitOpError("remaining target LDS capacity ")
+           << *scratchBudget << " bytes cannot hold one " << geometry.groupBytes
+           << "-byte scratch vector group";
+  return std::min(groups, geometry.sourceGroups);
+}
+
+static LogicalResult
+appendScratchStage(RedistributeOp op, const ScratchAccessPattern &pattern,
+                   int64_t firstResultGroup, int64_t resultGroupCount,
+                   int64_t firstSourceGroup, int64_t sourceGroupCount,
+                   int64_t vectorElements, const ScratchGeometry &geometry,
+                   int64_t waveWidth, ScratchPlan &plan) {
+  FailureOr<ScratchStagePlan> stage = buildScratchStage(
+      op, pattern, firstResultGroup, resultGroupCount, firstSourceGroup,
+      sourceGroupCount, vectorElements, geometry.groupBytes, waveWidth);
+  if (failed(stage))
+    return failure();
+  plan.scratchBytes = std::max(plan.scratchBytes, stage->scratchBytes);
+  plan.stages.push_back(*stage);
+  return success();
+}
+
+static LogicalResult
+buildScratchStages(RedistributeOp op, const ScratchAccessPattern &pattern,
+                   const ScratchGeometry &geometry, int64_t vectorElements,
+                   int64_t maxSourceGroups, int64_t scratchCapacity,
+                   int64_t waveWidth, ScratchPlan &plan) {
+  int64_t firstResultGroup = 0;
+  int64_t firstSourceGroup = 0;
+  int64_t lastSourceGroup = -1;
+  for (int64_t resultGroup : llvm::seq<int64_t>(0, geometry.resultGroups)) {
+    auto [first, last] = getSourceGroupRange(
+        pattern, op.getRelation().getItems(), resultGroup, vectorElements);
+    int64_t mergedFirst = resultGroup == firstResultGroup
+                              ? first
+                              : std::min(firstSourceGroup, first);
+    int64_t mergedLast = resultGroup == firstResultGroup
+                             ? last
+                             : std::max(lastSourceGroup, last);
+    if (mergedLast - mergedFirst + 1 <= maxSourceGroups) {
+      firstSourceGroup = mergedFirst;
+      lastSourceGroup = mergedLast;
+      continue;
+    }
+    if (resultGroup == firstResultGroup)
+      return op.emitOpError("destination vector group ")
+             << resultGroup << " requires "
+             << (last - first + 1) * geometry.groupBytes
+             << " scratch bytes, exceeding " << scratchCapacity
+             << "-byte remaining target LDS capacity";
+
+    if (failed(appendScratchStage(
+            op, pattern, firstResultGroup, resultGroup - firstResultGroup,
+            firstSourceGroup, lastSourceGroup - firstSourceGroup + 1,
+            vectorElements, geometry, waveWidth, plan)))
+      return failure();
+    firstResultGroup = resultGroup;
+    firstSourceGroup = first;
+    lastSourceGroup = last;
+  }
+
+  return appendScratchStage(
+      op, pattern, firstResultGroup, geometry.resultGroups - firstResultGroup,
+      firstSourceGroup, lastSourceGroup - firstSourceGroup + 1, vectorElements,
+      geometry, waveWidth, plan);
+}
+
+static int64_t getMaxScratchVectorBits(RedistributeOp op,
+                                       std::optional<int64_t> scratchBudget) {
+  constexpr int64_t maxVectorBits = 128;
+  if (!scratchBudget)
+    return maxVectorBits;
+  int64_t elementBits = getPacketType(op.getSource().getType())
+                            .getElementType()
+                            .getIntOrFloatBitWidth();
+  int64_t elementBytes = elementBits / 8;
+  std::optional<int64_t> groupElementBytes =
+      llvm::checkedMul(op.getRelation().getItems(), elementBytes);
+  if (!groupElementBytes || !*groupElementBytes)
+    return elementBits;
+  int64_t elements = std::min(*scratchBudget / *groupElementBytes,
+                              maxVectorBits / elementBits);
+  return std::max(elementBits, elements * elementBits);
+}
+
+static FailureOr<ScratchPlan>
+buildScratchPlan(sym::Store &store, RedistributeOp op,
+                 const RelationDomain &domain, int64_t waveWidth,
+                 int64_t fullScratchBytes,
+                 std::optional<int64_t> scratchBudget) {
+  int64_t maxVectorBits = getMaxScratchVectorBits(op, scratchBudget);
+  FailureOr<int64_t> vectorElements =
+      selectVectorElements(store, op, domain, maxVectorBits);
+  if (failed(vectorElements))
+    return failure();
+  FailureOr<SmallVector<std::optional<int64_t>>> selectors =
+      inferVectorSelectors(store, op, domain, *vectorElements);
+  FailureOr<ScratchGeometry> geometry = getScratchGeometry(op, *vectorElements);
+  if (failed(selectors) || failed(geometry))
+    return failure();
+  if (exceedsScratchPlanningBudget(op, *vectorElements))
+    return buildUnscoredScratchPlan(op, *vectorElements, fullScratchBytes,
+                                    scratchBudget, *geometry,
+                                    std::move(*selectors));
+
+  FailureOr<ScratchAccessPattern> pattern =
+      buildScratchAccessPattern(store, op, domain, *vectorElements);
+  FailureOr<int64_t> maxSourceGroups =
+      getMaxScratchSourceGroups(op, *geometry, scratchBudget);
+  if (failed(pattern) || failed(maxSourceGroups))
+    return failure();
+  ScratchPlan plan;
+  plan.selectors = std::move(*selectors);
+  plan.vectorElements = *vectorElements;
+  int64_t capacity = scratchBudget.value_or(fullScratchBytes);
+  if (failed(buildScratchStages(op, *pattern, *geometry, *vectorElements,
+                                *maxSourceGroups, capacity, waveWidth, plan)))
+    return failure();
+  return plan;
+}
+
 static Type getScratchTransferType(RedistributeOp op,
                                    const ScratchLayoutPlan &plan) {
   return getPacketSliceType(op.getSource().getType(), plan.vectorElements);
@@ -1176,13 +1470,15 @@ static Value buildScratchStoreValue(IRRewriter &rewriter, RedistributeOp op,
 static FailureOr<Value> emitScratchStores(
     IRRewriter &rewriter, RedistributeOp op, RelationMaterializer &materializer,
     Value allocation, ArrayRef<Value> source, sym::ExprHandle address,
-    const ScratchLayoutPlan &plan, Type tokenType, Value dependency) {
+    const ScratchStagePlan &stage, Type tokenType, Value dependency) {
   SmallVector<Value> tokens;
-  tokens.reserve(source.size() / plan.vectorElements);
-  for (int64_t slot = 0; slot < static_cast<int64_t>(source.size());
-       slot += plan.vectorElements) {
+  tokens.reserve(stage.sourceGroupCount);
+  for (int64_t localGroup : llvm::seq<int64_t>(0, stage.sourceGroupCount)) {
+    int64_t localSlot = localGroup * stage.layout.vectorElements;
+    int64_t sourceSlot =
+        (stage.firstSourceGroup + localGroup) * stage.layout.vectorElements;
     FailureOr<MaterializedExpr> offset =
-        materializer.materialize(address, slot);
+        materializer.materialize(address, localSlot);
     if (failed(offset)) {
       op.emitOpError("failed to materialize scratch store address");
       return failure();
@@ -1193,7 +1489,8 @@ static FailureOr<Value> emitScratchStores(
       op.emitOpError("failed to build scratch store pointer");
       return failure();
     }
-    Value value = buildScratchStoreValue(rewriter, op, source, slot, plan);
+    Value value =
+        buildScratchStoreValue(rewriter, op, source, sourceSlot, stage.layout);
     StoreOp store = StoreOp::create(rewriter, op.getLoc(), tokenType, value,
                                     *pointer, dependency, Attribute());
     tokens.push_back(store.getToken());
@@ -1209,6 +1506,7 @@ struct ScratchLoads {
 struct ScratchSequence {
   Value completion;
   Operation *cursor = nullptr;
+  int64_t scratchBytes = 0;
 };
 
 using ScratchSequenceMap = DenseMap<Block *, ScratchSequence>;
@@ -1241,15 +1539,19 @@ static Value advanceScratchSequence(IRRewriter &rewriter, RedistributeOp op,
 static FailureOr<ScratchLoads>
 emitScratchLoads(IRRewriter &rewriter, RedistributeOp op,
                  RelationMaterializer &materializer, Value allocation,
-                 sym::ExprHandle address, int64_t resultSlots,
+                 sym::ExprHandle address, const ScratchStagePlan &stage,
                  sym::ExprHandle sourceWithin, const ScratchLayoutPlan &plan,
                  ArrayRef<std::optional<int64_t>> selectors, Type componentType,
                  Type tokenType, Value published) {
   ScratchLoads loads;
-  loads.values.reserve(resultSlots);
-  loads.tokens.reserve(resultSlots / plan.vectorElements);
+  loads.values.reserve(stage.resultGroupCount * plan.vectorElements);
+  loads.tokens.reserve(stage.resultGroupCount);
   Type transferType = getScratchTransferType(op, plan);
-  for (int64_t slot = 0; slot < resultSlots; slot += plan.vectorElements) {
+  int64_t firstResultSlot = stage.firstResultGroup * plan.vectorElements;
+  int64_t endResultSlot =
+      firstResultSlot + stage.resultGroupCount * plan.vectorElements;
+  for (int64_t slot = firstResultSlot; slot < endResultSlot;
+       slot += plan.vectorElements) {
     FailureOr<MaterializedExpr> offset =
         materializer.materialize(address, slot);
     if (failed(offset)) {
@@ -1299,79 +1601,129 @@ emitScratchLoads(IRRewriter &rewriter, RedistributeOp op,
   return loads;
 }
 
+static Value retireScratchSequence(IRRewriter &rewriter, RedistributeOp op,
+                                   Type tokenType, Value dependency) {
+  if (!dependency || dependency.getDefiningOp<BarrierOp>())
+    return dependency;
+  return BarrierOp::create(rewriter, op.getLoc(), tokenType, dependency)
+      .getToken();
+}
+
+static bool mustRetireScratch(RedistributeOp op,
+                              const ScratchSequenceMap &sequences,
+                              std::optional<int64_t> scratchBudget,
+                              int64_t scratchBytes) {
+  if (!scratchBudget)
+    return false;
+  auto previous = sequences.find(op->getBlock());
+  return previous != sequences.end() &&
+         previous->second.scratchBytes > *scratchBudget - scratchBytes;
+}
+
+static FailureOr<ScratchLoads>
+emitScratchStage(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
+                 const RelationDomain &domain,
+                 RelationMaterializer &materializer, Value allocation,
+                 ArrayRef<Value> source, sym::ExprHandle sourceWithin,
+                 const ScratchStagePlan &stage, const ScratchPlan &plan,
+                 Type componentType, Type tokenType, Value dependency) {
+  FailureOr<sym::ExprHandle> storeAddress =
+      composeScratchVectorAddress(store, domain.item, domain.slot,
+                                  op.getRelation().getItems(), stage.layout);
+  if (failed(storeAddress))
+    return op.emitOpError("failed to construct scratch store address");
+  FailureOr<Value> published =
+      emitScratchStores(rewriter, op, materializer, allocation, source,
+                        *storeAddress, stage, tokenType, dependency);
+  if (failed(published))
+    return failure();
+
+  FailureOr<sym::ExprHandle> localSourceSlot = composeBinaryInt(
+      store, op.getRelation().getSourceSlot(), sym::ExprBinaryOp::Add,
+      -stage.firstSourceGroup * plan.vectorElements);
+  if (failed(localSourceSlot))
+    return op.emitOpError("failed to construct staged source slot");
+  FailureOr<sym::ExprHandle> loadAddress = composeScratchVectorAddress(
+      store, op.getRelation().getSourceItem(), *localSourceSlot,
+      op.getRelation().getItems(), stage.layout);
+  if (failed(loadAddress))
+    return op.emitOpError("failed to construct scratch load address");
+  return emitScratchLoads(rewriter, op, materializer, allocation, *loadAddress,
+                          stage, sourceWithin, stage.layout, plan.selectors,
+                          componentType, tokenType, *published);
+}
+
 static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                     sym::Store &store,
                                     const RelationDomain &domain,
                                     func::FuncOp func,
                                     ScratchSequenceMap &sequences) {
-  if (!func.getBody().hasOneBlock())
-    return op.emitOpError(
-        "cross-wave redistribution requires a single-block kernel function");
-
   FailureOr<int64_t> scratchBytes = getScratchBytes(op);
   if (failed(scratchBytes))
     return failure();
-  int64_t waveWidth = cast<SimdType>(op.getSource().getType()).getWidth();
-  FailureOr<ScratchLayoutPlan> layout =
-      selectScratchLayout(store, op, domain, waveWidth);
-  if (failed(layout))
+  FailureOr<std::optional<int64_t>> scratchBudget =
+      getRemainingScratchBytes(func);
+  if (failed(scratchBudget))
     return failure();
-  FailureOr<SmallVector<std::optional<int64_t>>> selectors =
-      inferVectorSelectors(store, op, domain, layout->vectorElements);
-  if (failed(selectors))
+  int64_t waveWidth = cast<SimdType>(op.getSource().getType()).getWidth();
+  FailureOr<ScratchPlan> plan = buildScratchPlan(store, op, domain, waveWidth,
+                                                 *scratchBytes, *scratchBudget);
+  if (failed(plan))
     return failure();
   VectorType sourcePacket = getPacketType(op.getSource().getType());
   Type elementType = sourcePacket.getElementType();
   int64_t elementBytes = elementType.getIntOrFloatBitWidth() / 8;
-  int64_t transferBytes = elementBytes * layout->vectorElements;
+  int64_t transferBytes = elementBytes * plan->vectorElements;
   PtrType pointerType =
       PtrType::get(op.getContext(), elementType,
                    SharedAddressSpaceAttr::get(op.getContext()));
   Value allocation = AllocOp::create(rewriter, op.getLoc(), pointerType,
-                                     static_cast<uint64_t>(*scratchBytes),
+                                     static_cast<uint64_t>(plan->scratchBytes),
                                      static_cast<uint64_t>(transferBytes));
   RelationMaterializer materializer(rewriter, op, store, domain);
   SmallVector<Value> source = extractComponents(rewriter, op);
-
-  FailureOr<sym::ExprHandle> storeAddress = composeScratchVectorAddress(
-      store, domain.item, domain.slot, op.getRelation().getItems(), *layout);
-  if (failed(storeAddress))
-    return op.emitOpError("failed to construct scratch store address");
   Type tokenType = MemTokenType::get(op.getContext());
   Value dependency = advanceScratchSequence(rewriter, op, sequences);
-  FailureOr<Value> published =
-      emitScratchStores(rewriter, op, materializer, allocation, source,
-                        *storeAddress, *layout, tokenType, dependency);
-  if (failed(published))
-    return failure();
-  FailureOr<sym::ExprHandle> loadAddress = composeScratchVectorAddress(
-      store, op.getRelation().getSourceItem(), op.getRelation().getSourceSlot(),
-      op.getRelation().getItems(), *layout);
-  if (failed(loadAddress))
-    return op.emitOpError("failed to construct scratch load address");
+  if (mustRetireScratch(op, sequences, *scratchBudget, plan->scratchBytes))
+    dependency = retireScratchSequence(rewriter, op, tokenType, dependency);
+
   FailureOr<sym::ExprHandle> sourceWithin =
       composeBinaryInt(store, op.getRelation().getSourceSlot(),
-                       sym::ExprBinaryOp::Mod, layout->vectorElements);
+                       sym::ExprBinaryOp::Mod, plan->vectorElements);
   if (failed(sourceWithin))
     return op.emitOpError("failed to construct scratch vector selector");
 
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
   Type componentType = getPacketElementType(op.getSource().getType());
-  FailureOr<ScratchLoads> loaded = emitScratchLoads(
-      rewriter, op, materializer, allocation, *loadAddress, resultSlots,
-      *sourceWithin, *layout, *selectors, componentType, tokenType, *published);
-  if (failed(loaded))
-    return failure();
+  SmallVector<Value> result(resultSlots);
+  SmallVector<Value> completionTokens;
+  for (auto [stageIndex, stage] : llvm::enumerate(plan->stages)) {
+    FailureOr<ScratchLoads> loaded = emitScratchStage(
+        rewriter, op, store, domain, materializer, allocation, source,
+        *sourceWithin, stage, *plan, componentType, tokenType, dependency);
+    if (failed(loaded))
+      return failure();
 
-  Value packed = PackOp::create(rewriter, op.getLoc(), op.getResult().getType(),
-                                loaded->values);
+    int64_t firstResultSlot = stage.firstResultGroup * plan->vectorElements;
+    for (auto [offset, value] : llvm::enumerate(loaded->values))
+      result[firstResultSlot + offset] = value;
+    completionTokens = std::move(loaded->tokens);
+    if (stageIndex + 1 != plan->stages.size())
+      dependency =
+          BarrierOp::create(rewriter, op.getLoc(), tokenType, completionTokens)
+              .getToken();
+  }
+
+  Value packed =
+      PackOp::create(rewriter, op.getLoc(), op.getResult().getType(), result);
   Value completed =
-      JoinOp::create(rewriter, op.getLoc(), tokenType, loaded->tokens);
+      JoinOp::create(rewriter, op.getLoc(), tokenType, completionTokens);
   AllocReleaseOp released =
       AllocReleaseOp::create(rewriter, op.getLoc(), tokenType, allocation,
                              completed, rewriter.getUnitAttr());
-  sequences[op->getBlock()] = {released.getToken(), released};
+  sequences[op->getBlock()] = {released.getToken(), released,
+                               plan->scratchBytes};
   rewriter.replaceOp(op, packed);
   return success();
 }
@@ -1481,6 +1833,9 @@ static LogicalResult lowerRedistribution(IRRewriter &rewriter,
   case Movement::Wave:
     return lowerWave(rewriter, op, dialect.getSymbolStore(), *domain, width);
   case Movement::Workgroup:
+    if (!func.getBody().hasOneBlock())
+      return op.emitOpError(
+          "cross-wave redistribution requires a single-block kernel function");
     return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), *domain, func,
                           sequences);
   case Movement::Cluster:

@@ -341,10 +341,11 @@ physical_cell = P(item, slot)
 
 Store and load addressing use the same `P`. The current planner first chooses
 the largest power-of-two vector, at most 128 bits, that divides both packet
-widths. Finite relation evaluation must prove every destination vector reads
-one source item and one source vector group. Component order inside that group
-may differ. Finite selector inference uses direct extracts for fixed component
-orders and emits per-lane selection only when the relation requires it.
+widths and leaves one vector group resident in available LDS. Finite relation
+evaluation must prove every destination vector reads one source item and one
+source vector group. Component order inside that group may differ. Finite
+selector inference uses direct extracts for fixed component orders and emits
+per-lane selection only when the relation requires it.
 
 Scratch uses a group-major AoSoA map:
 
@@ -363,6 +364,21 @@ against the target's 32- or 64-bank LDS phases. Repeated addresses count as
 broadcasts. Minimum combined read/write conflict count wins; equal scores keep
 the simpler map. This follows Triton's rule: preserve common vectorization,
 then choose one shared map for both directions.
+
+Target lowering computes scratch capacity after fixed, dynamic, and spill LDS.
+One stage holds all source vector groups when that fits. Otherwise each
+destination vector group contributes its minimum contiguous source-group
+window. Greedy maximal destination prefixes form stages whose merged windows
+fit capacity. Each stage stores only its window, publishes it, and loads its
+destination prefix. Its local source-group origin is subtracted from load
+addresses before applying `P`.
+
+An `N`-stage exchange emits `N` publish barriers and `N - 1` barriers before
+overwriting scratch: `2N - 1` total. Vector width is fixed across stages;
+swizzling is scored per stage. Consecutive exchanges retain the one-barrier
+ping-pong path while their scratch high-water marks fit together. Otherwise a
+barrier retires the earlier release and both allocations alias the same LDS.
+This is Triton's `reps` shape with rounds chosen from target capacity.
 
 Padding, multi-base physical partitions, and allocation placement remain
 generic scratch-allocation policies. They can extend `P` without changing the
@@ -515,8 +531,8 @@ The pass first validates every redistribution's execution and workgroup domain.
 It then composes, folds, classifies, and expands relations. This lets generated
 scratch addresses reuse `wave.index_expr` simplification, memory coalescing,
 normal allocation placement, and ordinary WaveAMD machine selection. Generic
-allocation/resource planning owns aggregate LDS capacity and reuse ordering. No
-`wave.redistribute` may reach `waveamd-to-machine`.
+allocation/resource planning remains the final aggregate LDS and reuse check.
+No `wave.redistribute` may reach `waveamd-to-machine`.
 
 ## Diagnostics
 
@@ -534,6 +550,7 @@ Diagnostics name the failed contract:
 - cross-block relation lacks cluster/DSM support: lowering;
 - block-dependent local relation lacks a block coordinate: lowering;
 - non-resident named dimension has no external adapter: frontend import;
+- one destination vector group exceeds remaining target LDS: lowering;
 - aggregate LDS capacity exceeded: generic allocation/resource planning;
 - payload has no bit-preserving storage codec: lowering;
 - symbolic expression cannot be selected on the target: lowering.
@@ -585,6 +602,10 @@ No failure fabricates values or silently changes the relation.
   vector selects instead of 256 shuffles and 16,256 scalar selects.
 - Three straight-line cross-wave conversions use two scratch slots and one
   publish barrier per conversion.
+- Capacity-limited exchanges use staged source-group windows and stay within
+  target-addressable LDS.
+- Consecutive stages and capacity-forced allocation reuse cross explicit
+  workgroup barriers.
 - Token-only lifetime order cannot alias workgroup storage; the path must cross
   a workgroup barrier.
 - Repeated logical lifetimes materialize a barrier when the loop backedge lacks
@@ -633,9 +654,9 @@ measurement before golden replacement.
   missing cluster support otherwise.
 - Cross-wave lowering emits explicit LDS token and barrier edges.
 - Cross-wave scratch uses one target-scored vector/swizzle map for stores and
-  loads.
-- Scratch reuse and aggregate LDS capacity stay in generic allocation/resource
-  planning.
+  loads per capacity-sized stage.
+- Target capacity chooses one stage or Triton-style rounds; generic allocation
+  and resource planning validate the result.
 - Internal barriers do not become user-visible memory-ordering semantics.
 - Triton `LinearLayout` conversions import through structural gather relations,
   not layout-kind cases or component-count guesses.

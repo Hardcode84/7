@@ -1,6 +1,12 @@
-// RUN: not wave-translate --wave-to-amdgpu-asm %s 2>&1 | FileCheck %s
+// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
+// RUN: wave-translate --wave-to-amdgpu-asm %s \
+// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
-// CHECK: error: waveamd-resource-info LDS usage 239808 bytes exceeds target-addressable capacity 163840 bytes
+// ASM-LABEL: glu_epilogue_redistribute_lds_overflow:
+// ASM: ds_write_b128
+// ASM-COUNT-7: s_barrier
+// ASM: ds_read_b128
+// ASM: .amdhsa_group_segment_fixed_size 141504
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @glu_epilogue_redistribute_lds_overflow(
