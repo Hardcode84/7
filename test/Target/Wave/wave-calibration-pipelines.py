@@ -17,9 +17,7 @@
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_v9_perf_golden_profile: ok
 # CHECK: matmul_v9_transposed_perf_golden_profile: ok
-# CHECK: matmul_a4w4_mxfp_k16k_1_profile: ok
-# CHECK: matmul_a4w4_mxfp_k16k_2_profile: ok
-# CHECK: matmul_a4w4_mxfp_k16k_3_profile: ok
+# CHECK: matmul_a4w4_mxfp_k16k_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: calibration_scheduler_region_cap: ok
@@ -1076,7 +1074,7 @@ def make_tlx_mxfp_perf_golden_args(matmul) -> argparse.Namespace:
     return matmul.parse_args(
         [
             "--chip=gfx950",
-            "--kernel-profile=a4w4-mxfp-k16k-1",
+            "--kernel-profile=a4w4-mxfp-k16k",
             "--skip-hw",
             "--no-check",
         ]
@@ -1156,7 +1154,7 @@ def check_tlx_mxfp_source(matmul, args: argparse.Namespace, check_name: str) -> 
     )
     require(
         check_name,
-        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k_1.mlir",
+        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k.mlir",
         "bad TLX MXFP source path",
     )
 
@@ -1222,66 +1220,14 @@ def check_tlx_mxfp_validation(
         )
 
 
-def check_matmul_a4w4_mxfp_k16k_1_profile(matmul) -> None:
-    check_name = "matmul_a4w4_mxfp_k16k_1_profile"
+def check_matmul_a4w4_mxfp_k16k_profile(matmul) -> None:
+    check_name = "matmul_a4w4_mxfp_k16k_profile"
     args = make_tlx_mxfp_perf_golden_args(matmul)
     check_tlx_mxfp_profile_shape(matmul, args, check_name)
     check_tlx_mxfp_profile_counts(matmul, args, check_name)
     check_tlx_mxfp_source(matmul, args, check_name)
     check_tlx_mxfp_runner_forwarding(matmul, args, check_name)
     check_tlx_mxfp_validation(matmul, args, check_name)
-    print(f"{check_name}: ok")
-
-
-def check_matmul_a4w4_mxfp_k16k_2_profile(matmul) -> None:
-    check_name = "matmul_a4w4_mxfp_k16k_2_profile"
-    args = matmul.parse_args(
-        [
-            "--chip=gfx950",
-            "--kernel-profile=a4w4-mxfp-k16k-2",
-            "--skip-hw",
-            "--no-check",
-        ]
-    )
-    check_tlx_mxfp_profile_shape(matmul, args, check_name)
-    check_tlx_mxfp_profile_counts(matmul, args, check_name)
-    require(
-        check_name,
-        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k_2.mlir",
-        "bad TLX MXFP 4096 source path",
-    )
-    source = matmul.generate_kernel_module(args, "gfx950")
-    require(
-        check_name,
-        "func.func @_a4w4_kernel" in source and "gpu.module @kernels" not in source,
-        "TLX MXFP 4096 source should be isolated for wave-translate",
-    )
-    print(f"{check_name}: ok")
-
-
-def check_matmul_a4w4_mxfp_k16k_3_profile(matmul) -> None:
-    check_name = "matmul_a4w4_mxfp_k16k_3_profile"
-    args = matmul.parse_args(
-        [
-            "--chip=gfx950",
-            "--kernel-profile=a4w4-mxfp-k16k-3",
-            "--skip-hw",
-            "--no-check",
-        ]
-    )
-    check_tlx_mxfp_profile_shape(matmul, args, check_name)
-    check_tlx_mxfp_profile_counts(matmul, args, check_name)
-    require(
-        check_name,
-        matmul.tlx_mxfp_golden_source(args).name == "a4w4_mxfp_k16k_3.mlir",
-        "bad canonicalize+cse TLX MXFP source path",
-    )
-    source = matmul.generate_kernel_module(args, "gfx950")
-    require(
-        check_name,
-        "func.func @_a4w4_kernel" in source and "gpu.module @kernels" not in source,
-        "canonicalize+cse TLX MXFP source should be isolated for wave-translate",
-    )
     print(f"{check_name}: ok")
 
 
@@ -1397,9 +1343,7 @@ def main() -> int:
     check_matmul_dma_sim_trip_count(matmul)
     check_matmul_v9_perf_golden_profile(matmul)
     check_matmul_v9_transposed_perf_golden_profile(matmul)
-    check_matmul_a4w4_mxfp_k16k_1_profile(matmul)
-    check_matmul_a4w4_mxfp_k16k_2_profile(matmul)
-    check_matmul_a4w4_mxfp_k16k_3_profile(matmul)
+    check_matmul_a4w4_mxfp_k16k_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)

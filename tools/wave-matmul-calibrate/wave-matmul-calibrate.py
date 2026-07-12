@@ -26,9 +26,7 @@ KERNEL_NAME = "wmma_f16_matmul_tiled"
 V9_GOLDEN_NAME = "v9_4096.original.wave"
 V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
-A4W4_MXFP_K16K_1_GOLDEN_NAME = "a4w4_mxfp_k16k_1"
-A4W4_MXFP_K16K_2_GOLDEN_NAME = "a4w4_mxfp_k16k_2"
-A4W4_MXFP_K16K_3_GOLDEN_NAME = "a4w4_mxfp_k16k_3"
+A4W4_MXFP_K16K_GOLDEN_NAME = "a4w4_mxfp_k16k"
 TLX_MXFP_GOLDEN_KERNEL_NAME = "_a4w4_kernel"
 V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
@@ -155,51 +153,9 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
-    "a4w4-mxfp-k16k-1": {
+    "a4w4-mxfp-k16k": {
         "example": "tlx-mxfp-perf-golden",
-        "tlx_mxfp_golden_name": A4W4_MXFP_K16K_1_GOLDEN_NAME,
-        "m": 4096,
-        "n": 4096,
-        "k": 16384,
-        "bm": 2,
-        "bn": 2,
-        "wave_m_tiles": 8,
-        "wave_n_tiles": 8,
-        "wave_k_tiles": 2,
-        "target_waves": 1,
-        "use_buffer": True,
-        "use_dma_lds": True,
-        "matrix_intrinsic": "mfma_gfx950",
-        "input_type": "mxfp4",
-        "output_type": "bf16",
-        "mxfp4_scale_path": "regs",
-        "cta_swizzle_xcds": 8,
-        "cta_group_m": 4,
-    },
-    "a4w4-mxfp-k16k-2": {
-        "example": "tlx-mxfp-perf-golden",
-        "tlx_mxfp_golden_name": A4W4_MXFP_K16K_2_GOLDEN_NAME,
-        "m": 4096,
-        "n": 4096,
-        "k": 16384,
-        "bm": 2,
-        "bn": 2,
-        "wave_m_tiles": 8,
-        "wave_n_tiles": 8,
-        "wave_k_tiles": 2,
-        "target_waves": 1,
-        "use_buffer": True,
-        "use_dma_lds": True,
-        "matrix_intrinsic": "mfma_gfx950",
-        "input_type": "mxfp4",
-        "output_type": "bf16",
-        "mxfp4_scale_path": "regs",
-        "cta_swizzle_xcds": 8,
-        "cta_group_m": 4,
-    },
-    "a4w4-mxfp-k16k-3": {
-        "example": "tlx-mxfp-perf-golden",
-        "tlx_mxfp_golden_name": A4W4_MXFP_K16K_3_GOLDEN_NAME,
+        "tlx_mxfp_golden_name": A4W4_MXFP_K16K_GOLDEN_NAME,
         "m": 4096,
         "n": 4096,
         "k": 16384,
@@ -388,7 +344,7 @@ def v9_golden_source(args: argparse.Namespace) -> Path:
 
 
 def tlx_mxfp_golden_source(args: argparse.Namespace) -> Path:
-    name = getattr(args, "tlx_mxfp_golden_name", A4W4_MXFP_K16K_1_GOLDEN_NAME)
+    name = getattr(args, "tlx_mxfp_golden_name", A4W4_MXFP_K16K_GOLDEN_NAME)
     return V9_GOLDEN_INPUT_DIR / f"{name}.mlir"
 
 
