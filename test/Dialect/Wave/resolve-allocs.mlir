@@ -15,11 +15,77 @@ func.func @reuse_nonoverlap(%out: !wave.ptr<#wave.global, i32>)
   %ta = wave.store %lane -> %ap
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
       -> !wave.mem.token
-  %done = wave.barrier %ta : (!wave.mem.token) -> !wave.mem.token
-  %released = wave.alloc_release %a after %done
+  %released = wave.alloc_release %a after %ta
       : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  // CHECK: %[[SAFE:.*]] = wave.barrier %[[TA:.*]]
+  %safe = wave.barrier %released : (!wave.mem.token) -> !wave.mem.token
 
   // CHECK: %[[B:.*]] = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %b = wave.alloc() {align = 16 : i64, bytesize = 64 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %tb = wave.store %lane -> %bp after %safe
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reuse_collectively_completed_release
+// CHECK-SAME: wave.lds_size = 64 : i64
+// CHECK-NOT: wave.alloc
+func.func @reuse_collectively_completed_release()
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 64 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %ta = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %safe = wave.barrier %ta : (!wave.mem.token) -> !wave.mem.token
+  %released = wave.alloc_release %a after %safe
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+
+  // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %b = wave.alloc() {align = 16 : i64, bytesize = 64 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %tb = wave.store %lane -> %bp after %released
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @token_order_without_collective_barrier
+// CHECK-SAME: wave.lds_size = 128 : i64
+// CHECK-NOT: wave.alloc
+func.func @token_order_without_collective_barrier()
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 64 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %ta = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %released = wave.alloc_release %a after %ta
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+
+  // CHECK: wave.shared_memory_base {offset = 64 : i64}
   %b = wave.alloc() {align = 16 : i64, bytesize = 64 : i64}
       : !wave.ptr<#wave.shared, i32>
   %bp = wave.ptr_add %b, %lane
@@ -301,6 +367,7 @@ func.func @same_loop_sequential_allocs(%n: index)
         -> !wave.mem.token
     %a_released = wave.alloc_release %a after %ta
         : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    // CHECK: %[[A_SAFE:.*]] = wave.barrier %[[TA:.*]]
 
     // CHECK: wave.shared_memory_base {offset = 16 : i64} : !wave.ptr<#wave.shared, i32>
     %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
@@ -341,6 +408,7 @@ func.func @same_loop_reuse_with_backedge(%n: index)
         -> !wave.mem.token
     %a_released = wave.alloc_release %a after %ta
         : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    // CHECK: %[[A_SAFE:.*]] = wave.barrier %[[TA:.*]]
 
     // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
     %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
@@ -354,6 +422,7 @@ func.func @same_loop_reuse_with_backedge(%n: index)
         -> !wave.mem.token
     %b_released = wave.alloc_release %b after %tb
         : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    // CHECK: %[[B_SAFE:.*]] = wave.barrier %[[TB:.*]]
     scf.yield %b_released : !wave.mem.token
   }
   return

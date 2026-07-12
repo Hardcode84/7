@@ -270,14 +270,27 @@ parallel wave.store operations
 wave.barrier after all store tokens
 parallel wave.load operations after the publish barrier
 wave.pack
-wave.barrier after all load tokens
-wave.alloc_release after the release barrier
+wave.join after all load tokens
+wave.alloc_release after the joined completion
 ```
 
 Stores are siblings, not a component-by-component chain. Loads are siblings and
-all depend on the publish barrier. The release barrier consumes all load tokens
-and `wave.alloc_release` binds that completion token to the scratch allocation.
-The release result orders accesses to any later allocation sharing its storage.
+all depend on the publish barrier. `wave.join` consumes all load tokens without
+emitting synchronization. `wave.alloc_release` binds that logical completion to
+the scratch allocation.
+
+Straight-line exchanges thread each release token into the next exchange's
+stores. Its publish barrier then retires the preceding exchange for later
+physical reuse. Three exchanges can therefore use scratch offsets A, B, A with
+one publish barrier each. An intervening explicit barrier consumes the pending
+release and can permit immediate offset reuse.
+
+Token order alone does not permit workgroup storage aliasing. Allocation
+resolution requires every path from an earlier release to a later access to
+cross `wave.barrier`. A join proves per-wave completion only. Repeated logical
+lifetimes, such as an allocation inside `scf.for`, require collective
+quiescence on the backedge; resolution materializes a barrier when no existing
+token path proves it.
 
 Scratch lifetime, overlapping offsets, reuse dependencies, and loop-carried
 reuse are general `wave.alloc` concerns. `wave.redistribute` neither changes nor
@@ -496,7 +509,14 @@ No failure fabricates values or silently changes the relation.
 - Same-workitem conversion emits only extract/select/pack.
 - Same-wave conversion emits shuffle without LDS or barrier.
 - Cross-wave conversion emits sibling stores, publish barrier, sibling loads,
-  and release barrier with explicit token edges.
+  joined logical release with explicit token edges, and no eager release
+  barrier.
+- Three straight-line cross-wave conversions use two scratch slots and one
+  publish barrier per conversion.
+- Token-only lifetime order cannot alias workgroup storage; the path must cross
+  a workgroup barrier.
+- Repeated logical lifetimes materialize a barrier when the loop backedge lacks
+  collective quiescence.
 - Any redistribution under lane-masked control fails the V1 full-wave contract.
 - Local and cross-wave conversions require exact `items`/workgroup-size parity.
 - A workgroup whose size is not divisible by `W` fails the full-wave contract.

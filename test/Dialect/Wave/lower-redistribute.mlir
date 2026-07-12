@@ -108,8 +108,8 @@ func.func @same_wave_uniform_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK-DAG: %[[LOAD0:.*]], %[[LOADTOK0:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 // CHECK-DAG: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 // CHECK: %[[PACK:.*]] = wave.pack %[[LOAD0]], %[[LOAD1]]
-// CHECK: %[[RELEASE:.*]] = wave.barrier %[[LOADTOK0]], %[[LOADTOK1]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[RELEASE]]
+// CHECK: %[[DONE:.*]] = wave.join %[[LOADTOK0]], %[[LOADTOK1]]
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]]
 // CHECK-NOT: wave.redistribute
 func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
@@ -125,8 +125,9 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
 // CHECK-LABEL: func.func @cross_wave_nested_if(
 // CHECK: scf.if
 // CHECK: wave.alloc
-// CHECK: wave.barrier
+// CHECK-COUNT-1: wave.barrier
 // CHECK: wave.load
+// CHECK: wave.join
 // CHECK: wave.alloc_release
 func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
                                 %condition: i1)
@@ -146,6 +147,7 @@ func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK: %[[PUBLISH:.*]] = wave.barrier
 // CHECK: %[[PTR:.*]] = wave.ptr_add %[[ALLOC]], {{.*}} : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
 // CHECK: wave.load %[[PTR]] after %[[PUBLISH]]
+// CHECK: wave.join
 // CHECK: wave.alloc_release
 func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
     -> !wave.simd<vector<1xi32>, 32>
@@ -154,6 +156,65 @@ func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
       <items = 64, source_item = "0", source_slot = "0">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return %result : !wave.simd<vector<1xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_sequence(
+// CHECK: %[[ALLOC0:.*]] = wave.alloc()
+// CHECK: %[[STORE0:.*]] = wave.store
+// CHECK: %[[PUBLISH0:.*]] = wave.barrier %[[STORE0]]
+// CHECK: %[[LOAD0:.*]], %[[LOADTOK0:.*]] = wave.load {{.*}} after %[[PUBLISH0]]
+// CHECK: %[[DONE0:.*]] = wave.join %[[LOADTOK0]]
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]]
+// CHECK: %[[ALLOC1:.*]] = wave.alloc()
+// CHECK: %[[STORE1:.*]] = wave.store {{.*}} after %[[RELEASE0]]
+// CHECK: %[[PUBLISH1:.*]] = wave.barrier %[[STORE1]]
+// CHECK: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH1]]
+// CHECK: %[[DONE1:.*]] = wave.join %[[LOADTOK1]]
+// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]]
+// CHECK: %[[ALLOC2:.*]] = wave.alloc()
+// CHECK: wave.store {{.*}} after %[[RELEASE1]]
+func.func @cross_wave_sequence(
+    %source0: !wave.simd<vector<1xi32>, 32>,
+    %source1: !wave.simd<vector<1xi32>, 32>,
+    %source2: !wave.simd<vector<1xi32>, 32>)
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result0 = wave.redistribute %source0,
+      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %result1 = wave.redistribute %source1,
+      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %result2 = wave.redistribute %source2,
+      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_existing_barrier(
+// CHECK: %[[ALLOC0:.*]] = wave.alloc()
+// CHECK: %[[DONE0:.*]] = wave.join
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]]
+// CHECK: %[[ROOT:.*]] = wave.token
+// CHECK: %[[SYNC:.*]] = wave.barrier %[[ROOT]], %[[RELEASE0]]
+// CHECK: wave.alloc
+// CHECK: wave.store {{.*}} after %[[SYNC]]
+func.func @cross_wave_existing_barrier(
+    %source0: !wave.simd<vector<1xi32>, 32>,
+    %source1: !wave.simd<vector<1xi32>, 32>)
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result0 = wave.redistribute %source0,
+      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %root = wave.token : !wave.mem.token
+  %sync = wave.barrier %root : (!wave.mem.token) -> !wave.mem.token
+  %result1 = wave.redistribute %source1,
+      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  return
 }
 
 // -----

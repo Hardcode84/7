@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -483,7 +484,7 @@ static FailureOr<Value>
 emitScratchStores(IRRewriter &rewriter, RedistributeOp op,
                   RelationMaterializer &materializer, Value allocation,
                   ArrayRef<Value> source, sym::ExprHandle address,
-                  Type tokenType) {
+                  Type tokenType, Value dependency) {
   SmallVector<Value> tokens;
   tokens.reserve(source.size());
   for (int64_t slot : llvm::seq<int64_t>(0, source.size())) {
@@ -501,7 +502,7 @@ emitScratchStores(IRRewriter &rewriter, RedistributeOp op,
     }
     StoreOp store =
         StoreOp::create(rewriter, op.getLoc(), tokenType, source[slot],
-                        *pointer, Value(), Attribute());
+                        *pointer, dependency, Attribute());
     tokens.push_back(store.getToken());
   }
   return BarrierOp::create(rewriter, op.getLoc(), tokenType, tokens).getToken();
@@ -511,6 +512,38 @@ struct ScratchLoads {
   SmallVector<Value> values;
   SmallVector<Value> tokens;
 };
+
+struct ScratchSequence {
+  Value completion;
+  Operation *cursor = nullptr;
+};
+
+using ScratchSequenceMap = DenseMap<Block *, ScratchSequence>;
+
+static Value advanceScratchSequence(IRRewriter &rewriter, RedistributeOp op,
+                                    ScratchSequenceMap &sequences) {
+  auto it = sequences.find(op->getBlock());
+  if (it == sequences.end())
+    return {};
+
+  Value dependency = it->second.completion;
+  Operation *cursor = it->second.cursor->getNextNode();
+  for (; cursor != op; cursor = cursor->getNextNode()) {
+    assert(cursor && "redistributions must lower in block order");
+    BarrierOp barrier = dyn_cast<BarrierOp>(cursor);
+    if (!barrier)
+      continue;
+    SmallVector<Value> dependencies(barrier.getDependencies());
+    if (!llvm::is_contained(dependencies, dependency)) {
+      dependencies.push_back(dependency);
+      rewriter.modifyOpInPlace(barrier, [&] {
+        barrier.getDependenciesMutable().assign(dependencies);
+      });
+    }
+    dependency = barrier.getToken();
+  }
+  return dependency;
+}
 
 static FailureOr<ScratchLoads>
 emitScratchLoads(IRRewriter &rewriter, RedistributeOp op,
@@ -544,7 +577,8 @@ emitScratchLoads(IRRewriter &rewriter, RedistributeOp op,
 static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                     sym::Store &store,
                                     const RelationDomain &domain,
-                                    func::FuncOp func) {
+                                    func::FuncOp func,
+                                    ScratchSequenceMap &sequences) {
   if (!func.getBody().hasOneBlock())
     return op.emitOpError(
         "cross-wave redistribution requires a single-block kernel function");
@@ -569,8 +603,10 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
   if (failed(storeAddress))
     return op.emitOpError("failed to construct scratch store address");
   Type tokenType = MemTokenType::get(op.getContext());
-  FailureOr<Value> published = emitScratchStores(
-      rewriter, op, materializer, allocation, source, *storeAddress, tokenType);
+  Value dependency = advanceScratchSequence(rewriter, op, sequences);
+  FailureOr<Value> published =
+      emitScratchStores(rewriter, op, materializer, allocation, source,
+                        *storeAddress, tokenType, dependency);
   if (failed(published))
     return failure();
   FailureOr<sym::ExprHandle> loadAddress = composeAddress(
@@ -590,10 +626,11 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
 
   Value packed = PackOp::create(rewriter, op.getLoc(), op.getResult().getType(),
                                 loaded->values);
-  Value released =
-      BarrierOp::create(rewriter, op.getLoc(), tokenType, loaded->tokens);
-  AllocReleaseOp::create(rewriter, op.getLoc(), tokenType, allocation,
-                         released);
+  Value completed =
+      JoinOp::create(rewriter, op.getLoc(), tokenType, loaded->tokens);
+  AllocReleaseOp released = AllocReleaseOp::create(
+      rewriter, op.getLoc(), tokenType, allocation, completed);
+  sequences[op->getBlock()] = {released.getToken(), released};
   rewriter.replaceOp(op, packed);
   return success();
 }
@@ -672,7 +709,8 @@ static LogicalResult composeRedistributions(IRRewriter &rewriter,
 static LogicalResult lowerRedistribution(IRRewriter &rewriter,
                                          RedistributeOp op,
                                          WaveDialect &dialect,
-                                         func::FuncOp func) {
+                                         func::FuncOp func,
+                                         ScratchSequenceMap &sequences) {
   rewriter.setInsertionPoint(op);
   FailureOr<RelationDomain> domain = buildDomain(dialect.getSymbolStore(), op);
   if (failed(domain))
@@ -692,8 +730,8 @@ static LogicalResult lowerRedistribution(IRRewriter &rewriter,
   case Movement::Wave:
     return lowerWave(rewriter, op, dialect.getSymbolStore(), *domain, width);
   case Movement::Workgroup:
-    return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), *domain,
-                          func);
+    return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), *domain, func,
+                          sequences);
   }
   llvm_unreachable("unknown redistribution movement");
 }
@@ -712,10 +750,11 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
                                     erased)))
     return failure();
 
+  ScratchSequenceMap sequences;
   for (RedistributeOp op : ops) {
     if (erased.contains(op.getOperation()))
       continue;
-    if (failed(lowerRedistribution(rewriter, op, dialect, func)))
+    if (failed(lowerRedistribution(rewriter, op, dialect, func, sequences)))
       return failure();
   }
   return success();

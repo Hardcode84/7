@@ -504,12 +504,13 @@ def Wave_AllocOp : Wave_Op<"alloc"> {
 def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
   let summary = "end a workgroup allocation lifetime";
   let description = [{
-    Marks `$allocation` reusable after `$dependency`. The dependency must cover
-    every memory access through the allocation. The result forwards that
-    ordering to accesses of a later allocation that may share the same storage.
+    Marks `$allocation` logically complete after `$dependency`. The dependency
+    must cover every memory access through the allocation. The result forwards
+    that ordering to accesses of a later allocation.
 
-    This is a logical lifetime operation. Allocation resolution removes it; it
-    emits no target instruction.
+    Allocation resolution removes the marker. It aliases workgroup storage only
+    across a workgroup barrier, materializing one for a repeated lifetime when
+    no existing token path proves collective quiescence.
   }];
 
   let arguments = (ins Arg<Wave_Ptr, "", [MemFree]>:$allocation,

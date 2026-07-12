@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace mlir::wave {
@@ -47,6 +48,7 @@ struct AllocInterval {
   unsigned start = 0;
   unsigned end = 0;
   bool hasUntrackedAccess = false;
+  bool collectivelyComplete = false;
 };
 
 struct PlacedAllocation {
@@ -211,26 +213,36 @@ struct DependencyProof {
   bool cyclic = false;
 };
 
+struct ActiveProof {
+  DenseSet<Value> dependency;
+  DenseSet<Value> barrier;
+};
+
 class TokenOrdering {
 public:
   explicit TokenOrdering(TokenOriginMap origins)
       : origins(std::move(origins)) {}
 
   bool dependsOn(Value token, Value target) {
-    DenseSet<Value> active;
-    return prove(token, target, active).depends;
+    ActiveProof active;
+    return prove(token, target, /*requireBarrier=*/false, active).depends;
+  }
+
+  bool dependsOnThroughBarrier(Value token, Value target) {
+    ActiveProof active;
+    return prove(token, target, /*requireBarrier=*/true, active).depends;
   }
 
   const TokenOriginMap &getOrigins() const { return origins; }
 
 private:
   DependencyProof proveAllOrigins(ArrayRef<Value> sources, Value target,
-                                  DenseSet<Value> &active) {
+                                  bool requireBarrier, ActiveProof &active) {
     if (sources.empty())
       return {};
     DependencyProof result{true, false};
     for (Value source : sources) {
-      DependencyProof proof = prove(source, target, active);
+      DependencyProof proof = prove(source, target, requireBarrier, active);
       if (!proof.depends && !proof.cyclic)
         return {};
       result.depends &= proof.depends;
@@ -240,12 +252,13 @@ private:
   }
 
   DependencyProof proveAnyOperand(Operation *op, Value target,
-                                  DenseSet<Value> &active) {
+                                  bool requireBarrier, ActiveProof &active) {
     DependencyProof result;
+    requireBarrier &= !isa<BarrierOp>(op);
     for (Value operand : op->getOperands()) {
       if (!isa<MemTokenType>(operand.getType()))
         continue;
-      DependencyProof proof = prove(operand, target, active);
+      DependencyProof proof = prove(operand, target, requireBarrier, active);
       if (proof.depends && !proof.cyclic)
         return {true, false};
       result.depends |= proof.depends;
@@ -254,36 +267,41 @@ private:
     return result;
   }
 
-  DependencyProof prove(Value token, Value target, DenseSet<Value> &active) {
+  DependencyProof prove(Value token, Value target, bool requireBarrier,
+                        ActiveProof &active) {
     if (token == target)
-      return {true, false};
+      return {!requireBarrier, false};
     if (!isa<MemTokenType>(token.getType()))
       return {};
 
     std::pair<Value, Value> key{token, target};
+    auto &cache = requireBarrier ? barrierCache : dependencyCache;
     auto cached = cache.find(key);
     if (cached != cache.end())
       return {cached->second, false};
     // Backedge cycle provisional; non-cycle origins still must prove target.
-    if (!active.insert(token).second)
+    DenseSet<Value> &activeSet =
+        requireBarrier ? active.barrier : active.dependency;
+    if (!activeSet.insert(token).second)
       return {true, true};
 
     // Region merge: every path. Op result: any dependency operand.
     DependencyProof result;
     auto origin = origins.find(token);
     if (origin != origins.end())
-      result = proveAllOrigins(origin->second, target, active);
+      result = proveAllOrigins(origin->second, target, requireBarrier, active);
     else if (Operation *def = token.getDefiningOp())
-      result = proveAnyOperand(def, target, active);
+      result = proveAnyOperand(def, target, requireBarrier, active);
 
-    active.erase(token);
+    activeSet.erase(token);
     if (!result.cyclic)
       cache.try_emplace(key, result.depends);
     return result;
   }
 
   TokenOriginMap origins;
-  DenseMap<std::pair<Value, Value>, bool> cache;
+  DenseMap<std::pair<Value, Value>, bool> dependencyCache;
+  DenseMap<std::pair<Value, Value>, bool> barrierCache;
 };
 
 static SmallVector<Value, 2> getTokenResults(Operation *op) {
@@ -422,6 +440,10 @@ static LogicalResult finalizeAllocationInterval(AllocInterval &interval,
   if (interval.hasUntrackedAccess)
     return interval.release.emitOpError(
         "cannot release an allocation with an untracked pointer use");
+  interval.collectivelyComplete = llvm::all_of(accessTokens, [&](Value token) {
+    return ordering.dependsOnThroughBarrier(interval.release.getDependency(),
+                                            token);
+  });
   interval.completionTokens.push_back(interval.release.getToken());
   return success();
 }
@@ -438,12 +460,15 @@ collectAllocationIntervals(const OperationOrder &order, TokenOrdering &ordering,
 }
 
 static bool operationDependsOnAll(Operation *op, ArrayRef<Value> dependencies,
-                                  TokenOrdering &ordering) {
+                                  TokenOrdering &ordering,
+                                  bool requireBarrier = false) {
   for (Value dependency : dependencies) {
     bool ordered = false;
     for (Value operand : op->getOperands()) {
       if (!isa<MemTokenType>(operand.getType()) ||
-          !ordering.dependsOn(operand, dependency))
+          !(requireBarrier
+                ? ordering.dependsOnThroughBarrier(operand, dependency)
+                : ordering.dependsOn(operand, dependency)))
         continue;
       ordered = true;
       break;
@@ -521,7 +546,7 @@ static bool yieldOrdersCompletion(scf::YieldOp yield,
   for (unsigned index : carried) {
     if (index >= yield.getNumOperands())
       continue;
-    if (ordering.dependsOn(yield.getOperand(index), completion))
+    if (ordering.dependsOnThroughBarrier(yield.getOperand(index), completion))
       return true;
   }
   return false;
@@ -566,6 +591,42 @@ getCommonEnclosingRepetitiveRegions(Operation *lhs, Operation *rhs) {
   return common;
 }
 
+static bool repeatedLifetimeNeedsBarrier(AllocInterval &interval,
+                                         TokenOrdering &ordering) {
+  SmallVector<Region *, 2> regions =
+      getCommonEnclosingRepetitiveRegions(interval.op, interval.op);
+  if (regions.empty() || interval.collectivelyComplete)
+    return false;
+  for (Region *region : regions) {
+    scf::ForOp loop = dyn_cast<scf::ForOp>(region->getParentOp());
+    if (!loop || !loopBackedgeOrders(interval, interval, loop, ordering))
+      return true;
+  }
+  return false;
+}
+
+static bool
+materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
+                                    SmallVectorImpl<AllocInterval> &allocs,
+                                    TokenOrdering &ordering) {
+  bool changed = false;
+  for (AllocInterval &interval : allocs) {
+    if (!interval.release || !repeatedLifetimeNeedsBarrier(interval, ordering))
+      continue;
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : interval.release.getToken().getUses())
+      uses.push_back(&use);
+    rewriter.setInsertionPointAfter(interval.release);
+    BarrierOp barrier = BarrierOp::create(rewriter, interval.release.getLoc(),
+                                          interval.release.getToken().getType(),
+                                          interval.release.getToken());
+    for (OpOperand *use : uses)
+      use->set(barrier.getToken());
+    changed = true;
+  }
+  return changed;
+}
+
 static bool usesExplicitLifetime(const AllocInterval &earlier,
                                  const AllocInterval &later) {
   return earlier.release || later.release;
@@ -581,7 +642,9 @@ static bool canReuseStorage(const AllocInterval &earlier,
   if (earlier.hasUntrackedAccess || later.hasUntrackedAccess)
     return false;
   for (Operation *access : later.accesses)
-    if (!operationDependsOnAll(access, earlier.completionTokens, ordering))
+    if (!operationDependsOnAll(access, earlier.completionTokens, ordering,
+                               /*requireBarrier=*/
+                               !earlier.collectivelyComplete))
       return false;
   for (Region *region :
        getCommonEnclosingRepetitiveRegions(earlier.op, later.op)) {
@@ -692,6 +755,23 @@ static void rewriteAllocations(IRRewriter &rewriter,
   }
 }
 
+struct AllocationAnalysis {
+  SmallVector<AllocInterval> allocs;
+  std::unique_ptr<TokenOrdering> ordering;
+};
+
+static LogicalResult analyzeAllocations(func::FuncOp func,
+                                        ArrayRef<AllocOp> ops,
+                                        ArrayRef<AllocReleaseOp> releases,
+                                        AllocationAnalysis &analysis) {
+  OperationOrder order(func);
+  analysis.allocs = buildAllocIntervals(ops);
+  if (failed(associateReleases(releases, analysis.allocs)))
+    return failure();
+  analysis.ordering = std::make_unique<TokenOrdering>(buildTokenOrigins(func));
+  return collectAllocationIntervals(order, *analysis.ordering, analysis.allocs);
+}
+
 static LogicalResult resolveFuncAllocs(func::FuncOp func,
                                        IRRewriter &rewriter) {
   if (func.isExternal())
@@ -709,19 +789,21 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
   if (fixedBytes < 0)
     return func.emitError("wave.lds_size must be non-negative");
 
-  OperationOrder order(func);
-  SmallVector<AllocInterval> allocs = buildAllocIntervals(ops);
-  if (failed(associateReleases(releases, allocs)))
+  AllocationAnalysis analysis;
+  if (failed(analyzeAllocations(func, ops, releases, analysis)))
     return failure();
-  TokenOrdering ordering(buildTokenOrigins(func));
-  if (failed(collectAllocationIntervals(order, ordering, allocs)))
+  if (materializeRepeatedLifetimeBarriers(rewriter, analysis.allocs,
+                                          *analysis.ordering) &&
+      failed(analyzeAllocations(func, ops, releases, analysis)))
     return failure();
-  FailureOr<int64_t> plannedBytes = assignOffsets(allocs, fixedBytes, ordering);
+
+  FailureOr<int64_t> plannedBytes =
+      assignOffsets(analysis.allocs, fixedBytes, *analysis.ordering);
   if (failed(plannedBytes))
     return func.emitError("failed to place wave.alloc storage");
 
-  eraseAllocationReleases(rewriter, allocs);
-  rewriteAllocations(rewriter, allocs);
+  eraseAllocationReleases(rewriter, analysis.allocs);
+  rewriteAllocations(rewriter, analysis.allocs);
 
   OpBuilder builder(func.getContext());
   func->setAttr("wave.lds_size", builder.getI64IntegerAttr(*plannedBytes));
