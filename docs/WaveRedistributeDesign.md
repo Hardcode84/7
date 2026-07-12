@@ -270,8 +270,11 @@ source_lane = Mod(source_item, W)
 ```
 
 For each result slot, shuffle candidate source components from `source_lane`,
-then select the component named by `source_slot`. Group equal lane expressions
-and shuffle whole vector packets when legal.
+then select the component named by `source_slot`. Lowering proves the widest
+destination packet slice whose slots share one source lane and source vector
+group. It shuffles only source groups reachable over the finite item domain,
+selects the group once, then extracts the slice components. Unprovable or
+oversized domains retain scalar lowering.
 
 Local lowering introduces no memory token or workgroup barrier.
 
@@ -567,6 +570,8 @@ No failure fabricates values or silently changes the relation.
 
 - Same-workitem conversion emits only extract/select/pack.
 - Same-wave conversion emits shuffle without LDS or barrier.
+- Dynamic same-wave source slots use proved packet slices and reachable source
+  groups instead of all-source scalar muxes.
 - Same-block, block-independent conversion lowers without a cluster coordinate.
 - Cross-block and block-dependent conversions report contextual diagnostics.
 - Cross-wave conversion emits sibling stores, publish barrier, sibling loads,
@@ -576,6 +581,8 @@ No failure fabricates values or silently changes the relation.
 - Conflict-heavy maps select different XOR phases on 32- and 64-bank targets.
 - Exact FA8K blocked-to-dot repro emits 16 `vector<8xbf16>` stores, 16 loads,
   one barrier, and no component selects.
+- Exact FA8K MFMA-to-linear repro emits 64 `vector<4xbf16>` shuffles and 32
+  vector selects instead of 256 shuffles and 16,256 scalar selects.
 - Three straight-line cross-wave conversions use two scratch slots and one
   publish barrier per conversion.
 - Token-only lifetime order cannot alias workgroup storage; the path must cross

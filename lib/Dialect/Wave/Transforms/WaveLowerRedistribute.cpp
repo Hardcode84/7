@@ -80,6 +80,14 @@ static SimdType getPacketElementType(Type type) {
                        packet.getWidth());
 }
 
+static SimdType getPacketSliceType(Type type, int64_t elements) {
+  SimdType packet = cast<SimdType>(type);
+  Type elementType = getPacketType(type).getElementType();
+  if (elements > 1)
+    elementType = VectorType::get({elements}, elementType);
+  return SimdType::get(type.getContext(), elementType, packet.getWidth());
+}
+
 static FailureOr<RelationDomain> buildDomain(sym::Store &store,
                                              RedistributeOp op) {
   int64_t destinationSlots =
@@ -368,6 +376,16 @@ static FailureOr<bool> supportsVectorAt(sym::Store &store, RedistributeOp op,
   return true;
 }
 
+static bool fitsRelationPointBudget(RedistributeOp op) {
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  std::optional<int64_t> points = llvm::checkedMul(op.getRelation().getBlocks(),
+                                                   op.getRelation().getItems());
+  if (points)
+    points = llvm::checkedMul(*points, resultSlots);
+  return points && *points <= kMaxRelationPoints;
+}
+
 static FailureOr<bool> supportsVectorTransfer(sym::Store &store,
                                               RedistributeOp op,
                                               const RelationDomain &domain,
@@ -376,10 +394,7 @@ static FailureOr<bool> supportsVectorTransfer(sym::Store &store,
   int64_t items = op.getRelation().getItems();
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
-  std::optional<int64_t> points = llvm::checkedMul(blocks, items);
-  if (points)
-    points = llvm::checkedMul(*points, resultSlots);
-  if (!points || *points > kMaxRelationPoints)
+  if (!fitsRelationPointBudget(op))
     return false;
 
   for (int64_t block : llvm::seq<int64_t>(0, blocks)) {
@@ -399,7 +414,8 @@ static FailureOr<bool> supportsVectorTransfer(sym::Store &store,
 
 static FailureOr<int64_t> selectVectorElements(sym::Store &store,
                                                RedistributeOp op,
-                                               const RelationDomain &domain) {
+                                               const RelationDomain &domain,
+                                               int64_t maxVectorBits) {
   int64_t sourceSlots =
       getPacketType(op.getSource().getType()).getNumElements();
   int64_t resultSlots =
@@ -407,7 +423,9 @@ static FailureOr<int64_t> selectVectorElements(sym::Store &store,
   int64_t elementBits = getPacketType(op.getSource().getType())
                             .getElementType()
                             .getIntOrFloatBitWidth();
-  int64_t limit = std::min({sourceSlots, resultSlots, 128 / elementBits});
+  int64_t limit = std::min(sourceSlots, resultSlots);
+  if (maxVectorBits)
+    limit = std::min(limit, maxVectorBits / elementBits);
   int64_t vectorElements = 1;
   while (vectorElements <= limit / 2)
     vectorElements *= 2;
@@ -425,9 +443,9 @@ static FailureOr<int64_t> selectVectorElements(sym::Store &store,
 }
 
 static FailureOr<std::optional<int64_t>>
-inferScratchSelector(sym::Store &store, RedistributeOp op,
-                     const RelationDomain &domain, int64_t destinationSlot,
-                     int64_t vectorElements) {
+inferVectorSelector(sym::Store &store, RedistributeOp op,
+                    const RelationDomain &domain, int64_t destinationSlot,
+                    int64_t vectorElements) {
   std::optional<int64_t> selector;
   for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
     for (int64_t item : llvm::seq<int64_t>(0, op.getRelation().getItems())) {
@@ -449,8 +467,8 @@ inferScratchSelector(sym::Store &store, RedistributeOp op,
 }
 
 static FailureOr<SmallVector<std::optional<int64_t>>>
-inferScratchSelectors(sym::Store &store, RedistributeOp op,
-                      const RelationDomain &domain, int64_t vectorElements) {
+inferVectorSelectors(sym::Store &store, RedistributeOp op,
+                     const RelationDomain &domain, int64_t vectorElements) {
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
   SmallVector<std::optional<int64_t>> selectors;
@@ -461,7 +479,7 @@ inferScratchSelectors(sym::Store &store, RedistributeOp op,
   }
   for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
     FailureOr<std::optional<int64_t>> selector =
-        inferScratchSelector(store, op, domain, slot, vectorElements);
+        inferVectorSelector(store, op, domain, slot, vectorElements);
     if (failed(selector))
       return failure();
     selectors.push_back(*selector);
@@ -620,7 +638,8 @@ static bool exceedsScratchPlanningBudget(RedistributeOp op,
 static FailureOr<ScratchLayoutPlan>
 selectScratchLayout(sym::Store &store, RedistributeOp op,
                     const RelationDomain &domain, int64_t waveWidth) {
-  FailureOr<int64_t> vectorElements = selectVectorElements(store, op, domain);
+  FailureOr<int64_t> vectorElements =
+      selectVectorElements(store, op, domain, /*maxVectorBits=*/128);
   if (failed(vectorElements))
     return failure();
   ScratchLayoutPlan best;
@@ -801,6 +820,20 @@ static SmallVector<Value> extractComponents(IRRewriter &rewriter,
   return components;
 }
 
+static SmallVector<Value> extractPacketSlices(IRRewriter &rewriter,
+                                              RedistributeOp op,
+                                              int64_t sliceElements) {
+  int64_t packetElements =
+      getPacketType(op.getSource().getType()).getNumElements();
+  Type sliceType = getPacketSliceType(op.getSource().getType(), sliceElements);
+  SmallVector<Value> slices;
+  slices.reserve(packetElements / sliceElements);
+  for (int64_t index = 0; index < packetElements; index += sliceElements)
+    slices.push_back(ExtractOp::create(rewriter, op.getLoc(), sliceType,
+                                       op.getSource(), index));
+  return slices;
+}
+
 static FailureOr<Value> selectComponent(IRRewriter &rewriter, RedistributeOp op,
                                         RelationMaterializer &materializer,
                                         ArrayRef<Value> candidates,
@@ -823,6 +856,58 @@ static FailureOr<Value> selectComponent(IRRewriter &rewriter, RedistributeOp op,
                               candidates[index], result);
   }
   return result;
+}
+
+static FailureOr<Value> selectKeyedCandidate(IRRewriter &rewriter,
+                                             RedistributeOp op,
+                                             RelationMaterializer &materializer,
+                                             ArrayRef<Value> candidates,
+                                             ArrayRef<int64_t> keys,
+                                             MaterializedExpr selector) {
+  assert(candidates.size() == keys.size() && "candidate keys must align");
+  if (selector.literal) {
+    auto found = llvm::find(keys, *selector.literal);
+    if (found == keys.end())
+      return failure();
+    return candidates[std::distance(keys.begin(), found)];
+  }
+  if (!selector.value)
+    return failure();
+
+  Value result = candidates.front();
+  int64_t width = cast<SimdType>(selector.value.getType()).getWidth();
+  Type maskType = MaskType::get(op.getContext(), width);
+  for (int64_t index : llvm::seq<int64_t>(1, candidates.size())) {
+    Value constant = materializer.constantIndex(keys[index], /*simd=*/true);
+    Value equal =
+        CmpIOp::create(rewriter, op.getLoc(), maskType,
+                       arith::CmpIPredicate::eq, selector.value, constant);
+    result = SelectOp::create(rewriter, op.getLoc(), result.getType(), equal,
+                              candidates[index], result);
+  }
+  return result;
+}
+
+static FailureOr<SmallVector<int64_t>>
+collectSourceVectorGroups(sym::Store &store, RedistributeOp op,
+                          const RelationDomain &domain, int64_t destinationSlot,
+                          int64_t vectorElements) {
+  DenseSet<int64_t> groupSet;
+  for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
+    for (int64_t item : llvm::seq<int64_t>(0, op.getRelation().getItems())) {
+      FailureOr<int64_t> sourceSlot =
+          evaluateCoordinate(store, op.getRelation().getSourceSlot(), domain,
+                             block, item, destinationSlot);
+      if (failed(sourceSlot)) {
+        op.emitOpError("failed to evaluate verified redistribution relation");
+        return failure();
+      }
+      groupSet.insert(*sourceSlot / vectorElements);
+    }
+  }
+  SmallVector<int64_t> groups(groupSet.begin(), groupSet.end());
+  llvm::sort(groups);
+  return groups;
 }
 
 static LogicalResult lowerWorkitem(IRRewriter &rewriter, RedistributeOp op,
@@ -851,9 +936,10 @@ static LogicalResult lowerWorkitem(IRRewriter &rewriter, RedistributeOp op,
   return success();
 }
 
-static LogicalResult lowerWave(IRRewriter &rewriter, RedistributeOp op,
-                               sym::Store &store, const RelationDomain &domain,
-                               int64_t waveWidth) {
+static LogicalResult lowerWaveScalar(IRRewriter &rewriter, RedistributeOp op,
+                                     sym::Store &store,
+                                     const RelationDomain &domain,
+                                     int64_t waveWidth) {
   RelationMaterializer materializer(rewriter, op, store, domain);
   SmallVector<Value> source = extractComponents(rewriter, op);
   FailureOr<sym::ExprHandle> width = sym::composeExprInt(store, waveWidth);
@@ -904,6 +990,133 @@ static LogicalResult lowerWave(IRRewriter &rewriter, RedistributeOp op,
   return success();
 }
 
+static LogicalResult appendSliceResults(
+    IRRewriter &rewriter, RedistributeOp op, RelationMaterializer &materializer,
+    Value slice, int64_t destinationSlot, int64_t vectorElements,
+    ArrayRef<std::optional<int64_t>> selectors, sym::ExprHandle sourceWithin,
+    SmallVectorImpl<Value> &result) {
+  if (vectorElements == 1) {
+    result.push_back(slice);
+    return success();
+  }
+
+  Type componentType = getPacketElementType(op.getSource().getType());
+  SmallVector<Value> components;
+  components.reserve(vectorElements);
+  for (int64_t index : llvm::seq<int64_t>(0, vectorElements))
+    components.push_back(
+        ExtractOp::create(rewriter, op.getLoc(), componentType, slice, index));
+  for (int64_t offset : llvm::seq<int64_t>(0, vectorElements)) {
+    int64_t slot = destinationSlot + offset;
+    if (selectors[slot]) {
+      result.push_back(components[*selectors[slot]]);
+      continue;
+    }
+    FailureOr<MaterializedExpr> selector =
+        materializer.materialize(sourceWithin, slot);
+    if (failed(selector))
+      return op.emitOpError("failed to materialize vector selector");
+    FailureOr<Value> selected =
+        selectComponent(rewriter, op, materializer, components, *selector);
+    if (failed(selected))
+      return op.emitOpError("failed to select vector component");
+    result.push_back(*selected);
+  }
+  return success();
+}
+
+static FailureOr<Value>
+materializeWaveSlice(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
+                     const RelationDomain &domain,
+                     RelationMaterializer &materializer, ArrayRef<Value> source,
+                     sym::ExprHandle sourceLane, sym::ExprHandle sourceGroup,
+                     int64_t destinationSlot, int64_t vectorElements) {
+  FailureOr<SmallVector<int64_t>> groups = collectSourceVectorGroups(
+      store, op, domain, destinationSlot, vectorElements);
+  FailureOr<MaterializedExpr> lane =
+      materializer.materialize(sourceLane, destinationSlot);
+  if (failed(groups) || failed(lane))
+    return failure();
+  Value laneValue = lane->literal ? materializer.constantIndex(*lane->literal,
+                                                               /*simd=*/false)
+                                  : lane->value;
+
+  SmallVector<Value> candidates;
+  candidates.reserve(groups->size());
+  for (int64_t group : *groups)
+    candidates.push_back(ShuffleOp::create(rewriter, op.getLoc(),
+                                           source[group].getType(),
+                                           source[group], laneValue));
+  if (candidates.size() == 1)
+    return candidates.front();
+
+  FailureOr<MaterializedExpr> selector =
+      materializer.materialize(sourceGroup, destinationSlot);
+  if (failed(selector))
+    return failure();
+  return selectKeyedCandidate(rewriter, op, materializer, candidates, *groups,
+                              *selector);
+}
+
+static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
+                                         RedistributeOp op, sym::Store &store,
+                                         const RelationDomain &domain,
+                                         int64_t waveWidth) {
+  FailureOr<int64_t> vectorElements =
+      selectVectorElements(store, op, domain, /*maxVectorBits=*/0);
+  if (failed(vectorElements))
+    return failure();
+  FailureOr<SmallVector<std::optional<int64_t>>> selectors =
+      inferVectorSelectors(store, op, domain, *vectorElements);
+  if (failed(selectors))
+    return failure();
+
+  FailureOr<sym::ExprHandle> width = sym::composeExprInt(store, waveWidth);
+  if (failed(width))
+    return op.emitOpError("failed to construct source lane expression");
+  FailureOr<sym::ExprHandle> sourceLane = sym::composeExprBinary(
+      store, op.getRelation().getSourceItem(), sym::ExprBinaryOp::Mod, *width);
+  FailureOr<sym::ExprHandle> sourceGroup =
+      floorDiv(store, op.getRelation().getSourceSlot(), *vectorElements);
+  FailureOr<sym::ExprHandle> sourceWithin =
+      composeBinaryInt(store, op.getRelation().getSourceSlot(),
+                       sym::ExprBinaryOp::Mod, *vectorElements);
+  if (failed(sourceLane) || failed(sourceGroup) || failed(sourceWithin))
+    return op.emitOpError("failed to construct packetized wave relation");
+
+  RelationMaterializer materializer(rewriter, op, store, domain);
+  SmallVector<Value> source =
+      extractPacketSlices(rewriter, op, *vectorElements);
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  SmallVector<Value> result;
+  result.reserve(resultSlots);
+  for (int64_t slot = 0; slot < resultSlots; slot += *vectorElements) {
+    FailureOr<Value> selected =
+        materializeWaveSlice(rewriter, op, store, domain, materializer, source,
+                             *sourceLane, *sourceGroup, slot, *vectorElements);
+    if (failed(selected))
+      return op.emitOpError("failed to materialize packetized wave relation");
+    if (failed(appendSliceResults(rewriter, op, materializer, *selected, slot,
+                                  *vectorElements, *selectors, *sourceWithin,
+                                  result)))
+      return failure();
+  }
+
+  Value packed =
+      PackOp::create(rewriter, op.getLoc(), op.getResult().getType(), result);
+  rewriter.replaceOp(op, packed);
+  return success();
+}
+
+static LogicalResult lowerWave(IRRewriter &rewriter, RedistributeOp op,
+                               sym::Store &store, const RelationDomain &domain,
+                               int64_t waveWidth) {
+  if (!fitsRelationPointBudget(op))
+    return lowerWaveScalar(rewriter, op, store, domain, waveWidth);
+  return lowerWavePacketized(rewriter, op, store, domain, waveWidth);
+}
+
 static FailureOr<Value> buildPointer(IRRewriter &rewriter, RedistributeOp op,
                                      RelationMaterializer &materializer,
                                      Value base, MaterializedExpr offset) {
@@ -948,13 +1161,7 @@ static FailureOr<int64_t> getScratchBytes(RedistributeOp op) {
 
 static Type getScratchTransferType(RedistributeOp op,
                                    const ScratchLayoutPlan &plan) {
-  Type componentType = getPacketElementType(op.getSource().getType());
-  if (plan.vectorElements == 1)
-    return componentType;
-  SimdType component = cast<SimdType>(componentType);
-  VectorType vectorType =
-      VectorType::get({plan.vectorElements}, component.getElementType());
-  return SimdType::get(op.getContext(), vectorType, component.getWidth());
+  return getPacketSliceType(op.getSource().getType(), plan.vectorElements);
 }
 
 static Value buildScratchStoreValue(IRRewriter &rewriter, RedistributeOp op,
@@ -1110,7 +1317,7 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
   if (failed(layout))
     return failure();
   FailureOr<SmallVector<std::optional<int64_t>>> selectors =
-      inferScratchSelectors(store, op, domain, layout->vectorElements);
+      inferVectorSelectors(store, op, domain, layout->vectorElements);
   if (failed(selectors))
     return failure();
   VectorType sourcePacket = getPacketType(op.getSource().getType());

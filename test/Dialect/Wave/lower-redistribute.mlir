@@ -71,7 +71,7 @@ func.func @piecewise_item(%source: !wave.simd<vector<2xi32>, 32>)
 // CHECK-NOT: wave.barrier
 // CHECK: wave.workitem_id 0
 // CHECK: wave.index_expr
-// CHECK-COUNT-2: wave.shuffle
+// CHECK-COUNT-1: wave.shuffle {{.*}}!wave.simd<vector<2xi32>, 32>
 // CHECK: wave.pack
 func.func @same_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
