@@ -376,6 +376,9 @@ Each stage stores only its window, publishes it, and loads its destination
 prefix. Its local source-group origin is subtracted from load addresses before
 applying `P`.
 
+One allocation snapshot serves every exchange. Batched token proofs and
+provisional scratch ranges avoid rescanning already-expanded redistribution IR.
+
 An `N`-stage exchange emits `N` publish barriers and `N - 1` barriers before
 overwriting scratch: `2N - 1` total. Vector width is fixed across stages;
 swizzling is scored per stage. Consecutive exchanges retain the one-barrier

@@ -18,6 +18,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -234,6 +235,117 @@ public:
     return prove(token, target, /*requireBarrier=*/true, active).depends;
   }
 
+  bool dependsOnAll(Value token, ArrayRef<Value> targets, bool requireBarrier) {
+    return dependsOnAll(ArrayRef<Value>{token}, targets, requireBarrier);
+  }
+
+  bool dependsOnAll(ArrayRef<Value> tokens, ArrayRef<Value> targets,
+                    bool requireBarrier) {
+    if (targets.empty())
+      return true;
+    if (tokens.empty())
+      return false;
+
+    struct Node {
+      SmallVector<unsigned, 2> dependencies;
+      bool conjunctive = false;
+      bool barrier = false;
+    };
+
+    DenseMap<Value, unsigned> indices;
+    SmallVector<Value> values;
+    SmallVector<Node> nodes;
+    SmallVector<unsigned> pending;
+    auto addNode = [&](Value value) {
+      auto [it, inserted] = indices.try_emplace(value, values.size());
+      if (inserted) {
+        values.push_back(value);
+        nodes.emplace_back();
+        pending.push_back(it->second);
+      }
+      return it->second;
+    };
+    SmallVector<unsigned, 2> roots;
+    for (Value token : tokens)
+      roots.push_back(addNode(token));
+    while (!pending.empty()) {
+      unsigned index = pending.pop_back_val();
+      Value value = values[index];
+      Node node;
+      auto origin = origins.find(value);
+      if (origin != origins.end()) {
+        node.conjunctive = true;
+        for (Value source : origin->second)
+          node.dependencies.push_back(addNode(source));
+        nodes[index] = std::move(node);
+        continue;
+      }
+      Operation *def = value.getDefiningOp();
+      if (!def) {
+        nodes[index] = std::move(node);
+        continue;
+      }
+      node.barrier = isa<BarrierOp>(def);
+      for (Value operand : def->getOperands())
+        if (isa<MemTokenType>(operand.getType()))
+          node.dependencies.push_back(addNode(operand));
+      nodes[index] = std::move(node);
+    }
+
+    SmallVector<SmallVector<unsigned, 2>> users(nodes.size());
+    for (auto [index, node] : llvm::enumerate(nodes))
+      for (unsigned dependency : node.dependencies)
+        users[dependency].push_back(index);
+
+    unsigned width = targets.size();
+    SmallVector<BitVector> plain(nodes.size(), BitVector(width, true));
+    SmallVector<BitVector> throughBarrier(nodes.size(), BitVector(width, true));
+    DenseMap<Value, SmallVector<unsigned, 1>> targetIndices;
+    for (auto [index, target] : llvm::enumerate(targets))
+      targetIndices[target].push_back(index);
+
+    SmallVector<unsigned> worklist;
+    BitVector queued(nodes.size(), true);
+    for (unsigned index : llvm::seq<unsigned>(0, nodes.size()))
+      worklist.push_back(index);
+    auto combine = [&](const Node &node, ArrayRef<BitVector> states) {
+      BitVector result(width, node.conjunctive);
+      if (node.dependencies.empty())
+        result.reset();
+      for (unsigned dependency : node.dependencies) {
+        if (node.conjunctive)
+          result &= states[dependency];
+        else
+          result |= states[dependency];
+      }
+      return result;
+    };
+    while (!worklist.empty()) {
+      unsigned index = worklist.pop_back_val();
+      queued.reset(index);
+      const Node &node = nodes[index];
+      BitVector nextPlain = combine(node, plain);
+      for (unsigned target : targetIndices.lookup(values[index]))
+        nextPlain.set(target);
+      BitVector nextBarrier =
+          node.barrier ? combine(node, plain) : combine(node, throughBarrier);
+      if (nextPlain == plain[index] && nextBarrier == throughBarrier[index])
+        continue;
+      plain[index] = std::move(nextPlain);
+      throughBarrier[index] = std::move(nextBarrier);
+      for (unsigned user : users[index])
+        if (!queued.test(user)) {
+          queued.set(user);
+          worklist.push_back(user);
+        }
+    }
+    BitVector covered(width);
+    ArrayRef<BitVector> states = requireBarrier ? throughBarrier : plain;
+    for (unsigned root : roots)
+      covered |= states[root];
+    return covered.all();
+  }
+
   const TokenOriginMap &getOrigins() const { return origins; }
 
 private:
@@ -434,17 +546,16 @@ static LogicalResult finalizeAllocationInterval(AllocInterval &interval,
     return success();
   }
 
-  for (Value token : accessTokens)
-    if (!ordering.dependsOn(interval.release.getDependency(), token))
-      return interval.release.emitOpError(
-          "dependency does not cover every allocation access token");
+  if (!ordering.dependsOnAll(interval.release.getDependency(), accessTokens,
+                             /*requireBarrier=*/false))
+    return interval.release.emitOpError(
+        "dependency does not cover every allocation access token");
   if (interval.hasUntrackedAccess)
     return interval.release.emitOpError(
         "cannot release an allocation with an untracked pointer use");
-  interval.collectivelyComplete = llvm::all_of(accessTokens, [&](Value token) {
-    return ordering.dependsOnThroughBarrier(interval.release.getDependency(),
-                                            token);
-  });
+  interval.collectivelyComplete =
+      ordering.dependsOnAll(interval.release.getDependency(), accessTokens,
+                            /*requireBarrier=*/true);
   interval.completionTokens.push_back(interval.release.getToken());
   return success();
 }
@@ -463,21 +574,11 @@ collectAllocationIntervals(const OperationOrder &order, TokenOrdering &ordering,
 static bool operationDependsOnAll(Operation *op, ArrayRef<Value> dependencies,
                                   TokenOrdering &ordering,
                                   bool requireBarrier = false) {
-  for (Value dependency : dependencies) {
-    bool ordered = false;
-    for (Value operand : op->getOperands()) {
-      if (!isa<MemTokenType>(operand.getType()) ||
-          !(requireBarrier
-                ? ordering.dependsOnThroughBarrier(operand, dependency)
-                : ordering.dependsOn(operand, dependency)))
-        continue;
-      ordered = true;
-      break;
-    }
-    if (!ordered)
-      return false;
-  }
-  return true;
+  SmallVector<Value, 2> tokens;
+  for (Value operand : op->getOperands())
+    if (isa<MemTokenType>(operand.getType()))
+      tokens.push_back(operand);
+  return ordering.dependsOnAll(tokens, dependencies, requireBarrier);
 }
 
 static bool appendLoopCarriedTokenIndex(Value token, scf::ForOp loop,
@@ -770,18 +871,20 @@ static void rewriteAllocations(IRRewriter &rewriter,
 struct AllocationAnalysis {
   SmallVector<AllocInterval> allocs;
   std::unique_ptr<TokenOrdering> ordering;
+  std::unique_ptr<OperationOrder> order;
 };
 
 static LogicalResult analyzeAllocations(func::FuncOp func,
                                         ArrayRef<AllocOp> ops,
                                         ArrayRef<AllocReleaseOp> releases,
                                         AllocationAnalysis &analysis) {
-  OperationOrder order(func);
+  analysis.order = std::make_unique<OperationOrder>(func);
   analysis.allocs = buildAllocIntervals(ops);
   if (failed(associateReleases(releases, analysis.allocs)))
     return failure();
   analysis.ordering = std::make_unique<TokenOrdering>(buildTokenOrigins(func));
-  return collectAllocationIntervals(order, *analysis.ordering, analysis.allocs);
+  return collectAllocationIntervals(*analysis.order, *analysis.ordering,
+                                    analysis.allocs);
 }
 
 static FailureOr<int64_t> getFixedLDSBytes(func::FuncOp func) {
@@ -794,25 +897,19 @@ static FailureOr<int64_t> getFixedLDSBytes(func::FuncOp func) {
 
 static bool isRetiredAtPoint(AllocInterval &interval, Operation *point,
                              unsigned position, Value dependency,
-                             const DenseSet<Value> &ignoredAllocations,
                              TokenOrdering &ordering) {
   if (interval.end >= position)
     return false;
   if (interval.hasUntrackedAccess)
     return false;
-  if (ignoredAllocations.contains(interval.op.getResult()))
-    return true;
   if (interval.completionTokens.empty())
     return true;
   if (!dependency)
     return false;
   if (!getCommonEnclosingRepetitiveRegions(interval.op, point).empty())
     return false;
-  return llvm::all_of(interval.completionTokens, [&](Value completion) {
-    return interval.collectivelyComplete
-               ? ordering.dependsOn(dependency, completion)
-               : ordering.dependsOnThroughBarrier(dependency, completion);
-  });
+  return ordering.dependsOnAll(dependency, interval.completionTokens,
+                               !interval.collectivelyComplete);
 }
 
 static FailureOr<int64_t>
@@ -858,14 +955,10 @@ static LogicalResult analyzeCurrentAllocations(func::FuncOp func,
 
 static SmallVector<PlacedAllocation>
 collectBlockedAllocations(AllocationAnalysis &analysis, Operation *point,
-                          unsigned position, Value dependency,
-                          ArrayRef<Value> ignoredAllocations) {
-  DenseSet<Value> ignored;
-  for (Value allocation : ignoredAllocations)
-    ignored.insert(allocation);
+                          unsigned position, Value dependency) {
   SmallVector<PlacedAllocation> blocked;
   for (auto [index, interval] : llvm::enumerate(analysis.allocs)) {
-    if (isRetiredAtPoint(interval, point, position, dependency, ignored,
+    if (isRetiredAtPoint(interval, point, position, dependency,
                          *analysis.ordering))
       continue;
     blocked.push_back(
@@ -878,30 +971,20 @@ collectBlockedAllocations(AllocationAnalysis &analysis, Operation *point,
   return blocked;
 }
 
-static FailureOr<int64_t>
-getLDSLargestFreeRangeImpl(func::FuncOp func, Operation *point,
-                           int64_t capacity, Value dependency,
-                           ArrayRef<Value> ignoredAllocations) {
-  FailureOr<int64_t> fixedBytes = getFixedLDSBytes(func);
-  if (failed(fixedBytes))
-    return failure();
-  if (capacity <= *fixedBytes)
-    return 0;
-
-  AllocationAnalysis analysis;
-  if (failed(analyzeCurrentAllocations(func, *fixedBytes, analysis)))
-    return failure();
-  SmallVector<PlacedAllocation> blocked;
-  if (!analysis.allocs.empty()) {
-    OperationOrder order(func);
-    blocked = collectBlockedAllocations(analysis, point, order.lookup(point),
-                                        dependency, ignoredAllocations);
+static LogicalResult
+appendBlockedRanges(ArrayRef<WaveLDSRange> ranges,
+                    SmallVectorImpl<PlacedAllocation> &blocked) {
+  for (WaveLDSRange range : ranges) {
+    if (range.offset < 0 || range.bytes <= 0 ||
+        range.offset > std::numeric_limits<int64_t>::max() - range.bytes)
+      return failure();
+    blocked.push_back({range.offset, range.bytes, 0});
   }
-  FailureOr<int64_t> largest =
-      findLargestAlignedGap(blocked, *fixedBytes, capacity);
-  if (failed(largest))
-    return func.emitError("failed to analyze available LDS ranges");
-  return *largest;
+  llvm::sort(blocked,
+             [](const PlacedAllocation &lhs, const PlacedAllocation &rhs) {
+               return lhs.offset < rhs.offset;
+             });
+  return success();
 }
 
 static LogicalResult materializeAndReanalyzeRepeatedLifetimes(
@@ -974,10 +1057,70 @@ struct WaveResolveAllocsPass
 
 } // namespace
 
-FailureOr<int64_t>
-mlir::wave::getWaveLDSLargestFreeRange(func::FuncOp func, Operation *point,
-                                       int64_t capacity, Value dependency,
-                                       ArrayRef<Value> ignoredAllocations) {
-  return getLDSLargestFreeRangeImpl(func, point, capacity, dependency,
-                                    ignoredAllocations);
+struct mlir::wave::WaveLDSAllocationAnalysis::Impl {
+  AllocationAnalysis analysis;
+  DenseMap<std::pair<Operation *, Value>, SmallVector<PlacedAllocation>>
+      blockedCache;
+  func::FuncOp func;
+  int64_t fixedBytes = 0;
+};
+
+WaveLDSAllocationAnalysis::WaveLDSAllocationAnalysis(std::unique_ptr<Impl> impl)
+    : impl(std::move(impl)) {}
+
+WaveLDSAllocationAnalysis::~WaveLDSAllocationAnalysis() = default;
+
+FailureOr<std::unique_ptr<WaveLDSAllocationAnalysis>>
+WaveLDSAllocationAnalysis::create(func::FuncOp func) {
+  FailureOr<int64_t> fixedBytes = getFixedLDSBytes(func);
+  if (failed(fixedBytes))
+    return failure();
+  auto impl = std::make_unique<Impl>();
+  impl->func = func;
+  impl->fixedBytes = *fixedBytes;
+  if (failed(analyzeCurrentAllocations(func, *fixedBytes, impl->analysis)))
+    return failure();
+  return std::unique_ptr<WaveLDSAllocationAnalysis>(
+      new WaveLDSAllocationAnalysis(std::move(impl)));
+}
+
+FailureOr<int64_t> WaveLDSAllocationAnalysis::getLargestFreeRange(
+    Operation *point, int64_t capacity, Value dependency,
+    ArrayRef<WaveLDSRange> extraBlocked) {
+  if (capacity <= impl->fixedBytes)
+    return 0;
+  auto [cached, inserted] = impl->blockedCache.try_emplace({point, dependency});
+  if (inserted && !impl->analysis.allocs.empty())
+    cached->second = collectBlockedAllocations(
+        impl->analysis, point, impl->analysis.order->lookup(point), dependency);
+  SmallVector<PlacedAllocation> blocked = cached->second;
+  if (failed(appendBlockedRanges(extraBlocked, blocked)))
+    return impl->func.emitError("invalid provisional LDS range");
+  FailureOr<int64_t> largest =
+      findLargestAlignedGap(blocked, impl->fixedBytes, capacity);
+  if (failed(largest))
+    return impl->func.emitError("failed to analyze available LDS ranges");
+  return *largest;
+}
+
+FailureOr<int64_t> WaveLDSAllocationAnalysis::findFreeOffset(
+    Operation *point, int64_t capacity, int64_t bytes, int64_t align,
+    Value dependency, ArrayRef<WaveLDSRange> extraBlocked) {
+  if (bytes <= 0 || align <= 0)
+    return impl->func.emitError("invalid provisional LDS allocation");
+  auto [cached, inserted] = impl->blockedCache.try_emplace({point, dependency});
+  if (inserted && !impl->analysis.allocs.empty())
+    cached->second = collectBlockedAllocations(
+        impl->analysis, point, impl->analysis.order->lookup(point), dependency);
+  SmallVector<PlacedAllocation> blocked = cached->second;
+  if (failed(appendBlockedRanges(extraBlocked, blocked)))
+    return impl->func.emitError("invalid provisional LDS range");
+  AllocInterval interval;
+  interval.bytes = bytes;
+  interval.align = align;
+  FailureOr<int64_t> offset =
+      findAvailableOffset(blocked, impl->fixedBytes, interval);
+  if (failed(offset) || *offset > capacity || bytes > capacity - *offset)
+    return impl->func.emitError("failed to place provisional LDS allocation");
+  return *offset;
 }
