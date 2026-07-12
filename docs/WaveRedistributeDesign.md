@@ -271,13 +271,14 @@ wave.barrier after all store tokens
 parallel wave.load operations after the publish barrier
 wave.pack
 wave.join after all load tokens
-wave.alloc_release after the joined completion
+wave.alloc_release {workgroup_collective} after the joined completion
 ```
 
 Stores are siblings, not a component-by-component chain. Loads are siblings and
 all depend on the publish barrier. `wave.join` consumes all load tokens without
 emitting synchronization. `wave.alloc_release` binds that logical completion to
-the scratch allocation.
+the scratch allocation. Lowering sets `workgroup_collective` because uniform
+workgroup control is a redistribution precondition.
 
 Straight-line exchanges thread each release token into the next exchange's
 stores. Its publish barrier then retires the preceding exchange for later
@@ -289,8 +290,9 @@ Token order alone does not permit workgroup storage aliasing. Allocation
 resolution requires every path from an earlier release to a later access to
 cross `wave.barrier`. A join proves per-wave completion only. Repeated logical
 lifetimes, such as an allocation inside `scf.for`, require collective
-quiescence on the backedge; resolution materializes a barrier when no existing
-token path proves it.
+quiescence on the backedge. Resolution materializes a barrier only for a
+`workgroup_collective` release; an unproven generic release fails instead of
+risking a barrier in divergent control.
 
 Scratch lifetime, overlapping offsets, reuse dependencies, and loop-carried
 reuse are general `wave.alloc` concerns. `wave.redistribute` neither changes nor
@@ -327,6 +329,9 @@ verifier.
 
 Do not add an `assume_uniform` escape-hatch attribute to
 `wave.redistribute`. Control facts need provenance and scope outside this op.
+The generated allocation release records the operation's established
+workgroup-collective precondition for lifetime resolution; it does not relax
+redistribution control legality.
 
 ## Workgroup Shape
 
@@ -516,7 +521,9 @@ No failure fabricates values or silently changes the relation.
 - Token-only lifetime order cannot alias workgroup storage; the path must cross
   a workgroup barrier.
 - Repeated logical lifetimes materialize a barrier when the loop backedge lacks
-  collective quiescence.
+  collective quiescence and the release is workgroup-collective.
+- A generic repeated release without a collective path or
+  `workgroup_collective` guarantee fails allocation resolution.
 - Any redistribution under lane-masked control fails the V1 full-wave contract.
 - Local and cross-wave conversions require exact `items`/workgroup-size parity.
 - A workgroup whose size is not divisible by `W` fails the full-wave contract.

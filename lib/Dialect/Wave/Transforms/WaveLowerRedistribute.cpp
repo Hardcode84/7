@@ -628,8 +628,9 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                 loaded->values);
   Value completed =
       JoinOp::create(rewriter, op.getLoc(), tokenType, loaded->tokens);
-  AllocReleaseOp released = AllocReleaseOp::create(
-      rewriter, op.getLoc(), tokenType, allocation, completed);
+  AllocReleaseOp released =
+      AllocReleaseOp::create(rewriter, op.getLoc(), tokenType, allocation,
+                             completed, rewriter.getUnitAttr());
   sequences[op->getBlock()] = {released.getToken(), released};
   rewriter.replaceOp(op, packed);
   return success();

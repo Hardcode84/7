@@ -109,7 +109,7 @@ func.func @same_wave_uniform_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK-DAG: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 // CHECK: %[[PACK:.*]] = wave.pack %[[LOAD0]], %[[LOAD1]]
 // CHECK: %[[DONE:.*]] = wave.join %[[LOADTOK0]], %[[LOADTOK1]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]]
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
 // CHECK-NOT: wave.redistribute
 func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
@@ -166,13 +166,13 @@ func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
 // CHECK: %[[PUBLISH0:.*]] = wave.barrier %[[STORE0]]
 // CHECK: %[[LOAD0:.*]], %[[LOADTOK0:.*]] = wave.load {{.*}} after %[[PUBLISH0]]
 // CHECK: %[[DONE0:.*]] = wave.join %[[LOADTOK0]]
-// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]]
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
 // CHECK: %[[ALLOC1:.*]] = wave.alloc()
 // CHECK: %[[STORE1:.*]] = wave.store {{.*}} after %[[RELEASE0]]
 // CHECK: %[[PUBLISH1:.*]] = wave.barrier %[[STORE1]]
 // CHECK: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH1]]
 // CHECK: %[[DONE1:.*]] = wave.join %[[LOADTOK1]]
-// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]]
+// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]] {workgroup_collective}
 // CHECK: %[[ALLOC2:.*]] = wave.alloc()
 // CHECK: wave.store {{.*}} after %[[RELEASE1]]
 func.func @cross_wave_sequence(
@@ -197,7 +197,7 @@ func.func @cross_wave_sequence(
 // CHECK-LABEL: func.func @cross_wave_existing_barrier(
 // CHECK: %[[ALLOC0:.*]] = wave.alloc()
 // CHECK: %[[DONE0:.*]] = wave.join
-// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]]
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
 // CHECK: %[[ROOT:.*]] = wave.token
 // CHECK: %[[SYNC:.*]] = wave.barrier %[[ROOT]], %[[RELEASE0]]
 // CHECK: wave.alloc

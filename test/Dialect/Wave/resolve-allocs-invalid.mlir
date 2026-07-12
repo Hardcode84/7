@@ -65,3 +65,31 @@ func.func @release_with_pointer_escape(%dependency: !wave.mem.token)
       : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return %alloc : !wave.ptr<#wave.shared, i32>
 }
+
+// -----
+
+func.func @divergent_repeated_release(%mask: !wave.mask<32>, %n: index)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 {
+    wave.where %mask {
+      %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
+          : !wave.ptr<#wave.shared, i32>
+      %ptr = wave.ptr_add %alloc, %lane
+          : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+          -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+      %stored = wave.store %lane -> %ptr
+          : (!wave.simd<i32, 32>,
+             !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+          -> !wave.mem.token
+      // expected-error @+1 {{repeated lifetime requires workgroup_collective before barrier synthesis}}
+      %released = wave.alloc_release %alloc after %stored
+          : (!wave.ptr<#wave.shared, i32>, !wave.mem.token)
+          -> !wave.mem.token
+      wave.yield
+    } : !wave.mask<32>
+  }
+  return
+}

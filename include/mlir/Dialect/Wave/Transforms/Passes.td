@@ -165,10 +165,11 @@ def WaveResolveAllocs : Pass<"wave-resolve-allocs"> {
     Computes allocation live intervals and assigns byte offsets. Release-marked
     allocations share storage only when explicit memory-token paths cross a
     workgroup barrier, including loop backedges. Repeated logical lifetimes
-    without such a path get a barrier. Unmarked allocations retain lexical
-    last-use placement. Rewrites `wave.alloc` to `wave.shared_memory_base`,
-    removes `wave.alloc_release`, and updates fixed function-level
-    `wave.lds_size` to cover the assigned storage.
+    without such a path get a barrier only when the release asserts
+    `workgroup_collective`; otherwise the pass fails. Unmarked allocations
+    retain lexical last-use placement. Rewrites `wave.alloc` to
+    `wave.shared_memory_base`, removes `wave.alloc_release`, and updates fixed
+    function-level `wave.lds_size` to cover the assigned storage.
   }];
   let dependentDialects = [
     "func::FuncDialect",

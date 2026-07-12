@@ -542,11 +542,14 @@ collectAccessCarriedIndices(Operation *access, scf::ForOp loop,
 
 static bool yieldOrdersCompletion(scf::YieldOp yield,
                                   ArrayRef<unsigned> carried, Value completion,
+                                  bool requireBarrier,
                                   TokenOrdering &ordering) {
   for (unsigned index : carried) {
     if (index >= yield.getNumOperands())
       continue;
-    if (ordering.dependsOnThroughBarrier(yield.getOperand(index), completion))
+    Value yielded = yield.getOperand(index);
+    if (requireBarrier ? ordering.dependsOnThroughBarrier(yielded, completion)
+                       : ordering.dependsOn(yielded, completion))
       return true;
   }
   return false;
@@ -562,7 +565,9 @@ static bool loopBackedgeOrders(const AllocInterval &later,
     SmallVector<unsigned, 2> carried =
         collectAccessCarriedIndices(access, loop, ordering.getOrigins());
     for (Value completion : later.completionTokens)
-      if (!yieldOrdersCompletion(yield, carried, completion, ordering))
+      if (!yieldOrdersCompletion(yield, carried, completion,
+                                 /*requireBarrier=*/
+                                 !later.collectivelyComplete, ordering))
         return false;
   }
   return true;
@@ -605,7 +610,7 @@ static bool repeatedLifetimeNeedsBarrier(AllocInterval &interval,
   return false;
 }
 
-static bool
+static FailureOr<bool>
 materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
                                     SmallVectorImpl<AllocInterval> &allocs,
                                     TokenOrdering &ordering) {
@@ -613,6 +618,12 @@ materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
   for (AllocInterval &interval : allocs) {
     if (!interval.release || !repeatedLifetimeNeedsBarrier(interval, ordering))
       continue;
+    if (!interval.release.getWorkgroupCollectiveAttr()) {
+      interval.release.emitOpError(
+          "repeated lifetime requires workgroup_collective before barrier "
+          "synthesis");
+      return failure();
+    }
     SmallVector<OpOperand *> uses;
     for (OpOperand &use : interval.release.getToken().getUses())
       uses.push_back(&use);
@@ -772,6 +783,18 @@ static LogicalResult analyzeAllocations(func::FuncOp func,
   return collectAllocationIntervals(order, *analysis.ordering, analysis.allocs);
 }
 
+static LogicalResult materializeAndReanalyzeRepeatedLifetimes(
+    func::FuncOp func, ArrayRef<AllocOp> ops, ArrayRef<AllocReleaseOp> releases,
+    IRRewriter &rewriter, AllocationAnalysis &analysis) {
+  FailureOr<bool> materialized = materializeRepeatedLifetimeBarriers(
+      rewriter, analysis.allocs, *analysis.ordering);
+  if (failed(materialized))
+    return failure();
+  if (!*materialized)
+    return success();
+  return analyzeAllocations(func, ops, releases, analysis);
+}
+
 static LogicalResult resolveFuncAllocs(func::FuncOp func,
                                        IRRewriter &rewriter) {
   if (func.isExternal())
@@ -792,9 +815,8 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
   AllocationAnalysis analysis;
   if (failed(analyzeAllocations(func, ops, releases, analysis)))
     return failure();
-  if (materializeRepeatedLifetimeBarriers(rewriter, analysis.allocs,
-                                          *analysis.ordering) &&
-      failed(analyzeAllocations(func, ops, releases, analysis)))
+  if (failed(materializeAndReanalyzeRepeatedLifetimes(func, ops, releases,
+                                                      rewriter, analysis)))
     return failure();
 
   FailureOr<int64_t> plannedBytes =

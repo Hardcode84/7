@@ -508,13 +508,14 @@ def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
     must cover every memory access through the allocation. The result forwards
     that ordering to accesses of a later allocation.
 
-    Allocation resolution removes the marker. It aliases workgroup storage only
-    across a workgroup barrier, materializing one for a repeated lifetime when
-    no existing token path proves collective quiescence.
+    Allocation resolution removes the marker. `workgroup_collective` asserts
+    that every workitem reaches the release and permits resolution to
+    materialize a workgroup barrier for a repeated lifetime.
   }];
 
   let arguments = (ins Arg<Wave_Ptr, "", [MemFree]>:$allocation,
-                       Wave_MemToken:$dependency);
+                       Wave_MemToken:$dependency,
+                       OptionalAttr<UnitAttr>:$workgroup_collective);
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = "$allocation `after` $dependency attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
