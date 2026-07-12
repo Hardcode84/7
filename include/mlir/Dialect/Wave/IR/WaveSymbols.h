@@ -320,6 +320,11 @@ struct InferredRange {
 /// `assumptions`. Returns `Unknown` when inconclusive.
 CheckResult checkPredicate(Store &store, PredHandle predicate,
                            llvm::ArrayRef<PredHandle> assumptions);
+/// Prove evaluation cannot produce a domain error under `assumptions`.
+bool provablyDefined(Store &store, ExprHandle expr,
+                     llvm::ArrayRef<PredHandle> assumptions);
+bool provablyDefined(Store &store, PredHandle pred,
+                     llvm::ArrayRef<PredHandle> assumptions);
 Pow2Fact getPow2Fact(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions);
 

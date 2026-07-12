@@ -677,7 +677,7 @@ def WaveAMDClearRegAllocAssignments
 
 def WaveAMDResourceInfo
     : Pass<"waveamd-resource-info", "ModuleOp"> {
-  let summary = "Annotate WaveAMDMachine functions with resource usage";
+  let summary = "Validate and annotate WaveAMDMachine resource usage";
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
   ];

@@ -319,6 +319,27 @@ void runPow2Queries(sym::Store &store, sym::ExprHandle x) {
                << pow2FactName(sym::getPow2Fact(store, x, assumptions)) << "\n";
 }
 
+void runDefinednessQueries(sym::Store &store) {
+  FailureOr<sym::PredHandle> range = sym::rangeAssumption(store, "x", 0, 31);
+  if (failed(range)) {
+    llvm::errs() << "failed to build definedness range\n";
+    std::exit(1);
+  }
+  llvm::SmallVector<sym::PredHandle, 1> assumptions{*range};
+  sym::ExprHandle safe = mustParseExpr(store, "floor(1 / (x + 1))");
+  sym::ExprHandle partial = mustParseExpr(store, "floor(1 / (x - 1))");
+  sym::ExprHandle uncovered = mustParseExpr(store, "Piecewise((x, x < 16))");
+  llvm::outs() << "defined-safe-div: "
+               << boolName(sym::provablyDefined(store, safe, assumptions))
+               << "\n";
+  llvm::outs() << "defined-partial-div: "
+               << boolName(sym::provablyDefined(store, partial, assumptions))
+               << "\n";
+  llvm::outs() << "defined-uncovered-piecewise: "
+               << boolName(sym::provablyDefined(store, uncovered, assumptions))
+               << "\n";
+}
+
 } // namespace
 
 int main() {
@@ -408,6 +429,7 @@ int main() {
 
   runRangeQueries(store, x, fourX);
   runPow2Queries(store, x);
+  runDefinednessQueries(store);
 
   return 0;
 }

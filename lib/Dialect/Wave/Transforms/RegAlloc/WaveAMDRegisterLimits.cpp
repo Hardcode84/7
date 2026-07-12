@@ -186,6 +186,17 @@ static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
   return waveamdmachine::supportsAGPRs(isa) ? 256 : 0;
 }
 
+FailureOr<WaveAMDLocalMemoryLimits>
+getWaveAMDLocalMemoryLimits(Operation *op, StringRef consumer) {
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      createSubtargetInfo(op, consumer);
+  if (failed(sti))
+    return failure();
+  return WaveAMDLocalMemoryLimits{
+      llvm::AMDGPU::IsaInfo::getLocalMemorySize(**sti),
+      llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(**sti)};
+}
+
 FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
                                                        StringRef consumer) {
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =

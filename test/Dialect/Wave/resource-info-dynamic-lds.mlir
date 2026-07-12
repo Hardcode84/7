@@ -1,5 +1,7 @@
 // RUN: wave-opt --waveamd-resource-info %s | FileCheck %s
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // CHECK-LABEL: func.func @dynamic_lds
 // CHECK-SAME: wave.dynamic_lds_size = 65536 : i64
 // CHECK-SAME: wave.lds_size = 0 : i64
@@ -24,4 +26,6 @@ func.func @mixed_lds() attributes {
   wave.lds_size = 512 : i64
 } {
   return
+}
+
 }

@@ -57,20 +57,6 @@ func.func @masked(%source: !wave.simd<vector<1xi32>, 32>,
 
 // -----
 
-func.func @cross_wave_nested(%source: !wave.simd<vector<1xi32>, 32>,
-                             %condition: i1)
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
-  scf.if %condition {
-    // expected-error @+1 {{cross-wave redistribution requires straight-line kernel control}}
-    %result = wave.redistribute %source,
-        <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
-        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
-  }
-  return
-}
-
-// -----
-
 func.func @cross_wave_i64(%source: !wave.simd<vector<1xi64>, 32>)
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   // expected-error @+1 {{cross-wave payload element must be 8, 16, or 32 bits wide}}

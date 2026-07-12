@@ -2713,6 +2713,17 @@ redistributionBoundsProven(sym::Store &store, RedistributionAttr relation,
   return itemProven && slotProven;
 }
 
+static bool
+redistributionDomainProven(sym::Store &store, RedistributionAttr relation,
+                           const RedistributionVerificationDomain &domain,
+                           int64_t sourceSlots) {
+  return sym::provablyDefined(store, relation.getSourceItem(),
+                              domain.assumptions) &&
+         sym::provablyDefined(store, relation.getSourceSlot(),
+                              domain.assumptions) &&
+         redistributionBoundsProven(store, relation, domain, sourceSlots);
+}
+
 static LogicalResult
 verifyRedistributionPoint(RedistributeOp op, sym::Store &store,
                           const RedistributionVerificationDomain &domain,
@@ -2758,7 +2769,7 @@ static LogicalResult verifyRedistributionDomain(RedistributeOp op,
       buildRedistributionVerificationDomain(store, relation, destinationSlots);
   if (failed(domain))
     return failure();
-  if (redistributionBoundsProven(store, relation, *domain, sourceSlots))
+  if (redistributionDomainProven(store, relation, *domain, sourceSlots))
     return success();
 
   std::optional<int64_t> points =

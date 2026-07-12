@@ -130,9 +130,9 @@ attributes:
 - every evaluated source item and slot is in bounds.
 
 Static-domain evaluation is exact and uses checked arithmetic. Symbolic range
-inference runs first. If it is inconclusive, the verifier exhausts at most
-`2^20` destination points. Larger domains require a symbolic proof; they do not
-start unbounded enumeration.
+and definedness proofs run first. If either is inconclusive, the verifier
+exhausts at most `2^20` destination points. Larger domains require both proofs;
+they do not start unbounded enumeration.
 
 The verifier does not inspect:
 
@@ -304,27 +304,13 @@ diagnostic. Numeric conversion is not a storage codec.
 ## Control Legality
 
 Control legality is a lowering concern, not an operation verification concern.
-V1 requires full-wave execution for every movement class. Frontend facts or
-context analysis establish that invariant before lowering; `verify()` does not.
+V1 assumes every workitem reaches each dynamic redistribution instance with all
+lanes active. Structured `scf` nesting does not weaken that contract and may
+contain local or cross-wave lowering.
 
-After establishing full-wave execution, local movement needs no workgroup
-participation proof beyond the requirements of the selected Wave operations.
-
-After selecting workgroup LDS, lowering must prove that every participating
-wave executes the same dynamic redistribution instance. The proof may come
-from control-flow analysis or explicit trusted frontend facts already modeled
-outside the operation verifier.
-
-If workgroup participation is not proven:
-
-- an optional same-wave LDS choice falls back to shuffle;
-- an inherently cross-wave relation fails lowering with a convergence
-  diagnostic.
-
-`wave.where` and other lane-masked contexts reject for every movement class in
-V1. Cross-wave lowering may additionally accept only straight-line kernel
-control and regions proven workgroup-uniform. Loops with unproven common trip
-counts reject only when lowering needs workgroup LDS.
+`wave.where` and other explicit lane-masked contexts reject for every movement
+class in V1. No uniformity or convergence analysis belongs in the operation
+verifier.
 
 Do not add an `assume_uniform` escape-hatch attribute to
 `wave.redistribute`. Control facts need provenance and scope outside this op.
@@ -473,7 +459,6 @@ Diagnostics name the failed contract:
 - unsupported multidimensional workgroup shape: lowering;
 - partial-wave workgroup violates the full-wave V1 contract: lowering;
 - redistribution is not in full-wave control: lowering;
-- required cross-wave participation is not proven: lowering;
 - block cannot be projected from the relation: frontend import;
 - non-resident named dimension has no external adapter: frontend import;
 - relation crosses workgroups: frontend import;
@@ -516,10 +501,7 @@ No failure fabricates values or silently changes the relation.
 - Local and cross-wave conversions require exact `items`/workgroup-size parity.
 - A workgroup whose size is not divisible by `W` fails the full-wave contract.
 - Multidimensional workgroup shape reports the V1 shape diagnostic.
-- Cross-wave conversion under unproven control passes operation verification
-  and fails only `wave-lower-redistribute`.
-- Cross-wave conversion under a `wave.subgroup_id`-dependent scalar branch
-  fails the workgroup-participation proof.
+- Cross-wave conversion lowers inside structured `scf` control.
 - Unsupported scratch payload reports its storage-codec diagnostic.
 - Generic resource planning diagnoses aggregate redistribution scratch plus
   existing LDS allocations that exceed target capacity.

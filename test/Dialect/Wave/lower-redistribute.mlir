@@ -122,6 +122,25 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
 
 // -----
 
+// CHECK-LABEL: func.func @cross_wave_nested_if(
+// CHECK: scf.if
+// CHECK: wave.alloc
+// CHECK: wave.barrier
+// CHECK: wave.load
+// CHECK: wave.alloc_release
+func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
+                                %condition: i1)
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  scf.if %condition {
+    %result = wave.redistribute %source,
+        <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @broadcast_cross_wave(
 // CHECK: %[[ALLOC:.*]] = wave.alloc()
 // CHECK: %[[PUBLISH:.*]] = wave.barrier

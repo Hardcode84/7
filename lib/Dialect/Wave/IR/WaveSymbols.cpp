@@ -918,6 +918,171 @@ mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
   return CheckResult::Unknown;
 }
 
+static bool provablyNonZero(Store &store, ExprHandle expr,
+                            ArrayRef<PredHandle> assumptions) {
+  FailureOr<ExprHandle> zero = composeExprInt(store, 0);
+  if (failed(zero))
+    return false;
+  FailureOr<PredHandle> nonZero =
+      composePredCmp(store, expr, PredCmpOp::Ne, *zero);
+  return succeeded(nonZero) &&
+         checkPredicate(store, *nonZero, assumptions) == CheckResult::True;
+}
+
+static bool provablyDefinedAdd(Store &store, ExprView view,
+                               ArrayRef<PredHandle> assumptions) {
+  if (!provablyDefined(store, view.getAddConstant(), assumptions))
+    return false;
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    AddTerm term = view.getAddTerm(index);
+    if (!provablyDefined(store, term.coefficient, assumptions) ||
+        !provablyDefined(store, term.term, assumptions))
+      return false;
+  }
+  return true;
+}
+
+static bool provablyDefinedMul(Store &store, ExprView view,
+                               ArrayRef<PredHandle> assumptions) {
+  if (!provablyDefined(store, view.getMulCoefficient(), assumptions))
+    return false;
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    MulFactor factor = view.getMulFactor(index);
+    if (!provablyDefined(store, factor.base, assumptions))
+      return false;
+    if (factor.exponent < 0 &&
+        !provablyNonZero(store, factor.base, assumptions))
+      return false;
+  }
+  return true;
+}
+
+static bool provablyDefinedPiecewise(Store &store, ExprView view,
+                                     ArrayRef<PredHandle> assumptions) {
+  FailureOr<PredHandle> covered = composePredFalse(store);
+  if (failed(covered))
+    return false;
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount())) {
+    PiecewiseCase piece = view.getPiecewiseCase(index);
+    if (!provablyDefined(store, piece.condition, assumptions))
+      return false;
+    if (checkPredicate(store, piece.condition, assumptions) !=
+        CheckResult::False) {
+      SmallVector<PredHandle, 4> caseAssumptions(assumptions);
+      caseAssumptions.push_back(piece.condition);
+      if (!provablyDefined(store, piece.value, caseAssumptions))
+        return false;
+    }
+    covered = composePredOr(store, *covered, piece.condition);
+    if (failed(covered))
+      return false;
+  }
+  return checkPredicate(store, *covered, assumptions) == CheckResult::True;
+}
+
+static std::optional<bool>
+proveSimpleExprDefined(Store &store, ExprView view,
+                       ArrayRef<PredHandle> assumptions) {
+  switch (view.getKind()) {
+  case ExprKind::Integer:
+  case ExprKind::Rational:
+  case ExprKind::Symbol:
+    return true;
+  case ExprKind::Floor:
+  case ExprKind::Ceil:
+    return provablyDefined(store, view.getUnaryArg(), assumptions);
+  case ExprKind::Invalid:
+  case ExprKind::Error:
+  case ExprKind::ParseError:
+    return false;
+  default:
+    return std::nullopt;
+  }
+}
+
+static bool provablyDefinedMod(Store &store, ExprView view,
+                               ArrayRef<PredHandle> assumptions) {
+  return provablyDefined(store, view.getBinaryLhs(), assumptions) &&
+         provablyDefined(store, view.getBinaryRhs(), assumptions) &&
+         provablyNonZero(store, view.getBinaryRhs(), assumptions);
+}
+
+static bool provablyDefinedBinary(Store &store, ExprView view,
+                                  ArrayRef<PredHandle> assumptions) {
+  return provablyDefined(store, view.getBinaryLhs(), assumptions) &&
+         provablyDefined(store, view.getBinaryRhs(), assumptions);
+}
+
+static bool proveCompoundExprDefined(Store &store, ExprView view,
+                                     ArrayRef<PredHandle> assumptions) {
+  switch (view.getKind()) {
+  case ExprKind::Add:
+    return provablyDefinedAdd(store, view, assumptions);
+  case ExprKind::Mul:
+    return provablyDefinedMul(store, view, assumptions);
+  case ExprKind::Mod:
+    return provablyDefinedMod(store, view, assumptions);
+  case ExprKind::Max:
+  case ExprKind::Min:
+  case ExprKind::Xor:
+    return provablyDefinedBinary(store, view, assumptions);
+  case ExprKind::Piecewise:
+    return provablyDefinedPiecewise(store, view, assumptions);
+  default:
+    llvm_unreachable("expected compound expression");
+  }
+}
+
+bool mlir::wave::sym::provablyDefined(Store &store, ExprHandle expr,
+                                      ArrayRef<PredHandle> assumptions) {
+  ExprView view(expr);
+  if (std::optional<bool> result =
+          proveSimpleExprDefined(store, view, assumptions))
+    return *result;
+  return proveCompoundExprDefined(store, view, assumptions);
+}
+
+static bool provablyDefinedLogic(Store &store, PredView view,
+                                 ArrayRef<PredHandle> assumptions) {
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+    if (!provablyDefined(store, view.getLogicArg(index), assumptions))
+      return false;
+  return true;
+}
+
+static std::optional<bool> proveSimplePredDefined(PredView view) {
+  switch (view.getKind()) {
+  case PredKind::True:
+  case PredKind::False:
+    return true;
+  case PredKind::Invalid:
+  case PredKind::Error:
+  case PredKind::ParseError:
+    return false;
+  default:
+    return std::nullopt;
+  }
+}
+
+bool mlir::wave::sym::provablyDefined(Store &store, PredHandle pred,
+                                      ArrayRef<PredHandle> assumptions) {
+  PredView view(pred);
+  if (std::optional<bool> result = proveSimplePredDefined(view))
+    return *result;
+  switch (view.getKind()) {
+  case PredKind::Cmp:
+    return provablyDefined(store, view.getCmpLhs(), assumptions) &&
+           provablyDefined(store, view.getCmpRhs(), assumptions);
+  case PredKind::And:
+  case PredKind::Or:
+    return provablyDefinedLogic(store, view, assumptions);
+  case PredKind::Not:
+    return provablyDefined(store, view.getUnaryArg(), assumptions);
+  default:
+    llvm_unreachable("expected compound predicate");
+  }
+}
+
 mlir::wave::sym::Pow2Fact
 mlir::wave::sym::getPow2Fact(Store &store, ExprHandle expr,
                              ArrayRef<PredHandle> assumptions) {

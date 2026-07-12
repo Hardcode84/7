@@ -31,7 +31,14 @@ struct WaveAMDRegisterLimits {
   bool agprCountsAgainstVGPRs = false;
 };
 
+struct WaveAMDLocalMemoryLimits {
+  unsigned localMemoryBytes = 0;
+  unsigned addressableLocalMemoryBytes = 0;
+};
+
 FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op);
+FailureOr<WaveAMDLocalMemoryLimits>
+getWaveAMDLocalMemoryLimits(Operation *op, StringRef consumer);
 unsigned getEffectiveWaveAMDRegisterBudget(unsigned budget, unsigned reserved);
 unsigned getMaxWaveAMDRegisterBudgetForWaves(ArrayRef<unsigned> budgets,
                                              unsigned targetWaves);

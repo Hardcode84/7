@@ -922,6 +922,15 @@ func.func @redistribute_partial_piecewise(
 
 // -----
 
+func.func @redistribute_partial_division(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{relation is not total at destination (0, 0)}}
+  %r = wave.redistribute %v, <items = 32, source_item = "item", source_slot = "Mod(floor(1 / (item - 1)), 2)"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
 func.func @redistribute_exhaustive_limit(
     %v: !wave.simd<vector<1xi32>, 32>) {
   // expected-error @+1 {{relation needs exhaustive validation beyond the 2^20 point limit}}

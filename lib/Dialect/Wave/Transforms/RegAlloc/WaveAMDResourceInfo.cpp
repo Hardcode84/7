@@ -14,8 +14,13 @@
 #include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "llvm/Support/CheckedArithmetic.h"
+
+#include <algorithm>
+#include <optional>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDRESOURCEINFO
@@ -62,31 +67,62 @@ static unsigned getMinReportedVGPRs(func::FuncOp func) {
   return std::max(1u, wave::getWaveAMDReservedVGPRs(func));
 }
 
-static int64_t collectLDSBytes(func::FuncOp func, OpBuilder &builder) {
-  int64_t fixedLds = 0;
-  int64_t dynamicLds = 0;
-  int64_t spillLds = 0;
-  bool hasLds = false;
-  if (IntegerAttr ldsAttr = func->getAttrOfType<IntegerAttr>("wave.lds_size")) {
-    fixedLds = ldsAttr.getInt();
-    hasLds = true;
-  }
-  if (IntegerAttr ldsAttr =
-          func->getAttrOfType<IntegerAttr>("wave.dynamic_lds_size")) {
-    dynamicLds = ldsAttr.getInt();
-    hasLds = true;
+static FailureOr<int64_t> getLDSAttr(func::FuncOp func, StringRef name) {
+  IntegerAttr attr = func->getAttrOfType<IntegerAttr>(name);
+  if (!attr)
+    return 0;
+  int64_t bytes = attr.getInt();
+  if (bytes < 0)
+    return func.emitError() << name << " must be non-negative";
+  return bytes;
+}
+
+static FailureOr<int64_t> collectLDSBytes(func::FuncOp func,
+                                          OpBuilder &builder) {
+  FailureOr<int64_t> fixedLds = getLDSAttr(func, "wave.lds_size");
+  FailureOr<int64_t> dynamicLds = getLDSAttr(func, "wave.dynamic_lds_size");
+  FailureOr<int64_t> spillLds =
+      getLDSAttr(func, "waveamdmachine.lds_spill_bytes");
+  if (failed(fixedLds) || failed(dynamicLds) || failed(spillLds))
+    return failure();
+
+  std::optional<int64_t> fixedAndDynamic =
+      llvm::checkedAdd(*fixedLds, *dynamicLds);
+  std::optional<int64_t> total =
+      fixedAndDynamic ? llvm::checkedAdd(*fixedAndDynamic, *spillLds)
+                      : std::nullopt;
+  if (!total)
+    return func.emitError("aggregate LDS byte count overflows i64");
+
+  if (func->hasAttr("wave.dynamic_lds_size"))
     func->setAttr("waveamdmachine.dynamic_lds_size",
-                  builder.getI64IntegerAttr(dynamicLds));
-  }
-  if (IntegerAttr ldsAttr =
-          func->getAttrOfType<IntegerAttr>("waveamdmachine.lds_spill_bytes")) {
-    spillLds = ldsAttr.getInt();
-    hasLds = true;
-  }
-  int64_t lds = fixedLds + dynamicLds + spillLds;
-  if (hasLds)
-    func->setAttr("waveamdmachine.lds_size", builder.getI64IntegerAttr(lds));
-  return lds;
+                  builder.getI64IntegerAttr(*dynamicLds));
+  if (func->hasAttr("wave.lds_size") ||
+      func->hasAttr("wave.dynamic_lds_size") ||
+      func->hasAttr("waveamdmachine.lds_spill_bytes"))
+    func->setAttr("waveamdmachine.lds_size", builder.getI64IntegerAttr(*total));
+  return *total;
+}
+
+static LogicalResult verifyLDSCapacity(func::FuncOp func, int64_t bytes) {
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return success();
+  FailureOr<wave::WaveAMDLocalMemoryLimits> limits =
+      wave::getWaveAMDLocalMemoryLimits(func, "waveamd-resource-info");
+  if (failed(limits))
+    return failure();
+
+  uint64_t capacity = limits->localMemoryBytes;
+  if (limits->addressableLocalMemoryBytes != 0)
+    capacity =
+        std::min<uint64_t>(capacity, limits->addressableLocalMemoryBytes);
+  if (capacity == 0)
+    return func.emitError("waveamd-resource-info target has no usable LDS");
+  if (static_cast<uint64_t>(bytes) > capacity)
+    return func.emitError("waveamd-resource-info LDS usage ")
+           << bytes << " bytes exceeds target-addressable capacity " << capacity
+           << " bytes";
+  return success();
 }
 
 static int64_t collectPrivateSegmentBytes(func::FuncOp func,
@@ -205,9 +241,9 @@ struct WaveAMDResourceInfoPass
               func, "waveamd-resource-info",
               wave::WaveAMDRegAllocVerificationScope::Results)))
         return signalPassFailure();
-      bool failed = false;
-      MaxRegs regs = collectMaxRegs(func, failed);
-      if (failed)
+      bool scanFailed = false;
+      MaxRegs regs = collectMaxRegs(func, scanFailed);
+      if (scanFailed)
         return signalPassFailure();
       bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
       unsigned sgprCount = std::max(regs.sgpr, getMinReportedSGPRs(func));
@@ -220,15 +256,19 @@ struct WaveAMDResourceInfoPass
                     builder.getI64IntegerAttr(vgprCount));
       func->setAttr("waveamdmachine.agpr_count",
                     builder.getI64IntegerAttr(agprCount));
-      int64_t lds = collectLDSBytes(func, builder);
+      FailureOr<int64_t> lds = collectLDSBytes(func, builder);
+      if (failed(lds))
+        return signalPassFailure();
       int64_t privateBytes = collectPrivateSegmentBytes(func, builder);
       if (!isKernel)
         continue;
+      if (failed(verifyLDSCapacity(func, *lds)))
+        return signalPassFailure();
       sawKernel = true;
       maxSgpr = std::max<int64_t>(maxSgpr, sgprCount);
       maxVgpr = std::max<int64_t>(maxVgpr, vgprCount);
       maxAgpr = std::max<int64_t>(maxAgpr, agprCount);
-      maxLds = std::max<int64_t>(maxLds, lds);
+      maxLds = std::max<int64_t>(maxLds, *lds);
       maxPrivate = std::max<int64_t>(maxPrivate, privateBytes);
     }
     if (sawKernel) {

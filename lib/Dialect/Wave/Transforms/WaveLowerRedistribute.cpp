@@ -545,9 +545,9 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                     sym::Store &store,
                                     const RelationDomain &domain,
                                     func::FuncOp func) {
-  if (!func.getBody().hasOneBlock() || op->getParentOp() != func)
+  if (!func.getBody().hasOneBlock())
     return op.emitOpError(
-        "cross-wave redistribution requires straight-line kernel control");
+        "cross-wave redistribution requires a single-block kernel function");
 
   FailureOr<int64_t> scratchBytes = getScratchBytes(op);
   if (failed(scratchBytes))
