@@ -1381,6 +1381,14 @@ static std::optional<int64_t> collectXorDenominator(ExprView view) {
   return 1;
 }
 
+static std::optional<int64_t> collectPiecewiseDenominator(ExprView view) {
+  std::optional<int64_t> denominator = 1;
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount()))
+    denominator = checkedLCM(
+        denominator, collectDenominator(view.getPiecewiseCase(index).value));
+  return denominator;
+}
+
 std::optional<int64_t> mlir::wave::sym::collectDenominator(ExprHandle value) {
   ExprView view(value);
   ExprKind kind = view.getKind();
@@ -1396,6 +1404,8 @@ std::optional<int64_t> mlir::wave::sym::collectDenominator(ExprHandle value) {
     return collectBinaryLCMDenominator(view);
   if (kind == ExprKind::Xor)
     return collectXorDenominator(view);
+  if (kind == ExprKind::Piecewise)
+    return collectPiecewiseDenominator(view);
   return std::nullopt;
 }
 

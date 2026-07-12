@@ -13,6 +13,7 @@
 // CHECK: expanded-product: 2 + 3*x + x**2
 // CHECK: denominator-lcm: 4
 // CHECK: denominator-mod-rational: 4
+// CHECK: denominator-piecewise: 4
 // CHECK: fits-u32: true
 // CHECK: fits-u32-unbounded: false
 

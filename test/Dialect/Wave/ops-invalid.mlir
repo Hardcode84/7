@@ -1,5 +1,12 @@
 // RUN: wave-opt --split-input-file --verify-diagnostics %s
 
+// expected-error @+1 {{redistribution item count must be positive}}
+func.func @bad_redistribution_items() attributes {test.relation = #wave.redistribution<items = 0, source_item = "item", source_slot = "slot">} {
+  return
+}
+
+// -----
+
 func.func @bad_simd_constant_type() {
   // expected-error @+1 {{value type must match the result payload type}}
   %c = wave.constant 1 : i64 -> !wave.simd<i32, 32>
@@ -847,6 +854,78 @@ func.func @shuffle_bad_simd_lane_type(%v: !wave.simd<i32, 32>,
                                       %lane: !wave.simd<f32, 32>) {
   // expected-error @+1 {{source lane SIMD element type must be index or signless i32}}
   %r = wave.shuffle %v from %lane : !wave.simd<i32, 32>, !wave.simd<f32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_width_mismatch(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source and result SIMD widths must match}}
+  %r = wave.redistribute %v, <items = 64, source_item = "item", source_slot = "slot"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 64>
+  return
+}
+
+// -----
+
+func.func @redistribute_scalable_packet(
+    %v: !wave.simd<vector<[2]xi32>, 32>) {
+  // expected-error @+1 {{packet vectors must be fixed-size}}
+  %r = wave.redistribute %v, <items = 32, source_item = "item", source_slot = "slot"> : !wave.simd<vector<[2]xi32>, 32> -> !wave.simd<vector<[2]xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_element_mismatch(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source and result packet element types must match}}
+  %r = wave.redistribute %v, <items = 32, source_item = "item", source_slot = "slot"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xf32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_unknown_symbol(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source item expression references unsupported symbol `lane`}}
+  %r = wave.redistribute %v, <items = 32, source_item = "lane", source_slot = "slot"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_nonintegral(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source item expression must be structurally integral}}
+  %r = wave.redistribute %v, <items = 32, source_item = "item / 2", source_slot = "slot"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_source_slot_oob(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source slot 2 is out of bounds at destination (0, 0)}}
+  %r = wave.redistribute %v, <items = 32, source_item = "item", source_slot = "2"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_partial_piecewise(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{relation is not total at destination (0, 1)}}
+  %r = wave.redistribute %v, <items = 32, source_item = "item", source_slot = "Piecewise((0, slot == 0))"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_exhaustive_limit(
+    %v: !wave.simd<vector<1xi32>, 32>) {
+  // expected-error @+1 {{relation needs exhaustive validation beyond the 2^20 point limit}}
+  %r = wave.redistribute %v, <items = 1048577, source_item = "Piecewise((item, item >= 0), (0, True))", source_slot = "0"> : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return
 }
 

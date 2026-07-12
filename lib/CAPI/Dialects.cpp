@@ -22,9 +22,12 @@
 namespace mlir::wave {
 // Python registers the small pass set used by in-process pipeline entrypoints.
 std::unique_ptr<::mlir::Pass> createWaveAMDDmaZeroFill();
+std::unique_ptr<::mlir::Pass> createWaveLowerRedistribute();
 std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
 } // namespace mlir::wave
 #include "llvm/ADT/StringRef.h"
+
+#include <cassert>
 
 using namespace mlir;
 
@@ -42,6 +45,9 @@ void mlirRegisterWavePasses(void) {
   });
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveAMDDmaZeroFill();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::wave::createWaveLowerRedistribute();
   });
 }
 
@@ -230,6 +236,39 @@ MlirAttribute mlirWavePredAttrGetFromBytes(MlirContext ctx,
     return MlirAttribute{nullptr};
   }
   return wrap(wave::PredAttr::get(context, *handle));
+}
+
+bool mlirWaveAttributeIsARedistribution(MlirAttribute attr) {
+  return llvm::isa<wave::RedistributionAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveRedistributionAttrGet(int64_t items,
+                                            MlirAttribute sourceItem,
+                                            MlirAttribute sourceSlot) {
+  wave::ExprAttr item = llvm::cast<wave::ExprAttr>(unwrap(sourceItem));
+  wave::ExprAttr slot = llvm::cast<wave::ExprAttr>(unwrap(sourceSlot));
+  assert(item.getContext() == slot.getContext() &&
+         "redistribution expressions must share an MLIR context");
+  return wrap(wave::RedistributionAttr::get(item.getContext(), items,
+                                            item.getValue(), slot.getValue()));
+}
+
+int64_t mlirWaveRedistributionAttrGetItems(MlirAttribute attr) {
+  return llvm::cast<wave::RedistributionAttr>(unwrap(attr)).getItems();
+}
+
+MlirAttribute mlirWaveRedistributionAttrGetSourceItem(MlirAttribute attr) {
+  wave::RedistributionAttr relation =
+      llvm::cast<wave::RedistributionAttr>(unwrap(attr));
+  return wrap(
+      wave::ExprAttr::get(relation.getContext(), relation.getSourceItem()));
+}
+
+MlirAttribute mlirWaveRedistributionAttrGetSourceSlot(MlirAttribute attr) {
+  wave::RedistributionAttr relation =
+      llvm::cast<wave::RedistributionAttr>(unwrap(attr));
+  return wrap(
+      wave::ExprAttr::get(relation.getContext(), relation.getSourceSlot()));
 }
 
 //===----------------------------------------------------------------------===//

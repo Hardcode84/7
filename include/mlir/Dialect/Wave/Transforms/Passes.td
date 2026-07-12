@@ -129,6 +129,20 @@ def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
   ];
 }
 
+def WaveLowerRedistribute : Pass<"wave-lower-redistribute"> {
+  let summary = "Lower symbolic Wave packet redistribution";
+  let description = [{
+    Validates the static workgroup and execution domain, composes adjacent
+    relations, then selects packet remap, wave shuffle, or explicit-token LDS
+    exchange from the symbolic gather relation.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
   let summary = "Remove writes to unread Wave allocations";
   let description = [{

@@ -29,6 +29,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -162,6 +163,17 @@ LogicalResult PredAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                sym::PredHandle value) {
   if (!sym::isPred(value))
     return emitError() << "expected predicate handle";
+  return success();
+}
+
+LogicalResult
+RedistributionAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                           int64_t items, sym::ExprHandle sourceItem,
+                           sym::ExprHandle sourceSlot) {
+  if (items <= 0)
+    return emitError() << "redistribution item count must be positive";
+  if (!sym::isExpr(sourceItem) || !sym::isExpr(sourceSlot))
+    return emitError() << "redistribution coordinates must be expressions";
   return success();
 }
 
@@ -2616,6 +2628,172 @@ LogicalResult ShuffleOp::verify() {
   if (!isShuffleLaneType(sourceLaneType))
     return emitOpError("source lane scalar type must be index or signless i32");
   return success();
+}
+
+static FailureOr<int64_t> evaluateRedistributionCoordinate(
+    sym::Store &store, sym::ExprHandle expr, sym::ExprHandle itemSymbol,
+    sym::ExprHandle slotSymbol, int64_t item, int64_t slot) {
+  FailureOr<sym::ExprHandle> itemValue = sym::composeExprInt(store, item);
+  FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
+  if (failed(itemValue) || failed(slotValue))
+    return failure();
+  std::array<sym::ExprSubstitution, 2> substitutions{
+      sym::ExprSubstitution{itemSymbol, *itemValue},
+      sym::ExprSubstitution{slotSymbol, *slotValue}};
+  FailureOr<sym::ExprHandle> substituted =
+      sym::substituteExpr(store, expr, substitutions);
+  if (failed(substituted))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(store, *substituted);
+  if (failed(simplified))
+    return failure();
+  std::optional<int64_t> value = sym::getIntegerLiteralValue(*simplified);
+  if (!value)
+    return failure();
+  return *value;
+}
+
+static LogicalResult verifyRedistributionSymbols(RedistributeOp op,
+                                                 sym::ExprHandle expr,
+                                                 StringRef coordinate) {
+  std::optional<std::string> badSymbol;
+  sym::walkSymbolNames(expr, [&](StringRef name) {
+    if (name != "item" && name != "slot" && !badSymbol)
+      badSymbol = name.str();
+  });
+  if (badSymbol)
+    return op.emitOpError(coordinate)
+           << " expression references unsupported symbol `" << *badSymbol
+           << "`";
+  std::optional<int64_t> denominator = sym::collectDenominator(expr);
+  if (!denominator || *denominator != 1)
+    return op.emitOpError(coordinate)
+           << " expression must be structurally integral";
+  return success();
+}
+
+struct RedistributionVerificationDomain {
+  sym::ExprHandle item;
+  sym::ExprHandle slot;
+  std::array<sym::PredHandle, 2> assumptions;
+};
+
+static FailureOr<RedistributionVerificationDomain>
+buildRedistributionVerificationDomain(sym::Store &store,
+                                      RedistributionAttr relation,
+                                      int64_t destinationSlots) {
+  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
+  if (failed(item))
+    return failure();
+  FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
+  if (failed(slot))
+    return failure();
+  FailureOr<sym::PredHandle> itemRange =
+      sym::rangeAssumption(store, "item", 0, relation.getItems() - 1);
+  if (failed(itemRange))
+    return failure();
+  FailureOr<sym::PredHandle> slotRange =
+      sym::rangeAssumption(store, "slot", 0, destinationSlots - 1);
+  if (failed(slotRange))
+    return failure();
+  return RedistributionVerificationDomain{
+      *item, *slot, std::array<sym::PredHandle, 2>{*itemRange, *slotRange}};
+}
+
+static bool
+redistributionBoundsProven(sym::Store &store, RedistributionAttr relation,
+                           const RedistributionVerificationDomain &domain,
+                           int64_t sourceSlots) {
+  bool itemProven =
+      sym::provablyInRange(store, relation.getSourceItem(), domain.assumptions,
+                           0, relation.getItems() - 1);
+  bool slotProven = sym::provablyInRange(
+      store, relation.getSourceSlot(), domain.assumptions, 0, sourceSlots - 1);
+  return itemProven && slotProven;
+}
+
+static LogicalResult
+verifyRedistributionPoint(RedistributeOp op, sym::Store &store,
+                          const RedistributionVerificationDomain &domain,
+                          int64_t sourceSlots, int64_t item, int64_t slot) {
+  RedistributionAttr relation = op.getRelation();
+  FailureOr<int64_t> mappedItem = evaluateRedistributionCoordinate(
+      store, relation.getSourceItem(), domain.item, domain.slot, item, slot);
+  if (failed(mappedItem))
+    return op.emitOpError("relation is not total at destination (")
+           << item << ", " << slot << ")";
+  FailureOr<int64_t> mappedSlot = evaluateRedistributionCoordinate(
+      store, relation.getSourceSlot(), domain.item, domain.slot, item, slot);
+  if (failed(mappedSlot))
+    return op.emitOpError("relation is not total at destination (")
+           << item << ", " << slot << ")";
+  if (*mappedItem < 0 || *mappedItem >= relation.getItems())
+    return op.emitOpError("source item ")
+           << *mappedItem << " is out of bounds at destination (" << item
+           << ", " << slot << ")";
+  if (*mappedSlot < 0 || *mappedSlot >= sourceSlots)
+    return op.emitOpError("source slot ")
+           << *mappedSlot << " is out of bounds at destination (" << item
+           << ", " << slot << ")";
+  return success();
+}
+
+static LogicalResult verifyRedistributionDomain(RedistributeOp op,
+                                                int64_t sourceSlots,
+                                                int64_t destinationSlots) {
+  MLIRContext *ctx = op.getContext();
+  WaveDialect &dialect = *ctx->getLoadedDialect<WaveDialect>();
+  sym::Store &store = dialect.getSymbolStore();
+  RedistributionAttr relation = op.getRelation();
+  sym::ExprHandle sourceItem = relation.getSourceItem();
+  sym::ExprHandle sourceSlot = relation.getSourceSlot();
+
+  if (failed(verifyRedistributionSymbols(op, sourceItem, "source item")))
+    return failure();
+  if (failed(verifyRedistributionSymbols(op, sourceSlot, "source slot")))
+    return failure();
+
+  FailureOr<RedistributionVerificationDomain> domain =
+      buildRedistributionVerificationDomain(store, relation, destinationSlots);
+  if (failed(domain))
+    return failure();
+  if (redistributionBoundsProven(store, relation, *domain, sourceSlots))
+    return success();
+
+  std::optional<int64_t> points =
+      llvm::checkedMul(relation.getItems(), destinationSlots);
+  constexpr int64_t maxPoints = int64_t{1} << 20;
+  if (!points)
+    return op.emitOpError(
+        "relation needs exhaustive validation beyond the 2^20 point limit");
+  if (*points > maxPoints)
+    return op.emitOpError(
+        "relation needs exhaustive validation beyond the 2^20 point limit");
+
+  for (int64_t item : llvm::seq<int64_t>(0, relation.getItems())) {
+    for (int64_t slot : llvm::seq<int64_t>(0, destinationSlots))
+      if (failed(verifyRedistributionPoint(op, store, *domain, sourceSlots,
+                                           item, slot)))
+        return failure();
+  }
+  return success();
+}
+
+LogicalResult RedistributeOp::verify() {
+  SimdType sourceType = cast<SimdType>(getSource().getType());
+  SimdType resultType = cast<SimdType>(getResult().getType());
+  VectorType sourceVector = cast<VectorType>(sourceType.getElementType());
+  VectorType resultVector = cast<VectorType>(resultType.getElementType());
+
+  if (sourceVector.isScalable() || resultVector.isScalable())
+    return emitOpError("packet vectors must be fixed-size");
+  if (sourceType.getWidth() != resultType.getWidth())
+    return emitOpError("source and result SIMD widths must match");
+  if (sourceVector.getElementType() != resultVector.getElementType())
+    return emitOpError("source and result packet element types must match");
+  return verifyRedistributionDomain(*this, sourceVector.getNumElements(),
+                                    resultVector.getNumElements());
 }
 
 LogicalResult WorkgroupIdOp::verify() {

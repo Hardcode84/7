@@ -252,6 +252,32 @@ static void bindPredAttr(nb::module_ &m) {
           nb::arg("cls"), nb::arg("data"), nb::arg("context"));
 }
 
+static void bindRedistributionAttr(nb::module_ &m) {
+  mlir_attribute_subclass(m, "RedistributionAttr",
+                          mlirWaveAttributeIsARedistribution)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, int64_t items, MlirAttribute sourceItem,
+             MlirAttribute sourceSlot) {
+            return cls(
+                mlirWaveRedistributionAttrGet(items, sourceItem, sourceSlot));
+          },
+          nb::arg("cls"), nb::arg("items"), nb::arg("source_item"),
+          nb::arg("source_slot"))
+      .def_property_readonly("items",
+                             [](MlirAttribute self) {
+                               return mlirWaveRedistributionAttrGetItems(self);
+                             })
+      .def_property_readonly("source_item",
+                             [](MlirAttribute self) {
+                               return mlirWaveRedistributionAttrGetSourceItem(
+                                   self);
+                             })
+      .def_property_readonly("source_slot", [](MlirAttribute self) {
+        return mlirWaveRedistributionAttrGetSourceSlot(self);
+      });
+}
+
 static void bindFragmentType(nb::module_ &m) {
   mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
       .def_classmethod(
@@ -323,6 +349,7 @@ NB_MODULE(_waveDialectsNanobind, m) {
   // Wave symbolic attributes.
   bindExprAttr(m);
   bindPredAttr(m);
+  bindRedistributionAttr(m);
 
   // Wave address-space attributes.
   bindAddressSpaceAttr(m, "GlobalAddressSpaceAttr",

@@ -5,7 +5,8 @@
 Represent layout conversion between two per-lane packets with one operation:
 
 ```mlir
-%dst = wave.redistribute %src #map
+%dst = wave.redistribute %src,
+    <items = 128, source_item = "xor(item, 64)", source_slot = "slot">
     : !wave.simd<vector<NsxT>, W>
    -> !wave.simd<vector<NdxT>, W>
 ```

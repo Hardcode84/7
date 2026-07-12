@@ -431,6 +431,23 @@ def Wave_ShuffleOp : Wave_Op<"shuffle", [NoMemoryEffect]> {
   let hasVerifier = 1;
 }
 
+def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
+  let summary = "redistribute a per-lane packet over a workgroup";
+  let description = [{
+    Applies a total gather relation to a SIMD vector packet. Lowering derives
+    register, wave-shuffle, or workgroup-memory movement from the relation.
+  }];
+
+  let arguments = (ins Wave_SimdOf1DVector:$source,
+                       Wave_RedistributionAttr:$relation);
+  let results = (outs Wave_SimdOf1DVector:$result);
+  let assemblyFormat = [{
+    $source `,` $relation attr-dict `:` qualified(type($source)) `->`
+    qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let summary = "create an empty memory dependency token";
   let results = (outs Wave_MemToken:$result);

@@ -199,6 +199,20 @@ def test_typed_bindings():
         )
         assert w.ExprAttr.isinstance(expr_from_node)
 
+        item_attr = w.ExprAttr.get_from_node_ptr(
+            w.sym("item").node_ptr,
+            context=w.Context.current,
+        )
+        slot_attr = w.ExprAttr.get_from_node_ptr(
+            w.sym("slot").node_ptr,
+            context=w.Context.current,
+        )
+        relation = w.RedistributionAttr.get(64, item_attr, slot_attr)
+        assert w.RedistributionAttr.isinstance(relation)
+        assert relation.items == 64
+        assert str(relation.source_item) == '#wave.expr<"item">'
+        assert str(relation.source_slot) == '#wave.expr<"slot">'
+
         pred = w.PredAttr.get("K >= 0", context=w.Context.current)
         assert w.PredAttr.isinstance(pred)
         raw_pred = w.sym_ctx.eq(
@@ -211,6 +225,38 @@ def test_typed_bindings():
         assert w.PredAttr.isinstance(pred_from_node)
         print("ok")
         # CHECK: ok
+
+
+# CHECK-LABEL: TEST: test_redistribute_builder
+@run
+def test_redistribute_builder():
+    with w.module() as m:
+        packet = w.simd_type(w.vector_type(2, w.i32()), 32)
+        with m.function(
+            "redistribute_kernel",
+            [packet],
+            kernel=True,
+            workgroup_size=[64, 1, 1],
+        ) as f:
+            (source,) = f.args
+            item = w.sym("item")
+            slot = w.sym("slot")
+            _result = f.redistribute(
+                source,
+                packet,
+                items=64,
+                source_item=w.xor(item, w.sym_ctx.int_(1)),
+                source_slot=slot,
+            )
+        # CHECK: wave.redistribute
+        # CHECK-SAME: <items = 64, source_item = "xor(1, item)", source_slot = "slot">
+        print(m.module)
+        w.PassManager.parse("builtin.module(wave-lower-redistribute)").run(
+            m.module.operation
+        )
+        # CHECK: wave.shuffle
+        # CHECK-NOT: wave.redistribute
+        print(m.module)
 
 
 # CHECK-LABEL: TEST: test_assume_helpers

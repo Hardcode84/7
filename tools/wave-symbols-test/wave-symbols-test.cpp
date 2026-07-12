@@ -187,6 +187,9 @@ void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
   sym::ExprHandle modQuarter =
       mustCompose(store, xQuarter, sym::ExprBinaryOp::Mod, xHalf);
   printLiteral("denominator-mod-rational", sym::collectDenominator(modQuarter));
+  sym::ExprHandle piecewise =
+      mustParseExpr(store, "Piecewise((7/2, x >= 0), (x/4, True))");
+  printLiteral("denominator-piecewise", sym::collectDenominator(piecewise));
 
   auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
   if (failed(rangeAssumption)) {

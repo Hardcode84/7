@@ -81,6 +81,16 @@ mlirWavePredAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePredAttrGetFromBytes(
     MlirContext ctx, const uint8_t *bytes, size_t length);
 
+MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsARedistribution(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirWaveRedistributionAttrGet(
+    int64_t items, MlirAttribute sourceItem, MlirAttribute sourceSlot);
+MLIR_CAPI_EXPORTED int64_t
+mlirWaveRedistributionAttrGetItems(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveRedistributionAttrGetSourceItem(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveRedistributionAttrGetSourceSlot(MlirAttribute attr);
+
 //===----------------------------------------------------------------------===//
 // Wave address-space attributes
 //===----------------------------------------------------------------------===//

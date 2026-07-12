@@ -46,6 +46,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     PredAttr,
     PrivateAddressSpaceAttr,
     PtrType,
+    RedistributionAttr,
     SharedAddressSpaceAttr,
     SimdType,
     StoreCacheAttr,
@@ -923,6 +924,25 @@ class FunctionBuilder:
             assumptions=_index_expr_assumptions_attr(assumptions),
         ).result
 
+    def redistribute(
+        self,
+        source: Value,
+        result_type: Type,
+        *,
+        items: int,
+        source_item: ixsimpl.Expr,
+        source_slot: ixsimpl.Expr,
+    ) -> Value:
+        """Build symbolic workgroup packet redistribution."""
+        item_attr = ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(source_item), context=_current_context()
+        )
+        slot_attr = ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(source_slot), context=_current_context()
+        )
+        relation = RedistributionAttr.get(items, item_attr, slot_attr)
+        return wave.RedistributeOp(result_type, source, relation).result
+
     def ptr_add(
         self, base: Value, offset: Value, result_type: Type | None = None
     ) -> Value:
@@ -1341,6 +1361,7 @@ __all__ = [
     "PredAttr",
     "PrivateAddressSpaceAttr",
     "PtrType",
+    "RedistributionAttr",
     "SharedAddressSpaceAttr",
     "SimdType",
     "StoreCacheAttr",

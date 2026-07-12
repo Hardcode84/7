@@ -87,6 +87,24 @@ def Wave_PredAttr : Wave_Attr<"Pred", "pred"> {
 def Wave_PredArrayAttr
     : TypedArrayAttrBase<Wave_PredAttr, "wave predicate array attribute">;
 
+def Wave_RedistributionAttr : Wave_Attr<"Redistribution", "redistribution"> {
+  let summary = "Workgroup packet redistribution relation";
+  let description = [{
+    Total gather relation from destination `(item, slot)` coordinates to
+    source `(item, slot)` coordinates. `item` and `slot` are the only free
+    symbols admitted by `wave.redistribute`.
+  }];
+  let parameters = (ins "int64_t":$items,
+                        Wave_ExprHandleParameter:$sourceItem,
+                        Wave_ExprHandleParameter:$sourceSlot);
+  let assemblyFormat = [{
+    `<` `items` `=` $items `,`
+        `source_item` `=` $sourceItem `,`
+        `source_slot` `=` $sourceSlot `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
 def Wave_GlobalAddressSpaceAttr : Wave_Attr<"GlobalAddressSpace", "global"> {
   let summary = "global memory address space";
   let assemblyFormat = "";
