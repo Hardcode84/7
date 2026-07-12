@@ -88,17 +88,21 @@ def Wave_PredArrayAttr
     : TypedArrayAttrBase<Wave_PredAttr, "wave predicate array attribute">;
 
 def Wave_RedistributionAttr : Wave_Attr<"Redistribution", "redistribution"> {
-  let summary = "Workgroup packet redistribution relation";
+  let summary = "Cluster packet redistribution relation";
   let description = [{
-    Total gather relation from destination `(item, slot)` coordinates to
-    source `(item, slot)` coordinates. `item` and `slot` are the only free
-    symbols admitted by `wave.redistribute`.
+    Total gather relation from destination `(block, item, slot)` coordinates
+    to source `(block, item, slot)` coordinates. `block`, `item`, and `slot`
+    are the only free symbols admitted by `wave.redistribute`.
   }];
-  let parameters = (ins "int64_t":$items,
+  let parameters = (ins "int64_t":$blocks,
+                        "int64_t":$items,
+                        Wave_ExprHandleParameter:$sourceBlock,
                         Wave_ExprHandleParameter:$sourceItem,
                         Wave_ExprHandleParameter:$sourceSlot);
   let assemblyFormat = [{
-    `<` `items` `=` $items `,`
+    `<` `blocks` `=` $blocks `,`
+        `items` `=` $items `,`
+        `source_block` `=` $sourceBlock `,`
         `source_item` `=` $sourceItem `,`
         `source_slot` `=` $sourceSlot `>`
   }];

@@ -432,10 +432,11 @@ def Wave_ShuffleOp : Wave_Op<"shuffle", [NoMemoryEffect]> {
 }
 
 def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
-  let summary = "redistribute a per-lane packet over a workgroup";
+  let summary = "redistribute a per-lane packet over a block cluster";
   let description = [{
     Applies a total gather relation to a SIMD vector packet. Lowering derives
-    register, wave-shuffle, or workgroup-memory movement from the relation.
+    register, wave-shuffle, workgroup-memory, or cluster movement from the
+    relation.
   }];
 
   let arguments = (ins Wave_SimdOf1DVector:$source,

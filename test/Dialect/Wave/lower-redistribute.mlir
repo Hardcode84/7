@@ -7,7 +7,7 @@ func.func @identity(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 32, source_item = "item", source_slot = "slot">
+      <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
 }
@@ -25,7 +25,7 @@ func.func @reverse_slots(%source: !wave.simd<vector<2xf32>, 32>)
     -> !wave.simd<vector<2xf32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 32, source_item = "item", source_slot = "1 - slot">
+      <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "1 - slot">
       : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf32>, 32>
   return %result : !wave.simd<vector<2xf32>, 32>
 }
@@ -43,7 +43,7 @@ func.func @item_selected_slot(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<1xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 32, source_item = "item", source_slot = "Mod(item, 2)">
+      <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "Mod(item, 2)">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return %result : !wave.simd<vector<1xi32>, 32>
 }
@@ -57,8 +57,8 @@ func.func @piecewise_item(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 32,
-       source_item = "Piecewise((item, slot == 0), (xor(item, 1), True))",
+      <blocks = 1, items = 32,
+       source_block = "block", source_item = "Piecewise((item, slot == 0), (xor(item, 1), True))",
        source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
@@ -77,9 +77,23 @@ func.func @same_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 64, source_item = "xor(item, 1)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @same_block_domain(
+// CHECK-NOT: wave.alloc
+// CHECK: wave.shuffle
+func.func @same_block_domain(%source: !wave.simd<vector<1xi32>, 32>)
+    -> !wave.simd<vector<1xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 2, items = 32, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  return %result : !wave.simd<vector<1xi32>, 32>
 }
 
 // -----
@@ -92,7 +106,7 @@ func.func @same_wave_uniform_if(%source: !wave.simd<vector<1xi32>, 32>,
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   scf.if %condition {
     %result = wave.redistribute %source,
-        <items = 64, source_item = "xor(item, 1)", source_slot = "slot">
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   }
   return
@@ -115,7 +129,7 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
 }
@@ -134,7 +148,7 @@ func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   scf.if %condition {
     %result = wave.redistribute %source,
-        <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   }
   return
@@ -153,7 +167,7 @@ func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
     -> !wave.simd<vector<1xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   %result = wave.redistribute %source,
-      <items = 64, source_item = "0", source_slot = "0">
+      <blocks = 1, items = 64, source_block = "block", source_item = "0", source_slot = "0">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return %result : !wave.simd<vector<1xi32>, 32>
 }
@@ -181,13 +195,13 @@ func.func @cross_wave_sequence(
     %source2: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   %result0 = wave.redistribute %source0,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   %result1 = wave.redistribute %source1,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   %result2 = wave.redistribute %source2,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return
 }
@@ -207,12 +221,12 @@ func.func @cross_wave_existing_barrier(
     %source1: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   %result0 = wave.redistribute %source0,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   %root = wave.token : !wave.mem.token
   %sync = wave.barrier %root : (!wave.mem.token) -> !wave.mem.token
   %result1 = wave.redistribute %source1,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return
 }
@@ -227,10 +241,29 @@ func.func @compose_to_identity(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   %first = wave.redistribute %source,
-      <items = 32, source_item = "xor(item, 1)", source_slot = "1 - slot">
+      <blocks = 1, items = 32, source_block = "block", source_item = "xor(item, 1)", source_slot = "1 - slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   %second = wave.redistribute %first,
-      <items = 32, source_item = "xor(item, 1)", source_slot = "1 - slot">
+      <blocks = 1, items = 32, source_block = "block", source_item = "xor(item, 1)", source_slot = "1 - slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %second : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @compose_cross_block_to_identity(
+// CHECK-NOT: wave.redistribute
+// CHECK-NOT: wave.extract
+// CHECK-NEXT: return %{{.*}} : !wave.simd<vector<1xi32>, 32>
+func.func @compose_cross_block_to_identity(
+    %source: !wave.simd<vector<1xi32>, 32>)
+    -> !wave.simd<vector<1xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %first = wave.redistribute %source,
+      <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %second = wave.redistribute %first,
+      <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  return %second : !wave.simd<vector<1xi32>, 32>
 }

@@ -83,9 +83,14 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirWavePredAttrGetFromBytes(
 
 MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsARedistribution(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWaveRedistributionAttrGet(
-    int64_t items, MlirAttribute sourceItem, MlirAttribute sourceSlot);
+    int64_t blocks, int64_t items, MlirAttribute sourceBlock,
+    MlirAttribute sourceItem, MlirAttribute sourceSlot);
+MLIR_CAPI_EXPORTED int64_t
+mlirWaveRedistributionAttrGetBlocks(MlirAttribute attr);
 MLIR_CAPI_EXPORTED int64_t
 mlirWaveRedistributionAttrGetItems(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveRedistributionAttrGetSourceBlock(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveRedistributionAttrGetSourceItem(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute

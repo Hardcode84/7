@@ -17,7 +17,7 @@ func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<2xi32>, 32>
   %moved = wave.redistribute %source,
-      <items = 64, source_item = "xor(item, 1)", source_slot = "slot">
+      <blocks = 2, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   %value = wave.extract %moved[0]
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
@@ -49,7 +49,7 @@ func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<2xi32>, 32>
   %moved = wave.redistribute %source,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   %value = wave.extract %moved[0]
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
@@ -80,7 +80,7 @@ func.func @redistribute_cross_wave_nested(
       : !wave.simd<i32, 32> -> !wave.simd<vector<1xi32>, 32>
   scf.if %condition {
     %moved = wave.redistribute %source,
-        <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
     %value = wave.extract %moved[0]
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
@@ -117,13 +117,13 @@ func.func @redistribute_cross_wave_sequence(
   %source2 = wave.pack %last
       : !wave.simd<i32, 32> -> !wave.simd<vector<1xi32>, 32>
   %moved0 = wave.redistribute %source0,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   %moved1 = wave.redistribute %source1,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   %moved2 = wave.redistribute %source2,
-      <items = 64, source_item = "xor(item, 32)", source_slot = "slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   %value0 = wave.extract %moved0[0]
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>

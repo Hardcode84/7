@@ -257,16 +257,27 @@ static void bindRedistributionAttr(nb::module_ &m) {
                           mlirWaveAttributeIsARedistribution)
       .def_classmethod(
           "get",
-          [](nb::object &cls, int64_t items, MlirAttribute sourceItem,
+          [](nb::object &cls, int64_t blocks, int64_t items,
+             MlirAttribute sourceBlock, MlirAttribute sourceItem,
              MlirAttribute sourceSlot) {
-            return cls(
-                mlirWaveRedistributionAttrGet(items, sourceItem, sourceSlot));
+            return cls(mlirWaveRedistributionAttrGet(blocks, items, sourceBlock,
+                                                     sourceItem, sourceSlot));
           },
-          nb::arg("cls"), nb::arg("items"), nb::arg("source_item"),
+          nb::arg("cls"), nb::arg("blocks"), nb::arg("items"),
+          nb::arg("source_block"), nb::arg("source_item"),
           nb::arg("source_slot"))
+      .def_property_readonly("blocks",
+                             [](MlirAttribute self) {
+                               return mlirWaveRedistributionAttrGetBlocks(self);
+                             })
       .def_property_readonly("items",
                              [](MlirAttribute self) {
                                return mlirWaveRedistributionAttrGetItems(self);
+                             })
+      .def_property_readonly("source_block",
+                             [](MlirAttribute self) {
+                               return mlirWaveRedistributionAttrGetSourceBlock(
+                                   self);
                              })
       .def_property_readonly("source_item",
                              [](MlirAttribute self) {

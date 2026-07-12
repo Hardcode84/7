@@ -242,19 +242,34 @@ bool mlirWaveAttributeIsARedistribution(MlirAttribute attr) {
   return llvm::isa<wave::RedistributionAttr>(unwrap(attr));
 }
 
-MlirAttribute mlirWaveRedistributionAttrGet(int64_t items,
+MlirAttribute mlirWaveRedistributionAttrGet(int64_t blocks, int64_t items,
+                                            MlirAttribute sourceBlock,
                                             MlirAttribute sourceItem,
                                             MlirAttribute sourceSlot) {
+  wave::ExprAttr block = llvm::cast<wave::ExprAttr>(unwrap(sourceBlock));
   wave::ExprAttr item = llvm::cast<wave::ExprAttr>(unwrap(sourceItem));
   wave::ExprAttr slot = llvm::cast<wave::ExprAttr>(unwrap(sourceSlot));
-  assert(item.getContext() == slot.getContext() &&
+  assert(block.getContext() == item.getContext() &&
+         item.getContext() == slot.getContext() &&
          "redistribution expressions must share an MLIR context");
-  return wrap(wave::RedistributionAttr::get(item.getContext(), items,
-                                            item.getValue(), slot.getValue()));
+  return wrap(wave::RedistributionAttr::get(item.getContext(), blocks, items,
+                                            block.getValue(), item.getValue(),
+                                            slot.getValue()));
+}
+
+int64_t mlirWaveRedistributionAttrGetBlocks(MlirAttribute attr) {
+  return llvm::cast<wave::RedistributionAttr>(unwrap(attr)).getBlocks();
 }
 
 int64_t mlirWaveRedistributionAttrGetItems(MlirAttribute attr) {
   return llvm::cast<wave::RedistributionAttr>(unwrap(attr)).getItems();
+}
+
+MlirAttribute mlirWaveRedistributionAttrGetSourceBlock(MlirAttribute attr) {
+  wave::RedistributionAttr relation =
+      llvm::cast<wave::RedistributionAttr>(unwrap(attr));
+  return wrap(
+      wave::ExprAttr::get(relation.getContext(), relation.getSourceBlock()));
 }
 
 MlirAttribute mlirWaveRedistributionAttrGetSourceItem(MlirAttribute attr) {

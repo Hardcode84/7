@@ -32,11 +32,13 @@ using namespace mlir::wave;
 
 namespace {
 
-enum class Movement { Alias, Workitem, Wave, Workgroup };
+enum class Movement { Alias, Workitem, Wave, Workgroup, Cluster };
 
 struct RelationDomain {
+  sym::ExprHandle block;
   sym::ExprHandle item;
   sym::ExprHandle slot;
+  sym::PredHandle blockRange;
   sym::PredHandle itemRange;
   sym::PredHandle slotRange;
 };
@@ -60,26 +62,34 @@ static FailureOr<RelationDomain> buildDomain(sym::Store &store,
                                              RedistributeOp op) {
   int64_t destinationSlots =
       getPacketType(op.getResult().getType()).getNumElements();
+  FailureOr<sym::ExprHandle> block = sym::composeExprSym(store, "block");
   FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
   FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
+  FailureOr<sym::PredHandle> blockRange =
+      sym::rangeAssumption(store, "block", 0, op.getRelation().getBlocks() - 1);
   FailureOr<sym::PredHandle> itemRange =
       sym::rangeAssumption(store, "item", 0, op.getRelation().getItems() - 1);
   FailureOr<sym::PredHandle> slotRange =
       sym::rangeAssumption(store, "slot", 0, destinationSlots - 1);
-  if (failed(item) || failed(slot) || failed(itemRange) || failed(slotRange))
+  if (failed(block) || failed(item) || failed(slot) || failed(blockRange) ||
+      failed(itemRange) || failed(slotRange))
     return failure();
-  return RelationDomain{*item, *slot, *itemRange, *slotRange};
+  return RelationDomain{*block,      *item,      *slot,
+                        *blockRange, *itemRange, *slotRange};
 }
 
 static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
                                              sym::ExprHandle expr,
                                              const RelationDomain &domain,
-                                             int64_t item, int64_t slot) {
+                                             int64_t block, int64_t item,
+                                             int64_t slot) {
+  FailureOr<sym::ExprHandle> blockValue = sym::composeExprInt(store, block);
   FailureOr<sym::ExprHandle> itemValue = sym::composeExprInt(store, item);
   FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
-  if (failed(itemValue) || failed(slotValue))
+  if (failed(blockValue) || failed(itemValue) || failed(slotValue))
     return failure();
-  std::array<sym::ExprSubstitution, 2> substitutions{
+  std::array<sym::ExprSubstitution, 3> substitutions{
+      sym::ExprSubstitution{domain.block, *blockValue},
       sym::ExprSubstitution{domain.item, *itemValue},
       sym::ExprSubstitution{domain.slot, *slotValue}};
   FailureOr<sym::ExprHandle> substituted =
@@ -118,8 +128,25 @@ floorDiv(sym::Store &store, sym::ExprHandle value, int64_t divisor) {
   return sym::composeExprFloor(store, *divided);
 }
 
-static Movement finishEnumeratedClassification(bool sameItem, bool sameWave,
+static sym::CheckResult proveSameWave(sym::Store &store,
+                                      sym::ExprHandle sourceItem,
+                                      sym::ExprHandle destinationItem,
+                                      int64_t waveWidth,
+                                      ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> sourceWave =
+      floorDiv(store, sourceItem, waveWidth);
+  FailureOr<sym::ExprHandle> destinationWave =
+      floorDiv(store, destinationItem, waveWidth);
+  if (failed(sourceWave) || failed(destinationWave))
+    return sym::CheckResult::Unknown;
+  return proveEqual(store, *sourceWave, *destinationWave, assumptions);
+}
+
+static Movement finishEnumeratedClassification(bool sameBlock, bool sameItem,
+                                               bool sameWave,
                                                bool identitySlot) {
+  if (!sameBlock)
+    return Movement::Cluster;
   if (sameItem && identitySlot)
     return Movement::Alias;
   if (sameItem)
@@ -134,8 +161,11 @@ static FailureOr<Movement> classifyByEnumeration(sym::Store &store,
                                                  const RelationDomain &domain,
                                                  int64_t waveWidth) {
   int64_t items = op.getRelation().getItems();
+  int64_t blocks = op.getRelation().getBlocks();
   int64_t slots = getPacketType(op.getResult().getType()).getNumElements();
-  std::optional<int64_t> points = llvm::checkedMul(items, slots);
+  std::optional<int64_t> points = llvm::checkedMul(blocks, items);
+  if (points)
+    points = llvm::checkedMul(*points, slots);
   constexpr int64_t maxPoints = int64_t{1} << 20;
   if (!points) {
     op.emitOpError(
@@ -148,48 +178,54 @@ static FailureOr<Movement> classifyByEnumeration(sym::Store &store,
     return failure();
   }
 
+  bool sameBlock = true;
   bool sameItem = true;
   bool sameWave = true;
   bool identitySlot = op.getSource().getType() == op.getResult().getType();
-  for (int64_t item : llvm::seq<int64_t>(0, items)) {
-    for (int64_t slot : llvm::seq<int64_t>(0, slots)) {
-      FailureOr<int64_t> sourceItem = evaluateCoordinate(
-          store, op.getRelation().getSourceItem(), domain, item, slot);
-      if (failed(sourceItem)) {
-        op.emitOpError("failed to evaluate verified redistribution relation");
-        return failure();
+  for (int64_t block : llvm::seq<int64_t>(0, blocks)) {
+    for (int64_t item : llvm::seq<int64_t>(0, items)) {
+      for (int64_t slot : llvm::seq<int64_t>(0, slots)) {
+        FailureOr<int64_t> sourceBlock =
+            evaluateCoordinate(store, op.getRelation().getSourceBlock(), domain,
+                               block, item, slot);
+        FailureOr<int64_t> sourceItem = evaluateCoordinate(
+            store, op.getRelation().getSourceItem(), domain, block, item, slot);
+        FailureOr<int64_t> sourceSlot = evaluateCoordinate(
+            store, op.getRelation().getSourceSlot(), domain, block, item, slot);
+        if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot)) {
+          op.emitOpError("failed to evaluate verified redistribution relation");
+          return failure();
+        }
+        sameBlock &= *sourceBlock == block;
+        sameItem &= *sourceItem == item;
+        sameWave &= *sourceItem / waveWidth == item / waveWidth;
+        identitySlot &= *sourceSlot == slot;
       }
-      FailureOr<int64_t> sourceSlot = evaluateCoordinate(
-          store, op.getRelation().getSourceSlot(), domain, item, slot);
-      if (failed(sourceSlot)) {
-        op.emitOpError("failed to evaluate verified redistribution relation");
-        return failure();
-      }
-      sameItem &= *sourceItem == item;
-      sameWave &= *sourceItem / waveWidth == item / waveWidth;
-      identitySlot &= *sourceSlot == slot;
     }
   }
-  return finishEnumeratedClassification(sameItem, sameWave, identitySlot);
+  return finishEnumeratedClassification(sameBlock, sameItem, sameWave,
+                                        identitySlot);
 }
 
 static FailureOr<Movement> classifyMovement(sym::Store &store,
                                             RedistributeOp op,
                                             const RelationDomain &domain,
                                             int64_t waveWidth) {
-  std::array<sym::PredHandle, 2> assumptions{domain.itemRange,
-                                             domain.slotRange};
+  std::array<sym::PredHandle, 3> assumptions{
+      domain.blockRange, domain.itemRange, domain.slotRange};
+  sym::CheckResult sameBlock = proveEqual(
+      store, op.getRelation().getSourceBlock(), domain.block, assumptions);
+  if (sameBlock == sym::CheckResult::False)
+    return Movement::Cluster;
+  if (sameBlock == sym::CheckResult::Unknown)
+    return classifyByEnumeration(store, op, domain, waveWidth);
   sym::CheckResult sameItem = proveEqual(
       store, op.getRelation().getSourceItem(), domain.item, assumptions);
   sym::CheckResult identitySlot = proveEqual(
       store, op.getRelation().getSourceSlot(), domain.slot, assumptions);
-  FailureOr<sym::ExprHandle> sourceWave =
-      floorDiv(store, op.getRelation().getSourceItem(), waveWidth);
-  FailureOr<sym::ExprHandle> destinationWave =
-      floorDiv(store, domain.item, waveWidth);
-  sym::CheckResult sameWave = sym::CheckResult::Unknown;
-  if (succeeded(sourceWave) && succeeded(destinationWave))
-    sameWave = proveEqual(store, *sourceWave, *destinationWave, assumptions);
+  sym::CheckResult sameWave =
+      proveSameWave(store, op.getRelation().getSourceItem(), domain.item,
+                    waveWidth, assumptions);
 
   bool sameType = op.getSource().getType() == op.getResult().getType();
   if (sameType && sameItem == sym::CheckResult::True &&
@@ -202,6 +238,42 @@ static FailureOr<Movement> classifyMovement(sym::Store &store,
   if (sameWave == sym::CheckResult::False)
     return Movement::Workgroup;
   return classifyByEnumeration(store, op, domain, waveWidth);
+}
+
+static bool hasSymbol(sym::ExprHandle expr, StringRef needle) {
+  bool found = false;
+  sym::walkSymbolNames(expr, [&](StringRef name) { found |= name == needle; });
+  return found;
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyRelationExpr(sym::Store &store, sym::ExprHandle expr,
+                     const RelationDomain &domain) {
+  std::array<sym::PredHandle, 3> assumptions{
+      domain.blockRange, domain.itemRange, domain.slotRange};
+  return sym::simplifyExpr(store, expr, assumptions);
+}
+
+static LogicalResult validateBlockLowering(RedistributeOp op, sym::Store &store,
+                                           const RelationDomain &domain,
+                                           Movement movement) {
+  if (movement == Movement::Cluster)
+    return op.emitOpError(
+        "cross-block redistribution requires cluster/DSM lowering");
+  if (movement == Movement::Alias || op.getRelation().getBlocks() == 1)
+    return success();
+
+  for (sym::ExprHandle expr :
+       {op.getRelation().getSourceItem(), op.getRelation().getSourceSlot()}) {
+    FailureOr<sym::ExprHandle> simplified =
+        simplifyRelationExpr(store, expr, domain);
+    if (failed(simplified))
+      return op.emitOpError("failed to simplify redistribution relation");
+    if (hasSymbol(*simplified, "block"))
+      return op.emitOpError(
+          "block-dependent redistribution requires a cluster block coordinate");
+  }
+  return success();
 }
 
 static DenseI32ArrayAttr getWorkgroupShape(func::FuncOp func) {
@@ -262,14 +334,20 @@ public:
 
   FailureOr<MaterializedExpr> materialize(sym::ExprHandle expr,
                                           int64_t destinationSlot) {
+    FailureOr<sym::ExprHandle> normalized =
+        simplifyRelationExpr(store, expr, domain);
     FailureOr<sym::ExprHandle> slotValue =
         sym::composeExprInt(store, destinationSlot);
-    if (failed(slotValue))
+    if (failed(normalized) || failed(slotValue))
       return failure();
-    std::array<sym::ExprSubstitution, 1> substitution{
+    FailureOr<sym::ExprHandle> blockValue = sym::composeExprInt(store, 0);
+    if (failed(blockValue))
+      return failure();
+    std::array<sym::ExprSubstitution, 2> substitutions{
+        sym::ExprSubstitution{domain.block, *blockValue},
         sym::ExprSubstitution{domain.slot, *slotValue}};
     FailureOr<sym::ExprHandle> substituted =
-        sym::substituteExpr(store, expr, substitution);
+        sym::substituteExpr(store, *normalized, substitutions);
     if (failed(substituted))
       return failure();
     std::array<sym::PredHandle, 1> assumptions{domain.itemRange};
@@ -639,31 +717,38 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
 static bool canCompose(RedistributeOp previous, RedistributeOp op) {
   return previous->getBlock() == op->getBlock() &&
          previous.getResult().hasOneUse() &&
+         previous.getRelation().getBlocks() == op.getRelation().getBlocks() &&
          previous.getRelation().getItems() == op.getRelation().getItems();
 }
 
 static LogicalResult composeOne(RedistributeOp previous, RedistributeOp op,
                                 sym::Store &store) {
+  FailureOr<sym::ExprHandle> block = sym::composeExprSym(store, "block");
   FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
   FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
-  if (failed(item) || failed(slot))
+  if (failed(block) || failed(item) || failed(slot))
     return op.emitOpError("failed to construct composition symbols");
-  std::array<sym::ExprSubstitution, 2> substitutions{
+  std::array<sym::ExprSubstitution, 3> substitutions{
+      sym::ExprSubstitution{*block, op.getRelation().getSourceBlock()},
       sym::ExprSubstitution{*item, op.getRelation().getSourceItem()},
       sym::ExprSubstitution{*slot, op.getRelation().getSourceSlot()}};
+  FailureOr<sym::ExprHandle> sourceBlock = sym::substituteExpr(
+      store, previous.getRelation().getSourceBlock(), substitutions);
   FailureOr<sym::ExprHandle> sourceItem = sym::substituteExpr(
       store, previous.getRelation().getSourceItem(), substitutions);
   FailureOr<sym::ExprHandle> sourceSlot = sym::substituteExpr(
       store, previous.getRelation().getSourceSlot(), substitutions);
-  if (failed(sourceItem) || failed(sourceSlot))
+  if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
     return op.emitOpError("failed to compose redistribution relations");
+  sourceBlock = sym::simplifyExpr(store, *sourceBlock);
   sourceItem = sym::simplifyExpr(store, *sourceItem);
   sourceSlot = sym::simplifyExpr(store, *sourceSlot);
-  if (failed(sourceItem) || failed(sourceSlot))
+  if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
     return op.emitOpError("failed to simplify composed redistribution");
 
   RedistributionAttr relation = RedistributionAttr::get(
-      op.getContext(), op.getRelation().getItems(), *sourceItem, *sourceSlot);
+      op.getContext(), op.getRelation().getBlocks(),
+      op.getRelation().getItems(), *sourceBlock, *sourceItem, *sourceSlot);
   op->setOperand(0, previous.getSource());
   op.setRelationAttr(relation);
   return op.verify();
@@ -721,6 +806,9 @@ static LogicalResult lowerRedistribution(IRRewriter &rewriter,
       classifyMovement(dialect.getSymbolStore(), op, *domain, width);
   if (failed(movement))
     return failure();
+  if (failed(validateBlockLowering(op, dialect.getSymbolStore(), *domain,
+                                   *movement)))
+    return failure();
 
   switch (*movement) {
   case Movement::Alias:
@@ -733,6 +821,8 @@ static LogicalResult lowerRedistribution(IRRewriter &rewriter,
   case Movement::Workgroup:
     return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), *domain, func,
                           sequences);
+  case Movement::Cluster:
+    llvm_unreachable("cluster movement must fail contextual validation");
   }
   llvm_unreachable("unknown redistribution movement");
 }

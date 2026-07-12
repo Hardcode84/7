@@ -932,15 +932,24 @@ class FunctionBuilder:
         items: int,
         source_item: ixsimpl.Expr,
         source_slot: ixsimpl.Expr,
+        blocks: int = 1,
+        source_block: ixsimpl.Expr | None = None,
     ) -> Value:
-        """Build symbolic workgroup packet redistribution."""
+        """Build symbolic cluster packet redistribution."""
+        if source_block is None:
+            source_block = sym("block")
+        block_attr = ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(source_block), context=_current_context()
+        )
         item_attr = ExprAttr.get_from_node_ptr(
             _ixsimpl_node_ptr(source_item), context=_current_context()
         )
         slot_attr = ExprAttr.get_from_node_ptr(
             _ixsimpl_node_ptr(source_slot), context=_current_context()
         )
-        relation = RedistributionAttr.get(items, item_attr, slot_attr)
+        relation = RedistributionAttr.get(
+            blocks, items, block_attr, item_attr, slot_attr
+        )
         return wave.RedistributeOp(result_type, source, relation).result
 
     def ptr_add(

@@ -2,10 +2,20 @@
 // RUN: wave-opt %s | wave-opt | FileCheck %s
 
 // CHECK-LABEL: func.func @wave_redistribution_attr
-// CHECK-SAME: test.relation = #wave.redistribution<items = 32, source_item = "item", source_slot = "slot">
+// CHECK-SAME: test.relation = #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot">
 func.func @wave_redistribution_attr()
     attributes {test.relation = #wave.redistribution<
-        items = 32, source_item = "item", source_slot = "slot">} {
+        blocks = 1, items = 32, source_block = "block",
+        source_item = "item", source_slot = "slot">} {
+  return
+}
+
+// CHECK-LABEL: func.func @wave_block_redistribution_attr
+// CHECK-SAME: test.relation = #wave.redistribution<blocks = 2, items = 32, source_block = "xor(1, block)", source_item = "xor(block, item)", source_slot = "slot">
+func.func @wave_block_redistribution_attr()
+    attributes {test.relation = #wave.redistribution<
+        blocks = 2, items = 32, source_block = "xor(block, 1)",
+        source_item = "xor(item, block)", source_slot = "slot">} {
   return
 }
 
@@ -110,9 +120,9 @@ func.func @shuffle_index_lanes(%value: !wave.simd<f32, 64>,
 func.func @wave_redistribute(
     %source: !wave.simd<vector<2xf32>, 32>)
     -> !wave.simd<vector<2xf32>, 32> {
-  // CHECK: wave.redistribute {{.*}} <items = 64, source_item = "xor(1, item)", source_slot = "1 - slot">
+  // CHECK: wave.redistribute {{.*}} <blocks = 1, items = 64, source_block = "block", source_item = "xor(1, item)", source_slot = "1 - slot">
   %result = wave.redistribute %source,
-      <items = 64, source_item = "xor(item, 1)", source_slot = "1 - slot">
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "1 - slot">
       : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf32>, 32>
   return %result : !wave.simd<vector<2xf32>, 32>
 }
