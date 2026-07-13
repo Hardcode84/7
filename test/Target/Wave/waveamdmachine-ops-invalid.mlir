@@ -661,3 +661,25 @@ func.func @uniform_loop_bad_terminator(%init: !waveamdmachine.reg<sgpr, 1>) {
   } -> !waveamdmachine.reg<sgpr, 1>
   return
 }
+
+// -----
+
+func.func @permlane32_odd_tuple(
+    %source: !waveamdmachine.reg<vgpr, 3>) {
+  // expected-error @below {{source and result widths must be positive even tuples}}
+  %result = waveamdmachine.v_permlane32_swap_b32_tuple %source
+      : (!waveamdmachine.reg<vgpr, 3>)
+      -> !waveamdmachine.reg<vgpr, 3>
+  return
+}
+
+// -----
+
+func.func @permlane32_width_mismatch(
+    %source: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{source and result widths must match}}
+  %result = waveamdmachine.v_permlane32_swap_b32_tuple %source
+      : (!waveamdmachine.reg<vgpr, 2>)
+      -> !waveamdmachine.reg<vgpr, 4>
+  return
+}

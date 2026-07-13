@@ -276,6 +276,13 @@ group. It shuffles only source groups reachable over the finite item domain,
 selects the group once, then extracts the slice components. Unprovable or
 oversized domains retain scalar lowering.
 
+Redistribute lowering stays target-independent. After WaveAMD instruction
+selection, the cross-lane peephole recognizes paired `ds_bpermute` and
+`v_cndmask` graphs with the gfx950 half-wave exchange semantics. Matching
+evaluates every lane in every wave of the known X-linear workgroup, so
+equivalent address arithmetic shares the fast path. Proved pairs become
+`waveamdmachine.v_permlane32_swap_b32_tuple`; other graphs stay generic.
+
 Local lowering introduces no memory token or workgroup barrier.
 
 ## Workgroup LDS Lowering
@@ -597,6 +604,8 @@ No failure fabricates values or silently changes the relation.
 
 - Same-workitem conversion emits only extract/select/pack.
 - Same-wave conversion emits shuffle without LDS or barrier.
+- gfx950 machine peepholes may replace proved half-wave shuffle/select pairs
+  with `v_permlane32_swap_b32_tuple`.
 - Dynamic same-wave source slots use proved packet slices and reachable source
   groups instead of all-source scalar muxes.
 - Same-block, block-independent conversion lowers without a cluster coordinate.
@@ -610,6 +619,8 @@ No failure fabricates values or silently changes the relation.
   one barrier, and no component selects.
 - Exact FA8K MFMA-to-linear repro emits 64 `vector<4xbf16>` shuffles and 32
   vector selects instead of 256 shuffles and 16,256 scalar selects.
+- WaveAMD selection folds those generic graphs into 16 gfx950 permlane tuple
+  operations; the dot-operand repro folds into 8.
 - Three straight-line cross-wave conversions use two scratch slots and one
   publish barrier per conversion.
 - Capacity-limited exchanges use staged source-group windows and stay within

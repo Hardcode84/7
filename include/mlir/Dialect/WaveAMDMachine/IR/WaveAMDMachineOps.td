@@ -988,6 +988,23 @@ def WaveAMDMachine_VPermB32Op
   let assemblyFormat =
       "$src0 `,` $src1 `,` $selector attr-dict `:` functional-type(operands, results)";
 }
+def WaveAMDMachine_VPermlane32SwapB32TupleOp
+    : WaveAMDMachine_Op<"v_permlane32_swap_b32_tuple",
+                        [WaveAMDMachine_VALU, WaveAMDMachine_ReadsExec, Pure]> {
+  let summary = "exchange corresponding dwords between wave64 halves";
+  let description = [{
+    Source tuple contains two equal-width payloads. Each corresponding dword
+    pair is exchanged with `v_permlane32_swap_b32`. Result reuses source storage.
+  }];
+  let archPredicate = WaveAMDMachine_Gfx950;
+  let arguments = (ins WaveAMDMachine_VGPR:$source);
+  let results = (outs WaveAMDMachine_VGPR:$result);
+  let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
+  let killedOperandReusePredicate = "&operand == &this->getSourceMutable()";
+  let requiredKilledOperandReusePredicate =
+      "&operand == &this->getSourceMutable()";
+  let hasVerifier = 1;
+}
 def WaveAMDMachine_VBitOp3B32Op
     : WaveAMDMachine_Op<"v_bitop3_b32", [WaveAMDMachine_VALU, Pure]>,
       WaveAMDMachine_VOP3IntLegality {

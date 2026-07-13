@@ -10,6 +10,8 @@
 // RUN: FileCheck %s --check-prefix=SHUFFLE < %t
 // RUN: FileCheck %s --check-prefix=SELECT < %t
 // RUN: FileCheck %s --check-prefix=LOCAL < %t
+// RUN: wave-opt %s --pass-pipeline='builtin.module(wave-lower-redistribute,waveamd-to-machine,canonicalize,cse,waveamd-form-fused-int,waveamd-cross-lane-peepholes,canonicalize,cse)' \
+// RUN:   | FileCheck %s --check-prefix=PERMLANE
 
 // SHUFFLE-LABEL: func.func @fa_mfma_to_dot_operand_dynamic_slot(
 // SHUFFLE-COUNT-32: wave.shuffle {{.*}}!wave.simd<vector<4xbf16>, 64>
@@ -23,6 +25,12 @@
 // LOCAL-NOT: wave.alloc
 // LOCAL-NOT: wave.barrier
 // LOCAL: return
+// PERMLANE-LABEL: func.func @fa_mfma_to_dot_operand_dynamic_slot(
+// PERMLANE-COUNT-8: waveamdmachine.v_permlane32_swap_b32_tuple
+// PERMLANE-NOT: waveamdmachine.ds_bpermute_b32
+// PERMLANE-NOT: waveamdmachine.v_cndmask_b32_tuple
+// PERMLANE: return
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @fa_mfma_to_dot_operand_dynamic_slot(
     %source: !wave.simd<vector<64xbf16>, 64>)
     -> !wave.simd<vector<64xbf16>, 64>
@@ -35,4 +43,5 @@ func.func @fa_mfma_to_dot_operand_dynamic_slot(
       : !wave.simd<vector<64xbf16>, 64>
      -> !wave.simd<vector<64xbf16>, 64>
   return %result : !wave.simd<vector<64xbf16>, 64>
+}
 }

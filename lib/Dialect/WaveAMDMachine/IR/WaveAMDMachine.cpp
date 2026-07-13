@@ -317,6 +317,16 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult VPermlane32SwapB32TupleOp::verify() {
+  RegType sourceType = cast<RegType>(getSource().getType());
+  RegType resultType = cast<RegType>(getResult().getType());
+  if (sourceType.getWidth() != resultType.getWidth())
+    return emitOpError("source and result widths must match");
+  if (sourceType.getWidth() < 2 || sourceType.getWidth() % 2 != 0)
+    return emitOpError("source and result widths must be positive even tuples");
+  return success();
+}
+
 static LogicalResult verifyAllocatedPairAlignment(Operation *op, RegType type,
                                                   StringRef name) {
   if (type.getIndex() >= 0 && type.getIndex() % 2 != 0)

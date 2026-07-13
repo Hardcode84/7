@@ -378,8 +378,8 @@ def WaveAMDCrossLanePeepholes
   let summary = "Form cheaper WaveAMDMachine cross-lane ops";
   let description = [{
     Function-local peepholes over selected WaveAMDMachine cross-lane ops.
-    Rewrites recognized dynamic lane-address arithmetic into cheaper
-    target-supported lane movement instructions while preserving waitcnt class.
+    Rewrites proved lane-address and select graphs into cheaper
+    target-supported lane movement instructions.
   }];
   let dependentDialects = [
     "func::FuncDialect",
