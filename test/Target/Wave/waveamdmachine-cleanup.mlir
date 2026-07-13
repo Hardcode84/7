@@ -166,6 +166,43 @@ func.func @keep_intervening_vcc_writer(%a: !waveamdmachine.reg<vgpr, 1>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @keep_nested_vcc_writer(
+// CHECK: [[MASK:%.*]], %{{.*}} = waveamdmachine.v_cmp_lt_u32_vcc
+// CHECK: waveamdmachine.uniform_if
+// CHECK: waveamdmachine.v_add_u32_vcc
+// CHECK: [[SEL:%.*]] = waveamdmachine.v_cndmask_b32_tuple {{.*}}, {{.*}}, [[MASK]]
+// CHECK-NEXT: return [[SEL]],
+func.func @keep_nested_vcc_writer(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>,
+    %false: !waveamdmachine.reg<vgpr, 1>,
+    %true: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mask, %vcc0 = waveamdmachine.v_cmp_lt_u32_vcc %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  %nested = waveamdmachine.uniform_if %cond {
+    %sum, %vcc1 = waveamdmachine.v_add_u32_vcc %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    waveamdmachine.yield %sum : !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    waveamdmachine.yield %a : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 1>
+  %sel = waveamdmachine.v_cndmask_b32_tuple %false, %true, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
+  return %sel, %nested
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 // CHECK-LABEL: func.func @hoist_exec_if_local_addr(
 // CHECK-SAME: [[COND:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
 // CHECK-SAME: [[X:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
