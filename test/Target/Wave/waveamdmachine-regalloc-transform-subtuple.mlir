@@ -229,6 +229,109 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>
   }
 
+  // Required reuse cannot clobber a live element borrowed by a packed tuple.
+  // PREP-LABEL: func.func @required_reuse_packed_tuple_copies_live_element(
+  // PREP-SAME: [[LIVE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP-SAME: [[LOCAL:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP: [[COPY:%.*]] = waveamdmachine.copy_tuple [[LIVE]]
+  // PREP-NEXT: [[PACKED:%.*]] = waveamdmachine.tuple_from_elements [[COPY]], [[LOCAL]]
+  // PREP-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[PACKED]]
+  // PREP-NEXT: [[USE:%.*]] = waveamdmachine.v_mov_b32_tuple [[LIVE]]
+  // PREP: return [[SWAPPED]], [[USE]]
+  // SCAN-LABEL: func.func @required_reuse_packed_tuple_copies_live_element(
+  // SCAN: [[COPY:%.*]] = waveamdmachine.copy_tuple
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 1, [[#BASE:]]>
+  // SCAN-NEXT: [[PACKED:%.*]] = waveamdmachine.tuple_from_elements [[COPY]],
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE]]>
+  // SCAN-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[PACKED]]
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE]]>
+  func.func @required_reuse_packed_tuple_copies_live_element(
+      %live: !waveamdmachine.reg<vgpr, 1>,
+      %local: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+    %packed = waveamdmachine.tuple_from_elements %live, %local
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %packed
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %use = waveamdmachine.v_mov_b32_tuple %live {registers = 1 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return %swapped, %use
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // Multi-use required input gets private storage before destructive reuse.
+  // PREP-LABEL: func.func @required_reuse_copies_shared_tuple(
+  // PREP: [[SOURCE:%.*]] = waveamdmachine.tuple_from_elements
+  // PREP-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SOURCE]]
+  // PREP-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[COPY]]
+  // PREP-NEXT: [[USE:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE]]
+  // SCAN-LABEL: func.func @required_reuse_copies_shared_tuple(
+  // SCAN: [[COPY:%.*]] = waveamdmachine.copy_tuple
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE:]]>
+  // SCAN-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[COPY]]
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE]]>
+  func.func @required_reuse_copies_shared_tuple(
+      %lo: !waveamdmachine.reg<vgpr, 1>,
+      %hi: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>) {
+    %source = waveamdmachine.tuple_from_elements %lo, %hi
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %source
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %use = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    return %swapped, %use
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>
+  }
+
+  // Inner carry storage cannot borrow an outer invariant live after the loop.
+  // PREP-LABEL: func.func @nested_packed_loop_init_copies_live_element(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP: [[LIVE:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP: waveamdmachine.uniform_loop
+  // PREP: [[FRESH:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[LOCAL:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[PACKED:%.*]] = waveamdmachine.tuple_from_elements [[LOCAL]], [[FRESH]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[PACKED]]
+  // PREP: waveamdmachine.v_mov_b32_tuple [[LIVE]]
+  func.func @nested_packed_loop_init_copies_live_element(
+      %outer_cond: !waveamdmachine.reg<scc, 1>,
+      %inner_cond: !waveamdmachine.reg<scc, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %live = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.uniform_loop if %outer_cond
+        : !waveamdmachine.reg<scc, 1> {
+    ^bb0:
+      %fresh = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %packed = waveamdmachine.tuple_from_elements %live, %fresh
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      %inner = waveamdmachine.uniform_loop if %inner_cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%packed : !waveamdmachine.reg<vgpr, 2>) {
+      ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+        waveamdmachine.continue_if %inner_cond
+            : !waveamdmachine.reg<scc, 1>
+            carries(%carry : !waveamdmachine.reg<vgpr, 2>)
+      } -> !waveamdmachine.reg<vgpr, 2>
+      %read = waveamdmachine.v_mov_b32_tuple %live {registers = 1 : i64}
+          : (!waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.continue_if %outer_cond
+          : !waveamdmachine.reg<scc, 1>
+    }
+    return
+  }
+
   // PREP-LABEL: func.func @rematerialize_profitable_duplicate_loop_inits(
   // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
   // PREP: [[ONE:%.*]] = waveamdmachine.imm 1
