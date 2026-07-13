@@ -65,4 +65,68 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return %rebuilt : !waveamdmachine.reg<vgpr, 8>
   }
 
+  // CANON-LABEL: func.func @fold_join_then_split
+  // CANON-SAME: %[[A:.*]]: !waveamdmachine.reg<vgpr, 2>
+  // CANON-SAME: %[[B:.*]]: !waveamdmachine.reg<vgpr, 4>
+  // CANON-NOT: waveamdmachine.tuple_from_elements
+  // CANON-NOT: waveamdmachine.tuple_to_elements
+  // CANON: return %[[A]], %[[B]]
+  func.func @fold_join_then_split(
+      %a: !waveamdmachine.reg<vgpr, 2>,
+      %b: !waveamdmachine.reg<vgpr, 4>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>) {
+    %tuple = waveamdmachine.tuple_from_elements %a, %b
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>)
+          -> !waveamdmachine.reg<vgpr, 6>
+    %split:2 = waveamdmachine.tuple_to_elements %tuple
+        : (!waveamdmachine.reg<vgpr, 6>)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>)
+    return %split#0, %split#1
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>
+  }
+
+  // Fixed tuple placement cannot disappear into unassigned components.
+  // CANON-LABEL: func.func @keep_fixed_join_then_split
+  // CANON: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements
+  // CANON-SAME: -> !waveamdmachine.reg<vgpr, 2, 8>
+  // CANON: [[SPLIT:%.*]]:2 = waveamdmachine.tuple_to_elements [[TUPLE]]
+  // CANON: return [[SPLIT]]#0, [[SPLIT]]#1
+  func.func @keep_fixed_join_then_split(
+      %lo: !waveamdmachine.reg<vgpr, 1>,
+      %hi: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+    %tuple = waveamdmachine.tuple_from_elements %lo, %hi
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2, 8>
+    %split:2 = waveamdmachine.tuple_to_elements %tuple
+        : (!waveamdmachine.reg<vgpr, 2, 8>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    return %split#0, %split#1
+        : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // CANON-LABEL: func.func @fold_exact_fixed_join_then_split
+  // CANON-SAME: %[[LO:.*]]: !waveamdmachine.reg<vgpr, 1, 8>
+  // CANON-SAME: %[[HI:.*]]: !waveamdmachine.reg<vgpr, 1, 9>
+  // CANON-NOT: waveamdmachine.tuple_from_elements
+  // CANON-NOT: waveamdmachine.tuple_to_elements
+  // CANON: return %[[LO]], %[[HI]]
+  func.func @fold_exact_fixed_join_then_split(
+      %lo: !waveamdmachine.reg<vgpr, 1, 8>,
+      %hi: !waveamdmachine.reg<vgpr, 1, 9>)
+      -> (!waveamdmachine.reg<vgpr, 1, 8>,
+          !waveamdmachine.reg<vgpr, 1, 9>) {
+    %tuple = waveamdmachine.tuple_from_elements %lo, %hi
+        : (!waveamdmachine.reg<vgpr, 1, 8>,
+           !waveamdmachine.reg<vgpr, 1, 9>)
+          -> !waveamdmachine.reg<vgpr, 2, 8>
+    %split:2 = waveamdmachine.tuple_to_elements %tuple
+        : (!waveamdmachine.reg<vgpr, 2, 8>)
+          -> (!waveamdmachine.reg<vgpr, 1, 8>,
+              !waveamdmachine.reg<vgpr, 1, 9>)
+    return %split#0, %split#1
+        : !waveamdmachine.reg<vgpr, 1, 8>,
+          !waveamdmachine.reg<vgpr, 1, 9>
+  }
+
 }

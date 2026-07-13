@@ -1140,29 +1140,29 @@ tlx_addmm_glu_kernel_optimized:
 		v_cvt_f32_f16_e32 v42, v7
 		v_cvt_f32_f16_sdwa v43, v7 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 		s_waitcnt vmcnt(10)
-		v_cvt_f32_f16_e32 v44, v30
-		v_cvt_f32_f16_sdwa v45, v30 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
-		v_cvt_f32_f16_e32 v46, v31
-		v_cvt_f32_f16_sdwa v47, v31 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v6, v30
+		v_cvt_f32_f16_sdwa v7, v30 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v44, v31
+		v_cvt_f32_f16_sdwa v45, v31 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 		s_waitcnt vmcnt(9)
-		v_cvt_f32_f16_e32 v48, v38
-		v_cvt_f32_f16_sdwa v49, v38 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
-		v_cvt_f32_f16_e32 v50, v39
-		v_cvt_f32_f16_sdwa v51, v39 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v30, v38
+		v_cvt_f32_f16_sdwa v31, v38 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v46, v39
+		v_cvt_f32_f16_sdwa v47, v39 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 		s_waitcnt vmcnt(8)
-		v_cvt_f32_f16_e32 v52, v2
-		v_cvt_f32_f16_sdwa v53, v2 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
-		v_cvt_f32_f16_e32 v54, v3
-		v_cvt_f32_f16_sdwa v55, v3 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v38, v2
+		v_cvt_f32_f16_sdwa v39, v2 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v48, v3
+		v_cvt_f32_f16_sdwa v49, v3 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 		s_waitcnt vmcnt(7)
 		v_cvt_f32_f16_e32 v2, v168
 		v_cvt_f32_f16_sdwa v3, v168 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
-		v_cvt_f32_f16_e32 v6, v169
-		v_cvt_f32_f16_sdwa v7, v169 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
-		v_cvt_f32_f16_e32 v30, v170
-		v_cvt_f32_f16_sdwa v31, v170 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
-		v_cvt_f32_f16_e32 v38, v171
-		v_cvt_f32_f16_sdwa v39, v171 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v50, v169
+		v_cvt_f32_f16_sdwa v51, v169 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v52, v170
+		v_cvt_f32_f16_sdwa v53, v170 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
+		v_cvt_f32_f16_e32 v54, v171
+		v_cvt_f32_f16_sdwa v55, v171 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 		s_waitcnt vmcnt(6)
 		v_cvt_f32_f16_e32 v56, v172
 		v_cvt_f32_f16_sdwa v57, v172 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
@@ -1228,220 +1228,219 @@ tlx_addmm_glu_kernel_optimized:
 		v_cvt_f32_f16_sdwa v175, v199 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1
 		v_pk_add_f32 v[176:177], v[104:105], v[40:41]
 		v_pk_add_f32 v[178:179], v[106:107], v[42:43]
-		v_pk_add_f32 v[104:105], v[108:109], v[44:45]
-		v_pk_add_f32 v[106:107], v[110:111], v[46:47]
-		v_pk_add_f32 v[108:109], v[112:113], v[48:49]
-		v_pk_add_f32 v[110:111], v[114:115], v[50:51]
-		v_pk_add_f32 v[112:113], v[116:117], v[52:53]
-		v_pk_add_f32 v[114:115], v[118:119], v[54:55]
+		v_pk_add_f32 v[104:105], v[108:109], v[6:7]
+		v_pk_add_f32 v[106:107], v[110:111], v[44:45]
+		v_pk_add_f32 v[108:109], v[112:113], v[30:31]
+		v_pk_add_f32 v[110:111], v[114:115], v[46:47]
+		v_pk_add_f32 v[112:113], v[116:117], v[38:39]
+		v_pk_add_f32 v[114:115], v[118:119], v[48:49]
 		v_pk_add_f32 v[116:117], v[120:121], v[40:41]
 		v_pk_add_f32 v[118:119], v[122:123], v[42:43]
-		v_pk_add_f32 v[120:121], v[124:125], v[44:45]
-		v_pk_add_f32 v[122:123], v[126:127], v[46:47]
-		v_pk_add_f32 v[124:125], v[128:129], v[48:49]
-		v_pk_add_f32 v[126:127], v[130:131], v[50:51]
-		v_pk_add_f32 v[128:129], v[132:133], v[52:53]
-		v_pk_add_f32 v[130:131], v[134:135], v[54:55]
+		v_pk_add_f32 v[120:121], v[124:125], v[6:7]
+		v_pk_add_f32 v[122:123], v[126:127], v[44:45]
+		v_pk_add_f32 v[124:125], v[128:129], v[30:31]
+		v_pk_add_f32 v[126:127], v[130:131], v[46:47]
+		v_pk_add_f32 v[128:129], v[132:133], v[38:39]
+		v_pk_add_f32 v[130:131], v[134:135], v[48:49]
 		v_pk_add_f32 v[132:133], v[136:137], v[40:41]
 		v_pk_add_f32 v[134:135], v[138:139], v[42:43]
-		v_pk_add_f32 v[136:137], v[140:141], v[44:45]
-		v_pk_add_f32 v[138:139], v[142:143], v[46:47]
-		v_pk_add_f32 v[140:141], v[144:145], v[48:49]
-		v_pk_add_f32 v[142:143], v[146:147], v[50:51]
-		v_pk_add_f32 v[144:145], v[148:149], v[52:53]
-		v_pk_add_f32 v[146:147], v[150:151], v[54:55]
+		v_pk_add_f32 v[136:137], v[140:141], v[6:7]
+		v_pk_add_f32 v[138:139], v[142:143], v[44:45]
+		v_pk_add_f32 v[140:141], v[144:145], v[30:31]
+		v_pk_add_f32 v[142:143], v[146:147], v[46:47]
+		v_pk_add_f32 v[144:145], v[148:149], v[38:39]
+		v_pk_add_f32 v[146:147], v[150:151], v[48:49]
 		v_pk_add_f32 v[148:149], v[152:153], v[40:41]
 		v_pk_add_f32 v[150:151], v[154:155], v[42:43]
-		v_pk_add_f32 v[40:41], v[156:157], v[44:45]
-		v_pk_add_f32 v[42:43], v[158:159], v[46:47]
-		v_pk_add_f32 v[44:45], v[160:161], v[48:49]
-		v_pk_add_f32 v[46:47], v[162:163], v[50:51]
-		v_pk_add_f32 v[48:49], v[164:165], v[52:53]
-		v_pk_add_f32 v[50:51], v[166:167], v[54:55]
+		v_pk_add_f32 v[40:41], v[156:157], v[6:7]
+		v_pk_add_f32 v[42:43], v[158:159], v[44:45]
+		v_pk_add_f32 v[152:153], v[160:161], v[30:31]
+		v_pk_add_f32 v[154:155], v[162:163], v[46:47]
+		v_pk_add_f32 v[44:45], v[164:165], v[38:39]
+		v_pk_add_f32 v[46:47], v[166:167], v[48:49]
 		v_lshlrev_b32_e32 v0, 8, v9
 		v_lshlrev_b32_e32 v4, 3, v29
-		v_lshlrev_b32_e32 v8, 2, v5
-		v_lshlrev_b32_e32 v11, 7, v26
+		v_lshlrev_b32_e32 v6, 2, v5
+		v_lshlrev_b32_e32 v7, 7, v26
 		v_and_b32_e32 v1, 1, v1
-		v_mov_b32_e32 v12, 0x1020
-		v_mul_lo_u32 v12, v12, v1
-		v_mov_b32_e32 v17, 0x810
-		v_mul_lo_u32 v17, v17, v34
-		v_mov_b32_e32 v19, 0x204
-		v_mul_lo_u32 v19, v19, v37
-		v_mov_b32_e32 v20, 0x408
-		v_mul_lo_u32 v20, v20, v32
-		v_bitop3_b32 v17, v17, v19, v20 bitop3:0x96
+		v_mov_b32_e32 v8, 0x1020
+		v_mul_lo_u32 v8, v8, v1
+		v_mov_b32_e32 v11, 0x810
+		v_mul_lo_u32 v11, v11, v34
+		v_mov_b32_e32 v12, 0x204
+		v_mul_lo_u32 v12, v12, v37
+		v_mov_b32_e32 v17, 0x408
+		v_mul_lo_u32 v17, v17, v32
 		v_bitop3_b32 v11, v11, v12, v17 bitop3:0x96
-		v_bitop3_b32 v4, v4, v8, v11 bitop3:0x96
+		v_bitop3_b32 v7, v7, v8, v11 bitop3:0x96
+		v_bitop3_b32 v4, v4, v6, v7 bitop3:0x96
 		v_bitop3_b32 v0, v27, v0, v4 bitop3:0x96
 		v_lshlrev_b32_e32 v4, 2, v0
 		ds_write_b128 v4, v[176:179]
-		v_xor_b32_e32 v8, 16, v0
-		v_lshlrev_b32_e32 v8, 2, v8
-		ds_write_b128 v8, v[104:107]
-		v_xor_b32_e32 v11, 32, v0
-		v_lshlrev_b32_e32 v11, 2, v11
-		ds_write_b128 v11, v[108:111]
+		v_xor_b32_e32 v6, 16, v0
+		v_lshlrev_b32_e32 v6, 2, v6
+		ds_write_b128 v6, v[104:107]
+		v_xor_b32_e32 v7, 32, v0
+		v_lshlrev_b32_e32 v7, 2, v7
+		ds_write_b128 v7, v[108:111]
 		v_xor_b32_e32 v0, 48, v0
 		v_lshlrev_b32_e32 v0, 2, v0
 		ds_write_b128 v0, v[112:115]
-		v_mov_b32_e32 v12, 0x1020
-		v_mul_lo_u32 v12, v12, v10
+		v_mov_b32_e32 v8, 0x1020
+		v_mul_lo_u32 v8, v8, v10
 		v_mov_b32_e32 v10, 0x810
 		v_mul_lo_u32 v10, v10, v9
 		v_mov_b32_e32 v9, 0x408
 		v_mul_lo_u32 v9, v9, v29
-		v_mov_b32_e32 v17, 0x204
-		v_mul_lo_u32 v17, v17, v5
+		v_mov_b32_e32 v11, 0x204
+		v_mul_lo_u32 v11, v11, v5
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		v_lshlrev_b32_e32 v5, 5, v26
-		v_lshlrev_b32_e32 v19, 8, v34
-		v_lshl_add_u32 v19, v37, 2, v19
-		v_lshl_add_u32 v19, v32, 3, v19
+		v_lshlrev_b32_e32 v12, 8, v34
+		v_lshl_add_u32 v12, v37, 2, v12
+		v_lshl_add_u32 v12, v32, 3, v12
 		v_lshlrev_b32_e32 v1, 4, v1
-		v_bitop3_b32 v1, v5, v19, v1 bitop3:0x96
-		v_bitop3_b32 v1, v9, v17, v1 bitop3:0x96
-		v_bitop3_b32 v1, v12, v10, v1 bitop3:0x96
+		v_bitop3_b32 v1, v5, v12, v1 bitop3:0x96
+		v_bitop3_b32 v1, v9, v11, v1 bitop3:0x96
+		v_bitop3_b32 v1, v8, v10, v1 bitop3:0x96
 		v_lshlrev_b32_e32 v1, 2, v1
-		ds_read_b128 v[32:35], v1
-		ds_read_b128 v[52:55], v1 offset:512
-		ds_read_b128 v[104:107], v1 offset:256
-		ds_read_b128 v[108:111], v1 offset:768
+		ds_read_b128 v[8:11], v1
+		ds_read_b128 v[28:31], v1 offset:512
+		ds_read_b128 v[32:35], v1 offset:256
+		ds_read_b128 v[36:39], v1 offset:768
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_write_b128 v4, v[116:119]
-		ds_write_b128 v8, v[120:123]
-		ds_write_b128 v11, v[124:127]
+		ds_write_b128 v6, v[120:123]
+		ds_write_b128 v7, v[124:127]
 		ds_write_b128 v0, v[128:131]
-		v_pk_fma_f32 v[112:113], v[32:33], v[2:3], v[32:33]
-		v_pk_fma_f32 v[114:115], v[34:35], v[6:7], v[34:35]
-		v_pk_fma_f32 v[116:117], v[52:53], v[30:31], v[52:53]
-		v_pk_fma_f32 v[118:119], v[54:55], v[38:39], v[54:55]
+		v_pk_fma_f32 v[26:27], v[8:9], v[2:3], v[8:9]
+		v_pk_fma_f32 v[2:3], v[10:11], v[50:51], v[10:11]
+		v_pk_fma_f32 v[8:9], v[28:29], v[52:53], v[28:29]
+		v_pk_fma_f32 v[10:11], v[30:31], v[54:55], v[30:31]
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_read_b128 v[28:31], v1
-		ds_read_b128 v[32:35], v1 offset:512
-		ds_read_b128 v[36:39], v1 offset:256
-		ds_read_b128 v[52:55], v1 offset:768
-		v_pk_fma_f32 v[120:121], v[104:105], v[56:57], v[104:105]
-		v_pk_fma_f32 v[122:123], v[106:107], v[58:59], v[106:107]
-		v_pk_fma_f32 v[124:125], v[108:109], v[60:61], v[108:109]
-		v_pk_fma_f32 v[126:127], v[110:111], v[62:63], v[110:111]
+		ds_read_b128 v[48:51], v1 offset:512
+		ds_read_b128 v[52:55], v1 offset:256
+		ds_read_b128 v[104:107], v1 offset:768
+		v_pk_fma_f32 v[108:109], v[32:33], v[56:57], v[32:33]
+		v_pk_fma_f32 v[32:33], v[34:35], v[58:59], v[34:35]
+		v_pk_fma_f32 v[34:35], v[36:37], v[60:61], v[36:37]
+		v_pk_fma_f32 v[36:37], v[38:39], v[62:63], v[38:39]
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_write_b128 v4, v[132:135]
-		ds_write_b128 v8, v[136:139]
-		ds_write_b128 v11, v[140:143]
+		ds_write_b128 v6, v[136:139]
+		ds_write_b128 v7, v[140:143]
 		ds_write_b128 v0, v[144:147]
-		v_pk_fma_f32 v[56:57], v[28:29], v[64:65], v[28:29]
-		v_pk_fma_f32 v[58:59], v[30:31], v[66:67], v[30:31]
-		v_pk_fma_f32 v[60:61], v[32:33], v[68:69], v[32:33]
-		v_pk_fma_f32 v[62:63], v[34:35], v[70:71], v[34:35]
+		v_pk_fma_f32 v[38:39], v[28:29], v[64:65], v[28:29]
+		v_pk_fma_f32 v[28:29], v[30:31], v[66:67], v[30:31]
+		v_pk_fma_f32 v[30:31], v[48:49], v[68:69], v[48:49]
+		v_pk_fma_f32 v[48:49], v[50:51], v[70:71], v[50:51]
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[28:31], v1
-		ds_read_b128 v[32:35], v1 offset:512
+		ds_read_b128 v[56:59], v1
+		ds_read_b128 v[60:63], v1 offset:512
 		ds_read_b128 v[64:67], v1 offset:256
 		ds_read_b128 v[68:71], v1 offset:768
-		v_pk_fma_f32 v[104:105], v[36:37], v[72:73], v[36:37]
-		v_pk_fma_f32 v[106:107], v[38:39], v[74:75], v[38:39]
-		v_pk_fma_f32 v[108:109], v[52:53], v[76:77], v[52:53]
-		v_pk_fma_f32 v[110:111], v[54:55], v[78:79], v[54:55]
+		v_pk_fma_f32 v[50:51], v[52:53], v[72:73], v[52:53]
+		v_pk_fma_f32 v[52:53], v[54:55], v[74:75], v[54:55]
+		v_pk_fma_f32 v[54:55], v[104:105], v[76:77], v[104:105]
+		v_pk_fma_f32 v[72:73], v[106:107], v[78:79], v[106:107]
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		ds_write_b128 v4, v[148:151]
-		ds_write_b128 v8, v[40:43]
-		ds_write_b128 v11, v[44:47]
-		ds_write_b128 v0, v[48:51]
-		v_pk_fma_f32 v[40:41], v[28:29], v[80:81], v[28:29]
-		v_pk_fma_f32 v[42:43], v[30:31], v[82:83], v[30:31]
-		v_pk_fma_f32 v[44:45], v[32:33], v[84:85], v[32:33]
-		v_pk_fma_f32 v[46:47], v[34:35], v[86:87], v[34:35]
+		ds_write_b128 v6, v[40:43]
+		ds_write_b128 v7, v[152:155]
+		ds_write_b128 v0, v[44:47]
+		v_pk_fma_f32 v[4:5], v[56:57], v[80:81], v[56:57]
+		v_pk_fma_f32 v[6:7], v[58:59], v[82:83], v[58:59]
+		v_pk_fma_f32 v[40:41], v[60:61], v[84:85], v[60:61]
+		v_pk_fma_f32 v[42:43], v[62:63], v[86:87], v[62:63]
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		ds_read_b128 v[4:7], v1
-		ds_read_b128 v[8:11], v1 offset:512
-		ds_read_b128 v[28:31], v1 offset:256
-		ds_read_b128 v[32:35], v1 offset:768
-		v_pk_fma_f32 v[48:49], v[64:65], v[88:89], v[64:65]
-		v_pk_fma_f32 v[50:51], v[66:67], v[90:91], v[66:67]
-		v_pk_fma_f32 v[52:53], v[68:69], v[92:93], v[68:69]
-		v_pk_fma_f32 v[54:55], v[70:71], v[94:95], v[70:71]
+		ds_read_b128 v[44:47], v1
+		ds_read_b128 v[56:59], v1 offset:512
+		ds_read_b128 v[60:63], v1 offset:256
+		ds_read_b128 v[76:79], v1 offset:768
+		v_pk_fma_f32 v[0:1], v[64:65], v[88:89], v[64:65]
+		v_pk_fma_f32 v[64:65], v[66:67], v[90:91], v[66:67]
+		v_pk_fma_f32 v[66:67], v[68:69], v[92:93], v[68:69]
+		v_pk_fma_f32 v[68:69], v[70:71], v[94:95], v[70:71]
 		s_waitcnt lgkmcnt(3)
-		v_pk_fma_f32 v[64:65], v[4:5], v[96:97], v[4:5]
-		v_pk_fma_f32 v[66:67], v[6:7], v[98:99], v[6:7]
+		v_pk_fma_f32 v[70:71], v[44:45], v[96:97], v[44:45]
+		v_pk_fma_f32 v[44:45], v[46:47], v[98:99], v[46:47]
 		s_waitcnt lgkmcnt(2)
-		v_pk_fma_f32 v[68:69], v[8:9], v[100:101], v[8:9]
-		v_pk_fma_f32 v[70:71], v[10:11], v[102:103], v[10:11]
+		v_pk_fma_f32 v[46:47], v[56:57], v[100:101], v[56:57]
+		v_pk_fma_f32 v[56:57], v[58:59], v[102:103], v[58:59]
 		s_waitcnt lgkmcnt(1)
-		v_pk_fma_f32 v[0:1], v[28:29], v[168:169], v[28:29]
-		v_pk_fma_f32 v[2:3], v[30:31], v[170:171], v[30:31]
+		v_pk_fma_f32 v[58:59], v[60:61], v[168:169], v[60:61]
+		v_pk_fma_f32 v[60:61], v[62:63], v[170:171], v[62:63]
 		s_waitcnt lgkmcnt(0)
-		v_pk_fma_f32 v[4:5], v[32:33], v[172:173], v[32:33]
-		v_pk_fma_f32 v[6:7], v[34:35], v[174:175], v[34:35]
-		v_cvt_pk_f16_f32 v8, v112, v113
-		v_cvt_pk_f16_f32 v9, v114, v115
-		v_cvt_pk_f16_f32 v10, v116, v117
-		v_cvt_pk_f16_f32 v11, v118, v119
-		v_mul_lo_u32 v12, s19, v21
-		v_lshl_add_u32 v12, v12, 1, v18
+		v_pk_fma_f32 v[62:63], v[76:77], v[172:173], v[76:77]
+		v_pk_fma_f32 v[74:75], v[78:79], v[174:175], v[78:79]
+		v_cvt_pk_f16_f32 v76, v26, v27
+		v_cvt_pk_f16_f32 v77, v2, v3
+		v_cvt_pk_f16_f32 v78, v8, v9
+		v_cvt_pk_f16_f32 v79, v10, v11
+		v_mul_lo_u32 v2, s19, v21
+		v_lshl_add_u32 v2, v2, 1, v18
 		s_mov_b32 s0, s10
 		s_mov_b32 s1, s11
 		s_mov_b32 s2, s26
 		s_mov_b32 s3, s27
-		buffer_store_dwordx4 v[8:11], v12, s[0:3], 0 offen sc0 nt
-		s_nop 1
-		v_mul_lo_u32 v8, s19, v22
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v28, v120, v121
-		v_cvt_pk_f16_f32 v29, v122, v123
-		v_cvt_pk_f16_f32 v30, v124, v125
-		v_cvt_pk_f16_f32 v31, v126, v127
-		buffer_store_dwordx4 v[28:31], v8, s[0:3], 0 offen sc0 nt
-		v_mul_lo_u32 v8, s19, v23
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v20, v56, v57
-		v_cvt_pk_f16_f32 v21, v58, v59
-		v_cvt_pk_f16_f32 v22, v60, v61
-		v_cvt_pk_f16_f32 v23, v62, v63
-		buffer_store_dwordx4 v[20:23], v8, s[0:3], 0 offen sc0 nt
-		v_mul_lo_u32 v8, s19, v24
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v20, v104, v105
-		v_cvt_pk_f16_f32 v21, v106, v107
-		v_cvt_pk_f16_f32 v22, v108, v109
-		v_cvt_pk_f16_f32 v23, v110, v111
-		buffer_store_dwordx4 v[20:23], v8, s[0:3], 0 offen sc0 nt
-		v_mul_lo_u32 v8, s19, v13
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v20, v40, v41
-		v_cvt_pk_f16_f32 v21, v42, v43
-		v_cvt_pk_f16_f32 v22, v44, v45
-		v_cvt_pk_f16_f32 v23, v46, v47
-		buffer_store_dwordx4 v[20:23], v8, s[0:3], 0 offen sc0 nt
-		v_mul_lo_u32 v8, s19, v14
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v20, v48, v49
-		v_cvt_pk_f16_f32 v21, v50, v51
-		v_cvt_pk_f16_f32 v22, v52, v53
-		v_cvt_pk_f16_f32 v23, v54, v55
-		buffer_store_dwordx4 v[20:23], v8, s[0:3], 0 offen sc0 nt
-		v_mul_lo_u32 v8, s19, v15
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v12, v64, v65
-		v_cvt_pk_f16_f32 v13, v66, v67
-		v_cvt_pk_f16_f32 v14, v68, v69
-		v_cvt_pk_f16_f32 v15, v70, v71
-		buffer_store_dwordx4 v[12:15], v8, s[0:3], 0 offen sc0 nt
-		v_mul_lo_u32 v8, s19, v16
-		v_lshl_add_u32 v8, v8, 1, v18
-		v_cvt_pk_f16_f32 v12, v0, v1
-		v_cvt_pk_f16_f32 v13, v2, v3
-		v_cvt_pk_f16_f32 v14, v4, v5
-		v_cvt_pk_f16_f32 v15, v6, v7
-		buffer_store_dwordx4 v[12:15], v8, s[0:3], 0 offen sc0 nt
+		buffer_store_dwordx4 v[76:79], v2, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v2, s19, v22
+		v_lshl_add_u32 v2, v2, 1, v18
+		v_cvt_pk_f16_f32 v8, v108, v109
+		v_cvt_pk_f16_f32 v9, v32, v33
+		v_cvt_pk_f16_f32 v10, v34, v35
+		v_cvt_pk_f16_f32 v11, v36, v37
+		buffer_store_dwordx4 v[8:11], v2, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v2, s19, v23
+		v_lshl_add_u32 v2, v2, 1, v18
+		v_cvt_pk_f16_f32 v8, v38, v39
+		v_cvt_pk_f16_f32 v9, v28, v29
+		v_cvt_pk_f16_f32 v10, v30, v31
+		v_cvt_pk_f16_f32 v11, v48, v49
+		buffer_store_dwordx4 v[8:11], v2, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v2, s19, v24
+		v_lshl_add_u32 v2, v2, 1, v18
+		v_cvt_pk_f16_f32 v8, v50, v51
+		v_cvt_pk_f16_f32 v9, v52, v53
+		v_cvt_pk_f16_f32 v10, v54, v55
+		v_cvt_pk_f16_f32 v11, v72, v73
+		buffer_store_dwordx4 v[8:11], v2, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v2, s19, v13
+		v_lshl_add_u32 v2, v2, 1, v18
+		v_cvt_pk_f16_f32 v8, v4, v5
+		v_cvt_pk_f16_f32 v9, v6, v7
+		v_cvt_pk_f16_f32 v10, v40, v41
+		v_cvt_pk_f16_f32 v11, v42, v43
+		buffer_store_dwordx4 v[8:11], v2, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v2, s19, v14
+		v_lshl_add_u32 v2, v2, 1, v18
+		v_cvt_pk_f16_f32 v4, v0, v1
+		v_cvt_pk_f16_f32 v5, v64, v65
+		v_cvt_pk_f16_f32 v6, v66, v67
+		v_cvt_pk_f16_f32 v7, v68, v69
+		buffer_store_dwordx4 v[4:7], v2, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v0, s19, v15
+		v_lshl_add_u32 v0, v0, 1, v18
+		v_cvt_pk_f16_f32 v4, v70, v71
+		v_cvt_pk_f16_f32 v5, v44, v45
+		v_cvt_pk_f16_f32 v6, v46, v47
+		v_cvt_pk_f16_f32 v7, v56, v57
+		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen sc0 nt
+		v_mul_lo_u32 v0, s19, v16
+		v_lshl_add_u32 v0, v0, 1, v18
+		v_cvt_pk_f16_f32 v4, v58, v59
+		v_cvt_pk_f16_f32 v5, v60, v61
+		v_cvt_pk_f16_f32 v6, v62, v63
+		v_cvt_pk_f16_f32 v7, v74, v75
+		buffer_store_dwordx4 v[4:7], v0, s[0:3], 0 offen sc0 nt
 		s_endpgm
 	.size	tlx_addmm_glu_kernel_optimized, .-tlx_addmm_glu_kernel_optimized
 	.section	.rodata,"a",@progbits

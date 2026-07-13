@@ -690,12 +690,36 @@ LogicalResult TupleToElementsOp::verify() {
                              getElements());
 }
 
+static bool canFoldTupleJoinSplit(TupleFromElementsOp joined,
+                                  ValueRange splitElements) {
+  if (joined.getElements().size() != splitElements.size())
+    return false;
+  RegType tupleType = cast<RegType>(joined.getTuple().getType());
+  int64_t offset = 0;
+  for (auto [source, result] :
+       llvm::zip_equal(joined.getElements(), splitElements)) {
+    if (source.getType() != result.getType())
+      return false;
+    RegType sourceType = cast<RegType>(source.getType());
+    if (tupleType.getIndex() >= 0 &&
+        sourceType.getIndex() != tupleType.getIndex() + offset)
+      return false;
+    offset += sourceType.getWidth();
+  }
+  return true;
+}
+
 LogicalResult TupleToElementsOp::fold(FoldAdaptor,
                                       SmallVectorImpl<OpFoldResult> &results) {
-  if (getElements().size() != 1 ||
-      getElements().front().getType() != getTuple().getType())
+  if (getElements().size() == 1 &&
+      getElements().front().getType() == getTuple().getType()) {
+    results.push_back(getTuple());
+    return success();
+  }
+  TupleFromElementsOp joined = getTuple().getDefiningOp<TupleFromElementsOp>();
+  if (!joined || !canFoldTupleJoinSplit(joined, getElements()))
     return failure();
-  results.push_back(getTuple());
+  llvm::append_range(results, joined.getElements());
   return success();
 }
 
