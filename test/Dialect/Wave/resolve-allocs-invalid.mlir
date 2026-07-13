@@ -114,3 +114,86 @@ func.func @overlapping_fixed_allocations()
       -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
   return
 }
+
+// -----
+
+func.func @loop_release_ignores_body_access(%n: index)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %alloc, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %done = scf.for %i = %c0 to %n step %c1
+      iter_args(%ready = %initial) -> (!wave.mem.token) {
+    %stored = wave.store %lane -> %ptr after %ready
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    scf.yield %ready : !wave.mem.token
+  }
+  // expected-error @+1 {{dependency does not cover every allocation access token}}
+  %released = wave.alloc_release %alloc after %done
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @conditional_release_ignores_arm_access(%condition: i1)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %alloc, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %done = scf.if %condition -> (!wave.mem.token) {
+    %stored = wave.store %lane -> %ptr after %initial
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    scf.yield %initial : !wave.mem.token
+  } else {
+    scf.yield %initial : !wave.mem.token
+  }
+  // expected-error @+1 {{dependency does not cover every allocation access token}}
+  %released = wave.alloc_release %alloc after %done
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @execute_region_release_drops_access(%condition: i1)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %alloc, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %done = scf.execute_region -> !wave.mem.token {
+  ^bb0:
+    %stored = wave.store %lane -> %ptr after %initial
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    cf.cond_br %condition, ^bb1, ^bb2
+  ^bb1:
+    %safe = wave.barrier %stored : (!wave.mem.token) -> !wave.mem.token
+    scf.yield %safe : !wave.mem.token
+  ^bb2:
+    scf.yield %initial : !wave.mem.token
+  }
+  // expected-error @+1 {{dependency does not cover every allocation access token}}
+  %released = wave.alloc_release %alloc after %done
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}

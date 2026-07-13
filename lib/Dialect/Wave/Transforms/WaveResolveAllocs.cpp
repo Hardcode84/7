@@ -61,7 +61,12 @@ struct PlacedAllocation {
   unsigned index = 0;
 };
 
-using TokenOriginMap = DenseMap<Value, SmallVector<Value, 2>>;
+struct TokenOrigin {
+  Value source;
+  Region *predecessorRegion = nullptr;
+};
+
+using TokenOriginMap = DenseMap<Value, SmallVector<TokenOrigin, 2>>;
 using MemoryEffectInstance = SideEffects::EffectInstance<MemoryEffects::Effect>;
 
 static FailureOr<int64_t> alignUp(int64_t value, int64_t align) {
@@ -171,7 +176,7 @@ appendForwardedAliases(Operation *user, Value value, unsigned index,
 }
 
 static void appendTokenOrigins(TokenOriginMap &origins, OperandRange sources,
-                               ValueRange targets) {
+                               ValueRange targets, Region *predecessorRegion) {
   for (auto [index, source] : llvm::enumerate(sources)) {
     if (index >= targets.size())
       break;
@@ -179,9 +184,12 @@ static void appendTokenOrigins(TokenOriginMap &origins, OperandRange sources,
     if (!isa<MemTokenType>(source.getType()) ||
         source.getType() != target.getType())
       continue;
-    SmallVector<Value, 2> &targetOrigins = origins[target];
-    if (!llvm::is_contained(targetOrigins, source))
-      targetOrigins.push_back(source);
+    SmallVector<TokenOrigin, 2> &targetOrigins = origins[target];
+    if (llvm::none_of(targetOrigins, [&](const TokenOrigin &origin) {
+          return origin.source == source &&
+                 origin.predecessorRegion == predecessorRegion;
+        }))
+      targetOrigins.push_back({source, predecessorRegion});
   }
 }
 
@@ -192,7 +200,8 @@ static TokenOriginMap buildTokenOrigins(func::FuncOp func) {
     branch.getSuccessorRegions(RegionBranchPoint::parent(), successors);
     for (RegionSuccessor successor : successors)
       appendTokenOrigins(origins, branch.getEntrySuccessorOperands(successor),
-                         branch.getSuccessorInputs(successor));
+                         branch.getSuccessorInputs(successor),
+                         /*predecessorRegion=*/nullptr);
 
     for (Region &region : branch->getRegions()) {
       for (Block &block : region) {
@@ -205,7 +214,7 @@ static TokenOriginMap buildTokenOrigins(func::FuncOp func) {
         for (RegionSuccessor successor : successors)
           appendTokenOrigins(origins,
                              terminator.getSuccessorOperands(successor),
-                             branch.getSuccessorInputs(successor));
+                             branch.getSuccessorInputs(successor), &region);
       }
     }
   });
@@ -222,17 +231,89 @@ struct ActiveProof {
   DenseSet<Value> barrier;
 };
 
+struct TokenProofDependency {
+  Region *predecessorRegion = nullptr;
+  unsigned index = 0;
+};
+
 struct TokenProofNode {
-  SmallVector<unsigned, 2> dependencies;
+  SmallVector<TokenProofDependency, 2> dependencies;
   bool allDependencies = false;
   bool barrier = false;
 };
+
+static Region *getValueParentRegion(Value value) {
+  if (BlockArgument argument = dyn_cast<BlockArgument>(value))
+    return argument.getOwner()->getParent();
+  Operation *def = value.getDefiningOp();
+  return def ? def->getParentRegion() : nullptr;
+}
+
+static Operation *getOriginBranch(Value value) {
+  if (Operation *def = value.getDefiningOp())
+    if (isa<RegionBranchOpInterface>(def))
+      return def;
+  // Entry plus backedge prevents self-yield from proving completion.
+  return nullptr;
+}
+
+static Region *getEnclosingBranchRegion(Operation *branch, Value value) {
+  for (Region *region = getValueParentRegion(value); region;) {
+    Operation *parent = region->getParentOp();
+    if (parent == branch)
+      return region;
+    region = parent ? parent->getParentRegion() : nullptr;
+  }
+  return nullptr;
+}
+
+static bool regionMayReach(Operation *branchOp, Region *source,
+                           Region *target) {
+  RegionBranchOpInterface branch = cast<RegionBranchOpInterface>(branchOp);
+  SmallVector<Region *, 4> worklist{source};
+  SmallPtrSet<Region *, 4> visited;
+  SmallVector<RegionSuccessor> successors;
+  while (!worklist.empty()) {
+    Region *region = worklist.pop_back_val();
+    if (!visited.insert(region).second)
+      continue;
+    if (region == target)
+      return true;
+    for (Block &block : *region) {
+      RegionBranchTerminatorOpInterface terminator =
+          dyn_cast<RegionBranchTerminatorOpInterface>(block.getTerminator());
+      if (!terminator)
+        continue;
+      successors.clear();
+      branch.getSuccessorRegions(RegionBranchPoint(terminator), successors);
+      for (RegionSuccessor successor : successors)
+        if (!successor.isOperation())
+          worklist.push_back(successor.getSuccessor());
+    }
+  }
+  return false;
+}
+
+static bool originParticipatesForTarget(Value merged, Region *predecessorRegion,
+                                        Value target) {
+  Operation *branch = getOriginBranch(merged);
+  if (!branch)
+    return true;
+  Region *targetRegion = getEnclosingBranchRegion(branch, target);
+  if (!targetRegion)
+    return true;
+  // Parent-origin edges precede every nested target.
+  if (!predecessorRegion)
+    return false;
+  return regionMayReach(branch, targetRegion, predecessorRegion);
+}
 
 class BatchedTokenProof {
 public:
   BatchedTokenProof(const TokenOriginMap &origins, ArrayRef<Value> tokens,
                     ArrayRef<Value> targets)
       : origins(origins), width(targets.size()) {
+    targetValues.append(targets.begin(), targets.end());
     for (Value token : tokens)
       roots.push_back(addNode(token));
     for (auto [index, target] : llvm::enumerate(targets))
@@ -268,8 +349,9 @@ private:
     auto origin = origins.find(value);
     if (origin != origins.end()) {
       node.allDependencies = true;
-      for (Value source : origin->second)
-        node.dependencies.push_back(addNode(source));
+      for (const TokenOrigin &tokenOrigin : origin->second)
+        node.dependencies.push_back(
+            {tokenOrigin.predecessorRegion, addNode(tokenOrigin.source)});
       return node;
     }
     Operation *def = value.getDefiningOp();
@@ -278,7 +360,7 @@ private:
     node.barrier = isa<BarrierOp>(def);
     for (Value operand : def->getOperands())
       if (isa<MemTokenType>(operand.getType()))
-        node.dependencies.push_back(addNode(operand));
+        node.dependencies.push_back({nullptr, addNode(operand)});
     return node;
   }
 
@@ -292,31 +374,42 @@ private:
   void buildUsers() {
     users.resize(nodes.size());
     for (auto [index, node] : llvm::enumerate(nodes))
-      for (unsigned dependency : node.dependencies)
-        users[dependency].push_back(index);
+      for (TokenProofDependency dependency : node.dependencies)
+        users[dependency.index].push_back(index);
   }
 
-  BitVector combine(const TokenProofNode &node,
+  BitVector combine(unsigned index, const TokenProofNode &node,
                     ArrayRef<BitVector> states) const {
-    BitVector result(width, node.allDependencies);
-    if (node.dependencies.empty())
-      result.reset();
-    for (unsigned dependency : node.dependencies) {
-      if (node.allDependencies)
-        result &= states[dependency];
-      else
-        result |= states[dependency];
+    BitVector result(width);
+    if (!node.allDependencies) {
+      for (TokenProofDependency dependency : node.dependencies)
+        result |= states[dependency.index];
+      return result;
+    }
+    for (unsigned targetIndex : llvm::seq<unsigned>(0, width)) {
+      bool hasRelevantOrigin = false;
+      bool covered = true;
+      for (TokenProofDependency dependency : node.dependencies) {
+        if (!originParticipatesForTarget(values[index],
+                                         dependency.predecessorRegion,
+                                         targetValues[targetIndex]))
+          continue;
+        hasRelevantOrigin = true;
+        covered &= states[dependency.index].test(targetIndex);
+      }
+      if (hasRelevantOrigin && covered)
+        result.set(targetIndex);
     }
     return result;
   }
 
   bool update(unsigned index) {
     const TokenProofNode &node = nodes[index];
-    BitVector nextPlain = combine(node, plain);
+    BitVector nextPlain = combine(index, node, plain);
     for (unsigned target : targetIndices.lookup(values[index]))
       nextPlain.set(target);
-    BitVector nextBarrier =
-        node.barrier ? combine(node, plain) : combine(node, throughBarrier);
+    BitVector nextBarrier = node.barrier ? combine(index, node, plain)
+                                         : combine(index, node, throughBarrier);
     if (nextPlain == plain[index] && nextBarrier == throughBarrier[index])
       return false;
     plain[index] = std::move(nextPlain);
@@ -350,6 +443,7 @@ private:
   SmallVector<BitVector> plain;
   SmallVector<unsigned, 2> roots;
   SmallVector<unsigned> pending;
+  SmallVector<Value> targetValues;
   SmallVector<Value> values;
   const TokenOriginMap &origins;
   unsigned width = 0;
@@ -386,19 +480,27 @@ public:
   const TokenOriginMap &getOrigins() const { return origins; }
 
 private:
-  DependencyProof proveAllOrigins(ArrayRef<Value> sources, Value target,
-                                  bool requireBarrier, ActiveProof &active) {
-    if (sources.empty())
+  DependencyProof proveAllOrigins(Value merged,
+                                  ArrayRef<TokenOrigin> tokenOrigins,
+                                  Value target, bool requireBarrier,
+                                  ActiveProof &active) {
+    if (tokenOrigins.empty())
       return {};
     DependencyProof result{true, false};
-    for (Value source : sources) {
-      DependencyProof proof = prove(source, target, requireBarrier, active);
+    bool hasRelevantOrigin = false;
+    for (const TokenOrigin &origin : tokenOrigins) {
+      if (!originParticipatesForTarget(merged, origin.predecessorRegion,
+                                       target))
+        continue;
+      hasRelevantOrigin = true;
+      DependencyProof proof =
+          prove(origin.source, target, requireBarrier, active);
       if (!proof.depends && !proof.cyclic)
         return {};
       result.depends &= proof.depends;
       result.cyclic |= proof.cyclic;
     }
-    return result;
+    return hasRelevantOrigin ? result : DependencyProof{};
   }
 
   DependencyProof proveAnyOperand(Operation *op, Value target,
@@ -435,11 +537,13 @@ private:
     if (!activeSet.insert(token).second)
       return {true, true};
 
-    // Region merge: every path. Op result: any dependency operand.
+    // Region merge: every path on which the target executes. Op result: any
+    // dependency operand.
     DependencyProof result;
     auto origin = origins.find(token);
     if (origin != origins.end())
-      result = proveAllOrigins(origin->second, target, requireBarrier, active);
+      result = proveAllOrigins(token, origin->second, target, requireBarrier,
+                               active);
     else if (Operation *def = token.getDefiningOp())
       result = proveAnyOperand(def, target, requireBarrier, active);
 
@@ -641,9 +745,9 @@ static void collectLoopCarriedTokenIndicesImpl(
     return;
   auto origin = origins.find(token);
   if (origin != origins.end()) {
-    for (Value source : origin->second)
-      collectLoopCarriedTokenIndicesImpl(source, loop, origins, indices,
-                                         visited);
+    for (const TokenOrigin &tokenOrigin : origin->second)
+      collectLoopCarriedTokenIndicesImpl(tokenOrigin.source, loop, origins,
+                                         indices, visited);
     return;
   }
   Operation *def = token.getDefiningOp();

@@ -489,3 +489,80 @@ func.func @fixed_allocation_offset()
       : !wave.ptr<#wave.shared, i8>
   return
 }
+
+// -----
+
+// Zero-trip path has no allocation access to cover.
+// CHECK-LABEL: func.func @release_after_maybe_zero_trip_loop
+// CHECK-SAME: wave.lds_size = 16 : i64
+func.func @release_after_maybe_zero_trip_loop(%n: index)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %done = scf.for %i = %c0 to %n step %c1
+      iter_args(%ready = %initial) -> (!wave.mem.token) {
+    %stored = wave.store %lane -> %ap after %ready
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    scf.yield %stored : !wave.mem.token
+  }
+  %released = wave.alloc_release %a after %done
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %safe = wave.barrier %released : (!wave.mem.token) -> !wave.mem.token
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored = wave.store %lane -> %bp after %safe
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Untaken arm has no allocation access to cover.
+// CHECK-LABEL: func.func @release_after_conditional_access
+// CHECK-SAME: wave.lds_size = 16 : i64
+func.func @release_after_conditional_access(%condition: i1)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %done = scf.if %condition -> (!wave.mem.token) {
+    %stored = wave.store %lane -> %ap after %initial
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    scf.yield %stored : !wave.mem.token
+  } else {
+    scf.yield %initial : !wave.mem.token
+  }
+  %released = wave.alloc_release %a after %done
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %safe = wave.barrier %released : (!wave.mem.token) -> !wave.mem.token
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored = wave.store %lane -> %bp after %safe
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
