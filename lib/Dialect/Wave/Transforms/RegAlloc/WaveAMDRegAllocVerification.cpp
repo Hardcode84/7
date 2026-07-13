@@ -521,11 +521,17 @@ static void collectReservedRanges(
     SmallVectorImpl<ReservedLiveRange> &ranges) {
   if (regClass == "SGPR")
     collectImplicitReservedSGPRRanges(orderedOps, positions, regs, ranges);
+  DenseMap<Operation *, unsigned> endCache;
   for (const PhysicalLiveRange &range : liveRanges) {
     if (!isAllowedReservedValue(range.value, regs))
       continue;
+    unsigned end = range.end;
+    if (isFixedHardwareRead(range.value))
+      end = std::max(end, getImplicitABIUseEnd(
+                              range.value.getDefiningOp(), positions,
+                              endCache));
     noteReservedSpan(ranges, range.physStart, range.physEnd - range.physStart,
-                     range.end, reserved);
+                     end, reserved);
   }
 }
 
@@ -547,6 +553,8 @@ hasDestructiveReservedBoundary(const PhysicalLiveRange &range,
     if (!isAllowedReservedValue(source.value, regs))
       return false;
     if (!overlapsReservedRange(source, reservedRange))
+      return false;
+    if (source.end != reservedRange.end)
       return false;
     return isDestructiveOperandBoundary(source, range, positions);
   });

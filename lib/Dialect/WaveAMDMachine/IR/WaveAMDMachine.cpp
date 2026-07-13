@@ -317,6 +317,16 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult VPermlane32SwapB32TupleOp::verify() {
+  RegType sourceType = cast<RegType>(getSource().getType());
+  RegType resultType = cast<RegType>(getResult().getType());
+  if (sourceType.getWidth() != resultType.getWidth())
+    return emitOpError("source and result widths must match");
+  if (sourceType.getWidth() < 2 || sourceType.getWidth() % 2 != 0)
+    return emitOpError("source and result widths must be positive even tuples");
+  return success();
+}
+
 static LogicalResult verifyAllocatedPairAlignment(Operation *op, RegType type,
                                                   StringRef name) {
   if (type.getIndex() >= 0 && type.getIndex() % 2 != 0)
@@ -683,8 +693,17 @@ LogicalResult TupleToElementsOp::verify() {
 LogicalResult TupleToElementsOp::fold(FoldAdaptor,
                                       SmallVectorImpl<OpFoldResult> &results) {
   if (getElements().size() != 1 ||
-      getElements().front().getType() != getTuple().getType())
-    return failure();
+      getElements().front().getType() != getTuple().getType()) {
+    auto joined = getTuple().getDefiningOp<TupleFromElementsOp>();
+    if (!joined || joined.getElements().size() != getElements().size())
+      return failure();
+    for (auto [source, result] :
+         llvm::zip_equal(joined.getElements(), getElements()))
+      if (source.getType() != result.getType())
+        return failure();
+    llvm::append_range(results, joined.getElements());
+    return success();
+  }
   results.push_back(getTuple());
   return success();
 }

@@ -139,7 +139,8 @@ def WaveLowerRedistribute : Pass<"wave-lower-redistribute"> {
   let dependentDialects = [
     "arith::ArithDialect",
     "func::FuncDialect",
-    "wave::WaveDialect"
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
   ];
 }
 

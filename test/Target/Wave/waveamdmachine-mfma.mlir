@@ -89,6 +89,42 @@ func.func @mfma_gfx950_f16_32x32x16_kernel(
   return
 }
 
+// A zero accumulator remains an MMA immediate when ordinary SIMD payloads are
+// packed at the MMA boundary.  In particular, do not materialize the repeated
+// scalar source as a wide register tuple.
+// SELECT-LABEL: func.func @mfma_gfx950_packed_zero_acc_kernel
+// SELECT-NOT: waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.mfma_f32_32x32x16_f16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 16>
+func.func @mfma_gfx950_packed_zero_acc_kernel() attributes {wave.kernel} {
+  %zero_bits = arith.constant 0 : i32
+  %zero = wave.constant 0.000000e+00 : f32 -> !wave.simd<f32, 64>
+  %acc_regs = wave.pack %zero, %zero, %zero, %zero,
+      %zero, %zero, %zero, %zero, %zero, %zero, %zero, %zero,
+      %zero, %zero, %zero, %zero
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>
+      -> !wave.simd<vector<16xf32>, 64>
+  %a = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<0, f16, 32, 32, 64, 4>
+  %b = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<1, f16, 32, 32, 64, 4>
+  %acc = waveamd.fragment_pack %acc_regs
+      : !wave.simd<vector<16xf32>, 64>
+      -> !waveamd.fragment<2, f32, 32, 32, 64, 16>
+  %result = waveamd.mma "mfma.f32.32x32x16.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 32, 32, 64, 4>,
+        !waveamd.fragment<1, f16, 32, 32, 64, 4>,
+        !waveamd.fragment<2, f32, 32, 32, 64, 16>
+     -> !waveamd.fragment<2, f32, 32, 32, 64, 16>
+  return
+}
+
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_kernel
 // SELECT: waveamdmachine.mfma_scale_f32_16x16x128_f4_f4{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
 

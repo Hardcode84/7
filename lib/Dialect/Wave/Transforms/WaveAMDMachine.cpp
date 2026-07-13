@@ -300,16 +300,55 @@ static Value createMachineMma(MmaKind kind, OpBuilder &builder, Location loc,
   return info->create(builder, loc, resultType, a, b, acc);
 }
 
-static Value foldZeroMmaAccumulator(Value selectedAcc,
-                                    SmallVectorImpl<Operation *> &foldedFills) {
-  auto fill = selectedAcc.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-  if (!fill)
+static Value matchZeroMmaAccumulatorMaterialization(
+    Value value, SmallVectorImpl<Operation *> &materializations) {
+  if (auto imm = value.getDefiningOp<waveamdmachine::ImmOp>())
+    return imm.getValue() == 0 ? value : Value{};
+
+  auto matchCopy = [&](Operation *op, Value source) -> Value {
+    SmallVector<Operation *> nested;
+    Value zero =
+        matchZeroMmaAccumulatorMaterialization(source, nested);
+    if (!zero)
+      return {};
+    llvm::append_range(materializations, nested);
+    materializations.push_back(op);
+    return zero;
+  };
+  if (auto mov = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>())
+    return matchCopy(mov, mov.getSource());
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB32TupleOp>())
+    return matchCopy(mov, mov.getSource());
+  if (auto mov = value.getDefiningOp<waveamdmachine::SMovB32ValueOp>())
+    return matchCopy(mov, mov.getSource());
+
+  auto tuple = value.getDefiningOp<waveamdmachine::TupleFromElementsOp>();
+  if (!tuple || tuple.getElements().empty())
+    return {};
+  SmallVector<Operation *> nested;
+  Value zero;
+  for (Value element : tuple.getElements()) {
+    Value elementZero =
+        matchZeroMmaAccumulatorMaterialization(element, nested);
+    if (!elementZero)
+      return {};
+    if (!zero)
+      zero = elementZero;
+  }
+  llvm::append_range(materializations, nested);
+  materializations.push_back(tuple);
+  return zero;
+}
+
+static Value foldZeroMmaAccumulator(
+    Value selectedAcc, SmallVectorImpl<Operation *> &foldedMaterializations) {
+  SmallVector<Operation *> materializations;
+  Value zero = matchZeroMmaAccumulatorMaterialization(selectedAcc,
+                                                      materializations);
+  if (!zero)
     return selectedAcc;
-  auto imm = fill.getSource().getDefiningOp<waveamdmachine::ImmOp>();
-  if (!imm || imm.getValue() != 0)
-    return selectedAcc;
-  foldedFills.push_back(fill);
-  return fill.getSource();
+  llvm::append_range(foldedMaterializations, materializations);
+  return zero;
 }
 
 static LogicalResult noteWaveWidth(Operation *diagOp,
@@ -435,16 +474,14 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   return success();
 }
 
-static void eraseDeadFoldedMmaAccumulatorFills(ArrayRef<Operation *> fills) {
+static void eraseDeadFoldedMmaAccumulatorMaterializations(
+    ArrayRef<Operation *> materializations) {
   SmallPtrSet<Operation *, 8> seen;
-  SmallVector<Operation *> deadOps;
-  for (Operation *fill : fills) {
-    if (!seen.insert(fill).second || !fill->use_empty())
+  for (Operation *op : llvm::reverse(materializations)) {
+    if (!seen.insert(op).second || !op->use_empty())
       continue;
-    deadOps.push_back(fill);
-  }
-  for (Operation *op : llvm::reverse(deadOps))
     op->erase();
+  }
 }
 
 LogicalResult WaveAMDMachineSelector::run() {
@@ -468,7 +505,8 @@ LogicalResult WaveAMDMachineSelector::run() {
   for (Operation *op : llvm::reverse(opsToErase))
     op->erase();
 
-  eraseDeadFoldedMmaAccumulatorFills(foldedMmaAccumulatorFills);
+  eraseDeadFoldedMmaAccumulatorMaterializations(
+      foldedMmaAccumulatorMaterializations);
 
   auto oldType = func.getFunctionType();
   func.setType(
@@ -2668,6 +2706,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
       .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
+      .Case<waveamd::Permlane32SwapOp>(
+          [&](auto o) { return selectPermlane32Swap(o); })
       .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
@@ -6118,6 +6158,48 @@ LogicalResult WaveAMDMachineSelector::selectShuffle(ShuffleOp op) {
   return success();
 }
 
+LogicalResult WaveAMDMachineSelector::selectPermlane32Swap(
+    waveamd::Permlane32SwapOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "permlane32 swap lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa))
+    return op.emitError("waveamd.permlane32_swap requires gfx950");
+
+  FailureOr<unsigned> words = getRegisterPayloadWidth(
+      op.getA().getType(), [&]() { return op.emitError(); });
+  if (failed(words))
+    return failure();
+  FailureOr<SmallVector<Value>> aWords = splitVGPRMaterializedWords(
+      *this, op.getOperation(), expect(op.getA(), op), *words,
+      "permlane32 first source");
+  FailureOr<SmallVector<Value>> bWords = splitVGPRMaterializedWords(
+      *this, op.getOperation(), expect(op.getB(), op), *words,
+      "permlane32 second source");
+  if (failed(aWords) || failed(bWords))
+    return failure();
+
+  Value a = joinVGPRWords(*this, op.getLoc(), *aWords);
+  Value b = joinVGPRWords(*this, op.getLoc(), *bWords);
+  Type halfType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
+                             *words);
+  Type combinedType = getRegType(op.getContext(),
+                                 waveamdmachine::RegClass::VGPR, *words * 2);
+  Value combined = waveamdmachine::TupleFromElementsOp::create(
+                       builder, op.getLoc(), combinedType, ValueRange{a, b})
+                       .getTuple();
+  auto swapped = waveamdmachine::VPermlane32SwapB32TupleOp::create(
+      builder, op.getLoc(), combinedType, combined);
+  SmallVector<Type, 2> resultTypes{halfType, halfType};
+  auto split = waveamdmachine::TupleToElementsOp::create(
+      builder, op.getLoc(), resultTypes, swapped.getResult());
+  values[op.getLower()] = split.getElements()[0];
+  values[op.getUpper()] = split.getElements()[1];
+  eraseIfTopLevel(op);
+  return success();
+}
+
 unsigned WaveAMDMachineSelector::elementSizeBytes(Type type) {
   if (auto ptr = dyn_cast<PtrType>(type)) {
     if (!ptr.getElementType())
@@ -6895,7 +6977,7 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
   Value a = expect(op.getA(), op);
   Value b = expect(op.getB(), op);
   Value acc = foldZeroMmaAccumulator(expect(op.getAcc(), op),
-                                     foldedMmaAccumulatorFills);
+                                     foldedMmaAccumulatorMaterializations);
   Value result =
       createMachineMma(mmaKind, builder, op.getLoc(), vgprTuple, a, b, acc);
   if (!result)

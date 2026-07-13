@@ -65,4 +65,27 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return %rebuilt : !waveamdmachine.reg<vgpr, 8>
   }
 
+  // Splitting a tuple assembled from the exact same element shape is also an
+  // SSA-only round trip. Folding it keeps independent payload chunks out of a
+  // single wide alias set before register allocation.
+  // CANON-LABEL: func.func @fold_join_then_split
+  // CANON-SAME: %[[A:.*]]: !waveamdmachine.reg<vgpr, 2>
+  // CANON-SAME: %[[B:.*]]: !waveamdmachine.reg<vgpr, 4>
+  // CANON-NOT: waveamdmachine.tuple_from_elements
+  // CANON-NOT: waveamdmachine.tuple_to_elements
+  // CANON: return %[[A]], %[[B]]
+  func.func @fold_join_then_split(
+      %a: !waveamdmachine.reg<vgpr, 2>,
+      %b: !waveamdmachine.reg<vgpr, 4>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>) {
+    %tuple = waveamdmachine.tuple_from_elements %a, %b
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>)
+          -> !waveamdmachine.reg<vgpr, 6>
+    %split:2 = waveamdmachine.tuple_to_elements %tuple
+        : (!waveamdmachine.reg<vgpr, 6>)
+          -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>)
+    return %split#0, %split#1
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>
+  }
+
 }

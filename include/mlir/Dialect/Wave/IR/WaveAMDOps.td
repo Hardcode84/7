@@ -34,6 +34,26 @@ def WaveAMD_MakeBufferOp : WaveAMD_Op<"make_buffer", [Pure]> {
   let hasVerifier = 1;
 }
 
+def WaveAMD_Permlane32SwapOp : WaveAMD_Op<"permlane32_swap", [Pure]> {
+  let summary = "exchange the upper and lower half-wave payloads of two SIMD values";
+  let description = [{
+    Applies the gfx950 `v_permlane32_swap_b32` mapping independently to every
+    dword in two equally typed wave64 SIMD payloads.  If the inputs are `a` and
+    `b`, the two results are:
+
+    * result 0: lanes 0..31 from `a`, lanes 32..63 from `b` lanes 0..31;
+    * result 1: lanes 0..31 from `a` lanes 32..63, lanes 32..63 from `b`.
+
+    The operation is target-specific but payload-generic.  Its verifier only
+    admits wave64 SIMD values with an integral number of dwords; target
+    availability is checked during WaveAMDMachine selection.
+  }];
+  let arguments = (ins Wave_Simd:$a, Wave_Simd:$b);
+  let results = (outs Wave_Simd:$lower, Wave_Simd:$upper);
+  let assemblyFormat = "$a `,` $b attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def WaveAMD_FragmentFillOp : WaveAMD_Op<"fragment_fill", [Pure]> {
   let summary = "fill an AMD matrix fragment with a scalar bit pattern";
   let arguments = (ins AnySignlessInteger:$source);

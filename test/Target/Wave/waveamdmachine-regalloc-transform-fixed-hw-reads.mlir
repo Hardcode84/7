@@ -37,5 +37,44 @@ module attributes {transform.with_named_sequence} {
           -> !waveamdmachine.reg<vgpr, 1>
       return %sum : !waveamdmachine.reg<vgpr, 1>
     }
+
+    // A workitem-id pseudo-op in a loop does not reload v0. Its entry value
+    // must therefore remain reserved through the backedge.
+    // CHECK-LABEL: func.func @loop_fixed_workitem_read_reserves_backedge
+    // CHECK-SAME: [[CARRY:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, 1>
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: ^bb0([[ITER:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, 1>):
+    // CHECK: [[WI:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 0>
+    // CHECK: [[SUM:%.*]] = waveamdmachine.v_add_u32 [[WI]], [[ITER]]
+    // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 2>
+    // CHECK: [[NEXT:%.*]] = waveamdmachine.v_add_u32 [[SUM]], [[ITER]]
+    // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 1>
+    func.func @loop_fixed_workitem_read_reserves_backedge(
+        %cond: !waveamdmachine.reg<scc, 1>,
+        %carry: !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {wave.kernel,
+                    waveamdmachine.vgpr_count_max = 3 : i64} {
+      %loop = waveamdmachine.uniform_loop if %cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 1>) {
+      ^bb0(%iter: !waveamdmachine.reg<vgpr, 1>):
+        %wi = waveamdmachine.v_workitem_id_x
+            : !waveamdmachine.reg<vgpr, 1, 0>
+        %sum = waveamdmachine.v_add_u32 %wi, %iter
+            : (!waveamdmachine.reg<vgpr, 1, 0>,
+               !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        %next = waveamdmachine.v_add_u32 %sum, %iter
+            : (!waveamdmachine.reg<vgpr, 1>,
+               !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond
+            : !waveamdmachine.reg<scc, 1>
+            carries(%next : !waveamdmachine.reg<vgpr, 1>)
+      } -> !waveamdmachine.reg<vgpr, 1>
+      return %loop : !waveamdmachine.reg<vgpr, 1>
+    }
   }
 }

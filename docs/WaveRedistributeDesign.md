@@ -276,6 +276,15 @@ group. It shuffles only source groups reachable over the finite item domain,
 selects the group once, then extracts the slice components. Unprovable or
 oversized domains retain scalar lowering.
 
+On gfx950, lowering also recognizes paired packet slices whose fully enumerated
+relation is exactly the two-result half-wave exchange implemented by
+`v_permlane32_swap_b32`. The matcher checks every block, item, and component;
+it does not depend on relation spelling, packet shape, or kernel identity.
+Matching pairs become `waveamd.permlane32_swap`, while every other same-wave
+relation retains the generic shuffle/select path. WaveAMDMachine emits one
+destructive hardware instruction per payload dword and requires the result to
+reuse the source tuple.
+
 Local lowering introduces no memory token or workgroup barrier.
 
 ## Workgroup LDS Lowering
@@ -593,7 +602,9 @@ No failure fabricates values or silently changes the relation.
 ### Lowering
 
 - Same-workitem conversion emits only extract/select/pack.
-- Same-wave conversion emits shuffle without LDS or barrier.
+- Same-wave conversion emits shuffle without LDS or barrier, or a proved
+  gfx950 `waveamd.permlane32_swap` pair when the relation has that exact
+  semantics.
 - Dynamic same-wave source slots use proved packet slices and reachable source
   groups instead of all-source scalar muxes.
 - Same-block, block-independent conversion lowers without a cluster coordinate.
@@ -605,8 +616,10 @@ No failure fabricates values or silently changes the relation.
 - Conflict-heavy maps select different XOR phases on 32- and 64-bank targets.
 - Exact FA8K blocked-to-dot repro emits 16 `vector<8xbf16>` stores, 16 loads,
   one barrier, and no component selects.
-- Exact FA8K MFMA-to-linear repro emits 64 `vector<4xbf16>` shuffles and 32
-  vector selects instead of 256 shuffles and 16,256 scalar selects.
+- Exact FA8K MFMA-to-linear repro emits 16
+  `waveamd.permlane32_swap` operations (32 hardware dword swaps), with no
+  shuffles or vector selects. The corresponding dot-operand repro emits 8
+  operations (16 hardware dword swaps).
 - Three straight-line cross-wave conversions use two scratch slots and one
   publish barrier per conversion.
 - Capacity-limited exchanges use staged source-group windows and stay within

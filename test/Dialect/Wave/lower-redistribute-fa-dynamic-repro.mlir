@@ -7,22 +7,24 @@
 //===----------------------------------------------------------------------===//
 
 // RUN: wave-opt %s --pass-pipeline='builtin.module(wave-lower-redistribute,canonicalize,cse)' > %t
-// RUN: FileCheck %s --check-prefix=SHUFFLE < %t
-// RUN: FileCheck %s --check-prefix=SELECT < %t
+// RUN: FileCheck %s --check-prefix=PERMLANE < %t
 // RUN: FileCheck %s --check-prefix=LOCAL < %t
+// RUN: wave-opt %s --pass-pipeline='builtin.module(wave-lower-redistribute,waveamd-to-machine,canonicalize,cse)' | FileCheck %s --check-prefix=MACHINE
 
-// SHUFFLE-LABEL: func.func @fa_mfma_to_linear_dynamic_slot(
-// SHUFFLE-COUNT-64: wave.shuffle {{.*}}!wave.simd<vector<4xbf16>, 64>
-// SHUFFLE-NOT: wave.shuffle
-// SHUFFLE: return
-// SELECT-LABEL: func.func @fa_mfma_to_linear_dynamic_slot(
-// SELECT-COUNT-32: wave.select {{.*}}!wave.simd<vector<4xbf16>, 64>
-// SELECT-NOT: wave.select
-// SELECT: return
+// PERMLANE-LABEL: func.func @fa_mfma_to_linear_dynamic_slot(
+// PERMLANE-COUNT-16: waveamd.permlane32_swap
+// PERMLANE-NOT: wave.shuffle
+// PERMLANE-NOT: wave.select
+// PERMLANE: return
 // LOCAL-LABEL: func.func @fa_mfma_to_linear_dynamic_slot(
 // LOCAL-NOT: wave.alloc
 // LOCAL-NOT: wave.barrier
 // LOCAL: return
+// MACHINE-LABEL: func.func @fa_mfma_to_linear_dynamic_slot(
+// MACHINE-COUNT-16: waveamdmachine.v_permlane32_swap_b32_tuple
+// MACHINE-NOT: waveamdmachine.ds_bpermute_b32
+// MACHINE: return
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @fa_mfma_to_linear_dynamic_slot(
     %source: !wave.simd<vector<128xbf16>, 64>)
     -> !wave.simd<vector<128xbf16>, 64>
@@ -35,4 +37,5 @@ func.func @fa_mfma_to_linear_dynamic_slot(
       : !wave.simd<vector<128xbf16>, 64>
      -> !wave.simd<vector<128xbf16>, 64>
   return %result : !wave.simd<vector<128xbf16>, 64>
+}
 }

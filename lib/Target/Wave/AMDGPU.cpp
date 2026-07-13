@@ -549,6 +549,9 @@ private:
   unsigned vOr3B32() const { return opcodes.vOr3B32; }
   unsigned vXadU32() const { return opcodes.vXadU32; }
   unsigned vPermB32() const { return opcodes.vPermB32; }
+  unsigned vPermlane32SwapB32() const {
+    return opcodes.vPermlane32SwapB32;
+  }
   unsigned vBitOp3B32() const { return opcodes.vBitOp3B32; }
   unsigned vAddF32() const { return opcodes.vAddF32; }
   unsigned vSubF32() const { return opcodes.vSubF32; }
@@ -2531,6 +2534,27 @@ private:
         if (failed(emitMC(vMovB32(), {toMCVGPRComponent(result(), i), srcOp})))
           return failure();
       }
+      return success();
+    }
+    if (auto swap =
+            dyn_cast<waveamdmachine::VPermlane32SwapB32TupleOp>(op)) {
+      if (!waveamdmachine::VPermlane32SwapB32TupleOp::isSupportedOnIsa(
+              isaVersion))
+        return op.emitError("v_permlane32_swap_b32_tuple unsupported on target");
+      Value source = swap.getSource();
+      Value destination = swap.getResult();
+      if (getPhys(source) != getPhys(destination))
+        return op.emitError(
+            "v_permlane32_swap_b32_tuple result must reuse its source tuple");
+      auto type = cast<waveamdmachine::RegType>(destination.getType());
+      unsigned halfWidth = type.getWidth() / 2;
+      for (unsigned i = 0; i < halfWidth; ++i)
+        if (failed(emitMC(vPermlane32SwapB32(),
+                          {toMCVGPRComponent(destination, i),
+                           toMCVGPRComponent(destination, halfWidth + i),
+                           toMCVGPRComponent(source, i),
+                           toMCVGPRComponent(source, halfWidth + i)})))
+          return failure();
       return success();
     }
     if (isa<waveamdmachine::VMovB64TupleOp>(op)) {

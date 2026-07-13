@@ -11,6 +11,7 @@
 #include "RegAlloc/WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/Wave/Transforms/WaveLDSAllocation.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -67,6 +68,11 @@ struct ScratchLayoutPlan {
 struct SourceCoordinate {
   int64_t item;
   int64_t slot;
+};
+
+struct Permlane32Pair {
+  int64_t firstSourceGroup;
+  int64_t secondSourceGroup;
 };
 
 struct ScratchAccessPattern {
@@ -529,6 +535,24 @@ static int64_t getSharedMemoryBankCount(Operation *op) {
   if ((isa.Major == 9 && isa.Minor == 5) || (isa.Major == 12 && isa.Minor == 5))
     return 64;
   return 32;
+}
+
+static bool supportsPermlane32Swap(Operation *op, int64_t waveWidth) {
+  if (waveWidth != 64)
+    return false;
+  ModuleOp targetModule = waveamdmachine::findAMDGPUTargetModule(op);
+  if (!targetModule)
+    return false;
+  StringAttr targetAttr =
+      targetModule->getAttrOfType<StringAttr>("waveamdmachine.target");
+  if (!targetAttr)
+    return false;
+  std::optional<waveamdmachine::AMDGPUTarget> target =
+      waveamdmachine::parseAMDGPUTargetAttr(targetAttr.getValue());
+  if (!target)
+    return false;
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(target->chip);
+  return isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0;
 }
 
 static int64_t physicalScratchVectorAddress(const ScratchLayoutPlan &plan,
@@ -1073,6 +1097,66 @@ materializeWaveSlice(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
                               *selector);
 }
 
+// Recognize the semantics of one pair of gfx950 half-wave exchange results.
+// This deliberately enumerates the verified relation instead of matching its
+// symbolic spelling: algebraically equivalent layouts take the fast path, and
+// every non-matching relation retains the generic shuffle/select lowering.
+static FailureOr<std::optional<Permlane32Pair>> matchPermlane32Pair(
+    sym::Store &store, RedistributeOp op, const RelationDomain &domain,
+    int64_t destinationSlot, int64_t vectorElements) {
+  int64_t items = op.getRelation().getItems();
+  int64_t sourceSlots =
+      getPacketType(op.getSource().getType()).getNumElements();
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  if (items < 64 || destinationSlot + 2 * vectorElements > resultSlots)
+    return std::optional<Permlane32Pair>();
+
+  FailureOr<SourceCoordinate> first = evaluateSourceCoordinate(
+      store, op, domain, /*block=*/0, /*item=*/0, destinationSlot);
+  FailureOr<SourceCoordinate> second = evaluateSourceCoordinate(
+      store, op, domain, /*block=*/0, /*item=*/32, destinationSlot);
+  if (failed(first) || failed(second))
+    return failure();
+  if (first->slot % vectorElements != 0 ||
+      second->slot % vectorElements != 0)
+    return std::optional<Permlane32Pair>();
+  Permlane32Pair pair{first->slot / vectorElements,
+                      second->slot / vectorElements};
+  int64_t sourceGroups = sourceSlots / vectorElements;
+  if (pair.firstSourceGroup < 0 || pair.firstSourceGroup >= sourceGroups ||
+      pair.secondSourceGroup < 0 || pair.secondSourceGroup >= sourceGroups)
+    return std::optional<Permlane32Pair>();
+
+  for (int64_t block :
+       llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
+    for (int64_t item : llvm::seq<int64_t>(0, items)) {
+      int64_t lane = item % 64;
+      int64_t waveBase = item - lane;
+      int64_t expectedGroup = lane < 32 ? pair.firstSourceGroup
+                                        : pair.secondSourceGroup;
+      for (int64_t half : llvm::seq<int64_t>(0, 2)) {
+        int64_t expectedItem = waveBase + lane % 32 + half * 32;
+        for (int64_t offset : llvm::seq<int64_t>(0, vectorElements)) {
+          int64_t slot = destinationSlot + half * vectorElements + offset;
+          FailureOr<int64_t> sourceBlock = evaluateCoordinate(
+              store, op.getRelation().getSourceBlock(), domain, block, item,
+              slot);
+          FailureOr<SourceCoordinate> source =
+              evaluateSourceCoordinate(store, op, domain, block, item, slot);
+          if (failed(sourceBlock) || failed(source))
+            return failure();
+          int64_t expectedSlot = expectedGroup * vectorElements + offset;
+          if (*sourceBlock != block || source->item != expectedItem ||
+              source->slot != expectedSlot)
+            return std::optional<Permlane32Pair>();
+        }
+      }
+    }
+  }
+  return std::optional<Permlane32Pair>(pair);
+}
+
 static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
                                          RedistributeOp op, sym::Store &store,
                                          const RelationDomain &domain,
@@ -1106,7 +1190,32 @@ static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
       getPacketType(op.getResult().getType()).getNumElements();
   SmallVector<Value> result;
   result.reserve(resultSlots);
-  for (int64_t slot = 0; slot < resultSlots; slot += *vectorElements) {
+  bool usePermlane = supportsPermlane32Swap(op, waveWidth);
+  for (int64_t slot = 0; slot < resultSlots;) {
+    if (usePermlane) {
+      FailureOr<std::optional<Permlane32Pair>> pair = matchPermlane32Pair(
+          store, op, domain, slot, *vectorElements);
+      if (failed(pair))
+        return op.emitOpError("failed to evaluate permlane32 relation");
+      if (*pair) {
+        Value first = source[(*pair)->firstSourceGroup];
+        Value second = source[(*pair)->secondSourceGroup];
+        SmallVector<Type, 2> resultTypes{first.getType(), second.getType()};
+        auto swapped = waveamd::Permlane32SwapOp::create(
+            rewriter, op.getLoc(), resultTypes, first, second);
+        if (failed(appendSliceResults(
+                rewriter, op, materializer, swapped.getLower(), slot,
+                *vectorElements, *selectors, *sourceWithin, result)) ||
+            failed(appendSliceResults(
+                rewriter, op, materializer, swapped.getUpper(),
+                slot + *vectorElements, *vectorElements, *selectors,
+                *sourceWithin, result)))
+          return failure();
+        slot += 2 * *vectorElements;
+        continue;
+      }
+    }
+
     FailureOr<Value> selected =
         materializeWaveSlice(rewriter, op, store, domain, materializer, source,
                              *sourceLane, *sourceGroup, slot, *vectorElements);
@@ -1116,6 +1225,7 @@ static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
                                   *vectorElements, *selectors, *sourceWithin,
                                   result)))
       return failure();
+    slot += *vectorElements;
   }
 
   Value packed =

@@ -1458,6 +1458,9 @@ private:
     if (regs.reservedSGPRs == 0 && regs.reservedVGPRs == 0)
       return success();
 
+    DenseMap<Operation *, unsigned> positions;
+    collectRegAllocOpPositions(func.getBody(), positions);
+    DenseMap<Operation *, unsigned> endCache;
     for (const wave::RegAllocTransformValue &stateValue : values) {
       if (!stateValue.fixed)
         continue;
@@ -1465,10 +1468,15 @@ private:
       std::optional<unsigned> base = getEntryRegFixedBase(value, regs);
       if (!base)
         continue;
+      unsigned end = stateValue.end;
+      // An entry-register read inside a loop is not a real redefinition. Keep
+      // the incoming register intact until the loop can no longer iterate.
+      if (isFixedHardwareRead(value))
+        end = std::max(end, getImplicitABIUseEnd(value.getDefiningOp(),
+                                                 positions, endCache));
       unsigned setId = sets.size() + fixedReservations.size();
       fixedReservations.push_back({stateValue.regClass, setId, *base,
-                                   stateValue.width, /*start=*/0,
-                                   stateValue.end});
+                                   stateValue.width, /*start=*/0, end});
     }
     return success();
   }

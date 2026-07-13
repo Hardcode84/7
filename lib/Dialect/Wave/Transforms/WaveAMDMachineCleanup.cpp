@@ -1343,10 +1343,19 @@ static bool writesVcc(Operation *op) {
   return llvm::is_contained(effects.writes, HardwareResourceKind::VCC);
 }
 
+static bool transitivelyWritesVcc(Operation *root) {
+  return root
+      ->walk([&](Operation *op) {
+        return writesVcc(op) ? WalkResult::interrupt()
+                             : WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
 static bool hasInterveningVccWriter(Operation *from, Operation *to) {
   for (Operation *op = from->getNextNode(); op && op != to;
        op = op->getNextNode())
-    if (writesVcc(op))
+    if (transitivelyWritesVcc(op))
       return true;
   return false;
 }

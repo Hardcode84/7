@@ -58,6 +58,38 @@ LogicalResult MakeBufferOp::verify() {
   return success();
 }
 
+static FailureOr<int64_t> getPermlanePayloadBits(Operation *op, Type type) {
+  auto simd = cast<wave::SimdType>(type);
+  Type element = simd.getElementType();
+  int64_t elements = 1;
+  if (auto vector = dyn_cast<VectorType>(element)) {
+    if (vector.getRank() != 1)
+      return op->emitOpError("SIMD payload vector must be one-dimensional");
+    elements = vector.getNumElements();
+    element = vector.getElementType();
+  }
+  if (!element.isIntOrFloat())
+    return op->emitOpError("SIMD payload element must be integer or float");
+  return elements * element.getIntOrFloatBitWidth();
+}
+
+LogicalResult Permlane32SwapOp::verify() {
+  Type type = getA().getType();
+  if (getB().getType() != type || getLower().getType() != type ||
+      getUpper().getType() != type)
+    return emitOpError("all operand and result types must match");
+  auto simd = cast<wave::SimdType>(type);
+  if (simd.getWidth() != 64)
+    return emitOpError("requires wave64 SIMD operands");
+  FailureOr<int64_t> payloadBits =
+      getPermlanePayloadBits(getOperation(), type);
+  if (failed(payloadBits))
+    return failure();
+  if (*payloadBits == 0 || *payloadBits % 32 != 0)
+    return emitOpError("per-lane SIMD payload must contain whole dwords");
+  return success();
+}
+
 namespace {
 // Layout constraints for an A or B operand fragment.
 static bool isValidABFragment(FragmentType type) {

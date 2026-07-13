@@ -189,6 +189,11 @@ getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 ? 4 : 0;
 }
 
+static unsigned
+getValuWriteVGPRPermlaneLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0 ? 2 : 0;
+}
+
 struct HazardConfig {
   bool hasDelayAlu;
   bool lgkmWaitNeedsValuGap;
@@ -204,6 +209,7 @@ struct HazardConfig {
 
   unsigned valuWriteVGPRMfmaLatency;
   unsigned valuWriteVGPRReadlaneLatency;
+  unsigned valuWriteVGPRPermlaneLatency;
   unsigned valuWriteSGPRValuReadLatency;
   unsigned valuWriteSGPRVmemReadLatency;
   unsigned valuWriteExecMfmaLatency;
@@ -232,6 +238,8 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       waveamdmachine::getValuWriteVGPRMfmaHazardLatency(),
       /*valuWriteVGPRReadlaneLatency=*/
       issueHazards.valuWriteVGPRScalarRead,
+      /*valuWriteVGPRPermlaneLatency=*/
+      getValuWriteVGPRPermlaneLatency(isaVersion),
       /*valuWriteSGPRValuReadLatency=*/
       issueHazards.valuWriteSGPRValuRead,
       /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
@@ -560,6 +568,10 @@ static bool isMFMA(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
 }
 
+static bool isPermlane32Swap(Operation *op) {
+  return isa<waveamdmachine::VPermlane32SwapB32TupleOp>(op);
+}
+
 static unsigned getMfmaPassCount(Operation *op) {
   switch (waveamdmachine::classifyOp(op)) {
   case waveamdmachine::SchedClass::Write2PassMAI:
@@ -626,8 +638,9 @@ static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
 }
 
 static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
-  return std::max(cfg.valuWriteVGPRMfmaLatency,
-                  cfg.valuWriteVGPRReadlaneLatency);
+  return std::max({cfg.valuWriteVGPRMfmaLatency,
+                   cfg.valuWriteVGPRReadlaneLatency,
+                   cfg.valuWriteVGPRPermlaneLatency});
 }
 
 static unsigned getSGPRWriteHazardLimit(const HazardConfig &cfg) {
@@ -683,6 +696,10 @@ static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
   if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
       isa<waveamdmachine::VReadfirstlaneB32Op>(op))
     return waitForHazardAge(hazard, cfg.valuWriteVGPRReadlaneLatency);
+
+  if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
+      isPermlane32Swap(op))
+    return waitForHazardAge(hazard, cfg.valuWriteVGPRPermlaneLatency);
 
   if (unsigned wait = getTransForwardingUseWait(op, use, hazard, cfg))
     return wait;
@@ -766,7 +783,10 @@ static unsigned getRequiredPhysicalWait(Operation *op, const HazardState &state,
     return 0;
 
   unsigned wait = 0;
-  if (isMFMA(op))
+  // gfx950 applies the same four-slot VCMPX/EXEC hazard to MFMA and
+  // permlane instructions. WritesExecOp is deliberately conservative here,
+  // as in the pre-existing MFMA handling.
+  if (isMFMA(op) || isPermlane32Swap(op))
     wait = std::max(wait, state.execToMfma);
   wait = std::max(wait, getOperandPhysicalWait(op, state, cfg));
   wait = std::max(wait, getResultPhysicalWait(op, state, cfg));

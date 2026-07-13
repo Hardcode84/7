@@ -780,6 +780,13 @@ static bool isStorageClobberUse(OpOperand &use,
                     reuse, use, *isa);
 }
 
+static bool hasStorageClobberUse(Value value,
+                                 KilledOperandReuseIsaCache &isaCache) {
+  return llvm::any_of(value.getUses(), [&](OpOperand &use) {
+    return isStorageClobberUse(use, isaCache);
+  });
+}
+
 static bool
 hasAlignedViewLifetimeConflict(waveamdmachine::TupleFromElementsOp op,
                                AlignedTupleView view,
@@ -807,9 +814,11 @@ static bool hasSlotMismatch(const DenseMap<Value, unsigned> &anchorSlot,
 
 static bool needsTupleElementCopy(Value element, bool slotMismatch, bool reuse,
                                   bool dragInConflict,
-                                  bool fixedElementInUnfixedTuple) {
+                                  bool fixedElementInUnfixedTuple,
+                                  bool clobberConflict) {
   return slotMismatch || reuse || dragInConflict ||
-         fixedElementInUnfixedTuple || feedsLoopCarry(element);
+         fixedElementInUnfixedTuple || clobberConflict ||
+         feedsLoopCarry(element);
 }
 
 static bool canPreserveAlignedView(waveamdmachine::TupleFromElementsOp op,
@@ -858,7 +867,8 @@ static bool hasFixedElementConflict(Value element,
 static FailureOr<Value> rewriteTupleElementForSharing(
     waveamdmachine::TupleFromElementsOp op, OpBuilder &builder, Value element,
     unsigned slot, waveamdmachine::RegType tupleType, bool preserveAlignedView,
-    bool preserveLayout, DenseMap<Value, unsigned> &anchorSlot,
+    bool preserveLayout, bool tupleIsClobbered,
+    DenseMap<Value, unsigned> &anchorSlot,
     const ToElementsSourceMap &source,
     DenseSet<Value> &consumedByFromElements) {
   bool slotMismatch =
@@ -868,8 +878,11 @@ static FailureOr<Value> rewriteTupleElementForSharing(
   bool dragInConflict = hasSourceDragConflict(element, source, preserveLayout);
   bool fixedConflict =
       hasFixedElementConflict(element, tupleType, preserveAlignedView);
+  // Clobbering packed storage cannot borrow an element that remains live.
+  bool clobberConflict =
+      tupleIsClobbered && !hasSingleUseBy(element, op.getOperation());
   if (!needsTupleElementCopy(element, slotMismatch, reuse, dragInConflict,
-                             fixedConflict)) {
+                             fixedConflict, clobberConflict)) {
     if (!preserveAlignedView)
       anchorSlot[element] = slot;
     consumedByFromElements.insert(element);
@@ -909,6 +922,7 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
   waveamdmachine::RegType tupleType =
       cast<waveamdmachine::RegType>(op.getTuple().getType());
   bool preserveAlignedView = alignedView.has_value();
+  bool tupleIsClobbered = hasStorageClobberUse(op.getTuple(), isaCache);
   for (Value element : op.getElements()) {
     unsigned slot = cumOffset;
     bool reanchorSource =
@@ -916,7 +930,8 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
     bool preserveLayout = preserveAlignedView || reanchorSource;
     FailureOr<Value> use = rewriteTupleElementForSharing(
         op, builder, element, slot, tupleType, preserveAlignedView,
-        preserveLayout, anchorSlot, toElementsSource, consumedByFromElements);
+        preserveLayout, tupleIsClobbered, anchorSlot, toElementsSource,
+        consumedByFromElements);
     if (failed(use))
       return failure();
     changed |= *use != element;

@@ -289,7 +289,7 @@ public:
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
-  SmallVector<Operation *> foldedMmaAccumulatorFills;
+  SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
   std::optional<unsigned> targetIsaMajor;
   unsigned nextLabel = 0;
 
@@ -373,6 +373,7 @@ public:
   LogicalResult selectBallot(BallotOp op);
   LogicalResult selectReadFirst(ReadFirstOp op);
   LogicalResult selectShuffle(ShuffleOp op);
+  LogicalResult selectPermlane32Swap(waveamd::Permlane32SwapOp op);
   LogicalResult selectScfIf(scf::IfOp op);
   LogicalResult selectPtrCast(PtrCastOp op);
   LogicalResult selectPtrAdd(PtrAddOp op);

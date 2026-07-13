@@ -87,6 +87,18 @@ public:
     return it->second;
   }
 
+  bool isAfter(Operation *op, unsigned position) const {
+    auto it = positions.find(op);
+    if (it != positions.end())
+      return it->second > position;
+    for (Operation *next = op->getNextNode(); next; next = next->getNextNode()) {
+      auto nextIt = positions.find(next);
+      if (nextIt != positions.end())
+        return nextIt->second > position;
+    }
+    return false;
+  }
+
 private:
   DenseMap<Operation *, unsigned> positions;
   unsigned next = 0;
@@ -740,17 +752,12 @@ materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
   return changed;
 }
 
-static bool usesExplicitLifetime(const AllocInterval &earlier,
-                                 const AllocInterval &later) {
-  return earlier.release || later.release;
-}
-
 static bool canReuseStorage(const AllocInterval &earlier,
                             const AllocInterval &later,
                             TokenOrdering &ordering) {
   if (earlier.end >= later.start)
     return false;
-  if (!usesExplicitLifetime(earlier, later))
+  if (!earlier.release)
     return true;
   if (earlier.hasUntrackedAccess || later.hasUntrackedAccess)
     return false;
@@ -897,11 +904,17 @@ static FailureOr<int64_t> getFixedLDSBytes(func::FuncOp func) {
 
 static bool isRetiredAtPoint(AllocInterval &interval, Operation *point,
                              unsigned position, Value dependency,
-                             TokenOrdering &ordering) {
+                             TokenOrdering &ordering,
+                             const OperationOrder &order) {
   if (interval.end >= position)
     return false;
   if (interval.hasUntrackedAccess)
     return false;
+  if (!interval.release) {
+    Operation *def = dependency ? dependency.getDefiningOp() : nullptr;
+    if (isa_and_nonnull<BarrierOp>(def) && order.isAfter(def, interval.end))
+      return true;
+  }
   if (interval.completionTokens.empty())
     return true;
   if (!dependency)
@@ -959,7 +972,7 @@ collectBlockedAllocations(AllocationAnalysis &analysis, Operation *point,
   SmallVector<PlacedAllocation> blocked;
   for (auto [index, interval] : llvm::enumerate(analysis.allocs)) {
     if (isRetiredAtPoint(interval, point, position, dependency,
-                         *analysis.ordering))
+                         *analysis.ordering, *analysis.order))
       continue;
     blocked.push_back(
         {interval.offset, interval.bytes, static_cast<unsigned>(index)});

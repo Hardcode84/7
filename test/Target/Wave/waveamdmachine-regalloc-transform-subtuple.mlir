@@ -229,6 +229,49 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>
   }
 
+  // A packed inner-loop init cannot borrow an outer invariant element because
+  // the inner carry storage is clobbered on every outer iteration.
+  // PREP-LABEL: func.func @nested_packed_loop_init_copies_live_element(
+  // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
+  // PREP: [[LIVE:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP: waveamdmachine.uniform_loop
+  // PREP: [[FRESH:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[LOCAL:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+  // PREP-NEXT: [[PACKED:%.*]] = waveamdmachine.tuple_from_elements [[LOCAL]], [[FRESH]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[PACKED]]
+  // PREP: waveamdmachine.v_mov_b32_tuple [[LIVE]]
+  func.func @nested_packed_loop_init_copies_live_element(
+      %outer_cond: !waveamdmachine.reg<scc, 1>,
+      %inner_cond: !waveamdmachine.reg<scc, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %live = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.uniform_loop if %outer_cond
+        : !waveamdmachine.reg<scc, 1> {
+    ^bb0:
+      %fresh = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %packed = waveamdmachine.tuple_from_elements %live, %fresh
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      %inner = waveamdmachine.uniform_loop if %inner_cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%packed : !waveamdmachine.reg<vgpr, 2>) {
+      ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+        waveamdmachine.continue_if %inner_cond
+            : !waveamdmachine.reg<scc, 1>
+            carries(%carry : !waveamdmachine.reg<vgpr, 2>)
+      } -> !waveamdmachine.reg<vgpr, 2>
+      %read = waveamdmachine.v_mov_b32_tuple %live {registers = 1 : i64}
+          : (!waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.continue_if %outer_cond
+          : !waveamdmachine.reg<scc, 1>
+    }
+    return
+  }
+
   // PREP-LABEL: func.func @rematerialize_profitable_duplicate_loop_inits(
   // PREP: [[ZERO:%.*]] = waveamdmachine.imm 0
   // PREP: [[ONE:%.*]] = waveamdmachine.imm 1

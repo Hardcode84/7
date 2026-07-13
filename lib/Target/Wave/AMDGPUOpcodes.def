@@ -88,6 +88,8 @@
   X(vOr3B32, V_OR3_B32_vi, V_OR3_B32_e64_gfx11)                                \
   X(vXadU32, V_XAD_U32_vi, V_XAD_U32_e64_gfx11)                                \
   X(vPermB32, V_PERM_B32_vi, V_PERM_B32_e64_gfx11)                             \
+  X(vPermlane32SwapB32, V_PERMLANE32_SWAP_B32_e32_gfx9,                        \
+    V_PERMLANE32_SWAP_B32_e32_gfx9)                                            \
   X(vBitOp3B32, V_BITOP3_B32_gfx9, V_BITOP3_B32_e64_gfx1250)                   \
   X(vAddF32, V_ADD_F32_e32_vi, V_ADD_F32_e32_gfx11)                            \
   X(vSubF32, V_SUB_F32_e32_vi, V_SUB_F32_e32_gfx11)                            \
