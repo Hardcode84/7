@@ -276,3 +276,25 @@ func.func @interfering_agprs() {
          !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   return
 }
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"
+} {
+  func.func @loop_workgroup_read_clobber(
+      %cond: !waveamdmachine.reg<scc, 1>) attributes {wave.kernel} {
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+      %group = waveamdmachine.s_workgroup_id_x
+          : !waveamdmachine.reg<sgpr, 1, 2>
+      // expected-error @below {{waveamd-resource-info found SGPR value allocated in reserved kernel ABI registers}}
+      %clobber:2 = waveamdmachine.s_add_i32 %group, %one
+          : (!waveamdmachine.reg<sgpr, 1, 2>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1, 2>,
+                !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+    }
+    return
+  }
+}
