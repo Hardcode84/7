@@ -822,6 +822,34 @@ func.func @alloc_bad_align() {
 
 // -----
 
+func.func @alloc_negative_offset() {
+  // expected-error @+1 {{offset must be non-negative}}
+  %p = wave.alloc() {align = 4 : i64, bytesize = 16 : i64, offset = -4 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  return
+}
+
+// -----
+
+func.func @alloc_misaligned_offset() {
+  // expected-error @+1 {{offset must satisfy alignment}}
+  %p = wave.alloc() {align = 16 : i64, bytesize = 16 : i64, offset = 4 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  return
+}
+
+// -----
+
+func.func @alloc_offset_overflow() {
+  // expected-error @+1 {{offset plus bytesize overflows i64}}
+  %p = wave.alloc() {align = 1 : i64, bytesize = 16 : i64,
+                     offset = 9223372036854775800 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  return
+}
+
+// -----
+
 func.func @read_first_element_mismatch(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{result type must match SIMD element type}}
   %r = wave.read_first %v : !wave.simd<i32, 32> -> i64

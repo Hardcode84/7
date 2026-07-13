@@ -87,3 +87,36 @@ func.func @block_dependent_local(%source: !wave.simd<vector<1xi32>, 32>)
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  func.func @nested_scratch_exceeds_lds(%condition: i1)
+      attributes {wave.kernel, wave.lds_size = 65440 : i64,
+                  wave.workgroup_size = array<i32: 64, 1, 1>,
+                  wave.waves_per_workgroup = 2 : i64} {
+    %zero = wave.constant 0 : i8 -> !wave.simd<i8, 32>
+    %source = wave.pack %zero
+        : !wave.simd<i8, 32> -> !wave.simd<vector<1xi8>, 32>
+    %first = scf.if %condition -> (!wave.simd<vector<1xi8>, 32>) {
+      %moved = wave.redistribute %source,
+          <blocks = 1, items = 64, source_block = "block",
+           source_item = "xor(item, 32)", source_slot = "slot">
+          : !wave.simd<vector<1xi8>, 32> -> !wave.simd<vector<1xi8>, 32>
+      scf.yield %moved : !wave.simd<vector<1xi8>, 32>
+    } else {
+      scf.yield %source : !wave.simd<vector<1xi8>, 32>
+    }
+    %second = scf.if %condition -> (!wave.simd<vector<1xi8>, 32>) {
+      // expected-error @+1 {{remaining target LDS capacity 32 bytes cannot hold one 64-byte scratch vector group}}
+      %moved = wave.redistribute %first,
+          <blocks = 1, items = 64, source_block = "block",
+           source_item = "xor(item, 32)", source_slot = "slot">
+          : !wave.simd<vector<1xi8>, 32> -> !wave.simd<vector<1xi8>, 32>
+      scf.yield %moved : !wave.simd<vector<1xi8>, 32>
+    } else {
+      scf.yield %first : !wave.simd<vector<1xi8>, 32>
+    }
+    return
+  }
+}

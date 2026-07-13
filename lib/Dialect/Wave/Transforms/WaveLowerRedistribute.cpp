@@ -25,6 +25,7 @@
 
 #include <array>
 #include <limits>
+#include <memory>
 #include <optional>
 
 namespace mlir::wave {
@@ -1212,9 +1213,7 @@ static FailureOr<int64_t> getNonAllocationLDSBytes(func::FuncOp func) {
   return *reserved;
 }
 
-static FailureOr<std::optional<int64_t>>
-getRemainingScratchBytes(func::FuncOp func, RedistributeOp op, Value dependency,
-                         ArrayRef<Value> ignoredAllocations = {}) {
+static FailureOr<std::optional<int64_t>> getScratchLDSLimit(func::FuncOp func) {
   if (!waveamdmachine::findAMDGPUTargetModule(func))
     return std::optional<int64_t>();
   FailureOr<int64_t> capacity = getScratchLDSCapacity(func);
@@ -1223,11 +1222,7 @@ getRemainingScratchBytes(func::FuncOp func, RedistributeOp op, Value dependency,
     return failure();
   if (*reserved >= *capacity)
     return std::optional<int64_t>(0);
-  FailureOr<int64_t> available = getWaveLDSLargestFreeRange(
-      func, op, *capacity - *reserved, dependency, ignoredAllocations);
-  if (failed(available))
-    return failure();
-  return std::optional<int64_t>(*available);
+  return std::optional<int64_t>(*capacity - *reserved);
 }
 
 static std::pair<int64_t, int64_t>
@@ -1500,21 +1495,40 @@ static FailureOr<Value> emitScratchStores(
 struct ScratchLoads {
   SmallVector<Value> values;
   SmallVector<Value> tokens;
+  Value publication;
 };
 
 struct ScratchSequence {
   Value completion;
-  Value allocation;
+  Value analysisCompletion;
   Operation *cursor = nullptr;
+  WaveLDSRange range;
 };
 
 struct ScratchCapacity {
+  std::optional<int64_t> limit;
   std::optional<int64_t> stageBytes;
   std::optional<int64_t> overlapBytes;
   Value dependency;
+  Value analysisDependency;
 };
 
 using ScratchSequenceMap = DenseMap<Block *, ScratchSequence>;
+
+static SmallVector<WaveLDSRange, 4>
+collectScratchRanges(Block *block, const ScratchSequenceMap &sequences,
+                     bool includeCurrentBlock) {
+  SmallVector<WaveLDSRange, 4> ranges;
+  for (const auto &[sequenceBlock, sequence] : sequences)
+    if (includeCurrentBlock || sequenceBlock != block)
+      ranges.push_back(sequence.range);
+  llvm::sort(ranges, [](WaveLDSRange lhs, WaveLDSRange rhs) {
+    if (lhs.offset != rhs.offset)
+      return lhs.offset < rhs.offset;
+    return lhs.bytes < rhs.bytes;
+  });
+  return ranges;
+}
 
 static Value findPrecedingBarrier(RedistributeOp op) {
   for (Operation *cursor = op->getPrevNode(); cursor;
@@ -1549,25 +1563,50 @@ static Value advanceScratchSequence(IRRewriter &rewriter, RedistributeOp op,
   return dependency;
 }
 
+static Value getScratchAnalysisDependency(RedistributeOp op,
+                                          ScratchSequenceMap &sequences) {
+  auto it = sequences.find(op->getBlock());
+  if (it == sequences.end())
+    return findPrecedingBarrier(op);
+
+  Value dependency = it->second.analysisCompletion;
+  for (Operation *cursor = it->second.cursor->getNextNode(); cursor != op;
+       cursor = cursor->getNextNode()) {
+    assert(cursor && "redistributions must lower in block order");
+    if (BarrierOp barrier = dyn_cast<BarrierOp>(cursor))
+      dependency = barrier.getToken();
+  }
+  return dependency;
+}
+
 static FailureOr<ScratchCapacity>
 getScratchCapacity(IRRewriter &rewriter, RedistributeOp op, func::FuncOp func,
+                   WaveLDSAllocationAnalysis &analysis,
                    ScratchSequenceMap &sequences) {
   ScratchCapacity capacity;
   capacity.dependency = advanceScratchSequence(rewriter, op, sequences);
-  SmallVector<Value, 1> ignoredAllocations;
-  auto previous = sequences.find(op->getBlock());
-  if (previous != sequences.end())
-    ignoredAllocations.push_back(previous->second.allocation);
-  FailureOr<std::optional<int64_t>> stageBytes = getRemainingScratchBytes(
-      func, op, capacity.dependency, ignoredAllocations);
+  capacity.analysisDependency = getScratchAnalysisDependency(op, sequences);
+  FailureOr<std::optional<int64_t>> limit = getScratchLDSLimit(func);
+  if (failed(limit))
+    return failure();
+  capacity.limit = *limit;
+  if (!capacity.limit)
+    return capacity;
+  SmallVector<WaveLDSRange, 4> stageBlocked =
+      collectScratchRanges(op->getBlock(), sequences,
+                           /*includeCurrentBlock=*/false);
+  FailureOr<int64_t> stageBytes = analysis.getLargestFreeRange(
+      op, *capacity.limit, capacity.analysisDependency, stageBlocked);
   if (failed(stageBytes))
     return failure();
   capacity.stageBytes = *stageBytes;
   capacity.overlapBytes = *stageBytes;
-  if (ignoredAllocations.empty())
+  auto previous = sequences.find(op->getBlock());
+  if (previous == sequences.end())
     return capacity;
-  FailureOr<std::optional<int64_t>> overlapBytes =
-      getRemainingScratchBytes(func, op, capacity.dependency);
+  stageBlocked.push_back(previous->second.range);
+  FailureOr<int64_t> overlapBytes = analysis.getLargestFreeRange(
+      op, *capacity.limit, capacity.analysisDependency, stageBlocked);
   if (failed(overlapBytes))
     return failure();
   capacity.overlapBytes = *overlapBytes;
@@ -1657,6 +1696,45 @@ static bool mustRetireScratch(RedistributeOp op,
   return previous != sequences.end() && scratchBytes > *overlapBudget;
 }
 
+struct ScratchAllocation {
+  WaveLDSRange range;
+  Value allocation;
+  Value dependency;
+};
+
+static FailureOr<ScratchAllocation> createScratchAllocation(
+    IRRewriter &rewriter, RedistributeOp op, Type elementType, Type tokenType,
+    int64_t transferBytes, const ScratchPlan &plan,
+    const ScratchCapacity &capacity, WaveLDSAllocationAnalysis &analysis,
+    ScratchSequenceMap &sequences) {
+  Value dependency = capacity.dependency;
+  bool retire = mustRetireScratch(op, sequences, capacity.overlapBytes,
+                                  plan.scratchBytes);
+  if (retire)
+    dependency = retireScratchSequence(rewriter, op, tokenType, dependency);
+  SmallVector<WaveLDSRange, 4> blocked = collectScratchRanges(
+      op->getBlock(), sequences, /*includeCurrentBlock=*/!retire);
+  WaveLDSRange range{0, plan.scratchBytes};
+  IntegerAttr fixedOffset;
+  if (capacity.limit) {
+    FailureOr<int64_t> offset =
+        analysis.findFreeOffset(op, *capacity.limit, range.bytes, transferBytes,
+                                capacity.analysisDependency, blocked);
+    if (failed(offset))
+      return failure();
+    range.offset = *offset;
+    fixedOffset = rewriter.getI64IntegerAttr(*offset);
+  }
+  PtrType pointerType =
+      PtrType::get(op.getContext(), elementType,
+                   SharedAddressSpaceAttr::get(op.getContext()));
+  AllocOp allocation =
+      AllocOp::create(rewriter, op.getLoc(), pointerType,
+                      rewriter.getI64IntegerAttr(plan.scratchBytes),
+                      rewriter.getI64IntegerAttr(transferBytes), fixedOffset);
+  return ScratchAllocation{range, allocation.getResult(), dependency};
+}
+
 static FailureOr<ScratchLoads>
 emitScratchStage(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
                  const RelationDomain &domain,
@@ -1685,22 +1763,27 @@ emitScratchStage(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
       op.getRelation().getItems(), stage.layout);
   if (failed(loadAddress))
     return op.emitOpError("failed to construct scratch load address");
-  return emitScratchLoads(rewriter, op, materializer, allocation, *loadAddress,
-                          stage, sourceWithin, stage.layout, plan.selectors,
-                          componentType, tokenType, *published);
+  FailureOr<ScratchLoads> loaded = emitScratchLoads(
+      rewriter, op, materializer, allocation, *loadAddress, stage, sourceWithin,
+      stage.layout, plan.selectors, componentType, tokenType, *published);
+  if (failed(loaded))
+    return failure();
+  loaded->publication = *published;
+  return loaded;
 }
 
 static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                     sym::Store &store,
                                     const RelationDomain &domain,
                                     func::FuncOp func,
+                                    WaveLDSAllocationAnalysis &analysis,
                                     ScratchSequenceMap &sequences) {
   FailureOr<int64_t> scratchBytes = getScratchBytes(op);
   if (failed(scratchBytes))
     return failure();
   Type tokenType = MemTokenType::get(op.getContext());
   FailureOr<ScratchCapacity> capacity =
-      getScratchCapacity(rewriter, op, func, sequences);
+      getScratchCapacity(rewriter, op, func, analysis, sequences);
   if (failed(capacity))
     return failure();
   int64_t waveWidth = cast<SimdType>(op.getSource().getType()).getWidth();
@@ -1712,18 +1795,13 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
   Type elementType = sourcePacket.getElementType();
   int64_t elementBytes = elementType.getIntOrFloatBitWidth() / 8;
   int64_t transferBytes = elementBytes * plan->vectorElements;
-  PtrType pointerType =
-      PtrType::get(op.getContext(), elementType,
-                   SharedAddressSpaceAttr::get(op.getContext()));
-  Value allocation = AllocOp::create(rewriter, op.getLoc(), pointerType,
-                                     static_cast<uint64_t>(plan->scratchBytes),
-                                     static_cast<uint64_t>(transferBytes));
+  FailureOr<ScratchAllocation> scratch = createScratchAllocation(
+      rewriter, op, elementType, tokenType, transferBytes, *plan, *capacity,
+      analysis, sequences);
+  if (failed(scratch))
+    return failure();
   RelationMaterializer materializer(rewriter, op, store, domain);
   SmallVector<Value> source = extractComponents(rewriter, op);
-  Value dependency = capacity->dependency;
-  if (mustRetireScratch(op, sequences, capacity->overlapBytes,
-                        plan->scratchBytes))
-    dependency = retireScratchSequence(rewriter, op, tokenType, dependency);
 
   FailureOr<sym::ExprHandle> sourceWithin =
       composeBinaryInt(store, op.getRelation().getSourceSlot(),
@@ -1736,19 +1814,22 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
   Type componentType = getPacketElementType(op.getSource().getType());
   SmallVector<Value> result(resultSlots);
   SmallVector<Value> completionTokens;
+  Value analysisCompletion;
   for (auto [stageIndex, stage] : llvm::enumerate(plan->stages)) {
-    FailureOr<ScratchLoads> loaded = emitScratchStage(
-        rewriter, op, store, domain, materializer, allocation, source,
-        *sourceWithin, stage, *plan, componentType, tokenType, dependency);
+    FailureOr<ScratchLoads> loaded =
+        emitScratchStage(rewriter, op, store, domain, materializer,
+                         scratch->allocation, source, *sourceWithin, stage,
+                         *plan, componentType, tokenType, scratch->dependency);
     if (failed(loaded))
       return failure();
+    analysisCompletion = loaded->publication;
 
     int64_t firstResultSlot = stage.firstResultGroup * plan->vectorElements;
     for (auto [offset, value] : llvm::enumerate(loaded->values))
       result[firstResultSlot + offset] = value;
     completionTokens = std::move(loaded->tokens);
     if (stageIndex + 1 != plan->stages.size())
-      dependency =
+      scratch->dependency =
           BarrierOp::create(rewriter, op.getLoc(), tokenType, completionTokens)
               .getToken();
   }
@@ -1757,10 +1838,11 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
       PackOp::create(rewriter, op.getLoc(), op.getResult().getType(), result);
   Value completed =
       JoinOp::create(rewriter, op.getLoc(), tokenType, completionTokens);
-  AllocReleaseOp released =
-      AllocReleaseOp::create(rewriter, op.getLoc(), tokenType, allocation,
-                             completed, rewriter.getUnitAttr());
-  sequences[op->getBlock()] = {released.getToken(), allocation, released};
+  AllocReleaseOp released = AllocReleaseOp::create(
+      rewriter, op.getLoc(), tokenType, scratch->allocation, completed,
+      rewriter.getUnitAttr());
+  sequences[op->getBlock()] = {released.getToken(), analysisCompletion,
+                               released, scratch->range};
   rewriter.replaceOp(op, packed);
   return success();
 }
@@ -1843,11 +1925,30 @@ static LogicalResult composeRedistributions(IRRewriter &rewriter,
   return success();
 }
 
-static LogicalResult lowerRedistribution(IRRewriter &rewriter,
-                                         RedistributeOp op,
-                                         WaveDialect &dialect,
-                                         func::FuncOp func,
-                                         ScratchSequenceMap &sequences) {
+static LogicalResult lowerWorkgroupRedistribution(
+    IRRewriter &rewriter, RedistributeOp op, WaveDialect &dialect,
+    const RelationDomain &domain, func::FuncOp func,
+    std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
+    ScratchSequenceMap &sequences) {
+  if (!func.getBody().hasOneBlock())
+    return op.emitOpError(
+        "cross-wave redistribution requires a single-block kernel function");
+  if (!analysis) {
+    FailureOr<std::unique_ptr<WaveLDSAllocationAnalysis>> created =
+        WaveLDSAllocationAnalysis::create(func);
+    if (failed(created))
+      return failure();
+    analysis = std::move(*created);
+  }
+  return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), domain, func,
+                        *analysis, sequences);
+}
+
+static LogicalResult
+lowerRedistribution(IRRewriter &rewriter, RedistributeOp op,
+                    WaveDialect &dialect, func::FuncOp func,
+                    std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
+                    ScratchSequenceMap &sequences) {
   rewriter.setInsertionPoint(op);
   FailureOr<RelationDomain> domain = buildDomain(dialect.getSymbolStore(), op);
   if (failed(domain))
@@ -1870,11 +1971,8 @@ static LogicalResult lowerRedistribution(IRRewriter &rewriter,
   case Movement::Wave:
     return lowerWave(rewriter, op, dialect.getSymbolStore(), *domain, width);
   case Movement::Workgroup:
-    if (!func.getBody().hasOneBlock())
-      return op.emitOpError(
-          "cross-wave redistribution requires a single-block kernel function");
-    return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), *domain, func,
-                          sequences);
+    return lowerWorkgroupRedistribution(rewriter, op, dialect, *domain, func,
+                                        analysis, sequences);
   case Movement::Cluster:
     llvm_unreachable("cluster movement must fail contextual validation");
   }
@@ -1896,10 +1994,12 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
     return failure();
 
   ScratchSequenceMap sequences;
+  std::unique_ptr<WaveLDSAllocationAnalysis> analysis;
   for (RedistributeOp op : ops) {
     if (erased.contains(op.getOperation()))
       continue;
-    if (failed(lowerRedistribution(rewriter, op, dialect, func, sequences)))
+    if (failed(lowerRedistribution(rewriter, op, dialect, func, analysis,
+                                   sequences)))
       return failure();
   }
   return success();

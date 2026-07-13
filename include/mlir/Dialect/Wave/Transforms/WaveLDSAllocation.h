@@ -13,15 +13,40 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 
+#include <memory>
+
 namespace mlir::wave {
 
-/// Returns the largest 16-byte-aligned LDS range not blocked at `point`.
-/// `dependency` retires ordered lifetimes; ignored allocations omit dead
-/// ranges.
-FailureOr<int64_t>
-getWaveLDSLargestFreeRange(func::FuncOp func, Operation *point,
-                           int64_t capacity, Value dependency = {},
-                           ArrayRef<Value> ignoredAllocations = {});
+struct WaveLDSRange {
+  int64_t offset = 0;
+  int64_t bytes = 0;
+};
+
+class WaveLDSAllocationAnalysis {
+public:
+  static FailureOr<std::unique_ptr<WaveLDSAllocationAnalysis>>
+  create(func::FuncOp func);
+
+  ~WaveLDSAllocationAnalysis();
+
+  /// Returns largest 16-byte-aligned range free at `point`.
+  FailureOr<int64_t> getLargestFreeRange(Operation *point, int64_t capacity,
+                                         Value dependency = {},
+                                         ArrayRef<WaveLDSRange> blocked = {});
+
+  /// Returns first-fit offset for an allocation free at `point`.
+  FailureOr<int64_t> findFreeOffset(Operation *point, int64_t capacity,
+                                    int64_t bytes, int64_t align,
+                                    Value dependency = {},
+                                    ArrayRef<WaveLDSRange> blocked = {});
+
+private:
+  struct Impl;
+
+  explicit WaveLDSAllocationAnalysis(std::unique_ptr<Impl> impl);
+
+  std::unique_ptr<Impl> impl;
+};
 
 } // namespace mlir::wave
 

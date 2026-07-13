@@ -493,9 +493,11 @@ def Wave_AllocOp : Wave_Op<"alloc"> {
   let summary = "allocate workgroup-local memory";
   let description = [{
     Produces a wave-uniform pointer to a fixed-size workgroup-local allocation.
+    Optional `offset` fixes placement in the kernel's shared-memory segment.
   }];
 
-  let arguments = (ins I64Attr:$bytesize, I64Attr:$align);
+  let arguments = (ins I64Attr:$bytesize, I64Attr:$align,
+                       OptionalAttr<I64Attr>:$offset);
   let results = (outs Res<Wave_Ptr, "",
                           [MemAlloc<DefaultResource, 0, FullEffect>]>:$result);
   let assemblyFormat = "`(` `)` attr-dict `:` qualified(type($result))";

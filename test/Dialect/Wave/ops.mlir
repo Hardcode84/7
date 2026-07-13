@@ -34,6 +34,10 @@ func.func @wave_constants() -> (i32, !wave.simd<i32, 32>, !wave.mask<32>) {
 func.func @wave_alloc() {
   // CHECK: wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared, i8>
   %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared, i8>
+  // CHECK: wave.alloc() {align = 16 : i64, bytesize = 32 : i64, offset = 256 : i64} : !wave.ptr<#wave.shared, i8>
+  %fixed = wave.alloc() {align = 16 : i64, bytesize = 32 : i64,
+                         offset = 256 : i64}
+      : !wave.ptr<#wave.shared, i8>
   %dependency = wave.token : !wave.mem.token
   // CHECK: wave.alloc_release {{.*}} after {{.*}} {workgroup_collective} : (!wave.ptr<#wave.shared, i8>, !wave.mem.token) -> !wave.mem.token
   %released = wave.alloc_release %alloc after %dependency {workgroup_collective}

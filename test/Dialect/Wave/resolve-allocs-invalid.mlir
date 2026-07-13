@@ -93,3 +93,24 @@ func.func @divergent_repeated_release(%mask: !wave.mask<32>, %n: index)
   }
   return
 }
+
+// -----
+
+func.func @overlapping_fixed_allocations()
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 64 : i64,
+                     offset = 0 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  // expected-error @+1 {{fixed offset overlaps live LDS storage}}
+  %b = wave.alloc() {align = 16 : i64, bytesize = 64 : i64,
+                     offset = 32 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  return
+}

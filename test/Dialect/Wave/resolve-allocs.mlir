@@ -476,3 +476,16 @@ func.func @collective_loop_backedge(%n: index)
   }
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @fixed_allocation_offset
+// CHECK-SAME: wave.lds_size = 160 : i64
+func.func @fixed_allocation_offset()
+    attributes {wave.kernel, wave.lds_size = 64 : i64} {
+  // CHECK: wave.shared_memory_base {offset = 128 : i64}
+  %fixed = wave.alloc() {align = 32 : i64, bytesize = 32 : i64,
+                         offset = 128 : i64}
+      : !wave.ptr<#wave.shared, i8>
+  return
+}

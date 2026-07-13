@@ -3132,6 +3132,16 @@ LogicalResult AllocOp::verify() {
   int64_t align = getAlignAttr().getInt();
   if (align <= 0 || !llvm::isPowerOf2_64(static_cast<uint64_t>(align)))
     return emitOpError("align must be a positive power of two");
+  IntegerAttr offsetAttr = getOffsetAttr();
+  if (!offsetAttr)
+    return success();
+  int64_t offset = offsetAttr.getInt();
+  if (offset < 0)
+    return emitOpError("offset must be non-negative");
+  if (offset % align)
+    return emitOpError("offset must satisfy alignment");
+  if (offset > std::numeric_limits<int64_t>::max() - getBytesizeAttr().getInt())
+    return emitOpError("offset plus bytesize overflows i64");
   return success();
 }
 

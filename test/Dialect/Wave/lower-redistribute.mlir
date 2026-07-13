@@ -338,7 +338,7 @@ func.func @compose_cross_block_to_identity(
 // -----
 
 // CHECK-LABEL: func.func @capacity_reduces_vector_width(
-// CHECK: wave.alloc() {align = 4 : i64, bytesize = 256 : i64}
+// CHECK: wave.alloc() {align = 4 : i64, bytesize = 256 : i64, offset = 65280 : i64}
 // CHECK: wave.store
 // CHECK-COUNT-7: wave.barrier
 // CHECK: wave.load
