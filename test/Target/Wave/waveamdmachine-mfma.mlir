@@ -89,6 +89,115 @@ func.func @mfma_gfx950_f16_32x32x16_kernel(
   return
 }
 
+// SELECT-LABEL: func.func @mfma_gfx950_packed_zero_acc_kernel
+// SELECT-NOT: waveamdmachine.tuple_from_elements
+// SELECT-NOT: waveamdmachine.v_mov_b32_tuple{{.*}}!waveamdmachine.reg<vgpr, 1>
+// SELECT: waveamdmachine.mfma_f32_32x32x16_f16{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 16>
+
+// ASM-LABEL: mfma_gfx950_packed_zero_acc_kernel:
+// ASM: v_mfma_f32_32x32x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
+func.func @mfma_gfx950_packed_zero_acc_kernel(
+    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %zero_bits = arith.constant 0 : i32
+  %zero = wave.constant 0.000000e+00 : f32 -> !wave.simd<f32, 64>
+  %acc_regs = wave.pack %zero, %zero, %zero, %zero,
+      %zero, %zero, %zero, %zero, %zero, %zero, %zero, %zero,
+      %zero, %zero, %zero, %zero
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>
+      -> !wave.simd<vector<16xf32>, 64>
+  %a = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<0, f16, 32, 32, 64, 4>
+  %b = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<1, f16, 32, 32, 64, 4>
+  %acc = waveamd.fragment_pack %acc_regs
+      : !wave.simd<vector<16xf32>, 64>
+      -> !waveamd.fragment<2, f32, 32, 32, 64, 16>
+  %result = waveamd.mma "mfma.f32.32x32x16.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 32, 32, 64, 4>,
+        !waveamd.fragment<1, f16, 32, 32, 64, 4>,
+        !waveamd.fragment<2, f32, 32, 32, 64, 16>
+     -> !waveamd.fragment<2, f32, 32, 32, 64, 16>
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %r = arith.constant 16 : i32
+  %r_simd = wave.splat %r : i32 -> !wave.simd<i32, 64>
+  %lane_off = wave.binary muli %wi, %r_simd
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %tuple_ptr = wave.ptr_add %out, %lane_off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %regs = waveamd.fragment_unpack %result
+      : !waveamd.fragment<2, f32, 32, 32, 64, 16>
+      -> !wave.simd<vector<16xi32>, 64>
+  %store_token = wave.store %regs -> %tuple_ptr
+      : (!wave.simd<vector<16xi32>, 64>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @mfma_gfx950_packed_nonzero_acc_kernel
+// SELECT: [[ACC:%.*]] = waveamdmachine.tuple_from_elements
+// SELECT: waveamdmachine.mfma_f32_16x16x32_f16 {{.*}}, {{.*}}, [[ACC]]
+// SELECT-SAME: !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+func.func @mfma_gfx950_packed_nonzero_acc_kernel() attributes {wave.kernel} {
+  %zero_bits = arith.constant 0 : i32
+  %zero = wave.constant 0.000000e+00 : f32 -> !wave.simd<f32, 64>
+  %one = wave.constant 1.000000e+00 : f32 -> !wave.simd<f32, 64>
+  %acc_regs = wave.pack %one, %zero, %zero, %zero
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>
+      -> !wave.simd<vector<4xf32>, 64>
+  %a = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+  %b = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+  %acc = waveamd.fragment_pack %acc_regs
+      : !wave.simd<vector<4xf32>, 64>
+      -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  %result = waveamd.mma "mfma.f32.16x16x32.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 16, 16, 64, 4>,
+        !waveamd.fragment<1, f16, 16, 16, 64, 4>,
+        !waveamd.fragment<2, f32, 16, 16, 64, 4>
+     -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return
+}
+
+// SELECT-LABEL: func.func @mfma_gfx950_shared_packed_zero_acc
+// SELECT: [[ACC:%.*]] = waveamdmachine.tuple_from_elements
+// SELECT: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements [[ACC]]
+// SELECT: waveamdmachine.mfma_f32_16x16x32_f16{{.*}}!waveamdmachine.imm
+// SELECT: waveamdmachine.v_readfirstlane_b32 [[PARTS]]#0
+func.func @mfma_gfx950_shared_packed_zero_acc()
+    -> !wave.simd<f32, 64> {
+  %zero_bits = arith.constant 0 : i32
+  %zero = wave.constant 0.000000e+00 : f32 -> !wave.simd<f32, 64>
+  %acc_regs = wave.pack %zero, %zero, %zero, %zero
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64>,
+        !wave.simd<f32, 64>, !wave.simd<f32, 64>
+      -> !wave.simd<vector<4xf32>, 64>
+  %first = wave.extract %acc_regs[0]
+      : !wave.simd<vector<4xf32>, 64> -> !wave.simd<f32, 64>
+  %a = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
+  %b = waveamd.fragment_fill %zero_bits
+      : i32 -> !waveamd.fragment<1, f16, 16, 16, 64, 4>
+  %acc = waveamd.fragment_pack %acc_regs
+      : !wave.simd<vector<4xf32>, 64>
+      -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  %result = waveamd.mma "mfma.f32.16x16x32.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 16, 16, 64, 4>,
+        !waveamd.fragment<1, f16, 16, 16, 64, 4>,
+        !waveamd.fragment<2, f32, 16, 16, 64, 4>
+     -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
+  return %first : !wave.simd<f32, 64>
+}
+
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_kernel
 // SELECT: waveamdmachine.mfma_scale_f32_16x16x128_f4_f4{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
 

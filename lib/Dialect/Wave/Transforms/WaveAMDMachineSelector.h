@@ -289,7 +289,7 @@ public:
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;
   SmallVector<Operation *> opsToErase;
-  SmallVector<Operation *> foldedMmaAccumulatorFills;
+  SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
   std::optional<unsigned> targetIsaMajor;
   unsigned nextLabel = 0;
 
