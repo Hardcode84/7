@@ -185,8 +185,14 @@ static bool isCDNA4Family(const llvm::AMDGPU::IsaVersion &isa) {
 static unsigned getValuWriteSGPRVmemReadLatency() { return 5; }
 
 static unsigned
-getValuWriteExecMfmaLatency(const llvm::AMDGPU::IsaVersion &isa) {
+getValuWriteExecConsumerLatency(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 ? 4 : 0;
+}
+
+static unsigned
+getValuWriteVGPRPermlane32SwapLatency(const llvm::AMDGPU::IsaVersion &isa) {
+  return waveamdmachine::VPermlane32SwapB32TupleOp::isSupportedOnIsa(isa) ? 2
+                                                                          : 0;
 }
 
 struct HazardConfig {
@@ -204,9 +210,10 @@ struct HazardConfig {
 
   unsigned valuWriteVGPRMfmaLatency;
   unsigned valuWriteVGPRReadlaneLatency;
+  unsigned valuWriteVGPRPermlane32SwapLatency;
   unsigned valuWriteSGPRValuReadLatency;
   unsigned valuWriteSGPRVmemReadLatency;
-  unsigned valuWriteExecMfmaLatency;
+  unsigned valuWriteExecConsumerLatency;
   unsigned transForwardingWaitStates;
 };
 
@@ -232,10 +239,13 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       waveamdmachine::getValuWriteVGPRMfmaHazardLatency(),
       /*valuWriteVGPRReadlaneLatency=*/
       issueHazards.valuWriteVGPRScalarRead,
+      /*valuWriteVGPRPermlane32SwapLatency=*/
+      getValuWriteVGPRPermlane32SwapLatency(isaVersion),
       /*valuWriteSGPRValuReadLatency=*/
       issueHazards.valuWriteSGPRValuRead,
       /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
-      /*valuWriteExecMfmaLatency=*/getValuWriteExecMfmaLatency(isaVersion),
+      /*valuWriteExecConsumerLatency=*/
+      getValuWriteExecConsumerLatency(isaVersion),
       /*transForwardingWaitStates=*/issueHazards.transWriteVGPRValuRead,
   };
 }
@@ -330,7 +340,7 @@ struct HazardState {
   DenseMap<Value, ValueHazards> values;
   SmallVector<PhysicalHazard, 16> physical;
   unsigned valuWriteVcc = 0;
-  unsigned execToMfma = 0;
+  unsigned execWriteHazard = 0;
 
   static bool joinMax(unsigned &lhs, unsigned rhs) {
     unsigned next = std::max(lhs, rhs);
@@ -364,7 +374,7 @@ struct HazardState {
     for (const PhysicalHazard &hazard : rhs.physical)
       changed |= joinPhysicalHazard(hazard);
     changed |= joinMax(valuWriteVcc, rhs.valuWriteVcc);
-    changed |= joinMax(execToMfma, rhs.execToMfma);
+    changed |= joinMax(execWriteHazard, rhs.execWriteHazard);
     return changed;
   }
 };
@@ -389,7 +399,7 @@ public:
   ChangeResult reset() {
     bool changed = state.lgkmToValu || state.lgkmPending ||
                    !state.values.empty() || !state.physical.empty() ||
-                   state.valuWriteVcc || state.execToMfma;
+                   state.valuWriteVcc || state.execWriteHazard;
     state = HazardState();
     return changed ? ChangeResult::Change : ChangeResult::NoChange;
   }
@@ -398,7 +408,7 @@ public:
     os << "lgkm=" << state.lgkmToValu << " pending=" << state.lgkmPending
        << " values=" << state.values.size()
        << " physical=" << state.physical.size() << " vcc=" << state.valuWriteVcc
-       << " exec=" << state.execToMfma;
+       << " exec=" << state.execWriteHazard;
   }
 
 private:
@@ -478,7 +488,8 @@ static void advancePhysicalHazards(HazardState &state, unsigned count = 1) {
   state.physical = std::move(kept);
   state.valuWriteVcc =
       state.valuWriteVcc > count ? state.valuWriteVcc - count : 0;
-  state.execToMfma = state.execToMfma > count ? state.execToMfma - count : 0;
+  state.execWriteHazard =
+      state.execWriteHazard > count ? state.execWriteHazard - count : 0;
 }
 
 static void advanceHazards(HazardState &state, unsigned count = 1,
@@ -560,6 +571,14 @@ static bool isMFMA(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
 }
 
+static bool isPermlane32Swap(Operation *op) {
+  return isa<waveamdmachine::VPermlane32SwapB32TupleOp>(op);
+}
+
+static bool isExecWriteHazardConsumer(Operation *op) {
+  return isMFMA(op) || isPermlane32Swap(op);
+}
+
 static unsigned getMfmaPassCount(Operation *op) {
   switch (waveamdmachine::classifyOp(op)) {
   case waveamdmachine::SchedClass::Write2PassMAI:
@@ -626,8 +645,9 @@ static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
 }
 
 static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
-  return std::max(cfg.valuWriteVGPRMfmaLatency,
-                  cfg.valuWriteVGPRReadlaneLatency);
+  return std::max({cfg.valuWriteVGPRMfmaLatency,
+                   cfg.valuWriteVGPRReadlaneLatency,
+                   cfg.valuWriteVGPRPermlane32SwapLatency});
 }
 
 static unsigned getSGPRWriteHazardLimit(const HazardConfig &cfg) {
@@ -683,6 +703,9 @@ static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
   if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
       isa<waveamdmachine::VReadfirstlaneB32Op>(op))
     return waitForHazardAge(hazard, cfg.valuWriteVGPRReadlaneLatency);
+
+  if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR && isPermlane32Swap(op))
+    return waitForHazardAge(hazard, cfg.valuWriteVGPRPermlane32SwapLatency);
 
   if (unsigned wait = getTransForwardingUseWait(op, use, hazard, cfg))
     return wait;
@@ -766,8 +789,8 @@ static unsigned getRequiredPhysicalWait(Operation *op, const HazardState &state,
     return 0;
 
   unsigned wait = 0;
-  if (isMFMA(op))
-    wait = std::max(wait, state.execToMfma);
+  if (isExecWriteHazardConsumer(op))
+    wait = std::max(wait, state.execWriteHazard);
   wait = std::max(wait, getOperandPhysicalWait(op, state, cfg));
   wait = std::max(wait, getResultPhysicalWait(op, state, cfg));
   return std::max(wait, getVccReadWait(op, state));
@@ -850,7 +873,8 @@ static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
 static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
                                            const HazardConfig &cfg) {
   if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
-    state.execToMfma = std::max(state.execToMfma, cfg.valuWriteExecMfmaLatency);
+    state.execWriteHazard =
+        std::max(state.execWriteHazard, cfg.valuWriteExecConsumerLatency);
   for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
     if (isCopiedVccCompareSGPRResult(op, resultIndex))
       continue;

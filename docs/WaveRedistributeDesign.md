@@ -282,6 +282,9 @@ selection, the cross-lane peephole recognizes paired `ds_bpermute` and
 evaluates every lane in every wave of the known X-linear workgroup, so
 equivalent address arithmetic shares the fast path. Proved pairs become
 `waveamdmachine.v_permlane32_swap_b32_tuple`; other graphs stay generic.
+The predicate is instruction-specific: LLVM exposes `permlane32_swap` only on
+gfx950, while gfx1250 and gfx13 expose the non-equivalent `permlane16_swap`.
+Generic permlane availability never enables the wave64 exchange.
 
 Local lowering introduces no memory token or workgroup barrier.
 

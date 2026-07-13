@@ -43,6 +43,32 @@ func.func @ds_lane_ops() attributes {wave.kernel} {
   return
 }
 
+// ROUNDTRIP-LABEL: func.func @permlane32_swap_tuple
+// ROUNDTRIP: waveamdmachine.v_permlane32_swap_b32_tuple
+// ROUNDTRIP-SAME: !waveamdmachine.reg<vgpr, 4, 0>
+// ASM-LABEL: permlane32_swap_tuple:
+// ASM: v_permlane32_swap_b32_e32 v0, v2
+// ASM-NEXT: v_permlane32_swap_b32_e32 v1, v3
+func.func @permlane32_swap_tuple() attributes {wave.kernel} {
+  %source = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 0>
+  %result = waveamdmachine.v_permlane32_swap_b32_tuple %source
+      : (!waveamdmachine.reg<vgpr, 4, 0>)
+      -> !waveamdmachine.reg<vgpr, 4, 0>
+  %parts:4 = waveamdmachine.tuple_to_elements %result
+      : (!waveamdmachine.reg<vgpr, 4, 0>)
+      -> (!waveamdmachine.reg<vgpr, 1, 0>,
+          !waveamdmachine.reg<vgpr, 1, 1>,
+          !waveamdmachine.reg<vgpr, 1, 2>,
+          !waveamdmachine.reg<vgpr, 1, 3>)
+  %first = waveamdmachine.v_readfirstlane_b32 %parts#0
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+      -> !waveamdmachine.reg<sgpr, 1, 20>
+  waveamdmachine.s_mov_b32 "s21", %first
+      : (!waveamdmachine.reg<sgpr, 1, 20>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ROUNDTRIP-LABEL: func.func @ds_agpr_load_store
 // ROUNDTRIP: waveamdmachine.ds_load_b128
 // ROUNDTRIP-SAME: -> (!waveamdmachine.reg<agpr, 4, 0>, !waveamdmachine.mem.token)

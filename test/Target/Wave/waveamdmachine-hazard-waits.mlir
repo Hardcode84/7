@@ -1740,4 +1740,40 @@ func.func @gfx950_packed_cvt_to_readfirstlane_delay(
   return
 }
 
+// gfx950 permlane source needs two slots after a VALU write.
+// CHECK-LABEL: func.func @gfx950_valu_to_permlane32_delay
+// CHECK: waveamdmachine.v_mov_b32_tuple
+// CHECK-NEXT: waveamdmachine.imm 1
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_permlane32_swap_b32_tuple
+func.func @gfx950_valu_to_permlane32_delay(
+    %x: !waveamdmachine.reg<sgpr, 1, 0>) {
+  %source = waveamdmachine.v_mov_b32_tuple %x
+      : (!waveamdmachine.reg<sgpr, 1, 0>)
+      -> !waveamdmachine.reg<vgpr, 4, 8>
+  %result = waveamdmachine.v_permlane32_swap_b32_tuple %source
+      : (!waveamdmachine.reg<vgpr, 4, 8>)
+      -> !waveamdmachine.reg<vgpr, 4, 8>
+  return
+}
+
+// gfx950 EXEC writes need four slots before permlane.
+// CHECK-LABEL: func.func @gfx950_cmpx_to_permlane32_delay
+// CHECK: waveamdmachine.v_cmpx_eq_u32
+// CHECK-NEXT: waveamdmachine.imm 3
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_permlane32_swap_b32_tuple
+func.func @gfx950_cmpx_to_permlane32_delay(
+    %x: !waveamdmachine.reg<vgpr, 1, 0>,
+    %y: !waveamdmachine.reg<vgpr, 1, 1>,
+    %source: !waveamdmachine.reg<vgpr, 4, 8>) {
+  waveamdmachine.v_cmpx_eq_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>) -> ()
+  %result = waveamdmachine.v_permlane32_swap_b32_tuple %source
+      : (!waveamdmachine.reg<vgpr, 4, 8>)
+      -> !waveamdmachine.reg<vgpr, 4, 8>
+  return
+}
+
 }

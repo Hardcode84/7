@@ -28,6 +28,7 @@ defvar WaveAMDMachine_Gfx940Plus =
 defvar WaveAMDMachine_BitOp3Target = WaveAMDMachine_Gfx940Plus;
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_Permlane32SwapTarget = WaveAMDMachine_Gfx950;
 defvar WaveAMDMachine_VMovB64Target =
     "(isa.Major == 9 && ((isa.Minor == 4 && isa.Stepping == 2) || " #
     "(isa.Minor == 5 && isa.Stepping == 0))) || " #
@@ -996,7 +997,7 @@ def WaveAMDMachine_VPermlane32SwapB32TupleOp
     Source tuple contains two equal-width payloads. Each corresponding dword
     pair is exchanged with `v_permlane32_swap_b32`. Result reuses source storage.
   }];
-  let archPredicate = WaveAMDMachine_Gfx950;
+  let archPredicate = WaveAMDMachine_Permlane32SwapTarget;
   let arguments = (ins WaveAMDMachine_VGPR:$source);
   let results = (outs WaveAMDMachine_VGPR:$result);
   let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
