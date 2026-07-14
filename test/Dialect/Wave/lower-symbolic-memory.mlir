@@ -309,6 +309,25 @@ func.func @branched_scatter_cover(
 
 // -----
 
+// Disconnected 18-node run leaves four-node branch on exact cover.
+// CHECK-LABEL: func.func @component_exact_cover(
+// CHECK-COUNT-2: wave.store {{.*}} : (!wave.simd<vector<2xf16>, 32>,
+// CHECK: wave.store {{.*}} : (!wave.simd<vector<18xf16>, 32>,
+// CHECK-NOT: wave.store {{.*}} : (!wave.simd<f16, 32>,
+// CHECK-NOT: wave.scatter
+func.func @component_exact_cover(
+    %value: !wave.simd<vector<22xf16>, 32>,
+    %base: !wave.ptr<#wave.shared, f16>) {
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"16 * Piecewise((0, slot == 0), (1, slot == 1), (1, slot == 2), (2, slot == 3), (28 + slot, True))">>
+      bindings []() packet_bindings []()
+      : (!wave.simd<vector<22xf16>, 32>, !wave.ptr<#wave.shared, f16>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
 // Slot-static partitioning selects each base and stays vectorized.
 // CHECK-LABEL: func.func @slot_partition_base(
 // CHECK: wave.ptr_cast %arg0

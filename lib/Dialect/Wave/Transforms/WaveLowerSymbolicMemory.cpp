@@ -731,6 +731,58 @@ buildSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
   return edges;
 }
 
+static SmallVector<SmallVector<unsigned>>
+buildConnectedComponents(ArrayRef<SmallVector<unsigned>> edges) {
+  SmallVector<SmallVector<unsigned>> neighbors(edges.size());
+  for (auto [lhs, successors] : llvm::enumerate(edges)) {
+    for (unsigned rhs : successors) {
+      neighbors[lhs].push_back(rhs);
+      neighbors[rhs].push_back(lhs);
+    }
+  }
+
+  SmallVector<SmallVector<unsigned>> components;
+  SmallVector<uint8_t> visited(edges.size(), 0);
+  for (unsigned start = 0; start < edges.size(); ++start) {
+    if (visited[start])
+      continue;
+    SmallVector<unsigned> component;
+    SmallVector<unsigned> worklist{start};
+    visited[start] = 1;
+    while (!worklist.empty()) {
+      unsigned node = worklist.pop_back_val();
+      component.push_back(node);
+      for (unsigned neighbor : neighbors[node]) {
+        if (visited[neighbor])
+          continue;
+        visited[neighbor] = 1;
+        worklist.push_back(neighbor);
+      }
+    }
+    llvm::sort(component);
+    components.push_back(std::move(component));
+  }
+  return components;
+}
+
+static SmallVector<SmallVector<unsigned>>
+buildComponentGraph(ArrayRef<SmallVector<unsigned>> edges,
+                    ArrayRef<unsigned> component) {
+  SmallVector<int64_t> localIndex(edges.size(), -1);
+  for (auto [local, global] : llvm::enumerate(component))
+    localIndex[global] = local;
+
+  SmallVector<SmallVector<unsigned>> localEdges(component.size());
+  for (auto [local, global] : llvm::enumerate(component)) {
+    for (unsigned successor : edges[global]) {
+      assert(localIndex[successor] >= 0 &&
+             "component must contain successor endpoints");
+      localEdges[local].push_back(static_cast<unsigned>(localIndex[successor]));
+    }
+  }
+  return localEdges;
+}
+
 static bool augmentMatching(unsigned lhs, ArrayRef<SmallVector<unsigned>> edges,
                             SmallVectorImpl<int64_t> &matchedRight,
                             SmallVectorImpl<uint8_t> &seen) {
@@ -972,21 +1024,39 @@ findExactCover(ArrayRef<SmallVector<unsigned>> edges, int64_t elementBits) {
 }
 
 static FailureOr<SmallVector<SmallVector<unsigned>>>
-planTransactions(sym::Store &store, ArrayRef<SlotMapping> slots,
-                 int64_t elementBits) {
-  SmallVector<SmallVector<unsigned>> edges =
-      buildSuccessorGraph(store, slots, elementBits);
-  if (FailureOr<SmallVector<SmallVector<unsigned>>> exact =
-          findExactCover(edges, elementBits);
-      succeeded(exact))
-    return exact;
-
+findMatchingCover(ArrayRef<SmallVector<unsigned>> edges, int64_t elementBits) {
   SmallVector<SmallVector<unsigned>> transactions;
   for (ArrayRef<unsigned> chain : buildContiguousChains(edges)) {
     SmallVector<SmallVector<unsigned>> cover = coverChain(chain, elementBits);
     if (cover.empty())
       return failure();
     llvm::append_range(transactions, std::move(cover));
+  }
+  return transactions;
+}
+
+static FailureOr<SmallVector<SmallVector<unsigned>>>
+planTransactions(sym::Store &store, ArrayRef<SlotMapping> slots,
+                 int64_t elementBits) {
+  SmallVector<SmallVector<unsigned>> edges =
+      buildSuccessorGraph(store, slots, elementBits);
+  SmallVector<SmallVector<unsigned>> transactions;
+  for (ArrayRef<unsigned> component : buildConnectedComponents(edges)) {
+    SmallVector<SmallVector<unsigned>> localEdges =
+        buildComponentGraph(edges, component);
+    FailureOr<SmallVector<SmallVector<unsigned>>> cover =
+        findExactCover(localEdges, elementBits);
+    if (failed(cover))
+      cover = findMatchingCover(localEdges, elementBits);
+    if (failed(cover))
+      return failure();
+    for (ArrayRef<unsigned> localTransaction : *cover) {
+      SmallVector<unsigned> transaction;
+      transaction.reserve(localTransaction.size());
+      for (unsigned local : localTransaction)
+        transaction.push_back(component[local]);
+      transactions.push_back(std::move(transaction));
+    }
   }
   return transactions;
 }
