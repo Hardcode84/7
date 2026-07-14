@@ -594,6 +594,60 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
+    // CHECK-LABEL: func.func @remat_relief_skips_other_class_budget_poison(
+    // CHECK-SAME: name = "wave.regalloc.remat.dwords", value = 2 : i64
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[TID:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK: [[DEAD_S:%.*]] = waveamdmachine.s_workgroup_id_x
+    // CHECK: [[POISON:%.*]] = waveamdmachine.v_add_u32 [[TID]], [[DEAD_S]]
+    // CHECK-NOT: waveamdmachine.v_xor_b32
+    // CHECK: [[LIVE_S:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: [[GOOD0:%.*]] = waveamdmachine.v_xor_b32 [[TID]], %{{.*}} {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[GOOD1:%.*]] = waveamdmachine.v_xor_b32 [[TID]], %{{.*}} {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: waveamdmachine.v_add3_u32 [[POISON]], [[GOOD0]], [[GOOD1]]
+    func.func @remat_relief_skips_other_class_budget_poison()
+        attributes {waveamdmachine.sgpr_count_max = 1 : i64,
+                    waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+      %tid = waveamdmachine.v_workitem_id_x
+          : !waveamdmachine.reg<vgpr, 1, 0>
+      %deadS = waveamdmachine.s_workgroup_id_x
+          : !waveamdmachine.reg<sgpr, 1>
+      %poison = waveamdmachine.v_add_u32 %tid, %deadS
+          : (!waveamdmachine.reg<vgpr, 1, 0>,
+             !waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %good0 = waveamdmachine.v_xor_b32 %tid, %one
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %good1 = waveamdmachine.v_xor_b32 %tid, %two
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %liveS = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit {waveamdmachine.regalloc_remat_temp}
+            : !waveamdmachine.reg<vgpr, 1>
+        %keepS = waveamdmachine.v_add_u32 %a, %liveS
+            : (!waveamdmachine.reg<vgpr, 1>,
+               !waveamdmachine.reg<sgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        %roots = waveamdmachine.v_add3_u32 %poison, %good0, %good1
+            : (!waveamdmachine.reg<vgpr, 1>,
+               !waveamdmachine.reg<vgpr, 1>,
+               !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      return
+    }
+
     // CHECK-LABEL: func.func @remat_relief_bundles_three_roots_two_leaves(
     // CHECK-SAME: name = "wave.regalloc.remat.dwords", value = 3 : i64
     // CHECK-NOT: waveamdmachine.regalloc_transform_state

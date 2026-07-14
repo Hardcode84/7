@@ -35,16 +35,18 @@ struct RematReliefSlot {
   Value value;
   Operation *rebuildOp = nullptr;
   const wave::RegAllocTransformValue *stateValue = nullptr;
-  int64_t cost = 0;
   unsigned rebuildPosition = 0;
 };
 
 struct RematReliefRoot {
+  DenseMap<Operation *, DenseSet<Value>> siteValues;
   SmallVector<RematReliefSlot> slots;
   SmallVector<Value> rematValues;
   SmallVector<unsigned> pressureLeafSets;
   const wave::RegAllocTransformAliasSet *set = nullptr;
   int64_t cost = 0;
+  int64_t useCost = 0;
+  bool usesFailurePosition = false;
 };
 
 struct RematReliefPlan {
@@ -56,6 +58,24 @@ struct RematRootExtension {
   int64_t gain = 0;
   int64_t cost = 0;
   unsigned index = 0;
+};
+
+struct RematBundleState {
+  DenseMap<Operation *, DenseSet<Value>> siteValues;
+  DenseSet<unsigned> selectedRoots;
+  DenseSet<unsigned> pressureLeafSets;
+  SmallVector<unsigned> indices;
+  RegClassPressure added = {};
+  RegClassPressure removed = {};
+  int64_t cost = 0;
+  bool usesFailurePosition = false;
+};
+
+struct RematBundleSearchContext {
+  DenseMap<unsigned, const wave::RegAllocTransformAliasSet *> sets;
+  RegClassPressure before = {};
+  RegClassPressure allowed = {};
+  StringRef failureClassName;
 };
 
 static bool isRematRelievableFailureClass(StringRef className) {
@@ -500,16 +520,21 @@ static bool rematRootsReduceFailurePressure(
 }
 
 static bool
-rematRootsUseFailurePosition(ArrayRef<const RematReliefRoot *> roots,
+rematRootUsesFailurePosition(const RematReliefRoot &root,
                              const RegAllocTransformFailure &failureRecord,
                              const RematReliefContext &context) {
-  return llvm::any_of(roots, [&](const RematReliefRoot *root) {
-    return llvm::any_of(root->slots, [&](const RematReliefSlot &slot) {
-      return llvm::any_of(slot.uses, [&](OpOperand *use) {
-        return context.positions.lookup(use->getOwner()) ==
-               failureRecord.position;
-      });
+  return llvm::any_of(root.slots, [&](const RematReliefSlot &slot) {
+    return llvm::any_of(slot.uses, [&](OpOperand *use) {
+      return context.positions.lookup(use->getOwner()) ==
+             failureRecord.position;
     });
+  });
+}
+
+static bool
+rematRootsUseFailurePosition(ArrayRef<const RematReliefRoot *> roots) {
+  return llvm::any_of(roots, [](const RematReliefRoot *root) {
+    return root->usesFailurePosition;
   });
 }
 
@@ -531,8 +556,6 @@ static FailureOr<RematReliefSlot> buildRematReliefSlot(
   slot.value = value;
   slot.rebuildOp = rebuildOp;
   slot.stateValue = &stateValue;
-  slot.cost = slot.dagValues.size() * getRematReliefLoopCostScale(rebuildOp) +
-              slot.uses.size();
   slot.rebuildPosition = context.positions.lookup(rebuildOp);
   return slot;
 }
@@ -543,6 +566,17 @@ static void sortRematReliefSlots(MutableArrayRef<RematReliefSlot> slots) {
                       return std::tie(lhs.rebuildPosition, lhs.stateValue->id) <
                              std::tie(rhs.rebuildPosition, rhs.stateValue->id);
                     });
+}
+
+static void collectRematRootCost(RematReliefRoot &root) {
+  for (const RematReliefSlot &slot : root.slots) {
+    root.useCost += slot.uses.size();
+    DenseSet<Value> &values = root.siteValues[slot.rebuildOp];
+    values.insert(slot.dagValues.begin(), slot.dagValues.end());
+  }
+  root.cost = root.useCost;
+  for (auto &[site, values] : root.siteValues)
+    root.cost += values.size() * getRematReliefLoopCostScale(site);
 }
 
 static void addForcedRematValues(ArrayRef<ResolvedRegAllocValue> values,
@@ -578,7 +612,6 @@ addRematReliefSlot(Value value, const wave::RegAllocTransformValue &stateValue,
                              forcedRematValues, std::move(uses));
     if (failed(slot))
       return false;
-    root.cost += slot->cost;
     root.slots.push_back(std::move(*slot));
   }
   return true;
@@ -641,9 +674,8 @@ static bool
 rematRootsPassPressureCheck(func::FuncOp func,
                             ArrayRef<const RematReliefRoot *> roots,
                             const RegAllocTransformFailure &failureRecord,
-                            ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                            const RematReliefContext &context) {
-  if (rematRootsUseFailurePosition(roots, failureRecord, context))
+                            ArrayRef<wave::RegAllocTransformAliasSet> sets) {
+  if (rematRootsUseFailurePosition(roots))
     return true;
   return rematRootsReduceFailurePressure(func, roots, failureRecord, sets);
 }
@@ -679,64 +711,208 @@ buildRematReliefRoot(func::FuncOp func, unsigned setId,
   if (root.slots.empty())
     return std::optional<RematReliefRoot>();
   sortRematReliefSlots(root.slots);
+  collectRematRootCost(root);
   std::array<const RematReliefRoot *, 1> roots = {&root};
   root.pressureLeafSets =
       collectRematPressureLeafSets(roots, failureRecord, context);
+  root.usesFailurePosition =
+      rematRootUsesFailurePosition(root, failureRecord, context);
   return std::optional<RematReliefRoot>(std::move(root));
 }
 
 static int64_t getRematPlanCost(ArrayRef<const RematReliefRoot *> roots) {
   DenseMap<Operation *, DenseSet<Value>> siteValues;
   int64_t cost = 0;
-  for (const RematReliefRoot *root : roots)
-    for (const RematReliefSlot &slot : root->slots) {
-      cost += slot.uses.size();
-      DenseSet<Value> &values = siteValues[slot.rebuildOp];
-      values.insert(slot.dagValues.begin(), slot.dagValues.end());
+  for (const RematReliefRoot *root : roots) {
+    cost += root->useCost;
+    for (auto &[site, rootValues] : root->siteValues) {
+      DenseSet<Value> &values = siteValues[site];
+      values.insert(rootValues.begin(), rootValues.end());
     }
+  }
   for (auto &[site, values] : siteValues)
     cost += values.size() * getRematReliefLoopCostScale(site);
   return cost;
 }
 
-static bool rootsSharePressureLeaf(const RematReliefRoot &lhs,
-                                   const RematReliefRoot &rhs) {
-  return llvm::any_of(lhs.pressureLeafSets, [&](unsigned setId) {
-    return llvm::is_contained(rhs.pressureLeafSets, setId);
+static RematBundleSearchContext
+buildRematBundleSearchContext(func::FuncOp func,
+                              const RegAllocTransformFailure &failureRecord,
+                              ArrayRef<wave::RegAllocTransformAliasSet> sets) {
+  RematBundleSearchContext context;
+  context.before = getRegClassPressureAtPosition(sets, failureRecord.position);
+  context.failureClassName = failureRecord.className;
+  for (const wave::RegAllocTransformAliasSet &set : sets) {
+    assert(!context.sets.contains(set.id) && "duplicate remat alias set ID");
+    context.sets[set.id] = &set;
+  }
+  for (waveamdmachine::RegClass regClass : kRegClasses) {
+    unsigned index = getRegClassIndex(regClass);
+    wave::RegAllocTransformBudget budget =
+        wave::getRegAllocTransformBudget(func, regClass);
+    context.allowed[index] =
+        std::max(context.before[index], static_cast<int64_t>(budget.limit));
+  }
+  return context;
+}
+
+static const wave::RegAllocTransformAliasSet &
+getRematBundleSet(const RematBundleSearchContext &context, unsigned setId) {
+  const wave::RegAllocTransformAliasSet *set = context.sets.lookup(setId);
+  assert(set && "remat bundle alias set missing");
+  return *set;
+}
+
+static int64_t getRematRootIncrementalCost(const RematReliefRoot &root,
+                                           const RematBundleState &state) {
+  int64_t cost = root.useCost;
+  for (auto &[site, values] : root.siteValues) {
+    int64_t scale = getRematReliefLoopCostScale(site);
+    auto existing = state.siteValues.find(site);
+    for (Value value : values)
+      if (existing == state.siteValues.end() ||
+          !existing->second.contains(value))
+        cost += scale;
+  }
+  return cost;
+}
+
+static RegClassPressure
+getRematRootExtensionAddedPressure(const RematReliefRoot &root,
+                                   const RematBundleState &state,
+                                   const RematBundleSearchContext &context) {
+  RegClassPressure added = state.added;
+  for (unsigned setId : root.pressureLeafSets) {
+    if (state.pressureLeafSets.contains(setId))
+      continue;
+    const wave::RegAllocTransformAliasSet &set =
+        getRematBundleSet(context, setId);
+    addRegClassPressure(added, set.regClass, set.width);
+  }
+  return added;
+}
+
+static RegClassPressure
+getRematRootExtensionRemovedPressure(const RematReliefRoot &root,
+                                     const RematBundleState &state) {
+  RegClassPressure removed = state.removed;
+  addRegClassPressure(removed, root.set->regClass, root.set->width);
+  return removed;
+}
+
+static bool rematPressuresRespectOtherClassBudgets(
+    RegClassPressure added, RegClassPressure removed,
+    const RematBundleSearchContext &context) {
+  for (waveamdmachine::RegClass regClass : kRegClasses) {
+    unsigned index = getRegClassIndex(regClass);
+    int64_t after = context.before[index] + added[index] - removed[index];
+    if (after < 0)
+      return false;
+    if (!isFailurePressureClass(regClass, context.failureClassName) &&
+        after > context.allowed[index])
+      return false;
+  }
+  return true;
+}
+
+static int64_t
+getRematBundleFailurePressureGain(RegClassPressure added,
+                                  RegClassPressure removed,
+                                  const RematBundleSearchContext &context) {
+  return getFailurePressure(removed, context.failureClassName) -
+         getFailurePressure(added, context.failureClassName);
+}
+
+static bool rootConnectsToBundle(const RematReliefRoot &root,
+                                 const RematBundleState &state) {
+  if (state.indices.empty())
+    return true;
+  return llvm::any_of(root.pressureLeafSets, [&](unsigned setId) {
+    return state.pressureLeafSets.contains(setId);
   });
 }
 
-static bool rootConnectsToPlan(const RematReliefRoot &root,
-                               ArrayRef<const RematReliefRoot *> roots) {
-  return llvm::any_of(roots, [&](const RematReliefRoot *member) {
-    return rootsSharePressureLeaf(root, *member);
-  });
+static std::optional<RematRootExtension>
+getRematRootExtension(unsigned index, ArrayRef<RematReliefRoot> roots,
+                      const RematBundleState &state,
+                      const RematBundleSearchContext &context) {
+  const RematReliefRoot &root = roots[index];
+  if (state.selectedRoots.contains(index) || !rootConnectsToBundle(root, state))
+    return std::nullopt;
+  assert(isFailurePressureClass(root.set->regClass, context.failureClassName) &&
+         "remat root outside failure class");
+  RegClassPressure added =
+      getRematRootExtensionAddedPressure(root, state, context);
+  RegClassPressure removed = getRematRootExtensionRemovedPressure(root, state);
+  bool usesFailurePosition =
+      state.usesFailurePosition || root.usesFailurePosition;
+  // Other-class overflow cannot recover: roots remove failure-class pressure.
+  if (!usesFailurePosition &&
+      !rematPressuresRespectOtherClassBudgets(added, removed, context))
+    return std::nullopt;
+  return RematRootExtension{
+      getRematBundleFailurePressureGain(added, removed, context),
+      state.cost + getRematRootIncrementalCost(root, state), index};
+}
+
+static void addRematRootToBundle(unsigned index,
+                                 ArrayRef<RematReliefRoot> roots,
+                                 const RematBundleSearchContext &context,
+                                 RematBundleState &state) {
+  const RematReliefRoot &root = roots[index];
+  assert(state.selectedRoots.insert(index).second &&
+         "duplicate remat bundle root");
+  state.indices.push_back(index);
+  state.cost += getRematRootIncrementalCost(root, state);
+  for (auto &[site, values] : root.siteValues) {
+    DenseSet<Value> &siteValues = state.siteValues[site];
+    siteValues.insert(values.begin(), values.end());
+  }
+  addRegClassPressure(state.removed, root.set->regClass, root.set->width);
+  for (unsigned setId : root.pressureLeafSets) {
+    if (!state.pressureLeafSets.insert(setId).second)
+      continue;
+    const wave::RegAllocTransformAliasSet &set =
+        getRematBundleSet(context, setId);
+    addRegClassPressure(state.added, set.regClass, set.width);
+  }
+  state.usesFailurePosition |= root.usesFailurePosition;
+}
+
+static bool
+rematBundlePassesPressureCheck(const RematBundleState &state,
+                               const RematBundleSearchContext &context) {
+  if (state.usesFailurePosition)
+    return true;
+  return getRematBundleFailurePressureGain(state.added, state.removed,
+                                           context) > 0 &&
+         rematPressuresRespectOtherClassBudgets(state.added, state.removed,
+                                                context);
 }
 
 static bool rematRootsAreConnected(ArrayRef<const RematReliefRoot *> roots) {
   if (roots.size() < 2)
     return true;
+  DenseMap<unsigned, SmallVector<unsigned>> rootsByLeaf;
+  for (auto [index, root] : llvm::enumerate(roots))
+    for (unsigned setId : root->pressureLeafSets)
+      rootsByLeaf[setId].push_back(static_cast<unsigned>(index));
   SmallVector<char> reached(roots.size(), false);
+  SmallVector<unsigned> worklist = {0};
   reached.front() = true;
-  for (unsigned pass = 0; pass < roots.size(); ++pass)
-    for (auto [index, root] : llvm::enumerate(roots)) {
-      if (!reached[index])
-        continue;
-      for (auto [otherIndex, other] : llvm::enumerate(roots))
-        if (!reached[otherIndex] && rootsSharePressureLeaf(*root, *other))
-          reached[otherIndex] = true;
+  for (unsigned cursor = 0; cursor < worklist.size(); ++cursor) {
+    unsigned index = worklist[cursor];
+    for (unsigned setId : roots[index]->pressureLeafSets) {
+      auto neighbors = rootsByLeaf.find(setId);
+      assert(neighbors != rootsByLeaf.end() && "remat leaf has no roots");
+      for (unsigned neighbor : neighbors->second)
+        if (!reached[neighbor]) {
+          reached[neighbor] = true;
+          worklist.push_back(neighbor);
+        }
     }
+  }
   return llvm::all_of(reached, [](char value) { return value; });
-}
-
-static int64_t
-getRematFailurePressureGain(ArrayRef<const RematReliefRoot *> roots,
-                            const RegAllocTransformFailure &failureRecord,
-                            ArrayRef<wave::RegAllocTransformAliasSet> sets) {
-  RegClassPressure removed = getRematRemovedPressure(roots);
-  RegClassPressure added = getRematExtendedLeafPressure(roots, sets);
-  return getFailurePressure(removed, failureRecord.className) -
-         getFailurePressure(added, failureRecord.className);
 }
 
 static bool
@@ -765,8 +941,7 @@ static void
 pruneRematRootIndices(func::FuncOp func, SmallVectorImpl<unsigned> &indices,
                       ArrayRef<RematReliefRoot> roots,
                       const RegAllocTransformFailure &failureRecord,
-                      ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                      const RematReliefContext &context) {
+                      ArrayRef<wave::RegAllocTransformAliasSet> sets) {
   while (indices.size() > 1) {
     SmallVector<unsigned> removalOrder(indices.begin(), indices.end());
     llvm::stable_sort(removalOrder, [&](unsigned lhs, unsigned rhs) {
@@ -782,8 +957,7 @@ pruneRematRootIndices(func::FuncOp func, SmallVectorImpl<unsigned> &indices,
       SmallVector<const RematReliefRoot *> refs =
           getRematRootRefs(roots, trial);
       if (!rematRootsAreConnected(refs) ||
-          !rematRootsPassPressureCheck(func, refs, failureRecord, sets,
-                                       context))
+          !rematRootsPassPressureCheck(func, refs, failureRecord, sets))
         continue;
       indices.assign(trial.begin(), trial.end());
       removed = true;
@@ -799,31 +973,31 @@ growRematRootBundle(func::FuncOp func, unsigned seed,
                     ArrayRef<RematReliefRoot> roots,
                     const RegAllocTransformFailure &failureRecord,
                     ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                    const RematReliefContext &context) {
-  SmallVector<unsigned> indices = {seed};
+                    const RematBundleSearchContext &context) {
+  RematBundleState state;
+  std::optional<RematRootExtension> seedExtension =
+      getRematRootExtension(seed, roots, state, context);
+  if (!seedExtension)
+    return std::nullopt;
+  addRematRootToBundle(seed, roots, context, state);
   while (true) {
-    SmallVector<const RematReliefRoot *> refs =
-        getRematRootRefs(roots, indices);
-    if (rematRootsPassPressureCheck(func, refs, failureRecord, sets, context)) {
-      pruneRematRootIndices(func, indices, roots, failureRecord, sets, context);
-      return indices;
+    if (rematBundlePassesPressureCheck(state, context)) {
+      pruneRematRootIndices(func, state.indices, roots, failureRecord, sets);
+      return state.indices;
     }
 
     std::optional<RematRootExtension> next;
-    for (auto [index, root] : llvm::enumerate(roots)) {
-      if (llvm::is_contained(indices, index) || !rootConnectsToPlan(root, refs))
+    for (unsigned index : llvm::seq<unsigned>(roots.size())) {
+      std::optional<RematRootExtension> candidate =
+          getRematRootExtension(index, roots, state, context);
+      if (!candidate)
         continue;
-      SmallVector<const RematReliefRoot *> trial(refs.begin(), refs.end());
-      trial.push_back(&root);
-      int64_t gain = getRematFailurePressureGain(trial, failureRecord, sets);
-      int64_t cost = getRematPlanCost(trial);
-      RematRootExtension candidate = {gain, cost, static_cast<unsigned>(index)};
-      if (isBetterRematRootExtension(candidate, next, roots))
-        next = candidate;
+      if (isBetterRematRootExtension(*candidate, next, roots))
+        next = *candidate;
     }
     if (!next)
       return std::nullopt;
-    indices.push_back(next->index);
+    addRematRootToBundle(next->index, roots, context, state);
   }
 }
 
@@ -875,10 +1049,12 @@ selectRematReliefPlan(func::FuncOp func,
     return lhs.set->id < rhs.set->id;
   });
 
+  RematBundleSearchContext searchContext =
+      buildRematBundleSearchContext(func, failureRecord, sets);
   std::optional<RematReliefPlan> best;
   for (unsigned seed : llvm::seq<unsigned>(roots.size())) {
-    std::optional<SmallVector<unsigned>> indices =
-        growRematRootBundle(func, seed, roots, failureRecord, sets, context);
+    std::optional<SmallVector<unsigned>> indices = growRematRootBundle(
+        func, seed, roots, failureRecord, sets, searchContext);
     if (!indices)
       continue;
     RematReliefPlan candidate = buildRematReliefPlan(roots, *indices);
