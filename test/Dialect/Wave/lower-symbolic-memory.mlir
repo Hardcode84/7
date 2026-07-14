@@ -229,6 +229,37 @@ func.func @affine_packet_producer(
 
 // -----
 
+// CHECK-LABEL: func.func @packet_item_base_selection(
+// CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
+// CHECK-COUNT-1: wave.workitem_id 0
+// CHECK: wave.ptr_cast [[FIRST]]
+// CHECK: wave.load
+// CHECK: wave.ptr_cast [[SECOND]]
+// CHECK: wave.load
+// CHECK-NOT: wave.gather
+func.func @packet_item_base_selection(
+    %first: !wave.ptr<#wave.shared, i32>,
+    %second: !wave.ptr<#wave.shared, i32>)
+    -> !wave.simd<vector<2xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %indices = wave.pack %item, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %value, %token = wave.gather %first, %second mapping
+      <base = <"idx - item">, bit_offset = <"32 * slot">>
+      bindings []() packet_bindings ["idx"](%indices)
+      : (!wave.ptr<#wave.shared, i32>, !wave.ptr<#wave.shared, i32>,
+         !wave.simd<vector<2xi32>, 32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
 // Internal packet symbols cannot alias declared mapping bindings.
 // CHECK-LABEL: func.func @binding_name_collision(
 // CHECK: wave.index_expr {{.*}} ["origin", "origin_0"](

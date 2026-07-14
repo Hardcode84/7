@@ -58,6 +58,7 @@ struct SlotMapping {
 };
 
 struct PacketBindingState {
+  llvm::DenseMap<Value, Value> canonicalValues;
   llvm::DenseMap<Value, StringRef> byValue;
   llvm::StringMap<Value> reserved;
 };
@@ -130,6 +131,7 @@ struct MappingDomain {
 };
 
 struct MappedItem {
+  SmallVector<Value> aliases;
   Value value;
   sym::PredHandle range;
 };
@@ -202,6 +204,41 @@ static DenseI32ArrayAttr getWorkgroupShape(Operation *op) {
   return {};
 }
 
+static bool isPacketIndexProducer(Operation *op) {
+  return isa<AssumeOp, BinaryOp, ExtractOp, IndexExprOp, PackOp, SelectOp,
+             SplatOp>(op);
+}
+
+static std::array<SmallVector<Value>, 3>
+collectPacketWorkitemIds(const MemoryAccess &access, Type type) {
+  std::array<SmallVector<Value>, 3> workitems;
+  SmallVector<Value> worklist(access.packetBindings);
+  DenseSet<Value> visited;
+  while (!worklist.empty()) {
+    Value value = worklist.pop_back_val();
+    if (!visited.insert(value).second)
+      continue;
+    if (WorkitemIdOp workitem = value.getDefiningOp<WorkitemIdOp>()) {
+      if (value.getType() == type)
+        workitems[workitem.getAxis()].push_back(value);
+      continue;
+    }
+    Operation *producer = value.getDefiningOp();
+    if (!producer || !isPacketIndexProducer(producer))
+      continue;
+    llvm::append_range(worklist, producer->getOperands());
+  }
+  return workitems;
+}
+
+static Value getOrCreatePacketWorkitemId(IRRewriter &rewriter, Location loc,
+                                         Type type, unsigned axis,
+                                         ArrayRef<Value> workitems) {
+  if (!workitems.empty())
+    return workitems.front();
+  return WorkitemIdOp::create(rewriter, loc, type, axis);
+}
+
 static FailureOr<MappedItem> materializeItem(IRRewriter &rewriter,
                                              const MemoryAccess &access,
                                              sym::Store &store) {
@@ -220,9 +257,12 @@ static FailureOr<MappedItem> materializeItem(IRRewriter &rewriter,
   Type type = SimdType::get(access.op->getContext(), rewriter.getI32Type(),
                             access.packetType.getWidth());
   Location loc = access.op->getLoc();
-  Value item = WorkitemIdOp::create(rewriter, loc, type, 0);
+  std::array<SmallVector<Value>, 3> workitems =
+      collectPacketWorkitemIds(access, type);
+  Value item =
+      getOrCreatePacketWorkitemId(rewriter, loc, type, 0, workitems[0]);
   if (dims[1] > 1) {
-    Value y = WorkitemIdOp::create(rewriter, loc, type, 1);
+    Value y = getOrCreatePacketWorkitemId(rewriter, loc, type, 1, workitems[1]);
     Value scale = ConstantOp::create(rewriter, loc, type,
                                      rewriter.getI32IntegerAttr(dims[0]));
     Value scaled =
@@ -231,7 +271,7 @@ static FailureOr<MappedItem> materializeItem(IRRewriter &rewriter,
         BinaryOp::create(rewriter, loc, type, BinaryKind::AddI, item, scaled);
   }
   if (dims[2] > 1) {
-    Value z = WorkitemIdOp::create(rewriter, loc, type, 2);
+    Value z = getOrCreatePacketWorkitemId(rewriter, loc, type, 2, workitems[2]);
     Value scale = ConstantOp::create(
         rewriter, loc, type,
         rewriter.getI32IntegerAttr(static_cast<int32_t>(xy)));
@@ -244,7 +284,10 @@ static FailureOr<MappedItem> materializeItem(IRRewriter &rewriter,
       sym::rangeAssumption(store, "item", 0, itemCount - 1);
   if (failed(range))
     return access.op->emitOpError("failed to construct workitem range");
-  return MappedItem{item, *range};
+  SmallVector<Value> aliases;
+  if (dims[1] == 1 && dims[2] == 1)
+    aliases = std::move(workitems[0]);
+  return MappedItem{std::move(aliases), item, *range};
 }
 
 static FailureOr<sym::ExprHandle>
@@ -299,14 +342,18 @@ static LogicalResult appendBinding(SlotMapping &mapping, StringRef name,
   return success();
 }
 
-static void seedPacketBindingState(const MemoryAccess &access, Value item,
+static void seedPacketBindingState(const MemoryAccess &access,
+                                   const MappedItem &item,
                                    PacketBindingState &state) {
   state.reserved.try_emplace("block", Value());
   state.reserved.try_emplace("slot", Value());
-  auto [itemIt, itemInserted] = state.reserved.try_emplace("item", item);
+  auto [itemIt, itemInserted] = state.reserved.try_emplace("item", item.value);
   (void)itemInserted;
-  if (item)
-    state.byValue.try_emplace(item, itemIt->getKey());
+  if (item.value) {
+    state.byValue.try_emplace(item.value, itemIt->getKey());
+    for (Value alias : item.aliases)
+      state.canonicalValues.try_emplace(alias, item.value);
+  }
 
   for (auto [name, value] : llvm::zip(access.bindingNames, access.bindings)) {
     auto [it, inserted] = state.reserved.try_emplace(name, value);
@@ -325,9 +372,12 @@ remapSymbolicBindings(sym::Store &store,
                       SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
   for (const SymbolicOffsetBinding &binding : bindings) {
     StringRef oldName = getSymbolName(binding);
+    Value value = state.canonicalValues.lookup(binding.value);
+    if (!value)
+      value = binding.value;
     StringRef newName = reserveIndexExprBindingName(
-        oldName, binding.value, state.reserved, state.byValue);
-    if (failed(appendBinding(mapping, newName, binding.value)))
+        oldName, value, state.reserved, state.byValue);
+    if (failed(appendBinding(mapping, newName, value)))
       return failure();
     if (newName == oldName)
       continue;
@@ -1279,7 +1329,7 @@ buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
                         ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
                         ArrayRef<ActiveControl> controls) {
   PacketBindingState bindingState;
-  seedPacketBindingState(access, item.value, bindingState);
+  seedPacketBindingState(access, item, bindingState);
   SmallVector<SlotMapping> mappings;
   mappings.reserve(slotCount);
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {

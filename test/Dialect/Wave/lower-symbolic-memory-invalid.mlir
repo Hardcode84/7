@@ -102,6 +102,29 @@ func.func @lane_partition_base(%first: !wave.ptr<#wave.shared, i32>,
 
 // -----
 
+func.func @multidim_axis_is_not_item(
+    %first: !wave.ptr<#wave.shared, i32>,
+    %second: !wave.ptr<#wave.shared, i32>)
+    attributes {wave.workgroup_size = array<i32: 4, 2, 1>} {
+  %x = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %indices = wave.pack %x, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  // expected-error @+1 {{mapping is not a defined, byte-addressable local memory point}}
+  %value, %token = wave.gather %first, %second mapping
+      <base = <"idx - item">, bit_offset = <"32 * slot">>
+      bindings []() packet_bindings ["idx"](%indices)
+      : (!wave.ptr<#wave.shared, i32>, !wave.ptr<#wave.shared, i32>,
+         !wave.simd<vector<2xi32>, 32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
 func.func @private_address_space(%base: !wave.ptr<#wave.private, i32>) {
   // expected-error @+1 {{lowering requires global or shared pointer bases}}
   %value, %token = wave.gather %base mapping
