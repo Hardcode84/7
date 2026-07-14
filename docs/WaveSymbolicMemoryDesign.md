@@ -9,8 +9,9 @@ packet(block, item, slot) <-> memory(base, target_block, bit_offset)
 ```
 
 `wave.gather` reads through the map. `wave.scatter` writes through the same
-map. Lowering asks the Wave symbolic engine how to split the map into legal
-loads or stores.
+map. Lowering uses the Wave symbolic engine to prove maximal physical runs,
+then emits the most efficient legal transaction cover. Single-element accesses
+are the terminal fallback.
 
 The operation carries no Triton layout, layout name, transaction plan, or
 movement class. Triton layout objects disappear after the importer constructs
@@ -338,7 +339,9 @@ its map. If reachability is unknown, treat the operation as live.
 For a live operation, lowering needs the map only at packet points that can
 execute. It simplifies those points using the specialized launch shape,
 predication, and SSA bindings. A failed proof is not an invalid configuration:
-it selects a narrower lowering. Proof-budget exhaustion has the same result.
+it rejects that transaction candidate and tries the next narrower candidate.
+Proof-budget exhaustion has the same result. Neither scalarizes the whole
+operation eagerly.
 
 Pointer bounds follow the same contract as ordinary `wave.load` and
 `wave.store`. A known `wave.alloc` gives the pass extra range facts. An unknown
@@ -352,8 +355,8 @@ access; it does not invalidate the map.
 An actually executed map may still have no legal interpretation: for example,
 it may select a missing base or require unsupported remote-block access. Such
 an operation can remain in mixed IR. It may fail only when a pipeline requires
-complete legalization and no semantics-preserving minimum lowering exists.
-Detection and diagnostic detail are best effort.
+complete legalization and no semantics-preserving single-element or container
+fallback exists. Detection and diagnostic detail are best effort.
 
 ## Lowering
 
@@ -370,37 +373,26 @@ packet component produces a scalar or lane-SIMD binding that existing
 `wave.index_expr` materialization can consume. Dynamic gather/scatter indices
 need no new expression value kind.
 
+Do not turn extracted components into unrelated opaque symbols immediately.
+Run the existing symbolic-offset builder through `wave.index_expr`, splat,
+arithmetic, and select producers first. Reuse one symbol for each irreducible
+SSA leaf across all slots. An index packet built as `origin + slot` then retains
+that relation, so contiguity can be proved after extraction. Arbitrary runtime
+indices remain opaque and take narrower candidates.
+
 Skip packet points proven inactive. Unknown activity stays active.
 
-### 2. Emit The Minimum Access
+### 2. Prove Physical Runs
 
-For each remaining slot, materialize one element access per active Wave item:
+Specialize `slot` but keep `block`, `item`, and runtime bindings symbolic. For
+each live slot `s`, normalize:
 
 ```text
-(base, target_block, bit_offset) = A(block, item, slot; bindings)
+A_s = (base_s, target_block_s, bit_offset_s)
 ```
 
-The `item` dimension is already represented by Wave SIMD lanes. The minimum
-operation therefore has one scalar element per active lane, not one operation
-per lane.
-
-Gather emits a read for every active point. It may reuse a read when equal
-physical points and memory semantics permit. Scatter emits every active write.
-Address equality alone never removes a scatter point.
-
-Sub-byte points use the containing addressable storage unit. Gather extracts
-the selected bits. Scatter combines all owned fields into one container write,
-or uses a legal target bit update. If neither preserves untouched bits and
-cross-lane collisions, no generic minimum scatter exists.
-
-This minimum path is the correctness fallback. It needs no contiguity,
-injectivity, alignment beyond the scalar/container requirement, or maximality
-proof.
-
-### 3. Widen Proven Slot Runs
-
-Widening is optional. For slots `s .. s + n - 1` of the same `(block, item)`,
-prove for every `k`:
+First test packet-order runs. For candidate slots `s .. s + n - 1`, prove for
+every `k`:
 
 ```text
 base(block, item, s + k) = base(block, item, s)
@@ -408,37 +400,117 @@ target_block(block, item, s + k) = target_block(block, item, s)
 bit_offset(block, item, s + k) = bit_offset(block, item, s) + k * element_bits
 ```
 
-Then check payload type, byte packing, alignment, address space, active mask,
-and target transaction limits. A swizzle, padding, partition, rotation, or
-cluster boundary naturally breaks the equalities.
+Build each equality with `sym::composePredCmp` and query it with
+`sym::checkPredicate` under launch-range and binding assumptions.
+Only `True` forms an edge. `False` and `Unknown` leave the points separate.
+
+Packet order is only the fast path. A layout may place packet slots in a
+different physical order. Build a symbolic successor graph as well:
+
+```text
+successor(a, b) iff
+  base_b = base_a and
+  target_block_b = target_block_a and
+  bit_offset_b = bit_offset_a + element_bits
+```
+
+Keep all proven successor edges. Unbranched components become maximal physical
+runs. Competing paths remain alternatives for the transaction planner. Gather
+may collapse proven equal physical points before building runs, then replicate
+the loaded value. Scatter keeps every point; equal addresses do not remove
+writes or create successor edges.
+
+A swizzle, padding, partition, rotation, cluster, or dynamic-index boundary
+splits a run only where the symbolic engine cannot prove the successor. Cache
+normalized expressions and proof results across candidate widths.
+
+### 3. Choose The Widest Legal Cover
+
+Ask the target for supported transaction shapes in descending payload width.
+Generic shapes supply payload width, required alignment, operation kind, and
+cost. Target-specific matchers may also propose a shape such as a transpose
+load by supplying its expected packet-to-memory relation. Prove that relation
+against the same symbolic map. All candidate state is transient; none becomes
+an operation attribute.
+
+For every physical run or target-specific match, enumerate candidates in
+descending payload width and prove the remaining requirements:
+
+- first-point alignment satisfies the transaction;
+- element type and bit packing cover the payload exactly;
+- address space, cache policy, and `target_block` support the operation;
+- every slot has the same active-lane semantics;
+- the access stays within any known allocation facts.
+
+Use the symbolic engine for alignment and range predicates. Target legality is
+queried only after contiguity succeeds.
+
+Choose a non-overlapping cover of all live packet points with this
+lexicographic objective:
+
+1. minimize packet points lowered as single-element accesses;
+2. minimize target transaction cost, then transaction count;
+3. prefer wider payloads and stable packet order as tie-breakers.
+
+Use interval dynamic programming for unbranched physical runs. Use a bounded
+exact-cover search only for components with competing successor paths or
+target-specific relation candidates. If the widest candidate fails, try every
+smaller supported vector shape covering those points before admitting a
+single-element candidate. One failed or exhausted proof never scalarizes an
+unrelated part of the map.
+
+Spend proof budget where it can remove scalar accesses. Run cheap widest-first
+queries first. If the selected cover still contains a single-element access,
+retry unresolved multi-element candidates that could replace it with the
+remaining proof budget before finalizing the cover. Cache every result; never
+repeat an identical predicate query.
 
 Do not combine unrelated `item` points into a vector payload. `wave.load` and
 `wave.store` already execute their item dimension across SIMD lanes; widening
-adds per-lane slot payload.
+adds per-lane slot payload. A target-specific candidate may cover an item
+permutation only when its relation matcher proves the complete mapping.
 
-Unknown equality, target legality, or alignment takes the minimum path. Proof
-budget exhaustion does the same. The pass may emit only minimum accesses and
-leave widening to `wave-coalesce-memory`.
+Here, scalar fallback means one logical element per active lane. The planner
+minimizes scalarized points across the whole run and admits them only when no
+non-overlapping all-vector cover exists among proved candidates. `Unknown`
+cannot be emitted for correctness, so necessity is relative to the available
+proofs and target operations.
+
+Sub-byte points still use an addressable container: gather extracts selected
+bits; scatter packs all owned fields or uses a legal target bit update. A live
+sub-byte scatter with neither option has no generic fallback.
+
+Example: four `f16` packet slots map to bit offsets:
+
+```text
+[B, B + 32, B + 16, B + 48]
+```
+
+The successor proof produces physical order `[0, 2, 1, 3]`. If the target
+accepts a 64-bit transaction at `B`, gather emits one load and repacks its four
+components into packet order. If only 32-bit transactions are proved legal, it
+emits two. It never starts with four `f16` loads and waits for coalescing.
 
 ### 4. Emit Ordinary Wave IR
 
-For each group:
+For each chosen transaction:
 
 1. Materialize `base`, `target_block`, and `bit_offset`.
 2. Select the pointer base.
 3. Split byte address from any intra-byte bit position.
 4. Emit local or target-block address construction.
-5. Emit ordinary `wave.load`, `wave.store`, or target-specific remote access.
-6. Extract, insert, pack, or redistribute slot components into packet order.
+5. Emit the selected vector, transpose, scalar, or remote memory operation.
+6. Gather: unpack physical order into packet order.
+7. Scatter: pack packet values into physical order before the store.
 
 Generated memory operations are siblings after the input dependency. Join their
 tokens for the symbolic operation's result. Do not serialize them unless an
 explicit source token requires it.
 
-Existing pointer simplification and memory coalescing may improve the emitted
-IR. Correctness does not depend on them reconstructing the original layout.
-Specialized target selection may replace a proved pattern with an operation
-such as `waveamd.transpose_load`; the generic minimum lowering remains valid.
+Pointer simplification and `wave-coalesce-memory` may clean up interactions
+between independently lowered operations. Symbolic memory lowering itself must
+emit the efficient per-operation cover; no later pass is expected to rebuild
+wide transactions from scalar accesses.
 
 ## Memory Ordering
 
@@ -488,16 +560,18 @@ after it.
 
 ## Failure Boundary
 
-Optimization-proof failure and budget exhaustion take the minimum lowering.
-Target uncertainty does the same when a generic minimum exists; otherwise the
-operation remains for required legalization. None diagnoses at this stage.
+Optimization-proof failure and budget exhaustion reject one candidate. The
+planner continues through narrower vector shapes and admits a single-element
+access only after none is proved legal. Target uncertainty follows the same
+rule when a generic fallback exists; otherwise the operation remains for
+required legalization. None diagnoses at this stage.
 
 A proven-dead operation never diagnoses. A live operation may fail only at a
-required legalization boundary when no semantics-preserving minimum lowering
-exists. Examples include an unmaterializable base, unsupported remote-block
-access, or a sub-byte scatter with no legal container update. These examples
-do not define a promised diagnostic set. Invalid configurations and diagnostic
-wording are detected on a best-effort basis, not as a verifier contract.
+required legalization boundary when no semantics-preserving fallback exists.
+Examples include an unmaterializable base, unsupported remote-block access, or
+a sub-byte scatter with no legal container update. These examples do not define
+a promised diagnostic set. Invalid configurations and diagnostic wording are
+detected on a best-effort basis, not as a verifier contract.
 
 ## Triton Bridge Sequence
 
@@ -512,8 +586,8 @@ and recognizes only a narrow local-load subset. Replace that surface in stages:
 4. Add packet bindings for indexed local gather/scatter.
 5. Preserve partition and cluster outputs as `base` and `target_block`.
 6. Add sub-byte container lowering and target-specific remote access.
-7. Recognize profitable transpose and vector transactions after the generic
-   path works.
+7. Add target transaction candidates, including transpose forms, to the same
+   widest-cover planner.
 
 At every stage, an unsupported source operation stays in its source dialect
 until a later required legalization. No Triton layout attaches to a Wave
@@ -534,11 +608,13 @@ Attribute and verifier tests:
 Lowering tests:
 
 - packet binding specializes and extracts each dynamic-index slot;
-- minimum contiguous access remains correct without widening;
-- proved contiguous slots may become one vector access;
-- strided map splits into scalar accesses;
-- swizzle boundary splits a vector;
-- padded boundary splits a vector;
+- affine packet-index producers retain cross-slot contiguity;
+- opaque runtime indices scalarize only after vector proofs fail;
+- a proved contiguous run emits the widest legal access without coalescing;
+- permuted packet slots emit one physical-order vector access plus repacking;
+- failed maximum-width alignment selects the next vector width, not scalars;
+- mixed contiguous and strided points scalarize only the isolated points;
+- swizzle and padded boundaries get the widest cover on each side;
 - partition expression selects the right base;
 - cluster output preserves `target_block`;
 - rotating layout uses its static coordinate-derived phase;
@@ -547,7 +623,9 @@ Lowering tests:
 - gather replication loads every packet result;
 - colliding scatter points emit every write;
 - independently proved equal scatter values may share one writer;
-- failed proofs and exhausted proof budgets take the minimum path;
+- a failed or exhausted proof affects only its transaction candidate;
+- last-chance proof budget is spent on candidates that remove scalar accesses;
+- disabling `wave-coalesce-memory` does not change transaction width;
 - a dead unsupported mapping is erased without a diagnostic;
 - a live unsupported mapping fails only at required legalization;
 - generated transactions share one dependency and join tokens.
@@ -567,7 +645,10 @@ survives, and supported symbolic maps lower to ordinary Wave memory operations.
 - Triton layout composition ends before Wave operation emission.
 - Verifiers remain structural; unreachable invalid configurations are
   well-formed.
-- Failed optimization proofs and proof-budget exhaustion take a correct minimum
-  lowering.
-- Only live operations with no legal minimum access may fail required
-  legalization; diagnostics are best effort.
+- Symbolic proofs form maximal physical runs and drive a widest-legal target
+  cover during symbolic memory lowering.
+- The planner minimizes single-element accesses globally and uses them only
+  when proved vector candidates cannot form a complete non-overlapping cover.
+- Memory coalescing is cleanup, not the source of per-operation vectorization.
+- Only live operations with no legal fallback may fail required legalization;
+  diagnostics are best effort.
