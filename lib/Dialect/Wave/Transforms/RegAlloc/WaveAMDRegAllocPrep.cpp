@@ -122,7 +122,8 @@ static bool canRematerializeDuplicateRegValue(Value v,
   Operation *def = v.getDefiningOp();
   if (!def || !wave::regalloc::isCheapVGPRPressureReliefExpr(def))
     return false;
-  if (isa<waveamdmachine::VWorkitemIdXOp>(def))
+  if (isa<waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
+          waveamdmachine::VWorkitemIdZOp>(def))
     return false;
   wave::HardwareResourceEffects effects = wave::getHardwareResourceEffects(def);
   if (!effects.reads.empty() || !effects.writes.empty())

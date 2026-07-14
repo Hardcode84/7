@@ -2082,16 +2082,17 @@ inline Value joinMemorySpillTokens(Type tokenType, ArrayRef<Value> tokens,
 
 inline bool isMemorySpillSuppressedVGPRExpr(Operation *op) {
   return isa_and_nonnull<
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VMovB32TupleOp,
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
+      waveamdmachine::VWorkitemIdZOp, waveamdmachine::VMovB32TupleOp,
       waveamdmachine::CopyTupleOp, waveamdmachine::UpdateTupleOp,
       waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
       waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
       waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
-      waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
-      waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
-      waveamdmachine::VPermB32Op, waveamdmachine::VBitOp3B32Op,
-      waveamdmachine::VCndmaskB32TupleOp, waveamdmachine::VCndmaskB32VccOp,
-      waveamdmachine::VAccvgprReadB32TupleOp,
+      waveamdmachine::VBfeU32Op, waveamdmachine::VMulLoU32Op,
+      waveamdmachine::VAddLshlU32Op, waveamdmachine::VXorB32Op,
+      waveamdmachine::VAndOrB32Op, waveamdmachine::VPermB32Op,
+      waveamdmachine::VBitOp3B32Op, waveamdmachine::VCndmaskB32TupleOp,
+      waveamdmachine::VCndmaskB32VccOp, waveamdmachine::VAccvgprReadB32TupleOp,
       waveamdmachine::VAccvgprWriteB32TupleOp>(op);
 }
 

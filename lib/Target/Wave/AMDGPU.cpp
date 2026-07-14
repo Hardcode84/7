@@ -541,6 +541,7 @@ private:
   unsigned vMulLoU32() const { return opcodes.vMulLoU32; }
   unsigned vMulHiU32() const { return opcodes.vMulHiU32; }
   unsigned vAdd3U32() const { return opcodes.vAdd3U32; }
+  unsigned vBfeU32() const { return opcodes.vBfeU32; }
   unsigned vMadI32I24() const { return opcodes.vMadI32I24; }
   unsigned vMadU32U24() const { return opcodes.vMadU32U24; }
   unsigned vLshlAddU32() const { return opcodes.vLshlAddU32; }
@@ -1489,6 +1490,7 @@ private:
     bool usesFlatScratch = getBoolAttr(func, kUsesFlatScratchAttr, false);
     bool usesWgY = false;
     bool usesWgZ = false;
+    unsigned maxWorkitemIdAxis = 0;
     wave::WaveAMDKernelEntryRegs entryRegs =
         wave::getWaveAMDKernelEntryRegs(func);
     func.walk([&](Operation *op) {
@@ -1496,6 +1498,18 @@ private:
         usesWgY = true;
       if (isa<waveamdmachine::SWorkgroupIdZOp>(op))
         usesWgZ = true;
+      if (waveamdmachine::VWorkitemIdXOp workitemX =
+              dyn_cast<waveamdmachine::VWorkitemIdXOp>(op)) {
+        IntegerAttr axis = workitemX->getAttrOfType<IntegerAttr>(
+            wave::getWaveAMDWorkitemIdAxisAttrName());
+        if (axis && axis.getInt() >= 0 && axis.getInt() <= 2)
+          maxWorkitemIdAxis =
+              std::max(maxWorkitemIdAxis, static_cast<unsigned>(axis.getInt()));
+      }
+      if (isa<waveamdmachine::VWorkitemIdYOp>(op))
+        maxWorkitemIdAxis = std::max(maxWorkitemIdAxis, 1u);
+      if (isa<waveamdmachine::VWorkitemIdZOp>(op))
+        maxWorkitemIdAxis = 2;
     });
     if (failed(verifyKernelDescriptor(func, entryRegs)))
       return failure();
@@ -1530,7 +1544,7 @@ private:
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_z " << (usesWgZ ? 1 : 0)
        << "\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_info 0\n";
-    os << "\t\t.amdhsa_system_vgpr_workitem_id 0\n";
+    os << "\t\t.amdhsa_system_vgpr_workitem_id " << maxWorkitemIdAxis << "\n";
     os << "\t\t.amdhsa_next_free_vgpr " << totalVGPRCount << "\n";
     os << "\t\t.amdhsa_next_free_sgpr " << sgprCount << "\n";
     if (isGfx90APlus()) {
@@ -2805,11 +2819,12 @@ private:
           isa<waveamdmachine::VMadI32I24Op>(op) ? vMadI32I24() : vMadU32U24();
       return emitTernaryIntClamp(opcode, op);
     }
-    if (isa<waveamdmachine::VAdd3U32Op, waveamdmachine::VLshlAddU32Op,
-            waveamdmachine::VAddLshlU32Op, waveamdmachine::VAndOrB32Op,
-            waveamdmachine::VOr3B32Op, waveamdmachine::VXadU32Op,
-            waveamdmachine::VPermB32Op>(op)) {
+    if (isa<waveamdmachine::VAdd3U32Op, waveamdmachine::VBfeU32Op,
+            waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddLshlU32Op,
+            waveamdmachine::VAndOrB32Op, waveamdmachine::VOr3B32Op,
+            waveamdmachine::VXadU32Op, waveamdmachine::VPermB32Op>(op)) {
       unsigned opcode = isa<waveamdmachine::VAdd3U32Op>(op)      ? vAdd3U32()
+                        : isa<waveamdmachine::VBfeU32Op>(op)     ? vBfeU32()
                         : isa<waveamdmachine::VLshlAddU32Op>(op) ? vLshlAddU32()
                         : isa<waveamdmachine::VAddLshlU32Op>(op) ? vAddLshlU32()
                         : isa<waveamdmachine::VAndOrB32Op>(op)   ? vAndOrB32()

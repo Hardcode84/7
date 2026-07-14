@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -33,6 +34,10 @@ StringRef getWaveAMDKernargPreloadLengthAttrName() {
 
 StringRef getWaveAMDKernargPreloadOffsetAttrName() {
   return "waveamdmachine.kernarg_preload_offset";
+}
+
+StringRef getWaveAMDWorkitemIdAxisAttrName() {
+  return "waveamdmachine.workitem_id_axis";
 }
 
 static unsigned getUnsignedIntegerAttr(Operation *op, StringRef name) {
@@ -74,8 +79,14 @@ WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func) {
   unsigned workgroupBase = regs.userSGPRCount;
   regs.workgroupIdSGPRs = {workgroupBase, workgroupBase + 1, workgroupBase + 2};
   regs.reservedSGPRs = regs.userSGPRCount + regs.workgroupIdSGPRs.size();
-  regs.workitemIdXVGPR = 0;
+  regs.workitemIdVGPRs = {0, 1, 2};
   regs.reservedVGPRs = 1;
+  func.walk([&](Operation *op) {
+    if (isa<waveamdmachine::VWorkitemIdYOp>(op))
+      regs.reservedVGPRs = std::max(regs.reservedVGPRs, 2u);
+    if (isa<waveamdmachine::VWorkitemIdZOp>(op))
+      regs.reservedVGPRs = std::max(regs.reservedVGPRs, 3u);
+  });
   return regs;
 }
 
@@ -125,6 +136,14 @@ createSubtargetInfo(Operation *op, StringRef consumer) {
     return op->emitError("unsupported AMDGPU target: ")
            << target->triple << "--" << target->chip;
   return sti;
+}
+
+FailureOr<bool> hasWaveAMDPackedTID(Operation *op, StringRef consumer) {
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      createSubtargetInfo(op, consumer);
+  if (failed(sti))
+    return failure();
+  return (*sti)->checkFeatures("+packed-tid");
 }
 
 FailureOr<bool> supportsWaveAMDKernargPreload(Operation *op,

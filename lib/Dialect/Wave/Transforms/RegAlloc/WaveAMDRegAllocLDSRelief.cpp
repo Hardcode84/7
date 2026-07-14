@@ -939,6 +939,17 @@ static unsigned countLDSReliefDwords(const LDSReliefCandidate &candidate) {
   return dwords;
 }
 
+static bool hasNonXWorkgroupDimension(func::FuncOp func) {
+  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+    DenseI32ArrayAttr shape = func->getAttrOfType<DenseI32ArrayAttr>(name);
+    if (!shape)
+      continue;
+    ArrayRef<int32_t> dims = shape.asArrayRef();
+    return (dims.size() > 1 && dims[1] > 1) || (dims.size() > 2 && dims[2] > 1);
+  }
+  return false;
+}
+
 static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
@@ -947,6 +958,9 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
   if (!*failureRecord)
     return success();
   if (!isAGPRRelievableFailure(**failureRecord))
+    return success();
+  // X-based ds_addtid wave bases alias across non-X dimensions.
+  if (hasNonXWorkgroupDimension(func))
     return success();
 
   FailureOr<wave::regalloc::RegisterBudgets> budgets =

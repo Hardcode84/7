@@ -27,12 +27,12 @@ namespace wave {
 
 struct WaveAMDKernelEntryRegs {
   std::array<unsigned, 3> workgroupIdSGPRs = {0, 0, 0};
+  std::array<unsigned, 3> workitemIdVGPRs = {0, 0, 0};
   unsigned userSGPRCount = 0;
   unsigned kernargSegmentPtrSGPR = 0;
   unsigned kernargSegmentPtrWidth = 0;
   unsigned kernargPreloadDwords = 0;
   unsigned kernargPreloadOffsetDwords = 0;
-  unsigned workitemIdXVGPR = 0;
   unsigned reservedSGPRs = 0;
   unsigned reservedVGPRs = 0;
 
@@ -40,10 +40,16 @@ struct WaveAMDKernelEntryRegs {
     assert(axis < workgroupIdSGPRs.size() && "workgroup id axis out of range");
     return workgroupIdSGPRs[axis];
   }
+
+  unsigned workitemIdVGPR(unsigned axis) const {
+    assert(axis < workitemIdVGPRs.size() && "workitem id axis out of range");
+    return workitemIdVGPRs[axis];
+  }
 };
 
 StringRef getWaveAMDKernargPreloadLengthAttrName();
 StringRef getWaveAMDKernargPreloadOffsetAttrName();
+StringRef getWaveAMDWorkitemIdAxisAttrName();
 WaveAMDKernelEntryRegs getWaveAMDKernelEntryRegs(func::FuncOp func);
 unsigned getWaveAMDDefaultKernargPreloadDwords(func::FuncOp func);
 bool hasWaveAMDKernargPreloadRequest(func::FuncOp func);
@@ -53,6 +59,7 @@ FailureOr<unsigned> getWaveAMDMaxKernargPreloadDwords(Operation *op,
                                                       StringRef consumer);
 FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
                                                        StringRef consumer);
+FailureOr<bool> hasWaveAMDPackedTID(Operation *op, StringRef consumer);
 LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
                                                 StringRef consumer);
 LogicalResult verifyWaveAMDKernargPreloadRuntimeSupport(func::FuncOp func,

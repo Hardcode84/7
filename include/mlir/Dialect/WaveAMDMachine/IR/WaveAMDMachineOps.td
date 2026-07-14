@@ -747,9 +747,17 @@ def WaveAMDMachine_SWorkgroupIdZOp
                                        [WaveAMDMachine_NoMachineInst,
                                         WaveAMDMachine_NoAsmEmission, Pure]>;
 
-// Packed workitem id X lives in layout-assigned entry VGPR.
+// Workitem entry values live in layout-assigned VGPRs.
 def WaveAMDMachine_VWorkitemIdXOp
     : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1,
+                                       [WaveAMDMachine_NoMachineInst,
+                                        WaveAMDMachine_NoAsmEmission, Pure]>;
+def WaveAMDMachine_VWorkitemIdYOp
+    : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_y", WaveAMDMachine_VGPR1,
+                                       [WaveAMDMachine_NoMachineInst,
+                                        WaveAMDMachine_NoAsmEmission, Pure]>;
+def WaveAMDMachine_VWorkitemIdZOp
+    : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_z", WaveAMDMachine_VGPR1,
                                        [WaveAMDMachine_NoMachineInst,
                                         WaveAMDMachine_NoAsmEmission, Pure]>;
 
@@ -956,6 +964,9 @@ def WaveAMDMachine_VFfblB32Op
 }
 def WaveAMDMachine_VAdd3U32Op
     : WaveAMDMachine_TernaryIntResult<"v_add3_u32">,
+      WaveAMDMachine_VOP3IntLegality;
+def WaveAMDMachine_VBfeU32Op
+    : WaveAMDMachine_TernaryIntResult<"v_bfe_u32">,
       WaveAMDMachine_VOP3IntLegality;
 def WaveAMDMachine_VMadI32I24Op
     : WaveAMDMachine_TernaryIntResult<"v_mad_i32_i24">,

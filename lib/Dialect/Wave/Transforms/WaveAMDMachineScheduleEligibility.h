@@ -31,7 +31,8 @@ static inline bool isSupportedSchedulerPseudo(Operation *op) {
       waveamdmachine::TokenJoinOp, waveamdmachine::AfterOp,
       waveamdmachine::BarrierInitOp, waveamdmachine::SWorkgroupIdXOp,
       waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::TupleToElementsOp,
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
+      waveamdmachine::VWorkitemIdZOp, waveamdmachine::TupleToElementsOp,
       waveamdmachine::TupleFromElementsOp, waveamdmachine::UpdateTupleOp>(op);
 }
 

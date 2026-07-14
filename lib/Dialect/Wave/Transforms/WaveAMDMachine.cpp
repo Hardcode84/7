@@ -451,6 +451,14 @@ getFunctionWaveWidth(func::FuncOp func) {
   return required;
 }
 
+static unsigned getMaxWorkitemIdAxis(func::FuncOp func) {
+  unsigned maxAxis = 0;
+  func.walk([&](WorkitemIdOp op) {
+    maxAxis = std::max(maxAxis, static_cast<unsigned>(op.getAxis()));
+  });
+  return maxAxis;
+}
+
 static LogicalResult validateTargetWaveWidth(func::FuncOp func) {
   if (!waveamdmachine::findAMDGPUTargetModule(func))
     return success();
@@ -481,13 +489,24 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
     return func.emitError("WaveAMDMachine selection supports one-block funcs");
   if (failed(validateTargetWaveWidth(func)))
     return failure();
-  if (!waveamdmachine::findAMDGPUTargetModule(func))
+  selector.maxWorkitemIdAxis = getMaxWorkitemIdAxis(func);
+  if (!waveamdmachine::findAMDGPUTargetModule(func)) {
+    // Targetless selection follows the backend's packed default target.
+    selector.packedWorkitemIds = selector.maxWorkitemIdAxis != 0;
     return success();
+  }
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       getTargetIsaVersion(func, "WaveAMDMachine selection");
   if (failed(isa))
     return failure();
   selector.targetIsaMajor = isa->Major;
+  if (selector.maxWorkitemIdAxis != 0) {
+    FailureOr<bool> packed =
+        hasWaveAMDPackedTID(func, "WaveAMDMachine workitem id selection");
+    if (failed(packed))
+      return failure();
+    selector.packedWorkitemIds = *packed;
+  }
   return success();
 }
 
@@ -3006,14 +3025,50 @@ LogicalResult WaveAMDMachineSelector::selectWorkgroupId(WorkgroupIdOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectWorkitemId(WorkitemIdOp op) {
-  if (op.getAxis() != 0)
-    return op.emitError(
-        "WaveAMDMachine backend supports only workitem_id along axis 0 (x)");
-  values[op.getResult()] = waveamdmachine::VWorkitemIdXOp::create(
-      builder, op.getLoc(),
+  unsigned axis = op.getAxis();
+  if (axis > 2)
+    return op.emitError("workitem_id axis must be 0, 1, or 2");
+
+  WaveAMDKernelEntryRegs entryRegs = getWaveAMDKernelEntryRegs(func);
+  Type pinned =
       getPinnedRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
-                       /*width=*/1,
-                       getWaveAMDKernelEntryRegs(func).workitemIdXVGPR));
+                       /*width=*/1, entryRegs.workitemIdVGPR(axis));
+  Value result;
+  if (!packedWorkitemIds) {
+    if (axis == 0)
+      result =
+          waveamdmachine::VWorkitemIdXOp::create(builder, op.getLoc(), pinned);
+    else if (axis == 1)
+      result =
+          waveamdmachine::VWorkitemIdYOp::create(builder, op.getLoc(), pinned);
+    else
+      result =
+          waveamdmachine::VWorkitemIdZOp::create(builder, op.getLoc(), pinned);
+  } else {
+    Type rawType =
+        getPinnedRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
+                         /*width=*/1, entryRegs.workitemIdVGPR(0));
+    waveamdmachine::VWorkitemIdXOp raw =
+        waveamdmachine::VWorkitemIdXOp::create(builder, op.getLoc(), rawType);
+    raw->setAttr(getWaveAMDWorkitemIdAxisAttrName(),
+                 builder.getI64IntegerAttr(axis));
+    Type resultType =
+        getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+    if (axis == 0) {
+      if (maxWorkitemIdAxis == 0)
+        result = raw;
+      else
+        result = waveamdmachine::VAndB32Op::create(
+            builder, op.getLoc(), resultType, raw,
+            createImm(builder, op.getLoc(), 0x3ff));
+    } else {
+      Value offset = createImm(builder, op.getLoc(), axis * 10);
+      Value width = createImm(builder, op.getLoc(), 10);
+      result = waveamdmachine::VBfeU32Op::create(
+          builder, op.getLoc(), resultType, raw, offset, width);
+    }
+  }
+  values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
 }

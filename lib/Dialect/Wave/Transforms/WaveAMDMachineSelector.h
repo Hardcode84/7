@@ -291,7 +291,9 @@ public:
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
   std::optional<unsigned> targetIsaMajor;
+  unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
+  bool packedWorkitemIds = false;
 
   // ---- address-planning helpers -----------------------------------------
   void appendBindingAssumptions(Value binding, StringRef name,

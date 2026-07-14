@@ -52,7 +52,9 @@ static bool isAuthoredFixedResult(OpResult result) {
   Operation *op = result.getOwner();
   return isa<waveamdmachine::KernargPreloadOp, waveamdmachine::SWorkgroupIdXOp,
              waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
-             waveamdmachine::UninitOp, waveamdmachine::VWorkitemIdXOp>(op);
+             waveamdmachine::UninitOp, waveamdmachine::VWorkitemIdXOp,
+             waveamdmachine::VWorkitemIdYOp, waveamdmachine::VWorkitemIdZOp>(
+      op);
 }
 
 static void clearRegAllocAssignment(Value value) {

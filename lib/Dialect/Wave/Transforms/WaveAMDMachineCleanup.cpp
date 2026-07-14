@@ -438,7 +438,7 @@ static Value findScalarWorkitemShift(const ScalarWorkitemShiftMap &shifts,
 }
 
 static bool isVOP3IntOp(Operation *op) {
-  return isa<VAdd3U32Op, VMadI32I24Op, VMadU32U24Op, VLshlAddU32Op,
+  return isa<VAdd3U32Op, VBfeU32Op, VMadI32I24Op, VMadU32U24Op, VLshlAddU32Op,
              VAddLshlU32Op, VAndOrB32Op, VOr3B32Op, VXadU32Op, VPermB32Op,
              VBitOp3B32Op>(op);
 }

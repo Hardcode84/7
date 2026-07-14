@@ -79,7 +79,8 @@ static bool isFixedHardwareRead(Value value) {
   Operation *def = value.getDefiningOp();
   return isa_and_nonnull<
       waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
-      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(def);
+      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp,
+      waveamdmachine::VWorkitemIdYOp, waveamdmachine::VWorkitemIdZOp>(def);
 }
 
 static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
@@ -1036,15 +1037,25 @@ getKernargPreloadBase(waveamdmachine::KernargPreloadOp op,
   return regs.kernargSegmentPtrWidth + static_cast<unsigned>(preloadOffset);
 }
 
+static std::optional<unsigned> getWorkitemIdAxis(Operation *op) {
+  if (isa<waveamdmachine::VWorkitemIdXOp>(op))
+    return 0;
+  if (isa<waveamdmachine::VWorkitemIdYOp>(op))
+    return 1;
+  if (isa<waveamdmachine::VWorkitemIdZOp>(op))
+    return 2;
+  return std::nullopt;
+}
+
 static std::optional<unsigned>
 getEntryRegFixedBase(Value value, const wave::WaveAMDKernelEntryRegs &regs) {
   Operation *def = value.getDefiningOp();
   if (!def)
     return std::nullopt;
   auto type = cast<waveamdmachine::RegType>(value.getType());
-  if (type.getRegClass() == waveamdmachine::RegClass::VGPR &&
-      isa<waveamdmachine::VWorkitemIdXOp>(def))
-    return regs.workitemIdXVGPR;
+  if (type.getRegClass() == waveamdmachine::RegClass::VGPR)
+    if (std::optional<unsigned> axis = getWorkitemIdAxis(def))
+      return regs.workitemIdVGPR(*axis);
   if (type.getRegClass() != waveamdmachine::RegClass::SGPR)
     return std::nullopt;
   if (isa<waveamdmachine::SWorkgroupIdXOp>(def))

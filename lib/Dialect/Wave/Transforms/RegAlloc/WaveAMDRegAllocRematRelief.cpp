@@ -77,7 +77,8 @@ static bool isAnchoredRematSource(Value value) {
   return isa_and_nonnull<
       waveamdmachine::KernargPreloadOp, waveamdmachine::SWorkgroupIdXOp,
       waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
-      waveamdmachine::VWorkitemIdXOp>(def);
+      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
+      waveamdmachine::VWorkitemIdZOp>(def);
 }
 
 static bool isCheapRematRoot(Operation *op) {
@@ -90,9 +91,10 @@ static bool isCheapRematRoot(Operation *op) {
              waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,
              waveamdmachine::VLshlAddU32Op, waveamdmachine::VAddU32Op,
              waveamdmachine::VAdd3U32Op, waveamdmachine::VAndB32Op,
-             waveamdmachine::VMulLoU32Op, waveamdmachine::VAddLshlU32Op,
-             waveamdmachine::VXorB32Op, waveamdmachine::VAndOrB32Op,
-             waveamdmachine::VPermB32Op, waveamdmachine::VBitOp3B32Op>(op) ||
+             waveamdmachine::VBfeU32Op, waveamdmachine::VMulLoU32Op,
+             waveamdmachine::VAddLshlU32Op, waveamdmachine::VXorB32Op,
+             waveamdmachine::VAndOrB32Op, waveamdmachine::VPermB32Op,
+             waveamdmachine::VBitOp3B32Op>(op) ||
          (op && op->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>());
 }
 

@@ -75,7 +75,8 @@ static bool isFixedHardwareRead(Value value) {
   Operation *def = value.getDefiningOp();
   return isa_and_nonnull<
       waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
-      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp>(def);
+      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp,
+      waveamdmachine::VWorkitemIdYOp, waveamdmachine::VWorkitemIdZOp>(def);
 }
 
 static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
@@ -393,7 +394,11 @@ isAllowedKernargPreloadValue(waveamdmachine::RegType type,
 static bool isAllowedEntryRegValue(Operation *def, int64_t index,
                                    const wave::WaveAMDKernelEntryRegs &regs) {
   if (isa<waveamdmachine::VWorkitemIdXOp>(def))
-    return index == regs.workitemIdXVGPR;
+    return index == regs.workitemIdVGPR(0);
+  if (isa<waveamdmachine::VWorkitemIdYOp>(def))
+    return index == regs.workitemIdVGPR(1);
+  if (isa<waveamdmachine::VWorkitemIdZOp>(def))
+    return index == regs.workitemIdVGPR(2);
   if (isa<waveamdmachine::SWorkgroupIdXOp>(def))
     return index == regs.workgroupIdSGPR(0);
   if (isa<waveamdmachine::SWorkgroupIdYOp>(def))
