@@ -38,6 +38,12 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 
+[[annotations]]
+path = ["docs/PerfReferences/hipblaslt-*.s"]
+precedence = "override"
+SPDX-FileCopyrightText = "Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
+
 # Generic / metadata files.
 [[annotations]]
 path = [
