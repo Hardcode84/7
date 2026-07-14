@@ -212,19 +212,56 @@ relief; do not demote AGPR back to VGPR as a spill strategy.
 
 ### Remat
 
-Remat rebuilds cheap pure WaveAMDMachine DAGs.
+Remat is reverse CSE for cheap pure WaveAMDMachine DAGs. Candidate roots come
+from the failed alias set and overlapping alias sets live at the failure point.
+Each root plan contains the whole alias set, rebuild sites, cloned DAG nodes,
+and leaves whose live ranges would extend across the failure. Build root plans
+before profitability checks; roots rejected alone may be profitable together.
 
-Candidate is the failed alias set or an overlapping alias set live at the
-failure point. The stage finds a cheap pure expression DAG rooted at the
-candidate value and clones it at consumers after the pressure point. Rebuilt
-values are normal IR and can be candidates in later iterations.
+A relief plan may contain one root or a bundle of roots. A shared extended leaf
+amortizes failure pressure. A shared cloned dependency amortizes cost only when
+the roots rebuild at the same insertion site. Roots sharing neither stay in
+separate plans.
 
-Leaves need not all be live at the rebuild point. Extending cheaper leaves
-across the failure point is legal when rebuilt IR lowers pressure there.
+For bundle `B` and register class `c`:
 
-Fixed hardware inputs such as `v_workitem_id_x`, workgroup IDs, and fixed
-kernarg preload sources are anchored values. Reuse only when availability and
-pressure are modeled.
+```text
+removed_c(B) = sum(width of each distinct root alias set in c)
+added_c(B)   = sum(width of the union of newly-live leaf alias sets in c)
+after_c(B)   = before_c + added_c(B) - removed_c(B)
+```
+
+Count each root and leaf alias set once, independent of root count, rebuild-site
+count, or consumer count. A legal bundle strictly lowers pressure for the
+recorded failure class or combined register family and does not push another
+class across its budget. It need not bring the failure point under budget;
+materialize one bundle, clear state, and rerun linear scan.
+
+Bundle selection operates on the bipartite graph from roots to newly-live leaf
+alias sets. Consider connected components independently. Select a deterministic
+inclusion-minimal profitable subset, then rank bundles by unique loop-scaled DAG
+cost, root count, and stable alias-set IDs. Profitability uses union pressure,
+never the sum of per-root leaf pressure.
+
+Materialization is atomic for the bundle. Rebuild roots at their post-failure
+consumer sites and share cloned dependency nodes only at the same insertion
+site. Cache by `(site, original value)`. Sharing across sites is illegal unless
+the resulting temporary live range is included in pressure accounting. Cost
+each unique `(site, DAG node)` once, plus rewritten uses.
+
+Leaves need not already be live at a rebuild site. Fixed hardware inputs such
+as `v_workitem_id_x`, workgroup IDs, and fixed kernarg preload sources are
+anchored values. Reuse only when availability and pressure are modeled.
+
+Example: 64 one-dword coordinate roots share one anchored lane-ID leaf. One
+root removes one VGPR and adds one VGPR, so it cannot make progress. A two-root
+bundle removes two VGPRs while adding the leaf once. After state rebuild, the
+lane ID is already live at the failure point and remaining roots add no leaf
+pressure.
+
+Rebuilt values are normal IR and can be remat candidates in later iterations.
+Provider metadata counts distinct relieved root alias-set widths, not rebuild
+slots.
 
 ### SGPRToVGPR
 
