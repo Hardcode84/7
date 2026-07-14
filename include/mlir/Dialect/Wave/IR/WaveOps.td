@@ -449,6 +449,57 @@ def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
   let hasVerifier = 1;
 }
 
+def Wave_GatherOp : Wave_Op<"gather", [AttrSizedOperandSegments]> {
+  let summary = "gather a packet through a symbolic memory mapping";
+  let description = [{
+    Reads one memory point for every active packet point. The mapping contains
+    physical coordinates only; lowering derives transaction shape.
+  }];
+
+  let arguments = (ins Arg<Variadic<Wave_Ptr>, "", [MemRead]>:$bases,
+                       Variadic<AnyType>:$bindings,
+                       Variadic<Wave_SimdOf1DVector>:$packet_bindings,
+                       Optional<Wave_MemToken>:$dependency,
+                       Wave_MemoryMappingAttr:$mapping,
+                       DefaultValuedAttr<StrArrayAttr, "{}">:$binding_names,
+                       DefaultValuedAttr<StrArrayAttr, "{}">:$packet_binding_names,
+                       OptionalAttr<AnyAttr>:$cache);
+  let results = (outs Wave_SimdOf1DVector:$value, Wave_MemToken:$token);
+  let assemblyFormat = [{
+    $bases `mapping` $mapping
+    `bindings` $binding_names `(` $bindings `)`
+    `packet_bindings` $packet_binding_names `(` $packet_bindings `)`
+    (`after` $dependency^)? attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
+  let summary = "scatter a packet through a symbolic memory mapping";
+  let description = [{
+    Writes every active packet point. Address equality does not remove writes;
+    atomic and reduction collisions use different operations.
+  }];
+
+  let arguments = (ins Wave_SimdOf1DVector:$value,
+                       Arg<Variadic<Wave_Ptr>, "", [MemWrite]>:$bases,
+                       Variadic<AnyType>:$bindings,
+                       Variadic<Wave_SimdOf1DVector>:$packet_bindings,
+                       Optional<Wave_MemToken>:$dependency,
+                       Wave_MemoryMappingAttr:$mapping,
+                       DefaultValuedAttr<StrArrayAttr, "{}">:$binding_names,
+                       DefaultValuedAttr<StrArrayAttr, "{}">:$packet_binding_names,
+                       OptionalAttr<AnyAttr>:$cache);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = [{
+    $value `to` $bases `mapping` $mapping
+    `bindings` $binding_names `(` $bindings `)`
+    `packet_bindings` $packet_binding_names `(` $packet_bindings `)`
+    (`after` $dependency^)? attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let summary = "create an empty memory dependency token";
   let results = (outs Wave_MemToken:$result);

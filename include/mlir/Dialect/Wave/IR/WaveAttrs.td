@@ -109,6 +109,20 @@ def Wave_RedistributionAttr : Wave_Attr<"Redistribution", "redistribution"> {
   let genVerifyDecl = 1;
 }
 
+def Wave_MemoryMappingAttr : Wave_Attr<"MemoryMapping", "memory_mapping"> {
+  let summary = "Symbolic packet-to-memory mapping";
+  let description = [{
+    Maps packet `(block, item, slot)` coordinates to a pointer base, owner
+    block, and bit offset. Missing `base` means pointer operand zero. Missing
+    `target_block` means the current block.
+  }];
+  let parameters = (ins OptionalParameter<"::mlir::wave::ExprAttr">:$base,
+                        OptionalParameter<"::mlir::wave::ExprAttr">:$target_block,
+                        "::mlir::wave::ExprAttr":$bit_offset);
+  let assemblyFormat = "`<` struct(params) `>`";
+  let genVerifyDecl = 1;
+}
+
 def Wave_GlobalAddressSpaceAttr : Wave_Attr<"GlobalAddressSpace", "global"> {
   let summary = "global memory address space";
   let assemblyFormat = "";

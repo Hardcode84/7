@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
+#include "mlir/Dialect/Wave/Transforms/SymbolicValue.h"
 
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
@@ -1411,6 +1412,20 @@ private:
   bool expandIndexExprRoot = false;
   unsigned nextRawSymbol = 0;
 };
+
+} // namespace
+
+FailureOr<std::optional<SymbolicOffset>>
+mlir::wave::buildSymbolicIndexValue(Value value, WaveDialect &dialect,
+                                    DataFlowSolver &solver) {
+  SymbolicValueBuilder builder(
+      dialect, solver, /*allowI64Integers=*/false,
+      /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true);
+  return builder.buildAllowingRootLeaf(value);
+}
+
+namespace {
 
 static IndexExprOp createIndexExpr(OpBuilder &builder, Location loc,
                                    MLIRContext *ctx,

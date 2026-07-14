@@ -21,6 +21,12 @@ This is the memory analogue of `wave.redistribute`. Redistribution maps a
 destination packet point to a source packet point. Symbolic memory access maps
 a packet point to a complete physical memory point.
 
+Current legalization covers local-block global/shared access, byte-addressable
+8/16/32-bit elements, and slot-static base selection. Runtime or lane-varying
+base selection, remote blocks, sub-byte elements, private memory, target-aware
+candidates, non-`wave.pack` producer recovery, and the Triton importer remain
+bridge work. Opaque packet producers still lower through the narrow fallback.
+
 ## Non-goals
 
 - No layout attribute on an operation or type.
@@ -30,8 +36,8 @@ a packet point to a complete physical memory point.
 - No general atomic or reduction scatter semantics.
 - No string round-trip for symbolic expressions.
 
-V1 targets Triton shared-memory loads and stores. The map also fits global and
-private memory once those paths need it.
+The relation also fits memory spaces and access modes outside the implemented
+legalization subset.
 
 ## One Map
 
@@ -183,12 +189,13 @@ Conceptual scatter syntax:
       -> !wave.mem.token
 ```
 
-Multiple pointer operands admit a `base` expression:
+Multiple pointer operands admit a `base` expression. Current legalization
+requires it to become a literal after `slot` specialization:
 
 ```mlir
 wave.gather %partition0, %partition1
     mapping #wave.memory_mapping<
-      base = #wave.expr<"item % 2">,
+      base = #wave.expr<"slot % 2">,
       bit_offset = #wave.expr<"...">
     >
 ```
@@ -563,15 +570,15 @@ after it.
 Optimization-proof failure and budget exhaustion reject one candidate. The
 planner continues through narrower vector shapes and admits a single-element
 access only after none is proved legal. Target uncertainty follows the same
-rule when a generic fallback exists; otherwise the operation remains for
-required legalization. None diagnoses at this stage.
+rule when a generic fallback exists.
 
-A proven-dead operation never diagnoses. A live operation may fail only at a
-required legalization boundary when no semantics-preserving fallback exists.
-Examples include an unmaterializable base, unsupported remote-block access, or
-a sub-byte scatter with no legal container update. These examples do not define
-a promised diagnostic set. Invalid configurations and diagnostic wording are
-detected on a best-effort basis, not as a verifier contract.
+`wave-lower-symbolic-memory` is the required legalization boundary. Pipelines
+erase proven-dead operations before it. A surviving operation may fail only
+when no semantics-preserving fallback exists. Examples include an
+unmaterializable base, unsupported remote-block access, or a sub-byte scatter
+with no legal container update. These examples do not define a promised
+diagnostic set. Invalid configurations and diagnostic wording are detected on
+a best-effort basis, not as a verifier contract.
 
 ## Triton Bridge Sequence
 

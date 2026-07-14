@@ -1014,3 +1014,56 @@ func.func @workitem_id_unsupported_wave_width() {
   %x = wave.workitem_id 0 : !wave.simd<i32, 16>
   return
 }
+
+// -----
+
+func.func @gather_missing_binding(%base: !wave.ptr<#wave.shared, i32>) {
+  // expected-error @+1 {{mapping symbol `origin` has no binding}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * (origin + slot)">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_unused_binding(%base: !wave.ptr<#wave.shared, i32>,
+                                 %origin: index) {
+  // expected-error @+1 {{binding `origin` is not referenced by the mapping}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * slot">>
+      bindings ["origin"](%origin) packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>, index)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_packet_slots_mismatch(
+    %base: !wave.ptr<#wave.shared, i32>,
+    %indices: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{packet binding slot count must match the accessed packet}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * index">>
+      bindings []() packet_bindings ["index"](%indices)
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<2xi32>, 32>)
+      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_pointer_type_mismatch(
+    %global: !wave.ptr<#wave.global, i32>,
+    %shared: !wave.ptr<#wave.shared, i32>) {
+  // expected-error @+1 {{pointer bases must have identical address spaces and element types}}
+  %value, %token = wave.gather %global, %shared mapping
+      <base = <"slot">, bit_offset = <"0">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.global, i32>, !wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}

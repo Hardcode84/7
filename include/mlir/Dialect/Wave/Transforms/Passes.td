@@ -143,6 +143,21 @@ def WaveLowerRedistribute : Pass<"wave-lower-redistribute"> {
   ];
 }
 
+def WaveLowerSymbolicMemory : Pass<"wave-lower-symbolic-memory"> {
+  let summary = "Lower symbolic Wave gather and scatter operations";
+  let description = [{
+    Specializes packet slots, proves physical contiguity with the Wave
+    symbolic engine, and emits a scalar-minimizing cover of ordinary Wave
+    loads and stores. Vector proof failure tries narrower candidates. A live
+    map without byte-addressed local lowering fails at this legalization
+    boundary; op verification remains structural.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
   let summary = "Remove writes to unread Wave allocations";
   let description = [{

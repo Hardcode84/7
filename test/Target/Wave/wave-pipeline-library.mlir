@@ -1,6 +1,10 @@
 // RUN: FileCheck %s --check-prefix=PIPELINE < %wave_pipelines
 
-// PIPELINE: transform.apply_registered_pass "wave-strength-reduce-modulo"
+// PIPELINE: transform.apply_registered_pass "wave-lower-symbolic-memory"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-lower-redistribute"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-strength-reduce-modulo"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-normalize-pointer-offsets"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

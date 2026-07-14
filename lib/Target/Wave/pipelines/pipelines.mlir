@@ -20,7 +20,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rmeta = transform.apply_registered_pass "canonicalize" to %rm
         : (!transform.any_op) -> !transform.any_op
-    %rredistribute = transform.apply_registered_pass "wave-lower-redistribute" to %rmeta
+    %rmemory = transform.apply_registered_pass "wave-lower-symbolic-memory" to %rmeta
+        : (!transform.any_op) -> !transform.any_op
+    %rredistribute = transform.apply_registered_pass "wave-lower-redistribute" to %rmemory
         : (!transform.any_op) -> !transform.any_op
     %rmod = transform.apply_registered_pass "wave-strength-reduce-modulo" to %rredistribute
         : (!transform.any_op) -> !transform.any_op

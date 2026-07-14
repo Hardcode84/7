@@ -180,6 +180,19 @@ LogicalResult RedistributionAttr::verify(
   return success();
 }
 
+LogicalResult
+MemoryMappingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                          ExprAttr base, ExprAttr targetBlock,
+                          ExprAttr bitOffset) {
+  if (!bitOffset)
+    return emitError() << "memory mapping requires a bit offset expression";
+  if ((base && !sym::isExpr(base.getValue())) ||
+      (targetBlock && !sym::isExpr(targetBlock.getValue())) ||
+      !sym::isExpr(bitOffset.getValue()))
+    return emitError() << "memory mapping coordinates must be expressions";
+  return success();
+}
+
 LogicalResult TuneEnumAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                    ArrayRef<int64_t> values) {
   if (values.empty())
@@ -3049,6 +3062,159 @@ LogicalResult LoadOp::verify() {
     return failure();
   return verifyMemoryPayloadFitsPointer(resultSimd.getElementType(),
                                         *ptrElementType, emit);
+}
+
+static bool isMemoryMappingReservedSymbol(StringRef name) {
+  return name == "block" || name == "item" || name == "slot";
+}
+
+static void
+collectMemoryMappingBindings(ExprAttr attr,
+                             llvm::DenseSet<StringRef> &requiredBindings) {
+  if (!attr)
+    return;
+  sym::ExprHandle expr = attr.getValue();
+  sym::walkSymbolNames(expr, [&](StringRef name) {
+    if (!isMemoryMappingReservedSymbol(name))
+      requiredBindings.insert(name);
+  });
+}
+
+static LogicalResult verifyMemoryMappingBindingNames(
+    Operation *op, ArrayAttr names, ValueRange bindings, StringRef kind,
+    llvm::DenseSet<StringRef> &declaredBindings,
+    const llvm::DenseSet<StringRef> &requiredBindings) {
+  if (names.size() != bindings.size())
+    return op->emitOpError()
+           << "expected one " << kind << " name per operand (got "
+           << names.size() << " names and " << bindings.size() << " operands)";
+  for (Attribute attr : names) {
+    StringRef name = cast<StringAttr>(attr).getValue();
+    if (name.empty())
+      return op->emitOpError() << kind << " names must be non-empty";
+    if (isMemoryMappingReservedSymbol(name))
+      return op->emitOpError() << kind << " name `" << name << "` is reserved";
+    if (!declaredBindings.insert(name).second)
+      return op->emitOpError() << "duplicate mapping binding `" << name << "`";
+    if (!requiredBindings.contains(name))
+      return op->emitOpError()
+             << kind << " `" << name << "` is not referenced by the mapping";
+  }
+  return success();
+}
+
+static LogicalResult verifyMemoryMappingBases(Operation *op, ValueRange bases) {
+  if (bases.empty())
+    return op->emitOpError("requires at least one pointer base");
+  PtrType firstBase = cast<PtrType>(bases.front().getType());
+  for (Value base : bases.drop_front()) {
+    PtrType type = cast<PtrType>(base.getType());
+    if (type.getAddressSpace() != firstBase.getAddressSpace() ||
+        type.getElementType() != firstBase.getElementType())
+      return op->emitOpError(
+          "pointer bases must have identical address spaces and element types");
+  }
+  return success();
+}
+
+static LogicalResult verifyMemoryMappingNames(Operation *op,
+                                              MemoryMappingAttr mapping,
+                                              ValueRange bindings,
+                                              ArrayAttr bindingNames,
+                                              ValueRange packetBindings,
+                                              ArrayAttr packetBindingNames) {
+  llvm::DenseSet<StringRef> requiredBindings;
+  collectMemoryMappingBindings(mapping.getBase(), requiredBindings);
+  collectMemoryMappingBindings(mapping.getTargetBlock(), requiredBindings);
+  collectMemoryMappingBindings(mapping.getBitOffset(), requiredBindings);
+
+  llvm::DenseSet<StringRef> declaredBindings;
+  if (failed(verifyMemoryMappingBindingNames(op, bindingNames, bindings,
+                                             "binding", declaredBindings,
+                                             requiredBindings)))
+    return failure();
+  if (failed(verifyMemoryMappingBindingNames(
+          op, packetBindingNames, packetBindings, "packet binding",
+          declaredBindings, requiredBindings)))
+    return failure();
+  for (StringRef name : requiredBindings)
+    if (!declaredBindings.contains(name))
+      return op->emitOpError()
+             << "mapping symbol `" << name << "` has no binding";
+  return success();
+}
+
+static LogicalResult verifyMemoryMappingBindings(Operation *op,
+                                                 ValueRange bindings,
+                                                 SimdType packetType) {
+  auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
+  for (Value binding : bindings) {
+    FailureOr<SymbolicOffsetBindingKind> kind =
+        classifySymbolicOffsetBinding(binding.getType(), emit);
+    if (failed(kind))
+      return failure();
+    if (*kind == SymbolicOffsetBindingKind::Lane &&
+        cast<SimdType>(binding.getType()).getWidth() != packetType.getWidth())
+      return op->emitOpError("lane binding width must match packet SIMD width");
+  }
+  return success();
+}
+
+static LogicalResult
+verifyMemoryMappingPacketBindings(Operation *op, ValueRange packetBindings,
+                                  SimdType packetType,
+                                  VectorType packetVector) {
+  for (Value binding : packetBindings) {
+    SimdType simd = cast<SimdType>(binding.getType());
+    VectorType vector = cast<VectorType>(simd.getElementType());
+    if (simd.getWidth() != packetType.getWidth())
+      return op->emitOpError(
+          "packet binding SIMD width must match packet SIMD width");
+    if (vector.isScalable() ||
+        vector.getNumElements() != packetVector.getNumElements())
+      return op->emitOpError(
+          "packet binding slot count must match the accessed packet");
+    Type element = vector.getElementType();
+    if (!element.isIndex() && !element.isInteger(32))
+      return op->emitOpError(
+          "packet binding elements must be index or signless i32");
+  }
+  return success();
+}
+
+static LogicalResult
+verifyMemoryMappingOp(Operation *op, MemoryMappingAttr mapping,
+                      ValueRange bases, ValueRange bindings,
+                      ArrayAttr bindingNames, ValueRange packetBindings,
+                      ArrayAttr packetBindingNames, SimdType packetType) {
+  VectorType packetVector = cast<VectorType>(packetType.getElementType());
+  if (packetVector.isScalable())
+    return op->emitOpError("packet vector must be fixed-size");
+  if (failed(verifyMemoryMappingBases(op, bases)))
+    return failure();
+  if (failed(verifyMemoryMappingNames(op, mapping, bindings, bindingNames,
+                                      packetBindings, packetBindingNames)))
+    return failure();
+  if (failed(verifyMemoryMappingBindings(op, bindings, packetType)))
+    return failure();
+  return verifyMemoryMappingPacketBindings(op, packetBindings, packetType,
+                                           packetVector);
+}
+
+LogicalResult GatherOp::verify() {
+  SimdType packetType = cast<SimdType>(getValue().getType());
+  return verifyMemoryMappingOp(getOperation(), getMapping(), getBases(),
+                               getBindings(), getBindingNames(),
+                               getPacketBindings(), getPacketBindingNames(),
+                               packetType);
+}
+
+LogicalResult ScatterOp::verify() {
+  SimdType packetType = cast<SimdType>(getValue().getType());
+  return verifyMemoryMappingOp(getOperation(), getMapping(), getBases(),
+                               getBindings(), getBindingNames(),
+                               getPacketBindings(), getPacketBindingNames(),
+                               packetType);
 }
 
 namespace {

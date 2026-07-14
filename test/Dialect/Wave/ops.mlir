@@ -19,6 +19,41 @@ func.func @wave_block_redistribution_attr()
   return
 }
 
+// CHECK-LABEL: func.func @wave_symbolic_memory_ops
+// CHECK: wave.gather {{.*}} mapping <base = <"0">, target_block = <"block">, bit_offset = <"32*(4*item + origin + slot)">>
+// CHECK: wave.scatter {{.*}} mapping <bit_offset = <"32*(4*item + origin + slot)">>
+func.func @wave_symbolic_memory_ops(
+    %base: !wave.ptr<#wave.shared, f32>, %origin: index) {
+  %value, %loaded = wave.gather %base mapping
+      #wave.memory_mapping<
+        base = #wave.expr<"0">,
+        target_block = #wave.expr<"block">,
+        bit_offset = #wave.expr<"32 * (origin + 4 * item + slot)">>
+      bindings ["origin"](%origin) packet_bindings []()
+      : (!wave.ptr<#wave.shared, f32>, index)
+      -> (!wave.simd<vector<4xf32>, 32>, !wave.mem.token)
+  %stored = wave.scatter %value to %base mapping
+      #wave.memory_mapping<bit_offset = #wave.expr<"32 * (origin + 4 * item + slot)">>
+      bindings ["origin"](%origin) packet_bindings []() after %loaded
+      : (!wave.simd<vector<4xf32>, 32>, !wave.ptr<#wave.shared, f32>,
+         index, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// Semantic lowerability is not an op-verifier contract.
+// CHECK-LABEL: func.func @wave_unchecked_memory_mapping
+// CHECK: wave.gather {{.*}} mapping <base = <"99">, target_block = <"7">, bit_offset = <"1/2*slot">>
+func.func @wave_unchecked_memory_mapping(
+    %base: !wave.ptr<#wave.private, i32>) {
+  %value, %token = wave.gather %base mapping
+      <base = <"99">, target_block = <"7">,
+       bit_offset = <"slot / 2">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.private, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
 // CHECK-LABEL: func.func @wave_constants
 func.func @wave_constants() -> (i32, !wave.simd<i32, 32>, !wave.mask<32>) {
   // CHECK: wave.constant 5 : i32
