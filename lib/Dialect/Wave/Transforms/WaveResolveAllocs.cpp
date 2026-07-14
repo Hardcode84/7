@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
@@ -25,6 +26,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -785,12 +787,17 @@ collectAccessCarriedIndices(Operation *access, scf::ForOp loop,
 
 static bool yieldOrdersCompletion(scf::YieldOp yield,
                                   ArrayRef<unsigned> carried, Value completion,
-                                  bool requireBarrier,
+                                  Operation *access, scf::ForOp loop,
+                                  bool requireCollectiveBarrier,
                                   TokenOrdering &ordering) {
   for (unsigned index : carried) {
     if (index >= yield.getNumOperands())
       continue;
     Value yielded = yield.getOperand(index);
+    bool accessCrossesBarrier =
+        operationDependsOnAll(access, {loop.getRegionIterArg(index)}, ordering,
+                              /*requireBarrier=*/true);
+    bool requireBarrier = requireCollectiveBarrier && !accessCrossesBarrier;
     if (requireBarrier ? ordering.dependsOnThroughBarrier(yielded, completion)
                        : ordering.dependsOn(yielded, completion))
       return true;
@@ -808,9 +815,10 @@ static bool loopBackedgeOrders(const AllocInterval &later,
     SmallVector<unsigned, 2> carried =
         collectAccessCarriedIndices(access, loop, ordering.getOrigins());
     for (Value completion : later.completionTokens)
-      if (!yieldOrdersCompletion(yield, carried, completion,
-                                 /*requireBarrier=*/
-                                 !later.collectivelyComplete, ordering))
+      if (!yieldOrdersCompletion(
+              yield, carried, completion, access, loop,
+              /*requireCollectiveBarrier=*/!later.collectivelyComplete,
+              ordering))
         return false;
   }
   return true;
@@ -853,13 +861,195 @@ static bool repeatedLifetimeNeedsBarrier(AllocInterval &interval,
   return false;
 }
 
-static FailureOr<bool>
-materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
-                                    SmallVectorImpl<AllocInterval> &allocs,
-                                    TokenOrdering &ordering) {
-  bool changed = false;
+static std::optional<scf::ForOp> getDirectRepeatedFor(AllocInterval &interval) {
+  SmallVector<Region *, 2> regions =
+      getCommonEnclosingRepetitiveRegions(interval.op, interval.op);
+  if (regions.size() != 1)
+    return std::nullopt;
+  scf::ForOp loop = dyn_cast<scf::ForOp>(regions.front()->getParentOp());
+  if (!loop || interval.release->getBlock() != loop.getBody())
+    return std::nullopt;
+  if (llvm::any_of(interval.accesses, [&](Operation *access) {
+        return access->getBlock() != loop.getBody();
+      }))
+    return std::nullopt;
+  return loop;
+}
+
+static bool canAddTokenDependency(Operation *access) {
+  if (isa<LoadOp, StoreOp, waveamd::TransposeLoadOp>(access))
+    return true;
+  return llvm::any_of(access->getOperands(), [](Value operand) {
+    return isa<MemTokenType>(operand.getType());
+  });
+}
+
+static bool tokenOnlyEndsAtUnusedLoopYield(Value token, scf::ForOp loop,
+                                           DenseSet<Value> &visited) {
+  if (!visited.insert(token).second)
+    return true;
+  for (OpOperand &use : token.getUses()) {
+    Operation *user = use.getOwner();
+    if (user == loop.getBody()->getTerminator()) {
+      if (!loop.getResult(use.getOperandNumber()).use_empty())
+        return false;
+      continue;
+    }
+    if (!isa<AfterOp, JoinOp>(user))
+      return false;
+    for (Value result : user->getResults())
+      if (isa<MemTokenType>(result.getType()) &&
+          !tokenOnlyEndsAtUnusedLoopYield(result, loop, visited))
+        return false;
+  }
+  return true;
+}
+
+static bool tokenOnlyEndsAtUnusedLoopYield(Value token, scf::ForOp loop) {
+  DenseSet<Value> visited;
+  return tokenOnlyEndsAtUnusedLoopYield(token, loop, visited);
+}
+
+static void addTokenDependency(IRRewriter &rewriter, Operation *access,
+                               Value dependency) {
+  rewriter.setInsertionPoint(access);
+  Value previous;
+  OpOperand *genericDependency = nullptr;
+  if (auto load = dyn_cast<LoadOp>(access))
+    previous = load.getDependency();
+  else if (auto store = dyn_cast<StoreOp>(access))
+    previous = store.getDependency();
+  else if (auto load = dyn_cast<waveamd::TransposeLoadOp>(access))
+    previous = load.getDependency();
+  else {
+    auto dependencyOperand =
+        llvm::find_if(access->getOpOperands(), [](OpOperand &operand) {
+          return isa<MemTokenType>(operand.get().getType());
+        });
+    assert(dependencyOperand != access->getOpOperands().end());
+    genericDependency = &*dependencyOperand;
+    previous = genericDependency->get();
+  }
+
+  Value combined = dependency;
+  if (previous && previous != dependency)
+    combined = JoinOp::create(rewriter, access->getLoc(), dependency.getType(),
+                              ValueRange{previous, dependency});
+
+  if (auto load = dyn_cast<LoadOp>(access))
+    load.getDependencyMutable().assign(combined);
+  else if (auto store = dyn_cast<StoreOp>(access))
+    store.getDependencyMutable().assign(combined);
+  else if (auto load = dyn_cast<waveamd::TransposeLoadOp>(access))
+    load.getDependencyMutable().assign(combined);
+  else
+    genericDependency->set(combined);
+}
+
+static std::optional<unsigned>
+findLoopHeaderCarry(scf::ForOp loop, ArrayRef<AllocInterval *> intervals,
+                    TokenOrdering &ordering) {
+  SmallVector<Value> completions;
+  completions.reserve(intervals.size());
+  for (AllocInterval *interval : intervals)
+    completions.push_back(interval->release.getToken());
+
+  scf::YieldOp yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  for (auto [index, yielded] : llvm::enumerate(yield.getOperands())) {
+    if (!isa<MemTokenType>(yielded.getType()) ||
+        !loop.getResult(index).use_empty() ||
+        !ordering.dependsOnAll(yielded, completions,
+                               /*requireBarrier=*/false))
+      continue;
+    BlockArgument carried = loop.getRegionIterArg(index);
+    bool ordersAllAccesses = llvm::all_of(intervals, [&](AllocInterval *item) {
+      return llvm::all_of(item->accesses, [&](Operation *access) {
+        return canAddTokenDependency(access) &&
+               operationDependsOnAll(access, {carried}, ordering,
+                                     /*requireBarrier=*/false);
+      });
+    });
+    if (ordersAllAccesses)
+      return index;
+  }
+  return std::nullopt;
+}
+
+static bool intervalUsesLoopCarry(const AllocInterval &interval,
+                                  scf::ForOp loop, Value carried,
+                                  TokenOrdering &ordering) {
+  if (interval.op->getBlock() != loop.getBody())
+    return false;
+  return llvm::all_of(interval.accesses, [&](Operation *access) {
+    return access->getBlock() == loop.getBody() &&
+           canAddTokenDependency(access) &&
+           operationDependsOnAll(access, {carried}, ordering,
+                                 /*requireBarrier=*/false);
+  });
+}
+
+static SmallVector<Operation *> collectLoopHeaderBarrierAccesses(
+    scf::ForOp loop, Value carried, MutableArrayRef<AllocInterval> intervals,
+    TokenOrdering &ordering, Operation *&firstAccess) {
+  SmallVector<Operation *> accesses;
+  SmallPtrSet<Operation *, 8> seen;
+  for (AllocInterval &interval : intervals) {
+    if (!intervalUsesLoopCarry(interval, loop, carried, ordering))
+      continue;
+    for (Operation *access : interval.accesses) {
+      if (seen.insert(access).second)
+        accesses.push_back(access);
+      if (access->isBeforeInBlock(firstAccess))
+        firstAccess = access;
+    }
+  }
+  return accesses;
+}
+
+static bool materializeLoopHeaderBarrier(
+    IRRewriter &rewriter, scf::ForOp loop, ArrayRef<AllocInterval *> intervals,
+    MutableArrayRef<AllocInterval> allIntervals, TokenOrdering &ordering) {
+  std::optional<unsigned> carry =
+      findLoopHeaderCarry(loop, intervals, ordering);
+  if (!carry)
+    return false;
+
+  Operation *firstAccess = loop.getBody()->getTerminator();
+  Value carried = loop.getRegionIterArg(*carry);
+  SmallVector<Operation *> accesses = collectLoopHeaderBarrierAccesses(
+      loop, carried, allIntervals, ordering, firstAccess);
+  rewriter.setInsertionPoint(firstAccess);
+  Value barrier = BarrierOp::create(rewriter, firstAccess->getLoc(),
+                                    carried.getType(), carried)
+                      .getToken();
+  for (Operation *access : accesses)
+    addTokenDependency(rewriter, access, barrier);
+  return true;
+}
+
+using RepeatedLoopIntervalMap =
+    DenseMap<Operation *, SmallVector<AllocInterval *, 2>>;
+
+static std::optional<scf::ForOp>
+getLoopHeaderBarrierLoop(AllocInterval &interval, TokenOrdering &ordering) {
+  std::optional<scf::ForOp> loop = getDirectRepeatedFor(interval);
+  if (!loop)
+    return std::nullopt;
+  if (!tokenOnlyEndsAtUnusedLoopYield(interval.release.getToken(), *loop))
+    return std::nullopt;
+  if (!llvm::all_of(interval.accesses, canAddTokenDependency))
+    return std::nullopt;
+  return loop;
+}
+
+static LogicalResult collectRepeatedLifetimeBarrierSites(
+    MutableArrayRef<AllocInterval> allocs, TokenOrdering &ordering,
+    RepeatedLoopIntervalMap &loopIntervals,
+    SmallVectorImpl<AllocInterval *> &releaseSiteIntervals) {
   for (AllocInterval &interval : allocs) {
-    if (!interval.release || !repeatedLifetimeNeedsBarrier(interval, ordering))
+    if (!interval.release)
+      continue;
+    if (!repeatedLifetimeNeedsBarrier(interval, ordering))
       continue;
     if (!interval.release.getWorkgroupCollectiveAttr()) {
       interval.release.emitOpError(
@@ -867,18 +1057,60 @@ materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
           "synthesis");
       return failure();
     }
-    SmallVector<OpOperand *> uses;
-    for (OpOperand &use : interval.release.getToken().getUses())
-      uses.push_back(&use);
-    rewriter.setInsertionPointAfter(interval.release);
-    BarrierOp barrier = BarrierOp::create(rewriter, interval.release.getLoc(),
-                                          interval.release.getToken().getType(),
-                                          interval.release.getToken());
-    for (OpOperand *use : uses)
-      use->set(barrier.getToken());
-    changed = true;
+    std::optional<scf::ForOp> loop =
+        getLoopHeaderBarrierLoop(interval, ordering);
+    if (loop)
+      loopIntervals[loop->getOperation()].push_back(&interval);
+    else
+      releaseSiteIntervals.push_back(&interval);
+  }
+  return success();
+}
+
+static bool materializeLoopHeaderBarriers(
+    IRRewriter &rewriter, MutableArrayRef<AllocInterval> allocs,
+    TokenOrdering &ordering, RepeatedLoopIntervalMap &loopIntervals,
+    SmallVectorImpl<AllocInterval *> &releaseSiteIntervals) {
+  bool changed = false;
+  for (auto &[loopOp, intervals] : loopIntervals) {
+    if (materializeLoopHeaderBarrier(rewriter, cast<scf::ForOp>(loopOp),
+                                     intervals, allocs, ordering))
+      changed = true;
+    else
+      llvm::append_range(releaseSiteIntervals, intervals);
   }
   return changed;
+}
+
+static void
+materializeReleaseSiteBarriers(IRRewriter &rewriter,
+                               ArrayRef<AllocInterval *> intervals) {
+  for (AllocInterval *interval : intervals) {
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : interval->release.getToken().getUses())
+      uses.push_back(&use);
+    rewriter.setInsertionPointAfter(interval->release);
+    BarrierOp barrier = BarrierOp::create(
+        rewriter, interval->release.getLoc(),
+        interval->release.getToken().getType(), interval->release.getToken());
+    for (OpOperand *use : uses)
+      use->set(barrier.getToken());
+  }
+}
+
+static FailureOr<bool>
+materializeRepeatedLifetimeBarriers(IRRewriter &rewriter,
+                                    SmallVectorImpl<AllocInterval> &allocs,
+                                    TokenOrdering &ordering) {
+  RepeatedLoopIntervalMap loopIntervals;
+  SmallVector<AllocInterval *> releaseSiteIntervals;
+  if (failed(collectRepeatedLifetimeBarrierSites(
+          allocs, ordering, loopIntervals, releaseSiteIntervals)))
+    return failure();
+  bool changed = materializeLoopHeaderBarriers(
+      rewriter, allocs, ordering, loopIntervals, releaseSiteIntervals);
+  materializeReleaseSiteBarriers(rewriter, releaseSiteIntervals);
+  return changed || !releaseSiteIntervals.empty();
 }
 
 static bool usesExplicitLifetime(const AllocInterval &earlier,

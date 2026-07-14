@@ -332,7 +332,11 @@ Token order alone does not permit workgroup storage aliasing. Allocation
 resolution requires every path from an earlier release to a later access to
 cross `wave.barrier`. A join proves per-wave completion only. Repeated logical
 lifetimes, such as an allocation inside `scf.for`, require collective
-quiescence on the backedge. Resolution materializes a barrier only for a
+quiescence on the backedge. A terminal direct loop lifetime can put the
+collective barrier on the next iteration's access when an existing carried
+token orders both release and access. A completion used after the loop, or a
+loop without that explicit edge, retains the conservative release-site
+barrier. Resolution materializes either form only for a
 `workgroup_collective` release; an unproven generic release fails instead of
 risking a barrier in divergent control.
 
@@ -351,40 +355,52 @@ physical_cell = P(item, slot)
 
 Store and load addressing use the same `P`. The current planner first chooses
 the largest power-of-two vector, at most 128 bits, that divides both packet
-widths and leaves one vector group resident in available LDS. Finite relation
-evaluation must prove every destination vector reads one source item and one
-source vector group. Component order inside that group may differ. Finite
-selector inference uses direct extracts for fixed component orders and emits
-per-lane selection only when the relation requires it.
+widths and leaves one vector group resident in available LDS. Vector groups
+are selected from power-of-two packet-slot bases, so physically adjacent
+components need not be adjacent logical slots. Finite relation evaluation must
+prove every destination vector reads one source item and one physical source
+vector group. Component order inside that group may differ. Finite selector
+inference uses direct extracts for fixed component orders and emits per-lane
+selection only when the relation requires it. Slot-order search shares a finite
+relation-point budget and falls back to scalar transfers when exhausted.
 
 Scratch uses a group-major AoSoA map:
 
 ```text
 group = floor(slot / vec)
 phase = Mod(floor(group / per_phase), max_phase)
-physical_item = xor(item, phase * item_stride)
+physical_item = xor(item,
+                    phase * item_stride,
+                    selected_high_item_bits << selected_bank_bits)
 P(item, slot) =
   (group * items + physical_item) * vec + Mod(slot, vec)
 ```
 
-`per_phase`, `max_phase`, and `item_stride` are powers of two. XOR changes only
-low item bits, so each candidate stays bijective over the static item domain.
-The planner enumerates legal candidates and scores every vector store and load
-against the target's 32- or 64-bank LDS phases. Repeated addresses count as
-broadcasts. Minimum combined read/write conflict count wins; equal scores keep
-the simpler map. This follows Triton's rule: preserve common vectorization,
-then choose one shared map for both directions.
+`per_phase`, `max_phase`, and `item_stride` are powers of two. Group phases and
+high item/segment bits XOR only into lower item bits. The latter are selected
+as strictly upper-triangular elementary transforms, so every candidate remains
+bijective over the static item domain. The planner enumerates legal candidates
+and scores every vector store and load against the target's 32- or 64-bank LDS
+phases. Repeated addresses count as broadcasts. Minimum combined read/write
+conflict count wins; equal scores keep the simpler map. This follows Triton's
+generic swizzling construction: preserve common vector bases, split reusable
+register bases into reps, and map shared segments into bank bits through one
+shared store/load map.
 
 Target lowering asks generic allocation analysis for the largest aligned LDS
 range available at each redistribution. The query includes unresolved
 `wave.alloc` lifetimes, fixed LDS, dynamic LDS, spill LDS, explicit token
-ordering, and provisional generic placement without rewriting IR. One stage
-holds all source vector groups when that fits. Otherwise each destination
-vector group contributes its minimum contiguous source-group window. Greedy
-maximal destination prefixes form stages whose merged windows fit capacity.
-Each stage stores only its window, publishes it, and loads its destination
-prefix. Its local source-group origin is subtracted from load addresses before
-applying `P`.
+ordering, and provisional generic placement without rewriting IR. Before
+capacity partitioning, the relation identifies a common register-resident
+source/result factor: corresponding destination tiles must have the same
+source-item and intra-tile source-group maps, differing only by a permutation
+of tile number. Those tiles become independent reps even when the full source
+fits, exposing producer latency in the same way as Triton's `buildReps`.
+Within each rep, every destination vector group contributes its minimum
+contiguous source-group window. Greedy maximal destination prefixes form
+additional stages when their merged windows exceed capacity. Each stage stores
+only its window, publishes it, and loads its destination prefix. Its local
+source-group origin is subtracted from load addresses before applying `P`.
 
 One allocation snapshot serves every exchange. Batched token proofs and a
 function-wide provisional range set avoid rescanning expanded redistribution
@@ -398,7 +414,7 @@ swizzling is scored per stage. Consecutive exchanges retain the one-barrier
 ping-pong path while the current stage fits beside prior scratch. A second
 capacity query omits that dead scratch range; when only that range fits, a
 barrier retires the earlier release and both allocations alias the same LDS.
-This is Triton's `reps` shape with rounds chosen from live target capacity.
+Relation reps and any extra capacity rounds share the same staged lowering.
 
 Padding, multi-base physical partitions, and allocation placement remain
 generic scratch-allocation policies. They can extend `P` without changing the

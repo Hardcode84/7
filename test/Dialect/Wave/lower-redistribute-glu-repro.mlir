@@ -10,10 +10,22 @@
 // RUN: FileCheck %s --check-prefixes=F32-256,F32-512,DOT-A,DOT-B < %t
 
 // F32-256-LABEL: func.func @glu_mfma_to_blocked_128x128(
-// F32-256: wave.alloc() {align = 16 : i64, bytesize = 65536 : i64}
-// F32-256-COUNT-16: wave.store
+// F32-256: wave.alloc() {align = 16 : i64, bytesize = 16384 : i64}
+// F32-256-COUNT-4: wave.store
 // F32-256: wave.barrier
-// F32-256-COUNT-16: wave.load
+// F32-256-COUNT-4: wave.load
+// F32-256: wave.barrier
+// F32-256-COUNT-4: wave.store
+// F32-256: wave.barrier
+// F32-256-COUNT-4: wave.load
+// F32-256: wave.barrier
+// F32-256-COUNT-4: wave.store
+// F32-256: wave.barrier
+// F32-256-COUNT-4: wave.load
+// F32-256: wave.barrier
+// F32-256-COUNT-4: wave.store
+// F32-256: wave.barrier
+// F32-256-COUNT-4: wave.load
 // F32-256-NOT: wave.alloc()
 // F32-256: return
 func.func @glu_mfma_to_blocked_128x128(
@@ -31,10 +43,22 @@ func.func @glu_mfma_to_blocked_128x128(
 }
 
 // F32-512-LABEL: func.func @glu_mfma_to_blocked_128x256(
-// F32-512: wave.alloc() {align = 16 : i64, bytesize = 131072 : i64}
-// F32-512-COUNT-16: wave.store
+// F32-512: wave.alloc() {align = 16 : i64, bytesize = 32768 : i64}
+// F32-512-COUNT-4: wave.store
 // F32-512: wave.barrier
-// F32-512-COUNT-16: wave.load
+// F32-512-COUNT-4: wave.load
+// F32-512: wave.barrier
+// F32-512-COUNT-4: wave.store
+// F32-512: wave.barrier
+// F32-512-COUNT-4: wave.load
+// F32-512: wave.barrier
+// F32-512-COUNT-4: wave.store
+// F32-512: wave.barrier
+// F32-512-COUNT-4: wave.load
+// F32-512: wave.barrier
+// F32-512-COUNT-4: wave.store
+// F32-512: wave.barrier
+// F32-512-COUNT-4: wave.load
 // F32-512-NOT: wave.alloc()
 // F32-512: return
 func.func @glu_mfma_to_blocked_128x256(
@@ -52,10 +76,15 @@ func.func @glu_mfma_to_blocked_128x256(
 }
 
 // DOT-A-LABEL: func.func @glu_blocked_to_dot_operand_a(
-// DOT-A: wave.alloc() {align = 16 : i64, bytesize = 16384 : i64}
-// DOT-A-COUNT-2: wave.store
+// DOT-A: wave.alloc() {align = 16 : i64, bytesize = 8192 : i64}
+// DOT-A: wave.index_expr <"8*xor(
+// DOT-A: wave.store
 // DOT-A: wave.barrier
-// DOT-A-COUNT-8: wave.load
+// DOT-A-COUNT-4: wave.load
+// DOT-A: wave.barrier
+// DOT-A: wave.store
+// DOT-A: wave.barrier
+// DOT-A-COUNT-4: wave.load
 // DOT-A-NOT: wave.alloc()
 // DOT-A: return
 func.func @glu_blocked_to_dot_operand_a(
@@ -73,10 +102,10 @@ func.func @glu_blocked_to_dot_operand_a(
 }
 
 // DOT-B-LABEL: func.func @glu_blocked_to_dot_operand_b(
-// DOT-B: wave.alloc() {align = 2 : i64, bytesize = 16384 : i64}
-// DOT-B-COUNT-16: wave.store
+// DOT-B: wave.alloc() {align = 4 : i64, bytesize = 16384 : i64}
+// DOT-B-COUNT-8: wave.store {{.*}}vector<2xf16>
 // DOT-B: wave.barrier
-// DOT-B-COUNT-32: wave.load
+// DOT-B-COUNT-16: wave.load {{.*}}vector<2xf16>
 // DOT-B-NOT: wave.alloc()
 // DOT-B: return
 func.func @glu_blocked_to_dot_operand_b(

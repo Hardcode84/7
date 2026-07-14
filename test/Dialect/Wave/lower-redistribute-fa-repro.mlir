@@ -11,10 +11,14 @@
 // RUN: FileCheck %s --check-prefix=NOSELECT < %t
 
 // CHECK-LABEL: func.func @fa_blocked_to_dot_operand_cross_wave(
-// CHECK: wave.alloc() {align = 16 : i64, bytesize = 65536 : i64}
-// CHECK-COUNT-16: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
+// CHECK: wave.alloc() {align = 16 : i64, bytesize = 32768 : i64}
+// CHECK-COUNT-8: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
 // CHECK: wave.barrier
-// CHECK-COUNT-16: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+// CHECK-COUNT-8: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+// CHECK: wave.barrier
+// CHECK-COUNT-8: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
+// CHECK: wave.barrier
+// CHECK-COUNT-8: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
 // CHECK: wave.pack
 // NOSELECT-LABEL: func.func @fa_blocked_to_dot_operand_cross_wave(
 // NOSELECT-NOT: wave.select

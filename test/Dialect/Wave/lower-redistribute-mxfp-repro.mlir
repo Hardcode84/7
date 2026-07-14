@@ -10,10 +10,22 @@
 // RUN: FileCheck %s < %t
 
 // CHECK-LABEL: func.func @mxfp_mfma_to_blocked_cross_wave(
-// CHECK: wave.alloc() {align = 8 : i64, bytesize = 65536 : i64}
-// CHECK-COUNT-32: wave.store
+// CHECK: wave.alloc() {align = 16 : i64, bytesize = 16384 : i64}
+// CHECK-COUNT-4: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
 // CHECK: wave.barrier
-// CHECK-COUNT-32: wave.load
+// CHECK-COUNT-4: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+// CHECK: wave.barrier
+// CHECK-COUNT-4: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
+// CHECK: wave.barrier
+// CHECK-COUNT-4: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+// CHECK: wave.barrier
+// CHECK-COUNT-4: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
+// CHECK: wave.barrier
+// CHECK-COUNT-4: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+// CHECK: wave.barrier
+// CHECK-COUNT-4: wave.store {{.*}}!wave.simd<vector<8xbf16>, 64>
+// CHECK: wave.barrier
+// CHECK-COUNT-4: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
 // CHECK-NOT: wave.alloc()
 // CHECK: return
 func.func @mxfp_mfma_to_blocked_cross_wave(

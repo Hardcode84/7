@@ -3,10 +3,10 @@
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
 // ASM-LABEL: mxfp_epilogue_redistribute_lds_overflow:
-// ASM: ds_write_b64
-// ASM-COUNT-11: s_barrier
-// ASM: ds_read_b64
-// ASM: .amdhsa_group_segment_fixed_size 162720
+// ASM: ds_write_b128
+// ASM-COUNT-15: s_barrier
+// ASM: ds_read_b128
+// ASM: .amdhsa_group_segment_fixed_size 154528
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @mxfp_epilogue_redistribute_lds_overflow(
