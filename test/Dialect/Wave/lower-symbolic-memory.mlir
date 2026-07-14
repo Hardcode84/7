@@ -332,6 +332,24 @@ func.func @slot_partition_base(
 
 // -----
 
+// CHECK-LABEL: func.func @dead_item_after_slot_specialization(
+// CHECK-NOT: wave.workitem_id
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @dead_item_after_slot_specialization(
+    %base: !wave.ptr<#wave.shared, i32>)
+    -> !wave.simd<vector<2xi32>, 32> {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"Piecewise((32 * slot, slot < 2), (32 * item, True))">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @explicit_local_block(
 // CHECK-COUNT-1: wave.load
 func.func @explicit_local_block(%base: !wave.ptr<#wave.shared, i32>)

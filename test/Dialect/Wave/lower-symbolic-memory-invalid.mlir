@@ -63,6 +63,19 @@ func.func @unknown_workgroup(%base: !wave.ptr<#wave.shared, i32>) {
 
 // -----
 
+func.func @live_item_after_slot_specialization(
+    %base: !wave.ptr<#wave.shared, i32>) {
+  // expected-error @+1 {{requires a known workgroup shape}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"Piecewise((32 * slot, slot < 1), (32 * item, True))">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
 func.func @partial_item_domain(%base: !wave.ptr<#wave.shared, i32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   // expected-error @+1 {{mapping is not a defined, byte-addressable local memory point}}

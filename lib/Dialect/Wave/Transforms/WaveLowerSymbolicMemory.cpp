@@ -1216,10 +1216,38 @@ static FailureOr<MappingDomain> getMappingDomain(sym::Store &store) {
   return MappingDomain{*block, *slot, *zero};
 }
 
+static bool coordinatesHaveSymbol(const MappingCoordinates &coordinates,
+                                  StringRef name) {
+  return hasSymbol(coordinates.base, name) ||
+         hasSymbol(coordinates.targetBlock, name) ||
+         hasSymbol(coordinates.bitOffset, name);
+}
+
+static bool mappingNeedsItemAfterSlotSpecialization(
+    const MemoryAccess &access, sym::Store &store, const MappingDomain &domain,
+    int64_t slotCount, ArrayRef<sym::ExprSubstitution> bindingSubstitutions) {
+  if (!mappingHasSymbol(access.mapping, "item"))
+    return false;
+  MappingCoordinates coordinates =
+      getMappingCoordinates(access, domain.block, domain.zero);
+  for (int64_t slot : llvm::seq<int64_t>(0, slotCount)) {
+    FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
+    if (failed(slotValue))
+      return true;
+    SmallVector<sym::ExprSubstitution> substitutions(bindingSubstitutions);
+    substitutions.push_back({domain.slot, *slotValue});
+    FailureOr<MappingCoordinates> specialized =
+        specializeCoordinates(store, coordinates, substitutions, {});
+    if (failed(specialized) || coordinatesHaveSymbol(*specialized, "item"))
+      return true;
+  }
+  return false;
+}
+
 static FailureOr<MappedItem> getMappedItem(IRRewriter &rewriter,
                                            const MemoryAccess &access,
-                                           sym::Store &store) {
-  if (!mappingHasSymbol(access.mapping, "item"))
+                                           sym::Store &store, bool needsItem) {
+  if (!needsItem)
     return MappedItem{};
   return materializeItem(rewriter, access, store);
 }
@@ -1358,17 +1386,20 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
   FailureOr<MappingDomain> domain = getMappingDomain(store);
   if (failed(domain))
     return access.op->emitOpError("failed to construct mapping domain");
-  FailureOr<MappedItem> item = getMappedItem(rewriter, access, store);
+  FailureOr<SmallVector<sym::ExprSubstitution>> bindingSubstitutions =
+      buildConstantBindingSubstitutions(access, store, solver);
+  if (failed(bindingSubstitutions))
+    return failure();
+  bool needsItem = mappingNeedsItemAfterSlotSpecialization(
+      access, store, *domain, shape->slotCount, *bindingSubstitutions);
+  FailureOr<MappedItem> item =
+      getMappedItem(rewriter, access, store, needsItem);
   if (failed(item))
     return failure();
   FailureOr<SmallVector<SmallVector<SymbolicOffset>>> packetComponents =
       buildPacketComponents(rewriter, access, shape->slotCount, dialect,
                             solver);
   if (failed(packetComponents))
-    return failure();
-  FailureOr<SmallVector<sym::ExprSubstitution>> bindingSubstitutions =
-      buildConstantBindingSubstitutions(access, store, solver);
-  if (failed(bindingSubstitutions))
     return failure();
   SmallVector<ActiveControl> controls =
       buildActiveControls(access, dialect, solver);
