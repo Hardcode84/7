@@ -724,24 +724,30 @@ convertUnsignedCmpPredicate(arith::CmpIPredicate predicate) {
   }
 }
 
-static bool hasUnsignedCmpDomain(CmpIOp op, DataFlowSolver &solver,
-                                 sym::Store &store) {
+static bool hasUnsignedCmpDomain(Value lhsValue, Value rhsValue,
+                                 DataFlowSolver &solver, sym::Store &store) {
   std::optional<SignedI64Range> lhs =
-      computeSignedI64Range(op.getLhs(), solver, store);
+      computeSignedI64Range(lhsValue, solver, store);
   std::optional<SignedI64Range> rhs =
-      computeSignedI64Range(op.getRhs(), solver, store);
+      computeSignedI64Range(rhsValue, solver, store);
   return lhs && rhs && lhs->first >= 0 && rhs->first >= 0;
 }
 
 static std::optional<sym::PredCmpOp>
-convertCmpPredicate(CmpIOp op, DataFlowSolver &solver, sym::Store &store) {
-  arith::CmpIPredicate predicate = op.getPredicate();
+convertCmpPredicate(arith::CmpIPredicate predicate, Value lhs, Value rhs,
+                    DataFlowSolver &solver, sym::Store &store) {
   if (std::optional<sym::PredCmpOp> converted =
           convertSignedCmpPredicate(predicate))
     return converted;
-  if (!hasUnsignedCmpDomain(op, solver, store))
+  if (!hasUnsignedCmpDomain(lhs, rhs, solver, store))
     return std::nullopt;
   return convertUnsignedCmpPredicate(predicate);
+}
+
+static std::optional<sym::PredCmpOp>
+convertCmpPredicate(CmpIOp op, DataFlowSolver &solver, sym::Store &store) {
+  return convertCmpPredicate(op.getPredicate(), op.getLhs(), op.getRhs(),
+                             solver, store);
 }
 
 static bool canBuildSymbolicCmp(CmpIOp op, bool allowI64Integers,
@@ -770,12 +776,14 @@ public:
                                 bool assumeI32StorageRange = false,
                                 bool bindI32Root = false,
                                 bool requireI32RootRange = false,
-                                bool expandIndexExprRoot = false)
+                                bool expandIndexExprRoot = false,
+                                bool foldWaveConstants = false)
       : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
         allowI64Integers(allowI64Integers),
         assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
         requireI32RootRange(requireI32RootRange),
-        expandIndexExprRoot(expandIndexExprRoot) {}
+        expandIndexExprRoot(expandIndexExprRoot),
+        foldWaveConstants(foldWaveConstants) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     return build(value, /*allowRootLeaf=*/false);
@@ -783,6 +791,31 @@ public:
 
   FailureOr<std::optional<SymbolicOffset>> buildAllowingRootLeaf(Value value) {
     return build(value, /*allowRootLeaf=*/true);
+  }
+
+  FailureOr<std::optional<SymbolicPredicate>> buildPredicate(Value value) {
+    bool skip = false;
+    FailureOr<sym::PredHandle> predicate = failure();
+    if (CmpIOp cmp = value.getDefiningOp<CmpIOp>())
+      predicate = buildCmpPredicate(cmp, skip, 0);
+    else if (arith::CmpIOp cmp = value.getDefiningOp<arith::CmpIOp>())
+      predicate = buildCmpPredicate(cmp.getPredicate(), cmp.getLhs(),
+                                    cmp.getRhs(), skip);
+    else
+      return std::optional<SymbolicPredicate>{};
+    if (skip)
+      return std::optional<SymbolicPredicate>{};
+    if (failed(predicate))
+      return failure();
+    FailureOr<sym::PredHandle> simplified =
+        sym::simplifyPred(store, *predicate);
+    if (failed(simplified))
+      return failure();
+    SymbolicPredicate result;
+    result.bindings = std::move(offset.bindings);
+    result.assumptions = std::move(offset.assumptions);
+    result.predicate = *simplified;
+    return std::optional<SymbolicPredicate>{std::move(result)};
   }
 
   bool canExpand(Value value) { return hasSymbolicRoot(value); }
@@ -846,7 +879,10 @@ private:
       skip = true;
       return failure();
     }
-    if (std::optional<int64_t> constant = getConstantIntValue(value))
+    std::optional<int64_t> constant = foldWaveConstants
+                                          ? getSplatOrConstantInt(value)
+                                          : getConstantIntValue(value);
+    if (constant)
       return sym::composeExprInt(store, *constant);
     if (IndexExprOp indexExpr = value.getDefiningOp<IndexExprOp>())
       return buildIndexExpr(indexExpr);
@@ -989,20 +1025,27 @@ private:
 
   FailureOr<sym::PredHandle> buildCmpPredicate(CmpIOp op, bool &skip,
                                                unsigned depth) {
-    std::optional<sym::PredCmpOp> predicate =
-        convertCmpPredicate(op, solver, store);
-    if (!predicate) {
+    return buildCmpPredicate(op.getPredicate(), op.getLhs(), op.getRhs(), skip,
+                             depth);
+  }
+
+  FailureOr<sym::PredHandle> buildCmpPredicate(arith::CmpIPredicate predicate,
+                                               Value lhsValue, Value rhsValue,
+                                               bool &skip, unsigned depth = 0) {
+    std::optional<sym::PredCmpOp> converted =
+        convertCmpPredicate(predicate, lhsValue, rhsValue, solver, store);
+    if (!converted) {
       skip = true;
       return failure();
     }
 
-    FailureOr<sym::ExprHandle> lhs = buildExpr(op.getLhs(), skip, true, depth);
+    FailureOr<sym::ExprHandle> lhs = buildExpr(lhsValue, skip, true, depth);
     if (skip || failed(lhs))
       return failure();
-    FailureOr<sym::ExprHandle> rhs = buildExpr(op.getRhs(), skip, true, depth);
+    FailureOr<sym::ExprHandle> rhs = buildExpr(rhsValue, skip, true, depth);
     if (skip || failed(rhs))
       return failure();
-    return sym::composePredCmp(store, *lhs, *predicate, *rhs);
+    return sym::composePredCmp(store, *lhs, *converted, *rhs);
   }
 
   FailureOr<sym::ExprHandle> buildPlainBinary(BinaryOp op, bool &skip,
@@ -1410,6 +1453,7 @@ private:
   bool bindI32Root = false;
   bool requireI32RootRange = false;
   bool expandIndexExprRoot = false;
+  bool foldWaveConstants = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -1423,6 +1467,17 @@ mlir::wave::buildSymbolicIndexValue(Value value, WaveDialect &dialect,
       /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
       /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true);
   return builder.buildAllowingRootLeaf(value);
+}
+
+FailureOr<std::optional<SymbolicPredicate>>
+mlir::wave::buildSymbolicIndexPredicate(Value value, WaveDialect &dialect,
+                                        DataFlowSolver &solver) {
+  SymbolicValueBuilder builder(
+      dialect, solver, /*allowI64Integers=*/false,
+      /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
+      /*foldWaveConstants=*/true);
+  return builder.buildPredicate(value);
 }
 
 namespace {

@@ -728,6 +728,17 @@ mlir::wave::sym::composePredOr(Store &store, PredHandle lhsHandle,
                     "failed to compose wave.pred OR");
 }
 
+mlir::FailureOr<PredHandle>
+mlir::wave::sym::composePredNot(Store &store, PredHandle valueHandle,
+                                std::string *diagnostic) {
+  Session session(store);
+  ixs_node *value = rawPredNode(valueHandle, diagnostic);
+  if (!value)
+    return failure();
+  return finishPred(session.raw(), ixs_not(session.raw(), value), diagnostic,
+                    "failed to compose wave.pred NOT");
+}
+
 FailureOr<ExprHandle> mlir::wave::sym::simplifyExpr(Store &store,
                                                     ExprHandle value,
                                                     std::string *diagnostic) {

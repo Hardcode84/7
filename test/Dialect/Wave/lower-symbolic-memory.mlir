@@ -291,3 +291,77 @@ func.func @row_major_item(%base: !wave.ptr<#wave.shared, i32>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<2xi32>, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @where_then_control(
+// CHECK: wave.where
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @where_then_control(%x: !wave.simd<i32, 32>,
+                              %base: !wave.ptr<#wave.shared, i32>) {
+  %limit = wave.constant 16 : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  wave.where %active {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"Piecewise((32 * slot, x < 16))">>
+        bindings ["x"](%x) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>)
+        -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+    wave.yield
+  } : !wave.mask<32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @where_else_control(
+// CHECK: wave.where
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @where_else_control(%x: !wave.simd<i32, 32>,
+                              %base: !wave.ptr<#wave.shared, i32>) {
+  %limit = wave.constant 16 : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  wave.where %active {
+    wave.yield
+  } otherwise {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"Piecewise((32 * slot, x >= 16))">>
+        bindings ["x"](%x) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>)
+        -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+    wave.yield
+  } : !wave.mask<32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @scf_if_control(
+// CHECK: scf.if
+// CHECK-COUNT-2: wave.load
+// CHECK-NOT: wave.gather
+func.func @scf_if_control(%x: index,
+                          %base: !wave.ptr<#wave.shared, i32>) {
+  %limit = arith.constant 16 : index
+  %active = arith.cmpi slt, %x, %limit : index
+  scf.if %active {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"Piecewise((32 * slot, x < 16))">>
+        bindings ["x"](%x) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i32>, index)
+        -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  } else {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"Piecewise((32 * slot, x >= 16))">>
+        bindings ["x"](%x) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i32>, index)
+        -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  }
+  return
+}

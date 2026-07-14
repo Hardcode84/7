@@ -13,6 +13,7 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -81,6 +82,16 @@ struct MemoryAccess {
   Type tokenType;
   Operation *op = nullptr;
   bool gather = false;
+};
+
+struct ActiveControl {
+  SymbolicPredicate predicate;
+  bool negated = false;
+};
+
+struct ControlCondition {
+  Value value;
+  bool negated = false;
 };
 
 struct CoverState {
@@ -295,11 +306,13 @@ static void seedPacketBindingState(const MemoryAccess &access, Value item,
     state.reserved.try_emplace(name, Value());
 }
 
-static FailureOr<sym::ExprHandle>
-remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
-                    PacketBindingState &state, SlotMapping &mapping) {
-  SmallVector<sym::ExprSubstitution> substitutions;
-  for (const SymbolicOffsetBinding &binding : offset.bindings) {
+static LogicalResult
+remapSymbolicBindings(sym::Store &store,
+                      ArrayRef<SymbolicOffsetBinding> bindings,
+                      ArrayRef<sym::PredHandle> assumptions,
+                      PacketBindingState &state, SlotMapping &mapping,
+                      SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+  for (const SymbolicOffsetBinding &binding : bindings) {
     StringRef oldName = getSymbolName(binding);
     StringRef newName = reserveIndexExprBindingName(
         oldName, binding.value, state.reserved, state.byValue);
@@ -315,17 +328,58 @@ remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
   }
 
   if (substitutions.empty())
-    llvm::append_range(mapping.assumptions, offset.assumptions);
+    llvm::append_range(mapping.assumptions, assumptions);
   else {
-    FailureOr<SmallVector<sym::PredHandle>> assumptions =
-        substituteIndexExprPredicates(store, offset.assumptions, substitutions);
-    if (failed(assumptions))
+    FailureOr<SmallVector<sym::PredHandle>> remappedAssumptions =
+        substituteIndexExprPredicates(store, assumptions, substitutions);
+    if (failed(remappedAssumptions))
       return failure();
-    llvm::append_range(mapping.assumptions, *assumptions);
+    llvm::append_range(mapping.assumptions, *remappedAssumptions);
   }
+  return success();
+}
+
+static FailureOr<sym::ExprHandle>
+remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
+                    PacketBindingState &state, SlotMapping &mapping) {
+  SmallVector<sym::ExprSubstitution> substitutions;
+  if (failed(remapSymbolicBindings(store, offset.bindings, offset.assumptions,
+                                   state, mapping, substitutions)))
+    return failure();
   if (substitutions.empty())
     return offset.expr;
   return sym::substituteExpr(store, offset.expr, substitutions);
+}
+
+static FailureOr<sym::PredHandle>
+remapSymbolicPredicate(sym::Store &store, const SymbolicPredicate &predicate,
+                       PacketBindingState &state, SlotMapping &mapping) {
+  SmallVector<sym::ExprSubstitution> substitutions;
+  if (failed(remapSymbolicBindings(store, predicate.bindings,
+                                   predicate.assumptions, state, mapping,
+                                   substitutions)))
+    return failure();
+  if (substitutions.empty())
+    return predicate.predicate;
+  return sym::substitutePred(store, predicate.predicate, substitutions);
+}
+
+static LogicalResult appendActiveControls(sym::Store &store,
+                                          ArrayRef<ActiveControl> controls,
+                                          PacketBindingState &state,
+                                          SlotMapping &mapping) {
+  for (const ActiveControl &control : controls) {
+    FailureOr<sym::PredHandle> predicate =
+        remapSymbolicPredicate(store, control.predicate, state, mapping);
+    if (failed(predicate))
+      return failure();
+    if (control.negated)
+      predicate = sym::composePredNot(store, *predicate);
+    if (failed(predicate))
+      return failure();
+    mapping.assumptions.push_back(*predicate);
+  }
+  return success();
 }
 
 static LogicalResult appendPacketSubstitution(
@@ -449,15 +503,16 @@ getByteOffset(sym::Store &store, sym::ExprHandle bitOffset,
   return byteOffset;
 }
 
-static FailureOr<SlotMapping>
-buildSlotMapping(const MemoryAccess &access, sym::Store &store,
-                 sym::ExprHandle blockSymbol, sym::ExprHandle slotSymbol,
-                 sym::ExprHandle zero, int64_t slot, Value item,
-                 ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
-                 PacketBindingState &bindingState) {
+static FailureOr<SlotMapping> buildSlotMapping(
+    const MemoryAccess &access, sym::Store &store, sym::ExprHandle blockSymbol,
+    sym::ExprHandle slotSymbol, sym::ExprHandle zero, int64_t slot, Value item,
+    ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
+    ArrayRef<ActiveControl> controls, PacketBindingState &bindingState) {
   SlotMapping result;
   result.logicalSlots.push_back(static_cast<unsigned>(slot));
   if (failed(appendAccessBindings(access, store, item, result)))
+    return failure();
+  if (failed(appendActiveControls(store, controls, bindingState, result)))
     return failure();
   FailureOr<SmallVector<sym::ExprSubstitution>> substitutions =
       buildSlotSubstitutions(access, store, slotSymbol, slot, packetComponents,
@@ -1120,10 +1175,50 @@ buildPacketComponents(IRRewriter &rewriter, const MemoryAccess &access,
   return packetComponents;
 }
 
-static FailureOr<SmallVector<SlotMapping>> buildAccessSlotMappings(
-    const MemoryAccess &access, sym::Store &store, const MappingDomain &domain,
-    int64_t slotCount, Value item,
-    ArrayRef<SmallVector<SymbolicOffset>> packetComponents) {
+static SmallVector<ControlCondition> collectControlConditions(Operation *op) {
+  SmallVector<ControlCondition> conditions;
+  Operation *child = op;
+  for (Operation *parent = child->getParentOp(); parent;
+       child = parent, parent = parent->getParentOp()) {
+    Region *region = child->getParentRegion();
+    if (WhereOp where = dyn_cast<WhereOp>(parent)) {
+      if (region == &where.getThenRegion())
+        conditions.push_back({where.getCondition(), false});
+      else if (region == &where.getElseRegion())
+        conditions.push_back({where.getCondition(), true});
+      continue;
+    }
+    if (scf::IfOp ifOp = dyn_cast<scf::IfOp>(parent)) {
+      if (region == &ifOp.getThenRegion())
+        conditions.push_back({ifOp.getCondition(), false});
+      else if (region == &ifOp.getElseRegion())
+        conditions.push_back({ifOp.getCondition(), true});
+    }
+  }
+  std::reverse(conditions.begin(), conditions.end());
+  return conditions;
+}
+
+static SmallVector<ActiveControl>
+buildActiveControls(const MemoryAccess &access, WaveDialect &dialect,
+                    DataFlowSolver &solver) {
+  SmallVector<ActiveControl> controls;
+  for (ControlCondition condition : collectControlConditions(access.op)) {
+    FailureOr<std::optional<SymbolicPredicate>> predicate =
+        buildSymbolicIndexPredicate(condition.value, dialect, solver);
+    if (failed(predicate) || !*predicate)
+      continue;
+    controls.push_back({std::move(**predicate), condition.negated});
+  }
+  return controls;
+}
+
+static FailureOr<SmallVector<SlotMapping>>
+buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
+                        const MappingDomain &domain, int64_t slotCount,
+                        Value item,
+                        ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
+                        ArrayRef<ActiveControl> controls) {
   PacketBindingState bindingState;
   seedPacketBindingState(access, item, bindingState);
   SmallVector<SlotMapping> mappings;
@@ -1131,7 +1226,7 @@ static FailureOr<SmallVector<SlotMapping>> buildAccessSlotMappings(
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {
     FailureOr<SlotMapping> mapping =
         buildSlotMapping(access, store, domain.block, domain.slot, domain.zero,
-                         index, item, packetComponents, bindingState);
+                         index, item, packetComponents, controls, bindingState);
     if (failed(mapping)) {
       access.op->emitOpError(
           "mapping is not a defined, byte-addressable local memory point");
@@ -1162,8 +1257,11 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
                             solver);
   if (failed(packetComponents))
     return failure();
-  FailureOr<SmallVector<SlotMapping>> mappings = buildAccessSlotMappings(
-      access, store, *domain, shape->slotCount, *item, *packetComponents);
+  SmallVector<ActiveControl> controls =
+      buildActiveControls(access, dialect, solver);
+  FailureOr<SmallVector<SlotMapping>> mappings =
+      buildAccessSlotMappings(access, store, *domain, shape->slotCount, *item,
+                              *packetComponents, controls);
   if (failed(mappings))
     return failure();
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =

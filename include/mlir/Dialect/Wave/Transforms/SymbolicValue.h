@@ -18,9 +18,18 @@ class DataFlowSolver;
 
 namespace wave {
 
+struct SymbolicPredicate {
+  SmallVector<SymbolicOffsetBinding, 4> bindings;
+  SmallVector<sym::PredHandle, 2> assumptions;
+  sym::PredHandle predicate;
+};
+
 FailureOr<std::optional<SymbolicOffset>>
 buildSymbolicIndexValue(Value value, WaveDialect &dialect,
                         DataFlowSolver &solver);
+FailureOr<std::optional<SymbolicPredicate>>
+buildSymbolicIndexPredicate(Value value, WaveDialect &dialect,
+                            DataFlowSolver &solver);
 
 } // namespace wave
 } // namespace mlir

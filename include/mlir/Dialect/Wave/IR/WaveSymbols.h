@@ -276,6 +276,8 @@ mlir::FailureOr<PredHandle> composePredAnd(Store &store, PredHandle lhs,
 mlir::FailureOr<PredHandle> composePredOr(Store &store, PredHandle lhs,
                                           PredHandle rhs,
                                           std::string *diagnostic = nullptr);
+mlir::FailureOr<PredHandle> composePredNot(Store &store, PredHandle value,
+                                           std::string *diagnostic = nullptr);
 
 /// Simplify under no assumptions.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,

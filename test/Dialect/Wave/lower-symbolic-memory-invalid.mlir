@@ -97,3 +97,22 @@ func.func @private_address_space(%base: !wave.ptr<#wave.private, i32>) {
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
 }
+
+// -----
+
+func.func @inactive_control_fact(%x: !wave.simd<i32, 32>,
+                                 %base: !wave.ptr<#wave.shared, i32>) {
+  %limit = wave.constant 16 : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  wave.where %active {
+    wave.yield
+  } : !wave.mask<32>
+  // expected-error @+1 {{mapping is not a defined, byte-addressable local memory point}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"Piecewise((32 * slot, x < 16))">>
+      bindings ["x"](%x) packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
