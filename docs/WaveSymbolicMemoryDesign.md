@@ -213,9 +213,45 @@ Indexed access binds its index packet pointwise:
 Cache policy remains an operation attribute, matching `wave.load` and
 `wave.store`. It is not part of the mapping.
 
-V1 maps every executed packet point. A future masked form may add mask and
-`other` operands to `wave.gather`, or a mask operand to `wave.scatter`. Masking
-does not change the mapping attribute.
+### Predication And Inactive Values
+
+`wave.gather` and `wave.scatter` have no mask operands. Put masked accesses in
+`wave.where`:
+
+```mlir
+%value, %done = wave.where %mask {
+  %loaded, %loaded_done = wave.gather %base after %dependency ...
+  wave.yield %loaded, %loaded_done
+} otherwise {
+  wave.yield %zero, %dependency
+}
+
+wave.where %mask {
+  %stored = wave.scatter %source -> %base after %dependency ...
+  wave.yield
+}
+```
+
+Lowering uses enclosing `wave.where` and branch predicates as proof
+assumptions. The map need only be defined where the access executes. Lowered
+`wave.load` and `wave.store` operations stay inside the region; predicates do
+not become mapping fields or access attributes.
+
+A then-only `wave.where` leaves inactive gathered data unspecified. Use an
+`otherwise` region yielding an explicit fallback when inactive lanes escape;
+yield the incoming dependency on the untaken memory path. Scatter needs no
+fallback: inactive lanes perform no write.
+
+Global-to-buffer promotion does not change those semantics. It rewrites
+eligible lowered loads and stores in place, preserving `wave.where` and EXEC
+masking. Buffer promotion never supplies the gathered fallback value.
+
+Buffer OOB zero fill is a separate DMA-to-LDS optimization. An isolated,
+then-only `wave.where` containing opt-in `waveamd.dma_load_lds` operations may
+be flattened by `waveamd-dma-zero-fill`: inactive lanes select a guaranteed-OOB
+source, and buffer hardware supplies zero. An ordinary gather, scatter, load,
+or store in the same region blocks that rewrite. Scatter has no zero-fill
+equivalent.
 
 ## Triton Import
 
@@ -557,7 +593,11 @@ wave-promote-global-to-buffer
 wave-combine-pointer-offsets
 wave-simplify-index-exprs
 wave-coalesce-memory
+wave-promote-global-to-buffer
+wave-extract-loop-strides
+waveamd-dma-zero-fill
 wave-resolve-allocs
+wave-coalesce-where
 waveamd-to-machine
 ```
 
