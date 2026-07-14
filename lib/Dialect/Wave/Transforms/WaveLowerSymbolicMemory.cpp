@@ -129,6 +129,11 @@ struct MappingDomain {
   sym::ExprHandle zero;
 };
 
+struct MappedItem {
+  Value value;
+  sym::PredHandle range;
+};
+
 static constexpr unsigned kMaxExactCoverNodes = 20;
 static constexpr unsigned kMaxTransactionCandidates = 4096;
 
@@ -197,8 +202,9 @@ static DenseI32ArrayAttr getWorkgroupShape(Operation *op) {
   return {};
 }
 
-static FailureOr<Value> materializeItem(IRRewriter &rewriter,
-                                        const MemoryAccess &access) {
+static FailureOr<MappedItem> materializeItem(IRRewriter &rewriter,
+                                             const MemoryAccess &access,
+                                             sym::Store &store) {
   DenseI32ArrayAttr shape = getWorkgroupShape(access.op);
   if (!shape)
     return access.op->emitOpError("requires a known workgroup shape");
@@ -208,8 +214,9 @@ static FailureOr<Value> materializeItem(IRRewriter &rewriter,
     return access.op->emitOpError(
         "requires three positive workgroup dimensions");
   int64_t xy = int64_t{dims[0]} * dims[1];
-  if (xy * dims[2] > std::numeric_limits<int32_t>::max())
+  if (xy > std::numeric_limits<int32_t>::max() / int64_t{dims[2]})
     return access.op->emitOpError("row-major workitem index exceeds i32");
+  int64_t itemCount = xy * dims[2];
   Type type = SimdType::get(access.op->getContext(), rewriter.getI32Type(),
                             access.packetType.getWidth());
   Location loc = access.op->getLoc();
@@ -233,7 +240,11 @@ static FailureOr<Value> materializeItem(IRRewriter &rewriter,
     item =
         BinaryOp::create(rewriter, loc, type, BinaryKind::AddI, item, scaled);
   }
-  return item;
+  FailureOr<sym::PredHandle> range =
+      sym::rangeAssumption(store, "item", 0, itemCount - 1);
+  if (failed(range))
+    return access.op->emitOpError("failed to construct workitem range");
+  return MappedItem{item, *range};
 }
 
 static FailureOr<sym::ExprHandle>
@@ -434,18 +445,21 @@ buildConstantBindingSubstitutions(const MemoryAccess &access, sym::Store &store,
 }
 
 static LogicalResult appendAccessBindings(const MemoryAccess &access,
-                                          sym::Store &store, Value item,
+                                          sym::Store &store,
+                                          const MappedItem &item,
                                           SlotMapping &mapping) {
   for (auto [name, value] : llvm::zip(access.bindingNames, access.bindings)) {
     if (failed(appendBinding(mapping, name, value)))
       return failure();
     appendAssumePredicates(store, value, name, mapping.assumptions);
   }
-  if (!item)
+  if (!item.value)
     return success();
-  if (failed(appendBinding(mapping, "item", item)))
+  assert(item.range && "mapped item requires an execution range");
+  if (failed(appendBinding(mapping, "item", item.value)))
     return failure();
-  appendAssumePredicates(store, item, "item", mapping.assumptions);
+  appendAssumePredicates(store, item.value, "item", mapping.assumptions);
+  mapping.assumptions.push_back(item.range);
   return success();
 }
 
@@ -542,12 +556,14 @@ getByteOffset(sym::Store &store, sym::ExprHandle bitOffset,
   return byteOffset;
 }
 
-static FailureOr<SlotMapping> buildSlotMapping(
-    const MemoryAccess &access, sym::Store &store, sym::ExprHandle blockSymbol,
-    sym::ExprHandle slotSymbol, sym::ExprHandle zero, int64_t slot, Value item,
-    ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
-    ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
-    ArrayRef<ActiveControl> controls, PacketBindingState &bindingState) {
+static FailureOr<SlotMapping>
+buildSlotMapping(const MemoryAccess &access, sym::Store &store,
+                 sym::ExprHandle blockSymbol, sym::ExprHandle slotSymbol,
+                 sym::ExprHandle zero, int64_t slot, const MappedItem &item,
+                 ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
+                 ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
+                 ArrayRef<ActiveControl> controls,
+                 PacketBindingState &bindingState) {
   SlotMapping result;
   result.logicalSlots.push_back(static_cast<unsigned>(slot));
   if (failed(appendAccessBindings(access, store, item, result)))
@@ -1150,11 +1166,12 @@ static FailureOr<MappingDomain> getMappingDomain(sym::Store &store) {
   return MappingDomain{*block, *slot, *zero};
 }
 
-static FailureOr<Value> getMappedItem(IRRewriter &rewriter,
-                                      const MemoryAccess &access) {
+static FailureOr<MappedItem> getMappedItem(IRRewriter &rewriter,
+                                           const MemoryAccess &access,
+                                           sym::Store &store) {
   if (!mappingHasSymbol(access.mapping, "item"))
-    return Value{};
-  return materializeItem(rewriter, access);
+    return MappedItem{};
+  return materializeItem(rewriter, access, store);
 }
 
 static SmallVector<Value> getPacketComponentValues(IRRewriter &rewriter,
@@ -1257,12 +1274,12 @@ buildActiveControls(const MemoryAccess &access, WaveDialect &dialect,
 static FailureOr<SmallVector<SlotMapping>>
 buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
                         const MappingDomain &domain, int64_t slotCount,
-                        Value item,
+                        const MappedItem &item,
                         ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
                         ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
                         ArrayRef<ActiveControl> controls) {
   PacketBindingState bindingState;
-  seedPacketBindingState(access, item, bindingState);
+  seedPacketBindingState(access, item.value, bindingState);
   SmallVector<SlotMapping> mappings;
   mappings.reserve(slotCount);
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {
@@ -1291,7 +1308,7 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
   FailureOr<MappingDomain> domain = getMappingDomain(store);
   if (failed(domain))
     return access.op->emitOpError("failed to construct mapping domain");
-  FailureOr<Value> item = getMappedItem(rewriter, access);
+  FailureOr<MappedItem> item = getMappedItem(rewriter, access, store);
   if (failed(item))
     return failure();
   FailureOr<SmallVector<SmallVector<SymbolicOffset>>> packetComponents =

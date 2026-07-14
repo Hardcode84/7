@@ -320,12 +320,46 @@ func.func @explicit_local_block(%base: !wave.ptr<#wave.shared, i32>)
 // CHECK: wave.workitem_id 1
 // CHECK: wave.binary muli
 // CHECK: wave.binary addi
+// CHECK: wave.index_expr <"8*item"> assuming [#wave.pred<"item >= 0 & -7 + item <= 0">]
 // CHECK-COUNT-1: wave.load
 func.func @row_major_item(%base: !wave.ptr<#wave.shared, i32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 4, 2, 1>} {
   %value, %token = wave.gather %base mapping
       <bit_offset = <"32 * (2 * item + slot)">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @item_range_simplifies_base(
+// CHECK-COUNT-1: wave.load
+// CHECK-NOT: wave.gather
+func.func @item_range_simplifies_base(%base: !wave.ptr<#wave.shared, i32>)
+    -> !wave.simd<vector<2xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %value, %token = wave.gather %base mapping
+      <base = <"floor(item / 32)">, bit_offset = <"32 * slot">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @item_range_proves_defined(
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @item_range_proves_defined(%base: !wave.ptr<#wave.shared, i32>)
+    -> !wave.simd<vector<2xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 4, 2, 2>} {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"Piecewise((32 * slot, item < 16))">>
       bindings []() packet_bindings []()
       : (!wave.ptr<#wave.shared, i32>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
