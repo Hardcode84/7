@@ -395,6 +395,44 @@ static LogicalResult appendPacketSubstitution(
   return success();
 }
 
+static std::optional<int64_t> getProvenConstantScalar(DataFlowSolver &solver,
+                                                      Value value) {
+  Type type = value.getType();
+  if (!type.isIndex() && !isa<IntegerType>(type))
+    return std::nullopt;
+  if (std::optional<int64_t> constant = getConstantIntValue(value))
+    return constant;
+
+  const dataflow::IntegerValueRangeLattice *lattice =
+      solver.lookupState<dataflow::IntegerValueRangeLattice>(value);
+  if (!lattice)
+    return std::nullopt;
+  IntegerValueRange valueRange = lattice->getValue();
+  if (valueRange.isUninitialized())
+    return std::nullopt;
+  std::optional<APInt> constant = valueRange.getValue().getConstantValue();
+  if (!constant || !constant->isSignedIntN(64))
+    return std::nullopt;
+  return constant->getSExtValue();
+}
+
+static FailureOr<SmallVector<sym::ExprSubstitution>>
+buildConstantBindingSubstitutions(const MemoryAccess &access, sym::Store &store,
+                                  DataFlowSolver &solver) {
+  SmallVector<sym::ExprSubstitution> substitutions;
+  for (auto [name, value] : llvm::zip(access.bindingNames, access.bindings)) {
+    std::optional<int64_t> constant = getProvenConstantScalar(solver, value);
+    if (!constant)
+      continue;
+    FailureOr<sym::ExprHandle> symbol = sym::composeExprSym(store, name);
+    FailureOr<sym::ExprHandle> literal = sym::composeExprInt(store, *constant);
+    if (failed(symbol) || failed(literal))
+      return failure();
+    substitutions.push_back({*symbol, *literal});
+  }
+  return substitutions;
+}
+
 static LogicalResult appendAccessBindings(const MemoryAccess &access,
                                           sym::Store &store, Value item,
                                           SlotMapping &mapping) {
@@ -414,13 +452,14 @@ static LogicalResult appendAccessBindings(const MemoryAccess &access,
 static FailureOr<SmallVector<sym::ExprSubstitution>>
 buildSlotSubstitutions(const MemoryAccess &access, sym::Store &store,
                        sym::ExprHandle slotSymbol, int64_t slot,
+                       ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
                        ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
                        PacketBindingState &bindingState, SlotMapping &mapping) {
   FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
   if (failed(slotValue))
     return failure();
-  SmallVector<sym::ExprSubstitution> substitutions{
-      sym::ExprSubstitution{slotSymbol, *slotValue}};
+  SmallVector<sym::ExprSubstitution> substitutions(bindingSubstitutions);
+  substitutions.push_back({slotSymbol, *slotValue});
   for (auto [bindingIndex, name] : llvm::enumerate(access.packetBindingNames))
     if (failed(appendPacketSubstitution(store, name,
                                         packetComponents[bindingIndex][slot],
@@ -506,6 +545,7 @@ getByteOffset(sym::Store &store, sym::ExprHandle bitOffset,
 static FailureOr<SlotMapping> buildSlotMapping(
     const MemoryAccess &access, sym::Store &store, sym::ExprHandle blockSymbol,
     sym::ExprHandle slotSymbol, sym::ExprHandle zero, int64_t slot, Value item,
+    ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
     ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
     ArrayRef<ActiveControl> controls, PacketBindingState &bindingState) {
   SlotMapping result;
@@ -515,7 +555,8 @@ static FailureOr<SlotMapping> buildSlotMapping(
   if (failed(appendActiveControls(store, controls, bindingState, result)))
     return failure();
   FailureOr<SmallVector<sym::ExprSubstitution>> substitutions =
-      buildSlotSubstitutions(access, store, slotSymbol, slot, packetComponents,
+      buildSlotSubstitutions(access, store, slotSymbol, slot,
+                             bindingSubstitutions, packetComponents,
                              bindingState, result);
   if (failed(substitutions))
     return failure();
@@ -1217,6 +1258,7 @@ static FailureOr<SmallVector<SlotMapping>>
 buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
                         const MappingDomain &domain, int64_t slotCount,
                         Value item,
+                        ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
                         ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
                         ArrayRef<ActiveControl> controls) {
   PacketBindingState bindingState;
@@ -1224,9 +1266,9 @@ buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
   SmallVector<SlotMapping> mappings;
   mappings.reserve(slotCount);
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {
-    FailureOr<SlotMapping> mapping =
-        buildSlotMapping(access, store, domain.block, domain.slot, domain.zero,
-                         index, item, packetComponents, controls, bindingState);
+    FailureOr<SlotMapping> mapping = buildSlotMapping(
+        access, store, domain.block, domain.slot, domain.zero, index, item,
+        bindingSubstitutions, packetComponents, controls, bindingState);
     if (failed(mapping)) {
       access.op->emitOpError(
           "mapping is not a defined, byte-addressable local memory point");
@@ -1257,11 +1299,15 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
                             solver);
   if (failed(packetComponents))
     return failure();
+  FailureOr<SmallVector<sym::ExprSubstitution>> bindingSubstitutions =
+      buildConstantBindingSubstitutions(access, store, solver);
+  if (failed(bindingSubstitutions))
+    return failure();
   SmallVector<ActiveControl> controls =
       buildActiveControls(access, dialect, solver);
-  FailureOr<SmallVector<SlotMapping>> mappings =
-      buildAccessSlotMappings(access, store, *domain, shape->slotCount, *item,
-                              *packetComponents, controls);
+  FailureOr<SmallVector<SlotMapping>> mappings = buildAccessSlotMappings(
+      access, store, *domain, shape->slotCount, *item, *bindingSubstitutions,
+      *packetComponents, controls);
   if (failed(mappings))
     return failure();
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =

@@ -15,6 +15,7 @@ func.func @remote_block(%base: !wave.ptr<#wave.shared, i32>) {
 func.func @dynamic_base(%first: !wave.ptr<#wave.shared, i32>,
                         %second: !wave.ptr<#wave.shared, i32>,
                         %which: index) {
+  // Nonconstant scalar base remains unsupported.
   // expected-error @+1 {{mapping is not a defined, byte-addressable local memory point}}
   %value, %token = wave.gather %first, %second mapping
       <base = <"which">, bit_offset = <"32 * slot">>

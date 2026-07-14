@@ -155,6 +155,46 @@ func.func @second_base(%first: !wave.ptr<#wave.shared, i32>,
 
 // -----
 
+// CHECK-LABEL: func.func @constant_binding_base(
+// CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
+// CHECK: wave.ptr_cast [[SECOND]]
+// CHECK-NOT: wave.ptr_cast [[FIRST]]
+// CHECK-COUNT-1: wave.load
+func.func @constant_binding_base(%first: !wave.ptr<#wave.shared, i32>,
+                                 %second: !wave.ptr<#wave.shared, i32>)
+    -> !wave.simd<vector<2xi32>, 32> {
+  %one = arith.constant 1 : index
+  %value, %token = wave.gather %first, %second mapping
+      <base = <"which">, bit_offset = <"32 * slot">>
+      bindings ["which"](%one) packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>, !wave.ptr<#wave.shared, i32>, index)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @solver_exact_binding_base(
+// CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
+// CHECK: wave.ptr_cast [[SECOND]]
+// CHECK-NOT: wave.ptr_cast [[FIRST]]
+// CHECK-COUNT-1: wave.load
+func.func @solver_exact_binding_base(%first: !wave.ptr<#wave.shared, i32>,
+                                     %second: !wave.ptr<#wave.shared, i32>,
+                                     %raw: i32)
+    -> !wave.simd<vector<2xi32>, 32> {
+  %which = wave.assume %raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 1">] : i32
+  %value, %token = wave.gather %first, %second mapping
+      <base = <"which">, bit_offset = <"32 * slot">>
+      bindings ["which"](%which) packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>, !wave.ptr<#wave.shared, i32>, i32)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
 // Packet producer algebra survives slot specialization.
 // CHECK-LABEL: func.func @affine_packet_producer(
 // CHECK-COUNT-1: wave.load
