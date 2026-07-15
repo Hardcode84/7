@@ -27,7 +27,7 @@ wmma_f16_matmul_tiled:
 		s_mov_b64 exec, s[18:19]
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		s_mov_b32 s22, 0x7fffffff
+		s_mov_b32 s22, 0x80000000
 		s_mov_b32 s23, 0x31016000
 		s_mov_b32 s20, s10
 		s_mov_b32 s21, s11

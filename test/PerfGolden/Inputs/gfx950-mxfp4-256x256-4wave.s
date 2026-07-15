@@ -17,7 +17,7 @@ wmma_f16_matmul_tiled:
 	.p2align	8
 .Lwmma_f16_matmul_tiled.kernarg_preload_entry:
 	; wave backend: WaveAMDMachine MLIR pipeline finalized
-		s_mov_b32 s18, 0x7fffffff
+		s_mov_b32 s18, 0x80000000
 		s_mov_b32 s19, 0x31016000
 		s_mov_b32 s16, s10
 		s_mov_b32 s17, s11

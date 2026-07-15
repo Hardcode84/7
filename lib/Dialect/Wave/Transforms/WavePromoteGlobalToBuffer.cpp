@@ -25,7 +25,6 @@
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <string>
 
@@ -39,8 +38,8 @@ using namespace mlir::wave;
 
 namespace {
 
-static constexpr int64_t kBufferRangeBytes =
-    std::numeric_limits<int32_t>::max();
+// Unsigned descriptor range covers nonnegative signed-i32 byte offsets.
+static constexpr int64_t kBufferRangeBytes = int64_t{1} << 31;
 
 struct ByteOffset {
   struct Binding {
@@ -52,6 +51,38 @@ struct ByteOffset {
   SmallVector<Binding, 4> bindings;
   sym::ExprHandle expr;
 };
+
+static bool predicatesProveRange(sym::Store &store, sym::ExprHandle expr,
+                                 ArrayRef<sym::PredHandle> assumptions,
+                                 int64_t lower, int64_t upper) {
+  FailureOr<sym::ExprHandle> lowerExpr = sym::composeExprInt(store, lower);
+  FailureOr<sym::ExprHandle> upperExpr = sym::composeExprInt(store, upper);
+  if (failed(lowerExpr) || failed(upperExpr))
+    return false;
+  FailureOr<sym::PredHandle> aboveLower =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, *lowerExpr);
+  FailureOr<sym::PredHandle> belowUpper =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Le, *upperExpr);
+  return succeeded(aboveLower) && succeeded(belowUpper) &&
+         sym::checkPredicate(store, *aboveLower, assumptions) ==
+             sym::CheckResult::True &&
+         sym::checkPredicate(store, *belowUpper, assumptions) ==
+             sym::CheckResult::True;
+}
+
+static bool provablyInRangeWithExpansion(sym::Store &store,
+                                         sym::ExprHandle expr,
+                                         ArrayRef<sym::PredHandle> assumptions,
+                                         int64_t lower, int64_t upper) {
+  auto provesRange = [&](sym::ExprHandle candidate) {
+    return sym::provablyInRange(store, candidate, assumptions, lower, upper) ||
+           predicatesProveRange(store, candidate, assumptions, lower, upper);
+  };
+  if (provesRange(expr))
+    return true;
+  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
+  return succeeded(expanded) && provesRange(*expanded);
+}
 
 static std::optional<PtrType> getPointerType(Type type) {
   if (auto simd = dyn_cast<SimdType>(type))
@@ -351,8 +382,8 @@ private:
       return true;
     if (referencesWideScalarInteger(offset))
       return false;
-    return sym::provablyInRange(store, offset.expr, offset.assumptions, 0,
-                                kBufferRangeBytes - *bytes);
+    return provablyInRangeWithExpansion(store, offset.expr, offset.assumptions,
+                                        0, kBufferRangeBytes - *bytes);
   }
 
   FailureOr<ByteOffset> buildByteOffset(Value ptr) {
