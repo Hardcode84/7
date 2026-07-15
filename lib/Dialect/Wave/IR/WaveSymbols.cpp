@@ -1326,37 +1326,63 @@ struct I64RangeBounds {
   std::optional<int64_t> upper;
 };
 
-static ExprHandle canonicalExpr(Store &store, ExprHandle value,
-                                ArrayRef<PredHandle> assumptions = {}) {
-  FailureOr<ExprHandle> expanded = sym::expandExpr(store, value);
-  if (succeeded(expanded))
-    value = *expanded;
-  FailureOr<ExprHandle> simplified =
-      assumptions.empty() ? sym::simplifyExpr(store, value)
-                          : sym::simplifyExpr(store, value, assumptions);
-  return succeeded(simplified) ? *simplified : value;
+static SmallVector<ixs_node *, 8> expandExprs(Session &session,
+                                              ArrayRef<ExprHandle> values) {
+  SmallVector<ixs_node *, 8> expanded;
+  expanded.reserve(values.size());
+  for (ExprHandle value : values) {
+    ixs_node *expr = rawExprNode(value, /*diagnostic=*/nullptr);
+    if (!expr) {
+      expanded.push_back(nullptr);
+      continue;
+    }
+    ixs_node *result = ixs_expand(session.raw(), expr);
+    expanded.push_back(result && ixs_node_is_expr(result) ? result : expr);
+  }
+  return expanded;
 }
 
-static std::optional<int64_t>
-offsetFromTarget(Store &store, ExprHandle target, ExprHandle lhs,
-                 ExprHandle rhs, ArrayRef<PredHandle> assumptions) {
-  FailureOr<ExprHandle> negRhs = sym::composeExprNeg(store, rhs);
-  if (failed(negRhs))
-    return std::nullopt;
-  FailureOr<ExprHandle> diff =
-      sym::composeExprBinary(store, lhs, ExprBinaryOp::Add, *negRhs);
-  if (failed(diff))
-    return std::nullopt;
-  FailureOr<ExprHandle> negTarget = sym::composeExprNeg(store, target);
-  if (failed(negTarget))
-    return std::nullopt;
-  FailureOr<ExprHandle> delta =
-      sym::composeExprBinary(store, canonicalExpr(store, *diff, assumptions),
-                             ExprBinaryOp::Add, *negTarget);
-  if (failed(delta))
-    return std::nullopt;
-  return sym::getIntegerLiteralValue(canonicalExpr(store, *delta, assumptions));
+static bool collectRawAssumptions(ArrayRef<PredHandle> assumptions,
+                                  SmallVectorImpl<ixs_node *> &rawAssumptions) {
+  for (PredHandle assumption : assumptions) {
+    ixs_node *pred = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!pred)
+      return false;
+    flattenAssumption(pred, rawAssumptions);
+  }
+  return true;
 }
+
+static void copyCanonicalExprs(MutableArrayRef<ExprHandle> values,
+                               ArrayRef<ixs_node *> simplified,
+                               ArrayRef<ixs_node *> expanded) {
+  for (size_t index : llvm::seq<size_t>(values.size())) {
+    ixs_node *result = simplified[index];
+    ixs_node *fallback = expanded[index];
+    if (result && ixs_node_is_expr(result))
+      values[index] = ExprHandle(result);
+    else if (fallback && ixs_node_is_expr(fallback))
+      values[index] = ExprHandle(fallback);
+  }
+}
+
+static void canonicalizeExprs(Store &store, MutableArrayRef<ExprHandle> values,
+                              ArrayRef<PredHandle> assumptions) {
+  Session session(store);
+  SmallVector<ixs_node *, 8> expanded = expandExprs(session, values);
+  ixs_session_clear_errors(session.raw());
+  SmallVector<ixs_node *, 8> simplified(expanded.begin(), expanded.end());
+  SmallVector<ixs_node *, 4> rawAssumptions;
+  if (collectRawAssumptions(assumptions, rawAssumptions))
+    ixs_simplify_batch(session.raw(), simplified.data(), simplified.size(),
+                       rawAssumptions.data(), rawAssumptions.size());
+  copyCanonicalExprs(values, simplified, expanded);
+}
+
+struct TargetComparison {
+  ExprHandle diff;
+  PredCmpOp op;
+};
 
 static void tightenLower(I64RangeBounds &bounds, int64_t bound) {
   bounds.lower = bounds.lower ? std::max(*bounds.lower, bound) : bound;
@@ -1391,34 +1417,90 @@ static void applyCmpBound(PredCmpOp op, int64_t bound, I64RangeBounds &bounds) {
   }
 }
 
-static void collectTargetRange(Store &store, ExprHandle target, PredHandle pred,
-                               ArrayRef<PredHandle> assumptions,
-                               I64RangeBounds &bounds) {
+static void
+collectTargetComparisons(Store &store, PredHandle pred,
+                         SmallVectorImpl<TargetComparison> &comparisons) {
   PredView view(pred);
   if (view.getKind() == PredKind::And) {
     for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-      collectTargetRange(store, target, view.getLogicArg(index), assumptions,
-                         bounds);
+      collectTargetComparisons(store, view.getLogicArg(index), comparisons);
     return;
   }
   if (view.getKind() != PredKind::Cmp)
     return;
   std::optional<PredCmpOp> op = view.getCmpOp();
-  std::optional<int64_t> offset = offsetFromTarget(
-      store, target, view.getCmpLhs(), view.getCmpRhs(), assumptions);
-  if (!op || !offset)
+  FailureOr<ExprHandle> negRhs = sym::composeExprNeg(store, view.getCmpRhs());
+  if (!op || failed(negRhs))
     return;
-  std::optional<int64_t> bound = llvm::checkedSub(int64_t{0}, *offset);
-  if (bound)
-    applyCmpBound(*op, *bound, bounds);
+  FailureOr<ExprHandle> diff = sym::composeExprBinary(
+      store, view.getCmpLhs(), ExprBinaryOp::Add, *negRhs);
+  if (succeeded(diff))
+    comparisons.push_back({*diff, *op});
+}
+
+static ExprHandle
+canonicalizeTargetDiffs(Store &store, ExprHandle target,
+                        MutableArrayRef<TargetComparison> comparisons,
+                        ArrayRef<PredHandle> assumptions) {
+  SmallVector<ExprHandle, 8> canonical;
+  canonical.push_back(target);
+  for (const TargetComparison &comparison : comparisons)
+    canonical.push_back(comparison.diff);
+  canonicalizeExprs(store, canonical, assumptions);
+  for (size_t index : llvm::seq<size_t>(comparisons.size()))
+    comparisons[index].diff = canonical[index + 1];
+  return canonical.front();
+}
+
+static LogicalResult collectTargetDeltas(Store &store, ExprHandle target,
+                                         ArrayRef<TargetComparison> comparisons,
+                                         SmallVectorImpl<ExprHandle> &deltas,
+                                         SmallVectorImpl<PredCmpOp> &ops) {
+  FailureOr<ExprHandle> negTarget = sym::composeExprNeg(store, target);
+  if (failed(negTarget))
+    return failure();
+  for (const TargetComparison &comparison : comparisons) {
+    FailureOr<ExprHandle> delta = sym::composeExprBinary(
+        store, comparison.diff, ExprBinaryOp::Add, *negTarget);
+    if (failed(delta))
+      continue;
+    deltas.push_back(*delta);
+    ops.push_back(comparison.op);
+  }
+  return success(!deltas.empty());
+}
+
+static I64RangeBounds collectDeltaBounds(ArrayRef<PredCmpOp> ops,
+                                         ArrayRef<ExprHandle> deltas) {
+  I64RangeBounds bounds;
+  for (auto [op, delta] : llvm::zip(ops, deltas)) {
+    std::optional<int64_t> offset = sym::getIntegerLiteralValue(delta);
+    if (!offset)
+      continue;
+    std::optional<int64_t> bound = llvm::checkedSub(int64_t{0}, *offset);
+    if (bound)
+      applyCmpBound(op, *bound, bounds);
+  }
+  return bounds;
 }
 
 static bool provenRangeFitsU32(Store &store, ExprHandle expr,
                                ArrayRef<PredHandle> assumptions) {
-  I64RangeBounds bounds;
-  ExprHandle target = canonicalExpr(store, expr, assumptions);
+  SmallVector<TargetComparison, 8> comparisons;
   for (PredHandle pred : assumptions)
-    collectTargetRange(store, target, pred, assumptions, bounds);
+    collectTargetComparisons(store, pred, comparisons);
+  if (comparisons.empty())
+    return false;
+
+  ExprHandle target =
+      canonicalizeTargetDiffs(store, expr, comparisons, assumptions);
+  SmallVector<ExprHandle, 8> deltas;
+  SmallVector<PredCmpOp, 8> ops;
+  if (failed(collectTargetDeltas(store, target, comparisons, deltas, ops)))
+    return false;
+  canonicalizeExprs(store, deltas, assumptions);
+
+  I64RangeBounds bounds = collectDeltaBounds(ops, deltas);
   constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
   return bounds.lower && bounds.upper && *bounds.lower >= 0 &&
          *bounds.upper <= u32Max;
@@ -1443,14 +1525,12 @@ static bool explicitPredicatesProveU32(Store &store, ExprHandle expr,
 
 bool mlir::wave::sym::provablyFitsU32(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions) {
-  if (provenRangeFitsU32(store, expr, assumptions))
-    return true;
   if (explicitPredicatesProveU32(store, expr, assumptions))
     return true;
   if (std::optional<uint64_t> bound =
           exprU32UpperBound(store, expr, assumptions))
     return *bound <= (uint64_t{1} << 32) - 1;
-  return false;
+  return provenRangeFitsU32(store, expr, assumptions);
 }
 
 bool mlir::wave::sym::positiveAddendsFitU32(Store &store, ExprHandle expr,

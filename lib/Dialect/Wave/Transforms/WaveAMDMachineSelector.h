@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace mlir::wave::wmsel {
 
@@ -74,6 +75,13 @@ struct AddressPlan {
   bool voffsetNeedsWide = false;
   bool soffsetNeedsWide = false;
 };
+
+struct SlotFitsU32CacheEntry {
+  llvm::SmallVector<sym::PredHandle, 4> assumptions;
+  bool fits = false;
+};
+
+using SlotFitsU32CacheKey = std::pair<sym::ExprHandle, llvm::hash_code>;
 
 inline constexpr int64_t kBufferSelectedSourceOobOffset = int64_t{1} << 31;
 
@@ -288,6 +296,8 @@ public:
   DenseMap<Value, PointerOffset> pointerIndexOffsets;
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;
+  DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
+      slotFitsU32Cache;
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
   std::optional<unsigned> targetIsaMajor;

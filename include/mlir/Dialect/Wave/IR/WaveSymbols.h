@@ -21,6 +21,7 @@
 #include "ixsimpl.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
@@ -369,5 +370,20 @@ void printExprHandle(AsmPrinter &printer, ExprHandle value);
 void printPredHandle(AsmPrinter &printer, PredHandle value);
 
 } // namespace mlir::wave::sym
+
+namespace llvm {
+
+template <> struct DenseMapInfo<mlir::wave::sym::ExprHandle> {
+  static unsigned getHashValue(mlir::wave::sym::ExprHandle value) {
+    return DenseMapInfo<const ixs_node *>::getHashValue(value.raw());
+  }
+
+  static bool isEqual(mlir::wave::sym::ExprHandle lhs,
+                      mlir::wave::sym::ExprHandle rhs) {
+    return lhs == rhs;
+  }
+};
+
+} // namespace llvm
 
 #endif // MLIR_DIALECT_WAVE_IR_WAVESYMBOLS_H

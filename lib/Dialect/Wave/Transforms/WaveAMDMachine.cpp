@@ -695,7 +695,18 @@ sym::Store &WaveAMDMachineSelector::symbolStore() {
 
 bool WaveAMDMachineSelector::slotFitsU32(
     sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions) {
-  return sym::provablyFitsU32(symbolStore(), expr, assumptions);
+  SlotFitsU32CacheKey key = {
+      expr, llvm::hash_combine_range(assumptions.begin(), assumptions.end())};
+  SmallVector<SlotFitsU32CacheEntry, 1> &entries = slotFitsU32Cache[key];
+  for (const SlotFitsU32CacheEntry &entry : entries)
+    if (llvm::equal(entry.assumptions, assumptions))
+      return entry.fits;
+
+  bool fits = sym::provablyFitsU32(symbolStore(), expr, assumptions);
+  SlotFitsU32CacheEntry &entry = entries.emplace_back();
+  llvm::append_range(entry.assumptions, assumptions);
+  entry.fits = fits;
+  return fits;
 }
 
 static bool positiveAddendsFitU32(WaveAMDMachineSelector &S,
