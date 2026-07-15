@@ -126,6 +126,69 @@ module attributes {transform.with_named_sequence} {
           : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
     }
 
+    // CHECK-LABEL: func.func @remat_relief_rejects_pinned_promotion_root(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK: waveamdmachine.v_mov_b32_tuple
+    // CHECK-SAME: waveamdmachine.regalloc_sgpr_to_vgpr_pinned
+    // CHECK-SAME: waveamdmachine.regalloc_sgpr_to_vgpr_temp
+    // CHECK-NOT: waveamdmachine.regalloc_remat_temp
+    // CHECK: return
+    func.func @remat_relief_rejects_pinned_promotion_root(
+        %long: !waveamdmachine.reg<vgpr, 1>,
+        %dies: !waveamdmachine.reg<vgpr, 1>,
+        %sg: !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %promoted = waveamdmachine.v_mov_b32_tuple %sg
+          {waveamdmachine.regalloc_sgpr_to_vgpr_pinned,
+           waveamdmachine.regalloc_sgpr_to_vgpr_temp}
+          : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+      %drop = waveamdmachine.v_add_u32 %dies, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use = waveamdmachine.v_add_u32 %promoted, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      return %long, %use
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+    }
+
+    // CHECK-LABEL: func.func @remat_relief_rejects_transitive_pinned_promotion(
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state =
+    // CHECK-SAME: stage = "linear-scan-failure"
+    // CHECK: waveamdmachine.v_mov_b32_tuple
+    // CHECK-SAME: waveamdmachine.regalloc_sgpr_to_vgpr_pinned
+    // CHECK-SAME: waveamdmachine.regalloc_sgpr_to_vgpr_temp
+    // CHECK-NOT: waveamdmachine.regalloc_remat_temp
+    // CHECK: return
+    func.func @remat_relief_rejects_transitive_pinned_promotion(
+        %long: !waveamdmachine.reg<vgpr, 1>,
+        %dies: !waveamdmachine.reg<vgpr, 1>,
+        %sg: !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %promoted = waveamdmachine.v_mov_b32_tuple %sg
+          {waveamdmachine.regalloc_sgpr_to_vgpr_pinned,
+           waveamdmachine.regalloc_sgpr_to_vgpr_temp}
+          : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+      %root = waveamdmachine.v_add_u32 %promoted, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %drop = waveamdmachine.v_add_u32 %dies, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use = waveamdmachine.v_add_u32 %root, %zero
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      return %long, %use
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+    }
+
     // CHECK-LABEL: func.func @remat_relief_rebuilds_scalar_operand(
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[SG:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>

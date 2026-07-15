@@ -135,6 +135,7 @@ static bool isRematRootValue(Value value) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   return def && type && type.getIndex() < 0 && !isAnchoredRematSource(value) &&
          !wave::regalloc::isRegAllocRematTempOp(def) && isCheapRematRoot(def) &&
+         !def->hasAttr(wave::regalloc::kRegAllocSGPRToVGPRPinnedAttr) &&
          !isRegAllocTransformBridgeRelated(value);
 }
 
