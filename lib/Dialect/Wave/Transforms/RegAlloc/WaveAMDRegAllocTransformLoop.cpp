@@ -1667,18 +1667,37 @@ private:
     return active.lookup(setId, assignments);
   }
 
+  const llvm::AMDGPU::IsaVersion *getKilledOperandReuseIsa(Operation *op) {
+    if (killedOperandReuseIsa)
+      return &*killedOperandReuseIsa;
+    if (killedOperandReuseIsaFailed)
+      return nullptr;
+    FailureOr<llvm::AMDGPU::IsaVersion> isa =
+        waveamdmachine::getAMDGPUTargetIsaVersion(
+            op, "waveamd regalloc killed operand reuse");
+    if (failed(isa)) {
+      killedOperandReuseIsaFailed = true;
+      return nullptr;
+    }
+    killedOperandReuseIsa = *isa;
+    return &*killedOperandReuseIsa;
+  }
+
   std::optional<ReusableInputBase>
-  findReusableInputBase(const wave::RegAllocTransformAliasSet &set,
-                        unsigned limit) {
-    const wave::RegAllocTransformValue *resultValue = getSingleResultValue(set);
-    if (!resultValue || resultValue->id >= payloadValues.size() ||
-        set.width > limit)
+  findReusableInputBaseForDef(const wave::RegAllocTransformAliasSet &set,
+                              unsigned limit, Operation *def) {
+    waveamdmachine::KilledOperandReuseOpInterface reuse =
+        wave::regalloc_detail::getKilledOperandReuseCandidate(def);
+    if (!reuse)
       return std::nullopt;
-    Operation *def = payloadValues[resultValue->id].getDefiningOp();
+    const llvm::AMDGPU::IsaVersion *targetIsa = getKilledOperandReuseIsa(def);
+    if (!targetIsa)
+      return std::nullopt;
 
     std::optional<ReusableInputBase> bestBase;
     for (OpOperand &operand : def->getOpOperands()) {
-      if (!wave::regalloc_detail::canReuseKilledOperandForResult(def, operand))
+      if (!wave::regalloc_detail::canReuseKilledOperandForResult(reuse, operand,
+                                                                 *targetIsa))
         continue;
       auto it = valueLookup.find(operand.get());
       if (it == valueLookup.end())
@@ -1691,6 +1710,17 @@ private:
         bestBase = *base;
     }
     return bestBase;
+  }
+
+  std::optional<ReusableInputBase>
+  findReusableInputBase(const wave::RegAllocTransformAliasSet &set,
+                        unsigned limit) {
+    const wave::RegAllocTransformValue *resultValue = getSingleResultValue(set);
+    if (!resultValue || resultValue->id >= payloadValues.size() ||
+        set.width > limit)
+      return std::nullopt;
+    Operation *def = payloadValues[resultValue->id].getDefiningOp();
+    return findReusableInputBaseForDef(set, limit, def);
   }
 
   bool
@@ -2293,12 +2323,14 @@ private:
   DenseMap<unsigned, unsigned> assignmentIndexBySet;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
+  std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
   std::array<std::optional<wave::RegAllocTransformBudget>, kRegClassCount>
       budgetCache;
   std::optional<RegAllocScanFailure> scanFailure;
   DictionaryAttr state;
   func::FuncOp func;
   Builder &builder;
+  bool killedOperandReuseIsaFailed = false;
 };
 
 static void setMFMAAccumulatorCoalescingFlag(func::FuncOp func,
