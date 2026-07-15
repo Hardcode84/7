@@ -124,6 +124,46 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
+  // CHECK-LABEL: func.func @m0_increment_stays_after_prior_consumer
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.s_barrier
+  // CHECK-NEXT: [[TOK0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]]
+  // CHECK-NEXT: [[NEXT:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[M0]],
+  // CHECK-NEXT: [[FILL:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[FILL]], {{.*}}, {{.*}}, [[NEXT]] after [[TOK0]]
+  func.func @m0_increment_stays_after_prior_consumer(
+      %off0: !waveamdmachine.reg<vgpr, 1, 0>,
+      %x: !waveamdmachine.reg<vgpr, 1, 1>,
+      %y: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %inc = waveamdmachine.imm 8192 : !waveamdmachine.imm
+    %m0 = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+    waveamdmachine.s_barrier : () -> ()
+    %tok0 = waveamdmachine.buffer_load_lds_b128
+        %off0, %desc, %soff, %m0 after %dep
+        : (!waveamdmachine.reg<vgpr, 1, 0>,
+           !waveamdmachine.reg<sgpr, 4, 4>,
+           !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %fill = waveamdmachine.v_add_u32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<vgpr, 1, 2>) -> !waveamdmachine.reg<vgpr, 1, 3>
+    %next, %scc = waveamdmachine.s_add_m0_i32 %m0, %inc
+        : (!waveamdmachine.m0, !waveamdmachine.imm)
+          -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+    %tok1 = waveamdmachine.buffer_load_lds_b128
+        %fill, %desc, %soff, %next after %tok0
+        : (!waveamdmachine.reg<vgpr, 1, 3>,
+           !waveamdmachine.reg<sgpr, 4, 4>,
+           !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    return
+  }
+
   // CHECK-LABEL: func.func @barrier_can_be_crossed
   // CHECK: waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.v_add_u32
@@ -392,6 +432,49 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
       %loaded = waveamdmachine.buffer_load_lds_b128
           %off, %desc, %soff, %m0 after %dep
           : (!waveamdmachine.reg<vgpr, 1, 1>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield %loaded : !waveamdmachine.mem.token
+    } : !waveamdmachine.reg<sgpr, 1, 0> -> !waveamdmachine.mem.token
+    return
+  }
+
+  // CHECK-LABEL: func.func @m0_increment_hoisted_after_prior_consumer
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: [[TOK0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]]
+  // CHECK-NEXT: [[NEXT:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[M0]],
+  // CHECK-NEXT: waveamdmachine.exec_if
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[NEXT]] after [[TOK0]]
+  // NO-CROSS-LABEL: func.func @m0_increment_hoisted_after_prior_consumer
+  // NO-CROSS: [[NO_CROSS_M0:%.*]] = waveamdmachine.s_mov_m0
+  // NO-CROSS-NEXT: [[NO_CROSS_TOK:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[NO_CROSS_M0]]
+  // NO-CROSS-NEXT: waveamdmachine.exec_if
+  // NO-CROSS-NEXT: waveamdmachine.s_add_m0_i32 [[NO_CROSS_M0]],
+  func.func @m0_increment_hoisted_after_prior_consumer(
+      %cond: !waveamdmachine.reg<sgpr, 1, 0>,
+      %off0: !waveamdmachine.reg<vgpr, 1, 1>,
+      %off1: !waveamdmachine.reg<vgpr, 1, 2>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %dep: !waveamdmachine.mem.token) {
+    %inc = waveamdmachine.imm 8192 : !waveamdmachine.imm
+    %m0 = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+    %tok0 = waveamdmachine.buffer_load_lds_b128
+        %off0, %desc, %soff, %m0 after %dep
+        : (!waveamdmachine.reg<vgpr, 1, 1>,
+           !waveamdmachine.reg<sgpr, 4, 4>,
+           !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %tok1 = waveamdmachine.exec_if %cond {
+      %next, %scc = waveamdmachine.s_add_m0_i32 %m0, %inc
+          : (!waveamdmachine.m0, !waveamdmachine.imm)
+            -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %off1, %desc, %soff, %next after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 2>,
              !waveamdmachine.reg<sgpr, 4, 4>,
              !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
              !waveamdmachine.mem.token) -> !waveamdmachine.mem.token

@@ -664,7 +664,7 @@ _attn_fwd_async_prefetch:
 		s_add_i32 s14, s14, s11
 		s_add_i32 s14, s14, s12
 		v_add_u32_e32 v10, s14, v0
-		s_add_i32 m0, s13, 0x1040
+		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e64 v10, v20, v10, s[4:5]
 		buffer_load_dwordx4 v10, s[32:35], 0 offen lds
 		s_lshl_b32 s14, s15, 4
@@ -1038,7 +1038,7 @@ _attn_fwd_async_prefetch:
 		buffer_load_dwordx4 v40, s[32:35], 0 offen lds
 		v_add_u32_e32 v40, s42, v0
 		v_add_u32_e32 v41, s6, v40
-		s_add_i32 m0, s43, 0x1040
+		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e64 v41, v20, v41, s[40:41]
 		buffer_load_dwordx4 v41, s[32:35], 0 offen lds
 		v_add_u32_e32 v41, s7, v40

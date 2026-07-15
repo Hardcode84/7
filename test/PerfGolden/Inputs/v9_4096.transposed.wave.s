@@ -197,7 +197,7 @@ v9_beyond_hotloop:
 		s_add_i32 s5, s3, s4
 		v_add_u32_e32 v21, s5, v19
 		buffer_load_dwordx4 v21, s[20:23], 0 offen lds
-		s_add_i32 m0, s2, 0x2100
+		s_add_i32 m0, m0, 0x2100
 		s_lshl_b32 s14, s10, 7
 		s_add_i32 s15, s14, s3
 		s_add_i32 s15, s15, s4
@@ -446,7 +446,7 @@ v9_beyond_hotloop:
 		s_add_i32 s37, s5, s36
 		v_add_u32_e32 v23, s37, v19
 		buffer_load_dwordx4 v23, s[20:23], 0 offen lds
-		s_add_i32 m0, s2, 0x2100
+		s_add_i32 m0, m0, 0x2100
 		v_add_u32_e32 v23, s36, v19
 		v_add_u32_e32 v24, s15, v23
 		buffer_load_dwordx4 v24, s[20:23], 0 offen lds

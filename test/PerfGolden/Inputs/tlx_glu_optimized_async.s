@@ -692,7 +692,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_lshl_add_u32 v50, v50, 1, v10
 		v_add3_u32 v50, v50, v14, v32
 		v_cndmask_b32_e32 v52, v51, v50, vcc
-		s_add_i32 m0, s3, 0x2100
+		s_add_i32 m0, m0, 0x2100
 		s_add_i32 s4, s23, s21
 		buffer_load_dwordx4 v52, s[28:31], 0 offen lds
 		v_cmp_lt_i32_e64 vcc, v5, s14
@@ -882,7 +882,7 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_mov_b32 m0, s21
 		v_cndmask_b32_e32 v49, v51, v13, vcc
 		buffer_load_dwordx4 v10, s[28:31], s36 offen lds
-		s_add_i32 m0, s21, 0x2100
+		s_add_i32 m0, m0, 0x2100
 		v_cmp_lt_i32_e64 vcc, v5, s27
 		buffer_load_dwordx4 v49, s[28:31], s36 offen lds
 		s_mul_i32 s36, s17, s22

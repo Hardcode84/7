@@ -68,7 +68,7 @@ wmma_f16_matmul_tiled:
 		s_add_i32 s9, s5, s4
 		v_add_u32_e32 v9, s9, v8
 		buffer_load_dwordx4 v9, s[16:19], 0 offen lds
-		s_add_i32 m0, s7, 0x4010
+		s_add_i32 m0, m0, 0x4000
 		s_lshl_b32 s8, s8, 22
 		v_add_u32_e32 v10, s8, v8
 		buffer_load_dwordx4 v10, s[0:3], 0 offen lds

@@ -269,6 +269,8 @@ static FailureOr<Value> shiftM0Value(OpBuilder &builder, Location loc,
 
   if (waveamdmachine::SAddM0I32Op add =
           m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      return failure();
     FoldedSGPROffset folded{add.getLhs(), 0};
     if (std::optional<unsigned> rhs = getLDSByteImm(add.getRhs())) {
       std::optional<unsigned> shifted = checkedAddBytes(*rhs, bytes);
@@ -337,6 +339,71 @@ collectM0ValuesShiftedAtDef(ArrayRef<Operation *> ldsOps) {
   return values;
 }
 
+static Value findM0ChainRoot(Value m0) {
+  while (waveamdmachine::SAddM0I32Op add =
+             m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    if (!isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      break;
+    m0 = add.getLhs();
+  }
+  return m0;
+}
+
+static bool isLDSAddressUser(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
+}
+
+static bool m0ChainOnlyAddressesLDS(Value m0, DenseSet<Value> &visited) {
+  if (!visited.insert(m0).second)
+    return true;
+  for (OpOperand &use : m0.getUses()) {
+    Operation *owner = use.getOwner();
+    if (isLDSAddressUser(owner))
+      continue;
+    waveamdmachine::SAddM0I32Op add =
+        dyn_cast<waveamdmachine::SAddM0I32Op>(owner);
+    if (!add || use.getOperandNumber() != 0 ||
+        !m0ChainOnlyAddressesLDS(add.getM0(), visited))
+      return false;
+  }
+  return true;
+}
+
+static DenseSet<Value> collectM0ChainRoots(func::FuncOp func) {
+  DenseSet<Value> roots;
+  func.walk([&](waveamdmachine::SAddM0I32Op add) {
+    if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      roots.insert(findM0ChainRoot(add.getM0()));
+  });
+  return roots;
+}
+
+static LogicalResult shiftM0ChainRoot(OpBuilder &builder, MachineTypes types,
+                                      Value root, unsigned bytes) {
+  Operation *oldDef = root.getDefiningOp();
+  if (!isa_and_nonnull<waveamdmachine::SMovM0Op, waveamdmachine::SAddM0I32Op>(
+          oldDef))
+    return emitError(root.getLoc(), "cannot find dynamic LDS M0 chain root");
+  if (llvm::any_of(oldDef->getResults(), [&](Value result) {
+        return result != root && !result.use_empty();
+      }))
+    return oldDef->emitError("cannot shift M0 chain with live flag result");
+  DenseSet<Value> visited;
+  if (!m0ChainOnlyAddressesLDS(root, visited))
+    return oldDef->emitError("M0 chain has a non-LDS address use");
+
+  builder.setInsertionPoint(oldDef);
+  FailureOr<Value> shifted =
+      shiftM0Value(builder, oldDef->getLoc(), types, root, bytes);
+  if (failed(shifted))
+    return oldDef->emitError("cannot shift dynamic LDS M0 chain root");
+  root.replaceAllUsesWith(*shifted);
+  eraseDeadAddressOp(oldDef);
+  return success();
+}
+
 static LogicalResult shiftLDSAddressOperand(OpBuilder &builder,
                                             MachineTypes types, Operation *op,
                                             unsigned bytes,
@@ -367,27 +434,69 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder,
   return success();
 }
 
+static SmallVector<Operation *, 64> collectLDSOps(func::FuncOp func) {
+  SmallVector<Operation *, 64> ldsOps;
+  func.walk([&](Operation *op) {
+    if (isLDSAddressUser(op))
+      ldsOps.push_back(op);
+  });
+  return ldsOps;
+}
+
+static void collectUsedM0Chains(ArrayRef<Operation *> ldsOps,
+                                const DenseSet<Value> &chainRoots,
+                                DenseSet<Value> &usedRoots,
+                                DenseSet<Operation *> &chainLDSOps) {
+  for (Operation *op : ldsOps)
+    for (Value operand : op->getOperands()) {
+      if (!isa<waveamdmachine::M0Type>(operand.getType()))
+        continue;
+      Value root = findM0ChainRoot(operand);
+      if (!chainRoots.contains(root))
+        continue;
+      usedRoots.insert(root);
+      chainLDSOps.insert(op);
+    }
+}
+
+static LogicalResult shiftM0ChainRoots(OpBuilder &builder, MachineTypes types,
+                                       const DenseSet<Value> &roots,
+                                       unsigned bytes) {
+  for (Value root : roots)
+    if (failed(shiftM0ChainRoot(builder, types, root, bytes)))
+      return failure();
+  return success();
+}
+
+static LogicalResult
+shiftUnchainedLDSAddresses(OpBuilder &builder, MachineTypes types,
+                           ArrayRef<Operation *> ldsOps,
+                           const DenseSet<Operation *> &chainLDSOps,
+                           const DenseSet<Value> &m0AtDefs, unsigned bytes) {
+  for (Operation *op : ldsOps)
+    if (!chainLDSOps.contains(op) &&
+        failed(shiftLDSAddressOperand(builder, types, op, bytes, m0AtDefs)))
+      return failure();
+  return success();
+}
+
 static LogicalResult shiftExistingLDSAddresses(func::FuncOp func,
                                                MachineTypes types,
                                                unsigned bytes) {
   if (bytes == 0)
     return success();
 
-  SmallVector<Operation *, 64> ldsOps;
-  func.walk([&](Operation *op) {
-    if (op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
-        op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>() ||
-        op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>())
-      ldsOps.push_back(op);
-  });
-
+  SmallVector<Operation *, 64> ldsOps = collectLDSOps(func);
   DenseSet<Value> m0AtDefs = collectM0ValuesShiftedAtDef(ldsOps);
-
   OpBuilder builder(func.getContext());
-  for (Operation *op : ldsOps)
-    if (failed(shiftLDSAddressOperand(builder, types, op, bytes, m0AtDefs)))
-      return failure();
-  return success();
+  DenseSet<Value> chainRoots = collectM0ChainRoots(func);
+  DenseSet<Value> usedRoots;
+  DenseSet<Operation *> chainLDSOps;
+  collectUsedM0Chains(ldsOps, chainRoots, usedRoots, chainLDSOps);
+  if (failed(shiftM0ChainRoots(builder, types, usedRoots, bytes)))
+    return failure();
+  return shiftUnchainedLDSAddresses(builder, types, ldsOps, chainLDSOps,
+                                    m0AtDefs, bytes);
 }
 
 static Value makeBarrierAddress(OpBuilder &builder, Location loc,

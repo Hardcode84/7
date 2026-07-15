@@ -189,7 +189,7 @@ _a4w4_kernel:
 		v_add3_u32 v18, v18, v7, v9
 		v_add3_u32 v18, v18, v11, v13
 		v_add3_u32 v18, v18, v15, v17
-		s_add_i32 m0, s16, 0x1080
+		s_add_i32 m0, m0, 0x1080
 		s_mul_i32 s21, s21, s15
 		buffer_load_dwordx4 v18, s[24:27], 0 offen lds
 		s_mov_b32 s23, 0
@@ -823,7 +823,7 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[38:39], v16 offset:6048
 		buffer_load_dwordx4 v5, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x1080
+		s_add_i32 m0, m0, 0x1080
 		s_add_u32 s32, s4, s13
 		s_addc_u32 s33, s5, 0
 		buffer_load_dwordx4 v18, s[28:31], 0 offen lds

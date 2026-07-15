@@ -607,7 +607,7 @@ _attn_fwd_persistent:
 		s_add_i32 s58, s58, s41
 		s_add_i32 s58, s58, s57
 		v_add_u32_e32 v18, s58, v20
-		s_add_i32 m0, s43, 0x1040
+		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e64 v18, v30, v18, s[44:45]
 		v_accvgpr_write_b32 a3, v18
 		v_accvgpr_read_b32 v18, a3
@@ -943,7 +943,7 @@ _attn_fwd_persistent:
 		v_add_u32_e32 v45, s45, v15
 		v_add_u32_e32 v46, s57, v20
 		v_add_u32_e32 v47, s48, v46
-		s_add_i32 m0, s70, 0x1040
+		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e64 v47, v30, v47, s[58:59]
 		buffer_load_dwordx4 v47, s[28:31], 0 offen lds
 		v_add_u32_e32 v47, s49, v46
@@ -6289,7 +6289,7 @@ _attn_fwd_persistent:
 		s_cselect_b32 s44, s44, s43
 		s_cmp_gt_i32 s44, 0
 		s_cselect_b32 s44, s44, 0
-		s_add_i32 m0, s26, 0x1040
+		s_add_i32 m0, m0, 0x1040
 		v_readfirstlane_b32 s47, v1
 		s_mul_i32 s45, s45, s47
 		v_accvgpr_read_b32 v7, a3
@@ -6803,7 +6803,7 @@ _attn_fwd_persistent:
 		s_lshl_b32 s53, s53, 1
 		s_add_i32 s52, s52, s53
 		v_add_u32_e32 v20, s52, v18
-		s_add_i32 m0, s68, 0x1040
+		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e64 v20, v12, v20, s[54:55]
 		buffer_load_dwordx4 v20, s[28:31], 0 offen lds
 		s_mul_i32 s52, 0x110, s15

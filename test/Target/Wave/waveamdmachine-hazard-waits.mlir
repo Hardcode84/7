@@ -430,6 +430,32 @@ func.func @m0_add_delay_before_lds_dma(
   return
 }
 
+// CHECK-LABEL: func.func @m0_increment_reads_and_writes_pipeline
+// CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: [[NEXT:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[M0]],
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.global_load_lds_b128 {{.*}}, [[NEXT]] after
+func.func @m0_increment_reads_and_writes_pipeline(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %m0 = waveamdmachine.s_mov_m0 %dst
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %next, %scc = waveamdmachine.s_add_m0_i32 %m0, %one
+      : (!waveamdmachine.m0, !waveamdmachine.imm)
+          -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %next after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+      -> !waveamdmachine.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @m0_delay_before_ds_addtid_store
 // CHECK: waveamdmachine.s_mov_m0
 // CHECK-NEXT: waveamdmachine.imm 0

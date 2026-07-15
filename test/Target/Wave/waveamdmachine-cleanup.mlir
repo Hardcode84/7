@@ -797,3 +797,90 @@ func.func @keep_exec_dependent_readfirstlane(
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @chain_dma_m0_increment(
+// CHECK: [[STEP:%.*]] = waveamdmachine.imm 8192
+// CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE:%.*]]
+// CHECK-NEXT: [[T0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]] after
+// CHECK-NEXT: [[NEXT:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32 [[M0]], [[STEP]]
+// CHECK-NEXT: [[T1:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[NEXT]] after [[T0]]
+// CHECK-NEXT: return [[T1]]
+func.func @chain_dma_m0_increment(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %step = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t0 = waveamdmachine.buffer_load_lds_b128
+      %off0, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %next, %scc = waveamdmachine.s_add_m0_i32 %base, %step
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t1 = waveamdmachine.buffer_load_lds_b128
+      %off1, %desc, %soff, %next after %t0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return %t1 : !waveamdmachine.mem.token
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_dma_m0_increment_across_region(
+// CHECK: {{%.*}} = waveamdmachine.s_mov_m0 [[BASE:%.*]] :
+// CHECK: waveamdmachine.exec_if
+// CHECK: waveamdmachine.s_add_m0_i32 [[BASE]],
+// CHECK: return
+func.func @keep_dma_m0_increment_across_region(
+    %cond: !waveamdmachine.reg<sgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %other: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %step = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t0 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.exec_if %cond {
+    %clobber = waveamdmachine.s_mov_m0 %other
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+    %inner = waveamdmachine.buffer_load_lds_b128
+        %off, %desc, %soff, %clobber after %t0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<sgpr, 1>
+  %next, %scc = waveamdmachine.s_add_m0_i32 %base, %step
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t1 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff, %next after %t0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return %t1 : !waveamdmachine.mem.token
+}
+
+}

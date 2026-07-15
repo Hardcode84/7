@@ -3034,10 +3034,13 @@ private:
       return emitMC(sAddI32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
-    if (isa<waveamdmachine::SAddM0I32Op>(op))
+    if (auto add = dyn_cast<waveamdmachine::SAddM0I32Op>(op)) {
+      llvm::MCOperand lhs = isa<waveamdmachine::M0Type>(add.getLhs().getType())
+                                ? llvm::MCOperand::createReg(namedPhysReg("m0"))
+                                : toMCOperand(add.getLhs());
       return emitMC(sAddI32(), {llvm::MCOperand::createReg(namedPhysReg("m0")),
-                                toMCOperand(op.getOperand(0)),
-                                toMCOperand(op.getOperand(1))});
+                                lhs, toMCOperand(add.getRhs())});
+    }
     if (isa<waveamdmachine::SMulI32Op>(op))
       return emitMC(sMulI32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),

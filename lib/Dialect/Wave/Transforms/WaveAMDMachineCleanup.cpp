@@ -1331,6 +1331,64 @@ static bool scaleLoopCarries(func::FuncOp func) {
   return changed;
 }
 
+static Value findM0Result(Operation *op) {
+  for (Value result : op->getResults())
+    if (isa<M0Type>(result.getType()))
+      return result;
+  return {};
+}
+
+static Value findM0Operand(Operation *op) {
+  for (Value operand : op->getOperands())
+    if (isa<M0Type>(operand.getType()))
+      return operand;
+  return {};
+}
+
+static std::optional<Value> findDmaM0ChainHead(SAddM0I32Op add) {
+  Value dmaM0;
+  for (Operation *op = add->getPrevNode(); op; op = op->getPrevNode()) {
+    // Region op may hide physical M0 writes.
+    if (!isa<WaveAMDMachineDialect>(op->getDialect()) ||
+        op->getNumRegions() != 0)
+      return std::nullopt;
+
+    if (Value m0 = findM0Result(op)) {
+      SMovM0Op move = dyn_cast<SMovM0Op>(op);
+      if (dmaM0 == m0 && move && move.getSource() == add.getLhs())
+        return m0;
+      return std::nullopt;
+    }
+
+    if (!dmaM0 && op->hasTrait<traits::LDSDmaOp>())
+      dmaM0 = findM0Operand(op);
+  }
+  return std::nullopt;
+}
+
+static bool chainDmaM0Increments(func::FuncOp func) {
+  SmallVector<SAddM0I32Op> adds;
+  func.walk([&](SAddM0I32Op add) { adds.push_back(add); });
+
+  OpBuilder builder(func.getContext());
+  bool changed = false;
+  for (SAddM0I32Op add : adds) {
+    if (isa<M0Type>(add.getLhs().getType()) || !add.getScc().use_empty())
+      continue;
+    std::optional<Value> head = findDmaM0ChainHead(add);
+    if (!head)
+      continue;
+    builder.setInsertionPoint(add);
+    SAddM0I32Op chained =
+        SAddM0I32Op::create(builder, add.getLoc(), add.getM0().getType(),
+                            add.getScc().getType(), *head, add.getRhs());
+    add.getM0().replaceAllUsesWith(chained.getM0());
+    add.erase();
+    changed = true;
+  }
+  return changed;
+}
+
 static bool isVccCompare(Operation *op) {
   return isa_and_nonnull<VCmpEqU32VccOp, VCmpNeU32VccOp, VCmpLtU32VccOp,
                          VCmpLeU32VccOp, VCmpGtU32VccOp, VCmpGeU32VccOp,
@@ -1417,6 +1475,7 @@ struct WaveAMDMachineCleanupPass
         changed = *d16Changed;
         changed |= hoistFunction(func);
         changed |= scaleLoopCarries(func);
+        changed |= chainDmaM0Increments(func);
         changed |= foldVccCndmask(func);
         FailureOr<bool> uniformShiftChanged =
             reuseUniformWorkitemShiftOperands(func);

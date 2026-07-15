@@ -429,6 +429,8 @@ static FailureOr<Value> shiftM0Value(OpBuilder &builder, Location loc, Value m0,
     return materializeM0FromSGPROffset(builder, loc, *folded);
   }
   if (auto add = m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      return failure();
     FoldedSGPROffset folded{add.getLhs(), 0};
     if (std::optional<unsigned> rhs = getLDSByteImm(add.getRhs())) {
       std::optional<unsigned> total = checkedAddBytes(*rhs, bytes);
@@ -586,57 +588,125 @@ static void replaceM0UsesAtOrAfter(Value oldM0, Value newM0, Operation *point) {
   }
 }
 
+static Value collectM0IncrementChain(
+    Value m0, SmallVectorImpl<waveamdmachine::SAddM0I32Op> &increments) {
+  while (waveamdmachine::SAddM0I32Op add =
+             m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+    if (!isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      break;
+    increments.push_back(add);
+    m0 = add.getLhs();
+  }
+  return m0;
+}
+
+static bool
+m0RestoreRebuildsSCC(Value liveSCC, waveamdmachine::SAddM0I32Op rootAdd,
+                     ArrayRef<waveamdmachine::SAddM0I32Op> increments) {
+  if (!liveSCC)
+    return false;
+  if (rootAdd && rootAdd.getScc() == liveSCC)
+    return true;
+  return llvm::any_of(increments, [&](waveamdmachine::SAddM0I32Op increment) {
+    return increment.getScc() == liveSCC;
+  });
+}
+
+static Value saveSCCForM0Restore(OpBuilder &builder, Operation *point,
+                                 Value liveSCC, bool rebuildsLiveSCC) {
+  if (!liveSCC || rebuildsLiveSCC)
+    return {};
+  Value one = createImm(builder, point->getLoc(), 1);
+  Value zero = createImm(builder, point->getLoc(), 0);
+  waveamdmachine::SCSelectB32Op saved = waveamdmachine::SCSelectB32Op::create(
+      builder, point->getLoc(), getVirtualSGPR1(builder.getContext()), liveSCC,
+      one, zero);
+  markRegAllocTemp(saved, builder);
+  return saved.getResult();
+}
+
+struct RestoredM0State {
+  Value m0;
+  Value scc;
+};
+
+static RestoredM0State restoreM0Root(OpBuilder &builder, Operation *point,
+                                     Value root, waveamdmachine::SMovM0Op mov,
+                                     waveamdmachine::SAddM0I32Op add,
+                                     Value liveSCC) {
+  if (mov) {
+    waveamdmachine::SMovM0Op restored = waveamdmachine::SMovM0Op::create(
+        builder, point->getLoc(), root.getType(), mov.getSource());
+    markRegAllocTemp(restored, builder);
+    return {restored.getResult(), {}};
+  }
+
+  waveamdmachine::SAddM0I32Op restored = waveamdmachine::SAddM0I32Op::create(
+      builder, point->getLoc(), root.getType(), add.getScc().getType(),
+      add.getLhs(), add.getRhs());
+  markRegAllocTemp(restored, builder);
+  Value restoredSCC = liveSCC == add.getScc() ? restored.getScc() : Value{};
+  return {restored.getM0(), restoredSCC};
+}
+
+static RestoredM0State
+replayM0Increments(OpBuilder &builder, Operation *point,
+                   ArrayRef<waveamdmachine::SAddM0I32Op> increments,
+                   Value liveSCC, RestoredM0State state) {
+  for (waveamdmachine::SAddM0I32Op increment : llvm::reverse(increments)) {
+    waveamdmachine::SAddM0I32Op restored = waveamdmachine::SAddM0I32Op::create(
+        builder, point->getLoc(), increment.getM0().getType(),
+        increment.getScc().getType(), state.m0, increment.getRhs());
+    markRegAllocTemp(restored, builder);
+    state.m0 = restored.getM0();
+    if (liveSCC == increment.getScc())
+      state.scc = restored.getScc();
+  }
+  return state;
+}
+
+static void restoreSCCAfterM0(OpBuilder &builder, Operation *point,
+                              Value liveSCC, Value savedSCC,
+                              Value restoredSCC) {
+  if (restoredSCC) {
+    replaceSCCUsesAtOrAfter(liveSCC, restoredSCC, point);
+    return;
+  }
+  if (!savedSCC)
+    return;
+  Value zero = createImm(builder, point->getLoc(), 0);
+  waveamdmachine::SCmpLgU32Op reloaded = waveamdmachine::SCmpLgU32Op::create(
+      builder, point->getLoc(), liveSCC.getType(), savedSCC, zero);
+  markRegAllocTemp(reloaded, builder);
+  replaceSCCUsesAtOrAfter(liveSCC, reloaded.getResult(), point);
+}
+
 static LogicalResult restoreLiveM0(OpBuilder &builder, Value liveM0,
                                    Operation *point) {
   if (!liveM0)
     return success();
 
   // LDS relief writes physical M0 outside SSA aliasing; recreate live user M0.
-  builder.setInsertionPoint(point);
-  Operation *restore = nullptr;
-  Value restoredM0;
-  Value liveSCC;
-  Value savedSCC;
-  if (waveamdmachine::SMovM0Op mov =
-          liveM0.getDefiningOp<waveamdmachine::SMovM0Op>()) {
-    waveamdmachine::SMovM0Op restored = waveamdmachine::SMovM0Op::create(
-        builder, point->getLoc(), liveM0.getType(), mov.getSource());
-    restore = restored;
-    restoredM0 = restored.getResult();
-  } else if (waveamdmachine::SAddM0I32Op add =
-                 liveM0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
-    liveSCC = findLiveSCCAt(point);
-    if (liveSCC && liveSCC != add.getScc()) {
-      Value one = createImm(builder, point->getLoc(), 1);
-      Value zero = createImm(builder, point->getLoc(), 0);
-      waveamdmachine::SCSelectB32Op saved =
-          waveamdmachine::SCSelectB32Op::create(
-              builder, point->getLoc(), getVirtualSGPR1(builder.getContext()),
-              liveSCC, one, zero);
-      markRegAllocTemp(saved, builder);
-      savedSCC = saved.getResult();
-    }
-    waveamdmachine::SAddM0I32Op restored = waveamdmachine::SAddM0I32Op::create(
-        builder, point->getLoc(), liveM0.getType(), add.getScc().getType(),
-        add.getLhs(), add.getRhs());
-    restore = restored;
-    restoredM0 = restored.getM0();
-    if (liveSCC == add.getScc()) {
-      replaceSCCUsesAtOrAfter(liveSCC, restored.getScc(), point);
-    } else if (savedSCC) {
-      Value zero = createImm(builder, point->getLoc(), 0);
-      waveamdmachine::SCmpLgU32Op reloaded =
-          waveamdmachine::SCmpLgU32Op::create(
-              builder, point->getLoc(), liveSCC.getType(), savedSCC, zero);
-      markRegAllocTemp(reloaded, builder);
-      replaceSCCUsesAtOrAfter(liveSCC, reloaded.getResult(), point);
-    }
-  } else {
+  SmallVector<waveamdmachine::SAddM0I32Op, 4> increments;
+  Value root = collectM0IncrementChain(liveM0, increments);
+  waveamdmachine::SMovM0Op mov = root.getDefiningOp<waveamdmachine::SMovM0Op>();
+  waveamdmachine::SAddM0I32Op add =
+      root.getDefiningOp<waveamdmachine::SAddM0I32Op>();
+  if (!mov && !add)
     return point->emitError("regalloc LDS relief cannot restore live M0 value");
-  }
 
-  markRegAllocTemp(restore, builder);
-  replaceM0UsesAtOrAfter(liveM0, restoredM0, point);
+  bool setsSCC = add || !increments.empty();
+  Value liveSCC = setsSCC ? findLiveSCCAt(point) : Value{};
+  bool rebuildsLiveSCC = m0RestoreRebuildsSCC(liveSCC, add, increments);
+
+  builder.setInsertionPoint(point);
+  Value savedSCC =
+      saveSCCForM0Restore(builder, point, liveSCC, rebuildsLiveSCC);
+  RestoredM0State restored =
+      restoreM0Root(builder, point, root, mov, add, liveSCC);
+  restored = replayM0Increments(builder, point, increments, liveSCC, restored);
+  restoreSCCAfterM0(builder, point, liveSCC, savedSCC, restored.scc);
+  replaceM0UsesAtOrAfter(liveM0, restored.m0, point);
   return success();
 }
 
@@ -686,6 +756,75 @@ static void eraseDeadAddressOp(Operation *op) {
     eraseDeadAddressOp(operand.getDefiningOp());
 }
 
+static Value findM0ChainRoot(Value m0) {
+  SmallVector<waveamdmachine::SAddM0I32Op, 4> increments;
+  return collectM0IncrementChain(m0, increments);
+}
+
+static bool isLDSAddressUser(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
+}
+
+static bool m0ChainOnlyAddressesLDS(Value m0, DenseSet<Value> &visited) {
+  if (!visited.insert(m0).second)
+    return true;
+  for (OpOperand &use : m0.getUses()) {
+    Operation *owner = use.getOwner();
+    if (isLDSAddressUser(owner))
+      continue;
+    waveamdmachine::SAddM0I32Op add =
+        dyn_cast<waveamdmachine::SAddM0I32Op>(owner);
+    if (!add || use.getOperandNumber() != 0 ||
+        !m0ChainOnlyAddressesLDS(add.getM0(), visited))
+      return false;
+  }
+  return true;
+}
+
+static LogicalResult shiftM0ChainRoot(OpBuilder &builder, Value root,
+                                      unsigned bytes) {
+  Operation *oldDef = root.getDefiningOp();
+  if (!isa_and_nonnull<waveamdmachine::SMovM0Op, waveamdmachine::SAddM0I32Op>(
+          oldDef))
+    return emitError(root.getLoc(), "cannot find dynamic LDS M0 chain root");
+  if (llvm::any_of(oldDef->getResults(), [&](Value result) {
+        return result != root && !result.use_empty();
+      }))
+    return oldDef->emitError("cannot shift M0 chain with live flag result");
+  DenseSet<Value> visited;
+  if (!m0ChainOnlyAddressesLDS(root, visited))
+    return oldDef->emitError("M0 chain has a non-LDS address use");
+
+  Value liveSCC = findLiveSCCAt(oldDef);
+  builder.setInsertionPoint(oldDef);
+  Value savedSCC;
+  if (liveSCC) {
+    Value one = createImm(builder, oldDef->getLoc(), 1);
+    Value zero = createImm(builder, oldDef->getLoc(), 0);
+    waveamdmachine::SCSelectB32Op saved = waveamdmachine::SCSelectB32Op::create(
+        builder, oldDef->getLoc(), getVirtualSGPR1(builder.getContext()),
+        liveSCC, one, zero);
+    markRegAllocTemp(saved, builder);
+    savedSCC = saved.getResult();
+  }
+  FailureOr<Value> shifted =
+      shiftM0Value(builder, oldDef->getLoc(), root, bytes);
+  if (failed(shifted))
+    return oldDef->emitError("cannot shift dynamic LDS M0 chain root");
+  if (savedSCC) {
+    Value zero = createImm(builder, oldDef->getLoc(), 0);
+    waveamdmachine::SCmpLgU32Op reloaded = waveamdmachine::SCmpLgU32Op::create(
+        builder, oldDef->getLoc(), liveSCC.getType(), savedSCC, zero);
+    markRegAllocTemp(reloaded, builder);
+    replaceSCCUsesAtOrAfter(liveSCC, reloaded.getResult(), oldDef);
+  }
+  root.replaceAllUsesWith(*shifted);
+  eraseDeadAddressOp(oldDef);
+  return success();
+}
+
 static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
                                             unsigned bytes) {
   for (OpOperand &operand : op->getOpOperands()) {
@@ -730,25 +869,74 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
   return success();
 }
 
+static SmallVector<Operation *, 64> collectDynamicLDSOps(func::FuncOp func) {
+  SmallVector<Operation *, 64> ldsOps;
+  func.walk([&](Operation *op) {
+    if (wave::regalloc::isRegAllocTempOp(op) || !isLDSAddressUser(op))
+      return;
+    ldsOps.push_back(op);
+  });
+  return ldsOps;
+}
+
+static DenseSet<Value> collectM0ChainRoots(func::FuncOp func) {
+  DenseSet<Value> roots;
+  func.walk([&](waveamdmachine::SAddM0I32Op add) {
+    if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      roots.insert(findM0ChainRoot(add.getM0()));
+  });
+  return roots;
+}
+
+static void collectUsedM0Chains(ArrayRef<Operation *> ldsOps,
+                                const DenseSet<Value> &chainRoots,
+                                DenseSet<Value> &usedRoots,
+                                DenseSet<Operation *> &chainLDSOps) {
+  for (Operation *op : ldsOps)
+    for (Value operand : op->getOperands()) {
+      if (!isa<waveamdmachine::M0Type>(operand.getType()))
+        continue;
+      Value root = findM0ChainRoot(operand);
+      if (!chainRoots.contains(root))
+        continue;
+      usedRoots.insert(root);
+      chainLDSOps.insert(op);
+    }
+}
+
+static LogicalResult shiftM0ChainRoots(OpBuilder &builder,
+                                       const DenseSet<Value> &roots,
+                                       unsigned bytes) {
+  for (Value root : roots)
+    if (failed(shiftM0ChainRoot(builder, root, bytes)))
+      return failure();
+  return success();
+}
+
+static LogicalResult
+shiftUnchainedLDSAddresses(OpBuilder &builder, ArrayRef<Operation *> ldsOps,
+                           const DenseSet<Operation *> &chainLDSOps,
+                           unsigned bytes) {
+  for (Operation *op : ldsOps)
+    if (!chainLDSOps.contains(op) &&
+        failed(shiftLDSAddressOperand(builder, op, bytes)))
+      return failure();
+  return success();
+}
+
 static LogicalResult shiftDynamicLDSAddresses(func::FuncOp func,
                                               OpBuilder &builder,
                                               unsigned bytes) {
   if (bytes == 0)
     return success();
-  SmallVector<Operation *, 64> ldsOps;
-  func.walk([&](Operation *op) {
-    if (wave::regalloc::isRegAllocTempOp(op))
-      return;
-    if (!op->hasTrait<OpTrait::waveamdmachine::LDSLoadOp>() &&
-        !op->hasTrait<OpTrait::waveamdmachine::LDSStoreOp>() &&
-        !op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>())
-      return;
-    ldsOps.push_back(op);
-  });
-  for (Operation *op : ldsOps)
-    if (failed(shiftLDSAddressOperand(builder, op, bytes)))
-      return failure();
-  return success();
+  SmallVector<Operation *, 64> ldsOps = collectDynamicLDSOps(func);
+  DenseSet<Value> chainRoots = collectM0ChainRoots(func);
+  DenseSet<Value> usedRoots;
+  DenseSet<Operation *> chainLDSOps;
+  collectUsedM0Chains(ldsOps, chainRoots, usedRoots, chainLDSOps);
+  if (failed(shiftM0ChainRoots(builder, usedRoots, bytes)))
+    return failure();
+  return shiftUnchainedLDSAddresses(builder, ldsOps, chainLDSOps, bytes);
 }
 
 static bool shouldShiftDynamicLDS(const LDSReliefCandidate &candidate) {

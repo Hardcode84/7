@@ -780,7 +780,7 @@ tlx_addmm_glu_kernel_persistent:
 		s_barrier
 		v_xad_u32 v72, v71, -1, 1
 		v_add_u32_e32 v73, v33, v68
-		s_add_i32 m0, s71, 0x62e0
+		s_add_i32 m0, m0, 0x62e0
 		v_cndmask_b32_e64 v74, v32, v73, s[26:27]
 		buffer_load_dwordx4 v74, s[48:51], 0 offen lds
 		v_add_u32_e32 v74, s10, v73

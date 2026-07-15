@@ -392,6 +392,13 @@ def WaveAMDMachine_SGPR1OrImm
                  "::llvm::isa<::mlir::waveamdmachine::ImmType>($_self)">,
            "WaveAMDMachine SGPR or immediate">;
 
+def WaveAMDMachine_SGPR1OrM0
+    : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 1) || "
+                 "::llvm::isa<::mlir::waveamdmachine::M0Type>($_self)">,
+           "WaveAMDMachine one-dword SGPR or M0">;
+
 def WaveAMDMachine_RegOrImm
     : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
                  "(::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR || "
@@ -3098,7 +3105,7 @@ def WaveAMDMachine_SAddM0I32Op
       ]> {
   let summary = "scalar 32-bit add into M0 (sets SCC)";
   let arguments = (ins
-    WaveAMDMachine_SGPR1:$lhs,
+    WaveAMDMachine_SGPR1OrM0:$lhs,
     WaveAMDMachine_SGPR1OrImm:$rhs
   );
   let results = (outs WaveAMDMachine_M0:$m0, WaveAMDMachine_SCC:$scc);
