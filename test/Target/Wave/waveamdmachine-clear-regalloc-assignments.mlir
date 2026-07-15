@@ -109,3 +109,112 @@ func.func @preserve_marked_fixed_result()
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @clear_result_signature()
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+func.func @clear_result_signature() -> !waveamdmachine.reg<vgpr, 1, 7>
+    attributes {waveamdmachine.regalloc_assignments} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // CHECK: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple
+  // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+  %value = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  // CHECK: return [[VALUE]] : !waveamdmachine.reg<vgpr, 1>
+  return %value : !waveamdmachine.reg<vgpr, 1, 7>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @clear_consistent_returns(
+// CHECK-SAME: %[[COND:.*]]: i1) -> !waveamdmachine.reg<vgpr, 1>
+func.func @clear_consistent_returns(%cond: i1)
+    -> !waveamdmachine.reg<vgpr, 1, 7>
+    attributes {waveamdmachine.regalloc_assignments} {
+  cf.cond_br %cond, ^left, ^right
+^left:
+  %left_zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %left = waveamdmachine.v_mov_b32_tuple %left_zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  // CHECK: return {{.*}} : !waveamdmachine.reg<vgpr, 1>
+  return %left : !waveamdmachine.reg<vgpr, 1, 7>
+^right:
+  %right_zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %right = waveamdmachine.v_mov_b32_tuple %right_zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  // CHECK: return {{.*}} : !waveamdmachine.reg<vgpr, 1>
+  return %right : !waveamdmachine.reg<vgpr, 1, 7>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func private @preserve_declaration(
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 4>) -> !waveamdmachine.reg<vgpr, 1, 7>
+// CHECK-NOT: waveamdmachine.regalloc_assignments
+func.func private @preserve_declaration(!waveamdmachine.reg<vgpr, 1, 4>)
+    -> !waveamdmachine.reg<vgpr, 1, 7>
+    attributes {waveamdmachine.regalloc_assignments}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @preserve_entry_signature(
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 4>) -> !waveamdmachine.reg<vgpr, 1, 4>
+func.func @preserve_entry_signature(%arg: !waveamdmachine.reg<vgpr, 1, 4>)
+    -> !waveamdmachine.reg<vgpr, 1, 4>
+    attributes {waveamdmachine.regalloc_assignments} {
+  // CHECK: return {{.*}} : !waveamdmachine.reg<vgpr, 1, 4>
+  return %arg : !waveamdmachine.reg<vgpr, 1, 4>
+}
+
+// CHECK-LABEL: func.func @preserve_fixed_result()
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 5>
+func.func @preserve_fixed_result() -> !waveamdmachine.reg<vgpr, 1, 5>
+    attributes {waveamdmachine.regalloc_assignments} {
+  %fixed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 5>
+  // CHECK: return {{.*}} : !waveamdmachine.reg<vgpr, 1, 5>
+  return %fixed : !waveamdmachine.reg<vgpr, 1, 5>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func private @clear_callee()
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+func.func private @clear_callee() -> !waveamdmachine.reg<vgpr, 1, 7>
+    attributes {waveamdmachine.regalloc_assignments} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %value = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 7>
+  return %value : !waveamdmachine.reg<vgpr, 1, 7>
+}
+
+// CHECK-LABEL: func.func @clear_direct_call()
+// CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1>
+func.func @clear_direct_call() -> !waveamdmachine.reg<vgpr, 1, 7>
+    attributes {waveamdmachine.regalloc_assignments} {
+  // CHECK: [[CALL:%.*]] = call @clear_callee() : () -> !waveamdmachine.reg<vgpr, 1>
+  %value = func.call @clear_callee()
+      : () -> !waveamdmachine.reg<vgpr, 1, 7>
+  // CHECK: return [[CALL]] : !waveamdmachine.reg<vgpr, 1>
+  return %value : !waveamdmachine.reg<vgpr, 1, 7>
+}
+
+}
