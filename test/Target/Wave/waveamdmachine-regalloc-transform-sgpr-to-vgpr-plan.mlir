@@ -14,6 +14,13 @@
 // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.sgpr_to_vgpr.dwords", value = 1 : i64}]
 // CHECK-NOT: waveamdmachine.regalloc_transform_state
 // CHECK: return [[PARTIAL]], [[PARTIAL_FIXED]]
+// CHECK-LABEL: func.func @all_canonical_sgpr_alias_is_noop(
+// CHECK-SAME: waveamdmachine.regalloc_transform_state =
+// CHECK: [[CANONICAL_SRC:%.*]] = waveamdmachine.uninit
+// CHECK-NEXT: waveamdmachine.v_mov_b32_tuple [[CANONICAL_SRC]]
+// CHECK-SAME: waveamdmachine.regalloc_sgpr_to_vgpr_temp
+// CHECK-NOT: waveamdmachine.regalloc_sgpr_to_vgpr_pinned
+// CHECK: return
 module attributes {transform.with_named_sequence} {
   transform.named_sequence @__transform_main(
       %root: !transform.any_op {transform.readonly}) {
@@ -125,6 +132,44 @@ module attributes {transform.with_named_sequence} {
       }} {
     return %value, %fixed
         : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 2, 0>
+  }
+
+  func.func @all_canonical_sgpr_alias_is_noop() attributes {
+    waveamdmachine.regalloc_transform_state = {
+      alias_sets = [
+        {class = "sgpr", id = 0 : i64,
+         members = [{value = 0 : i64}], width = 1 : i64},
+        {class = "vgpr", id = 1 : i64,
+         members = [{value = 1 : i64}], width = 1 : i64}
+      ],
+      failure = {
+        class = "sgpr",
+        limit = 0 : i64,
+        overlaps = [],
+        position = 0 : i64,
+        pressure = 1 : i64,
+        reason = "pressure",
+        request = 1 : i64,
+        set = 0 : i64
+      },
+      stage = "linear-scan-failure",
+      values = [
+        {class = "sgpr", end = 1 : i64, id = 0 : i64,
+         kind = "op_result", number = 0 : i64, offset = 0 : i64,
+         path = [0, 0, 0], ranges = [{end = 1 : i64, start = 0 : i64}],
+         set = 0 : i64, start = 0 : i64, width = 1 : i64},
+        {class = "vgpr", end = 1 : i64, id = 1 : i64,
+         kind = "op_result", number = 0 : i64, offset = 0 : i64,
+         path = [0, 0, 1], ranges = [{end = 1 : i64, start = 1 : i64}],
+         set = 1 : i64, start = 1 : i64, width = 1 : i64}
+      ]
+    }
+  } {
+    %src = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    %promoted = waveamdmachine.v_mov_b32_tuple %src
+        {waveamdmachine.regalloc_sgpr_to_vgpr_temp}
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
   }
 }
 

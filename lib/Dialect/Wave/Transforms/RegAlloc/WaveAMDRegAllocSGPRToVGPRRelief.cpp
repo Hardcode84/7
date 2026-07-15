@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocTransformLoop.h"
 #include "WaveAMDRegAllocTransformState.h"
 #include "WaveAMDRegAllocTransformUtils.h"
@@ -13,6 +14,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -24,8 +26,11 @@ using namespace mlir::wave::regalloc_detail;
 
 namespace {
 
-static constexpr StringLiteral kSGPRToVGPRTempAttr =
-    "waveamdmachine.regalloc_sgpr_to_vgpr_temp";
+enum class SGPRToVGPRValueState : uint8_t {
+  Illegal,
+  AlreadyCanonical,
+  Repairable,
+};
 
 struct SGPRToVGPRReliefScore {
   unsigned liveDwords = 0;
@@ -84,29 +89,62 @@ static bool isFuncEntryBlockArgument(Value value, func::FuncOp func) {
 
 static bool isSGPRToVGPRTempMove(Operation *op) {
   return isa_and_nonnull<waveamdmachine::VMovB32TupleOp>(op) &&
-         op->hasAttr(kSGPRToVGPRTempAttr);
+         op->hasAttr(wave::regalloc::kRegAllocSGPRToVGPRTempAttr);
 }
 
-static bool hasSGPRToVGPRTempUse(Value value) {
-  return llvm::any_of(value.getUses(), [](OpOperand &use) {
-    return isSGPRToVGPRTempMove(use.getOwner());
-  });
+static bool isCanonicalSGPRToVGPRTempUse(Value value, OpOperand &use) {
+  Operation *def = value.getDefiningOp();
+  Operation *move = use.getOwner();
+  return def && isSGPRToVGPRTempMove(move) &&
+         move->getBlock() == def->getBlock() && def->getNextNode() == move;
 }
 
-static bool isPromotableSGPRValue(func::FuncOp func,
-                                  const ResolvedRegAllocValue &resolved) {
+static bool hasOnlyCanonicalSGPRToVGPRTempUses(Value value) {
+  return !value.use_empty() &&
+         llvm::all_of(value.getUses(), [&](OpOperand &use) {
+           return isCanonicalSGPRToVGPRTempUse(value, use);
+         });
+}
+
+static bool
+hasValidSGPRToVGPRState(Value value,
+                        const wave::RegAllocTransformValue &stateValue) {
+  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  return type && type.getRegClass() == waveamdmachine::RegClass::SGPR &&
+         type.getIndex() < 0 && stateValue.regClass == type.getRegClass() &&
+         stateValue.width == static_cast<unsigned>(type.getWidth());
+}
+
+static SGPRToVGPRValueState
+classifySGPRToVGPRValue(func::FuncOp func,
+                        const ResolvedRegAllocValue &resolved) {
   Value value = resolved.first;
   const wave::RegAllocTransformValue &stateValue = *resolved.second;
-  auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-  if (!type || type.getRegClass() != waveamdmachine::RegClass::SGPR ||
-      type.getIndex() >= 0 || stateValue.regClass != type.getRegClass() ||
-      stateValue.width != static_cast<unsigned>(type.getWidth()))
-    return false;
-  if (stateValue.fixed || hasSGPRToVGPRTempUse(value))
-    return false;
+  if (!hasValidSGPRToVGPRState(value, stateValue))
+    return SGPRToVGPRValueState::Illegal;
+  if (stateValue.fixed)
+    return SGPRToVGPRValueState::Illegal;
   if (isa<BlockArgument>(value))
-    return isFuncEntryBlockArgument(value, func);
-  return value.getDefiningOp() != nullptr;
+    return isFuncEntryBlockArgument(value, func)
+               ? SGPRToVGPRValueState::Repairable
+               : SGPRToVGPRValueState::Illegal;
+  if (!value.getDefiningOp())
+    return SGPRToVGPRValueState::Illegal;
+  if (hasOnlyCanonicalSGPRToVGPRTempUses(value))
+    return SGPRToVGPRValueState::AlreadyCanonical;
+  return SGPRToVGPRValueState::Repairable;
+}
+
+static bool isRepairableSGPRToVGPRSet(func::FuncOp func,
+                                      ArrayRef<ResolvedRegAllocValue> values) {
+  bool hasRepairable = false;
+  for (const ResolvedRegAllocValue &value : values) {
+    SGPRToVGPRValueState state = classifySGPRToVGPRValue(func, value);
+    if (state == SGPRToVGPRValueState::Illegal)
+      return false;
+    hasRepairable |= state == SGPRToVGPRValueState::Repairable;
+  }
+  return hasRepairable;
 }
 
 static bool
@@ -271,9 +309,7 @@ buildSGPRToVGPRReliefCandidate(func::FuncOp func, unsigned setId,
       getResolvedSGPRToVGPRSetValues(func, *set, resolvedValues);
   if (failed(setValues))
     return failure();
-  if (!llvm::all_of(*setValues, [&](const ResolvedRegAllocValue &value) {
-        return isPromotableSGPRValue(func, value);
-      }))
+  if (!isRepairableSGPRToVGPRSet(func, *setValues))
     return std::optional<SGPRToVGPRReliefCandidate>();
   if (!returnUsesStayConsistent(func, *setValues))
     return std::optional<SGPRToVGPRReliefCandidate>();
@@ -372,6 +408,83 @@ collectSGPRToVGPRUses(ArrayRef<ResolvedRegAllocValue> values) {
   return uses;
 }
 
+static waveamdmachine::VMovB32TupleOp findEarliestSGPRToVGPRTempMove(
+    ArrayRef<OpOperand *> uses,
+    const DenseMap<Operation *, unsigned> &positions) {
+  waveamdmachine::VMovB32TupleOp earliest;
+  for (OpOperand *use : uses) {
+    auto move = dyn_cast<waveamdmachine::VMovB32TupleOp>(use->getOwner());
+    if (!move || !isSGPRToVGPRTempMove(move))
+      continue;
+    if (!earliest || positions.lookup(move.getOperation()) <
+                         positions.lookup(earliest.getOperation()))
+      earliest = move;
+  }
+  return earliest;
+}
+
+static Value getOrCreateSGPRToVGPRPromotion(
+    OpBuilder &builder, Value value, ArrayRef<OpOperand *> uses,
+    const DenseMap<Operation *, unsigned> &positions) {
+  waveamdmachine::RegType promotedType =
+      getRegAllocTransformClassType(value, waveamdmachine::RegClass::VGPR);
+  if (isa<BlockArgument>(value)) {
+    value.setType(promotedType);
+    return value;
+  }
+
+  Operation *def = value.getDefiningOp();
+  if (waveamdmachine::VMovB32TupleOp move =
+          findEarliestSGPRToVGPRTempMove(uses, positions)) {
+    move->moveAfter(def);
+    move->setAttr(wave::regalloc::kRegAllocSGPRToVGPRPinnedAttr,
+                  builder.getUnitAttr());
+    return move.getResult();
+  }
+
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointAfter(def);
+  auto move = waveamdmachine::VMovB32TupleOp::create(builder, def->getLoc(),
+                                                     promotedType, value);
+  move->setAttr(wave::regalloc::kRegAllocSGPRToVGPRTempAttr,
+                builder.getUnitAttr());
+  return move.getResult();
+}
+
+static LogicalResult
+rewriteSGPRToVGPRUses(OpBuilder &builder, Value promoted,
+                      ArrayRef<OpOperand *> uses, DominanceInfo &dominance,
+                      SmallVectorImpl<Operation *> &redundantTempMoves,
+                      DenseSet<Operation *> &seenRedundantTempMoves) {
+  for (OpOperand *use : uses) {
+    Operation *owner = use->getOwner();
+    if (isSGPRToVGPRTempMove(owner)) {
+      auto move = cast<waveamdmachine::VMovB32TupleOp>(owner);
+      if (move.getResult() == promoted)
+        continue;
+      move.getResult().replaceAllUsesWith(promoted);
+      if (seenRedundantTempMoves.insert(owner).second)
+        redundantTempMoves.push_back(owner);
+      continue;
+    }
+    if (!dominance.dominates(promoted, owner)) {
+      InFlightDiagnostic diag = owner->emitError(
+          "SGPR-to-VGPR promotion does not dominate scalar readback");
+      diag.attachNote(promoted.getLoc()) << "promotion defined here";
+      return failure();
+    }
+    if (isa<func::ReturnOp>(owner)) {
+      use->set(promoted);
+      continue;
+    }
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(owner);
+    Value sgpr = createSGPRReadFirst(builder, owner->getLoc(), promoted);
+    use->set(sgpr);
+  }
+  return success();
+}
+
 static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
   if (func.isDeclaration())
     return success();
@@ -399,47 +512,34 @@ static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
   return success();
 }
 
-static void
-materializeSGPRToVGPRRelief(OpBuilder &builder,
+static LogicalResult
+materializeSGPRToVGPRRelief(OpBuilder &builder, func::FuncOp func,
                             const SGPRToVGPRReliefCandidate &candidate) {
   DenseMap<Value, SmallVector<OpOperand *>> uses =
       collectSGPRToVGPRUses(candidate.values);
   DenseMap<Value, Value> promotedValues;
+  DenseMap<Operation *, unsigned> positions;
+  collectRegAllocOpPositions(func.getBody(), positions);
 
   for (const ResolvedRegAllocValue &resolved : candidate.values) {
     Value value = resolved.first;
-    waveamdmachine::RegType promotedType =
-        getRegAllocTransformClassType(value, waveamdmachine::RegClass::VGPR);
-    if (isa<BlockArgument>(value)) {
-      value.setType(promotedType);
-      promotedValues[value] = value;
-      continue;
-    }
-
-    Operation *def = value.getDefiningOp();
-    OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointAfter(def);
-    auto move = waveamdmachine::VMovB32TupleOp::create(builder, def->getLoc(),
-                                                       promotedType, value);
-    move->setAttr(kSGPRToVGPRTempAttr, builder.getUnitAttr());
-    promotedValues[value] = move.getResult();
+    promotedValues[value] = getOrCreateSGPRToVGPRPromotion(
+        builder, value, uses.lookup(value), positions);
   }
 
+  SmallVector<Operation *> redundantTempMoves;
+  DenseSet<Operation *> seenRedundantTempMoves;
+  DominanceInfo dominance(func);
   for (const ResolvedRegAllocValue &resolved : candidate.values) {
     Value value = resolved.first;
-    Value promoted = promotedValues.lookup(value);
-    for (OpOperand *use : uses.lookup(value)) {
-      Operation *owner = use->getOwner();
-      if (isa<func::ReturnOp>(owner)) {
-        use->set(promoted);
-        continue;
-      }
-      OpBuilder::InsertionGuard guard(builder);
-      builder.setInsertionPoint(owner);
-      Value sgpr = createSGPRReadFirst(builder, owner->getLoc(), promoted);
-      use->set(sgpr);
-    }
+    if (failed(rewriteSGPRToVGPRUses(
+            builder, promotedValues.lookup(value), uses.lookup(value),
+            dominance, redundantTempMoves, seenRedundantTempMoves)))
+      return failure();
   }
+  for (Operation *move : redundantTempMoves)
+    move->erase();
+  return success();
 }
 
 static FailureOr<std::optional<SGPRToVGPRReliefPlan>>
@@ -481,7 +581,8 @@ static LogicalResult applySGPRToVGPRRelief(func::FuncOp func,
                                            OpBuilder &builder,
                                            const SGPRToVGPRReliefPlan &plan) {
   for (const SGPRToVGPRReliefCandidate &candidate : plan.candidates)
-    materializeSGPRToVGPRRelief(builder, candidate);
+    if (failed(materializeSGPRToVGPRRelief(builder, func, candidate)))
+      return failure();
   if (failed(refreshFuncTypeFromBody(func)))
     return failure();
   if (failed(wave::addRegAllocTransformProviderMetadata(
