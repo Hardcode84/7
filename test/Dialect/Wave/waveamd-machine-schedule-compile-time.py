@@ -95,7 +95,7 @@ def fa_base_cmd() -> list[str]:
     ]
 
 
-def gfx950_mfma_dma_mlir(cma_count: int = 32) -> str:
+def gfx950_mfma_dma_mlir(cma_count: int = 384) -> str:
     lines = [
         'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
         "func.func @gfx950_mfma_dma(",
