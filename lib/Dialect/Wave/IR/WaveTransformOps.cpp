@@ -186,6 +186,16 @@ static LogicalResult finalizeRegAllocLoopMetadata(ArrayRef<Operation *> targets,
   return success();
 }
 
+static void beginRegAllocPreparationTracking(ArrayRef<Operation *> targets) {
+  for (Operation *target : targets)
+    wave::beginRegAllocPreparationTracking(target);
+}
+
+static void endRegAllocPreparationTracking(ArrayRef<Operation *> targets) {
+  for (Operation *target : targets)
+    wave::endRegAllocPreparationTracking(target);
+}
+
 static DiagnosedSilenceableFailure
 runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
                     transform::TransformResults &results,
@@ -206,6 +216,7 @@ runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
   if (failed(clearRegAllocLoopMetadata(current, builder)))
     return op.emitDefiniteFailure()
            << "failed to clear regalloc transform metadata";
+  beginRegAllocPreparationTracking(current);
   int64_t maxIterations = op.getMaxIterations();
   for (int64_t iteration = 0; iteration < maxIterations; ++iteration) {
     SmallVector<Operation *> yielded;
@@ -213,25 +224,34 @@ runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
         runRegAllocLoopIteration(op, body, current, state, yielded);
     if (!status.succeeded())
       return status;
-    if (failed(stampRegAllocLoopIteration(yielded, builder, iteration)))
+    if (failed(stampRegAllocLoopIteration(yielded, builder, iteration))) {
+      endRegAllocPreparationTracking(yielded);
       return op.emitDefiniteFailure()
              << "failed to stamp regalloc loop iteration";
+    }
 
     FailureOr<wave::RegAllocTransformLoopDecision> decision =
         classifyRegAllocLoopTargets(yielded);
-    if (failed(decision))
+    if (failed(decision)) {
+      endRegAllocPreparationTracking(yielded);
       return op.emitDefiniteFailure()
              << "failed to read regalloc transform loop state";
+    }
 
     if (*decision != wave::RegAllocTransformLoopDecision::Restart) {
-      if (failed(finalizeRegAllocLoopMetadata(yielded, builder, iteration + 1)))
+      if (failed(
+              finalizeRegAllocLoopMetadata(yielded, builder, iteration + 1))) {
+        endRegAllocPreparationTracking(yielded);
         return op.emitDefiniteFailure()
                << "failed to finalize regalloc transform metadata";
+      }
+      endRegAllocPreparationTracking(yielded);
       results.set(cast<OpResult>(op.getResult()), yielded);
       return DiagnosedSilenceableFailure::success();
     }
     current = std::move(yielded);
   }
+  endRegAllocPreparationTracking(current);
   return op.emitDefiniteFailure()
          << "regalloc transform loop exceeded max_iterations = "
          << maxIterations;

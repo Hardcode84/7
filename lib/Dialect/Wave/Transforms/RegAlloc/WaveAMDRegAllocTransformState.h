@@ -120,6 +120,12 @@ getRegAllocTransformVGPRFamilyBudget(func::FuncOp func);
 
 void clearRegAllocTransformState(Operation *target);
 
+void beginRegAllocPreparationTracking(Operation *target);
+void endRegAllocPreparationTracking(Operation *target);
+bool isRegAllocPreparationValid(func::FuncOp func);
+void markRegAllocPreparationValid(func::FuncOp func);
+void invalidateRegAllocPreparation(func::FuncOp func);
+
 FailureOr<RegAllocTransformLoopDecision>
 getRegAllocTransformLoopDecision(Operation *target);
 

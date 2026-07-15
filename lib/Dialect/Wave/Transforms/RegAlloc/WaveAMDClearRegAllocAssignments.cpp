@@ -406,6 +406,7 @@ static LogicalResult applyRegAllocAssignmentClear(func::FuncOp func,
   if (!func.isDeclaration())
     func.setType(plannedType);
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
+  wave::invalidateRegAllocPreparation(func);
   wave::clearRegAllocTransformState(func);
   return success();
 }

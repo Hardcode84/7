@@ -982,6 +982,7 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
   if (failed(wave::addRegAllocTransformProviderMetadata(
           func, builder, "lds", countLDSReliefDwords(**candidate))))
     return failure();
+  wave::invalidateRegAllocPreparation(func);
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
   return success();

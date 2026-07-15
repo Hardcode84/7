@@ -1,4 +1,8 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s
+// RUN: wave-opt %s \
+// RUN:   --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' \
+// RUN:   | FileCheck %s \
+// RUN:       --implicit-check-not=waveamdmachine.regalloc_preparation_tracking \
+// RUN:       --implicit-check-not=waveamdmachine.regalloc_preparation_valid
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func private @regalloc_transform_loop_decl

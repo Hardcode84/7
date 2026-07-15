@@ -49,6 +49,8 @@ module attributes {transform.with_named_sequence} {
 
     // CHECK-LABEL: func.func @agpr_relief_promotes_overlap(
     // CHECK-SAME: [[HOT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // CHECK-SAME: waveamdmachine.regalloc_preparation_tracking
+    // CHECK-SAME: waveamdmachine.regalloc_preparation_valid
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[HOT]]
     // CHECK: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
@@ -57,7 +59,9 @@ module attributes {transform.with_named_sequence} {
         %hot: !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
         attributes {waveamdmachine.vgpr_count_max = 1 : i64,
-                    waveamdmachine.agpr_count_max = 4 : i64} {
+                    waveamdmachine.agpr_count_max = 4 : i64,
+                    waveamdmachine.regalloc_preparation_tracking,
+                    waveamdmachine.regalloc_preparation_valid} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
       %long = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}

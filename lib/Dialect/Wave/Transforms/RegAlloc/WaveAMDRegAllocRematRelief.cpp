@@ -1198,6 +1198,7 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
   if (failed(materializeSelectedRematRelief(builder, func, **plan,
                                             **failureRecord, context)))
     return failure();
+  wave::invalidateRegAllocPreparation(func);
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
   return success();

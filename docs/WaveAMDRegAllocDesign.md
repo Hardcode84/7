@@ -73,6 +73,12 @@ Regalloc state is a function attribute. It contains:
 State is ephemeral. Every IR rewrite clears it; the next iteration rebuilds it.
 Do not preserve alias sets across rewrites.
 
+IR preparation has separate loop-scoped validity. AGPR relief preserves the
+prepared shape; remat, SGPRToVGPR, LDS, scratch, and assignment clearing
+invalidate it. The loop records validity in temporary IR attributes and removes
+them on exit. Alias state still rebuilds every iteration; standalone alias-state
+construction always prepares.
+
 Alias state lives in versioned `#wave.regalloc_state`. Fixed-stride op, value,
 range, and alias-set records index contiguous path and member slabs. Record
 index is the stable ID; C++ field enums define the schema. The outer dictionary

@@ -1,4 +1,8 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=restart_once})' | FileCheck %s
+// RUN: wave-opt %s \
+// RUN:   --pass-pipeline='builtin.module(transform-interpreter{entry-point=restart_once})' \
+// RUN:   | FileCheck %s \
+// RUN:       --implicit-check-not=waveamdmachine.regalloc_preparation_tracking \
+// RUN:       --implicit-check-not=waveamdmachine.regalloc_preparation_valid
 // RUN: not wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=never_progresses})' 2>&1 | FileCheck %s --check-prefix=NO-PROGRESS
 // RUN: wave-opt %s --mlir-print-op-generic | FileCheck %s --check-prefix=DEFAULT
 

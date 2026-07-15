@@ -3,10 +3,14 @@
 // CHECK-LABEL: func.func @clear_state(
 // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 4>
 // CHECK-SAME: attributes {waveamdmachine.regalloc_assignments}
+// CHECK-NOT: waveamdmachine.regalloc_preparation_tracking
+// CHECK-NOT: waveamdmachine.regalloc_preparation_valid
 // CHECK-NOT: waveamdmachine.regalloc_transform_state
 func.func @clear_state(%arg0: !waveamdmachine.reg<vgpr, 1, 4>)
     attributes {
       waveamdmachine.regalloc_assignments,
+      waveamdmachine.regalloc_preparation_tracking,
+      waveamdmachine.regalloc_preparation_valid,
       waveamdmachine.regalloc_transform_state = {
         packed = #wave.regalloc_state<
             version = 1,

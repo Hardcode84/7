@@ -1034,6 +1034,7 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
   OpBuilder builder(func.getContext());
   const AGPRReliefCandidate &candidate = (*selection)->candidate;
   materializeAGPRRelief(builder, candidate, (*selection)->isa);
+  // Rebanking and point bridges preserve preparation invariants.
   if (failed(wave::addRegAllocTransformProviderMetadata(
           func, builder, "agpr", countAGPRReliefDwords(candidate))))
     return failure();

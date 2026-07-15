@@ -24,6 +24,8 @@ module attributes {transform.with_named_sequence} {
 
   module @payload_module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     // CHECK-LABEL: func.func @remat_relief_rebuilds_after_pressure(
+    // CHECK-SAME: waveamdmachine.regalloc_preparation_tracking
+    // CHECK-NOT: waveamdmachine.regalloc_preparation_valid
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
     // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
@@ -35,7 +37,9 @@ module attributes {transform.with_named_sequence} {
     func.func @remat_relief_rebuilds_after_pressure()
         -> !waveamdmachine.reg<vgpr, 1>
         attributes {waveamdmachine.vgpr_count_max = 2 : i64,
-                    waveamdmachine.agpr_count_max = 0 : i64} {
+                    waveamdmachine.agpr_count_max = 0 : i64,
+                    waveamdmachine.regalloc_preparation_tracking,
+                    waveamdmachine.regalloc_preparation_valid} {
       %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
       %one = waveamdmachine.imm 1 : !waveamdmachine.imm
       %seed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}

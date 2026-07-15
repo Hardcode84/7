@@ -2352,10 +2352,13 @@ static LogicalResult setRegAllocTransformState(func::FuncOp func,
     return success();
   }
   setMFMAAccumulatorCoalescingFlag(func, builder, coalesceMFMAAccResult);
-  if (failed(wave::prepareWaveAMDRegAllocIR(func)))
-    return failure();
-  if (failed(splitOverlappingLoopInits(func)))
-    return failure();
+  if (!wave::isRegAllocPreparationValid(func)) {
+    if (failed(wave::prepareWaveAMDRegAllocIR(func)))
+      return failure();
+    if (failed(splitOverlappingLoopInits(func)))
+      return failure();
+    wave::markRegAllocPreparationValid(func);
+  }
   RegAllocAliasStateBuilder stateBuilder(func, builder, coalesceMFMAAccResult);
   FailureOr<DictionaryAttr> state = stateBuilder.build();
   if (failed(state))

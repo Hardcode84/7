@@ -588,6 +588,7 @@ static LogicalResult applySGPRToVGPRRelief(func::FuncOp func,
   if (failed(wave::addRegAllocTransformProviderMetadata(
           func, builder, "sgpr_to_vgpr", plan.promotedDwords)))
     return failure();
+  wave::invalidateRegAllocPreparation(func);
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
   return success();

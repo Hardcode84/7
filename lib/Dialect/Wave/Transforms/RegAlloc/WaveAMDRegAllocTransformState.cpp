@@ -27,6 +27,10 @@ static constexpr StringLiteral kRegAllocTransformStateAttr =
 static constexpr StringLiteral kRegAllocAssignmentsAttr =
     "waveamdmachine.regalloc_assignments";
 static constexpr StringLiteral kRegAllocPackedStateField = "packed";
+static constexpr StringLiteral kRegAllocPreparationTrackingAttr =
+    "waveamdmachine.regalloc_preparation_tracking";
+static constexpr StringLiteral kRegAllocPreparationValidAttr =
+    "waveamdmachine.regalloc_preparation_valid";
 static constexpr StringLiteral kRegAllocStageSuccess = "linear-scan-success";
 static constexpr StringLiteral kRegAllocStageFailure = "linear-scan-failure";
 static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
@@ -737,6 +741,49 @@ void clearRegAllocTransformState(Operation *target) {
   }
   target->walk(
       [](func::FuncOp func) { func->removeAttr(kRegAllocTransformStateAttr); });
+}
+
+static void clearRegAllocPreparationTracking(Operation *target) {
+  auto clear = [](Operation *op) {
+    op->removeAttr(kRegAllocPreparationTrackingAttr);
+    op->removeAttr(kRegAllocPreparationValidAttr);
+  };
+  clear(target);
+  target->walk(clear);
+}
+
+void beginRegAllocPreparationTracking(Operation *target) {
+  clearRegAllocPreparationTracking(target);
+  target->setAttr(kRegAllocPreparationTrackingAttr,
+                  UnitAttr::get(target->getContext()));
+}
+
+void endRegAllocPreparationTracking(Operation *target) {
+  Operation *root = target;
+  while (root && !root->hasAttr(kRegAllocPreparationTrackingAttr))
+    root = root->getParentOp();
+  clearRegAllocPreparationTracking(root ? root : target);
+}
+
+bool isRegAllocPreparationValid(func::FuncOp func) {
+  for (Operation *op = func.getOperation(); op; op = op->getParentOp())
+    if (op->hasAttr(kRegAllocPreparationTrackingAttr))
+      return func->hasAttr(kRegAllocPreparationValidAttr);
+  return false;
+}
+
+void markRegAllocPreparationValid(func::FuncOp func) {
+  for (Operation *op = func.getOperation(); op; op = op->getParentOp()) {
+    if (!op->hasAttr(kRegAllocPreparationTrackingAttr))
+      continue;
+    func->setAttr(kRegAllocPreparationValidAttr,
+                  UnitAttr::get(func.getContext()));
+    return;
+  }
+}
+
+void invalidateRegAllocPreparation(func::FuncOp func) {
+  func->removeAttr(kRegAllocPreparationValidAttr);
 }
 
 static FailureOr<RegAllocTransformLoopDecision>

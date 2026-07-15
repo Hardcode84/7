@@ -27,6 +27,7 @@ struct WaveAMDClearRegAllocTransformStatePass
 
   void runOnOperation() override {
     wave::clearRegAllocTransformState(getOperation());
+    wave::endRegAllocPreparationTracking(getOperation());
   }
 };
 
