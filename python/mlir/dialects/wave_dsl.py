@@ -393,32 +393,89 @@ def _index_expr_assumptions_attr(
     return ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
 
 
-def _memory_mapping_bindings(
-    expressions: Sequence[ixsimpl.Expr | None],
-    bindings: Mapping[ixsimpl.Expr, Value] | None,
-) -> tuple[dict[str, Value], dict[str, Value]]:
-    binding_map = {key.sym_name: value for key, value in (bindings or {}).items()}
-    free_names = {
+_MEMORY_MAPPING_RESERVED_SYMBOLS = frozenset({"block", "item", "slot"})
+
+
+def _memory_mapping_required_names(
+    expressions: Sequence[ixsimpl.Expr],
+) -> set[str]:
+    return {
         symbol.sym_name
         for expr in expressions
-        if expr is not None
         for symbol in expr.free_symbols
+        if symbol.sym_name not in _MEMORY_MAPPING_RESERVED_SYMBOLS
     }
-    free_names -= {"block", "item", "slot"}
-    unknown = free_names - binding_map.keys()
-    if unknown:
-        raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
-    scalar: dict[str, Value] = {}
-    packet: dict[str, Value] = {}
-    for name in sorted(free_names):
-        value = binding_map[name]
+
+
+def _named_memory_mapping_values(
+    values: Mapping[ixsimpl.Expr, Value] | None,
+    kind: str,
+    required_names: set[str],
+) -> dict[str, Value]:
+    named: dict[str, Value] = {}
+    for symbol, value in (values or {}).items():
+        try:
+            name = symbol.sym_name
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            raise TypeError(f"{kind} keys must be symbol expressions") from exc
+        if name in _MEMORY_MAPPING_RESERVED_SYMBOLS:
+            raise ValueError(f"{kind} name {name!r} is reserved")
+        if name in named:
+            raise ValueError(f"duplicate {kind} name {name!r}")
+        if name in required_names:
+            named[name] = value
+    return dict(sorted(named.items()))
+
+
+def _memory_mapping_expr_attr(expr: ixsimpl.Expr | None) -> ExprAttr | None:
+    if expr is None:
+        return None
+    return ExprAttr.get_from_node_ptr(
+        _ixsimpl_node_ptr(expr), context=_current_context()
+    )
+
+
+def _memory_mapping_parts(
+    bit_offset: ixsimpl.Expr,
+    base: ixsimpl.Expr | None,
+    target_block: ixsimpl.Expr | None,
+    bindings: Mapping[ixsimpl.Expr, Value] | None,
+    packet_bindings: Mapping[ixsimpl.Expr, Value] | None,
+) -> tuple[MemoryMappingAttr, dict[str, Value], dict[str, Value]]:
+    """Import a symbolic memory map and its bindings structurally."""
+    expressions = tuple(
+        expr for expr in (base, target_block, bit_offset) if expr is not None
+    )
+    required_names = _memory_mapping_required_names(expressions)
+    bound_values = _named_memory_mapping_values(bindings, "binding", required_names)
+    explicit_packet_values = _named_memory_mapping_values(
+        packet_bindings, "packet binding", required_names
+    )
+    overlap = bound_values.keys() & explicit_packet_values.keys()
+    if overlap:
+        raise ValueError(
+            f"symbols cannot be both scalar and packet bindings: {sorted(overlap)}"
+        )
+    missing = required_names - bound_values.keys() - explicit_packet_values.keys()
+    if missing:
+        raise ValueError(f"mapping symbols missing from bindings: {sorted(missing)}")
+
+    scalar_values: dict[str, Value] = {}
+    packet_values = dict(explicit_packet_values)
+    for name, value in bound_values.items():
         if SimdType.isinstance(value.type) and isinstance(
             SimdType(value.type).element_type, VectorType
         ):
-            packet[name] = value
+            packet_values[name] = value
         else:
-            scalar[name] = value
-    return scalar, packet
+            scalar_values[name] = value
+
+    mapping = MemoryMappingAttr.get(
+        _memory_mapping_expr_attr(bit_offset),
+        base=_memory_mapping_expr_attr(base),
+        target_block=_memory_mapping_expr_attr(target_block),
+    )
+    return mapping, scalar_values, packet_values
 
 
 # ---------------------------------------------------------------------------
@@ -960,42 +1017,61 @@ class FunctionBuilder:
         *,
         bit_offset: ixsimpl.Expr,
         bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        packet_bindings: Mapping[ixsimpl.Expr, Value] | None = None,
         base: ixsimpl.Expr | None = None,
         target_block: ixsimpl.Expr | None = None,
         after: Value | None = None,
         cache: Attribute | None = None,
     ) -> tuple[Value, Value]:
         """Build target-neutral symbolic packet gather."""
+        mapping, scalar_values, packet_values = _memory_mapping_parts(
+            bit_offset, base, target_block, bindings, packet_bindings
+        )
         sources = [bases] if isinstance(bases, Value) else list(bases)
-        scalar_bindings, packet_bindings = _memory_mapping_bindings(
-            [base, target_block, bit_offset], bindings
-        )
-
-        def expr_attr(expr: ixsimpl.Expr | None) -> ExprAttr | None:
-            if expr is None:
-                return None
-            return ExprAttr.get_from_node_ptr(
-                _ixsimpl_node_ptr(expr), context=_current_context()
-            )
-
-        mapping = MemoryMappingAttr.get(
-            expr_attr(bit_offset),
-            base=expr_attr(base),
-            target_block=expr_attr(target_block),
-        )
         op = wave.GatherOp(
             result_type,
             mem_token_type(),
             sources,
-            list(scalar_bindings.values()),
-            list(packet_bindings.values()),
+            list(scalar_values.values()),
+            list(packet_values.values()),
             mapping,
             dependency=after,
-            binding_names=list(scalar_bindings),
-            packet_binding_names=list(packet_bindings),
+            binding_names=list(scalar_values),
+            packet_binding_names=list(packet_values),
             cache=cache,
         )
         return op.value, op.token
+
+    def scatter(
+        self,
+        value: Value,
+        bases: Value | Sequence[Value],
+        *,
+        bit_offset: ixsimpl.Expr,
+        bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        packet_bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        base: ixsimpl.Expr | None = None,
+        target_block: ixsimpl.Expr | None = None,
+        after: Value | None = None,
+        cache: Attribute | None = None,
+    ) -> Value:
+        """Build target-neutral symbolic packet scatter."""
+        mapping, scalar_values, packet_values = _memory_mapping_parts(
+            bit_offset, base, target_block, bindings, packet_bindings
+        )
+        destinations = [bases] if isinstance(bases, Value) else list(bases)
+        return wave.ScatterOp(
+            mem_token_type(),
+            value,
+            destinations,
+            list(scalar_values.values()),
+            list(packet_values.values()),
+            mapping,
+            dependency=after,
+            binding_names=list(scalar_values),
+            packet_binding_names=list(packet_values),
+            cache=cache,
+        ).token
 
     def redistribute(
         self,

@@ -1,11 +1,21 @@
 # RUN: %PYTHON %s | FileCheck %s
 
+import ixsimpl
 from mlir.dialects import wave_dsl as w
 
 
 def run(f):
     print("\nTEST:", f.__name__)
     f()
+
+
+def assert_raises(error_type, message, callback):
+    try:
+        callback()
+    except error_type as exc:
+        assert str(exc) == message
+        return
+    raise AssertionError(f"expected {error_type.__name__}: {message}")
 
 
 # CHECK-LABEL: TEST: test_generic_wave_kernel
@@ -422,6 +432,65 @@ def test_symbolic_gather():
         # CHECK-SAME: bindings ["origin"](%arg1) packet_bindings ["index"](%arg2)
         # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
         print(m.module)
+
+
+# CHECK-LABEL: TEST: test_symbolic_memory_builder_diagnostics
+@run
+def test_symbolic_memory_builder_diagnostics():
+    with w.module() as m:
+        packet = w.simd_type(w.vector_type(4, w.i32()), width=64)
+        with m.function(
+            "symbolic_memory_diagnostics",
+            [w.ptr_type(w.i32()), w.index_type(), packet],
+        ) as f:
+            base, scalar_value, packet_value = f.args
+            index = w.sym("index")
+            result_type = w.simd_type(w.vector_type(4, w.i32()), width=64)
+
+            def gather(**kwargs):
+                return f.gather(
+                    base,
+                    result_type,
+                    bit_offset=32 * index,
+                    **kwargs,
+                )
+
+            assert_raises(
+                TypeError,
+                "binding keys must be symbol expressions",
+                lambda: gather(bindings={index + w.sym_ctx.int_(1): scalar_value}),
+            )
+            assert_raises(
+                ValueError,
+                "binding name 'item' is reserved",
+                lambda: gather(bindings={w.sym("item"): scalar_value}),
+            )
+
+            other_context = ixsimpl.Context()
+            duplicate_bindings = {
+                index: scalar_value,
+                other_context.sym("index"): scalar_value,
+            }
+            assert_raises(
+                ValueError,
+                "duplicate binding name 'index'",
+                lambda: gather(bindings=duplicate_bindings),
+            )
+            assert_raises(
+                ValueError,
+                "symbols cannot be both scalar and packet bindings: ['index']",
+                lambda: gather(
+                    bindings={index: scalar_value},
+                    packet_bindings={index: packet_value},
+                ),
+            )
+            assert_raises(
+                ValueError,
+                "mapping symbols missing from bindings: ['index']",
+                gather,
+            )
+        print("ok")
+        # CHECK: ok
 
 
 # CHECK-LABEL: TEST: test_wave_cast_helper

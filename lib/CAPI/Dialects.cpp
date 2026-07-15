@@ -22,6 +22,7 @@
 namespace mlir::wave {
 // Python registers the small pass set used by in-process pipeline entrypoints.
 std::unique_ptr<::mlir::Pass> createWaveAMDDmaZeroFill();
+std::unique_ptr<::mlir::Pass> createWaveLowerSymbolicMemory();
 std::unique_ptr<::mlir::Pass> createWaveLowerRedistribute();
 std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
 } // namespace mlir::wave
@@ -45,6 +46,9 @@ void mlirRegisterWavePasses(void) {
   });
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveAMDDmaZeroFill();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::wave::createWaveLowerSymbolicMemory();
   });
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveLowerRedistribute();
