@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,53 @@ def build_source() -> str:
             "      waveamdmachine.yield",
             "    } : !waveamdmachine.reg<sgpr, 2>",
             f"    return {values} : {types}",
+            "  }",
+            "  func.func @exec_if_condition_liveness() attributes {wave.kernel} {",
+            "    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm",
+            "    %cond = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>",
+            "    %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>",
+            "    waveamdmachine.exec_if %cond {",
+            "      %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>",
+            "      %value, %token = waveamdmachine.buffer_load_b32 %off, %desc, %zero",
+            "          : (!waveamdmachine.reg<vgpr, 1>,",
+            "             !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)",
+            "            -> (!waveamdmachine.reg<vgpr, 1>,",
+            "                !waveamdmachine.mem.token)",
+            "      waveamdmachine.yield",
+            "    } otherwise {",
+            "      waveamdmachine.yield",
+            "    } : !waveamdmachine.reg<sgpr, 2>",
+            "    return",
+            "  }",
+            "  func.func @exec_if_result_liveness() -> (",
+            "      !waveamdmachine.reg<vgpr, 1>,",
+            "      !waveamdmachine.reg<vgpr, 1>) {",
+            "    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm",
+            "    %one = waveamdmachine.imm 1 : !waveamdmachine.imm",
+            "    %cond = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>",
+            "    %fallback = waveamdmachine.v_mov_b32_tuple %zero",
+            "        {registers = 1 : i64} : (!waveamdmachine.imm)",
+            "        -> !waveamdmachine.reg<vgpr, 1>",
+            "    %r0 = waveamdmachine.exec_if %cond {",
+            "      %then0 = waveamdmachine.v_mov_b32_tuple %one",
+            "          {registers = 1 : i64} : (!waveamdmachine.imm)",
+            "          -> !waveamdmachine.reg<vgpr, 1>",
+            "      waveamdmachine.yield %then0 : !waveamdmachine.reg<vgpr, 1>",
+            "    } otherwise {",
+            "      waveamdmachine.yield %fallback : !waveamdmachine.reg<vgpr, 1>",
+            "    } : !waveamdmachine.reg<sgpr, 2>",
+            "        -> !waveamdmachine.reg<vgpr, 1>",
+            "    %r1 = waveamdmachine.exec_if %cond {",
+            "      %then1 = waveamdmachine.v_mov_b32_tuple %one",
+            "          {registers = 1 : i64} : (!waveamdmachine.imm)",
+            "          -> !waveamdmachine.reg<vgpr, 1>",
+            "      waveamdmachine.yield %then1 : !waveamdmachine.reg<vgpr, 1>",
+            "    } otherwise {",
+            "      waveamdmachine.yield %fallback : !waveamdmachine.reg<vgpr, 1>",
+            "    } : !waveamdmachine.reg<sgpr, 2>",
+            "        -> !waveamdmachine.reg<vgpr, 1>",
+            "    return %r0, %r1 : !waveamdmachine.reg<vgpr, 1>,",
+            "        !waveamdmachine.reg<vgpr, 1>",
             "  }",
             "}",
         ]
@@ -74,6 +122,17 @@ def main() -> None:
     require(
         "waveamdmachine.sgpr_count = 102 : i64" in mlir,
         "resource-info did not reserve exec_if save stack inside gfx950 limit",
+    )
+    result_liveness = re.search(
+        r"func\.func @exec_if_result_liveness\(\)\s*->\s*\("
+        r"!waveamdmachine\.reg<vgpr, 1, (\d+)>,\s*"
+        r"!waveamdmachine\.reg<vgpr, 1, (\d+)>",
+        mlir,
+    )
+    require(result_liveness is not None, "missing allocated exec_if results")
+    require(
+        result_liveness.group(1) != result_liveness.group(2),
+        "simultaneously live exec_if results share a physical VGPR",
     )
 
     asm = run([wave_translate, "--wave-to-amdgpu-asm", "-"], mlir)
