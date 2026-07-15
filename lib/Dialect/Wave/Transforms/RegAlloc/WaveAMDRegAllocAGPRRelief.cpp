@@ -21,6 +21,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/MathExtras.h"
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <optional>
@@ -79,14 +80,19 @@ struct ActiveAGPRReliefAssignments {
 
   ActiveAGPRReliefAssignments(unsigned limit) : occupied(limit) {}
 
+  static bool endHeapCompare(const wave::RegAllocTransformAssignment &lhs,
+                             const wave::RegAllocTransformAssignment &rhs) {
+    return std::tie(lhs.end, lhs.set) > std::tie(rhs.end, rhs.set);
+  }
+
+  void reserve(size_t size) { assignments.reserve(size); }
+
   void expire(unsigned position) {
-    llvm::erase_if(assignments,
-                   [&](const wave::RegAllocTransformAssignment &assigned) {
-                     if (assigned.end >= position)
-                       return false;
-                     dropLaneUse(assigned.base, assigned.width);
-                     return true;
-                   });
+    while (!assignments.empty() && assignments.front().end < position) {
+      std::pop_heap(assignments.begin(), assignments.end(), endHeapCompare);
+      wave::RegAllocTransformAssignment assigned = assignments.pop_back_val();
+      dropLaneUse(assigned.base, assigned.width);
+    }
   }
 
   bool rangeIsFree(unsigned base, unsigned width) const {
@@ -100,9 +106,13 @@ struct ActiveAGPRReliefAssignments {
     if (interval.width > limit)
       return std::nullopt;
     unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(interval.width));
-    for (unsigned base = 0; base <= limit - interval.width; base += align)
-      if (rangeIsFree(base, interval.width))
+    unsigned maxBase = limit - interval.width;
+    for (unsigned base = 0; base <= maxBase;) {
+      int conflict = occupied.find_first_in(base, base + interval.width);
+      if (conflict < 0)
         return base;
+      base = llvm::alignTo(static_cast<unsigned>(conflict) + 1, align);
+    }
     return std::nullopt;
   }
 
@@ -110,6 +120,7 @@ struct ActiveAGPRReliefAssignments {
     addLaneUse(base, interval.width);
     assignments.push_back({waveamdmachine::RegClass::AGPR, interval.id, base,
                            interval.width, interval.start, interval.end});
+    std::push_heap(assignments.begin(), assignments.end(), endHeapCompare);
   }
 
 private:
@@ -168,6 +179,7 @@ canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
                                ArrayRef<AGPRReliefInterval> overlayIntervals,
                                unsigned limit, unsigned &footprint) {
   ActiveAGPRReliefAssignments active(limit);
+  active.reserve(intervals.size() + overlayIntervals.size());
   footprint = 0;
   size_t index = 0;
   size_t overlayIndex = 0;
@@ -659,7 +671,6 @@ static void collectMFMAAGPRReliefPartnerSets(
 static AGPRReliefSetGroup
 buildAGPRReliefSetGroup(const wave::RegAllocTransformAliasSet &primary,
                         const AGPRReliefSetIndex &setIndex,
-                        ArrayRef<wave::RegAllocTransformAliasSet> sets,
                         ArrayRef<wave::RegAllocTransformValue> values,
                         ArrayRef<ResolvedRegAllocValue> resolvedValues,
                         const DenseMap<Value, unsigned> &valueIndex) {
@@ -677,11 +688,18 @@ buildAGPRReliefSetGroup(const wave::RegAllocTransformAliasSet &primary,
                                        valueIndex, values, seen, worklist);
   }
 
+  llvm::sort(worklist, [&](unsigned lhsId, unsigned rhsId) {
+    const wave::RegAllocTransformAliasSet *lhs =
+        setIndex.setsById.lookup(lhsId);
+    const wave::RegAllocTransformAliasSet *rhs =
+        setIndex.setsById.lookup(rhsId);
+    assert(lhs && rhs && "AGPR relief group set is missing");
+    return std::tie(lhs->start, lhs->id) < std::tie(rhs->start, rhs->id);
+  });
   AGPRReliefSetGroup group;
   group.primary = &primary;
-  for (const wave::RegAllocTransformAliasSet &set : sets)
-    if (seen.contains(set.id))
-      group.sets.push_back(&set);
+  for (unsigned setId : worklist)
+    group.sets.push_back(setIndex.setsById.lookup(setId));
   return group;
 }
 
@@ -702,7 +720,6 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
                          const RegAllocTransformFailure &failureRecord,
                          const AGPRReliefSetIndex &setIndex,
                          const AGPRReliefFitState &fitState,
-                         ArrayRef<wave::RegAllocTransformAliasSet> sets,
                          ArrayRef<wave::RegAllocTransformValue> values,
                          ArrayRef<ResolvedRegAllocValue> resolvedValues,
                          const DenseMap<Value, unsigned> &valueIndex,
@@ -711,7 +728,7 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   if (!set)
     return std::optional<AGPRReliefCandidate>();
   AGPRReliefSetGroup group = buildAGPRReliefSetGroup(
-      *set, setIndex, sets, values, resolvedValues, valueIndex);
+      *set, setIndex, values, resolvedValues, valueIndex);
   SmallVector<ResolvedRegAllocValue> groupValues;
   for (const wave::RegAllocTransformAliasSet *groupSet : group.sets) {
     FailureOr<SmallVector<ResolvedRegAllocValue>> setValues =
@@ -752,7 +769,6 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
 static FailureOr<std::optional<AGPRReliefCandidate>> selectAGPRReliefCandidate(
     func::FuncOp func, const RegAllocTransformFailure &failureRecord,
     const AGPRReliefSetIndex &setIndex, const AGPRReliefFitState &fitState,
-    ArrayRef<wave::RegAllocTransformAliasSet> sets,
     ArrayRef<wave::RegAllocTransformValue> values,
     ArrayRef<ResolvedRegAllocValue> resolvedValues,
     const DenseMap<Value, unsigned> &valueIndex,
@@ -761,7 +777,7 @@ static FailureOr<std::optional<AGPRReliefCandidate>> selectAGPRReliefCandidate(
   for (unsigned setId : collectVGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<AGPRReliefCandidate>> candidate =
         buildAGPRReliefCandidate(func, setId, failureRecord, setIndex, fitState,
-                                 sets, values, resolvedValues, valueIndex,
+                                 values, resolvedValues, valueIndex,
                                  isaVersion);
     if (failed(candidate))
       return failure();
@@ -959,8 +975,8 @@ selectAGPRReliefCandidateFromFunc(func::FuncOp func,
       buildAGPRReliefValueIndex(state.resolvedValues);
   FailureOr<std::optional<AGPRReliefCandidate>> candidate =
       selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState,
-                                state.sets, state.values, state.resolvedValues,
-                                valueIndex, *isaVersion);
+                                state.values, state.resolvedValues, valueIndex,
+                                *isaVersion);
   if (failed(candidate))
     return failure();
   if (!*candidate)

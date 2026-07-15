@@ -50,6 +50,8 @@ struct RegAllocAliasValue {
 struct RegAllocAliasOp {
   SmallVector<int64_t> path;
   Operation *op = nullptr;
+  Operation *enclosingLoop = nullptr;
+  TypeID typeId;
   unsigned id = 0;
   unsigned position = 0;
 };
@@ -282,7 +284,7 @@ public:
 
   FailureOr<DictionaryAttr>
   build(wave::regalloc_detail::RegAllocTransformStateCache *cache) {
-    collectRegion(func.getBody(), {0});
+    collectRegion(func.getBody(), {0}, nullptr);
     collectUsesAndAliases();
     if (failed(assignAliasSets()))
       return failure();
@@ -324,7 +326,8 @@ private:
                     arg.getArgNumber());
   }
 
-  void collectRegion(Region &region, ArrayRef<int64_t> regionPath) {
+  void collectRegion(Region &region, ArrayRef<int64_t> regionPath,
+                     Operation *enclosingLoop) {
     Operation *parent = region.getParentOp();
     unsigned blockArgStart = parent ? positions.lookup(parent) : 0;
     for (auto [blockIndex, block] : llvm::enumerate(region)) {
@@ -337,17 +340,25 @@ private:
         RegAllocAliasOp record;
         record.path = opPath;
         record.op = &op;
+        record.enclosingLoop = enclosingLoop;
+        record.typeId = op.getName().getTypeID();
         record.id = ops.size();
         record.position = ops.size();
         positions[&op] = record.position;
         ops.push_back(record);
+        Operation *nestedEnclosingLoop = enclosingLoop;
+        if (op.getNumRegions() != 0 &&
+            record.typeId == TypeID::get<waveamdmachine::UniformLoopOp>()) {
+          parentUniformLoops[&op] = enclosingLoop;
+          nestedEnclosingLoop = &op;
+        }
         for (auto [regionIndex, nested] : llvm::enumerate(op.getRegions())) {
           SmallVector<int64_t> nestedPath(opPath);
           nestedPath.push_back(regionIndex);
-          collectRegion(nested, nestedPath);
+          collectRegion(nested, nestedPath, nestedEnclosingLoop);
         }
         unsigned resultStart = record.position;
-        if (isa<waveamdmachine::UniformLoopOp>(op))
+        if (record.typeId == TypeID::get<waveamdmachine::UniformLoopOp>())
           resultStart = ops.back().position;
         for (OpResult result : op.getResults())
           registerValue(result, resultStart, opPath,
@@ -403,14 +414,14 @@ private:
     return owner && (owner == scope || scope->isAncestor(owner));
   }
 
-  void collectExternalLoopBodyUse(Value operand, Operation *user) {
+  void collectExternalLoopBodyUse(Value operand, Operation *enclosingLoop) {
     if (!valueIds.contains(operand))
       return;
-    for (Operation *scope = user->getParentOp(); scope;
-         scope = scope->getParentOp()) {
-      auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(scope);
-      if (!loop || isValueDefinedInside(scope, operand))
-        continue;
+    for (Operation *scope = enclosingLoop; scope;
+         scope = parentUniformLoops.lookup(scope)) {
+      if (isValueDefinedInside(scope, operand))
+        break;
+      auto loop = cast<waveamdmachine::UniformLoopOp>(scope);
       unsigned &end = externalLoopUseEnds[operand];
       end = std::max(end, getLoopExitPosition(loop));
     }
@@ -489,7 +500,7 @@ private:
     }
   }
 
-  void collectTupleAliases(Operation *op) {
+  void collectTupleAliases(Operation *op, TypeID typeId) {
     auto collect = [&](Value tuple, ValueRange elements) {
       int64_t offset = 0;
       for (Value element : elements) {
@@ -498,11 +509,18 @@ private:
           offset += type.getWidth();
       }
     };
-    if (auto toElements = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
+    if (typeId == TypeID::get<waveamdmachine::TupleToElementsOp>()) {
+      auto toElements = cast<waveamdmachine::TupleToElementsOp>(op);
       collect(toElements.getTuple(), toElements.getElements());
-    if (auto fromElements = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
+      return;
+    }
+    if (typeId == TypeID::get<waveamdmachine::TupleFromElementsOp>()) {
+      auto fromElements = cast<waveamdmachine::TupleFromElementsOp>(op);
       collect(fromElements.getTuple(), fromElements.getElements());
-    if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op)) {
+      return;
+    }
+    if (typeId == TypeID::get<waveamdmachine::UpdateTupleOp>()) {
+      auto update = cast<waveamdmachine::UpdateTupleOp>(op);
       addAliasEdge(update.getResult(), update.getBase(), 0);
       for (auto [value, offset] :
            llvm::zip_equal(update.getUpdates(), update.getOffsets()))
@@ -552,17 +570,20 @@ private:
       addAliasEdge(arg, carry, 0);
   }
 
-  void collectRegionAliases(Operation *op) {
-    if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op)) {
+  void collectRegionAliases(Operation *op, TypeID typeId) {
+    if (typeId == TypeID::get<waveamdmachine::UniformLoopOp>()) {
+      auto loop = cast<waveamdmachine::UniformLoopOp>(op);
       collectLoopCarryAliases(loop);
       return;
     }
-    if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op)) {
+    if (typeId == TypeID::get<waveamdmachine::UniformIfOp>()) {
+      auto uniformIf = cast<waveamdmachine::UniformIfOp>(op);
       collectYieldAliases(uniformIf.getResults(), uniformIf.getThenRegion());
       collectYieldAliases(uniformIf.getResults(), uniformIf.getElseRegion());
       return;
     }
-    if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op)) {
+    if (typeId == TypeID::get<waveamdmachine::ExecIfOp>()) {
+      auto execIf = cast<waveamdmachine::ExecIfOp>(op);
       collectYieldAliases(execIf.getResults(), execIf.getThenRegion());
       collectYieldAliases(execIf.getResults(), execIf.getElseRegion());
     }
@@ -572,7 +593,7 @@ private:
     for (RegAllocAliasOp &record : ops) {
       for (Value operand : record.op->getOperands()) {
         extendValue(operand, record.position);
-        collectExternalLoopBodyUse(operand, record.op);
+        collectExternalLoopBodyUse(operand, record.enclosingLoop);
       }
     }
     extendExternalLoopUses();
@@ -580,10 +601,10 @@ private:
 
   void collectAliases() {
     for (RegAllocAliasOp &record : ops) {
-      collectTupleAliases(record.op);
+      collectTupleAliases(record.op, record.typeId);
       collectMMAAliases(record.op);
       collectRequiredKilledOperandAliases(record.op);
-      collectRegionAliases(record.op);
+      collectRegionAliases(record.op, record.typeId);
     }
   }
 
@@ -807,6 +828,47 @@ private:
     return getDictionary(attrs);
   }
 
+  SmallVector<wave::RegAllocTransformAliasSet>
+  buildDecodedAliasSets(ArrayRef<wave::RegAllocTransformValue> decodedValues) {
+    SmallVector<wave::RegAllocTransformAliasSet> setsById;
+    setsById.reserve(aliasSets.size());
+    SmallVector<unsigned> setsPerStart(ops.size() + 1);
+    for (RegAllocAliasSet &record : aliasSets) {
+      assert(record.id == setsById.size() &&
+             "alias set IDs must match slab order");
+      wave::RegAllocTransformAliasSet set;
+      set.members = std::move(record.members);
+      set.regClass = decodedValues[set.members.front()].regClass;
+      set.id = record.id;
+      set.start = std::numeric_limits<unsigned>::max();
+      for (unsigned valueId : set.members) {
+        const wave::RegAllocTransformValue &value = decodedValues[valueId];
+        set.start = std::min(set.start, value.start);
+        set.end = std::max(set.end, value.end);
+        set.width = std::max(set.width, value.offset + value.width);
+      }
+      wave::collectRegAllocTransformAliasSetLiveRanges(set, decodedValues);
+      assert(set.start < setsPerStart.size() &&
+             "alias set start must name an operation position");
+      ++setsPerStart[set.start];
+      setsById.push_back(std::move(set));
+    }
+    unsigned offset = 0;
+    for (unsigned &count : setsPerStart) {
+      unsigned next = offset + count;
+      count = offset;
+      offset = next;
+    }
+    SmallVector<unsigned> setOrder(setsById.size());
+    for (auto [index, set] : llvm::enumerate(setsById))
+      setOrder[setsPerStart[set.start]++] = index;
+    SmallVector<wave::RegAllocTransformAliasSet> decodedSets;
+    decodedSets.reserve(setsById.size());
+    for (unsigned index : setOrder)
+      decodedSets.push_back(std::move(setsById[index]));
+    return decodedSets;
+  }
+
   std::unique_ptr<wave::regalloc_detail::RegAllocTransformDecodedState>
   buildDecodedState() {
     using wave::regalloc_detail::RegAllocTransformDecodedState;
@@ -833,26 +895,7 @@ private:
       decoded->values.push_back(std::move(value));
     }
 
-    decoded->sets.reserve(aliasSets.size());
-    for (RegAllocAliasSet &record : aliasSets) {
-      wave::RegAllocTransformAliasSet set;
-      set.members = std::move(record.members);
-      set.regClass = decoded->values[set.members.front()].regClass;
-      set.id = record.id;
-      set.start = std::numeric_limits<unsigned>::max();
-      for (unsigned valueId : set.members) {
-        const wave::RegAllocTransformValue &value = decoded->values[valueId];
-        set.start = std::min(set.start, value.start);
-        set.end = std::max(set.end, value.end);
-        set.width = std::max(set.width, value.offset + value.width);
-      }
-      wave::collectRegAllocTransformAliasSetLiveRanges(set, decoded->values);
-      decoded->sets.push_back(std::move(set));
-    }
-    llvm::sort(decoded->sets, [](const wave::RegAllocTransformAliasSet &lhs,
-                                 const wave::RegAllocTransformAliasSet &rhs) {
-      return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
-    });
+    decoded->sets = buildDecodedAliasSets(decoded->values);
 
     decoded->resolvedValues.reserve(decoded->values.size());
     for (unsigned id : llvm::seq<unsigned>(0, decoded->values.size())) {
@@ -870,6 +913,7 @@ private:
   SmallVector<RegAllocAliasSet> aliasSets;
   SmallVector<Value> payloadValues;
   DenseMap<Value, unsigned> externalLoopUseEnds;
+  DenseMap<Operation *, Operation *> parentUniformLoops;
   DenseMap<Operation *, unsigned> positions;
   DenseMap<Value, unsigned> valueIds;
   std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
