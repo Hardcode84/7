@@ -8,6 +8,7 @@
 
 #include "WaveAMDRegAllocTransformUtils.h"
 
+#include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/DenseSet.h"
@@ -383,6 +384,68 @@ resolveRegAllocStateValues(func::FuncOp func,
     return func.emitError("regalloc state value count no longer matches IR");
   return resolvedValues;
 }
+
+static std::pair<Attribute, Attribute>
+getRegAllocTransformStateIdentity(DictionaryAttr state) {
+  if (wave::RegAllocStateAttr packed = state.getAs<wave::RegAllocStateAttr>(
+          wave::getRegAllocTransformPackedStateFieldName()))
+    return {packed, packed};
+  return {state.get("values"), state.get("alias_sets")};
+}
+
+FailureOr<const RegAllocTransformDecodedState *>
+RegAllocTransformStateCache::get(func::FuncOp func) {
+  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
+      wave::getRegAllocTransformStateAttrName());
+  if (!state)
+    return func.emitError("regalloc transform state is missing");
+  auto [valuesIdentity, aliasSetsIdentity] =
+      getRegAllocTransformStateIdentity(state);
+  auto it = states.find(func.getOperation());
+  if (it != states.end() && it->second->valuesIdentity == valuesIdentity &&
+      it->second->aliasSetsIdentity == aliasSetsIdentity)
+    return it->second.get();
+
+  std::unique_ptr<RegAllocTransformDecodedState> decoded =
+      std::make_unique<RegAllocTransformDecodedState>();
+  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
+      wave::parseRegAllocTransformValues(state, func.getOperation());
+  if (failed(values))
+    return failure();
+  decoded->values = std::move(*values);
+  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
+      wave::parseRegAllocTransformAliasSets(state, decoded->values,
+                                            func.getOperation());
+  if (failed(sets))
+    return failure();
+  decoded->sets = std::move(*sets);
+  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
+      resolveRegAllocStateValues(func, decoded->values);
+  if (failed(resolvedValues))
+    return failure();
+  decoded->resolvedValues = std::move(*resolvedValues);
+  for (auto [value, stateValue] : decoded->resolvedValues)
+    decoded->valueLookup[value] = stateValue;
+  decoded->valuesIdentity = valuesIdentity;
+  decoded->aliasSetsIdentity = aliasSetsIdentity;
+  RegAllocTransformDecodedState *result = decoded.get();
+  states[func.getOperation()] = std::move(decoded);
+  return result;
+}
+
+void RegAllocTransformStateCache::install(
+    func::FuncOp func, DictionaryAttr state,
+    std::unique_ptr<RegAllocTransformDecodedState> decoded) {
+  std::tie(decoded->valuesIdentity, decoded->aliasSetsIdentity) =
+      getRegAllocTransformStateIdentity(state);
+  states[func.getOperation()] = std::move(decoded);
+}
+
+void RegAllocTransformStateCache::erase(func::FuncOp func) {
+  states.erase(func.getOperation());
+}
+
+void RegAllocTransformStateCache::clear() { states.clear(); }
 
 FailureOr<SmallVector<ResolvedRegAllocValue>> getResolvedRegAllocSetValues(
     func::FuncOp func, const wave::RegAllocTransformAliasSet &set,

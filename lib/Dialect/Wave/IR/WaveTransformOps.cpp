@@ -10,6 +10,7 @@
 
 #include "../Transforms/RegAlloc/WaveAMDRegAllocTransformLoop.h"
 #include "../Transforms/RegAlloc/WaveAMDRegAllocTransformState.h"
+#include "../Transforms/RegAlloc/WaveAMDRegAllocTransformUtils.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/EventSimulator.h"
@@ -33,6 +34,7 @@
 #include "mlir/Support/Timing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <limits>
@@ -72,6 +74,26 @@ void wave::TransformGetIntAttrOp::getEffects(
 
 namespace {
 
+class RegAllocTransformStateExtension final
+    : public transform::TransformState::Extension {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RegAllocTransformStateExtension)
+
+  explicit RegAllocTransformStateExtension(transform::TransformState &state)
+      : Extension(state) {}
+
+  wave::regalloc_detail::RegAllocTransformStateCache cache;
+};
+
+static wave::regalloc_detail::RegAllocTransformStateCache &
+getRegAllocTransformStateCache(transform::TransformState &state) {
+  RegAllocTransformStateExtension *extension =
+      state.getExtension<RegAllocTransformStateExtension>();
+  if (!extension)
+    extension = &state.addExtension<RegAllocTransformStateExtension>();
+  return extension->cache;
+}
+
 static DiagnosedSilenceableFailure
 runNamedSequence(transform::TransformOpInterface caller,
                  transform::NamedSequenceOp callee,
@@ -107,6 +129,7 @@ static DiagnosedSilenceableFailure runRegAllocLoopIteration(
     wave::TransformRegAllocLoopOp op, transform::NamedSequenceOp body,
     ArrayRef<Operation *> current, transform::TransformState &state,
     SmallVectorImpl<Operation *> &yielded) {
+  getRegAllocTransformStateCache(state).clear();
   for (Operation *target : current)
     wave::clearRegAllocTransformState(target);
   SmallVector<transform::MappedValue> targetMapping =
@@ -200,6 +223,9 @@ static DiagnosedSilenceableFailure
 runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
                     transform::TransformResults &results,
                     transform::TransformState &state) {
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
+  llvm::scope_exit clearCache([&] { cache.clear(); });
   transform::NamedSequenceOp body =
       SymbolTable::lookupNearestSymbolFrom<transform::NamedSequenceOp>(
           op.getOperation(), op.getBodyAttr());
@@ -291,12 +317,15 @@ DiagnosedSilenceableFailure wave::TransformRegAllocBuildAliasStateOp::apply(
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing =
       getRegAllocStageTimingScope("regalloc_build_alias_state");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
+  cache.clear();
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
     if (failed(wave::buildRegAllocTransformAliasState(
-            target, builder, getCoalesceMfmaAccResult())))
+            target, builder, getCoalesceMfmaAccResult(), &cache)))
       return emitDefiniteFailure() << "failed to build regalloc alias state";
   }
   results.set(cast<OpResult>(getResult()), targets);
@@ -314,11 +343,13 @@ DiagnosedSilenceableFailure wave::TransformRegAllocLinearScanOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing = getRegAllocStageTimingScope("regalloc_linear_scan");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::runRegAllocTransformLinearScan(target, builder)))
+    if (failed(wave::runRegAllocTransformLinearScan(target, builder, &cache)))
       return emitDefiniteFailure() << "failed to run regalloc linear scan";
   }
   results.set(cast<OpResult>(getResult()), targets);
@@ -336,11 +367,13 @@ DiagnosedSilenceableFailure wave::TransformRegAllocAGPRReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing = getRegAllocStageTimingScope("regalloc_agpr_relief");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::runRegAllocTransformAGPRRelief(target, builder)))
+    if (failed(wave::runRegAllocTransformAGPRRelief(target, builder, &cache)))
       return emitDefiniteFailure() << "failed to run regalloc AGPR relief";
   }
   results.set(cast<OpResult>(getResult()), targets);
@@ -358,11 +391,13 @@ DiagnosedSilenceableFailure wave::TransformRegAllocRematReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing = getRegAllocStageTimingScope("regalloc_remat_relief");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::runRegAllocTransformRematRelief(target, builder)))
+    if (failed(wave::runRegAllocTransformRematRelief(target, builder, &cache)))
       return emitDefiniteFailure() << "failed to run regalloc remat relief";
   }
   results.set(cast<OpResult>(getResult()), targets);
@@ -381,11 +416,14 @@ DiagnosedSilenceableFailure wave::TransformRegAllocSGPRToVGPRReliefOp::apply(
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing =
       getRegAllocStageTimingScope("regalloc_sgpr_to_vgpr_relief");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::runRegAllocTransformSGPRToVGPRRelief(target, builder)))
+    if (failed(wave::runRegAllocTransformSGPRToVGPRRelief(target, builder,
+                                                          &cache)))
       return emitDefiniteFailure()
              << "failed to run regalloc SGPR to VGPR relief";
   }
@@ -404,11 +442,13 @@ DiagnosedSilenceableFailure wave::TransformRegAllocLDSReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing = getRegAllocStageTimingScope("regalloc_lds_relief");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::runRegAllocTransformLDSRelief(target, builder)))
+    if (failed(wave::runRegAllocTransformLDSRelief(target, builder, &cache)))
       return emitDefiniteFailure() << "failed to run regalloc LDS relief";
   }
   results.set(cast<OpResult>(getResult()), targets);
@@ -426,11 +466,14 @@ DiagnosedSilenceableFailure wave::TransformRegAllocScratchReliefOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results, transform::TransformState &state) {
   TimingScope timing = getRegAllocStageTimingScope("regalloc_scratch_relief");
+  wave::regalloc_detail::RegAllocTransformStateCache &cache =
+      getRegAllocTransformStateCache(state);
   SmallVector<Operation *> targets;
   Builder builder(getContext());
   for (Operation *target : state.getPayloadOps(getTarget())) {
     targets.push_back(target);
-    if (failed(wave::runRegAllocTransformScratchRelief(target, builder)))
+    if (failed(
+            wave::runRegAllocTransformScratchRelief(target, builder, &cache)))
       return emitDefiniteFailure() << "failed to run regalloc scratch relief";
   }
   results.set(cast<OpResult>(getResult()), targets);

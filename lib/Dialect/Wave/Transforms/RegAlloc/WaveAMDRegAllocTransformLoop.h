@@ -15,27 +15,37 @@
 
 namespace mlir::wave {
 
-LogicalResult
-buildRegAllocTransformAliasState(Operation *target, Builder &builder,
-                                 bool coalesceMFMAAccResult = true);
+namespace regalloc_detail {
+class RegAllocTransformStateCache;
+}
 
-LogicalResult runRegAllocTransformLinearScan(Operation *target,
-                                             Builder &builder);
+LogicalResult buildRegAllocTransformAliasState(
+    Operation *target, Builder &builder, bool coalesceMFMAAccResult = true,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
 
-LogicalResult runRegAllocTransformAGPRRelief(Operation *target,
-                                             Builder &builder);
+LogicalResult runRegAllocTransformLinearScan(
+    Operation *target, Builder &builder,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
 
-LogicalResult runRegAllocTransformRematRelief(Operation *target,
-                                              Builder &builder);
+LogicalResult runRegAllocTransformAGPRRelief(
+    Operation *target, Builder &builder,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
 
-LogicalResult runRegAllocTransformSGPRToVGPRRelief(Operation *target,
-                                                   Builder &builder);
+LogicalResult runRegAllocTransformRematRelief(
+    Operation *target, Builder &builder,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
 
-LogicalResult runRegAllocTransformLDSRelief(Operation *target,
-                                            Builder &builder);
+LogicalResult runRegAllocTransformSGPRToVGPRRelief(
+    Operation *target, Builder &builder,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
 
-LogicalResult runRegAllocTransformScratchRelief(Operation *target,
-                                                Builder &builder);
+LogicalResult runRegAllocTransformLDSRelief(
+    Operation *target, Builder &builder,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
+
+LogicalResult runRegAllocTransformScratchRelief(
+    Operation *target, Builder &builder,
+    regalloc_detail::RegAllocTransformStateCache *cache = nullptr);
 
 } // namespace mlir::wave
 

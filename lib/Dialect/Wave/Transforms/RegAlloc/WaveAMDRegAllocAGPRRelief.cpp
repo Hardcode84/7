@@ -19,6 +19,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/MathExtras.h"
 #include <array>
 #include <limits>
@@ -933,8 +934,9 @@ static unsigned countAGPRReliefDwords(const AGPRReliefCandidate &candidate) {
 }
 
 static FailureOr<std::optional<AGPRReliefSelection>>
-selectAGPRReliefCandidateFromFunc(
-    func::FuncOp func, const RegAllocTransformFailure &failureRecord) {
+selectAGPRReliefCandidateFromFunc(func::FuncOp func,
+                                  const RegAllocTransformFailure &failureRecord,
+                                  RegAllocTransformStateCache &cache) {
   FailureOr<llvm::AMDGPU::IsaVersion> isaVersion =
       waveamdmachine::getAMDGPUTargetIsaVersion(
           func, "regalloc transform AGPR relief");
@@ -943,31 +945,22 @@ selectAGPRReliefCandidateFromFunc(
   if (!waveamdmachine::supportsAGPRs(*isaVersion))
     return std::optional<AGPRReliefSelection>();
 
-  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
-      wave::getRegAllocTransformStateAttrName());
-  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
-      wave::parseRegAllocTransformValues(state, func.getOperation());
-  if (failed(values))
+  FailureOr<const RegAllocTransformDecodedState *> decoded = cache.get(func);
+  if (failed(decoded))
     return failure();
-  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
-      wave::parseRegAllocTransformAliasSets(state, *values,
-                                            func.getOperation());
-  if (failed(sets))
-    return failure();
-  FailureOr<AGPRReliefSetIndex> setIndex = buildAGPRReliefSetIndex(func, *sets);
+  const RegAllocTransformDecodedState &state = **decoded;
+  FailureOr<AGPRReliefSetIndex> setIndex =
+      buildAGPRReliefSetIndex(func, state.sets);
   if (failed(setIndex))
     return failure();
-  AGPRReliefFitState fitState = buildAGPRReliefFitState(func, *sets, *values);
-  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveRegAllocStateValues(func, *values);
-  if (failed(resolvedValues))
-    return failure();
+  AGPRReliefFitState fitState =
+      buildAGPRReliefFitState(func, state.sets, state.values);
   DenseMap<Value, unsigned> valueIndex =
-      buildAGPRReliefValueIndex(*resolvedValues);
+      buildAGPRReliefValueIndex(state.resolvedValues);
   FailureOr<std::optional<AGPRReliefCandidate>> candidate =
-      selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState, *sets,
-                                *values, *resolvedValues, valueIndex,
-                                *isaVersion);
+      selectAGPRReliefCandidate(func, failureRecord, *setIndex, fitState,
+                                state.sets, state.values, state.resolvedValues,
+                                valueIndex, *isaVersion);
   if (failed(candidate))
     return failure();
   if (!*candidate)
@@ -988,7 +981,8 @@ static FailureOr<bool> shouldSkipAGPRRelief(func::FuncOp func) {
   return (*familyBudget)->limit <= vgprLimit;
 }
 
-static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
+static LogicalResult runRegAllocAGPRRelief(func::FuncOp func,
+                                           RegAllocTransformStateCache &cache) {
   FailureOr<bool> skip = shouldSkipAGPRRelief(func);
   if (failed(skip))
     return failure();
@@ -1007,12 +1001,13 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
     return success();
 
   FailureOr<std::optional<AGPRReliefSelection>> selection =
-      selectAGPRReliefCandidateFromFunc(func, **failureRecord);
+      selectAGPRReliefCandidateFromFunc(func, **failureRecord, cache);
   if (failed(selection))
     return failure();
   if (!*selection)
     return success();
 
+  llvm::scope_exit clearCache([&] { cache.erase(func); });
   OpBuilder builder(func.getContext());
   const AGPRReliefCandidate &candidate = (*selection)->candidate;
   materializeAGPRRelief(builder, candidate, (*selection)->isa);
@@ -1027,13 +1022,17 @@ static LogicalResult runRegAllocAGPRRelief(func::FuncOp func) {
 
 } // namespace
 
-LogicalResult wave::runRegAllocTransformAGPRRelief(Operation *target,
-                                                   Builder &builder) {
+LogicalResult
+wave::runRegAllocTransformAGPRRelief(Operation *target, Builder &builder,
+                                     RegAllocTransformStateCache *cache) {
+  RegAllocTransformStateCache localCache;
+  if (!cache)
+    cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return runRegAllocAGPRRelief(func);
+    return runRegAllocAGPRRelief(func, *cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(runRegAllocAGPRRelief(func)) ? WalkResult::interrupt()
-                                               : WalkResult::advance();
+    return failed(runRegAllocAGPRRelief(func, *cache)) ? WalkResult::interrupt()
+                                                       : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

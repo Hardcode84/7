@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallSet.h"
 #include <optional>
 
@@ -543,7 +544,8 @@ materializeSGPRToVGPRRelief(OpBuilder &builder, func::FuncOp func,
 }
 
 static FailureOr<std::optional<SGPRToVGPRReliefPlan>>
-findSGPRToVGPRReliefPlan(func::FuncOp func) {
+findSGPRToVGPRReliefPlan(func::FuncOp func,
+                         RegAllocTransformStateCache &cache) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
   if (failed(failureRecord))
@@ -553,25 +555,14 @@ findSGPRToVGPRReliefPlan(func::FuncOp func) {
   if (!isSGPRToVGPRRelievableFailure(**failureRecord))
     return std::optional<SGPRToVGPRReliefPlan>();
 
-  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
-      wave::getRegAllocTransformStateAttrName());
-  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
-      wave::parseRegAllocTransformValues(state, func.getOperation());
-  if (failed(values))
+  FailureOr<const RegAllocTransformDecodedState *> decoded = cache.get(func);
+  if (failed(decoded))
     return failure();
-  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
-      wave::parseRegAllocTransformAliasSets(state, *values,
-                                            func.getOperation());
-  if (failed(sets))
-    return failure();
-  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveRegAllocStateValues(func, *values);
-  if (failed(resolvedValues))
-    return failure();
+  const RegAllocTransformDecodedState &state = **decoded;
 
   FailureOr<std::optional<SGPRToVGPRReliefPlan>> plan =
-      selectSGPRToVGPRReliefPlan(func, **failureRecord, *sets, *values,
-                                 *resolvedValues);
+      selectSGPRToVGPRReliefPlan(func, **failureRecord, state.sets,
+                                 state.values, state.resolvedValues);
   if (failed(plan))
     return failure();
   return plan;
@@ -594,27 +585,37 @@ static LogicalResult applySGPRToVGPRRelief(func::FuncOp func,
   return success();
 }
 
-static LogicalResult runRegAllocSGPRToVGPRRelief(func::FuncOp func) {
+static LogicalResult
+runRegAllocSGPRToVGPRRelief(func::FuncOp func,
+                            RegAllocTransformStateCache &cache) {
   FailureOr<std::optional<SGPRToVGPRReliefPlan>> plan =
-      findSGPRToVGPRReliefPlan(func);
+      findSGPRToVGPRReliefPlan(func, cache);
   if (failed(plan))
     return failure();
   if (!*plan)
     return success();
 
+  llvm::scope_exit clearCache([&] { cache.erase(func); });
   OpBuilder builder(func.getContext());
-  return applySGPRToVGPRRelief(func, builder, **plan);
+  if (failed(applySGPRToVGPRRelief(func, builder, **plan)))
+    return failure();
+  return success();
 }
 
 } // namespace
 
-LogicalResult wave::runRegAllocTransformSGPRToVGPRRelief(Operation *target,
-                                                         Builder &builder) {
+LogicalResult
+wave::runRegAllocTransformSGPRToVGPRRelief(Operation *target, Builder &builder,
+                                           RegAllocTransformStateCache *cache) {
+  RegAllocTransformStateCache localCache;
+  if (!cache)
+    cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return runRegAllocSGPRToVGPRRelief(func);
+    return runRegAllocSGPRToVGPRRelief(func, *cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(runRegAllocSGPRToVGPRRelief(func)) ? WalkResult::interrupt()
-                                                     : WalkResult::advance();
+    return failed(runRegAllocSGPRToVGPRRelief(func, *cache))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

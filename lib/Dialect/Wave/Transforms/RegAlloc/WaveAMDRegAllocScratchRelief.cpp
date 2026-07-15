@@ -19,6 +19,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/MathExtras.h"
 #include <array>
 #include <limits>
@@ -372,7 +373,9 @@ countScratchReliefDwords(const ScratchReliefCandidate &candidate) {
   return dwords;
 }
 
-static LogicalResult runRegAllocScratchRelief(func::FuncOp func) {
+static LogicalResult
+runRegAllocScratchRelief(func::FuncOp func,
+                         RegAllocTransformStateCache &cache) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
   if (failed(failureRecord))
@@ -385,12 +388,13 @@ static LogicalResult runRegAllocScratchRelief(func::FuncOp func) {
   ScratchReliefPlanningState planning = getScratchReliefPlanningState(func);
   FailureOr<std::optional<ScratchReliefCandidate>> candidate =
       selectMemoryReliefCandidateFromState<ScratchMemoryReliefTraits>(
-          func, **failureRecord, planning);
+          func, **failureRecord, planning, cache);
   if (failed(candidate))
     return failure();
   if (!*candidate)
     return success();
 
+  llvm::scope_exit clearCache([&] { cache.erase(func); });
   OpBuilder builder(func.getContext());
   if (failed(materializeScratchRelief(builder, func, **candidate)))
     return failure();
@@ -405,13 +409,18 @@ static LogicalResult runRegAllocScratchRelief(func::FuncOp func) {
 
 } // namespace
 
-LogicalResult wave::runRegAllocTransformScratchRelief(Operation *target,
-                                                      Builder &builder) {
+LogicalResult
+wave::runRegAllocTransformScratchRelief(Operation *target, Builder &builder,
+                                        RegAllocTransformStateCache *cache) {
+  RegAllocTransformStateCache localCache;
+  if (!cache)
+    cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return runRegAllocScratchRelief(func);
+    return runRegAllocScratchRelief(func, *cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(runRegAllocScratchRelief(func)) ? WalkResult::interrupt()
-                                                  : WalkResult::advance();
+    return failed(runRegAllocScratchRelief(func, *cache))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

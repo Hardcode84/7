@@ -29,6 +29,8 @@
 #include <optional>
 
 using namespace mlir;
+using wave::regalloc_detail::RegAllocTransformDecodedState;
+using wave::regalloc_detail::RegAllocTransformStateCache;
 
 namespace {
 
@@ -278,12 +280,16 @@ public:
       : func(func), builder(builder),
         coalesceMFMAAccResult(coalesceMFMAAccResult) {}
 
-  FailureOr<DictionaryAttr> build() {
+  FailureOr<DictionaryAttr>
+  build(wave::regalloc_detail::RegAllocTransformStateCache *cache) {
     collectRegion(func.getBody(), {0});
     collectUsesAndAliases();
     if (failed(assignAliasSets()))
       return failure();
-    return buildAttr();
+    DictionaryAttr state = buildAttr();
+    if (cache)
+      cache->install(func, state, buildDecodedState());
+    return state;
   }
 
 private:
@@ -308,6 +314,7 @@ private:
     record.number = number;
     valueIds[value] = record.id;
     values.push_back(record);
+    payloadValues.push_back(value);
   }
 
   void collectBlockArguments(Block &block, unsigned start,
@@ -800,10 +807,68 @@ private:
     return getDictionary(attrs);
   }
 
+  std::unique_ptr<wave::regalloc_detail::RegAllocTransformDecodedState>
+  buildDecodedState() {
+    using wave::regalloc_detail::RegAllocTransformDecodedState;
+    std::unique_ptr<RegAllocTransformDecodedState> decoded =
+        std::make_unique<RegAllocTransformDecodedState>();
+    decoded->values.reserve(values.size());
+    for (RegAllocAliasValue &record : values) {
+      wave::RegAllocTransformValue value;
+      value.path = std::move(record.path);
+      value.ranges = std::move(record.ranges);
+      value.regClass = record.type.getRegClass();
+      value.kind = record.blockArgument
+                       ? wave::RegAllocTransformValueKind::BlockArgument
+                       : wave::RegAllocTransformValueKind::OpResult;
+      if (record.type.getIndex() >= 0)
+        value.fixed = record.type.getIndex();
+      value.id = record.id;
+      value.set = record.aliasSet;
+      value.start = record.start;
+      value.end = record.end;
+      value.width = record.type.getWidth();
+      value.offset = static_cast<unsigned>(record.offset);
+      value.number = record.number;
+      decoded->values.push_back(std::move(value));
+    }
+
+    decoded->sets.reserve(aliasSets.size());
+    for (RegAllocAliasSet &record : aliasSets) {
+      wave::RegAllocTransformAliasSet set;
+      set.members = std::move(record.members);
+      set.regClass = decoded->values[set.members.front()].regClass;
+      set.id = record.id;
+      set.start = std::numeric_limits<unsigned>::max();
+      for (unsigned valueId : set.members) {
+        const wave::RegAllocTransformValue &value = decoded->values[valueId];
+        set.start = std::min(set.start, value.start);
+        set.end = std::max(set.end, value.end);
+        set.width = std::max(set.width, value.offset + value.width);
+      }
+      wave::collectRegAllocTransformAliasSetLiveRanges(set, decoded->values);
+      decoded->sets.push_back(std::move(set));
+    }
+    llvm::sort(decoded->sets, [](const wave::RegAllocTransformAliasSet &lhs,
+                                 const wave::RegAllocTransformAliasSet &rhs) {
+      return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
+    });
+
+    decoded->resolvedValues.reserve(decoded->values.size());
+    for (unsigned id : llvm::seq<unsigned>(0, decoded->values.size())) {
+      Value value = payloadValues[id];
+      const wave::RegAllocTransformValue *stateValue = &decoded->values[id];
+      decoded->resolvedValues.push_back({value, stateValue});
+      decoded->valueLookup[value] = stateValue;
+    }
+    return decoded;
+  }
+
   SmallVector<RegAllocAliasOp> ops;
   SmallVector<RegAllocAliasValue> values;
   SmallVector<RegAllocAliasEdge> edges;
   SmallVector<RegAllocAliasSet> aliasSets;
+  SmallVector<Value> payloadValues;
   DenseMap<Value, unsigned> externalLoopUseEnds;
   DenseMap<Operation *, unsigned> positions;
   DenseMap<Value, unsigned> valueIds;
@@ -1129,8 +1194,11 @@ static LogicalResult refreshFuncTypeFromBody(func::FuncOp func) {
 
 class RegAllocLinearScanner {
 public:
-  RegAllocLinearScanner(func::FuncOp func, Builder &builder)
-      : func(func), builder(builder) {}
+  RegAllocLinearScanner(func::FuncOp func, Builder &builder,
+                        const RegAllocTransformDecodedState &decoded)
+      : values(decoded.values), sets(decoded.sets),
+        resolvedValues(decoded.resolvedValues),
+        valueLookup(&decoded.valueLookup), func(func), builder(builder) {}
 
   LogicalResult run() {
     if (failed(parseState()))
@@ -1336,6 +1404,95 @@ private:
     }
   };
 
+  struct CombinedFootprintTracker {
+    struct ActiveRange {
+      unsigned footprint = 0;
+      unsigned end = 0;
+      unsigned sequence = 0;
+    };
+
+    struct FutureRange {
+      waveamdmachine::RegClass regClass;
+      unsigned footprint = 0;
+      unsigned start = 0;
+      unsigned end = 0;
+      unsigned sequence = 0;
+    };
+
+    static unsigned getFamilyIndex(waveamdmachine::RegClass regClass) {
+      assert(isVGPRFamilyClass(regClass) && "expected VGPR-family class");
+      return regClass == waveamdmachine::RegClass::AGPR ? 0 : 1;
+    }
+
+    static bool activeRangeLess(const ActiveRange &lhs,
+                                const ActiveRange &rhs) {
+      return std::tie(lhs.footprint, lhs.end, lhs.sequence) <
+             std::tie(rhs.footprint, rhs.end, rhs.sequence);
+    }
+
+    static bool futureRangeLess(const FutureRange &lhs,
+                                const FutureRange &rhs) {
+      return std::tie(lhs.start, lhs.sequence) >
+             std::tie(rhs.start, rhs.sequence);
+    }
+
+    void advance(unsigned position) {
+      assert((!currentPosition || position >= *currentPosition) &&
+             "combined footprint scan must be monotonic");
+      currentPosition = position;
+      while (!futureRanges.empty() && futureRanges.front().start <= position) {
+        std::pop_heap(futureRanges.begin(), futureRanges.end(),
+                      futureRangeLess);
+        FutureRange range = futureRanges.pop_back_val();
+        if (range.end >= position)
+          addActive(range);
+      }
+      for (SmallVector<ActiveRange> &ranges : activeRanges)
+        while (!ranges.empty() && ranges.front().end < position) {
+          std::pop_heap(ranges.begin(), ranges.end(), activeRangeLess);
+          ranges.pop_back();
+        }
+    }
+
+    void add(const wave::RegAllocTransformAliasSet &set, unsigned base) {
+      if (!isVGPRFamilyClass(set.regClass))
+        return;
+      assert(currentPosition && "combined footprint position is unset");
+      for (wave::RegAllocTransformLiveRange liveRange : set.ranges) {
+        if (liveRange.end < *currentPosition)
+          continue;
+        FutureRange range{set.regClass, base + set.width, liveRange.start,
+                          liveRange.end, nextSequence++};
+        if (liveRange.start <= *currentPosition) {
+          addActive(range);
+          continue;
+        }
+        futureRanges.push_back(range);
+        std::push_heap(futureRanges.begin(), futureRanges.end(),
+                       futureRangeLess);
+      }
+    }
+
+    unsigned get(waveamdmachine::RegClass regClass) const {
+      const SmallVector<ActiveRange> &ranges =
+          activeRanges[getFamilyIndex(regClass)];
+      return ranges.empty() ? 0 : ranges.front().footprint;
+    }
+
+  private:
+    void addActive(const FutureRange &range) {
+      SmallVector<ActiveRange> &ranges =
+          activeRanges[getFamilyIndex(range.regClass)];
+      ranges.push_back({range.footprint, range.end, range.sequence});
+      std::push_heap(ranges.begin(), ranges.end(), activeRangeLess);
+    }
+
+    std::array<SmallVector<ActiveRange>, 2> activeRanges;
+    SmallVector<FutureRange> futureRanges;
+    std::optional<unsigned> currentPosition;
+    unsigned nextSequence = 0;
+  };
+
   struct FixedReservations {
     SmallVector<wave::RegAllocTransformAssignment> reservations;
     std::array<SmallVector<unsigned>, kRegClassCount> byClass;
@@ -1375,18 +1532,6 @@ private:
     if (!state)
       return func.emitError("regalloc linear scan requires alias state");
 
-    FailureOr<SmallVector<wave::RegAllocTransformValue>> parsedValues =
-        wave::parseRegAllocTransformValues(state, func.getOperation());
-    if (failed(parsedValues))
-      return failure();
-    values = std::move(*parsedValues);
-
-    FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> parsedSets =
-        wave::parseRegAllocTransformAliasSets(state, values,
-                                              func.getOperation());
-    if (failed(parsedSets))
-      return failure();
-    sets = std::move(*parsedSets);
     if (failed(buildSetIndex()))
       return failure();
     if (failed(collectResolvedValues()))
@@ -1439,26 +1584,28 @@ private:
   }
 
   LogicalResult collectResolvedValues() {
-    FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-        wave::regalloc_detail::resolveRegAllocStateValues(func, values);
-    if (failed(resolvedValues))
-      return failure();
+    if (resolvedValues.size() != values.size())
+      return func.emitError("regalloc decoded value count is invalid");
     payloadValues.resize(values.size());
-    for (auto [payloadValue, stateValue] : *resolvedValues) {
+    for (auto [payloadValue, stateValue] : resolvedValues) {
+      if (stateValue->id >= payloadValues.size())
+        return func.emitError("regalloc decoded value id is invalid");
       payloadValues[stateValue->id] = payloadValue;
-      valueLookup[payloadValue] = stateValue;
     }
     return success();
   }
 
   LogicalResult computeFixedBases() {
-    for (wave::RegAllocTransformAliasSet &set : sets)
-      if (failed(computeFixedBase(set)))
+    fixedBases.resize(sets.size());
+    for (auto [index, set] : llvm::enumerate(sets))
+      if (failed(computeFixedBase(set, index)))
         return failure();
     return success();
   }
 
-  LogicalResult computeFixedBase(wave::RegAllocTransformAliasSet &set) {
+  LogicalResult computeFixedBase(const wave::RegAllocTransformAliasSet &set,
+                                 unsigned setIndex) {
+    std::optional<unsigned> &fixedBase = fixedBases[setIndex];
     for (unsigned valueId : set.members) {
       const wave::RegAllocTransformValue &value = values[valueId];
       if (!value.fixed)
@@ -1466,16 +1613,23 @@ private:
       if (*value.fixed < value.offset)
         return recordFixedFailure(set, "fixed-underflow");
       unsigned base = *value.fixed - value.offset;
-      if (set.fixedBase && *set.fixedBase != base)
+      if (fixedBase && *fixedBase != base)
         return recordFixedFailure(set, "fixed-conflict");
-      set.fixedBase = base;
+      fixedBase = base;
     }
     return success();
   }
 
+  std::optional<unsigned>
+  getFixedBase(const wave::RegAllocTransformAliasSet &set) const {
+    assert(&set >= sets.begin() && &set < sets.end() &&
+           "alias set must belong to decoded state");
+    return fixedBases[&set - sets.begin()];
+  }
+
   LogicalResult collectFixedHardwareReadSets() {
     for (const wave::RegAllocTransformAliasSet &set : sets) {
-      if (!set.fixedBase || set.members.size() != 1)
+      if (!getFixedBase(set) || set.members.size() != 1)
         continue;
       unsigned valueId = set.members.front();
       Value payloadValue = payloadValues[valueId];
@@ -1487,12 +1641,13 @@ private:
 
   void collectFixedReservations() {
     for (const wave::RegAllocTransformAliasSet &set : sets) {
-      if (!set.fixedBase)
+      std::optional<unsigned> fixedBase = getFixedBase(set);
+      if (!fixedBase)
         continue;
       wave::RegAllocTransformBudget budget = getBudget(set.regClass);
-      if (*set.fixedBase + set.width <= budget.limit)
-        fixedReservations.push_back({set.regClass, set.id, *set.fixedBase,
-                                     set.width, set.start, set.end});
+      if (*fixedBase + set.width <= budget.limit)
+        fixedReservations.push_back(
+            {set.regClass, set.id, *fixedBase, set.width, set.start, set.end});
     }
   }
 
@@ -1564,6 +1719,8 @@ private:
   LogicalResult scan() {
     for (const wave::RegAllocTransformAliasSet &set : sets) {
       expireInactive(set.start);
+      if (vgprFamilyBudget)
+        combinedFootprints.advance(set.start);
       if (failed(allocateSet(set)))
         return failure();
       if (scanFailure)
@@ -1579,7 +1736,7 @@ private:
   LogicalResult allocateSet(const wave::RegAllocTransformAliasSet &set) {
     startSetConflictQuery();
     wave::RegAllocTransformBudget budget = getBudget(set.regClass);
-    if (set.fixedBase)
+    if (getFixedBase(set))
       return allocateFixedSet(set, budget);
     std::optional<ReusableInputBase> reusableBase =
         findReusableInputBase(set, budget.limit);
@@ -1612,19 +1769,20 @@ private:
 
   LogicalResult allocateFixedSet(const wave::RegAllocTransformAliasSet &set,
                                  wave::RegAllocTransformBudget budget) {
-    bool conflict = conflictsWithActive(set, *set.fixedBase);
+    unsigned fixedBase = *getFixedBase(set);
+    bool conflict = conflictsWithActive(set, fixedBase);
     if (conflict) {
       std::optional<ReusableInputBase> reusableBase =
           findReusableInputBase(set, budget.limit);
-      conflict = !reusableBase || reusableBase->base != *set.fixedBase;
+      conflict = !reusableBase || reusableBase->base != fixedBase;
     }
-    if (*set.fixedBase + set.width > budget.limit || conflict) {
+    if (fixedBase + set.width > budget.limit || conflict) {
       recordPressureFailure(set, budget);
       return success();
     }
-    if (checkCombinedPressureFailure(set, *set.fixedBase))
+    if (checkCombinedPressureFailure(set, fixedBase))
       return success();
-    addAssignment(set, *set.fixedBase);
+    addAssignment(set, fixedBase);
     return success();
   }
 
@@ -1700,8 +1858,8 @@ private:
       if (!wave::regalloc_detail::canReuseKilledOperandForResult(reuse, operand,
                                                                  *targetIsa))
         continue;
-      auto it = valueLookup.find(operand.get());
-      if (it == valueLookup.end())
+      auto it = valueLookup->find(operand.get());
+      if (it == valueLookup->end())
         continue;
       std::optional<ReusableInputBase> base =
           getReusableOperandBase(set, *it->second, limit);
@@ -1969,7 +2127,8 @@ private:
   canShareFixedHardwareRead(const wave::RegAllocTransformAliasSet &set,
                             const wave::RegAllocTransformAssignment &assigned,
                             unsigned base) {
-    if (!set.fixedBase || *set.fixedBase != base || assigned.base != base ||
+    std::optional<unsigned> fixedBase = getFixedBase(set);
+    if (!fixedBase || *fixedBase != base || assigned.base != base ||
         assigned.width != set.width)
       return false;
     auto lhs = fixedHardwareReadValues.find(set.id);
@@ -2043,9 +2202,10 @@ private:
                                     unsigned base) {
     if (!vgprFamilyBudget || !isVGPRFamilyClass(set.regClass))
       return false;
-    refreshCombinedFootprint(set.start);
-    unsigned agprFootprint = combinedAGPRFootprint;
-    unsigned vgprFootprint = combinedVGPRFootprint;
+    unsigned agprFootprint =
+        combinedFootprints.get(waveamdmachine::RegClass::AGPR);
+    unsigned vgprFootprint =
+        combinedFootprints.get(waveamdmachine::RegClass::VGPR);
     addFamilyFootprint(set.regClass, base, set.width, agprFootprint,
                        vgprFootprint);
     unsigned pressure =
@@ -2059,25 +2219,6 @@ private:
                       });
     recordCombinedPressureFailure(set, pressure, overlaps);
     return true;
-  }
-
-  void refreshCombinedFootprint(unsigned position) {
-    if (combinedFootprintPosition == position)
-      return;
-    combinedFootprintPosition = position;
-    combinedAGPRFootprint = 0;
-    combinedVGPRFootprint = 0;
-    auto addActiveFootprint =
-        [&](const wave::RegAllocTransformAssignment &assigned) {
-          if (!setLiveAtPosition(assigned.set, position))
-            return;
-          addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
-                             combinedAGPRFootprint, combinedVGPRFootprint);
-        };
-    active.forRegClass(waveamdmachine::RegClass::AGPR, assignments,
-                       addActiveFootprint);
-    active.forRegClass(waveamdmachine::RegClass::VGPR, assignments,
-                       addActiveFootprint);
   }
 
   void checkCombinedFootprintFailure() {
@@ -2115,9 +2256,8 @@ private:
     assignments.push_back(assigned);
     assignmentIndexBySet[set.id] = assignmentIndex;
     active.add(assignmentIndex, assignments);
-    if (combinedFootprintPosition == set.start)
-      addFamilyFootprint(set.regClass, base, set.width, combinedAGPRFootprint,
-                         combinedVGPRFootprint);
+    if (vgprFamilyBudget)
+      combinedFootprints.add(set, base);
   }
 
   unsigned getPressureAtFailure(
@@ -2346,30 +2486,30 @@ private:
     func->setAttr(wave::getRegAllocTransformStateAttrName(), newState);
   }
 
-  SmallVector<wave::RegAllocTransformValue> values;
-  SmallVector<wave::RegAllocTransformAliasSet> sets;
+  ArrayRef<wave::RegAllocTransformValue> values;
+  ArrayRef<wave::RegAllocTransformAliasSet> sets;
+  ArrayRef<wave::regalloc_detail::ResolvedRegAllocValue> resolvedValues;
+  const DenseMap<Value, const wave::RegAllocTransformValue *> *valueLookup;
   SmallVector<Value> payloadValues;
   SmallVector<unsigned> setIndexById;
   SmallVector<unsigned> memberConflictGenerations;
+  SmallVector<std::optional<unsigned>> fixedBases;
   FixedReservations fixedReservations;
   ActiveAssignments active;
+  CombinedFootprintTracker combinedFootprints;
   BitVector memberConflicts;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
-  DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
   DenseMap<unsigned, unsigned> sparseSetIndexById;
   DenseMap<unsigned, unsigned> assignmentIndexBySet;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
   std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
-  std::optional<unsigned> combinedFootprintPosition;
   std::array<std::optional<wave::RegAllocTransformBudget>, kRegClassCount>
       budgetCache;
   std::optional<RegAllocScanFailure> scanFailure;
   DictionaryAttr state;
   func::FuncOp func;
   Builder &builder;
-  unsigned combinedAGPRFootprint = 0;
-  unsigned combinedVGPRFootprint = 0;
   unsigned memberConflictGeneration = 0;
   bool killedOperandReuseIsaFailed = false;
 };
@@ -2385,9 +2525,12 @@ static void setMFMAAccumulatorCoalescingFlag(func::FuncOp func,
                 builder.getBoolAttr(false));
 }
 
-static LogicalResult setRegAllocTransformState(func::FuncOp func,
-                                               Builder &builder,
-                                               bool coalesceMFMAAccResult) {
+static LogicalResult
+setRegAllocTransformState(func::FuncOp func, Builder &builder,
+                          bool coalesceMFMAAccResult,
+                          RegAllocTransformStateCache *cache) {
+  if (cache)
+    cache->erase(func);
   if (func.isDeclaration()) {
     func->removeAttr(wave::getRegAllocTransformStateAttrName());
     return success();
@@ -2401,44 +2544,57 @@ static LogicalResult setRegAllocTransformState(func::FuncOp func,
     wave::markRegAllocPreparationValid(func);
   }
   RegAllocAliasStateBuilder stateBuilder(func, builder, coalesceMFMAAccResult);
-  FailureOr<DictionaryAttr> state = stateBuilder.build();
+  FailureOr<DictionaryAttr> state = stateBuilder.build(cache);
   if (failed(state))
     return failure();
   func->setAttr(wave::getRegAllocTransformStateAttrName(), *state);
   return success();
 }
 
-static LogicalResult runRegAllocLinearScan(func::FuncOp func,
-                                           Builder &builder) {
+static LogicalResult runRegAllocLinearScan(func::FuncOp func, Builder &builder,
+                                           RegAllocTransformStateCache &cache) {
   if (func.isDeclaration())
     return success();
-  RegAllocLinearScanner scanner(func, builder);
-  return scanner.run();
+  FailureOr<const RegAllocTransformDecodedState *> decoded = cache.get(func);
+  if (failed(decoded))
+    return failure();
+  RegAllocLinearScanner scanner(func, builder, **decoded);
+  LogicalResult result = scanner.run();
+  if (succeeded(result) &&
+      func->hasAttr(wave::getRegAllocTransformAssignmentsAttrName()))
+    cache.erase(func);
+  return result;
 }
 
 } // namespace
 
 LogicalResult
 wave::buildRegAllocTransformAliasState(Operation *target, Builder &builder,
-                                       bool coalesceMFMAAccResult) {
+                                       bool coalesceMFMAAccResult,
+                                       RegAllocTransformStateCache *cache) {
   clearRegAllocTransformState(target);
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return setRegAllocTransformState(func, builder, coalesceMFMAAccResult);
+    return setRegAllocTransformState(func, builder, coalesceMFMAAccResult,
+                                     cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(
-               setRegAllocTransformState(func, builder, coalesceMFMAAccResult))
+    return failed(setRegAllocTransformState(func, builder,
+                                            coalesceMFMAAccResult, cache))
                ? WalkResult::interrupt()
                : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }
 
-LogicalResult wave::runRegAllocTransformLinearScan(Operation *target,
-                                                   Builder &builder) {
+LogicalResult
+wave::runRegAllocTransformLinearScan(Operation *target, Builder &builder,
+                                     RegAllocTransformStateCache *cache) {
+  RegAllocTransformStateCache localCache;
+  if (!cache)
+    cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return runRegAllocLinearScan(func, builder);
+    return runRegAllocLinearScan(func, builder, *cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(runRegAllocLinearScan(func, builder))
+    return failed(runRegAllocLinearScan(func, builder, *cache))
                ? WalkResult::interrupt()
                : WalkResult::advance();
   });

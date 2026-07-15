@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/MathExtras.h"
 #include <array>
 #include <limits>
@@ -950,7 +951,8 @@ static bool hasNonXWorkgroupDimension(func::FuncOp func) {
   return false;
 }
 
-static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
+static LogicalResult runRegAllocLDSRelief(func::FuncOp func,
+                                          RegAllocTransformStateCache &cache) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
   if (failed(failureRecord))
@@ -970,12 +972,13 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
   LDSReliefPlanningState planning = getLDSReliefPlanningState(func, *budgets);
   FailureOr<std::optional<LDSReliefCandidate>> candidate =
       selectMemoryReliefCandidateFromState<LDSMemoryReliefTraits>(
-          func, **failureRecord, planning);
+          func, **failureRecord, planning, cache);
   if (failed(candidate))
     return failure();
   if (!*candidate)
     return success();
 
+  llvm::scope_exit clearCache([&] { cache.erase(func); });
   OpBuilder builder(func.getContext());
   if (failed(materializeLDSRelief(builder, func, **candidate)))
     return failure();
@@ -990,13 +993,17 @@ static LogicalResult runRegAllocLDSRelief(func::FuncOp func) {
 
 } // namespace
 
-LogicalResult wave::runRegAllocTransformLDSRelief(Operation *target,
-                                                  Builder &builder) {
+LogicalResult
+wave::runRegAllocTransformLDSRelief(Operation *target, Builder &builder,
+                                    RegAllocTransformStateCache *cache) {
+  RegAllocTransformStateCache localCache;
+  if (!cache)
+    cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return runRegAllocLDSRelief(func);
+    return runRegAllocLDSRelief(func, *cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(runRegAllocLDSRelief(func)) ? WalkResult::interrupt()
-                                              : WalkResult::advance();
+    return failed(runRegAllocLDSRelief(func, *cache)) ? WalkResult::interrupt()
+                                                      : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

@@ -21,12 +21,34 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include <array>
+#include <memory>
 #include <optional>
 
 namespace mlir::wave::regalloc_detail {
 
 using ResolvedRegAllocValue =
     std::pair<Value, const wave::RegAllocTransformValue *>;
+
+struct RegAllocTransformDecodedState {
+  SmallVector<wave::RegAllocTransformValue> values;
+  SmallVector<wave::RegAllocTransformAliasSet> sets;
+  SmallVector<ResolvedRegAllocValue> resolvedValues;
+  DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
+  Attribute valuesIdentity;
+  Attribute aliasSetsIdentity;
+};
+
+class RegAllocTransformStateCache {
+public:
+  FailureOr<const RegAllocTransformDecodedState *> get(func::FuncOp func);
+  void install(func::FuncOp func, DictionaryAttr state,
+               std::unique_ptr<RegAllocTransformDecodedState> decoded);
+  void erase(func::FuncOp func);
+  void clear();
+
+private:
+  DenseMap<Operation *, std::unique_ptr<RegAllocTransformDecodedState>> states;
+};
 
 struct RegAllocTransformFailure {
   SmallVector<wave::RegAllocTransformAssignment> overlaps;

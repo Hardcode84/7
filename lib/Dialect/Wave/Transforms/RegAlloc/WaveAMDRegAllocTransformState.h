@@ -98,6 +98,9 @@ parseRegAllocTransformAliasSets(DictionaryAttr state,
                                 ArrayRef<RegAllocTransformValue> values,
                                 Operation *diagOp);
 
+void collectRegAllocTransformAliasSetLiveRanges(
+    RegAllocTransformAliasSet &set, ArrayRef<RegAllocTransformValue> values);
+
 DictionaryAttr buildRegAllocTransformAliasMemberAttr(
     Builder &builder, const RegAllocTransformAliasMember &member);
 

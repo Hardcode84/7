@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/MathExtras.h"
 #include <algorithm>
 #include <array>
@@ -1163,7 +1164,8 @@ materializeSelectedRematRelief(OpBuilder &builder, func::FuncOp func,
       func, builder, "remat", countRematReliefDwords(plan));
 }
 
-static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
+static LogicalResult
+runRegAllocRematRelief(func::FuncOp func, RegAllocTransformStateCache &cache) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
   if (failed(failureRecord))
@@ -1173,30 +1175,22 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
   if (!isRematRelievableFailure(**failureRecord))
     return success();
 
-  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
-      wave::getRegAllocTransformStateAttrName());
-  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
-      wave::parseRegAllocTransformValues(state, func.getOperation());
-  if (failed(values))
+  FailureOr<const RegAllocTransformDecodedState *> decoded = cache.get(func);
+  if (failed(decoded))
     return failure();
-  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
-      wave::parseRegAllocTransformAliasSets(state, *values,
-                                            func.getOperation());
-  if (failed(sets))
-    return failure();
-  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveRegAllocStateValues(func, *values);
-  if (failed(resolvedValues))
-    return failure();
+  const RegAllocTransformDecodedState &state = **decoded;
 
-  RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
-  FailureOr<std::optional<RematReliefPlan>> plan = selectRematReliefPlan(
-      func, **failureRecord, *sets, *values, *resolvedValues, context);
+  RematReliefContext context =
+      buildRematReliefContext(func, state.resolvedValues);
+  FailureOr<std::optional<RematReliefPlan>> plan =
+      selectRematReliefPlan(func, **failureRecord, state.sets, state.values,
+                            state.resolvedValues, context);
   if (failed(plan))
     return failure();
   if (!*plan)
     return success();
 
+  llvm::scope_exit clearCache([&] { cache.erase(func); });
   OpBuilder builder(func.getContext());
   if (failed(materializeSelectedRematRelief(builder, func, **plan,
                                             **failureRecord, context)))
@@ -1209,13 +1203,18 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
 
 } // namespace
 
-LogicalResult wave::runRegAllocTransformRematRelief(Operation *target,
-                                                    Builder &builder) {
+LogicalResult
+wave::runRegAllocTransformRematRelief(Operation *target, Builder &builder,
+                                      RegAllocTransformStateCache *cache) {
+  RegAllocTransformStateCache localCache;
+  if (!cache)
+    cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
-    return runRegAllocRematRelief(func);
+    return runRegAllocRematRelief(func, *cache);
   WalkResult walk = target->walk([&](func::FuncOp func) {
-    return failed(runRegAllocRematRelief(func)) ? WalkResult::interrupt()
-                                                : WalkResult::advance();
+    return failed(runRegAllocRematRelief(func, *cache))
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
   });
   return failure(walk.wasInterrupted());
 }

@@ -662,31 +662,23 @@ template <typename Traits>
 static FailureOr<std::optional<typename Traits::Candidate>>
 selectMemoryReliefCandidateFromState(
     func::FuncOp func, const RegAllocTransformFailure &failureRecord,
-    const typename Traits::PlanningState &planning) {
-  DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
-      wave::getRegAllocTransformStateAttrName());
-  FailureOr<SmallVector<wave::RegAllocTransformValue>> values =
-      wave::parseRegAllocTransformValues(state, func.getOperation());
-  if (failed(values))
+    const typename Traits::PlanningState &planning,
+    RegAllocTransformStateCache &cache) {
+  FailureOr<const RegAllocTransformDecodedState *> decoded = cache.get(func);
+  if (failed(decoded))
     return failure();
-  FailureOr<SmallVector<wave::RegAllocTransformAliasSet>> sets =
-      wave::parseRegAllocTransformAliasSets(state, *values,
-                                            func.getOperation());
-  if (failed(sets))
-    return failure();
+  const RegAllocTransformDecodedState &state = **decoded;
   FailureOr<MemoryReliefSetIndex> setIndex =
-      buildMemoryReliefSetIndex(func, *sets);
+      buildMemoryReliefSetIndex(func, state.sets);
   if (failed(setIndex))
     return failure();
-  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveRegAllocStateValues(func, *values);
-  if (failed(resolvedValues))
-    return failure();
-  MemoryReliefValueIndex valueIndex{*resolvedValues};
+  MemoryReliefValueIndex valueIndex{state.resolvedValues};
 
-  RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
-  return selectMemoryReliefCandidate<Traits>(
-      func, failureRecord, *setIndex, valueIndex, *values, context, planning);
+  RematReliefContext context =
+      buildRematReliefContext(func, state.resolvedValues);
+  return selectMemoryReliefCandidate<Traits>(func, failureRecord, *setIndex,
+                                             valueIndex, state.values, context,
+                                             planning);
 }
 
 static Operation *getMemoryReliefLoadInsertionPoint(Operation *user) {

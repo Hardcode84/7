@@ -396,8 +396,8 @@ static LogicalResult parseAliasMembers(DictionaryAttr dict,
   return success();
 }
 
-static void collectAliasSetLiveRanges(RegAllocTransformAliasSet &set,
-                                      ArrayRef<RegAllocTransformValue> values) {
+void collectRegAllocTransformAliasSetLiveRanges(
+    RegAllocTransformAliasSet &set, ArrayRef<RegAllocTransformValue> values) {
   for (unsigned valueId : set.members)
     for (RegAllocTransformLiveRange range : values[valueId].ranges)
       set.ranges.push_back(range);
@@ -450,7 +450,7 @@ parsePackedRegAllocTransformAliasSets(RegAllocStateAttr packed,
       set.start = std::min(set.start, value.start);
       set.end = std::max(set.end, value.end);
     }
-    collectAliasSetLiveRanges(set, values);
+    collectRegAllocTransformAliasSetLiveRanges(set, values);
     sets.push_back(std::move(set));
   }
   llvm::sort(sets, [](const RegAllocTransformAliasSet &lhs,
@@ -476,7 +476,7 @@ parseAliasSet(DictionaryAttr dict, ArrayRef<RegAllocTransformValue> values,
   set.width = *width;
   if (failed(parseAliasMembers(dict, values, diagOp, set)))
     return failure();
-  collectAliasSetLiveRanges(set, values);
+  collectRegAllocTransformAliasSetLiveRanges(set, values);
   return set;
 }
 
