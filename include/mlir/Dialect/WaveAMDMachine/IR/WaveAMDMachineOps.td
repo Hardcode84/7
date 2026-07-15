@@ -89,6 +89,7 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   string killedOperandReusePredicate =
       WaveAMDMachine_DefaultKilledOperandReuse;
   string requiredKilledOperandReusePredicate = "false";
+  bit hasRequiredKilledOperandReuse = 0;
 
   let extraClassDeclaration = [{
     static bool isSupportedOnIsa(const ::llvm::AMDGPU::IsaVersion &isa) {
@@ -138,6 +139,10 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
       (void)isa;
       (void)operand;
       return }] # killedOperandReusePredicate # [{;
+    }
+
+    bool hasRequiredKilledOperandReuse() {
+      return }] # !if(hasRequiredKilledOperandReuse, "true", "false") # [{;
     }
 
     bool requiresKilledOperandReuseForResult(
@@ -191,6 +196,7 @@ class WaveAMDMachine_KilledOperandReuse<string predicate> {
 class WaveAMDMachine_RequiredKilledOperandReuse<string predicate> {
   string killedOperandReusePredicate = predicate;
   string requiredKilledOperandReusePredicate = predicate;
+  bit hasRequiredKilledOperandReuse = 1;
 }
 
 class WaveAMDMachine_VOP2AnyVGPRLegality
@@ -1002,7 +1008,9 @@ def WaveAMDMachine_VPermB32Op
 }
 def WaveAMDMachine_VPermlane32SwapB32TupleOp
     : WaveAMDMachine_Op<"v_permlane32_swap_b32_tuple",
-                        [WaveAMDMachine_VALU, WaveAMDMachine_ReadsExec, Pure]> {
+                        [WaveAMDMachine_VALU, WaveAMDMachine_ReadsExec, Pure]>,
+      WaveAMDMachine_RequiredKilledOperandReuse<
+          "&operand == &this->getSourceMutable()"> {
   let summary = "exchange corresponding dwords between wave64 halves";
   let description = [{
     Source tuple contains two equal-width payloads. Each corresponding dword
@@ -1012,9 +1020,6 @@ def WaveAMDMachine_VPermlane32SwapB32TupleOp
   let arguments = (ins WaveAMDMachine_VGPR:$source);
   let results = (outs WaveAMDMachine_VGPR:$result);
   let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
-  let killedOperandReusePredicate = "&operand == &this->getSourceMutable()";
-  let requiredKilledOperandReusePredicate =
-      "&operand == &this->getSourceMutable()";
   let hasVerifier = 1;
 }
 def WaveAMDMachine_VBitOp3B32Op
@@ -2129,12 +2134,11 @@ def WaveAMDMachine_BufferLoadU8D16Op
 
 def WaveAMDMachine_BufferLoadU8D16HiOp
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_u8_d16_hi", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
-      WaveAMDMachine_VMEMLoadInfo {
+      WaveAMDMachine_VMEMLoadInfo,
+      WaveAMDMachine_RequiredKilledOperandReuse<
+          "&operand == &this->getPreservedMutable()"> {
   let summary = "buffer unsigned 8-bit D16 high-half load";
   let archPredicate = "isa.Major == 9 || isa.Major == 11";
-  let killedOperandReusePredicate = "&operand == &this->getPreservedMutable()";
-  let requiredKilledOperandReusePredicate =
-      "&operand == &this->getPreservedMutable()";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$preserved,
                        WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,

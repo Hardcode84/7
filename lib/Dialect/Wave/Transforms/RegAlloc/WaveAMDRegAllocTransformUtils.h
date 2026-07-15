@@ -87,8 +87,9 @@ FailureOr<SmallVector<ResolvedRegAllocValue>>
 resolveRegAllocStateValues(func::FuncOp func,
                            ArrayRef<wave::RegAllocTransformValue> values);
 FailureOr<SmallVector<ResolvedRegAllocValue>>
-resolveSetValues(func::FuncOp func, const wave::RegAllocTransformAliasSet &set,
-                 ArrayRef<wave::RegAllocTransformValue> values);
+getResolvedRegAllocSetValues(func::FuncOp func,
+                             const wave::RegAllocTransformAliasSet &set,
+                             ArrayRef<ResolvedRegAllocValue> resolvedValues);
 
 FailureOr<std::optional<RegAllocTransformFailure>>
 parseRegAllocTransformFailure(func::FuncOp func);

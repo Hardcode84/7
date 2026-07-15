@@ -15,6 +15,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -73,9 +74,9 @@ struct AGPRReliefFitState {
 
 struct ActiveAGPRReliefAssignments {
   SmallVector<wave::RegAllocTransformAssignment> assignments;
-  SmallVector<unsigned, 256> laneUseCounts;
+  BitVector occupied;
 
-  ActiveAGPRReliefAssignments(unsigned limit) : laneUseCounts(limit, 0) {}
+  ActiveAGPRReliefAssignments(unsigned limit) : occupied(limit) {}
 
   void expire(unsigned position) {
     llvm::erase_if(assignments,
@@ -88,12 +89,9 @@ struct ActiveAGPRReliefAssignments {
   }
 
   bool rangeIsFree(unsigned base, unsigned width) const {
-    if (base > laneUseCounts.size() || width > laneUseCounts.size() - base)
+    if (base > occupied.size() || width > occupied.size() - base)
       return false;
-    for (unsigned lane : llvm::seq(base, base + width))
-      if (laneUseCounts[lane] != 0)
-        return false;
-    return true;
+    return occupied.find_first_in(base, base + width) < 0;
   }
 
   std::optional<unsigned> findFreeBase(const AGPRReliefInterval &interval,
@@ -115,21 +113,20 @@ struct ActiveAGPRReliefAssignments {
 
 private:
   void addLaneUse(unsigned base, unsigned width) {
-    assert(base <= laneUseCounts.size() && "AGPR assignment base out of range");
-    assert(width <= laneUseCounts.size() - base &&
+    assert(base <= occupied.size() && "AGPR assignment base out of range");
+    assert(width <= occupied.size() - base &&
            "AGPR assignment width out of range");
-    for (unsigned lane : llvm::seq(base, base + width))
-      ++laneUseCounts[lane];
+    assert(rangeIsFree(base, width) && "AGPR assignment overlap");
+    occupied.set(base, base + width);
   }
 
   void dropLaneUse(unsigned base, unsigned width) {
-    assert(base <= laneUseCounts.size() && "AGPR assignment base out of range");
-    assert(width <= laneUseCounts.size() - base &&
+    assert(base <= occupied.size() && "AGPR assignment base out of range");
+    assert(width <= occupied.size() - base &&
            "AGPR assignment width out of range");
-    for (unsigned lane : llvm::seq(base, base + width)) {
-      assert(laneUseCounts[lane] != 0 && "AGPR lane use underflow");
-      --laneUseCounts[lane];
-    }
+    assert(occupied.find_first_unset_in(base, base + width) < 0 &&
+           "AGPR lane use underflow");
+    occupied.reset(base, base + width);
   }
 };
 
@@ -587,21 +584,6 @@ static bool isBetterAGPRReliefScore(AGPRReliefScore lhs, AGPRReliefScore rhs) {
   return lhs.end > rhs.end;
 }
 
-static FailureOr<SmallVector<ResolvedRegAllocValue>>
-getResolvedAGPRReliefSetValues(func::FuncOp func,
-                               const wave::RegAllocTransformAliasSet &set,
-                               ArrayRef<ResolvedRegAllocValue> resolvedValues) {
-  SmallVector<ResolvedRegAllocValue> setValues;
-  setValues.reserve(set.members.size());
-  for (unsigned valueId : set.members) {
-    if (valueId >= resolvedValues.size() ||
-        resolvedValues[valueId].second->id != valueId)
-      return func.emitError("regalloc state member value id is invalid");
-    setValues.push_back(resolvedValues[valueId]);
-  }
-  return setValues;
-}
-
 static FailureOr<AGPRReliefSetIndex>
 buildAGPRReliefSetIndex(func::FuncOp func,
                         ArrayRef<wave::RegAllocTransformAliasSet> sets) {
@@ -732,7 +714,7 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   SmallVector<ResolvedRegAllocValue> groupValues;
   for (const wave::RegAllocTransformAliasSet *groupSet : group.sets) {
     FailureOr<SmallVector<ResolvedRegAllocValue>> setValues =
-        getResolvedAGPRReliefSetValues(func, *groupSet, resolvedValues);
+        getResolvedRegAllocSetValues(func, *groupSet, resolvedValues);
     if (failed(setValues))
       return failure();
     bool eligible =

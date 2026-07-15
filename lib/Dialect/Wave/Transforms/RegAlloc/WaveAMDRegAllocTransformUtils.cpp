@@ -146,7 +146,8 @@ bool requiresKilledOperandReuseForResult(Operation *op, OpOperand &operand,
 bool requiresKilledOperandReuseForResult(
     waveamdmachine::KilledOperandReuseOpInterface reuse, OpOperand &operand,
     const llvm::AMDGPU::IsaVersion &isa) {
-  if (!canReuseKilledOperandForResult(reuse, operand, isa))
+  if (!reuse || !reuse.hasRequiredKilledOperandReuse() ||
+      !canReuseKilledOperandForResult(reuse, operand, isa))
     return false;
   return reuse.requiresKilledOperandReuseForResult(isa, operand);
 }
@@ -383,19 +384,18 @@ resolveRegAllocStateValues(func::FuncOp func,
   return resolvedValues;
 }
 
-FailureOr<SmallVector<ResolvedRegAllocValue>>
-resolveSetValues(func::FuncOp func, const wave::RegAllocTransformAliasSet &set,
-                 ArrayRef<wave::RegAllocTransformValue> values) {
-  SmallVector<ResolvedRegAllocValue> resolvedValues;
-  resolvedValues.reserve(set.members.size());
+FailureOr<SmallVector<ResolvedRegAllocValue>> getResolvedRegAllocSetValues(
+    func::FuncOp func, const wave::RegAllocTransformAliasSet &set,
+    ArrayRef<ResolvedRegAllocValue> allResolvedValues) {
+  SmallVector<ResolvedRegAllocValue> setValues;
+  setValues.reserve(set.members.size());
   for (unsigned valueId : set.members) {
-    const wave::RegAllocTransformValue &value = values[valueId];
-    FailureOr<Value> payloadValue = resolveRegAllocStateValue(func, value);
-    if (failed(payloadValue))
-      return failure();
-    resolvedValues.push_back({*payloadValue, &value});
+    if (valueId >= allResolvedValues.size() ||
+        allResolvedValues[valueId].second->id != valueId)
+      return func.emitError("regalloc state member value id is invalid");
+    setValues.push_back(allResolvedValues[valueId]);
   }
-  return resolvedValues;
+  return setValues;
 }
 
 static FailureOr<wave::RegAllocTransformAssignment>

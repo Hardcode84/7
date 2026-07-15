@@ -93,6 +93,12 @@ def WaveAMDMachine_KilledOperandReuseOpInterface
   }];
   let methods = [
     InterfaceMethod<
+      [{Whether any operand requires destructive result reuse.}],
+      "bool",
+      "hasRequiredKilledOperandReuse",
+      (ins)
+    >,
+    InterfaceMethod<
       [{Whether this op may write its result into the killed operand.}],
       "bool",
       "canReuseKilledOperandForResult",

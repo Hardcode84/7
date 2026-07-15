@@ -396,32 +396,25 @@ static LogicalResult parseAliasMembers(DictionaryAttr dict,
   return success();
 }
 
-static void
-insertAliasSetLiveRange(SmallVectorImpl<RegAllocTransformLiveRange> &ranges,
-                        RegAllocTransformLiveRange range) {
-  auto it =
-      llvm::lower_bound(ranges, range.start,
-                        [](RegAllocTransformLiveRange existing,
-                           unsigned start) { return existing.end < start; });
-  if (it == ranges.end() || range.end < it->start) {
-    ranges.insert(it, range);
-    return;
-  }
-  it->start = std::min(it->start, range.start);
-  it->end = std::max(it->end, range.end);
-  auto next = it;
-  ++next;
-  while (next != ranges.end() && next->start <= it->end) {
-    it->end = std::max(it->end, next->end);
-    next = ranges.erase(next);
-  }
-}
-
 static void collectAliasSetLiveRanges(RegAllocTransformAliasSet &set,
                                       ArrayRef<RegAllocTransformValue> values) {
   for (unsigned valueId : set.members)
     for (RegAllocTransformLiveRange range : values[valueId].ranges)
-      insertAliasSetLiveRange(set.ranges, range);
+      set.ranges.push_back(range);
+  llvm::sort(set.ranges, [](RegAllocTransformLiveRange lhs,
+                            RegAllocTransformLiveRange rhs) {
+    return std::tie(lhs.start, lhs.end) < std::tie(rhs.start, rhs.end);
+  });
+  SmallVector<RegAllocTransformLiveRange, 4> merged;
+  merged.reserve(set.ranges.size());
+  for (RegAllocTransformLiveRange range : set.ranges) {
+    if (!merged.empty() && range.start <= merged.back().end) {
+      merged.back().end = std::max(merged.back().end, range.end);
+      continue;
+    }
+    merged.push_back(range);
+  }
+  set.ranges = std::move(merged);
 }
 
 static FailureOr<SmallVector<RegAllocTransformAliasSet>>
@@ -460,8 +453,8 @@ parsePackedRegAllocTransformAliasSets(RegAllocStateAttr packed,
     collectAliasSetLiveRanges(set, values);
     sets.push_back(std::move(set));
   }
-  llvm::stable_sort(sets, [](const RegAllocTransformAliasSet &lhs,
-                             const RegAllocTransformAliasSet &rhs) {
+  llvm::sort(sets, [](const RegAllocTransformAliasSet &lhs,
+                      const RegAllocTransformAliasSet &rhs) {
     return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
   });
   return sets;
@@ -509,8 +502,8 @@ parseRegAllocTransformAliasSets(DictionaryAttr state,
       return failure();
     sets.push_back(std::move(*set));
   }
-  llvm::stable_sort(sets, [](const RegAllocTransformAliasSet &lhs,
-                             const RegAllocTransformAliasSet &rhs) {
+  llvm::sort(sets, [](const RegAllocTransformAliasSet &lhs,
+                      const RegAllocTransformAliasSet &rhs) {
     return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
   });
   return sets;

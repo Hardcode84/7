@@ -462,11 +462,11 @@ private:
 
   void collectRequiredKilledOperandAliases(Operation *op) {
     Value result = getSingleTrackedResult(op);
-    if (!result)
+    if (!result || op->getNumRegions() != 0)
       return;
     waveamdmachine::KilledOperandReuseOpInterface reuse =
-        wave::regalloc_detail::getKilledOperandReuseCandidate(op);
-    if (!reuse)
+        dyn_cast<waveamdmachine::KilledOperandReuseOpInterface>(op);
+    if (!reuse || !reuse.hasRequiredKilledOperandReuse())
       return;
     const llvm::AMDGPU::IsaVersion *targetIsa = getKilledOperandReuseIsa();
     if (!targetIsa)
@@ -1577,6 +1577,7 @@ private:
   }
 
   LogicalResult allocateSet(const wave::RegAllocTransformAliasSet &set) {
+    startSetConflictQuery();
     wave::RegAllocTransformBudget budget = getBudget(set.regClass);
     if (set.fixedBase)
       return allocateFixedSet(set, budget);
@@ -1905,12 +1906,34 @@ private:
       int64_t memberEnd = memberBegin + static_cast<int64_t>(member.width);
       if (setEnd <= memberBegin || memberEnd <= setBegin)
         continue;
-      if (!liveRangeListsOverlap(member.ranges, set.ranges))
-        continue;
-      if (!memberOverlapIsDestructiveContinuation(set, member))
+      if (memberConflictsWithSet(set, member))
         return true;
     }
     return false;
+  }
+
+  void startSetConflictQuery() {
+    ++memberConflictGeneration;
+    if (memberConflictGeneration != 0)
+      return;
+    std::fill(memberConflictGenerations.begin(),
+              memberConflictGenerations.end(), 0);
+    memberConflictGeneration = 1;
+  }
+
+  bool memberConflictsWithSet(const wave::RegAllocTransformAliasSet &set,
+                              const wave::RegAllocTransformValue &member) {
+    if (member.id >= memberConflictGenerations.size()) {
+      memberConflictGenerations.resize(member.id + 1, 0);
+      memberConflicts.resize(member.id + 1, false);
+    }
+    if (memberConflictGenerations[member.id] == memberConflictGeneration)
+      return memberConflicts[member.id];
+    memberConflictGenerations[member.id] = memberConflictGeneration;
+    bool conflict = liveRangeListsOverlap(member.ranges, set.ranges) &&
+                    !memberOverlapIsDestructiveContinuation(set, member);
+    memberConflicts[member.id] = conflict;
+    return conflict;
   }
 
   bool memberOverlapIsDestructiveContinuation(
@@ -2020,19 +2043,9 @@ private:
                                     unsigned base) {
     if (!vgprFamilyBudget || !isVGPRFamilyClass(set.regClass))
       return false;
-    unsigned agprFootprint = 0;
-    unsigned vgprFootprint = 0;
-    auto addActiveFootprint =
-        [&](const wave::RegAllocTransformAssignment &assigned) {
-          if (!setLiveAtPosition(assigned.set, set.start))
-            return;
-          addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
-                             agprFootprint, vgprFootprint);
-        };
-    active.forRegClass(waveamdmachine::RegClass::AGPR, assignments,
-                       addActiveFootprint);
-    active.forRegClass(waveamdmachine::RegClass::VGPR, assignments,
-                       addActiveFootprint);
+    refreshCombinedFootprint(set.start);
+    unsigned agprFootprint = combinedAGPRFootprint;
+    unsigned vgprFootprint = combinedVGPRFootprint;
     addFamilyFootprint(set.regClass, base, set.width, agprFootprint,
                        vgprFootprint);
     unsigned pressure =
@@ -2046,6 +2059,25 @@ private:
                       });
     recordCombinedPressureFailure(set, pressure, overlaps);
     return true;
+  }
+
+  void refreshCombinedFootprint(unsigned position) {
+    if (combinedFootprintPosition == position)
+      return;
+    combinedFootprintPosition = position;
+    combinedAGPRFootprint = 0;
+    combinedVGPRFootprint = 0;
+    auto addActiveFootprint =
+        [&](const wave::RegAllocTransformAssignment &assigned) {
+          if (!setLiveAtPosition(assigned.set, position))
+            return;
+          addFamilyFootprint(assigned.regClass, assigned.base, assigned.width,
+                             combinedAGPRFootprint, combinedVGPRFootprint);
+        };
+    active.forRegClass(waveamdmachine::RegClass::AGPR, assignments,
+                       addActiveFootprint);
+    active.forRegClass(waveamdmachine::RegClass::VGPR, assignments,
+                       addActiveFootprint);
   }
 
   void checkCombinedFootprintFailure() {
@@ -2083,6 +2115,9 @@ private:
     assignments.push_back(assigned);
     assignmentIndexBySet[set.id] = assignmentIndex;
     active.add(assignmentIndex, assignments);
+    if (combinedFootprintPosition == set.start)
+      addFamilyFootprint(set.regClass, base, set.width, combinedAGPRFootprint,
+                         combinedVGPRFootprint);
   }
 
   unsigned getPressureAtFailure(
@@ -2315,8 +2350,10 @@ private:
   SmallVector<wave::RegAllocTransformAliasSet> sets;
   SmallVector<Value> payloadValues;
   SmallVector<unsigned> setIndexById;
+  SmallVector<unsigned> memberConflictGenerations;
   FixedReservations fixedReservations;
   ActiveAssignments active;
+  BitVector memberConflicts;
   SmallVector<wave::RegAllocTransformAssignment> assignments;
   DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
   DenseMap<unsigned, unsigned> sparseSetIndexById;
@@ -2324,12 +2361,16 @@ private:
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
   std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
+  std::optional<unsigned> combinedFootprintPosition;
   std::array<std::optional<wave::RegAllocTransformBudget>, kRegClassCount>
       budgetCache;
   std::optional<RegAllocScanFailure> scanFailure;
   DictionaryAttr state;
   func::FuncOp func;
   Builder &builder;
+  unsigned combinedAGPRFootprint = 0;
+  unsigned combinedVGPRFootprint = 0;
+  unsigned memberConflictGeneration = 0;
   bool killedOperandReuseIsaFailed = false;
 };
 

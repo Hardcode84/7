@@ -196,10 +196,10 @@ static bool collectExtendedRematOperandLeaves(
   if (canUseOriginalRematLeaf(operand, user, failureRecord, context,
                               forcedRematValues))
     return true;
-  DenseSet<Value> rematLeaves = extendedLeaves;
+  DenseSet<Value> rematLeaves;
   if (collectExtendedRematLeaves(operand, user, failureRecord, context,
                                  visiting, forcedRematValues, rematLeaves)) {
-    extendedLeaves = std::move(rematLeaves);
+    extendedLeaves.insert(rematLeaves.begin(), rematLeaves.end());
     return true;
   }
   if (canExtendOriginalRematLeaf(operand, user, context, forcedRematValues)) {
@@ -246,8 +246,8 @@ collectExtendedRematLeaves(Value value, Operation *user,
 
 static void collectRematDAGValuesAt(
     Value value, Operation *user, const RegAllocTransformFailure &failureRecord,
-    const RematReliefContext &context, DenseSet<Value> &values,
-    const DenseSet<Value> *forcedRematValues) {
+    const RematReliefContext &context, const DenseSet<Value> &extendedLeaves,
+    DenseSet<Value> &values, const DenseSet<Value> *forcedRematValues) {
   if (!values.insert(value).second)
     return;
   Operation *def = value.getDefiningOp();
@@ -255,22 +255,20 @@ static void collectRematDAGValuesAt(
     if (canUseOriginalRematLeaf(operand, user, failureRecord, context,
                                 forcedRematValues))
       continue;
-    FailureOr<SmallVector<Value>> extendedLeaves = collectExtendedRematLeaves(
-        operand, user, failureRecord, context, forcedRematValues);
-    if (succeeded(extendedLeaves))
-      collectRematDAGValuesAt(operand, user, failureRecord, context, values,
-                              forcedRematValues);
+    if (extendedLeaves.contains(operand))
+      continue;
+    collectRematDAGValuesAt(operand, user, failureRecord, context,
+                            extendedLeaves, values, forcedRematValues);
   }
 }
 
-static SmallVector<Value>
-collectRematDAGValuesAt(Value value, Operation *user,
-                        const RegAllocTransformFailure &failureRecord,
-                        const RematReliefContext &context,
-                        const DenseSet<Value> *forcedRematValues) {
+static SmallVector<Value> collectRematDAGValuesAt(
+    Value value, Operation *user, const RegAllocTransformFailure &failureRecord,
+    const RematReliefContext &context, const DenseSet<Value> &extendedLeaves,
+    const DenseSet<Value> *forcedRematValues) {
   DenseSet<Value> values;
-  collectRematDAGValuesAt(value, user, failureRecord, context, values,
-                          forcedRematValues);
+  collectRematDAGValuesAt(value, user, failureRecord, context, extendedLeaves,
+                          values, forcedRematValues);
   SmallVector<Value> ordered(values.begin(), values.end());
   llvm::sort(ordered, [&](Value lhs, Value rhs) {
     return context.values.lookup(lhs)->id < context.values.lookup(rhs)->id;
@@ -549,11 +547,14 @@ static FailureOr<RematReliefSlot> buildRematReliefSlot(
       value, rebuildOp, failureRecord, context, &forcedRematValues);
   if (failed(extendedLeaves))
     return failure();
+  DenseSet<Value> extendedLeafSet;
+  extendedLeafSet.insert(extendedLeaves->begin(), extendedLeaves->end());
   RematReliefSlot slot;
   slot.uses = std::move(uses);
+  slot.dagValues =
+      collectRematDAGValuesAt(value, rebuildOp, failureRecord, context,
+                              extendedLeafSet, &forcedRematValues);
   slot.extendedLeaves = std::move(*extendedLeaves);
-  slot.dagValues = collectRematDAGValuesAt(value, rebuildOp, failureRecord,
-                                           context, &forcedRematValues);
   slot.value = value;
   slot.rebuildOp = rebuildOp;
   slot.stateValue = &stateValue;
@@ -686,25 +687,26 @@ buildRematReliefRoot(func::FuncOp func, unsigned setId,
                      const RegAllocTransformFailure &failureRecord,
                      ArrayRef<wave::RegAllocTransformAliasSet> sets,
                      ArrayRef<wave::RegAllocTransformValue> values,
+                     ArrayRef<ResolvedRegAllocValue> allResolvedValues,
                      const RematReliefContext &context) {
   const wave::RegAllocTransformAliasSet *set =
       findRegAllocTransformSet(sets, setId);
   if (!set || !isRematCandidateSet(*set, values, failureRecord))
     return std::optional<RematReliefRoot>();
-  FailureOr<SmallVector<ResolvedRegAllocValue>> resolvedValues =
-      resolveSetValues(func, *set, values);
-  if (failed(resolvedValues))
+  FailureOr<SmallVector<ResolvedRegAllocValue>> setValues =
+      getResolvedRegAllocSetValues(func, *set, allResolvedValues);
+  if (failed(setValues))
     return failure();
-  if (hasStructuralLoopCarryUse(*resolvedValues))
+  if (hasStructuralLoopCarryUse(*setValues))
     return std::optional<RematReliefRoot>();
 
   RematReliefRoot root;
   DenseSet<Value> forcedRematValues;
   root.set = set;
-  addForcedRematValues(*resolvedValues, failureRecord, root.rematValues,
+  addForcedRematValues(*setValues, failureRecord, root.rematValues,
                        forcedRematValues);
   FailureOr<bool> added = addRematReliefSlotsForSet(
-      *resolvedValues, failureRecord, context, forcedRematValues, root);
+      *setValues, failureRecord, context, forcedRematValues, root);
   if (failed(added))
     return failure();
   if (!*added)
@@ -1036,11 +1038,12 @@ selectRematReliefPlan(func::FuncOp func,
                       const RegAllocTransformFailure &failureRecord,
                       ArrayRef<wave::RegAllocTransformAliasSet> sets,
                       ArrayRef<wave::RegAllocTransformValue> values,
+                      ArrayRef<ResolvedRegAllocValue> resolvedValues,
                       const RematReliefContext &context) {
   SmallVector<RematReliefRoot, 0> roots;
   for (unsigned setId : collectRematReliefCandidateIds(failureRecord)) {
-    FailureOr<std::optional<RematReliefRoot>> root =
-        buildRematReliefRoot(func, setId, failureRecord, sets, values, context);
+    FailureOr<std::optional<RematReliefRoot>> root = buildRematReliefRoot(
+        func, setId, failureRecord, sets, values, resolvedValues, context);
     if (failed(root))
       return failure();
     if (*root)
@@ -1187,8 +1190,8 @@ static LogicalResult runRegAllocRematRelief(func::FuncOp func) {
     return failure();
 
   RematReliefContext context = buildRematReliefContext(func, *resolvedValues);
-  FailureOr<std::optional<RematReliefPlan>> plan =
-      selectRematReliefPlan(func, **failureRecord, *sets, *values, context);
+  FailureOr<std::optional<RematReliefPlan>> plan = selectRematReliefPlan(
+      func, **failureRecord, *sets, *values, *resolvedValues, context);
   if (failed(plan))
     return failure();
   if (!*plan)
