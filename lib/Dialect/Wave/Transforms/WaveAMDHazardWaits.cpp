@@ -292,6 +292,12 @@ struct ValueHazards {
 
   bool empty() const { return m0 == 0 && mfmaStore == 0; }
 
+  bool operator==(const ValueHazards &rhs) const {
+    return m0 == rhs.m0 && mfmaStore == rhs.mfmaStore;
+  }
+
+  bool operator!=(const ValueHazards &rhs) const { return !(*this == rhs); }
+
   bool joinWith(ValueHazards rhs) {
     unsigned nextM0 = std::max(m0, rhs.m0);
     unsigned nextMfmaStore = std::max(mfmaStore, rhs.mfmaStore);
@@ -332,6 +338,11 @@ struct PhysicalHazard {
   unsigned limit = 0;
   unsigned remaining = 0;
   unsigned mfmaPasses = 0;
+
+  bool operator==(const PhysicalHazard &rhs) const {
+    return span == rhs.span && kind == rhs.kind && limit == rhs.limit &&
+           remaining == rhs.remaining && mfmaPasses == rhs.mfmaPasses;
+  }
 };
 
 struct HazardState {
@@ -341,6 +352,20 @@ struct HazardState {
   SmallVector<PhysicalHazard, 16> physical;
   unsigned valuWriteVcc = 0;
   unsigned execWriteHazard = 0;
+
+  bool hasSamePhysicalHazards(const HazardState &rhs) const {
+    return physical.size() == rhs.physical.size() &&
+           llvm::all_of(physical, [&](const PhysicalHazard &hazard) {
+             return llvm::is_contained(rhs.physical, hazard);
+           });
+  }
+
+  bool operator==(const HazardState &rhs) const {
+    return lgkmToValu == rhs.lgkmToValu && lgkmPending == rhs.lgkmPending &&
+           values == rhs.values && hasSamePhysicalHazards(rhs) &&
+           valuWriteVcc == rhs.valuWriteVcc &&
+           execWriteHazard == rhs.execWriteHazard;
+  }
 
   static bool joinMax(unsigned &lhs, unsigned rhs) {
     unsigned next = std::max(lhs, rhs);
@@ -644,6 +669,60 @@ static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
   return {};
 }
 
+struct HazardOpInfo {
+  std::optional<waveamdmachine::StoreWriteDataHazard> storeWriteData;
+  std::optional<unsigned> lgkmWaitLimit;
+  waveamdmachine::WaitcntInfo waitcnt;
+  unsigned mfmaPasses = 0;
+  bool noMachineInst = false;
+  bool controlFlow = false;
+  bool mfma = false;
+  bool legacyValu = false;
+  bool trans = false;
+  bool vmem = false;
+  bool vmemStore = false;
+  bool execWriteConsumer = false;
+  bool valu = false;
+  bool writesExec = false;
+  bool xdlResultConsumer = false;
+  bool readFirstLane = false;
+  bool permlane32Swap = false;
+  bool copiedVccCompare = false;
+};
+
+using HazardOpInfoMap = DenseMap<Operation *, HazardOpInfo>;
+
+static const HazardOpInfo *lookupHazardOpInfo(Operation *op,
+                                              const HazardOpInfoMap *infos) {
+  if (!infos)
+    return nullptr;
+  auto it = infos->find(op);
+  assert(it != infos->end() && "missing hazard operation info");
+  return &it->second;
+}
+
+static bool isCachedLegacyVALU(Operation *op, const HazardOpInfo *info) {
+  return info ? info->legacyValu : isLegacyVALU(op);
+}
+
+static bool isCachedVALU(Operation *op, const HazardOpInfo *info) {
+  return info ? info->valu : op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
+}
+
+static bool isCachedXdlResultConsumer(Operation *op, const HazardOpInfo *info) {
+  return info ? info->xdlResultConsumer
+              : waveamdmachine::isXdlResultHazardConsumer(op);
+}
+
+static bool isCachedReadFirstLane(Operation *op, const HazardOpInfo *info) {
+  return info ? info->readFirstLane
+              : isa<waveamdmachine::VReadfirstlaneB32Op>(op);
+}
+
+static bool isCachedPermlane32Swap(Operation *op, const HazardOpInfo *info) {
+  return info ? info->permlane32Swap : isPermlane32Swap(op);
+}
+
 static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
   return std::max({cfg.valuWriteVGPRMfmaLatency,
                    cfg.valuWriteVGPRReadlaneLatency,
@@ -672,108 +751,120 @@ static unsigned getMfmaUseWait(unsigned operandIndex, RegSpan use,
 
 static unsigned getTransForwardingUseWait(Operation *op, RegSpan use,
                                           const PhysicalHazard &hazard,
-                                          const HazardConfig &cfg) {
+                                          const HazardConfig &cfg,
+                                          const HazardOpInfo *info) {
   if (hazard.kind != PhysicalHazardKind::TransWriteVGPR)
     return 0;
-  if (!isVGPRSpan(use) || !isLegacyVALU(op) || isTransOp(op))
+  bool legacyValu = isCachedLegacyVALU(op, info);
+  bool trans = info ? info->trans : isTransOp(op);
+  if (!isVGPRSpan(use) || !legacyValu || trans)
     return 0;
   return waitForHazardAge(hazard, cfg.transForwardingWaitStates);
 }
 
 static unsigned getValuWriteSGPRUseWait(Operation *op, RegSpan use,
                                         const PhysicalHazard &hazard,
-                                        const HazardConfig &cfg) {
+                                        const HazardConfig &cfg,
+                                        const HazardOpInfo *info) {
   if (hazard.kind != PhysicalHazardKind::ValuWriteSGPR || !isSGPRSpan(use))
     return 0;
-  if (isVMEM(op))
+  if (info ? info->vmem : isVMEM(op))
     return waitForHazardAge(hazard, cfg.valuWriteSGPRVmemReadLatency);
-  if (isLegacyVALU(op))
+  if (isCachedLegacyVALU(op, info))
     return waitForHazardAge(hazard, cfg.valuWriteSGPRValuReadLatency);
   return 0;
 }
 
 static unsigned getNonMfmaUseWait(Operation *op, RegSpan use,
                                   const PhysicalHazard &hazard,
-                                  const HazardConfig &cfg) {
+                                  const HazardConfig &cfg,
+                                  const HazardOpInfo *info) {
   if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
-      waveamdmachine::isXdlResultHazardConsumer(op))
+      isCachedXdlResultConsumer(op, info))
     return waitForHazardAge(
         hazard, getXdlResultLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
-      isa<waveamdmachine::VReadfirstlaneB32Op>(op))
+      isCachedReadFirstLane(op, info))
     return waitForHazardAge(hazard, cfg.valuWriteVGPRReadlaneLatency);
 
-  if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR && isPermlane32Swap(op))
+  if (hazard.kind == PhysicalHazardKind::ValuWriteVGPR &&
+      isCachedPermlane32Swap(op, info))
     return waitForHazardAge(hazard, cfg.valuWriteVGPRPermlane32SwapLatency);
 
-  if (unsigned wait = getTransForwardingUseWait(op, use, hazard, cfg))
+  if (unsigned wait = getTransForwardingUseWait(op, use, hazard, cfg, info))
     return wait;
 
-  return getValuWriteSGPRUseWait(op, use, hazard, cfg);
+  return getValuWriteSGPRUseWait(op, use, hazard, cfg, info);
 }
 
 static unsigned getPhysicalUseWait(Operation *op, unsigned operandIndex,
                                    RegSpan use, const PhysicalHazard &hazard,
-                                   const HazardConfig &cfg) {
+                                   const HazardConfig &cfg,
+                                   const HazardOpInfo *info) {
   if (!overlaps(use, hazard.span))
     return 0;
-  if (isMFMA(op))
+  if (info ? info->mfma : isMFMA(op))
     return getMfmaUseWait(operandIndex, use, hazard, cfg);
-  return getNonMfmaUseWait(op, use, hazard, cfg);
+  return getNonMfmaUseWait(op, use, hazard, cfg, info);
 }
 
 static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
                                    const PhysicalHazard &hazard,
-                                   const HazardConfig &cfg) {
+                                   const HazardConfig &cfg,
+                                   const HazardOpInfo *info) {
   if (!overlaps(def, hazard.span))
     return 0;
 
   if (hazard.kind == PhysicalHazardKind::MfmaWrite &&
-      waveamdmachine::isXdlResultHazardConsumer(op))
+      isCachedXdlResultConsumer(op, info))
     return waitForHazardAge(
         hazard, getXdlResultLatency(getHazardMfmaPassCount(hazard), cfg));
 
-  if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead && isLegacyVALU(op))
+  if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead &&
+      isCachedLegacyVALU(op, info))
     return waitForHazardAge(
         hazard, getXdlSrcCReadWarLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::StoreWriteData &&
-      op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && isVGPRSpan(def))
+      isCachedVALU(op, info) && isVGPRSpan(def))
     return waitForHazardAge(hazard, hazard.limit);
 
   return 0;
 }
 
 static unsigned getOperandPhysicalWait(Operation *op, const HazardState &state,
-                                       const HazardConfig &cfg) {
+                                       const HazardConfig &cfg,
+                                       const HazardOpInfo *info) {
   unsigned wait = 0;
   for (auto [operandIndex, operand] : llvm::enumerate(op->getOperands())) {
     std::optional<RegSpan> span = getAllocatedRegSpan(operand);
     if (!span)
       continue;
     for (const PhysicalHazard &hazard : state.physical)
-      wait = std::max(wait,
-                      getPhysicalUseWait(op, operandIndex, *span, hazard, cfg));
+      wait = std::max(
+          wait, getPhysicalUseWait(op, operandIndex, *span, hazard, cfg, info));
   }
   return wait;
 }
 
 static unsigned getResultPhysicalWait(Operation *op, const HazardState &state,
-                                      const HazardConfig &cfg) {
+                                      const HazardConfig &cfg,
+                                      const HazardOpInfo *info) {
   unsigned wait = 0;
   for (Value result : op->getResults()) {
     std::optional<RegSpan> span = getAllocatedRegSpan(result);
     if (!span)
       continue;
     for (const PhysicalHazard &hazard : state.physical)
-      wait = std::max(wait, getPhysicalDefWait(op, *span, hazard, cfg));
+      wait = std::max(wait, getPhysicalDefWait(op, *span, hazard, cfg, info));
   }
   return wait;
 }
 
-static unsigned getVccReadWait(Operation *op, const HazardState &state) {
-  if (!op->hasTrait<OpTrait::waveamdmachine::VALUOp>())
+static unsigned getVccReadWait(Operation *op, const HazardState &state,
+                               const HazardOpInfo *info) {
+  if (!(info ? info->valu : op->hasTrait<OpTrait::waveamdmachine::VALUOp>()))
     return 0;
   for (Value operand : op->getOperands()) {
     auto type = dyn_cast<waveamdmachine::RegType>(operand.getType());
@@ -784,16 +875,17 @@ static unsigned getVccReadWait(Operation *op, const HazardState &state) {
 }
 
 static unsigned getRequiredPhysicalWait(Operation *op, const HazardState &state,
-                                        const HazardConfig &cfg) {
-  if (isControlFlowOp(op))
+                                        const HazardConfig &cfg,
+                                        const HazardOpInfo *info = nullptr) {
+  if (info ? info->controlFlow : isControlFlowOp(op))
     return 0;
 
   unsigned wait = 0;
-  if (isExecWriteHazardConsumer(op))
+  if (info ? info->execWriteConsumer : isExecWriteHazardConsumer(op))
     wait = std::max(wait, state.execWriteHazard);
-  wait = std::max(wait, getOperandPhysicalWait(op, state, cfg));
-  wait = std::max(wait, getResultPhysicalWait(op, state, cfg));
-  return std::max(wait, getVccReadWait(op, state));
+  wait = std::max(wait, getOperandPhysicalWait(op, state, cfg, info));
+  wait = std::max(wait, getResultPhysicalWait(op, state, cfg, info));
+  return std::max(wait, getVccReadWait(op, state, info));
 }
 
 static void addPhysicalHazard(HazardState &state, RegSpan span,
@@ -804,8 +896,9 @@ static void addPhysicalHazard(HazardState &state, RegSpan span,
 }
 
 static void addProducedMfmaPhysicalHazards(Operation *op, HazardState &state,
-                                           const HazardConfig &cfg) {
-  unsigned passes = getMfmaPassCount(op);
+                                           const HazardConfig &cfg,
+                                           const HazardOpInfo *info) {
+  unsigned passes = info ? info->mfmaPasses : getMfmaPassCount(op);
   unsigned resultLatency = getXdlResultLatency(passes, cfg);
   for (Value result : op->getResults())
     if (std::optional<RegSpan> span = getAllocatedRegSpan(result)) {
@@ -870,24 +963,61 @@ static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
       op);
 }
 
-static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
+static HazardOpInfoMap collectHazardOpInfo(Operation *root,
                                            const HazardConfig &cfg) {
-  if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
+  HazardOpInfoMap infos;
+  root->walk([&](Operation *op) {
+    HazardOpInfo info;
+    info.storeWriteData =
+        waveamdmachine::getStoreWriteDataHazard(op, cfg.isaVersion);
+    info.lgkmWaitLimit = getLgkmWaitLimit(*op);
+    info.waitcnt = getWaitcntInfo(op);
+    info.noMachineInst = emitsNoMachineInst(*op);
+    info.controlFlow = isControlFlowOp(op);
+    info.mfma = isMFMA(op);
+    info.mfmaPasses = info.mfma ? getMfmaPassCount(op) : 0;
+    info.legacyValu = isLegacyVALU(op);
+    info.trans = isTransOp(op);
+    info.vmem = isVMEM(op);
+    info.vmemStore = isVMEMStore(*op);
+    info.execWriteConsumer = isExecWriteHazardConsumer(op);
+    info.valu = op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
+    info.writesExec = op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>();
+    info.xdlResultConsumer = waveamdmachine::isXdlResultHazardConsumer(op);
+    info.readFirstLane = isa<waveamdmachine::VReadfirstlaneB32Op>(op);
+    info.permlane32Swap = isPermlane32Swap(op);
+    info.copiedVccCompare = isCopiedVccCompareSGPRResult(op, 0);
+    infos.try_emplace(op, info);
+  });
+  return infos;
+}
+
+static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
+                                           const HazardConfig &cfg,
+                                           const HazardOpInfo *info) {
+  if (info ? info->writesExec
+           : op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
     state.execWriteHazard =
         std::max(state.execWriteHazard, cfg.valuWriteExecConsumerLatency);
+  bool transOp =
+      cfg.hasTransForwardingHazard && (info ? info->trans : isTransOp(op));
   for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
-    if (isCopiedVccCompareSGPRResult(op, resultIndex))
+    if (resultIndex == 0 &&
+        (info ? info->copiedVccCompare
+              : isCopiedVccCompareSGPRResult(op, resultIndex)))
       continue;
-    if (isTransOp(op))
+    if (transOp)
       addProducedTransRegHazard(result, state, cfg);
     addProducedValuRegHazard(result, state, cfg);
   }
 }
 
 static void addProducedStorePhysicalHazards(Operation *op, HazardState &state,
-                                            const HazardConfig &cfg) {
+                                            const HazardConfig &cfg,
+                                            const HazardOpInfo *info) {
   std::optional<waveamdmachine::StoreWriteDataHazard> hazard =
-      waveamdmachine::getStoreWriteDataHazard(op, cfg.isaVersion);
+      info ? info->storeWriteData
+           : waveamdmachine::getStoreWriteDataHazard(op, cfg.isaVersion);
   if (!hazard)
     return;
   if (std::optional<RegSpan> span = getAllocatedRegSpan(hazard->data))
@@ -896,30 +1026,33 @@ static void addProducedStorePhysicalHazards(Operation *op, HazardState &state,
 }
 
 static void addProducedPhysicalHazards(Operation *op, HazardState &state,
-                                       const HazardConfig &cfg) {
-  if (isMFMA(op)) {
-    addProducedMfmaPhysicalHazards(op, state, cfg);
+                                       const HazardConfig &cfg,
+                                       const HazardOpInfo *info) {
+  if (info ? info->mfma : isMFMA(op)) {
+    addProducedMfmaPhysicalHazards(op, state, cfg, info);
     return;
   }
-  if (isLegacyVALU(op))
-    addProducedValuPhysicalHazards(op, state, cfg);
-  addProducedStorePhysicalHazards(op, state, cfg);
+  if (info ? info->legacyValu : isLegacyVALU(op))
+    addProducedValuPhysicalHazards(op, state, cfg, info);
+  addProducedStorePhysicalHazards(op, state, cfg, info);
 }
 
 static void addProducedHazards(Operation *op, HazardState &state,
-                               const HazardConfig &cfg) {
+                               const HazardConfig &cfg,
+                               const HazardOpInfo *info) {
   if (auto m0Writer = dyn_cast<waveamdmachine::M0WriteHazardOpInterface>(op))
     mergeValueHazards(state, m0Writer.getM0HazardValue(),
                       {/*m0=*/cfg.m0PipelineDelay,
                        /*mfmaStore=*/0});
-  if (op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()) {
-    unsigned resultLatency = getXdlResultLatency(getMfmaPassCount(op), cfg);
+  if (info ? info->mfma : op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()) {
+    unsigned passes = info ? info->mfmaPasses : getMfmaPassCount(op);
+    unsigned resultLatency = getXdlResultLatency(passes, cfg);
     for (Value result : op->getResults())
       mergeValueHazards(state, result,
                         {/*m0=*/0,
                          /*mfmaStore=*/resultLatency});
   }
-  addProducedPhysicalHazards(op, state, cfg);
+  addProducedPhysicalHazards(op, state, cfg, info);
 }
 
 static unsigned getMaxTrackedLgkmPending(const HazardConfig &cfg) {
@@ -927,8 +1060,10 @@ static unsigned getMaxTrackedLgkmPending(const HazardConfig &cfg) {
 }
 
 static void addPendingLgkmIssue(Operation *op, HazardState &state,
-                                const HazardConfig &cfg) {
-  waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
+                                const HazardConfig &cfg,
+                                const HazardOpInfo *opInfo) {
+  waveamdmachine::WaitcntInfo info =
+      opInfo ? opInfo->waitcnt : getWaitcntInfo(op);
   if (info.counter != waveamdmachine::WaitcntCounter::Lgkm || !info.issueCount)
     return;
   unsigned maxTrackedPending = getMaxTrackedLgkmPending(cfg);
@@ -938,8 +1073,9 @@ static void addPendingLgkmIssue(Operation *op, HazardState &state,
 }
 
 static void applyLgkmWait(Operation *op, HazardState &state,
-                          const HazardConfig &cfg) {
-  std::optional<unsigned> limit = getLgkmWaitLimit(*op);
+                          const HazardConfig &cfg, const HazardOpInfo *info) {
+  std::optional<unsigned> limit =
+      info ? info->lgkmWaitLimit : getLgkmWaitLimit(*op);
   if (!limit || *limit >= cfg.defaultLgkmcnt)
     return;
   bool drained = state.lgkmPending > *limit;
@@ -949,25 +1085,27 @@ static void applyLgkmWait(Operation *op, HazardState &state,
 }
 
 static void transferHazards(Operation *op, HazardState &state,
-                            const HazardConfig &cfg) {
-  bool controlFlow = isControlFlowOp(op);
-  if (!emitsNoMachineInst(*op))
+                            const HazardConfig &cfg,
+                            const HazardOpInfo *info = nullptr) {
+  bool controlFlow = info ? info->controlFlow : isControlFlowOp(op);
+  if (!(info ? info->noMachineInst : emitsNoMachineInst(*op)))
     advanceHazards(state, /*count=*/1, /*advanceLgkm=*/!controlFlow);
 
   if (controlFlow)
     return;
 
   inheritNoInstOperandHazards(op, state);
-  addProducedHazards(op, state, cfg);
-  addPendingLgkmIssue(op, state, cfg);
-  applyLgkmWait(op, state, cfg);
+  addProducedHazards(op, state, cfg, info);
+  addPendingLgkmIssue(op, state, cfg, info);
+  applyLgkmWait(op, state, cfg, info);
 }
 
-static unsigned getRequiredSsaWait(Operation *op, const HazardState &state) {
-  if (isControlFlowOp(op))
+static unsigned getRequiredSsaWait(Operation *op, const HazardState &state,
+                                   const HazardOpInfo *info = nullptr) {
+  if (info ? info->controlFlow : isControlFlowOp(op))
     return 0;
   unsigned wait = 0;
-  bool vmemStore = isVMEMStore(*op);
+  bool vmemStore = info ? info->vmemStore : isVMEMStore(*op);
   for (Value operand : op->getOperands()) {
     ValueHazards hazards = lookupValueHazards(state, operand);
     if (isa<waveamdmachine::M0Type>(operand.getType()))
@@ -978,8 +1116,10 @@ static unsigned getRequiredSsaWait(Operation *op, const HazardState &state) {
   return wait;
 }
 
-static bool needsValuMitigation(Operation *op, const HazardState &state) {
-  return state.lgkmToValu && op->hasTrait<OpTrait::waveamdmachine::VALUOp>();
+static bool needsValuMitigation(Operation *op, const HazardState &state,
+                                const HazardOpInfo *info = nullptr) {
+  return state.lgkmToValu &&
+         (info ? info->valu : op->hasTrait<OpTrait::waveamdmachine::VALUOp>());
 }
 
 using HazardWaitMap = DenseMap<Operation *, unsigned>;
@@ -991,15 +1131,16 @@ struct BlockHazardTrace {
 };
 
 static unsigned getRequiredMitigation(Operation *op, HazardState &state,
-                                      const HazardConfig &cfg) {
+                                      const HazardConfig &cfg,
+                                      const HazardOpInfo *info) {
   unsigned count = 0;
-  unsigned wait = std::max(getRequiredSsaWait(op, state),
-                           getRequiredPhysicalWait(op, state, cfg));
+  unsigned wait = std::max(getRequiredSsaWait(op, state, info),
+                           getRequiredPhysicalWait(op, state, cfg, info));
   if (wait) {
     count += wait;
     advanceHazards(state, wait);
   }
-  if (needsValuMitigation(op, state)) {
+  if (needsValuMitigation(op, state, info)) {
     ++count;
     advanceHazards(state);
   }
@@ -1007,17 +1148,19 @@ static unsigned getRequiredMitigation(Operation *op, HazardState &state,
 }
 
 static BlockHazardTrace computeBlockHazardTrace(Block &block,
-                                                const HazardConfig &cfg) {
+                                                const HazardConfig &cfg,
+                                                const HazardOpInfoMap *infos) {
   HazardState state;
   BlockHazardTrace trace;
   for (Operation &op : block) {
+    const HazardOpInfo *info = lookupHazardOpInfo(&op, infos);
     trace.before.try_emplace(&op, state);
-    unsigned wait = getRequiredMitigation(&op, state, cfg);
+    unsigned wait = getRequiredMitigation(&op, state, cfg, info);
     if (wait) {
       trace.waits[&op] = wait;
       trace.totalWaits += wait;
     }
-    transferHazards(&op, state, cfg);
+    transferHazards(&op, state, cfg, info);
   }
   return trace;
 }
@@ -1045,53 +1188,11 @@ static bool isRepairCandidate(Operation *op) {
   return !touchesBlockedSingletonReg(op);
 }
 
-static bool operandsAvailableBefore(Operation *candidate,
-                                    Operation *insertBefore) {
-  for (Value operand : candidate->getOperands()) {
-    Operation *def = operand.getDefiningOp();
-    if (!def || def->getBlock() != candidate->getBlock())
-      continue;
-    if (!def->isBeforeInBlock(insertBefore))
-      return false;
-  }
-  return true;
-}
-
 static Operation *getAncestorInBlock(Operation *op, Block *block) {
   for (Operation *ancestor = op; ancestor; ancestor = ancestor->getParentOp())
     if (ancestor->getBlock() == block)
       return ancestor;
   return nullptr;
-}
-
-static bool resultsRemainAvailableBefore(Operation *candidate,
-                                         Operation *insertBefore) {
-  for (Value result : candidate->getResults()) {
-    for (Operation *user : result.getUsers()) {
-      Operation *ancestor = getAncestorInBlock(user, candidate->getBlock());
-      if (!ancestor)
-        continue;
-      if (ancestor->isBeforeInBlock(insertBefore))
-        return false;
-    }
-  }
-  return true;
-}
-
-static bool hasCloserHazard(Operation *candidate, Operation *target,
-                            const HazardWaitMap &waits) {
-  if (target->isBeforeInBlock(candidate)) {
-    for (Operation *op = candidate->getPrevNode(); op && op != target;
-         op = op->getPrevNode())
-      if (waits.lookup(op))
-        return true;
-    return false;
-  }
-  for (Operation *op = candidate->getNextNode(); op && op != target;
-       op = op->getNextNode())
-    if (waits.lookup(op))
-      return true;
-  return false;
 }
 
 static void restoreCandidatePosition(Operation *candidate,
@@ -1105,39 +1206,59 @@ static void restoreCandidatePosition(Operation *candidate,
     candidate->moveBefore(block, block->end());
 }
 
+static bool hasRejoinedHazardTrace(Operation *next, Operation *rejoinBefore,
+                                   bool &canRejoin, bool targetImproved,
+                                   bool candidateClear,
+                                   const HazardState &state,
+                                   const BlockHazardTrace &oldTrace) {
+  canRejoin |= next == rejoinBefore;
+  if (!canRejoin || !next || !targetImproved || !candidateClear)
+    return false;
+  auto beforeIt = oldTrace.before.find(next);
+  assert(beforeIt != oldTrace.before.end() && "missing rejoin hazard state");
+  return state == beforeIt->second;
+}
+
 static bool movedHazardsAccepted(Operation *startOp, HazardState state,
                                  Operation *candidate, Operation *target,
+                                 Operation *rejoinBefore,
                                  unsigned oldTargetWait,
                                  const BlockHazardTrace &oldTrace,
-                                 const HazardConfig &cfg) {
+                                 const HazardConfig &cfg,
+                                 const HazardOpInfoMap *infos) {
   bool targetImproved = false;
   bool candidateClear = false;
+  bool canRejoin = false;
   for (Operation *op = startOp; op; op = op->getNextNode()) {
-    unsigned wait = getRequiredMitigation(op, state, cfg);
+    const HazardOpInfo *info = lookupHazardOpInfo(op, infos);
+    unsigned wait = getRequiredMitigation(op, state, cfg, info);
     if (wait > oldTrace.waits.lookup(op))
       return false;
     if (op == target)
       targetImproved = wait < oldTargetWait;
     if (op == candidate)
       candidateClear = wait == 0;
-    transferHazards(op, state, cfg);
+    transferHazards(op, state, cfg, info);
+    Operation *next = op->getNextNode();
+    if (hasRejoinedHazardTrace(next, rejoinBefore, canRejoin, targetImproved,
+                               candidateClear, state, oldTrace))
+      return true;
   }
   return targetImproved && candidateClear;
 }
 
-static bool canTryMoveRepairCandidate(Operation *candidate, Operation *target,
-                                      const BlockHazardTrace &oldTrace) {
-  if (candidate->getBlock() != target->getBlock())
-    return false;
-  if (candidate == target)
-    return false;
-  if (hasCloserHazard(candidate, target, oldTrace.waits))
-    return false;
-  if (!operandsAvailableBefore(candidate, target))
-    return false;
-  if (!resultsRemainAvailableBefore(candidate, target))
-    return false;
-  return true;
+struct RepairCandidate {
+  Operation *op = nullptr;
+  unsigned ordinal = 0;
+  unsigned targetBegin = 0;
+  unsigned targetEnd = 0;
+};
+
+static bool canMoveCandidateTo(const RepairCandidate &candidate,
+                               unsigned targetOrdinal) {
+  return candidate.op != nullptr && candidate.ordinal != targetOrdinal &&
+         targetOrdinal >= candidate.targetBegin &&
+         targetOrdinal < candidate.targetEnd;
 }
 
 static Operation *getMovedRepairStart(Operation *candidate,
@@ -1149,13 +1270,16 @@ static Operation *getMovedRepairStart(Operation *candidate,
   return restoreBefore;
 }
 
-static bool tryMoveRepairCandidate(Operation *candidate, Operation *target,
+static bool tryMoveRepairCandidate(const RepairCandidate &candidateInfo,
+                                   Operation *target, unsigned targetOrdinal,
                                    const BlockHazardTrace &oldTrace,
-                                   const HazardConfig &cfg) {
-  if (!canTryMoveRepairCandidate(candidate, target, oldTrace))
+                                   const HazardConfig &cfg,
+                                   const HazardOpInfoMap *infos) {
+  if (!canMoveCandidateTo(candidateInfo, targetOrdinal))
     return false;
 
-  bool candidateAfterTarget = target->isBeforeInBlock(candidate);
+  Operation *candidate = candidateInfo.op;
+  bool candidateAfterTarget = targetOrdinal < candidateInfo.ordinal;
   auto beforeIt =
       oldTrace.before.find(candidateAfterTarget ? target : candidate);
   assert(beforeIt != oldTrace.before.end() && "missing hazard prefix state");
@@ -1167,8 +1291,11 @@ static bool tryMoveRepairCandidate(Operation *candidate, Operation *target,
 
   Operation *startOp = getMovedRepairStart(candidate, restoreBefore, target,
                                            candidateAfterTarget);
-  bool accept = movedHazardsAccepted(startOp, prefixState, candidate, target,
-                                     oldTargetWait, oldTrace, cfg);
+  Operation *rejoinBefore =
+      candidateAfterTarget ? restoreBefore : target->getNextNode();
+  bool accept =
+      movedHazardsAccepted(startOp, prefixState, candidate, target,
+                           rejoinBefore, oldTargetWait, oldTrace, cfg, infos);
   if (!accept)
     restoreCandidatePosition(candidate, restoreBefore, restoreAfter,
                              candidate->getBlock());
@@ -1325,21 +1452,23 @@ static bool canPullOuterRepairCandidate(Operation *candidate, Operation *target,
 static bool tryPullOuterRepairCandidate(Operation *candidate, Operation *target,
                                         const BlockHazardTrace &targetTrace,
                                         const HazardConfig &cfg,
+                                        const HazardOpInfoMap *infos,
                                         DominanceInfo &dom) {
   if (!canPullOuterRepairCandidate(candidate, target, dom))
     return false;
 
   Block *sourceBlock = candidate->getBlock();
-  BlockHazardTrace sourceTrace = computeBlockHazardTrace(*sourceBlock, cfg);
+  BlockHazardTrace sourceTrace =
+      computeBlockHazardTrace(*sourceBlock, cfg, infos);
   Operation *restoreBefore = candidate->getNextNode();
   Operation *restoreAfter = candidate->getPrevNode();
   unsigned oldTargetWait = targetTrace.waits.lookup(target);
   candidate->moveBefore(target);
 
   BlockHazardTrace movedTargetTrace =
-      computeBlockHazardTrace(*target->getBlock(), cfg);
+      computeBlockHazardTrace(*target->getBlock(), cfg, infos);
   BlockHazardTrace movedSourceTrace =
-      computeBlockHazardTrace(*sourceBlock, cfg);
+      computeBlockHazardTrace(*sourceBlock, cfg, infos);
   bool accept = movedTargetTrace.waits.lookup(target) < oldTargetWait &&
                 movedTargetTrace.waits.lookup(candidate) == 0 &&
                 hazardsDoNotIncrease(targetTrace, movedTargetTrace) &&
@@ -1361,15 +1490,110 @@ collectOuterRepairCandidates(Block &block,
       candidates.push_back(op);
 }
 
-static void collectRepairBlockOps(Block &block,
-                                  SmallVectorImpl<Operation *> &candidates,
-                                  SmallVectorImpl<Operation *> &ops) {
-  for (Operation &op : block) {
-    if (isRepairCandidate(&op))
-      candidates.push_back(&op);
-    ops.push_back(&op);
+struct RepairBlockIndex {
+  SmallVector<Operation *, 16> ops;
+  SmallVector<RepairCandidate, 16> localCandidates;
+  SmallVector<Operation *, 16> outerCandidates;
+  SmallVector<unsigned, 8> waitOrdinals;
+  DenseMap<Operation *, unsigned> ordinals;
+};
+
+static RepairCandidate
+indexRepairCandidate(Operation *candidate,
+                     const DenseMap<Operation *, unsigned> &ordinals,
+                     unsigned blockSize) {
+  unsigned targetBegin = 0;
+  unsigned targetEnd = blockSize;
+  for (Value operand : candidate->getOperands()) {
+    Operation *def = operand.getDefiningOp();
+    if (!def || def->getBlock() != candidate->getBlock())
+      continue;
+    auto defIt = ordinals.find(def);
+    assert(defIt != ordinals.end() && "missing candidate operand ordinal");
+    targetBegin = std::max(targetBegin, defIt->second + 1);
   }
-  collectOuterRepairCandidates(block, candidates);
+  for (Value result : candidate->getResults()) {
+    for (Operation *user : result.getUsers()) {
+      Operation *ancestor = getAncestorInBlock(user, candidate->getBlock());
+      if (!ancestor)
+        continue;
+      auto userIt = ordinals.find(ancestor);
+      assert(userIt != ordinals.end() && "missing candidate user ordinal");
+      targetEnd = std::min(targetEnd, userIt->second + 1);
+    }
+  }
+  auto candidateIt = ordinals.find(candidate);
+  assert(candidateIt != ordinals.end() && "missing candidate ordinal");
+  return RepairCandidate{candidate, candidateIt->second, targetBegin,
+                         targetEnd};
+}
+
+static RepairBlockIndex buildRepairBlockIndex(Block &block,
+                                              const BlockHazardTrace &trace) {
+  RepairBlockIndex index;
+  for (auto [ordinal, op] : llvm::enumerate(block)) {
+    index.ops.push_back(&op);
+    index.ordinals[&op] = ordinal;
+    if (trace.waits.lookup(&op))
+      index.waitOrdinals.push_back(ordinal);
+  }
+  for (Operation *op : index.ops)
+    if (isRepairCandidate(op))
+      index.localCandidates.push_back(
+          indexRepairCandidate(op, index.ordinals, index.ops.size()));
+  collectOuterRepairCandidates(block, index.outerCandidates);
+  return index;
+}
+
+struct CandidateOrdinalRange {
+  unsigned begin = 0;
+  unsigned end = 0;
+};
+
+static CandidateOrdinalRange
+getCandidateOrdinalRange(const RepairBlockIndex &index,
+                         unsigned targetOrdinal) {
+  auto targetIt = llvm::lower_bound(index.waitOrdinals, targetOrdinal);
+  assert(targetIt != index.waitOrdinals.end() && *targetIt == targetOrdinal &&
+         "repair target must have a wait");
+  unsigned begin = targetIt == index.waitOrdinals.begin() ? 0 : targetIt[-1];
+  ++targetIt;
+  unsigned end =
+      targetIt == index.waitOrdinals.end() ? index.ops.size() : *targetIt + 1;
+  return CandidateOrdinalRange{begin, end};
+}
+
+static bool tryLocalRepairCandidates(Operation *target, unsigned targetOrdinal,
+                                     const RepairBlockIndex &index,
+                                     const BlockHazardTrace &trace,
+                                     const HazardConfig &cfg,
+                                     const HazardOpInfoMap *infos) {
+  CandidateOrdinalRange range = getCandidateOrdinalRange(index, targetOrdinal);
+  auto begin =
+      llvm::lower_bound(index.localCandidates, range.begin,
+                        [](const RepairCandidate &candidate, unsigned ordinal) {
+                          return candidate.ordinal < ordinal;
+                        });
+  auto end =
+      llvm::lower_bound(index.localCandidates, range.end,
+                        [](const RepairCandidate &candidate, unsigned ordinal) {
+                          return candidate.ordinal < ordinal;
+                        });
+  for (auto candidate = begin; candidate != end; ++candidate)
+    if (tryMoveRepairCandidate(*candidate, target, targetOrdinal, trace, cfg,
+                               infos))
+      return true;
+  return false;
+}
+
+static bool
+tryOuterRepairCandidates(Operation *target, const RepairBlockIndex &index,
+                         const BlockHazardTrace &trace, const HazardConfig &cfg,
+                         const HazardOpInfoMap *infos, DominanceInfo &dom) {
+  for (Operation *candidate : index.outerCandidates)
+    if (tryPullOuterRepairCandidate(candidate, target, trace, cfg, infos, dom))
+      return true;
+  return false;
 }
 
 struct RepairStepResult {
@@ -1378,43 +1602,41 @@ struct RepairStepResult {
 };
 
 static RepairStepResult
-tryRepairHazardOp(Operation *op, ArrayRef<Operation *> candidates,
+tryRepairHazardOp(Operation *op, const RepairBlockIndex &index,
                   const BlockHazardTrace &trace, const HazardConfig &cfg,
-                  DominanceInfo &dom, unsigned &moves, unsigned maxMoves) {
+                  const HazardOpInfoMap *infos, DominanceInfo &dom,
+                  unsigned &moves, unsigned maxMoves) {
   if (!trace.waits.lookup(op))
     return {};
-  for (Operation *candidate : candidates) {
-    bool moved =
-        candidate->getBlock() == op->getBlock()
-            ? tryMoveRepairCandidate(candidate, op, trace, cfg)
-            : tryPullOuterRepairCandidate(candidate, op, trace, cfg, dom);
-    if (!moved)
-      continue;
-    if (++moves > maxMoves) {
-      op->getBlock()->getParentOp()->emitWarning(
-          "waveamd-hazard-repair did not converge");
-      return {/*moved=*/true, /*stop=*/true};
-    }
-    return {/*moved=*/true, /*stop=*/false};
+  auto ordinalIt = index.ordinals.find(op);
+  assert(ordinalIt != index.ordinals.end() && "missing repair target ordinal");
+  bool moved =
+      tryLocalRepairCandidates(op, ordinalIt->second, index, trace, cfg, infos);
+  if (!moved)
+    moved = tryOuterRepairCandidates(op, index, trace, cfg, infos, dom);
+  if (!moved)
+    return {};
+  if (++moves > maxMoves) {
+    op->getBlock()->getParentOp()->emitWarning(
+        "waveamd-hazard-repair did not converge");
+    return {/*moved=*/true, /*stop=*/true};
   }
-  return {};
+  return {/*moved=*/true, /*stop=*/false};
 }
 
 static bool repairBlock(Block &block, const HazardConfig &cfg,
-                        DominanceInfo &dom) {
+                        const HazardOpInfoMap *infos, DominanceInfo &dom) {
   bool changed = false;
   unsigned moves = 0;
-  BlockHazardTrace trace = computeBlockHazardTrace(block, cfg);
+  BlockHazardTrace trace = computeBlockHazardTrace(block, cfg, infos);
   unsigned maxMoves = trace.totalWaits;
   while (true) {
     bool progress = false;
-    SmallVector<Operation *, 16> candidates;
-    SmallVector<Operation *, 16> ops;
-    collectRepairBlockOps(block, candidates, ops);
+    RepairBlockIndex index = buildRepairBlockIndex(block, trace);
 
-    for (Operation *op : ops) {
+    for (Operation *op : index.ops) {
       RepairStepResult result =
-          tryRepairHazardOp(op, candidates, trace, cfg, dom, moves, maxMoves);
+          tryRepairHazardOp(op, index, trace, cfg, infos, dom, moves, maxMoves);
       if (!result.moved)
         continue;
       changed = true;
@@ -1425,7 +1647,7 @@ static bool repairBlock(Block &block, const HazardConfig &cfg,
     }
     if (!progress)
       break;
-    trace = computeBlockHazardTrace(block, cfg);
+    trace = computeBlockHazardTrace(block, cfg, infos);
   }
   return changed;
 }
@@ -1510,7 +1732,9 @@ struct WaveAMDHazardRepairPass
     DominanceInfo dom(root);
     if (hoistM0AcrossRegions)
       hoistM0WritesAcrossRegions(root, cfg, dom);
-    root->walk([&](Block *block) { (void)repairBlock(*block, cfg, dom); });
+    HazardOpInfoMap infos = collectHazardOpInfo(root, cfg);
+    root->walk(
+        [&](Block *block) { (void)repairBlock(*block, cfg, &infos, dom); });
   }
 };
 
