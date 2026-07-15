@@ -21,6 +21,7 @@ namespace mlir::wave {
 
 StringRef getRegAllocTransformStateAttrName();
 StringRef getRegAllocTransformAssignmentsAttrName();
+StringRef getRegAllocTransformPackedStateFieldName();
 
 enum class RegAllocTransformLoopDecision { Done, Restart, Stalled };
 

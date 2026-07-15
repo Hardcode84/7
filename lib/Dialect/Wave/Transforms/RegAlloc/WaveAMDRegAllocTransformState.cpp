@@ -9,6 +9,7 @@
 #include "WaveAMDRegAllocTransformState.h"
 
 #include "WaveAMDRegisterLimits.h"
+#include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -25,6 +26,7 @@ static constexpr StringLiteral kRegAllocTransformStateAttr =
     "waveamdmachine.regalloc_transform_state";
 static constexpr StringLiteral kRegAllocAssignmentsAttr =
     "waveamdmachine.regalloc_assignments";
+static constexpr StringLiteral kRegAllocPackedStateField = "packed";
 static constexpr StringLiteral kRegAllocStageSuccess = "linear-scan-success";
 static constexpr StringLiteral kRegAllocStageFailure = "linear-scan-failure";
 static constexpr StringLiteral kTargetWavesAttr = "waveamdmachine.target_waves";
@@ -47,6 +49,10 @@ StringRef getRegAllocTransformStateAttrName() {
 
 StringRef getRegAllocTransformAssignmentsAttrName() {
   return kRegAllocAssignmentsAttr;
+}
+
+StringRef getRegAllocTransformPackedStateFieldName() {
+  return kRegAllocPackedStateField;
 }
 
 std::optional<waveamdmachine::RegType>
@@ -194,6 +200,91 @@ struct ParsedRegAllocValueUnsignedAttrs {
   unsigned offset = 0;
 };
 
+static unsigned unpackRegAllocUnsigned(int64_t value) {
+  assert(value >= 0 &&
+         static_cast<uint64_t>(value) <= std::numeric_limits<unsigned>::max() &&
+         "verified packed regalloc value exceeds range");
+  return static_cast<unsigned>(value);
+}
+
+static waveamdmachine::RegClass unpackRegAllocClass(int64_t value) {
+  switch (value) {
+  case RegAllocStateAttr::PackedSGPR:
+    return waveamdmachine::RegClass::SGPR;
+  case RegAllocStateAttr::PackedVGPR:
+    return waveamdmachine::RegClass::VGPR;
+  case RegAllocStateAttr::PackedAGPR:
+    return waveamdmachine::RegClass::AGPR;
+  }
+  llvm_unreachable("verified packed regalloc class is invalid");
+}
+
+static RegAllocTransformValueKind unpackRegAllocValueKind(int64_t value) {
+  switch (value) {
+  case RegAllocStateAttr::PackedBlockArgument:
+    return RegAllocTransformValueKind::BlockArgument;
+  case RegAllocStateAttr::PackedOpResult:
+    return RegAllocTransformValueKind::OpResult;
+  }
+  llvm_unreachable("verified packed regalloc value kind is invalid");
+}
+
+static FailureOr<SmallVector<RegAllocTransformValue>>
+parsePackedRegAllocTransformValues(RegAllocStateAttr packed,
+                                   Operation *diagOp) {
+  if (packed.getVersion() != RegAllocStateAttr::kVersion)
+    return diagOp->emitError("unsupported packed regalloc state version");
+  ArrayRef<int64_t> records = packed.getValues();
+  ArrayRef<int64_t> paths = packed.getValuePaths();
+  ArrayRef<int64_t> ranges = packed.getValueRanges();
+  SmallVector<RegAllocTransformValue> values;
+  values.reserve(packed.getValueCount());
+  for (unsigned id : llvm::seq(packed.getValueCount())) {
+    ArrayRef<int64_t> record = records.slice(
+        static_cast<size_t>(id) * RegAllocStateAttr::ValueFieldCount,
+        RegAllocStateAttr::ValueFieldCount);
+    RegAllocTransformValue value;
+    value.regClass =
+        unpackRegAllocClass(record[RegAllocStateAttr::ValueRegClass]);
+    value.kind = unpackRegAllocValueKind(record[RegAllocStateAttr::ValueKind]);
+    int64_t fixed = record[RegAllocStateAttr::ValueFixed];
+    if (fixed >= 0)
+      value.fixed = unpackRegAllocUnsigned(fixed);
+    value.id = id;
+    value.set = unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueSet]);
+    value.start = unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueStart]);
+    value.end = unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueEnd]);
+    value.width = unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueWidth]);
+    value.offset =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueOffset]);
+    value.number =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueNumber]);
+
+    unsigned pathBegin =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::ValuePathBegin]);
+    unsigned pathLength =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::ValuePathLength]);
+    ArrayRef<int64_t> path = paths.slice(pathBegin, pathLength);
+    value.path.append(path.begin(), path.end());
+
+    unsigned rangeBegin =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueRangeBegin]);
+    unsigned rangeCount =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::ValueRangeCount]);
+    for (unsigned rangeIndex : llvm::seq(rangeCount)) {
+      ArrayRef<int64_t> range =
+          ranges.slice(static_cast<size_t>(rangeBegin + rangeIndex) *
+                           RegAllocStateAttr::RangeFieldCount,
+                       RegAllocStateAttr::RangeFieldCount);
+      value.ranges.push_back(
+          {unpackRegAllocUnsigned(range[RegAllocStateAttr::RangeStart]),
+           unpackRegAllocUnsigned(range[RegAllocStateAttr::RangeEnd])});
+    }
+    values.push_back(std::move(value));
+  }
+  return values;
+}
+
 static FailureOr<ParsedRegAllocValueUnsignedAttrs>
 parseValueUnsignedAttrs(DictionaryAttr dict, Operation *diagOp) {
   FailureOr<unsigned> id = getRegAllocTransformUnsignedAttr(dict, "id", diagOp);
@@ -253,6 +344,9 @@ static FailureOr<RegAllocTransformValue> parseValue(DictionaryAttr dict,
 
 FailureOr<SmallVector<RegAllocTransformValue>>
 parseRegAllocTransformValues(DictionaryAttr state, Operation *diagOp) {
+  if (RegAllocStateAttr packed = state.getAs<RegAllocStateAttr>(
+          getRegAllocTransformPackedStateFieldName()))
+    return parsePackedRegAllocTransformValues(packed, diagOp);
   auto valueAttrs = state.getAs<ArrayAttr>("values");
   if (!valueAttrs)
     return diagOp->emitError("regalloc state missing `values`");
@@ -326,6 +420,49 @@ static void collectAliasSetLiveRanges(RegAllocTransformAliasSet &set,
       insertAliasSetLiveRange(set.ranges, range);
 }
 
+static FailureOr<SmallVector<RegAllocTransformAliasSet>>
+parsePackedRegAllocTransformAliasSets(RegAllocStateAttr packed,
+                                      ArrayRef<RegAllocTransformValue> values,
+                                      Operation *diagOp) {
+  if (values.size() != packed.getValueCount())
+    return diagOp->emitError(
+        "packed regalloc value count no longer matches decoded values");
+  ArrayRef<int64_t> records = packed.getAliasSets();
+  ArrayRef<int64_t> members = packed.getAliasMembers();
+  SmallVector<RegAllocTransformAliasSet> sets;
+  sets.reserve(packed.getAliasSetCount());
+  for (unsigned id : llvm::seq(packed.getAliasSetCount())) {
+    ArrayRef<int64_t> record = records.slice(
+        static_cast<size_t>(id) * RegAllocStateAttr::AliasSetFieldCount,
+        RegAllocStateAttr::AliasSetFieldCount);
+    RegAllocTransformAliasSet set;
+    set.regClass =
+        unpackRegAllocClass(record[RegAllocStateAttr::AliasSetRegClass]);
+    set.id = id;
+    set.width =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::AliasSetWidth]);
+    unsigned memberBegin =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::AliasSetMemberBegin]);
+    unsigned memberCount =
+        unpackRegAllocUnsigned(record[RegAllocStateAttr::AliasSetMemberCount]);
+    set.start = std::numeric_limits<unsigned>::max();
+    for (int64_t member : members.slice(memberBegin, memberCount)) {
+      unsigned valueId = unpackRegAllocUnsigned(member);
+      const RegAllocTransformValue &value = values[valueId];
+      set.members.push_back(valueId);
+      set.start = std::min(set.start, value.start);
+      set.end = std::max(set.end, value.end);
+    }
+    collectAliasSetLiveRanges(set, values);
+    sets.push_back(std::move(set));
+  }
+  llvm::stable_sort(sets, [](const RegAllocTransformAliasSet &lhs,
+                             const RegAllocTransformAliasSet &rhs) {
+    return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
+  });
+  return sets;
+}
+
 static FailureOr<RegAllocTransformAliasSet>
 parseAliasSet(DictionaryAttr dict, ArrayRef<RegAllocTransformValue> values,
               Operation *diagOp) {
@@ -350,6 +487,9 @@ FailureOr<SmallVector<RegAllocTransformAliasSet>>
 parseRegAllocTransformAliasSets(DictionaryAttr state,
                                 ArrayRef<RegAllocTransformValue> values,
                                 Operation *diagOp) {
+  if (RegAllocStateAttr packed = state.getAs<RegAllocStateAttr>(
+          getRegAllocTransformPackedStateFieldName()))
+    return parsePackedRegAllocTransformAliasSets(packed, values, diagOp);
   auto setAttrs = state.getAs<ArrayAttr>("alias_sets");
   if (!setAttrs)
     return diagOp->emitError("regalloc state missing `alias_sets`");

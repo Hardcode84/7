@@ -242,6 +242,7 @@ def check_post_regalloc(label: str, post_passes: list[str]) -> None:
             "waveamd-resource-info",
             "waveamd-verify-machine-operands",
             "waveamd-metadata",
+            "waveamd-clear-regalloc-transform-state",
         ],
         "post-regalloc pass order drifted",
     )

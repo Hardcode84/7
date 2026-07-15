@@ -692,6 +692,15 @@ def WaveAMDClearRegAllocAssignments
   ];
 }
 
+def WaveAMDClearRegAllocTransformState
+    : Pass<"waveamd-clear-regalloc-transform-state", "ModuleOp"> {
+  let summary = "Drop ephemeral WaveAMD register-allocation transform state";
+  let description = [{
+    Removes allocator planning state after the final allocation. Physical
+    register assignments and resource metadata remain intact.
+  }];
+}
+
 
 def WaveAMDResourceInfo
     : Pass<"waveamd-resource-info", "ModuleOp"> {

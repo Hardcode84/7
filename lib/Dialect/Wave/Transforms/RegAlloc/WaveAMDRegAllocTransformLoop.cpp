@@ -13,6 +13,7 @@
 #include "WaveAMDRegAllocTransformState.h"
 #include "WaveAMDRegAllocTransformUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -39,7 +40,6 @@ struct RegAllocAliasValue {
   unsigned start = 0;
   unsigned end = 0;
   unsigned aliasSet = 0;
-  unsigned opId = 0;
   unsigned number = 0;
   int64_t offset = 0;
   bool blockArgument = false;
@@ -62,6 +62,22 @@ struct RegAllocAliasSet {
   SmallVector<unsigned> members;
   unsigned id = 0;
 };
+
+static wave::RegAllocStateAttr::PackedRegClass
+packRegAllocClass(waveamdmachine::RegClass regClass) {
+  switch (regClass) {
+  case waveamdmachine::RegClass::SGPR:
+    return wave::RegAllocStateAttr::PackedSGPR;
+  case waveamdmachine::RegClass::VGPR:
+    return wave::RegAllocStateAttr::PackedVGPR;
+  case waveamdmachine::RegClass::AGPR:
+    return wave::RegAllocStateAttr::PackedAGPR;
+  case waveamdmachine::RegClass::SCC:
+  case waveamdmachine::RegClass::VCC:
+    llvm_unreachable("untracked packed register class");
+  }
+  llvm_unreachable("unknown register class");
+}
 
 static bool isSGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::SGPR;
@@ -274,7 +290,7 @@ private:
   using AliasAdjacency = SmallVector<SmallVector<std::pair<unsigned, int64_t>>>;
 
   void registerValue(Value value, unsigned start, ArrayRef<int64_t> path,
-                     bool blockArgument, unsigned number, unsigned opId) {
+                     bool blockArgument, unsigned number) {
     if (valueIds.contains(value))
       return;
     std::optional<waveamdmachine::RegType> type =
@@ -290,7 +306,6 @@ private:
     record.ranges.push_back({start, start});
     record.blockArgument = blockArgument;
     record.number = number;
-    record.opId = opId;
     valueIds[value] = record.id;
     values.push_back(record);
   }
@@ -299,7 +314,7 @@ private:
                              ArrayRef<int64_t> blockPath) {
     for (BlockArgument arg : block.getArguments())
       registerValue(arg, start, blockPath, /*blockArgument=*/true,
-                    arg.getArgNumber(), /*opId=*/0);
+                    arg.getArgNumber());
   }
 
   void collectRegion(Region &region, ArrayRef<int64_t> regionPath) {
@@ -329,8 +344,7 @@ private:
           resultStart = ops.back().position;
         for (OpResult result : op.getResults())
           registerValue(result, resultStart, opPath,
-                        /*blockArgument=*/false, result.getResultNumber(),
-                        record.id);
+                        /*blockArgument=*/false, result.getResultNumber());
       }
     }
   }
@@ -654,81 +668,112 @@ private:
 
   Attribute getI64(int64_t value) { return builder.getI64IntegerAttr(value); }
 
-  ArrayAttr getI64Array(ArrayRef<int64_t> values) {
-    return builder.getI64ArrayAttr(values);
-  }
-
   DictionaryAttr getDictionary(ArrayRef<NamedAttribute> attrs) {
     return builder.getDictionaryAttr(attrs);
   }
 
-  DictionaryAttr buildLiveRangeAttr(wave::RegAllocTransformLiveRange range) {
-    SmallVector<NamedAttribute> attrs;
-    attrs.emplace_back(builder.getStringAttr("end"), getI64(range.end));
-    attrs.emplace_back(builder.getStringAttr("start"), getI64(range.start));
-    return getDictionary(attrs);
+  struct PackedStateStorage {
+    SmallVector<int64_t> opRecords;
+    SmallVector<int64_t> opPaths;
+    SmallVector<int64_t> valueRecords;
+    SmallVector<int64_t> valuePaths;
+    SmallVector<int64_t> valueRanges;
+    SmallVector<int64_t> aliasSetRecords;
+    SmallVector<int64_t> aliasMembers;
+  };
+
+  void reservePackedState(PackedStateStorage &packed) {
+    packed.opRecords.reserve(ops.size() *
+                             wave::RegAllocStateAttr::OpFieldCount);
+    packed.valueRecords.reserve(values.size() *
+                                wave::RegAllocStateAttr::ValueFieldCount);
+    packed.aliasSetRecords.reserve(aliasSets.size() *
+                                   wave::RegAllocStateAttr::AliasSetFieldCount);
   }
 
-  ArrayAttr
-  buildLiveRangeArrayAttr(ArrayRef<wave::RegAllocTransformLiveRange> ranges) {
-    SmallVector<Attribute> attrs;
-    for (wave::RegAllocTransformLiveRange range : ranges)
-      attrs.push_back(buildLiveRangeAttr(range));
-    return builder.getArrayAttr(attrs);
-  }
-
-  DictionaryAttr buildOpAttr(const RegAllocAliasOp &record) {
-    SmallVector<NamedAttribute> attrs;
-    attrs.emplace_back(builder.getStringAttr("id"), getI64(record.id));
-    attrs.emplace_back(
-        builder.getStringAttr("name"),
-        builder.getStringAttr(record.op->getName().getStringRef()));
-    attrs.emplace_back(builder.getStringAttr("path"), getI64Array(record.path));
-    attrs.emplace_back(builder.getStringAttr("position"),
-                       getI64(record.position));
-    return getDictionary(attrs);
-  }
-
-  DictionaryAttr buildValueAttr(const RegAllocAliasValue &record) {
-    SmallVector<NamedAttribute> attrs;
-    attrs.emplace_back(builder.getStringAttr("class"),
-                       builder.getStringAttr(waveamdmachine::stringifyRegClass(
-                           record.type.getRegClass())));
-    attrs.emplace_back(builder.getStringAttr("end"), getI64(record.end));
-    if (record.type.getIndex() >= 0)
-      attrs.emplace_back(builder.getStringAttr("fixed"),
-                         getI64(record.type.getIndex()));
-    attrs.emplace_back(builder.getStringAttr("id"), getI64(record.id));
-    attrs.emplace_back(builder.getStringAttr("kind"),
-                       builder.getStringAttr(
-                           record.blockArgument ? "block_arg" : "op_result"));
-    attrs.emplace_back(builder.getStringAttr("number"), getI64(record.number));
-    attrs.emplace_back(builder.getStringAttr("offset"), getI64(record.offset));
-    if (!record.blockArgument)
-      attrs.emplace_back(builder.getStringAttr("op"), getI64(record.opId));
-    attrs.emplace_back(builder.getStringAttr("path"), getI64Array(record.path));
-    attrs.emplace_back(builder.getStringAttr("ranges"),
-                       buildLiveRangeArrayAttr(record.ranges));
-    attrs.emplace_back(builder.getStringAttr("set"), getI64(record.aliasSet));
-    attrs.emplace_back(builder.getStringAttr("start"), getI64(record.start));
-    attrs.emplace_back(builder.getStringAttr("width"),
-                       getI64(record.type.getWidth()));
-    return getDictionary(attrs);
-  }
-
-  DictionaryAttr buildAliasSetAttr(const RegAllocAliasSet &set) {
-    SmallVector<wave::RegAllocTransformAliasMember> members;
-    int64_t width = 0;
-    for (unsigned member : set.members) {
-      const RegAllocAliasValue &value = values[member];
-      unsigned memberWidth = static_cast<unsigned>(value.type.getWidth());
-      members.push_back(
-          {value.id, value.start, value.end, memberWidth, value.offset});
-      width = std::max<int64_t>(width, value.offset + memberWidth);
+  void packOps(PackedStateStorage &packed) {
+    for (auto [index, record] : llvm::enumerate(ops)) {
+      assert(record.id == index && record.position == index &&
+             "regalloc op IDs must match slab order");
+      std::array<int64_t, wave::RegAllocStateAttr::OpFieldCount> row{};
+      row[wave::RegAllocStateAttr::OpPathBegin] = packed.opPaths.size();
+      row[wave::RegAllocStateAttr::OpPathLength] = record.path.size();
+      packed.opPaths.append(record.path.begin(), record.path.end());
+      packed.opRecords.append(row.begin(), row.end());
     }
-    return wave::buildRegAllocTransformAliasSetAttr(
-        builder, values[set.members.front()].type.getRegClass(), set.id,
-        members, static_cast<unsigned>(width));
+  }
+
+  void packValues(PackedStateStorage &packed) {
+    for (auto [index, record] : llvm::enumerate(values)) {
+      assert(record.id == index && record.offset >= 0 &&
+             "regalloc value metadata must be packable");
+      std::array<int64_t, wave::RegAllocStateAttr::ValueFieldCount> row{};
+      row[wave::RegAllocStateAttr::ValueRegClass] =
+          packRegAllocClass(record.type.getRegClass());
+      row[wave::RegAllocStateAttr::ValueKind] =
+          record.blockArgument ? wave::RegAllocStateAttr::PackedBlockArgument
+                               : wave::RegAllocStateAttr::PackedOpResult;
+      row[wave::RegAllocStateAttr::ValueFixed] = record.type.getIndex();
+      row[wave::RegAllocStateAttr::ValueSet] = record.aliasSet;
+      row[wave::RegAllocStateAttr::ValueStart] = record.start;
+      row[wave::RegAllocStateAttr::ValueEnd] = record.end;
+      row[wave::RegAllocStateAttr::ValueWidth] = record.type.getWidth();
+      row[wave::RegAllocStateAttr::ValueOffset] = record.offset;
+      row[wave::RegAllocStateAttr::ValueNumber] = record.number;
+      row[wave::RegAllocStateAttr::ValuePathBegin] = packed.valuePaths.size();
+      row[wave::RegAllocStateAttr::ValuePathLength] = record.path.size();
+      row[wave::RegAllocStateAttr::ValueRangeBegin] =
+          packed.valueRanges.size() / wave::RegAllocStateAttr::RangeFieldCount;
+      row[wave::RegAllocStateAttr::ValueRangeCount] = record.ranges.size();
+      packed.valuePaths.append(record.path.begin(), record.path.end());
+      for (wave::RegAllocTransformLiveRange range : record.ranges) {
+        std::array<int64_t, wave::RegAllocStateAttr::RangeFieldCount>
+            rangeRow{};
+        rangeRow[wave::RegAllocStateAttr::RangeStart] = range.start;
+        rangeRow[wave::RegAllocStateAttr::RangeEnd] = range.end;
+        packed.valueRanges.append(rangeRow.begin(), rangeRow.end());
+      }
+      packed.valueRecords.append(row.begin(), row.end());
+    }
+  }
+
+  void packAliasSets(PackedStateStorage &packed) {
+    for (auto [index, set] : llvm::enumerate(aliasSets)) {
+      assert(set.id == index && !set.members.empty() &&
+             "regalloc alias-set IDs must match slab order");
+      waveamdmachine::RegClass regClass =
+          values[set.members.front()].type.getRegClass();
+      int64_t width = 0;
+      std::array<int64_t, wave::RegAllocStateAttr::AliasSetFieldCount> row{};
+      row[wave::RegAllocStateAttr::AliasSetRegClass] =
+          packRegAllocClass(regClass);
+      row[wave::RegAllocStateAttr::AliasSetMemberBegin] =
+          packed.aliasMembers.size();
+      row[wave::RegAllocStateAttr::AliasSetMemberCount] = set.members.size();
+      for (unsigned member : set.members) {
+        const RegAllocAliasValue &value = values[member];
+        assert(value.aliasSet == index &&
+               value.type.getRegClass() == regClass &&
+               "regalloc alias member metadata must match set");
+        packed.aliasMembers.push_back(member);
+        width = std::max(width, value.offset + value.type.getWidth());
+      }
+      row[wave::RegAllocStateAttr::AliasSetWidth] = width;
+      packed.aliasSetRecords.append(row.begin(), row.end());
+    }
+  }
+
+  wave::RegAllocStateAttr buildPackedAttr() {
+    PackedStateStorage packed;
+    reservePackedState(packed);
+    packOps(packed);
+    packValues(packed);
+    packAliasSets(packed);
+    return wave::RegAllocStateAttr::get(
+        builder.getContext(), wave::RegAllocStateAttr::kVersion,
+        packed.opRecords, packed.opPaths, packed.valueRecords,
+        packed.valuePaths, packed.valueRanges, packed.aliasSetRecords,
+        packed.aliasMembers);
   }
 
   DictionaryAttr buildDebugAttr() {
@@ -743,28 +788,15 @@ private:
   }
 
   DictionaryAttr buildAttr() {
-    SmallVector<Attribute> opAttrs;
-    for (const RegAllocAliasOp &record : ops)
-      opAttrs.push_back(buildOpAttr(record));
-    SmallVector<Attribute> valueAttrs;
-    for (const RegAllocAliasValue &record : values)
-      valueAttrs.push_back(buildValueAttr(record));
-    SmallVector<Attribute> aliasSetAttrs;
-    for (const RegAllocAliasSet &set : aliasSets)
-      aliasSetAttrs.push_back(buildAliasSetAttr(set));
-
     SmallVector<NamedAttribute> attrs;
-    attrs.emplace_back(builder.getStringAttr("alias_sets"),
-                       builder.getArrayAttr(aliasSetAttrs));
     attrs.emplace_back(builder.getStringAttr("debug"), buildDebugAttr());
     attrs.emplace_back(builder.getStringAttr("epoch"), getI64(0));
     attrs.emplace_back(builder.getStringAttr("iteration"), getI64(0));
-    attrs.emplace_back(builder.getStringAttr("ops"),
-                       builder.getArrayAttr(opAttrs));
+    attrs.emplace_back(
+        builder.getStringAttr(wave::getRegAllocTransformPackedStateFieldName()),
+        buildPackedAttr());
     attrs.emplace_back(builder.getStringAttr("stage"),
                        builder.getStringAttr("alias-state"));
-    attrs.emplace_back(builder.getStringAttr("values"),
-                       builder.getArrayAttr(valueAttrs));
     return getDictionary(attrs);
   }
 

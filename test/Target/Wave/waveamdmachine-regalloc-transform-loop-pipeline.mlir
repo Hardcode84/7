@@ -18,8 +18,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
   // CHECK-SAME: assignments = [{base = 0 : i64, class = "vgpr"
   // CHECK-SAME: debug = {alias_edges = 0 : i64, alias_sets = 1 : i64, ops = 1 : i64, values = 1 : i64}
+  // CHECK-SAME: packed = #wave.regalloc_state<version = 1
+  // CHECK-SAME: values = [1, 0, -1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1]
   // CHECK-SAME: stage = "linear-scan-success"
-  // CHECK-SAME: values = [{class = "vgpr"
   func.func @regalloc_transform_loop_mwe(
       %arg0: !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1> {
     return %arg0 : !waveamdmachine.reg<vgpr, 1>
@@ -37,9 +38,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-SAME: {base = 8 : i64, class = "vgpr"
   // CHECK-SAME: {base = 12 : i64, class = "vgpr"
   // CHECK-SAME: debug = {alias_edges = 5 : i64, alias_sets = 4 : i64, ops = 4 : i64, values = 8 : i64}
-  // CHECK-SAME: name = "waveamdmachine.mfma_f32_16x16x32_f16"
+  // CHECK-SAME: packed = #wave.regalloc_state<version = 1
+  // CHECK-SAME: alias_members = [0, 4, 5, 6, 1, 2, 3, 7]
   // CHECK-SAME: stage = "linear-scan-success"
-  // CHECK-SAME: offset = 1 : i64
   func.func @regalloc_transform_loop_aliases(
       %wide: !waveamdmachine.reg<vgpr, 2>,
       %a: !waveamdmachine.reg<vgpr, 4>,
@@ -60,7 +61,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @regalloc_transform_loop_shared_mfma_acc
   // CHECK-SAME: waveamdmachine.regalloc_transform_state =
   // CHECK-SAME: debug = {alias_edges = 2 : i64, alias_sets = 7 : i64, ops = 5 : i64, values = 9 : i64}
-  // CHECK-SAME: name = "waveamdmachine.mfma_f32_16x16x32_f16"
+  // CHECK-SAME: packed = #wave.regalloc_state<version = 1
   // CHECK-SAME: stage = "linear-scan-success"
   func.func @regalloc_transform_loop_shared_mfma_acc(
       %a0: !waveamdmachine.reg<vgpr, 4>,

@@ -99,6 +99,8 @@
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-verify-machine-operands"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-metadata"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-clear-regalloc-transform-state"
 // PIPELINE: transform.named_sequence @waveamd_backend_finish_transform_regalloc
 // PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

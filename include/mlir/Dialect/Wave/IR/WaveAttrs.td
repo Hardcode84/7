@@ -40,6 +40,89 @@ def Wave_CastExtensionPolicyAttr
   let assemblyFormat = "`<` $value `>`";
 }
 
+def Wave_RegAllocStateAttr : Wave_Attr<"RegAllocState", "regalloc_state"> {
+  let summary = "Packed WaveAMD register-allocation state";
+  let description = [{
+    Structural register-allocation state stored as fixed-stride records plus
+    contiguous path, live-range, and alias-member slabs. Record index is the
+    stable operation, value, or alias-set ID.
+  }];
+  let parameters = (ins
+      "int64_t":$version,
+      OptionalArrayRefParameter<"int64_t">:$ops,
+      OptionalArrayRefParameter<"int64_t">:$opPaths,
+      OptionalArrayRefParameter<"int64_t">:$values,
+      OptionalArrayRefParameter<"int64_t">:$valuePaths,
+      OptionalArrayRefParameter<"int64_t">:$valueRanges,
+      OptionalArrayRefParameter<"int64_t">:$aliasSets,
+      OptionalArrayRefParameter<"int64_t">:$aliasMembers);
+  let assemblyFormat = [{
+    `<` `version` `=` $version `,`
+        `ops` `=` `[` (`]`) : ($ops^ `]`)? `,`
+        `op_paths` `=` `[` (`]`) : ($opPaths^ `]`)? `,`
+        `values` `=` `[` (`]`) : ($values^ `]`)? `,`
+        `value_paths` `=` `[` (`]`) : ($valuePaths^ `]`)? `,`
+        `value_ranges` `=` `[` (`]`) : ($valueRanges^ `]`)? `,`
+        `alias_sets` `=` `[` (`]`) : ($aliasSets^ `]`)? `,`
+        `alias_members` `=` `[` (`]`) : ($aliasMembers^ `]`)? `>`
+  }];
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = [{
+    static constexpr int64_t kVersion = 1;
+
+    enum PackedRegClass : int64_t {
+      PackedSGPR,
+      PackedVGPR,
+      PackedAGPR,
+    };
+    enum PackedValueKind : int64_t {
+      PackedBlockArgument,
+      PackedOpResult,
+    };
+    enum OpField : unsigned {
+      OpPathBegin,
+      OpPathLength,
+      OpFieldCount,
+    };
+    enum ValueField : unsigned {
+      ValueRegClass,
+      ValueKind,
+      ValueFixed,
+      ValueSet,
+      ValueStart,
+      ValueEnd,
+      ValueWidth,
+      ValueOffset,
+      ValueNumber,
+      ValuePathBegin,
+      ValuePathLength,
+      ValueRangeBegin,
+      ValueRangeCount,
+      ValueFieldCount,
+    };
+    enum RangeField : unsigned {
+      RangeStart,
+      RangeEnd,
+      RangeFieldCount,
+    };
+    enum AliasSetField : unsigned {
+      AliasSetRegClass,
+      AliasSetWidth,
+      AliasSetMemberBegin,
+      AliasSetMemberCount,
+      AliasSetFieldCount,
+    };
+
+    unsigned getOpCount() const { return getOps().size() / OpFieldCount; }
+    unsigned getValueCount() const {
+      return getValues().size() / ValueFieldCount;
+    }
+    unsigned getAliasSetCount() const {
+      return getAliasSets().size() / AliasSetFieldCount;
+    }
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Symbolic offset algebra: opaque ixsimpl-node handles, round-tripped via
 // the dialect-owned `sym::Store`. Attribute parameters carry pointer-typed

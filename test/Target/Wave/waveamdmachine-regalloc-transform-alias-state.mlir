@@ -162,7 +162,8 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: [[INV:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
     // CHECK-SAME: debug = {alias_edges = 3 : i64, alias_sets = 3 : i64, ops = 5 : i64, values = 6 : i64}
-    // CHECK-SAME: values = [{class = "vgpr", end = 3 : i64, id = 0 : i64
+    // CHECK-SAME: packed = #wave.regalloc_state<version = 1
+    // CHECK-SAME: values = [1, 0, -1, 0, 0, 3, 1
     // CHECK: [[USE:%.*]] = waveamdmachine.v_mov_b32_tuple [[INV]] {registers = 1 : i64}
     // SCAN-LABEL: func.func @loop_invariant_body_use_alias_state(
     // SCAN-SAME: [[INV:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[INV_BASE:[0-9]+]]>
@@ -189,8 +190,9 @@ module attributes {transform.with_named_sequence} {
 
     // CHECK-LABEL: func.func @loop_carry_hole_reuse(
     // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-    // CHECK-SAME: ranges = [{end = 1 : i64, start = 0 : i64}], set = 0 : i64, start = 0 : i64
-    // CHECK-SAME: ranges = [{end = 6 : i64, start = 6 : i64}], set = 0 : i64, start = 6 : i64
+    // CHECK-SAME: packed = #wave.regalloc_state<version = 1
+    // CHECK-SAME: value_ranges = [0, 1, 1, 2, 3, 4, 5, 6, 6, 6]
+    // CHECK-SAME: alias_members = [0, 1, 4, 3, 2]
     // SCAN-LABEL: func.func @loop_carry_hole_reuse(
     // SCAN-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, 0>
     // SCAN-SAME: waveamdmachine.regalloc_assignments

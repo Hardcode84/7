@@ -141,7 +141,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %r9 = transform.apply_registered_pass "waveamd-metadata" to %rv
         : (!transform.any_op) -> !transform.any_op
-    transform.yield %r9 : !transform.any_op
+    %rstate = transform.apply_registered_pass "waveamd-clear-regalloc-transform-state" to %r9
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %rstate : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend_finish_transform_regalloc(

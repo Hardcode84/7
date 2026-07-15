@@ -73,6 +73,12 @@ Regalloc state is a function attribute. It contains:
 State is ephemeral. Every IR rewrite clears it; the next iteration rebuilds it.
 Do not preserve alias sets across rewrites.
 
+Alias state lives in versioned `#wave.regalloc_state`. Fixed-stride op, value,
+range, and alias-set records index contiguous path and member slabs. Record
+index is the stable ID; C++ field enums define the schema. The outer dictionary
+holds stage, failure, assignments, and counters. Legacy dictionary payloads are
+accepted only as authored compatibility input.
+
 Value IDs are structural:
 
 - op result: operation path plus result number;

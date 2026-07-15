@@ -193,6 +193,285 @@ MemoryMappingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
   return success();
 }
 
+static bool isRegAllocPackedUnsigned(int64_t value) {
+  return value >= 0 &&
+         static_cast<uint64_t>(value) <= std::numeric_limits<unsigned>::max();
+}
+
+static LogicalResult
+verifyRegAllocPackedSlice(function_ref<InFlightDiagnostic()> emitError,
+                          StringRef name, int64_t begin, int64_t count,
+                          size_t size) {
+  if (!isRegAllocPackedUnsigned(begin) || !isRegAllocPackedUnsigned(count))
+    return emitError() << name << " slice exceeds supported range";
+  size_t unsignedBegin = static_cast<size_t>(begin);
+  size_t unsignedCount = static_cast<size_t>(count);
+  if (unsignedBegin > size || unsignedCount > size - unsignedBegin)
+    return emitError() << name << " slice is out of bounds";
+  return success();
+}
+
+static LogicalResult
+verifyRegAllocPackedPathComponents(function_ref<InFlightDiagnostic()> emitError,
+                                   StringRef name, ArrayRef<int64_t> paths) {
+  for (int64_t component : paths)
+    if (!isRegAllocPackedUnsigned(component))
+      return emitError() << name << " component exceeds range";
+  return success();
+}
+
+static LogicalResult
+verifyRegAllocPackedOps(function_ref<InFlightDiagnostic()> emitError,
+                        ArrayRef<int64_t> ops, ArrayRef<int64_t> opPaths) {
+  using State = RegAllocStateAttr;
+  size_t nextOpPath = 0;
+  for (size_t index : llvm::seq<size_t>(ops.size() / State::OpFieldCount)) {
+    ArrayRef<int64_t> record =
+        ops.slice(index * State::OpFieldCount, State::OpFieldCount);
+    if (record[State::OpPathBegin] != static_cast<int64_t>(nextOpPath))
+      return emitError() << "regalloc op paths are not contiguous";
+    if (failed(verifyRegAllocPackedSlice(
+            emitError, "regalloc op path", record[State::OpPathBegin],
+            record[State::OpPathLength], opPaths.size())))
+      return failure();
+    if (record[State::OpPathLength] == 0)
+      return emitError() << "regalloc op path is empty";
+    nextOpPath += static_cast<size_t>(record[State::OpPathLength]);
+  }
+  if (nextOpPath != opPaths.size())
+    return emitError() << "regalloc op path slab has trailing data";
+  return verifyRegAllocPackedPathComponents(emitError, "regalloc op path",
+                                            opPaths);
+}
+
+static LogicalResult
+verifyRegAllocPackedValueIdentity(function_ref<InFlightDiagnostic()> emitError,
+                                  ArrayRef<int64_t> record,
+                                  size_t aliasSetCount) {
+  using State = RegAllocStateAttr;
+  int64_t regClass = record[State::ValueRegClass];
+  if (regClass < State::PackedSGPR || regClass > State::PackedAGPR)
+    return emitError() << "regalloc value has invalid register class";
+  int64_t kind = record[State::ValueKind];
+  if (kind < State::PackedBlockArgument || kind > State::PackedOpResult)
+    return emitError() << "regalloc value has invalid kind";
+  int64_t fixed = record[State::ValueFixed];
+  if (fixed != -1 && !isRegAllocPackedUnsigned(fixed))
+    return emitError() << "regalloc value fixed index exceeds range";
+  if (!isRegAllocPackedUnsigned(record[State::ValueSet]) ||
+      static_cast<uint64_t>(record[State::ValueSet]) >= aliasSetCount)
+    return emitError() << "regalloc value alias-set ID is invalid";
+  return success();
+}
+
+static LogicalResult verifyRegAllocPackedValueRangeFields(
+    function_ref<InFlightDiagnostic()> emitError, ArrayRef<int64_t> record) {
+  using State = RegAllocStateAttr;
+  if (!isRegAllocPackedUnsigned(record[State::ValueStart]) ||
+      !isRegAllocPackedUnsigned(record[State::ValueEnd]) ||
+      record[State::ValueEnd] < record[State::ValueStart])
+    return emitError() << "regalloc value range envelope is invalid";
+  if (!isRegAllocPackedUnsigned(record[State::ValueWidth]) ||
+      record[State::ValueWidth] == 0)
+    return emitError() << "regalloc value width is invalid";
+  if (!isRegAllocPackedUnsigned(record[State::ValueOffset]) ||
+      !isRegAllocPackedUnsigned(record[State::ValueNumber]))
+    return emitError() << "regalloc value field exceeds range";
+  return success();
+}
+
+static LogicalResult
+verifyRegAllocPackedValueSlices(function_ref<InFlightDiagnostic()> emitError,
+                                ArrayRef<int64_t> record, size_t valuePathSize,
+                                size_t rangeCount, size_t &nextValuePath,
+                                size_t &nextValueRange) {
+  using State = RegAllocStateAttr;
+  if (record[State::ValuePathBegin] != static_cast<int64_t>(nextValuePath))
+    return emitError() << "regalloc value paths are not contiguous";
+  if (failed(verifyRegAllocPackedSlice(
+          emitError, "regalloc value path", record[State::ValuePathBegin],
+          record[State::ValuePathLength], valuePathSize)))
+    return failure();
+  if (record[State::ValuePathLength] == 0)
+    return emitError() << "regalloc value path is empty";
+  nextValuePath += static_cast<size_t>(record[State::ValuePathLength]);
+  if (record[State::ValueRangeBegin] != static_cast<int64_t>(nextValueRange))
+    return emitError() << "regalloc value ranges are not contiguous";
+  if (failed(verifyRegAllocPackedSlice(
+          emitError, "regalloc value ranges", record[State::ValueRangeBegin],
+          record[State::ValueRangeCount], rangeCount)))
+    return failure();
+  if (record[State::ValueRangeCount] == 0)
+    return emitError() << "regalloc value has no live ranges";
+  nextValueRange += static_cast<size_t>(record[State::ValueRangeCount]);
+  return success();
+}
+
+static LogicalResult
+verifyRegAllocPackedLiveRanges(function_ref<InFlightDiagnostic()> emitError,
+                               ArrayRef<int64_t> record,
+                               ArrayRef<int64_t> valueRanges) {
+  using State = RegAllocStateAttr;
+  size_t rangeBegin = static_cast<size_t>(record[State::ValueRangeBegin]);
+  size_t rangeCount = static_cast<size_t>(record[State::ValueRangeCount]);
+  int64_t priorEnd = -1;
+  for (size_t rangeIndex : llvm::seq<size_t>(rangeCount)) {
+    ArrayRef<int64_t> range =
+        valueRanges.slice((rangeBegin + rangeIndex) * State::RangeFieldCount,
+                          State::RangeFieldCount);
+    if (!isRegAllocPackedUnsigned(range[State::RangeStart]) ||
+        !isRegAllocPackedUnsigned(range[State::RangeEnd]) ||
+        range[State::RangeEnd] < range[State::RangeStart] ||
+        range[State::RangeStart] <= priorEnd)
+      return emitError() << "regalloc value live ranges are invalid";
+    priorEnd = range[State::RangeEnd];
+    if (rangeIndex == 0 &&
+        range[State::RangeStart] != record[State::ValueStart])
+      return emitError() << "regalloc value range start mismatches envelope";
+    if (rangeIndex + 1 == rangeCount &&
+        range[State::RangeEnd] != record[State::ValueEnd])
+      return emitError() << "regalloc value range end mismatches envelope";
+  }
+  return success();
+}
+
+static LogicalResult verifyRegAllocPackedValues(
+    function_ref<InFlightDiagnostic()> emitError, ArrayRef<int64_t> values,
+    ArrayRef<int64_t> valuePaths, ArrayRef<int64_t> valueRanges,
+    size_t aliasSetCount) {
+  using State = RegAllocStateAttr;
+  size_t rangeCount = valueRanges.size() / State::RangeFieldCount;
+  size_t nextValuePath = 0;
+  size_t nextValueRange = 0;
+  for (size_t index :
+       llvm::seq<size_t>(values.size() / State::ValueFieldCount)) {
+    ArrayRef<int64_t> record =
+        values.slice(index * State::ValueFieldCount, State::ValueFieldCount);
+    if (failed(verifyRegAllocPackedValueIdentity(emitError, record,
+                                                 aliasSetCount)))
+      return failure();
+    if (failed(verifyRegAllocPackedValueRangeFields(emitError, record)))
+      return failure();
+    if (failed(verifyRegAllocPackedValueSlices(emitError, record,
+                                               valuePaths.size(), rangeCount,
+                                               nextValuePath, nextValueRange)))
+      return failure();
+    if (failed(verifyRegAllocPackedLiveRanges(emitError, record, valueRanges)))
+      return failure();
+  }
+  if (nextValuePath != valuePaths.size())
+    return emitError() << "regalloc value path slab has trailing data";
+  if (nextValueRange != rangeCount)
+    return emitError() << "regalloc range slab has trailing data";
+  return verifyRegAllocPackedPathComponents(emitError, "regalloc value path",
+                                            valuePaths);
+}
+
+static LogicalResult verifyRegAllocPackedAliasSetHeader(
+    function_ref<InFlightDiagnostic()> emitError, ArrayRef<int64_t> record,
+    size_t aliasMemberSize, size_t &nextAliasMember) {
+  using State = RegAllocStateAttr;
+  int64_t regClass = record[State::AliasSetRegClass];
+  if (regClass < State::PackedSGPR || regClass > State::PackedAGPR)
+    return emitError() << "regalloc alias set has invalid register class";
+  if (!isRegAllocPackedUnsigned(record[State::AliasSetWidth]) ||
+      record[State::AliasSetWidth] == 0)
+    return emitError() << "regalloc alias-set width is invalid";
+  if (record[State::AliasSetMemberBegin] !=
+      static_cast<int64_t>(nextAliasMember))
+    return emitError() << "regalloc alias members are not contiguous";
+  if (failed(verifyRegAllocPackedSlice(emitError, "regalloc alias members",
+                                       record[State::AliasSetMemberBegin],
+                                       record[State::AliasSetMemberCount],
+                                       aliasMemberSize)))
+    return failure();
+  if (record[State::AliasSetMemberCount] == 0)
+    return emitError() << "regalloc alias set has no members";
+  nextAliasMember += static_cast<size_t>(record[State::AliasSetMemberCount]);
+  return success();
+}
+
+static LogicalResult verifyRegAllocPackedAliasSetMembers(
+    function_ref<InFlightDiagnostic()> emitError, size_t setIndex,
+    ArrayRef<int64_t> record, ArrayRef<int64_t> values,
+    ArrayRef<int64_t> aliasMembers, SmallVectorImpl<char> &seenValues) {
+  using State = RegAllocStateAttr;
+  size_t memberBegin = static_cast<size_t>(record[State::AliasSetMemberBegin]);
+  size_t memberCount = static_cast<size_t>(record[State::AliasSetMemberCount]);
+  int64_t regClass = record[State::AliasSetRegClass];
+  int64_t computedWidth = 0;
+  for (size_t memberIndex : llvm::seq<size_t>(memberCount)) {
+    int64_t valueId = aliasMembers[memberBegin + memberIndex];
+    if (!isRegAllocPackedUnsigned(valueId) ||
+        static_cast<uint64_t>(valueId) >= seenValues.size())
+      return emitError() << "regalloc alias member value ID is invalid";
+    size_t unsignedValueId = static_cast<size_t>(valueId);
+    if (seenValues[unsignedValueId])
+      return emitError() << "regalloc value belongs to multiple alias sets";
+    seenValues[unsignedValueId] = 1;
+    ArrayRef<int64_t> value = values.slice(
+        unsignedValueId * State::ValueFieldCount, State::ValueFieldCount);
+    if (value[State::ValueSet] != static_cast<int64_t>(setIndex) ||
+        value[State::ValueRegClass] != regClass)
+      return emitError() << "regalloc alias member metadata mismatches set";
+    computedWidth = std::max(computedWidth, value[State::ValueOffset] +
+                                                value[State::ValueWidth]);
+  }
+  if (computedWidth != record[State::AliasSetWidth])
+    return emitError() << "regalloc alias-set width mismatches members";
+  return success();
+}
+
+static LogicalResult verifyRegAllocPackedAliasSets(
+    function_ref<InFlightDiagnostic()> emitError, ArrayRef<int64_t> values,
+    ArrayRef<int64_t> aliasSets, ArrayRef<int64_t> aliasMembers) {
+  using State = RegAllocStateAttr;
+  size_t valueCount = values.size() / State::ValueFieldCount;
+  SmallVector<char> seenValues(valueCount, 0);
+  size_t nextAliasMember = 0;
+  for (size_t index :
+       llvm::seq<size_t>(aliasSets.size() / State::AliasSetFieldCount)) {
+    ArrayRef<int64_t> record = aliasSets.slice(
+        index * State::AliasSetFieldCount, State::AliasSetFieldCount);
+    if (failed(verifyRegAllocPackedAliasSetHeader(
+            emitError, record, aliasMembers.size(), nextAliasMember)))
+      return failure();
+    if (failed(verifyRegAllocPackedAliasSetMembers(
+            emitError, index, record, values, aliasMembers, seenValues)))
+      return failure();
+  }
+  if (nextAliasMember != aliasMembers.size())
+    return emitError() << "regalloc alias-member slab has trailing data";
+  if (llvm::is_contained(seenValues, 0))
+    return emitError() << "regalloc value has no alias set";
+  return success();
+}
+
+LogicalResult RegAllocStateAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, int64_t version,
+    ArrayRef<int64_t> ops, ArrayRef<int64_t> opPaths, ArrayRef<int64_t> values,
+    ArrayRef<int64_t> valuePaths, ArrayRef<int64_t> valueRanges,
+    ArrayRef<int64_t> aliasSets, ArrayRef<int64_t> aliasMembers) {
+  if (version != kVersion)
+    return emitError() << "unsupported regalloc state version " << version;
+  if (ops.size() % OpFieldCount != 0)
+    return emitError() << "regalloc op slab has partial record";
+  if (values.size() % ValueFieldCount != 0)
+    return emitError() << "regalloc value slab has partial record";
+  if (valueRanges.size() % RangeFieldCount != 0)
+    return emitError() << "regalloc range slab has partial record";
+  if (aliasSets.size() % AliasSetFieldCount != 0)
+    return emitError() << "regalloc alias-set slab has partial record";
+  if (failed(verifyRegAllocPackedOps(emitError, ops, opPaths)))
+    return failure();
+  if (failed(verifyRegAllocPackedValues(emitError, values, valuePaths,
+                                        valueRanges,
+                                        aliasSets.size() / AliasSetFieldCount)))
+    return failure();
+  return verifyRegAllocPackedAliasSets(emitError, values, aliasSets,
+                                       aliasMembers);
+}
+
 LogicalResult TuneEnumAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                    ArrayRef<int64_t> values) {
   if (values.empty())
