@@ -139,7 +139,7 @@ def Wave_TransformRegAllocLoopOp
   }];
   let arguments = (ins TransformHandleTypeInterface:$target,
                        SymbolRefAttr:$body,
-                       DefaultValuedAttr<I64Attr, "512">:$max_iterations);
+                       DefaultValuedAttr<I64Attr, "1024">:$max_iterations);
   let results = (outs TransformHandleTypeInterface:$result);
   let assemblyFormat = [{
     `from` $target `body` `=` $body attr-dict

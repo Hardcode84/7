@@ -354,7 +354,7 @@ Loop state determines the next action:
 
 Providers clear state only after a semantic IR rewrite. SGPR promotion repair
 pins reused moves so remat cannot undo the rewrite on the next iteration. The
-loop still has a `max_iterations` backstop, default 512, and reports the reached
+loop still has a `max_iterations` backstop, default 1024, and reports the reached
 cap. Raising the cap requires a converging workload, a progress argument, and
 compile-time measurements; it is not a cycle repair.
 
