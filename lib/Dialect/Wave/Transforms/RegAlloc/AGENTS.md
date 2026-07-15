@@ -152,7 +152,7 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 - Successful scan exits. Unchanged failure state stalls. Provider rewrite
   clears state and restarts.
 - Providers clear state only after semantic IR progress.
-- Default `max_iterations` is 512. Cap exhaustion is a diagnostic backstop.
+- Default `max_iterations` is 1024. Cap exhaustion is a diagnostic backstop.
 - Do not raise the cap without a converging workload, progress argument, and
   compile-time measurements.
 

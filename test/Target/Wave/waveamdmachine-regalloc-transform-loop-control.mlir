@@ -37,7 +37,7 @@ module attributes {transform.with_named_sequence} {
   transform.named_sequence @default_limit(
       %root: !transform.any_op {transform.consumed}) {
     // DEFAULT: "wave.transform.regalloc_loop"
-    // DEFAULT-SAME: max_iterations = 512 : i64
+    // DEFAULT-SAME: max_iterations = 1024 : i64
     %r = wave.transform.regalloc_loop from %root body = @no_progress_iteration
         : (!transform.any_op) -> !transform.any_op
     transform.yield
