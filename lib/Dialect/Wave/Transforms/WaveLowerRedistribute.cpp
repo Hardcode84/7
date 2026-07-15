@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <utility>
 
 namespace mlir::wave {
@@ -49,6 +50,11 @@ enum class Movement { Alias, Workitem, Wave, Workgroup, Cluster };
 
 enum class EnumerationPurpose { RelationValidation, MovementClassification };
 
+using CoordinateCacheKey =
+    std::tuple<sym::ExprHandle, sym::ExprHandle, sym::ExprHandle,
+               sym::ExprHandle, int64_t, int64_t, int64_t>;
+using CoordinateCache = DenseMap<CoordinateCacheKey, int64_t>;
+
 struct RelationDomain {
   sym::ExprHandle block;
   sym::ExprHandle item;
@@ -56,6 +62,7 @@ struct RelationDomain {
   sym::PredHandle blockRange;
   sym::PredHandle itemRange;
   sym::PredHandle slotRange;
+  CoordinateCache *coordinateCache = nullptr;
 };
 
 struct MaterializedExpr {
@@ -146,7 +153,8 @@ static SimdType getPacketSliceType(Type type, int64_t elements) {
 }
 
 static FailureOr<RelationDomain> buildDomain(sym::Store &store,
-                                             RedistributeOp op) {
+                                             RedistributeOp op,
+                                             CoordinateCache &coordinateCache) {
   int64_t destinationSlots =
       getPacketType(op.getResult().getType()).getNumElements();
   FailureOr<sym::ExprHandle> block = sym::composeExprSym(store, "block");
@@ -161,8 +169,8 @@ static FailureOr<RelationDomain> buildDomain(sym::Store &store,
   if (failed(block) || failed(item) || failed(slot) || failed(blockRange) ||
       failed(itemRange) || failed(slotRange))
     return failure();
-  return RelationDomain{*block,      *item,      *slot,
-                        *blockRange, *itemRange, *slotRange};
+  return RelationDomain{*block,     *item,      *slot,           *blockRange,
+                        *itemRange, *slotRange, &coordinateCache};
 }
 
 static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
@@ -170,6 +178,13 @@ static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
                                              const RelationDomain &domain,
                                              int64_t block, int64_t item,
                                              int64_t slot) {
+  assert(domain.coordinateCache && "coordinate cache is missing");
+  CoordinateCacheKey key{expr,  domain.block, domain.item, domain.slot,
+                         block, item,         slot};
+  auto found = domain.coordinateCache->find(key);
+  if (found != domain.coordinateCache->end())
+    return found->second;
+
   FailureOr<sym::ExprHandle> blockValue = sym::composeExprInt(store, block);
   FailureOr<sym::ExprHandle> itemValue = sym::composeExprInt(store, item);
   FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
@@ -190,6 +205,7 @@ static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
   std::optional<int64_t> value = sym::getIntegerLiteralValue(*simplified);
   if (!value)
     return failure();
+  domain.coordinateCache->try_emplace(std::move(key), *value);
   return *value;
 }
 
@@ -2690,10 +2706,11 @@ static FailureOr<bool> composeAdjacent(IRRewriter &rewriter, RedistributeOp op,
 static LogicalResult
 validateAndClassifyRedistributions(ArrayRef<RedistributeOp> ops,
                                    func::FuncOp func, WaveDialect &dialect,
-                                   DenseMap<Operation *, Movement> &movements) {
+                                   DenseMap<Operation *, Movement> &movements,
+                                   CoordinateCache &coordinateCache) {
   for (RedistributeOp op : ops) {
     FailureOr<RelationDomain> domain =
-        buildDomain(dialect.getSymbolStore(), op);
+        buildDomain(dialect.getSymbolStore(), op, coordinateCache);
     if (failed(domain))
       return op.emitOpError("failed to construct redistribution domain");
     int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
@@ -2746,9 +2763,11 @@ static LogicalResult lowerWorkgroupRedistribution(
 static LogicalResult lowerRedistribution(
     IRRewriter &rewriter, RedistributeOp op, WaveDialect &dialect,
     func::FuncOp func, std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
-    ScratchSequenceMap &sequences, std::optional<Movement> validatedMovement) {
+    ScratchSequenceMap &sequences, std::optional<Movement> validatedMovement,
+    CoordinateCache &coordinateCache) {
   rewriter.setInsertionPoint(op);
-  FailureOr<RelationDomain> domain = buildDomain(dialect.getSymbolStore(), op);
+  FailureOr<RelationDomain> domain =
+      buildDomain(dialect.getSymbolStore(), op, coordinateCache);
   if (failed(domain))
     return op.emitOpError("failed to construct redistribution domain");
   int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
@@ -2784,13 +2803,15 @@ static LogicalResult lowerRedistribution(
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
-                               IRRewriter &rewriter) {
+                               IRRewriter &rewriter,
+                               CoordinateCache &coordinateCache) {
   SmallVector<RedistributeOp> ops;
   func.walk([&](RedistributeOp op) { ops.push_back(op); });
   if (ops.empty())
     return success();
   DenseMap<Operation *, Movement> movements;
-  if (failed(validateAndClassifyRedistributions(ops, func, dialect, movements)))
+  if (failed(validateAndClassifyRedistributions(ops, func, dialect, movements,
+                                                coordinateCache)))
     return failure();
 
   DenseSet<Operation *> erased;
@@ -2808,7 +2829,7 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
     if (found != movements.end())
       movement = found->second;
     if (failed(lowerRedistribution(rewriter, op, dialect, func, analysis,
-                                   sequences, movement)))
+                                   sequences, movement, coordinateCache)))
       return failure();
   }
   return success();
@@ -2823,13 +2844,14 @@ struct WaveLowerRedistributePass
       return signalPassFailure();
     }
     IRRewriter rewriter(&getContext());
+    CoordinateCache coordinateCache;
     SmallVector<func::FuncOp> funcs;
     if (auto func = dyn_cast<func::FuncOp>(getOperation()))
       funcs.push_back(func);
     else
       getOperation()->walk([&](func::FuncOp func) { funcs.push_back(func); });
     for (func::FuncOp func : funcs)
-      if (failed(lowerFunc(func, *dialect, rewriter)))
+      if (failed(lowerFunc(func, *dialect, rewriter, coordinateCache)))
         return signalPassFailure();
   }
 };
