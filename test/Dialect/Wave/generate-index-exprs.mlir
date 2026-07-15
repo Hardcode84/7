@@ -427,14 +427,18 @@ func.func @index_expr_assumed_select_binding_expands(
 // -----
 
 // CHECK-LABEL: func.func @assumed_existing_index_expr_binding_expands
-// CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
+// CHECK-SAME: (%[[ORIGIN:.*]]: i32, %[[LANE:.*]]: !wave.simd<i32, 32>)
 func.func @assumed_existing_index_expr_binding_expands(
-    %lane: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
-  %inner = wave.index_expr <"1 + lid"> ["lid"](%lane)
-      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %bounded = wave.assume %inner as "x" [#wave.pred<"x >= 0">]
+    %origin: i32, %lane: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
+  %inner = wave.index_expr <"origin + xor(1, lid)">
+      ["origin", "lid"](%origin, %lane)
+      : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %bounded = wave.assume %inner as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
       : !wave.simd<index, 32>
-  // CHECK: [[OUT:%.*]] = wave.index_expr <"2*(1 + lid)"> assuming [#wave.pred<"1 + lid >= 0">] ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: [[OUT:%.*]] = wave.index_expr <"2*(origin + xor(1, lid))"> assuming
+  // CHECK-SAME: #wave.pred<"2*(origin + xor(1, lid)) >= 0 & -62 + 2*origin + 2*xor(1, lid) <= 0">
+  // CHECK-SAME: ["origin", "lid"](%[[ORIGIN]], %[[LANE]]) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %outer = wave.index_expr <"2*x"> ["x"](%bounded)
       : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
   return %outer : !wave.simd<index, 32>

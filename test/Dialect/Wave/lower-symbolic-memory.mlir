@@ -507,3 +507,76 @@ func.func @scf_if_control(%x: index,
   }
   return
 }
+
+// -----
+
+// Pre-divide before integer packet substitution; rational xor stays integral.
+// CHECK-LABEL: func.func @predivide_packet_binding(
+// CHECK-COUNT-1: wave.store
+// CHECK-NOT: wave.scatter
+func.func @predivide_packet_binding(
+    %value: !wave.simd<vector<1xf16>, 32>,
+    %base: !wave.ptr<#wave.shared, f16>,
+    %raw: !wave.simd<i32, 32>) {
+  %index = wave.index_expr
+      <"xor(1/8*(8*Mod(raw0, 2) + 32*Mod(floor(1/4*raw0), 2) + 16*Mod(floor(1/2*raw0), 2)), Mod(floor(1/16*raw0), 8))">
+      ["raw0"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %indices = wave.pack %index
+      : !wave.simd<index, 32> -> !wave.simd<vector<1xindex>, 32>
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"16 * idx">>
+      bindings []() packet_bindings ["idx"](%indices)
+      : (!wave.simd<vector<1xf16>, 32>, !wave.ptr<#wave.shared, f16>,
+         !wave.simd<vector<1xindex>, 32>) -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Expand equivalent integer packet expressions before adjacency proofs.
+// CHECK-LABEL: func.func @expanded_packet_adjacency(
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<vector<2xf16>, 32>
+// CHECK-NOT: wave.store {{.*}}!wave.simd<f16, 32>
+func.func @expanded_packet_adjacency(
+    %value: !wave.simd<vector<2xf16>, 32>,
+    %base: !wave.ptr<#wave.shared, f16>,
+    %raw: !wave.simd<i32, 32>) {
+  %i0 = wave.index_expr
+      <"64*floor(1/8*raw0) + 8*xor(1/8*(8*Mod(raw0, 2) + 32*Mod(floor(1/4*raw0), 2) + 16*Mod(floor(1/2*raw0), 2)), Mod(floor(1/16*raw0), 8))">
+      ["raw0"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %i1 = wave.index_expr
+      <"1 + 64*floor(1/8*raw0) + 8*xor(Mod(raw0, 2) + 4*Mod(floor(1/4*raw0), 2) + 2*Mod(floor(1/2*raw0), 2), Mod(floor(1/16*raw0), 8))">
+      ["raw0"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %indices = wave.pack %i0, %i1
+      : !wave.simd<index, 32>, !wave.simd<index, 32>
+      -> !wave.simd<vector<2xindex>, 32>
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"16 * idx">>
+      bindings []() packet_bindings ["idx"](%indices)
+      : (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#wave.shared, f16>,
+         !wave.simd<vector<2xindex>, 32>) -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Expand an affine bit offset before rejecting exact byte division.
+// CHECK-LABEL: func.func @expanded_exact_byte_division(
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<8xf16>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @expanded_exact_byte_division(
+    %base: !wave.ptr<#wave.global, f16>,
+    %offset: !wave.simd<index, 32>)
+    -> !wave.simd<vector<8xf16>, 32> {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"16 * offset + 16 * slot">>
+      bindings ["offset"](%offset) packet_bindings []()
+      : (!wave.ptr<#wave.global, f16>, !wave.simd<index, 32>)
+      -> (!wave.simd<vector<8xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<8xf16>, 32>
+}

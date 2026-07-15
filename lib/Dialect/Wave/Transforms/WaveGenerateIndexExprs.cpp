@@ -391,6 +391,27 @@ inferSignedI64Range(sym::Store &store, sym::ExprHandle expr,
   return SignedI64Range{*lo, *hi};
 }
 
+static LogicalResult
+appendExprSignedRangeAssumption(sym::Store &store, sym::ExprHandle expr,
+                                SignedI64Range range,
+                                SmallVectorImpl<sym::PredHandle> &assumptions) {
+  constexpr llvm::StringLiteral resultName = "__wave_generated_result";
+  FailureOr<sym::ExprHandle> result = symbolExpr(store, resultName);
+  FailureOr<sym::PredHandle> resultRange =
+      sym::rangeAssumption(store, resultName, range.first, range.second);
+  if (failed(result) || failed(resultRange))
+    return failure();
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{*result, expr}};
+  FailureOr<sym::PredHandle> remapped =
+      sym::substitutePred(store, *resultRange, substitution);
+  if (failed(remapped))
+    return failure();
+  if (!isPredicateImplied(store, *remapped, assumptions))
+    assumptions.push_back(*remapped);
+  return success();
+}
+
 static std::optional<SignedI64Range>
 intersectRange(std::optional<SignedI64Range> lhs,
                std::optional<SignedI64Range> rhs) {
@@ -1752,6 +1773,10 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
   if (!changed)
     return false;
 
+  // Keep result bounds when binding expansion hides producer correlations.
+  std::optional<SignedI64Range> resultRange =
+      inferSignedI64Range(store, op.getExpr().getValue(), state.assumptions);
+
   FailureOr<SmallVector<sym::PredHandle>> assumptions =
       substituteIndexExprPredicates(store, state.assumptions, substitutions);
   if (failed(assumptions))
@@ -1760,6 +1785,10 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
       substituteAndSimplifyGenerated(op, store, substitutions, *assumptions);
   if (failed(simplified))
     return failure();
+  if (resultRange && failed(appendExprSignedRangeAssumption(
+                         store, *simplified, *resultRange, *assumptions)))
+    return op.emitError(
+        "failed to preserve generated wave.index_expr result range");
   SmallVector<IndexExprBinding> liveBindings =
       collectLiveBindings(*simplified, state.bindings);
   llvm::DenseSet<StringRef> liveSymbols;

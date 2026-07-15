@@ -327,10 +327,14 @@ void runDefinednessQueries(sym::Store &store) {
   }
   llvm::SmallVector<sym::PredHandle, 1> assumptions{*range};
   sym::ExprHandle safe = mustParseExpr(store, "floor(1 / (x + 1))");
+  sym::ExprHandle literalDenominator = mustParseExpr(store, "floor(1/32*x)");
   sym::ExprHandle partial = mustParseExpr(store, "floor(1 / (x - 1))");
   sym::ExprHandle uncovered = mustParseExpr(store, "Piecewise((x, x < 16))");
   llvm::outs() << "defined-safe-div: "
                << boolName(sym::provablyDefined(store, safe, assumptions))
+               << "\n";
+  llvm::outs() << "defined-literal-denominator: "
+               << boolName(sym::provablyDefined(store, literalDenominator, {}))
                << "\n";
   llvm::outs() << "defined-partial-div: "
                << boolName(sym::provablyDefined(store, partial, assumptions))

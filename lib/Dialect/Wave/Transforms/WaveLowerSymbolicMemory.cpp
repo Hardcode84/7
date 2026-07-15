@@ -780,6 +780,15 @@ static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
         sym::simplifyExpr(store, *difference, assumptions);
     if (succeeded(simplified) && sym::getIntegerLiteralValue(*simplified) == 0)
       return true;
+    if (succeeded(simplified)) {
+      FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *simplified);
+      if (succeeded(expanded)) {
+        simplified = sym::simplifyExpr(store, *expanded, assumptions);
+        if (succeeded(simplified) &&
+            sym::getIntegerLiteralValue(*simplified) == 0)
+          return true;
+      }
+    }
   }
   FailureOr<sym::PredHandle> equal =
       sym::composePredCmp(store, lhs, sym::PredCmpOp::Eq, rhs);

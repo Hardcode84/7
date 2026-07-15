@@ -216,7 +216,9 @@ func.func @merge_nested_index_expr_through_assume_chain(%out: !wave.ptr<#wave.gl
   %outer = wave.index_expr <"2*x"> ["x"](%bounded2)
       : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
   // CHECK-NOT: wave.assume
-  // CHECK: %[[OFF:.*]] = wave.index_expr <"2*lid"> assuming {{.*}} ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: %[[OFF:.*]] = wave.index_expr <"2*lid"> assuming
+  // CHECK-SAME: #wave.pred<"2*lid >= 0 & -62 + 2*lid <= 0">
+  // CHECK-SAME: ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK: wave.ptr_add %[[OUT]], %[[OFF]]
   %ptrs = wave.ptr_add %out, %outer
       : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
