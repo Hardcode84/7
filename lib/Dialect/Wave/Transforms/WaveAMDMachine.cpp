@@ -4075,8 +4075,21 @@ static std::optional<VectorType> getSimdVectorTypeNoDiag(Type type) {
   return vecType;
 }
 
+static bool isScalarMemoryPayloadElementBits(unsigned bits) {
+  return bits == 8 || bits == 16 || bits == 32;
+}
+
+static bool hasFixedSingletonSimdVectorPayload(Type type) {
+  std::optional<VectorType> vector = getSimdVectorTypeNoDiag(type);
+  if (!vector || vector->isScalable() || vector->getNumElements() != 1)
+    return false;
+  Type elementType = vector->getElementType();
+  return elementType.isIntOrFloat() &&
+         isScalarMemoryPayloadElementBits(elementType.getIntOrFloatBitWidth());
+}
+
 static bool isMemoryPayloadElementBits(unsigned bits) {
-  return bits == 4 || bits == 8 || bits == 16 || bits == 32;
+  return bits == 4 || isScalarMemoryPayloadElementBits(bits);
 }
 
 static std::optional<unsigned> getVectorPayloadBits(VectorType vecType,
@@ -4404,6 +4417,13 @@ static bool canPackMmaScaleLowDword(WaveAMDMachineSelector &S, PackOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
+  if (op.getInputs().size() == 1 &&
+      hasFixedSingletonSimdVectorPayload(op.getResult().getType())) {
+    values[op.getResult()] = expect(op.getInputs().front(), op);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   FailureOr<MemoryPayloadShape> shape =
       getSimdVectorPayloadShape(op, op.getResult().getType(), "pack");
   if (failed(shape))
@@ -4452,11 +4472,40 @@ LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
   return success();
 }
 
+static Value extractScalarPayload(WaveAMDMachineSelector &S, ExtractOp op,
+                                  const MemoryPayloadShape &shape) {
+  Location loc = op.getLoc();
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  Value word = S.expect(op.getSource(), op);
+  unsigned bitOffset = op.getIndex() * shape.elementBits;
+  unsigned wordIndex = bitOffset / 32;
+  unsigned wordShift = bitOffset % 32;
+  if (shape.registers != 1) {
+    SmallVector<Type> elementTypes(shape.registers, vgprType);
+    auto split = waveamdmachine::TupleToElementsOp::create(S.builder, loc,
+                                                           elementTypes, word);
+    word = split.getElements()[wordIndex];
+  }
+  if (wordShift) {
+    word = S.ensureVGPRForVSrc1(loc, word);
+    word = waveamdmachine::VLshrrevB32Op::create(
+        S.builder, loc, vgprType, word, createImm(S.builder, loc, wordShift));
+  }
+  return maskLowBits(S, loc, word, shape.elementBits);
+}
+
 LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
   FailureOr<bool> defer = canDeferExtractSelection(op);
   if (failed(defer))
     return failure();
   if (*defer) {
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  if (op.getIndex() == 0 &&
+      hasFixedSingletonSimdVectorPayload(op.getSource().getType())) {
+    values[op.getResult()] = expect(op.getSource(), op);
     eraseIfTopLevel(op);
     return success();
   }
@@ -4488,23 +4537,7 @@ LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
     return success();
   }
 
-  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
-  Value word = expect(op.getSource(), op);
-  unsigned bitOffset = op.getIndex() * shape->elementBits;
-  unsigned wordIndex = bitOffset / 32;
-  unsigned wordShift = bitOffset % 32;
-  if (shape->registers != 1) {
-    SmallVector<Type> elementTypes(shape->registers, vgprType);
-    auto split = waveamdmachine::TupleToElementsOp::create(builder, loc,
-                                                           elementTypes, word);
-    word = split.getElements()[wordIndex];
-  }
-  if (wordShift) {
-    word = ensureVGPRForVSrc1(loc, word);
-    word = waveamdmachine::VLshrrevB32Op::create(
-        builder, loc, vgprType, word, createImm(builder, loc, wordShift));
-  }
-  values[op.getResult()] = maskLowBits(*this, loc, word, shape->elementBits);
+  values[op.getResult()] = extractScalarPayload(*this, op, *shape);
   eraseIfTopLevel(op);
   return success();
 }
