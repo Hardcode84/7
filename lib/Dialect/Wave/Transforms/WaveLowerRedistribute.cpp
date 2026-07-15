@@ -47,6 +47,8 @@ static constexpr int64_t kScratchVectorizationScanMultiplier = 8;
 
 enum class Movement { Alias, Workitem, Wave, Workgroup, Cluster };
 
+enum class EnumerationPurpose { RelationValidation, MovementClassification };
+
 struct RelationDomain {
   sym::ExprHandle block;
   sym::ExprHandle item;
@@ -286,24 +288,76 @@ static Movement finishEnumeratedClassification(bool sameBlock, bool sameItem,
   return Movement::Workgroup;
 }
 
-static FailureOr<Movement> classifyByEnumeration(sym::Store &store,
-                                                 RedistributeOp op,
-                                                 const RelationDomain &domain,
-                                                 int64_t waveWidth) {
+static bool redistributionDomainProven(sym::Store &store, RedistributeOp op,
+                                       const RelationDomain &domain) {
+  RedistributionAttr relation = op.getRelation();
+  std::array<sym::PredHandle, 3> assumptions{
+      domain.blockRange, domain.itemRange, domain.slotRange};
+  int64_t sourceSlots =
+      getPacketType(op.getSource().getType()).getNumElements();
+  return sym::provablyDefined(store, relation.getSourceBlock(), assumptions) &&
+         sym::provablyDefined(store, relation.getSourceItem(), assumptions) &&
+         sym::provablyDefined(store, relation.getSourceSlot(), assumptions) &&
+         sym::provablyInRange(store, relation.getSourceBlock(), assumptions, 0,
+                              relation.getBlocks() - 1) &&
+         sym::provablyInRange(store, relation.getSourceItem(), assumptions, 0,
+                              relation.getItems() - 1) &&
+         sym::provablyInRange(store, relation.getSourceSlot(), assumptions, 0,
+                              sourceSlots - 1);
+}
+
+static void emitEnumerationLimit(RedistributeOp op,
+                                 EnumerationPurpose purpose) {
+  if (purpose == EnumerationPurpose::RelationValidation)
+    op.emitOpError(
+        "relation needs exhaustive validation beyond the 2^20 point limit");
+  else
+    op.emitOpError(
+        "symbolic movement classification exceeds the 2^20 point limit");
+}
+
+static LogicalResult
+validateRedistributionPoint(RedistributeOp op, int64_t sourceBlock,
+                            int64_t sourceItem, int64_t sourceSlot,
+                            int64_t sourceSlots, int64_t destinationBlock,
+                            int64_t destinationItem, int64_t destinationSlot) {
+  RedistributionAttr relation = op.getRelation();
+  if (sourceBlock < 0 || sourceBlock >= relation.getBlocks())
+    return op.emitOpError("source block ")
+           << sourceBlock << " is out of bounds at destination ("
+           << destinationBlock << ", " << destinationItem << ", "
+           << destinationSlot << ")";
+  if (sourceItem < 0 || sourceItem >= relation.getItems())
+    return op.emitOpError("source item ")
+           << sourceItem << " is out of bounds at destination ("
+           << destinationBlock << ", " << destinationItem << ", "
+           << destinationSlot << ")";
+  if (sourceSlot < 0 || sourceSlot >= sourceSlots)
+    return op.emitOpError("source slot ")
+           << sourceSlot << " is out of bounds at destination ("
+           << destinationBlock << ", " << destinationItem << ", "
+           << destinationSlot << ")";
+  return success();
+}
+
+static bool fitsRelationPointBudget(RedistributeOp op) {
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  std::optional<int64_t> points = llvm::checkedMul(op.getRelation().getBlocks(),
+                                                   op.getRelation().getItems());
+  if (points)
+    points = llvm::checkedMul(*points, resultSlots);
+  return points && *points <= kMaxRelationPoints;
+}
+
+static FailureOr<Movement> validateAndClassifyByEnumeration(
+    sym::Store &store, RedistributeOp op, const RelationDomain &domain,
+    int64_t waveWidth, EnumerationPurpose purpose) {
   int64_t items = op.getRelation().getItems();
   int64_t blocks = op.getRelation().getBlocks();
   int64_t slots = getPacketType(op.getResult().getType()).getNumElements();
-  std::optional<int64_t> points = llvm::checkedMul(blocks, items);
-  if (points)
-    points = llvm::checkedMul(*points, slots);
-  if (!points) {
-    op.emitOpError(
-        "symbolic movement classification exceeds the 2^20 point limit");
-    return failure();
-  }
-  if (*points > kMaxRelationPoints) {
-    op.emitOpError(
-        "symbolic movement classification exceeds the 2^20 point limit");
+  if (!fitsRelationPointBudget(op)) {
+    emitEnumerationLimit(op, purpose);
     return failure();
   }
 
@@ -311,6 +365,8 @@ static FailureOr<Movement> classifyByEnumeration(sym::Store &store,
   bool sameItem = true;
   bool sameWave = true;
   bool identitySlot = op.getSource().getType() == op.getResult().getType();
+  int64_t sourceSlots =
+      getPacketType(op.getSource().getType()).getNumElements();
   for (int64_t block : llvm::seq<int64_t>(0, blocks)) {
     for (int64_t item : llvm::seq<int64_t>(0, items)) {
       for (int64_t slot : llvm::seq<int64_t>(0, slots)) {
@@ -322,9 +378,14 @@ static FailureOr<Movement> classifyByEnumeration(sym::Store &store,
         FailureOr<int64_t> sourceSlot = evaluateCoordinate(
             store, op.getRelation().getSourceSlot(), domain, block, item, slot);
         if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot)) {
-          op.emitOpError("failed to evaluate verified redistribution relation");
+          op.emitOpError("relation is not total at destination (")
+              << block << ", " << item << ", " << slot << ")";
           return failure();
         }
+        if (failed(validateRedistributionPoint(op, *sourceBlock, *sourceItem,
+                                               *sourceSlot, sourceSlots, block,
+                                               item, slot)))
+          return failure();
         sameBlock &= *sourceBlock == block;
         sameItem &= *sourceItem == item;
         sameWave &= *sourceItem / waveWidth == item / waveWidth;
@@ -336,10 +397,13 @@ static FailureOr<Movement> classifyByEnumeration(sym::Store &store,
                                         identitySlot);
 }
 
-static FailureOr<Movement> classifyMovement(sym::Store &store,
-                                            RedistributeOp op,
-                                            const RelationDomain &domain,
-                                            int64_t waveWidth) {
+static FailureOr<Movement>
+validateAndClassifyMovement(sym::Store &store, RedistributeOp op,
+                            const RelationDomain &domain, int64_t waveWidth) {
+  if (!redistributionDomainProven(store, op, domain))
+    return validateAndClassifyByEnumeration(
+        store, op, domain, waveWidth, EnumerationPurpose::RelationValidation);
+
   std::array<sym::PredHandle, 3> assumptions{
       domain.blockRange, domain.itemRange, domain.slotRange};
   sym::CheckResult sameBlock = proveEqual(
@@ -347,7 +411,9 @@ static FailureOr<Movement> classifyMovement(sym::Store &store,
   if (sameBlock == sym::CheckResult::False)
     return Movement::Cluster;
   if (sameBlock == sym::CheckResult::Unknown)
-    return classifyByEnumeration(store, op, domain, waveWidth);
+    return validateAndClassifyByEnumeration(
+        store, op, domain, waveWidth,
+        EnumerationPurpose::MovementClassification);
   sym::CheckResult sameItem = proveEqual(
       store, op.getRelation().getSourceItem(), domain.item, assumptions);
   sym::CheckResult identitySlot = proveEqual(
@@ -366,7 +432,8 @@ static FailureOr<Movement> classifyMovement(sym::Store &store,
     return Movement::Wave;
   if (sameWave == sym::CheckResult::False)
     return Movement::Workgroup;
-  return classifyByEnumeration(store, op, domain, waveWidth);
+  return validateAndClassifyByEnumeration(
+      store, op, domain, waveWidth, EnumerationPurpose::MovementClassification);
 }
 
 static bool hasSymbol(sym::ExprHandle expr, StringRef needle) {
@@ -552,16 +619,6 @@ static bool supportsOrderedVectorAt(const ScratchRelationMap &map,
       return false;
   }
   return true;
-}
-
-static bool fitsRelationPointBudget(RedistributeOp op) {
-  int64_t resultSlots =
-      getPacketType(op.getResult().getType()).getNumElements();
-  std::optional<int64_t> points = llvm::checkedMul(op.getRelation().getBlocks(),
-                                                   op.getRelation().getItems());
-  if (points)
-    points = llvm::checkedMul(*points, resultSlots);
-  return points && *points <= kMaxRelationPoints;
 }
 
 static FailureOr<bool> supportsVectorTransfer(sym::Store &store,
@@ -2613,40 +2670,56 @@ static LogicalResult composeOne(RedistributeOp previous, RedistributeOp op,
   return op.verify();
 }
 
-static LogicalResult composeAdjacent(IRRewriter &rewriter, RedistributeOp op,
-                                     sym::Store &store,
-                                     DenseSet<Operation *> &erased) {
+static FailureOr<bool> composeAdjacent(IRRewriter &rewriter, RedistributeOp op,
+                                       sym::Store &store,
+                                       DenseSet<Operation *> &erased) {
+  bool changed = false;
   while (RedistributeOp previous =
              op.getSource().getDefiningOp<RedistributeOp>()) {
     if (!canCompose(previous, op))
       break;
     if (failed(composeOne(previous, op, store)))
       return failure();
+    changed = true;
     erased.insert(previous.getOperation());
     rewriter.eraseOp(previous);
   }
-  return success();
+  return changed;
 }
 
-static LogicalResult validateRedistributions(ArrayRef<RedistributeOp> ops,
-                                             func::FuncOp func) {
+static LogicalResult
+validateAndClassifyRedistributions(ArrayRef<RedistributeOp> ops,
+                                   func::FuncOp func, WaveDialect &dialect,
+                                   DenseMap<Operation *, Movement> &movements) {
   for (RedistributeOp op : ops) {
+    FailureOr<RelationDomain> domain =
+        buildDomain(dialect.getSymbolStore(), op);
+    if (failed(domain))
+      return op.emitOpError("failed to construct redistribution domain");
     int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
+    FailureOr<Movement> movement = validateAndClassifyMovement(
+        dialect.getSymbolStore(), op, *domain, width);
+    if (failed(movement))
+      return failure();
+    movements[op.getOperation()] = *movement;
     if (failed(validateWorkgroup(op, func, width)))
       return failure();
   }
   return success();
 }
 
-static LogicalResult composeRedistributions(IRRewriter &rewriter,
-                                            ArrayRef<RedistributeOp> ops,
-                                            sym::Store &store,
-                                            DenseSet<Operation *> &erased) {
+static LogicalResult
+composeRedistributions(IRRewriter &rewriter, ArrayRef<RedistributeOp> ops,
+                       sym::Store &store, DenseSet<Operation *> &erased,
+                       DenseMap<Operation *, Movement> &movements) {
   for (RedistributeOp op : llvm::reverse(ops)) {
     if (erased.contains(op.getOperation()))
       continue;
-    if (failed(composeAdjacent(rewriter, op, store, erased)))
+    FailureOr<bool> changed = composeAdjacent(rewriter, op, store, erased);
+    if (failed(changed))
       return failure();
+    if (*changed)
+      movements.erase(op.getOperation());
   }
   return success();
 }
@@ -2670,25 +2743,30 @@ static LogicalResult lowerWorkgroupRedistribution(
                         *analysis, sequences);
 }
 
-static LogicalResult
-lowerRedistribution(IRRewriter &rewriter, RedistributeOp op,
-                    WaveDialect &dialect, func::FuncOp func,
-                    std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
-                    ScratchSequenceMap &sequences) {
+static LogicalResult lowerRedistribution(
+    IRRewriter &rewriter, RedistributeOp op, WaveDialect &dialect,
+    func::FuncOp func, std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
+    ScratchSequenceMap &sequences, std::optional<Movement> validatedMovement) {
   rewriter.setInsertionPoint(op);
   FailureOr<RelationDomain> domain = buildDomain(dialect.getSymbolStore(), op);
   if (failed(domain))
     return op.emitOpError("failed to construct redistribution domain");
   int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
-  FailureOr<Movement> movement =
-      classifyMovement(dialect.getSymbolStore(), op, *domain, width);
-  if (failed(movement))
-    return failure();
+  Movement movement;
+  if (validatedMovement) {
+    movement = *validatedMovement;
+  } else {
+    FailureOr<Movement> classified = validateAndClassifyMovement(
+        dialect.getSymbolStore(), op, *domain, width);
+    if (failed(classified))
+      return failure();
+    movement = *classified;
+  }
   if (failed(validateBlockLowering(op, dialect.getSymbolStore(), *domain,
-                                   *movement)))
+                                   movement)))
     return failure();
 
-  switch (*movement) {
+  switch (movement) {
   case Movement::Alias:
     rewriter.replaceOp(op, op.getSource());
     return success();
@@ -2711,12 +2789,13 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
   func.walk([&](RedistributeOp op) { ops.push_back(op); });
   if (ops.empty())
     return success();
-  if (failed(validateRedistributions(ops, func)))
+  DenseMap<Operation *, Movement> movements;
+  if (failed(validateAndClassifyRedistributions(ops, func, dialect, movements)))
     return failure();
 
   DenseSet<Operation *> erased;
   if (failed(composeRedistributions(rewriter, ops, dialect.getSymbolStore(),
-                                    erased)))
+                                    erased, movements)))
     return failure();
 
   ScratchSequenceMap sequences;
@@ -2724,8 +2803,12 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
   for (RedistributeOp op : ops) {
     if (erased.contains(op.getOperation()))
       continue;
+    std::optional<Movement> movement;
+    auto found = movements.find(op.getOperation());
+    if (found != movements.end())
+      movement = found->second;
     if (failed(lowerRedistribution(rewriter, op, dialect, func, analysis,
-                                   sequences)))
+                                   sequences, movement)))
       return failure();
   }
   return success();

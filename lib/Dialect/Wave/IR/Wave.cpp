@@ -29,7 +29,6 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -2925,33 +2924,6 @@ LogicalResult ShuffleOp::verify() {
   return success();
 }
 
-static FailureOr<int64_t> evaluateRedistributionCoordinate(
-    sym::Store &store, sym::ExprHandle expr, sym::ExprHandle blockSymbol,
-    sym::ExprHandle itemSymbol, sym::ExprHandle slotSymbol, int64_t block,
-    int64_t item, int64_t slot) {
-  FailureOr<sym::ExprHandle> blockValue = sym::composeExprInt(store, block);
-  FailureOr<sym::ExprHandle> itemValue = sym::composeExprInt(store, item);
-  FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
-  if (failed(blockValue) || failed(itemValue) || failed(slotValue))
-    return failure();
-  std::array<sym::ExprSubstitution, 3> substitutions{
-      sym::ExprSubstitution{blockSymbol, *blockValue},
-      sym::ExprSubstitution{itemSymbol, *itemValue},
-      sym::ExprSubstitution{slotSymbol, *slotValue}};
-  FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, expr, substitutions);
-  if (failed(substituted))
-    return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, *substituted);
-  if (failed(simplified))
-    return failure();
-  std::optional<int64_t> value = sym::getIntegerLiteralValue(*simplified);
-  if (!value)
-    return failure();
-  return *value;
-}
-
 static LogicalResult verifyRedistributionSymbols(RedistributeOp op,
                                                  sym::ExprHandle expr,
                                                  StringRef coordinate) {
@@ -2971,107 +2943,6 @@ static LogicalResult verifyRedistributionSymbols(RedistributeOp op,
   return success();
 }
 
-struct RedistributionVerificationDomain {
-  sym::ExprHandle block;
-  sym::ExprHandle item;
-  sym::ExprHandle slot;
-  std::array<sym::PredHandle, 3> assumptions;
-};
-
-static FailureOr<RedistributionVerificationDomain>
-buildRedistributionVerificationDomain(sym::Store &store,
-                                      RedistributionAttr relation,
-                                      int64_t destinationSlots) {
-  FailureOr<sym::ExprHandle> block = sym::composeExprSym(store, "block");
-  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
-  if (failed(block) || failed(item))
-    return failure();
-  FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
-  if (failed(slot))
-    return failure();
-  FailureOr<sym::PredHandle> blockRange =
-      sym::rangeAssumption(store, "block", 0, relation.getBlocks() - 1);
-  if (failed(blockRange))
-    return failure();
-  FailureOr<sym::PredHandle> itemRange =
-      sym::rangeAssumption(store, "item", 0, relation.getItems() - 1);
-  if (failed(itemRange))
-    return failure();
-  FailureOr<sym::PredHandle> slotRange =
-      sym::rangeAssumption(store, "slot", 0, destinationSlots - 1);
-  if (failed(slotRange))
-    return failure();
-  return RedistributionVerificationDomain{
-      *block, *item, *slot, {*blockRange, *itemRange, *slotRange}};
-}
-
-static bool
-redistributionBoundsProven(sym::Store &store, RedistributionAttr relation,
-                           const RedistributionVerificationDomain &domain,
-                           int64_t sourceSlots) {
-  bool blockProven =
-      sym::provablyInRange(store, relation.getSourceBlock(), domain.assumptions,
-                           0, relation.getBlocks() - 1);
-  bool itemProven =
-      sym::provablyInRange(store, relation.getSourceItem(), domain.assumptions,
-                           0, relation.getItems() - 1);
-  bool slotProven = sym::provablyInRange(
-      store, relation.getSourceSlot(), domain.assumptions, 0, sourceSlots - 1);
-  return blockProven && itemProven && slotProven;
-}
-
-static bool
-redistributionDomainProven(sym::Store &store, RedistributionAttr relation,
-                           const RedistributionVerificationDomain &domain,
-                           int64_t sourceSlots) {
-  return sym::provablyDefined(store, relation.getSourceBlock(),
-                              domain.assumptions) &&
-         sym::provablyDefined(store, relation.getSourceItem(),
-                              domain.assumptions) &&
-         sym::provablyDefined(store, relation.getSourceSlot(),
-                              domain.assumptions) &&
-         redistributionBoundsProven(store, relation, domain, sourceSlots);
-}
-
-static LogicalResult
-verifyRedistributionPoint(RedistributeOp op, sym::Store &store,
-                          const RedistributionVerificationDomain &domain,
-                          int64_t sourceSlots, int64_t block, int64_t item,
-                          int64_t slot) {
-  RedistributionAttr relation = op.getRelation();
-  FailureOr<int64_t> mappedBlock = evaluateRedistributionCoordinate(
-      store, relation.getSourceBlock(), domain.block, domain.item, domain.slot,
-      block, item, slot);
-  if (failed(mappedBlock))
-    return op.emitOpError("relation is not total at destination (")
-           << block << ", " << item << ", " << slot << ")";
-  FailureOr<int64_t> mappedItem = evaluateRedistributionCoordinate(
-      store, relation.getSourceItem(), domain.block, domain.item, domain.slot,
-      block, item, slot);
-  if (failed(mappedItem))
-    return op.emitOpError("relation is not total at destination (")
-           << block << ", " << item << ", " << slot << ")";
-  FailureOr<int64_t> mappedSlot = evaluateRedistributionCoordinate(
-      store, relation.getSourceSlot(), domain.block, domain.item, domain.slot,
-      block, item, slot);
-  if (failed(mappedSlot))
-    return op.emitOpError("relation is not total at destination (")
-           << block << ", " << item << ", " << slot << ")";
-  if (*mappedBlock < 0 || *mappedBlock >= relation.getBlocks())
-    return op.emitOpError("source block ")
-           << *mappedBlock << " is out of bounds at destination (" << block
-           << ", " << item << ", " << slot << ")";
-  if (*mappedItem < 0 || *mappedItem >= relation.getItems())
-    return op.emitOpError("source item ")
-           << *mappedItem << " is out of bounds at destination (" << block
-           << ", " << item << ", " << slot << ")";
-  if (*mappedSlot < 0 || *mappedSlot >= sourceSlots)
-    return op.emitOpError("source slot ")
-           << *mappedSlot << " is out of bounds at destination (" << block
-           << ", " << item << ", " << slot << ")";
-  return success();
-}
-
 static LogicalResult
 verifyRedistributionRelationSymbols(RedistributeOp op,
                                     RedistributionAttr relation) {
@@ -3087,62 +2958,6 @@ verifyRedistributionRelationSymbols(RedistributeOp op,
   return success();
 }
 
-static LogicalResult verifyRedistributionEnumerationBudget(
-    RedistributeOp op, RedistributionAttr relation, int64_t destinationSlots) {
-  std::optional<int64_t> blockItems =
-      llvm::checkedMul(relation.getBlocks(), relation.getItems());
-  if (!blockItems)
-    return op.emitOpError(
-        "relation needs exhaustive validation beyond the 2^20 point limit");
-  std::optional<int64_t> points =
-      llvm::checkedMul(*blockItems, destinationSlots);
-  constexpr int64_t maxPoints = int64_t{1} << 20;
-  if (!points || *points > maxPoints)
-    return op.emitOpError(
-        "relation needs exhaustive validation beyond the 2^20 point limit");
-  return success();
-}
-
-static LogicalResult
-exhaustRedistributionDomain(RedistributeOp op, sym::Store &store,
-                            const RedistributionVerificationDomain &domain,
-                            int64_t sourceSlots, int64_t destinationSlots) {
-  RedistributionAttr relation = op.getRelation();
-  for (int64_t block : llvm::seq<int64_t>(0, relation.getBlocks())) {
-    for (int64_t item : llvm::seq<int64_t>(0, relation.getItems())) {
-      for (int64_t slot : llvm::seq<int64_t>(0, destinationSlots))
-        if (failed(verifyRedistributionPoint(op, store, domain, sourceSlots,
-                                             block, item, slot)))
-          return failure();
-    }
-  }
-  return success();
-}
-
-static LogicalResult verifyRedistributionDomain(RedistributeOp op,
-                                                int64_t sourceSlots,
-                                                int64_t destinationSlots) {
-  MLIRContext *ctx = op.getContext();
-  WaveDialect &dialect = *ctx->getLoadedDialect<WaveDialect>();
-  sym::Store &store = dialect.getSymbolStore();
-  RedistributionAttr relation = op.getRelation();
-
-  if (failed(verifyRedistributionRelationSymbols(op, relation)))
-    return failure();
-
-  FailureOr<RedistributionVerificationDomain> domain =
-      buildRedistributionVerificationDomain(store, relation, destinationSlots);
-  if (failed(domain))
-    return failure();
-  if (redistributionDomainProven(store, relation, *domain, sourceSlots))
-    return success();
-  if (failed(verifyRedistributionEnumerationBudget(op, relation,
-                                                   destinationSlots)))
-    return failure();
-  return exhaustRedistributionDomain(op, store, *domain, sourceSlots,
-                                     destinationSlots);
-}
-
 LogicalResult RedistributeOp::verify() {
   SimdType sourceType = cast<SimdType>(getSource().getType());
   SimdType resultType = cast<SimdType>(getResult().getType());
@@ -3155,8 +2970,7 @@ LogicalResult RedistributeOp::verify() {
     return emitOpError("source and result SIMD widths must match");
   if (sourceVector.getElementType() != resultVector.getElementType())
     return emitOpError("source and result packet element types must match");
-  return verifyRedistributionDomain(*this, sourceVector.getNumElements(),
-                                    resultVector.getNumElements());
+  return verifyRedistributionRelationSymbols(*this, getRelation());
 }
 
 LogicalResult WorkgroupIdOp::verify() {

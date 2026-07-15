@@ -939,60 +939,6 @@ func.func @redistribute_nonintegral(
 
 // -----
 
-func.func @redistribute_source_slot_oob(
-    %v: !wave.simd<vector<2xi32>, 32>) {
-  // expected-error @+1 {{source slot 2 is out of bounds at destination (0, 0, 0)}}
-  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "2"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
-  return
-}
-
-// -----
-
-func.func @redistribute_partial_piecewise(
-    %v: !wave.simd<vector<2xi32>, 32>) {
-  // expected-error @+1 {{relation is not total at destination (0, 0, 1)}}
-  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "Piecewise((0, slot == 0))"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
-  return
-}
-
-// -----
-
-func.func @redistribute_partial_division(
-    %v: !wave.simd<vector<2xi32>, 32>) {
-  // expected-error @+1 {{relation is not total at destination (0, 0, 0)}}
-  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "Mod(floor(1 / (item - 1)), 2)"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
-  return
-}
-
-// -----
-
-func.func @redistribute_source_block_oob(
-    %v: !wave.simd<vector<1xi32>, 32>) {
-  // expected-error @+1 {{source block 2 is out of bounds at destination (0, 0, 0)}}
-  %r = wave.redistribute %v, <blocks = 2, items = 32, source_block = "2", source_item = "item", source_slot = "slot"> : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
-  return
-}
-
-// -----
-
-func.func @redistribute_partial_source_block(
-    %v: !wave.simd<vector<1xi32>, 32>) {
-  // expected-error @+1 {{relation is not total at destination (1, 0, 0)}}
-  %r = wave.redistribute %v, <blocks = 2, items = 32, source_block = "Piecewise((block, block == 0))", source_item = "item", source_slot = "slot"> : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
-  return
-}
-
-// -----
-
-func.func @redistribute_exhaustive_limit(
-    %v: !wave.simd<vector<1xi32>, 32>) {
-  // expected-error @+1 {{relation needs exhaustive validation beyond the 2^20 point limit}}
-  %r = wave.redistribute %v, <blocks = 1, items = 1048577, source_block = "block", source_item = "Piecewise((item, item >= 0), (0, True))", source_slot = "0"> : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
-  return
-}
-
-// -----
-
 func.func @splat_element_mismatch(%v: i32) {
   // expected-error @+1 {{source type must match SIMD element type}}
   %s = wave.splat %v : i32 -> !wave.simd<i64, 32>
