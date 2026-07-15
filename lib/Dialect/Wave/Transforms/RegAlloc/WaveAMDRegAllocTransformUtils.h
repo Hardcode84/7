@@ -32,6 +32,9 @@ struct RegAllocTransformFailure {
   SmallVector<wave::RegAllocTransformAssignment> overlaps;
   StringRef className;
   StringRef reason;
+  std::optional<unsigned> limit;
+  std::optional<unsigned> pressure;
+  std::optional<unsigned> request;
   unsigned set = 0;
   unsigned position = 0;
 };

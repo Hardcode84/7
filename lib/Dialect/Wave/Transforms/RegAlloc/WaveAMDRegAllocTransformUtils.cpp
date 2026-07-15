@@ -470,6 +470,24 @@ parseRegAllocFailureKind(DictionaryAttr failureAttr, Operation *diagOp) {
   return RegAllocFailureKind{className.getValue(), reason.getValue()};
 }
 
+static FailureOr<std::optional<unsigned>>
+parseOptionalRegAllocFailureUnsignedAttr(DictionaryAttr failureAttr,
+                                         StringRef name, Operation *diagOp) {
+  Attribute attr = failureAttr.get(name);
+  if (!attr)
+    return std::optional<unsigned>();
+  auto integer = dyn_cast<IntegerAttr>(attr);
+  if (!integer)
+    return diagOp->emitError("regalloc state field `")
+           << name << "` is not an integer";
+  const APInt &value = integer.getValue();
+  if (value.isNegative() ||
+      value.getActiveBits() > std::numeric_limits<unsigned>::digits)
+    return diagOp->emitError("regalloc state integer `")
+           << name << "` exceeds supported range";
+  return std::optional<unsigned>(static_cast<unsigned>(value.getZExtValue()));
+}
+
 static FailureOr<RegAllocTransformFailure>
 parseRegAllocFailure(DictionaryAttr failureAttr, RegAllocFailureKind kind,
                      func::FuncOp func) {
@@ -477,12 +495,22 @@ parseRegAllocFailure(DictionaryAttr failureAttr, RegAllocFailureKind kind,
       wave::getRegAllocTransformUnsignedAttr(failureAttr, "set", func);
   FailureOr<unsigned> position =
       wave::getRegAllocTransformUnsignedAttr(failureAttr, "position", func);
-  if (failed(set) || failed(position))
+  FailureOr<std::optional<unsigned>> limit =
+      parseOptionalRegAllocFailureUnsignedAttr(failureAttr, "limit", func);
+  FailureOr<std::optional<unsigned>> pressure =
+      parseOptionalRegAllocFailureUnsignedAttr(failureAttr, "pressure", func);
+  FailureOr<std::optional<unsigned>> request =
+      parseOptionalRegAllocFailureUnsignedAttr(failureAttr, "request", func);
+  if (failed(set) || failed(position) || failed(limit) || failed(pressure) ||
+      failed(request))
     return failure();
 
   RegAllocTransformFailure parsed;
   parsed.className = kind.className;
   parsed.reason = kind.reason;
+  parsed.limit = std::move(*limit);
+  parsed.pressure = std::move(*pressure);
+  parsed.request = std::move(*request);
   parsed.set = *set;
   parsed.position = *position;
   if (failed(parseRegAllocFailureOverlaps(failureAttr, func, parsed.overlaps)))

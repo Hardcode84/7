@@ -1,5 +1,5 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=LOOP
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-pack-vgpr-zero-moves,waveamd-resource-info)' | FileCheck %s --check-prefix=POST
+// RUN: wave-opt --split-input-file %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=LOOP
+// RUN: wave-opt --split-input-file %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-pack-vgpr-zero-moves,waveamd-resource-info)' | FileCheck %s --check-prefix=POST
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // LOOP-LABEL: func.func @target_addressable_sgpr_promotes_to_vgpr(
@@ -32,5 +32,42 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %loop#0, %loop#1, %s
         : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
           !waveamdmachine.reg<sgpr, 104>
+  }
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  // LOOP-LABEL: func.func @sgpr_pressure_overage_promotes_bundle(
+  // LOOP-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 2 : i64}
+  // LOOP-SAME: {name = "wave.regalloc.sgpr_to_vgpr.dwords", value = 2 : i64}
+  // LOOP-NOT: linear-scan-failure
+  // POST-LABEL: func.func @sgpr_pressure_overage_promotes_bundle(
+  // POST-SAME: waveamdmachine.sgpr_count =
+  // POST-SAME: waveamdmachine.vgpr_count =
+  func.func @sgpr_pressure_overage_promotes_bundle()
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                  waveamdmachine.sgpr_count_max = 4 : i64,
+                  waveamdmachine.vgpr_count_max = 16 : i64,
+                  waveamdmachine.agpr_count_max = 0 : i64} {
+    %fixed = waveamdmachine.uninit
+        : !waveamdmachine.reg<sgpr, 2, 0>
+    %a = waveamdmachine.uninit {waveamdmachine.regalloc_remat_temp}
+        : !waveamdmachine.reg<sgpr, 1>
+    %b = waveamdmachine.uninit {waveamdmachine.regalloc_remat_temp}
+        : !waveamdmachine.reg<sgpr, 1>
+    %blocked = waveamdmachine.uninit {waveamdmachine.regalloc_remat_temp}
+        : !waveamdmachine.reg<sgpr, 2>
+    %blockedV = waveamdmachine.v_mov_b32_tuple %blocked
+        {waveamdmachine.regalloc_sgpr_to_vgpr_temp}
+        : (!waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+    %fixedV = waveamdmachine.v_mov_b32_tuple %fixed
+        : (!waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.reg<vgpr, 2>
+    %aV = waveamdmachine.v_mov_b32_tuple %a
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %bV = waveamdmachine.v_mov_b32_tuple %b
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.s_endpgm
+    return
   }
 }

@@ -37,8 +37,13 @@ struct SGPRToVGPRReliefScore {
 
 struct SGPRToVGPRReliefCandidate {
   SmallVector<ResolvedRegAllocValue> values;
-  const wave::RegAllocTransformAliasSet *set = nullptr;
   SGPRToVGPRReliefScore score;
+  unsigned promotedDwords = 0;
+  unsigned setId = 0;
+};
+
+struct SGPRToVGPRReliefPlan {
+  SmallVector<SGPRToVGPRReliefCandidate> candidates;
   unsigned promotedDwords = 0;
 };
 
@@ -274,36 +279,62 @@ buildSGPRToVGPRReliefCandidate(func::FuncOp func, unsigned setId,
     return std::optional<SGPRToVGPRReliefCandidate>();
 
   SGPRToVGPRReliefCandidate candidate;
-  candidate.set = set;
   candidate.values = std::move(*setValues);
   candidate.score = getSGPRToVGPRReliefScore(*set, values, candidate.values,
                                              failureRecord.position);
   candidate.promotedDwords = set->width;
+  candidate.setId = set->id;
   return std::optional<SGPRToVGPRReliefCandidate>(std::move(candidate));
 }
 
-static FailureOr<std::optional<SGPRToVGPRReliefCandidate>>
-selectSGPRToVGPRReliefCandidate(
-    func::FuncOp func, const RegAllocTransformFailure &failureRecord,
-    ArrayRef<wave::RegAllocTransformAliasSet> sets,
-    ArrayRef<wave::RegAllocTransformValue> values,
-    ArrayRef<ResolvedRegAllocValue> resolvedValues) {
-  std::optional<SGPRToVGPRReliefCandidate> best;
+static bool
+isBetterSGPRToVGPRReliefCandidate(const SGPRToVGPRReliefCandidate &lhs,
+                                  const SGPRToVGPRReliefCandidate &rhs) {
+  if (isBetterSGPRToVGPRReliefScore(lhs.score, rhs.score))
+    return true;
+  if (isBetterSGPRToVGPRReliefScore(rhs.score, lhs.score))
+    return false;
+  return lhs.setId < rhs.setId;
+}
+
+static unsigned
+getRequiredSGPRToVGPRReliefDwords(const RegAllocTransformFailure &failure) {
+  if (failure.pressure && failure.limit && *failure.pressure > *failure.limit)
+    return *failure.pressure - *failure.limit;
+  return std::max(1u, failure.request.value_or(1));
+}
+
+static FailureOr<std::optional<SGPRToVGPRReliefPlan>>
+selectSGPRToVGPRReliefPlan(func::FuncOp func,
+                           const RegAllocTransformFailure &failureRecord,
+                           ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                           ArrayRef<wave::RegAllocTransformValue> values,
+                           ArrayRef<ResolvedRegAllocValue> resolvedValues) {
+  SmallVector<SGPRToVGPRReliefCandidate> candidates;
   for (unsigned setId : collectSGPRReliefCandidateIds(failureRecord)) {
     FailureOr<std::optional<SGPRToVGPRReliefCandidate>> candidate =
         buildSGPRToVGPRReliefCandidate(func, setId, failureRecord, sets, values,
                                        resolvedValues);
     if (failed(candidate))
       return failure();
-    if (!*candidate)
-      continue;
-    if (!best ||
-        isBetterSGPRToVGPRReliefScore((*candidate)->score, best->score) ||
-        (!isBetterSGPRToVGPRReliefScore(best->score, (*candidate)->score) &&
-         (*candidate)->set->id < best->set->id))
-      best = std::move(**candidate);
+    if (*candidate)
+      candidates.push_back(std::move(**candidate));
   }
-  return best;
+  if (candidates.empty())
+    return std::optional<SGPRToVGPRReliefPlan>();
+  llvm::sort(candidates, isBetterSGPRToVGPRReliefCandidate);
+
+  unsigned requiredDwords = getRequiredSGPRToVGPRReliefDwords(failureRecord);
+  unsigned relievedDwords = 0;
+  SGPRToVGPRReliefPlan plan;
+  for (SGPRToVGPRReliefCandidate &candidate : candidates) {
+    relievedDwords += candidate.score.liveDwords;
+    plan.promotedDwords += candidate.promotedDwords;
+    plan.candidates.push_back(std::move(candidate));
+    if (relievedDwords >= requiredDwords)
+      break;
+  }
+  return std::optional<SGPRToVGPRReliefPlan>(std::move(plan));
 }
 
 static Value createSGPRReadFirst(OpBuilder &builder, Location loc, Value vgpr) {
@@ -411,16 +442,16 @@ materializeSGPRToVGPRRelief(OpBuilder &builder,
   }
 }
 
-static FailureOr<std::optional<SGPRToVGPRReliefCandidate>>
-findSGPRToVGPRReliefCandidate(func::FuncOp func) {
+static FailureOr<std::optional<SGPRToVGPRReliefPlan>>
+findSGPRToVGPRReliefPlan(func::FuncOp func) {
   FailureOr<std::optional<RegAllocTransformFailure>> failureRecord =
       parseRegAllocTransformFailure(func);
   if (failed(failureRecord))
     return failure();
   if (!*failureRecord)
-    return std::optional<SGPRToVGPRReliefCandidate>();
+    return std::optional<SGPRToVGPRReliefPlan>();
   if (!isSGPRToVGPRRelievableFailure(**failureRecord))
-    return std::optional<SGPRToVGPRReliefCandidate>();
+    return std::optional<SGPRToVGPRReliefPlan>();
 
   DictionaryAttr state = func->getAttrOfType<DictionaryAttr>(
       wave::getRegAllocTransformStateAttrName());
@@ -438,22 +469,23 @@ findSGPRToVGPRReliefCandidate(func::FuncOp func) {
   if (failed(resolvedValues))
     return failure();
 
-  FailureOr<std::optional<SGPRToVGPRReliefCandidate>> candidate =
-      selectSGPRToVGPRReliefCandidate(func, **failureRecord, *sets, *values,
-                                      *resolvedValues);
-  if (failed(candidate))
+  FailureOr<std::optional<SGPRToVGPRReliefPlan>> plan =
+      selectSGPRToVGPRReliefPlan(func, **failureRecord, *sets, *values,
+                                 *resolvedValues);
+  if (failed(plan))
     return failure();
-  return candidate;
+  return plan;
 }
 
-static LogicalResult
-applySGPRToVGPRRelief(func::FuncOp func, OpBuilder &builder,
-                      const SGPRToVGPRReliefCandidate &candidate) {
-  materializeSGPRToVGPRRelief(builder, candidate);
+static LogicalResult applySGPRToVGPRRelief(func::FuncOp func,
+                                           OpBuilder &builder,
+                                           const SGPRToVGPRReliefPlan &plan) {
+  for (const SGPRToVGPRReliefCandidate &candidate : plan.candidates)
+    materializeSGPRToVGPRRelief(builder, candidate);
   if (failed(refreshFuncTypeFromBody(func)))
     return failure();
   if (failed(wave::addRegAllocTransformProviderMetadata(
-          func, builder, "sgpr_to_vgpr", candidate.promotedDwords)))
+          func, builder, "sgpr_to_vgpr", plan.promotedDwords)))
     return failure();
   func->removeAttr(wave::getRegAllocTransformAssignmentsAttrName());
   func->removeAttr(wave::getRegAllocTransformStateAttrName());
@@ -461,15 +493,15 @@ applySGPRToVGPRRelief(func::FuncOp func, OpBuilder &builder,
 }
 
 static LogicalResult runRegAllocSGPRToVGPRRelief(func::FuncOp func) {
-  FailureOr<std::optional<SGPRToVGPRReliefCandidate>> candidate =
-      findSGPRToVGPRReliefCandidate(func);
-  if (failed(candidate))
+  FailureOr<std::optional<SGPRToVGPRReliefPlan>> plan =
+      findSGPRToVGPRReliefPlan(func);
+  if (failed(plan))
     return failure();
-  if (!*candidate)
+  if (!*plan)
     return success();
 
   OpBuilder builder(func.getContext());
-  return applySGPRToVGPRRelief(func, builder, **candidate);
+  return applySGPRToVGPRRelief(func, builder, **plan);
 }
 
 } // namespace
