@@ -213,8 +213,5 @@ cmake --build build --target wave-opt wave-translate WavePythonModules -j $(npro
 - Before every commit, run full lit, wavec, and integration tests:
   `cmake --build build --target check-wave-mlir -j $(nproc)`,
   `cmake --build build --target check-wavec -j $(nproc)`, and
-  `build/bin/llvm-lit -sv build/test --filter='Integration'`.
-- If generated ASM can drift, also run perf goldens:
-  `build/bin/llvm-lit -sv build/test --filter='PerfGolden'`.
 - Small, focused commits. One logical change per commit. If you're wondering whether to split — split.
 - Commit messages should be descriptive, or at least funny. Not both is acceptable. Neither is not.
