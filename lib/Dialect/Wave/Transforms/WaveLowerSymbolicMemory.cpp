@@ -1372,6 +1372,16 @@ planGatherTransactions(const MemoryAccess &access, sym::Store &store,
   return plan;
 }
 
+static bool isLegalPtrAddOffset(Type type) {
+  if (type.isIndex())
+    return true;
+  if (IntegerType integer = dyn_cast<IntegerType>(type))
+    return integer.getWidth() == 32 || integer.getWidth() == 64;
+  SimdType simd = dyn_cast<SimdType>(type);
+  return simd && (simd.getElementType().isIndex() ||
+                  simd.getElementType().isInteger(32));
+}
+
 static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
                                         const MemoryAccess &access,
                                         const SlotMapping &slot,
@@ -1382,6 +1392,13 @@ static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
                                              rewriter.getIndexAttr(*literal));
     return constant.getResult();
   }
+
+  StringRef symbol = sym::ExprView(expr).getSymbolName();
+  if (!symbol.empty())
+    for (const NamedBinding &binding : slot.bindings)
+      if (binding.name == symbol &&
+          isLegalPtrAddOffset(binding.value.getType()))
+        return binding.value;
 
   llvm::DenseSet<StringRef> freeSymbols;
   sym::walkSymbolNames(expr, [&](StringRef name) { freeSymbols.insert(name); });
@@ -1428,9 +1445,46 @@ static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
 }
 
 static FailureOr<Value>
-materializePointer(IRRewriter &rewriter, const MemoryAccess &access,
-                   const SlotMapping &slot, sym::ExprHandle byteOffset,
-                   int64_t baseIndex, SmallVectorImpl<Value> &byteBases) {
+materializeTypedPointer(IRRewriter &rewriter, const MemoryAccess &access,
+                        const SlotMapping &slot, sym::ExprHandle byteOffset,
+                        int64_t baseIndex, sym::Store &store) {
+  Value source = access.bases[baseIndex];
+  PtrType sourceType = cast<PtrType>(source.getType());
+  VectorType packet = cast<VectorType>(access.packetType.getElementType());
+  Type sourceElement = sourceType.getElementType();
+  if (!sourceElement || sourceElement != packet.getElementType() ||
+      !sourceElement.isIntOrFloat())
+    return failure();
+  int64_t elementBits = sourceElement.getIntOrFloatBitWidth();
+  if (elementBits <= 0 || elementBits % 8 != 0)
+    return failure();
+  FailureOr<sym::ExprHandle> elementOffset =
+      divideExactly(store, byteOffset, elementBits / 8, slot.assumptions);
+  if (failed(elementOffset))
+    return failure();
+  FailureOr<Value> offset =
+      materializeExpr(rewriter, access, slot, *elementOffset);
+  if (failed(offset))
+    return failure();
+  Type resultType = sourceType;
+  if (SimdType simd = dyn_cast<SimdType>((*offset).getType()))
+    resultType =
+        SimdType::get(access.op->getContext(), sourceType, simd.getWidth());
+  return PtrAddOp::create(rewriter, access.op->getLoc(), resultType, source,
+                          *offset)
+      .getResult();
+}
+
+static FailureOr<Value> materializePointer(IRRewriter &rewriter,
+                                           const MemoryAccess &access,
+                                           const SlotMapping &slot,
+                                           sym::ExprHandle byteOffset,
+                                           int64_t baseIndex, sym::Store &store,
+                                           SmallVectorImpl<Value> &byteBases) {
+  FailureOr<Value> typed = materializeTypedPointer(
+      rewriter, access, slot, byteOffset, baseIndex, store);
+  if (succeeded(typed))
+    return typed;
   Value byteBase = getByteBase(rewriter, access, baseIndex, byteBases);
 
   if (std::optional<int64_t> literal = sym::getIntegerLiteralValue(byteOffset))
@@ -1455,9 +1509,10 @@ materializePointer(IRRewriter &rewriter, const MemoryAccess &access,
 static FailureOr<Value> materializePointer(IRRewriter &rewriter,
                                            const MemoryAccess &access,
                                            const SlotMapping &slot,
+                                           sym::Store &store,
                                            SmallVectorImpl<Value> &byteBases) {
   return materializePointer(rewriter, access, slot, slot.byteOffset,
-                            slot.baseIndex, byteBases);
+                            slot.baseIndex, store, byteBases);
 }
 
 static Type getComponentType(const MemoryAccess &access) {
@@ -1516,7 +1571,7 @@ static LogicalResult unpackTargetGatherResult(
 }
 
 static LogicalResult emitProviderGatherCandidate(
-    IRRewriter &rewriter, const MemoryAccess &access,
+    IRRewriter &rewriter, const MemoryAccess &access, sym::Store &store,
     ArrayRef<SlotMapping> mappings,
     const wave::memory_lowering::GatherTransactionCandidate &transaction,
     bool soleCandidate, int64_t slotCount, Type componentType,
@@ -1526,7 +1581,7 @@ static LogicalResult emitProviderGatherCandidate(
   const SlotMapping &point = mappings[transaction.addressPoint];
   FailureOr<Value> ptr =
       materializePointer(rewriter, access, point, transaction.byteOffset,
-                         transaction.baseIndex, state.byteBases);
+                         transaction.baseIndex, store, state.byteBases);
   if (failed(ptr))
     return access.op->emitOpError("failed to materialize mapped address");
   FailureOr<wave::memory_lowering::GatherTransactionResult> result =
@@ -1549,13 +1604,13 @@ static LogicalResult emitProviderGatherCandidate(
 
 static LogicalResult
 emitGenericGatherCandidate(IRRewriter &rewriter, const MemoryAccess &access,
-                           const GatherPlan &plan,
+                           sym::Store &store, const GatherPlan &plan,
                            const GatherCandidate &candidate, Type componentType,
                            GatherEmissionState &state) {
   ArrayRef<unsigned> transaction = candidate.physicalNodes;
   const SlotMapping &first = plan.physicalSlots[transaction.front()];
   FailureOr<Value> ptr =
-      materializePointer(rewriter, access, first, state.byteBases);
+      materializePointer(rewriter, access, first, store, state.byteBases);
   if (failed(ptr))
     return access.op->emitOpError("failed to materialize mapped address");
   Type valueType = getTransactionType(access, transaction.size());
@@ -1589,7 +1644,7 @@ static FailureOr<Value> buildGatherResult(IRRewriter &rewriter,
 }
 
 static LogicalResult lowerGather(IRRewriter &rewriter,
-                                 const MemoryAccess &access,
+                                 const MemoryAccess &access, sym::Store &store,
                                  ArrayRef<SlotMapping> mappings,
                                  const GatherPlan &plan) {
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
@@ -1604,11 +1659,11 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
     LogicalResult emitted =
         candidate.provider
             ? emitProviderGatherCandidate(
-                  rewriter, access, mappings, *candidate.provider,
+                  rewriter, access, store, mappings, *candidate.provider,
                   plan.selected.size() == 1, packet.getNumElements(),
                   componentType, state)
-            : emitGenericGatherCandidate(rewriter, access, plan, candidate,
-                                         componentType, state);
+            : emitGenericGatherCandidate(rewriter, access, store, plan,
+                                         candidate, componentType, state);
     if (failed(emitted))
       return failure();
   }
@@ -1623,7 +1678,7 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
 
 static LogicalResult
 lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
-             ArrayRef<SlotMapping> slots,
+             sym::Store &store, ArrayRef<SlotMapping> slots,
              ArrayRef<SmallVector<unsigned>> transactions) {
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
   Type componentType = getComponentType(access);
@@ -1638,7 +1693,7 @@ lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
   for (ArrayRef<unsigned> transaction : transactions) {
     const SlotMapping &first = slots[transaction.front()];
     FailureOr<Value> ptr =
-        materializePointer(rewriter, access, first, byteBases);
+        materializePointer(rewriter, access, first, store, byteBases);
     if (failed(ptr))
       return access.op->emitOpError("failed to materialize mapped address");
     SmallVector<Value> values;
@@ -1897,14 +1952,14 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
     if (failed(plan))
       return access.op->emitOpError(
           "packet cannot be covered by legal memory transactions");
-    return lowerGather(rewriter, access, *mappings, *plan);
+    return lowerGather(rewriter, access, store, *mappings, *plan);
   }
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
       planTransactions(store, *mappings, shape->elementBits);
   if (failed(transactions))
     return access.op->emitOpError(
         "packet cannot be covered by legal memory transactions");
-  return lowerScatter(rewriter, access, *mappings, *transactions);
+  return lowerScatter(rewriter, access, store, *mappings, *transactions);
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
