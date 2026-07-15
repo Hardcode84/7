@@ -1,4 +1,6 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=restart_once})' | FileCheck %s
+// RUN: not wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=never_progresses})' 2>&1 | FileCheck %s --check-prefix=NO-PROGRESS
+// RUN: wave-opt %s --mlir-print-op-generic | FileCheck %s --check-prefix=DEFAULT
 
 module attributes {transform.with_named_sequence} {
   transform.named_sequence @match_func(
@@ -25,6 +27,29 @@ module attributes {transform.with_named_sequence} {
       transform.yield %func : !transform.any_op
     }
     transform.yield %next : !transform.any_op
+  }
+
+  transform.named_sequence @no_progress_iteration(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    transform.yield %root : !transform.any_op
+  }
+
+  transform.named_sequence @default_limit(
+      %root: !transform.any_op {transform.consumed}) {
+    // DEFAULT: "wave.transform.regalloc_loop"
+    // DEFAULT-SAME: max_iterations = 512 : i64
+    %r = wave.transform.regalloc_loop from %root body = @no_progress_iteration
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield
+  }
+
+  transform.named_sequence @never_progresses(
+      %root: !transform.any_op {transform.consumed}) {
+    // NO-PROGRESS: regalloc transform loop exceeded max_iterations = 2
+    %r = wave.transform.regalloc_loop from %root body = @no_progress_iteration
+        {max_iterations = 2 : i64}
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield
   }
 
   transform.named_sequence @restart_once(
