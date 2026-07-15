@@ -3,6 +3,17 @@
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule-report='print-classes=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=CLASS
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1 max-region-ops=2' | FileCheck %s --check-prefix=CAP
+// RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' --mlir-timing --mlir-timing-display=tree 2>&1 >/dev/null | FileCheck %s --check-prefix=TIMING
+
+// TIMING: wave_machine_schedule_stages
+// TIMING: machine_schedule_setup
+// TIMING: machine_schedule_prepare_function
+// TIMING: machine_schedule_collect_regions
+// TIMING: machine_schedule_build_value_origins
+// TIMING: machine_schedule_build_graph
+// TIMING: machine_schedule_build_order
+// TIMING: machine_schedule_pressure_checks
+// TIMING: machine_schedule_apply_order
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,

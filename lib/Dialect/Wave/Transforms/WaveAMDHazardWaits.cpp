@@ -30,6 +30,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Support/Timing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -49,6 +50,31 @@ using namespace mlir;
 using namespace mlir::dataflow;
 
 namespace {
+
+struct HazardRepairStageTimingManager {
+  HazardRepairStageTimingManager() {
+    applyDefaultTimingManagerCLOptions(manager);
+  }
+
+  DefaultTimingManager manager;
+};
+
+static DefaultTimingManager &getHazardRepairStageTimingManager() {
+  static HazardRepairStageTimingManager timing;
+  return timing.manager;
+}
+
+struct HazardRepairStageTiming {
+  HazardRepairStageTiming() {
+    rootScope = getHazardRepairStageTimingManager().getRootScope();
+    stageScope = rootScope.nest("wave_hazard_repair_stages");
+  }
+
+  TimingScope nest(StringRef name) { return stageScope.nest(name); }
+
+  TimingScope rootScope;
+  TimingScope stageScope;
+};
 
 //===----------------------------------------------------------------------===//
 // Vendored AMDGPU hazard-delay encodings.
@@ -1722,6 +1748,8 @@ struct WaveAMDHazardRepairPass
   using WaveAMDHazardRepairBase::WaveAMDHazardRepairBase;
 
   void runOnOperation() override {
+    HazardRepairStageTiming timing;
+    TimingScope setupTiming = timing.nest("hazard_repair_setup");
     Operation *root = getOperation();
     FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
         createSubtargetInfo(root, "waveamd-hazard-repair");
@@ -1730,9 +1758,18 @@ struct WaveAMDHazardRepairPass
 
     HazardConfig cfg = makeHazardConfig(**sti);
     DominanceInfo dom(root);
+    setupTiming.stop();
+
+    TimingScope hoistTiming = timing.nest("hazard_repair_hoist_m0");
     if (hoistM0AcrossRegions)
       hoistM0WritesAcrossRegions(root, cfg, dom);
+    hoistTiming.stop();
+
+    TimingScope collectTiming = timing.nest("hazard_repair_collect_op_info");
     HazardOpInfoMap infos = collectHazardOpInfo(root, cfg);
+    collectTiming.stop();
+
+    TimingScope blocksTiming = timing.nest("hazard_repair_blocks");
     root->walk(
         [&](Block *block) { (void)repairBlock(*block, cfg, &infos, dom); });
   }

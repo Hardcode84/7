@@ -1,5 +1,12 @@
 // RUN: wave-opt --split-input-file %s --waveamd-hazard-repair | FileCheck %s
 // RUN: wave-opt --split-input-file %s --waveamd-hazard-repair='hoist-m0-across-regions=0' | FileCheck %s --check-prefix=NO-CROSS
+// RUN: wave-opt --split-input-file %s --waveamd-hazard-repair --mlir-timing --mlir-timing-display=tree 2>&1 >/dev/null | FileCheck %s --check-prefix=TIMING
+
+// TIMING: wave_hazard_repair_stages
+// TIMING: hazard_repair_setup
+// TIMING: hazard_repair_hoist_m0
+// TIMING: hazard_repair_collect_op_info
+// TIMING: hazard_repair_blocks
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @m0_gap_filled_by_later_valu

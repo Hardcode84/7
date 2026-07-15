@@ -6,6 +6,17 @@
 // RUN:   --waveamd-insert-hazard-waits --waveamd-resource-info \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
+// RUN: wave-opt %s --waveamd-hazard-repair \
+// RUN:   --waveamd-machine-schedule='apply-schedule=1' --mlir-timing \
+// RUN:   --mlir-timing-display=tree 2>&1 >/dev/null \
+// RUN:   | FileCheck %s --check-prefix=TIMING
+
+// TIMING-DAG: wave_hazard_repair_stages
+// TIMING-DAG: hazard_repair_collect_op_info
+// TIMING-DAG: hazard_repair_blocks
+// TIMING-DAG: wave_machine_schedule_stages
+// TIMING-DAG: machine_schedule_build_graph
+// TIMING-DAG: machine_schedule_build_order
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 

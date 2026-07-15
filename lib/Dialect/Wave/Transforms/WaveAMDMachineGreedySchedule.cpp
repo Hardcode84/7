@@ -27,6 +27,7 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Support/Timing.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -51,6 +52,31 @@ using namespace mlir::wave;
 namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
+
+struct MachineScheduleStageTimingManager {
+  MachineScheduleStageTimingManager() {
+    applyDefaultTimingManagerCLOptions(manager);
+  }
+
+  DefaultTimingManager manager;
+};
+
+static DefaultTimingManager &getMachineScheduleStageTimingManager() {
+  static MachineScheduleStageTimingManager timing;
+  return timing.manager;
+}
+
+struct MachineScheduleStageTiming {
+  MachineScheduleStageTiming() {
+    rootScope = getMachineScheduleStageTimingManager().getRootScope();
+    stageScope = rootScope.nest("wave_machine_schedule_stages");
+  }
+
+  TimingScope nest(StringRef name) { return stageScope.nest(name); }
+
+  TimingScope rootScope;
+  TimingScope stageScope;
+};
 
 static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
@@ -2134,13 +2160,17 @@ struct WaveAMDMachineSchedulePass
   using WaveAMDMachineScheduleBase::WaveAMDMachineScheduleBase;
 
   void runOnOperation() override {
+    MachineScheduleStageTiming timing;
+    TimingScope setupTiming = timing.nest("machine_schedule_setup");
     Operation *root = getOperation();
     if (failed(validateOptions(root)))
       return signalPassFailure();
 
     waveamdmachine::EventSimConfig modelConfig = buildModelConfig();
-    WalkResult walk = root->walk(
-        [&](func::FuncOp func) { return processFunction(func, modelConfig); });
+    setupTiming.stop();
+    WalkResult walk = root->walk([&](func::FuncOp func) {
+      return processFunction(func, modelConfig, timing);
+    });
     if (walk.wasInterrupted())
       return signalPassFailure();
   }
@@ -2151,9 +2181,11 @@ struct WaveAMDMachineSchedulePass
     return success();
   }
 
-  WalkResult
-  processFunction(func::FuncOp func,
-                  const waveamdmachine::EventSimConfig &modelConfig) {
+  WalkResult processFunction(func::FuncOp func,
+                             const waveamdmachine::EventSimConfig &modelConfig,
+                             MachineScheduleStageTiming &timing) {
+    TimingScope prepareTiming =
+        timing.nest("machine_schedule_prepare_function");
     if (!shouldScheduleFunction(func))
       return WalkResult::advance();
 
@@ -2164,14 +2196,22 @@ struct WaveAMDMachineSchedulePass
     if (!applySchedule)
       return WalkResult::advance();
     func->removeAttr(kScheduleInputAttr);
+    prepareTiming.stop();
 
+    TimingScope collectTiming = timing.nest("machine_schedule_collect_regions");
     FailureOr<SmallVector<GreedyRegion, 16>> collected =
         RegionCollector().collect(func);
     if (failed(collected))
       return WalkResult::interrupt();
+    collectTiming.stop();
+
+    TimingScope originsTiming =
+        timing.nest("machine_schedule_build_value_origins");
     ValueOriginMap origins = buildValueOriginMap(func);
+    originsTiming.stop();
     for (const GreedyRegion &region : *collected)
-      if (failed(processRegion(region, *arch.arch, modelConfig, origins)))
+      if (failed(
+              processRegion(region, *arch.arch, modelConfig, origins, timing)))
         return WalkResult::interrupt();
     return WalkResult::advance();
   }
@@ -2227,25 +2267,32 @@ struct WaveAMDMachineSchedulePass
   LogicalResult processRegion(const GreedyRegion &region,
                               const waveamdmachine::ArchData &arch,
                               const waveamdmachine::EventSimConfig &config,
-                              const ValueOriginMap &origins) {
+                              const ValueOriginMap &origins,
+                              MachineScheduleStageTiming &timing) {
     if (maxRegionOps >= 0 &&
         region.ops.size() > static_cast<unsigned>(maxRegionOps))
       return success();
 
+    TimingScope graphTiming = timing.nest("machine_schedule_build_graph");
     GraphTables graph;
     if (failed(buildGraph(region, graph)))
       return failure();
+    graphTiming.stop();
 
     bool prioritizeLongLatencyVmem = true;
     bool prioritizeComputeResources = true;
     GreedyResult greedy;
     while (true) {
+      TimingScope orderTiming = timing.nest("machine_schedule_build_order");
       greedy = buildGreedyOrder(region, graph, arch, config, origins,
                                 prioritizeLongLatencyVmem,
                                 prioritizeComputeResources);
       if (!greedy.success)
         return emitGreedyFailure(region, greedy);
+      orderTiming.stop();
 
+      TimingScope pressureTiming =
+          timing.nest("machine_schedule_pressure_checks");
       FailureOr<bool> dropVmemPriority = needsRegisterPressureFallback(
           region, greedy.order, prioritizeLongLatencyVmem,
           greedy.stats.longLatencyVmemPrefetchMoves != 0);
@@ -2265,9 +2312,11 @@ struct WaveAMDMachineSchedulePass
         prioritizeComputeResources = false;
         continue;
       }
+      pressureTiming.stop();
       break;
     }
 
+    TimingScope applyTiming = timing.nest("machine_schedule_apply_order");
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
     return applyGreedyOrder(region, originalOrder, greedy);
   }
