@@ -33,6 +33,7 @@ STAGES = [
     "regalloc_linear_scan",
     "regalloc_agpr_relief",
     "regalloc_remat_relief",
+    "regalloc_sgpr_to_vgpr_relief",
     "regalloc_lds_relief",
     "regalloc_scratch_relief",
 ]

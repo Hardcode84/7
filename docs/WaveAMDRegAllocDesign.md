@@ -214,6 +214,8 @@ relief; do not demote AGPR back to VGPR as a spill strategy.
 
 Remat is reverse CSE for cheap pure WaveAMDMachine DAGs. Candidate roots come
 from the failed alias set and overlapping alias sets live at the failure point.
+It handles eligible SGPR, VGPR, and combined VGPR/AGPR failures. Profitable
+scalar DAG remat therefore runs before SGPRToVGPR promotion.
 Each root plan contains the whole alias set, rebuild sites, cloned DAG nodes,
 and leaves whose live ranges would extend across the failure. Build root plans
 before profitability checks; roots rejected alone may be profitable together.
@@ -265,7 +267,15 @@ slots.
 
 ### SGPRToVGPR
 
-SGPRToVGPR relieves SGPR pressure by storing uniform values in VGPRs.
+SGPRToVGPR owns SGPR pressure and allocated-footprint failures left after remat.
+It stores uniform values in VGPRs.
+
+Candidates come from the failed SGPR alias set and its live SGPR overlaps.
+Required relief is `pressure - limit` when both fields are present, otherwise
+the failure request. Candidate order uses bridge count and cost, loop cost,
+live dwords, lifetime end, and stable alias-set IDs. The plan takes candidates
+until required relief is covered or legal candidates are exhausted, then
+rewrites the whole plan and rebuilds allocator state once.
 
 Legality:
 
@@ -276,9 +286,20 @@ Legality:
 - source value has a legal scalar-to-vector bridge;
 - every SGPR use has a legal readback or direct replacement.
 
-Materialization inserts vector materialization after the SGPR def and
-`v_readfirstlane_b32` before SGPR users that need readback. Bridge temps are
-marked so the allocator can avoid cyclic re-promotion.
+Every alias member must be legal and at least one must need repair. A set whose
+members already have only canonical promotion moves is not a candidate. Mixed
+sets remain repairable: reuse the earliest promotion, move it after the SGPR
+definition, and coalesce duplicate promotions. Reused moves are pinned;
+new moves carry SGPR-to-VGPR temp provenance.
+
+Materialization replaces VGPR and return uses directly. SGPR users read back
+through `v_readfirstlane_b32`; the promotion must dominate each readback.
+Function entry arguments change bank in place. Function result types refresh
+from the rewritten returns.
+
+Pinned promotion moves cannot be remat roots or cloned inside another remat
+DAG. Within a remat plan they remain pressure-accounted leaves. This prevents a
+repaired promotion from alternating between SGPR remat and VGPR storage.
 
 ### LDS
 
@@ -310,6 +331,20 @@ Legality:
 
 Scratch updates private segment size, flat-scratch usage, and metadata. It has
 unlimited capacity and is last by stage order.
+
+## Convergence
+
+Loop state determines the next action:
+
+- successful scan: done;
+- failure state left by all providers: stalled, return the concrete failure;
+- state cleared by a provider rewrite: restart from alias-state construction.
+
+Providers clear state only after a semantic IR rewrite. SGPR promotion repair
+pins reused moves so remat cannot undo the rewrite on the next iteration. The
+loop still has a `max_iterations` backstop, default 512, and reports the reached
+cap. Raising the cap requires a converging workload, a progress argument, and
+compile-time measurements; it is not a cycle repair.
 
 ## Memory Spill Rules
 
@@ -379,6 +414,12 @@ Consumer scopes:
 - hazard waits depend on physical spans for operands they inspect;
 - metadata comes from final IR, not allocator state.
 
+Assignment clearing preflights function types before mutation. Defined function
+results come from cleared return operands; entry arguments provide input types;
+declarations stay unchanged. Multiple returns and direct calls must agree with
+the planned types or clearing fails before changing IR. Fixed ABI and marked
+values keep their physical indices.
+
 ## Non-Goals
 
 - No direct SGPR, SCC, VCC, EXEC, or M0 spilling to memory.
@@ -391,10 +432,14 @@ Consumer scopes:
 
 ## Coverage And Costs
 
-Coverage comes from RegAlloc LIT tests, integration tests for tuple subranges,
-target-waves, AGPR MFMA accumulators, bridge codegen, and post-regalloc
-consumers: resource info, hazard waits, metadata, and assembly translation.
+RegAlloc LIT coverage includes multi-candidate SGPR relief, mixed canonical and
+sunk tuple aliases, pinned-promotion convergence, profitable SGPR remat,
+signature clearing, and malformed failure fields. Production-loop Integration
+coverage translates SGPR overage bundles and repaired aliases through assembly.
+Other integration coverage exercises tuple subranges, target-waves, AGPR MFMA
+accumulators, bridge codegen, resource info, hazard waits, and metadata.
 
 Compile-time cost grows with alias-set count, live-range density, physical
 register scan length, and retry count. Dense live-slot sets and rebuilds after
-IR rewrites are the main memory costs for large generated kernels.
+IR rewrites are the main memory costs for large generated kernels. Stage timing
+reports include alias build, scan, AGPR, remat, SGPRToVGPR, LDS, and scratch.

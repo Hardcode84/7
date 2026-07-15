@@ -99,6 +99,8 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 ### Remat
 
 - Remat is reverse CSE for cheap pure WaveAMDMachine DAGs.
+- Handles eligible SGPR, VGPR, and combined VGPR/AGPR failures.
+- Profitable SGPR remat runs before SGPRToVGPR promotion.
 - Candidate is the alias set named by the failure, or an overlapping alias set
   live at the failure point.
 - Find a cheap pure expression DAG rooted at the candidate value.
@@ -113,6 +115,19 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 - Allocation metadata is not fixed-source provenance.
 - Machine CSE may merge pure layout/address math across loops. Remat owns
   undoing those long ranges when they create pressure.
+
+### SGPRToVGPR
+
+- Owns SGPR pressure and allocated-footprint failures left after remat.
+- Relieves pressure through VGPR storage and scalar readback.
+- Candidate IDs are the failed set plus live SGPR overlaps.
+- Select candidates through `pressure - limit`, or request when unavailable.
+  Apply available legal candidates even when they do not cover the overage.
+- Promote whole alias sets. Mixed canonical/sunk tuple members are repairable.
+- Move the earliest sunk promotion after its definition and coalesce duplicates.
+- Pin repaired promotions. Remat cannot clone a pinned root or DAG node.
+- Refresh changed function results, update metadata, and clear state once after
+  the complete plan.
 
 ### LDS
 
@@ -132,6 +147,15 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 - Unlimited capacity. Last resort by order.
 - No loop-specific allocator path. Loops affect bridge/store/reload cost.
 
+## Convergence
+
+- Successful scan exits. Unchanged failure state stalls. Provider rewrite
+  clears state and restarts.
+- Providers clear state only after semantic IR progress.
+- Default `max_iterations` is 512. Cap exhaustion is a diagnostic backstop.
+- Do not raise the cap without a converging workload, progress argument, and
+  compile-time measurements.
+
 ## Final Result
 
 - No virtual SGPR/VGPR/AGPR values remain in allocation scope.
@@ -139,6 +163,8 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 - Spill, remat, AGPR bridge, and memory-token ops are ordinary IR.
 - Kernel metadata comes from final IR, not stale allocator state.
 - Verification must not require hidden allocator objects.
+- Assignment clearing preflights function returns and direct calls. Declarations
+  and fixed ABI entries retain their types.
 
 ## Forbidden Shapes
 
