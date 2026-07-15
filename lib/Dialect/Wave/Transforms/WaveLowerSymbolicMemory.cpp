@@ -9,6 +9,8 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/Wave/Transforms/SymbolicValue.h"
 
+#include "WaveMemoryTransactionProvider.h"
+
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
@@ -28,6 +30,7 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -105,6 +108,21 @@ struct CoverState {
 struct TransactionCandidate {
   SmallVector<unsigned> nodes;
   uint64_t mask = 0;
+};
+
+struct GatherCandidate {
+  SmallVector<unsigned> physicalNodes;
+  SmallVector<unsigned> logicalSlots;
+  std::unique_ptr<wave::memory_lowering::GatherTransactionCandidate> provider;
+  uint64_t mask = 0;
+  int64_t width = 0;
+  bool singleton = false;
+};
+
+struct GatherPlan {
+  SmallVector<SlotMapping> physicalSlots;
+  SmallVector<GatherCandidate> candidates;
+  SmallVector<unsigned> selected;
 };
 
 struct ExactCoverResult {
@@ -302,6 +320,91 @@ substituteAndSimplify(sym::Store &store, sym::ExprHandle expr,
 }
 
 static FailureOr<sym::ExprHandle>
+multiplyExpandedFactors(sym::Store &store, sym::ExprHandle initial,
+                        sym::ExprView view) {
+  FailureOr<sym::ExprHandle> result = initial;
+  for (unsigned index : llvm::seq(view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(index);
+    if (factor.exponent < 0)
+      return failure();
+    for (int32_t unused : llvm::seq(factor.exponent)) {
+      (void)unused;
+      result = sym::composeExprBinary(store, *result, sym::ExprBinaryOp::Mul,
+                                      factor.base);
+      if (failed(result))
+        return failure();
+    }
+  }
+  return result;
+}
+
+static FailureOr<sym::ExprHandle>
+divideExpandedMul(sym::Store &store, sym::ExprView view, int64_t divisor) {
+  std::optional<int64_t> coefficient =
+      sym::getIntegerLiteralValue(view.getMulCoefficient());
+  if (!coefficient || *coefficient % divisor != 0)
+    return failure();
+  FailureOr<sym::ExprHandle> initial =
+      sym::composeExprInt(store, *coefficient / divisor);
+  if (failed(initial))
+    return failure();
+  return multiplyExpandedFactors(store, *initial, view);
+}
+
+static FailureOr<sym::ExprHandle> appendDividedAddTerm(sym::Store &store,
+                                                       sym::ExprHandle result,
+                                                       sym::AddTerm term,
+                                                       int64_t divisor) {
+  std::optional<int64_t> coefficient =
+      sym::getIntegerLiteralValue(term.coefficient);
+  if (!coefficient || *coefficient % divisor != 0)
+    return failure();
+  FailureOr<sym::ExprHandle> scaled =
+      sym::composeExprInt(store, *coefficient / divisor);
+  if (failed(scaled))
+    return failure();
+  scaled =
+      sym::composeExprBinary(store, *scaled, sym::ExprBinaryOp::Mul, term.term);
+  if (failed(scaled))
+    return failure();
+  return sym::composeExprBinary(store, result, sym::ExprBinaryOp::Add, *scaled);
+}
+
+static FailureOr<sym::ExprHandle>
+divideExpandedAdd(sym::Store &store, sym::ExprView view, int64_t divisor) {
+  std::optional<int64_t> constant =
+      sym::getIntegerLiteralValue(view.getAddConstant());
+  if (!constant || *constant % divisor != 0)
+    return failure();
+  FailureOr<sym::ExprHandle> result =
+      sym::composeExprInt(store, *constant / divisor);
+  if (failed(result))
+    return failure();
+
+  for (unsigned index : llvm::seq(view.getAddTermCount())) {
+    result =
+        appendDividedAddTerm(store, *result, view.getAddTerm(index), divisor);
+    if (failed(result))
+      return failure();
+  }
+  return result;
+}
+
+static FailureOr<sym::ExprHandle>
+divideCoefficientsExactly(sym::Store &store, sym::ExprHandle value,
+                          int64_t divisor) {
+  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, value);
+  if (failed(expanded))
+    return failure();
+  sym::ExprView view(*expanded);
+  if (view.getKind() == sym::ExprKind::Mul)
+    return divideExpandedMul(store, view, divisor);
+  if (view.getKind() == sym::ExprKind::Add)
+    return divideExpandedAdd(store, view, divisor);
+  return failure();
+}
+
+static FailureOr<sym::ExprHandle>
 divideExactly(sym::Store &store, sym::ExprHandle value, int64_t divisor,
               ArrayRef<sym::PredHandle> assumptions) {
   FailureOr<sym::ExprHandle> divisorExpr = sym::composeExprInt(store, divisor);
@@ -316,9 +419,13 @@ divideExactly(sym::Store &store, sym::ExprHandle value, int64_t divisor,
   if (failed(simplified))
     return failure();
   std::optional<int64_t> denominator = sym::collectDenominator(*simplified);
-  if (!denominator || *denominator != 1)
+  if (denominator && *denominator == 1)
+    return *simplified;
+  FailureOr<sym::ExprHandle> divided =
+      divideCoefficientsExactly(store, value, divisor);
+  if (failed(divided))
     return failure();
-  return *simplified;
+  return sym::simplifyExpr(store, *divided, assumptions);
 }
 
 static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
@@ -1061,6 +1168,201 @@ planTransactions(sym::Store &store, ArrayRef<SlotMapping> slots,
   return transactions;
 }
 
+static FailureOr<GatherPlan>
+buildGenericGatherPlan(sym::Store &store, ArrayRef<SlotMapping> mappings,
+                       int64_t elementBits) {
+  GatherPlan plan;
+  plan.physicalSlots = deduplicateGatherSlots(
+      store, SmallVector<SlotMapping>(mappings.begin(), mappings.end()));
+  FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
+      planTransactions(store, plan.physicalSlots, elementBits);
+  if (failed(transactions))
+    return failure();
+  for (SmallVector<unsigned> &transaction : *transactions) {
+    GatherCandidate candidate;
+    candidate.width = transaction.size();
+    candidate.singleton = transaction.size() == 1;
+    candidate.physicalNodes = std::move(transaction);
+    plan.selected.push_back(plan.candidates.size());
+    plan.candidates.push_back(std::move(candidate));
+  }
+  return plan;
+}
+
+static SmallVector<wave::memory_lowering::GatherTransactionCandidate>
+getProviderGatherCandidates(const MemoryAccess &access, sym::Store &store,
+                            ArrayRef<SlotMapping> mappings) {
+  SmallVector<SmallVector<wave::memory_lowering::MemoryTransactionBinding>>
+      bindingStorage;
+  bindingStorage.reserve(mappings.size());
+  for (const SlotMapping &mapping : mappings) {
+    SmallVector<wave::memory_lowering::MemoryTransactionBinding> bindings;
+    bindings.reserve(mapping.bindings.size());
+    for (const NamedBinding &binding : mapping.bindings)
+      bindings.push_back({binding.name, binding.value});
+    bindingStorage.push_back(std::move(bindings));
+  }
+
+  SmallVector<wave::memory_lowering::MemoryTransactionPoint> points;
+  points.reserve(mappings.size());
+  for (auto [index, mapping] : llvm::enumerate(mappings))
+    points.push_back({bindingStorage[index], mapping.assumptions, mapping.base,
+                      mapping.targetBlock, mapping.byteOffset,
+                      mapping.baseIndex});
+
+  wave::memory_lowering::GatherTransactionRequest request;
+  request.bases = access.bases;
+  request.points = points;
+  request.op = access.op;
+  request.store = &store;
+  request.resultType = access.packetType;
+  request.dependency = access.dependency;
+  request.cache = access.cache;
+  request.tokenType = access.tokenType;
+  SmallVector<std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
+      providers;
+  wave::memory_lowering::populateGatherTransactionProviders(providers);
+  SmallVector<wave::memory_lowering::GatherTransactionCandidate> candidates;
+  for (const auto &provider : providers)
+    provider->enumerate(request, candidates);
+  return candidates;
+}
+
+static ExactCoverResult
+solveGatherExactCover(uint64_t mask, uint64_t fullMask,
+                      ArrayRef<GatherCandidate> candidates,
+                      ArrayRef<SmallVector<unsigned>> candidatesBySlot,
+                      llvm::DenseMap<uint64_t, ExactCoverResult> &memo) {
+  if (mask == fullMask) {
+    ExactCoverResult result;
+    result.score = CoverState{0, 0, 0, 0};
+    result.valid = true;
+    return result;
+  }
+  auto found = memo.find(mask);
+  if (found != memo.end())
+    return found->second;
+
+  unsigned first = 0;
+  while (mask & (uint64_t{1} << first))
+    ++first;
+  ExactCoverResult best;
+  for (unsigned candidateIndex : candidatesBySlot[first]) {
+    const GatherCandidate &candidate = candidates[candidateIndex];
+    if (mask & candidate.mask)
+      continue;
+    ExactCoverResult tail = solveGatherExactCover(
+        mask | candidate.mask, fullMask, candidates, candidatesBySlot, memo);
+    if (!tail.valid)
+      continue;
+    CoverState score{tail.score.singletons + candidate.singleton,
+                     tail.score.transactions + 1,
+                     tail.score.widthScore + candidate.width * candidate.width,
+                     candidate.width};
+    if (best.valid && !betterCover(score, best.score))
+      continue;
+    best = std::move(tail);
+    best.score = score;
+    best.candidates.insert(best.candidates.begin(), candidateIndex);
+    best.valid = true;
+  }
+  memo.try_emplace(mask, best);
+  return best;
+}
+
+static bool setGatherCandidateMask(GatherCandidate &candidate,
+                                   int64_t slotCount) {
+  for (unsigned slot : candidate.logicalSlots) {
+    if (slot >= static_cast<uint64_t>(slotCount))
+      return false;
+    uint64_t bit = uint64_t{1} << slot;
+    if (candidate.mask & bit)
+      return false;
+    candidate.mask |= bit;
+  }
+  return candidate.mask != 0;
+}
+
+static void
+appendGenericGatherCandidates(GatherPlan &plan,
+                              ArrayRef<TransactionCandidate> transactions,
+                              int64_t slotCount) {
+  for (const TransactionCandidate &transaction : transactions) {
+    GatherCandidate candidate;
+    candidate.physicalNodes = transaction.nodes;
+    candidate.width = transaction.nodes.size();
+    candidate.singleton = transaction.nodes.size() == 1;
+    for (unsigned node : transaction.nodes)
+      llvm::append_range(candidate.logicalSlots,
+                         plan.physicalSlots[node].logicalSlots);
+    llvm::sort(candidate.logicalSlots);
+    candidate.logicalSlots.erase(std::unique(candidate.logicalSlots.begin(),
+                                             candidate.logicalSlots.end()),
+                                 candidate.logicalSlots.end());
+    if (setGatherCandidateMask(candidate, slotCount))
+      plan.candidates.push_back(std::move(candidate));
+  }
+}
+
+static void appendProviderGatherCandidates(
+    GatherPlan &plan,
+    SmallVectorImpl<wave::memory_lowering::GatherTransactionCandidate>
+        &transactions,
+    int64_t slotCount) {
+  for (wave::memory_lowering::GatherTransactionCandidate &transaction :
+       transactions) {
+    GatherCandidate candidate;
+    candidate.logicalSlots = transaction.slots;
+    candidate.width = transaction.slots.size();
+    candidate.singleton = transaction.slots.size() == 1;
+    candidate.provider =
+        std::make_unique<wave::memory_lowering::GatherTransactionCandidate>(
+            std::move(transaction));
+    if (setGatherCandidateMask(candidate, slotCount))
+      plan.candidates.push_back(std::move(candidate));
+  }
+}
+
+static LogicalResult selectGatherCover(GatherPlan &plan, int64_t slotCount) {
+  SmallVector<SmallVector<unsigned>> candidatesBySlot(slotCount);
+  for (auto [candidateIndex, candidate] : llvm::enumerate(plan.candidates))
+    for (unsigned slot : candidate.logicalSlots)
+      candidatesBySlot[slot].push_back(candidateIndex);
+  uint64_t fullMask = (uint64_t{1} << slotCount) - 1;
+  llvm::DenseMap<uint64_t, ExactCoverResult> memo;
+  ExactCoverResult cover = solveGatherExactCover(0, fullMask, plan.candidates,
+                                                 candidatesBySlot, memo);
+  if (!cover.valid)
+    return failure();
+  plan.selected = std::move(cover.candidates);
+  return success();
+}
+
+static FailureOr<GatherPlan>
+planGatherTransactions(const MemoryAccess &access, sym::Store &store,
+                       ArrayRef<SlotMapping> mappings, int64_t elementBits) {
+  SmallVector<wave::memory_lowering::GatherTransactionCandidate>
+      providerCandidates = getProviderGatherCandidates(access, store, mappings);
+  if (providerCandidates.empty() || mappings.size() > kMaxExactCoverNodes)
+    return buildGenericGatherPlan(store, mappings, elementBits);
+
+  GatherPlan plan;
+  plan.physicalSlots = deduplicateGatherSlots(
+      store, SmallVector<SlotMapping>(mappings.begin(), mappings.end()));
+  SmallVector<SmallVector<unsigned>> edges =
+      buildSuccessorGraph(store, plan.physicalSlots, elementBits);
+  FailureOr<SmallVector<TransactionCandidate>> genericCandidates =
+      enumerateTransactionCandidates(edges, elementBits);
+  if (failed(genericCandidates))
+    return buildGenericGatherPlan(store, mappings, elementBits);
+
+  appendGenericGatherCandidates(plan, *genericCandidates, mappings.size());
+  appendProviderGatherCandidates(plan, providerCandidates, mappings.size());
+  if (failed(selectGatherCover(plan, mappings.size())))
+    return buildGenericGatherPlan(store, mappings, elementBits);
+  return plan;
+}
+
 static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
                                         const MemoryAccess &access,
                                         const SlotMapping &slot,
@@ -1116,19 +1418,17 @@ static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
   return byteBase;
 }
 
-static FailureOr<Value> materializePointer(IRRewriter &rewriter,
-                                           const MemoryAccess &access,
-                                           const SlotMapping &slot,
-                                           SmallVectorImpl<Value> &byteBases) {
-  Value byteBase = getByteBase(rewriter, access, slot.baseIndex, byteBases);
+static FailureOr<Value>
+materializePointer(IRRewriter &rewriter, const MemoryAccess &access,
+                   const SlotMapping &slot, sym::ExprHandle byteOffset,
+                   int64_t baseIndex, SmallVectorImpl<Value> &byteBases) {
+  Value byteBase = getByteBase(rewriter, access, baseIndex, byteBases);
 
-  if (std::optional<int64_t> literal =
-          sym::getIntegerLiteralValue(slot.byteOffset))
+  if (std::optional<int64_t> literal = sym::getIntegerLiteralValue(byteOffset))
     if (*literal == 0)
       return byteBase;
 
-  FailureOr<Value> offset =
-      materializeExpr(rewriter, access, slot, slot.byteOffset);
+  FailureOr<Value> offset = materializeExpr(rewriter, access, slot, byteOffset);
   if (failed(offset))
     return failure();
   Type resultType = byteBase.getType();
@@ -1141,6 +1441,14 @@ static FailureOr<Value> materializePointer(IRRewriter &rewriter,
   PtrAddOp ptr = PtrAddOp::create(rewriter, access.op->getLoc(), resultType,
                                   byteBase, *offset);
   return ptr.getResult();
+}
+
+static FailureOr<Value> materializePointer(IRRewriter &rewriter,
+                                           const MemoryAccess &access,
+                                           const SlotMapping &slot,
+                                           SmallVectorImpl<Value> &byteBases) {
+  return materializePointer(rewriter, access, slot, slot.byteOffset,
+                            slot.baseIndex, byteBases);
 }
 
 static Type getComponentType(const MemoryAccess &access) {
@@ -1166,43 +1474,141 @@ static Value joinTokens(IRRewriter &rewriter, const MemoryAccess &access,
                         tokens);
 }
 
+struct GatherEmissionState {
+  SmallVector<Value> components;
+  SmallVector<Value> tokens;
+  SmallVector<Value> byteBases;
+  Value directResult;
+};
+
+static bool hasNaturalSlotOrder(ArrayRef<unsigned> slots, int64_t slotCount) {
+  if (slots.size() != static_cast<size_t>(slotCount))
+    return false;
+  return llvm::all_of(llvm::enumerate(slots), [](auto indexed) {
+    return indexed.index() == indexed.value();
+  });
+}
+
+static LogicalResult unpackTargetGatherResult(
+    IRRewriter &rewriter, const MemoryAccess &access,
+    const wave::memory_lowering::GatherTransactionCandidate &transaction,
+    Value value, Type componentType, GatherEmissionState &state) {
+  SimdType resultType = dyn_cast<SimdType>(value.getType());
+  if (!resultType)
+    return access.op->emitOpError("invalid target transaction result");
+  VectorType resultVector = dyn_cast<VectorType>(resultType.getElementType());
+  if (!resultVector || resultVector.getNumElements() !=
+                           static_cast<int64_t>(transaction.slots.size()))
+    return access.op->emitOpError("invalid target transaction result");
+  for (auto [index, slot] : llvm::enumerate(transaction.slots))
+    state.components[slot] = ExtractOp::create(rewriter, access.op->getLoc(),
+                                               componentType, value, index);
+  return success();
+}
+
+static LogicalResult emitProviderGatherCandidate(
+    IRRewriter &rewriter, const MemoryAccess &access,
+    ArrayRef<SlotMapping> mappings,
+    const wave::memory_lowering::GatherTransactionCandidate &transaction,
+    bool soleCandidate, int64_t slotCount, Type componentType,
+    GatherEmissionState &state) {
+  if (transaction.addressPoint >= mappings.size())
+    return access.op->emitOpError("invalid target transaction address");
+  const SlotMapping &point = mappings[transaction.addressPoint];
+  FailureOr<Value> ptr =
+      materializePointer(rewriter, access, point, transaction.byteOffset,
+                         transaction.baseIndex, state.byteBases);
+  if (failed(ptr))
+    return access.op->emitOpError("failed to materialize mapped address");
+  FailureOr<wave::memory_lowering::GatherTransactionResult> result =
+      transaction.emitter->emit(rewriter, access.op->getLoc(),
+                                access.packetType, access.tokenType, *ptr,
+                                access.dependency);
+  if (failed(result))
+    return failure();
+  state.tokens.push_back(result->token);
+
+  if (soleCandidate && hasNaturalSlotOrder(transaction.slots, slotCount)) {
+    if (result->value.getType() != access.packetType)
+      return access.op->emitOpError("invalid target transaction result");
+    state.directResult = result->value;
+    return success();
+  }
+  return unpackTargetGatherResult(rewriter, access, transaction, result->value,
+                                  componentType, state);
+}
+
+static LogicalResult
+emitGenericGatherCandidate(IRRewriter &rewriter, const MemoryAccess &access,
+                           const GatherPlan &plan,
+                           const GatherCandidate &candidate, Type componentType,
+                           GatherEmissionState &state) {
+  ArrayRef<unsigned> transaction = candidate.physicalNodes;
+  const SlotMapping &first = plan.physicalSlots[transaction.front()];
+  FailureOr<Value> ptr =
+      materializePointer(rewriter, access, first, state.byteBases);
+  if (failed(ptr))
+    return access.op->emitOpError("failed to materialize mapped address");
+  Type valueType = getTransactionType(access, transaction.size());
+  LoadOp load =
+      LoadOp::create(rewriter, access.op->getLoc(), valueType, access.tokenType,
+                     *ptr, access.dependency, access.cache);
+  state.tokens.push_back(load.getToken());
+  for (auto [physicalIndex, nodeIndex] : llvm::enumerate(transaction)) {
+    Value value = load.getValue();
+    if (transaction.size() > 1)
+      value = ExtractOp::create(rewriter, access.op->getLoc(), componentType,
+                                value, physicalIndex);
+    for (unsigned logicalSlot : plan.physicalSlots[nodeIndex].logicalSlots)
+      state.components[logicalSlot] = value;
+  }
+  return success();
+}
+
+static FailureOr<Value> buildGatherResult(IRRewriter &rewriter,
+                                          const MemoryAccess &access,
+                                          GatherEmissionState &state) {
+  if (state.directResult)
+    return state.directResult;
+  if (llvm::any_of(state.components, [](Value value) { return !value; })) {
+    access.op->emitOpError("failed to cover every gathered packet slot");
+    return failure();
+  }
+  return PackOp::create(rewriter, access.op->getLoc(), access.packetType,
+                        state.components)
+      .getResult();
+}
+
 static LogicalResult lowerGather(IRRewriter &rewriter,
                                  const MemoryAccess &access,
-                                 ArrayRef<SlotMapping> slots,
-                                 ArrayRef<SmallVector<unsigned>> transactions) {
+                                 ArrayRef<SlotMapping> mappings,
+                                 const GatherPlan &plan) {
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
-  SmallVector<Value> components(packet.getNumElements());
-  SmallVector<Value> tokens;
-  SmallVector<Value> byteBases(access.bases.size());
+  GatherEmissionState state{SmallVector<Value>(packet.getNumElements()),
+                            {},
+                            SmallVector<Value>(access.bases.size()),
+                            {}};
   Type componentType = getComponentType(access);
 
-  for (ArrayRef<unsigned> transaction : transactions) {
-    const SlotMapping &first = slots[transaction.front()];
-    FailureOr<Value> ptr =
-        materializePointer(rewriter, access, first, byteBases);
-    if (failed(ptr))
-      return access.op->emitOpError("failed to materialize mapped address");
-    Type valueType = getTransactionType(access, transaction.size());
-    LoadOp load =
-        LoadOp::create(rewriter, access.op->getLoc(), valueType,
-                       access.tokenType, *ptr, access.dependency, access.cache);
-    tokens.push_back(load.getToken());
-    for (auto [physicalIndex, nodeIndex] : llvm::enumerate(transaction)) {
-      Value value = load.getValue();
-      if (transaction.size() > 1)
-        value = ExtractOp::create(rewriter, access.op->getLoc(), componentType,
-                                  value, physicalIndex);
-      for (unsigned logicalSlot : slots[nodeIndex].logicalSlots)
-        components[logicalSlot] = value;
-    }
+  for (unsigned candidateIndex : plan.selected) {
+    const GatherCandidate &candidate = plan.candidates[candidateIndex];
+    LogicalResult emitted =
+        candidate.provider
+            ? emitProviderGatherCandidate(
+                  rewriter, access, mappings, *candidate.provider,
+                  plan.selected.size() == 1, packet.getNumElements(),
+                  componentType, state)
+            : emitGenericGatherCandidate(rewriter, access, plan, candidate,
+                                         componentType, state);
+    if (failed(emitted))
+      return failure();
   }
 
-  if (llvm::any_of(components, [](Value value) { return !value; }))
-    return access.op->emitOpError("failed to cover every gathered packet slot");
-  Value result = PackOp::create(rewriter, access.op->getLoc(),
-                                access.packetType, components);
-  Value token = joinTokens(rewriter, access, tokens);
-  rewriter.replaceOp(access.op, {result, token});
+  FailureOr<Value> result = buildGatherResult(rewriter, access, state);
+  if (failed(result))
+    return failure();
+  Value token = joinTokens(rewriter, access, state.tokens);
+  rewriter.replaceOp(access.op, {*result, token});
   return success();
 }
 
@@ -1441,8 +1847,6 @@ buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
     }
     mappings.push_back(std::move(*mapping));
   }
-  if (access.gather)
-    mappings = deduplicateGatherSlots(store, std::move(mappings));
   return mappings;
 }
 
@@ -1478,13 +1882,19 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
       *packetComponents, controls);
   if (failed(mappings))
     return failure();
+  if (access.gather) {
+    FailureOr<GatherPlan> plan =
+        planGatherTransactions(access, store, *mappings, shape->elementBits);
+    if (failed(plan))
+      return access.op->emitOpError(
+          "packet cannot be covered by legal memory transactions");
+    return lowerGather(rewriter, access, *mappings, *plan);
+  }
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
       planTransactions(store, *mappings, shape->elementBits);
   if (failed(transactions))
     return access.op->emitOpError(
         "packet cannot be covered by legal memory transactions");
-  if (access.gather)
-    return lowerGather(rewriter, access, *mappings, *transactions);
   return lowerScatter(rewriter, access, *mappings, *transactions);
 }
 

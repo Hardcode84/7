@@ -233,6 +233,30 @@ def test_typed_bindings():
         # CHECK: ok
 
 
+# CHECK-LABEL: TEST: test_memory_mapping_attr
+@run
+def test_memory_mapping_attr():
+    with w.module():
+        attrs = {
+            name: w.ExprAttr.get_from_node_ptr(
+                w.sym(name).node_ptr, context=w.Context.current
+            )
+            for name in ("block", "item", "slot")
+        }
+        mapping = w.MemoryMappingAttr.get(
+            attrs["slot"], base=attrs["block"], target_block=attrs["item"]
+        )
+        assert w.MemoryMappingAttr.isinstance(mapping)
+        assert str(mapping.base) == '#wave.expr<"block">'
+        assert str(mapping.target_block) == '#wave.expr<"item">'
+        assert str(mapping.bit_offset) == '#wave.expr<"slot">'
+        default_mapping = w.MemoryMappingAttr.get(attrs["slot"])
+        assert default_mapping.base is None
+        assert default_mapping.target_block is None
+        print("ok")
+        # CHECK: ok
+
+
 # CHECK-LABEL: TEST: test_redistribute_builder
 @run
 def test_redistribute_builder():
@@ -369,6 +393,34 @@ def test_waveamd_transpose_load():
         # CHECK-SAME: -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
         # CHECK: waveamd.transpose_load
         # CHECK-SAME: -> (!wave.simd<vector<4xbf16>, 64>, !wave.mem.token)
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_symbolic_gather
+@run
+def test_symbolic_gather():
+    with w.module() as m:
+        packet_indices = w.simd_type(w.vector_type(8, w.i32()), width=64)
+        with m.function(
+            "symbolic_gather",
+            [
+                w.ptr_type(w.i8(), w.shared_address_space()),
+                w.index_type(),
+                packet_indices,
+            ],
+        ) as f:
+            base, origin_value, indices = f.args
+            origin = w.sym("origin")
+            index = w.sym("index")
+            f.gather(
+                base,
+                w.simd_type(w.vector_type(8, w.i8()), width=64),
+                bit_offset=8 * (origin + index + w.sym("item") + w.sym("slot")),
+                bindings={origin: origin_value, index: indices},
+            )
+        # CHECK: wave.gather %arg0 mapping
+        # CHECK-SAME: bindings ["origin"](%arg1) packet_bindings ["index"](%arg2)
+        # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
         print(m.module)
 
 

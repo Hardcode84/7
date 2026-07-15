@@ -7,12 +7,20 @@
 // RUN:   --target-waves=1 --use-buffer --use-dma-lds \
 // RUN:   --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 \
 // RUN:   --mxfp4-scale-path=regs --cta-swizzle-xcds=1 --cta-group-m=1 \
-// RUN:   --variants=scheduled --skip-hw --emit-asm=%t.s 2>/dev/null \
+// RUN:   --variants=scheduled --skip-hw --emit-mlir=%t.mlir --emit-asm=%t.s 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=OUT
+// RUN: FileCheck %s --input-file=%t.mlir --check-prefix=IR
 // RUN: FileCheck %s --input-file=%t.s --check-prefix=ASM
 //
 // OUT: mxfp4_scale_path=regs
 // OUT: variant: scheduled
+//
+// IR-LABEL: func.func @wmma_f16_matmul_tiled
+// IR-NOT: waveamd.transpose_load
+// IR: wave.gather
+// IR-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+// IR-NOT: waveamd.transpose_load
+// IR: return
 //
 // ASM-LABEL: wmma_f16_matmul_tiled:
 // ASM: buffer_load_dword v{{[0-9]+}},

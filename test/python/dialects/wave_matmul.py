@@ -245,7 +245,8 @@ print(static_bld.module)
 # CHECK-SAME: -> (!wave.simd<vector<16xi8>, 64>, !wave.mem.token)
 # CHECK: wave.store
 # CHECK-SAME: !wave.simd<vector<16xi8>, 64>
-# CHECK: waveamd.transpose_load
+# CHECK: wave.gather
+# CHECK-SAME: mapping <bit_offset =
 # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
 # CHECK-COUNT-8: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>

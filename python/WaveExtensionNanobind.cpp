@@ -289,6 +289,43 @@ static void bindRedistributionAttr(nb::module_ &m) {
       });
 }
 
+static void bindMemoryMappingAttr(nb::module_ &m) {
+  mlir_attribute_subclass(m, "MemoryMappingAttr",
+                          mlirWaveAttributeIsAMemoryMapping)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, MlirAttribute bitOffset, nb::object base,
+             nb::object targetBlock) {
+            MlirAttribute baseAttr{nullptr};
+            MlirAttribute targetBlockAttr{nullptr};
+            if (!base.is_none())
+              baseAttr = nb::cast<MlirAttribute>(base);
+            if (!targetBlock.is_none())
+              targetBlockAttr = nb::cast<MlirAttribute>(targetBlock);
+            MlirContext context = mlirAttributeGetContext(bitOffset);
+            return cls(mlirWaveMemoryMappingAttrGet(context, bitOffset,
+                                                    baseAttr, targetBlockAttr));
+          },
+          nb::arg("cls"), nb::arg("bit_offset"), nb::arg("base") = nb::none(),
+          nb::arg("target_block") = nb::none())
+      .def_property_readonly("base",
+                             [](MlirAttribute self) -> nb::object {
+                               MlirAttribute base =
+                                   mlirWaveMemoryMappingAttrGetBase(self);
+                               return base.ptr ? nb::cast(base) : nb::none();
+                             })
+      .def_property_readonly(
+          "target_block",
+          [](MlirAttribute self) -> nb::object {
+            MlirAttribute target =
+                mlirWaveMemoryMappingAttrGetTargetBlock(self);
+            return target.ptr ? nb::cast(target) : nb::none();
+          })
+      .def_property_readonly("bit_offset", [](MlirAttribute self) {
+        return mlirWaveMemoryMappingAttrGetBitOffset(self);
+      });
+}
+
 static void bindFragmentType(nb::module_ &m) {
   mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
       .def_classmethod(
@@ -361,6 +398,7 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindExprAttr(m);
   bindPredAttr(m);
   bindRedistributionAttr(m);
+  bindMemoryMappingAttr(m);
 
   // Wave address-space attributes.
   bindAddressSpaceAttr(m, "GlobalAddressSpaceAttr",

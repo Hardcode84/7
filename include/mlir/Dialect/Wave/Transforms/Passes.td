@@ -154,7 +154,8 @@ def WaveLowerSymbolicMemory : Pass<"wave-lower-symbolic-memory"> {
   }];
   let dependentDialects = [
     "func::FuncDialect",
-    "wave::WaveDialect"
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
   ];
 }
 

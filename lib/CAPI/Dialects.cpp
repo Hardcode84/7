@@ -286,6 +286,46 @@ MlirAttribute mlirWaveRedistributionAttrGetSourceSlot(MlirAttribute attr) {
       wave::ExprAttr::get(relation.getContext(), relation.getSourceSlot()));
 }
 
+bool mlirWaveAttributeIsAMemoryMapping(MlirAttribute attr) {
+  return llvm::isa<wave::MemoryMappingAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGet(MlirContext ctx,
+                                           MlirAttribute bitOffset,
+                                           MlirAttribute base,
+                                           MlirAttribute targetBlock) {
+  MLIRContext *context = unwrap(ctx);
+  wave::ExprAttr bitOffsetAttr = llvm::cast<wave::ExprAttr>(unwrap(bitOffset));
+  wave::ExprAttr baseAttr;
+  wave::ExprAttr targetBlockAttr;
+  if (base.ptr)
+    baseAttr = llvm::cast<wave::ExprAttr>(unwrap(base));
+  if (targetBlock.ptr)
+    targetBlockAttr = llvm::cast<wave::ExprAttr>(unwrap(targetBlock));
+  assert(bitOffsetAttr.getContext() == context &&
+         (!baseAttr || baseAttr.getContext() == context) &&
+         (!targetBlockAttr || targetBlockAttr.getContext() == context) &&
+         "memory mapping expressions must share an MLIR context");
+  return wrap(wave::MemoryMappingAttr::get(context, baseAttr, targetBlockAttr,
+                                           bitOffsetAttr));
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGetBase(MlirAttribute attr) {
+  wave::ExprAttr base =
+      llvm::cast<wave::MemoryMappingAttr>(unwrap(attr)).getBase();
+  return base ? wrap(base) : MlirAttribute{nullptr};
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGetTargetBlock(MlirAttribute attr) {
+  wave::ExprAttr target =
+      llvm::cast<wave::MemoryMappingAttr>(unwrap(attr)).getTargetBlock();
+  return target ? wrap(target) : MlirAttribute{nullptr};
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGetBitOffset(MlirAttribute attr) {
+  return wrap(llvm::cast<wave::MemoryMappingAttr>(unwrap(attr)).getBitOffset());
+}
+
 //===----------------------------------------------------------------------===//
 // Wave address-space attributes
 //===----------------------------------------------------------------------===//

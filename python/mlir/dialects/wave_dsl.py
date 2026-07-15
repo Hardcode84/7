@@ -42,6 +42,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     GlobalAddressSpaceAttr,
     LoadCacheAttr,
     MaskType,
+    MemoryMappingAttr,
     MemTokenType,
     PredAttr,
     PrivateAddressSpaceAttr,
@@ -390,6 +391,34 @@ def _index_expr_assumptions_attr(
     if assumptions is None:
         return None
     return ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
+
+
+def _memory_mapping_bindings(
+    expressions: Sequence[ixsimpl.Expr | None],
+    bindings: Mapping[ixsimpl.Expr, Value] | None,
+) -> tuple[dict[str, Value], dict[str, Value]]:
+    binding_map = {key.sym_name: value for key, value in (bindings or {}).items()}
+    free_names = {
+        symbol.sym_name
+        for expr in expressions
+        if expr is not None
+        for symbol in expr.free_symbols
+    }
+    free_names -= {"block", "item", "slot"}
+    unknown = free_names - binding_map.keys()
+    if unknown:
+        raise ValueError(f"free symbols missing from bindings: {sorted(unknown)}")
+    scalar: dict[str, Value] = {}
+    packet: dict[str, Value] = {}
+    for name in sorted(free_names):
+        value = binding_map[name]
+        if SimdType.isinstance(value.type) and isinstance(
+            SimdType(value.type).element_type, VectorType
+        ):
+            packet[name] = value
+        else:
+            scalar[name] = value
+    return scalar, packet
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +953,50 @@ class FunctionBuilder:
             assumptions=_index_expr_assumptions_attr(assumptions),
         ).result
 
+    def gather(
+        self,
+        bases: Value | Sequence[Value],
+        result_type: Type,
+        *,
+        bit_offset: ixsimpl.Expr,
+        bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        base: ixsimpl.Expr | None = None,
+        target_block: ixsimpl.Expr | None = None,
+        after: Value | None = None,
+        cache: Attribute | None = None,
+    ) -> tuple[Value, Value]:
+        """Build target-neutral symbolic packet gather."""
+        sources = [bases] if isinstance(bases, Value) else list(bases)
+        scalar_bindings, packet_bindings = _memory_mapping_bindings(
+            [base, target_block, bit_offset], bindings
+        )
+
+        def expr_attr(expr: ixsimpl.Expr | None) -> ExprAttr | None:
+            if expr is None:
+                return None
+            return ExprAttr.get_from_node_ptr(
+                _ixsimpl_node_ptr(expr), context=_current_context()
+            )
+
+        mapping = MemoryMappingAttr.get(
+            expr_attr(bit_offset),
+            base=expr_attr(base),
+            target_block=expr_attr(target_block),
+        )
+        op = wave.GatherOp(
+            result_type,
+            mem_token_type(),
+            sources,
+            list(scalar_bindings.values()),
+            list(packet_bindings.values()),
+            mapping,
+            dependency=after,
+            binding_names=list(scalar_bindings),
+            packet_binding_names=list(packet_bindings),
+            cache=cache,
+        )
+        return op.value, op.token
+
     def redistribute(
         self,
         source: Value,
@@ -1366,6 +1439,7 @@ __all__ = [
     "MaskType",
     "MemRefType",
     "MemTokenType",
+    "MemoryMappingAttr",
     "ModuleBuilder",
     "PredAttr",
     "PrivateAddressSpaceAttr",

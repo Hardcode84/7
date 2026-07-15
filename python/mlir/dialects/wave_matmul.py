@@ -2543,11 +2543,23 @@ def _read_mxfp4_scale_tile(
 ) -> tuple[dsl.Value, dsl.Value]:
     lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     load_type = dsl.simd_type(dsl.vector_type(8, dsl.i8()), width=cfg.mma.wave_size)
-    read_off = bld.index_expr(tile * 512 + layout.lane * 8, bindings=layout.bindings)
-    value: dsl.Value
-    token: dsl.Value
-    value, token = bld.transpose_load(
-        bld.ptr_add(lds, read_off), load_type, after=ready_token
+    item = dsl.sym("item")
+    slot = dsl.sym("slot")
+    if isinstance(tile, dsl.Expr):
+        tile = tile.subs({dsl.sym("wi"): item})
+    lane = dsl.mod(item, cfg.mma.wave_size)
+    byte_offset = (
+        tile * 512
+        + dsl.floor(lane / 16) * 128
+        + dsl.mod(item, 16) * 4
+        + dsl.floor(slot / 2)
+    )
+    value, token = bld.gather(
+        lds,
+        load_type,
+        bit_offset=byte_offset * 8,
+        bindings=layout.bindings,
+        after=ready_token,
     )
     return value, token
 
