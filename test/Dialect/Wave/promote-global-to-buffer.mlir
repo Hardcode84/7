@@ -6,7 +6,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @promote_load_store
 // CHECK-SAME: ([[IN:%[^:]+]]: !wave.ptr<#wave.global, i32>
 // CHECK-SAME: [[OUT:%[^:]+]]: !wave.ptr<#wave.global, i32>
-// CHECK-DAG: arith.constant 2147483647 : i32
+// CHECK-DAG: arith.constant -2147483648 : i32
 // CHECK-DAG: [[IN_BUF:%.*]] = waveamd.make_buffer [[IN]], {{%.*}} : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
 // CHECK-DAG: [[OUT_BUF:%.*]] = waveamd.make_buffer [[OUT]], {{%.*}} : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
 // CHECK: [[LANE:%.*]] = wave.lane_id : !wave.simd<i32, 32>
@@ -35,6 +35,60 @@ func.func @promote_load_store(
   %tok1 = wave.store %value -> %out_ptr after %tok0
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @promote_access_ending_at_signed_i32_max
+// CHECK: waveamd.make_buffer
+// CHECK: wave.load {{.*}}!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+// MACHINE-LABEL: func.func @promote_access_ending_at_signed_i32_max
+// MACHINE: waveamdmachine.buffer_load_tuple_b32
+func.func @promote_access_ending_at_signed_i32_max(
+    %in: !wave.ptr<#wave.global, i8>,
+    %raw: !wave.simd<index, 32>) attributes {wave.kernel} {
+  %offset = wave.assume %raw as "x"
+      [#wave.pred<"x >= 2147483632">,
+       #wave.pred<"x <= 2147483632">] : !wave.simd<index, 32>
+  %ptr = wave.ptr_add %in, %offset
+      : !wave.ptr<#wave.global, i8>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+  %value, %token = wave.load %ptr
+      : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+      -> (!wave.simd<vector<16xi8>, 32>, !wave.mem.token)
+  return
+}
+
+// Algebraically equivalent range assumptions must prove a factored byte
+// offset even when their expression trees are not structurally identical.
+// CHECK-LABEL: func.func @promote_factored_byte_offset
+// CHECK: waveamd.make_buffer
+// CHECK: wave.load {{.*}}!wave.simd<!wave.ptr<#waveamd.buffer>, 32>
+// MACHINE-LABEL: func.func @promote_factored_byte_offset
+// MACHINE: waveamdmachine.buffer_load_tuple_b32
+func.func @promote_factored_byte_offset(
+    %in: !wave.ptr<#wave.global>,
+    %wi: !wave.simd<i32, 32>,
+    %s: i32,
+    %a: i32,
+    %b: i32,
+    %c: i32) attributes {wave.kernel} {
+  %offset = wave.index_expr <"2*(128 + 256*c + 256*s*(4*a + b) + s*Mod(wi, 2))">
+      assuming [#wave.pred<"256 + 512*c + 2048*a*s + 512*b*s + 2*s*Mod(wi, 2) >= 0 & -2147483640 + 256 + 512*c + 2048*a*s + 512*b*s + 2*s*Mod(wi, 2) <= 0">]
+      ["wi", "s", "a", "b", "c"](%wi, %s, %a, %b, %c)
+      : (!wave.simd<i32, 32>, i32, i32, i32, i32)
+      -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %in, %offset
+      : !wave.ptr<#wave.global>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global>, 32>
+  %value, %token = wave.load %ptr
+      : (!wave.simd<!wave.ptr<#wave.global>, 32>)
+      -> (!wave.simd<vector<4xf16>, 32>, !wave.mem.token)
   return
 }
 

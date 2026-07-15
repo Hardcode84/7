@@ -931,6 +931,8 @@ mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
 
 static bool provablyNonZero(Store &store, ExprHandle expr,
                             ArrayRef<PredHandle> assumptions) {
+  if (std::optional<int64_t> literal = getIntegerLiteralValue(expr))
+    return *literal != 0;
   FailureOr<ExprHandle> zero = composeExprInt(store, 0);
   if (failed(zero))
     return false;

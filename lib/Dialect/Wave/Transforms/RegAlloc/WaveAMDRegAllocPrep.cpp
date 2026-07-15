@@ -968,14 +968,14 @@ splitTupleElementSharing(func::FuncOp func,
   return success();
 }
 
-static bool isUniformIfCopyableYield(Value value) {
+static bool isRegionCopyableYield(Value value) {
   auto rt = dyn_cast<waveamdmachine::RegType>(value.getType());
   return rt && (isSGPR(rt) || isVGPR(rt));
 }
 
 static LogicalResult
-materializeUniformIfRegionYieldCopies(waveamdmachine::UniformIfOp uniformIf,
-                                      Region &region, OpBuilder &builder) {
+materializeExternalRegionYieldCopies(Operation *regionBranch, Region &region,
+                                     OpBuilder &builder) {
   if (region.empty())
     return success();
   auto yield =
@@ -986,9 +986,9 @@ materializeUniformIfRegionYieldCopies(waveamdmachine::UniformIfOp uniformIf,
   bool changed = false;
   builder.setInsertionPoint(yield);
   for (auto [index, value] : llvm::enumerate(values)) {
-    if (!isUniformIfCopyableYield(value))
+    if (!isRegionCopyableYield(value))
       continue;
-    if (valueIsDefinedInside(uniformIf, value))
+    if (valueIsDefinedInside(regionBranch, value))
       continue;
     FailureOr<Value> dup = duplicateRegValue(builder, yield.getLoc(), value);
     if (failed(dup))
@@ -1006,11 +1006,26 @@ static LogicalResult materializeUniformIfYieldCopies(func::FuncOp func) {
   func.walk([&](waveamdmachine::UniformIfOp op) { ops.push_back(op); });
   OpBuilder builder(func.getContext());
   for (waveamdmachine::UniformIfOp op : ops) {
-    if (failed(materializeUniformIfRegionYieldCopies(op, op.getThenRegion(),
-                                                     builder)))
+    if (failed(materializeExternalRegionYieldCopies(
+            op.getOperation(), op.getThenRegion(), builder)))
       return failure();
-    if (failed(materializeUniformIfRegionYieldCopies(op, op.getElseRegion(),
-                                                     builder)))
+    if (failed(materializeExternalRegionYieldCopies(
+            op.getOperation(), op.getElseRegion(), builder)))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult materializeExecIfYieldCopies(func::FuncOp func) {
+  SmallVector<waveamdmachine::ExecIfOp> ops;
+  func.walk([&](waveamdmachine::ExecIfOp op) { ops.push_back(op); });
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::ExecIfOp op : ops) {
+    if (failed(materializeExternalRegionYieldCopies(
+            op.getOperation(), op.getThenRegion(), builder)))
+      return failure();
+    if (failed(materializeExternalRegionYieldCopies(
+            op.getOperation(), op.getElseRegion(), builder)))
       return failure();
   }
   return success();
@@ -1020,6 +1035,8 @@ static LogicalResult materializeUniformIfYieldCopies(func::FuncOp func) {
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   if (failed(materializeUniformIfYieldCopies(func)))
+    return failure();
+  if (failed(materializeExecIfYieldCopies(func)))
     return failure();
   if (failed(materializeLoopBackedgeCopies(func)))
     return failure();

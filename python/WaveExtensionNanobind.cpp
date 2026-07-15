@@ -289,6 +289,39 @@ static void bindRedistributionAttr(nb::module_ &m) {
       });
 }
 
+static void bindMemoryMappingAttr(nb::module_ &m) {
+  mlir_attribute_subclass(m, "MemoryMappingAttr",
+                          mlirWaveAttributeIsAMemoryMapping)
+      .def_classmethod(
+          "get",
+          [](nb::object &cls, MlirAttribute bitOffset, nb::object base,
+             nb::object targetBlock) {
+            MlirAttribute baseAttr{nullptr};
+            MlirAttribute targetBlockAttr{nullptr};
+            if (!base.is_none())
+              baseAttr = nb::cast<MlirAttribute>(base);
+            if (!targetBlock.is_none())
+              targetBlockAttr = nb::cast<MlirAttribute>(targetBlock);
+            return cls(mlirWaveMemoryMappingAttrGet(
+                baseAttr, targetBlockAttr, bitOffset));
+          },
+          nb::arg("cls"), nb::arg("bit_offset"), nb::arg("base") = nb::none(),
+          nb::arg("target_block") = nb::none())
+      .def_property_readonly("base", [](MlirAttribute self) -> nb::object {
+        MlirAttribute value = mlirWaveMemoryMappingAttrGetBase(self);
+        return value.ptr ? nb::cast(value) : nb::none();
+      })
+      .def_property_readonly(
+          "target_block", [](MlirAttribute self) -> nb::object {
+            MlirAttribute value =
+                mlirWaveMemoryMappingAttrGetTargetBlock(self);
+            return value.ptr ? nb::cast(value) : nb::none();
+          })
+      .def_property_readonly("bit_offset", [](MlirAttribute self) {
+        return mlirWaveMemoryMappingAttrGetBitOffset(self);
+      });
+}
+
 static void bindFragmentType(nb::module_ &m) {
   mlir_type_subclass(m, "FragmentType", mlirWaveAMDTypeIsAFragment)
       .def_classmethod(
@@ -361,6 +394,7 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindExprAttr(m);
   bindPredAttr(m);
   bindRedistributionAttr(m);
+  bindMemoryMappingAttr(m);
 
   // Wave address-space attributes.
   bindAddressSpaceAttr(m, "GlobalAddressSpaceAttr",

@@ -25,7 +25,6 @@
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <string>
 
@@ -39,8 +38,9 @@ using namespace mlir::wave;
 
 namespace {
 
-static constexpr int64_t kBufferRangeBytes =
-    std::numeric_limits<int32_t>::max();
+// The buffer descriptor range is unsigned i32. Cover the complete nonnegative
+// signed-i32 byte-offset domain, including an access ending at 0x7fffffff.
+static constexpr int64_t kBufferRangeBytes = int64_t{1} << 31;
 
 struct ByteOffset {
   struct Binding {
@@ -351,8 +351,33 @@ private:
       return true;
     if (referencesWideScalarInteger(offset))
       return false;
-    return sym::provablyInRange(store, offset.expr, offset.assumptions, 0,
-                                kBufferRangeBytes - *bytes);
+    int64_t upper = kBufferRangeBytes - *bytes;
+    auto provablyBounded = [&](sym::ExprHandle expr) {
+      if (sym::provablyInRange(store, expr, offset.assumptions, 0, upper))
+        return true;
+
+      // Generated index expressions often preserve useful factoring while
+      // their carried assumptions are algebraically expanded. Ask the exact
+      // predicate checker before rejecting an otherwise buffer-safe access.
+      FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+      FailureOr<sym::ExprHandle> limit = sym::composeExprInt(store, upper);
+      if (failed(zero) || failed(limit))
+        return false;
+      FailureOr<sym::PredHandle> nonNegative = sym::composePredCmp(
+          store, expr, sym::PredCmpOp::Ge, *zero);
+      FailureOr<sym::PredHandle> withinLimit = sym::composePredCmp(
+          store, expr, sym::PredCmpOp::Le, *limit);
+      return succeeded(nonNegative) && succeeded(withinLimit) &&
+             sym::checkPredicate(store, *nonNegative, offset.assumptions) ==
+                 sym::CheckResult::True &&
+             sym::checkPredicate(store, *withinLimit, offset.assumptions) ==
+                 sym::CheckResult::True;
+    };
+
+    if (provablyBounded(offset.expr))
+      return true;
+    FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, offset.expr);
+    return succeeded(expanded) && provablyBounded(*expanded);
   }
 
   FailureOr<ByteOffset> buildByteOffset(Value ptr) {

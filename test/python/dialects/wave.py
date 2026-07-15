@@ -219,6 +219,24 @@ def test_typed_bindings():
         assert str(relation.source_item) == '#wave.expr<"item">'
         assert str(relation.source_slot) == '#wave.expr<"slot">'
 
+        bit_offset_attr = w.ExprAttr.get_from_node_ptr(
+            (32 * w.sym("slot")).node_ptr,
+            context=w.Context.current,
+        )
+        mapping = w.MemoryMappingAttr.get(
+            bit_offset_attr,
+            base=block_attr,
+            target_block=item_attr,
+        )
+        assert w.MemoryMappingAttr.isinstance(mapping)
+        assert str(mapping.base) == '#wave.expr<"block">'
+        assert str(mapping.target_block) == '#wave.expr<"item">'
+        assert str(mapping.bit_offset) == '#wave.expr<"32*slot">'
+
+        local_mapping = w.MemoryMappingAttr.get(bit_offset_attr)
+        assert local_mapping.base is None
+        assert local_mapping.target_block is None
+
         pred = w.PredAttr.get("K >= 0", context=w.Context.current)
         assert w.PredAttr.isinstance(pred)
         raw_pred = w.sym_ctx.eq(
@@ -262,6 +280,48 @@ def test_redistribute_builder():
         )
         # CHECK: wave.shuffle
         # CHECK-NOT: wave.redistribute
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_symbolic_memory_builder
+@run
+def test_symbolic_memory_builder():
+    with w.module() as m:
+        packet = w.simd_type(w.vector_type(4, w.i32()), 32)
+        indices = w.simd_type(w.vector_type(4, w.index_type()), 32)
+        with m.function(
+            "symbolic_memory_kernel",
+            [w.ptr_type(w.i32()), indices],
+            kernel=True,
+            workgroup_size=[32, 1, 1],
+        ) as f:
+            base, index_packet = f.args
+            index = w.sym("index")
+            loaded, read = f.gather(
+                base,
+                packet,
+                bit_offset=32 * index,
+                packet_bindings={index: index_packet},
+            )
+            f.scatter(
+                loaded,
+                base,
+                bit_offset=32 * index,
+                packet_bindings={index: index_packet},
+                after=read,
+            )
+        # CHECK: wave.gather
+        # CHECK-SAME: packet_bindings ["index"]
+        # CHECK: wave.scatter
+        # CHECK-SAME: packet_bindings ["index"]
+        print(m.module)
+        w.PassManager.parse("builtin.module(wave-lower-symbolic-memory)").run(
+            m.module.operation
+        )
+        # CHECK-NOT: wave.gather
+        # CHECK-NOT: wave.scatter
+        # CHECK: wave.load
+        # CHECK: wave.store
         print(m.module)
 
 

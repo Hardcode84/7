@@ -26,6 +26,36 @@ func.func @i8_scalar_uses_b8(%in: !wave.ptr<#wave.global, i8>,
   return
 }
 
+// CHECK-LABEL: func.func @i8_singleton_pack_extract_uses_b8
+// CHECK: waveamdmachine.global_load_u8
+// CHECK-NOT: waveamdmachine.v_lshrrev_b32
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_or_b32
+// CHECK: waveamdmachine.global_store_b8
+func.func @i8_singleton_pack_extract_uses_b8(
+    %in: !wave.ptr<#wave.global, i8>,
+    %out: !wave.ptr<#wave.global, i8>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ip = wave.ptr_add %in, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+  %op = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+  %value, %loaded = wave.load %ip
+      : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+      -> (!wave.simd<i8, 32>, !wave.mem.token)
+  %packet = wave.pack %value
+      : !wave.simd<i8, 32> -> !wave.simd<vector<1xi8>, 32>
+  %unpacked = wave.extract %packet[0]
+      : !wave.simd<vector<1xi8>, 32> -> !wave.simd<i8, 32>
+  %stored = wave.store %unpacked -> %op after %loaded
+      : (!wave.simd<i8, 32>,
+         !wave.simd<!wave.ptr<#wave.global, i8>, 32>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @i8_pair_uses_b16
 // CHECK: waveamdmachine.global_load_b16
 // CHECK: waveamdmachine.global_store_b16

@@ -22,6 +22,7 @@
 namespace mlir::wave {
 // Python registers the small pass set used by in-process pipeline entrypoints.
 std::unique_ptr<::mlir::Pass> createWaveAMDDmaZeroFill();
+std::unique_ptr<::mlir::Pass> createWaveLowerSymbolicMemory();
 std::unique_ptr<::mlir::Pass> createWaveLowerRedistribute();
 std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
 } // namespace mlir::wave
@@ -45,6 +46,9 @@ void mlirRegisterWavePasses(void) {
   });
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveAMDDmaZeroFill();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::wave::createWaveLowerSymbolicMemory();
   });
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveLowerRedistribute();
@@ -284,6 +288,45 @@ MlirAttribute mlirWaveRedistributionAttrGetSourceSlot(MlirAttribute attr) {
       llvm::cast<wave::RedistributionAttr>(unwrap(attr));
   return wrap(
       wave::ExprAttr::get(relation.getContext(), relation.getSourceSlot()));
+}
+
+bool mlirWaveAttributeIsAMemoryMapping(MlirAttribute attr) {
+  return llvm::isa<wave::MemoryMappingAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGet(MlirAttribute base,
+                                           MlirAttribute targetBlock,
+                                           MlirAttribute bitOffset) {
+  wave::ExprAttr bit = llvm::cast<wave::ExprAttr>(unwrap(bitOffset));
+  wave::ExprAttr baseExpr =
+      base.ptr ? llvm::cast<wave::ExprAttr>(unwrap(base)) : wave::ExprAttr();
+  wave::ExprAttr targetBlockExpr = targetBlock.ptr
+                                       ? llvm::cast<wave::ExprAttr>(
+                                             unwrap(targetBlock))
+                                       : wave::ExprAttr();
+  assert((!baseExpr || baseExpr.getContext() == bit.getContext()) &&
+         (!targetBlockExpr ||
+          targetBlockExpr.getContext() == bit.getContext()) &&
+         "memory mapping expressions must share an MLIR context");
+  return wrap(wave::MemoryMappingAttr::get(
+      bit.getContext(), baseExpr, targetBlockExpr, bit));
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGetBase(MlirAttribute attr) {
+  wave::ExprAttr base =
+      llvm::cast<wave::MemoryMappingAttr>(unwrap(attr)).getBase();
+  return base ? wrap(base) : MlirAttribute{nullptr};
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGetTargetBlock(MlirAttribute attr) {
+  wave::ExprAttr targetBlock =
+      llvm::cast<wave::MemoryMappingAttr>(unwrap(attr)).getTargetBlock();
+  return targetBlock ? wrap(targetBlock) : MlirAttribute{nullptr};
+}
+
+MlirAttribute mlirWaveMemoryMappingAttrGetBitOffset(MlirAttribute attr) {
+  return wrap(
+      llvm::cast<wave::MemoryMappingAttr>(unwrap(attr)).getBitOffset());
 }
 
 //===----------------------------------------------------------------------===//

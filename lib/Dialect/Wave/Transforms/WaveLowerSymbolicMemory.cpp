@@ -316,8 +316,17 @@ divideExactly(sym::Store &store, sym::ExprHandle value, int64_t divisor,
   if (failed(simplified))
     return failure();
   std::optional<int64_t> denominator = sym::collectDenominator(*simplified);
-  if (!denominator || *denominator != 1)
-    return failure();
+  if (!denominator || *denominator != 1) {
+    FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *quotient);
+    if (failed(expanded))
+      return failure();
+    simplified = sym::simplifyExpr(store, *expanded, assumptions);
+    if (failed(simplified))
+      return failure();
+    denominator = sym::collectDenominator(*simplified);
+    if (!denominator || *denominator != 1)
+      return failure();
+  }
   return *simplified;
 }
 
@@ -628,6 +637,9 @@ buildSlotMapping(const MemoryAccess &access, sym::Store &store,
     return failure();
   MappingCoordinates coordinates =
       getMappingCoordinates(access, blockSymbol, zero);
+  // Pre-divide before substitution; rational xor syntax hides integer types.
+  FailureOr<sym::ExprHandle> mappingByteOffset =
+      divideExactly(store, coordinates.bitOffset, 8, result.assumptions);
   FailureOr<MappingCoordinates> specialized = specializeCoordinates(
       store, coordinates, *substitutions, result.assumptions);
   if (failed(specialized))
@@ -642,8 +654,16 @@ buildSlotMapping(const MemoryAccess &access, sym::Store &store,
       store, *specialized, blockSubstitution, result.assumptions);
   if (failed(local))
     return failure();
-  FailureOr<sym::ExprHandle> byteOffset =
-      getByteOffset(store, local->bitOffset, result.assumptions);
+  FailureOr<sym::ExprHandle> byteOffset = failure();
+  if (succeeded(mappingByteOffset)) {
+    SmallVector<sym::ExprSubstitution> localSubstitutions(*substitutions);
+    llvm::append_range(localSubstitutions, blockSubstitution);
+    byteOffset = substituteAndSimplify(store, *mappingByteOffset,
+                                       localSubstitutions,
+                                       result.assumptions);
+  }
+  if (failed(byteOffset))
+    byteOffset = getByteOffset(store, local->bitOffset, result.assumptions);
   if (failed(byteOffset))
     return failure();
   result.base = local->base;
@@ -673,6 +693,16 @@ static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
         sym::simplifyExpr(store, *difference, assumptions);
     if (succeeded(simplified) && sym::getIntegerLiteralValue(*simplified) == 0)
       return true;
+    if (succeeded(simplified)) {
+      FailureOr<sym::ExprHandle> expanded =
+          sym::expandExpr(store, *simplified);
+      if (succeeded(expanded)) {
+        simplified = sym::simplifyExpr(store, *expanded, assumptions);
+        if (succeeded(simplified) &&
+            sym::getIntegerLiteralValue(*simplified) == 0)
+          return true;
+      }
+    }
   }
   FailureOr<sym::PredHandle> equal =
       sym::composePredCmp(store, lhs, sym::PredCmpOp::Eq, rhs);
@@ -1072,6 +1102,12 @@ static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
     return constant.getResult();
   }
 
+  StringRef symbol = sym::ExprView(expr).getSymbolName();
+  if (!symbol.empty())
+    for (const NamedBinding &binding : slot.bindings)
+      if (binding.name == symbol)
+        return binding.value;
+
   llvm::DenseSet<StringRef> freeSymbols;
   sym::walkSymbolNames(expr, [&](StringRef name) { freeSymbols.insert(name); });
   SmallVector<StringRef> names;
@@ -1119,7 +1155,35 @@ static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
 static FailureOr<Value> materializePointer(IRRewriter &rewriter,
                                            const MemoryAccess &access,
                                            const SlotMapping &slot,
+                                           sym::Store &store,
                                            SmallVectorImpl<Value> &byteBases) {
+  Value source = access.bases[slot.baseIndex];
+  PtrType sourceType = cast<PtrType>(source.getType());
+  VectorType packet = cast<VectorType>(access.packetType.getElementType());
+  Type sourceElement = sourceType.getElementType();
+  Type packetElement = packet.getElementType();
+  if (sourceElement && sourceElement == packetElement &&
+      sourceElement.isIntOrFloat()) {
+    int64_t elementBits = sourceElement.getIntOrFloatBitWidth();
+    if (elementBits > 0 && elementBits % 8 == 0) {
+      FailureOr<sym::ExprHandle> elementOffset = divideExactly(
+          store, slot.byteOffset, elementBits / 8, slot.assumptions);
+      if (succeeded(elementOffset)) {
+        FailureOr<Value> offset =
+            materializeExpr(rewriter, access, slot, *elementOffset);
+        if (succeeded(offset)) {
+          Type resultType = sourceType;
+          if (SimdType simd = dyn_cast<SimdType>((*offset).getType()))
+            resultType = SimdType::get(access.op->getContext(), sourceType,
+                                       simd.getWidth());
+          return PtrAddOp::create(rewriter, access.op->getLoc(), resultType,
+                                  source, *offset)
+              .getResult();
+        }
+      }
+    }
+  }
+
   Value byteBase = getByteBase(rewriter, access, slot.baseIndex, byteBases);
 
   if (std::optional<int64_t> literal =
@@ -1168,6 +1232,7 @@ static Value joinTokens(IRRewriter &rewriter, const MemoryAccess &access,
 
 static LogicalResult lowerGather(IRRewriter &rewriter,
                                  const MemoryAccess &access,
+                                 sym::Store &store,
                                  ArrayRef<SlotMapping> slots,
                                  ArrayRef<SmallVector<unsigned>> transactions) {
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
@@ -1179,7 +1244,7 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
   for (ArrayRef<unsigned> transaction : transactions) {
     const SlotMapping &first = slots[transaction.front()];
     FailureOr<Value> ptr =
-        materializePointer(rewriter, access, first, byteBases);
+        materializePointer(rewriter, access, first, store, byteBases);
     if (failed(ptr))
       return access.op->emitOpError("failed to materialize mapped address");
     Type valueType = getTransactionType(access, transaction.size());
@@ -1208,6 +1273,7 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
 
 static LogicalResult
 lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
+             sym::Store &store,
              ArrayRef<SlotMapping> slots,
              ArrayRef<SmallVector<unsigned>> transactions) {
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
@@ -1223,7 +1289,7 @@ lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
   for (ArrayRef<unsigned> transaction : transactions) {
     const SlotMapping &first = slots[transaction.front()];
     FailureOr<Value> ptr =
-        materializePointer(rewriter, access, first, byteBases);
+        materializePointer(rewriter, access, first, store, byteBases);
     if (failed(ptr))
       return access.op->emitOpError("failed to materialize mapped address");
     SmallVector<Value> values;
@@ -1484,8 +1550,8 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
     return access.op->emitOpError(
         "packet cannot be covered by legal memory transactions");
   if (access.gather)
-    return lowerGather(rewriter, access, *mappings, *transactions);
-  return lowerScatter(rewriter, access, *mappings, *transactions);
+    return lowerGather(rewriter, access, store, *mappings, *transactions);
+  return lowerScatter(rewriter, access, store, *mappings, *transactions);
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,

@@ -139,8 +139,8 @@ func.func @duplicate_scatter(%value: !wave.simd<vector<4xi32>, 32>,
 
 // CHECK-LABEL: func.func @second_base(
 // CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
-// CHECK: wave.ptr_cast [[SECOND]]
-// CHECK-NOT: wave.ptr_cast [[FIRST]]
+// CHECK: wave.ptr_add [[SECOND]]
+// CHECK-NOT: wave.ptr_add [[FIRST]]
 // CHECK-COUNT-1: wave.load
 func.func @second_base(%first: !wave.ptr<#wave.shared, i32>,
                        %second: !wave.ptr<#wave.shared, i32>)
@@ -157,8 +157,8 @@ func.func @second_base(%first: !wave.ptr<#wave.shared, i32>,
 
 // CHECK-LABEL: func.func @constant_binding_base(
 // CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
-// CHECK: wave.ptr_cast [[SECOND]]
-// CHECK-NOT: wave.ptr_cast [[FIRST]]
+// CHECK: wave.ptr_add [[SECOND]]
+// CHECK-NOT: wave.ptr_add [[FIRST]]
 // CHECK-COUNT-1: wave.load
 func.func @constant_binding_base(%first: !wave.ptr<#wave.shared, i32>,
                                  %second: !wave.ptr<#wave.shared, i32>)
@@ -176,8 +176,8 @@ func.func @constant_binding_base(%first: !wave.ptr<#wave.shared, i32>,
 
 // CHECK-LABEL: func.func @solver_exact_binding_base(
 // CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
-// CHECK: wave.ptr_cast [[SECOND]]
-// CHECK-NOT: wave.ptr_cast [[FIRST]]
+// CHECK: wave.ptr_add [[SECOND]]
+// CHECK-NOT: wave.ptr_add [[FIRST]]
 // CHECK-COUNT-1: wave.load
 func.func @solver_exact_binding_base(%first: !wave.ptr<#wave.shared, i32>,
                                      %second: !wave.ptr<#wave.shared, i32>,
@@ -232,9 +232,9 @@ func.func @affine_packet_producer(
 // CHECK-LABEL: func.func @packet_item_base_selection(
 // CHECK-SAME: [[FIRST:%.*]]: !wave.ptr<#wave.shared, i32>, [[SECOND:%.*]]: !wave.ptr<#wave.shared, i32>
 // CHECK-COUNT-1: wave.workitem_id 0
-// CHECK: wave.ptr_cast [[FIRST]]
+// CHECK: wave.ptr_add [[FIRST]]
 // CHECK: wave.load
-// CHECK: wave.ptr_cast [[SECOND]]
+// CHECK: wave.ptr_add [[SECOND]]
 // CHECK: wave.load
 // CHECK-NOT: wave.gather
 func.func @packet_item_base_selection(
@@ -330,10 +330,10 @@ func.func @component_exact_cover(
 
 // Slot-static partitioning selects each base and stays vectorized.
 // CHECK-LABEL: func.func @slot_partition_base(
-// CHECK: wave.ptr_cast %arg0
+// CHECK: wave.ptr_add %arg0
 // CHECK: wave.load
 // CHECK-SAME: -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
-// CHECK: wave.ptr_cast %arg1
+// CHECK: wave.ptr_add %arg1
 // CHECK: wave.load
 // CHECK-SAME: -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
 func.func @slot_partition_base(
@@ -388,7 +388,7 @@ func.func @explicit_local_block(%base: !wave.ptr<#wave.shared, i32>)
 // CHECK: wave.workitem_id 1
 // CHECK: wave.binary muli
 // CHECK: wave.binary addi
-// CHECK: wave.index_expr <"8*item"> assuming [#wave.pred<"item >= 0 & -7 + item <= 0">]
+// CHECK: wave.index_expr <"2*item"> assuming [#wave.pred<"item >= 0 & -7 + item <= 0">]
 // CHECK-COUNT-1: wave.load
 func.func @row_major_item(%base: !wave.ptr<#wave.shared, i32>)
     -> !wave.simd<vector<2xi32>, 32>
@@ -506,4 +506,77 @@ func.func @scf_if_control(%x: index,
         -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   }
   return
+}
+
+// -----
+
+// Pre-divide before integer packet substitution; rational xor stays integral.
+// CHECK-LABEL: func.func @predivide_packet_binding(
+// CHECK-COUNT-1: wave.store
+// CHECK-NOT: wave.scatter
+func.func @predivide_packet_binding(
+    %value: !wave.simd<vector<1xf16>, 32>,
+    %base: !wave.ptr<#wave.shared, f16>,
+    %raw: !wave.simd<i32, 32>) {
+  %index = wave.index_expr
+      <"xor(1/8*(8*Mod(raw0, 2) + 32*Mod(floor(1/4*raw0), 2) + 16*Mod(floor(1/2*raw0), 2)), Mod(floor(1/16*raw0), 8))">
+      ["raw0"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %indices = wave.pack %index
+      : !wave.simd<index, 32> -> !wave.simd<vector<1xindex>, 32>
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"16 * idx">>
+      bindings []() packet_bindings ["idx"](%indices)
+      : (!wave.simd<vector<1xf16>, 32>, !wave.ptr<#wave.shared, f16>,
+         !wave.simd<vector<1xindex>, 32>) -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Expand equivalent integer packet expressions before adjacency proofs.
+// CHECK-LABEL: func.func @expanded_packet_adjacency(
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<vector<2xf16>, 32>
+// CHECK-NOT: wave.store {{.*}}!wave.simd<f16, 32>
+func.func @expanded_packet_adjacency(
+    %value: !wave.simd<vector<2xf16>, 32>,
+    %base: !wave.ptr<#wave.shared, f16>,
+    %raw: !wave.simd<i32, 32>) {
+  %i0 = wave.index_expr
+      <"64*floor(1/8*raw0) + 8*xor(1/8*(8*Mod(raw0, 2) + 32*Mod(floor(1/4*raw0), 2) + 16*Mod(floor(1/2*raw0), 2)), Mod(floor(1/16*raw0), 8))">
+      ["raw0"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %i1 = wave.index_expr
+      <"1 + 64*floor(1/8*raw0) + 8*xor(Mod(raw0, 2) + 4*Mod(floor(1/4*raw0), 2) + 2*Mod(floor(1/2*raw0), 2), Mod(floor(1/16*raw0), 8))">
+      ["raw0"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %indices = wave.pack %i0, %i1
+      : !wave.simd<index, 32>, !wave.simd<index, 32>
+      -> !wave.simd<vector<2xindex>, 32>
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"16 * idx">>
+      bindings []() packet_bindings ["idx"](%indices)
+      : (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#wave.shared, f16>,
+         !wave.simd<vector<2xindex>, 32>) -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Expand an affine bit offset before rejecting exact byte division.
+// CHECK-LABEL: func.func @expanded_exact_byte_division(
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<8xf16>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @expanded_exact_byte_division(
+    %base: !wave.ptr<#wave.global, f16>,
+    %offset: !wave.simd<index, 32>)
+    -> !wave.simd<vector<8xf16>, 32> {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"16 * offset + 16 * slot">>
+      bindings ["offset"](%offset) packet_bindings []()
+      : (!wave.ptr<#wave.global, f16>, !wave.simd<index, 32>)
+      -> (!wave.simd<vector<8xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<8xf16>, 32>
 }

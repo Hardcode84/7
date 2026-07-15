@@ -4075,6 +4075,11 @@ static std::optional<VectorType> getSimdVectorTypeNoDiag(Type type) {
   return vecType;
 }
 
+static bool hasSingletonSimdVectorPayload(Type type) {
+  std::optional<VectorType> vector = getSimdVectorTypeNoDiag(type);
+  return vector && vector->getNumElements() == 1;
+}
+
 static bool isMemoryPayloadElementBits(unsigned bits) {
   return bits == 4 || bits == 8 || bits == 16 || bits == 32;
 }
@@ -4404,6 +4409,17 @@ static bool canPackMmaScaleLowDword(WaveAMDMachineSelector &S, PackOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
+  // A single-element packet is a structural wrapper, not a wider register
+  // payload. Preserve the selected scalar representation directly. This is
+  // particularly important for i8 packets, whose vector<1xi8> type is not a
+  // legal hardware memory payload even though scalar i8 is legal.
+  if (op.getInputs().size() == 1 &&
+      hasSingletonSimdVectorPayload(op.getResult().getType())) {
+    values[op.getResult()] = expect(op.getInputs().front(), op);
+    eraseIfTopLevel(op);
+    return success();
+  }
+
   FailureOr<MemoryPayloadShape> shape =
       getSimdVectorPayloadShape(op, op.getResult().getType(), "pack");
   if (failed(shape))
@@ -4457,6 +4473,15 @@ LogicalResult WaveAMDMachineSelector::selectExtract(ExtractOp op) {
   if (failed(defer))
     return failure();
   if (*defer) {
+    eraseIfTopLevel(op);
+    return success();
+  }
+
+  // The inverse singleton extract is also representationally free. Bypass
+  // vector payload validation and retain the selected scalar value.
+  if (op.getIndex() == 0 &&
+      hasSingletonSimdVectorPayload(op.getSource().getType())) {
+    values[op.getResult()] = expect(op.getSource(), op);
     eraseIfTopLevel(op);
     return success();
   }

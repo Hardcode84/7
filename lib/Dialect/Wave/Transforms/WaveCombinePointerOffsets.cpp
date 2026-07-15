@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringMap.h"
 
+#include <array>
 #include <cassert>
 #include <optional>
 #include <string>
@@ -252,6 +253,54 @@ struct MergedIndexExpr {
   sym::ExprHandle expr;
 };
 
+static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator > 0)
+    ++quotient;
+  return quotient;
+}
+
+static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator < 0)
+    --quotient;
+  return quotient;
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+inferIntegerRange(sym::Store &store, sym::ExprHandle expr,
+                  ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<sym::InferredRange> range =
+      sym::inferRange(store, expr, assumptions);
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+  std::optional<int64_t> lower = ceilRational(*range->lower);
+  std::optional<int64_t> upper = floorRational(*range->upper);
+  if (!lower || !upper || *lower > *upper)
+    return std::nullopt;
+  return std::make_pair(*lower, *upper);
+}
+
+static FailureOr<sym::PredHandle>
+buildExprRangeAssumption(sym::Store &store, sym::ExprHandle expr,
+                         std::pair<int64_t, int64_t> range) {
+  constexpr llvm::StringLiteral resultName = "__wave_combined_result";
+  FailureOr<sym::ExprHandle> result = symbolExpr(store, resultName);
+  FailureOr<sym::PredHandle> assumption =
+      sym::rangeAssumption(store, resultName, range.first, range.second);
+  if (failed(result) || failed(assumption))
+    return failure();
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{*result, expr}};
+  return sym::substitutePred(store, *assumption, substitution);
+}
+
 static FailureOr<MergedIndexExpr>
 substituteAndSimplify(IndexExprOp op, sym::Store &store,
                       ArrayRef<sym::ExprSubstitution> substitutions,
@@ -357,10 +406,24 @@ static FailureOr<bool> combineIndexExpr(IRRewriter &rewriter, IndexExprOp op,
   seedBindingNames(op, state);
   if (failed(collectIndexExprMerge(op, store, state)))
     return op.emitError("failed to compose chained wave.index_expr");
+  // Flattening replaces a bounded intermediate result with its producer
+  // expression.  Preserve the intermediate's finite range explicitly: the
+  // symbolic range solver may not rediscover a correlated bound after a
+  // complex producer (for example a swizzled affine index) is substituted.
+  std::optional<std::pair<int64_t, int64_t>> resultRange = inferIntegerRange(
+      store, op.getExpr().getValue(), state.assumptions);
   FailureOr<MergedIndexExpr> merged =
       substituteAndSimplify(op, store, state.substitutions, state.assumptions);
   if (failed(merged))
     return failure();
+  if (resultRange) {
+    FailureOr<sym::PredHandle> rangeAssumption =
+        buildExprRangeAssumption(store, merged->expr, *resultRange);
+    if (failed(rangeAssumption))
+      return op.emitError(
+          "failed to preserve chained wave.index_expr result range");
+    merged->assumptions.push_back(*rangeAssumption);
+  }
 
   FailureOr<SmallVector<IndexExprBinding>> liveBindings =
       collectLiveBindings(merged->expr, state.bindings);

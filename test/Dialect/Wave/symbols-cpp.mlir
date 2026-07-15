@@ -63,5 +63,6 @@
 // CHECK: pow2-or-zero: or-zero
 // CHECK: pow2-positive: positive
 // CHECK: defined-safe-div: true
+// CHECK: defined-literal-denominator: true
 // CHECK: defined-partial-div: false
 // CHECK: defined-uncovered-piecewise: false

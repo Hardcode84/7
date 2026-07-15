@@ -19,7 +19,7 @@ wmma_f16_matmul_tiled:
 	; wave backend: WaveAMDMachine MLIR pipeline finalized
 		v_readfirstlane_b32 s15, v0
 		s_lshl_b32 s15, s15, 2
-		s_mov_b32 s18, 0x7fffffff
+		s_mov_b32 s18, 0x80000000
 		s_mov_b32 s23, 0x31016000
 		s_mov_b32 s22, 0x1000000
 		s_mov_b32 s20, s2

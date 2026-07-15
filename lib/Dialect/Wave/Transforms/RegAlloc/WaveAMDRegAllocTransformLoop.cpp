@@ -437,6 +437,37 @@ private:
     return positions.lookup(loop.getOperation());
   }
 
+  unsigned getRegionExitPosition(Region &region, unsigned fallback) {
+    if (region.empty())
+      return fallback;
+    Operation *terminator = region.front().getTerminator();
+    auto it = positions.find(terminator);
+    return it == positions.end() ? fallback : it->second;
+  }
+
+  static bool needsExecIfConditionForDataMerge(
+      waveamdmachine::ExecIfOp execIf) {
+    if (execIf.getElseRegion().empty())
+      return false;
+    return llvm::any_of(execIf.getResultTypes(), [](Type type) {
+      return !isa<waveamdmachine::MemTokenType>(type);
+    });
+  }
+
+  void collectExecIfConditionUses(RegAllocAliasOp &record) {
+    if (record.typeId != TypeID::get<waveamdmachine::ExecIfOp>())
+      return;
+    auto execIf = cast<waveamdmachine::ExecIfOp>(record.op);
+    if (!execIf.getElseRegion().empty())
+      extendValue(execIf.getCondition(), getRegionExitPosition(
+                                             execIf.getThenRegion(),
+                                             record.position));
+    if (needsExecIfConditionForDataMerge(execIf))
+      extendValue(execIf.getCondition(), getRegionExitPosition(
+                                             execIf.getElseRegion(),
+                                             record.position));
+  }
+
   void extendExternalLoopUses() {
     for (auto [value, end] : externalLoopUseEnds)
       extendValue(value, end);
@@ -595,6 +626,7 @@ private:
         extendValue(operand, record.position);
         collectExternalLoopBodyUse(operand, record.enclosingLoop);
       }
+      collectExecIfConditionUses(record);
     }
     extendExternalLoopUses();
   }

@@ -42,6 +42,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     GlobalAddressSpaceAttr,
     LoadCacheAttr,
     MaskType,
+    MemoryMappingAttr,
     MemTokenType,
     PredAttr,
     PrivateAddressSpaceAttr,
@@ -390,6 +391,70 @@ def _index_expr_assumptions_attr(
     if assumptions is None:
         return None
     return ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
+
+
+_MEMORY_MAPPING_RESERVED_SYMBOLS = frozenset({"block", "item", "slot"})
+
+
+def _memory_mapping_parts(
+    bit_offset: ixsimpl.Expr,
+    base: ixsimpl.Expr | None,
+    target_block: ixsimpl.Expr | None,
+    bindings: Mapping[ixsimpl.Expr, Value] | None,
+    packet_bindings: Mapping[ixsimpl.Expr, Value] | None,
+) -> tuple[MemoryMappingAttr, dict[str, Value], dict[str, Value]]:
+    """Import a symbolic memory map and its value bindings structurally."""
+    expressions = tuple(
+        expr for expr in (base, target_block, bit_offset) if expr is not None
+    )
+    required_names = {
+        symbol.sym_name
+        for expr in expressions
+        for symbol in expr.free_symbols
+        if symbol.sym_name not in _MEMORY_MAPPING_RESERVED_SYMBOLS
+    }
+
+    def named_values(
+        values: Mapping[ixsimpl.Expr, Value] | None, kind: str
+    ) -> dict[str, Value]:
+        named: dict[str, Value] = {}
+        for symbol, value in (values or {}).items():
+            try:
+                name = symbol.sym_name
+            except (AttributeError, RuntimeError) as exc:
+                raise TypeError(f"{kind} keys must be symbol expressions") from exc
+            if name in _MEMORY_MAPPING_RESERVED_SYMBOLS:
+                raise ValueError(f"{kind} name {name!r} is reserved")
+            if name in named:
+                raise ValueError(f"duplicate {kind} name {name!r}")
+            if name in required_names:
+                named[name] = value
+        return dict(sorted(named.items()))
+
+    scalar_values = named_values(bindings, "binding")
+    packet_values = named_values(packet_bindings, "packet binding")
+    overlap = scalar_values.keys() & packet_values.keys()
+    if overlap:
+        raise ValueError(
+            f"symbols cannot be both scalar and packet bindings: {sorted(overlap)}"
+        )
+    missing = required_names - scalar_values.keys() - packet_values.keys()
+    if missing:
+        raise ValueError(f"mapping symbols missing from bindings: {sorted(missing)}")
+
+    def expr_attr(expr: ixsimpl.Expr | None) -> ExprAttr | None:
+        if expr is None:
+            return None
+        return ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(expr), context=_current_context()
+        )
+
+    mapping = MemoryMappingAttr.get(
+        expr_attr(bit_offset),
+        base=expr_attr(base),
+        target_block=expr_attr(target_block),
+    )
+    return mapping, scalar_values, packet_values
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1063,69 @@ class FunctionBuilder:
         )
         return op.value, op.token
 
+    def gather(
+        self,
+        bases: Value | Sequence[Value],
+        result_type: Type,
+        *,
+        bit_offset: ixsimpl.Expr,
+        base: ixsimpl.Expr | None = None,
+        target_block: ixsimpl.Expr | None = None,
+        bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        packet_bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        after: Value | None = None,
+        cache: Attribute | None = None,
+    ) -> tuple[Value, Value]:
+        """Gather a SIMD vector packet through a structural memory mapping."""
+        mapping, scalar_values, packet_values = _memory_mapping_parts(
+            bit_offset, base, target_block, bindings, packet_bindings
+        )
+        base_values = [bases] if isinstance(bases, Value) else list(bases)
+        op = wave.GatherOp(
+            result_type,
+            mem_token_type(),
+            base_values,
+            list(scalar_values.values()),
+            list(packet_values.values()),
+            mapping,
+            dependency=after,
+            binding_names=list(scalar_values),
+            packet_binding_names=list(packet_values),
+            cache=cache,
+        )
+        return op.value, op.token
+
+    def scatter(
+        self,
+        value: Value,
+        bases: Value | Sequence[Value],
+        *,
+        bit_offset: ixsimpl.Expr,
+        base: ixsimpl.Expr | None = None,
+        target_block: ixsimpl.Expr | None = None,
+        bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        packet_bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        after: Value | None = None,
+        cache: Attribute | None = None,
+    ) -> Value:
+        """Scatter a SIMD vector packet through a structural memory mapping."""
+        mapping, scalar_values, packet_values = _memory_mapping_parts(
+            bit_offset, base, target_block, bindings, packet_bindings
+        )
+        base_values = [bases] if isinstance(bases, Value) else list(bases)
+        return wave.ScatterOp(
+            mem_token_type(),
+            value,
+            base_values,
+            list(scalar_values.values()),
+            list(packet_values.values()),
+            mapping,
+            dependency=after,
+            binding_names=list(scalar_values),
+            packet_binding_names=list(packet_values),
+            cache=cache,
+        ).token
+
     def token(self) -> Value:
         return wave.TokenOp(mem_token_type()).result
 
@@ -1364,6 +1492,7 @@ __all__ = [
     "IntegerType",
     "LoadCacheAttr",
     "MaskType",
+    "MemoryMappingAttr",
     "MemRefType",
     "MemTokenType",
     "ModuleBuilder",

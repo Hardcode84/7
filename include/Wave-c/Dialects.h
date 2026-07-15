@@ -96,6 +96,17 @@ mlirWaveRedistributionAttrGetSourceItem(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveRedistributionAttrGetSourceSlot(MlirAttribute attr);
 
+MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAMemoryMapping(MlirAttribute attr);
+// `base` and `targetBlock` may be null attributes. `bitOffset` is required.
+MLIR_CAPI_EXPORTED MlirAttribute mlirWaveMemoryMappingAttrGet(
+    MlirAttribute base, MlirAttribute targetBlock, MlirAttribute bitOffset);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveMemoryMappingAttrGetBase(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveMemoryMappingAttrGetTargetBlock(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveMemoryMappingAttrGetBitOffset(MlirAttribute attr);
+
 //===----------------------------------------------------------------------===//
 // Wave address-space attributes
 //===----------------------------------------------------------------------===//
