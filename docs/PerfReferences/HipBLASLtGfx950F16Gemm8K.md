@@ -76,6 +76,76 @@ export LD_LIBRARY_PATH="$BUILD/library:$BUILD/deps/install/lib:$LD_LIBRARY_PATH"
 
 Use `--algo_method index --solution_index 2531` to pin the all-search kernel.
 
+## Standalone ASM Oracle
+
+`hipblaslt-gfx950-f16-8192-tn-solution2530-manual.s` is the assembleable,
+commented solution-2530 source. It uses the kernel's direct 104-byte ABI; the
+calibration runner does not load hipBLASLt.
+
+Build with repository LLVM and conda `hipcc`:
+
+```bash
+ASM=docs/PerfReferences/hipblaslt-gfx950-f16-8192-tn-solution2530-manual.s
+OUT=build/f16-8k-reference/hipblaslt-solution2530-manual
+
+build/llvm-install/bin/llvm-mc \
+  -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj \
+  -o "$OUT.o" "$ASM"
+build/llvm-install/bin/ld.lld -shared "$OUT.o" -o "$OUT.hsaco"
+hipcc -O2 tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp \
+  -o build/f16-8k-reference/wave-matmul-calibrate-runner-manual
+```
+
+Strict random check. Every output position is compared against the CPU
+reference:
+
+```bash
+KERNEL=Custom_Cijk_Alik_Bljk_HHS_BH_MT256x256x64_MI16x16x1_UserArgs_shortname0_gfx950
+HIP_VISIBLE_DEVICES=2 \
+  build/f16-8k-reference/wave-matmul-calibrate-runner-manual \
+  --m 256 --n 256 --k 512 \
+  --bm 2 --bn 2 --wave-m-tiles 8 --wave-n-tiles 8 --wave-k-tiles 2 \
+  --wave-size 64 --input-type f16 --c-type f16 \
+  --kernel-abi hipblaslt --rand-int --iters 1 --warmup 0 \
+  "$OUT.hsaco" "$KERNEL"
+```
+
+`rand_int` and generic-random seeds 0 and 17 each passed with
+`max_abs_diff=0`. The custom kernel's K=64 special path is incorrect; the
+standalone ABI rejects K below 128. K=128, K=512, and target K=8192 use the
+validated path.
+
+Target timing uses the same code object and `rand_int` input:
+
+```bash
+HIP_VISIBLE_DEVICES=2 \
+  build/f16-8k-reference/wave-matmul-calibrate-runner-manual \
+  --m 8192 --n 8192 --k 8192 \
+  --bm 2 --bn 2 --wave-m-tiles 8 --wave-n-tiles 8 --wave-k-tiles 2 \
+  --wave-size 64 --input-type f16 --c-type f16 \
+  --kernel-abi hipblaslt --rand-int --no-check \
+  --warmup 2000 --iters 500 "$OUT.hsaco" "$KERNEL"
+```
+
+Fresh process results were `727.106`, `731.790`, and `732.819 us`. Median:
+`731.790 us`, `1.502496 PFLOP/s`. No clock controls were read or changed.
+Generic-random seed 0 measured `754.191 us`, `1.457869 PFLOP/s`; input mode
+remains part of the performance contract.
+
+Frozen hashes:
+
+- Annotated source: `d32b0401681a80c50027eec5c35bc3fd350d3298a9ce8603658999659396bf81`.
+- Assembled object: `2ce2340e3358abedd7fa8caa9dc0f3e60bb6615429d07bca2bd693c0e100ad72`.
+- Linked HSACO: `a229f6e6d190f3b5b707ce910ed16903132d38e6f35421534d3941d955514a08`.
+
+All 16,730 encoded instructions match the extracted solution-2530 symbol.
+Normalized encoding stream SHA-256:
+`f5ef57fa3862db19dace70e923771844006c64c44a9e2894b69567cc251a9208`.
+
+Annotations mark the transferable main-loop pieces: wave-parity issue
+stagger, barriers after MFMA indices 21/51/92, partial `vmcnt(13)`, X0/X1
+read overlap, and the `0x1040` direct-to-LDS `m0` row advance.
+
 ## ISA Artifacts
 
 `hipblaslt-gfx950-f16-8192-tn-heuristic.s` is the complete disassembly of

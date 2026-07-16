@@ -38,6 +38,7 @@
 // VALID: output_layouts: ok
 // VALID: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled
 // VALID: aiter_runner_contract: ok
+// VALID: hipblaslt_kernel_abi: ok
 // VALID: streamk_kernel_abi: ok
 // VALID: tlx_mxfp_kernel_abi: ok
 // MUTEX: --all-ones, --rand-int, and --hpl are mutually exclusive
