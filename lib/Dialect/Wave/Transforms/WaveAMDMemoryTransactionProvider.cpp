@@ -149,8 +149,8 @@ static std::optional<int64_t> getWorkgroupItemCount(Operation *op) {
 
 static FailureOr<sym::ExprHandle>
 substituteItem(sym::Store &store, sym::ExprHandle expr, sym::ExprHandle item,
-               int64_t value, ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> literal = sym::composeExprInt(store, value);
+               int64_t replacement, ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> literal = sym::composeExprInt(store, replacement);
   if (failed(literal))
     return failure();
   std::array<sym::ExprSubstitution, 1> substitution{
@@ -184,13 +184,14 @@ static bool isWaveUniform(Operation *op, sym::Store &store,
   return true;
 }
 
-struct B8Mapping {
+struct CanonicalB8Mapping {
   sym::ExprHandle item;
   sym::ExprHandle lane;
   sym::ExprHandle matrixOffset;
 };
 
-static FailureOr<B8Mapping> buildB8Mapping(sym::Store &store) {
+static FailureOr<CanonicalB8Mapping>
+buildCanonicalB8Mapping(sym::Store &store) {
   FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
   if (failed(item))
     return failure();
@@ -213,12 +214,12 @@ static FailureOr<B8Mapping> buildB8Mapping(sym::Store &store) {
       compose(store, *groupBytes, sym::ExprBinaryOp::Add, *rowBytes);
   if (failed(matrixOffset))
     return failure();
-  return B8Mapping{*item, *lane, *matrixOffset};
+  return CanonicalB8Mapping{*item, *lane, *matrixOffset};
 }
 
-static FailureOr<sym::ExprHandle>
-getB8TileBase(const wave::memory_lowering::GatherTransactionRequest &request,
-              const B8Mapping &mapping, ArrayRef<sym::PredHandle> assumptions) {
+static FailureOr<sym::ExprHandle> getCanonicalB8TileBase(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    const CanonicalB8Mapping &mapping, ArrayRef<sym::PredHandle> assumptions) {
   sym::Store &store = *request.store;
   ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
       request.points;
@@ -233,10 +234,10 @@ getB8TileBase(const wave::memory_lowering::GatherTransactionRequest &request,
   return tileBase;
 }
 
-static LogicalResult
-verifyB8Points(const wave::memory_lowering::GatherTransactionRequest &request,
-               const B8Mapping &mapping, sym::ExprHandle tileBase,
-               ArrayRef<sym::PredHandle> assumptions) {
+static LogicalResult verifyCanonicalB8Points(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    const CanonicalB8Mapping &mapping, sym::ExprHandle tileBase,
+    ArrayRef<sym::PredHandle> assumptions) {
   sym::Store &store = *request.store;
   ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
       request.points;
@@ -258,9 +259,9 @@ verifyB8Points(const wave::memory_lowering::GatherTransactionRequest &request,
   return success();
 }
 
-static bool isB8WaveBaseUniform(
+static bool isCanonicalB8WaveBaseUniform(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    const B8Mapping &mapping, sym::ExprHandle tileBase,
+    const CanonicalB8Mapping &mapping, sym::ExprHandle tileBase,
     ArrayRef<sym::PredHandle> assumptions) {
   sym::Store &store = *request.store;
   FailureOr<sym::ExprHandle> waveItem =
@@ -280,23 +281,20 @@ static bool isB8WaveBaseUniform(
          isWaveUniform(request.op, store, tileBase, mapping.item, assumptions);
 }
 
-static FailureOr<sym::ExprHandle> getB8AddressOffset(
+static FailureOr<sym::ExprHandle> getCanonicalB8AddressOffset(
     const wave::memory_lowering::GatherTransactionRequest &request) {
-  // Output slot pairs duplicate bytes; lane addresses advance by eight.
   sym::Store &store = *request.store;
   SmallVector<sym::PredHandle> assumptions = collectAssumptions(request.points);
-  FailureOr<B8Mapping> mapping = buildB8Mapping(store);
+  FailureOr<CanonicalB8Mapping> mapping = buildCanonicalB8Mapping(store);
   if (failed(mapping))
     return failure();
   FailureOr<sym::ExprHandle> tileBase =
-      getB8TileBase(request, *mapping, assumptions);
-  if (failed(tileBase))
+      getCanonicalB8TileBase(request, *mapping, assumptions);
+  if (failed(tileBase) ||
+      failed(
+          verifyCanonicalB8Points(request, *mapping, *tileBase, assumptions)) ||
+      !isCanonicalB8WaveBaseUniform(request, *mapping, *tileBase, assumptions))
     return failure();
-  if (failed(verifyB8Points(request, *mapping, *tileBase, assumptions)))
-    return failure();
-  if (!isB8WaveBaseUniform(request, *mapping, *tileBase, assumptions))
-    return failure();
-
   FailureOr<sym::ExprHandle> laneBytes =
       composeInt(store, mapping->lane, sym::ExprBinaryOp::Mul, 8);
   if (failed(laneBytes))
@@ -306,6 +304,165 @@ static FailureOr<sym::ExprHandle> getB8AddressOffset(
   if (failed(address))
     return failure();
   return sym::simplifyExpr(store, *address, assumptions);
+}
+
+static FailureOr<sym::ExprHandle> getBitAffineB8Coefficient(
+    sym::Store &store,
+    const wave::memory_lowering::MemoryTransactionPoint &point,
+    sym::ExprHandle item, sym::ExprHandle base, int64_t bit, int64_t bitValue,
+    std::optional<sym::ExprHandle> bitTwoCoefficient,
+    ArrayRef<sym::PredHandle> assumptions) {
+  // Result relation hides source bit 3; hardware tile continues bit 2.
+  if (bit == 3) {
+    if (!bitTwoCoefficient)
+      return failure();
+    return composeInt(store, *bitTwoCoefficient, sym::ExprBinaryOp::Mul, 2);
+  }
+  int64_t outputItem = bit < 3 ? 2 * bitValue : bitValue;
+  FailureOr<sym::ExprHandle> sample =
+      substituteItem(store, point.byteOffset, item, outputItem, assumptions);
+  if (failed(sample))
+    return failure();
+  FailureOr<sym::ExprHandle> coefficient =
+      compose(store, *sample, sym::ExprBinaryOp::Sub, base);
+  if (failed(coefficient))
+    return failure();
+  return sym::simplifyExpr(store, *coefficient, assumptions);
+}
+
+static FailureOr<sym::ExprHandle>
+addBitAffineB8Contribution(sym::Store &store, sym::ExprHandle address,
+                           sym::ExprHandle coefficient, sym::ExprHandle item,
+                           int64_t bitValue) {
+  if (sym::getIntegerLiteralValue(coefficient) == 0)
+    return address;
+  FailureOr<sym::ExprHandle> itemBit = floorDiv(store, item, bitValue);
+  if (failed(itemBit))
+    return failure();
+  itemBit = composeInt(store, *itemBit, sym::ExprBinaryOp::Mod, 2);
+  if (failed(itemBit))
+    return failure();
+  FailureOr<sym::ExprHandle> contribution =
+      compose(store, coefficient, sym::ExprBinaryOp::Mul, *itemBit);
+  if (failed(contribution))
+    return failure();
+  return compose(store, address, sym::ExprBinaryOp::Add, *contribution);
+}
+
+static FailureOr<sym::ExprHandle> synthesizeBitAffineB8SourceAddress(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, int64_t itemCount,
+    ArrayRef<sym::PredHandle> assumptions) {
+  sym::Store &store = *request.store;
+  const wave::memory_lowering::MemoryTransactionPoint &point =
+      request.points.front();
+  FailureOr<sym::ExprHandle> base =
+      substituteItem(store, point.byteOffset, item, 0, assumptions);
+  if (failed(base))
+    return failure();
+
+  sym::ExprHandle address = *base;
+  std::optional<sym::ExprHandle> bitTwoCoefficient;
+  for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
+       ++bit, bitValue <<= 1) {
+    FailureOr<sym::ExprHandle> coefficient =
+        getBitAffineB8Coefficient(store, point, item, *base, bit, bitValue,
+                                  bitTwoCoefficient, assumptions);
+    if (failed(coefficient))
+      return failure();
+    if (bit == 2)
+      bitTwoCoefficient = *coefficient;
+    FailureOr<sym::ExprHandle> next = addBitAffineB8Contribution(
+        store, address, *coefficient, item, bitValue);
+    if (failed(next))
+      return failure();
+    address = *next;
+  }
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(store, address, assumptions);
+  if (failed(simplified) || !hasOnlyUniformBindings(*simplified, point))
+    return failure();
+  return simplified;
+}
+
+static bool hasCommonB8TransactionBase(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    ArrayRef<sym::PredHandle> assumptions) {
+  sym::Store &store = *request.store;
+  ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
+      request.points;
+  for (const wave::memory_lowering::MemoryTransactionPoint &point : points) {
+    if (point.baseIndex != points.front().baseIndex ||
+        !proveEqual(store, point.base, points.front().base, assumptions) ||
+        !proveEqual(store, point.targetBlock, points.front().targetBlock,
+                    assumptions))
+      return false;
+  }
+  return true;
+}
+
+static LogicalResult verifyBitAffineB8Output(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, sym::ExprHandle sourceAddress, int64_t outputItem,
+    ArrayRef<sym::PredHandle> assumptions) {
+  sym::Store &store = *request.store;
+  int64_t lane = outputItem % 64;
+  int64_t sourceItem = outputItem - lane + 16 * (lane / 16) + (lane % 16) / 2;
+  FailureOr<sym::ExprHandle> source =
+      substituteItem(store, sourceAddress, item, sourceItem, assumptions);
+  if (failed(source))
+    return failure();
+  for (auto [slot, point] : llvm::enumerate(request.points)) {
+    FailureOr<sym::ExprHandle> actual =
+        substituteItem(store, point.byteOffset, item, outputItem, assumptions);
+    FailureOr<sym::ExprHandle> expected =
+        composeInt(store, *source, sym::ExprBinaryOp::Add,
+                   4 * (lane % 2) + static_cast<int64_t>(slot / 2));
+    if (failed(actual) || failed(expected) ||
+        !proveEqual(store, *expected, *actual, assumptions))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult verifyBitAffineB8Points(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, int64_t itemCount, sym::ExprHandle sourceAddress,
+    ArrayRef<sym::PredHandle> assumptions) {
+  if (!hasCommonB8TransactionBase(request, assumptions))
+    return failure();
+  for (int64_t outputItem = 0; outputItem < itemCount; ++outputItem) {
+    if (failed(verifyBitAffineB8Output(request, item, sourceAddress, outputItem,
+                                       assumptions)))
+      return failure();
+  }
+  return success();
+}
+
+static FailureOr<sym::ExprHandle> getBitAffineB8AddressOffset(
+    const wave::memory_lowering::GatherTransactionRequest &request) {
+  sym::Store &store = *request.store;
+  SmallVector<sym::PredHandle> assumptions = collectAssumptions(request.points);
+  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
+  std::optional<int64_t> itemCount = getWorkgroupItemCount(request.op);
+  if (failed(item) || !itemCount)
+    return failure();
+  FailureOr<sym::ExprHandle> sourceAddress = synthesizeBitAffineB8SourceAddress(
+      request, *item, *itemCount, assumptions);
+  if (failed(sourceAddress))
+    return failure();
+  if (failed(verifyBitAffineB8Points(request, *item, *itemCount, *sourceAddress,
+                                     assumptions)))
+    return failure();
+  return sourceAddress;
+}
+
+static FailureOr<sym::ExprHandle> getB8AddressOffset(
+    const wave::memory_lowering::GatherTransactionRequest &request) {
+  FailureOr<sym::ExprHandle> canonical = getCanonicalB8AddressOffset(request);
+  if (succeeded(canonical))
+    return canonical;
+  return getBitAffineB8AddressOffset(request);
 }
 
 class B8TransposeEmitter final

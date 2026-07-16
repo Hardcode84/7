@@ -23,6 +23,27 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// CHECK-LABEL: func.func @gfx950_b8_strided_transpose(
+// CHECK-NOT: wave.load
+// CHECK: wave.index_expr <"16*item">
+// CHECK: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_strided_transpose(
+      %base: !wave.ptr<#wave.shared, i8>)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * (256 * floor(Mod(item, 64) / 16) + 16 * floor(Mod(item, 16) / 2) + 4 * Mod(item, 2) + floor(slot / 2))">>
+        bindings []() packet_bindings []()
+        : (!wave.ptr<#wave.shared, i8>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @gfx950_wave_id_tile(
 // CHECK-NOT: wave.load
 // CHECK: wave.index_expr <"2048 + 8*Mod(item, 64) + 1024*Mod(floor(1/64*item), 2)">
