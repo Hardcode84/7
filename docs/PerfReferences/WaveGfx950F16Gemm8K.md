@@ -20,17 +20,20 @@ Seven locked runs used 25 warmups and 1,000 timed launches each:
 
 | Run | Time us | PFLOP/s |
 |---:|---:|---:|
-| 1 | 782.883 | 1.404439 |
-| 2 | 784.244 | 1.402002 |
-| 3 | 783.908 | 1.402603 |
-| 4 | 784.936 | 1.400766 |
-| 5 | 783.771 | 1.402848 |
-| 6 | 785.414 | 1.399913 |
-| 7 | 787.176 | 1.396780 |
+| 1 | 782.544 | 1.405048 |
+| 2 | 782.529 | 1.405075 |
+| 3 | 782.143 | 1.405768 |
+| 4 | 783.440 | 1.403441 |
+| 5 | 784.580 | 1.401402 |
+| 6 | 784.265 | 1.401964 |
+| 7 | 785.934 | 1.398987 |
 
-Median: `784.244 us`, `1.402002 PFLOP/s`. Five of seven runs clear 1.4;
-the median is the acceptance result. A preceding 300-launch check measured
-`781.088 us`.
+Median: `783.440 us`, `1.403441 PFLOP/s`. Six of seven runs clear 1.4;
+the median is the acceptance result.
+
+Interleaved old/new HSACO runs at `M=N=4096` improved all seven sweep K
+values by 0.15-1.53%; K=8192 improved 0.30%. Non-f16 sweep HSACOs were
+byte-identical across the rebase.
 
 Correctness used `M=2048`, `N=256`, `K=512`, the same kernel shape, and
 five independent 20,000-launch checks. All 100,000 launches passed with
@@ -50,25 +53,28 @@ The winning schedule uses split-barrier intent without a software barrier:
 
 1. Split the eight wave64 waves into cohorts 0-3 and 4-7.
 2. Before loop DMA request 7, waves 0-3 wait 46 cycles; waves 4-7 skip it.
-3. Move 33 cycles of independent work into the issue window: four
-   post-barrier MFMAs first, then one local MFMA.
-4. Fill request 8's DMA queue stall instead of leading it early.
-5. Reconverge all waves at the existing `s_barrier` after DMA and MFMA work.
+3. Schedule against the skipped cohort, which exposes the DMA queue stall.
+4. Fill request 8's issue gap with independent MFMAs instead of leading it.
+5. Move three independent MFMAs before the existing `s_barrier`.
 
 The cohort predicate is computed once in SGPR state, restored to VCC before
 the loop, and carried explicitly through the uniform loop. An ordinary DMA
 token anchors each delay at issue; delayed M0 orders the next DMA. Completion
 waits remain explicit through ordinary memory tokens.
 
-Prologue DMA uses 68-cycle gaps before requests 7 and 14. Locked profile
-values:
+Delayed waves execute the explicit NOP span; skipped waves do not. Modeling
+only the delayed cohort hid queue and barrier stalls from greedy scheduling.
+
+Prologue DMA uses 68-cycle gaps before requests 7 and 14. Locked typed schedule:
 
 ```text
-dma_lds_issue_group_size=7
-dma_lds_initial_delay_cycles=68
-dma_lds_loop_delay_cycles=46
-dma_lds_loop_overlap_cycles=33
-dma_lds_loop_delay_waves=4
+PhasedDmaSchedule.issue_group_size=7
+PhasedDmaSchedule.initial_delay_cycles=68
+PhasedDmaSchedule.loop_delay_cycles=46
+PhasedDmaSchedule.loop_overlap_cycles=33
+PhasedDmaSchedule.delayed_waves=4
+PhasedDmaSchedule.fetch_alignment=32
+PhasedDmaSchedule.fetch_phase=16
 ```
 
 ## Fetch Phase
@@ -86,7 +92,7 @@ Manual address-phase probes, two runs each:
 
 Phases 16 and 48 are both 16 modulo 32. gfx950 DMA-phased loops therefore
 emit `.p2align 5`, four encoded `s_nop 0` instructions, then the loop label.
-The checked-in loop target is at code offset `0x5f0`, 16 modulo 32.
+The checked-in loop target remains 16 modulo 32.
 
 ## Kernel Shape
 
@@ -95,7 +101,7 @@ CTA tile: 256x256x64
 waves/workgroup: 8 wave64
 MFMA: v_mfma_f32_16x16x32_f16
 target resident waves/SIMD: 2
-VGPRs: 244
+VGPRs: 240
 SGPRs: 24
 AGPRs: 0
 spills: 0
@@ -183,12 +189,12 @@ unused.
 - ASM: `test/PerfGolden/Inputs/gfx950-f16-256x256-8wave.s`.
 - Generator/check: `test/PerfGolden/test_gfx950_f16_256x256_8wave.py`.
 - ASM SHA-256:
-  `71fd27873541af927f4adc817908608f39b19bf88327f170f2aa89190e3fb06b`.
-- Lines/bytes: 735 / 31,539.
+  `a18858ca56095bd67d48b8e80b28251383951073273a22ea966e6e7a16936816`.
+- Lines/bytes: 735 / 31,482.
 
 Five-run regalloc-stage timing, one warmup: transform stages median
-`0.1263 s`; alias state `0.0131 s`; linear scan `0.0080 s`. AGPR, remat, LDS,
-and scratch relief each reported `0.0001 s`; the ASM matched the golden.
+`0.1061 s`; alias state `0.0083 s`; linear scan `0.0031 s`. Every relief
+provider reported `0.0001 s`; the ASM matched the golden.
 
 Regenerate the reference only after benchmarking old and new assembly:
 
