@@ -43,6 +43,96 @@ Twelve alternating K=2048 pairs measured median `none` at `55.896 us` and
 `cs` at `55.882 us`. Full regeneration changed only the normal and specialized
 four-wave f16 artifacts; all other perf goldens remained byte-identical.
 
+## hipBLASLt Gap Investigation
+
+Same-session `rand_int` runs on device 2 reproduced the gap without clock
+controls:
+
+| Kernel | Workgroups | Time us | PFLOP/s | Wave slower |
+|---|---:|---:|---:|---:|
+| Wave four-wave | 1,024 | 820.452 | 1.340129 | - |
+| hipBLASLt 2530, StreamK 0 | 1,024 | 732.855 | 1.500313 | +11.95% |
+| hipBLASLt 2531, StreamK 5 | 256 | 718.835 | 1.529574 | +14.14% |
+
+StreamK persistence saves 14.020 us over solution 2530. It explains 1.95% of
+hipBLASLt time, not the 87.597 us gap to the matched 1,024-workgroup control.
+
+One dynamic K64 main-loop body has the same heavy work:
+
+| Item | Wave | hipBLASLt 2530 |
+|---|---:|---:|
+| f16 MFMA | 128 | 128 |
+| direct-to-LDS load | 16 | 16 |
+| `ds_read_b128` | 32 | 32 |
+| barrier | 1 | 3 |
+| wait | 2 | 4 |
+| total instructions | 207 | 225 |
+
+Wave issues all 16 DMA operations by MFMA 62, waits at MFMA 68, then exposes
+all LDS reads behind one barrier. hipBLASLt barriers after MFMAs 22, 52, and
+93. Its DMA and LDS reads remain interleaved through MFMA 125. More barriers
+and instructions are faster because each phase keeps ready MFMA work around
+the DMA issue and completion points.
+
+Raw counter medians from steady profiled launches:
+
+| Counter | Wave | hipBLASLt 2530 | hipBLASLt 2531 |
+|---|---:|---:|---:|
+| `SQ_VALU_MFMA_BUSY_CYCLES` | 1,073,741,824 | 1,075,707,904 | 1,075,707,904 |
+| `SQ_ACTIVE_INST_LDS` | 16,777,216 | 16,777,216 | 16,859,136 |
+| `SQ_WAIT_INST_LDS` | 17,572,835 | 17,862,961 | 12,894,066 |
+| `SQ_LDS_CMD_FIFO_FULL` | 533,876 | 486,036 | 112,144 |
+| `SQ_LDS_DATA_FIFO_FULL` | 0 | 0 | 0 |
+
+A separate issue-stall pass measured 230,546,966 `SQ_WAIT_INST_ANY`
+wave-cycles for Wave and 150,715,430 for solution 2530, a 53.0% excess.
+LDS-specific waits are similar, so the excess is the whole-pipeline dead time
+around DMA completion, waits, and convergence.
+
+One-CU ATT traces resolved every row. Dynamic heavy-op hit counts matched:
+131,072 MFMA, 16,384 direct-to-LDS loads, and 32,768 LDS reads. Duration and
+stall columns below are trace-reported cycle counts.
+
+| ATT class | Wave avg duration | 2530 avg duration | Wave stall | 2530 stall |
+|---|---:|---:|---:|---:|
+| direct-to-LDS load | 67.63 | 17.62 | 946,120 | 160,925 |
+| f16 MFMA | 12.19 | 10.74 | 1,040,546 | 858,392 |
+| `ds_read_b128` | 8.18 | 8.25 | 136,781 | 128,658 |
+| barrier | 28.78 | 11.84 | 54,791 | 58,785 |
+| wait | 21.14 | 6.03 | 47,528 | 24,656 |
+
+Direct-to-LDS issue stall is 5.88x higher in Wave. LDS-read duration matches,
+and solution 2530 reaches 85.30% MFMA utilization despite 21.29% reported LDS
+bank-conflict time. Wave reaches 65.46% MFMA utilization with no reported bank
+conflicts. Bank layout can still improve the final result, but it does not
+explain the main gap.
+
+CTA mapping is not the missing 12%. A 300-launch control measured 815.659 us
+for group 4, 838.002 us for group 16, and 948.995 us for group 32 with the
+same eight-XCD remap. Group 4 remains best.
+
+An issue-group-5 probe added 20 delay cycles with 16 cycles of overlap after
+each group. It regressed from 815.659 to 859.681 us. The checked-in profile was
+restored. Delay inside the single-ready-token graph cannot expose earlier LDS
+work.
+
+`--enable-split-barriers` emits byte-identical ASM for this workgroup. The pass
+skips four waves on a four-SIMD CU, and its arrive/wait split would still retain
+one full-buffer readiness point. hipBLASLt needs phased data readiness, not an
+arrive/wait split.
+
+Required implementation shape:
+
+- Partition next-tile A/B DMA and LDS reads into explicit subpanel phases.
+- Join only each phase's DMA tokens before its barrier and fragment reads.
+- Carry reuse tokens per subpanel; no implicit memory ordering.
+- Let the greedy scheduler/model place phases. No post-greedy cycle veto.
+- Model direct-to-LDS issue pressure so legal phases spread before FIFO fill.
+
+The padded `0x1080` M0 cadence remains a second experiment after phased
+readiness. Current `0x1000` layout and one-barrier token topology change at the
+same time, so ATT cannot assign the full load-stall delta to either one alone.
+
 ## Configuration
 
 ```text
