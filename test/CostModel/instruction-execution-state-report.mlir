@@ -4,6 +4,10 @@
 // RUN: wave-instruction-state-report --func=store_then_load_carries_token --vmem-counter-latency=7 --vscnt-counter-latency=7 %s | FileCheck %s --check-prefix=TOKENCARRY
 // RUN: wave-instruction-state-report --func=barrier_does_not_drain --vmem-counter-latency=7 %s | FileCheck %s --check-prefix=BARRIER
 // RUN: wave-instruction-state-report --func=m0_gap %s | FileCheck %s --check-prefix=M0
+// RUN: wave-instruction-state-report --func=m0_dma_capture_gap --arch=gfx950 %s | FileCheck %s --check-prefix=M0DMA
+// RUN: wave-instruction-state-report --func=m0_tagged_dma_capture_gap --arch=gfx950 %s | FileCheck %s --check-prefix=M0DMATAGGED
+// RUN: wave-instruction-state-report --func=m0_dma_capture_filled --arch=gfx950 %s | FileCheck %s --check-prefix=M0DMAFILL
+// RUN: wave-instruction-state-report --func=m0_dma_capture_gap --arch=gfx942 %s | FileCheck %s --check-prefix=M0DMACDNA3
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --pipe-backpressure --salu-max-in-flight=1 %s | FileCheck %s --check-prefix=PIPE
 // RUN: wave-instruction-state-report --func=lds_dma_issue_backpressure --arch=gfx950 %s | FileCheck %s --check-prefix=LDSDMA
 // RUN: wave-instruction-state-report --func=trans_forwarding_gap --arch=gfx950 %s | FileCheck %s --check-prefix=TRANS
@@ -82,6 +86,58 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %load, %tok = waveamdmachine.ds_load_addtid_b32 %m0
         : (!waveamdmachine.m0)
           -> (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.mem.token)
+    return
+  }
+
+  func.func @m0_dma_capture_gap(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>,
+      %m0: !waveamdmachine.m0,
+      %dst: !waveamdmachine.reg<sgpr, 1>) {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %next = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+    return
+  }
+
+  func.func @m0_tagged_dma_capture_gap(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>,
+      %m0: !waveamdmachine.m0,
+      %dst: !waveamdmachine.reg<sgpr, 1>) {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        {waveamdmachine.dma_issue_timing}
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %next = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+    return
+  }
+
+  func.func @m0_dma_capture_filled(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>,
+      %m0: !waveamdmachine.m0,
+      %dst: !waveamdmachine.reg<sgpr, 1>,
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 4>) {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.m0, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %result = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %next = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
     return
   }
 
@@ -243,6 +299,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // M0: func: m0_gap
 // M0: query op_index=1 cycle=1 op=waveamdmachine.ds_load_addtid_b32 stall=m0_read_write cycles=1 components=m0_read_write:1
+
+// M0DMA: func: m0_dma_capture_gap
+// M0DMA: query op_index=2 cycle=4 op=waveamdmachine.s_mov_m0 stall=m0_read_write cycles=1 components=m0_read_write:1
+
+// M0DMATAGGED: func: m0_tagged_dma_capture_gap
+// M0DMATAGGED: query op_index=2 cycle=4 op=waveamdmachine.s_mov_m0 stall=m0_read_write cycles=1 components=m0_read_write:1
+
+// M0DMAFILL: func: m0_dma_capture_filled
+// M0DMAFILL: query op_index=3 cycle=8 op=waveamdmachine.s_mov_m0 stall=none cycles=0 components=none
+
+// M0DMACDNA3: func: m0_dma_capture_gap
+// M0DMACDNA3: arch: gfx942
+// M0DMACDNA3: query op_index=2 cycle=4 op=waveamdmachine.s_mov_m0 stall=none cycles=0 components=none
 
 // PIPE: func: salu_pipe_cap
 // PIPE: query op_index=1 cycle=1 op=waveamdmachine.s_add_i32 stall=issue_backpressure cycles=1 components=issue_backpressure:1

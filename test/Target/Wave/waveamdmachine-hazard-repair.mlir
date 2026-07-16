@@ -128,8 +128,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.s_barrier
   // CHECK-NEXT: [[TOK0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]]
-  // CHECK-NEXT: [[NEXT:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[M0]],
   // CHECK-NEXT: [[FILL:%.*]] = waveamdmachine.v_add_u32
+  // CHECK-NEXT: [[NEXT:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[M0]],
   // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 [[FILL]], {{.*}}, {{.*}}, [[NEXT]] after [[TOK0]]
   func.func @m0_increment_stays_after_prior_consumer(
       %off0: !waveamdmachine.reg<vgpr, 1, 0>,

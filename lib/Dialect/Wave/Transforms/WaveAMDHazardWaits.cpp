@@ -234,6 +234,9 @@ struct HazardConfig {
   // GCNHazardRecognizer.cpp's setreg / m0-write hazard checks.
   unsigned m0PipelineDelay;
 
+  // LDS DMA must capture M0 before the next scalar M0 write on CDNA4.
+  unsigned m0DmaCaptureDelay;
+
   unsigned valuWriteVGPRMfmaLatency;
   unsigned valuWriteVGPRReadlaneLatency;
   unsigned valuWriteVGPRPermlane32SwapLatency;
@@ -261,6 +264,7 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       amdgpu_compat::SDelayAlu::encode(
           amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
       /*m0PipelineDelay=*/1,
+      /*m0DmaCaptureDelay=*/isCDNA4Family(isaVersion) ? 1u : 0u,
       /*valuWriteVGPRMfmaLatency=*/
       waveamdmachine::getValuWriteVGPRMfmaHazardLatency(),
       /*valuWriteVGPRReadlaneLatency=*/
@@ -374,6 +378,7 @@ struct PhysicalHazard {
 struct HazardState {
   unsigned lgkmToValu = 0;
   unsigned lgkmPending = 0;
+  unsigned m0DmaCapture = 0;
   DenseMap<Value, ValueHazards> values;
   SmallVector<PhysicalHazard, 16> physical;
   unsigned valuWriteVcc = 0;
@@ -388,8 +393,8 @@ struct HazardState {
 
   bool operator==(const HazardState &rhs) const {
     return lgkmToValu == rhs.lgkmToValu && lgkmPending == rhs.lgkmPending &&
-           values == rhs.values && hasSamePhysicalHazards(rhs) &&
-           valuWriteVcc == rhs.valuWriteVcc &&
+           m0DmaCapture == rhs.m0DmaCapture && values == rhs.values &&
+           hasSamePhysicalHazards(rhs) && valuWriteVcc == rhs.valuWriteVcc &&
            execWriteHazard == rhs.execWriteHazard;
   }
 
@@ -417,6 +422,7 @@ struct HazardState {
     bool changed = false;
     changed |= joinMax(lgkmToValu, rhs.lgkmToValu);
     changed |= joinMax(lgkmPending, rhs.lgkmPending);
+    changed |= joinMax(m0DmaCapture, rhs.m0DmaCapture);
     for (auto [value, hazards] : rhs.values) {
       if (hazards.empty())
         continue;
@@ -449,15 +455,16 @@ public:
 
   ChangeResult reset() {
     bool changed = state.lgkmToValu || state.lgkmPending ||
-                   !state.values.empty() || !state.physical.empty() ||
-                   state.valuWriteVcc || state.execWriteHazard;
+                   state.m0DmaCapture || !state.values.empty() ||
+                   !state.physical.empty() || state.valuWriteVcc ||
+                   state.execWriteHazard;
     state = HazardState();
     return changed ? ChangeResult::Change : ChangeResult::NoChange;
   }
 
   void print(raw_ostream &os) const override {
     os << "lgkm=" << state.lgkmToValu << " pending=" << state.lgkmPending
-       << " values=" << state.values.size()
+       << " m0-dma=" << state.m0DmaCapture << " values=" << state.values.size()
        << " physical=" << state.physical.size() << " vcc=" << state.valuWriteVcc
        << " exec=" << state.execWriteHazard;
   }
@@ -547,6 +554,8 @@ static void advanceHazards(HazardState &state, unsigned count = 1,
                            bool advanceLgkm = true) {
   if (advanceLgkm)
     state.lgkmToValu = state.lgkmToValu > count ? state.lgkmToValu - count : 0;
+  state.m0DmaCapture =
+      state.m0DmaCapture > count ? state.m0DmaCapture - count : 0;
   advanceValueHazards(state, count);
   advancePhysicalHazards(state, count);
 }
@@ -714,6 +723,7 @@ struct HazardOpInfo {
   bool readFirstLane = false;
   bool permlane32Swap = false;
   bool copiedVccCompare = false;
+  bool ldsDmaIssue = false;
 };
 
 using HazardOpInfoMap = DenseMap<Operation *, HazardOpInfo>;
@@ -725,6 +735,10 @@ static const HazardOpInfo *lookupHazardOpInfo(Operation *op,
   auto it = infos->find(op);
   assert(it != infos->end() && "missing hazard operation info");
   return &it->second;
+}
+
+static bool isLdsDmaIssue(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
 }
 
 static bool isCachedLegacyVALU(Operation *op, const HazardOpInfo *info) {
@@ -1013,6 +1027,7 @@ static HazardOpInfoMap collectHazardOpInfo(Operation *root,
     info.readFirstLane = isa<waveamdmachine::VReadfirstlaneB32Op>(op);
     info.permlane32Swap = isPermlane32Swap(op);
     info.copiedVccCompare = isCopiedVccCompareSGPRResult(op, 0);
+    info.ldsDmaIssue = isLdsDmaIssue(op);
     infos.try_emplace(op, info);
   });
   return infos;
@@ -1066,6 +1081,8 @@ static void addProducedPhysicalHazards(Operation *op, HazardState &state,
 static void addProducedHazards(Operation *op, HazardState &state,
                                const HazardConfig &cfg,
                                const HazardOpInfo *info) {
+  if (info ? info->ldsDmaIssue : isLdsDmaIssue(op))
+    state.m0DmaCapture = std::max(state.m0DmaCapture, cfg.m0DmaCaptureDelay);
   if (auto m0Writer = dyn_cast<waveamdmachine::M0WriteHazardOpInterface>(op))
     mergeValueHazards(state, m0Writer.getM0HazardValue(),
                       {/*m0=*/cfg.m0PipelineDelay,
@@ -1130,7 +1147,9 @@ static unsigned getRequiredSsaWait(Operation *op, const HazardState &state,
                                    const HazardOpInfo *info = nullptr) {
   if (info ? info->controlFlow : isControlFlowOp(op))
     return 0;
-  unsigned wait = 0;
+  unsigned wait = isa<waveamdmachine::M0WriteHazardOpInterface>(op)
+                      ? state.m0DmaCapture
+                      : 0;
   bool vmemStore = info ? info->vmemStore : isVMEMStore(*op);
   for (Value operand : op->getOperands()) {
     ValueHazards hazards = lookupValueHazards(state, operand);

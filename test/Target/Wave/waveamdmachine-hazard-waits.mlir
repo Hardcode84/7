@@ -456,6 +456,78 @@ func.func @m0_increment_reads_and_writes_pipeline(
   return
 }
 
+// CHECK-LABEL: func.func @m0_delay_after_untagged_lds_dma
+// CHECK: waveamdmachine.global_load_lds_b128
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.s_mov_m0
+func.func @m0_delay_after_untagged_lds_dma(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst0: !waveamdmachine.reg<sgpr, 1>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %next = waveamdmachine.s_mov_m0 %dst1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  return
+}
+
+// CHECK-LABEL: func.func @m0_delay_after_tagged_lds_dma
+// CHECK: waveamdmachine.global_load_lds_b128
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.s_mov_m0
+func.func @m0_delay_after_tagged_lds_dma(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst0: !waveamdmachine.reg<sgpr, 1>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      {waveamdmachine.dma_issue_timing}
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %next = waveamdmachine.s_mov_m0 %dst1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  return
+}
+
+// CHECK-LABEL: func.func @mfma_fills_m0_delay_after_lds_dma
+// CHECK: waveamdmachine.global_load_lds_b128
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.s_mov_m0
+func.func @mfma_fills_m0_delay_after_lds_dma(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst0: !waveamdmachine.reg<sgpr, 1>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %result = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %next = waveamdmachine.s_mov_m0 %dst1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  return
+}
+
 // CHECK-LABEL: func.func @m0_delay_before_ds_addtid_store
 // CHECK: waveamdmachine.s_mov_m0
 // CHECK-NEXT: waveamdmachine.imm 0
@@ -746,6 +818,26 @@ func.func @cdna3_mfma_result_store_delay(
   %tok = waveamdmachine.global_store_b128 %off, %r, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @cdna3_no_m0_delay_after_lds_dma
+// CHECK: waveamdmachine.global_load_lds_b128
+// CHECK-NEXT: waveamdmachine.s_mov_m0
+func.func @cdna3_no_m0_delay_after_lds_dma(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %dst0: !waveamdmachine.reg<sgpr, 1>,
+    %dst1: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) {
+  %m0 = waveamdmachine.s_mov_m0 %dst0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %next = waveamdmachine.s_mov_m0 %dst1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
   return
 }
 

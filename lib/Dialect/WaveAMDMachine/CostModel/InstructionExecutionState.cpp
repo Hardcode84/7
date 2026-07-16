@@ -50,6 +50,10 @@ static bool isCDNA3Or4(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 && (isa.Minor == 4 || isa.Minor == 5);
 }
 
+static bool isCDNA4(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5;
+}
+
 static std::optional<RegClass> getRegClass(Value value) {
   if (RegType type = dyn_cast<RegType>(value.getType()))
     return type.getRegClass();
@@ -668,6 +672,7 @@ InstructionExecutionState::InstructionDesc
 InstructionExecutionState::describe(Operation *op) const {
   InstructionDesc desc;
   desc.waitcnt = op->hasTrait<traits::WaitcntOp>();
+  desc.ldsDmaIssue = op->hasTrait<traits::LDSDmaOp>();
   desc.m0Writer = writesM0ThroughHazard(op);
   desc.m0Consumer = consumesM0ThroughHazard(op);
   if (std::optional<StoreWriteDataHazard> hazard =
@@ -741,14 +746,21 @@ InstructionExecutionState::query(Operation *op,
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                memoryIssueReady - currentCycle);
 
-  if (desc.m0Consumer && m0GapArmed)
+  addIssueHazards(op, desc, stall);
+
+  return stall;
+}
+
+void InstructionExecutionState::addIssueHazards(Operation *op,
+                                                const InstructionDesc &desc,
+                                                InstructionStall &stall) const {
+  if ((desc.m0Consumer && m0GapArmed) ||
+      (desc.m0Writer && m0DmaCaptureGapArmed))
     addComponent(stall, InstructionStallKind::M0ReadWrite, 1);
   if (desc.storeDataProducer && storeDataGap)
     addComponent(stall, InstructionStallKind::StoreWriteData, storeDataGap);
   addComponent(stall, InstructionStallKind::InstructionHazard,
                issueSlotHazardWait(op, desc));
-
-  return stall;
 }
 
 uint64_t InstructionExecutionState::mfmaOperandReadyAt(
@@ -1117,12 +1129,15 @@ void InstructionExecutionState::commitIssueSlotProducer(
 }
 
 void InstructionExecutionState::commitM0(const InstructionDesc &desc) {
-  if (desc.m0Writer) {
+  if (desc.m0Writer)
     m0GapArmed = true;
-    return;
-  }
-  if (desc.waitcnt || !desc.noMachineInst)
+  else if (desc.waitcnt || !desc.noMachineInst)
     m0GapArmed = false;
+
+  if (desc.ldsDmaIssue && isCDNA4(arch.isa))
+    m0DmaCaptureGapArmed = true;
+  else if (desc.waitcnt || !desc.noMachineInst)
+    m0DmaCaptureGapArmed = false;
 }
 
 void InstructionExecutionState::commitStoreData(const InstructionDesc &desc) {

@@ -15,6 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_mov_b32 m0, s8
 // ASM-NEXT: s_nop 0
 // ASM-NEXT: buffer_load_dwordx4 v0, s[4:7], 0 offen lds
+// ASM-NEXT: s_nop 0
 // ASM-NEXT: s_add_i32 m0, m0, 0x2000
 // ASM-NEXT: s_nop 0
 // ASM-NEXT: buffer_load_dwordx4 v1, s[4:7], 0 offen lds

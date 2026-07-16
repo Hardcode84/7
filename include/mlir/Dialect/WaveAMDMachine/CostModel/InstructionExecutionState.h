@@ -179,6 +179,7 @@ private:
     bool legacyVALU = false;
     bool trans = false;
     bool laneRead = false;
+    bool ldsDmaIssue = false;
     bool m0Writer = false;
     bool m0Consumer = false;
     bool storeDataProducer = false;
@@ -227,6 +228,8 @@ private:
                                        unsigned limit, int64_t cycle) const;
   int64_t operandReadyCycle(Operation *op,
                             InstructionStallKind &stallKind) const;
+  void addIssueHazards(Operation *op, const InstructionDesc &desc,
+                       InstructionStall &stall) const;
   unsigned issueSlotHazardWait(Operation *op,
                                const InstructionDesc &desc) const;
   uint64_t mfmaOperandReadyAt(Operation *op, const InstructionDesc &desc,
@@ -281,6 +284,7 @@ private:
   uint64_t currentIssueSlot = 0;
   EventId nextEventId = 1;
   unsigned storeDataGap = 0;
+  bool m0DmaCaptureGapArmed = false;
   bool m0GapArmed = false;
 };
 
