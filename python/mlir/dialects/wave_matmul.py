@@ -52,7 +52,7 @@ import struct
 from dataclasses import dataclass
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
-from mlir.dialects import wave, waveamd, wavemeta
+from mlir.dialects import scf, wave, waveamd, wavemeta
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import (
     DictAttr,
@@ -120,6 +120,43 @@ def _validate_choice(name: str, value: str, choices: tuple[str, ...]) -> None:
         raise ValueError(f"{name} must be {expected}; got {value}")
 
 
+def _validate_phased_dma_fetch(alignment: int, phase: int) -> None:
+    if alignment < 4 or alignment > 256 or alignment & (alignment - 1):
+        raise ValueError(
+            "phased DMA fetch alignment must be a power of two from 4 to 256"
+        )
+    if phase < 0 or phase >= alignment:
+        raise ValueError("phased DMA fetch phase must be within its alignment")
+    if phase % 4:
+        raise ValueError("phased DMA fetch phase must be 4-byte aligned")
+
+
+@dataclass(frozen=True)
+class PhasedDmaSchedule:
+    issue_group_size: int
+    initial_delay_cycles: int
+    loop_delay_cycles: int
+    loop_overlap_cycles: int
+    delayed_waves: int
+    fetch_alignment: int
+    fetch_phase: int
+
+    def __post_init__(self) -> None:
+        if self.issue_group_size < 1:
+            raise ValueError("phased DMA issue group size must be positive")
+        delays = (
+            self.initial_delay_cycles,
+            self.loop_delay_cycles,
+            self.loop_overlap_cycles,
+            self.delayed_waves,
+        )
+        if any(value < 0 for value in delays):
+            raise ValueError("phased DMA schedule values must be non-negative")
+        if self.loop_overlap_cycles > self.loop_delay_cycles:
+            raise ValueError("phased DMA loop overlap cannot exceed its delay")
+        _validate_phased_dma_fetch(self.fetch_alignment, self.fetch_phase)
+
+
 @dataclass(frozen=True)
 class _MatmulConfig:
     M: int
@@ -142,6 +179,7 @@ class _MatmulConfig:
     cta_group_m: int = 1
     target_waves: int | None = None
     enable_split_barriers: bool = False
+    phased_dma_schedule: PhasedDmaSchedule | None = None
 
     def __post_init__(self) -> None:
         _validate_positive_shape(self)
@@ -374,7 +412,18 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
         )
 
 
+def _validate_phased_dma_schedule(cfg: _MatmulConfig) -> None:
+    schedule = cfg.phased_dma_schedule
+    if schedule is None:
+        return
+    if not cfg.use_dma_lds:
+        raise ValueError("phased DMA schedule requires use_dma_lds")
+    if schedule.delayed_waves > cfg.waves_per_workgroup:
+        raise ValueError("phased DMA delayed waves exceed workgroup wave count")
+
+
 def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
+    _validate_phased_dma_schedule(cfg)
     if not cfg.use_dma_lds:
         return
     if cfg.mma.name != "mfma_gfx950":
@@ -912,10 +961,18 @@ def _dma_cta_buffer_dwords(cfg: _MatmulConfig) -> int:
     return (geom.a_total_slots + geom.b_total_slots) * geom.dwords_per_slot
 
 
+def _uses_phased_dma_schedule(cfg: _MatmulConfig) -> bool:
+    return cfg.phased_dma_schedule is not None
+
+
 def _dma_buffer_count(cfg: _MatmulConfig) -> int:
     if not cfg.use_dma_lds or cfg.virtual_k_steps <= 1:
         return 1
-    if not cfg.uses_packed_mxfp4 and cfg.virtual_k_steps > 2:
+    if (
+        not cfg.uses_packed_mxfp4
+        and not _uses_phased_dma_schedule(cfg)
+        and cfg.virtual_k_steps > 2
+    ):
         return 4
     return 2
 
@@ -1161,7 +1218,7 @@ def _load_fragment_group_through_dma_lds(
     b_type: dsl.Type,
     staging: _LdsStaging,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
-    dma_tokens = _dma_issue(bld, a_ptrs, b_ptrs, staging)
+    dma_tokens = _dma_issue(bld, cfg, a_ptrs, b_ptrs, staging, in_loop=False)
     a_frags, b_frags, reuse_token = _dma_drain(
         bld, _join_tokens(bld, dma_tokens), a_type, b_type, staging
     )
@@ -1180,27 +1237,63 @@ def _dep_or_token(bld: dsl.FunctionBuilder, dep: dsl.Value | None) -> dsl.Value:
     return dep if dep is not None else bld.token()
 
 
+def _dma_issue_delay_options(
+    cfg: _MatmulConfig, request: int, in_loop: bool
+) -> tuple[int | None, int | None, int | None]:
+    schedule = cfg.phased_dma_schedule
+    if schedule is None:
+        return None, None, None
+    delayed = request % schedule.issue_group_size == 0
+    configured_delay = (
+        schedule.loop_delay_cycles if in_loop else schedule.initial_delay_cycles
+    )
+    delay_cycles = configured_delay if delayed and configured_delay > 0 else None
+    overlap_cycles = (
+        schedule.loop_overlap_cycles if in_loop and delay_cycles is not None else None
+    )
+    skip_threshold = (
+        schedule.delayed_waves * cfg.mma.wave_size
+        if in_loop
+        and delay_cycles is not None
+        and schedule.delayed_waves < cfg.waves_per_workgroup
+        else None
+    )
+    return delay_cycles, overlap_cycles, skip_threshold
+
+
 def _dma_issue(
     bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
     staging: _LdsStaging,
     *,
     after: dsl.Value | None = None,
     lds_offset: int | dsl.Value = 0,
+    in_loop: bool,
+    request_offset: int = 0,
 ) -> list[dsl.Value]:
     dep = after if after is not None else bld.token()
     dma_tokens: list[dsl.Value] = []
     a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
     b_lds_ptrs = _offset_ptrs(bld, staging.b_dma_lds_ptrs, lds_offset)
-    for ptr, lds_ptr in zip(a_ptrs, a_lds_ptrs, strict=True):
-        tok = bld.dma_load_lds(
-            ptr, lds_ptr, after=dep, bytes=16, zero_fill_inactive=True
+    requests = [
+        *zip(a_ptrs, a_lds_ptrs, strict=True),
+        *zip(b_ptrs, b_lds_ptrs, strict=True),
+    ]
+    for request, (ptr, lds_ptr) in enumerate(requests, start=request_offset + 1):
+        delay_cycles, overlap_cycles, skip_threshold = _dma_issue_delay_options(
+            cfg, request, in_loop
         )
-        dma_tokens.append(tok)
-    for ptr, lds_ptr in zip(b_ptrs, b_lds_ptrs, strict=True):
         tok = bld.dma_load_lds(
-            ptr, lds_ptr, after=dep, bytes=16, zero_fill_inactive=True
+            ptr,
+            lds_ptr,
+            after=dep,
+            bytes=16,
+            zero_fill_inactive=True,
+            issue_delay_cycles=delay_cycles,
+            issue_delay_overlap_cycles=overlap_cycles,
+            issue_delay_skip_thread_threshold=skip_threshold,
         )
         dma_tokens.append(tok)
     return dma_tokens
@@ -2948,7 +3041,7 @@ def _initial_dma_load_state(
     b0: tuple[dsl.Value, ...],
     virtual_k_stride: dsl.Value,
 ) -> _InitialLoadState:
-    dma_tokens = _dma_issue(bld, a0, b0, staging, lds_offset=0)
+    dma_tokens = _dma_issue(bld, cfg, a0, b0, staging, lds_offset=0, in_loop=False)
     scale_token, next_scale_token = _initial_scale_state(bld, cfg, coords)
     ready_token = None
     if cfg.virtual_k_steps > 1:
@@ -2958,10 +3051,13 @@ def _initial_dma_load_state(
             bld,
             _dma_issue(
                 bld,
+                cfg,
                 a1,
                 b1,
                 staging,
                 lds_offset=_dma_buffer_offset(bld, cfg, 1),
+                in_loop=False,
+                request_offset=len(a0) + len(b0),
             ),
         )
     a_frags, b_frags, reuse_token = _dma_drain(
@@ -3384,6 +3480,8 @@ def _emit_mma_grid(
     scale_after: dsl.Value | None = None,
     scale_tokens: list[dsl.Value] | None = None,
     scale_ready_token: dsl.Value | None = None,
+    k_begin: int = 0,
+    k_end: int | None = None,
 ) -> tuple[dsl.Value, ...]:
     """Triply-nested `wavemeta.static_for` over (k, i, j); the
     specialiser unrolls all three once the tile-factor params bind.
@@ -3393,6 +3491,8 @@ def _emit_mma_grid(
     if not accs:
         return ()
     if cfg.uses_packed_mxfp4:
+        if k_begin != 0 or k_end is not None:
+            raise ValueError("MXFP4 MMA grid does not support K ranges")
         if coords is None or scale_step is None:
             raise ValueError("MXFP4 scaled MFMA requires scale coordinates")
         return _emit_mxfp4_mma_grid(
@@ -3428,7 +3528,9 @@ def _emit_mma_grid(
     wave_m = bld.static_param("wave_m_tiles", index)
     wave_n = bld.static_param("wave_n_tiles", index)
 
-    with bld.static_for(c0, wave_k, c1, init_args=[accs_t]) as outer:
+    k_lower = c0 if k_begin == 0 else bld.constant(index, k_begin)
+    k_upper = wave_k if k_end is None else bld.constant(index, k_end)
+    with bld.static_for(k_lower, k_upper, c1, init_args=[accs_t]) as outer:
         k_iv = outer.induction_variable
         (accs_k,) = outer.inner_iter_args
         a_row = wavemeta.TupleGetOp(a_row_type, afs[0], k_iv).result
@@ -3455,6 +3557,96 @@ def _emit_mma_grid(
         wavemeta.YieldOp([mid.results[0]])
 
     return _flat_extract(bld, outer.results[0], acc_type, acc_count)
+
+
+def _emit_mma_phase_with_dma_reads(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    afs: tuple[dsl.Value, ...],
+    bfs: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    k: int,
+    ready_token: dsl.Value,
+    a_type: dsl.Type,
+    b_type: dsl.Type,
+    staging: _LdsStaging,
+    a_read_ptrs: tuple[dsl.Value, ...],
+    b_read_ptrs: tuple[dsl.Value, ...],
+) -> tuple[
+    tuple[dsl.Value, ...],
+    tuple[dsl.Value, ...],
+    tuple[dsl.Value, ...],
+    dsl.Value,
+]:
+    a_outer_type = PTupleType(afs[0].type)
+    b_outer_type = PTupleType(bfs[0].type)
+    a_row_type = a_outer_type.element_type
+    b_row_type = b_outer_type.element_type
+    af_type = PTupleType(a_row_type).element_type
+    bf_type = PTupleType(b_row_type).element_type
+
+    index_type = IndexType.get()
+    k_value = bld.constant(index_type, k)
+    a_row = wavemeta.TupleGetOp(a_row_type, afs[0], k_value).result
+    b_row = wavemeta.TupleGetOp(b_row_type, bfs[0], k_value).result
+    new_accs = list(accs)
+
+    a_frags: list[dsl.Value | None] = [None] * len(a_read_ptrs)
+    b_frags: list[dsl.Value | None] = [None] * len(b_read_ptrs)
+    early_reads: list[tuple[bool, int, dsl.Value]] = []
+    for phase in range(cfg.wave_k_tiles - 1):
+        for tile in range(max(cfg.wave_m_tiles, cfg.wave_n_tiles)):
+            if tile < cfg.wave_m_tiles:
+                a_index = phase * cfg.wave_m_tiles + tile
+                early_reads.append((True, a_index, a_read_ptrs[a_index]))
+            if tile < cfg.wave_n_tiles:
+                b_index = phase * cfg.wave_n_tiles + tile
+                early_reads.append((False, b_index, b_read_ptrs[b_index]))
+
+    load_tokens: list[dsl.Value] = []
+
+    def emit_read(is_a: bool, frag_index: int, ptr: dsl.Value) -> None:
+        regs, token = bld.load(ptr, staging.reg_simd_type, after=ready_token)
+        frag = bld.fragment_pack(regs, a_type if is_a else b_type)
+        if is_a:
+            a_frags[frag_index] = frag
+        else:
+            b_frags[frag_index] = frag
+        load_tokens.append(token)
+
+    early_emitted = 0
+    early_mmas = max(1, (cfg.wave_m_tiles - 1) * cfg.wave_n_tiles)
+    last_phase = cfg.wave_k_tiles - 1
+    for i in range(cfg.wave_m_tiles):
+        i_value = bld.constant(index_type, i)
+        af = wavemeta.TupleGetOp(af_type, a_row, i_value).result
+        for j in range(cfg.wave_n_tiles):
+            j_value = bld.constant(index_type, j)
+            bf = wavemeta.TupleGetOp(bf_type, b_row, j_value).result
+            acc_index = i * cfg.wave_n_tiles + j
+            new_accs[acc_index] = bld.mma(cfg.mma.kind, af, bf, new_accs[acc_index])
+
+            if i < cfg.wave_m_tiles - 1:
+                early_done = acc_index + 1
+                early_target = early_done * len(early_reads) // early_mmas
+                while early_emitted < early_target:
+                    emit_read(*early_reads[early_emitted])
+                    early_emitted += 1
+            if i == cfg.wave_m_tiles - 1:
+                b_index = last_phase * cfg.wave_n_tiles + j
+                emit_read(False, b_index, b_read_ptrs[b_index])
+
+        a_index = last_phase * cfg.wave_m_tiles + i
+        emit_read(True, a_index, a_read_ptrs[a_index])
+
+    if early_emitted != len(early_reads):
+        raise ValueError("DMA read cadence did not emit all fragments")
+    return (
+        tuple(new_accs),
+        tuple(frag for frag in a_frags if frag is not None),
+        tuple(frag for frag in b_frags if frag is not None),
+        _join_tokens(bld, load_tokens),
+    )
 
 
 def _emit_pipelined_step(
@@ -3608,11 +3800,13 @@ def _emit_dma_step(
                 bld,
                 _dma_issue(
                     bld,
+                    cfg,
                     a_ptrs,
                     b_ptrs,
                     staging,
                     after=dma_after_token(),
                     lds_offset=next_lds_offset,
+                    in_loop=True,
                 ),
             )
         return next_token
@@ -3877,37 +4071,86 @@ def _emit_dma_step(
         )
         scale_tokens.append(scales.token)
     else:
+        ready_read_ptrs: tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]] | None = (
+            None
+        )
+        if (
+            not cfg.uses_packed_mxfp4
+            and cfg.wave_k_tiles > 1
+            and _uses_phased_dma_schedule(cfg)
+        ):
+            ready_read_ptrs = (
+                _offset_ptrs(bld, staging.a_dma_read_ptrs, ready_lds_offset),
+                _offset_ptrs(bld, staging.b_dma_read_ptrs, ready_lds_offset),
+            )
         if _use_reuse_data_dma_issue(cfg):
             issue_next_dma()
-        new_accs = _emit_mma_grid(
-            bld,
-            cfg,
-            state.afs,
-            state.bfs,
-            state.accs,
-            coords=coords,
-            scale_step=scale_step,
-            scale_lds_offset=(
-                _scale_buffer_offset(bld, cfg, scale_step)
-                if state.scale_token is not None
-                else current_lds_offset
-            ),
-            scale_after=get_ready_token() if cfg.uses_packed_mxfp4 else None,
-            scale_tokens=scale_tokens,
-            scale_ready_token=state.scale_token,
-        )
+        if (
+            not cfg.uses_packed_mxfp4
+            and cfg.wave_k_tiles > 1
+            and _uses_phased_dma_schedule(cfg)
+        ):
+            assert ready_read_ptrs is not None
+            new_accs = state.accs
+            for k in range(cfg.wave_k_tiles - 1):
+                new_accs = _emit_mma_grid(
+                    bld,
+                    cfg,
+                    state.afs,
+                    state.bfs,
+                    new_accs,
+                    k_begin=k,
+                    k_end=k + 1,
+                )
+            new_accs, ready_afs, ready_bfs, reuse_token = (
+                _emit_mma_phase_with_dma_reads(
+                    bld,
+                    cfg,
+                    state.afs,
+                    state.bfs,
+                    new_accs,
+                    cfg.wave_k_tiles - 1,
+                    get_ready_token(),
+                    types.a,
+                    types.b,
+                    staging,
+                    *ready_read_ptrs,
+                )
+            )
+            ready_loads = (ready_afs, ready_bfs, reuse_token)
+        else:
+            new_accs = _emit_mma_grid(
+                bld,
+                cfg,
+                state.afs,
+                state.bfs,
+                state.accs,
+                coords=coords,
+                scale_step=scale_step,
+                scale_lds_offset=(
+                    _scale_buffer_offset(bld, cfg, scale_step)
+                    if state.scale_token is not None
+                    else current_lds_offset
+                ),
+                scale_after=get_ready_token() if cfg.uses_packed_mxfp4 else None,
+                scale_tokens=scale_tokens,
+                scale_ready_token=state.scale_token,
+            )
+            ready_loads = None
     if next_token is None:
         finish_next_dma()
     if early_dma and not uses_prefetched_scales:
         new_accs = _emit_mxfp4_mma_state_step(bld, cfg, state, scales)
-    new_afs, new_bfs, reuse_token = _dma_read_ready(
-        bld,
-        get_ready_token(),
-        types.a,
-        types.b,
-        staging,
-        lds_offset=ready_lds_offset,
-    )
+    if cfg.uses_packed_mxfp4 or ready_loads is None:
+        ready_loads = _dma_read_ready(
+            bld,
+            get_ready_token(),
+            types.a,
+            types.b,
+            staging,
+            lds_offset=ready_lds_offset,
+        )
+    new_afs, new_bfs, reuse_token = ready_loads
     return (
         new_accs,
         next_token,
@@ -4470,6 +4713,19 @@ def _kernel_trip_count_source(
     return bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 1, 0))
 
 
+def _attach_phased_dma_loop_attrs(forop: scf.ForOp, cfg: _MatmulConfig) -> None:
+    schedule = cfg.phased_dma_schedule
+    if schedule is None:
+        return
+    i64 = IntegerType.get_signless(64)
+    forop.operation.attributes["waveamdmachine.fetch_alignment"] = IntegerAttr.get(
+        i64, schedule.fetch_alignment
+    )
+    forop.operation.attributes["waveamdmachine.fetch_phase"] = IntegerAttr.get(
+        i64, schedule.fetch_phase
+    )
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
@@ -4500,6 +4756,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         one_i32,
         init_args=init_args,
     ) as forop:
+        _attach_phased_dma_loop_attrs(forop, cfg)
         state = _split_loop_state(tuple(forop.inner_iter_args), cfg)
         loop_iv = bld.assume_range(
             forop.induction_variable, 0, max(cfg.virtual_k_steps - 2, 0)
@@ -4616,6 +4873,7 @@ def _make_matmul_config(
     cta_group_m: int,
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
+    phased_dma_schedule: PhasedDmaSchedule | None = None,
 ) -> _MatmulConfig:
     return _MatmulConfig(
         M=M,
@@ -4638,6 +4896,7 @@ def _make_matmul_config(
         cta_group_m=cta_group_m,
         target_waves=target_waves,
         enable_split_barriers=enable_split_barriers,
+        phased_dma_schedule=phased_dma_schedule,
     )
 
 
@@ -4714,6 +4973,7 @@ def build_wmma_f16_matmul_module(
     skip_specialize: bool = False,
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
+    phased_dma_schedule: PhasedDmaSchedule | None = None,
     include_host: bool = True,
 ) -> Module:
     """Return an MLIR module for tiled matmul."""
@@ -4738,6 +4998,7 @@ def build_wmma_f16_matmul_module(
         cta_group_m=cta_group_m,
         target_waves=target_waves,
         enable_split_barriers=enable_split_barriers,
+        phased_dma_schedule=phased_dma_schedule,
     )
     bld = dsl.ModuleBuilder()
     with bld:
@@ -4777,6 +5038,7 @@ def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
 
 
 __all__ = [
+    "PhasedDmaSchedule",
     "build_wmma_f16_matmul_module",
     "compute_wmma_f16_matmul_reference_buffer",
     "generate_mxfp4_packed_matmul_inputs",

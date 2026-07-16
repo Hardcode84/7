@@ -96,8 +96,9 @@ static Value advanceStridedBase(WaveAMDMachineSelector &S, Location loc,
 }
 
 // Materialize `waveamdmachine.uniform_loop` with optional entry cond.
-static Operation *buildUniformLoopOp(WaveAMDMachineSelector &S, Location loc,
-                                     Value entryCond, ArrayRef<Value> inits) {
+static Operation *buildUniformLoopOp(WaveAMDMachineSelector &S, scf::ForOp op,
+                                     Location loc, Value entryCond,
+                                     ArrayRef<Value> inits) {
   SmallVector<Type> resultTypes;
   for (Value v : inits)
     resultTypes.push_back(v.getType());
@@ -109,6 +110,9 @@ static Operation *buildUniformLoopOp(WaveAMDMachineSelector &S, Location loc,
   int32_t segs[2] = {entryCond ? 1 : 0, static_cast<int32_t>(inits.size())};
   state.addAttribute("operandSegmentSizes",
                      S.builder.getDenseI32ArrayAttr(segs));
+  for (StringRef name : {"fetch_alignment", "fetch_phase"})
+    if (Attribute attr = op->getAttr(("waveamdmachine." + name).str()))
+      state.addAttribute(name, attr);
   Region *body = state.addRegion();
   body->emplaceBlock();
   for (Value init : inits)
@@ -686,7 +690,7 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   if (failed(skipCondition))
     return failure();
 
-  Operation *loop = buildUniformLoopOp(S, loc, entryCond, inits);
+  Operation *loop = buildUniformLoopOp(S, op, loc, entryCond, inits);
   Block &loopBody = loop->getRegion(0).front();
   bindLoopBodyArgs(S, op, loopBody, snapshots, stridedBaseGroups);
 

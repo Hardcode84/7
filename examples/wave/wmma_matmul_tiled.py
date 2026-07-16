@@ -52,6 +52,7 @@ from common import (
 )
 
 _ProfileValue = bool | int | str
+_PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
 
 _GFX950_SW_PIPELINE: dict[str, _ProfileValue] = {
     "bm": 2,
@@ -70,6 +71,22 @@ _GFX950_F16_256X256_16WAVE: dict[str, _ProfileValue] = {
     "wave_m_tiles": 4,
     "wave_n_tiles": 4,
     "wave_k_tiles": 1,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "f16",
+    "output_type": "f16",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
+_GFX950_F16_256X256_8WAVE: dict[str, _ProfileValue] = {
+    "bm": 2,
+    "bn": 4,
+    "wave_m_tiles": 8,
+    "wave_n_tiles": 4,
+    "wave_k_tiles": 2,
+    "target_waves": 2,
     "use_buffer": True,
     "use_dma_lds": True,
     "matrix_intrinsic": "mfma_gfx950",
@@ -114,6 +131,7 @@ _GFX950_MXFP4_256X256_4WAVE: dict[str, _ProfileValue] = {
 _KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
     "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
     "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
+    "gfx950-f16-256x256-8wave": _GFX950_F16_256X256_8WAVE,
     "gfx950-mxfp4-256x256-8wave": _GFX950_MXFP4_256X256_8WAVE,
     "gfx950-mxfp4-256x256-4wave": _GFX950_MXFP4_256X256_4WAVE,
 }
@@ -347,12 +365,24 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     ensure_package_on_path("mlir.dialects.wave_matmul")
     from mlir.dialects.wave_matmul import (
+        PhasedDmaSchedule,
         build_wmma_f16_matmul_module,
         compute_wmma_f16_matmul_reference_buffer,
     )
 
     matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
     random_data = args.random_data or (args.compare_cpu and args.input_type != "mxfp4")
+    phased_dma_schedule = {
+        _PHASED_DMA_PROFILE: PhasedDmaSchedule(
+            issue_group_size=7,
+            initial_delay_cycles=68,
+            loop_delay_cycles=46,
+            loop_overlap_cycles=33,
+            delayed_waves=4,
+            fetch_alignment=32,
+            fetch_phase=16,
+        )
+    }.get(args.kernel_profile)
     module = build_wmma_f16_matmul_module(
         M=args.m,
         N=args.n,
@@ -374,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         cta_group_m=args.cta_group_m,
         target_waves=args.target_waves or None,
         enable_split_barriers=args.enable_split_barriers,
+        phased_dma_schedule=phased_dma_schedule,
         include_host=not args.kernel_only,
     )
     module_text = str(module)

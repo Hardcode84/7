@@ -12,6 +12,7 @@
 # CHECK: matmul_mxfp4_scale_regs_forwarding: ok
 # CHECK: matmul_mxfp4_profile_kernel_only_target_waves: ok
 # CHECK: matmul_profile_cli_override: ok
+# CHECK: matmul_f16_8wave_profile: ok
 # CHECK: matmul_mxfp4_4wave_profile: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_f16_dma_buffer_count: ok
@@ -726,6 +727,63 @@ def check_matmul_profile_cli_override(matmul) -> None:
     print("matmul_profile_cli_override: ok")
 
 
+def check_matmul_f16_8wave_profile(matmul) -> None:
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-8wave",
+            "--m=256",
+            "--n=256",
+            "--k=256",
+            "--skip-hw",
+        ]
+    )
+    require(
+        "matmul_f16_8wave_profile",
+        args.bm == 2
+        and args.bn == 4
+        and args.wave_m_tiles == 8
+        and args.wave_n_tiles == 4
+        and args.wave_k_tiles == 2,
+        "bad 8-wave tile shape",
+    )
+    require(
+        "matmul_f16_8wave_profile",
+        args.kernel_profile == "gfx950-f16-256x256-8wave",
+        "wrong selected profile",
+    )
+    require(
+        "matmul_f16_8wave_profile",
+        matmul.effective_target_waves(args) == 2,
+        "8-wave profile should request two waves per SIMD",
+    )
+    require(
+        "matmul_f16_8wave_profile",
+        matmul.dma_buffer_count(args) == 2
+        and matmul.compute_dynamic_lds_bytes(args) == 131072,
+        "bad phased DMA LDS byte accounting",
+    )
+    cmd = matmul.build_matmul_example_args(args, "gfx950")
+    forbidden = (
+        "dma-lds-issue-group-size",
+        "dma-lds-initial-delay-cycles",
+        "dma-lds-loop-delay-cycles",
+        "dma-lds-loop-overlap-cycles",
+        "dma-lds-loop-delay-waves",
+    )
+    require(
+        "matmul_f16_8wave_profile",
+        "--kernel-profile=gfx950-f16-256x256-8wave" in cmd,
+        "calibrator did not forward the named profile",
+    )
+    require(
+        "matmul_f16_8wave_profile",
+        not any(any(name in arg for name in forbidden) for arg in cmd),
+        "calibrator exposed scalar timing flags",
+    )
+    print("matmul_f16_8wave_profile: ok")
+
+
 def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     args = matmul.parse_args(
         [
@@ -1435,6 +1493,7 @@ def main() -> int:
     check_matmul_mxfp4_scale_regs_forwarding(matmul)
     check_matmul_mxfp4_profile_kernel_only_target_waves(matmul)
     check_matmul_profile_cli_override(matmul)
+    check_matmul_f16_8wave_profile(matmul)
     check_matmul_mxfp4_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_f16_dma_buffer_count(matmul)
