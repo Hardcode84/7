@@ -109,6 +109,12 @@ static void checkCoordinate(const Args &args, int index, int m, int n) {
     fail("fragment output coordinate mismatch");
 }
 
+static void checkEqual(uint32_t actual, uint32_t expected,
+                       const char *message) {
+  if (actual != expected)
+    fail(message);
+}
+
 static void checkOutputCoordinates() {
   Args args;
   args.m = 16;
@@ -236,8 +242,8 @@ static void checkStreamKArgStorage(Args &args) {
   second.deviceStreamKCounters = reinterpret_cast<void *>(uintptr_t{0x4000});
   KernelArgStorage firstStorage;
   KernelArgStorage secondStorage;
-  initKernelArgStorage(firstStorage, args, first, launch.tripCount);
-  initKernelArgStorage(secondStorage, args, second, launch.tripCount);
+  initKernelArgStorage(firstStorage, args, first, launch);
+  initKernelArgStorage(secondStorage, args, second, launch);
   if (firstStorage.active != firstStorage.streamKArgs.data() ||
       secondStorage.active != secondStorage.streamKArgs.data())
     fail("Stream-K argument block not selected");
@@ -279,9 +285,9 @@ static void checkTLXMXFPABI() {
   validateArgs(args);
 
   DeviceBuffers buffers;
-  int tripCount = 0;
+  LaunchShape launch = makeLaunchShape(args);
   KernelArgStorage storage;
-  initKernelArgStorage(storage, args, buffers, tripCount);
+  initKernelArgStorage(storage, args, buffers, launch);
   if (storage.active != storage.tlxArgs.data() || storage.tlxArgs.size() != 13)
     fail("TLX MXFP argument block mismatch");
   std::array<int, 8> actual;
@@ -292,6 +298,45 @@ static void checkTLXMXFPABI() {
   if (actual != expected)
     fail("TLX MXFP argument block mismatch");
   std::printf("tlx_mxfp_kernel_abi: ok\n");
+}
+
+static void checkHipBLASLtABI() {
+  Args args;
+  args.m = 512;
+  args.n = 256;
+  args.k = 128;
+  args.bm = 2;
+  args.bn = 2;
+  args.waveMTiles = 8;
+  args.waveNTiles = 8;
+  args.waveKTiles = 2;
+  args.waveSize = 64;
+  args.cType = CType::F16;
+  args.kernelABI = KernelABI::HipBLASLt;
+  validateArgs(args);
+
+  LaunchShape launch = makeLaunchShape(args);
+  if (launch.gridX != 2 || launch.gridY != 1 || launch.blockThreads != 256)
+    fail("hipBLASLt launch shape mismatch");
+
+  DeviceBuffers buffers;
+  KernelArgStorage storage;
+  initKernelArgStorage(storage, args, buffers, launch);
+  if (storage.active != storage.hipBLASLtArgs.data())
+    fail("hipBLASLt argument block not selected");
+  checkEqual(storage.hipGemmCount, 1, "hipBLASLt gemm count mismatch");
+  checkEqual(storage.hipInternalArgs0, 1,
+             "hipBLASLt internal argument 0 mismatch");
+  checkEqual(storage.hipInternalArgs1, 0x10020,
+             "hipBLASLt internal argument 1 mismatch");
+  checkEqual(storage.hipNumWorkGroups, 2, "hipBLASLt workgroup count mismatch");
+  checkEqual(storage.hipStrideD1, 512, "hipBLASLt D stride 1 mismatch");
+  checkEqual(storage.hipStrideD2, 512 * 256, "hipBLASLt D stride 2 mismatch");
+  checkEqual(storage.hipStrideA1, 128, "hipBLASLt A stride 1 mismatch");
+  checkEqual(storage.hipStrideA2, 512 * 128, "hipBLASLt A stride 2 mismatch");
+  checkEqual(storage.hipStrideB1, 128, "hipBLASLt B stride 1 mismatch");
+  checkEqual(storage.hipStrideB2, 256 * 128, "hipBLASLt B stride 2 mismatch");
+  std::printf("hipblaslt_kernel_abi: ok\n");
 }
 
 static bool setInputInvalidMode(const char *mode, Args &args) {
@@ -477,6 +522,7 @@ int main(int argc, char **argv) {
   checkOutputCoordinates();
   checkOutputLayouts();
   checkAITERRunnerContract();
+  checkHipBLASLtABI();
   checkStreamKABI();
   checkTLXMXFPABI();
   return 0;

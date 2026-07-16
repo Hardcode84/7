@@ -27,7 +27,7 @@ namespace {
 
 enum class CType { F32, F16, BF16 };
 enum class InputType { F16, BF16, MXFP4 };
-enum class KernelABI { Matmul, V9Golden, TLXMXFP, StreamK };
+enum class KernelABI { Matmul, V9Golden, TLXMXFP, StreamK, HipBLASLt };
 enum class AccumulatorLayout { Automatic, Wmma, Mfma };
 enum class OutputLayout { Automatic, TilePacked, RowMajor, ColumnMajor };
 enum class ScaleLayout { Canonical, TensileLite };
@@ -84,7 +84,8 @@ static void usage() {
       "  --wave-size N          lanes per wave (default 32)\n"
       "  --input-type f16|bf16|mxfp4  input element type (default f16)\n"
       "  --c-type f32|f16|bf16  output element type (default f32)\n"
-      "  --kernel-abi matmul|v9-golden|tlx-mxfp|streamk  kernel argument "
+      "  --kernel-abi matmul|v9-golden|tlx-mxfp|streamk|hipblaslt  kernel "
+      "argument "
       "ABI\n"
       "  --accumulator-layout automatic|wmma|mfma\n"
       "  --output-layout automatic|tile-packed|row-major|column-major\n"
@@ -199,7 +200,12 @@ static void setKernelABI(Args &a, const char *v) {
     a.kernelABI = KernelABI::StreamK;
     return;
   }
-  die("bad --kernel-abi; expected matmul, v9-golden, tlx-mxfp, or streamk");
+  if (std::strcmp(v, "hipblaslt") == 0) {
+    a.kernelABI = KernelABI::HipBLASLt;
+    return;
+  }
+  die("bad --kernel-abi; expected matmul, v9-golden, tlx-mxfp, streamk, or "
+      "hipblaslt");
 }
 static void setAccumulatorLayout(Args &a, const char *v) {
   if (std::strcmp(v, "automatic") == 0) {
@@ -471,6 +477,11 @@ static void validateStreamKArgs(const Args &a) {
   validateStreamKWork(a);
 }
 
+static bool hasHipBLASLtTileShape(const Args &a) {
+  return a.bm == 2 && a.bn == 2 && a.waveMTiles == 8 && a.waveNTiles == 8 &&
+         a.waveKTiles == 2;
+}
+
 static void validateV9GoldenArgs(const Args &a) {
   if (a.kernelABI != KernelABI::V9Golden)
     return;
@@ -576,6 +587,19 @@ static void validateMXFP4InputArgs(const Args &a) {
   validateAITERInputArgs(a);
 }
 
+static void validateHipBLASLtArgs(const Args &a) {
+  if (a.kernelABI != KernelABI::HipBLASLt)
+    return;
+  if (a.inputType != InputType::F16 || a.cType != CType::F16)
+    die("hipBLASLt ABI requires f16 input and output");
+  if (a.waveSize != 64)
+    die("hipBLASLt ABI requires wave-size 64");
+  if (!hasHipBLASLtTileShape(a))
+    die("hipBLASLt ABI requires the 256x256x64 tile shape");
+  if (a.m % 256 != 0 || a.n % 256 != 0 || a.k < 128 || a.k % 64 != 0)
+    die("hipBLASLt ABI requires tile-aligned M/N and K >= 128");
+}
+
 static void validateArgs(const Args &a) {
   requirePositive(a.m, "m must be positive");
   requirePositive(a.n, "n must be positive");
@@ -601,6 +625,7 @@ static void validateArgs(const Args &a) {
   validateV9GoldenArgs(a);
   validateTLXMXFPArgs(a);
   validateStreamKArgs(a);
+  validateHipBLASLtArgs(a);
   (void)getOutputElementCount(a);
 }
 
@@ -1021,6 +1046,8 @@ static const char *getKernelABIName(KernelABI abi) {
     return "tlx-mxfp";
   case KernelABI::StreamK:
     return "streamk";
+  case KernelABI::HipBLASLt:
+    return "hipblaslt";
   }
   die("unknown kernel ABI");
 }
@@ -1079,9 +1106,15 @@ static bool isTLXMXFP(const Args &a) {
   return a.kernelABI == KernelABI::TLXMXFP;
 }
 
+static bool isHipBLASLt(const Args &a) {
+  return a.kernelABI == KernelABI::HipBLASLt;
+}
+
 static OutputLayout getEffectiveOutputLayout(const Args &a) {
   if (a.outputLayout != OutputLayout::Automatic)
     return a.outputLayout;
+  if (isHipBLASLt(a))
+    return OutputLayout::ColumnMajor;
   if (isV9Golden(a))
     return OutputLayout::RowMajor;
   if (isStreamK(a))
@@ -1092,7 +1125,7 @@ static OutputLayout getEffectiveOutputLayout(const Args &a) {
 }
 
 static bool usesFlattenedGrid(const Args &a) {
-  return isV9Golden(a) || isTLXMXFP(a) || isStreamK(a);
+  return isV9Golden(a) || isTLXMXFP(a) || isStreamK(a) || isHipBLASLt(a);
 }
 
 static int mmaKTile(const Args &a) {
@@ -1769,6 +1802,7 @@ struct KernelArgStorage {
   std::array<void *, 8> v9Args;
   std::array<void *, 13> tlxArgs;
   std::array<void *, 6> streamKArgs;
+  std::array<void *, 22> hipBLASLtArgs;
   void **active = nullptr;
   int strideAM = 0;
   int strideBK = 0;
@@ -1776,10 +1810,28 @@ struct KernelArgStorage {
   int packedKStride = 0;
   int aScaleKStride = 0;
   int bScaleKStride = 0;
+  uint32_t hipGemmCount = 1;
+  uint32_t hipInternalArgs0 = 1;
+  uint32_t hipInternalArgs1 = (1u << 16) | 32u;
+  uint32_t hipNumWorkGroups = 0;
+  uint32_t hipM = 0;
+  uint32_t hipN = 0;
+  uint32_t hipBatch = 1;
+  uint32_t hipK = 0;
+  uint32_t hipStrideD1 = 0;
+  uint32_t hipStrideD2 = 0;
+  uint32_t hipStrideC1 = 0;
+  uint32_t hipStrideC2 = 0;
+  uint32_t hipStrideA1 = 0;
+  uint32_t hipStrideA2 = 0;
+  uint32_t hipStrideB1 = 0;
+  uint32_t hipStrideB2 = 0;
+  float hipAlpha = 1.0f;
+  float hipBeta = 0.0f;
 };
 
 static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
-                                 DeviceBuffers &buffers, int &tripCount) {
+                                 DeviceBuffers &buffers, LaunchShape &launch) {
   storage.strideAM = a.k;
   storage.strideBK = a.n;
   storage.strideCM = a.n;
@@ -1788,10 +1840,10 @@ static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
   storage.aScaleKStride = isMXFP4(a.inputType) ? a.m : 0;
   storage.bScaleKStride = isMXFP4(a.inputType) ? a.n : 0;
   storage.matmulArgs = {&buffers.deviceA, &buffers.deviceB, &buffers.deviceC,
-                        &tripCount};
+                        &launch.tripCount};
   storage.mxfp4Args = {&buffers.deviceA,      &buffers.deviceB,
                        &buffers.deviceC,      &buffers.deviceAScale,
-                       &buffers.deviceBScale, &tripCount};
+                       &buffers.deviceBScale, &launch.tripCount};
   storage.v9Args = {
       &buffers.deviceA,  &buffers.deviceB,  &buffers.deviceC, &a.m, &a.n,
       &storage.strideAM, &storage.strideBK, &storage.strideCM};
@@ -1816,6 +1868,44 @@ static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
                          &a.streamKWorkers};
   if (isStreamK(a)) {
     storage.active = storage.streamKArgs.data();
+    return;
+  }
+  storage.hipNumWorkGroups = launch.gridX;
+  storage.hipM = static_cast<uint32_t>(a.m);
+  storage.hipN = static_cast<uint32_t>(a.n);
+  storage.hipK = static_cast<uint32_t>(a.k);
+  storage.hipStrideD1 = storage.hipM;
+  storage.hipStrideD2 = storage.hipM * storage.hipN;
+  storage.hipStrideC1 = storage.hipStrideD1;
+  storage.hipStrideC2 = storage.hipStrideD2;
+  storage.hipStrideA1 = storage.hipK;
+  storage.hipStrideA2 = storage.hipM * storage.hipK;
+  storage.hipStrideB1 = storage.hipK;
+  storage.hipStrideB2 = storage.hipN * storage.hipK;
+  storage.hipBLASLtArgs = {&storage.hipGemmCount,
+                           &storage.hipInternalArgs0,
+                           &storage.hipInternalArgs1,
+                           &storage.hipNumWorkGroups,
+                           &storage.hipM,
+                           &storage.hipN,
+                           &storage.hipBatch,
+                           &storage.hipK,
+                           &buffers.deviceC,
+                           &buffers.deviceC,
+                           &buffers.deviceA,
+                           &buffers.deviceB,
+                           &storage.hipStrideD1,
+                           &storage.hipStrideD2,
+                           &storage.hipStrideC1,
+                           &storage.hipStrideC2,
+                           &storage.hipStrideA1,
+                           &storage.hipStrideA2,
+                           &storage.hipStrideB1,
+                           &storage.hipStrideB2,
+                           &storage.hipAlpha,
+                           &storage.hipBeta};
+  if (isHipBLASLt(a)) {
+    storage.active = storage.hipBLASLtArgs.data();
     return;
   }
   if (isTLXMXFP(a)) {
@@ -1852,7 +1942,7 @@ int main(int argc, char **argv) {
   validateRandomAITERInputs(inputs, a);
   DeviceBuffers buffers = prepareDeviceBuffers(a, inputs);
   KernelArgStorage kernelArgs;
-  initKernelArgStorage(kernelArgs, a, buffers, launch.tripCount);
+  initKernelArgStorage(kernelArgs, a, buffers, launch);
 
   auto launchGemm = [&](const char *what) {
     checkHip(hipModuleLaunchKernel(kfn, launch.gridX, launch.gridY, 1,
