@@ -160,8 +160,7 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-materialize-split-barriers"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-scalar-mask-preschedule"
-// PIPELINE-NEXT: with options = { "dma-issue-only" = true }
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-scalar-mask-postschedule"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.include @waveamd_backend_finish
 // PIPELINE: transform.named_sequence @waveamd_backend_unscheduled

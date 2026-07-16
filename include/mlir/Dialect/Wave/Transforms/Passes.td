@@ -545,9 +545,16 @@ def WaveAMDScalarMaskPreschedule
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
   ];
-  let options = [
-    Option<"dmaIssueOnly", "dma-issue-only", "bool", "false",
-           "Restrict sinking to functions with DMA issue delays">
+}
+
+def WaveAMDScalarMaskPostSchedule
+    : Pass<"waveamd-scalar-mask-postschedule"> {
+  let summary = "Repair scalar masks after DMA issue scheduling";
+  let description = [{
+    Reapplies scalar mask sinking in functions containing DMA issue delays.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
   ];
 }
 

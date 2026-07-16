@@ -1,5 +1,11 @@
 // RUN: wave-opt %s --waveamd-scalar-mask-preschedule | FileCheck %s
-// RUN: wave-opt %s --waveamd-scalar-mask-preschedule='dma-issue-only' | FileCheck %s --check-prefix=DMA
+// RUN: wave-opt %s --waveamd-scalar-mask-postschedule | FileCheck %s --check-prefix=POST
+// RUN: wave-opt %s --waveamd-scalar-mask-preschedule > %t.pre-once
+// RUN: wave-opt %t.pre-once --waveamd-scalar-mask-preschedule > %t.pre-twice
+// RUN: diff %t.pre-once %t.pre-twice
+// RUN: wave-opt %s --waveamd-scalar-mask-postschedule > %t.post-once
+// RUN: wave-opt %t.post-once --waveamd-scalar-mask-postschedule > %t.post-twice
+// RUN: diff %t.post-once %t.post-twice
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @sinks_vcc_compare_masks
@@ -171,15 +177,23 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %pick : !waveamdmachine.reg<sgpr, 1>
   }
 
-  // DMA-LABEL: func.func @dma_issue_only_sinks_selected_function
-  // DMA: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32
-  // DMA-NEXT: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32
-  // DMA-NEXT: waveamdmachine.s_cselect_b32 [[CMP]], [[SUM]],
-  func.func @dma_issue_only_sinks_selected_function(
+  // POST-LABEL: func.func @postschedule_sinks_dma_function
+  // POST: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32
+  // POST-NEXT: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32
+  // POST-NEXT: waveamdmachine.s_cselect_b32 [[CMP]], [[SUM]],
+  // POST-NEXT: %{{.*}}, [[VCC:%.*]] = waveamdmachine.v_cmp_ne_u32_vcc
+  // POST-NEXT: waveamdmachine.exec_if [[VCC]]
+  // POST: } {mask_width = 64 : i64} : !waveamdmachine.reg<vcc, 1>
+  func.func @postschedule_sinks_dma_function(
       %a: !waveamdmachine.reg<sgpr, 1>,
       %b: !waveamdmachine.reg<sgpr, 1>,
+      %va: !waveamdmachine.reg<vgpr, 1>,
+      %vzero: !waveamdmachine.reg<vgpr, 1>,
       %dep: !waveamdmachine.mem.token,
       %m0: !waveamdmachine.m0) {
+    %mask, %vcc = waveamdmachine.v_cmp_ne_u32_vcc %va, %vzero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
     %cmp = waveamdmachine.s_cmp_eq_u32 %a, %b
         : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
         -> !waveamdmachine.reg<scc, 1>
@@ -189,17 +203,20 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %pick = waveamdmachine.s_cselect_b32 %cmp, %sum, %a
         : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
            !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    waveamdmachine.exec_if %mask {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
     %delayed = waveamdmachine.dma_issue_delay %dep, %m0 {cycles = 1 : i64}
         : (!waveamdmachine.mem.token, !waveamdmachine.m0)
           -> !waveamdmachine.m0
     return
   }
 
-  // DMA-LABEL: func.func @dma_issue_only_leaves_other_function
-  // DMA: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32
-  // DMA-NEXT: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32
-  // DMA-NEXT: waveamdmachine.s_cselect_b32 [[CMP]], [[SUM]],
-  func.func @dma_issue_only_leaves_other_function(
+  // POST-LABEL: func.func @postschedule_leaves_unrelated_function
+  // POST: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32
+  // POST-NEXT: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32
+  // POST-NEXT: waveamdmachine.s_cselect_b32 [[CMP]], [[SUM]],
+  func.func @postschedule_leaves_unrelated_function(
       %a: !waveamdmachine.reg<sgpr, 1>,
       %b: !waveamdmachine.reg<sgpr, 1>) {
     %cmp = waveamdmachine.s_cmp_eq_u32 %a, %b

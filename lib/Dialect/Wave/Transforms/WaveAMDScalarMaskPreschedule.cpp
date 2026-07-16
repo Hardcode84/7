@@ -16,6 +16,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir::wave {
+#define GEN_PASS_DEF_WAVEAMDSCALARMASKPOSTSCHEDULE
 #define GEN_PASS_DEF_WAVEAMDSCALARMASKPRESCHEDULE
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 } // namespace mlir::wave
@@ -187,26 +188,37 @@ static void collectOps(Operation *root, SmallVectorImpl<Operation *> &ops) {
   root->walk([&](Operation *op) { ops.push_back(op); });
 }
 
+static void sinkScalarMasks(Operation *root) {
+  SmallVector<Operation *> ops;
+  collectOps(root, ops);
+  for (Operation *op : ops)
+    sinkScalarMaskClosure(op);
+  for (Operation *op : ops)
+    if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
+      useVCCExecMask(execIf);
+}
+
 struct WaveAMDScalarMaskPreschedulePass
     : public wave::impl::WaveAMDScalarMaskPrescheduleBase<
           WaveAMDScalarMaskPreschedulePass> {
   using WaveAMDScalarMaskPrescheduleBase::WaveAMDScalarMaskPrescheduleBase;
 
+  void runOnOperation() override { sinkScalarMasks(getOperation()); }
+};
+
+struct WaveAMDScalarMaskPostSchedulePass
+    : public wave::impl::WaveAMDScalarMaskPostScheduleBase<
+          WaveAMDScalarMaskPostSchedulePass> {
+  using WaveAMDScalarMaskPostScheduleBase::WaveAMDScalarMaskPostScheduleBase;
+
   void runOnOperation() override {
-    SmallVector<Operation *> ops;
-    if (dmaIssueOnly) {
-      getOperation()->walk([&](func::FuncOp func) {
-        if (hasDmaIssueDelay(func))
-          collectOps(func, ops);
-      });
-    } else {
-      collectOps(getOperation(), ops);
-    }
-    for (Operation *op : ops)
-      sinkScalarMaskClosure(op);
-    for (Operation *op : ops)
-      if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
-        useVCCExecMask(execIf);
+    SmallVector<func::FuncOp> funcs;
+    getOperation()->walk([&](func::FuncOp func) {
+      if (hasDmaIssueDelay(func))
+        funcs.push_back(func);
+    });
+    for (func::FuncOp func : funcs)
+      sinkScalarMasks(func);
   }
 };
 

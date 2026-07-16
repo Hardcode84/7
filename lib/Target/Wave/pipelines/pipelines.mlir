@@ -228,8 +228,7 @@ module attributes {transform.with_named_sequence} {
         to %root : (!transform.any_op) -> !transform.any_op
     %rmat = transform.apply_registered_pass "waveamd-materialize-split-barriers"
         to %rbar : (!transform.any_op) -> !transform.any_op
-    %rmask = transform.apply_registered_pass "waveamd-scalar-mask-preschedule"
-        with options = { "dma-issue-only" = true }
+    %rmask = transform.apply_registered_pass "waveamd-scalar-mask-postschedule"
         to %rmat : (!transform.any_op) -> !transform.any_op
     %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rmask)
         : (!transform.any_op) -> !transform.any_op
