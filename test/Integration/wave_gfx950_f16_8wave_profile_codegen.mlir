@@ -47,4 +47,12 @@
 // ASM-NEXT: s_nop 15
 // ASM-NEXT: s_nop 13
 // ASM-NEXT: [[DELAY]]:
+// ASM-NEXT: buffer_load_dwordx4
+// ASM-NEXT: v_mfma_f32_16x16x32_f16
+// ASM-NEXT: s_add_i32 m0
+// ASM-COUNT-11: v_mfma_f32_16x16x32_f16
+// ASM-NEXT: buffer_load_dwordx4
+// ASM-COUNT-11: v_mfma_f32_16x16x32_f16
+// ASM-NEXT: s_waitcnt vmcnt(8)
+// ASM-NEXT: s_barrier
 // ASM: s_cbranch_scc1 [[LOOP]]

@@ -373,6 +373,9 @@ buildInstructionConfig(const waveamdmachine::ArchData &arch,
   stateConfig.valueLatencies = config.valueLatencies;
   stateConfig.issuePeriod =
       waveamdmachine::getEventSimIssuePeriod(arch, config);
+  // Skipped waves expose queue and barrier stalls hidden by the delay span.
+  stateConfig.dmaIssueDelayCohortPolicy =
+      waveamdmachine::DmaIssueDelayCohortPolicy::Skipped;
   return stateConfig;
 }
 
