@@ -478,29 +478,6 @@ func.func @m0_delay_after_untagged_lds_dma(
   return
 }
 
-// CHECK-LABEL: func.func @m0_delay_after_tagged_lds_dma
-// CHECK: waveamdmachine.global_load_lds_b128
-// CHECK-NEXT: waveamdmachine.imm 0
-// CHECK-NEXT: waveamdmachine.s_nop
-// CHECK-NEXT: waveamdmachine.s_mov_m0
-func.func @m0_delay_after_tagged_lds_dma(
-    %off: !waveamdmachine.reg<vgpr, 1>,
-    %base: !waveamdmachine.reg<sgpr, 2>,
-    %dst0: !waveamdmachine.reg<sgpr, 1>,
-    %dst1: !waveamdmachine.reg<sgpr, 1>,
-    %dep: !waveamdmachine.mem.token) {
-  %m0 = waveamdmachine.s_mov_m0 %dst0
-      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
-  %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %dep
-      {waveamdmachine.dma_issue_timing}
-      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
-         !waveamdmachine.m0, !waveamdmachine.mem.token)
-        -> !waveamdmachine.mem.token
-  %next = waveamdmachine.s_mov_m0 %dst1
-      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
-  return
-}
-
 // CHECK-LABEL: func.func @mfma_fills_m0_delay_after_lds_dma
 // CHECK: waveamdmachine.global_load_lds_b128
 // CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
@@ -1910,7 +1887,7 @@ func.func @dma_issue_edge_does_not_wait_for_completion(
     %m0: !waveamdmachine.m0,
     %dep: !waveamdmachine.mem.token) {
   %token = waveamdmachine.global_load_lds_b128
-      %off, %base, %m0 after %dep {waveamdmachine.dma_issue_timing}
+      %off, %base, %m0 after %dep
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
          !waveamdmachine.m0, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token

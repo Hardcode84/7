@@ -14,19 +14,17 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: waveamdmachine.uniform_loop carries({{.*}}[[VCC]] : {{.*}}!waveamdmachine.reg<vcc, 1>)
 // CHECK: ^bb0({{.*}}[[LOOP_VCC:%.*]]: !waveamdmachine.reg<vcc, 1>):
 // CHECK: [[DMA0:%.*]] = waveamdmachine.global_load_lds_b128
-// CHECK-SAME: {waveamdmachine.dma_issue_timing}
 // CHECK: [[NEXT_M0:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32
 // CHECK: [[DELAYED:%.*]] = waveamdmachine.dma_issue_delay [[DMA0]], [[NEXT_M0]] unless [[LOOP_VCC]]
 // CHECK-SAME: cycles = 17 : i64
 // CHECK: waveamdmachine.global_load_lds_b128 {{.*}}, [[DELAYED]] after
-// CHECK-SAME: {waveamdmachine.dma_issue_timing}
 // CHECK: waveamdmachine.global_load_lds_b128
-// CHECK-SAME: {waveamdmachine.dma_issue_after_delay, waveamdmachine.dma_issue_timing}
+// CHECK-SAME: {waveamdmachine.dma_issue_after_delay}
 // CHECK: waveamdmachine.continue_if {{.*}}carries({{.*}}[[LOOP_VCC]] : {{.*}}!waveamdmachine.reg<vcc, 1>)
 // CHECK: waveamdmachine.uniform_loop
 // CHECK: waveamdmachine.global_load_lds_b128
-// CHECK-NOT: waveamdmachine.dma_issue_timing
 // CHECK: waveamdmachine.continue_if
+// CHECK-NOT: waveamdmachine.dma_issue_timing
 func.func @phased_dma_loop(%in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 2048 : i64,
                 wave.workgroup_size = array<i32: 128, 1, 1>} {

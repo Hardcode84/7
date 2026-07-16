@@ -60,8 +60,6 @@ using namespace mlir::waveamd;
 
 static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
-static constexpr StringLiteral kDmaIssueTimingAttr =
-    "waveamdmachine.dma_issue_timing";
 static constexpr StringLiteral kDmaIssueAfterDelayAttr =
     "waveamdmachine.dma_issue_after_delay";
 
@@ -515,7 +513,6 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
 }
 
 struct DmaIssueDelayConfig {
-  SmallVector<Operation *, 4> timingLoops;
   std::optional<int64_t> skipThreadThreshold;
   bool enabled = false;
 };
@@ -524,13 +521,8 @@ static FailureOr<DmaIssueDelayConfig>
 getDmaIssueDelayConfig(func::FuncOp func) {
   DmaIssueDelayConfig config;
   WalkResult walk = func.walk([&](waveamd::DmaLoadLdsOp op) {
-    if (op->hasAttr("issue_delay_cycles")) {
+    if (op->hasAttr("issue_delay_cycles"))
       config.enabled = true;
-      Operation *parent = op->getParentOp();
-      if (isa_and_nonnull<scf::ForOp>(parent) &&
-          !llvm::is_contained(config.timingLoops, parent))
-        config.timingLoops.push_back(parent);
-    }
     IntegerAttr threshold =
         op->getAttrOfType<IntegerAttr>("issue_delay_skip_thread_threshold");
     if (!threshold)
@@ -567,7 +559,6 @@ LogicalResult WaveAMDMachineSelector::run() {
     return failure();
   dmaIssueTimingEnabled = delayConfig->enabled;
   dmaIssueSkipThreadThreshold = delayConfig->skipThreadThreshold;
-  dmaIssueTimingLoops = std::move(delayConfig->timingLoops);
 
   Block &block = func.getBody().front();
   builder.setInsertionPointToStart(&block);
@@ -7911,8 +7902,6 @@ static void recordDmaM0(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   Operation *dma = token.getDefiningOp();
   Operation *previousDma =
       S.lastDmaToken ? S.lastDmaToken.getDefiningOp() : nullptr;
-  if (llvm::is_contained(S.dmaIssueTimingLoops, op->getParentOp()))
-    dma->setAttr(kDmaIssueTimingAttr, S.builder.getUnitAttr());
   if (S.lastDmaHadIssueDelay && previousDma &&
       previousDma->getBlock() == dma->getBlock())
     dma->setAttr(kDmaIssueAfterDelayAttr, S.builder.getUnitAttr());

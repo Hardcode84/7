@@ -114,7 +114,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
       %dst: !waveamdmachine.reg<sgpr, 1>) {
     %root = waveamdmachine.token : !waveamdmachine.mem.token
     %tok = waveamdmachine.global_load_lds_b128 %off, %base, %m0 after %root
-        {waveamdmachine.dma_issue_timing}
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
            !waveamdmachine.m0, !waveamdmachine.mem.token)
           -> !waveamdmachine.mem.token

@@ -11,6 +11,8 @@
 // RUN:     wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 \
 // RUN:     -filetype=obj -o /dev/null
+// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1' \
+// RUN:   2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
@@ -19,6 +21,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-NEXT: s_add_i32 s9, s9, s10
 // ASM-NEXT: s_waitcnt vmcnt(0) lgkmcnt(0)
 // ASM-NEXT: buffer_load_dwordx4 v0, s[4:7], 0 offen lds
+// DIAG: waveamd-machine-schedule region func=loop_carried_wait_fill_codegen index=1
+// DIAG-SAME: action=apply reason=loop_wait
+// DIAG-SAME: steady_state_fills=1
+// DIAG-SAME: steady_state_iterations=4
+// DIAG-SAME: steady_state_refinements=2
 func.func @loop_carried_wait_fill_codegen() attributes {wave.kernel} {
   %root = waveamdmachine.token : !waveamdmachine.mem.token
   %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
@@ -47,7 +54,6 @@ func.func @loop_carried_wait_fill_codegen() attributes {wave.kernel} {
        %iter: !waveamdmachine.reg<sgpr, 1, 9>):
     %dma = waveamdmachine.buffer_load_lds_b128
         %off, %desc, %zero, %m0 after %tok
-        {waveamdmachine.dma_issue_timing}
         : (!waveamdmachine.reg<vgpr, 1, 0>,
            !waveamdmachine.reg<sgpr, 4, 4>, !waveamdmachine.imm,
            !waveamdmachine.m0, !waveamdmachine.mem.token)

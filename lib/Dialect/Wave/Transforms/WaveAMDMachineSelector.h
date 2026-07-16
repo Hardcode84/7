@@ -299,7 +299,6 @@ public:
   DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
       slotFitsU32Cache;
   PointerOffset lastDmaDstOffset;
-  SmallVector<Operation *, 4> dmaIssueTimingLoops;
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
   std::optional<int64_t> dmaIssueSkipThreadThreshold;
