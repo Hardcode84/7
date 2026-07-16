@@ -136,3 +136,8 @@ GPU-event timing, and 1000 W conditions. Record the input generator exactly;
 Wave's generic random-float mode is not equivalent to hipBLASLt `rand_int`.
 The existing Wave comparison ISA is
 `test/PerfGolden/Inputs/gfx950-f16-256x256-16wave.s`.
+
+`test/Integration/wave_hipblaslt_f16_profiles_runtime.mlir` runs the scheduled
+4-, 8-, and 16-wave profiles with `rand_int` on hardware. Output checks decode
+every accumulator slot to its logical matrix coordinate; tile sorting is not
+accepted as correctness.
