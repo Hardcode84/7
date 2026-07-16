@@ -6,6 +6,7 @@
 # CHECK: matmul_auto_gfx950_wave_size: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
 # CHECK: matmul_bf16_forwarding: ok
+# CHECK: matmul_rand_int_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
 # CHECK: matmul_mxfp4_scale_regs_forwarding: ok
@@ -20,6 +21,7 @@
 # CHECK: matmul_a4w4_mxfp_k16k_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
+# CHECK: matmul_perf_sweep_rand_int_forwarding: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
 
@@ -422,6 +424,62 @@ def check_matmul_bf16_forwarding(matmul) -> None:
         "runner should receive bf16",
     )
     print("matmul_bf16_forwarding: ok")
+
+
+def check_matmul_rand_int_forwarding(matmul) -> None:
+    args = matmul.parse_args(
+        ["--chip=gfx950", "--input-type=bf16", "--rand-int", "--variants=baseline"]
+    )
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return (
+                "per_launch_cycles_wallclock: 1\n"
+                "per_launch_us: 1.0\n"
+                "output_check: passed\n"
+            )
+
+        matmul.run = fake_run
+        _, _, check = matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require(
+        "matmul_rand_int_forwarding",
+        bool(captured) and "--rand-int" in captured[0],
+        "runner command missing --rand-int",
+    )
+    require(
+        "matmul_rand_int_forwarding",
+        check == "passed" and matmul.input_mode_name(args) == "rand-int",
+        "rand_int should retain CPU checking and header mode",
+    )
+
+    try:
+        matmul.parse_args(["--all-ones", "--rand-int"])
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_rand_int_forwarding",
+            False,
+            "calibrator accepted conflicting input modes",
+        )
+
+    bad = matmul.parse_args(["--chip=gfx950", "--input-type=mxfp4", "--rand-int"])
+    try:
+        matmul.validate_args(bad)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_rand_int_forwarding",
+            False,
+            "calibrator accepted MXFP4 rand_int",
+        )
+    print("matmul_rand_int_forwarding: ok")
 
 
 def make_mxfp4_args() -> argparse.Namespace:
@@ -1280,6 +1338,44 @@ def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     print("matmul_perf_sweep_precompile_plan: ok")
 
 
+def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
+    args = perf_sweep.build_argparser().parse_args(
+        ["--kernels=f16", "--rand-int", "--skip-rebuild", "--dry-run"]
+    )
+    perf_sweep.validate_args(args)
+    spec = perf_sweep.build_run_specs(args)[0]
+    cmd = perf_sweep.calibrator_command(args, spec)
+    require(
+        "matmul_perf_sweep_rand_int_forwarding",
+        "--rand-int" in cmd,
+        "perf sweep command missing --rand-int",
+    )
+
+    try:
+        perf_sweep.build_argparser().parse_args(["--all-ones", "--rand-int"])
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_perf_sweep_rand_int_forwarding",
+            False,
+            "perf sweep accepted conflicting input modes",
+        )
+
+    bad = perf_sweep.build_argparser().parse_args(["--kernels=mxfp4", "--rand-int"])
+    try:
+        perf_sweep.validate_args(bad)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_perf_sweep_rand_int_forwarding",
+            False,
+            "perf sweep accepted MXFP4 rand_int",
+        )
+    print("matmul_perf_sweep_rand_int_forwarding: ok")
+
+
 def check_calibration_scheduler_region_cap(matmul, fa) -> None:
     matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
     matmul_variant = matmul.VARIANTS["scheduled"]
@@ -1333,6 +1429,7 @@ def main() -> int:
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
     check_matmul_bf16_forwarding(matmul)
+    check_matmul_rand_int_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)
     check_matmul_mxfp4_scale_regs_forwarding(matmul)
@@ -1347,6 +1444,7 @@ def main() -> int:
     check_matmul_a4w4_mxfp_k16k_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
+    check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:
         matmul.parse_variants("pingpong")

@@ -143,7 +143,18 @@ _hipcc = (
     config.environment.get("HIPCC") or shutil.which("hipcc") or "/opt/rocm/bin/hipcc"
 )
 if Path(_hipcc).exists() or shutil.which(_hipcc):
+    _hipcc_path = Path(shutil.which(_hipcc) or _hipcc).resolve()
+    _hipcc_rocm = _hipcc_path.parent.parent
+    _hipconfig = _hipcc_path.parent / "hipconfig"
+    if _hipconfig.exists():
+        _hipconfig_path = subprocess.run(
+            [_hipconfig, "--path"], capture_output=True, text=True, check=False
+        )
+        if _hipconfig_path.returncode == 0 and _hipconfig_path.stdout.strip():
+            _hipcc_rocm = Path(_hipconfig_path.stdout.strip())
     config.available_features.add("host-has-hipcc")
+    config.substitutions.append(("%hipcc", f'"{_hipcc}"'))
+    config.substitutions.append(("%compiler_rocm_lib", str(_hipcc_rocm / "lib")))
 
 # Compilation pipeline library (transform.named_sequence file) staged
 # next to the binary at build time; tests reach it via %wave_pipelines.

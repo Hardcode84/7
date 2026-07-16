@@ -46,6 +46,7 @@ struct Args {
   int seed = 0;
   bool checkOutput = true;
   bool allOnes = false;
+  bool randInt = false;
   ScaleLayout scaleLayout = ScaleLayout::Canonical;
 };
 
@@ -77,6 +78,7 @@ static void usage() {
       "  --seed N               deterministic input seed (default 0)\n"
       "  --scale-layout canonical|tensilelite  MXFP4 scale upload layout\n"
       "  --all-ones             fill A/B with ones and MXFP4 scales with 1\n"
+      "  --rand-int             match hipBLASLt f16/bf16 rand_int inputs\n"
       "  --no-check             skip random-output check\n");
 }
 
@@ -232,6 +234,10 @@ static int handleOneArg(int argc, char **argv, int i, Args &a,
     a.allOnes = true;
     return i + 1;
   }
+  if (std::strcmp(arg, "--rand-int") == 0) {
+    a.randInt = true;
+    return i + 1;
+  }
   if (isFlag(arg)) {
     if (i + 1 >= argc)
       die("missing value for flag");
@@ -305,6 +311,10 @@ static void validateArgs(const Args &a) {
   if (a.scaleLayout == ScaleLayout::TensileLite &&
       a.inputType != InputType::MXFP4)
     die("tensilelite scale layout requires MXFP4 input");
+  if (a.allOnes && a.randInt)
+    die("--all-ones and --rand-int are mutually exclusive");
+  if (a.randInt && a.inputType == InputType::MXFP4)
+    die("--rand-int supports f16/bf16 inputs only");
   validateV9GoldenArgs(a);
   validateTLXMXFPArgs(a);
 }
@@ -396,6 +406,18 @@ static uint32_t nextRand(uint32_t &state) {
 static float randomInputValue(uint32_t &state) {
   int bucket = static_cast<int>((nextRand(state) >> 24) % 17u);
   return static_cast<float>((bucket - 8) * 0.25f);
+}
+
+static uint64_t hipblasLtXorShift(uint64_t state) {
+  return state ^ (state << 13) ^ (state >> 17) ^ (state << 5);
+}
+
+static float hipblasLtRandInt(size_t index) {
+  uint64_t state = index * 1664525 + 1013904223;
+  state = hipblasLtXorShift(state);
+  state = hipblasLtXorShift(state);
+  state = hipblasLtXorShift(state);
+  return static_cast<float>(static_cast<uint32_t>(state) % 5) - 2.0f;
 }
 
 static uint8_t randomMXFP4Code(uint32_t &state) {
@@ -564,6 +586,14 @@ static const char *getScaleLayoutName(ScaleLayout layout) {
   return layout == ScaleLayout::TensileLite ? "tensilelite" : "canonical";
 }
 
+static const char *getInputModeName(const Args &a) {
+  if (a.allOnes)
+    return "all-ones";
+  if (a.randInt)
+    return "rand-int";
+  return "random";
+}
+
 static uint16_t oneBits(InputType type) {
   switch (type) {
   case InputType::F16:
@@ -598,24 +628,31 @@ static int mmaKTile(const Args &a) {
   return 16;
 }
 
-static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type,
-                                           int seed, int stream, bool allOnes) {
-  size_t elements = static_cast<size_t>(rows) * k;
-  if (isMXFP4(type)) {
-    if (elements % 2 != 0)
-      die("MXFP4 input element count must be even");
-    if (allOnes)
-      return std::vector<uint8_t>(elements / 2, 0x22);
-    std::vector<uint8_t> bytes(elements / 2);
-    uint32_t state = randState(seed, stream);
-    for (size_t i = 0; i < elements; i += 2) {
-      uint8_t low = randomMXFP4Code(state);
-      uint8_t high = randomMXFP4Code(state);
-      bytes[i / 2] = static_cast<uint8_t>(low | (high << 4));
-    }
-    return bytes;
+static std::vector<uint8_t> makeMXFP4InputBytes(size_t elements, int seed,
+                                                int stream, bool allOnes) {
+  if (elements % 2 != 0)
+    die("MXFP4 input element count must be even");
+  if (allOnes)
+    return std::vector<uint8_t>(elements / 2, 0x22);
+  std::vector<uint8_t> bytes(elements / 2);
+  uint32_t state = randState(seed, stream);
+  for (size_t i = 0; i < elements; i += 2) {
+    uint8_t low = randomMXFP4Code(state);
+    uint8_t high = randomMXFP4Code(state);
+    bytes[i / 2] = static_cast<uint8_t>(low | (high << 4));
   }
+  return bytes;
+}
 
+static uint16_t inputBits(InputType type, float value) {
+  return type == InputType::BF16 ? floatToBF16Bits(value)
+                                 : floatToHalfBits(value);
+}
+
+static std::vector<uint8_t> make16BitInputBytes(size_t elements, int k,
+                                                InputType type, int seed,
+                                                int stream, bool allOnes,
+                                                bool randInt) {
   std::vector<uint8_t> bytes(elements * sizeof(uint16_t));
   if (allOnes) {
     uint16_t bits = oneBits(type);
@@ -624,14 +661,35 @@ static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type,
     return bytes;
   }
 
+  if (randInt) {
+    for (size_t i = 0; i < elements; ++i) {
+      float value = hipblasLtRandInt(i);
+      size_t row = i / static_cast<size_t>(k);
+      size_t col = i % static_cast<size_t>(k);
+      if (stream == 1 && ((row ^ col) & 1u) == 0)
+        value = -value;
+      uint16_t bits = inputBits(type, value);
+      std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+    }
+    return bytes;
+  }
+
   uint32_t state = randState(seed, stream);
   for (size_t i = 0; i < elements; ++i) {
     float value = randomInputValue(state);
-    uint16_t bits = type == InputType::BF16 ? floatToBF16Bits(value)
-                                            : floatToHalfBits(value);
+    uint16_t bits = inputBits(type, value);
     std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
   }
   return bytes;
+}
+
+static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type,
+                                           int seed, int stream, bool allOnes,
+                                           bool randInt) {
+  size_t elements = static_cast<size_t>(rows) * k;
+  if (isMXFP4(type))
+    return makeMXFP4InputBytes(elements, seed, stream, allOnes);
+  return make16BitInputBytes(elements, k, type, seed, stream, allOnes, randInt);
 }
 
 static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k, int seed,
@@ -795,9 +853,9 @@ static int inputCols(const Args &a, bool isA) {
 static HostInputs makeHostInputs(const Args &a) {
   HostInputs inputs;
   inputs.a = makeInputBytes(inputRows(a, true), inputCols(a, true), a.inputType,
-                            a.seed, 0, a.allOnes);
+                            a.seed, 0, a.allOnes, a.randInt);
   inputs.b = makeInputBytes(inputRows(a, false), inputCols(a, false),
-                            a.inputType, a.seed, 1, a.allOnes);
+                            a.inputType, a.seed, 1, a.allOnes, a.randInt);
   if (isMXFP4(a.inputType)) {
     inputs.aScale = makeMXFP4ScaleBytes(a.m, a.k, a.seed, 2, a.allOnes);
     inputs.bScale = makeMXFP4ScaleBytes(a.n, a.k, a.seed, 3, a.allOnes);
@@ -1019,6 +1077,7 @@ static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
 
 } // namespace
 
+#ifndef WAVE_MATMUL_CALIBRATE_RUNNER_NO_MAIN
 int main(int argc, char **argv) {
   Args a = parseArgs(argc, argv);
 
@@ -1072,8 +1131,7 @@ int main(int argc, char **argv) {
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
               getCTypeName(a.cType), getKernelABIName(a.kernelABI),
-              getScaleLayoutName(a.scaleLayout),
-              a.allOnes ? "all-ones" : "random");
+              getScaleLayoutName(a.scaleLayout), getInputModeName(a));
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n",
               launch.gridX, launch.gridY, launch.blockThreads, a.bm * a.bn);
   std::printf("loop_trip_count: %d\n", launch.displayTripCount);
@@ -1086,3 +1144,4 @@ int main(int argc, char **argv) {
   freeDeviceBuffers(buffers);
   return 0;
 }
+#endif

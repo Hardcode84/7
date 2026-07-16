@@ -256,6 +256,14 @@ def selected_scale_input(args: argparse.Namespace) -> str:
     return getattr(args, "scale_input", "canonical")
 
 
+def input_mode_name(args: argparse.Namespace) -> str:
+    if getattr(args, "all_ones", False):
+        return "all-ones"
+    if getattr(args, "rand_int", False):
+        return "rand-int"
+    return "random"
+
+
 def append_option_if(cmd: list[str], enabled: bool, option: str) -> None:
     if enabled:
         cmd.append(option)
@@ -909,6 +917,8 @@ def run_hw(
         cmd.extend(["--scale-layout", "tensilelite"])
     if getattr(args, "all_ones", False):
         cmd.append("--all-ones")
+    if getattr(args, "rand_int", False):
+        cmd.append("--rand-int")
     if args.no_check:
         cmd.append("--no-check")
     cmd += [str(hsaco), kernel_name(args)]
@@ -1092,10 +1102,16 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument(
+    input_mode = ap.add_mutually_exclusive_group()
+    input_mode.add_argument(
         "--all-ones",
         action="store_true",
         help="fill A/B with ones and MXFP4 scales with 1 for debug runs",
+    )
+    input_mode.add_argument(
+        "--rand-int",
+        action="store_true",
+        help="match hipBLASLt f16/bf16 rand_int inputs",
     )
     ap.add_argument(
         "--repeats",
@@ -1360,6 +1376,8 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--sim-trip-count must be >= -1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
+    if getattr(args, "rand_int", False) and args.input_type == "mxfp4":
+        sys.exit("--rand-int supports f16/bf16 inputs only")
     validate_tool_output_args(args)
     validate_example_args(args)
     validate_mxfp4_args(args)
@@ -1394,8 +1412,7 @@ def print_header(args: argparse.Namespace, chip: str) -> None:
         f"example={selected_example(args)} "
         f"scale_input={selected_scale_input(args)} "
         f"kernel_abi={kernel_abi(args)} "
-        f"seed={args.seed} input_mode="
-        f"{'all-ones' if args.all_ones else 'random'}\n"
+        f"seed={args.seed} input_mode={input_mode_name(args)}\n"
         f"cta_swizzle_xcds={args.cta_swizzle_xcds} "
         f"cta_group_m={args.cta_group_m}\n"
         f"kernel_arg_trip_count: {kernel_arg_trip_count_text(args)}\n"

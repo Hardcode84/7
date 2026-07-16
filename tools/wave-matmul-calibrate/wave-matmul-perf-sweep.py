@@ -323,6 +323,8 @@ def calibrator_command(args: argparse.Namespace, spec: RunSpec) -> list[str]:
         cmd.append("--no-check")
     if args.all_ones:
         cmd.append("--all-ones")
+    if args.rand_int:
+        cmd.append("--rand-int")
     if args.rocm_lib:
         cmd.extend(["--rocm-lib", args.rocm_lib])
     cmd.extend(args.extra_calibrator_arg)
@@ -570,7 +572,9 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable CPU output checks; default perf sweep skips them",
     )
-    parser.add_argument("--all-ones", action="store_true")
+    input_mode = parser.add_mutually_exclusive_group()
+    input_mode.add_argument("--all-ones", action="store_true")
+    input_mode.add_argument("--rand-int", action="store_true")
     parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rebuild", action="store_true")
@@ -615,6 +619,11 @@ def build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_input_mode(args: argparse.Namespace) -> None:
+    if args.rand_int and any(kernel.key.startswith("mxfp4") for kernel in args.kernels):
+        raise SystemExit("--rand-int supports f16 kernels only")
+
+
 def validate_args(args: argparse.Namespace) -> None:
     for name in ("m", "n", "iters", "warmup", "repeats", "build_jobs"):
         if getattr(args, name) <= 0:
@@ -623,6 +632,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--compile-jobs must be non-negative")
     if args.sim_trip_count < -1:
         raise SystemExit("--sim-trip-count must be >= -1")
+    validate_input_mode(args)
     if any(kernel.key.startswith("v9") for kernel in args.kernels) and (
         args.m % 256 != 0 or args.n % 256 != 0
     ):
