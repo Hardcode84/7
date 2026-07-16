@@ -44,6 +44,73 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// CHECK-LABEL: func.func @gfx950_b16_transpose(
+// CHECK-NOT: wave.load
+// CHECK: wave.index_expr <"8*item">
+// CHECK: waveamd.transpose_load
+// CHECK-SAME: !wave.simd<vector<4xf16>, 64>
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b16_transpose(
+      %base: !wave.ptr<#wave.shared, f16>)
+      -> !wave.simd<vector<4xf16>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16 * (8 * (item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot) + Mod(item, 4))">>
+        bindings []() packet_bindings []()
+        : (!wave.ptr<#wave.shared, f16>)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<4xf16>, 64>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @gfx950_b16_xor_transpose(
+// CHECK-NOT: wave.load
+// CHECK: wave.ptr_cast
+// CHECK: wave.index_expr
+// CHECK: wave.ptr_add
+// CHECK: wave.ptr_cast
+// CHECK: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b16_xor_transpose(
+      %base: !wave.ptr<#wave.shared, f16>)
+      -> !wave.simd<vector<4xf16>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16 * (xor(item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot, floor((item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot) / 2)) + Mod(item, 4))">>
+        bindings []() packet_bindings []()
+        : (!wave.ptr<#wave.shared, f16>)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<4xf16>, 64>
+  }
+}
+
+// -----
+
+// Wrong B16 destination-lane stride keeps generic lowering.
+// CHECK-LABEL: func.func @wrong_b16_relation(
+// CHECK-NOT: waveamd.transpose_load
+// CHECK: wave.load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @wrong_b16_relation(
+      %base: !wave.ptr<#wave.shared, f16>)
+      -> !wave.simd<vector<4xf16>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16 * (8 * (item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot) + 2 * Mod(item, 4))">>
+        bindings []() packet_bindings []()
+        : (!wave.ptr<#wave.shared, f16>)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<4xf16>, 64>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @gfx950_wave_id_tile(
 // CHECK-NOT: wave.load
 // CHECK: wave.index_expr <"2048 + 8*Mod(item, 64) + 1024*Mod(floor(1/64*item), 2)">
