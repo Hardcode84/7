@@ -3,9 +3,8 @@
 ## Result
 
 `gfx950-f16-256x256-4wave` keeps the 256x256x64 CTA tile but assigns one
-128x128 output tile to each of four wave64 waves. It reached
-`1.343401 PFLOP/s` on MI350X device 2. The locked eight-wave kernel remains
-faster. Post-rebase validation measured `821.162 us`, `1.338970 PFLOP/s`.
+128x128 output tile to each of four wave64 waves. Phased LDS-DMA reaches
+`1.413956 PFLOP/s` on MI350X. The eight-wave profile remains unchanged.
 
 - Shape: `M=N=K=8192`.
 - Types: f16 A/B/C, f32 accumulation.
@@ -13,6 +12,18 @@ faster. Post-rebase validation measured `821.162 us`, `1.338970 PFLOP/s`.
 - Launch: grid `32x32x1`, block `256x1x1`.
 - Dynamic LDS: 131,072 bytes.
 - Clock controls: not used.
+
+Initial qualification used 25 warmups, 500 timed launches, and three repeats:
+
+| Run | Time us | PFLOP/s |
+|---:|---:|---:|
+| 1 | 777.602 | 1.413977 |
+| 2 | 777.614 | 1.413956 |
+| 3 | 778.111 | 1.413052 |
+
+Median: `777.614 us`, `1.413956 PFLOP/s`.
+
+The pre-pipeline baseline used 25 warmups and 1,000 timed launches:
 
 Seven runs used 25 warmups and 1,000 timed launches:
 
@@ -26,9 +37,9 @@ Seven runs used 25 warmups and 1,000 timed launches:
 | 6 | 819.039 | 1.342441 |
 | 7 | 818.454 | 1.343401 |
 
-Median: `818.454 us`, `1.343401 PFLOP/s`. A same-device five-run eight-wave
-check measured `785.121 us`, `1.400436 PFLOP/s`. Four-wave is `33.333 us`,
-or 4.246%, slower.
+Median: `818.454 us`, `1.343401 PFLOP/s`. Phased readiness removes `40.840 us`,
+or 4.990%, and raises throughput by 5.252%. A same-device five-run eight-wave
+check measured `785.121 us`, `1.400436 PFLOP/s` before the scheduler changes.
 
 The `M=N=K=512` runtime check passed with `max_abs_diff=0`.
 
@@ -121,7 +132,7 @@ skips four waves on a four-SIMD CU, and its arrive/wait split would still retain
 one full-buffer readiness point. hipBLASLt needs phased data readiness, not an
 arrive/wait split.
 
-Required implementation shape:
+Implemented topology:
 
 - Partition next-tile A/B DMA and LDS reads into explicit subpanel phases.
 - Join only each phase's DMA tokens before its barrier and fragment reads.
@@ -129,9 +140,22 @@ Required implementation shape:
 - Let the greedy scheduler/model place phases. No post-greedy cycle veto.
 - Model direct-to-LDS issue pressure so legal phases spread before FIFO fill.
 
-The padded `0x1080` M0 cadence remains a second experiment after phased
-readiness. Current `0x1000` layout and one-barrier token topology change at the
-same time, so ATT cannot assign the full load-stall delta to either one alone.
+Each K64 loop iteration consumes two K32 subpanels. A/B K0 reads feed the first
+MFMA phase. A/B K1 reads overlap its middle. Thirteen next-tile DMA requests
+issue before the readiness barrier; three B1 requests issue after it. Next-tile
+K0 reads overlap the second MFMA phase. Bounded steady-state scheduling previews
+four loop iterations and smooths LDS-DMA issue at the modeled queue service
+rate.
+
+Generated loop barriers follow MFMAs 24 and 49. The third IR barrier drains 13
+previous-iteration requests before the late B1 cohort and next-tile reads;
+token-only barrier contraction removes its redundant ISA barrier while keeping
+wait and token order. hipBLASLt 2530 remains `44.759 us`, or 6.11%, faster than
+the initial phased result.
+
+The padded `0x1040` M0 cadence remains a separate experiment. Current `0x1000`
+layout and phased token topology no longer change together, so a padding A/B can
+isolate its contribution.
 
 ## Configuration
 
@@ -183,10 +207,9 @@ Combined register pressure fits the one-wave-per-SIMD target. Bank placement
 is not an acceptance constraint.
 
 hipBLASLt's four-wave reference still differs structurally: its direct-to-LDS
-M0 cadence advances by `0x1080` and allocates 130 KiB LDS. Wave advances by
+M0 cadence advances by `0x1040` and allocates 130 KiB LDS. Wave advances by
 `0x1000` in an unpadded 128 KiB layout. Reproducing that padded/swizzled LDS
-mapping is separate work; delay tuning around the current layout did not close
-the gap.
+mapping is separate work.
 
 ## Artifacts
 
