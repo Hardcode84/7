@@ -823,32 +823,34 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[38:39], v16 offset:6048
 		buffer_load_dwordx4 v5, s[28:31], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, m0, 0x1080
+		s_nop 0
+		buffer_load_dwordx4 v18, s[28:31], 0 offen lds
 		s_add_u32 s32, s4, s13
 		s_addc_u32 s33, s5, 0
-		buffer_load_dwordx4 v18, s[28:31], 0 offen lds
 		s_add_i32 m0, s16, 0x2100
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], a[64:67], a[0:3], v[200:203], v38, v50 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v20, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x3180
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], a[72:75], a[0:3], v[204:207], v38, v50 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v21, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x4200
+		s_add_i32 m0, s16, 0x3180
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], a[72:75], a[8:11], v[220:223], v38, v50 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v19, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x5280
+		buffer_load_dwordx4 v21, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], a[64:67], a[8:11], v[216:219], v38, v50 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v23, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x6300
+		s_add_i32 m0, s16, 0x4200
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], a[68:71], a[4:7], v[200:203], v38, v50 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v24, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x7380
+		buffer_load_dwordx4 v19, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], a[76:79], a[4:7], v[204:207], v38, v50 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x5280
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], a[76:79], a[12:15], v[220:223], v38, v50 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v23, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], a[68:71], a[12:15], v[216:219], v38, v50 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x6300
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], a[80:83], a[0:3], v[208:211], v39, v50 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v24, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], a[88:91], a[0:3], v[212:215], v39, v50 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x7380
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], a[88:91], a[8:11], v[228:231], v39, v50 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], a[80:83], a[8:11], v[224:227], v39, v50 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], a[84:87], a[4:7], v[208:211], v39, v50 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -869,16 +871,20 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], a[64:67], a[24:27], a[100:103], v38, v51 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], a[68:71], a[20:23], v[232:235], v38, v51 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v22, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x107e0
-		s_nop 0
-		buffer_load_dwordx4 v27, s[32:35], 0 offen lds
-		s_add_i32 m0, s16, 0x11860
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[96:99], a[76:79], a[20:23], a[96:99], v38, v51 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x107e0
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], a[76:79], a[28:31], a[104:107], v38, v51 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v27, s[32:35], 0 offen lds
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], a[68:71], a[28:31], a[100:103], v38, v51 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x11860
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[64:67], a[32:35], a[108:111], v38, v68 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v32, s[32:35], 0 offen lds
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[72:75], a[32:35], a[112:115], v38, v68 op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, s16, 0x128e0
 		s_add_u32 s40, s10, s19
 		s_addc_u32 s41, s11, 0
 		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[72:75], a[40:43], a[128:131], v38, v68 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_add_i32 m0, s16, 0x13960
 		s_add_u32 s36, s8, s18
 		s_addc_u32 s37, s9, 0
@@ -887,11 +893,6 @@ _a4w4_kernel:
 		buffer_load_dword v49, v47, s[40:43], 0 offen
 		s_waitcnt vmcnt(21)
 		s_barrier
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], a[76:79], a[28:31], a[104:107], v38, v51 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], a[68:71], a[28:31], a[100:103], v38, v51 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[64:67], a[32:35], a[108:111], v38, v68 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[72:75], a[32:35], a[112:115], v38, v68 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[72:75], a[40:43], a[128:131], v38, v68 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[124:127], a[64:67], a[40:43], a[124:127], v38, v68 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[68:71], a[36:39], a[108:111], v38, v68 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[76:79], a[36:39], a[112:115], v38, v68 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
@@ -958,20 +959,22 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[66:67], v16 offset:6048
 		buffer_load_dwordx4 v53, s[32:35], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, s16, 0x19c40
 		s_nop 0
 		buffer_load_dwordx4 v55, s[32:35], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, s16, 0x1acc0
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[72:75], a[64:67], a[0:3], v[72:75], v66, v38 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v56, s[32:35], 0 offen lds
-		s_add_i32 m0, s16, 0x1bd40
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[76:79], a[72:75], a[0:3], v[76:79], v66, v38 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x1bd40
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[92:95], a[72:75], a[8:11], v[92:95], v66, v38 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v54, s[32:35], 0 offen lds
 		buffer_load_dword v58, v57, s[40:43], 0 offen
 		s_waitcnt vmcnt(20)
 		s_barrier
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[92:95], a[72:75], a[8:11], v[92:95], v66, v38 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[88:91], a[64:67], a[8:11], v[88:91], v66, v38 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[72:75], a[68:71], a[4:7], v[72:75], v66, v38 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[76:79], a[76:79], a[4:7], v[76:79], v66, v38 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
@@ -1048,31 +1051,33 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[252:253], v16 offset:6048
 		buffer_load_dwordx4 v59, s[28:31], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, s16, 0x9480
 		s_nop 0
 		buffer_load_dwordx4 v60, s[28:31], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, s16, 0xa500
 		s_waitcnt lgkmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], a[64:67], a[0:3], v[200:203], v252, v38 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v61, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0xb580
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], a[72:75], a[0:3], v[204:207], v252, v38 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v62, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0xc600
+		s_add_i32 m0, s16, 0xb580
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], a[72:75], a[8:11], v[220:223], v252, v38 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v63, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0xd680
+		buffer_load_dwordx4 v62, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], a[64:67], a[8:11], v[216:219], v252, v38 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v64, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0xe700
+		s_add_i32 m0, s16, 0xc600
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], a[68:71], a[4:7], v[200:203], v252, v38 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v65, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0xf780
+		buffer_load_dwordx4 v63, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], a[76:79], a[4:7], v[204:207], v252, v38 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0xd680
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[220:223], a[76:79], a[12:15], v[220:223], v252, v38 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v64, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[216:219], a[68:71], a[12:15], v[216:219], v252, v38 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0xe700
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], a[80:83], a[0:3], v[208:211], v253, v38 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v65, s[28:31], 0 offen lds
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[68:71], a[0:3], v[212:215], v253, v38 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0xf780
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[228:231], v[68:71], a[8:11], v[228:231], v253, v38 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[224:227], a[80:83], a[8:11], v[224:227], v253, v38 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], a[84:87], a[4:7], v[208:211], v253, v38 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -1094,28 +1099,26 @@ _a4w4_kernel:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], a[68:71], a[20:23], v[232:235], v252, v39 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[96:99], a[76:79], a[20:23], a[96:99], v252, v39 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v2, s[28:31], 0 offen lds
-		s_add_i32 m0, s16, 0x149e0
-		s_add_i32 s19, s19, s15
-		buffer_load_dwordx4 v4, s[32:35], 0 offen lds
-		s_add_i32 m0, s16, 0x15a60
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107], a[76:79], a[28:31], a[104:107], v252, v39 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		buffer_load_dwordx4 v9, s[32:35], 0 offen lds
-		s_add_i32 m0, s16, 0x16ae0
+		s_add_i32 m0, s16, 0x149e0
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103], a[68:71], a[28:31], a[100:103], v252, v39 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v4, s[32:35], 0 offen lds
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[64:67], a[32:35], a[108:111], v252, v50 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x15a60
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[72:75], a[32:35], a[112:115], v252, v50 op_sel_hi:[1,0,0] cbsz:4 blgp:4
+		buffer_load_dwordx4 v9, s[32:35], 0 offen lds
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[72:75], a[40:43], a[128:131], v252, v50 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x16ae0
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[124:127], a[64:67], a[40:43], a[124:127], v252, v50 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v11, s[32:35], 0 offen lds
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[68:71], a[36:39], a[108:111], v252, v50 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, s16, 0x17b60
-		s_add_i32 s23, s23, 2
+		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[76:79], a[36:39], a[112:115], v252, v50 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		buffer_load_dwordx4 v7, s[32:35], 0 offen lds
 		buffer_load_dwordx2 v[66:67], v34, s[36:39], 0 offen
 		buffer_load_dword v37, v35, s[40:43], 0 offen
 		s_waitcnt vmcnt(21)
 		s_barrier
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[64:67], a[32:35], a[108:111], v252, v50 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[72:75], a[32:35], a[112:115], v252, v50 op_sel_hi:[1,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[72:75], a[40:43], a[128:131], v252, v50 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[124:127], a[64:67], a[40:43], a[124:127], v252, v50 op_sel_hi:[0,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111], a[68:71], a[36:39], a[108:111], v252, v50 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115], a[76:79], a[36:39], a[112:115], v252, v50 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], a[76:79], a[44:47], a[128:131], v252, v50 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[124:127], a[68:71], a[44:47], a[124:127], v252, v50 op_sel:[1,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[116:119], a[80:83], a[32:35], a[116:119], v253, v50 op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -1179,12 +1182,15 @@ _a4w4_kernel:
 		s_barrier
 		ds_read_b64_tr_b8 v[38:39], v16 offset:6048
 		buffer_load_dwordx4 v42, s[32:35], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, s16, 0x1de40
-		s_add_i32 s18, s18, s14
+		s_add_i32 s23, s23, 2
 		buffer_load_dwordx4 v26, s[32:35], 0 offen lds
+		s_add_i32 s19, s19, s15
 		s_add_i32 m0, s16, 0x1eec0
-		s_add_i32 s13, s13, 0x100
+		s_add_i32 s18, s18, s14
 		buffer_load_dwordx4 v28, s[32:35], 0 offen lds
+		s_add_i32 s13, s13, 0x100
 		s_add_i32 m0, s16, 0x1ff40
 		s_add_i32 s1, s1, 0x100
 		buffer_load_dwordx4 v25, s[32:35], 0 offen lds

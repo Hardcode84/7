@@ -811,14 +811,14 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 m0, s71, 0xe6e0
 		v_cndmask_b32_e64 v49, v32, v49, s[38:39]
 		v_add_u32_e32 v74, s61, v73
-		v_cndmask_b32_e64 v74, v32, v74, s[40:41]
 		s_mov_b32 s74, 0
 		v_add_u32_e32 v76, v39, v75
 		s_mov_b32 s75, 0
 		buffer_load_dwordx4 v49, s[48:51], 0 offen lds
-		s_add_i32 m0, s71, 0x107e0
 		v_cndmask_b32_e64 v49, v71, v72, s[76:77]
-		buffer_load_dwordx4 v74, s[48:51], 0 offen lds
+		s_add_i32 m0, s71, 0x107e0
+		v_cndmask_b32_e64 v71, v32, v74, s[40:41]
+		buffer_load_dwordx4 v71, s[48:51], 0 offen lds
 		s_waitcnt vmcnt(3)
 		s_barrier
 		ds_read_b128 v[80:83], v38
