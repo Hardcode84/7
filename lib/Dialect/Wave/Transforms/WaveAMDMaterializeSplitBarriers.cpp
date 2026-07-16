@@ -340,11 +340,20 @@ collectM0ValuesShiftedAtDef(ArrayRef<Operation *> ldsOps) {
 }
 
 static Value findM0ChainRoot(Value m0) {
-  while (waveamdmachine::SAddM0I32Op add =
-             m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
-    if (!isa<waveamdmachine::M0Type>(add.getLhs().getType()))
-      break;
-    m0 = add.getLhs();
+  while (true) {
+    if (waveamdmachine::SAddM0I32Op add =
+            m0.getDefiningOp<waveamdmachine::SAddM0I32Op>()) {
+      if (!isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+        break;
+      m0 = add.getLhs();
+      continue;
+    }
+    if (waveamdmachine::DmaIssueDelayOp delay =
+            m0.getDefiningOp<waveamdmachine::DmaIssueDelayOp>()) {
+      m0 = delay.getM0();
+      continue;
+    }
+    break;
   }
   return m0;
 }
@@ -362,6 +371,13 @@ static bool m0ChainOnlyAddressesLDS(Value m0, DenseSet<Value> &visited) {
     Operation *owner = use.getOwner();
     if (isLDSAddressUser(owner))
       continue;
+    if (waveamdmachine::DmaIssueDelayOp delay =
+            dyn_cast<waveamdmachine::DmaIssueDelayOp>(owner)) {
+      if (use.get() != delay.getM0() ||
+          !m0ChainOnlyAddressesLDS(delay.getDelayedM0(), visited))
+        return false;
+      continue;
+    }
     waveamdmachine::SAddM0I32Op add =
         dyn_cast<waveamdmachine::SAddM0I32Op>(owner);
     if (!add || use.getOperandNumber() != 0 ||
@@ -376,6 +392,9 @@ static DenseSet<Value> collectM0ChainRoots(func::FuncOp func) {
   func.walk([&](waveamdmachine::SAddM0I32Op add) {
     if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
       roots.insert(findM0ChainRoot(add.getM0()));
+  });
+  func.walk([&](waveamdmachine::DmaIssueDelayOp delay) {
+    roots.insert(findM0ChainRoot(delay.getDelayedM0()));
   });
   return roots;
 }

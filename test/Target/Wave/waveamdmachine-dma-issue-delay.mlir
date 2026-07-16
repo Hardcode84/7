@@ -33,4 +33,14 @@ func.func @dma_issue_delay_unconditional(%dep: !waveamdmachine.mem.token,
   return
 }
 
+// CHECK-LABEL: restore_vcc_wave64:
+// CHECK: s_mov_b32 vcc_lo,
+// CHECK-NEXT: s_mov_b32 vcc_hi, 0
+func.func @restore_vcc_wave64(%flag: !waveamdmachine.reg<sgpr, 1>)
+    attributes {wave.kernel} {
+  %restored = waveamdmachine.s_mov_vcc_b32 %flag
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<vcc, 1>
+  return
+}
+
 }

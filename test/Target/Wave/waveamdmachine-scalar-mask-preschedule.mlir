@@ -1,4 +1,5 @@
 // RUN: wave-opt %s --waveamd-scalar-mask-preschedule | FileCheck %s
+// RUN: wave-opt %s --waveamd-scalar-mask-preschedule='dma-issue-only' | FileCheck %s --check-prefix=DMA
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-LABEL: func.func @sinks_vcc_compare_masks
@@ -168,5 +169,48 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
            !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
     return %pick : !waveamdmachine.reg<sgpr, 1>
+  }
+
+  // DMA-LABEL: func.func @dma_issue_only_sinks_selected_function
+  // DMA: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32
+  // DMA-NEXT: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32
+  // DMA-NEXT: waveamdmachine.s_cselect_b32 [[CMP]], [[SUM]],
+  func.func @dma_issue_only_sinks_selected_function(
+      %a: !waveamdmachine.reg<sgpr, 1>,
+      %b: !waveamdmachine.reg<sgpr, 1>,
+      %dep: !waveamdmachine.mem.token,
+      %m0: !waveamdmachine.m0) {
+    %cmp = waveamdmachine.s_cmp_eq_u32 %a, %b
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+    %sum, %sum_scc = waveamdmachine.s_add_i32 %a, %b
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %pick = waveamdmachine.s_cselect_b32 %cmp, %sum, %a
+        : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
+           !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    %delayed = waveamdmachine.dma_issue_delay %dep, %m0 {cycles = 1 : i64}
+        : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+          -> !waveamdmachine.m0
+    return
+  }
+
+  // DMA-LABEL: func.func @dma_issue_only_leaves_other_function
+  // DMA: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32
+  // DMA-NEXT: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32
+  // DMA-NEXT: waveamdmachine.s_cselect_b32 [[CMP]], [[SUM]],
+  func.func @dma_issue_only_leaves_other_function(
+      %a: !waveamdmachine.reg<sgpr, 1>,
+      %b: !waveamdmachine.reg<sgpr, 1>) {
+    %cmp = waveamdmachine.s_cmp_eq_u32 %a, %b
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+    %sum, %sum_scc = waveamdmachine.s_add_i32 %a, %b
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    %pick = waveamdmachine.s_cselect_b32 %cmp, %sum, %a
+        : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
+           !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    return
   }
 }

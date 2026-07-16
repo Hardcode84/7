@@ -593,6 +593,64 @@ static bool canSkipLoopEntryCheck(WaveAMDMachineSelector &S, scf::ForOp op) {
   return (tripCount && !tripCount->isZero()) || rangeProvesLoopEntry(S, op);
 }
 
+static bool needsDmaIssueSkipCondition(scf::ForOp loop) {
+  bool needed = false;
+  loop.walk([&](waveamd::DmaLoadLdsOp dma) {
+    if (dma->getParentOfType<scf::ForOp>() == loop &&
+        dma->hasAttr("issue_delay_skip_thread_threshold"))
+      needed = true;
+  });
+  return needed;
+}
+
+static FailureOr<Value> createDmaIssueSkipCondition(WaveAMDMachineSelector &S,
+                                                    scf::ForOp loop) {
+  if (!S.dmaIssueSkipFlag)
+    return loop.emitError("DMA issue skip condition lacks cohort flag");
+  return waveamdmachine::SMovVccB32Op::create(
+             S.builder, loop.getLoc(), getVCCType(S.builder.getContext()),
+             S.dmaIssueSkipFlag)
+      .getResult();
+}
+
+static FailureOr<Value> appendDmaIssueSkipInit(WaveAMDMachineSelector &S,
+                                               scf::ForOp loop,
+                                               SmallVectorImpl<Value> &inits) {
+  if (!needsDmaIssueSkipCondition(loop))
+    return Value{};
+  FailureOr<Value> condition = createDmaIssueSkipCondition(S, loop);
+  if (failed(condition))
+    return failure();
+  inits.push_back(*condition);
+  return *condition;
+}
+
+static FailureOr<Value>
+selectLoopBody(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
+               ArrayRef<CarrySnapshot> snapshots,
+               ArrayRef<StridedBaseCarry> stridedBaseGroups,
+               Value skipCondition) {
+  S.builder.setInsertionPointToStart(&loopBody);
+  Value savedSkipCondition = S.dmaIssueSkipCondition;
+  if (skipCondition)
+    S.dmaIssueSkipCondition = loopBody.getArguments().back();
+  // Strided pointers: globals carry bases; buffers use IV-derived soffset.
+  rebindStridedPointerCarries(S, op, loopBody, snapshots, stridedBaseGroups);
+  LogicalResult result = selectScfBody(S, op);
+  Value bodySkipCondition = S.dmaIssueSkipCondition;
+  S.dmaIssueSkipCondition = savedSkipCondition;
+  if (failed(result))
+    return failure();
+  return bodySkipCondition;
+}
+
+static void appendDmaIssueSkipCarry(Value skipCondition,
+                                    Value bodySkipCondition,
+                                    SmallVectorImpl<Value> &carries) {
+  if (skipCondition)
+    carries.push_back(bodySkipCondition);
+}
+
 } // namespace
 
 // Wide bounds force wide IV carry; otherwise IV wraps before wide compare.
@@ -624,15 +682,17 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   if (!canSkipLoopEntryCheck(S, op))
     entryCond = createLoopLtCmp(S, loc, lower, upper);
 
+  FailureOr<Value> skipCondition = appendDmaIssueSkipInit(S, op, inits);
+  if (failed(skipCondition))
+    return failure();
+
   Operation *loop = buildUniformLoopOp(S, loc, entryCond, inits);
   Block &loopBody = loop->getRegion(0).front();
   bindLoopBodyArgs(S, op, loopBody, snapshots, stridedBaseGroups);
 
-  S.builder.setInsertionPointToStart(&loopBody);
-  // Strided pointers: globals use carried bases; buffers use IV-derived
-  // soffset.
-  rebindStridedPointerCarries(S, op, loopBody, snapshots, stridedBaseGroups);
-  if (failed(selectScfBody(S, op)))
+  FailureOr<Value> bodySkipCondition = selectLoopBody(
+      S, op, loopBody, snapshots, stridedBaseGroups, *skipCondition);
+  if (failed(bodySkipCondition))
     return failure();
 
   Value nextIv =
@@ -643,6 +703,7 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   if (failed(collectYieldCarries(S, yield, snapshots, carryOperands)))
     return failure();
   collectStridedBaseCarries(S, loc, stridedBaseGroups, carryOperands);
+  appendDmaIssueSkipCarry(*skipCondition, *bodySkipCondition, carryOperands);
 
   Value backCond = createLoopLtCmp(S, loc, nextIv, upper);
   waveamdmachine::ContinueIfOp::create(S.builder, loc, backCond, carryOperands);

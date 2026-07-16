@@ -545,6 +545,10 @@ def WaveAMDScalarMaskPreschedule
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"
   ];
+  let options = [
+    Option<"dmaIssueOnly", "dma-issue-only", "bool", "false",
+           "Restrict sinking to functions with DMA issue delays">
+  ];
 }
 
 def WaveAMDSplitBarriers

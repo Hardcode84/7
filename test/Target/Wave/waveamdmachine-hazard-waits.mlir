@@ -1895,3 +1895,30 @@ func.func @gfx950_cmpx_to_permlane32_delay(
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @dma_issue_edge_does_not_wait_for_completion
+// CHECK: [[TOKEN:%.*]] = waveamdmachine.global_load_lds_b128
+// CHECK-NOT: waveamdmachine.s_waitcnt
+// CHECK: waveamdmachine.dma_issue_delay [[TOKEN]],
+func.func @dma_issue_edge_does_not_wait_for_completion(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %m0: !waveamdmachine.m0,
+    %dep: !waveamdmachine.mem.token) {
+  %token = waveamdmachine.global_load_lds_b128
+      %off, %base, %m0 after %dep {waveamdmachine.dma_issue_timing}
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %delayed = waveamdmachine.dma_issue_delay %token, %m0
+      {cycles = 17 : i64}
+      : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+        -> !waveamdmachine.m0
+  return
+}
+
+}

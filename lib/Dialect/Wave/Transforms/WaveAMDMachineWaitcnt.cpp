@@ -645,6 +645,8 @@ static WaitRequirement computeRequirement(Operation *op,
   for (OpOperand &operand : op->getOpOperands()) {
     if (isD16LowPreservedOperand(operand))
       continue;
+    if (isMemToken(operand.get()) && isa<waveamdmachine::DmaIssueDelayOp>(op))
+      continue;
     // Issuer `after` tokens order issue. Completion waits stay explicit.
     if (issuer && isMemToken(operand.get())) {
       requireIssuerToken(req, operand.get(), state, op);

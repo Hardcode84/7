@@ -298,11 +298,19 @@ public:
   DenseMap<Value, bool> pointerBuffers;
   DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
       slotFitsU32Cache;
+  PointerOffset lastDmaDstOffset;
+  std::optional<int64_t> dmaIssueSkipThreadThreshold;
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
+  Value lastDmaM0;
+  Value lastDmaToken;
+  Value lastDmaDstBase;
+  Value dmaIssueSkipFlag;
+  Value dmaIssueSkipCondition;
   std::optional<unsigned> targetIsaMajor;
   unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
+  bool dmaIssueTimingEnabled = false;
   bool packedWorkitemIds = false;
 
   // ---- address-planning helpers -----------------------------------------

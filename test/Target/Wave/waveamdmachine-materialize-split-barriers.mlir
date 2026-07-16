@@ -288,3 +288,58 @@ module {
     return
   }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @dynamic_delayed_m0_chain_shift(
+// CHECK-SAME: wave.dynamic_lds_size = 1024 : i64
+// CHECK-SAME: wave.lds_size = 16 : i64
+// CHECK: [[BASE:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+// CHECK: [[SIXTEEN:%.*]] = waveamdmachine.imm 16
+// CHECK-NEXT: [[M0:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[BASE]], [[SIXTEEN]]
+// CHECK: [[DMA0:%.*]] = waveamdmachine.buffer_load_lds_b32 {{.*}}, [[M0]]
+// CHECK-NEXT: [[M1:%.*]], {{%.*}} = waveamdmachine.s_add_m0_i32 [[M0]], {{%.*}}
+// CHECK-NEXT: [[DELAYED:%.*]] = waveamdmachine.dma_issue_delay [[DMA0]], [[M1]]
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b32 {{.*}}, [[DELAYED]] after [[DMA0]]
+func.func @dynamic_delayed_m0_chain_shift()
+    attributes {wave.kernel, wave.dynamic_lds_size = 1024 : i64,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                wave.waves_per_workgroup = 4 : i64} {
+  %state = waveamdmachine.barrier_init : !waveamdmachine.barrier
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+  %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+  %addr = waveamdmachine.v_workitem_id_x
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %step = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %dma0 = waveamdmachine.buffer_load_lds_b32
+      %addr, %desc, %zero, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %m1, %unused = waveamdmachine.s_add_m0_i32 %m0, %step
+      : (!waveamdmachine.m0, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %delayed = waveamdmachine.dma_issue_delay %dma0, %m1 {cycles = 17 : i64}
+      : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+        -> !waveamdmachine.m0
+  %dma1 = waveamdmachine.buffer_load_lds_b32
+      %addr, %desc, %zero, %delayed after %dma0
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %ticket, %arrived = waveamdmachine.barrier_arrive %state after %dma1
+      : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %ready = waveamdmachine.barrier_wait %state, %ticket after %arrived
+      : (!waveamdmachine.barrier, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+}

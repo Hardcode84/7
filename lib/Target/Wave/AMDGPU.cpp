@@ -1732,6 +1732,8 @@ private:
       return llvm::AMDGPU::SGPR_NULL;
     if (name == "vcc_lo")
       return llvm::AMDGPU::VCC_LO;
+    if (name == "vcc_hi")
+      return llvm::AMDGPU::VCC_HI;
     llvm_unreachable("unknown physical register name");
   }
 
@@ -3363,11 +3365,15 @@ private:
                      llvm::MCOperand::createReg(namedPhysReg("vcc_lo"))});
     }
     if (isa<waveamdmachine::SMovVccB32Op>(op)) {
-      if (wavefrontSize != 32)
-        return op.emitError("s_mov_vcc_b32 supports wave32 only");
+      if (failed(emitMC(sMovB32(),
+                        {llvm::MCOperand::createReg(namedPhysReg("vcc_lo")),
+                         toMCOperand(op.getOperand(0))})))
+        return failure();
+      if (wavefrontSize == 32)
+        return success();
       return emitMC(sMovB32(),
-                    {llvm::MCOperand::createReg(namedPhysReg("vcc_lo")),
-                     toMCOperand(op.getOperand(0))});
+                    {llvm::MCOperand::createReg(namedPhysReg("vcc_hi")),
+                     llvm::MCOperand::createImm(0)});
     }
     if (isa<waveamdmachine::SCBranchScc0Op>(op))
       return emitMC(sCbranchScc0(),

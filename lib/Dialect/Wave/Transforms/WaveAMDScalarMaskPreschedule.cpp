@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "WaveAMDHardwareResources.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -174,12 +175,33 @@ static void sinkScalarMaskClosure(Operation *anchor) {
     op->moveBefore(anchor);
 }
 
+static bool hasDmaIssueDelay(func::FuncOp func) {
+  return func
+      .walk([](waveamdmachine::DmaIssueDelayOp) {
+        return WalkResult::interrupt();
+      })
+      .wasInterrupted();
+}
+
+static void collectOps(Operation *root, SmallVectorImpl<Operation *> &ops) {
+  root->walk([&](Operation *op) { ops.push_back(op); });
+}
+
 struct WaveAMDScalarMaskPreschedulePass
     : public wave::impl::WaveAMDScalarMaskPrescheduleBase<
           WaveAMDScalarMaskPreschedulePass> {
+  using WaveAMDScalarMaskPrescheduleBase::WaveAMDScalarMaskPrescheduleBase;
+
   void runOnOperation() override {
     SmallVector<Operation *> ops;
-    getOperation()->walk([&](Operation *op) { ops.push_back(op); });
+    if (dmaIssueOnly) {
+      getOperation()->walk([&](func::FuncOp func) {
+        if (hasDmaIssueDelay(func))
+          collectOps(func, ops);
+      });
+    } else {
+      collectOps(getOperation(), ops);
+    }
     for (Operation *op : ops)
       sinkScalarMaskClosure(op);
     for (Operation *op : ops)

@@ -89,6 +89,43 @@ createKernargPreload(OpBuilder &builder, Location loc,
                                                   dwordOffset);
 }
 
+static bool isUniformLoopInit(OpOperand &use) {
+  waveamdmachine::UniformLoopOp loop =
+      dyn_cast<waveamdmachine::UniformLoopOp>(use.getOwner());
+  if (!loop)
+    return false;
+  unsigned initBegin = loop.getEntryCond() ? 1 : 0;
+  return use.getOperandNumber() >= initBegin;
+}
+
+static Value createVirtualSGPRCopy(OpBuilder &builder, Location loc,
+                                   waveamdmachine::RegType type, Value source) {
+  if (type.getWidth() == 1)
+    return waveamdmachine::SMovB32ValueOp::create(builder, loc, type, source);
+  return waveamdmachine::SMovB32TupleOp::create(builder, loc, type, source);
+}
+
+static bool hasDmaIssueDelay(func::FuncOp func) {
+  return func
+      .walk([](waveamdmachine::DmaIssueDelayOp) {
+        return WalkResult::interrupt();
+      })
+      .wasInterrupted();
+}
+
+static void replaceArgUses(Operation &op, waveamdmachine::RegType regType,
+                           Value loaded, OpBuilder &builder,
+                           bool copyLoopInits) {
+  Value arg = op.getResult(0);
+  Value loopInit = loaded;
+  if (copyLoopInits && loaded.getType() != arg.getType() &&
+      llvm::any_of(arg.getUses(), isUniformLoopInit))
+    loopInit = createVirtualSGPRCopy(builder, op.getLoc(), regType, loaded);
+  for (OpOperand &use : llvm::make_early_inc_range(arg.getUses()))
+    use.set(isUniformLoopInit(use) ? loopInit : loaded);
+  op.erase();
+}
+
 struct WaveAMDABILoweringPass
     : public wave::impl::WaveAMDABILoweringBase<WaveAMDABILoweringPass> {
   void runOnOperation() override {
@@ -145,7 +182,7 @@ private:
                                   ArrayRef<waveamd::KernargSlot> layout,
                                   TypeRange argTypes,
                                   const wave::WaveAMDKernelEntryRegs &entryRegs,
-                                  OpBuilder &builder) {
+                                  OpBuilder &builder, bool copyLoopInits) {
     auto info = validateArgOp(op);
     if (failed(info))
       return failure();
@@ -184,8 +221,7 @@ private:
           createKernArgLoad(builder, op.getLoc(), op.getResult(0).getType(),
                             offsetImm, regType.getWidth(), base);
     }
-    op.getResult(0).replaceAllUsesWith(loaded);
-    op.erase();
+    replaceArgUses(op, regType, loaded, builder, copyLoopInits);
     return success();
   }
 
@@ -199,10 +235,12 @@ private:
       return failure();
     wave::WaveAMDKernelEntryRegs entryRegs =
         wave::getWaveAMDKernelEntryRegs(func);
+    bool copyLoopInits = hasDmaIssueDelay(func);
     for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
       if (!isa<waveamdmachine::ArgOp>(op))
         continue;
-      if (failed(lowerArgOp(op, layout, argTypes, entryRegs, builder)))
+      if (failed(lowerArgOp(op, layout, argTypes, entryRegs, builder,
+                            copyLoopInits)))
         return failure();
     }
     unsigned kernargSize = waveamd::getKernargSegmentSize(argTypes);

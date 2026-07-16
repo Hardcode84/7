@@ -510,6 +510,34 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   return success();
 }
 
+struct DmaIssueDelayConfig {
+  std::optional<int64_t> skipThreadThreshold;
+  bool enabled = false;
+};
+
+static FailureOr<DmaIssueDelayConfig>
+getDmaIssueDelayConfig(func::FuncOp func) {
+  DmaIssueDelayConfig config;
+  WalkResult walk = func.walk([&](waveamd::DmaLoadLdsOp op) {
+    if (op->hasAttr("issue_delay_cycles"))
+      config.enabled = true;
+    IntegerAttr threshold =
+        op->getAttrOfType<IntegerAttr>("issue_delay_skip_thread_threshold");
+    if (!threshold)
+      return WalkResult::advance();
+    if (config.skipThreadThreshold &&
+        *config.skipThreadThreshold != threshold.getInt()) {
+      op.emitOpError("all DMA issue delays must use one skip threshold");
+      return WalkResult::interrupt();
+    }
+    config.skipThreadThreshold = threshold.getInt();
+    return WalkResult::advance();
+  });
+  if (walk.wasInterrupted())
+    return failure();
+  return config;
+}
+
 static void eraseDeadFoldedMmaAccumulatorMaterializations(
     ArrayRef<Operation *> materializations) {
   SmallPtrSet<Operation *, 8> seen;
@@ -524,6 +552,11 @@ static void eraseDeadFoldedMmaAccumulatorMaterializations(
 LogicalResult WaveAMDMachineSelector::run() {
   if (failed(validateMachineSelectionTarget(*this)))
     return failure();
+  FailureOr<DmaIssueDelayConfig> delayConfig = getDmaIssueDelayConfig(func);
+  if (failed(delayConfig))
+    return failure();
+  dmaIssueTimingEnabled = delayConfig->enabled;
+  dmaIssueSkipThreadThreshold = delayConfig->skipThreadThreshold;
 
   Block &block = func.getBody().front();
   builder.setInsertionPointToStart(&block);
@@ -3035,6 +3068,39 @@ LogicalResult WaveAMDMachineSelector::selectWorkgroupId(WorkgroupIdOp op) {
   return success();
 }
 
+static LogicalResult materializeDmaIssueSkipFlag(WaveAMDMachineSelector &S,
+                                                 WorkitemIdOp op, unsigned axis,
+                                                 Value result) {
+  if (axis != 0 || !S.dmaIssueSkipThreadThreshold || S.dmaIssueSkipFlag)
+    return success();
+  FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
+      S.func, "waveamd-machine-selector");
+  if (failed(wavefrontSize))
+    return failure();
+  int64_t threshold = *S.dmaIssueSkipThreadThreshold;
+  if (threshold <= 0 || threshold % *wavefrontSize != 0)
+    return op.emitOpError("DMA issue skip threshold must be wave-aligned");
+  Value firstThread = waveamdmachine::VReadfirstlaneB32Op::create(
+      S.builder, op.getLoc(),
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+      result);
+  waveamdmachine::SLshrB32Op waveId = waveamdmachine::SLshrB32Op::create(
+      S.builder, op.getLoc(),
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+      getSCCType(S.builder.getContext()), firstThread,
+      createImm(S.builder, op.getLoc(), llvm::Log2_32(*wavefrontSize)));
+  Value highCohort = waveamdmachine::SCmpGeU32Op::create(
+      S.builder, op.getLoc(), getSCCType(S.builder.getContext()),
+      waveId.getResult(),
+      createImm(S.builder, op.getLoc(), threshold / *wavefrontSize));
+  S.dmaIssueSkipFlag = waveamdmachine::SCSelectB32Op::create(
+      S.builder, op.getLoc(),
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+      highCohort, createImm(S.builder, op.getLoc(), 1),
+      createImm(S.builder, op.getLoc(), 0));
+  return success();
+}
+
 LogicalResult WaveAMDMachineSelector::selectWorkitemId(WorkitemIdOp op) {
   unsigned axis = op.getAxis();
   if (axis > 2)
@@ -3079,6 +3145,8 @@ LogicalResult WaveAMDMachineSelector::selectWorkitemId(WorkitemIdOp op) {
           builder, op.getLoc(), resultType, raw, offset, width);
     }
   }
+  if (failed(materializeDmaIssueSkipFlag(*this, op, axis, result)))
+    return failure();
   values[op.getResult()] = result;
   eraseIfTopLevel(op);
   return success();
@@ -7285,6 +7353,46 @@ static LogicalResult requireUniformDmaDest(WaveAMDMachineSelector &S,
   return success();
 }
 
+static bool haveSameDmaOffsetBindings(const PointerOffset &lhs,
+                                      const PointerOffset &rhs) {
+  if (lhs.bindings.size() != rhs.bindings.size())
+    return false;
+  return llvm::all_of(lhs.bindings, [&](const PointerOffsetBinding &binding) {
+    return llvm::any_of(rhs.bindings, [&](const PointerOffsetBinding &other) {
+      return samePointerBinding(binding, other);
+    });
+  });
+}
+
+static std::optional<int64_t>
+getConstantDmaDestinationDelta(WaveAMDMachineSelector &S,
+                               const PointerOffset &previous,
+                               const PointerOffset &current) {
+  if (!haveSameDmaOffsetBindings(previous, current))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(S.symbolStore(), 0);
+  if (failed(zero))
+    return std::nullopt;
+  sym::ExprHandle previousExpr = previous.expr ? previous.expr : *zero;
+  sym::ExprHandle currentExpr = current.expr ? current.expr : *zero;
+  FailureOr<sym::ExprHandle> delta = sym::composeExprBinary(
+      S.symbolStore(), currentExpr, sym::ExprBinaryOp::Sub, previousExpr);
+  if (failed(delta))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> expanded =
+      sym::expandExpr(S.symbolStore(), *delta);
+  if (failed(expanded))
+    return std::nullopt;
+  SmallVector<sym::PredHandle> assumptions;
+  llvm::append_range(assumptions, previous.assumptions);
+  llvm::append_range(assumptions, current.assumptions);
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), *expanded, assumptions);
+  if (failed(simplified))
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(*simplified);
+}
+
 static waveamdmachine::AddressFieldSpec
 dmaFallbackStoreSpec(waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() == 4)
@@ -7571,6 +7679,10 @@ static LogicalResult selectDmaLoadLdsAddr64Fallback(
       materializeDmaFallbackLdsStore(S, op, *dst, load->values, load->token);
   if (failed(token))
     return failure();
+  S.lastDmaM0 = {};
+  S.lastDmaToken = {};
+  S.lastDmaDstBase = {};
+  S.lastDmaDstOffset = {};
   S.values[op.getToken()] = *token;
   S.eraseIfTopLevel(op);
   return success();
@@ -7733,7 +7845,63 @@ static Value createDmaLoadLdsMachineOp(WaveAMDMachineSelector &S,
 static FailureOr<Value> materializeDmaLoadLdsM0(WaveAMDMachineSelector &S,
                                                 waveamd::DmaLoadLdsOp op,
                                                 const DmaPointers &ptrs) {
+  Operation *previousDma =
+      S.lastDmaToken ? S.lastDmaToken.getDefiningOp() : nullptr;
+  if (S.lastDmaM0 && previousDma &&
+      previousDma->getBlock() == S.builder.getInsertionBlock() &&
+      S.lastDmaDstBase == ptrs.dstBase) {
+    std::optional<int64_t> delta =
+        getConstantDmaDestinationDelta(S, S.lastDmaDstOffset, ptrs.dstOffset);
+    if (delta && *delta != 0 && llvm::isInt<32>(*delta)) {
+      Value immediate = createImm(S.builder, op.getLoc(), *delta);
+      return waveamdmachine::SAddM0I32Op::create(
+                 S.builder, op.getLoc(),
+                 waveamdmachine::M0Type::get(op.getContext()),
+                 getSCCType(op.getContext()), S.lastDmaM0, immediate)
+          .getM0();
+    }
+  }
   return materializeDmaM0(S, op, ptrs.dstBase, ptrs.dstOffset);
+}
+
+static FailureOr<Value> materializeDmaIssueDelay(WaveAMDMachineSelector &S,
+                                                 waveamd::DmaLoadLdsOp op,
+                                                 Value m0) {
+  IntegerAttr cycles = op->getAttrOfType<IntegerAttr>("issue_delay_cycles");
+  if (!cycles)
+    return m0;
+  if (!S.lastDmaToken)
+    return op.emitOpError("issue delay requires a preceding DMA");
+
+  Value condition;
+  IntegerAttr threshold =
+      op->getAttrOfType<IntegerAttr>("issue_delay_skip_thread_threshold");
+  if (threshold) {
+    if (!S.dmaIssueSkipCondition)
+      return op.emitOpError("issue delay skip condition was not materialized");
+    condition = S.dmaIssueSkipCondition;
+  }
+  IntegerAttr overlap =
+      op->getAttrOfType<IntegerAttr>("issue_delay_overlap_cycles");
+  if (!overlap)
+    overlap = S.builder.getI64IntegerAttr(0);
+  waveamdmachine::DmaIssueDelayOp delay =
+      waveamdmachine::DmaIssueDelayOp::create(
+          S.builder, op.getLoc(), waveamdmachine::M0Type::get(op.getContext()),
+          S.lastDmaToken, m0, condition, cycles, overlap);
+  return delay.getDelayedM0();
+}
+
+static void recordDmaM0(WaveAMDMachineSelector &S, const DmaPointers &ptrs,
+                        Value m0, Value token) {
+  if (!S.dmaIssueTimingEnabled)
+    return;
+  token.getDefiningOp()->setAttr("waveamdmachine.dma_issue_timing",
+                                 S.builder.getUnitAttr());
+  S.lastDmaM0 = m0;
+  S.lastDmaToken = token;
+  S.lastDmaDstBase = ptrs.dstBase;
+  S.lastDmaDstOffset = ptrs.dstOffset;
 }
 
 static void bindDmaLoadLdsToken(WaveAMDMachineSelector &S,
@@ -7758,8 +7926,13 @@ trySelectBufferDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   FailureOr<Value> m0 = materializeDmaLoadLdsM0(S, op, ptrs);
   if (failed(m0))
     return failure();
-  return std::optional<Value>{
-      createDmaLoadLdsMachineOp(S, op, **selectedSource, *m0, isBuffer)};
+  m0 = materializeDmaIssueDelay(S, op, *m0);
+  if (failed(m0))
+    return failure();
+  Value token =
+      createDmaLoadLdsMachineOp(S, op, **selectedSource, *m0, isBuffer);
+  recordDmaM0(S, ptrs, *m0, token);
+  return std::optional<Value>{token};
 }
 
 static LogicalResult
@@ -7770,12 +7943,16 @@ selectPlannedDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   FailureOr<Value> m0 = materializeDmaLoadLdsM0(S, op, ptrs);
   if (failed(m0))
     return failure();
+  m0 = materializeDmaIssueDelay(S, op, *m0);
+  if (failed(m0))
+    return failure();
   FailureOr<DmaSourceAddress> source = materializeDmaSourceAddress(
       S, op, ptrs.srcBase, sourcePlan, isBuffer, spec);
   if (failed(source))
     return failure();
-  bindDmaLoadLdsToken(S, op,
-                      createDmaLoadLdsMachineOp(S, op, *source, *m0, isBuffer));
+  Value token = createDmaLoadLdsMachineOp(S, op, *source, *m0, isBuffer);
+  recordDmaM0(S, ptrs, *m0, token);
+  bindDmaLoadLdsToken(S, op, token);
   return success();
 }
 
@@ -7806,8 +7983,11 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
       *this, op, *ptrs, *sourcePlan, isBuffer);
   if (failed(selectedFallback))
     return failure();
-  if (*selectedFallback)
+  if (*selectedFallback) {
+    if (op->hasAttr("issue_delay_cycles"))
+      return op.emitOpError("issue delay requires direct-to-LDS lowering");
     return success();
+  }
   return selectPlannedDmaLoadLds(*this, op, *ptrs, *sourcePlan, spec, isBuffer);
 }
 
