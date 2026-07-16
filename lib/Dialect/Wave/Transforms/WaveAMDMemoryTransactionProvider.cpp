@@ -385,7 +385,7 @@ static FailureOr<sym::ExprHandle> synthesizeBitAffineB8SourceAddress(
   return simplified;
 }
 
-static bool hasCommonB8TransactionBase(
+static bool hasCommonTransactionBase(
     const wave::memory_lowering::GatherTransactionRequest &request,
     ArrayRef<sym::PredHandle> assumptions) {
   sym::Store &store = *request.store;
@@ -429,7 +429,7 @@ static LogicalResult verifyBitAffineB8Points(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::ExprHandle item, int64_t itemCount, sym::ExprHandle sourceAddress,
     ArrayRef<sym::PredHandle> assumptions) {
-  if (!hasCommonB8TransactionBase(request, assumptions))
+  if (!hasCommonTransactionBase(request, assumptions))
     return failure();
   for (int64_t outputItem = 0; outputItem < itemCount; ++outputItem) {
     if (failed(verifyBitAffineB8Output(request, item, sourceAddress, outputItem,
@@ -465,12 +465,203 @@ static FailureOr<sym::ExprHandle> getB8AddressOffset(
   return getBitAffineB8AddressOffset(request);
 }
 
-class B8TransposeEmitter final
+enum class B16Combine { Add, Xor };
+
+struct B16SourceComposition {
+  B16Combine base;
+  B16Combine bits;
+};
+
+struct B16Sample {
+  int64_t slot;
+  int64_t outputItem;
+};
+
+static sym::ExprBinaryOp getB16DeltaOp(B16Combine composition) {
+  return composition == B16Combine::Add ? sym::ExprBinaryOp::Sub
+                                        : sym::ExprBinaryOp::Xor;
+}
+
+static sym::ExprBinaryOp getB16CombineOp(B16Combine composition) {
+  return composition == B16Combine::Add ? sym::ExprBinaryOp::Add
+                                        : sym::ExprBinaryOp::Xor;
+}
+
+static B16Sample getB16Sample(int64_t bit, int64_t bitValue) {
+  if (bit < 2)
+    return B16Sample{0, 4 * bitValue};
+  if (bit < 4)
+    return B16Sample{bitValue / 4, 0};
+  return B16Sample{0, bitValue};
+}
+
+static FailureOr<sym::ExprHandle> getB16Coefficient(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, sym::ExprHandle base, int64_t bit, int64_t bitValue,
+    ArrayRef<sym::PredHandle> assumptions, B16Combine composition) {
+  sym::Store &store = *request.store;
+  B16Sample sample = getB16Sample(bit, bitValue);
+  FailureOr<sym::ExprHandle> sampledAddress =
+      substituteItem(store, request.points[sample.slot].byteOffset, item,
+                     sample.outputItem, assumptions);
+  if (failed(sampledAddress))
+    return failure();
+  FailureOr<sym::ExprHandle> coefficient =
+      compose(store, *sampledAddress, getB16DeltaOp(composition), base);
+  if (failed(coefficient))
+    return failure();
+  return sym::simplifyExpr(store, *coefficient, assumptions);
+}
+
+static FailureOr<sym::ExprHandle>
+addB16Contribution(sym::Store &store, sym::ExprHandle offset,
+                   sym::ExprHandle coefficient, sym::ExprHandle item,
+                   int64_t bitValue, B16Combine composition) {
+  if (sym::getIntegerLiteralValue(coefficient) == 0)
+    return offset;
+  FailureOr<sym::ExprHandle> itemBit = floorDiv(store, item, bitValue);
+  if (failed(itemBit))
+    return failure();
+  itemBit = composeInt(store, *itemBit, sym::ExprBinaryOp::Mod, 2);
+  if (failed(itemBit))
+    return failure();
+  FailureOr<sym::ExprHandle> contribution =
+      compose(store, coefficient, sym::ExprBinaryOp::Mul, *itemBit);
+  if (failed(contribution))
+    return failure();
+  return compose(store, offset, getB16CombineOp(composition), *contribution);
+}
+
+static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, int64_t itemCount,
+    ArrayRef<sym::PredHandle> assumptions, B16SourceComposition composition) {
+  sym::Store &store = *request.store;
+  FailureOr<sym::ExprHandle> base = substituteItem(
+      store, request.points.front().byteOffset, item, 0, assumptions);
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  if (failed(base) || failed(zero))
+    return failure();
+
+  sym::ExprHandle offset = *zero;
+  for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
+       ++bit, bitValue <<= 1) {
+    FailureOr<sym::ExprHandle> coefficient = getB16Coefficient(
+        request, item, *base, bit, bitValue, assumptions, composition.base);
+    if (failed(coefficient))
+      return failure();
+    FailureOr<sym::ExprHandle> next = addB16Contribution(
+        store, offset, *coefficient, item, bitValue, composition.bits);
+    if (failed(next))
+      return failure();
+    offset = *next;
+  }
+  FailureOr<sym::ExprHandle> address =
+      compose(store, *base, getB16CombineOp(composition.base), offset);
+  if (failed(address))
+    return failure();
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(store, *address, assumptions);
+  if (failed(simplified) ||
+      !hasOnlyUniformBindings(*simplified, request.points.front()))
+    return failure();
+  return simplified;
+}
+
+static LogicalResult verifyB16OutputSlot(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, sym::ExprHandle sourceAddress, int64_t outputItem,
+    size_t slot, const wave::memory_lowering::MemoryTransactionPoint &point,
+    ArrayRef<sym::PredHandle> assumptions) {
+  sym::Store &store = *request.store;
+  int64_t lane = outputItem % 64;
+  int64_t sourceItem = outputItem - lane + 16 * (lane / 16) + (lane % 16) / 4 +
+                       4 * static_cast<int64_t>(slot);
+  FailureOr<sym::ExprHandle> source =
+      substituteItem(store, sourceAddress, item, sourceItem, assumptions);
+  FailureOr<sym::ExprHandle> actual =
+      substituteItem(store, point.byteOffset, item, outputItem, assumptions);
+  if (failed(source) || failed(actual))
+    return failure();
+  FailureOr<sym::ExprHandle> expected =
+      composeInt(store, *source, sym::ExprBinaryOp::Add, 2 * (lane % 4));
+  if (failed(expected) || !proveEqual(store, *expected, *actual, assumptions))
+    return failure();
+  return success();
+}
+
+static LogicalResult
+verifyB16Output(const wave::memory_lowering::GatherTransactionRequest &request,
+                sym::ExprHandle item, sym::ExprHandle sourceAddress,
+                int64_t outputItem, ArrayRef<sym::PredHandle> assumptions) {
+  for (auto [slot, point] : llvm::enumerate(request.points)) {
+    if (failed(verifyB16OutputSlot(request, item, sourceAddress, outputItem,
+                                   slot, point, assumptions)))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult
+verifyB16Points(const wave::memory_lowering::GatherTransactionRequest &request,
+                sym::ExprHandle item, int64_t itemCount,
+                sym::ExprHandle sourceAddress,
+                ArrayRef<sym::PredHandle> assumptions) {
+  if (!hasCommonTransactionBase(request, assumptions))
+    return failure();
+  for (int64_t outputItem : llvm::seq<int64_t>(itemCount)) {
+    if (failed(verifyB16Output(request, item, sourceAddress, outputItem,
+                               assumptions)))
+      return failure();
+  }
+  return success();
+}
+
+static FailureOr<sym::ExprHandle> getB16AddressOffset(
+    const wave::memory_lowering::GatherTransactionRequest &request) {
+  sym::Store &store = *request.store;
+  SmallVector<sym::PredHandle> assumptions = collectAssumptions(request.points);
+  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
+  std::optional<int64_t> itemCount = getWorkgroupItemCount(request.op);
+  if (failed(item) || !itemCount)
+    return failure();
+  constexpr std::array<B16SourceComposition, 4> compositions{
+      B16SourceComposition{B16Combine::Add, B16Combine::Add},
+      B16SourceComposition{B16Combine::Add, B16Combine::Xor},
+      B16SourceComposition{B16Combine::Xor, B16Combine::Add},
+      B16SourceComposition{B16Combine::Xor, B16Combine::Xor}};
+  for (B16SourceComposition composition : compositions) {
+    FailureOr<sym::ExprHandle> sourceAddress = synthesizeB16SourceAddress(
+        request, *item, *itemCount, assumptions, composition);
+    if (succeeded(sourceAddress) &&
+        succeeded(verifyB16Points(request, *item, *itemCount, *sourceAddress,
+                                  assumptions)))
+      return sourceAddress;
+  }
+  return failure();
+}
+
+class TransposeEmitter final
     : public wave::memory_lowering::GatherTransactionEmitter {
 public:
   FailureOr<wave::memory_lowering::GatherTransactionResult>
   emit(IRRewriter &rewriter, Location loc, SimdType resultType, Type tokenType,
        Value address, Value dependency) const override {
+    VectorType packet = cast<VectorType>(resultType.getElementType());
+    SimdType addressSimd = dyn_cast<SimdType>(address.getType());
+    Type pointerType =
+        addressSimd ? addressSimd.getElementType() : address.getType();
+    PtrType pointer = cast<PtrType>(pointerType);
+    if (pointer.getElementType() != packet.getElementType()) {
+      PtrType typedPointer =
+          PtrType::get(rewriter.getContext(), packet.getElementType(),
+                       pointer.getAddressSpace());
+      Type typedAddress =
+          addressSimd ? Type(SimdType::get(rewriter.getContext(), typedPointer,
+                                           addressSimd.getWidth()))
+                      : Type(typedPointer);
+      address = PtrCastOp::create(rewriter, loc, typedAddress, address);
+    }
     waveamd::TransposeLoadOp load = waveamd::TransposeLoadOp::create(
         rewriter, loc, resultType, tokenType, address, dependency);
     return wave::memory_lowering::GatherTransactionResult{load.getValue(),
@@ -484,15 +675,24 @@ static bool hasB8PacketType(SimdType type) {
          packet.getElementType().isInteger(8);
 }
 
-static bool hasB8ExecutionContext(
-    const wave::memory_lowering::GatherTransactionRequest &request) {
-  if (request.points.size() != 8 || request.cache)
+static bool hasB16PacketType(SimdType type) {
+  VectorType packet = dyn_cast<VectorType>(type.getElementType());
+  if (!packet || type.getWidth() != 64 || packet.getNumElements() != 4)
+    return false;
+  Type element = packet.getElementType();
+  return element.isInteger(16) || element.isF16() || element.isBF16();
+}
+
+static bool hasTransposeExecutionContext(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    size_t pointCount) {
+  if (request.points.size() != pointCount || request.cache)
     return false;
   if (!isGfx950(request.op) || !getWorkgroupItemCount(request.op) ||
       isInsideWhere(request.op))
     return false;
-  PtrType baseType = cast<PtrType>(request.bases.front().getType());
-  return isa<SharedAddressSpaceAttr>(baseType.getAddressSpace());
+  PtrType baseType = dyn_cast<PtrType>(request.bases.front().getType());
+  return baseType && isa<SharedAddressSpaceAttr>(baseType.getAddressSpace());
 }
 
 class AMDGatherTransactionProvider final
@@ -502,15 +702,21 @@ public:
   enumerate(const wave::memory_lowering::GatherTransactionRequest &request,
             SmallVectorImpl<wave::memory_lowering::GatherTransactionCandidate>
                 &candidates) const override {
-    if (!hasB8PacketType(request.resultType) || !hasB8ExecutionContext(request))
+    FailureOr<sym::ExprHandle> address = failure();
+    if (hasB8PacketType(request.resultType) &&
+        hasTransposeExecutionContext(request, 8))
+      address = getB8AddressOffset(request);
+    else if (hasB16PacketType(request.resultType) &&
+             hasTransposeExecutionContext(request, 4))
+      address = getB16AddressOffset(request);
+    else
       return;
-
-    FailureOr<sym::ExprHandle> address = getB8AddressOffset(request);
     if (failed(address))
       return;
     wave::memory_lowering::GatherTransactionCandidate candidate;
-    candidate.slots = {0, 1, 2, 3, 4, 5, 6, 7};
-    candidate.emitter = std::make_unique<B8TransposeEmitter>();
+    for (unsigned slot = 0; slot < request.points.size(); ++slot)
+      candidate.slots.push_back(slot);
+    candidate.emitter = std::make_unique<TransposeEmitter>();
     candidate.byteOffset = *address;
     candidate.baseIndex = request.points.front().baseIndex;
     candidates.push_back(std::move(candidate));
