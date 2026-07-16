@@ -10,7 +10,7 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-added-large-files
-        exclude: '^(test/PerfGolden/Inputs/a4w4_mxfp_k16k_[123]\.mlir|docs/PerfReferences/hipblaslt-gfx950-f16-8192-tn-heuristic\.s)$'
+        exclude: '^(test/PerfGolden/Inputs/a4w4_mxfp_k16k_[123]\.mlir|docs/PerfReferences/hipblaslt-gfx950-f16-8192-tn-(?:heuristic|solution2530-manual)\.s)$'
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
