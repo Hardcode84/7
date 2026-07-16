@@ -1,5 +1,5 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-interpreter{entry-point=scratch_relief})' | FileCheck %s --check-prefix=DIRECT
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=LOOP
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop debug-payload-root-tag=scratch-loop})' | FileCheck %s --check-prefix=LOOP
 
 module attributes {transform.with_named_sequence} {
   transform.named_sequence @match_func(
@@ -115,6 +115,7 @@ module attributes {transform.with_named_sequence} {
     // LOOP: waveamdmachine.scratch_load_b32
     func.func @scratch_relief_loop_restarts_to_success()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    transform.target_tag = "scratch-loop",
                     waveamdmachine.lds_size = 1048576 : i64,
                     waveamdmachine.vgpr_count_max = 3 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {

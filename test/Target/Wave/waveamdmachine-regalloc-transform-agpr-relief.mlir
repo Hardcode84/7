@@ -432,6 +432,55 @@ module attributes {transform.with_named_sequence} {
           : !waveamdmachine.reg<agpr, 120>,
             !waveamdmachine.reg<vgpr, 120>
     }
+
+    // DIRECT-LABEL: func.func @agpr_relief_rejects_split_range_recoloring()
+    // DIRECT-SAME: waveamdmachine.regalloc_transform_state =
+    // DIRECT-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+    // DIRECT: return
+    func.func @agpr_relief_rejects_split_range_recoloring()
+        -> !waveamdmachine.reg<vgpr, 1>
+        attributes {waveamdmachine.agpr_count_max = 2 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "agpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 1 : i64},
+            {class = "agpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 2 : i64,
+             members = [{value = 2 : i64}], width = 1 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [],
+            position = 4 : i64,
+            reason = "pressure",
+            set = 2 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "agpr", end = 5 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 0],
+             ranges = [{end = 1 : i64, start = 0 : i64},
+                       {end = 5 : i64, start = 4 : i64}],
+             set = 0 : i64, start = 0 : i64, width = 1 : i64},
+            {class = "agpr", end = 3 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 1],
+             ranges = [{end = 3 : i64, start = 0 : i64}],
+             set = 1 : i64, start = 0 : i64, width = 1 : i64},
+            {class = "vgpr", end = 5 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2],
+             ranges = [{end = 5 : i64, start = 2 : i64}],
+             set = 2 : i64, start = 2 : i64, width = 1 : i64}
+          ]
+        }} {
+      %a = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1>
+      %b = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1>
+      %hot = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+      return %hot : !waveamdmachine.reg<vgpr, 1>
+    }
   }
 
   module @gfx908_payload_module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx908"} {

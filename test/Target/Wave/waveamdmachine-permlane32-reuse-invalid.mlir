@@ -4,7 +4,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 func.func @permlane32_swap_without_reuse() {
   %source = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2, 0>
-  // CHECK: error: waveamd-resource-info found inconsistent physical register aliases
+  // CHECK: regalloc stalled in @permlane32_swap_without_reuse:
+  // CHECK-SAME: class=vgpr reason=fixed-conflict set=0 position=0
+  // CHECK-SAME: pressure=2 request=2 limit=256
   %result = waveamdmachine.v_permlane32_swap_b32_tuple %source
       : (!waveamdmachine.reg<vgpr, 2, 0>)
       -> !waveamdmachine.reg<vgpr, 2, 2>

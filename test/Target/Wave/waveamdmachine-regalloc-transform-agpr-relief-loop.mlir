@@ -1,13 +1,9 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s
+// RUN: not wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' 2>&1 | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-  // CHECK-LABEL: func.func @regalloc_transform_loop_entry_failure_not_agpr_relief(
-  // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-  // CHECK-SAME: position = 0 : i64
-  // CHECK-SAME: stage = "linear-scan-failure"
-  // CHECK-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
-  // CHECK-NOT: waveamdmachine.v_accvgpr_read_b32_tuple
-  // CHECK: return
+  // CHECK: regalloc stalled in @regalloc_transform_loop_entry_failure_not_agpr_relief:
+  // CHECK-SAME: class=vgpr reason=pressure set=1 position=0
+  // CHECK-SAME: pressure=2 request=1 limit=1
   func.func @regalloc_transform_loop_entry_failure_not_agpr_relief(
       %a: !waveamdmachine.reg<vgpr, 1>,
       %b: !waveamdmachine.reg<vgpr, 1>)

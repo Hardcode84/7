@@ -220,6 +220,63 @@ static void endRegAllocPreparationTracking(ArrayRef<Operation *> targets) {
 }
 
 static DiagnosedSilenceableFailure
+emitRegAllocLoopStalledFailure(wave::TransformRegAllocLoopOp op,
+                               ArrayRef<Operation *> targets) {
+  SmallVector<func::FuncOp> funcs;
+  for (Operation *target : targets) {
+    if (auto func = dyn_cast<func::FuncOp>(target)) {
+      funcs.push_back(func);
+      continue;
+    }
+    target->walk([&](func::FuncOp func) { funcs.push_back(func); });
+  }
+
+  for (func::FuncOp func : funcs) {
+    FailureOr<std::optional<wave::regalloc_detail::RegAllocTransformFailure>>
+        failure = wave::regalloc_detail::parseRegAllocTransformFailure(func);
+    if (failed(failure))
+      return op.emitDefiniteFailure()
+             << "failed to read stalled regalloc state";
+    if (!*failure)
+      continue;
+    const wave::regalloc_detail::RegAllocTransformFailure &record = **failure;
+    DiagnosedDefiniteFailure diag = op.emitDefiniteFailure();
+    diag << "regalloc stalled in @" << func.getSymName()
+         << ": class=" << record.className << " reason=" << record.reason
+         << " set=" << record.set << " position=" << record.position;
+    if (record.pressure)
+      diag << " pressure=" << *record.pressure;
+    if (record.request)
+      diag << " request=" << *record.request;
+    if (record.limit)
+      diag << " limit=" << *record.limit;
+    return std::move(diag);
+  }
+  return op.emitDefiniteFailure()
+         << "regalloc stalled without a linear-scan failure record";
+}
+
+static DiagnosedSilenceableFailure finishRegAllocLoopIteration(
+    wave::TransformRegAllocLoopOp op, transform::TransformResults &results,
+    ArrayRef<Operation *> yielded, Builder &builder,
+    wave::RegAllocTransformLoopDecision decision, int64_t iterations) {
+  if (decision == wave::RegAllocTransformLoopDecision::Stalled) {
+    endRegAllocPreparationTracking(yielded);
+    return emitRegAllocLoopStalledFailure(op, yielded);
+  }
+  assert(decision == wave::RegAllocTransformLoopDecision::Done &&
+         "terminal regalloc decision must finish or stall");
+  if (failed(finalizeRegAllocLoopMetadata(yielded, builder, iterations))) {
+    endRegAllocPreparationTracking(yielded);
+    return op.emitDefiniteFailure()
+           << "failed to finalize regalloc transform metadata";
+  }
+  endRegAllocPreparationTracking(yielded);
+  results.set(cast<OpResult>(op.getResult()), yielded);
+  return DiagnosedSilenceableFailure::success();
+}
+
+static DiagnosedSilenceableFailure
 runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
                     transform::TransformResults &results,
                     transform::TransformState &state) {
@@ -264,17 +321,9 @@ runRegAllocLoopBody(wave::TransformRegAllocLoopOp op,
              << "failed to read regalloc transform loop state";
     }
 
-    if (*decision != wave::RegAllocTransformLoopDecision::Restart) {
-      if (failed(
-              finalizeRegAllocLoopMetadata(yielded, builder, iteration + 1))) {
-        endRegAllocPreparationTracking(yielded);
-        return op.emitDefiniteFailure()
-               << "failed to finalize regalloc transform metadata";
-      }
-      endRegAllocPreparationTracking(yielded);
-      results.set(cast<OpResult>(op.getResult()), yielded);
-      return DiagnosedSilenceableFailure::success();
-    }
+    if (*decision != wave::RegAllocTransformLoopDecision::Restart)
+      return finishRegAllocLoopIteration(op, results, yielded, builder,
+                                         *decision, iteration + 1);
     current = std::move(yielded);
   }
   endRegAllocPreparationTracking(current);

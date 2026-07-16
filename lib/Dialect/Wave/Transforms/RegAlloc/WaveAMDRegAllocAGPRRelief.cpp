@@ -61,7 +61,8 @@ struct AGPRReliefSetIndex {
       setsById;
 };
 
-struct AGPRReliefInterval {
+struct AGPRReliefFitSet {
+  ArrayRef<wave::RegAllocTransformLiveRange> ranges;
   std::optional<unsigned> fixedBase;
   unsigned id = 0;
   unsigned start = 0;
@@ -70,138 +71,166 @@ struct AGPRReliefInterval {
 };
 
 struct AGPRReliefFitState {
-  SmallVector<AGPRReliefInterval> intervals;
+  SmallVector<AGPRReliefFitSet> sets;
   wave::RegAllocTransformBudget budget;
 };
 
+static bool
+liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
+                      ArrayRef<wave::RegAllocTransformLiveRange> rhs) {
+  unsigned lhsIndex = 0;
+  unsigned rhsIndex = 0;
+  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
+    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
+    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
+    if (liveRangesOverlap(lhsRange, rhsRange))
+      return true;
+    if (lhsRange.end < rhsRange.start)
+      ++lhsIndex;
+    else
+      ++rhsIndex;
+  }
+  return false;
+}
+
 struct ActiveAGPRReliefAssignments {
-  SmallVector<wave::RegAllocTransformAssignment> assignments;
-  BitVector occupied;
+  struct Assignment {
+    const AGPRReliefFitSet *set = nullptr;
+    unsigned base = 0;
+  };
 
-  ActiveAGPRReliefAssignments(unsigned limit) : occupied(limit) {}
+  using LaneAssignments = SmallVector<unsigned, 4>;
 
-  static bool endHeapCompare(const wave::RegAllocTransformAssignment &lhs,
-                             const wave::RegAllocTransformAssignment &rhs) {
-    return std::tie(lhs.end, lhs.set) > std::tie(rhs.end, rhs.set);
+  SmallVector<Assignment> assignments;
+  SmallVector<unsigned> byEnd;
+  SmallVector<LaneAssignments, 256> byLane;
+  BitVector live;
+
+  ActiveAGPRReliefAssignments(unsigned limit) : byLane(limit) {}
+
+  bool endHeapCompare(unsigned lhs, unsigned rhs) const {
+    const AGPRReliefFitSet &lhsSet = *assignments[lhs].set;
+    const AGPRReliefFitSet &rhsSet = *assignments[rhs].set;
+    return std::tie(lhsSet.end, lhsSet.id) > std::tie(rhsSet.end, rhsSet.id);
   }
 
-  void reserve(size_t size) { assignments.reserve(size); }
+  void reserve(size_t size) {
+    assignments.reserve(size);
+    byEnd.reserve(size);
+  }
 
   void expire(unsigned position) {
-    while (!assignments.empty() && assignments.front().end < position) {
-      std::pop_heap(assignments.begin(), assignments.end(), endHeapCompare);
-      wave::RegAllocTransformAssignment assigned = assignments.pop_back_val();
-      dropLaneUse(assigned.base, assigned.width);
+    while (!byEnd.empty() && assignments[byEnd.front()].set->end < position) {
+      std::pop_heap(
+          byEnd.begin(), byEnd.end(),
+          [&](unsigned lhs, unsigned rhs) { return endHeapCompare(lhs, rhs); });
+      live.reset(byEnd.pop_back_val());
     }
   }
 
-  bool rangeIsFree(unsigned base, unsigned width) const {
-    if (base > occupied.size() || width > occupied.size() - base)
+  bool rangeIsFree(const AGPRReliefFitSet &set, unsigned base) const {
+    if (base > byLane.size() || set.width > byLane.size() - base)
       return false;
-    return occupied.find_first_in(base, base + width) < 0;
+    for (unsigned lane : llvm::seq(base, base + set.width)) {
+      for (unsigned assignmentIndex : byLane[lane]) {
+        if (!live[assignmentIndex])
+          continue;
+        const AGPRReliefFitSet &assigned = *assignments[assignmentIndex].set;
+        if (liveRangeListsOverlap(set.ranges, assigned.ranges))
+          return false;
+      }
+    }
+    return true;
   }
 
-  std::optional<unsigned> findFreeBase(const AGPRReliefInterval &interval,
+  std::optional<unsigned> findFreeBase(const AGPRReliefFitSet &set,
                                        unsigned limit) const {
-    if (interval.width > limit)
+    if (set.width > limit)
       return std::nullopt;
-    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(interval.width));
-    unsigned maxBase = limit - interval.width;
-    for (unsigned base = 0; base <= maxBase;) {
-      int conflict = occupied.find_first_in(base, base + interval.width);
-      if (conflict < 0)
+    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(set.width));
+    unsigned maxBase = limit - set.width;
+    for (unsigned base = 0; base <= maxBase; base += align)
+      if (rangeIsFree(set, base))
         return base;
-      base = llvm::alignTo(static_cast<unsigned>(conflict) + 1, align);
-    }
     return std::nullopt;
   }
 
-  void add(const AGPRReliefInterval &interval, unsigned base) {
-    addLaneUse(base, interval.width);
-    assignments.push_back({waveamdmachine::RegClass::AGPR, interval.id, base,
-                           interval.width, interval.start, interval.end});
-    std::push_heap(assignments.begin(), assignments.end(), endHeapCompare);
-  }
-
-private:
-  void addLaneUse(unsigned base, unsigned width) {
-    assert(base <= occupied.size() && "AGPR assignment base out of range");
-    assert(width <= occupied.size() - base &&
+  void add(const AGPRReliefFitSet &set, unsigned base) {
+    assert(base <= byLane.size() && "AGPR assignment base out of range");
+    assert(set.width <= byLane.size() - base &&
            "AGPR assignment width out of range");
-    assert(rangeIsFree(base, width) && "AGPR assignment overlap");
-    occupied.set(base, base + width);
-  }
-
-  void dropLaneUse(unsigned base, unsigned width) {
-    assert(base <= occupied.size() && "AGPR assignment base out of range");
-    assert(width <= occupied.size() - base &&
-           "AGPR assignment width out of range");
-    assert(occupied.find_first_unset_in(base, base + width) < 0 &&
-           "AGPR lane use underflow");
-    occupied.reset(base, base + width);
+    assert(rangeIsFree(set, base) && "AGPR assignment overlap");
+    unsigned assignmentIndex = assignments.size();
+    assignments.push_back({&set, base});
+    live.resize(assignments.size());
+    live.set(assignmentIndex);
+    for (unsigned lane : llvm::seq(base, base + set.width))
+      byLane[lane].push_back(assignmentIndex);
+    byEnd.push_back(assignmentIndex);
+    std::push_heap(byEnd.begin(), byEnd.end(), [&](unsigned lhs, unsigned rhs) {
+      return endHeapCompare(lhs, rhs);
+    });
   }
 };
 
 static std::optional<unsigned>
-findFreeAGPRBase(const AGPRReliefInterval &interval,
+findFreeAGPRBase(const AGPRReliefFitSet &set,
                  const ActiveAGPRReliefAssignments &active, unsigned limit) {
-  return active.findFreeBase(interval, limit);
+  return active.findFreeBase(set, limit);
 }
 
-static bool lessAGPRReliefInterval(const AGPRReliefInterval &lhs,
-                                   const AGPRReliefInterval &rhs) {
+static bool lessAGPRReliefFitSet(const AGPRReliefFitSet &lhs,
+                                 const AGPRReliefFitSet &rhs) {
   return std::tie(lhs.start, lhs.id) < std::tie(rhs.start, rhs.id);
 }
 
-static bool assignAGPRReliefInterval(const AGPRReliefInterval &interval,
-                                     ActiveAGPRReliefAssignments &active,
-                                     unsigned limit, unsigned &footprint) {
-  active.expire(interval.start);
-  if (interval.fixedBase) {
-    if (interval.width > limit || *interval.fixedBase > limit - interval.width)
+static bool assignAGPRReliefFitSet(const AGPRReliefFitSet &set,
+                                   ActiveAGPRReliefAssignments &active,
+                                   unsigned limit, unsigned &footprint) {
+  active.expire(set.start);
+  if (set.fixedBase) {
+    if (set.width > limit || *set.fixedBase > limit - set.width)
       return false;
-    if (!active.rangeIsFree(*interval.fixedBase, interval.width))
+    if (!active.rangeIsFree(set, *set.fixedBase))
       return false;
-    active.add(interval, *interval.fixedBase);
-    footprint = std::max(footprint, *interval.fixedBase + interval.width);
+    active.add(set, *set.fixedBase);
+    footprint = std::max(footprint, *set.fixedBase + set.width);
     return true;
   }
-  std::optional<unsigned> base = findFreeAGPRBase(interval, active, limit);
+  std::optional<unsigned> base = findFreeAGPRBase(set, active, limit);
   if (!base)
     return false;
-  active.add(interval, *base);
-  footprint = std::max(footprint, *base + interval.width);
+  active.add(set, *base);
+  footprint = std::max(footprint, *base + set.width);
   return true;
 }
 
-static bool
-canAllocateAGPRReliefIntervals(ArrayRef<AGPRReliefInterval> intervals,
-                               ArrayRef<AGPRReliefInterval> overlayIntervals,
-                               unsigned limit, unsigned &footprint) {
+static bool canAllocateAGPRReliefSets(ArrayRef<AGPRReliefFitSet> sets,
+                                      ArrayRef<AGPRReliefFitSet> overlaySets,
+                                      unsigned limit, unsigned &footprint) {
   ActiveAGPRReliefAssignments active(limit);
-  active.reserve(intervals.size() + overlayIntervals.size());
+  active.reserve(sets.size() + overlaySets.size());
   footprint = 0;
   size_t index = 0;
   size_t overlayIndex = 0;
-  while (index < intervals.size() || overlayIndex < overlayIntervals.size()) {
-    bool useOverlay = index == intervals.size() ||
-                      (overlayIndex < overlayIntervals.size() &&
-                       lessAGPRReliefInterval(overlayIntervals[overlayIndex],
-                                              intervals[index]));
-    const AGPRReliefInterval &interval =
-        useOverlay ? overlayIntervals[overlayIndex++] : intervals[index++];
-    if (!assignAGPRReliefInterval(interval, active, limit, footprint))
+  while (index < sets.size() || overlayIndex < overlaySets.size()) {
+    bool useOverlay =
+        index == sets.size() ||
+        (overlayIndex < overlaySets.size() &&
+         lessAGPRReliefFitSet(overlaySets[overlayIndex], sets[index]));
+    const AGPRReliefFitSet &set =
+        useOverlay ? overlaySets[overlayIndex++] : sets[index++];
+    if (!assignAGPRReliefFitSet(set, active, limit, footprint))
       return false;
   }
-  return !overlayIntervals.empty();
+  return !overlaySets.empty();
 }
 
-static void
-addAGPRReliefIntervals(SmallVectorImpl<AGPRReliefInterval> &intervals,
-                       const wave::RegAllocTransformAliasSet &set,
-                       std::optional<unsigned> fixedBase) {
-  for (wave::RegAllocTransformLiveRange range : set.ranges)
-    intervals.push_back({fixedBase, set.id, range.start, range.end, set.width});
+static void addAGPRReliefFitSet(SmallVectorImpl<AGPRReliefFitSet> &sets,
+                                const wave::RegAllocTransformAliasSet &set,
+                                std::optional<unsigned> fixedBase) {
+  sets.push_back(
+      {set.ranges, fixedBase, set.id, set.start, set.end, set.width});
 }
 
 static AGPRReliefFitState
@@ -214,22 +243,22 @@ buildAGPRReliefFitState(func::FuncOp func,
   for (const wave::RegAllocTransformAliasSet &set : sets) {
     if (set.regClass != waveamdmachine::RegClass::AGPR)
       continue;
-    addAGPRReliefIntervals(state.intervals, set,
-                           getRegAllocTransformFixedBase(set, values));
+    addAGPRReliefFitSet(state.sets, set,
+                        getRegAllocTransformFixedBase(set, values));
   }
-  llvm::stable_sort(state.intervals, lessAGPRReliefInterval);
+  llvm::stable_sort(state.sets, lessAGPRReliefFitSet);
   return state;
 }
 
 static bool canAllocateAGPRReliefCandidate(const AGPRReliefSetGroup &candidate,
                                            const AGPRReliefFitState &fitState,
                                            unsigned &agprFootprint) {
-  SmallVector<AGPRReliefInterval, 8> overlayIntervals;
+  SmallVector<AGPRReliefFitSet, 8> overlaySets;
   for (const wave::RegAllocTransformAliasSet *set : candidate.sets)
-    addAGPRReliefIntervals(overlayIntervals, *set, std::nullopt);
-  llvm::stable_sort(overlayIntervals, lessAGPRReliefInterval);
-  return canAllocateAGPRReliefIntervals(fitState.intervals, overlayIntervals,
-                                        fitState.budget.limit, agprFootprint);
+    addAGPRReliefFitSet(overlaySets, *set, std::nullopt);
+  llvm::stable_sort(overlaySets, lessAGPRReliefFitSet);
+  return canAllocateAGPRReliefSets(fitState.sets, overlaySets,
+                                   fitState.budget.limit, agprFootprint);
 }
 
 static bool

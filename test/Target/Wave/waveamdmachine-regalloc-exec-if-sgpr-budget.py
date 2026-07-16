@@ -13,19 +13,26 @@ from pathlib import Path
 
 
 def build_source() -> str:
-    returns = ", ".join(["!waveamdmachine.reg<sgpr, 2>" for _ in range(50)])
-    values = ", ".join([f"%s{i}" for i in range(50)])
-    types = ", ".join(["!waveamdmachine.reg<sgpr, 2>" for _ in range(50)])
+    returns = ", ".join(["!waveamdmachine.reg<vgpr, 1>" for _ in range(98)])
+    values = ", ".join([f"%sink{i}" for i in range(98)])
+    types = ", ".join(["!waveamdmachine.reg<vgpr, 1>" for _ in range(98)])
+    args = ", ".join(
+        ["%cond: !waveamdmachine.reg<sgpr, 2>"]
+        + [f"%v{i}: !waveamdmachine.reg<vgpr, 1>" for i in range(98)]
+    )
     lines = [
         'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
-        "  func.func @exec_if_save_stack_sgpr_budget_results()",
+        f"  func.func @exec_if_save_stack_sgpr_budget_results({args})",
         f"      -> ({returns}) {{",
         "    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm",
-        "    %cond = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>",
     ]
-    for i in range(50):
-        lines.append(
-            f"    %s{i} = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>"
+    for i in range(98):
+        lines.extend(
+            [
+                f"    %s{i} = waveamdmachine.v_readfirstlane_b32 %v{i}",
+                "        : (!waveamdmachine.reg<vgpr, 1>)",
+                "          -> !waveamdmachine.reg<sgpr, 1>",
+            ]
         )
     lines.extend(
         [
@@ -33,6 +40,19 @@ def build_source() -> str:
             "      waveamdmachine.s_nop %zero : (!waveamdmachine.imm) -> ()",
             "      waveamdmachine.yield",
             "    } : !waveamdmachine.reg<sgpr, 2>",
+        ]
+    )
+    for i in range(98):
+        lines.extend(
+            [
+                f"    %sink{i} = waveamdmachine.v_mov_b32_tuple %s{i}",
+                "        : (!waveamdmachine.reg<sgpr, 1>)",
+                "          -> !waveamdmachine.reg<vgpr, 1>",
+            ]
+        )
+    lines.extend(
+        [
+            "    waveamdmachine.s_endpgm",
             f"    return {values} : {types}",
             "  }",
             "  func.func @exec_if_condition_liveness() attributes {wave.kernel} {",
@@ -135,7 +155,7 @@ def main() -> None:
         "simultaneously live exec_if results share a physical VGPR",
     )
 
-    asm = run([wave_translate, "--wave-to-amdgpu-asm", "-"], mlir)
+    asm = run([wave_translate, "--wave-to-amdgpu-asm", "-"], build_source())
     require("s[102:103]" not in asm, "exec_if save stack escaped gfx950 SGPRs")
     save_line = next(
         line.strip() for line in asm.splitlines() if "s_and_saveexec_b64" in line

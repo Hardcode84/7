@@ -123,22 +123,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %mfma : !waveamdmachine.reg<vgpr, 4>
   }
 
-  // CHECK-LABEL: func.func @regalloc_transform_loop_rejects_wmma_input_reuse
-  // CHECK-NOT: waveamdmachine.regalloc_assignments
-  // CHECK-SAME: limit = 24 : i64
-  // CHECK-SAME: pressure = 32 : i64
-  // CHECK-SAME: stage = "linear-scan-failure"
-  func.func @regalloc_transform_loop_rejects_wmma_input_reuse(
-      %a: !waveamdmachine.reg<vgpr, 8>,
-      %b: !waveamdmachine.reg<vgpr, 8>,
-      %acc: !waveamdmachine.reg<vgpr, 8>)
-      attributes {waveamdmachine.vgpr_count_max = 24 : i64} {
-    %wmma = waveamdmachine.wmma_f32_16x16x16_f16 %a, %b, %acc
-        : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
-           !waveamdmachine.reg<vgpr, 8>) -> !waveamdmachine.reg<vgpr, 8>
-    return
-  }
-
   // CHECK-LABEL: func.func @regalloc_transform_loop_reuses_killed_alu_input
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: stage = "linear-scan-success"
@@ -266,24 +250,4 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
-  // CHECK-LABEL: func.func @regalloc_transform_loop_failure
-  // CHECK-NOT: waveamdmachine.regalloc_assignments
-  // CHECK-SAME: waveamdmachine.regalloc_transform_state =
-  // CHECK-SAME: assignments = []
-  // CHECK-SAME: failure = {budget_mode = "func_attr", class = "vgpr"
-  // CHECK-SAME: limit = 1 : i64
-  // CHECK-SAME: overlaps = [{base = 0 : i64, class = "vgpr"
-  // CHECK-SAME: position = 0 : i64
-  // CHECK-SAME: pressure = 2 : i64
-  // CHECK-SAME: reason = "pressure"
-  // CHECK-SAME: request = 1 : i64
-  // CHECK-SAME: set = 1 : i64
-  // CHECK-SAME: stage = "linear-scan-failure"
-  func.func @regalloc_transform_loop_failure(
-      %a: !waveamdmachine.reg<vgpr, 1>,
-      %b: !waveamdmachine.reg<vgpr, 1>)
-      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-      attributes {waveamdmachine.vgpr_count_max = 1 : i64} {
-    return %a, %b : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
-  }
 }
