@@ -12,6 +12,7 @@ __pycache__/
 # Tool caches
 .mypy_cache/
 .pytest_cache/
+.rocprofv3/
 .ruff_cache/
 
 # IDE
