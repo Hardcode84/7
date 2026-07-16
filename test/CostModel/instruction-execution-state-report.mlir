@@ -18,6 +18,9 @@
 // RUN: wave-instruction-state-report --func=noinst_issue_hazard_alias --arch=gfx950 %s | FileCheck %s --check-prefix=HAZARDALIAS
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx942 %s | FileCheck %s --check-prefix=CDNA3
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx950 %s | FileCheck %s --check-prefix=CDNA4
+// RUN: wave-instruction-state-report --func=dma_issue_delay_chunks --arch=gfx950 %s | FileCheck %s --check-prefix=DMACHUNKS
+// RUN: wave-instruction-state-report --func=dma_issue_delay_conditional --arch=gfx950 %s | FileCheck %s --check-prefix=DMADELAY
+// RUN: wave-instruction-state-report --func=dma_issue_delay_conditional --arch=gfx950 --dma-issue-delay-cohort=skipped %s | FileCheck %s --check-prefix=DMASKIP
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @smem_value_ready(%zero: !waveamdmachine.imm,
@@ -275,6 +278,30 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
     return
   }
+
+  func.func @dma_issue_delay_chunks(%m0: !waveamdmachine.m0) {
+    %dep = waveamdmachine.token : !waveamdmachine.mem.token
+    %first = waveamdmachine.dma_issue_delay %dep, %m0
+        {cycles = 16 : i64}
+        : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+          -> !waveamdmachine.m0
+    %second = waveamdmachine.dma_issue_delay %dep, %first
+        {cycles = 17 : i64}
+        : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+          -> !waveamdmachine.m0
+    return
+  }
+
+  func.func @dma_issue_delay_conditional(
+      %m0: !waveamdmachine.m0,
+      %skip: !waveamdmachine.reg<vcc, 1>) {
+    %dep = waveamdmachine.token : !waveamdmachine.mem.token
+    %delayed = waveamdmachine.dma_issue_delay %dep, %m0 unless %skip
+        {cycles = 17 : i64, overlap_cycles = 3 : i64}
+        : (!waveamdmachine.mem.token, !waveamdmachine.m0,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.m0
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -342,3 +369,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // CDNA4: arch: gfx950
 // CDNA4: query op_index=0 cycle=0 op=waveamdmachine.s_add_i32 stall=none cycles=0
+
+// DMACHUNKS: func: dma_issue_delay_chunks
+// DMACHUNKS: commit op_index=1 issue=0 next=16 value_ready=16
+// DMACHUNKS: commit op_index=2 issue=16 next=36 value_ready=36
+
+// DMADELAY: func: dma_issue_delay_conditional
+// DMADELAY: query op_index=1 cycle=0 op=waveamdmachine.dma_issue_delay stall=operand_value cycles=3 components=operand_value:3
+// DMADELAY: commit op_index=1 issue=3 next=27 value_ready=27
+
+// DMASKIP: func: dma_issue_delay_conditional
+// DMASKIP: query op_index=1 cycle=0 op=waveamdmachine.dma_issue_delay stall=operand_value cycles=3 components=operand_value:3
+// DMASKIP: commit op_index=1 issue=3 next=7 value_ready=7

@@ -83,6 +83,87 @@ func.func @dma_load_lds_dest_element_type(%src: !wave.simd<!wave.ptr<#wave.globa
 
 // -----
 
+func.func @dma_load_lds_nonpositive_delay(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @+2 {{attribute 'issue_delay_cycles' failed to satisfy constraint}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {bytes = 4 : i64, issue_delay_cycles = 0 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @dma_load_lds_negative_overlap(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @+2 {{attribute 'issue_delay_overlap_cycles' failed to satisfy constraint}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {bytes = 4 : i64, issue_delay_cycles = 4 : i64,
+       issue_delay_overlap_cycles = -1 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @dma_load_lds_nonpositive_skip_threshold(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @+2 {{attribute 'issue_delay_skip_thread_threshold' failed to satisfy constraint}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {bytes = 4 : i64, issue_delay_cycles = 4 : i64,
+       issue_delay_skip_thread_threshold = 0 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @dma_load_lds_overlap_without_delay(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @below {{issue delay options require issue_delay_cycles}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {bytes = 4 : i64, issue_delay_overlap_cycles = 1 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @dma_load_lds_threshold_without_delay(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @below {{issue delay options require issue_delay_cycles}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {bytes = 4 : i64, issue_delay_skip_thread_threshold = 64 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @dma_load_lds_overlap_exceeds_delay(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @below {{issue delay overlap cannot exceed delay cycles}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {bytes = 4 : i64, issue_delay_cycles = 4 : i64,
+       issue_delay_overlap_cycles = 5 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @make_buffer_base_not_global(%p: !wave.ptr<#wave.shared, i32>, %r: i32) {
   // expected-error @below {{base must be a global wave pointer}}
   %b = waveamd.make_buffer %p, %r : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>

@@ -343,9 +343,19 @@ def test_waveamd_dma_load_lds():
             src = f.ptr_add(src_base, lane, w.simd_ptr_type(w.i32()))
             lds = f.shared_memory_base()
             dep = f.token()
-            f.dma_load_lds(src, lds, after=dep)
+            f.dma_load_lds(
+                src,
+                lds,
+                after=dep,
+                issue_delay_cycles=46,
+                issue_delay_overlap_cycles=33,
+                issue_delay_skip_thread_threshold=256,
+            )
         # CHECK: waveamd.dma_load_lds
-        # CHECK-SAME: {bytes = 4 : i64}
+        # CHECK-SAME: bytes = 4 : i64
+        # CHECK-SAME: issue_delay_cycles = 46 : i64
+        # CHECK-SAME: issue_delay_overlap_cycles = 33 : i64
+        # CHECK-SAME: issue_delay_skip_thread_threshold = 256 : i64
         print(m.module)
 
 

@@ -49,6 +49,15 @@ static llvm::cl::opt<int>
                 llvm::cl::desc("override single-unit issue period"),
                 llvm::cl::init(0));
 
+static llvm::cl::opt<DmaIssueDelayCohortPolicy> dmaIssueDelayCohort(
+    "dma-issue-delay-cohort",
+    llvm::cl::desc("conditional DMA issue delay path"),
+    llvm::cl::values(clEnumValN(DmaIssueDelayCohortPolicy::Delayed, "delayed",
+                                "execute the delay"),
+                     clEnumValN(DmaIssueDelayCohortPolicy::Skipped, "skipped",
+                                "take the skip branch")),
+    llvm::cl::init(DmaIssueDelayCohortPolicy::Delayed));
+
 static llvm::cl::opt<int> vmemCounterLatency(
     "vmem-counter-latency",
     llvm::cl::desc("override VMEM-load waitcnt counter latency"),
@@ -194,6 +203,7 @@ static InstructionExecutionConfig buildConfig() {
   config.valuMaxInFlight = valuMaxInFlight;
   config.saluMaxInFlight = saluMaxInFlight;
   config.xdlMaxInFlight = xdlMaxInFlight;
+  config.dmaIssueDelayCohortPolicy = dmaIssueDelayCohort;
   return config;
 }
 

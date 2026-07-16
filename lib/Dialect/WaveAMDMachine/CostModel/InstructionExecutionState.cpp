@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
+#include <limits>
 
 namespace mlir::waveamdmachine {
 
@@ -203,6 +205,31 @@ static InstructionEventClass toInstructionEventClass(Operation *op) {
 static unsigned getIssueCount(Operation *op) {
   WaitcntInfo info = getWaitcntInfo(op);
   return std::max(1u, info.issueCount);
+}
+
+static int64_t saturatingAdd(int64_t lhs, int64_t rhs) {
+  assert(lhs >= 0 && rhs >= 0 && "expected non-negative cycle counts");
+  if (lhs > std::numeric_limits<int64_t>::max() - rhs)
+    return std::numeric_limits<int64_t>::max();
+  return lhs + rhs;
+}
+
+static int64_t saturatingMultiply(int64_t lhs, int64_t rhs) {
+  assert(lhs >= 0 && rhs >= 0 && "expected non-negative cycle counts");
+  if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs)
+    return std::numeric_limits<int64_t>::max();
+  return lhs * rhs;
+}
+
+static int64_t getDmaIssueDelayNopSpan(int64_t cycles, int64_t issuePeriod) {
+  constexpr int64_t maxNopCycles = 16;
+  int64_t fullChunks = cycles / maxNopCycles;
+  int64_t remainder = cycles % maxNopCycles;
+  int64_t span =
+      saturatingMultiply(fullChunks, std::max(maxNopCycles, issuePeriod));
+  if (remainder != 0)
+    span = saturatingAdd(span, std::max(remainder, issuePeriod));
+  return span;
 }
 
 static bool hasMemoryTokenOperand(Operation *op) {
@@ -655,12 +682,12 @@ InstructionExecutionState::commit(Operation *op) {
   commitResults(op, desc, result.issueCycle, newEvents);
   commitPipe(desc.pipe, valueReadyCycle);
   commitMemoryIssue(desc, result.issueCycle);
-  currentIssueSlot += desc.issueCount;
+  currentIssueSlot += desc.issueSlots;
   commitIssueSlotHazards(op, desc);
   commitM0(desc);
   commitStoreData(desc);
 
-  currentCycle = result.issueCycle + getInstructionSpan(desc);
+  currentCycle = saturatingAdd(result.issueCycle, getInstructionSpan(desc));
   pruneRetiredEvents(currentCycle);
   result.nextIssueCycle = currentCycle;
   result.valueReadyCycle = valueReadyCycle;
@@ -691,9 +718,11 @@ InstructionExecutionState::describe(Operation *op) const {
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
   desc.issueCount = getIssueCount(op);
+  desc.issueSlots = desc.issueCount;
   if (op->hasTrait<traits::MFMAOp>())
     desc.mfmaPasses = getMfmaPassCount(cls);
   desc.latency = getConfiguredLatency(arch, cls, config.calibration);
+  configureDmaIssueDelay(op, desc);
   desc.memoryIssueResources = getMemoryIssueResources(op);
 
   MemoryCounterKind memoryCounter = getMemoryCounterKind(op);
@@ -712,6 +741,30 @@ InstructionExecutionState::describe(Operation *op) const {
   return desc;
 }
 
+void InstructionExecutionState::configureDmaIssueDelay(
+    Operation *op, InstructionDesc &desc) const {
+  DmaIssueDelayOp delay = dyn_cast<DmaIssueDelayOp>(op);
+  if (!delay)
+    return;
+  bool skipped =
+      delay.getSkipCondition() &&
+      config.dmaIssueDelayCohortPolicy == DmaIssueDelayCohortPolicy::Skipped;
+  int64_t cycles = delay.getCyclesAttr().getInt();
+  int64_t issuePeriod = getIssuePeriod();
+  desc.latency = 0;
+  desc.resultReadyAtEnd = true;
+  if (skipped) {
+    desc.issueSlots = 1;
+    desc.instructionSpan = issuePeriod;
+    return;
+  }
+  desc.issueSlots =
+      static_cast<uint64_t>(cycles) + (delay.getSkipCondition() ? 1 : 0);
+  desc.instructionSpan = getDmaIssueDelayNopSpan(cycles, issuePeriod);
+  if (delay.getSkipCondition())
+    desc.instructionSpan = saturatingAdd(issuePeriod, desc.instructionSpan);
+}
+
 FailureOr<InstructionStall>
 InstructionExecutionState::query(Operation *op,
                                  const InstructionDesc &desc) const {
@@ -719,7 +772,7 @@ InstructionExecutionState::query(Operation *op,
 
   if (!op->hasTrait<traits::NoMachineInst>()) {
     InstructionStallKind operandKind = InstructionStallKind::OperandValue;
-    int64_t operandsReady = operandReadyCycle(op, operandKind);
+    int64_t operandsReady = issueReadyCycle(op, operandKind);
     addComponent(stall, operandKind, operandsReady - currentCycle);
   }
 
@@ -908,6 +961,21 @@ int64_t InstructionExecutionState::operandReadyCycle(
   return ready;
 }
 
+int64_t InstructionExecutionState::issueReadyCycle(
+    Operation *op, InstructionStallKind &stallKind) const {
+  int64_t ready = operandReadyCycle(op, stallKind);
+  DmaIssueDelayOp delay = dyn_cast<DmaIssueDelayOp>(op);
+  if (!delay)
+    return ready;
+  DenseMap<Value, int64_t>::const_iterator it =
+      valueReadyAt.find(delay.getDependency());
+  if (it == valueReadyAt.end())
+    return ready;
+  IntegerAttr overlapAttr = delay.getOverlapCyclesAttr();
+  int64_t overlap = overlapAttr ? overlapAttr.getInt() : 0;
+  return std::max(ready, saturatingAdd(it->second, overlap));
+}
+
 int64_t InstructionExecutionState::tokenReadyCycle(Operation *op) const {
   int64_t ready = currentCycle;
   for (EventId id : collectTokenDeps(op)) {
@@ -971,11 +1039,15 @@ int64_t InstructionExecutionState::getIssuePeriod() const {
 
 int64_t InstructionExecutionState::getInstructionSpan(
     const InstructionDesc &desc) const {
+  if (desc.instructionSpan != 0)
+    return desc.instructionSpan;
   return static_cast<int64_t>(desc.issueCount) * getIssuePeriod();
 }
 
 int64_t InstructionExecutionState::getResultReadyCycle(
     Operation *op, const InstructionDesc &desc, int64_t issueCycle) const {
+  if (desc.resultReadyAtEnd)
+    return saturatingAdd(issueCycle, getInstructionSpan(desc));
   int64_t latency =
       desc.hasMemoryValue ? desc.memoryValueLatency : desc.latency;
   bool hasRegisterResult = llvm::any_of(

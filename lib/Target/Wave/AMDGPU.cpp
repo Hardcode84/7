@@ -374,6 +374,7 @@ private:
   unsigned loopCounter = 0;
   unsigned ifCounter = 0;
   unsigned execIfCounter = 0;
+  unsigned dmaIssueDelayCounter = 0;
   unsigned execIfSaveBase = 0;
   unsigned execIfSaveCursor = 0;
   std::string funcLabelPrefix;
@@ -508,6 +509,7 @@ private:
   unsigned sBranch() const { return opcodes.sBranch; }
   unsigned sCbranchScc0() const { return opcodes.sCbranchScc0; }
   unsigned sCbranchScc1() const { return opcodes.sCbranchScc1; }
+  unsigned sCbranchVccnz() const { return opcodes.sCbranchVccnz; }
   unsigned sCbranchExecz() const { return opcodes.sCbranchExecz; }
   unsigned sLoadB32() const { return opcodes.sLoadB32; }
   unsigned sLoadB64() const { return opcodes.sLoadB64; }
@@ -1161,6 +1163,7 @@ private:
     loopCounter = 0;
     ifCounter = 0;
     execIfCounter = 0;
+    dmaIssueDelayCounter = 0;
     execIfSaveCursor = 0;
     funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
     wave::WaveAMDExecIfSaveStackInfo execIfSaveInfo =
@@ -1895,6 +1898,34 @@ private:
     for (Value operand : operands)
       mcOperands.push_back(toMCOperand(operand));
     return emitMC(opcode, mcOperands);
+  }
+
+  LogicalResult emitSNopCycles(uint64_t cycles) {
+    while (cycles != 0) {
+      uint64_t chunk = std::min<uint64_t>(cycles, 16);
+      if (failed(emitMC(sNop(), {llvm::MCOperand::createImm(chunk - 1)})))
+        return failure();
+      cycles -= chunk;
+    }
+    return success();
+  }
+
+  LogicalResult emitDmaIssueDelay(waveamdmachine::DmaIssueDelayOp delay) {
+    Value condition = delay.getSkipCondition();
+    std::string skipLabel;
+    if (condition) {
+      skipLabel = (funcLabelPrefix + ".dma_issue_delay_" +
+                   Twine(dmaIssueDelayCounter++))
+                      .str();
+      if (failed(emitMC(sCbranchVccnz(), {labelOperand(skipLabel)})))
+        return failure();
+    }
+    if (failed(emitSNopCycles(
+            static_cast<uint64_t>(delay.getCyclesAttr().getInt()))))
+      return failure();
+    if (condition)
+      os << skipLabel << ":\n";
+    return success();
   }
 
   unsigned packedSrcMods(unsigned opSel, unsigned opSelHi,
@@ -3396,6 +3427,8 @@ private:
     }
     if (isa<waveamdmachine::SNopOp>(op))
       return emitMCValues(sNop(), op.getOperands());
+    if (auto delay = dyn_cast<waveamdmachine::DmaIssueDelayOp>(op))
+      return emitDmaIssueDelay(delay);
     if (isa<waveamdmachine::SSleepOp>(op))
       return emitMCValues(sSleep(), op.getOperands());
     if (isa<waveamdmachine::SSetprioOp>(op))

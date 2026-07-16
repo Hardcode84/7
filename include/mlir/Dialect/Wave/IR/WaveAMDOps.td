@@ -132,7 +132,10 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds"> {
                        Wave_MemToken:$dependency,
                        I64Attr:$bytes,
                        DefaultValuedAttr<I64Attr, "0">:$aux,
-                       OptionalAttr<UnitAttr>:$zero_fill_inactive);
+                       OptionalAttr<UnitAttr>:$zero_fill_inactive,
+                       OptionalAttr<ConfinedAttr<I64Attr, [IntMinValue<1>]>>:$issue_delay_cycles,
+                       OptionalAttr<ConfinedAttr<I64Attr, [IntMinValue<0>]>>:$issue_delay_overlap_cycles,
+                       OptionalAttr<ConfinedAttr<I64Attr, [IntMinValue<1>]>>:$issue_delay_skip_thread_threshold);
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = [{
     $source `->` $dest `after` $dependency

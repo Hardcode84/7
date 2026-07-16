@@ -86,6 +86,8 @@ struct InstructionCommitResult {
   int64_t tokenReadyCycle = 0;
 };
 
+enum class DmaIssueDelayCohortPolicy : uint8_t { Delayed, Skipped };
+
 struct InstructionExecutionConfig {
   const CalibrationData *calibration = nullptr;
   MemoryCounterLatencies counterLatencies;
@@ -95,6 +97,8 @@ struct InstructionExecutionConfig {
   unsigned valuMaxInFlight = 0;
   unsigned saluMaxInFlight = 0;
   unsigned xdlMaxInFlight = 0;
+  DmaIssueDelayCohortPolicy dmaIssueDelayCohortPolicy =
+      DmaIssueDelayCohortPolicy::Delayed;
 };
 
 bool isInstructionExecutionStateArchSupported(
@@ -167,6 +171,8 @@ private:
     int64_t latency = 0;
     int64_t memoryCounterLatency = 0;
     int64_t memoryValueLatency = 0;
+    int64_t instructionSpan = 0;
+    uint64_t issueSlots = 1;
     unsigned issueCount = 1;
     unsigned storeDataHazardLatency = 0;
     unsigned mfmaPasses = 0;
@@ -185,6 +191,7 @@ private:
     bool storeDataProducer = false;
     bool waitsForTokenDeps = false;
     bool hasMemoryValue = false;
+    bool resultReadyAtEnd = false;
   };
 
   struct IssueSlotHazards {
@@ -221,6 +228,7 @@ private:
   };
 
   InstructionDesc describe(Operation *op) const;
+  void configureDmaIssueDelay(Operation *op, InstructionDesc &desc) const;
   FailureOr<InstructionStall> query(Operation *op,
                                     const InstructionDesc &desc) const;
   FailureOr<int64_t> waitcntReadyCycle(Operation *op, int64_t cycle) const;
@@ -228,6 +236,7 @@ private:
                                        unsigned limit, int64_t cycle) const;
   int64_t operandReadyCycle(Operation *op,
                             InstructionStallKind &stallKind) const;
+  int64_t issueReadyCycle(Operation *op, InstructionStallKind &stallKind) const;
   void addIssueHazards(Operation *op, const InstructionDesc &desc,
                        InstructionStall &stall) const;
   unsigned issueSlotHazardWait(Operation *op,

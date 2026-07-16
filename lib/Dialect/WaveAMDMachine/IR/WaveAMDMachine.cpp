@@ -974,6 +974,19 @@ static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
   return success();
 }
 
+LogicalResult DmaIssueDelayOp::verify() {
+  int64_t cycles = getCyclesAttr().getInt();
+  IntegerAttr overlapAttr = getOverlapCyclesAttr();
+  int64_t overlap = overlapAttr ? overlapAttr.getInt() : 0;
+  if (cycles <= 0)
+    return emitOpError("requires positive cycles");
+  if (overlap < 0)
+    return emitOpError("requires non-negative overlap_cycles");
+  if (overlap > cycles)
+    return emitOpError("overlap_cycles cannot exceed cycles");
+  return success();
+}
+
 LogicalResult UniformLoopOp::verify() {
   Block &body = getBody().front();
   if (body.getNumArguments() != getInits().size())

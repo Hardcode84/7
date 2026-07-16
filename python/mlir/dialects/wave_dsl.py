@@ -1201,6 +1201,9 @@ class FunctionBuilder:
         bytes: int = 4,
         aux: int = 0,
         zero_fill_inactive: bool = False,
+        issue_delay_cycles: int | None = None,
+        issue_delay_overlap_cycles: int | None = None,
+        issue_delay_skip_thread_threshold: int | None = None,
     ) -> Value:
         op = waveamd.DmaLoadLdsOp(
             mem_token_type(),
@@ -1210,6 +1213,9 @@ class FunctionBuilder:
             bytes=bytes,
             aux=aux,
             zero_fill_inactive=zero_fill_inactive,
+            issue_delay_cycles=issue_delay_cycles,
+            issue_delay_overlap_cycles=issue_delay_overlap_cycles,
+            issue_delay_skip_thread_threshold=issue_delay_skip_thread_threshold,
         )
         return op.token
 

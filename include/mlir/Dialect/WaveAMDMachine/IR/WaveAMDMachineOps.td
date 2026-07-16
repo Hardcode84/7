@@ -3117,6 +3117,24 @@ def WaveAMDMachine_SAddM0I32Op
   }];
 }
 
+def WaveAMDMachine_DmaIssueDelayOp
+    : WaveAMDMachine_Op<"dma_issue_delay", [WaveAMDMachine_SALU]> {
+  let summary = "delay the next DMA issue around overlapped work";
+  let arguments = (ins
+    WaveAMDMachine_MemToken:$dependency,
+    WaveAMDMachine_M0:$m0,
+    Optional<WaveAMDMachine_VCC>:$skip_condition,
+    I64Attr:$cycles,
+    DefaultValuedAttr<I64Attr, "0">:$overlap_cycles
+  );
+  let results = (outs WaveAMDMachine_M0:$delayed_m0);
+  let assemblyFormat = [{
+    $dependency `,` $m0 (`unless` $skip_condition^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
 // Signed scalar 32-bit multiply. AMDGPU `s_mul_i32` does not set SCC, so
 // there's no carry-out result to model; callers that need the high half
 // or unsigned behaviour will get separate ops later.

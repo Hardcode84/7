@@ -683,3 +683,39 @@ func.func @permlane32_width_mismatch(
       -> !waveamdmachine.reg<vgpr, 4>
   return
 }
+
+// -----
+
+func.func @dma_issue_delay_nonpositive(
+    %dep: !waveamdmachine.mem.token, %m0: !waveamdmachine.m0) {
+  // expected-error @below {{requires positive cycles}}
+  %delayed_m0 = waveamdmachine.dma_issue_delay %dep, %m0
+      {cycles = 0 : i64}
+      : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+        -> !waveamdmachine.m0
+  return
+}
+
+// -----
+
+func.func @dma_issue_delay_negative_overlap(
+    %dep: !waveamdmachine.mem.token, %m0: !waveamdmachine.m0) {
+  // expected-error @below {{requires non-negative overlap_cycles}}
+  %delayed_m0 = waveamdmachine.dma_issue_delay %dep, %m0
+      {cycles = 4 : i64, overlap_cycles = -1 : i64}
+      : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+        -> !waveamdmachine.m0
+  return
+}
+
+// -----
+
+func.func @dma_issue_delay_overlap_exceeds_cycles(
+    %dep: !waveamdmachine.mem.token, %m0: !waveamdmachine.m0) {
+  // expected-error @below {{overlap_cycles cannot exceed cycles}}
+  %delayed_m0 = waveamdmachine.dma_issue_delay %dep, %m0
+      {cycles = 4 : i64, overlap_cycles = 5 : i64}
+      : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+        -> !waveamdmachine.m0
+  return
+}

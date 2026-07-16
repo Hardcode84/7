@@ -539,9 +539,24 @@ void MmaScaleOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
   patterns.add<MmaScaleRepackCanonicalizer>(context);
 }
 
+static LogicalResult verifyDmaLoadLdsOptions(DmaLoadLdsOp op) {
+  if (op.getBytes() != 4 && op.getBytes() != 16)
+    return op.emitOpError("currently supports only bytes = 4 or 16");
+  IntegerAttr delay = op->getAttrOfType<IntegerAttr>("issue_delay_cycles");
+  IntegerAttr overlap =
+      op->getAttrOfType<IntegerAttr>("issue_delay_overlap_cycles");
+  IntegerAttr threshold =
+      op->getAttrOfType<IntegerAttr>("issue_delay_skip_thread_threshold");
+  if (!delay && (overlap || threshold))
+    return op.emitOpError("issue delay options require issue_delay_cycles");
+  if (delay && overlap && overlap.getInt() > delay.getInt())
+    return op.emitOpError("issue delay overlap cannot exceed delay cycles");
+  return success();
+}
+
 LogicalResult DmaLoadLdsOp::verify() {
-  if (getBytes() != 4 && getBytes() != 16)
-    return emitOpError("currently supports only bytes = 4 or 16");
+  if (failed(verifyDmaLoadLdsOptions(*this)))
+    return failure();
 
   Type sourceType = getSource().getType();
   auto sourceSimdType = dyn_cast<wave::SimdType>(sourceType);
