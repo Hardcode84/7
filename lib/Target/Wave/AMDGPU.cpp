@@ -49,6 +49,7 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
@@ -2356,6 +2357,17 @@ private:
       // SCC was already set by an upstream s_cmp; skip body if false.
       if (failed(emitMC(sCbranchScc0(), {labelOperand(exitLabel)})))
         return failure();
+    }
+    if (IntegerAttr alignmentAttr = loop.getFetchAlignmentAttr()) {
+      uint64_t alignment = alignmentAttr.getValue().getZExtValue();
+      uint64_t phase = 0;
+      if (IntegerAttr phaseAttr = loop.getFetchPhaseAttr())
+        phase = phaseAttr.getValue().getZExtValue();
+      os << "\t.p2align\t" << llvm::Log2_64(alignment) << "\n";
+      for ([[maybe_unused]] unsigned unused :
+           llvm::seq<unsigned>(static_cast<unsigned>(phase / 4)))
+        if (failed(emitMC(sNop(), {llvm::MCOperand::createImm(0)})))
+          return failure();
     }
     os << headLabel << ":\n";
     Block &body = loop.getBody().front();

@@ -17,6 +17,7 @@
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <cstdint>
 #include <limits>
@@ -987,7 +988,44 @@ LogicalResult DmaIssueDelayOp::verify() {
   return success();
 }
 
+static LogicalResult verifyUniformLoopFetchAlignment(UniformLoopOp loop) {
+  IntegerAttr alignmentAttr = loop.getFetchAlignmentAttr();
+  if (!alignmentAttr)
+    return success();
+  int64_t alignment = alignmentAttr.getInt();
+  if (alignment < 4 || alignment > 256 ||
+      !llvm::isPowerOf2_64(static_cast<uint64_t>(alignment)))
+    return loop.emitOpError(
+        "fetch_alignment must be a power of two from 4 to 256 bytes");
+  return success();
+}
+
+static LogicalResult verifyUniformLoopFetchPhase(UniformLoopOp loop) {
+  IntegerAttr phaseAttr = loop.getFetchPhaseAttr();
+  if (!phaseAttr)
+    return success();
+  IntegerAttr alignmentAttr = loop.getFetchAlignmentAttr();
+  if (!alignmentAttr)
+    return loop.emitOpError("fetch_phase requires fetch_alignment");
+  int64_t phase = phaseAttr.getInt();
+  int64_t alignment = alignmentAttr.getInt();
+  if (phase < 0 || phase >= alignment)
+    return loop.emitOpError(
+        "fetch_phase must be non-negative and smaller than fetch_alignment");
+  if (phase % 4 != 0)
+    return loop.emitOpError("fetch_phase must be 4-byte aligned");
+  return success();
+}
+
+static LogicalResult verifyUniformLoopFetchPlacement(UniformLoopOp loop) {
+  if (failed(verifyUniformLoopFetchAlignment(loop)))
+    return failure();
+  return verifyUniformLoopFetchPhase(loop);
+}
+
 LogicalResult UniformLoopOp::verify() {
+  if (failed(verifyUniformLoopFetchPlacement(*this)))
+    return failure();
   Block &body = getBody().front();
   if (body.getNumArguments() != getInits().size())
     return emitOpError("body block must have one argument per init carry");

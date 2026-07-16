@@ -57,6 +57,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // CHECK-NEXT: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[SPILL_M0]]
   // CHECK-NEXT: [[RESTORED_M0:%.*]] = waveamdmachine.s_mov_m0 [[DST]]
   // CHECK-NEXT: waveamdmachine.buffer_load_lds_b32 [[RELOAD]], {{%.*}}, {{%.*}}, [[RESTORED_M0]]
+  // CHECK: } {fetch_alignment = 32 : i64, fetch_phase = 16 : i64}
   func.func @regalloc_transform_loop_lds_restores_cloned_body_m0()
       attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                   waveamdmachine.vgpr_count_max = 4 : i64,
@@ -105,7 +106,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
             -> !waveamdmachine.reg<vgpr, 1>
       waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
           carries(%carry : !waveamdmachine.reg<vgpr, 1>)
-    } -> !waveamdmachine.reg<vgpr, 1>
+    } {fetch_alignment = 32 : i64, fetch_phase = 16 : i64}
+        -> !waveamdmachine.reg<vgpr, 1>
     %use_result = waveamdmachine.v_add_u32 %loop, %hot
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>

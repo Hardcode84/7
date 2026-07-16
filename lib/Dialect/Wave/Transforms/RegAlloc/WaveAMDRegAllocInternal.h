@@ -1789,7 +1789,8 @@ struct MemorySpillLoopCarryMaterializer {
     builder.setInsertionPoint(loop);
     waveamdmachine::UniformLoopOp newLoop =
         waveamdmachine::UniformLoopOp::create(
-            builder, loop.getLoc(), resultTypes, loop.getEntryCond(), inits);
+            builder, loop.getLoc(), resultTypes, loop.getEntryCond(), inits,
+            loop.getFetchAlignmentAttr(), loop.getFetchPhaseAttr());
     if (failed(cloneLoopBody(loop, newLoop, spills))) {
       newLoop.erase();
       return failure();

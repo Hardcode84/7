@@ -231,7 +231,8 @@ private:
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(loop);
     UniformLoopOp newLoop = UniformLoopOp::create(
-        rewriter, loop.getLoc(), resultTypes, loop.getEntryCond(), inits);
+        rewriter, loop.getLoc(), resultTypes, loop.getEntryCond(), inits,
+        loop.getFetchAlignmentAttr(), loop.getFetchPhaseAttr());
     copyLoopAttrs(newLoop);
     if (failed(cloneBody(newLoop))) {
       newLoop.erase();

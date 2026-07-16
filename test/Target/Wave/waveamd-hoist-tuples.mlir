@@ -18,6 +18,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, %[[DESC]]
 // CHECK: waveamdmachine.continue_if {{.*}} : !waveamdmachine.reg<scc, 1>
 // CHECK-SAME: carries({{%.*}}, {{%.*}}, %[[DESC]] :
+// CHECK: } {fetch_alignment = 32 : i64, fetch_phase = 16 : i64}
 func.func @hoist_loop_buffer_rsrc(
     %base0: !waveamdmachine.reg<sgpr, 2>,
     %off0: !waveamdmachine.reg<sgpr, 1>,
@@ -55,7 +56,8 @@ func.func @hoist_loop_buffer_rsrc(
         carries(%next, %tok1 :
                 !waveamdmachine.reg<sgpr, 1>,
                 !waveamdmachine.mem.token)
-  } -> !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.mem.token
+  } {fetch_alignment = 32 : i64, fetch_phase = 16 : i64}
+      -> !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.mem.token
   return
 }
 

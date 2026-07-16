@@ -746,7 +746,7 @@ static Value materializePollLoop(OpBuilder &builder, Location loc,
 
   waveamdmachine::UniformLoopOp loop = waveamdmachine::UniformLoopOp::create(
       builder, loc, TypeRange{types.token}, Value(),
-      ValueRange{firstPoll.token});
+      ValueRange{firstPoll.token}, IntegerAttr(), IntegerAttr());
   SmallVector<Location, 1> argLocs(1, loc);
   Block *body = builder.createBlock(&loop.getBody(), loop.getBody().end(),
                                     TypeRange{types.token}, argLocs);

@@ -664,6 +664,50 @@ func.func @uniform_loop_bad_terminator(%init: !waveamdmachine.reg<sgpr, 1>) {
 
 // -----
 
+func.func @uniform_loop_phase_without_alignment(
+    %cond: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{fetch_phase requires fetch_alignment}}
+  waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  } {fetch_phase = 16 : i64}
+  return
+}
+
+// -----
+
+func.func @uniform_loop_bad_fetch_alignment(
+    %cond: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{fetch_alignment must be a power of two from 4 to 256 bytes}}
+  waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  } {fetch_alignment = 24 : i64}
+  return
+}
+
+// -----
+
+func.func @uniform_loop_out_of_range_fetch_phase(
+    %cond: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{fetch_phase must be non-negative and smaller than fetch_alignment}}
+  waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  } {fetch_alignment = 32 : i64, fetch_phase = 32 : i64}
+  return
+}
+
+// -----
+
+func.func @uniform_loop_unaligned_fetch_phase(
+    %cond: !waveamdmachine.reg<scc, 1>) {
+  // expected-error @below {{fetch_phase must be 4-byte aligned}}
+  waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  } {fetch_alignment = 32 : i64, fetch_phase = 6 : i64}
+  return
+}
+
+// -----
+
 func.func @permlane32_odd_tuple(
     %source: !waveamdmachine.reg<vgpr, 3>) {
   // expected-error @below {{source and result widths must be positive even tuples}}

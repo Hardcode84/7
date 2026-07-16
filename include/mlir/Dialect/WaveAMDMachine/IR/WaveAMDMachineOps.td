@@ -3492,10 +3492,15 @@ def WaveAMDMachine_UniformLoopOp : WaveAMDMachine_Op<"uniform_loop", [
     `waveamdmachine.s_add_i32` / `s_cmp_*` ops in the body; this op only
     establishes the region boundary and the back-edge that the waitcnt
     pass needs to see via `RegionBranchOpInterface`.
+
+    `$fetch_alignment` and `$fetch_phase` place the loop head at the given
+    byte phase modulo the power-of-two alignment.
   }];
 
   let arguments = (ins Optional<WaveAMDMachine_SCC>:$entry_cond,
-                       Variadic<WaveAMDMachine_RegOrMemToken>:$inits);
+                       Variadic<WaveAMDMachine_RegOrMemToken>:$inits,
+                       OptionalAttr<I64Attr>:$fetch_alignment,
+                       OptionalAttr<I64Attr>:$fetch_phase);
   let results = (outs Variadic<WaveAMDMachine_RegOrMemToken>:$results);
   let regions = (region SizedRegion<1>:$body);
 
