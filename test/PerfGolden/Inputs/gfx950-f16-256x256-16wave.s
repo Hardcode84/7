@@ -105,10 +105,9 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[40:43], v7 offset:18432
 		ds_read_b128 v[44:47], v7 offset:19456
 		s_add_i32 s4, s7, 0x10000
-		s_add_i32 s5, s7, 0x14000
 		v_add_u32_e32 v7, 0x80, v4
 		v_add_u32_e32 v4, 0x80, v5
-		s_mov_b32 s7, 0
+		s_mov_b32 s5, 0
 		v_mov_b64_e32 v[48:49], 0
 		v_mov_b64_e32 v[50:51], 0
 		v_mov_b64_e32 v[52:53], 0
@@ -141,13 +140,13 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[106:107], 0
 .Lwmma_f16_matmul_tiled.loop_head_0:
 		s_add_i32 m0, s4, 16
-		s_lshl_b32 s8, s7, 6
+		s_lshl_b32 s7, s5, 6
 		s_waitcnt lgkmcnt(0)
-		buffer_load_dwordx4 v7, s[16:19], s8 offen lds
+		buffer_load_dwordx4 v7, s[16:19], s7 offen lds
 		s_add_i32 s4, s4, 0x8000
-		s_add_i32 m0, s5, 16
-		s_add_i32 s7, s7, 1
-		buffer_load_dwordx4 v4, s[0:3], s8 offen lds
+		s_add_i32 m0, m0, 0x4000
+		s_add_i32 s5, s5, 1
+		buffer_load_dwordx4 v4, s[0:3], s7 offen lds
 		v_mfma_f32_16x16x32_f16 v[8:11], v[16:19], v[32:35], v[8:11]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[16:19], v[36:39], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[52:55], v[16:19], v[40:43], v[52:55]
@@ -164,18 +163,18 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[92:95], v[28:31], v[32:35], v[92:95]
 		v_mfma_f32_16x16x32_f16 v[96:99], v[28:31], v[36:39], v[96:99]
 		v_mfma_f32_16x16x32_f16 v[100:103], v[28:31], v[40:43], v[100:103]
-		s_and_b32 s8, s7, 3
-		s_lshl_b32 s8, s8, 15
+		s_and_b32 s7, s5, 3
+		s_lshl_b32 s7, s7, 15
 		s_waitcnt vmcnt(2)
 		s_barrier
-		v_add_u32_e32 v5, s8, v3
+		v_add_u32_e32 v5, s7, v3
 		v_add3_u32 v5, v5, v12, v0
 		v_add_u32_e32 v5, 16, v5
 		ds_read_b128 v[16:19], v5
 		ds_read_b128 v[20:23], v5 offset:1024
 		ds_read_b128 v[24:27], v5 offset:2048
 		ds_read_b128 v[28:31], v5 offset:3072
-		v_add_u32_e32 v5, s8, v12
+		v_add_u32_e32 v5, s7, v12
 		v_add3_u32 v5, v5, v6, v0
 		v_add_u32_e32 v5, 16, v5
 		ds_read_b128 v[32:35], v5 offset:16384
@@ -183,9 +182,7 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[40:43], v5 offset:18432
 		ds_read_b128 v[44:47], v5 offset:19456
 		s_and_b32 s4, s4, 0x1ffff
-		s_add_i32 s5, s5, 0x8000
-		s_and_b32 s5, s5, 0x1ffff
-		s_cmp_lt_i32 s7, 0xfe
+		s_cmp_lt_i32 s5, 0xfe
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		v_mov_b32_e32 v4, 1

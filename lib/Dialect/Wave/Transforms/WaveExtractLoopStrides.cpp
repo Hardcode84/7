@@ -85,8 +85,14 @@ struct CyclicOffsetCarryShape {
   int64_t ring = 0;
 };
 
-struct LoopCyclicOffsetCandidate {
+struct CyclicOffsetMember {
   IndexExprOp indexExpr;
+  int64_t delta = 0;
+};
+
+struct LoopCyclicOffsetCandidate {
+  SmallVector<CyclicOffsetMember> members;
+  SmallVector<Operation *> producers;
   SmallVector<Operation *> deadProducers;
   BoundExpr base;
   int64_t increment = 0;
@@ -1213,9 +1219,8 @@ buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
   if (failed(base))
     return success();
 
-  candidate.indexExpr = indexExpr;
-  collectDeadProducers(loop, indexExpr, cyclic.expanded.producers,
-                       candidate.deadProducers);
+  candidate.members.push_back({indexExpr, 0});
+  llvm::append_range(candidate.producers, cyclic.expanded.producers);
   candidate.base = std::move(*base);
   candidate.increment = shape->increment;
   candidate.ring = shape->ring;
@@ -1239,9 +1244,116 @@ findCandidate(scf::ForOp loop, sym::Store &store, DataFlowSolver &solver) {
   return std::optional<LoopStrideCandidate>{};
 }
 
+static bool haveSameBoundBindings(const BoundExpr &lhs, const BoundExpr &rhs) {
+  if (lhs.names.size() != rhs.names.size())
+    return false;
+  for (auto [lhsName, lhsValue] : llvm::zip(lhs.names, lhs.bindings)) {
+    bool found = false;
+    for (auto [rhsName, rhsValue] : llvm::zip(rhs.names, rhs.bindings))
+      if (lhsName == rhsName && lhsValue == rhsValue) {
+        found = true;
+        break;
+      }
+    if (!found)
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<std::optional<int64_t>>
+constantBaseDelta(sym::Store &store, const BoundExpr &lhs,
+                  const BoundExpr &rhs) {
+  if (!haveSameBoundBindings(lhs, rhs))
+    return std::optional<int64_t>{};
+
+  FailureOr<sym::ExprHandle> diff =
+      sym::composeExprBinary(store, lhs.expr, sym::ExprBinaryOp::Sub, rhs.expr);
+  if (failed(diff))
+    return failure();
+  SmallVector<sym::PredHandle> assumptions(lhs.assumptions);
+  llvm::append_range(assumptions, rhs.assumptions);
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyExpanded(store, *diff, assumptions);
+  if (failed(simplified))
+    return failure();
+  return sym::getIntegerLiteralValue(*simplified);
+}
+
+static bool adjustCyclicOffsetMembers(LoopCyclicOffsetCandidate &group,
+                                      LoopCyclicOffsetCandidate &candidate,
+                                      CyclicOffsetMember &member,
+                                      int64_t delta) {
+  if (delta >= 0) {
+    if (delta >= group.ring)
+      return false;
+    member.delta = delta;
+    return true;
+  }
+
+  __int128 shift = -__int128(delta);
+  for (const CyclicOffsetMember &existing : group.members)
+    if (__int128(existing.delta) + shift >= group.ring)
+      return false;
+  for (CyclicOffsetMember &existing : group.members)
+    existing.delta = static_cast<int64_t>(__int128(existing.delta) + shift);
+  group.base = std::move(candidate.base);
+  return true;
+}
+
+static void
+appendUniqueCyclicProducers(LoopCyclicOffsetCandidate &group,
+                            const LoopCyclicOffsetCandidate &candidate) {
+  for (Operation *producer : candidate.producers)
+    if (!llvm::is_contained(group.producers, producer))
+      group.producers.push_back(producer);
+}
+
+static FailureOr<bool>
+mergeCyclicOffsetCandidate(LoopCyclicOffsetCandidate &group,
+                           LoopCyclicOffsetCandidate candidate,
+                           sym::Store &store) {
+  if (group.increment != candidate.increment || group.ring != candidate.ring)
+    return false;
+  FailureOr<std::optional<int64_t>> delta =
+      constantBaseDelta(store, candidate.base, group.base);
+  if (failed(delta))
+    return failure();
+  if (!*delta)
+    return false;
+
+  CyclicOffsetMember member = candidate.members.front();
+  if (!adjustCyclicOffsetMembers(group, candidate, member, **delta))
+    return false;
+  group.members.push_back(member);
+  appendUniqueCyclicProducers(group, candidate);
+  return true;
+}
+
+static void collectDeadCyclicProducers(scf::ForOp loop,
+                                       LoopCyclicOffsetCandidate &candidate) {
+  llvm::SmallPtrSet<Operation *, 32> skip;
+  for (const CyclicOffsetMember &member : candidate.members)
+    skip.insert(member.indexExpr);
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (Operation *producer : candidate.producers) {
+      if (skip.contains(producer) || !isImmediateBodyOp(loop, producer))
+        continue;
+      if (!areAllUsersSkipped(producer, skip))
+        continue;
+      skip.insert(producer);
+      candidate.deadProducers.push_back(producer);
+      changed = true;
+    }
+  }
+}
+
 static FailureOr<std::optional<LoopCyclicOffsetCandidate>>
 findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
                           DataFlowSolver &solver) {
+  std::optional<LoopCyclicOffsetCandidate> group;
   for (Operation &op : loop.getBody()->without_terminator()) {
     IndexExprOp indexExpr = dyn_cast<IndexExprOp>(&op);
     if (!indexExpr)
@@ -1251,10 +1363,21 @@ findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
     if (failed(buildCyclicOffsetCandidate(loop, indexExpr, store, solver,
                                           candidate, matched)))
       return failure();
-    if (matched)
-      return std::optional<LoopCyclicOffsetCandidate>(std::move(candidate));
+    if (!matched)
+      continue;
+    if (!group) {
+      group = std::move(candidate);
+      continue;
+    }
+    FailureOr<bool> merged =
+        mergeCyclicOffsetCandidate(*group, std::move(candidate), store);
+    if (failed(merged))
+      return failure();
   }
-  return std::optional<LoopCyclicOffsetCandidate>{};
+  if (!group)
+    return group;
+  collectDeadCyclicProducers(loop, *group);
+  return group;
 }
 
 static Type getOffsetElementType(Type type) {
@@ -1448,6 +1571,58 @@ static LogicalResult cloneBodyWithCarriedPointer(IRRewriter &rewriter,
   return success();
 }
 
+static FailureOr<IndexExprOp>
+mapCyclicOffsetMembers(IRRewriter &rewriter, scf::ForOp src,
+                       LoopCyclicOffsetCandidate &candidate, sym::Store &store,
+                       Value offsetCarry, IRMapping &map) {
+  IndexExprOp anchor;
+  for (CyclicOffsetMember &member : candidate.members) {
+    if (member.delta == 0) {
+      anchor = member.indexExpr;
+      map.map(member.indexExpr.getResult(), offsetCarry);
+      continue;
+    }
+
+    FailureOr<sym::ExprHandle> offset = sym::composeExprSym(store, "offset");
+    FailureOr<sym::ExprHandle> delta = sym::composeExprInt(store, member.delta);
+    if (failed(offset) || failed(delta))
+      return failure();
+    FailureOr<sym::ExprHandle> shifted =
+        sym::composeExprBinary(store, *offset, sym::ExprBinaryOp::Add, *delta);
+    if (failed(shifted))
+      return failure();
+    FailureOr<sym::ExprHandle> simplified =
+        simplifyExpanded(store, *shifted, {});
+    if (failed(simplified))
+      return failure();
+
+    BoundExpr derived;
+    derived.expr = *simplified;
+    derived.names.push_back("offset");
+    derived.bindings.push_back(offsetCarry);
+    IndexExprOp derivedOffset = createIndexExpr(
+        rewriter, member.indexExpr.getLoc(), src->getContext(), derived);
+    map.map(member.indexExpr.getResult(), derivedOffset.getResult());
+  }
+  assert(anchor && "cyclic offset group must have an anchor");
+  return anchor;
+}
+
+static void cloneCyclicOffsetBody(IRRewriter &rewriter, Block &srcBody,
+                                  LoopCyclicOffsetCandidate &candidate,
+                                  IRMapping &map) {
+  llvm::SmallPtrSet<Operation *, 32> skipped;
+  for (const CyclicOffsetMember &member : candidate.members)
+    skipped.insert(member.indexExpr);
+  for (Operation *producer : candidate.deadProducers)
+    skipped.insert(producer);
+  for (Operation &op : srcBody.without_terminator()) {
+    if (skipped.contains(&op))
+      continue;
+    rewriter.clone(op, map);
+  }
+}
+
 static LogicalResult cloneBodyWithCarriedCyclicOffset(
     IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
     LoopCyclicOffsetCandidate candidate, sym::Store &store) {
@@ -1460,16 +1635,13 @@ static LogicalResult cloneBodyWithCarriedCyclicOffset(
   for (auto [oldArg, newArg] :
        llvm::zip(src.getRegionIterArgs(), dst.getRegionIterArgs().drop_back()))
     map.map(oldArg, newArg);
-  map.map(candidate.indexExpr.getResult(), offsetCarry);
 
   rewriter.setInsertionPointToStart(&dstBody);
-  for (Operation &op : srcBody.without_terminator()) {
-    if (&op == candidate.indexExpr.getOperation())
-      continue;
-    if (llvm::is_contained(candidate.deadProducers, &op))
-      continue;
-    rewriter.clone(op, map);
-  }
+  FailureOr<IndexExprOp> anchor =
+      mapCyclicOffsetMembers(rewriter, src, candidate, store, offsetCarry, map);
+  if (failed(anchor))
+    return failure();
+  cloneCyclicOffsetBody(rewriter, srcBody, candidate, map);
 
   SmallVector<Value> yielded;
   scf::YieldOp srcYield = cast<scf::YieldOp>(srcBody.getTerminator());
@@ -1477,8 +1649,8 @@ static LogicalResult cloneBodyWithCarriedCyclicOffset(
     yielded.push_back(map.lookupOrDefault(value));
 
   FailureOr<Value> nextOffset = createCyclicOffsetUpdate(
-      rewriter, candidate.indexExpr.getLoc(), src->getContext(), store,
-      offsetCarry, candidate.increment, candidate.ring);
+      rewriter, anchor->getLoc(), src->getContext(), store, offsetCarry,
+      candidate.increment, candidate.ring);
   if (failed(nextOffset))
     return failure();
   yielded.push_back(*nextOffset);
@@ -1604,7 +1776,13 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
                                  sym::Store &store) {
   Location loc = loop.getLoc();
   rewriter.setInsertionPoint(loop);
-  IndexExprOp base = createIndexExpr(rewriter, candidate.indexExpr.getLoc(),
+  CyclicOffsetMember *anchor =
+      llvm::find_if(candidate.members, [](const CyclicOffsetMember &member) {
+        return member.delta == 0;
+      });
+  assert(anchor != candidate.members.end() &&
+         "cyclic offset group must have an anchor");
+  IndexExprOp base = createIndexExpr(rewriter, anchor->indexExpr.getLoc(),
                                      loop->getContext(), candidate.base);
 
   SmallVector<Value> initArgs(loop.getInitArgs().begin(),
