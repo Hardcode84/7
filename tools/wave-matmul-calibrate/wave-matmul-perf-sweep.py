@@ -80,7 +80,15 @@ KERNELS = {
     "f16": KernelSpec(
         key="f16",
         label="f16",
-        profile="gfx950-f16-256x256-16wave",
+        profile="gfx950-f16-256x256-8wave",
+        variants="scheduled",
+        default_k_values=F16_DOC_K_VALUES,
+        sweep_k=True,
+    ),
+    "f16-4wave": KernelSpec(
+        key="f16-4wave",
+        label="f16-4wave",
+        profile="gfx950-f16-256x256-4wave",
         variants="scheduled",
         default_k_values=F16_DOC_K_VALUES,
         sweep_k=True,
@@ -126,6 +134,8 @@ KERNEL_ALIASES = {
     "mxfp4-8wave": ("mxfp4",),
     "mxfp4-4wave": ("mxfp4-4wave",),
     "f16": ("f16",),
+    "f16-8wave": ("f16",),
+    "f16-4wave": ("f16-4wave",),
     "v9": ("v9",),
     "v9-original": ("v9",),
     "v9-transposed": ("v9-transposed",),
@@ -532,7 +542,8 @@ def build_argparser() -> argparse.ArgumentParser:
         type=parse_kernel_csv,
         default=parse_kernel_csv("all"),
         help=(
-            "comma-separated f16,mxfp4,mxfp4-4wave,v9,v9-transposed,all; "
+            "comma-separated f16,f16-4wave,mxfp4,mxfp4-4wave,v9,"
+            "v9-transposed,all; f16-8wave aliases f16 and "
             "mxfp/mxfp4-8wave alias mxfp4"
         ),
     )

@@ -833,6 +833,51 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     print("matmul_mxfp4_4wave_profile: ok")
 
 
+def check_matmul_f16_4wave_profile(matmul) -> None:
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave",
+            "--m=256",
+            "--n=256",
+            "--k=256",
+            "--skip-hw",
+        ]
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        args.bm == 2 and args.bn == 2,
+        "bad 4-wave workgroup shape",
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        args.wave_m_tiles == 8 and args.wave_n_tiles == 8 and args.wave_k_tiles == 2,
+        "bad 4-wave tile shape",
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        args.input_type == "f16" and args.output_type == "f16",
+        "bad 4-wave dtypes",
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        matmul.effective_target_waves(args) == 1,
+        "4-wave profile should request one wave per SIMD",
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        matmul.dma_buffer_count(args) == 2 and matmul.compute_lds_bytes(args) == 131072,
+        "bad 4-wave LDS byte accounting",
+    )
+    cmd = matmul.build_matmul_example_args(args, "gfx950")
+    require(
+        "matmul_f16_4wave_profile",
+        "--kernel-profile=gfx950-f16-256x256-4wave" in cmd,
+        "calibrator did not forward the named 4-wave profile",
+    )
+    print("matmul_f16_4wave_profile: ok")
+
+
 def check_matmul_dynamic_lds_forwarding(matmul) -> None:
     args = argparse.Namespace(
         m=64,
@@ -1362,6 +1407,24 @@ def check_matmul_perf_sweep_v9_defaults(perf_sweep) -> None:
     print("matmul_perf_sweep_v9_defaults: ok")
 
 
+def check_matmul_perf_sweep_f16_profiles(perf_sweep) -> None:
+    default_kernels = perf_sweep.parse_kernel_csv("all")
+    default_profiles = {kernel.profile for kernel in default_kernels}
+    require(
+        "matmul_perf_sweep_f16_profiles",
+        "gfx950-f16-256x256-8wave" in default_profiles
+        and "gfx950-f16-256x256-4wave" not in default_profiles,
+        "default sweep should retain the 8-wave f16 profile",
+    )
+    four_wave = perf_sweep.parse_kernel_csv("f16-4wave")
+    require(
+        "matmul_perf_sweep_f16_profiles",
+        len(four_wave) == 1 and four_wave[0].profile == "gfx950-f16-256x256-4wave",
+        "f16 four-wave sweep should remain opt-in",
+    )
+    print("matmul_perf_sweep_f16_profiles: ok")
+
+
 def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     args = perf_sweep.build_argparser().parse_args(
         [
@@ -1495,6 +1558,7 @@ def main() -> int:
     check_matmul_profile_cli_override(matmul)
     check_matmul_f16_8wave_profile(matmul)
     check_matmul_mxfp4_4wave_profile(matmul)
+    check_matmul_f16_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_f16_dma_buffer_count(matmul)
     check_matmul_dma_sim_trip_count(matmul)
@@ -1502,6 +1566,7 @@ def main() -> int:
     check_matmul_v9_transposed_perf_golden_profile(matmul)
     check_matmul_a4w4_mxfp_k16k_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
+    check_matmul_perf_sweep_f16_profiles(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)

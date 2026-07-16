@@ -469,6 +469,37 @@ Implication: current generic rule is not a 4-wave win. Keep split barriers
 disabled by default; use this heuristic only as an 8-wave improvement candidate
 until 4-wave is gated or fixed by the scheduler model.
 
+## `gfx950-f16-256x256-4wave`
+
+Experimental f16 GEMM profile for 8192x8192x8192:
+
+```text
+bm=2
+bn=2
+wave_m_tiles=8
+wave_n_tiles=8
+wave_k_tiles=2
+target_waves=1
+use_buffer=true
+use_dma_lds=true
+matrix_intrinsic=mfma_gfx950
+input_type=f16
+output_type=f16
+cta_swizzle_xcds=8
+cta_group_m=4
+```
+
+Named profile supplies a typed `PhasedDmaSchedule`: issue group 7, zero issue
+delays, and fetch alignment/phase 4/0. Schedule selects the two-buffer f16 DMA
+pipeline; four buffers exceed gfx950 LDS capacity for this tile. Profile stays
+separate from the locked `gfx950-f16-256x256-8wave` default.
+
+See [Wave gfx950 f16 four-wave experiment](PerfReferences/WaveGfx950F16Gemm4Wave.md)
+for hardware results and saved ISA.
+
+Sweep only this profile with `--kernels=f16-4wave`. Default `all` keeps the
+locked eight-wave f16 profile and excludes this experiment.
+
 ## `gfx950-mxfp4-256x256-4wave`
 
 Lower-occupancy MXFP4 GEMM profile for 4096x4096xK:

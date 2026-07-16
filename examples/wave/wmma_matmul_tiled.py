@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from typing import TYPE_CHECKING
 
 from common import (
     add_execution_args,
@@ -51,8 +52,40 @@ from common import (
     run_module,
 )
 
+if TYPE_CHECKING:
+    from mlir.dialects.wave_matmul import PhasedDmaSchedule
+
 _ProfileValue = bool | int | str
 _PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
+_FOUR_WAVE_PHASED_DMA_PROFILE = "gfx950-f16-256x256-4wave"
+_PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int]] = {
+    _PHASED_DMA_PROFILE: {
+        "issue_group_size": 7,
+        "initial_delay_cycles": 68,
+        "loop_delay_cycles": 46,
+        "loop_overlap_cycles": 33,
+        "delayed_waves": 4,
+        "fetch_alignment": 32,
+        "fetch_phase": 16,
+    },
+    _FOUR_WAVE_PHASED_DMA_PROFILE: {
+        "issue_group_size": 7,
+        "initial_delay_cycles": 0,
+        "loop_delay_cycles": 0,
+        "loop_overlap_cycles": 0,
+        "delayed_waves": 0,
+        "fetch_alignment": 4,
+        "fetch_phase": 0,
+    },
+}
+
+
+def _make_phased_dma_schedule(
+    constructor: type[PhasedDmaSchedule], kernel_profile: str
+) -> PhasedDmaSchedule | None:
+    schedule_args = _PHASED_DMA_SCHEDULE_ARGS.get(kernel_profile)
+    return constructor(**schedule_args) if schedule_args else None
+
 
 _GFX950_SW_PIPELINE: dict[str, _ProfileValue] = {
     "bm": 2,
@@ -87,6 +120,22 @@ _GFX950_F16_256X256_8WAVE: dict[str, _ProfileValue] = {
     "wave_n_tiles": 4,
     "wave_k_tiles": 2,
     "target_waves": 2,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "f16",
+    "output_type": "f16",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
+_GFX950_F16_256X256_4WAVE: dict[str, _ProfileValue] = {
+    "bm": 2,
+    "bn": 2,
+    "wave_m_tiles": 8,
+    "wave_n_tiles": 8,
+    "wave_k_tiles": 2,
+    "target_waves": 1,
     "use_buffer": True,
     "use_dma_lds": True,
     "matrix_intrinsic": "mfma_gfx950",
@@ -132,6 +181,7 @@ _KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
     "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
     "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
     "gfx950-f16-256x256-8wave": _GFX950_F16_256X256_8WAVE,
+    "gfx950-f16-256x256-4wave": _GFX950_F16_256X256_4WAVE,
     "gfx950-mxfp4-256x256-8wave": _GFX950_MXFP4_256X256_8WAVE,
     "gfx950-mxfp4-256x256-4wave": _GFX950_MXFP4_256X256_4WAVE,
 }
@@ -372,17 +422,9 @@ def main(argv: list[str] | None = None) -> int:
 
     matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
     random_data = args.random_data or (args.compare_cpu and args.input_type != "mxfp4")
-    phased_dma_schedule = {
-        _PHASED_DMA_PROFILE: PhasedDmaSchedule(
-            issue_group_size=7,
-            initial_delay_cycles=68,
-            loop_delay_cycles=46,
-            loop_overlap_cycles=33,
-            delayed_waves=4,
-            fetch_alignment=32,
-            fetch_phase=16,
-        )
-    }.get(args.kernel_profile)
+    phased_dma_schedule = _make_phased_dma_schedule(
+        PhasedDmaSchedule, args.kernel_profile
+    )
     module = build_wmma_f16_matmul_module(
         M=args.m,
         N=args.n,

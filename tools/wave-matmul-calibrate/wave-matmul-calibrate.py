@@ -68,6 +68,8 @@ VARIANTS = {
 
 ProfileValue = bool | int | str
 _PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
+_FOUR_WAVE_PHASED_DMA_PROFILE = "gfx950-f16-256x256-4wave"
+_PHASED_DMA_PROFILES = frozenset((_PHASED_DMA_PROFILE, _FOUR_WAVE_PHASED_DMA_PROFILE))
 
 KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
     "gfx950-f16-256x256-16wave": {
@@ -91,6 +93,21 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "wave_n_tiles": 4,
         "wave_k_tiles": 2,
         "target_waves": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+    "gfx950-f16-256x256-4wave": {
+        "bm": 2,
+        "bn": 2,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "target_waves": 1,
         "use_buffer": True,
         "use_dma_lds": True,
         "matrix_intrinsic": "mfma_gfx950",
@@ -343,18 +360,17 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     )
     cta_swizzle_xcds = getattr(args, "cta_swizzle_xcds", 1)
     cta_group_m = getattr(args, "cta_group_m", 1)
-    append_option_if(
-        cmd, cta_swizzle_xcds != 1, f"--cta-swizzle-xcds={cta_swizzle_xcds}"
-    )
-    append_option_if(cmd, cta_group_m != 1, f"--cta-group-m={cta_group_m}")
+    cmd.append(f"--cta-swizzle-xcds={cta_swizzle_xcds}")
+    cmd.append(f"--cta-group-m={cta_group_m}")
     append_target_waves(cmd, args)
     append_option_if(
         cmd, getattr(args, "enable_split_barriers", False), "--enable-split-barriers"
     )
+    kernel_profile = getattr(args, "kernel_profile", "manual")
     append_option_if(
         cmd,
-        getattr(args, "kernel_profile", "manual") == _PHASED_DMA_PROFILE,
-        f"--kernel-profile={_PHASED_DMA_PROFILE}",
+        kernel_profile in _PHASED_DMA_PROFILES,
+        f"--kernel-profile={kernel_profile}",
     )
     return cmd
 
@@ -807,7 +823,7 @@ def dma_buffer_count(args: argparse.Namespace) -> int:
         return 1
     if (
         getattr(args, "input_type", "f16") != "mxfp4"
-        and getattr(args, "kernel_profile", "manual") != _PHASED_DMA_PROFILE
+        and getattr(args, "kernel_profile", "manual") not in _PHASED_DMA_PROFILES
         and compute_virtual_k_steps(args) > 2
     ):
         return 4
