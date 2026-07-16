@@ -126,6 +126,9 @@ pressure is the constraint; AGPR placement is not the optimization. Match the
 reference's direct-to-LDS and MFMA/load interleave before tuning scheduler
 delays.
 
+Result: [the separate four-wave profile](WaveGfx950F16Gemm4Wave.md) reached
+`1.343401 PFLOP/s`, below this eight-wave kernel.
+
 ### One-sided Triple Buffer
 
 Each `256x64xf16` operand panel is 32 KiB. Current `2A + 2B` staging consumes
