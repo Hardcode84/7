@@ -299,9 +299,10 @@ public:
   DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
       slotFitsU32Cache;
   PointerOffset lastDmaDstOffset;
-  std::optional<int64_t> dmaIssueSkipThreadThreshold;
+  SmallVector<Operation *, 4> dmaIssueTimingLoops;
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
+  std::optional<int64_t> dmaIssueSkipThreadThreshold;
   Value lastDmaM0;
   Value lastDmaToken;
   Value lastDmaDstBase;
@@ -311,6 +312,7 @@ public:
   unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
   bool dmaIssueTimingEnabled = false;
+  bool lastDmaHadIssueDelay = false;
   bool packedWorkitemIds = false;
 
   // ---- address-planning helpers -----------------------------------------

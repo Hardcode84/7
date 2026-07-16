@@ -1,7 +1,7 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_unscheduled})' \
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend})' \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_unscheduled})' \
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend})' \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
@@ -19,6 +19,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-NEXT: s_nop 0
 // ASM-NEXT: [[SKIP]]:
 // ASM-NEXT: buffer_load_dwordx4
+// ASM: buffer_load_dwordx4
 // ASM: s_endpgm
 func.func @gfx950_phased_dma_lowering_codegen(
     %in: !wave.ptr<#wave.global, i32>)
@@ -50,6 +51,10 @@ func.func @gfx950_phased_dma_lowering_codegen(
         {bytes = 16 : i64, issue_delay_cycles = 17 : i64,
          issue_delay_overlap_cycles = 3 : i64,
          issue_delay_skip_thread_threshold = 64 : i64}
+        : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+           !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    %third = waveamd.dma_load_lds %src -> %next_lds after %root
+        {bytes = 16 : i64}
         : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
            !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
     scf.yield %base : !wave.ptr<#wave.global, i32>

@@ -39,8 +39,9 @@ static inline bool isSupportedSchedulerPseudo(Operation *op) {
 static inline bool isSupportedSchedulerSALU(Operation *op) {
   return isa<waveamdmachine::SAddI32Op, waveamdmachine::SAddM0I32Op,
              waveamdmachine::SAddU64Op, waveamdmachine::SAddU64U32Op,
-             waveamdmachine::SAndB32Op, waveamdmachine::SAndn2ExecB32Op,
-             waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SAndSaveexecB32Op,
+             waveamdmachine::DmaIssueDelayOp, waveamdmachine::SAndB32Op,
+             waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndn2ExecB64Op,
+             waveamdmachine::SAndSaveexecB32Op,
              waveamdmachine::SAndSaveexecB64Op, waveamdmachine::SCmpEqI32Op,
              waveamdmachine::SCmpLgI32Op, waveamdmachine::SCmpGtI32Op,
              waveamdmachine::SCmpGeI32Op, waveamdmachine::SCmpLtI32Op,

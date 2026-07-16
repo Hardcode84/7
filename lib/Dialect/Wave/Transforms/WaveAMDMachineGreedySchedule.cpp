@@ -82,6 +82,8 @@ static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
 static constexpr StringLiteral kDmaIssueTimingAttr =
     "waveamdmachine.dma_issue_timing";
+static constexpr StringLiteral kDmaIssueAfterDelayAttr =
+    "waveamdmachine.dma_issue_after_delay";
 static constexpr StringLiteral kReportPrefix =
     "waveamd-machine-schedule-report";
 
@@ -126,7 +128,7 @@ struct GreedyRegion {
   Operation *last = nullptr;
   unsigned blockOrdinal = 0;
   unsigned regionOrdinal = 0;
-  bool prefillLoopCarriedWaits = false;
+  bool dmaIssueTiming = false;
 };
 
 struct ArchResolution {
@@ -573,11 +575,12 @@ static StringRef edgeKindName(EdgeKind kind) {
   llvm_unreachable("unknown edge kind");
 }
 
-static void
-addSingletonReadEdges(Operation *op, unsigned index, GraphTables &graph,
-                      DenseMap<Operation *, unsigned> &node,
-                      const std::array<std::optional<unsigned>, 3> &lastWriter,
-                      std::array<SmallVector<unsigned, 4>, 3> &readers) {
+static void addSingletonReadEdges(
+    Operation *op, unsigned index, GraphTables &graph,
+    DenseMap<Operation *, unsigned> &node,
+    const std::array<std::optional<unsigned>, 3> &lastWriter,
+    std::array<SmallVector<unsigned, 4>, 3> &readers,
+    const std::array<SmallVector<unsigned, 4>, 3> &deadWriters) {
   llvm::SmallPtrSet<Type, 4> seenReadTypes;
   for (Value operand : op->getOperands()) {
     SingletonKind kind = getSingletonKind(operand.getType());
@@ -591,15 +594,77 @@ addSingletonReadEdges(Operation *op, unsigned index, GraphTables &graph,
     if (lastWriter[kindIndex] &&
         (defIt == node.end() || *lastWriter[kindIndex] != defIt->second))
       addEdge(graph, *lastWriter[kindIndex], index, EdgeKind::Singleton);
+    for (unsigned writer : deadWriters[kindIndex])
+      addEdge(graph, writer, index, EdgeKind::Singleton);
     if (!llvm::is_contained(readers[kindIndex], index))
       readers[kindIndex].push_back(index);
   }
 }
 
+static bool readsSingletonKind(Operation *op, SingletonKind kind) {
+  return llvm::any_of(op->getOperandTypes(), [kind](Type type) {
+    return getSingletonKind(type) == kind;
+  });
+}
+
+static bool hasUsedSingletonResult(Operation *op, SingletonKind kind) {
+  return llvm::any_of(op->getResults(), [kind](OpResult result) {
+    return getSingletonKind(result.getType()) == kind && !result.use_empty();
+  });
+}
+
+static void addPriorSingletonEdges(unsigned index, GraphTables &graph,
+                                   std::optional<unsigned> lastWriter,
+                                   ArrayRef<unsigned> readers,
+                                   bool skipCurrentReader = false) {
+  if (lastWriter)
+    addEdge(graph, *lastWriter, index, EdgeKind::Singleton);
+  for (unsigned reader : readers)
+    if (!skipCurrentReader || reader != index)
+      addEdge(graph, reader, index, EdgeKind::Singleton);
+}
+
+static void
+recordLegacySingletonWrite(unsigned index, unsigned kindIndex,
+                           GraphTables &graph,
+                           std::array<std::optional<unsigned>, 3> &lastWriter,
+                           std::array<SmallVector<unsigned, 4>, 3> &readers) {
+  addPriorSingletonEdges(index, graph, lastWriter[kindIndex],
+                         readers[kindIndex]);
+  readers[kindIndex].clear();
+  lastWriter[kindIndex] = index;
+}
+
+static void recordDeadSingletonWrite(
+    unsigned index, unsigned kindIndex, GraphTables &graph,
+    const std::array<std::optional<unsigned>, 3> &lastWriter,
+    const std::array<SmallVector<unsigned, 4>, 3> &readers,
+    std::array<SmallVector<unsigned, 4>, 3> &deadWriters) {
+  addPriorSingletonEdges(index, graph, lastWriter[kindIndex],
+                         readers[kindIndex]);
+  deadWriters[kindIndex].push_back(index);
+}
+
+static void
+recordLiveSingletonWrite(unsigned index, unsigned kindIndex, GraphTables &graph,
+                         std::array<std::optional<unsigned>, 3> &lastWriter,
+                         std::array<SmallVector<unsigned, 4>, 3> &readers,
+                         std::array<SmallVector<unsigned, 4>, 3> &deadWriters) {
+  addPriorSingletonEdges(index, graph, lastWriter[kindIndex],
+                         readers[kindIndex], /*skipCurrentReader=*/true);
+  for (unsigned writer : deadWriters[kindIndex])
+    addEdge(graph, writer, index, EdgeKind::Singleton);
+  readers[kindIndex].clear();
+  deadWriters[kindIndex].clear();
+  lastWriter[kindIndex] = index;
+}
+
 static void
 addSingletonWriteEdges(Operation *op, unsigned index, GraphTables &graph,
                        std::array<std::optional<unsigned>, 3> &lastWriter,
-                       std::array<SmallVector<unsigned, 4>, 3> &readers) {
+                       std::array<SmallVector<unsigned, 4>, 3> &readers,
+                       std::array<SmallVector<unsigned, 4>, 3> &deadWriters,
+                       bool splitDeadWriters) {
   llvm::SmallPtrSet<Type, 4> seenWriteTypes;
   for (Value result : op->getResults()) {
     SingletonKind kind = getSingletonKind(result.getType());
@@ -608,12 +673,19 @@ addSingletonWriteEdges(Operation *op, unsigned index, GraphTables &graph,
     if (!seenWriteTypes.insert(result.getType()).second)
       continue;
     unsigned kindIndex = getSingletonIndex(kind);
-    if (lastWriter[kindIndex])
-      addEdge(graph, *lastWriter[kindIndex], index, EdgeKind::Singleton);
-    for (unsigned reader : readers[kindIndex])
-      addEdge(graph, reader, index, EdgeKind::Singleton);
-    readers[kindIndex].clear();
-    lastWriter[kindIndex] = index;
+    if (!splitDeadWriters) {
+      recordLegacySingletonWrite(index, kindIndex, graph, lastWriter, readers);
+      continue;
+    }
+    bool liveWrite =
+        readsSingletonKind(op, kind) || hasUsedSingletonResult(op, kind);
+    if (!liveWrite) {
+      recordDeadSingletonWrite(index, kindIndex, graph, lastWriter, readers,
+                               deadWriters);
+      continue;
+    }
+    recordLiveSingletonWrite(index, kindIndex, graph, lastWriter, readers,
+                             deadWriters);
   }
 }
 
@@ -622,10 +694,16 @@ static LogicalResult addSingletonEdges(const GreedyRegion &region,
                                        DenseMap<Operation *, unsigned> &node) {
   std::array<std::optional<unsigned>, 3> lastWriter;
   std::array<SmallVector<unsigned, 4>, 3> readers;
+  std::array<SmallVector<unsigned, 4>, 3> deadWriters;
+  bool splitDeadWriters =
+      region.dmaIssueTiming && isa_and_nonnull<waveamdmachine::UniformLoopOp>(
+                                   region.block->getParentOp());
 
   for (auto [index, op] : llvm::enumerate(region.ops)) {
-    addSingletonReadEdges(op, index, graph, node, lastWriter, readers);
-    addSingletonWriteEdges(op, index, graph, lastWriter, readers);
+    addSingletonReadEdges(op, index, graph, node, lastWriter, readers,
+                          deadWriters);
+    addSingletonWriteEdges(op, index, graph, lastWriter, readers, deadWriters,
+                           splitDeadWriters);
   }
   return success();
 }
@@ -706,8 +784,11 @@ static LogicalResult buildGraph(const GreedyRegion &region,
       auto it = graph.node.find(def);
       if (it == graph.node.end())
         continue;
+      // Delay anchors at DMA issue, not memory retirement.
+      bool memoryEdge =
+          isMemToken(operand) && !isa<waveamdmachine::DmaIssueDelayOp>(op);
       addEdge(graph, it->second, dst,
-              isMemToken(operand) ? EdgeKind::MemToken : EdgeKind::Ssa);
+              memoryEdge ? EdgeKind::MemToken : EdgeKind::Ssa);
     }
   }
 
@@ -1010,7 +1091,7 @@ static MemoryKindSet getLoopCarriedTokenKinds(const GreedyRegion &region,
                                               unsigned consumer,
                                               const ValueOriginMap &origins) {
   MemoryKindSet kinds;
-  if (!region.prefillLoopCarriedWaits ||
+  if (!region.dmaIssueTiming ||
       !isa_and_nonnull<waveamdmachine::UniformLoopOp>(
           region.block->getParentOp()) ||
       !waveamdmachine::waitsForMemoryTokenDepsBeforeIssue(region.ops[consumer]))
@@ -1375,6 +1456,13 @@ static FailureOr<bool> canIssueTokenConsumerBeforeNext(
   if (failed(movedProjection))
     return failure();
 
+  if (region.dmaIssueTiming && isBarrierOp(region.ops[consumer]))
+    return movedProjection->memoryWaitCycles <
+               originalProjection->memoryWaitCycles ||
+           (movedProjection->memoryWaitCycles ==
+                originalProjection->memoryWaitCycles &&
+            movedProjection->issueBackpressureCycles <
+                originalProjection->issueBackpressureCycles);
   return movedProjection->memoryWaitCycles <=
              originalProjection->memoryWaitCycles &&
          movedProjection->issueBackpressureCycles <=
@@ -1495,11 +1583,81 @@ static bool fillsStall(FillableStall stall, const IssuePreview &candidate) {
   return true;
 }
 
+static unsigned findFirstUnscheduledBarrier(const GreedyRegion &region,
+                                            const BitVector &scheduled,
+                                            unsigned begin) {
+  for (unsigned index :
+       llvm::seq(begin, static_cast<unsigned>(region.ops.size())))
+    if (!scheduled.test(index) && isBarrierOp(region.ops[index]))
+      return index;
+  return region.ops.size();
+}
+
+static unsigned findFirstUnscheduledMemory(const GreedyRegion &region,
+                                           const BitVector &scheduled,
+                                           unsigned begin) {
+  for (unsigned index :
+       llvm::seq(begin, static_cast<unsigned>(region.ops.size())))
+    if (!scheduled.test(index) && waveamdmachine::getMemoryCounterKind(
+                                      region.ops[index]) != MemoryKind::None)
+      return index;
+  return region.ops.size();
+}
+
+static bool isPostBarrierFillerCandidate(unsigned index, const BitVector &ready,
+                                         const BitVector &scheduled,
+                                         const GreedyRegion &region) {
+  Operation *candidate = region.ops[index];
+  return ready.test(index) && !scheduled.test(index) && isPure(candidate) &&
+         waveamdmachine::getMemoryCounterKind(candidate) == MemoryKind::None;
+}
+
+static bool fillsReservedStall(Operation *candidate, FillableStall stall,
+                               const IssuePreview &preview,
+                               const waveamdmachine::ArchData &arch,
+                               const waveamdmachine::EventSimConfig &config) {
+  int64_t reserveCycles = static_cast<int64_t>(getIssueCount(candidate)) *
+                          waveamdmachine::getEventSimIssuePeriod(arch, config);
+  return fillsStall(stall, preview) &&
+         preview.nextIssueCycle + reserveCycles <= stall.issueCycle;
+}
+
+static FailureOr<unsigned> findDmaDelayPostBarrierFiller(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const IssueState &state, const BitVector &scheduled,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, FillableStall stall) {
+  if (!region.dmaIssueTiming ||
+      !isa<waveamdmachine::DmaIssueDelayOp>(region.ops[next]))
+    return region.ops.size();
+
+  unsigned barrier = findFirstUnscheduledBarrier(region, scheduled, next + 1);
+  if (barrier == region.ops.size())
+    return region.ops.size();
+
+  unsigned memory = findFirstUnscheduledMemory(region, scheduled, barrier + 1);
+  if (memory == region.ops.size())
+    return region.ops.size();
+
+  // Prefix fills barrier wait; downstream work shortens post-barrier path.
+  for (unsigned index : llvm::seq(memory + 1, ready.size())) {
+    Operation *candidate = region.ops[index];
+    if (!isPostBarrierFillerCandidate(index, ready, scheduled, region))
+      continue;
+    FailureOr<IssuePreview> preview = previewIssue(state, candidate);
+    if (failed(preview))
+      return failure();
+    if (fillsReservedStall(candidate, stall, *preview, arch, config))
+      return index;
+  }
+  return region.ops.size();
+}
+
 static FailureOr<unsigned>
-findStallFiller(const BitVector &ready, unsigned next,
-                const GreedyRegion &region, const IssueState &state,
-                const BitVector &scheduled, FillableStall stall,
-                const ValueOriginMap &origins) {
+findGenericStallFiller(const BitVector &ready, unsigned next,
+                       const GreedyRegion &region, const IssueState &state,
+                       const BitVector &scheduled, FillableStall stall,
+                       const ValueOriginMap &origins) {
   for (unsigned index : llvm::seq(ready.size())) {
     if (!ready.test(index) || index == next)
       continue;
@@ -1515,6 +1673,21 @@ findStallFiller(const BitVector &ready, unsigned next,
       return index;
   }
   return ready.size();
+}
+
+static FailureOr<unsigned>
+findStallFiller(const BitVector &ready, unsigned next,
+                const GreedyRegion &region, const IssueState &state,
+                const BitVector &scheduled,
+                const waveamdmachine::ArchData &arch,
+                const waveamdmachine::EventSimConfig &config,
+                FillableStall stall, const ValueOriginMap &origins) {
+  FailureOr<unsigned> postBarrier = findDmaDelayPostBarrierFiller(
+      ready, next, region, state, scheduled, arch, config, stall);
+  if (failed(postBarrier) || *postBarrier != region.ops.size())
+    return postBarrier;
+  return findGenericStallFiller(ready, next, region, state, scheduled, stall,
+                                origins);
 }
 
 static unsigned findFirstReadyNoInst(const BitVector &ready,
@@ -1632,8 +1805,45 @@ static bool nextStillReady(const BitVector &ready, const BitVector &scheduled,
   return !scheduled.test(next) && ready.test(next);
 }
 
+static int64_t
+getLdsDmaIssueLead(const waveamdmachine::ArchData &arch,
+                   const waveamdmachine::EventSimConfig &config) {
+  if (arch.ldsDmaIssueQueueDepth <= 0 || arch.ldsDmaIssueLatency <= 0)
+    return 0;
+  int64_t issuePeriod = waveamdmachine::getEventSimIssuePeriod(arch, config);
+  int64_t serviceInterval =
+      arch.ldsDmaIssueLatency / arch.ldsDmaIssueQueueDepth;
+  return serviceInterval / issuePeriod * issuePeriod;
+}
+
+static bool canLeadLdsDmaIssue(Operation *op, const IssuePreview &preview,
+                               const waveamdmachine::ArchData &arch,
+                               const waveamdmachine::EventSimConfig &config) {
+  int64_t lead = getLdsDmaIssueLead(arch, config);
+  return op->hasTrait<traits::LDSDmaOp>() && lead != 0 &&
+         preview.fuWaitCycles != 0 && preview.fuWaitCycles <= lead &&
+         preview.operandWaitCycles == 0 && preview.memoryWaitCycles == 0 &&
+         preview.hazardWaitInsts == 0;
+}
+
+static bool
+canIssueNextDespiteStall(const GreedyRegion &region, unsigned next,
+                         const IssuePreview &preview,
+                         const waveamdmachine::ArchData &arch,
+                         const waveamdmachine::EventSimConfig &config) {
+  Operation *op = region.ops[next];
+  bool canLeadDma = region.dmaIssueTiming &&
+                    !op->hasAttr(kDmaIssueAfterDelayAttr) &&
+                    canLeadLdsDmaIssue(op, preview, arch, config);
+  bool emptyBarrierWait =
+      isa<waveamdmachine::BarrierWaitOp>(op) && preview.memoryWaitCycles == 0;
+  return canLeadDma || emptyBarrierWait;
+}
+
 static FailureOr<bool>
 fillStallBeforeNext(const GreedyRegion &region, const GraphTables &graph,
+                    const waveamdmachine::ArchData &arch,
+                    const waveamdmachine::EventSimConfig &config,
                     IssueState &state, BitVector &ready, BitVector &scheduled,
                     SmallVectorImpl<unsigned> &pending,
                     SmallVectorImpl<unsigned> &order, GreedyStats &stats,
@@ -1646,14 +1856,13 @@ fillStallBeforeNext(const GreedyRegion &region, const GraphTables &graph,
       return failure();
     if (*readyNow)
       return true;
-    if (isa<waveamdmachine::BarrierWaitOp>(region.ops[next]) &&
-        nextPreview.memoryWaitCycles == 0)
+    if (canIssueNextDespiteStall(region, next, nextPreview, arch, config))
       return true;
 
     recordGapStats(region.ops[next], nextPreview, stats);
     FillableStall stall = getFillableStall(nextPreview);
-    FailureOr<unsigned> filler =
-        findStallFiller(ready, next, region, state, scheduled, stall, origins);
+    FailureOr<unsigned> filler = findStallFiller(
+        ready, next, region, state, scheduled, arch, config, stall, origins);
     if (failed(filler))
       return failure();
     if (*filler == region.ops.size()) {
@@ -1701,14 +1910,16 @@ static FailureOr<GreedyStepStatus> scheduleFirstReadyByOriginal(
 
 static FailureOr<GreedyStepStatus>
 scheduleOriginalNext(const GreedyRegion &region, const GraphTables &graph,
+                     const waveamdmachine::ArchData &arch,
+                     const waveamdmachine::EventSimConfig &config,
                      IssueState &state, BitVector &ready, BitVector &scheduled,
                      SmallVectorImpl<unsigned> &pending, GreedyResult &result,
                      unsigned next, const ValueOriginMap &origins,
                      const BitVector &noInsts) {
   IssuePreview preview;
   FailureOr<bool> filled = fillStallBeforeNext(
-      region, graph, state, ready, scheduled, pending, result.order,
-      result.stats, next, preview, origins, noInsts);
+      region, graph, arch, config, state, ready, scheduled, pending,
+      result.order, result.stats, next, preview, origins, noInsts);
   if (failed(filled))
     return failure();
   if (!*filled)
@@ -1945,8 +2156,9 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
   if (!ready.test(next))
     return scheduleFirstReadyByOriginal(region, graph, state, ready, scheduled,
                                         pending, result.order, origins);
-  return scheduleOriginalNext(region, graph, state, ready, scheduled, pending,
-                              result, next, origins, noInsts);
+  return scheduleOriginalNext(region, graph, arch, config, state, ready,
+                              scheduled, pending, result, next, origins,
+                              noInsts);
 }
 
 static GreedyResult
@@ -2284,7 +2496,8 @@ static bool hasLocalDmaIssueTiming(Block &block) {
   if (!isa_and_nonnull<waveamdmachine::UniformLoopOp>(block.getParentOp()))
     return false;
   return llvm::any_of(block.without_terminator(), [](Operation &op) {
-    return op.hasAttr(kDmaIssueTimingAttr);
+    return op.hasAttr(kDmaIssueTimingAttr) ||
+           isa<waveamdmachine::DmaIssueDelayOp>(op);
   });
 }
 
@@ -2309,7 +2522,7 @@ struct RegionCollector {
     region.last = region.ops.back();
     region.blockOrdinal = thisBlockOrdinal;
     region.regionOrdinal = nextRegion++;
-    region.prefillLoopCarriedWaits = hasLocalDmaIssueTiming(block);
+    region.dmaIssueTiming = hasLocalDmaIssueTiming(block);
     regions.push_back(std::move(region));
     ops.clear();
   }
@@ -2496,7 +2709,7 @@ struct WaveAMDMachineSchedulePass
 
     bool prioritizeLongLatencyVmem = true;
     bool prioritizeComputeResources = true;
-    bool prefillLoopCarriedWaits = region.prefillLoopCarriedWaits;
+    bool prefillLoopCarriedWaits = region.dmaIssueTiming;
     GreedyResult greedy;
     while (true) {
       TimingScope orderTiming = timing.nest("machine_schedule_build_order");

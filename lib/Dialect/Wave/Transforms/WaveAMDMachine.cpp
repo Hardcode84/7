@@ -60,6 +60,10 @@ using namespace mlir::waveamd;
 
 static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
+static constexpr StringLiteral kDmaIssueTimingAttr =
+    "waveamdmachine.dma_issue_timing";
+static constexpr StringLiteral kDmaIssueAfterDelayAttr =
+    "waveamdmachine.dma_issue_after_delay";
 
 namespace mlir::wave::wmsel {
 
@@ -511,6 +515,7 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
 }
 
 struct DmaIssueDelayConfig {
+  SmallVector<Operation *, 4> timingLoops;
   std::optional<int64_t> skipThreadThreshold;
   bool enabled = false;
 };
@@ -519,8 +524,13 @@ static FailureOr<DmaIssueDelayConfig>
 getDmaIssueDelayConfig(func::FuncOp func) {
   DmaIssueDelayConfig config;
   WalkResult walk = func.walk([&](waveamd::DmaLoadLdsOp op) {
-    if (op->hasAttr("issue_delay_cycles"))
+    if (op->hasAttr("issue_delay_cycles")) {
       config.enabled = true;
+      Operation *parent = op->getParentOp();
+      if (isa_and_nonnull<scf::ForOp>(parent) &&
+          !llvm::is_contained(config.timingLoops, parent))
+        config.timingLoops.push_back(parent);
+    }
     IntegerAttr threshold =
         op->getAttrOfType<IntegerAttr>("issue_delay_skip_thread_threshold");
     if (!threshold)
@@ -557,6 +567,7 @@ LogicalResult WaveAMDMachineSelector::run() {
     return failure();
   dmaIssueTimingEnabled = delayConfig->enabled;
   dmaIssueSkipThreadThreshold = delayConfig->skipThreadThreshold;
+  dmaIssueTimingLoops = std::move(delayConfig->timingLoops);
 
   Block &block = func.getBody().front();
   builder.setInsertionPointToStart(&block);
@@ -7683,6 +7694,7 @@ static LogicalResult selectDmaLoadLdsAddr64Fallback(
   S.lastDmaToken = {};
   S.lastDmaDstBase = {};
   S.lastDmaDstOffset = {};
+  S.lastDmaHadIssueDelay = false;
   S.values[op.getToken()] = *token;
   S.eraseIfTopLevel(op);
   return success();
@@ -7892,16 +7904,23 @@ static FailureOr<Value> materializeDmaIssueDelay(WaveAMDMachineSelector &S,
   return delay.getDelayedM0();
 }
 
-static void recordDmaM0(WaveAMDMachineSelector &S, const DmaPointers &ptrs,
-                        Value m0, Value token) {
+static void recordDmaM0(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                        const DmaPointers &ptrs, Value m0, Value token) {
   if (!S.dmaIssueTimingEnabled)
     return;
-  token.getDefiningOp()->setAttr("waveamdmachine.dma_issue_timing",
-                                 S.builder.getUnitAttr());
+  Operation *dma = token.getDefiningOp();
+  Operation *previousDma =
+      S.lastDmaToken ? S.lastDmaToken.getDefiningOp() : nullptr;
+  if (llvm::is_contained(S.dmaIssueTimingLoops, op->getParentOp()))
+    dma->setAttr(kDmaIssueTimingAttr, S.builder.getUnitAttr());
+  if (S.lastDmaHadIssueDelay && previousDma &&
+      previousDma->getBlock() == dma->getBlock())
+    dma->setAttr(kDmaIssueAfterDelayAttr, S.builder.getUnitAttr());
   S.lastDmaM0 = m0;
   S.lastDmaToken = token;
   S.lastDmaDstBase = ptrs.dstBase;
   S.lastDmaDstOffset = ptrs.dstOffset;
+  S.lastDmaHadIssueDelay = op->hasAttr("issue_delay_cycles");
 }
 
 static void bindDmaLoadLdsToken(WaveAMDMachineSelector &S,
@@ -7931,7 +7950,7 @@ trySelectBufferDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
     return failure();
   Value token =
       createDmaLoadLdsMachineOp(S, op, **selectedSource, *m0, isBuffer);
-  recordDmaM0(S, ptrs, *m0, token);
+  recordDmaM0(S, op, ptrs, *m0, token);
   return std::optional<Value>{token};
 }
 
@@ -7951,7 +7970,7 @@ selectPlannedDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   if (failed(source))
     return failure();
   Value token = createDmaLoadLdsMachineOp(S, op, *source, *m0, isBuffer);
-  recordDmaM0(S, ptrs, *m0, token);
+  recordDmaM0(S, op, ptrs, *m0, token);
   bindDmaLoadLdsToken(S, op, token);
   return success();
 }
