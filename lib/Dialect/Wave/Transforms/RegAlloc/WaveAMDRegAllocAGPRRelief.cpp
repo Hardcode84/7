@@ -293,10 +293,12 @@ findFailureOverlap(const RegAllocTransformFailure &failureRecord,
   return nullptr;
 }
 
-static FailureOr<bool> respectsCombinedVGPRFamilyBudget(
-    func::FuncOp func, const AGPRReliefSetGroup &candidate,
-    const RegAllocTransformFailure &failureRecord,
-    const AGPRReliefSetIndex &setIndex, unsigned agprFootprint) {
+static FailureOr<bool>
+respectsCombinedVGPRFamilyBudget(func::FuncOp func,
+                                 const AGPRReliefSetGroup &candidate,
+                                 const RegAllocTransformFailure &failureRecord,
+                                 const AGPRReliefSetIndex &setIndex,
+                                 unsigned agprFootprint, int64_t bridgeCount) {
   FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
       wave::getRegAllocTransformVGPRFamilyBudget(func);
   if (failed(familyBudget))
@@ -313,11 +315,19 @@ static FailureOr<bool> respectsCombinedVGPRFamilyBudget(
       return false;
     const wave::RegAllocTransformAliasSet *request =
         setIndex.setsById.lookup(failureRecord.set);
-    if (!request || request->width > moved->width)
+    if (!request)
       return false;
-    vgprFootprint = std::max(getVGPRFootprintAfterRemovingSets(
-                                 failureRecord.overlaps, candidate.sets),
-                             moved->base + request->width);
+    if (request->width <= moved->width) {
+      vgprFootprint = std::max(getVGPRFootprintAfterRemovingSets(
+                                   failureRecord.overlaps, candidate.sets),
+                               moved->base + request->width);
+    } else {
+      // Bridged partial relief preempts cheaper providers on every retry.
+      if (bridgeCount != 0)
+        return false;
+      vgprFootprint = getVGPRFootprintAfterRemovingSets(failureRecord.overlaps,
+                                                        /*removedSets=*/{});
+    }
   }
 
   unsigned pressure =
@@ -778,15 +788,15 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   unsigned agprFootprint = 0;
   if (!canAllocateAGPRReliefCandidate(group, fitState, agprFootprint))
     return std::optional<AGPRReliefCandidate>();
+  AGPRReliefScore score = getAGPRReliefScore(
+      group, values, groupValues, failureRecord.position, isaVersion);
   FailureOr<bool> respectsFamilyBudget = respectsCombinedVGPRFamilyBudget(
-      func, group, failureRecord, setIndex, agprFootprint);
+      func, group, failureRecord, setIndex, agprFootprint, score.bridgeCount);
   if (failed(respectsFamilyBudget))
     return failure();
   if (!*respectsFamilyBudget)
     return std::optional<AGPRReliefCandidate>();
 
-  AGPRReliefScore score = getAGPRReliefScore(
-      group, values, groupValues, failureRecord.position, isaVersion);
   AGPRReliefCandidate candidate;
   candidate.set = set;
   candidate.values = std::move(groupValues);
