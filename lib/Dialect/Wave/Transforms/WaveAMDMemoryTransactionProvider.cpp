@@ -532,6 +532,109 @@ addB16Contribution(sym::Store &store, sym::ExprHandle offset,
   return compose(store, offset, getB16CombineOp(composition), *contribution);
 }
 
+static size_t findGroupedB16AddEnd(sym::Store &store,
+                                   sym::ExprHandle coefficient,
+                                   ArrayRef<sym::ExprHandle> coefficients,
+                                   size_t begin,
+                                   ArrayRef<sym::PredHandle> assumptions) {
+  size_t end = begin + 1;
+  int64_t scale = 2;
+  while (end < coefficients.size()) {
+    FailureOr<sym::ExprHandle> expected =
+        composeInt(store, coefficient, sym::ExprBinaryOp::Mul, scale);
+    if (failed(expected) ||
+        !proveEqual(store, *expected, coefficients[end], assumptions))
+      break;
+    ++end;
+    scale *= 2;
+  }
+  return end;
+}
+
+static FailureOr<sym::ExprHandle>
+addGroupedB16Contribution(sym::Store &store, sym::ExprHandle offset,
+                          sym::ExprHandle coefficient, sym::ExprHandle item,
+                          size_t begin, size_t end) {
+  FailureOr<sym::ExprHandle> field = floorDiv(store, item, int64_t{1} << begin);
+  if (failed(field))
+    return failure();
+  field = composeInt(store, *field, sym::ExprBinaryOp::Mod,
+                     int64_t{1} << (end - begin));
+  if (failed(field))
+    return failure();
+  FailureOr<sym::ExprHandle> contribution =
+      compose(store, coefficient, sym::ExprBinaryOp::Mul, *field);
+  if (failed(contribution))
+    return failure();
+  return compose(store, offset, sym::ExprBinaryOp::Add, *contribution);
+}
+
+static FailureOr<sym::ExprHandle>
+buildGroupedB16AddOffset(sym::Store &store, sym::ExprHandle item,
+                         ArrayRef<sym::ExprHandle> coefficients,
+                         ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> offset = sym::composeExprInt(store, 0);
+  if (failed(offset))
+    return failure();
+  for (size_t begin = 0; begin < coefficients.size();) {
+    sym::ExprHandle coefficient = coefficients[begin];
+    if (sym::getIntegerLiteralValue(coefficient) == 0) {
+      ++begin;
+      continue;
+    }
+    // Doubling coefficients encode one ordinary integer field.
+    size_t end = findGroupedB16AddEnd(store, coefficient, coefficients, begin,
+                                      assumptions);
+    offset = addGroupedB16Contribution(store, *offset, coefficient, item, begin,
+                                       end);
+    if (failed(offset))
+      return failure();
+    begin = end;
+  }
+  return offset;
+}
+
+static FailureOr<SmallVector<sym::ExprHandle>> collectB16Coefficients(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::ExprHandle item, sym::ExprHandle base, int64_t itemCount,
+    ArrayRef<sym::PredHandle> assumptions, B16Combine composition) {
+  SmallVector<sym::ExprHandle> coefficients;
+  for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
+       ++bit, bitValue <<= 1) {
+    FailureOr<sym::ExprHandle> coefficient = getB16Coefficient(
+        request, item, base, bit, bitValue, assumptions, composition);
+    if (failed(coefficient))
+      return failure();
+    coefficients.push_back(*coefficient);
+  }
+  return coefficients;
+}
+
+static FailureOr<sym::ExprHandle>
+buildPerBitB16Offset(sym::Store &store, sym::ExprHandle item,
+                     ArrayRef<sym::ExprHandle> coefficients,
+                     B16Combine composition) {
+  FailureOr<sym::ExprHandle> offset = sym::composeExprInt(store, 0);
+  if (failed(offset))
+    return failure();
+  for (auto [bit, coefficient] : llvm::enumerate(coefficients)) {
+    offset = addB16Contribution(store, *offset, coefficient, item,
+                                int64_t{1} << bit, composition);
+    if (failed(offset))
+      return failure();
+  }
+  return offset;
+}
+
+static FailureOr<sym::ExprHandle>
+buildB16Offset(sym::Store &store, sym::ExprHandle item,
+               ArrayRef<sym::ExprHandle> coefficients,
+               ArrayRef<sym::PredHandle> assumptions, B16Combine composition) {
+  if (composition == B16Combine::Add)
+    return buildGroupedB16AddOffset(store, item, coefficients, assumptions);
+  return buildPerBitB16Offset(store, item, coefficients, composition);
+}
+
 static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::ExprHandle item, int64_t itemCount,
@@ -539,25 +642,19 @@ static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
   sym::Store &store = *request.store;
   FailureOr<sym::ExprHandle> base = substituteItem(
       store, request.points.front().byteOffset, item, 0, assumptions);
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-  if (failed(base) || failed(zero))
+  if (failed(base))
     return failure();
 
-  sym::ExprHandle offset = *zero;
-  for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
-       ++bit, bitValue <<= 1) {
-    FailureOr<sym::ExprHandle> coefficient = getB16Coefficient(
-        request, item, *base, bit, bitValue, assumptions, composition.base);
-    if (failed(coefficient))
-      return failure();
-    FailureOr<sym::ExprHandle> next = addB16Contribution(
-        store, offset, *coefficient, item, bitValue, composition.bits);
-    if (failed(next))
-      return failure();
-    offset = *next;
-  }
+  FailureOr<SmallVector<sym::ExprHandle>> coefficients = collectB16Coefficients(
+      request, item, *base, itemCount, assumptions, composition.base);
+  if (failed(coefficients))
+    return failure();
+  FailureOr<sym::ExprHandle> offset =
+      buildB16Offset(store, item, *coefficients, assumptions, composition.bits);
+  if (failed(offset))
+    return failure();
   FailureOr<sym::ExprHandle> address =
-      compose(store, *base, getB16CombineOp(composition.base), offset);
+      compose(store, *base, getB16CombineOp(composition.base), *offset);
   if (failed(address))
     return failure();
   FailureOr<sym::ExprHandle> simplified =

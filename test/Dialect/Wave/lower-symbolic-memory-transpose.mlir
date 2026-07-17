@@ -66,10 +66,33 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// CHECK-LABEL: func.func @gfx950_b16_grouped_add_transpose(
+// CHECK-NOT: wave.load
+// CHECK: wave.index_expr <"1024*floor(1/64*item) + 8*Mod(item, 64)">
+// CHECK: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b16_grouped_add_transpose(
+      %base: !wave.ptr<#wave.shared, f16>)
+      -> !wave.simd<vector<4xf16>, 64>
+      attributes {wave.workgroup_size = array<i32: 256, 1, 1>} {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16 * (1024 * floor((item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot) / 64) + 8 * Mod(item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot, 64) + Mod(item, 4))">>
+        bindings []() packet_bindings []()
+        : (!wave.ptr<#wave.shared, f16>)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<4xf16>, 64>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @gfx950_b16_xor_transpose(
 // CHECK-NOT: wave.load
 // CHECK: wave.ptr_cast
-// CHECK: wave.index_expr
+// CHECK: wave.index_expr <"xor(
+// CHECK-SAME: Mod(floor(1/16*item), 2)
+// CHECK-SAME: Mod(floor(1/8*item), 2)
 // CHECK: wave.ptr_add
 // CHECK: wave.ptr_cast
 // CHECK: waveamd.transpose_load
