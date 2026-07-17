@@ -3,8 +3,9 @@
 ## Result
 
 `gfx950-f16-256x256-4wave` keeps the 256x256x64 CTA tile but assigns one
-128x128 output tile to each of four wave64 waves. Phased LDS-DMA reaches
-`1.413956 PFLOP/s` on MI350X. The eight-wave profile remains unchanged.
+128x128 output tile to each of four wave64 waves. Generated phased LDS-DMA
+reaches `1.413956 PFLOP/s` on MI350X. A frozen manual convergence kernel reaches
+`1.498017 PFLOP/s`. The eight-wave profile remains unchanged.
 
 - Shape: `M=N=K=8192`.
 - Types: f16 A/B/C, f32 accumulation.
@@ -53,6 +54,54 @@ Matched MI350X HPL medians improved from `913.2385` to `909.8135 us`
 Twelve alternating K=2048 pairs measured median `none` at `55.896 us` and
 `cs` at `55.882 us`. Full regeneration changed only the normal and specialized
 four-wave f16 artifacts; all other perf goldens remained byte-identical.
+
+## Manual 1.5 PFLOP/s Reproduction
+
+The accepted dense column-major ASM measured `733.370`, `734.536`, and
+`733.978 us`: median `733.978 us`, or `1.498017 PFLOP/s`. Same-session
+hipBLASLt solution 2530 measured `729.637`, `731.718`, and `729.511 us`:
+median `729.637 us`, or `1.506930 PFLOP/s`. Protocol: device 2, `rand_int`, 25
+warmups, 500 launches, no clock controls.
+
+Full 8192x8192 output comparisons passed bit-exactly for `rand_int` and random
+seeds 0 and 17. Each case checked 67,108,864 f16 values against the validated
+dense column-major kernel.
+
+Controlled convergence, one mechanism at a time:
+
+| Variant | Time us | PFLOP/s |
+|---|---:|---:|
+| Compact padded LDS | 758.346 | 1.449881 |
+| Scalar SRD/M0 cadence | 751.801 | 1.462504 |
+| Loop-carried LDS read addresses | 747.130 | 1.471647 |
+| Early next-buffer M0 base | 743.238 | 1.479353 |
+| Odd-SIMD event staggering, packed output | 733.947 | 1.498080 |
+| LDS dense-output transpose | 749.273 | 1.467438 |
+| Transposed MFMA lanes, direct dense stores | 733.978 | 1.498017 |
+
+LDS read address carry removes address setup from the first MFMA phase. Early
+M0 setup fills remaining scalar issue holes. Odd-SIMD staggering shifts DMA,
+barrier, and LDS-read pressure without changing token legality.
+
+Dense output needs coalesced lanes. Replacing the LDS transpose with correct
+but scattered direct stores regressed to `836-843 us`. The accepted version
+swaps MFMA operands in place, transposes destination accumulator tiles, packs
+eight adjacent M values, and emits 32 `buffer_store_dwordx4` instructions per
+wave. In-place rewriting matters: moving operand uses to another scheduled
+MFMA can read a register before its defining LDS load or after reuse.
+
+Physical accumulator tile row 7 is rotated: `a224` holds logical column 7,
+`a228` holds column 0, through `a252` holding column 6. The transpose absorbs
+that allocation permutation; the epilogue stays regular.
+
+Compiler reproduction remains split into three general mechanisms:
+
+1. Carry next parity's LDS read addresses and scalar bases through loop SSA.
+2. Model per-SIMD steady-state issue phase in greedy scheduling.
+3. Select lane-transposed MFMA output layout with cross-fragment f16 packing.
+
+No post-greedy schedule veto. Each improvement belongs in IR layout or the
+greedy scheduler/model.
 
 ## hipBLASLt Gap Investigation
 
@@ -153,9 +202,90 @@ token-only barrier contraction removes its redundant ISA barrier while keeping
 wait and token order. hipBLASLt 2530 remains `44.759 us`, or 6.11%, faster than
 the initial phased result.
 
-The padded `0x1040` M0 cadence remains a separate experiment. Current `0x1000`
-layout and phased token topology no longer change together, so a padding A/B can
-isolate its contribution.
+### Padded LDS A/B
+
+Per-tile LDS padding is not the missing gap. Both hipBLASLt layouts were tested
+without changing phased token topology:
+
+| Layout | LDS | M0 step | Median us | PFLOP/s |
+|---|---:|---:|---:|---:|
+| Wave baseline | 131,072 B | `0x1000` | 777.907 | 1.413423 |
+| solution 2530 layout | 133,120 B | `0x1040` | 780.641 | 1.408473 |
+| solution 2531 layout | 135,168 B | `0x1080` | 778.682 | 1.412016 |
+
+Each row used 25 warmups, 500 timed launches, three repeats, and `rand_int`
+seed 0. Baseline samples were `776.610`, `781.656`, and `777.907 us`.
+The 16-byte samples were `780.641`, `777.823`, and `781.113 us`; the 32-byte
+samples were `780.487`, `777.432`, and `778.682 us`.
+
+Both padded kernels passed strict positional random-data checking at
+`1024x512x256` with `max_abs_diff=0`. Padding reduced allocation to 392 VGPR
+address slots and 136 AGPRs, but did not improve execution time. Active profile
+stays unpadded.
+
+### Barrier lookahead A/B
+
+Bounded 24-instruction lookahead moved loop barriers from MFMA ordinals
+`24,49` to `24,50,98`. Remaining three DMA requests then clustered after the
+last barrier. Median regressed from `777.907 us` to `792.656 us`, or from
+1.413423 to 1.387048 PFLOP/s. Samples were `793.836`, `791.766`, and
+`792.656 us` with the baseline protocol.
+
+Strict positional random-data checking at `1024x512x256` passed with
+`max_abs_diff=0`. Delay-to-loop-end also passed correctness but regressed to
+`818.306 us`. Barrier delay alone does not reproduce hipBLASLt cadence.
+
+### Bulk LDS-read fence A/B
+
+An explicit workgroup barrier drained all 16 carried LDS reads at loop tail.
+It removed eight `lgkmcnt(7)` waits from loop entry, but median regressed to
+`789.961 us`, or 1.391856 PFLOP/s. Samples were `789.961`, `811.833`, and
+`788.190 us`. Strict random-data checking passed with `max_abs_diff=0`.
+
+Cross-wave synchronization costs more than the removed wait instructions.
+A per-wave wait with an SSA completion token was also tested. The token fed
+the next iteration's `current_access`, preventing arbitrary scheduler motion.
+It removed the entry waits without `s_barrier`, but still regressed to
+`787.996 us`, or 1.395326 PFLOP/s. Samples were `789.251`, `787.432`, and
+`787.996 us`; strict random-data checking passed with `max_abs_diff=0`.
+
+### hipBLASLt DMA-cohort A/B
+
+Regrouping DMA requests into hipBLASLt's `5/5/3/3` cohorts without moving
+the compute cuts placed barriers after MFMA 25 and 49. Median regressed to
+`801.810 us`, or 1.371287 PFLOP/s. Samples were `799.705`, `824.065`, and
+`801.810 us`; strict random-data checking passed with `max_abs_diff=0`.
+
+Cohort shape alone is not the optimization. hipBLASLt's matching MFMA and LDS
+read cadence must be evaluated separately.
+
+### MFMA-cut A/B
+
+Flattening phase-0 compute ranges moved the two generated barriers exactly to
+MFMA 22 and 52 without changing the accepted DMA grouping. Median regressed to
+`789.534 us`, or 1.392608 PFLOP/s. Samples were `789.534`, `785.515`, and
+`789.998 us`; strict random-data checking passed with `max_abs_diff=0`.
+
+Barrier ordinals alone do not reproduce hipBLASLt's overlap. LDS-read cadence
+and the third readiness phase remain coupled to those cuts.
+
+Spreading the first eight LDS reads across MFMAs `1,3,...,15` while retaining
+the 22/52 cuts recovered part of the loss. Median was `785.355 us`, or
+1.400019 PFLOP/s. Samples were `789.518`, `785.355`, and `784.924 us`; strict
+random-data checking passed with `max_abs_diff=0`. The accepted 24/49 cadence
+remains faster.
+
+Removing greedy's forced no-wait barrier chaining retained the third barrier
+at MFMA 98 with `vmcnt(13)`. Median regressed to `793.203 us`, or 1.386167
+PFLOP/s. Samples were `794.882`, `793.203`, and `790.698 us`; strict random
+checking passed with `max_abs_diff=0`. Matching the no-drain barrier without
+matching surrounding DMA placement is insufficient.
+
+The same scheduler-only change on the accepted 24/49 pipeline retained a
+third barrier at MFMA 96 with `vmcnt(13)`. Median was `787.393 us`, or
+1.396395 PFLOP/s. Samples were `787.393`, `805.263`, and `785.536 us`; strict
+random checking passed with `max_abs_diff=0`. Forced barrier chaining remains
+enabled because its contraction is faster for the current token topology.
 
 ## Configuration
 
@@ -206,10 +336,9 @@ static workgroup barriers: 5
 Combined register pressure fits the one-wave-per-SIMD target. Bank placement
 is not an acceptance constraint.
 
-hipBLASLt's four-wave reference still differs structurally: its direct-to-LDS
-M0 cadence advances by `0x1040` and allocates 130 KiB LDS. Wave advances by
-`0x1000` in an unpadded 128 KiB layout. Reproducing that padded/swizzled LDS
-mapping is separate work.
+hipBLASLt solution 2530 advances direct-to-LDS M0 by `0x1040` and allocates
+130 KiB LDS. Solution 2531 uses `0x1080` and 132 KiB. Wave stays at `0x1000`
+and 128 KiB: matched padding did not move performance.
 
 ## Artifacts
 
@@ -226,6 +355,49 @@ gfx950 A/B was waived; timings above are not attributed to these hashes.
 - ASM SHA-256:
   `db776c0c9ff870de4c67f91f2347c10212ecb5901104d35c25b7f26919aa9ee1`.
 - Lines/bytes: 1,313 / 55,446.
+- 1.5-class manual Wave ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-cacheline-padded-phased-oracle-lds-read-carry-m0-early-parity-stagger-coalesced-column-major.s`.
+- Manual Wave ASM SHA-256:
+  `c2766f867d726c0f364dcc05939952af3c5ef89507b15ec34d5c51f738884605`.
+- Manual Wave ASM lines/bytes: 1,831 / 78,559.
+- Rejected 16-byte padding ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-padded-16b.s`, SHA-256
+  `efecefe116bea7aa6b98c8f30ebb76468146339018964f757499a95d59525ee2`.
+- Rejected 32-byte padding ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-padded-32b.s`, SHA-256
+  `3053965c40c4fb7fb31f2576d9ce0dd546e13e5fb894c7a9d60514772b7cc48e`.
+- Rejected 24-instruction barrier-lookahead ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-barrier-lookahead24-rejected.s`,
+  SHA-256
+  `e0e85e5b5d207241b53ec8f7f3acd1ee5521d9b5232cd941cc69544db2f979fd`.
+- Rejected bulk-read workgroup-barrier ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-bulk-barrier-rejected.s`,
+  SHA-256
+  `d6c9579e9de99d4e43687ed37d94934c6d70ba227fb5c2a466eb4dc730826090`.
+- Rejected loop-carried token-wait ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-token-wait-rejected.s`,
+  SHA-256
+  `5c328477496eae83c01b6ab3cbf7b734de9b290766ef7902910ad24455b0e60f`.
+- Rejected `5/5/3/3` DMA-cohort ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-cohorts-5-5-3-3-rejected.s`,
+  SHA-256
+  `e20e541af442f103763ca2fa0e4e8444f2290137f23fad0df26b3f9c59f034cd`.
+- Rejected 22/52 MFMA-cut ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-cuts-22-52-rejected.s`,
+  SHA-256
+  `bd9e2d3f1feabd584647083a27c4264bdddf3bf9b72a4f9c138ae3200ea86e97`.
+- Rejected 22/52 cut plus hipBLASLt-style LDS-read cadence ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-cuts-reads-rejected.s`,
+  SHA-256
+  `a484dd4ff3306c2905af1f78dfd18688f5c919f41af16e6bc7c57cd72e8a11b1`.
+- Rejected 22/52/98 three-barrier ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-three-barrier-rejected.s`,
+  SHA-256
+  `f2c0a78cb69b5f70356977cf6441c6b27262df4decd328a45d1ee654daffe369`.
+- Rejected scheduler-only no-barrier-chaining ASM:
+  `docs/PerfReferences/wave-gfx950-f16-8192-4wave-no-barrier-chaining-rejected.s`,
+  SHA-256
+  `1d42d534a8c2194c0cee76c9329ec1209a01ef581d8355759d5a46fd6dfef14e`.
 
 ## Commands
 
