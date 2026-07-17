@@ -3,16 +3,21 @@
 ## Result
 
 `gfx950-f16-256x256-4wave` keeps the 256x256x64 CTA tile but assigns one
-128x128 output tile to each of four wave64 waves. Generated phased LDS-DMA
-reaches `1.413956 PFLOP/s` on MI350X. A frozen manual convergence kernel reaches
-`1.498017 PFLOP/s`. The eight-wave profile remains unchanged.
+128x128 output tile to each of four wave64 waves. Generated dense column-major
+output reaches `1.413296 PFLOP/s` on MI350X. A frozen manual convergence kernel
+reaches `1.498017 PFLOP/s`. The eight-wave profile remains unchanged.
 
 - Shape: `M=N=K=8192`.
 - Types: f16 A/B/C, f32 accumulation.
 - Input: `rand_int`, seed 0.
 - Launch: grid `32x32x1`, block `256x1x1`.
-- Dynamic LDS: 131,072 bytes.
+- Dynamic LDS: 133,120 bytes.
 - Clock controls: not used.
+
+Kernel-side port qualification used device 2, `rand_int`, 25 warmups, and 500
+launches. Frozen tile-packed ASM measured `783.708`, `785.509`, and `779.891 us`;
+dense column-major ASM measured `777.977`, `778.575`, and `775.848 us`.
+Medians: `1.402961` versus `1.413296 PFLOP/s`.
 
 Initial qualification used 25 warmups, 500 timed launches, and three repeats:
 
@@ -337,8 +342,8 @@ Combined register pressure fits the one-wave-per-SIMD target. Bank placement
 is not an acceptance constraint.
 
 hipBLASLt solution 2530 advances direct-to-LDS M0 by `0x1040` and allocates
-130 KiB LDS. Solution 2531 uses `0x1080` and 132 KiB. Wave stays at `0x1000`
-and 128 KiB: matched padding did not move performance.
+130 KiB LDS. Solution 2531 uses `0x1080` and 132 KiB. Dense Wave uses `0x1040`
+and 130 KiB; cache-line padding alone has no measured performance credit.
 
 ## Artifacts
 
