@@ -513,6 +513,66 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
+    // CHECK-LABEL: func.func @lds_relief_rebuilds_non_dominating_base(
+    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+    // CHECK: [[OFF:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK-NEXT: [[FRESH_LANE:%.*]] = waveamdmachine.v_readfirstlane_b32 [[OFF]]
+    // CHECK: [[FRESH_SHIFT:%.*]] = waveamdmachine.imm 2
+    // CHECK: [[FRESH_BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32 [[FRESH_LANE]], [[FRESH_SHIFT]]
+    // CHECK: [[ORIGINAL_LANE:%.*]] = waveamdmachine.v_readfirstlane_b32 [[OFF]]
+    // CHECK-NEXT: [[SPILL:%.*]] = waveamdmachine.v_mov_b32_tuple [[ORIGINAL_LANE]]
+    // CHECK-NEXT: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[FRESH_BASE]]
+    // CHECK-NEXT: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]], [[SPILL]]
+    // CHECK: [[DEPENDENT_LANE:%.*]] = waveamdmachine.v_readfirstlane_b32 [[SPILL]]
+    // CHECK: waveamdmachine.s_lshl_b32 [[DEPENDENT_LANE]],
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[FRESH_BASE]]
+    // CHECK-NEXT: [[RELOAD:%.*]], {{%.*}} = waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
+    // CHECK: waveamdmachine.v_add_u32 [[RELOAD]],
+    func.func @lds_relief_rebuilds_non_dominating_base()
+        attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+      %lane = waveamdmachine.v_readfirstlane_b32 %off
+          {waveamdmachine.regalloc_debug_temp}
+          : (!waveamdmachine.reg<vgpr, 1, 0>)
+            -> !waveamdmachine.reg<sgpr, 1>
+      %spill = waveamdmachine.v_mov_b32_tuple %lane
+          {waveamdmachine.regalloc_sgpr_to_vgpr_pinned,
+           waveamdmachine.regalloc_sgpr_to_vgpr_temp}
+          : (!waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %dependent_lane = waveamdmachine.v_readfirstlane_b32 %spill
+          : (!waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<sgpr, 1>
+      %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+      %dependent_base, %unused_scc =
+          waveamdmachine.s_lshl_b32 %dependent_lane, %two
+          {waveamdmachine.lds_addtid_base_bytes = 0 : i64,
+           waveamdmachine.regalloc_debug_temp}
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<scc, 1>)
+      %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+      %a, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %b, %tok2 = waveamdmachine.global_load_b32 %off, %base after %tok1
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %sum = waveamdmachine.v_add_u32 %a, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use = waveamdmachine.v_add_u32 %spill, %sum
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.s_endpgm
+      return
+    }
+
     // CHECK-LABEL: func.func @lds_relief_accounts_multiple_waves(
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 512 : i64
     // CHECK: waveamdmachine.ds_store_addtid_b32

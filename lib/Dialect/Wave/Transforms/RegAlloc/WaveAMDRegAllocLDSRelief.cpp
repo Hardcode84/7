@@ -17,6 +17,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -282,12 +283,44 @@ struct LDSAddTidContext {
   Value waveBaseBytes;
 };
 
-static Value findLDSAddTidBase(func::FuncOp func, unsigned ldsBaseBytes) {
+static Operation *getLDSReliefStoreAnchor(const LDSReliefSlot &slot) {
+  if (!slot.loopCarry)
+    return slot.value.getDefiningOp();
+  waveamdmachine::UniformLoopOp loop = slot.loopCarry->loop;
+  OpOperand *loopUse = &loop.getInitsMutable()[slot.loopCarry->index];
+  return wave::regalloc::getLoopCarryInitStoreDiagOp(slot.value, loopUse, loop);
+}
+
+static bool ldsAddTidBaseDominatesStore(Value base, const LDSReliefSlot &slot,
+                                        DominanceInfo &dominance) {
+  if (Operation *anchor = getLDSReliefStoreAnchor(slot))
+    return dominance.dominates(base, anchor);
+
+  // Block-start stores require a base from an ancestor block.
+  auto arg = dyn_cast<BlockArgument>(slot.value);
+  if (!arg)
+    return false;
+  Operation *parent = arg.getOwner()->getParentOp();
+  return parent && dominance.dominates(base, parent);
+}
+
+static bool ldsAddTidBaseDominatesCandidate(Value base,
+                                            const LDSReliefCandidate &candidate,
+                                            DominanceInfo &dominance) {
+  return llvm::all_of(candidate.slots, [&](const LDSReliefSlot &slot) {
+    return ldsAddTidBaseDominatesStore(base, slot, dominance);
+  });
+}
+
+static Value findLDSAddTidBase(func::FuncOp func, unsigned ldsBaseBytes,
+                               const LDSReliefCandidate &candidate,
+                               DominanceInfo &dominance) {
   Block &entry = func.getBody().front();
   for (Operation &op : entry) {
     std::optional<unsigned> attr =
         getUnsignedIntegerAttr(&op, kLDSAddTidBaseAttr);
-    if (attr && *attr == ldsBaseBytes && op.getNumResults() != 0)
+    if (attr && *attr == ldsBaseBytes && op.getNumResults() != 0 &&
+        ldsAddTidBaseDominatesCandidate(op.getResult(0), candidate, dominance))
       return op.getResult(0);
   }
   return {};
@@ -312,10 +345,13 @@ getLDSBaseBytes(func::FuncOp func, const LDSReliefCandidate &candidate) {
   return *baseBytes;
 }
 
-static LDSAddTidContext materializeLDSAddTidContext(OpBuilder &builder,
-                                                    func::FuncOp func,
-                                                    unsigned ldsBaseBytes) {
-  if (Value existing = findLDSAddTidBase(func, ldsBaseBytes))
+static LDSAddTidContext
+materializeLDSAddTidContext(OpBuilder &builder, func::FuncOp func,
+                            unsigned ldsBaseBytes,
+                            const LDSReliefCandidate &candidate) {
+  DominanceInfo dominance(func);
+  if (Value existing =
+          findLDSAddTidBase(func, ldsBaseBytes, candidate, dominance))
     return LDSAddTidContext{existing};
 
   MLIRContext *ctx = builder.getContext();
@@ -1022,6 +1058,11 @@ static FailureOr<Value> storeLDSValue(OpBuilder &builder,
                                       const LDSAddTidContext &context,
                                       const LDSReliefSlot &slot, Value token) {
   wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
+  if (auto arg = dyn_cast<BlockArgument>(slot.value)) {
+    Operation *baseDef = context.waveBaseBytes.getDefiningOp();
+    if (baseDef && baseDef->getBlock() == arg.getOwner())
+      builder.setInsertionPointAfter(baseDef);
+  }
   return storeLDSValueAt(builder, context, slot.value.getLoc(), slot.value,
                          slot.type, token, slot.plan);
 }
@@ -1098,7 +1139,7 @@ static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
   if (failed(ldsBaseBytes))
     return failure();
   LDSAddTidContext context =
-      materializeLDSAddTidContext(builder, func, *ldsBaseBytes);
+      materializeLDSAddTidContext(builder, func, *ldsBaseBytes, candidate);
   auto store = [&](const LDSReliefSlot &slot, Value token) {
     return storeLDSValue(builder, context, slot, token);
   };
