@@ -313,11 +313,21 @@ static FailureOr<bool> respectsCombinedVGPRFamilyBudget(
       return false;
     const wave::RegAllocTransformAliasSet *request =
         setIndex.setsById.lookup(failureRecord.set);
-    if (!request || request->width > moved->width)
+    if (!request)
       return false;
-    vgprFootprint = std::max(getVGPRFootprintAfterRemovingSets(
-                                 failureRecord.overlaps, candidate.sets),
-                             moved->base + request->width);
+    if (request->width <= moved->width) {
+      vgprFootprint = std::max(getVGPRFootprintAfterRemovingSets(
+                                   failureRecord.overlaps, candidate.sets),
+                               moved->base + request->width);
+    } else {
+      // Moving one narrow overlap may not make the wider failed request fit
+      // immediately, but it still makes monotonic pressure progress.  The
+      // outer allocation loop can move further cheap overlaps before retrying
+      // the request.  Bound combined-family pressure by the current VGPR
+      // footprint until that retry instead of rejecting the useful move.
+      vgprFootprint = getVGPRFootprintAfterRemovingSets(failureRecord.overlaps,
+                                                        /*removedSets=*/{});
+    }
   }
 
   unsigned pressure =

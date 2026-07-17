@@ -532,6 +532,60 @@ addB16Contribution(sym::Store &store, sym::ExprHandle offset,
   return compose(store, offset, getB16CombineOp(composition), *contribution);
 }
 
+static FailureOr<sym::ExprHandle>
+buildGroupedB16AddOffset(sym::Store &store, sym::ExprHandle item,
+                         ArrayRef<sym::ExprHandle> coefficients,
+                         ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  if (failed(zero))
+    return failure();
+  sym::ExprHandle offset = *zero;
+
+  for (size_t begin = 0; begin < coefficients.size();) {
+    sym::ExprHandle coefficient = coefficients[begin];
+    if (sym::getIntegerLiteralValue(coefficient) == 0) {
+      ++begin;
+      continue;
+    }
+
+    // Adjacent item bits whose coefficients double form one ordinary integer
+    // field.  Keep that field grouped instead of expanding it into independent
+    // bit tests; the compact quotient/remainder form materially reduces the
+    // address DAG carried by transpose-heavy kernels.
+    size_t end = begin + 1;
+    int64_t scale = 2;
+    while (end < coefficients.size()) {
+      FailureOr<sym::ExprHandle> expected =
+          composeInt(store, coefficient, sym::ExprBinaryOp::Mul, scale);
+      if (failed(expected) ||
+          !proveEqual(store, *expected, coefficients[end], assumptions))
+        break;
+      ++end;
+      scale *= 2;
+    }
+
+    int64_t divisor = int64_t{1} << begin;
+    FailureOr<sym::ExprHandle> field = floorDiv(store, item, divisor);
+    if (failed(field))
+      return failure();
+    int64_t modulus = int64_t{1} << (end - begin);
+    field = composeInt(store, *field, sym::ExprBinaryOp::Mod, modulus);
+    if (failed(field))
+      return failure();
+    FailureOr<sym::ExprHandle> contribution =
+        compose(store, coefficient, sym::ExprBinaryOp::Mul, *field);
+    if (failed(contribution))
+      return failure();
+    FailureOr<sym::ExprHandle> next =
+        compose(store, offset, sym::ExprBinaryOp::Add, *contribution);
+    if (failed(next))
+      return failure();
+    offset = *next;
+    begin = end;
+  }
+  return offset;
+}
+
 static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::ExprHandle item, int64_t itemCount,
@@ -539,25 +593,39 @@ static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
   sym::Store &store = *request.store;
   FailureOr<sym::ExprHandle> base = substituteItem(
       store, request.points.front().byteOffset, item, 0, assumptions);
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-  if (failed(base) || failed(zero))
+  if (failed(base))
     return failure();
 
-  sym::ExprHandle offset = *zero;
+  SmallVector<sym::ExprHandle> coefficients;
   for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
        ++bit, bitValue <<= 1) {
     FailureOr<sym::ExprHandle> coefficient = getB16Coefficient(
         request, item, *base, bit, bitValue, assumptions, composition.base);
     if (failed(coefficient))
       return failure();
-    FailureOr<sym::ExprHandle> next = addB16Contribution(
-        store, offset, *coefficient, item, bitValue, composition.bits);
-    if (failed(next))
-      return failure();
-    offset = *next;
+    coefficients.push_back(*coefficient);
   }
+
+  FailureOr<sym::ExprHandle> offset = failure();
+  if (composition.bits == B16Combine::Add) {
+    offset = buildGroupedB16AddOffset(store, item, coefficients, assumptions);
+  } else {
+    offset = sym::composeExprInt(store, 0);
+    if (failed(offset))
+      return failure();
+    for (auto [bit, coefficient] : llvm::enumerate(coefficients)) {
+      FailureOr<sym::ExprHandle> next =
+          addB16Contribution(store, *offset, coefficient, item,
+                             int64_t{1} << bit, composition.bits);
+      if (failed(next))
+        return failure();
+      offset = *next;
+    }
+  }
+  if (failed(offset))
+    return failure();
   FailureOr<sym::ExprHandle> address =
-      compose(store, *base, getB16CombineOp(composition.base), offset);
+      compose(store, *base, getB16CombineOp(composition.base), *offset);
   if (failed(address))
     return failure();
   FailureOr<sym::ExprHandle> simplified =

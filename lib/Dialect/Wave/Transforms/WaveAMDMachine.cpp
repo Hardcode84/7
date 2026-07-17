@@ -2785,6 +2785,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
       .Case<arith::CmpIOp>([&](auto o) { return selectArithCmp(o); })
       .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
+      .Case<arith::SelectOp>([&](auto o) { return selectTokenSelect(o); })
       .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
@@ -7038,6 +7039,17 @@ LogicalResult WaveAMDMachineSelector::selectTokenJoin(Operation *op) {
     operands.push_back(expect(dependency, op));
   values[op->getResult(0)] = waveamdmachine::TokenJoinOp::create(
       builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectTokenSelect(arith::SelectOp op) {
+  if (!isa<MemTokenType>(op.getType()))
+    return op.emitError("only memory-token arith.select is supported");
+  SmallVector<Value> operands{expect(op.getTrueValue(), op),
+                              expect(op.getFalseValue(), op)};
+  values[op.getResult()] = waveamdmachine::TokenJoinOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()), operands);
   eraseIfTopLevel(op);
   return success();
 }

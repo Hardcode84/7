@@ -15,6 +15,18 @@ func.func @select_uniform(%pred: i1, %a: i32, %b: i32) -> i32 {
   return %r : i32
 }
 
+// SELECT-LABEL: func.func @select_memory_token
+// SELECT: [[TRUE:%.*]] = waveamdmachine.token
+// SELECT: [[FALSE:%.*]] = waveamdmachine.token
+// SELECT: waveamdmachine.token_join [[TRUE]], [[FALSE]]
+func.func @select_memory_token(%pred: i1) {
+  %true = wave.token : !wave.mem.token
+  %false = wave.token : !wave.mem.token
+  %merged = arith.select %pred, %true, %false : !wave.mem.token
+  %barrier = wave.barrier %merged : (!wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @select_uniform_index_args
 // SELECT: waveamdmachine.tuple_from_elements
 // SELECT: waveamdmachine.tuple_from_elements

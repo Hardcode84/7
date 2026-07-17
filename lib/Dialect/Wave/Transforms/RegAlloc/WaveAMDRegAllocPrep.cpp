@@ -356,6 +356,22 @@ static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
   return false;
 }
 
+static bool hasUseAfterLoop(Value value, waveamdmachine::UniformLoopOp loop) {
+  Block *block = loop->getBlock();
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (user == loop.getOperation() ||
+        operationIsInside(loop.getOperation(), user))
+      continue;
+    Operation *top = ancestorInBlock(user, block);
+    // A use outside the containing block is not proven to precede the loop.
+    // Keep the loop's writable carry storage distinct conservatively.
+    if (!top || loop->isBeforeInBlock(top))
+      return true;
+  }
+  return false;
+}
+
 static bool shouldRematerializeLoopInit(Value init,
                                         waveamdmachine::UniformLoopOp loop) {
   DenseSet<Value> visiting;
@@ -393,7 +409,9 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
       bool localNestedInit = needsLocalNestedLoopInit(loop, init);
       bool rematInit = shouldRematerializeLoopInit(init, loop);
       bool invariantLoopUse = hasInvariantBodyRead(init, loop);
-      if (!repeatedInit && !localNestedInit && !rematInit && !invariantLoopUse)
+      bool postLoopUse = hasUseAfterLoop(init, loop);
+      if (!repeatedInit && !localNestedInit && !rematInit &&
+          !invariantLoopUse && !postLoopUse)
         continue;
       Operation *def = init.getDefiningOp();
       DuplicateRematPolicy rematPolicy =

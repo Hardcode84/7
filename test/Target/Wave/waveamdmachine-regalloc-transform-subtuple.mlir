@@ -172,6 +172,50 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %loop : !waveamdmachine.reg<vgpr, 2>
   }
 
+  // A loop init that remains live after the loop cannot alias writable carry
+  // storage.  In particular, CSE commonly shares a scalar zero between the IV
+  // initializer and post-loop address arithmetic.
+  // PREP-LABEL: func.func @loop_init_with_post_loop_use(
+  // PREP: [[INIT:%.*]] = waveamdmachine.s_mov_b32_value
+  // PREP-NEXT: [[CARRY:%.*]] = waveamdmachine.copy_tuple [[INIT]]
+  // PREP-NEXT: [[LOOP:%.*]] = waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[CARRY]]
+  // PREP: [[POST:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[INIT]],
+  // SCAN-LABEL: func.func @loop_init_with_post_loop_use(
+  // SCAN: [[INIT:%.*]] = waveamdmachine.s_mov_b32_value
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 1, [[#INIT_REG:]]>
+  // SCAN-NEXT: [[CARRY:%.*]] = waveamdmachine.copy_tuple [[INIT]]
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 1, [[#CARRY_REG:]]>
+  // SCAN-NEXT: [[LOOP:%.*]] = waveamdmachine.uniform_loop
+  // SCAN-SAME: carries([[CARRY]] : !waveamdmachine.reg<sgpr, 1, [[#CARRY_REG]]>)
+  // SCAN: [[POST:%.*]], %{{.*}} = waveamdmachine.s_add_i32 [[INIT]],
+  // SCAN-SAME: !waveamdmachine.reg<sgpr, 1, [[#INIT_REG]]>
+  func.func @loop_init_with_post_loop_use(
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> !waveamdmachine.reg<sgpr, 1> {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %init = waveamdmachine.s_mov_b32_value %zero
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%carry: !waveamdmachine.reg<sgpr, 1>):
+      %next, %scc = waveamdmachine.s_add_i32 %carry, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %cond
+          : !waveamdmachine.reg<scc, 1>
+          carries(%next : !waveamdmachine.reg<sgpr, 1>)
+    } -> !waveamdmachine.reg<sgpr, 1>
+    %post, %post_scc = waveamdmachine.s_add_i32 %init, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>,
+              !waveamdmachine.reg<scc, 1>)
+    return %post : !waveamdmachine.reg<sgpr, 1>
+  }
+
   // Forwarding an init unchanged is not an invariant body read.
   // PREP-LABEL: func.func @loop_init_passthrough(
   // PREP-SAME: [[SRC:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>

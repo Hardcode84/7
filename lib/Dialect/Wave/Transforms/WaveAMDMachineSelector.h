@@ -390,6 +390,7 @@ public:
   LogicalResult selectFRcp(FRcpOp op);
   LogicalResult selectIndexExpr(IndexExprOp op);
   LogicalResult selectCmp(CmpIOp op);
+  LogicalResult selectTokenSelect(arith::SelectOp op);
   LogicalResult selectSelect(SelectOp op);
   LogicalResult selectBallot(BallotOp op);
   LogicalResult selectReadFirst(ReadFirstOp op);
