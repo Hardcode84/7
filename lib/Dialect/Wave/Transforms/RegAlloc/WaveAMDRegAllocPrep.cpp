@@ -356,6 +356,21 @@ static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
   return false;
 }
 
+static bool hasUseAfterLoop(Value value, waveamdmachine::UniformLoopOp loop) {
+  Block *block = loop->getBlock();
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (user == loop.getOperation() ||
+        operationIsInside(loop.getOperation(), user))
+      continue;
+    Operation *top = ancestorInBlock(user, block);
+    // Cross-block use order unknown: keep writable carry storage distinct.
+    if (!top || loop->isBeforeInBlock(top))
+      return true;
+  }
+  return false;
+}
+
 static bool shouldRematerializeLoopInit(Value init,
                                         waveamdmachine::UniformLoopOp loop) {
   DenseSet<Value> visiting;
@@ -377,6 +392,13 @@ static bool needsLocalNestedLoopInit(waveamdmachine::UniformLoopOp loop,
   return parentLoop && !valueIsDefinedInside(parentLoop.getOperation(), init);
 }
 
+static bool needsDistinctLoopInit(Value init,
+                                  waveamdmachine::UniformLoopOp loop,
+                                  bool repeatedInit, bool rematInit) {
+  return repeatedInit || needsLocalNestedLoopInit(loop, init) || rematInit ||
+         hasInvariantBodyRead(init, loop) || hasUseAfterLoop(init, loop);
+}
+
 static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
   SmallVector<waveamdmachine::UniformLoopOp> loops;
   func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
@@ -390,10 +412,8 @@ static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
         continue;
       }
       bool repeatedInit = !seen.insert(init).second;
-      bool localNestedInit = needsLocalNestedLoopInit(loop, init);
       bool rematInit = shouldRematerializeLoopInit(init, loop);
-      bool invariantLoopUse = hasInvariantBodyRead(init, loop);
-      if (!repeatedInit && !localNestedInit && !rematInit && !invariantLoopUse)
+      if (!needsDistinctLoopInit(init, loop, repeatedInit, rematInit))
         continue;
       Operation *def = init.getDefiningOp();
       DuplicateRematPolicy rematPolicy =
