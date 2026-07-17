@@ -237,6 +237,9 @@ def Wave_SelectOp : Wave_Op<"select", [
     `!wave.mask<W>` condition selects lane-wise and therefore requires a
     lane-shaped result with the same width (`!wave.simd<..., W>` or
     `!wave.mask<W>`).
+
+    Memory-token arms conservatively join both dependencies. Their condition
+    does not weaken ordering.
   }];
 
   let arguments = (ins AnyType:$condition,
@@ -244,6 +247,7 @@ def Wave_SelectOp : Wave_Op<"select", [
                        AnyType:$false_value);
   let results = (outs AnyType:$result);
   let hasCustomAssemblyFormat = 1;
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 

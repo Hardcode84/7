@@ -742,11 +742,11 @@ func.func @select_rejects_bad_condition(%pred: i32, %a: i32, %b: i32) {
 
 // -----
 
-func.func @select_rejects_token(%pred: i1) {
+func.func @select_rejects_masked_token(%mask: !wave.mask<32>) {
   %t0 = wave.token : !wave.mem.token
   %t1 = wave.token : !wave.mem.token
-  // expected-error @+1 {{cannot select memory tokens}}
-  %r = wave.select %pred, %t0, %t1 : !wave.mem.token
+  // expected-error @+1 {{mask condition requires SIMD or mask result}}
+  %r = wave.select %mask, %t0, %t1 : !wave.mask<32>, !wave.mem.token
   return
 }
 

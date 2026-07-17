@@ -162,6 +162,17 @@ func.func @single_input_join() -> !wave.mem.token {
   return %joined : !wave.mem.token
 }
 
+// CHECK-LABEL: func.func @token_select
+// CHECK-SAME: (%[[PRED:.*]]: i1, %[[TRUE:.*]]: !wave.mem.token, %[[FALSE:.*]]: !wave.mem.token)
+// CHECK-NOT: wave.select
+// CHECK: %[[JOINED:.*]] = wave.join %[[TRUE]], %[[FALSE]] : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+// CHECK: return %[[JOINED]] : !wave.mem.token
+func.func @token_select(%pred: i1, %true: !wave.mem.token,
+                        %false: !wave.mem.token) -> !wave.mem.token {
+  %selected = wave.select %pred, %true, %false : !wave.mem.token
+  return %selected : !wave.mem.token
+}
+
 // CHECK-LABEL: func.func @join_drops_dummy_and_duplicates
 // CHECK-SAME: (%[[A:.*]]: !wave.mem.token, %[[B:.*]]: !wave.mem.token)
 // CHECK-NOT: wave.token

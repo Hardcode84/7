@@ -1054,8 +1054,6 @@ void SelectOp::print(OpAsmPrinter &p) {
 LogicalResult SelectOp::verify() {
   Type condType = getCondition().getType();
   Type resultType = getResult().getType();
-  if (isa<MemTokenType>(resultType))
-    return emitOpError("cannot select memory tokens");
   if (condType.isInteger(1))
     return success();
   auto maskType = dyn_cast<MaskType>(condType);
@@ -1072,6 +1070,28 @@ LogicalResult SelectOp::verify() {
     return success();
   }
   return emitOpError("mask condition requires SIMD or mask result");
+}
+
+namespace {
+struct CanonicalizeTokenSelectOp : OpRewritePattern<SelectOp> {
+  using OpRewritePattern<SelectOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SelectOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!isa<MemTokenType>(op.getType()))
+      return failure();
+    std::array<Value, 2> dependencies{op.getTrueValue(), op.getFalseValue()};
+    JoinOp join =
+        JoinOp::create(rewriter, op.getLoc(), op.getType(), dependencies);
+    rewriter.replaceOp(op, join.getResult());
+    return success();
+  }
+};
+} // namespace
+
+void SelectOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  patterns.add<CanonicalizeTokenSelectOp>(context);
 }
 
 LogicalResult WhereOp::verify() {

@@ -391,6 +391,7 @@ public:
   LogicalResult selectIndexExpr(IndexExprOp op);
   LogicalResult selectCmp(CmpIOp op);
   LogicalResult selectSelect(SelectOp op);
+  LogicalResult selectTokenSelect(SelectOp op);
   LogicalResult selectBallot(BallotOp op);
   LogicalResult selectReadFirst(ReadFirstOp op);
   LogicalResult selectShuffle(ShuffleOp op);

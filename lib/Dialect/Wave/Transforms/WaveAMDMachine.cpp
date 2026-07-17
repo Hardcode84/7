@@ -6258,6 +6258,8 @@ static LogicalResult selectRegisterValue(WaveAMDMachineSelector &S, SelectOp op,
 LogicalResult WaveAMDMachineSelector::selectSelect(SelectOp op) {
   bool maskCondition = isa<MaskType>(op.getCondition().getType());
   Type resultType = op.getType();
+  if (isa<MemTokenType>(resultType))
+    return selectTokenSelect(op);
   if (isWavePointerLikeType(resultType)) {
     if (failed(selectPointer(*this, op, maskCondition)))
       return failure();
@@ -7038,6 +7040,15 @@ LogicalResult WaveAMDMachineSelector::selectTokenJoin(Operation *op) {
     operands.push_back(expect(dependency, op));
   values[op->getResult(0)] = waveamdmachine::TokenJoinOp::create(
       builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectTokenSelect(SelectOp op) {
+  std::array<Value, 2> dependencies{expect(op.getTrueValue(), op),
+                                    expect(op.getFalseValue(), op)};
+  values[op.getResult()] = waveamdmachine::TokenJoinOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()), dependencies);
   eraseIfTopLevel(op);
   return success();
 }
