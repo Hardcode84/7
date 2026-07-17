@@ -1072,26 +1072,20 @@ LogicalResult SelectOp::verify() {
   return emitOpError("mask condition requires SIMD or mask result");
 }
 
-namespace {
-struct CanonicalizeTokenSelectOp : OpRewritePattern<SelectOp> {
-  using OpRewritePattern<SelectOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(SelectOp op,
-                                PatternRewriter &rewriter) const override {
-    if (!isa<MemTokenType>(op.getType()))
-      return failure();
-    std::array<Value, 2> dependencies{op.getTrueValue(), op.getFalseValue()};
-    JoinOp join =
-        JoinOp::create(rewriter, op.getLoc(), op.getType(), dependencies);
-    rewriter.replaceOp(op, join.getResult());
-    return success();
+OpFoldResult SelectOp::fold(FoldAdaptor adaptor) {
+  if (getTrueValue() == getFalseValue())
+    return getTrueValue();
+  if (matchPattern(adaptor.getCondition(), m_One())) {
+    if (Attribute trueValue = adaptor.getTrueValue())
+      return trueValue;
+    return getTrueValue();
   }
-};
-} // namespace
-
-void SelectOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
-                                           MLIRContext *context) {
-  patterns.add<CanonicalizeTokenSelectOp>(context);
+  if (matchPattern(adaptor.getCondition(), m_Zero())) {
+    if (Attribute falseValue = adaptor.getFalseValue())
+      return falseValue;
+    return getFalseValue();
+  }
+  return {};
 }
 
 LogicalResult WhereOp::verify() {

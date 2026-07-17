@@ -164,13 +164,83 @@ func.func @single_input_join() -> !wave.mem.token {
 
 // CHECK-LABEL: func.func @token_select
 // CHECK-SAME: (%[[PRED:.*]]: i1, %[[TRUE:.*]]: !wave.mem.token, %[[FALSE:.*]]: !wave.mem.token)
-// CHECK-NOT: wave.select
-// CHECK: %[[JOINED:.*]] = wave.join %[[TRUE]], %[[FALSE]] : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-// CHECK: return %[[JOINED]] : !wave.mem.token
+// CHECK: %[[SELECTED:.*]] = wave.select %[[PRED]], %[[TRUE]], %[[FALSE]] : !wave.mem.token
+// CHECK-NOT: wave.join
+// CHECK: return %[[SELECTED]] : !wave.mem.token
 func.func @token_select(%pred: i1, %true: !wave.mem.token,
                         %false: !wave.mem.token) -> !wave.mem.token {
   %selected = wave.select %pred, %true, %false : !wave.mem.token
   return %selected : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @constant_token_select
+// CHECK-SAME: (%[[TRUE:.*]]: !wave.mem.token, %[[FALSE:.*]]: !wave.mem.token)
+// CHECK-NOT: wave.select
+// CHECK-NOT: wave.join
+// CHECK: return %[[TRUE]], %[[FALSE]] : !wave.mem.token, !wave.mem.token
+func.func @constant_token_select(%true: !wave.mem.token,
+                                 %false: !wave.mem.token)
+    -> (!wave.mem.token, !wave.mem.token) {
+  %yes = arith.constant true
+  %no = arith.constant false
+  %selected_true = wave.select %yes, %true, %false : !wave.mem.token
+  %selected_false = wave.select %no, %true, %false : !wave.mem.token
+  return %selected_true, %selected_false : !wave.mem.token, !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @constant_scalar_select
+// CHECK-SAME: (%[[TRUE:.*]]: i32, %[[FALSE:.*]]: i32)
+// CHECK-NOT: wave.select
+// CHECK: return %[[TRUE]], %[[FALSE]] : i32, i32
+func.func @constant_scalar_select(%true: i32, %false: i32) -> (i32, i32) {
+  %yes = arith.constant true
+  %no = arith.constant false
+  %selected_true = wave.select %yes, %true, %false : i32
+  %selected_false = wave.select %no, %true, %false : i32
+  return %selected_true, %selected_false : i32, i32
+}
+
+// CHECK-LABEL: func.func @constant_mask_select
+// CHECK-SAME: (%[[TRUE:.*]]: !wave.simd<i32, 32>, %[[FALSE:.*]]: !wave.simd<i32, 32>)
+// CHECK-NOT: wave.select
+// CHECK: return %[[TRUE]], %[[FALSE]] : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+func.func @constant_mask_select(%true: !wave.simd<i32, 32>,
+                                %false: !wave.simd<i32, 32>)
+    -> (!wave.simd<i32, 32>, !wave.simd<i32, 32>) {
+  %all = wave.constant true -> !wave.mask<32>
+  %none = wave.constant false -> !wave.mask<32>
+  %selected_true = wave.select %all, %true, %false
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %selected_false = wave.select %none, %true, %false
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  return %selected_true, %selected_false
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+}
+
+// CHECK-LABEL: func.func @constant_select_splats
+// CHECK-SAME: (%[[TRUE:.*]]: i32, %[[FALSE:.*]]: i32, %[[TRUE_VEC:.*]]: vector<2xi32>, %[[FALSE_VEC:.*]]: vector<2xi32>)
+// CHECK: %[[TRUE_SPLAT:.*]] = wave.splat %[[TRUE]] : i32 -> !wave.simd<i32, 32>
+// CHECK: %[[FALSE_VEC_SPLAT:.*]] = wave.splat %[[FALSE_VEC]] : vector<2xi32> -> !wave.simd<vector<2xi32>, 32>
+// CHECK-NOT: wave.select
+// CHECK: return %[[TRUE_SPLAT]], %[[FALSE_VEC_SPLAT]] : !wave.simd<i32, 32>, !wave.simd<vector<2xi32>, 32>
+func.func @constant_select_splats(%true: i32, %false: i32,
+                                  %true_vec: vector<2xi32>,
+                                  %false_vec: vector<2xi32>)
+    -> (!wave.simd<i32, 32>, !wave.simd<vector<2xi32>, 32>) {
+  %yes = arith.constant true
+  %no = arith.constant false
+  %true_splat = wave.splat %true : i32 -> !wave.simd<i32, 32>
+  %false_splat = wave.splat %false : i32 -> !wave.simd<i32, 32>
+  %true_vec_splat = wave.splat %true_vec
+      : vector<2xi32> -> !wave.simd<vector<2xi32>, 32>
+  %false_vec_splat = wave.splat %false_vec
+      : vector<2xi32> -> !wave.simd<vector<2xi32>, 32>
+  %selected_splat = wave.select %yes, %true_splat, %false_splat
+      : !wave.simd<i32, 32>
+  %selected_vec_splat = wave.select %no, %true_vec_splat, %false_vec_splat
+      : !wave.simd<vector<2xi32>, 32>
+  return %selected_splat, %selected_vec_splat
+      : !wave.simd<i32, 32>, !wave.simd<vector<2xi32>, 32>
 }
 
 // CHECK-LABEL: func.func @join_drops_dummy_and_duplicates

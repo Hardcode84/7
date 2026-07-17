@@ -72,9 +72,14 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %raclean = transform.apply_registered_pass "wave-cleanup-allocs" to %rdivcs
         : (!transform.any_op) -> !transform.any_op
+    // First canon picks constant arms; second cleans joins and dead conditions.
     %racanon = transform.apply_registered_pass "canonicalize" to %raclean
         : (!transform.any_op) -> !transform.any_op
-    %ralloc = transform.apply_registered_pass "wave-resolve-allocs" to %racanon
+    %rselect = transform.apply_registered_pass "wave-lower-token-selects" to %racanon
+        : (!transform.any_op) -> !transform.any_op
+    %rselectc = transform.apply_registered_pass "canonicalize" to %rselect
+        : (!transform.any_op) -> !transform.any_op
+    %ralloc = transform.apply_registered_pass "wave-resolve-allocs" to %rselectc
         : (!transform.any_op) -> !transform.any_op
     %rdlp = transform.apply_registered_pass "wave-delay-loop-carried-packs" to %ralloc
         : (!transform.any_op) -> !transform.any_op

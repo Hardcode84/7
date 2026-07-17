@@ -159,6 +159,18 @@ def WaveLowerSymbolicMemory : Pass<"wave-lower-symbolic-memory"> {
   ];
 }
 
+def WaveLowerTokenSelects : Pass<"wave-lower-token-selects"> {
+  let summary = "Lower unresolved Wave memory-token selects";
+  let description = [{
+    Lowers unresolved memory-token `wave.select` operations to conservative
+    `wave.join` operations. Pipeline placement after canonicalization preserves
+    constant-condition arm elimination.
+  }];
+  let dependentDialects = [
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
   let summary = "Remove writes to unread Wave allocations";
   let description = [{

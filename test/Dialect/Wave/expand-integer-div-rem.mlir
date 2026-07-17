@@ -124,12 +124,10 @@ func.func @signed_const_simd_i32_rem_negative_divisor(
 // -----
 
 // CHECK-LABEL: func.func @signed_const_i32_negative_numerator
-// CHECK: [[MINUS_SEVEN:%.*]] = arith.constant -7 : i32
-// CHECK: [[SEVEN:%.*]] = wave.constant 7 : i32
-// CHECK: [[ABS:%.*]] = wave.select {{%.*}}, [[SEVEN]], [[MINUS_SEVEN]]
-// CHECK: [[HI:%.*]] = wave.binary mulhui [[ABS]]
-// CHECK: wave.binary subi {{%.*}}, {{%.*}}
-// CHECK: return
+// CHECK-NOT: wave.select
+// CHECK: [[QUOT:%.*]] = wave.constant -2 : i32
+// CHECK: [[REM:%.*]] = wave.constant -1 : i32
+// CHECK: return [[QUOT]], [[REM]] : i32, i32
 func.func @signed_const_i32_negative_numerator() -> (i32, i32) {
   %minus_seven = arith.constant -7 : i32
   %three = arith.constant 3 : i32
@@ -141,15 +139,12 @@ func.func @signed_const_i32_negative_numerator() -> (i32, i32) {
 // -----
 
 // CHECK-LABEL: func.func @signed_const_i32_int_min_ones
-// CHECK: [[WAVE_ZERO:%.*]] = wave.constant 0 : i32
 // CHECK: [[MIN:%.*]] = arith.constant -2147483648 : i32
 // CHECK: [[ZERO:%.*]] = arith.constant 0 : i32
 // CHECK: [[WAVE_MIN:%.*]] = wave.constant -2147483648 : i32
-// CHECK: [[ABS:%.*]] = wave.select {{%.*}}, [[WAVE_MIN]], [[MIN]]
-// CHECK: [[WRAPPED_NEG:%.*]] = wave.binary subi [[ZERO]], [[ABS]]
-// CHECK: [[OVERFLOW_QUOT:%.*]] = wave.select {{%.*}}, [[WRAPPED_NEG]], [[ABS]]
-// CHECK: [[MINUS_ONE_REM:%.*]] = wave.select {{%.*}}, [[WAVE_ZERO]], [[ZERO]]
-// CHECK: return [[MIN]], [[ZERO]], [[OVERFLOW_QUOT]], [[MINUS_ONE_REM]]
+// CHECK: [[WAVE_ZERO:%.*]] = wave.constant 0 : i32
+// CHECK-NOT: wave.select
+// CHECK: return [[MIN]], [[ZERO]], [[WAVE_MIN]], [[WAVE_ZERO]]
 func.func @signed_const_i32_int_min_ones() -> (i32, i32, i32, i32) {
   %min = arith.constant -2147483648 : i32
   %one = arith.constant 1 : i32

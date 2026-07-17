@@ -238,8 +238,9 @@ def Wave_SelectOp : Wave_Op<"select", [
     lane-shaped result with the same width (`!wave.simd<..., W>` or
     `!wave.mask<W>`).
 
-    Memory-token arms conservatively join both dependencies. Their condition
-    does not weaken ordering.
+    Memory-token arms with an unresolved condition conservatively join both
+    dependencies during backend legalization. Constant conditions fold to the
+    selected dependency.
   }];
 
   let arguments = (ins AnyType:$condition,
@@ -247,7 +248,7 @@ def Wave_SelectOp : Wave_Op<"select", [
                        AnyType:$false_value);
   let results = (outs AnyType:$result);
   let hasCustomAssemblyFormat = 1;
-  let hasCanonicalizer = 1;
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 
