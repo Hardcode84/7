@@ -227,6 +227,24 @@ func.func @simd_i32_signed_div_splat_dynamic_pow2(%d: i32) attributes {wave.kern
   return
 }
 
+// SELECT-LABEL: func.func @simd_i32_signed_div_after_unsigned_rem
+// SELECT-NOT: waveamdmachine.v_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.v_cndmask_b32
+// SELECT: waveamdmachine.v_lshrrev_b32
+// SELECT-NOT: waveamdmachine.v_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.v_cndmask_b32
+func.func @simd_i32_signed_div_after_unsigned_rem() attributes {
+    gpu.known_block_size = array<i32: 256, 1, 1>, wave.kernel} {
+  %lane = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %thirty_two = wave.constant 32 : i32 -> !wave.simd<i32, 32>
+  %bounded = wave.binary remui %lane, %thirty_two
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %sixteen = wave.constant 16 : i32 -> !wave.simd<i32, 32>
+  %quot = wave.binary divsi %bounded, %sixteen
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
 // SELECT-LABEL: func.func @uniform_i64_signed_div_dynamic_pow2
 // SELECT-DAG: %[[X:.*]] = waveamdmachine.arg
 // SELECT-DAG: %[[D:.*]] = waveamdmachine.arg
@@ -503,7 +521,7 @@ func.func @simd_i64_xor(%a: !wave.simd<i64, 32>, %b: !wave.simd<i64, 32>) attrib
 
 // SELECT-LABEL: func.func @uniform_index_sub_div_rem
 // SELECT: waveamdmachine.s_add_u64
-// SELECT: waveamdmachine.s_lshr_b64
+// SELECT: waveamdmachine.s_lshr_b32
 // SELECT: waveamdmachine.s_and_b32
 // SELECT: waveamdmachine.tuple_from_elements
 func.func @uniform_index_sub_div_rem() attributes {wave.kernel} {

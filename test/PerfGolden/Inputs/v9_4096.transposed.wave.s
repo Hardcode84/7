@@ -18,127 +18,100 @@ v9_beyond_hotloop:
 .Lv9_beyond_hotloop.kernarg_preload_entry:
 	; wave backend: WaveAMDMachine MLIR pipeline finalized
 		s_add_i32 s0, s8, 0xff
-		s_mov_b32 s1, 0xff
-		s_cmp_lt_i32 s0, 0
-		s_cselect_b32 s14, s1, 0
-		s_add_i32 s0, s0, s14
-		s_ashr_i32 s0, s0, 8
-		s_add_i32 s14, s9, 0xff
-		s_cmp_lt_i32 s14, 0
-		s_cselect_b32 s1, s1, 0
-		s_add_i32 s1, s14, s1
-		s_ashr_i32 s1, s1, 8
+		s_lshr_b32 s0, s0, 8
+		s_add_i32 s1, s9, 0xff
+		s_lshr_b32 s1, s1, 8
 		s_and_b32 s14, s13, 7
 		s_lshr_b32 s13, s13, 3
 		s_mul_i32 s14, s14, 32
 		s_add_i32 s13, s14, s13
 		s_mul_i32 s1, s1, 4
-		s_cmp_lt_i32 s13, 0
-		s_cselect_b32 s14, 1, 0
-		s_xor_b32 s15, s13, -1
-		s_add_i32 s15, s15, 1
-		s_cmp_lg_u32 s14, 0
-		s_cselect_b32 s14, s15, s13
-		s_cselect_b32 s15, 1, 0
-		s_xor_b32 s16, s1, -1
-		s_add_i32 s16, s16, 1
-		s_cmp_lt_i32 s1, 0
-		s_cselect_b32 s16, s16, s1
-		v_mov_b32_e32 v1, s16
+		v_mov_b32_e32 v1, s1
 		v_cvt_f32_u32_e32 v1, v1
 		v_rcp_iflag_f32_e32 v1, v1
 		v_mov_b32_e32 v2, 0x4f7ffffe
 		v_mul_f32_e32 v1, v2, v1
 		v_cvt_u32_f32_e32 v1, v1
-		s_xor_b32 s17, s16, -1
-		v_readfirstlane_b32 s18, v1
-		s_add_i32 s17, s17, 1
-		s_mul_i32 s19, s17, s18
-		s_mul_hi_u32 s19, s18, s19
-		s_add_i32 s18, s18, s19
-		s_mul_hi_u32 s18, s14, s18
-		s_mul_i32 s19, s18, s16
-		s_xor_b32 s19, s19, -1
-		s_add_i32 s19, s19, 1
-		s_add_i32 s14, s14, s19
-		s_cmp_ge_u32 s14, s16
-		s_cselect_b32 s19, 1, 0
-		s_add_i32 s20, s18, 1
-		s_cmp_lg_u32 s19, 0
-		s_cselect_b32 s18, s20, s18
-		s_cselect_b32 s19, 1, 0
-		s_add_i32 s20, s14, s17
-		s_cmp_lg_u32 s19, 0
-		s_cselect_b32 s14, s20, s14
-		s_cmp_ge_u32 s14, s16
-		s_cselect_b32 s16, 1, 0
-		s_add_i32 s19, s18, 1
-		s_cmp_lg_u32 s16, 0
-		s_cselect_b32 s16, s19, s18
-		s_cselect_b32 s18, 1, 0
-		s_xor_b32 s1, s13, s1
-		s_xor_b32 s13, s16, -1
-		s_add_i32 s13, s13, 1
-		s_cmp_lt_i32 s1, 0
-		s_cselect_b32 s1, s13, s16
-		s_mul_i32 s13, s1, 4
-		s_xor_b32 s16, s13, -1
+		s_xor_b32 s14, s1, -1
+		v_readfirstlane_b32 s15, v1
+		s_add_i32 s14, s14, 1
+		s_mul_i32 s16, s14, s15
+		s_mul_hi_u32 s16, s15, s16
+		s_add_i32 s15, s15, s16
+		s_mul_hi_u32 s15, s13, s15
+		s_mul_i32 s16, s15, s1
+		s_xor_b32 s16, s16, -1
 		s_add_i32 s16, s16, 1
-		s_add_i32 s0, s0, s16
+		s_add_i32 s13, s13, s16
+		s_cmp_ge_u32 s13, s1
+		s_cselect_b32 s16, 1, 0
+		s_add_i32 s17, s15, 1
+		s_cmp_lg_u32 s16, 0
+		s_cselect_b32 s15, s17, s15
+		s_cselect_b32 s16, 1, 0
+		s_add_i32 s17, s13, s14
+		s_cmp_lg_u32 s16, 0
+		s_cselect_b32 s13, s17, s13
+		s_cmp_ge_u32 s13, s1
+		s_cselect_b32 s1, 1, 0
+		s_add_i32 s16, s15, 1
+		s_cmp_lg_u32 s1, 0
+		s_cselect_b32 s1, s16, s15
+		s_mul_i32 s15, s1, 4
+		s_cselect_b32 s16, 1, 0
+		s_xor_b32 s17, s15, -1
+		s_add_i32 s17, s17, 1
+		s_add_i32 s0, s0, s17
 		s_cmp_lt_i32 s0, 4
 		s_cselect_b32 s0, s0, 4
-		s_add_i32 s16, s14, s17
-		s_cmp_lg_u32 s18, 0
-		s_cselect_b32 s14, s16, s14
-		s_xor_b32 s16, s14, -1
-		s_add_i32 s16, s16, 1
-		s_cmp_lg_u32 s15, 0
-		s_cselect_b32 s14, s16, s14
+		s_add_i32 s14, s13, s14
+		s_cmp_lg_u32 s16, 0
+		s_cselect_b32 s13, s14, s13
 		v_mov_b32_e32 v1, s0
 		v_cvt_f32_u32_e32 v1, v1
 		v_rcp_iflag_f32_e32 v1, v1
-		s_xor_b32 s15, s0, -1
+		s_xor_b32 s14, s0, -1
 		v_mul_f32_e32 v1, v2, v1
 		v_cvt_u32_f32_e32 v1, v1
-		s_add_i32 s15, s15, 1
+		s_add_i32 s14, s14, 1
 		v_readfirstlane_b32 s16, v1
-		s_mul_i32 s17, s15, s16
+		s_mul_i32 s17, s14, s16
 		s_mul_hi_u32 s17, s16, s17
 		s_add_i32 s16, s16, s17
-		s_mul_hi_u32 s16, s14, s16
+		s_mul_hi_u32 s16, s13, s16
 		s_mul_i32 s16, s16, s0
 		s_xor_b32 s16, s16, -1
 		s_add_i32 s16, s16, 1
-		s_add_i32 s16, s14, s16
-		s_add_i32 s17, s16, s15
+		s_add_i32 s16, s13, s16
+		s_add_i32 s17, s16, s14
 		s_cmp_ge_u32 s16, s0
 		s_cselect_b32 s16, s17, s16
-		s_add_i32 s17, s16, s15
+		s_add_i32 s17, s16, s14
 		s_cmp_ge_u32 s16, s0
 		s_cselect_b32 s16, s17, s16
-		s_add_i32 s13, s13, s16
+		s_add_i32 s15, s15, s16
 		v_readfirstlane_b32 s17, v1
-		s_mul_i32 s18, s15, s17
+		s_mul_i32 s18, s14, s17
 		s_mul_hi_u32 s18, s17, s18
 		s_add_i32 s17, s17, s18
-		s_mul_hi_u32 s17, s14, s17
+		s_mul_hi_u32 s17, s13, s17
 		s_mul_i32 s18, s17, s0
 		s_xor_b32 s18, s18, -1
 		s_add_i32 s18, s18, 1
-		s_add_i32 s14, s14, s18
-		s_cmp_ge_u32 s14, s0
+		s_add_i32 s13, s13, s18
+		s_cmp_ge_u32 s13, s0
 		s_cselect_b32 s18, 1, 0
 		s_add_i32 s19, s17, 1
 		s_cmp_lg_u32 s18, 0
 		s_cselect_b32 s17, s19, s17
 		s_cselect_b32 s18, 1, 0
-		s_add_i32 s15, s14, s15
+		s_add_i32 s14, s13, s14
 		s_cmp_lg_u32 s18, 0
-		s_cselect_b32 s14, s15, s14
-		s_add_i32 s15, s17, 1
-		s_cmp_ge_u32 s14, s0
-		s_cselect_b32 s0, s15, s17
-		s_mul_i32 s13, s13, 0x100
+		s_cselect_b32 s13, s14, s13
+		s_add_i32 s14, s17, 1
+		s_cmp_ge_u32 s13, s0
+		s_cselect_b32 s0, s14, s17
+		s_mul_i32 s13, s15, 0x100
 		v_lshrrev_b32_e32 v1, 3, v0
 		v_and_b32_e32 v2, 1, v0
 		v_lshrrev_b32_e32 v3, 1, v0

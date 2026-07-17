@@ -1346,6 +1346,7 @@ public:
   void runOnOperation() override {
     Operation *root = getOperation();
     DataFlowSolver solver;
+    dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
     if (failed(solver.initializeAndRun(root))) {
       root->emitError("IntegerRangeAnalysis failed for modulo recurrence pass");
@@ -1367,6 +1368,7 @@ public:
   void runOnOperation() override {
     Operation *root = getOperation();
     DataFlowSolver solver;
+    dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
     if (failed(solver.initializeAndRun(root))) {
       root->emitError("IntegerRangeAnalysis failed for integer div/rem pass");
@@ -1389,7 +1391,7 @@ public:
     }
 
     IRRewriter rewriter(root->getContext());
-    for (BinaryOp op : ops) {
+    for (BinaryOp op : llvm::reverse(ops)) {
       if (!op->getBlock())
         continue;
       rewriter.setInsertionPoint(op);
