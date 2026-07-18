@@ -2753,6 +2753,11 @@ struct RegionCollector {
              << op.getName();
     if (isSchedulerRegionBoundary(&op)) {
       flush(block, thisBlockOrdinal, ops);
+      // Real boundary instructions retain cost as singleton regions.
+      if (isPinnedSchedulerBoundary(&op)) {
+        ops.push_back(&op);
+        flush(block, thisBlockOrdinal, ops);
+      }
       return success();
     }
     if (op.getNumRegions() != 0) {

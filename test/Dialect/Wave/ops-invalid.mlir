@@ -1,5 +1,21 @@
 // RUN: wave-opt --split-input-file --verify-diagnostics %s
 
+func.func @set_priority_below_range() {
+  // expected-error @+1 {{attribute 'priority' failed to satisfy constraint}}
+  waveamd.set_priority -1
+  return
+}
+
+// -----
+
+func.func @set_priority_above_range() {
+  // expected-error @+1 {{attribute 'priority' failed to satisfy constraint}}
+  waveamd.set_priority 4
+  return
+}
+
+// -----
+
 // expected-error @+1 {{redistribution block count must be positive}}
 func.func @bad_redistribution_blocks() attributes {test.relation = #wave.redistribution<blocks = 0, items = 1, source_block = "block", source_item = "item", source_slot = "slot">} {
   return

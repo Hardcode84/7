@@ -64,6 +64,16 @@ def test_issue_token():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_set_priority
+@run
+def test_set_priority():
+    with w.module() as m:
+        with m.function("set_priority_kernel", [], kernel=True) as f:
+            f.set_priority(2)
+        # CHECK: waveamd.set_priority 2
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_generic_wave_kernel_attrs
 @run
 def test_generic_wave_kernel_attrs():

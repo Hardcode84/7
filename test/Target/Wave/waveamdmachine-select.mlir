@@ -55,6 +55,18 @@ func.func @select_sched_barrier() {
   return
 }
 
+// SELECT-LABEL: func.func @select_set_priority
+// SELECT: [[TWO:%.*]] = waveamdmachine.imm 2
+// SELECT-NEXT: waveamdmachine.s_setprio [[TWO]]
+// SCHED-LABEL: func.func @select_set_priority
+// SCHED: waveamdmachine.s_setprio
+// ASM-LABEL: select_set_priority:
+// ASM: s_setprio 2
+func.func @select_set_priority() {
+  waveamd.set_priority 2
+  return
+}
+
 // SELECT-LABEL: func.func @select_uniform_index_args
 // SELECT: waveamdmachine.tuple_from_elements
 // SELECT: waveamdmachine.tuple_from_elements

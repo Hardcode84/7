@@ -25,7 +25,11 @@ static inline bool isWaveAMDMachineOpForScheduling(Operation *op) {
 }
 
 static inline bool isSchedulerRegionBoundary(Operation *op) {
-  return isa<waveamdmachine::SchedBarrierOp>(op);
+  return isa<waveamdmachine::SchedBarrierOp, waveamdmachine::SSetprioOp>(op);
+}
+
+static inline bool isPinnedSchedulerBoundary(Operation *op) {
+  return isa<waveamdmachine::SSetprioOp>(op);
 }
 
 static inline bool isSupportedSchedulerPseudo(Operation *op) {
@@ -65,7 +69,7 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
              waveamdmachine::SMulU64Op, waveamdmachine::SFf1I32B32Op,
              waveamdmachine::SFf1I32B64Op, waveamdmachine::SFlbitI32B32Op,
              waveamdmachine::SFlbitI32B64Op, waveamdmachine::SOrB32Op,
-             waveamdmachine::SReadVccB32Op,
+             waveamdmachine::SReadVccB32Op, waveamdmachine::SSetprioOp,
              waveamdmachine::SGetregShaderCyclesOp, waveamdmachine::SXorB32Op,
              waveamdmachine::SXorB64Op, waveamdmachine::CopyTupleOp>(op);
 }

@@ -400,6 +400,7 @@ public:
   LogicalResult selectPtrAdd(PtrAddOp op);
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
   LogicalResult selectSchedBarrier(SchedBarrierOp op);
+  LogicalResult selectSetPriority(waveamd::SetPriorityOp op);
   LogicalResult selectToken(TokenOp op);
   LogicalResult selectIssueToken(IssueTokenOp op);
   LogicalResult selectTokenJoin(Operation *op);

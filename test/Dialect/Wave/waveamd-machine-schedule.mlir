@@ -43,6 +43,19 @@ func.func @sched_barrier_regions(%a: !waveamdmachine.reg<vgpr, 1>,
   return
 }
 
+func.func @set_priority_regions(%a: !waveamdmachine.reg<vgpr, 1>,
+                                %b: !waveamdmachine.reg<vgpr, 1>) {
+  %before = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+  waveamdmachine.s_setprio %two : (!waveamdmachine.imm) -> ()
+  %after = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 func.func @memory_edges(%off: !waveamdmachine.reg<vgpr, 1>,
                         %base: !waveamdmachine.reg<sgpr, 2>,
                         %value: !waveamdmachine.reg<vgpr, 1>) {
@@ -175,6 +188,9 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // REGION: waveamd-machine-schedule-report region func=regions block=0 region=2 ops=2 instruction_ops=2 first=waveamdmachine.s_barrier last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=sched_barrier_regions block=0 region=0 ops=1 instruction_ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=sched_barrier_regions block=0 region=1 ops=1 instruction_ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
+// REGION: waveamd-machine-schedule-report region func=set_priority_regions block=0 region=0 ops=2 instruction_ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.imm
+// REGION: waveamd-machine-schedule-report region func=set_priority_regions block=0 region=1 ops=1 instruction_ops=1 first=waveamdmachine.s_setprio last=waveamdmachine.s_setprio
+// REGION: waveamd-machine-schedule-report region func=set_priority_regions block=0 region=2 ops=1 instruction_ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=exec_if_regions block=0 region=0 ops=1 instruction_ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=exec_if_regions block=1 region=1 ops=2 instruction_ops=2 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
 // REGION: waveamd-machine-schedule-report region func=exec_if_regions block=2 region=2 ops=1 instruction_ops=1 first=waveamdmachine.v_add_u32 last=waveamdmachine.v_add_u32
@@ -212,5 +228,6 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 
 // SCORE: waveamd-machine-schedule-report score func=regions region=0 order=original cycles=
 // SCORE-SAME: issued_ops=3
+// SCORE: waveamd-machine-schedule-report score func=set_priority_regions region=1 order=original cycles=1 issued_ops=1
 // SCORE: waveamd-machine-schedule-report score func=memory_edges region=0 order=original cycles=
 // SCORE-SAME: issued_ops=4

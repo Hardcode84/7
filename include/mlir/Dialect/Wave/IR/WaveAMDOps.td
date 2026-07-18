@@ -19,6 +19,19 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 class WaveAMD_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveAMD_Dialect, mnemonic, traits>;
 
+def WaveAMD_SetPriorityOp : WaveAMD_Op<"set_priority"> {
+  let summary = "set AMD wave issue priority";
+  let description = [{
+    Sets hardware issue priority for the current wave. Greedy machine
+    scheduling pins the lowered instruction as a region cut; generic
+    transforms may move independent work before scheduling. No memory
+    ordering is implied.
+  }];
+  let arguments = (ins ConfinedAttr<I64Attr,
+                                 [IntMinValue<0>, IntMaxValue<3>]>:$priority);
+  let assemblyFormat = "$priority attr-dict";
+}
+
 def WaveAMD_MakeBufferOp : WaveAMD_Op<"make_buffer", [Pure]> {
   let summary = "construct an AMD buffer pointer from a flat/global pointer";
   let description = [{

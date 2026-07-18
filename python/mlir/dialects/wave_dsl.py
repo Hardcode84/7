@@ -1200,6 +1200,10 @@ class FunctionBuilder:
 
     # --- WaveAMD ops -------------------------------------------------------
 
+    def set_priority(self, priority: int) -> None:
+        """Set hardware issue priority for the current wave."""
+        waveamd.SetPriorityOp(priority)
+
     def dma_load_lds(
         self,
         source: Value,

@@ -2791,6 +2791,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
       .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
+      .Case<waveamd::SetPriorityOp>(
+          [&](auto o) { return selectSetPriority(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
       .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
@@ -7038,6 +7040,14 @@ LogicalResult WaveAMDMachineSelector::selectToken(TokenOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectSchedBarrier(SchedBarrierOp op) {
   waveamdmachine::SchedBarrierOp::create(builder, op.getLoc());
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectSetPriority(waveamd::SetPriorityOp op) {
+  Value priority = createImm(builder, op.getLoc(), op.getPriority());
+  waveamdmachine::SSetprioOp::create(builder, op.getLoc(), priority);
   eraseIfTopLevel(op);
   return success();
 }

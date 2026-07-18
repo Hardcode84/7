@@ -557,6 +557,41 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @set_priority_cuts_prefetch(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>) {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %before = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %two = waveamdmachine.imm 2 : !waveamdmachine.imm
+  waveamdmachine.s_setprio %two : (!waveamdmachine.imm) -> ()
+  %loaded, %loaded_token = waveamdmachine.global_load_b32
+      %off, %base after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %sum = waveamdmachine.v_add_u32 %before, %loaded
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @set_priority_cuts_prefetch
+// IR-NOT: waveamdmachine.global_load_b32
+// IR: [[BEFORE:%.*]] = waveamdmachine.v_add_u32
+// IR-NOT: waveamdmachine.global_load_b32
+// IR: waveamdmachine.s_setprio
+// IR-NEXT: [[LOADED:%.*]], {{%.*}} = waveamdmachine.global_load_b32
+// IR: waveamdmachine.v_add_u32 [[BEFORE]], [[LOADED]]
+// DIAG: waveamd-machine-schedule region func=set_priority_cuts_prefetch index=1 ops=1 action=keep reason=same_order
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @compute_resource_overlap(
     %s0: !waveamdmachine.reg<sgpr, 1>,
     %s1: !waveamdmachine.reg<sgpr, 1>,
