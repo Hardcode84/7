@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-to-machine --verify-diagnostics --split-input-file %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --canonicalize --cse --waveamd-to-machine --split-input-file %s | FileCheck %s --check-prefix=SCHED
 // RUN: wave-translate --wave-to-amdgpu-asm --split-input-file %s | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm --split-input-file %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
@@ -24,6 +25,18 @@ func.func @select_memory_token(%pred: i1) {
   %false = wave.token : !wave.mem.token
   %merged = wave.select %pred, %true, %false : !wave.mem.token
   %barrier = wave.barrier %merged : (!wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @select_sched_barrier
+// SELECT: waveamdmachine.sched_barrier
+// SCHED-LABEL: func.func @select_sched_barrier
+// SCHED: waveamdmachine.sched_barrier
+// ASM-LABEL: select_sched_barrier:
+// ASM-NEXT: ; wave backend: WaveAMDMachine MLIR pipeline finalized
+// ASM-NEXT: s_setpc_b64
+func.func @select_sched_barrier() {
+  wave.sched_barrier
   return
 }
 

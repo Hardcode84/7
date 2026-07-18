@@ -505,6 +505,16 @@ def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+def Wave_SchedBarrierOp : Wave_Op<"sched_barrier"> {
+  let summary = "cut greedy backend scheduling";
+  let description = [{
+    Splits greedy machine-scheduler regions when the marker reaches scheduler
+    input. Earlier optimization and cleanup may cross it. It emits no machine
+    instruction, does not order memory, and does not synchronize waves.
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let summary = "create an empty memory dependency token";
   let results = (outs Wave_MemToken:$result);

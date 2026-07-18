@@ -703,6 +703,18 @@ def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
+def WaveAMDMachine_SchedBarrierOp : WaveAMDMachine_Op<"sched_barrier", [
+  WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission
+]> {
+  let summary = "cut greedy machine scheduling";
+  let description = [{
+    Splits greedy scheduler regions at scheduler input. It has no memory or
+    wave-synchronization semantics and emits no instruction.
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
 def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
   Pure,
   WaveAMDMachine_TokenTrait,

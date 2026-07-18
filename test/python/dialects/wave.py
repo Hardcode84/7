@@ -39,6 +39,17 @@ def test_generic_wave_kernel():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_sched_barrier
+@run
+def test_sched_barrier():
+    with w.module() as m:
+        with m.function("sched_barrier_kernel", [], kernel=True) as f:
+            f.sched_barrier()
+        # CHECK: func.func @sched_barrier_kernel
+        # CHECK: wave.sched_barrier
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_generic_wave_kernel_attrs
 @run
 def test_generic_wave_kernel_attrs():

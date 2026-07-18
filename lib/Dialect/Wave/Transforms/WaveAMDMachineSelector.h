@@ -399,6 +399,7 @@ public:
   LogicalResult selectPtrCast(PtrCastOp op);
   LogicalResult selectPtrAdd(PtrAddOp op);
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
+  LogicalResult selectSchedBarrier(SchedBarrierOp op);
   LogicalResult selectToken(TokenOp op);
   LogicalResult selectTokenJoin(Operation *op);
   LogicalResult selectWhere(WhereOp op);

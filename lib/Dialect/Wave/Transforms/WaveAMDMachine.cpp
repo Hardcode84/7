@@ -2792,6 +2792,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
+      .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
       .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
       .Case<WhereOp>([&](auto o) { return selectWhere(o); })
@@ -7030,6 +7031,12 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
 LogicalResult WaveAMDMachineSelector::selectToken(TokenOp op) {
   values[op.getResult()] = waveamdmachine::TokenOp::create(
       builder, op.getLoc(), getMemTokenType(op.getContext()));
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectSchedBarrier(SchedBarrierOp op) {
+  waveamdmachine::SchedBarrierOp::create(builder, op.getLoc());
   eraseIfTopLevel(op);
   return success();
 }
