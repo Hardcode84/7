@@ -20,6 +20,28 @@ func.func @release_dependency_misses_access() attributes {wave.kernel} {
 
 // -----
 
+func.func @issue_token_is_not_completion() attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %root = wave.token : !wave.mem.token
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 64 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %alloc, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored = wave.store %lane -> %ptr after %root
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %issued = wave.issue_token %stored
+      : !wave.mem.token -> !wave.mem.token
+  // expected-error @+1 {{dependency does not cover every allocation access token}}
+  %released = wave.alloc_release %alloc after %issued
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @release_non_allocation(
     %base: !wave.ptr<#wave.shared, i32>, %dependency: !wave.mem.token) {
   // expected-error @+1 {{allocation must be a direct wave.alloc result}}

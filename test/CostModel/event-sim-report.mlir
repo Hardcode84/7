@@ -18,6 +18,8 @@
 // RUN: wave-sim-report --func=uniform_if_report %s | FileCheck %s --check-prefix=UIF
 // RUN: wave-sim-report --func=cma_matrix_cap --arch=gfx950 --timeline %s | FileCheck %s --check-prefix=CMA
 // RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --timeline %s | FileCheck %s --check-prefix=LDSDMA
+// RUN: wave-sim-report --func=issue_token_drops_completion --arch=gfx950 --timeline --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=ISSUETOKEN
+// RUN: wave-sim-report --func=token_join_carries_completion --arch=gfx950 --timeline --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=TOKENJOIN
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -65,6 +67,30 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
            !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
           -> !waveamdmachine.mem.token
+    return
+  }
+
+  func.func @issue_token_drops_completion(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>) {
+    %loaded, %loaded_token = waveamdmachine.global_load_b32 %off, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %issued = waveamdmachine.issue_token %loaded_token
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.s_barrier %issued : (!waveamdmachine.mem.token) -> ()
+    return
+  }
+
+  func.func @token_join_carries_completion(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>) {
+    %loaded, %loaded_token = waveamdmachine.global_load_b32 %off, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %joined = waveamdmachine.token_join %loaded_token
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.s_barrier %joined : (!waveamdmachine.mem.token) -> ()
     return
   }
 
@@ -281,3 +307,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // LDSDMA: func: lds_dma_issue_spacing
 // LDSDMA: issue cycle=0 fu=VMEM op=waveamdmachine.global_load_lds_b128
 // LDSDMA: issue cycle=4 fu=VMEM op=waveamdmachine.global_load_lds_b128
+
+// ISSUETOKEN: func: issue_token_drops_completion
+// ISSUETOKEN: total_cycles: 20
+// ISSUETOKEN: issue cycle=0 fu=VMEM op=waveamdmachine.global_load_b32
+// ISSUETOKEN: issue cycle=4 fu=BRANCH op=waveamdmachine.s_barrier
+// ISSUETOKEN: value_ready cycle=4 op=waveamdmachine.issue_token
+
+// TOKENJOIN: func: token_join_carries_completion
+// TOKENJOIN: total_cycles: 24
+// TOKENJOIN: issue cycle=0 fu=VMEM op=waveamdmachine.global_load_b32
+// TOKENJOIN: issue cycle=20 fu=BRANCH op=waveamdmachine.s_barrier
+// TOKENJOIN: value_ready cycle=20 op=waveamdmachine.token_join

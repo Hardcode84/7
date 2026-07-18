@@ -28,6 +28,21 @@ func.func @select_memory_token(%pred: i1) {
   return
 }
 
+// SELECT-LABEL: func.func @select_issue_token
+// SELECT: [[SOURCE:%.*]] = waveamdmachine.token
+// SELECT-NEXT: [[ISSUED:%.*]] = waveamdmachine.issue_token [[SOURCE]]
+// SELECT-NEXT: waveamdmachine.s_barrier [[ISSUED]]
+// ASM-LABEL: select_issue_token:
+// ASM-NEXT: ; wave backend: WaveAMDMachine MLIR pipeline finalized
+// ASM-NEXT: s_barrier
+func.func @select_issue_token() {
+  %source = wave.token : !wave.mem.token
+  %issued = wave.issue_token %source
+      : !wave.mem.token -> !wave.mem.token
+  %barrier = wave.barrier %issued : (!wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @select_sched_barrier
 // SELECT: waveamdmachine.sched_barrier
 // SCHED-LABEL: func.func @select_sched_barrier

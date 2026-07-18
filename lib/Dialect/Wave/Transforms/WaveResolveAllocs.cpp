@@ -69,6 +69,11 @@ struct TokenOrigin {
 };
 
 using TokenOriginMap = DenseMap<Value, SmallVector<TokenOrigin, 2>>;
+
+static bool dropsTokenCompletion(Operation *op) {
+  return isa<IssueTokenOp>(op);
+}
+
 using MemoryEffectInstance = SideEffects::EffectInstance<MemoryEffects::Effect>;
 
 static FailureOr<int64_t> alignUp(int64_t value, int64_t align) {
@@ -359,6 +364,8 @@ private:
     Operation *def = value.getDefiningOp();
     if (!def)
       return node;
+    if (dropsTokenCompletion(def))
+      return node;
     node.barrier = isa<BarrierOp>(def);
     for (Value operand : def->getOperands())
       if (isa<MemTokenType>(operand.getType()))
@@ -508,6 +515,8 @@ private:
   DependencyProof proveAnyOperand(Operation *op, Value target,
                                   bool requireBarrier, ActiveProof &active) {
     DependencyProof result;
+    if (dropsTokenCompletion(op))
+      return result;
     requireBarrier &= !isa<BarrierOp>(op);
     for (Value operand : op->getOperands()) {
       if (!isa<MemTokenType>(operand.getType()))
@@ -753,7 +762,7 @@ static void collectLoopCarriedTokenIndicesImpl(
     return;
   }
   Operation *def = token.getDefiningOp();
-  if (!def)
+  if (!def || dropsTokenCompletion(def))
     return;
   for (Value operand : def->getOperands())
     if (isa<MemTokenType>(operand.getType()))

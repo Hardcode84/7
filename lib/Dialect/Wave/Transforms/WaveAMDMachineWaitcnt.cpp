@@ -462,12 +462,13 @@ static bool isControlFlowOp(Operation *op) {
 }
 
 enum class OpKind {
-  Skip,    // s_waitcnt, control-flow: handled separately.
-  Issuer,  // VMEM/SMEM/LDS load or store: drain, then issue.
-  Barrier, // s_barrier: drain AND derive result tokens.
-  TokenOp, // waveamdmachine.after / token_join: derive only.
-  Endpgm,  // s_endpgm: implicit full drain.
-  Generic, // any other op: drain its operands.
+  Skip,           // s_waitcnt, control-flow: handled separately.
+  Issuer,         // VMEM/SMEM/LDS load or store: drain, then issue.
+  Barrier,        // s_barrier: drain AND derive result tokens.
+  CompletionFree, // Issue order only; no drain or completion transfer.
+  TokenOp,        // waveamdmachine.after / token_join: derive only.
+  Endpgm,         // s_endpgm: implicit full drain.
+  Generic,        // any other op: drain its operands.
 };
 
 static OpKind classifyOp(Operation *op) {
@@ -477,6 +478,8 @@ static OpKind classifyOp(Operation *op) {
     return OpKind::Issuer;
   if (llvm::isa<waveamdmachine::SBarrierOp>(op))
     return OpKind::Barrier;
+  if (op->hasTrait<OpTrait::waveamdmachine::CompletionFreeTokenOp>())
+    return OpKind::CompletionFree;
   if (isTokenOnlyOp(op))
     return OpKind::TokenOp;
   if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
@@ -762,6 +765,8 @@ static void runTransfer(Operation *op, WaitState &state,
     // loads of the same arena depend on it.
     applyDrain(op, state, isaVer, emit);
     deriveResultTokens(op, state);
+    return;
+  case OpKind::CompletionFree:
     return;
   case OpKind::TokenOp:
     deriveResultTokens(op, state);

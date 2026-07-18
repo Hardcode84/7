@@ -4,6 +4,8 @@
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=candidate_invalid score-region=0 score-order=1,0' 2>&1 | FileCheck %s --check-prefix=INVALID
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=wmma_latency score-region=0 score-order=0,1' 2>&1 | FileCheck %s --check-prefix=WMMA
 // RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=noinst_alias print-score=1' 2>&1 | FileCheck %s --check-prefix=ALIAS
+// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=issue_token_score print-score=1' 2>&1 | FileCheck %s --check-prefix=ISSUETOKEN
+// RUN: wave-opt %s --waveamd-machine-schedule-report='score-func=token_join_score print-score=1' 2>&1 | FileCheck %s --check-prefix=TOKENJOIN
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
@@ -79,6 +81,28 @@ func.func @noinst_alias(%off: !waveamdmachine.reg<vgpr, 1>,
   return
 }
 
+func.func @issue_token_score(%off: !waveamdmachine.reg<vgpr, 1>,
+                             %base: !waveamdmachine.reg<sgpr, 2>) {
+  %loaded, %loaded_token = waveamdmachine.global_load_b32 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %issued = waveamdmachine.issue_token %loaded_token
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_barrier %issued : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
+func.func @token_join_score(%off: !waveamdmachine.reg<vgpr, 1>,
+                            %base: !waveamdmachine.reg<sgpr, 2>) {
+  %loaded, %loaded_token = waveamdmachine.global_load_b32 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %joined = waveamdmachine.token_join %loaded_token
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_barrier %joined : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
 func.func @fixed_pressure() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %fixed = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
@@ -109,3 +133,7 @@ func.func @fixed_pressure() {
 // WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=128 issued_ops=2
 
 // ALIAS: waveamd-machine-schedule-report score func=noinst_alias region=0 order=original cycles=325 issued_ops=3
+
+// ISSUETOKEN: waveamd-machine-schedule-report score func=issue_token_score region=0 order=original cycles=320 issued_ops=2
+
+// TOKENJOIN: waveamd-machine-schedule-report score func=token_join_score region=0 order=original cycles=321 issued_ops=2

@@ -521,6 +521,17 @@ def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let assemblyFormat = "attr-dict `:` qualified(type($result))";
 }
 
+def Wave_IssueTokenOp : Wave_Op<"issue_token", [Pure]> {
+  let summary = "order after token producers without completion";
+  let description = [{
+    Retains SSA issue ordering from each dependency but carries none of their
+    completion events. Consumers cannot use it to make memory contents ready.
+  }];
+  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
+  let results = (outs Wave_MemToken:$result);
+  let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
+}
+
 def Wave_AfterOp : Wave_Op<"after", [Pure]> {
   let summary = "derive a memory token after one or more dependencies";
   let arguments = (ins Variadic<Wave_MemToken>:$dependencies);

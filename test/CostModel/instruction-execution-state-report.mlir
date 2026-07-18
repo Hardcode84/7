@@ -15,6 +15,7 @@
 // RUN: wave-instruction-state-report --func=vcc_gap --arch=gfx950 %s | FileCheck %s --check-prefix=VCC
 // RUN: wave-instruction-state-report --func=noinst_memory_alias_zero_cycle --arch=gfx950 --vmem-value-latency=20 %s | FileCheck %s --check-prefix=ALIAS
 // RUN: wave-instruction-state-report --func=noinst_token_alias --arch=gfx950 --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=TOKENALIAS
+// RUN: wave-instruction-state-report --func=issue_token_drops_completion --arch=gfx950 --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=ISSUETOKEN
 // RUN: wave-instruction-state-report --func=noinst_issue_hazard_alias --arch=gfx950 %s | FileCheck %s --check-prefix=HAZARDALIAS
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx942 %s | FileCheck %s --check-prefix=CDNA3
 // RUN: wave-instruction-state-report --func=salu_pipe_cap --arch=gfx950 %s | FileCheck %s --check-prefix=CDNA4
@@ -265,6 +266,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  func.func @issue_token_drops_completion(
+      %off: !waveamdmachine.reg<vgpr, 1>,
+      %base: !waveamdmachine.reg<sgpr, 2>) {
+    %loaded, %loaded_token = waveamdmachine.global_load_b32 %off, %base
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %issued = waveamdmachine.issue_token %loaded_token
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.s_barrier %issued : (!waveamdmachine.mem.token) -> ()
+    return
+  }
+
   func.func @noinst_issue_hazard_alias(
       %a: !waveamdmachine.reg<vgpr, 1>,
       %b: !waveamdmachine.reg<vgpr, 1>) {
@@ -359,6 +372,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // TOKENALIAS: commit op_index=1 issue=4 next=4 value_ready=4 token_ready=20
 // TOKENALIAS: query op_index=2 cycle=4 op=waveamdmachine.global_store_b32 stall=memory_token cycles=16 components=memory_token:16
+
+// ISSUETOKEN: func: issue_token_drops_completion
+// ISSUETOKEN: commit op_index=1 issue=4 next=4 value_ready=4 token_ready=4 pending_vmem=1
+// ISSUETOKEN: query op_index=2 cycle=4 op=waveamdmachine.s_barrier stall=none cycles=0 components=none
 
 // HAZARDALIAS: query op_index=1 cycle=4 op=waveamdmachine.tuple_from_elements stall=none cycles=0 components=none
 // HAZARDALIAS: query op_index=2 cycle=4 op=waveamdmachine.v_readfirstlane_b32 stall=instruction_hazard cycles=1 components=instruction_hazard:1

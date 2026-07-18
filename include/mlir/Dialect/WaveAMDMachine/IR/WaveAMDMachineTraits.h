@@ -80,6 +80,11 @@ class TokenOp : public TraitBase<ConcreteType, TokenOp> {};
 template <typename ConcreteType>
 class TokenJoinOp : public TraitBase<ConcreteType, TokenJoinOp> {};
 
+// Token result keeps issue SSA edges but drops completion events.
+template <typename ConcreteType>
+class CompletionFreeTokenOp
+    : public TraitBase<ConcreteType, CompletionFreeTokenOp> {};
+
 // Does not advance instruction-distance hazards. May still emit asm.
 template <typename ConcreteType>
 class NoMachineInst : public TraitBase<ConcreteType, NoMachineInst> {};

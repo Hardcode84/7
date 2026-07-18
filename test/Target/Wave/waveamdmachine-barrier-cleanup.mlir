@@ -44,6 +44,22 @@ func.func @collapse_void_first(%a: !waveamdmachine.mem.token) {
 
 // -----
 
+// CHECK-LABEL: func.func @keep_completion_cut(
+// CHECK: [[FIRST:%.*]] = waveamdmachine.s_barrier
+// CHECK: [[ISSUED:%.*]] = waveamdmachine.issue_token [[FIRST]]
+// CHECK: waveamdmachine.s_barrier [[ISSUED]]
+func.func @keep_completion_cut(%a: !waveamdmachine.mem.token) {
+  %first = waveamdmachine.s_barrier %a
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %issued = waveamdmachine.issue_token %first
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %second = waveamdmachine.s_barrier %issued
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @merge_split_pair(
 // CHECK-SAME: %[[A:.*]]: !waveamdmachine.mem.token
 // CHECK-NOT: waveamdmachine.barrier_init

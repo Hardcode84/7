@@ -1027,6 +1027,8 @@ static void collectTokenMemoryKinds(Value value, const ValueOriginMap &origins,
   Operation *def = value.getDefiningOp();
   if (!def)
     return;
+  if (def->hasTrait<traits::CompletionFreeTokenOp>())
+    return;
   appendMemoryKind(kinds, waveamdmachine::getMemoryCounterKind(def));
 
   for (Value operand : def->getOperands())

@@ -50,6 +50,20 @@ def test_sched_barrier():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_issue_token
+@run
+def test_issue_token():
+    with w.module() as m:
+        with m.function("issue_token_kernel", [], kernel=True) as f:
+            source = f.token()
+            issued = f.issue_token(source)
+            f.barrier(issued)
+        # CHECK: [[SOURCE:%.*]] = wave.token
+        # CHECK: [[ISSUED:%.*]] = wave.issue_token [[SOURCE]]
+        # CHECK: wave.barrier [[ISSUED]]
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_generic_wave_kernel_attrs
 @run
 def test_generic_wave_kernel_attrs():

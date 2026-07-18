@@ -252,6 +252,8 @@ def WaveAMDMachine_TupleAlias : NativeOpTrait<"waveamdmachine::TupleAliasOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
 def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
+def WaveAMDMachine_CompletionFreeTokenTrait
+    : NativeOpTrait<"waveamdmachine::CompletionFreeTokenOp">;
 def WaveAMDMachine_NoMachineInst : NativeOpTrait<"waveamdmachine::NoMachineInst">;
 def WaveAMDMachine_NoAsmEmission : NativeOpTrait<"waveamdmachine::NoAsmEmission">;
 def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
@@ -724,6 +726,23 @@ def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
   let summary = "empty machine memory token";
   let results = (outs WaveAMDMachine_MemToken:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def WaveAMDMachine_IssueTokenOp : WaveAMDMachine_Op<"issue_token", [
+  Pure,
+  WaveAMDMachine_TokenJoinTrait,
+  WaveAMDMachine_CompletionFreeTokenTrait,
+  WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission
+]> {
+  let summary = "order after token producers without completion";
+  let description = [{
+    Retains SSA issue ordering from each dependency but carries none of their
+    completion events. It cannot make memory contents ready.
+  }];
+  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let results = (outs WaveAMDMachine_MemToken:$result);
+  let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
 def WaveAMDMachine_TokenJoinOp : WaveAMDMachine_Op<"token_join",

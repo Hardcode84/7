@@ -401,6 +401,7 @@ public:
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
   LogicalResult selectSchedBarrier(SchedBarrierOp op);
   LogicalResult selectToken(TokenOp op);
+  LogicalResult selectIssueToken(IssueTokenOp op);
   LogicalResult selectTokenJoin(Operation *op);
   LogicalResult selectWhere(WhereOp op);
   LogicalResult selectRegion(Region &region);

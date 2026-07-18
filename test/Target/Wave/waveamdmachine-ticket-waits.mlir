@@ -239,6 +239,28 @@ func.func @read_only_issuer_token_preserves_cross_counter_dep(
   return
 }
 
+// CHECK-LABEL: func.func @issue_token_orders_without_waiting
+// CHECK: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: waveamdmachine.issue_token
+// CHECK-NEXT: waveamdmachine.s_barrier
+// CHECK-NOT: waveamdmachine.s_waitcnt
+func.func @issue_token_orders_without_waiting(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %m0: !waveamdmachine.m0) {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %dma = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %issued = waveamdmachine.issue_token %dma
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_barrier %issued : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
 }
 
 // -----

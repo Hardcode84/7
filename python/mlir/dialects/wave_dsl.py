@@ -1150,6 +1150,10 @@ class FunctionBuilder:
     def token(self) -> Value:
         return wave.TokenOp(mem_token_type()).result
 
+    def issue_token(self, *tokens: Value) -> Value:
+        """Keep issue ordering without carrying completion."""
+        return wave.IssueTokenOp(mem_token_type(), list(tokens)).result
+
     def sched_barrier(self) -> None:
         """Cut greedy machine scheduling at this point."""
         wave.SchedBarrierOp()

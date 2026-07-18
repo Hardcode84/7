@@ -47,6 +47,9 @@ static bool isFlatNoInst(Operation *op) {
 static bool isFlattenableTokenProducer(Operation *op) {
   if (!isFlatNoInst(op))
     return false;
+  // Flattening would restore stripped completion deps.
+  if (op->hasTrait<traits::CompletionFreeTokenOp>())
+    return false;
   return op->hasTrait<traits::TokenOp>() || op->hasTrait<traits::TokenJoinOp>();
 }
 

@@ -48,6 +48,10 @@ static bool isMemToken(Value value) {
   return isa<MemTokenType>(value.getType());
 }
 
+static bool dropsTokenCompletion(Operation *op) {
+  return op->hasTrait<traits::CompletionFreeTokenOp>();
+}
+
 static bool isCDNA3Or4(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 && (isa.Minor == 4 || isa.Minor == 5);
 }
@@ -1077,6 +1081,8 @@ int64_t InstructionExecutionState::getTokenReadyCycle(
 
 int64_t InstructionExecutionState::commitNoMachineInst(Operation *op) {
   SmallVector<Value, 8> sources(op->operand_begin(), op->operand_end());
+  if (dropsTokenCompletion(op))
+    sources.clear();
   int64_t ready = currentCycle;
   for (Value result : op->getResults()) {
     bindValue(result, sources);
@@ -1242,6 +1248,8 @@ void InstructionExecutionState::pruneRetiredEvents(int64_t cycle) {
 SmallVector<InstructionExecutionState::EventId, 4>
 InstructionExecutionState::collectTokenDeps(Operation *op) const {
   SmallVector<EventId, 4> deps;
+  if (dropsTokenCompletion(op))
+    return deps;
   for (Value operand : op->getOperands()) {
     if (!isMemToken(operand))
       continue;
