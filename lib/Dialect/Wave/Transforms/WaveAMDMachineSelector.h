@@ -398,8 +398,11 @@ public:
   LogicalResult selectScfIf(scf::IfOp op);
   LogicalResult selectPtrCast(PtrCastOp op);
   LogicalResult selectPtrAdd(PtrAddOp op);
+  LogicalResult selectSetPriority(waveamd::SetPriorityOp op);
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
+  LogicalResult selectSchedBarrier(SchedBarrierOp op);
   LogicalResult selectToken(TokenOp op);
+  LogicalResult selectIssueToken(IssueTokenOp op);
   LogicalResult selectTokenJoin(Operation *op);
   LogicalResult selectWhere(WhereOp op);
   LogicalResult selectRegion(Region &region);

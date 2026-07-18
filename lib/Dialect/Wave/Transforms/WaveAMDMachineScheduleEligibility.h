@@ -24,11 +24,17 @@ static inline bool isWaveAMDMachineOpForScheduling(Operation *op) {
          waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
 }
 
+static inline bool isSchedulerRegionBoundary(Operation *op) {
+  return isa<waveamdmachine::SchedBarrierOp,
+             waveamdmachine::SSetprioOp>(op);
+}
+
 static inline bool isSupportedSchedulerPseudo(Operation *op) {
   return isa<
       waveamdmachine::ArgOp, waveamdmachine::KernargPreloadOp,
       waveamdmachine::UninitOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
-      waveamdmachine::TokenJoinOp, waveamdmachine::AfterOp,
+      waveamdmachine::TokenJoinOp, waveamdmachine::IssueTokenOp,
+      waveamdmachine::AfterOp,
       waveamdmachine::BarrierInitOp, waveamdmachine::SWorkgroupIdXOp,
       waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
       waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,

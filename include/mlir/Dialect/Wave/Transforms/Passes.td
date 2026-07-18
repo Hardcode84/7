@@ -611,9 +611,10 @@ def WaveAMDMachineSchedule
     for the affected region.
 
     Intended placement is before ticket-wait and hazard-wait insertion. Nested
-    region ops split local scheduling regions; block terminators finish the
-    block and are not scheduled. Only scheduler-supported WaveAMDMachine ops may
-    appear inside a local region; any other op is a hard error.
+    region ops and `waveamdmachine.sched_barrier` split local scheduling
+    regions; block terminators finish the block and are not scheduled. Only
+    scheduler-supported WaveAMDMachine ops may appear inside a local region;
+    any other op is a hard error.
   }];
   let dependentDialects = [
     "func::FuncDialect",

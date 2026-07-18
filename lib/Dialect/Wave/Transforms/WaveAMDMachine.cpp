@@ -2792,8 +2792,12 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
       .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
+      .Case<waveamd::SetPriorityOp>(
+          [&](auto o) { return selectSetPriority(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
+      .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
+      .Case<IssueTokenOp>([&](auto o) { return selectIssueToken(o); })
       .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
       .Case<WhereOp>([&](auto o) { return selectWhere(o); })
       .Case<StoreOp>([&](auto o) { return selectStore(*this, o); })
@@ -7029,6 +7033,31 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
 LogicalResult WaveAMDMachineSelector::selectToken(TokenOp op) {
   values[op.getResult()] = waveamdmachine::TokenOp::create(
       builder, op.getLoc(), getMemTokenType(op.getContext()));
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectSchedBarrier(SchedBarrierOp op) {
+  waveamdmachine::SchedBarrierOp::create(builder, op.getLoc());
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectSetPriority(waveamd::SetPriorityOp op) {
+  Value priority = createImm(builder, op.getLoc(), op.getPriority());
+  waveamdmachine::SSetprioOp::create(builder, op.getLoc(), priority);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectIssueToken(IssueTokenOp op) {
+  SmallVector<Value> operands;
+  for (Value dependency : op.getDependencies())
+    operands.push_back(expect(dependency, op));
+  values[op.getResult()] = waveamdmachine::IssueTokenOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()), operands);
   eraseIfTopLevel(op);
   return success();
 }

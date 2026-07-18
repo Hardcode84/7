@@ -47,6 +47,9 @@ static bool isFlatNoInst(Operation *op) {
 static bool isFlattenableTokenProducer(Operation *op) {
   if (!isFlatNoInst(op))
     return false;
+  // Flattening restores completion deps and drains retained async groups.
+  if (isa<waveamdmachine::IssueTokenOp>(op))
+    return false;
   return op->hasTrait<traits::TokenOp>() || op->hasTrait<traits::TokenJoinOp>();
 }
 

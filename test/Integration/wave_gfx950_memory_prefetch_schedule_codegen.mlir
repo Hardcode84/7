@@ -136,4 +136,29 @@ func.func @long_latency_memory_prefetch_schedule_codegen()
   return
 }
 
+// ASM-LABEL: sched_barrier_memory_prefetch_codegen:
+// ASM: v_add_u32_e32 v4
+// ASM-NEXT: global_load_dword v5
+// ASM-NEXT: s_waitcnt vmcnt(0)
+// ASM-NEXT: v_add_u32_e32 v6, v4, v5
+// ASM-NEXT: s_endpgm
+func.func @sched_barrier_memory_prefetch_codegen() attributes {wave.kernel} {
+  %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %ptr = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 2>
+  %before = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 4>
+  waveamdmachine.sched_barrier
+  %loaded, %tok = waveamdmachine.global_load_b32 %off, %ptr
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2, 0>)
+        -> (!waveamdmachine.reg<vgpr, 1, 5>, !waveamdmachine.mem.token)
+  %sum = waveamdmachine.v_add_u32 %before, %loaded
+      : (!waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.reg<vgpr, 1, 5>)
+        -> !waveamdmachine.reg<vgpr, 1, 6>
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

@@ -703,6 +703,14 @@ def WaveAMDMachine_ImmOp : WaveAMDMachine_Op<"imm", [
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
+def WaveAMDMachine_SchedBarrierOp : WaveAMDMachine_Op<"sched_barrier", [
+  WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission
+]> {
+  let summary = "hard machine scheduling boundary";
+  let assemblyFormat = "attr-dict";
+}
+
 def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
   Pure,
   WaveAMDMachine_TokenTrait,
@@ -712,6 +720,18 @@ def WaveAMDMachine_TokenOp : WaveAMDMachine_Op<"token", [
   let summary = "empty machine memory token";
   let results = (outs WaveAMDMachine_MemToken:$result);
   let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def WaveAMDMachine_IssueTokenOp : WaveAMDMachine_Op<"issue_token", [
+  Pure,
+  WaveAMDMachine_TokenJoinTrait,
+  WaveAMDMachine_NoMachineInst,
+  WaveAMDMachine_NoAsmEmission
+]> {
+  let summary = "derive an issue-order token without completion events";
+  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let results = (outs WaveAMDMachine_MemToken:$result);
+  let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
 def WaveAMDMachine_TokenJoinOp : WaveAMDMachine_Op<"token_join",

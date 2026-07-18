@@ -2749,6 +2749,10 @@ struct RegionCollector {
       return op.emitError("waveamd-machine-schedule op after block-ending "
                           "machine terminator: ")
              << op.getName();
+    if (isSchedulerRegionBoundary(&op)) {
+      flush(block, thisBlockOrdinal, ops);
+      return success();
+    }
     if (op.getNumRegions() != 0) {
       flush(block, thisBlockOrdinal, ops);
       return collectNestedRegionOp(op);

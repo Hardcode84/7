@@ -500,10 +500,37 @@ def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+def Wave_SchedBarrierOp : Wave_Op<"sched_barrier"> {
+  let summary = "hard backend scheduling boundary";
+  let description = [{
+    Prevents backend instruction scheduling across this point. It does not
+    synchronize waves, order memory, or emit a machine instruction.
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let summary = "create an empty memory dependency token";
   let results = (outs Wave_MemToken:$result);
   let assemblyFormat = "attr-dict `:` qualified(type($result))";
+}
+
+def Wave_IssueTokenOp : Wave_Op<"issue_token", [Pure]> {
+  let summary = "derive an issue-order token without a completion dependency";
+  let description = [{
+    Produces an empty memory token after all dependency-producing operations
+    have issued. Unlike `wave.after` and `wave.join`, the result does not carry
+    the dependencies' completion events. This is the structural ordering
+    primitive for protocols such as a partial async-group wait: the retained
+    group must be issued before the wait is evaluated, but must remain in
+    flight after that wait.
+
+    Consumers must not use this op to make memory contents ready. Completion
+    and visibility remain expressed by ordinary memory tokens and barriers.
+  }];
+  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
+  let results = (outs Wave_MemToken:$result);
+  let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
 }
 
 def Wave_AfterOp : Wave_Op<"after", [Pure]> {

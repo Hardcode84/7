@@ -1150,11 +1150,19 @@ class FunctionBuilder:
     def token(self) -> Value:
         return wave.TokenOp(mem_token_type()).result
 
+    def issue_token(self, *tokens: Value) -> Value:
+        """Order after token producers without carrying their completion."""
+        return wave.IssueTokenOp(mem_token_type(), list(tokens)).result
+
     def after(self, *tokens: Value) -> Value:
         return wave.AfterOp(mem_token_type(), list(tokens)).result
 
     def join(self, *tokens: Value) -> Value:
         return wave.JoinOp(mem_token_type(), list(tokens)).result
+
+    def sched_barrier(self) -> None:
+        """Prevent backend instruction scheduling across this point."""
+        wave.SchedBarrierOp()
 
     def shared_memory_base(
         self,
@@ -1191,6 +1199,10 @@ class FunctionBuilder:
         return wave.BarrierOp(mem_token_type(), list(dependencies)).token
 
     # --- WaveAMD ops -------------------------------------------------------
+
+    def set_priority(self, priority: int) -> None:
+        """Set the AMD hardware issue priority for the current wave."""
+        waveamd.SetPriorityOp(priority)
 
     def dma_load_lds(
         self,
