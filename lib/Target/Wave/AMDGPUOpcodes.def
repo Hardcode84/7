@@ -49,6 +49,7 @@
   X(sCbranchScc1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)                     \
   X(sCbranchVccnz, S_CBRANCH_VCCNZ_vi, S_CBRANCH_VCCNZ_gfx11)                  \
   X(sCbranchExecz, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11)                  \
+  X(sGetregB32, S_GETREG_B32_vi, S_GETREG_B32_gfx11)                            \
   X(sLoadB32, S_LOAD_DWORD_IMM_vi, S_LOAD_B32_IMM_gfx11)                       \
   X(sLoadB64, S_LOAD_DWORDX2_IMM_vi, S_LOAD_B64_IMM_gfx11)                     \
   X(sLoadB128, S_LOAD_DWORDX4_IMM_vi, S_LOAD_B128_IMM_gfx11)                   \

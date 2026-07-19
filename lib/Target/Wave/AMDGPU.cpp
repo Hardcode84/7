@@ -512,6 +512,7 @@ private:
   unsigned sCbranchScc1() const { return opcodes.sCbranchScc1; }
   unsigned sCbranchVccnz() const { return opcodes.sCbranchVccnz; }
   unsigned sCbranchExecz() const { return opcodes.sCbranchExecz; }
+  unsigned sGetregB32() const { return opcodes.sGetregB32; }
   unsigned sLoadB32() const { return opcodes.sLoadB32; }
   unsigned sLoadB64() const { return opcodes.sLoadB64; }
   unsigned sLoadB128() const { return opcodes.sLoadB128; }
@@ -2578,14 +2579,21 @@ private:
       return emitMC(vMbcntHi(),
                     {toMCOperand(result()), llvm::MCOperand::createImm(-1),
                      toMCOperand(op.getOperand(0))});
-    // hwreg(HW_REG_SHADER_CYCLES=29, offset=0, size=32) packed as
-    // id | (offset << 6) | ((size - 1) << 11) = 0xF81D. Gated on
-    // gfx11 by archPredicate; emitter assumes the dispatcher already
-    // honoured isSupportedOnIsa.
-    if (isa<waveamdmachine::SGetregShaderCyclesOp>(op))
-      return emitMC(
-          llvm::AMDGPU::S_GETREG_B32_gfx11,
-          {toMCOperand(result()), llvm::MCOperand::createImm(0xF81D)});
+    if (isa<waveamdmachine::SGetregShaderCyclesOp>(op)) {
+      uint64_t encoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+          llvm::AMDGPU::Hwreg::ID_SHADER_CYCLES, 0, 32);
+      return emitMC(sGetregB32(), {toMCOperand(result()),
+                                   llvm::MCOperand::createImm(encoding)});
+    }
+    if (waveamdmachine::SGetregHwIdOp hwId =
+            dyn_cast<waveamdmachine::SGetregHwIdOp>(op)) {
+      unsigned id = isaVersion.Major >= 10 ? llvm::AMDGPU::Hwreg::ID_HW_ID1
+                                           : llvm::AMDGPU::Hwreg::ID_HW_ID;
+      uint64_t encoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+          id, hwId.getOffset(), hwId.getWidth());
+      return emitMC(sGetregB32(), {toMCOperand(result()),
+                                   llvm::MCOperand::createImm(encoding)});
+    }
     if (auto copy = dyn_cast<waveamdmachine::CopyTupleOp>(op))
       return emitCopy(copy.getResult(), copy.getSource(), copy.getOperation());
     if (isa<waveamdmachine::VMovB32TupleOp>(op)) {

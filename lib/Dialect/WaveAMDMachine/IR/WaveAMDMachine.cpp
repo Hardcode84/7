@@ -515,6 +515,16 @@ bool UniformIfOp::areTypesCompatible(Type lhs, Type rhs) {
          sourceReg.getWidth() == resultReg.getWidth();
 }
 
+LogicalResult SGetregHwIdOp::verify() {
+  int64_t offset = getOffset();
+  int64_t width = getWidth();
+  if (offset < 0 || offset >= 32)
+    return emitOpError("offset must be in [0, 31]");
+  if (width <= 0 || width > 32 || offset + width > 32)
+    return emitOpError("width must be in [1, 32 - offset]");
+  return success();
+}
+
 static LogicalResult verifyUniformIfYieldSource(UniformIfOp op, Type resultType,
                                                 Value value, StringRef arm) {
   if (isa<MemTokenType>(resultType)) {

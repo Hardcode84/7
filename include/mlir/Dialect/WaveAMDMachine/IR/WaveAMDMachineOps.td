@@ -1425,6 +1425,16 @@ def WaveAMDMachine_SGetregShaderCyclesOp
   let archPredicate = "isa.Major == 11";
   let summary = "read HW_REG_SHADER_CYCLES via s_getreg_b32 (RDNA3)";
 }
+def WaveAMDMachine_SGetregHwIdOp
+    : WaveAMDMachine_Op<"s_getreg_hw_id", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "read a bit slice of the hardware wave identifier";
+  let arguments = (ins I32Attr:$offset, I32Attr:$width);
+  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let assemblyFormat =
+      "`offset` $offset `width` $width attr-dict `:` type($result)";
+  let archPredicate = WaveAMDMachine_Gfx8To13;
+  let hasVerifier = 1;
+}
 def WaveAMDMachine_SWaitcntOp
     : WaveAMDMachine_Op<"s_waitcnt",
                         [WaveAMDMachine_Waitcnt,
