@@ -155,15 +155,9 @@ struct SteadyStallTarget {
   unsigned fills = 0;
 };
 
-struct LoopCarriedLdsPrefetchPlan {
-  SmallVector<BitVector, 16> recurrenceConsumers;
-  BitVector candidates;
-  BitVector cadenceCandidates;
-  BitVector overlap;
-  unsigned candidateCount = 0;
-  unsigned cadenceCount = 0;
-  unsigned overlapCount = 0;
-  bool active = false;
+struct RecurrenceSchedulePlan {
+  SmallVector<BitVector, 16> consumers;
+  BitVector producers;
 };
 
 struct ValueOriginBinding {
@@ -267,7 +261,7 @@ struct GreedyStats {
   unsigned storeDataGaps = 0;
   unsigned vmemPrefetchMoves = 0;
   unsigned longLatencyVmemPrefetchMoves = 0;
-  unsigned loopCarriedLdsPrefetchMoves = 0;
+  unsigned recurrenceModelMoves = 0;
   unsigned memoryTokenGaps = 0;
   unsigned barrierMemoryGaps = 0;
   unsigned filledBarrierMemoryGaps = 0;
@@ -911,8 +905,8 @@ static bool filledSteadyStateStall(const GreedyStats &stats) {
   return stats.steadyStateFills != 0;
 }
 
-static bool prefetchedLoopCarriedLds(const GreedyStats &stats) {
-  return stats.loopCarriedLdsPrefetchMoves != 0;
+static bool scheduledModeledRecurrence(const GreedyStats &stats) {
+  return stats.recurrenceModelMoves != 0;
 }
 
 static bool hasComputeResourceMoves(const GreedyStats &stats) {
@@ -924,8 +918,8 @@ static StringRef getGreedyMoveReason(const GreedyStats &stats) {
     return "m0_hazard";
   if (filledOnlyStoreDataHazardGaps(stats))
     return "store_data_hazard";
-  if (prefetchedLoopCarriedLds(stats))
-    return "loop_lds_prefetch";
+  if (scheduledModeledRecurrence(stats))
+    return "recurrence_model";
   if (filledSteadyStateStall(stats))
     return "loop_wait";
   if (filledBarrierMemoryGap(stats))
@@ -1803,12 +1797,6 @@ canIssueNextDespiteStall(const GreedyRegion &region, unsigned next,
   return canLeadDma || emptyBarrierWait;
 }
 
-static bool shouldReleaseLoopCarriedLdsPrefetch(
-    unsigned next, const GreedyRegion &region, const GraphTables &graph,
-    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
-    const waveamdmachine::EventSimConfig &config,
-    const LoopCarriedLdsPrefetchPlan &plan, bool enabled);
-
 static FailureOr<bool> fillStallBeforeNext(
     const GreedyRegion &region, const GraphTables &graph,
     const waveamdmachine::ArchData &arch,
@@ -1816,9 +1804,7 @@ static FailureOr<bool> fillStallBeforeNext(
     IssueState *steadyState, BitVector &ready, BitVector &scheduled,
     SmallVectorImpl<unsigned> &pending, SmallVectorImpl<unsigned> &order,
     GreedyStats &stats, unsigned next, IssuePreview &nextPreview,
-    const ValueOriginMap &origins, const BitVector &noInsts,
-    const LoopCarriedLdsPrefetchPlan &loopCarriedLdsPrefetch,
-    bool prioritizeLoopCarriedLds) {
+    const ValueOriginMap &origins, const BitVector &noInsts) {
   while (true) {
     FailureOr<bool> readyNow =
         previewNextIssue(region, state, next, nextPreview);
@@ -1828,12 +1814,6 @@ static FailureOr<bool> fillStallBeforeNext(
       return true;
     if (canIssueNextDespiteStall(region, next, nextPreview, arch, config))
       return true;
-    if (shouldReleaseLoopCarriedLdsPrefetch(
-            next, region, graph, scheduled, arch, config,
-            loopCarriedLdsPrefetch, prioritizeLoopCarriedLds)) {
-      ++stats.loopCarriedLdsPrefetchMoves;
-      return true;
-    }
 
     recordGapStats(region.ops[next], nextPreview, stats);
     FillableStall stall = getFillableStall(nextPreview);
@@ -1894,14 +1874,11 @@ static FailureOr<GreedyStepStatus> scheduleOriginalNext(
     const waveamdmachine::EventSimConfig &config, IssueState &state,
     IssueState *steadyState, BitVector &ready, BitVector &scheduled,
     SmallVectorImpl<unsigned> &pending, GreedyResult &result, unsigned next,
-    const ValueOriginMap &origins, const BitVector &noInsts,
-    const LoopCarriedLdsPrefetchPlan &loopCarriedLdsPrefetch,
-    bool prioritizeLoopCarriedLds) {
+    const ValueOriginMap &origins, const BitVector &noInsts) {
   IssuePreview preview;
   FailureOr<bool> filled = fillStallBeforeNext(
       region, graph, arch, config, state, steadyState, ready, scheduled,
-      pending, result.order, result.stats, next, preview, origins, noInsts,
-      loopCarriedLdsPrefetch, prioritizeLoopCarriedLds);
+      pending, result.order, result.stats, next, preview, origins, noInsts);
   if (failed(filled))
     return failure();
   if (!*filled)
@@ -2130,290 +2107,332 @@ findSteadyStateAlternative(const BitVector &ready, unsigned next,
 static waveamdmachine::UniformLoopOp
 getCompleteUniformLoop(const GreedyRegion &region);
 
-static bool isLdsValueLoad(Operation *op) {
-  return waveamdmachine::hasMemoryValueLatency(op) &&
-         waveamdmachine::hasMemoryIssueResource(
-             waveamdmachine::getMemoryIssueResources(op),
-             waveamdmachine::MemoryIssueResource::Lds);
-}
+static LogicalResult bindLoopBackedge(IssueState &state,
+                                      waveamdmachine::UniformLoopOp loop);
 
-static void collectLoopCarriedLdsValueLoads(Value value,
-                                            const GraphTables &graph,
-                                            BitVector &candidates,
-                                            DenseSet<Value> &seen) {
-  if (isMemToken(value) || !seen.insert(value).second)
+static void collectRealRecurrenceProducers(Value value,
+                                           const GraphTables &graph,
+                                           BitVector &producers,
+                                           DenseSet<Value> &seen) {
+  if (!seen.insert(value).second)
     return;
   Operation *def = value.getDefiningOp();
   if (!def)
     return;
-  if (isLdsValueLoad(def)) {
-    DenseMap<Operation *, unsigned>::const_iterator it = graph.node.find(def);
-    if (it != graph.node.end())
-      candidates.set(it->second);
+  auto node = graph.node.find(def);
+  if (node == graph.node.end())
+    return;
+  if (waveamdmachine::classifyOp(def) != waveamdmachine::SchedClass::NoInst) {
+    producers.set(node->second);
     return;
   }
-  if (waveamdmachine::classifyOp(def) != waveamdmachine::SchedClass::NoInst)
-    return;
   for (Value operand : def->getOperands())
-    collectLoopCarriedLdsValueLoads(operand, graph, candidates, seen);
+    collectRealRecurrenceProducers(operand, graph, producers, seen);
 }
 
-static void collectRealRecurrenceConsumers(unsigned node,
-                                           const GreedyRegion &region,
+static void collectRealRecurrenceConsumers(Value value,
                                            const GraphTables &graph,
                                            BitVector &consumers,
-                                           BitVector &seen) {
-  if (seen.test(node))
+                                           DenseSet<Value> &seen) {
+  if (!seen.insert(value).second)
     return;
-  seen.set(node);
-  if (waveamdmachine::classifyOp(region.ops[node]) !=
-      waveamdmachine::SchedClass::NoInst) {
-    consumers.set(node);
-    return;
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    auto node = graph.node.find(user);
+    if (node == graph.node.end())
+      continue;
+    if (waveamdmachine::classifyOp(user) !=
+        waveamdmachine::SchedClass::NoInst) {
+      consumers.set(node->second);
+      continue;
+    }
+    for (Value result : user->getResults())
+      collectRealRecurrenceConsumers(result, graph, consumers, seen);
   }
-  for (unsigned successor : graph.successors[node])
-    collectRealRecurrenceConsumers(successor, region, graph, consumers, seen);
 }
 
-static LoopCarriedLdsPrefetchPlan
-buildLoopCarriedLdsPrefetchPlan(const GreedyRegion &region,
-                                const GraphTables &graph) {
-  LoopCarriedLdsPrefetchPlan plan;
-  plan.candidates.resize(region.ops.size());
-  plan.cadenceCandidates.resize(region.ops.size());
-  plan.overlap.resize(region.ops.size());
-  plan.recurrenceConsumers.resize(region.ops.size());
-  for (BitVector &consumers : plan.recurrenceConsumers)
+static RecurrenceSchedulePlan
+buildRecurrenceSchedulePlan(const GreedyRegion &region,
+                            const GraphTables &graph) {
+  RecurrenceSchedulePlan plan;
+  plan.producers.resize(region.ops.size());
+  plan.consumers.resize(region.ops.size());
+  for (BitVector &consumers : plan.consumers)
     consumers.resize(region.ops.size());
+
   waveamdmachine::UniformLoopOp loop = getCompleteUniformLoop(region);
-  if (!loop)
-    return plan;
-  waveamdmachine::ContinueIfOp terminator =
-      dyn_cast<waveamdmachine::ContinueIfOp>(region.block->getTerminator());
-  if (!terminator)
+  auto terminator = dyn_cast_if_present<waveamdmachine::ContinueIfOp>(
+      region.block->getTerminator());
+  if (!loop || !terminator)
     return plan;
 
-  DenseSet<Value> seen;
-  for (Value carry : terminator.getCarries())
-    collectLoopCarriedLdsValueLoads(carry, graph, plan.candidates, seen);
-  for (const ScheduleEdge &edge : graph.edges) {
-    if (!edge.recurrence || !plan.candidates.test(edge.src))
+  for (auto [arg, carry] :
+       llvm::zip_equal(region.block->getArguments(), terminator.getCarries())) {
+    // Token SSA remains legality; tracing joins creates false self-recurrences.
+    if (isMemToken(arg) || isMemToken(carry))
       continue;
-    BitVector consumerSeen(region.ops.size());
-    collectRealRecurrenceConsumers(edge.dst, region, graph,
-                                   plan.recurrenceConsumers[edge.src],
-                                   consumerSeen);
-  }
-  unsigned firstCandidate = region.ops.size();
-  unsigned lastConsumer = 0;
-  bool hasConsumer = false;
-  for (unsigned candidate : llvm::seq<unsigned>(0, region.ops.size())) {
-    if (!plan.candidates.test(candidate))
+    BitVector producers(region.ops.size());
+    BitVector consumers(region.ops.size());
+    DenseSet<Value> seenProducers;
+    DenseSet<Value> seenConsumers;
+    collectRealRecurrenceProducers(carry, graph, producers, seenProducers);
+    collectRealRecurrenceConsumers(arg, graph, consumers, seenConsumers);
+    if (!consumers.any())
       continue;
-    firstCandidate = std::min(firstCandidate, candidate);
-    for (unsigned consumer : llvm::seq<unsigned>(0, region.ops.size())) {
-      if (!plan.recurrenceConsumers[candidate].test(consumer))
-        continue;
-      lastConsumer = std::max(lastConsumer, consumer);
-      hasConsumer = true;
+    for (int producer = producers.find_first(); producer >= 0;
+         producer = producers.find_next(producer)) {
+      plan.producers.set(producer);
+      plan.consumers[producer] |= consumers;
     }
   }
-  // Preserve an existing software pipeline. This fallback is only for a tail
-  // of loop-carried loads emitted after all of their current-iteration uses.
-  if (hasConsumer && firstCandidate < lastConsumer) {
-    plan.candidates.reset();
-    plan.candidateCount = 0;
-    return plan;
-  }
-  plan.candidateCount = plan.candidates.count();
   return plan;
 }
 
-static unsigned countUnscheduled(const BitVector &members,
-                                 const BitVector &scheduled) {
-  unsigned count = 0;
-  for (unsigned index : llvm::seq<unsigned>(0, members.size()))
-    if (members.test(index) && !scheduled.test(index))
-      ++count;
-  return count;
-}
+struct ModeledRecurrenceOrder {
+  SmallVector<unsigned, 16> order;
+  BitVector moved;
+};
 
-static unsigned findFirstUnscheduled(const BitVector &members,
-                                     const BitVector &scheduled) {
-  for (unsigned index : llvm::seq<unsigned>(0, members.size()))
-    if (members.test(index) && !scheduled.test(index))
+struct ModeledRecurrenceSchedule {
+  SmallVector<unsigned, 16> order;
+  BitVector moved;
+  unsigned cursor = 0;
+  unsigned remainingMoves = 0;
+  bool evaluated = false;
+};
+
+static unsigned findFirstRemainingAtOrAfter(const BitVector &scheduled,
+                                            unsigned begin) {
+  for (unsigned index : llvm::seq(begin, scheduled.size()))
+    if (!scheduled.test(index))
       return index;
-  return members.size();
+  return scheduled.size();
 }
 
-static bool
-areRecurrenceConsumersScheduled(unsigned candidate,
-                                const LoopCarriedLdsPrefetchPlan &plan,
-                                const BitVector &scheduled) {
-  const BitVector &consumers = plan.recurrenceConsumers[candidate];
-  return consumers.any() && countUnscheduled(consumers, scheduled) == 0;
-}
-
-static bool reachesLdsPrefetchCandidate(unsigned node,
-                                        const GreedyRegion &region,
-                                        const GraphTables &graph,
-                                        const LoopCarriedLdsPrefetchPlan &plan,
-                                        BitVector &seen) {
-  if (seen.test(node))
-    return false;
-  seen.set(node);
-  for (unsigned successor : graph.successors[node]) {
-    if (plan.candidates.test(successor))
-      return true;
-    if (waveamdmachine::classifyOp(region.ops[successor]) ==
-            waveamdmachine::SchedClass::NoInst &&
-        reachesLdsPrefetchCandidate(successor, region, graph, plan, seen))
+static bool crossesSameMemoryProducerExcept(const GreedyRegion &region,
+                                            const BitVector &scheduled,
+                                            unsigned begin, unsigned producer,
+                                            ArrayRef<MemoryKind> producerKinds,
+                                            const BitVector &ignored) {
+  for (unsigned index : llvm::seq(begin, producer)) {
+    if (scheduled.test(index) || ignored.test(index))
+      continue;
+    if (containsMemoryKind(producerKinds, waveamdmachine::getMemoryCounterKind(
+                                              region.ops[index])))
       return true;
   }
   return false;
 }
 
-static bool shouldReleaseLoopCarriedLdsPrefetch(
+static bool validateModeledRecurrenceOrder(ArrayRef<unsigned> order,
+                                           const GraphTables &graph,
+                                           const RecurrenceSchedulePlan &plan,
+                                           const BitVector &scheduled,
+                                           const BitVector &moved) {
+  BitVector placed = scheduled;
+  for (unsigned node : order) {
+    for (unsigned predecessor : graph.predecessors[node])
+      if (!placed.test(predecessor))
+        return false;
+    if (moved.test(node))
+      for (int consumer = plan.consumers[node].find_first(); consumer >= 0;
+           consumer = plan.consumers[node].find_next(consumer))
+        if (!placed.test(consumer))
+          return false;
+    placed.set(node);
+  }
+  return placed.all();
+}
+
+static ModeledRecurrenceOrder buildModeledRecurrenceOrder(
     unsigned next, const GreedyRegion &region, const GraphTables &graph,
-    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
-    const waveamdmachine::EventSimConfig &config,
-    const LoopCarriedLdsPrefetchPlan &plan, bool enabled) {
-  if (!enabled || !isBarrierOp(region.ops[next]) || plan.candidateCount == 0)
-    return false;
-  BitVector seen(region.ops.size());
-  if (!reachesLdsPrefetchCandidate(next, region, graph, plan, seen))
-    return false;
+    const BitVector &scheduled, const ValueOriginMap &origins,
+    const RecurrenceSchedulePlan &plan) {
+  ModeledRecurrenceOrder result;
+  result.moved.resize(region.ops.size());
+  SmallVector<int, 16> insertionAfter(region.ops.size(), -1);
 
-  unsigned first = findFirstUnscheduled(plan.candidates, scheduled);
-  if (first == plan.candidates.size() || first <= next)
-    return false;
-  unsigned overlapIssues = 0;
-  for (unsigned index : llvm::seq(next + 1, first))
-    if (!scheduled.test(index) &&
-        waveamdmachine::classifyOp(region.ops[index]) !=
-            waveamdmachine::SchedClass::NoInst &&
-        waveamdmachine::getMemoryCounterKind(region.ops[index]) ==
-            MemoryKind::None)
-      overlapIssues += getIssueCount(region.ops[index]);
-
-  unsigned prefetchIssues = 0;
-  int64_t maxLatency = 0;
-  for (unsigned index : llvm::seq<unsigned>(0, plan.candidates.size())) {
-    if (!plan.candidates.test(index) || scheduled.test(index))
+  for (int producer = plan.producers.find_first(); producer >= 0;
+       producer = plan.producers.find_next(producer)) {
+    unsigned index = producer;
+    if (scheduled.test(index) || index <= next)
       continue;
-    Operation *candidate = region.ops[index];
-    prefetchIssues += getIssueCount(candidate);
-    maxLatency = std::max<int64_t>(
-        maxLatency, waveamdmachine::getMemoryValueLatency(
-                        arch, candidate, config.counterLatencies,
-                        config.valueLatencies, config.calibration));
-  }
-  int64_t issuePeriod = waveamdmachine::getEventSimIssuePeriod(arch, config);
-  assert(issuePeriod > 0 && "machine issue period must be positive");
-  unsigned latencyIssues =
-      static_cast<unsigned>((maxLatency + issuePeriod - 1) / issuePeriod);
-  return overlapIssues <= prefetchIssues + latencyIssues;
-}
 
-static bool activateLoopCarriedLdsPrefetch(LoopCarriedLdsPrefetchPlan &plan,
-                                           const BitVector &ready,
-                                           unsigned next,
-                                           const GreedyRegion &region,
-                                           const BitVector &scheduled) {
-  unsigned first = findFirstUnscheduled(plan.candidates, scheduled);
-  if (first == plan.candidates.size() || first <= next)
-    return false;
-  bool hasReadyCandidate = false;
-  for (unsigned index : llvm::seq<unsigned>(first, plan.candidates.size())) {
-    if (!plan.candidates.test(index) || scheduled.test(index) ||
-        !areRecurrenceConsumersScheduled(index, plan, scheduled))
+    int lastRequired = -1;
+    for (unsigned predecessor : graph.predecessors[index])
+      if (!scheduled.test(predecessor))
+        lastRequired = std::max(lastRequired, static_cast<int>(predecessor));
+    for (int consumer = plan.consumers[index].find_first(); consumer >= 0;
+         consumer = plan.consumers[index].find_next(consumer))
+      if (!scheduled.test(consumer))
+        lastRequired = std::max(lastRequired, consumer);
+    if (lastRequired >= producer)
       continue;
-    plan.cadenceCandidates.set(index);
-    hasReadyCandidate |= ready.test(index);
-  }
-  if (!hasReadyCandidate)
-    return false;
 
-  for (unsigned index : llvm::seq(next, first)) {
-    Operation *op = region.ops[index];
-    if (!scheduled.test(index) &&
-        waveamdmachine::classifyOp(op) != waveamdmachine::SchedClass::NoInst &&
-        waveamdmachine::getMemoryCounterKind(op) == MemoryKind::None)
-      plan.overlap.set(index);
-  }
-  plan.cadenceCount = plan.cadenceCandidates.count();
-  plan.overlapCount = plan.overlap.count();
-  plan.active = plan.cadenceCount != 0 && plan.overlapCount != 0;
-  return plan.active;
-}
-
-static FailureOr<std::optional<unsigned>>
-selectReadyLdsPrefetch(const BitVector &members, const BitVector &ready,
-                       unsigned next, const GreedyRegion &region,
-                       const IssueState &state, const BitVector &scheduled,
-                       const ValueOriginMap &origins,
-                       const LoopCarriedLdsPrefetchPlan &plan) {
-  for (unsigned index : llvm::seq<unsigned>(0, members.size())) {
-    if (!members.test(index) || scheduled.test(index) || !ready.test(index) ||
-        crossesSplitBarrier(region, scheduled, next, index))
+    unsigned begin =
+        lastRequired < 0
+            ? next
+            : findFirstRemainingAtOrAfter(scheduled, lastRequired + 1);
+    if (begin >= index || crossesSplitBarrier(region, scheduled, begin, index))
       continue;
-    MemoryKindSet kinds = collectFillerMemoryKinds(region.ops[index], origins);
-    bool crossesUnrelatedMemory = false;
-    for (unsigned crossed : llvm::seq(next, index)) {
-      // Ready cohort members have no token edge; waitcnt sees final order.
-      if (scheduled.test(crossed) || plan.candidates.test(crossed))
-        continue;
-      if (containsMemoryKind(kinds, waveamdmachine::getMemoryCounterKind(
-                                        region.ops[crossed]))) {
-        crossesUnrelatedMemory = true;
-        break;
+    insertionAfter[index] = lastRequired;
+    result.moved.set(index);
+  }
+
+  // waitcnt observes issue order within each counter.
+  for (int producer = result.moved.find_first(); producer >= 0;
+       producer = result.moved.find_next(producer)) {
+    MemoryKindSet kinds =
+        collectFillerMemoryKinds(region.ops[producer], origins);
+    for (int prior = result.moved.find_first(); prior >= 0 && prior < producer;
+         prior = result.moved.find_next(prior)) {
+      MemoryKind priorKind =
+          waveamdmachine::getMemoryCounterKind(region.ops[prior]);
+      if (containsMemoryKind(kinds, priorKind))
+        insertionAfter[producer] =
+            std::max(insertionAfter[producer], insertionAfter[prior]);
+    }
+  }
+
+  // Re-run after a rejected cohort member becomes a counter boundary.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (int producer = result.moved.find_first(); producer >= 0;
+         producer = result.moved.find_next(producer)) {
+      unsigned begin =
+          insertionAfter[producer] < 0
+              ? next
+              : findFirstRemainingAtOrAfter(
+                    scheduled,
+                    static_cast<unsigned>(insertionAfter[producer] + 1));
+      MemoryKindSet kinds =
+          collectFillerMemoryKinds(region.ops[producer], origins);
+      if (begin >= static_cast<unsigned>(producer) ||
+          crossesSameMemoryProducerExcept(region, scheduled, begin, producer,
+                                          kinds, result.moved)) {
+        result.moved.reset(producer);
+        changed = true;
       }
     }
-    if (crossesUnrelatedMemory)
-      continue;
-    FailureOr<IssuePreview> preview = previewIssue(state, region.ops[index]);
-    if (failed(preview))
-      return failure();
-    if (!stalls(*preview))
-      return std::optional<unsigned>(index);
   }
-  return std::optional<unsigned>{};
+
+  for (int producer = result.moved.find_first(); producer >= 0;
+       producer = result.moved.find_next(producer))
+    if (insertionAfter[producer] < 0)
+      result.order.push_back(producer);
+  for (unsigned index : llvm::seq<unsigned>(0, region.ops.size())) {
+    if (!scheduled.test(index) && !result.moved.test(index))
+      result.order.push_back(index);
+    for (int producer = result.moved.find_first(); producer >= 0;
+         producer = result.moved.find_next(producer))
+      if (insertionAfter[producer] == static_cast<int>(index))
+        result.order.push_back(producer);
+  }
+
+  if (!validateModeledRecurrenceOrder(result.order, graph, plan, scheduled,
+                                      result.moved)) {
+    result.order.clear();
+    result.moved.reset();
+  }
+  return result;
 }
 
-static FailureOr<std::optional<unsigned>> findReadyLoopCarriedLdsPrefetch(
+static FailureOr<int64_t> projectRecurringOrder(
+    const IssueState &state, ArrayRef<unsigned> scheduledOrder,
+    ArrayRef<unsigned> remainingOrder, const GreedyRegion &region,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config,
+    const ValueOriginMap &origins) {
+  waveamdmachine::UniformLoopOp loop = getCompleteUniformLoop(region);
+  if (!loop)
+    return failure();
+
+  IssueState trial = state;
+  int64_t startCycle = trial.model.getCurrentCycle();
+  int64_t startSlot = trial.resources.currentSlot;
+  auto commitNode = [&](unsigned node) -> LogicalResult {
+    FailureOr<IssuePreview> preview = previewIssue(trial, region.ops[node]);
+    if (failed(preview))
+      return failure();
+    return commitIssue(trial, region.ops[node], *preview, origins);
+  };
+
+  for (unsigned node : remainingOrder)
+    if (failed(commitNode(node)))
+      return failure();
+  trial.frozenLoopArgs = region.block;
+  if (failed(bindLoopBackedge(trial, loop)))
+    return failure();
+  for (unsigned node : scheduledOrder)
+    if (failed(commitNode(node)))
+      return failure();
+  for (unsigned node : remainingOrder)
+    if (failed(commitNode(node)))
+      return failure();
+
+  int64_t modelCycles = trial.model.getCurrentCycle() - startCycle;
+  int64_t issuePeriod = waveamdmachine::getEventSimIssuePeriod(arch, config);
+  int64_t resourceCycles =
+      (trial.resources.currentSlot - startSlot) * issuePeriod;
+  return std::max(modelCycles, resourceCycles);
+}
+
+static FailureOr<std::optional<unsigned>> findModeledRecurrenceAction(
     const BitVector &ready, unsigned next, const GreedyRegion &region,
-    const IssueState &state, const BitVector &scheduled,
-    const ValueOriginMap &origins, LoopCarriedLdsPrefetchPlan &plan,
+    const GraphTables &graph, const IssueState &state,
+    const IssueState *steadyState, ArrayRef<unsigned> scheduledOrder,
+    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    const RecurrenceSchedulePlan &plan, ModeledRecurrenceSchedule &schedule,
     bool enabled) {
-  if (!enabled || plan.candidateCount == 0)
-    return std::optional<unsigned>{};
-  if (!plan.active &&
-      !activateLoopCarriedLdsPrefetch(plan, ready, next, region, scheduled))
-    return std::optional<unsigned>{};
-  if (!plan.overlap.test(next))
+  if (!enabled || !plan.producers.any())
     return std::optional<unsigned>{};
 
-  BitVector released(plan.candidates.size());
-  for (unsigned index : llvm::seq<unsigned>(0, plan.candidates.size()))
-    if (plan.candidates.test(index) && !plan.cadenceCandidates.test(index) &&
-        areRecurrenceConsumersScheduled(index, plan, scheduled))
-      released.set(index);
-  FailureOr<std::optional<unsigned>> replacement = selectReadyLdsPrefetch(
-      released, ready, next, region, state, scheduled, origins, plan);
-  if (failed(replacement) || *replacement)
-    return replacement;
+  if (schedule.evaluated) {
+    while (schedule.cursor < schedule.order.size() &&
+           scheduled.test(schedule.order[schedule.cursor])) {
+      if (schedule.moved.test(schedule.order[schedule.cursor])) {
+        assert(schedule.remainingMoves > 0 &&
+               "recurrence move count underflow");
+        --schedule.remainingMoves;
+      }
+      ++schedule.cursor;
+    }
+    if (schedule.remainingMoves == 0 ||
+        schedule.cursor == schedule.order.size())
+      return std::optional<unsigned>{};
+    unsigned action = schedule.order[schedule.cursor];
+    if (!ready.test(action))
+      return std::optional<unsigned>{};
+    return std::optional<unsigned>(action);
+  }
+  schedule.evaluated = true;
 
-  unsigned issuedOverlap =
-      plan.overlapCount - countUnscheduled(plan.overlap, scheduled);
-  unsigned issuedCandidates =
-      plan.cadenceCount - countUnscheduled(plan.cadenceCandidates, scheduled);
-  unsigned desiredCandidates =
-      ((issuedOverlap + 1) * plan.cadenceCount + plan.overlapCount - 1) /
-      plan.overlapCount;
-  if (issuedCandidates >= desiredCandidates)
+  SmallVector<unsigned, 16> original;
+  for (unsigned index : llvm::seq<unsigned>(0, region.ops.size()))
+    if (!scheduled.test(index))
+      original.push_back(index);
+  ModeledRecurrenceOrder modeled = buildModeledRecurrenceOrder(
+      next, region, graph, scheduled, origins, plan);
+  if (!modeled.moved.any() || sameOrder(original, modeled.order))
     return std::optional<unsigned>{};
-  return selectReadyLdsPrefetch(plan.cadenceCandidates, ready, next, region,
-                                state, scheduled, origins, plan);
+
+  const IssueState &projectionState = steadyState ? *steadyState : state;
+  FailureOr<int64_t> originalCycles = projectRecurringOrder(
+      projectionState, scheduledOrder, original, region, arch, config, origins);
+  FailureOr<int64_t> modeledCycles =
+      projectRecurringOrder(projectionState, scheduledOrder, modeled.order,
+                            region, arch, config, origins);
+  if (failed(originalCycles) || failed(modeledCycles))
+    return failure();
+  if (*modeledCycles >= *originalCycles || modeled.order.empty() ||
+      !ready.test(modeled.order.front()))
+    return std::optional<unsigned>{};
+  schedule.order = std::move(modeled.order);
+  schedule.moved = std::move(modeled.moved);
+  schedule.remainingMoves = schedule.moved.count();
+  return std::optional<unsigned>(schedule.order.front());
 }
 
 static FailureOr<std::optional<unsigned>> findReadyAlternative(
@@ -2424,20 +2443,7 @@ static FailureOr<std::optional<unsigned>> findReadyAlternative(
     const BitVector &scheduled, const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     ArrayRef<unsigned> computeIslandEnds, GreedyStats &stats,
-    LoopCarriedLdsPrefetchPlan &loopCarriedLdsPrefetch,
-    bool prioritizeLoopCarriedLds, bool prioritizeLongLatencyVmem,
-    bool prioritizeComputeResources) {
-  FailureOr<std::optional<unsigned>> ldsPrefetch =
-      findReadyLoopCarriedLdsPrefetch(ready, next, region, state, scheduled,
-                                      origins, loopCarriedLdsPrefetch,
-                                      prioritizeLoopCarriedLds);
-  if (failed(ldsPrefetch))
-    return failure();
-  if (*ldsPrefetch) {
-    ++stats.loopCarriedLdsPrefetchMoves;
-    return *ldsPrefetch;
-  }
-
+    bool prioritizeLongLatencyVmem, bool prioritizeComputeResources) {
   FailureOr<std::optional<unsigned>> steady =
       findSteadyStateAlternative(ready, next, region, state, steadyState,
                                  steadyStallTarget, scheduled, stats);
@@ -2475,19 +2481,18 @@ static FailureOr<std::optional<unsigned>> findReadyAlternative(
                                      prioritizeComputeResources);
 }
 
-static FailureOr<GreedyStepStatus>
-buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
-                const waveamdmachine::ArchData &arch,
-                const waveamdmachine::EventSimConfig &config, IssueState &state,
-                IssueState *steadyState,
-                std::optional<SteadyStallTarget> &steadyStallTarget,
-                BitVector &ready, BitVector &scheduled,
-                SmallVectorImpl<unsigned> &pending, GreedyResult &result,
-                const ValueOriginMap &origins,
-                ArrayRef<unsigned> computeIslandEnds, const BitVector &noInsts,
-                LoopCarriedLdsPrefetchPlan &loopCarriedLdsPrefetch,
-                bool prioritizeLoopCarriedLds, bool prioritizeLongLatencyVmem,
-                bool prioritizeComputeResources) {
+static FailureOr<GreedyStepStatus> buildGreedyStep(
+    const GreedyRegion &region, const GraphTables &graph,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, IssueState &state,
+    IssueState *steadyState,
+    std::optional<SteadyStallTarget> &steadyStallTarget, BitVector &ready,
+    BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
+    GreedyResult &result, const ValueOriginMap &origins,
+    ArrayRef<unsigned> computeIslandEnds, const BitVector &noInsts,
+    const RecurrenceSchedulePlan &recurrencePlan,
+    ModeledRecurrenceSchedule &recurrenceSchedule, bool prioritizeRecurrences,
+    bool prioritizeLongLatencyVmem, bool prioritizeComputeResources) {
   if (failed(drainReadyNoInsts(region, graph, state, steadyState, ready,
                                scheduled, pending, result.order, origins,
                                noInsts)))
@@ -2509,20 +2514,26 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                                 ready, scheduled, pending, result.order,
                                 origins);
 
-  if (ready.test(next) &&
-      shouldReleaseLoopCarriedLdsPrefetch(next, region, graph, scheduled, arch,
-                                          config, loopCarriedLdsPrefetch,
-                                          prioritizeLoopCarriedLds)) {
-    ++result.stats.loopCarriedLdsPrefetchMoves;
-    return scheduleReadyByIndex(next, region, graph, state, steadyState, ready,
-                                scheduled, pending, result.order, origins);
+  if (ready.test(next)) {
+    FailureOr<std::optional<unsigned>> recurrence = findModeledRecurrenceAction(
+        ready, next, region, graph, state, steadyState, result.order, scheduled,
+        arch, config, origins, recurrencePlan, recurrenceSchedule,
+        prioritizeRecurrences);
+    if (failed(recurrence))
+      return failure();
+    if (*recurrence) {
+      if (recurrenceSchedule.moved.test(**recurrence))
+        ++result.stats.recurrenceModelMoves;
+      return scheduleReadyByIndex(**recurrence, region, graph, state,
+                                  steadyState, ready, scheduled, pending,
+                                  result.order, origins);
+    }
   }
 
   if (ready.test(next)) {
     FailureOr<std::optional<unsigned>> alternative = findReadyAlternative(
         ready, next, region, graph, state, steadyState, steadyStallTarget,
         scheduled, arch, config, origins, computeIslandEnds, result.stats,
-        loopCarriedLdsPrefetch, prioritizeLoopCarriedLds,
         prioritizeLongLatencyVmem, prioritizeComputeResources);
     if (failed(alternative))
       return failure();
@@ -2538,8 +2549,7 @@ buildGreedyStep(const GreedyRegion &region, const GraphTables &graph,
                                         origins);
   return scheduleOriginalNext(region, graph, arch, config, state, steadyState,
                               ready, scheduled, pending, result, next, origins,
-                              noInsts, loopCarriedLdsPrefetch,
-                              prioritizeLoopCarriedLds);
+                              noInsts);
 }
 
 static BitVector getInitialReadySet(ArrayRef<unsigned> pending) {
@@ -2555,7 +2565,7 @@ static GreedyResult buildGreedyOrderFromState(
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     const StaticIssueInfoMap &staticInfo, const IssueState *initialState,
-    bool prioritizeLoopCarriedLds, bool prioritizeLongLatencyVmem,
+    bool prioritizeRecurrences, bool prioritizeLongLatencyVmem,
     bool prioritizeComputeResources) {
   GreedyResult result;
   SmallVector<unsigned, 16> pending = graph.pendingPreds;
@@ -2565,8 +2575,9 @@ static GreedyResult buildGreedyOrderFromState(
   SmallVector<unsigned, 16> computeIslandEnds =
       buildComputeIslandEnds(region, staticInfo);
   BitVector noInsts = buildNoInsts(region, staticInfo);
-  LoopCarriedLdsPrefetchPlan loopCarriedLdsPrefetch =
-      buildLoopCarriedLdsPrefetchPlan(region, graph);
+  RecurrenceSchedulePlan recurrencePlan =
+      buildRecurrenceSchedulePlan(region, graph);
+  ModeledRecurrenceSchedule recurrenceSchedule;
   assert((!initialState || initialState->staticInfo == &staticInfo) &&
          "initial issue state uses different static info");
   IssueState state(arch, buildInstructionConfig(arch, config), staticInfo);
@@ -2580,8 +2591,8 @@ static GreedyResult buildGreedyOrderFromState(
     FailureOr<GreedyStepStatus> step =
         buildGreedyStep(region, graph, arch, config, state, steadyState.get(),
                         steadyStallTarget, ready, scheduled, pending, result,
-                        origins, computeIslandEnds, noInsts,
-                        loopCarriedLdsPrefetch, prioritizeLoopCarriedLds,
+                        origins, computeIslandEnds, noInsts, recurrencePlan,
+                        recurrenceSchedule, prioritizeRecurrences,
                         prioritizeLongLatencyVmem, prioritizeComputeResources);
     if (failed(step))
       return failGreedyModel(result);
@@ -2599,12 +2610,12 @@ static GreedyResult buildGreedyOrder(
     const GreedyRegion &region, const GraphTables &graph,
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
-    bool prioritizeLoopCarriedLds = true, bool prioritizeLongLatencyVmem = true,
+    bool prioritizeRecurrences = true, bool prioritizeLongLatencyVmem = true,
     bool prioritizeComputeResources = true) {
   StaticIssueInfoMap staticInfo = buildStaticIssueInfoMap(region, arch);
   return buildGreedyOrderFromState(
       region, graph, arch, config, origins, staticInfo,
-      /*initialState=*/nullptr, prioritizeLoopCarriedLds,
+      /*initialState=*/nullptr, prioritizeRecurrences,
       prioritizeLongLatencyVmem, prioritizeComputeResources);
 }
 
@@ -2926,21 +2937,21 @@ static GreedyResult buildBoundedGreedyOrder(
     const GreedyRegion &region, const GraphTables &graph,
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
-    bool prioritizeLoopCarriedLds = true, bool prioritizeLongLatencyVmem = true,
+    bool prioritizeRecurrences = true, bool prioritizeLongLatencyVmem = true,
     bool prioritizeComputeResources = true) {
   if (!getCompleteUniformLoop(region))
     return buildGreedyOrder(region, graph, arch, config, origins,
-                            prioritizeLoopCarriedLds, prioritizeLongLatencyVmem,
+                            prioritizeRecurrences, prioritizeLongLatencyVmem,
                             prioritizeComputeResources);
 
   StaticIssueInfoMap staticInfo = buildStaticIssueInfoMap(region, arch);
   GreedyResult best = buildGreedyOrderFromState(
       region, graph, arch, config, origins, staticInfo,
-      /*initialState=*/nullptr, prioritizeLoopCarriedLds,
+      /*initialState=*/nullptr, prioritizeRecurrences,
       prioritizeLongLatencyVmem, prioritizeComputeResources);
   if (!best.success)
     return best;
-  bool usedLoopCarriedLdsPrefetch = best.stats.loopCarriedLdsPrefetchMoves != 0;
+  bool usedModeledRecurrence = best.stats.recurrenceModelMoves != 0;
 
   SmallVector<unsigned, 16> currentOrder = best.order;
   SmallVector<SmallVector<unsigned, 16>, 4> seenOrders;
@@ -2957,13 +2968,12 @@ static GreedyResult buildBoundedGreedyOrder(
   for (unsigned refinement : llvm::seq(kSteadyStateRefinementLimit)) {
     GreedyResult stableCandidate = buildGreedyOrderFromState(
         region, graph, arch, config, origins, staticInfo, entryState.get(),
-        prioritizeLoopCarriedLds, prioritizeLongLatencyVmem,
+        prioritizeRecurrences, prioritizeLongLatencyVmem,
         prioritizeComputeResources);
     ++refinements;
     if (!stableCandidate.success)
       return stableCandidate;
-    usedLoopCarriedLdsPrefetch |=
-        stableCandidate.stats.loopCarriedLdsPrefetchMoves != 0;
+    usedModeledRecurrence |= stableCandidate.stats.recurrenceModelMoves != 0;
     if (sameOrder(stableCandidate.order, currentOrder) ||
         hasSeenOrder(seenOrders, stableCandidate.order))
       break;
@@ -2984,8 +2994,8 @@ static GreedyResult buildBoundedGreedyOrder(
 
   best.stats.steadyStateIterations = kSteadyStateIterations;
   best.stats.steadyStateRefinements = refinements;
-  if (usedLoopCarriedLdsPrefetch && best.stats.loopCarriedLdsPrefetchMoves == 0)
-    best.stats.loopCarriedLdsPrefetchMoves = 1;
+  if (usedModeledRecurrence && best.stats.recurrenceModelMoves == 0)
+    best.stats.recurrenceModelMoves = 1;
   return best;
 }
 
@@ -3035,8 +3045,7 @@ static void printDecision(const GreedyRegion &region, StringRef action,
                << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
                << " long_latency_vmem_prefetch_moves="
                << stats.longLatencyVmemPrefetchMoves
-               << " loop_carried_lds_prefetch_moves="
-               << stats.loopCarriedLdsPrefetchMoves
+               << " recurrence_model_moves=" << stats.recurrenceModelMoves
                << " memory_token_gaps=" << stats.memoryTokenGaps
                << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                << " filled_barrier_memory_gaps="
@@ -3269,14 +3278,14 @@ struct WaveAMDMachineSchedulePass
     graphTiming.stop();
 
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
-    bool prioritizeLoopCarriedLds = true;
+    bool prioritizeRecurrences = true;
     bool prioritizeLongLatencyVmem = true;
     bool prioritizeComputeResources = true;
     GreedyResult greedy;
     while (true) {
       TimingScope orderTiming = timing.nest("machine_schedule_build_order");
       greedy = buildBoundedGreedyOrder(
-          region, graph, arch, config, origins, prioritizeLoopCarriedLds,
+          region, graph, arch, config, origins, prioritizeRecurrences,
           prioritizeLongLatencyVmem, prioritizeComputeResources);
       if (!greedy.success)
         return emitGreedyFailure(region, greedy);
@@ -3285,8 +3294,8 @@ struct WaveAMDMachineSchedulePass
       TimingScope pressureTiming =
           timing.nest("machine_schedule_pressure_checks");
       std::array policies{
-          RegisterPressurePolicy{&prioritizeLoopCarriedLds,
-                                 greedy.stats.loopCarriedLdsPrefetchMoves != 0},
+          RegisterPressurePolicy{&prioritizeRecurrences,
+                                 greedy.stats.recurrenceModelMoves != 0},
           RegisterPressurePolicy{&prioritizeLongLatencyVmem,
                                  greedy.stats.longLatencyVmemPrefetchMoves !=
                                      0},
@@ -3693,8 +3702,7 @@ struct WaveAMDMachineScheduleReportPass
                  << " m0_gaps=" << stats.m0Gaps
                  << " store_data_gaps=" << stats.storeDataGaps
                  << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
-                 << " loop_carried_lds_prefetch_moves="
-                 << stats.loopCarriedLdsPrefetchMoves
+                 << " recurrence_model_moves=" << stats.recurrenceModelMoves
                  << " memory_token_gaps=" << stats.memoryTokenGaps
                  << " barrier_memory_gaps=" << stats.barrierMemoryGaps
                  << " filled_barrier_memory_gaps="

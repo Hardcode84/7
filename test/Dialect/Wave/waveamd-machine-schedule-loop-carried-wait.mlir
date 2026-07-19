@@ -176,6 +176,7 @@ func.func @fill_steady_dma_queue(
 // IR-NEXT: waveamdmachine.buffer_load_lds_b128
 // DIAG: waveamd-machine-schedule region func=fill_steady_dma_queue index=0
 // DIAG-SAME: action=apply reason=loop_wait
+// DIAG-SAME: recurrence_model_moves=0
 // DIAG-SAME: steady_state_fills=17
 // DIAG-SAME: steady_state_iterations=4
 // DIAG-SAME: steady_state_refinements=3
@@ -575,17 +576,17 @@ func.func @prefetch_tail_loop_carried_lds(
 // IR-NEXT: [[READY:%.*]] = waveamdmachine.s_barrier
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: [[NEXT0:%.*]], {{%.*}} = waveamdmachine.ds_load_b32 {{.*}} after [[READY]]
-// IR-NEXT: waveamdmachine.v_add_u32
-// IR-NEXT: waveamdmachine.v_add_u32
-// IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: [[NEXT1:%.*]], {{%.*}} = waveamdmachine.ds_load_b32 {{.*}} after [[READY]]
 // IR-NEXT: waveamdmachine.token_join
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT0]], [[NEXT1]],
 // DIAG: waveamd-machine-schedule region func=prefetch_tail_loop_carried_lds index=1
-// DIAG-SAME: loop_carried_lds_prefetch_moves={{[1-9][0-9]*}}
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
 
 // -----
 
@@ -647,7 +648,7 @@ func.func @preserve_interleaved_loop_carried_lds(
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.ds_load_b32
 // DIAG: waveamd-machine-schedule region func=preserve_interleaved_loop_carried_lds index=1
-// DIAG-SAME: loop_carried_lds_prefetch_moves=0
+// DIAG-SAME: recurrence_model_moves=0
 
 // -----
 
@@ -719,4 +720,134 @@ func.func @prefetch_after_each_recurrence_last_use(
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT0]], [[NEXT1]],
 // DIAG: waveamd-machine-schedule region func=prefetch_after_each_recurrence_last_use index=1
-// DIAG-SAME: loop_carried_lds_prefetch_moves={{[1-9][0-9]*}}
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
+
+// -----
+
+// Same graph: gfx942's shorter LDS latency keeps source order.
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
+func.func @preserve_short_latency_recurrence(
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init0, %init_t0 = waveamdmachine.ds_load_b32 %addr0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init1, %init_t1 = waveamdmachine.ds_load_b32 %addr1 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init_token = waveamdmachine.token_join %init_t0, %init_t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %loop:3 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init0, %init1, %init_token :
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile0: !waveamdmachine.reg<vgpr, 1>,
+       %tile1: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %used0 = waveamdmachine.v_add_u32 %tile0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work0 = waveamdmachine.v_add_u32 %used0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %used1 = waveamdmachine.v_add_u32 %tile1, %work0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work1 = waveamdmachine.v_add_u32 %used1, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next0, %read0 = waveamdmachine.ds_load_b32 %addr0 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next1, %read1 = waveamdmachine.ds_load_b32 %addr1 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next_token = waveamdmachine.token_join %read0, %read1
+        : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next0, %next1, %next_token :
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>,
+       !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @preserve_short_latency_recurrence
+// IR: ^bb0
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.ds_load_b32
+// DIAG: waveamd-machine-schedule region func=preserve_short_latency_recurrence index=1
+// DIAG-SAME: action=keep reason=same_order
+// DIAG-SAME: recurrence_model_moves=0
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @prefetch_loop_carried_global(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init, %init_token = waveamdmachine.global_load_b32 %off, %ptr after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init, %init_token : !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %used = waveamdmachine.v_add_u32 %tile, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work0 = waveamdmachine.v_add_u32 %used, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work1 = waveamdmachine.v_add_u32 %work0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work2 = waveamdmachine.v_add_u32 %work1, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work3 = waveamdmachine.v_add_u32 %work2, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next, %read = waveamdmachine.global_load_b32 %off, %ptr after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+           !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next, %read : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @prefetch_loop_carried_global
+// IR: ^bb0
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.global_load_b32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// DIAG: waveamd-machine-schedule region func=prefetch_loop_carried_global index=1
+// DIAG-SAME: action=apply reason=recurrence_model
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}

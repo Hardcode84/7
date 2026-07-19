@@ -892,30 +892,30 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_cmp_eq_u32_e64 vcc, v6, v32
 		buffer_load_dwordx4 v10, s[28:31], s38 offen lds
 		ds_read_b128 v[56:59], v49
-		ds_read_b128 v[60:63], v49 offset:64
-		ds_read_b128 v[64:67], v49 offset:256
 		s_add_i32 m0, m0, 0x2100
 		s_lshl_b32 s25, s39, 7
 		s_add_i32 s37, s15, s25
 		v_add_u32_e32 v6, s37, v15
 		v_cndmask_b32_e64 v6, v51, v6, s[40:41]
 		buffer_load_dwordx4 v42, s[28:31], s38 offen lds
-		ds_read_b128 v[68:71], v49 offset:320
-		ds_read_b128 v[72:75], v49 offset:512
-		ds_read_b128 v[76:79], v49 offset:576
+		ds_read_b128 v[60:63], v49 offset:64
 		s_add_i32 m0, s24, 0xc5e0
 		s_add_i32 s25, s23, s25
 		v_add_u32_e32 v10, s25, v15
 		s_add_i32 s22, s22, 1
 		v_cndmask_b32_e32 v10, v51, v10, vcc
 		buffer_load_dwordx4 v6, s[32:35], 0 offen lds
-		ds_read_b128 v[80:83], v49 offset:768
-		ds_read_b128 v[84:87], v49 offset:832
+		ds_read_b128 v[64:67], v49 offset:256
 		s_add_i32 m0, s24, 0xe6e0
 		s_cmp_lg_u32 s36, 0
 		s_cselect_b32 s24, s26, s27
 		s_cmp_lt_i32 s22, s5
 		buffer_load_dwordx4 v10, s[32:35], 0 offen lds
+		ds_read_b128 v[68:71], v49 offset:320
+		ds_read_b128 v[72:75], v49 offset:512
+		ds_read_b128 v[76:79], v49 offset:576
+		ds_read_b128 v[80:83], v49 offset:768
+		ds_read_b128 v[84:87], v49 offset:832
 		ds_read_b64_tr_b16 v[88:89], v54 offset:50656
 		ds_read_b64_tr_b16 v[90:91], v54 offset:59104
 		ds_read_b64_tr_b16 v[92:93], v54 offset:51168

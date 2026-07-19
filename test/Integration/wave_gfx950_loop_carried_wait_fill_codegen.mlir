@@ -78,8 +78,8 @@ func.func @loop_carried_wait_fill_codegen() attributes {wave.kernel} {
 // ASM-NEXT: ds_read_b32 v3, v0
 // ASM: ds_read_b32 v4, v1
 // DIAG: waveamd-machine-schedule region func=loop_carried_lds_prefetch_codegen index=1
-// DIAG-SAME: action=apply reason=loop_lds_prefetch
-// DIAG-SAME: loop_carried_lds_prefetch_moves={{[1-9][0-9]*}}
+// DIAG-SAME: action=apply reason=recurrence_model
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
 func.func @loop_carried_lds_prefetch_codegen() attributes {wave.kernel} {
   %root = waveamdmachine.token : !waveamdmachine.mem.token
   %addr0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
