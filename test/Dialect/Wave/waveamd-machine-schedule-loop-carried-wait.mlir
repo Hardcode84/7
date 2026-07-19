@@ -499,3 +499,224 @@ func.func @skip_sliced_uniform_loop(
 // DIAG: waveamd-machine-schedule region func=skip_sliced_uniform_loop index=2
 // DIAG-SAME: steady_state_iterations=0
 // DIAG-NOT: waveamd-machine-schedule region func=skip_sliced_uniform_loop{{.*}}steady_state_iterations=4
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @prefetch_tail_loop_carried_lds(
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init0, %init_t0 = waveamdmachine.ds_load_b32 %addr0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init1, %init_t1 = waveamdmachine.ds_load_b32 %addr1 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init_token = waveamdmachine.token_join %init_t0, %init_t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %loop:3 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init0, %init1, %init_token :
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile0: !waveamdmachine.reg<vgpr, 1>,
+       %tile1: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %ready = waveamdmachine.s_barrier %tok
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %used = waveamdmachine.v_add_u32 %tile0, %tile1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work0 = waveamdmachine.v_add_u32 %used, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work1 = waveamdmachine.v_add_u32 %work0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work2 = waveamdmachine.v_add_u32 %work1, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work3 = waveamdmachine.v_add_u32 %work2, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work4 = waveamdmachine.v_add_u32 %work3, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work5 = waveamdmachine.v_add_u32 %work4, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next0, %read0 = waveamdmachine.ds_load_b32 %addr0 after %ready
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next1, %read1 = waveamdmachine.ds_load_b32 %addr1 after %ready
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next_token = waveamdmachine.token_join %read0, %read1
+        : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next0, %next1, %next_token :
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>,
+       !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @prefetch_tail_loop_carried_lds
+// IR: ^bb0
+// IR-NEXT: [[READY:%.*]] = waveamdmachine.s_barrier
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: [[NEXT0:%.*]], {{%.*}} = waveamdmachine.ds_load_b32 {{.*}} after [[READY]]
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: [[NEXT1:%.*]], {{%.*}} = waveamdmachine.ds_load_b32 {{.*}} after [[READY]]
+// IR-NEXT: waveamdmachine.token_join
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT0]], [[NEXT1]],
+// DIAG: waveamd-machine-schedule region func=prefetch_tail_loop_carried_lds index=1
+// DIAG-SAME: loop_carried_lds_prefetch_moves={{[1-9][0-9]*}}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @preserve_interleaved_loop_carried_lds(
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init0, %init_t0 = waveamdmachine.ds_load_b32 %addr0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init1, %init_t1 = waveamdmachine.ds_load_b32 %addr1 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init_token = waveamdmachine.token_join %init_t0, %init_t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %loop:3 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init0, %init1, %init_token :
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile0: !waveamdmachine.reg<vgpr, 1>,
+       %tile1: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %used0 = waveamdmachine.v_add_u32 %tile0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next0, %read0 = waveamdmachine.ds_load_b32 %addr0 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %used1 = waveamdmachine.v_add_u32 %tile1, %used0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next1, %read1 = waveamdmachine.ds_load_b32 %addr1 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next_token = waveamdmachine.token_join %read0, %read1
+        : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next0, %next1, %next_token :
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>,
+       !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @preserve_interleaved_loop_carried_lds
+// IR: ^bb0
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.ds_load_b32
+// DIAG: waveamd-machine-schedule region func=preserve_interleaved_loop_carried_lds index=1
+// DIAG-SAME: loop_carried_lds_prefetch_moves=0
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @prefetch_after_each_recurrence_last_use(
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init0, %init_t0 = waveamdmachine.ds_load_b32 %addr0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init1, %init_t1 = waveamdmachine.ds_load_b32 %addr1 after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %init_token = waveamdmachine.token_join %init_t0, %init_t1
+      : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %loop:3 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init0, %init1, %init_token :
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile0: !waveamdmachine.reg<vgpr, 1>,
+       %tile1: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %used0 = waveamdmachine.v_add_u32 %tile0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work0 = waveamdmachine.v_add_u32 %used0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %used1 = waveamdmachine.v_add_u32 %tile1, %work0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work1 = waveamdmachine.v_add_u32 %used1, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next0, %read0 = waveamdmachine.ds_load_b32 %addr0 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next1, %read1 = waveamdmachine.ds_load_b32 %addr1 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next_token = waveamdmachine.token_join %read0, %read1
+        : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next0, %next1, %next_token :
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>,
+       !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @prefetch_after_each_recurrence_last_use
+// IR: ^bb0
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: [[NEXT0:%.*]], {{%.*}} = waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: [[NEXT1:%.*]], {{%.*}} = waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.token_join
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT0]], [[NEXT1]],
+// DIAG: waveamd-machine-schedule region func=prefetch_after_each_recurrence_last_use index=1
+// DIAG-SAME: loop_carried_lds_prefetch_moves={{[1-9][0-9]*}}

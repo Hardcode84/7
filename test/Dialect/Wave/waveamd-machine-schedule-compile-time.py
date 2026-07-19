@@ -200,7 +200,8 @@ def main() -> int:
         "matmul_greedy_report",
         text,
         r"candidate func=wmma_f16_matmul_tiled region=1 name=greedy "
-        r".*operand_gaps=1 .*memory_token_gaps=2 "
+        r".*operand_gaps=1 .*loop_carried_lds_prefetch_moves=1 "
+        r".*memory_token_gaps=1 "
         r".*steady_state_iterations=4 .*steady_state_refinements=2",
     )
 

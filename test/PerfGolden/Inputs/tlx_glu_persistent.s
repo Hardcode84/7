@@ -913,6 +913,7 @@ tlx_addmm_glu_kernel_persistent:
 		s_mul_i32 s83, 0x4200, s76
 		s_mul_i32 s76, 0x2100, s76
 		v_add_u32_e32 v72, s76, v38
+		ds_read_b128 v[80:83], v72
 		v_add_u32_e32 v75, s83, v5
 		v_cndmask_b32_e32 v77, v32, v76, vcc
 		s_add_i32 m0, s71, s81
@@ -921,29 +922,28 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s75, s75, 1
 		v_cmp_lt_i32_e64 vcc, v6, s80
 		s_add_i32 s74, s71, s74
-		s_lshl_b32 s76, s82, 6
-		s_add_i32 s81, s63, s76
-		v_add_u32_e32 v77, s81, v73
-		v_cndmask_b32_e32 v78, v1, v41, vcc
-		v_add_u32_e32 v78, v78, v71
-		v_cmp_eq_u32_e64 vcc, v78, v74
-		s_mov_b64 s[82:83], vcc
+		ds_read_b128 v[84:87], v72 offset:2112
+		v_cndmask_b32_e32 v77, v1, v41, vcc
+		v_add_u32_e32 v77, v77, v71
+		v_cmp_eq_u32_e64 vcc, v77, v74
+		s_mov_b64 s[84:85], vcc
 		v_cmp_lt_i32_e64 vcc, v7, s80
-		v_cndmask_b32_e64 v77, v32, v77, s[82:83]
+		s_lshl_b32 s76, s82, 6
+		ds_read_b128 v[88:91], v72 offset:4224
+		v_cndmask_b32_e32 v77, v1, v41, vcc
+		s_add_i32 s80, s63, s76
+		v_add_u32_e32 v78, s80, v73
+		v_cndmask_b32_e64 v78, v32, v78, s[84:85]
 		s_add_i32 m0, s74, 0x62e0
-		v_cndmask_b32_e32 v78, v1, v41, vcc
-		buffer_load_dwordx4 v77, s[48:51], 0 offen lds
-		v_add_u32_e32 v71, v78, v71
+		ds_read_b128 v[92:95], v72 offset:6336
+		buffer_load_dwordx4 v78, s[48:51], 0 offen lds
+		v_add_u32_e32 v71, v77, v71
 		s_add_i32 s76, s64, s76
 		v_cmp_eq_u32_e64 vcc, v71, v74
 		v_add_u32_e32 v71, s76, v73
 		s_add_i32 m0, s74, 0x83e0
 		v_cndmask_b32_e32 v71, v32, v71, vcc
 		buffer_load_dwordx4 v71, s[48:51], 0 offen lds
-		ds_read_b128 v[80:83], v72
-		ds_read_b128 v[84:87], v72 offset:2112
-		ds_read_b128 v[88:91], v72 offset:4224
-		ds_read_b128 v[92:95], v72 offset:6336
 		ds_read_b64_tr_b16 v[96:97], v75 offset:25312
 		ds_read_b64_tr_b16 v[98:99], v75 offset:33760
 		ds_read_b64_tr_b16 v[100:101], v75 offset:25440
@@ -1420,7 +1420,7 @@ tlx_addmm_glu_kernel_persistent:
 		.amdhsa_system_sgpr_workgroup_info 0
 		.amdhsa_system_vgpr_workitem_id 0
 		.amdhsa_next_free_vgpr 216
-		.amdhsa_next_free_sgpr 86
+		.amdhsa_next_free_sgpr 88
 		.amdhsa_accum_offset 216
 		.amdhsa_reserve_vcc 1
 		.amdhsa_float_round_mode_32 0
@@ -1434,7 +1434,7 @@ tlx_addmm_glu_kernel_persistent:
 	.text
 	.set .Ltlx_addmm_glu_kernel_persistent.num_vgpr, 216
 	.set .Ltlx_addmm_glu_kernel_persistent.num_agpr, 0
-	.set .Ltlx_addmm_glu_kernel_persistent.numbered_sgpr, 86
+	.set .Ltlx_addmm_glu_kernel_persistent.numbered_sgpr, 88
 	.set .Ltlx_addmm_glu_kernel_persistent.num_named_barrier, 0
 	.set .Ltlx_addmm_glu_kernel_persistent.private_seg_size, 0
 	.set .Ltlx_addmm_glu_kernel_persistent.uses_vcc, 1
@@ -1505,7 +1505,7 @@ amdhsa.kernels:
     .max_flat_workgroup_size: 512
     .name:           tlx_addmm_glu_kernel_persistent
     .private_segment_fixed_size: 0
-    .sgpr_count:     86
+    .sgpr_count:     88
     .sgpr_spill_count: 0
     .symbol:         tlx_addmm_glu_kernel_persistent.kd
     .uses_dynamic_stack: false
