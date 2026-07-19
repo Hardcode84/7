@@ -655,7 +655,7 @@ private:
 
   LogicalResult
   coalesceUniformIfRegionResults(waveamdmachine::UniformIfOp uniformIf,
-                                 Region &region, unsigned index, unsigned pos) {
+                                 Region &region, unsigned index) {
     if (region.empty())
       return success();
     auto yield =
@@ -673,37 +673,46 @@ private:
     if (!valueIsDefinedInside(uniformIf, yieldValue))
       return uniformIf.emitError(
           "uniform_if register yield must be defined inside the branch");
-    return coalesce(resultValue, yieldValue, pos, result.intervals, uniformIf);
+    unsigned yieldPos = result.positions.lookup(yield);
+    return coalesce(resultValue, yieldValue, yieldPos, result.intervals,
+                    uniformIf);
   }
 
-  LogicalResult coalesceUniformIfResults(waveamdmachine::UniformIfOp uniformIf,
-                                         unsigned pos) {
+  LogicalResult
+  coalesceUniformIfResults(waveamdmachine::UniformIfOp uniformIf) {
     for (unsigned index : llvm::seq<unsigned>(0, uniformIf.getNumResults())) {
       if (failed(coalesceUniformIfRegionResults(
-              uniformIf, uniformIf.getThenRegion(), index, pos)))
+              uniformIf, uniformIf.getThenRegion(), index)))
         return failure();
       if (failed(coalesceUniformIfRegionResults(
-              uniformIf, uniformIf.getElseRegion(), index, pos)))
+              uniformIf, uniformIf.getElseRegion(), index)))
         return failure();
     }
     return success();
   }
 
-  LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf,
-                                 unsigned pos) {
-    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Coalesce &&
-        failed(coalesceUniformIfResults(uniformIf, pos)))
-      return failure();
+  LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf) {
     if (failed(walkExecIfRegion(uniformIf.getThenRegion())))
       return failure();
-    return walkExecIfRegion(uniformIf.getElseRegion());
+    if (failed(walkExecIfRegion(uniformIf.getElseRegion())))
+      return failure();
+
+    // Yield aliases cover each arm; parent results start at join.
+    unsigned exitPos = cursor - 1;
+    for (Value resultValue : uniformIf.getResults())
+      (void)ensureInterval(resultValue, exitPos, result.intervals, uniformIf,
+                           includeAllocated);
+    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Coalesce &&
+        failed(coalesceUniformIfResults(uniformIf)))
+      return failure();
+    return success();
   }
 
   LogicalResult processNestedRegions(Operation *op, unsigned pos) {
     if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
       return processLoop(loop, pos);
     if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
-      return processUniformIf(uniformIf, pos);
+      return processUniformIf(uniformIf);
     if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
       return processExecIf(execIf, pos);
     return walkNestedRegions(op);
@@ -875,7 +884,8 @@ private:
       unsigned pos = cursor++;
       result.positions[op] = pos;
       result.orderedOps.push_back(op);
-      bool deferResults = isa<waveamdmachine::UniformLoopOp>(op);
+      bool deferResults =
+          isa<waveamdmachine::UniformLoopOp, waveamdmachine::UniformIfOp>(op);
       if (!deferResults)
         for (Value value : op->getResults()) {
           // failure() here means "not a tracked register", not error.

@@ -44,14 +44,14 @@ tlx_addmm_glu_kernel_optimized_async:
 		s_mov_b32 s20, s16
 		s_branch .Ltlx_addmm_glu_kernel_optimized_async.if_end_0
 .Ltlx_addmm_glu_kernel_optimized_async.if_else_0:
-		s_and_b32 s21, s16, 7
+		s_and_b32 s20, s16, 7
 		s_lshr_b32 s16, s16, 3
-		s_lshr_b32 s22, s16, 2
-		s_mul_i32 s22, s22, 32
-		s_mul_i32 s21, s21, 4
-		s_add_i32 s21, s22, s21
+		s_lshr_b32 s21, s16, 2
+		s_mul_i32 s21, s21, 32
+		s_mul_i32 s20, s20, 4
+		s_add_i32 s20, s21, s20
 		s_and_b32 s16, s16, 3
-		s_add_i32 s20, s21, s16
+		s_add_i32 s20, s20, s16
 .Ltlx_addmm_glu_kernel_optimized_async.if_end_0:
 		s_mul_i32 s1, s1, 4
 		s_cmp_lt_i32 s20, 0

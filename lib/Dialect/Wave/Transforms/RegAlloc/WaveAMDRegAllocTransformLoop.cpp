@@ -358,7 +358,8 @@ private:
           collectRegion(nested, nestedPath, nestedEnclosingLoop);
         }
         unsigned resultStart = record.position;
-        if (record.typeId == TypeID::get<waveamdmachine::UniformLoopOp>())
+        if (record.typeId == TypeID::get<waveamdmachine::UniformLoopOp>() ||
+            record.typeId == TypeID::get<waveamdmachine::UniformIfOp>())
           resultStart = ops.back().position;
         for (OpResult result : op.getResults())
           registerValue(result, resultStart, opPath,

@@ -1,0 +1,52 @@
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
+// RUN:   | FileCheck %s --check-prefix=ALLOC
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
+// RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
+// RUN:   | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
+// RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
+// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx90a -filetype=obj -o /dev/null
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+
+// ALLOC-LABEL: func.func @uniform_if_branch_storage_reuse()
+// ALLOC-SAME: waveamdmachine.regalloc_assignments
+// ALLOC-SAME: waveamdmachine.vgpr_count = 64 : i64
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64, 0>
+// ALLOC-NEXT: [[THEN:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64, 0>
+// ALLOC-NEXT: waveamdmachine.yield [[THEN]] : !waveamdmachine.reg<vgpr, 64, 0>
+// ALLOC: otherwise
+// ALLOC-NEXT: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64, 0>
+// ALLOC-NEXT: [[ELSE:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64, 0>
+// ALLOC-NEXT: waveamdmachine.yield [[ELSE]] : !waveamdmachine.reg<vgpr, 64, 0>
+// ASM-LABEL: uniform_if_branch_storage_reuse:
+// ASM: s_cbranch_scc0
+// ASM: s_branch
+// ASM: v_cmpx_eq_u32
+func.func @uniform_if_branch_storage_reuse()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    %scratch = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+    %then = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+    waveamdmachine.yield %then : !waveamdmachine.reg<vgpr, 64>
+  } otherwise {
+    %scratch = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+    %else = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+    waveamdmachine.yield %else : !waveamdmachine.reg<vgpr, 64>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 64>
+  %parts:2 = waveamdmachine.tuple_to_elements %selected
+      : (!waveamdmachine.reg<vgpr, 64>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 63>)
+  waveamdmachine.v_cmpx_eq_u32 %parts#0, %parts#0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+}

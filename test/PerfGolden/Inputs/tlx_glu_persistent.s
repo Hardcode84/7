@@ -395,14 +395,14 @@ tlx_addmm_glu_kernel_persistent:
 		s_mov_b32 s16, s2
 		s_branch .Ltlx_addmm_glu_kernel_persistent.if_end_0
 .Ltlx_addmm_glu_kernel_persistent.if_else_0:
-		s_and_b32 s71, s2, 7
-		s_lshr_b32 s72, s2, 3
-		s_lshr_b32 s73, s72, 2
-		s_mul_i32 s73, s73, 32
-		s_mul_i32 s71, s71, 4
-		s_add_i32 s71, s73, s71
-		s_and_b32 s72, s72, 3
-		s_add_i32 s16, s71, s72
+		s_and_b32 s16, s2, 7
+		s_lshr_b32 s71, s2, 3
+		s_lshr_b32 s72, s71, 2
+		s_mul_i32 s72, s72, 32
+		s_mul_i32 s16, s16, 4
+		s_add_i32 s16, s72, s16
+		s_and_b32 s71, s71, 3
+		s_add_i32 s16, s16, s71
 .Ltlx_addmm_glu_kernel_persistent.if_end_0:
 		s_barrier
 		s_cmp_lt_i32 s16, 0

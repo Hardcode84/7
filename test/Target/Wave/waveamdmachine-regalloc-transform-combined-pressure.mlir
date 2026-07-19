@@ -85,5 +85,33 @@ module attributes {transform.with_named_sequence} {
       %wide = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 257>
       return
     }
+
+    // CHECK-LABEL: func.func @uniform_if_late_results_reuse_branch_storage(
+    // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 64, 0>
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
+    // CHECK: waveamdmachine.uniform_if
+    // CHECK: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 128, 0>
+    // CHECK-NEXT: [[THEN:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64, 0>
+    // CHECK-NEXT: waveamdmachine.yield [[THEN]] : !waveamdmachine.reg<vgpr, 64, 0>
+    // CHECK: otherwise
+    // CHECK-NEXT: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 128, 0>
+    // CHECK-NEXT: [[ELSE:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64, 0>
+    // CHECK-NEXT: waveamdmachine.yield [[ELSE]] : !waveamdmachine.reg<vgpr, 64, 0>
+    func.func @uniform_if_late_results_reuse_branch_storage(
+        %cond: !waveamdmachine.reg<scc, 1>)
+        -> !waveamdmachine.reg<vgpr, 64>
+        attributes {waveamdmachine.target_waves = 4 : i64} {
+      %selected = waveamdmachine.uniform_if %cond {
+        %scratch = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 128>
+        %then = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+        waveamdmachine.yield %then : !waveamdmachine.reg<vgpr, 64>
+      } otherwise {
+        %scratch = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 128>
+        %else = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+        waveamdmachine.yield %else : !waveamdmachine.reg<vgpr, 64>
+      } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 64>
+      return %selected : !waveamdmachine.reg<vgpr, 64>
+    }
   }
 }
