@@ -34,6 +34,47 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
+  // CHECK-LABEL: func.func @loop_carry_def_keeps_greedy_order
+  // CHECK: waveamdmachine.uniform_loop
+  // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, {{.*}}, {{.*}}, [[M0]]
+  // CHECK-NEXT: [[NEXT:%.*]], {{.*}} = waveamdmachine.s_add_i32
+  // CHECK: waveamdmachine.continue_if {{.*}} carries({{.*}}, [[NEXT]]
+  func.func @loop_carry_def_keeps_greedy_order(
+      %cond: !waveamdmachine.reg<scc, 1>,
+      %off: !waveamdmachine.reg<vgpr, 1, 0>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %iter: !waveamdmachine.reg<sgpr, 1, 10>,
+      %step: !waveamdmachine.reg<sgpr, 1, 11>,
+      %dep: !waveamdmachine.mem.token) {
+    %loop:2 = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%dep, %iter : !waveamdmachine.mem.token,
+                !waveamdmachine.reg<sgpr, 1, 10>) {
+    ^bb0(%tok: !waveamdmachine.mem.token,
+         %iv: !waveamdmachine.reg<sgpr, 1, 10>):
+      %m0 = waveamdmachine.s_mov_m0 %dst
+          : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+      %loaded = waveamdmachine.buffer_load_lds_b128
+          %off, %desc, %soff, %m0 after %tok
+          : (!waveamdmachine.reg<vgpr, 1, 0>,
+             !waveamdmachine.reg<sgpr, 4, 4>,
+             !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      %next, %scc = waveamdmachine.s_add_i32 %iv, %step
+          : (!waveamdmachine.reg<sgpr, 1, 10>,
+             !waveamdmachine.reg<sgpr, 1, 11>)
+            -> (!waveamdmachine.reg<sgpr, 1, 10>,
+                !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%loaded, %next : !waveamdmachine.mem.token,
+                  !waveamdmachine.reg<sgpr, 1, 10>)
+    } -> !waveamdmachine.mem.token, !waveamdmachine.reg<sgpr, 1, 10>
+    return
+  }
+
   // CHECK-LABEL: func.func @dead_scc_salu_fills_gap
   // CHECK: waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.s_add_i32

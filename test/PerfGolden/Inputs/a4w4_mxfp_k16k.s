@@ -1184,18 +1184,22 @@ _a4w4_kernel:
 		buffer_load_dwordx4 v42, s[32:35], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x1080
-		s_add_i32 s23, s23, 2
+		s_nop 0
 		buffer_load_dwordx4 v26, s[32:35], 0 offen lds
-		s_add_i32 s19, s19, s15
+		s_nop 0
 		s_add_i32 m0, m0, 0x1080
-		s_add_i32 s18, s18, s14
+		s_nop 0
 		buffer_load_dwordx4 v28, s[32:35], 0 offen lds
-		s_add_i32 s13, s13, 0x100
+		s_nop 0
 		s_add_i32 m0, m0, 0x1080
 		s_add_i32 s1, s1, 0x100
+		s_add_i32 s13, s13, 0x100
+		s_add_i32 s18, s18, s14
+		s_add_i32 s19, s19, s15
+		s_add_i32 s23, s23, 2
+		s_cmp_lt_i32 s23, 62
 		buffer_load_dwordx4 v25, s[32:35], 0 offen lds
 		buffer_load_dword v14, v12, s[40:43], 0 offen
-		s_cmp_lt_i32 s23, 62
 		s_cbranch_scc1 .L_a4w4_kernel.loop_head_0
 .L_a4w4_kernel.loop_exit_0:
 		s_waitcnt vmcnt(1) lgkmcnt(0)

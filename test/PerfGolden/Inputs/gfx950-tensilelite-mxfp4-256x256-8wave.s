@@ -1207,6 +1207,8 @@ wmma_f16_matmul_tiled:
 		scratch_store_dword off, v1, s33 offset:228
 		v_and_b32_e32 v2, 63, v0
 		v_lshlrev_b32_e32 v2, 2, v2
+		s_mov_b32 s33, 0
+		scratch_store_dword off, v2, s33 offset:240
 		v_add3_u32 v1, s8, v1, v2
 		v_add_u32_e32 v9, 0x1000, v1
 		v_add_u32_e32 v9, 0x1000, v9
@@ -1234,31 +1236,31 @@ wmma_f16_matmul_tiled:
 		v_and_b32_e32 v1, 1, v1
 		v_lshlrev_b32_e32 v1, 10, v1
 		s_mov_b32 s33, 0
-		scratch_store_dword off, v1, s33 offset:240
-		v_add3_u32 v1, s8, v2, v1
-		v_add_u32_e32 v9, 0x1000, v1
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x800, v9
-		v_add_u32_e32 v9, 0x800, v9
-		ds_read_b32 v32, v9 offset:2048
+		scratch_store_dword off, v1, s33 offset:244
+		v_add3_u32 v9, s8, v2, v1
+		v_add_u32_e32 v32, 0x1000, v9
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x800, v32
+		v_add_u32_e32 v32, 0x800, v32
+		ds_read_b32 v33, v32 offset:2048
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:244
-		v_add_u32_e32 v9, 0x1000, v1
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x1000, v9
-		v_add_u32_e32 v9, 0x800, v9
-		v_add_u32_e32 v9, 0x800, v9
-		ds_read_b32 v32, v9 offset:2304
+		scratch_store_dword off, v33, s8 offset:248
+		v_add_u32_e32 v32, 0x1000, v9
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x1000, v32
+		v_add_u32_e32 v32, 0x800, v32
+		v_add_u32_e32 v32, 0x800, v32
+		ds_read_b32 v33, v32 offset:2304
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:248
-		v_add_u32_e32 v9, 0x1000, v1
+		scratch_store_dword off, v33, s8 offset:252
+		v_add_u32_e32 v9, 0x1000, v9
 		v_add_u32_e32 v9, 0x1000, v9
 		v_add_u32_e32 v9, 0x1000, v9
 		v_add_u32_e32 v9, 0x1000, v9
@@ -1268,7 +1270,11 @@ wmma_f16_matmul_tiled:
 		ds_read_b32 v32, v9 offset:2560
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:252
+		scratch_store_dword off, v32, s8 offset:256
+		s_and_b32 s8, s5, 1
+		s_lshl_b32 s8, s8, 12
+		s_add_i32 s8, s8, 0x20000
+		v_add3_u32 v1, s8, v2, v1
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
@@ -1279,9 +1285,9 @@ wmma_f16_matmul_tiled:
 		ds_read_b32 v9, v1 offset:2816
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v9, s8 offset:256
+		scratch_store_dword off, v9, s8 offset:260
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(20)
+		s_waitcnt vmcnt(21)
 		scratch_load_dword v32, off, s8 offset:164
 		scratch_load_dword v33, off, s8 offset:168
 		scratch_load_dword v34, off, s8 offset:172
@@ -1289,7 +1295,7 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[216:219], v[32:35], v[12:15], v8, v65 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(16)
+		s_waitcnt vmcnt(17)
 		scratch_load_dword v32, off, s8 offset:180
 		scratch_load_dword v33, off, s8 offset:184
 		scratch_load_dword v34, off, s8 offset:188
@@ -1311,7 +1317,7 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(0)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[220:223], v[32:35], v[120:123], v8, v65 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(12)
+		s_waitcnt vmcnt(13)
 		scratch_load_dword v32, off, s8 offset:196
 		scratch_load_dword v33, off, s8 offset:200
 		scratch_load_dword v34, off, s8 offset:204
@@ -1400,7 +1406,7 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(0) lgkmcnt(0)
 		v_add3_u32 v1, v1, v3, v8
 		s_mov_b32 s33, 0
-		scratch_store_dword off, v1, s33 offset:260
+		scratch_store_dword off, v1, s33 offset:264
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1411,10 +1417,10 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[32:35], v3
 		s_mov_b32 s33, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s33 offset:432
-		scratch_store_dword off, v33, s33 offset:436
-		scratch_store_dword off, v34, s33 offset:440
-		scratch_store_dword off, v35, s33 offset:444
+		scratch_store_dword off, v32, s33 offset:420
+		scratch_store_dword off, v33, s33 offset:424
+		scratch_store_dword off, v34, s33 offset:428
+		scratch_store_dword off, v35, s33 offset:432
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1425,10 +1431,10 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[64:67], v3 offset:1024
 		s_mov_b32 s33, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v64, s33 offset:564
-		scratch_store_dword off, v65, s33 offset:568
-		scratch_store_dword off, v66, s33 offset:572
-		scratch_store_dword off, v67, s33 offset:576
+		scratch_store_dword off, v64, s33 offset:552
+		scratch_store_dword off, v65, s33 offset:556
+		scratch_store_dword off, v66, s33 offset:560
+		scratch_store_dword off, v67, s33 offset:564
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1437,12 +1443,6 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
 		ds_read_b128 v[216:219], v3 offset:2048
-		s_mov_b32 s33, 0
-		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v216, s33 offset:596
-		scratch_store_dword off, v217, s33 offset:600
-		scratch_store_dword off, v218, s33 offset:604
-		scratch_store_dword off, v219, s33 offset:608
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
@@ -1463,7 +1463,7 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(0)
 		v_add3_u32 v1, v1, v3, v8
 		s_mov_b32 s32, 0
-		scratch_store_dword off, v1, s32 offset:512
+		scratch_store_dword off, v1, s32 offset:500
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1474,10 +1474,10 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[224:227], v3 offset:32768
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:264
-		scratch_store_dword off, v225, s32 offset:268
-		scratch_store_dword off, v226, s32 offset:272
-		scratch_store_dword off, v227, s32 offset:276
+		scratch_store_dword off, v224, s32 offset:268
+		scratch_store_dword off, v225, s32 offset:272
+		scratch_store_dword off, v226, s32 offset:276
+		scratch_store_dword off, v227, s32 offset:280
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1488,10 +1488,10 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[224:227], v3 offset:33792
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:368
-		scratch_store_dword off, v225, s32 offset:372
-		scratch_store_dword off, v226, s32 offset:376
-		scratch_store_dword off, v227, s32 offset:380
+		scratch_store_dword off, v224, s32 offset:372
+		scratch_store_dword off, v225, s32 offset:376
+		scratch_store_dword off, v226, s32 offset:380
+		scratch_store_dword off, v227, s32 offset:384
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1499,13 +1499,13 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b128 v[224:227], v3 offset:34816
+		ds_read_b128 v[228:231], v3 offset:34816
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:384
-		scratch_store_dword off, v225, s32 offset:388
-		scratch_store_dword off, v226, s32 offset:392
-		scratch_store_dword off, v227, s32 offset:396
+		scratch_store_dword off, v228, s32 offset:388
+		scratch_store_dword off, v229, s32 offset:392
+		scratch_store_dword off, v230, s32 offset:396
+		scratch_store_dword off, v231, s32 offset:400
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1513,13 +1513,13 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b128 v[224:227], v3 offset:35840
+		ds_read_b128 v[232:235], v3 offset:35840
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:400
-		scratch_store_dword off, v225, s32 offset:404
-		scratch_store_dword off, v226, s32 offset:408
-		scratch_store_dword off, v227, s32 offset:412
+		scratch_store_dword off, v232, s32 offset:404
+		scratch_store_dword off, v233, s32 offset:408
+		scratch_store_dword off, v234, s32 offset:412
+		scratch_store_dword off, v235, s32 offset:416
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1527,13 +1527,13 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b128 v[224:227], v3 offset:36864
+		ds_read_b128 v[236:239], v3 offset:36864
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:416
-		scratch_store_dword off, v225, s32 offset:420
-		scratch_store_dword off, v226, s32 offset:424
-		scratch_store_dword off, v227, s32 offset:428
+		scratch_store_dword off, v236, s32 offset:436
+		scratch_store_dword off, v237, s32 offset:440
+		scratch_store_dword off, v238, s32 offset:444
+		scratch_store_dword off, v239, s32 offset:448
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1541,13 +1541,13 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b128 v[224:227], v3 offset:37888
+		ds_read_b128 v[240:243], v3 offset:37888
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:448
-		scratch_store_dword off, v225, s32 offset:452
-		scratch_store_dword off, v226, s32 offset:456
-		scratch_store_dword off, v227, s32 offset:460
+		scratch_store_dword off, v240, s32 offset:452
+		scratch_store_dword off, v241, s32 offset:456
+		scratch_store_dword off, v242, s32 offset:460
+		scratch_store_dword off, v243, s32 offset:464
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1555,13 +1555,13 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b128 v[224:227], v3 offset:38912
+		ds_read_b128 v[244:247], v3 offset:38912
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:464
-		scratch_store_dword off, v225, s32 offset:468
-		scratch_store_dword off, v226, s32 offset:472
-		scratch_store_dword off, v227, s32 offset:476
+		scratch_store_dword off, v244, s32 offset:468
+		scratch_store_dword off, v245, s32 offset:472
+		scratch_store_dword off, v246, s32 offset:476
+		scratch_store_dword off, v247, s32 offset:480
 		v_add_u32_e32 v3, 0x1000, v1
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
@@ -1569,222 +1569,210 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b128 v[224:227], v3 offset:39936
+		ds_read_b128 v[248:251], v3 offset:39936
 		s_mov_b32 s32, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v224, s32 offset:480
-		scratch_store_dword off, v225, s32 offset:484
-		scratch_store_dword off, v226, s32 offset:488
-		scratch_store_dword off, v227, s32 offset:492
+		scratch_store_dword off, v248, s32 offset:484
+		scratch_store_dword off, v249, s32 offset:488
+		scratch_store_dword off, v250, s32 offset:492
+		scratch_store_dword off, v251, s32 offset:496
 		s_lshl_b32 s8, s8, 12
 		s_add_i32 s8, s8, 0x20000
 		s_mov_b32 s32, 0
-		s_waitcnt vmcnt(53)
+		s_waitcnt vmcnt(50)
 		scratch_load_dword v3, off, s32 offset:228
+		s_add_i32 s32, s5, 1
+		s_and_b32 s32, s32, 1
+		s_lshl_b32 s32, s32, 12
+		s_add_i32 s32, s32, 0x20000
 		s_waitcnt vmcnt(0)
-		v_add3_u32 v3, s8, v3, v2
-		v_add_u32_e32 v8, 0x1000, v3
-		v_add_u32_e32 v8, 0x1000, v8
-		v_add_u32_e32 v8, 0x1000, v8
-		v_add_u32_e32 v8, 0x1000, v8
-		v_add_u32_e32 v8, 0x1000, v8
-		v_add_u32_e32 v8, 0x800, v8
-		v_add_u32_e32 v8, 0x800, v8
-		ds_read_b32 v9, v8
-		v_add_u32_e32 v3, 0x1000, v3
+		v_add3_u32 v2, s32, v3, v2
+		v_add_u32_e32 v3, 0x1000, v2
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x1000, v3
 		v_add_u32_e32 v3, 0x800, v3
 		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b32 v106, v3 offset:256
+		ds_read_b32 v8, v3
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x800, v2
+		v_add_u32_e32 v2, 0x800, v2
+		ds_read_b32 v3, v2 offset:256
 		s_mov_b32 s32, 0
-		s_waitcnt vmcnt(50)
-		scratch_load_dword v3, off, s32 offset:240
-		s_waitcnt vmcnt(0)
-		v_add3_u32 v2, s8, v2, v3
-		v_add_u32_e32 v3, 0x1000, v2
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x800, v3
-		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b32 v107, v3 offset:2048
-		v_add_u32_e32 v3, 0x1000, v2
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x800, v3
-		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b32 v108, v3 offset:2304
-		v_add_u32_e32 v3, 0x1000, v2
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x1000, v3
-		v_add_u32_e32 v3, 0x800, v3
-		v_add_u32_e32 v3, 0x800, v3
-		ds_read_b32 v109, v3 offset:2560
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x800, v2
-		v_add_u32_e32 v2, 0x800, v2
-		ds_read_b32 v224, v2 offset:2816
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v2 offset:4096
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v3 offset:6144
-		s_waitcnt lgkmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:280
-		scratch_store_dword off, v227, s8 offset:284
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v2 offset:8192
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v3 offset:10240
-		s_waitcnt lgkmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:288
-		scratch_store_dword off, v227, s8 offset:292
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v2 offset:12288
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v3 offset:14336
-		s_waitcnt lgkmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:296
-		scratch_store_dword off, v227, s8 offset:300
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v2 offset:16384
-		s_mov_b32 m0, s15
-		s_nop 0
-		ds_read_addtid_b32 v3 offset:18432
-		s_waitcnt lgkmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:304
-		scratch_store_dword off, v227, s8 offset:308
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8
-		scratch_load_dword v3, off, s8 offset:4
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:312
-		scratch_store_dword off, v227, s8 offset:316
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:8
-		scratch_load_dword v3, off, s8 offset:12
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:320
-		scratch_store_dword off, v227, s8 offset:324
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:16
-		scratch_load_dword v3, off, s8 offset:20
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:328
-		scratch_store_dword off, v227, s8 offset:332
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:24
-		scratch_load_dword v3, off, s8 offset:28
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:336
-		scratch_store_dword off, v227, s8 offset:340
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:32
-		scratch_load_dword v3, off, s8 offset:36
-		s_mov_b32 s8, 0
-		scratch_load_dword v68, off, s8 offset:152
-		scratch_load_dword v69, off, s8 offset:156
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:344
-		scratch_store_dword off, v227, s8 offset:348
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:40
-		scratch_load_dword v3, off, s8 offset:44
-		s_mov_b32 s8, 0
-		scratch_load_dword v68, off, s8 offset:152
-		scratch_load_dword v69, off, s8 offset:156
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:352
-		scratch_store_dword off, v227, s8 offset:356
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:48
-		scratch_load_dword v3, off, s8 offset:52
-		s_mov_b32 s8, 0
-		scratch_load_dword v68, off, s8 offset:152
-		scratch_load_dword v69, off, s8 offset:156
-		s_waitcnt vmcnt(0)
-		v_add_co_u32_e64 v226, vcc, v2, v68
-		v_addc_co_u32_e64 v227, vcc, v3, v69, vcc
-		s_mov_b32 s8, 0
-		scratch_store_dword off, v226, s8 offset:360
-		scratch_store_dword off, v227, s8 offset:364
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(50)
-		scratch_load_dword v228, off, s8 offset:264
-		scratch_load_dword v229, off, s8 offset:268
-		scratch_load_dword v230, off, s8 offset:272
-		scratch_load_dword v231, off, s8 offset:276
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[32:35], v[228:231], v[12:15], v9, v107 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:260
-		s_waitcnt vmcnt(0)
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x1000, v2
-		v_add_u32_e32 v2, 0x800, v2
-		v_add_u32_e32 v2, 0x800, v2
-		ds_read_b128 v[228:231], v2 offset:16384
-		s_mov_b32 s8, 0
+		s_waitcnt vmcnt(49)
+		scratch_load_dword v2, off, s32 offset:240
+		s_mov_b32 s32, 0
 		s_waitcnt vmcnt(46)
-		scratch_load_dword v232, off, s8 offset:368
-		scratch_load_dword v233, off, s8 offset:372
-		scratch_load_dword v234, off, s8 offset:376
-		scratch_load_dword v235, off, s8 offset:380
+		scratch_load_dword v9, off, s32 offset:244
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[72:75], v[32:35], v[232:235], v[72:75], v9, v107 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_add3_u32 v2, s8, v2, v9
+		v_add_u32_e32 v9, 0x1000, v2
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x800, v9
+		v_add_u32_e32 v9, 0x800, v9
+		ds_read_b32 v106, v9 offset:2048
+		v_add_u32_e32 v9, 0x1000, v2
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x800, v9
+		v_add_u32_e32 v9, 0x800, v9
+		ds_read_b32 v107, v9 offset:2304
+		v_add_u32_e32 v9, 0x1000, v2
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x1000, v9
+		v_add_u32_e32 v9, 0x800, v9
+		v_add_u32_e32 v9, 0x800, v9
+		ds_read_b32 v108, v9 offset:2560
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x800, v2
+		v_add_u32_e32 v2, 0x800, v2
+		ds_read_b32 v9, v2 offset:2816
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v252 offset:4096
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v253 offset:6144
+		s_waitcnt lgkmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
 		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:260
+		scratch_store_dword off, v254, s8 offset:284
+		scratch_store_dword off, v255, s8 offset:288
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v252 offset:8192
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v253 offset:10240
+		s_waitcnt lgkmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:292
+		scratch_store_dword off, v255, s8 offset:296
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v252 offset:12288
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v253 offset:14336
+		s_waitcnt lgkmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:300
+		scratch_store_dword off, v255, s8 offset:304
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v252 offset:16384
+		s_mov_b32 m0, s15
+		s_nop 0
+		ds_read_addtid_b32 v253 offset:18432
+		s_waitcnt lgkmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:308
+		scratch_store_dword off, v255, s8 offset:312
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8
+		scratch_load_dword v253, off, s8 offset:4
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:316
+		scratch_store_dword off, v255, s8 offset:320
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8 offset:8
+		scratch_load_dword v253, off, s8 offset:12
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:324
+		scratch_store_dword off, v255, s8 offset:328
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8 offset:16
+		scratch_load_dword v253, off, s8 offset:20
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:332
+		scratch_store_dword off, v255, s8 offset:336
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8 offset:24
+		scratch_load_dword v253, off, s8 offset:28
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v252, v68
+		v_addc_co_u32_e64 v255, vcc, v253, v69, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:340
+		scratch_store_dword off, v255, s8 offset:344
+		s_mov_b32 s8, 0
+		scratch_load_dword v68, off, s8 offset:32
+		scratch_load_dword v69, off, s8 offset:36
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8 offset:152
+		scratch_load_dword v253, off, s8 offset:156
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v68, v252
+		v_addc_co_u32_e64 v255, vcc, v69, v253, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:348
+		scratch_store_dword off, v255, s8 offset:352
+		s_mov_b32 s8, 0
+		scratch_load_dword v68, off, s8 offset:40
+		scratch_load_dword v69, off, s8 offset:44
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8 offset:152
+		scratch_load_dword v253, off, s8 offset:156
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v68, v252
+		v_addc_co_u32_e64 v255, vcc, v69, v253, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:356
+		scratch_store_dword off, v255, s8 offset:360
+		s_mov_b32 s8, 0
+		scratch_load_dword v68, off, s8 offset:48
+		scratch_load_dword v69, off, s8 offset:52
+		s_mov_b32 s8, 0
+		scratch_load_dword v252, off, s8 offset:152
+		scratch_load_dword v253, off, s8 offset:156
+		s_waitcnt vmcnt(0)
+		v_add_co_u32_e64 v254, vcc, v68, v252
+		v_addc_co_u32_e64 v255, vcc, v69, v253, vcc
+		s_mov_b32 s8, 0
+		scratch_store_dword off, v254, s8 offset:364
+		scratch_store_dword off, v255, s8 offset:368
+		s_mov_b32 s8, 0
+		s_waitcnt vmcnt(50)
+		scratch_load_dword v252, off, s8 offset:268
+		scratch_load_dword v253, off, s8 offset:272
+		scratch_load_dword v254, off, s8 offset:276
+		scratch_load_dword v255, off, s8 offset:280
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[32:35], v[252:255], v[12:15], v8, v106 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_mov_b32 s8, 0
+		scratch_load_dword v2, off, s8 offset:264
 		s_waitcnt vmcnt(0)
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1793,17 +1781,10 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x800, v2
 		v_add_u32_e32 v2, 0x800, v2
-		ds_read_b128 v[232:235], v2 offset:17408
+		ds_read_b128 v[252:255], v2 offset:16384
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[72:75], v[32:35], v[224:227], v[72:75], v8, v106 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(42)
-		scratch_load_dword v236, off, s8 offset:384
-		scratch_load_dword v237, off, s8 offset:388
-		scratch_load_dword v238, off, s8 offset:392
-		scratch_load_dword v239, off, s8 offset:396
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[76:79], v[32:35], v[236:239], v[76:79], v9, v108 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:260
+		scratch_load_dword v2, off, s8 offset:264
 		s_waitcnt vmcnt(0)
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1812,17 +1793,10 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x800, v2
 		v_add_u32_e32 v2, 0x800, v2
-		ds_read_b128 v[236:239], v2 offset:18432
+		ds_read_b128 v[224:227], v2 offset:17408
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[76:79], v[32:35], v[228:231], v[76:79], v8, v107 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(38)
-		scratch_load_dword v240, off, s8 offset:400
-		scratch_load_dword v241, off, s8 offset:404
-		scratch_load_dword v242, off, s8 offset:408
-		scratch_load_dword v243, off, s8 offset:412
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[80:83], v[32:35], v[240:243], v[80:83], v9, v108 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v2, off, s8 offset:260
+		scratch_load_dword v2, off, s8 offset:264
 		s_waitcnt vmcnt(0)
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1831,20 +1805,20 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x800, v2
 		v_add_u32_e32 v2, 0x800, v2
-		ds_read_b128 v[240:243], v2 offset:19456
+		ds_read_b128 v[228:231], v2 offset:18432
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[80:83], v[32:35], v[232:235], v[80:83], v8, v107 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(34)
-		scratch_load_dword v32, off, s8 offset:416
-		scratch_load_dword v33, off, s8 offset:420
-		scratch_load_dword v34, off, s8 offset:424
-		scratch_load_dword v35, off, s8 offset:428
-		s_mov_b32 s8, 0
-		scratch_load_dword v244, off, s8 offset:432
-		scratch_load_dword v245, off, s8 offset:436
-		scratch_load_dword v246, off, s8 offset:440
-		scratch_load_dword v247, off, s8 offset:444
+		scratch_load_dword v2, off, s8 offset:264
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[244:247], v[32:35], v[84:87], v9, v109 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x1000, v2
+		v_add_u32_e32 v2, 0x800, v2
+		v_add_u32_e32 v2, 0x800, v2
+		ds_read_b128 v[232:235], v2 offset:19456
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[32:35], v[236:239], v[84:87], v8, v108 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_add_u32_e32 v2, 0x1000, v1
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1855,23 +1829,17 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[32:35], v2 offset:49152
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:496
-		scratch_store_dword off, v33, s8 offset:500
-		scratch_store_dword off, v34, s8 offset:504
-		scratch_store_dword off, v35, s8 offset:508
+		scratch_store_dword off, v32, s8 offset:504
+		scratch_store_dword off, v33, s8 offset:508
+		scratch_store_dword off, v34, s8 offset:512
+		scratch_store_dword off, v35, s8 offset:516
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:432
-		scratch_load_dword v33, off, s8 offset:436
-		scratch_load_dword v34, off, s8 offset:440
-		scratch_load_dword v35, off, s8 offset:444
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(34)
-		scratch_load_dword v244, off, s8 offset:448
-		scratch_load_dword v245, off, s8 offset:452
-		scratch_load_dword v246, off, s8 offset:456
-		scratch_load_dword v247, off, s8 offset:460
+		scratch_load_dword v32, off, s8 offset:420
+		scratch_load_dword v33, off, s8 offset:424
+		scratch_load_dword v34, off, s8 offset:428
+		scratch_load_dword v35, off, s8 offset:432
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[96:99], v[32:35], v[244:247], v[96:99], v9, v109 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[96:99], v[32:35], v[240:243], v[96:99], v8, v108 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_add_u32_e32 v2, 0x1000, v1
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1882,23 +1850,17 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[32:35], v2 offset:50176
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:516
-		scratch_store_dword off, v33, s8 offset:520
-		scratch_store_dword off, v34, s8 offset:524
-		scratch_store_dword off, v35, s8 offset:528
+		scratch_store_dword off, v32, s8 offset:520
+		scratch_store_dword off, v33, s8 offset:524
+		scratch_store_dword off, v34, s8 offset:528
+		scratch_store_dword off, v35, s8 offset:532
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:432
-		scratch_load_dword v33, off, s8 offset:436
-		scratch_load_dword v34, off, s8 offset:440
-		scratch_load_dword v35, off, s8 offset:444
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(34)
-		scratch_load_dword v244, off, s8 offset:464
-		scratch_load_dword v245, off, s8 offset:468
-		scratch_load_dword v246, off, s8 offset:472
-		scratch_load_dword v247, off, s8 offset:476
+		scratch_load_dword v32, off, s8 offset:420
+		scratch_load_dword v33, off, s8 offset:424
+		scratch_load_dword v34, off, s8 offset:428
+		scratch_load_dword v35, off, s8 offset:432
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[112:115], v[32:35], v[244:247], v[112:115], v9, v224 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[112:115], v[32:35], v[244:247], v[112:115], v8, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_add_u32_e32 v2, 0x1000, v1
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1909,23 +1871,17 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[32:35], v2 offset:51200
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:532
-		scratch_store_dword off, v33, s8 offset:536
-		scratch_store_dword off, v34, s8 offset:540
-		scratch_store_dword off, v35, s8 offset:544
+		scratch_store_dword off, v32, s8 offset:536
+		scratch_store_dword off, v33, s8 offset:540
+		scratch_store_dword off, v34, s8 offset:544
+		scratch_store_dword off, v35, s8 offset:548
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:432
-		scratch_load_dword v33, off, s8 offset:436
-		scratch_load_dword v34, off, s8 offset:440
-		scratch_load_dword v35, off, s8 offset:444
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(34)
-		scratch_load_dword v244, off, s8 offset:480
-		scratch_load_dword v245, off, s8 offset:484
-		scratch_load_dword v246, off, s8 offset:488
-		scratch_load_dword v247, off, s8 offset:492
+		scratch_load_dword v32, off, s8 offset:420
+		scratch_load_dword v33, off, s8 offset:424
+		scratch_load_dword v34, off, s8 offset:428
+		scratch_load_dword v35, off, s8 offset:432
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[116:119], v[32:35], v[244:247], v[116:119], v9, v224 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[116:119], v[32:35], v[248:251], v[116:119], v8, v9 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_add_u32_e32 v2, 0x1000, v1
 		v_add_u32_e32 v2, 0x1000, v2
 		v_add_u32_e32 v2, 0x1000, v2
@@ -1936,17 +1892,17 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[32:35], v2 offset:52224
 		s_mov_b32 s8, 0
 		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:548
-		scratch_store_dword off, v33, s8 offset:552
-		scratch_store_dword off, v34, s8 offset:556
-		scratch_store_dword off, v35, s8 offset:560
+		scratch_store_dword off, v32, s8 offset:568
+		scratch_store_dword off, v33, s8 offset:572
+		scratch_store_dword off, v34, s8 offset:576
+		scratch_store_dword off, v35, s8 offset:580
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:264
-		scratch_load_dword v33, off, s8 offset:268
-		scratch_load_dword v34, off, s8 offset:272
-		scratch_load_dword v35, off, s8 offset:276
+		scratch_load_dword v32, off, s8 offset:268
+		scratch_load_dword v33, off, s8 offset:272
+		scratch_load_dword v34, off, s8 offset:276
+		scratch_load_dword v35, off, s8 offset:280
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[64:67], v[32:35], v[120:123], v9, v107 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[64:67], v[32:35], v[120:123], v8, v106 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
@@ -1956,20 +1912,15 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v1, 0x800, v1
 		ds_read_b128 v[32:35], v1 offset:53248
 		s_mov_b32 s8, 0
-		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:580
-		scratch_store_dword off, v33, s8 offset:584
-		scratch_store_dword off, v34, s8 offset:588
-		scratch_store_dword off, v35, s8 offset:592
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:368
-		scratch_load_dword v33, off, s8 offset:372
-		scratch_load_dword v34, off, s8 offset:376
-		scratch_load_dword v35, off, s8 offset:380
+		s_waitcnt vmcnt(62)
+		scratch_load_dword v236, off, s8 offset:372
+		scratch_load_dword v237, off, s8 offset:376
+		scratch_load_dword v238, off, s8 offset:380
+		scratch_load_dword v239, off, s8 offset:384
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[124:127], v[64:67], v[32:35], v[124:127], v9, v107 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[124:127], v[64:67], v[236:239], v[124:127], v8, v106 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:512
+		scratch_load_dword v1, off, s8 offset:500
 		s_waitcnt vmcnt(0)
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
@@ -1978,22 +1929,17 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x800, v1
 		v_add_u32_e32 v1, 0x800, v1
-		ds_read_b128 v[32:35], v1 offset:54272
+		ds_read_b128 v[236:239], v1 offset:54272
 		s_mov_b32 s8, 0
-		s_waitcnt lgkmcnt(0)
-		scratch_store_dword off, v32, s8 offset:612
-		scratch_store_dword off, v33, s8 offset:616
-		scratch_store_dword off, v34, s8 offset:620
-		scratch_store_dword off, v35, s8 offset:624
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:384
-		scratch_load_dword v33, off, s8 offset:388
-		scratch_load_dword v34, off, s8 offset:392
-		scratch_load_dword v35, off, s8 offset:396
+		s_waitcnt vmcnt(58)
+		scratch_load_dword v240, off, s8 offset:388
+		scratch_load_dword v241, off, s8 offset:392
+		scratch_load_dword v242, off, s8 offset:396
+		scratch_load_dword v243, off, s8 offset:400
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[64:67], v[32:35], v[128:131], v9, v108 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[64:67], v[240:243], v[128:131], v8, v107 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:512
+		scratch_load_dword v1, off, s8 offset:500
 		s_waitcnt vmcnt(0)
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
@@ -2002,16 +1948,17 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x800, v1
 		v_add_u32_e32 v1, 0x800, v1
-		ds_read_b128 v[244:247], v1 offset:55296
+		ds_read_b128 v[240:243], v1 offset:55296
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:400
-		scratch_load_dword v33, off, s8 offset:404
-		scratch_load_dword v34, off, s8 offset:408
-		scratch_load_dword v35, off, s8 offset:412
+		s_waitcnt vmcnt(54)
+		scratch_load_dword v244, off, s8 offset:404
+		scratch_load_dword v245, off, s8 offset:408
+		scratch_load_dword v246, off, s8 offset:412
+		scratch_load_dword v247, off, s8 offset:416
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[64:67], v[32:35], v[132:135], v9, v108 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[64:67], v[244:247], v[132:135], v8, v107 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:512
+		scratch_load_dword v1, off, s8 offset:500
 		s_waitcnt vmcnt(0)
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x1000, v1
@@ -2020,465 +1967,414 @@ wmma_f16_matmul_tiled:
 		v_add_u32_e32 v1, 0x1000, v1
 		v_add_u32_e32 v1, 0x800, v1
 		v_add_u32_e32 v1, 0x800, v1
-		ds_read_b128 v[248:251], v1 offset:56320
+		ds_read_b128 v[64:67], v1 offset:56320
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:416
-		scratch_load_dword v33, off, s8 offset:420
-		scratch_load_dword v34, off, s8 offset:424
-		scratch_load_dword v35, off, s8 offset:428
+		s_waitcnt vmcnt(50)
+		scratch_load_dword v244, off, s8 offset:436
+		scratch_load_dword v245, off, s8 offset:440
+		scratch_load_dword v246, off, s8 offset:444
+		scratch_load_dword v247, off, s8 offset:448
 		s_mov_b32 s8, 0
-		scratch_load_dword v64, off, s8 offset:564
-		scratch_load_dword v65, off, s8 offset:568
-		scratch_load_dword v66, off, s8 offset:572
-		scratch_load_dword v67, off, s8 offset:576
+		scratch_load_dword v248, off, s8 offset:552
+		scratch_load_dword v249, off, s8 offset:556
+		scratch_load_dword v250, off, s8 offset:560
+		scratch_load_dword v251, off, s8 offset:564
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[64:67], v[32:35], v[136:139], v9, v109 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[248:251], v[244:247], v[136:139], v8, v108 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, s19, 0x16000
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(44)
-		scratch_load_dword v2, off, s8 offset:280
-		scratch_load_dword v3, off, s8 offset:284
-		s_waitcnt vmcnt(0)
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:448
-		scratch_load_dword v33, off, s8 offset:452
-		scratch_load_dword v34, off, s8 offset:456
-		scratch_load_dword v35, off, s8 offset:460
-		s_mov_b32 s8, 0
-		scratch_load_dword v64, off, s8 offset:564
-		scratch_load_dword v65, off, s8 offset:568
-		scratch_load_dword v66, off, s8 offset:572
-		scratch_load_dword v67, off, s8 offset:576
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[64:67], v[32:35], v[140:143], v9, v109 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 m0, m0, 0x2000
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(42)
-		scratch_load_dword v2, off, s8 offset:288
-		scratch_load_dword v3, off, s8 offset:292
-		s_waitcnt vmcnt(0)
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:464
-		scratch_load_dword v33, off, s8 offset:468
-		scratch_load_dword v34, off, s8 offset:472
-		scratch_load_dword v35, off, s8 offset:476
-		s_mov_b32 s8, 0
-		scratch_load_dword v64, off, s8 offset:564
-		scratch_load_dword v65, off, s8 offset:568
-		scratch_load_dword v66, off, s8 offset:572
-		scratch_load_dword v67, off, s8 offset:576
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[64:67], v[32:35], v[144:147], v9, v224 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 m0, m0, 0x2000
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(40)
-		scratch_load_dword v2, off, s8 offset:296
-		scratch_load_dword v3, off, s8 offset:300
-		s_waitcnt vmcnt(0)
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:480
-		scratch_load_dword v33, off, s8 offset:484
-		scratch_load_dword v34, off, s8 offset:488
-		scratch_load_dword v35, off, s8 offset:492
-		s_mov_b32 s8, 0
-		scratch_load_dword v64, off, s8 offset:564
-		scratch_load_dword v65, off, s8 offset:568
-		scratch_load_dword v66, off, s8 offset:572
-		scratch_load_dword v67, off, s8 offset:576
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[64:67], v[32:35], v[148:151], v9, v224 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 m0, m0, 0x2000
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(38)
-		scratch_load_dword v2, off, s8 offset:304
-		scratch_load_dword v3, off, s8 offset:308
-		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:256
-		s_waitcnt vmcnt(0)
-		v_mov_b32_e32 v64, v1
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:264
-		scratch_load_dword v33, off, s8 offset:268
-		scratch_load_dword v34, off, s8 offset:272
-		scratch_load_dword v35, off, s8 offset:276
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[216:219], v[32:35], v[152:155], v106, v107 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 m0, m0, 0x2000
-		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(36)
-		scratch_load_dword v2, off, s8 offset:312
-		scratch_load_dword v3, off, s8 offset:316
-		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:252
+		scratch_load_dword v68, off, s8 offset:284
+		scratch_load_dword v69, off, s8 offset:288
 		s_waitcnt vmcnt(0)
-		v_mov_b32_e32 v67, v1
-		buffer_load_dwordx4 v2, s[0:3], 0 offen lds
+		buffer_load_dwordx4 v68, s[20:23], 0 offen lds
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:368
-		scratch_load_dword v33, off, s8 offset:372
-		scratch_load_dword v34, off, s8 offset:376
-		scratch_load_dword v35, off, s8 offset:380
+		scratch_load_dword v244, off, s8 offset:452
+		scratch_load_dword v245, off, s8 offset:456
+		scratch_load_dword v246, off, s8 offset:460
+		scratch_load_dword v247, off, s8 offset:464
+		s_mov_b32 s8, 0
+		scratch_load_dword v248, off, s8 offset:552
+		scratch_load_dword v249, off, s8 offset:556
+		scratch_load_dword v250, off, s8 offset:560
+		scratch_load_dword v251, off, s8 offset:564
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[216:219], v[32:35], v[156:159], v106, v107 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[248:251], v[244:247], v[140:143], v8, v108 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, m0, 0x2000
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(34)
-		scratch_load_dword v2, off, s8 offset:320
-		scratch_load_dword v3, off, s8 offset:324
-		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:248
+		scratch_load_dword v68, off, s8 offset:292
+		scratch_load_dword v69, off, s8 offset:296
 		s_waitcnt vmcnt(0)
-		v_mov_b32_e32 v66, v1
-		buffer_load_dwordx4 v2, s[0:3], 0 offen lds
+		buffer_load_dwordx4 v68, s[20:23], 0 offen lds
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:384
-		scratch_load_dword v33, off, s8 offset:388
-		scratch_load_dword v34, off, s8 offset:392
-		scratch_load_dword v35, off, s8 offset:396
+		scratch_load_dword v244, off, s8 offset:468
+		scratch_load_dword v245, off, s8 offset:472
+		scratch_load_dword v246, off, s8 offset:476
+		scratch_load_dword v247, off, s8 offset:480
+		s_mov_b32 s8, 0
+		scratch_load_dword v248, off, s8 offset:552
+		scratch_load_dword v249, off, s8 offset:556
+		scratch_load_dword v250, off, s8 offset:560
+		scratch_load_dword v251, off, s8 offset:564
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[216:219], v[32:35], v[160:163], v106, v108 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[248:251], v[244:247], v[144:147], v8, v9 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, m0, 0x2000
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(32)
-		scratch_load_dword v2, off, s8 offset:328
-		scratch_load_dword v3, off, s8 offset:332
-		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:244
+		scratch_load_dword v68, off, s8 offset:300
+		scratch_load_dword v69, off, s8 offset:304
 		s_waitcnt vmcnt(0)
-		v_mov_b32_e32 v65, v1
-		buffer_load_dwordx4 v2, s[0:3], 0 offen lds
+		buffer_load_dwordx4 v68, s[20:23], 0 offen lds
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:400
-		scratch_load_dword v33, off, s8 offset:404
-		scratch_load_dword v34, off, s8 offset:408
-		scratch_load_dword v35, off, s8 offset:412
+		scratch_load_dword v244, off, s8 offset:484
+		scratch_load_dword v245, off, s8 offset:488
+		scratch_load_dword v246, off, s8 offset:492
+		scratch_load_dword v247, off, s8 offset:496
+		s_mov_b32 s8, 0
+		scratch_load_dword v248, off, s8 offset:552
+		scratch_load_dword v249, off, s8 offset:556
+		scratch_load_dword v250, off, s8 offset:560
+		scratch_load_dword v251, off, s8 offset:564
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[216:219], v[32:35], v[164:167], v106, v108 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[248:251], v[244:247], v[148:151], v8, v9 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_add_i32 m0, m0, 0x2000
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(30)
-		scratch_load_dword v32, off, s8 offset:336
-		scratch_load_dword v33, off, s8 offset:340
-		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:236
+		scratch_load_dword v68, off, s8 offset:308
+		scratch_load_dword v69, off, s8 offset:312
 		s_waitcnt vmcnt(0)
-		v_mov_b32_e32 v3, v1
-		buffer_load_dwordx4 v32, s[0:3], 0 offen lds
+		buffer_load_dwordx4 v68, s[20:23], 0 offen lds
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:416
-		scratch_load_dword v33, off, s8 offset:420
-		scratch_load_dword v34, off, s8 offset:424
-		scratch_load_dword v35, off, s8 offset:428
+		scratch_load_dword v244, off, s8 offset:268
+		scratch_load_dword v245, off, s8 offset:272
+		scratch_load_dword v246, off, s8 offset:276
+		scratch_load_dword v247, off, s8 offset:280
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[216:219], v[32:35], v[168:171], v106, v109 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 m0, s16, 0x27000
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[216:219], v[244:247], v[152:155], v3, v106 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, m0, 0x2000
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(28)
-		scratch_load_dword v32, off, s8 offset:344
-		scratch_load_dword v33, off, s8 offset:348
-		s_mov_b32 s8, 0
-		scratch_load_dword v1, off, s8 offset:232
+		scratch_load_dword v68, off, s8 offset:316
+		scratch_load_dword v69, off, s8 offset:320
 		s_waitcnt vmcnt(0)
-		v_mov_b32_e32 v8, v1
-		buffer_load_dword v32, s[24:27], 0 offen lds
+		buffer_load_dwordx4 v68, s[0:3], 0 offen lds
 		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:448
-		scratch_load_dword v33, off, s8 offset:452
-		scratch_load_dword v34, off, s8 offset:456
-		scratch_load_dword v35, off, s8 offset:460
+		scratch_load_dword v244, off, s8 offset:372
+		scratch_load_dword v245, off, s8 offset:376
+		scratch_load_dword v246, off, s8 offset:380
+		scratch_load_dword v247, off, s8 offset:384
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[216:219], v[32:35], v[172:175], v106, v109 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 m0, m0, 0x100
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[216:219], v[244:247], v[156:159], v3, v106 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, m0, 0x2000
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(26)
-		scratch_load_dword v68, off, s8 offset:352
-		scratch_load_dword v69, off, s8 offset:356
-		s_mov_b32 s8, 0
-		scratch_load_dword v32, off, s8 offset:212
-		scratch_load_dword v33, off, s8 offset:216
-		scratch_load_dword v34, off, s8 offset:220
-		scratch_load_dword v35, off, s8 offset:224
-		s_waitcnt vmcnt(4)
-		buffer_load_dword v68, s[24:27], 0 offen lds
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:464
-		scratch_load_dword v217, off, s8 offset:468
-		scratch_load_dword v218, off, s8 offset:472
-		scratch_load_dword v219, off, s8 offset:476
-		s_mov_b32 s8, 0
-		scratch_load_dword v252, off, s8 offset:596
-		scratch_load_dword v253, off, s8 offset:600
-		scratch_load_dword v254, off, s8 offset:604
-		scratch_load_dword v255, off, s8 offset:608
+		scratch_load_dword v68, off, s8 offset:324
+		scratch_load_dword v69, off, s8 offset:328
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[252:255], v[216:219], v[176:179], v106, v224 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 s5, s5, 2
+		buffer_load_dwordx4 v68, s[0:3], 0 offen lds
+		s_mov_b32 s8, 0
+		scratch_load_dword v244, off, s8 offset:388
+		scratch_load_dword v245, off, s8 offset:392
+		scratch_load_dword v246, off, s8 offset:396
+		scratch_load_dword v247, off, s8 offset:400
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[216:219], v[244:247], v[160:163], v3, v107 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, m0, 0x2000
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(24)
-		scratch_load_dword v68, off, s8 offset:360
-		scratch_load_dword v69, off, s8 offset:364
+		scratch_load_dword v68, off, s8 offset:332
+		scratch_load_dword v69, off, s8 offset:336
+		s_waitcnt vmcnt(0)
+		buffer_load_dwordx4 v68, s[0:3], 0 offen lds
+		s_mov_b32 s8, 0
+		scratch_load_dword v244, off, s8 offset:404
+		scratch_load_dword v245, off, s8 offset:408
+		scratch_load_dword v246, off, s8 offset:412
+		scratch_load_dword v247, off, s8 offset:416
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[216:219], v[244:247], v[164:167], v3, v107 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, m0, 0x2000
+		s_mov_b32 s8, 0
+		s_waitcnt vmcnt(22)
+		scratch_load_dword v68, off, s8 offset:340
+		scratch_load_dword v69, off, s8 offset:344
+		s_waitcnt vmcnt(0)
+		buffer_load_dwordx4 v68, s[0:3], 0 offen lds
+		s_mov_b32 s8, 0
+		scratch_load_dword v244, off, s8 offset:436
+		scratch_load_dword v245, off, s8 offset:440
+		scratch_load_dword v246, off, s8 offset:444
+		scratch_load_dword v247, off, s8 offset:448
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[216:219], v[244:247], v[168:171], v3, v108 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, s16, 0x27000
+		s_mov_b32 s8, 0
+		s_waitcnt vmcnt(20)
+		scratch_load_dword v68, off, s8 offset:348
+		scratch_load_dword v69, off, s8 offset:352
+		s_waitcnt vmcnt(0)
+		buffer_load_dword v68, s[24:27], 0 offen lds
+		s_mov_b32 s8, 0
+		scratch_load_dword v244, off, s8 offset:452
+		scratch_load_dword v245, off, s8 offset:456
+		scratch_load_dword v246, off, s8 offset:460
+		scratch_load_dword v247, off, s8 offset:464
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[216:219], v[244:247], v[172:175], v3, v108 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 m0, m0, 0x100
+		s_mov_b32 s8, 0
+		s_waitcnt vmcnt(18)
+		scratch_load_dword v68, off, s8 offset:356
+		scratch_load_dword v69, off, s8 offset:360
+		s_waitcnt vmcnt(0)
+		buffer_load_dword v68, s[24:27], 0 offen lds
+		s_mov_b32 s8, 0
+		scratch_load_dword v244, off, s8 offset:468
+		scratch_load_dword v245, off, s8 offset:472
+		scratch_load_dword v246, off, s8 offset:476
+		scratch_load_dword v247, off, s8 offset:480
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[216:219], v[244:247], v[176:179], v3, v9 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_mov_b32 s8, 0
+		s_waitcnt vmcnt(16)
+		scratch_load_dword v68, off, s8 offset:364
+		scratch_load_dword v69, off, s8 offset:368
 		s_add_i32 m0, s4, 0x27000
 		s_waitcnt vmcnt(0)
 		s_nop 0
 		buffer_load_dwordx4 v68, s[28:31], 0 offen lds
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:480
-		scratch_load_dword v217, off, s8 offset:484
-		scratch_load_dword v218, off, s8 offset:488
-		scratch_load_dword v219, off, s8 offset:492
-		s_mov_b32 s8, 0
-		scratch_load_dword v252, off, s8 offset:596
-		scratch_load_dword v253, off, s8 offset:600
-		scratch_load_dword v254, off, s8 offset:604
-		scratch_load_dword v255, off, s8 offset:608
+		scratch_load_dword v244, off, s8 offset:484
+		scratch_load_dword v245, off, s8 offset:488
+		scratch_load_dword v246, off, s8 offset:492
+		scratch_load_dword v247, off, s8 offset:496
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[252:255], v[216:219], v[180:183], v106, v224 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[216:219], v[244:247], v[180:183], v3, v9 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:480
-		scratch_load_dword v217, off, s8 offset:484
-		scratch_load_dword v218, off, s8 offset:488
-		scratch_load_dword v219, off, s8 offset:492
+		scratch_load_dword v216, off, s8 offset:484
+		scratch_load_dword v217, off, s8 offset:488
+		scratch_load_dword v218, off, s8 offset:492
+		scratch_load_dword v219, off, s8 offset:496
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[220:223], v[216:219], v[212:215], v106, v224 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[220:223], v[216:219], v[212:215], v3, v9 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:464
-		scratch_load_dword v217, off, s8 offset:468
-		scratch_load_dword v218, off, s8 offset:472
-		scratch_load_dword v219, off, s8 offset:476
+		scratch_load_dword v216, off, s8 offset:468
+		scratch_load_dword v217, off, s8 offset:472
+		scratch_load_dword v218, off, s8 offset:476
+		scratch_load_dword v219, off, s8 offset:480
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[220:223], v[216:219], v[208:211], v106, v224 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[220:223], v[216:219], v[208:211], v3, v9 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:264
-		scratch_load_dword v217, off, s8 offset:268
-		scratch_load_dword v218, off, s8 offset:272
-		scratch_load_dword v219, off, s8 offset:276
+		scratch_load_dword v216, off, s8 offset:268
+		scratch_load_dword v217, off, s8 offset:272
+		scratch_load_dword v218, off, s8 offset:276
+		scratch_load_dword v219, off, s8 offset:280
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[220:223], v[216:219], v[184:187], v106, v107 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[220:223], v[216:219], v[184:187], v3, v106 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:368
-		scratch_load_dword v217, off, s8 offset:372
-		scratch_load_dword v218, off, s8 offset:376
-		scratch_load_dword v219, off, s8 offset:380
+		scratch_load_dword v216, off, s8 offset:372
+		scratch_load_dword v217, off, s8 offset:376
+		scratch_load_dword v218, off, s8 offset:380
+		scratch_load_dword v219, off, s8 offset:384
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[220:223], v[216:219], v[188:191], v106, v107 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[220:223], v[216:219], v[188:191], v3, v106 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:384
-		scratch_load_dword v217, off, s8 offset:388
-		scratch_load_dword v218, off, s8 offset:392
-		scratch_load_dword v219, off, s8 offset:396
+		scratch_load_dword v216, off, s8 offset:388
+		scratch_load_dword v217, off, s8 offset:392
+		scratch_load_dword v218, off, s8 offset:396
+		scratch_load_dword v219, off, s8 offset:400
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[220:223], v[216:219], v[192:195], v106, v108 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[220:223], v[216:219], v[192:195], v3, v107 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:400
-		scratch_load_dword v217, off, s8 offset:404
-		scratch_load_dword v218, off, s8 offset:408
-		scratch_load_dword v219, off, s8 offset:412
+		scratch_load_dword v216, off, s8 offset:404
+		scratch_load_dword v217, off, s8 offset:408
+		scratch_load_dword v218, off, s8 offset:412
+		scratch_load_dword v219, off, s8 offset:416
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[220:223], v[216:219], v[196:199], v106, v108 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[220:223], v[216:219], v[196:199], v3, v107 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:416
-		scratch_load_dword v217, off, s8 offset:420
-		scratch_load_dword v218, off, s8 offset:424
-		scratch_load_dword v219, off, s8 offset:428
+		scratch_load_dword v216, off, s8 offset:436
+		scratch_load_dword v217, off, s8 offset:440
+		scratch_load_dword v218, off, s8 offset:444
+		scratch_load_dword v219, off, s8 offset:448
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[220:223], v[216:219], v[200:203], v106, v109 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[220:223], v[216:219], v[200:203], v3, v108 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:448
-		scratch_load_dword v217, off, s8 offset:452
-		scratch_load_dword v218, off, s8 offset:456
-		scratch_load_dword v219, off, s8 offset:460
+		scratch_load_dword v216, off, s8 offset:452
+		scratch_load_dword v217, off, s8 offset:456
+		scratch_load_dword v218, off, s8 offset:460
+		scratch_load_dword v219, off, s8 offset:464
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[220:223], v[216:219], v[204:207], v106, v109 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[220:223], v[216:219], v[204:207], v3, v108 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_barrier
 		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(20)
-		scratch_load_dword v216, off, s8 offset:496
-		scratch_load_dword v217, off, s8 offset:500
-		scratch_load_dword v218, off, s8 offset:504
-		scratch_load_dword v219, off, s8 offset:508
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[228:231], v[216:219], v[12:15], v9, v107 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		s_waitcnt vmcnt(16)
-		scratch_load_dword v216, off, s8 offset:516
-		scratch_load_dword v217, off, s8 offset:520
-		scratch_load_dword v218, off, s8 offset:524
-		scratch_load_dword v219, off, s8 offset:528
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[72:75], v[228:231], v[216:219], v[72:75], v9, v107 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:516
-		scratch_load_dword v217, off, s8 offset:520
-		scratch_load_dword v218, off, s8 offset:524
-		scratch_load_dword v219, off, s8 offset:528
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[124:127], v[232:235], v[216:219], v[124:127], v9, v107 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:496
-		scratch_load_dword v217, off, s8 offset:500
-		scratch_load_dword v218, off, s8 offset:504
-		scratch_load_dword v219, off, s8 offset:508
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[232:235], v[216:219], v[120:123], v9, v107 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(12)
-		scratch_load_dword v216, off, s8 offset:532
-		scratch_load_dword v217, off, s8 offset:536
-		scratch_load_dword v218, off, s8 offset:540
-		scratch_load_dword v219, off, s8 offset:544
+		scratch_load_dword v216, off, s8 offset:504
+		scratch_load_dword v217, off, s8 offset:508
+		scratch_load_dword v218, off, s8 offset:512
+		scratch_load_dword v219, off, s8 offset:516
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[232:235], v[216:219], v[128:131], v9, v108 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:532
-		scratch_load_dword v217, off, s8 offset:536
-		scratch_load_dword v218, off, s8 offset:540
-		scratch_load_dword v219, off, s8 offset:544
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[76:79], v[228:231], v[216:219], v[76:79], v9, v108 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[12:15], v[252:255], v[216:219], v[12:15], v8, v106 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(8)
-		scratch_load_dword v216, off, s8 offset:548
-		scratch_load_dword v217, off, s8 offset:552
-		scratch_load_dword v218, off, s8 offset:556
-		scratch_load_dword v219, off, s8 offset:560
+		scratch_load_dword v216, off, s8 offset:520
+		scratch_load_dword v217, off, s8 offset:524
+		scratch_load_dword v218, off, s8 offset:528
+		scratch_load_dword v219, off, s8 offset:532
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[80:83], v[228:231], v[216:219], v[80:83], v9, v108 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[72:75], v[252:255], v[216:219], v[72:75], v8, v106 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:548
-		scratch_load_dword v217, off, s8 offset:552
-		scratch_load_dword v218, off, s8 offset:556
-		scratch_load_dword v219, off, s8 offset:560
+		scratch_load_dword v216, off, s8 offset:520
+		scratch_load_dword v217, off, s8 offset:524
+		scratch_load_dword v218, off, s8 offset:528
+		scratch_load_dword v219, off, s8 offset:532
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[232:235], v[216:219], v[132:135], v9, v108 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[124:127], v[224:227], v[216:219], v[124:127], v8, v106 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		s_mov_b32 s8, 0
+		scratch_load_dword v216, off, s8 offset:504
+		scratch_load_dword v217, off, s8 offset:508
+		scratch_load_dword v218, off, s8 offset:512
+		scratch_load_dword v219, off, s8 offset:516
+		s_waitcnt vmcnt(0)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[120:123], v[224:227], v[216:219], v[120:123], v8, v106 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(4)
-		scratch_load_dword v216, off, s8 offset:580
-		scratch_load_dword v217, off, s8 offset:584
-		scratch_load_dword v218, off, s8 offset:588
-		scratch_load_dword v219, off, s8 offset:592
+		scratch_load_dword v216, off, s8 offset:536
+		scratch_load_dword v217, off, s8 offset:540
+		scratch_load_dword v218, off, s8 offset:544
+		scratch_load_dword v219, off, s8 offset:548
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[232:235], v[216:219], v[136:139], v9, v109 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[128:131], v[224:227], v[216:219], v[128:131], v8, v107 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:580
-		scratch_load_dword v217, off, s8 offset:584
-		scratch_load_dword v218, off, s8 offset:588
-		scratch_load_dword v219, off, s8 offset:592
+		scratch_load_dword v216, off, s8 offset:536
+		scratch_load_dword v217, off, s8 offset:540
+		scratch_load_dword v218, off, s8 offset:544
+		scratch_load_dword v219, off, s8 offset:548
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[228:231], v[216:219], v[84:87], v9, v109 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[76:79], v[252:255], v[216:219], v[76:79], v8, v107 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
 		s_waitcnt vmcnt(0)
-		scratch_load_dword v216, off, s8 offset:612
-		scratch_load_dword v217, off, s8 offset:616
-		scratch_load_dword v218, off, s8 offset:620
-		scratch_load_dword v219, off, s8 offset:624
+		scratch_load_dword v216, off, s8 offset:568
+		scratch_load_dword v217, off, s8 offset:572
+		scratch_load_dword v218, off, s8 offset:576
+		scratch_load_dword v219, off, s8 offset:580
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[96:99], v[228:231], v[216:219], v[96:99], v9, v109 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[80:83], v[252:255], v[216:219], v[80:83], v8, v107 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:612
-		scratch_load_dword v217, off, s8 offset:616
-		scratch_load_dword v218, off, s8 offset:620
-		scratch_load_dword v219, off, s8 offset:624
+		scratch_load_dword v216, off, s8 offset:568
+		scratch_load_dword v217, off, s8 offset:572
+		scratch_load_dword v218, off, s8 offset:576
+		scratch_load_dword v219, off, s8 offset:580
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[232:235], v[216:219], v[140:143], v9, v109 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[224:227], v[216:219], v[132:135], v8, v107 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		s_waitcnt lgkmcnt(3)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[224:227], v[32:35], v[136:139], v8, v108 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[84:87], v[252:255], v[32:35], v[84:87], v8, v108 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		s_waitcnt lgkmcnt(2)
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[96:99], v[252:255], v[236:239], v[96:99], v8, v108 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[224:227], v[236:239], v[140:143], v8, v108 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_waitcnt lgkmcnt(1)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[232:235], v[244:247], v[144:147], v9, v224 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[112:115], v[228:231], v[244:247], v[112:115], v9, v224 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[224:227], v[240:243], v[144:147], v8, v9 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[112:115], v[252:255], v[240:243], v[112:115], v8, v9 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_waitcnt lgkmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[116:119], v[228:231], v[248:251], v[116:119], v9, v224 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[232:235], v[248:251], v[148:151], v9, v224 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[236:239], v[248:251], v[180:183], v106, v224 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[236:239], v[244:247], v[176:179], v106, v224 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[240:243], v[244:247], v[208:211], v106, v224 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[240:243], v[248:251], v[212:215], v106, v224 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[116:119], v[252:255], v[64:67], v[116:119], v8, v9 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[148:151], v[224:227], v[64:67], v[148:151], v8, v9 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[180:183], v[228:231], v[64:67], v[180:183], v3, v9 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[176:179], v[228:231], v[240:243], v[176:179], v3, v9 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[208:211], v[232:235], v[240:243], v[208:211], v3, v9 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[212:215], v[232:235], v[64:67], v[212:215], v3, v9 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:496
-		scratch_load_dword v217, off, s8 offset:500
-		scratch_load_dword v218, off, s8 offset:504
-		scratch_load_dword v219, off, s8 offset:508
+		scratch_load_dword v64, off, s8 offset:504
+		scratch_load_dword v65, off, s8 offset:508
+		scratch_load_dword v66, off, s8 offset:512
+		scratch_load_dword v67, off, s8 offset:516
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[240:243], v[216:219], v[184:187], v106, v107 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[184:187], v[232:235], v[64:67], v[184:187], v3, v106 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:496
-		scratch_load_dword v217, off, s8 offset:500
-		scratch_load_dword v218, off, s8 offset:504
-		scratch_load_dword v219, off, s8 offset:508
+		scratch_load_dword v64, off, s8 offset:504
+		scratch_load_dword v65, off, s8 offset:508
+		scratch_load_dword v66, off, s8 offset:512
+		scratch_load_dword v67, off, s8 offset:516
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[236:239], v[216:219], v[152:155], v106, v107 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[152:155], v[228:231], v[64:67], v[152:155], v3, v106 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:516
-		scratch_load_dword v217, off, s8 offset:520
-		scratch_load_dword v218, off, s8 offset:524
-		scratch_load_dword v219, off, s8 offset:528
+		scratch_load_dword v64, off, s8 offset:520
+		scratch_load_dword v65, off, s8 offset:524
+		scratch_load_dword v66, off, s8 offset:528
+		scratch_load_dword v67, off, s8 offset:532
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[236:239], v[216:219], v[156:159], v106, v107 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[156:159], v[228:231], v[64:67], v[156:159], v3, v106 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:516
-		scratch_load_dword v217, off, s8 offset:520
-		scratch_load_dword v218, off, s8 offset:524
-		scratch_load_dword v219, off, s8 offset:528
+		scratch_load_dword v64, off, s8 offset:520
+		scratch_load_dword v65, off, s8 offset:524
+		scratch_load_dword v66, off, s8 offset:528
+		scratch_load_dword v67, off, s8 offset:532
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[240:243], v[216:219], v[188:191], v106, v107 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[188:191], v[232:235], v[64:67], v[188:191], v3, v106 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:532
-		scratch_load_dword v217, off, s8 offset:536
-		scratch_load_dword v218, off, s8 offset:540
-		scratch_load_dword v219, off, s8 offset:544
+		scratch_load_dword v64, off, s8 offset:536
+		scratch_load_dword v65, off, s8 offset:540
+		scratch_load_dword v66, off, s8 offset:544
+		scratch_load_dword v67, off, s8 offset:548
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[240:243], v[216:219], v[192:195], v106, v108 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[192:195], v[232:235], v[64:67], v[192:195], v3, v107 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:532
-		scratch_load_dword v217, off, s8 offset:536
-		scratch_load_dword v218, off, s8 offset:540
-		scratch_load_dword v219, off, s8 offset:544
+		scratch_load_dword v64, off, s8 offset:536
+		scratch_load_dword v65, off, s8 offset:540
+		scratch_load_dword v66, off, s8 offset:544
+		scratch_load_dword v67, off, s8 offset:548
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[236:239], v[216:219], v[160:163], v106, v108 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[160:163], v[228:231], v[64:67], v[160:163], v3, v107 op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:548
-		scratch_load_dword v217, off, s8 offset:552
-		scratch_load_dword v218, off, s8 offset:556
-		scratch_load_dword v219, off, s8 offset:560
+		scratch_load_dword v64, off, s8 offset:568
+		scratch_load_dword v65, off, s8 offset:572
+		scratch_load_dword v66, off, s8 offset:576
+		scratch_load_dword v67, off, s8 offset:580
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[236:239], v[216:219], v[164:167], v106, v108 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[164:167], v[228:231], v[64:67], v[164:167], v3, v107 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:548
-		scratch_load_dword v217, off, s8 offset:552
-		scratch_load_dword v218, off, s8 offset:556
-		scratch_load_dword v219, off, s8 offset:560
+		scratch_load_dword v64, off, s8 offset:568
+		scratch_load_dword v65, off, s8 offset:572
+		scratch_load_dword v66, off, s8 offset:576
+		scratch_load_dword v67, off, s8 offset:580
 		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[240:243], v[216:219], v[196:199], v106, v108 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:580
-		scratch_load_dword v217, off, s8 offset:584
-		scratch_load_dword v218, off, s8 offset:588
-		scratch_load_dword v219, off, s8 offset:592
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[240:243], v[216:219], v[200:203], v106, v109 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:580
-		scratch_load_dword v217, off, s8 offset:584
-		scratch_load_dword v218, off, s8 offset:588
-		scratch_load_dword v219, off, s8 offset:592
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[236:239], v[216:219], v[168:171], v106, v109 op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:612
-		scratch_load_dword v217, off, s8 offset:616
-		scratch_load_dword v218, off, s8 offset:620
-		scratch_load_dword v219, off, s8 offset:624
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[236:239], v[216:219], v[172:175], v106, v109 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
-		s_mov_b32 s8, 0
-		scratch_load_dword v216, off, s8 offset:612
-		scratch_load_dword v217, off, s8 offset:616
-		scratch_load_dword v218, off, s8 offset:620
-		scratch_load_dword v219, off, s8 offset:624
-		s_waitcnt vmcnt(0)
-		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[240:243], v[216:219], v[204:207], v106, v109 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[196:199], v[232:235], v[64:67], v[196:199], v3, v107 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[200:203], v[232:235], v[32:35], v[200:203], v3, v108 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[168:171], v[228:231], v[32:35], v[168:171], v3, v108 op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[172:175], v[228:231], v[236:239], v[172:175], v3, v108 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		v_mfma_scale_f32_16x16x128_f8f6f4 v[204:207], v[232:235], v[236:239], v[204:207], v3, v108 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+		s_add_i32 s5, s5, 2
 		s_cmp_lt_i32 s5, s9
+		s_mov_b32 s8, 0
+		scratch_load_dword v32, off, s8 offset:212
+		scratch_load_dword v33, off, s8 offset:216
+		scratch_load_dword v34, off, s8 offset:220
+		scratch_load_dword v35, off, s8 offset:224
+		s_mov_b32 s8, 0
+		scratch_load_dword v1, off, s8 offset:232
+		s_waitcnt vmcnt(0)
+		v_mov_b32_e32 v8, v1
+		s_mov_b32 s8, 0
+		scratch_load_dword v1, off, s8 offset:236
+		s_waitcnt vmcnt(0)
+		v_mov_b32_e32 v3, v1
+		s_mov_b32 s8, 0
+		scratch_load_dword v1, off, s8 offset:248
+		s_waitcnt vmcnt(0)
+		v_mov_b32_e32 v65, v1
+		s_mov_b32 s8, 0
+		scratch_load_dword v1, off, s8 offset:252
+		s_waitcnt vmcnt(0)
+		v_mov_b32_e32 v66, v1
+		s_mov_b32 s8, 0
+		scratch_load_dword v1, off, s8 offset:256
+		s_waitcnt vmcnt(0)
+		v_mov_b32_e32 v67, v1
+		s_mov_b32 s8, 0
+		scratch_load_dword v1, off, s8 offset:260
+		s_waitcnt vmcnt(0)
+		v_mov_b32_e32 v64, v1
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		s_add_i32 s0, s12, -1
@@ -3111,7 +3007,7 @@ wmma_f16_matmul_tiled:
 	.p2align	6, 0x0
 	.amdhsa_kernel wmma_f16_matmul_tiled
 		.amdhsa_group_segment_fixed_size 24576
-		.amdhsa_private_segment_fixed_size 628
+		.amdhsa_private_segment_fixed_size 584
 		.amdhsa_kernarg_size 48
 		.amdhsa_user_sgpr_count 13
 		.amdhsa_user_sgpr_kernarg_segment_ptr 1
@@ -3140,7 +3036,7 @@ wmma_f16_matmul_tiled:
 	.set .Lwmma_f16_matmul_tiled.num_agpr, 0
 	.set .Lwmma_f16_matmul_tiled.numbered_sgpr, 37
 	.set .Lwmma_f16_matmul_tiled.num_named_barrier, 0
-	.set .Lwmma_f16_matmul_tiled.private_seg_size, 628
+	.set .Lwmma_f16_matmul_tiled.private_seg_size, 584
 	.set .Lwmma_f16_matmul_tiled.uses_vcc, 1
 	.set .Lwmma_f16_matmul_tiled.uses_flat_scratch, 1
 	.set .Lwmma_f16_matmul_tiled.has_dyn_sized_stack, 0
@@ -3184,22 +3080,22 @@ amdhsa.kernels:
     .kernarg_segment_size: 48
     .max_flat_workgroup_size: 512
     .name:           wmma_f16_matmul_tiled
-    .private_segment_fixed_size: 628
+    .private_segment_fixed_size: 584
     .sgpr_count:     37
     .sgpr_spill_count: 0
     .symbol:         wmma_f16_matmul_tiled.kd
     .uses_dynamic_stack: false
     .vgpr_count:     256
     .agpr_count:     0
-    .vgpr_spill_count: 157
+    .vgpr_spill_count: 146
     .wavefront_size: 64
     .workgroup_processor_mode: 1
-    wave.regalloc.iterations: 81
+    wave.regalloc.iterations: 82
     wave.regalloc.agpr.dwords: 0
-    wave.regalloc.remat.dwords: 11
+    wave.regalloc.remat.dwords: 14
     wave.regalloc.sgpr_to_vgpr.dwords: 0
     wave.regalloc.lds.dwords: 12
-    wave.regalloc.scratch.dwords: 157
+    wave.regalloc.scratch.dwords: 146
 amdhsa.target:   amdgcn-amd-amdhsa--gfx950
 amdhsa.version:
   - 1

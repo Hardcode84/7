@@ -876,10 +876,11 @@ wmma_f16_matmul_tiled:
 		buffer_load_dwordx4 v22, s[0:3], s44 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x2000
-		s_add_i32 s13, s13, 0x10000
+		s_nop 0
 		buffer_load_dwordx4 v23, s[0:3], s44 offen lds
-		s_add_i32 s18, s18, 1
+		s_add_i32 s13, s13, 0x10000
 		s_add_i32 m0, m0, 0x2000
+		s_add_i32 s18, s18, 1
 		s_and_b32 s45, s18, 1
 		s_lshl_b32 s45, s45, 16
 		v_add_u32_e32 v12, s45, v14

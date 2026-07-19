@@ -786,12 +786,13 @@ wmma_f16_matmul_tiled:
 		buffer_load_dwordx4 v36, s[0:3], s12 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x2000
-		s_add_i32 s7, s7, 0x10000
+		s_nop 0
 		buffer_load_dwordx4 v38, s[0:3], s12 offen lds
-		s_and_b32 s7, s7, 0x1ffff
+		s_nop 0
 		s_add_i32 m0, m0, 0x2000
-		s_add_i32 s28, s28, 1
+		s_add_i32 s7, s7, 0x10000
 		buffer_load_dwordx4 v40, s[0:3], s12 offen lds
+		s_add_i32 s28, s28, 1
 		s_and_b32 s12, s28, 1
 		s_lshl_b32 s12, s12, 16
 		v_add_u32_e32 v19, s12, v17
@@ -799,6 +800,7 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(23)
 		v_add_u32_e32 v26, s12, v0
 		v_add3_u32 v26, v26, v2, v21
+		s_and_b32 s7, s7, 0x1ffff
 		s_cmp_lt_i32 s28, 30
 		s_barrier
 		ds_read_b128 a[4:7], v19

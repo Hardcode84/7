@@ -1224,11 +1224,24 @@ static bool touchesBlockedSingletonReg(Operation *op) {
   });
 }
 
+static bool definesLoopCarry(Operation *op) {
+  return llvm::any_of(op->getResults(), [](Value result) {
+    return llvm::any_of(result.getUsers(), [&](Operation *user) {
+      waveamdmachine::ContinueIfOp terminator =
+          dyn_cast<waveamdmachine::ContinueIfOp>(user);
+      return terminator && llvm::is_contained(terminator.getCarries(), result);
+    });
+  });
+}
+
 static bool isRepairCandidate(Operation *op) {
   if (emitsNoMachineInst(*op) || !isPure(op) || isMFMA(op))
     return false;
   if (!op->hasTrait<OpTrait::waveamdmachine::VALUOp>() &&
       !op->hasTrait<OpTrait::waveamdmachine::SALUOp>())
+    return false;
+  // Post-greedy repair may not move carry defs; backedges reuse registers.
+  if (definesLoopCarry(op))
     return false;
   return !touchesBlockedSingletonReg(op);
 }
