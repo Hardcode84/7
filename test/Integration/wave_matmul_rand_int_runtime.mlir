@@ -2,14 +2,16 @@
 //
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --m=32 --n=32 --k=32 --bm=1 --bn=2 --input-type=f16 --variants=baseline --iters=2 --warmup=1 --repeats=1 --sim-trip-count=0 --rand-int \
 // RUN:   | FileCheck %s --check-prefix=F16
-// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --m=32 --n=32 --k=32 --bm=1 --bn=2 --input-type=bf16 --variants=baseline --iters=2 --warmup=1 --repeats=1 --sim-trip-count=0 --rand-int \
+// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --m=32 --n=32 --k=32 --bm=1 --bn=2 --input-type=bf16 --output-layout=tile-packed --variants=baseline --iters=2 --warmup=1 --repeats=1 --sim-trip-count=0 --rand-int \
 // RUN:   | FileCheck %s --check-prefix=BF16
 //
 // F16: input_type=f16
 // F16-SAME: input_mode=rand-int
+// F16: kernel_abi=matmul output_layout=tile-packed
 // F16: output_check: passed mode=strict
 // F16: hw_output_check: passed
 // BF16: input_type=bf16
 // BF16-SAME: input_mode=rand-int
+// BF16: kernel_abi=matmul output_layout=tile-packed
 // BF16: output_check: passed mode=strict
 // BF16: hw_output_check: passed

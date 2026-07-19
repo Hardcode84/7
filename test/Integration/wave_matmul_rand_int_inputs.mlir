@@ -10,5 +10,6 @@
 // VALID: rand_int_f16_cpu_reference: ok
 // VALID: rand_int_bf16_cpu_reference: ok
 // VALID: fragment_output_coordinates: ok
+// VALID: output_layouts: ok
 // MUTEX: --all-ones and --rand-int are mutually exclusive
 // MXFP4: --rand-int supports f16/bf16 inputs only

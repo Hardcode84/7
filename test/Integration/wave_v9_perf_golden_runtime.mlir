@@ -7,10 +7,12 @@
 //
 // CHECK: example=v9-perf-golden scale_input=canonical kernel_abi=v9-golden
 // CHECK: kernel: v9_beyond_hotloop
+// CHECK: kernel_abi=v9-golden output_layout=row-major
 // CHECK: grid: 1,1,1 block: 512,1,1
 // CHECK: hw_output_check: skipped
 
 // TRANSPOSED: example=v9-perf-golden scale_input=canonical kernel_abi=v9-golden
 // TRANSPOSED: kernel: v9_beyond_hotloop
+// TRANSPOSED: kernel_abi=v9-golden output_layout=row-major
 // TRANSPOSED: grid: 1,1,1 block: 512,1,1
 // TRANSPOSED: hw_output_check: skipped

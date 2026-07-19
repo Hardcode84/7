@@ -101,6 +101,22 @@ static void checkOutputCoordinates() {
   std::printf("fragment_output_coordinates: ok\n");
 }
 
+static void checkOutputLayouts() {
+  Args args;
+  if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked)
+    fail("matmul automatic output layout mismatch");
+  args.kernelABI = KernelABI::V9Golden;
+  if (getEffectiveOutputLayout(args) != OutputLayout::RowMajor)
+    fail("v9 automatic output layout mismatch");
+  args.kernelABI = KernelABI::TLXMXFP;
+  if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked)
+    fail("TLX automatic output layout mismatch");
+  args.outputLayout = OutputLayout::ColumnMajor;
+  if (getEffectiveOutputLayout(args) != OutputLayout::ColumnMajor)
+    fail("explicit output layout mismatch");
+  std::printf("output_layouts: ok\n");
+}
+
 int main(int argc, char **argv) {
   if (argc == 2) {
     Args args;
@@ -125,5 +141,6 @@ int main(int argc, char **argv) {
   checkCPUReference(InputType::F16, "f16");
   checkCPUReference(InputType::BF16, "bf16");
   checkOutputCoordinates();
+  checkOutputLayouts();
   return 0;
 }

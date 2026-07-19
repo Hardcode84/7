@@ -24,6 +24,7 @@ enum class CType { F32, F16, BF16 };
 enum class InputType { F16, BF16, MXFP4 };
 enum class KernelABI { Matmul, V9Golden, TLXMXFP };
 enum class AccumulatorLayout { Automatic, Wmma, Mfma };
+enum class OutputLayout { Automatic, TilePacked, RowMajor, ColumnMajor };
 enum class ScaleLayout { Canonical, TensileLite };
 
 struct Args {
@@ -42,6 +43,7 @@ struct Args {
   CType cType = CType::F32;
   KernelABI kernelABI = KernelABI::Matmul;
   AccumulatorLayout accumulatorLayout = AccumulatorLayout::Automatic;
+  OutputLayout outputLayout = OutputLayout::Automatic;
   int iters = 1000;
   int warmupIters = 10;
   int dynamicLdsBytes = 0;
@@ -75,6 +77,7 @@ static void usage() {
       "  --c-type f32|f16|bf16  output element type (default f32)\n"
       "  --kernel-abi matmul|v9-golden|tlx-mxfp  kernel argument ABI\n"
       "  --accumulator-layout automatic|wmma|mfma\n"
+      "  --output-layout automatic|tile-packed|row-major|column-major\n"
       "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
@@ -184,6 +187,26 @@ static void setAccumulatorLayout(Args &a, const char *v) {
   }
   die("bad --accumulator-layout; expected automatic, wmma, or mfma");
 }
+static void setOutputLayout(Args &a, const char *v) {
+  if (std::strcmp(v, "automatic") == 0) {
+    a.outputLayout = OutputLayout::Automatic;
+    return;
+  }
+  if (std::strcmp(v, "tile-packed") == 0) {
+    a.outputLayout = OutputLayout::TilePacked;
+    return;
+  }
+  if (std::strcmp(v, "row-major") == 0) {
+    a.outputLayout = OutputLayout::RowMajor;
+    return;
+  }
+  if (std::strcmp(v, "column-major") == 0) {
+    a.outputLayout = OutputLayout::ColumnMajor;
+    return;
+  }
+  die("bad --output-layout; expected automatic, tile-packed, row-major, or "
+      "column-major");
+}
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
@@ -205,6 +228,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--c-type", setCType},
     {"--kernel-abi", setKernelABI},
     {"--accumulator-layout", setAccumulatorLayout},
+    {"--output-layout", setOutputLayout},
     {"--scale-layout", setScaleLayout},
     {"--dynamic-lds", setDynamicLds},
     {"--iters", setIters},
@@ -589,6 +613,39 @@ static void validateRowMajorOutput(int elements, const Args &a,
               worst, worstIdx);
 }
 
+template <typename ReadFn>
+static void validateColumnMajorOutput(int elements, const Args &a,
+                                      const HostInputs &inputs,
+                                      ReadFn readValue) {
+  if (elements != a.m * a.n)
+    die("column-major output check expects dense MxN output");
+  double worst = 0.0;
+  int worstIdx = 0;
+  for (int n = 0; n < a.n; ++n) {
+    for (int m = 0; m < a.m; ++m) {
+      int index = n * a.m + m;
+      double got = static_cast<double>(readValue(index));
+      double exp =
+          roundExpectedOutput(computeExpectedElement(inputs, a, m, n), a.cType);
+      double diff = std::fabs(got - exp);
+      if (diff > worst) {
+        worst = diff;
+        worstIdx = index;
+      }
+      double limit = 1.0e-2 + 1.0e-3 * std::fabs(exp);
+      if (diff > limit) {
+        std::fprintf(stderr,
+                     "output_check: failed m=%d n=%d expected=%.6f "
+                     "got=%.6f abs_diff=%.6f tolerance=%.6f\n",
+                     m, n, exp, got, diff, limit);
+        std::exit(1);
+      }
+    }
+  }
+  std::printf("output_check: passed mode=strict max_abs_diff=%.6f index=%d\n",
+              worst, worstIdx);
+}
+
 static const char *getCTypeName(CType type) {
   switch (type) {
   case CType::F32:
@@ -625,6 +682,20 @@ static const char *getKernelABIName(KernelABI abi) {
   die("unknown kernel ABI");
 }
 
+static const char *getOutputLayoutName(OutputLayout layout) {
+  switch (layout) {
+  case OutputLayout::Automatic:
+    return "automatic";
+  case OutputLayout::TilePacked:
+    return "tile-packed";
+  case OutputLayout::RowMajor:
+    return "row-major";
+  case OutputLayout::ColumnMajor:
+    return "column-major";
+  }
+  die("unknown output layout");
+}
+
 static const char *getScaleLayoutName(ScaleLayout layout) {
   return layout == ScaleLayout::TensileLite ? "tensilelite" : "canonical";
 }
@@ -657,6 +728,14 @@ static bool isV9Golden(const Args &a) {
 
 static bool isTLXMXFP(const Args &a) {
   return a.kernelABI == KernelABI::TLXMXFP;
+}
+
+static OutputLayout getEffectiveOutputLayout(const Args &a) {
+  if (a.outputLayout != OutputLayout::Automatic)
+    return a.outputLayout;
+  if (isV9Golden(a))
+    return OutputLayout::RowMajor;
+  return OutputLayout::TilePacked;
 }
 
 static bool usesFlattenedGrid(const Args &a) {
@@ -1014,6 +1093,7 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
                                const Args &a, const HostInputs &inputs) {
   if (!a.checkOutput)
     return;
+  OutputLayout layout = getEffectiveOutputLayout(a);
   if (a.cType == CType::F16 || a.cType == CType::BF16) {
     std::vector<uint16_t> hostC(cElements);
     checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
@@ -1022,7 +1102,11 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
       return a.cType == CType::F16 ? halfToFloat(hostC[i])
                                    : bf16ToFloat(hostC[i]);
     };
-    if (isV9Golden(a)) {
+    if (layout == OutputLayout::ColumnMajor) {
+      validateColumnMajorOutput(cElements, a, inputs, readValue);
+      return;
+    }
+    if (layout == OutputLayout::RowMajor) {
       validateRowMajorOutput(cElements, a, inputs, readValue);
       return;
     }
@@ -1032,7 +1116,12 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
   std::vector<float> hostC(cElements);
   checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
            "hipMemcpy C");
-  if (isV9Golden(a)) {
+  if (layout == OutputLayout::ColumnMajor) {
+    validateColumnMajorOutput(cElements, a, inputs,
+                              [&](int i) { return hostC[i]; });
+    return;
+  }
+  if (layout == OutputLayout::RowMajor) {
     validateRowMajorOutput(cElements, a, inputs,
                            [&](int i) { return hostC[i]; });
     return;
@@ -1170,10 +1259,12 @@ int main(int argc, char **argv) {
   std::printf("kernel: %s\n", a.kernel);
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
               "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d input_type=%s "
-              "c_type=%s kernel_abi=%s scale_layout=%s input_mode=%s\n",
+              "c_type=%s kernel_abi=%s output_layout=%s scale_layout=%s "
+              "input_mode=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
               getCTypeName(a.cType), getKernelABIName(a.kernelABI),
+              getOutputLayoutName(getEffectiveOutputLayout(a)),
               getScaleLayoutName(a.scaleLayout), getInputModeName(a));
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n",
               launch.gridX, launch.gridY, launch.blockThreads, a.bm * a.bn);

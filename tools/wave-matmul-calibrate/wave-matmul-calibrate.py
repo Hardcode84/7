@@ -942,6 +942,8 @@ def run_hw(
         str(kernel_wave_size(args)),
         "--accumulator-layout",
         accumulator_layout(args),
+        "--output-layout",
+        getattr(args, "output_layout", "automatic"),
         "--input-type",
         args.input_type,
         "--c-type",
@@ -1146,6 +1148,11 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--output-layout",
+        choices=("automatic", "tile-packed", "row-major", "column-major"),
+        default="automatic",
+    )
     input_mode = ap.add_mutually_exclusive_group()
     input_mode.add_argument(
         "--all-ones",
