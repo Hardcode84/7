@@ -543,10 +543,11 @@ coalesced_mfma_output=true
 ```
 
 Named profile supplies a typed `PhasedDmaSchedule`: issue group 7, zero issue
-delays, fetch alignment/phase 32/12, and subpanel pipelining. Schedule selects
-the two-buffer f16 DMA pipeline; four buffers exceed gfx950 LDS capacity for
-this tile. Profile stays separate from the locked
-`gfx950-f16-256x256-8wave` default.
+delays, fetch alignment/phase 32/12, and subpanel pipelining. Opt-in multi-wave
+specialization plus the general shared-resource scheduler reaches 1.498 PFLOP/s
+on the final `rand_int` run. Schedule selects the two-buffer f16 DMA pipeline;
+four buffers exceed gfx950 LDS capacity for this tile. Profile stays separate
+from the locked `gfx950-f16-256x256-8wave` default.
 
 See [Wave gfx950 f16 four-wave experiment](PerfReferences/WaveGfx950F16Gemm4Wave.md)
 for hardware results and saved ISA.

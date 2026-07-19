@@ -3,9 +3,9 @@
 ## Result
 
 `gfx950-f16-256x256-4wave` keeps the 256x256x64 CTA tile but assigns one
-128x128 output tile to each of four wave64 waves. Generated dense column-major
-output reaches `1.413296 PFLOP/s` on MI350X. A frozen manual convergence kernel
-reaches `1.498017 PFLOP/s`. The eight-wave profile remains unchanged.
+128x128 output tile to each of four wave64 waves. Opt-in multi-wave
+specialization reaches `1.50154 PFLOP/s` on MI350X. Same-session frozen manual
+ASM reaches `1.50018 PFLOP/s`. The eight-wave profile remains unchanged.
 
 - Shape: `M=N=K=8192`.
 - Types: f16 A/B/C, f32 accumulation.
@@ -14,10 +14,65 @@ reaches `1.498017 PFLOP/s`. The eight-wave profile remains unchanged.
 - Dynamic LDS: 133,120 bytes.
 - Clock controls: not used.
 
-Kernel-side port qualification used device 2, `rand_int`, 25 warmups, and 500
-launches. Frozen tile-packed ASM measured `783.708`, `785.509`, and `779.891 us`;
-dense column-major ASM measured `777.977`, `778.575`, and `775.848 us`.
-Medians: `1.402961` versus `1.413296 PFLOP/s`.
+Seven specialized compiler runs measured `735.433`, `732.851`, `731.078`,
+`732.250`, `732.258`, `731.656`, and `733.425 us`. Median: `732.258 us`, or
+`1.50154 PFLOP/s`. Same-session manual ASM median: `732.921 us`, or
+`1.50018 PFLOP/s`. Protocol: device 2, `rand_int`, 25 warmups, 500 launches,
+no clock controls.
+
+Fresh final validation of the checked-in ASM measured a `733.768 us` median,
+or `1.498446 PFLOP/s`, across seven `rand_int` runs. Default random seed 17
+measured `757.306 us`, or `1.451872 PFLOP/s`, with the same binary and protocol.
+
+Strict `1024x512x256` checks passed bit-exactly for `rand_int` seed 0 and
+default random seed 17.
+
+### Full sweep
+
+Fresh `--kernels all` validation rebuilt the complete calibration path and ran
+all 30 configurations. Four-wave f16 improved across the main K range:
+
+| K | Prior TFLOP/s | Current TFLOP/s | Delta |
+|---:|---:|---:|---:|
+| 2048 | 1097.21 | 1125.22 | +2.55% |
+| 3072 | 1183.77 | 1220.41 | +3.09% |
+| 4096 | 1240.85 | 1287.60 | +3.77% |
+| 8192 | 1377.77 | 1425.05 | +3.43% |
+| 16384 | 1334.10 | 1385.52 | +3.85% |
+
+Valid controls stayed within run variance: eight-wave f16 changed by at most
+`-1.07%`, four-wave MXFP4 by `-0.62%`, and v9 by `-0.19%`. Current MXFP4
+throughput spans `1960.61-3945.43 TFLOP/s` for eight waves and
+`1804.61-4188.34 TFLOP/s` for four waves.
+
+The older eight-wave MXFP4 baseline is excluded. Its K=3072 HSACO fails strict
+random checking at `(m=4,n=0)`: expected `1803`, got `1667`. That binary
+predates the DMA descriptor lifetime edge; its apparent `2.36%` advantage is
+not a valid performance result.
+
+All regenerated perf goldens were measured against their checked-in ASM on
+device 2. The full sweep covers f16 4/8-wave, MXFP4 4/8-wave, and both v9
+goldens. Focused random-input A/B runs covered the remaining drift:
+
+| Golden | Shape | Prior us | Current us |
+|---|---|---:|---:|
+| f16 16-wave | `4096x4096x8192` | 227.428 | 226.843 |
+| A4W4 MXFP | `4096x4096x16384` | 127.891 | 127.865 |
+| TLX async GLU | `1024x21568x256` | 59.952 | 59.990 |
+| TLX async FA | `B2 H64 N8192 D128` | 5299.393 | 5282.099 |
+| TLX persistent causal FA | `B2 H64 N8192 D128` | 4333.515 | 4317.141 |
+
+GEMM and GLU rows used 25 warmups, 200 launches, and nine repeats. FA rows
+used 5 warmups, 20 launches, and nine repeats. No clock controls were used.
+
+Five exact-golden compile runs bounded regalloc at `2.5824-2.6101 s`; median
+`2.5940 s`. The timing harness selects `waveamd_backend_multi_wave` explicitly
+and rejects any assembly mismatch.
+
+Unspecialized kernel-side port qualification used device 2, `rand_int`, 25
+warmups, and 500 launches. Frozen tile-packed ASM measured `783.708`,
+`785.509`, and `779.891 us`; dense column-major ASM measured `777.977`,
+`778.575`, and `775.848 us`. Medians: `1.402961` versus `1.413296 PFLOP/s`.
 
 Initial qualification used 25 warmups, 500 timed launches, and three repeats:
 
@@ -99,11 +154,12 @@ Physical accumulator tile row 7 is rotated: `a224` holds logical column 7,
 `a228` holds column 0, through `a252` holding column 6. The transpose absorbs
 that allocation permutation; the epilogue stays regular.
 
-Compiler reproduction remains split into three general mechanisms:
+Compiler reproduction uses four mechanisms:
 
-1. Carry next parity's LDS read addresses and scalar bases through loop SSA.
-2. Model per-SIMD steady-state issue phase in greedy scheduling.
-3. Select lane-transposed MFMA output layout with cross-fragment f16 packing.
+1. Carry DMA buffer bases and source pointers through loop SSA.
+2. Model shared LDS issue resources across resident waves.
+3. Jointly schedule cloned loop branches with bounded greedy lookahead.
+4. Select lane-transposed MFMA output with cross-fragment f16 packing.
 
 No post-greedy schedule veto. Each improvement belongs in IR layout or the
 greedy scheduler/model.
@@ -315,6 +371,10 @@ PhasedDmaSchedule.fetch_phase=12
 PhasedDmaSchedule.subpanel_pipeline=true
 ```
 
+The backend emits three encoded NOPs after each 32-byte alignment directive.
+Both specialized loop heads therefore start at byte phase 12. This removes the
+remaining fetch-sensitive gap without changing loop dependencies or clocks.
+
 The issue group selects the two-buffer f16 DMA pipeline. Four unpadded buffers
 need 256 KiB and cannot launch on gfx950. Copying the eight-wave issue delays
 regressed to `838.893 us`; K32 with four 32 KiB buffers regressed to
@@ -409,8 +469,9 @@ gfx950 A/B was waived; timings above are not attributed to these hashes.
 Generate and check ISA:
 
 ```bash
-python test/PerfGolden/test_gfx950_f16_256x256_4wave.py \
-  --build-dir build --generated-out /tmp/gfx950-f16-256x256-4wave.s
+python test/PerfGolden/test_gfx950_f16_256x256_4wave_specialized.py \
+  --build-dir build \
+  --generated-out /tmp/gfx950-f16-256x256-4wave-specialized.s
 ```
 
 Run hardware calibration:
@@ -421,6 +482,7 @@ python tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
   --chip=gfx950 --build-dir=build \
   --kernel-profile=gfx950-f16-256x256-4wave \
   --m=8192 --n=8192 --k=8192 --variants=scheduled \
-  --iters=1000 --warmup=25 --repeats=7 --rand-int --no-check \
+  --multi-wave-specialize \
+  --iters=500 --warmup=25 --repeats=7 --rand-int --no-check \
   --hipcc="$(command -v hipcc)"
 ```
