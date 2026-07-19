@@ -851,3 +851,242 @@ func.func @prefetch_loop_carried_global(
 // DIAG: waveamd-machine-schedule region func=prefetch_loop_carried_global index=1
 // DIAG-SAME: action=apply reason=recurrence_model
 // DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @preserve_greedy_prefix_for_recurrence(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init, %init_token = waveamdmachine.ds_load_b32 %addr after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init, %init_token : !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %used = waveamdmachine.v_add_u32 %tile, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work0 = waveamdmachine.v_add_u32 %used, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work1 = waveamdmachine.v_add_u32 %work0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work2 = waveamdmachine.v_add_u32 %work1, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work3 = waveamdmachine.v_add_u32 %work2, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %next, %read = waveamdmachine.ds_load_b32 %addr after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next, %read : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @preserve_greedy_prefix_for_recurrence
+// IR: ^bb0
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: [[NEXT:%.*]], {{%.*}} = waveamdmachine.ds_load_b32
+// IR-COUNT-4: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT]],
+// DIAG: waveamd-machine-schedule region func=preserve_greedy_prefix_for_recurrence index=1
+// DIAG-SAME: action=apply reason=recurrence_model
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @preserve_loop_carried_mfma_resource_order(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %tile: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%tile, %root : !waveamdmachine.reg<vgpr, 4>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%iter_tile: !waveamdmachine.reg<vgpr, 4>,
+       %tok: !waveamdmachine.mem.token):
+    %parts:4 = waveamdmachine.tuple_to_elements %iter_tile
+        : (!waveamdmachine.reg<vgpr, 4>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %used = waveamdmachine.v_add_u32 %parts#0, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mfma_a = waveamdmachine.tuple_from_elements %used, %used, %used, %used
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 4>
+    %unused0, %read0 = waveamdmachine.ds_load_b32 %addr after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %unused1, %read1 = waveamdmachine.ds_load_b32 %addr after %read0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %unused2, %read2 = waveamdmachine.ds_load_b32 %addr after %read1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %unused3, %read3 = waveamdmachine.ds_load_b32 %addr after %read2
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next = waveamdmachine.mfma_f32_16x16x32_f16 %mfma_a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next, %read3 : !waveamdmachine.reg<vgpr, 4>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @preserve_loop_carried_mfma_resource_order
+// IR: ^bb0
+// IR-NEXT: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements
+// IR-NEXT: [[USED:%.*]] = waveamdmachine.v_add_u32 [[PARTS]]#0
+// IR-NEXT: [[MFMA_A:%.*]] = waveamdmachine.tuple_from_elements [[USED]],
+// IR-COUNT-4: waveamdmachine.ds_load_b32
+// IR-NEXT: [[NEXT:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[MFMA_A]],
+// IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT]],
+// DIAG: waveamd-machine-schedule region func=preserve_loop_carried_mfma_resource_order index=0
+// DIAG-SAME: action=keep reason=same_order
+// DIAG-SAME: recurrence_model_moves=0
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @prefetch_loop_carried_compute(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %tile: !waveamdmachine.reg<vgpr, 1>,
+    %seed: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%tile, %root : !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%iter_tile: !waveamdmachine.reg<vgpr, 1>,
+       %tok: !waveamdmachine.mem.token):
+    %used = waveamdmachine.v_add_f32 %iter_tile, %seed
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %unused0, %read0 = waveamdmachine.ds_load_b32 %addr after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %unused1, %read1 = waveamdmachine.ds_load_b32 %addr after %read0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %unused2, %read2 = waveamdmachine.ds_load_b32 %addr after %read1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next = waveamdmachine.v_rcp_f32 %used
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next, %read2 : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @prefetch_loop_carried_compute
+// IR: ^bb0
+// IR-NEXT: [[USED:%.*]] = waveamdmachine.v_add_f32
+// IR-NEXT: [[NEXT:%.*]] = waveamdmachine.v_rcp_f32 [[USED]]
+// IR-COUNT-3: waveamdmachine.ds_load_b32
+// IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT]],
+// DIAG: waveamd-machine-schedule region func=prefetch_loop_carried_compute index=0
+// DIAG-SAME: action=apply reason=recurrence_model
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @prefetch_structural_loop_carry(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %seed0: !waveamdmachine.reg<vgpr, 1>,
+    %seed1: !waveamdmachine.reg<vgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token) {
+  %init = waveamdmachine.tuple_from_elements %seed0, %seed1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init, %root : !waveamdmachine.reg<vgpr, 2>,
+              !waveamdmachine.mem.token) {
+  ^bb0(%tile: !waveamdmachine.reg<vgpr, 2>,
+       %tok: !waveamdmachine.mem.token):
+    %parts:2 = waveamdmachine.tuple_to_elements %tile
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %used0 = waveamdmachine.v_add_u32 %parts#0, %seed0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %used1 = waveamdmachine.v_add_u32 %parts#1, %used0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work0 = waveamdmachine.v_add_u32 %used1, %seed0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work1 = waveamdmachine.v_add_u32 %work0, %seed0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work2 = waveamdmachine.v_add_u32 %work1, %seed0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %work3 = waveamdmachine.v_add_u32 %work2, %seed0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next0, %read = waveamdmachine.ds_load_b32 %addr after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next1 = waveamdmachine.v_add_u32 %work3, %seed1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %packed = waveamdmachine.tuple_from_elements %next0, %next1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%packed, %read : !waveamdmachine.reg<vgpr, 2>,
+                !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token
+  return
+}
+}
+
+// IR-LABEL: func.func @prefetch_structural_loop_carry
+// IR: ^bb0
+// IR-NEXT: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements
+// IR-NEXT: waveamdmachine.v_add_u32 [[PARTS]]#0
+// IR-NEXT: waveamdmachine.v_add_u32 [[PARTS]]#1
+// IR-NEXT: [[NEXT0:%.*]], {{%.*}} = waveamdmachine.ds_load_b32
+// IR-COUNT-5: waveamdmachine.v_add_u32
+// IR-NEXT: [[PACKED:%.*]] = waveamdmachine.tuple_from_elements [[NEXT0]],
+// IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[PACKED]],
+// DIAG: waveamd-machine-schedule region func=prefetch_structural_loop_carry index=1
+// DIAG-SAME: action=apply reason=recurrence_model
+// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
