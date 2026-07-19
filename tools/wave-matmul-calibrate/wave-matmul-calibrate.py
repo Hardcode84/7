@@ -778,6 +778,10 @@ def kernel_wave_size(args: argparse.Namespace) -> int:
     return 32
 
 
+def accumulator_layout(args: argparse.Namespace) -> str:
+    return "wmma" if selected_matrix_intrinsic(args) == "wmma" else "mfma"
+
+
 def div_exact(num: int, den: int, what: str) -> int:
     if den <= 0 or num % den != 0:
         sys.exit(what)
@@ -936,6 +940,8 @@ def run_hw(
         str(args.wave_k_tiles),
         "--wave-size",
         str(kernel_wave_size(args)),
+        "--accumulator-layout",
+        accumulator_layout(args),
         "--input-type",
         args.input_type,
         "--c-type",

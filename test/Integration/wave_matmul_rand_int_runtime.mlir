@@ -7,7 +7,9 @@
 //
 // F16: input_type=f16
 // F16-SAME: input_mode=rand-int
+// F16: output_check: passed mode=strict
 // F16: hw_output_check: passed
 // BF16: input_type=bf16
 // BF16-SAME: input_mode=rand-int
+// BF16: output_check: passed mode=strict
 // BF16: hw_output_check: passed

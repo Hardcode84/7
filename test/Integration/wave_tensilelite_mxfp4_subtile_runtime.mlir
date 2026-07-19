@@ -5,5 +5,6 @@
 //
 // CHECK: example=tensilelite-subtile scale_input=tensilelite
 // CHECK: scale_layout=tensilelite
+// CHECK: output_check: passed mode=strict
 // CHECK: variant: baseline
 // CHECK: hw_output_check: passed

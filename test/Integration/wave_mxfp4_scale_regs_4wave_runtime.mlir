@@ -6,5 +6,6 @@
 // CHECK: bm=2 bn=2 wave_m_tiles=8 wave_n_tiles=8 wave_k_tiles=2 target_waves=1
 // CHECK: input_type=mxfp4 output_type=f16 mxfp4_scale_path=regs
 // CHECK: input_mode=random
+// CHECK: output_check: passed mode=strict
 // CHECK: variant: scheduled
 // CHECK: hw_output_check: passed

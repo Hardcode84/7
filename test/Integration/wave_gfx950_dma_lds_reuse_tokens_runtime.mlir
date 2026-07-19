@@ -6,8 +6,10 @@
 // RUN:   | FileCheck %s --check-prefix=MXFP4
 //
 // F16: input_mode=random
+// F16: output_check: passed mode=strict
 // F16: variant: scheduled
 // F16: hw_output_check: passed
 // MXFP4: input_mode=random
+// MXFP4: output_check: passed mode=strict
 // MXFP4: variant: scheduled
 // MXFP4: hw_output_check: passed

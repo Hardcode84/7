@@ -290,6 +290,11 @@ def check_matmul_wave_size(matmul) -> None:
         matmul.kernel_wave_size(explicit) == 64,
         "explicit gfx950 should use wave64",
     )
+    require(
+        "matmul_explicit_gfx950_wave_size",
+        matmul.accumulator_layout(explicit) == "mfma",
+        "explicit gfx950 should use MFMA accumulator layout",
+    )
     forced = argparse.Namespace(chip="gfx1100", matrix_intrinsic="mfma_gfx950")
     require(
         "matmul_explicit_gfx950_wave_size",
@@ -301,6 +306,11 @@ def check_matmul_wave_size(matmul) -> None:
         "matmul_explicit_gfx950_wave_size",
         matmul.kernel_wave_size(rdna) == 32,
         "gfx1100 auto should use wave32",
+    )
+    require(
+        "matmul_explicit_gfx950_wave_size",
+        matmul.accumulator_layout(rdna) == "wmma",
+        "gfx1100 auto should use WMMA accumulator layout",
     )
     print("matmul_explicit_gfx950_wave_size: ok")
 
@@ -367,6 +377,17 @@ def check_matmul_runner_wave_size(matmul) -> None:
         "matmul_runner_gfx950_wave_size",
         cmd[index + 1] == "64",
         "runner should receive wave64",
+    )
+    require(
+        "matmul_runner_gfx950_wave_size",
+        "--accumulator-layout" in cmd,
+        "missing --accumulator-layout",
+    )
+    index = cmd.index("--accumulator-layout")
+    require(
+        "matmul_runner_gfx950_wave_size",
+        cmd[index + 1] == "mfma",
+        "runner should receive MFMA accumulator layout",
     )
     print("matmul_runner_gfx950_wave_size: ok")
 

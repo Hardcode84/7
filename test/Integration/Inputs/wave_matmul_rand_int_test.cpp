@@ -64,6 +64,43 @@ static void checkCPUReference(InputType type, const char *label) {
   std::printf("rand_int_%s_cpu_reference: ok\n", label);
 }
 
+static void checkCoordinate(const Args &args, int index, int m, int n) {
+  OutputCoordinate coord = getOutputCoordinate(args, index);
+  if (coord.m != m || coord.n != n)
+    fail("fragment output coordinate mismatch");
+}
+
+static void checkOutputCoordinates() {
+  Args args;
+  args.m = 16;
+  args.n = 16;
+  args.bm = 1;
+  args.bn = 1;
+  args.waveMTiles = 1;
+  args.waveNTiles = 1;
+
+  args.accumulatorLayout = AccumulatorLayout::Mfma;
+  args.waveSize = 64;
+  checkCoordinate(args, 0, 0, 0);
+  checkCoordinate(args, 3, 3, 0);
+  checkCoordinate(args, 4, 0, 1);
+  checkCoordinate(args, 64, 4, 0);
+  checkCoordinate(args, 255, 15, 15);
+
+  args.accumulatorLayout = AccumulatorLayout::Wmma;
+  args.waveSize = 32;
+  checkCoordinate(args, 0, 0, 0);
+  checkCoordinate(args, 7, 14, 0);
+  checkCoordinate(args, 8, 0, 1);
+  checkCoordinate(args, 128, 1, 0);
+  checkCoordinate(args, 255, 15, 15);
+
+  args.accumulatorLayout = AccumulatorLayout::Mfma;
+  checkCoordinate(args, 7, 7, 0);
+  checkCoordinate(args, 128, 8, 0);
+  std::printf("fragment_output_coordinates: ok\n");
+}
+
 int main(int argc, char **argv) {
   if (argc == 2) {
     Args args;
@@ -87,5 +124,6 @@ int main(int argc, char **argv) {
   checkType(InputType::BF16, "bf16");
   checkCPUReference(InputType::F16, "f16");
   checkCPUReference(InputType::BF16, "bf16");
+  checkOutputCoordinates();
   return 0;
 }

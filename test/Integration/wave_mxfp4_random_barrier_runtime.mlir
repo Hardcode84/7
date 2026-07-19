@@ -4,5 +4,6 @@
 // RUN:   | FileCheck %s
 //
 // CHECK: input_mode=random
+// CHECK: output_check: passed mode=strict
 // CHECK: variant: scheduled
 // CHECK: hw_output_check: passed

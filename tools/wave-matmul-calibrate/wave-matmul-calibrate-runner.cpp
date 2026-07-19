@@ -23,6 +23,7 @@ namespace {
 enum class CType { F32, F16, BF16 };
 enum class InputType { F16, BF16, MXFP4 };
 enum class KernelABI { Matmul, V9Golden, TLXMXFP };
+enum class AccumulatorLayout { Automatic, Wmma, Mfma };
 enum class ScaleLayout { Canonical, TensileLite };
 
 struct Args {
@@ -40,6 +41,7 @@ struct Args {
   InputType inputType = InputType::F16;
   CType cType = CType::F32;
   KernelABI kernelABI = KernelABI::Matmul;
+  AccumulatorLayout accumulatorLayout = AccumulatorLayout::Automatic;
   int iters = 1000;
   int warmupIters = 10;
   int dynamicLdsBytes = 0;
@@ -72,6 +74,7 @@ static void usage() {
       "  --input-type f16|bf16|mxfp4  input element type (default f16)\n"
       "  --c-type f32|f16|bf16  output element type (default f32)\n"
       "  --kernel-abi matmul|v9-golden|tlx-mxfp  kernel argument ABI\n"
+      "  --accumulator-layout automatic|wmma|mfma\n"
       "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
@@ -166,6 +169,21 @@ static void setKernelABI(Args &a, const char *v) {
   }
   die("bad --kernel-abi; expected matmul, v9-golden, or tlx-mxfp");
 }
+static void setAccumulatorLayout(Args &a, const char *v) {
+  if (std::strcmp(v, "automatic") == 0) {
+    a.accumulatorLayout = AccumulatorLayout::Automatic;
+    return;
+  }
+  if (std::strcmp(v, "wmma") == 0) {
+    a.accumulatorLayout = AccumulatorLayout::Wmma;
+    return;
+  }
+  if (std::strcmp(v, "mfma") == 0) {
+    a.accumulatorLayout = AccumulatorLayout::Mfma;
+    return;
+  }
+  die("bad --accumulator-layout; expected automatic, wmma, or mfma");
+}
 static void setIters(Args &a, const char *v) { a.iters = parseInt(v); }
 static void setWarmup(Args &a, const char *v) { a.warmupIters = parseInt(v); }
 static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
@@ -186,6 +204,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--input-type", setInputType},
     {"--c-type", setCType},
     {"--kernel-abi", setKernelABI},
+    {"--accumulator-layout", setAccumulatorLayout},
     {"--scale-layout", setScaleLayout},
     {"--dynamic-lds", setDynamicLds},
     {"--iters", setIters},
@@ -449,8 +468,31 @@ static double roundExpectedOutput(double value, CType type) {
   return value;
 }
 
-static double computeExpectedOutputSlot(const HostInputs &inputs, const Args &a,
-                                        int index) {
+struct OutputCoordinate {
+  int m;
+  int n;
+};
+
+static AccumulatorLayout getEffectiveAccumulatorLayout(const Args &a) {
+  if (a.accumulatorLayout != AccumulatorLayout::Automatic)
+    return a.accumulatorLayout;
+  return a.waveSize == 64 ? AccumulatorLayout::Mfma : AccumulatorLayout::Wmma;
+}
+
+static int getAccumulatorRow(const Args &a, int lane, int laneValue,
+                             int valuesPerLane) {
+  // WMMA interleaves row parity; MFMA assigns contiguous rows per lane group.
+  if (getEffectiveAccumulatorLayout(a) == AccumulatorLayout::Wmma) {
+    if (a.waveSize != 32)
+      die("WMMA output check requires wave32");
+    return (lane / 16) + 2 * laneValue;
+  }
+  if (a.waveSize != 32 && a.waveSize != 64)
+    die("MFMA output check requires wave32 or wave64");
+  return (lane / 16) * valuesPerLane + laneValue;
+}
+
+static OutputCoordinate getOutputCoordinate(const Args &a, int index) {
   int tilesPerWave = a.waveMTiles * a.waveNTiles;
   int wavesPerWorkgroup = a.bm * a.bn;
   int ctaElems = wavesPerWorkgroup * tilesPerWave * 256;
@@ -466,13 +508,22 @@ static double computeExpectedOutputSlot(const HostInputs &inputs, const Args &a,
   int slot = waveRem % 256;
   int mWave = waveId / a.bn;
   int nWave = waveId % a.bn;
+  int valuesPerLane = divExact(256, a.waveSize, "bad output wave size");
+  int lane = slot / valuesPerLane;
+  int laneValue = slot % valuesPerLane;
+  int mLane = getAccumulatorRow(a, lane, laneValue, valuesPerLane);
   int mTile =
       wgM * a.bm * a.waveMTiles + mWave * a.waveMTiles + tileId / a.waveNTiles;
   int nTile =
       wgN * a.bn * a.waveNTiles + nWave * a.waveNTiles + tileId % a.waveNTiles;
-  int m = mTile * 16 + slot / 16;
-  int n = nTile * 16 + slot % 16;
-  return roundExpectedOutput(computeExpectedElement(inputs, a, m, n), a.cType);
+  return {mTile * 16 + mLane, nTile * 16 + lane % 16};
+}
+
+static double computeExpectedOutputSlot(const HostInputs &inputs, const Args &a,
+                                        int index) {
+  OutputCoordinate coord = getOutputCoordinate(a, index);
+  return roundExpectedOutput(
+      computeExpectedElement(inputs, a, coord.m, coord.n), a.cType);
 }
 
 template <typename ReadFn>
@@ -483,18 +534,10 @@ static void validateOutput(int elements, const Args &a,
   double worst = 0.0;
   int worstIdx = 0;
   for (int tileBase = 0; tileBase < elements; tileBase += 256) {
-    std::vector<double> actual(256);
-    std::vector<double> expected(256);
     for (int slot = 0; slot < 256; ++slot) {
       int index = tileBase + slot;
-      actual[slot] = static_cast<double>(readValue(index));
-      expected[slot] = computeExpectedOutputSlot(inputs, a, index);
-    }
-    std::sort(actual.begin(), actual.end());
-    std::sort(expected.begin(), expected.end());
-    for (int slot = 0; slot < 256; ++slot) {
-      double got = actual[slot];
-      double exp = expected[slot];
+      double got = static_cast<double>(readValue(index));
+      double exp = computeExpectedOutputSlot(inputs, a, index);
       double diff = std::fabs(got - exp);
       if (diff > worst) {
         worst = diff;
@@ -510,8 +553,8 @@ static void validateOutput(int elements, const Args &a,
       }
     }
   }
-  std::printf("output_check: passed max_abs_diff=%.6f index=%d\n", worst,
-              worstIdx);
+  std::printf("output_check: passed mode=strict max_abs_diff=%.6f index=%d\n",
+              worst, worstIdx);
 }
 
 template <typename ReadFn>
@@ -542,8 +585,8 @@ static void validateRowMajorOutput(int elements, const Args &a,
       }
     }
   }
-  std::printf("output_check: passed max_abs_diff=%.6f index=%d\n", worst,
-              worstIdx);
+  std::printf("output_check: passed mode=strict max_abs_diff=%.6f index=%d\n",
+              worst, worstIdx);
 }
 
 static const char *getCTypeName(CType type) {
