@@ -153,6 +153,93 @@ static void bindLoopBodyArgs(WaveAMDMachineSelector &S, scf::ForOp op,
         loopBody.getArgument(firstBaseArg + indexed.index());
 }
 
+static Value updateStridedPointerBase(WaveAMDMachineSelector &S, Location loc,
+                                      Value pointerBase, Value base) {
+  if (!pointerBase)
+    return base;
+  return waveamdmachine::UpdateBufferRsrcBaseOp::create(
+             S.builder, loc, pointerBase.getType(), pointerBase, base)
+      .getResult();
+}
+
+static void
+materializeBodyPointerBases(WaveAMDMachineSelector &S, Location loc,
+                            SmallVectorImpl<StridedBaseCarry> &groups) {
+  for (StridedBaseCarry &group : groups)
+    group.bodyPointerBase =
+        updateStridedPointerBase(S, loc, group.pointerBase, group.bodyBase);
+}
+
+static void
+materializeBodyNextBases(WaveAMDMachineSelector &S, Location loc,
+                         SmallVectorImpl<StridedBaseCarry> &groups) {
+  for (StridedBaseCarry &group : groups)
+    group.bodyNextBase = advanceStridedBase(S, loc, group.bodyBase, group);
+}
+
+static void
+delayBodyNextBasesAfterPointerUses(WaveAMDMachineSelector &S, Location loc,
+                                   SmallVectorImpl<StridedBaseCarry> &groups) {
+  for (StridedBaseCarry &group : groups) {
+    SmallVector<Value, 8> dependencies;
+    for (Operation &candidate : *group.bodyPointerBase.getParentBlock()) {
+      if (!llvm::is_contained(candidate.getOperands(), group.bodyPointerBase))
+        continue;
+      for (Value result : candidate.getResults())
+        if (isa<waveamdmachine::MemTokenType>(result.getType()))
+          dependencies.push_back(result);
+    }
+    if (dependencies.empty())
+      continue;
+
+    // Tuple updates alias storage; old descriptor must outlive its DMA issues.
+    Value retained = waveamdmachine::RegAfterOp::create(
+                         S.builder, loc, group.bodyBase.getType(),
+                         group.bodyBase, dependencies)
+                         .getResult();
+    Value nextBase = advanceStridedBase(S, loc, retained, group);
+    Value nextPointerBase =
+        updateStridedPointerBase(S, loc, group.pointerBase, nextBase);
+    assert(group.bodyNextPointerBase &&
+           "strided base group needs advanced descriptor");
+    group.bodyNextPointerBase.replaceAllUsesWith(nextPointerBase);
+    group.bodyNextBase = nextBase;
+    group.bodyNextPointerBase = nextPointerBase;
+  }
+}
+
+static void bindAdvancedYieldPointers(WaveAMDMachineSelector &S, scf::ForOp op,
+                                      scf::YieldOp yield,
+                                      ArrayRef<CarrySnapshot> snapshots,
+                                      SmallVectorImpl<StridedBaseCarry> &groups,
+                                      bool preselect) {
+  for (auto [idx, snap] : llvm::enumerate(snapshots)) {
+    if (snap.kind != CarrySnapshot::Kind::Pointer || !hasStride(snap.stride) ||
+        snap.strideInOffset)
+      continue;
+    Value yielded = yield.getOperand(idx);
+    if (!yielded.getDefiningOp<PtrAddOp>())
+      continue;
+    assert(snap.stridedBaseGroup != noStridedBaseGroup &&
+           "global strided carry must have base group");
+    StridedBaseCarry &group = groups[snap.stridedBaseGroup];
+    if (!group.bodyNextPointerBase)
+      group.bodyNextPointerBase = updateStridedPointerBase(
+          S, op.getLoc(), group.pointerBase, group.bodyNextBase);
+    Value iterArg = op.getRegionIterArgs()[idx];
+    auto offset = S.pointerIndexOffsets.find(iterArg);
+    assert(offset != S.pointerIndexOffsets.end() &&
+           "strided pointer carry must have offset");
+    S.pointerBases[yielded] = group.bodyNextPointerBase;
+    S.pointerGlobalBases[yielded] = group.bodyNextBase;
+    S.pointerIndexOffsets[yielded] = offset->second;
+    S.pointerBuffers[yielded] = snap.isBuffer;
+    S.values[yielded] = group.bodyNextPointerBase;
+    if (preselect)
+      S.preselectedPointerAdds.insert(yielded);
+  }
+}
+
 // Recursively select every non-terminator op in the scf.for body. The
 // original scf.yield is consumed by the caller.
 static LogicalResult selectScfBody(WaveAMDMachineSelector &S, scf::ForOp op) {
@@ -213,9 +300,7 @@ static LogicalResult collectYieldCarries(WaveAMDMachineSelector &S,
   return success();
 }
 
-static Value resultPointerBase(Operation *loop,
-                               ArrayRef<CarrySnapshot> snapshots,
-                               ArrayRef<StridedBaseCarry> groups,
+static Value resultPointerBase(ArrayRef<StridedBaseCarry> groups,
                                const CarrySnapshot &snap) {
   if (!hasStride(snap.stride) || snap.strideInOffset)
     return snap.base;
@@ -223,6 +308,12 @@ static Value resultPointerBase(Operation *loop,
          "global strided carry must have base group");
   assert(static_cast<size_t>(snap.stridedBaseGroup) < groups.size() &&
          "global strided carry group out of range");
+  return groups[snap.stridedBaseGroup].resultPointerBase;
+}
+
+static Value resultGlobalBase(Operation *loop,
+                              ArrayRef<CarrySnapshot> snapshots,
+                              const CarrySnapshot &snap) {
   unsigned firstBaseResult = 1 + snapshots.size();
   return loop->getResult(firstBaseResult +
                          static_cast<unsigned>(snap.stridedBaseGroup));
@@ -233,10 +324,10 @@ static void bindPointerLoopResult(WaveAMDMachineSelector &S, Value scfResult,
                                   ArrayRef<CarrySnapshot> snapshots,
                                   ArrayRef<StridedBaseCarry> groups,
                                   const CarrySnapshot &snap) {
-  Value base = resultPointerBase(loop, snapshots, groups, snap);
+  Value base = resultPointerBase(groups, snap);
   S.pointerBases[scfResult] = base;
   if (hasStride(snap.stride) && !snap.strideInOffset)
-    S.pointerGlobalBases[scfResult] = base;
+    S.pointerGlobalBases[scfResult] = resultGlobalBase(loop, snapshots, snap);
   else if (snap.globalBase)
     S.pointerGlobalBases[scfResult] = snap.globalBase;
   S.values[wmResult] = wmResult;
@@ -264,6 +355,18 @@ static void bindLoopResults(WaveAMDMachineSelector &S, scf::ForOp op,
       continue;
     }
     S.values[scfResult] = wmResult;
+  }
+}
+
+static void
+materializeResultPointerBases(WaveAMDMachineSelector &S, Operation *loop,
+                              ArrayRef<CarrySnapshot> snapshots,
+                              SmallVectorImpl<StridedBaseCarry> &groups) {
+  unsigned firstBaseResult = 1 + snapshots.size();
+  for (auto [idx, group] : llvm::enumerate(groups)) {
+    Value base = loop->getResult(firstBaseResult + idx);
+    group.resultPointerBase =
+        updateStridedPointerBase(S, loop->getLoc(), group.pointerBase, base);
   }
 }
 
@@ -323,18 +426,17 @@ static void rebindStridedPointerCarries(WaveAMDMachineSelector &S,
     }
     assert(snap.stridedBaseGroup != noStridedBaseGroup &&
            "global strided carry must have base group");
-    Value bodyBase = groups[snap.stridedBaseGroup].bodyBase;
-    S.pointerBases[scfArg] = bodyBase;
+    const StridedBaseCarry &group = groups[snap.stridedBaseGroup];
+    S.pointerBases[scfArg] = group.bodyPointerBase;
     if (snap.globalBase)
-      S.pointerGlobalBases[scfArg] = bodyBase;
+      S.pointerGlobalBases[scfArg] = group.bodyBase;
   }
 }
 
-static void collectStridedBaseCarries(WaveAMDMachineSelector &S, Location loc,
-                                      ArrayRef<StridedBaseCarry> groups,
+static void collectStridedBaseCarries(ArrayRef<StridedBaseCarry> groups,
                                       SmallVectorImpl<Value> &out) {
   for (const StridedBaseCarry &group : groups)
-    out.push_back(advanceStridedBase(S, loc, group.bodyBase, group));
+    out.push_back(group.bodyNextBase);
 }
 
 static bool needsWideSignedScalarCmp(WaveAMDMachineSelector &S, Value value) {
@@ -411,9 +513,10 @@ static bool isSGPR1Value(Value value) {
          regType.getWidth() == 1;
 }
 
-static bool isPinnedRegValue(Value value) {
+static bool needsLoopInitCopy(Value value) {
   auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
-  return regType && regType.getIndex() >= 0;
+  return regType && (regType.getIndex() >= 0 ||
+                     value.getDefiningOp<waveamdmachine::ArgOp>());
 }
 
 static waveamdmachine::RegType getVirtualRegType(WaveAMDMachineSelector &S,
@@ -425,7 +528,7 @@ static waveamdmachine::RegType getVirtualRegType(WaveAMDMachineSelector &S,
 static FailureOr<Value> copyPinnedLoopInit(WaveAMDMachineSelector &S,
                                            scf::ForOp op, Value value) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
-  if (!type || !isPinnedRegValue(value))
+  if (!type || !needsLoopInitCopy(value))
     return value;
 
   Location loc = op.getLoc();
@@ -632,19 +735,27 @@ static FailureOr<Value> appendDmaIssueSkipInit(WaveAMDMachineSelector &S,
 static FailureOr<Value>
 selectLoopBody(WaveAMDMachineSelector &S, scf::ForOp op, Block &loopBody,
                ArrayRef<CarrySnapshot> snapshots,
-               ArrayRef<StridedBaseCarry> stridedBaseGroups,
+               SmallVectorImpl<StridedBaseCarry> &stridedBaseGroups,
                Value skipCondition) {
   S.builder.setInsertionPointToStart(&loopBody);
   Value savedSkipCondition = S.dmaIssueSkipCondition;
   if (skipCondition)
     S.dmaIssueSkipCondition = loopBody.getArguments().back();
-  // Strided pointers: globals carry bases; buffers use IV-derived soffset.
+  materializeBodyPointerBases(S, op.getLoc(), stridedBaseGroups);
+  materializeBodyNextBases(S, op.getLoc(), stridedBaseGroups);
+  // DMA buffers and globals advance bases; other buffers use soffset.
   rebindStridedPointerCarries(S, op, loopBody, snapshots, stridedBaseGroups);
+  scf::YieldOp yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
+  bindAdvancedYieldPointers(S, op, yield, snapshots, stridedBaseGroups,
+                            /*preselect=*/true);
   LogicalResult result = selectScfBody(S, op);
   Value bodySkipCondition = S.dmaIssueSkipCondition;
   S.dmaIssueSkipCondition = savedSkipCondition;
   if (failed(result))
     return failure();
+  delayBodyNextBasesAfterPointerUses(S, op.getLoc(), stridedBaseGroups);
+  bindAdvancedYieldPointers(S, op, yield, snapshots, stridedBaseGroups,
+                            /*preselect=*/false);
   return bodySkipCondition;
 }
 
@@ -706,13 +817,14 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op) {
   auto yield = cast<scf::YieldOp>(op.getBody()->getTerminator());
   if (failed(collectYieldCarries(S, yield, snapshots, carryOperands)))
     return failure();
-  collectStridedBaseCarries(S, loc, stridedBaseGroups, carryOperands);
+  collectStridedBaseCarries(stridedBaseGroups, carryOperands);
   appendDmaIssueSkipCarry(*skipCondition, *bodySkipCondition, carryOperands);
 
   Value backCond = createLoopLtCmp(S, loc, nextIv, upper);
   waveamdmachine::ContinueIfOp::create(S.builder, loc, backCond, carryOperands);
 
   S.builder.setInsertionPointAfter(loop);
+  materializeResultPointerBases(S, loop, snapshots, stridedBaseGroups);
   bindLoopResults(S, op, loop, snapshots, stridedBaseGroups);
   S.eraseIfTopLevel(op);
   return success();

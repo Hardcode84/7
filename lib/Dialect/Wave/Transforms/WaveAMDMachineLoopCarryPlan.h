@@ -29,7 +29,12 @@ struct StrideBytes {
 struct StridedBaseCarry {
   StrideBytes stride;
   Value base;
+  Value pointerBase;
   Value bodyBase;
+  Value bodyPointerBase;
+  Value bodyNextBase;
+  Value bodyNextPointerBase;
+  Value resultPointerBase;
   Value byteStride;
 };
 

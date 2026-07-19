@@ -9,6 +9,7 @@
 #include "WaveAMDMachineLoopCarryPlan.h"
 
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
 using namespace mlir;
@@ -556,9 +557,10 @@ static FailureOr<Value> materializeDynamicStride(WaveAMDMachineSelector &S,
 static FailureOr<int64_t>
 getStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
                     SmallVectorImpl<StridedBaseCarry> &groups, Value base,
-                    const StrideBytes &stride) {
+                    Value pointerBase, const StrideBytes &stride) {
   for (auto [idx, group] : llvm::enumerate(groups))
-    if (group.base == base && sameStride(group.stride, stride))
+    if (group.base == base && group.pointerBase == pointerBase &&
+        sameStride(group.stride, stride))
       return static_cast<int64_t>(idx);
   Value byteStride;
   if (!isImmediateStride(stride)) {
@@ -567,7 +569,8 @@ getStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
       return failure();
     byteStride = *materialized;
   }
-  groups.push_back(StridedBaseCarry{stride, base, {}, byteStride});
+  groups.push_back(StridedBaseCarry{
+      stride, base, pointerBase, {}, {}, {}, {}, {}, byteStride});
   return static_cast<int64_t>(groups.size() - 1);
 }
 
@@ -580,14 +583,42 @@ static StrideBytes selectStridedCarry(WaveAMDMachineSelector &S, scf::ForOp op,
   return std::move(*stride);
 }
 
+static bool reachesDmaLoadLds(Value pointer) {
+  SmallVector<Value, 8> pending = {pointer};
+  llvm::DenseSet<Value> visited;
+  while (!pending.empty()) {
+    Value current = pending.pop_back_val();
+    if (!visited.insert(current).second)
+      continue;
+    for (Operation *user : current.getUsers()) {
+      if (auto dma = dyn_cast<waveamd::DmaLoadLdsOp>(user)) {
+        if (dma.getSource() == current)
+          return true;
+        continue;
+      }
+      if (auto add = dyn_cast<PtrAddOp>(user)) {
+        if (add.getBase() == current)
+          pending.push_back(add.getResult());
+        continue;
+      }
+      if (auto cast = dyn_cast<PtrCastOp>(user))
+        if (cast.getSource() == current)
+          pending.push_back(cast.getResult());
+    }
+  }
+  return false;
+}
+
 static LogicalResult
 attachStridedBaseGroup(WaveAMDMachineSelector &S, scf::ForOp op,
                        SmallVectorImpl<StridedBaseCarry> &groups,
                        CarrySnapshot &snap) {
   if (!hasStride(snap.stride) || snap.strideInOffset)
     return success();
+  Value base = snap.isBuffer ? snap.globalBase : snap.base;
+  Value pointerBase = snap.isBuffer ? snap.base : Value{};
   FailureOr<int64_t> group =
-      getStridedBaseGroup(S, op, groups, snap.base, snap.stride);
+      getStridedBaseGroup(S, op, groups, base, pointerBase, snap.stride);
   if (failed(group))
     return failure();
   snap.stridedBaseGroup = *group;
@@ -606,7 +637,10 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
         "scf.for pointer iter arg has no WaveAMDMachine sidecar");
   TermKind initKind = classifyPointerOffset(S, offsetIt->second);
   bool isBuffer = S.pointerBuffers.lookup(initArg);
-  bool strideInOffset = isBuffer || S.isSharedPointer(initArg.getType());
+  bool dmaBufferBaseCarry = isBuffer && S.pointerGlobalBases.lookup(initArg) &&
+                            reachesDmaLoadLds(op.getRegionIterArgs()[idx]);
+  bool strideInOffset =
+      S.isSharedPointer(initArg.getType()) || (isBuffer && !dmaBufferBaseCarry);
   StrideBytes stride = selectStridedCarry(S, op, idx, initArg, strideInOffset);
   TermKind yieldKind = hasStride(stride)
                            ? initKind

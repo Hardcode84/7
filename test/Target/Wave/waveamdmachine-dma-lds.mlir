@@ -416,15 +416,15 @@ func.func @buffer_dma_lds_uniform_dest_sadd_m0(
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_bounded_source_soffset
+// SELECT-DAG: %[[DESC:.*]] = waveamdmachine.make_buffer_rsrc
 // SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // SELECT-DAG: %[[WI:.*]] = waveamdmachine.v_workitem_id_x
 // SELECT-DAG: %[[SOFFSET:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
 // SELECT-DAG: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[WI]],
-// SELECT: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[SOFFSET]], %[[VOFFSET]]
-// SELECT: waveamdmachine.buffer_load_lds_b128 %[[ADDR]], {{.*}}, %{{.*}},
+// SELECT: waveamdmachine.buffer_load_lds_b128 %[[VOFFSET]], %[[DESC]], %[[SOFFSET]],
 
 // ASM-LABEL: buffer_dma_lds_bounded_source_soffset:
-// ASM: buffer_load_dwordx4 {{.*}}, 0 offen lds
+// ASM: buffer_load_dwordx4 {{.*}}, s{{[0-9]+}} offen lds
 func.func @buffer_dma_lds_bounded_source_soffset(
     %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
@@ -448,6 +448,7 @@ func.func @buffer_dma_lds_bounded_source_soffset(
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_lane_terms_before_uniform
+// SELECT-DAG: %[[DESC:.*]] = waveamdmachine.make_buffer_rsrc
 // SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // SELECT-DAG: %[[USCALED:.*]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
 // SELECT-DAG: %[[X4:.*]] = waveamdmachine.v_lshlrev_b32
@@ -455,11 +456,10 @@ func.func @buffer_dma_lds_bounded_source_soffset(
 // SELECT-DAG: %[[Z4:.*]] = waveamdmachine.v_lshlrev_b32
 // SELECT-DAG: %[[XY:.*]] = waveamdmachine.v_add_u32 %[[X4]], %[[Y4]]
 // SELECT-DAG: %[[XYZ:.*]] = waveamdmachine.v_add_u32 %[[XY]], %[[Z4]]
-// SELECT: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[USCALED]], %[[XYZ]]
-// SELECT: waveamdmachine.buffer_load_lds_b128 %[[ADDR]], {{.*}}, %{{.*}},
+// SELECT: waveamdmachine.buffer_load_lds_b128 %[[XYZ]], %[[DESC]], %[[USCALED]],
 
 // ASM-LABEL: buffer_dma_lds_lane_terms_before_uniform:
-// ASM: buffer_load_dwordx4 {{.*}}, 0 offen lds
+// ASM: buffer_load_dwordx4 {{.*}}, s{{[0-9]+}} offen lds
 func.func @buffer_dma_lds_lane_terms_before_uniform(
     %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {
@@ -494,14 +494,15 @@ func.func @buffer_dma_lds_lane_terms_before_uniform(
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_source_const_soffset
+// SELECT-DAG: %[[DESC:.*]] = waveamdmachine.make_buffer_rsrc
 // SELECT-DAG: %[[WI:.*]] = waveamdmachine.v_workitem_id_x
 // SELECT-DAG: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[WI]],
 // SELECT-DAG: %[[SOIMM:.*]] = waveamdmachine.imm 2048
-// SELECT: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[SOIMM]], %[[VOFFSET]]
-// SELECT: waveamdmachine.buffer_load_lds_b128 %[[ADDR]], {{.*}}, %{{.*}},
+// SELECT: %[[SOFFSET:.*]] = waveamdmachine.s_mov_b32_value %[[SOIMM]]
+// SELECT: waveamdmachine.buffer_load_lds_b128 %[[VOFFSET]], %[[DESC]], %[[SOFFSET]],
 
 // ASM-LABEL: buffer_dma_lds_source_const_soffset:
-// ASM: buffer_load_dwordx4 {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen lds
+// ASM: buffer_load_dwordx4 {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], s{{[0-9]+}} offen lds
 func.func @buffer_dma_lds_source_const_soffset(
     %in: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.lds_size = 512 : i64} {

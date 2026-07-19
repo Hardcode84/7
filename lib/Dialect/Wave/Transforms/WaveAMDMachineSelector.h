@@ -31,6 +31,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -296,6 +297,7 @@ public:
   DenseMap<Value, PointerOffset> pointerIndexOffsets;
   DenseMap<Value, PointerOffset> indexOffsets;
   DenseMap<Value, bool> pointerBuffers;
+  DenseSet<Value> preselectedPointerAdds;
   DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
       slotFitsU32Cache;
   PointerOffset lastDmaDstOffset;

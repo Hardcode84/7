@@ -790,6 +790,14 @@ LogicalResult CopyTupleOp::verify() {
   return success();
 }
 
+LogicalResult RegAfterOp::verify() {
+  if (getDependencies().empty())
+    return emitOpError("requires at least one dependency");
+  if (getSource().getType() != getResult().getType())
+    return emitOpError("source and result types must match");
+  return success();
+}
+
 LogicalResult UpdateTupleOp::verify() {
   auto baseType = cast<RegType>(getBase().getType());
   auto resultType = cast<RegType>(getResult().getType());

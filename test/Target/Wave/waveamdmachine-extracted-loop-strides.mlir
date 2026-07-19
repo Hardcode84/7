@@ -35,8 +35,9 @@ func.func @cyclic_scalar_offset_carry_constant_init(
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
 // CHECK-NOT: waveamdmachine.v_add_u32
-// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BASE]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
+// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[COND]]
 // CHECK-SAME: %[[NEXT]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -67,8 +68,9 @@ func.func @extracted_strided_kloop(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
 // CHECK-NOT: waveamdmachine.v_add_u32
-// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BASE]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
+// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[COND]]
 // CHECK-SAME: %[[NEXT]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -104,8 +106,9 @@ func.func @extracted_scaled_nested_binding(
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
 // CHECK-NOT: waveamdmachine.v_add_u32
-// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BASE]], %[[STRIDE]]
-// CHECK-NEXT: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
+// CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %[[STRIDE]]
+// CHECK: %[[COND:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[COND]]
 // CHECK-SAME: %[[NEXT]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {

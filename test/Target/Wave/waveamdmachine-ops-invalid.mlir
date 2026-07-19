@@ -763,3 +763,25 @@ func.func @dma_issue_delay_overlap_exceeds_cycles(
         -> !waveamdmachine.m0
   return
 }
+
+// -----
+
+func.func @reg_after_without_dependency(
+    %source: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{requires at least one dependency}}
+  %result = "waveamdmachine.reg_after"(%source)
+      : (!waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<sgpr, 2>
+  return
+}
+
+// -----
+
+func.func @reg_after_type_mismatch(
+    %source: !waveamdmachine.reg<sgpr, 2>,
+    %dep: !waveamdmachine.mem.token) {
+  // expected-error @below {{source and result types must match}}
+  %result = "waveamdmachine.reg_after"(%source, %dep)
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.reg<sgpr, 4>
+  return
+}

@@ -68,7 +68,8 @@ func.func @loop_static_zero_trip() attributes {wave.kernel} {
 // SELECT: %[[LOWER:.+]] = waveamdmachine.arg
 // SELECT: %[[UPPER:.+]] = waveamdmachine.arg
 // SELECT-NOT: waveamdmachine.s_cmp_lt_i32 %[[LOWER]], %[[UPPER]]
-// SELECT: waveamdmachine.uniform_loop carries(%[[LOWER]]
+// SELECT: %[[INIT:.+]] = waveamdmachine.s_mov_b32_value %[[LOWER]]
+// SELECT: waveamdmachine.uniform_loop carries(%[[INIT]]
 // SELECT-NOT: uniform_loop if %
 func.func @loop_range_nonzero_trip(%lo_raw: i32, %hi_raw: i32)
     attributes {wave.kernel} {

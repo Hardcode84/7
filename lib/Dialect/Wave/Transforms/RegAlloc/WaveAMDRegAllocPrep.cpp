@@ -72,6 +72,15 @@ static bool allResultsDead(Operation *op) {
                       [](Value result) { return result.use_empty(); });
 }
 
+static void eraseRegAfterOps(func::FuncOp func) {
+  SmallVector<waveamdmachine::RegAfterOp> ops;
+  func.walk([&](waveamdmachine::RegAfterOp op) { ops.push_back(op); });
+  for (waveamdmachine::RegAfterOp op : ops) {
+    op.getResult().replaceAllUsesWith(op.getSource());
+    op.erase();
+  }
+}
+
 static bool isDeadCheapRegOp(Operation *op) {
   return op && op->getNumResults() != 0 && allResultsDead(op) &&
          wave::regalloc::isCheapVGPRPressureReliefExpr(op);
@@ -1108,6 +1117,7 @@ static LogicalResult materializeExecIfYieldCopies(func::FuncOp func) {
 } // namespace
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  eraseRegAfterOps(func);
   if (failed(materializeUniformIfYieldCopies(func)))
     return failure();
   if (failed(materializeExecIfYieldCopies(func)))

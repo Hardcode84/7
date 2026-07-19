@@ -6957,6 +6957,10 @@ static FailureOr<PtrAddBase> lookupPtrAddBase(WaveAMDMachineSelector &S,
 }
 
 LogicalResult WaveAMDMachineSelector::selectPtrAdd(PtrAddOp op) {
+  if (preselectedPointerAdds.erase(op.getResult())) {
+    eraseIfTopLevel(op);
+    return success();
+  }
   FailureOr<PtrAddBase> base = lookupPtrAddBase(*this, op);
   if (failed(base))
     return failure();
@@ -7639,7 +7643,7 @@ planDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
-  if (isBuffer && (plan->soffsetExpr || plan->fullAddressRemainderExpr))
+  if (isBuffer && plan->fullAddressRemainderExpr)
     if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
                                                   /*includeInstOffset=*/false)))
       return failure();
@@ -7788,6 +7792,9 @@ static FailureOr<DmaSourceAddress> materializeBufferDmaSourceAddress(
   FailureOr<AddressPlan> plan =
       planDmaSourceAddress(S, op, source.offset, /*isBuffer=*/true, spec);
   if (failed(plan))
+    return failure();
+  if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
+                                                /*includeInstOffset=*/false)))
     return failure();
   return materializeDmaSourceAddress(S, op, source.base, *plan,
                                      /*isBuffer=*/true, spec);

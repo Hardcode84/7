@@ -558,6 +558,11 @@ private:
            llvm::zip_equal(update.getUpdates(), update.getOffsets()))
         addAliasEdge(update.getResult(), value,
                      cast<IntegerAttr>(offset).getInt());
+      return;
+    }
+    if (typeId == TypeID::get<waveamdmachine::RegAfterOp>()) {
+      auto after = cast<waveamdmachine::RegAfterOp>(op);
+      addAliasEdge(after.getResult(), after.getSource(), 0);
     }
   }
 

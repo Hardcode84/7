@@ -2,6 +2,18 @@
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=SCAN
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  // PREP-LABEL: func.func @erase_reg_after(
+  // PREP-NOT: waveamdmachine.reg_after
+  // PREP: return [[SOURCE:%[^ :]+]]
+  func.func @erase_reg_after(
+      %source: !waveamdmachine.reg<sgpr, 2>,
+      %dep: !waveamdmachine.mem.token) -> !waveamdmachine.reg<sgpr, 2> {
+    %result = waveamdmachine.reg_after %source after %dep
+        : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
+          -> !waveamdmachine.reg<sgpr, 2>
+    return %result : !waveamdmachine.reg<sgpr, 2>
+  }
+
   // PREP-LABEL: func.func @aligned_width2_halves(
   // PREP-NOT: waveamdmachine.copy_tuple
   // PREP: return

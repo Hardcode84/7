@@ -785,6 +785,18 @@ def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_RegAfterOp : WaveAMDMachine_Op<"reg_after",
+    [Pure, WaveAMDMachine_TupleAlias, WaveAMDMachine_NoMachineInst,
+     WaveAMDMachine_NoAsmEmission]> {
+  let summary = "retain a GPR value until memory dependencies issue";
+  let arguments = (ins WaveAMDMachine_GPR:$source,
+                       Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let results = (outs WaveAMDMachine_GPR:$result);
+  let assemblyFormat =
+      "$source `after` $dependencies attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def WaveAMDMachine_LabelOp : WaveAMDMachine_Op<"label"> {
   let summary = "assembly label";
   let arguments = (ins StrAttr:$name);

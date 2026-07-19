@@ -47,8 +47,9 @@ func.func @strided_kloop(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 // CHECK: global_load_tuple_b32 %[[V0]], %[[B]]
 // CHECK: global_load_tuple_b32 %[[V1]], %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32
-// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[B]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
+// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[BC]]
 // CHECK-SAME: %[[NB]]
 
@@ -59,9 +60,11 @@ func.func @strided_kloop(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 // CHECK-NOT: waveamdmachine.s_lshl_b32
 // CHECK: global_load_tuple_b32 %[[AV]], %[[AB]]
 // CHECK: global_load_tuple_b32 %[[BV]], %[[BB]]
-// CHECK: %[[AN:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[AB]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[BN:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BB]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[BC2:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[ARETAINED:.*]] = waveamdmachine.reg_after %[[AB]] after
+// CHECK: %[[AN:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[ARETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[BRETAINED:.*]] = waveamdmachine.reg_after %[[BB]] after
+// CHECK-NEXT: %[[BN:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[BRETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[BC2:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[BC2]]
 // CHECK-SAME: %[[AN]]
 // CHECK-SAME: %[[BN]]
@@ -118,8 +121,9 @@ func.func @strided_two_base_kloop(%a: !wave.ptr<#wave.global, f16>,
 // CHECK-NOT: waveamdmachine.s_lshl_b32
 // CHECK: global_load_tuple_b32 %[[V]], %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32
-// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[B]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
+// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[BC]]
 // CHECK-SAME: %[[NB]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -159,8 +163,9 @@ func.func @strided_non_normalized_kloop(%a: !wave.ptr<#wave.global, f16>,
 // CHECK: global_load_tuple_b32 %[[V0]], %[[B]]
 // CHECK: global_load_tuple_b32 %[[V1]], %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32
-// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[B]], %[[STRIDE]]
-// CHECK-NEXT: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
+// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %[[STRIDE]]
+// CHECK: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[BC]]
 // CHECK-SAME: %[[NB]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -212,8 +217,9 @@ func.func @strided_dynamic_uniform_kloop(%a: !wave.ptr<#wave.global, f16>,
 // CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK: global_load_tuple_b32 %[[V]], %[[B]]
-// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[B]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
-// CHECK-NEXT: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
+// CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
+// CHECK: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[BC]]
 // CHECK-SAME: %[[NB]]
 // CHECK: global_load_tuple_b32 %[[LOOP]]#1, %[[LOOP]]#2
