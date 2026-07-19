@@ -1,9 +1,9 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-prepare-regalloc,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
 // RUN:   | FileCheck %s --check-prefix=ALLOC
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-prepare-regalloc,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-prepare-regalloc,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx90a -filetype=obj -o /dev/null
 
@@ -44,6 +44,67 @@ func.func @uniform_if_branch_storage_reuse()
       : (!waveamdmachine.reg<vgpr, 64>)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 63>)
   waveamdmachine.v_cmpx_eq_u32 %parts#0, %parts#0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @uniform_if_sibling_loop_invariant_reuse()
+// ALLOC: [[INIT:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, [[REG:[0-9]+]]>
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NOT: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.uniform_loop carries([[INIT]]
+// ALLOC-NOT: waveamdmachine.v_mov_b32_tuple
+// ALLOC: waveamdmachine.yield
+// ALLOC: otherwise
+// ALLOC-NOT: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.uniform_loop carries([[INIT]]
+// ALLOC-NOT: waveamdmachine.v_mov_b32_tuple
+// ALLOC: waveamdmachine.yield
+// ASM-LABEL: uniform_if_sibling_loop_invariant_reuse:
+// ASM-NOT: v_mov_b32
+// ASM: s_cbranch_scc0
+// ASM: v_add_u32
+// ASM: s_branch
+// ASM: v_add_u32
+// ASM-NOT: v_mov_b32
+// ASM: s_endpgm
+func.func @uniform_if_sibling_loop_invariant_reuse()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %init = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    %then = waveamdmachine.uniform_loop carries(%init
+        : !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%arg: !waveamdmachine.reg<vgpr, 1>):
+      %unused = waveamdmachine.v_add_u32 %arg, %arg
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.v_cmpx_eq_u32 %unused, %unused
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%init : !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield %then : !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %else = waveamdmachine.uniform_loop carries(%init
+        : !waveamdmachine.reg<vgpr, 1>) {
+    ^bb0(%arg: !waveamdmachine.reg<vgpr, 1>):
+      %unused = waveamdmachine.v_add_u32 %arg, %arg
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.v_cmpx_eq_u32 %unused, %unused
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%init : !waveamdmachine.reg<vgpr, 1>)
+    } -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield %else : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %selected, %selected
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
   waveamdmachine.s_endpgm
   return

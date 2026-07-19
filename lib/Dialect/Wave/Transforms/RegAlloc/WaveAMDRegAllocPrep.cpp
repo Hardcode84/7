@@ -15,6 +15,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -314,6 +315,57 @@ static Operation *ancestorInBlock(Operation *op, Block *block) {
   return op;
 }
 
+static Region *getChildRegion(Operation *parent, Operation *nested) {
+  for (Region *region = nested->getParentRegion(); region;) {
+    Operation *owner = region->getParentOp();
+    if (owner == parent)
+      return region;
+    region = owner ? owner->getParentRegion() : nullptr;
+  }
+  return nullptr;
+}
+
+static bool regionMayReach(RegionBranchOpInterface branch, Region *source,
+                           Region *target) {
+  SmallVector<Region *, 4> pending{source};
+  DenseSet<Region *> visited;
+  SmallVector<RegionSuccessor, 4> successors;
+  while (!pending.empty()) {
+    Region *region = pending.pop_back_val();
+    if (!visited.insert(region).second)
+      continue;
+    if (region == target)
+      return true;
+    for (Block &block : *region) {
+      RegionBranchTerminatorOpInterface terminator =
+          dyn_cast<RegionBranchTerminatorOpInterface>(block.getTerminator());
+      if (!terminator)
+        continue;
+      successors.clear();
+      branch.getSuccessorRegions(RegionBranchPoint(terminator), successors);
+      for (RegionSuccessor successor : successors)
+        if (!successor.isOperation())
+          pending.push_back(successor.getSuccessor());
+    }
+  }
+  return false;
+}
+
+static bool useCannotFollow(Operation *from, Operation *user) {
+  for (Operation *parent = from->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
+    if (!branch)
+      continue;
+    Region *fromRegion = getChildRegion(parent, from);
+    Region *useRegion = getChildRegion(parent, user);
+    if (fromRegion && useRegion && fromRegion != useRegion &&
+        !regionMayReach(branch, fromRegion, useRegion))
+      return true;
+  }
+  return false;
+}
+
 static bool operationIsInside(Operation *root, Operation *op) {
   for (Operation *cur = op; cur; cur = cur->getParentOp())
     if (cur == root)
@@ -364,7 +416,9 @@ static bool hasUseAfterLoop(Value value, waveamdmachine::UniformLoopOp loop) {
         operationIsInside(loop.getOperation(), user))
       continue;
     Operation *top = ancestorInBlock(user, block);
-    // Cross-block use order unknown: keep writable carry storage distinct.
+    if (!top && useCannotFollow(loop, user))
+      continue;
+    // Reachable cross-block use keeps writable carry storage distinct.
     if (!top || loop->isBeforeInBlock(top))
       return true;
   }
