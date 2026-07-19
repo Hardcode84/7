@@ -784,31 +784,31 @@ tlx_addmm_glu_kernel_persistent:
 		v_cndmask_b32_e64 v74, v32, v73, s[26:27]
 		buffer_load_dwordx4 v74, s[48:51], 0 offen lds
 		v_add_u32_e32 v74, s10, v73
-		s_add_i32 m0, s71, 0x83e0
+		s_add_i32 m0, m0, 0x2100
 		v_cndmask_b32_e64 v74, v32, v74, s[28:29]
 		buffer_load_dwordx4 v74, s[48:51], 0 offen lds
 		s_barrier
 		v_add_u32_e32 v74, 64, v49
-		s_add_i32 m0, s71, 0x2100
+		s_add_i32 m0, m0, 0xffff9d20
 		v_cndmask_b32_e64 v74, v32, v74, s[30:31]
 		buffer_load_dwordx4 v74, s[44:47], 0 offen lds
 		s_barrier
 		v_add_u32_e32 v74, s11, v73
-		s_add_i32 m0, s71, 0xa4e0
+		s_add_i32 m0, m0, 0x83e0
 		v_cndmask_b32_e64 v74, v32, v74, s[32:33]
 		buffer_load_dwordx4 v74, s[48:51], 0 offen lds
 		v_add_u32_e32 v74, s43, v73
-		s_add_i32 m0, s71, 0xc5e0
+		s_add_i32 m0, m0, 0x2100
 		v_cndmask_b32_e64 v74, v32, v74, s[34:35]
 		buffer_load_dwordx4 v74, s[48:51], 0 offen lds
 		s_barrier
 		v_add_u32_e32 v49, 0x80, v49
-		s_add_i32 m0, s71, 0x4200
+		s_add_i32 m0, m0, 0xffff7c20
 		v_cndmask_b32_e64 v49, v32, v49, s[36:37]
 		buffer_load_dwordx4 v49, s[44:47], 0 offen lds
 		s_barrier
 		v_add_u32_e32 v49, s60, v73
-		s_add_i32 m0, s71, 0xe6e0
+		s_add_i32 m0, m0, 0xa4e0
 		v_cndmask_b32_e64 v49, v32, v49, s[38:39]
 		v_add_u32_e32 v74, s61, v73
 		s_mov_b32 s74, 0
@@ -816,7 +816,7 @@ tlx_addmm_glu_kernel_persistent:
 		s_mov_b32 s75, 0
 		buffer_load_dwordx4 v49, s[48:51], 0 offen lds
 		v_cndmask_b32_e64 v49, v71, v72, s[76:77]
-		s_add_i32 m0, s71, 0x107e0
+		s_add_i32 m0, m0, 0x2100
 		v_cndmask_b32_e64 v71, v32, v74, s[40:41]
 		buffer_load_dwordx4 v71, s[48:51], 0 offen lds
 		s_waitcnt vmcnt(3)
@@ -934,10 +934,10 @@ tlx_addmm_glu_kernel_persistent:
 		v_cndmask_b32_e32 v78, v1, v41, vcc
 		buffer_load_dwordx4 v77, s[48:51], 0 offen lds
 		v_add_u32_e32 v71, v78, v71
-		s_add_i32 s76, s64, s76
+		s_add_i32 s74, s64, s76
 		v_cmp_eq_u32_e64 vcc, v71, v74
-		v_add_u32_e32 v71, s76, v73
-		s_add_i32 m0, s74, 0x83e0
+		v_add_u32_e32 v71, s74, v73
+		s_add_i32 m0, m0, 0x2100
 		v_cndmask_b32_e32 v71, v32, v71, vcc
 		buffer_load_dwordx4 v71, s[48:51], 0 offen lds
 		ds_read_b128 v[80:83], v72

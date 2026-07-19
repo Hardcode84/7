@@ -808,15 +808,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NEXT: [[T0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]] after
 // CHECK-NEXT: [[NEXT:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32 [[M0]], [[STEP]]
 // CHECK-NEXT: [[T1:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[NEXT]] after [[T0]]
-// CHECK-NEXT: return [[T1]]
+// CHECK-NEXT: [[LAST:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32 [[NEXT]], [[STEP]]
+// CHECK-NEXT: [[T2:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[LAST]] after [[T1]]
+// CHECK-NEXT: return [[T2]]
 func.func @chain_dma_m0_increment(
     %base: !waveamdmachine.reg<sgpr, 1>,
     %off0: !waveamdmachine.reg<vgpr, 1>,
     %off1: !waveamdmachine.reg<vgpr, 1>,
+    %off2: !waveamdmachine.reg<vgpr, 1>,
     %desc: !waveamdmachine.reg<sgpr, 4>,
     %soff: !waveamdmachine.reg<sgpr, 1>,
     %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
   %step = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %last = waveamdmachine.imm 16384 : !waveamdmachine.imm
   %m0 = waveamdmachine.s_mov_m0 %base
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
   %t0 = waveamdmachine.buffer_load_lds_b128
@@ -832,7 +836,92 @@ func.func @chain_dma_m0_increment(
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
          !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  return %t1 : !waveamdmachine.mem.token
+  %next2, %scc2 = waveamdmachine.s_add_m0_i32 %base, %last
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t2 = waveamdmachine.buffer_load_lds_b128
+      %off2, %desc, %soff, %next2 after %t1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return %t2 : !waveamdmachine.mem.token
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @chain_dma_m0_absolute_offsets(
+// CHECK-SAME: [[BASE:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+// CHECK-SAME: [[DYNAMIC:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+// CHECK: [[STEP:%.*]] = waveamdmachine.imm 8192
+// CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+// CHECK-NEXT: [[T0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]] after
+// CHECK-NEXT: [[NEXT:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32 [[M0]], [[STEP]]
+// CHECK-NEXT: [[T1:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[NEXT]] after [[T0]]
+// CHECK-NEXT: [[T2:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[NEXT]] after [[T1]]
+// CHECK-NEXT: [[DELTA:%.*]] = waveamdmachine.imm 4294963200
+// CHECK-NEXT: [[BACK:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32 [[NEXT]], [[DELTA]]
+// CHECK-NEXT: [[T3:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[BACK]] after [[T2]]
+// CHECK-NEXT: [[DYNAMIC_M0:%.*]], %{{.*}} = waveamdmachine.s_add_m0_i32 [[BASE]], [[DYNAMIC]]
+// CHECK-NEXT: [[T4:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[DYNAMIC_M0]] after [[T3]]
+// CHECK-NEXT: return [[T4]]
+func.func @chain_dma_m0_absolute_offsets(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %dynamic: !waveamdmachine.reg<sgpr, 1>,
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %off2: !waveamdmachine.reg<vgpr, 1>,
+    %off3: !waveamdmachine.reg<vgpr, 1>,
+    %off4: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %step = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %repeat = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %back = waveamdmachine.imm 4096 : !waveamdmachine.imm
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t0 = waveamdmachine.buffer_load_lds_b128
+      %off0, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %next, %scc1 = waveamdmachine.s_add_m0_i32 %base, %step
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t1 = waveamdmachine.buffer_load_lds_b128
+      %off1, %desc, %soff, %next after %t0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %same, %scc2 = waveamdmachine.s_add_m0_i32 %base, %repeat
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t2 = waveamdmachine.buffer_load_lds_b128
+      %off2, %desc, %soff, %same after %t1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %back_m0, %scc3 = waveamdmachine.s_add_m0_i32 %base, %back
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t3 = waveamdmachine.buffer_load_lds_b128
+      %off3, %desc, %soff, %back_m0 after %t2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %dynamic_m0, %scc4 = waveamdmachine.s_add_m0_i32 %base, %dynamic
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %t4 = waveamdmachine.buffer_load_lds_b128
+      %off4, %desc, %soff, %dynamic_m0 after %t3
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return %t4 : !waveamdmachine.mem.token
 }
 
 }

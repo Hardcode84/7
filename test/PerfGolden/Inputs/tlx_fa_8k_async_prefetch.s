@@ -671,7 +671,7 @@ _attn_fwd_async_prefetch:
 		s_add_i32 s14, s14, s11
 		s_add_i32 s14, s14, s12
 		v_add_u32_e32 v10, s14, v0
-		s_add_i32 m0, s13, 0x2080
+		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e64 v10, v20, v10, s[6:7]
 		buffer_load_dwordx4 v10, s[32:35], 0 offen lds
 		s_mul_i32 s14, 24, s15
@@ -679,7 +679,7 @@ _attn_fwd_async_prefetch:
 		s_add_i32 s14, s14, s12
 		v_add_u32_e32 v10, s14, v0
 		v_cndmask_b32_e32 v10, v20, v10, vcc
-		s_add_i32 m0, s13, 0x30c0
+		s_add_i32 m0, m0, 0x1040
 		v_mov_b32_e32 v21, 0
 		buffer_load_dwordx4 v10, s[32:35], 0 offen lds
 		v_mul_lo_u32 v10, s20, v9
@@ -706,14 +706,14 @@ _attn_fwd_async_prefetch:
 		s_add_i32 s2, s2, s14
 		s_add_i32 s2, s2, s18
 		v_add_u32_e32 v16, s2, v10
-		s_add_i32 m0, s10, 0x92f0
+		s_add_i32 m0, m0, 0x1100
 		v_cndmask_b32_e64 v16, v20, v16, s[4:5]
 		buffer_load_dwordx4 v16, s[36:39], 0 offen lds
 		s_lshl_b32 s2, s20, 4
 		s_add_i32 s2, s2, s14
 		s_add_i32 s2, s2, s18
 		v_add_u32_e32 v16, s2, v10
-		s_add_i32 m0, s10, 0xa3f0
+		s_add_i32 m0, m0, 0x1100
 		v_cndmask_b32_e64 v16, v20, v16, s[6:7]
 		buffer_load_dwordx4 v16, s[36:39], 0 offen lds
 		s_mul_i32 s2, 24, s20
@@ -721,7 +721,7 @@ _attn_fwd_async_prefetch:
 		s_add_i32 s2, s2, s18
 		v_add_u32_e32 v16, s2, v10
 		v_cndmask_b32_e32 v16, v20, v16, vcc
-		s_add_i32 m0, s10, 0xb4f0
+		s_add_i32 m0, m0, 0x1100
 		v_mov_b32_e32 v17, 4
 		v_mul_lo_u32 v17, v17, v14
 		buffer_load_dwordx4 v16, s[36:39], 0 offen lds
@@ -974,30 +974,30 @@ _attn_fwd_async_prefetch:
 		buffer_load_dwordx4 v184, s[32:35], 0 offen lds
 		v_add_u32_e32 v184, v188, v185
 		v_cmp_eq_u32_e64 vcc, v184, v186
-		s_mov_b64 s[44:45], vcc
+		s_mov_b64 s[40:41], vcc
 		v_cmp_lt_i32_e64 vcc, v38, s25
-		v_cndmask_b32_e64 v38, v20, v189, s[44:45]
+		v_cndmask_b32_e64 v38, v20, v189, s[40:41]
 		s_add_i32 m0, m0, 0x1040
 		v_cndmask_b32_e32 v184, v21, v36, vcc
 		buffer_load_dwordx4 v39, s[32:35], 0 offen lds
 		v_add_u32_e32 v39, v184, v185
 		v_cmp_eq_u32_e64 vcc, v39, v186
-		s_add_i32 m0, s41, 0x2080
+		s_add_i32 m0, m0, 0x1040
 		s_waitcnt lgkmcnt(14)
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[40:43], a[0:3], 0
 		buffer_load_dwordx4 v38, s[32:35], 0 offen lds
 		v_cndmask_b32_e32 v38, v20, v187, vcc
-		s_add_i32 m0, s41, 0x30c0
+		s_add_i32 m0, m0, 0x1040
 		s_lshl_b32 s4, s4, 1
-		s_add_i32 s40, s12, s4
-		v_add_u32_e32 v39, s40, v10
+		s_add_i32 s44, s12, s4
+		v_add_u32_e32 v39, s44, v10
 		s_add_i32 s18, s10, s18
 		v_cndmask_b32_e64 v39, v20, v39, s[30:31]
 		v_add_u32_e32 v184, s4, v10
 		v_add_u32_e32 v185, s19, v184
 		v_cndmask_b32_e64 v185, v20, v185, s[42:43]
 		v_add_u32_e32 v186, s24, v184
-		v_cndmask_b32_e64 v186, v20, v186, s[44:45]
+		v_cndmask_b32_e64 v186, v20, v186, s[40:41]
 		v_add_u32_e32 v184, s14, v184
 		v_cndmask_b32_e32 v184, v20, v184, vcc
 		buffer_load_dwordx4 v38, s[32:35], 0 offen lds
@@ -1006,15 +1006,15 @@ _attn_fwd_async_prefetch:
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[176:179], a[32:35], 0
 		buffer_load_dwordx4 v39, s[36:39], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[240:255], v[40:43], a[32:35], 0
-		s_add_i32 m0, s18, 0x92f0
+		s_add_i32 m0, m0, 0x1100
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[44:47], a[4:7], v[192:207]
 		buffer_load_dwordx4 v185, s[36:39], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[180:183], a[4:7], v[208:223]
-		s_add_i32 m0, s18, 0xa3f0
+		s_add_i32 m0, m0, 0x1100
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[180:183], a[36:39], v[224:239]
 		buffer_load_dwordx4 v186, s[36:39], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[240:255], v[44:47], a[36:39], v[240:255]
-		s_add_i32 m0, s18, 0xb4f0
+		s_add_i32 m0, m0, 0x1100
 		s_cmp_lt_i32 s3, s2
 		v_mfma_f32_32x32x16_bf16 v[192:207], a[68:71], a[8:11], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], a[92:95], a[8:11], v[208:223]

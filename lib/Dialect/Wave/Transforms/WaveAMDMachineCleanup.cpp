@@ -1345,7 +1345,7 @@ static Value findM0Operand(Operation *op) {
   return {};
 }
 
-static std::optional<Value> findDmaM0ChainHead(SAddM0I32Op add) {
+static std::optional<Value> findPreviousDmaM0(SAddM0I32Op add) {
   Value dmaM0;
   for (Operation *op = add->getPrevNode(); op; op = op->getPrevNode()) {
     // Region op may hide physical M0 writes.
@@ -1354,8 +1354,7 @@ static std::optional<Value> findDmaM0ChainHead(SAddM0I32Op add) {
       return std::nullopt;
 
     if (Value m0 = findM0Result(op)) {
-      SMovM0Op move = dyn_cast<SMovM0Op>(op);
-      if (dmaM0 == m0 && move && move.getSource() == add.getLhs())
+      if (dmaM0 == m0)
         return m0;
       return std::nullopt;
     }
@@ -1364,6 +1363,57 @@ static std::optional<Value> findDmaM0ChainHead(SAddM0I32Op add) {
       dmaM0 = findM0Operand(op);
   }
   return std::nullopt;
+}
+
+struct M0BaseOffset {
+  Value base;
+  uint32_t offset = 0;
+};
+
+static std::optional<M0BaseOffset> decomposeM0BaseOffset(Value m0) {
+  uint32_t offset = 0;
+  while (SAddM0I32Op add = m0.getDefiningOp<SAddM0I32Op>()) {
+    std::optional<int64_t> increment = getImmValue(add.getRhs());
+    if (!increment)
+      return std::nullopt;
+    offset += static_cast<uint32_t>(*increment);
+    if (!isa<M0Type>(add.getLhs().getType()))
+      return M0BaseOffset{add.getLhs(), offset};
+    m0 = add.getLhs();
+  }
+  if (SMovM0Op move = m0.getDefiningOp<SMovM0Op>())
+    return M0BaseOffset{move.getSource(), offset};
+  return std::nullopt;
+}
+
+struct DmaM0IncrementPlan {
+  Value previousM0;
+  Value increment;
+  uint32_t constantIncrement = 0;
+  bool materializeConstant = false;
+};
+
+static std::optional<DmaM0IncrementPlan> planDmaM0Increment(SAddM0I32Op add) {
+  std::optional<Value> previousM0 = findPreviousDmaM0(add);
+  if (!previousM0)
+    return std::nullopt;
+  std::optional<M0BaseOffset> previous = decomposeM0BaseOffset(*previousM0);
+  if (!previous || previous->base != add.getLhs())
+    return std::nullopt;
+
+  std::optional<int64_t> absolute = getImmValue(add.getRhs());
+  if (previous->offset == 0) {
+    if (!absolute || static_cast<uint32_t>(*absolute) != 0)
+      return DmaM0IncrementPlan{*previousM0, add.getRhs()};
+    return DmaM0IncrementPlan{*previousM0};
+  }
+  if (!absolute)
+    return std::nullopt;
+  // M0 arithmetic wraps at 32 bits; derive delta in the same ring.
+  uint32_t delta = static_cast<uint32_t>(*absolute) - previous->offset;
+  if (delta == 0)
+    return DmaM0IncrementPlan{*previousM0};
+  return DmaM0IncrementPlan{*previousM0, {}, delta, true};
 }
 
 static bool chainDmaM0Increments(func::FuncOp func) {
@@ -1375,13 +1425,23 @@ static bool chainDmaM0Increments(func::FuncOp func) {
   for (SAddM0I32Op add : adds) {
     if (isa<M0Type>(add.getLhs().getType()) || !add.getScc().use_empty())
       continue;
-    std::optional<Value> head = findDmaM0ChainHead(add);
-    if (!head)
+    std::optional<DmaM0IncrementPlan> plan = planDmaM0Increment(add);
+    if (!plan)
       continue;
+    if (!plan->increment && !plan->materializeConstant) {
+      add.getM0().replaceAllUsesWith(plan->previousM0);
+      add.erase();
+      changed = true;
+      continue;
+    }
     builder.setInsertionPoint(add);
-    SAddM0I32Op chained =
-        SAddM0I32Op::create(builder, add.getLoc(), add.getM0().getType(),
-                            add.getScc().getType(), *head, add.getRhs());
+    Value increment =
+        plan->materializeConstant
+            ? createImm(builder, add.getLoc(), plan->constantIncrement)
+            : plan->increment;
+    SAddM0I32Op chained = SAddM0I32Op::create(
+        builder, add.getLoc(), add.getM0().getType(), add.getScc().getType(),
+        plan->previousM0, increment);
     add.getM0().replaceAllUsesWith(chained.getM0());
     add.erase();
     changed = true;

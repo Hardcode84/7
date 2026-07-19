@@ -19,14 +19,20 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-NEXT: s_add_i32 m0, m0, 0x2000
 // ASM-NEXT: s_nop 0
 // ASM-NEXT: buffer_load_dwordx4 v1, s[4:7], 0 offen lds
+// ASM-NEXT: s_nop 0
+// ASM-NEXT: s_add_i32 m0, m0, 0x2000
+// ASM-NEXT: s_nop 0
+// ASM-NEXT: buffer_load_dwordx4 v2, s[4:7], 0 offen lds
 // ASM-NEXT: s_endpgm
 func.func @m0_increment_chain_codegen() attributes {wave.kernel} {
   %off0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %off1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+  %off2 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 2>
   %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4, 4>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1, 8>
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %step = waveamdmachine.imm 8192 : !waveamdmachine.imm
+  %last = waveamdmachine.imm 16384 : !waveamdmachine.imm
   %root = waveamdmachine.token : !waveamdmachine.mem.token
   %m0 = waveamdmachine.s_mov_m0 %base
       : (!waveamdmachine.reg<sgpr, 1, 8>) -> !waveamdmachine.m0
@@ -42,6 +48,15 @@ func.func @m0_increment_chain_codegen() attributes {wave.kernel} {
   %second = waveamdmachine.buffer_load_lds_b128
       %off1, %desc, %zero, %next after %first
       : (!waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<sgpr, 4, 4>, !waveamdmachine.imm,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %last_m0, %last_scc = waveamdmachine.s_add_m0_i32 %base, %last
+      : (!waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.imm)
+        -> (!waveamdmachine.m0, !waveamdmachine.reg<scc, 1>)
+  %third = waveamdmachine.buffer_load_lds_b128
+      %off2, %desc, %zero, %last_m0 after %second
+      : (!waveamdmachine.reg<vgpr, 1, 2>,
          !waveamdmachine.reg<sgpr, 4, 4>, !waveamdmachine.imm,
          !waveamdmachine.m0, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
