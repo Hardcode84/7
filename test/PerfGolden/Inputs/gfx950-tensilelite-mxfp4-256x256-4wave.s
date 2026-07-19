@@ -1803,7 +1803,11 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[236:239], v22 offset:55296
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[16:19], a[4:7], v[72:75], a[16:19], v27, v24 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_add_u32_e32 v22, 0x800, v2
+		v_accvgpr_write_b32 a0, v22
+		v_accvgpr_read_b32 v22, a0
 		v_add_u32_e32 v22, 0x800, v22
+		v_accvgpr_write_b32 a0, v22
+		v_accvgpr_read_b32 v22, a0
 		v_add_u32_e32 v22, 0x800, v22
 		v_add_u32_e32 v22, 0x800, v22
 		v_add_u32_e32 v22, 0x400, v22
@@ -5687,8 +5691,8 @@ amdhsa.kernels:
     .vgpr_spill_count: 103
     .wavefront_size: 64
     .workgroup_processor_mode: 1
-    wave.regalloc.iterations: 141
-    wave.regalloc.agpr.dwords: 300
+    wave.regalloc.iterations: 143
+    wave.regalloc.agpr.dwords: 302
     wave.regalloc.remat.dwords: 12
     wave.regalloc.sgpr_to_vgpr.dwords: 0
     wave.regalloc.lds.dwords: 24

@@ -298,7 +298,7 @@ respectsCombinedVGPRFamilyBudget(func::FuncOp func,
                                  const AGPRReliefSetGroup &candidate,
                                  const RegAllocTransformFailure &failureRecord,
                                  const AGPRReliefSetIndex &setIndex,
-                                 unsigned agprFootprint, int64_t bridgeCount) {
+                                 unsigned agprFootprint) {
   FailureOr<std::optional<wave::RegAllocTransformBudget>> familyBudget =
       wave::getRegAllocTransformVGPRFamilyBudget(func);
   if (failed(familyBudget))
@@ -322,9 +322,6 @@ respectsCombinedVGPRFamilyBudget(func::FuncOp func,
                                    failureRecord.overlaps, candidate.sets),
                                moved->base + request->width);
     } else {
-      // Bridged partial relief preempts cheaper providers on every retry.
-      if (bridgeCount != 0)
-        return false;
       vgprFootprint = getVGPRFootprintAfterRemovingSets(failureRecord.overlaps,
                                                         /*removedSets=*/{});
     }
@@ -791,7 +788,7 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   AGPRReliefScore score = getAGPRReliefScore(
       group, values, groupValues, failureRecord.position, isaVersion);
   FailureOr<bool> respectsFamilyBudget = respectsCombinedVGPRFamilyBudget(
-      func, group, failureRecord, setIndex, agprFootprint, score.bridgeCount);
+      func, group, failureRecord, setIndex, agprFootprint);
   if (failed(respectsFamilyBudget))
     return failure();
   if (!*respectsFamilyBudget)
