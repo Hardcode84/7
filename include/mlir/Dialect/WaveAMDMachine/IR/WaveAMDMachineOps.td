@@ -72,10 +72,12 @@ defvar WaveAMDMachine_DefaultKilledOperandReuse =
 class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveAMDMachine_Dialect, mnemonic,
        !listconcat(traits, [WaveAMDMachine_WaitcntInfoOpInterface,
+                            WaveAMDMachine_InstructionIssueOpInterface,
                             WaveAMDMachine_OperandLegalityOpInterface,
                             WaveAMDMachine_AGPRBankingOpInterface,
                             WaveAMDMachine_KilledOperandReuseOpInterface])> {
   string archPredicate = "true";
+  string instructionIssueCount = "1";
   string waitcntCounter = "None";
   string waitcntEvent = "None";
   string waitcntIssueCount = "0";
@@ -102,6 +104,12 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
               ::mlir::waveamdmachine::WaitcntEvent::}] # waitcntEvent # [{,
               static_cast<unsigned>(}] # waitcntIssueCount # [{),
               }] # !if(waitcntOutOfOrder, "true", "false") # [{};
+    }
+
+    unsigned getInstructionIssueCount(
+        const ::llvm::AMDGPU::IsaVersion &isa) {
+      (void)isa;
+      return static_cast<unsigned>(}] # instructionIssueCount # [{);
     }
 
     ::mlir::waveamdmachine::OperandLegalitySpec getOperandLegality() {
@@ -160,6 +168,10 @@ class WaveAMDMachine_WaitcntInfo<string counter, string event,
   string waitcntEvent = event;
   string waitcntIssueCount = count;
   bit waitcntOutOfOrder = outOfOrder;
+}
+
+class WaveAMDMachine_InstructionIssueCount<string count> {
+  string instructionIssueCount = count;
 }
 
 class WaveAMDMachine_VMEMLoadInfo
@@ -225,19 +237,29 @@ defvar WaveAMDMachine_ValueRegChunkCount =
 
 class WaveAMDMachine_VMEMTupleLoadInfo
     : WaveAMDMachine_WaitcntInfo<"Vmem", "Vmem",
-                                 WaveAMDMachine_ResultRegChunkCount>;
+                                 WaveAMDMachine_ResultRegChunkCount>,
+      WaveAMDMachine_InstructionIssueCount<
+          WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_VMEMTupleStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Vscnt", "VmemStore",
-                                 WaveAMDMachine_ValueRegChunkCount>;
+                                 WaveAMDMachine_ValueRegChunkCount>,
+      WaveAMDMachine_InstructionIssueCount<
+          WaveAMDMachine_ValueRegChunkCount>;
 class WaveAMDMachine_ScratchTupleStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Vscnt", "ScratchStore",
-                                 WaveAMDMachine_ValueRegChunkCount>;
+                                 WaveAMDMachine_ValueRegChunkCount>,
+      WaveAMDMachine_InstructionIssueCount<
+          WaveAMDMachine_ValueRegChunkCount>;
 class WaveAMDMachine_LDSTupleLoadInfo
     : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
-                                 WaveAMDMachine_ResultRegChunkCount>;
+                                 WaveAMDMachine_ResultRegChunkCount>,
+      WaveAMDMachine_InstructionIssueCount<
+          WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_LDSTupleStoreInfo
     : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
-                                 WaveAMDMachine_ValueRegChunkCount>;
+                                 WaveAMDMachine_ValueRegChunkCount>,
+      WaveAMDMachine_InstructionIssueCount<
+          WaveAMDMachine_ValueRegChunkCount>;
 
 def WaveAMDMachine_VALU : NativeOpTrait<"waveamdmachine::VALUOp">;
 def WaveAMDMachine_SALU : NativeOpTrait<"waveamdmachine::SALUOp">;
@@ -810,7 +832,8 @@ def WaveAMDMachine_VMovB32TupleOp
                               WaveAMDMachine_VGPR,
                               [WaveAMDMachine_VALU, AlwaysSpeculatable,
                                DeclareOpInterfaceMethods<
-                                   MemoryEffectsOpInterface>]> {
+                                   MemoryEffectsOpInterface>]>,
+      WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
   let hasVerifier = 1;
 }
 
@@ -839,7 +862,8 @@ def WaveAMDMachine_VMovB64FromElementsOp
 
 def WaveAMDMachine_VCndmaskB32TupleOp
     : WaveAMDMachine_Op<"v_cndmask_b32_tuple",
-                        [WaveAMDMachine_VALU, Pure]> {
+                        [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
   let summary = "vector lane select using an SGPR mask";
   let arguments = (ins WaveAMDMachine_RegOrImm:$false_value,
                        WaveAMDMachine_RegOrImm:$true_value,
@@ -853,7 +877,8 @@ def WaveAMDMachine_VCndmaskB32TupleOp
 def WaveAMDMachine_VCndmaskB32VccOp
     : WaveAMDMachine_Op<"v_cndmask_b32_vcc",
                         [WaveAMDMachine_VALU, Pure]>,
-      WaveAMDMachine_VOP2CndmaskVccLegality {
+      WaveAMDMachine_VOP2CndmaskVccLegality,
+      WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
   let summary = "vector lane select using VCC";
   let arguments = (ins WaveAMDMachine_RegOrImm:$false_value,
                        WaveAMDMachine_RegOrImm:$true_value,
@@ -867,7 +892,8 @@ def WaveAMDMachine_VCndmaskB32VccOp
 def WaveAMDMachine_VAccvgprReadB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_accvgpr_read_b32_tuple",
                                  WaveAMDMachine_AGPR, WaveAMDMachine_VGPR,
-                                 [WaveAMDMachine_VALU, Pure]> {
+                                 [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
   let summary = "copy an AGPR tuple into VGPRs";
   let archPredicate = WaveAMDMachine_AGPRTarget;
   let hasVerifier = 1;
@@ -876,7 +902,8 @@ def WaveAMDMachine_VAccvgprReadB32TupleOp
 def WaveAMDMachine_VAccvgprWriteB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_accvgpr_write_b32_tuple",
                                  WaveAMDMachine_VGPROrImm, WaveAMDMachine_AGPR,
-                                 [WaveAMDMachine_VALU, Pure]> {
+                                 [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
   let summary = "copy a VGPR tuple or inline immediate into AGPRs";
   let archPredicate = WaveAMDMachine_AGPRTarget;
   let hasVerifier = 1;
@@ -984,7 +1011,13 @@ def WaveAMDMachine_VMulLoU32Op
           "(!::mlir::waveamdmachine::isMachineImm(" #
           "this->getOperation()->getOperand(0)) && " #
           "!::mlir::waveamdmachine::isMachineImm(" #
-          "this->getOperation()->getOperand(1))))">;
+          "this->getOperation()->getOperand(1))))">,
+      WaveAMDMachine_InstructionIssueCount<
+          "((isa.Major == 8 || isa.Major == 9) && " #
+          "(::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(0)) || " #
+          "::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(1)))) ? 2 : 1">;
 def WaveAMDMachine_VMulHiU32Op
     : WaveAMDMachine_BinaryU32Result<"v_mul_hi_u32">,
       WaveAMDMachine_KilledOperandReuse<
@@ -993,7 +1026,13 @@ def WaveAMDMachine_VMulHiU32Op
           "(!::mlir::waveamdmachine::isMachineImm(" #
           "this->getOperation()->getOperand(0)) && " #
           "!::mlir::waveamdmachine::isMachineImm(" #
-          "this->getOperation()->getOperand(1))))">;
+          "this->getOperation()->getOperand(1))))">,
+      WaveAMDMachine_InstructionIssueCount<
+          "((isa.Major == 8 || isa.Major == 9) && " #
+          "(::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(0)) || " #
+          "::mlir::waveamdmachine::isMachineImm(" #
+          "this->getOperation()->getOperand(1)))) ? 2 : 1">;
 def WaveAMDMachine_VFfbhU32Op
     : WaveAMDMachine_UnaryResult<"v_ffbh_u32", WaveAMDMachine_Reg1OrImm,
                                  WaveAMDMachine_VGPR1,
@@ -1048,7 +1087,10 @@ def WaveAMDMachine_VPermlane32SwapB32TupleOp
     : WaveAMDMachine_Op<"v_permlane32_swap_b32_tuple",
                         [WaveAMDMachine_VALU, WaveAMDMachine_ReadsExec, Pure]>,
       WaveAMDMachine_RequiredKilledOperandReuse<
-          "&operand == &this->getSourceMutable()"> {
+          "&operand == &this->getSourceMutable()">,
+      WaveAMDMachine_InstructionIssueCount<
+          "(::llvm::cast<::mlir::waveamdmachine::RegType>(" #
+          "this->getOperation()->getResult(0).getType()).getWidth() / 2)"> {
   let summary = "exchange corresponding dwords between wave64 halves";
   let description = [{
     Source tuple contains two equal-width payloads. Each corresponding dword
@@ -1359,7 +1401,8 @@ def WaveAMDMachine_SReadVccB32Op
 // VCC reload writes singleton flag state; LICM must keep it local.
 def WaveAMDMachine_SMovVccB32Op
     : WaveAMDMachine_UnaryResult<"s_mov_vcc_b32", WaveAMDMachine_SGPR1,
-                                 WaveAMDMachine_VCC, [WaveAMDMachine_SALU]>;
+                                 WaveAMDMachine_VCC, [WaveAMDMachine_SALU]>,
+      WaveAMDMachine_InstructionIssueCount<"isa.Major == 9 ? 2 : 1">;
 
 // Value-producing scalar move: materialises an SGPR1 holding the
 // given Imm or copies an existing SGPR1/RegOrImm into a fresh
@@ -1384,7 +1427,8 @@ def WaveAMDMachine_SMovB32TupleOp
                               WaveAMDMachine_SGPR,
                               [WaveAMDMachine_SALU, AlwaysSpeculatable,
                                DeclareOpInterfaceMethods<
-                                   MemoryEffectsOpInterface>]> {
+                                   MemoryEffectsOpInterface>]>,
+      WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
   let hasVerifier = 1;
 }
 def WaveAMDMachine_SLoadB32Op : WaveAMDMachine_UnaryResult<"s_load_b32",
@@ -1476,7 +1520,9 @@ def WaveAMDMachine_SAndSaveexecB32Op
     : WaveAMDMachine_Op<"s_and_saveexec_b32",
                         [WaveAMDMachine_SALU,
                          WaveAMDMachine_ReadsExec,
-                         WaveAMDMachine_WritesExec]> {
+                         WaveAMDMachine_WritesExec]>,
+      WaveAMDMachine_InstructionIssueCount<
+          "(isa.Major == 8 || isa.Major == 9) ? 2 : 1"> {
   let summary = "save EXEC, mask EXEC, and set SCC";
   let arguments = (ins WaveAMDMachine_SGPR1:$mask);
   let results = (outs
@@ -3283,7 +3329,8 @@ def WaveAMDMachine_SXorB64Op
 // pair `s_add_u32` (low) + `s_addc_u32` (high). The intermediate SCC is
 // consumed by the second instruction and discarded after.
 def WaveAMDMachine_SAddU64Op
-    : WaveAMDMachine_Op<"s_add_u64", [WaveAMDMachine_SALU, Pure]> {
+    : WaveAMDMachine_Op<"s_add_u64", [WaveAMDMachine_SALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "scalar 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
@@ -3295,7 +3342,8 @@ def WaveAMDMachine_SAddU64Op
 // immediate, so unlike a full `s_add_u64` it needs no second register
 // pair and no `tuple_from_elements` to widen the offset.
 def WaveAMDMachine_SAddU64U32Op
-    : WaveAMDMachine_Op<"s_add_u64_u32", [WaveAMDMachine_SALU, Pure]> {
+    : WaveAMDMachine_Op<"s_add_u64_u32", [WaveAMDMachine_SALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "scalar 64-bit base + zero-extended 32-bit offset";
   let arguments = (ins
     WaveAMDMachine_SGPR2:$base,
@@ -3306,7 +3354,8 @@ def WaveAMDMachine_SAddU64U32Op
 }
 
 // 64-bit vector add. Expanded as a target carry-chain pair through VCC.
-def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]> {
+def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]>,
+    WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "vector 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);
   let results = (outs WaveAMDMachine_VGPR2:$result, WaveAMDMachine_VCC:$vcc);
@@ -3314,7 +3363,9 @@ def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]> {
 }
 
 // Vector mirror of s_add_u64_u32: high addend is literal zero.
-def WaveAMDMachine_VAddU64U32Op : WaveAMDMachine_Op<"v_add_u64_u32", [Pure]> {
+def WaveAMDMachine_VAddU64U32Op
+    : WaveAMDMachine_Op<"v_add_u64_u32", [Pure]>,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "vector 64-bit base + zero-extended 32-bit offset";
   let arguments = (ins
     WaveAMDMachine_VGPR2:$base,
@@ -3331,7 +3382,8 @@ def WaveAMDMachine_VAddU64U32Op : WaveAMDMachine_Op<"v_add_u64_u32", [Pure]> {
 // that's dead after the op; the regalloc just sees one extra short-
 // lived live range per op.
 def WaveAMDMachine_SMulU64Op
-    : WaveAMDMachine_Op<"s_mul_u64", [WaveAMDMachine_SALU, Pure]> {
+    : WaveAMDMachine_Op<"s_mul_u64", [WaveAMDMachine_SALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<"6"> {
   let summary = "scalar 64-bit unsigned multiply (low half)";
   let arguments = (ins WaveAMDMachine_SGPR2:$lhs, WaveAMDMachine_SGPR2:$rhs);
   let results = (outs
@@ -3342,7 +3394,8 @@ def WaveAMDMachine_SMulU64Op
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_VMulU64Op : WaveAMDMachine_Op<"v_mul_u64", [Pure]> {
+def WaveAMDMachine_VMulU64Op : WaveAMDMachine_Op<"v_mul_u64", [Pure]>,
+    WaveAMDMachine_InstructionIssueCount<"6"> {
   let summary = "vector 64-bit unsigned multiply (low half)";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);
   let results = (outs
@@ -3353,7 +3406,8 @@ def WaveAMDMachine_VMulU64Op : WaveAMDMachine_Op<"v_mul_u64", [Pure]> {
 }
 
 def WaveAMDMachine_VXorB64Op
-    : WaveAMDMachine_Op<"v_xor_b64", [WaveAMDMachine_VALU, Pure]> {
+    : WaveAMDMachine_Op<"v_xor_b64", [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "vector 64-bit bitwise XOR";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);
   let results = (outs WaveAMDMachine_VGPR2:$result);
@@ -3433,7 +3487,8 @@ def WaveAMDMachine_VAshrrevI64Op : WaveAMDMachine_Op<"v_ashrrev_i64", [Pure]> {
 // selector to lift `arith.constant : i64` into the 2-wide register
 // world the i64 ops consume.
 def WaveAMDMachine_SMovB64ImmOp
-    : WaveAMDMachine_Op<"s_mov_b64_imm", [WaveAMDMachine_SALU, Pure]> {
+    : WaveAMDMachine_Op<"s_mov_b64_imm", [WaveAMDMachine_SALU, Pure]>,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "materialize a 64-bit immediate into an SGPR pair";
   let arguments = (ins I64Attr:$value);
   let results = (outs WaveAMDMachine_SGPR2:$result);

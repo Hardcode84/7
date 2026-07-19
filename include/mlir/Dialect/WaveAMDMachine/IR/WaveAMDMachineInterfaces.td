@@ -45,6 +45,22 @@ def WaveAMDMachine_WaitcntInfoOpInterface
   ];
 }
 
+def WaveAMDMachine_InstructionIssueOpInterface
+    : OpInterface<"InstructionIssueOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Number of hardware instructions emitted by a machine op.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Number of hardware instructions emitted by this op.}],
+      "unsigned",
+      "getInstructionIssueCount",
+      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa)
+    >,
+  ];
+}
+
 def WaveAMDMachine_OperandLegalityOpInterface
     : OpInterface<"OperandLegalityOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

@@ -1471,9 +1471,10 @@ _attn_fwd_async_prefetch:
 		v_permlane32_swap_b32_e32 v241, v243
 		v_permlane32_swap_b32_e32 v232, v234
 		v_permlane32_swap_b32_e32 v233, v235
+		s_nop 0
+		v_mfma_f32_32x32x16_bf16 v[48:63], a[116:119], v[240:243], v[48:63]
 		v_permlane32_swap_b32_e32 v44, v46
 		v_permlane32_swap_b32_e32 v45, v47
-		v_mfma_f32_32x32x16_bf16 v[48:63], a[116:119], v[240:243], v[48:63]
 		v_permlane32_swap_b32_e32 v176, v178
 		v_permlane32_swap_b32_e32 v177, v179
 		v_permlane32_swap_b32_e32 v180, v182
@@ -2202,9 +2203,10 @@ _attn_fwd_async_prefetch:
 		v_permlane32_swap_b32_e32 v161, v163
 		v_permlane32_swap_b32_e32 v164, v166
 		v_permlane32_swap_b32_e32 v165, v167
+		s_nop 0
+		v_mfma_f32_32x32x16_bf16 v[240:255], a[108:111], v[160:163], v[240:255]
 		v_permlane32_swap_b32_e32 v16, v18
 		v_permlane32_swap_b32_e32 v17, v19
-		v_mfma_f32_32x32x16_bf16 v[240:255], a[108:111], v[160:163], v[240:255]
 		v_permlane32_swap_b32_e32 v24, v26
 		v_permlane32_swap_b32_e32 v25, v27
 		v_permlane32_swap_b32_e32 v28, v30
@@ -2216,32 +2218,32 @@ _attn_fwd_async_prefetch:
 		v_permlane32_swap_b32_e32 v44, v46
 		v_permlane32_swap_b32_e32 v45, v47
 		v_rcp_f32_e32 v6, v36
-		v_rcp_f32_e32 v12, v37
 		v_mfma_f32_32x32x16_bf16 v[48:63], a[124:127], v[160:163], v[48:63]
+		v_rcp_f32_e32 v12, v37
 		s_mul_i32 s1, s16, s23
 		s_lshl_b32 s1, s1, 9
 		s_mul_i32 s2, s17, s21
 		s_lshl_b32 s2, s2, 1
 		s_add_i32 s3, s1, s2
 		s_mul_i32 s0, s0, s22
-		s_lshl_b32 s0, s0, 1
 		v_mfma_f32_32x32x16_bf16 v[64:79], a[140:143], v[160:163], v[64:79]
+		s_lshl_b32 s0, s0, 1
 		s_add_i32 s3, s3, s0
 		v_mul_lo_u32 v0, s23, v9
 		v_lshlrev_b32_e32 v0, 7, v0
 		v_mul_lo_u32 v7, s23, v15
 		v_lshlrev_b32_e32 v8, 1, v7
 		v_add3_u32 v7, s3, v0, v8
-		v_mul_lo_u32 v9, s23, v11
 		v_mfma_f32_32x32x16_bf16 v[80:95], a[156:159], v[160:163], v[80:95]
+		v_mul_lo_u32 v9, s23, v11
 		v_lshlrev_b32_e32 v9, 6, v9
 		v_mul_lo_u32 v5, s23, v5
 		v_lshlrev_b32_e32 v5, 5, v5
 		v_add3_u32 v7, v7, v9, v5
 		v_mul_lo_u32 v4, s23, v4
 		v_lshlrev_b32_e32 v4, 4, v4
-		v_mul_lo_u32 v3, s23, v3
 		v_mfma_f32_32x32x16_bf16 v[144:159], a[156:159], v[28:31], v[144:159]
+		v_mul_lo_u32 v3, s23, v3
 		v_lshlrev_b32_e32 v3, 3, v3
 		v_add3_u32 v7, v7, v4, v3
 		v_mul_lo_u32 v2, s23, v2

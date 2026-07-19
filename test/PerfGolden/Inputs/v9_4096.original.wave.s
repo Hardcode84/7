@@ -268,46 +268,46 @@ v9_beyond_hotloop:
 		v_add_u32_e32 v24, s3, v14
 		s_add_i32 s4, s13, 0x80
 		v_add_u32_e32 v25, s4, v17
-		v_mov_b32_e32 v26, 0x840
-		v_mul_lo_u32 v26, v26, v5
-		buffer_load_dwordx4 v24, s[20:23], 0 offen lds
 		v_and_b32_e32 v0, 63, v0
+		buffer_load_dwordx4 v24, s[20:23], 0 offen lds
+		v_mov_b32_e32 v24, 0x840
+		v_mul_lo_u32 v24, v24, v5
 		s_add_i32 m0, m0, 0x62e0
 		s_add_i32 s10, s29, 0x80
 		v_lshrrev_b32_e32 v5, 4, v0
-		v_lshlrev_b32_e32 v5, 4, v5
 		buffer_load_dwordx4 v25, s[24:27], 0 offen lds
-		v_add_u32_e32 v24, v26, v5
+		v_lshlrev_b32_e32 v5, 4, v5
 		s_add_i32 m0, m0, 0x2100
 		s_add_i32 s10, s10, s13
 		v_add_u32_e32 v25, s10, v17
 		s_add_i32 s29, s31, 0x80
 		buffer_load_dwordx4 v25, s[24:27], 0 offen lds
-		v_and_b32_e32 v0, 15, v0
+		v_add_u32_e32 v24, v24, v5
 		s_add_i32 m0, m0, 0x62e0
 		s_add_i32 s29, s29, s13
 		v_add_u32_e32 v25, s29, v17
 		s_add_i32 s11, s11, 0x80
 		buffer_load_dwordx4 v25, s[24:27], 0 offen lds
-		v_lshrrev_b32_e32 v25, 3, v0
+		v_and_b32_e32 v0, 15, v0
 		s_add_i32 m0, m0, 0x2100
 		s_add_i32 s11, s11, s13
-		v_add_u32_e32 v26, s11, v17
-		v_mov_b32_e32 v27, 0x420
-		v_mul_lo_u32 v27, v27, v25
-		buffer_load_dwordx4 v26, s[24:27], 0 offen lds
+		v_add_u32_e32 v25, s11, v17
+		v_lshrrev_b32_e32 v26, 3, v0
+		buffer_load_dwordx4 v25, s[24:27], 0 offen lds
 		s_waitcnt vmcnt(10)
 		s_barrier
-		v_lshrrev_b32_e32 v25, 2, v0
-		v_and_b32_e32 v25, 1, v25
-		v_lshlrev_b32_e32 v25, 9, v25
-		v_add3_u32 v24, v24, v27, v25
-		v_lshrrev_b32_e32 v26, 1, v0
+		v_mov_b32_e32 v25, 0x420
+		v_mul_lo_u32 v25, v25, v26
+		v_lshrrev_b32_e32 v26, 2, v0
 		v_and_b32_e32 v26, 1, v26
-		v_lshlrev_b32_e32 v26, 8, v26
+		v_lshlrev_b32_e32 v26, 9, v26
+		v_add3_u32 v24, v24, v25, v26
+		v_lshrrev_b32_e32 v27, 1, v0
+		v_and_b32_e32 v27, 1, v27
+		v_lshlrev_b32_e32 v27, 8, v27
 		v_and_b32_e32 v0, 1, v0
 		v_lshlrev_b32_e32 v0, 7, v0
-		v_add3_u32 v24, v24, v26, v0
+		v_add3_u32 v24, v24, v27, v0
 		ds_read_b128 v[28:31], v24
 		ds_read_b128 v[32:35], v24 offset:64
 		ds_read_b128 v[36:39], v24 offset:8448
@@ -317,11 +317,11 @@ v9_beyond_hotloop:
 		ds_read_b128 v[52:55], v24 offset:25344
 		ds_read_b128 v[56:59], v24 offset:25408
 		v_add_u32_e32 v5, 0x10000, v5
-		v_add_u32_e32 v5, v5, v27
-		v_mov_b32_e32 v27, 0x840
-		v_mul_lo_u32 v27, v27, v16
-		v_add3_u32 v5, v5, v27, v25
-		v_add3_u32 v0, v5, v26, v0
+		v_add_u32_e32 v5, v5, v25
+		v_mov_b32_e32 v25, 0x840
+		v_mul_lo_u32 v25, v25, v16
+		v_add3_u32 v5, v5, v25, v26
+		v_add3_u32 v0, v5, v27, v0
 		ds_read_b128 v[60:63], v0 offset:2016
 		ds_read_b128 v[64:67], v0 offset:2080
 		ds_read_b128 v[68:71], v0 offset:6240

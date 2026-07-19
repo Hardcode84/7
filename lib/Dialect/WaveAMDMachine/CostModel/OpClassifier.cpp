@@ -15,6 +15,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
+
 namespace mlir::waveamdmachine {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
@@ -145,6 +147,14 @@ SchedClass classifyOp(Operation *op) {
   if (cls != SchedClass::NumSchedClasses)
     return cls;
   return fallbackClassify(op);
+}
+
+unsigned getInstructionIssueCount(Operation *op,
+                                  const llvm::AMDGPU::IsaVersion &isa) {
+  if (InstructionIssueOpInterface info =
+          dyn_cast<InstructionIssueOpInterface>(op))
+    return std::max(1u, info.getInstructionIssueCount(isa));
+  return 1;
 }
 
 bool hasSchedClassMapping(Operation *op) {

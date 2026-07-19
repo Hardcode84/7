@@ -173,7 +173,8 @@ private:
     int64_t memoryValueLatency = 0;
     int64_t instructionSpan = 0;
     uint64_t issueSlots = 1;
-    unsigned issueCount = 1;
+    unsigned instructionIssueCount = 1;
+    unsigned counterIssueCount = 0;
     unsigned storeDataHazardLatency = 0;
     unsigned mfmaPasses = 0;
     InstructionPipeKind pipe = InstructionPipeKind::None;

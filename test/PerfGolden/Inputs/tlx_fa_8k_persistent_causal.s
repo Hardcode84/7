@@ -7108,9 +7108,10 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v217, v219
 		v_permlane32_swap_b32_e32 v220, v222
 		v_permlane32_swap_b32_e32 v221, v223
+		s_nop 0
+		v_mfma_f32_32x32x16_bf16 v[16:31], a[76:79], v[216:219], v[16:31]
 		v_permlane32_swap_b32_e32 v52, v54
 		v_permlane32_swap_b32_e32 v53, v55
-		v_mfma_f32_32x32x16_bf16 v[16:31], a[76:79], v[216:219], v[16:31]
 		v_permlane32_swap_b32_e32 v56, v58
 		v_permlane32_swap_b32_e32 v57, v59
 		v_permlane32_swap_b32_e32 v100, v102
@@ -7123,9 +7124,9 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v105, v107
 		v_permlane32_swap_b32_e32 v108, v110
 		v_permlane32_swap_b32_e32 v109, v111
+		v_mfma_f32_32x32x16_bf16 v[32:47], a[108:111], v[216:219], v[32:47]
 		v_permlane32_swap_b32_e32 v112, v114
 		v_permlane32_swap_b32_e32 v113, v115
-		v_mfma_f32_32x32x16_bf16 v[32:47], a[108:111], v[216:219], v[32:47]
 		v_permlane32_swap_b32_e32 v116, v118
 		v_permlane32_swap_b32_e32 v117, v119
 		v_permlane32_swap_b32_e32 v120, v122
@@ -9347,9 +9348,10 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v221, v223
 		v_permlane32_swap_b32_e32 v208, v210
 		v_permlane32_swap_b32_e32 v209, v211
+		s_nop 0
+		v_mfma_f32_32x32x16_bf16 v[16:31], a[96:99], v[220:223], v[16:31]
 		v_permlane32_swap_b32_e32 v96, v98
 		v_permlane32_swap_b32_e32 v97, v99
-		v_mfma_f32_32x32x16_bf16 v[16:31], a[96:99], v[220:223], v[16:31]
 		v_permlane32_swap_b32_e32 v100, v102
 		v_permlane32_swap_b32_e32 v101, v103
 		v_permlane32_swap_b32_e32 v128, v130
@@ -9362,9 +9364,9 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v113, v115
 		v_permlane32_swap_b32_e32 v116, v118
 		v_permlane32_swap_b32_e32 v117, v119
+		v_mfma_f32_32x32x16_bf16 v[32:47], a[128:131], v[220:223], v[32:47]
 		v_permlane32_swap_b32_e32 v120, v122
 		v_permlane32_swap_b32_e32 v121, v123
-		v_mfma_f32_32x32x16_bf16 v[32:47], a[128:131], v[220:223], v[32:47]
 		v_permlane32_swap_b32_e32 v12, v14
 		v_permlane32_swap_b32_e32 v13, v15
 		v_permlane32_swap_b32_e32 v48, v50

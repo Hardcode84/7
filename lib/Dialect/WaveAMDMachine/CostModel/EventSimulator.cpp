@@ -95,10 +95,10 @@ static bool isWaitcntOp(Operation *op) {
   return op->hasTrait<traits::WaitcntOp>();
 }
 
-static unsigned getIssueCount(Operation *op) {
+static unsigned getCounterIssueCount(Operation *op) {
   if (WaitcntInfoOpInterface info = dyn_cast<WaitcntInfoOpInterface>(op))
-    return std::max(1u, info.getWaitcntInfo().issueCount);
-  return 1;
+    return info.getWaitcntInfo().issueCount;
+  return 0;
 }
 
 static InstructionExecutionConfig
@@ -365,7 +365,7 @@ private:
                                           config.calibration);
     int period = getEventSimIssuePeriod(arch, config);
 
-    for (unsigned issue : llvm::seq<unsigned>(0, getIssueCount(op))) {
+    for (unsigned issue : llvm::seq<unsigned>(0, getCounterIssueCount(op))) {
       int64_t ready =
           commit.issueCycle + static_cast<int64_t>(issue) * period + latency;
       lastCounterReady = std::max(lastCounterReady, ready);

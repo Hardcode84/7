@@ -11,6 +11,10 @@
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
 
+namespace llvm::AMDGPU {
+struct IsaVersion;
+} // namespace llvm::AMDGPU
+
 namespace mlir {
 class Operation;
 } // namespace mlir
@@ -22,6 +26,9 @@ namespace mlir::waveamdmachine {
 // release builds fall back to Write32Bit and emit a warning via
 // llvm::errs().
 SchedClass classifyOp(Operation *op);
+
+unsigned getInstructionIssueCount(Operation *op,
+                                  const llvm::AMDGPU::IsaVersion &isa);
 
 // True when the cost model has a non-fallback mapping for the op.
 bool hasSchedClassMapping(Operation *op);

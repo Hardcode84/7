@@ -206,11 +206,6 @@ static InstructionEventClass toInstructionEventClass(Operation *op) {
   llvm_unreachable("bad waitcnt event");
 }
 
-static unsigned getIssueCount(Operation *op) {
-  WaitcntInfo info = getWaitcntInfo(op);
-  return std::max(1u, info.issueCount);
-}
-
 static int64_t saturatingAdd(int64_t lhs, int64_t rhs) {
   assert(lhs >= 0 && rhs >= 0 && "expected non-negative cycle counts");
   if (lhs > std::numeric_limits<int64_t>::max() - rhs)
@@ -721,8 +716,9 @@ InstructionExecutionState::describe(Operation *op) const {
                   hasRegClass(op->getOperands(), RegClass::VGPR) &&
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
-  desc.issueCount = getIssueCount(op);
-  desc.issueSlots = desc.issueCount;
+  desc.instructionIssueCount = getInstructionIssueCount(op, arch.isa);
+  desc.counterIssueCount = getWaitcntInfo(op).issueCount;
+  desc.issueSlots = desc.instructionIssueCount;
   if (op->hasTrait<traits::MFMAOp>())
     desc.mfmaPasses = getMfmaPassCount(cls);
   desc.latency = getConfiguredLatency(arch, cls, config.calibration);
@@ -799,7 +795,7 @@ InstructionExecutionState::query(Operation *op,
                pipeReady - currentCycle);
 
   int64_t memoryIssueReady = memoryIssueReadyCycle(
-      desc.memoryIssueResources, desc.issueCount, currentCycle);
+      desc.memoryIssueResources, desc.instructionIssueCount, currentCycle);
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                memoryIssueReady - currentCycle);
 
@@ -1045,7 +1041,7 @@ int64_t InstructionExecutionState::getInstructionSpan(
     const InstructionDesc &desc) const {
   if (desc.instructionSpan != 0)
     return desc.instructionSpan;
-  return static_cast<int64_t>(desc.issueCount) * getIssuePeriod();
+  return static_cast<int64_t>(desc.instructionIssueCount) * getIssuePeriod();
 }
 
 int64_t InstructionExecutionState::getResultReadyCycle(
@@ -1059,7 +1055,8 @@ int64_t InstructionExecutionState::getResultReadyCycle(
   if (!hasRegisterResult)
     return issueCycle;
   return issueCycle +
-         (static_cast<int64_t>(desc.issueCount) - 1) * getIssuePeriod() +
+         (static_cast<int64_t>(desc.instructionIssueCount) - 1) *
+             getIssuePeriod() +
          std::max<int64_t>(0, latency);
 }
 
@@ -1101,7 +1098,7 @@ InstructionExecutionState::commitMemoryEvents(Operation *op,
     return newEvents;
 
   unsigned queue = counterIndex(desc.counter);
-  for (unsigned issue : llvm::seq<unsigned>(0, desc.issueCount)) {
+  for (unsigned issue : llvm::seq<unsigned>(0, desc.counterIssueCount)) {
     EventId id = nextEventId++;
     PendingEvent event;
     event.id = id;
@@ -1157,7 +1154,7 @@ void InstructionExecutionState::commitMemoryIssue(const InstructionDesc &desc,
       continue;
 
     unsigned queue = memoryIssueIndex(resource);
-    for (unsigned issue : llvm::seq<unsigned>(0, desc.issueCount)) {
+    for (unsigned issue : llvm::seq<unsigned>(0, desc.instructionIssueCount)) {
       int64_t issuedAt =
           issueCycle + static_cast<int64_t>(issue) * getIssuePeriod();
       memoryIssueQueues[queue].push_back(issuedAt + latency);
