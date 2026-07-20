@@ -1039,12 +1039,6 @@ def run_hw(
         args.output_type,
         "--kernel-abi",
         kernel_abi(args),
-        "--output-layout",
-        (
-            "column-major"
-            if getattr(args, "coalesced_mfma_output", False)
-            else "automatic"
-        ),
         "--dynamic-lds",
         str(compute_dynamic_lds_bytes(args)),
         "--iters",
