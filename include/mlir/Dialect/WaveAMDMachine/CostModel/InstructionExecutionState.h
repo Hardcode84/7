@@ -245,6 +245,15 @@ private:
   void
   appendIssueResourceUses(unsigned count, int64_t offset, int64_t period,
                           SmallVectorImpl<InstructionResourceUse> &uses) const;
+  void
+  appendPipeResourceUse(Operation *op, const InstructionDesc &desc,
+                        const InstructionResourceState &resourceState,
+                        SmallVectorImpl<InstructionResourceUse> &uses) const;
+  void
+  appendLdsResourceUses(const InstructionDesc &desc,
+                        const InstructionResourceState &resourceState,
+                        int64_t issuePeriod,
+                        SmallVectorImpl<InstructionResourceUse> &uses) const;
   void appendDmaIssueResourceUses(
       Operation *op, SmallVectorImpl<InstructionResourceUse> &uses) const;
   void configureDmaIssueDelay(Operation *op, InstructionDesc &desc) const;

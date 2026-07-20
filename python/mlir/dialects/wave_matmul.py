@@ -49,7 +49,7 @@ Shape constraints:
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
 from mlir.dialects import scf, wave, waveamd, wavemeta
@@ -140,6 +140,7 @@ class PhasedDmaSchedule:
     delayed_waves: int
     fetch_alignment: int
     fetch_phase: int
+    subpanel_pipeline: bool = False
 
     def __post_init__(self) -> None:
         if self.issue_group_size < 1:
@@ -180,6 +181,7 @@ class _MatmulConfig:
     target_waves: int | None = None
     enable_split_barriers: bool = False
     phased_dma_schedule: PhasedDmaSchedule | None = None
+    coalesced_mfma_output: bool = False
 
     def __post_init__(self) -> None:
         _validate_positive_shape(self)
@@ -302,6 +304,8 @@ class _MatmulConfig:
     @property
     def data_lds_bytes(self) -> int:
         if self.use_dma_lds:
+            if self.coalesced_mfma_output:
+                return _dma_cta_buffer_dwords(self) * _dma_buffer_count(self) * 4
             one_buffer = (
                 self.wave_k_tiles
                 * (self.BM * self.wave_m_tiles + self.BN * self.wave_n_tiles)
@@ -365,6 +369,7 @@ def _validate_wave_tile_counts(cfg: _MatmulConfig) -> None:
 
 def _validate_tile_shape(cfg: _MatmulConfig) -> None:
     _validate_mxfp4_shape(cfg)
+    _validate_coalesced_mfma_output(cfg)
     if not _is_power_of_two(cfg.BN):
         raise ValueError(
             f"BN must be a positive power of two (for the wave-id "
@@ -412,6 +417,23 @@ def _validate_tile_shape(cfg: _MatmulConfig) -> None:
         )
 
 
+def _validate_coalesced_mfma_output(cfg: _MatmulConfig) -> None:
+    if not cfg.coalesced_mfma_output:
+        return
+    if cfg.mma.name != "mfma_gfx950" or cfg.input_type != "f16":
+        raise ValueError("coalesced MFMA output requires gfx950 f16 MFMA")
+    if cfg.output_type != "f16":
+        raise ValueError("coalesced MFMA output requires f16 output")
+    if (
+        cfg.mma.wave_size != 64
+        or cfg.mma.acc_registers != 4
+        or cfg.wave_m_tiles != 8
+        or cfg.wave_n_tiles != 8
+        or cfg.BM != cfg.BN
+    ):
+        raise ValueError("coalesced MFMA output requires a square 8x8 wave64 tile")
+
+
 def _validate_phased_dma_schedule(cfg: _MatmulConfig) -> None:
     schedule = cfg.phased_dma_schedule
     if schedule is None:
@@ -420,6 +442,12 @@ def _validate_phased_dma_schedule(cfg: _MatmulConfig) -> None:
         raise ValueError("phased DMA schedule requires use_dma_lds")
     if schedule.delayed_waves > cfg.waves_per_workgroup:
         raise ValueError("phased DMA delayed waves exceed workgroup wave count")
+    if schedule.subpanel_pipeline and cfg.uses_packed_mxfp4:
+        raise ValueError("DMA subpanel pipeline does not support packed MXFP4")
+    if schedule.subpanel_pipeline and cfg.wave_k_tiles != 2:
+        raise ValueError("DMA subpanel pipeline requires two K32 phases")
+    if schedule.subpanel_pipeline and cfg.wave_m_tiles < 2:
+        raise ValueError("DMA subpanel pipeline requires at least two M tiles per wave")
 
 
 def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
@@ -434,6 +462,13 @@ def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
         raise ValueError("DMA LDS A slots must divide evenly across waves")
     if b_slots % cfg.waves_per_workgroup != 0:
         raise ValueError("DMA LDS B slots must divide evenly across waves")
+    if _uses_dma_subpanel_pipeline(cfg):
+        block_m_tiles = cfg.BM * cfg.wave_m_tiles
+        block_n_tiles = cfg.BN * cfg.wave_n_tiles
+        if block_m_tiles % cfg.waves_per_workgroup != 0:
+            raise ValueError("DMA LDS A subpanels must divide evenly across waves")
+        if block_n_tiles % cfg.waves_per_workgroup != 0:
+            raise ValueError("DMA LDS B subpanels must divide evenly across waves")
 
 
 def _validate_mxfp4_shape(cfg: _MatmulConfig) -> None:
@@ -642,6 +677,24 @@ def _reference_tile(
     return tuple(tile)
 
 
+def _store_reference_tile(
+    out: list[float],
+    cfg: _MatmulConfig,
+    tile: tuple[float, ...],
+    m_tile: int,
+    n_tile: int,
+    coalesced_mfma_output: bool,
+) -> None:
+    if not coalesced_mfma_output:
+        out.extend(tile)
+        return
+    for mi in range(16):
+        for nj in range(16):
+            m = m_tile * 16 + mi
+            n = n_tile * 16 + nj
+            out[n * cfg.M + m] = tile[mi * 16 + nj]
+
+
 def compute_wmma_f16_matmul_reference_buffer(
     M: int,
     N: int,
@@ -659,6 +712,7 @@ def compute_wmma_f16_matmul_reference_buffer(
     output_type: str = "f32",
     cta_swizzle_xcds: int = 1,
     cta_group_m: int = 1,
+    coalesced_mfma_output: bool = False,
 ) -> tuple[float, ...]:
     cfg = _MatmulConfig(
         M=M,
@@ -676,6 +730,7 @@ def compute_wmma_f16_matmul_reference_buffer(
         output_type=output_type,
         cta_swizzle_xcds=cta_swizzle_xcds,
         cta_group_m=cta_group_m,
+        coalesced_mfma_output=coalesced_mfma_output,
     )
     a_values, b_values = generate_wmma_f16_matmul_inputs(
         M,
@@ -689,7 +744,7 @@ def compute_wmma_f16_matmul_reference_buffer(
     b_scales: tuple[int, ...] | None = None
     if cfg.uses_packed_mxfp4:
         a_scales, b_scales = generate_mxfp4_scale_inputs(M, N, K)
-    out: list[float] = []
+    out: list[float] = [0.0] * cfg.total_elements if coalesced_mfma_output else []
     for wg_m in range(cfg.M_blocks):
         for wg_n in range(cfg.N_blocks):
             for wave_id in range(cfg.waves_per_workgroup):
@@ -701,16 +756,22 @@ def compute_wmma_f16_matmul_reference_buffer(
                     for j in range(cfg.wave_n_tiles):
                         m_tile = m_base + m_wave * cfg.wave_m_tiles + i
                         n_tile = n_base + n_wave * cfg.wave_n_tiles + j
-                        out.extend(
-                            _reference_tile(
-                                cfg,
-                                a_values,
-                                b_values,
-                                m_tile,
-                                n_tile,
-                                a_scales,
-                                b_scales,
-                            )
+                        tile = _reference_tile(
+                            cfg,
+                            a_values,
+                            b_values,
+                            m_tile,
+                            n_tile,
+                            a_scales,
+                            b_scales,
+                        )
+                        _store_reference_tile(
+                            out,
+                            cfg,
+                            tile,
+                            m_tile,
+                            n_tile,
+                            coalesced_mfma_output,
                         )
     if cfg.output_type == "f16":
         return tuple(_round_f16(value) for value in out)
@@ -784,6 +845,49 @@ def _emit_cta_coords(
     )
 
 
+def _emit_c_ptr(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    c_arg: dsl.Value,
+    wg_m: dsl.Expr,
+    wg_n: dsl.Expr,
+    wave_id: dsl.Expr,
+    m_wave: dsl.Expr,
+    n_wave: dsl.Expr,
+    bindings: dict[dsl.Expr, dsl.Value],
+) -> dsl.Value:
+    if cfg.coalesced_mfma_output:
+        wave_m = 16 * cfg.wave_m_tiles
+        wave_n = 16 * cfg.wave_n_tiles
+        c_wave_off = bld.index_expr(
+            wg_m * (cfg.BM * wave_m)
+            + n_wave * wave_m
+            + (wg_n * (cfg.BN * wave_n) + m_wave * wave_n) * cfg.M,
+            bindings=bindings,
+        )
+        return bld.ptr_add(c_arg, c_wave_off)
+
+    c_cta_off = bld.index_expr(
+        wg_m * (cfg.N_blocks * cfg.waves_per_workgroup * cfg.tiles_per_wave * 256)
+        + wg_n * (cfg.waves_per_workgroup * cfg.tiles_per_wave * 256),
+        bindings=bindings,
+    )
+    c_base = bld.ptr_add(c_arg, c_cta_off)
+    if cfg.use_buffer:
+        c_base = _wrap_in_buffer(
+            bld,
+            c_base,
+            cfg.waves_per_workgroup * cfg.tiles_per_wave * 256,
+            _output_element_type(cfg),
+            cfg.c_element_bytes,
+        )
+    c_wave_off = bld.index_expr(
+        wave_id * (cfg.tiles_per_wave * 256),
+        bindings=bindings,
+    )
+    return bld.ptr_add(c_base, c_wave_off)
+
+
 def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
     """Compute per-wave A/B/C pointer coordinates."""
     a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
@@ -804,6 +908,14 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
             cfg.input_element_type,
             cfg.input_element_bytes,
         )
+        if cfg.coalesced_mfma_output:
+            c_arg = _wrap_in_buffer(
+                bld,
+                c_arg,
+                cfg.c_elements,
+                _output_element_type(cfg),
+                cfg.c_element_bytes,
+            )
 
     wi_val = bld.assume_range(
         bld.workitem_id(axis=0, width=cfg.mma.wave_size),
@@ -844,25 +956,17 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
     b_off = bld.index_expr(lane_mod16 * cfg.storage_K + lane_k_off, bindings=sym_to_val)
     b_lane_base = bld.ptr_add(b_tile_base, b_off)
 
-    c_cta_off = bld.index_expr(
-        wg_m * (cfg.N_blocks * cfg.waves_per_workgroup * cfg.tiles_per_wave * 256)
-        + wg_n * (cfg.waves_per_workgroup * cfg.tiles_per_wave * 256),
-        bindings=sym_to_val,
+    c_ptr = _emit_c_ptr(
+        bld,
+        cfg,
+        c_arg,
+        wg_m,
+        wg_n,
+        wave_id,
+        m_wave,
+        n_wave,
+        sym_to_val,
     )
-    c_base = bld.ptr_add(c_arg, c_cta_off)
-    if cfg.use_buffer:
-        c_base = _wrap_in_buffer(
-            bld,
-            c_base,
-            cfg.waves_per_workgroup * cfg.tiles_per_wave * 256,
-            _output_element_type(cfg),
-            cfg.c_element_bytes,
-        )
-    c_wave_off = bld.index_expr(
-        wave_id * (cfg.tiles_per_wave * 256),
-        bindings=sym_to_val,
-    )
-    c_ptr = bld.ptr_add(c_base, c_wave_off)
 
     return _TileCoords(
         wi=wi_val,
@@ -893,6 +997,31 @@ class _LdsStaging:
     b_dma_read_ptrs: tuple[dsl.Value, ...]
     a_dma_src_ptrs: tuple[dsl.Value, ...] = ()
     b_dma_src_ptrs: tuple[dsl.Value, ...] = ()
+    a_dma_lds_byte_ptrs: tuple[dsl.Value, ...] = ()
+    b_dma_lds_byte_ptrs: tuple[dsl.Value, ...] = ()
+    dma_lds_wave_byte_base: dsl.Value | None = None
+    dma_read_lds: dsl.Value | None = None
+    a_dma_read_base_offset: dsl.Value | None = None
+    b_dma_read_base_offset: dsl.Value | None = None
+    a_dma_read_offsets: tuple[int, ...] = ()
+    b_dma_read_offsets: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class _DmaCtaStagingPtrs:
+    a_src: tuple[dsl.Value, ...]
+    b_src: tuple[dsl.Value, ...]
+    a_lds: tuple[dsl.Value, ...]
+    b_lds: tuple[dsl.Value, ...]
+    a_lds_bytes: tuple[dsl.Value, ...]
+    b_lds_bytes: tuple[dsl.Value, ...]
+    lds_wave_byte_base: dsl.Value
+    a_read: tuple[dsl.Value, ...]
+    b_read: tuple[dsl.Value, ...]
+    a_read_base_offset: dsl.Value
+    b_read_base_offset: dsl.Value
+    a_read_offsets: tuple[int, ...]
+    b_read_offsets: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -944,6 +1073,8 @@ def _dma_cta_geometry(cfg: _MatmulConfig) -> _DmaCtaGeometry:
     a_total_slots = cfg.wave_k_tiles * block_m_tiles
     b_total_slots = cfg.wave_k_tiles * block_n_tiles
     dwords = cfg.mma.lds_dwords_per_frag
+    if cfg.coalesced_mfma_output:
+        dwords += cfg.mma.ab_registers
     return _DmaCtaGeometry(
         block_m_tiles=block_m_tiles,
         block_n_tiles=block_n_tiles,
@@ -963,6 +1094,11 @@ def _dma_cta_buffer_dwords(cfg: _MatmulConfig) -> int:
 
 def _uses_phased_dma_schedule(cfg: _MatmulConfig) -> bool:
     return cfg.phased_dma_schedule is not None
+
+
+def _uses_dma_subpanel_pipeline(cfg: _MatmulConfig) -> bool:
+    schedule = cfg.phased_dma_schedule
+    return schedule is not None and schedule.subpanel_pipeline
 
 
 def _dma_buffer_count(cfg: _MatmulConfig) -> int:
@@ -991,19 +1127,46 @@ def _dma_slot_major_minor(
     return major, minor
 
 
-def _emit_dma_cta_staging_ptrs(
+@dataclass(frozen=True)
+class _DmaCtaStagingContext:
+    bld: dsl.FunctionBuilder
+    cfg: _MatmulConfig
+    coords: _TileCoords
+    lds: dsl.Value
+    lds_bytes: dsl.Value
+    geom: _DmaCtaGeometry
+    first_bindings: dict[dsl.Expr, dsl.Value]
+    bindings: dict[dsl.Expr, dsl.Value]
+    wg_m: dsl.Expr
+    wg_n: dsl.Expr
+    wave_id: dsl.Expr
+    wave_id_uniform: dsl.Expr
+    lane: dsl.Expr
+    lane_mod16: dsl.Expr
+    lane_k_group: dsl.Expr
+    src_row: dsl.Expr
+    src_k_group: int | dsl.Expr
+    read_k_group: int | dsl.Expr
+    lds_wave_byte_base: dsl.Value
+    chunks_per_row: int
+
+
+@dataclass(frozen=True)
+class _DmaCtaCommonPtrs:
+    a_src: tuple[dsl.Value, ...]
+    b_src: tuple[dsl.Value, ...]
+    a_lds: tuple[dsl.Value, ...]
+    b_lds: tuple[dsl.Value, ...]
+    a_lds_bytes: tuple[dsl.Value, ...]
+    b_lds_bytes: tuple[dsl.Value, ...]
+
+
+def _make_dma_cta_staging_context(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
     lds: dsl.Value,
-) -> tuple[
-    tuple[dsl.Value, ...],
-    tuple[dsl.Value, ...],
-    tuple[dsl.Value, ...],
-    tuple[dsl.Value, ...],
-    tuple[dsl.Value, ...],
-    tuple[dsl.Value, ...],
-]:
+) -> _DmaCtaStagingContext:
     wi = dsl.sym("wi")
     wi_first = dsl.sym("wi_first")
     wg_m = dsl.sym("wg_m")
@@ -1021,73 +1184,320 @@ def _emit_dma_cta_staging_ptrs(
     src_k_group = _dma_logical_col(cfg, src_row, src_k_group)
     read_k_group = _dma_logical_col(cfg, lane_mod16, lane_k_group)
     geom = _dma_cta_geometry(cfg)
+    lds_bytes = bld.shared_memory_base(dsl.i8())
+    lds_wave_byte_offset = bld.index_expr(
+        4 * wave_id_uniform * geom.dwords_per_slot,
+        bindings=first_bindings,
+    )
+    lds_wave_byte_base = bld.cast(
+        lds_wave_byte_offset, dsl.i32(), dsl.CastKind.IntConvert
+    )
+    return _DmaCtaStagingContext(
+        bld=bld,
+        cfg=cfg,
+        coords=coords,
+        lds=lds,
+        lds_bytes=lds_bytes,
+        geom=geom,
+        first_bindings=first_bindings,
+        bindings=bindings,
+        wg_m=wg_m,
+        wg_n=wg_n,
+        wave_id=wave_id,
+        wave_id_uniform=wave_id_uniform,
+        lane=lane,
+        lane_mod16=lane_mod16,
+        lane_k_group=lane_k_group,
+        src_row=src_row,
+        src_k_group=src_k_group,
+        read_k_group=read_k_group,
+        lds_wave_byte_base=lds_wave_byte_base,
+        chunks_per_row=chunks_per_row,
+    )
 
-    def dma_lds_ptr(slot_per_wave: int, base: int) -> dsl.Value:
-        slot_off = bld.index_expr(
+
+def _dma_lds_ptr(
+    ctx: _DmaCtaStagingContext, slot_per_wave: int, base: int
+) -> dsl.Value:
+    slot_off = ctx.bld.index_expr(
+        base
+        + _dma_slot_expr(ctx.cfg, slot_per_wave, ctx.wave_id_uniform)
+        * ctx.geom.dwords_per_slot,
+        bindings=ctx.first_bindings,
+    )
+    return ctx.bld.ptr_add(ctx.lds, slot_off)
+
+
+def _dma_lds_byte_ptr(
+    ctx: _DmaCtaStagingContext, slot_per_wave: int, base: int
+) -> dsl.Value:
+    byte_offset = 4 * (
+        base + slot_per_wave * ctx.cfg.waves_per_workgroup * ctx.geom.dwords_per_slot
+    )
+    return ctx.bld.ptr_add(ctx.lds_bytes, ctx.bld.constant(dsl.i32(), byte_offset))
+
+
+def _a_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
+    cfg = ctx.cfg
+    slot = _dma_slot_expr(cfg, slot_per_wave, ctx.wave_id)
+    if cfg.coalesced_mfma_output:
+        row = slot * cfg.wave_m_tiles + dsl.floor(
+            ctx.lane / (ctx.chunks_per_row * cfg.wave_k_tiles)
+        )
+        k_group = dsl.mod(ctx.lane, ctx.chunks_per_row * cfg.wave_k_tiles)
+        off = ctx.bld.index_expr(
+            ctx.wg_m * (ctx.geom.block_m_tiles * 16 * cfg.storage_K)
+            + row * cfg.storage_K
+            + k_group * cfg.storage_lane_k_elems,
+            bindings=ctx.bindings,
+        )
+        return ctx.bld.ptr_add(ctx.coords.a_base, off)
+    k_tile, m_tile = _dma_slot_major_minor(slot, ctx.geom.block_m_tiles)
+    off = ctx.bld.index_expr(
+        ctx.wg_m * (ctx.geom.block_m_tiles * 16 * cfg.storage_K)
+        + m_tile * (16 * cfg.storage_K)
+        + k_tile * cfg.storage_k_tile
+        + ctx.src_row * cfg.storage_K
+        + ctx.src_k_group * cfg.storage_lane_k_elems,
+        bindings=ctx.bindings,
+    )
+    return ctx.bld.ptr_add(ctx.coords.a_base, off)
+
+
+def _b_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
+    cfg = ctx.cfg
+    slot = _dma_slot_expr(cfg, slot_per_wave, ctx.wave_id)
+    if cfg.coalesced_mfma_output:
+        row = slot * cfg.wave_n_tiles + dsl.floor(
+            ctx.lane / (ctx.chunks_per_row * cfg.wave_k_tiles)
+        )
+        k_group = dsl.mod(ctx.lane, ctx.chunks_per_row * cfg.wave_k_tiles)
+        off = ctx.bld.index_expr(
+            ctx.wg_n * (ctx.geom.block_n_tiles * 16 * cfg.storage_K)
+            + row * cfg.storage_K
+            + k_group * cfg.storage_lane_k_elems,
+            bindings=ctx.bindings,
+        )
+        return ctx.bld.ptr_add(ctx.coords.b_base, off)
+    k_tile, n_tile = _dma_slot_major_minor(slot, ctx.geom.block_n_tiles)
+    off = ctx.bld.index_expr(
+        ctx.wg_n * (ctx.geom.block_n_tiles * 16 * cfg.storage_K)
+        + n_tile * (16 * cfg.storage_K)
+        + k_tile * cfg.storage_k_tile
+        + ctx.src_row * cfg.storage_K
+        + ctx.src_k_group * cfg.storage_lane_k_elems,
+        bindings=ctx.bindings,
+    )
+    return ctx.bld.ptr_add(ctx.coords.b_base, off)
+
+
+def _dma_read_ptr(
+    ctx: _DmaCtaStagingContext, slot: int | dsl.Expr, base: int
+) -> dsl.Value:
+    slot_off = ctx.bld.index_expr(
+        base
+        + slot * ctx.geom.dwords_per_slot
+        + ctx.lane_mod16 * ctx.cfg.storage_k_tile_dwords
+        + ctx.read_k_group * ctx.cfg.storage_lane_k_dwords,
+        bindings=ctx.bindings,
+    )
+    return ctx.bld.ptr_add(ctx.lds, slot_off)
+
+
+def _dma_read_base_offset(
+    ctx: _DmaCtaStagingContext, slot: int | dsl.Expr, base: int
+) -> dsl.Value:
+    offset = ctx.bld.index_expr(
+        4
+        * (
             base
-            + _dma_slot_expr(cfg, slot_per_wave, wave_id_uniform)
-            * geom.dwords_per_slot,
-            bindings=first_bindings,
-        )
-        return bld.ptr_add(lds, slot_off)
+            + slot * ctx.geom.dwords_per_slot
+            + ctx.lane_mod16 * ctx.cfg.storage_k_tile_dwords
+            + ctx.read_k_group * ctx.cfg.storage_lane_k_dwords
+        ),
+        bindings=ctx.bindings,
+    )
+    return ctx.bld.cast(
+        offset,
+        dsl.simd_type(dsl.i32(), ctx.cfg.mma.wave_size),
+        dsl.CastKind.IntConvert,
+    )
 
-    def a_dma_src_ptr(slot_per_wave: int) -> dsl.Value:
-        slot = _dma_slot_expr(cfg, slot_per_wave, wave_id)
-        k_tile, m_tile = _dma_slot_major_minor(slot, geom.block_m_tiles)
-        off = bld.index_expr(
-            wg_m * (geom.block_m_tiles * 16 * cfg.storage_K)
-            + m_tile * (16 * cfg.storage_K)
-            + k_tile * cfg.storage_k_tile
-            + src_row * cfg.storage_K
-            + src_k_group * cfg.storage_lane_k_elems,
-            bindings=bindings,
-        )
-        return bld.ptr_add(coords.a_base, off)
 
-    def b_dma_src_ptr(slot_per_wave: int) -> dsl.Value:
-        slot = _dma_slot_expr(cfg, slot_per_wave, wave_id)
-        k_tile, n_tile = _dma_slot_major_minor(slot, geom.block_n_tiles)
-        off = bld.index_expr(
-            wg_n * (geom.block_n_tiles * 16 * cfg.storage_K)
-            + n_tile * (16 * cfg.storage_K)
-            + k_tile * cfg.storage_k_tile
-            + src_row * cfg.storage_K
-            + src_k_group * cfg.storage_lane_k_elems,
-            bindings=bindings,
-        )
-        return bld.ptr_add(coords.b_base, off)
+def _regular_dma_read_offsets(
+    cfg: _MatmulConfig,
+    geom: _DmaCtaGeometry,
+    block_tiles: int,
+    wave_tiles: int,
+) -> tuple[int, ...]:
+    return tuple(
+        4 * (k * block_tiles + tile) * geom.dwords_per_slot
+        for k in range(cfg.wave_k_tiles)
+        for tile in range(wave_tiles)
+    )
 
-    def dma_read_ptr(slot: int | dsl.Expr, base: int) -> dsl.Value:
-        slot_off = bld.index_expr(
+
+def _coalesced_dma_read_ptr(
+    ctx: _DmaCtaStagingContext,
+    tile: int,
+    phase: int,
+    group: dsl.Expr,
+    base: int,
+) -> dsl.Value:
+    cfg = ctx.cfg
+    line = group * 16 + ctx.lane_mod16
+    tile_stride = cfg.wave_k_tiles * cfg.storage_k_tile_dwords
+    off = ctx.bld.index_expr(
+        base
+        + line * ctx.geom.dwords_per_slot
+        + tile * tile_stride
+        + phase * cfg.storage_k_tile_dwords
+        + ctx.lane_k_group * cfg.storage_lane_k_dwords,
+        bindings=ctx.bindings,
+    )
+    return ctx.bld.ptr_add(ctx.lds, off)
+
+
+def _coalesced_dma_read_base_offset(
+    ctx: _DmaCtaStagingContext, group: dsl.Expr, base: int
+) -> dsl.Value:
+    line = group * 16 + ctx.lane_mod16
+    offset = ctx.bld.index_expr(
+        4
+        * (
             base
-            + slot * geom.dwords_per_slot
-            + lane_mod16 * cfg.storage_k_tile_dwords
-            + read_k_group * cfg.storage_lane_k_dwords,
-            bindings=bindings,
-        )
-        return bld.ptr_add(lds, slot_off)
+            + line * ctx.geom.dwords_per_slot
+            + ctx.lane_k_group * ctx.cfg.storage_lane_k_dwords
+        ),
+        bindings=ctx.bindings,
+    )
+    return ctx.bld.cast(
+        offset,
+        dsl.simd_type(dsl.i32(), ctx.cfg.mma.wave_size),
+        dsl.CastKind.IntConvert,
+    )
 
-    m_wave = dsl.floor(wave_id / cfg.BN)
-    n_wave = dsl.mod(wave_id, cfg.BN)
+
+def _emit_dma_cta_common_ptrs(
+    ctx: _DmaCtaStagingContext,
+) -> _DmaCtaCommonPtrs:
+    geom = ctx.geom
+    return _DmaCtaCommonPtrs(
+        a_src=tuple(_a_dma_src_ptr(ctx, i) for i in range(geom.a_slots_per_wave)),
+        b_src=tuple(_b_dma_src_ptr(ctx, i) for i in range(geom.b_slots_per_wave)),
+        a_lds=tuple(_dma_lds_ptr(ctx, i, 0) for i in range(geom.a_slots_per_wave)),
+        b_lds=tuple(
+            _dma_lds_ptr(ctx, i, geom.b_lds_base) for i in range(geom.b_slots_per_wave)
+        ),
+        a_lds_bytes=tuple(
+            _dma_lds_byte_ptr(ctx, i, 0) for i in range(geom.a_slots_per_wave)
+        ),
+        b_lds_bytes=tuple(
+            _dma_lds_byte_ptr(ctx, i, geom.b_lds_base)
+            for i in range(geom.b_slots_per_wave)
+        ),
+    )
+
+
+def _emit_coalesced_dma_cta_staging_ptrs(
+    ctx: _DmaCtaStagingContext,
+) -> _DmaCtaStagingPtrs:
+    cfg = ctx.cfg
+    geom = ctx.geom
+    m_wave = dsl.floor(ctx.wave_id / cfg.BN)
+    n_wave = dsl.mod(ctx.wave_id, cfg.BN)
+    tile_stride = cfg.wave_k_tiles * cfg.storage_k_tile_dwords
+    a_read_base_offset = _coalesced_dma_read_base_offset(ctx, n_wave, 0)
+    b_read_base_offset = _coalesced_dma_read_base_offset(ctx, m_wave, geom.b_lds_base)
+    a_read_offsets = tuple(
+        4 * (i * tile_stride + k * cfg.storage_k_tile_dwords)
+        for k in range(cfg.wave_k_tiles)
+        for i in range(cfg.wave_m_tiles)
+    )
+    b_read_offsets = tuple(
+        4 * (j * tile_stride + k * cfg.storage_k_tile_dwords)
+        for k in range(cfg.wave_k_tiles)
+        for j in range(cfg.wave_n_tiles)
+    )
+    common = _emit_dma_cta_common_ptrs(ctx)
+    return _DmaCtaStagingPtrs(
+        a_src=common.a_src,
+        b_src=common.b_src,
+        a_lds=common.a_lds,
+        b_lds=common.b_lds,
+        a_lds_bytes=common.a_lds_bytes,
+        b_lds_bytes=common.b_lds_bytes,
+        lds_wave_byte_base=ctx.lds_wave_byte_base,
+        a_read=tuple(
+            _coalesced_dma_read_ptr(ctx, i, k, n_wave, 0)
+            for k in range(cfg.wave_k_tiles)
+            for i in range(cfg.wave_m_tiles)
+        ),
+        b_read=tuple(
+            _coalesced_dma_read_ptr(ctx, j, k, m_wave, geom.b_lds_base)
+            for k in range(cfg.wave_k_tiles)
+            for j in range(cfg.wave_n_tiles)
+        ),
+        a_read_base_offset=a_read_base_offset,
+        b_read_base_offset=b_read_base_offset,
+        a_read_offsets=a_read_offsets,
+        b_read_offsets=b_read_offsets,
+    )
+
+
+def _emit_regular_dma_cta_staging_ptrs(
+    ctx: _DmaCtaStagingContext,
+) -> _DmaCtaStagingPtrs:
+    cfg = ctx.cfg
+    geom = ctx.geom
+    a_wave = dsl.floor(ctx.wave_id / cfg.BN)
+    b_wave = dsl.mod(ctx.wave_id, cfg.BN)
     a_read_slots = tuple(
-        k * geom.block_m_tiles + m_wave * cfg.wave_m_tiles + i
+        k * geom.block_m_tiles + a_wave * cfg.wave_m_tiles + i
         for k in range(cfg.wave_k_tiles)
         for i in range(cfg.wave_m_tiles)
     )
     b_read_slots = tuple(
-        k * geom.block_n_tiles + n_wave * cfg.wave_n_tiles + j
+        k * geom.block_n_tiles + b_wave * cfg.wave_n_tiles + j
         for k in range(cfg.wave_k_tiles)
         for j in range(cfg.wave_n_tiles)
     )
-
-    return (
-        tuple(a_dma_src_ptr(i) for i in range(geom.a_slots_per_wave)),
-        tuple(b_dma_src_ptr(i) for i in range(geom.b_slots_per_wave)),
-        tuple(dma_lds_ptr(i, 0) for i in range(geom.a_slots_per_wave)),
-        tuple(dma_lds_ptr(i, geom.b_lds_base) for i in range(geom.b_slots_per_wave)),
-        tuple(dma_read_ptr(slot, 0) for slot in a_read_slots),
-        tuple(dma_read_ptr(slot, geom.b_lds_base) for slot in b_read_slots),
+    common = _emit_dma_cta_common_ptrs(ctx)
+    return _DmaCtaStagingPtrs(
+        a_src=common.a_src,
+        b_src=common.b_src,
+        a_lds=common.a_lds,
+        b_lds=common.b_lds,
+        a_lds_bytes=common.a_lds_bytes,
+        b_lds_bytes=common.b_lds_bytes,
+        lds_wave_byte_base=ctx.lds_wave_byte_base,
+        a_read=tuple(_dma_read_ptr(ctx, slot, 0) for slot in a_read_slots),
+        b_read=tuple(
+            _dma_read_ptr(ctx, slot, geom.b_lds_base) for slot in b_read_slots
+        ),
+        a_read_base_offset=_dma_read_base_offset(ctx, a_wave * cfg.wave_m_tiles, 0),
+        b_read_base_offset=_dma_read_base_offset(
+            ctx, b_wave * cfg.wave_n_tiles, geom.b_lds_base
+        ),
+        a_read_offsets=_regular_dma_read_offsets(
+            cfg, geom, geom.block_m_tiles, cfg.wave_m_tiles
+        ),
+        b_read_offsets=_regular_dma_read_offsets(
+            cfg, geom, geom.block_n_tiles, cfg.wave_n_tiles
+        ),
     )
+
+
+def _emit_dma_cta_staging_ptrs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    lds: dsl.Value,
+) -> _DmaCtaStagingPtrs:
+    ctx = _make_dma_cta_staging_context(bld, cfg, coords, lds)
+    if cfg.coalesced_mfma_output:
+        return _emit_coalesced_dma_cta_staging_ptrs(ctx)
+    return _emit_regular_dma_cta_staging_ptrs(ctx)
 
 
 def _emit_lds_staging(
@@ -1128,14 +1538,7 @@ def _emit_lds_staging(
             b_dma_read_ptrs=(),
         )
 
-    (
-        a_dma_src_ptrs,
-        b_dma_src_ptrs,
-        a_dma_lds_ptrs,
-        b_dma_lds_ptrs,
-        a_dma_read_ptrs,
-        b_dma_read_ptrs,
-    ) = _emit_dma_cta_staging_ptrs(
+    dma = _emit_dma_cta_staging_ptrs(
         bld,
         cfg,
         coords,
@@ -1145,12 +1548,20 @@ def _emit_lds_staging(
         reg_simd_type=reg_simd_type,
         a_lds_ptrs=a_lds_ptrs,
         b_lds_ptrs=b_lds_ptrs,
-        a_dma_lds_ptrs=a_dma_lds_ptrs,
-        b_dma_lds_ptrs=b_dma_lds_ptrs,
-        a_dma_read_ptrs=a_dma_read_ptrs,
-        b_dma_read_ptrs=b_dma_read_ptrs,
-        a_dma_src_ptrs=a_dma_src_ptrs,
-        b_dma_src_ptrs=b_dma_src_ptrs,
+        a_dma_lds_ptrs=dma.a_lds,
+        b_dma_lds_ptrs=dma.b_lds,
+        a_dma_read_ptrs=dma.a_read,
+        b_dma_read_ptrs=dma.b_read,
+        a_dma_src_ptrs=dma.a_src,
+        b_dma_src_ptrs=dma.b_src,
+        a_dma_lds_byte_ptrs=dma.a_lds_bytes,
+        b_dma_lds_byte_ptrs=dma.b_lds_bytes,
+        dma_lds_wave_byte_base=dma.lds_wave_byte_base,
+        dma_read_lds=bld.shared_memory_base(dsl.i8()),
+        a_dma_read_base_offset=dma.a_read_base_offset,
+        b_dma_read_base_offset=dma.b_read_base_offset,
+        a_dma_read_offsets=dma.a_read_offsets,
+        b_dma_read_offsets=dma.b_read_offsets,
     )
 
 
@@ -1274,13 +1685,33 @@ def _dma_issue(
     request_offset: int = 0,
 ) -> list[dsl.Value]:
     dep = after if after is not None else bld.token()
-    dma_tokens: list[dsl.Value] = []
     a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
     b_lds_ptrs = _offset_ptrs(bld, staging.b_dma_lds_ptrs, lds_offset)
     requests = [
         *zip(a_ptrs, a_lds_ptrs, strict=True),
         *zip(b_ptrs, b_lds_ptrs, strict=True),
     ]
+    return _dma_issue_requests(
+        bld,
+        cfg,
+        requests,
+        after=dep,
+        in_loop=in_loop,
+        request_offset=request_offset,
+    )
+
+
+def _dma_issue_requests(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    requests: list[tuple[dsl.Value, dsl.Value]],
+    *,
+    after: dsl.Value | None,
+    in_loop: bool,
+    request_offset: int,
+) -> list[dsl.Value]:
+    dep = after if after is not None else bld.token()
+    dma_tokens: list[dsl.Value] = []
     for request, (ptr, lds_ptr) in enumerate(requests, start=request_offset + 1):
         delay_cycles, overlap_cycles, skip_threshold = _dma_issue_delay_options(
             cfg, request, in_loop
@@ -1472,10 +1903,49 @@ class _InitialLoadState:
     next_scale_token: dsl.Value | None = None
 
 
+@dataclass(frozen=True)
+class _DmaSubpanelTokens:
+    a: tuple[dsl.Value, ...]
+    b: tuple[dsl.Value, ...]
+
+
+@dataclass(frozen=True)
+class _DmaSubpanelReadBases:
+    a: dsl.Value
+    b: dsl.Value
+
+
+@dataclass(frozen=True)
+class _DmaSubpanelLoopState:
+    accs: tuple[dsl.Value, ...]
+    a_frags: tuple[dsl.Value, ...]
+    b_frags: tuple[dsl.Value, ...]
+    a_read: dsl.Value
+    b_read: dsl.Value
+    current_access: dsl.Value
+    current_read_bases: _DmaSubpanelReadBases
+    current_lds_offset: dsl.Value
+    current_dma_lds_byte_base: dsl.Value
+    ready: _DmaSubpanelTokens
+
+
+@dataclass(frozen=True)
+class _DmaSubpanelReuseState:
+    accs: tuple[dsl.Value, ...]
+    a1_frags: tuple[dsl.Value, ...]
+    b1_frags: tuple[dsl.Value, ...]
+    reuse_access: dsl.Value
+    next_a0: dsl.Value
+    next_a1_early: dsl.Value | None
+    release_mmas: int
+
+
 def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
+    a_role = 1 if cfg.coalesced_mfma_output else 0
+    b_role = 0 if cfg.coalesced_mfma_output else 1
     return _KernelTypes(
         a=dsl.fragment_type(
-            0,
+            a_role,
             cfg.input_element_type,
             16,
             16,
@@ -1483,7 +1953,7 @@ def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
             cfg.mma.ab_registers,
         ),
         b=dsl.fragment_type(
-            1,
+            b_role,
             cfg.input_element_type,
             16,
             16,
@@ -1494,6 +1964,24 @@ def _kernel_types(cfg: _MatmulConfig) -> _KernelTypes:
             2, dsl.f32(), 16, 16, cfg.mma.wave_size, cfg.mma.acc_registers
         ),
     )
+
+
+def _mma_acc_index(cfg: _MatmulConfig, i: int, j: int) -> int:
+    if cfg.coalesced_mfma_output:
+        return j * cfg.wave_m_tiles + i
+    return i * cfg.wave_n_tiles + j
+
+
+def _emit_mma(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    af: dsl.Value,
+    bf: dsl.Value,
+    acc: dsl.Value,
+) -> dsl.Value:
+    if cfg.coalesced_mfma_output:
+        return bld.mma(cfg.mma.kind, bf, af, acc)
+    return bld.mma(cfg.mma.kind, af, bf, acc)
 
 
 def _initial_tile_ptrs(
@@ -1522,6 +2010,91 @@ def _offset_ptrs(
         bld.constant(dsl.i32(), offset) if isinstance(offset, int) else offset
     )
     return tuple(bld.ptr_add(ptr, offset_value) for ptr in ptrs)
+
+
+def _dma_subpanel_read_bases(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    lds_offset: int | dsl.Value,
+) -> _DmaSubpanelReadBases:
+    assert (
+        staging.a_dma_read_base_offset is not None
+        and staging.b_dma_read_base_offset is not None
+    )
+    offsets = _DmaSubpanelReadBases(
+        staging.a_dma_read_base_offset, staging.b_dma_read_base_offset
+    )
+    if not (isinstance(lds_offset, int) and lds_offset == 0):
+        offset = (
+            bld.constant(dsl.i32(), 4 * lds_offset)
+            if isinstance(lds_offset, int)
+            else bld.muli(lds_offset, bld.constant(dsl.i32(), 4))
+        )
+        offsets = _DmaSubpanelReadBases(
+            bld.addi(offsets.a, offset), bld.addi(offsets.b, offset)
+        )
+    maximum = 4 * _dma_cta_buffer_dwords(cfg) * _dma_buffer_count(cfg) - 1
+    return _DmaSubpanelReadBases(
+        bld.assume_range(offsets.a, 0, maximum),
+        bld.assume_range(offsets.b, 0, maximum),
+    )
+
+
+def _next_dma_subpanel_read_state(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    current_lds_offset: dsl.Value,
+) -> tuple[_DmaSubpanelReadBases, dsl.Value]:
+    assert _dma_buffer_count(cfg) == 2
+    buffer_dwords = _dma_cta_buffer_dwords(cfg)
+    next_lds_offset = bld.subi(
+        bld.constant(dsl.i32(), buffer_dwords), current_lds_offset
+    )
+    next_lds_offset = bld.assume_range(next_lds_offset, 0, buffer_dwords)
+    return _dma_subpanel_read_bases(bld, cfg, staging, next_lds_offset), next_lds_offset
+
+
+def _dma_subpanel_lds_byte_base(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    step: int | dsl.Value,
+) -> dsl.Value:
+    assert staging.dma_lds_wave_byte_base is not None
+    buffer_bytes = 4 * _dma_cta_buffer_dwords(cfg)
+    if isinstance(step, int):
+        byte_offset = (step % _dma_buffer_count(cfg)) * buffer_bytes
+        if byte_offset == 0:
+            result = staging.dma_lds_wave_byte_base
+        else:
+            offset = bld.constant(dsl.i32(), byte_offset)
+            result = bld.addi(staging.dma_lds_wave_byte_base, offset)
+    else:
+        i = dsl.sym("i")
+        offset = bld.index_expr(
+            dsl.mod(i, _dma_buffer_count(cfg)) * buffer_bytes,
+            bindings={i: step},
+        )
+        offset = bld.cast(offset, dsl.i32(), dsl.CastKind.IntConvert)
+        result = bld.addi(staging.dma_lds_wave_byte_base, offset)
+    wave_bytes = 4 * _dma_cta_geometry(cfg).dwords_per_slot
+    maximum = buffer_bytes * (_dma_buffer_count(cfg) - 1) + wave_bytes * (
+        cfg.waves_per_workgroup - 1
+    )
+    return bld.assume_range(result, 0, maximum)
+
+
+def _dma_subpanel_read_ptrs(
+    bld: dsl.FunctionBuilder,
+    staging: _LdsStaging,
+    base_offset: dsl.Value,
+    offsets: tuple[int, ...],
+) -> tuple[dsl.Value, ...]:
+    assert staging.dma_read_lds is not None
+    base = bld.ptr_add(staging.dma_read_lds, base_offset)
+    return tuple(_ptr_add_const(bld, base, offset) for offset in offsets)
 
 
 def _dma_buffer_offset(
@@ -1556,6 +2129,7 @@ def _load_ptrs_for_step(
         cfg.storage_k_tile * cfg.wave_k_tiles,
         cfg.storage_k_tile * cfg.wave_k_tiles * max_step,
     )
+
     return _advance_ptrs(bld, a0, offset), _advance_ptrs(bld, b0, offset)
 
 
@@ -3543,12 +4117,15 @@ def _emit_mma_grid(
                 j_iv = inner.induction_variable
                 (accs_kij,) = inner.inner_iter_args
                 wn = dsl.idx(wave_n)
+                wm = dsl.idx(wave_m)
                 i = dsl.idx(i_iv)
                 j = dsl.idx(j_iv)
-                acc_idx = (i * wn + j).v
+                acc_idx = (
+                    (j * wm + i).v if cfg.coalesced_mfma_output else (i * wn + j).v
+                )
                 bf = wavemeta.TupleGetOp(bf_type, b_row, j_iv).result
                 acc_old = wavemeta.TupleGetOp(acc_type, accs_kij, acc_idx).result
-                acc_new = bld.mma(cfg.mma.kind, af, bf, acc_old)
+                acc_new = _emit_mma(bld, cfg, af, bf, acc_old)
                 accs_kij_new = wavemeta.TupleSetOp(
                     acc_pt_type, accs_kij, acc_idx, acc_new
                 ).result
@@ -3623,11 +4200,11 @@ def _emit_mma_phase_with_dma_reads(
         for j in range(cfg.wave_n_tiles):
             j_value = bld.constant(index_type, j)
             bf = wavemeta.TupleGetOp(bf_type, b_row, j_value).result
-            acc_index = i * cfg.wave_n_tiles + j
-            new_accs[acc_index] = bld.mma(cfg.mma.kind, af, bf, new_accs[acc_index])
+            acc_index = _mma_acc_index(cfg, i, j)
+            new_accs[acc_index] = _emit_mma(bld, cfg, af, bf, new_accs[acc_index])
 
             if i < cfg.wave_m_tiles - 1:
-                early_done = acc_index + 1
+                early_done = i * cfg.wave_n_tiles + j + 1
                 early_target = early_done * len(early_reads) // early_mmas
                 while early_emitted < early_target:
                     emit_read(*early_reads[early_emitted])
@@ -4246,11 +4823,15 @@ def _store_final_tiles(
         scale_ready_token=state.scale_token,
     )
     store_after = scale_tokens[-1] if scale_tokens else None
-    for acc, c_ptr in zip(final_accs, c_ptrs, strict=True):
-        if cfg.output_type == "f16":
-            _fragment_store_f16(bld, cfg, acc, c_ptr, after=store_after)
-        else:
-            bld.fragment_store(acc, c_ptr, after=store_after)
+    _store_acc_tiles(
+        bld,
+        cfg,
+        final_accs,
+        c_ptrs,
+        0,
+        cfg.wave_n_tiles,
+        after=store_after,
+    )
 
 
 def _can_split_mxfp4_epilogue(cfg: _MatmulConfig, state: _LoopState) -> bool:
@@ -4344,6 +4925,11 @@ def _store_acc_tiles(
     *,
     after: dsl.Value | None = None,
 ) -> None:
+    if cfg.coalesced_mfma_output:
+        _store_acc_tiles_mfma_coalesced(
+            bld, cfg, accs, c_ptrs[0], n_begin, n_end, after=after
+        )
+        return
     for i in range(cfg.wave_m_tiles):
         for j in range(n_begin, n_end):
             acc_idx = i * cfg.wave_n_tiles + j
@@ -4353,6 +4939,58 @@ def _store_acc_tiles(
                 )
             else:
                 bld.fragment_store(accs[acc_idx], c_ptrs[acc_idx], after=after)
+
+
+def _store_acc_tiles_mfma_coalesced(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    accs: tuple[dsl.Value, ...],
+    c_ptr: dsl.Value,
+    n_begin: int,
+    n_end: int,
+    *,
+    after: dsl.Value | None = None,
+) -> None:
+    regs_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()), width=cfg.mma.wave_size
+    )
+    unpacked = tuple(
+        waveamd.FragmentUnpackOp(regs_type, fragment).result for fragment in accs
+    )
+    f32_simd = dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size)
+    f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
+    packed_type = dsl.simd_type(
+        dsl.vector_type(cfg.wave_m_tiles, dsl.f16()), width=cfg.mma.wave_size
+    )
+    wi_sym = dsl.sym("__wave_dsl_coalesced_wi")
+    wi_val = bld.assume_range(
+        bld.workitem_id(axis=0, width=cfg.mma.wave_size),
+        0,
+        cfg.threads_per_workgroup - 1,
+    )
+    lane = dsl.mod(wi_sym, cfg.mma.wave_size)
+    lane_m = dsl.mod(lane, 16) * cfg.wave_m_tiles
+    lane_n = dsl.floor(lane / 16) * (cfg.mma.acc_registers * cfg.wave_n_tiles)
+    for reg in range(cfg.mma.acc_registers):
+        for j in range(n_begin, n_end):
+            values = [
+                bld.fpconvert(
+                    wave.ExtractOp(
+                        f32_simd, unpacked[_mma_acc_index(cfg, i, j)], reg
+                    ).result,
+                    f16_simd,
+                )
+                for i in range(cfg.wave_m_tiles)
+            ]
+            offset = bld.index_expr(
+                lane_m + (lane_n + reg * cfg.wave_n_tiles + j) * cfg.M,
+                bindings={wi_sym: wi_val},
+            )
+            bld.store(
+                wave.PackOp(packed_type, values).result,
+                bld.ptr_add(c_ptr, offset),
+                after=after,
+            )
 
 
 def _store_acc_tiles_lds_coalesced(
@@ -4726,6 +5364,1153 @@ def _attach_phased_dma_loop_attrs(forop: scf.ForOp, cfg: _MatmulConfig) -> None:
     )
 
 
+def _dma_phase_slice(
+    values: tuple[dsl.Value, ...], phase: int, phases: int
+) -> tuple[dsl.Value, ...]:
+    width = len(values) // phases
+    begin = phase * width
+    return values[begin : begin + width]
+
+
+def _flatten_dma_subpanel_tokens(tokens: _DmaSubpanelTokens) -> tuple[dsl.Value, ...]:
+    return (*tokens.a, *tokens.b)
+
+
+def _split_dma_subpanel_tokens(
+    values: tuple[dsl.Value, ...], cfg: _MatmulConfig
+) -> _DmaSubpanelTokens:
+    phases = cfg.wave_k_tiles
+    return _DmaSubpanelTokens(values[:phases], values[phases : 2 * phases])
+
+
+def _split_dma_subpanel_loop_state(
+    values: tuple[dsl.Value, ...], cfg: _MatmulConfig
+) -> _DmaSubpanelLoopState:
+    acc_end = cfg.tiles_per_wave
+    a_end = acc_end + cfg.wave_m_tiles
+    b_end = a_end + cfg.wave_n_tiles
+    ready_begin = b_end + 7
+    token_count = 2 * cfg.wave_k_tiles
+    return _DmaSubpanelLoopState(
+        accs=values[:acc_end],
+        a_frags=values[acc_end:a_end],
+        b_frags=values[a_end:b_end],
+        a_read=values[b_end],
+        b_read=values[b_end + 1],
+        current_access=values[b_end + 2],
+        current_read_bases=_DmaSubpanelReadBases(values[b_end + 3], values[b_end + 4]),
+        current_lds_offset=values[b_end + 5],
+        current_dma_lds_byte_base=values[b_end + 6],
+        ready=_split_dma_subpanel_tokens(
+            values[ready_begin : ready_begin + token_count], cfg
+        ),
+    )
+
+
+def _issue_dma_operand_subpanels(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    src_ptrs: tuple[dsl.Value, ...],
+    dst_ptrs: tuple[dsl.Value, ...],
+    after: tuple[dsl.Value, ...],
+    *,
+    lds_byte_base: dsl.Value,
+    in_loop: bool,
+    request_offset: int,
+) -> tuple[dsl.Value, ...]:
+    tokens: list[dsl.Value] = []
+    for phase in range(cfg.wave_k_tiles):
+        tokens.append(
+            _issue_dma_operand_phase(
+                bld,
+                cfg,
+                src_ptrs,
+                dst_ptrs,
+                phase,
+                after[phase],
+                lds_byte_base=lds_byte_base,
+                in_loop=in_loop,
+                request_offset=request_offset,
+            )
+        )
+    return tuple(tokens)
+
+
+def _issue_dma_operand_phase(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    src_ptrs: tuple[dsl.Value, ...],
+    dst_ptrs: tuple[dsl.Value, ...],
+    phase: int,
+    after: dsl.Value,
+    *,
+    lds_byte_base: dsl.Value,
+    in_loop: bool,
+    request_offset: int,
+) -> dsl.Value:
+    phase_width = len(src_ptrs) // cfg.wave_k_tiles
+    return _issue_dma_operand_phase_requests(
+        bld,
+        cfg,
+        src_ptrs,
+        dst_ptrs,
+        phase,
+        0,
+        phase_width,
+        after,
+        lds_byte_base=lds_byte_base,
+        in_loop=in_loop,
+        request_offset=request_offset,
+    )
+
+
+def _issue_dma_operand_phase_requests(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    src_ptrs: tuple[dsl.Value, ...],
+    dst_ptrs: tuple[dsl.Value, ...],
+    phase: int,
+    begin: int,
+    end: int,
+    after: dsl.Value,
+    *,
+    lds_byte_base: dsl.Value,
+    in_loop: bool,
+    request_offset: int,
+) -> dsl.Value:
+    byte_base = dsl.sym("byte_base")
+    byte_offset = bld.index_expr(
+        byte_base,
+        bindings={byte_base: lds_byte_base},
+    )
+    dst_ptrs = _offset_ptrs(bld, dst_ptrs, byte_offset)
+    dma_lds_type = dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    dst_ptrs = tuple(bld.ptr_cast(ptr, dma_lds_type) for ptr in dst_ptrs)
+    phase_requests = list(
+        zip(
+            _dma_phase_slice(src_ptrs, phase, cfg.wave_k_tiles),
+            _dma_phase_slice(dst_ptrs, phase, cfg.wave_k_tiles),
+            strict=True,
+        )
+    )
+    requests = phase_requests[begin:end]
+    phase_offset = request_offset + phase * len(phase_requests) + begin
+    return _join_tokens(
+        bld,
+        _dma_issue_requests(
+            bld,
+            cfg,
+            requests,
+            after=after,
+            in_loop=in_loop,
+            request_offset=phase_offset,
+        ),
+    )
+
+
+def _issue_dma_subpanels(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+    staging: _LdsStaging,
+    after: _DmaSubpanelTokens,
+    *,
+    lds_byte_base: dsl.Value,
+    in_loop: bool,
+    request_offset: int = 0,
+) -> _DmaSubpanelTokens:
+    a = _issue_dma_operand_subpanels(
+        bld,
+        cfg,
+        a_ptrs,
+        staging.a_dma_lds_byte_ptrs,
+        after.a,
+        lds_byte_base=lds_byte_base,
+        in_loop=in_loop,
+        request_offset=request_offset,
+    )
+    b = _issue_dma_operand_subpanels(
+        bld,
+        cfg,
+        b_ptrs,
+        staging.b_dma_lds_byte_ptrs,
+        after.b,
+        lds_byte_base=lds_byte_base,
+        in_loop=in_loop,
+        request_offset=request_offset + len(a_ptrs),
+    )
+    return _DmaSubpanelTokens(a, b)
+
+
+def _read_dma_subpanel(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    base: dsl.Value,
+    offsets: tuple[int, ...],
+    phase: int,
+    ready: dsl.Value,
+    frag_type: dsl.Type,
+    staging: _LdsStaging,
+) -> tuple[tuple[dsl.Value, ...], dsl.Value]:
+    read_ptrs = _dma_subpanel_read_ptrs(bld, staging, base, offsets)
+    fragments: list[dsl.Value] = []
+    tokens: list[dsl.Value] = []
+    for ptr in _dma_phase_slice(read_ptrs, phase, cfg.wave_k_tiles):
+        fragment, token = _read_dma_subpanel_fragment(
+            bld, ptr, ready, frag_type, staging
+        )
+        fragments.append(fragment)
+        tokens.append(token)
+    return tuple(fragments), _join_tokens(bld, tokens)
+
+
+def _read_dma_subpanel_fragment(
+    bld: dsl.FunctionBuilder,
+    ptr: dsl.Value,
+    ready: dsl.Value,
+    frag_type: dsl.Type,
+    staging: _LdsStaging,
+) -> tuple[dsl.Value, dsl.Value]:
+    regs, token = bld.load(ptr, staging.reg_simd_type, after=ready)
+    return bld.fragment_pack(regs, frag_type), token
+
+
+def _emit_dma_subpanel_mmas(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    *,
+    m_begin: int = 0,
+    m_end: int | None = None,
+) -> tuple[dsl.Value, ...]:
+    if m_end is None:
+        m_end = len(a_frags)
+    return _emit_dma_subpanel_mma_range(
+        bld,
+        cfg,
+        a_frags,
+        b_frags,
+        accs,
+        m_begin * len(b_frags),
+        m_end * len(b_frags),
+    )
+
+
+def _emit_dma_subpanel_mma_range(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    begin: int,
+    end: int,
+) -> tuple[dsl.Value, ...]:
+    total = len(a_frags) * len(b_frags)
+    if not 0 <= begin <= end <= total:
+        raise ValueError("MFMA range must fit the subpanel")
+    new_accs = list(accs)
+    for ordinal in range(begin, end):
+        i, j = divmod(ordinal, len(b_frags))
+        index = _mma_acc_index(cfg, i, j)
+        new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
+    return tuple(new_accs)
+
+
+def _emit_dma_subpanel_mma_prefix(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    count: int,
+) -> tuple[dsl.Value, ...]:
+    return _emit_dma_subpanel_mma_range(bld, cfg, a_frags, b_frags, accs, 0, count)
+
+
+def _emit_dma_subpanel_phase0(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    b1_ptrs: tuple[dsl.Value, ...],
+    access: dsl.Value,
+    *,
+    m_end: int | None = None,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
+    if m_end is None:
+        m_end = len(a_frags)
+    new_accs = list(accs)
+    b1_frags: list[dsl.Value] = []
+    b1_tokens: list[dsl.Value] = []
+    for i in range(m_end):
+        af = a_frags[i]
+        for j, bf in enumerate(b_frags):
+            index = _mma_acc_index(cfg, i, j)
+            new_accs[index] = _emit_mma(bld, cfg, af, bf, new_accs[index])
+            if i == 0:
+                fragment, token = _read_dma_subpanel_fragment(
+                    bld, b1_ptrs[j], access, types.b, staging
+                )
+                b1_frags.append(fragment)
+                b1_tokens.append(token)
+    return tuple(new_accs), tuple(b1_frags), _join_tokens(bld, b1_tokens)
+
+
+def _emit_dma_subpanel_phase1_with_reads(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    access: dsl.Value,
+    ready_read_bases: _DmaSubpanelReadBases,
+    mma_begin: int,
+) -> tuple[
+    tuple[dsl.Value, ...],
+    tuple[dsl.Value, ...],
+    tuple[dsl.Value, ...],
+    dsl.Value,
+    dsl.Value,
+]:
+    ready_a_ptrs = _dma_phase_slice(
+        _dma_subpanel_read_ptrs(
+            bld, staging, ready_read_bases.a, staging.a_dma_read_offsets
+        ),
+        0,
+        cfg.wave_k_tiles,
+    )
+    ready_b_ptrs = _dma_phase_slice(
+        _dma_subpanel_read_ptrs(
+            bld, staging, ready_read_bases.b, staging.b_dma_read_offsets
+        ),
+        0,
+        cfg.wave_k_tiles,
+    )
+    reads: list[tuple[bool, dsl.Value]] = []
+    for tile in range(max(len(ready_a_ptrs), len(ready_b_ptrs))):
+        if tile < len(ready_a_ptrs):
+            reads.append((True, ready_a_ptrs[tile]))
+        if tile < len(ready_b_ptrs):
+            reads.append((False, ready_b_ptrs[tile]))
+
+    new_accs = list(accs)
+    ready_a: list[dsl.Value] = []
+    ready_b: list[dsl.Value] = []
+    ready_a_tokens: list[dsl.Value] = []
+    ready_b_tokens: list[dsl.Value] = []
+    total_mmas = len(a_frags) * len(b_frags)
+    read_span = total_mmas - mma_begin
+    emitted = 0
+    ordinal = 0
+    for i, af in enumerate(a_frags):
+        for j, bf in enumerate(b_frags):
+            ordinal += 1
+            if ordinal <= mma_begin:
+                continue
+            index = _mma_acc_index(cfg, i, j)
+            new_accs[index] = _emit_mma(bld, cfg, af, bf, new_accs[index])
+            suffix_ordinal = ordinal - mma_begin
+            target = (suffix_ordinal * len(reads) + read_span - 1) // read_span
+            while emitted < target:
+                is_a, ptr = reads[emitted]
+                fragment, token = _read_dma_subpanel_fragment(
+                    bld, ptr, access, types.a if is_a else types.b, staging
+                )
+                if is_a:
+                    ready_a.append(fragment)
+                    ready_a_tokens.append(token)
+                else:
+                    ready_b.append(fragment)
+                    ready_b_tokens.append(token)
+                emitted += 1
+    if emitted != len(reads):
+        raise ValueError("DMA subpanel read cadence did not emit all fragments")
+    return (
+        tuple(new_accs),
+        tuple(ready_a),
+        tuple(ready_b),
+        _join_tokens(bld, ready_a_tokens),
+        _join_tokens(bld, ready_b_tokens),
+    )
+
+
+def _emit_dma_subpanel_phase0_with_a1_reads(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    access: dsl.Value,
+    current_read_base: dsl.Value,
+    m_begin: int,
+    m_end: int,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
+    a1_ptrs = _dma_phase_slice(
+        _dma_subpanel_read_ptrs(
+            bld, staging, current_read_base, staging.a_dma_read_offsets
+        ),
+        1,
+        cfg.wave_k_tiles,
+    )
+    return _emit_dma_subpanel_rows_with_reads(
+        bld,
+        cfg,
+        staging,
+        a_frags,
+        b_frags,
+        accs,
+        a1_ptrs,
+        types.a,
+        access,
+        m_begin,
+        m_end,
+    )
+
+
+def _emit_dma_subpanel_rows_with_reads(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    read_ptrs: tuple[dsl.Value, ...],
+    read_type: dsl.Type,
+    access: dsl.Value,
+    m_begin: int,
+    m_end: int,
+    read_mma_span: int | None = None,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
+    return _emit_dma_subpanel_mma_range_with_reads(
+        bld,
+        cfg,
+        staging,
+        a_frags,
+        b_frags,
+        accs,
+        read_ptrs,
+        read_type,
+        access,
+        m_begin * len(b_frags),
+        m_end * len(b_frags),
+        read_mma_span,
+    )
+
+
+def _emit_dma_subpanel_mma_range_with_reads(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    a_frags: tuple[dsl.Value, ...],
+    b_frags: tuple[dsl.Value, ...],
+    accs: tuple[dsl.Value, ...],
+    read_ptrs: tuple[dsl.Value, ...],
+    read_type: dsl.Type,
+    access: dsl.Value,
+    begin: int,
+    end: int,
+    read_mma_span: int | None = None,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
+    total = len(a_frags) * len(b_frags)
+    if not 0 <= begin < end <= total:
+        raise ValueError("MFMA range must fit the subpanel")
+    new_accs = list(accs)
+    read_frags: list[dsl.Value] = []
+    read_tokens: list[dsl.Value] = []
+    total_mmas = end - begin
+    if read_mma_span is None:
+        read_mma_span = total_mmas
+    if not 0 < read_mma_span <= total_mmas:
+        raise ValueError("read MMA span must fit the emitted MMA range")
+    emitted = 0
+    for local_ordinal, mma_ordinal in enumerate(range(begin, end), start=1):
+        i, j = divmod(mma_ordinal, len(b_frags))
+        index = _mma_acc_index(cfg, i, j)
+        new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
+        read_ordinal = min(local_ordinal, read_mma_span)
+        target = (read_ordinal * len(read_ptrs) + read_mma_span - 1) // read_mma_span
+        while emitted < target:
+            fragment, token = _read_dma_subpanel_fragment(
+                bld, read_ptrs[emitted], access, read_type, staging
+            )
+            read_frags.append(fragment)
+            read_tokens.append(token)
+            emitted += 1
+    return tuple(new_accs), tuple(read_frags), _join_tokens(bld, read_tokens)
+
+
+def _emit_coalesced_dma_subpanel_reuse(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    a_ptrs: tuple[dsl.Value, ...],
+) -> _DmaSubpanelReuseState:
+    a1_ptrs = _dma_phase_slice(
+        _dma_subpanel_read_ptrs(
+            bld,
+            staging,
+            state.current_read_bases.a,
+            staging.a_dma_read_offsets,
+        ),
+        1,
+        cfg.wave_k_tiles,
+    )
+    a_read_mmas = 2 * len(a1_ptrs)
+    a_release_mmas = a_read_mmas + len(state.b_frags) - cfg.wave_k_tiles
+    accs, a1_frags, a1_read = _emit_dma_subpanel_mma_range_with_reads(
+        bld,
+        cfg,
+        staging,
+        state.a_frags,
+        state.b_frags,
+        state.accs,
+        a1_ptrs,
+        types.a,
+        state.current_access,
+        0,
+        a_release_mmas,
+        read_mma_span=a_read_mmas,
+    )
+    a_reuse_access = bld.barrier(state.current_access, state.a_read, a1_read)
+    next_a0 = _issue_dma_operand_phase(
+        bld,
+        cfg,
+        a_ptrs,
+        staging.a_dma_lds_byte_ptrs,
+        0,
+        a_reuse_access,
+        lds_byte_base=state.current_dma_lds_byte_base,
+        in_loop=True,
+        request_offset=0,
+    )
+    a_phase_width = len(a_ptrs) // cfg.wave_k_tiles
+    a1_early_width = max(1, a_phase_width // cfg.waves_per_workgroup)
+    next_a1_early = _issue_dma_operand_phase_requests(
+        bld,
+        cfg,
+        a_ptrs,
+        staging.a_dma_lds_byte_ptrs,
+        1,
+        0,
+        a1_early_width,
+        a_reuse_access,
+        lds_byte_base=state.current_dma_lds_byte_base,
+        in_loop=True,
+        request_offset=0,
+    )
+
+    b1_ptrs = _dma_phase_slice(
+        _dma_subpanel_read_ptrs(
+            bld,
+            staging,
+            state.current_read_bases.b,
+            staging.b_dma_read_offsets,
+        ),
+        1,
+        cfg.wave_k_tiles,
+    )
+    b_read_mmas = 2 * len(b1_ptrs) + cfg.wave_k_tiles + 3
+    b_release_mmas = a_release_mmas + b_read_mmas + len(state.b_frags) + 1
+    accs, b1_frags, b1_read = _emit_dma_subpanel_mma_range_with_reads(
+        bld,
+        cfg,
+        staging,
+        state.a_frags,
+        state.b_frags,
+        accs,
+        b1_ptrs,
+        types.b,
+        a_reuse_access,
+        a_release_mmas,
+        b_release_mmas,
+        read_mma_span=b_read_mmas,
+    )
+    b_reuse_access = bld.barrier(state.b_read, b1_read)
+    return _DmaSubpanelReuseState(
+        accs,
+        a1_frags,
+        b1_frags,
+        b_reuse_access,
+        next_a0,
+        next_a1_early,
+        b_release_mmas,
+    )
+
+
+def _emit_dma_subpanel_reuse(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    a_ptrs: tuple[dsl.Value, ...],
+) -> _DmaSubpanelReuseState:
+    if cfg.coalesced_mfma_output:
+        return _emit_coalesced_dma_subpanel_reuse(
+            bld, cfg, types, staging, state, a_ptrs
+        )
+    current_b_ptrs = _dma_subpanel_read_ptrs(
+        bld, staging, state.current_read_bases.b, staging.b_dma_read_offsets
+    )
+    b1_ptrs = _dma_phase_slice(current_b_ptrs, 1, cfg.wave_k_tiles)
+    reuse_rows = max(1, (cfg.wave_m_tiles + 2) // 3)
+    accs, b1_frags, b1_read = _emit_dma_subpanel_phase0(
+        bld,
+        cfg,
+        types,
+        staging,
+        state.a_frags,
+        state.b_frags,
+        state.accs,
+        b1_ptrs,
+        state.current_access,
+        m_end=reuse_rows,
+    )
+
+    a_reuse_access = bld.barrier(state.current_access, state.a_read)
+    next_a0 = a_reuse_access
+    if not cfg.coalesced_mfma_output:
+        next_a0 = _issue_dma_operand_phase(
+            bld,
+            cfg,
+            a_ptrs,
+            staging.a_dma_lds_byte_ptrs,
+            0,
+            a_reuse_access,
+            lds_byte_base=state.current_dma_lds_byte_base,
+            in_loop=True,
+            request_offset=0,
+        )
+    release_rows = min(cfg.wave_m_tiles, 2 * reuse_rows)
+    accs, a1_frags, a1_read = _emit_dma_subpanel_phase0_with_a1_reads(
+        bld,
+        cfg,
+        types,
+        staging,
+        state.a_frags,
+        state.b_frags,
+        accs,
+        a_reuse_access,
+        state.current_read_bases.a,
+        reuse_rows,
+        release_rows,
+    )
+
+    reuse_access = bld.barrier(state.b_read, a1_read, b1_read)
+    return _DmaSubpanelReuseState(
+        accs,
+        a1_frags,
+        b1_frags,
+        reuse_access,
+        next_a0,
+        None,
+        release_rows * len(state.b_frags),
+    )
+
+
+def _issue_next_dma_subpanel_a(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    reuse: _DmaSubpanelReuseState,
+    a_ptrs: tuple[dsl.Value, ...],
+) -> tuple[dsl.Value, dsl.Value]:
+    next_a0 = reuse.next_a0
+    if reuse.next_a1_early is None:
+        next_a1 = _issue_dma_operand_phase(
+            bld,
+            cfg,
+            a_ptrs,
+            staging.a_dma_lds_byte_ptrs,
+            1,
+            reuse.reuse_access,
+            lds_byte_base=state.current_dma_lds_byte_base,
+            in_loop=True,
+            request_offset=0,
+        )
+        return next_a0, next_a1
+
+    a_phase_width = len(a_ptrs) // cfg.wave_k_tiles
+    a1_early_width = max(1, a_phase_width // cfg.waves_per_workgroup)
+    next_a1_late = _issue_dma_operand_phase_requests(
+        bld,
+        cfg,
+        a_ptrs,
+        staging.a_dma_lds_byte_ptrs,
+        1,
+        a1_early_width,
+        a_phase_width,
+        reuse.reuse_access,
+        lds_byte_base=state.current_dma_lds_byte_base,
+        in_loop=True,
+        request_offset=0,
+    )
+    return next_a0, bld.join(reuse.next_a1_early, next_a1_late)
+
+
+def _issue_next_dma_subpanel_b_prefix(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    reuse: _DmaSubpanelReuseState,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+) -> tuple[dsl.Value, dsl.Value, int, int]:
+    request_offset = len(a_ptrs)
+    next_b0 = _issue_dma_operand_phase(
+        bld,
+        cfg,
+        b_ptrs,
+        staging.b_dma_lds_byte_ptrs,
+        0,
+        reuse.reuse_access,
+        lds_byte_base=state.current_dma_lds_byte_base,
+        in_loop=True,
+        request_offset=request_offset,
+    )
+    phase_width = len(b_ptrs) // cfg.wave_k_tiles
+    early_width = max(1, phase_width // cfg.waves_per_workgroup)
+    next_b1_early = _issue_dma_operand_phase_requests(
+        bld,
+        cfg,
+        b_ptrs,
+        staging.b_dma_lds_byte_ptrs,
+        1,
+        0,
+        early_width,
+        reuse.reuse_access,
+        lds_byte_base=state.current_dma_lds_byte_base,
+        in_loop=True,
+        request_offset=request_offset,
+    )
+    return next_b0, next_b1_early, phase_width, early_width
+
+
+def _finish_dma_subpanel_step(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    reuse: _DmaSubpanelReuseState,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+    next_dma_lds_byte_base: dsl.Value,
+) -> tuple[dsl.Value, ...]:
+    next_a0, next_a1 = _issue_next_dma_subpanel_a(
+        bld, cfg, staging, state, reuse, a_ptrs
+    )
+    next_b0, next_b1_early, b_phase_width, b1_early_width = (
+        _issue_next_dma_subpanel_b_prefix(
+            bld, cfg, staging, state, reuse, a_ptrs, b_ptrs
+        )
+    )
+    accs = _emit_dma_subpanel_mma_range(
+        bld,
+        cfg,
+        state.a_frags,
+        state.b_frags,
+        reuse.accs,
+        reuse.release_mmas,
+        len(state.a_frags) * len(state.b_frags),
+    )
+    ready_read_count = (
+        len(staging.a_dma_read_offsets) + len(staging.b_dma_read_offsets)
+    ) // cfg.wave_k_tiles
+    phase1_mmas = len(reuse.a1_frags) * len(reuse.b1_frags)
+    read_suffix_mmas = min(phase1_mmas, 2 * ready_read_count + 3)
+    phase1_prefix_mmas = phase1_mmas - read_suffix_mmas
+    accs = _emit_dma_subpanel_mma_prefix(
+        bld,
+        cfg,
+        reuse.a1_frags,
+        reuse.b1_frags,
+        accs,
+        phase1_prefix_mmas,
+    )
+    ready_access = bld.barrier(*_flatten_dma_subpanel_tokens(state.ready))
+    late_access = bld.join(reuse.reuse_access, ready_access)
+    next_b1_late = _issue_dma_operand_phase_requests(
+        bld,
+        cfg,
+        b_ptrs,
+        staging.b_dma_lds_byte_ptrs,
+        1,
+        b1_early_width,
+        b_phase_width,
+        late_access,
+        lds_byte_base=state.current_dma_lds_byte_base,
+        in_loop=True,
+        request_offset=len(a_ptrs),
+    )
+    ready_read_bases, ready_lds_offset = _next_dma_subpanel_read_state(
+        bld, cfg, staging, state.current_lds_offset
+    )
+    accs, ready_a, ready_b, ready_a_read, ready_b_read = (
+        _emit_dma_subpanel_phase1_with_reads(
+            bld,
+            cfg,
+            types,
+            staging,
+            reuse.a1_frags,
+            reuse.b1_frags,
+            accs,
+            ready_access,
+            ready_read_bases,
+            phase1_prefix_mmas,
+        )
+    )
+    next_b1 = bld.join(next_b1_early, next_b1_late)
+    return (
+        *accs,
+        *ready_a,
+        *ready_b,
+        ready_a_read,
+        ready_b_read,
+        ready_access,
+        ready_read_bases.a,
+        ready_read_bases.b,
+        ready_lds_offset,
+        next_dma_lds_byte_base,
+        *_flatten_dma_subpanel_tokens(
+            _DmaSubpanelTokens(
+                (next_a0, next_a1),
+                (next_b0, next_b1),
+            )
+        ),
+    )
+
+
+def _emit_dma_subpanel_step(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    a_ptrs: tuple[dsl.Value, ...],
+    b_ptrs: tuple[dsl.Value, ...],
+    loop_iv: dsl.Value,
+) -> tuple[dsl.Value, ...]:
+    wave_bytes = 4 * _dma_cta_geometry(cfg).dwords_per_slot
+    maximum = 4 * _dma_cta_buffer_dwords(cfg) * (_dma_buffer_count(cfg) - 1)
+    maximum += wave_bytes * (cfg.waves_per_workgroup - 1)
+    state = replace(
+        state,
+        current_dma_lds_byte_base=bld.assume_range(
+            state.current_dma_lds_byte_base, 0, maximum
+        ),
+    )
+    reuse = _emit_dma_subpanel_reuse(
+        bld,
+        cfg,
+        types,
+        staging,
+        state,
+        a_ptrs,
+    )
+    next_dma_lds_byte_base = _dma_subpanel_lds_byte_base(
+        bld, cfg, staging, bld.addi(loop_iv, bld.constant(dsl.i32(), 1))
+    )
+    return _finish_dma_subpanel_step(
+        bld,
+        cfg,
+        types,
+        staging,
+        state,
+        reuse,
+        a_ptrs,
+        b_ptrs,
+        next_dma_lds_byte_base,
+    )
+
+
+def _drain_dma_subpanel_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    ready: _DmaSubpanelTokens,
+    accs: tuple[dsl.Value, ...],
+    read_bases: _DmaSubpanelReadBases,
+) -> tuple[dsl.Value, ...]:
+    access = bld.barrier(*_flatten_dma_subpanel_tokens(ready))
+    a0, _ = _read_dma_subpanel(
+        bld,
+        cfg,
+        read_bases.a,
+        staging.a_dma_read_offsets,
+        0,
+        access,
+        types.a,
+        staging,
+    )
+    b0, _ = _read_dma_subpanel(
+        bld,
+        cfg,
+        read_bases.b,
+        staging.b_dma_read_offsets,
+        0,
+        access,
+        types.b,
+        staging,
+    )
+    b_ptrs = _dma_subpanel_read_ptrs(
+        bld, staging, read_bases.b, staging.b_dma_read_offsets
+    )
+    b1_ptrs = _dma_phase_slice(b_ptrs, 1, cfg.wave_k_tiles)
+    accs, b1, _ = _emit_dma_subpanel_phase0(
+        bld, cfg, types, staging, a0, b0, accs, b1_ptrs, access
+    )
+    a1, _ = _read_dma_subpanel(
+        bld,
+        cfg,
+        read_bases.a,
+        staging.a_dma_read_offsets,
+        1,
+        access,
+        types.a,
+        staging,
+    )
+    return _emit_dma_subpanel_mmas(bld, cfg, a1, b1, accs)
+
+
+def _emit_dma_subpanel_tail(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+) -> tuple[dsl.Value, ...]:
+    current_b_ptrs = _dma_subpanel_read_ptrs(
+        bld, staging, state.current_read_bases.b, staging.b_dma_read_offsets
+    )
+    b1_ptrs = _dma_phase_slice(current_b_ptrs, 1, cfg.wave_k_tiles)
+    accs, b1, _ = _emit_dma_subpanel_phase0(
+        bld,
+        cfg,
+        types,
+        staging,
+        state.a_frags,
+        state.b_frags,
+        state.accs,
+        b1_ptrs,
+        state.current_access,
+    )
+    a1, _ = _read_dma_subpanel(
+        bld,
+        cfg,
+        state.current_read_bases.a,
+        staging.a_dma_read_offsets,
+        1,
+        state.current_access,
+        types.a,
+        staging,
+    )
+    accs = _emit_dma_subpanel_mmas(bld, cfg, a1, b1, accs)
+    ready_read_bases, _ = _next_dma_subpanel_read_state(
+        bld, cfg, staging, state.current_lds_offset
+    )
+    return _drain_dma_subpanel_tile(
+        bld, cfg, types, staging, state.ready, accs, ready_read_bases
+    )
+
+
+def _init_dma_subpanel_kernel(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+) -> tuple[tuple[dsl.Value, ...], _DmaSubpanelTokens, _DmaSubpanelTokens]:
+    root = bld.token()
+    roots = tuple(root for _ in range(cfg.wave_k_tiles))
+    empty = _DmaSubpanelTokens(roots, roots)
+    first_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 0)
+    first_ready = _issue_dma_subpanels(
+        bld,
+        cfg,
+        staging.a_dma_src_ptrs,
+        staging.b_dma_src_ptrs,
+        staging,
+        empty,
+        lds_byte_base=first_dma_lds_byte_base,
+        in_loop=False,
+    )
+    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
+    init_accs = tuple(init_acc for _ in range(cfg.tiles_per_wave))
+    return init_accs, first_ready, empty
+
+
+def _init_dma_subpanel_loop(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    first_ready: _DmaSubpanelTokens,
+    empty: _DmaSubpanelTokens,
+    init_accs: tuple[dsl.Value, ...],
+    virtual_k_stride: dsl.Value,
+) -> tuple[dsl.Value, ...]:
+    current_read_bases = _dma_subpanel_read_bases(bld, cfg, staging, 0)
+    current_lds_offset = bld.constant(dsl.i32(), 0)
+    current_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 0)
+    second_a_ptrs = _advance_ptrs(bld, staging.a_dma_src_ptrs, virtual_k_stride)
+    second_b_ptrs = _advance_ptrs(bld, staging.b_dma_src_ptrs, virtual_k_stride)
+    second_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 1)
+    second_ready = _issue_dma_subpanels(
+        bld,
+        cfg,
+        second_a_ptrs,
+        second_b_ptrs,
+        staging,
+        empty,
+        lds_byte_base=second_dma_lds_byte_base,
+        in_loop=False,
+        request_offset=len(second_a_ptrs) + len(second_b_ptrs),
+    )
+    first_access = bld.barrier(*_flatten_dma_subpanel_tokens(first_ready))
+    first_a, first_a_read = _read_dma_subpanel(
+        bld,
+        cfg,
+        current_read_bases.a,
+        staging.a_dma_read_offsets,
+        0,
+        first_access,
+        types.a,
+        staging,
+    )
+    first_b, first_b_read = _read_dma_subpanel(
+        bld,
+        cfg,
+        current_read_bases.b,
+        staging.b_dma_read_offsets,
+        0,
+        first_access,
+        types.b,
+        staging,
+    )
+    return (
+        *init_accs,
+        *first_a,
+        *first_b,
+        first_a_read,
+        first_b_read,
+        first_access,
+        current_read_bases.a,
+        current_read_bases.b,
+        current_lds_offset,
+        current_dma_lds_byte_base,
+        *_flatten_dma_subpanel_tokens(second_ready),
+    )
+
+
+def _emit_dma_subpanel_loop(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    virtual_k_stride: dsl.Value,
+    init_args: tuple[dsl.Value, ...],
+) -> tuple[dsl.Value, ...]:
+    zero = bld.constant(dsl.i32(), 0)
+    one = bld.constant(dsl.i32(), 1)
+    trip_count = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
+    loop_a_ptrs = _advance_ptrs(bld, staging.a_dma_src_ptrs, virtual_k_stride)
+    loop_b_ptrs = _advance_ptrs(bld, staging.b_dma_src_ptrs, virtual_k_stride)
+    state_count = len(init_args)
+    a_count = len(loop_a_ptrs)
+    loop_init_args = (*init_args, *loop_a_ptrs, *loop_b_ptrs)
+    with bld.for_loop(zero, trip_count, one, init_args=loop_init_args) as forop:
+        _attach_phased_dma_loop_attrs(forop, cfg)
+        loop_args = tuple(forop.inner_iter_args)
+        state = _split_dma_subpanel_loop_state(loop_args[:state_count], cfg)
+        loop_iv = bld.assume_range(
+            forop.induction_variable, 0, max(cfg.virtual_k_steps - 3, 0)
+        )
+        previous_a_ptrs = loop_args[state_count : state_count + a_count]
+        previous_b_ptrs = loop_args[state_count + a_count :]
+        a_ptrs = _advance_ptrs(bld, previous_a_ptrs, virtual_k_stride)
+        b_ptrs = _advance_ptrs(bld, previous_b_ptrs, virtual_k_stride)
+        step_results = _emit_dma_subpanel_step(
+            bld,
+            cfg,
+            types,
+            staging,
+            state,
+            a_ptrs,
+            b_ptrs,
+            loop_iv,
+        )
+        bld.yield_((*step_results, *a_ptrs, *b_ptrs))
+
+    final_state = _split_dma_subpanel_loop_state(
+        tuple(forop.results)[:state_count], cfg
+    )
+    return _emit_dma_subpanel_tail(bld, cfg, types, staging, final_state)
+
+
+def _emit_dma_subpanel_kernel(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    ptrs: _TilePtrs,
+    virtual_k_stride: dsl.Value,
+) -> None:
+    init_accs, first_ready, empty = _init_dma_subpanel_kernel(bld, cfg, types, staging)
+    if cfg.virtual_k_steps == 1:
+        final_accs = _drain_dma_subpanel_tile(
+            bld,
+            cfg,
+            types,
+            staging,
+            first_ready,
+            init_accs,
+            _dma_subpanel_read_bases(bld, cfg, staging, 0),
+        )
+    else:
+        init_args = _init_dma_subpanel_loop(
+            bld,
+            cfg,
+            types,
+            staging,
+            first_ready,
+            empty,
+            init_accs,
+            virtual_k_stride,
+        )
+        final_accs = _emit_dma_subpanel_loop(
+            bld, cfg, types, staging, virtual_k_stride, init_args
+        )
+    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles)
+
+
+def _dma_loop_offsets(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, loop_iv: dsl.Value
+) -> tuple[int | dsl.Value, int | dsl.Value, int | dsl.Value]:
+    if not cfg.use_dma_lds:
+        return 0, 0, 0
+    current = _dma_buffer_offset(bld, cfg, loop_iv)
+    ready = _dma_buffer_offset(bld, cfg, bld.addi(loop_iv, bld.constant(dsl.i32(), 1)))
+    next_offset = _dma_buffer_offset(
+        bld, cfg, bld.addi(loop_iv, bld.constant(dsl.i32(), 2))
+    )
+    return current, ready, next_offset
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
@@ -4733,6 +6518,9 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     staging = _emit_lds_staging(bld, cfg, coords)
     virtual_k_stride = bld.constant(dsl.i32(), cfg.storage_k_tile * cfg.wave_k_tiles)
     ptrs = _initial_tile_ptrs(bld, cfg, coords)
+    if _uses_dma_subpanel_pipeline(cfg):
+        _emit_dma_subpanel_kernel(bld, cfg, types, staging, ptrs, virtual_k_stride)
+        return
     init_args = _initial_loop_args(
         bld, cfg, types, staging, coords, ptrs, virtual_k_stride
     )
@@ -4770,18 +6558,9 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
             virtual_k_stride,
             step_base=2 if cfg.use_dma_lds else 1,
         )
-        if cfg.use_dma_lds:
-            current_lds_offset: int | dsl.Value = _dma_buffer_offset(bld, cfg, loop_iv)
-            ready_lds_offset: int | dsl.Value = _dma_buffer_offset(
-                bld, cfg, bld.addi(loop_iv, bld.constant(dsl.i32(), 1))
-            )
-            next_lds_offset: int | dsl.Value = _dma_buffer_offset(
-                bld, cfg, bld.addi(loop_iv, bld.constant(dsl.i32(), 2))
-            )
-        else:
-            current_lds_offset = 0
-            ready_lds_offset = 0
-            next_lds_offset = 0
+        current_lds_offset, ready_lds_offset, next_lds_offset = _dma_loop_offsets(
+            bld, cfg, loop_iv
+        )
         bld.yield_(
             _emit_pipelined_step(
                 bld,
@@ -4874,6 +6653,7 @@ def _make_matmul_config(
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
     phased_dma_schedule: PhasedDmaSchedule | None = None,
+    coalesced_mfma_output: bool = False,
 ) -> _MatmulConfig:
     return _MatmulConfig(
         M=M,
@@ -4897,6 +6677,7 @@ def _make_matmul_config(
         target_waves=target_waves,
         enable_split_barriers=enable_split_barriers,
         phased_dma_schedule=phased_dma_schedule,
+        coalesced_mfma_output=coalesced_mfma_output,
     )
 
 
@@ -4974,6 +6755,7 @@ def build_wmma_f16_matmul_module(
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
     phased_dma_schedule: PhasedDmaSchedule | None = None,
+    coalesced_mfma_output: bool = False,
     include_host: bool = True,
 ) -> Module:
     """Return an MLIR module for tiled matmul."""
@@ -4999,6 +6781,7 @@ def build_wmma_f16_matmul_module(
         target_waves=target_waves,
         enable_split_barriers=enable_split_barriers,
         phased_dma_schedule=phased_dma_schedule,
+        coalesced_mfma_output=coalesced_mfma_output,
     )
     bld = dsl.ModuleBuilder()
     with bld:

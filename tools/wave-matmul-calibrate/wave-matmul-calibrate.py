@@ -115,6 +115,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "output_type": "f16",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
+        "coalesced_mfma_output": True,
     },
     "gfx950-mxfp4-256x256-8wave": {
         "bm": 4,
@@ -366,6 +367,11 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     append_option_if(
         cmd, getattr(args, "enable_split_barriers", False), "--enable-split-barriers"
     )
+    append_option_if(
+        cmd,
+        getattr(args, "coalesced_mfma_output", False),
+        "--coalesced-mfma-output",
+    )
     kernel_profile = getattr(args, "kernel_profile", "manual")
     append_option_if(
         cmd,
@@ -554,6 +560,7 @@ def append_calibration_entry(
     module,
     schedule_options: dict[str, bool | int | str],
     report_options: dict[str, bool | int | str],
+    multi_wave_specialize: bool,
 ) -> None:
     any_op = transform.AnyOpType.get()
     with ir.InsertionPoint(module.body):
@@ -581,6 +588,13 @@ def append_calibration_entry(
                 "waveamd-machine-schedule-report",
                 options=report_options,
             ).result
+        if schedule_options and multi_wave_specialize:
+            finish_input = transform.ApplyRegisteredPassOp(
+                any_op,
+                finish_input,
+                "waveamd-machine-multi-wave-specialize",
+                options={"enable": True},
+            ).result
         if schedule_options:
             finish_input = transform.ApplyRegisteredPassOp(
                 any_op,
@@ -602,6 +616,7 @@ def pipeline_text(
     *,
     schedule_options: dict[str, bool | int | str],
     report_options: dict[str, bool | int | str],
+    multi_wave_specialize: bool = False,
 ) -> str:
     ir, transform, register_dialects = import_mlir_bindings(build_dir)
     with ir.Context() as ctx, ir.Location.unknown(ctx):
@@ -609,7 +624,12 @@ def pipeline_text(
         module = ir.Module.parse(read_backend_pipeline(build_dir))
         erase_default_entry(ir, module)
         append_calibration_entry(
-            ir, transform, module, schedule_options, report_options
+            ir,
+            transform,
+            module,
+            schedule_options,
+            report_options,
+            multi_wave_specialize,
         )
         if not module.operation.verify():
             sys.exit("generated calibration pipeline failed verification")
@@ -624,6 +644,7 @@ def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Pat
             args.build_dir,
             schedule_options=schedule_pass_options(variant, args),
             report_options=schedule_report_options(variant, args),
+            multi_wave_specialize=args.multi_wave_specialize,
         )
     )
     return path
@@ -846,7 +867,10 @@ def compute_lds_bytes(args: argparse.Namespace) -> int:
         slots = args.wave_k_tiles * (
             args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
         )
-        one_buffer = slots * lds_dwords_per_frag(args) * 4
+        dwords_per_slot = lds_dwords_per_frag(args)
+        if getattr(args, "coalesced_mfma_output", False):
+            dwords_per_slot += 4
+        one_buffer = slots * dwords_per_slot * 4
         data_lds = one_buffer * dma_buffer_count(args)
         if getattr(args, "input_type", "f16") != "mxfp4":
             return data_lds
@@ -920,6 +944,11 @@ def run_hw(
     env = os.environ.copy()
     existing_ld = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = rocm_lib + (":" + existing_ld if existing_ld else "")
+    effective_output_layout = getattr(args, "output_layout", "automatic")
+    if effective_output_layout == "automatic" and getattr(
+        args, "coalesced_mfma_output", False
+    ):
+        effective_output_layout = "column-major"
     cmd = [
         str(runner),
         "--m",
@@ -943,7 +972,7 @@ def run_hw(
         "--accumulator-layout",
         accumulator_layout(args),
         "--output-layout",
-        getattr(args, "output_layout", "automatic"),
+        effective_output_layout,
         "--input-type",
         args.input_type,
         "--c-type",
@@ -1142,6 +1171,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         action="store_true",
         help="stamp waveamdmachine.enable_split_barriers on generated matmul kernels",
     )
+    ap.add_argument("--coalesced-mfma-output", action="store_true")
 
 
 def add_runtime_args(ap: argparse.ArgumentParser) -> None:
@@ -1189,6 +1219,7 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
 
 def add_scheduler_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--calibration-file", type=Path, default=None)
+    ap.add_argument("--multi-wave-specialize", action="store_true")
 
 
 def add_tool_args(ap: argparse.ArgumentParser) -> None:

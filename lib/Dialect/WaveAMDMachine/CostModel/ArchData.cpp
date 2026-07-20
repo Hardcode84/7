@@ -28,6 +28,7 @@ static constexpr ArchData kGfx803{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
     /*ldsCounterLatency=*/5,
+    /*ldsIssuePeriod=*/0,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
@@ -50,6 +51,7 @@ static constexpr ArchData kGfx942{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
     /*ldsCounterLatency=*/5,
+    /*ldsIssuePeriod=*/0,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
@@ -71,6 +73,7 @@ static constexpr ArchData kGfx950{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/4,
     /*ldsCounterLatency=*/20,
+    /*ldsIssuePeriod=*/4,
     /*ldsDmaIssueQueueDepth=*/7,
     /*ldsDmaIssueLatency=*/180,
     /*ldsDmaIssuePeriod=*/4,
@@ -93,6 +96,7 @@ static constexpr ArchData kGfx1100{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/1,
     /*ldsCounterLatency=*/20,
+    /*ldsIssuePeriod=*/0,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
@@ -114,6 +118,7 @@ static constexpr ArchData kGfx1200{
     /*issuesPerCUPerCycle=*/5,
     /*simdIssuePeriod=*/1,
     /*ldsCounterLatency=*/20,
+    /*ldsIssuePeriod=*/0,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
@@ -121,6 +126,8 @@ static constexpr ArchData kGfx1200{
 };
 
 template <const ArchData &A> static constexpr bool saneLdsDmaIssue() {
+  static_assert(A.ldsIssuePeriod >= 0 && A.ldsIssuePeriod <= 64,
+                "LDS issue period out of range");
   static_assert(A.ldsDmaIssueQueueDepth >= 0,
                 "ldsDmaIssueQueueDepth below range");
   static_assert(A.ldsDmaIssueQueueDepth <= 64,

@@ -23,7 +23,7 @@ namespace wave {
 /// `transform.named_sequence` in `pipelineFile` (or the CMake-baked
 /// default when empty) before emission. The emitter consumes inspectable
 /// WaveAMDMachine IR rather than selecting source Wave operations
-/// directly.
+/// directly. `WAVE_PIPELINE_ENTRY_POINT` selects a non-default sequence.
 LogicalResult translateWaveToAMDGPU(Operation *op, raw_ostream &os,
                                     StringRef pipelineFile = {});
 

@@ -823,13 +823,39 @@ InstructionExecutionState::getResourceUses(
     appendIssueResourceUses(desc.instructionIssueCount, /*offset=*/0,
                             issuePeriod, uses);
 
-  InstructionResourceKind pipe = resourceForPipe(desc.pipe);
+  appendPipeResourceUse(op, desc, resourceState, uses);
+  appendLdsResourceUses(desc, resourceState, issuePeriod, uses);
+  return uses;
+}
+
+void InstructionExecutionState::appendPipeResourceUse(
+    Operation *op, const InstructionDesc &desc,
+    const InstructionResourceState &resourceState,
+    SmallVectorImpl<InstructionResourceUse> &uses) const {
   // Delay result span is control flow, not SALU pipe occupancy.
-  if (!isa<DmaIssueDelayOp>(op) && resourceState.isEnabled(pipe) &&
-      desc.resourceDuration > 0)
-    uses.push_back({pipe, getInstructionResourceScope(pipe), /*units=*/1,
-                    /*count=*/1, /*offset=*/0, /*period=*/0,
-                    desc.resourceDuration});
+  if (isa<DmaIssueDelayOp>(op) || desc.resourceDuration <= 0)
+    return;
+  InstructionResourceKind pipe = resourceForPipe(desc.pipe);
+  if (!resourceState.isEnabled(pipe))
+    return;
+  uses.push_back({pipe, getInstructionResourceScope(pipe), /*units=*/1,
+                  /*count=*/1, /*offset=*/0, /*period=*/0,
+                  desc.resourceDuration});
+}
+
+void InstructionExecutionState::appendLdsResourceUses(
+    const InstructionDesc &desc, const InstructionResourceState &resourceState,
+    int64_t issuePeriod, SmallVectorImpl<InstructionResourceUse> &uses) const {
+  bool usesLds = hasMemoryIssueResource(desc.memoryIssueResources,
+                                        MemoryIssueResource::Lds) ||
+                 hasMemoryIssueResource(desc.memoryIssueResources,
+                                        MemoryIssueResource::LdsDmaAccept);
+  if (usesLds && resourceState.isEnabled(InstructionResourceKind::LdsIssue)) {
+    uses.push_back({InstructionResourceKind::LdsIssue,
+                    InstructionResourceScope::SIMDPair, /*units=*/1,
+                    desc.instructionIssueCount, /*offset=*/0, issuePeriod,
+                    arch.ldsIssuePeriod});
+  }
 
   if (hasMemoryIssueResource(desc.memoryIssueResources,
                              MemoryIssueResource::LdsDmaAccept) &&
@@ -839,7 +865,6 @@ InstructionExecutionState::getResourceUses(
                     desc.instructionIssueCount, /*offset=*/0, issuePeriod,
                     arch.ldsDmaIssuePeriod});
   }
-  return uses;
 }
 
 void InstructionExecutionState::appendIssueResourceUses(

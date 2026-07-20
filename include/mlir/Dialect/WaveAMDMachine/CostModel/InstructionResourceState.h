@@ -35,6 +35,7 @@ enum class InstructionResourceKind : uint8_t {
   ValuPipe,
   SaluPipe,
   XdlPipe,
+  LdsIssue,
   LdsDmaIssue,
   NumResources,
 };
@@ -103,7 +104,7 @@ private:
   };
 
   static constexpr size_t kSIMDResourceCount = 4;
-  static constexpr size_t kSIMDPairResourceCount = 1;
+  static constexpr size_t kSIMDPairResourceCount = 2;
   static constexpr size_t kCUResourceCount = 1;
   using SIMDResourceDomain = std::array<ResourceCalendar, kSIMDResourceCount>;
   using SIMDPairResourceDomain =

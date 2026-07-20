@@ -342,6 +342,8 @@ def calibrator_command(args: argparse.Namespace, spec: RunSpec) -> list[str]:
         cmd.append("--all-ones")
     if args.rand_int:
         cmd.append("--rand-int")
+    if args.multi_wave_specialize:
+        cmd.append("--multi-wave-specialize")
     if args.rocm_lib:
         cmd.extend(["--rocm-lib", args.rocm_lib])
     cmd.extend(args.extra_calibrator_arg)
@@ -596,6 +598,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rebuild", action="store_true")
+    parser.add_argument("--multi-wave-specialize", action="store_true")
     parser.add_argument(
         "--build-jobs",
         type=int,

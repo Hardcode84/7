@@ -71,6 +71,9 @@ struct ArchData {
   // Default LDS counter drain latency used when no calibration/override exists.
   int ldsCounterLatency;
 
+  // DS and direct-to-LDS issue cadence per SIMD pair. Zero disables it.
+  int ldsIssuePeriod;
+
   // LDS-DMA issue-side accept queue. Zero depth/latency disables the model.
   int ldsDmaIssueQueueDepth;
   int ldsDmaIssueLatency;

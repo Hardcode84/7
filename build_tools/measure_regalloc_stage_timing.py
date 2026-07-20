@@ -53,6 +53,7 @@ class PerfGoldenInput:
     golden: Path
     isolate_kernel: Callable[[Path], Path] | None
     normalize_asm: Callable[[str], str]
+    pipeline_entry_point: str | None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ def load_perf_golden(path: Path) -> PerfGoldenInput:
         golden=Path(data["GOLDEN"]),
         isolate_kernel=isolate_kernel,
         normalize_asm=data["normalize_asm"],
+        pipeline_entry_point=data.get("PIPELINE_ENTRY_POINT"),
     )
 
 
@@ -182,6 +184,7 @@ def run_translate(
     output_dir: Path,
     name: str,
     disable_threading: bool,
+    pipeline_entry_point: str | None,
 ) -> dict[str, float]:
     asm_path = output_dir / f"{name}.s"
     timing_path = output_dir / f"{name}.timing.txt"
@@ -196,6 +199,10 @@ def run_translate(
     cmd.append(str(source))
     env = os.environ.copy()
     env["WAVE_PIPELINES_DIR"] = str(pipeline_dir)
+    if pipeline_entry_point is None:
+        env.pop("WAVE_PIPELINE_ENTRY_POINT", None)
+    else:
+        env["WAVE_PIPELINE_ENTRY_POINT"] = pipeline_entry_point
     env["LC_ALL"] = "C"
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
     asm_path.write_text(proc.stdout, encoding="utf-8")
@@ -235,6 +242,7 @@ def measure(
                 output_dir,
                 f"warmup-{warmup}-{tool.label}",
                 disable_threading,
+                perf_golden.pipeline_entry_point,
             )
 
     for run in range(1, runs + 1):
@@ -248,6 +256,7 @@ def measure(
                 output_dir,
                 f"run-{run}-{tool.label}",
                 disable_threading,
+                perf_golden.pipeline_entry_point,
             )
             for stage in STAGES:
                 samples.append(

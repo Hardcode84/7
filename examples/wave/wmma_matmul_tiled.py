@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 _ProfileValue = bool | int | str
 _PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
 _FOUR_WAVE_PHASED_DMA_PROFILE = "gfx950-f16-256x256-4wave"
-_PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int]] = {
+_PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int | bool]] = {
     _PHASED_DMA_PROFILE: {
         "issue_group_size": 7,
         "initial_delay_cycles": 68,
@@ -74,8 +74,9 @@ _PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int]] = {
         "loop_delay_cycles": 0,
         "loop_overlap_cycles": 0,
         "delayed_waves": 0,
-        "fetch_alignment": 4,
-        "fetch_phase": 0,
+        "fetch_alignment": 32,
+        "fetch_phase": 12,
+        "subpanel_pipeline": True,
     },
 }
 
@@ -143,6 +144,7 @@ _GFX950_F16_256X256_4WAVE: dict[str, _ProfileValue] = {
     "output_type": "f16",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
+    "coalesced_mfma_output": True,
 }
 
 _GFX950_MXFP4_256X256_8WAVE: dict[str, _ProfileValue] = {
@@ -286,6 +288,11 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="stamp waveamdmachine.enable_split_barriers on the kernel",
     )
     parser.add_argument(
+        "--coalesced-mfma-output",
+        action="store_true",
+        help="transpose gfx950 MFMA accumulation for direct column-major stores",
+    )
+    parser.add_argument(
         "--cta-swizzle-xcds",
         type=int,
         default=1,
@@ -411,6 +418,38 @@ def _compare_tile_multisets(
     )
 
 
+def _compare_buffers(
+    actual: tuple[float, ...],
+    expected: tuple[float, ...],
+    *,
+    atol: float,
+    rtol: float,
+) -> tuple[bool, str]:
+    if len(actual) != len(expected):
+        return False, f"length mismatch: gpu={len(actual)} cpu={len(expected)}"
+    worst = (0.0, 0, 0.0, 0.0)
+    for index, (got, exp) in enumerate(zip(actual, expected, strict=True)):
+        diff = abs(got - exp)
+        if diff > worst[0]:
+            worst = (diff, index, got, exp)
+        if not math.isclose(got, exp, rel_tol=rtol, abs_tol=atol):
+            return False, f"element {index}: gpu={got} cpu={exp} abs_diff={diff}"
+    diff, index, got, exp = worst
+    return True, f"elements={len(actual)} max_abs_diff={diff} at {index} ({got}, {exp})"
+
+
+def _compare_output(
+    actual: tuple[float, ...],
+    expected: tuple[float, ...],
+    *,
+    coalesced_mfma_output: bool,
+    atol: float,
+    rtol: float,
+) -> tuple[bool, str]:
+    compare = _compare_buffers if coalesced_mfma_output else _compare_tile_multisets
+    return compare(actual, expected, atol=atol, rtol=rtol)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     ensure_package_on_path("mlir.dialects.wave_matmul")
@@ -447,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         target_waves=args.target_waves or None,
         enable_split_barriers=args.enable_split_barriers,
         phased_dma_schedule=phased_dma_schedule,
+        coalesced_mfma_output=args.coalesced_mfma_output,
         include_host=not args.kernel_only,
     )
     module_text = str(module)
@@ -484,10 +524,12 @@ def main(argv: list[str] | None = None) -> int:
         output_type=args.output_type,
         cta_swizzle_xcds=args.cta_swizzle_xcds,
         cta_group_m=args.cta_group_m,
+        coalesced_mfma_output=args.coalesced_mfma_output,
     )
-    ok, message = _compare_tile_multisets(
+    ok, message = _compare_output(
         parse_runner_values(output),
         expected,
+        coalesced_mfma_output=args.coalesced_mfma_output,
         atol=args.atol,
         rtol=args.rtol,
     )

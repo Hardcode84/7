@@ -1115,6 +1115,9 @@ class FunctionBuilder:
                 result_type = base.type
         return wave.PtrAddOp(result_type, base, offset).result
 
+    def ptr_cast(self, source: Value, result_type: Type) -> Value:
+        return wave.PtrCastOp(result_type, source).result
+
     def store(
         self,
         value: Value,

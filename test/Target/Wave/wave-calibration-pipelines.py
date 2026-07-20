@@ -5,6 +5,7 @@
 # CHECK: matmul_explicit_gfx950_wave_size: ok
 # CHECK: matmul_auto_gfx950_wave_size: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
+# CHECK: matmul_runner_output_layout: ok
 # CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_rand_int_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
@@ -98,7 +99,7 @@ def require_sequence(ir, parsed, label: str, name: str):
     return sequence
 
 
-def check_backend_entry(label: str, ir, entry) -> None:
+def check_backend_entry(label: str, ir, entry, multi_wave_specialize: bool) -> None:
     includes = included_sequences(ir, entry)
     require(
         label,
@@ -117,12 +118,11 @@ def check_backend_entry(label: str, ir, entry) -> None:
         "backend include order drifted",
     )
     entry_passes = applied_passes(ir, entry)
-    require_pass_order(
-        label,
-        entry_passes,
-        ["waveamd-machine-schedule-report", "waveamd-machine-schedule"],
-        "scheduler report/order drifted",
-    )
+    expected = ["waveamd-machine-schedule-report"]
+    if multi_wave_specialize:
+        expected.append("waveamd-machine-multi-wave-specialize")
+    expected.append("waveamd-machine-schedule")
+    require_pass_order(label, entry_passes, expected, "scheduler order drifted")
     require(
         label,
         "waveamd-insert-hazard-waits" not in entry_passes,
@@ -251,12 +251,14 @@ def check_post_regalloc(label: str, post_passes: list[str]) -> None:
     )
 
 
-def check_calibration_entry(label: str, module) -> None:
-    text = module.pipeline_text(
-        BUILD_DIR,
-        schedule_options={"apply-schedule": True},
-        report_options={"print-candidates": True},
-    )
+def check_calibration_entry(label: str, module, multi_wave_specialize: bool) -> None:
+    kwargs = {
+        "schedule_options": {"apply-schedule": True},
+        "report_options": {"print-candidates": True},
+    }
+    if multi_wave_specialize:
+        kwargs["multi_wave_specialize"] = True
+    text = module.pipeline_text(BUILD_DIR, **kwargs)
     ir, _, register_dialects = module.import_mlir_bindings(BUILD_DIR)
     with ir.Context() as ctx:
         register_dialects(ctx)
@@ -273,7 +275,7 @@ def check_calibration_entry(label: str, module) -> None:
         )
         post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
         require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
-        check_backend_entry(label, ir, entry)
+        check_backend_entry(label, ir, entry, multi_wave_specialize)
         check_preschedule(label, ir, preschedule)
         check_postschedule(label, ir, postschedule)
         check_backend_lower(label, applied_passes(ir, lower))
@@ -390,6 +392,53 @@ def check_matmul_runner_wave_size(matmul) -> None:
         "runner should receive MFMA accumulator layout",
     )
     print("matmul_runner_gfx950_wave_size: ok")
+
+
+def check_matmul_runner_output_layout(matmul) -> None:
+    explicit = matmul.parse_args(
+        ["--chip=gfx950", "--output-layout=row-major", "--no-check"]
+    )
+    coalesced = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave",
+            "--k=64",
+            "--no-check",
+        ]
+    )
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), explicit, "/tmp")
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), coalesced, "/tmp")
+    finally:
+        matmul.run = old_run
+
+    require(
+        "matmul_runner_output_layout",
+        len(captured) == 2,
+        "runner call count mismatch",
+    )
+    expected = ("row-major", "column-major")
+    for cmd, layout in zip(captured, expected, strict=True):
+        require(
+            "matmul_runner_output_layout",
+            cmd.count("--output-layout") == 1,
+            "runner should receive one --output-layout",
+        )
+        index = cmd.index("--output-layout")
+        require(
+            "matmul_runner_output_layout",
+            cmd[index + 1] == layout,
+            f"runner should receive {layout}",
+        )
+    print("matmul_runner_output_layout: ok")
 
 
 def check_matmul_bf16_forwarding(matmul) -> None:
@@ -887,7 +936,7 @@ def check_matmul_f16_4wave_profile(matmul) -> None:
     )
     require(
         "matmul_f16_4wave_profile",
-        matmul.dma_buffer_count(args) == 2 and matmul.compute_lds_bytes(args) == 131072,
+        matmul.dma_buffer_count(args) == 2 and matmul.compute_lds_bytes(args) == 133120,
         "bad 4-wave LDS byte accounting",
     )
     cmd = matmul.build_matmul_example_args(args, "gfx950")
@@ -895,6 +944,11 @@ def check_matmul_f16_4wave_profile(matmul) -> None:
         "matmul_f16_4wave_profile",
         "--kernel-profile=gfx950-f16-256x256-4wave" in cmd,
         "calibrator did not forward the named 4-wave profile",
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        "--coalesced-mfma-output" in cmd,
+        "calibrator did not forward coalesced output",
     )
     print("matmul_f16_4wave_profile: ok")
 
@@ -1482,7 +1536,13 @@ def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
 
 def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
     args = perf_sweep.build_argparser().parse_args(
-        ["--kernels=f16", "--rand-int", "--skip-rebuild", "--dry-run"]
+        [
+            "--kernels=f16",
+            "--rand-int",
+            "--multi-wave-specialize",
+            "--skip-rebuild",
+            "--dry-run",
+        ]
     )
     perf_sweep.validate_args(args)
     spec = perf_sweep.build_run_specs(args)[0]
@@ -1491,6 +1551,11 @@ def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
         "matmul_perf_sweep_rand_int_forwarding",
         "--rand-int" in cmd,
         "perf sweep command missing --rand-int",
+    )
+    require(
+        "matmul_perf_sweep_rand_int_forwarding",
+        "--multi-wave-specialize" in cmd,
+        "perf sweep command missing specialization flag",
     )
 
     try:
@@ -1566,10 +1631,11 @@ def main() -> int:
         "wave_matmul_perf_sweep",
         REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py",
     )
-    check_calibration_entry("matmul_pipeline", matmul)
-    check_calibration_entry("fa_pipeline", fa)
+    check_calibration_entry("matmul_pipeline", matmul, True)
+    check_calibration_entry("fa_pipeline", fa, False)
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
+    check_matmul_runner_output_layout(matmul)
     check_matmul_bf16_forwarding(matmul)
     check_matmul_rand_int_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)

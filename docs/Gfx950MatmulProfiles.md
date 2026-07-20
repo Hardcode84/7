@@ -487,12 +487,14 @@ input_type=f16
 output_type=f16
 cta_swizzle_xcds=8
 cta_group_m=4
+coalesced_mfma_output=true
 ```
 
 Named profile supplies a typed `PhasedDmaSchedule`: issue group 7, zero issue
-delays, and fetch alignment/phase 4/0. Schedule selects the two-buffer f16 DMA
-pipeline; four buffers exceed gfx950 LDS capacity for this tile. Profile stays
-separate from the locked `gfx950-f16-256x256-8wave` default.
+delays, fetch alignment/phase 32/12, and subpanel pipelining. Schedule selects
+the two-buffer f16 DMA pipeline; four buffers exceed gfx950 LDS capacity for
+this tile. Profile stays separate from the locked
+`gfx950-f16-256x256-8wave` default.
 
 See [Wave gfx950 f16 four-wave experiment](PerfReferences/WaveGfx950F16Gemm4Wave.md)
 for hardware results and saved ISA.

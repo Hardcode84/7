@@ -662,6 +662,18 @@ graphPostOrder(ArrayRef<SmallVector<unsigned, 4>> successors) {
   return postOrder;
 }
 
+static SmallVector<int64_t, 16>
+buildNodeLatencies(const GreedyRegion &region,
+                   const waveamdmachine::ArchData &arch,
+                   const waveamdmachine::EventSimConfig &config) {
+  SmallVector<int64_t, 16> latencies;
+  latencies.reserve(region.ops.size());
+  for (Operation *op : region.ops)
+    latencies.push_back(
+        getModelLatency(arch, waveamdmachine::classifyOp(op), config));
+  return latencies;
+}
+
 static NodeAdjacency
 buildGraphPredecessors(ArrayRef<SmallVector<unsigned, 4>> successors) {
   NodeAdjacency predecessors(successors.size());
@@ -3812,10 +3824,44 @@ using MultiWaveOrders =
 struct MultiWaveClassState {
   SmallVector<unsigned, 16> order;
   SmallVector<unsigned, 16> priority;
+  SmallVector<int64_t, 16> latency;
   SmallVector<unsigned, 16> pending;
   BitVector ready;
   BitVector scheduled;
+  std::optional<unsigned> deferredReadyNode;
 };
+
+static bool consumeDeferredReadyNode(MultiWaveClassState &state, unsigned node,
+                                     bool ready) {
+  if (!ready)
+    return false;
+  if (state.deferredReadyNode != node)
+    return false;
+  state.deferredReadyNode.reset();
+  return true;
+}
+
+static bool isAlternativeCandidate(const MultiWaveClassState &state,
+                                   unsigned candidate, unsigned original) {
+  return state.ready.test(candidate) && candidate != original;
+}
+
+static bool mustKeepReadyOriginal(const MultiWaveClassState &state,
+                                  unsigned original, bool originalReady) {
+  return originalReady && state.latency[original] == 0;
+}
+
+static bool shouldSkipAlternative(const MultiWaveClassState &state,
+                                  const GreedyRegion &region,
+                                  unsigned candidate, unsigned original,
+                                  bool originalReady) {
+  if (!originalReady)
+    return false;
+  if (isBarrierOp(region.ops[candidate]))
+    return true;
+  int64_t requiredLatency = 2 * std::max<int64_t>(1, state.latency[original]);
+  return state.latency[candidate] < requiredLatency;
+}
 
 static unsigned getMultiWaveClass(waveamdmachine::WavePlacement placement) {
   return placement.simd % kMultiWaveClassCount;
@@ -3924,12 +3970,16 @@ public:
   MultiWaveGreedyScheduler(
       const MultiWaveRegions &regions, const MultiWaveGraphs &graphs,
       const MultiWaveOrders &priorities, const ValueOriginMap &origins,
+      const waveamdmachine::ArchData &arch,
+      const waveamdmachine::EventSimConfig &config,
       std::unique_ptr<waveamdmachine::MultiWaveExecutionState> state)
       : state(std::move(state)), regions(regions), graphs(graphs),
         origins(origins) {
     pc.assign(this->state->getWaveCount(), 0);
     for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
       classes[classId].priority = priorities[classId];
+      classes[classId].latency =
+          buildNodeLatencies(regions[classId], arch, config);
       classes[classId].pending = graphs[classId].pendingPreds;
       classes[classId].ready = getInitialReadySet(classes[classId].pending);
       classes[classId].scheduled.resize(regions[classId].ops.size());
@@ -3941,8 +3991,9 @@ public:
 private:
   FailureOr<bool> extendOneFrontier();
   FailureOr<unsigned> selectNode(unsigned classId);
-  FailureOr<std::optional<unsigned>> selectAlternative(unsigned classId,
-                                                       unsigned original) const;
+  FailureOr<std::optional<unsigned>>
+  selectAlternative(unsigned classId, unsigned original,
+                    bool originalReady) const;
   FailureOr<bool> canIssueWithoutStall(unsigned classId, unsigned node) const;
   unsigned findPreferredReady(unsigned classId) const;
   unsigned findPreferredUnscheduled(unsigned classId) const;
@@ -4042,44 +4093,54 @@ FailureOr<unsigned> MultiWaveGreedyScheduler::selectNode(unsigned classId) {
   FailureOr<bool> preferredReady = canIssueWithoutStall(classId, preferred);
   if (failed(preferredReady))
     return failure();
-  if (*preferredReady)
+  if (consumeDeferredReadyNode(classState, preferred, *preferredReady))
     return preferred;
-
-  LDBG("wave-multi-wave-schedule")
-      << "class=" << classId << " preferred=" << preferred
-      << " op=" << regions[classId].ops[preferred]->getName() << " stalls";
+  if (!*preferredReady)
+    LDBG("wave-multi-wave-schedule")
+        << "class=" << classId << " preferred=" << preferred
+        << " op=" << regions[classId].ops[preferred]->getName() << " stalls";
 
   FailureOr<std::optional<unsigned>> alternative =
-      selectAlternative(classId, preferred);
+      selectAlternative(classId, preferred, *preferredReady);
   if (failed(alternative))
     return failure();
-  if (*alternative)
+  if (*alternative) {
+    if (*preferredReady)
+      classState.deferredReadyNode = preferred;
     LDBG("wave-multi-wave-schedule")
         << "class=" << classId << " selected=" << **alternative
         << " op=" << regions[classId].ops[**alternative]->getName();
-  else
-    LDBG("wave-multi-wave-schedule")
-        << "class=" << classId << " no stall-free alternative";
-  return *alternative ? **alternative : preferred;
+    return **alternative;
+  }
+  LDBG("wave-multi-wave-schedule")
+      << "class=" << classId << " no stall-free alternative";
+  return preferred;
 }
 
 FailureOr<std::optional<unsigned>>
-MultiWaveGreedyScheduler::selectAlternative(unsigned classId,
-                                            unsigned original) const {
+MultiWaveGreedyScheduler::selectAlternative(unsigned classId, unsigned original,
+                                            bool originalReady) const {
   const MultiWaveClassState &classState = classes[classId];
+  if (mustKeepReadyOriginal(classState, original, originalReady))
+    return std::optional<unsigned>();
   unsigned examined = 0;
   for (unsigned candidate : classState.priority) {
-    if (!classState.ready.test(candidate) || candidate == original)
+    if (!isAlternativeCandidate(classState, candidate, original))
       continue;
     if (++examined > kMultiWaveCandidateLimit)
       break;
+    if (shouldSkipAlternative(classState, regions[classId], candidate, original,
+                              originalReady))
+      continue;
     FailureOr<bool> candidateReady = canIssueWithoutStall(classId, candidate);
     if (failed(candidateReady))
       return failure();
     LDBG("wave-multi-wave-schedule")
         << "class=" << classId << " candidate=" << candidate
         << " op=" << regions[classId].ops[candidate]->getName()
-        << " stalls=" << !*candidateReady;
+        << " stalls=" << !*candidateReady
+        << " latency=" << classState.latency[candidate]
+        << " original_latency=" << classState.latency[original];
     if (!*candidateReady)
       continue;
     return std::optional<unsigned>(candidate);
@@ -4381,9 +4442,11 @@ replayMultiWaveOrders(const MultiWaveRegions &regions,
 static FailureOr<MultiWaveOrders> buildMultiWaveOrdersFromState(
     const MultiWaveRegions &regions, const MultiWaveGraphs &graphs,
     const MultiWaveOrders &priorities, const ValueOriginMap &origins,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config,
     std::unique_ptr<waveamdmachine::MultiWaveExecutionState> state) {
-  MultiWaveGreedyScheduler scheduler(regions, graphs, priorities, origins,
-                                     std::move(state));
+  MultiWaveGreedyScheduler scheduler(regions, graphs, priorities, origins, arch,
+                                     config, std::move(state));
   return scheduler.run();
 }
 
@@ -4407,7 +4470,7 @@ static FailureOr<MultiWaveOrders> buildBoundedMultiWaveOrders(
       buildMultiWaveInstructionConfig(arch, config, regions[0].first));
   initializeMultiWaveState(*initial, regions, origins);
   FailureOr<MultiWaveOrders> first = buildMultiWaveOrdersFromState(
-      regions, graphs, priorities, origins, std::move(initial));
+      regions, graphs, priorities, origins, arch, config, std::move(initial));
   if (failed(first))
     return failure();
 
@@ -4422,7 +4485,7 @@ static FailureOr<MultiWaveOrders> buildBoundedMultiWaveOrders(
     if (failed(state))
       return failure();
     FailureOr<MultiWaveOrders> candidate = buildMultiWaveOrdersFromState(
-        regions, graphs, priorities, origins, std::move(*state));
+        regions, graphs, priorities, origins, arch, config, std::move(*state));
     if (failed(candidate))
       return failure();
     if (sameMultiWaveOrders(current, *candidate) ||

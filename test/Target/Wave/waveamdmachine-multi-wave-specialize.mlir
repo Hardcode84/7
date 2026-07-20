@@ -94,16 +94,16 @@ func.func @barrier_first(%root: !waveamdmachine.mem.token,
 // SCHEDULED: } otherwise {
 // SCHEDULED: waveamdmachine.uniform_loop
 // SCHEDULED: waveamdmachine.s_barrier
-// SCHEDULED-NEXT: {{.*}} = waveamdmachine.ds_load_b128
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.buffer_load_lds_b128
+// SCHEDULED-NEXT: {{.*}} = waveamdmachine.ds_load_b128
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.mfma_f32_16x16x32_f16
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.s_barrier
-// SCHEDULED-NEXT: {{.*}} = waveamdmachine.ds_load_b128
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.buffer_load_lds_b128
+// SCHEDULED-NEXT: {{.*}} = waveamdmachine.ds_load_b128
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.mfma_f32_16x16x32_f16
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.s_barrier
-// SCHEDULED-NEXT: {{.*}} = waveamdmachine.ds_load_b128
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.buffer_load_lds_b128
+// SCHEDULED-NEXT: {{.*}} = waveamdmachine.ds_load_b128
 // SCHEDULED-NEXT: {{.*}} = waveamdmachine.mfma_f32_16x16x32_f16
 // SCHEDULED-NOT: waveamdmachine.multi_wave_schedule
 func.func @shared_dma_saturation(

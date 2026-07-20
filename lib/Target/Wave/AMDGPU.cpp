@@ -58,6 +58,7 @@
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <limits>
 
 LLD_HAS_DRIVER(elf)
@@ -3825,11 +3826,16 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
     return module.emitError("failed to parse Wave compilation pipeline `")
            << path << "`";
 
-  Operation *entry =
-      transform::detail::findTransformEntryPoint(module, *transformModule);
+  StringRef entryPoint =
+      transform::TransformDialect::kTransformEntryPointSymbolName;
+  // Explicit callers may select another sequence from the same library.
+  if (const char *env = std::getenv("WAVE_PIPELINE_ENTRY_POINT"))
+    entryPoint = env;
+  Operation *entry = transform::detail::findTransformEntryPoint(
+      module, *transformModule, entryPoint);
   if (!entry)
     return module.emitError("Wave compilation pipeline `")
-           << path << "` missing entry point";
+           << path << "` missing entry point `" << entryPoint << "`";
 
   return transform::applyTransformNamedSequence(module, entry, *transformModule,
                                                 transform::TransformOptions());

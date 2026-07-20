@@ -10,6 +10,123 @@ from mlir.dialects.wave_matmul import (
     generate_wmma_f16_matmul_inputs,
 )
 
+
+def assert_raises(error_type, message, callback):
+    try:
+        callback()
+    except error_type as exc:
+        assert str(exc) == message
+        return
+    raise AssertionError(f"expected {error_type.__name__}: {message}")
+
+
+subpanel_schedule = wm.PhasedDmaSchedule(
+    issue_group_size=1,
+    initial_delay_cycles=0,
+    loop_delay_cycles=0,
+    loop_overlap_cycles=0,
+    delayed_waves=0,
+    fetch_alignment=4,
+    fetch_phase=0,
+    subpanel_pipeline=True,
+)
+assert_raises(
+    ValueError,
+    "DMA subpanel pipeline requires two K32 phases",
+    lambda: build_wmma_f16_matmul_module(
+        M=16,
+        N=16,
+        K=32,
+        wave_k_tiles=1,
+        use_dma_lds=True,
+        matrix_intrinsic="mfma_gfx950",
+        phased_dma_schedule=subpanel_schedule,
+    ),
+)
+assert_raises(
+    ValueError,
+    "DMA subpanel pipeline does not support packed MXFP4",
+    lambda: build_wmma_f16_matmul_module(
+        M=16,
+        N=16,
+        K=256,
+        wave_k_tiles=2,
+        use_dma_lds=True,
+        matrix_intrinsic="mfma_gfx950",
+        input_type="mxfp4",
+        phased_dma_schedule=subpanel_schedule,
+    ),
+)
+assert_raises(
+    ValueError,
+    "DMA subpanel pipeline requires at least two M tiles per wave",
+    lambda: build_wmma_f16_matmul_module(
+        M=16,
+        N=16,
+        K=128,
+        wave_m_tiles=1,
+        wave_n_tiles=1,
+        wave_k_tiles=2,
+        use_dma_lds=True,
+        matrix_intrinsic="mfma_gfx950",
+        phased_dma_schedule=subpanel_schedule,
+    ),
+)
+print("subpanel-validation ok")
+
+module_regular_subpanel = build_wmma_f16_matmul_module(
+    M=64,
+    N=64,
+    K=128,
+    BM=2,
+    BN=2,
+    wave_m_tiles=2,
+    wave_n_tiles=2,
+    wave_k_tiles=2,
+    use_dma_lds=True,
+    matrix_intrinsic="mfma_gfx950",
+    phased_dma_schedule=subpanel_schedule,
+    include_host=False,
+)
+assert "waveamd.dma_load_lds" in str(module_regular_subpanel)
+print("regular-subpanel ok")
+
+assert_raises(
+    ValueError,
+    "coalesced MFMA output requires gfx950 f16 MFMA",
+    lambda: build_wmma_f16_matmul_module(
+        M=128,
+        N=128,
+        K=32,
+        wave_m_tiles=8,
+        wave_n_tiles=8,
+        output_type="f16",
+        coalesced_mfma_output=True,
+    ),
+)
+module_coalesced = build_wmma_f16_matmul_module(
+    M=256,
+    N=256,
+    K=64,
+    BM=2,
+    BN=2,
+    wave_m_tiles=8,
+    wave_n_tiles=8,
+    wave_k_tiles=2,
+    use_buffer=True,
+    use_dma_lds=True,
+    matrix_intrinsic="mfma_gfx950",
+    output_type="f16",
+    coalesced_mfma_output=True,
+    include_host=False,
+)
+coalesced_text = str(module_coalesced)
+assert coalesced_text.count("wave.pack") == 32
+assert coalesced_text.count("!wave.simd<vector<8xf16>, 64>") >= 32
+assert "!waveamd.fragment<0, f16, 16, 16, 64, 4>" in coalesced_text
+assert "!waveamd.fragment<1, f16, 16, 16, 64, 4>" in coalesced_text
+print("coalesced-mfma-output ok")
+
 a0, b0 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
 a1, b1 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
 a2, _ = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=8)
@@ -199,6 +316,9 @@ static_signature = static_text.split("func.func @static_matmul_kernel", 1)[1].sp
 assert "i32" not in static_signature
 print(static_bld.module)
 
+# CHECK: subpanel-validation ok
+# CHECK: regular-subpanel ok
+# CHECK: coalesced-mfma-output ok
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0
 # CHECK: mxfp4-scales 64 64 127 122

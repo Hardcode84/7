@@ -46,8 +46,10 @@ static size_t simdResourceIndex(InstructionResourceKind kind) {
 
 static size_t simdPairResourceIndex(InstructionResourceKind kind) {
   switch (kind) {
-  case InstructionResourceKind::LdsDmaIssue:
+  case InstructionResourceKind::LdsIssue:
     return 0;
+  case InstructionResourceKind::LdsDmaIssue:
+    return 1;
   default:
     llvm_unreachable("resource is not SIMD-pair-scoped");
   }
@@ -112,6 +114,8 @@ llvm::StringRef getInstructionResourceKindName(InstructionResourceKind kind) {
     return "salu_pipe";
   case InstructionResourceKind::XdlPipe:
     return "xdl_pipe";
+  case InstructionResourceKind::LdsIssue:
+    return "lds_issue";
   case InstructionResourceKind::LdsDmaIssue:
     return "lds_dma_issue";
   case InstructionResourceKind::NumResources:
@@ -130,6 +134,7 @@ getInstructionResourceScope(InstructionResourceKind kind) {
   case InstructionResourceKind::SaluPipe:
   case InstructionResourceKind::XdlPipe:
     return InstructionResourceScope::SIMD;
+  case InstructionResourceKind::LdsIssue:
   case InstructionResourceKind::LdsDmaIssue:
     return InstructionResourceScope::SIMDPair;
   case InstructionResourceKind::CuIssue:
@@ -156,6 +161,8 @@ InstructionResourceState::InstructionResourceState(
   configure(InstructionResourceKind::ValuPipe, capacities.valuPipe);
   configure(InstructionResourceKind::SaluPipe, capacities.saluPipe);
   configure(InstructionResourceKind::XdlPipe, capacities.xdlPipe);
+  configure(InstructionResourceKind::LdsIssue,
+            arch.ldsIssuePeriod == 0 ? 0 : 1);
   configure(InstructionResourceKind::LdsDmaIssue,
             arch.ldsDmaIssuePeriod == 0 ? 0 : 1);
 }
