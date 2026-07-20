@@ -235,4 +235,64 @@ func.func @redistribute_cross_wave_sequence(
   return
 }
 
+// Allocation resolution keeps lowering-introduced scratch recurrences
+// internal to value-only redistributions.
+// ASM-LABEL: redistribute_cross_wave_loop_lifetime:
+// ASM: ds_store_b32
+// ASM: s_barrier
+// ASM: ds_load_b32
+// ASM: .amdhsa_group_segment_fixed_size 65536
+func.func @redistribute_cross_wave_loop_lifetime(
+    %dst: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel,
+                wave.lds_size = 65024 : i64,
+                wave.workgroup_size = array<i32: 64, 1, 1>,
+                wave.waves_per_workgroup = 2 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %source = wave.pack %item
+      : !wave.simd<i32, 32> -> !wave.simd<vector<1xi32>, 32>
+  %lower = arith.constant 0 : index
+  %upper = arith.constant 2 : index
+  %step = arith.constant 1 : index
+  %done = scf.for %i = %lower to %upper step %step
+      iter_args(%acc = %item) -> (!wave.simd<i32, 32>) {
+    %moved0 = wave.redistribute %source,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    %value0 = wave.extract %moved0[0]
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+    %moved1 = wave.redistribute %source,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    %value1 = wave.extract %moved1[0]
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+    %moved2 = wave.redistribute %source,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    %value2 = wave.extract %moved2[0]
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+    %moved3 = wave.redistribute %source,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    %value3 = wave.extract %moved3[0]
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+    %sum01 = wave.binary addi %value0, %value1
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %sum23 = wave.binary addi %value2, %value3
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %sum = wave.binary addi %sum01, %sum23
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %next = wave.binary addi %acc, %sum
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    scf.yield %next : !wave.simd<i32, 32>
+  }
+  %ptr = wave.ptr_add %dst, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %stored = wave.store %done -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 }

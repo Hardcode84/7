@@ -432,14 +432,112 @@ func.func @same_loop_reuse_with_backedge(%n: index)
 
 // -----
 
-// CHECK-LABEL: func.func @missing_loop_backedge_stays_release_site
+// Fixed provisional offsets model clients that plan a bounded rotating LDS
+// scratch sequence before final allocation resolution.
+// CHECK-LABEL: func.func @fixed_loop_reuse_synthesizes_backedge
+// CHECK-SAME: wave.lds_size = 48 : i64
+// CHECK-NOT: wave.alloc
+// CHECK: scf.for {{.*}} iter_args(%[[READY:.*]] =
+// CHECK: %[[UNRELATED_BASE:.*]] = wave.shared_memory_base {offset = 32 : i64}
+// CHECK: %[[UNRELATED_PTR:.*]] = wave.ptr_add %[[UNRELATED_BASE]]
+// CHECK: wave.store {{.*}} -> %[[UNRELATED_PTR]] :
+// CHECK: wave.barrier
+// CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+// CHECK: wave.store {{.*}} after %[[READY]]
+// CHECK: wave.shared_memory_base {offset = 16 : i64}
+// CHECK: wave.barrier
+// CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+// CHECK: wave.barrier
+// CHECK: wave.shared_memory_base {offset = 16 : i64}
+// CHECK: %[[LAST:.*]] = wave.store
+// CHECK: %[[LATCH:.*]] = wave.barrier {{.*}}%[[LAST]]
+// CHECK: scf.yield %[[LATCH]]
+func.func @fixed_loop_reuse_synthesizes_backedge(%n: index)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 {
+    %unrelated = wave.alloc() {align = 16 : i64, bytesize = 16 : i64,
+                               offset = 32 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %unrelated_ptr = wave.ptr_add %unrelated, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %unrelated_stored = wave.store %lane -> %unrelated_ptr
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+        -> !wave.mem.token
+    %unrelated_safe = wave.barrier %unrelated_stored
+        : (!wave.mem.token) -> !wave.mem.token
+    %unrelated_released = wave.alloc_release %unrelated after %unrelated_safe
+        {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+
+    %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64,
+                       offset = 0 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %ap = wave.ptr_add %a, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %ta = wave.store %lane -> %ap
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+        -> !wave.mem.token
+    %a_released = wave.alloc_release %a after %ta {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+
+    %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64,
+                       offset = 16 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %bp = wave.ptr_add %b, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %tb = wave.store %lane -> %bp after %a_released
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    %b_released = wave.alloc_release %b after %tb {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+
+    %c = wave.alloc() {align = 16 : i64, bytesize = 16 : i64,
+                       offset = 0 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %cp = wave.ptr_add %c, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %tc = wave.store %lane -> %cp after %b_released
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    %c_released = wave.alloc_release %c after %tc {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+
+    %d = wave.alloc() {align = 16 : i64, bytesize = 16 : i64,
+                       offset = 16 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %dp = wave.ptr_add %d, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %td = wave.store %lane -> %dp after %c_released
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    %d_released = wave.alloc_release %d after %td {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @missing_loop_backedge_synthesizes_carry
 // CHECK-SAME: wave.lds_size = 16 : i64
 // CHECK-NOT: wave.alloc
-// CHECK: scf.for
+// CHECK: scf.for {{.*}} iter_args(%[[READY:.*]] =
 // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
-// CHECK: %[[STORED:.*]] = wave.store
+// CHECK: %[[STORED:.*]] = wave.store {{.*}} after %[[READY]]
 // CHECK: %[[SAFE:.*]] = wave.barrier %[[STORED]]
-func.func @missing_loop_backedge_stays_release_site(%n: index)
+// CHECK: scf.yield %[[SAFE]]
+func.func @missing_loop_backedge_synthesizes_carry(%n: index)
     attributes {wave.kernel, wave.lds_size = 0 : i64} {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -461,15 +559,15 @@ func.func @missing_loop_backedge_stays_release_site(%n: index)
 
 // -----
 
-// CHECK-LABEL: func.func @missing_access_backedge_stays_release_site
+// CHECK-LABEL: func.func @missing_access_backedge_uses_existing_carry
 // CHECK-SAME: wave.lds_size = 16 : i64
 // CHECK-NOT: wave.alloc
 // CHECK: scf.for {{.*}} iter_args(%[[READY:.*]] =
 // CHECK: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
-// CHECK: %[[STORED:.*]] = wave.store
-// CHECK: %[[SAFE:.*]] = wave.barrier %[[STORED]]
-// CHECK: scf.yield %[[SAFE]]
-func.func @missing_access_backedge_stays_release_site(%n: index)
+// CHECK: %[[SAFE:.*]] = wave.barrier %[[READY]]
+// CHECK: %[[STORED:.*]] = wave.store {{.*}} after %[[SAFE]]
+// CHECK: scf.yield %[[STORED]]
+func.func @missing_access_backedge_uses_existing_carry(%n: index)
     attributes {wave.kernel, wave.lds_size = 0 : i64} {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
