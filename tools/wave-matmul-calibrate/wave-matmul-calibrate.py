@@ -324,6 +324,9 @@ def build_tensilelite_example_args(args: argparse.Namespace, chip: str) -> list[
         f"--scale-input={selected_scale_input(args)}",
     ]
     append_target_waves(cmd, args)
+    append_option_if(
+        cmd, getattr(args, "multi_wave_specialize", False), "--multi-wave-specialize"
+    )
     return cmd
 
 
@@ -366,6 +369,9 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     append_target_waves(cmd, args)
     append_option_if(
         cmd, getattr(args, "enable_split_barriers", False), "--enable-split-barriers"
+    )
+    append_option_if(
+        cmd, getattr(args, "multi_wave_specialize", False), "--multi-wave-specialize"
     )
     append_option_if(
         cmd,
@@ -560,7 +566,6 @@ def append_calibration_entry(
     module,
     schedule_options: dict[str, bool | int | str],
     report_options: dict[str, bool | int | str],
-    multi_wave_specialize: bool,
 ) -> None:
     any_op = transform.AnyOpType.get()
     with ir.InsertionPoint(module.body):
@@ -588,14 +593,12 @@ def append_calibration_entry(
                 "waveamd-machine-schedule-report",
                 options=report_options,
             ).result
-        if schedule_options and multi_wave_specialize:
+        if schedule_options:
             finish_input = transform.ApplyRegisteredPassOp(
                 any_op,
                 finish_input,
                 "waveamd-machine-multi-wave-specialize",
-                options={"enable": True},
             ).result
-        if schedule_options:
             finish_input = transform.ApplyRegisteredPassOp(
                 any_op,
                 finish_input,
@@ -616,7 +619,6 @@ def pipeline_text(
     *,
     schedule_options: dict[str, bool | int | str],
     report_options: dict[str, bool | int | str],
-    multi_wave_specialize: bool = False,
 ) -> str:
     ir, transform, register_dialects = import_mlir_bindings(build_dir)
     with ir.Context() as ctx, ir.Location.unknown(ctx):
@@ -629,7 +631,6 @@ def pipeline_text(
             module,
             schedule_options,
             report_options,
-            multi_wave_specialize,
         )
         if not module.operation.verify():
             sys.exit("generated calibration pipeline failed verification")
@@ -644,7 +645,6 @@ def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Pat
             args.build_dir,
             schedule_options=schedule_pass_options(variant, args),
             report_options=schedule_report_options(variant, args),
-            multi_wave_specialize=args.multi_wave_specialize,
         )
     )
     return path
@@ -1219,7 +1219,13 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
 
 def add_scheduler_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--calibration-file", type=Path, default=None)
-    ap.add_argument("--multi-wave-specialize", action="store_true")
+    ap.add_argument(
+        "--multi-wave-specialize",
+        action="store_true",
+        help=(
+            "stamp waveamdmachine.enable_multi_wave_specialization on generated kernels"
+        ),
+    )
 
 
 def add_tool_args(ap: argparse.ArgumentParser) -> None:

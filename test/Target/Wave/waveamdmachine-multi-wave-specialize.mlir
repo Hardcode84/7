@@ -1,13 +1,8 @@
+// RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=ENABLED
 // RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=DISABLED
-// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize{enable=true})' | FileCheck %s --check-prefix=ENABLED
-// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize{enable=true},waveamd-machine-schedule{apply-schedule=true require-selected-input=true})' | FileCheck %s --check-prefix=SCHEDULED
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-machine-schedule{apply-schedule=true require-selected-input=true})' | FileCheck %s --check-prefix=SCHEDULED
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-
-// DISABLED-LABEL: func.func @specialize(
-// DISABLED-NOT: waveamdmachine.s_getreg_hw_id
-// DISABLED-NOT: waveamdmachine.uniform_if
-// DISABLED-COUNT-1: waveamdmachine.uniform_loop
 
 // ENABLED-LABEL: func.func @specialize(
 // ENABLED: [[HW_ID:%.*]] = waveamdmachine.s_getreg_hw_id offset 4 width 1
@@ -29,6 +24,7 @@ func.func @specialize(%cond: !waveamdmachine.reg<scc, 1>,
     attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
                 wave.kernel,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
                 waveamdmachine.schedule_input,
                 waveamdmachine.target_waves = 1 : i64} {
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
@@ -62,6 +58,7 @@ func.func @barrier_first(%root: !waveamdmachine.mem.token,
     attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
                 wave.kernel,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
                 waveamdmachine.schedule_input,
                 waveamdmachine.target_waves = 1 : i64} {
   %result = waveamdmachine.uniform_loop if %cond
@@ -121,6 +118,7 @@ func.func @shared_dma_saturation(
     attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
                 wave.kernel,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
                 waveamdmachine.schedule_input,
                 waveamdmachine.target_waves = 1 : i64} {
   %result = waveamdmachine.uniform_loop if %cond
@@ -174,6 +172,22 @@ func.func @shared_dma_saturation(
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
         carries(%next : !waveamdmachine.reg<sgpr, 1>)
   } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// DISABLED-LABEL: func.func @unmarked(
+// DISABLED-NOT: waveamdmachine.s_getreg_hw_id
+// DISABLED-NOT: waveamdmachine.uniform_if
+// DISABLED-COUNT-1: waveamdmachine.uniform_loop
+func.func @unmarked(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
   return
 }
 

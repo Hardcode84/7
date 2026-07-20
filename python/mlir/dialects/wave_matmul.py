@@ -180,6 +180,7 @@ class _MatmulConfig:
     cta_group_m: int = 1
     target_waves: int | None = None
     enable_split_barriers: bool = False
+    enable_multi_wave_specialization: bool = False
     phased_dma_schedule: PhasedDmaSchedule | None = None
     coalesced_mfma_output: bool = False
 
@@ -486,6 +487,9 @@ _PRINT_HELPER = "printMemrefF32"
 _PRINT_F16_HELPER = "printMemrefF16"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
 _ENABLE_SPLIT_BARRIERS_ATTR = "waveamdmachine.enable_split_barriers"
+_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR = (
+    "waveamdmachine.enable_multi_wave_specialization"
+)
 _DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
 _STATIC_LDS_LIMIT = 64 * 1024
 _MXFP4_SCALE_PACK = 4
@@ -523,6 +527,8 @@ def _kernel_attrs(
     attrs = _target_waves_attrs(target_waves)
     if cfg.enable_split_barriers:
         attrs[_ENABLE_SPLIT_BARRIERS_ATTR] = UnitAttr.get()
+    if cfg.enable_multi_wave_specialization:
+        attrs[_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR] = UnitAttr.get()
     dynamic_lds = _dynamic_lds_bytes(cfg)
     if dynamic_lds:
         attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(dynamic_lds)
@@ -6652,6 +6658,7 @@ def _make_matmul_config(
     cta_group_m: int,
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
+    enable_multi_wave_specialization: bool = False,
     phased_dma_schedule: PhasedDmaSchedule | None = None,
     coalesced_mfma_output: bool = False,
 ) -> _MatmulConfig:
@@ -6676,6 +6683,7 @@ def _make_matmul_config(
         cta_group_m=cta_group_m,
         target_waves=target_waves,
         enable_split_barriers=enable_split_barriers,
+        enable_multi_wave_specialization=enable_multi_wave_specialization,
         phased_dma_schedule=phased_dma_schedule,
         coalesced_mfma_output=coalesced_mfma_output,
     )
@@ -6754,6 +6762,7 @@ def build_wmma_f16_matmul_module(
     skip_specialize: bool = False,
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
+    enable_multi_wave_specialization: bool = False,
     phased_dma_schedule: PhasedDmaSchedule | None = None,
     coalesced_mfma_output: bool = False,
     include_host: bool = True,
@@ -6780,6 +6789,7 @@ def build_wmma_f16_matmul_module(
         cta_group_m=cta_group_m,
         target_waves=target_waves,
         enable_split_barriers=enable_split_barriers,
+        enable_multi_wave_specialization=enable_multi_wave_specialization,
         phased_dma_schedule=phased_dma_schedule,
         coalesced_mfma_output=coalesced_mfma_output,
     )

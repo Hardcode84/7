@@ -7,6 +7,7 @@
 # CHECK: matmul_runner_gfx950_wave_size: ok
 # CHECK: matmul_runner_output_layout: ok
 # CHECK: matmul_bf16_forwarding: ok
+# CHECK: matmul_multi_wave_specialization_forwarding: ok
 # CHECK: matmul_rand_int_forwarding: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
@@ -99,7 +100,7 @@ def require_sequence(ir, parsed, label: str, name: str):
     return sequence
 
 
-def check_backend_entry(label: str, ir, entry, multi_wave_specialize: bool) -> None:
+def check_backend_entry(label: str, ir, entry) -> None:
     includes = included_sequences(ir, entry)
     require(
         label,
@@ -118,11 +119,16 @@ def check_backend_entry(label: str, ir, entry, multi_wave_specialize: bool) -> N
         "backend include order drifted",
     )
     entry_passes = applied_passes(ir, entry)
-    expected = ["waveamd-machine-schedule-report"]
-    if multi_wave_specialize:
-        expected.append("waveamd-machine-multi-wave-specialize")
-    expected.append("waveamd-machine-schedule")
-    require_pass_order(label, entry_passes, expected, "scheduler order drifted")
+    require_pass_order(
+        label,
+        entry_passes,
+        [
+            "waveamd-machine-schedule-report",
+            "waveamd-machine-multi-wave-specialize",
+            "waveamd-machine-schedule",
+        ],
+        "scheduler order drifted",
+    )
     require(
         label,
         "waveamd-insert-hazard-waits" not in entry_passes,
@@ -251,13 +257,11 @@ def check_post_regalloc(label: str, post_passes: list[str]) -> None:
     )
 
 
-def check_calibration_entry(label: str, module, multi_wave_specialize: bool) -> None:
+def check_calibration_entry(label: str, module) -> None:
     kwargs = {
         "schedule_options": {"apply-schedule": True},
         "report_options": {"print-candidates": True},
     }
-    if multi_wave_specialize:
-        kwargs["multi_wave_specialize"] = True
     text = module.pipeline_text(BUILD_DIR, **kwargs)
     ir, _, register_dialects = module.import_mlir_bindings(BUILD_DIR)
     with ir.Context() as ctx:
@@ -275,7 +279,7 @@ def check_calibration_entry(label: str, module, multi_wave_specialize: bool) -> 
         )
         post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
         require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
-        check_backend_entry(label, ir, entry, multi_wave_specialize)
+        check_backend_entry(label, ir, entry)
         check_preschedule(label, ir, preschedule)
         check_postschedule(label, ir, postschedule)
         check_backend_lower(label, applied_passes(ir, lower))
@@ -495,6 +499,24 @@ def check_matmul_bf16_forwarding(matmul) -> None:
         "runner should receive bf16",
     )
     print("matmul_bf16_forwarding: ok")
+
+
+def check_matmul_multi_wave_specialization_forwarding(matmul) -> None:
+    args = matmul.parse_args(["--chip=gfx950", "--multi-wave-specialize", "--skip-hw"])
+    cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_multi_wave_specialization_forwarding",
+        "--multi-wave-specialize" in cmd,
+        "matmul command missing specialization marker flag",
+    )
+    args.example = "tensilelite-subtile"
+    cmd = matmul.build_example_args(args, "gfx950")
+    require(
+        "matmul_multi_wave_specialization_forwarding",
+        "--multi-wave-specialize" in cmd,
+        "TensileLite command missing specialization marker flag",
+    )
+    print("matmul_multi_wave_specialization_forwarding: ok")
 
 
 def check_matmul_rand_int_forwarding(matmul) -> None:
@@ -1631,12 +1653,13 @@ def main() -> int:
         "wave_matmul_perf_sweep",
         REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py",
     )
-    check_calibration_entry("matmul_pipeline", matmul, True)
-    check_calibration_entry("fa_pipeline", fa, False)
+    check_calibration_entry("matmul_pipeline", matmul)
+    check_calibration_entry("fa_pipeline", fa)
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
     check_matmul_runner_output_layout(matmul)
     check_matmul_bf16_forwarding(matmul)
+    check_matmul_multi_wave_specialization_forwarding(matmul)
     check_matmul_rand_int_forwarding(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)

@@ -177,20 +177,11 @@
 // PIPELINE: transform.named_sequence @waveamd_backend
 // PIPELINE: transform.include @waveamd_backend_preschedule
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: %{{.*}} = transform.apply_registered_pass
+// PIPELINE-NEXT: "waveamd-machine-multi-wave-specialize"
+// PIPELINE-NEXT: to %{{.*}} : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-schedule"
 // PIPELINE-NEXT: options = { "apply-schedule" = true,
 // PIPELINE-NEXT: "require-selected-input" = true }
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.include @waveamd_backend_postschedule
-// PIPELINE: transform.named_sequence @waveamd_backend_multi_wave
-// PIPELINE: transform.include @waveamd_backend_preschedule
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: %{{.*}} = transform.apply_registered_pass
-// PIPELINE-NEXT: "waveamd-machine-multi-wave-specialize" with
-// PIPELINE-NEXT: options = { "enable" = true }
-// PIPELINE-NEXT: to %{{.*}} : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: %{{.*}} = transform.apply_registered_pass "waveamd-machine-schedule" with
-// PIPELINE-NEXT: options = { "apply-schedule" = true,
-// PIPELINE-NEXT: "require-selected-input" = true }
-// PIPELINE-NEXT: to %{{.*}} : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.include @waveamd_backend_postschedule

@@ -255,22 +255,8 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rpre = transform.include @waveamd_backend_preschedule failures(propagate) (%root)
         : (!transform.any_op) -> !transform.any_op
-    %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
-        options = { "apply-schedule" = true,
-                    "require-selected-input" = true }
-        to %rpre : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rs)
-        : (!transform.any_op) -> !transform.any_op
-    transform.yield %r1 : !transform.any_op
-  }
-
-  transform.named_sequence @waveamd_backend_multi_wave(
-      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
-    %rpre = transform.include @waveamd_backend_preschedule failures(propagate) (%root)
-        : (!transform.any_op) -> !transform.any_op
     %rjoint = transform.apply_registered_pass
-        "waveamd-machine-multi-wave-specialize" with
-        options = { "enable" = true }
+        "waveamd-machine-multi-wave-specialize"
         to %rpre : (!transform.any_op) -> !transform.any_op
     %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
         options = { "apply-schedule" = true,

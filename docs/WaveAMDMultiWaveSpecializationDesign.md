@@ -3,11 +3,12 @@
 ## Status
 
 Scoped hardware model, clone pass, joint greedy scheduling, barrier rendezvous,
-and paired barrier cleanup implemented behind a disabled pass option. Synthetic
-WaveAMDMachine and Integration fixtures cover the stack.
+and paired barrier cleanup implemented. Scheduled pipelines always run the
+clone pass; a function unit attribute opts kernels in. Synthetic WaveAMDMachine
+and Integration fixtures cover the stack.
 
-No kernel-specific attributes, operation patterns, schedule-order policies, or
-kernel enablement.
+No profile names, operation patterns, or schedule-order policies drive
+qualification.
 
 Current model provides:
 
@@ -285,7 +286,7 @@ without proving that cross-loop phase matters.
 
 ## Specialization IR
 
-The opt-in clone pass runs before scheduling:
+The function-gated clone pass runs before scheduling:
 
 1. Validate target topology, workgroup occupancy, loop shape, and barrier
    lineage.
@@ -372,7 +373,7 @@ Required relative order:
 ```text
 waveamd-split-barriers
 preschedule cleanup and hazard repair
-optional waveamd-machine-multi-wave-specialize
+waveamd-machine-multi-wave-specialize
 waveamd-machine-schedule
 paired waveamd-barrier-cleanup
 barrier-signature validation
@@ -386,10 +387,11 @@ all arms keep the split protocol or all arms return to a full barrier.
 
 ## Enablement And Fallback
 
-The `enable` pass option defaults false. `waveamd_backend_multi_wave` is an
-explicit qualification pipeline, but no kernel generator, profile, calibrator,
-or perf sweep selects it. Default backend stays unspecialized. Do not stamp
-kernels with profile names or resource-order attributes.
+The scheduled backend always runs the pass. Only functions carrying
+`waveamdmachine.enable_multi_wave_specialization` are candidates; unmarked
+functions are unchanged. Matmul generators and calibration tools expose
+`--multi-wave-specialize` to stamp that unit attribute. Profiles do not stamp
+it implicitly.
 
 Specialization requires:
 
@@ -446,8 +448,8 @@ After barrier cleanup:
 - Shared saturation selects a ready operation using another resource.
 - SIMD-private work issues concurrently where target capacity allows.
 - Class priority rotates and output is deterministic.
-- Disabled specialization leaves IR unchanged.
-- Enabled specialization clones regions larger than 2,048 operations.
+- Unmarked functions remain unchanged.
+- Marked functions clone regions larger than 2,048 operations.
 - Scheduler consumes the clone marker and applies both orders.
 - Explicit token edges remain forward in every class.
 - Candidate, replay, and refinement limits are enforced.
@@ -467,7 +469,7 @@ After barrier cleanup:
 - `uniform_if` branch locals reuse registers without specialization attrs.
 - Synthetic Integration fixtures exercise paired cleanup and scoped resources.
 - Target tests cover large-region bounds, determinism, and fallback.
-- Kernel qualification remains separate from infrastructure enablement.
+- Function qualification remains separate from kernel profiles.
 
 ## Implementation Slices
 

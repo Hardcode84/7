@@ -288,6 +288,11 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="stamp waveamdmachine.enable_split_barriers on the kernel",
     )
     parser.add_argument(
+        "--multi-wave-specialize",
+        action="store_true",
+        help=("stamp waveamdmachine.enable_multi_wave_specialization on the kernel"),
+    )
+    parser.add_argument(
         "--coalesced-mfma-output",
         action="store_true",
         help="transpose gfx950 MFMA accumulation for direct column-major stores",
@@ -485,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
         cta_group_m=args.cta_group_m,
         target_waves=args.target_waves or None,
         enable_split_barriers=args.enable_split_barriers,
+        enable_multi_wave_specialization=args.multi_wave_specialize,
         phased_dma_schedule=phased_dma_schedule,
         coalesced_mfma_output=args.coalesced_mfma_output,
         include_host=not args.kernel_only,

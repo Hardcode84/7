@@ -18,11 +18,14 @@ ensure_package_on_path("mlir.dialects.wave_dsl")
 
 from mlir.dialects import wave, waveamd  # noqa: E402
 from mlir.dialects import wave_dsl as dsl  # noqa: E402
-from mlir.ir import Attribute, Module  # noqa: E402
+from mlir.ir import Attribute, Module, UnitAttr  # noqa: E402
 
 _GPU_MODULE_NAME = "kernels"
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
+_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR = (
+    "waveamdmachine.enable_multi_wave_specialization"
+)
 _DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
 _STATIC_LDS_LIMIT = 64 * 1024
 _WAVE_SIZE = 64
@@ -45,6 +48,7 @@ class Config:
     wave_k_tiles: int
     target_waves: int
     scale_input: str
+    enable_multi_wave_specialization: bool
 
     @property
     def waves_per_workgroup(self) -> int:
@@ -306,6 +310,8 @@ def _kernel_attrs(cfg: Config) -> dict[str, Attribute]:
     attrs: dict[str, Attribute] = {}
     if cfg.target_waves:
         attrs[_TARGET_WAVES_ATTR] = dsl.i64_attr(cfg.target_waves)
+    if cfg.enable_multi_wave_specialization:
+        attrs[_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR] = UnitAttr.get()
     if cfg.dynamic_lds_bytes:
         attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(cfg.dynamic_lds_bytes)
     return attrs
@@ -1647,6 +1653,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--wave-n-tiles", type=int, default=8)
     parser.add_argument("--wave-k-tiles", type=int, default=2)
     parser.add_argument("--target-waves", type=int, default=1)
+    parser.add_argument("--multi-wave-specialize", action="store_true")
     parser.add_argument(
         "--scale-input",
         choices=("canonical", "tensilelite"),
@@ -1675,6 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
         wave_k_tiles=args.wave_k_tiles,
         target_waves=args.target_waves,
         scale_input=args.scale_input,
+        enable_multi_wave_specialization=args.multi_wave_specialize,
     )
     try:
         module = build_module(cfg)

@@ -17,6 +17,7 @@ def build_source() -> str:
         "      attributes {gpu.known_block_size = array<i32: 256, 1, 1>,",
         "                  wave.kernel,",
         "                  wave.workgroup_size = array<i32: 256, 1, 1>,",
+        "                  waveamdmachine.enable_multi_wave_specialization,",
         "                  waveamdmachine.schedule_input,",
         "                  waveamdmachine.target_waves = 1 : i64} {",
         "    waveamdmachine.uniform_loop {",
@@ -44,7 +45,7 @@ def main() -> None:
             sys.argv[1],
             "-",
             "--pass-pipeline=builtin.module("
-            "waveamd-machine-multi-wave-specialize{enable=true},"
+            "waveamd-machine-multi-wave-specialize,"
             "waveamd-machine-schedule{apply-schedule=true "
             "require-selected-input=true max-region-ops=0})",
         ],

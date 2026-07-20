@@ -37,6 +37,8 @@ static constexpr StringLiteral kScheduleMarkerAttr =
     "waveamdmachine.multi_wave_schedule";
 static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
+static constexpr StringLiteral kEnableSpecializationAttr =
+    "waveamdmachine.enable_multi_wave_specialization";
 static constexpr StringLiteral kPairedBarriersAttr =
     "waveamdmachine.paired_barriers";
 static constexpr StringLiteral kBarrierSitesAttr =
@@ -296,10 +298,9 @@ struct WaveAMDMachineMultiWaveSpecializePass
       WaveAMDMachineMultiWaveSpecializeBase;
 
   void runOnOperation() override {
-    if (!enable)
-      return;
     WalkResult walk = getOperation()->walk([&](func::FuncOp func) {
-      if (func.isExternal() || !func->hasAttr(kScheduleInputAttr))
+      if (func.isExternal() || !func->hasAttr(kScheduleInputAttr) ||
+          !func->hasAttr(kEnableSpecializationAttr))
         return WalkResult::advance();
       return failed(specializeFunction(func)) ? WalkResult::interrupt()
                                               : WalkResult::advance();

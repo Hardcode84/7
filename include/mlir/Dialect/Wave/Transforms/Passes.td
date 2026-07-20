@@ -647,17 +647,14 @@ def WaveAMDMachineMultiWaveSpecialize
     : Pass<"waveamd-machine-multi-wave-specialize"> {
   let summary = "Clone loops for joint multi-wave scheduling";
   let description = [{
-    Clones eligible top-level uniform loops into a marked wave-uniform
-    conditional selected by SIMD identity. The pass preserves source order;
-    `waveamd-machine-schedule` owns both branch schedules.
+    Clones eligible top-level uniform loops in functions marked with
+    `waveamdmachine.enable_multi_wave_specialization` into a marked
+    wave-uniform conditional selected by SIMD identity. The pass preserves
+    source order; `waveamd-machine-schedule` owns both branch schedules.
   }];
   let dependentDialects = [
     "func::FuncDialect",
     "waveamdmachine::WaveAMDMachineDialect"
-  ];
-  let options = [
-    Option<"enable", "enable", "bool", /*default=*/"false",
-           "Enable multi-wave specialization.">
   ];
 }
 

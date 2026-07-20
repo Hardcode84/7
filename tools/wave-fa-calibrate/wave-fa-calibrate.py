@@ -251,6 +251,11 @@ def append_calibration_entry(
             finish_input = transform.ApplyRegisteredPassOp(
                 any_op,
                 finish_input,
+                "waveamd-machine-multi-wave-specialize",
+            ).result
+            finish_input = transform.ApplyRegisteredPassOp(
+                any_op,
+                finish_input,
                 "waveamd-machine-schedule",
                 options=schedule_options,
             ).result

@@ -15,7 +15,6 @@ from pathlib import Path
 
 NAME = "gfx950-f16-256x256-4wave-specialized"
 PROFILE = "gfx950-f16-256x256-4wave"
-PIPELINE_ENTRY_POINT = "waveamd_backend_multi_wave"
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 CALIBRATOR = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py"

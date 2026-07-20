@@ -232,6 +232,7 @@ module = build_wmma_f16_matmul_module(
     wave_n_tiles=2,
     wave_k_tiles=2,
     matrix_intrinsic="mfma",
+    enable_multi_wave_specialization=True,
 )
 print(module)
 
@@ -329,6 +330,7 @@ print(static_bld.module)
 # CHECK: mxfp4-random-module ok
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: wave.lds_size = 2048
+# CHECK-SAME: waveamdmachine.enable_multi_wave_specialization
 # CHECK-NOT: wavemeta.
 # CHECK: %[[TRIP:.*]] = wave.assume %arg3 as "x" {{\[.*\]}} : i32
 # CHECK: scf.for %{{.*}} = %{{.*}} to %[[TRIP]] step
