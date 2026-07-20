@@ -31,5 +31,6 @@ add_lit_testsuite(check-wave-mlir "Running the wave-mlir regression tests"
 set_target_properties(check-wave-mlir PROPERTIES FOLDER "Tests")
 
 add_lit_testsuites(WAVE_MLIR ${CMAKE_CURRENT_SOURCE_DIR}
+  BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${WAVE_MLIR_TEST_DEPENDS}
 )
