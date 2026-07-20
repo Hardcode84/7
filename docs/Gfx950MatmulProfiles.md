@@ -497,8 +497,8 @@ separate from the locked `gfx950-f16-256x256-8wave` default.
 See [Wave gfx950 f16 four-wave experiment](PerfReferences/WaveGfx950F16Gemm4Wave.md)
 for hardware results and saved ISA.
 
-Sweep only this profile with `--kernels=f16-4wave`. Default `all` keeps the
-locked eight-wave f16 profile and excludes this experiment.
+Sweep only this profile with `--kernels=f16-4wave`. Default `all` includes both
+four-wave and eight-wave f16 profiles.
 
 ## `gfx950-mxfp4-256x256-4wave`
 

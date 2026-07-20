@@ -128,7 +128,14 @@ KERNELS = {
 }
 
 KERNEL_ALIASES = {
-    "all": ("f16", "mxfp4", "mxfp4-4wave", "v9", "v9-transposed"),
+    "all": (
+        "f16",
+        "f16-4wave",
+        "mxfp4",
+        "mxfp4-4wave",
+        "v9",
+        "v9-transposed",
+    ),
     "mxfp": ("mxfp4",),
     "mxfp4": ("mxfp4",),
     "mxfp4-8wave": ("mxfp4",),

@@ -1434,14 +1434,14 @@ def check_matmul_perf_sweep_f16_profiles(perf_sweep) -> None:
     require(
         "matmul_perf_sweep_f16_profiles",
         "gfx950-f16-256x256-8wave" in default_profiles
-        and "gfx950-f16-256x256-4wave" not in default_profiles,
-        "default sweep should retain the 8-wave f16 profile",
+        and "gfx950-f16-256x256-4wave" in default_profiles,
+        "default sweep should include both f16 profiles",
     )
     four_wave = perf_sweep.parse_kernel_csv("f16-4wave")
     require(
         "matmul_perf_sweep_f16_profiles",
         len(four_wave) == 1 and four_wave[0].profile == "gfx950-f16-256x256-4wave",
-        "f16 four-wave sweep should remain opt-in",
+        "f16 four-wave alias should select only its profile",
     )
     print("matmul_perf_sweep_f16_profiles: ok")
 
