@@ -2,6 +2,7 @@
 
 # CHECK: scale_lds_dma_gap_fill: ok
 # CHECK: large_scale_lds_dma_gap_fill: ok
+# CHECK: resident_wave_lds_dma_order: ok
 
 from __future__ import annotations
 
@@ -33,12 +34,24 @@ def run_schedule_report(input_text: str) -> str:
     return proc.stderr
 
 
-def scale_lds_dma_stagger_mlir(dma_count: int, mfma_count: int, func_name: str) -> str:
+def scale_lds_dma_stagger_mlir(
+    dma_count: int,
+    mfma_count: int,
+    func_name: str,
+    *,
+    target_waves: int | None = None,
+) -> str:
     reg4 = "!waveamdmachine.reg<vgpr, 4>"
     reg1 = "!waveamdmachine.reg<vgpr, 1>"
     rsrc = "!waveamdmachine.reg<sgpr, 4>"
+    wave_attr = (
+        f", waveamdmachine.target_waves = {target_waves} : i64"
+        if target_waves is not None
+        else ""
+    )
     lines = [
-        'module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {',
+        "module attributes {waveamdmachine.target = "
+        f'"amdgcn-amd-amdhsa--gfx950"{wave_attr}}} {{',
         f"func.func @{func_name}(",
         f"    %off: {reg1},",
         f"    %rsrc: {rsrc},",
@@ -136,7 +149,7 @@ def check_small_scale_lds_dma() -> None:
     last_dma = max(index for index, op in enumerate(seq) if op == "dma")
     join = seq.index("join")
     require(
-        label, first_mfma == 7, f"compute should start after queue fill: {seq[:16]}"
+        label, first_mfma == 1, f"compute should fill first service gap: {seq[:16]}"
     )
     require(label, first_mfma < last_dma, f"compute should fill DMA stall: {seq[:32]}")
     require(label, join == last_dma + 1, "token join should drain after DMA issuers")
@@ -173,7 +186,7 @@ def check_large_scale_lds_dma() -> None:
     last_dma = max(index for index, op in enumerate(seq) if op == "dma")
     join = seq.index("join")
     require(
-        label, first_mfma == 7, f"compute should start after queue fill: {seq[:16]}"
+        label, first_mfma == 1, f"compute should fill first service gap: {seq[:16]}"
     )
     require(label, first_mfma < last_dma, f"compute should fill DMA stall: {seq[:48]}")
     require(label, join == last_dma + 1, "token join should drain after DMA issuers")
@@ -185,9 +198,24 @@ def check_large_scale_lds_dma() -> None:
     print(f"{label}: ok")
 
 
+def check_resident_wave_lds_dma_order() -> None:
+    label = "resident_wave_lds_dma_order"
+    text = run_schedule_report(
+        scale_lds_dma_stagger_mlir(12, 64, label, target_waves=2)
+    )
+    seq, _, _, _ = greedy_order_sequence(text, 12, 64)
+    require(
+        label,
+        seq.index("mfma") == 7,
+        f"resident waves should preserve queue lead: {seq[:16]}",
+    )
+    print(f"{label}: ok")
+
+
 def main() -> int:
     check_small_scale_lds_dma()
     check_large_scale_lds_dma()
+    check_resident_wave_lds_dma_order()
     return 0
 
 

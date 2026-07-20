@@ -179,7 +179,7 @@ func.func @fill_steady_dma_queue(
 // DIAG-SAME: recurrence_model_moves=0
 // DIAG-SAME: steady_state_fills=17
 // DIAG-SAME: steady_state_iterations=4
-// DIAG-SAME: steady_state_refinements=3
+// DIAG-SAME: steady_state_refinements=2
 
 // -----
 
@@ -967,13 +967,13 @@ func.func @preserve_loop_carried_mfma_resource_order(
 // IR-LABEL: func.func @preserve_loop_carried_mfma_resource_order
 // IR: ^bb0
 // IR-NEXT: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements
+// IR-COUNT-4: waveamdmachine.ds_load_b32
 // IR-NEXT: [[USED:%.*]] = waveamdmachine.v_add_u32 [[PARTS]]#0
 // IR-NEXT: [[MFMA_A:%.*]] = waveamdmachine.tuple_from_elements [[USED]],
-// IR-COUNT-4: waveamdmachine.ds_load_b32
 // IR-NEXT: [[NEXT:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 [[MFMA_A]],
 // IR-NEXT: waveamdmachine.continue_if {{.*}} carries([[NEXT]],
 // DIAG: waveamd-machine-schedule region func=preserve_loop_carried_mfma_resource_order index=0
-// DIAG-SAME: action=keep reason=same_order
+// DIAG-SAME: action=apply reason=loop_wait
 // DIAG-SAME: recurrence_model_moves=0
 
 // -----

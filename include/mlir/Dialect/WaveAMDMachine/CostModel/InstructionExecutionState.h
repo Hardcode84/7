@@ -94,6 +94,8 @@ struct InstructionExecutionConfig {
   MemoryValueLatencies valueLatencies;
   int issuePeriod = 0;
   bool enablePipeBackpressure = false;
+  bool smoothLdsDmaIssue = false;
+  unsigned ldsDmaIssueWaveStreams = 1;
   unsigned valuMaxInFlight = 0;
   unsigned saluMaxInFlight = 0;
   unsigned xdlMaxInFlight = 0;
@@ -291,6 +293,7 @@ private:
   const ArchData &arch;
   InstructionIssueSlotHazardConfig issueSlotHazardConfig;
   int64_t currentCycle = 0;
+  int64_t nextLdsDmaIssueCycle = 0;
   uint64_t currentIssueSlot = 0;
   EventId nextEventId = 1;
   unsigned storeDataGap = 0;

@@ -144,6 +144,54 @@ func.func @token_loop_carry_edges(%off: !waveamdmachine.reg<vgpr, 1>,
   return
 }
 
+func.func @tuple_address_loop_carry_edges(
+    %init: !waveamdmachine.reg<vgpr, 2>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %scc: !waveamdmachine.reg<scc, 1>) {
+  %result = waveamdmachine.uniform_loop
+      carries(%init : !waveamdmachine.reg<vgpr, 2>) {
+  ^bb0(%address: !waveamdmachine.reg<vgpr, 2>):
+    %parts:2 = waveamdmachine.tuple_to_elements %address
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>)
+    %loaded, %token = waveamdmachine.ds_load_b32 %parts#0
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %next0 = waveamdmachine.v_add_u32 %parts#0, %x
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next = waveamdmachine.tuple_from_elements %next0, %parts#1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<vgpr, 2>)
+  } -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
+func.func @parallel_loop_carry_edges(
+    %init0: !waveamdmachine.reg<vgpr, 1>,
+    %init1: !waveamdmachine.reg<vgpr, 1>,
+    %scc: !waveamdmachine.reg<scc, 1>) {
+  %result:2 = waveamdmachine.uniform_loop
+      carries(%init0, %init1 : !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%carry0: !waveamdmachine.reg<vgpr, 1>,
+       %carry1: !waveamdmachine.reg<vgpr, 1>):
+    %next0 = waveamdmachine.v_add_u32 %carry0, %carry1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next1 = waveamdmachine.v_xor_b32 %carry1, %carry0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1>
+        carries(%next0, %next1 : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  return
+}
+
 func.func @exec_if_regions(%cond: !waveamdmachine.reg<sgpr, 1>,
                            %a: !waveamdmachine.reg<vgpr, 1>,
                            %b: !waveamdmachine.reg<vgpr, 1>) {
@@ -201,10 +249,11 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.v_add_u32
 // DEPS: waveamd-machine-schedule-report deps func=regions region=1 nodes=3
 // DEPS: waveamd-machine-schedule-report edge region=1 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
-// DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 0->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 0->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry recurrence 1->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
 // DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry 0->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
 // DEPS: waveamd-machine-schedule-report deps func=memory_edges region=0 nodes=5 edges=4
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.token dst=waveamdmachine.global_load_b32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 1->2 src=waveamdmachine.global_load_b32 dst=waveamdmachine.v_add_u32
@@ -225,6 +274,12 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DEPS: waveamd-machine-schedule-report deps func=token_loop_carry_edges region=0 nodes=2 edges=2
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.global_load_b32 dst=waveamdmachine.token_join
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry recurrence 1->0 src=waveamdmachine.token_join dst=waveamdmachine.global_load_b32
+// DEPS: waveamd-machine-schedule-report deps func=tuple_address_loop_carry_edges region=0 nodes=4
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry recurrence 3->0 src=waveamdmachine.tuple_from_elements dst=waveamdmachine.tuple_to_elements
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry 1->3 src=waveamdmachine.ds_load_b32 dst=waveamdmachine.tuple_from_elements
+// DEPS: waveamd-machine-schedule-report deps func=parallel_loop_carry_edges region=0 nodes=2
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry 1->0 src=waveamdmachine.v_xor_b32 dst=waveamdmachine.v_add_u32
+// DEPS-NOT: kind=loop_carry 0->1
 
 // SCORE: waveamd-machine-schedule-report score func=regions region=0 order=original cycles=
 // SCORE-SAME: issued_ops=3

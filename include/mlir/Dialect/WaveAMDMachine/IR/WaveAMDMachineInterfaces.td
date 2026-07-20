@@ -26,6 +26,14 @@ def WaveAMDMachine_AddressFieldsOpInterface
       "getAddressFieldSpec",
       (ins)
     >,
+    InterfaceMethod<
+      [{Vector address operand.}],
+      "::mlir::Value",
+      "getVAddress",
+      (ins),
+      [{}],
+      [{ return $_op->getOperand(0); }]
+    >,
   ];
 }
 

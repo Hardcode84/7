@@ -580,6 +580,36 @@ func.func @set_priority_cuts_prefetch(
 }
 }
 
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @blocked_original_uses_resource_model(
+    %init: !waveamdmachine.reg<vgpr, 1>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<vgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %scc: !waveamdmachine.reg<scc, 1>) {
+  %result = waveamdmachine.uniform_loop
+      carries(%init : !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 1>):
+    %next = waveamdmachine.v_add_u32 %carry, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %read = waveamdmachine.v_xor_b32 %carry, %x
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
 // IR-LABEL: func.func @set_priority_cuts_prefetch
 // IR-NOT: waveamdmachine.global_load_b32
 // IR: [[BEFORE:%.*]] = waveamdmachine.v_add_u32
@@ -588,6 +618,68 @@ func.func @set_priority_cuts_prefetch(
 // IR-NEXT: [[LOADED:%.*]], {{%.*}} = waveamdmachine.global_load_b32
 // IR: waveamdmachine.v_add_u32 [[BEFORE]], [[LOADED]]
 // DIAG: waveamd-machine-schedule region func=set_priority_cuts_prefetch index=1 ops=1 action=keep reason=same_order
+
+// IR-LABEL: func.func @blocked_original_uses_resource_model
+// IR: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.v_xor_b32
+// IR-NEXT: waveamdmachine.v_add_u32
+// DIAG: waveamd-machine-schedule region func=blocked_original_uses_resource_model
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_priority_moves=1
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @compute_recurrence_across_memory(
+    %init: !waveamdmachine.reg<vgpr, 2>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<vgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %scc: !waveamdmachine.reg<scc, 1>) {
+  %result = waveamdmachine.uniform_loop
+      carries(%init : !waveamdmachine.reg<vgpr, 2>) {
+  ^bb0(%address: !waveamdmachine.reg<vgpr, 2>):
+    %parts:2 = waveamdmachine.tuple_to_elements %address
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>)
+    %independent = waveamdmachine.v_xor_b32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %loaded, %token = waveamdmachine.ds_load_b32 %parts#0
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %mfma_parts:4 = waveamdmachine.tuple_to_elements %mfma
+        : (!waveamdmachine.reg<vgpr, 4>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>)
+    %next0 = waveamdmachine.v_add_u32 %parts#0, %mfma_parts#0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %next = waveamdmachine.tuple_from_elements %next0, %parts#1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    waveamdmachine.continue_if %scc : !waveamdmachine.reg<scc, 1>
+        carries(%next : !waveamdmachine.reg<vgpr, 2>)
+  } -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+}
+
+// IR-LABEL: func.func @compute_recurrence_across_memory
+// IR: waveamdmachine.mfma_f32_16x16x32_f16
+// IR: waveamdmachine.v_xor_b32
+// IR: waveamdmachine.ds_load_b32
+// DIAG: waveamd-machine-schedule region func=compute_recurrence_across_memory
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_priority_moves={{[1-9][0-9]*}}
 
 // -----
 
@@ -810,9 +902,9 @@ func.func @compute_resource_barrier_boundary(
 }
 
 // IR-LABEL: func.func @compute_resource_barrier_boundary
-// IR: {{%.*}} = waveamdmachine.s_barrier
+// IR: waveamdmachine.s_add_i32
 // IR-NEXT: waveamdmachine.s_add_i32
-// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: {{%.*}} = waveamdmachine.s_barrier
 // IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
 // IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
 // DIAG: waveamd-machine-schedule region func=compute_resource_barrier_boundary
@@ -992,7 +1084,8 @@ func.func @cluster_barrier_run_after_stall_fill(
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: [[RUN_B0:%.*]] = waveamdmachine.s_barrier
 // IR-NEXT: [[RUN_B1:%.*]] = waveamdmachine.s_barrier
-// IR-NEXT: waveamdmachine.token_join [[RUN_B0]], [[RUN_B1]]
+// IR-NEXT: [[RUN_J0:%.*]] = waveamdmachine.token_join [[RUN_B0]], [[RUN_B1]]
+// IR-NEXT: waveamdmachine.ds_load_b32 {{.*}} after [[RUN_J0]]
 // IR-NEXT: [[RUN_B2:%.*]] = waveamdmachine.s_barrier
 // IR-NEXT: waveamdmachine.token_join [[RUN_B0]], [[RUN_B2]]
 // DIAG: waveamd-machine-schedule region func=cluster_barrier_run_after_stall_fill
@@ -1000,7 +1093,10 @@ func.func @cluster_barrier_run_after_stall_fill(
 // CLEANUP-LABEL: func.func @cluster_barrier_run_after_stall_fill
 // CLEANUP: waveamdmachine.s_add_i32
 // CLEANUP-NEXT: waveamdmachine.v_add_u32
-// CLEANUP-NEXT: [[RUN_BARRIER:%.*]] = waveamdmachine.s_barrier
+// CLEANUP-NEXT: [[RUN_BARRIER0:%.*]] = waveamdmachine.s_barrier
+// CLEANUP-NEXT: [[RUN_JOIN:%.*]] = waveamdmachine.token_join [[RUN_BARRIER0]], [[RUN_BARRIER0]]
+// CLEANUP-NEXT: waveamdmachine.ds_load_b32 {{.*}} after [[RUN_JOIN]]
+// CLEANUP-NEXT: [[RUN_BARRIER1:%.*]] = waveamdmachine.s_barrier
 // CLEANUP-NOT: waveamdmachine.s_barrier
 // CLEANUP: return
 

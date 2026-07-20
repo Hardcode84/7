@@ -832,6 +832,7 @@ wmma_f16_matmul_tiled:
 .Lwmma_f16_matmul_tiled.exec_endif_11:
 		s_mov_b64 exec, s[60:61]
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[132:135], v[24:27], v[72:75], v[132:135], v244, v248 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		s_add_i32 s36, s13, 0x10000
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[136:139], v[24:27], v[76:79], v[136:139], v244, v248 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[140:143], v[24:27], v[80:83], v[140:143], v244, v248 op_sel_hi:[0,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[144:147], v[24:27], v[84:87], v[144:147], v244, v248 op_sel:[0,1,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
@@ -864,23 +865,24 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[232:235], v[52:55], v[108:111], v[232:235], v250, v254 op_sel:[1,1,0] op_sel_hi:[1,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[236:239], v[52:55], v[112:115], v[236:239], v250, v254 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_add_i32 m0, s13, 16
-		s_nop 0
+		s_add_i32 s35, s35, 1
 		buffer_load_dwordx4 v18, s[8:11], 0 offen lds
-		s_nop 0
+		s_and_b32 s13, s35, 1
 		s_add_i32 m0, m0, 0x2000
-		s_nop 0
+		s_lshl_b32 s13, s13, 16
 		buffer_load_dwordx4 v19, s[8:11], 0 offen lds
-		s_nop 0
+		v_add_u32_e32 v22, s13, v14
 		s_add_i32 m0, m0, 0x2000
-		s_nop 0
+		v_add3_u32 v22, v22, v15, v0
 		buffer_load_dwordx4 v20, s[8:11], 0 offen lds
-		s_nop 0
+		v_add_u32_e32 v23, s13, v15
 		s_add_i32 m0, m0, 0x2000
-		s_nop 0
+		v_add3_u32 v23, v23, v16, v0
 		buffer_load_dwordx4 v3, s[8:11], 0 offen lds
-		s_nop 0
+		s_and_b32 s13, s36, 0x1ffff
 		s_add_i32 m0, m0, 0x2000
-		s_nop 0
+		s_add_u32 s8, s8, 0x80
+		s_addc_u32 s9, s9, 0
 		buffer_load_dwordx4 v7, s[28:31], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x2000
@@ -890,25 +892,15 @@ wmma_f16_matmul_tiled:
 		s_add_i32 m0, m0, 0x2000
 		s_nop 0
 		buffer_load_dwordx4 v17, s[28:31], 0 offen lds
-		s_add_i32 s13, s13, 0x10000
+		v_add_u32_e32 v23, 16, v23
 		s_add_i32 m0, m0, 0x2000
-		s_add_i32 s35, s35, 1
-		s_and_b32 s36, s35, 1
-		s_lshl_b32 s36, s36, 16
-		v_add_u32_e32 v22, s36, v14
-		v_add3_u32 v22, v22, v15, v0
-		v_add_u32_e32 v23, s36, v15
-		v_add3_u32 v23, v23, v16, v0
-		s_and_b32 s13, s13, 0x1ffff
-		s_add_u32 s8, s8, 0x80
-		s_addc_u32 s9, s9, 0
+		v_add_u32_e32 v22, 16, v22
 		buffer_load_dwordx4 v21, s[28:31], 0 offen lds
 		s_add_u32 s28, s28, 0x80
 		s_addc_u32 s29, s29, 0
 		s_cmp_lt_i32 s35, 30
 		s_waitcnt vmcnt(8)
 		s_barrier
-		v_add_u32_e32 v22, 16, v22
 		ds_read_b128 v[24:27], v22
 		ds_read_b128 v[28:31], v22 offset:1024
 		ds_read_b128 v[32:35], v22 offset:2048
@@ -917,23 +909,22 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[44:47], v22 offset:17408
 		ds_read_b128 v[48:51], v22 offset:18432
 		ds_read_b128 v[52:55], v22 offset:19456
-		v_add_u32_e32 v22, 16, v23
-		ds_read_b128 v[56:59], v22 offset:32768
-		ds_read_b128 v[60:63], v22 offset:33792
-		ds_read_b128 v[64:67], v22 offset:34816
-		ds_read_b128 v[68:71], v22 offset:35840
-		ds_read_b128 v[72:75], v22 offset:36864
-		ds_read_b128 v[76:79], v22 offset:37888
-		ds_read_b128 v[80:83], v22 offset:38912
-		ds_read_b128 v[84:87], v22 offset:39936
-		ds_read_b128 v[88:91], v22 offset:49152
-		ds_read_b128 v[92:95], v22 offset:50176
-		ds_read_b128 v[96:99], v22 offset:51200
-		ds_read_b128 v[100:103], v22 offset:52224
-		ds_read_b128 v[104:107], v22 offset:53248
-		ds_read_b128 v[108:111], v22 offset:54272
-		ds_read_b128 v[112:115], v22 offset:55296
-		ds_read_b128 v[116:119], v22 offset:56320
+		ds_read_b128 v[56:59], v23 offset:32768
+		ds_read_b128 v[60:63], v23 offset:33792
+		ds_read_b128 v[64:67], v23 offset:34816
+		ds_read_b128 v[68:71], v23 offset:35840
+		ds_read_b128 v[72:75], v23 offset:36864
+		ds_read_b128 v[76:79], v23 offset:37888
+		ds_read_b128 v[80:83], v23 offset:38912
+		ds_read_b128 v[84:87], v23 offset:39936
+		ds_read_b128 v[88:91], v23 offset:49152
+		ds_read_b128 v[92:95], v23 offset:50176
+		ds_read_b128 v[96:99], v23 offset:51200
+		ds_read_b128 v[100:103], v23 offset:52224
+		ds_read_b128 v[104:107], v23 offset:53248
+		ds_read_b128 v[108:111], v23 offset:54272
+		ds_read_b128 v[112:115], v23 offset:55296
+		ds_read_b128 v[116:119], v23 offset:56320
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		s_waitcnt lgkmcnt(0)

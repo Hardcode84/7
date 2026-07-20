@@ -303,6 +303,8 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[196:199], v[36:39], v[84:87], v[196:199]
 		buffer_load_dwordx4 v113, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[200:203], v[36:39], v[88:91], v[200:203]
+		s_add_u32 s20, s20, 0x80
+		s_addc_u32 s21, s21, 0
 		v_mfma_f32_16x16x32_f16 v[216:219], v[40:43], v[88:91], v[216:219]
 		v_mfma_f32_16x16x32_f16 v[208:211], v[40:43], v[80:83], v[208:211]
 		v_mfma_f32_16x16x32_f16 v[212:215], v[40:43], v[84:87], v[212:215]
@@ -314,8 +316,6 @@ wmma_f16_matmul_tiled:
 		v_mfma_f32_16x16x32_f16 v[4:7], v[48:51], v[96:99], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[116:119], v[48:51], v[100:103], v[116:119]
 		v_mfma_f32_16x16x32_f16 v[120:123], v[48:51], v[104:107], v[120:123]
-		s_add_u32 s20, s20, 0x80
-		s_addc_u32 s21, s21, 0
 		s_waitcnt vmcnt(8)
 		s_barrier
 		ds_read_b128 v[16:19], v9

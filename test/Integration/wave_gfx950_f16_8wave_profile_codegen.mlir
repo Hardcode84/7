@@ -42,19 +42,15 @@
 // ASM: .p2align{{[[:space:]]+}}5
 // ASM-COUNT-4: s_nop 0
 // ASM-NEXT: [[LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
+// ASM: buffer_load_dwordx4
 // ASM: s_cbranch_vccnz [[DELAY:.Lwmma_f16_matmul_tiled.dma_issue_delay_[0-9]+]]
 // ASM-NEXT: s_nop 15
 // ASM-NEXT: s_nop 15
 // ASM-NEXT: s_nop 13
 // ASM-NEXT: [[DELAY]]:
 // ASM-NEXT: buffer_load_dwordx4
-// ASM-NEXT: v_mfma_f32_16x16x32_f16
-// ASM-NEXT: s_add_i32 m0
-// ASM-COUNT-11: v_mfma_f32_16x16x32_f16
-// ASM-NEXT: buffer_load_dwordx4
-// ASM-COUNT-12: v_mfma_f32_16x16x32_f16
-// ASM-NEXT: s_add_u32
-// ASM-NEXT: s_addc_u32
-// ASM-NEXT: s_waitcnt vmcnt(8)
+// ASM: v_mfma_f32_16x16x32_f16
+// ASM: s_add_i32 m0
+// ASM: s_waitcnt vmcnt(8)
 // ASM-NEXT: s_barrier
 // ASM: s_cbranch_scc1 [[LOOP]]

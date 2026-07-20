@@ -231,6 +231,17 @@ static int64_t getDmaIssueDelayNopSpan(int64_t cycles, int64_t issuePeriod) {
   return span;
 }
 
+static int64_t getLdsDmaServiceInterval(const ArchData &arch,
+                                        int64_t issuePeriod,
+                                        unsigned waveStreams) {
+  if (arch.ldsDmaIssueQueueDepth <= 0 || arch.ldsDmaIssueLatency <= 0)
+    return 0;
+  int64_t serviceWidth =
+      saturatingMultiply(arch.ldsDmaIssueQueueDepth, std::max(1u, waveStreams));
+  int64_t interval = arch.ldsDmaIssueLatency / serviceWidth;
+  return std::max(issuePeriod, interval / issuePeriod * issuePeriod);
+}
+
 static bool hasMemoryTokenOperand(Operation *op) {
   for (Value operand : op->getOperands())
     if (isMemToken(operand))
@@ -635,6 +646,16 @@ InstructionExecutionState::query(Operation *op) const {
   return query(op, desc);
 }
 
+static unsigned getIssueHazardWait(const InstructionStall &stall) {
+  unsigned wait = 0;
+  for (const InstructionStallComponent &component : stall.components)
+    if (component.kind == InstructionStallKind::InstructionHazard ||
+        component.kind == InstructionStallKind::M0ReadWrite ||
+        component.kind == InstructionStallKind::StoreWriteData)
+      wait = std::max<unsigned>(wait, component.cycles);
+  return wait;
+}
+
 FailureOr<InstructionCommitResult>
 InstructionExecutionState::commit(Operation *op) {
   if (!isInstructionExecutionStateArchSupported(arch.isa)) {
@@ -654,14 +675,7 @@ InstructionExecutionState::commit(Operation *op) {
 
   currentCycle += queried->cycles;
   pruneRetiredEvents(currentCycle);
-
-  unsigned issueHazardWait = 0;
-  for (const InstructionStallComponent &component : queried->components)
-    if (component.kind == InstructionStallKind::InstructionHazard ||
-        component.kind == InstructionStallKind::M0ReadWrite ||
-        component.kind == InstructionStallKind::StoreWriteData)
-      issueHazardWait = std::max<unsigned>(issueHazardWait, component.cycles);
-  currentIssueSlot += issueHazardWait;
+  currentIssueSlot += getIssueHazardWait(*queried);
 
   InstructionCommitResult result;
   result.stall = *queried;
@@ -678,6 +692,11 @@ InstructionExecutionState::commit(Operation *op) {
 
   SmallVector<EventId, 4> newEvents =
       commitMemoryEvents(op, desc, result.issueCycle);
+  if (desc.ldsDmaIssue && config.smoothLdsDmaIssue)
+    nextLdsDmaIssueCycle =
+        saturatingAdd(result.issueCycle,
+                      getLdsDmaServiceInterval(arch, getIssuePeriod(),
+                                               config.ldsDmaIssueWaveStreams));
   int64_t valueReadyCycle = getResultReadyCycle(op, desc, result.issueCycle);
   commitResults(op, desc, result.issueCycle, newEvents);
   commitPipe(desc.pipe, valueReadyCycle);
@@ -799,6 +818,10 @@ InstructionExecutionState::query(Operation *op,
       desc.memoryIssueResources, desc.instructionIssueCount, currentCycle);
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                memoryIssueReady - currentCycle);
+
+  if (desc.ldsDmaIssue && config.smoothLdsDmaIssue)
+    addComponent(stall, InstructionStallKind::IssueBackpressure,
+                 nextLdsDmaIssueCycle - currentCycle);
 
   addIssueHazards(op, desc, stall);
 

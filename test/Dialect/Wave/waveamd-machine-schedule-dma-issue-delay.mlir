@@ -87,7 +87,7 @@ func.func @post_barrier_fill(
 // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[BASE_M0]]
 // CHECK-SAME: {waveamdmachine.dma_issue_after_delay}
 // DIAG: waveamd-machine-schedule region func=queue_lead_after_delayed_dma index=1
-// DIAG-SAME: resource_gaps=2
+// DIAG-SAME: resource_gaps=8
 // DEPS: waveamd-machine-schedule-report deps func=queue_lead_after_delayed_dma region=1
 // DEPS: edge region=1 kind=ssa {{[0-9]+}}->{{[0-9]+}} src=waveamdmachine.buffer_load_lds_b128 dst=waveamdmachine.dma_issue_delay
 func.func @queue_lead_after_delayed_dma(
@@ -173,7 +173,8 @@ func.func @queue_lead_after_delayed_dma(
 // DEPS-NOT: edge region=1 kind=singleton 0->1
 // DEPS: edge region=1 kind=singleton 0->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DEPS: waveamd-machine-schedule-report deps func=loop_local_policy region=2
-// DEPS: edge region=2 kind=singleton 0->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS-NOT: edge region=2 kind=singleton 0->1
+// DEPS: edge region=2 kind=singleton 0->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 func.func @loop_local_policy(
     %iv0: !waveamdmachine.reg<sgpr, 1>,
     %dep: !waveamdmachine.mem.token,
