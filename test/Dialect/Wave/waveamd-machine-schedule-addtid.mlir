@@ -22,7 +22,7 @@ func.func @addtid_schedule(%base: !waveamdmachine.reg<sgpr, 1>,
 // CHECK: waveamd-machine-schedule-report op func=addtid_schedule region=0 index=3 name=waveamdmachine.ds_load_addtid_b32 class=WriteLDS fu=LGKM
 // CHECK: waveamd-machine-schedule-report deps func=addtid_schedule region=0 nodes=4
 // CHECK: waveamd-machine-schedule-report edge region=0 kind=ssa 0->2 src=waveamdmachine.s_mov_m0 dst=waveamdmachine.ds_store_addtid_b32
-// CHECK: waveamd-machine-schedule-report edge region=0 kind=mem_token 1->2 src=waveamdmachine.token dst=waveamdmachine.ds_store_addtid_b32
 // CHECK: waveamd-machine-schedule-report edge region=0 kind=ssa 0->3 src=waveamdmachine.s_mov_m0 dst=waveamdmachine.ds_load_addtid_b32
+// CHECK: waveamd-machine-schedule-report edge region=0 kind=mem_token 1->2 src=waveamdmachine.token dst=waveamdmachine.ds_store_addtid_b32
 // CHECK: waveamd-machine-schedule-report edge region=0 kind=mem_token 2->3 src=waveamdmachine.ds_store_addtid_b32 dst=waveamdmachine.ds_load_addtid_b32
 // CHECK: waveamd-machine-schedule-report score func=addtid_schedule region=0 order=original cycles={{[0-9]+}} issued_ops=3

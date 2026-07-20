@@ -219,6 +219,9 @@ static void printStall(const InstructionStall &stall) {
       llvm::outs() << ",";
     llvm::outs() << getInstructionStallKindName(component.kind) << ":"
                  << component.cycles;
+    if (component.resource != InstructionResourceKind::None)
+      llvm::outs() << "@" << getInstructionResourceScopeName(component.scope)
+                   << "/" << getInstructionResourceKindName(component.resource);
   }
 }
 

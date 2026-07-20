@@ -20,6 +20,11 @@
 // RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --timeline %s | FileCheck %s --check-prefix=LDSDMA
 // RUN: wave-sim-report --func=issue_token_drops_completion --arch=gfx950 --timeline --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=ISSUETOKEN
 // RUN: wave-sim-report --func=token_join_carries_completion --arch=gfx950 --timeline --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=TOKENJOIN
+// RUN: wave-sim-report --func=two_dep_salu --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=MULTI
+// RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=MULTIDMA
+// RUN: wave-sim-report --func=dma_delay_interleave --arch=gfx950 --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=DMAMULTI
+// RUN: not wave-sim-report --func=trip_loop --waves-per-simd=1 %s 2>&1 | FileCheck %s --check-prefix=MULTIERR
+// RUN: not wave-sim-report --func=barrier_report --waves-per-simd=1 %s 2>&1 | FileCheck %s --check-prefix=MULTIBARRIER
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @two_dep_salu(%init: !waveamdmachine.reg<sgpr, 1>) {
@@ -215,6 +220,26 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
           -> !waveamdmachine.mem.token
     return
   }
+
+  func.func @dma_delay_interleave(
+      %m0: !waveamdmachine.m0,
+      %value: !waveamdmachine.reg<sgpr, 1>) {
+    %dep = waveamdmachine.token : !waveamdmachine.mem.token
+    %step = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %delayed = waveamdmachine.dma_issue_delay %dep, %m0
+        {cycles = 17 : i64}
+        : (!waveamdmachine.mem.token, !waveamdmachine.m0)
+          -> !waveamdmachine.m0
+    %sum:2 = waveamdmachine.s_add_i32 %value, %step :
+        (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) ->
+        (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    return
+  }
+
+  func.func @barrier_report() {
+    waveamdmachine.s_barrier : () -> ()
+    return
+  }
 }
 
 // ONE: func: two_dep_salu
@@ -319,3 +344,37 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TOKENJOIN: issue cycle=0 fu=VMEM op=waveamdmachine.global_load_b32
 // TOKENJOIN: issue cycle=20 fu=BRANCH op=waveamdmachine.s_barrier
 // TOKENJOIN: value_ready cycle=20 op=waveamdmachine.token_join
+
+// MULTI: func: two_dep_salu
+// MULTI: waves_per_simd: 2
+// MULTI: resident_waves: 4
+// MULTI: total_cycles: 5
+// MULTI: issued_ops: 8
+// MULTI: wave_0_completed: 4
+// MULTI: wave_1_completed: 5
+// MULTI-DAG: issue cycle=0 wave=0 simd=0 fu=SALU
+// MULTI-DAG: issue cycle=0 wave=2 simd=1 fu=SALU
+// MULTI-DAG: issue cycle=1 wave=1 simd=0 fu=SALU
+// MULTI-DAG: issue cycle=1 wave=3 simd=1 fu=SALU
+// MULTI-DAG: issue cycle=2 wave=0 simd=0 fu=SALU
+// MULTI-DAG: issue cycle=3 wave=1 simd=0 fu=SALU
+
+// MULTIDMA: waves_per_simd: 2
+// MULTIDMA: resident_waves: 8
+// MULTIDMA: issued_ops: 16
+// MULTIDMA-DAG: issue cycle=0 wave=0 simd=0 fu=VMEM
+// MULTIDMA-DAG: issue cycle=0 wave=4 simd=2 fu=VMEM
+// MULTIDMA-DAG: issue cycle=4 wave=1 simd=0 fu=VMEM
+// MULTIDMA-DAG: issue cycle=4 wave=5 simd=2 fu=VMEM
+// MULTIDMA-DAG: issue cycle=16 wave=2 simd=1 fu=VMEM
+// MULTIDMA-DAG: issue cycle=16 wave=6 simd=3 fu=VMEM
+// MULTIDMA-DAG: issue cycle=28 wave=3 simd=1 fu=VMEM
+// MULTIDMA-DAG: issue cycle=28 wave=7 simd=3 fu=VMEM
+
+// DMAMULTI-DAG: issue cycle=0 wave=0 simd=0 fu=SALU op=waveamdmachine.dma_issue_delay
+// DMAMULTI-DAG: issue cycle=4 wave=1 simd=0 fu=SALU op=waveamdmachine.dma_issue_delay
+// DMAMULTI-DAG: issue cycle=24 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
+// DMAMULTI-DAG: issue cycle=28 wave=1 simd=0 fu=SALU op=waveamdmachine.s_add_i32
+
+// MULTIERR: error: 'waveamdmachine.uniform_loop' op multi-wave event simulation requires linear machine control flow
+// MULTIBARRIER: error: 'waveamdmachine.s_barrier' op multi-wave event simulation does not model wave rendezvous

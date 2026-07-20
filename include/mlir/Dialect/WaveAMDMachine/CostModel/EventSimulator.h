@@ -29,6 +29,7 @@ struct ArchData;
 class CalibrationData;
 
 struct EventSimConfig {
+  unsigned wavesPerSIMD = 0;
   int waveSize = 0;
   int64_t tripCountOverride = -1;
   const CalibrationData *calibration = nullptr;
@@ -59,12 +60,15 @@ struct EventSimEvent {
   Operation *op = nullptr;
   FunctionalUnit fu = FunctionalUnit::None;
   EventSimCounter counter = EventSimCounter::None;
+  unsigned wave = 0;
+  unsigned simd = 0;
 };
 
 struct EventSimResult {
   int64_t totalCycles = 0;
   int64_t issuedOps = 0;
   int64_t completedCycle = 0;
+  SmallVector<int64_t> waveCompletedCycles;
   SmallVector<EventSimEvent> events;
 };
 

@@ -529,7 +529,8 @@ static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues,
   Operation *def = value.getDefiningOp();
   if (!def)
     return false;
-  if (isa<waveamdmachine::UninitOp, waveamdmachine::UniformLoopOp>(def))
+  if (isa<waveamdmachine::UninitOp, waveamdmachine::UniformIfOp,
+          waveamdmachine::UniformLoopOp>(def))
     return true;
   if (canDefineAGPRThroughInterface(value, isaVersion))
     return true;
@@ -539,6 +540,14 @@ static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues,
   Value acc = mma.getAcc();
   return hasRegAllocTransformClass(acc, waveamdmachine::RegClass::AGPR) ||
          groupValues.contains(acc);
+}
+
+static bool isStructuralAGPRCarryUse(OpOperand &use) {
+  Operation *user = use.getOwner();
+  if (isStructuralLoopCarryUse(user))
+    return true;
+  auto yield = dyn_cast<waveamdmachine::YieldOp>(user);
+  return yield && isa<waveamdmachine::UniformIfOp>(yield->getParentOp());
 }
 
 static bool isTupleAliasOp(Operation *op) {
@@ -607,7 +616,7 @@ canConsumeAGPRAfterRelief(OpOperand &use, const DenseSet<Value> &groupValues,
          isReliefGroupValue(mfma.getAccResult(), groupValues)))
       return true;
   }
-  if (isStructuralLoopCarryUse(user))
+  if (isStructuralAGPRCarryUse(use))
     return true;
   if (canRebankTupleAliasOp(user, groupValues))
     return true;
@@ -1066,7 +1075,7 @@ static void rewriteAGPRReliefUse(OpBuilder &builder, OpOperand &use, Value agpr,
     return;
   if (rewriteAGPRReliefMFMAUse(use, agpr, groupValues))
     return;
-  if (isStructuralLoopCarryUse(use.getOwner())) {
+  if (isStructuralAGPRCarryUse(use)) {
     use.set(agpr);
     return;
   }

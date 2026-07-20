@@ -308,6 +308,20 @@ static unsigned counterIndex(InstructionWaitCounterKind kind) {
   llvm_unreachable("counter has no queue");
 }
 
+static InstructionResourceKind resourceForPipe(InstructionPipeKind kind) {
+  switch (kind) {
+  case InstructionPipeKind::VALU:
+    return InstructionResourceKind::ValuPipe;
+  case InstructionPipeKind::SALU:
+    return InstructionResourceKind::SaluPipe;
+  case InstructionPipeKind::XDL:
+    return InstructionResourceKind::XdlPipe;
+  case InstructionPipeKind::None:
+    return InstructionResourceKind::None;
+  }
+  llvm_unreachable("bad pipe kind");
+}
+
 static unsigned pipeIndex(InstructionPipeKind kind) {
   switch (kind) {
   case InstructionPipeKind::VALU:
@@ -387,11 +401,13 @@ static void appendUniqueEvents(SmallVectorImpl<uint64_t> &events,
       events.push_back(id);
 }
 
-static void addComponent(InstructionStall &stall, InstructionStallKind kind,
-                         int64_t cycles) {
+static void
+addComponent(InstructionStall &stall, InstructionStallKind kind, int64_t cycles,
+             InstructionResourceKind resource = InstructionResourceKind::None,
+             InstructionResourceScope scope = InstructionResourceScope::Wave) {
   if (cycles <= 0)
     return;
-  stall.components.push_back({kind, cycles});
+  stall.components.push_back({kind, cycles, resource, scope});
   if (cycles > stall.cycles) {
     stall.cycles = cycles;
     stall.kind = kind;
@@ -551,6 +567,14 @@ InstructionExecutionState::InstructionExecutionState(
     : config(config), arch(arch),
       issueSlotHazardConfig(getInstructionIssueSlotHazardConfig(arch.isa)) {}
 
+InstructionResourceCapacities InstructionExecutionState::getResourceCapacities(
+    const InstructionExecutionConfig &config) {
+  if (!config.enablePipeBackpressure)
+    return {};
+  return {config.valuMaxInFlight, config.saluMaxInFlight,
+          config.xdlMaxInFlight};
+}
+
 unsigned InstructionExecutionState::getPendingMemoryEventCount(
     InstructionWaitCounterKind kind) const {
   if (kind == InstructionWaitCounterKind::None)
@@ -658,6 +682,20 @@ static unsigned getIssueHazardWait(const InstructionStall &stall) {
 
 FailureOr<InstructionCommitResult>
 InstructionExecutionState::commit(Operation *op) {
+  return commitWithResources(op, /*resourceState=*/nullptr, /*wave=*/0,
+                             /*placement=*/{});
+}
+
+void InstructionExecutionState::advanceToCycle(int64_t cycle) {
+  assert(cycle >= currentCycle && "wave timeline moved back");
+  currentCycle = cycle;
+  pruneRetiredEvents(currentCycle);
+}
+
+FailureOr<InstructionCommitResult>
+InstructionExecutionState::commitWithResources(
+    Operation *op, InstructionResourceState *resourceState, unsigned wave,
+    WavePlacement placement) {
   if (!isInstructionExecutionStateArchSupported(arch.isa)) {
     op->emitOpError("instruction execution state supports gfx942, gfx950, "
                     "and RDNA3 only");
@@ -669,7 +707,8 @@ InstructionExecutionState::commit(Operation *op) {
   }
 
   InstructionDesc desc = describe(op);
-  FailureOr<InstructionStall> queried = query(op, desc);
+  FailureOr<InstructionStall> queried =
+      queryWithResources(op, desc, resourceState, wave, placement);
   if (failed(queried))
     return failure();
 
@@ -692,15 +731,22 @@ InstructionExecutionState::commit(Operation *op) {
 
   SmallVector<EventId, 4> newEvents =
       commitMemoryEvents(op, desc, result.issueCycle);
-  if (desc.ldsDmaIssue && config.smoothLdsDmaIssue)
+  if (desc.ldsDmaIssue && config.smoothLdsDmaIssue && !resourceState)
     nextLdsDmaIssueCycle =
         saturatingAdd(result.issueCycle,
                       getLdsDmaServiceInterval(arch, getIssuePeriod(),
                                                config.ldsDmaIssueWaveStreams));
   int64_t valueReadyCycle = getResultReadyCycle(op, desc, result.issueCycle);
   commitResults(op, desc, result.issueCycle, newEvents);
-  commitPipe(desc.pipe, valueReadyCycle);
-  commitMemoryIssue(desc, result.issueCycle);
+  if (resourceState) {
+    SmallVector<InstructionResourceUse, 6> uses =
+        getResourceUses(op, desc, *resourceState);
+    resourceState->commit(wave, placement, uses, result.issueCycle);
+    commitMemoryIssue(desc, result.issueCycle);
+  } else {
+    commitPipe(desc.pipe, valueReadyCycle);
+    commitMemoryIssue(desc, result.issueCycle);
+  }
   currentIssueSlot += desc.issueSlots;
   commitIssueSlotHazards(op, desc);
   commitM0(desc);
@@ -736,6 +782,7 @@ InstructionExecutionState::describe(Operation *op) const {
                   hasRegClass(op->getOperands(), RegClass::VGPR) &&
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
+  desc.resourceDuration = getResourceCycles(arch, cls);
   desc.instructionIssueCount = getInstructionIssueCount(op, arch.isa);
   desc.counterIssueCount = getWaitcntInfo(op).issueCount;
   desc.issueSlots = desc.instructionIssueCount;
@@ -759,6 +806,73 @@ InstructionExecutionState::describe(Operation *op) const {
     }
   }
   return desc;
+}
+
+SmallVector<InstructionResourceUse, 6>
+InstructionExecutionState::getResourceUses(
+    Operation *op, const InstructionDesc &desc,
+    const InstructionResourceState &resourceState) const {
+  SmallVector<InstructionResourceUse, 6> uses;
+  if (desc.noMachineInst)
+    return uses;
+
+  int64_t issuePeriod = getIssuePeriod();
+  if (isa<DmaIssueDelayOp>(op))
+    appendDmaIssueResourceUses(op, uses);
+  else
+    appendIssueResourceUses(desc.instructionIssueCount, /*offset=*/0,
+                            issuePeriod, uses);
+
+  InstructionResourceKind pipe = resourceForPipe(desc.pipe);
+  // Delay result span is control flow, not SALU pipe occupancy.
+  if (!isa<DmaIssueDelayOp>(op) && resourceState.isEnabled(pipe) &&
+      desc.resourceDuration > 0)
+    uses.push_back({pipe, getInstructionResourceScope(pipe), /*units=*/1,
+                    /*count=*/1, /*offset=*/0, /*period=*/0,
+                    desc.resourceDuration});
+
+  if (hasMemoryIssueResource(desc.memoryIssueResources,
+                             MemoryIssueResource::LdsDmaAccept) &&
+      resourceState.isEnabled(InstructionResourceKind::LdsDmaIssue)) {
+    uses.push_back({InstructionResourceKind::LdsDmaIssue,
+                    InstructionResourceScope::SIMDPair, /*units=*/1,
+                    desc.instructionIssueCount, /*offset=*/0, issuePeriod,
+                    arch.ldsDmaIssuePeriod});
+  }
+  return uses;
+}
+
+void InstructionExecutionState::appendIssueResourceUses(
+    unsigned count, int64_t offset, int64_t period,
+    SmallVectorImpl<InstructionResourceUse> &uses) const {
+  uses.push_back({InstructionResourceKind::SimdIssue,
+                  InstructionResourceScope::SIMD, /*units=*/1, count, offset,
+                  period, getIssuePeriod()});
+  uses.push_back({InstructionResourceKind::CuIssue,
+                  InstructionResourceScope::CU, /*units=*/1, count, offset,
+                  period, /*duration=*/1});
+}
+
+void InstructionExecutionState::appendDmaIssueResourceUses(
+    Operation *op, SmallVectorImpl<InstructionResourceUse> &uses) const {
+  DmaIssueDelayOp delay = cast<DmaIssueDelayOp>(op);
+  bool skipped =
+      delay.getSkipCondition() &&
+      config.dmaIssueDelayCohortPolicy == DmaIssueDelayCohortPolicy::Skipped;
+  int64_t issuePeriod = getIssuePeriod();
+  if (delay.getSkipCondition())
+    appendIssueResourceUses(/*count=*/1, /*offset=*/0, /*period=*/0, uses);
+  if (skipped)
+    return;
+
+  constexpr int64_t maxNopCycles = 16;
+  int64_t cycles = delay.getCyclesAttr().getInt();
+  unsigned nopCount =
+      static_cast<unsigned>((cycles + maxNopCycles - 1) / maxNopCycles);
+  int64_t nopOffset = delay.getSkipCondition() ? issuePeriod : 0;
+  // s_nop blocks its wave; only emitted branch/NOPs reserve issue.
+  appendIssueResourceUses(nopCount, nopOffset,
+                          std::max(maxNopCycles, issuePeriod), uses);
 }
 
 void InstructionExecutionState::configureDmaIssueDelay(
@@ -788,8 +902,35 @@ void InstructionExecutionState::configureDmaIssueDelay(
 FailureOr<InstructionStall>
 InstructionExecutionState::query(Operation *op,
                                  const InstructionDesc &desc) const {
-  InstructionStall stall;
+  return queryWithResources(op, desc, /*resourceState=*/nullptr, /*wave=*/0,
+                            /*placement=*/{});
+}
 
+FailureOr<InstructionStall> InstructionExecutionState::queryWithResources(
+    Operation *op, const InstructionDesc &desc,
+    const InstructionResourceState *resourceState, unsigned wave,
+    WavePlacement placement) const {
+  InstructionStall stall;
+  if (failed(addDependencyStalls(op, desc, stall)))
+    return failure();
+
+  if (resourceState) {
+    addLocalMemoryIssueStalls(desc, stall);
+    addIssueHazards(op, desc, stall);
+  } else {
+    addLocalResourceStalls(desc, stall);
+    addIssueHazards(op, desc, stall);
+    return stall;
+  }
+
+  if (failed(addSharedResourceStall(op, desc, *resourceState, wave, placement,
+                                    stall)))
+    return failure();
+  return stall;
+}
+
+LogicalResult InstructionExecutionState::addDependencyStalls(
+    Operation *op, const InstructionDesc &desc, InstructionStall &stall) const {
   if (!op->hasTrait<traits::NoMachineInst>()) {
     InstructionStallKind operandKind = InstructionStallKind::OperandValue;
     int64_t operandsReady = issueReadyCycle(op, operandKind);
@@ -809,23 +950,48 @@ InstructionExecutionState::query(Operation *op,
     addComponent(stall, InstructionStallKind::Waitcnt,
                  *waitReady - currentCycle);
   }
+  return success();
+}
 
-  int64_t pipeReady = pipeReadyCycle(desc.pipe, currentCycle);
-  addComponent(stall, InstructionStallKind::IssueBackpressure,
-               pipeReady - currentCycle);
-
+void InstructionExecutionState::addLocalMemoryIssueStalls(
+    const InstructionDesc &desc, InstructionStall &stall) const {
   int64_t memoryIssueReady = memoryIssueReadyCycle(
       desc.memoryIssueResources, desc.instructionIssueCount, currentCycle);
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                memoryIssueReady - currentCycle);
+}
+
+void InstructionExecutionState::addLocalResourceStalls(
+    const InstructionDesc &desc, InstructionStall &stall) const {
+  int64_t pipeReady = pipeReadyCycle(desc.pipe, currentCycle);
+  addComponent(stall, InstructionStallKind::IssueBackpressure,
+               pipeReady - currentCycle);
+
+  addLocalMemoryIssueStalls(desc, stall);
 
   if (desc.ldsDmaIssue && config.smoothLdsDmaIssue)
     addComponent(stall, InstructionStallKind::IssueBackpressure,
                  nextLdsDmaIssueCycle - currentCycle);
+}
 
-  addIssueHazards(op, desc, stall);
-
-  return stall;
+LogicalResult InstructionExecutionState::addSharedResourceStall(
+    Operation *op, const InstructionDesc &desc,
+    const InstructionResourceState &resourceState, unsigned wave,
+    WavePlacement placement, InstructionStall &stall) const {
+  SmallVector<InstructionResourceUse, 6> uses =
+      getResourceUses(op, desc, resourceState);
+  int64_t resourceEarliest = saturatingAdd(currentCycle, stall.cycles);
+  FailureOr<InstructionResourceQuery> resource =
+      resourceState.query(wave, placement, uses, resourceEarliest);
+  if (failed(resource)) {
+    op->emitOpError("resource reservation exceeds modeled capacity");
+    return failure();
+  }
+  if (resource->readyCycle > resourceEarliest)
+    addComponent(stall, InstructionStallKind::IssueBackpressure,
+                 resource->readyCycle - currentCycle, resource->kind,
+                 resource->scope);
+  return success();
 }
 
 void InstructionExecutionState::addIssueHazards(Operation *op,

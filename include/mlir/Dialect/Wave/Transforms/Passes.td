@@ -643,6 +643,24 @@ def WaveAMDMachineSchedule
   ];
 }
 
+def WaveAMDMachineMultiWaveSpecialize
+    : Pass<"waveamd-machine-multi-wave-specialize"> {
+  let summary = "Clone loops for joint multi-wave scheduling";
+  let description = [{
+    Clones eligible top-level uniform loops into a marked wave-uniform
+    conditional selected by SIMD identity. The pass preserves source order;
+    `waveamd-machine-schedule` owns both branch schedules.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+  let options = [
+    Option<"enable", "enable", "bool", /*default=*/"false",
+           "Enable multi-wave specialization.">
+  ];
+}
+
 def WaveAMDPrepareRegAlloc
     : Pass<"waveamd-prepare-regalloc"> {
   let summary = "Expose register-allocation copies in WaveAMDMachine IR";
@@ -663,6 +681,18 @@ def WaveAMDBarrierCleanup
   let description = [{
     Removes redundant machine barriers while preserving explicit memory-token
     ordering.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
+def WaveAMDFinalizeBarrierProtocols
+    : Pass<"waveamd-finalize-barrier-protocols"> {
+  let summary = "Validate and finalize paired barrier protocols";
+  let description = [{
+    Checks barrier site and protocol parity across marked specialization arms,
+    then removes transient barrier lineage attributes.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

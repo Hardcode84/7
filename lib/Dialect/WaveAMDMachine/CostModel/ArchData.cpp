@@ -20,6 +20,7 @@ static constexpr ArchData kGfx803{
     /*name=*/"gfx803",
     /*wavesPerSIMD=*/10,
     /*simdsPerCU=*/4,
+    /*simdIdOffset=*/4,
     /*vgprFileSize=*/256,
     /*vgprAllocGranule=*/4,
     /*valuPipelineDepth=*/4,
@@ -29,6 +30,8 @@ static constexpr ArchData kGfx803{
     /*ldsCounterLatency=*/5,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
+    /*ldsDmaIssuePeriod=*/0,
+    /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
 };
 
 // CDNA3 / MI300. LLVM AMDGPUBaseInfo gives 8 waves/EU,
@@ -39,6 +42,7 @@ static constexpr ArchData kGfx942{
     /*name=*/"gfx942",
     /*wavesPerSIMD=*/8,
     /*simdsPerCU=*/4,
+    /*simdIdOffset=*/4,
     /*vgprFileSize=*/512,
     /*vgprAllocGranule=*/8,
     /*valuPipelineDepth=*/4,
@@ -48,6 +52,8 @@ static constexpr ArchData kGfx942{
     /*ldsCounterLatency=*/5,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
+    /*ldsDmaIssuePeriod=*/0,
+    /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
 };
 
 // CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
@@ -57,6 +63,7 @@ static constexpr ArchData kGfx950{
     /*name=*/"gfx950",
     /*wavesPerSIMD=*/8,
     /*simdsPerCU=*/4,
+    /*simdIdOffset=*/4,
     /*vgprFileSize=*/512,
     /*vgprAllocGranule=*/8,
     /*valuPipelineDepth=*/4,
@@ -66,6 +73,8 @@ static constexpr ArchData kGfx950{
     /*ldsCounterLatency=*/20,
     /*ldsDmaIssueQueueDepth=*/7,
     /*ldsDmaIssueLatency=*/180,
+    /*ldsDmaIssuePeriod=*/4,
+    /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
 };
 
 // RDNA3 Navi31 (RX 7900 series). FeatureGFX10_3Insts +
@@ -76,6 +85,7 @@ static constexpr ArchData kGfx1100{
     /*name=*/"gfx1100",
     /*wavesPerSIMD=*/16,
     /*simdsPerCU=*/2,
+    /*simdIdOffset=*/8,
     /*vgprFileSize=*/1536,
     /*vgprAllocGranule=*/24,
     /*valuPipelineDepth=*/5,
@@ -85,6 +95,8 @@ static constexpr ArchData kGfx1100{
     /*ldsCounterLatency=*/20,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
+    /*ldsDmaIssuePeriod=*/0,
+    /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
 };
 
 // RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default.
@@ -94,6 +106,7 @@ static constexpr ArchData kGfx1200{
     /*name=*/"gfx1200",
     /*wavesPerSIMD=*/16,
     /*simdsPerCU=*/2,
+    /*simdIdOffset=*/8,
     /*vgprFileSize=*/1536,
     /*vgprAllocGranule=*/24,
     /*valuPipelineDepth=*/5,
@@ -103,6 +116,8 @@ static constexpr ArchData kGfx1200{
     /*ldsCounterLatency=*/20,
     /*ldsDmaIssueQueueDepth=*/0,
     /*ldsDmaIssueLatency=*/0,
+    /*ldsDmaIssuePeriod=*/0,
+    /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
 };
 
 template <const ArchData &A> static constexpr bool saneLdsDmaIssue() {
@@ -114,6 +129,10 @@ template <const ArchData &A> static constexpr bool saneLdsDmaIssue() {
   static_assert(A.ldsDmaIssueLatency <= 512, "ldsDmaIssueLatency above range");
   static_assert((A.ldsDmaIssueQueueDepth == 0) == (A.ldsDmaIssueLatency == 0),
                 "LDS-DMA issue model requires depth and latency");
+  static_assert(A.ldsDmaIssuePeriod >= 0 && A.ldsDmaIssuePeriod <= 64,
+                "ldsDmaIssuePeriod out of range");
+  static_assert(A.ldsDmaIssuePeriod == 0 || A.ldsDmaIssueQueueDepth != 0,
+                "shared LDS-DMA issue requires an accept queue");
   return true;
 }
 
@@ -124,6 +143,8 @@ template <const ArchData &A> static constexpr bool sane() {
                 "wavesPerSIMD out of range");
   static_assert(A.simdsPerCU == 2 || A.simdsPerCU == 4,
                 "simdsPerCU is 2 (RDNA) or 4 (CDNA)");
+  static_assert(static_cast<unsigned>(A.simdIdOffset) < 32,
+                "simdIdOffset out of range");
   static_assert(A.vgprFileSize >= 256 && A.vgprFileSize <= 2048,
                 "vgprFileSize out of range");
   static_assert(A.vgprAllocGranule > 0 &&

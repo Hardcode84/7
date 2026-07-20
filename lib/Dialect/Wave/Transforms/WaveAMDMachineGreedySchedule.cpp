@@ -18,6 +18,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MultiWaveExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -34,6 +35,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/DebugLog.h"
 
 #include <algorithm>
 #include <array>
@@ -87,11 +89,17 @@ static constexpr StringLiteral kScheduleInputAttr =
     "waveamdmachine.schedule_input";
 static constexpr StringLiteral kDmaIssueAfterDelayAttr =
     "waveamdmachine.dma_issue_after_delay";
+static constexpr StringLiteral kMultiWaveScheduleAttr =
+    "waveamdmachine.multi_wave_schedule";
+static constexpr StringLiteral kBarrierSitesAttr =
+    "waveamdmachine.barrier_sites";
 static constexpr StringLiteral kReportPrefix =
     "waveamd-machine-schedule-report";
 static constexpr unsigned kSteadyStateIterations = 4;
 static constexpr unsigned kSteadyStateRefinementLimit = 3;
 static constexpr unsigned kSteadyStateFillsPerTarget = 16;
+static constexpr unsigned kMultiWaveClassCount = 2;
+static constexpr unsigned kMultiWaveCandidateLimit = 32;
 
 enum class EdgeKind : uint8_t {
   Ssa,
@@ -1063,6 +1071,16 @@ static void indexGraphNodes(const GreedyRegion &region, GraphTables &graph) {
   }
 }
 
+static bool edgeLess(const ScheduleEdge &lhs, const ScheduleEdge &rhs) {
+  if (lhs.src != rhs.src)
+    return lhs.src < rhs.src;
+  if (lhs.dst != rhs.dst)
+    return lhs.dst < rhs.dst;
+  if (lhs.kind != rhs.kind)
+    return lhs.kind < rhs.kind;
+  return lhs.recurrence < rhs.recurrence;
+}
+
 static void buildComputeRecurrenceCritical(GraphTables &graph) {
   graph.computeRecurrenceCritical.resize(graph.pendingPreds.size());
   SmallVector<SmallVector<unsigned, 4>, 16> ssaPredecessors(
@@ -1110,6 +1128,7 @@ static LogicalResult buildGraph(const GreedyRegion &region,
     return failure();
   addExecEdges(region, graph);
   addLoopCarryEdges(region, graph, graph.node);
+  llvm::sort(graph.edges, edgeLess);
   buildComputeRecurrenceCritical(graph);
   for (SmallVector<unsigned, 4> &succs : graph.successors)
     llvm::sort(succs);
@@ -1123,6 +1142,10 @@ static SmallVector<unsigned, 16> getOriginalOrder(const GreedyRegion &region) {
   for (unsigned index : llvm::seq<unsigned>(0, region.ops.size()))
     order.push_back(index);
   return order;
+}
+
+static bool isRegionAboveLimit(const GreedyRegion &region, int limit) {
+  return limit >= 0 && region.ops.size() > static_cast<unsigned>(limit);
 }
 
 static bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs) {
@@ -3781,6 +3804,636 @@ static bool hasLocalDmaIssueTiming(Block &block) {
   });
 }
 
+using MultiWaveRegions = std::array<GreedyRegion, kMultiWaveClassCount>;
+using MultiWaveGraphs = std::array<GraphTables, kMultiWaveClassCount>;
+using MultiWaveOrders =
+    std::array<SmallVector<unsigned, 16>, kMultiWaveClassCount>;
+
+struct MultiWaveClassState {
+  SmallVector<unsigned, 16> order;
+  SmallVector<unsigned, 16> priority;
+  SmallVector<unsigned, 16> pending;
+  BitVector ready;
+  BitVector scheduled;
+};
+
+static unsigned getMultiWaveClass(waveamdmachine::WavePlacement placement) {
+  return placement.simd % kMultiWaveClassCount;
+}
+
+static waveamdmachine::InstructionExecutionConfig
+buildMultiWaveInstructionConfig(const waveamdmachine::ArchData &arch,
+                                const waveamdmachine::EventSimConfig &config,
+                                Operation *context) {
+  waveamdmachine::InstructionExecutionConfig stateConfig =
+      buildInstructionConfig(arch, config, context);
+  stateConfig.smoothLdsDmaIssue = false;
+  stateConfig.enablePipeBackpressure = true;
+  stateConfig.valuMaxInFlight = 1;
+  stateConfig.saluMaxInFlight = 1;
+  stateConfig.xdlMaxInFlight = 1;
+  return stateConfig;
+}
+
+static void
+bindMultiWaveValueOrigins(waveamdmachine::MultiWaveExecutionState &state,
+                          unsigned wave, const ValueOriginMap &origins,
+                          Block *frozenLoopArgs) {
+  for (const ValueOriginBinding &binding : origins.bindings) {
+    BlockArgument arg = dyn_cast<BlockArgument>(binding.target);
+    if (arg && arg.getOwner() == frozenLoopArgs)
+      continue;
+    state.bindValue(wave, binding.target, binding.leaves);
+  }
+}
+
+static void
+bindMultiWaveLoopEntry(waveamdmachine::MultiWaveExecutionState &state,
+                       unsigned wave, waveamdmachine::UniformLoopOp loop) {
+  Block &body = loop.getBody().front();
+  for (auto [arg, init] : llvm::zip_equal(body.getArguments(), loop.getInits()))
+    state.bindValue(wave, arg, init);
+}
+
+static LogicalResult
+bindMultiWaveLoopBackedge(waveamdmachine::MultiWaveExecutionState &state,
+                          unsigned wave, waveamdmachine::UniformLoopOp loop) {
+  Block &body = loop.getBody().front();
+  auto terminator =
+      dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
+  if (!terminator)
+    return failure();
+  for (auto [arg, carry] :
+       llvm::zip_equal(body.getArguments(), terminator.getCarries()))
+    state.bindValue(wave, arg, carry);
+  return success();
+}
+
+static void
+initializeMultiWaveState(waveamdmachine::MultiWaveExecutionState &state,
+                         const MultiWaveRegions &regions,
+                         const ValueOriginMap &origins) {
+  for (unsigned wave : llvm::seq<unsigned>(state.getWaveCount())) {
+    unsigned classId = getMultiWaveClass(state.getPlacement(wave));
+    waveamdmachine::UniformLoopOp loop =
+        getCompleteUniformLoop(regions[classId]);
+    bindMultiWaveValueOrigins(state, wave, origins, regions[classId].block);
+    bindMultiWaveLoopEntry(state, wave, loop);
+  }
+}
+
+static bool haveSameGraphShape(const GraphTables &lhs, const GraphTables &rhs) {
+  if (lhs.pendingPreds != rhs.pendingPreds ||
+      lhs.edges.size() != rhs.edges.size())
+    return false;
+  for (auto [left, right] : llvm::zip_equal(lhs.edges, rhs.edges))
+    if (left.src != right.src || left.dst != right.dst ||
+        left.kind != right.kind || left.recurrence != right.recurrence)
+      return false;
+  return true;
+}
+
+static bool haveSameRegionShape(const MultiWaveRegions &regions,
+                                const MultiWaveGraphs &graphs) {
+  if (regions[0].ops.empty() ||
+      regions[0].ops.size() != regions[1].ops.size() ||
+      !getCompleteUniformLoop(regions[0]) ||
+      !getCompleteUniformLoop(regions[1]) ||
+      !haveSameGraphShape(graphs[0], graphs[1]))
+    return false;
+  for (auto [left, right] : llvm::zip_equal(regions[0].ops, regions[1].ops))
+    if (left->getName() != right->getName() ||
+        left->getOperandTypes() != right->getOperandTypes() ||
+        left->getResultTypes() != right->getResultTypes())
+      return false;
+  return true;
+}
+
+static LogicalResult verifySameBarrier(Operation *left, Operation *right) {
+  if (left->getName() != right->getName())
+    return failure();
+  DenseI64ArrayAttr leftSites =
+      left->getAttrOfType<DenseI64ArrayAttr>(kBarrierSitesAttr);
+  DenseI64ArrayAttr rightSites =
+      right->getAttrOfType<DenseI64ArrayAttr>(kBarrierSitesAttr);
+  return success(leftSites && leftSites == rightSites);
+}
+
+class MultiWaveGreedyScheduler {
+public:
+  MultiWaveGreedyScheduler(
+      const MultiWaveRegions &regions, const MultiWaveGraphs &graphs,
+      const MultiWaveOrders &priorities, const ValueOriginMap &origins,
+      std::unique_ptr<waveamdmachine::MultiWaveExecutionState> state)
+      : state(std::move(state)), regions(regions), graphs(graphs),
+        origins(origins) {
+    pc.assign(this->state->getWaveCount(), 0);
+    for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
+      classes[classId].priority = priorities[classId];
+      classes[classId].pending = graphs[classId].pendingPreds;
+      classes[classId].ready = getInitialReadySet(classes[classId].pending);
+      classes[classId].scheduled.resize(regions[classId].ops.size());
+    }
+  }
+
+  FailureOr<MultiWaveOrders> run();
+
+private:
+  FailureOr<bool> extendOneFrontier();
+  FailureOr<unsigned> selectNode(unsigned classId);
+  FailureOr<std::optional<unsigned>> selectAlternative(unsigned classId,
+                                                       unsigned original) const;
+  FailureOr<bool> canIssueWithoutStall(unsigned classId, unsigned node) const;
+  unsigned findPreferredReady(unsigned classId) const;
+  unsigned findPreferredUnscheduled(unsigned classId) const;
+  FailureOr<bool> allWavesAtBarrier() const;
+  FailureOr<unsigned> selectWave() const;
+  LogicalResult scheduleStep();
+  LogicalResult commitWave(unsigned wave);
+  LogicalResult commitBarrier();
+  Operation *getCurrentOp(unsigned wave) const;
+  FailureOr<unsigned> selectClassWave(unsigned classId, Operation *op) const;
+  bool classCaughtUp(unsigned classId) const;
+  bool hasNonBarrierFrontier() const;
+
+  std::unique_ptr<waveamdmachine::MultiWaveExecutionState> state;
+  std::array<MultiWaveClassState, kMultiWaveClassCount> classes;
+  SmallVector<unsigned, 8> pc;
+  const MultiWaveRegions &regions;
+  const MultiWaveGraphs &graphs;
+  const ValueOriginMap &origins;
+  size_t committed = 0;
+  std::optional<unsigned> pendingCohortClass;
+  unsigned preferredClass = 0;
+};
+
+bool MultiWaveGreedyScheduler::classCaughtUp(unsigned classId) const {
+  for (unsigned wave : llvm::seq<unsigned>(state->getWaveCount()))
+    if (getMultiWaveClass(state->getPlacement(wave)) == classId &&
+        pc[wave] != classes[classId].order.size())
+      return false;
+  return true;
+}
+
+bool MultiWaveGreedyScheduler::hasNonBarrierFrontier() const {
+  return llvm::any_of(llvm::seq<unsigned>(state->getWaveCount()),
+                      [&](unsigned wave) {
+                        Operation *op = getCurrentOp(wave);
+                        return op && !isBarrierOp(op);
+                      });
+}
+
+FailureOr<unsigned>
+MultiWaveGreedyScheduler::selectClassWave(unsigned classId,
+                                          Operation *op) const {
+  SmallVector<Operation *, 8> candidates(state->getWaveCount(), nullptr);
+  for (unsigned wave : llvm::seq<unsigned>(state->getWaveCount()))
+    if (getMultiWaveClass(state->getPlacement(wave)) == classId)
+      candidates[wave] = op;
+  return state->selectWave(candidates);
+}
+
+unsigned MultiWaveGreedyScheduler::findPreferredReady(unsigned classId) const {
+  const MultiWaveClassState &classState = classes[classId];
+  for (unsigned node : classState.priority)
+    if (classState.ready.test(node))
+      return node;
+  return regions[classId].ops.size();
+}
+
+unsigned
+MultiWaveGreedyScheduler::findPreferredUnscheduled(unsigned classId) const {
+  const MultiWaveClassState &classState = classes[classId];
+  for (unsigned node : classState.priority)
+    if (!classState.scheduled.test(node))
+      return node;
+  return regions[classId].ops.size();
+}
+
+FailureOr<bool>
+MultiWaveGreedyScheduler::canIssueWithoutStall(unsigned classId,
+                                               unsigned node) const {
+  Operation *op = regions[classId].ops[node];
+  FailureOr<unsigned> wave = selectClassWave(classId, op);
+  if (failed(wave))
+    return failure();
+  FailureOr<bool> stalls = state->wouldStall(*wave, op);
+  if (failed(stalls))
+    return failure();
+  LDBG("wave-multi-wave-schedule")
+      << "query class=" << classId << " wave=" << *wave << " node=" << node
+      << " op=" << op->getName() << " cycle=" << state->getCurrentCycle(*wave)
+      << " stalls=" << *stalls << " committed=" << committed
+      << " orders=" << classes[0].order.size() << ","
+      << classes[1].order.size();
+  return !*stalls;
+}
+
+FailureOr<unsigned> MultiWaveGreedyScheduler::selectNode(unsigned classId) {
+  MultiWaveClassState &classState = classes[classId];
+  unsigned preferred = findPreferredUnscheduled(classId);
+  if (preferred == regions[classId].ops.size())
+    return preferred;
+  if (!classState.ready.test(preferred))
+    preferred = findPreferredReady(classId);
+  if (preferred == regions[classId].ops.size())
+    return failure();
+
+  FailureOr<bool> preferredReady = canIssueWithoutStall(classId, preferred);
+  if (failed(preferredReady))
+    return failure();
+  if (*preferredReady)
+    return preferred;
+
+  LDBG("wave-multi-wave-schedule")
+      << "class=" << classId << " preferred=" << preferred
+      << " op=" << regions[classId].ops[preferred]->getName() << " stalls";
+
+  FailureOr<std::optional<unsigned>> alternative =
+      selectAlternative(classId, preferred);
+  if (failed(alternative))
+    return failure();
+  if (*alternative)
+    LDBG("wave-multi-wave-schedule")
+        << "class=" << classId << " selected=" << **alternative
+        << " op=" << regions[classId].ops[**alternative]->getName();
+  else
+    LDBG("wave-multi-wave-schedule")
+        << "class=" << classId << " no stall-free alternative";
+  return *alternative ? **alternative : preferred;
+}
+
+FailureOr<std::optional<unsigned>>
+MultiWaveGreedyScheduler::selectAlternative(unsigned classId,
+                                            unsigned original) const {
+  const MultiWaveClassState &classState = classes[classId];
+  unsigned examined = 0;
+  for (unsigned candidate : classState.priority) {
+    if (!classState.ready.test(candidate) || candidate == original)
+      continue;
+    if (++examined > kMultiWaveCandidateLimit)
+      break;
+    FailureOr<bool> candidateReady = canIssueWithoutStall(classId, candidate);
+    if (failed(candidateReady))
+      return failure();
+    LDBG("wave-multi-wave-schedule")
+        << "class=" << classId << " candidate=" << candidate
+        << " op=" << regions[classId].ops[candidate]->getName()
+        << " stalls=" << !*candidateReady;
+    if (!*candidateReady)
+      continue;
+    return std::optional<unsigned>(candidate);
+  }
+  return std::optional<unsigned>();
+}
+
+FailureOr<bool> MultiWaveGreedyScheduler::extendOneFrontier() {
+  for (unsigned offset : llvm::seq<unsigned>(kMultiWaveClassCount)) {
+    unsigned classId = (preferredClass + offset) % kMultiWaveClassCount;
+    MultiWaveClassState &classState = classes[classId];
+    if (!classCaughtUp(classId) ||
+        classState.order.size() == regions[classId].ops.size())
+      continue;
+    FailureOr<unsigned> node = selectNode(classId);
+    if (failed(node))
+      return failure();
+    classState.order.push_back(*node);
+    markScheduled(*node, graphs[classId], classState.ready,
+                  classState.scheduled, classState.pending);
+    if (!isBarrierOp(regions[classId].ops[*node]))
+      pendingCohortClass = classId;
+    preferredClass = (classId + 1) % kMultiWaveClassCount;
+    return true;
+  }
+  return false;
+}
+
+Operation *MultiWaveGreedyScheduler::getCurrentOp(unsigned wave) const {
+  unsigned classId = getMultiWaveClass(state->getPlacement(wave));
+  if (pc[wave] >= classes[classId].order.size())
+    return nullptr;
+  return regions[classId].ops[classes[classId].order[pc[wave]]];
+}
+
+FailureOr<bool> MultiWaveGreedyScheduler::allWavesAtBarrier() const {
+  Operation *first = nullptr;
+  for (unsigned wave : llvm::seq<unsigned>(state->getWaveCount())) {
+    Operation *op = getCurrentOp(wave);
+    if (!op || !isBarrierOp(op))
+      return false;
+    if (first && failed(verifySameBarrier(first, op)))
+      return failure();
+    first = op;
+  }
+  return first != nullptr;
+}
+
+FailureOr<unsigned> MultiWaveGreedyScheduler::selectWave() const {
+  SmallVector<Operation *, 8> candidates(state->getWaveCount(), nullptr);
+  for (unsigned wave : llvm::seq<unsigned>(state->getWaveCount())) {
+    Operation *op = getCurrentOp(wave);
+    if (!op || isBarrierOp(op))
+      continue;
+    candidates[wave] = op;
+  }
+  return state->selectWave(candidates);
+}
+
+LogicalResult MultiWaveGreedyScheduler::commitWave(unsigned wave) {
+  Operation *op = getCurrentOp(wave);
+  if (!op)
+    return failure();
+  FailureOr<waveamdmachine::InstructionCommitResult> result =
+      state->commit(wave, op);
+  if (failed(result))
+    return failure();
+  unsigned classId = getMultiWaveClass(state->getPlacement(wave));
+  LDBG("wave-multi-wave-schedule")
+      << "commit class=" << classId << " wave=" << wave
+      << " node=" << classes[classId].order[pc[wave]] << " op=" << op->getName()
+      << " issue=" << result->issueCycle << " stall=" << result->stall.cycles
+      << " committed=" << committed << " orders=" << classes[0].order.size()
+      << "," << classes[1].order.size();
+  bindMultiWaveValueOrigins(*state, wave, origins, regions[classId].block);
+  ++pc[wave];
+  ++committed;
+  // Freeze next class choice only after this class reserves every placement.
+  if (pendingCohortClass == classId && classCaughtUp(classId))
+    pendingCohortClass.reset();
+  return success();
+}
+
+LogicalResult MultiWaveGreedyScheduler::commitBarrier() {
+  SmallVector<Operation *, 8> candidates(state->getWaveCount(), nullptr);
+  for (unsigned wave : llvm::seq<unsigned>(state->getWaveCount()))
+    candidates[wave] = getCurrentOp(wave);
+  for ([[maybe_unused]] unsigned offset :
+       llvm::seq<unsigned>(state->getWaveCount())) {
+    FailureOr<unsigned> wave = state->selectWave(candidates);
+    if (failed(wave) || failed(commitWave(*wave)))
+      return failure();
+    candidates[*wave] = nullptr;
+  }
+  state->rendezvous();
+  return success();
+}
+
+LogicalResult MultiWaveGreedyScheduler::scheduleStep() {
+  for ([[maybe_unused]] unsigned classId :
+       llvm::seq<unsigned>(kMultiWaveClassCount)) {
+    bool extended = false;
+    if (!pendingCohortClass) {
+      FailureOr<bool> result = extendOneFrontier();
+      if (failed(result))
+        return failure();
+      extended = *result;
+    }
+    FailureOr<bool> barrier = allWavesAtBarrier();
+    if (failed(barrier))
+      return failure();
+    if (*barrier)
+      return commitBarrier();
+    if (hasNonBarrierFrontier()) {
+      FailureOr<unsigned> wave = selectWave();
+      if (failed(wave))
+        return failure();
+      return commitWave(*wave);
+    }
+    if (!extended)
+      return failure();
+  }
+  return failure();
+}
+
+FailureOr<MultiWaveOrders> MultiWaveGreedyScheduler::run() {
+  size_t total = state->getWaveCount() * regions[0].ops.size();
+  for ([[maybe_unused]] size_t step : llvm::seq<size_t>(total)) {
+    if (committed == total)
+      break;
+    if (failed(scheduleStep()))
+      return failure();
+  }
+  if (committed != total)
+    return failure();
+  MultiWaveOrders orders;
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount))
+    orders[classId] = std::move(classes[classId].order);
+  return orders;
+}
+
+struct MultiWaveReplayPosition {
+  unsigned offset = 0;
+  unsigned iteration = 0;
+};
+
+class MultiWaveOrderReplay {
+public:
+  MultiWaveOrderReplay(const MultiWaveRegions &regions,
+                       const MultiWaveOrders &orders,
+                       const ValueOriginMap &origins,
+                       waveamdmachine::MultiWaveExecutionState &state,
+                       unsigned iterations)
+      : regions(regions), orders(orders), origins(origins), state(state),
+        iterations(iterations) {
+    positions.resize(state.getWaveCount());
+  }
+
+  LogicalResult run();
+
+private:
+  Operation *getCurrentOp(unsigned wave) const;
+  FailureOr<bool> allWavesAtBarrier() const;
+  FailureOr<unsigned> selectWave() const;
+  LogicalResult commitWave(unsigned wave);
+  LogicalResult commitBarrier();
+
+  SmallVector<MultiWaveReplayPosition, 8> positions;
+  const MultiWaveRegions &regions;
+  const MultiWaveOrders &orders;
+  const ValueOriginMap &origins;
+  waveamdmachine::MultiWaveExecutionState &state;
+  size_t committed = 0;
+  unsigned iterations = 0;
+};
+
+Operation *MultiWaveOrderReplay::getCurrentOp(unsigned wave) const {
+  const MultiWaveReplayPosition &position = positions[wave];
+  if (position.iteration >= iterations)
+    return nullptr;
+  unsigned classId = getMultiWaveClass(state.getPlacement(wave));
+  return regions[classId].ops[orders[classId][position.offset]];
+}
+
+FailureOr<bool> MultiWaveOrderReplay::allWavesAtBarrier() const {
+  Operation *first = nullptr;
+  std::optional<unsigned> iteration;
+  for (unsigned wave : llvm::seq<unsigned>(state.getWaveCount())) {
+    Operation *op = getCurrentOp(wave);
+    if (!op || !isBarrierOp(op))
+      return false;
+    if (iteration && *iteration != positions[wave].iteration)
+      return failure();
+    if (first && failed(verifySameBarrier(first, op)))
+      return failure();
+    first = op;
+    iteration = positions[wave].iteration;
+  }
+  return first != nullptr;
+}
+
+FailureOr<unsigned> MultiWaveOrderReplay::selectWave() const {
+  SmallVector<Operation *, 8> candidates(state.getWaveCount(), nullptr);
+  for (unsigned wave : llvm::seq<unsigned>(state.getWaveCount())) {
+    Operation *op = getCurrentOp(wave);
+    if (!op || isBarrierOp(op))
+      continue;
+    candidates[wave] = op;
+  }
+  return state.selectWave(candidates);
+}
+
+LogicalResult MultiWaveOrderReplay::commitWave(unsigned wave) {
+  Operation *op = getCurrentOp(wave);
+  if (!op || failed(state.commit(wave, op)))
+    return failure();
+  unsigned classId = getMultiWaveClass(state.getPlacement(wave));
+  bindMultiWaveValueOrigins(state, wave, origins, regions[classId].block);
+  MultiWaveReplayPosition &position = positions[wave];
+  ++position.offset;
+  if (position.offset == orders[classId].size()) {
+    position.offset = 0;
+    ++position.iteration;
+    if (failed(bindMultiWaveLoopBackedge(
+            state, wave, getCompleteUniformLoop(regions[classId]))))
+      return failure();
+  }
+  ++committed;
+  return success();
+}
+
+LogicalResult MultiWaveOrderReplay::commitBarrier() {
+  SmallVector<Operation *, 8> candidates(state.getWaveCount(), nullptr);
+  for (unsigned wave : llvm::seq<unsigned>(state.getWaveCount()))
+    candidates[wave] = getCurrentOp(wave);
+  for ([[maybe_unused]] unsigned offset :
+       llvm::seq<unsigned>(state.getWaveCount())) {
+    FailureOr<unsigned> wave = state.selectWave(candidates);
+    if (failed(wave) || failed(commitWave(*wave)))
+      return failure();
+    candidates[*wave] = nullptr;
+  }
+  state.rendezvous();
+  return success();
+}
+
+LogicalResult MultiWaveOrderReplay::run() {
+  size_t total = state.getWaveCount() * regions[0].ops.size() * iterations;
+  for ([[maybe_unused]] size_t step : llvm::seq<size_t>(total)) {
+    if (committed == total)
+      return success();
+    FailureOr<bool> barrier = allWavesAtBarrier();
+    if (failed(barrier))
+      return failure();
+    if (*barrier) {
+      if (failed(commitBarrier()))
+        return failure();
+      continue;
+    }
+    FailureOr<unsigned> wave = selectWave();
+    if (failed(wave) || failed(commitWave(*wave)))
+      return failure();
+  }
+  return success(committed == total);
+}
+
+static bool sameMultiWaveOrders(const MultiWaveOrders &lhs,
+                                const MultiWaveOrders &rhs) {
+  return llvm::all_of(
+      llvm::seq<unsigned>(kMultiWaveClassCount),
+      [&](unsigned classId) { return sameOrder(lhs[classId], rhs[classId]); });
+}
+
+static bool hasSeenMultiWaveOrders(ArrayRef<MultiWaveOrders> seen,
+                                   const MultiWaveOrders &orders) {
+  return llvm::any_of(seen, [&](const MultiWaveOrders &prior) {
+    return sameMultiWaveOrders(prior, orders);
+  });
+}
+
+static FailureOr<std::unique_ptr<waveamdmachine::MultiWaveExecutionState>>
+replayMultiWaveOrders(const MultiWaveRegions &regions,
+                      const MultiWaveOrders &orders,
+                      const waveamdmachine::ArchData &arch,
+                      const waveamdmachine::EventSimConfig &config,
+                      const ValueOriginMap &origins,
+                      ArrayRef<waveamdmachine::WavePlacement> placements) {
+  auto state = std::make_unique<waveamdmachine::MultiWaveExecutionState>(
+      arch, placements,
+      buildMultiWaveInstructionConfig(arch, config, regions[0].first));
+  initializeMultiWaveState(*state, regions, origins);
+  MultiWaveOrderReplay replay(regions, orders, origins, *state,
+                              kSteadyStateIterations);
+  if (failed(replay.run()))
+    return failure();
+  return state;
+}
+
+static FailureOr<MultiWaveOrders> buildMultiWaveOrdersFromState(
+    const MultiWaveRegions &regions, const MultiWaveGraphs &graphs,
+    const MultiWaveOrders &priorities, const ValueOriginMap &origins,
+    std::unique_ptr<waveamdmachine::MultiWaveExecutionState> state) {
+  MultiWaveGreedyScheduler scheduler(regions, graphs, priorities, origins,
+                                     std::move(state));
+  return scheduler.run();
+}
+
+// Refinement feeds greedy state only; simulated totals never veto an order.
+static FailureOr<MultiWaveOrders> buildBoundedMultiWaveOrders(
+    const MultiWaveRegions &regions, const MultiWaveGraphs &graphs,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    ArrayRef<waveamdmachine::WavePlacement> placements) {
+  MultiWaveOrders priorities;
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
+    GreedyResult greedy = buildBoundedGreedyOrder(
+        regions[classId], graphs[classId], arch, config, origins);
+    if (!greedy.success)
+      return failure();
+    priorities[classId] = std::move(greedy.order);
+  }
+
+  auto initial = std::make_unique<waveamdmachine::MultiWaveExecutionState>(
+      arch, placements,
+      buildMultiWaveInstructionConfig(arch, config, regions[0].first));
+  initializeMultiWaveState(*initial, regions, origins);
+  FailureOr<MultiWaveOrders> first = buildMultiWaveOrdersFromState(
+      regions, graphs, priorities, origins, std::move(initial));
+  if (failed(first))
+    return failure();
+
+  MultiWaveOrders current = std::move(*first);
+  SmallVector<MultiWaveOrders, 4> seen;
+  seen.push_back(current);
+  for ([[maybe_unused]] unsigned refinement :
+       llvm::seq<unsigned>(kSteadyStateRefinementLimit)) {
+    FailureOr<std::unique_ptr<waveamdmachine::MultiWaveExecutionState>> state =
+        replayMultiWaveOrders(regions, current, arch, config, origins,
+                              placements);
+    if (failed(state))
+      return failure();
+    FailureOr<MultiWaveOrders> candidate = buildMultiWaveOrdersFromState(
+        regions, graphs, priorities, origins, std::move(*state));
+    if (failed(candidate))
+      return failure();
+    if (sameMultiWaveOrders(current, *candidate) ||
+        hasSeenMultiWaveOrders(seen, *candidate))
+      break;
+    current = std::move(*candidate);
+    seen.push_back(current);
+  }
+  return current;
+}
+
 struct RegionCollector {
   FailureOr<SmallVector<GreedyRegion, 16>> collect(func::FuncOp func) {
     this->func = func;
@@ -3811,6 +4464,8 @@ struct RegionCollector {
     if (!isWaveAMDMachineOpForScheduling(&op) || !isSupportedRegionOp(&op))
       return op.emitError("waveamd-machine-schedule unsupported region op: ")
              << op.getName();
+    if (op.hasAttr(kMultiWaveScheduleAttr))
+      return success();
     for (Region &nested : op.getRegions())
       for (Block &nestedBlock : nested)
         if (failed(collectBlock(nestedBlock)))
@@ -3881,6 +4536,94 @@ static bool hasAnyWaveMachineOp(func::FuncOp func) {
   return found;
 }
 
+static FailureOr<waveamdmachine::UniformLoopOp>
+getSpecializedLoop(Region &region) {
+  if (region.getBlocks().size() != 1)
+    return failure();
+  waveamdmachine::UniformLoopOp loop;
+  for (Operation &op : region.front().without_terminator()) {
+    auto candidate = dyn_cast<waveamdmachine::UniformLoopOp>(&op);
+    if (!candidate || loop)
+      return failure();
+    loop = candidate;
+  }
+  if (!loop)
+    return failure();
+  return loop;
+}
+
+static FailureOr<GreedyRegion>
+buildSpecializedRegion(waveamdmachine::UniformLoopOp loop, func::FuncOp func,
+                       unsigned ordinal) {
+  GreedyRegion region;
+  region.func = func;
+  region.block = &loop.getBody().front();
+  region.blockOrdinal = ordinal;
+  region.regionOrdinal = ordinal;
+  region.dmaIssueTiming = hasLocalDmaIssueTiming(*region.block);
+  for (Operation &op : region.block->without_terminator()) {
+    if (op.getNumRegions() != 0 || failed(validateRegionMember(&op)))
+      return failure();
+    region.ops.push_back(&op);
+  }
+  if (region.ops.empty())
+    return failure();
+  region.first = region.ops.front();
+  region.last = region.ops.back();
+  return region;
+}
+
+static FailureOr<MultiWaveRegions>
+buildSpecializedRegions(waveamdmachine::UniformIfOp uniformIf,
+                        unsigned ordinal) {
+  FailureOr<waveamdmachine::UniformLoopOp> thenLoop =
+      getSpecializedLoop(uniformIf.getThenRegion());
+  FailureOr<waveamdmachine::UniformLoopOp> elseLoop =
+      getSpecializedLoop(uniformIf.getElseRegion());
+  if (failed(thenLoop) || failed(elseLoop)) {
+    uniformIf.emitOpError("invalid multi-wave scheduling region");
+    return failure();
+  }
+
+  MultiWaveRegions regions;
+  func::FuncOp func = uniformIf->getParentOfType<func::FuncOp>();
+  FailureOr<GreedyRegion> thenRegion =
+      buildSpecializedRegion(*thenLoop, func, ordinal * kMultiWaveClassCount);
+  FailureOr<GreedyRegion> elseRegion = buildSpecializedRegion(
+      *elseLoop, func, ordinal * kMultiWaveClassCount + 1);
+  if (failed(thenRegion) || failed(elseRegion)) {
+    uniformIf.emitOpError("unsupported multi-wave scheduling region");
+    return failure();
+  }
+  regions[0] = std::move(*thenRegion);
+  regions[1] = std::move(*elseRegion);
+  return regions;
+}
+
+static LogicalResult buildMultiWaveGraphs(waveamdmachine::UniformIfOp uniformIf,
+                                          const MultiWaveRegions &regions,
+                                          MultiWaveGraphs &graphs) {
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount))
+    if (failed(buildGraph(regions[classId], graphs[classId])))
+      return failure();
+  if (!haveSameRegionShape(regions, graphs))
+    return uniformIf.emitOpError("multi-wave branch graphs differ");
+  return success();
+}
+
+static FailureOr<bool> isMultiWavePressureSafe(const MultiWaveRegions &regions,
+                                               const MultiWaveOrders &orders) {
+  bool pressureSafe = true;
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
+    FailureOr<bool> classSafe =
+        isRegisterPressureSafe(regions[classId], orders[classId]);
+    if (failed(classSafe))
+      return failure();
+    pressureSafe &= *classSafe;
+  }
+  return pressureSafe;
+}
+
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
@@ -3908,6 +4651,21 @@ struct WaveAMDMachineSchedulePass
     return success();
   }
 
+  LogicalResult processCollectedRegions(
+      ArrayRef<waveamdmachine::UniformIfOp> specializations,
+      ArrayRef<GreedyRegion> regions, const waveamdmachine::ArchData &arch,
+      const waveamdmachine::EventSimConfig &modelConfig,
+      const ValueOriginMap &origins, MachineScheduleStageTiming &timing) {
+    for (auto [ordinal, specialization] : llvm::enumerate(specializations))
+      if (failed(processSpecialization(specialization, arch, modelConfig,
+                                       origins, ordinal, timing)))
+        return failure();
+    for (const GreedyRegion &region : regions)
+      if (failed(processRegion(region, arch, modelConfig, origins, timing)))
+        return failure();
+    return success();
+  }
+
   WalkResult processFunction(func::FuncOp func,
                              const waveamdmachine::EventSimConfig &modelConfig,
                              MachineScheduleStageTiming &timing) {
@@ -3926,6 +4684,11 @@ struct WaveAMDMachineSchedulePass
     prepareTiming.stop();
 
     TimingScope collectTiming = timing.nest("machine_schedule_collect_regions");
+    SmallVector<waveamdmachine::UniformIfOp, 2> specializations;
+    func.walk([&](waveamdmachine::UniformIfOp uniformIf) {
+      if (uniformIf->hasAttr(kMultiWaveScheduleAttr))
+        specializations.push_back(uniformIf);
+    });
     FailureOr<SmallVector<GreedyRegion, 16>> collected =
         RegionCollector().collect(func);
     if (failed(collected))
@@ -3936,10 +4699,11 @@ struct WaveAMDMachineSchedulePass
         timing.nest("machine_schedule_build_value_origins");
     ValueOriginMap origins = buildValueOriginMap(func);
     originsTiming.stop();
-    for (const GreedyRegion &region : *collected)
-      if (failed(
-              processRegion(region, *arch.arch, modelConfig, origins, timing)))
-        return WalkResult::interrupt();
+    if (failed(processCollectedRegions(specializations, *collected, *arch.arch,
+                                       modelConfig, origins, timing)))
+      return WalkResult::interrupt();
+    for (waveamdmachine::UniformIfOp specialization : specializations)
+      specialization->removeAttr(kMultiWaveScheduleAttr);
     return WalkResult::advance();
   }
 
@@ -3988,8 +4752,7 @@ struct WaveAMDMachineSchedulePass
                               const waveamdmachine::EventSimConfig &config,
                               const ValueOriginMap &origins,
                               MachineScheduleStageTiming &timing) {
-    if (maxRegionOps >= 0 &&
-        region.ops.size() > static_cast<unsigned>(maxRegionOps))
+    if (isRegionAboveLimit(region, maxRegionOps))
       return success();
 
     TimingScope graphTiming = timing.nest("machine_schedule_build_graph");
@@ -4039,6 +4802,49 @@ struct WaveAMDMachineSchedulePass
 
     TimingScope applyTiming = timing.nest("machine_schedule_apply_order");
     return applyGreedyOrder(region, originalOrder, greedy);
+  }
+
+  LogicalResult
+  processSpecialization(waveamdmachine::UniformIfOp uniformIf,
+                        const waveamdmachine::ArchData &arch,
+                        const waveamdmachine::EventSimConfig &config,
+                        const ValueOriginMap &origins, unsigned ordinal,
+                        MachineScheduleStageTiming &timing) {
+    FailureOr<MultiWaveRegions> regions =
+        buildSpecializedRegions(uniformIf, ordinal);
+    if (failed(regions))
+      return failure();
+
+    TimingScope graphTiming = timing.nest("machine_schedule_build_joint_graph");
+    MultiWaveGraphs graphs;
+    if (failed(buildMultiWaveGraphs(uniformIf, *regions, graphs)))
+      return failure();
+    graphTiming.stop();
+
+    unsigned targetWaves = getTargetWaveCount(uniformIf);
+    SmallVector<waveamdmachine::WavePlacement> placements =
+        waveamdmachine::getFullCUWavePlacements(arch, targetWaves);
+    if (placements.empty())
+      return uniformIf.emitOpError("invalid multi-wave occupancy");
+
+    TimingScope orderTiming = timing.nest("machine_schedule_build_joint_order");
+    FailureOr<MultiWaveOrders> orders = buildBoundedMultiWaveOrders(
+        *regions, graphs, arch, config, origins, placements);
+    if (failed(orders))
+      return uniformIf.emitOpError("joint greedy scheduling failed");
+    orderTiming.stop();
+
+    FailureOr<bool> pressureSafe = isMultiWavePressureSafe(*regions, *orders);
+    if (failed(pressureSafe))
+      return failure();
+    if (!*pressureSafe)
+      for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount))
+        (*orders)[classId] = getOriginalOrder((*regions)[classId]);
+
+    TimingScope applyTiming = timing.nest("machine_schedule_apply_joint_order");
+    for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount))
+      applyOrder((*regions)[classId], (*orders)[classId]);
+    return success();
   }
 };
 
@@ -4365,8 +5171,7 @@ struct WaveAMDMachineScheduleReportPass
 
     if (!wantsGraphForRegion(region))
       return success();
-    if (maxRegionOps >= 0 &&
-        region.ops.size() > static_cast<unsigned>(maxRegionOps)) {
+    if (isRegionAboveLimit(region, maxRegionOps)) {
       printReportSkip(region, maxRegionOps);
       return success();
     }

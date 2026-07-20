@@ -500,7 +500,8 @@ bool ExecIfOp::areTypesCompatible(Type lhs, Type rhs) {
 }
 
 static bool isUniformIfResultRegClass(RegClass regClass) {
-  return regClass == RegClass::VGPR || regClass == RegClass::SGPR;
+  return regClass == RegClass::VGPR || regClass == RegClass::AGPR ||
+         regClass == RegClass::SGPR;
 }
 
 bool UniformIfOp::areTypesCompatible(Type lhs, Type rhs) {
@@ -535,7 +536,8 @@ static LogicalResult verifyUniformIfYieldSource(UniformIfOp op, Type resultType,
 
   RegType resultReg = cast<RegType>(resultType);
   if (!isUniformIfResultRegClass(resultReg.getRegClass()))
-    return op.emitOpError() << "results must be SGPR, VGPR, or memory tokens";
+    return op.emitOpError()
+           << "results must be SGPR, VGPR, AGPR, or memory tokens";
 
   RegType sourceReg = dyn_cast<RegType>(value.getType());
   if (!sourceReg || sourceReg.getRegClass() != resultReg.getRegClass() ||

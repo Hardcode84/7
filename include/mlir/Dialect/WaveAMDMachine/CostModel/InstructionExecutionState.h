@@ -9,6 +9,7 @@
 #ifndef MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_INSTRUCTIONEXECUTIONSTATE_H
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_INSTRUCTIONEXECUTIONSTATE_H
 
+#include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionResourceState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
@@ -70,6 +71,8 @@ enum class InstructionEventClass : uint8_t {
 struct InstructionStallComponent {
   InstructionStallKind kind = InstructionStallKind::None;
   int64_t cycles = 0;
+  InstructionResourceKind resource = InstructionResourceKind::None;
+  InstructionResourceScope scope = InstructionResourceScope::Wave;
 };
 
 struct InstructionStall {
@@ -157,6 +160,8 @@ struct InstructionExecutionState {
   unsigned getPipeInFlightCount(InstructionPipeKind kind) const;
 
 private:
+  friend class MultiWaveExecutionState;
+  void advanceToCycle(int64_t cycle);
   using EventId = uint64_t;
   static constexpr unsigned kWaitCounterCount = 4;
   static constexpr unsigned kPipeCount = 3;
@@ -174,6 +179,7 @@ private:
     int64_t memoryCounterLatency = 0;
     int64_t memoryValueLatency = 0;
     int64_t instructionSpan = 0;
+    int64_t resourceDuration = 0;
     uint64_t issueSlots = 1;
     unsigned instructionIssueCount = 1;
     unsigned counterIssueCount = 0;
@@ -231,9 +237,37 @@ private:
   };
 
   InstructionDesc describe(Operation *op) const;
+  static InstructionResourceCapacities
+  getResourceCapacities(const InstructionExecutionConfig &config);
+  SmallVector<InstructionResourceUse, 6>
+  getResourceUses(Operation *op, const InstructionDesc &desc,
+                  const InstructionResourceState &resourceState) const;
+  void
+  appendIssueResourceUses(unsigned count, int64_t offset, int64_t period,
+                          SmallVectorImpl<InstructionResourceUse> &uses) const;
+  void appendDmaIssueResourceUses(
+      Operation *op, SmallVectorImpl<InstructionResourceUse> &uses) const;
   void configureDmaIssueDelay(Operation *op, InstructionDesc &desc) const;
   FailureOr<InstructionStall> query(Operation *op,
                                     const InstructionDesc &desc) const;
+  FailureOr<InstructionStall>
+  queryWithResources(Operation *op, const InstructionDesc &desc,
+                     const InstructionResourceState *resourceState,
+                     unsigned wave, WavePlacement placement) const;
+  LogicalResult addDependencyStalls(Operation *op, const InstructionDesc &desc,
+                                    InstructionStall &stall) const;
+  void addLocalMemoryIssueStalls(const InstructionDesc &desc,
+                                 InstructionStall &stall) const;
+  void addLocalResourceStalls(const InstructionDesc &desc,
+                              InstructionStall &stall) const;
+  LogicalResult
+  addSharedResourceStall(Operation *op, const InstructionDesc &desc,
+                         const InstructionResourceState &resourceState,
+                         unsigned wave, WavePlacement placement,
+                         InstructionStall &stall) const;
+  FailureOr<InstructionCommitResult>
+  commitWithResources(Operation *op, InstructionResourceState *resourceState,
+                      unsigned wave, WavePlacement placement);
   FailureOr<int64_t> waitcntReadyCycle(Operation *op, int64_t cycle) const;
   FailureOr<int64_t> counterReadyCycle(InstructionWaitCounterKind kind,
                                        unsigned limit, int64_t cycle) const;

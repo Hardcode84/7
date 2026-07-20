@@ -231,8 +231,10 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rbar = transform.apply_registered_pass "waveamd-barrier-cleanup"
         to %root : (!transform.any_op) -> !transform.any_op
-    %rmat = transform.apply_registered_pass "waveamd-materialize-split-barriers"
+    %rprotocol = transform.apply_registered_pass "waveamd-finalize-barrier-protocols"
         to %rbar : (!transform.any_op) -> !transform.any_op
+    %rmat = transform.apply_registered_pass "waveamd-materialize-split-barriers"
+        to %rprotocol : (!transform.any_op) -> !transform.any_op
     %rmask = transform.apply_registered_pass "waveamd-scalar-mask-postschedule"
         to %rmat : (!transform.any_op) -> !transform.any_op
     %r1 = transform.include @waveamd_backend_finish failures(propagate) (%rmask)
@@ -257,6 +259,23 @@ module attributes {transform.with_named_sequence} {
         options = { "apply-schedule" = true,
                     "require-selected-input" = true }
         to %rpre : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rs)
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %r1 : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_backend_multi_wave(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %rpre = transform.include @waveamd_backend_preschedule failures(propagate) (%root)
+        : (!transform.any_op) -> !transform.any_op
+    %rjoint = transform.apply_registered_pass
+        "waveamd-machine-multi-wave-specialize" with
+        options = { "enable" = true }
+        to %rpre : (!transform.any_op) -> !transform.any_op
+    %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
+        options = { "apply-schedule" = true,
+                    "require-selected-input" = true }
+        to %rjoint : (!transform.any_op) -> !transform.any_op
     %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rs)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op

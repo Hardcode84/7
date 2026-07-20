@@ -551,19 +551,6 @@ func.func @uniform_if_yield_type_mismatch(%cond: !waveamdmachine.reg<scc, 1>,
 
 // -----
 
-func.func @uniform_if_agpr_result(%cond: !waveamdmachine.reg<scc, 1>,
-                                  %value: !waveamdmachine.reg<agpr, 1>) {
-  // expected-error @below {{results must be SGPR, VGPR, or memory tokens}}
-  %r = waveamdmachine.uniform_if %cond {
-    waveamdmachine.yield %value : !waveamdmachine.reg<agpr, 1>
-  } otherwise {
-    waveamdmachine.yield %value : !waveamdmachine.reg<agpr, 1>
-  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<agpr, 1>
-  return
-}
-
-// -----
-
 func.func @uniform_if_fixed_register_yields(
     %cond: !waveamdmachine.reg<scc, 1>,
     %x: !waveamdmachine.reg<sgpr, 1, 4>,

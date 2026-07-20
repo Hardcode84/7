@@ -248,17 +248,17 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 1->2 src=waveamdmachine.v_add_u32 dst=waveamdmachine.v_add_u32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.v_add_u32
 // DEPS: waveamd-machine-schedule-report deps func=regions region=1 nodes=3
-// DEPS: waveamd-machine-schedule-report edge region=1 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
-// DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 0->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
-// DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
-// DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry recurrence 1->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
-// DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
 // DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry 0->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 0->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry recurrence 1->0 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=loop_carry recurrence 1->1 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_add_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=ssa 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
+// DEPS: waveamd-machine-schedule-report edge region=1 kind=singleton 1->2 src=waveamdmachine.s_add_i32 dst=waveamdmachine.s_cmp_lt_i32
 // DEPS: waveamd-machine-schedule-report deps func=memory_edges region=0 nodes=5 edges=4
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.token dst=waveamdmachine.global_load_b32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 1->2 src=waveamdmachine.global_load_b32 dst=waveamdmachine.v_add_u32
-// DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.global_store_b32
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 1->3 src=waveamdmachine.global_load_b32 dst=waveamdmachine.global_store_b32
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=ssa 2->3 src=waveamdmachine.v_add_u32 dst=waveamdmachine.global_store_b32
 // DEPS-NOT: kind=memory_order
 // DEPS: waveamd-machine-schedule-report deps func=vcc_edges region=0 nodes=2 edges=1
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=singleton 0->1 src=waveamdmachine.v_add_u64 dst=waveamdmachine.v_add_u64
@@ -275,8 +275,8 @@ transform.named_sequence @__transform_main(%root: !transform.any_op {transform.c
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=mem_token 0->1 src=waveamdmachine.global_load_b32 dst=waveamdmachine.token_join
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry recurrence 1->0 src=waveamdmachine.token_join dst=waveamdmachine.global_load_b32
 // DEPS: waveamd-machine-schedule-report deps func=tuple_address_loop_carry_edges region=0 nodes=4
-// DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry recurrence 3->0 src=waveamdmachine.tuple_from_elements dst=waveamdmachine.tuple_to_elements
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry 1->3 src=waveamdmachine.ds_load_b32 dst=waveamdmachine.tuple_from_elements
+// DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry recurrence 3->0 src=waveamdmachine.tuple_from_elements dst=waveamdmachine.tuple_to_elements
 // DEPS: waveamd-machine-schedule-report deps func=parallel_loop_carry_edges region=0 nodes=2
 // DEPS: waveamd-machine-schedule-report edge region=0 kind=loop_carry 1->0 src=waveamdmachine.v_xor_b32 dst=waveamdmachine.v_add_u32
 // DEPS-NOT: kind=loop_carry 0->1

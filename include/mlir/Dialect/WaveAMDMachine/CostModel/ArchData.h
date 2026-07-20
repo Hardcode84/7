@@ -18,7 +18,11 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
+#include <cstdint>
+
 namespace mlir::waveamdmachine {
+
+enum class WaveIssueArbitration : uint8_t { RoundRobin };
 
 // Structural parameters of one AMDGPU compute-unit + SIMD pipeline.
 // One instance per supported gfx target. All counts are integers;
@@ -37,6 +41,9 @@ struct ArchData {
 
   // SIMD units per CU. RDNA: 2 SIMD32. CDNA: 4 SIMD16.
   int simdsPerCU;
+
+  // Low SIMD-ID bit in the target hardware-ID register.
+  int simdIdOffset;
 
   // VGPR file size in 32-bit lanes per SIMD (RDNA) / per EU (CDNA),
   // in the arch's native wave mode.
@@ -67,6 +74,12 @@ struct ArchData {
   // LDS-DMA issue-side accept queue. Zero depth/latency disables the model.
   int ldsDmaIssueQueueDepth;
   int ldsDmaIssueLatency;
+
+  // LDS-DMA cadence per SIMD pair. Zero disables the shared resource.
+  int ldsDmaIssuePeriod;
+
+  // Selection policy among ready resident waves on one SIMD.
+  WaveIssueArbitration waveIssueArbitration;
 };
 
 // Lookup by IsaVersion. Aborts (report_fatal_error) on unsupported

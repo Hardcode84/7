@@ -14,6 +14,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MultiWaveExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
@@ -383,6 +384,7 @@ private:
     int64_t complete = getCompleteCycle();
     out.totalCycles = complete;
     out.completedCycle = complete;
+    out.waveCompletedCycles = {complete};
     record({complete, EventSimEventKind::WaveCompleted, nullptr,
             FunctionalUnit::None, EventSimCounter::None});
     sortEvents();
@@ -402,12 +404,197 @@ private:
   }
 };
 
+class MultiWaveTimeline {
+public:
+  MultiWaveTimeline(ArrayRef<Operation *> ops, const ArchData &arch,
+                    const EventSimConfig &config, EventSimResult &out)
+      : ops(ops),
+        placements(getFullCUWavePlacements(arch, config.wavesPerSIMD)),
+        state(arch, placements, buildInstructionConfig(arch, config)),
+        arch(arch), config(config), out(out) {
+    size_t waveCount = placements.size();
+    pc.assign(waveCount, 0);
+    lastReady.assign(waveCount, 0);
+    lastCounterReady.assign(waveCount, 0);
+  }
+
+  LogicalResult run() {
+    if (placements.empty())
+      return failure();
+    if (ops.size() > std::numeric_limits<size_t>::max() / placements.size())
+      return failure();
+
+    size_t stepCount = ops.size() * placements.size();
+    for ([[maybe_unused]] size_t step : llvm::seq<size_t>(0, stepCount)) {
+      unsigned selected = 0;
+      if (failed(selectNextWave(selected)) || failed(commitWave(selected)))
+        return failure();
+    }
+    finish();
+    return success();
+  }
+
+private:
+  ArrayRef<Operation *> ops;
+  SmallVector<WavePlacement> placements;
+  MultiWaveExecutionState state;
+  const ArchData &arch;
+  const EventSimConfig &config;
+  EventSimResult &out;
+  SmallVector<size_t, 8> pc;
+  SmallVector<int64_t, 8> lastReady;
+  SmallVector<int64_t, 8> lastCounterReady;
+
+  LogicalResult selectNextWave(unsigned &selected) {
+    SmallVector<Operation *, 8> candidates(placements.size(), nullptr);
+    for (unsigned wave :
+         llvm::seq<unsigned>(0, static_cast<unsigned>(placements.size()))) {
+      if (pc[wave] == ops.size())
+        continue;
+      candidates[wave] = ops[pc[wave]];
+    }
+    FailureOr<unsigned> wave = state.selectWave(candidates);
+    if (failed(wave))
+      return failure();
+    selected = *wave;
+    return success();
+  }
+
+  LogicalResult commitWave(unsigned wave) {
+    Operation *op = ops[pc[wave]];
+    FailureOr<InstructionCommitResult> commit = state.commit(wave, op);
+    if (failed(commit))
+      return failure();
+
+    SchedClass cls = classifyOp(op);
+    bool realInst = cls != SchedClass::NoInst;
+    FunctionalUnit fu = realInst ? funit(arch, cls) : FunctionalUnit::None;
+    WavePlacement placement = placements[wave];
+
+    if (realInst) {
+      ++out.issuedOps;
+      record({commit->issueCycle, EventSimEventKind::OpIssued, op, fu,
+              EventSimCounter::None, wave, placement.simd});
+    }
+    if (isWaitcntOp(op))
+      record({commit->issueCycle, EventSimEventKind::CounterDrained, op,
+              FunctionalUnit::None, EventSimCounter::None, wave,
+              placement.simd});
+
+    for (Value result : op->getResults()) {
+      int64_t ready = isMemToken(result) ? commit->tokenReadyCycle
+                                         : commit->valueReadyCycle;
+      lastReady[wave] = std::max(lastReady[wave], ready);
+      record({ready, EventSimEventKind::ValueReady, op, fu,
+              EventSimCounter::None, wave, placement.simd});
+    }
+    if (op->getNumResults() == 0)
+      lastReady[wave] = std::max(lastReady[wave], commit->valueReadyCycle);
+    recordMemoryCounters(wave, op, fu, *commit);
+    ++pc[wave];
+    return success();
+  }
+
+  void recordMemoryCounters(unsigned wave, Operation *op, FunctionalUnit fu,
+                            const InstructionCommitResult &commit) {
+    MemoryCounterKind counterKind = getMemoryCounterKind(op);
+    if (counterKind == MemoryCounterKind::None)
+      return;
+
+    EventSimCounter counter = toEventCounter(counterKind);
+    int latency = getMemoryCounterLatency(arch, op, config.counterLatencies,
+                                          config.calibration);
+    int period = getEventSimIssuePeriod(arch, config);
+    WavePlacement placement = placements[wave];
+    for (unsigned issue : llvm::seq<unsigned>(0, getCounterIssueCount(op))) {
+      int64_t ready =
+          commit.issueCycle + static_cast<int64_t>(issue) * period + latency;
+      lastCounterReady[wave] = std::max(lastCounterReady[wave], ready);
+      record({ready, EventSimEventKind::CounterDrained, op, fu, counter, wave,
+              placement.simd});
+    }
+  }
+
+  void record(EventSimEvent event) {
+    if (config.recordTimeline)
+      out.events.push_back(event);
+  }
+
+  void finish() {
+    out.waveCompletedCycles.assign(placements.size(), 0);
+    for (unsigned wave :
+         llvm::seq<unsigned>(0, static_cast<unsigned>(placements.size()))) {
+      int64_t complete = std::max(lastReady[wave], state.getCurrentCycle(wave));
+      if (config.completePendingLdsDmaCounters)
+        complete = std::max(complete, lastCounterReady[wave]);
+      out.waveCompletedCycles[wave] = complete;
+      out.totalCycles = std::max(out.totalCycles, complete);
+      record({complete, EventSimEventKind::WaveCompleted, nullptr,
+              FunctionalUnit::None, EventSimCounter::None, wave,
+              placements[wave].simd});
+    }
+    out.completedCycle = out.totalCycles;
+    if (!config.recordTimeline)
+      return;
+    llvm::sort(out.events,
+               [](const EventSimEvent &lhs, const EventSimEvent &rhs) {
+                 if (lhs.cycle != rhs.cycle)
+                   return lhs.cycle < rhs.cycle;
+                 if (eventKindRank(lhs.kind) != eventKindRank(rhs.kind))
+                   return eventKindRank(lhs.kind) < eventKindRank(rhs.kind);
+                 if (lhs.wave != rhs.wave)
+                   return lhs.wave < rhs.wave;
+                 return lhs.op < rhs.op;
+               });
+  }
+};
+
+static LogicalResult validateMultiWaveProgramOp(Operation *op) {
+  if (op->getNumRegions() != 0)
+    return op->emitOpError(
+        "multi-wave event simulation requires linear machine control flow");
+  if (isa<SBarrierOp, BarrierWaitOp>(op))
+    return op->emitOpError(
+        "multi-wave event simulation does not model wave rendezvous");
+  return success();
+}
+
+static LogicalResult collectLinearProgram(func::FuncOp func,
+                                          SmallVectorImpl<Operation *> &ops) {
+  if (!func.getBody().hasOneBlock())
+    return func.emitOpError(
+        "multi-wave event simulation requires one function block");
+  for (Operation &op : func.getBody().front()) {
+    if (failed(validateMultiWaveProgramOp(&op)))
+      return failure();
+    if (isWaveAMDMachineOp(&op))
+      ops.push_back(&op);
+  }
+  return success();
+}
+
+static LogicalResult validateLinearProgram(ArrayRef<Operation *> ops) {
+  for (Operation *op : ops)
+    if (failed(validateMultiWaveProgramOp(op)))
+      return failure();
+  return success();
+}
+
 } // namespace
 
 LogicalResult simulateEventTimeline(func::FuncOp func, const ArchData &arch,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
   out = EventSimResult();
+  if (config.wavesPerSIMD != 0) {
+    if (config.wavesPerSIMD > static_cast<unsigned>(arch.wavesPerSIMD))
+      return failure();
+    SmallVector<Operation *> ops;
+    if (failed(collectLinearProgram(func, ops)))
+      return failure();
+    MultiWaveTimeline timeline(ops, arch, config, out);
+    return timeline.run();
+  }
   StateTimeline timeline(arch, config, out, config.recordTimeline);
   return timeline.runFunc(func);
 }
@@ -417,6 +604,16 @@ LogicalResult simulateEventTimeline(ArrayRef<Operation *> ops,
                                     const EventSimConfig &config,
                                     EventSimResult &out) {
   out = EventSimResult();
+  if (config.wavesPerSIMD != 0) {
+    if (config.wavesPerSIMD > static_cast<unsigned>(arch.wavesPerSIMD))
+      return failure();
+    if (failed(validateLinearProgram(ops)))
+      return failure();
+    SmallVector<Operation *> machineOps;
+    llvm::copy_if(ops, std::back_inserter(machineOps), isWaveAMDMachineOp);
+    MultiWaveTimeline timeline(machineOps, arch, config, out);
+    return timeline.run();
+  }
   StateTimeline timeline(arch, config, out, config.recordTimeline);
   return timeline.runOps(ops);
 }

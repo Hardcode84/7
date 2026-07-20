@@ -56,6 +56,11 @@ static llvm::cl::opt<int>
              llvm::cl::desc("wavefront width for issue timing; 0 uses arch"),
              llvm::cl::init(0));
 
+static llvm::cl::opt<int>
+    wavesPerSIMD("waves-per-simd",
+                 llvm::cl::desc("model full-CU occupancy; 0 models one wave"),
+                 llvm::cl::init(0));
+
 static llvm::cl::opt<int64_t>
     tripCount("trip-count",
               llvm::cl::desc("override all uniform_loop trip counts"),
@@ -227,8 +232,10 @@ static SmallVector<Operation *> flattenOps(func::FuncOp func) {
   return ops;
 }
 
-static void printEvent(const EventSimEvent &event) {
+static void printEvent(const EventSimEvent &event, bool printPlacement) {
   llvm::outs() << eventKindName(event.kind) << " cycle=" << event.cycle;
+  if (printPlacement)
+    llvm::outs() << " wave=" << event.wave << " simd=" << event.simd;
   if (event.fu != FunctionalUnit::None)
     llvm::outs() << " fu=" << getFunctionalUnitName(event.fu);
   if (event.counter != EventSimCounter::None)
@@ -288,6 +295,7 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
 
 static EventSimConfig buildConfig(const CalibrationData *calibration) {
   EventSimConfig config;
+  config.wavesPerSIMD = static_cast<unsigned>(wavesPerSIMD.getValue());
   config.waveSize = waveSize.getValue();
   config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
   config.calibration = calibration;
@@ -341,11 +349,19 @@ static void printSimulationReport(func::FuncOp func, const ArchData &arch,
   llvm::outs() << "arch: " << arch.name << "\n";
   if (config.waveSize != 0)
     llvm::outs() << "wave_size: " << config.waveSize << "\n";
+  if (config.wavesPerSIMD != 0) {
+    llvm::outs() << "waves_per_simd: " << config.wavesPerSIMD << "\n";
+    llvm::outs() << "resident_waves: " << result.waveCompletedCycles.size()
+                 << "\n";
+  }
   if (config.tripCountOverride >= 0)
     llvm::outs() << "trip_count_override: " << config.tripCountOverride << "\n";
   llvm::outs() << "total_cycles: " << result.totalCycles << "\n";
   llvm::outs() << "issued_ops: " << result.issuedOps << "\n";
   llvm::outs() << "completed: " << result.completedCycle << "\n";
+  if (config.wavesPerSIMD != 0)
+    for (auto [wave, cycle] : llvm::enumerate(result.waveCompletedCycles))
+      llvm::outs() << "wave_" << wave << "_completed: " << cycle << "\n";
 }
 
 static void printOptionalReports(func::FuncOp func, const ArchData &arch,
@@ -356,7 +372,15 @@ static void printOptionalReports(func::FuncOp func, const ArchData &arch,
                      config.calibration);
   if (timeline)
     for (const EventSimEvent &event : result.events)
-      printEvent(event);
+      printEvent(event, config.wavesPerSIMD != 0);
+}
+
+static bool validateWavesPerSIMD(const ArchData &arch) {
+  if (wavesPerSIMD >= 0 && wavesPerSIMD <= arch.wavesPerSIMD)
+    return true;
+  llvm::errs() << "waves-per-simd must be between 0 and " << arch.wavesPerSIMD
+               << "\n";
+  return false;
 }
 
 static int report(ModuleOp mod) {
@@ -378,6 +402,8 @@ static int report(ModuleOp mod) {
     llvm::errs() << "wave-size must be 0, 32, or 64\n";
     return 1;
   }
+  if (!validateWavesPerSIMD(*arch))
+    return 1;
   std::optional<CalibrationData> calibration;
   if (!loadCalibration(calibration))
     return 1;

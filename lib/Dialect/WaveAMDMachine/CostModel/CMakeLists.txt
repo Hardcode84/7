@@ -4,8 +4,10 @@ add_mlir_library(MLIRWaveAMDMachineCostModel
   EventSimulator.cpp
   FunctionalUnit.cpp
   InstructionExecutionState.cpp
+  InstructionResourceState.cpp
   LatencyTable.cpp
   MemoryCounterTiming.cpp
+  MultiWaveExecutionState.cpp
   OpClassifier.cpp
   SchedClass.cpp
 

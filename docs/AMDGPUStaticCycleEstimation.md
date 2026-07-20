@@ -428,19 +428,25 @@ deprioritize iglp pattern matching.
 
 The active in-tree path is WaveAMDMachine replay:
 
-1. `InstructionExecutionState` models one wave's issue, value readiness,
-   waitcnt drains, token dependencies, and M0 gaps.
-2. `EventSimulator` replays a linear order through that state.
-3. `wave-sim-report` and `wave.transform.estimate_cycles` expose the estimate
+1. `InstructionExecutionState` owns one wave's SSA readiness, waitcnt drains,
+   token dependencies, and local hazards.
+2. `InstructionResourceState` reserves capacity in SIMD-, SIMD-pair-, and
+   CU-scoped calendars. Current shared resources are SIMD issue, optional pipe
+   caps, CU issue, and gfx950 SIMD-pair LDS-DMA issue cadence. Outstanding
+   LDS-DMA acceptance remains wave-local.
+3. `MultiWaveExecutionState` maps independent wave states onto explicit
+   `(SIMD, slot)` placements backed by those shared calendars.
+4. `EventSimulator` provides single-wave structured replay and bounded
+   multi-wave replay for linear, barrier-free model tests.
+5. `wave-sim-report` and `wave.transform.estimate_cycles` expose the estimate
    to tools and transform-dialect scoring.
 
 Wrapping `llvm-mca` remains useful as an external cross-check, not the current
 implementation path.
 
-### Multi-wave correction formula
+### External multi-wave sanity formula
 
-Once the single-wave estimate is in hand, the inter-wave correction
-is roughly:
+For tools outside the explicit placement model, a rough correction is:
 
 - **GCN/CDNA**: `simd_ipc = min(1/4_per_cycle, sum_of_wave_demand)`.
   One wave saturates one SIMD16's VALU at 4-cycle wave64 issue.
