@@ -305,12 +305,14 @@ module attributes {transform.with_named_sequence} {
       return
     }
 
-    // DIRECT-LABEL: func.func @agpr_relief_direct_rejects_bridged_narrow_overlap()
-    // DIRECT-SAME: waveamdmachine.regalloc_transform_state =
-    // DIRECT-NOT: waveamdmachine.v_accvgpr_{{read|write}}_b32_tuple
-    // DIRECT: [[VALUE:%.*]] = waveamdmachine.v_mov_b32_tuple
-    // DIRECT: return [[VALUE]],
-    func.func @agpr_relief_direct_rejects_bridged_narrow_overlap()
+    // DIRECT-LABEL: func.func @agpr_relief_direct_allows_bridged_narrow_progress()
+    // DIRECT-NOT: waveamdmachine.regalloc_transform_state
+    // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT: [[AGPR:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT: [[REQUEST:%.*]] = waveamdmachine.uninit
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AGPR]]
+    // DIRECT: return [[READ]], [[REQUEST]]
+    func.func @agpr_relief_direct_allows_bridged_narrow_progress()
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4, 252>)
         attributes {waveamdmachine.agpr_count_max = 256 : i64,
                     waveamdmachine.target_waves = 1 : i64,
