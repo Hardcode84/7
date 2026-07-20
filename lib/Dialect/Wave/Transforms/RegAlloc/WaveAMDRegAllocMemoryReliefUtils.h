@@ -119,8 +119,8 @@ static FailureOr<SmallVector<OpOperand *>> collectMemoryReliefUses(
       uses.push_back(&use);
   }
   llvm::stable_sort(uses, [&](OpOperand *lhs, OpOperand *rhs) {
-    return context.positions.lookup(lhs->getOwner()) <
-           context.positions.lookup(rhs->getOwner());
+    return context.positions->lookup(lhs->getOwner()) <
+           context.positions->lookup(rhs->getOwner());
   });
   return uses;
 }
@@ -675,7 +675,7 @@ selectMemoryReliefCandidateFromState(
   MemoryReliefValueIndex valueIndex{state.resolvedValues};
 
   RematReliefContext context =
-      buildRematReliefContext(func, state.resolvedValues);
+      buildRematReliefContext(state.resolvedValues, state.positions);
   return selectMemoryReliefCandidate<Traits>(func, failureRecord, *setIndex,
                                              valueIndex, state.values, context,
                                              planning);

@@ -104,9 +104,18 @@ struct ActiveAGPRReliefAssignments {
   SmallVector<Assignment> assignments;
   SmallVector<unsigned> byEnd;
   SmallVector<LaneAssignments, 256> byLane;
+  SmallVector<LaneAssignments, 256> nonContiguousByLane;
+  SmallVector<unsigned, 256> contiguousLaneUseCounts;
+  SmallVector<uintptr_t, 8> contiguousBlocked;
   BitVector live;
+  unsigned liveNonContiguous = 0;
 
-  ActiveAGPRReliefAssignments(unsigned limit) : byLane(limit) {}
+  ActiveAGPRReliefAssignments(unsigned limit)
+      : byLane(limit), nonContiguousByLane(limit),
+        contiguousLaneUseCounts(limit),
+        contiguousBlocked((limit + std::numeric_limits<uintptr_t>::digits - 1) /
+                              std::numeric_limits<uintptr_t>::digits,
+                          0) {}
 
   bool endHeapCompare(unsigned lhs, unsigned rhs) const {
     const AGPRReliefFitSet &lhsSet = *assignments[lhs].set;
@@ -124,13 +133,83 @@ struct ActiveAGPRReliefAssignments {
       std::pop_heap(
           byEnd.begin(), byEnd.end(),
           [&](unsigned lhs, unsigned rhs) { return endHeapCompare(lhs, rhs); });
-      live.reset(byEnd.pop_back_val());
+      unsigned assignmentIndex = byEnd.pop_back_val();
+      const Assignment &assignment = assignments[assignmentIndex];
+      const AGPRReliefFitSet &set = *assignment.set;
+      if (set.ranges.size() == 1) {
+        for (unsigned lane :
+             llvm::seq(assignment.base, assignment.base + set.width)) {
+          assert(contiguousLaneUseCounts[lane] != 0 &&
+                 "missing contiguous AGPR assignment");
+          if (--contiguousLaneUseCounts[lane] == 0)
+            clearBlockedLane(contiguousBlocked, lane);
+        }
+      } else {
+        assert(liveNonContiguous != 0 &&
+               "missing non-contiguous AGPR assignment");
+        --liveNonContiguous;
+      }
+      live.reset(assignmentIndex);
     }
   }
 
-  bool rangeIsFree(const AGPRReliefFitSet &set, unsigned base) const {
-    if (base > byLane.size() || set.width > byLane.size() - base)
+  static constexpr unsigned wordBits = std::numeric_limits<uintptr_t>::digits;
+  static_assert(wordBits == 32 || wordBits == 64,
+                "unsupported AGPR blocked-lane word size");
+  static constexpr unsigned wordShift = wordBits == 64 ? 6 : 5;
+
+  static void setBlockedLane(MutableArrayRef<uintptr_t> blocked,
+                             unsigned lane) {
+    blocked[lane >> wordShift] |= uintptr_t{1} << (lane & (wordBits - 1));
+  }
+
+  static void clearBlockedLane(MutableArrayRef<uintptr_t> blocked,
+                               unsigned lane) {
+    blocked[lane >> wordShift] &= ~(uintptr_t{1} << (lane & (wordBits - 1)));
+  }
+
+  static void setBlockedRange(MutableArrayRef<uintptr_t> blocked,
+                              unsigned begin, unsigned end) {
+    for (unsigned lane : llvm::seq(begin, end))
+      setBlockedLane(blocked, lane);
+  }
+
+  static bool anyBlockedLane(ArrayRef<uintptr_t> words, unsigned begin,
+                             unsigned end) {
+    assert(begin < end && end <= words.size() * wordBits &&
+           "invalid AGPR blocked-lane query");
+    unsigned firstWord = begin >> wordShift;
+    unsigned lastWord = (end - 1) >> wordShift;
+    uintptr_t firstMask = ~uintptr_t{0} << (begin & (wordBits - 1));
+    unsigned lastBits = end & (wordBits - 1);
+    uintptr_t lastMask =
+        lastBits == 0 ? ~uintptr_t{0} : (uintptr_t{1} << lastBits) - 1;
+    if (firstWord == lastWord)
+      return (words[firstWord] & firstMask & lastMask) != 0;
+    if ((words[firstWord] & firstMask) != 0)
+      return true;
+    for (unsigned word = firstWord + 1; word < lastWord; ++word)
+      if (words[word] != 0)
+        return true;
+    return (words[lastWord] & lastMask) != 0;
+  }
+
+  bool contiguousRangeIsFree(const AGPRReliefFitSet &set, unsigned base) const {
+    if (anyBlockedLane(contiguousBlocked, base, base + set.width))
       return false;
+    for (unsigned lane : llvm::seq(base, base + set.width))
+      for (unsigned assignmentIndex : nonContiguousByLane[lane]) {
+        if (!live[assignmentIndex])
+          continue;
+        const AGPRReliefFitSet &assigned = *assignments[assignmentIndex].set;
+        if (liveRangeListsOverlap(set.ranges, assigned.ranges))
+          return false;
+      }
+    return true;
+  }
+
+  bool nonContiguousRangeIsFree(const AGPRReliefFitSet &set,
+                                unsigned base) const {
     for (unsigned lane : llvm::seq(base, base + set.width)) {
       for (unsigned assignmentIndex : byLane[lane]) {
         if (!live[assignmentIndex])
@@ -143,10 +222,49 @@ struct ActiveAGPRReliefAssignments {
     return true;
   }
 
+  bool rangeIsFree(const AGPRReliefFitSet &set, unsigned base) const {
+    if (base > byLane.size() || set.width > byLane.size() - base)
+      return false;
+    return set.ranges.size() == 1 ? contiguousRangeIsFree(set, base)
+                                  : nonContiguousRangeIsFree(set, base);
+  }
+
+  static std::optional<unsigned> findFirstFreeBase(ArrayRef<uintptr_t> blocked,
+                                                   unsigned width,
+                                                   unsigned limit) {
+    if (width > limit)
+      return std::nullopt;
+    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
+    unsigned maxBase = limit - width;
+    for (unsigned base = 0; base <= maxBase; base += align)
+      if (!anyBlockedLane(blocked, base, base + width))
+        return base;
+    return std::nullopt;
+  }
+
+  SmallVector<uintptr_t, 8>
+  getContiguousSetBlockedLanes(const AGPRReliefFitSet &set) const {
+    SmallVector<uintptr_t, 8> blocked = contiguousBlocked;
+    for (auto [assignmentIndex, assignment] : llvm::enumerate(assignments)) {
+      if (!live[assignmentIndex] || assignment.set->ranges.size() == 1)
+        continue;
+      if (liveRangeListsOverlap(set.ranges, assignment.set->ranges))
+        setBlockedRange(blocked, assignment.base,
+                        assignment.base + assignment.set->width);
+    }
+    return blocked;
+  }
+
   std::optional<unsigned> findFreeBase(const AGPRReliefFitSet &set,
                                        unsigned limit) const {
     if (set.width > limit)
       return std::nullopt;
+    if (set.ranges.size() == 1) {
+      if (liveNonContiguous == 0)
+        return findFirstFreeBase(contiguousBlocked, set.width, limit);
+      SmallVector<uintptr_t, 8> blocked = getContiguousSetBlockedLanes(set);
+      return findFirstFreeBase(blocked, set.width, limit);
+    }
     unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(set.width));
     unsigned maxBase = limit - set.width;
     for (unsigned base = 0; base <= maxBase; base += align)
@@ -164,8 +282,17 @@ struct ActiveAGPRReliefAssignments {
     assignments.push_back({&set, base});
     live.resize(assignments.size());
     live.set(assignmentIndex);
-    for (unsigned lane : llvm::seq(base, base + set.width))
+    for (unsigned lane : llvm::seq(base, base + set.width)) {
       byLane[lane].push_back(assignmentIndex);
+      if (set.ranges.size() == 1) {
+        if (contiguousLaneUseCounts[lane]++ == 0)
+          setBlockedLane(contiguousBlocked, lane);
+      } else {
+        nonContiguousByLane[lane].push_back(assignmentIndex);
+      }
+    }
+    if (set.ranges.size() != 1)
+      ++liveNonContiguous;
     byEnd.push_back(assignmentIndex);
     std::push_heap(byEnd.begin(), byEnd.end(), [&](unsigned lhs, unsigned rhs) {
       return endHeapCompare(lhs, rhs);
@@ -1085,9 +1212,9 @@ wave::runRegAllocTransformAGPRRelief(Operation *target, Builder &builder,
     cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
     return runRegAllocAGPRRelief(func, *cache);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(runRegAllocAGPRRelief(func, *cache)) ? WalkResult::interrupt()
-                                                       : WalkResult::advance();
+                                                       : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }

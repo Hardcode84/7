@@ -426,6 +426,7 @@ RegAllocTransformStateCache::get(func::FuncOp func) {
   decoded->resolvedValues = std::move(*resolvedValues);
   for (auto [value, stateValue] : decoded->resolvedValues)
     decoded->valueLookup[value] = stateValue;
+  collectRegAllocOpPositions(func.getBody(), decoded->positions);
   decoded->valuesIdentity = valuesIdentity;
   decoded->aliasSetsIdentity = aliasSetsIdentity;
   RegAllocTransformDecodedState *result = decoded.get();
@@ -700,10 +701,10 @@ void collectRegAllocOpPositions(Region &region,
 }
 
 RematReliefContext
-buildRematReliefContext(func::FuncOp func,
-                        ArrayRef<ResolvedRegAllocValue> values) {
+buildRematReliefContext(ArrayRef<ResolvedRegAllocValue> values,
+                        const DenseMap<Operation *, unsigned> &positions) {
   RematReliefContext context;
-  collectRegAllocOpPositions(func.getBody(), context.positions);
+  context.positions = &positions;
   for (ResolvedRegAllocValue value : values)
     context.values[value.first] = value.second;
   return context;
@@ -737,8 +738,9 @@ bool valueIsAvailableAt(Value value, Operation *user) {
 
 std::optional<unsigned> getRematOpPosition(Operation *op,
                                            const RematReliefContext &context) {
-  auto it = context.positions.find(op);
-  if (it == context.positions.end())
+  assert(context.positions && "missing remat operation positions");
+  auto it = context.positions->find(op);
+  if (it == context.positions->end())
     return std::nullopt;
   return it->second;
 }

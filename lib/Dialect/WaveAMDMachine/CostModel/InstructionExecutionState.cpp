@@ -17,9 +17,9 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/Operation.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/ErrorHandling.h"
 
 #include <algorithm>
@@ -367,7 +367,8 @@ static int64_t memoryIssueLatency(const ArchData &arch,
 
 static void appendUniqueEvents(SmallVectorImpl<uint64_t> &events,
                                ArrayRef<uint64_t> appended) {
-  llvm::SmallSet<uint64_t, 8> seen;
+  llvm::SmallDenseSet<uint64_t, 16> seen;
+  seen.reserve(events.size() + appended.size());
   for (uint64_t id : events)
     seen.insert(id);
   for (uint64_t id : appended)

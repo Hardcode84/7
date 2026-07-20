@@ -732,8 +732,10 @@ void clearRegAllocTransformState(Operation *target) {
     func->removeAttr(kRegAllocTransformStateAttr);
     return;
   }
-  target->walk(
-      [](func::FuncOp func) { func->removeAttr(kRegAllocTransformStateAttr); });
+  target->walk<WalkOrder::PreOrder>([](func::FuncOp func) {
+    func->removeAttr(kRegAllocTransformStateAttr);
+    return WalkResult::skip();
+  });
 }
 
 static void clearRegAllocPreparationTracking(Operation *target) {
@@ -819,13 +821,13 @@ getRegAllocTransformLoopDecision(Operation *target) {
   RegAllocTransformLoopDecision combined = RegAllocTransformLoopDecision::Done;
   if (auto func = dyn_cast<func::FuncOp>(target))
     return getFuncRegAllocTransformLoopDecision(func);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     FailureOr<RegAllocTransformLoopDecision> decision =
         getFuncRegAllocTransformLoopDecision(func);
     if (failed(decision))
       return WalkResult::interrupt();
     combineRegAllocTransformLoopDecision(*decision, combined);
-    return WalkResult::advance();
+    return WalkResult::skip();
   });
   if (walk.wasInterrupted())
     return failure();
@@ -865,11 +867,11 @@ LogicalResult setRegAllocTransformLoopIteration(Operation *target,
                                                 int64_t iteration) {
   if (auto func = dyn_cast<func::FuncOp>(target))
     return setFuncRegAllocTransformLoopIteration(func, builder, iteration);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(
                setFuncRegAllocTransformLoopIteration(func, builder, iteration))
                ? WalkResult::interrupt()
-               : WalkResult::advance();
+               : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }
@@ -938,10 +940,10 @@ LogicalResult clearRegAllocTransformMetadata(Operation *target,
                                              Builder &builder) {
   if (auto func = dyn_cast<func::FuncOp>(target))
     return clearFuncRegAllocMetadata(func, builder);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(clearFuncRegAllocMetadata(func, builder))
                ? WalkResult::interrupt()
-               : WalkResult::advance();
+               : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }
@@ -1018,10 +1020,10 @@ LogicalResult finalizeRegAllocTransformMetadata(Operation *target,
                                                 int64_t iterations) {
   if (auto func = dyn_cast<func::FuncOp>(target))
     return finalizeFuncRegAllocMetadata(func, builder, iterations);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(finalizeFuncRegAllocMetadata(func, builder, iterations))
                ? WalkResult::interrupt()
-               : WalkResult::advance();
+               : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }

@@ -417,10 +417,10 @@ wave::runRegAllocTransformScratchRelief(Operation *target, Builder &builder,
     cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
     return runRegAllocScratchRelief(func, *cache);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(runRegAllocScratchRelief(func, *cache))
                ? WalkResult::interrupt()
-               : WalkResult::advance();
+               : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }

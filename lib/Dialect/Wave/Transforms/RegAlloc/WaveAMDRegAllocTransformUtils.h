@@ -34,6 +34,7 @@ struct RegAllocTransformDecodedState {
   SmallVector<wave::RegAllocTransformAliasSet> sets;
   SmallVector<ResolvedRegAllocValue> resolvedValues;
   DenseMap<Value, const wave::RegAllocTransformValue *> valueLookup;
+  DenseMap<Operation *, unsigned> positions;
   Attribute valuesIdentity;
   Attribute aliasSetsIdentity;
 };
@@ -62,8 +63,8 @@ struct RegAllocTransformFailure {
 };
 
 struct RematReliefContext {
-  DenseMap<Operation *, unsigned> positions;
   DenseMap<Value, const wave::RegAllocTransformValue *> values;
+  const DenseMap<Operation *, unsigned> *positions = nullptr;
 };
 
 static constexpr unsigned kRegClassCount = 5;
@@ -135,8 +136,8 @@ bool hasStructuralLoopCarryUse(Value value);
 void collectRegAllocOpPositions(Region &region,
                                 DenseMap<Operation *, unsigned> &ops);
 RematReliefContext
-buildRematReliefContext(func::FuncOp func,
-                        ArrayRef<ResolvedRegAllocValue> values);
+buildRematReliefContext(ArrayRef<ResolvedRegAllocValue> values,
+                        const DenseMap<Operation *, unsigned> &positions);
 Operation *getAncestorInBlock(Operation *op, Block *block);
 bool valueIsAvailableAt(Value value, Operation *user);
 std::optional<unsigned> getRematOpPosition(Operation *op,

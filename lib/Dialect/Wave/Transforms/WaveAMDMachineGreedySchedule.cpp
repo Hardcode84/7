@@ -172,6 +172,7 @@ struct ValueOriginBinding {
 struct ValueOriginMap {
   DenseMap<Value, SmallVector<Value, 4>> sources;
   SmallVector<ValueOriginBinding, 16> bindings;
+  DenseMap<Operation *, SmallVector<unsigned, 4>> bindingsByDef;
 };
 
 struct ComputeResourcePreview {
@@ -254,6 +255,10 @@ struct IssuePreview {
 static void bindValueOrigins(waveamdmachine::InstructionExecutionState &model,
                              const ValueOriginMap &origins,
                              Block *frozenLoopArgs = nullptr);
+static void
+bindValueOriginsFromDef(waveamdmachine::InstructionExecutionState &model,
+                        const ValueOriginMap &origins, Operation *def,
+                        Block *frozenLoopArgs = nullptr);
 
 struct GreedyStats {
   unsigned filledGaps = 0;
@@ -566,7 +571,7 @@ static LogicalResult commitIssue(IssueState &state, Operation *op,
   if (failed(state.model.commit(op)))
     return failure();
   // Candidate copies inherit aliases from the committed state.
-  bindValueOrigins(state.model, origins, state.frozenLoopArgs);
+  bindValueOriginsFromDef(state.model, origins, op, state.frozenLoopArgs);
   state.resources.commit(state.getStaticInfo(op));
   return success();
 }
@@ -1014,17 +1019,43 @@ static void buildValueOriginBindings(ValueOriginMap &origins) {
     if (!leaves.empty())
       origins.bindings.push_back({std::move(leaves), entry.first});
   }
+  for (auto [index, binding] : llvm::enumerate(origins.bindings)) {
+    for (Value leaf : binding.leaves) {
+      Operation *def = leaf.getDefiningOp();
+      if (!def)
+        continue;
+      SmallVector<unsigned, 4> &indices = origins.bindingsByDef[def];
+      if (!llvm::is_contained(indices, index))
+        indices.push_back(index);
+    }
+  }
+}
+
+static void bindValueOrigin(waveamdmachine::InstructionExecutionState &model,
+                            const ValueOriginBinding &binding,
+                            Block *frozenLoopArgs) {
+  BlockArgument arg = dyn_cast<BlockArgument>(binding.target);
+  if (arg && arg.getOwner() == frozenLoopArgs)
+    return;
+  model.bindValue(binding.target, binding.leaves);
 }
 
 static void bindValueOrigins(waveamdmachine::InstructionExecutionState &model,
                              const ValueOriginMap &origins,
                              Block *frozenLoopArgs) {
-  for (const ValueOriginBinding &binding : origins.bindings) {
-    BlockArgument arg = dyn_cast<BlockArgument>(binding.target);
-    if (arg && arg.getOwner() == frozenLoopArgs)
-      continue;
-    model.bindValue(binding.target, binding.leaves);
-  }
+  for (const ValueOriginBinding &binding : origins.bindings)
+    bindValueOrigin(model, binding, frozenLoopArgs);
+}
+
+static void
+bindValueOriginsFromDef(waveamdmachine::InstructionExecutionState &model,
+                        const ValueOriginMap &origins, Operation *def,
+                        Block *frozenLoopArgs) {
+  auto it = origins.bindingsByDef.find(def);
+  if (it == origins.bindingsByDef.end())
+    return;
+  for (unsigned index : it->second)
+    bindValueOrigin(model, origins.bindings[index], frozenLoopArgs);
 }
 
 static void collectTokenMemoryKinds(Value value, const ValueOriginMap &origins,
@@ -1158,7 +1189,7 @@ projectIssueOrder(const IssueState &state, ArrayRef<Operation *> ops,
         trial.model.commit(op);
     if (failed(commit))
       return failure();
-    bindValueOrigins(trial.model, origins, trial.frozenLoopArgs);
+    bindValueOriginsFromDef(trial.model, origins, op, trial.frozenLoopArgs);
     addProjectionStall(projection, commit->stall);
   }
   projection.cycles = trial.model.getCurrentCycle() - startCycle;

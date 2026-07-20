@@ -291,8 +291,8 @@ collectSortedRematPostFailureUses(Value value,
       uses.push_back(&use);
   }
   llvm::stable_sort(uses, [&](OpOperand *lhs, OpOperand *rhs) {
-    return context.positions.lookup(lhs->getOwner()) <
-           context.positions.lookup(rhs->getOwner());
+    return context.positions->lookup(lhs->getOwner()) <
+           context.positions->lookup(rhs->getOwner());
   });
   return uses;
 }
@@ -525,7 +525,7 @@ rematRootUsesFailurePosition(const RematReliefRoot &root,
                              const RematReliefContext &context) {
   return llvm::any_of(root.slots, [&](const RematReliefSlot &slot) {
     return llvm::any_of(slot.uses, [&](OpOperand *use) {
-      return context.positions.lookup(use->getOwner()) ==
+      return context.positions->lookup(use->getOwner()) ==
              failureRecord.position;
     });
   });
@@ -559,7 +559,7 @@ static FailureOr<RematReliefSlot> buildRematReliefSlot(
   slot.value = value;
   slot.rebuildOp = rebuildOp;
   slot.stateValue = &stateValue;
-  slot.rebuildPosition = context.positions.lookup(rebuildOp);
+  slot.rebuildPosition = context.positions->lookup(rebuildOp);
   return slot;
 }
 
@@ -1181,7 +1181,7 @@ runRegAllocRematRelief(func::FuncOp func, RegAllocTransformStateCache &cache) {
   const RegAllocTransformDecodedState &state = **decoded;
 
   RematReliefContext context =
-      buildRematReliefContext(func, state.resolvedValues);
+      buildRematReliefContext(state.resolvedValues, state.positions);
   FailureOr<std::optional<RematReliefPlan>> plan =
       selectRematReliefPlan(func, **failureRecord, state.sets, state.values,
                             state.resolvedValues, context);
@@ -1211,10 +1211,10 @@ wave::runRegAllocTransformRematRelief(Operation *target, Builder &builder,
     cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
     return runRegAllocRematRelief(func, *cache);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(runRegAllocRematRelief(func, *cache))
                ? WalkResult::interrupt()
-               : WalkResult::advance();
+               : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }

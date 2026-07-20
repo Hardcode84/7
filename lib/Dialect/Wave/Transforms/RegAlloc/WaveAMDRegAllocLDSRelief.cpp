@@ -1230,9 +1230,9 @@ wave::runRegAllocTransformLDSRelief(Operation *target, Builder &builder,
     cache = &localCache;
   if (func::FuncOp func = dyn_cast<func::FuncOp>(target))
     return runRegAllocLDSRelief(func, *cache);
-  WalkResult walk = target->walk([&](func::FuncOp func) {
+  WalkResult walk = target->walk<WalkOrder::PreOrder>([&](func::FuncOp func) {
     return failed(runRegAllocLDSRelief(func, *cache)) ? WalkResult::interrupt()
-                                                      : WalkResult::advance();
+                                                      : WalkResult::skip();
   });
   return failure(walk.wasInterrupted());
 }
