@@ -87,21 +87,35 @@ duration from 9,152 to 36,018, and store duration from 1,752 to 15,858. Its
 total trace duration grows by 123,734 cycles versus Wave's 74,181. HPL
 throttling is not unique to the Wave schedule.
 
-Two ATT-directed controls were rejected:
+ATT-directed controls were rejected:
 
 - Redistributing DMA issue groups from `5/8/3` to `6/7/3` changed median HPL
   time from `909.097` to `910.096 us`.
 - Removing specialization changed median HPL time from `906.847` to
   `915.213 us`.
+- Giving all four SIMDs independent schedules regressed by `0.21%` against a
+  matched run.
+- Moving the B cohort split from `1/3` to `14/2`, `15/1`, and `16/0` measured
+  `906.482`, `905.439`, and `905.930 us`. The apparent best is run variance.
+- Moving every B load through VGPRs measured `1035.119 us`; moving only the
+  hottest B cohort measured `1009.249 us`. Starting that cohort early and
+  delaying its LDS writes measured `951.056 us`.
+- Adding returned-token DMA delays measured `961.330 us` at 32 cycles and
+  `978.123 us` at 46 cycles with 33-cycle overlap.
+- Permuting K groups with XOR masks measured `904.196-910.635 us` against a
+  matched `907.706 us`. No permutation repeated a material gain.
+- Four-wave `128x256`, `256x128`, and `128x128` CTA shapes measured
+  `1260-1274`, `1193`, and `1533.007 us`. The existing eight-wave kernel
+  measured `959.779 us` on exact HPL input.
+- K=32 failed strict correctness; K=128 exceeded LDS and register budgets.
+  A `32x32x16` MFMA prototype measured `1131.431 us`.
+- Frozen schedule variants did not beat the accepted kernel; the best measured
+  `924.615 us`.
 
-Remaining opportunities, in expected-value order:
-
-1. Generate four independent SIMD schedules. Current parity specialization
-   still issues each DMA cohort from two SIMDs together.
-2. Route only the late B cohort through VGPR loads plus LDS writes, or narrower
-   direct-to-LDS requests, to bypass or pace the saturated issue path.
-3. Test an alternate coalesced epilogue only after the load path; stores account
-   for less than one tenth of the HPL-only trace increase.
+All valid variants kept exact HPL and random-data checks. No compiler or kernel
+change from this batch was accepted. The best exact result remains `907.979 us`
+on device 2 and `890.003 us` across devices. A post-experiment frozen-binary
+sanity run measured `905.765 us` (`1.213904 PFLOP/s`). Target remains open.
 
 Clearing five f16 mantissa bits reached `834.717 us`, but changes the GEMM
 inputs and fails the numerical contract. One-level f16 Strassen reduced MFMA
