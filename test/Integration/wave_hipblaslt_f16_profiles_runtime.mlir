@@ -11,6 +11,7 @@
 //
 // F4: bm=2 bn=2 wave_m_tiles=8 wave_n_tiles=8 wave_k_tiles=2 target_waves=1
 // F4-SAME: input_type=f16 output_type=f16
+// F4-SAME: output_store_cache=cs
 // F4: seed=0 input_mode=rand-int
 // F4: cta_swizzle_xcds=8 cta_group_m=4
 // F4: kernel_abi=matmul output_layout=column-major
@@ -23,6 +24,7 @@
 // F4R: hw_output_check: passed
 // F8: bm=2 bn=4 wave_m_tiles=8 wave_n_tiles=4 wave_k_tiles=2 target_waves=2
 // F8-SAME: input_type=f16 output_type=f16
+// F8-SAME: output_store_cache=none
 // F8: seed=0 input_mode=rand-int
 // F8: cta_swizzle_xcds=8 cta_group_m=4
 // F8: kernel_abi=matmul output_layout=tile-packed

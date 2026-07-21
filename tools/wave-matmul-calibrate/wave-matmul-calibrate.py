@@ -113,6 +113,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
         "output_type": "f16",
+        "output_store_cache": "cs",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
         "coalesced_mfma_output": True,
@@ -355,6 +356,12 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     append_option_if(cmd, args.input_type != "f16", f"--input-type={args.input_type}")
     append_option_if(
         cmd, args.output_type != "f32", f"--output-type={args.output_type}"
+    )
+    output_store_cache = getattr(args, "output_store_cache", "none")
+    append_option_if(
+        cmd,
+        output_store_cache != "none",
+        f"--output-store-cache={output_store_cache}",
     )
     mxfp4_scale_path = getattr(args, "mxfp4_scale_path", "dma")
     append_option_if(
@@ -1156,6 +1163,11 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         default="auto",
     )
     ap.add_argument("--output-type", choices=("f32", "f16", "bf16"), default="f32")
+    ap.add_argument(
+        "--output-store-cache",
+        choices=("none", "wb", "cg", "cs", "wt"),
+        default="none",
+    )
     ap.add_argument("--input-type", choices=("f16", "bf16", "mxfp4"), default="f16")
     ap.add_argument("--mxfp4-scale-path", choices=("dma", "regs"), default="dma")
     ap.add_argument(
@@ -1497,6 +1509,7 @@ def print_header(args: argparse.Namespace, chip: str) -> None:
         f"target_waves={effective_target_waves(args)} "
         f"input_type={args.input_type} output_type={args.output_type} "
         f"mxfp4_scale_path={args.mxfp4_scale_path} "
+        f"output_store_cache={args.output_store_cache} "
         f"example={selected_example(args)} "
         f"scale_input={selected_scale_input(args)} "
         f"kernel_abi={kernel_abi(args)} "

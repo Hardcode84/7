@@ -142,6 +142,7 @@ _GFX950_F16_256X256_4WAVE: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "f16",
     "output_type": "f16",
+    "output_store_cache": "cs",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
     "coalesced_mfma_output": True,
@@ -322,6 +323,12 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="output element type for C",
     )
     parser.add_argument(
+        "--output-store-cache",
+        choices=("none", "wb", "cg", "cs", "wt"),
+        default="none",
+        help="cache policy for output stores",
+    )
+    parser.add_argument(
         "--mxfp4-scale-path",
         choices=("dma", "regs"),
         default="dma",
@@ -483,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
+        output_store_cache=args.output_store_cache,
         mxfp4_scale_path=args.mxfp4_scale_path,
         random_data=random_data,
         random_seed=args.seed,

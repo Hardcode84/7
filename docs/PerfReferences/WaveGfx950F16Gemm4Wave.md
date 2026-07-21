@@ -32,6 +32,17 @@ or 4.246%, slower.
 
 The `M=N=K=512` runtime check passed with `max_abs_diff=0`.
 
+### Output-store cache
+
+The profile marks all 32 final stores `cs`; gfx950 lowers them to `sc0 nt`.
+Matched MI350X HPL medians improved from `913.2385` to `909.8135 us`
+(+0.376%). Two balanced random-input comparisons improved by 0.238% and
+0.273%. Strict HPL and random checks passed.
+
+Twelve alternating K=2048 pairs measured median `none` at `55.896 us` and
+`cs` at `55.882 us`. Full regeneration changed only the normal and specialized
+four-wave f16 artifacts; all other perf goldens remained byte-identical.
+
 ## Configuration
 
 ```text
@@ -43,13 +54,16 @@ wave_k_tiles=2
 target_waves=1
 cta_swizzle_xcds=8
 cta_group_m=4
+coalesced_mfma_output=true
+output_store_cache=cs
 PhasedDmaSchedule.issue_group_size=7
 PhasedDmaSchedule.initial_delay_cycles=0
 PhasedDmaSchedule.loop_delay_cycles=0
 PhasedDmaSchedule.loop_overlap_cycles=0
 PhasedDmaSchedule.delayed_waves=0
-PhasedDmaSchedule.fetch_alignment=4
-PhasedDmaSchedule.fetch_phase=0
+PhasedDmaSchedule.fetch_alignment=32
+PhasedDmaSchedule.fetch_phase=12
+PhasedDmaSchedule.subpanel_pipeline=true
 ```
 
 The issue group selects the two-buffer f16 DMA pipeline. Four unpadded buffers
@@ -86,11 +100,16 @@ the gap.
 
 ## Artifacts
 
+- Specialized compiler ASM:
+  `test/PerfGolden/Inputs/gfx950-f16-256x256-4wave-specialized.s`.
+- Specialized ASM SHA-256:
+  `22603f6bf1cb387c5ef2661d5fcc4f147ab8575f3457ae06880d8f39084d9e5c`.
+- Specialized ASM lines/bytes: 1,721 / 72,748.
 - ASM: `test/PerfGolden/Inputs/gfx950-f16-256x256-4wave.s`.
 - Generator/check: `test/PerfGolden/test_gfx950_f16_256x256_4wave.py`.
 - ASM SHA-256:
-  `2b0c5e0545c4218d285f8642b2f9486fa3789d4206f737faedd79d552a984a8d`.
-- Lines/bytes: 1,236 / 55,840.
+  `52cf80e4442c9b2a851bb30fba87db3224d680cb9d5341efa3fccb938f67b30d`.
+- Lines/bytes: 1,330 / 55,884.
 
 ## Commands
 

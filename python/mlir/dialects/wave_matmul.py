@@ -55,6 +55,7 @@ from mlir._mlir_libs._waveDialectsNanobind import PTupleType
 from mlir.dialects import scf, wave, waveamd, wavemeta
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import (
+    Attribute,
     DictAttr,
     IndexType,
     IntegerAttr,
@@ -158,6 +159,14 @@ class PhasedDmaSchedule:
         _validate_phased_dma_fetch(self.fetch_alignment, self.fetch_phase)
 
 
+_OUTPUT_STORE_CACHE_KINDS = {
+    "wb": dsl.StoreCacheAttr.WB,
+    "cg": dsl.StoreCacheAttr.CG,
+    "cs": dsl.StoreCacheAttr.CS,
+    "wt": dsl.StoreCacheAttr.WT,
+}
+
+
 @dataclass(frozen=True)
 class _MatmulConfig:
     M: int
@@ -173,6 +182,7 @@ class _MatmulConfig:
     matrix_intrinsic: str = "wmma"
     input_type: str = "f16"
     output_type: str = "f32"
+    output_store_cache: str = "none"
     mxfp4_scale_path: str = "dma"
     random_data: bool = False
     random_seed: int = 0
@@ -347,6 +357,11 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
     _validate_cta_remap_params(cfg)
     _validate_wave_tile_counts(cfg)
     _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
+    _validate_choice(
+        "output_store_cache",
+        cfg.output_store_cache,
+        ("none", *_OUTPUT_STORE_CACHE_KINDS),
+    )
     _validate_choice("input_type", cfg.input_type, ("f16", "bf16", "mxfp4"))
     _validate_choice("mxfp4_scale_path", cfg.mxfp4_scale_path, ("dma", "regs"))
 
@@ -4931,6 +4946,7 @@ def _store_acc_tiles(
     *,
     after: dsl.Value | None = None,
 ) -> None:
+    cache = _output_store_cache(cfg)
     if cfg.coalesced_mfma_output:
         _store_acc_tiles_mfma_coalesced(
             bld, cfg, accs, c_ptrs[0], n_begin, n_end, after=after
@@ -4941,10 +4957,24 @@ def _store_acc_tiles(
             acc_idx = i * cfg.wave_n_tiles + j
             if cfg.output_type == "f16":
                 _fragment_store_f16(
-                    bld, cfg, accs[acc_idx], c_ptrs[acc_idx], after=after
+                    bld,
+                    cfg,
+                    accs[acc_idx],
+                    c_ptrs[acc_idx],
+                    after=after,
+                    cache=cache,
                 )
             else:
-                bld.fragment_store(accs[acc_idx], c_ptrs[acc_idx], after=after)
+                bld.fragment_store(
+                    accs[acc_idx], c_ptrs[acc_idx], after=after, cache=cache
+                )
+
+
+def _output_store_cache(cfg: _MatmulConfig) -> Attribute | None:
+    kind = _OUTPUT_STORE_CACHE_KINDS.get(cfg.output_store_cache)
+    if kind is None:
+        return None
+    return dsl.store_cache(kind)
 
 
 def _store_acc_tiles_mfma_coalesced(
@@ -4957,6 +4987,7 @@ def _store_acc_tiles_mfma_coalesced(
     *,
     after: dsl.Value | None = None,
 ) -> None:
+    cache = _output_store_cache(cfg)
     regs_type = dsl.simd_type(
         dsl.vector_type(cfg.mma.acc_registers, dsl.f32()), width=cfg.mma.wave_size
     )
@@ -4996,6 +5027,7 @@ def _store_acc_tiles_mfma_coalesced(
                 wave.PackOp(packed_type, values).result,
                 bld.ptr_add(c_ptr, offset),
                 after=after,
+                cache=cache,
             )
 
 
@@ -5010,6 +5042,7 @@ def _store_acc_tiles_lds_coalesced(
     *,
     after: dsl.Value | None = None,
 ) -> None:
+    cache = _output_store_cache(cfg)
     lds = bld.shared_memory_base(dsl.f16())
     wi = dsl.sym("__wave_dsl_epilogue_wi")
     bindings = {wi: coords.wi}
@@ -5071,6 +5104,7 @@ def _store_acc_tiles_lds_coalesced(
                         value,
                         bld.ptr_add(c_ptrs[acc_idx], global_off),
                         after=load_token,
+                        cache=cache,
                     )
                 )
         bld.yield_([_join_tokens(bld, store_tokens)])
@@ -5103,6 +5137,7 @@ def _fragment_store_f16(
     ptr: dsl.Value,
     *,
     after: dsl.Value | None = None,
+    cache: Attribute | None = None,
 ) -> dsl.Value:
     if cfg.mma.acc_registers % 2 != 0:
         raise ValueError("f16 output needs an even accumulator register count")
@@ -5120,7 +5155,9 @@ def _fragment_store_f16(
         lane_off, 0, (cfg.mma.wave_size - 1) * cfg.mma.acc_registers
     )
     base = bld.ptr_add(ptr, lane_off)
-    return bld.store(_pack_fragment_f16(bld, cfg, fragment), base, after=after)
+    return bld.store(
+        _pack_fragment_f16(bld, cfg, fragment), base, after=after, cache=cache
+    )
 
 
 def _emit_constant_fill(
@@ -6659,6 +6696,7 @@ def _make_matmul_config(
     random_seed: int,
     cta_swizzle_xcds: int,
     cta_group_m: int,
+    output_store_cache: str = "none",
     target_waves: int | None = None,
     enable_split_barriers: bool = False,
     enable_multi_wave_specialization: bool = False,
@@ -6679,6 +6717,7 @@ def _make_matmul_config(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        output_store_cache=output_store_cache,
         mxfp4_scale_path=mxfp4_scale_path,
         random_data=random_data,
         random_seed=random_seed,
@@ -6757,6 +6796,7 @@ def build_wmma_f16_matmul_module(
     matrix_intrinsic: str = "wmma",
     input_type: str = "f16",
     output_type: str = "f32",
+    output_store_cache: str = "none",
     mxfp4_scale_path: str = "dma",
     random_data: bool = False,
     random_seed: int = 0,
@@ -6785,6 +6825,7 @@ def build_wmma_f16_matmul_module(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        output_store_cache=output_store_cache,
         mxfp4_scale_path=mxfp4_scale_path,
         random_data=random_data,
         random_seed=random_seed,

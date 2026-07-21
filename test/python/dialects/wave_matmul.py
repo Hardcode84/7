@@ -78,6 +78,10 @@ def assert_serpentine_subpanel(module, a_count, b_count):
     ]
 
 
+def assert_output_store_cache(module, kind, count):
+    assert str(module).count(f"#waveamd.store_cache<{kind}>") == count
+
+
 subpanel_schedule = wm.PhasedDmaSchedule(
     issue_group_size=1,
     initial_delay_cycles=0,
@@ -166,6 +170,44 @@ module_rectangular_subpanel = build_wmma_f16_matmul_module(
 assert_serpentine_subpanel(module_rectangular_subpanel, 2, 3)
 print("rectangular-subpanel-serpentine ok")
 
+for output_store_cache in ("wb", "cg", "cs", "wt"):
+    module_fragment_cache = build_wmma_f16_matmul_module(
+        M=16,
+        N=16,
+        K=32,
+        output_store_cache=output_store_cache,
+        include_host=False,
+    )
+    assert_output_store_cache(module_fragment_cache, output_store_cache, 1)
+module_default_cache = build_wmma_f16_matmul_module(
+    M=16,
+    N=16,
+    K=32,
+    include_host=False,
+)
+assert "#waveamd.store_cache<" not in str(module_default_cache)
+assert_raises(
+    ValueError,
+    "output_store_cache must be 'none' or 'wb' or 'cg' or 'cs' or 'wt'; got invalid",
+    lambda: build_wmma_f16_matmul_module(
+        M=16,
+        N=16,
+        K=32,
+        output_store_cache="invalid",
+        include_host=False,
+    ),
+)
+module_f16_cache = build_wmma_f16_matmul_module(
+    M=16,
+    N=16,
+    K=32,
+    output_type="f16",
+    output_store_cache="cg",
+    include_host=False,
+)
+assert_output_store_cache(module_f16_cache, "cg", 1)
+print("output-store-cache ok")
+
 assert_raises(
     ValueError,
     "coalesced MFMA output requires gfx950 f16 MFMA",
@@ -192,6 +234,7 @@ module_coalesced = build_wmma_f16_matmul_module(
     use_dma_lds=True,
     matrix_intrinsic="mfma_gfx950",
     output_type="f16",
+    output_store_cache="cs",
     coalesced_mfma_output=True,
     include_host=False,
 )
@@ -200,7 +243,28 @@ assert coalesced_text.count("wave.pack") == 32
 assert coalesced_text.count("!wave.simd<vector<8xf16>, 64>") >= 32
 assert "!waveamd.fragment<0, f16, 16, 16, 64, 4>" in coalesced_text
 assert "!waveamd.fragment<1, f16, 16, 16, 64, 4>" in coalesced_text
+assert_output_store_cache(module_coalesced, "cs", 32)
 print("coalesced-mfma-output ok")
+
+module_lds_coalesced_cache = build_wmma_f16_matmul_module(
+    M=32,
+    N=32,
+    K=256,
+    BM=1,
+    BN=1,
+    wave_m_tiles=2,
+    wave_n_tiles=2,
+    wave_k_tiles=2,
+    use_buffer=True,
+    use_dma_lds=True,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+    output_type="f16",
+    output_store_cache="wt",
+    include_host=False,
+)
+assert_output_store_cache(module_lds_coalesced_cache, "wt", 4)
+print("lds-coalesced-output-store-cache ok")
 
 a0, b0 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
 a1, b1 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
@@ -395,7 +459,9 @@ print(static_bld.module)
 # CHECK: subpanel-validation ok
 # CHECK: regular-subpanel ok
 # CHECK: rectangular-subpanel-serpentine ok
+# CHECK: output-store-cache ok
 # CHECK: coalesced-mfma-output ok
+# CHECK: lds-coalesced-output-store-cache ok
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0
 # CHECK: mxfp4-scales 64 64 127 122

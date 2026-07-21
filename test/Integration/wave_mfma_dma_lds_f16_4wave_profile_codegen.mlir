@@ -2,6 +2,8 @@
 //
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only --multi-wave-specialize \
 // RUN:   | FileCheck %s
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only \
+// RUN:   | FileCheck %s --check-prefix=CACHE
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only 2>/dev/null \
 // RUN:   | wave-opt --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_preschedule})' \
 // RUN:   | FileCheck %s --check-prefix=MACHINE
@@ -26,6 +28,8 @@
 // CHECK-COUNT-64: waveamd.fragment_unpack
 // CHECK-COUNT-32: wave.pack {{.*}} -> !wave.simd<vector<8xf16>, 64>
 
+// CACHE-COUNT-32: wave.store {{.*}} {cache = #waveamd.store_cache<cs>}
+
 // MACHINE-LABEL: func.func @wmma_f16_matmul_tiled
 // MACHINE-NOT: waveamdmachine.reg_after
 // MACHINE: waveamdmachine.uniform_loop
@@ -37,3 +41,4 @@
 
 // SPECIALIZED-ASM-LABEL: wmma_f16_matmul_tiled:
 // SPECIALIZED-ASM: s_getreg_b32 {{s[0-9]+}}, hwreg(HW_REG_HW_ID, 4, 1)
+// SPECIALIZED-ASM-COUNT-32: buffer_store_dwordx4 {{.*}} sc0 nt

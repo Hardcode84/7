@@ -1283,6 +1283,7 @@ class FunctionBuilder:
         frag_type: Type,
         *,
         after: Value | None = None,
+        cache: Attribute | None = None,
     ) -> tuple[Value, Value]:
         """Load a fragment by stitching a tuple ``wave.load`` and pack.
 
@@ -1297,7 +1298,7 @@ class FunctionBuilder:
         """
         frag = FragmentType(frag_type)
         load_type = simd_type(vector_type(frag.registers, i32()), width=frag.wave_size)
-        regs, token = self.load(ptr, load_type, after=after)
+        regs, token = self.load(ptr, load_type, after=after, cache=cache)
         return self.fragment_pack(regs, frag_type), token
 
     def mma(self, kind: str, a: Value, b: Value, acc: Value) -> Value:
@@ -1328,7 +1329,12 @@ class FunctionBuilder:
         ).result
 
     def fragment_store(
-        self, fragment: Value, ptr: Value, *, after: Value | None = None
+        self,
+        fragment: Value,
+        ptr: Value,
+        *,
+        after: Value | None = None,
+        cache: Attribute | None = None,
     ) -> Value:
         """Symmetric to :meth:`fragment_load`: unpack the fragment and
         store the resulting per-lane R-dword tuple via ``wave.store``.
@@ -1353,7 +1359,7 @@ class FunctionBuilder:
         )
         tuple_ptr = self.ptr_add(ptr, lane_off)
         regs = self.fragment_unpack(fragment)
-        return self.store(regs, tuple_ptr, after=after)
+        return self.store(regs, tuple_ptr, after=after, cache=cache)
 
     def make_buffer(
         self,

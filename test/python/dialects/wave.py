@@ -150,14 +150,19 @@ def test_waveamd_load_and_fragment_pack():
             scalar, scalar_tok = f.load(simd_in, scalar_t, after=tok)
             f.store(scalar, simd_out, after=scalar_tok)
 
-            packed_frag, pack_tok = f.fragment_load(simd_in, acc_t, after=scalar_tok)
-            f.fragment_store(packed_frag, scalar_out, after=pack_tok)
+            load_cache = w.load_cache(w.LoadCacheAttr.CS)
+            store_cache = w.store_cache(w.StoreCacheAttr.WB)
+            packed_frag, pack_tok = f.fragment_load(
+                simd_in, acc_t, after=scalar_tok, cache=load_cache
+            )
+            f.fragment_store(packed_frag, scalar_out, after=pack_tok, cache=store_cache)
         # CHECK: func.func @load_pack_kernel
         # CHECK: wave.load {{.*}} -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
         # CHECK: waveamd.fragment_pack {{.*}} -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
         # CHECK: wave.load {{.*}} after {{.*}} -> (!wave.simd<i32, 32>, !wave.mem.token)
-        # CHECK: wave.load {{.*}} -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+        # CHECK: wave.load {{.*}} {cache = #waveamd.load_cache<cs>} {{.*}} -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
         # CHECK: waveamd.fragment_pack
+        # CHECK: wave.store {{.*}} {cache = #waveamd.store_cache<wb>}
         print(m.module)
 
 

@@ -846,6 +846,11 @@ def check_matmul_f16_8wave_profile(matmul) -> None:
     )
     require(
         "matmul_f16_8wave_profile",
+        args.output_store_cache == "none",
+        "8-wave output-store cache policy changed",
+    )
+    require(
+        "matmul_f16_8wave_profile",
         matmul.effective_target_waves(args) == 2,
         "8-wave profile should request two waves per SIMD",
     )
@@ -953,6 +958,11 @@ def check_matmul_f16_4wave_profile(matmul) -> None:
     )
     require(
         "matmul_f16_4wave_profile",
+        args.output_store_cache == "cs",
+        "bad 4-wave output-store cache policy",
+    )
+    require(
+        "matmul_f16_4wave_profile",
         matmul.effective_target_waves(args) == 1,
         "4-wave profile should request one wave per SIMD",
     )
@@ -971,6 +981,11 @@ def check_matmul_f16_4wave_profile(matmul) -> None:
         "matmul_f16_4wave_profile",
         "--coalesced-mfma-output" in cmd,
         "calibrator did not forward coalesced output",
+    )
+    require(
+        "matmul_f16_4wave_profile",
+        "--output-store-cache=cs" in cmd,
+        "calibrator did not forward output-store cache policy",
     )
     print("matmul_f16_4wave_profile: ok")
 
