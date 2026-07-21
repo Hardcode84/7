@@ -784,6 +784,9 @@ def check_matmul_rand_int_forwarding(matmul) -> None:
     args = matmul.parse_args(
         ["--chip=gfx950", "--input-type=bf16", "--rand-int", "--variants=baseline"]
     )
+    hpl_args = matmul.parse_args(
+        ["--chip=gfx950", "--input-type=f16", "--hpl", "--variants=baseline"]
+    )
     captured: list[list[str]] = []
     old_run = matmul.run
     try:
@@ -798,6 +801,9 @@ def check_matmul_rand_int_forwarding(matmul) -> None:
 
         matmul.run = fake_run
         _, _, check = matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+        _, _, hpl_check = matmul.run_hw(
+            Path("runner"), Path("kernel.hsaco"), hpl_args, "/tmp"
+        )
     finally:
         matmul.run = old_run
     require(
@@ -809,6 +815,16 @@ def check_matmul_rand_int_forwarding(matmul) -> None:
         "matmul_rand_int_forwarding",
         check == "passed" and matmul.input_mode_name(args) == "rand-int",
         "rand_int should retain CPU checking and header mode",
+    )
+    require(
+        "matmul_rand_int_forwarding",
+        len(captured) == 2 and "--hpl" in captured[1],
+        "runner command missing --hpl",
+    )
+    require(
+        "matmul_rand_int_forwarding",
+        hpl_check == "passed" and matmul.input_mode_name(hpl_args) == "hpl",
+        "HPL should retain CPU checking and header mode",
     )
 
     try:
@@ -832,6 +848,17 @@ def check_matmul_rand_int_forwarding(matmul) -> None:
             "matmul_rand_int_forwarding",
             False,
             "calibrator accepted MXFP4 rand_int",
+        )
+    bad = matmul.parse_args(["--chip=gfx950", "--input-type=mxfp4", "--hpl"])
+    try:
+        matmul.validate_args(bad)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_rand_int_forwarding",
+            False,
+            "calibrator accepted MXFP4 HPL",
         )
     print("matmul_rand_int_forwarding: ok")
 
