@@ -52,6 +52,57 @@ Rejected exact controls:
 - Reversing independent MFMA runs in one specialized branch was flat at
   `907.666 us`.
 
+#### HPL ATT stall audit
+
+One-CU ATT captures used the exact checked-in HSACO, device 2, and three cold
+launches per input. HPL took `955.768-992.609 us`; `rand_int` took
+`770.767-782.766 us`. All 230,928 rows per capture resolved. Values below are
+median duration or stall cycles per traced wave.
+
+| Class | HPL duration | Random duration | HPL stall | Random stall | HPL duration delta |
+|---|---:|---:|---:|---:|---:|
+| MFMA | 194,224 | 194,079 | 125,741 | 125,488 | +145 |
+| Direct-to-LDS | 86,562 | 32,057 | 76,625 | 21,733 | +54,506 |
+| LDS read | 29,940 | 29,761 | 12,758 | 12,718 | +180 |
+| Barrier | 20,331 | 8,013 | 18,577 | 6,373 | +12,318 |
+| VMEM store | 9,135 | 2,004 | 8,878 | 1,747 | +7,131 |
+| Wait | 5,715 | 5,731 | 5,715 | 5,731 | -16 |
+
+MFMA duration changes by 0.07%; explicit waits are flat. HPL's 74,181-cycle
+total increase is direct-to-LDS issue backpressure followed by barrier skew
+and output-store stalls. Addresses and instruction counts are input-invariant,
+so this is data-dependent execution throttling, not cache behavior or a
+missing wait.
+
+All-SIMD traces show where the skew lands. At the three loop barriers, HPL
+arrival spreads have medians `32`, `20`, and `108` cycles and p95 values
+`384`, `920`, and `888`; random medians are `12`, `16`, and `4`. The odd
+specialized schedule arrives last at the third barrier in 448 of 504 events.
+Barrier release reconverges within four cycles. Split barriers cannot shorten
+the critical late-wave path.
+
+Matched hipBLASLt solution 2530 shows the same input dependence, more sharply:
+direct-to-LDS duration grows from 34,636 to 116,874 cycles per wave, barrier
+duration from 9,152 to 36,018, and store duration from 1,752 to 15,858. Its
+total trace duration grows by 123,734 cycles versus Wave's 74,181. HPL
+throttling is not unique to the Wave schedule.
+
+Two ATT-directed controls were rejected:
+
+- Redistributing DMA issue groups from `5/8/3` to `6/7/3` changed median HPL
+  time from `909.097` to `910.096 us`.
+- Removing specialization changed median HPL time from `906.847` to
+  `915.213 us`.
+
+Remaining opportunities, in expected-value order:
+
+1. Generate four independent SIMD schedules. Current parity specialization
+   still issues each DMA cohort from two SIMDs together.
+2. Route only the late B cohort through VGPR loads plus LDS writes, or narrower
+   direct-to-LDS requests, to bypass or pace the saturated issue path.
+3. Test an alternate coalesced epilogue only after the load path; stores account
+   for less than one tenth of the HPL-only trace increase.
+
 Clearing five f16 mantissa bits reached `834.717 us`, but changes the GEMM
 inputs and fails the numerical contract. One-level f16 Strassen reduced MFMA
 work by 12.5%, but rounded operand sums exceeded the existing per-element
