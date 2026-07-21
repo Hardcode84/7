@@ -100,15 +100,18 @@ the gap.
 
 ## Artifacts
 
+Current hashes include shared-greedy scheduling. gfx950 A/B was waived; timings
+above are not attributed to these hashes.
+
 - Specialized compiler ASM:
   `test/PerfGolden/Inputs/gfx950-f16-256x256-4wave-specialized.s`.
 - Specialized ASM SHA-256:
-  `22603f6bf1cb387c5ef2661d5fcc4f147ab8575f3457ae06880d8f39084d9e5c`.
-- Specialized ASM lines/bytes: 1,721 / 72,748.
+  `446e04e13dc2eb4cfb4b435a75147a4d3d1c20bcea7c8a26cb08cd103b78c649`.
+- Specialized ASM lines/bytes: 1,722 / 72,758.
 - ASM: `test/PerfGolden/Inputs/gfx950-f16-256x256-4wave.s`.
 - Generator/check: `test/PerfGolden/test_gfx950_f16_256x256_4wave.py`.
 - ASM SHA-256:
-  `52cf80e4442c9b2a851bb30fba87db3224d680cb9d5341efa3fccb938f67b30d`.
+  `e91aade56929785564d1ad5803ea2e7f59ac781584144cb85219cbc93d95d8da`.
 - Lines/bytes: 1,330 / 55,884.
 
 ## Commands

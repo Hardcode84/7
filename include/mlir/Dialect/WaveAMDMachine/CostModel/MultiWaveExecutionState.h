@@ -11,6 +11,8 @@
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 
+#include <memory>
+
 namespace mlir::waveamdmachine {
 
 bool areWavePlacementsValid(const ArchData &arch,
@@ -23,6 +25,8 @@ public:
   MultiWaveExecutionState(const ArchData &arch,
                           ArrayRef<WavePlacement> placements,
                           InstructionExecutionConfig config = {});
+  MultiWaveExecutionState(const MultiWaveExecutionState &other);
+  MultiWaveExecutionState &operator=(const MultiWaveExecutionState &) = delete;
 
   unsigned getWaveCount() const { return waves.size(); }
   WavePlacement getPlacement(unsigned wave) const;
@@ -37,6 +41,8 @@ public:
 
   FailureOr<unsigned> selectWave(ArrayRef<Operation *> candidates) const;
   FailureOr<bool> wouldStall(unsigned wave, Operation *op) const;
+  FailureOr<InstructionStall> queryAfterIssueOpportunity(unsigned wave,
+                                                         Operation *op) const;
   FailureOr<InstructionStall> query(unsigned wave, Operation *op) const;
   FailureOr<InstructionCommitResult> commit(unsigned wave, Operation *op);
 
@@ -49,6 +55,29 @@ private:
   SmallVector<unsigned, 4> roundRobinCursor;
   InstructionResourceState resources;
   const ArchData *arch = nullptr;
+};
+
+class MultiWaveCohortExecutionState {
+public:
+  MultiWaveCohortExecutionState(const MultiWaveExecutionState &state,
+                                ArrayRef<unsigned> waves);
+  MultiWaveCohortExecutionState(const MultiWaveCohortExecutionState &other);
+  MultiWaveCohortExecutionState &
+  operator=(const MultiWaveCohortExecutionState &other);
+  MultiWaveCohortExecutionState(MultiWaveCohortExecutionState &&) = default;
+  MultiWaveCohortExecutionState &
+  operator=(MultiWaveCohortExecutionState &&) = default;
+
+  FailureOr<InstructionCommitResult> commit(Operation *op);
+  int64_t getCurrentCycle() const;
+  void bindValue(Value result, Value source);
+  void bindValue(Value result, ArrayRef<Value> sources);
+  void setState(std::unique_ptr<MultiWaveExecutionState> newState);
+  std::unique_ptr<MultiWaveExecutionState> takeState();
+
+private:
+  SmallVector<unsigned, 4> waves;
+  std::unique_ptr<MultiWaveExecutionState> state;
 };
 
 } // namespace mlir::waveamdmachine

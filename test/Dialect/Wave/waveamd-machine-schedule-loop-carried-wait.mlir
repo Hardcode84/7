@@ -849,8 +849,8 @@ func.func @prefetch_loop_carried_global(
 // IR-NEXT: waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.v_add_u32
 // DIAG: waveamd-machine-schedule region func=prefetch_loop_carried_global index=1
-// DIAG-SAME: action=apply reason=recurrence_model
-// DIAG-SAME: recurrence_model_moves={{[1-9][0-9]*}}
+// DIAG-SAME: action=apply reason=latency_priority
+// DIAG-SAME: latency_priority_moves={{[1-9][0-9]*}}
 
 // -----
 

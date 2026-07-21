@@ -7,12 +7,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-LABEL: func.func @post_barrier_fill
 // CHECK: waveamdmachine.uniform_loop
 // CHECK: [[PREFIX0:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[ACC:%.*]]
-// CHECK: waveamdmachine.buffer_load_lds_b128
-// CHECK-NEXT: [[PREFIX1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[PREFIX0]]
+// CHECK: [[PREFIX1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[PREFIX0]]
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: [[PREFIX2:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[PREFIX1]]
 // CHECK-NEXT: waveamdmachine.s_add_m0_i32
 // CHECK-NEXT: [[POST:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[ACC]]
 // CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST]]
-// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[PREFIX1]]
 // CHECK-NEXT: waveamdmachine.dma_issue_delay
 // CHECK: waveamdmachine.s_barrier
 // CHECK-NEXT: waveamdmachine.ds_load_b32

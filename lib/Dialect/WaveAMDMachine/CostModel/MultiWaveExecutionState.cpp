@@ -109,6 +109,103 @@ MultiWaveExecutionState::MultiWaveExecutionState(
   roundRobinCursor.assign(static_cast<unsigned>(arch.simdsPerCU), 0);
 }
 
+MultiWaveExecutionState::MultiWaveExecutionState(
+    const MultiWaveExecutionState &other)
+    : placements(other.placements.begin(), other.placements.end()),
+      resources(other.resources), arch(other.arch) {
+  waves.reserve(other.waves.size());
+  for (const InstructionExecutionState &wave : other.waves)
+    waves.emplace_back(wave);
+  llvm::append_range(roundRobinCursor, other.roundRobinCursor);
+}
+
+static bool areCohortWavesValid(const MultiWaveExecutionState &state,
+                                ArrayRef<unsigned> waves) {
+  llvm::SmallDenseSet<unsigned, 8> seen;
+  return !waves.empty() && llvm::all_of(waves, [&](unsigned wave) {
+    return wave < state.getWaveCount() && seen.insert(wave).second;
+  });
+}
+
+MultiWaveCohortExecutionState::MultiWaveCohortExecutionState(
+    const MultiWaveExecutionState &state, ArrayRef<unsigned> waves)
+    : waves(waves.begin(), waves.end()),
+      state(std::make_unique<MultiWaveExecutionState>(state)) {
+  assert(areCohortWavesValid(state, waves) && "invalid multi-wave cohort");
+}
+
+MultiWaveCohortExecutionState::MultiWaveCohortExecutionState(
+    const MultiWaveCohortExecutionState &other)
+    : MultiWaveCohortExecutionState(*other.state, other.waves) {}
+
+MultiWaveCohortExecutionState &MultiWaveCohortExecutionState::operator=(
+    const MultiWaveCohortExecutionState &other) {
+  state = std::make_unique<MultiWaveExecutionState>(*other.state);
+  waves = other.waves;
+  return *this;
+}
+
+FailureOr<InstructionCommitResult>
+MultiWaveCohortExecutionState::commit(Operation *op) {
+  SmallVector<Operation *, 8> candidates(state->getWaveCount(), nullptr);
+  for (unsigned wave : waves)
+    candidates[wave] = op;
+
+  std::optional<InstructionCommitResult> first;
+  while (llvm::any_of(candidates,
+                      [](Operation *candidate) { return candidate; })) {
+    FailureOr<unsigned> wave = state->selectWave(candidates);
+    if (failed(wave))
+      return failure();
+    FailureOr<InstructionStall> stall =
+        state->queryAfterIssueOpportunity(*wave, op);
+    if (failed(stall))
+      return failure();
+    FailureOr<InstructionCommitResult> result = state->commit(*wave, op);
+    if (failed(result))
+      return failure();
+    if (!first) {
+      result->stall = std::move(*stall);
+      first = *result;
+    }
+    candidates[*wave] = nullptr;
+  }
+  if (!first)
+    return failure();
+  return *first;
+}
+
+int64_t MultiWaveCohortExecutionState::getCurrentCycle() const {
+  int64_t cycle = state->getCurrentCycle(waves.front());
+  for (unsigned wave : ArrayRef<unsigned>(waves).drop_front())
+    cycle = std::min(cycle, state->getCurrentCycle(wave));
+  return cycle;
+}
+
+void MultiWaveCohortExecutionState::bindValue(Value result, Value source) {
+  for (unsigned wave : waves)
+    state->bindValue(wave, result, source);
+}
+
+void MultiWaveCohortExecutionState::bindValue(Value result,
+                                              ArrayRef<Value> sources) {
+  for (unsigned wave : waves)
+    state->bindValue(wave, result, sources);
+}
+
+void MultiWaveCohortExecutionState::setState(
+    std::unique_ptr<MultiWaveExecutionState> newState) {
+  assert(newState && areCohortWavesValid(*newState, waves) &&
+         "invalid multi-wave cohort state");
+  state = std::move(newState);
+}
+
+std::unique_ptr<MultiWaveExecutionState>
+MultiWaveCohortExecutionState::takeState() {
+  assert(state && "missing multi-wave state");
+  return std::move(state);
+}
+
 WavePlacement MultiWaveExecutionState::getPlacement(unsigned wave) const {
   assert(wave < placements.size() && "wave index out of range");
   return placements[wave];
@@ -191,13 +288,8 @@ MultiWaveExecutionState::selectWave(ArrayRef<Operation *> candidates) const {
 
 FailureOr<bool> MultiWaveExecutionState::wouldStall(unsigned wave,
                                                     Operation *op) const {
-  FailureOr<InstructionStall> stall = query(wave, op);
-  if (failed(stall))
-    return failure();
-  FailureOr<int64_t> opportunity = getIssueOpportunityCycle(wave);
-  if (failed(opportunity))
-    return failure();
-  return getCurrentCycle(wave) + stall->cycles > *opportunity;
+  FailureOr<InstructionStall> stall = queryAfterIssueOpportunity(wave, op);
+  return failed(stall) ? FailureOr<bool>(failure()) : stall->cycles != 0;
 }
 
 FailureOr<int64_t>
@@ -212,6 +304,29 @@ MultiWaveExecutionState::getIssueOpportunityCycle(unsigned wave) const {
   if (failed(query))
     return failure();
   return query->readyCycle;
+}
+
+FailureOr<InstructionStall>
+MultiWaveExecutionState::queryAfterIssueOpportunity(unsigned wave,
+                                                    Operation *op) const {
+  FailureOr<InstructionStall> raw = query(wave, op);
+  FailureOr<int64_t> opportunity = getIssueOpportunityCycle(wave);
+  if (failed(raw) || failed(opportunity))
+    return failure();
+
+  int64_t covered = std::max<int64_t>(0, *opportunity - getCurrentCycle(wave));
+  InstructionStall stall;
+  for (InstructionStallComponent component : raw->components) {
+    component.cycles = std::max<int64_t>(0, component.cycles - covered);
+    if (component.cycles == 0)
+      continue;
+    stall.components.push_back(component);
+    if (component.cycles > stall.cycles) {
+      stall.kind = component.kind;
+      stall.cycles = component.cycles;
+    }
+  }
+  return stall;
 }
 
 FailureOr<InstructionStall>

@@ -1,6 +1,7 @@
 // RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=ENABLED
 // RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=DISABLED
 // RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-machine-schedule{apply-schedule=true require-selected-input=true})' | FileCheck %s --check-prefix=SCHEDULED
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-machine-schedule{apply-schedule=true require-selected-input=true})' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
@@ -172,6 +173,143 @@ func.func @shared_dma_saturation(
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
         carries(%next : !waveamdmachine.reg<sgpr, 1>)
   } -> !waveamdmachine.reg<sgpr, 1>
+  return
+}
+
+// SCHEDULED-LABEL: func.func @sched_barrier_blocks(
+// SCHEDULED: waveamdmachine.uniform_if
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED-NEXT: waveamdmachine.sched_barrier
+// SCHEDULED-NEXT: waveamdmachine.v_xor_b32
+// SCHEDULED: } otherwise {
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED-NEXT: waveamdmachine.sched_barrier
+// SCHEDULED-NEXT: waveamdmachine.v_xor_b32
+// SCHEDULED-NOT: waveamdmachine.multi_wave_schedule
+func.func @sched_barrier_blocks(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    %before = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.sched_barrier
+    %after = waveamdmachine.v_xor_b32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// SCHEDULED-LABEL: func.func @nested_regions(
+// SCHEDULED: waveamdmachine.uniform_if
+// SCHEDULED: waveamdmachine.uniform_loop
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED-NEXT: waveamdmachine.exec_if
+// SCHEDULED: waveamdmachine.v_xor_b32
+// SCHEDULED: } otherwise {
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED: } otherwise {
+// SCHEDULED: waveamdmachine.uniform_loop
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED-NEXT: waveamdmachine.exec_if
+// SCHEDULED: waveamdmachine.v_xor_b32
+// SCHEDULED: } otherwise {
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED: waveamdmachine.v_add_u32
+// SCHEDULED-NOT: waveamdmachine.multi_wave_schedule
+func.func @nested_regions(
+    %exec: !waveamdmachine.reg<sgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    %pre = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.exec_if %exec {
+      %then = waveamdmachine.v_xor_b32 %pre, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.yield
+    } otherwise {
+      %else = waveamdmachine.v_add_u32 %pre, %a
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 1>
+    %post = waveamdmachine.v_add_u32 %pre, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// DIAG: waveamd-machine-schedule region func=pressure_fallback
+// DIAG-SAME: action=keep reason=pressure
+// DIAG-NEXT: waveamd-machine-schedule region func=pressure_fallback
+// DIAG-SAME: action=apply reason=loop_wait
+func.func @pressure_fallback(
+    %addr: !waveamdmachine.reg<vgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %d0: !waveamdmachine.reg<sgpr, 1>,
+    %d1: !waveamdmachine.reg<sgpr, 1>,
+    %d2: !waveamdmachine.reg<sgpr, 1>,
+    %d3: !waveamdmachine.reg<sgpr, 1>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %m0: !waveamdmachine.m0,
+    %x: !waveamdmachine.reg<sgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>,
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.sgpr_count_max = 1 : i64,
+                waveamdmachine.target_waves = 1 : i64} {
+  %init = waveamdmachine.ds_store_b32 %addr, %addr after %root
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %loop:2 = waveamdmachine.uniform_loop if %cond
+      : !waveamdmachine.reg<scc, 1>
+      carries(%init, %x : !waveamdmachine.mem.token,
+              !waveamdmachine.reg<sgpr, 1>) {
+  ^bb0(%tok: !waveamdmachine.mem.token,
+       %iv: !waveamdmachine.reg<sgpr, 1>):
+    %desc = waveamdmachine.tuple_from_elements %d0, %d1, %d2, %d3
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>,
+           !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<sgpr, 4>
+    %dma = waveamdmachine.buffer_load_lds_b128
+        %off, %desc, %soff, %m0 after %tok
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %sum, %scc = waveamdmachine.s_add_i32 %iv, %y
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%dma, %sum : !waveamdmachine.mem.token,
+                !waveamdmachine.reg<sgpr, 1>)
+  } -> !waveamdmachine.mem.token, !waveamdmachine.reg<sgpr, 1>
   return
 }
 

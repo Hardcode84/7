@@ -2,10 +2,10 @@
 
 ## Status
 
-Scoped hardware model, clone pass, joint greedy scheduling, barrier rendezvous,
-and paired barrier cleanup implemented. Scheduled pipelines always run the
-clone pass; a function unit attribute opts kernels in. Synthetic WaveAMDMachine
-and Integration fixtures cover the stack.
+Scoped hardware model, clone pass, block-paired greedy scheduling, barrier
+rendezvous, and paired barrier cleanup implemented. Scheduled pipelines always
+run the clone pass; a function unit attribute opts kernels in. Synthetic
+WaveAMDMachine and Integration fixtures cover the stack.
 
 No profile names, operation patterns, or schedule-order policies drive
 qualification.
@@ -18,12 +18,11 @@ Current model provides:
 - CU issue and SIMD-pair LDS-DMA issue domains;
 - target-declared round-robin wave arbitration;
 - `wouldStall(wave, op)` admission over shared resource state;
-- bounded joint greedy refinement and loop replay;
+- normal greedy selection with bounded joint refinement and loop replay;
 - clone-only specialization before the normal scheduler.
 
-Replay and refinement use fixed iteration counts. Candidate search has a fixed
-per-step bound. Region size is uncapped; compile work scales with input IR and
-never iterates to convergence.
+Replay and refinement use fixed iteration counts. Region size is uncapped;
+compile work scales with input IR and never iterates to convergence.
 
 ## Goal
 
@@ -73,18 +72,17 @@ including structured region path, original site, and full or split form.
 6. Barrier-count or barrier-protocol rewrites commit in every branch or none.
 7. Greedy choices see shared-resource pressure directly. No post-greedy cycle
    simulation may veto or replace an order.
-8. Class count, occupancy, candidates per step, refinement, and replay have
-   fixed bounds.
+8. Class count, occupancy, refinement, and replay have fixed bounds.
 
 ## Current Architecture
 
 `waveamd-machine-multi-wave-specialize` clones eligible top-level loops into a
 marked `uniform_if`. It preserves source order and performs no scheduling.
 
-`waveamd-machine-schedule` collects marked branch pairs before ordinary local
-regions. It builds one graph per branch, verifies structural equality, then
-runs both class frontiers against one `MultiWaveExecutionState`. The marker is
-removed after orders are applied.
+`waveamd-machine-schedule` runs the normal recursive region collector on both
+marked arms. It pairs regions by block and region ordinal, verifies structural
+equality, then advances both normal greedy states against one
+`MultiWaveExecutionState`. The marker is removed after orders are applied.
 
 Explicit placement keeps wave-local memory admission queues and adds shared
 calendars. It disables occupancy proxies such as `smoothLdsDmaIssue`; shared
@@ -197,33 +195,30 @@ Single-wave clients retain wave-local queue behavior. Explicit multi-wave
 clients share the scoped calendars while reusing the same SSA, token, wait, and
 hazard implementation per placement.
 
-## Joint Greedy Scheduling
+## Paired Greedy Scheduling
 
 Build one dependency graph per cloned branch. Canonical edge order removes
 MLIR use-list order from graph identity. Structurally unequal graphs fail before
 either order changes.
 
-Each class gets independent `ready`, `pending`, `scheduled`, and output-order
-state. Scheduling never clones IR.
+Each class gets an ordinary `GreedyOrderState`: the same `ready`, `pending`,
+`scheduled`, recurrence, stall-fill, steady-state, and output-order state used
+outside specialization. Scheduling never clones IR.
 
 The runtime model contains one `WaveExecutionState` per placement. Placements
 of one class share the class's static order but keep independent dynamic state.
 All placements share scoped resource calendars.
 
-At each greedy step:
+The coordinator rotates between class frontiers and calls the normal
+`buildGreedyStep` for each advance. It has no candidate selector, latency rule,
+deferred-node rule, or operation policy. The class issue model commits each
+selected static operation across every placement using that class before the
+other class advances, so shared reservations include full class multiplicity.
 
-1. Extend the next caught-up class under rotating class priority.
-2. Start from that class's bounded single-wave greedy priority.
-3. Ask `wouldStall(wave, op)` for the target-selected physical wave.
-4. On a stall, search a fixed number of ready alternatives in priority order.
-5. Append the selected operation to that class's static order.
-6. Commit that operation across every placement using the class before another
-   class chooses; shared reservations then reflect full class multiplicity.
-7. If only barriers are exposed, extend classes until the paired rendezvous.
-
-Multi-wave concerns stay inside the model. Greedy sees only stall admission; it
-never asks whether an operation is MFMA, LDS DMA, or a GEMM load. Saturating one
-shared resource naturally admits ready work using another.
+Multi-wave concerns stay inside the model. Normal greedy logic sees the same
+issue preview API and never asks whether an operation is MFMA, LDS DMA, or a
+GEMM load. Saturating one shared resource naturally admits ready work using
+another through the existing stall-fill logic.
 
 Lockstep means one shared scheduling timeline and coordinated class frontiers.
 It does not mean strict alternation. One chosen node covers its full class
@@ -247,23 +242,23 @@ Keep fixed constants for:
 - fillers per stall target;
 - specialization classes;
 - resident placements;
-- candidates examined per greedy step.
 
 No convergence loop runs until a state happens to stabilize. Complexity is
 bounded by these constants and region size.
 
 ### Pressure
 
-Validate pressure independently for each class. Maximum branch pressure
-determines whether the requested `target_waves` remains valid. A failed check
-keeps both original orders.
+Validate pressure independently for each class with the normal retry policy.
+Maximum branch pressure determines whether the requested `target_waves`
+remains valid. A failed class falls back to its original order.
 
 This is scheduler input, not a later cycle-based order veto.
 
 ## Code Chunk
 
-Initial unit is one complete top-level `waveamdmachine.uniform_loop` plus any
-required loop-local scheduling regions.
+Initial unit is one top-level `waveamdmachine.uniform_loop`. Nested supported
+regions remain nested; scheduling lowers each arm through the normal collector
+and pairs the resulting block-local regions.
 
 Loop-only cloning keeps shared:
 
@@ -324,9 +319,14 @@ a generic regalloc bug.
 
 ## Barriers
 
-Scheduling needs no specialization-specific barrier fence. Both arms clone the
-same code chunk and therefore start with the same barrier sites and dynamic
-structure. Each class still obeys the same SSA/token graph.
+`waveamdmachine.sched_barrier` uses normal region-boundary handling. It is not
+part of a paired graph and no operation crosses it. Real hardware barriers stay
+in the graph; a class frontier stops after one and resumes only after the
+matching barrier reaches every class and the model rendezvous completes.
+
+Both arms clone the same code chunk and therefore start with the same hardware
+barrier sites and dynamic structure. Each class still obeys the same SSA/token
+graph.
 
 The hazard is later cleanup. Current `waveamd-barrier-cleanup` walks blocks
 independently. Different schedules can make a full-barrier pair or a split
@@ -452,7 +452,10 @@ After barrier cleanup:
 - Marked functions clone regions larger than 2,048 operations.
 - Scheduler consumes the clone marker and applies both orders.
 - Explicit token edges remain forward in every class.
-- Candidate, replay, and refinement limits are enforced.
+- Replay and refinement limits are enforced.
+- Nested blocks and scheduling barriers produce the same region stream in both
+  arms.
+- Paired frontier advances use the normal greedy step implementation.
 - No operation-name or kernel-shape eligibility appears in diagnostics.
 
 ### Barriers
@@ -476,7 +479,7 @@ After barrier cleanup:
 1. Scoped resource descriptions and multi-placement query/commit.
 2. Explicit-placement occupancy model with single-wave wrapper retained.
 3. Clone-only specialization pass.
-4. Bounded joint greedy scheduling in the normal scheduler.
+4. Block-paired normal greedy scheduling with shared model state.
 5. Transactional paired barrier cleanup.
 6. Synthetic integration, code-size, and compile-time gates before kernel use.
 

@@ -47,7 +47,7 @@ def main() -> None:
             "--pass-pipeline=builtin.module("
             "waveamd-machine-multi-wave-specialize,"
             "waveamd-machine-schedule{apply-schedule=true "
-            "require-selected-input=true max-region-ops=0})",
+            "require-selected-input=true})",
         ],
         input=build_source(),
         text=True,

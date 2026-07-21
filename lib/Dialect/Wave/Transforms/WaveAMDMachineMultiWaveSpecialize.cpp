@@ -140,13 +140,12 @@ static bool isSupportedResultType(Type type) {
          reg.getRegClass() == waveamdmachine::RegClass::AGPR;
 }
 
-static bool isFlatTopLevelLoop(waveamdmachine::UniformLoopOp loop) {
+static bool isTopLevelLoop(waveamdmachine::UniformLoopOp loop) {
   if (!isa<func::FuncOp>(loop->getParentOp()) ||
       loop.getBody().getBlocks().size() != 1 ||
       !llvm::all_of(loop.getResultTypes(), isSupportedResultType))
     return false;
-  return llvm::none_of(loop.getBody().front().without_terminator(),
-                       [](Operation &op) { return op.getNumRegions() != 0; });
+  return true;
 }
 
 static FailureOr<DenseMap<Operation *, int64_t>>
@@ -274,7 +273,7 @@ static SmallVector<waveamdmachine::UniformLoopOp, 2>
 collectSpecializationLoops(func::FuncOp func) {
   SmallVector<waveamdmachine::UniformLoopOp, 2> loops;
   func.walk([&](waveamdmachine::UniformLoopOp loop) {
-    if (isFlatTopLevelLoop(loop))
+    if (isTopLevelLoop(loop))
       loops.push_back(loop);
   });
   return loops;
