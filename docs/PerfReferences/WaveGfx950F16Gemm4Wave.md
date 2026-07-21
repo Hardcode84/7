@@ -122,6 +122,39 @@ inputs and fails the numerical contract. One-level f16 Strassen reduced MFMA
 work by 12.5%, but rounded operand sums exceeded the existing per-element
 tolerance. Neither is a valid kernel result.
 
+#### ROCm library source audit
+
+`rocm-libraries` commit `4e51baa84a5` has no hidden 1.3 PFLOP/s HPL kernel.
+A rough screen of all 1,004 supported hipBLASLt solutions found solution 2531
+best at `892.980 us`, or `1.23128 PFLOP/s`. Custom solution 2530 measured
+`911.945 us` through the same runner, matching Wave's HPL range.
+
+The leading kernels retain the same 256x256x64 direct-to-LDS core. Shared
+traits are transposed, padded LDS input layouts and `NTD4` output stores.
+Solution 2531 adds StreamK 5, but disables prefetch-across-persistent and uses
+no space-filling CTA map. StreamK alone cannot close the HPL target gap.
+
+The portable gain was output-store cache policy. Marking the 32 final stores
+`cs` lowers to `sc0 nt` on gfx950. Matched HPL medians improved from
+`913.2385` to `909.8135 us` (+0.376%). Two balanced random-input comparisons
+improved by 0.238% and 0.273%. Strict HPL and random checks passed.
+
+Morton CTA mapping was rejected. Eight-XCD Morton measured
+`927.205-928.193 us`; grouped traversal measured `905.299-906.821 us`. No
+Morton code remains.
+
+Remaining source-derived experiments, in expected-value order:
+
+1. Transpose the LDS input mapping, changing direct-to-LDS and local-read
+   addresses together. Padding alone already failed.
+2. Add persistent CTA or StreamK partitioning. hipBLASLt bounds its HPL value
+   to about 2%, so it is supporting machinery rather than the full fix.
+3. Evaluate prefetch-across-persistent and store-in-unroll only with a
+   persistent kernel. The best production solution disables the former.
+
+Single LDS buffering, wave-separated global reads, and space-filling CTA maps
+lack performance evidence from the production solution set.
+
 ### Full sweep
 
 Fresh `--kernels all` validation rebuilt the complete calibration path and ran
@@ -139,6 +172,16 @@ Unchanged controls stayed within run variance: eight-wave f16 changed by at
 most `-0.84%` and MXFP4 by `-1.37%`. Current MXFP4 throughput spans
 `1952.04-3946.08 TFLOP/s` for eight waves and `1800.07-4192.83 TFLOP/s` for
 four waves.
+
+After the output-store change, a conda-only `--kernels all` run rebuilt and
+measured all 30 configurations. Four-wave f16 reached `1439.51 TFLOP/s` at
+K=8192 and `1400.18 TFLOP/s` at K=16384. All other generated ASM was
+byte-identical.
+
+An immediate `none/cs/none` sweep isolated run-order drift. At six of seven K
+values, `cs` improved or landed between the two `none` controls. K=2048 was
+then tested in 12 alternating pairs: median `none` was `55.896 us`; median
+`cs` was `55.882 us`. No sweep regression remains.
 
 The older eight-wave MXFP4 baseline is excluded. Its K=3072 HSACO fails strict
 random checking at `(m=4,n=0)`: expected `1803`, got `1667`. That binary
