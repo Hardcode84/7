@@ -1219,6 +1219,14 @@ static std::vector<uint8_t> make16BitInputBytes(size_t elements, int k,
     return bytes;
   }
 
+  if (hpl) {
+    for (size_t i = 0; i < elements; ++i) {
+      uint16_t bits = inputBits(type, hipblasLtHpl(i));
+      std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+    }
+    return bytes;
+  }
+
   uint32_t state = randState(seed, stream);
   for (size_t i = 0; i < elements; ++i) {
     float value = randomInputValue(state);
