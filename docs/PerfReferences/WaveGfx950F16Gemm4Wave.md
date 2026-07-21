@@ -27,6 +27,36 @@ measured `757.306 us`, or `1.451872 PFLOP/s`, with the same binary and protocol.
 Strict `1024x512x256` checks passed bit-exactly for `rand_int` seed 0 and
 default random seed 17.
 
+### HPL inputs
+
+The exact hipBLASLt HPL stream remains power-limited below 1.3 PFLOP/s. On
+device 2, the checked-in traversal measured `913.694 us` (`1.20337 PFLOP/s`).
+Keeping MFMA source 0 fixed across each column and reversing alternate columns
+measured `907.979 us` (`1.21094 PFLOP/s`). Both used 2,000 warmups and 500
+timed launches. No clock controls were used.
+
+All eight idle MI350X devices measured `890.003-937.049 us`; the best result
+was `1.23540 PFLOP/s`. The 1.3 PFLOP/s threshold is `845.778 us`.
+
+PMC captures found identical MFMA and LDS work for HPL and `rand_int`.
+Steady dispatches reported 163.4M versus 168.7M `SQ_WAIT_INST_ANY` wave-cycles,
+respectively. HPL does not expose scheduler stall headroom hidden by the random
+case.
+
+Rejected exact controls:
+
+- CTA groups 1, 2, 4, 8, 16, and 32 measured `981.905`, `942.824`, `908.861`,
+  `907.063`, `929.558`, and `982.988 us`.
+- Common power-of-two operand exponent shifts stayed within run variance.
+- One `v_nop` per 16 MFMAs regressed to `916.315 us`.
+- Reversing independent MFMA runs in one specialized branch was flat at
+  `907.666 us`.
+
+Clearing five f16 mantissa bits reached `834.717 us`, but changes the GEMM
+inputs and fails the numerical contract. One-level f16 Strassen reduced MFMA
+work by 12.5%, but rounded operand sums exceeded the existing per-element
+tolerance. Neither is a valid kernel result.
+
 ### Full sweep
 
 Fresh `--kernels all` validation rebuilt the complete calibration path and ran
@@ -34,16 +64,16 @@ all 30 configurations. Four-wave f16 improved across the main K range:
 
 | K | Prior TFLOP/s | Current TFLOP/s | Delta |
 |---:|---:|---:|---:|
-| 2048 | 1097.21 | 1125.22 | +2.55% |
-| 3072 | 1183.77 | 1220.41 | +3.09% |
-| 4096 | 1240.85 | 1287.60 | +3.77% |
-| 8192 | 1377.77 | 1425.05 | +3.43% |
-| 16384 | 1334.10 | 1385.52 | +3.85% |
+| 2048 | 1144.60 | 1149.58 | +0.43% |
+| 3072 | 1222.32 | 1238.72 | +1.34% |
+| 4096 | 1295.99 | 1307.85 | +0.91% |
+| 8192 | 1438.10 | 1447.14 | +0.63% |
+| 16384 | 1397.24 | 1411.03 | +0.99% |
 
-Valid controls stayed within run variance: eight-wave f16 changed by at most
-`-1.07%`, four-wave MXFP4 by `-0.62%`, and v9 by `-0.19%`. Current MXFP4
-throughput spans `1960.61-3945.43 TFLOP/s` for eight waves and
-`1804.61-4188.34 TFLOP/s` for four waves.
+Unchanged controls stayed within run variance: eight-wave f16 changed by at
+most `-0.84%` and MXFP4 by `-1.37%`. Current MXFP4 throughput spans
+`1952.04-3946.08 TFLOP/s` for eight waves and `1800.07-4192.83 TFLOP/s` for
+four waves.
 
 The older eight-wave MXFP4 baseline is excluded. Its K=3072 HSACO fails strict
 random checking at `(m=4,n=0)`: expected `1803`, got `1667`. That binary
