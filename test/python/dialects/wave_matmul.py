@@ -20,6 +20,64 @@ def assert_raises(error_type, message, callback):
     raise AssertionError(f"expected {error_type.__name__}: {message}")
 
 
+def operation_blocks(operation):
+    for region in operation.regions:
+        for block in region.blocks:
+            yield block
+            for child in block.operations:
+                yield from operation_blocks(child)
+
+
+def normalized_mma_pairs(mmas):
+    a_ids = {}
+    b_ids = {}
+    pairs = []
+    for mma in mmas:
+        a, b = mma.operands[:2]
+        if a not in a_ids:
+            a_ids[a] = len(a_ids)
+        if b not in b_ids:
+            b_ids[b] = len(b_ids)
+        pairs.append((a_ids[a], b_ids[b]))
+    return pairs
+
+
+def serpentine_mma_pairs(a_count, b_count):
+    pairs = []
+    for j in range(b_count):
+        rows = range(a_count) if j % 2 == 0 else reversed(range(a_count))
+        pairs.extend((i, j) for i in rows)
+    return pairs
+
+
+def normalized_mma_groups(module, group_size):
+    groups = []
+    for block in operation_blocks(module.operation):
+        mmas = [op for op in block.operations if op.name == "waveamd.mma"]
+        if not mmas:
+            continue
+        assert len(mmas) % group_size == 0
+        for begin in range(0, len(mmas), group_size):
+            groups.append(normalized_mma_pairs(mmas[begin : begin + group_size]))
+    return groups
+
+
+def assert_serpentine_subpanel(module, a_count, b_count):
+    serpentine = serpentine_mma_pairs(a_count, b_count)
+    row_major = [(i, j) for i in range(a_count) for j in range(b_count)]
+    groups = normalized_mma_groups(module, a_count * b_count)
+
+    range_boundary = b_count
+    assert groups == [
+        row_major,
+        serpentine,
+        row_major,
+        serpentine,
+        row_major[:range_boundary] + serpentine[range_boundary:],
+        serpentine,
+    ]
+
+
 subpanel_schedule = wm.PhasedDmaSchedule(
     issue_group_size=1,
     initial_delay_cycles=0,
@@ -90,6 +148,23 @@ module_regular_subpanel = build_wmma_f16_matmul_module(
 )
 assert "waveamd.dma_load_lds" in str(module_regular_subpanel)
 print("regular-subpanel ok")
+
+module_rectangular_subpanel = build_wmma_f16_matmul_module(
+    M=32,
+    N=48,
+    K=128,
+    BM=1,
+    BN=1,
+    wave_m_tiles=2,
+    wave_n_tiles=3,
+    wave_k_tiles=2,
+    use_dma_lds=True,
+    matrix_intrinsic="mfma_gfx950",
+    phased_dma_schedule=subpanel_schedule,
+    include_host=False,
+)
+assert_serpentine_subpanel(module_rectangular_subpanel, 2, 3)
+print("rectangular-subpanel-serpentine ok")
 
 assert_raises(
     ValueError,
@@ -319,6 +394,7 @@ print(static_bld.module)
 
 # CHECK: subpanel-validation ok
 # CHECK: regular-subpanel ok
+# CHECK: rectangular-subpanel-serpentine ok
 # CHECK: coalesced-mfma-output ok
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0

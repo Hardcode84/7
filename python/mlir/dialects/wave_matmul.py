@@ -5605,6 +5605,13 @@ def _emit_dma_subpanel_mmas(
     )
 
 
+def _serpentine_mma_coords(a_count: int, ordinal: int) -> tuple[int, int]:
+    j, i = divmod(ordinal, a_count)
+    if j % 2:
+        i = a_count - i - 1
+    return i, j
+
+
 def _emit_dma_subpanel_mma_range(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -5619,7 +5626,7 @@ def _emit_dma_subpanel_mma_range(
         raise ValueError("MFMA range must fit the subpanel")
     new_accs = list(accs)
     for ordinal in range(begin, end):
-        i, j = divmod(ordinal, len(b_frags))
+        i, j = _serpentine_mma_coords(len(a_frags), ordinal)
         index = _mma_acc_index(cfg, i, j)
         new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
     return tuple(new_accs)
@@ -5715,28 +5722,24 @@ def _emit_dma_subpanel_phase1_with_reads(
     total_mmas = len(a_frags) * len(b_frags)
     read_span = total_mmas - mma_begin
     emitted = 0
-    ordinal = 0
-    for i, af in enumerate(a_frags):
-        for j, bf in enumerate(b_frags):
-            ordinal += 1
-            if ordinal <= mma_begin:
-                continue
-            index = _mma_acc_index(cfg, i, j)
-            new_accs[index] = _emit_mma(bld, cfg, af, bf, new_accs[index])
-            suffix_ordinal = ordinal - mma_begin
-            target = (suffix_ordinal * len(reads) + read_span - 1) // read_span
-            while emitted < target:
-                is_a, ptr = reads[emitted]
-                fragment, token = _read_dma_subpanel_fragment(
-                    bld, ptr, access, types.a if is_a else types.b, staging
-                )
-                if is_a:
-                    ready_a.append(fragment)
-                    ready_a_tokens.append(token)
-                else:
-                    ready_b.append(fragment)
-                    ready_b_tokens.append(token)
-                emitted += 1
+    for ordinal in range(mma_begin, total_mmas):
+        i, j = _serpentine_mma_coords(len(a_frags), ordinal)
+        index = _mma_acc_index(cfg, i, j)
+        new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
+        suffix_ordinal = ordinal - mma_begin + 1
+        target = (suffix_ordinal * len(reads) + read_span - 1) // read_span
+        while emitted < target:
+            is_a, ptr = reads[emitted]
+            fragment, token = _read_dma_subpanel_fragment(
+                bld, ptr, access, types.a if is_a else types.b, staging
+            )
+            if is_a:
+                ready_a.append(fragment)
+                ready_a_tokens.append(token)
+            else:
+                ready_b.append(fragment)
+                ready_b_tokens.append(token)
+            emitted += 1
     if emitted != len(reads):
         raise ValueError("DMA subpanel read cadence did not emit all fragments")
     return (
@@ -5840,7 +5843,7 @@ def _emit_dma_subpanel_mma_range_with_reads(
         raise ValueError("read MMA span must fit the emitted MMA range")
     emitted = 0
     for local_ordinal, mma_ordinal in enumerate(range(begin, end), start=1):
-        i, j = divmod(mma_ordinal, len(b_frags))
+        i, j = _serpentine_mma_coords(len(a_frags), mma_ordinal)
         index = _mma_acc_index(cfg, i, j)
         new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
         read_ordinal = min(local_ordinal, read_mma_span)
