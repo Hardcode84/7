@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -1398,6 +1399,207 @@ static bool combineMaxTrees(func::FuncOp func) {
   return changed;
 }
 
+struct PackedMulSubCandidate {
+  VPkMulF32Op mul;
+  TupleToElementsOp split;
+  VSubF32Op loSub;
+  VSubF32Op hiSub;
+  Value loAcc;
+  Value hiAcc;
+};
+
+static bool getBoolAttr(Operation *op, StringRef name, bool defaultValue) {
+  if (BoolAttr attr = op->getAttrOfType<BoolAttr>(name))
+    return attr.getValue();
+  return defaultValue;
+}
+
+static unsigned getUnsignedAttr(Operation *op, StringRef name,
+                                unsigned defaultValue) {
+  if (IntegerAttr attr = op->getAttrOfType<IntegerAttr>(name))
+    return static_cast<unsigned>(attr.getInt());
+  return defaultValue;
+}
+
+static std::optional<PackedMulSubCandidate> matchPackedMulSub(VPkMulF32Op mul) {
+  if (!getBoolAttr(mul, "contract", false) ||
+      getBoolAttr(mul, "clamp", false) || !mul.getResult().hasOneUse())
+    return std::nullopt;
+
+  auto split = dyn_cast<TupleToElementsOp>(*mul.getResult().getUsers().begin());
+  if (!split || split.getElements().size() != 2 ||
+      split->getBlock() != mul->getBlock())
+    return std::nullopt;
+
+  std::array<VSubF32Op, 2> subs;
+  for (unsigned lane = 0; lane != 2; ++lane) {
+    Value element = split.getElements()[lane];
+    if (!element.hasOneUse())
+      return std::nullopt;
+    VSubF32Op sub = dyn_cast<VSubF32Op>(*element.getUsers().begin());
+    if (!sub || sub.getLhs() != element || sub->getBlock() != mul->getBlock())
+      return std::nullopt;
+    subs[lane] = sub;
+  }
+
+  return PackedMulSubCandidate{
+      mul, split, subs[0], subs[1], subs[0].getRhs(), subs[1].getRhs()};
+}
+
+static Operation *
+getPackedMulSubInsertPoint(const PackedMulSubCandidate &candidate) {
+  Operation *lo = candidate.loSub;
+  Operation *hi = candidate.hiSub;
+  return lo->isBeforeInBlock(hi) ? lo : hi;
+}
+
+struct PackedAccTuple {
+  Value value;
+  bool reversed = false;
+};
+
+static std::optional<PackedAccTuple> getOrCreatePackedAccTuple(
+    Value lo, Value hi, Operation *insertBefore, DominanceInfo &dominance,
+    DenseMap<Value, Value> &partners,
+    DenseMap<std::pair<Value, Value>, Value> &tuples, OpBuilder &builder) {
+  if (lo == hi || !dominance.dominates(lo, insertBefore) ||
+      !dominance.dominates(hi, insertBefore))
+    return std::nullopt;
+
+  if (Value tuple = tuples.lookup({lo, hi}))
+    return PackedAccTuple{tuple, false};
+  if (Value tuple = tuples.lookup({hi, lo}))
+    return PackedAccTuple{tuple, true};
+
+  Value loPartner = partners.lookup(lo);
+  Value hiPartner = partners.lookup(hi);
+  if ((loPartner && loPartner != hi) || (hiPartner && hiPartner != lo))
+    return std::nullopt;
+
+  builder.setInsertionPoint(insertBefore);
+  Type type = RegType::get(builder.getContext(), RegClass::VGPR, 2, -1);
+  Value tuple = TupleFromElementsOp::create(builder, insertBefore->getLoc(),
+                                            type, ValueRange{lo, hi})
+                    .getTuple();
+  partners[lo] = hi;
+  partners[hi] = lo;
+  tuples[{lo, hi}] = tuple;
+  return PackedAccTuple{tuple, false};
+}
+
+static void combinePackedMulSub(PackedMulSubCandidate candidate, Value acc,
+                                unsigned lowAccLane, unsigned highAccLane,
+                                OpBuilder &builder) {
+  Operation *insertBefore = getPackedMulSubInsertPoint(candidate);
+  builder.setInsertionPoint(insertBefore);
+
+  unsigned opSel = getUnsignedAttr(candidate.mul, "op_sel", 0) & 3;
+  unsigned opSelHi = getUnsignedAttr(candidate.mul, "op_sel_hi", 3) & 3;
+  opSel |= lowAccLane << 2;
+  opSelHi |= highAccLane << 2;
+
+  Value fused =
+      VPkFmaF32Op::create(builder, candidate.mul.getLoc(),
+                          candidate.mul.getResult().getType(),
+                          candidate.mul.getLhs(), candidate.mul.getRhs(), acc,
+                          /*clamp=*/false, opSel, opSelHi,
+                          /*negLo=*/4, /*negHi=*/4)
+          .getResult();
+  SmallVector<Type, 2> resultTypes(candidate.split.getResultTypes());
+  auto fusedSplit = TupleToElementsOp::create(builder, candidate.split.getLoc(),
+                                              resultTypes, fused);
+  candidate.loSub.getResult().replaceAllUsesWith(fusedSplit.getElements()[0]);
+  candidate.hiSub.getResult().replaceAllUsesWith(fusedSplit.getElements()[1]);
+
+  candidate.loSub.erase();
+  candidate.hiSub.erase();
+  candidate.split.erase();
+  candidate.mul.erase();
+}
+
+static bool combinePackedMulSubs(func::FuncOp func) {
+  DenseMap<Block *, SmallVector<PackedMulSubCandidate, 16>> blockCandidates;
+  func.walk([&](VPkMulF32Op mul) {
+    if (std::optional<PackedMulSubCandidate> candidate = matchPackedMulSub(mul))
+      blockCandidates[mul->getBlock()].push_back(*candidate);
+  });
+
+  DominanceInfo dominance(func);
+  OpBuilder builder(func.getContext());
+  bool changed = false;
+  for (auto &[block, candidates] : blockCandidates) {
+    (void)block;
+    DenseMap<Value, Value> partners;
+    DenseMap<std::pair<Value, Value>, Value> tuples;
+    SmallVector<char, 16> combined(candidates.size(), false);
+
+    // First handle the natural pair case where each result lane subtracts a
+    // different scalar. Reuse the same alias tuple when that scalar pair is
+    // shared by several packed multiplies.
+    for (auto [index, candidate] : llvm::enumerate(candidates)) {
+      if (candidate.loAcc == candidate.hiAcc)
+        continue;
+      Operation *insertBefore = getPackedMulSubInsertPoint(candidate);
+      std::optional<PackedAccTuple> acc = getOrCreatePackedAccTuple(
+          candidate.loAcc, candidate.hiAcc, insertBefore, dominance, partners,
+          tuples, builder);
+      if (!acc)
+        continue;
+      combinePackedMulSub(candidate, acc->value, acc->reversed ? 1 : 0,
+                          acc->reversed ? 0 : 1, builder);
+      combined[index] = true;
+      changed = true;
+    }
+
+    // A common vectorized form broadcasts one scalar across both lanes. Pair
+    // distinct broadcast scalars into one physical VGPR pair, then select the
+    // appropriate lane for both halves of each fused instruction. This avoids
+    // an invalid tuple alias containing the same scalar twice.
+    DenseMap<Value, SmallVector<unsigned, 8>> broadcastCandidates;
+    SmallVector<Value, 8> broadcastOrder;
+    for (auto [index, candidate] : llvm::enumerate(candidates)) {
+      if (combined[index] || candidate.loAcc != candidate.hiAcc)
+        continue;
+      if (!broadcastCandidates.count(candidate.loAcc))
+        broadcastOrder.push_back(candidate.loAcc);
+      broadcastCandidates[candidate.loAcc].push_back(index);
+    }
+
+    for (unsigned bucket = 0; bucket + 1 < broadcastOrder.size(); bucket += 2) {
+      Value low = broadcastOrder[bucket];
+      Value high = broadcastOrder[bucket + 1];
+      ArrayRef<unsigned> lowIndices = broadcastCandidates[low];
+      ArrayRef<unsigned> highIndices = broadcastCandidates[high];
+      Operation *insertBefore =
+          getPackedMulSubInsertPoint(candidates[lowIndices.front()]);
+      Operation *highInsert =
+          getPackedMulSubInsertPoint(candidates[highIndices.front()]);
+      if (highInsert->isBeforeInBlock(insertBefore))
+        insertBefore = highInsert;
+
+      std::optional<PackedAccTuple> acc = getOrCreatePackedAccTuple(
+          low, high, insertBefore, dominance, partners, tuples, builder);
+      if (!acc)
+        continue;
+      unsigned lowLane = acc->reversed ? 1 : 0;
+      unsigned highLane = acc->reversed ? 0 : 1;
+      for (unsigned index : lowIndices) {
+        combinePackedMulSub(candidates[index], acc->value, lowLane, lowLane,
+                            builder);
+        combined[index] = true;
+        changed = true;
+      }
+      for (unsigned index : highIndices) {
+        combinePackedMulSub(candidates[index], acc->value, highLane, highLane,
+                            builder);
+        combined[index] = true;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 static Value findM0Result(Operation *op) {
   for (Value result : op->getResults())
     if (isa<M0Type>(result.getType()))
@@ -1603,6 +1805,7 @@ struct WaveAMDMachineCleanupPass
         changed |= hoistFunction(func);
         changed |= scaleLoopCarries(func);
         changed |= combineMaxTrees(func);
+        changed |= combinePackedMulSubs(func);
         changed |= chainDmaM0Increments(func);
         changed |= foldVccCndmask(func);
         FailureOr<bool> uniformShiftChanged =

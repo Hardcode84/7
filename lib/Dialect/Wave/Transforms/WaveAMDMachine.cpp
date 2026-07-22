@@ -3887,10 +3887,13 @@ static LogicalResult selectPackedF32Binary(WaveAMDMachineSelector &S, WaveOp op,
       getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2);
   SmallVector<Value> resultPairs;
   resultPairs.reserve(pairCount);
+  bool contract = isa<FMulOp>(op.getOperation()) &&
+                  arith::bitEnumContainsAll(op.getFastmath(),
+                                            arith::FastMathFlags::contract);
   for (unsigned index : llvm::seq<unsigned>(0, pairCount)) {
     Value selected =
         MachineOp::create(S.builder, op.getLoc(), vgpr2Type, (*lhsPairs)[index],
-                          (*rhsPairs)[index], false, 0, 3)
+                          (*rhsPairs)[index], false, 0, 3, contract)
             .getResult();
     resultPairs.push_back(selected);
   }
@@ -3975,7 +3978,7 @@ static LogicalResult selectPackedF32Ternary(WaveAMDMachineSelector &S,
   for (unsigned index : llvm::seq<unsigned>(0, pairCount)) {
     Value selected =
         MachineOp::create(S.builder, op.getLoc(), vgpr2Type, (*aPairs)[index],
-                          (*bPairs)[index], (*cPairs)[index], false, 0, 7)
+                          (*bPairs)[index], (*cPairs)[index], false, 0, 7, 0, 0)
             .getResult();
     resultPairs.push_back(selected);
   }
