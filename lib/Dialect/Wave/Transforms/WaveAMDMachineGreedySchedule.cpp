@@ -150,21 +150,23 @@ struct ArchResolution {
   const waveamdmachine::ArchData *arch = nullptr;
 };
 
+using MemoryKind = waveamdmachine::MemoryCounterKind;
+using MemoryKindSet = SmallVector<MemoryKind, 4>;
+using MemoryResourceMask = waveamdmachine::MemoryIssueResourceMask;
+
 struct GraphTables {
   DenseMap<Operation *, unsigned> node;
   SmallVector<ScheduleEdge, 32> edges;
   SmallVector<SmallVector<unsigned, 4>, 16> predecessors;
   SmallVector<SmallVector<unsigned, 4>, 16> successors;
+  SmallVector<MemoryKind, 16> memoryKinds;
+  SmallVector<MemoryKindSet, 16> fillerMemoryKinds;
   SmallVector<unsigned, 16> memoryNodes;
   SmallVector<unsigned, 8> memoryRecurrenceSources;
   SmallVector<unsigned, 8> computeRecurrenceSources;
   BitVector computeRecurrenceCritical;
   SmallVector<unsigned, 16> pendingPreds;
 };
-
-using MemoryKind = waveamdmachine::MemoryCounterKind;
-using MemoryKindSet = SmallVector<MemoryKind, 4>;
-using MemoryResourceMask = waveamdmachine::MemoryIssueResourceMask;
 
 struct SteadyStallTarget {
   unsigned index = 0;
@@ -1139,9 +1141,12 @@ static void addLoopCarryEdges(const GreedyRegion &region, GraphTables &graph,
 }
 
 static void indexGraphNodes(const GreedyRegion &region, GraphTables &graph) {
+  graph.memoryKinds.reserve(region.ops.size());
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     graph.node[op] = index;
-    if (waveamdmachine::getMemoryCounterKind(op) != MemoryKind::None)
+    MemoryKind kind = waveamdmachine::getMemoryCounterKind(op);
+    graph.memoryKinds.push_back(kind);
+    if (kind != MemoryKind::None)
       graph.memoryNodes.push_back(index);
   }
 }
@@ -1495,19 +1500,28 @@ static MemoryKindSet collectFillerMemoryKinds(Operation *op,
   return kinds;
 }
 
+static void buildFillerMemoryKinds(const GreedyRegion &region,
+                                   const ValueOriginMap &origins,
+                                   GraphTables &graph) {
+  graph.fillerMemoryKinds.reserve(region.ops.size());
+  for (Operation *op : region.ops)
+    graph.fillerMemoryKinds.push_back(collectFillerMemoryKinds(op, origins));
+}
+
 static bool containsMemoryKind(ArrayRef<MemoryKind> kinds, MemoryKind kind) {
   return kind != MemoryKind::None && llvm::is_contained(kinds, kind);
 }
 
-static bool crossesSameMemoryProducer(const GreedyRegion &region,
+static bool crossesSameMemoryProducer(const GraphTables &graph,
                                       const BitVector &scheduled, unsigned next,
                                       unsigned filler,
                                       ArrayRef<MemoryKind> fillerKinds) {
-  for (unsigned index : llvm::seq(next, filler)) {
+  auto memory = llvm::lower_bound(graph.memoryNodes, next);
+  for (; memory != graph.memoryNodes.end() && *memory < filler; ++memory) {
+    unsigned index = *memory;
     if (scheduled.test(index))
       continue;
-    if (containsMemoryKind(fillerKinds, waveamdmachine::getMemoryCounterKind(
-                                            region.ops[index])))
+    if (containsMemoryKind(fillerKinds, graph.memoryKinds[index]))
       return true;
   }
   return false;
@@ -1526,13 +1540,13 @@ static bool crossesSplitBarrier(const GreedyRegion &region,
   return false;
 }
 
-static bool canUseStallFiller(const GreedyRegion &region,
+static bool canUseStallFiller(const GraphTables &graph,
                               const BitVector &scheduled, unsigned next,
-                              unsigned filler, const ValueOriginMap &origins) {
-  MemoryKindSet fillerKinds =
-      collectFillerMemoryKinds(region.ops[filler], origins);
-  return !crossesSameMemoryProducer(region, scheduled, next, filler,
-                                    fillerKinds);
+                              unsigned filler) {
+  assert(filler < graph.fillerMemoryKinds.size() &&
+         "missing filler memory kinds");
+  return !crossesSameMemoryProducer(graph, scheduled, next, filler,
+                                    graph.fillerMemoryKinds[filler]);
 }
 
 struct LocalProjection {
@@ -1698,8 +1712,7 @@ static unsigned findNextVmemValue(unsigned next, const GreedyRegion &region,
   for (unsigned node : graph.memoryNodes) {
     if (node <= next || scheduled.test(node))
       continue;
-    if (waveamdmachine::getMemoryCounterKind(region.ops[node]) ==
-        MemoryKind::Vmem)
+    if (graph.memoryKinds[node] == MemoryKind::Vmem)
       return node;
   }
   return region.ops.size();
@@ -1713,7 +1726,7 @@ findReadyPrefetchChainHead(unsigned candidate, unsigned next,
                            const ValueOriginMap &origins, BitVector &chain) {
   Operation *op = region.ops[candidate];
   if (!waveamdmachine::hasMemoryValueLatency(op) ||
-      !canUseStallFiller(region, scheduled, next, candidate, origins))
+      !canUseStallFiller(graph, scheduled, next, candidate))
     return std::optional<unsigned>{};
   if (!collectPrefetchChain(candidate, candidate, next, region, graph,
                             scheduled, chain))
@@ -1801,12 +1814,11 @@ static FailureOr<unsigned> findReadyVmemPrefetch(
 }
 
 static FailureOr<bool> canIssueTokenConsumerBeforeNext(
-    const GreedyRegion &region, const BitVector &scheduled, unsigned next,
-    unsigned consumer, const IssueState &state, const ValueOriginMap &origins) {
-  MemoryKindSet consumerKinds =
-      collectFillerMemoryKinds(region.ops[consumer], origins);
-  if (crossesSameMemoryProducer(region, scheduled, next, consumer,
-                                consumerKinds))
+    const GreedyRegion &region, const GraphTables &graph,
+    const BitVector &scheduled, unsigned next, unsigned consumer,
+    const IssueState &state, const ValueOriginMap &origins) {
+  if (crossesSameMemoryProducer(graph, scheduled, next, consumer,
+                                graph.fillerMemoryKinds[consumer]))
     return false;
 
   std::array<Operation *, 2> original = {region.ops[next],
@@ -1862,8 +1874,9 @@ static unsigned findReadyBarrierPairFiller(const BitVector &ready,
 
 static FailureOr<unsigned>
 findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
-                       const BitVector &scheduled, unsigned next,
-                       const IssueState &state, const ValueOriginMap &origins) {
+                       const GraphTables &graph, const BitVector &scheduled,
+                       unsigned next, const IssueState &state,
+                       const ValueOriginMap &origins) {
   for (unsigned index : llvm::seq(next + 1, ready.size())) {
     if (!ready.test(index))
       continue;
@@ -1876,7 +1889,7 @@ findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
         isa<waveamdmachine::SBarrierOp>(region.ops[index]))
       return region.ops.size();
     FailureOr<bool> canMove = canIssueTokenConsumerBeforeNext(
-        region, scheduled, next, index, state, origins);
+        region, graph, scheduled, next, index, state, origins);
     if (failed(canMove))
       return failure();
     if (*canMove)
@@ -1990,16 +2003,16 @@ static FailureOr<unsigned> findDmaDelayPostBarrierFiller(
 
 static FailureOr<unsigned>
 findGenericStallFiller(const BitVector &ready, unsigned next,
-                       const GreedyRegion &region, const IssueState &state,
-                       const BitVector &scheduled, FillableStall stall,
-                       const ValueOriginMap &origins) {
+                       const GreedyRegion &region, const GraphTables &graph,
+                       const IssueState &state, const BitVector &scheduled,
+                       FillableStall stall) {
   for (unsigned index : llvm::seq(ready.size())) {
     if (!ready.test(index) || index == next)
       continue;
     if (isa<waveamdmachine::SBarrierOp>(region.ops[next]) &&
         isa<waveamdmachine::SBarrierOp>(region.ops[index]))
       continue;
-    if (!canUseStallFiller(region, scheduled, next, index, origins))
+    if (!canUseStallFiller(graph, scheduled, next, index))
       continue;
     if ((stall.blockedMemoryResources &
          waveamdmachine::getMemoryIssueResources(region.ops[index])) != 0)
@@ -2013,19 +2026,17 @@ findGenericStallFiller(const BitVector &ready, unsigned next,
   return ready.size();
 }
 
-static FailureOr<unsigned>
-findStallFiller(const BitVector &ready, unsigned next,
-                const GreedyRegion &region, const IssueState &state,
-                const BitVector &scheduled,
-                const waveamdmachine::ArchData &arch,
-                const waveamdmachine::EventSimConfig &config,
-                FillableStall stall, const ValueOriginMap &origins) {
+static FailureOr<unsigned> findStallFiller(
+    const BitVector &ready, unsigned next, const GreedyRegion &region,
+    const GraphTables &graph, const IssueState &state,
+    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, FillableStall stall) {
   FailureOr<unsigned> postBarrier = findDmaDelayPostBarrierFiller(
       ready, next, region, state, scheduled, arch, config, stall);
   if (failed(postBarrier) || *postBarrier != region.ops.size())
     return postBarrier;
-  return findGenericStallFiller(ready, next, region, state, scheduled, stall,
-                                origins);
+  return findGenericStallFiller(ready, next, region, graph, state, scheduled,
+                                stall);
 }
 
 static unsigned findFirstReadyNoInst(const BitVector &ready,
@@ -2214,7 +2225,7 @@ static FailureOr<FillStallStatus> fillStallBeforeNext(
   FillableStall stall = getFillableStall(
       region.ops[next], nextPreview, hasSingleWaveIssueStream(region.first));
   FailureOr<unsigned> filler = findStallFiller(
-      ready, next, region, state, scheduled, arch, config, stall, origins);
+      ready, next, region, graph, state, scheduled, arch, config, stall);
   if (failed(filler))
     return failure();
   if (*filler == region.ops.size()) {
@@ -2283,8 +2294,7 @@ static FailureOr<GreedyStepStatus> scheduleOriginalNext(
 }
 
 static bool isPureComputeIslandOp(Operation *op, const StaticIssueInfo &info) {
-  if (!isPure(op) || isBarrierOp(op) ||
-      waveamdmachine::getMemoryCounterKind(op) != MemoryKind::None)
+  if (!isPure(op) || isBarrierOp(op) || info.memoryIssuer)
     return false;
   return !info.realInst || tracksComputeResource(info.fu);
 }
@@ -2467,8 +2477,8 @@ static bool canPrioritizeLatency(const GreedyRegion &region, bool enabled) {
 
 static bool
 canUseLatencyCandidate(unsigned index, unsigned next, int64_t requiredLatency,
-                       const GreedyRegion &region, const BitVector &scheduled,
-                       const ValueOriginMap &origins,
+                       const GreedyRegion &region, const GraphTables &graph,
+                       const IssueState &state, const BitVector &scheduled,
                        const waveamdmachine::ArchData &arch,
                        const waveamdmachine::EventSimConfig &config) {
   Operation *candidate = region.ops[index];
@@ -2476,25 +2486,25 @@ canUseLatencyCandidate(unsigned index, unsigned next, int64_t requiredLatency,
     return false;
   if (isBarrierOp(candidate))
     return false;
-  if (!canUseStallFiller(region, scheduled, next, index, origins))
+  if (!canUseStallFiller(graph, scheduled, next, index))
     return false;
   int candidateLatency =
-      getModelLatency(arch, waveamdmachine::classifyOp(candidate), config);
+      getModelLatency(arch, state.getStaticInfo(candidate).cls, config);
   return candidateLatency >= requiredLatency;
 }
 
 static FailureOr<unsigned>
 findReadyLatencyCandidate(const BitVector &ready, unsigned next,
                           int64_t requiredLatency, const GreedyRegion &region,
-                          const IssueState &state, const BitVector &scheduled,
-                          const ValueOriginMap &origins,
+                          const GraphTables &graph, const IssueState &state,
+                          const BitVector &scheduled,
                           const waveamdmachine::ArchData &arch,
                           const waveamdmachine::EventSimConfig &config) {
   for (int readyIndex = ready.find_first(); readyIndex >= 0;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
-    if (!canUseLatencyCandidate(index, next, requiredLatency, region, scheduled,
-                                origins, arch, config))
+    if (!canUseLatencyCandidate(index, next, requiredLatency, region, graph,
+                                state, scheduled, arch, config))
       continue;
     FailureOr<IssuePreview> preview = previewIssue(state, region.ops[index]);
     if (failed(preview))
@@ -2508,14 +2518,14 @@ findReadyLatencyCandidate(const BitVector &ready, unsigned next,
 
 static FailureOr<std::optional<unsigned>> findReadyLatencyAlternative(
     const BitVector &ready, unsigned next, const GreedyRegion &region,
-    const IssueState &state, const BitVector &scheduled,
-    const ValueOriginMap &origins, const waveamdmachine::ArchData &arch,
+    const GraphTables &graph, const IssueState &state,
+    const BitVector &scheduled, const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, bool enabled,
     GreedyStats &stats, std::optional<unsigned> &resumeTarget) {
   if (!canPrioritizeLatency(region, enabled))
     return std::optional<unsigned>{};
-  int nextLatency = getModelLatency(
-      arch, waveamdmachine::classifyOp(region.ops[next]), config);
+  int nextLatency =
+      getModelLatency(arch, state.getStaticInfo(region.ops[next]).cls, config);
   if (nextLatency <= 0)
     return std::optional<unsigned>{};
   FailureOr<IssuePreview> nextPreview = previewIssue(state, region.ops[next]);
@@ -2527,8 +2537,8 @@ static FailureOr<std::optional<unsigned>> findReadyLatencyAlternative(
   int64_t requiredLatency =
       2 * std::max<int64_t>(1, static_cast<int64_t>(nextLatency));
   FailureOr<unsigned> candidate =
-      findReadyLatencyCandidate(ready, next, requiredLatency, region, state,
-                                scheduled, origins, arch, config);
+      findReadyLatencyCandidate(ready, next, requiredLatency, region, graph,
+                                state, scheduled, arch, config);
   if (failed(candidate))
     return failure();
   if (*candidate == region.ops.size())
@@ -2837,7 +2847,7 @@ static bool crossesSplitBarrierInOrder(const GreedyRegion &region,
   });
 }
 
-static bool crossesSameMemoryProducerExcept(const GreedyRegion &region,
+static bool crossesSameMemoryProducerExcept(const GraphTables &graph,
                                             ArrayRef<unsigned> order,
                                             unsigned begin, unsigned end,
                                             ArrayRef<MemoryKind> producerKinds,
@@ -2846,8 +2856,7 @@ static bool crossesSameMemoryProducerExcept(const GreedyRegion &region,
     unsigned node = order[position];
     if (ignored.test(node))
       continue;
-    if (containsMemoryKind(producerKinds, waveamdmachine::getMemoryCounterKind(
-                                              region.ops[node])))
+    if (containsMemoryKind(producerKinds, graph.memoryKinds[node]))
       return true;
   }
   return false;
@@ -2955,15 +2964,14 @@ collectMovedInBaselineOrder(ArrayRef<unsigned> baselineOrder,
   return movedInBaselineOrder;
 }
 
-static void constrainRecurrenceCounterOrder(
-    ArrayRef<unsigned> movedInBaselineOrder, const GreedyRegion &region,
-    const ValueOriginMap &origins, MutableArrayRef<int> insertionAfter) {
+static void
+constrainRecurrenceCounterOrder(ArrayRef<unsigned> movedInBaselineOrder,
+                                const GraphTables &graph,
+                                MutableArrayRef<int> insertionAfter) {
   for (auto [position, producer] : llvm::enumerate(movedInBaselineOrder)) {
-    MemoryKindSet kinds =
-        collectFillerMemoryKinds(region.ops[producer], origins);
+    ArrayRef<MemoryKind> kinds = graph.fillerMemoryKinds[producer];
     for (unsigned prior : movedInBaselineOrder.take_front(position)) {
-      MemoryKind priorKind =
-          waveamdmachine::getMemoryCounterKind(region.ops[prior]);
+      MemoryKind priorKind = graph.memoryKinds[prior];
       if (containsMemoryKind(kinds, priorKind))
         insertionAfter[producer] =
             std::max(insertionAfter[producer], insertionAfter[prior]);
@@ -2973,9 +2981,8 @@ static void constrainRecurrenceCounterOrder(
 
 static void rejectRecurrenceCounterCrossings(
     ArrayRef<unsigned> baselineOrder, ArrayRef<unsigned> movedInBaselineOrder,
-    const GreedyRegion &region, const ValueOriginMap &origins,
-    ArrayRef<int> baselinePosition, ArrayRef<int> insertionAfter,
-    BitVector &moved) {
+    const GraphTables &graph, ArrayRef<int> baselinePosition,
+    ArrayRef<int> insertionAfter, BitVector &moved) {
   // Re-run after a rejected cohort member becomes a counter boundary.
   bool changed = true;
   while (changed) {
@@ -2985,10 +2992,9 @@ static void rejectRecurrenceCounterCrossings(
         continue;
       unsigned begin = static_cast<unsigned>(insertionAfter[producer] + 1);
       unsigned end = baselinePosition[producer];
-      MemoryKindSet kinds =
-          collectFillerMemoryKinds(region.ops[producer], origins);
+      ArrayRef<MemoryKind> kinds = graph.fillerMemoryKinds[producer];
       if (begin < end && !crossesSameMemoryProducerExcept(
-                             region, baselineOrder, begin, end, kinds, moved))
+                             graph, baselineOrder, begin, end, kinds, moved))
         continue;
       moved.reset(producer);
       changed = true;
@@ -3017,7 +3023,7 @@ static SmallVector<unsigned, 16> materializeModeledRecurrenceOrder(
 static ModeledRecurrenceOrder buildModeledRecurrenceOrder(
     ArrayRef<unsigned> baselineOrder, const GreedyRegion &region,
     const GraphTables &graph, const BitVector &scheduled,
-    const ValueOriginMap &origins, const RecurrenceSchedulePlan &plan) {
+    const RecurrenceSchedulePlan &plan) {
   ModeledRecurrenceOrder result;
   result.moved.resize(region.ops.size());
   SmallVector<int, 16> baselinePosition(region.ops.size(), -1);
@@ -3030,10 +3036,9 @@ static ModeledRecurrenceOrder buildModeledRecurrenceOrder(
   SmallVector<unsigned, 8> movedInBaselineOrder =
       collectMovedInBaselineOrder(baselineOrder, result.moved);
   // waitcnt observes issue order within each counter.
-  constrainRecurrenceCounterOrder(movedInBaselineOrder, region, origins,
-                                  insertionAfter);
-  rejectRecurrenceCounterCrossings(baselineOrder, movedInBaselineOrder, region,
-                                   origins, baselinePosition, insertionAfter,
+  constrainRecurrenceCounterOrder(movedInBaselineOrder, graph, insertionAfter);
+  rejectRecurrenceCounterCrossings(baselineOrder, movedInBaselineOrder, graph,
+                                   baselinePosition, insertionAfter,
                                    result.moved);
   result.order = materializeModeledRecurrenceOrder(
       baselineOrder, movedInBaselineOrder, insertionAfter, result.moved);
@@ -3137,7 +3142,7 @@ static FailureOr<std::optional<unsigned>> findModeledRecurrenceAction(
   schedule.evaluated = true;
 
   ModeledRecurrenceOrder modeled = buildModeledRecurrenceOrder(
-      baselineOrder, region, graph, scheduled, origins, plan);
+      baselineOrder, region, graph, scheduled, plan);
   if (!changesRecurrenceOrder(baselineOrder, modeled))
     return std::optional<unsigned>{};
 
@@ -3187,8 +3192,8 @@ static FailureOr<std::optional<unsigned>> findReadyMemoryAlternative(
     const BitVector &scheduled, const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     GreedyStats &stats, bool prioritizeLongLatencyVmem) {
-  FailureOr<unsigned> consumer =
-      findReadyTokenConsumer(ready, region, scheduled, next, state, origins);
+  FailureOr<unsigned> consumer = findReadyTokenConsumer(
+      ready, region, graph, scheduled, next, state, origins);
   if (failed(consumer))
     return failure();
   if (*consumer != region.ops.size())
@@ -3244,8 +3249,8 @@ static FailureOr<std::optional<unsigned>> findReadyAlternative(
       prioritizeComputeResources);
   if (failed(compute) || *compute)
     return compute;
-  return findReadyLatencyAlternative(ready, next, region, state, scheduled,
-                                     origins, arch, config, prioritizeLatency,
+  return findReadyLatencyAlternative(ready, next, region, graph, state,
+                                     scheduled, arch, config, prioritizeLatency,
                                      stats, resumeTarget);
 }
 
@@ -4769,10 +4774,13 @@ collectSpecializedRegions(waveamdmachine::UniformIfOp uniformIf) {
 
 static LogicalResult buildMultiWaveGraphs(waveamdmachine::UniformIfOp uniformIf,
                                           const MultiWaveRegions &regions,
+                                          const ValueOriginMap &origins,
                                           MultiWaveGraphs &graphs) {
-  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount))
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
     if (failed(buildGraph(regions[classId], graphs[classId])))
       return failure();
+    buildFillerMemoryKinds(regions[classId], origins, graphs[classId]);
+  }
   if (!haveSameRegionShape(regions, graphs))
     return uniformIf.emitOpError("multi-wave branch graphs differ");
   return success();
@@ -4943,6 +4951,7 @@ struct WaveAMDMachineSchedulePass
     GraphTables graph;
     if (failed(buildGraph(region, graph)))
       return failure();
+    buildFillerMemoryKinds(region, origins, graph);
     graphTiming.stop();
 
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
@@ -5027,7 +5036,7 @@ struct WaveAMDMachineSchedulePass
 
     TimingScope graphTiming = timing.nest("machine_schedule_build_joint_graph");
     MultiWaveGraphs graphs;
-    if (failed(buildMultiWaveGraphs(uniformIf, regions, graphs)))
+    if (failed(buildMultiWaveGraphs(uniformIf, regions, origins, graphs)))
       return failure();
     graphTiming.stop();
 
@@ -5405,6 +5414,7 @@ struct WaveAMDMachineScheduleReportPass
     GraphTables graph;
     if (failed(buildGraph(region, graph)))
       return failure();
+    buildFillerMemoryKinds(region, origins, graph);
     if (printDeps)
       printReportDeps(region, graph);
 
