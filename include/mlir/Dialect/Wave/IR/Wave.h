@@ -56,9 +56,15 @@ struct SymbolicOffsetBinding {
   SymbolicOffsetBindingKind kind = SymbolicOffsetBindingKind::Lane;
 };
 
+struct SymbolicOffsetMaterialization {
+  Value value;
+  sym::ExprHandle expr;
+};
+
 struct SymbolicOffset {
   SmallVector<SymbolicOffsetBinding, 4> bindings;
   SmallVector<sym::PredHandle, 2> assumptions;
+  SmallVector<SymbolicOffsetMaterialization, 2> materializations;
   sym::ExprHandle expr;
   unsigned laneWidth = 0;
 

@@ -6699,6 +6699,23 @@ simplifyPointerOffset(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return succeeded(simplified) ? *simplified : expr;
 }
 
+static LogicalResult appendScaledPointerAssumptions(WaveAMDMachineSelector &S,
+                                                    PointerOffset &offset,
+                                                    unsigned size) {
+  SmallVector<sym::PredHandle> scaledAssumptions;
+  for (sym::PredHandle assumption : offset.assumptions) {
+    FailureOr<sym::PredHandle> scaled =
+        sym::scalePred(S.symbolStore(), assumption, size);
+    if (failed(scaled))
+      return failure();
+    if (!llvm::is_contained(offset.assumptions, *scaled) &&
+        !llvm::is_contained(scaledAssumptions, *scaled))
+      scaledAssumptions.push_back(*scaled);
+  }
+  llvm::append_range(offset.assumptions, scaledAssumptions);
+  return success();
+}
+
 static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
                                                    const PointerOffset &offset,
                                                    unsigned size) {
@@ -6707,6 +6724,8 @@ static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
     return out;
   FailureOr<sym::ExprHandle> scale = sym::composeExprInt(S.symbolStore(), size);
   if (failed(scale))
+    return failure();
+  if (failed(appendScaledPointerAssumptions(S, out, size)))
     return failure();
   FailureOr<sym::ExprHandle> scaled = sym::composeExprBinary(
       S.symbolStore(), out.expr, sym::ExprBinaryOp::Mul, *scale);
@@ -8941,6 +8960,9 @@ static LogicalResult createStructuredScfIf(WaveAMDMachineSelector &S,
 }
 
 LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
+  if (op.getConditions().size() != 1)
+    return op.emitOpError(
+        "multi-condition where requires symbolic memory lowering");
   auto maskType = cast<MaskType>(op.getCondition().getType());
   unsigned maskWidth = maskType.getWidth();
   if (failed(validateWhereMaskWidth(op, maskWidth)))

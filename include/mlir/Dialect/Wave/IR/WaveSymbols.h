@@ -76,7 +76,7 @@ private:
   const ixs_node *node = nullptr;
 };
 
-enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod, Xor };
+enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod, Xor, Max, Min };
 enum class PredCmpOp { Lt, Le, Gt, Ge, Eq, Ne };
 
 enum class ExprKind {
@@ -279,6 +279,10 @@ mlir::FailureOr<PredHandle> composePredOr(Store &store, PredHandle lhs,
                                           std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> composePredNot(Store &store, PredHandle value,
                                            std::string *diagnostic = nullptr);
+/// Multiply every comparison operand by the same positive integer.
+mlir::FailureOr<PredHandle> scalePred(Store &store, PredHandle value,
+                                      int64_t scale,
+                                      std::string *diagnostic = nullptr);
 
 /// Simplify under no assumptions.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,

@@ -93,6 +93,8 @@ static bool planGapOps(WhereOp first, WhereOp second,
 
 static bool canMerge(WhereOp first, WhereOp second,
                      ArrayRef<Operation *> gapOps, GapPlan &plan) {
+  if (first.getConditions().size() != 1 || second.getConditions().size() != 1)
+    return false;
   if (first.getCondition() != second.getCondition())
     return false;
   if (!first.getElseRegion().empty() || !second.getElseRegion().empty())
@@ -152,7 +154,7 @@ static WhereOp mergeWhere(IRRewriter &rewriter, WhereOp first, WhereOp second,
   llvm::append_range(resultTypes, second.getResultTypes());
   rewriter.setInsertionPoint(first);
   WhereOp merged = WhereOp::create(rewriter, first.getLoc(), resultTypes,
-                                   first.getCondition());
+                                   first.getConditions());
   merged->setAttrs(first->getAttrDictionary());
   Block &body = merged.getThenRegion().emplaceBlock();
 

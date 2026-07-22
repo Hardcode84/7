@@ -55,6 +55,32 @@ func.func @unsupported_binary_stays_raw(%out: !wave.ptr<#wave.global, f32>,
 
 // -----
 
+// Runtime div/rem stay as SSA leaves so both operations use the ordinary
+// integer div/rem expansion instead of being duplicated as symbolic nodes.
+// CHECK-LABEL: func.func @dynamic_div_rem_stay_bound
+func.func @dynamic_div_rem_stay_bound(
+    %out: !wave.ptr<#wave.global, i8>, %x_raw: i32, %d_raw: i32)
+    -> !wave.ptr<#wave.global, i8> {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %d = wave.assume %d_raw as "d"
+      [#wave.pred<"d >= 1">, #wave.pred<"d <= 1023">] : i32
+  // CHECK: [[DIV:%.*]] = wave.binary divui
+  %quotient = wave.binary divui %x, %d : i32, i32 -> i32
+  // CHECK: [[REM:%.*]] = wave.binary remui
+  %remainder = wave.binary remui %x, %d : i32, i32 -> i32
+  %offset = wave.binary addi %quotient, %remainder overflow<nsw, nuw>
+      : i32, i32 -> i32
+  // CHECK: [[INDEX:%.*]] = wave.index_expr <"raw0 + raw1">
+  // CHECK-SAME: ["raw0", "raw1"]([[DIV]], [[REM]])
+  // CHECK: wave.ptr_add %{{.*}}, [[INDEX]]
+  %ptr = wave.ptr_add %out, %offset
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#wave.global, i8>
+  return %ptr : !wave.ptr<#wave.global, i8>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @ptr_add_signed_div_nonnegative
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
 func.func @ptr_add_signed_div_nonnegative(%out: !wave.ptr<#wave.global, f32>,

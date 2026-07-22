@@ -174,6 +174,8 @@ static FailureOr<Value> createSelectedSource(IRRewriter &rewriter,
 }
 
 static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
+  if (where.getConditions().size() != 1)
+    return false;
   SmallVector<Operation *> ops;
   SmallVector<waveamd::DmaLoadLdsOp> dmas;
   if (!collectMovableBody(where, ops, dmas))

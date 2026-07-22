@@ -27,6 +27,8 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -1089,6 +1091,14 @@ OpFoldResult SelectOp::fold(FoldAdaptor adaptor) {
 }
 
 LogicalResult WhereOp::verify() {
+  if (getConditions().empty())
+    return emitOpError("requires at least one lane-mask condition");
+  int64_t width = cast<MaskType>(getConditions().front().getType()).getWidth();
+  if (llvm::any_of(getConditions(), [&](Value condition) {
+        return cast<MaskType>(condition.getType()).getWidth() != width;
+      }))
+    return emitOpError("all conditions must have the same mask width");
+
   auto verifyYield = [&](Region &region, StringRef name) -> LogicalResult {
     auto yield = dyn_cast<YieldOp>(region.front().getTerminator());
     if (!yield)
@@ -3210,6 +3220,33 @@ static LogicalResult verifyMemoryMappingBindingNames(
   return success();
 }
 
+static LogicalResult verifyMemoryMappingPacketBindingNames(
+    Operation *op, ArrayAttr names, ValueRange bindings,
+    llvm::DenseSet<StringRef> &declaredBindings,
+    const llvm::DenseSet<StringRef> &requiredBindings) {
+  if (names.size() != bindings.size())
+    return op->emitOpError()
+           << "expected one packet binding name per operand (got "
+           << names.size() << " names and " << bindings.size() << " operands)";
+
+  llvm::DenseSet<StringRef> packetNames;
+  for (Attribute attr : names) {
+    StringRef name = cast<StringAttr>(attr).getValue();
+    if (name.empty())
+      return op->emitOpError("packet binding names must be non-empty");
+    if (isMemoryMappingReservedSymbol(name))
+      return op->emitOpError("packet binding name `")
+             << name << "` is reserved";
+    if (packetNames.insert(name).second &&
+        !declaredBindings.insert(name).second)
+      return op->emitOpError("duplicate mapping binding `") << name << "`";
+    if (!requiredBindings.contains(name))
+      return op->emitOpError("packet binding `")
+             << name << "` is not referenced by the mapping";
+  }
+  return success();
+}
+
 static LogicalResult verifyMemoryMappingBases(Operation *op, ValueRange bases) {
   if (bases.empty())
     return op->emitOpError("requires at least one pointer base");
@@ -3240,9 +3277,9 @@ static LogicalResult verifyMemoryMappingNames(Operation *op,
                                              "binding", declaredBindings,
                                              requiredBindings)))
     return failure();
-  if (failed(verifyMemoryMappingBindingNames(
-          op, packetBindingNames, packetBindings, "packet binding",
-          declaredBindings, requiredBindings)))
+  if (failed(verifyMemoryMappingPacketBindingNames(
+          op, packetBindingNames, packetBindings, declaredBindings,
+          requiredBindings)))
     return failure();
   for (StringRef name : requiredBindings)
     if (!declaredBindings.contains(name))
@@ -3267,25 +3304,74 @@ static LogicalResult verifyMemoryMappingBindings(Operation *op,
   return success();
 }
 
+static LogicalResult verifyPackedPacketBinding(
+    Operation *op, StringRef name, VectorType vector, VectorType packetVector,
+    llvm::StringMap<int64_t> &scalarCounts, llvm::StringSet<> &vectorBindings) {
+  if (scalarCounts.contains(name) || !vectorBindings.insert(name).second)
+    return op->emitOpError("packet binding `")
+           << name << "` mixes packed and component operands";
+  if (vector.isScalable() ||
+      vector.getNumElements() != packetVector.getNumElements())
+    return op->emitOpError(
+        "packet binding slot count must match the accessed packet");
+  if (!vector.getElementType().isInteger(32))
+    return op->emitOpError(
+        "packed packet binding elements must be signless i32");
+  return success();
+}
+
 static LogicalResult
-verifyMemoryMappingPacketBindings(Operation *op, ValueRange packetBindings,
-                                  SimdType packetType,
-                                  VectorType packetVector) {
-  for (Value binding : packetBindings) {
-    SimdType simd = cast<SimdType>(binding.getType());
-    VectorType vector = cast<VectorType>(simd.getElementType());
-    if (simd.getWidth() != packetType.getWidth())
-      return op->emitOpError(
-          "packet binding SIMD width must match packet SIMD width");
-    if (vector.isScalable() ||
-        vector.getNumElements() != packetVector.getNumElements())
-      return op->emitOpError(
-          "packet binding slot count must match the accessed packet");
-    Type element = vector.getElementType();
-    if (!element.isIndex() && !element.isInteger(32))
-      return op->emitOpError(
-          "packet binding elements must be index or signless i32");
+verifyComponentPacketBinding(Operation *op, StringRef name, Type element,
+                             llvm::StringMap<int64_t> &scalarCounts,
+                             const llvm::StringSet<> &vectorBindings) {
+  if (vectorBindings.contains(name))
+    return op->emitOpError("packet binding `")
+           << name << "` mixes packed and component operands";
+  if (!element.isIndex() && !element.isInteger(32))
+    return op->emitOpError(
+        "packet binding components must be index or signless i32");
+  ++scalarCounts[name];
+  return success();
+}
+
+static LogicalResult
+verifyMemoryMappingPacketBinding(Operation *op, Value binding, StringRef name,
+                                 SimdType packetType, VectorType packetVector,
+                                 llvm::StringMap<int64_t> &scalarCounts,
+                                 llvm::StringSet<> &vectorBindings) {
+  SimdType simd = dyn_cast<SimdType>(binding.getType());
+  if (!simd)
+    return op->emitOpError("packet binding operands must have wave SIMD type");
+  if (simd.getWidth() != packetType.getWidth())
+    return op->emitOpError(
+        "packet binding SIMD width must match packet SIMD width");
+
+  Type element = simd.getElementType();
+  if (VectorType vector = dyn_cast<VectorType>(element))
+    return verifyPackedPacketBinding(op, name, vector, packetVector,
+                                     scalarCounts, vectorBindings);
+  return verifyComponentPacketBinding(op, name, element, scalarCounts,
+                                      vectorBindings);
+}
+
+static LogicalResult verifyMemoryMappingPacketBindings(
+    Operation *op, ValueRange packetBindings, ArrayAttr packetBindingNames,
+    SimdType packetType, VectorType packetVector) {
+  llvm::StringMap<int64_t> scalarCounts;
+  llvm::StringSet<> vectorBindings;
+  for (auto [binding, nameAttr] :
+       llvm::zip(packetBindings, packetBindingNames)) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    if (failed(verifyMemoryMappingPacketBinding(op, binding, name, packetType,
+                                                packetVector, scalarCounts,
+                                                vectorBindings)))
+      return failure();
   }
+  for (auto &entry : scalarCounts)
+    if (entry.getValue() != packetVector.getNumElements())
+      return op->emitOpError("packet binding `")
+             << entry.getKey()
+             << "` component count must match the accessed packet";
   return success();
 }
 
@@ -3304,8 +3390,8 @@ verifyMemoryMappingOp(Operation *op, MemoryMappingAttr mapping,
     return failure();
   if (failed(verifyMemoryMappingBindings(op, bindings, packetType)))
     return failure();
-  return verifyMemoryMappingPacketBindings(op, packetBindings, packetType,
-                                           packetVector);
+  return verifyMemoryMappingPacketBindings(
+      op, packetBindings, packetBindingNames, packetType, packetVector);
 }
 
 LogicalResult GatherOp::verify() {

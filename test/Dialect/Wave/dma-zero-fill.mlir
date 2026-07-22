@@ -47,4 +47,32 @@ func.func @loop_carried_buffer_dma_zero_fill(
   return
 }
 
+// ZF-LABEL: func.func @keep_packet_predicate_dma
+// ZF: wave.where {{.*}}, {{.*}}
+// ZF: waveamd.dma_load_lds
+// ZF-NOT: wave.select
+func.func @keep_packet_predicate_dma(
+    %src: !wave.ptr<#wave.global, f16>,
+    %mask0: !wave.mask<64>, %mask1: !wave.mask<64>)
+    attributes {wave.kernel, waveamdmachine.lds_size = 512 : i64} {
+  %range = arith.constant 1024 : i32
+  %buffer = waveamd.make_buffer %src, %range
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
+  %lane = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %source = wave.ptr_add %buffer, %lane
+      : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>
+  %dest = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %dependency = wave.token : !wave.mem.token
+  %token = wave.where %mask0, %mask1 {
+    %loaded = waveamd.dma_load_lds %source -> %dest after %dependency
+        {bytes = 16 : i64, zero_fill_inactive}
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>,
+           !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    wave.yield %loaded : !wave.mem.token
+  } : !wave.mask<64>, !wave.mask<64> -> !wave.mem.token
+  %barrier = wave.barrier %token : (!wave.mem.token) -> !wave.mem.token
+  return
+}
+
 }

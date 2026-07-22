@@ -283,7 +283,7 @@ public:
       return failure();
 
     OperationState state(op.getLoc(), WhereOp::getOperationName());
-    state.addOperands(adaptor.getCondition());
+    state.addOperands(adaptor.getConditions());
     state.addTypes(resultTypes);
     state.addAttributes(op->getAttrs());
     state.addRegion();

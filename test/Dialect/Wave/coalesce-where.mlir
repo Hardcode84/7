@@ -65,6 +65,21 @@ func.func @keep_different_masks(
 
 // -----
 
+// CHECK-LABEL: func.func @keep_packet_masks
+// CHECK-COUNT-2: wave.where
+func.func @keep_packet_masks(
+    %mask0: !wave.mask<64>, %mask1: !wave.mask<64>) {
+  wave.where %mask0, %mask1 {
+    wave.yield
+  } : !wave.mask<64>, !wave.mask<64>
+  wave.where %mask0, %mask1 {
+    wave.yield
+  } : !wave.mask<64>, !wave.mask<64>
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @keep_effectful_gap
 // CHECK-COUNT-2: wave.where
 func.func @keep_effectful_gap(

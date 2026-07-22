@@ -217,6 +217,29 @@ static FailureOr<PredHandle> finishPred(ixs_session *session, ixs_node *node,
   return PredHandle(node);
 }
 
+static ixs_node *composeRawBinary(ixs_session *session, ixs_node *lhs,
+                                  ExprBinaryOp op, ixs_node *rhs) {
+  switch (op) {
+  case ExprBinaryOp::Add:
+    return ixs_add(session, lhs, rhs);
+  case ExprBinaryOp::Sub:
+    return ixs_sub(session, lhs, rhs);
+  case ExprBinaryOp::Mul:
+    return ixs_mul(session, lhs, rhs);
+  case ExprBinaryOp::Div:
+    return ixs_div(session, lhs, rhs);
+  case ExprBinaryOp::Mod:
+    return ixs_mod(session, lhs, rhs);
+  case ExprBinaryOp::Xor:
+    return ixs_xor(session, lhs, rhs);
+  case ExprBinaryOp::Max:
+    return ixs_max(session, lhs, rhs);
+  case ExprBinaryOp::Min:
+    return ixs_min(session, lhs, rhs);
+  }
+  llvm_unreachable("unknown symbolic binary operation");
+}
+
 } // namespace
 
 Store::Store() : ctx(ixs_ctx_create()) {
@@ -548,28 +571,7 @@ mlir::wave::sym::composeExprBinary(Store &store, ExprHandle lhsHandle,
   ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
-
-  ixs_node *node = nullptr;
-  switch (op) {
-  case ExprBinaryOp::Add:
-    node = ixs_add(session.raw(), lhs, rhs);
-    break;
-  case ExprBinaryOp::Sub:
-    node = ixs_sub(session.raw(), lhs, rhs);
-    break;
-  case ExprBinaryOp::Mul:
-    node = ixs_mul(session.raw(), lhs, rhs);
-    break;
-  case ExprBinaryOp::Div:
-    node = ixs_div(session.raw(), lhs, rhs);
-    break;
-  case ExprBinaryOp::Mod:
-    node = ixs_mod(session.raw(), lhs, rhs);
-    break;
-  case ExprBinaryOp::Xor:
-    node = ixs_xor(session.raw(), lhs, rhs);
-    break;
-  }
+  ixs_node *node = composeRawBinary(session.raw(), lhs, op, rhs);
   return finishExpr(session.raw(), node, diagnostic,
                     "failed to compose wave.expr");
 }
@@ -737,6 +739,94 @@ mlir::wave::sym::composePredNot(Store &store, PredHandle valueHandle,
     return failure();
   return finishPred(session.raw(), ixs_not(session.raw(), value), diagnostic,
                     "failed to compose wave.pred NOT");
+}
+
+namespace {
+
+static FailureOr<PredHandle> scaleComparison(Store &store, PredView view,
+                                             int64_t scale,
+                                             std::string *diagnostic) {
+  std::optional<PredCmpOp> comparison = view.getCmpOp();
+  FailureOr<ExprHandle> factor = composeExprInt(store, scale, diagnostic);
+  if (!comparison || failed(factor))
+    return failure();
+  FailureOr<ExprHandle> lhs = composeExprBinary(
+      store, view.getCmpLhs(), ExprBinaryOp::Mul, *factor, diagnostic);
+  FailureOr<ExprHandle> rhs = composeExprBinary(
+      store, view.getCmpRhs(), ExprBinaryOp::Mul, *factor, diagnostic);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  lhs = simplifyExpr(store, *lhs, diagnostic);
+  rhs = simplifyExpr(store, *rhs, diagnostic);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  return composePredCmp(store, *lhs, *comparison, *rhs, diagnostic);
+}
+
+static FailureOr<PredHandle> scaleLogic(Store &store, PredView view,
+                                        int64_t scale,
+                                        std::string *diagnostic) {
+  if (view.getLogicArgCount() == 0)
+    return failure();
+  FailureOr<PredHandle> result =
+      scalePred(store, view.getLogicArg(0), scale, diagnostic);
+  for (uint32_t index = 1; succeeded(result) && index < view.getLogicArgCount();
+       ++index) {
+    FailureOr<PredHandle> next =
+        scalePred(store, view.getLogicArg(index), scale, diagnostic);
+    if (failed(next))
+      return failure();
+    result = view.getKind() == PredKind::And
+                 ? composePredAnd(store, *result, *next, diagnostic)
+                 : composePredOr(store, *result, *next, diagnostic);
+  }
+  return result;
+}
+
+static FailureOr<PredHandle> scalePredicateNode(Store &store, PredView view,
+                                                int64_t scale,
+                                                std::string *diagnostic) {
+  switch (view.getKind()) {
+  case PredKind::Cmp:
+    return scaleComparison(store, view, scale, diagnostic);
+  case PredKind::And:
+  case PredKind::Or:
+    return scaleLogic(store, view, scale, diagnostic);
+  case PredKind::Not: {
+    FailureOr<PredHandle> argument =
+        scalePred(store, view.getUnaryArg(), scale, diagnostic);
+    if (failed(argument))
+      return failure();
+    return composePredNot(store, *argument, diagnostic);
+  }
+  case PredKind::True:
+  case PredKind::False:
+    return view.getHandle();
+  default:
+    setDiagnostic(diagnostic, "invalid wave.pred for scaling");
+    return failure();
+  }
+}
+
+} // namespace
+
+FailureOr<PredHandle> mlir::wave::sym::scalePred(Store &store, PredHandle value,
+                                                 int64_t scale,
+                                                 std::string *diagnostic) {
+  if (scale <= 0) {
+    setDiagnostic(diagnostic, "wave.pred scale must be positive");
+    return failure();
+  }
+  if (scale == 1)
+    return value;
+
+  PredView view(value);
+  FailureOr<PredHandle> result =
+      scalePredicateNode(store, view, scale, diagnostic);
+  if (failed(result))
+    return failure();
+  FailureOr<PredHandle> simplified = simplifyPred(store, *result, diagnostic);
+  return succeeded(simplified) ? *simplified : *result;
 }
 
 FailureOr<ExprHandle> mlir::wave::sym::simplifyExpr(Store &store,
@@ -1139,14 +1229,19 @@ mlir::wave::sym::rangeAssumption(Store &store, StringRef name, int64_t lo,
   return composePredAnd(store, *geLo, *leHi, diagnostic);
 }
 
+static bool provenRangeFits(Store &store, ExprHandle expr,
+                            ArrayRef<PredHandle> assumptions, int64_t lower,
+                            int64_t upper);
+
 bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions,
                                       int64_t lo, int64_t hi) {
   std::optional<InferredRange> range = inferRange(store, expr, assumptions);
-  if (!range || !range->lower || !range->upper)
-    return false;
-  return compareRationalToInteger(*range->lower, lo) >= 0 &&
-         compareRationalToInteger(*range->upper, hi) <= 0;
+  if (range && range->lower && range->upper &&
+      compareRationalToInteger(*range->lower, lo) >= 0 &&
+      compareRationalToInteger(*range->upper, hi) <= 0)
+    return true;
+  return provenRangeFits(store, expr, assumptions, lo, hi);
 }
 
 static std::optional<uint64_t> checkedAddU32Bound(uint64_t lhs, uint64_t rhs) {
@@ -1486,8 +1581,9 @@ static I64RangeBounds collectDeltaBounds(ArrayRef<PredCmpOp> ops,
   return bounds;
 }
 
-static bool provenRangeFitsU32(Store &store, ExprHandle expr,
-                               ArrayRef<PredHandle> assumptions) {
+static bool provenRangeFits(Store &store, ExprHandle expr,
+                            ArrayRef<PredHandle> assumptions, int64_t lower,
+                            int64_t upper) {
   SmallVector<TargetComparison, 8> comparisons;
   for (PredHandle pred : assumptions)
     collectTargetComparisons(store, pred, comparisons);
@@ -1503,9 +1599,8 @@ static bool provenRangeFitsU32(Store &store, ExprHandle expr,
   canonicalizeExprs(store, deltas, assumptions);
 
   I64RangeBounds bounds = collectDeltaBounds(ops, deltas);
-  constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
-  return bounds.lower && bounds.upper && *bounds.lower >= 0 &&
-         *bounds.upper <= u32Max;
+  return bounds.lower && bounds.upper && *bounds.lower >= lower &&
+         *bounds.upper <= upper;
 }
 
 static bool explicitPredicatesProveU32(Store &store, ExprHandle expr,
@@ -1532,7 +1627,7 @@ bool mlir::wave::sym::provablyFitsU32(Store &store, ExprHandle expr,
   if (std::optional<uint64_t> bound =
           exprU32UpperBound(store, expr, assumptions))
     return *bound <= (uint64_t{1} << 32) - 1;
-  return provenRangeFitsU32(store, expr, assumptions);
+  return provenRangeFits(store, expr, assumptions, 0, (int64_t{1} << 32) - 1);
 }
 
 bool mlir::wave::sym::positiveAddendsFitU32(Store &store, ExprHandle expr,

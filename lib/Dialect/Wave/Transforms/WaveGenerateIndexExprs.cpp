@@ -13,6 +13,7 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
@@ -693,20 +694,17 @@ static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers,
     return rangeProvesNoSignedOverflow(op, solver, store);
   switch (op.getKind()) {
   case BinaryKind::XOrI:
-  case BinaryKind::DivSI:
-  case BinaryKind::DivUI:
-  case BinaryKind::RemUI:
   case BinaryKind::ShRUI:
   case BinaryKind::AndI:
     return true;
+  case BinaryKind::DivSI:
+  case BinaryKind::DivUI:
+  case BinaryKind::RemUI:
+    // Dynamic div/rem stay SSA: shared lowering must not be duplicated.
+    return getSplatOrConstantInt(op.getRhs()).has_value();
   default:
     return false;
   }
-}
-
-static bool isSymbolicRootBinaryOp(BinaryOp op, bool allowI64Integers,
-                                   DataFlowSolver &solver, sym::Store &store) {
-  return canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store);
 }
 
 static std::optional<sym::PredCmpOp>
@@ -798,13 +796,15 @@ public:
                                 bool bindI32Root = false,
                                 bool requireI32RootRange = false,
                                 bool expandIndexExprRoot = false,
-                                bool foldWaveConstants = false)
+                                bool foldWaveConstants = false,
+                                bool allowWrappingArithmetic = false)
       : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
         allowI64Integers(allowI64Integers),
         assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
         requireI32RootRange(requireI32RootRange),
         expandIndexExprRoot(expandIndexExprRoot),
-        foldWaveConstants(foldWaveConstants) {}
+        foldWaveConstants(foldWaveConstants),
+        allowWrappingArithmetic(allowWrappingArithmetic) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     return build(value, /*allowRootLeaf=*/false);
@@ -816,14 +816,7 @@ public:
 
   FailureOr<std::optional<SymbolicPredicate>> buildPredicate(Value value) {
     bool skip = false;
-    FailureOr<sym::PredHandle> predicate = failure();
-    if (CmpIOp cmp = value.getDefiningOp<CmpIOp>())
-      predicate = buildCmpPredicate(cmp, skip, 0);
-    else if (arith::CmpIOp cmp = value.getDefiningOp<arith::CmpIOp>())
-      predicate = buildCmpPredicate(cmp.getPredicate(), cmp.getLhs(),
-                                    cmp.getRhs(), skip);
-    else
-      return std::optional<SymbolicPredicate>{};
+    FailureOr<sym::PredHandle> predicate = buildPredicateExpr(value, skip, 0);
     if (skip)
       return std::optional<SymbolicPredicate>{};
     if (failed(predicate))
@@ -842,6 +835,94 @@ public:
   bool canExpand(Value value) { return hasSymbolicRoot(value); }
 
 private:
+  struct LoopCarriedRecurrence {
+    scf::ForOp loop;
+    Value init;
+    Value stride;
+    bool subtractStride = false;
+  };
+
+  struct LoopCarriedUpdate {
+    scf::ForOp loop;
+    BinaryOp update;
+    unsigned index;
+  };
+
+  bool canBuildBinary(BinaryOp op) {
+    if (canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store))
+      return true;
+    if (!allowWrappingArithmetic ||
+        !isSignlessI32StorageType(op.getResult().getType()))
+      return false;
+    return op.getKind() == BinaryKind::AddI ||
+           op.getKind() == BinaryKind::SubI || op.getKind() == BinaryKind::MulI;
+  }
+
+  static bool isMaskSelect(SelectOp select) {
+    return select && isa<MaskType>(select.getType()) &&
+           isa<MaskType>(select.getCondition().getType()) &&
+           isa<MaskType>(select.getTrueValue().getType()) &&
+           isa<MaskType>(select.getFalseValue().getType());
+  }
+
+  template <typename T>
+  static bool failedOrSkipped(const FailureOr<T> &value, bool skip) {
+    return skip || failed(value);
+  }
+
+  FailureOr<sym::PredHandle> buildSelectPredicate(SelectOp select, bool &skip,
+                                                  unsigned depth) {
+    FailureOr<sym::PredHandle> condition =
+        buildPredicateExpr(select.getCondition(), skip, depth + 1);
+    if (failedOrSkipped(condition, skip))
+      return failure();
+    FailureOr<sym::PredHandle> truePredicate =
+        buildPredicateExpr(select.getTrueValue(), skip, depth + 1);
+    if (failedOrSkipped(truePredicate, skip))
+      return failure();
+    FailureOr<sym::PredHandle> falsePredicate =
+        buildPredicateExpr(select.getFalseValue(), skip, depth + 1);
+    if (failedOrSkipped(falsePredicate, skip))
+      return failure();
+
+    FailureOr<sym::PredHandle> activeTrue =
+        sym::composePredAnd(store, *condition, *truePredicate);
+    FailureOr<sym::PredHandle> notCondition =
+        sym::composePredNot(store, *condition);
+    if (failed(activeTrue) || failed(notCondition))
+      return failure();
+    FailureOr<sym::PredHandle> activeFalse =
+        sym::composePredAnd(store, *notCondition, *falsePredicate);
+    if (failed(activeFalse))
+      return failure();
+    return sym::composePredOr(store, *activeTrue, *activeFalse);
+  }
+
+  FailureOr<sym::PredHandle> buildPredicateExpr(Value value, bool &skip,
+                                                unsigned depth) {
+    if (depth > kMaxSymbolicValueDepth) {
+      skip = true;
+      return failure();
+    }
+    if (CmpIOp cmp = value.getDefiningOp<CmpIOp>())
+      return buildCmpPredicate(cmp, skip, depth + 1);
+    if (arith::CmpIOp cmp = value.getDefiningOp<arith::CmpIOp>())
+      return buildCmpPredicate(cmp.getPredicate(), cmp.getLhs(), cmp.getRhs(),
+                               skip, depth + 1);
+    if (std::optional<int64_t> constant = getSplatOrConstantInt(value)) {
+      if (*constant == 0)
+        return sym::composePredFalse(store);
+      if (*constant == 1)
+        return sym::composePredTrue(store);
+    }
+    SelectOp select = value.getDefiningOp<SelectOp>();
+    if (!isMaskSelect(select)) {
+      skip = true;
+      return failure();
+    }
+    return buildSelectPredicate(select, skip, depth);
+  }
+
   FailureOr<std::optional<SymbolicOffset>> build(Value value,
                                                  bool allowRootLeaf) {
     bool hasRoot = hasSymbolicRoot(value);
@@ -886,11 +967,13 @@ private:
     if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
       return hasSymbolicRoot(assume.getValue());
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
-      return isSymbolicRootBinaryOp(binary, allowI64Integers, solver, store);
+      return canBuildBinary(binary);
     if (SelectOp select = value.getDefiningOp<SelectOp>())
       return isSymbolicSelectOp(select, allowI64Integers, solver, store);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return hasSymbolicRoot(splat.getSource());
+    if (BlockArgument arg = dyn_cast<BlockArgument>(value))
+      return matchLoopCarriedRecurrence(arg).has_value();
     return false;
   }
 
@@ -915,7 +998,147 @@ private:
       return buildBinaryExpr(value, binary, skip, allowLeaf, depth);
     if (SelectOp select = value.getDefiningOp<SelectOp>())
       return buildSelectExpr(value, select, skip, allowLeaf, depth);
+    return buildLeafOrRecurrence(value, skip, allowLeaf, depth);
+  }
+
+  FailureOr<sym::ExprHandle> buildLeafOrRecurrence(Value value, bool &skip,
+                                                   bool allowLeaf,
+                                                   unsigned depth) {
+    if (BlockArgument arg = dyn_cast<BlockArgument>(value)) {
+      if (std::optional<LoopCarriedRecurrence> recurrence =
+              matchLoopCarriedRecurrence(arg))
+        return buildLoopCarriedRecurrence(*recurrence, skip, depth);
+    }
     return bindOrSkip(value, skip, allowLeaf);
+  }
+
+  std::optional<LoopCarriedUpdate> getLoopCarriedUpdate(BlockArgument arg) {
+    if (arg.getArgNumber() == 0)
+      return std::nullopt;
+    if (!isSymbolicValueType(arg.getType(), allowI64Integers))
+      return std::nullopt;
+    scf::ForOp loop =
+        dyn_cast_or_null<scf::ForOp>(arg.getOwner()->getParentOp());
+    if (!loop)
+      return std::nullopt;
+    if (arg.getOwner() != loop.getBody())
+      return std::nullopt;
+
+    unsigned index = arg.getArgNumber() - 1;
+    if (index >= loop.getInitArgs().size())
+      return std::nullopt;
+    std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+    if (!step)
+      return std::nullopt;
+    if (*step <= 0)
+      return std::nullopt;
+
+    scf::YieldOp yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+    BinaryOp update = yield.getOperand(index).getDefiningOp<BinaryOp>();
+    if (!update)
+      return std::nullopt;
+    if (!canBuildBinary(update))
+      return std::nullopt;
+    return LoopCarriedUpdate{loop, update, index};
+  }
+
+  static std::optional<std::pair<Value, bool>>
+  getRecurrenceStride(BlockArgument arg, BinaryOp update) {
+    if (update.getKind() == BinaryKind::AddI) {
+      if (update.getLhs() == arg)
+        return std::pair<Value, bool>{update.getRhs(), false};
+      if (update.getRhs() == arg)
+        return std::pair<Value, bool>{update.getLhs(), false};
+      return std::nullopt;
+    }
+    if (update.getKind() != BinaryKind::SubI)
+      return std::nullopt;
+    if (update.getLhs() != arg)
+      return std::nullopt;
+    return std::pair<Value, bool>{update.getRhs(), true};
+  }
+
+  std::optional<LoopCarriedRecurrence>
+  matchLoopCarriedRecurrence(BlockArgument arg) {
+    std::optional<LoopCarriedUpdate> carried = getLoopCarriedUpdate(arg);
+    if (!carried)
+      return std::nullopt;
+    std::optional<std::pair<Value, bool>> stride =
+        getRecurrenceStride(arg, carried->update);
+    if (!stride)
+      return std::nullopt;
+    if (!carried->loop.isDefinedOutsideOfLoop(stride->first))
+      return std::nullopt;
+    if (stride->first.getType() != arg.getType())
+      return std::nullopt;
+    return LoopCarriedRecurrence{carried->loop,
+                                 carried->loop.getInitArgs()[carried->index],
+                                 stride->first, stride->second};
+  }
+
+  FailureOr<sym::ExprHandle>
+  buildRecurrenceIteration(LoopCarriedRecurrence recurrence, bool &skip,
+                           unsigned depth) {
+    FailureOr<sym::ExprHandle> induction =
+        buildExpr(recurrence.loop.getInductionVar(), skip, true, depth + 1);
+    if (failedOrSkipped(induction, skip))
+      return failure();
+    FailureOr<sym::ExprHandle> lower =
+        buildExpr(recurrence.loop.getLowerBound(), skip, true, depth + 1);
+    if (failedOrSkipped(lower, skip))
+      return failure();
+    FailureOr<sym::ExprHandle> iteration = sym::composeExprBinary(
+        store, *induction, sym::ExprBinaryOp::Sub, *lower);
+    if (failed(iteration))
+      return failure();
+
+    int64_t step = *getConstantIntValue(recurrence.loop.getStep());
+    if (step == 1)
+      return iteration;
+    FailureOr<sym::ExprHandle> stepExpr = sym::composeExprInt(store, step);
+    if (failed(stepExpr))
+      return failure();
+    return sym::composeExprBinary(store, *iteration, sym::ExprBinaryOp::Div,
+                                  *stepExpr);
+  }
+
+  FailureOr<sym::ExprHandle>
+  buildRecurrenceStride(LoopCarriedRecurrence recurrence, bool &skip,
+                        unsigned depth) {
+    FailureOr<sym::ExprHandle> stride =
+        buildExpr(recurrence.stride, skip, true, depth + 1);
+    if (failedOrSkipped(stride, skip))
+      return failure();
+    if (!recurrence.subtractStride)
+      return stride;
+    FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+    if (failed(zero))
+      return failure();
+    return sym::composeExprBinary(store, *zero, sym::ExprBinaryOp::Sub,
+                                  *stride);
+  }
+
+  FailureOr<sym::ExprHandle>
+  buildLoopCarriedRecurrence(LoopCarriedRecurrence recurrence, bool &skip,
+                             unsigned depth) {
+    FailureOr<sym::ExprHandle> init =
+        buildExpr(recurrence.init, skip, true, depth + 1);
+    if (failedOrSkipped(init, skip))
+      return failure();
+    FailureOr<sym::ExprHandle> iteration =
+        buildRecurrenceIteration(recurrence, skip, depth);
+    if (failed(iteration))
+      return failure();
+    FailureOr<sym::ExprHandle> stride =
+        buildRecurrenceStride(recurrence, skip, depth);
+    if (failed(stride))
+      return failure();
+    FailureOr<sym::ExprHandle> displacement = sym::composeExprBinary(
+        store, *iteration, sym::ExprBinaryOp::Mul, *stride);
+    if (failed(displacement))
+      return failure();
+    return sym::composeExprBinary(store, *init, sym::ExprBinaryOp::Add,
+                                  *displacement);
   }
 
   FailureOr<sym::ExprHandle> bindOrSkip(Value value, bool &skip,
@@ -960,8 +1183,11 @@ private:
                                              unsigned depth) {
     bool childSkip = false;
     FailureOr<sym::ExprHandle> expr = buildBinary(binary, childSkip, depth + 1);
-    if (!childSkip)
+    if (!childSkip) {
+      if (succeeded(expr))
+        offset.materializations.push_back({value, *expr});
       return expr;
+    }
     return bindOrSkip(value, skip, allowLeaf);
   }
 
@@ -984,7 +1210,7 @@ private:
 
   FailureOr<sym::ExprHandle> buildBinary(BinaryOp op, bool &skip,
                                          unsigned depth) {
-    if (!canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store)) {
+    if (!canBuildBinary(op)) {
       skip = true;
       return failure();
     }
@@ -1475,6 +1701,7 @@ private:
   bool requireI32RootRange = false;
   bool expandIndexExprRoot = false;
   bool foldWaveConstants = false;
+  bool allowWrappingArithmetic = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -1498,6 +1725,18 @@ mlir::wave::buildSymbolicIndexPredicate(Value value, WaveDialect &dialect,
       /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
       /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
       /*foldWaveConstants=*/true);
+  return builder.buildPredicate(value);
+}
+
+FailureOr<std::optional<SymbolicPredicate>>
+mlir::wave::buildSymbolicPacketPredicateRelation(Value value,
+                                                 WaveDialect &dialect,
+                                                 DataFlowSolver &solver) {
+  SymbolicValueBuilder builder(
+      dialect, solver, /*allowI64Integers=*/false,
+      /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
+      /*foldWaveConstants=*/true, /*allowWrappingArithmetic=*/true);
   return builder.buildPredicate(value);
 }
 

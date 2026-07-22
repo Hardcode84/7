@@ -8,6 +8,17 @@ func.func @unsupported_op(%x: i32, %y: i32) attributes {wave.kernel} {
 
 // -----
 
+func.func @packet_where_requires_symbolic_memory_lowering(
+    %mask0: !wave.mask<64>, %mask1: !wave.mask<64>) attributes {wave.kernel} {
+  // expected-error @below {{multi-condition where requires symbolic memory lowering}}
+  wave.where %mask0, %mask1 {
+    wave.yield
+  } : !wave.mask<64>, !wave.mask<64>
+  return
+}
+
+// -----
+
 func.func @unsupported_raw_arith_addi(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %wgid = wave.workgroup_id 0
   %two = arith.constant 2 : i32

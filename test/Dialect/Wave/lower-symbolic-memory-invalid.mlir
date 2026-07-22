@@ -139,7 +139,7 @@ func.func @multidim_axis_is_not_item(
 // -----
 
 func.func @private_address_space(%base: !wave.ptr<#wave.private, i32>) {
-  // expected-error @+1 {{lowering requires global or shared pointer bases}}
+  // expected-error @+1 {{lowering requires global, shared, or AMD buffer pointer bases}}
   %value, %token = wave.gather %base mapping
       <bit_offset = <"32 * slot">>
       bindings []() packet_bindings []()

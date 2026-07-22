@@ -107,3 +107,17 @@ func.func @producer_range_drops_stale_lower_assumption(%lane: !wave.simd<i32, 64
       : (!wave.simd<index, 64>) -> !wave.simd<index, 64>
   return %off : !wave.simd<index, 64>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @preserves_result_range_when_binding_folds
+// CHECK-SAME: (%[[K:.*]]: i32, %[[XRAW:.*]]: i32)
+// CHECK: %[[X:.*]] = wave.assume %[[XRAW]]
+// CHECK: %[[OFF:.*]] = wave.index_expr <"32 + 2*K"> assuming [#wave.pred<"32 + 2*K >= 0 & -68 + 2*K <= 0">] ["K"](%[[K]]) : (i32) -> index
+// CHECK: return %[[OFF]] : index
+func.func @preserves_result_range_when_binding_folds(%k: i32, %x_raw: i32)
+    -> index {
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0 & -3 + x <= 0">] : i32
+  %off = wave.index_expr <"2*(16 + K + floor(1/4*x))"> assuming [#wave.pred<"32 + 2*K + 2*floor(1/4*x) >= 0 & -68 + 2*K + 2*floor(1/4*x) <= 0">] ["K", "x"](%k, %x) : (i32, i32) -> index
+  return %off : index
+}

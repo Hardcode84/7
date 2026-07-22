@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -24,11 +25,13 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -49,13 +52,23 @@ struct NamedBinding {
   Value value;
 };
 
+struct MaterializationCandidate {
+  Value value;
+  sym::ExprHandle expression;
+};
+
 struct SlotMapping {
   SmallVector<NamedBinding> bindings;
   SmallVector<sym::PredHandle> assumptions;
+  SmallVector<MaterializationCandidate> materializationCandidates;
   SmallVector<unsigned> logicalSlots;
+  std::optional<sym::PredHandle> activationPredicate;
+  sym::PredHandle activationRelationPredicate;
+  Value packetCondition;
   sym::ExprHandle base;
   sym::ExprHandle targetBlock;
   sym::ExprHandle bitOffset;
+  sym::ExprHandle materializationBitOffset;
   sym::ExprHandle byteOffset;
   int64_t baseIndex = 0;
 };
@@ -64,6 +77,11 @@ struct PacketBindingState {
   llvm::DenseMap<Value, Value> canonicalValues;
   llvm::DenseMap<Value, StringRef> byValue;
   llvm::StringMap<Value> reserved;
+};
+
+struct PacketBinding {
+  std::string name;
+  SmallVector<Value> values;
 };
 
 struct MappingCoordinates {
@@ -75,9 +93,10 @@ struct MappingCoordinates {
 struct MemoryAccess {
   SmallVector<Value> bases;
   SmallVector<Value> bindings;
-  SmallVector<Value> packetBindings;
+  SmallVector<PacketBinding> packetBindings;
   SmallVector<std::string> bindingNames;
-  SmallVector<std::string> packetBindingNames;
+  SmallVector<Value> packetConditions;
+  SmallVector<Value> inactiveComponents;
   MemoryMappingAttr mapping;
   SimdType packetType;
   Value packet;
@@ -85,6 +104,8 @@ struct MemoryAccess {
   Attribute cache;
   Type tokenType;
   Operation *op = nullptr;
+  WhereOp packetWhere;
+  Value inactiveToken;
   bool gather = false;
 };
 
@@ -96,6 +117,17 @@ struct ActiveControl {
 struct ControlCondition {
   Value value;
   bool negated = false;
+};
+
+struct PacketControl {
+  std::optional<SymbolicPredicate> predicate;
+  std::unique_ptr<SymbolicPredicate> relationPredicate;
+  Value value;
+};
+
+struct PacketComponents {
+  SmallVector<Value> values;
+  SmallVector<SymbolicOffset> offsets;
 };
 
 struct CoverState {
@@ -120,7 +152,7 @@ struct GatherCandidate {
 };
 
 struct GatherPlan {
-  SmallVector<SlotMapping> physicalSlots;
+  SmallVector<SlotMapping, 4> physicalSlots;
   SmallVector<GatherCandidate> candidates;
   SmallVector<unsigned> selected;
 };
@@ -140,6 +172,11 @@ struct AccessShape {
   VectorType packet;
   int64_t slotCount = 0;
   int64_t elementBits = 0;
+};
+
+struct PreparedAccessMappings {
+  SmallVector<SlotMapping, 4> mappings;
+  AccessShape shape;
 };
 
 struct MappingDomain {
@@ -165,14 +202,30 @@ static SmallVector<std::string> getNames(ArrayAttr attrs) {
   return names;
 }
 
+static void appendPacketBindings(ValueRange values, ArrayAttr names,
+                                 MemoryAccess &access) {
+  for (auto [value, nameAttr] : llvm::zip(values, names)) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    auto existing =
+        llvm::find_if(access.packetBindings, [&](const PacketBinding &binding) {
+          return binding.name == name;
+        });
+    if (existing == access.packetBindings.end()) {
+      access.packetBindings.push_back(PacketBinding{name.str(), {value}});
+      continue;
+    }
+    existing->values.push_back(value);
+  }
+}
+
 static MemoryAccess getAccess(GatherOp op) {
   MemoryAccess access;
   access.op = op;
   llvm::append_range(access.bases, op.getBases());
   llvm::append_range(access.bindings, op.getBindings());
-  llvm::append_range(access.packetBindings, op.getPacketBindings());
+  appendPacketBindings(op.getPacketBindings(), op.getPacketBindingNames(),
+                       access);
   access.bindingNames = getNames(op.getBindingNames());
-  access.packetBindingNames = getNames(op.getPacketBindingNames());
   access.mapping = op.getMapping();
   access.packetType = cast<SimdType>(op.getValue().getType());
   access.dependency = op.getDependency();
@@ -187,9 +240,9 @@ static MemoryAccess getAccess(ScatterOp op) {
   access.op = op;
   llvm::append_range(access.bases, op.getBases());
   llvm::append_range(access.bindings, op.getBindings());
-  llvm::append_range(access.packetBindings, op.getPacketBindings());
+  appendPacketBindings(op.getPacketBindings(), op.getPacketBindingNames(),
+                       access);
   access.bindingNames = getNames(op.getBindingNames());
-  access.packetBindingNames = getNames(op.getPacketBindingNames());
   access.mapping = op.getMapping();
   access.packetType = cast<SimdType>(op.getValue().getType());
   access.packet = op.getValue();
@@ -197,6 +250,152 @@ static MemoryAccess getAccess(ScatterOp op) {
   access.cache = op.getCacheAttr();
   access.tokenType = op.getToken().getType();
   return access;
+}
+
+static Type getComponentType(const MemoryAccess &access);
+
+static SmallVector<Value> getDataPacketComponents(IRRewriter &rewriter,
+                                                  const MemoryAccess &access,
+                                                  Value packet,
+                                                  int64_t slotCount) {
+  Type componentType = getComponentType(access);
+  if (PackOp pack = packet.getDefiningOp<PackOp>();
+      pack && pack.getInputs().size() == static_cast<size_t>(slotCount) &&
+      llvm::all_of(pack.getInputs(), [&](Value value) {
+        return value.getType() == componentType;
+      }))
+    return SmallVector<Value>(pack.getInputs().begin(), pack.getInputs().end());
+
+  SmallVector<Value> components;
+  components.reserve(slotCount);
+  for (int64_t index : llvm::seq<int64_t>(0, slotCount))
+    components.push_back(ExtractOp::create(rewriter, access.op->getLoc(),
+                                           componentType, packet, index));
+  return components;
+}
+
+static bool hasIsolatedPacketAccess(WhereOp where, Operation *access,
+                                    YieldOp thenYield) {
+  return thenYield && &where.getThenRegion().front().front() == access &&
+         access->getNextNode() == thenYield;
+}
+
+static bool hasValidGatherThenYield(WhereOp where, const MemoryAccess &access,
+                                    YieldOp thenYield) {
+  return where.getNumResults() == 2 && thenYield.getNumOperands() == 2 &&
+         thenYield.getOperand(0) == access.op->getResult(0) &&
+         thenYield.getOperand(1) == access.op->getResult(1) &&
+         !where.getElseRegion().empty();
+}
+
+static bool hasIsolatedGatherElseYield(WhereOp where, YieldOp elseYield) {
+  return elseYield && elseYield.getNumOperands() == 2 &&
+         &where.getElseRegion().front().front() == elseYield.getOperation();
+}
+
+static LogicalResult prepareGatherPacketPredication(IRRewriter &rewriter,
+                                                    MemoryAccess &access,
+                                                    WhereOp where,
+                                                    YieldOp thenYield,
+                                                    int64_t slotCount) {
+  if (!hasValidGatherThenYield(where, access, thenYield))
+    return where.emitOpError(
+        "packet-predicated gather must yield its value and token and have "
+        "an inactive region");
+  YieldOp elseYield =
+      dyn_cast<YieldOp>(where.getElseRegion().front().getTerminator());
+  if (!hasIsolatedGatherElseYield(where, elseYield))
+    return where.emitOpError(
+        "packet-predicated gather inactive region must only yield fallback "
+        "value and token");
+  access.inactiveComponents = getDataPacketComponents(
+      rewriter, access, elseYield.getOperand(0), slotCount);
+  access.inactiveToken = elseYield.getOperand(1);
+  return success();
+}
+
+static bool hasValidScatterThenYield(WhereOp where, const MemoryAccess &access,
+                                     YieldOp thenYield) {
+  if (where.getNumResults() > 1)
+    return false;
+  if (thenYield.getNumOperands() != where.getNumResults())
+    return false;
+  return where.getNumResults() == 0 ||
+         thenYield.getOperand(0) == access.op->getResult(0);
+}
+
+static LogicalResult prepareResultScatterPredication(MemoryAccess &access,
+                                                     WhereOp where) {
+  if (where.getElseRegion().empty())
+    return where.emitOpError(
+        "result-bearing packet-predicated scatter requires an inactive "
+        "region");
+  YieldOp elseYield =
+      dyn_cast<YieldOp>(where.getElseRegion().front().getTerminator());
+  if (!elseYield || elseYield.getNumOperands() != 1 ||
+      &where.getElseRegion().front().front() != elseYield.getOperation())
+    return where.emitOpError(
+        "packet-predicated scatter inactive region must only yield a token");
+  access.inactiveToken = elseYield.getOperand(0);
+  return success();
+}
+
+static LogicalResult prepareEffectScatterPredication(IRRewriter &rewriter,
+                                                     MemoryAccess &access,
+                                                     WhereOp where) {
+  if (!where.getElseRegion().empty())
+    return where.emitOpError(
+        "effect-only packet-predicated scatter must not have an inactive "
+        "region");
+  access.inactiveToken = access.dependency;
+  if (!access.inactiveToken)
+    access.inactiveToken =
+        TokenOp::create(rewriter, where.getLoc(), access.tokenType).getResult();
+  return success();
+}
+
+static LogicalResult prepareScatterPacketPredication(IRRewriter &rewriter,
+                                                     MemoryAccess &access,
+                                                     WhereOp where,
+                                                     YieldOp thenYield) {
+  if (!hasValidScatterThenYield(where, access, thenYield))
+    return where.emitOpError(
+        "packet-predicated scatter must yield only its optional token");
+  if (where.getNumResults() == 1)
+    return prepareResultScatterPredication(access, where);
+  return prepareEffectScatterPredication(rewriter, access, where);
+}
+
+static LogicalResult preparePacketPredication(IRRewriter &rewriter,
+                                              MemoryAccess &access,
+                                              int64_t slotCount) {
+  WhereOp where = dyn_cast_or_null<WhereOp>(access.op->getParentOp());
+  if (!where)
+    return success();
+  if (where.getConditions().size() == 1)
+    return success();
+  if (where.getConditions().size() != static_cast<size_t>(slotCount))
+    return where.emitOpError(
+        "mask packet length must match symbolic memory packet length");
+  if (access.op->getBlock() != &where.getThenRegion().front())
+    return access.op->emitOpError(
+        "packet-predicated symbolic memory access must be in the then region");
+
+  YieldOp thenYield =
+      dyn_cast<YieldOp>(where.getThenRegion().front().getTerminator());
+  if (!hasIsolatedPacketAccess(where, access.op, thenYield))
+    return where.emitOpError(
+        "packet-predicated symbolic memory then region must contain only the "
+        "memory access");
+
+  rewriter.setInsertionPoint(where);
+  access.packetWhere = where;
+  llvm::append_range(access.packetConditions, where.getConditions());
+
+  if (access.gather)
+    return prepareGatherPacketPredication(rewriter, access, where, thenYield,
+                                          slotCount);
+  return prepareScatterPacketPredication(rewriter, access, where, thenYield);
 }
 
 static bool hasSymbol(sym::ExprHandle expr, StringRef sought) {
@@ -223,14 +422,16 @@ static DenseI32ArrayAttr getWorkgroupShape(Operation *op) {
 }
 
 static bool isPacketIndexProducer(Operation *op) {
-  return isa<AssumeOp, BinaryOp, ExtractOp, IndexExprOp, PackOp, SelectOp,
-             SplatOp>(op);
+  return isa<AssumeOp, BinaryOp, CastOp, ExtractOp, IndexExprOp, PackOp,
+             SelectOp, SplatOp>(op);
 }
 
 static std::array<SmallVector<Value>, 3>
 collectPacketWorkitemIds(const MemoryAccess &access, Type type) {
   std::array<SmallVector<Value>, 3> workitems;
-  SmallVector<Value> worklist(access.packetBindings);
+  SmallVector<Value> worklist;
+  for (const PacketBinding &binding : access.packetBindings)
+    llvm::append_range(worklist, binding.values);
   DenseSet<Value> visited;
   while (!worklist.empty()) {
     Value value = worklist.pop_back_val();
@@ -467,8 +668,8 @@ static void seedPacketBindingState(const MemoryAccess &access,
     (void)inserted;
     state.byValue.try_emplace(value, it->getKey());
   }
-  for (StringRef name : access.packetBindingNames)
-    state.reserved.try_emplace(name, Value());
+  for (const PacketBinding &binding : access.packetBindings)
+    state.reserved.try_emplace(binding.name, Value());
 }
 
 static LogicalResult
@@ -507,13 +708,16 @@ remapSymbolicBindings(sym::Store &store,
   return success();
 }
 
-static FailureOr<sym::ExprHandle>
-remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
-                    PacketBindingState &state, SlotMapping &mapping) {
+static FailureOr<sym::ExprHandle> remapSymbolicOffset(
+    sym::Store &store, const SymbolicOffset &offset, PacketBindingState &state,
+    SlotMapping &mapping,
+    SmallVectorImpl<sym::ExprSubstitution> *resultSubstitutions = nullptr) {
   SmallVector<sym::ExprSubstitution> substitutions;
   if (failed(remapSymbolicBindings(store, offset.bindings, offset.assumptions,
                                    state, mapping, substitutions)))
     return failure();
+  if (resultSubstitutions)
+    llvm::append_range(*resultSubstitutions, substitutions);
   if (substitutions.empty())
     return offset.expr;
   return sym::substituteExpr(store, offset.expr, substitutions);
@@ -525,6 +729,46 @@ remapSymbolicPredicate(sym::Store &store, const SymbolicPredicate &predicate,
   SmallVector<sym::ExprSubstitution> substitutions;
   if (failed(remapSymbolicBindings(store, predicate.bindings,
                                    predicate.assumptions, state, mapping,
+                                   substitutions)))
+    return failure();
+  if (substitutions.empty())
+    return predicate.predicate;
+  return sym::substitutePred(store, predicate.predicate, substitutions);
+}
+
+static bool isI32WrappingInvariant(sym::ExprHandle expression) {
+  sym::ExprView view(expression);
+  if (view.getKind() != sym::ExprKind::Mod)
+    return false;
+  std::optional<int64_t> modulus =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  return modulus && *modulus > 1 && *modulus <= (int64_t{1} << 32) &&
+         llvm::isPowerOf2_64(static_cast<uint64_t>(*modulus));
+}
+
+static bool isI32WrappingInvariant(sym::PredHandle predicate) {
+  sym::PredView view(predicate);
+  if (view.getKind() != sym::PredKind::Cmp ||
+      view.getCmpOp() != sym::PredCmpOp::Eq)
+    return false;
+  sym::ExprHandle lhs = view.getCmpLhs();
+  sym::ExprHandle rhs = view.getCmpRhs();
+  return (sym::getIntegerLiteralValue(lhs) == 0 &&
+          isI32WrappingInvariant(rhs)) ||
+         (sym::getIntegerLiteralValue(rhs) == 0 && isI32WrappingInvariant(lhs));
+}
+
+static FailureOr<sym::PredHandle>
+remapRelationPredicate(sym::Store &store, const SymbolicPredicate &predicate,
+                       PacketBindingState &state, SlotMapping &mapping) {
+  SmallVector<sym::PredHandle> invariantAssumptions;
+  llvm::copy_if(predicate.assumptions, std::back_inserter(invariantAssumptions),
+                [](sym::PredHandle assumption) {
+                  return isI32WrappingInvariant(assumption);
+                });
+  SmallVector<sym::ExprSubstitution> substitutions;
+  if (failed(remapSymbolicBindings(store, predicate.bindings,
+                                   invariantAssumptions, state, mapping,
                                    substitutions)))
     return failure();
   if (substitutions.empty())
@@ -550,15 +794,54 @@ static LogicalResult appendActiveControls(sym::Store &store,
   return success();
 }
 
+static LogicalResult appendPacketControl(sym::Store &store,
+                                         const PacketControl *control,
+                                         PacketBindingState &state,
+                                         SlotMapping &mapping) {
+  if (!control)
+    return success();
+  mapping.packetCondition = control->value;
+  if (!control->predicate)
+    return success();
+  FailureOr<sym::PredHandle> predicate =
+      remapSymbolicPredicate(store, *control->predicate, state, mapping);
+  if (failed(predicate))
+    return failure();
+  mapping.activationPredicate = *predicate;
+  mapping.assumptions.push_back(*predicate);
+  if (control->relationPredicate) {
+    FailureOr<sym::PredHandle> relation = remapRelationPredicate(
+        store, *control->relationPredicate, state, mapping);
+    if (failed(relation))
+      return failure();
+    mapping.activationRelationPredicate = *relation;
+  }
+  return success();
+}
+
 static LogicalResult appendPacketSubstitution(
-    sym::Store &store, StringRef name, const SymbolicOffset &offset,
-    PacketBindingState &state, SlotMapping &mapping,
+    sym::Store &store, StringRef name, Value value,
+    const SymbolicOffset &offset, PacketBindingState &state,
+    SlotMapping &mapping,
     SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
   FailureOr<sym::ExprHandle> original = sym::composeExprSym(store, name);
+  SmallVector<sym::ExprSubstitution> offsetSubstitutions;
   FailureOr<sym::ExprHandle> replacement =
-      remapSymbolicOffset(store, offset, state, mapping);
+      remapSymbolicOffset(store, offset, state, mapping, &offsetSubstitutions);
   if (failed(original) || failed(replacement))
     return failure();
+  for (const SymbolicOffsetMaterialization &materialization :
+       offset.materializations) {
+    FailureOr<sym::ExprHandle> expression = materialization.expr;
+    if (!offsetSubstitutions.empty())
+      expression =
+          sym::substituteExpr(store, materialization.expr, offsetSubstitutions);
+    if (failed(expression))
+      return failure();
+    mapping.materializationCandidates.push_back(
+        {materialization.value, *expression});
+  }
+  mapping.materializationCandidates.push_back({value, *replacement});
   substitutions.push_back({*original, *replacement});
   return success();
 }
@@ -624,17 +907,18 @@ static FailureOr<SmallVector<sym::ExprSubstitution>>
 buildSlotSubstitutions(const MemoryAccess &access, sym::Store &store,
                        sym::ExprHandle slotSymbol, int64_t slot,
                        ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
-                       ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
+                       ArrayRef<PacketComponents> packetComponents,
                        PacketBindingState &bindingState, SlotMapping &mapping) {
   FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
   if (failed(slotValue))
     return failure();
   SmallVector<sym::ExprSubstitution> substitutions(bindingSubstitutions);
   substitutions.push_back({slotSymbol, *slotValue});
-  for (auto [bindingIndex, name] : llvm::enumerate(access.packetBindingNames))
-    if (failed(appendPacketSubstitution(store, name,
-                                        packetComponents[bindingIndex][slot],
-                                        bindingState, mapping, substitutions)))
+  for (auto [bindingIndex, binding] : llvm::enumerate(access.packetBindings))
+    if (failed(appendPacketSubstitution(
+            store, binding.name, packetComponents[bindingIndex].values[slot],
+            packetComponents[bindingIndex].offsets[slot], bindingState, mapping,
+            substitutions)))
       return failure();
   return substitutions;
 }
@@ -713,19 +997,267 @@ getByteOffset(sym::Store &store, sym::ExprHandle bitOffset,
   return byteOffset;
 }
 
+static std::optional<uint64_t>
+rangePossibleBits(sym::Store &store, sym::ExprHandle expression,
+                  ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<int64_t> upper = sym::inferNonNegativeUpperBound(
+      store, expression, assumptions, std::numeric_limits<int64_t>::max());
+  if (!upper)
+    return std::nullopt;
+  uint64_t value = static_cast<uint64_t>(*upper);
+  if (value == 0)
+    return uint64_t{0};
+  unsigned bits = llvm::Log2_64(value) + 1;
+  return (uint64_t{1} << bits) - 1;
+}
+
+static std::optional<uint64_t> scalePossibleBits(uint64_t bits,
+                                                 sym::ExprHandle coefficient) {
+  std::optional<int64_t> value = sym::getIntegerLiteralValue(coefficient);
+  if (!value || *value < 0)
+    return std::nullopt;
+  if (*value == 0 || bits == 0)
+    return uint64_t{0};
+  uint64_t scale = static_cast<uint64_t>(*value);
+  if (!llvm::isPowerOf2_64(scale))
+    return std::nullopt;
+  unsigned shift = llvm::Log2_64(scale);
+  if (shift >= 63 ||
+      bits > (uint64_t(std::numeric_limits<int64_t>::max()) >> shift))
+    return std::nullopt;
+  return bits << shift;
+}
+
+static std::optional<uint64_t>
+possibleOneBits(sym::Store &store, sym::ExprHandle expression,
+                ArrayRef<sym::PredHandle> assumptions);
+
+static std::optional<uint64_t>
+possibleAddOneBits(sym::Store &store, sym::ExprHandle expression,
+                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<int64_t> constant =
+      sym::getIntegerLiteralValue(view.getAddConstant());
+  if (!constant || *constant < 0)
+    return rangePossibleBits(store, expression, assumptions);
+  uint64_t bits = static_cast<uint64_t>(*constant);
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(index);
+    std::optional<uint64_t> termBits =
+        possibleOneBits(store, term.term, assumptions);
+    if (!termBits)
+      return rangePossibleBits(store, expression, assumptions);
+    termBits = scalePossibleBits(*termBits, term.coefficient);
+    if (!termBits || (bits & *termBits) != 0)
+      return rangePossibleBits(store, expression, assumptions);
+    bits |= *termBits;
+  }
+  return bits;
+}
+
+static std::optional<uint64_t>
+possibleMulOneBits(sym::Store &store, sym::ExprHandle expression,
+                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
+  if (view.getMulFactorCount() != 1 || view.getMulFactor(0).exponent != 1)
+    return rangePossibleBits(store, expression, assumptions);
+  std::optional<uint64_t> factorBits =
+      possibleOneBits(store, view.getMulFactor(0).base, assumptions);
+  if (!factorBits)
+    return rangePossibleBits(store, expression, assumptions);
+  std::optional<uint64_t> scaled =
+      scalePossibleBits(*factorBits, view.getMulCoefficient());
+  return scaled ? scaled : rangePossibleBits(store, expression, assumptions);
+}
+
+static std::optional<uint64_t>
+possibleModOneBits(sym::Store &store, sym::ExprHandle expression,
+                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<int64_t> modulus =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  if (!modulus || *modulus <= 0)
+    return rangePossibleBits(store, expression, assumptions);
+  uint64_t upper = static_cast<uint64_t>(*modulus - 1);
+  if (upper == 0)
+    return uint64_t{0};
+  unsigned bits = llvm::Log2_64(upper) + 1;
+  return (uint64_t{1} << bits) - 1;
+}
+
+static std::optional<uint64_t>
+possibleXorOneBits(sym::Store &store, sym::ExprHandle expression,
+                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<uint64_t> lhs =
+      possibleOneBits(store, view.getBinaryLhs(), assumptions);
+  std::optional<uint64_t> rhs =
+      possibleOneBits(store, view.getBinaryRhs(), assumptions);
+  if (lhs && rhs)
+    return *lhs | *rhs;
+  return rangePossibleBits(store, expression, assumptions);
+}
+
+static std::optional<uint64_t>
+possibleOneBits(sym::Store &store, sym::ExprHandle expression,
+                ArrayRef<sym::PredHandle> assumptions) {
+  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(expression))
+    return *value >= 0 ? std::optional<uint64_t>(*value) : std::nullopt;
+
+  sym::ExprView view(expression);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return possibleAddOneBits(store, expression, view, assumptions);
+  case sym::ExprKind::Mul:
+    return possibleMulOneBits(store, expression, view, assumptions);
+  case sym::ExprKind::Mod:
+    return possibleModOneBits(store, expression, view, assumptions);
+  case sym::ExprKind::Xor:
+    return possibleXorOneBits(store, expression, view, assumptions);
+  default:
+    return rangePossibleBits(store, expression, assumptions);
+  }
+}
+
+static void appendAddChildren(sym::ExprView view,
+                              SmallVectorImpl<sym::ExprHandle> &children) {
+  children.push_back(view.getAddConstant());
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(index);
+    children.push_back(term.coefficient);
+    children.push_back(term.term);
+  }
+}
+
+static void appendMulChildren(sym::ExprView view,
+                              SmallVectorImpl<sym::ExprHandle> &children) {
+  children.push_back(view.getMulCoefficient());
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
+    children.push_back(view.getMulFactor(index).base);
+}
+
+static void
+appendPiecewiseChildren(sym::ExprView view,
+                        SmallVectorImpl<sym::ExprHandle> &children) {
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount()))
+    children.push_back(view.getPiecewiseCase(index).value);
+}
+
+static SmallVector<sym::ExprHandle> getExpressionChildren(sym::ExprView view) {
+  SmallVector<sym::ExprHandle> children;
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    appendAddChildren(view, children);
+    break;
+  case sym::ExprKind::Mul:
+    appendMulChildren(view, children);
+    break;
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    children.push_back(view.getUnaryArg());
+    break;
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Max:
+  case sym::ExprKind::Min:
+  case sym::ExprKind::Xor:
+    children.push_back(view.getBinaryLhs());
+    children.push_back(view.getBinaryRhs());
+    break;
+  case sym::ExprKind::Piecewise:
+    appendPiecewiseChildren(view, children);
+    break;
+  default:
+    break;
+  }
+  return children;
+}
+
+static bool canLinearizeXor(std::optional<uint64_t> lhs,
+                            std::optional<uint64_t> rhs) {
+  return lhs && rhs && ((*lhs & *rhs) == 0);
+}
+
+static LogicalResult
+rewriteDisjointXor(sym::Store &store, sym::ExprHandle expression,
+                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions,
+                   SmallVectorImpl<sym::ExprSubstitution> &rewrites) {
+  sym::ExprHandle lhs = view.getBinaryLhs();
+  sym::ExprHandle rhs = view.getBinaryRhs();
+  if (!rewrites.empty()) {
+    FailureOr<sym::ExprHandle> rewrittenLhs =
+        sym::substituteExpr(store, lhs, rewrites);
+    FailureOr<sym::ExprHandle> rewrittenRhs =
+        sym::substituteExpr(store, rhs, rewrites);
+    if (failed(rewrittenLhs) || failed(rewrittenRhs))
+      return failure();
+    lhs = *rewrittenLhs;
+    rhs = *rewrittenRhs;
+  }
+  std::optional<uint64_t> lhsBits = possibleOneBits(store, lhs, assumptions);
+  std::optional<uint64_t> rhsBits = possibleOneBits(store, rhs, assumptions);
+  sym::ExprBinaryOp op = canLinearizeXor(lhsBits, rhsBits)
+                             ? sym::ExprBinaryOp::Add
+                             : sym::ExprBinaryOp::Xor;
+  FailureOr<sym::ExprHandle> replacement =
+      sym::composeExprBinary(store, lhs, op, rhs);
+  if (failed(replacement))
+    return failure();
+  replacement = sym::simplifyExpr(store, *replacement, assumptions);
+  if (failed(replacement))
+    return failure();
+  if (!(*replacement == expression))
+    rewrites.push_back({expression, *replacement});
+  return success();
+}
+
+static LogicalResult
+collectDisjointXorRewrites(sym::Store &store, sym::ExprHandle expression,
+                           ArrayRef<sym::PredHandle> assumptions,
+                           llvm::DenseSet<sym::ExprHandle> &visited,
+                           SmallVectorImpl<sym::ExprSubstitution> &rewrites) {
+  if (!visited.insert(expression).second)
+    return success();
+
+  sym::ExprView view(expression);
+  for (sym::ExprHandle child : getExpressionChildren(view))
+    if (child && failed(collectDisjointXorRewrites(store, child, assumptions,
+                                                   visited, rewrites)))
+      return failure();
+
+  if (view.getKind() != sym::ExprKind::Xor)
+    return success();
+  return rewriteDisjointXor(store, expression, view, assumptions, rewrites);
+}
+
+static FailureOr<sym::ExprHandle>
+linearizeDisjointXors(sym::Store &store, sym::ExprHandle expression,
+                      ArrayRef<sym::PredHandle> assumptions) {
+  llvm::DenseSet<sym::ExprHandle> visited;
+  SmallVector<sym::ExprSubstitution> rewrites;
+  if (failed(collectDisjointXorRewrites(store, expression, assumptions, visited,
+                                        rewrites)))
+    return failure();
+  if (rewrites.empty())
+    return expression;
+  FailureOr<sym::ExprHandle> rewritten =
+      sym::substituteExpr(store, expression, rewrites);
+  if (failed(rewritten))
+    return failure();
+  return sym::simplifyExpr(store, *rewritten, assumptions);
+}
+
 static FailureOr<SlotMapping>
 buildSlotMapping(const MemoryAccess &access, sym::Store &store,
                  sym::ExprHandle blockSymbol, sym::ExprHandle slotSymbol,
                  sym::ExprHandle zero, int64_t slot, const MappedItem &item,
                  ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
-                 ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
+                 ArrayRef<PacketComponents> packetComponents,
                  ArrayRef<ActiveControl> controls,
+                 const PacketControl *packetControl,
                  PacketBindingState &bindingState) {
   SlotMapping result;
   result.logicalSlots.push_back(static_cast<unsigned>(slot));
   if (failed(appendAccessBindings(access, store, item, result)))
     return failure();
   if (failed(appendActiveControls(store, controls, bindingState, result)))
+    return failure();
+  if (failed(appendPacketControl(store, packetControl, bindingState, result)))
     return failure();
   FailureOr<SmallVector<sym::ExprSubstitution>> substitutions =
       buildSlotSubstitutions(access, store, slotSymbol, slot,
@@ -735,8 +1267,9 @@ buildSlotMapping(const MemoryAccess &access, sym::Store &store,
     return failure();
   MappingCoordinates coordinates =
       getMappingCoordinates(access, blockSymbol, zero);
+  ArrayRef<sym::PredHandle> simplificationAssumptions = result.assumptions;
   FailureOr<MappingCoordinates> specialized = specializeCoordinates(
-      store, coordinates, *substitutions, result.assumptions);
+      store, coordinates, *substitutions, simplificationAssumptions);
   if (failed(specialized))
     return failure();
   FailureOr<int64_t> baseIndex = validateLocalCoordinates(
@@ -746,11 +1279,17 @@ buildSlotMapping(const MemoryAccess &access, sym::Store &store,
   std::array<sym::ExprSubstitution, 1> blockSubstitution{
       sym::ExprSubstitution{blockSymbol, zero}};
   FailureOr<MappingCoordinates> local = specializeCoordinates(
-      store, *specialized, blockSubstitution, result.assumptions);
+      store, *specialized, blockSubstitution, simplificationAssumptions);
   if (failed(local))
     return failure();
+  result.materializationBitOffset = local->bitOffset;
+  FailureOr<sym::ExprHandle> bitOffset =
+      linearizeDisjointXors(store, local->bitOffset, simplificationAssumptions);
+  if (failed(bitOffset))
+    return failure();
+  local->bitOffset = *bitOffset;
   FailureOr<sym::ExprHandle> byteOffset =
-      getByteOffset(store, local->bitOffset, result.assumptions);
+      getByteOffset(store, local->bitOffset, simplificationAssumptions);
   if (failed(byteOffset))
     return failure();
   result.base = local->base;
@@ -766,6 +1305,439 @@ static SmallVector<sym::PredHandle> combineAssumptions(const SlotMapping &lhs,
   SmallVector<sym::PredHandle> assumptions = lhs.assumptions;
   llvm::append_range(assumptions, rhs.assumptions);
   return assumptions;
+}
+
+static SmallVector<sym::PredHandle>
+combineNonActivationAssumptions(const SlotMapping &lhs,
+                                const SlotMapping &rhs) {
+  SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
+  llvm::erase_if(assumptions, [&](sym::PredHandle predicate) {
+    return (lhs.activationPredicate && *lhs.activationPredicate == predicate) ||
+           (rhs.activationPredicate && *rhs.activationPredicate == predicate);
+  });
+  return assumptions;
+}
+
+static bool predicateImplies(sym::Store &store, sym::PredHandle lhs,
+                             sym::PredHandle rhs,
+                             ArrayRef<sym::PredHandle> assumptions) {
+  SmallVector<sym::PredHandle> withLhs(assumptions);
+  withLhs.push_back(lhs);
+  return sym::checkPredicate(store, rhs, withLhs) == sym::CheckResult::True;
+}
+
+static bool isOrderedComparison(sym::PredCmpOp comparison) {
+  switch (comparison) {
+  case sym::PredCmpOp::Lt:
+  case sym::PredCmpOp::Le:
+  case sym::PredCmpOp::Gt:
+  case sym::PredCmpOp::Ge:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isReversedComparison(sym::PredCmpOp comparison) {
+  return comparison == sym::PredCmpOp::Gt || comparison == sym::PredCmpOp::Ge;
+}
+
+static bool isStrictComparison(sym::PredCmpOp comparison) {
+  return comparison == sym::PredCmpOp::Lt || comparison == sym::PredCmpOp::Gt;
+}
+
+static FailureOr<sym::ExprHandle>
+getStrictComparisonResidual(sym::Store &store, sym::PredHandle predicate) {
+  sym::PredView view(predicate);
+  std::optional<sym::PredCmpOp> comparison = view.getCmpOp();
+  if (!comparison)
+    return failure();
+  if (!isOrderedComparison(*comparison))
+    return failure();
+
+  sym::ExprHandle lhs = view.getCmpLhs();
+  sym::ExprHandle rhs = view.getCmpRhs();
+  if (isReversedComparison(*comparison))
+    std::swap(lhs, rhs);
+  FailureOr<sym::ExprHandle> residual =
+      sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
+  if (failed(residual))
+    return failure();
+  if (isStrictComparison(*comparison))
+    return residual;
+
+  FailureOr<sym::ExprHandle> one = sym::composeExprInt(store, 1);
+  if (failed(one))
+    return failure();
+  return sym::composeExprBinary(store, *residual, sym::ExprBinaryOp::Sub, *one);
+}
+
+static std::optional<int64_t>
+getConstantDifference(sym::Store &store, sym::ExprHandle lhs,
+                      sym::ExprHandle rhs,
+                      ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> difference =
+      sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
+  if (failed(difference))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(store, *difference, assumptions);
+  if (failed(simplified))
+    return std::nullopt;
+  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(*simplified))
+    return value;
+  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *simplified);
+  if (failed(expanded))
+    return std::nullopt;
+  simplified = sym::simplifyExpr(store, *expanded, assumptions);
+  if (failed(simplified))
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(*simplified);
+}
+
+static void appendModulus(sym::ExprHandle expression,
+                          SmallVectorImpl<int64_t> &moduli) {
+  sym::ExprView view(expression);
+  if (view.getKind() != sym::ExprKind::Mod)
+    return;
+  std::optional<int64_t> modulus =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  if (!modulus || *modulus <= 1)
+    return;
+  if (!llvm::is_contained(moduli, *modulus))
+    moduli.push_back(*modulus);
+
+  // Legal memory transaction widths are powers of two. A divisibility fact
+  // also proves every power-of-two factor, which may match a narrower packet.
+  for (int64_t factor = 2; *modulus % factor == 0; factor *= 2) {
+    if (!llvm::is_contained(moduli, factor))
+      moduli.push_back(factor);
+    if (factor == *modulus)
+      break;
+  }
+}
+
+static void collectAssumptionModuli(sym::PredHandle predicate,
+                                    SmallVectorImpl<int64_t> &moduli) {
+  sym::PredView view(predicate);
+  if (view.getKind() == sym::PredKind::Cmp) {
+    appendModulus(view.getCmpLhs(), moduli);
+    appendModulus(view.getCmpRhs(), moduli);
+    return;
+  }
+  if (view.getKind() == sym::PredKind::Not) {
+    collectAssumptionModuli(view.getUnaryArg(), moduli);
+    return;
+  }
+  for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
+    collectAssumptionModuli(view.getLogicArg(index), moduli);
+}
+
+static std::optional<int64_t> getAdditiveConstant(sym::ExprHandle expression) {
+  sym::ExprView view(expression);
+  if (std::optional<int64_t> literal = sym::getIntegerLiteralValue(expression))
+    return literal;
+  if (view.getKind() == sym::ExprKind::Add)
+    return sym::getIntegerLiteralValue(view.getAddConstant());
+  return int64_t{0};
+}
+
+static FailureOr<sym::ExprHandle>
+normalizeComparisonResidual(sym::Store &store, sym::PredHandle predicate,
+                            ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> residual =
+      getStrictComparisonResidual(store, predicate);
+  if (failed(residual))
+    return failure();
+  return linearizeDisjointXors(store, *residual, assumptions);
+}
+
+static bool
+provesRemainderBelowBoundary(sym::Store &store, sym::ExprHandle residual,
+                             sym::ExprHandle divisor, sym::ExprHandle boundary,
+                             ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> remainder =
+      sym::composeExprBinary(store, residual, sym::ExprBinaryOp::Mod, divisor);
+  if (failed(remainder))
+    return false;
+  if (!sym::provablyDefined(store, *remainder, assumptions))
+    return false;
+  FailureOr<sym::PredHandle> staysInBlock =
+      sym::composePredCmp(store, *remainder, sym::PredCmpOp::Lt, boundary);
+  if (failed(staysInBlock))
+    return false;
+  return sym::checkPredicate(store, *staysInBlock, assumptions) ==
+         sym::CheckResult::True;
+}
+
+static std::optional<int64_t> getAlignedResidue(sym::ExprHandle residual,
+                                                int64_t modulus,
+                                                uint64_t distance) {
+  std::optional<int64_t> constant = getAdditiveConstant(residual);
+  if (!constant)
+    return std::nullopt;
+  int64_t residue = *constant % modulus;
+  if (residue < 0)
+    residue += modulus;
+  if (static_cast<uint64_t>(residue) + distance >=
+      static_cast<uint64_t>(modulus))
+    return std::nullopt;
+  return residue;
+}
+
+static bool provesAlignedGrid(sym::Store &store, sym::ExprHandle residual,
+                              sym::ExprHandle divisor, int64_t modulus,
+                              uint64_t distance,
+                              ArrayRef<sym::PredHandle> assumptions) {
+  std::optional<int64_t> residue =
+      getAlignedResidue(residual, modulus, distance);
+  if (!residue)
+    return false;
+  FailureOr<sym::ExprHandle> residueExpr = sym::composeExprInt(store, *residue);
+  if (failed(residueExpr))
+    return false;
+  FailureOr<sym::ExprHandle> gridBase = sym::composeExprBinary(
+      store, residual, sym::ExprBinaryOp::Sub, *residueExpr);
+  if (failed(gridBase))
+    return false;
+  FailureOr<sym::ExprHandle> remainder =
+      sym::composeExprBinary(store, *gridBase, sym::ExprBinaryOp::Mod, divisor);
+  if (failed(remainder))
+    return false;
+  if (!sym::provablyDefined(store, *remainder, assumptions))
+    return false;
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  if (failed(zero))
+    return false;
+  FailureOr<sym::PredHandle> aligned =
+      sym::composePredCmp(store, *remainder, sym::PredCmpOp::Eq, *zero);
+  if (failed(aligned))
+    return false;
+  return sym::checkPredicate(store, *aligned, assumptions) ==
+         sym::CheckResult::True;
+}
+
+static bool alignedWithinModulus(sym::Store &store,
+                                 sym::ExprHandle lowerResidual,
+                                 uint64_t distance, int64_t modulus,
+                                 ArrayRef<sym::PredHandle> assumptions) {
+  if (static_cast<uint64_t>(modulus) <= distance)
+    return false;
+  FailureOr<sym::ExprHandle> divisor = sym::composeExprInt(store, modulus);
+  FailureOr<sym::ExprHandle> boundary =
+      sym::composeExprInt(store, modulus - static_cast<int64_t>(distance));
+  if (failed(divisor) || failed(boundary))
+    return false;
+  if (provesRemainderBelowBoundary(store, lowerResidual, *divisor, *boundary,
+                                   assumptions))
+    return true;
+  return provesAlignedGrid(store, lowerResidual, *divisor, modulus, distance,
+                           assumptions);
+}
+
+static uint64_t getAbsoluteDistance(int64_t delta) {
+  return static_cast<uint64_t>(delta < 0 ? -delta : delta);
+}
+
+static sym::ExprHandle getLowerResidual(int64_t delta,
+                                        sym::ExprHandle lhsResidual,
+                                        sym::ExprHandle rhsResidual) {
+  return delta > 0 ? lhsResidual : rhsResidual;
+}
+
+static bool
+alignedComparisonsEquivalent(sym::Store &store, sym::PredHandle lhs,
+                             sym::PredHandle rhs,
+                             ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> lhsResidual =
+      normalizeComparisonResidual(store, lhs, assumptions);
+  FailureOr<sym::ExprHandle> rhsResidual =
+      normalizeComparisonResidual(store, rhs, assumptions);
+  if (failed(lhsResidual) || failed(rhsResidual))
+    return false;
+  std::optional<int64_t> delta =
+      getConstantDifference(store, *rhsResidual, *lhsResidual, assumptions);
+  if (!delta || *delta == std::numeric_limits<int64_t>::min())
+    return false;
+  if (*delta == 0)
+    return true;
+
+  uint64_t distance = getAbsoluteDistance(*delta);
+  sym::ExprHandle lowerResidual =
+      getLowerResidual(*delta, *lhsResidual, *rhsResidual);
+  SmallVector<int64_t> moduli;
+  for (sym::PredHandle assumption : assumptions)
+    collectAssumptionModuli(assumption, moduli);
+  for (int64_t modulus : moduli)
+    if (alignedWithinModulus(store, lowerResidual, distance, modulus,
+                             assumptions))
+      return true;
+  return false;
+}
+
+static bool
+equivalentActivationPredicates(sym::Store &store, sym::PredHandle lhs,
+                               sym::PredHandle rhs,
+                               ArrayRef<sym::PredHandle> assumptions);
+
+struct UnmatchedLogicArgs {
+  SmallVector<uint32_t> lhs;
+  SmallVector<uint32_t> rhs;
+};
+
+static std::optional<uint32_t> findExactLogicArg(sym::PredView rhs,
+                                                 sym::PredHandle sought,
+                                                 ArrayRef<uint8_t> matched) {
+  for (uint32_t index : llvm::seq<uint32_t>(0, rhs.getLogicArgCount()))
+    if (!matched[index] && sought == rhs.getLogicArg(index))
+      return index;
+  return std::nullopt;
+}
+
+static UnmatchedLogicArgs collectUnmatchedLogicArgs(sym::PredView lhs,
+                                                    sym::PredView rhs) {
+  uint32_t count = lhs.getLogicArgCount();
+  SmallVector<uint8_t> rhsMatched(count, false);
+  UnmatchedLogicArgs result;
+  for (uint32_t lhsIndex : llvm::seq<uint32_t>(0, count)) {
+    std::optional<uint32_t> exact =
+        findExactLogicArg(rhs, lhs.getLogicArg(lhsIndex), rhsMatched);
+    if (!exact) {
+      result.lhs.push_back(lhsIndex);
+      continue;
+    }
+    rhsMatched[*exact] = true;
+  }
+  for (uint32_t rhsIndex : llvm::seq<uint32_t>(0, count))
+    if (!rhsMatched[rhsIndex])
+      result.rhs.push_back(rhsIndex);
+  return result;
+}
+
+static SmallVector<SmallVector<uint8_t>>
+buildLogicEquivalenceMatrix(sym::Store &store, sym::PredView lhs,
+                            sym::PredView rhs,
+                            const UnmatchedLogicArgs &remaining,
+                            ArrayRef<sym::PredHandle> assumptions) {
+  uint32_t count = remaining.lhs.size();
+  SmallVector<SmallVector<uint8_t>> equivalent(count);
+  for (uint32_t lhsIndex : llvm::seq<uint32_t>(0, count)) {
+    equivalent[lhsIndex].reserve(count);
+    for (uint32_t rhsIndex : llvm::seq<uint32_t>(0, count))
+      equivalent[lhsIndex].push_back(equivalentActivationPredicates(
+          store, lhs.getLogicArg(remaining.lhs[lhsIndex]),
+          rhs.getLogicArg(remaining.rhs[rhsIndex]), assumptions));
+  }
+  return equivalent;
+}
+
+static bool augmentLogicMatching(uint32_t lhsIndex,
+                                 ArrayRef<SmallVector<uint8_t>> equivalent,
+                                 SmallVectorImpl<int32_t> &matchedLhs,
+                                 SmallVectorImpl<uint8_t> &visited) {
+  for (uint32_t rhsIndex :
+       llvm::seq<uint32_t>(0, static_cast<uint32_t>(equivalent.size()))) {
+    if (!equivalent[lhsIndex][rhsIndex] || visited[rhsIndex])
+      continue;
+    visited[rhsIndex] = true;
+    if (matchedLhs[rhsIndex] < 0 ||
+        augmentLogicMatching(static_cast<uint32_t>(matchedLhs[rhsIndex]),
+                             equivalent, matchedLhs, visited)) {
+      matchedLhs[rhsIndex] = lhsIndex;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool hasPerfectLogicMatching(ArrayRef<SmallVector<uint8_t>> equivalent) {
+  uint32_t count = equivalent.size();
+  SmallVector<int32_t> matchedLhs(count, -1);
+  for (uint32_t lhsIndex : llvm::seq<uint32_t>(0, count)) {
+    SmallVector<uint8_t> visited(count, false);
+    if (!augmentLogicMatching(lhsIndex, equivalent, matchedLhs, visited))
+      return false;
+  }
+  return true;
+}
+
+static bool equivalentLogicPredicates(sym::Store &store, sym::PredView lhs,
+                                      sym::PredView rhs,
+                                      ArrayRef<sym::PredHandle> assumptions) {
+  uint32_t count = lhs.getLogicArgCount();
+  if (count != rhs.getLogicArgCount())
+    return false;
+  UnmatchedLogicArgs remaining = collectUnmatchedLogicArgs(lhs, rhs);
+  SmallVector<SmallVector<uint8_t>> equivalent =
+      buildLogicEquivalenceMatrix(store, lhs, rhs, remaining, assumptions);
+  return hasPerfectLogicMatching(equivalent);
+}
+
+static bool
+equivalentActivationPredicates(sym::Store &store, sym::PredHandle lhs,
+                               sym::PredHandle rhs,
+                               ArrayRef<sym::PredHandle> assumptions) {
+  if (lhs == rhs)
+    return true;
+  sym::PredView lhsView(lhs);
+  sym::PredView rhsView(rhs);
+  if (lhsView.getKind() != rhsView.getKind())
+    return false;
+
+  switch (lhsView.getKind()) {
+  case sym::PredKind::Cmp:
+    return alignedComparisonsEquivalent(store, lhs, rhs, assumptions);
+  case sym::PredKind::Not:
+    return equivalentActivationPredicates(store, lhsView.getUnaryArg(),
+                                          rhsView.getUnaryArg(), assumptions);
+  case sym::PredKind::And:
+  case sym::PredKind::Or:
+    return equivalentLogicPredicates(store, lhsView, rhsView, assumptions);
+  case sym::PredKind::True:
+  case sym::PredKind::False:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static sym::PredHandle getActivationRelation(const SlotMapping &mapping) {
+  return mapping.activationRelationPredicate
+             ? mapping.activationRelationPredicate
+             : *mapping.activationPredicate;
+}
+
+static bool mutuallyImply(sym::Store &store, sym::PredHandle lhs,
+                          sym::PredHandle rhs,
+                          ArrayRef<sym::PredHandle> assumptions) {
+  return predicateImplies(store, lhs, rhs, assumptions) &&
+         predicateImplies(store, rhs, lhs, assumptions);
+}
+
+static bool sameActivation(sym::Store &store, const SlotMapping &lhs,
+                           const SlotMapping &rhs) {
+  if (!lhs.packetCondition)
+    return !rhs.packetCondition;
+  if (!rhs.packetCondition)
+    return false;
+  if (lhs.packetCondition == rhs.packetCondition)
+    return true;
+  if (!lhs.activationPredicate)
+    return false;
+  if (!rhs.activationPredicate)
+    return false;
+  sym::PredHandle lhsPredicate = *lhs.activationPredicate;
+  sym::PredHandle rhsPredicate = *rhs.activationPredicate;
+  if (lhsPredicate == rhsPredicate)
+    return true;
+  SmallVector<sym::PredHandle> assumptions =
+      combineNonActivationAssumptions(lhs, rhs);
+  sym::PredHandle lhsRelation = getActivationRelation(lhs);
+  sym::PredHandle rhsRelation = getActivationRelation(rhs);
+  if (equivalentActivationPredicates(store, lhsRelation, rhsRelation,
+                                     assumptions))
+    return true;
+  return mutuallyImply(store, lhsPredicate, rhsPredicate, assumptions);
 }
 
 static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
@@ -798,6 +1770,8 @@ static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
 
 static bool samePoint(sym::Store &store, const SlotMapping &lhs,
                       const SlotMapping &rhs) {
+  if (!sameActivation(store, lhs, rhs))
+    return false;
   SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
   return proveEqual(store, lhs.base, rhs.base, assumptions) &&
          proveEqual(store, lhs.targetBlock, rhs.targetBlock, assumptions) &&
@@ -815,13 +1789,15 @@ static bool adjacent(sym::Store &store, const SlotMapping &lhs,
     return false;
   FailureOr<sym::ExprHandle> expected = sym::composeExprBinary(
       store, lhs.bitOffset, sym::ExprBinaryOp::Add, *delta);
-  return succeeded(expected) &&
-         proveEqual(store, *expected, rhs.bitOffset, assumptions);
+  if (failed(expected) ||
+      !proveEqual(store, *expected, rhs.bitOffset, assumptions))
+    return false;
+  return sameActivation(store, lhs, rhs);
 }
 
-static SmallVector<SlotMapping>
-deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping> slots) {
-  SmallVector<SlotMapping> unique;
+static SmallVector<SlotMapping, 4>
+deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots) {
+  SmallVector<SlotMapping, 4> unique;
   for (SlotMapping &slot : slots) {
     auto found = llvm::find_if(unique, [&](const SlotMapping &candidate) {
       return samePoint(store, candidate, slot);
@@ -836,8 +1812,8 @@ deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping> slots) {
 }
 
 static SmallVector<SmallVector<unsigned>>
-buildSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
-                    int64_t elementBits) {
+buildDenseSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
+                         int64_t elementBits) {
   size_t count = slots.size();
   SmallVector<SmallVector<unsigned>> edges(count);
   for (unsigned lhs = 0; lhs < count; ++lhs)
@@ -845,6 +1821,111 @@ buildSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
       if (lhs != rhs && adjacent(store, slots[lhs], slots[rhs], elementBits))
         edges[lhs].push_back(rhs);
   return edges;
+}
+
+using SparseAddressKey =
+    std::pair<sym::ExprHandle, std::pair<sym::ExprHandle, sym::ExprHandle>>;
+
+static FailureOr<sym::ExprHandle>
+canonicalizeAddressExpr(sym::Store &store, sym::ExprHandle expression,
+                        ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(store, expression, assumptions);
+  if (failed(simplified))
+    return failure();
+  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *simplified);
+  if (failed(expanded))
+    return *simplified;
+  FailureOr<sym::ExprHandle> canonical =
+      sym::simplifyExpr(store, *expanded, assumptions);
+  if (succeeded(canonical))
+    return *canonical;
+  return *simplified;
+}
+
+static FailureOr<std::pair<sym::ExprHandle, int64_t>>
+splitAddressConstant(sym::Store &store, sym::ExprHandle expression,
+                     ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> canonical =
+      canonicalizeAddressExpr(store, expression, assumptions);
+  if (failed(canonical))
+    return failure();
+  std::optional<int64_t> constant = getAdditiveConstant(*canonical);
+  if (!constant)
+    return failure();
+  FailureOr<sym::ExprHandle> constantExpr =
+      sym::composeExprInt(store, *constant);
+  if (failed(constantExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> origin = sym::composeExprBinary(
+      store, *canonical, sym::ExprBinaryOp::Sub, *constantExpr);
+  if (failed(origin))
+    return failure();
+  FailureOr<sym::ExprHandle> canonicalOrigin =
+      canonicalizeAddressExpr(store, *origin, assumptions);
+  if (failed(canonicalOrigin))
+    return failure();
+  return std::pair<sym::ExprHandle, int64_t>{*canonicalOrigin, *constant};
+}
+
+using SparseOffsetBuckets = llvm::DenseMap<int64_t, SmallVector<unsigned>>;
+using SparseAddressGroups =
+    llvm::DenseMap<SparseAddressKey, SparseOffsetBuckets>;
+
+static SparseAddressGroups groupSparseAddresses(sym::Store &store,
+                                                ArrayRef<SlotMapping> slots) {
+  SparseAddressGroups groups;
+  for (auto [index, slot] : llvm::enumerate(slots)) {
+    ArrayRef<sym::PredHandle> assumptions = slot.assumptions;
+    FailureOr<sym::ExprHandle> base =
+        canonicalizeAddressExpr(store, slot.base, assumptions);
+    FailureOr<sym::ExprHandle> targetBlock =
+        canonicalizeAddressExpr(store, slot.targetBlock, assumptions);
+    FailureOr<std::pair<sym::ExprHandle, int64_t>> offset =
+        splitAddressConstant(store, slot.bitOffset, assumptions);
+    if (failed(base) || failed(targetBlock) || failed(offset))
+      continue;
+    SparseAddressKey key{*base, {*targetBlock, offset->first}};
+    groups[key][offset->second].push_back(index);
+  }
+  return groups;
+}
+
+static void
+appendSparseGroupEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
+                       SparseOffsetBuckets &buckets, int64_t elementBits,
+                       SmallVectorImpl<SmallVector<unsigned>> &edges) {
+  for (auto &bucket : buckets) {
+    int64_t offset = bucket.first;
+    if (offset > std::numeric_limits<int64_t>::max() - elementBits)
+      continue;
+    auto successor = buckets.find(offset + elementBits);
+    if (successor == buckets.end())
+      continue;
+    for (unsigned lhs : bucket.second)
+      for (unsigned rhs : successor->second)
+        if (adjacent(store, slots[lhs], slots[rhs], elementBits))
+          edges[lhs].push_back(rhs);
+  }
+}
+
+static SmallVector<SmallVector<unsigned>>
+buildSparseSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
+                          int64_t elementBits) {
+  SparseAddressGroups groups = groupSparseAddresses(store, slots);
+  SmallVector<SmallVector<unsigned>> edges(slots.size());
+  for (auto &group : groups)
+    appendSparseGroupEdges(store, slots, group.second, elementBits, edges);
+  return edges;
+}
+
+static SmallVector<SmallVector<unsigned>>
+buildSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
+                    int64_t elementBits) {
+  constexpr size_t denseLimit = 64;
+  if (slots.size() <= denseLimit)
+    return buildDenseSuccessorGraph(store, slots, elementBits);
+  return buildSparseSuccessorGraph(store, slots, elementBits);
 }
 
 static SmallVector<SmallVector<unsigned>>
@@ -1178,11 +2259,15 @@ planTransactions(sym::Store &store, ArrayRef<SlotMapping> slots,
 }
 
 static FailureOr<GatherPlan>
-buildGenericGatherPlan(sym::Store &store, ArrayRef<SlotMapping> mappings,
-                       int64_t elementBits) {
+buildGenericGatherPlan(const MemoryAccess &access, sym::Store &store,
+                       ArrayRef<SlotMapping> mappings, int64_t elementBits) {
   GatherPlan plan;
-  plan.physicalSlots = deduplicateGatherSlots(
-      store, SmallVector<SlotMapping>(mappings.begin(), mappings.end()));
+  plan.physicalSlots =
+      access.packetWhere
+          ? SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end())
+          : deduplicateGatherSlots(
+                store,
+                SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()));
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
       planTransactions(store, plan.physicalSlots, elementBits);
   if (failed(transactions))
@@ -1352,23 +2437,25 @@ planGatherTransactions(const MemoryAccess &access, sym::Store &store,
                        ArrayRef<SlotMapping> mappings, int64_t elementBits) {
   SmallVector<wave::memory_lowering::GatherTransactionCandidate>
       providerCandidates = getProviderGatherCandidates(access, store, mappings);
+  if (access.packetWhere)
+    return buildGenericGatherPlan(access, store, mappings, elementBits);
   if (providerCandidates.empty() || mappings.size() > kMaxExactCoverNodes)
-    return buildGenericGatherPlan(store, mappings, elementBits);
+    return buildGenericGatherPlan(access, store, mappings, elementBits);
 
   GatherPlan plan;
   plan.physicalSlots = deduplicateGatherSlots(
-      store, SmallVector<SlotMapping>(mappings.begin(), mappings.end()));
+      store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()));
   SmallVector<SmallVector<unsigned>> edges =
       buildSuccessorGraph(store, plan.physicalSlots, elementBits);
   FailureOr<SmallVector<TransactionCandidate>> genericCandidates =
       enumerateTransactionCandidates(edges, elementBits);
   if (failed(genericCandidates))
-    return buildGenericGatherPlan(store, mappings, elementBits);
+    return buildGenericGatherPlan(access, store, mappings, elementBits);
 
   appendGenericGatherCandidates(plan, *genericCandidates, mappings.size());
   appendProviderGatherCandidates(plan, providerCandidates, mappings.size());
   if (failed(selectGatherCover(plan, mappings.size())))
-    return buildGenericGatherPlan(store, mappings, elementBits);
+    return buildGenericGatherPlan(access, store, mappings, elementBits);
   return plan;
 }
 
@@ -1428,6 +2515,32 @@ static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
   return index.getResult();
 }
 
+static Value findElementOffsetMaterialization(const SlotMapping &slot,
+                                              sym::ExprHandle byteOffset,
+                                              int64_t elementBits,
+                                              sym::Store &store) {
+  if (elementBits <= 0 || elementBits % 8 != 0)
+    return {};
+  FailureOr<sym::ExprHandle> elementOffset =
+      divideExactly(store, byteOffset, elementBits / 8, slot.assumptions);
+  if (failed(elementOffset))
+    return {};
+  FailureOr<sym::ExprHandle> materializationElementOffset = divideExactly(
+      store, slot.materializationBitOffset, elementBits, slot.assumptions);
+  for (const MaterializationCandidate &candidate :
+       slot.materializationCandidates) {
+    if (!isLegalPtrAddOffset(candidate.value.getType()))
+      continue;
+    if ((succeeded(materializationElementOffset) &&
+         proveEqual(store, *materializationElementOffset, candidate.expression,
+                    slot.assumptions)) ||
+        proveEqual(store, *elementOffset, candidate.expression,
+                   slot.assumptions))
+      return candidate.value;
+  }
+  return {};
+}
+
 static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
                          unsigned index, SmallVectorImpl<Value> &byteBases) {
   Value &byteBase = byteBases[index];
@@ -1444,32 +2557,69 @@ static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
   return byteBase;
 }
 
+static void materializePredicatedByteBases(IRRewriter &rewriter,
+                                           const MemoryAccess &access,
+                                           SmallVectorImpl<Value> &byteBases) {
+  if (!access.packetWhere)
+    return;
+  for (unsigned index : llvm::seq<unsigned>(0, access.bases.size()))
+    (void)getByteBase(rewriter, access, index, byteBases);
+}
+
+static std::optional<int64_t>
+getTypedPointerElementBits(const MemoryAccess &access, unsigned baseIndex) {
+  PtrType sourceType = cast<PtrType>(access.bases[baseIndex].getType());
+  VectorType packet = cast<VectorType>(access.packetType.getElementType());
+  Type sourceElement = sourceType.getElementType();
+  if (!sourceElement)
+    return std::nullopt;
+  if (sourceElement != packet.getElementType())
+    return std::nullopt;
+  if (!sourceElement.isIntOrFloat())
+    return std::nullopt;
+  int64_t elementBits = sourceElement.getIntOrFloatBitWidth();
+  if (elementBits <= 0)
+    return std::nullopt;
+  if (elementBits % 8 != 0)
+    return std::nullopt;
+  return elementBits;
+}
+
+static Type getPointerAddResultType(MLIRContext *context, PtrType pointerType,
+                                    Value offset) {
+  if (SimdType simd = dyn_cast<SimdType>(offset.getType()))
+    return SimdType::get(context, pointerType, simd.getWidth());
+  return pointerType;
+}
+
 static FailureOr<Value>
 materializeTypedPointer(IRRewriter &rewriter, const MemoryAccess &access,
                         const SlotMapping &slot, sym::ExprHandle byteOffset,
                         int64_t baseIndex, sym::Store &store) {
   Value source = access.bases[baseIndex];
   PtrType sourceType = cast<PtrType>(source.getType());
-  VectorType packet = cast<VectorType>(access.packetType.getElementType());
-  Type sourceElement = sourceType.getElementType();
-  if (!sourceElement || sourceElement != packet.getElementType() ||
-      !sourceElement.isIntOrFloat())
+  std::optional<int64_t> elementBits =
+      getTypedPointerElementBits(access, baseIndex);
+  if (!elementBits)
     return failure();
-  int64_t elementBits = sourceElement.getIntOrFloatBitWidth();
-  if (elementBits <= 0 || elementBits % 8 != 0)
-    return failure();
+  if (Value candidate = findElementOffsetMaterialization(slot, byteOffset,
+                                                         *elementBits, store)) {
+    Type resultType =
+        getPointerAddResultType(access.op->getContext(), sourceType, candidate);
+    return PtrAddOp::create(rewriter, access.op->getLoc(), resultType, source,
+                            candidate)
+        .getResult();
+  }
   FailureOr<sym::ExprHandle> elementOffset =
-      divideExactly(store, byteOffset, elementBits / 8, slot.assumptions);
+      divideExactly(store, byteOffset, *elementBits / 8, slot.assumptions);
   if (failed(elementOffset))
     return failure();
   FailureOr<Value> offset =
       materializeExpr(rewriter, access, slot, *elementOffset);
   if (failed(offset))
     return failure();
-  Type resultType = sourceType;
-  if (SimdType simd = dyn_cast<SimdType>((*offset).getType()))
-    resultType =
-        SimdType::get(access.op->getContext(), sourceType, simd.getWidth());
+  Type resultType =
+      getPointerAddResultType(access.op->getContext(), sourceType, *offset);
   return PtrAddOp::create(rewriter, access.op->getLoc(), resultType, source,
                           *offset)
       .getResult();
@@ -1538,6 +2688,121 @@ static Value joinTokens(IRRewriter &rewriter, const MemoryAccess &access,
                         tokens);
 }
 
+struct PredicatedLoadResult {
+  Value value;
+  Value token;
+};
+
+static SlotMapping buildTransactionPoint(ArrayRef<SlotMapping> slots,
+                                         ArrayRef<unsigned> transaction,
+                                         unsigned addressPoint) {
+  SlotMapping point = slots[addressPoint];
+  for (unsigned nodeIndex : transaction) {
+    const SlotMapping &slot = slots[nodeIndex];
+    for (const NamedBinding &binding : slot.bindings) {
+      auto existing =
+          llvm::find_if(point.bindings, [&](const NamedBinding &it) {
+            return it.name == binding.name;
+          });
+      if (existing == point.bindings.end()) {
+        point.bindings.push_back(binding);
+        continue;
+      }
+      assert(existing->value == binding.value &&
+             "canonical binding names must identify one value");
+    }
+    for (sym::PredHandle assumption : slot.assumptions)
+      if (!llvm::is_contained(point.assumptions, assumption))
+        point.assumptions.push_back(assumption);
+  }
+  return point;
+}
+
+static FailureOr<PredicatedLoadResult>
+emitPredicatedLoad(IRRewriter &rewriter, const MemoryAccess &access,
+                   sym::Store &store, const SlotMapping &point,
+                   SmallVectorImpl<Value> &byteBases, Value condition,
+                   Type valueType, Value inactiveValue) {
+  SmallVector<Type> resultTypes{valueType, access.tokenType};
+  WhereOp where = WhereOp::create(rewriter, access.op->getLoc(), resultTypes,
+                                  ValueRange{condition});
+  Block &thenBlock = where.getThenRegion().emplaceBlock();
+  rewriter.setInsertionPointToStart(&thenBlock);
+  FailureOr<Value> ptr =
+      materializePointer(rewriter, access, point, store, byteBases);
+  if (failed(ptr))
+    return failure();
+  LoadOp load =
+      LoadOp::create(rewriter, access.op->getLoc(), valueType, access.tokenType,
+                     *ptr, access.dependency, access.cache);
+  YieldOp::create(rewriter, access.op->getLoc(),
+                  ValueRange{load.getValue(), load.getToken()});
+  Block &elseBlock = where.getElseRegion().emplaceBlock();
+  rewriter.setInsertionPointToStart(&elseBlock);
+  YieldOp::create(rewriter, access.op->getLoc(),
+                  ValueRange{inactiveValue, access.inactiveToken});
+  rewriter.setInsertionPointAfter(where);
+  return PredicatedLoadResult{where.getResult(0), where.getResult(1)};
+}
+
+static Value buildInactivePacketValue(IRRewriter &rewriter,
+                                      const MemoryAccess &access,
+                                      ArrayRef<unsigned> logicalSlots,
+                                      Type valueType) {
+  SmallVector<Value> values;
+  values.reserve(logicalSlots.size());
+  for (unsigned logicalSlot : logicalSlots) {
+    assert(logicalSlot < access.inactiveComponents.size() &&
+           "inactive packet slot must exist");
+    values.push_back(access.inactiveComponents[logicalSlot]);
+  }
+  if (values.size() == 1)
+    return values.front();
+  return PackOp::create(rewriter, access.op->getLoc(), valueType, values);
+}
+
+static Value buildInactiveTransactionValue(IRRewriter &rewriter,
+                                           const MemoryAccess &access,
+                                           ArrayRef<SlotMapping> slots,
+                                           ArrayRef<unsigned> transaction,
+                                           Type valueType) {
+  SmallVector<unsigned> logicalSlots;
+  logicalSlots.reserve(transaction.size());
+  for (unsigned nodeIndex : transaction) {
+    ArrayRef<unsigned> nodeSlots = slots[nodeIndex].logicalSlots;
+    assert(nodeSlots.size() == 1 &&
+           "packet-predicated gather must retain logical slots");
+    logicalSlots.push_back(nodeSlots.front());
+  }
+  return buildInactivePacketValue(rewriter, access, logicalSlots, valueType);
+}
+
+static FailureOr<Value> emitPredicatedStore(IRRewriter &rewriter,
+                                            const MemoryAccess &access,
+                                            sym::Store &symbolStore,
+                                            const SlotMapping &point,
+                                            SmallVectorImpl<Value> &byteBases,
+                                            Value condition, Value value) {
+  WhereOp where =
+      WhereOp::create(rewriter, access.op->getLoc(),
+                      TypeRange{access.tokenType}, ValueRange{condition});
+  Block &thenBlock = where.getThenRegion().emplaceBlock();
+  rewriter.setInsertionPointToStart(&thenBlock);
+  FailureOr<Value> ptr =
+      materializePointer(rewriter, access, point, symbolStore, byteBases);
+  if (failed(ptr))
+    return failure();
+  StoreOp store =
+      StoreOp::create(rewriter, access.op->getLoc(), access.tokenType, value,
+                      *ptr, access.dependency, access.cache);
+  YieldOp::create(rewriter, access.op->getLoc(), store.getToken());
+  Block &elseBlock = where.getElseRegion().emplaceBlock();
+  rewriter.setInsertionPointToStart(&elseBlock);
+  YieldOp::create(rewriter, access.op->getLoc(), access.inactiveToken);
+  rewriter.setInsertionPointAfter(where);
+  return where.getResult(0);
+}
+
 struct GatherEmissionState {
   SmallVector<Value> components;
   SmallVector<Value> tokens;
@@ -1578,7 +2843,8 @@ static LogicalResult emitProviderGatherCandidate(
     GatherEmissionState &state) {
   if (transaction.addressPoint >= mappings.size())
     return access.op->emitOpError("invalid target transaction address");
-  const SlotMapping &point = mappings[transaction.addressPoint];
+  SlotMapping point = buildTransactionPoint(mappings, transaction.slots,
+                                            transaction.addressPoint);
   FailureOr<Value> ptr =
       materializePointer(rewriter, access, point, transaction.byteOffset,
                          transaction.baseIndex, store, state.byteBases);
@@ -1608,18 +2874,33 @@ emitGenericGatherCandidate(IRRewriter &rewriter, const MemoryAccess &access,
                            const GatherCandidate &candidate, Type componentType,
                            GatherEmissionState &state) {
   ArrayRef<unsigned> transaction = candidate.physicalNodes;
-  const SlotMapping &first = plan.physicalSlots[transaction.front()];
-  FailureOr<Value> ptr =
-      materializePointer(rewriter, access, first, store, state.byteBases);
-  if (failed(ptr))
-    return access.op->emitOpError("failed to materialize mapped address");
+  SlotMapping point = buildTransactionPoint(plan.physicalSlots, transaction,
+                                            transaction.front());
   Type valueType = getTransactionType(access, transaction.size());
-  LoadOp load =
-      LoadOp::create(rewriter, access.op->getLoc(), valueType, access.tokenType,
-                     *ptr, access.dependency, access.cache);
-  state.tokens.push_back(load.getToken());
+  Value loadedValue;
+  if (access.packetWhere) {
+    Value inactiveValue = buildInactiveTransactionValue(
+        rewriter, access, plan.physicalSlots, transaction, valueType);
+    FailureOr<PredicatedLoadResult> load =
+        emitPredicatedLoad(rewriter, access, store, point, state.byteBases,
+                           point.packetCondition, valueType, inactiveValue);
+    if (failed(load))
+      return access.op->emitOpError("failed to materialize mapped address");
+    loadedValue = load->value;
+    state.tokens.push_back(load->token);
+  } else {
+    FailureOr<Value> ptr =
+        materializePointer(rewriter, access, point, store, state.byteBases);
+    if (failed(ptr))
+      return access.op->emitOpError("failed to materialize mapped address");
+    LoadOp load =
+        LoadOp::create(rewriter, access.op->getLoc(), valueType,
+                       access.tokenType, *ptr, access.dependency, access.cache);
+    loadedValue = load.getValue();
+    state.tokens.push_back(load.getToken());
+  }
   for (auto [physicalIndex, nodeIndex] : llvm::enumerate(transaction)) {
-    Value value = load.getValue();
+    Value value = loadedValue;
     if (transaction.size() > 1)
       value = ExtractOp::create(rewriter, access.op->getLoc(), componentType,
                                 value, physicalIndex);
@@ -1652,6 +2933,7 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
                             {},
                             SmallVector<Value>(access.bases.size()),
                             {}};
+  materializePredicatedByteBases(rewriter, access, state.byteBases);
   Type componentType = getComponentType(access);
 
   for (unsigned candidateIndex : plan.selected) {
@@ -1672,7 +2954,10 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
   if (failed(result))
     return failure();
   Value token = joinTokens(rewriter, access, state.tokens);
-  rewriter.replaceOp(access.op, {*result, token});
+  if (access.packetWhere)
+    rewriter.replaceOp(access.packetWhere, {*result, token});
+  else
+    rewriter.replaceOp(access.op, {*result, token});
   return success();
 }
 
@@ -1690,12 +2975,10 @@ lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
 
   SmallVector<Value> tokens;
   SmallVector<Value> byteBases(access.bases.size());
+  materializePredicatedByteBases(rewriter, access, byteBases);
   for (ArrayRef<unsigned> transaction : transactions) {
-    const SlotMapping &first = slots[transaction.front()];
-    FailureOr<Value> ptr =
-        materializePointer(rewriter, access, first, store, byteBases);
-    if (failed(ptr))
-      return access.op->emitOpError("failed to materialize mapped address");
+    SlotMapping point =
+        buildTransactionPoint(slots, transaction, transaction.front());
     SmallVector<Value> values;
     values.reserve(transaction.size());
     for (unsigned nodeIndex : transaction)
@@ -1704,14 +2987,33 @@ lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
     if (values.size() > 1)
       value = PackOp::create(rewriter, access.op->getLoc(),
                              getTransactionType(access, values.size()), values);
-    StoreOp store =
-        StoreOp::create(rewriter, access.op->getLoc(), access.tokenType, value,
-                        *ptr, access.dependency, access.cache);
-    tokens.push_back(store.getToken());
+    if (access.packetWhere) {
+      FailureOr<Value> token =
+          emitPredicatedStore(rewriter, access, store, point, byteBases,
+                              point.packetCondition, value);
+      if (failed(token))
+        return access.op->emitOpError("failed to materialize mapped address");
+      tokens.push_back(*token);
+    } else {
+      FailureOr<Value> ptr =
+          materializePointer(rewriter, access, point, store, byteBases);
+      if (failed(ptr))
+        return access.op->emitOpError("failed to materialize mapped address");
+      StoreOp store =
+          StoreOp::create(rewriter, access.op->getLoc(), access.tokenType,
+                          value, *ptr, access.dependency, access.cache);
+      tokens.push_back(store.getToken());
+    }
   }
 
   Value token = joinTokens(rewriter, access, tokens);
-  rewriter.replaceOp(access.op, token);
+  if (!access.packetWhere) {
+    rewriter.replaceOp(access.op, token);
+  } else if (access.packetWhere->getNumResults() == 1) {
+    rewriter.replaceOp(access.packetWhere, token);
+  } else {
+    rewriter.eraseOp(access.packetWhere);
+  }
   return success();
 }
 
@@ -1736,8 +3038,10 @@ static FailureOr<AccessShape> getAccessShape(const MemoryAccess &access) {
   }
   Attribute addressSpace =
       cast<PtrType>(access.bases.front().getType()).getAddressSpace();
-  if (!isa<GlobalAddressSpaceAttr, SharedAddressSpaceAttr>(addressSpace)) {
-    access.op->emitOpError("lowering requires global or shared pointer bases");
+  if (!isa<GlobalAddressSpaceAttr, SharedAddressSpaceAttr,
+           waveamd::BufferAddressSpaceAttr>(addressSpace)) {
+    access.op->emitOpError(
+        "lowering requires global, shared, or AMD buffer pointer bases");
     return failure();
   }
   return AccessShape{packet, slotCount, elementBits};
@@ -1833,20 +3137,33 @@ buildPacketComponentOffsets(const MemoryAccess &access, ValueRange values,
   return components;
 }
 
-static FailureOr<SmallVector<SmallVector<SymbolicOffset>>>
+static FailureOr<SmallVector<PacketComponents, 4>>
 buildPacketComponents(IRRewriter &rewriter, const MemoryAccess &access,
                       int64_t slotCount, WaveDialect &dialect,
                       DataFlowSolver &solver) {
-  SmallVector<SmallVector<SymbolicOffset>> packetComponents;
+  SmallVector<PacketComponents, 4> packetComponents;
   packetComponents.reserve(access.packetBindings.size());
-  for (Value binding : access.packetBindings) {
-    SmallVector<Value> values =
-        getPacketComponentValues(rewriter, access, binding, slotCount);
+  for (const PacketBinding &binding : access.packetBindings) {
+    SmallVector<Value> values;
+    if (binding.values.size() == 1 &&
+        isa<VectorType>(cast<SimdType>(binding.values.front().getType())
+                            .getElementType())) {
+      values = getPacketComponentValues(rewriter, access,
+                                        binding.values.front(), slotCount);
+    } else {
+      llvm::append_range(values, binding.values);
+    }
+    if (values.size() != static_cast<size_t>(slotCount)) {
+      access.op->emitOpError("packet binding component count does not match "
+                             "the accessed packet");
+      return failure();
+    }
     FailureOr<SmallVector<SymbolicOffset>> components =
         buildPacketComponentOffsets(access, values, dialect, solver);
     if (failed(components))
       return failure();
-    packetComponents.push_back(std::move(*components));
+    packetComponents.push_back(
+        PacketComponents{std::move(values), std::move(*components)});
   }
   return packetComponents;
 }
@@ -1858,6 +3175,8 @@ static SmallVector<ControlCondition> collectControlConditions(Operation *op) {
        child = parent, parent = parent->getParentOp()) {
     Region *region = child->getParentRegion();
     if (WhereOp where = dyn_cast<WhereOp>(parent)) {
+      if (where.getConditions().size() != 1)
+        continue;
       if (region == &where.getThenRegion())
         conditions.push_back({where.getCondition(), false});
       else if (region == &where.getElseRegion())
@@ -1889,21 +3208,46 @@ buildActiveControls(const MemoryAccess &access, WaveDialect &dialect,
   return controls;
 }
 
-static FailureOr<SmallVector<SlotMapping>>
-buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
-                        const MappingDomain &domain, int64_t slotCount,
-                        const MappedItem &item,
-                        ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
-                        ArrayRef<SmallVector<SymbolicOffset>> packetComponents,
-                        ArrayRef<ActiveControl> controls) {
+static FailureOr<SmallVector<PacketControl>>
+buildPacketControls(const MemoryAccess &access, WaveDialect &dialect,
+                    DataFlowSolver &solver) {
+  SmallVector<PacketControl> controls;
+  controls.reserve(access.packetConditions.size());
+  for (Value condition : access.packetConditions) {
+    FailureOr<std::optional<SymbolicPredicate>> predicate =
+        buildSymbolicIndexPredicate(condition, dialect, solver);
+    if (failed(predicate))
+      return failure();
+    FailureOr<std::optional<SymbolicPredicate>> relationPredicate =
+        buildSymbolicPacketPredicateRelation(condition, dialect, solver);
+    if (failed(relationPredicate))
+      return failure();
+    std::unique_ptr<SymbolicPredicate> relation;
+    if (*relationPredicate)
+      relation =
+          std::make_unique<SymbolicPredicate>(std::move(**relationPredicate));
+    controls.push_back(
+        PacketControl{std::move(*predicate), std::move(relation), condition});
+  }
+  return controls;
+}
+
+static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
+    const MemoryAccess &access, sym::Store &store, const MappingDomain &domain,
+    int64_t slotCount, const MappedItem &item,
+    ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
+    ArrayRef<PacketComponents> packetComponents,
+    ArrayRef<ActiveControl> controls, ArrayRef<PacketControl> packetControls) {
   PacketBindingState bindingState;
   seedPacketBindingState(access, item, bindingState);
-  SmallVector<SlotMapping> mappings;
+  SmallVector<SlotMapping, 4> mappings;
   mappings.reserve(slotCount);
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {
     FailureOr<SlotMapping> mapping = buildSlotMapping(
         access, store, domain.block, domain.slot, domain.zero, index, item,
-        bindingSubstitutions, packetComponents, controls, bindingState);
+        bindingSubstitutions, packetComponents, controls,
+        packetControls.empty() ? nullptr : &packetControls[index],
+        bindingState);
     if (failed(mapping)) {
       access.op->emitOpError(
           "mapping is not a defined, byte-addressable local memory point");
@@ -1914,11 +3258,13 @@ buildAccessSlotMappings(const MemoryAccess &access, sym::Store &store,
   return mappings;
 }
 
-static LogicalResult lowerAccess(IRRewriter &rewriter,
-                                 const MemoryAccess &access,
-                                 WaveDialect &dialect, DataFlowSolver &solver) {
+static FailureOr<PreparedAccessMappings>
+prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
+                      WaveDialect &dialect, DataFlowSolver &solver) {
   FailureOr<AccessShape> shape = getAccessShape(access);
   if (failed(shape))
+    return failure();
+  if (failed(preparePacketPredication(rewriter, access, shape->slotCount)))
     return failure();
   sym::Store &store = dialect.getSymbolStore();
   FailureOr<MappingDomain> domain = getMappingDomain(store);
@@ -1934,32 +3280,50 @@ static LogicalResult lowerAccess(IRRewriter &rewriter,
       getMappedItem(rewriter, access, store, needsItem);
   if (failed(item))
     return failure();
-  FailureOr<SmallVector<SmallVector<SymbolicOffset>>> packetComponents =
+  FailureOr<SmallVector<PacketComponents, 4>> packetComponents =
       buildPacketComponents(rewriter, access, shape->slotCount, dialect,
                             solver);
   if (failed(packetComponents))
     return failure();
   SmallVector<ActiveControl> controls =
       buildActiveControls(access, dialect, solver);
-  FailureOr<SmallVector<SlotMapping>> mappings = buildAccessSlotMappings(
+  FailureOr<SmallVector<PacketControl>> packetControls =
+      buildPacketControls(access, dialect, solver);
+  if (failed(packetControls))
+    return access.op->emitOpError(
+        "failed to analyze symbolic memory packet predicates");
+  FailureOr<SmallVector<SlotMapping, 4>> mappings = buildAccessSlotMappings(
       access, store, *domain, shape->slotCount, *item, *bindingSubstitutions,
-      *packetComponents, controls);
+      *packetComponents, controls, *packetControls);
   if (failed(mappings))
     return failure();
+  return PreparedAccessMappings{std::move(*mappings), *shape};
+}
+
+static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
+                                 WaveDialect &dialect, DataFlowSolver &solver) {
+  FailureOr<PreparedAccessMappings> prepared =
+      prepareAccessMappings(rewriter, access, dialect, solver);
+  if (failed(prepared))
+    return failure();
+  sym::Store &store = dialect.getSymbolStore();
+  if (access.packetWhere)
+    rewriter.setInsertionPoint(access.packetWhere);
   if (access.gather) {
-    FailureOr<GatherPlan> plan =
-        planGatherTransactions(access, store, *mappings, shape->elementBits);
+    FailureOr<GatherPlan> plan = planGatherTransactions(
+        access, store, prepared->mappings, prepared->shape.elementBits);
     if (failed(plan))
       return access.op->emitOpError(
           "packet cannot be covered by legal memory transactions");
-    return lowerGather(rewriter, access, store, *mappings, *plan);
+    return lowerGather(rewriter, access, store, prepared->mappings, *plan);
   }
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
-      planTransactions(store, *mappings, shape->elementBits);
+      planTransactions(store, prepared->mappings, prepared->shape.elementBits);
   if (failed(transactions))
     return access.op->emitOpError(
         "packet cannot be covered by legal memory transactions");
-  return lowerScatter(rewriter, access, store, *mappings, *transactions);
+  return lowerScatter(rewriter, access, store, prepared->mappings,
+                      *transactions);
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
