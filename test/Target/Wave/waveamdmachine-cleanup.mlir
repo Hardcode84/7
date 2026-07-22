@@ -33,6 +33,100 @@ func.func @reuse_uniform_workitem_shift(%lane: !waveamdmachine.reg<vgpr, 1>)
       : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
 }
 
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @combine_balanced_max_tree(
+// CHECK-SAME: [[A:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[B:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[C:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[D:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[E:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[F:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[G:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK-SAME: [[H:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+// CHECK: [[ABC:%.*]] = waveamdmachine.v_max3_f32 [[A]], [[B]], [[C]]
+// CHECK-NEXT: [[EFG:%.*]] = waveamdmachine.v_max3_f32 [[E]], [[F]], [[G]]
+// CHECK-NEXT: [[MID:%.*]] = waveamdmachine.v_max3_f32 [[ABC]], [[D]], [[EFG]]
+// CHECK-NEXT: [[RESULT:%.*]] = waveamdmachine.v_max_f32 [[MID]], [[H]]
+// CHECK-NEXT: return [[RESULT]]
+func.func @combine_balanced_max_tree(
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>,
+    %c: !waveamdmachine.reg<vgpr, 1>,
+    %d: !waveamdmachine.reg<vgpr, 1>,
+    %e: !waveamdmachine.reg<vgpr, 1>,
+    %f: !waveamdmachine.reg<vgpr, 1>,
+    %g: !waveamdmachine.reg<vgpr, 1>,
+    %h: !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1> {
+  %ab = waveamdmachine.v_max_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %cd = waveamdmachine.v_max_f32 %c, %d
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %ef = waveamdmachine.v_max_f32 %e, %f
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %gh = waveamdmachine.v_max_f32 %g, %h
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %abcd = waveamdmachine.v_max_f32 %ab, %cd
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %efgh = waveamdmachine.v_max_f32 %ef, %gh
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %result = waveamdmachine.v_max_f32 %abcd, %efgh
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %result : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @combine_rhs_max(
+// CHECK: [[RESULT:%.*]] = waveamdmachine.v_max3_f32 [[A:%[^,]+]], [[B:%[^,]+]], [[C:%[^ ]+]]
+// CHECK-NEXT: return [[RESULT]]
+func.func @combine_rhs_max(%a: !waveamdmachine.reg<vgpr, 1>,
+                           %b: !waveamdmachine.reg<vgpr, 1>,
+                           %c: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %bc = waveamdmachine.v_max_f32 %b, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %result = waveamdmachine.v_max_f32 %a, %bc
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %result : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @keep_shared_max(
+// CHECK: [[INNER:%.*]] = waveamdmachine.v_max_f32
+// CHECK-NEXT: [[OUTER:%.*]] = waveamdmachine.v_max_f32 [[INNER]],
+// CHECK-NOT: waveamdmachine.v_max3_f32
+// CHECK: return [[INNER]], [[OUTER]]
+func.func @keep_shared_max(%a: !waveamdmachine.reg<vgpr, 1>,
+                           %b: !waveamdmachine.reg<vgpr, 1>,
+                           %c: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %inner = waveamdmachine.v_max_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %outer = waveamdmachine.v_max_f32 %inner, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %inner, %outer
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 // CHECK-LABEL: func.func @keep_lane_varying_workitem_shift(
 // CHECK-SAME: [[LANE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-DAG: [[S5:%.*]] = waveamdmachine.imm 5

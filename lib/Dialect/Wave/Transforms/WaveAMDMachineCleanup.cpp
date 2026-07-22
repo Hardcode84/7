@@ -1331,6 +1331,73 @@ static bool scaleLoopCarries(func::FuncOp func) {
   return changed;
 }
 
+static VMaxF32Op getSingleUseMax(Value value) {
+  VMaxF32Op max = value.getDefiningOp<VMaxF32Op>();
+  if (!max || !max.getResult().hasOneUse())
+    return {};
+  return max;
+}
+
+static bool hasCombinableMaxChild(VMaxF32Op max) {
+  return getSingleUseMax(max.getLhs()) || getSingleUseMax(max.getRhs());
+}
+
+static Value createMax3(OpBuilder &builder, VMaxF32Op root, Value a, Value b,
+                        Value c) {
+  builder.setInsertionPoint(root);
+  return VMax3F32Op::create(builder, root.getLoc(), root.getResult().getType(),
+                            a, b, c)
+      .getResult();
+}
+
+static bool combineMaxTree(VMaxF32Op root, OpBuilder &builder) {
+  VMaxF32Op lhs = getSingleUseMax(root.getLhs());
+  VMaxF32Op rhs = getSingleUseMax(root.getRhs());
+  bool combineTree = lhs && rhs;
+  bool hasDeeperTree =
+      combineTree && (hasCombinableMaxChild(lhs) || hasCombinableMaxChild(rhs));
+  if (hasDeeperTree)
+    return false;
+
+  if (combineTree) {
+    Value max3 =
+        createMax3(builder, root, lhs.getLhs(), lhs.getRhs(), rhs.getLhs());
+    root.getLhsMutable().assign(max3);
+    root.getRhsMutable().assign(rhs.getRhs());
+    lhs.erase();
+    rhs.erase();
+    return true;
+  }
+
+  Value max3;
+  VMaxF32Op inner;
+  if (lhs) {
+    inner = lhs;
+    max3 = createMax3(builder, root, lhs.getLhs(), lhs.getRhs(), root.getRhs());
+  } else if (rhs) {
+    inner = rhs;
+    max3 = createMax3(builder, root, root.getLhs(), rhs.getLhs(), rhs.getRhs());
+  } else {
+    return false;
+  }
+
+  root.getResult().replaceAllUsesWith(max3);
+  root.erase();
+  inner.erase();
+  return true;
+}
+
+static bool combineMaxTrees(func::FuncOp func) {
+  SmallVector<VMaxF32Op> roots;
+  func.walk([&](VMaxF32Op max) { roots.push_back(max); });
+
+  OpBuilder builder(func.getContext());
+  bool changed = false;
+  for (VMaxF32Op root : roots)
+    changed |= combineMaxTree(root, builder);
+  return changed;
+}
+
 static Value findM0Result(Operation *op) {
   for (Value result : op->getResults())
     if (isa<M0Type>(result.getType()))
@@ -1535,6 +1602,7 @@ struct WaveAMDMachineCleanupPass
         changed = *d16Changed;
         changed |= hoistFunction(func);
         changed |= scaleLoopCarries(func);
+        changed |= combineMaxTrees(func);
         changed |= chainDmaM0Increments(func);
         changed |= foldVccCndmask(func);
         FailureOr<bool> uniformShiftChanged =

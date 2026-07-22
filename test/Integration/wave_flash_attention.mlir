@@ -8,6 +8,9 @@
 // RUN: %python %S/../../examples/wave/flash_attention.py --chip=%chip \
 // RUN:   --block-m=16 --block-n=16 --seq-n=32 --head-dim=32 --print-flops \
 // RUN:   | FileCheck %s --check-prefix=FLOPS
+// RUN: %python %S/../../examples/wave/flash_attention.py --chip=%chip \
+// RUN:   --block-m=16 --block-n=16 --seq-n=32 --head-dim=32 --dump-asm \
+// RUN:   | FileCheck %s --check-prefix=MAX3
 // RUN: %python %S/../../tools/wave-fa-calibrate/wave-fa-calibrate.py --chip=%chip \
 // RUN:   --block-m=16 --block-n=16 --seq-n=16 --head-dim=32 --seed=11 \
 // RUN:   --variants=scheduled --skip-hw | FileCheck %s --check-prefix=SCHEDULED
@@ -24,6 +27,7 @@
 //
 // CHECK: CPU comparison passed
 // FLOPS: matmul_equiv_flops: 65536
+// MAX3: v_max3_f32
 // SCHEDULED: matmul_equiv_flops:
 // SCHEDULED: variant: scheduled
 // HW-SCHEDULED: variant: scheduled

@@ -97,6 +97,7 @@
   X(vMulF32, V_MUL_F32_e32_vi, V_MUL_F32_e32_gfx11)                            \
   X(vFmaF32, V_FMA_F32_vi, V_FMA_F32_e64_gfx11)                                 \
   X(vMaxF32, V_MAX_F32_e32_vi, V_MAX_F32_e32_gfx11)                            \
+  X(vMax3F32, V_MAX3_F32_vi, V_MAX3_F32_e64_gfx11)                             \
   X(vExpF32, V_EXP_F32_e32_vi, V_EXP_F32_e32_gfx11)                            \
   X(vRcpF32, V_RCP_F32_e32_vi, V_RCP_F32_e32_gfx11)                            \
   X(vRcpIFlagF32, V_RCP_IFLAG_F32_e32_vi, V_RCP_IFLAG_F32_e32_gfx11)           \
