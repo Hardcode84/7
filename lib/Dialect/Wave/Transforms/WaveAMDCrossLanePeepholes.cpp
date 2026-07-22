@@ -579,6 +579,80 @@ struct DsPermuteToSwizzlePattern : public OpRewritePattern<DsPermuteB32Op> {
   unsigned wavefrontSize;
 };
 
+static std::optional<unsigned> evaluateBpermuteSource(DsBpermuteB32Op op,
+                                                      unsigned lane,
+                                                      unsigned workitemX) {
+  if (op.getOffset() != 0)
+    return std::nullopt;
+  MachineU32Evaluator evaluator(lane, workitemX);
+  std::optional<uint32_t> byteAddress = evaluator.evaluate(op.getAddr());
+  if (!byteAddress || *byteAddress % 4 != 0 || *byteAddress / 4 >= 64)
+    return std::nullopt;
+  return *byteAddress / 4;
+}
+
+static bool isHalfExchangePair(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
+                               unsigned workgroupSize) {
+  if (!lhs || !rhs || lhs.getData() != rhs.getData() || workgroupSize < 64 ||
+      workgroupSize % 64 != 0)
+    return false;
+  for (unsigned wave : llvm::seq<unsigned>(workgroupSize / 64)) {
+    unsigned waveBase = wave * 64;
+    for (unsigned lane : llvm::seq<unsigned>(0, 64)) {
+      std::optional<unsigned> lhsSource =
+          evaluateBpermuteSource(lhs, lane, waveBase + lane);
+      std::optional<unsigned> rhsSource =
+          evaluateBpermuteSource(rhs, lane, waveBase + lane);
+      if (!lhsSource || !rhsSource)
+        return false;
+      unsigned otherHalf = lane ^ 32;
+      if (!((*lhsSource == lane && *rhsSource == otherHalf) ||
+            (*rhsSource == lane && *lhsSource == otherHalf)))
+        return false;
+    }
+  }
+  return true;
+}
+
+template <typename BinaryOp>
+struct BpermuteHalfReductionToPermlanePattern
+    : public OpRewritePattern<BinaryOp> {
+  BpermuteHalfReductionToPermlanePattern(MLIRContext *context,
+                                         unsigned workgroupSize)
+      : OpRewritePattern<BinaryOp>(context), workgroupSize(workgroupSize) {}
+
+  LogicalResult matchAndRewrite(BinaryOp op,
+                                PatternRewriter &rewriter) const override {
+    DsBpermuteB32Op lhs = op.getLhs().template getDefiningOp<DsBpermuteB32Op>();
+    DsBpermuteB32Op rhs = op.getRhs().template getDefiningOp<DsBpermuteB32Op>();
+    if (!isHalfExchangePair(lhs, rhs, workgroupSize))
+      return failure();
+
+    Value data = lhs.getData();
+    Type pairType =
+        RegType::get(op.getContext(), RegClass::VGPR, 2, /*index=*/-1);
+    std::array<Value, 2> words{data, data};
+    Value source = TupleFromElementsOp::create(rewriter, op.getLoc(), pairType,
+                                               words)
+                       .getTuple();
+    VPermlane32SwapB32TupleOp swap = VPermlane32SwapB32TupleOp::create(
+        rewriter, op.getLoc(), pairType, source);
+    Type wordType = data.getType();
+    std::array<Type, 2> resultTypes{wordType, wordType};
+    TupleToElementsOp split = TupleToElementsOp::create(
+        rewriter, op.getLoc(), resultTypes, swap.getResult());
+    BinaryOp replacement = BinaryOp::create(
+        rewriter, op.getLoc(), op.getResult().getType(),
+        split.getElements()[0], split.getElements()[1]);
+    rewriter.replaceOp(op, replacement.getResult());
+    eraseIfDead(rewriter, lhs);
+    eraseIfDead(rewriter, rhs);
+    return success();
+  }
+
+  unsigned workgroupSize;
+};
+
 static bool hasCrossLanePeepholeCandidate(func::FuncOp func) {
   bool found = false;
   WalkResult result = func.walk([&](Operation *op) {
@@ -608,9 +682,13 @@ static LogicalResult runOnFunc(func::FuncOp func) {
   patterns.add<DsPermuteToSwizzlePattern>(func.getContext(), *wavefrontSize);
   std::optional<unsigned> workgroupSize = getXLinearWorkgroupSize(func);
   if (*wavefrontSize == 64 && workgroupSize &&
-      VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa))
+      VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa)) {
     patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(),
                                                       *workgroupSize);
+    patterns.add<BpermuteHalfReductionToPermlanePattern<VAddF32Op>,
+                 BpermuteHalfReductionToPermlanePattern<VMaxF32Op>>(
+        func.getContext(), *workgroupSize);
+  }
   return applyPatternsGreedily(
       func, std::move(patterns),
       GreedyRewriteConfig().enableFolding(false).setRegionSimplificationLevel(

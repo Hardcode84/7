@@ -1,5 +1,7 @@
-// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s --check-prefix=ASM
-// RUN: wave-translate --wave-to-amdgpu-asm %s \
+// RUN: wave-opt --waveamd-cross-lane-peepholes %s \
+// RUN:   | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
+// RUN: wave-opt --waveamd-cross-lane-peepholes %s \
+// RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
 // ASM-LABEL: redistribute_permlane32:
@@ -43,6 +45,55 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
   %token = wave.store %result -> %ptr
       : (!wave.simd<vector<2xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
+  return
+}
+
+// ASM-LABEL: half_exchange_reduction_permlane32:
+// ASM-NOT: ds_bpermute
+// ASM: v_permlane32_swap_b32_e32
+// ASM-NOT: ds_bpermute
+// ASM: v_add_f32_e32
+// ASM: buffer_store_dword
+// ASM: s_endpgm
+func.func @half_exchange_reduction_permlane32() attributes {
+    wave.kernel,
+    wave.workgroup_size = array<i32: 64, 1, 1>,
+    wave.waves_per_workgroup = 1 : i64} {
+  %data = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %workitem = waveamdmachine.v_workitem_id_x
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
+  %lane = waveamdmachine.v_and_b32 %workitem, %c63
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %c32 = waveamdmachine.imm 32 : !waveamdmachine.imm
+  %other_lane = waveamdmachine.v_xor_b32 %lane, %c32
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %c2 = waveamdmachine.imm 2 : !waveamdmachine.imm
+  %self_addr = waveamdmachine.v_lshlrev_b32 %lane, %c2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %other_addr = waveamdmachine.v_lshlrev_b32 %other_lane, %c2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %self = waveamdmachine.ds_bpermute_b32 %self_addr, %data
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %other = waveamdmachine.ds_bpermute_b32 %other_addr, %data
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %result = waveamdmachine.v_add_f32 %self, %other
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %offset = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %token = waveamdmachine.buffer_store_b32 %offset, %result, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+      -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
   return
 }
 }
