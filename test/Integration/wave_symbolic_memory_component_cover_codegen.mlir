@@ -53,14 +53,11 @@ func.func @symbolic_memory_exact_packet_codegen(
       <"1 + 64*floor(1/8*raw0) + 8*xor(Mod(raw0, 2) + 4*Mod(floor(1/4*raw0), 2) + 2*Mod(floor(1/2*raw0), 2), Mod(floor(1/16*raw0), 8))">
       ["raw0"](%raw)
       : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
-  %indices = wave.pack %i0, %i1
-      : !wave.simd<index, 64>, !wave.simd<index, 64>
-      -> !wave.simd<vector<2xindex>, 64>
   %written = wave.scatter %value to %dst mapping
       <bit_offset = <"16 * idx">>
-      bindings []() packet_bindings ["idx"](%indices) after %read
+      bindings []() packet_bindings ["idx", "idx"](%i0, %i1) after %read
       : (!wave.simd<vector<2xf16>, 64>, !wave.ptr<#wave.global, f16>,
-         !wave.simd<vector<2xindex>, 64>, !wave.mem.token)
+         !wave.simd<index, 64>, !wave.simd<index, 64>, !wave.mem.token)
       -> !wave.mem.token
   return
 }

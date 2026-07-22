@@ -18,6 +18,83 @@ func.func @contiguous_gather(%base: !wave.ptr<#wave.shared, f32>,
 
 // -----
 
+// CHECK-LABEL: func.func @contiguous_buffer_gather(
+// CHECK-NOT: wave.gather
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 32>
+// CHECK-SAME: -> (!wave.simd<vector<4xf32>, 32>, !wave.mem.token)
+func.func @contiguous_buffer_gather(
+    %base: !wave.ptr<#waveamd.buffer, f32>, %origin: index)
+    -> !wave.simd<vector<4xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * (4 * item + origin + slot)">>
+      bindings ["origin"](%origin) packet_bindings []()
+      : (!wave.ptr<#waveamd.buffer, f32>, index)
+      -> (!wave.simd<vector<4xf32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<4xf32>, 32>
+}
+
+// -----
+
+// Transaction planning may expand an i32 packet relation, but address
+// materialization must retain the original i32 value and its wrapping width.
+// CHECK-LABEL: func.func @buffer_packet_i32_gather(
+// CHECK-SAME: %[[BASE:.*]]: !wave.ptr<#waveamd.buffer, f16>, %[[ORIGIN:.*]]: !wave.simd<i32, 32>
+// CHECK: wave.ptr_add %[[BASE]], %[[ORIGIN]]
+// CHECK-NOT: wave.index_expr
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<4xf16>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @buffer_packet_i32_gather(
+    %base: !wave.ptr<#waveamd.buffer, f16>,
+    %origin: !wave.simd<i32, 32>) -> !wave.simd<vector<4xf16>, 32> {
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %i1 = wave.binary addi %origin, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i2 = wave.binary addi %origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i3 = wave.binary addi %origin, %three overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %indices = wave.pack %origin, %i1, %i2, %i3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"16 * offset">>
+      bindings []() packet_bindings ["offset"](%indices)
+      : (!wave.ptr<#waveamd.buffer, f16>, !wave.simd<vector<4xi32>, 32>)
+      -> (!wave.simd<vector<4xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<4xf16>, 32>
+}
+
+// -----
+
+// Packet index components remain ordinary SSA values; they do not require an
+// impossible builtin vector<index> carrier or a narrowing cast.
+// CHECK-LABEL: func.func @buffer_packet_index_component_gather(
+// CHECK-COUNT-4: wave.load
+// CHECK-NOT: wave.gather
+func.func @buffer_packet_index_component_gather(
+    %base: !wave.ptr<#waveamd.buffer, f16>,
+    %i0: !wave.simd<index, 32>, %i1: !wave.simd<index, 32>,
+    %i2: !wave.simd<index, 32>, %i3: !wave.simd<index, 32>)
+    -> !wave.simd<vector<4xf16>, 32> {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"16 * offset">>
+      bindings []() packet_bindings
+      ["offset", "offset", "offset", "offset"](%i0, %i1, %i2, %i3)
+      : (!wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 32>,
+         !wave.simd<index, 32>, !wave.simd<index, 32>,
+         !wave.simd<index, 32>)
+      -> (!wave.simd<vector<4xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<4xf16>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @permuted_gather(
 // CHECK-COUNT-1: wave.load
 // CHECK-SAME: -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
@@ -61,6 +138,58 @@ func.func @permuted_scatter(%value: !wave.simd<vector<4xi32>, 32>,
 
 // -----
 
+// CHECK-LABEL: func.func @contiguous_buffer_scatter(
+// CHECK-NOT: wave.scatter
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+func.func @contiguous_buffer_scatter(
+    %value: !wave.simd<vector<4xi32>, 32>,
+    %base: !wave.ptr<#waveamd.buffer, i32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"32 * (4 * item + slot)">>
+      bindings []() packet_bindings []()
+      : (!wave.simd<vector<4xi32>, 32>, !wave.ptr<#waveamd.buffer, i32>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Byte bases shared by separately predicated packet transactions must be
+// materialized outside their sibling wave.where regions.
+// CHECK-LABEL: func.func @predicated_wrapping_buffer_scatter(
+// CHECK-SAME: %[[BASE:.*]]: !wave.ptr<#waveamd.buffer, f16>
+// CHECK: %[[BYTE:.*]] = wave.ptr_cast %[[BASE]]
+// CHECK: wave.where
+// CHECK: wave.ptr_add %[[BYTE]]
+// CHECK: wave.where
+// CHECK: wave.ptr_add %[[BYTE]]
+// CHECK-NOT: wave.scatter
+func.func @predicated_wrapping_buffer_scatter(
+    %base: !wave.ptr<#waveamd.buffer, f16>,
+    %input: !wave.simd<vector<2xf16>, 32>,
+    %i0: !wave.simd<i32, 32>, %i1: !wave.simd<i32, 32>,
+    %m0: !wave.mask<32>, %m1: !wave.mask<32>) {
+  %indices = wave.pack %i0, %i1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result = wave.where %m0, %m1 {
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"8*Mod(2*idx, 4294967296)">>
+        bindings []() packet_bindings ["idx"](%indices)
+        : (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#waveamd.buffer, f16>,
+           !wave.simd<vector<2xi32>, 32>) -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %initial : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32> -> !wave.mem.token
+  return
+}
+
+// -----
+
 // Five f16 slots need one dword-multiple vector access plus one scalar.
 // CHECK-LABEL: func.func @odd_f16_chain(
 // CHECK-SAME: %arg0: !wave.ptr<#wave.shared, f16>, [[DEP:%.*]]: !wave.mem.token
@@ -97,6 +226,329 @@ func.func @packet_index_fallback(
       : (!wave.ptr<#wave.global, i32>, !wave.simd<vector<4xi32>, 32>)
       -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<4xi32>, 32>
+}
+
+// -----
+
+// Aligned bounds make all packet predicates equivalent.
+// CHECK-LABEL: func.func @aligned_packet_predicated_gather(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @aligned_packet_predicated_gather(
+    %base: !wave.ptr<#wave.global, i32>,
+    %rawOrigin: !wave.simd<i32, 32>,
+    %rawLimit: !wave.simd<i32, 32>)
+    -> !wave.simd<vector<4xi32>, 32> {
+  %limit = wave.assume %rawLimit as "limit"
+      [#wave.pred<"Mod(limit, 8) == 0">] : !wave.simd<i32, 32>
+  %four = wave.constant 4 : i32 -> !wave.simd<i32, 32>
+  %origin = wave.binary muli %rawOrigin, %four overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %i1 = wave.binary addi %origin, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i2 = wave.binary addi %origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i3 = wave.binary addi %origin, %three overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi slt %origin, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi slt %i1, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m2 = wave.cmpi slt %i2, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m3 = wave.cmpi slt %i3, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %indices = wave.pack %origin, %i1, %i2, %i3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %fallback = wave.pack %zero, %zero, %zero, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result, %token = wave.where %m0, %m1, %m2, %m3 {
+    %value, %loaded = wave.gather %base mapping
+        <bit_offset = <"32 * idx">>
+        bindings []() packet_bindings ["idx"](%indices)
+        : (!wave.ptr<#wave.global, i32>, !wave.simd<vector<4xi32>, 32>)
+        -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
+    wave.yield %value, %loaded
+        : !wave.simd<vector<4xi32>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %initial
+        : !wave.simd<vector<4xi32>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<4xi32>, 32>, !wave.mem.token
+  return %result : !wave.simd<vector<4xi32>, 32>
+}
+
+// -----
+
+// Unknown bound alignment preserves independent predicates.
+// CHECK-LABEL: func.func @unaligned_packet_predicated_gather(
+// CHECK: wave.where
+// CHECK-COUNT-4: wave.load
+// CHECK-NOT: wave.load {{.*}}vector<
+// CHECK-NOT: wave.gather
+func.func @unaligned_packet_predicated_gather(
+    %base: !wave.ptr<#wave.global, i32>,
+    %rawOrigin: !wave.simd<i32, 32>,
+    %limit: !wave.simd<i32, 32>)
+    -> !wave.simd<vector<4xi32>, 32> {
+  %origin = wave.assume %rawOrigin as "origin"
+      [#wave.pred<"Mod(origin, 4) == 0">] : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %i1 = wave.binary addi %origin, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i2 = wave.binary addi %origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i3 = wave.binary addi %origin, %three overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi slt %origin, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi slt %i1, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m2 = wave.cmpi slt %i2, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m3 = wave.cmpi slt %i3, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %indices = wave.pack %origin, %i1, %i2, %i3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %fallback = wave.pack %zero, %zero, %zero, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result, %token = wave.where %m0, %m1, %m2, %m3 {
+    %value, %loaded = wave.gather %base mapping
+        <bit_offset = <"32 * idx">>
+        bindings []() packet_bindings ["idx"](%indices)
+        : (!wave.ptr<#wave.global, i32>, !wave.simd<vector<4xi32>, 32>)
+        -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
+    wave.yield %value, %loaded
+        : !wave.simd<vector<4xi32>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %initial
+        : !wave.simd<vector<4xi32>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<4xi32>, 32>, !wave.mem.token
+  return %result : !wave.simd<vector<4xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @aligned_packet_predicated_scatter(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<vector<4xi32>, 32>
+// CHECK-NOT: wave.scatter
+func.func @aligned_packet_predicated_scatter(
+    %input: !wave.simd<vector<4xi32>, 32>,
+    %base: !wave.ptr<#wave.global, i32>,
+    %rawOrigin: !wave.simd<i32, 32>,
+    %rawLimit: !wave.simd<i32, 32>) {
+  %origin = wave.assume %rawOrigin as "origin"
+      [#wave.pred<"Mod(origin, 4) == 0">] : !wave.simd<i32, 32>
+  %limit = wave.assume %rawLimit as "limit"
+      [#wave.pred<"Mod(limit, 4) == 0">] : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %i1 = wave.binary addi %origin, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i2 = wave.binary addi %origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i3 = wave.binary addi %origin, %three overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi slt %origin, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi slt %i1, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m2 = wave.cmpi slt %i2, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m3 = wave.cmpi slt %i3, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %indices = wave.pack %origin, %i1, %i2, %i3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result = wave.where %m0, %m1, %m2, %m3 {
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"32 * idx">>
+        bindings []() packet_bindings ["idx"](%indices)
+        : (!wave.simd<vector<4xi32>, 32>, !wave.ptr<#wave.global, i32>,
+           !wave.simd<vector<4xi32>, 32>) -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %initial : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// A common outer predicate must not hide alignment-equivalent packet masks.
+// CHECK-LABEL: func.func @nested_aligned_packet_predicated_scatter(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<vector<4xi32>, 32>
+// CHECK-NOT: wave.scatter
+func.func @nested_aligned_packet_predicated_scatter(
+    %input: !wave.simd<vector<4xi32>, 32>,
+    %base: !wave.ptr<#wave.global, i32>,
+    %rawOrigin: !wave.simd<i32, 32>,
+    %rawLimit: !wave.simd<i32, 32>,
+    %row: !wave.simd<i32, 32>,
+    %rowLimit: !wave.simd<i32, 32>) {
+  %origin = wave.assume %rawOrigin as "origin"
+      [#wave.pred<"Mod(origin, 4) == 0">] : !wave.simd<i32, 32>
+  %limit = wave.assume %rawLimit as "limit"
+      [#wave.pred<"Mod(limit, 4) == 0">] : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %i1 = wave.binary addi %origin, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i2 = wave.binary addi %origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %i3 = wave.binary addi %origin, %three overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %rowActive = wave.cmpi slt %row, %rowLimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m0 = wave.cmpi slt %origin, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi slt %i1, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m2 = wave.cmpi slt %i2, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m3 = wave.cmpi slt %i3, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %false = wave.constant false -> !wave.mask<32>
+  %a0 = wave.select %rowActive, %m0, %false
+      : !wave.mask<32>, !wave.mask<32>
+  %a1 = wave.select %rowActive, %m1, %false
+      : !wave.mask<32>, !wave.mask<32>
+  %a2 = wave.select %rowActive, %m2, %false
+      : !wave.mask<32>, !wave.mask<32>
+  %a3 = wave.select %rowActive, %m3, %false
+      : !wave.mask<32>, !wave.mask<32>
+  %indices = wave.pack %origin, %i1, %i2, %i3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result = wave.where %a0, %a1, %a2, %a3 {
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"32 * idx">>
+        bindings []() packet_bindings ["idx"](%indices)
+        : (!wave.simd<vector<4xi32>, 32>, !wave.ptr<#wave.global, i32>,
+           !wave.simd<vector<4xi32>, 32>) -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %initial : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Packet mask relations use i32 modular arithmetic even when the source ops
+// do not promise no-overflow. Disjoint layout XORs must not hide the common
+// aligned mask boundary.
+// CHECK-LABEL: func.func @wrapping_xor_packet_predicated_scatter(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<vector<4xi32>, 32>
+// CHECK-NOT: wave.scatter
+func.func @wrapping_xor_packet_predicated_scatter(
+    %input: !wave.simd<vector<4xi32>, 32>,
+    %base: !wave.ptr<#wave.global, i32>,
+    %rawLane: !wave.simd<i32, 32>,
+    %rawTile: !wave.simd<i32, 32>,
+    %rawLimit: !wave.simd<i32, 32>) {
+  %lane = wave.assume %rawLane as "lane"
+      [#wave.pred<"lane >= 0">, #wave.pred<"lane <= 31">]
+      : !wave.simd<i32, 32>
+  %limit = wave.assume %rawLimit as "limit"
+      [#wave.pred<"Mod(limit, 4) == 0">] : !wave.simd<i32, 32>
+  %four = wave.constant 4 : i32 -> !wave.simd<i32, 32>
+  %addr0 = wave.binary muli %lane, %four overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %addr1 = wave.binary addi %addr0, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %addr2 = wave.binary addi %addr0, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %addr3 = wave.binary addi %addr0, %three overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %c128 = wave.constant 128 : i32 -> !wave.simd<i32, 32>
+  %laneHigh = wave.binary muli %lane, %c128 overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %c64 = wave.constant 64 : i32 -> !wave.simd<i32, 32>
+  %c65 = wave.constant 65 : i32 -> !wave.simd<i32, 32>
+  %c66 = wave.constant 66 : i32 -> !wave.simd<i32, 32>
+  %c67 = wave.constant 67 : i32 -> !wave.simd<i32, 32>
+  %layout0 = wave.binary xori %laneHigh, %c64
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %layout1 = wave.binary xori %laneHigh, %c65
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %layout2 = wave.binary xori %laneHigh, %c66
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %layout3 = wave.binary xori %laneHigh, %c67
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %c256 = wave.constant 256 : i32 -> !wave.simd<i32, 32>
+  %tileBase = wave.binary muli %rawTile, %c256
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %coord0 = wave.binary addi %tileBase, %layout0
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %coord1 = wave.binary addi %tileBase, %layout1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %coord2 = wave.binary addi %tileBase, %layout2
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %coord3 = wave.binary addi %tileBase, %layout3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %m0 = wave.cmpi slt %coord0, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m1 = wave.cmpi slt %coord1, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m2 = wave.cmpi slt %coord2, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %m3 = wave.cmpi slt %coord3, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %indices = wave.pack %addr0, %addr1, %addr2, %addr3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result = wave.where %m0, %m1, %m2, %m3 {
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"32 * idx">>
+        bindings []() packet_bindings ["idx"](%indices)
+        : (!wave.simd<vector<4xi32>, 32>, !wave.ptr<#wave.global, i32>,
+           !wave.simd<vector<4xi32>, 32>) -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %initial : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+      -> !wave.mem.token
+  return
 }
 
 // -----
@@ -276,15 +728,13 @@ func.func @binding_name_collision(
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %i3 = wave.index_expr <"3 + origin"> ["origin"](%origin)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %indices = wave.pack %i0, %i1, %i2, %i3
-      : !wave.simd<index, 32>, !wave.simd<index, 32>,
-        !wave.simd<index, 32>, !wave.simd<index, 32>
-      -> !wave.simd<vector<4xindex>, 32>
   %value, %token = wave.gather %base mapping
       <bit_offset = <"32 * (origin + idx)">>
-      bindings ["origin"](%bias) packet_bindings ["idx"](%indices)
-      : (!wave.ptr<#wave.global, i32>, index,
-         !wave.simd<vector<4xindex>, 32>)
+      bindings ["origin"](%bias) packet_bindings
+      ["idx", "idx", "idx", "idx"](%i0, %i1, %i2, %i3)
+      : (!wave.ptr<#wave.global, i32>, index, !wave.simd<index, 32>,
+         !wave.simd<index, 32>, !wave.simd<index, 32>,
+         !wave.simd<index, 32>)
       -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<4xi32>, 32>
 }
@@ -523,13 +973,11 @@ func.func @predivide_packet_binding(
       <"xor(1/8*(8*Mod(raw0, 2) + 32*Mod(floor(1/4*raw0), 2) + 16*Mod(floor(1/2*raw0), 2)), Mod(floor(1/16*raw0), 8))">
       ["raw0"](%raw)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %indices = wave.pack %index
-      : !wave.simd<index, 32> -> !wave.simd<vector<1xindex>, 32>
   %token = wave.scatter %value to %base mapping
       <bit_offset = <"16 * idx">>
-      bindings []() packet_bindings ["idx"](%indices)
+      bindings []() packet_bindings ["idx"](%index)
       : (!wave.simd<vector<1xf16>, 32>, !wave.ptr<#wave.shared, f16>,
-         !wave.simd<vector<1xindex>, 32>) -> !wave.mem.token
+         !wave.simd<index, 32>) -> !wave.mem.token
   return
 }
 
@@ -552,14 +1000,11 @@ func.func @expanded_packet_adjacency(
       <"1 + 64*floor(1/8*raw0) + 8*xor(Mod(raw0, 2) + 4*Mod(floor(1/4*raw0), 2) + 2*Mod(floor(1/2*raw0), 2), Mod(floor(1/16*raw0), 8))">
       ["raw0"](%raw)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %indices = wave.pack %i0, %i1
-      : !wave.simd<index, 32>, !wave.simd<index, 32>
-      -> !wave.simd<vector<2xindex>, 32>
   %token = wave.scatter %value to %base mapping
       <bit_offset = <"16 * idx">>
-      bindings []() packet_bindings ["idx"](%indices)
+      bindings []() packet_bindings ["idx", "idx"](%i0, %i1)
       : (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#wave.shared, f16>,
-         !wave.simd<vector<2xindex>, 32>) -> !wave.mem.token
+         !wave.simd<index, 32>, !wave.simd<index, 32>) -> !wave.mem.token
   return
 }
 

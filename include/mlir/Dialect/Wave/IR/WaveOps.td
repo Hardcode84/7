@@ -463,7 +463,7 @@ def Wave_GatherOp : Wave_Op<"gather", [AttrSizedOperandSegments]> {
 
   let arguments = (ins Arg<Variadic<Wave_Ptr>, "", [MemRead]>:$bases,
                        Variadic<AnyType>:$bindings,
-                       Variadic<Wave_SimdOf1DVector>:$packet_bindings,
+                       Variadic<AnyType>:$packet_bindings,
                        Optional<Wave_MemToken>:$dependency,
                        Wave_MemoryMappingAttr:$mapping,
                        DefaultValuedAttr<StrArrayAttr, "{}">:$binding_names,
@@ -489,7 +489,7 @@ def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
   let arguments = (ins Wave_SimdOf1DVector:$value,
                        Arg<Variadic<Wave_Ptr>, "", [MemWrite]>:$bases,
                        Variadic<AnyType>:$bindings,
-                       Variadic<Wave_SimdOf1DVector>:$packet_bindings,
+                       Variadic<AnyType>:$packet_bindings,
                        Optional<Wave_MemToken>:$dependency,
                        Wave_MemoryMappingAttr:$mapping,
                        DefaultValuedAttr<StrArrayAttr, "{}">:$binding_names,
@@ -714,26 +714,37 @@ def Wave_WhereOp : Wave_Op<"where", [
     NoRegionArguments]> {
   let summary = "structured lane-mask predication";
   let description = [{
-    Executes the `then` region under a lane-varying mask. If an `otherwise`
-    region is present, it executes under the complementary mask within the
-    original active lanes.
+    With one condition, executes the `then` region under that lane-varying
+    mask. Multiple conditions define a packet predicate domain: condition `i`
+    applies to logical packet slot `i` of a nested symbolic memory access.
+    Symbolic memory lowering specializes that domain together with the gather
+    or scatter relation and predicates each selected target transaction. If an
+    `otherwise` region is present, it supplies inactive packet values and
+    dependency tokens.
 
-    WaveAMDMachine lowering consumes `wave.where` directly: it saves EXEC,
-    installs the then-mask, emits the nested region, optionally installs the
-    else-mask, then restores EXEC. Other targets may lower the same op to
-    predicate manipulation or structured divergent control.
+    WaveAMDMachine lowering consumes single-condition `wave.where` directly:
+    it saves EXEC, installs the then-mask, emits the nested region, optionally
+    installs the else-mask, then restores EXEC. Multi-condition `wave.where`
+    must be eliminated by symbolic memory lowering first.
   }];
 
-  let arguments = (ins Wave_Mask:$condition);
+  let arguments = (ins Variadic<Wave_Mask>:$conditions);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$thenRegion,
                         MaxSizedRegion<1>:$elseRegion);
 
   let assemblyFormat = [{
-    $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict `:` qualified(type($condition))
+    $conditions $thenRegion (`otherwise` $elseRegion^)? attr-dict `:` qualified(type($conditions))
     (`->` type($results)^)?
   }];
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    Value getCondition() {
+      assert(getConditions().size() == 1 &&
+             "multi-condition where must be lowered as symbolic memory");
+      return getConditions().front();
+    }
+  }];
 }
 
 #endif // MLIR_DIALECT_WAVE_IR_WAVEOPS_TD

@@ -430,14 +430,10 @@ private:
     return buildRawOffset(value, scale);
   }
 
-  FailureOr<ByteOffset> buildIndexExprOffset(IndexExprOp op, int64_t scale) {
-    FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(op);
-    if (failed(symbolic))
-      return failure();
-
-    ByteOffset offset;
-    SmallVector<sym::ExprSubstitution, 4> substitutions;
-    for (const SymbolicOffsetBinding &binding : symbolic->bindings) {
+  LogicalResult appendIndexExprBindings(
+      const SymbolicOffset &symbolic, ByteOffset &offset,
+      SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+    for (const SymbolicOffsetBinding &binding : symbolic.bindings) {
       if (sym::ExprView(binding.name).getSymbolName().empty())
         return failure();
       std::string name = getFreshIndexExprBindingName(
@@ -451,13 +447,46 @@ private:
       appendKnownPredicates(solver, store, binding.value, name,
                             offset.assumptions);
     }
-    for (sym::PredHandle pred : symbolic->assumptions) {
+    return success();
+  }
+
+  LogicalResult
+  appendIndexExprAssumptions(const SymbolicOffset &symbolic, ByteOffset &offset,
+                             ArrayRef<sym::ExprSubstitution> substitutions) {
+    for (sym::PredHandle pred : symbolic.assumptions) {
       FailureOr<sym::PredHandle> substituted =
           substituteOffsetPred(store, pred, substitutions);
       if (failed(substituted))
         return failure();
       offset.assumptions.push_back(*substituted);
     }
+    return success();
+  }
+
+  void appendScaledIndexExprAssumptions(ByteOffset &offset, int64_t scale) {
+    SmallVector<sym::PredHandle> scaledAssumptions;
+    for (sym::PredHandle assumption : offset.assumptions) {
+      FailureOr<sym::PredHandle> scaled =
+          sym::scalePred(store, assumption, scale);
+      if (succeeded(scaled) &&
+          !llvm::is_contained(offset.assumptions, *scaled) &&
+          !llvm::is_contained(scaledAssumptions, *scaled))
+        scaledAssumptions.push_back(*scaled);
+    }
+    llvm::append_range(offset.assumptions, scaledAssumptions);
+  }
+
+  FailureOr<ByteOffset> buildIndexExprOffset(IndexExprOp op, int64_t scale) {
+    FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(op);
+    if (failed(symbolic))
+      return failure();
+
+    ByteOffset offset;
+    SmallVector<sym::ExprSubstitution, 4> substitutions;
+    if (failed(appendIndexExprBindings(*symbolic, offset, substitutions)))
+      return failure();
+    if (failed(appendIndexExprAssumptions(*symbolic, offset, substitutions)))
+      return failure();
     offset.expr = symbolic->expr;
     if (!substitutions.empty()) {
       FailureOr<sym::ExprHandle> substituted =
@@ -466,6 +495,7 @@ private:
         return failure();
       offset.expr = *substituted;
     }
+    appendScaledIndexExprAssumptions(offset, scale);
     FailureOr<sym::ExprHandle> scaled =
         scaleExpr(store, offset.expr, scale, offset.assumptions);
     if (failed(scaled))

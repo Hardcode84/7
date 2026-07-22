@@ -206,6 +206,28 @@ func.func @where_bad_terminator(%mask: !wave.mask<32>) {
 
 // -----
 
+func.func @where_requires_condition() {
+  // expected-error @+1 {{requires at least one lane-mask condition}}
+  "wave.where"() ({
+    "wave.yield"() : () -> ()
+  }, {
+  }) : () -> ()
+  return
+}
+
+// -----
+
+func.func @where_condition_width_mismatch(%m32: !wave.mask<32>, %m64: !wave.mask<64>) {
+  // expected-error @+1 {{all conditions must have the same mask width}}
+  "wave.where"(%m32, %m64) ({
+    "wave.yield"() : () -> ()
+  }, {
+  }) : (!wave.mask<32>, !wave.mask<64>) -> ()
+  return
+}
+
+// -----
+
 func.func @addi_width_mismatch(%a: i32, %b: i64) {
   // expected-error @+1 {{operand element types must match}}
   %0 = wave.binary addi %a, %b : i32, i64 -> i32
@@ -1012,6 +1034,39 @@ func.func @gather_packet_slots_mismatch(
       <bit_offset = <"32 * index">>
       bindings []() packet_bindings ["index"](%indices)
       : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<2xi32>, 32>)
+      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_packet_component_count_mismatch(
+    %base: !wave.ptr<#wave.shared, i32>,
+    %i0: !wave.simd<index, 32>, %i1: !wave.simd<index, 32>,
+    %i2: !wave.simd<index, 32>) {
+  // expected-error @+1 {{packet binding `index` component count must match the accessed packet}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * index">>
+      bindings []() packet_bindings
+      ["index", "index", "index"](%i0, %i1, %i2)
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>,
+         !wave.simd<index, 32>, !wave.simd<index, 32>)
+      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_packet_mixed_packed_and_components(
+    %base: !wave.ptr<#wave.shared, i32>,
+    %indices: !wave.simd<vector<4xi32>, 32>,
+    %i0: !wave.simd<index, 32>) {
+  // expected-error @+1 {{packet binding `index` mixes packed and component operands}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * index">>
+      bindings []() packet_bindings ["index", "index"](%indices, %i0)
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<4xi32>, 32>,
+         !wave.simd<index, 32>)
       -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
   return
 }

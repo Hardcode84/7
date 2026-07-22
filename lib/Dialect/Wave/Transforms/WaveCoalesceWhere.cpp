@@ -152,7 +152,7 @@ static WhereOp mergeWhere(IRRewriter &rewriter, WhereOp first, WhereOp second,
   llvm::append_range(resultTypes, second.getResultTypes());
   rewriter.setInsertionPoint(first);
   WhereOp merged = WhereOp::create(rewriter, first.getLoc(), resultTypes,
-                                   first.getCondition());
+                                   first.getConditions());
   merged->setAttrs(first->getAttrDictionary());
   Block &body = merged.getThenRegion().emplaceBlock();
 

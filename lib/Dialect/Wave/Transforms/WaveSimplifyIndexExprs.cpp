@@ -61,18 +61,31 @@ static std::optional<ConstantIntRanges> getFiniteRange(DataFlowSolver &solver,
   return range;
 }
 
-static SmallVector<sym::PredHandle>
-collectIndexExprAssumptions(IndexExprOp op, DataFlowSolver &solver,
-                            sym::Store &store) {
-  SmallVector<sym::PredHandle> assumptions;
-  appendIndexExprPredicates(op, assumptions);
+struct IndexExprAssumptions {
+  SmallVector<sym::PredHandle> explicitPredicates;
+  SmallVector<sym::PredHandle> bindingPredicates;
+
+  SmallVector<sym::PredHandle> all() const {
+    SmallVector<sym::PredHandle> result(explicitPredicates);
+    result.append(bindingPredicates.begin(), bindingPredicates.end());
+    return result;
+  }
+};
+
+static IndexExprAssumptions collectIndexExprAssumptions(IndexExprOp op,
+                                                        DataFlowSolver &solver,
+                                                        sym::Store &store) {
+  IndexExprAssumptions assumptions;
+  appendIndexExprPredicates(op, assumptions.explicitPredicates);
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     if (std::optional<ConstantIntRanges> range =
             getFiniteRange(solver, binding))
-      appendRangeAndAssumePredicates(store, binding, name, *range, assumptions);
+      appendRangeAndAssumePredicates(store, binding, name, *range,
+                                     assumptions.bindingPredicates);
     else
-      appendAssumePredicates(store, binding, name, assumptions);
+      appendAssumePredicates(store, binding, name,
+                             assumptions.bindingPredicates);
   }
   return assumptions;
 }
@@ -139,9 +152,90 @@ expandAndSimplify(sym::Store &store, sym::ExprHandle expr,
   return sym::simplifyExpr(store, expr, assumptions);
 }
 
+static FailureOr<std::optional<sym::PredHandle>>
+simplifyExplicitPredicate(sym::Store &store, sym::PredHandle pred,
+                          ArrayRef<sym::PredHandle> bindingPredicates);
+
+static FailureOr<std::optional<sym::PredHandle>>
+simplifyExplicitComparison(sym::Store &store, sym::PredView view,
+                           ArrayRef<sym::PredHandle> bindingPredicates) {
+  std::optional<sym::PredCmpOp> comparison = view.getCmpOp();
+  if (!comparison)
+    return failure();
+  FailureOr<sym::ExprHandle> lhs =
+      expandAndSimplify(store, view.getCmpLhs(), bindingPredicates);
+  FailureOr<sym::ExprHandle> rhs =
+      expandAndSimplify(store, view.getCmpRhs(), bindingPredicates);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  FailureOr<sym::PredHandle> rewritten =
+      sym::composePredCmp(store, *lhs, *comparison, *rhs);
+  if (failed(rewritten))
+    return failure();
+  if (sym::checkPredicate(store, *rewritten, bindingPredicates) ==
+      sym::CheckResult::False)
+    return std::optional<sym::PredHandle>{};
+  return std::optional<sym::PredHandle>{*rewritten};
+}
+
+static FailureOr<std::optional<sym::PredHandle>>
+simplifyExplicitConjunction(sym::Store &store, sym::PredView view,
+                            ArrayRef<sym::PredHandle> bindingPredicates) {
+  std::optional<sym::PredHandle> result;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount())) {
+    FailureOr<std::optional<sym::PredHandle>> arg = simplifyExplicitPredicate(
+        store, view.getLogicArg(i), bindingPredicates);
+    if (failed(arg))
+      return failure();
+    if (!*arg)
+      continue;
+    if (!result) {
+      result = **arg;
+      continue;
+    }
+    FailureOr<sym::PredHandle> combined =
+        sym::composePredAnd(store, *result, **arg);
+    if (failed(combined))
+      return failure();
+    result = *combined;
+  }
+  return result;
+}
+
+static FailureOr<std::optional<sym::PredHandle>>
+simplifyExplicitPredicate(sym::Store &store, sym::PredHandle pred,
+                          ArrayRef<sym::PredHandle> bindingPredicates) {
+  sym::PredView view(pred);
+  if (view.getKind() == sym::PredKind::Cmp)
+    return simplifyExplicitComparison(store, view, bindingPredicates);
+  if (view.getKind() == sym::PredKind::And)
+    return simplifyExplicitConjunction(store, view, bindingPredicates);
+  if (view.getKind() == sym::PredKind::True ||
+      view.getKind() == sym::PredKind::False)
+    return std::optional<sym::PredHandle>{};
+  return std::optional<sym::PredHandle>{pred};
+}
+
+static FailureOr<SmallVector<sym::PredHandle>>
+simplifyExplicitPredicates(sym::Store &store,
+                           ArrayRef<sym::PredHandle> explicitPredicates,
+                           ArrayRef<sym::PredHandle> bindingPredicates) {
+  SmallVector<sym::PredHandle> simplifiedPredicates;
+  for (sym::PredHandle pred : explicitPredicates) {
+    FailureOr<std::optional<sym::PredHandle>> simplified =
+        simplifyExplicitPredicate(store, pred, bindingPredicates);
+    if (failed(simplified))
+      return failure();
+    if (*simplified && !llvm::is_contained(simplifiedPredicates, **simplified))
+      simplifiedPredicates.push_back(**simplified);
+  }
+  return simplifiedPredicates;
+}
+
 static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
-                                         ArrayRef<sym::PredHandle> assumptions,
+                                         const IndexExprAssumptions &collected,
                                          sym::Store &store) {
+  SmallVector<sym::PredHandle> assumptions = collected.all();
   FailureOr<sym::ExprHandle> simplified =
       expandAndSimplify(store, op.getExpr().getValue(), assumptions);
   if (failed(simplified))
@@ -149,8 +243,17 @@ static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
 
   llvm::DenseSet<StringRef> freeSymbols;
   collectFreeSymbols(*simplified, freeSymbols);
+  FailureOr<SmallVector<sym::PredHandle>> simplifiedExplicit =
+      simplifyExplicitPredicates(store, collected.explicitPredicates,
+                                 collected.bindingPredicates);
+  if (failed(simplifiedExplicit))
+    return op.emitError("failed to simplify wave.index_expr assumptions");
+  SmallVector<sym::PredHandle> rewrittenAssumptions =
+      std::move(*simplifiedExplicit);
+  rewrittenAssumptions.append(collected.bindingPredicates.begin(),
+                              collected.bindingPredicates.end());
   SmallVector<sym::PredHandle> liveAssumptions =
-      filterIndexExprPredicatesBySymbols(assumptions, freeSymbols);
+      filterIndexExprPredicatesBySymbols(rewrittenAssumptions, freeSymbols);
 
   SmallVector<StringRef> names;
   SmallVector<Value> bindings;
@@ -190,7 +293,7 @@ struct WaveSimplifyIndexExprsPass
     SmallVector<IndexExprOp> ops;
     root->walk([&](IndexExprOp op) { ops.push_back(op); });
 
-    llvm::DenseMap<Operation *, SmallVector<sym::PredHandle>> assumptionsByOp;
+    llvm::DenseMap<Operation *, IndexExprAssumptions> assumptionsByOp;
     for (IndexExprOp op : ops)
       assumptionsByOp[op.getOperation()] =
           collectIndexExprAssumptions(op, solver, dialect->getSymbolStore());

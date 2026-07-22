@@ -1,8 +1,8 @@
 // REQUIRES: host-supports-amdgpu-gfx950, wave-python-bindings
 //
-// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only \
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only --multi-wave-specialize \
 // RUN:   | FileCheck %s
-// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only 2>/dev/null \
+// RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only --multi-wave-specialize 2>/dev/null \
 // RUN:   | wave-opt --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_preschedule})' \
 // RUN:   | FileCheck %s --check-prefix=MACHINE
 // RUN: %python %S/../../examples/wave/wmma_matmul_tiled.py --chip=%chip --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --kernel-only --multi-wave-specialize 2>/dev/null \

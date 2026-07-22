@@ -408,11 +408,11 @@ def _memory_mapping_required_names(
 
 
 def _named_memory_mapping_values(
-    values: Mapping[ixsimpl.Expr, Value] | None,
+    values: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None,
     kind: str,
     required_names: set[str],
-) -> dict[str, Value]:
-    named: dict[str, Value] = {}
+) -> dict[str, Value | Sequence[Value]]:
+    named: dict[str, Value | Sequence[Value]] = {}
     for symbol, value in (values or {}).items():
         try:
             name = symbol.sym_name
@@ -440,8 +440,12 @@ def _memory_mapping_parts(
     base: ixsimpl.Expr | None,
     target_block: ixsimpl.Expr | None,
     bindings: Mapping[ixsimpl.Expr, Value] | None,
-    packet_bindings: Mapping[ixsimpl.Expr, Value] | None,
-) -> tuple[MemoryMappingAttr, dict[str, Value], dict[str, Value]]:
+    packet_bindings: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None,
+) -> tuple[
+    MemoryMappingAttr,
+    dict[str, Value],
+    dict[str, Value | Sequence[Value]],
+]:
     """Import a symbolic memory map and its bindings structurally."""
     expressions = tuple(
         expr for expr in (base, target_block, bit_offset) if expr is not None
@@ -463,6 +467,8 @@ def _memory_mapping_parts(
     scalar_values: dict[str, Value] = {}
     packet_values = dict(explicit_packet_values)
     for name, value in bound_values.items():
+        if not isinstance(value, Value):
+            raise TypeError(f"binding {name!r} must be one SSA value")
         if SimdType.isinstance(value.type) and isinstance(
             SimdType(value.type).element_type, VectorType
         ):
@@ -476,6 +482,22 @@ def _memory_mapping_parts(
         target_block=_memory_mapping_expr_attr(target_block),
     )
     return mapping, scalar_values, packet_values
+
+
+def _flatten_packet_mapping_values(
+    packet_values: Mapping[str, Value | Sequence[Value]],
+) -> tuple[list[str], list[Value]]:
+    names: list[str] = []
+    values: list[Value] = []
+    for name, binding in packet_values.items():
+        components = [binding] if isinstance(binding, Value) else list(binding)
+        if not components:
+            raise ValueError(f"packet binding {name!r} must not be empty")
+        if not all(isinstance(component, Value) for component in components):
+            raise TypeError(f"packet binding {name!r} components must be SSA values")
+        names.extend([name] * len(components))
+        values.extend(components)
+    return names, values
 
 
 # ---------------------------------------------------------------------------
@@ -918,10 +940,13 @@ class FunctionBuilder:
 
     @contextmanager
     def where(
-        self, condition: Value, result_types: Sequence[Type] = ()
+        self,
+        condition: Value | Sequence[Value],
+        result_types: Sequence[Type] = (),
     ) -> Iterator[_WhereBuilder]:
         """Open `wave.where`; call `.otherwise()` for the else arm."""
-        op = wave.WhereOp(list(result_types), condition)
+        conditions = [condition] if isinstance(condition, Value) else list(condition)
+        op = wave.WhereOp(list(result_types), conditions)
         block = op.thenRegion.blocks.append()
         where_builder = _WhereBuilder(self, op, result_types, block)
         with InsertionPoint(block):
@@ -1017,7 +1042,7 @@ class FunctionBuilder:
         *,
         bit_offset: ixsimpl.Expr,
         bindings: Mapping[ixsimpl.Expr, Value] | None = None,
-        packet_bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        packet_bindings: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None = None,
         base: ixsimpl.Expr | None = None,
         target_block: ixsimpl.Expr | None = None,
         after: Value | None = None,
@@ -1027,17 +1052,18 @@ class FunctionBuilder:
         mapping, scalar_values, packet_values = _memory_mapping_parts(
             bit_offset, base, target_block, bindings, packet_bindings
         )
+        packet_names, packet_operands = _flatten_packet_mapping_values(packet_values)
         sources = [bases] if isinstance(bases, Value) else list(bases)
         op = wave.GatherOp(
             result_type,
             mem_token_type(),
             sources,
             list(scalar_values.values()),
-            list(packet_values.values()),
+            packet_operands,
             mapping,
             dependency=after,
             binding_names=list(scalar_values),
-            packet_binding_names=list(packet_values),
+            packet_binding_names=packet_names,
             cache=cache,
         )
         return op.value, op.token
@@ -1049,7 +1075,7 @@ class FunctionBuilder:
         *,
         bit_offset: ixsimpl.Expr,
         bindings: Mapping[ixsimpl.Expr, Value] | None = None,
-        packet_bindings: Mapping[ixsimpl.Expr, Value] | None = None,
+        packet_bindings: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None = None,
         base: ixsimpl.Expr | None = None,
         target_block: ixsimpl.Expr | None = None,
         after: Value | None = None,
@@ -1059,17 +1085,18 @@ class FunctionBuilder:
         mapping, scalar_values, packet_values = _memory_mapping_parts(
             bit_offset, base, target_block, bindings, packet_bindings
         )
+        packet_names, packet_operands = _flatten_packet_mapping_values(packet_values)
         destinations = [bases] if isinstance(bases, Value) else list(bases)
         return wave.ScatterOp(
             mem_token_type(),
             value,
             destinations,
             list(scalar_values.values()),
-            list(packet_values.values()),
+            packet_operands,
             mapping,
             dependency=after,
             binding_names=list(scalar_values),
-            packet_binding_names=list(packet_values),
+            packet_binding_names=packet_names,
             cache=cache,
         ).token
 
