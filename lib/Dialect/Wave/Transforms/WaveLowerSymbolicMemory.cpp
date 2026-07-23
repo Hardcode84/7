@@ -3393,12 +3393,12 @@ static FailureOr<GatherPlan>
 planGatherTransactions(const MemoryAccess &access, sym::Store &store,
                        ArrayRef<SlotMapping> mappings, int64_t elementBits,
                        RemainderProofContext &proofContext) {
-  SmallVector<wave::memory_lowering::GatherTransactionCandidate>
-      providerCandidates = getProviderGatherCandidates(access, store, mappings);
-  if (access.packetWhere)
+  if (access.packetWhere || mappings.size() > kMaxExactCoverNodes)
     return buildGenericGatherPlan(access, store, mappings, elementBits,
                                   proofContext);
-  if (providerCandidates.empty() || mappings.size() > kMaxExactCoverNodes)
+  SmallVector<wave::memory_lowering::GatherTransactionCandidate>
+      providerCandidates = getProviderGatherCandidates(access, store, mappings);
+  if (providerCandidates.empty())
     return buildGenericGatherPlan(access, store, mappings, elementBits,
                                   proofContext);
 
@@ -3813,9 +3813,10 @@ static LogicalResult emitProviderGatherCandidate(
   if (failed(ptr))
     return access.op->emitOpError("failed to materialize mapped address");
   FailureOr<wave::memory_lowering::GatherTransactionResult> result =
-      transaction.emitter->emit(rewriter, access.op->getLoc(),
-                                access.packetType, access.tokenType, *ptr,
-                                access.dependency);
+      transaction.emitter->emit(
+          rewriter, access.op->getLoc(),
+          cast<SimdType>(getTransactionType(access, transaction.slots.size())),
+          access.tokenType, *ptr, access.dependency);
   if (failed(result))
     return failure();
   state.tokens.push_back(result->token);

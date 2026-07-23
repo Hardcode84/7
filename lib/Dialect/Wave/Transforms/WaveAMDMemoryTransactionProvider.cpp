@@ -15,6 +15,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <optional>
@@ -780,16 +781,145 @@ static bool hasB16PacketType(SimdType type) {
   return element.isInteger(16) || element.isF16() || element.isBF16();
 }
 
+static std::optional<unsigned> getTransposeTransactionWidth(SimdType type) {
+  VectorType packet = dyn_cast<VectorType>(type.getElementType());
+  if (!packet || type.getWidth() != 64)
+    return std::nullopt;
+  Type element = packet.getElementType();
+  if (element.isInteger(8))
+    return 8;
+  if (element.isInteger(16) || element.isF16() || element.isBF16())
+    return 4;
+  return std::nullopt;
+}
+
+static SimdType getTransposeTransactionType(SimdType type, unsigned width) {
+  VectorType packet = cast<VectorType>(type.getElementType());
+  VectorType transaction = VectorType::get({width}, packet.getElementType());
+  return SimdType::get(type.getContext(), transaction, type.getWidth());
+}
+
 static bool hasTransposeExecutionContext(
-    const wave::memory_lowering::GatherTransactionRequest &request,
-    size_t pointCount) {
-  if (request.points.size() != pointCount || request.cache)
+    const wave::memory_lowering::GatherTransactionRequest &request) {
+  if (request.points.empty() || request.cache)
     return false;
   if (!isGfx950(request.op) || !getWorkgroupItemCount(request.op) ||
       isInsideWhere(request.op))
     return false;
   PtrType baseType = dyn_cast<PtrType>(request.bases.front().getType());
   return baseType && isa<SharedAddressSpaceAttr>(baseType.getAddressSpace());
+}
+
+static FailureOr<wave::memory_lowering::GatherTransactionCandidate>
+buildTransposeCandidate(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    ArrayRef<unsigned> slots) {
+  SmallVector<wave::memory_lowering::MemoryTransactionPoint> points;
+  points.reserve(slots.size());
+  for (unsigned slot : slots)
+    points.push_back(request.points[slot]);
+
+  wave::memory_lowering::GatherTransactionRequest transactionRequest = request;
+  transactionRequest.points = points;
+  transactionRequest.resultType =
+      getTransposeTransactionType(request.resultType, slots.size());
+  FailureOr<sym::ExprHandle> address = failure();
+  if (hasB8PacketType(transactionRequest.resultType))
+    address = getB8AddressOffset(transactionRequest);
+  else if (hasB16PacketType(transactionRequest.resultType))
+    address = getB16AddressOffset(transactionRequest);
+  if (failed(address))
+    return failure();
+
+  wave::memory_lowering::GatherTransactionCandidate candidate;
+  llvm::append_range(candidate.slots, slots);
+  candidate.emitter = std::make_unique<TransposeEmitter>();
+  candidate.byteOffset = *address;
+  candidate.addressPoint = slots.front();
+  candidate.baseIndex = points.front().baseIndex;
+  return candidate;
+}
+
+static bool appendNaturalTransposeCover(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    unsigned width,
+    SmallVectorImpl<wave::memory_lowering::GatherTransactionCandidate>
+        &candidates) {
+  if (request.points.size() % width)
+    return false;
+  SmallVector<wave::memory_lowering::GatherTransactionCandidate> cover;
+  for (unsigned begin = 0; begin < request.points.size(); begin += width) {
+    SmallVector<unsigned> slots;
+    llvm::append_range(slots, llvm::seq(begin, begin + width));
+    FailureOr<wave::memory_lowering::GatherTransactionCandidate> candidate =
+        buildTransposeCandidate(request, slots);
+    if (failed(candidate))
+      return false;
+    cover.push_back(std::move(*candidate));
+  }
+  for (wave::memory_lowering::GatherTransactionCandidate &candidate : cover)
+    candidates.push_back(std::move(candidate));
+  return true;
+}
+
+static void appendContiguousTransposeCandidates(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    unsigned width,
+    SmallVectorImpl<wave::memory_lowering::GatherTransactionCandidate>
+        &candidates) {
+  for (unsigned begin = 0; begin + width <= request.points.size(); ++begin) {
+    SmallVector<unsigned> slots;
+    llvm::append_range(slots, llvm::seq(begin, begin + width));
+    FailureOr<wave::memory_lowering::GatherTransactionCandidate> candidate =
+        buildTransposeCandidate(request, slots);
+    if (succeeded(candidate))
+      candidates.push_back(std::move(*candidate));
+  }
+}
+
+static bool hasBoundedSubsetCount(unsigned pointCount, unsigned width,
+                                  uint64_t limit) {
+  if (width > pointCount)
+    return false;
+  width = std::min(width, pointCount - width);
+  uint64_t count = 1;
+  for (unsigned index = 1; index <= width; ++index) {
+    count *= pointCount - width + index;
+    count /= index;
+    if (count > limit)
+      return false;
+  }
+  return true;
+}
+
+static void enumerateTransposeSubsets(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    unsigned width, unsigned next, SmallVectorImpl<unsigned> &slots,
+    unsigned &attempts,
+    SmallVectorImpl<wave::memory_lowering::GatherTransactionCandidate>
+        &candidates) {
+  constexpr unsigned maxAttempts = 256;
+  if (attempts == maxAttempts)
+    return;
+  if (slots.size() == width) {
+    ++attempts;
+    if (slots.back() - slots.front() + 1 == width)
+      return;
+    FailureOr<wave::memory_lowering::GatherTransactionCandidate> candidate =
+        buildTransposeCandidate(request, slots);
+    if (succeeded(candidate))
+      candidates.push_back(std::move(*candidate));
+    return;
+  }
+  unsigned remaining = width - slots.size();
+  for (unsigned slot = next;
+       slot + remaining <= request.points.size() && attempts < maxAttempts;
+       ++slot) {
+    slots.push_back(slot);
+    enumerateTransposeSubsets(request, width, slot + 1, slots, attempts,
+                              candidates);
+    slots.pop_back();
+  }
 }
 
 class AMDGatherTransactionProvider final
@@ -799,24 +929,19 @@ public:
   enumerate(const wave::memory_lowering::GatherTransactionRequest &request,
             SmallVectorImpl<wave::memory_lowering::GatherTransactionCandidate>
                 &candidates) const override {
-    FailureOr<sym::ExprHandle> address = failure();
-    if (hasB8PacketType(request.resultType) &&
-        hasTransposeExecutionContext(request, 8))
-      address = getB8AddressOffset(request);
-    else if (hasB16PacketType(request.resultType) &&
-             hasTransposeExecutionContext(request, 4))
-      address = getB16AddressOffset(request);
-    else
+    std::optional<unsigned> width =
+        getTransposeTransactionWidth(request.resultType);
+    if (!width || request.points.size() < *width ||
+        !hasTransposeExecutionContext(request))
       return;
-    if (failed(address))
+    if (appendNaturalTransposeCover(request, *width, candidates))
       return;
-    wave::memory_lowering::GatherTransactionCandidate candidate;
-    for (unsigned slot = 0; slot < request.points.size(); ++slot)
-      candidate.slots.push_back(slot);
-    candidate.emitter = std::make_unique<TransposeEmitter>();
-    candidate.byteOffset = *address;
-    candidate.baseIndex = request.points.front().baseIndex;
-    candidates.push_back(std::move(candidate));
+    appendContiguousTransposeCandidates(request, *width, candidates);
+    if (!hasBoundedSubsetCount(request.points.size(), *width, 256))
+      return;
+    SmallVector<unsigned> slots;
+    unsigned attempts = 0;
+    enumerateTransposeSubsets(request, *width, 0, slots, attempts, candidates);
   }
 };
 
