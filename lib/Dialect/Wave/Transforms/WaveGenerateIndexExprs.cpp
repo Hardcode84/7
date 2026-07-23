@@ -182,6 +182,10 @@ static bool isSignlessI32StorageType(Type type) {
   return intType && intType.isSignless() && intType.getWidth() == 32;
 }
 
+static bool isSignlessI32SimdType(Type type) {
+  return isa<SimdType>(type) && isSignlessI32StorageType(type);
+}
+
 static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
                                ArrayRef<sym::PredHandle> assumptions) {
   return sym::checkPredicate(store, pred, assumptions) ==
@@ -1824,6 +1828,10 @@ createGeneratedIndexExprBuilder(WaveDialect &dialect, DataFlowSolver &solver,
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
+  if (!op.getOffset().hasOneUse() &&
+      isSignlessI32SimdType(op.getOffset().getType()))
+    return false;
+
   SymbolicValueBuilder builder = createGeneratedIndexExprBuilder(
       dialect, solver, hasGlobalPointerBase(op));
   FailureOr<std::optional<SymbolicOffset>> offset =
@@ -1907,9 +1915,15 @@ static void seedBindingNames(IndexExprOp op, BindingState &state) {
   }
 }
 
+static bool isIdentityBinding(IndexExprOp op, StringRef name) {
+  sym::ExprView expr(op.getExpr().getValue());
+  return expr.getKind() == sym::ExprKind::Symbol &&
+         expr.getSymbolName() == name;
+}
+
 static bool shouldPreserveGeneratedBinding(Value value,
                                            bool preserveI32Binding) {
-  if (preserveI32Binding && isSignlessI32StorageType(value.getType()))
+  if (preserveI32Binding && isSignlessI32SimdType(value.getType()))
     return true;
   return false;
 }
@@ -1998,7 +2012,9 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     appendAssumePredicates(store, value, name, state.assumptions);
     FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
-        op, dialect, state, name, value, substitutions, solver);
+        op, dialect, state, name, value, substitutions, solver,
+        /*preserveI32Binding=*/!value.hasOneUse() &&
+            isIdentityBinding(op, name));
     if (failed(bindingChanged))
       return failure();
     changed |= *bindingChanged;
