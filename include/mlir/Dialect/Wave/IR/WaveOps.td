@@ -206,7 +206,10 @@ def Wave_CtzOp : Wave_Op<"ctz", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_CastOp : Wave_Op<"cast", [Pure]> {
+def Wave_CastOp : Wave_Op<"cast", [
+    Pure,
+    DeclareOpInterfaceMethods<InferIntRangeInterface,
+                              ["inferResultRanges"]>]> {
   let summary = "numeric conversion over scalar or SIMD values";
   let arguments = (ins Wave_CastKindEnum:$kind,
                        AnyType:$source,

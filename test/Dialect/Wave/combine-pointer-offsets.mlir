@@ -319,3 +319,70 @@ func.func @non_global_identity_i32_offset_stays_split(
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
   return %ptr : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @merge_keeps_cheaper_simplification
+// CHECK: %[[OFF:.*]] = wave.index_expr <"x"> ["x"](%arg1)
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+func.func @merge_keeps_cheaper_simplification(
+    %out: !wave.ptr<#wave.global, i32>,
+    %x: !wave.simd<i32, 32>) attributes {wave.kernel} {
+  %inner = wave.index_expr <"x"> ["x"](%x)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %outer = wave.index_expr <"4*floor(1/4*y) + Mod(y, 4)"> ["y"](%inner)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %out, %outer
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @merge_rejects_equal_cost_simplification
+// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c)">
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+func.func @merge_rejects_equal_cost_simplification(
+    %out: !wave.ptr<#wave.global, i32>,
+    %b: !wave.simd<i32, 32>, %c: !wave.simd<i32, 32>)
+    attributes {wave.kernel} {
+  %inner = wave.index_expr <"xor(32 + 4*b, 8*c)"> assuming
+      [#wave.pred<"b >= 0 & -1 + b <= 0">,
+       #wave.pred<"c >= 0 & -1 + c <= 0">]
+      ["b", "c"](%b, %c)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %outer = wave.index_expr <"x"> ["x"](%inner)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %out, %outer
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @ptr_chain_rejects_equal_cost_simplification
+// CHECK: wave.index_expr <"xor(32 + 4*b, 8*c)">
+// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c)">
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+func.func @ptr_chain_rejects_equal_cost_simplification(
+    %out: !wave.ptr<#wave.global, i32>,
+    %b: !wave.simd<i32, 32>, %c: !wave.simd<i32, 32>)
+    attributes {wave.kernel} {
+  %off = wave.index_expr <"xor(32 + 4*b, 8*c)"> assuming
+      [#wave.pred<"b >= 0 & -1 + b <= 0">,
+       #wave.pred<"c >= 0 & -1 + c <= 0">]
+      ["b", "c"](%b, %c)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %base = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %c0 = arith.constant 0 : index
+  %ptr = wave.ptr_add %base, %c0
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, index
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return
+}

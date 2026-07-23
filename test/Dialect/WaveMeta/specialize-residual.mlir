@@ -68,6 +68,16 @@ func.func @nonconst_index(%a: i32, %b: i32, %i: index) -> i32 {
 
 // -----
 
+func.func @nonconst_index_expr(%a: i32, %b: i32, %i: index) -> i32 {
+  %idx = wave.index_expr <"1 + i"> ["i"](%i) : (index) -> index
+  %t = wavemeta.tuple_make %a, %b : (i32, i32) -> !wavemeta.ptuple<i32, 2>
+  // expected-error@+1 {{tuple operation depends on a non-constant index or parametric width}}
+  %v = wavemeta.tuple_get %t[%idx] : !wavemeta.ptuple<i32, 2> -> i32
+  return %v : i32
+}
+
+// -----
+
 // Broadcast with parameter-named width: pass leaves it; diagnostic
 // pinpoints the unresolved width. The function signature is also
 // flagged because the returned ptuple is parametric.

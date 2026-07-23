@@ -24,23 +24,6 @@ using namespace mlir::wave;
 
 namespace {
 
-static FailureOr<sym::ExprHandle> composeInt(sym::Store &store,
-                                             sym::ExprHandle lhs,
-                                             sym::ExprBinaryOp op,
-                                             int64_t rhs) {
-  FailureOr<sym::ExprHandle> value = sym::composeExprInt(store, rhs);
-  if (failed(value))
-    return failure();
-  return sym::composeExprBinary(store, lhs, op, *value);
-}
-
-static FailureOr<sym::ExprHandle> compose(sym::Store &store,
-                                          sym::ExprHandle lhs,
-                                          sym::ExprBinaryOp op,
-                                          sym::ExprHandle rhs) {
-  return sym::composeExprBinary(store, lhs, op, rhs);
-}
-
 static FailureOr<sym::ExprHandle> composeInt(sym::Analysis &analysis,
                                              sym::ExprHandle lhs,
                                              sym::ExprBinaryOp op,
@@ -59,15 +42,6 @@ static FailureOr<sym::ExprHandle> compose(sym::Analysis &analysis,
 }
 
 static FailureOr<sym::ExprHandle>
-floorDiv(sym::Store &store, sym::ExprHandle value, int64_t divisor) {
-  FailureOr<sym::ExprHandle> divided =
-      composeInt(store, value, sym::ExprBinaryOp::Div, divisor);
-  if (failed(divided))
-    return failure();
-  return sym::composeExprFloor(store, *divided);
-}
-
-static FailureOr<sym::ExprHandle>
 floorDiv(sym::Analysis &analysis, sym::ExprHandle value, int64_t divisor) {
   FailureOr<sym::ExprHandle> divided =
       composeInt(analysis, value, sym::ExprBinaryOp::Div, divisor);
@@ -76,28 +50,34 @@ floorDiv(sym::Analysis &analysis, sym::ExprHandle value, int64_t divisor) {
   return analysis.composeFloor(*divided);
 }
 
-static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
-                       sym::ExprHandle rhs,
-                       ArrayRef<sym::PredHandle> assumptions) {
-  if (lhs == rhs)
-    return true;
-  FailureOr<sym::ExprHandle> difference =
-      compose(store, lhs, sym::ExprBinaryOp::Sub, rhs);
-  if (succeeded(difference)) {
-    FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, *difference, assumptions);
-    if (succeeded(simplified) && sym::getIntegerLiteralValue(*simplified) == 0)
-      return true;
-  }
-  FailureOr<sym::PredHandle> equal =
-      sym::composePredCmp(store, lhs, sym::PredCmpOp::Eq, rhs);
-  return succeeded(equal) && sym::checkPredicate(store, *equal, assumptions) ==
-                                 sym::CheckResult::True;
-}
-
 static bool proveEqual(sym::Analysis &analysis, sym::ExprHandle lhs,
                        sym::ExprHandle rhs) {
   return analysis.equivalent(lhs, rhs) == sym::CheckResult::True;
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyForMaterialization(sym::Analysis &analysis, sym::ExprHandle expr) {
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(expr);
+  if (failed(simplified))
+    return failure();
+  return shouldUseSimplifiedIndexExpr(*simplified, expr) ? *simplified : expr;
+}
+
+enum class AddressForm { Proof, Materialization };
+
+static sym::ExprHandle
+getByteOffset(const wave::memory_lowering::MemoryTransactionPoint &point,
+              AddressForm form) {
+  return form == AddressForm::Proof ? point.byteOffset
+                                    : point.materializationByteOffset;
+}
+
+static FailureOr<sym::ExprHandle> simplifyAddress(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr,
+                                                  AddressForm form) {
+  if (form == AddressForm::Proof)
+    return analysis.simplify(expr);
+  return simplifyForMaterialization(analysis, expr);
 }
 
 static SmallVector<sym::PredHandle> collectAssumptions(
@@ -156,6 +136,20 @@ static bool hasOnlyUniformBindings(
   return uniform;
 }
 
+static FailureOr<sym::ExprHandle> selectAddressForMaterialization(
+    sym::Analysis &analysis, sym::ExprHandle proof,
+    sym::ExprHandle materialization,
+    const wave::memory_lowering::MemoryTransactionPoint &point) {
+  if (!proveEqual(analysis, proof, materialization))
+    return failure();
+  sym::ExprHandle selected =
+      shouldUseSimplifiedIndexExpr(proof, materialization) ? proof
+                                                           : materialization;
+  if (!hasOnlyUniformBindings(selected, point))
+    return failure();
+  return selected;
+}
+
 static std::optional<int64_t> getWorkgroupItemCount(Operation *op) {
   func::FuncOp func = op->getParentOfType<func::FuncOp>();
   if (!func)
@@ -178,21 +172,6 @@ static std::optional<int64_t> getWorkgroupItemCount(Operation *op) {
   return count;
 }
 
-static FailureOr<sym::ExprHandle>
-substituteItem(sym::Store &store, sym::ExprHandle expr, sym::ExprHandle item,
-               int64_t replacement, ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> literal = sym::composeExprInt(store, replacement);
-  if (failed(literal))
-    return failure();
-  std::array<sym::ExprSubstitution, 1> substitution{
-      sym::ExprSubstitution{item, *literal}};
-  FailureOr<sym::ExprHandle> replaced =
-      sym::substituteExpr(store, expr, substitution);
-  if (failed(replaced))
-    return failure();
-  return sym::simplifyExpr(store, *replaced, assumptions);
-}
-
 static FailureOr<sym::ExprHandle> substituteItem(sym::Analysis &analysis,
                                                  sym::ExprHandle expr,
                                                  sym::ExprHandle item,
@@ -208,22 +187,44 @@ static FailureOr<sym::ExprHandle> substituteItem(sym::Analysis &analysis,
   return analysis.simplify(*replaced);
 }
 
-static bool isWaveUniform(Operation *op, sym::Store &store,
-                          sym::ExprHandle expr, sym::ExprHandle item,
-                          ArrayRef<sym::PredHandle> assumptions) {
+static FailureOr<sym::ExprHandle>
+substituteItemForMaterialization(sym::Analysis &analysis, sym::ExprHandle expr,
+                                 sym::ExprHandle item, int64_t replacement) {
+  FailureOr<sym::ExprHandle> literal = analysis.composeInteger(replacement);
+  if (failed(literal))
+    return failure();
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{item, *literal}};
+  FailureOr<sym::ExprHandle> replaced = analysis.substitute(expr, substitution);
+  if (failed(replaced))
+    return failure();
+  return simplifyForMaterialization(analysis, *replaced);
+}
+
+static FailureOr<sym::ExprHandle> substituteAddressItem(sym::Analysis &analysis,
+                                                        sym::ExprHandle expr,
+                                                        sym::ExprHandle item,
+                                                        int64_t replacement,
+                                                        AddressForm form) {
+  if (form == AddressForm::Proof)
+    return substituteItem(analysis, expr, item, replacement);
+  return substituteItemForMaterialization(analysis, expr, item, replacement);
+}
+
+static bool isWaveUniform(Operation *op, sym::Analysis &analysis,
+                          sym::ExprHandle expr, sym::ExprHandle item) {
   std::optional<int64_t> itemCount = getWorkgroupItemCount(op);
   if (!itemCount)
     return false;
   for (int64_t wave = 0; wave < *itemCount; wave += 64) {
     FailureOr<sym::ExprHandle> reference =
-        substituteItem(store, expr, item, wave, assumptions);
+        substituteItem(analysis, expr, item, wave);
     if (failed(reference))
       return false;
     for (int64_t lane = 1; lane < 64; ++lane) {
       FailureOr<sym::ExprHandle> current =
-          substituteItem(store, expr, item, wave + lane, assumptions);
-      if (failed(current) ||
-          !proveEqual(store, *reference, *current, assumptions))
+          substituteItem(analysis, expr, item, wave + lane);
+      if (failed(current) || !proveEqual(analysis, *reference, *current))
         return false;
     }
   }
@@ -237,27 +238,27 @@ struct CanonicalB8Mapping {
 };
 
 static FailureOr<CanonicalB8Mapping>
-buildCanonicalB8Mapping(sym::Store &store) {
-  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
+buildCanonicalB8Mapping(sym::Analysis &analysis) {
+  FailureOr<sym::ExprHandle> item = analysis.composeSymbol("item");
   if (failed(item))
     return failure();
   FailureOr<sym::ExprHandle> lane =
-      composeInt(store, *item, sym::ExprBinaryOp::Mod, 64);
+      composeInt(analysis, *item, sym::ExprBinaryOp::Mod, 64);
   if (failed(lane))
     return failure();
-  FailureOr<sym::ExprHandle> group = floorDiv(store, *lane, 16);
+  FailureOr<sym::ExprHandle> group = floorDiv(analysis, *lane, 16);
   FailureOr<sym::ExprHandle> row =
-      composeInt(store, *item, sym::ExprBinaryOp::Mod, 16);
+      composeInt(analysis, *item, sym::ExprBinaryOp::Mod, 16);
   if (failed(group) || failed(row))
     return failure();
   FailureOr<sym::ExprHandle> groupBytes =
-      composeInt(store, *group, sym::ExprBinaryOp::Mul, 128);
+      composeInt(analysis, *group, sym::ExprBinaryOp::Mul, 128);
   FailureOr<sym::ExprHandle> rowBytes =
-      composeInt(store, *row, sym::ExprBinaryOp::Mul, 4);
+      composeInt(analysis, *row, sym::ExprBinaryOp::Mul, 4);
   if (failed(groupBytes) || failed(rowBytes))
     return failure();
   FailureOr<sym::ExprHandle> matrixOffset =
-      compose(store, *groupBytes, sym::ExprBinaryOp::Add, *rowBytes);
+      compose(analysis, *groupBytes, sym::ExprBinaryOp::Add, *rowBytes);
   if (failed(matrixOffset))
     return failure();
   return CanonicalB8Mapping{*item, *lane, *matrixOffset};
@@ -265,41 +266,36 @@ buildCanonicalB8Mapping(sym::Store &store) {
 
 static FailureOr<sym::ExprHandle> getCanonicalB8TileBase(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    const CanonicalB8Mapping &mapping, ArrayRef<sym::PredHandle> assumptions) {
-  sym::Store &store = *request.store;
+    sym::Analysis &analysis, const CanonicalB8Mapping &mapping,
+    AddressForm form) {
   ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
       request.points;
   FailureOr<sym::ExprHandle> tileBase =
-      compose(store, points.front().byteOffset, sym::ExprBinaryOp::Sub,
-              mapping.matrixOffset);
+      compose(analysis, getByteOffset(points.front(), form),
+              sym::ExprBinaryOp::Sub, mapping.matrixOffset);
   if (failed(tileBase))
     return failure();
-  tileBase = sym::simplifyExpr(store, *tileBase, assumptions);
-  if (failed(tileBase) || !hasOnlyUniformBindings(*tileBase, points.front()))
-    return failure();
-  return tileBase;
+  return simplifyAddress(analysis, *tileBase, form);
 }
 
 static LogicalResult verifyCanonicalB8Points(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    const CanonicalB8Mapping &mapping, sym::ExprHandle tileBase,
-    ArrayRef<sym::PredHandle> assumptions) {
-  sym::Store &store = *request.store;
+    sym::Analysis &analysis, const CanonicalB8Mapping &mapping,
+    sym::ExprHandle tileBase) {
   ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
       request.points;
   for (auto [slot, point] : llvm::enumerate(points)) {
     if (point.baseIndex != points.front().baseIndex ||
-        !proveEqual(store, point.base, points.front().base, assumptions) ||
-        !proveEqual(store, point.targetBlock, points.front().targetBlock,
-                    assumptions))
+        !proveEqual(analysis, point.base, points.front().base) ||
+        !proveEqual(analysis, point.targetBlock, points.front().targetBlock))
       return failure();
-    FailureOr<sym::ExprHandle> expected =
-        compose(store, tileBase, sym::ExprBinaryOp::Add, mapping.matrixOffset);
+    FailureOr<sym::ExprHandle> expected = compose(
+        analysis, tileBase, sym::ExprBinaryOp::Add, mapping.matrixOffset);
     if (failed(expected))
       return failure();
-    expected = composeInt(store, *expected, sym::ExprBinaryOp::Add, slot / 2);
-    if (failed(expected) ||
-        !proveEqual(store, *expected, point.byteOffset, assumptions))
+    expected =
+        composeInt(analysis, *expected, sym::ExprBinaryOp::Add, slot / 2);
+    if (failed(expected) || !proveEqual(analysis, *expected, point.byteOffset))
       return failure();
   }
   return success();
@@ -307,103 +303,130 @@ static LogicalResult verifyCanonicalB8Points(
 
 static bool isCanonicalB8WaveBaseUniform(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    const CanonicalB8Mapping &mapping, sym::ExprHandle tileBase,
-    ArrayRef<sym::PredHandle> assumptions) {
-  sym::Store &store = *request.store;
+    sym::Analysis &analysis, const CanonicalB8Mapping &mapping,
+    sym::ExprHandle tileBase) {
   FailureOr<sym::ExprHandle> waveItem =
-      compose(store, mapping.item, sym::ExprBinaryOp::Sub, mapping.lane);
+      compose(analysis, mapping.item, sym::ExprBinaryOp::Sub, mapping.lane);
   if (failed(waveItem))
     return false;
   std::array<sym::ExprSubstitution, 1> substitution{
       sym::ExprSubstitution{mapping.item, *waveItem}};
   FailureOr<sym::ExprHandle> waveBase =
-      sym::substituteExpr(store, tileBase, substitution);
+      analysis.substitute(tileBase, substitution);
   if (failed(waveBase))
     return false;
-  waveBase = sym::simplifyExpr(store, *waveBase, assumptions);
+  waveBase = analysis.simplify(*waveBase);
   if (failed(waveBase))
     return false;
-  return proveEqual(store, tileBase, *waveBase, assumptions) ||
-         isWaveUniform(request.op, store, tileBase, mapping.item, assumptions);
+  return proveEqual(analysis, tileBase, *waveBase) ||
+         isWaveUniform(request.op, analysis, tileBase, mapping.item);
+}
+
+static FailureOr<sym::ExprHandle> getCanonicalB8ProofTileBase(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis, const CanonicalB8Mapping &mapping) {
+  FailureOr<sym::ExprHandle> tileBase =
+      getCanonicalB8TileBase(request, analysis, mapping, AddressForm::Proof);
+  if (failed(tileBase) ||
+      !hasOnlyUniformBindings(*tileBase, request.points.front()) ||
+      failed(verifyCanonicalB8Points(request, analysis, mapping, *tileBase)) ||
+      !isCanonicalB8WaveBaseUniform(request, analysis, mapping, *tileBase))
+    return failure();
+  return tileBase;
+}
+
+static FailureOr<sym::ExprHandle>
+addCanonicalB8LaneOffset(sym::Analysis &analysis, sym::ExprHandle tileBase,
+                         sym::ExprHandle laneBytes, AddressForm form) {
+  FailureOr<sym::ExprHandle> address =
+      compose(analysis, tileBase, sym::ExprBinaryOp::Add, laneBytes);
+  if (failed(address))
+    return failure();
+  return simplifyAddress(analysis, *address, form);
 }
 
 static FailureOr<sym::ExprHandle> getCanonicalB8AddressOffset(
-    const wave::memory_lowering::GatherTransactionRequest &request) {
-  sym::Store &store = *request.store;
-  SmallVector<sym::PredHandle> assumptions = collectAssumptions(request.points);
-  FailureOr<CanonicalB8Mapping> mapping = buildCanonicalB8Mapping(store);
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis) {
+  FailureOr<CanonicalB8Mapping> mapping = buildCanonicalB8Mapping(analysis);
   if (failed(mapping))
     return failure();
-  FailureOr<sym::ExprHandle> tileBase =
-      getCanonicalB8TileBase(request, *mapping, assumptions);
-  if (failed(tileBase) ||
-      failed(
-          verifyCanonicalB8Points(request, *mapping, *tileBase, assumptions)) ||
-      !isCanonicalB8WaveBaseUniform(request, *mapping, *tileBase, assumptions))
+  FailureOr<sym::ExprHandle> proofTileBase =
+      getCanonicalB8ProofTileBase(request, analysis, *mapping);
+  if (failed(proofTileBase))
     return failure();
   FailureOr<sym::ExprHandle> laneBytes =
-      composeInt(store, mapping->lane, sym::ExprBinaryOp::Mul, 8);
+      composeInt(analysis, mapping->lane, sym::ExprBinaryOp::Mul, 8);
   if (failed(laneBytes))
     return failure();
-  FailureOr<sym::ExprHandle> address =
-      compose(store, *tileBase, sym::ExprBinaryOp::Add, *laneBytes);
-  if (failed(address))
+  FailureOr<sym::ExprHandle> proofAddress = addCanonicalB8LaneOffset(
+      analysis, *proofTileBase, *laneBytes, AddressForm::Proof);
+  if (failed(proofAddress))
     return failure();
-  return sym::simplifyExpr(store, *address, assumptions);
+
+  FailureOr<sym::ExprHandle> materializationTileBase = getCanonicalB8TileBase(
+      request, analysis, *mapping, AddressForm::Materialization);
+  if (failed(materializationTileBase))
+    return failure();
+  FailureOr<sym::ExprHandle> materializationAddress =
+      addCanonicalB8LaneOffset(analysis, *materializationTileBase, *laneBytes,
+                               AddressForm::Materialization);
+  if (failed(materializationAddress))
+    return failure();
+  return selectAddressForMaterialization(
+      analysis, *proofAddress, *materializationAddress, request.points.front());
 }
 
 static FailureOr<sym::ExprHandle> getBitAffineB8Coefficient(
-    sym::Store &store,
+    sym::Analysis &analysis,
     const wave::memory_lowering::MemoryTransactionPoint &point,
     sym::ExprHandle item, sym::ExprHandle base, int64_t bit, int64_t bitValue,
-    std::optional<sym::ExprHandle> bitTwoCoefficient,
-    ArrayRef<sym::PredHandle> assumptions) {
+    std::optional<sym::ExprHandle> bitTwoCoefficient, AddressForm form) {
   // Result relation hides source bit 3; hardware tile continues bit 2.
   if (bit == 3) {
     if (!bitTwoCoefficient)
       return failure();
-    return composeInt(store, *bitTwoCoefficient, sym::ExprBinaryOp::Mul, 2);
+    return composeInt(analysis, *bitTwoCoefficient, sym::ExprBinaryOp::Mul, 2);
   }
   int64_t outputItem = bit < 3 ? 2 * bitValue : bitValue;
-  FailureOr<sym::ExprHandle> sample =
-      substituteItem(store, point.byteOffset, item, outputItem, assumptions);
+  FailureOr<sym::ExprHandle> sample = substituteAddressItem(
+      analysis, getByteOffset(point, form), item, outputItem, form);
   if (failed(sample))
     return failure();
   FailureOr<sym::ExprHandle> coefficient =
-      compose(store, *sample, sym::ExprBinaryOp::Sub, base);
+      compose(analysis, *sample, sym::ExprBinaryOp::Sub, base);
   if (failed(coefficient))
     return failure();
-  return sym::simplifyExpr(store, *coefficient, assumptions);
+  return simplifyAddress(analysis, *coefficient, form);
 }
 
 static FailureOr<sym::ExprHandle>
-addBitAffineB8Contribution(sym::Store &store, sym::ExprHandle address,
+addBitAffineB8Contribution(sym::Analysis &analysis, sym::ExprHandle address,
                            sym::ExprHandle coefficient, sym::ExprHandle item,
                            int64_t bitValue) {
   if (sym::getIntegerLiteralValue(coefficient) == 0)
     return address;
-  FailureOr<sym::ExprHandle> itemBit = floorDiv(store, item, bitValue);
+  FailureOr<sym::ExprHandle> itemBit = floorDiv(analysis, item, bitValue);
   if (failed(itemBit))
     return failure();
-  itemBit = composeInt(store, *itemBit, sym::ExprBinaryOp::Mod, 2);
+  itemBit = composeInt(analysis, *itemBit, sym::ExprBinaryOp::Mod, 2);
   if (failed(itemBit))
     return failure();
   FailureOr<sym::ExprHandle> contribution =
-      compose(store, coefficient, sym::ExprBinaryOp::Mul, *itemBit);
+      compose(analysis, coefficient, sym::ExprBinaryOp::Mul, *itemBit);
   if (failed(contribution))
     return failure();
-  return compose(store, address, sym::ExprBinaryOp::Add, *contribution);
+  return compose(analysis, address, sym::ExprBinaryOp::Add, *contribution);
 }
 
 static FailureOr<sym::ExprHandle> synthesizeBitAffineB8SourceAddress(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    sym::ExprHandle item, int64_t itemCount,
-    ArrayRef<sym::PredHandle> assumptions) {
-  sym::Store &store = *request.store;
+    sym::Analysis &analysis, sym::ExprHandle item, int64_t itemCount,
+    AddressForm form) {
   const wave::memory_lowering::MemoryTransactionPoint &point =
       request.points.front();
-  FailureOr<sym::ExprHandle> base =
-      substituteItem(store, point.byteOffset, item, 0, assumptions);
+  FailureOr<sym::ExprHandle> base = substituteAddressItem(
+      analysis, getByteOffset(point, form), item, 0, form);
   if (failed(base))
     return failure();
 
@@ -411,37 +434,30 @@ static FailureOr<sym::ExprHandle> synthesizeBitAffineB8SourceAddress(
   std::optional<sym::ExprHandle> bitTwoCoefficient;
   for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
        ++bit, bitValue <<= 1) {
-    FailureOr<sym::ExprHandle> coefficient =
-        getBitAffineB8Coefficient(store, point, item, *base, bit, bitValue,
-                                  bitTwoCoefficient, assumptions);
+    FailureOr<sym::ExprHandle> coefficient = getBitAffineB8Coefficient(
+        analysis, point, item, *base, bit, bitValue, bitTwoCoefficient, form);
     if (failed(coefficient))
       return failure();
     if (bit == 2)
       bitTwoCoefficient = *coefficient;
     FailureOr<sym::ExprHandle> next = addBitAffineB8Contribution(
-        store, address, *coefficient, item, bitValue);
+        analysis, address, *coefficient, item, bitValue);
     if (failed(next))
       return failure();
     address = *next;
   }
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, address, assumptions);
-  if (failed(simplified) || !hasOnlyUniformBindings(*simplified, point))
-    return failure();
-  return simplified;
+  return simplifyAddress(analysis, address, form);
 }
 
 static bool hasCommonTransactionBase(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    ArrayRef<sym::PredHandle> assumptions) {
-  sym::Store &store = *request.store;
+    sym::Analysis &analysis) {
   ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
       request.points;
   for (const wave::memory_lowering::MemoryTransactionPoint &point : points) {
     if (point.baseIndex != points.front().baseIndex ||
-        !proveEqual(store, point.base, points.front().base, assumptions) ||
-        !proveEqual(store, point.targetBlock, points.front().targetBlock,
-                    assumptions))
+        !proveEqual(analysis, point.base, points.front().base) ||
+        !proveEqual(analysis, point.targetBlock, points.front().targetBlock))
       return false;
   }
   return true;
@@ -449,23 +465,22 @@ static bool hasCommonTransactionBase(
 
 static LogicalResult verifyBitAffineB8Output(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    sym::ExprHandle item, sym::ExprHandle sourceAddress, int64_t outputItem,
-    ArrayRef<sym::PredHandle> assumptions) {
-  sym::Store &store = *request.store;
+    sym::Analysis &analysis, sym::ExprHandle item,
+    sym::ExprHandle sourceAddress, int64_t outputItem) {
   int64_t lane = outputItem % 64;
   int64_t sourceItem = outputItem - lane + 16 * (lane / 16) + (lane % 16) / 2;
   FailureOr<sym::ExprHandle> source =
-      substituteItem(store, sourceAddress, item, sourceItem, assumptions);
+      substituteItem(analysis, sourceAddress, item, sourceItem);
   if (failed(source))
     return failure();
   for (auto [slot, point] : llvm::enumerate(request.points)) {
     FailureOr<sym::ExprHandle> actual =
-        substituteItem(store, point.byteOffset, item, outputItem, assumptions);
+        substituteItem(analysis, point.byteOffset, item, outputItem);
     FailureOr<sym::ExprHandle> expected =
-        composeInt(store, *source, sym::ExprBinaryOp::Add,
+        composeInt(analysis, *source, sym::ExprBinaryOp::Add,
                    4 * (lane % 2) + static_cast<int64_t>(slot / 2));
     if (failed(actual) || failed(expected) ||
-        !proveEqual(store, *expected, *actual, assumptions))
+        !proveEqual(analysis, *expected, *actual))
       return failure();
   }
   return success();
@@ -473,42 +488,55 @@ static LogicalResult verifyBitAffineB8Output(
 
 static LogicalResult verifyBitAffineB8Points(
     const wave::memory_lowering::GatherTransactionRequest &request,
-    sym::ExprHandle item, int64_t itemCount, sym::ExprHandle sourceAddress,
-    ArrayRef<sym::PredHandle> assumptions) {
-  if (!hasCommonTransactionBase(request, assumptions))
+    sym::Analysis &analysis, sym::ExprHandle item, int64_t itemCount,
+    sym::ExprHandle sourceAddress) {
+  if (!hasCommonTransactionBase(request, analysis))
     return failure();
   for (int64_t outputItem = 0; outputItem < itemCount; ++outputItem) {
-    if (failed(verifyBitAffineB8Output(request, item, sourceAddress, outputItem,
-                                       assumptions)))
+    if (failed(verifyBitAffineB8Output(request, analysis, item, sourceAddress,
+                                       outputItem)))
       return failure();
   }
   return success();
 }
 
 static FailureOr<sym::ExprHandle> getBitAffineB8AddressOffset(
-    const wave::memory_lowering::GatherTransactionRequest &request) {
-  sym::Store &store = *request.store;
-  SmallVector<sym::PredHandle> assumptions = collectAssumptions(request.points);
-  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis) {
+  FailureOr<sym::ExprHandle> item = analysis.composeSymbol("item");
   std::optional<int64_t> itemCount = getWorkgroupItemCount(request.op);
   if (failed(item) || !itemCount)
     return failure();
-  FailureOr<sym::ExprHandle> sourceAddress = synthesizeBitAffineB8SourceAddress(
-      request, *item, *itemCount, assumptions);
-  if (failed(sourceAddress))
+  FailureOr<sym::ExprHandle> proofAddress = synthesizeBitAffineB8SourceAddress(
+      request, analysis, *item, *itemCount, AddressForm::Proof);
+  if (failed(proofAddress))
     return failure();
-  if (failed(verifyBitAffineB8Points(request, *item, *itemCount, *sourceAddress,
-                                     assumptions)))
+  if (failed(verifyBitAffineB8Points(request, analysis, *item, *itemCount,
+                                     *proofAddress)))
     return failure();
-  return sourceAddress;
+  FailureOr<sym::ExprHandle> materializationAddress =
+      synthesizeBitAffineB8SourceAddress(request, analysis, *item, *itemCount,
+                                         AddressForm::Materialization);
+  if (failed(materializationAddress))
+    return failure();
+  return selectAddressForMaterialization(
+      analysis, *proofAddress, *materializationAddress, request.points.front());
 }
 
 static FailureOr<sym::ExprHandle> getB8AddressOffset(
     const wave::memory_lowering::GatherTransactionRequest &request) {
-  FailureOr<sym::ExprHandle> canonical = getCanonicalB8AddressOffset(request);
+  sym::Store &store = *request.store;
+  SmallVector<sym::PredHandle> assumptions = collectAssumptions(request.points);
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      sym::Analysis::create(store, assumptions);
+  if (failed(created))
+    return failure();
+  sym::Analysis &analysis = **created;
+  FailureOr<sym::ExprHandle> canonical =
+      getCanonicalB8AddressOffset(request, analysis);
   if (succeeded(canonical))
     return canonical;
-  return getBitAffineB8AddressOffset(request);
+  return getBitAffineB8AddressOffset(request, analysis);
 }
 
 enum class B16Combine { Add, Xor };
@@ -544,18 +572,18 @@ static B16Sample getB16Sample(int64_t bit, int64_t bitValue) {
 static FailureOr<sym::ExprHandle> getB16Coefficient(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::Analysis &analysis, sym::ExprHandle item, sym::ExprHandle base,
-    int64_t bit, int64_t bitValue, B16Combine composition) {
+    int64_t bit, int64_t bitValue, B16Combine composition, AddressForm form) {
   B16Sample sample = getB16Sample(bit, bitValue);
-  FailureOr<sym::ExprHandle> sampledAddress =
-      substituteItem(analysis, request.points[sample.slot].byteOffset, item,
-                     sample.outputItem);
+  FailureOr<sym::ExprHandle> sampledAddress = substituteAddressItem(
+      analysis, getByteOffset(request.points[sample.slot], form), item,
+      sample.outputItem, form);
   if (failed(sampledAddress))
     return failure();
   FailureOr<sym::ExprHandle> coefficient =
       compose(analysis, *sampledAddress, getB16DeltaOp(composition), base);
   if (failed(coefficient))
     return failure();
-  return analysis.simplify(*coefficient);
+  return simplifyAddress(analysis, *coefficient, form);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -640,12 +668,12 @@ buildGroupedB16AddOffset(sym::Analysis &analysis, sym::ExprHandle item,
 static FailureOr<SmallVector<sym::ExprHandle>> collectB16Coefficients(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::Analysis &analysis, sym::ExprHandle item, sym::ExprHandle base,
-    int64_t itemCount, B16Combine composition) {
+    int64_t itemCount, B16Combine composition, AddressForm form) {
   SmallVector<sym::ExprHandle> coefficients;
   for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
        ++bit, bitValue <<= 1) {
     FailureOr<sym::ExprHandle> coefficient = getB16Coefficient(
-        request, analysis, item, base, bit, bitValue, composition);
+        request, analysis, item, base, bit, bitValue, composition, form);
     if (failed(coefficient))
       return failure();
     coefficients.push_back(*coefficient);
@@ -680,14 +708,14 @@ buildB16Offset(sym::Analysis &analysis, sym::ExprHandle item,
 static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::Analysis &analysis, sym::ExprHandle item, int64_t itemCount,
-    B16SourceComposition composition) {
-  FailureOr<sym::ExprHandle> base =
-      substituteItem(analysis, request.points.front().byteOffset, item, 0);
+    B16SourceComposition composition, AddressForm form) {
+  FailureOr<sym::ExprHandle> base = substituteAddressItem(
+      analysis, getByteOffset(request.points.front(), form), item, 0, form);
   if (failed(base))
     return failure();
 
   FailureOr<SmallVector<sym::ExprHandle>> coefficients = collectB16Coefficients(
-      request, analysis, item, *base, itemCount, composition.base);
+      request, analysis, item, *base, itemCount, composition.base, form);
   if (failed(coefficients))
     return failure();
   FailureOr<sym::ExprHandle> offset =
@@ -698,11 +726,7 @@ static FailureOr<sym::ExprHandle> synthesizeB16SourceAddress(
       compose(analysis, *base, getB16CombineOp(composition.base), *offset);
   if (failed(address))
     return failure();
-  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*address);
-  if (failed(simplified) ||
-      !hasOnlyUniformBindings(*simplified, request.points.front()))
-    return failure();
-  return simplified;
+  return simplifyAddress(analysis, *address, form);
 }
 
 static LogicalResult verifyB16OutputSlot(
@@ -736,20 +760,6 @@ verifyB16Output(const wave::memory_lowering::GatherTransactionRequest &request,
       return failure();
   }
   return success();
-}
-
-static bool hasCommonTransactionBase(
-    const wave::memory_lowering::GatherTransactionRequest &request,
-    sym::Analysis &analysis) {
-  ArrayRef<wave::memory_lowering::MemoryTransactionPoint> points =
-      request.points;
-  for (const wave::memory_lowering::MemoryTransactionPoint &point : points) {
-    if (point.baseIndex != points.front().baseIndex ||
-        !proveEqual(analysis, point.base, points.front().base) ||
-        !proveEqual(analysis, point.targetBlock, points.front().targetBlock))
-      return false;
-  }
-  return true;
 }
 
 static LogicalResult
@@ -787,12 +797,22 @@ static FailureOr<sym::ExprHandle> getB16AddressOffset(
       B16SourceComposition{B16Combine::Xor, B16Combine::Add},
       B16SourceComposition{B16Combine::Xor, B16Combine::Xor}};
   for (B16SourceComposition composition : compositions) {
-    FailureOr<sym::ExprHandle> sourceAddress = synthesizeB16SourceAddress(
-        request, analysis, *item, *itemCount, composition);
-    if (succeeded(sourceAddress) &&
+    FailureOr<sym::ExprHandle> proofAddress = synthesizeB16SourceAddress(
+        request, analysis, *item, *itemCount, composition, AddressForm::Proof);
+    if (succeeded(proofAddress) &&
         succeeded(verifyB16Points(request, analysis, *item, *itemCount,
-                                  *sourceAddress)))
-      return sourceAddress;
+                                  *proofAddress))) {
+      FailureOr<sym::ExprHandle> materializationAddress =
+          synthesizeB16SourceAddress(request, analysis, *item, *itemCount,
+                                     composition, AddressForm::Materialization);
+      if (failed(materializationAddress))
+        continue;
+      FailureOr<sym::ExprHandle> selected = selectAddressForMaterialization(
+          analysis, *proofAddress, *materializationAddress,
+          request.points.front());
+      if (succeeded(selected))
+        return selected;
+    }
   }
   return failure();
 }

@@ -260,8 +260,13 @@ func.func @where_otherwise_yields_same_base_pointer(
 }
 
 // SELECT-LABEL: func.func @where_yields_large_pointer_offset
-// SELECT: waveamdmachine.s_mov_b64_imm 4294967296
-// SELECT: waveamdmachine.yield {{.*}} : !waveamdmachine.reg<vgpr, 2>
+// SELECT: %[[SCALE:.*]] = waveamdmachine.s_mov_b64_imm 4
+// SELECT: %[[BASE:.*]] = waveamdmachine.s_mov_b64_imm 1073741824
+// SELECT: %[[BASE_V:.*]] = waveamdmachine.v_mov_b32_tuple %[[BASE]]
+// SELECT: %[[SUM:[^,]+]], %{{.*}} = waveamdmachine.v_add_u64 %[[BASE_V]],
+// SELECT: %[[SCALE_V:.*]] = waveamdmachine.v_mov_b32_tuple %[[SCALE]]
+// SELECT: %[[BYTE_OFFSET:[^,]+]], %{{.*}} = waveamdmachine.v_mul_u64 %[[SCALE_V]], %[[SUM]]
+// SELECT: waveamdmachine.yield %[[BYTE_OFFSET]] : !waveamdmachine.reg<vgpr, 2>
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: where_yields_large_pointer_offset:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off

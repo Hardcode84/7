@@ -253,26 +253,6 @@ struct MergedIndexExpr {
   sym::ExprHandle expr;
 };
 
-static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator > 0)
-    ++quotient;
-  return quotient;
-}
-
-static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator < 0)
-    --quotient;
-  return quotient;
-}
-
 static std::optional<std::pair<int64_t, int64_t>>
 inferIntegerRange(sym::Store &store, sym::ExprHandle expr,
                   ArrayRef<sym::PredHandle> assumptions) {
@@ -280,8 +260,8 @@ inferIntegerRange(sym::Store &store, sym::ExprHandle expr,
       sym::inferRange(store, expr, assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
-  std::optional<int64_t> lower = ceilRational(*range->lower);
-  std::optional<int64_t> upper = floorRational(*range->upper);
+  std::optional<int64_t> lower = sym::ceilEndpoint(*range->lower);
+  std::optional<int64_t> upper = sym::floorEndpoint(*range->upper);
   if (!lower || !upper || *lower > *upper)
     return std::nullopt;
   return std::make_pair(*lower, *upper);
@@ -318,22 +298,29 @@ static FailureOr<MergedIndexExpr>
 substituteAndSimplify(IndexExprOp op, sym::Store &store,
                       ArrayRef<sym::ExprSubstitution> substitutions,
                       ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> substituted =
-      substituteExprSymbols(store, op.getExpr().getValue(), substitutions);
-  if (failed(substituted))
-    return op.emitError("failed to substitute chained wave.index_expr");
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return op.emitError("failed to construct chained wave.index_expr facts");
   FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
-      substituteIndexExprPredicates(store, assumptions, substitutions);
+      substituteIndexExprPredicates(**analysis, assumptions, substitutions);
   if (failed(substitutedAssumptions))
     return op.emitError("failed to substitute chained wave.index_expr "
                         "assumptions");
-  FailureOr<sym::ExprHandle> simplified =
-      substitutedAssumptions->empty()
-          ? sym::simplifyExpr(store, *substituted)
-          : sym::simplifyExpr(store, *substituted, *substitutedAssumptions);
+  for (sym::PredHandle pred : *substitutedAssumptions)
+    if (failed((*analysis)->assume(pred)))
+      return op.emitError("failed to assume chained wave.index_expr facts");
+  FailureOr<sym::ExprHandle> substituted =
+      (*analysis)->substitute(op.getExpr().getValue(), substitutions);
+  if (failed(substituted))
+    return op.emitError("failed to substitute chained wave.index_expr");
+  FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(*substituted);
   if (failed(simplified))
     return op.emitError("failed to simplify chained wave.index_expr");
-  return MergedIndexExpr{std::move(*substitutedAssumptions), *simplified};
+  sym::ExprHandle result =
+      shouldUseSimplifiedIndexExpr(*simplified, *substituted) ? *simplified
+                                                              : *substituted;
+  return MergedIndexExpr{std::move(*substitutedAssumptions), result};
 }
 
 static FailureOr<SmallVector<IndexExprBinding>>

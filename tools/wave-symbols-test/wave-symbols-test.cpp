@@ -12,13 +12,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/Wave/IR/WaveSymbols.h"
+#include "mlir/Dialect/Wave/IR/Wave.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 
 using namespace mlir;
@@ -160,6 +161,18 @@ mustCreateAnalysis(sym::Store &store,
   return std::move(*analysis);
 }
 
+std::unique_ptr<sym::Analysis>
+mustCreateDirectAnalysis(sym::Store &store,
+                         llvm::ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::createDirect(store, assumptions);
+  if (failed(analysis)) {
+    llvm::errs() << "failed to create direct symbolic analysis\n";
+    std::exit(1);
+  }
+  return std::move(*analysis);
+}
+
 sym::ExprHandle mustBuildAnalysisExpr(FailureOr<sym::ExprHandle> handle) {
   if (failed(handle)) {
     llvm::errs() << "failed to build symbolic analysis expression\n";
@@ -222,28 +235,19 @@ void printRational(llvm::StringRef label,
 void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
   sym::ExprHandle one = mustBuildInt(store, 1);
   sym::ExprHandle two = mustBuildInt(store, 2);
-  sym::ExprHandle four = mustBuildInt(store, 4);
-  sym::ExprHandle seven = mustBuildInt(store, 7);
   sym::ExprHandle xPlusOne = mustCompose(store, x, sym::ExprBinaryOp::Add, one);
   sym::ExprHandle xPlusTwo = mustCompose(store, x, sym::ExprBinaryOp::Add, two);
   sym::ExprHandle product =
       mustCompose(store, xPlusOne, sym::ExprBinaryOp::Mul, xPlusTwo);
   printRendered(store, "expanded-product", mustExpand(store, product));
-
-  sym::ExprHandle sevenHalf =
-      mustCompose(store, seven, sym::ExprBinaryOp::Div, two);
-  sym::ExprHandle xQuarter =
-      mustCompose(store, x, sym::ExprBinaryOp::Div, four);
-  sym::ExprHandle xHalf = mustCompose(store, x, sym::ExprBinaryOp::Div, two);
-  sym::ExprHandle denomExpr =
-      mustCompose(store, sevenHalf, sym::ExprBinaryOp::Add, xQuarter);
-  printLiteral("denominator-lcm", sym::collectDenominator(denomExpr));
-  sym::ExprHandle modQuarter =
-      mustCompose(store, xQuarter, sym::ExprBinaryOp::Mod, xHalf);
-  printLiteral("denominator-mod-rational", sym::collectDenominator(modQuarter));
-  sym::ExprHandle piecewise =
-      mustParseExpr(store, "Piecewise((7/2, x >= 0), (x/4, True))");
-  printLiteral("denominator-piecewise", sym::collectDenominator(piecewise));
+  printLiteral("endpoint-floor", sym::floorEndpoint({-3, 2}));
+  printLiteral("endpoint-ceil", sym::ceilEndpoint({-3, 2}));
+  printLiteral("endpoint-invalid", sym::floorEndpoint({1, 0}));
+  llvm::outs() << "endpoint-compare-wide: "
+               << sym::compareEndpointToInteger(
+                      {std::numeric_limits<int64_t>::max(), 2},
+                      std::numeric_limits<int64_t>::max())
+               << "\n";
 
   auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
   if (failed(rangeAssumption)) {
@@ -255,6 +259,15 @@ void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
                << boolName(sym::provablyFitsU32(store, x, assumptions)) << "\n";
   llvm::outs() << "fits-u32-unbounded: "
                << boolName(sym::provablyFitsU32(store, x, {})) << "\n";
+
+  sym::ExprHandle composed = mustParseExpr(store, "128 + 64*u + w");
+  sym::PredHandle composedRange = mustParsePred(
+      store, "128 + 64*u + w >= 0 & -2147483647 + 128 + 64*u + w <= 0");
+  std::array<sym::PredHandle, 1> composedAssumptions{composedRange};
+  llvm::outs() << "fits-u32-compound: "
+               << boolName(sym::provablyFitsU32(store, composed,
+                                                composedAssumptions))
+               << "\n";
 }
 
 void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
@@ -524,6 +537,53 @@ static void runAnalysisFactSubstitution(sym::Store &store, sym::ExprHandle x,
                << checkResultName(analysis->congruent(y, 4, 0)) << "\n";
 }
 
+static void runAnalysisBatchMutation(sym::Store &store, sym::ExprHandle x) {
+  sym::PredHandle nonnegative = mustParsePred(store, "x >= 0");
+  sym::PredHandle nonpositive = mustParsePred(store, "x <= 0");
+  sym::PredHandle zero = mustParsePred(store, "x == 0");
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
+  std::array<sym::PredHandle, 2> jointFacts{nonnegative, nonpositive};
+  bool jointSuccess = succeeded(analysis->assume(jointFacts)) &&
+                      analysis->check(zero) == sym::CheckResult::True;
+  llvm::outs() << "analysis-batch-mutator-joint-success: "
+               << boolName(jointSuccess) << "\n";
+
+  analysis = mustCreateAnalysis(store);
+  std::array<sym::PredHandle, 2> invalidFacts{nonnegative, sym::PredHandle{}};
+  llvm::outs() << "analysis-batch-mutator-rejected: "
+               << boolName(failed(analysis->assume(invalidFacts))) << "\n";
+  llvm::outs() << "analysis-batch-mutator-poisoned: "
+               << checkResultName(analysis->defined(x)) << "\n";
+}
+
+static void runAnalysisBatchClosure(sym::Store &store) {
+  std::array<sym::PredHandle, 2> predicates{
+      mustParsePred(store, "closure_divisor == 8"),
+      mustParsePred(store, "closure_base + "
+                           "floor(Mod(closure_lane, 8)/closure_divisor) >= 0"),
+  };
+  sym::PredHandle query = mustParsePred(store, "closure_base >= 0");
+
+  std::unique_ptr<sym::Analysis> direct =
+      mustCreateDirectAnalysis(store, predicates);
+  llvm::outs() << "analysis-direct-batch-closure: "
+               << checkResultName(direct->check(query)) << "\n";
+  direct.reset();
+
+  std::unique_ptr<sym::Analysis> analysis =
+      mustCreateAnalysis(store, predicates);
+  llvm::outs() << "analysis-create-batch-closure: "
+               << checkResultName(analysis->check(query)) << "\n";
+
+  analysis = mustCreateAnalysis(store);
+  if (failed(analysis->assume(predicates))) {
+    llvm::errs() << "failed analysis closure batch\n";
+    std::exit(1);
+  }
+  llvm::outs() << "analysis-assume-batch-closure: "
+               << checkResultName(analysis->check(query)) << "\n";
+}
+
 static void runAnalysisRejection(sym::Store &store, sym::ExprHandle x,
                                  sym::PredHandle validFacts,
                                  sym::PredHandle invalidFacts) {
@@ -552,6 +612,67 @@ static void runAnalysisRejection(sym::Store &store, sym::ExprHandle x,
   llvm::outs() << "analysis-invalid-handle-diagnostic: " << diagnostic << "\n";
 }
 
+static void runSingletonFactSimplification(sym::Store &store) {
+  std::array<sym::PredHandle, 6> facts{
+      mustParsePred(store, "raw0 >= 0"),   mustParsePred(store, "raw0 <= 255"),
+      mustParsePred(store, "raw1 >= 2"),   mustParsePred(store, "raw1 <= 2"),
+      mustParsePred(store, "raw7 >= 128"), mustParsePred(store, "raw7 <= 128"),
+  };
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store, facts);
+  sym::ExprHandle expr = mustParseExpr(store, "Mod(floor(raw0/raw7), raw1)");
+  FailureOr<sym::ExprHandle> simplified = analysis->simplify(expr);
+  if (failed(simplified)) {
+    llvm::errs() << "failed singleton-fact simplification\n";
+    std::exit(1);
+  }
+  printRendered(store, "analysis-singleton-simplified", *simplified);
+  std::optional<uint64_t> sourceCost = getIndexExprMaterializationCost(expr);
+  std::optional<uint64_t> simplifiedCost =
+      getIndexExprMaterializationCost(*simplified);
+  llvm::outs() << "analysis-singleton-source-cost: ";
+  if (sourceCost)
+    llvm::outs() << *sourceCost;
+  else
+    llvm::outs() << "none";
+  llvm::outs() << "\nanalysis-singleton-simplified-cost: ";
+  if (simplifiedCost)
+    llvm::outs() << *simplifiedCost;
+  else
+    llvm::outs() << "none";
+  llvm::outs() << "\nanalysis-singleton-prefers-simplified: "
+               << boolName(shouldUseSimplifiedIndexExpr(*simplified, expr))
+               << "\n";
+}
+
+static void printMaterializationCost(sym::Store &store, StringRef label,
+                                     StringRef text) {
+  std::optional<uint64_t> cost =
+      getIndexExprMaterializationCost(mustParseExpr(store, text));
+  llvm::outs() << label << ": ";
+  if (cost)
+    llvm::outs() << *cost;
+  else
+    llvm::outs() << "none";
+  llvm::outs() << "\n";
+}
+
+static void runMaterializationCostQueries(sym::Store &store) {
+  printMaterializationCost(store, "material-cost-rational", "1/2");
+  printMaterializationCost(store, "material-cost-nonpow2-floor",
+                           "floor(1/3*x)");
+  printMaterializationCost(store, "material-cost-wide-nonpow2-mod",
+                           "Mod(x, 4294967297)");
+  printMaterializationCost(store, "material-cost-nonpow2-exact", "1/3*x");
+  printMaterializationCost(store, "material-cost-product-denominator-overflow",
+                           "floor(Mod(1/4294967296*x, 3)*"
+                           "Mod(1/4294967296*y, 3))");
+  printMaterializationCost(store, "material-cost-piecewise",
+                           "Piecewise((x, x >= 0), (0, True))");
+  printMaterializationCost(store, "material-cost-pow2-floor", "floor(1/2*x)");
+  printMaterializationCost(store, "material-cost-max-pow2-mod",
+                           "Mod(x, 4294967296)");
+}
+
 void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
   sym::PredHandle range =
       mustBuildAnalysisPred(sym::rangeAssumption(store, "x", 0, 31));
@@ -563,7 +684,11 @@ void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
   runAnalysisCore(store, x, facts);
   runAnalysisRangeMutation(store, x);
   runAnalysisFactSubstitution(store, x, facts);
+  runAnalysisBatchMutation(store, x);
+  runAnalysisBatchClosure(store);
   runAnalysisRejection(store, x, facts, invalidFacts);
+  runSingletonFactSimplification(store);
+  runMaterializationCostQueries(store);
 }
 
 // (4) Range queries: under `x in [0, 31]`, probe `4*x + 1` against

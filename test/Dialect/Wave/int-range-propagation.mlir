@@ -180,6 +180,29 @@ func.func @index_expr_range(%v: i32) -> i1 {
   return %cmp : i1
 }
 
+// CTA remap output bounds derive from the two raw grid contracts.
+// CHECK-LABEL: func.func @cta_remap_index_expr_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @cta_remap_index_expr_range(%m: i32, %n: i32) -> i1 {
+  %rawM = wave.assume %m as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"-7 + x <= 0">] : i32
+  %rawN = wave.assume %n as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"-7 + x <= 0">] : i32
+  %wgM = wave.index_expr <"4*floor(1/32*wg_n_raw + 1/32*floor(1/8*wg_m_raw) + 1/4*Mod(wg_m_raw, 8)) + Mod(Mod(wg_n_raw + floor(1/8*wg_m_raw) + 8*Mod(wg_m_raw, 8), 32), 4)"> ["wg_m_raw", "wg_n_raw"](%rawM, %rawN) : (i32, i32) -> index
+  %wgN = wave.index_expr <"floor(1/4*Mod(wg_n_raw + floor(1/8*wg_m_raw) + 8*Mod(wg_m_raw, 8), 32))"> ["wg_m_raw", "wg_n_raw"](%rawM, %rawN) : (i32, i32) -> index
+  %zero = arith.constant 0 : index
+  %eight = arith.constant 8 : index
+  %mLo = arith.cmpi sge, %wgM, %zero : index
+  %mHi = arith.cmpi slt, %wgM, %eight : index
+  %nLo = arith.cmpi sge, %wgN, %zero : index
+  %nHi = arith.cmpi slt, %wgN, %eight : index
+  %mBounded = arith.andi %mLo, %mHi : i1
+  %nBounded = arith.andi %nLo, %nHi : i1
+  %bounded = arith.andi %mBounded, %nBounded : i1
+  return %bounded : i1
+}
+
 // CHECK-LABEL: func.func @index_expr_simd_no_crash
 // CHECK: wave.index_expr
 // CHECK: return

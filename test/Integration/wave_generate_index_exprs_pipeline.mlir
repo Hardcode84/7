@@ -10,7 +10,7 @@ func.func @generate_after_normalize(%out: !wave.ptr<#wave.global, f32>,
   %c16 = arith.constant 16 : index
   %s16 = wave.splat %c16 : index -> !wave.simd<index, 32>
   %offset = wave.binary addi %idx, %s16 overflow<nsw> : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
-  // CHECK: wave.index_expr <"64 + 4*raw0"> ["raw0"](%[[IDX]]) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.index_expr <"4*(16 + raw0)"> ["raw0"](%[[IDX]]) : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
   %ptr = wave.ptr_add %out, %offset : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
   %cst = arith.constant 0.000000e+00 : f32
   %val = wave.splat %cst : f32 -> !wave.simd<f32, 32>
@@ -116,7 +116,7 @@ func.func @rewrite_assumed_offset_after_normalize(
   %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %orig = wave.assume %offset as "orig" [#wave.pred<"orig >= 0">, #wave.pred<"orig <= 94">] : !wave.simd<i32, 32>
-  // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.index_expr <"2*(raw0 + 4*floor(1/2*raw0))"> {{.*}} ["raw0"](%[[ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK-NOT: 2*orig
   %ptr = wave.ptr_add %out, %orig
       : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
@@ -151,7 +151,7 @@ func.func @rewrite_assumed_buffer_offset_after_normalize(
   %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %orig = wave.assume %offset as "orig" [#wave.pred<"orig >= 0">, #wave.pred<"orig <= 94">] : !wave.simd<i32, 32>
-  // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[BUFFER_ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.index_expr <"2*(raw0 + 4*floor(1/2*raw0))"> {{.*}} ["raw0"](%[[BUFFER_ASSUME]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK-NOT: 2*orig
   %ptr = wave.ptr_add %out, %orig
       : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>
@@ -194,7 +194,7 @@ func.func @keep_cmp_operands_after_index_generation(
   // CHECK: %[[OFFSET:.*]] = wave.binary addi %[[LO]], %[[SCALED_HI]] overflow<nsw> : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %offset = wave.binary addi %lo, %scaled_hi overflow<nsw>
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  // CHECK: wave.index_expr <"2*raw0 + 8*floor(1/2*raw0)"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // CHECK: wave.index_expr <"2*(raw0 + 4*floor(1/2*raw0))"> {{.*}} ["raw0"](%[[IDX]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %ptr = wave.ptr_add %out, %offset
       : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>

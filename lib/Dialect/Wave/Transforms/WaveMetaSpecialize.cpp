@@ -14,6 +14,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -408,6 +409,8 @@ struct TupleSetFold : OpRewritePattern<TupleSetOp> {
 static void populatePhase2Patterns(RewritePatternSet &patterns) {
   patterns.add<StaticIfFold, StaticForUnroll, UnrolledForLower, BroadcastExpand,
                TupleSetFold>(patterns.getContext());
+  wave::IndexExprOp::getCanonicalizationPatterns(patterns,
+                                                 patterns.getContext());
 }
 
 //===----------------------------------------------------------------------===//

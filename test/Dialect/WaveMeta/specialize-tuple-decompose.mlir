@@ -28,6 +28,22 @@ func.func @get_of_arg(%t: !wavemeta.ptuple<i32, 4>) -> i32 {
 
 // -----
 
+// CHECK-LABEL: func.func @get_of_parametric_arg
+// CHECK-SAME: (%[[A0:.+]]: i32, %[[A1:.+]]: i32, %[[A2:.+]]: i32, %[[A3:.+]]: i32) -> i32
+// CHECK-NOT: wave.index_expr
+// CHECK-NOT: wavemeta.
+// CHECK: return %[[A2]] : i32
+module attributes {wavemeta.params = {n = 4 : index}} {
+  func.func @get_of_parametric_arg(%t: !wavemeta.ptuple<i32, "n">) -> i32 {
+    %n = wavemeta.param "n" : index
+    %i = wave.index_expr <"n - 2"> ["n"](%n) : (index) -> index
+    %v = wavemeta.tuple_get %t[%i] : !wavemeta.ptuple<i32, "n"> -> i32
+    return %v : i32
+  }
+}
+
+// -----
+
 // `tuple_set` against a function-arg ptuple with constant index:
 // produces the new operand list where the target slot is the
 // supplied value.

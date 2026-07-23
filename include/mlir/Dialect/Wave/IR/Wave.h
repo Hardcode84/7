@@ -103,12 +103,19 @@ void appendIndexExprPredicates(IndexExprOp op,
 ArrayAttr getIndexExprPredArrayAttr(MLIRContext *ctx,
                                     ArrayRef<sym::PredHandle> assumptions);
 FailureOr<SmallVector<sym::PredHandle>>
+substituteIndexExprPredicates(sym::Analysis &analysis,
+                              ArrayRef<sym::PredHandle> assumptions,
+                              ArrayRef<sym::ExprSubstitution> substitutions);
+FailureOr<SmallVector<sym::PredHandle>>
 substituteIndexExprPredicates(sym::Store &store,
                               ArrayRef<sym::PredHandle> assumptions,
                               ArrayRef<sym::ExprSubstitution> substitutions);
 SmallVector<sym::PredHandle>
 filterIndexExprPredicatesBySymbols(ArrayRef<sym::PredHandle> assumptions,
                                    const llvm::DenseSet<StringRef> &symbols);
+std::optional<uint64_t> getIndexExprMaterializationCost(sym::ExprHandle expr);
+bool shouldUseSimplifiedIndexExpr(sym::ExprHandle candidate,
+                                  sym::ExprHandle baseline);
 FailureOr<SymbolicOffset> getIndexExprSymbolicOffset(IndexExprOp op);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,

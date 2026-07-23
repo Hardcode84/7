@@ -33,6 +33,45 @@ func.func @group_two_cyclic_offsets(
 
 // -----
 
+// CHECK-LABEL: func.func @group_fact_equivalent_bases(
+// CHECK: %[[INIT:.*]] = wave.index_expr <"xor(16*a, xor(32 + 4*b, 8*c))">
+// CHECK: scf.for {{.*}} iter_args(%[[OFF:.*]] = %[[INIT]])
+// CHECK: %[[PEER:.*]] = wave.index_expr <"8192 + offset"> ["offset"](%[[OFF]])
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+// CHECK: wave.ptr_add %arg1, %[[PEER]]
+func.func @group_fact_equivalent_bases(
+    %p: !wave.ptr<#wave.global, i32>, %q: !wave.ptr<#wave.global, i32>,
+    %a: i32, %b: i32, %c: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c8 = arith.constant 8 : i32
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %aoff = wave.index_expr <"8192*Mod(i, 4) + xor(16*a, xor(32 + 4*b, 8*c))">
+        assuming [#wave.pred<"a >= 0 & -1 + a <= 0">,
+                  #wave.pred<"b >= 0 & -1 + b <= 0">,
+                  #wave.pred<"c >= 0 & -1 + c <= 0">]
+        ["i", "a", "b", "c"](%i, %a, %b, %c)
+        : (i32, i32, i32, i32) -> index
+    %boff = wave.index_expr <"8224 + 8192*Mod(i, 4) + 16*a + 4*b + 8*c">
+        assuming [#wave.pred<"a >= 0 & -1 + a <= 0">,
+                  #wave.pred<"b >= 0 & -1 + b <= 0">,
+                  #wave.pred<"c >= 0 & -1 + c <= 0">]
+        ["i", "a", "b", "c"](%i, %a, %b, %c)
+        : (i32, i32, i32, i32) -> index
+    %ap = wave.ptr_add %p, %aoff
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %bp = wave.ptr_add %q, %boff
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %av, %at = wave.load %ap
+        : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+    %bv, %bt = wave.load %bp
+        : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @group_three_cyclic_offsets_with_negative_rebase(
 // CHECK: %[[INIT:.*]] = wave.index_expr <"0"> []() : () -> index
 // CHECK: scf.for {{.*}} iter_args(%[[OFF:.*]] = %[[INIT]])
@@ -75,9 +114,9 @@ func.func @group_three_cyclic_offsets_with_negative_rebase(
 
 // CHECK-LABEL: func.func @reject_span_without_partial_rebase(
 // CHECK: %[[GROUP_INIT:.*]] = wave.index_expr <"16384 + b">
+// CHECK: %[[FAR_INIT:.*]] = wave.index_expr <"36864 + b">
 // CHECK: %[[REJECTED_INIT:.*]] = wave.index_expr <"b">
-// CHECK: scf.for {{.*}} iter_args(%[[GROUP:.*]] = %[[GROUP_INIT]], %[[REJECTED:.*]] = %[[REJECTED_INIT]])
-// CHECK: %[[FAR:.*]] = wave.index_expr <"20480 + offset"> ["offset"](%[[GROUP]])
+// CHECK: scf.for {{.*}} iter_args(%[[GROUP:.*]] = %[[GROUP_INIT]], %[[FAR:.*]] = %[[FAR_INIT]], %[[REJECTED:.*]] = %[[REJECTED_INIT]])
 // CHECK: %[[NEAR:.*]] = wave.index_expr <"4096 + offset"> ["offset"](%[[GROUP]])
 // CHECK: wave.ptr_add %arg0, %[[GROUP]]
 // CHECK: wave.ptr_add %arg1, %[[FAR]]

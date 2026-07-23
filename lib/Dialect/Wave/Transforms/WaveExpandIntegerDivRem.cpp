@@ -414,21 +414,12 @@ finiteSignedRange(DataFlowSolver &solver, Value value) {
 
 static bool hasLowerBoundAtLeast(const sym::InferredRange &range,
                                  int64_t lower) {
-  return range.lower && range.lower->denominator > 0 &&
-         range.lower->numerator >= lower * range.lower->denominator;
+  return range.lower && sym::compareEndpointToInteger(*range.lower, lower) >= 0;
 }
 
 static bool hasUpperBoundAtMost(const sym::InferredRange &range,
                                 int64_t upper) {
-  if (!range.upper || range.upper->denominator <= 0)
-    return false;
-  if (upper == std::numeric_limits<int64_t>::max())
-    return true;
-  int64_t quotient = range.upper->numerator / range.upper->denominator;
-  int64_t remainder = range.upper->numerator % range.upper->denominator;
-  if (remainder != 0 && range.upper->numerator > 0)
-    ++quotient;
-  return quotient <= upper;
+  return range.upper && sym::compareEndpointToInteger(*range.upper, upper) <= 0;
 }
 
 static bool isAssumedAtLeast(sym::Store &store, Value value, int64_t lower) {

@@ -143,6 +143,82 @@ func.func @global_dma_lds_uniform_dest_sadd_m0(
   return
 }
 
+// SELECT-LABEL: func.func @global_dma_lds_intconvert_range_m0
+// SELECT-NOT: waveamdmachine.s_add_u64
+// SELECT-NOT: waveamdmachine.tuple_to_elements
+// SELECT: waveamdmachine.s_mov_m0
+// SELECT: waveamdmachine.global_load_lds_b128
+// SELECT-SAME: !waveamdmachine.m0
+
+// ASM-LABEL: global_dma_lds_intconvert_range_m0:
+// ASM-NOT: s_addc_u32
+// ASM: s_mov_b32 m0,
+// ASM: global_load_lds_dwordx4
+func.func @global_dma_lds_intconvert_range_m0(
+    %in: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel, wave.lds_size = 16384 : i64} {
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w"
+      [#wave.pred<"w >= 0">, #wave.pred<"w <= 255">]
+      : !wave.simd<i32, 64>
+  %src = wave.ptr_add %in, %wi
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
+  %derived = wave.index_expr <"1040*floor(1/64*w)"> ["w"](%first)
+      : (i32) -> index
+  %base = wave.cast intconvert %derived : index -> i32
+  %off = wave.index_expr <"byte_base"> ["byte_base"](%base)
+      : (i32) -> index
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %dst = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, index
+      -> !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @global_dma_lds_wrapping_intconvert_wide_m0
+// SELECT: waveamdmachine.s_add_u64
+// SELECT: %[[CAST_M0:.*]]:2 = waveamdmachine.tuple_to_elements
+// SELECT: waveamdmachine.s_mov_m0 %[[CAST_M0]]#0
+// SELECT: waveamdmachine.global_load_lds_b128
+// SELECT-SAME: !waveamdmachine.m0
+
+// ASM-LABEL: global_dma_lds_wrapping_intconvert_wide_m0:
+// ASM: s_addc_u32
+// ASM: s_mov_b32 m0,
+// ASM: global_load_lds_dwordx4
+func.func @global_dma_lds_wrapping_intconvert_wide_m0(
+    %in: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel, wave.lds_size = 16384 : i64} {
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w"
+      [#wave.pred<"w >= 0">, #wave.pred<"w <= 127">]
+      : !wave.simd<i32, 64>
+  %src = wave.ptr_add %in, %wi
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %first = wave.read_first %wi : !wave.simd<i32, 64> -> i32
+  %derived = wave.index_expr <"2147483647 + floor(1/64*w)"> ["w"](%first)
+      : (i32) -> index
+  %base = wave.cast intconvert %derived : index -> i32
+  %off = wave.index_expr <"byte_base"> ["byte_base"](%base)
+      : (i32) -> index
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %dst = wave.ptr_add %lds, %off
+      : !wave.ptr<#wave.shared, i32>, index
+      -> !wave.ptr<#wave.shared, i32>
+  %tok0 = wave.token : !wave.mem.token
+  %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @global_dma_lds_wide_uniform_dest_m0
 // SELECT: waveamdmachine.arg {index = 1 : i64, pointer = false} : !waveamdmachine.reg<sgpr, 2>
 // SELECT: waveamdmachine.s_lshr_b64

@@ -23,8 +23,10 @@
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
@@ -63,6 +65,7 @@ struct SlotMapping {
   SmallVector<MaterializationCandidate> materializationCandidates;
   SmallVector<unsigned> logicalSlots;
   std::optional<sym::PredHandle> activationPredicate;
+  std::optional<sym::SplitAdditiveConstant> proofOffset;
   sym::PredHandle activationRelationPredicate;
   Value packetCondition;
   sym::ExprHandle base;
@@ -70,6 +73,8 @@ struct SlotMapping {
   sym::ExprHandle bitOffset;
   sym::ExprHandle materializationBitOffset;
   sym::ExprHandle byteOffset;
+  sym::ExprHandle materializationByteOffset;
+  size_t proofIndex = std::numeric_limits<size_t>::max();
   int64_t baseIndex = 0;
 };
 
@@ -510,128 +515,45 @@ static FailureOr<MappedItem> materializeItem(IRRewriter &rewriter,
 }
 
 static FailureOr<sym::ExprHandle>
-substituteAndSimplify(sym::Store &store, sym::ExprHandle expr,
-                      ArrayRef<sym::ExprSubstitution> substitutions,
-                      ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, expr, substitutions);
-  if (failed(substituted))
-    return failure();
-  return sym::simplifyExpr(store, *substituted, assumptions);
-}
-
-static FailureOr<sym::ExprHandle>
-multiplyExpandedFactors(sym::Store &store, sym::ExprHandle initial,
-                        sym::ExprView view) {
-  FailureOr<sym::ExprHandle> result = initial;
-  for (unsigned index : llvm::seq(view.getMulFactorCount())) {
-    sym::MulFactor factor = view.getMulFactor(index);
-    if (factor.exponent < 0)
-      return failure();
-    for (int32_t unused : llvm::seq(factor.exponent)) {
-      (void)unused;
-      result = sym::composeExprBinary(store, *result, sym::ExprBinaryOp::Mul,
-                                      factor.base);
-      if (failed(result))
-        return failure();
-    }
-  }
-  return result;
-}
-
-static FailureOr<sym::ExprHandle>
-divideExpandedMul(sym::Store &store, sym::ExprView view, int64_t divisor) {
-  std::optional<int64_t> coefficient =
-      sym::getIntegerLiteralValue(view.getMulCoefficient());
-  if (!coefficient || *coefficient % divisor != 0)
-    return failure();
-  FailureOr<sym::ExprHandle> initial =
-      sym::composeExprInt(store, *coefficient / divisor);
-  if (failed(initial))
-    return failure();
-  return multiplyExpandedFactors(store, *initial, view);
-}
-
-static FailureOr<sym::ExprHandle> appendDividedAddTerm(sym::Store &store,
-                                                       sym::ExprHandle result,
-                                                       sym::AddTerm term,
-                                                       int64_t divisor) {
-  std::optional<int64_t> coefficient =
-      sym::getIntegerLiteralValue(term.coefficient);
-  if (!coefficient || *coefficient % divisor != 0)
-    return failure();
-  FailureOr<sym::ExprHandle> scaled =
-      sym::composeExprInt(store, *coefficient / divisor);
-  if (failed(scaled))
-    return failure();
-  scaled =
-      sym::composeExprBinary(store, *scaled, sym::ExprBinaryOp::Mul, term.term);
-  if (failed(scaled))
-    return failure();
-  return sym::composeExprBinary(store, result, sym::ExprBinaryOp::Add, *scaled);
-}
-
-static FailureOr<sym::ExprHandle>
-divideExpandedAdd(sym::Store &store, sym::ExprView view, int64_t divisor) {
-  std::optional<int64_t> constant =
-      sym::getIntegerLiteralValue(view.getAddConstant());
-  if (!constant || *constant % divisor != 0)
-    return failure();
-  FailureOr<sym::ExprHandle> result =
-      sym::composeExprInt(store, *constant / divisor);
-  if (failed(result))
-    return failure();
-
-  for (unsigned index : llvm::seq(view.getAddTermCount())) {
-    result =
-        appendDividedAddTerm(store, *result, view.getAddTerm(index), divisor);
-    if (failed(result))
-      return failure();
-  }
-  return result;
-}
-
-static FailureOr<sym::ExprHandle>
-divideCoefficientsExactly(sym::Store &store, sym::ExprHandle value,
-                          int64_t divisor) {
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, value);
-  if (failed(expanded))
-    return failure();
-  sym::ExprView view(*expanded);
-  if (view.getKind() == sym::ExprKind::Mul)
-    return divideExpandedMul(store, view, divisor);
-  if (view.getKind() == sym::ExprKind::Add)
-    return divideExpandedAdd(store, view, divisor);
-  return failure();
-}
-
-static FailureOr<sym::ExprHandle>
-divideExactly(sym::Store &store, sym::ExprHandle value, int64_t divisor,
-              ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> divisorExpr = sym::composeExprInt(store, divisor);
-  if (failed(divisorExpr))
-    return failure();
-  FailureOr<sym::ExprHandle> quotient = sym::composeExprBinary(
-      store, value, sym::ExprBinaryOp::Div, *divisorExpr);
-  if (failed(quotient))
-    return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, *quotient, assumptions);
+simplifyForMaterialization(sym::Analysis &analysis, sym::ExprHandle expr) {
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(expr);
   if (failed(simplified))
     return failure();
-  std::optional<int64_t> denominator = sym::collectDenominator(*simplified);
-  if (denominator && *denominator == 1)
-    return *simplified;
-  FailureOr<sym::ExprHandle> divided =
-      divideCoefficientsExactly(store, value, divisor);
-  if (failed(divided))
-    return failure();
-  return sym::simplifyExpr(store, *divided, assumptions);
+  return shouldUseSimplifiedIndexExpr(*simplified, expr) ? *simplified : expr;
 }
 
-static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
-                       sym::ExprHandle rhs,
-                       ArrayRef<sym::PredHandle> assumptions);
+static FailureOr<sym::ExprHandle> divideExactlyProof(sym::Analysis &analysis,
+                                                     sym::ExprHandle value,
+                                                     int64_t divisor) {
+  sym::ExactDivideResult result = analysis.tryExactDivide(value, divisor);
+  if (result.status != sym::ExactDivideStatus::Proven || !result.quotient)
+    return failure();
+  if (analysis.defined(value) != sym::CheckResult::True ||
+      analysis.defined(result.quotient) != sym::CheckResult::True)
+    return failure();
+  return result.quotient;
+}
+
+static FailureOr<sym::ExprHandle>
+divideExactlyForMaterialization(sym::Analysis &analysis, sym::ExprHandle value,
+                                int64_t divisor) {
+  FailureOr<sym::ExprHandle> proof =
+      divideExactlyProof(analysis, value, divisor);
+  if (failed(proof))
+    return failure();
+  FailureOr<sym::ExprHandle> divisorExpr = analysis.composeInteger(divisor);
+  if (failed(divisorExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> materialization =
+      analysis.compose(value, sym::ExprBinaryOp::Div, *divisorExpr);
+  if (failed(materialization))
+    return failure();
+  if (analysis.defined(*materialization) != sym::CheckResult::True)
+    return failure();
+  return shouldUseSimplifiedIndexExpr(*proof, *materialization)
+             ? *proof
+             : *materialization;
+}
 
 static StringRef getSymbolName(const SymbolicOffsetBinding &binding) {
   StringRef name = sym::ExprView(binding.name).getSymbolName();
@@ -936,43 +858,41 @@ static MappingCoordinates getMappingCoordinates(const MemoryAccess &access,
 }
 
 static FailureOr<MappingCoordinates>
-specializeCoordinates(sym::Store &store, const MappingCoordinates &coordinates,
-                      ArrayRef<sym::ExprSubstitution> substitutions,
-                      ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> base = substituteAndSimplify(
-      store, coordinates.base, substitutions, assumptions);
-  if (failed(base))
+specializeCoordinates(sym::Analysis &analysis,
+                      const MappingCoordinates &coordinates,
+                      ArrayRef<sym::ExprSubstitution> substitutions) {
+  std::array<sym::ExprHandle, 3> roots{
+      coordinates.base, coordinates.targetBlock, coordinates.bitOffset};
+  for (sym::ExprHandle &root : roots) {
+    FailureOr<sym::ExprHandle> substituted =
+        analysis.substitute(root, substitutions);
+    if (failed(substituted))
+      return failure();
+    root = *substituted;
+  }
+  if (failed(analysis.simplify(roots)))
     return failure();
-  FailureOr<sym::ExprHandle> targetBlock = substituteAndSimplify(
-      store, coordinates.targetBlock, substitutions, assumptions);
-  if (failed(targetBlock))
-    return failure();
-  FailureOr<sym::ExprHandle> bitOffset = substituteAndSimplify(
-      store, coordinates.bitOffset, substitutions, assumptions);
-  if (failed(bitOffset))
-    return failure();
-  return MappingCoordinates{*base, *targetBlock, *bitOffset};
+  return MappingCoordinates{roots[0], roots[1], roots[2]};
 }
 
-static bool coordinatesProvablyDefined(sym::Store &store,
-                                       const MappingCoordinates &coordinates,
-                                       ArrayRef<sym::PredHandle> assumptions) {
-  return sym::provablyDefined(store, coordinates.base, assumptions) &&
-         sym::provablyDefined(store, coordinates.targetBlock, assumptions) &&
-         sym::provablyDefined(store, coordinates.bitOffset, assumptions);
+static bool coordinatesProvablyDefined(sym::Analysis &analysis,
+                                       const MappingCoordinates &coordinates) {
+  return analysis.defined(coordinates.base) == sym::CheckResult::True &&
+         analysis.defined(coordinates.targetBlock) == sym::CheckResult::True &&
+         analysis.defined(coordinates.bitOffset) == sym::CheckResult::True;
 }
 
 static FailureOr<int64_t>
-validateLocalCoordinates(const MemoryAccess &access, sym::Store &store,
+validateLocalCoordinates(const MemoryAccess &access, sym::Analysis &analysis,
                          const MappingCoordinates &coordinates,
-                         sym::ExprHandle block,
-                         ArrayRef<sym::PredHandle> assumptions) {
-  if (!coordinatesProvablyDefined(store, coordinates, assumptions))
+                         sym::ExprHandle block) {
+  if (!coordinatesProvablyDefined(analysis, coordinates))
     return failure();
   if (hasSymbol(coordinates.base, "block") ||
       hasSymbol(coordinates.bitOffset, "block"))
     return failure();
-  if (!proveEqual(store, coordinates.targetBlock, block, assumptions))
+  if (analysis.equivalent(coordinates.targetBlock, block) !=
+      sym::CheckResult::True)
     return failure();
   std::optional<int64_t> baseIndex =
       sym::getIntegerLiteralValue(coordinates.base);
@@ -985,319 +905,100 @@ validateLocalCoordinates(const MemoryAccess &access, sym::Store &store,
   return *baseIndex;
 }
 
-static FailureOr<sym::ExprHandle>
-getByteOffset(sym::Store &store, sym::ExprHandle bitOffset,
-              ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> byteOffset =
-      divideExactly(store, bitOffset, 8, assumptions);
-  if (failed(byteOffset))
+static FailureOr<sym::ExprHandle> getByteOffset(sym::Analysis &analysis,
+                                                sym::ExprHandle bitOffset) {
+  return divideExactlyProof(analysis, bitOffset, 8);
+}
+
+struct PreparedSlotMapping {
+  SmallVector<sym::ExprSubstitution> substitutions;
+  SlotMapping mapping;
+};
+
+static FailureOr<PreparedSlotMapping> prepareSlotMapping(
+    const MemoryAccess &access, sym::Store &store, sym::ExprHandle slotSymbol,
+    int64_t slot, const MappedItem &item,
+    ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
+    ArrayRef<PacketComponents> packetComponents,
+    ArrayRef<ActiveControl> controls, const PacketControl *packetControl,
+    PacketBindingState &bindingState) {
+  PreparedSlotMapping prepared;
+  prepared.mapping.logicalSlots.push_back(static_cast<unsigned>(slot));
+  prepared.mapping.proofIndex = static_cast<size_t>(slot);
+  if (failed(appendAccessBindings(access, store, item, prepared.mapping)))
     return failure();
-  if (!sym::provablyDefined(store, *byteOffset, assumptions))
+  if (failed(appendActiveControls(store, controls, bindingState,
+                                  prepared.mapping)))
     return failure();
-  return byteOffset;
-}
-
-static std::optional<uint64_t>
-rangePossibleBits(sym::Store &store, sym::ExprHandle expression,
-                  ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<int64_t> upper = sym::inferNonNegativeUpperBound(
-      store, expression, assumptions, std::numeric_limits<int64_t>::max());
-  if (!upper)
-    return std::nullopt;
-  uint64_t value = static_cast<uint64_t>(*upper);
-  if (value == 0)
-    return uint64_t{0};
-  unsigned bits = llvm::Log2_64(value) + 1;
-  return (uint64_t{1} << bits) - 1;
-}
-
-static std::optional<uint64_t> scalePossibleBits(uint64_t bits,
-                                                 sym::ExprHandle coefficient) {
-  std::optional<int64_t> value = sym::getIntegerLiteralValue(coefficient);
-  if (!value || *value < 0)
-    return std::nullopt;
-  if (*value == 0 || bits == 0)
-    return uint64_t{0};
-  uint64_t scale = static_cast<uint64_t>(*value);
-  if (!llvm::isPowerOf2_64(scale))
-    return std::nullopt;
-  unsigned shift = llvm::Log2_64(scale);
-  if (shift >= 63 ||
-      bits > (uint64_t(std::numeric_limits<int64_t>::max()) >> shift))
-    return std::nullopt;
-  return bits << shift;
-}
-
-static std::optional<uint64_t>
-possibleOneBits(sym::Store &store, sym::ExprHandle expression,
-                ArrayRef<sym::PredHandle> assumptions);
-
-static std::optional<uint64_t>
-possibleAddOneBits(sym::Store &store, sym::ExprHandle expression,
-                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<int64_t> constant =
-      sym::getIntegerLiteralValue(view.getAddConstant());
-  if (!constant || *constant < 0)
-    return rangePossibleBits(store, expression, assumptions);
-  uint64_t bits = static_cast<uint64_t>(*constant);
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-    sym::AddTerm term = view.getAddTerm(index);
-    std::optional<uint64_t> termBits =
-        possibleOneBits(store, term.term, assumptions);
-    if (!termBits)
-      return rangePossibleBits(store, expression, assumptions);
-    termBits = scalePossibleBits(*termBits, term.coefficient);
-    if (!termBits || (bits & *termBits) != 0)
-      return rangePossibleBits(store, expression, assumptions);
-    bits |= *termBits;
-  }
-  return bits;
-}
-
-static std::optional<uint64_t>
-possibleMulOneBits(sym::Store &store, sym::ExprHandle expression,
-                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
-  if (view.getMulFactorCount() != 1 || view.getMulFactor(0).exponent != 1)
-    return rangePossibleBits(store, expression, assumptions);
-  std::optional<uint64_t> factorBits =
-      possibleOneBits(store, view.getMulFactor(0).base, assumptions);
-  if (!factorBits)
-    return rangePossibleBits(store, expression, assumptions);
-  std::optional<uint64_t> scaled =
-      scalePossibleBits(*factorBits, view.getMulCoefficient());
-  return scaled ? scaled : rangePossibleBits(store, expression, assumptions);
-}
-
-static std::optional<uint64_t>
-possibleModOneBits(sym::Store &store, sym::ExprHandle expression,
-                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<int64_t> modulus =
-      sym::getIntegerLiteralValue(view.getBinaryRhs());
-  if (!modulus || *modulus <= 0)
-    return rangePossibleBits(store, expression, assumptions);
-  uint64_t upper = static_cast<uint64_t>(*modulus - 1);
-  if (upper == 0)
-    return uint64_t{0};
-  unsigned bits = llvm::Log2_64(upper) + 1;
-  return (uint64_t{1} << bits) - 1;
-}
-
-static std::optional<uint64_t>
-possibleXorOneBits(sym::Store &store, sym::ExprHandle expression,
-                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<uint64_t> lhs =
-      possibleOneBits(store, view.getBinaryLhs(), assumptions);
-  std::optional<uint64_t> rhs =
-      possibleOneBits(store, view.getBinaryRhs(), assumptions);
-  if (lhs && rhs)
-    return *lhs | *rhs;
-  return rangePossibleBits(store, expression, assumptions);
-}
-
-static std::optional<uint64_t>
-possibleOneBits(sym::Store &store, sym::ExprHandle expression,
-                ArrayRef<sym::PredHandle> assumptions) {
-  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(expression))
-    return *value >= 0 ? std::optional<uint64_t>(*value) : std::nullopt;
-
-  sym::ExprView view(expression);
-  switch (view.getKind()) {
-  case sym::ExprKind::Add:
-    return possibleAddOneBits(store, expression, view, assumptions);
-  case sym::ExprKind::Mul:
-    return possibleMulOneBits(store, expression, view, assumptions);
-  case sym::ExprKind::Mod:
-    return possibleModOneBits(store, expression, view, assumptions);
-  case sym::ExprKind::Xor:
-    return possibleXorOneBits(store, expression, view, assumptions);
-  default:
-    return rangePossibleBits(store, expression, assumptions);
-  }
-}
-
-static void appendAddChildren(sym::ExprView view,
-                              SmallVectorImpl<sym::ExprHandle> &children) {
-  children.push_back(view.getAddConstant());
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-    sym::AddTerm term = view.getAddTerm(index);
-    children.push_back(term.coefficient);
-    children.push_back(term.term);
-  }
-}
-
-static void appendMulChildren(sym::ExprView view,
-                              SmallVectorImpl<sym::ExprHandle> &children) {
-  children.push_back(view.getMulCoefficient());
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
-    children.push_back(view.getMulFactor(index).base);
-}
-
-static void
-appendPiecewiseChildren(sym::ExprView view,
-                        SmallVectorImpl<sym::ExprHandle> &children) {
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount()))
-    children.push_back(view.getPiecewiseCase(index).value);
-}
-
-static SmallVector<sym::ExprHandle> getExpressionChildren(sym::ExprView view) {
-  SmallVector<sym::ExprHandle> children;
-  switch (view.getKind()) {
-  case sym::ExprKind::Add:
-    appendAddChildren(view, children);
-    break;
-  case sym::ExprKind::Mul:
-    appendMulChildren(view, children);
-    break;
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    children.push_back(view.getUnaryArg());
-    break;
-  case sym::ExprKind::Mod:
-  case sym::ExprKind::Max:
-  case sym::ExprKind::Min:
-  case sym::ExprKind::Xor:
-    children.push_back(view.getBinaryLhs());
-    children.push_back(view.getBinaryRhs());
-    break;
-  case sym::ExprKind::Piecewise:
-    appendPiecewiseChildren(view, children);
-    break;
-  default:
-    break;
-  }
-  return children;
-}
-
-static bool canLinearizeXor(std::optional<uint64_t> lhs,
-                            std::optional<uint64_t> rhs) {
-  return lhs && rhs && ((*lhs & *rhs) == 0);
-}
-
-static LogicalResult
-rewriteDisjointXor(sym::Store &store, sym::ExprHandle expression,
-                   sym::ExprView view, ArrayRef<sym::PredHandle> assumptions,
-                   SmallVectorImpl<sym::ExprSubstitution> &rewrites) {
-  sym::ExprHandle lhs = view.getBinaryLhs();
-  sym::ExprHandle rhs = view.getBinaryRhs();
-  if (!rewrites.empty()) {
-    FailureOr<sym::ExprHandle> rewrittenLhs =
-        sym::substituteExpr(store, lhs, rewrites);
-    FailureOr<sym::ExprHandle> rewrittenRhs =
-        sym::substituteExpr(store, rhs, rewrites);
-    if (failed(rewrittenLhs) || failed(rewrittenRhs))
-      return failure();
-    lhs = *rewrittenLhs;
-    rhs = *rewrittenRhs;
-  }
-  std::optional<uint64_t> lhsBits = possibleOneBits(store, lhs, assumptions);
-  std::optional<uint64_t> rhsBits = possibleOneBits(store, rhs, assumptions);
-  sym::ExprBinaryOp op = canLinearizeXor(lhsBits, rhsBits)
-                             ? sym::ExprBinaryOp::Add
-                             : sym::ExprBinaryOp::Xor;
-  FailureOr<sym::ExprHandle> replacement =
-      sym::composeExprBinary(store, lhs, op, rhs);
-  if (failed(replacement))
-    return failure();
-  replacement = sym::simplifyExpr(store, *replacement, assumptions);
-  if (failed(replacement))
-    return failure();
-  if (!(*replacement == expression))
-    rewrites.push_back({expression, *replacement});
-  return success();
-}
-
-static LogicalResult
-collectDisjointXorRewrites(sym::Store &store, sym::ExprHandle expression,
-                           ArrayRef<sym::PredHandle> assumptions,
-                           llvm::DenseSet<sym::ExprHandle> &visited,
-                           SmallVectorImpl<sym::ExprSubstitution> &rewrites) {
-  if (!visited.insert(expression).second)
-    return success();
-
-  sym::ExprView view(expression);
-  for (sym::ExprHandle child : getExpressionChildren(view))
-    if (child && failed(collectDisjointXorRewrites(store, child, assumptions,
-                                                   visited, rewrites)))
-      return failure();
-
-  if (view.getKind() != sym::ExprKind::Xor)
-    return success();
-  return rewriteDisjointXor(store, expression, view, assumptions, rewrites);
-}
-
-static FailureOr<sym::ExprHandle>
-linearizeDisjointXors(sym::Store &store, sym::ExprHandle expression,
-                      ArrayRef<sym::PredHandle> assumptions) {
-  llvm::DenseSet<sym::ExprHandle> visited;
-  SmallVector<sym::ExprSubstitution> rewrites;
-  if (failed(collectDisjointXorRewrites(store, expression, assumptions, visited,
-                                        rewrites)))
-    return failure();
-  if (rewrites.empty())
-    return expression;
-  FailureOr<sym::ExprHandle> rewritten =
-      sym::substituteExpr(store, expression, rewrites);
-  if (failed(rewritten))
-    return failure();
-  return sym::simplifyExpr(store, *rewritten, assumptions);
-}
-
-static FailureOr<SlotMapping>
-buildSlotMapping(const MemoryAccess &access, sym::Store &store,
-                 sym::ExprHandle blockSymbol, sym::ExprHandle slotSymbol,
-                 sym::ExprHandle zero, int64_t slot, const MappedItem &item,
-                 ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
-                 ArrayRef<PacketComponents> packetComponents,
-                 ArrayRef<ActiveControl> controls,
-                 const PacketControl *packetControl,
-                 PacketBindingState &bindingState) {
-  SlotMapping result;
-  result.logicalSlots.push_back(static_cast<unsigned>(slot));
-  if (failed(appendAccessBindings(access, store, item, result)))
-    return failure();
-  if (failed(appendActiveControls(store, controls, bindingState, result)))
-    return failure();
-  if (failed(appendPacketControl(store, packetControl, bindingState, result)))
+  if (failed(appendPacketControl(store, packetControl, bindingState,
+                                 prepared.mapping)))
     return failure();
   FailureOr<SmallVector<sym::ExprSubstitution>> substitutions =
       buildSlotSubstitutions(access, store, slotSymbol, slot,
                              bindingSubstitutions, packetComponents,
-                             bindingState, result);
+                             bindingState, prepared.mapping);
   if (failed(substitutions))
     return failure();
+  prepared.substitutions = std::move(*substitutions);
+  return prepared;
+}
+
+static FailureOr<SlotMapping> analyzeSlotMapping(const MemoryAccess &access,
+                                                 sym::Analysis &analysis,
+                                                 sym::ExprHandle blockSymbol,
+                                                 sym::ExprHandle zero,
+                                                 PreparedSlotMapping prepared) {
+  SlotMapping &result = prepared.mapping;
   MappingCoordinates coordinates =
       getMappingCoordinates(access, blockSymbol, zero);
-  ArrayRef<sym::PredHandle> simplificationAssumptions = result.assumptions;
-  FailureOr<MappingCoordinates> specialized = specializeCoordinates(
-      store, coordinates, *substitutions, simplificationAssumptions);
+  FailureOr<sym::ExprHandle> materializationBitOffset =
+      analysis.substitute(coordinates.bitOffset, prepared.substitutions);
+  if (failed(materializationBitOffset))
+    return failure();
+  FailureOr<MappingCoordinates> specialized =
+      specializeCoordinates(analysis, coordinates, prepared.substitutions);
   if (failed(specialized))
     return failure();
-  FailureOr<int64_t> baseIndex = validateLocalCoordinates(
-      access, store, *specialized, blockSymbol, result.assumptions);
+  FailureOr<int64_t> baseIndex =
+      validateLocalCoordinates(access, analysis, *specialized, blockSymbol);
   if (failed(baseIndex))
     return failure();
   std::array<sym::ExprSubstitution, 1> blockSubstitution{
       sym::ExprSubstitution{blockSymbol, zero}};
-  FailureOr<MappingCoordinates> local = specializeCoordinates(
-      store, *specialized, blockSubstitution, simplificationAssumptions);
+  materializationBitOffset =
+      analysis.substitute(*materializationBitOffset, blockSubstitution);
+  if (failed(materializationBitOffset))
+    return failure();
+  FailureOr<MappingCoordinates> local =
+      specializeCoordinates(analysis, *specialized, blockSubstitution);
   if (failed(local))
     return failure();
-  result.materializationBitOffset = local->bitOffset;
-  FailureOr<sym::ExprHandle> bitOffset =
-      linearizeDisjointXors(store, local->bitOffset, simplificationAssumptions);
+  result.materializationBitOffset = *materializationBitOffset;
+  FailureOr<sym::ExprHandle> materializationByteOffset =
+      divideExactlyForMaterialization(analysis, result.materializationBitOffset,
+                                      8);
+  if (failed(materializationByteOffset))
+    return failure();
+  materializationByteOffset =
+      simplifyForMaterialization(analysis, *materializationByteOffset);
+  if (failed(materializationByteOffset))
+    return failure();
+  result.materializationByteOffset = *materializationByteOffset;
+  FailureOr<sym::ExprHandle> bitOffset = analysis.simplify(local->bitOffset);
   if (failed(bitOffset))
     return failure();
   local->bitOffset = *bitOffset;
   FailureOr<sym::ExprHandle> byteOffset =
-      getByteOffset(store, local->bitOffset, simplificationAssumptions);
+      getByteOffset(analysis, local->bitOffset);
   if (failed(byteOffset))
     return failure();
   result.base = local->base;
   result.targetBlock = local->targetBlock;
   result.bitOffset = local->bitOffset;
   result.byteOffset = *byteOffset;
+  result.proofOffset = analysis.splitAdditiveConstant(local->bitOffset);
   result.baseIndex = *baseIndex;
-  return result;
+  return std::move(prepared.mapping);
 }
 
 static SmallVector<sym::PredHandle> combineAssumptions(const SlotMapping &lhs,
@@ -1308,397 +1009,21 @@ static SmallVector<sym::PredHandle> combineAssumptions(const SlotMapping &lhs,
 }
 
 static SmallVector<sym::PredHandle>
-combineNonActivationAssumptions(const SlotMapping &lhs,
-                                const SlotMapping &rhs) {
-  SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
-  llvm::erase_if(assumptions, [&](sym::PredHandle predicate) {
-    return (lhs.activationPredicate && *lhs.activationPredicate == predicate) ||
-           (rhs.activationPredicate && *rhs.activationPredicate == predicate);
-  });
+getNonActivationAssumptions(const SlotMapping &slot) {
+  SmallVector<sym::PredHandle> assumptions = slot.assumptions;
+  if (slot.activationPredicate)
+    llvm::erase(assumptions, *slot.activationPredicate);
   return assumptions;
 }
 
-static bool predicateImplies(sym::Store &store, sym::PredHandle lhs,
-                             sym::PredHandle rhs,
-                             ArrayRef<sym::PredHandle> assumptions) {
-  SmallVector<sym::PredHandle> withLhs(assumptions);
-  withLhs.push_back(lhs);
-  return sym::checkPredicate(store, rhs, withLhs) == sym::CheckResult::True;
-}
-
-static bool isOrderedComparison(sym::PredCmpOp comparison) {
-  switch (comparison) {
-  case sym::PredCmpOp::Lt:
-  case sym::PredCmpOp::Le:
-  case sym::PredCmpOp::Gt:
-  case sym::PredCmpOp::Ge:
-    return true;
-  default:
-    return false;
-  }
-}
-
-static bool isReversedComparison(sym::PredCmpOp comparison) {
-  return comparison == sym::PredCmpOp::Gt || comparison == sym::PredCmpOp::Ge;
-}
-
-static bool isStrictComparison(sym::PredCmpOp comparison) {
-  return comparison == sym::PredCmpOp::Lt || comparison == sym::PredCmpOp::Gt;
-}
-
-static FailureOr<sym::ExprHandle>
-getStrictComparisonResidual(sym::Store &store, sym::PredHandle predicate) {
-  sym::PredView view(predicate);
-  std::optional<sym::PredCmpOp> comparison = view.getCmpOp();
-  if (!comparison)
-    return failure();
-  if (!isOrderedComparison(*comparison))
-    return failure();
-
-  sym::ExprHandle lhs = view.getCmpLhs();
-  sym::ExprHandle rhs = view.getCmpRhs();
-  if (isReversedComparison(*comparison))
-    std::swap(lhs, rhs);
-  FailureOr<sym::ExprHandle> residual =
-      sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
-  if (failed(residual))
-    return failure();
-  if (isStrictComparison(*comparison))
-    return residual;
-
-  FailureOr<sym::ExprHandle> one = sym::composeExprInt(store, 1);
-  if (failed(one))
-    return failure();
-  return sym::composeExprBinary(store, *residual, sym::ExprBinaryOp::Sub, *one);
-}
-
-static std::optional<int64_t>
-getConstantDifference(sym::Store &store, sym::ExprHandle lhs,
-                      sym::ExprHandle rhs,
-                      ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> difference =
-      sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
-  if (failed(difference))
-    return std::nullopt;
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, *difference, assumptions);
-  if (failed(simplified))
-    return std::nullopt;
-  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(*simplified))
-    return value;
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *simplified);
-  if (failed(expanded))
-    return std::nullopt;
-  simplified = sym::simplifyExpr(store, *expanded, assumptions);
-  if (failed(simplified))
-    return std::nullopt;
-  return sym::getIntegerLiteralValue(*simplified);
-}
-
-static void appendModulus(sym::ExprHandle expression,
-                          SmallVectorImpl<int64_t> &moduli) {
-  sym::ExprView view(expression);
-  if (view.getKind() != sym::ExprKind::Mod)
-    return;
-  std::optional<int64_t> modulus =
-      sym::getIntegerLiteralValue(view.getBinaryRhs());
-  if (!modulus || *modulus <= 1)
-    return;
-  if (!llvm::is_contained(moduli, *modulus))
-    moduli.push_back(*modulus);
-
-  // Legal memory transaction widths are powers of two. A divisibility fact
-  // also proves every power-of-two factor, which may match a narrower packet.
-  for (int64_t factor = 2; *modulus % factor == 0; factor *= 2) {
-    if (!llvm::is_contained(moduli, factor))
-      moduli.push_back(factor);
-    if (factor == *modulus)
-      break;
-  }
-}
-
-static void collectAssumptionModuli(sym::PredHandle predicate,
-                                    SmallVectorImpl<int64_t> &moduli) {
-  sym::PredView view(predicate);
-  if (view.getKind() == sym::PredKind::Cmp) {
-    appendModulus(view.getCmpLhs(), moduli);
-    appendModulus(view.getCmpRhs(), moduli);
-    return;
-  }
-  if (view.getKind() == sym::PredKind::Not) {
-    collectAssumptionModuli(view.getUnaryArg(), moduli);
-    return;
-  }
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-    collectAssumptionModuli(view.getLogicArg(index), moduli);
-}
-
-static std::optional<int64_t> getAdditiveConstant(sym::ExprHandle expression) {
-  sym::ExprView view(expression);
-  if (std::optional<int64_t> literal = sym::getIntegerLiteralValue(expression))
-    return literal;
-  if (view.getKind() == sym::ExprKind::Add)
-    return sym::getIntegerLiteralValue(view.getAddConstant());
-  return int64_t{0};
-}
-
-static FailureOr<sym::ExprHandle>
-normalizeComparisonResidual(sym::Store &store, sym::PredHandle predicate,
-                            ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> residual =
-      getStrictComparisonResidual(store, predicate);
-  if (failed(residual))
-    return failure();
-  return linearizeDisjointXors(store, *residual, assumptions);
-}
-
-static bool
-provesRemainderBelowBoundary(sym::Store &store, sym::ExprHandle residual,
-                             sym::ExprHandle divisor, sym::ExprHandle boundary,
-                             ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> remainder =
-      sym::composeExprBinary(store, residual, sym::ExprBinaryOp::Mod, divisor);
-  if (failed(remainder))
-    return false;
-  if (!sym::provablyDefined(store, *remainder, assumptions))
-    return false;
-  FailureOr<sym::PredHandle> staysInBlock =
-      sym::composePredCmp(store, *remainder, sym::PredCmpOp::Lt, boundary);
-  if (failed(staysInBlock))
-    return false;
-  return sym::checkPredicate(store, *staysInBlock, assumptions) ==
-         sym::CheckResult::True;
-}
-
-static std::optional<int64_t> getAlignedResidue(sym::ExprHandle residual,
-                                                int64_t modulus,
-                                                uint64_t distance) {
-  std::optional<int64_t> constant = getAdditiveConstant(residual);
-  if (!constant)
-    return std::nullopt;
-  int64_t residue = *constant % modulus;
-  if (residue < 0)
-    residue += modulus;
-  if (static_cast<uint64_t>(residue) + distance >=
-      static_cast<uint64_t>(modulus))
-    return std::nullopt;
-  return residue;
-}
-
-static bool provesAlignedGrid(sym::Store &store, sym::ExprHandle residual,
-                              sym::ExprHandle divisor, int64_t modulus,
-                              uint64_t distance,
-                              ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<int64_t> residue =
-      getAlignedResidue(residual, modulus, distance);
-  if (!residue)
-    return false;
-  FailureOr<sym::ExprHandle> residueExpr = sym::composeExprInt(store, *residue);
-  if (failed(residueExpr))
-    return false;
-  FailureOr<sym::ExprHandle> gridBase = sym::composeExprBinary(
-      store, residual, sym::ExprBinaryOp::Sub, *residueExpr);
-  if (failed(gridBase))
-    return false;
-  FailureOr<sym::ExprHandle> remainder =
-      sym::composeExprBinary(store, *gridBase, sym::ExprBinaryOp::Mod, divisor);
-  if (failed(remainder))
-    return false;
-  if (!sym::provablyDefined(store, *remainder, assumptions))
-    return false;
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-  if (failed(zero))
-    return false;
-  FailureOr<sym::PredHandle> aligned =
-      sym::composePredCmp(store, *remainder, sym::PredCmpOp::Eq, *zero);
-  if (failed(aligned))
-    return false;
-  return sym::checkPredicate(store, *aligned, assumptions) ==
-         sym::CheckResult::True;
-}
-
-static bool alignedWithinModulus(sym::Store &store,
-                                 sym::ExprHandle lowerResidual,
-                                 uint64_t distance, int64_t modulus,
-                                 ArrayRef<sym::PredHandle> assumptions) {
-  if (static_cast<uint64_t>(modulus) <= distance)
-    return false;
-  FailureOr<sym::ExprHandle> divisor = sym::composeExprInt(store, modulus);
-  FailureOr<sym::ExprHandle> boundary =
-      sym::composeExprInt(store, modulus - static_cast<int64_t>(distance));
-  if (failed(divisor) || failed(boundary))
-    return false;
-  if (provesRemainderBelowBoundary(store, lowerResidual, *divisor, *boundary,
-                                   assumptions))
-    return true;
-  return provesAlignedGrid(store, lowerResidual, *divisor, modulus, distance,
-                           assumptions);
-}
-
-static uint64_t getAbsoluteDistance(int64_t delta) {
-  return static_cast<uint64_t>(delta < 0 ? -delta : delta);
-}
-
-static sym::ExprHandle getLowerResidual(int64_t delta,
-                                        sym::ExprHandle lhsResidual,
-                                        sym::ExprHandle rhsResidual) {
-  return delta > 0 ? lhsResidual : rhsResidual;
-}
-
-static bool
-alignedComparisonsEquivalent(sym::Store &store, sym::PredHandle lhs,
-                             sym::PredHandle rhs,
-                             ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> lhsResidual =
-      normalizeComparisonResidual(store, lhs, assumptions);
-  FailureOr<sym::ExprHandle> rhsResidual =
-      normalizeComparisonResidual(store, rhs, assumptions);
-  if (failed(lhsResidual) || failed(rhsResidual))
-    return false;
-  std::optional<int64_t> delta =
-      getConstantDifference(store, *rhsResidual, *lhsResidual, assumptions);
-  if (!delta || *delta == std::numeric_limits<int64_t>::min())
-    return false;
-  if (*delta == 0)
-    return true;
-
-  uint64_t distance = getAbsoluteDistance(*delta);
-  sym::ExprHandle lowerResidual =
-      getLowerResidual(*delta, *lhsResidual, *rhsResidual);
-  SmallVector<int64_t> moduli;
-  for (sym::PredHandle assumption : assumptions)
-    collectAssumptionModuli(assumption, moduli);
-  for (int64_t modulus : moduli)
-    if (alignedWithinModulus(store, lowerResidual, distance, modulus,
-                             assumptions))
-      return true;
-  return false;
-}
-
-static bool
-equivalentActivationPredicates(sym::Store &store, sym::PredHandle lhs,
-                               sym::PredHandle rhs,
-                               ArrayRef<sym::PredHandle> assumptions);
-
-struct UnmatchedLogicArgs {
-  SmallVector<uint32_t> lhs;
-  SmallVector<uint32_t> rhs;
-};
-
-static std::optional<uint32_t> findExactLogicArg(sym::PredView rhs,
-                                                 sym::PredHandle sought,
-                                                 ArrayRef<uint8_t> matched) {
-  for (uint32_t index : llvm::seq<uint32_t>(0, rhs.getLogicArgCount()))
-    if (!matched[index] && sought == rhs.getLogicArg(index))
-      return index;
-  return std::nullopt;
-}
-
-static UnmatchedLogicArgs collectUnmatchedLogicArgs(sym::PredView lhs,
-                                                    sym::PredView rhs) {
-  uint32_t count = lhs.getLogicArgCount();
-  SmallVector<uint8_t> rhsMatched(count, false);
-  UnmatchedLogicArgs result;
-  for (uint32_t lhsIndex : llvm::seq<uint32_t>(0, count)) {
-    std::optional<uint32_t> exact =
-        findExactLogicArg(rhs, lhs.getLogicArg(lhsIndex), rhsMatched);
-    if (!exact) {
-      result.lhs.push_back(lhsIndex);
-      continue;
-    }
-    rhsMatched[*exact] = true;
-  }
-  for (uint32_t rhsIndex : llvm::seq<uint32_t>(0, count))
-    if (!rhsMatched[rhsIndex])
-      result.rhs.push_back(rhsIndex);
-  return result;
-}
-
-static SmallVector<SmallVector<uint8_t>>
-buildLogicEquivalenceMatrix(sym::Store &store, sym::PredView lhs,
-                            sym::PredView rhs,
-                            const UnmatchedLogicArgs &remaining,
-                            ArrayRef<sym::PredHandle> assumptions) {
-  uint32_t count = remaining.lhs.size();
-  SmallVector<SmallVector<uint8_t>> equivalent(count);
-  for (uint32_t lhsIndex : llvm::seq<uint32_t>(0, count)) {
-    equivalent[lhsIndex].reserve(count);
-    for (uint32_t rhsIndex : llvm::seq<uint32_t>(0, count))
-      equivalent[lhsIndex].push_back(equivalentActivationPredicates(
-          store, lhs.getLogicArg(remaining.lhs[lhsIndex]),
-          rhs.getLogicArg(remaining.rhs[rhsIndex]), assumptions));
-  }
-  return equivalent;
-}
-
-static bool augmentLogicMatching(uint32_t lhsIndex,
-                                 ArrayRef<SmallVector<uint8_t>> equivalent,
-                                 SmallVectorImpl<int32_t> &matchedLhs,
-                                 SmallVectorImpl<uint8_t> &visited) {
-  for (uint32_t rhsIndex :
-       llvm::seq<uint32_t>(0, static_cast<uint32_t>(equivalent.size()))) {
-    if (!equivalent[lhsIndex][rhsIndex] || visited[rhsIndex])
-      continue;
-    visited[rhsIndex] = true;
-    if (matchedLhs[rhsIndex] < 0 ||
-        augmentLogicMatching(static_cast<uint32_t>(matchedLhs[rhsIndex]),
-                             equivalent, matchedLhs, visited)) {
-      matchedLhs[rhsIndex] = lhsIndex;
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool hasPerfectLogicMatching(ArrayRef<SmallVector<uint8_t>> equivalent) {
-  uint32_t count = equivalent.size();
-  SmallVector<int32_t> matchedLhs(count, -1);
-  for (uint32_t lhsIndex : llvm::seq<uint32_t>(0, count)) {
-    SmallVector<uint8_t> visited(count, false);
-    if (!augmentLogicMatching(lhsIndex, equivalent, matchedLhs, visited))
-      return false;
-  }
-  return true;
-}
-
-static bool equivalentLogicPredicates(sym::Store &store, sym::PredView lhs,
-                                      sym::PredView rhs,
-                                      ArrayRef<sym::PredHandle> assumptions) {
-  uint32_t count = lhs.getLogicArgCount();
-  if (count != rhs.getLogicArgCount())
-    return false;
-  UnmatchedLogicArgs remaining = collectUnmatchedLogicArgs(lhs, rhs);
-  SmallVector<SmallVector<uint8_t>> equivalent =
-      buildLogicEquivalenceMatrix(store, lhs, rhs, remaining, assumptions);
-  return hasPerfectLogicMatching(equivalent);
-}
-
-static bool
-equivalentActivationPredicates(sym::Store &store, sym::PredHandle lhs,
-                               sym::PredHandle rhs,
-                               ArrayRef<sym::PredHandle> assumptions) {
-  if (lhs == rhs)
-    return true;
-  sym::PredView lhsView(lhs);
-  sym::PredView rhsView(rhs);
-  if (lhsView.getKind() != rhsView.getKind())
-    return false;
-
-  switch (lhsView.getKind()) {
-  case sym::PredKind::Cmp:
-    return alignedComparisonsEquivalent(store, lhs, rhs, assumptions);
-  case sym::PredKind::Not:
-    return equivalentActivationPredicates(store, lhsView.getUnaryArg(),
-                                          rhsView.getUnaryArg(), assumptions);
-  case sym::PredKind::And:
-  case sym::PredKind::Or:
-    return equivalentLogicPredicates(store, lhsView, rhsView, assumptions);
-  case sym::PredKind::True:
-  case sym::PredKind::False:
-    return true;
-  default:
-    return false;
-  }
+static SmallVector<sym::PredHandle>
+combineNonActivationAssumptions(const SlotMapping &lhs,
+                                const SlotMapping &rhs) {
+  SmallVector<sym::PredHandle> assumptions = getNonActivationAssumptions(lhs);
+  SmallVector<sym::PredHandle> rhsAssumptions =
+      getNonActivationAssumptions(rhs);
+  llvm::append_range(assumptions, rhsAssumptions);
+  return assumptions;
 }
 
 static sym::PredHandle getActivationRelation(const SlotMapping &mapping) {
@@ -1707,15 +1032,9 @@ static sym::PredHandle getActivationRelation(const SlotMapping &mapping) {
              : *mapping.activationPredicate;
 }
 
-static bool mutuallyImply(sym::Store &store, sym::PredHandle lhs,
-                          sym::PredHandle rhs,
-                          ArrayRef<sym::PredHandle> assumptions) {
-  return predicateImplies(store, lhs, rhs, assumptions) &&
-         predicateImplies(store, rhs, lhs, assumptions);
-}
-
-static bool sameActivation(sym::Store &store, const SlotMapping &lhs,
-                           const SlotMapping &rhs) {
+static std::optional<bool>
+getStructuralActivationRelation(const SlotMapping &lhs,
+                                const SlotMapping &rhs) {
   if (!lhs.packetCondition)
     return !rhs.packetCondition;
   if (!rhs.packetCondition)
@@ -1726,65 +1045,759 @@ static bool sameActivation(sym::Store &store, const SlotMapping &lhs,
     return false;
   if (!rhs.activationPredicate)
     return false;
-  sym::PredHandle lhsPredicate = *lhs.activationPredicate;
-  sym::PredHandle rhsPredicate = *rhs.activationPredicate;
-  if (lhsPredicate == rhsPredicate)
-    return true;
-  SmallVector<sym::PredHandle> assumptions =
-      combineNonActivationAssumptions(lhs, rhs);
-  sym::PredHandle lhsRelation = getActivationRelation(lhs);
-  sym::PredHandle rhsRelation = getActivationRelation(rhs);
-  if (equivalentActivationPredicates(store, lhsRelation, rhsRelation,
-                                     assumptions))
-    return true;
-  return mutuallyImply(store, lhsPredicate, rhsPredicate, assumptions);
+  return std::nullopt;
 }
 
-static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
-                       sym::ExprHandle rhs,
-                       ArrayRef<sym::PredHandle> assumptions) {
-  if (lhs == rhs)
-    return true;
-  FailureOr<sym::ExprHandle> difference =
-      sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
-  if (succeeded(difference)) {
-    FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, *difference, assumptions);
-    if (succeeded(simplified) && sym::getIntegerLiteralValue(*simplified) == 0)
-      return true;
-    if (succeeded(simplified)) {
-      FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *simplified);
-      if (succeeded(expanded)) {
-        simplified = sym::simplifyExpr(store, *expanded, assumptions);
-        if (succeeded(simplified) &&
-            sym::getIntegerLiteralValue(*simplified) == 0)
-          return true;
-      }
+struct ExactFactDomainGroup {
+  SmallVector<sym::PredHandle> assumptions;
+  SmallVector<size_t> tasks;
+};
+
+static void appendExactFactDomainTask(
+    SmallVector<sym::PredHandle> assumptions, size_t task,
+    SmallVectorImpl<ExactFactDomainGroup> &groups,
+    llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> &buckets) {
+  llvm::hash_code hash =
+      llvm::hash_combine_range(assumptions.begin(), assumptions.end());
+  SmallVector<size_t> &bucket = buckets[hash];
+  for (size_t groupIndex : bucket) {
+    ExactFactDomainGroup &group = groups[groupIndex];
+    if (llvm::equal(group.assumptions, assumptions)) {
+      group.tasks.push_back(task);
+      return;
     }
   }
-  FailureOr<sym::PredHandle> equal =
-      sym::composePredCmp(store, lhs, sym::PredCmpOp::Eq, rhs);
-  return succeeded(equal) && sym::checkPredicate(store, *equal, assumptions) ==
-                                 sym::CheckResult::True;
+  bucket.push_back(groups.size());
+  groups.push_back({std::move(assumptions), {task}});
 }
 
-static bool proveEqual(sym::Analysis &analysis, sym::ExprHandle lhs,
-                       sym::ExprHandle rhs) {
-  return analysis.equivalent(lhs, rhs) == sym::CheckResult::True;
-}
+using RelationPair = std::pair<size_t, size_t>;
+using AddressProofClassKey =
+    std::pair<sym::ExprHandle, std::pair<sym::ExprHandle, sym::ExprHandle>>;
+
+struct RelationProof {
+  bool available = false;
+  bool baseTargetProven = false;
+  bool sameBitOffset = false;
+  bool lowToHighAdjacent = false;
+  bool highToLowAdjacent = false;
+};
+
+struct ActivationProof {
+  bool available = false;
+  bool same = false;
+};
+
+struct AddressClassProof {
+  bool available = false;
+  bool baseTargetProven = false;
+  int64_t residualDifference = 0;
+};
+
+struct RemainderPairPreparationProof {
+  bool ready = false;
+  bool lhsBindingNonnegative = false;
+  bool rhsBindingNonnegative = false;
+};
+
+class SymbolicRelationProofCache {
+public:
+  std::optional<RelationProof>
+  lookupAddress(ArrayRef<sym::PredHandle> assumptions, const SlotMapping &lhs,
+                const SlotMapping &rhs, int64_t elementBits) const {
+    llvm::hash_code hash = getAddressHash(assumptions, lhs, rhs, elementBits);
+    auto bucket = addressBuckets.find(hash);
+    if (bucket == addressBuckets.end())
+      return std::nullopt;
+    for (size_t index : bucket->second) {
+      const AddressEntry &entry = addressEntries[index];
+      if (matchesAddressEntry(entry, assumptions, lhs, rhs, elementBits))
+        return entry.proof;
+    }
+    return std::nullopt;
+  }
+
+  void insertAddress(ArrayRef<sym::PredHandle> assumptions,
+                     const SlotMapping &lhs, const SlotMapping &rhs,
+                     int64_t elementBits, RelationProof proof) {
+    llvm::hash_code hash = getAddressHash(assumptions, lhs, rhs, elementBits);
+    addressBuckets[hash].push_back(addressEntries.size());
+    addressEntries.push_back({SmallVector<sym::PredHandle>(assumptions),
+                              lhs.base, rhs.base, lhs.targetBlock,
+                              rhs.targetBlock, lhs.bitOffset, rhs.bitOffset,
+                              elementBits, proof});
+  }
+
+  std::optional<AddressClassProof>
+  lookupAddressClass(ArrayRef<sym::PredHandle> assumptions,
+                     AddressProofClassKey lhs, AddressProofClassKey rhs) const {
+    llvm::hash_code hash = getAddressClassHash(assumptions, lhs, rhs);
+    auto bucket = addressClassBuckets.find(hash);
+    if (bucket == addressClassBuckets.end())
+      return std::nullopt;
+    for (size_t index : bucket->second) {
+      const AddressClassEntry &entry = addressClassEntries[index];
+      if (entry.lhs == lhs && entry.rhs == rhs &&
+          llvm::equal(entry.assumptions, assumptions))
+        return entry.proof;
+    }
+    return std::nullopt;
+  }
+
+  void insertAddressClass(ArrayRef<sym::PredHandle> assumptions,
+                          AddressProofClassKey lhs, AddressProofClassKey rhs,
+                          AddressClassProof proof) {
+    llvm::hash_code hash = getAddressClassHash(assumptions, lhs, rhs);
+    addressClassBuckets[hash].push_back(addressClassEntries.size());
+    addressClassEntries.push_back(
+        {SmallVector<sym::PredHandle>(assumptions), lhs, rhs, proof});
+  }
+
+  std::optional<ActivationProof>
+  lookupActivation(ArrayRef<sym::PredHandle> assumptions,
+                   sym::PredHandle lhsRelation,
+                   sym::PredHandle rhsRelation) const {
+    llvm::hash_code hash =
+        getActivationHash(assumptions, lhsRelation, rhsRelation);
+    auto bucket = activationBuckets.find(hash);
+    if (bucket == activationBuckets.end())
+      return std::nullopt;
+    for (size_t index : bucket->second) {
+      const ActivationEntry &entry = activationEntries[index];
+      if (entry.lhsRelation == lhsRelation &&
+          entry.rhsRelation == rhsRelation &&
+          llvm::equal(entry.assumptions, assumptions))
+        return entry.proof;
+    }
+    return std::nullopt;
+  }
+
+  void insertActivation(ArrayRef<sym::PredHandle> assumptions,
+                        sym::PredHandle lhsRelation,
+                        sym::PredHandle rhsRelation, ActivationProof proof) {
+    llvm::hash_code hash =
+        getActivationHash(assumptions, lhsRelation, rhsRelation);
+    activationBuckets[hash].push_back(activationEntries.size());
+    activationEntries.push_back({SmallVector<sym::PredHandle>(assumptions),
+                                 lhsRelation, rhsRelation, proof});
+  }
+
+  std::optional<RemainderPairPreparationProof> lookupRemainderPairPreparation(
+      ArrayRef<sym::PredHandle> assumptions, sym::ExprHandle lhsBitOffset,
+      sym::ExprHandle rhsBitOffset, sym::ExprHandle lhsBinding,
+      sym::ExprHandle rhsBinding, int64_t elementBits) const {
+    llvm::hash_code hash =
+        getRemainderPairPreparationHash(assumptions, lhsBitOffset, rhsBitOffset,
+                                        lhsBinding, rhsBinding, elementBits);
+    auto bucket = remainderPairPreparationBuckets.find(hash);
+    if (bucket == remainderPairPreparationBuckets.end())
+      return std::nullopt;
+    for (size_t index : bucket->second) {
+      const RemainderPairPreparationEntry &entry =
+          remainderPairPreparationEntries[index];
+      if (entry.lhsBitOffset == lhsBitOffset &&
+          entry.rhsBitOffset == rhsBitOffset &&
+          entry.lhsBinding == lhsBinding && entry.rhsBinding == rhsBinding &&
+          entry.elementBits == elementBits &&
+          llvm::equal(entry.assumptions, assumptions))
+        return entry.proof;
+    }
+    return std::nullopt;
+  }
+
+  void insertRemainderPairPreparation(ArrayRef<sym::PredHandle> assumptions,
+                                      sym::ExprHandle lhsBitOffset,
+                                      sym::ExprHandle rhsBitOffset,
+                                      sym::ExprHandle lhsBinding,
+                                      sym::ExprHandle rhsBinding,
+                                      int64_t elementBits,
+                                      RemainderPairPreparationProof proof) {
+    if (lookupRemainderPairPreparation(assumptions, lhsBitOffset, rhsBitOffset,
+                                       lhsBinding, rhsBinding, elementBits))
+      return;
+    llvm::hash_code hash =
+        getRemainderPairPreparationHash(assumptions, lhsBitOffset, rhsBitOffset,
+                                        lhsBinding, rhsBinding, elementBits);
+    remainderPairPreparationBuckets[hash].push_back(
+        remainderPairPreparationEntries.size());
+    remainderPairPreparationEntries.push_back(
+        {SmallVector<sym::PredHandle>(assumptions), lhsBitOffset, rhsBitOffset,
+         lhsBinding, rhsBinding, elementBits, proof});
+  }
+
+private:
+  struct AddressEntry {
+    SmallVector<sym::PredHandle> assumptions;
+    sym::ExprHandle lhsBase;
+    sym::ExprHandle rhsBase;
+    sym::ExprHandle lhsTargetBlock;
+    sym::ExprHandle rhsTargetBlock;
+    sym::ExprHandle lhsBitOffset;
+    sym::ExprHandle rhsBitOffset;
+    int64_t elementBits = 0;
+    RelationProof proof;
+  };
+
+  struct AddressClassEntry {
+    SmallVector<sym::PredHandle> assumptions;
+    AddressProofClassKey lhs;
+    AddressProofClassKey rhs;
+    AddressClassProof proof;
+  };
+
+  struct ActivationEntry {
+    SmallVector<sym::PredHandle> assumptions;
+    sym::PredHandle lhsRelation;
+    sym::PredHandle rhsRelation;
+    ActivationProof proof;
+  };
+
+  struct RemainderPairPreparationEntry {
+    SmallVector<sym::PredHandle> assumptions;
+    sym::ExprHandle lhsBitOffset;
+    sym::ExprHandle rhsBitOffset;
+    sym::ExprHandle lhsBinding;
+    sym::ExprHandle rhsBinding;
+    int64_t elementBits = 0;
+    RemainderPairPreparationProof proof;
+  };
+
+  static bool matchesAddressEntry(const AddressEntry &entry,
+                                  ArrayRef<sym::PredHandle> assumptions,
+                                  const SlotMapping &lhs,
+                                  const SlotMapping &rhs, int64_t elementBits) {
+    return entry.elementBits == elementBits && entry.lhsBase == lhs.base &&
+           entry.rhsBase == rhs.base &&
+           entry.lhsTargetBlock == lhs.targetBlock &&
+           entry.rhsTargetBlock == rhs.targetBlock &&
+           entry.lhsBitOffset == lhs.bitOffset &&
+           entry.rhsBitOffset == rhs.bitOffset &&
+           llvm::equal(entry.assumptions, assumptions);
+  }
+
+  static llvm::hash_code getAddressHash(ArrayRef<sym::PredHandle> assumptions,
+                                        const SlotMapping &lhs,
+                                        const SlotMapping &rhs,
+                                        int64_t elementBits) {
+    return llvm::hash_combine(
+        llvm::hash_combine_range(assumptions.begin(), assumptions.end()),
+        lhs.base, rhs.base, lhs.targetBlock, rhs.targetBlock, lhs.bitOffset,
+        rhs.bitOffset, elementBits);
+  }
+
+  static llvm::hash_code
+  getAddressClassHash(ArrayRef<sym::PredHandle> assumptions,
+                      AddressProofClassKey lhs, AddressProofClassKey rhs) {
+    return llvm::hash_combine(
+        llvm::hash_combine_range(assumptions.begin(), assumptions.end()), lhs,
+        rhs);
+  }
+
+  static llvm::hash_code
+  getActivationHash(ArrayRef<sym::PredHandle> assumptions,
+                    sym::PredHandle lhsRelation, sym::PredHandle rhsRelation) {
+    return llvm::hash_combine(
+        llvm::hash_combine_range(assumptions.begin(), assumptions.end()),
+        lhsRelation, rhsRelation);
+  }
+
+  static llvm::hash_code getRemainderPairPreparationHash(
+      ArrayRef<sym::PredHandle> assumptions, sym::ExprHandle lhsBitOffset,
+      sym::ExprHandle rhsBitOffset, sym::ExprHandle lhsBinding,
+      sym::ExprHandle rhsBinding, int64_t elementBits) {
+    return llvm::hash_combine(
+        llvm::hash_combine_range(assumptions.begin(), assumptions.end()),
+        lhsBitOffset, rhsBitOffset, lhsBinding, rhsBinding, elementBits);
+  }
+
+  SmallVector<AddressEntry> addressEntries;
+  SmallVector<AddressClassEntry> addressClassEntries;
+  SmallVector<ActivationEntry> activationEntries;
+  SmallVector<RemainderPairPreparationEntry> remainderPairPreparationEntries;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> addressBuckets;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> addressClassBuckets;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> activationBuckets;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>>
+      remainderPairPreparationBuckets;
+};
+
+class RelationCache {
+public:
+  RelationCache(sym::Store &store, ArrayRef<SlotMapping> slots,
+                SymbolicRelationProofCache &proofCache)
+      : store(store), slots(slots), proofCache(proofCache) {}
+
+  void prepare(ArrayRef<RelationPair> pairs, int64_t elementBits,
+               uint64_t &factDomainCount) {
+    SmallVector<RelationPair> addressPairs;
+    for (RelationPair pair : pairs) {
+      std::optional<RelationPair> canonical = getCanonicalPair(pair);
+      if (!canonical)
+        continue;
+      if (relationProofs.try_emplace(*canonical).second)
+        addressPairs.push_back(*canonical);
+    }
+    prepareAddressRelations(addressPairs, elementBits, factDomainCount);
+  }
+
+  const RelationProof *lookupPrepared(const SlotMapping &lhs,
+                                      const SlotMapping &rhs) const {
+    std::optional<RelationPair> pair =
+        getCanonicalPair({lhs.proofIndex, rhs.proofIndex});
+    if (!pair)
+      return nullptr;
+    auto found = relationProofs.find(*pair);
+    if (found == relationProofs.end())
+      return nullptr;
+    return &found->second;
+  }
+
+  std::optional<AddressClassProof>
+  proveAddressClasses(ArrayRef<sym::PredHandle> assumptions,
+                      AddressProofClassKey lhs, AddressProofClassKey rhs,
+                      uint64_t &factDomainCount) {
+    std::optional<AddressClassProof> cached =
+        proofCache.lookupAddressClass(assumptions, lhs, rhs);
+    if (cached)
+      return cached;
+
+    std::optional<AddressClassProof> proof;
+    bool countedDomain = false;
+    bool cacheable = false;
+    {
+      FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+          sym::Analysis::createDirect(store, assumptions);
+      if (succeeded(analysis)) {
+        ++factDomainCount;
+        countedDomain = true;
+        proof = prepareAddressClass(**analysis, lhs, rhs);
+        cacheable = proof.has_value();
+      }
+    }
+    if (!proof) {
+      FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+          sym::Analysis::create(store, assumptions);
+      if (succeeded(analysis)) {
+        if (!countedDomain)
+          ++factDomainCount;
+        cacheable = true;
+        proof = prepareAddressClass(**analysis, lhs, rhs);
+      }
+    }
+    if (!cacheable)
+      return std::nullopt;
+    AddressClassProof result = proof.value_or(AddressClassProof{});
+    proofCache.insertAddressClass(assumptions, lhs, rhs, result);
+    return result;
+  }
+
+  bool sameActivation(const SlotMapping &lhs, const SlotMapping &rhs,
+                      uint64_t &factDomainCount) {
+    std::optional<bool> structural = getStructuralActivationRelation(lhs, rhs);
+    if (structural)
+      return *structural;
+    std::optional<RelationPair> pair =
+        getCanonicalPair({lhs.proofIndex, rhs.proofIndex});
+    if (!pair)
+      return false;
+    auto found = activationProofs.find(*pair);
+    if (found != activationProofs.end())
+      return found->second.same;
+
+    const SlotMapping &lowSlot = slots[pair->first];
+    const SlotMapping &highSlot = slots[pair->second];
+    SmallVector<sym::PredHandle> assumptions =
+        combineNonActivationAssumptions(lowSlot, highSlot);
+    sym::PredHandle lhsRelation = getActivationRelation(lowSlot);
+    sym::PredHandle rhsRelation = getActivationRelation(highSlot);
+    std::optional<ActivationProof> cached =
+        proofCache.lookupActivation(assumptions, lhsRelation, rhsRelation);
+    if (cached) {
+      activationProofs.try_emplace(*pair, *cached);
+      return cached->same;
+    }
+
+    std::optional<ActivationProof> proof;
+    bool countedDomain = false;
+    {
+      FailureOr<std::unique_ptr<sym::Analysis>> created =
+          sym::Analysis::createDirect(store, assumptions);
+      if (succeeded(created)) {
+        ++factDomainCount;
+        countedDomain = true;
+        proof = prepareActivationRelation(**created, *pair);
+      }
+    }
+    if (!proof) {
+      FailureOr<std::unique_ptr<sym::Analysis>> created =
+          sym::Analysis::create(store, assumptions);
+      if (succeeded(created)) {
+        if (!countedDomain)
+          ++factDomainCount;
+        proof = prepareActivationRelation(**created, *pair);
+      }
+    }
+    if (!proof)
+      return false;
+    activationProofs.try_emplace(*pair, *proof);
+    proofCache.insertActivation(assumptions, lhsRelation, rhsRelation, *proof);
+    return proof->same;
+  }
+
+private:
+  std::optional<RelationPair> getCanonicalPair(RelationPair pair) const {
+    if (pair.first == pair.second || pair.first >= slots.size() ||
+        pair.second >= slots.size())
+      return std::nullopt;
+    if (pair.first > pair.second)
+      std::swap(pair.first, pair.second);
+    return pair;
+  }
+
+  void prepareAddressRelations(ArrayRef<RelationPair> pairs,
+                               int64_t elementBits, uint64_t &factDomainCount) {
+    SmallVector<ExactFactDomainGroup> groups;
+    llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+    collectAddressRelationGroups(pairs, elementBits, groups, buckets);
+
+    for (ExactFactDomainGroup &group : groups) {
+      SmallVector<size_t> fallbackTasks;
+      bool countedDomain = prepareDirectAddressGroup(
+          group, pairs, elementBits, factDomainCount, fallbackTasks);
+      prepareStrongAddressGroup(group, pairs, fallbackTasks, elementBits,
+                                countedDomain, factDomainCount);
+    }
+  }
+
+  void collectAddressRelationGroups(
+      ArrayRef<RelationPair> pairs, int64_t elementBits,
+      SmallVectorImpl<ExactFactDomainGroup> &groups,
+      llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> &buckets) {
+    for (auto [index, pair] : llvm::enumerate(pairs)) {
+      std::optional<RelationProof> proof =
+          getCachedAddressRelation(pair, elementBits);
+      if (proof) {
+        relationProofs[pair] = *proof;
+        continue;
+      }
+      SmallVector<sym::PredHandle> assumptions =
+          combineAssumptions(slots[pair.first], slots[pair.second]);
+      std::optional<RelationProof> cached = proofCache.lookupAddress(
+          assumptions, slots[pair.first], slots[pair.second], elementBits);
+      if (cached) {
+        relationProofs[pair] = *cached;
+        continue;
+      }
+      appendExactFactDomainTask(std::move(assumptions), index, groups, buckets);
+    }
+  }
+
+  void cacheAddressRelation(ArrayRef<sym::PredHandle> assumptions,
+                            RelationPair pair, int64_t elementBits,
+                            RelationProof proof) {
+    relationProofs[pair] = proof;
+    proofCache.insertAddress(assumptions, slots[pair.first], slots[pair.second],
+                             elementBits, proof);
+  }
+
+  bool prepareDirectAddressGroup(const ExactFactDomainGroup &group,
+                                 ArrayRef<RelationPair> pairs,
+                                 int64_t elementBits, uint64_t &factDomainCount,
+                                 SmallVectorImpl<size_t> &fallbackTasks) {
+    FailureOr<std::unique_ptr<sym::Analysis>> created =
+        sym::Analysis::createDirect(store, group.assumptions);
+    if (failed(created)) {
+      llvm::append_range(fallbackTasks, group.tasks);
+      return false;
+    }
+    ++factDomainCount;
+    for (size_t index : group.tasks) {
+      RelationPair pair = pairs[index];
+      std::optional<RelationProof> proof =
+          prepareAddressRelation(**created, pair, elementBits);
+      if (proof)
+        cacheAddressRelation(group.assumptions, pair, elementBits, *proof);
+      else
+        fallbackTasks.push_back(index);
+    }
+    return true;
+  }
+
+  void prepareStrongAddressGroup(const ExactFactDomainGroup &group,
+                                 ArrayRef<RelationPair> pairs,
+                                 ArrayRef<size_t> fallbackTasks,
+                                 int64_t elementBits, bool countedDomain,
+                                 uint64_t &factDomainCount) {
+    if (fallbackTasks.empty())
+      return;
+    FailureOr<std::unique_ptr<sym::Analysis>> created =
+        sym::Analysis::create(store, group.assumptions);
+    if (failed(created))
+      return;
+    if (!countedDomain)
+      ++factDomainCount;
+    for (size_t index : fallbackTasks) {
+      RelationPair pair = pairs[index];
+      bool cacheableUnknown = false;
+      RelationProof partial;
+      std::optional<RelationProof> proof = prepareAddressRelation(
+          **created, pair, elementBits, &cacheableUnknown, &partial);
+      if (proof || cacheableUnknown)
+        cacheAddressRelation(group.assumptions, pair, elementBits,
+                             proof.value_or(partial));
+    }
+  }
+
+  std::optional<RelationProof>
+  getCachedAddressRelation(RelationPair pair, int64_t elementBits) const {
+    const SlotMapping &lowSlot = slots[pair.first];
+    const SlotMapping &highSlot = slots[pair.second];
+    if (!(lowSlot.base == highSlot.base) ||
+        !(lowSlot.targetBlock == highSlot.targetBlock) ||
+        !lowSlot.proofOffset || !highSlot.proofOffset ||
+        !(lowSlot.proofOffset->residual == highSlot.proofOffset->residual))
+      return std::nullopt;
+    std::optional<int64_t> difference = llvm::checkedSub(
+        highSlot.proofOffset->constant, lowSlot.proofOffset->constant);
+    if (!difference)
+      return std::nullopt;
+    return RelationProof{/*available=*/true, /*baseTargetProven=*/true,
+                         /*sameBitOffset=*/*difference == 0,
+                         /*lowToHighAdjacent=*/*difference == elementBits,
+                         /*highToLowAdjacent=*/*difference == -elementBits};
+  }
+
+  std::optional<RelationProof>
+  prepareAddressRelation(sym::Analysis &analysis, RelationPair pair,
+                         int64_t elementBits, bool *cacheableUnknown = nullptr,
+                         RelationProof *partial = nullptr) {
+    if (cacheableUnknown)
+      *cacheableUnknown = false;
+    const SlotMapping &lowSlot = slots[pair.first];
+    const SlotMapping &highSlot = slots[pair.second];
+    RelationProof proof;
+    std::optional<bool> baseTarget = prepareAddressBaseTarget(
+        analysis, lowSlot, highSlot, proof, cacheableUnknown, partial);
+    if (!baseTarget)
+      return std::nullopt;
+    if (!*baseTarget)
+      return proof;
+    return prepareAddressOffset(analysis, lowSlot, highSlot, elementBits, proof,
+                                cacheableUnknown, partial);
+  }
+
+  static void markAddressUnknown(const RelationProof &proof,
+                                 bool *cacheableUnknown,
+                                 RelationProof *partial) {
+    if (cacheableUnknown)
+      *cacheableUnknown = true;
+    if (partial)
+      *partial = proof;
+  }
+
+  static std::optional<bool>
+  queryAddressEquivalent(sym::Analysis &analysis, sym::ExprHandle lhs,
+                         sym::ExprHandle rhs, const RelationProof &proof,
+                         bool *cacheableUnknown, RelationProof *partial) {
+    sym::CheckResult result = analysis.equivalent(lhs, rhs);
+    if (result != sym::CheckResult::Unknown)
+      return result == sym::CheckResult::True;
+    markAddressUnknown(proof, cacheableUnknown, partial);
+    return std::nullopt;
+  }
+
+  static std::optional<bool>
+  prepareAddressBaseTarget(sym::Analysis &analysis, const SlotMapping &lowSlot,
+                           const SlotMapping &highSlot, RelationProof &proof,
+                           bool *cacheableUnknown, RelationProof *partial) {
+    std::optional<bool> sameBase =
+        queryAddressEquivalent(analysis, lowSlot.base, highSlot.base, proof,
+                               cacheableUnknown, partial);
+    if (!sameBase)
+      return std::nullopt;
+    if (!*sameBase) {
+      proof.available = true;
+      return false;
+    }
+    std::optional<bool> sameTarget = queryAddressEquivalent(
+        analysis, lowSlot.targetBlock, highSlot.targetBlock, proof,
+        cacheableUnknown, partial);
+    if (!sameTarget)
+      return std::nullopt;
+    if (!*sameTarget) {
+      proof.available = true;
+      return false;
+    }
+    proof.baseTargetProven = true;
+    return true;
+  }
+
+  static std::optional<RelationProof>
+  prepareAddressOffset(sym::Analysis &analysis, const SlotMapping &lowSlot,
+                       const SlotMapping &highSlot, int64_t elementBits,
+                       RelationProof proof, bool *cacheableUnknown,
+                       RelationProof *partial) {
+    std::optional<int64_t> difference =
+        analysis.constantDifference(highSlot.bitOffset, lowSlot.bitOffset);
+    if (difference) {
+      proof.sameBitOffset = *difference == 0;
+      proof.lowToHighAdjacent = *difference == elementBits;
+      proof.highToLowAdjacent = *difference == -elementBits;
+      proof.available = true;
+      return proof;
+    }
+
+    std::optional<bool> sameOffset =
+        queryAddressEquivalent(analysis, lowSlot.bitOffset, highSlot.bitOffset,
+                               proof, cacheableUnknown, partial);
+    if (!sameOffset)
+      return std::nullopt;
+    proof.sameBitOffset = *sameOffset;
+    FailureOr<sym::ExprHandle> delta = analysis.composeInteger(elementBits);
+    if (failed(delta))
+      return std::nullopt;
+    FailureOr<sym::ExprHandle> highExpected =
+        analysis.compose(lowSlot.bitOffset, sym::ExprBinaryOp::Add, *delta);
+    FailureOr<sym::ExprHandle> lowExpected =
+        analysis.compose(highSlot.bitOffset, sym::ExprBinaryOp::Add, *delta);
+    if (failed(highExpected) || failed(lowExpected))
+      return std::nullopt;
+    std::optional<bool> lowToHigh =
+        queryAddressEquivalent(analysis, *highExpected, highSlot.bitOffset,
+                               proof, cacheableUnknown, partial);
+    if (!lowToHigh)
+      return std::nullopt;
+    proof.lowToHighAdjacent = *lowToHigh;
+    std::optional<bool> highToLow =
+        queryAddressEquivalent(analysis, *lowExpected, lowSlot.bitOffset, proof,
+                               cacheableUnknown, partial);
+    if (!highToLow)
+      return std::nullopt;
+    proof.highToLowAdjacent = *highToLow;
+    proof.available = true;
+    return proof;
+  }
+
+  static std::optional<AddressClassProof>
+  prepareAddressClass(sym::Analysis &analysis, AddressProofClassKey lhs,
+                      AddressProofClassKey rhs) {
+    sym::CheckResult base = analysis.equivalent(lhs.first, rhs.first);
+    if (base == sym::CheckResult::False)
+      return AddressClassProof{/*available=*/true};
+    if (base == sym::CheckResult::Unknown)
+      return std::nullopt;
+    sym::CheckResult target =
+        analysis.equivalent(lhs.second.first, rhs.second.first);
+    if (target == sym::CheckResult::False)
+      return AddressClassProof{/*available=*/true};
+    if (target == sym::CheckResult::Unknown)
+      return std::nullopt;
+    std::optional<int64_t> residualDifference =
+        analysis.constantDifference(rhs.second.second, lhs.second.second);
+    if (!residualDifference)
+      return std::nullopt;
+    return AddressClassProof{/*available=*/true,
+                             /*baseTargetProven=*/true, *residualDifference};
+  }
+
+  std::optional<ActivationProof>
+  prepareActivationRelation(sym::Analysis &analysis, RelationPair pair) {
+    sym::CheckResult result =
+        analysis.equivalent(getActivationRelation(slots[pair.first]),
+                            getActivationRelation(slots[pair.second]));
+    if (result == sym::CheckResult::Unknown)
+      return std::nullopt;
+    return ActivationProof{true, result == sym::CheckResult::True};
+  }
+
+  llvm::DenseMap<RelationPair, RelationProof> relationProofs;
+  llvm::DenseMap<RelationPair, ActivationProof> activationProofs;
+  sym::Store &store;
+  ArrayRef<SlotMapping> slots;
+  SymbolicRelationProofCache &proofCache;
+};
 
 struct SymbolicProofValue {
   SmallVector<sym::PredHandle> assumptions;
   sym::ExprHandle expression;
 };
 
+enum class RemainderDivisorSign { Positive, Negative, Unknown };
+
+struct PreparedRemainderCandidate {
+  SmallVector<sym::PredHandle> assumptions;
+  BinaryOp lhsRemainder;
+  BinaryOp rhsRemainder;
+  sym::ExprHandle lhsDividend;
+  sym::ExprHandle rhsDividend;
+  sym::ExprHandle lhsDivisor;
+  sym::ExprHandle rhsDivisor;
+  BinaryKind kind = BinaryKind::AddI;
+  size_t lhsBinding = 0;
+  size_t rhsBinding = 0;
+  RemainderDivisorSign divisorSign = RemainderDivisorSign::Unknown;
+  bool lhsBindingNonnegative = false;
+  bool rhsBindingNonnegative = false;
+  bool successorProven = false;
+};
+
+struct PreparedRemainderRelation {
+  SmallVector<PreparedRemainderCandidate> candidates;
+  bool available = false;
+};
+
 // Runtime div/rem stay SSA; proof-only projections must not duplicate them.
 class RemainderProofContext {
 public:
   RemainderProofContext(WaveDialect &dialect, DataFlowSolver &solver,
-                        Operation *access, ArrayRef<SlotMapping> slots)
-      : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
-        slots(slots), access(access) {}
+                        Operation *access, ArrayRef<SlotMapping> slots,
+                        SymbolicRelationProofCache &proofCache,
+                        uint64_t &factDomainCount)
+      : proofCache(proofCache),
+        relations(dialect.getSymbolStore(), slots, proofCache),
+        dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
+        slots(slots), factDomainCount(factDomainCount), access(access) {}
+
+  void prepareRelations(ArrayRef<RelationPair> pairs, int64_t elementBits) {
+    relations.prepare(pairs, elementBits, factDomainCount);
+    prepareRemainderRelations(pairs, elementBits, false);
+  }
+
+  const RelationProof *lookupPreparedRelation(const SlotMapping &lhs,
+                                              const SlotMapping &rhs) const {
+    return relations.lookupPrepared(lhs, rhs);
+  }
+
+  std::optional<AddressClassProof>
+  proveAddressClasses(ArrayRef<sym::PredHandle> assumptions,
+                      AddressProofClassKey lhs, AddressProofClassKey rhs) {
+    return relations.proveAddressClasses(assumptions, lhs, rhs,
+                                         factDomainCount);
+  }
+
+  const PreparedRemainderRelation *
+  lookupRemainderRelation(const SlotMapping &lhs,
+                          const SlotMapping &rhs) const {
+    auto found = remainderRelations.find({lhs.proofIndex, rhs.proofIndex});
+    if (found == remainderRelations.end() || !found->second.available)
+      return nullptr;
+    return &found->second;
+  }
+
+  void prepareRemainderRelation(const SlotMapping &lhs, const SlotMapping &rhs,
+                                int64_t elementBits) {
+    RelationPair pair{lhs.proofIndex, rhs.proofIndex};
+    if (pair.first == pair.second)
+      return;
+    std::array<RelationPair, 1> pairs{pair};
+    prepareRemainderRelations(pairs, elementBits, true);
+  }
+
+  bool sameActivation(const SlotMapping &lhs, const SlotMapping &rhs) {
+    return relations.sameActivation(lhs, rhs, factDomainCount);
+  }
+
+  void recordFactDomain() { ++factDomainCount; }
 
   std::optional<SymbolicProofValue> get(Value value) {
     auto found = values.find(value);
@@ -1804,15 +1817,17 @@ public:
     std::optional<SymbolicProofValue> symbolic = get(value);
     if (!symbolic)
       return cacheNonnegative(value, false);
-    FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, symbolic->assumptions);
+    if (failed(analysis))
+      return cacheNonnegative(value, false);
+    FailureOr<sym::ExprHandle> zero = (*analysis)->composeInteger(0);
     if (failed(zero))
       return cacheNonnegative(value, false);
-    FailureOr<sym::PredHandle> predicate = sym::composePredCmp(
-        store, symbolic->expression, sym::PredCmpOp::Ge, *zero);
-    bool result =
-        succeeded(predicate) &&
-        sym::checkPredicate(store, *predicate, symbolic->assumptions) ==
-            sym::CheckResult::True;
+    FailureOr<sym::PredHandle> predicate =
+        (*analysis)->compare(symbolic->expression, sym::PredCmpOp::Ge, *zero);
+    bool result = succeeded(predicate) &&
+                  (*analysis)->check(*predicate) == sym::CheckResult::True;
     return cacheNonnegative(value, result);
   }
 
@@ -1843,6 +1858,9 @@ public:
   }
 
 private:
+  void prepareRemainderRelations(ArrayRef<RelationPair> pairs,
+                                 int64_t elementBits, bool directed);
+
   std::optional<SymbolicProofValue> getAssumedValue(Value value,
                                                     AssumeOp assume) {
     std::optional<SymbolicProofValue> source = get(assume.getValue());
@@ -2224,121 +2242,53 @@ private:
     return substitutions;
   }
 
-  bool invariantUnderProjection(const SymbolicProofValue &value,
-                                ArrayRef<sym::ExprSubstitution> substitutions) {
-    FailureOr<sym::ExprHandle> projected =
-        sym::substituteExpr(store, value.expression, substitutions);
-    return succeeded(projected) &&
-           proveEqual(store, value.expression, *projected, value.assumptions);
-  }
+  struct PreparedProjection {
+    SmallVector<sym::ExprSubstitution> substitutions;
+    bool available = false;
+  };
 
-  LogicalResult
-  appendProjectionFacts(ArrayRef<sym::ExprSubstitution> substitutions,
-                        SmallVectorImpl<sym::PredHandle> &assumptions) {
-    FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-    if (failed(zero))
-      return failure();
-    for (const sym::ExprSubstitution &substitution : substitutions) {
-      sym::ExprView replacement(substitution.replacement);
-      if (replacement.getKind() != sym::ExprKind::Mod)
+  static void getProjectionInvariance(sym::Analysis &analysis,
+                                      const SymbolicProofValue &value,
+                                      ArrayRef<PreparedProjection> projections,
+                                      MutableArrayRef<uint8_t> invariant) {
+    for (auto [index, projection] : llvm::enumerate(projections)) {
+      if (!projection.available)
         continue;
-      sym::ExprHandle divisor = replacement.getBinaryRhs();
-      std::optional<int64_t> modulus = sym::getIntegerLiteralValue(divisor);
-      if (!modulus || *modulus <= 0)
-        return failure();
-      FailureOr<sym::PredHandle> lower = sym::composePredCmp(
-          store, substitution.replacement, sym::PredCmpOp::Ge, *zero);
-      FailureOr<sym::PredHandle> upper = sym::composePredCmp(
-          store, substitution.replacement, sym::PredCmpOp::Lt, divisor);
-      if (failed(lower) || failed(upper))
-        return failure();
-      assumptions.push_back(*lower);
-      assumptions.push_back(*upper);
+      FailureOr<sym::ExprHandle> projected =
+          analysis.substitute(value.expression, projection.substitutions);
+      invariant[index] = succeeded(projected) &&
+                         analysis.equivalent(value.expression, *projected) ==
+                             sym::CheckResult::True;
     }
-    return success();
-  }
-
-  FailureOr<sym::ExprHandle> getNonnegativeResidual(sym::PredHandle predicate) {
-    sym::PredView view(predicate);
-    if (view.getKind() != sym::PredKind::Cmp)
-      return failure();
-    sym::ExprHandle lhs = view.getCmpLhs();
-    sym::ExprHandle rhs = view.getCmpRhs();
-    sym::PredCmpOp comparison = view.getCmpOp().value_or(sym::PredCmpOp::Eq);
-    bool strict = false;
-    switch (comparison) {
-    case sym::PredCmpOp::Ge:
-      break;
-    case sym::PredCmpOp::Gt:
-      strict = true;
-      break;
-    case sym::PredCmpOp::Le:
-      std::swap(lhs, rhs);
-      break;
-    case sym::PredCmpOp::Lt:
-      std::swap(lhs, rhs);
-      strict = true;
-      break;
-    default:
-      return failure();
-    }
-    FailureOr<sym::ExprHandle> residual =
-        sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
-    if (failed(residual) || !strict)
-      return residual;
-    FailureOr<sym::ExprHandle> one = sym::composeExprInt(store, 1);
-    if (failed(one))
-      return failure();
-    return sym::composeExprBinary(store, *residual, sym::ExprBinaryOp::Sub,
-                                  *one);
-  }
-
-  bool projectedAssumptionProvesNonnegative(
-      sym::PredHandle predicate, const SymbolicProofValue &target,
-      ArrayRef<sym::ExprSubstitution> substitutions,
-      ArrayRef<sym::PredHandle> assumptions) {
-    sym::PredView view(predicate);
-    if (view.getKind() == sym::PredKind::And) {
-      for (uint32_t index : llvm::seq(view.getLogicArgCount()))
-        if (projectedAssumptionProvesNonnegative(
-                view.getLogicArg(index), target, substitutions, assumptions))
-          return true;
-      return false;
-    }
-    FailureOr<sym::ExprHandle> residual = getNonnegativeResidual(predicate);
-    if (failed(residual))
-      return false;
-    FailureOr<sym::ExprHandle> projected =
-        sym::substituteExpr(store, *residual, substitutions);
-    if (failed(projected))
-      return false;
-    FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, *projected, assumptions);
-    if (succeeded(simplified))
-      projected = *simplified;
-    return proveEqual(store, *projected, target.expression, assumptions);
   }
 
   bool
   projectionProvesNonnegative(const SymbolicProofValue &root,
                               const SymbolicProofValue &target,
                               ArrayRef<sym::ExprSubstitution> substitutions) {
-    SmallVector<sym::PredHandle> assumptions(target.assumptions);
-    if (failed(appendProjectionFacts(substitutions, assumptions)))
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, target.assumptions);
+    if (failed(analysis))
       return false;
+    SmallVector<sym::PredHandle> projectedPredicates;
+    projectedPredicates.reserve(root.assumptions.size());
     for (sym::PredHandle assumption : root.assumptions) {
       FailureOr<sym::PredHandle> projected =
-          sym::substitutePred(store, assumption, substitutions);
+          (*analysis)->substitute(assumption, substitutions);
       if (failed(projected))
         return false;
-      FailureOr<sym::PredHandle> simplified =
-          sym::simplifyPred(store, *projected);
-      assumptions.push_back(succeeded(simplified) ? *simplified : *projected);
+      projectedPredicates.push_back(*projected);
     }
-    return llvm::any_of(root.assumptions, [&](sym::PredHandle assumption) {
-      return projectedAssumptionProvesNonnegative(assumption, target,
-                                                  substitutions, assumptions);
-    });
+    if (!projectedPredicates.empty() &&
+        failed((*analysis)->assume(projectedPredicates)))
+      return false;
+    FailureOr<sym::ExprHandle> zero = (*analysis)->composeInteger(0);
+    if (failed(zero))
+      return false;
+    FailureOr<sym::PredHandle> nonnegative =
+        (*analysis)->compare(target.expression, sym::PredCmpOp::Ge, *zero);
+    return succeeded(nonnegative) &&
+           (*analysis)->check(*nonnegative) == sym::CheckResult::True;
   }
 
   bool proveProjectedNonnegative(Value rootValue, Value targetValue,
@@ -2346,26 +2296,78 @@ private:
                                  const SymbolicProofValue &dividend,
                                  const SymbolicProofValue &divisor,
                                  const SymbolicProofValue &target) {
+    SmallVector<PreparedProjection> prepared = prepareExecutionProjections(
+        rootValue, targetValue, root, dividend, divisor);
+    if (llvm::none_of(prepared, [](const PreparedProjection &projection) {
+          return projection.available;
+        }))
+      return false;
+
+    SmallVector<uint8_t> dividendInvariant(prepared.size(), 0);
+    SmallVector<uint8_t> divisorInvariant(prepared.size(), 0);
+    getRemainderProjectionInvariance(dividend, divisor, prepared,
+                                     dividendInvariant, divisorInvariant);
+    for (size_t index : llvm::seq<size_t>(0, prepared.size())) {
+      if (!prepared[index].available || !dividendInvariant[index] ||
+          !divisorInvariant[index])
+        continue;
+      if (projectionProvesNonnegative(root, target,
+                                      prepared[index].substitutions))
+        return true;
+    }
+    return false;
+  }
+
+  SmallVector<PreparedProjection> prepareExecutionProjections(
+      Value rootValue, Value targetValue, const SymbolicProofValue &root,
+      const SymbolicProofValue &dividend, const SymbolicProofValue &divisor) {
     SmallVector<std::optional<WorkitemProjection>> projections{std::nullopt};
     for (WorkitemProjection projection : getWorkitemProjections(
              rootValue, root, dividend, divisor, targetValue))
       projections.push_back(projection);
+
+    SmallVector<PreparedProjection> prepared;
+    prepared.reserve(projections.size());
     for (std::optional<WorkitemProjection> projection : projections) {
       FailureOr<SmallVector<sym::ExprSubstitution>> substitutions =
           buildExecutionProjection(rootValue, projection);
-      if (failed(substitutions))
+      if (failed(substitutions)) {
+        prepared.push_back({});
         continue;
-      // Projected execution point must preserve remainder operands.
-      bool dividendInvariant =
-          invariantUnderProjection(dividend, *substitutions);
-      bool divisorInvariant = invariantUnderProjection(divisor, *substitutions);
-      if (!dividendInvariant || !divisorInvariant)
-        continue;
-      bool proven = projectionProvesNonnegative(root, target, *substitutions);
-      if (proven)
-        return true;
+      }
+      prepared.push_back({std::move(*substitutions), true});
     }
-    return false;
+    return prepared;
+  }
+
+  void getValueProjectionInvariance(const SymbolicProofValue &value,
+                                    ArrayRef<PreparedProjection> prepared,
+                                    MutableArrayRef<uint8_t> invariant) {
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, value.assumptions);
+    if (succeeded(analysis))
+      getProjectionInvariance(**analysis, value, prepared, invariant);
+  }
+
+  void
+  getRemainderProjectionInvariance(const SymbolicProofValue &dividend,
+                                   const SymbolicProofValue &divisor,
+                                   ArrayRef<PreparedProjection> prepared,
+                                   MutableArrayRef<uint8_t> dividendInvariant,
+                                   MutableArrayRef<uint8_t> divisorInvariant) {
+    if (llvm::equal(dividend.assumptions, divisor.assumptions)) {
+      FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+          sym::Analysis::create(store, dividend.assumptions);
+      if (succeeded(analysis)) {
+        getProjectionInvariance(**analysis, dividend, prepared,
+                                dividendInvariant);
+        getProjectionInvariance(**analysis, divisor, prepared,
+                                divisorInvariant);
+      }
+      return;
+    }
+    getValueProjectionInvariance(dividend, prepared, dividendInvariant);
+    getValueProjectionInvariance(divisor, prepared, divisorInvariant);
   }
 
   static bool referencesOnly(sym::PredHandle predicate, StringRef name) {
@@ -2451,22 +2453,16 @@ private:
   llvm::DenseMap<Value, bool> nonnegativeValues;
   llvm::DenseMap<Value, bool> materializedNonnegativeValues;
   llvm::DenseMap<Value, unsigned> values;
+  llvm::DenseMap<RelationPair, PreparedRemainderRelation> remainderRelations;
+  SymbolicRelationProofCache &proofCache;
+  RelationCache relations;
   WaveDialect &dialect;
   DataFlowSolver &solver;
   sym::Store &store;
   ArrayRef<SlotMapping> slots;
+  uint64_t &factDomainCount;
   Operation *access;
 };
-
-static bool provePredicate(sym::Store &store, sym::ExprHandle lhs,
-                           sym::PredCmpOp comparison, sym::ExprHandle rhs,
-                           ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::PredHandle> predicate =
-      sym::composePredCmp(store, lhs, comparison, rhs);
-  return succeeded(predicate) &&
-         sym::checkPredicate(store, *predicate, assumptions) ==
-             sym::CheckResult::True;
-}
 
 static BinaryOp findRemainder(Value value) {
   while (true) {
@@ -2487,264 +2483,903 @@ static BinaryOp findRemainder(Value value) {
   }
 }
 
-static FailureOr<sym::ExprHandle>
-getRemainderResidual(sym::Store &store, const SlotMapping &slot,
-                     const NamedBinding &binding, int64_t elementBits) {
-  FailureOr<sym::ExprHandle> symbol = sym::composeExprSym(store, binding.name);
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-  FailureOr<sym::ExprHandle> scale = sym::composeExprInt(store, elementBits);
-  if (failed(symbol) || failed(zero) || failed(scale))
-    return failure();
-  std::array<sym::ExprSubstitution, 1> substitution{
-      sym::ExprSubstitution{*symbol, *zero}};
-  FailureOr<sym::ExprHandle> residual =
-      sym::substituteExpr(store, slot.bitOffset, substitution);
-  if (failed(residual))
-    return failure();
-  residual = sym::simplifyExpr(store, *residual, slot.assumptions);
-  if (failed(residual))
-    return failure();
-  FailureOr<sym::ExprHandle> contribution =
-      sym::composeExprBinary(store, *scale, sym::ExprBinaryOp::Mul, *symbol);
-  if (failed(contribution))
-    return failure();
-  FailureOr<sym::ExprHandle> rebuilt = sym::composeExprBinary(
-      store, *residual, sym::ExprBinaryOp::Add, *contribution);
-  if (failed(rebuilt) ||
-      !proveEqual(store, slot.bitOffset, *rebuilt, slot.assumptions))
-    return failure();
-  return *residual;
-}
-
-static bool isBindingNonnegative(sym::Store &store, const SlotMapping &slot,
-                                 const NamedBinding &binding) {
-  FailureOr<sym::ExprHandle> symbol = sym::composeExprSym(store, binding.name);
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-  return succeeded(symbol) && succeeded(zero) &&
-         provePredicate(store, *symbol, sym::PredCmpOp::Ge, *zero,
-                        slot.assumptions);
-}
-
-struct AlignedRemainderProof {
-  SmallVector<sym::PredHandle> assumptions;
-  sym::ExprHandle dividend;
-  sym::ExprHandle divisor;
+enum class RemainderPreparationResult {
+  Unprepared,
+  Ready,
+  Ineligible,
+  Retry,
+  Failure,
 };
 
-static std::optional<AlignedRemainderProof>
-buildAlignedRemainderProof(sym::Store &store, BinaryOp lhs, BinaryOp rhs,
-                           RemainderProofContext &proofContext) {
-  std::optional<SymbolicProofValue> lhsDividend =
-      proofContext.get(lhs.getLhs());
-  if (!lhsDividend)
-    return std::nullopt;
-  std::optional<SymbolicProofValue> rhsDividend =
-      proofContext.get(rhs.getLhs());
-  if (!rhsDividend)
-    return std::nullopt;
-  std::optional<SymbolicProofValue> lhsDivisor = proofContext.get(lhs.getRhs());
-  if (!lhsDivisor)
-    return std::nullopt;
-  std::optional<SymbolicProofValue> rhsDivisor = proofContext.get(rhs.getRhs());
-  if (!rhsDivisor)
-    return std::nullopt;
-  SmallVector<sym::PredHandle> assumptions;
-  llvm::append_range(assumptions, lhsDividend->assumptions);
-  llvm::append_range(assumptions, rhsDividend->assumptions);
-  llvm::append_range(assumptions, lhsDivisor->assumptions);
-  llvm::append_range(assumptions, rhsDivisor->assumptions);
-  if (!proveEqual(store, lhsDivisor->expression, rhsDivisor->expression,
-                  assumptions))
-    return std::nullopt;
-  FailureOr<sym::ExprHandle> one = sym::composeExprInt(store, 1);
+struct RemainderBindingProof {
+  sym::ExprHandle residual;
+  RemainderPreparationResult result = RemainderPreparationResult::Unprepared;
+  bool nonnegative = false;
+};
+
+static FailureOr<std::optional<sym::AffineDecomposition>>
+getRemainderDecomposition(sym::Analysis &analysis, const SlotMapping &slot,
+                          const NamedBinding &binding, int64_t elementBits) {
+  FailureOr<sym::ExprHandle> symbol = analysis.composeSymbol(binding.name);
+  FailureOr<sym::ExprHandle> scale = analysis.composeInteger(elementBits);
+  if (failed(symbol) || failed(scale))
+    return failure();
+  std::optional<sym::AffineDecomposition> decomposition =
+      analysis.affineDecompose(slot.bitOffset, *symbol);
+  if (!decomposition || analysis.equivalent(decomposition->coefficient,
+                                            *scale) != sym::CheckResult::True)
+    return std::optional<sym::AffineDecomposition>{};
+  return decomposition;
+}
+
+static FailureOr<sym::CheckResult>
+checkBindingNonnegative(sym::Analysis &analysis, const NamedBinding &binding) {
+  FailureOr<sym::ExprHandle> symbol = analysis.composeSymbol(binding.name);
+  FailureOr<sym::ExprHandle> zero = analysis.composeInteger(0);
+  if (failed(symbol) || failed(zero))
+    return failure();
+  FailureOr<sym::PredHandle> nonnegative =
+      analysis.compare(*symbol, sym::PredCmpOp::Ge, *zero);
+  if (failed(nonnegative))
+    return failure();
+  return analysis.check(*nonnegative);
+}
+
+static RemainderPreparationResult
+prepareRemainderBinding(sym::Analysis &analysis, const SlotMapping &slot,
+                        size_t index, int64_t elementBits, bool retryIncomplete,
+                        SmallVectorImpl<RemainderBindingProof> &proofs) {
+  RemainderBindingProof &proof = proofs[index];
+  if (proof.result != RemainderPreparationResult::Unprepared)
+    return proof.result;
+
+  RemainderPreparationResult incomplete =
+      retryIncomplete ? RemainderPreparationResult::Retry
+                      : RemainderPreparationResult::Ineligible;
+  RemainderPreparationResult queryFailure =
+      retryIncomplete ? RemainderPreparationResult::Retry
+                      : RemainderPreparationResult::Failure;
+  const NamedBinding &binding = slot.bindings[index];
+  FailureOr<std::optional<sym::AffineDecomposition>> decomposition =
+      getRemainderDecomposition(analysis, slot, binding, elementBits);
+  if (failed(decomposition))
+    return proof.result = queryFailure;
+  if (!*decomposition)
+    return proof.result = incomplete;
+
+  FailureOr<sym::CheckResult> nonnegativeResult =
+      checkBindingNonnegative(analysis, binding);
+  if (failed(nonnegativeResult))
+    return proof.result = queryFailure;
+  if (retryIncomplete && *nonnegativeResult == sym::CheckResult::Unknown)
+    return proof.result = RemainderPreparationResult::Retry;
+
+  proof.residual = (*decomposition)->residual;
+  proof.nonnegative = *nonnegativeResult == sym::CheckResult::True;
+  return proof.result = RemainderPreparationResult::Ready;
+}
+
+static RemainderPreparationResult prepareRemainderCandidate(
+    sym::Analysis &analysis, const SlotMapping &lhs, const SlotMapping &rhs,
+    PreparedRemainderCandidate &candidate, int64_t elementBits,
+    bool retryIncomplete, SmallVectorImpl<RemainderBindingProof> &lhsProofs,
+    SmallVectorImpl<RemainderBindingProof> &rhsProofs) {
+  RemainderPreparationResult lhsResult =
+      prepareRemainderBinding(analysis, lhs, candidate.lhsBinding, elementBits,
+                              retryIncomplete, lhsProofs);
+  RemainderPreparationResult rhsResult =
+      prepareRemainderBinding(analysis, rhs, candidate.rhsBinding, elementBits,
+                              retryIncomplete, rhsProofs);
+  if (lhsResult == RemainderPreparationResult::Failure ||
+      rhsResult == RemainderPreparationResult::Failure)
+    return RemainderPreparationResult::Failure;
+  if (lhsResult == RemainderPreparationResult::Retry ||
+      rhsResult == RemainderPreparationResult::Retry)
+    return RemainderPreparationResult::Retry;
+  if (lhsResult == RemainderPreparationResult::Ineligible ||
+      rhsResult == RemainderPreparationResult::Ineligible)
+    return RemainderPreparationResult::Ineligible;
+
+  RemainderBindingProof &lhsProof = lhsProofs[candidate.lhsBinding];
+  RemainderBindingProof &rhsProof = rhsProofs[candidate.rhsBinding];
+  sym::CheckResult residuals =
+      analysis.equivalent(lhsProof.residual, rhsProof.residual);
+  if (residuals == sym::CheckResult::False)
+    return RemainderPreparationResult::Ineligible;
+  if (residuals == sym::CheckResult::Unknown)
+    return retryIncomplete ? RemainderPreparationResult::Retry
+                           : RemainderPreparationResult::Ineligible;
+  candidate.lhsBindingNonnegative = lhsProof.nonnegative;
+  candidate.rhsBindingNonnegative = rhsProof.nonnegative;
+  return RemainderPreparationResult::Ready;
+}
+
+static bool provesModSuccessor(sym::Analysis &analysis,
+                               sym::ExprHandle dividend,
+                               sym::ExprHandle positiveDivisor) {
+  FailureOr<sym::ExprHandle> one = analysis.composeInteger(1);
   if (failed(one))
-    return std::nullopt;
-  FailureOr<sym::ExprHandle> nextDividend = sym::composeExprBinary(
-      store, lhsDividend->expression, sym::ExprBinaryOp::Add, *one);
-  if (failed(nextDividend))
-    return std::nullopt;
-  if (!proveEqual(store, *nextDividend, rhsDividend->expression, assumptions))
-    return std::nullopt;
-  return AlignedRemainderProof{std::move(assumptions), lhsDividend->expression,
-                               lhsDivisor->expression};
-}
-
-static bool appendRemainderDefinedAssumption(
-    sym::Store &store, BinaryKind kind, sym::ExprHandle divisor,
-    sym::ExprHandle zero, SmallVectorImpl<sym::PredHandle> &assumptions) {
-  sym::PredCmpOp comparison = sym::PredCmpOp::Ne;
-  if (kind == BinaryKind::RemUI)
-    comparison = sym::PredCmpOp::Gt;
-  FailureOr<sym::PredHandle> defined =
-      sym::composePredCmp(store, divisor, comparison, zero);
-  if (failed(defined))
     return false;
-  if (kind == BinaryKind::RemUI &&
-      sym::checkPredicate(store, *defined, assumptions) !=
-          sym::CheckResult::True)
+  FailureOr<sym::ExprHandle> nextDividend =
+      analysis.compose(dividend, sym::ExprBinaryOp::Add, *one);
+  FailureOr<sym::ExprHandle> remainder =
+      analysis.compose(dividend, sym::ExprBinaryOp::Mod, positiveDivisor);
+  if (failed(nextDividend) || failed(remainder))
     return false;
-  assumptions.push_back(*defined);
-  return true;
+  FailureOr<sym::ExprHandle> nextRemainder =
+      analysis.compose(*nextDividend, sym::ExprBinaryOp::Mod, positiveDivisor);
+  FailureOr<sym::ExprHandle> expected =
+      analysis.compose(*remainder, sym::ExprBinaryOp::Add, *one);
+  return succeeded(nextRemainder) && succeeded(expected) &&
+         analysis.equivalent(*nextRemainder, *expected) ==
+             sym::CheckResult::True;
 }
 
-static bool hasValidRemainderSign(sym::Store &store, BinaryKind kind,
-                                  sym::ExprHandle dividend,
-                                  sym::ExprHandle zero,
-                                  bool nonnegativeRemainders,
-                                  ArrayRef<sym::PredHandle> assumptions) {
-  if (kind != BinaryKind::RemSI || nonnegativeRemainders)
-    return true;
-  return provePredicate(store, dividend, sym::PredCmpOp::Ge, zero, assumptions);
-}
-
-static bool hasAlignedRemainderGrid(sym::Store &store,
-                                    const AlignedRemainderProof &proof,
-                                    sym::ExprHandle zero) {
-  SmallVector<int64_t> moduli;
-  for (sym::PredHandle assumption : proof.assumptions)
-    collectAssumptionModuli(assumption, moduli);
-  for (int64_t modulusValue : moduli) {
-    FailureOr<sym::ExprHandle> modulus =
-        sym::composeExprInt(store, modulusValue);
-    if (failed(modulus))
+static bool provesModSuccessor(sym::Store &store,
+                               const PreparedRemainderCandidate &candidate,
+                               sym::PredHandle defined,
+                               sym::PredHandle divisorSign,
+                               bool negateDivisor) {
+  SmallVector<sym::PredHandle> assumptions(candidate.assumptions);
+  assumptions.push_back(defined);
+  assumptions.push_back(divisorSign);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return false;
+  sym::ExprHandle divisor = candidate.lhsDivisor;
+  if (negateDivisor) {
+    FailureOr<sym::ExprHandle> negated = (*analysis)->composeNeg(divisor);
+    if (failed(negated))
       return false;
-    FailureOr<sym::ExprHandle> divisorResidue = sym::composeExprBinary(
-        store, proof.divisor, sym::ExprBinaryOp::Mod, *modulus);
-    if (failed(divisorResidue))
-      return false;
-    if (provePredicate(store, *divisorResidue, sym::PredCmpOp::Eq, zero,
-                       proof.assumptions) &&
-        alignedWithinModulus(store, proof.dividend, 1, modulusValue,
-                             proof.assumptions))
-      return true;
+    divisor = *negated;
   }
-  return false;
+  return provesModSuccessor(**analysis, candidate.lhsDividend, divisor);
+}
+
+struct RemainderSuccessorProofPlan {
+  std::optional<bool> directResult;
+  sym::PredHandle defined;
+  sym::PredHandle positive;
+  sym::PredHandle negative;
+};
+
+struct RemainderSignPredicates {
+  sym::PredHandle positive;
+  sym::PredHandle negative;
+};
+
+static bool
+provesNonnegativeRemainderDividend(sym::Analysis &analysis,
+                                   const PreparedRemainderCandidate &candidate,
+                                   sym::ExprHandle zero) {
+  FailureOr<sym::PredHandle> nonnegative =
+      analysis.compare(candidate.lhsDividend, sym::PredCmpOp::Ge, zero);
+  return succeeded(nonnegative) &&
+         analysis.check(*nonnegative) == sym::CheckResult::True;
+}
+
+static FailureOr<RemainderSignPredicates>
+composeRemainderSignPredicates(sym::Analysis &analysis,
+                               const PreparedRemainderCandidate &candidate,
+                               sym::ExprHandle zero) {
+  FailureOr<sym::PredHandle> positive =
+      analysis.compare(candidate.lhsDivisor, sym::PredCmpOp::Gt, zero);
+  FailureOr<sym::PredHandle> negative =
+      analysis.compare(candidate.lhsDivisor, sym::PredCmpOp::Lt, zero);
+  if (failed(positive) || failed(negative))
+    return failure();
+  return RemainderSignPredicates{*positive, *negative};
 }
 
 static bool
-proveAlignedRemainderSuccessor(sym::Store &store, BinaryOp lhs, BinaryOp rhs,
-                               bool nonnegativeRemainders,
-                               RemainderProofContext &proofContext) {
-  if (lhs.getKind() != rhs.getKind())
+proveKnownSignRemainderSuccessor(sym::Analysis &analysis,
+                                 const PreparedRemainderCandidate &candidate,
+                                 const RemainderSignPredicates &signs) {
+  sym::PredHandle sign = candidate.divisorSign == RemainderDivisorSign::Positive
+                             ? signs.positive
+                             : signs.negative;
+  if (failed(analysis.assume(sign)))
     return false;
-  std::optional<AlignedRemainderProof> proof =
-      buildAlignedRemainderProof(store, lhs, rhs, proofContext);
-  if (!proof)
-    return false;
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-  if (failed(zero))
-    return false;
-  if (!appendRemainderDefinedAssumption(store, lhs.getKind(), proof->divisor,
-                                        *zero, proof->assumptions))
-    return false;
-  if (!hasValidRemainderSign(store, lhs.getKind(), proof->dividend, *zero,
-                             nonnegativeRemainders, proof->assumptions))
-    return false;
-  return hasAlignedRemainderGrid(store, *proof, *zero);
+  sym::ExprHandle divisor = candidate.lhsDivisor;
+  if (candidate.divisorSign == RemainderDivisorSign::Negative) {
+    FailureOr<sym::ExprHandle> negated = analysis.composeNeg(divisor);
+    if (failed(negated))
+      return false;
+    divisor = *negated;
+  }
+  return provesModSuccessor(analysis, candidate.lhsDividend, divisor);
 }
 
-static bool isRemainderNonnegative(sym::Store &store, const SlotMapping &slot,
+static std::optional<RemainderSuccessorProofPlan>
+buildSignedRemainderSuccessorProofPlan(
+    sym::Analysis &analysis, const PreparedRemainderCandidate &candidate,
+    sym::ExprHandle zero, sym::PredHandle defined, bool nonnegativeRemainders) {
+  if (!nonnegativeRemainders &&
+      !provesNonnegativeRemainderDividend(analysis, candidate, zero))
+    return std::nullopt;
+  FailureOr<RemainderSignPredicates> signs =
+      composeRemainderSignPredicates(analysis, candidate, zero);
+  if (failed(signs))
+    return std::nullopt;
+
+  RemainderSuccessorProofPlan plan;
+  plan.defined = defined;
+  plan.positive = signs->positive;
+  plan.negative = signs->negative;
+  if (candidate.divisorSign == RemainderDivisorSign::Unknown)
+    return plan;
+  plan.directResult =
+      proveKnownSignRemainderSuccessor(analysis, candidate, *signs);
+  return plan;
+}
+
+static std::optional<RemainderSuccessorProofPlan>
+buildRemainderSuccessorProofPlan(sym::Store &store,
+                                 const PreparedRemainderCandidate &candidate,
+                                 bool nonnegativeRemainders) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, candidate.assumptions);
+  if (failed(analysis))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> zero = (*analysis)->composeInteger(0);
+  if (failed(zero))
+    return std::nullopt;
+  sym::PredCmpOp definedComparison = candidate.kind == BinaryKind::RemUI
+                                         ? sym::PredCmpOp::Gt
+                                         : sym::PredCmpOp::Ne;
+  FailureOr<sym::PredHandle> defined =
+      (*analysis)->compare(candidate.lhsDivisor, definedComparison, *zero);
+  if (failed(defined) || failed((*analysis)->assume(*defined)))
+    return std::nullopt;
+
+  if (candidate.kind == BinaryKind::RemUI) {
+    RemainderSuccessorProofPlan plan;
+    plan.defined = *defined;
+    plan.directResult = provesModSuccessor(**analysis, candidate.lhsDividend,
+                                           candidate.lhsDivisor);
+    return plan;
+  }
+  return buildSignedRemainderSuccessorProofPlan(
+      **analysis, candidate, *zero, *defined, nonnegativeRemainders);
+}
+
+static bool proveRemainderSuccessor(sym::Store &store,
+                                    const PreparedRemainderCandidate &candidate,
+                                    bool nonnegativeRemainders) {
+  std::optional<RemainderSuccessorProofPlan> plan =
+      buildRemainderSuccessorProofPlan(store, candidate, nonnegativeRemainders);
+  if (!plan)
+    return false;
+  if (plan->directResult.has_value())
+    return *plan->directResult;
+  return provesModSuccessor(store, candidate, plan->defined, plan->positive,
+                            /*negateDivisor=*/false) &&
+         provesModSuccessor(store, candidate, plan->defined, plan->negative,
+                            /*negateDivisor=*/true);
+}
+
+static std::optional<PreparedRemainderCandidate> buildRemainderCandidate(
+    RemainderProofContext &proofContext, const NamedBinding &lhsBinding,
+    const NamedBinding &rhsBinding, size_t lhsIndex, size_t rhsIndex) {
+  BinaryOp lhsRemainder = findRemainder(lhsBinding.value);
+  BinaryOp rhsRemainder = findRemainder(rhsBinding.value);
+  if (!lhsRemainder || !rhsRemainder ||
+      lhsRemainder.getKind() != rhsRemainder.getKind())
+    return std::nullopt;
+  std::optional<SymbolicProofValue> lhsDividend =
+      proofContext.get(lhsRemainder.getLhs());
+  std::optional<SymbolicProofValue> rhsDividend =
+      proofContext.get(rhsRemainder.getLhs());
+  std::optional<SymbolicProofValue> lhsDivisor =
+      proofContext.get(lhsRemainder.getRhs());
+  std::optional<SymbolicProofValue> rhsDivisor =
+      proofContext.get(rhsRemainder.getRhs());
+  if (!lhsDividend || !rhsDividend || !lhsDivisor || !rhsDivisor)
+    return std::nullopt;
+  PreparedRemainderCandidate candidate;
+  llvm::append_range(candidate.assumptions, lhsDividend->assumptions);
+  llvm::append_range(candidate.assumptions, rhsDividend->assumptions);
+  llvm::append_range(candidate.assumptions, lhsDivisor->assumptions);
+  llvm::append_range(candidate.assumptions, rhsDivisor->assumptions);
+  candidate.lhsRemainder = lhsRemainder;
+  candidate.rhsRemainder = rhsRemainder;
+  candidate.lhsDividend = lhsDividend->expression;
+  candidate.rhsDividend = rhsDividend->expression;
+  candidate.lhsDivisor = lhsDivisor->expression;
+  candidate.rhsDivisor = rhsDivisor->expression;
+  candidate.kind = lhsRemainder.getKind();
+  candidate.lhsBinding = lhsIndex;
+  candidate.rhsBinding = rhsIndex;
+  return candidate;
+}
+
+static FailureOr<sym::CheckResult>
+hasSuccessorDividends(sym::Analysis &analysis,
+                      const PreparedRemainderCandidate &candidate) {
+  std::optional<int64_t> difference =
+      analysis.constantDifference(candidate.rhsDividend, candidate.lhsDividend);
+  if (difference)
+    return *difference == 1 ? sym::CheckResult::True : sym::CheckResult::False;
+  FailureOr<sym::ExprHandle> one = analysis.composeInteger(1);
+  if (failed(one))
+    return failure();
+  FailureOr<sym::ExprHandle> next =
+      analysis.compose(candidate.lhsDividend, sym::ExprBinaryOp::Add, *one);
+  if (failed(next))
+    return failure();
+  return analysis.equivalent(*next, candidate.rhsDividend);
+}
+
+static RemainderPreparationResult
+getRemainderQueryFailure(bool retryIncomplete) {
+  return retryIncomplete ? RemainderPreparationResult::Retry
+                         : RemainderPreparationResult::Failure;
+}
+
+static RemainderPreparationResult
+getIncompleteRemainderResult(bool retryIncomplete) {
+  return retryIncomplete ? RemainderPreparationResult::Retry
+                         : RemainderPreparationResult::Ineligible;
+}
+
+static std::optional<RemainderPreparationResult>
+validateRemainderSuccessorOperands(sym::Analysis &analysis,
+                                   const PreparedRemainderCandidate &candidate,
+                                   bool retryIncomplete) {
+  FailureOr<sym::CheckResult> successorDividends =
+      hasSuccessorDividends(analysis, candidate);
+  if (failed(successorDividends))
+    return getRemainderQueryFailure(retryIncomplete);
+  sym::CheckResult sameDivisor =
+      analysis.equivalent(candidate.lhsDivisor, candidate.rhsDivisor);
+  if (*successorDividends == sym::CheckResult::False ||
+      sameDivisor == sym::CheckResult::False)
+    return RemainderPreparationResult::Ineligible;
+  if (*successorDividends == sym::CheckResult::Unknown ||
+      sameDivisor == sym::CheckResult::Unknown)
+    return getIncompleteRemainderResult(retryIncomplete);
+  return std::nullopt;
+}
+
+static RemainderPreparationResult
+prepareUnsignedRemainderSuccessor(PreparedRemainderCandidate &candidate,
+                                  sym::CheckResult positive,
+                                  bool retryIncomplete) {
+  if (positive == sym::CheckResult::Unknown)
+    return getIncompleteRemainderResult(retryIncomplete);
+  if (positive == sym::CheckResult::False)
+    return RemainderPreparationResult::Ineligible;
+  candidate.successorProven = true;
+  return RemainderPreparationResult::Ready;
+}
+
+static RemainderDivisorSign
+classifyRemainderDivisorSign(sym::CheckResult positive,
+                             sym::CheckResult negative) {
+  if (positive == sym::CheckResult::True || negative == sym::CheckResult::False)
+    return RemainderDivisorSign::Positive;
+  if (negative == sym::CheckResult::True || positive == sym::CheckResult::False)
+    return RemainderDivisorSign::Negative;
+  return RemainderDivisorSign::Unknown;
+}
+
+static RemainderPreparationResult
+prepareSignedRemainderSuccessor(sym::Analysis &analysis, sym::ExprHandle zero,
+                                PreparedRemainderCandidate &candidate,
+                                sym::CheckResult positive,
+                                bool retryIncomplete) {
+  FailureOr<sym::PredHandle> negative =
+      analysis.compare(candidate.lhsDivisor, sym::PredCmpOp::Lt, zero);
+  if (failed(negative))
+    return getRemainderQueryFailure(retryIncomplete);
+  RemainderDivisorSign sign =
+      classifyRemainderDivisorSign(positive, analysis.check(*negative));
+  if (retryIncomplete && sign == RemainderDivisorSign::Unknown)
+    return RemainderPreparationResult::Retry;
+  candidate.divisorSign = sign;
+  candidate.successorProven = true;
+  return RemainderPreparationResult::Ready;
+}
+
+static RemainderPreparationResult
+prepareRemainderSuccessor(sym::Analysis &analysis, sym::ExprHandle zero,
+                          PreparedRemainderCandidate &candidate,
+                          bool retryIncomplete) {
+  std::optional<RemainderPreparationResult> invalid =
+      validateRemainderSuccessorOperands(analysis, candidate, retryIncomplete);
+  if (invalid)
+    return *invalid;
+
+  FailureOr<sym::PredHandle> positive =
+      analysis.compare(candidate.lhsDivisor, sym::PredCmpOp::Gt, zero);
+  if (failed(positive))
+    return getRemainderQueryFailure(retryIncomplete);
+  sym::CheckResult positiveResult = analysis.check(*positive);
+  if (candidate.kind == BinaryKind::RemUI)
+    return prepareUnsignedRemainderSuccessor(candidate, positiveResult,
+                                             retryIncomplete);
+  return prepareSignedRemainderSuccessor(analysis, zero, candidate,
+                                         positiveResult, retryIncomplete);
+}
+
+class RemainderRelationPreparer {
+public:
+  RemainderRelationPreparer(
+      RemainderProofContext &proofContext, sym::Store &store,
+      ArrayRef<SlotMapping> slots, SymbolicRelationProofCache &proofCache,
+      llvm::DenseMap<RelationPair, PreparedRemainderRelation> &relations,
+      int64_t elementBits)
+      : proofContext(proofContext), store(store), slots(slots),
+        proofCache(proofCache), relations(relations), elementBits(elementBits) {
+  }
+
+  void prepare(ArrayRef<RelationPair> pairs, bool directed) {
+    collectPairs(pairs, directed);
+    buildCandidates();
+    preparePairs();
+    prepareSuccessors();
+    eraseUnavailable();
+  }
+
+private:
+  struct PairPreparation {
+    SmallVector<RemainderPreparationResult> results;
+    SmallVector<std::optional<std::pair<sym::ExprHandle, sym::ExprHandle>>>
+        bindingSymbols;
+    RelationPair pair;
+  };
+
+  using CandidateTask = std::pair<RelationPair, size_t>;
+
+  void appendPair(RelationPair pair) {
+    if (pair.first == pair.second || pair.first >= slots.size() ||
+        pair.second >= slots.size())
+      return;
+    auto existing = relations.find(pair);
+    if (existing != relations.end() && !existing->second.available)
+      relations.erase(existing);
+    if (relations.try_emplace(pair).second)
+      directedPairs.push_back(pair);
+  }
+
+  void appendUnprovenDirections(RelationPair pair,
+                                const RelationProof &relation) {
+    std::array<std::pair<RelationPair, bool>, 2> directions{{
+        {{pair.first, pair.second},
+         relation.available && relation.lowToHighAdjacent},
+        {{pair.second, pair.first},
+         relation.available && relation.highToLowAdjacent},
+    }};
+    for (auto [direction, directlyAdjacent] : directions)
+      if (!directlyAdjacent)
+        appendPair(direction);
+  }
+
+  void collectPairs(ArrayRef<RelationPair> pairs, bool directed) {
+    if (directed) {
+      for (RelationPair pair : pairs)
+        appendPair(pair);
+      return;
+    }
+    for (RelationPair pair : pairs) {
+      if (pair.first == pair.second || pair.first >= slots.size() ||
+          pair.second >= slots.size())
+        continue;
+      if (pair.first > pair.second)
+        std::swap(pair.first, pair.second);
+      const RelationProof *relation = proofContext.lookupPreparedRelation(
+          slots[pair.first], slots[pair.second]);
+      if (relation && relation->baseTargetProven)
+        appendUnprovenDirections(pair, *relation);
+    }
+  }
+
+  void buildCandidates(RelationPair pair) {
+    PreparedRemainderRelation &relation = relations[pair];
+    const SlotMapping &lhs = slots[pair.first];
+    const SlotMapping &rhs = slots[pair.second];
+    for (auto [lhsIndex, lhsBinding] : llvm::enumerate(lhs.bindings))
+      for (auto [rhsIndex, rhsBinding] : llvm::enumerate(rhs.bindings))
+        if (std::optional<PreparedRemainderCandidate> candidate =
+                buildRemainderCandidate(proofContext, lhsBinding, rhsBinding,
+                                        lhsIndex, rhsIndex))
+          relation.candidates.push_back(std::move(*candidate));
+    if (relation.candidates.empty())
+      relation.available = true;
+  }
+
+  void buildCandidates() {
+    for (RelationPair pair : directedPairs)
+      buildCandidates(pair);
+  }
+
+  SmallVector<ExactFactDomainGroup> buildPairGroups() {
+    SmallVector<ExactFactDomainGroup> groups;
+    llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+    for (auto [index, pair] : llvm::enumerate(directedPairs)) {
+      if (relations[pair].candidates.empty())
+        continue;
+      appendExactFactDomainTask(
+          combineAssumptions(slots[pair.first], slots[pair.second]), index,
+          groups, buckets);
+    }
+    return groups;
+  }
+
+  PairPreparation buildPairPreparation(ArrayRef<sym::PredHandle> assumptions,
+                                       RelationPair pair) {
+    const SlotMapping &lhs = slots[pair.first];
+    const SlotMapping &rhs = slots[pair.second];
+    PreparedRemainderRelation &relation = relations[pair];
+    PairPreparation preparation{{}, {}, pair};
+    preparation.results.assign(relation.candidates.size(),
+                               RemainderPreparationResult::Retry);
+    preparation.bindingSymbols.resize(relation.candidates.size());
+    for (auto [candidateIndex, candidate] :
+         llvm::enumerate(relation.candidates))
+      restoreCachedPreparation(assumptions, lhs, rhs, candidateIndex, candidate,
+                               preparation);
+    return preparation;
+  }
+
+  void restoreCachedPreparation(ArrayRef<sym::PredHandle> assumptions,
+                                const SlotMapping &lhs, const SlotMapping &rhs,
+                                size_t candidateIndex,
+                                PreparedRemainderCandidate &candidate,
+                                PairPreparation &preparation) {
+    FailureOr<sym::ExprHandle> lhsSymbol =
+        sym::composeExprSym(store, lhs.bindings[candidate.lhsBinding].name);
+    FailureOr<sym::ExprHandle> rhsSymbol =
+        sym::composeExprSym(store, rhs.bindings[candidate.rhsBinding].name);
+    if (failed(lhsSymbol) || failed(rhsSymbol))
+      return;
+    preparation.bindingSymbols[candidateIndex] =
+        std::pair{*lhsSymbol, *rhsSymbol};
+    std::optional<RemainderPairPreparationProof> cached =
+        proofCache.lookupRemainderPairPreparation(assumptions, lhs.bitOffset,
+                                                  rhs.bitOffset, *lhsSymbol,
+                                                  *rhsSymbol, elementBits);
+    if (!cached)
+      return;
+    preparation.results[candidateIndex] =
+        cached->ready ? RemainderPreparationResult::Ready
+                      : RemainderPreparationResult::Ineligible;
+    candidate.lhsBindingNonnegative = cached->lhsBindingNonnegative;
+    candidate.rhsBindingNonnegative = cached->rhsBindingNonnegative;
+  }
+
+  SmallVector<PairPreparation>
+  buildPairPreparations(const ExactFactDomainGroup &group) {
+    SmallVector<PairPreparation> preparations;
+    preparations.reserve(group.tasks.size());
+    for (size_t pairIndex : group.tasks)
+      preparations.push_back(
+          buildPairPreparation(group.assumptions, directedPairs[pairIndex]));
+    return preparations;
+  }
+
+  static bool needsAnalysis(ArrayRef<PairPreparation> preparations) {
+    return llvm::any_of(preparations, [](const PairPreparation &preparation) {
+      return llvm::is_contained(preparation.results,
+                                RemainderPreparationResult::Retry);
+    });
+  }
+
+  void cachePreparation(ArrayRef<sym::PredHandle> assumptions,
+                        const PairPreparation &preparation,
+                        size_t candidateIndex,
+                        const PreparedRemainderCandidate &candidate,
+                        RemainderPreparationResult result) {
+    if (result != RemainderPreparationResult::Ready &&
+        result != RemainderPreparationResult::Ineligible)
+      return;
+    const auto &symbols = preparation.bindingSymbols[candidateIndex];
+    if (!symbols)
+      return;
+    const SlotMapping &lhs = slots[preparation.pair.first];
+    const SlotMapping &rhs = slots[preparation.pair.second];
+    proofCache.insertRemainderPairPreparation(
+        assumptions, lhs.bitOffset, rhs.bitOffset, symbols->first,
+        symbols->second, elementBits,
+        {/*ready=*/result == RemainderPreparationResult::Ready,
+         candidate.lhsBindingNonnegative, candidate.rhsBindingNonnegative});
+  }
+
+  void preparePairCandidates(sym::Analysis &analysis,
+                             ArrayRef<sym::PredHandle> assumptions,
+                             MutableArrayRef<PairPreparation> preparations,
+                             bool retryIncomplete) {
+    for (PairPreparation &preparation : preparations) {
+      const SlotMapping &lhs = slots[preparation.pair.first];
+      const SlotMapping &rhs = slots[preparation.pair.second];
+      PreparedRemainderRelation &relation = relations[preparation.pair];
+      SmallVector<RemainderBindingProof> lhsProofs(lhs.bindings.size());
+      SmallVector<RemainderBindingProof> rhsProofs(rhs.bindings.size());
+      for (auto [candidateIndex, candidate] :
+           llvm::enumerate(relation.candidates)) {
+        if (preparation.results[candidateIndex] !=
+            RemainderPreparationResult::Retry)
+          continue;
+        preparation.results[candidateIndex] = prepareRemainderCandidate(
+            analysis, lhs, rhs, candidate, elementBits, retryIncomplete,
+            lhsProofs, rhsProofs);
+        cachePreparation(assumptions, preparation, candidateIndex, candidate,
+                         preparation.results[candidateIndex]);
+      }
+    }
+  }
+
+  void finalizePairPreparation(PairPreparation &preparation) {
+    PreparedRemainderRelation &relation = relations[preparation.pair];
+    if (llvm::is_contained(preparation.results,
+                           RemainderPreparationResult::Failure) ||
+        llvm::is_contained(preparation.results,
+                           RemainderPreparationResult::Retry)) {
+      relation.available = false;
+      return;
+    }
+    SmallVector<PreparedRemainderCandidate> candidates;
+    candidates.reserve(relation.candidates.size());
+    for (auto [candidateIndex, candidate] :
+         llvm::enumerate(relation.candidates))
+      if (preparation.results[candidateIndex] ==
+          RemainderPreparationResult::Ready)
+        candidates.push_back(std::move(candidate));
+    relation.candidates = std::move(candidates);
+    relation.available = true;
+  }
+
+  void preparePairGroup(ExactFactDomainGroup &group) {
+    SmallVector<PairPreparation> preparations = buildPairPreparations(group);
+    if (needsAnalysis(preparations)) {
+      FailureOr<std::unique_ptr<sym::Analysis>> direct =
+          sym::Analysis::createDirect(store, group.assumptions);
+      if (succeeded(direct))
+        preparePairCandidates(**direct, group.assumptions, preparations,
+                              /*retryIncomplete=*/true);
+    }
+    if (needsAnalysis(preparations)) {
+      FailureOr<std::unique_ptr<sym::Analysis>> strong =
+          sym::Analysis::create(store, group.assumptions);
+      if (succeeded(strong))
+        preparePairCandidates(**strong, group.assumptions, preparations,
+                              /*retryIncomplete=*/false);
+    }
+    for (PairPreparation &preparation : preparations)
+      finalizePairPreparation(preparation);
+  }
+
+  void preparePairs() {
+    SmallVector<ExactFactDomainGroup> groups = buildPairGroups();
+    for (ExactFactDomainGroup &group : groups)
+      preparePairGroup(group);
+  }
+
+  SmallVector<ExactFactDomainGroup> buildSuccessorGroups() {
+    SmallVector<ExactFactDomainGroup> groups;
+    llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+    for (RelationPair pair : directedPairs) {
+      PreparedRemainderRelation &relation = relations[pair];
+      if (!relation.available)
+        continue;
+      for (size_t index : llvm::seq<size_t>(0, relation.candidates.size())) {
+        size_t task = candidateTasks.size();
+        candidateTasks.push_back({pair, index});
+        appendExactFactDomainTask(relation.candidates[index].assumptions, task,
+                                  groups, buckets);
+      }
+    }
+    return groups;
+  }
+
+  void prepareSuccessorCandidates(
+      sym::Analysis &analysis, const ExactFactDomainGroup &group,
+      MutableArrayRef<RemainderPreparationResult> results,
+      bool retryIncomplete) {
+    FailureOr<sym::ExprHandle> zero = analysis.composeInteger(0);
+    if (failed(zero))
+      return;
+    for (auto [groupIndex, task] : llvm::enumerate(group.tasks)) {
+      if (!retryIncomplete &&
+          results[groupIndex] != RemainderPreparationResult::Retry)
+        continue;
+      auto [pair, candidateIndex] = candidateTasks[task];
+      PreparedRemainderCandidate &candidate =
+          relations[pair].candidates[candidateIndex];
+      results[groupIndex] = prepareRemainderSuccessor(
+          analysis, *zero, candidate, retryIncomplete);
+    }
+  }
+
+  void markFailedSuccessors(const ExactFactDomainGroup &group,
+                            ArrayRef<RemainderPreparationResult> results) {
+    for (auto [groupIndex, task] : llvm::enumerate(group.tasks)) {
+      RemainderPreparationResult result = results[groupIndex];
+      if (result == RemainderPreparationResult::Failure ||
+          result == RemainderPreparationResult::Retry)
+        relations[candidateTasks[task].first].available = false;
+    }
+  }
+
+  void prepareSuccessorGroup(const ExactFactDomainGroup &group) {
+    SmallVector<RemainderPreparationResult> results(
+        group.tasks.size(), RemainderPreparationResult::Retry);
+    {
+      FailureOr<std::unique_ptr<sym::Analysis>> direct =
+          sym::Analysis::createDirect(store, group.assumptions);
+      if (succeeded(direct))
+        prepareSuccessorCandidates(**direct, group, results,
+                                   /*retryIncomplete=*/true);
+    }
+    if (llvm::is_contained(results, RemainderPreparationResult::Retry)) {
+      FailureOr<std::unique_ptr<sym::Analysis>> strong =
+          sym::Analysis::create(store, group.assumptions);
+      if (succeeded(strong))
+        prepareSuccessorCandidates(**strong, group, results,
+                                   /*retryIncomplete=*/false);
+    }
+    markFailedSuccessors(group, results);
+  }
+
+  void prepareSuccessors() {
+    SmallVector<ExactFactDomainGroup> groups = buildSuccessorGroups();
+    for (const ExactFactDomainGroup &group : groups)
+      prepareSuccessorGroup(group);
+  }
+
+  void eraseUnavailable() {
+    for (RelationPair pair : directedPairs)
+      if (!relations[pair].available)
+        relations.erase(pair);
+  }
+
+  RemainderProofContext &proofContext;
+  sym::Store &store;
+  ArrayRef<SlotMapping> slots;
+  SymbolicRelationProofCache &proofCache;
+  llvm::DenseMap<RelationPair, PreparedRemainderRelation> &relations;
+  int64_t elementBits;
+  SmallVector<RelationPair> directedPairs;
+  SmallVector<CandidateTask> candidateTasks;
+};
+
+void RemainderProofContext::prepareRemainderRelations(
+    ArrayRef<RelationPair> pairs, int64_t elementBits, bool directed) {
+  RemainderRelationPreparer(*this, store, slots, proofCache, remainderRelations,
+                            elementBits)
+      .prepare(pairs, directed);
+}
+
+static bool isRemainderNonnegative(const SlotMapping &slot,
                                    const NamedBinding &binding,
-                                   BinaryOp remainder,
+                                   BinaryOp remainder, bool bindingNonnegative,
                                    RemainderProofContext &proofContext) {
-  return isBindingNonnegative(store, slot, binding) ||
+  return bindingNonnegative ||
          proofContext.isNonnegative(remainder.getResult()) ||
          proofContext.isNonnegativeFromMaterializations(slot, binding,
                                                         remainder);
 }
 
-static bool proveRemainderBindingAdjacent(
-    sym::Store &store, const SlotMapping &lhs, const SlotMapping &rhs,
-    const NamedBinding &lhsBinding, const NamedBinding &rhsBinding,
-    int64_t elementBits, ArrayRef<sym::PredHandle> assumptions,
-    RemainderProofContext &proofContext) {
-  BinaryOp lhsRemainder = findRemainder(lhsBinding.value);
-  if (!lhsRemainder)
-    return false;
-  BinaryOp rhsRemainder = findRemainder(rhsBinding.value);
-  if (!rhsRemainder)
-    return false;
-  FailureOr<sym::ExprHandle> lhsResidual =
-      getRemainderResidual(store, lhs, lhsBinding, elementBits);
-  if (failed(lhsResidual))
-    return false;
-  FailureOr<sym::ExprHandle> rhsResidual =
-      getRemainderResidual(store, rhs, rhsBinding, elementBits);
-  if (failed(rhsResidual))
-    return false;
-  if (!proveEqual(store, *lhsResidual, *rhsResidual, assumptions))
-    return false;
-  bool nonnegativeRemainders =
-      isRemainderNonnegative(store, lhs, lhsBinding, lhsRemainder,
-                             proofContext) &&
-      isRemainderNonnegative(store, rhs, rhsBinding, rhsRemainder,
-                             proofContext);
-  return proveAlignedRemainderSuccessor(store, lhsRemainder, rhsRemainder,
-                                        nonnegativeRemainders, proofContext);
-}
-
 static bool proveRemainderAdjacent(sym::Store &store, const SlotMapping &lhs,
                                    const SlotMapping &rhs, int64_t elementBits,
                                    RemainderProofContext &proofContext) {
-  SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
-  for (const NamedBinding &lhsBinding : lhs.bindings)
-    for (const NamedBinding &rhsBinding : rhs.bindings)
-      if (proveRemainderBindingAdjacent(store, lhs, rhs, lhsBinding, rhsBinding,
-                                        elementBits, assumptions, proofContext))
-        return true;
+  const PreparedRemainderRelation *relation =
+      proofContext.lookupRemainderRelation(lhs, rhs);
+  if (!relation) {
+    proofContext.prepareRemainderRelation(lhs, rhs, elementBits);
+    relation = proofContext.lookupRemainderRelation(lhs, rhs);
+  }
+  if (!relation)
+    return false;
+  for (const PreparedRemainderCandidate &candidate : relation->candidates) {
+    if (!candidate.successorProven ||
+        candidate.lhsBinding >= lhs.bindings.size() ||
+        candidate.rhsBinding >= rhs.bindings.size())
+      continue;
+    const NamedBinding &lhsBinding = lhs.bindings[candidate.lhsBinding];
+    const NamedBinding &rhsBinding = rhs.bindings[candidate.rhsBinding];
+    bool nonnegativeRemainders =
+        isRemainderNonnegative(lhs, lhsBinding, candidate.lhsRemainder,
+                               candidate.lhsBindingNonnegative, proofContext) &&
+        isRemainderNonnegative(rhs, rhsBinding, candidate.rhsRemainder,
+                               candidate.rhsBindingNonnegative, proofContext);
+    if (proveRemainderSuccessor(store, candidate, nonnegativeRemainders))
+      return true;
+  }
   return false;
 }
 
 static bool samePoint(sym::Store &store, const SlotMapping &lhs,
-                      const SlotMapping &rhs) {
-  if (!sameActivation(store, lhs, rhs))
-    return false;
+                      const SlotMapping &rhs,
+                      RemainderProofContext &proofContext) {
+  if (const RelationProof *proof =
+          proofContext.lookupPreparedRelation(lhs, rhs)) {
+    if (!proof->baseTargetProven || !proof->sameBitOffset)
+      return false;
+    return proofContext.sameActivation(lhs, rhs);
+  }
   SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
-  FailureOr<std::unique_ptr<sym::Analysis>> created =
-      sym::Analysis::create(store, assumptions);
-  if (failed(created))
-    return false;
-  sym::Analysis &analysis = **created;
-  return proveEqual(analysis, lhs.base, rhs.base) &&
-         proveEqual(analysis, lhs.targetBlock, rhs.targetBlock) &&
-         proveEqual(analysis, lhs.bitOffset, rhs.bitOffset);
-}
-
-static bool adjacent(sym::Store &store, const SlotMapping &lhs,
-                     const SlotMapping &rhs, int64_t elementBits,
-                     RemainderProofContext &proofContext) {
-  SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
-  bool directlyAdjacent = false;
   {
     FailureOr<std::unique_ptr<sym::Analysis>> created =
         sym::Analysis::create(store, assumptions);
     if (failed(created))
       return false;
     sym::Analysis &analysis = **created;
-    if (!proveEqual(analysis, lhs.base, rhs.base) ||
-        !proveEqual(analysis, lhs.targetBlock, rhs.targetBlock))
+    if (analysis.equivalent(lhs.base, rhs.base) != sym::CheckResult::True ||
+        analysis.equivalent(lhs.targetBlock, rhs.targetBlock) !=
+            sym::CheckResult::True ||
+        analysis.equivalent(lhs.bitOffset, rhs.bitOffset) !=
+            sym::CheckResult::True)
       return false;
-    FailureOr<sym::ExprHandle> delta = analysis.composeInteger(elementBits);
-    if (failed(delta))
-      return false;
-    FailureOr<sym::ExprHandle> expected =
-        analysis.compose(lhs.bitOffset, sym::ExprBinaryOp::Add, *delta);
-    if (failed(expected))
-      return false;
-    directlyAdjacent = proveEqual(analysis, *expected, rhs.bitOffset);
   }
-  if (!directlyAdjacent &&
+  return proofContext.sameActivation(lhs, rhs);
+}
+
+static std::optional<bool>
+getPreparedAddressAdjacency(const SlotMapping &lhs, const SlotMapping &rhs,
+                            const RelationProof &proof) {
+  if (!proof.baseTargetProven)
+    return std::nullopt;
+  return lhs.proofIndex < rhs.proofIndex ? proof.lowToHighAdjacent
+                                         : proof.highToLowAdjacent;
+}
+
+static std::optional<bool> proveDirectAddressAdjacency(sym::Store &store,
+                                                       const SlotMapping &lhs,
+                                                       const SlotMapping &rhs,
+                                                       int64_t elementBits) {
+  SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      sym::Analysis::create(store, assumptions);
+  if (failed(created))
+    return std::nullopt;
+  sym::Analysis &analysis = **created;
+  if (analysis.equivalent(lhs.base, rhs.base) != sym::CheckResult::True ||
+      analysis.equivalent(lhs.targetBlock, rhs.targetBlock) !=
+          sym::CheckResult::True)
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> delta = analysis.composeInteger(elementBits);
+  if (failed(delta))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> expected =
+      analysis.compose(lhs.bitOffset, sym::ExprBinaryOp::Add, *delta);
+  if (failed(expected))
+    return std::nullopt;
+  return analysis.equivalent(*expected, rhs.bitOffset) ==
+         sym::CheckResult::True;
+}
+
+static std::optional<bool>
+getAddressAdjacency(sym::Store &store, const SlotMapping &lhs,
+                    const SlotMapping &rhs, int64_t elementBits,
+                    RemainderProofContext &proofContext) {
+  const RelationProof *proof = proofContext.lookupPreparedRelation(lhs, rhs);
+  if (proof)
+    return getPreparedAddressAdjacency(lhs, rhs, *proof);
+  return proveDirectAddressAdjacency(store, lhs, rhs, elementBits);
+}
+
+static bool adjacent(sym::Store &store, const SlotMapping &lhs,
+                     const SlotMapping &rhs, int64_t elementBits,
+                     RemainderProofContext &proofContext) {
+  std::optional<bool> directlyAdjacent =
+      getAddressAdjacency(store, lhs, rhs, elementBits, proofContext);
+  if (!directlyAdjacent)
+    return false;
+  if (!*directlyAdjacent &&
       !proveRemainderAdjacent(store, lhs, rhs, elementBits, proofContext))
     return false;
-  return sameActivation(store, lhs, rhs);
+  return proofContext.sameActivation(lhs, rhs);
 }
 
 static SmallVector<SlotMapping, 4>
-deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots) {
+deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots,
+                       RemainderProofContext &proofContext) {
   SmallVector<SlotMapping, 4> unique;
   for (SlotMapping &slot : slots) {
     auto found = llvm::find_if(unique, [&](const SlotMapping &candidate) {
-      return samePoint(store, candidate, slot);
+      return samePoint(store, candidate, slot, proofContext);
     });
     if (found == unique.end()) {
       unique.push_back(std::move(slot));
@@ -2755,93 +3390,130 @@ deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots) {
   return unique;
 }
 
-static SmallVector<SmallVector<unsigned>>
-buildDenseSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
-                         int64_t elementBits,
-                         RemainderProofContext &proofContext) {
-  size_t count = slots.size();
-  SmallVector<SmallVector<unsigned>> edges(count);
-  for (unsigned lhs = 0; lhs < count; ++lhs)
-    for (unsigned rhs = 0; rhs < count; ++rhs)
-      if (lhs != rhs &&
-          adjacent(store, slots[lhs], slots[rhs], elementBits, proofContext))
-        edges[lhs].push_back(rhs);
-  return edges;
+constexpr size_t kRelationPairByteBudget = 4 * 1024 * 1024;
+constexpr size_t kMaxRelationBatchPairs =
+    kRelationPairByteBudget / sizeof(RelationPair);
+
+static std::optional<size_t> getUnorderedPairCount(size_t count) {
+  if (count < 2)
+    return 0;
+  size_t lhs = count;
+  size_t rhs = count - 1;
+  if ((lhs & 1) == 0)
+    lhs /= 2;
+  else
+    rhs /= 2;
+  if (lhs > std::numeric_limits<size_t>::max() / rhs)
+    return std::nullopt;
+  return lhs * rhs;
+}
+
+static std::optional<SmallVector<RelationPair>>
+buildAllRelationPairs(ArrayRef<SlotMapping> slots) {
+  std::optional<size_t> pairCount = getUnorderedPairCount(slots.size());
+  if (!pairCount || *pairCount > kMaxRelationBatchPairs)
+    return std::nullopt;
+  SmallVector<RelationPair> pairs;
+  pairs.reserve(*pairCount);
+  for (size_t low = 0; low < slots.size(); ++low)
+    for (size_t high = low + 1; high < slots.size(); ++high)
+      pairs.push_back({slots[low].proofIndex, slots[high].proofIndex});
+  return pairs;
+}
+
+static void prepareAllRelations(ArrayRef<SlotMapping> slots,
+                                int64_t elementBits,
+                                RemainderProofContext &proofContext) {
+  std::optional<SmallVector<RelationPair>> pairs = buildAllRelationPairs(slots);
+  if (pairs)
+    proofContext.prepareRelations(*pairs, elementBits);
 }
 
 using SparseAddressKey =
     std::pair<sym::ExprHandle, std::pair<sym::ExprHandle, sym::ExprHandle>>;
 
 static FailureOr<sym::ExprHandle>
-canonicalizeAddressExpr(sym::Store &store, sym::ExprHandle expression,
-                        ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, expression, assumptions);
+canonicalizeAddressExpr(sym::Analysis &analysis, sym::ExprHandle expression) {
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(expression);
   if (failed(simplified))
     return failure();
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, *simplified);
+  FailureOr<sym::ExprHandle> expanded = analysis.expand(*simplified);
   if (failed(expanded))
     return *simplified;
-  FailureOr<sym::ExprHandle> canonical =
-      sym::simplifyExpr(store, *expanded, assumptions);
+  FailureOr<sym::ExprHandle> canonical = analysis.simplify(*expanded);
   if (succeeded(canonical))
     return *canonical;
   return *simplified;
-}
-
-static FailureOr<std::pair<sym::ExprHandle, int64_t>>
-splitAddressConstant(sym::Store &store, sym::ExprHandle expression,
-                     ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> canonical =
-      canonicalizeAddressExpr(store, expression, assumptions);
-  if (failed(canonical))
-    return failure();
-  std::optional<int64_t> constant = getAdditiveConstant(*canonical);
-  if (!constant)
-    return failure();
-  FailureOr<sym::ExprHandle> constantExpr =
-      sym::composeExprInt(store, *constant);
-  if (failed(constantExpr))
-    return failure();
-  FailureOr<sym::ExprHandle> origin = sym::composeExprBinary(
-      store, *canonical, sym::ExprBinaryOp::Sub, *constantExpr);
-  if (failed(origin))
-    return failure();
-  FailureOr<sym::ExprHandle> canonicalOrigin =
-      canonicalizeAddressExpr(store, *origin, assumptions);
-  if (failed(canonicalOrigin))
-    return failure();
-  return std::pair<sym::ExprHandle, int64_t>{*canonicalOrigin, *constant};
 }
 
 using SparseOffsetBuckets = llvm::DenseMap<int64_t, SmallVector<unsigned>>;
 using SparseAddressGroups =
     llvm::DenseMap<SparseAddressKey, SparseOffsetBuckets>;
 
-static SparseAddressGroups groupSparseAddresses(sym::Store &store,
-                                                ArrayRef<SlotMapping> slots) {
+class RelationPairBatch {
+public:
+  void append(const SlotMapping &lhs, const SlotMapping &rhs) {
+    if (!valid || lhs.proofIndex == rhs.proofIndex)
+      return;
+    RelationPair pair{lhs.proofIndex, rhs.proofIndex};
+    if (pair.first > pair.second)
+      std::swap(pair.first, pair.second);
+    if (!seen.insert(pair).second)
+      return;
+    if (pairs.size() == kMaxRelationBatchPairs) {
+      valid = false;
+      pairs.clear();
+      seen.clear();
+      return;
+    }
+    pairs.push_back(pair);
+  }
+
+  void prepare(int64_t elementBits, RemainderProofContext &proofContext) const {
+    if (valid)
+      proofContext.prepareRelations(pairs, elementBits);
+  }
+
+private:
+  SmallVector<RelationPair> pairs;
+  llvm::DenseSet<RelationPair> seen;
+  bool valid = true;
+};
+
+static SparseAddressGroups
+groupSparseAddresses(sym::Store &store, ArrayRef<SlotMapping> slots,
+                     RemainderProofContext &proofContext) {
   SparseAddressGroups groups;
-  for (auto [index, slot] : llvm::enumerate(slots)) {
-    ArrayRef<sym::PredHandle> assumptions = slot.assumptions;
-    FailureOr<sym::ExprHandle> base =
-        canonicalizeAddressExpr(store, slot.base, assumptions);
-    FailureOr<sym::ExprHandle> targetBlock =
-        canonicalizeAddressExpr(store, slot.targetBlock, assumptions);
-    FailureOr<std::pair<sym::ExprHandle, int64_t>> offset =
-        splitAddressConstant(store, slot.bitOffset, assumptions);
-    if (failed(base) || failed(targetBlock) || failed(offset))
+  SmallVector<ExactFactDomainGroup> factGroups;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+  for (auto [index, slot] : llvm::enumerate(slots))
+    appendExactFactDomainTask(slot.assumptions, index, factGroups, buckets);
+  for (ExactFactDomainGroup &factGroup : factGroups) {
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, factGroup.assumptions);
+    if (failed(analysis))
       continue;
-    SparseAddressKey key{*base, {*targetBlock, offset->first}};
-    groups[key][offset->second].push_back(index);
+    proofContext.recordFactDomain();
+    for (size_t index : factGroup.tasks) {
+      const SlotMapping &slot = slots[index];
+      FailureOr<sym::ExprHandle> base =
+          canonicalizeAddressExpr(**analysis, slot.base);
+      FailureOr<sym::ExprHandle> targetBlock =
+          canonicalizeAddressExpr(**analysis, slot.targetBlock);
+      std::optional<sym::SplitAdditiveConstant> offset =
+          (*analysis)->splitAdditiveConstant(slot.bitOffset);
+      if (failed(base) || failed(targetBlock) || !offset)
+        continue;
+      SparseAddressKey key{*base, {*targetBlock, offset->residual}};
+      groups[key][offset->constant].push_back(index);
+    }
   }
   return groups;
 }
 
-static void
-appendSparseGroupEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
-                       SparseOffsetBuckets &buckets, int64_t elementBits,
-                       SmallVectorImpl<SmallVector<unsigned>> &edges,
-                       RemainderProofContext &proofContext) {
+template <typename Callback>
+static void forEachSparseGroupPair(SparseOffsetBuckets &buckets,
+                                   int64_t elementBits, Callback callback) {
   for (auto &bucket : buckets) {
     int64_t offset = bucket.first;
     if (offset > std::numeric_limits<int64_t>::max() - elementBits)
@@ -2851,28 +3523,13 @@ appendSparseGroupEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
       continue;
     for (unsigned lhs : bucket.second)
       for (unsigned rhs : successor->second)
-        if (adjacent(store, slots[lhs], slots[rhs], elementBits, proofContext))
-          edges[lhs].push_back(rhs);
+        callback(lhs, rhs);
   }
 }
 
-static SmallVector<SmallVector<unsigned>>
-buildSparseSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
-                          int64_t elementBits,
-                          RemainderProofContext &proofContext) {
-  SparseAddressGroups groups = groupSparseAddresses(store, slots);
-  SmallVector<SmallVector<unsigned>> edges(slots.size());
-  for (auto &group : groups)
-    appendSparseGroupEdges(store, slots, group.second, elementBits, edges,
-                           proofContext);
-  return edges;
-}
-
-static void
-appendLogicalPacketEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
-                         int64_t elementBits,
-                         RemainderProofContext &proofContext,
-                         SmallVectorImpl<SmallVector<unsigned>> &edges) {
+template <typename Callback>
+static void forEachLogicalPacketPair(ArrayRef<SlotMapping> slots,
+                                     Callback callback) {
   llvm::DenseMap<unsigned, SmallVector<unsigned>> nodesByLogicalSlot;
   for (auto [node, slot] : llvm::enumerate(slots))
     for (unsigned logicalSlot : slot.logicalSlots)
@@ -2883,21 +3540,261 @@ appendLogicalPacketEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
       if (successors == nodesByLogicalSlot.end())
         continue;
       for (unsigned rhs : successors->second)
-        if (lhs != rhs && !llvm::is_contained(edges[lhs], rhs) &&
-            adjacent(store, slots[lhs], slots[rhs], elementBits, proofContext))
-          edges[lhs].push_back(rhs);
+        if (lhs != rhs)
+          callback(lhs, rhs);
     }
   }
+}
+
+static void appendSparseGroupPairs(ArrayRef<SlotMapping> slots,
+                                   SparseOffsetBuckets &buckets,
+                                   int64_t elementBits,
+                                   RelationPairBatch &batch) {
+  forEachSparseGroupPair(buckets, elementBits, [&](unsigned lhs, unsigned rhs) {
+    batch.append(slots[lhs], slots[rhs]);
+  });
+}
+
+static void appendLogicalPacketPairs(ArrayRef<SlotMapping> slots,
+                                     RelationPairBatch &batch) {
+  forEachLogicalPacketPair(slots, [&](unsigned lhs, unsigned rhs) {
+    batch.append(slots[lhs], slots[rhs]);
+  });
+}
+
+static void
+appendSparseGroupEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
+                       SparseOffsetBuckets &buckets, int64_t elementBits,
+                       SmallVectorImpl<SmallVector<unsigned>> &edges,
+                       RemainderProofContext &proofContext) {
+  forEachSparseGroupPair(buckets, elementBits, [&](unsigned lhs, unsigned rhs) {
+    if (adjacent(store, slots[lhs], slots[rhs], elementBits, proofContext))
+      edges[lhs].push_back(rhs);
+  });
+}
+
+static SmallVector<SmallVector<unsigned>>
+buildSparseSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
+                          int64_t elementBits,
+                          RemainderProofContext &proofContext) {
+  SparseAddressGroups groups = groupSparseAddresses(store, slots, proofContext);
+  RelationPairBatch batch;
+  for (auto &group : groups)
+    appendSparseGroupPairs(slots, group.second, elementBits, batch);
+  appendLogicalPacketPairs(slots, batch);
+  batch.prepare(elementBits, proofContext);
+  SmallVector<SmallVector<unsigned>> edges(slots.size());
+  for (auto &group : groups)
+    appendSparseGroupEdges(store, slots, group.second, elementBits, edges,
+                           proofContext);
+  return edges;
+}
+
+static std::optional<int64_t>
+getCachedAddressDifference(const SlotMapping &lhs, const SlotMapping &rhs) {
+  if (!(lhs.base == rhs.base) || !(lhs.targetBlock == rhs.targetBlock) ||
+      !lhs.proofOffset || !rhs.proofOffset ||
+      !(lhs.proofOffset->residual == rhs.proofOffset->residual))
+    return std::nullopt;
+  return llvm::checkedSub(rhs.proofOffset->constant, lhs.proofOffset->constant);
+}
+
+struct AddressProofClass {
+  SmallVector<sym::PredHandle> assumptions;
+  SmallVector<unsigned> members;
+  AddressProofClassKey key;
+};
+
+static SmallVector<AddressProofClass>
+buildAddressProofClasses(ArrayRef<SlotMapping> slots,
+                         SmallVectorImpl<std::optional<unsigned>> &classIds) {
+  SmallVector<AddressProofClass> classes;
+  llvm::DenseMap<AddressProofClassKey, unsigned> indices;
+  classIds.resize(slots.size());
+  for (auto [index, slot] : llvm::enumerate(slots)) {
+    if (!slot.proofOffset)
+      continue;
+    AddressProofClassKey key{slot.base,
+                             {slot.targetBlock, slot.proofOffset->residual}};
+    auto [found, inserted] = indices.try_emplace(key, classes.size());
+    if (inserted)
+      classes.push_back({{}, {}, key});
+    classes[found->second].members.push_back(index);
+    classIds[index] = found->second;
+  }
+  for (AddressProofClass &addressClass : classes) {
+    addressClass.assumptions =
+        getNonActivationAssumptions(slots[addressClass.members.front()]);
+    for (unsigned member : ArrayRef(addressClass.members).drop_front()) {
+      SmallVector<sym::PredHandle> assumptions =
+          getNonActivationAssumptions(slots[member]);
+      llvm::erase_if(addressClass.assumptions, [&](sym::PredHandle predicate) {
+        return !llvm::is_contained(assumptions, predicate);
+      });
+    }
+  }
+  return classes;
+}
+
+static void appendKnownAddressDifference(
+    ArrayRef<SlotMapping> slots, unsigned lhs, unsigned rhs, int64_t difference,
+    int64_t elementBits, RemainderProofContext &proofContext,
+    SmallVectorImpl<SmallVector<unsigned>> &edges) {
+  if (difference == elementBits &&
+      proofContext.sameActivation(slots[lhs], slots[rhs]))
+    edges[lhs].push_back(rhs);
+  if (difference == -elementBits &&
+      proofContext.sameActivation(slots[rhs], slots[lhs]))
+    edges[rhs].push_back(lhs);
+}
+
+static std::optional<int64_t>
+getClassPairDifference(const AddressClassProof &proof, const SlotMapping &lhs,
+                       const SlotMapping &rhs) {
+  std::optional<int64_t> difference =
+      llvm::checkedAdd(proof.residualDifference, rhs.proofOffset->constant);
+  if (!difference)
+    return std::nullopt;
+  return llvm::checkedSub(*difference, lhs.proofOffset->constant);
+}
+
+static void appendSameClassEdges(
+    ArrayRef<SlotMapping> slots, ArrayRef<AddressProofClass> classes,
+    int64_t elementBits, RemainderProofContext &proofContext,
+    SmallVectorImpl<SmallVector<unsigned>> &edges,
+    SmallVectorImpl<std::pair<unsigned, unsigned>> &fallbackPairs) {
+  for (const AddressProofClass &addressClass : classes) {
+    for (auto [position, lhs] : llvm::enumerate(addressClass.members)) {
+      for (unsigned rhs :
+           ArrayRef(addressClass.members).drop_front(position + 1)) {
+        std::optional<int64_t> difference =
+            getCachedAddressDifference(slots[lhs], slots[rhs]);
+        if (difference)
+          appendKnownAddressDifference(slots, lhs, rhs, *difference,
+                                       elementBits, proofContext, edges);
+        else
+          fallbackPairs.push_back({lhs, rhs});
+      }
+    }
+  }
+}
+
+static void appendAddressClassPairEdges(
+    ArrayRef<SlotMapping> slots, const AddressProofClass &lhs,
+    const AddressProofClass &rhs, int64_t elementBits,
+    RemainderProofContext &proofContext,
+    SmallVectorImpl<SmallVector<unsigned>> &edges,
+    SmallVectorImpl<std::pair<unsigned, unsigned>> &fallbackPairs) {
+  SmallVector<sym::PredHandle> assumptions = lhs.assumptions;
+  llvm::append_range(assumptions, rhs.assumptions);
+  AddressClassProof proof =
+      proofContext.proveAddressClasses(assumptions, lhs.key, rhs.key)
+          .value_or(AddressClassProof{});
+  for (unsigned lhsMember : lhs.members) {
+    for (unsigned rhsMember : rhs.members) {
+      if (!proof.available) {
+        fallbackPairs.push_back(
+            {std::min(lhsMember, rhsMember), std::max(lhsMember, rhsMember)});
+        continue;
+      }
+      if (!proof.baseTargetProven)
+        continue;
+      std::optional<int64_t> difference =
+          getClassPairDifference(proof, slots[lhsMember], slots[rhsMember]);
+      if (!difference) {
+        fallbackPairs.push_back(
+            {std::min(lhsMember, rhsMember), std::max(lhsMember, rhsMember)});
+        continue;
+      }
+      appendKnownAddressDifference(slots, lhsMember, rhsMember, *difference,
+                                   elementBits, proofContext, edges);
+    }
+  }
+}
+
+static void appendCrossClassEdges(
+    ArrayRef<SlotMapping> slots, ArrayRef<AddressProofClass> classes,
+    int64_t elementBits, RemainderProofContext &proofContext,
+    SmallVectorImpl<SmallVector<unsigned>> &edges,
+    SmallVectorImpl<std::pair<unsigned, unsigned>> &fallbackPairs) {
+  for (unsigned lhs = 0; lhs < classes.size(); ++lhs)
+    for (unsigned rhs = lhs + 1; rhs < classes.size(); ++rhs)
+      appendAddressClassPairEdges(slots, classes[lhs], classes[rhs],
+                                  elementBits, proofContext, edges,
+                                  fallbackPairs);
+}
+
+static void appendUnclassifiedPairs(
+    ArrayRef<std::optional<unsigned>> classIds,
+    SmallVectorImpl<std::pair<unsigned, unsigned>> &fallbackPairs) {
+  for (unsigned lhs = 0; lhs < classIds.size(); ++lhs)
+    for (unsigned rhs = lhs + 1; rhs < classIds.size(); ++rhs)
+      if (!classIds[lhs] || !classIds[rhs])
+        fallbackPairs.push_back({lhs, rhs});
+}
+
+static void
+appendDenseFallbackEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
+                         int64_t elementBits,
+                         ArrayRef<std::pair<unsigned, unsigned>> fallbackPairs,
+                         RemainderProofContext &proofContext,
+                         SmallVectorImpl<SmallVector<unsigned>> &edges) {
+  SmallVector<RelationPair> relationPairs;
+  relationPairs.reserve(fallbackPairs.size());
+  for (auto [lhs, rhs] : fallbackPairs)
+    relationPairs.push_back({slots[lhs].proofIndex, slots[rhs].proofIndex});
+  proofContext.prepareRelations(relationPairs, elementBits);
+  for (auto [lhs, rhs] : fallbackPairs) {
+    if (!llvm::is_contained(edges[lhs], rhs) &&
+        adjacent(store, slots[lhs], slots[rhs], elementBits, proofContext))
+      edges[lhs].push_back(rhs);
+    if (!llvm::is_contained(edges[rhs], lhs) &&
+        adjacent(store, slots[rhs], slots[lhs], elementBits, proofContext))
+      edges[rhs].push_back(lhs);
+  }
+}
+
+static SmallVector<SmallVector<unsigned>>
+buildDenseSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
+                         int64_t elementBits,
+                         RemainderProofContext &proofContext) {
+  SmallVector<SmallVector<unsigned>> edges(slots.size());
+  SmallVector<std::optional<unsigned>> classIds;
+  SmallVector<AddressProofClass> classes =
+      buildAddressProofClasses(slots, classIds);
+  SmallVector<std::pair<unsigned, unsigned>> fallbackPairs;
+
+  appendSameClassEdges(slots, classes, elementBits, proofContext, edges,
+                       fallbackPairs);
+  appendCrossClassEdges(slots, classes, elementBits, proofContext, edges,
+                        fallbackPairs);
+  appendUnclassifiedPairs(classIds, fallbackPairs);
+  appendDenseFallbackEdges(store, slots, elementBits, fallbackPairs,
+                           proofContext, edges);
+  return edges;
+}
+
+static void
+appendLogicalPacketEdges(sym::Store &store, ArrayRef<SlotMapping> slots,
+                         int64_t elementBits,
+                         RemainderProofContext &proofContext,
+                         SmallVectorImpl<SmallVector<unsigned>> &edges) {
+  forEachLogicalPacketPair(slots, [&](unsigned lhs, unsigned rhs) {
+    if (!llvm::is_contained(edges[lhs], rhs) &&
+        adjacent(store, slots[lhs], slots[rhs], elementBits, proofContext))
+      edges[lhs].push_back(rhs);
+  });
 }
 
 static SmallVector<SmallVector<unsigned>>
 buildSuccessorGraph(sym::Store &store, ArrayRef<SlotMapping> slots,
                     int64_t elementBits, RemainderProofContext &proofContext) {
   constexpr size_t denseLimit = 64;
-  SmallVector<SmallVector<unsigned>> edges =
-      slots.size() <= denseLimit
-          ? buildDenseSuccessorGraph(store, slots, elementBits, proofContext)
-          : buildSparseSuccessorGraph(store, slots, elementBits, proofContext);
+  SmallVector<SmallVector<unsigned>> edges;
+  if (slots.size() <= denseLimit)
+    edges = buildDenseSuccessorGraph(store, slots, elementBits, proofContext);
+  else
+    edges = buildSparseSuccessorGraph(store, slots, elementBits, proofContext);
   appendLogicalPacketEdges(store, slots, elementBits, proofContext, edges);
   return edges;
 }
@@ -3237,12 +4134,15 @@ buildGenericGatherPlan(const MemoryAccess &access, sym::Store &store,
                        ArrayRef<SlotMapping> mappings, int64_t elementBits,
                        RemainderProofContext &proofContext) {
   GatherPlan plan;
-  plan.physicalSlots =
-      access.packetWhere
-          ? SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end())
-          : deduplicateGatherSlots(
-                store,
-                SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()));
+  if (access.packetWhere) {
+    plan.physicalSlots =
+        SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end());
+  } else {
+    prepareAllRelations(mappings, elementBits, proofContext);
+    plan.physicalSlots = deduplicateGatherSlots(
+        store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()),
+        proofContext);
+  }
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
       planTransactions(store, plan.physicalSlots, elementBits, proofContext);
   if (failed(transactions))
@@ -3277,7 +4177,7 @@ getProviderGatherCandidates(const MemoryAccess &access, sym::Store &store,
   for (auto [index, mapping] : llvm::enumerate(mappings))
     points.push_back({bindingStorage[index], mapping.assumptions, mapping.base,
                       mapping.targetBlock, mapping.byteOffset,
-                      mapping.baseIndex});
+                      mapping.materializationByteOffset, mapping.baseIndex});
 
   wave::memory_lowering::GatherTransactionRequest request;
   request.bases = access.bases;
@@ -3421,8 +4321,10 @@ planGatherTransactions(const MemoryAccess &access, sym::Store &store,
                                   proofContext);
 
   GatherPlan plan;
+  prepareAllRelations(mappings, elementBits, proofContext);
   plan.physicalSlots = deduplicateGatherSlots(
-      store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()));
+      store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()),
+      proofContext);
   SmallVector<SmallVector<unsigned>> edges =
       buildSuccessorGraph(store, plan.physicalSlots, elementBits, proofContext);
   FailureOr<SmallVector<TransactionCandidate>> genericCandidates =
@@ -3498,28 +4400,40 @@ static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
 static Value findElementOffsetMaterialization(const SlotMapping &slot,
                                               sym::ExprHandle byteOffset,
                                               int64_t elementBits,
-                                              sym::Store &store) {
+                                              sym::Analysis &analysis) {
   if (elementBits <= 0 || elementBits % 8 != 0)
     return {};
   FailureOr<sym::ExprHandle> elementOffset =
-      divideExactly(store, byteOffset, elementBits / 8, slot.assumptions);
+      divideExactlyProof(analysis, byteOffset, elementBits / 8);
   if (failed(elementOffset))
     return {};
-  FailureOr<sym::ExprHandle> materializationElementOffset = divideExactly(
-      store, slot.materializationBitOffset, elementBits, slot.assumptions);
+  FailureOr<sym::ExprHandle> materializationElementOffset =
+      divideExactlyProof(analysis, slot.materializationBitOffset, elementBits);
   for (const MaterializationCandidate &candidate :
        slot.materializationCandidates) {
     if (!isLegalPtrAddOffset(candidate.value.getType()))
       continue;
     if ((succeeded(materializationElementOffset) &&
-         proveEqual(store, *materializationElementOffset, candidate.expression,
-                    slot.assumptions)) ||
-        proveEqual(store, *elementOffset, candidate.expression,
-                   slot.assumptions))
+         analysis.equivalent(*materializationElementOffset,
+                             candidate.expression) == sym::CheckResult::True) ||
+        analysis.equivalent(*elementOffset, candidate.expression) ==
+            sym::CheckResult::True)
       return candidate.value;
   }
   return {};
 }
+
+struct TypedPointerRequest {
+  const SlotMapping *slot = nullptr;
+  sym::ExprHandle byteOffset;
+  int64_t baseIndex = 0;
+};
+
+struct TypedPointerPlan {
+  Value offset;
+  sym::ExprHandle elementOffset;
+  bool available = false;
+};
 
 static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
                          unsigned index, SmallVectorImpl<Value> &byteBases) {
@@ -3572,30 +4486,78 @@ static Type getPointerAddResultType(MLIRContext *context, PtrType pointerType,
   return pointerType;
 }
 
-static FailureOr<Value>
-materializeTypedPointer(IRRewriter &rewriter, const MemoryAccess &access,
-                        const SlotMapping &slot, sym::ExprHandle byteOffset,
-                        int64_t baseIndex, sym::Store &store) {
+static bool isValidTypedPointerRequest(const MemoryAccess &access,
+                                       const TypedPointerRequest &request) {
+  if (!request.slot || request.baseIndex < 0 ||
+      request.baseIndex >= static_cast<int64_t>(access.bases.size()))
+    return false;
+  return getTypedPointerElementBits(access, request.baseIndex).has_value();
+}
+
+static void prepareTypedPointerPlan(const MemoryAccess &access,
+                                    const TypedPointerRequest &request,
+                                    sym::Analysis &analysis,
+                                    TypedPointerPlan &plan) {
+  std::optional<int64_t> elementBits =
+      getTypedPointerElementBits(access, request.baseIndex);
+  if (!elementBits)
+    return;
+  plan.offset = findElementOffsetMaterialization(
+      *request.slot, request.byteOffset, *elementBits, analysis);
+  if (plan.offset) {
+    plan.available = true;
+    return;
+  }
+  FailureOr<sym::ExprHandle> elementOffset = divideExactlyForMaterialization(
+      analysis, request.byteOffset, *elementBits / 8);
+  if (failed(elementOffset))
+    return;
+  plan.elementOffset = *elementOffset;
+  plan.available = true;
+}
+
+static SmallVector<TypedPointerPlan>
+prepareTypedPointerPlans(const MemoryAccess &access, sym::Store &store,
+                         ArrayRef<TypedPointerRequest> requests) {
+  SmallVector<ExactFactDomainGroup> groups;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+  for (auto [index, request] : llvm::enumerate(requests)) {
+    if (!isValidTypedPointerRequest(access, request))
+      continue;
+    appendExactFactDomainTask(request.slot->assumptions, index, groups,
+                              buckets);
+  }
+  SmallVector<TypedPointerPlan> plans(requests.size());
+  for (ExactFactDomainGroup &group : groups) {
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, group.assumptions);
+    if (failed(analysis))
+      continue;
+    for (size_t index : group.tasks)
+      prepareTypedPointerPlan(access, requests[index], **analysis,
+                              plans[index]);
+  }
+  return plans;
+}
+
+static FailureOr<Value> materializeTypedPointer(IRRewriter &rewriter,
+                                                const MemoryAccess &access,
+                                                const SlotMapping &slot,
+                                                int64_t baseIndex,
+                                                const TypedPointerPlan &plan) {
+  if (!plan.available)
+    return failure();
   Value source = access.bases[baseIndex];
   PtrType sourceType = cast<PtrType>(source.getType());
-  std::optional<int64_t> elementBits =
-      getTypedPointerElementBits(access, baseIndex);
-  if (!elementBits)
-    return failure();
-  if (Value candidate = findElementOffsetMaterialization(slot, byteOffset,
-                                                         *elementBits, store)) {
-    Type resultType =
-        getPointerAddResultType(access.op->getContext(), sourceType, candidate);
+  if (plan.offset) {
+    Type resultType = getPointerAddResultType(access.op->getContext(),
+                                              sourceType, plan.offset);
     return PtrAddOp::create(rewriter, access.op->getLoc(), resultType, source,
-                            candidate)
+                            plan.offset)
         .getResult();
   }
-  FailureOr<sym::ExprHandle> elementOffset =
-      divideExactly(store, byteOffset, *elementBits / 8, slot.assumptions);
-  if (failed(elementOffset))
-    return failure();
   FailureOr<Value> offset =
-      materializeExpr(rewriter, access, slot, *elementOffset);
+      materializeExpr(rewriter, access, slot, plan.elementOffset);
   if (failed(offset))
     return failure();
   Type resultType =
@@ -3605,14 +4567,13 @@ materializeTypedPointer(IRRewriter &rewriter, const MemoryAccess &access,
       .getResult();
 }
 
-static FailureOr<Value> materializePointer(IRRewriter &rewriter,
-                                           const MemoryAccess &access,
-                                           const SlotMapping &slot,
-                                           sym::ExprHandle byteOffset,
-                                           int64_t baseIndex, sym::Store &store,
-                                           SmallVectorImpl<Value> &byteBases) {
-  FailureOr<Value> typed = materializeTypedPointer(
-      rewriter, access, slot, byteOffset, baseIndex, store);
+static FailureOr<Value>
+materializePointer(IRRewriter &rewriter, const MemoryAccess &access,
+                   const SlotMapping &slot, sym::ExprHandle byteOffset,
+                   int64_t baseIndex, const TypedPointerPlan &typedPlan,
+                   SmallVectorImpl<Value> &byteBases) {
+  FailureOr<Value> typed =
+      materializeTypedPointer(rewriter, access, slot, baseIndex, typedPlan);
   if (succeeded(typed))
     return typed;
   Value byteBase = getByteBase(rewriter, access, baseIndex, byteBases);
@@ -3639,10 +4600,11 @@ static FailureOr<Value> materializePointer(IRRewriter &rewriter,
 static FailureOr<Value> materializePointer(IRRewriter &rewriter,
                                            const MemoryAccess &access,
                                            const SlotMapping &slot,
-                                           sym::Store &store,
+                                           const TypedPointerPlan &typedPlan,
                                            SmallVectorImpl<Value> &byteBases) {
-  return materializePointer(rewriter, access, slot, slot.byteOffset,
-                            slot.baseIndex, store, byteBases);
+  return materializePointer(rewriter, access, slot,
+                            slot.materializationByteOffset, slot.baseIndex,
+                            typedPlan, byteBases);
 }
 
 static Type getComponentType(const MemoryAccess &access) {
@@ -3700,7 +4662,7 @@ static SlotMapping buildTransactionPoint(ArrayRef<SlotMapping> slots,
 
 static FailureOr<PredicatedLoadResult>
 emitPredicatedLoad(IRRewriter &rewriter, const MemoryAccess &access,
-                   sym::Store &store, const SlotMapping &point,
+                   const SlotMapping &point, const TypedPointerPlan &typedPlan,
                    SmallVectorImpl<Value> &byteBases, Value condition,
                    Type valueType, Value inactiveValue) {
   SmallVector<Type> resultTypes{valueType, access.tokenType};
@@ -3709,7 +4671,7 @@ emitPredicatedLoad(IRRewriter &rewriter, const MemoryAccess &access,
   Block &thenBlock = where.getThenRegion().emplaceBlock();
   rewriter.setInsertionPointToStart(&thenBlock);
   FailureOr<Value> ptr =
-      materializePointer(rewriter, access, point, store, byteBases);
+      materializePointer(rewriter, access, point, typedPlan, byteBases);
   if (failed(ptr))
     return failure();
   LoadOp load =
@@ -3759,8 +4721,8 @@ static Value buildInactiveTransactionValue(IRRewriter &rewriter,
 
 static FailureOr<Value> emitPredicatedStore(IRRewriter &rewriter,
                                             const MemoryAccess &access,
-                                            sym::Store &symbolStore,
                                             const SlotMapping &point,
+                                            const TypedPointerPlan &typedPlan,
                                             SmallVectorImpl<Value> &byteBases,
                                             Value condition, Value value) {
   WhereOp where =
@@ -3769,7 +4731,7 @@ static FailureOr<Value> emitPredicatedStore(IRRewriter &rewriter,
   Block &thenBlock = where.getThenRegion().emplaceBlock();
   rewriter.setInsertionPointToStart(&thenBlock);
   FailureOr<Value> ptr =
-      materializePointer(rewriter, access, point, symbolStore, byteBases);
+      materializePointer(rewriter, access, point, typedPlan, byteBases);
   if (failed(ptr))
     return failure();
   StoreOp store =
@@ -3816,18 +4778,14 @@ static LogicalResult unpackTargetGatherResult(
 }
 
 static LogicalResult emitProviderGatherCandidate(
-    IRRewriter &rewriter, const MemoryAccess &access, sym::Store &store,
-    ArrayRef<SlotMapping> mappings,
+    IRRewriter &rewriter, const MemoryAccess &access,
     const wave::memory_lowering::GatherTransactionCandidate &transaction,
+    const SlotMapping &point, const TypedPointerPlan &typedPlan,
     bool soleCandidate, int64_t slotCount, Type componentType,
     GatherEmissionState &state) {
-  if (transaction.addressPoint >= mappings.size())
-    return access.op->emitOpError("invalid target transaction address");
-  SlotMapping point = buildTransactionPoint(mappings, transaction.slots,
-                                            transaction.addressPoint);
   FailureOr<Value> ptr =
       materializePointer(rewriter, access, point, transaction.byteOffset,
-                         transaction.baseIndex, store, state.byteBases);
+                         transaction.baseIndex, typedPlan, state.byteBases);
   if (failed(ptr))
     return access.op->emitOpError("failed to materialize mapped address");
   FailureOr<wave::memory_lowering::GatherTransactionResult> result =
@@ -3848,21 +4806,19 @@ static LogicalResult emitProviderGatherCandidate(
                                   componentType, state);
 }
 
-static LogicalResult
-emitGenericGatherCandidate(IRRewriter &rewriter, const MemoryAccess &access,
-                           sym::Store &store, const GatherPlan &plan,
-                           const GatherCandidate &candidate, Type componentType,
-                           GatherEmissionState &state) {
+static LogicalResult emitGenericGatherCandidate(
+    IRRewriter &rewriter, const MemoryAccess &access, const GatherPlan &plan,
+    const GatherCandidate &candidate, const SlotMapping &point,
+    const TypedPointerPlan &typedPlan, Type componentType,
+    GatherEmissionState &state) {
   ArrayRef<unsigned> transaction = candidate.physicalNodes;
-  SlotMapping point = buildTransactionPoint(plan.physicalSlots, transaction,
-                                            transaction.front());
   Type valueType = getTransactionType(access, transaction.size());
   Value loadedValue;
   if (access.packetWhere) {
     Value inactiveValue = buildInactiveTransactionValue(
         rewriter, access, plan.physicalSlots, transaction, valueType);
     FailureOr<PredicatedLoadResult> load =
-        emitPredicatedLoad(rewriter, access, store, point, state.byteBases,
+        emitPredicatedLoad(rewriter, access, point, typedPlan, state.byteBases,
                            point.packetCondition, valueType, inactiveValue);
     if (failed(load))
       return access.op->emitOpError("failed to materialize mapped address");
@@ -3870,7 +4826,7 @@ emitGenericGatherCandidate(IRRewriter &rewriter, const MemoryAccess &access,
     state.tokens.push_back(load->token);
   } else {
     FailureOr<Value> ptr =
-        materializePointer(rewriter, access, point, store, state.byteBases);
+        materializePointer(rewriter, access, point, typedPlan, state.byteBases);
     if (failed(ptr))
       return access.op->emitOpError("failed to materialize mapped address");
     LoadOp load =
@@ -3904,6 +4860,86 @@ static FailureOr<Value> buildGatherResult(IRRewriter &rewriter,
       .getResult();
 }
 
+static FailureOr<SmallVector<SlotMapping, 4>>
+buildGatherTransactionPoints(const MemoryAccess &access,
+                             ArrayRef<SlotMapping> mappings,
+                             const GatherPlan &plan) {
+  SmallVector<SlotMapping, 4> points;
+  points.reserve(plan.selected.size());
+  for (unsigned candidateIndex : plan.selected) {
+    const GatherCandidate &candidate = plan.candidates[candidateIndex];
+    if (candidate.provider) {
+      if (candidate.provider->addressPoint >= mappings.size()) {
+        access.op->emitOpError("invalid target transaction address");
+        return failure();
+      }
+      points.push_back(buildTransactionPoint(mappings,
+                                             candidate.provider->slots,
+                                             candidate.provider->addressPoint));
+      continue;
+    }
+    ArrayRef<unsigned> transaction = candidate.physicalNodes;
+    points.push_back(buildTransactionPoint(plan.physicalSlots, transaction,
+                                           transaction.front()));
+  }
+  return points;
+}
+
+static SmallVector<TypedPointerRequest>
+buildGatherTypedPointerRequests(const GatherPlan &plan,
+                                ArrayRef<SlotMapping> points) {
+  SmallVector<TypedPointerRequest> requests;
+  requests.reserve(points.size());
+  for (auto [index, candidateIndex] : llvm::enumerate(plan.selected)) {
+    const GatherCandidate &candidate = plan.candidates[candidateIndex];
+    requests.push_back(
+        candidate.provider
+            ? TypedPointerRequest{&points[index],
+                                  candidate.provider->byteOffset,
+                                  candidate.provider->baseIndex}
+            : TypedPointerRequest{&points[index],
+                                  points[index].materializationByteOffset,
+                                  points[index].baseIndex});
+  }
+  return requests;
+}
+
+static LogicalResult
+emitGatherCandidates(IRRewriter &rewriter, const MemoryAccess &access,
+                     const GatherPlan &plan, ArrayRef<SlotMapping> points,
+                     ArrayRef<TypedPointerPlan> typedPlans, int64_t slotCount,
+                     Type componentType, GatherEmissionState &state) {
+  for (auto [index, candidateIndex] : llvm::enumerate(plan.selected)) {
+    const GatherCandidate &candidate = plan.candidates[candidateIndex];
+    LogicalResult emitted =
+        candidate.provider
+            ? emitProviderGatherCandidate(rewriter, access, *candidate.provider,
+                                          points[index], typedPlans[index],
+                                          plan.selected.size() == 1, slotCount,
+                                          componentType, state)
+            : emitGenericGatherCandidate(rewriter, access, plan, candidate,
+                                         points[index], typedPlans[index],
+                                         componentType, state);
+    if (failed(emitted))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult finishGatherLowering(IRRewriter &rewriter,
+                                          const MemoryAccess &access,
+                                          GatherEmissionState &state) {
+  FailureOr<Value> result = buildGatherResult(rewriter, access, state);
+  if (failed(result))
+    return failure();
+  Value token = joinTokens(rewriter, access, state.tokens);
+  if (access.packetWhere)
+    rewriter.replaceOp(access.packetWhere, {*result, token});
+  else
+    rewriter.replaceOp(access.op, {*result, token});
+  return success();
+}
+
 static LogicalResult lowerGather(IRRewriter &rewriter,
                                  const MemoryAccess &access, sym::Store &store,
                                  ArrayRef<SlotMapping> mappings,
@@ -3916,29 +4952,109 @@ static LogicalResult lowerGather(IRRewriter &rewriter,
   materializePredicatedByteBases(rewriter, access, state.byteBases);
   Type componentType = getComponentType(access);
 
-  for (unsigned candidateIndex : plan.selected) {
-    const GatherCandidate &candidate = plan.candidates[candidateIndex];
-    LogicalResult emitted =
-        candidate.provider
-            ? emitProviderGatherCandidate(
-                  rewriter, access, store, mappings, *candidate.provider,
-                  plan.selected.size() == 1, packet.getNumElements(),
-                  componentType, state)
-            : emitGenericGatherCandidate(rewriter, access, store, plan,
-                                         candidate, componentType, state);
-    if (failed(emitted))
-      return failure();
-  }
-
-  FailureOr<Value> result = buildGatherResult(rewriter, access, state);
-  if (failed(result))
+  FailureOr<SmallVector<SlotMapping, 4>> points =
+      buildGatherTransactionPoints(access, mappings, plan);
+  if (failed(points))
     return failure();
-  Value token = joinTokens(rewriter, access, state.tokens);
+  SmallVector<TypedPointerRequest> requests =
+      buildGatherTypedPointerRequests(plan, *points);
+  SmallVector<TypedPointerPlan> typedPlans =
+      prepareTypedPointerPlans(access, store, requests);
+
+  if (failed(emitGatherCandidates(rewriter, access, plan, *points, typedPlans,
+                                  packet.getNumElements(), componentType,
+                                  state)))
+    return failure();
+  return finishGatherLowering(rewriter, access, state);
+}
+
+struct ScatterEmissionState {
+  SmallVector<Value> components;
+  SmallVector<Value> tokens;
+  SmallVector<Value> byteBases;
+};
+
+static SmallVector<Value> extractScatterComponents(IRRewriter &rewriter,
+                                                   const MemoryAccess &access,
+                                                   VectorType packet,
+                                                   Type componentType) {
+  SmallVector<Value> components;
+  components.reserve(packet.getNumElements());
+  for (int64_t index : llvm::seq<int64_t>(0, packet.getNumElements()))
+    components.push_back(ExtractOp::create(
+        rewriter, access.op->getLoc(), componentType, access.packet, index));
+  return components;
+}
+
+static SmallVector<SlotMapping, 4>
+buildScatterTransactionPoints(ArrayRef<SlotMapping> slots,
+                              ArrayRef<SmallVector<unsigned>> transactions) {
+  SmallVector<SlotMapping, 4> points;
+  points.reserve(transactions.size());
+  for (ArrayRef<unsigned> transaction : transactions)
+    points.push_back(
+        buildTransactionPoint(slots, transaction, transaction.front()));
+  return points;
+}
+
+static SmallVector<TypedPointerRequest>
+buildScatterTypedPointerRequests(ArrayRef<SlotMapping> points) {
+  SmallVector<TypedPointerRequest> requests;
+  requests.reserve(points.size());
+  for (const SlotMapping &point : points)
+    requests.push_back(
+        {&point, point.materializationByteOffset, point.baseIndex});
+  return requests;
+}
+
+static Value buildScatterTransactionValue(IRRewriter &rewriter,
+                                          const MemoryAccess &access,
+                                          ArrayRef<SlotMapping> slots,
+                                          ArrayRef<unsigned> transaction,
+                                          Type componentType,
+                                          ArrayRef<Value> components) {
+  SmallVector<Value> values;
+  values.reserve(transaction.size());
+  for (unsigned nodeIndex : transaction)
+    values.push_back(components[slots[nodeIndex].logicalSlots.front()]);
+  if (values.size() == 1)
+    return values.front();
+  return PackOp::create(rewriter, access.op->getLoc(),
+                        getTransactionType(access, values.size()), values);
+}
+
+static FailureOr<Value>
+emitScatterTransaction(IRRewriter &rewriter, const MemoryAccess &access,
+                       ArrayRef<SlotMapping> slots,
+                       ArrayRef<unsigned> transaction, SlotMapping &point,
+                       const TypedPointerPlan &typedPlan, Type componentType,
+                       ScatterEmissionState &state) {
+  Value value = buildScatterTransactionValue(
+      rewriter, access, slots, transaction, componentType, state.components);
   if (access.packetWhere)
-    rewriter.replaceOp(access.packetWhere, {*result, token});
-  else
-    rewriter.replaceOp(access.op, {*result, token});
-  return success();
+    return emitPredicatedStore(rewriter, access, point, typedPlan,
+                               state.byteBases, point.packetCondition, value);
+  FailureOr<Value> ptr =
+      materializePointer(rewriter, access, point, typedPlan, state.byteBases);
+  if (failed(ptr))
+    return failure();
+  StoreOp store =
+      StoreOp::create(rewriter, access.op->getLoc(), access.tokenType, value,
+                      *ptr, access.dependency, access.cache);
+  return store.getToken();
+}
+
+static void finishScatterLowering(IRRewriter &rewriter,
+                                  const MemoryAccess &access, Value token) {
+  if (!access.packetWhere) {
+    rewriter.replaceOp(access.op, token);
+    return;
+  }
+  if (access.packetWhere->getNumResults() == 1) {
+    rewriter.replaceOp(access.packetWhere, token);
+    return;
+  }
+  rewriter.eraseOp(access.packetWhere);
 }
 
 static LogicalResult
@@ -3947,53 +5063,29 @@ lowerScatter(IRRewriter &rewriter, const MemoryAccess &access,
              ArrayRef<SmallVector<unsigned>> transactions) {
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
   Type componentType = getComponentType(access);
-  SmallVector<Value> components;
-  components.reserve(packet.getNumElements());
-  for (int64_t index : llvm::seq<int64_t>(0, packet.getNumElements()))
-    components.push_back(ExtractOp::create(
-        rewriter, access.op->getLoc(), componentType, access.packet, index));
+  ScatterEmissionState state{
+      extractScatterComponents(rewriter, access, packet, componentType),
+      {},
+      SmallVector<Value>(access.bases.size())};
+  materializePredicatedByteBases(rewriter, access, state.byteBases);
+  SmallVector<SlotMapping, 4> points =
+      buildScatterTransactionPoints(slots, transactions);
+  SmallVector<TypedPointerRequest> requests =
+      buildScatterTypedPointerRequests(points);
+  SmallVector<TypedPointerPlan> typedPlans =
+      prepareTypedPointerPlans(access, store, requests);
 
-  SmallVector<Value> tokens;
-  SmallVector<Value> byteBases(access.bases.size());
-  materializePredicatedByteBases(rewriter, access, byteBases);
-  for (ArrayRef<unsigned> transaction : transactions) {
-    SlotMapping point =
-        buildTransactionPoint(slots, transaction, transaction.front());
-    SmallVector<Value> values;
-    values.reserve(transaction.size());
-    for (unsigned nodeIndex : transaction)
-      values.push_back(components[slots[nodeIndex].logicalSlots.front()]);
-    Value value = values.front();
-    if (values.size() > 1)
-      value = PackOp::create(rewriter, access.op->getLoc(),
-                             getTransactionType(access, values.size()), values);
-    if (access.packetWhere) {
-      FailureOr<Value> token =
-          emitPredicatedStore(rewriter, access, store, point, byteBases,
-                              point.packetCondition, value);
-      if (failed(token))
-        return access.op->emitOpError("failed to materialize mapped address");
-      tokens.push_back(*token);
-    } else {
-      FailureOr<Value> ptr =
-          materializePointer(rewriter, access, point, store, byteBases);
-      if (failed(ptr))
-        return access.op->emitOpError("failed to materialize mapped address");
-      StoreOp store =
-          StoreOp::create(rewriter, access.op->getLoc(), access.tokenType,
-                          value, *ptr, access.dependency, access.cache);
-      tokens.push_back(store.getToken());
-    }
+  for (auto [index, transaction] : llvm::enumerate(transactions)) {
+    FailureOr<Value> token = emitScatterTransaction(
+        rewriter, access, slots, transaction, points[index], typedPlans[index],
+        componentType, state);
+    if (failed(token))
+      return access.op->emitOpError("failed to materialize mapped address");
+    state.tokens.push_back(*token);
   }
 
-  Value token = joinTokens(rewriter, access, tokens);
-  if (!access.packetWhere) {
-    rewriter.replaceOp(access.op, token);
-  } else if (access.packetWhere->getNumResults() == 1) {
-    rewriter.replaceOp(access.packetWhere, token);
-  } else {
-    rewriter.eraseOp(access.packetWhere);
-  }
+  Value token = joinTokens(rewriter, access, state.tokens);
+  finishScatterLowering(rewriter, access, token);
   return success();
 }
 
@@ -4052,16 +5144,20 @@ static bool mappingNeedsItemAfterSlotSpecialization(
     int64_t slotCount, ArrayRef<sym::ExprSubstitution> bindingSubstitutions) {
   if (!mappingHasSymbol(access.mapping, "item"))
     return false;
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return true;
   MappingCoordinates coordinates =
       getMappingCoordinates(access, domain.block, domain.zero);
   for (int64_t slot : llvm::seq<int64_t>(0, slotCount)) {
-    FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
+    FailureOr<sym::ExprHandle> slotValue = (*analysis)->composeInteger(slot);
     if (failed(slotValue))
       return true;
     SmallVector<sym::ExprSubstitution> substitutions(bindingSubstitutions);
     substitutions.push_back({domain.slot, *slotValue});
     FailureOr<MappingCoordinates> specialized =
-        specializeCoordinates(store, coordinates, substitutions, {});
+        specializeCoordinates(**analysis, coordinates, substitutions);
     if (failed(specialized) || coordinatesHaveSymbol(*specialized, "item"))
       return true;
   }
@@ -4220,20 +5316,48 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
     ArrayRef<ActiveControl> controls, ArrayRef<PacketControl> packetControls) {
   PacketBindingState bindingState;
   seedPacketBindingState(access, item, bindingState);
-  SmallVector<SlotMapping, 4> mappings;
-  mappings.reserve(slotCount);
+  SmallVector<PreparedSlotMapping, 4> preparedMappings;
+  preparedMappings.reserve(slotCount);
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {
-    FailureOr<SlotMapping> mapping = buildSlotMapping(
-        access, store, domain.block, domain.slot, domain.zero, index, item,
-        bindingSubstitutions, packetComponents, controls,
+    FailureOr<PreparedSlotMapping> prepared = prepareSlotMapping(
+        access, store, domain.slot, index, item, bindingSubstitutions,
+        packetComponents, controls,
         packetControls.empty() ? nullptr : &packetControls[index],
         bindingState);
-    if (failed(mapping)) {
+    if (failed(prepared)) {
       access.op->emitOpError(
           "mapping is not a defined, byte-addressable local memory point");
       return failure();
     }
-    mappings.push_back(std::move(*mapping));
+    preparedMappings.push_back(std::move(*prepared));
+  }
+
+  SmallVector<ExactFactDomainGroup> groups;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+  for (auto [index, prepared] : llvm::enumerate(preparedMappings))
+    appendExactFactDomainTask(prepared.mapping.assumptions, index, groups,
+                              buckets);
+
+  SmallVector<SlotMapping, 4> mappings(preparedMappings.size());
+  for (ExactFactDomainGroup &group : groups) {
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, group.assumptions);
+    if (failed(analysis)) {
+      access.op->emitOpError(
+          "mapping is not a defined, byte-addressable local memory point");
+      return failure();
+    }
+    for (size_t index : group.tasks) {
+      FailureOr<SlotMapping> mapping =
+          analyzeSlotMapping(access, **analysis, domain.block, domain.zero,
+                             std::move(preparedMappings[index]));
+      if (failed(mapping)) {
+        access.op->emitOpError(
+            "mapping is not a defined, byte-addressable local memory point");
+        return failure();
+      }
+      mappings[index] = std::move(*mapping);
+    }
   }
   return mappings;
 }
@@ -4281,14 +5405,17 @@ prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
 }
 
 static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
-                                 WaveDialect &dialect, DataFlowSolver &solver) {
+                                 WaveDialect &dialect, DataFlowSolver &solver,
+                                 SymbolicRelationProofCache &proofCache,
+                                 uint64_t &factDomainCount) {
   FailureOr<PreparedAccessMappings> prepared =
       prepareAccessMappings(rewriter, access, dialect, solver);
   if (failed(prepared))
     return failure();
   sym::Store &store = dialect.getSymbolStore();
   RemainderProofContext proofContext(dialect, solver, access.op,
-                                     prepared->mappings);
+                                     prepared->mappings, proofCache,
+                                     factDomainCount);
   if (access.packetWhere)
     rewriter.setInsertionPoint(access.packetWhere);
   if (access.gather) {
@@ -4310,7 +5437,9 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
-                               IRRewriter &rewriter, DataFlowSolver &solver) {
+                               IRRewriter &rewriter, DataFlowSolver &solver,
+                               SymbolicRelationProofCache &proofCache,
+                               uint64_t &factDomainCount) {
   SmallVector<Operation *> accesses;
   func.walk([&](Operation *op) {
     if (isa<GatherOp, ScatterOp>(op))
@@ -4320,7 +5449,8 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
     rewriter.setInsertionPoint(op);
     MemoryAccess access = isa<GatherOp>(op) ? getAccess(cast<GatherOp>(op))
                                             : getAccess(cast<ScatterOp>(op));
-    if (failed(lowerAccess(rewriter, access, dialect, solver)))
+    if (failed(lowerAccess(rewriter, access, dialect, solver, proofCache,
+                           factDomainCount)))
       return failure();
   }
   return success();
@@ -4356,9 +5486,13 @@ struct WaveLowerSymbolicMemoryPass
       funcs.push_back(func);
     else
       getOperation()->walk([&](func::FuncOp func) { funcs.push_back(func); });
+    SymbolicRelationProofCache proofCache;
+    uint64_t factDomainCount = 0;
     for (func::FuncOp func : funcs)
-      if (failed(lowerFunc(func, *dialect, rewriter, solver)))
+      if (failed(lowerFunc(func, *dialect, rewriter, solver, proofCache,
+                           factDomainCount)))
         return signalPassFailure();
+    numRelationPlanningFactDomains += factDomainCount;
   }
 };
 

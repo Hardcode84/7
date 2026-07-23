@@ -31,11 +31,14 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <array>
+#include <cstdint>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 using namespace mlir;
@@ -1393,6 +1396,35 @@ static Attribute foldWaveFpToInt(CastOp op, WaveCastPolicy policy,
       });
 }
 
+void CastOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                               SetIntRangeFn setResultRange) {
+  if (getKind() != CastKind::IntConvert || argRanges.empty())
+    return;
+
+  unsigned sourceBits = getWaveCastIntegerBits(getSource().getType());
+  unsigned resultBits = getWaveCastIntegerBits(getType());
+  ConstantIntRanges sourceRange =
+      argRanges.front().smin().getBitWidth() == sourceBits
+          ? argRanges.front()
+          : ConstantIntRanges::maxRange(sourceBits);
+  if (resultBits < sourceBits) {
+    setResultRange(getResult(), intrange::truncRange(sourceRange, resultBits));
+    return;
+  }
+  if (resultBits == sourceBits) {
+    setResultRange(getResult(), sourceRange);
+    return;
+  }
+
+  FailureOr<WaveCastPolicy> policy = getWaveCastPolicy(*this);
+  if (failed(policy) || !policy->extension)
+    return;
+  if (policy->extension.getValue() == CastExtension::Zero)
+    setResultRange(getResult(), intrange::extUIRange(sourceRange, resultBits));
+  else
+    setResultRange(getResult(), intrange::extSIRange(sourceRange, resultBits));
+}
+
 OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
   if (getSource().getType() == getType())
     return getSource();
@@ -2324,34 +2356,8 @@ static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
                                ArrayRef<sym::PredHandle> assumptions) {
   if (llvm::is_contained(assumptions, pred))
     return true;
-  sym::PredView view(pred);
-  if (view.getKind() == sym::PredKind::And) {
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-      if (!isPredicateImplied(store, view.getLogicArg(i), assumptions))
-        return false;
-    return true;
-  }
   return sym::checkPredicate(store, pred, assumptions) ==
          sym::CheckResult::True;
-}
-
-static bool isPredicateContradicted(sym::Store &store, sym::PredHandle pred,
-                                    ArrayRef<sym::PredHandle> assumptions) {
-  sym::PredView view(pred);
-  if (view.getKind() == sym::PredKind::And) {
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-      if (isPredicateContradicted(store, view.getLogicArg(i), assumptions))
-        return true;
-    return false;
-  }
-  if (view.getKind() == sym::PredKind::Or) {
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-      if (!isPredicateContradicted(store, view.getLogicArg(i), assumptions))
-        return false;
-    return true;
-  }
-  return sym::checkPredicate(store, pred, assumptions) ==
-         sym::CheckResult::False;
 }
 
 void mlir::wave::appendRangeAndAssumePredicates(
@@ -2426,26 +2432,6 @@ SmallVector<sym::PredHandle> mlir::wave::filterIndexExprPredicatesBySymbols(
   return filtered;
 }
 
-static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator < 0)
-    --quotient;
-  return quotient;
-}
-
-static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator > 0)
-    ++quotient;
-  return quotient;
-}
-
 static unsigned indexValueElementWidth(Type type) {
   if (auto simd = dyn_cast<SimdType>(type))
     type = simd.getElementType();
@@ -2465,8 +2451,8 @@ buildIndexExprResultRange(sym::Store &store, sym::ExprHandle expr,
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
 
-  std::optional<int64_t> lo = floorRational(*range->lower);
-  std::optional<int64_t> hi = ceilRational(*range->upper);
+  std::optional<int64_t> lo = sym::floorEndpoint(*range->lower);
+  std::optional<int64_t> hi = sym::ceilEndpoint(*range->upper);
   if (!lo || !hi)
     return std::nullopt;
   unsigned bits = indexValueElementWidth(resultType);
@@ -2503,14 +2489,14 @@ buildIndexExprProducerRange(sym::Store &store, Value value) {
 }
 
 static FailureOr<sym::PredHandle>
-composeLogicPredicate(sym::Store &store, sym::PredKind kind,
+composeLogicPredicate(sym::Analysis &analysis, sym::PredKind kind,
                       ArrayRef<sym::PredHandle> predicates) {
   assert(!predicates.empty() && "expected at least one predicate");
   sym::PredHandle current = predicates.front();
   for (sym::PredHandle pred : predicates.drop_front()) {
-    FailureOr<sym::PredHandle> next =
-        kind == sym::PredKind::And ? sym::composePredAnd(store, current, pred)
-                                   : sym::composePredOr(store, current, pred);
+    FailureOr<sym::PredHandle> next = kind == sym::PredKind::And
+                                          ? analysis.composeAnd(current, pred)
+                                          : analysis.composeOr(current, pred);
     if (failed(next))
       return failure();
     current = *next;
@@ -2518,55 +2504,66 @@ composeLogicPredicate(sym::Store &store, sym::PredKind kind,
   return current;
 }
 
-static std::optional<sym::PredHandle>
-removeContradictedPredicateParts(sym::Store &store, sym::PredHandle pred,
-                                 ArrayRef<sym::PredHandle> assumptions) {
+static FailureOr<std::optional<sym::PredHandle>>
+removeContradictedPredicateParts(sym::Analysis &analysis,
+                                 sym::PredHandle pred) {
   sym::PredView view(pred);
   if (view.getKind() != sym::PredKind::And &&
       view.getKind() != sym::PredKind::Or) {
-    if (isPredicateContradicted(store, pred, assumptions))
-      return std::nullopt;
-    return pred;
+    if (analysis.check(pred) == sym::CheckResult::False)
+      return std::optional<sym::PredHandle>{};
+    return std::optional<sym::PredHandle>{pred};
   }
 
   SmallVector<sym::PredHandle, 4> kept;
   bool changed = false;
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount())) {
     sym::PredHandle arg = view.getLogicArg(i);
-    std::optional<sym::PredHandle> keptArg =
-        removeContradictedPredicateParts(store, arg, assumptions);
-    if (!keptArg) {
+    FailureOr<std::optional<sym::PredHandle>> keptArg =
+        removeContradictedPredicateParts(analysis, arg);
+    if (failed(keptArg))
+      return failure();
+    if (!*keptArg) {
       changed = true;
       continue;
     }
-    changed |= !(*keptArg == arg);
-    kept.push_back(*keptArg);
+    changed |= !(**keptArg == arg);
+    kept.push_back(**keptArg);
   }
   if (kept.empty())
-    return std::nullopt;
+    return std::optional<sym::PredHandle>{};
   if (!changed)
-    return pred;
+    return std::optional<sym::PredHandle>{pred};
   FailureOr<sym::PredHandle> rebuilt =
-      composeLogicPredicate(store, view.getKind(), kept);
+      composeLogicPredicate(analysis, view.getKind(), kept);
   if (failed(rebuilt))
-    return std::nullopt;
-  return *rebuilt;
+    return failure();
+  return std::optional<sym::PredHandle>{*rebuilt};
 }
 
 static void
 dropPredicatesContradictedBy(sym::Store &store, sym::PredHandle trusted,
                              SmallVectorImpl<sym::PredHandle> &assumptions) {
   std::array<sym::PredHandle, 1> trustedAssumptions{trusted};
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, trustedAssumptions);
+  if (failed(analysis))
+    return;
+
   SmallVector<sym::PredHandle, 4> filtered;
   for (sym::PredHandle pred : assumptions) {
     if (pred == trusted) {
       appendUniquePredicate(filtered, pred);
       continue;
     }
-    std::optional<sym::PredHandle> kept =
-        removeContradictedPredicateParts(store, pred, trustedAssumptions);
-    if (kept)
-      appendUniquePredicate(filtered, *kept);
+    FailureOr<std::optional<sym::PredHandle>> kept =
+        removeContradictedPredicateParts(**analysis, pred);
+    if (failed(kept)) {
+      appendUniquePredicate(filtered, pred);
+      continue;
+    }
+    if (*kept)
+      appendUniquePredicate(filtered, **kept);
   }
   assumptions.assign(filtered.begin(), filtered.end());
 }
@@ -2653,13 +2650,13 @@ buildAssumePredicateRange(sym::Store &store, Value binding, StringRef name,
   APInt loValue = APInt::getSignedMinValue(bits);
   APInt hiValue = APInt::getSignedMaxValue(bits);
   if (range->lower) {
-    std::optional<int64_t> lo = floorRational(*range->lower);
+    std::optional<int64_t> lo = sym::floorEndpoint(*range->lower);
     if (!lo || !fitsSignedWidth(*lo, bits))
       return std::nullopt;
     loValue = APInt(bits, *lo, /*isSigned=*/true);
   }
   if (range->upper) {
-    std::optional<int64_t> hi = ceilRational(*range->upper);
+    std::optional<int64_t> hi = sym::ceilEndpoint(*range->upper);
     if (!hi || !fitsSignedWidth(*hi, bits))
       return std::nullopt;
     hiValue = APInt(bits, *hi, /*isSigned=*/true);
@@ -2960,8 +2957,7 @@ static LogicalResult verifyRedistributionSymbols(RedistributeOp op,
     return op.emitOpError(coordinate)
            << " expression references unsupported symbol `" << *badSymbol
            << "`";
-  std::optional<int64_t> denominator = sym::collectDenominator(expr);
-  if (!denominator || *denominator != 1)
+  if (!sym::isIntegerValued(expr))
     return op.emitOpError(coordinate)
            << " expression must be structurally integral";
   return success();
@@ -3740,72 +3736,378 @@ static LogicalResult collectConstantIndexExprSubstitutions(
   return success();
 }
 
-static sym::ExprHandle expandIndexExprPredicateExpr(sym::Store &store,
-                                                    sym::ExprHandle expr) {
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
-  return succeeded(expanded) ? *expanded : expr;
-}
+FailureOr<SmallVector<sym::PredHandle>>
+mlir::wave::substituteIndexExprPredicates(
+    sym::Analysis &analysis, ArrayRef<sym::PredHandle> assumptions,
+    ArrayRef<sym::ExprSubstitution> substitutions) {
+  if (substitutions.empty())
+    return SmallVector<sym::PredHandle>(assumptions);
 
-static FailureOr<sym::PredHandle>
-expandIndexExprPredicate(sym::Store &store, sym::PredHandle pred) {
-  sym::PredView view(pred);
-  if (view.getKind() == sym::PredKind::Cmp) {
-    std::optional<sym::PredCmpOp> op = view.getCmpOp();
-    if (!op)
-      return pred;
-    return sym::composePredCmp(
-        store, expandIndexExprPredicateExpr(store, view.getCmpLhs()), *op,
-        expandIndexExprPredicateExpr(store, view.getCmpRhs()));
-  }
-  if (view.getKind() != sym::PredKind::And &&
-      view.getKind() != sym::PredKind::Or)
-    return pred;
-
-  FailureOr<sym::PredHandle> current =
-      expandIndexExprPredicate(store, view.getLogicArg(0));
-  if (failed(current))
-    return failure();
-  for (uint32_t i = 1, e = view.getLogicArgCount(); i != e; ++i) {
-    FailureOr<sym::PredHandle> next =
-        expandIndexExprPredicate(store, view.getLogicArg(i));
-    if (failed(next))
+  SmallVector<sym::PredHandle> substituted;
+  substituted.reserve(assumptions.size());
+  for (sym::PredHandle pred : assumptions) {
+    FailureOr<sym::PredHandle> result =
+        analysis.substitute(pred, substitutions);
+    if (failed(result))
       return failure();
-    current = view.getKind() == sym::PredKind::And
-                  ? sym::composePredAnd(store, *current, *next)
-                  : sym::composePredOr(store, *current, *next);
-    if (failed(current))
+    FailureOr<sym::PredHandle> expanded = analysis.expand(*result);
+    if (failed(expanded))
       return failure();
+    FailureOr<sym::PredHandle> simplified = analysis.simplify(*expanded);
+    substituted.push_back(succeeded(simplified) ? *simplified : *expanded);
   }
-  return current;
+  return substituted;
 }
 
 FailureOr<SmallVector<sym::PredHandle>>
 mlir::wave::substituteIndexExprPredicates(
     sym::Store &store, ArrayRef<sym::PredHandle> assumptions,
     ArrayRef<sym::ExprSubstitution> substitutions) {
-  SmallVector<sym::PredHandle> substituted;
-  for (sym::PredHandle pred : assumptions) {
-    if (substitutions.empty()) {
-      substituted.push_back(pred);
-      continue;
-    }
-    FailureOr<sym::PredHandle> result =
-        sym::substitutePred(store, pred, substitutions);
-    if (failed(result))
-      return failure();
-    FailureOr<sym::PredHandle> expanded =
-        expandIndexExprPredicate(store, *result);
-    if (failed(expanded))
-      return failure();
-    FailureOr<sym::PredHandle> simplified = sym::simplifyPred(store, *expanded);
-    substituted.push_back(succeeded(simplified) ? *simplified : *expanded);
-  }
-  return substituted;
+  if (substitutions.empty())
+    return SmallVector<sym::PredHandle>(assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return failure();
+  return substituteIndexExprPredicates(**analysis, assumptions, substitutions);
 }
 
 static void collectIndexExprFreeSymbols(sym::ExprHandle expr,
                                         llvm::DenseSet<StringRef> &symbols) {
   sym::walkSymbolNames(expr, [&](StringRef name) { symbols.insert(name); });
+}
+
+static bool isIntegerLiteral(sym::ExprHandle expr, int64_t value) {
+  return sym::ExprView(expr).getInt() == value;
+}
+
+static bool addIndexExprMaterializationCost(uint64_t value, uint64_t &cost) {
+  if (value > std::numeric_limits<uint64_t>::max() - cost)
+    return false;
+  cost += value;
+  return true;
+}
+
+static std::optional<int64_t>
+combineIndexExprDenominators(std::optional<int64_t> lhs,
+                             std::optional<int64_t> rhs) {
+  if (!lhs || !rhs || *lhs <= 0 || *rhs <= 0)
+    return std::nullopt;
+  int64_t gcd = std::gcd(*lhs, *rhs);
+  return llvm::checkedMul(*lhs / gcd, *rhs);
+}
+
+static std::optional<int64_t>
+multiplyIndexExprDenominators(std::optional<int64_t> lhs,
+                              std::optional<int64_t> rhs) {
+  if (!lhs || !rhs || *lhs <= 0 || *rhs <= 0)
+    return std::nullopt;
+  return llvm::checkedMul(*lhs, *rhs);
+}
+
+static std::optional<int64_t> raiseIndexExprDenominator(int64_t value,
+                                                        int32_t exponent) {
+  if (value <= 0 || exponent < 0)
+    return std::nullopt;
+  int64_t result = 1;
+  int64_t factor = value;
+  uint32_t remaining = static_cast<uint32_t>(exponent);
+  while (remaining) {
+    if (remaining & 1) {
+      std::optional<int64_t> product = llvm::checkedMul(result, factor);
+      if (!product)
+        return std::nullopt;
+      result = *product;
+    }
+    remaining >>= 1;
+    if (!remaining)
+      break;
+    std::optional<int64_t> square = llvm::checkedMul(factor, factor);
+    if (!square)
+      return std::nullopt;
+    factor = *square;
+  }
+  return result;
+}
+
+static std::optional<int64_t>
+getIndexExprStaticDenominator(sym::ExprHandle expr);
+
+static std::optional<int64_t> getIndexExprAddDenominator(sym::ExprView view) {
+  std::optional<int64_t> denominator =
+      getIndexExprStaticDenominator(view.getAddConstant());
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    std::optional<int64_t> termDenominator = multiplyIndexExprDenominators(
+        getIndexExprStaticDenominator(term.coefficient),
+        getIndexExprStaticDenominator(term.term));
+    denominator = combineIndexExprDenominators(denominator, termDenominator);
+  }
+  return denominator;
+}
+
+static std::optional<int64_t> getIndexExprMulDenominator(sym::ExprView view) {
+  std::optional<int64_t> denominator =
+      getIndexExprStaticDenominator(view.getMulCoefficient());
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    std::optional<int64_t> base = getIndexExprStaticDenominator(factor.base);
+    if (!base)
+      return std::nullopt;
+    denominator = multiplyIndexExprDenominators(
+        denominator, raiseIndexExprDenominator(*base, factor.exponent));
+  }
+  return denominator;
+}
+
+static std::optional<int64_t> getIndexExprModDenominator(sym::ExprView view) {
+  std::optional<int64_t> rhs =
+      getIndexExprStaticDenominator(view.getBinaryRhs());
+  if (!rhs || *rhs != 1)
+    return std::nullopt;
+  return getIndexExprStaticDenominator(view.getBinaryLhs());
+}
+
+static std::optional<int64_t> getIndexExprXorDenominator(sym::ExprView view) {
+  std::optional<int64_t> lhs =
+      getIndexExprStaticDenominator(view.getBinaryLhs());
+  std::optional<int64_t> rhs =
+      getIndexExprStaticDenominator(view.getBinaryRhs());
+  if (!lhs || !rhs || *lhs != 1 || *rhs != 1)
+    return std::nullopt;
+  return 1;
+}
+
+static std::optional<int64_t>
+getIndexExprCompoundDenominator(sym::ExprView view) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return getIndexExprAddDenominator(view);
+  case sym::ExprKind::Mul:
+    return getIndexExprMulDenominator(view);
+  case sym::ExprKind::Mod:
+    return getIndexExprModDenominator(view);
+  case sym::ExprKind::Xor:
+    return getIndexExprXorDenominator(view);
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<int64_t>
+getIndexExprStaticDenominator(sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  sym::ExprKind kind = view.getKind();
+  if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Symbol ||
+      kind == sym::ExprKind::Floor || kind == sym::ExprKind::Ceil)
+    return 1;
+  if (kind == sym::ExprKind::Rational) {
+    std::optional<sym::RationalLiteral> rational = view.getRational();
+    if (!rational || rational->denominator <= 0)
+      return std::nullopt;
+    return rational->denominator;
+  }
+  return getIndexExprCompoundDenominator(view);
+}
+
+static std::optional<uint64_t>
+getIndexExprMaterializationCostImpl(sym::ExprHandle expr, bool rationalAllowed);
+
+static bool appendIndexExprNodeMaterializationCost(sym::ExprHandle expr,
+                                                   bool rationalAllowed,
+                                                   uint64_t &cost) {
+  std::optional<uint64_t> node =
+      getIndexExprMaterializationCostImpl(expr, rationalAllowed);
+  return node && addIndexExprMaterializationCost(*node, cost);
+}
+
+static bool appendIndexExprOperatorCost(uint64_t operandCount, uint64_t &cost) {
+  return operandCount == 0 ||
+         addIndexExprMaterializationCost(operandCount - 1, cost);
+}
+
+static bool appendIndexExprAddTermMaterializationCost(sym::AddTerm term,
+                                                      bool rationalAllowed,
+                                                      uint64_t &cost) {
+  if (!appendIndexExprNodeMaterializationCost(term.term, rationalAllowed, cost))
+    return false;
+  if (isIntegerLiteral(term.coefficient, 1))
+    return true;
+  return appendIndexExprNodeMaterializationCost(term.coefficient,
+                                                rationalAllowed, cost) &&
+         addIndexExprMaterializationCost(1, cost);
+}
+
+static std::optional<uint64_t>
+getIndexExprAddMaterializationCost(sym::ExprView view, bool rationalAllowed) {
+  uint64_t cost = 0;
+  uint64_t operandCount = 0;
+  if (!isIntegerLiteral(view.getAddConstant(), 0)) {
+    if (!appendIndexExprNodeMaterializationCost(view.getAddConstant(),
+                                                rationalAllowed, cost))
+      return std::nullopt;
+    ++operandCount;
+  }
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    if (!appendIndexExprAddTermMaterializationCost(term, rationalAllowed, cost))
+      return std::nullopt;
+    ++operandCount;
+  }
+  if (!appendIndexExprOperatorCost(operandCount, cost))
+    return std::nullopt;
+  return cost;
+}
+
+static bool appendIndexExprMulFactorMaterializationCost(sym::MulFactor factor,
+                                                        bool rationalAllowed,
+                                                        uint64_t &cost) {
+  if (factor.exponent <= 0)
+    return false;
+  if (!appendIndexExprNodeMaterializationCost(factor.base, rationalAllowed,
+                                              cost))
+    return false;
+  return addIndexExprMaterializationCost(
+      static_cast<uint64_t>(factor.exponent - 1), cost);
+}
+
+static std::optional<uint64_t>
+getIndexExprMulMaterializationCost(sym::ExprView view, bool rationalAllowed) {
+  uint64_t cost = 0;
+  uint64_t operandCount = 0;
+  if (!isIntegerLiteral(view.getMulCoefficient(), 1)) {
+    if (!appendIndexExprNodeMaterializationCost(view.getMulCoefficient(),
+                                                rationalAllowed, cost))
+      return std::nullopt;
+    ++operandCount;
+  }
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    if (!appendIndexExprMulFactorMaterializationCost(factor, rationalAllowed,
+                                                     cost))
+      return std::nullopt;
+    ++operandCount;
+  }
+  if (!appendIndexExprOperatorCost(operandCount, cost))
+    return std::nullopt;
+  return cost;
+}
+
+static std::optional<uint64_t>
+getRoundedIndexExprMaterializationCost(sym::ExprView view) {
+  std::optional<int64_t> denominator =
+      getIndexExprStaticDenominator(view.getUnaryArg());
+  if (!denominator || !llvm::isPowerOf2_64(*denominator))
+    return std::nullopt;
+  std::optional<uint64_t> arg =
+      getIndexExprMaterializationCostImpl(view.getUnaryArg(), true);
+  if (!arg || *arg == std::numeric_limits<uint64_t>::max())
+    return std::nullopt;
+  return *arg + 1;
+}
+
+static std::optional<uint64_t>
+getModIndexExprMaterializationCost(sym::ExprView view, bool rationalAllowed) {
+  std::optional<int64_t> divisor =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  if (!divisor || *divisor <= 0)
+    return std::nullopt;
+  bool isPowerOfTwo = llvm::isPowerOf2_64(*divisor);
+  if ((!isPowerOfTwo && !llvm::isUInt<32>(*divisor)) ||
+      (isPowerOfTwo && !llvm::isUInt<32>(*divisor - 1)))
+    return std::nullopt;
+  std::optional<uint64_t> lhs =
+      getIndexExprMaterializationCostImpl(view.getBinaryLhs(), rationalAllowed);
+  if (!lhs || *lhs == std::numeric_limits<uint64_t>::max())
+    return std::nullopt;
+  return *lhs + 1;
+}
+
+static std::optional<uint64_t>
+getXorIndexExprMaterializationCost(sym::ExprView view) {
+  uint64_t cost = 0;
+  std::optional<uint64_t> lhs =
+      getIndexExprMaterializationCostImpl(view.getBinaryLhs(), false);
+  std::optional<uint64_t> rhs =
+      getIndexExprMaterializationCostImpl(view.getBinaryRhs(), false);
+  if (!lhs || !rhs || !addIndexExprMaterializationCost(*lhs, cost) ||
+      !addIndexExprMaterializationCost(*rhs, cost) ||
+      !addIndexExprMaterializationCost(1, cost))
+    return std::nullopt;
+  return cost;
+}
+
+static std::optional<uint64_t>
+getCompoundIndexExprMaterializationCost(sym::ExprView view,
+                                        bool rationalAllowed) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return getIndexExprAddMaterializationCost(view, rationalAllowed);
+  case sym::ExprKind::Mul:
+    return getIndexExprMulMaterializationCost(view, rationalAllowed);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return getRoundedIndexExprMaterializationCost(view);
+  case sym::ExprKind::Mod:
+    return getModIndexExprMaterializationCost(view, rationalAllowed);
+  case sym::ExprKind::Xor:
+    return getXorIndexExprMaterializationCost(view);
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<uint64_t>
+getIndexExprMaterializationCostImpl(sym::ExprHandle expr,
+                                    bool rationalAllowed) {
+  sym::ExprView view(expr);
+  if (view.getKind() == sym::ExprKind::Integer ||
+      view.getKind() == sym::ExprKind::Symbol)
+    return 0;
+  if (view.getKind() == sym::ExprKind::Rational)
+    return rationalAllowed ? std::optional<uint64_t>(0) : std::nullopt;
+  return getCompoundIndexExprMaterializationCost(view, rationalAllowed);
+}
+
+std::optional<uint64_t>
+mlir::wave::getIndexExprMaterializationCost(sym::ExprHandle expr) {
+  sym::ExprKind kind = sym::ExprView(expr).getKind();
+  bool rationalAllowed =
+      kind == sym::ExprKind::Add || kind == sym::ExprKind::Mul;
+  if (rationalAllowed) {
+    std::optional<int64_t> denominator = getIndexExprStaticDenominator(expr);
+    if (!denominator || !llvm::isPowerOf2_64(*denominator))
+      return std::nullopt;
+  }
+  return getIndexExprMaterializationCostImpl(expr, rationalAllowed);
+}
+
+bool mlir::wave::shouldUseSimplifiedIndexExpr(sym::ExprHandle candidate,
+                                              sym::ExprHandle baseline) {
+  llvm::DenseSet<StringRef> candidateSymbols;
+  llvm::DenseSet<StringRef> baselineSymbols;
+  collectIndexExprFreeSymbols(candidate, candidateSymbols);
+  collectIndexExprFreeSymbols(baseline, baselineSymbols);
+  bool removesSymbols =
+      candidateSymbols.size() < baselineSymbols.size() &&
+      llvm::all_of(
+          candidateSymbols,
+          [&](StringRef name) { return baselineSymbols.contains(name); });
+  sym::ExprKind candidateKind = sym::ExprView(candidate).getKind();
+  if (candidateKind == sym::ExprKind::Integer)
+    return true;
+
+  std::optional<uint64_t> candidateCost =
+      getIndexExprMaterializationCost(candidate);
+  std::optional<uint64_t> baselineCost =
+      getIndexExprMaterializationCost(baseline);
+  if (!candidateCost)
+    return false;
+  if (!baselineCost)
+    return true;
+  if (*candidateCost != *baselineCost)
+    return *candidateCost < *baselineCost;
+  return removesSymbols;
 }
 
 static Value preserveIndexExprResultType(OpBuilder &builder, Location loc,
@@ -3871,24 +4173,31 @@ substituteAndSimplifyIndexExpr(IndexExprOp op, sym::Store &store) {
 
   SmallVector<sym::PredHandle, 4> assumptions;
   appendIndexExprPredicates(op, assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return failure();
   FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
-      substituteIndexExprPredicates(store, assumptions, substitutions);
+      substituteIndexExprPredicates(**analysis, assumptions, substitutions);
   if (failed(substitutedAssumptions))
     return failure();
+  for (sym::PredHandle pred : *substitutedAssumptions)
+    if (failed((*analysis)->assume(pred)))
+      return failure();
 
   FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
+      (*analysis)->substitute(op.getExpr().getValue(), substitutions);
   if (failed(substituted))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      substitutedAssumptions->empty()
-          ? sym::simplifyExpr(store, *substituted)
-          : sym::simplifyExpr(store, *substituted, *substitutedAssumptions);
+  FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(*substituted);
   if (failed(simplified))
     return failure();
+  sym::ExprHandle result =
+      shouldUseSimplifiedIndexExpr(*simplified, *substituted) ? *simplified
+                                                              : *substituted;
 
   return CanonicalIndexExprSimplification{std::move(*substitutedAssumptions),
-                                          *simplified};
+                                          result};
 }
 
 static CanonicalIndexExprReplacement buildCanonicalIndexExprReplacement(

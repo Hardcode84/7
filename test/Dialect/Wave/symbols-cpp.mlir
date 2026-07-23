@@ -9,13 +9,15 @@
 // CHECK: non-unit-rat: none
 // CHECK: symbol: none
 
-// Expansion, denominator-LCM, and u32 range wrappers stay behind WaveSymbols.
+// Expansion and u32 range wrappers stay behind WaveSymbols.
 // CHECK: expanded-product: 2 + 3*x + x**2
-// CHECK: denominator-lcm: 4
-// CHECK: denominator-mod-rational: 4
-// CHECK: denominator-piecewise: 4
+// CHECK: endpoint-floor: -2
+// CHECK: endpoint-ceil: -1
+// CHECK: endpoint-invalid: none
+// CHECK: endpoint-compare-wide: -1
 // CHECK: fits-u32: true
 // CHECK: fits-u32-unbounded: false
+// CHECK: fits-u32-compound: true
 
 // Const-correct facade over ixsimpl ADD/MUL/unary/binary/predicate nodes.
 // CHECK: view-add-valid: true
@@ -68,6 +70,12 @@
 // CHECK: analysis-derived-upper: 9
 // CHECK: analysis-substituted-upper: 31
 // CHECK: analysis-substituted-congruence: true
+// CHECK: analysis-batch-mutator-joint-success: true
+// CHECK: analysis-batch-mutator-rejected: true
+// CHECK: analysis-batch-mutator-poisoned: unknown
+// CHECK: analysis-direct-batch-closure: unknown
+// CHECK: analysis-create-batch-closure: true
+// CHECK: analysis-assume-batch-closure: true
 // CHECK: analysis-or-factory-rejected: true
 // CHECK: analysis-partial-factory-rejected: true
 // CHECK: analysis-or-mutator-rejected: true
@@ -75,6 +83,18 @@
 // CHECK: analysis-poisoned-expand: true
 // CHECK: analysis-invalid-handle-rejected: true
 // CHECK: analysis-invalid-handle-diagnostic: expected non-null wave.pred
+// CHECK: analysis-singleton-simplified: floor(1/128*raw0)
+// CHECK: analysis-singleton-source-cost: none
+// CHECK: analysis-singleton-simplified-cost: 2
+// CHECK: analysis-singleton-prefers-simplified: true
+// CHECK: material-cost-rational: none
+// CHECK: material-cost-nonpow2-floor: none
+// CHECK: material-cost-wide-nonpow2-mod: none
+// CHECK: material-cost-nonpow2-exact: none
+// CHECK: material-cost-product-denominator-overflow: none
+// CHECK: material-cost-piecewise: none
+// CHECK: material-cost-pow2-floor: 2
+// CHECK: material-cost-max-pow2-mod: 1
 
 // Two independently-constructed expressions that ixsimpl folds to the
 // same canonical form. Both `floor((4*x + 2*x) / 3)` and `floor((6*x) / 3)`

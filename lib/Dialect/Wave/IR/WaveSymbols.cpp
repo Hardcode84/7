@@ -20,7 +20,6 @@
 #include <cassert>
 #include <cstring>
 #include <limits>
-#include <numeric>
 #include <utility>
 
 using namespace mlir;
@@ -79,14 +78,6 @@ static std::optional<PredCmpOp> getPredCmpOp(ixs_cmp_op op) {
     return PredCmpOp::Ne;
   }
   return std::nullopt;
-}
-
-static std::optional<int64_t> checkedLCM(std::optional<int64_t> lhs,
-                                         std::optional<int64_t> rhs) {
-  if (!lhs || !rhs)
-    return std::nullopt;
-  int64_t gcd = std::gcd(*lhs, *rhs);
-  return llvm::checkedMul(*lhs / gcd, *rhs);
 }
 
 static std::string joinSessionErrors(ixs_session *session) {
@@ -373,6 +364,16 @@ Analysis::create(Store &store, ArrayRef<PredHandle> assumptions,
     return failure();
   }
   analysis->usable = true;
+  if (failed(analysis->assume(assumptions, diagnostic)))
+    return failure();
+  return analysis;
+}
+
+FailureOr<std::unique_ptr<Analysis>>
+Analysis::createDirect(Store &store, ArrayRef<PredHandle> assumptions,
+                       std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  std::unique_ptr<Analysis> analysis(new Analysis(store));
   SmallVector<ixs_node *, 4> rawAssumptions;
   rawAssumptions.reserve(assumptions.size());
   for (PredHandle assumption : assumptions) {
@@ -383,11 +384,13 @@ Analysis::create(Store &store, ArrayRef<PredHandle> assumptions,
     }
     rawAssumptions.push_back(rawAssumption);
   }
-  if (!ixs_facts_assume_preds(analysis->facts, rawAssumptions.data(),
-                              rawAssumptions.size())) {
+  analysis->facts = ixs_facts_create_preds(
+      analysis->session.raw(), rawAssumptions.data(), rawAssumptions.size());
+  if (!analysis->facts) {
     analysis->poison(diagnostic, "failed to ingest symbolic assumptions");
     return failure();
   }
+  analysis->usable = true;
   return analysis;
 }
 
@@ -414,6 +417,31 @@ LogicalResult Analysis::assume(PredHandle pred, std::string *diagnostic) {
   ixs_node *rawPred = rawPredNode(pred, diagnostic);
   if (!rawPred || !ixs_facts_assume_pred(facts, rawPred)) {
     poison(diagnostic, "failed to ingest symbolic assumption");
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult Analysis::assume(ArrayRef<PredHandle> predicates,
+                               std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  SmallVector<ixs_node *, 4> rawPredicates;
+  rawPredicates.reserve(predicates.size());
+  for (PredHandle predicate : predicates) {
+    ixs_node *rawPredicate = rawPredNode(predicate, diagnostic);
+    if (!rawPredicate) {
+      poison(diagnostic, "failed to ingest symbolic assumptions");
+      return failure();
+    }
+    rawPredicates.push_back(rawPredicate);
+  }
+  if (!ixs_facts_assume_preds(facts, rawPredicates.data(),
+                              rawPredicates.size())) {
+    poison(diagnostic, "failed to ingest symbolic assumptions");
     return failure();
   }
   return success();
@@ -938,6 +966,10 @@ bool mlir::wave::sym::isPred(PredHandle value) {
   return value && ixs_node_is_pred(value.raw());
 }
 
+bool mlir::wave::sym::isIntegerValued(ExprHandle value) {
+  return value && ixs_node_is_integer_valued(value.raw());
+}
+
 bool ExprView::isValid() const { return isExpr(value); }
 
 ExprKind ExprView::getKind() const {
@@ -1402,94 +1434,6 @@ mlir::wave::sym::composePredNot(Store &store, PredHandle valueHandle,
                     "failed to compose wave.pred NOT");
 }
 
-namespace {
-
-static FailureOr<PredHandle> scaleComparison(Store &store, PredView view,
-                                             int64_t scale,
-                                             std::string *diagnostic) {
-  std::optional<PredCmpOp> comparison = view.getCmpOp();
-  FailureOr<ExprHandle> factor = composeExprInt(store, scale, diagnostic);
-  if (!comparison || failed(factor))
-    return failure();
-  FailureOr<ExprHandle> lhs = composeExprBinary(
-      store, view.getCmpLhs(), ExprBinaryOp::Mul, *factor, diagnostic);
-  FailureOr<ExprHandle> rhs = composeExprBinary(
-      store, view.getCmpRhs(), ExprBinaryOp::Mul, *factor, diagnostic);
-  if (failed(lhs) || failed(rhs))
-    return failure();
-  lhs = simplifyExpr(store, *lhs, diagnostic);
-  rhs = simplifyExpr(store, *rhs, diagnostic);
-  if (failed(lhs) || failed(rhs))
-    return failure();
-  return composePredCmp(store, *lhs, *comparison, *rhs, diagnostic);
-}
-
-static FailureOr<PredHandle> scaleLogic(Store &store, PredView view,
-                                        int64_t scale,
-                                        std::string *diagnostic) {
-  if (view.getLogicArgCount() == 0)
-    return failure();
-  FailureOr<PredHandle> result =
-      scalePred(store, view.getLogicArg(0), scale, diagnostic);
-  for (uint32_t index = 1; succeeded(result) && index < view.getLogicArgCount();
-       ++index) {
-    FailureOr<PredHandle> next =
-        scalePred(store, view.getLogicArg(index), scale, diagnostic);
-    if (failed(next))
-      return failure();
-    result = view.getKind() == PredKind::And
-                 ? composePredAnd(store, *result, *next, diagnostic)
-                 : composePredOr(store, *result, *next, diagnostic);
-  }
-  return result;
-}
-
-static FailureOr<PredHandle> scalePredicateNode(Store &store, PredView view,
-                                                int64_t scale,
-                                                std::string *diagnostic) {
-  switch (view.getKind()) {
-  case PredKind::Cmp:
-    return scaleComparison(store, view, scale, diagnostic);
-  case PredKind::And:
-  case PredKind::Or:
-    return scaleLogic(store, view, scale, diagnostic);
-  case PredKind::Not: {
-    FailureOr<PredHandle> argument =
-        scalePred(store, view.getUnaryArg(), scale, diagnostic);
-    if (failed(argument))
-      return failure();
-    return composePredNot(store, *argument, diagnostic);
-  }
-  case PredKind::True:
-  case PredKind::False:
-    return view.getHandle();
-  default:
-    setDiagnostic(diagnostic, "invalid wave.pred for scaling");
-    return failure();
-  }
-}
-
-} // namespace
-
-FailureOr<PredHandle> mlir::wave::sym::scalePred(Store &store, PredHandle value,
-                                                 int64_t scale,
-                                                 std::string *diagnostic) {
-  if (scale <= 0) {
-    setDiagnostic(diagnostic, "wave.pred scale must be positive");
-    return failure();
-  }
-  if (scale == 1)
-    return value;
-
-  PredView view(value);
-  FailureOr<PredHandle> result =
-      scalePredicateNode(store, view, scale, diagnostic);
-  if (failed(result))
-    return failure();
-  FailureOr<PredHandle> simplified = simplifyPred(store, *result, diagnostic);
-  return succeeded(simplified) ? *simplified : *result;
-}
-
 FailureOr<ExprHandle> mlir::wave::sym::simplifyExpr(Store &store,
                                                     ExprHandle value,
                                                     std::string *diagnostic) {
@@ -1582,7 +1526,8 @@ mlir::wave::sym::substitutePred(Store &store, PredHandle value,
                     "failed to substitute wave.pred");
 }
 
-static int compareRationalToInteger(RationalEndpoint value, int64_t integer) {
+int mlir::wave::sym::compareEndpointToInteger(RationalEndpoint value,
+                                              int64_t integer) {
   assert(value.denominator > 0 && "expected positive denominator");
   __int128 lhs = static_cast<__int128>(value.numerator);
   __int128 rhs =
@@ -1594,7 +1539,17 @@ static int compareRationalToInteger(RationalEndpoint value, int64_t integer) {
   return 0;
 }
 
-static std::optional<int64_t> ceilRational(RationalEndpoint value) {
+std::optional<int64_t> mlir::wave::sym::floorEndpoint(RationalEndpoint value) {
+  if (value.denominator <= 0)
+    return std::nullopt;
+  int64_t quotient = value.numerator / value.denominator;
+  int64_t remainder = value.numerator % value.denominator;
+  if (remainder != 0 && value.numerator < 0)
+    --quotient;
+  return quotient;
+}
+
+std::optional<int64_t> mlir::wave::sym::ceilEndpoint(RationalEndpoint value) {
   if (value.denominator <= 0)
     return std::nullopt;
   int64_t quotient = value.numerator / value.denominator;
@@ -1692,21 +1647,6 @@ mlir::wave::sym::rangeAssumption(Store &store, StringRef name, int64_t lo,
   return composePredAnd(store, *geLo, *leHi, diagnostic);
 }
 
-static bool provenRangeFits(Store &store, ExprHandle expr,
-                            ArrayRef<PredHandle> assumptions, int64_t lower,
-                            int64_t upper);
-
-bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
-                                      ArrayRef<PredHandle> assumptions,
-                                      int64_t lo, int64_t hi) {
-  std::optional<InferredRange> range = inferRange(store, expr, assumptions);
-  if (range && range->lower && range->upper &&
-      compareRationalToInteger(*range->lower, lo) >= 0 &&
-      compareRationalToInteger(*range->upper, hi) <= 0)
-    return true;
-  return provenRangeFits(store, expr, assumptions, lo, hi);
-}
-
 static std::optional<uint64_t> checkedAddU32Bound(uint64_t lhs, uint64_t rhs) {
   constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
   if (lhs > u32Max || rhs > u32Max || lhs > u32Max - rhs)
@@ -1721,46 +1661,28 @@ static std::optional<uint64_t> checkedMulU32Bound(uint64_t lhs, uint64_t rhs) {
   return lhs * rhs;
 }
 
-static std::optional<uint64_t>
-exprU32UpperBound(Store &store, ExprHandle expr,
-                  ArrayRef<PredHandle> assumptions);
-
-static std::optional<uint64_t>
-addExprU32UpperBound(Store &store, ExprHandle expr,
-                     ArrayRef<PredHandle> assumptions) {
-  uint64_t bound = 0;
-  ExprView view(expr);
-  std::optional<int64_t> constant =
-      sym::getIntegerLiteralValue(view.getAddConstant());
-  if (!constant || *constant < 0)
+static std::optional<uint64_t> positiveAddendU32UpperBound(Analysis &analysis,
+                                                           AddTerm addTerm) {
+  std::optional<int64_t> coeff =
+      sym::getIntegerLiteralValue(addTerm.coefficient);
+  if (!coeff)
     return std::nullopt;
-  bound = static_cast<uint64_t>(*constant);
-
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-    AddTerm addTerm = view.getAddTerm(index);
-    std::optional<int64_t> coeff =
-        sym::getIntegerLiteralValue(addTerm.coefficient);
-    if (!coeff || *coeff < 0)
-      return std::nullopt;
-    std::optional<uint64_t> term =
-        exprU32UpperBound(store, addTerm.term, assumptions);
-    if (!term)
-      return std::nullopt;
-    std::optional<uint64_t> scaled =
-        checkedMulU32Bound(static_cast<uint64_t>(*coeff), *term);
-    if (!scaled)
-      return std::nullopt;
-    std::optional<uint64_t> next = checkedAddU32Bound(bound, *scaled);
-    if (!next)
-      return std::nullopt;
-    bound = *next;
-  }
-  return bound;
+  if (*coeff <= 0)
+    return uint64_t{0};
+  std::optional<InferredRange> range = analysis.range(addTerm.term);
+  if (!range || !range->upper)
+    return std::nullopt;
+  std::optional<int64_t> upper = ceilEndpoint(*range->upper);
+  if (!upper)
+    return std::nullopt;
+  if (*upper <= 0)
+    return uint64_t{0};
+  return checkedMulU32Bound(static_cast<uint64_t>(*coeff),
+                            static_cast<uint64_t>(*upper));
 }
 
-static std::optional<uint64_t>
-positiveAddendsU32UpperBound(Store &store, ExprHandle expr,
-                             ArrayRef<PredHandle> assumptions) {
+static std::optional<uint64_t> positiveAddendsU32UpperBound(Analysis &analysis,
+                                                            ExprHandle expr) {
   uint64_t bound = 0;
   ExprView view(expr);
   std::optional<int64_t> constant =
@@ -1771,22 +1693,13 @@ positiveAddendsU32UpperBound(Store &store, ExprHandle expr,
     bound = static_cast<uint64_t>(*constant);
 
   for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-    AddTerm addTerm = view.getAddTerm(index);
-    std::optional<int64_t> coeff =
-        sym::getIntegerLiteralValue(addTerm.coefficient);
-    if (!coeff)
+    std::optional<uint64_t> addend =
+        positiveAddendU32UpperBound(analysis, view.getAddTerm(index));
+    if (!addend)
       return std::nullopt;
-    if (*coeff <= 0)
+    if (*addend == 0)
       continue;
-    std::optional<uint64_t> term =
-        exprU32UpperBound(store, addTerm.term, assumptions);
-    if (!term)
-      return std::nullopt;
-    std::optional<uint64_t> scaled =
-        checkedMulU32Bound(static_cast<uint64_t>(*coeff), *term);
-    if (!scaled)
-      return std::nullopt;
-    std::optional<uint64_t> next = checkedAddU32Bound(bound, *scaled);
+    std::optional<uint64_t> next = checkedAddU32Bound(bound, *addend);
     if (!next)
       return std::nullopt;
     bound = *next;
@@ -1794,289 +1707,61 @@ positiveAddendsU32UpperBound(Store &store, ExprHandle expr,
   return bound;
 }
 
-static std::optional<uint64_t>
-mulExprU32UpperBound(Store &store, ExprHandle expr,
-                     ArrayRef<PredHandle> assumptions) {
-  ExprView view(expr);
-  std::optional<int64_t> coeff =
-      sym::getIntegerLiteralValue(view.getMulCoefficient());
-  if (!coeff || *coeff < 0)
-    return std::nullopt;
-  uint64_t bound = static_cast<uint64_t>(*coeff);
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
-    MulFactor factor = view.getMulFactor(index);
-    if (factor.exponent <= 0)
-      return std::nullopt;
-    std::optional<uint64_t> factorBound =
-        exprU32UpperBound(store, factor.base, assumptions);
-    if (!factorBound)
-      return std::nullopt;
-    for (int32_t exp = 0; exp < factor.exponent; ++exp) {
-      std::optional<uint64_t> next = checkedMulU32Bound(bound, *factorBound);
-      if (!next)
-        return std::nullopt;
-      bound = *next;
-    }
-  }
-  return bound;
+static bool inferredRangeWithin(Analysis &analysis, ExprHandle expr,
+                                int64_t lower, int64_t upper) {
+  std::optional<InferredRange> range = analysis.range(expr);
+  return range && range->lower && range->upper &&
+         compareEndpointToInteger(*range->lower, lower) >= 0 &&
+         compareEndpointToInteger(*range->upper, upper) <= 0;
 }
 
-static std::optional<uint64_t>
-xorExprU32UpperBound(Store &store, ExprHandle expr,
-                     ArrayRef<PredHandle> assumptions) {
-  ExprView view(expr);
-  std::optional<uint64_t> lhs =
-      exprU32UpperBound(store, view.getBinaryLhs(), assumptions);
-  std::optional<uint64_t> rhs =
-      exprU32UpperBound(store, view.getBinaryRhs(), assumptions);
-  if (!lhs || !rhs)
-    return std::nullopt;
-  uint64_t maxOperand = std::max(*lhs, *rhs);
-  if (maxOperand == 0)
-    return uint64_t{0};
-  return llvm::PowerOf2Ceil(maxOperand + 1) - 1;
-}
-
-static std::optional<uint64_t>
-piecewiseExprU32UpperBound(Store &store, ExprHandle expr,
-                           ArrayRef<PredHandle> assumptions) {
-  ExprView view(expr);
-  std::optional<uint64_t> maxBound;
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount())) {
-    std::optional<uint64_t> bound = exprU32UpperBound(
-        store, view.getPiecewiseCase(index).value, assumptions);
-    if (!bound)
-      return std::nullopt;
-    maxBound = maxBound ? std::max(*maxBound, *bound) : *bound;
-  }
-  return maxBound;
-}
-
-static std::optional<uint64_t>
-exprU32UpperBound(Store &store, ExprHandle expr,
-                  ArrayRef<PredHandle> assumptions) {
-  constexpr uint64_t u32Max = (uint64_t{1} << 32) - 1;
-  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(expr)) {
-    if (*value < 0 || static_cast<uint64_t>(*value) > u32Max)
-      return std::nullopt;
-    return static_cast<uint64_t>(*value);
-  }
-  if (std::optional<int64_t> upper = sym::inferNonNegativeUpperBound(
-          store, expr, assumptions, static_cast<int64_t>(u32Max)))
-    return static_cast<uint64_t>(*upper);
-
-  ExprView view(expr);
-  switch (view.getKind()) {
-  case ExprKind::Add:
-    return addExprU32UpperBound(store, expr, assumptions);
-  case ExprKind::Mul:
-    return mulExprU32UpperBound(store, expr, assumptions);
-  case ExprKind::Xor:
-    return xorExprU32UpperBound(store, expr, assumptions);
-  case ExprKind::Piecewise:
-    return piecewiseExprU32UpperBound(store, expr, assumptions);
-  default:
-    break;
-  }
-  return std::nullopt;
-}
-
-struct I64RangeBounds {
-  std::optional<int64_t> lower;
-  std::optional<int64_t> upper;
-};
-
-static void canonicalizeExprs(Store &store, MutableArrayRef<ExprHandle> values,
-                              ArrayRef<PredHandle> assumptions) {
-  Session session(store);
-  SmallVector<ixs_node *, 8> expanded;
-  expanded.reserve(values.size());
-  for (ExprHandle value : values) {
-    ixs_node *raw = rawExprNode(value, /*diagnostic=*/nullptr);
-    expanded.push_back(raw ? ixs_expand(session.raw(), raw) : nullptr);
-  }
-
-  ixs_session_clear_errors(session.raw());
-  SmallVector<ixs_node *, 8> simplified(expanded.begin(), expanded.end());
-  SmallVector<ixs_node *, 4> rawAssumptions;
-  for (PredHandle assumption : assumptions) {
-    ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
-    if (!raw)
-      return;
-    rawAssumptions.push_back(raw);
-  }
-  ixs_simplify_batch(session.raw(), simplified.data(), simplified.size(),
-                     rawAssumptions.data(), rawAssumptions.size());
-  for (size_t index : llvm::seq<size_t>(values.size())) {
-    ixs_node *result = simplified[index];
-    ixs_node *fallback = expanded[index];
-    if (result && ixs_node_is_expr(result))
-      values[index] = ExprHandle(result);
-    else if (fallback && ixs_node_is_expr(fallback))
-      values[index] = ExprHandle(fallback);
-  }
-}
-
-struct TargetComparison {
-  ExprHandle diff;
-  PredCmpOp op;
-};
-
-static void tightenLower(I64RangeBounds &bounds, int64_t bound) {
-  bounds.lower = bounds.lower ? std::max(*bounds.lower, bound) : bound;
-}
-
-static void tightenUpper(I64RangeBounds &bounds, int64_t bound) {
-  bounds.upper = bounds.upper ? std::min(*bounds.upper, bound) : bound;
-}
-
-static void applyCmpBound(PredCmpOp op, int64_t bound, I64RangeBounds &bounds) {
-  switch (op) {
-  case PredCmpOp::Le:
-    tightenUpper(bounds, bound);
-    break;
-  case PredCmpOp::Lt:
-    if (std::optional<int64_t> strict = llvm::checkedSub(bound, int64_t{1}))
-      tightenUpper(bounds, *strict);
-    break;
-  case PredCmpOp::Ge:
-    tightenLower(bounds, bound);
-    break;
-  case PredCmpOp::Gt:
-    if (std::optional<int64_t> strict = llvm::checkedAdd(bound, int64_t{1}))
-      tightenLower(bounds, *strict);
-    break;
-  case PredCmpOp::Eq:
-    tightenLower(bounds, bound);
-    tightenUpper(bounds, bound);
-    break;
-  case PredCmpOp::Ne:
-    break;
-  }
-}
-
-static void
-collectTargetComparisons(Store &store, PredHandle pred,
-                         SmallVectorImpl<TargetComparison> &comparisons) {
-  PredView view(pred);
-  if (view.getKind() == PredKind::And) {
-    for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-      collectTargetComparisons(store, view.getLogicArg(index), comparisons);
-    return;
-  }
-  if (view.getKind() != PredKind::Cmp)
-    return;
-  std::optional<PredCmpOp> op = view.getCmpOp();
-  FailureOr<ExprHandle> negRhs = sym::composeExprNeg(store, view.getCmpRhs());
-  if (!op || failed(negRhs))
-    return;
-  FailureOr<ExprHandle> diff = sym::composeExprBinary(
-      store, view.getCmpLhs(), ExprBinaryOp::Add, *negRhs);
-  if (succeeded(diff))
-    comparisons.push_back({*diff, *op});
-}
-
-static ExprHandle
-canonicalizeTargetDiffs(Store &store, ExprHandle target,
-                        MutableArrayRef<TargetComparison> comparisons,
-                        ArrayRef<PredHandle> assumptions) {
-  SmallVector<ExprHandle, 8> canonical;
-  canonical.push_back(target);
-  for (const TargetComparison &comparison : comparisons)
-    canonical.push_back(comparison.diff);
-  canonicalizeExprs(store, canonical, assumptions);
-  for (size_t index : llvm::seq<size_t>(comparisons.size()))
-    comparisons[index].diff = canonical[index + 1];
-  return canonical.front();
-}
-
-static LogicalResult collectTargetDeltas(Store &store, ExprHandle target,
-                                         ArrayRef<TargetComparison> comparisons,
-                                         SmallVectorImpl<ExprHandle> &deltas,
-                                         SmallVectorImpl<PredCmpOp> &ops) {
-  FailureOr<ExprHandle> negTarget = sym::composeExprNeg(store, target);
-  if (failed(negTarget))
-    return failure();
-  for (const TargetComparison &comparison : comparisons) {
-    FailureOr<ExprHandle> delta = sym::composeExprBinary(
-        store, comparison.diff, ExprBinaryOp::Add, *negTarget);
-    if (failed(delta))
-      continue;
-    deltas.push_back(*delta);
-    ops.push_back(comparison.op);
-  }
-  return success(!deltas.empty());
-}
-
-static I64RangeBounds collectDeltaBounds(ArrayRef<PredCmpOp> ops,
-                                         ArrayRef<ExprHandle> deltas) {
-  I64RangeBounds bounds;
-  for (auto [op, delta] : llvm::zip(ops, deltas)) {
-    std::optional<int64_t> offset = sym::getIntegerLiteralValue(delta);
-    if (!offset)
-      continue;
-    std::optional<int64_t> bound = llvm::checkedSub(int64_t{0}, *offset);
-    if (bound)
-      applyCmpBound(op, *bound, bounds);
-  }
-  return bounds;
-}
-
-static bool provenRangeFits(Store &store, ExprHandle expr,
-                            ArrayRef<PredHandle> assumptions, int64_t lower,
-                            int64_t upper) {
-  SmallVector<TargetComparison, 8> comparisons;
-  for (PredHandle pred : assumptions)
-    collectTargetComparisons(store, pred, comparisons);
-  if (comparisons.empty())
+static bool proveRangePredicates(Analysis &analysis, ExprHandle expr,
+                                 int64_t lower, int64_t upper) {
+  FailureOr<ExprHandle> lowerExpr = analysis.composeInteger(lower);
+  FailureOr<ExprHandle> upperExpr = analysis.composeInteger(upper);
+  if (failed(lowerExpr) || failed(upperExpr))
     return false;
-
-  ExprHandle target =
-      canonicalizeTargetDiffs(store, expr, comparisons, assumptions);
-  SmallVector<ExprHandle, 8> deltas;
-  SmallVector<PredCmpOp, 8> ops;
-  if (failed(collectTargetDeltas(store, target, comparisons, deltas, ops)))
-    return false;
-  canonicalizeExprs(store, deltas, assumptions);
-
-  I64RangeBounds bounds = collectDeltaBounds(ops, deltas);
-  return bounds.lower && bounds.upper && *bounds.lower >= lower &&
-         *bounds.upper <= upper;
+  FailureOr<PredHandle> lowerBound =
+      analysis.compare(expr, PredCmpOp::Ge, *lowerExpr);
+  FailureOr<PredHandle> upperBound =
+      analysis.compare(expr, PredCmpOp::Le, *upperExpr);
+  return succeeded(lowerBound) && succeeded(upperBound) &&
+         analysis.check(*lowerBound) == CheckResult::True &&
+         analysis.check(*upperBound) == CheckResult::True;
 }
 
-static bool explicitPredicatesProveU32(Store &store, ExprHandle expr,
-                                       ArrayRef<PredHandle> assumptions) {
-  FailureOr<ExprHandle> zero = sym::composeExprInt(store, 0);
-  FailureOr<ExprHandle> u32MaxExpr =
-      sym::composeExprInt(store, (int64_t{1} << 32) - 1);
-  if (failed(zero) || failed(u32MaxExpr))
-    return false;
-  FailureOr<PredHandle> nonNegative =
-      sym::composePredCmp(store, expr, PredCmpOp::Ge, *zero);
-  FailureOr<PredHandle> inUpper =
-      sym::composePredCmp(store, expr, PredCmpOp::Le, *u32MaxExpr);
-  return succeeded(nonNegative) && succeeded(inUpper) &&
-         sym::checkPredicate(store, *nonNegative, assumptions) ==
-             CheckResult::True &&
-         sym::checkPredicate(store, *inUpper, assumptions) == CheckResult::True;
+bool mlir::wave::sym::provablyInRange(Analysis &analysis, ExprHandle expr,
+                                      int64_t lower, int64_t upper) {
+  return inferredRangeWithin(analysis, expr, lower, upper) ||
+         proveRangePredicates(analysis, expr, lower, upper);
+}
+
+bool mlir::wave::sym::provablyInRange(Store &store, ExprHandle expr,
+                                      ArrayRef<PredHandle> assumptions,
+                                      int64_t lo, int64_t hi) {
+  FailureOr<std::unique_ptr<Analysis>> analysis =
+      Analysis::create(store, assumptions);
+  return succeeded(analysis) && provablyInRange(**analysis, expr, lo, hi);
 }
 
 bool mlir::wave::sym::provablyFitsU32(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions) {
-  if (explicitPredicatesProveU32(store, expr, assumptions))
-    return true;
-  if (std::optional<uint64_t> bound =
-          exprU32UpperBound(store, expr, assumptions))
-    return *bound <= (uint64_t{1} << 32) - 1;
-  return provenRangeFits(store, expr, assumptions, 0, (int64_t{1} << 32) - 1);
+  FailureOr<std::unique_ptr<Analysis>> analysis =
+      Analysis::create(store, assumptions);
+  return succeeded(analysis) &&
+         provablyInRange(**analysis, expr, 0, (int64_t{1} << 32) - 1);
 }
 
 bool mlir::wave::sym::positiveAddendsFitU32(Store &store, ExprHandle expr,
                                             ArrayRef<PredHandle> assumptions) {
   if (ExprView(expr).getKind() != ExprKind::Add)
     return false;
+  FailureOr<std::unique_ptr<Analysis>> analysis =
+      Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return false;
   if (std::optional<uint64_t> bound =
-          positiveAddendsU32UpperBound(store, expr, assumptions))
+          positiveAddendsU32UpperBound(**analysis, expr))
     return *bound <= (uint64_t{1} << 32) - 1;
   return false;
 }
@@ -2109,10 +1794,10 @@ mlir::wave::sym::inferNonNegativeUpperBound(Store &store, ExprHandle expr,
   std::optional<InferredRange> range = inferRange(store, expr, assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
-  if (compareRationalToInteger(*range->lower, 0) < 0 ||
-      compareRationalToInteger(*range->upper, maxUpper) > 0)
+  if (compareEndpointToInteger(*range->lower, 0) < 0 ||
+      compareEndpointToInteger(*range->upper, maxUpper) > 0)
     return std::nullopt;
-  return ceilRational(*range->upper);
+  return ceilEndpoint(*range->upper);
 }
 
 std::optional<int64_t>
@@ -2123,76 +1808,6 @@ mlir::wave::sym::getIntegerLiteralValue(ExprHandle value) {
   std::optional<RationalLiteral> rational = view.getRational();
   if (rational && rational->denominator == 1)
     return rational->numerator;
-  return std::nullopt;
-}
-
-static bool hasUnitDenominator(ExprKind kind) {
-  return kind == ExprKind::Integer || kind == ExprKind::Symbol ||
-         kind == ExprKind::Floor || kind == ExprKind::Ceil;
-}
-
-static std::optional<int64_t> collectRationalDenominator(ExprView view) {
-  std::optional<RationalLiteral> rational = view.getRational();
-  if (!rational)
-    return std::nullopt;
-  return rational->denominator > 0 ? rational->denominator : 1;
-}
-
-static std::optional<int64_t> collectAddDenominator(ExprView view) {
-  std::optional<int64_t> d = collectDenominator(view.getAddConstant());
-  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
-    AddTerm term = view.getAddTerm(i);
-    d = checkedLCM(d, collectDenominator(term.coefficient));
-    d = checkedLCM(d, collectDenominator(term.term));
-  }
-  return d;
-}
-
-static std::optional<int64_t> collectMulDenominator(ExprView view) {
-  std::optional<int64_t> d = collectDenominator(view.getMulCoefficient());
-  for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i)
-    d = checkedLCM(d, collectDenominator(view.getMulFactor(i).base));
-  return d;
-}
-
-static std::optional<int64_t> collectBinaryLCMDenominator(ExprView view) {
-  return checkedLCM(collectDenominator(view.getBinaryLhs()),
-                    collectDenominator(view.getBinaryRhs()));
-}
-
-static std::optional<int64_t> collectXorDenominator(ExprView view) {
-  std::optional<int64_t> lhs = collectDenominator(view.getBinaryLhs());
-  std::optional<int64_t> rhs = collectDenominator(view.getBinaryRhs());
-  if (!lhs || !rhs || *lhs != 1 || *rhs != 1)
-    return std::nullopt;
-  return 1;
-}
-
-static std::optional<int64_t> collectPiecewiseDenominator(ExprView view) {
-  std::optional<int64_t> denominator = 1;
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount()))
-    denominator = checkedLCM(
-        denominator, collectDenominator(view.getPiecewiseCase(index).value));
-  return denominator;
-}
-
-std::optional<int64_t> mlir::wave::sym::collectDenominator(ExprHandle value) {
-  ExprView view(value);
-  ExprKind kind = view.getKind();
-  if (hasUnitDenominator(kind))
-    return 1;
-  if (kind == ExprKind::Rational)
-    return collectRationalDenominator(view);
-  if (kind == ExprKind::Add)
-    return collectAddDenominator(view);
-  if (kind == ExprKind::Mul)
-    return collectMulDenominator(view);
-  if (kind == ExprKind::Max || kind == ExprKind::Min || kind == ExprKind::Mod)
-    return collectBinaryLCMDenominator(view);
-  if (kind == ExprKind::Xor)
-    return collectXorDenominator(view);
-  if (kind == ExprKind::Piecewise)
-    return collectPiecewiseDenominator(view);
   return std::nullopt;
 }
 

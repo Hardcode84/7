@@ -500,61 +500,6 @@ def _flatten_packet_mapping_values(
     return names, values
 
 
-# ---------------------------------------------------------------------------
-# `index` operator-overload sugar
-# ---------------------------------------------------------------------------
-
-
-class IndexExpr:
-    """Operator-overload wrapper around an `index`-typed SSA value.
-
-    Lets callers write `(k * wave_m + i).v` instead of nested
-    `arith.AddIOp(arith.MulIOp(...).result, ...).result` chains. Each
-    operator materialises one arith op against the current insertion
-    point; an `int` operand auto-promotes to `arith.constant`. Pick
-    one up via `idx(value)`, drop back to a raw Value via `.v`.
-    """
-
-    __slots__ = ("_v",)
-
-    def __init__(self, value: Value) -> None:
-        self._v = value
-
-    @property
-    def v(self) -> Value:
-        return self._v
-
-    def __add__(self, other: IndexExpr | Value | int) -> IndexExpr:
-        return IndexExpr(arith.AddIOp(self._v, _index_value(other)).result)
-
-    def __radd__(self, other: Value | int) -> IndexExpr:
-        return IndexExpr(arith.AddIOp(_index_value(other), self._v).result)
-
-    def __mul__(self, other: IndexExpr | Value | int) -> IndexExpr:
-        return IndexExpr(arith.MulIOp(self._v, _index_value(other)).result)
-
-    def __rmul__(self, other: Value | int) -> IndexExpr:
-        return IndexExpr(arith.MulIOp(_index_value(other), self._v).result)
-
-
-def _index_value(x: IndexExpr | Value | int) -> Value:
-    if isinstance(x, IndexExpr):
-        return x.v
-    if isinstance(x, int):
-        return arith.ConstantOp(IndexType.get(), x).result
-    return x
-
-
-def idx(value: IndexExpr | Value | int) -> IndexExpr:
-    """Lift an `index` Value (or `int` -> `arith.constant`) into an
-    `IndexExpr` so it can participate in operator-overloaded arithmetic.
-    `IndexExpr` inputs pass through unchanged.
-    """
-    if isinstance(value, IndexExpr):
-        return value
-    return IndexExpr(_index_value(value))
-
-
 def specialize_wavemeta(module: Module) -> None:
     """Bind module-level `wavemeta.params` and run `wavemeta-specialize`
     in place. After the call no `wavemeta.*` op survives in `module`.

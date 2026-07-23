@@ -49,7 +49,7 @@ Shape constraints:
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
 from mlir.dialects import scf, wave, waveamd, wavemeta
@@ -860,10 +860,7 @@ def _emit_cta_coords(
     bindings = {raw_m: wg_m_raw, raw_n: wg_n_raw}
     wg_m_val = bld.index_expr(wg_m, bindings=bindings)
     wg_n_val = bld.index_expr(wg_n, bindings=bindings)
-    return (
-        bld.assume_range(wg_m_val, 0, cfg.M_blocks - 1),
-        bld.assume_range(wg_n_val, 0, cfg.N_blocks - 1),
-    )
+    return wg_m_val, wg_n_val
 
 
 def _emit_c_ptr(
@@ -938,11 +935,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
                 cfg.c_element_bytes,
             )
 
-    wi_val = bld.assume_range(
-        bld.workitem_id(axis=0, width=cfg.mma.wave_size),
-        0,
-        cfg.threads_per_workgroup - 1,
-    )
+    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
     wg_m_val, wg_n_val = _emit_cta_coords(bld, cfg)
 
     # Symbolic offset side via the shared `dsl.sym_ctx`. wave_id /
@@ -2035,7 +2028,6 @@ def _offset_ptrs(
 
 def _dma_subpanel_read_bases(
     bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
     staging: _LdsStaging,
     lds_offset: int | dsl.Value,
 ) -> _DmaSubpanelReadBases:
@@ -2055,11 +2047,7 @@ def _dma_subpanel_read_bases(
         offsets = _DmaSubpanelReadBases(
             bld.addi(offsets.a, offset), bld.addi(offsets.b, offset)
         )
-    maximum = 4 * _dma_cta_buffer_dwords(cfg) * _dma_buffer_count(cfg) - 1
-    return _DmaSubpanelReadBases(
-        bld.assume_range(offsets.a, 0, maximum),
-        bld.assume_range(offsets.b, 0, maximum),
-    )
+    return offsets
 
 
 def _next_dma_subpanel_read_state(
@@ -2073,8 +2061,7 @@ def _next_dma_subpanel_read_state(
     next_lds_offset = bld.subi(
         bld.constant(dsl.i32(), buffer_dwords), current_lds_offset
     )
-    next_lds_offset = bld.assume_range(next_lds_offset, 0, buffer_dwords)
-    return _dma_subpanel_read_bases(bld, cfg, staging, next_lds_offset), next_lds_offset
+    return _dma_subpanel_read_bases(bld, staging, next_lds_offset), next_lds_offset
 
 
 def _dma_subpanel_lds_byte_base(
@@ -2100,11 +2087,7 @@ def _dma_subpanel_lds_byte_base(
         )
         offset = bld.cast(offset, dsl.i32(), dsl.CastKind.IntConvert)
         result = bld.addi(staging.dma_lds_wave_byte_base, offset)
-    wave_bytes = 4 * _dma_cta_geometry(cfg).dwords_per_slot
-    maximum = buffer_bytes * (_dma_buffer_count(cfg) - 1) + wave_bytes * (
-        cfg.waves_per_workgroup - 1
-    )
-    return bld.assume_range(result, 0, maximum)
+    return result
 
 
 def _dma_subpanel_read_ptrs(
@@ -2141,15 +2124,8 @@ def _load_ptrs_for_step(
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
     a0 = staging.a_dma_src_ptrs if cfg.use_dma_lds else ptrs.a0
     b0 = staging.b_dma_src_ptrs if cfg.use_dma_lds else ptrs.b0
-    max_step = max(cfg.virtual_k_steps - 1, step_base)
     step = bld.addi(loop_iv, bld.constant(dsl.i32(), step_base))
-    step = bld.assume_range(step, step_base, max_step)
     offset = bld.muli(step, virtual_k_stride)
-    offset = bld.assume_range(
-        offset,
-        cfg.storage_k_tile * cfg.wave_k_tiles,
-        cfg.storage_k_tile * cfg.wave_k_tiles * max_step,
-    )
 
     return _advance_ptrs(bld, a0, offset), _advance_ptrs(bld, b0, offset)
 
@@ -3592,10 +3568,12 @@ def _mxfp4_raw_k_step(
         return step
     if isinstance(step, int):
         return step * cfg.wave_k_tiles + k
-    scaled = bld.muli(step, bld.constant(dsl.i32(), cfg.wave_k_tiles))
-    if k != 0:
-        scaled = bld.addi(scaled, bld.constant(dsl.i32(), k))
-    return bld.assume_range(scaled, k, cfg.k_steps - 1)
+    step_sym = dsl.sym("__wave_dsl_mxfp4_step")
+    raw_step = step_sym * cfg.wave_k_tiles + k
+    return bld.index_expr(
+        raw_step,
+        {step_sym: step},
+    )
 
 
 def _initial_scale_state(
@@ -4122,6 +4100,16 @@ def _emit_mma_grid(
     wave_k = bld.static_param("wave_k_tiles", index)
     wave_m = bld.static_param("wave_m_tiles", index)
     wave_n = bld.static_param("wave_n_tiles", index)
+    i_sym = dsl.sym("__wave_dsl_mma_i")
+    j_sym = dsl.sym("__wave_dsl_mma_j")
+    if cfg.coalesced_mfma_output:
+        wave_m_sym = dsl.sym("__wave_dsl_mma_wave_m")
+        acc_index_expr = j_sym * wave_m_sym + i_sym
+        acc_index_params = {wave_m_sym: wave_m}
+    else:
+        wave_n_sym = dsl.sym("__wave_dsl_mma_wave_n")
+        acc_index_expr = i_sym * wave_n_sym + j_sym
+        acc_index_params = {wave_n_sym: wave_n}
 
     k_lower = c0 if k_begin == 0 else bld.constant(index, k_begin)
     k_upper = wave_k if k_end is None else bld.constant(index, k_end)
@@ -4137,12 +4125,9 @@ def _emit_mma_grid(
             with bld.static_for(c0, wave_n, c1, init_args=[accs_ki]) as inner:
                 j_iv = inner.induction_variable
                 (accs_kij,) = inner.inner_iter_args
-                wn = dsl.idx(wave_n)
-                wm = dsl.idx(wave_m)
-                i = dsl.idx(i_iv)
-                j = dsl.idx(j_iv)
-                acc_idx = (
-                    (j * wm + i).v if cfg.coalesced_mfma_output else (i * wn + j).v
+                acc_idx = bld.index_expr(
+                    acc_index_expr,
+                    acc_index_params | {i_sym: i_iv, j_sym: j_iv},
                 )
                 bf = wavemeta.TupleGetOp(bf_type, b_row, j_iv).result
                 acc_old = wavemeta.TupleGetOp(acc_type, accs_kij, acc_idx).result
@@ -4449,9 +4434,6 @@ def _emit_dma_step(
         if state.next_scale_token is None:
             raise ValueError("DMA MXFP4 loop requires next prefetched scales")
         next_scale_step = bld.addi(scale_step, bld.constant(dsl.i32(), 2))
-        next_scale_step = bld.assume_range(
-            next_scale_step, 2, max(cfg.virtual_k_steps - 1, 2)
-        )
         new_scale_token = state.next_scale_token
         if _use_mxfp4_regional_scale_read_step(cfg):
             n_mid = cfg.wave_n_tiles // 2
@@ -5000,11 +4982,7 @@ def _store_acc_tiles_mfma_coalesced(
         dsl.vector_type(cfg.wave_m_tiles, dsl.f16()), width=cfg.mma.wave_size
     )
     wi_sym = dsl.sym("__wave_dsl_coalesced_wi")
-    wi_val = bld.assume_range(
-        bld.workitem_id(axis=0, width=cfg.mma.wave_size),
-        0,
-        cfg.threads_per_workgroup - 1,
-    )
+    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
     lane = dsl.mod(wi_sym, cfg.mma.wave_size)
     lane_m = dsl.mod(lane, 16) * cfg.wave_m_tiles
     lane_n = dsl.floor(lane / 16) * (cfg.mma.acc_registers * cfg.wave_n_tiles)
@@ -5142,17 +5120,10 @@ def _fragment_store_f16(
     if cfg.mma.acc_registers % 2 != 0:
         raise ValueError("f16 output needs an even accumulator register count")
     wi_sym = dsl.sym("__wave_dsl_frag_wi")
-    wi_val = bld.assume_range(
-        bld.workitem_id(axis=0, width=cfg.mma.wave_size),
-        0,
-        cfg.threads_per_workgroup - 1,
-    )
+    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
     lane_off = bld.index_expr(
         dsl.mod(wi_sym, cfg.mma.wave_size) * cfg.mma.acc_registers,
         {wi_sym: wi_val},
-    )
-    lane_off = bld.assume_range(
-        lane_off, 0, (cfg.mma.wave_size - 1) * cfg.mma.acc_registers
     )
     base = bld.ptr_add(ptr, lane_off)
     return bld.store(
@@ -6251,15 +6222,6 @@ def _emit_dma_subpanel_step(
     b_ptrs: tuple[dsl.Value, ...],
     loop_iv: dsl.Value,
 ) -> tuple[dsl.Value, ...]:
-    wave_bytes = 4 * _dma_cta_geometry(cfg).dwords_per_slot
-    maximum = 4 * _dma_cta_buffer_dwords(cfg) * (_dma_buffer_count(cfg) - 1)
-    maximum += wave_bytes * (cfg.waves_per_workgroup - 1)
-    state = replace(
-        state,
-        current_dma_lds_byte_base=bld.assume_range(
-            state.current_dma_lds_byte_base, 0, maximum
-        ),
-    )
     reuse = _emit_dma_subpanel_reuse(
         bld,
         cfg,
@@ -6410,7 +6372,7 @@ def _init_dma_subpanel_loop(
     init_accs: tuple[dsl.Value, ...],
     virtual_k_stride: dsl.Value,
 ) -> tuple[dsl.Value, ...]:
-    current_read_bases = _dma_subpanel_read_bases(bld, cfg, staging, 0)
+    current_read_bases = _dma_subpanel_read_bases(bld, staging, 0)
     current_lds_offset = bld.constant(dsl.i32(), 0)
     current_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 0)
     second_a_ptrs = _advance_ptrs(bld, staging.a_dma_src_ptrs, virtual_k_stride)
@@ -6483,9 +6445,7 @@ def _emit_dma_subpanel_loop(
         _attach_phased_dma_loop_attrs(forop, cfg)
         loop_args = tuple(forop.inner_iter_args)
         state = _split_dma_subpanel_loop_state(loop_args[:state_count], cfg)
-        loop_iv = bld.assume_range(
-            forop.induction_variable, 0, max(cfg.virtual_k_steps - 3, 0)
-        )
+        loop_iv = forop.induction_variable
         previous_a_ptrs = loop_args[state_count : state_count + a_count]
         previous_b_ptrs = loop_args[state_count + a_count :]
         a_ptrs = _advance_ptrs(bld, previous_a_ptrs, virtual_k_stride)
@@ -6525,7 +6485,7 @@ def _emit_dma_subpanel_kernel(
             staging,
             first_ready,
             init_accs,
-            _dma_subpanel_read_bases(bld, cfg, staging, 0),
+            _dma_subpanel_read_bases(bld, staging, 0),
         )
     else:
         init_args = _init_dma_subpanel_loop(
@@ -6557,6 +6517,15 @@ def _dma_loop_offsets(
     return current, ready, next_offset
 
 
+def _kernel_loop_trip_count(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> dsl.Value:
+    if cfg.use_dma_lds and cfg.virtual_k_steps > 1:
+        return bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
+    trip_count = _kernel_trip_count_source(bld, cfg)
+    if len(bld.args) > cfg.trip_count_arg_index:
+        trip_count = bld.assume_range(trip_count, 0, max(cfg.virtual_k_steps - 1, 0))
+    return trip_count
+
+
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
     coords = _emit_tile_coords(bld, cfg)
@@ -6576,11 +6545,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
         )
         return
 
-    trip_count_i32 = bld.assume_range(
-        _kernel_trip_count_source(bld, cfg), 0, max(cfg.virtual_k_steps - 1, 0)
-    )
-    if cfg.use_dma_lds and cfg.virtual_k_steps > 1:
-        trip_count_i32 = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
+    trip_count_i32 = _kernel_loop_trip_count(bld, cfg)
     zero_i32 = bld.constant(dsl.i32(), 0)
     one_i32 = bld.constant(dsl.i32(), 1)
 
@@ -6592,9 +6557,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     ) as forop:
         _attach_phased_dma_loop_attrs(forop, cfg)
         state = _split_loop_state(tuple(forop.inner_iter_args), cfg)
-        loop_iv = bld.assume_range(
-            forop.induction_variable, 0, max(cfg.virtual_k_steps - 2, 0)
-        )
+        loop_iv = forop.induction_variable
         a_ptrs, b_ptrs = _load_ptrs_for_step(
             bld,
             cfg,

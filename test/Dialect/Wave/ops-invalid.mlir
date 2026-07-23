@@ -977,6 +977,23 @@ func.func @redistribute_nonintegral(
 
 // -----
 
+func.func @redistribute_nonnegative_power(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item * item", source_slot = "slot"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_negative_power(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source item expression must be structurally integral}}
+  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "1 / item", source_slot = "slot"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+  return
+}
+
+// -----
+
 func.func @splat_element_mismatch(%v: i32) {
   // expected-error @+1 {{source type must match SIMD element type}}
   %s = wave.splat %v : i32 -> !wave.simd<i64, 32>

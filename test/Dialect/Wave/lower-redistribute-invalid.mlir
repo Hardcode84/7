@@ -79,7 +79,7 @@ func.func @exhaustive_limit(%source: !wave.simd<vector<1xi32>, 32>)
   // expected-error @+1 {{symbolic movement classification exceeds the 2^20 point limit}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 1048608, source_block = "block",
-       source_item = "Piecewise((item, item >= 0), (0, True))",
+       source_item = "Mod(1 + item, 1048608)",
        source_slot = "0">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return

@@ -25,6 +25,7 @@
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -52,36 +53,23 @@ struct ByteOffset {
   sym::ExprHandle expr;
 };
 
-static bool predicatesProveRange(sym::Store &store, sym::ExprHandle expr,
-                                 ArrayRef<sym::PredHandle> assumptions,
-                                 int64_t lower, int64_t upper) {
-  FailureOr<sym::ExprHandle> lowerExpr = sym::composeExprInt(store, lower);
-  FailureOr<sym::ExprHandle> upperExpr = sym::composeExprInt(store, upper);
-  if (failed(lowerExpr) || failed(upperExpr))
-    return false;
-  FailureOr<sym::PredHandle> aboveLower =
-      sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, *lowerExpr);
-  FailureOr<sym::PredHandle> belowUpper =
-      sym::composePredCmp(store, expr, sym::PredCmpOp::Le, *upperExpr);
-  return succeeded(aboveLower) && succeeded(belowUpper) &&
-         sym::checkPredicate(store, *aboveLower, assumptions) ==
-             sym::CheckResult::True &&
-         sym::checkPredicate(store, *belowUpper, assumptions) ==
-             sym::CheckResult::True;
-}
-
-static bool provablyInRangeWithExpansion(sym::Store &store,
-                                         sym::ExprHandle expr,
-                                         ArrayRef<sym::PredHandle> assumptions,
-                                         int64_t lower, int64_t upper) {
-  auto provesRange = [&](sym::ExprHandle candidate) {
-    return sym::provablyInRange(store, candidate, assumptions, lower, upper) ||
-           predicatesProveRange(store, candidate, assumptions, lower, upper);
-  };
-  if (provesRange(expr))
+static bool provablyInRangeWithExpansion(sym::Analysis &analysis,
+                                         sym::ExprHandle expr, int64_t lower,
+                                         int64_t upper) {
+  if (sym::provablyInRange(analysis, expr, lower, upper))
     return true;
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
-  return succeeded(expanded) && provesRange(*expanded);
+  if (FailureOr<sym::ExprHandle> simplified = analysis.simplify(expr);
+      succeeded(simplified) &&
+      sym::provablyInRange(analysis, *simplified, lower, upper))
+    return true;
+  FailureOr<sym::ExprHandle> expanded = analysis.expand(expr);
+  if (failed(expanded))
+    return false;
+  if (sym::provablyInRange(analysis, *expanded, lower, upper))
+    return true;
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*expanded);
+  return succeeded(simplified) &&
+         sym::provablyInRange(analysis, *simplified, lower, upper);
 }
 
 static std::optional<PtrType> getPointerType(Type type) {
@@ -144,29 +132,14 @@ static std::optional<int64_t> getPointerElementBytes(Type type) {
 }
 
 static FailureOr<sym::ExprHandle>
-simplifyOffsetExpr(sym::Store &store, sym::ExprHandle expr,
-                   ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
-  if (succeeded(expanded))
-    expr = *expanded;
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, expr, assumptions);
-  return succeeded(simplified) ? *simplified : expr;
-}
-
-static FailureOr<sym::ExprHandle>
-scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale,
-          ArrayRef<sym::PredHandle> assumptions) {
+scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale) {
   if (!expr || scale == 1)
     return expr;
   FailureOr<sym::ExprHandle> scaleExpr = sym::composeExprInt(store, scale);
   if (failed(scaleExpr))
     return failure();
-  FailureOr<sym::ExprHandle> product =
-      sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mul, *scaleExpr);
-  if (failed(product))
-    return failure();
-  return simplifyOffsetExpr(store, *product, assumptions);
+  return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mul,
+                                *scaleExpr);
 }
 
 static bool isWideScalarInteger(Type type) {
@@ -230,20 +203,8 @@ static LogicalResult appendExpr(sym::Store &store, ByteOffset &dst,
       sym::composeExprBinary(store, dst.expr, sym::ExprBinaryOp::Add, src.expr);
   if (failed(sum))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      simplifyOffsetExpr(store, *sum, dst.assumptions);
-  if (failed(simplified))
-    return failure();
-  dst.expr = *simplified;
+  dst.expr = *sum;
   return success();
-}
-
-static FailureOr<sym::PredHandle>
-substituteOffsetPred(sym::Store &store, sym::PredHandle pred,
-                     ArrayRef<sym::ExprSubstitution> substitutions) {
-  if (substitutions.empty())
-    return pred;
-  return sym::substitutePred(store, pred, substitutions);
 }
 
 static void appendLaneIdRange(sym::Store &store, Value value, StringRef name,
@@ -382,8 +343,11 @@ private:
       return true;
     if (referencesWideScalarInteger(offset))
       return false;
-    return provablyInRangeWithExpansion(store, offset.expr, offset.assumptions,
-                                        0, kBufferRangeBytes - *bytes);
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, offset.assumptions);
+    return succeeded(analysis) &&
+           provablyInRangeWithExpansion(**analysis, offset.expr, 0,
+                                        kBufferRangeBytes - *bytes);
   }
 
   FailureOr<ByteOffset> buildByteOffset(Value ptr) {
@@ -455,25 +419,14 @@ private:
                              ArrayRef<sym::ExprSubstitution> substitutions) {
     for (sym::PredHandle pred : symbolic.assumptions) {
       FailureOr<sym::PredHandle> substituted =
-          substituteOffsetPred(store, pred, substitutions);
+          substitutions.empty()
+              ? FailureOr<sym::PredHandle>(pred)
+              : sym::substitutePred(store, pred, substitutions);
       if (failed(substituted))
         return failure();
       offset.assumptions.push_back(*substituted);
     }
     return success();
-  }
-
-  void appendScaledIndexExprAssumptions(ByteOffset &offset, int64_t scale) {
-    SmallVector<sym::PredHandle> scaledAssumptions;
-    for (sym::PredHandle assumption : offset.assumptions) {
-      FailureOr<sym::PredHandle> scaled =
-          sym::scalePred(store, assumption, scale);
-      if (succeeded(scaled) &&
-          !llvm::is_contained(offset.assumptions, *scaled) &&
-          !llvm::is_contained(scaledAssumptions, *scaled))
-        scaledAssumptions.push_back(*scaled);
-    }
-    llvm::append_range(offset.assumptions, scaledAssumptions);
   }
 
   FailureOr<ByteOffset> buildIndexExprOffset(IndexExprOp op, int64_t scale) {
@@ -495,9 +448,7 @@ private:
         return failure();
       offset.expr = *substituted;
     }
-    appendScaledIndexExprAssumptions(offset, scale);
-    FailureOr<sym::ExprHandle> scaled =
-        scaleExpr(store, offset.expr, scale, offset.assumptions);
+    FailureOr<sym::ExprHandle> scaled = scaleExpr(store, offset.expr, scale);
     if (failed(scaled))
       return failure();
     offset.expr = *scaled;
@@ -507,15 +458,14 @@ private:
   FailureOr<ByteOffset> buildRawOffset(Value value, int64_t scale) {
     std::string name = getFreshIndexExprBindingName(
         "__wave_buffer_ptr_", reservedSymbols, nextSymbol);
-    FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
-    if (failed(expr))
-      return failure();
     ByteOffset offset;
     reservedSymbols[name] = value;
     offset.bindings.push_back({name, value});
     appendKnownPredicates(solver, store, value, name, offset.assumptions);
-    FailureOr<sym::ExprHandle> scaled =
-        scaleExpr(store, *expr, scale, offset.assumptions);
+    FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
+    if (failed(expr))
+      return failure();
+    FailureOr<sym::ExprHandle> scaled = scaleExpr(store, *expr, scale);
     if (failed(scaled))
       return failure();
     offset.expr = *scaled;

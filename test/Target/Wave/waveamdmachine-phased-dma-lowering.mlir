@@ -67,4 +67,40 @@ func.func @phased_dma_loop(%in: !wave.ptr<#wave.global, i32>)
   return
 }
 
+// CHECK-LABEL: func.func @phased_dma_algebraic_destination_delta
+// CHECK: waveamdmachine.global_load_lds_b128
+// CHECK: [[DELTA:%.*]] = waveamdmachine.imm 12
+// CHECK: waveamdmachine.s_add_m0_i32 {{%.*}}, [[DELTA]]
+// CHECK: waveamdmachine.global_load_lds_b128
+func.func @phased_dma_algebraic_destination_delta(
+    %in: !wave.ptr<#wave.global, i32>, %x_raw: i32)
+    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+  %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %wi = wave.assume %wi_raw as "w"
+      [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">]
+      : !wave.simd<i32, 64>
+  %src = wave.ptr_add %in, %wi
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 255">] : i32
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %first_off = wave.index_expr <"1 + 4*x"> ["x"](%x) : (i32) -> index
+  %second_off = wave.index_expr <"4*(1 + x)"> ["x"](%x) : (i32) -> index
+  %first_dst = wave.ptr_add %lds, %first_off
+      : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
+  %second_dst = wave.ptr_add %lds, %second_off
+      : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
+  %root = wave.token : !wave.mem.token
+  %first = waveamd.dma_load_lds %src -> %first_dst after %root
+      {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %second = waveamd.dma_load_lds %src -> %second_dst after %root
+      {bytes = 16 : i64, issue_delay_cycles = 1 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 }

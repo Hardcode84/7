@@ -55,6 +55,7 @@ struct BoundExpr {
 
 struct ExpandedIndexExpr {
   sym::ExprHandle expr;
+  sym::ExprHandle materializationExpr;
   SmallVector<sym::PredHandle> assumptions;
   SmallVector<std::string> names;
   SmallVector<Value> bindings;
@@ -72,6 +73,7 @@ struct LoopStrideCandidate {
 struct CyclicOffsetPattern {
   int64_t scale = 1;
   int64_t modulus = 0;
+  bool canAnchor = false;
 };
 
 struct CyclicOffsetLoopMatch {
@@ -95,8 +97,10 @@ struct LoopCyclicOffsetCandidate {
   SmallVector<Operation *> producers;
   SmallVector<Operation *> deadProducers;
   BoundExpr base;
+  BoundExpr proof;
   int64_t increment = 0;
   int64_t ring = 0;
+  bool canAnchor = false;
 };
 
 struct OffsetCarryCandidate {
@@ -480,7 +484,7 @@ expandIndexExpr(IndexExprOp op, scf::ForOp loop, sym::Store &store,
   if (failed(substitutedAssumptions))
     return failure();
   llvm::append_range(state.assumptions, *substitutedAssumptions);
-  return simplifyExpanded(store, *substituted, state.assumptions);
+  return *substituted;
 }
 
 static FailureOr<ExpandedIndexExpr> expandIndexExpr(IndexExprOp op,
@@ -493,13 +497,18 @@ static FailureOr<ExpandedIndexExpr> expandIndexExpr(IndexExprOp op,
     state.reserved[name] = value;
   }
 
-  FailureOr<sym::ExprHandle> expr =
+  FailureOr<sym::ExprHandle> materializationExpr =
       expandIndexExpr(op, loop, store, solver, state);
+  if (failed(materializationExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> expr =
+      simplifyExpanded(store, *materializationExpr, state.assumptions);
   if (failed(expr))
     return failure();
 
   ExpandedIndexExpr out;
   out.expr = *expr;
+  out.materializationExpr = *materializationExpr;
   out.assumptions = std::move(state.assumptions);
   for (const NamedBinding &binding : state.bindings) {
     out.names.push_back(binding.name);
@@ -553,15 +562,32 @@ static FailureOr<BoundExpr> bindLiveExpr(const ExpandedIndexExpr &expanded,
   return out;
 }
 
+static FailureOr<sym::ExprHandle> simplifyExpanded(sym::Analysis &analysis,
+                                                   sym::ExprHandle expr) {
+  FailureOr<sym::ExprHandle> expanded = analysis.expand(expr);
+  if (failed(expanded))
+    return failure();
+  return analysis.simplify(*expanded);
+}
+
 static FailureOr<sym::ExprHandle>
 simplifyExpanded(sym::Store &store, sym::ExprHandle expr,
                  ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
-  if (failed(expanded))
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
     return failure();
-  if (assumptions.empty())
-    return sym::simplifyExpr(store, *expanded);
-  return sym::simplifyExpr(store, *expanded, assumptions);
+  return simplifyExpanded(**analysis, expr);
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyExpandedForMaterialization(sym::Store &store, sym::ExprHandle expr,
+                                   ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyExpanded(store, expr, assumptions);
+  if (failed(simplified))
+    return failure();
+  return shouldUseSimplifiedIndexExpr(*simplified, expr) ? *simplified : expr;
 }
 
 static FailureOr<BoundExpr> buildBaseExpr(const ExpandedIndexExpr &expanded,
@@ -578,7 +604,7 @@ static FailureOr<BoundExpr> buildBaseExpr(const ExpandedIndexExpr &expanded,
     return failure();
 
   FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, expanded.expr, {{*iv, *lower}});
+      sym::substituteExpr(store, expanded.materializationExpr, {{*iv, *lower}});
   if (failed(substituted))
     return failure();
   FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
@@ -586,12 +612,93 @@ static FailureOr<BoundExpr> buildBaseExpr(const ExpandedIndexExpr &expanded,
                                     {{*iv, *lower}});
   if (failed(substitutedAssumptions))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      simplifyExpanded(store, *substituted, *substitutedAssumptions);
+  FailureOr<sym::ExprHandle> simplified = simplifyExpandedForMaterialization(
+      store, *substituted, *substitutedAssumptions);
   if (failed(simplified))
     return failure();
   return bindLiveExpr(expanded, *simplified, ivName, *substitutedAssumptions,
                       extra);
+}
+
+struct StrideProof {
+  sym::ExprHandle proof;
+  sym::ExprHandle materialization;
+};
+
+static FailureOr<StrideProof>
+buildStrideProof(sym::Analysis &analysis, const ExpandedIndexExpr &expanded,
+                 sym::ExprHandle iv, sym::ExprHandle step) {
+  std::optional<sym::ExprHandle> proof =
+      analysis.finiteDifference(expanded.expr, iv, step);
+  if (!proof || analysis.integerValued(*proof) != sym::CheckResult::True)
+    return failure();
+
+  FailureOr<sym::ExprHandle> ivPlusStep =
+      analysis.compose(iv, sym::ExprBinaryOp::Add, step);
+  if (failed(ivPlusStep))
+    return failure();
+  FailureOr<sym::ExprHandle> shifted =
+      analysis.substitute(expanded.materializationExpr, {{iv, *ivPlusStep}});
+  FailureOr<sym::ExprHandle> current =
+      analysis.substitute(expanded.materializationExpr, {{iv, iv}});
+  if (failed(shifted) || failed(current))
+    return failure();
+  FailureOr<sym::ExprHandle> materialization =
+      analysis.compose(*shifted, sym::ExprBinaryOp::Sub, *current);
+  if (failed(materialization) ||
+      analysis.equivalent(*proof, *materialization) != sym::CheckResult::True)
+    return failure();
+  return StrideProof{*proof, *materialization};
+}
+
+static FailureOr<sym::ExprHandle>
+selectAnchoredStride(sym::Analysis &analysis, const ExpandedIndexExpr &expanded,
+                     StringRef ivName, sym::ExprHandle iv, sym::ExprHandle step,
+                     const StrideProof &proof) {
+  FailureOr<sym::ExprHandle> zero = analysis.composeInteger(0);
+  if (failed(zero))
+    return failure();
+  FailureOr<sym::ExprHandle> atStep =
+      analysis.substitute(expanded.materializationExpr, {{iv, step}});
+  FailureOr<sym::ExprHandle> atZero =
+      analysis.substitute(expanded.materializationExpr, {{iv, *zero}});
+  if (failed(atStep) || failed(atZero))
+    return failure();
+  FailureOr<sym::ExprHandle> anchored =
+      analysis.compose(*atStep, sym::ExprBinaryOp::Sub, *atZero);
+  if (failed(anchored))
+    return failure();
+  if (hasSymbol(*anchored, ivName))
+    return proof.materialization;
+  if (analysis.equivalent(proof.proof, *anchored) != sym::CheckResult::True)
+    return proof.materialization;
+  return shouldUseSimplifiedIndexExpr(*anchored, proof.materialization)
+             ? *anchored
+             : proof.materialization;
+}
+
+static sym::ExprHandle selectSimplifiedStride(sym::Analysis &analysis,
+                                              const StrideProof &proof,
+                                              sym::ExprHandle stride) {
+  if (FailureOr<sym::ExprHandle> simplified = analysis.simplify(stride);
+      succeeded(simplified) &&
+      shouldUseSimplifiedIndexExpr(*simplified, stride))
+    stride = *simplified;
+  if (shouldUseSimplifiedIndexExpr(proof.proof, proof.materialization) &&
+      shouldUseSimplifiedIndexExpr(proof.proof, stride))
+    stride = proof.proof;
+  return stride;
+}
+
+static FailureOr<sym::ExprHandle>
+selectStrideExpr(sym::Analysis &analysis, const ExpandedIndexExpr &expanded,
+                 StringRef ivName, sym::ExprHandle iv, sym::ExprHandle step,
+                 const StrideProof &proof) {
+  FailureOr<sym::ExprHandle> stride =
+      selectAnchoredStride(analysis, expanded, ivName, iv, step, proof);
+  if (failed(stride))
+    return failure();
+  return selectSimplifiedStride(analysis, proof, *stride);
 }
 
 static FailureOr<BoundExpr> buildStrideExpr(const ExpandedIndexExpr &expanded,
@@ -611,57 +718,47 @@ static FailureOr<BoundExpr> buildStrideExpr(const ExpandedIndexExpr &expanded,
       sym::Analysis::create(store, expanded.assumptions);
   if (failed(analysis))
     return failure();
-  std::optional<sym::ExprHandle> difference =
-      (*analysis)->finiteDifference(expanded.expr, *iv, *step);
-  if (!difference ||
-      (*analysis)->integerValued(*difference) != sym::CheckResult::True)
+  FailureOr<StrideProof> proof =
+      buildStrideProof(**analysis, expanded, *iv, *step);
+  if (failed(proof))
     return failure();
-  sym::ExprHandle stride = *difference;
+  FailureOr<sym::ExprHandle> stride =
+      selectStrideExpr(**analysis, expanded, ivName, *iv, *step, *proof);
+  if (failed(stride))
+    return failure();
   (*analysis).reset();
-  if (sym::getIntegerLiteralValue(stride) == int64_t{0})
+  if (sym::getIntegerLiteralValue(*stride) == int64_t{0})
     return failure();
-  return bindLiveExpr(expanded, stride, ivName, expanded.assumptions, extra);
+  return bindLiveExpr(expanded, *stride, ivName, expanded.assumptions, extra);
 }
 
 static bool isPowerOfTwo(int64_t value) {
   return value > 0 && (value & (value - 1)) == 0;
 }
 
-static std::optional<int64_t> matchIVPlusConstant(sym::ExprHandle expr,
+static std::optional<int64_t> matchIVPlusConstant(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr,
                                                   StringRef ivName) {
-  sym::ExprView view(expr);
-  if (view.getKind() == sym::ExprKind::Symbol && view.getSymbolName() == ivName)
-    return 0;
-
-  if (view.getKind() != sym::ExprKind::Add || view.getAddTermCount() != 1)
+  FailureOr<sym::ExprHandle> iv = analysis.composeSymbol(ivName);
+  if (failed(iv))
     return std::nullopt;
-
-  std::optional<int64_t> constant =
-      sym::getIntegerLiteralValue(view.getAddConstant());
-  if (!constant)
+  std::optional<sym::AffineDecomposition> decomposition =
+      analysis.affineDecompose(expr, *iv);
+  if (!decomposition ||
+      sym::getIntegerLiteralValue(decomposition->coefficient) != int64_t{1})
     return std::nullopt;
-
-  sym::AddTerm term = view.getAddTerm(0);
-  std::optional<int64_t> coefficient =
-      sym::getIntegerLiteralValue(term.coefficient);
-  if (!coefficient || *coefficient != 1)
-    return std::nullopt;
-
-  sym::ExprView termView(term.term);
-  if (termView.getKind() != sym::ExprKind::Symbol ||
-      termView.getSymbolName() != ivName)
-    return std::nullopt;
-  return *constant;
+  return sym::getIntegerLiteralValue(decomposition->residual);
 }
 
 static std::optional<CyclicOffsetPattern>
-matchScaledModOfIV(sym::ExprHandle modExpr, int64_t scale, StringRef ivName) {
+matchScaledModOfIV(sym::Analysis &analysis, sym::ExprHandle modExpr,
+                   int64_t scale, StringRef ivName) {
   if (scale <= 0)
     return std::nullopt;
   sym::ExprView view(modExpr);
   if (view.getKind() != sym::ExprKind::Mod)
     return std::nullopt;
-  if (!matchIVPlusConstant(view.getBinaryLhs(), ivName))
+  if (!matchIVPlusConstant(analysis, view.getBinaryLhs(), ivName))
     return std::nullopt;
 
   std::optional<int64_t> modulus =
@@ -678,24 +775,24 @@ matchScaledModOfIV(sym::ExprHandle modExpr, int64_t scale, StringRef ivName) {
 }
 
 static FailureOr<sym::ExprHandle>
-scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale) {
+scaleExpr(sym::Analysis &analysis, sym::ExprHandle expr, int64_t scale) {
   if (scale == 1)
     return expr;
-  FailureOr<sym::ExprHandle> coeff = sym::composeExprInt(store, scale);
+  FailureOr<sym::ExprHandle> coeff = analysis.composeInteger(scale);
   if (failed(coeff))
     return failure();
-  return sym::composeExprBinary(store, *coeff, sym::ExprBinaryOp::Mul, expr);
+  return analysis.compose(*coeff, sym::ExprBinaryOp::Mul, expr);
 }
 
-static FailureOr<bool>
-baseFitsCyclicUpdate(sym::Store &store, sym::ExprHandle expr,
-                     sym::ExprHandle cyclicTerm, int64_t scale,
-                     StringRef ivName, ArrayRef<sym::PredHandle> assumptions) {
+static FailureOr<bool> baseFitsCyclicUpdate(sym::Analysis &analysis,
+                                            sym::ExprHandle expr,
+                                            sym::ExprHandle cyclicTerm,
+                                            int64_t scale, StringRef ivName) {
   FailureOr<sym::ExprHandle> diff =
-      sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Sub, cyclicTerm);
+      analysis.compose(expr, sym::ExprBinaryOp::Sub, cyclicTerm);
   if (failed(diff))
     return failure();
-  FailureOr<sym::ExprHandle> base = simplifyExpanded(store, *diff, assumptions);
+  FailureOr<sym::ExprHandle> base = simplifyExpanded(analysis, *diff);
   if (failed(base))
     return failure();
   if (hasSymbol(*base, ivName))
@@ -703,44 +800,39 @@ baseFitsCyclicUpdate(sym::Store &store, sym::ExprHandle expr,
   if (sym::getIntegerLiteralValue(*base) == int64_t{0})
     return true;
 
-  llvm::DenseSet<StringRef> freeSymbols;
-  collectFreeSymbols(*base, freeSymbols);
-  SmallVector<sym::PredHandle> liveAssumptions =
-      filterIndexExprPredicatesBySymbols(assumptions, freeSymbols);
-  return sym::inferNonNegativeUpperBound(store, *base, liveAssumptions,
-                                         scale - 1)
-      .has_value();
+  std::optional<sym::InferredRange> range = analysis.range(*base);
+  if (!range || !range->lower || !range->upper)
+    return false;
+  return sym::compareEndpointToInteger(*range->lower, 0) >= 0 &&
+         sym::compareEndpointToInteger(*range->upper, scale - 1) <= 0 &&
+         sym::ceilEndpoint(*range->upper).has_value();
 }
 
 static FailureOr<std::optional<CyclicOffsetPattern>>
-acceptCyclicTerm(sym::Store &store, sym::ExprHandle expr,
+acceptCyclicTerm(sym::Analysis &analysis, sym::ExprHandle expr,
                  sym::ExprHandle cyclicTerm,
-                 std::optional<CyclicOffsetPattern> pattern, StringRef ivName,
-                 ArrayRef<sym::PredHandle> assumptions) {
+                 std::optional<CyclicOffsetPattern> pattern, StringRef ivName) {
   if (!pattern)
     return std::optional<CyclicOffsetPattern>{};
-  FailureOr<bool> baseOk = baseFitsCyclicUpdate(
-      store, expr, cyclicTerm, pattern->scale, ivName, assumptions);
+  FailureOr<bool> baseOk =
+      baseFitsCyclicUpdate(analysis, expr, cyclicTerm, pattern->scale, ivName);
   if (failed(baseOk))
     return failure();
-  if (!*baseOk)
-    return std::optional<CyclicOffsetPattern>{};
+  pattern->canAnchor = *baseOk;
   return pattern;
 }
 
 static FailureOr<std::optional<CyclicOffsetPattern>>
-matchModCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
-                            StringRef ivName,
-                            ArrayRef<sym::PredHandle> assumptions) {
-  return acceptCyclicTerm(store, expr, expr,
-                          matchScaledModOfIV(expr, /*scale=*/1, ivName), ivName,
-                          assumptions);
+matchModCyclicOffsetPattern(sym::Analysis &analysis, sym::ExprHandle expr,
+                            StringRef ivName) {
+  return acceptCyclicTerm(
+      analysis, expr, expr,
+      matchScaledModOfIV(analysis, expr, /*scale=*/1, ivName), ivName);
 }
 
 static FailureOr<std::optional<CyclicOffsetPattern>>
-matchMulCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
-                            StringRef ivName,
-                            ArrayRef<sym::PredHandle> assumptions) {
+matchMulCyclicOffsetPattern(sym::Analysis &analysis, sym::ExprHandle expr,
+                            StringRef ivName) {
   sym::ExprView view(expr);
   std::optional<int64_t> coefficient =
       sym::getIntegerLiteralValue(view.getMulCoefficient());
@@ -750,40 +842,36 @@ matchMulCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
   sym::MulFactor factor = view.getMulFactor(0);
   if (factor.exponent != 1)
     return std::optional<CyclicOffsetPattern>{};
-  return acceptCyclicTerm(store, expr, expr,
-                          matchScaledModOfIV(factor.base, *coefficient, ivName),
-                          ivName, assumptions);
+  return acceptCyclicTerm(
+      analysis, expr, expr,
+      matchScaledModOfIV(analysis, factor.base, *coefficient, ivName), ivName);
 }
 
 static FailureOr<std::optional<CyclicOffsetPattern>>
-matchAddCyclicOffsetTerm(sym::Store &store, sym::ExprHandle expr,
-                         sym::AddTerm term, StringRef ivName,
-                         ArrayRef<sym::PredHandle> assumptions) {
+matchAddCyclicOffsetTerm(sym::Analysis &analysis, sym::ExprHandle expr,
+                         sym::AddTerm term, StringRef ivName) {
   std::optional<int64_t> coefficient =
       sym::getIntegerLiteralValue(term.coefficient);
   if (!coefficient)
     return std::optional<CyclicOffsetPattern>{};
   std::optional<CyclicOffsetPattern> pattern =
-      matchScaledModOfIV(term.term, *coefficient, ivName);
+      matchScaledModOfIV(analysis, term.term, *coefficient, ivName);
   if (!pattern)
     return std::optional<CyclicOffsetPattern>{};
   FailureOr<sym::ExprHandle> cyclicTerm =
-      scaleExpr(store, term.term, pattern->scale);
+      scaleExpr(analysis, term.term, pattern->scale);
   if (failed(cyclicTerm))
     return failure();
-  return acceptCyclicTerm(store, expr, *cyclicTerm, pattern, ivName,
-                          assumptions);
+  return acceptCyclicTerm(analysis, expr, *cyclicTerm, pattern, ivName);
 }
 
 static FailureOr<std::optional<CyclicOffsetPattern>>
-matchAddCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
-                            StringRef ivName,
-                            ArrayRef<sym::PredHandle> assumptions) {
+matchAddCyclicOffsetPattern(sym::Analysis &analysis, sym::ExprHandle expr,
+                            StringRef ivName) {
   sym::ExprView view(expr);
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
     FailureOr<std::optional<CyclicOffsetPattern>> pattern =
-        matchAddCyclicOffsetTerm(store, expr, view.getAddTerm(i), ivName,
-                                 assumptions);
+        matchAddCyclicOffsetTerm(analysis, expr, view.getAddTerm(i), ivName);
     if (failed(pattern))
       return failure();
     if (*pattern)
@@ -797,13 +885,19 @@ matchCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
                          StringRef ivName,
                          ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Mod &&
+      view.getKind() != sym::ExprKind::Mul &&
+      view.getKind() != sym::ExprKind::Add)
+    return std::optional<CyclicOffsetPattern>{};
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return std::optional<CyclicOffsetPattern>{};
   if (view.getKind() == sym::ExprKind::Mod)
-    return matchModCyclicOffsetPattern(store, expr, ivName, assumptions);
+    return matchModCyclicOffsetPattern(**analysis, expr, ivName);
   if (view.getKind() == sym::ExprKind::Mul)
-    return matchMulCyclicOffsetPattern(store, expr, ivName, assumptions);
-  if (view.getKind() == sym::ExprKind::Add)
-    return matchAddCyclicOffsetPattern(store, expr, ivName, assumptions);
-  return std::optional<CyclicOffsetPattern>{};
+    return matchMulCyclicOffsetPattern(**analysis, expr, ivName);
+  return matchAddCyclicOffsetPattern(**analysis, expr, ivName);
 }
 
 static FailureOr<Value>
@@ -824,7 +918,8 @@ createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, MLIRContext *ctx,
       sym::composeExprBinary(store, *sum, sym::ExprBinaryOp::Mod, *ringExpr);
   if (failed(wrapped))
     return failure();
-  FailureOr<sym::ExprHandle> simplified = simplifyExpanded(store, *wrapped, {});
+  FailureOr<sym::ExprHandle> simplified =
+      simplifyExpandedForMaterialization(store, *wrapped, {});
   if (failed(simplified))
     return failure();
 
@@ -958,18 +1053,23 @@ appendBoundExprAssumptions(sym::Store &store, DataFlowSolver &solver,
   }
 }
 
-static FailureOr<sym::ExprHandle>
-scaleByteExpr(sym::Store &store, sym::ExprHandle expr, int64_t byteScale,
-              ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> scaled = scaleExpr(store, expr, byteScale);
+static FailureOr<sym::ExprHandle> scaleByteExpr(sym::Analysis &analysis,
+                                                sym::ExprHandle expr,
+                                                int64_t byteScale) {
+  if (byteScale == 1)
+    return simplifyExpanded(analysis, expr);
+  FailureOr<sym::ExprHandle> scale = analysis.composeInteger(byteScale);
+  if (failed(scale))
+    return failure();
+  FailureOr<sym::ExprHandle> scaled =
+      analysis.compose(expr, sym::ExprBinaryOp::Mul, *scale);
   if (failed(scaled))
     return failure();
-  return simplifyExpanded(store, *scaled, assumptions);
+  return simplifyExpanded(analysis, *scaled);
 }
 
-static bool fitsU32(sym::Store &store, sym::ExprHandle expr,
-                    ArrayRef<sym::PredHandle> assumptions) {
-  return sym::provablyFitsU32(store, expr, assumptions);
+static bool fitsU32(sym::Analysis &analysis, sym::ExprHandle expr) {
+  return sym::provablyInRange(analysis, expr, 0, u32Max);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -1032,7 +1132,7 @@ buildAccumulatedByteExpr(sym::Store &store, DataFlowSolver &solver,
       store, baseBytes, sym::ExprBinaryOp::Add, *advance);
   if (failed(total))
     return failure();
-  return simplifyExpanded(store, *total, assumptions);
+  return total;
 }
 
 static bool canUseOffsetStridedCarry(scf::ForOp loop,
@@ -1042,22 +1142,52 @@ static bool canUseOffsetStridedCarry(scf::ForOp loop,
          isNormalizedUnitLoop(loop);
 }
 
+static FailureOr<sym::ExprHandle>
+assumeAndScaleByteExpr(sym::Analysis &analysis,
+                       ArrayRef<sym::PredHandle> assumptions, size_t begin,
+                       sym::ExprHandle expr, int64_t byteScale) {
+  if (failed(analysis.assume(assumptions.drop_front(begin))))
+    return failure();
+  return scaleByteExpr(analysis, expr, byteScale);
+}
+
+static bool accumulatedByteExprFitsU32(
+    sym::Analysis &analysis, sym::Store &store, DataFlowSolver &solver,
+    scf::ForOp loop, const BoundExpr &base, const BoundExpr &stride,
+    sym::ExprHandle baseBytes, sym::ExprHandle strideBytes,
+    SmallVectorImpl<sym::PredHandle> &assumptions) {
+  size_t tripAssumptionBegin = assumptions.size();
+  FailureOr<sym::ExprHandle> rawTotal = buildAccumulatedByteExpr(
+      store, solver, loop, base, stride, baseBytes, strideBytes, assumptions);
+  if (failed(rawTotal) ||
+      failed(analysis.assume(
+          ArrayRef(assumptions).drop_front(tripAssumptionBegin))))
+    return false;
+  FailureOr<sym::ExprHandle> total = simplifyExpanded(analysis, *rawTotal);
+  return succeeded(total) && fitsU32(analysis, *total);
+}
+
 static bool
 proveAccumulatingCarryFitsU32(sym::Store &store, DataFlowSolver &solver,
                               scf::ForOp loop, const BoundExpr &base,
                               const BoundExpr &stride, int64_t byteScale) {
   SmallVector<sym::PredHandle> baseAssumptions;
   appendBoundExprAssumptions(store, solver, base, baseAssumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, baseAssumptions);
+  if (failed(analysis))
+    return false;
   FailureOr<sym::ExprHandle> baseBytes =
-      scaleByteExpr(store, base.expr, byteScale, baseAssumptions);
-  if (failed(baseBytes) || !fitsU32(store, *baseBytes, baseAssumptions))
+      scaleByteExpr(**analysis, base.expr, byteScale);
+  if (failed(baseBytes) || !fitsU32(**analysis, *baseBytes))
     return false;
 
   SmallVector<sym::PredHandle> assumptions(baseAssumptions.begin(),
                                            baseAssumptions.end());
+  size_t strideAssumptionBegin = assumptions.size();
   appendBoundExprAssumptions(store, solver, stride, assumptions);
-  FailureOr<sym::ExprHandle> strideBytes =
-      scaleByteExpr(store, stride.expr, byteScale, assumptions);
+  FailureOr<sym::ExprHandle> strideBytes = assumeAndScaleByteExpr(
+      **analysis, assumptions, strideAssumptionBegin, stride.expr, byteScale);
   if (failed(strideBytes))
     return false;
 
@@ -1071,9 +1201,9 @@ proveAccumulatingCarryFitsU32(sym::Store &store, DataFlowSolver &solver,
   if (*strideLiteral == 0)
     return true;
 
-  FailureOr<sym::ExprHandle> total = buildAccumulatedByteExpr(
-      store, solver, loop, base, stride, *baseBytes, *strideBytes, assumptions);
-  return succeeded(total) && fitsU32(store, *total, assumptions);
+  return accumulatedByteExprFitsU32(**analysis, store, solver, loop, base,
+                                    stride, *baseBytes, *strideBytes,
+                                    assumptions);
 }
 
 static bool canExtractPointerCarry(scf::ForOp loop, PtrAddOp ptrAdd,
@@ -1215,8 +1345,13 @@ buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
   candidate.members.push_back({indexExpr, 0});
   llvm::append_range(candidate.producers, cyclic.expanded.producers);
   candidate.base = std::move(*base);
+  candidate.proof.expr = cyclic.expanded.expr;
+  candidate.proof.assumptions = cyclic.expanded.assumptions;
+  candidate.proof.names = cyclic.expanded.names;
+  candidate.proof.bindings = cyclic.expanded.bindings;
   candidate.increment = shape->increment;
   candidate.ring = shape->ring;
+  candidate.canAnchor = cyclic.pattern.canAnchor;
   matched = true;
   return success();
 }
@@ -1254,22 +1389,21 @@ static bool haveSameBoundBindings(const BoundExpr &lhs, const BoundExpr &rhs) {
 }
 
 static FailureOr<std::optional<int64_t>>
-constantBaseDelta(sym::Store &store, const BoundExpr &lhs,
+constantExprDelta(sym::Store &store, const BoundExpr &lhs,
                   const BoundExpr &rhs) {
   if (!haveSameBoundBindings(lhs, rhs))
     return std::optional<int64_t>{};
 
-  FailureOr<sym::ExprHandle> diff =
-      sym::composeExprBinary(store, lhs.expr, sym::ExprBinaryOp::Sub, rhs.expr);
-  if (failed(diff))
-    return failure();
   SmallVector<sym::PredHandle> assumptions(lhs.assumptions);
   llvm::append_range(assumptions, rhs.assumptions);
-  FailureOr<sym::ExprHandle> simplified =
-      simplifyExpanded(store, *diff, assumptions);
-  if (failed(simplified))
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
     return failure();
-  return sym::getIntegerLiteralValue(*simplified);
+  if (std::optional<int64_t> delta =
+          (*analysis)->constantDifference(lhs.expr, rhs.expr))
+    return delta;
+  return std::optional<int64_t>{};
 }
 
 static bool adjustCyclicOffsetMembers(LoopCyclicOffsetCandidate &group,
@@ -1290,6 +1424,7 @@ static bool adjustCyclicOffsetMembers(LoopCyclicOffsetCandidate &group,
   for (CyclicOffsetMember &existing : group.members)
     existing.delta = static_cast<int64_t>(__int128(existing.delta) + shift);
   group.base = std::move(candidate.base);
+  group.proof = std::move(candidate.proof);
   return true;
 }
 
@@ -1308,10 +1443,12 @@ mergeCyclicOffsetCandidate(LoopCyclicOffsetCandidate &group,
   if (group.increment != candidate.increment || group.ring != candidate.ring)
     return false;
   FailureOr<std::optional<int64_t>> delta =
-      constantBaseDelta(store, candidate.base, group.base);
+      constantExprDelta(store, candidate.proof, group.proof);
   if (failed(delta))
     return failure();
   if (!*delta)
+    return false;
+  if (**delta < 0 && !candidate.canAnchor)
     return false;
 
   CyclicOffsetMember member = candidate.members.front();
@@ -1343,10 +1480,39 @@ static void collectDeadCyclicProducers(scf::ForOp loop,
   }
 }
 
+static LogicalResult
+addCyclicOffsetCandidate(std::optional<LoopCyclicOffsetCandidate> &group,
+                         SmallVectorImpl<LoopCyclicOffsetCandidate> &deferred,
+                         LoopCyclicOffsetCandidate candidate,
+                         sym::Store &store) {
+  if (group) {
+    FailureOr<bool> merged =
+        mergeCyclicOffsetCandidate(*group, std::move(candidate), store);
+    if (failed(merged))
+      return failure();
+    return success();
+  }
+  if (!candidate.canAnchor) {
+    deferred.push_back(std::move(candidate));
+    return success();
+  }
+
+  group = std::move(candidate);
+  for (LoopCyclicOffsetCandidate &peer : deferred) {
+    FailureOr<bool> merged =
+        mergeCyclicOffsetCandidate(*group, std::move(peer), store);
+    if (failed(merged))
+      return failure();
+  }
+  deferred.clear();
+  return success();
+}
+
 static FailureOr<std::optional<LoopCyclicOffsetCandidate>>
 findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
                           DataFlowSolver &solver) {
   std::optional<LoopCyclicOffsetCandidate> group;
+  SmallVector<LoopCyclicOffsetCandidate, 0> deferred;
   for (Operation &op : loop.getBody()->without_terminator()) {
     IndexExprOp indexExpr = dyn_cast<IndexExprOp>(&op);
     if (!indexExpr)
@@ -1358,13 +1524,8 @@ findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
       return failure();
     if (!matched)
       continue;
-    if (!group) {
-      group = std::move(candidate);
-      continue;
-    }
-    FailureOr<bool> merged =
-        mergeCyclicOffsetCandidate(*group, std::move(candidate), store);
-    if (failed(merged))
+    if (failed(addCyclicOffsetCandidate(group, deferred, std::move(candidate),
+                                        store)))
       return failure();
   }
   if (!group)
@@ -1585,7 +1746,7 @@ mapCyclicOffsetMembers(IRRewriter &rewriter, scf::ForOp src,
     if (failed(shifted))
       return failure();
     FailureOr<sym::ExprHandle> simplified =
-        simplifyExpanded(store, *shifted, {});
+        simplifyExpandedForMaterialization(store, *shifted, {});
     if (failed(simplified))
       return failure();
 

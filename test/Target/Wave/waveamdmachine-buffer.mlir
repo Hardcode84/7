@@ -1,4 +1,5 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=MATERIAL
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-buffer-rsrc-to-tuples,waveamd-abi-lowering,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=PIPELINE
 // RUN: wave-opt --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
@@ -206,7 +207,8 @@ func.func @buffer_load_tuple_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wa
 // SELECT-LABEL: func.func @buffer_selected_oob_load
 // SELECT: %[[MASK:.*]] = waveamdmachine.v_cmp_lt_u32
 // SELECT: %[[OOB_IMM:.*]] = waveamdmachine.imm 2147483648
-// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_add_u32
+// SELECT: %[[ACTIVE_ELEMS:.*]] = waveamdmachine.v_add_u32
+// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[ACTIVE_ELEMS]]
 // SELECT: %[[OOB:.*]] = waveamdmachine.v_mov_b32_tuple %[[OOB_IMM]]
 // SELECT: %[[VOFF:.*]] = waveamdmachine.v_cndmask_b32_tuple %[[OOB]], %[[ACTIVE]], %[[MASK]]
 // SELECT-NOT: waveamdmachine.v_cndmask_b32_tuple
@@ -257,7 +259,8 @@ func.func @buffer_selected_oob_load(
 // SELECT-LABEL: func.func @buffer_selected_oob_store
 // SELECT: %[[MASK:.*]] = waveamdmachine.v_cmp_lt_u32
 // SELECT: %[[OOB_IMM:.*]] = waveamdmachine.imm 2147483648
-// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_add_u32
+// SELECT: %[[ACTIVE_ELEMS:.*]] = waveamdmachine.v_add_u32
+// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[ACTIVE_ELEMS]]
 // SELECT: %[[OOB:.*]] = waveamdmachine.v_mov_b32_tuple %[[OOB_IMM]]
 // SELECT: %[[VOFF:.*]] = waveamdmachine.v_cndmask_b32_tuple %[[OOB]], %[[ACTIVE]], %[[MASK]]
 // SELECT-NOT: waveamdmachine.v_cndmask_b32_tuple
@@ -294,6 +297,43 @@ func.func @buffer_selected_oob_store(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %lane -> %selected
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
+  return
+}
+
+// MATERIAL-LABEL: func.func @buffer_selected_oob_factored_load
+// MATERIAL: %[[K64:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
+// MATERIAL: %[[ACTIVE_ELEMS:.*]] = waveamdmachine.v_add_u32 %[[K64]]
+// MATERIAL-NEXT: %{{.*}} = waveamdmachine.imm 2
+// MATERIAL-NEXT: %[[ACTIVE_BYTES:.*]] = waveamdmachine.v_lshlrev_b32 %[[ACTIVE_ELEMS]]
+// MATERIAL: waveamdmachine.v_cndmask_b32_tuple {{.*}}, %[[ACTIVE_BYTES]]
+// MATERIAL: waveamdmachine.buffer_load_b32
+func.func @buffer_selected_oob_factored_load(
+    %in: !wave.ptr<#wave.global, i32>, %k_raw: i32) attributes {wave.kernel} {
+  %range = arith.constant 4096 : i32
+  %k = wave.assume %k_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %limit = arith.constant 16 : i32
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %mask = wave.cmpi ult %lane, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active = wave.index_expr <"64*K + lid"> ["K", "lid"](%k, %lane)
+      : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %oob = arith.constant 536870912 : index
+  %oob_simd = wave.splat %oob : index -> !wave.simd<index, 32>
+  %active_ptr = wave.ptr_add %buffer, %active
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %oob_ptr = wave.ptr_add %buffer, %oob_simd
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %selected = wave.select %mask, %active_ptr, %oob_ptr
+      : !wave.mask<32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %value, %tok = wave.load %selected
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
   return
 }
 

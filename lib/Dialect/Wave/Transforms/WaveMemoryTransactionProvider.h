@@ -31,6 +31,7 @@ struct MemoryTransactionPoint {
   sym::ExprHandle base;
   sym::ExprHandle targetBlock;
   sym::ExprHandle byteOffset;
+  sym::ExprHandle materializationByteOffset;
   int64_t baseIndex = 0;
 };
 

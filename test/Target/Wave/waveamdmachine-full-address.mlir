@@ -275,14 +275,15 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<#wave.global, i32>
 }
 
 // SELECT-LABEL: func.func @global_addr64_xor
-// SELECT-NOT: waveamdmachine.v_xor
-// SELECT: waveamdmachine.s_mov_b64_imm 4294967296
-// SELECT-NOT: waveamdmachine.v_xor
+// SELECT: waveamdmachine.s_mov_b64_imm 4
+// SELECT: waveamdmachine.s_mov_b64_imm 1073741824
+// SELECT: waveamdmachine.v_xor_b64
+// SELECT: waveamdmachine.v_mul_u64
 // SELECT: waveamdmachine.v_add_u64
-// SELECT-NOT: waveamdmachine.v_xor
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_addr64_xor:
-// ASM-NOT: v_xor
+// ASM: v_xor_b32
+// ASM: v_mul_lo_u32
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @global_addr64_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -342,11 +343,11 @@ func.func @global_addr64_rational_mod_floor(%out: !wave.ptr<#wave.global, i32>,
 
 // SELECT-LABEL: func.func @global_addr64_rational_mod_lhs
 // SELECT: waveamdmachine.v_and_b32
-// SELECT: waveamdmachine.v_lshrrev_b64
+// SELECT-NOT: waveamdmachine.v_lshrrev_b64
 // SELECT: waveamdmachine.global_store_b32_addr64
 // ASM-LABEL: global_addr64_rational_mod_lhs:
 // ASM: v_and_b32
-// ASM: v_lshrrev_b64
+// ASM-NOT: v_lshrrev_b64
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @global_addr64_rational_mod_lhs(%out: !wave.ptr<#wave.global, i32>,
                                           %x_raw: i32) attributes {wave.kernel} {

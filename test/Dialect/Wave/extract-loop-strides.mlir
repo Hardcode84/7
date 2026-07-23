@@ -65,6 +65,95 @@ func.func @non_unit_step(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 
 // -----
 
+// CHECK-LABEL: func.func @preserve_cheaper_xor_base
+// CHECK: %[[BASE:.*]] = wave.index_expr <"xor(16*a, xor(32 + 4*b, 8*c))">
+// CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE]]
+// CHECK: %[[STRIDE:.*]] = wave.index_expr <"128"> []() : () -> index
+// CHECK: scf.for {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
+// CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
+// CHECK: scf.yield %[[NEXT]]
+func.func @preserve_cheaper_xor_base(
+    %p: !wave.ptr<#wave.global, i8>, %a: !wave.simd<i32, 32>,
+    %b: !wave.simd<i32, 32>, %c: !wave.simd<i32, 32>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %off = wave.index_expr <"128*i + xor(16*a, xor(32 + 4*b, 8*c))">
+        assuming [#wave.pred<"a >= 0 & -1 + a <= 0">,
+                  #wave.pred<"b >= 0 & -1 + b <= 0">,
+                  #wave.pred<"c >= 0 & -1 + c <= 0">]
+        ["i", "a", "b", "c"](%i, %a, %b, %c)
+        : (i32, !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+           !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %address = wave.ptr_add %p, %off
+        : !wave.ptr<#wave.global, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+    %value, %token = wave.load %address
+        : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+        -> (!wave.simd<vector<4xi8>, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @accept_cheaper_base_fold
+// CHECK: %[[BASE:.*]] = wave.index_expr <"0"> []() : () -> index
+// CHECK: %[[SPLAT:.*]] = wave.splat %[[BASE]]
+// CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[SPLAT]]
+// CHECK: %[[STRIDE:.*]] = wave.index_expr <"128"> []() : () -> index
+// CHECK: scf.for {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
+// CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
+// CHECK: scf.yield %[[NEXT]]
+func.func @accept_cheaper_base_fold(
+    %p: !wave.ptr<#wave.global, i8>, %k: !wave.simd<i32, 32>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %off = wave.index_expr <"128*i + Mod(k, 8)">
+        assuming [#wave.pred<"Mod(k, 16) == 0">] ["i", "k"](%i, %k)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %address = wave.ptr_add %p, %off
+        : !wave.ptr<#wave.global, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+    %value, %token = wave.load %address
+        : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+        -> (!wave.simd<vector<4xi8>, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @preserve_factored_stride
+// CHECK: %[[BASE:.*]] = wave.index_expr <"0"> []() : () -> index
+// CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %arg0, %[[BASE]]
+// CHECK: %[[STRIDE:.*]] = wave.index_expr <"x*(y + z)">
+// CHECK-NOT: wave.index_expr <"x*y + x*z">
+// CHECK: scf.for {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
+// CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
+// CHECK: scf.yield %[[NEXT]]
+func.func @preserve_factored_stride(
+    %p: !wave.ptr<#wave.global, i8>, %x: i32, %y: i32, %z: i32,
+    %n: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %off = wave.index_expr <"i*x*(y + z)"> ["i", "x", "y", "z"]
+        (%i, %x, %y, %z) : (i32, i32, i32, i32) -> index
+    %address = wave.ptr_add %p, %off
+        : !wave.ptr<#wave.global, i8>, index -> !wave.ptr<#wave.global, i8>
+    %value, %token = wave.load %address
+        : (!wave.ptr<#wave.global, i8>)
+        -> (!wave.simd<vector<4xi8>, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reject_fractional_stride
 // CHECK: scf.for
 // CHECK-NOT: iter_args
@@ -526,6 +615,36 @@ func.func @drop_dead_simd_offset_carries(
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     scf.yield %next0, %next1, %t
         : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.mem.token
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @extract_non_normalized_shared_pointer_carry
+// CHECK: %[[WI:.*]] = wave.workitem_id 0
+// CHECK: %[[BASE:.*]] = wave.index_expr <"32 + 8*Mod(wi, 64)"> ["wi"](%[[WI]])
+// CHECK: %[[PTR:.*]] = wave.ptr_add %arg0, %[[BASE]]
+// CHECK: %[[STRIDE:.*]] = wave.index_expr <"16"> []()
+// CHECK: scf.for {{.*}} iter_args(%[[CARRY:.*]] = %[[PTR]])
+// CHECK: wave.load %[[CARRY]]
+// CHECK: %[[NEXT:.*]] = wave.ptr_add %[[CARRY]], %[[STRIDE]]
+// CHECK: scf.yield %[[NEXT]]
+func.func @extract_non_normalized_shared_pointer_carry(
+    %lds: !wave.ptr<#wave.shared, i8>) attributes {wave.kernel} {
+  %c2 = arith.constant 2 : i32
+  %c4 = arith.constant 4 : i32
+  %c12 = arith.constant 12 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  scf.for %i = %c4 to %c12 step %c2 : i32 {
+    %off = wave.index_expr <"8*i + 8*Mod(wi, 64)"> ["i", "wi"](%i, %wi)
+        : (i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+    %ptr = wave.ptr_add %lds, %off
+        : !wave.ptr<#wave.shared, i8>, !wave.simd<index, 64>
+        -> !wave.simd<!wave.ptr<#wave.shared, i8>, 64>
+    %value, %token = wave.load %ptr
+        : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>)
+        -> (!wave.simd<i32, 64>, !wave.mem.token)
   }
   return
 }

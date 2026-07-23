@@ -365,9 +365,61 @@ func.func @floor_unknown_value(%x: i32) -> index {
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @integer_rational_without_divisibility(%x_raw: i32) -> index {
+  %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">] : i32
+  // expected-error @below {{wave.index_expr selection rejects non-integer rational}}
+  %off = wave.index_expr <"1/8*x"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @integer_rational_numerator_overflow(
+    %a_raw: i32, %b_raw: i32, %c_raw: i32, %d_raw: i32) -> index {
+  %a = wave.assume %a_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %b = wave.assume %b_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %c = wave.assume %c_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %d = wave.assume %d_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  // expected-error @below {{wave.index_expr rational numerator does not provably fit u32}}
+  %off = wave.index_expr <"1/4*a + 1/4*b + 1/4*c + 1/4*d">
+      ["a", "b", "c", "d"](%a, %b, %c, %d)
+      : (i32, i32, i32, i32) -> index
+  return %off : index
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @mod_non_power_of_two_unknown_sign(%x: i32) -> index {
   // expected-error @below {{wave.index_expr non-power-of-two mod needs nonnegative dividend}}
   %off = wave.index_expr <"Mod(x, 3)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @mod_non_power_of_two_wide_product(
+    %x_raw: i32, %y_raw: i32) -> index {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 65536">] : i32
+  %y = wave.assume %y_raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 65536">] : i32
+  // expected-error @below {{wave.index_expr non-power-of-two mod dividend must fit u32}}
+  %off = wave.index_expr <"Mod(x*y, 3)"> ["x", "y"](%x, %y)
+      : (i32, i32) -> index
   return %off : index
 }
 }
@@ -388,11 +440,26 @@ func.func @floor_dynamic_denominator_buffer(%out: !wave.ptr<#wave.global, i32>,
   %ptrs = wave.ptr_add %buf, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
-  // expected-error @below {{wave.index_expr floor needs a static denominator}}
+  // expected-error @below {{wave.index_expr dynamic denominator is unsupported}}
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
   return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @dynamic_denominator_product(%x_raw: i32, %y_raw: i32) -> index {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 2147483647">] : i32
+  %y = wave.assume %y_raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 2147483647">] : i32
+  // expected-error @below {{wave.index_expr dynamic denominator is unsupported}}
+  %off = wave.index_expr <"floor(1/(x*y))"> ["x", "y"](%x, %y)
+      : (i32, i32) -> index
+  return %off : index
 }
 }
 

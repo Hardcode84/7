@@ -337,6 +337,31 @@ func.func @compose_cross_block_to_identity(
 
 // -----
 
+// CHECK-LABEL: func.func @compose_cross_block_chain_to_identity(
+// CHECK-NOT: wave.redistribute
+// CHECK-NOT: wave.extract
+// CHECK-NEXT: return %{{.*}} : !wave.simd<vector<1xi32>, 32>
+func.func @compose_cross_block_chain_to_identity(
+    %source: !wave.simd<vector<1xi32>, 32>)
+    -> !wave.simd<vector<1xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %first = wave.redistribute %source,
+      <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %second = wave.redistribute %first,
+      <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %third = wave.redistribute %second,
+      <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %fourth = wave.redistribute %third,
+      <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  return %fourth : !wave.simd<vector<1xi32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @capacity_reduces_vector_width(
 // CHECK: wave.alloc() {align = 4 : i64, bytesize = 256 : i64, offset = 65280 : i64}
 // CHECK: wave.store

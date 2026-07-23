@@ -82,6 +82,10 @@ def assert_output_store_cache(module, kind, count):
     assert str(module).count(f"#waveamd.store_cache<{kind}>") == count
 
 
+def assert_external_assumption_count(module, count):
+    assert str(module).count("wave.assume ") == count
+
+
 subpanel_schedule = wm.PhasedDmaSchedule(
     issue_group_size=1,
     initial_delay_cycles=0,
@@ -151,7 +155,23 @@ module_regular_subpanel = build_wmma_f16_matmul_module(
     include_host=False,
 )
 assert "waveamd.dma_load_lds" in str(module_regular_subpanel)
+assert_external_assumption_count(module_regular_subpanel, 2)
 print("regular-subpanel ok")
+
+module_cta_remap = build_wmma_f16_matmul_module(
+    M=128,
+    N=128,
+    K=16,
+    cta_swizzle_xcds=8,
+    cta_group_m=4,
+    skip_specialize=True,
+    include_host=False,
+)
+cta_remap_text = str(module_cta_remap)
+assert_external_assumption_count(module_cta_remap, 3)
+assert cta_remap_text.count('["wg_m_raw", "wg_n_raw"]') == 2
+dsl.specialize_wavemeta(module_cta_remap)
+print("cta-remap-symbolic-ranges ok")
 
 module_rectangular_subpanel = build_wmma_f16_matmul_module(
     M=32,
@@ -206,7 +226,27 @@ module_f16_cache = build_wmma_f16_matmul_module(
     include_host=False,
 )
 assert_output_store_cache(module_f16_cache, "cg", 1)
+assert_external_assumption_count(module_f16_cache, 3)
 print("output-store-cache ok")
+
+module_symbolic_mma_index = build_wmma_f16_matmul_module(
+    M=32,
+    N=32,
+    K=32,
+    wave_m_tiles=2,
+    wave_n_tiles=2,
+    wave_k_tiles=1,
+    matrix_intrinsic="mfma",
+    skip_specialize=True,
+    include_host=False,
+)
+symbolic_mma_index_text = str(module_symbolic_mma_index)
+assert "__wave_dsl_mma_i" in symbolic_mma_index_text
+assert "__wave_dsl_mma_j" in symbolic_mma_index_text
+assert "__wave_dsl_mma_wave_n" in symbolic_mma_index_text
+dsl.specialize_wavemeta(module_symbolic_mma_index)
+assert "__wave_dsl_mma_" not in str(module_symbolic_mma_index)
+print("symbolic-mma-index ok")
 
 assert_raises(
     ValueError,
@@ -236,9 +276,17 @@ module_coalesced = build_wmma_f16_matmul_module(
     output_type="f16",
     output_store_cache="cs",
     coalesced_mfma_output=True,
+    skip_specialize=True,
     include_host=False,
 )
+coalesced_symbolic_text = str(module_coalesced)
+assert "__wave_dsl_mma_i" in coalesced_symbolic_text
+assert "__wave_dsl_mma_j" in coalesced_symbolic_text
+assert "__wave_dsl_mma_wave_m" in coalesced_symbolic_text
+dsl.specialize_wavemeta(module_coalesced)
 coalesced_text = str(module_coalesced)
+assert "__wave_dsl_mma_" not in coalesced_text
+assert_external_assumption_count(module_coalesced, 2)
 assert coalesced_text.count("wave.pack") == 32
 assert coalesced_text.count("!wave.simd<vector<8xf16>, 64>") >= 32
 assert "!waveamd.fragment<0, f16, 16, 16, 64, 4>" in coalesced_text
@@ -264,7 +312,37 @@ module_lds_coalesced_cache = build_wmma_f16_matmul_module(
     include_host=False,
 )
 assert_output_store_cache(module_lds_coalesced_cache, "wt", 4)
+assert_external_assumption_count(module_lds_coalesced_cache, 2)
 print("lds-coalesced-output-store-cache ok")
+
+module_symbolic_mxfp4_step = build_wmma_f16_matmul_module(
+    M=32,
+    N=32,
+    K=1024,
+    BM=1,
+    BN=1,
+    wave_m_tiles=2,
+    wave_n_tiles=2,
+    wave_k_tiles=2,
+    use_buffer=True,
+    use_dma_lds=True,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+    output_type="f16",
+    skip_specialize=True,
+    include_host=False,
+)
+symbolic_mxfp4_step_text = str(module_symbolic_mxfp4_step)
+assert (
+    'wave.index_expr <"2*__wave_dsl_mxfp4_step"> ["__wave_dsl_mxfp4_step"]'
+    in symbolic_mxfp4_step_text
+)
+assert (
+    'wave.index_expr <"1 + 2*__wave_dsl_mxfp4_step"> ["__wave_dsl_mxfp4_step"]'
+    in symbolic_mxfp4_step_text
+)
+assert_external_assumption_count(module_symbolic_mxfp4_step, 2)
+print("symbolic-mxfp4-step ok")
 
 a0, b0 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
 a1, b1 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
@@ -445,6 +523,7 @@ with static_bld:
         wm._kernel_input_types(static_cfg, include_trip_count=False),
         kernel=True,
         lds_size=static_cfg.lds_bytes,
+        workgroup_size=[static_cfg.threads_per_workgroup, 1, 1],
     ) as fb:
         wm._emit_kernel(fb, static_cfg)
     wm._attach_wavemeta_params(static_bld.module, static_cfg)
@@ -454,14 +533,18 @@ static_signature = static_text.split("func.func @static_matmul_kernel", 1)[1].sp
     ")", 1
 )[0]
 assert "i32" not in static_signature
+assert_external_assumption_count(static_bld.module, 2)
 print(static_bld.module)
 
 # CHECK: subpanel-validation ok
 # CHECK: regular-subpanel ok
+# CHECK: cta-remap-symbolic-ranges ok
 # CHECK: rectangular-subpanel-serpentine ok
 # CHECK: output-store-cache ok
+# CHECK: symbolic-mma-index ok
 # CHECK: coalesced-mfma-output ok
 # CHECK: lds-coalesced-output-store-cache ok
+# CHECK: symbolic-mxfp4-step ok
 # CHECK: random-ref 1024 1024 1024
 # CHECK: bf16-ref 256 32.0
 # CHECK: mxfp4-scales 64 64 127 122
@@ -523,5 +606,5 @@ print(static_bld.module)
 # CHECK-LABEL: func.func @static_matmul_kernel
 # CHECK-SAME: wave.lds_size = 2048 : i64
 # CHECK: %[[TRIP:.*]] = arith.constant 1 : i32
-# CHECK: %[[ASSUME:.*]] = wave.assume %[[TRIP]] as "x" {{\[.*\]}} : i32
-# CHECK: scf.for %{{.*}} = %{{.*}} to %[[ASSUME]] step
+# CHECK-NOT: wave.assume %[[TRIP]]
+# CHECK: scf.for %{{.*}} = %{{.*}} to %[[TRIP]] step

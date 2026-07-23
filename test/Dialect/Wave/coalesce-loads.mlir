@@ -120,6 +120,101 @@ func.func @symbolic_delta_and_token_rewrite(%in: !wave.ptr<#wave.global, f32>,
 
 // -----
 
+// CHECK-LABEL: func.func @fact_backed_symbolic_delta
+// CHECK: wave.load {{.*}} -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+func.func @fact_backed_symbolic_delta(
+    %in: !wave.ptr<#wave.global, f32>, %x: !wave.simd<i32, 32>,
+    %i: !wave.simd<i32, 32>)
+    -> (!wave.simd<f32, 32>, !wave.simd<f32, 32>)
+    attributes {wave.kernel} {
+  %off0 = wave.index_expr <"x + 4*i"> assuming [#wave.pred<"x == 0">]
+      ["x", "i"](%x, %i)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %off1 = wave.index_expr <"4*j + 1"> ["j"](%i)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %p0 = wave.ptr_add %in, %off0
+      : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %p1 = wave.ptr_add %in, %off1
+      : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %v0, %t0 = wave.load %p0
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+      -> (!wave.simd<f32, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %t0
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>, !wave.mem.token)
+      -> (!wave.simd<f32, 32>, !wave.mem.token)
+  return %v0, %v1 : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @missing_delta_fact_stays
+// CHECK-NOT: vector<2xf32>
+// CHECK: wave.load
+// CHECK: wave.load
+func.func @missing_delta_fact_stays(
+    %in: !wave.ptr<#wave.global, f32>, %x: !wave.simd<i32, 32>,
+    %i: !wave.simd<i32, 32>)
+    -> (!wave.simd<f32, 32>, !wave.simd<f32, 32>)
+    attributes {wave.kernel} {
+  %off0 = wave.index_expr <"x + 4*i"> ["x", "i"](%x, %i)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %off1 = wave.index_expr <"4*j + 1"> ["j"](%i)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %p0 = wave.ptr_add %in, %off0
+      : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %p1 = wave.ptr_add %in, %off1
+      : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %v0, %t0 = wave.load %p0
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+      -> (!wave.simd<f32, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %t0
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>, !wave.mem.token)
+      -> (!wave.simd<f32, 32>, !wave.mem.token)
+  return %v0, %v1 : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @contradictory_delta_facts_stay
+// CHECK-NOT: vector<2xf32>
+// CHECK: wave.load
+// CHECK: wave.load
+func.func @contradictory_delta_facts_stay(
+    %in: !wave.ptr<#wave.global, f32>, %x: !wave.simd<i32, 32>,
+    %i: !wave.simd<i32, 32>)
+    -> (!wave.simd<f32, 32>, !wave.simd<f32, 32>)
+    attributes {wave.kernel} {
+  %off0 = wave.index_expr <"x + 4*i"> assuming [#wave.pred<"x == 0">]
+      ["x", "i"](%x, %i)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %off1 = wave.index_expr <"4*j + y">
+      assuming [#wave.pred<"y == 1">] ["j", "y"](%i, %x)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %p0 = wave.ptr_add %in, %off0
+      : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %p1 = wave.ptr_add %in, %off1
+      : !wave.ptr<#wave.global, f32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %v0, %t0 = wave.load %p0
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+      -> (!wave.simd<f32, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %t0
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 32>, !wave.mem.token)
+      -> (!wave.simd<f32, 32>, !wave.mem.token)
+  return %v0, %v1 : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @same_dependency_join_tokens
 // CHECK-SAME: ([[IN:%.*]]: !wave.ptr<#wave.global, f16>)
 func.func @same_dependency_join_tokens(%in: !wave.ptr<#wave.global, f16>)

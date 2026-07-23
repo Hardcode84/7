@@ -165,15 +165,6 @@ FailureOr<Value> materializeIndexExprNode(
     ArrayRef<sym::PredHandle> assumptions = {},
     IndexExprAddOrder addOrder = IndexExprAddOrder::UniformFirst);
 
-struct RationalPow2Shape {
-  int64_t denominator = 1;
-  unsigned numeratorPow2Divisibility = 0;
-};
-
-std::optional<RationalPow2Shape> inferRationalPow2Shape(sym::ExprHandle expr);
-
-bool isIntegerValuedRationalPow2Expr(sym::ExprHandle expr, int64_t denominator);
-
 FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
                                            const SymbolicOffset &offset);
 
@@ -321,6 +312,7 @@ public:
                                 SmallVectorImpl<sym::PredHandle> &assumptions,
                                 int64_t scale = 1);
   sym::Store &symbolStore();
+  bool slotFitsU32(sym::Analysis &analysis, sym::ExprHandle expr);
   bool slotFitsU32(sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions);
   SmallVector<NamedAttribute> instOffsetAttrs(int64_t value,
                                               StringRef attrName);

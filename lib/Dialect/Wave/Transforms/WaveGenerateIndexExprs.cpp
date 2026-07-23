@@ -184,13 +184,6 @@ static bool isSignlessI32StorageType(Type type) {
 
 static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
                                ArrayRef<sym::PredHandle> assumptions) {
-  sym::PredView view(pred);
-  if (view.getKind() == sym::PredKind::And) {
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-      if (!isPredicateImplied(store, view.getLogicArg(i), assumptions))
-        return false;
-    return true;
-  }
   return sym::checkPredicate(store, pred, assumptions) ==
          sym::CheckResult::True;
 }
@@ -334,26 +327,6 @@ static std::optional<SignedI64Range> workitemIdRange(WorkitemIdOp op) {
   return SignedI64Range{0, *dim - 1};
 }
 
-static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator < 0)
-    --quotient;
-  return quotient;
-}
-
-static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator > 0)
-    ++quotient;
-  return quotient;
-}
-
 static std::optional<SignedI64Range>
 finiteAssumeSignedI64Range(sym::Store &store, AssumeOp assume) {
   FailureOr<sym::ExprHandle> expr =
@@ -371,8 +344,8 @@ finiteAssumeSignedI64Range(sym::Store &store, AssumeOp assume) {
       sym::inferRange(store, *expr, assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
-  std::optional<int64_t> lo = floorRational(*range->lower);
-  std::optional<int64_t> hi = ceilRational(*range->upper);
+  std::optional<int64_t> lo = sym::floorEndpoint(*range->lower);
+  std::optional<int64_t> hi = sym::ceilEndpoint(*range->upper);
   if (!lo || !hi)
     return std::nullopt;
   return SignedI64Range{*lo, *hi};
@@ -385,8 +358,8 @@ inferSignedI64Range(sym::Store &store, sym::ExprHandle expr,
       sym::inferRange(store, expr, assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
-  std::optional<int64_t> lo = floorRational(*range->lower);
-  std::optional<int64_t> hi = ceilRational(*range->upper);
+  std::optional<int64_t> lo = sym::floorEndpoint(*range->lower);
+  std::optional<int64_t> hi = sym::ceilEndpoint(*range->upper);
   if (!lo || !hi)
     return std::nullopt;
   return SignedI64Range{*lo, *hi};
@@ -956,9 +929,13 @@ private:
   }
 
   FailureOr<sym::ExprHandle> simplifyBuiltExpr(sym::ExprHandle expr) {
-    if (offset.assumptions.empty())
-      return sym::simplifyExpr(store, expr);
-    return sym::simplifyExpr(store, expr, offset.assumptions);
+    FailureOr<sym::ExprHandle> simplified =
+        offset.assumptions.empty()
+            ? sym::simplifyExpr(store, expr)
+            : sym::simplifyExpr(store, expr, offset.assumptions);
+    if (failed(simplified) || !shouldUseSimplifiedIndexExpr(*simplified, expr))
+      return expr;
+    return *simplified;
   }
 
   bool hasSymbolicRoot(Value value) {
@@ -1973,20 +1950,38 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
   return true;
 }
 
-static FailureOr<sym::ExprHandle>
+struct GeneratedIndexExprSimplification {
+  SmallVector<sym::PredHandle> assumptions;
+  sym::ExprHandle expr;
+};
+
+static FailureOr<GeneratedIndexExprSimplification>
 substituteAndSimplifyGenerated(IndexExprOp op, sym::Store &store,
                                ArrayRef<sym::ExprSubstitution> substitutions,
                                ArrayRef<sym::PredHandle> assumptions) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return op.emitError("failed to construct generated wave.index_expr facts");
+  FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
+      substituteIndexExprPredicates(**analysis, assumptions, substitutions);
+  if (failed(substitutedAssumptions))
+    return op.emitError("failed to substitute generated wave.index_expr facts");
+  for (sym::PredHandle pred : *substitutedAssumptions)
+    if (failed((*analysis)->assume(pred)))
+      return op.emitError("failed to assume generated wave.index_expr facts");
   FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
+      (*analysis)->substitute(op.getExpr().getValue(), substitutions);
   if (failed(substituted))
     return op.emitError("failed to substitute generated wave.index_expr");
-  FailureOr<sym::ExprHandle> simplified =
-      assumptions.empty() ? sym::simplifyExpr(store, *substituted)
-                          : sym::simplifyExpr(store, *substituted, assumptions);
+  FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(*substituted);
   if (failed(simplified))
     return op.emitError("failed to simplify generated wave.index_expr");
-  return *simplified;
+  sym::ExprHandle result =
+      shouldUseSimplifiedIndexExpr(*simplified, *substituted) ? *simplified
+                                                              : *substituted;
+  return GeneratedIndexExprSimplification{std::move(*substitutedAssumptions),
+                                          result};
 }
 
 static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
@@ -2016,33 +2011,32 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
   std::optional<SignedI64Range> resultRange =
       inferSignedI64Range(store, op.getExpr().getValue(), state.assumptions);
 
-  FailureOr<SmallVector<sym::PredHandle>> assumptions =
-      substituteIndexExprPredicates(store, state.assumptions, substitutions);
-  if (failed(assumptions))
-    return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      substituteAndSimplifyGenerated(op, store, substitutions, *assumptions);
-  if (failed(simplified))
+  FailureOr<GeneratedIndexExprSimplification> simplification =
+      substituteAndSimplifyGenerated(op, store, substitutions,
+                                     state.assumptions);
+  if (failed(simplification))
     return failure();
   if (resultRange && failed(appendExprSignedRangeAssumption(
-                         store, *simplified, *resultRange, *assumptions)))
+                         store, simplification->expr, *resultRange,
+                         simplification->assumptions)))
     return op.emitError(
         "failed to preserve generated wave.index_expr result range");
   SmallVector<IndexExprBinding> liveBindings =
-      collectLiveBindings(*simplified, state.bindings);
+      collectLiveBindings(simplification->expr, state.bindings);
   llvm::DenseSet<StringRef> liveSymbols;
   for (const IndexExprBinding &binding : liveBindings)
     liveSymbols.insert(binding.name);
   SmallVector<sym::PredHandle> liveAssumptions =
-      filterIndexExprPredicatesBySymbols(*assumptions, liveSymbols);
+      filterIndexExprPredicatesBySymbols(simplification->assumptions,
+                                         liveSymbols);
   if (getIndexExprType(op.getContext(), liveBindings) !=
       op.getResult().getType())
     return false;
 
   rewriter.setInsertionPoint(op);
   IndexExprOp replacement =
-      createIndexExpr(rewriter, op.getLoc(), op.getContext(), *simplified,
-                      liveBindings, liveAssumptions);
+      createIndexExpr(rewriter, op.getLoc(), op.getContext(),
+                      simplification->expr, liveBindings, liveAssumptions);
   rewriter.replaceOp(op, replacement.getResult());
   return true;
 }

@@ -9,7 +9,6 @@
 #include "WaveAMDMachineSelector.h"
 
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/CheckedArithmetic.h"
 
 using namespace mlir;
 using namespace mlir::wave;
@@ -20,20 +19,15 @@ namespace mlir::wave::wmsel {
 
 namespace {
 
-static FailureOr<sym::ExprHandle>
-appendAddressExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs,
-                  sym::ExprHandle rhs, ArrayRef<sym::PredHandle> assumptions) {
+static FailureOr<sym::ExprHandle> appendAddressExpr(WaveAMDMachineSelector &S,
+                                                    sym::ExprHandle lhs,
+                                                    sym::ExprHandle rhs) {
   if (!lhs)
     return rhs;
   if (!rhs)
     return lhs;
-  FailureOr<sym::ExprHandle> expr =
-      sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add, rhs);
-  if (failed(expr))
-    return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), *expr, assumptions);
-  return succeeded(simplified) ? *simplified : *expr;
+  return sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add,
+                                rhs);
 }
 
 static FailureOr<BufferSelectedSourcePointer>
@@ -48,81 +42,82 @@ lookupBufferSelectedSourcePointer(WaveAMDMachineSelector &S, Operation *user,
                                      S.pointerBuffers.lookup(source)};
 }
 
-static std::optional<int64_t> lookupConstantBinding(WaveAMDMachineSelector &S,
-                                                    const AddressPlan &plan,
-                                                    StringRef name) {
+static const PointerOffsetBinding *lookupBinding(const AddressPlan &plan,
+                                                 StringRef name) {
   for (const PointerOffsetBinding &binding : plan.bindings)
     if (StringRef(binding.name) == name)
-      return S.getImmediateValue(binding.value);
-  return std::nullopt;
+      return &binding;
+  return nullptr;
 }
 
-static std::optional<int64_t> evaluateConstantExpr(WaveAMDMachineSelector &S,
-                                                   const AddressPlan &plan,
-                                                   sym::ExprHandle expr);
-
-static std::optional<int64_t> evaluateConstantProduct(WaveAMDMachineSelector &S,
-                                                      const AddressPlan &plan,
-                                                      sym::ExprView view) {
-  std::optional<int64_t> product =
-      sym::getIntegerLiteralValue(view.getMulCoefficient()).value_or(1);
-  for (uint32_t i = 0, e = view.getMulFactorCount(); i != e; ++i) {
-    sym::MulFactor factor = view.getMulFactor(i);
-    std::optional<int64_t> base = evaluateConstantExpr(S, plan, factor.base);
-    if (!base || factor.exponent < 0)
-      return std::nullopt;
-    int64_t power = 1;
-    for (int32_t exp = 0; exp != factor.exponent; ++exp) {
-      std::optional<int64_t> next = llvm::checkedMul(power, *base);
-      if (!next)
-        return std::nullopt;
-      power = *next;
-    }
-    product = llvm::checkedMul(*product, power);
-    if (!product)
-      return std::nullopt;
-  }
-  return product;
+static SmallVector<StringRef, 4> collectSymbolNames(sym::ExprHandle expr) {
+  SmallVector<StringRef, 4> names;
+  sym::walkSymbolNames(expr, [&](StringRef name) {
+    if (!llvm::is_contained(names, name))
+      names.push_back(name);
+  });
+  return names;
 }
 
-static std::optional<int64_t> evaluateConstantSum(WaveAMDMachineSelector &S,
-                                                  const AddressPlan &plan,
-                                                  sym::ExprView view) {
-  std::optional<int64_t> sum =
-      sym::getIntegerLiteralValue(view.getAddConstant()).value_or(0);
-  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i) {
-    sym::AddTerm term = view.getAddTerm(i);
-    std::optional<int64_t> value = evaluateConstantExpr(S, plan, term.term);
-    std::optional<int64_t> coeff =
-        sym::getIntegerLiteralValue(term.coefficient).value_or(1);
+static std::optional<SmallVector<int64_t, 4>>
+collectImmediateValues(WaveAMDMachineSelector &S, const AddressPlan &plan,
+                       ArrayRef<StringRef> names) {
+  SmallVector<int64_t, 4> values;
+  values.reserve(names.size());
+  for (StringRef name : names) {
+    const PointerOffsetBinding *binding = lookupBinding(plan, name);
+    if (!binding)
+      return std::nullopt;
+    std::optional<int64_t> value = S.getImmediateValue(binding->value);
     if (!value)
       return std::nullopt;
-    std::optional<int64_t> scaled = llvm::checkedMul(*coeff, *value);
-    if (!scaled)
-      return std::nullopt;
-    sum = llvm::checkedAdd(*sum, *scaled);
-    if (!sum)
-      return std::nullopt;
+    values.push_back(*value);
   }
-  return sum;
+  return values;
+}
+
+static std::optional<SmallVector<sym::ExprSubstitution, 4>>
+buildConstantSubstitutions(sym::Analysis &analysis, ArrayRef<StringRef> names,
+                           ArrayRef<int64_t> values) {
+  SmallVector<sym::ExprSubstitution, 4> substitutions;
+  substitutions.reserve(names.size());
+  for (size_t index : llvm::seq<size_t>(names.size())) {
+    FailureOr<sym::ExprHandle> target = analysis.composeSymbol(names[index]);
+    FailureOr<sym::ExprHandle> replacement =
+        analysis.composeInteger(values[index]);
+    if (failed(target) || failed(replacement))
+      return std::nullopt;
+    substitutions.push_back({*target, *replacement});
+  }
+  return substitutions;
 }
 
 static std::optional<int64_t> evaluateConstantExpr(WaveAMDMachineSelector &S,
                                                    const AddressPlan &plan,
                                                    sym::ExprHandle expr) {
-  if (std::optional<int64_t> value = sym::getIntegerLiteralValue(expr))
-    return value;
-  sym::ExprView view(expr);
-  switch (view.getKind()) {
-  case sym::ExprKind::Symbol:
-    return lookupConstantBinding(S, plan, view.getSymbolName());
-  case sym::ExprKind::Add:
-    return evaluateConstantSum(S, plan, view);
-  case sym::ExprKind::Mul:
-    return evaluateConstantProduct(S, plan, view);
-  default:
+  SmallVector<StringRef, 4> names = collectSymbolNames(expr);
+  std::optional<SmallVector<int64_t, 4>> values =
+      collectImmediateValues(S, plan, names);
+  if (!values)
     return std::nullopt;
-  }
+
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      sym::Analysis::create(S.symbolStore(), plan.assumptions);
+  if (failed(created))
+    return std::nullopt;
+  sym::Analysis &analysis = **created;
+  std::optional<SmallVector<sym::ExprSubstitution, 4>> substitutions =
+      buildConstantSubstitutions(analysis, names, *values);
+  if (!substitutions)
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> substituted =
+      analysis.substitute(expr, *substitutions);
+  if (failed(substituted) || failed(analysis.substituteFacts(*substitutions)))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*substituted);
+  if (failed(simplified))
+    return std::nullopt;
+  return sym::getIntegerLiteralValue(*simplified);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -134,7 +129,41 @@ appendInstOffsetExpr(WaveAMDMachineSelector &S, sym::ExprHandle voffset,
       sym::composeExprInt(S.symbolStore(), plan.instOffset);
   if (failed(instOffset))
     return failure();
-  return appendAddressExpr(S, voffset, *instOffset, plan.assumptions);
+  return appendAddressExpr(S, voffset, *instOffset);
+}
+
+static FailureOr<sym::ExprHandle>
+composeFoldedVOffset(WaveAMDMachineSelector &S, const AddressPlan &plan,
+                     bool includeInstOffset) {
+  FailureOr<sym::ExprHandle> voffset =
+      appendAddressExpr(S, plan.voffsetExpr, plan.soffsetExpr);
+  if (failed(voffset))
+    return failure();
+  voffset = appendAddressExpr(S, *voffset, plan.fullAddressRemainderExpr);
+  if (failed(voffset))
+    return failure();
+  return appendInstOffsetExpr(S, *voffset, plan, includeInstOffset);
+}
+
+static FailureOr<sym::ExprHandle>
+buildVOffsetProof(sym::Analysis &analysis, sym::ExprHandle materialization) {
+  FailureOr<sym::ExprHandle> proof = analysis.expand(materialization);
+  if (succeeded(proof)) {
+    FailureOr<sym::ExprHandle> simplified = analysis.simplify(*proof);
+    if (succeeded(simplified))
+      return *simplified;
+    return *proof;
+  }
+  return analysis.simplify(materialization);
+}
+
+static void clearFoldedAddressFields(AddressPlan &plan,
+                                     bool includeInstOffset) {
+  if (includeInstOffset)
+    plan.instOffset = 0;
+  plan.soffsetExpr = {};
+  plan.soffsetNeedsWide = false;
+  plan.fullAddressRemainderExpr = {};
 }
 
 static bool hasSelectedPtrAddArms(SelectOp select) {
@@ -152,34 +181,32 @@ static bool hasMatchingBufferSources(const SelectedBufferSources &sources) {
 LogicalResult foldBufferAddressFieldsIntoVOffset(WaveAMDMachineSelector &S,
                                                  AddressPlan &plan,
                                                  bool includeInstOffset) {
-  FailureOr<sym::ExprHandle> voffset = appendAddressExpr(
-      S, plan.voffsetExpr, plan.soffsetExpr, plan.assumptions);
-  if (failed(voffset))
-    return failure();
-  voffset = appendAddressExpr(S, *voffset, plan.fullAddressRemainderExpr,
-                              plan.assumptions);
-  if (failed(voffset))
-    return failure();
-  voffset = appendInstOffsetExpr(S, *voffset, plan, includeInstOffset);
+  FailureOr<sym::ExprHandle> voffset =
+      composeFoldedVOffset(S, plan, includeInstOffset);
   if (failed(voffset))
     return failure();
   if (!*voffset) {
-    if (includeInstOffset)
-      plan.instOffset = 0;
-    plan.soffsetExpr = {};
-    plan.soffsetNeedsWide = false;
-    plan.fullAddressRemainderExpr = {};
+    clearFoldedAddressFields(plan, includeInstOffset);
     return success();
   }
-  if (!S.slotFitsU32(*voffset, plan.assumptions))
+  sym::ExprHandle materialization = *voffset;
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      sym::Analysis::create(S.symbolStore(), plan.assumptions);
+  if (failed(created))
     return success();
-  plan.voffsetExpr = *voffset;
-  plan.voffsetNeedsWide = needsWideAddressMaterialization(*voffset, plan);
-  if (includeInstOffset)
-    plan.instOffset = 0;
-  plan.soffsetExpr = {};
-  plan.soffsetNeedsWide = false;
-  plan.fullAddressRemainderExpr = {};
+  sym::Analysis &analysis = **created;
+  FailureOr<sym::ExprHandle> proof =
+      buildVOffsetProof(analysis, materialization);
+  sym::ExprHandle proofExpr = succeeded(proof) ? *proof : materialization;
+  if (!S.slotFitsU32(analysis, proofExpr))
+    return success();
+  plan.voffsetExpr =
+      succeeded(proof) && shouldUseSimplifiedIndexExpr(*proof, materialization)
+          ? *proof
+          : materialization;
+  plan.voffsetNeedsWide =
+      needsWideAddressMaterialization(plan.voffsetExpr, plan);
+  clearFoldedAddressFields(plan, includeInstOffset);
   return success();
 }
 

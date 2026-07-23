@@ -728,6 +728,16 @@ sym::Store &WaveAMDMachineSelector::symbolStore() {
   return func.getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
 }
 
+bool WaveAMDMachineSelector::slotFitsU32(sym::Analysis &analysis,
+                                         sym::ExprHandle expr) {
+  constexpr int64_t max = (int64_t{1} << 32) - 1;
+  if (sym::provablyInRange(analysis, expr, 0, max))
+    return true;
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(expr);
+  return succeeded(simplified) &&
+         sym::provablyInRange(analysis, *simplified, 0, max);
+}
+
 bool WaveAMDMachineSelector::slotFitsU32(
     sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions) {
   SlotFitsU32CacheKey key = {
@@ -737,7 +747,9 @@ bool WaveAMDMachineSelector::slotFitsU32(
     if (llvm::equal(entry.assumptions, assumptions))
       return entry.fits;
 
-  bool fits = sym::provablyFitsU32(symbolStore(), expr, assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(symbolStore(), assumptions);
+  bool fits = succeeded(analysis) && slotFitsU32(**analysis, expr);
   SlotFitsU32CacheEntry &entry = entries.emplace_back();
   llvm::append_range(entry.assumptions, assumptions);
   entry.fits = fits;
@@ -1392,6 +1404,35 @@ collectOrderedWideMulFactors(sym::ExprHandle expr, Operation *user,
   return factors;
 }
 
+struct WideMaterializationContext {
+  WideMaterializationContext(WaveAMDMachineSelector &selector,
+                             ArrayRef<sym::PredHandle> assumptions)
+      : assumptions(assumptions), selector(selector) {}
+
+  std::unique_ptr<sym::Analysis> analysis;
+  ArrayRef<sym::PredHandle> assumptions;
+  WaveAMDMachineSelector &selector;
+
+  sym::Analysis *getAnalysis() {
+    if (analysis)
+      return analysis.get();
+    FailureOr<std::unique_ptr<sym::Analysis>> created =
+        sym::Analysis::create(selector.symbolStore(), assumptions);
+    if (failed(created))
+      return nullptr;
+    analysis = std::move(*created);
+    return analysis.get();
+  }
+
+  void resetAnalysis() { analysis.reset(); }
+};
+
+static FailureOr<Value> materializeWideIndexExprNode(
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
+    bool symbolsAreUniform = false,
+    IndexExprAddOrder addOrder = IndexExprAddOrder::UniformFirst);
+
 static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
     ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
@@ -1404,26 +1445,24 @@ struct WideRationalValue {
 };
 
 static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform = false);
 
-static FailureOr<Value>
-materializeWideAddTerm(WaveAMDMachineSelector &S, sym::AddTerm addTerm,
-                       Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                       ArrayRef<sym::PredHandle> assumptions,
-                       bool symbolsAreUniform, IndexExprAddOrder addOrder) {
-  FailureOr<Value> term =
-      materializeWideIndexExprNode(S, addTerm.term, user, bindings, assumptions,
-                                   symbolsAreUniform, addOrder);
+static FailureOr<Value> materializeWideAddTerm(
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::AddTerm addTerm, Operation *user, ArrayRef<WideSymbolBinding> bindings,
+    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+  FailureOr<Value> term = materializeWideIndexExprNode(
+      S, context, addTerm.term, user, bindings, symbolsAreUniform, addOrder);
   if (failed(term))
     return failure();
   std::optional<int64_t> coeffInt = staticIntLiteral(addTerm.coefficient);
   if (coeffInt && *coeffInt == 1)
     return *term;
   FailureOr<Value> coeffValue =
-      materializeWideIndexExprNode(S, addTerm.coefficient, user, bindings,
-                                   assumptions, symbolsAreUniform, addOrder);
+      materializeWideIndexExprNode(S, context, addTerm.coefficient, user,
+                                   bindings, symbolsAreUniform, addOrder);
   if (failed(coeffValue))
     return failure();
   return mulWide(S, user->getLoc(), *coeffValue, *term);
@@ -1444,13 +1483,14 @@ static Value createWideZero(WaveAMDMachineSelector &S, Location loc) {
 }
 
 static LogicalResult materializeWideLaneFirstAddConstant(
-    WaveAMDMachineSelector &S, Operation *user, sym::ExprHandle coeff,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
-    bool symbolsAreUniform, std::optional<Value> &uniformAcc) {
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    Operation *user, sym::ExprHandle coeff,
+    ArrayRef<WideSymbolBinding> bindings, bool symbolsAreUniform,
+    std::optional<Value> &uniformAcc) {
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   if (!coeffInt || *coeffInt != 0) {
     FailureOr<Value> seed = materializeWideIndexExprNode(
-        S, coeff, user, bindings, assumptions, symbolsAreUniform,
+        S, context, coeff, user, bindings, symbolsAreUniform,
         IndexExprAddOrder::LaneFirst);
     if (failed(seed))
       return failure();
@@ -1460,12 +1500,12 @@ static LogicalResult materializeWideLaneFirstAddConstant(
 }
 
 static LogicalResult appendWideLaneFirstAddTerm(
-    WaveAMDMachineSelector &S, Operation *user,
-    const OrderedWideAddTerm &ordered, ArrayRef<WideSymbolBinding> bindings,
-    ArrayRef<sym::PredHandle> assumptions, bool symbolsAreUniform,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    Operation *user, const OrderedWideAddTerm &ordered,
+    ArrayRef<WideSymbolBinding> bindings, bool symbolsAreUniform,
     std::optional<Value> &laneAcc, std::optional<Value> &uniformAcc) {
   FailureOr<Value> term =
-      materializeWideAddTerm(S, ordered.term, user, bindings, assumptions,
+      materializeWideAddTerm(S, context, ordered.term, user, bindings,
                              symbolsAreUniform, IndexExprAddOrder::LaneFirst);
   if (failed(term))
     return failure();
@@ -1489,29 +1529,29 @@ static Value finalizeWideLaneFirstAdd(WaveAMDMachineSelector &S, Location loc,
 }
 
 static FailureOr<Value> materializeWideAddLaneFirst(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   sym::ExprView view(expr);
   std::optional<Value> laneAcc;
   std::optional<Value> uniformAcc;
   if (failed(materializeWideLaneFirstAddConstant(
-          S, user, view.getAddConstant(), bindings, assumptions,
-          symbolsAreUniform, uniformAcc)))
+          S, context, user, view.getAddConstant(), bindings, symbolsAreUniform,
+          uniformAcc)))
     return failure();
   SmallVector<OrderedWideAddTerm, 8> terms = collectOrderedWideAddTerms(
       expr, user, bindings, symbolsAreUniform, IndexExprAddOrder::LaneFirst);
   for (const OrderedWideAddTerm &ordered : terms)
-    if (failed(appendWideLaneFirstAddTerm(S, user, ordered, bindings,
-                                          assumptions, symbolsAreUniform,
-                                          laneAcc, uniformAcc)))
+    if (failed(appendWideLaneFirstAddTerm(S, context, user, ordered, bindings,
+                                          symbolsAreUniform, laneAcc,
+                                          uniformAcc)))
       return failure();
   return finalizeWideLaneFirstAdd(S, user->getLoc(), laneAcc, uniformAcc);
 }
 
 static FailureOr<Value> materializeWideAddUniformFirst(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
@@ -1520,7 +1560,7 @@ static FailureOr<Value> materializeWideAddUniformFirst(
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   if (!coeffInt || *coeffInt != 0) {
     FailureOr<Value> seed = materializeWideIndexExprNode(
-        S, coeff, user, bindings, assumptions, symbolsAreUniform);
+        S, context, coeff, user, bindings, symbolsAreUniform);
     if (failed(seed))
       return failure();
     acc = *seed;
@@ -1529,7 +1569,7 @@ static FailureOr<Value> materializeWideAddUniformFirst(
       expr, user, bindings, symbolsAreUniform, IndexExprAddOrder::UniformFirst);
   for (const OrderedWideAddTerm &ordered : terms) {
     FailureOr<Value> term = materializeWideAddTerm(
-        S, ordered.term, user, bindings, assumptions, symbolsAreUniform,
+        S, context, ordered.term, user, bindings, symbolsAreUniform,
         IndexExprAddOrder::UniformFirst);
     if (failed(term))
       return failure();
@@ -1541,28 +1581,29 @@ static FailureOr<Value> materializeWideAddUniformFirst(
 }
 
 static FailureOr<Value>
-materializeWideAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+materializeWideAdd(WaveAMDMachineSelector &S,
+                   WideMaterializationContext &context, sym::ExprHandle expr,
                    Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                   ArrayRef<sym::PredHandle> assumptions,
                    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   if (addOrder == IndexExprAddOrder::LaneFirst)
-    return materializeWideAddLaneFirst(S, expr, user, bindings, assumptions,
+    return materializeWideAddLaneFirst(S, context, expr, user, bindings,
                                        symbolsAreUniform);
-  return materializeWideAddUniformFirst(S, expr, user, bindings, assumptions,
+  return materializeWideAddUniformFirst(S, context, expr, user, bindings,
                                         symbolsAreUniform);
 }
 
 static FailureOr<Value>
-materializeWideMulFactor(WaveAMDMachineSelector &S, sym::MulFactor factor,
-                         Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                         ArrayRef<sym::PredHandle> assumptions,
+materializeWideMulFactor(WaveAMDMachineSelector &S,
+                         WideMaterializationContext &context,
+                         sym::MulFactor factor, Operation *user,
+                         ArrayRef<WideSymbolBinding> bindings,
                          bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   int32_t exp = factor.exponent;
   if (exp <= 0)
     return user->emitError(
         "full-address index_expr rejects non-positive mul exponent");
   FailureOr<Value> base = materializeWideIndexExprNode(
-      S, factor.base, user, bindings, assumptions, symbolsAreUniform, addOrder);
+      S, context, factor.base, user, bindings, symbolsAreUniform, addOrder);
   if (failed(base))
     return failure();
   Value pow = *base;
@@ -1572,9 +1613,9 @@ materializeWideMulFactor(WaveAMDMachineSelector &S, sym::MulFactor factor,
 }
 
 static FailureOr<Value>
-materializeWideMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+materializeWideMul(WaveAMDMachineSelector &S,
+                   WideMaterializationContext &context, sym::ExprHandle expr,
                    Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                   ArrayRef<sym::PredHandle> assumptions,
                    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
@@ -1583,7 +1624,7 @@ materializeWideMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   if (!coeffInt || *coeffInt != 1) {
     FailureOr<Value> seed = materializeWideIndexExprNode(
-        S, coeff, user, bindings, assumptions, symbolsAreUniform, addOrder);
+        S, context, coeff, user, bindings, symbolsAreUniform, addOrder);
     if (failed(seed))
       return failure();
     acc = *seed;
@@ -1592,7 +1633,7 @@ materializeWideMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       collectOrderedWideMulFactors(expr, user, bindings, symbolsAreUniform);
   for (const OrderedWideMulFactor &ordered : factors) {
     FailureOr<Value> factor =
-        materializeWideMulFactor(S, ordered.factor, user, bindings, assumptions,
+        materializeWideMulFactor(S, context, ordered.factor, user, bindings,
                                  symbolsAreUniform, addOrder);
     if (failed(factor))
       return failure();
@@ -1686,17 +1727,17 @@ static FailureOr<Value> materializeWideRational(WaveAMDMachineSelector &S,
 }
 
 static FailureOr<Value>
-materializeWideXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+materializeWideXor(WaveAMDMachineSelector &S,
+                   WideMaterializationContext &context, sym::ExprHandle expr,
                    Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                   ArrayRef<sym::PredHandle> assumptions,
                    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   sym::ExprView view(expr);
   FailureOr<Value> lhs =
-      materializeWideIndexExprNode(S, view.getBinaryLhs(), user, bindings,
-                                   assumptions, symbolsAreUniform, addOrder);
+      materializeWideIndexExprNode(S, context, view.getBinaryLhs(), user,
+                                   bindings, symbolsAreUniform, addOrder);
   FailureOr<Value> rhs =
-      materializeWideIndexExprNode(S, view.getBinaryRhs(), user, bindings,
-                                   assumptions, symbolsAreUniform, addOrder);
+      materializeWideIndexExprNode(S, context, view.getBinaryRhs(), user,
+                                   bindings, symbolsAreUniform, addOrder);
   if (failed(lhs) || failed(rhs))
     return failure();
   return xorWide(S, user->getLoc(), *lhs, *rhs);
@@ -1742,24 +1783,23 @@ static bool isPositivePowerOfTwo(int64_t value) {
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalAdd(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> constant = materializeWideRationalIndexExprNode(
-      S, view.getAddConstant(), user, bindings, assumptions, symbolsAreUniform);
+      S, context, view.getAddConstant(), user, bindings, symbolsAreUniform);
   if (failed(constant))
     return failure();
   WideRationalValue acc = *constant;
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
     sym::AddTerm term = view.getAddTerm(i);
     FailureOr<WideRationalValue> coefficient =
-        materializeWideRationalIndexExprNode(S, term.coefficient, user,
-                                             bindings, assumptions,
-                                             symbolsAreUniform);
+        materializeWideRationalIndexExprNode(S, context, term.coefficient, user,
+                                             bindings, symbolsAreUniform);
     FailureOr<WideRationalValue> value = materializeWideRationalIndexExprNode(
-        S, term.term, user, bindings, assumptions, symbolsAreUniform);
+        S, context, term.term, user, bindings, symbolsAreUniform);
     if (failed(coefficient) || failed(value))
       return failure();
     FailureOr<WideRationalValue> product =
@@ -1776,15 +1816,14 @@ static FailureOr<WideRationalValue> materializeWideRationalAdd(
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalMul(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> coefficient =
-      materializeWideRationalIndexExprNode(S, view.getMulCoefficient(), user,
-                                           bindings, assumptions,
-                                           symbolsAreUniform);
+      materializeWideRationalIndexExprNode(S, context, view.getMulCoefficient(),
+                                           user, bindings, symbolsAreUniform);
   if (failed(coefficient))
     return failure();
   WideRationalValue acc = *coefficient;
@@ -1794,7 +1833,7 @@ static FailureOr<WideRationalValue> materializeWideRationalMul(
       return user->emitError("full-address index_expr rational rejects "
                              "non-positive mul exponent");
     FailureOr<WideRationalValue> base = materializeWideRationalIndexExprNode(
-        S, factor.base, user, bindings, assumptions, symbolsAreUniform);
+        S, context, factor.base, user, bindings, symbolsAreUniform);
     if (failed(base))
       return failure();
     WideRationalValue pow = *base;
@@ -1830,8 +1869,8 @@ static FailureOr<int64_t> getStaticWideModDivisor(WaveAMDMachineSelector &S,
 }
 
 static FailureOr<Value> materializeNarrowModAsWide(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   llvm::DenseSet<StringRef> liveSymbols;
   sym::walkSymbolNames(expr, [&](StringRef name) { liveSymbols.insert(name); });
@@ -1845,8 +1884,9 @@ static FailureOr<Value> materializeNarrowModAsWide(
                              "needs 32-bit bindings");
     subs[binding.name] = *low;
   }
-  FailureOr<Value> value =
-      materializeIndexExprNode(S, expr, user, subs, assumptions, addOrder);
+  context.resetAnalysis();
+  FailureOr<Value> value = materializeIndexExprNode(
+      S, expr, user, subs, context.assumptions, addOrder);
   if (failed(value))
     return failure();
   if (symbolsAreUniform)
@@ -1855,14 +1895,14 @@ static FailureOr<Value> materializeNarrowModAsWide(
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalMod(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> lhs = materializeWideRationalIndexExprNode(
-      S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
+      S, context, view.getBinaryLhs(), user, bindings, symbolsAreUniform);
   FailureOr<WideRationalValue> rhs = materializeWideRationalIndexExprNode(
-      S, view.getBinaryRhs(), user, bindings, assumptions, symbolsAreUniform);
+      S, context, view.getBinaryRhs(), user, bindings, symbolsAreUniform);
   if (failed(lhs) || failed(rhs))
     return failure();
   FailureOr<int64_t> divisor = getStaticWideModDivisor(S, *lhs, *rhs, user);
@@ -1873,7 +1913,7 @@ static FailureOr<WideRationalValue> materializeWideRationalMod(
       return user->emitError("full-address index_expr non-power-of-two mod "
                              "needs an integer-valued lhs");
     FailureOr<Value> value = materializeNarrowModAsWide(
-        S, expr, user, bindings, assumptions, symbolsAreUniform,
+        S, context, expr, user, bindings, symbolsAreUniform,
         IndexExprAddOrder::UniformFirst);
     if (failed(value))
       return failure();
@@ -1885,11 +1925,11 @@ static FailureOr<WideRationalValue> materializeWideRationalMod(
 }
 
 static FailureOr<WideRationalValue> materializeWideIntegerRational(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   FailureOr<Value> value = materializeWideIndexExprNode(
-      S, expr, user, bindings, assumptions, symbolsAreUniform);
+      S, context, expr, user, bindings, symbolsAreUniform);
   if (failed(value))
     return failure();
   return WideRationalValue{*value, 1};
@@ -1930,24 +1970,24 @@ static FailureOr<WideRationalValue> materializeWideRationalPrimitive(
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalCompound(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
-    return materializeWideRationalAdd(S, expr, user, bindings, assumptions,
+    return materializeWideRationalAdd(S, context, expr, user, bindings,
                                       symbolsAreUniform);
   case sym::ExprKind::Mul:
-    return materializeWideRationalMul(S, expr, user, bindings, assumptions,
+    return materializeWideRationalMul(S, context, expr, user, bindings,
                                       symbolsAreUniform);
   case sym::ExprKind::Mod:
-    return materializeWideRationalMod(S, expr, user, bindings, assumptions,
+    return materializeWideRationalMod(S, context, expr, user, bindings,
                                       symbolsAreUniform);
   case sym::ExprKind::Xor:
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
-    return materializeWideIntegerRational(S, expr, user, bindings, assumptions,
+    return materializeWideIntegerRational(S, context, expr, user, bindings,
                                           symbolsAreUniform);
   default:
     break;
@@ -1958,15 +1998,15 @@ static FailureOr<WideRationalValue> materializeWideRationalCompound(
 }
 
 static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
     return materializeWideRationalPrimitive(S, expr, user, bindings,
                                             symbolsAreUniform);
-  return materializeWideRationalCompound(S, expr, user, bindings, assumptions,
+  return materializeWideRationalCompound(S, context, expr, user, bindings,
                                          symbolsAreUniform);
 }
 
@@ -1975,142 +2015,38 @@ static bool hasNonNegativeLowerBound(const sym::InferredRange &range) {
          range.lower->numerator >= 0;
 }
 
-static bool
-hasInferredNonNegativeLowerBound(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr,
-                                 ArrayRef<sym::PredHandle> assumptions) {
-  std::optional<sym::InferredRange> range =
-      sym::inferRange(S.symbolStore(), expr, assumptions);
-  return range && hasNonNegativeLowerBound(*range);
-}
-
-static bool
-explicitPredicatesProveNonNegative(WaveAMDMachineSelector &S,
-                                   sym::ExprHandle expr,
-                                   ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(S.symbolStore(), 0);
+static bool isProvablyNonNegativeForWideShift(sym::Analysis &analysis,
+                                              sym::ExprHandle expr) {
+  std::optional<sym::InferredRange> range = analysis.range(expr);
+  if (range && hasNonNegativeLowerBound(*range))
+    return true;
+  FailureOr<sym::ExprHandle> zero = analysis.composeInteger(0);
   if (failed(zero))
     return false;
   FailureOr<sym::PredHandle> nonNegative =
-      sym::composePredCmp(S.symbolStore(), expr, sym::PredCmpOp::Ge, *zero);
+      analysis.compare(expr, sym::PredCmpOp::Ge, *zero);
   return succeeded(nonNegative) &&
-         sym::checkPredicate(S.symbolStore(), *nonNegative, assumptions) ==
-             sym::CheckResult::True;
+         analysis.check(*nonNegative) == sym::CheckResult::True;
 }
 
-static bool
-isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
-                                  sym::ExprHandle expr,
-                                  ArrayRef<sym::PredHandle> assumptions);
-
-static bool isNonNegativeLiteral(sym::ExprHandle expr) {
-  sym::ExprView view(expr);
-  if (std::optional<int64_t> value = view.getInt())
-    return *value >= 0;
-  if (std::optional<sym::RationalLiteral> rational = view.getRational())
-    return rational->denominator > 0 && rational->numerator >= 0;
-  return false;
-}
-
-static bool isNonNegativeAddExpr(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr,
-                                 ArrayRef<sym::PredHandle> assumptions) {
-  sym::ExprView view(expr);
-  if (!isProvablyNonNegativeForWideShift(S, view.getAddConstant(), assumptions))
-    return false;
-  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-    sym::AddTerm term = view.getAddTerm(i);
-    if (!isProvablyNonNegativeForWideShift(S, term.coefficient, assumptions) ||
-        !isProvablyNonNegativeForWideShift(S, term.term, assumptions))
-      return false;
-  }
-  return true;
-}
-
-static bool isNonNegativeMulExpr(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr,
-                                 ArrayRef<sym::PredHandle> assumptions) {
-  sym::ExprView view(expr);
-  if (!isProvablyNonNegativeForWideShift(S, view.getMulCoefficient(),
-                                         assumptions))
-    return false;
-  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
-    sym::MulFactor factor = view.getMulFactor(i);
-    if (factor.exponent <= 0 ||
-        !isProvablyNonNegativeForWideShift(S, factor.base, assumptions))
-      return false;
-  }
-  return true;
-}
-
-static bool isNonNegativeXorExpr(WaveAMDMachineSelector &S,
-                                 sym::ExprHandle expr,
-                                 ArrayRef<sym::PredHandle> assumptions) {
-  sym::ExprView view(expr);
-  return isProvablyNonNegativeForWideShift(S, view.getBinaryLhs(),
-                                           assumptions) &&
-         isProvablyNonNegativeForWideShift(S, view.getBinaryRhs(), assumptions);
-}
-
-static bool isNonNegativeModExpr(sym::ExprHandle expr) {
-  std::optional<int64_t> divisor =
-      staticIntLiteral(sym::ExprView(expr).getBinaryRhs());
-  return divisor && *divisor > 0;
-}
-
-static bool isProvablyNonNegativeForWideShiftByShape(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr,
-    ArrayRef<sym::PredHandle> assumptions) {
-  sym::ExprView view(expr);
-  switch (view.getKind()) {
-  case sym::ExprKind::Integer:
-  case sym::ExprKind::Rational:
-    return isNonNegativeLiteral(expr);
-  case sym::ExprKind::Add:
-    return isNonNegativeAddExpr(S, expr, assumptions);
-  case sym::ExprKind::Mul:
-    return isNonNegativeMulExpr(S, expr, assumptions);
-  case sym::ExprKind::Xor:
-    return isNonNegativeXorExpr(S, expr, assumptions);
-  case sym::ExprKind::Mod:
-    return isNonNegativeModExpr(expr);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    return isProvablyNonNegativeForWideShift(S, view.getUnaryArg(),
-                                             assumptions);
-  default:
-    return false;
-  }
-}
-
-static bool
-isProvablyNonNegativeForWideShift(WaveAMDMachineSelector &S,
-                                  sym::ExprHandle expr,
-                                  ArrayRef<sym::PredHandle> assumptions) {
-  if (hasInferredNonNegativeLowerBound(S, expr, assumptions))
-    return true;
-  if (explicitPredicatesProveNonNegative(S, expr, assumptions))
-    return true;
-  return isProvablyNonNegativeForWideShiftByShape(S, expr, assumptions);
-}
-
-static LogicalResult requireWideNonNegativeRoundedExpr(
-    WaveAMDMachineSelector &S, sym::ExprHandle sourceExpr, Operation *user,
-    ArrayRef<sym::PredHandle> assumptions, StringRef opName) {
-  if (isProvablyNonNegativeForWideShift(S, sourceExpr, assumptions))
+static LogicalResult
+requireWideNonNegativeRoundedExpr(WideMaterializationContext &context,
+                                  sym::ExprHandle sourceExpr, Operation *user,
+                                  StringRef opName) {
+  sym::Analysis *analysis = context.getAnalysis();
+  if (analysis && isProvablyNonNegativeForWideShift(*analysis, sourceExpr))
     return success();
   return user->emitError("full-address index_expr ")
          << opName << " shift lowering needs nonnegative operand";
 }
 
-static FailureOr<Value>
-materializeWideRounded(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                       Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                       ArrayRef<sym::PredHandle> assumptions, bool isCeil,
-                       bool symbolsAreUniform) {
+static FailureOr<Value> materializeWideRounded(
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
+    bool isCeil, bool symbolsAreUniform) {
   sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
   FailureOr<WideRationalValue> child = materializeWideRationalIndexExprNode(
-      S, childExpr, user, bindings, assumptions, symbolsAreUniform);
+      S, context, childExpr, user, bindings, symbolsAreUniform);
   if (failed(child))
     return failure();
   int64_t den = child->denominator;
@@ -2122,8 +2058,8 @@ materializeWideRounded(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                "power of two (got ")
            << den << ")";
   StringRef opName = isCeil ? "ceil" : "floor";
-  if (failed(requireWideNonNegativeRoundedExpr(S, childExpr, user, assumptions,
-                                               opName)))
+  if (failed(
+          requireWideNonNegativeRoundedExpr(context, childExpr, user, opName)))
     return failure();
   Value numerator = child->numerator;
   if (isCeil)
@@ -2133,24 +2069,26 @@ materializeWideRounded(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 }
 
 static FailureOr<Value>
-materializeWideMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+materializeWideMod(WaveAMDMachineSelector &S,
+                   WideMaterializationContext &context, sym::ExprHandle expr,
                    Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                   ArrayRef<sym::PredHandle> assumptions,
                    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   sym::ExprView view(expr);
   FailureOr<WideRationalValue> lhs = materializeWideRationalIndexExprNode(
-      S, view.getBinaryLhs(), user, bindings, assumptions, symbolsAreUniform);
+      S, context, view.getBinaryLhs(), user, bindings, symbolsAreUniform);
   FailureOr<WideRationalValue> rhs = materializeWideRationalIndexExprNode(
-      S, view.getBinaryRhs(), user, bindings, assumptions, symbolsAreUniform);
+      S, context, view.getBinaryRhs(), user, bindings, symbolsAreUniform);
   if (failed(lhs) || failed(rhs))
     return failure();
   FailureOr<int64_t> divisor = getStaticWideModDivisor(S, *lhs, *rhs, user);
   if (failed(divisor))
     return failure();
   if (!isPositivePowerOfTwo(*divisor))
-    return materializeNarrowModAsWide(S, expr, user, bindings, assumptions,
+    return materializeNarrowModAsWide(S, context, expr, user, bindings,
                                       symbolsAreUniform, addOrder);
-  if (!isIntegerValuedRationalPow2Expr(view.getBinaryLhs(), lhs->denominator))
+  sym::Analysis *analysis = context.getAnalysis();
+  if (!analysis ||
+      analysis->integerValued(view.getBinaryLhs()) != sym::CheckResult::True)
     return user->emitError(
         "full-address index_expr mod needs an integer-valued lhs");
   Value numerator =
@@ -2181,28 +2119,28 @@ static FailureOr<Value> materializeWidePrimitiveIndexExprNode(
 }
 
 static FailureOr<Value> materializeWideCompoundIndexExprNode(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
-    return materializeWideAdd(S, expr, user, bindings, assumptions,
+    return materializeWideAdd(S, context, expr, user, bindings,
                               symbolsAreUniform, addOrder);
   case sym::ExprKind::Mul:
-    return materializeWideMul(S, expr, user, bindings, assumptions,
+    return materializeWideMul(S, context, expr, user, bindings,
                               symbolsAreUniform, addOrder);
   case sym::ExprKind::Xor:
-    return materializeWideXor(S, expr, user, bindings, assumptions,
+    return materializeWideXor(S, context, expr, user, bindings,
                               symbolsAreUniform, addOrder);
   case sym::ExprKind::Floor:
-    return materializeWideRounded(S, expr, user, bindings, assumptions,
+    return materializeWideRounded(S, context, expr, user, bindings,
                                   /*isCeil=*/false, symbolsAreUniform);
   case sym::ExprKind::Ceil:
-    return materializeWideRounded(S, expr, user, bindings, assumptions,
+    return materializeWideRounded(S, context, expr, user, bindings,
                                   /*isCeil=*/true, symbolsAreUniform);
   case sym::ExprKind::Mod:
-    return materializeWideMod(S, expr, user, bindings, assumptions,
+    return materializeWideMod(S, context, expr, user, bindings,
                               symbolsAreUniform, addOrder);
   default:
     break;
@@ -2212,16 +2150,25 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
 }
 
 static FailureOr<Value> materializeWideIndexExprNode(
-    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
-    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
     return materializeWidePrimitiveIndexExprNode(S, expr, user, bindings,
                                                  symbolsAreUniform);
-  return materializeWideCompoundIndexExprNode(
-      S, expr, user, bindings, assumptions, symbolsAreUniform, addOrder);
+  return materializeWideCompoundIndexExprNode(S, context, expr, user, bindings,
+                                              symbolsAreUniform, addOrder);
+}
+
+static FailureOr<Value> materializeWideIndexExprNode(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
+    bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+  WideMaterializationContext context(S, assumptions);
+  return materializeWideIndexExprNode(S, context, expr, user, bindings,
+                                      symbolsAreUniform, addOrder);
 }
 
 static Value sgprPairToVGPRPair(WaveAMDMachineSelector &S, Location loc,
@@ -2305,20 +2252,34 @@ materializeAddressPlanBindings(WaveAMDMachineSelector &S, Operation *user,
   return out;
 }
 
-static FailureOr<sym::ExprHandle>
-appendAddressExpr(WaveAMDMachineSelector &S, sym::ExprHandle lhs,
-                  sym::ExprHandle rhs, ArrayRef<sym::PredHandle> assumptions) {
+static FailureOr<sym::ExprHandle> appendAddressExpr(WaveAMDMachineSelector &S,
+                                                    sym::ExprHandle lhs,
+                                                    sym::ExprHandle rhs) {
   if (!lhs)
     return rhs;
   if (!rhs)
     return lhs;
   FailureOr<sym::ExprHandle> expr =
       sym::composeExprBinary(S.symbolStore(), lhs, sym::ExprBinaryOp::Add, rhs);
+  return expr;
+}
+
+static FailureOr<sym::ExprHandle> appendAddressExpr(sym::Analysis &analysis,
+                                                    sym::ExprHandle lhs,
+                                                    sym::ExprHandle rhs) {
+  if (!lhs)
+    return rhs;
+  if (!rhs)
+    return lhs;
+  FailureOr<sym::ExprHandle> expr =
+      analysis.compose(lhs, sym::ExprBinaryOp::Add, rhs);
   if (failed(expr))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), *expr, assumptions);
-  return succeeded(simplified) ? *simplified : *expr;
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*expr);
+  return succeeded(simplified) &&
+                 shouldUseSimplifiedIndexExpr(*simplified, *expr)
+             ? *simplified
+             : *expr;
 }
 
 static TermKind classifyPlanExpr(WaveAMDMachineSelector &S,
@@ -2334,11 +2295,15 @@ static FailureOr<bool> tryAppendRemainderToSlot(WaveAMDMachineSelector &S,
                                                 AddressPlan &plan,
                                                 sym::ExprHandle &slot,
                                                 bool &slotNeedsWide) {
-  FailureOr<sym::ExprHandle> joined = appendAddressExpr(
-      S, slot, plan.fullAddressRemainderExpr, plan.assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), plan.assumptions);
+  if (failed(analysis))
+    return failure();
+  FailureOr<sym::ExprHandle> joined =
+      appendAddressExpr(**analysis, slot, plan.fullAddressRemainderExpr);
   if (failed(joined))
     return failure();
-  if (!S.slotFitsU32(*joined, plan.assumptions))
+  if (!S.slotFitsU32(**analysis, *joined))
     return false;
   slot = *joined;
   slotNeedsWide = needsWideAddressMaterialization(*joined, plan);
@@ -2382,17 +2347,27 @@ planCompleteAddressExpr(WaveAMDMachineSelector &S, const AddressPlan &plan) {
         sym::composeExprInt(S.symbolStore(), plan.instOffset);
     if (failed(inst))
       return failure();
-    FailureOr<sym::ExprHandle> withInst =
-        appendAddressExpr(S, expr, *inst, plan.assumptions);
+    FailureOr<sym::ExprHandle> withInst = appendAddressExpr(S, expr, *inst);
     if (failed(withInst))
       return failure();
     expr = *withInst;
   }
   FailureOr<sym::ExprHandle> withVoffset =
-      appendAddressExpr(S, expr, plan.voffsetExpr, plan.assumptions);
+      appendAddressExpr(S, expr, plan.voffsetExpr);
   if (failed(withVoffset))
     return failure();
-  return appendAddressExpr(S, *withVoffset, plan.soffsetExpr, plan.assumptions);
+  FailureOr<sym::ExprHandle> materialization =
+      appendAddressExpr(S, *withVoffset, plan.soffsetExpr);
+  if (failed(materialization))
+    return failure();
+  if (!*materialization)
+    return *materialization;
+  FailureOr<sym::ExprHandle> simplified =
+      sym::simplifyExpr(S.symbolStore(), *materialization, plan.assumptions);
+  return succeeded(simplified) &&
+                 shouldUseSimplifiedIndexExpr(*simplified, *materialization)
+             ? *simplified
+             : *materialization;
 }
 
 static Value
@@ -6654,7 +6629,9 @@ FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
     return pointerOffset;
   FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(
       S.symbolStore(), pointerOffset.expr, pointerOffset.assumptions);
-  pointerOffset.expr = succeeded(simplified) ? *simplified : pointerOffset.expr;
+  if (succeeded(simplified) &&
+      shouldUseSimplifiedIndexExpr(*simplified, pointerOffset.expr))
+    pointerOffset.expr = *simplified;
   return pointerOffset;
 }
 
@@ -6691,30 +6668,8 @@ static LogicalResult appendPointerBindings(PointerOffset &dst,
   return success();
 }
 
-static FailureOr<sym::ExprHandle>
-simplifyPointerOffset(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                      ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), expr, assumptions);
-  return succeeded(simplified) ? *simplified : expr;
-}
-
-static LogicalResult appendScaledPointerAssumptions(WaveAMDMachineSelector &S,
-                                                    PointerOffset &offset,
-                                                    unsigned size) {
-  SmallVector<sym::PredHandle> scaledAssumptions;
-  for (sym::PredHandle assumption : offset.assumptions) {
-    FailureOr<sym::PredHandle> scaled =
-        sym::scalePred(S.symbolStore(), assumption, size);
-    if (failed(scaled))
-      return failure();
-    if (!llvm::is_contained(offset.assumptions, *scaled) &&
-        !llvm::is_contained(scaledAssumptions, *scaled))
-      scaledAssumptions.push_back(*scaled);
-  }
-  llvm::append_range(offset.assumptions, scaledAssumptions);
-  return success();
-}
+static std::optional<IntRange64>
+inferPointerOffsetRange(WaveAMDMachineSelector &S, const PointerOffset &offset);
 
 static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
                                                    const PointerOffset &offset,
@@ -6725,21 +6680,15 @@ static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
   FailureOr<sym::ExprHandle> scale = sym::composeExprInt(S.symbolStore(), size);
   if (failed(scale))
     return failure();
-  if (failed(appendScaledPointerAssumptions(S, out, size)))
-    return failure();
   FailureOr<sym::ExprHandle> scaled = sym::composeExprBinary(
       S.symbolStore(), out.expr, sym::ExprBinaryOp::Mul, *scale);
   if (failed(scaled))
     return failure();
-  FailureOr<sym::ExprHandle> expanded =
-      sym::expandExpr(S.symbolStore(), *scaled);
-  if (failed(expanded))
+  if (std::optional<IntRange64> range = inferPointerOffsetRange(S, offset);
+      range && !scaleRange64(*range, size) &&
+      failed(sym::expandExpr(S.symbolStore(), *scaled)))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      simplifyPointerOffset(S, *expanded, out.assumptions);
-  if (failed(simplified))
-    return failure();
-  out.expr = *simplified;
+  out.expr = *scaled;
   return out;
 }
 
@@ -6759,32 +6708,8 @@ static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
       S.symbolStore(), out.expr, sym::ExprBinaryOp::Add, add.expr);
   if (failed(expr))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      simplifyPointerOffset(S, *expr, out.assumptions);
-  if (failed(simplified))
-    return failure();
-  out.expr = *simplified;
+  out.expr = *expr;
   return out;
-}
-
-static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator < 0)
-    --quotient;
-  return quotient;
-}
-
-static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator > 0)
-    ++quotient;
-  return quotient;
 }
 
 static std::optional<IntRange64>
@@ -6796,8 +6721,8 @@ inferPointerOffsetRange(WaveAMDMachineSelector &S,
       sym::inferRange(S.symbolStore(), offset.expr, offset.assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
-  std::optional<int64_t> lo = floorRational(*range->lower);
-  std::optional<int64_t> hi = ceilRational(*range->upper);
+  std::optional<int64_t> lo = sym::floorEndpoint(*range->lower);
+  std::optional<int64_t> hi = sym::ceilEndpoint(*range->upper);
   if (!lo || !hi)
     return std::nullopt;
   return IntRange64{*lo, *hi};
@@ -7439,22 +7364,14 @@ getConstantDmaDestinationDelta(WaveAMDMachineSelector &S,
     return std::nullopt;
   sym::ExprHandle previousExpr = previous.expr ? previous.expr : *zero;
   sym::ExprHandle currentExpr = current.expr ? current.expr : *zero;
-  FailureOr<sym::ExprHandle> delta = sym::composeExprBinary(
-      S.symbolStore(), currentExpr, sym::ExprBinaryOp::Sub, previousExpr);
-  if (failed(delta))
-    return std::nullopt;
-  FailureOr<sym::ExprHandle> expanded =
-      sym::expandExpr(S.symbolStore(), *delta);
-  if (failed(expanded))
-    return std::nullopt;
   SmallVector<sym::PredHandle> assumptions;
   llvm::append_range(assumptions, previous.assumptions);
   llvm::append_range(assumptions, current.assumptions);
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(S.symbolStore(), *expanded, assumptions);
-  if (failed(simplified))
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), assumptions);
+  if (failed(analysis))
     return std::nullopt;
-  return sym::getIntegerLiteralValue(*simplified);
+  return (*analysis)->constantDifference(currentExpr, previousExpr);
 }
 
 static waveamdmachine::AddressFieldSpec

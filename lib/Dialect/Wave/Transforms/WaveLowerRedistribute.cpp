@@ -50,10 +50,25 @@ enum class Movement { Alias, Workitem, Wave, Workgroup, Cluster };
 
 enum class EnumerationPurpose { RelationValidation, MovementClassification };
 
+enum class BlockLoweringStatus {
+  Legal,
+  Cluster,
+  AnalysisFailure,
+  SimplificationFailure,
+  BlockDependent
+};
+
+struct RedistributionClassification {
+  Movement movement;
+  BlockLoweringStatus blockLowering;
+};
+
 using CoordinateCacheKey =
     std::tuple<sym::ExprHandle, sym::ExprHandle, sym::ExprHandle,
                sym::ExprHandle, int64_t, int64_t, int64_t>;
 using CoordinateCache = DenseMap<CoordinateCacheKey, int64_t>;
+using CoordinateCacheMap =
+    DenseMap<Operation *, std::unique_ptr<CoordinateCache>>;
 
 struct RelationDomain {
   sym::ExprHandle block;
@@ -68,6 +83,21 @@ struct RelationDomain {
 struct MaterializedExpr {
   Value value;
   std::optional<int64_t> literal;
+};
+
+struct RelationMaterializationPoint {
+  sym::ExprHandle expression;
+  int64_t destinationSlot;
+};
+
+struct PreparedRelationMaterialization {
+  sym::ExprHandle expression;
+  std::optional<int64_t> literal;
+};
+
+struct ScratchStageExpressions {
+  sym::ExprHandle storeAddress;
+  sym::ExprHandle loadAddress;
 };
 
 struct ScratchLayoutPlan {
@@ -173,7 +203,7 @@ static FailureOr<RelationDomain> buildDomain(sym::Store &store,
                         *itemRange, *slotRange, &coordinateCache};
 }
 
-static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
+static FailureOr<int64_t> evaluateCoordinate(sym::Analysis &analysis,
                                              sym::ExprHandle expr,
                                              const RelationDomain &domain,
                                              int64_t block, int64_t item,
@@ -185,9 +215,9 @@ static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
   if (found != domain.coordinateCache->end())
     return found->second;
 
-  FailureOr<sym::ExprHandle> blockValue = sym::composeExprInt(store, block);
-  FailureOr<sym::ExprHandle> itemValue = sym::composeExprInt(store, item);
-  FailureOr<sym::ExprHandle> slotValue = sym::composeExprInt(store, slot);
+  FailureOr<sym::ExprHandle> blockValue = analysis.composeInteger(block);
+  FailureOr<sym::ExprHandle> itemValue = analysis.composeInteger(item);
+  FailureOr<sym::ExprHandle> slotValue = analysis.composeInteger(slot);
   if (failed(blockValue) || failed(itemValue) || failed(slotValue))
     return failure();
   std::array<sym::ExprSubstitution, 3> substitutions{
@@ -195,11 +225,10 @@ static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
       sym::ExprSubstitution{domain.item, *itemValue},
       sym::ExprSubstitution{domain.slot, *slotValue}};
   FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, expr, substitutions);
+      analysis.substitute(expr, substitutions);
   if (failed(substituted))
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, *substituted);
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*substituted);
   if (failed(simplified))
     return failure();
   std::optional<int64_t> value = sym::getIntegerLiteralValue(*simplified);
@@ -210,13 +239,13 @@ static FailureOr<int64_t> evaluateCoordinate(sym::Store &store,
 }
 
 static FailureOr<SourceCoordinate>
-evaluateSourceCoordinate(sym::Store &store, RedistributeOp op,
+evaluateSourceCoordinate(sym::Analysis &analysis, RedistributeOp op,
                          const RelationDomain &domain, int64_t block,
                          int64_t item, int64_t slot) {
   FailureOr<int64_t> sourceItem = evaluateCoordinate(
-      store, op.getRelation().getSourceItem(), domain, block, item, slot);
+      analysis, op.getRelation().getSourceItem(), domain, block, item, slot);
   FailureOr<int64_t> sourceSlot = evaluateCoordinate(
-      store, op.getRelation().getSourceSlot(), domain, block, item, slot);
+      analysis, op.getRelation().getSourceSlot(), domain, block, item, slot);
   if (failed(sourceItem) || failed(sourceSlot)) {
     op.emitOpError("failed to evaluate verified redistribution relation");
     return failure();
@@ -227,6 +256,10 @@ evaluateSourceCoordinate(sym::Store &store, RedistributeOp op,
 static FailureOr<ScratchRelationMap>
 buildScratchRelationMap(sym::Store &store, RedistributeOp op,
                         const RelationDomain &domain) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return failure();
   ScratchRelationMap map;
   map.blocks = op.getRelation().getBlocks();
   map.items = op.getRelation().getItems();
@@ -237,7 +270,7 @@ buildScratchRelationMap(sym::Store &store, RedistributeOp op,
     for (int64_t item : llvm::seq<int64_t>(0, map.items)) {
       for (int64_t slot : llvm::seq<int64_t>(0, map.resultSlots)) {
         FailureOr<SourceCoordinate> source =
-            evaluateSourceCoordinate(store, op, domain, block, item, slot);
+            evaluateSourceCoordinate(**analysis, op, domain, block, item, slot);
         if (failed(source))
           return failure();
         map.sources.push_back(*source);
@@ -254,16 +287,6 @@ static const SourceCoordinate &getScratchSource(const ScratchRelationMap &map,
   return map.sources[index];
 }
 
-static sym::CheckResult proveEqual(sym::Store &store, sym::ExprHandle lhs,
-                                   sym::ExprHandle rhs,
-                                   ArrayRef<sym::PredHandle> assumptions) {
-  FailureOr<sym::PredHandle> equal =
-      sym::composePredCmp(store, lhs, sym::PredCmpOp::Eq, rhs);
-  if (failed(equal))
-    return sym::CheckResult::Unknown;
-  return sym::checkPredicate(store, *equal, assumptions);
-}
-
 static FailureOr<sym::ExprHandle>
 floorDiv(sym::Store &store, sym::ExprHandle value, int64_t divisor) {
   FailureOr<sym::ExprHandle> divisorExpr = sym::composeExprInt(store, divisor);
@@ -276,18 +299,34 @@ floorDiv(sym::Store &store, sym::ExprHandle value, int64_t divisor) {
   return sym::composeExprFloor(store, *divided);
 }
 
-static sym::CheckResult proveSameWave(sym::Store &store,
+static FailureOr<sym::ExprHandle>
+floorDiv(sym::Analysis &analysis, sym::ExprHandle value, int64_t divisor) {
+  FailureOr<sym::ExprHandle> divisorExpr = analysis.composeInteger(divisor);
+  if (failed(divisorExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> divided =
+      analysis.compose(value, sym::ExprBinaryOp::Div, *divisorExpr);
+  if (failed(divided))
+    return failure();
+  return analysis.composeFloor(*divided);
+}
+
+static FailureOr<sym::ExprHandle>
+simplifyForMaterialization(sym::Analysis &analysis, sym::ExprHandle expr) {
+  return analysis.simplify(expr);
+}
+
+static sym::CheckResult proveSameWave(sym::Analysis &analysis,
                                       sym::ExprHandle sourceItem,
                                       sym::ExprHandle destinationItem,
-                                      int64_t waveWidth,
-                                      ArrayRef<sym::PredHandle> assumptions) {
+                                      int64_t waveWidth) {
   FailureOr<sym::ExprHandle> sourceWave =
-      floorDiv(store, sourceItem, waveWidth);
+      floorDiv(analysis, sourceItem, waveWidth);
   FailureOr<sym::ExprHandle> destinationWave =
-      floorDiv(store, destinationItem, waveWidth);
+      floorDiv(analysis, destinationItem, waveWidth);
   if (failed(sourceWave) || failed(destinationWave))
     return sym::CheckResult::Unknown;
-  return proveEqual(store, *sourceWave, *destinationWave, assumptions);
+  return analysis.equivalent(*sourceWave, *destinationWave);
 }
 
 static Movement finishEnumeratedClassification(bool sameBlock, bool sameItem,
@@ -304,21 +343,20 @@ static Movement finishEnumeratedClassification(bool sameBlock, bool sameItem,
   return Movement::Workgroup;
 }
 
-static bool redistributionDomainProven(sym::Store &store, RedistributeOp op,
-                                       const RelationDomain &domain) {
+static bool redistributionDomainProven(sym::Analysis &analysis,
+                                       RedistributeOp op) {
   RedistributionAttr relation = op.getRelation();
-  std::array<sym::PredHandle, 3> assumptions{
-      domain.blockRange, domain.itemRange, domain.slotRange};
   int64_t sourceSlots =
       getPacketType(op.getSource().getType()).getNumElements();
-  return sym::provablyDefined(store, relation.getSourceBlock(), assumptions) &&
-         sym::provablyDefined(store, relation.getSourceItem(), assumptions) &&
-         sym::provablyDefined(store, relation.getSourceSlot(), assumptions) &&
-         sym::provablyInRange(store, relation.getSourceBlock(), assumptions, 0,
+  return analysis.defined(relation.getSourceBlock()) ==
+             sym::CheckResult::True &&
+         analysis.defined(relation.getSourceItem()) == sym::CheckResult::True &&
+         analysis.defined(relation.getSourceSlot()) == sym::CheckResult::True &&
+         sym::provablyInRange(analysis, relation.getSourceBlock(), 0,
                               relation.getBlocks() - 1) &&
-         sym::provablyInRange(store, relation.getSourceItem(), assumptions, 0,
+         sym::provablyInRange(analysis, relation.getSourceItem(), 0,
                               relation.getItems() - 1) &&
-         sym::provablyInRange(store, relation.getSourceSlot(), assumptions, 0,
+         sym::provablyInRange(analysis, relation.getSourceSlot(), 0,
                               sourceSlots - 1);
 }
 
@@ -367,7 +405,7 @@ static bool fitsRelationPointBudget(RedistributeOp op) {
 }
 
 static FailureOr<Movement> validateAndClassifyByEnumeration(
-    sym::Store &store, RedistributeOp op, const RelationDomain &domain,
+    sym::Analysis &analysis, RedistributeOp op, const RelationDomain &domain,
     int64_t waveWidth, EnumerationPurpose purpose) {
   int64_t items = op.getRelation().getItems();
   int64_t blocks = op.getRelation().getBlocks();
@@ -387,12 +425,14 @@ static FailureOr<Movement> validateAndClassifyByEnumeration(
     for (int64_t item : llvm::seq<int64_t>(0, items)) {
       for (int64_t slot : llvm::seq<int64_t>(0, slots)) {
         FailureOr<int64_t> sourceBlock =
-            evaluateCoordinate(store, op.getRelation().getSourceBlock(), domain,
-                               block, item, slot);
-        FailureOr<int64_t> sourceItem = evaluateCoordinate(
-            store, op.getRelation().getSourceItem(), domain, block, item, slot);
-        FailureOr<int64_t> sourceSlot = evaluateCoordinate(
-            store, op.getRelation().getSourceSlot(), domain, block, item, slot);
+            evaluateCoordinate(analysis, op.getRelation().getSourceBlock(),
+                               domain, block, item, slot);
+        FailureOr<int64_t> sourceItem =
+            evaluateCoordinate(analysis, op.getRelation().getSourceItem(),
+                               domain, block, item, slot);
+        FailureOr<int64_t> sourceSlot =
+            evaluateCoordinate(analysis, op.getRelation().getSourceSlot(),
+                               domain, block, item, slot);
         if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot)) {
           op.emitOpError("relation is not total at destination (")
               << block << ", " << item << ", " << slot << ")";
@@ -413,30 +453,24 @@ static FailureOr<Movement> validateAndClassifyByEnumeration(
                                         identitySlot);
 }
 
-static FailureOr<Movement>
-validateAndClassifyMovement(sym::Store &store, RedistributeOp op,
-                            const RelationDomain &domain, int64_t waveWidth) {
-  if (!redistributionDomainProven(store, op, domain))
-    return validateAndClassifyByEnumeration(
-        store, op, domain, waveWidth, EnumerationPurpose::RelationValidation);
-
-  std::array<sym::PredHandle, 3> assumptions{
-      domain.blockRange, domain.itemRange, domain.slotRange};
-  sym::CheckResult sameBlock = proveEqual(
-      store, op.getRelation().getSourceBlock(), domain.block, assumptions);
+static FailureOr<Movement> classifyProvenMovement(sym::Analysis &analysis,
+                                                  RedistributeOp op,
+                                                  const RelationDomain &domain,
+                                                  int64_t waveWidth) {
+  sym::CheckResult sameBlock =
+      analysis.equivalent(op.getRelation().getSourceBlock(), domain.block);
   if (sameBlock == sym::CheckResult::False)
     return Movement::Cluster;
   if (sameBlock == sym::CheckResult::Unknown)
     return validateAndClassifyByEnumeration(
-        store, op, domain, waveWidth,
+        analysis, op, domain, waveWidth,
         EnumerationPurpose::MovementClassification);
-  sym::CheckResult sameItem = proveEqual(
-      store, op.getRelation().getSourceItem(), domain.item, assumptions);
-  sym::CheckResult identitySlot = proveEqual(
-      store, op.getRelation().getSourceSlot(), domain.slot, assumptions);
-  sym::CheckResult sameWave =
-      proveSameWave(store, op.getRelation().getSourceItem(), domain.item,
-                    waveWidth, assumptions);
+  sym::CheckResult sameItem =
+      analysis.equivalent(op.getRelation().getSourceItem(), domain.item);
+  sym::CheckResult identitySlot =
+      analysis.equivalent(op.getRelation().getSourceSlot(), domain.slot);
+  sym::CheckResult sameWave = proveSameWave(
+      analysis, op.getRelation().getSourceItem(), domain.item, waveWidth);
 
   bool sameType = op.getSource().getType() == op.getResult().getType();
   if (sameType && sameItem == sym::CheckResult::True &&
@@ -449,7 +483,8 @@ validateAndClassifyMovement(sym::Store &store, RedistributeOp op,
   if (sameWave == sym::CheckResult::False)
     return Movement::Workgroup;
   return validateAndClassifyByEnumeration(
-      store, op, domain, waveWidth, EnumerationPurpose::MovementClassification);
+      analysis, op, domain, waveWidth,
+      EnumerationPurpose::MovementClassification);
 }
 
 static bool hasSymbol(sym::ExprHandle expr, StringRef needle) {
@@ -458,33 +493,71 @@ static bool hasSymbol(sym::ExprHandle expr, StringRef needle) {
   return found;
 }
 
-static FailureOr<sym::ExprHandle>
-simplifyRelationExpr(sym::Store &store, sym::ExprHandle expr,
-                     const RelationDomain &domain) {
-  std::array<sym::PredHandle, 3> assumptions{
-      domain.blockRange, domain.itemRange, domain.slotRange};
-  return sym::simplifyExpr(store, expr, assumptions);
-}
-
-static LogicalResult validateBlockLowering(RedistributeOp op, sym::Store &store,
-                                           const RelationDomain &domain,
-                                           Movement movement) {
+static BlockLoweringStatus classifyBlockLowering(sym::Analysis &analysis,
+                                                 RedistributeOp op,
+                                                 Movement movement,
+                                                 bool hasDomainFacts) {
   if (movement == Movement::Cluster)
-    return op.emitOpError(
-        "cross-block redistribution requires cluster/DSM lowering");
+    return BlockLoweringStatus::Cluster;
   if (movement == Movement::Alias || op.getRelation().getBlocks() == 1)
-    return success();
+    return BlockLoweringStatus::Legal;
+  if (!hasDomainFacts)
+    return BlockLoweringStatus::AnalysisFailure;
 
   for (sym::ExprHandle expr :
        {op.getRelation().getSourceItem(), op.getRelation().getSourceSlot()}) {
-    FailureOr<sym::ExprHandle> simplified =
-        simplifyRelationExpr(store, expr, domain);
+    FailureOr<sym::ExprHandle> simplified = analysis.simplify(expr);
     if (failed(simplified))
-      return op.emitOpError("failed to simplify redistribution relation");
+      return BlockLoweringStatus::SimplificationFailure;
     if (hasSymbol(*simplified, "block"))
-      return op.emitOpError(
-          "block-dependent redistribution requires a cluster block coordinate");
+      return BlockLoweringStatus::BlockDependent;
   }
+  return BlockLoweringStatus::Legal;
+}
+
+static FailureOr<RedistributionClassification>
+validateAndClassifyMovement(sym::Store &store, RedistributeOp op,
+                            const RelationDomain &domain, int64_t waveWidth) {
+  std::array<sym::PredHandle, 3> assumptions{
+      domain.blockRange, domain.itemRange, domain.slotRange};
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  bool hasDomainFacts = succeeded(analysis);
+  if (!hasDomainFacts)
+    analysis = sym::Analysis::create(store);
+  if (failed(analysis))
+    return failure();
+
+  FailureOr<Movement> movement =
+      hasDomainFacts && redistributionDomainProven(**analysis, op)
+          ? classifyProvenMovement(**analysis, op, domain, waveWidth)
+          : validateAndClassifyByEnumeration(
+                **analysis, op, domain, waveWidth,
+                EnumerationPurpose::RelationValidation);
+  if (failed(movement))
+    return failure();
+  return RedistributionClassification{
+      *movement,
+      classifyBlockLowering(**analysis, op, *movement, hasDomainFacts)};
+}
+
+static LogicalResult validateBlockLowering(RedistributeOp op,
+                                           BlockLoweringStatus blockLowering) {
+  switch (blockLowering) {
+  case BlockLoweringStatus::Legal:
+    return success();
+  case BlockLoweringStatus::Cluster:
+    return op.emitOpError(
+        "cross-block redistribution requires cluster/DSM lowering");
+  case BlockLoweringStatus::AnalysisFailure:
+    return op.emitOpError("failed to analyze redistribution relation");
+  case BlockLoweringStatus::SimplificationFailure:
+    return op.emitOpError("failed to simplify redistribution relation");
+  case BlockLoweringStatus::BlockDependent:
+    return op.emitOpError(
+        "block-dependent redistribution requires a cluster block coordinate");
+  }
+  llvm_unreachable("unknown block lowering status");
   return success();
 }
 
@@ -593,18 +666,19 @@ static SmallVector<SlotOrder> getSlotOrders(int64_t slots,
   return orders;
 }
 
-static FailureOr<bool> supportsVectorAt(sym::Store &store, RedistributeOp op,
+static FailureOr<bool> supportsVectorAt(sym::Analysis &analysis,
+                                        RedistributeOp op,
                                         const RelationDomain &domain,
                                         int64_t block, int64_t item,
                                         int64_t slot, int64_t vectorElements) {
   FailureOr<SourceCoordinate> first =
-      evaluateSourceCoordinate(store, op, domain, block, item, slot);
+      evaluateSourceCoordinate(analysis, op, domain, block, item, slot);
   if (failed(first))
     return failure();
   int64_t vectorGroup = first->slot / vectorElements;
   for (int64_t offset : llvm::seq<int64_t>(1, vectorElements)) {
-    FailureOr<SourceCoordinate> next =
-        evaluateSourceCoordinate(store, op, domain, block, item, slot + offset);
+    FailureOr<SourceCoordinate> next = evaluateSourceCoordinate(
+        analysis, op, domain, block, item, slot + offset);
     if (failed(next))
       return failure();
     if (next->item != first->item || next->slot / vectorElements != vectorGroup)
@@ -637,7 +711,7 @@ static bool supportsOrderedVectorAt(const ScratchRelationMap &map,
   return true;
 }
 
-static FailureOr<bool> supportsVectorTransfer(sym::Store &store,
+static FailureOr<bool> supportsVectorTransfer(sym::Analysis &analysis,
                                               RedistributeOp op,
                                               const RelationDomain &domain,
                                               int64_t vectorElements) {
@@ -652,7 +726,7 @@ static FailureOr<bool> supportsVectorTransfer(sym::Store &store,
     for (int64_t item : llvm::seq<int64_t>(0, items)) {
       for (int64_t slot = 0; slot < resultSlots; slot += vectorElements) {
         FailureOr<bool> supported = supportsVectorAt(
-            store, op, domain, block, item, slot, vectorElements);
+            analysis, op, domain, block, item, slot, vectorElements);
         if (failed(supported))
           return failure();
         if (!*supported)
@@ -691,7 +765,7 @@ getScratchVectorizationPointBudget(const ScratchRelationMap &map) {
                relationPoints * kScratchVectorizationScanMultiplier));
 }
 
-static FailureOr<int64_t> selectVectorElements(sym::Store &store,
+static FailureOr<int64_t> selectVectorElements(sym::Analysis &analysis,
                                                RedistributeOp op,
                                                const RelationDomain &domain,
                                                int64_t maxVectorBits) {
@@ -712,7 +786,7 @@ static FailureOr<int64_t> selectVectorElements(sym::Store &store,
     if (sourceSlots % vectorElements || resultSlots % vectorElements)
       continue;
     FailureOr<bool> supported =
-        supportsVectorTransfer(store, op, domain, vectorElements);
+        supportsVectorTransfer(analysis, op, domain, vectorElements);
     if (failed(supported))
       return failure();
     if (*supported)
@@ -766,14 +840,14 @@ selectScratchVectorization(const ScratchRelationMap &map, RedistributeOp op,
 }
 
 static FailureOr<std::optional<int64_t>>
-inferVectorSelector(sym::Store &store, RedistributeOp op,
+inferVectorSelector(sym::Analysis &analysis, RedistributeOp op,
                     const RelationDomain &domain, int64_t destinationSlot,
                     int64_t vectorElements) {
   std::optional<int64_t> selector;
   for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
     for (int64_t item : llvm::seq<int64_t>(0, op.getRelation().getItems())) {
       FailureOr<int64_t> sourceSlot =
-          evaluateCoordinate(store, op.getRelation().getSourceSlot(), domain,
+          evaluateCoordinate(analysis, op.getRelation().getSourceSlot(), domain,
                              block, item, destinationSlot);
       if (failed(sourceSlot)) {
         op.emitOpError("failed to evaluate verified redistribution relation");
@@ -790,7 +864,7 @@ inferVectorSelector(sym::Store &store, RedistributeOp op,
 }
 
 static FailureOr<SmallVector<std::optional<int64_t>>>
-inferVectorSelectors(sym::Store &store, RedistributeOp op,
+inferVectorSelectors(sym::Analysis &analysis, RedistributeOp op,
                      const RelationDomain &domain, int64_t vectorElements) {
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
@@ -802,7 +876,7 @@ inferVectorSelectors(sym::Store &store, RedistributeOp op,
   }
   for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
     FailureOr<std::optional<int64_t>> selector =
-        inferVectorSelector(store, op, domain, slot, vectorElements);
+        inferVectorSelector(analysis, op, domain, slot, vectorElements);
     if (failed(selector))
       return failure();
     selectors.push_back(*selector);
@@ -1176,6 +1250,16 @@ static FailureOr<sym::ExprHandle> composeBinaryInt(sym::Store &store,
   return sym::composeExprBinary(store, lhs, op, *rhsExpr);
 }
 
+static FailureOr<sym::ExprHandle> composeBinaryInt(sym::Analysis &analysis,
+                                                   sym::ExprHandle lhs,
+                                                   sym::ExprBinaryOp op,
+                                                   int64_t rhs) {
+  FailureOr<sym::ExprHandle> rhsExpr = analysis.composeInteger(rhs);
+  if (failed(rhsExpr))
+    return failure();
+  return analysis.compose(lhs, op, *rhsExpr);
+}
+
 static FailureOr<sym::ExprHandle>
 composePhysicalSlot(sym::Store &store, sym::ExprHandle logicalSlot,
                     const SlotOrder &order) {
@@ -1288,46 +1372,63 @@ composeScratchVectorAddress(sym::Store &store, sym::ExprHandle item,
 }
 
 class RelationMaterializer {
+  using MaterializationKey = std::pair<sym::ExprHandle, int64_t>;
+  using PreparedEntry =
+      std::pair<MaterializationKey, PreparedRelationMaterialization>;
+
 public:
   RelationMaterializer(IRRewriter &rewriter, RedistributeOp op,
                        sym::Store &store, const RelationDomain &domain)
       : rewriter(rewriter), op(op), store(store), domain(domain) {}
 
-  FailureOr<MaterializedExpr> materialize(sym::ExprHandle expr,
-                                          int64_t destinationSlot) {
-    FailureOr<sym::ExprHandle> slotValue =
-        sym::composeExprInt(store, destinationSlot);
-    if (failed(slotValue))
+  LogicalResult prepare(ArrayRef<RelationMaterializationPoint> points) {
+    SmallVector<RelationMaterializationPoint> missing = collectMissing(points);
+    if (missing.empty())
+      return success();
+
+    std::array<sym::PredHandle, 1> assumptions{domain.itemRange};
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, assumptions);
+    if (failed(analysis))
       return failure();
-    FailureOr<sym::ExprHandle> blockValue = sym::composeExprInt(store, 0);
+    FailureOr<sym::ExprHandle> blockValue = (*analysis)->composeInteger(0);
     if (failed(blockValue))
       return failure();
-    std::array<sym::ExprSubstitution, 2> substitutions{
-        sym::ExprSubstitution{domain.block, *blockValue},
-        sym::ExprSubstitution{domain.slot, *slotValue}};
-    FailureOr<sym::ExprHandle> substituted =
-        sym::substituteExpr(store, expr, substitutions);
-    if (failed(substituted))
+    SmallVector<PreparedEntry> materializations;
+    materializations.reserve(missing.size());
+    for (RelationMaterializationPoint point : missing) {
+      FailureOr<PreparedEntry> materialization =
+          preparePoint(**analysis, *blockValue, point);
+      if (failed(materialization))
+        return failure();
+      materializations.push_back(*materialization);
+    }
+    for (auto &[key, materialization] : materializations)
+      prepared.try_emplace(key, materialization);
+    return success();
+  }
+
+  FailureOr<MaterializedExpr> materialize(sym::ExprHandle expr,
+                                          int64_t destinationSlot) {
+    MaterializationKey key{expr, destinationSlot};
+    auto found = prepared.find(key);
+    if (found == prepared.end())
       return failure();
-    std::array<sym::PredHandle, 1> assumptions{domain.itemRange};
-    FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, *substituted, assumptions);
-    if (failed(simplified))
-      return failure();
-    if (std::optional<int64_t> literal =
-            sym::getIntegerLiteralValue(*simplified))
-      return MaterializedExpr{Value(), literal};
+    const PreparedRelationMaterialization &materialization = found->second;
+    if (materialization.literal)
+      return MaterializedExpr{Value(), materialization.literal};
 
     Value item = getItem();
     Type resultType =
         SimdType::get(op.getContext(), rewriter.getIndexType(), getWaveWidth());
     ArrayAttr names = rewriter.getStrArrayAttr({"item"});
+    std::array<sym::PredHandle, 1> assumptions{domain.itemRange};
     ArrayAttr predicateAttrs =
         getIndexExprPredArrayAttr(op.getContext(), assumptions);
-    Value value =
-        IndexExprOp::create(rewriter, op.getLoc(), resultType,
-                            ExprAttr::get(op.getContext(), *simplified),
-                            predicateAttrs, names, ValueRange{item});
+    Value value = IndexExprOp::create(
+        rewriter, op.getLoc(), resultType,
+        ExprAttr::get(op.getContext(), materialization.expression),
+        predicateAttrs, names, ValueRange{item});
     return MaterializedExpr{value, std::nullopt};
   }
 
@@ -1340,6 +1441,43 @@ public:
   }
 
 private:
+  SmallVector<RelationMaterializationPoint>
+  collectMissing(ArrayRef<RelationMaterializationPoint> points) const {
+    SmallVector<RelationMaterializationPoint> missing;
+    DenseSet<MaterializationKey> missingKeys;
+    for (RelationMaterializationPoint point : points) {
+      MaterializationKey key{point.expression, point.destinationSlot};
+      if (!prepared.contains(key) && missingKeys.insert(key).second)
+        missing.push_back(point);
+    }
+    return missing;
+  }
+
+  FailureOr<PreparedEntry>
+  preparePoint(sym::Analysis &analysis, sym::ExprHandle blockValue,
+               RelationMaterializationPoint point) const {
+    FailureOr<sym::ExprHandle> slotValue =
+        analysis.composeInteger(point.destinationSlot);
+    if (failed(slotValue))
+      return failure();
+    std::array<sym::ExprSubstitution, 2> substitutions{
+        sym::ExprSubstitution{domain.block, blockValue},
+        sym::ExprSubstitution{domain.slot, *slotValue}};
+    FailureOr<sym::ExprHandle> substituted =
+        analysis.substitute(point.expression, substitutions);
+    if (failed(substituted))
+      return failure();
+    FailureOr<sym::ExprHandle> simplified =
+        simplifyForMaterialization(analysis, *substituted);
+    if (failed(simplified))
+      return failure();
+    std::optional<int64_t> literal = sym::getIntegerLiteralValue(*simplified);
+    return PreparedEntry{
+        MaterializationKey{point.expression, point.destinationSlot},
+        PreparedRelationMaterialization{*simplified, literal},
+    };
+  }
+
   int64_t getWaveWidth() {
     return cast<SimdType>(op.getSource().getType()).getWidth();
   }
@@ -1353,11 +1491,12 @@ private:
     return item;
   }
 
+  DenseMap<MaterializationKey, PreparedRelationMaterialization> prepared;
+  Value item;
   IRRewriter &rewriter;
   RedistributeOp op;
   sym::Store &store;
   const RelationDomain &domain;
-  Value item;
 };
 
 static SmallVector<Value> extractComponents(IRRewriter &rewriter,
@@ -1441,14 +1580,14 @@ static FailureOr<Value> selectKeyedCandidate(IRRewriter &rewriter,
 }
 
 static FailureOr<SmallVector<int64_t>>
-collectSourceVectorGroups(sym::Store &store, RedistributeOp op,
+collectSourceVectorGroups(sym::Analysis &analysis, RedistributeOp op,
                           const RelationDomain &domain, int64_t destinationSlot,
                           int64_t vectorElements) {
   DenseSet<int64_t> groupSet;
   for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
     for (int64_t item : llvm::seq<int64_t>(0, op.getRelation().getItems())) {
       FailureOr<int64_t> sourceSlot =
-          evaluateCoordinate(store, op.getRelation().getSourceSlot(), domain,
+          evaluateCoordinate(analysis, op.getRelation().getSourceSlot(), domain,
                              block, item, destinationSlot);
       if (failed(sourceSlot)) {
         op.emitOpError("failed to evaluate verified redistribution relation");
@@ -1469,6 +1608,12 @@ static LogicalResult lowerWorkitem(IRRewriter &rewriter, RedistributeOp op,
   SmallVector<Value> source = extractComponents(rewriter, op);
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
+  SmallVector<RelationMaterializationPoint> points;
+  points.reserve(resultSlots);
+  for (int64_t slot : llvm::seq<int64_t>(0, resultSlots))
+    points.push_back({op.getRelation().getSourceSlot(), slot});
+  if (failed(materializer.prepare(points)))
+    return op.emitOpError("failed to prepare source slot expressions");
   SmallVector<Value> result;
   result.reserve(resultSlots);
   for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
@@ -1488,6 +1633,43 @@ static LogicalResult lowerWorkitem(IRRewriter &rewriter, RedistributeOp op,
   return success();
 }
 
+static FailureOr<Value>
+materializeWaveScalarSlot(IRRewriter &rewriter, RedistributeOp op,
+                          RelationMaterializer &materializer,
+                          ArrayRef<Value> source, sym::ExprHandle sourceLane,
+                          int64_t destinationSlot) {
+  FailureOr<MaterializedExpr> lane =
+      materializer.materialize(sourceLane, destinationSlot);
+  FailureOr<MaterializedExpr> sourceSlot = materializer.materialize(
+      op.getRelation().getSourceSlot(), destinationSlot);
+  if (failed(lane) || failed(sourceSlot)) {
+    op.emitOpError("failed to materialize same-wave relation");
+    return failure();
+  }
+  Value laneValue =
+      lane->literal ? materializer.constantIndex(*lane->literal, /*simd=*/false)
+                    : lane->value;
+
+  if (sourceSlot->literal)
+    return ShuffleOp::create(rewriter, op.getLoc(),
+                             source[*sourceSlot->literal].getType(),
+                             source[*sourceSlot->literal], laneValue)
+        .getResult();
+
+  SmallVector<Value> shuffled;
+  shuffled.reserve(source.size());
+  for (Value component : source)
+    shuffled.push_back(ShuffleOp::create(
+        rewriter, op.getLoc(), component.getType(), component, laneValue));
+  FailureOr<Value> selected =
+      selectComponent(rewriter, op, materializer, shuffled, *sourceSlot);
+  if (failed(selected)) {
+    op.emitOpError("failed to select shuffled packet component");
+    return failure();
+  }
+  return *selected;
+}
+
 static LogicalResult lowerWaveScalar(IRRewriter &rewriter, RedistributeOp op,
                                      sym::Store &store,
                                      const RelationDomain &domain,
@@ -1504,36 +1686,21 @@ static LogicalResult lowerWaveScalar(IRRewriter &rewriter, RedistributeOp op,
 
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
+  SmallVector<RelationMaterializationPoint> points;
+  points.reserve(2 * resultSlots);
+  for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
+    points.push_back({*sourceLane, slot});
+    points.push_back({op.getRelation().getSourceSlot(), slot});
+  }
+  if (failed(materializer.prepare(points)))
+    return op.emitOpError("failed to prepare same-wave relation");
   SmallVector<Value> result;
   result.reserve(resultSlots);
   for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
-    FailureOr<MaterializedExpr> lane =
-        materializer.materialize(*sourceLane, slot);
-    FailureOr<MaterializedExpr> sourceSlot =
-        materializer.materialize(op.getRelation().getSourceSlot(), slot);
-    if (failed(lane) || failed(sourceSlot))
-      return op.emitOpError("failed to materialize same-wave relation");
-    Value laneValue = lane->literal ? materializer.constantIndex(*lane->literal,
-                                                                 /*simd=*/false)
-                                    : lane->value;
-
-    if (sourceSlot->literal) {
-      Value shuffled = ShuffleOp::create(
-          rewriter, op.getLoc(), source[*sourceSlot->literal].getType(),
-          source[*sourceSlot->literal], laneValue);
-      result.push_back(shuffled);
-      continue;
-    }
-
-    SmallVector<Value> shuffled;
-    shuffled.reserve(source.size());
-    for (Value component : source)
-      shuffled.push_back(ShuffleOp::create(
-          rewriter, op.getLoc(), component.getType(), component, laneValue));
-    FailureOr<Value> selected =
-        selectComponent(rewriter, op, materializer, shuffled, *sourceSlot);
+    FailureOr<Value> selected = materializeWaveScalarSlot(
+        rewriter, op, materializer, source, *sourceLane, slot);
     if (failed(selected))
-      return op.emitOpError("failed to select shuffled packet component");
+      return failure();
     result.push_back(*selected);
   }
   Value packed =
@@ -1578,24 +1745,21 @@ static LogicalResult appendSliceResults(
 }
 
 static FailureOr<Value>
-materializeWaveSlice(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
-                     const RelationDomain &domain,
+materializeWaveSlice(IRRewriter &rewriter, RedistributeOp op,
                      RelationMaterializer &materializer, ArrayRef<Value> source,
-                     sym::ExprHandle sourceLane, sym::ExprHandle sourceGroup,
-                     int64_t destinationSlot, int64_t vectorElements) {
-  FailureOr<SmallVector<int64_t>> groups = collectSourceVectorGroups(
-      store, op, domain, destinationSlot, vectorElements);
+                     ArrayRef<int64_t> groups, sym::ExprHandle sourceLane,
+                     sym::ExprHandle sourceGroup, int64_t destinationSlot) {
   FailureOr<MaterializedExpr> lane =
       materializer.materialize(sourceLane, destinationSlot);
-  if (failed(groups) || failed(lane))
+  if (failed(lane))
     return failure();
   Value laneValue = lane->literal ? materializer.constantIndex(*lane->literal,
                                                                /*simd=*/false)
                                   : lane->value;
 
   SmallVector<Value> candidates;
-  candidates.reserve(groups->size());
-  for (int64_t group : *groups)
+  candidates.reserve(groups.size());
+  for (int64_t group : groups)
     candidates.push_back(ShuffleOp::create(rewriter, op.getLoc(),
                                            source[group].getType(),
                                            source[group], laneValue));
@@ -1606,52 +1770,98 @@ materializeWaveSlice(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
       materializer.materialize(sourceGroup, destinationSlot);
   if (failed(selector))
     return failure();
-  return selectKeyedCandidate(rewriter, op, materializer, candidates, *groups,
+  return selectKeyedCandidate(rewriter, op, materializer, candidates, groups,
                               *selector);
 }
 
-static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
-                                         RedistributeOp op, sym::Store &store,
-                                         const RelationDomain &domain,
-                                         int64_t waveWidth) {
+struct WavePacketizationPlan {
+  SmallVector<SmallVector<int64_t>> sourceGroups;
+  SmallVector<std::optional<int64_t>> selectors;
+  sym::ExprHandle sourceLane;
+  sym::ExprHandle sourceGroup;
+  sym::ExprHandle sourceWithin;
+  int64_t vectorElements = 1;
+};
+
+static FailureOr<WavePacketizationPlan>
+buildWavePacketizationPlan(sym::Analysis &analysis, RedistributeOp op,
+                           const RelationDomain &domain, int64_t waveWidth) {
   FailureOr<int64_t> vectorElements =
-      selectVectorElements(store, op, domain, /*maxVectorBits=*/0);
+      selectVectorElements(analysis, op, domain, /*maxVectorBits=*/0);
   if (failed(vectorElements))
     return failure();
   FailureOr<SmallVector<std::optional<int64_t>>> selectors =
-      inferVectorSelectors(store, op, domain, *vectorElements);
+      inferVectorSelectors(analysis, op, domain, *vectorElements);
   if (failed(selectors))
     return failure();
 
-  FailureOr<sym::ExprHandle> width = sym::composeExprInt(store, waveWidth);
-  if (failed(width))
-    return op.emitOpError("failed to construct source lane expression");
-  FailureOr<sym::ExprHandle> sourceLane = sym::composeExprBinary(
-      store, op.getRelation().getSourceItem(), sym::ExprBinaryOp::Mod, *width);
+  FailureOr<sym::ExprHandle> width = analysis.composeInteger(waveWidth);
+  if (failed(width)) {
+    op.emitOpError("failed to construct source lane expression");
+    return failure();
+  }
+  FailureOr<sym::ExprHandle> sourceLane = analysis.compose(
+      op.getRelation().getSourceItem(), sym::ExprBinaryOp::Mod, *width);
   FailureOr<sym::ExprHandle> sourceGroup =
-      floorDiv(store, op.getRelation().getSourceSlot(), *vectorElements);
+      floorDiv(analysis, op.getRelation().getSourceSlot(), *vectorElements);
   FailureOr<sym::ExprHandle> sourceWithin =
-      composeBinaryInt(store, op.getRelation().getSourceSlot(),
+      composeBinaryInt(analysis, op.getRelation().getSourceSlot(),
                        sym::ExprBinaryOp::Mod, *vectorElements);
-  if (failed(sourceLane) || failed(sourceGroup) || failed(sourceWithin))
-    return op.emitOpError("failed to construct packetized wave relation");
+  if (failed(sourceLane) || failed(sourceGroup) || failed(sourceWithin)) {
+    op.emitOpError("failed to construct packetized wave relation");
+    return failure();
+  }
 
-  RelationMaterializer materializer(rewriter, op, store, domain);
-  SmallVector<Value> source =
-      extractPacketSlices(rewriter, op, *vectorElements);
+  WavePacketizationPlan plan;
+  plan.selectors = std::move(*selectors);
+  plan.sourceLane = *sourceLane;
+  plan.sourceGroup = *sourceGroup;
+  plan.sourceWithin = *sourceWithin;
+  plan.vectorElements = *vectorElements;
   int64_t resultSlots =
       getPacketType(op.getResult().getType()).getNumElements();
+  plan.sourceGroups.reserve(resultSlots / plan.vectorElements);
+  for (int64_t slot = 0; slot < resultSlots; slot += plan.vectorElements) {
+    FailureOr<SmallVector<int64_t>> groups = collectSourceVectorGroups(
+        analysis, op, domain, slot, plan.vectorElements);
+    if (failed(groups))
+      return failure();
+    plan.sourceGroups.push_back(std::move(*groups));
+  }
+  return plan;
+}
+
+static LogicalResult
+emitWavePacketizedResult(IRRewriter &rewriter, RedistributeOp op,
+                         sym::Store &store, const RelationDomain &domain,
+                         const WavePacketizationPlan &plan) {
+  RelationMaterializer materializer(rewriter, op, store, domain);
+  SmallVector<Value> source =
+      extractPacketSlices(rewriter, op, plan.vectorElements);
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  SmallVector<RelationMaterializationPoint> points;
+  points.reserve(3 * resultSlots);
+  for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
+    points.push_back({plan.sourceLane, slot});
+    points.push_back({plan.sourceGroup, slot});
+    points.push_back({plan.sourceWithin, slot});
+  }
+  if (failed(materializer.prepare(points)))
+    return op.emitOpError("failed to prepare packetized wave relation");
+
   SmallVector<Value> result;
   result.reserve(resultSlots);
-  for (int64_t slot = 0; slot < resultSlots; slot += *vectorElements) {
+  for (int64_t slot = 0; slot < resultSlots; slot += plan.vectorElements) {
+    ArrayRef<int64_t> groups = plan.sourceGroups[slot / plan.vectorElements];
     FailureOr<Value> selected =
-        materializeWaveSlice(rewriter, op, store, domain, materializer, source,
-                             *sourceLane, *sourceGroup, slot, *vectorElements);
+        materializeWaveSlice(rewriter, op, materializer, source, groups,
+                             plan.sourceLane, plan.sourceGroup, slot);
     if (failed(selected))
       return op.emitOpError("failed to materialize packetized wave relation");
     if (failed(appendSliceResults(rewriter, op, materializer, *selected, slot,
-                                  *vectorElements, *selectors, *sourceWithin,
-                                  result)))
+                                  plan.vectorElements, plan.selectors,
+                                  plan.sourceWithin, result)))
       return failure();
   }
 
@@ -1659,6 +1869,22 @@ static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
       PackOp::create(rewriter, op.getLoc(), op.getResult().getType(), result);
   rewriter.replaceOp(op, packed);
   return success();
+}
+
+static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
+                                         RedistributeOp op, sym::Store &store,
+                                         const RelationDomain &domain,
+                                         int64_t waveWidth) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return failure();
+  FailureOr<WavePacketizationPlan> plan =
+      buildWavePacketizationPlan(**analysis, op, domain, waveWidth);
+  if (failed(plan))
+    return failure();
+  analysis->reset();
+  return emitWavePacketizedResult(rewriter, op, store, domain, *plan);
 }
 
 static LogicalResult lowerWave(IRRewriter &rewriter, RedistributeOp op,
@@ -2213,6 +2439,12 @@ struct ScratchLoads {
   Value publication;
 };
 
+struct ScratchExecution {
+  SmallVector<Value> result;
+  SmallVector<Value> completionTokens;
+  Value analysisCompletion;
+};
+
 struct ScratchSequence {
   Value completion;
   Value analysisCompletion;
@@ -2514,23 +2746,14 @@ static FailureOr<ScratchAllocation> createScratchAllocation(
   return ScratchAllocation{range, allocation.getResult(), dependency};
 }
 
-static FailureOr<ScratchLoads>
-emitScratchStage(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
-                 const RelationDomain &domain,
-                 RelationMaterializer &materializer, Value allocation,
-                 ArrayRef<Value> source, sym::ExprHandle sourceWithin,
-                 const ScratchStagePlan &stage, const ScratchPlan &plan,
-                 Type componentType, Type tokenType, Value dependency) {
+static FailureOr<ScratchStageExpressions> composeScratchStageExpressions(
+    sym::Store &store, RedistributeOp op, const RelationDomain &domain,
+    const ScratchStagePlan &stage, const ScratchPlan &plan) {
   FailureOr<sym::ExprHandle> storeAddress =
       composeScratchVectorAddress(store, domain.item, domain.slot,
                                   op.getRelation().getItems(), stage.layout);
   if (failed(storeAddress))
     return op.emitOpError("failed to construct scratch store address");
-  FailureOr<Value> published =
-      emitScratchStores(rewriter, op, materializer, allocation, source,
-                        *storeAddress, stage, plan, tokenType, dependency);
-  if (failed(published))
-    return failure();
 
   FailureOr<sym::ExprHandle> physicalSourceSlot = composePhysicalSlot(
       store, op.getRelation().getSourceSlot(), plan.sourceOrder);
@@ -2546,9 +2769,55 @@ emitScratchStage(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
       op.getRelation().getItems(), stage.layout);
   if (failed(loadAddress))
     return op.emitOpError("failed to construct scratch load address");
+  return ScratchStageExpressions{*storeAddress, *loadAddress};
+}
+
+static void collectScratchMaterializationPoints(
+    const ScratchStageExpressions &expressions, sym::ExprHandle sourceWithin,
+    const ScratchStagePlan &stage, const ScratchPlan &plan,
+    SmallVectorImpl<RelationMaterializationPoint> &points) {
+  int64_t vectorElements = stage.layout.vectorElements;
+  for (int64_t localGroup : llvm::seq<int64_t>(0, stage.sourceGroupCount))
+    points.push_back({expressions.storeAddress, localGroup * vectorElements});
+
+  for (int64_t baseGroup : stage.loadBaseGroups) {
+    int64_t basePhysicalSlot =
+        (stage.firstResultGroup + baseGroup) * vectorElements;
+    int64_t baseDestinationSlot =
+        physicalToLogicalSlot(plan.resultOrder, basePhysicalSlot);
+    points.push_back({expressions.loadAddress, baseDestinationSlot});
+  }
+  if (vectorElements == 1)
+    return;
+
+  int64_t firstPhysicalSlot = stage.firstResultGroup * vectorElements;
+  int64_t endPhysicalSlot =
+      firstPhysicalSlot + stage.resultGroupCount * vectorElements;
+  for (int64_t physicalSlot :
+       llvm::seq<int64_t>(firstPhysicalSlot, endPhysicalSlot)) {
+    int64_t destinationSlot =
+        physicalToLogicalSlot(plan.resultOrder, physicalSlot);
+    if (!plan.selectors[destinationSlot])
+      points.push_back({sourceWithin, destinationSlot});
+  }
+}
+
+static FailureOr<ScratchLoads>
+emitScratchStage(IRRewriter &rewriter, RedistributeOp op,
+                 RelationMaterializer &materializer, Value allocation,
+                 ArrayRef<Value> source, sym::ExprHandle sourceWithin,
+                 const ScratchStageExpressions &expressions,
+                 const ScratchStagePlan &stage, const ScratchPlan &plan,
+                 Type componentType, Type tokenType, Value dependency) {
+  FailureOr<Value> published = emitScratchStores(
+      rewriter, op, materializer, allocation, source, expressions.storeAddress,
+      stage, plan, tokenType, dependency);
+  if (failed(published))
+    return failure();
+
   FailureOr<ScratchLoads> loaded = emitScratchLoads(
-      rewriter, op, materializer, allocation, *loadAddress, stage, sourceWithin,
-      stage.layout, plan, componentType, tokenType, *published);
+      rewriter, op, materializer, allocation, expressions.loadAddress, stage,
+      sourceWithin, stage.layout, plan, componentType, tokenType, *published);
   if (failed(loaded))
     return failure();
   loaded->publication = *published;
@@ -2573,75 +2842,124 @@ composeScratchSourceWithin(sym::Store &store, RedistributeOp op,
   return *sourceWithin;
 }
 
+struct ScratchLoweringPlan {
+  SmallVector<ScratchStageExpressions> stageExpressions;
+  SmallVector<RelationMaterializationPoint> materializationPoints;
+  ScratchPlan scratch;
+  ScratchCapacity capacity;
+  sym::ExprHandle sourceWithin;
+};
+
+static FailureOr<ScratchLoweringPlan>
+buildScratchLoweringPlan(IRRewriter &rewriter, RedistributeOp op,
+                         sym::Store &store, const RelationDomain &domain,
+                         func::FuncOp func, WaveLDSAllocationAnalysis &analysis,
+                         ScratchSequenceMap &sequences) {
+  FailureOr<int64_t> scratchBytes = getScratchBytes(op);
+  if (failed(scratchBytes))
+    return failure();
+  FailureOr<ScratchCapacity> capacity =
+      getScratchCapacity(rewriter, op, func, analysis, sequences);
+  if (failed(capacity))
+    return failure();
+  int64_t waveWidth = cast<SimdType>(op.getSource().getType()).getWidth();
+  FailureOr<ScratchPlan> scratch = buildScratchPlan(
+      store, op, domain, waveWidth, *scratchBytes, capacity->stageBytes);
+  if (failed(scratch))
+    return failure();
+  FailureOr<sym::ExprHandle> sourceWithin =
+      composeScratchSourceWithin(store, op, *scratch);
+  if (failed(sourceWithin))
+    return failure();
+
+  ScratchLoweringPlan plan;
+  plan.stageExpressions.reserve(scratch->stages.size());
+  for (const ScratchStagePlan &stage : scratch->stages) {
+    FailureOr<ScratchStageExpressions> expressions =
+        composeScratchStageExpressions(store, op, domain, stage, *scratch);
+    if (failed(expressions))
+      return failure();
+    plan.stageExpressions.push_back(*expressions);
+    collectScratchMaterializationPoints(*expressions, *sourceWithin, stage,
+                                        *scratch, plan.materializationPoints);
+  }
+  plan.scratch = std::move(*scratch);
+  plan.capacity = std::move(*capacity);
+  plan.sourceWithin = *sourceWithin;
+  return plan;
+}
+
+static FailureOr<ScratchExecution> executeScratchPlan(
+    IRRewriter &rewriter, RedistributeOp op, RelationMaterializer &materializer,
+    ScratchAllocation &allocation, sym::ExprHandle sourceWithin,
+    ArrayRef<ScratchStageExpressions> stageExpressions, const ScratchPlan &plan,
+    Type componentType, Type tokenType) {
+  SmallVector<Value> source = extractComponents(rewriter, op);
+  int64_t resultSlots =
+      getPacketType(op.getResult().getType()).getNumElements();
+  ScratchExecution execution;
+  execution.result.resize(resultSlots);
+  for (auto [stageIndex, stage] : llvm::enumerate(plan.stages)) {
+    FailureOr<ScratchLoads> loaded = emitScratchStage(
+        rewriter, op, materializer, allocation.allocation, source, sourceWithin,
+        stageExpressions[stageIndex], stage, plan, componentType, tokenType,
+        allocation.dependency);
+    if (failed(loaded))
+      return failure();
+    execution.analysisCompletion = loaded->publication;
+    for (const ScratchValue &value : loaded->values)
+      execution.result[value.slot] = value.value;
+    execution.completionTokens = std::move(loaded->tokens);
+    if (stageIndex + 1 != plan.stages.size())
+      allocation.dependency =
+          BarrierOp::create(rewriter, op.getLoc(), tokenType,
+                            execution.completionTokens)
+              .getToken();
+  }
+  return execution;
+}
+
 static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
                                     sym::Store &store,
                                     const RelationDomain &domain,
                                     func::FuncOp func,
                                     WaveLDSAllocationAnalysis &analysis,
                                     ScratchSequenceMap &sequences) {
-  FailureOr<int64_t> scratchBytes = getScratchBytes(op);
-  if (failed(scratchBytes))
-    return failure();
-  Type tokenType = MemTokenType::get(op.getContext());
-  FailureOr<ScratchCapacity> capacity =
-      getScratchCapacity(rewriter, op, func, analysis, sequences);
-  if (failed(capacity))
-    return failure();
-  int64_t waveWidth = cast<SimdType>(op.getSource().getType()).getWidth();
-  FailureOr<ScratchPlan> plan = buildScratchPlan(
-      store, op, domain, waveWidth, *scratchBytes, capacity->stageBytes);
+  FailureOr<ScratchLoweringPlan> plan = buildScratchLoweringPlan(
+      rewriter, op, store, domain, func, analysis, sequences);
   if (failed(plan))
     return failure();
+  Type tokenType = MemTokenType::get(op.getContext());
+  RelationMaterializer materializer(rewriter, op, store, domain);
+  if (failed(materializer.prepare(plan->materializationPoints)))
+    return op.emitOpError("failed to prepare scratch relation");
+
   VectorType sourcePacket = getPacketType(op.getSource().getType());
   Type elementType = sourcePacket.getElementType();
   int64_t elementBytes = elementType.getIntOrFloatBitWidth() / 8;
-  int64_t transferBytes = elementBytes * plan->vectorElements;
+  int64_t transferBytes = elementBytes * plan->scratch.vectorElements;
   FailureOr<ScratchAllocation> scratch = createScratchAllocation(
-      rewriter, op, elementType, tokenType, transferBytes, *plan, *capacity,
-      analysis, sequences);
+      rewriter, op, elementType, tokenType, transferBytes, plan->scratch,
+      plan->capacity, analysis, sequences);
   if (failed(scratch))
     return failure();
-  RelationMaterializer materializer(rewriter, op, store, domain);
-  SmallVector<Value> source = extractComponents(rewriter, op);
-
-  FailureOr<sym::ExprHandle> sourceWithin =
-      composeScratchSourceWithin(store, op, *plan);
-  if (failed(sourceWithin))
+  Type componentType = getPacketElementType(op.getSource().getType());
+  FailureOr<ScratchExecution> execution = executeScratchPlan(
+      rewriter, op, materializer, *scratch, plan->sourceWithin,
+      plan->stageExpressions, plan->scratch, componentType, tokenType);
+  if (failed(execution))
     return failure();
 
-  int64_t resultSlots =
-      getPacketType(op.getResult().getType()).getNumElements();
-  Type componentType = getPacketElementType(op.getSource().getType());
-  SmallVector<Value> result(resultSlots);
-  SmallVector<Value> completionTokens;
-  Value analysisCompletion;
-  for (auto [stageIndex, stage] : llvm::enumerate(plan->stages)) {
-    FailureOr<ScratchLoads> loaded =
-        emitScratchStage(rewriter, op, store, domain, materializer,
-                         scratch->allocation, source, *sourceWithin, stage,
-                         *plan, componentType, tokenType, scratch->dependency);
-    if (failed(loaded))
-      return failure();
-    analysisCompletion = loaded->publication;
-
-    for (const ScratchValue &value : loaded->values)
-      result[value.slot] = value.value;
-    completionTokens = std::move(loaded->tokens);
-    if (stageIndex + 1 != plan->stages.size())
-      scratch->dependency =
-          BarrierOp::create(rewriter, op.getLoc(), tokenType, completionTokens)
-              .getToken();
-  }
-
-  Value packed =
-      PackOp::create(rewriter, op.getLoc(), op.getResult().getType(), result);
-  Value completed =
-      JoinOp::create(rewriter, op.getLoc(), tokenType, completionTokens);
+  Value packed = PackOp::create(rewriter, op.getLoc(), op.getResult().getType(),
+                                execution->result);
+  Value completed = JoinOp::create(rewriter, op.getLoc(), tokenType,
+                                   execution->completionTokens);
   AllocReleaseOp released = AllocReleaseOp::create(
       rewriter, op.getLoc(), tokenType, scratch->allocation, completed,
       rewriter.getUnitAttr());
-  sequences[op->getBlock()] = {released.getToken(), analysisCompletion,
-                               released, scratch->range};
+  sequences[op->getBlock()] = {released.getToken(),
+                               execution->analysisCompletion, released,
+                               scratch->range};
   rewriter.replaceOp(op, packed);
   return success();
 }
@@ -2653,90 +2971,157 @@ static bool canCompose(RedistributeOp previous, RedistributeOp op) {
          previous.getRelation().getItems() == op.getRelation().getItems();
 }
 
-static LogicalResult composeOne(RedistributeOp previous, RedistributeOp op,
-                                sym::Store &store) {
-  FailureOr<sym::ExprHandle> block = sym::composeExprSym(store, "block");
-  FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, "item");
-  FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
-  if (failed(block) || failed(item) || failed(slot))
-    return op.emitOpError("failed to construct composition symbols");
-  std::array<sym::ExprSubstitution, 3> substitutions{
-      sym::ExprSubstitution{*block, op.getRelation().getSourceBlock()},
-      sym::ExprSubstitution{*item, op.getRelation().getSourceItem()},
-      sym::ExprSubstitution{*slot, op.getRelation().getSourceSlot()}};
-  FailureOr<sym::ExprHandle> sourceBlock = sym::substituteExpr(
-      store, previous.getRelation().getSourceBlock(), substitutions);
-  FailureOr<sym::ExprHandle> sourceItem = sym::substituteExpr(
-      store, previous.getRelation().getSourceItem(), substitutions);
-  FailureOr<sym::ExprHandle> sourceSlot = sym::substituteExpr(
-      store, previous.getRelation().getSourceSlot(), substitutions);
-  if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
-    return op.emitOpError("failed to compose redistribution relations");
-  sourceBlock = sym::simplifyExpr(store, *sourceBlock);
-  sourceItem = sym::simplifyExpr(store, *sourceItem);
-  sourceSlot = sym::simplifyExpr(store, *sourceSlot);
-  if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
-    return op.emitOpError("failed to simplify composed redistribution");
+struct RedistributionComposition {
+  SmallVector<RedistributeOp> composed;
+  std::array<sym::ExprHandle, 3> sources;
+  Value source;
+};
 
-  RedistributionAttr relation = RedistributionAttr::get(
-      op.getContext(), op.getRelation().getBlocks(),
-      op.getRelation().getItems(), *sourceBlock, *sourceItem, *sourceSlot);
-  op->setOperand(0, previous.getSource());
-  op.setRelationAttr(relation);
-  return op.verify();
+static FailureOr<std::array<sym::ExprHandle, 3>>
+buildCompositionSymbols(sym::Analysis &analysis, RedistributeOp op) {
+  FailureOr<sym::ExprHandle> block = analysis.composeSymbol("block");
+  FailureOr<sym::ExprHandle> item = analysis.composeSymbol("item");
+  FailureOr<sym::ExprHandle> slot = analysis.composeSymbol("slot");
+  if (failed(block) || failed(item) || failed(slot)) {
+    op.emitOpError("failed to construct composition symbols");
+    return failure();
+  }
+  return std::array<sym::ExprHandle, 3>{*block, *item, *slot};
+}
+
+static FailureOr<std::array<sym::ExprHandle, 3>>
+composeRelationStep(sym::Analysis &analysis, RedistributeOp op,
+                    RedistributeOp previous,
+                    const std::array<sym::ExprHandle, 3> &symbols,
+                    const std::array<sym::ExprHandle, 3> &sources) {
+  std::array<sym::ExprSubstitution, 3> substitutions{
+      sym::ExprSubstitution{symbols[0], sources[0]},
+      sym::ExprSubstitution{symbols[1], sources[1]},
+      sym::ExprSubstitution{symbols[2], sources[2]}};
+  std::array<sym::ExprHandle, 3> next{previous.getRelation().getSourceBlock(),
+                                      previous.getRelation().getSourceItem(),
+                                      previous.getRelation().getSourceSlot()};
+  for (sym::ExprHandle &expression : next) {
+    FailureOr<sym::ExprHandle> substituted =
+        analysis.substitute(expression, substitutions);
+    if (failed(substituted)) {
+      op.emitOpError("failed to compose redistribution relations");
+      return failure();
+    }
+    expression = *substituted;
+  }
+  std::array<sym::ExprHandle, 3> simplified = next;
+  if (failed(analysis.simplify(simplified))) {
+    op.emitOpError("failed to simplify composed redistribution");
+    return failure();
+  }
+  for (auto [expression, candidate] : llvm::zip(next, simplified))
+    if (shouldUseSimplifiedIndexExpr(candidate, expression))
+      expression = candidate;
+  return next;
+}
+
+static FailureOr<RedistributionComposition>
+buildRedistributionComposition(sym::Analysis &analysis, RedistributeOp op,
+                               RedistributeOp previous,
+                               const std::array<sym::ExprHandle, 3> &symbols) {
+  RedistributionComposition composition;
+  composition.sources = {op.getRelation().getSourceBlock(),
+                         op.getRelation().getSourceItem(),
+                         op.getRelation().getSourceSlot()};
+  composition.source = op.getSource();
+  do {
+    FailureOr<std::array<sym::ExprHandle, 3>> sources = composeRelationStep(
+        analysis, op, previous, symbols, composition.sources);
+    if (failed(sources))
+      return failure();
+    composition.sources = *sources;
+    composition.source = previous.getSource();
+    composition.composed.push_back(previous);
+    previous = composition.source.getDefiningOp<RedistributeOp>();
+  } while (previous && canCompose(previous, op));
+  return composition;
 }
 
 static FailureOr<bool> composeAdjacent(IRRewriter &rewriter, RedistributeOp op,
                                        sym::Store &store,
                                        DenseSet<Operation *> &erased) {
-  bool changed = false;
-  while (RedistributeOp previous =
-             op.getSource().getDefiningOp<RedistributeOp>()) {
-    if (!canCompose(previous, op))
-      break;
-    if (failed(composeOne(previous, op, store)))
-      return failure();
-    changed = true;
-    erased.insert(previous.getOperation());
-    rewriter.eraseOp(previous);
+  RedistributeOp previous = op.getSource().getDefiningOp<RedistributeOp>();
+  if (!previous || !canCompose(previous, op))
+    return false;
+
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store);
+  if (failed(analysis))
+    return op.emitOpError("failed to construct composition analysis");
+  FailureOr<std::array<sym::ExprHandle, 3>> symbols =
+      buildCompositionSymbols(**analysis, op);
+  if (failed(symbols))
+    return failure();
+  FailureOr<RedistributionComposition> composition =
+      buildRedistributionComposition(**analysis, op, previous, *symbols);
+  if (failed(composition))
+    return failure();
+
+  analysis->reset();
+  RedistributionAttr relation = RedistributionAttr::get(
+      op.getContext(), op.getRelation().getBlocks(),
+      op.getRelation().getItems(), composition->sources[0],
+      composition->sources[1], composition->sources[2]);
+  op->setOperand(0, composition->source);
+  op.setRelationAttr(relation);
+  if (failed(op.verify()))
+    return failure();
+  for (RedistributeOp composedOp : composition->composed) {
+    erased.insert(composedOp.getOperation());
+    rewriter.eraseOp(composedOp);
   }
-  return changed;
+  return true;
 }
 
-static LogicalResult
-validateAndClassifyRedistributions(ArrayRef<RedistributeOp> ops,
-                                   func::FuncOp func, WaveDialect &dialect,
-                                   DenseMap<Operation *, Movement> &movements,
-                                   CoordinateCache &coordinateCache) {
+static LogicalResult validateAndClassifyRedistributions(
+    ArrayRef<RedistributeOp> ops, func::FuncOp func, WaveDialect &dialect,
+    DenseMap<Operation *, RedistributionClassification> &classifications,
+    CoordinateCacheMap &coordinateCaches) {
   for (RedistributeOp op : ops) {
+    auto coordinateCache = std::make_unique<CoordinateCache>();
     FailureOr<RelationDomain> domain =
-        buildDomain(dialect.getSymbolStore(), op, coordinateCache);
+        buildDomain(dialect.getSymbolStore(), op, *coordinateCache);
     if (failed(domain))
       return op.emitOpError("failed to construct redistribution domain");
     int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
-    FailureOr<Movement> movement = validateAndClassifyMovement(
-        dialect.getSymbolStore(), op, *domain, width);
-    if (failed(movement))
+    FailureOr<RedistributionClassification> classification =
+        validateAndClassifyMovement(dialect.getSymbolStore(), op, *domain,
+                                    width);
+    if (failed(classification))
       return failure();
-    movements[op.getOperation()] = *movement;
+    classifications.try_emplace(op.getOperation(), *classification);
+    coordinateCaches.try_emplace(op.getOperation(), std::move(coordinateCache));
     if (failed(validateWorkgroup(op, func, width)))
       return failure();
   }
   return success();
 }
 
-static LogicalResult
-composeRedistributions(IRRewriter &rewriter, ArrayRef<RedistributeOp> ops,
-                       sym::Store &store, DenseSet<Operation *> &erased,
-                       DenseMap<Operation *, Movement> &movements) {
+static LogicalResult composeRedistributions(
+    IRRewriter &rewriter, ArrayRef<RedistributeOp> ops, sym::Store &store,
+    DenseSet<Operation *> &erased,
+    DenseMap<Operation *, RedistributionClassification> &classifications,
+    CoordinateCacheMap &coordinateCaches) {
   for (RedistributeOp op : llvm::reverse(ops)) {
     if (erased.contains(op.getOperation()))
       continue;
     FailureOr<bool> changed = composeAdjacent(rewriter, op, store, erased);
     if (failed(changed))
       return failure();
-    if (*changed)
-      movements.erase(op.getOperation());
+    if (*changed) {
+      classifications.erase(op.getOperation());
+      coordinateCaches.erase(op.getOperation());
+    }
+  }
+  for (Operation *op : erased) {
+    classifications.erase(op);
+    coordinateCaches.erase(op);
   }
   return success();
 }
@@ -2763,7 +3148,8 @@ static LogicalResult lowerWorkgroupRedistribution(
 static LogicalResult lowerRedistribution(
     IRRewriter &rewriter, RedistributeOp op, WaveDialect &dialect,
     func::FuncOp func, std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
-    ScratchSequenceMap &sequences, std::optional<Movement> validatedMovement,
+    ScratchSequenceMap &sequences,
+    std::optional<RedistributionClassification> validatedClassification,
     CoordinateCache &coordinateCache) {
   rewriter.setInsertionPoint(op);
   FailureOr<RelationDomain> domain =
@@ -2771,21 +3157,21 @@ static LogicalResult lowerRedistribution(
   if (failed(domain))
     return op.emitOpError("failed to construct redistribution domain");
   int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
-  Movement movement;
-  if (validatedMovement) {
-    movement = *validatedMovement;
+  RedistributionClassification classification;
+  if (validatedClassification) {
+    classification = *validatedClassification;
   } else {
-    FailureOr<Movement> classified = validateAndClassifyMovement(
-        dialect.getSymbolStore(), op, *domain, width);
+    FailureOr<RedistributionClassification> classified =
+        validateAndClassifyMovement(dialect.getSymbolStore(), op, *domain,
+                                    width);
     if (failed(classified))
       return failure();
-    movement = *classified;
+    classification = *classified;
   }
-  if (failed(validateBlockLowering(op, dialect.getSymbolStore(), *domain,
-                                   movement)))
+  if (failed(validateBlockLowering(op, classification.blockLowering)))
     return failure();
 
-  switch (movement) {
+  switch (classification.movement) {
   case Movement::Alias:
     rewriter.replaceOp(op, op.getSource());
     return success();
@@ -2803,20 +3189,20 @@ static LogicalResult lowerRedistribution(
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
-                               IRRewriter &rewriter,
-                               CoordinateCache &coordinateCache) {
+                               IRRewriter &rewriter) {
   SmallVector<RedistributeOp> ops;
   func.walk([&](RedistributeOp op) { ops.push_back(op); });
   if (ops.empty())
     return success();
-  DenseMap<Operation *, Movement> movements;
-  if (failed(validateAndClassifyRedistributions(ops, func, dialect, movements,
-                                                coordinateCache)))
+  DenseMap<Operation *, RedistributionClassification> classifications;
+  CoordinateCacheMap coordinateCaches;
+  if (failed(validateAndClassifyRedistributions(
+          ops, func, dialect, classifications, coordinateCaches)))
     return failure();
 
   DenseSet<Operation *> erased;
   if (failed(composeRedistributions(rewriter, ops, dialect.getSymbolStore(),
-                                    erased, movements)))
+                                    erased, classifications, coordinateCaches)))
     return failure();
 
   ScratchSequenceMap sequences;
@@ -2824,13 +3210,24 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
   for (RedistributeOp op : ops) {
     if (erased.contains(op.getOperation()))
       continue;
-    std::optional<Movement> movement;
-    auto found = movements.find(op.getOperation());
-    if (found != movements.end())
-      movement = found->second;
+    Operation *operation = op.getOperation();
+    std::optional<RedistributionClassification> classification;
+    auto found = classifications.find(operation);
+    if (found != classifications.end())
+      classification = found->second;
+    std::unique_ptr<CoordinateCache> localCoordinateCache;
+    auto cache = coordinateCaches.find(operation);
+    if (cache == coordinateCaches.end()) {
+      localCoordinateCache = std::make_unique<CoordinateCache>();
+      cache = coordinateCaches
+                  .try_emplace(operation, std::move(localCoordinateCache))
+                  .first;
+    }
     if (failed(lowerRedistribution(rewriter, op, dialect, func, analysis,
-                                   sequences, movement, coordinateCache)))
+                                   sequences, classification, *cache->second)))
       return failure();
+    coordinateCaches.erase(operation);
+    classifications.erase(operation);
   }
   return success();
 }
@@ -2844,14 +3241,13 @@ struct WaveLowerRedistributePass
       return signalPassFailure();
     }
     IRRewriter rewriter(&getContext());
-    CoordinateCache coordinateCache;
     SmallVector<func::FuncOp> funcs;
     if (auto func = dyn_cast<func::FuncOp>(getOperation()))
       funcs.push_back(func);
     else
       getOperation()->walk([&](func::FuncOp func) { funcs.push_back(func); });
     for (func::FuncOp func : funcs)
-      if (failed(lowerFunc(func, *dialect, rewriter, coordinateCache)))
+      if (failed(lowerFunc(func, *dialect, rewriter)))
         return signalPassFailure();
   }
 };

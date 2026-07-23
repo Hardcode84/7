@@ -137,6 +137,7 @@ struct ExprSubstitution {
 
 bool isExpr(ExprHandle value);
 bool isPred(PredHandle value);
+bool isIntegerValued(ExprHandle value);
 
 // Wrong-kind accessors return empty handles / zero counts.
 class ExprView {
@@ -280,11 +281,6 @@ mlir::FailureOr<PredHandle> composePredOr(Store &store, PredHandle lhs,
                                           std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> composePredNot(Store &store, PredHandle value,
                                            std::string *diagnostic = nullptr);
-/// Multiply every comparison operand by the same positive integer.
-mlir::FailureOr<PredHandle> scalePred(Store &store, PredHandle value,
-                                      int64_t scale,
-                                      std::string *diagnostic = nullptr);
-
 /// Simplify under no assumptions.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          std::string *diagnostic = nullptr);
@@ -317,6 +313,10 @@ struct RationalEndpoint {
   int64_t numerator = 0;
   int64_t denominator = 1;
 };
+
+std::optional<int64_t> floorEndpoint(RationalEndpoint value);
+std::optional<int64_t> ceilEndpoint(RationalEndpoint value);
+int compareEndpointToInteger(RationalEndpoint value, int64_t integer);
 
 struct InferredRange {
   std::optional<RationalEndpoint> lower;
@@ -359,10 +359,17 @@ public:
   create(Store &store, llvm::ArrayRef<PredHandle> assumptions = {},
          std::string *diagnostic = nullptr);
 
+  /// Imports one exact domain without inter-predicate closure.
+  static mlir::FailureOr<std::unique_ptr<Analysis>>
+  createDirect(Store &store, llvm::ArrayRef<PredHandle> assumptions = {},
+               std::string *diagnostic = nullptr);
+
   Analysis(const Analysis &) = delete;
   Analysis &operator=(const Analysis &) = delete;
 
   mlir::LogicalResult assume(PredHandle pred,
+                             std::string *diagnostic = nullptr);
+  mlir::LogicalResult assume(llvm::ArrayRef<PredHandle> predicates,
                              std::string *diagnostic = nullptr);
   mlir::LogicalResult assumeRange(ExprHandle expr, InferredRange range,
                                   std::string *diagnostic = nullptr);
@@ -466,6 +473,8 @@ mlir::FailureOr<PredHandle> rangeAssumption(Store &store, llvm::StringRef name,
                                             std::string *diagnostic = nullptr);
 
 /// True iff `expr` provably stays in `[lo, hi]` under `assumptions`.
+bool provablyInRange(Analysis &analysis, ExprHandle expr, int64_t lo,
+                     int64_t hi);
 bool provablyInRange(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions, int64_t lo,
                      int64_t hi);
@@ -483,7 +492,6 @@ inferNonNegativeUpperBound(Store &store, ExprHandle expr,
 /// Integer payload of a structurally-integral expression. `nullopt`
 /// for non-integral nodes.
 std::optional<int64_t> getIntegerLiteralValue(ExprHandle value);
-std::optional<int64_t> collectDenominator(ExprHandle value);
 
 /// Walk every symbolic leaf name in `value`.
 void walkSymbolNames(ExprHandle value,

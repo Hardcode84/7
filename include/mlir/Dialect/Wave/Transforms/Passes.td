@@ -157,6 +157,10 @@ def WaveLowerSymbolicMemory : Pass<"wave-lower-symbolic-memory"> {
     "wave::WaveDialect",
     "waveamd::WaveAMDDialect"
   ];
+  let statistics = [
+    Statistic<"numRelationPlanningFactDomains", "relation-planning-fact-domains",
+              "Number of exact fact domains built for local relation planning">
+  ];
 }
 
 def WaveLowerTokenSelects : Pass<"wave-lower-token-selects"> {

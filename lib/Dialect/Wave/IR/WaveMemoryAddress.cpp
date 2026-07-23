@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 
 #include <algorithm>
 #include <optional>
@@ -51,7 +52,8 @@ public:
             : sym::simplifyExpr(store, expr, offset.assumptions);
     if (failed(simplified))
       return failure();
-    offset.expr = *simplified;
+    offset.expr =
+        shouldUseSimplifiedIndexExpr(*simplified, expr) ? *simplified : expr;
     return MemoryAddress{std::move(offset), base};
   }
 
@@ -245,7 +247,32 @@ static SmallVector<PtrAddOp> collectPtrAddChain(PtrAddOp op) {
   return chain;
 }
 
-static FailureOr<sym::ExprHandle>
+struct RemappedOffset {
+  SmallVector<sym::PredHandle> assumptions;
+  sym::ExprHandle expr;
+};
+
+static bool assumptionsUseBoundSymbols(const SymbolicOffset &offset) {
+  llvm::StringSet<> bound;
+  for (const SymbolicOffsetBinding &binding : offset.bindings) {
+    StringRef name = sym::ExprView(binding.name).getSymbolName();
+    if (name.empty())
+      return false;
+    bound.insert(name);
+  }
+  for (sym::PredHandle assumption : offset.assumptions) {
+    bool valid = true;
+    sym::walkSymbolNames(assumption, [&](StringRef name) {
+      if (!bound.contains(name))
+        valid = false;
+    });
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<RemappedOffset>
 substituteDeltaBindings(WaveDialect &dialect, const MemoryAddress &lhs,
                         const MemoryAddress &rhs) {
   sym::Store &store = dialect.getSymbolStore();
@@ -271,9 +298,32 @@ substituteDeltaBindings(WaveDialect &dialect, const MemoryAddress &lhs,
     substitutions.push_back({binding.name, lhsByValue->name});
   }
 
-  if (substitutions.empty())
-    return rhs.offset.expr;
-  return sym::substituteExpr(store, rhs.offset.expr, substitutions);
+  sym::ExprHandle expr = rhs.offset.expr;
+  if (!substitutions.empty()) {
+    FailureOr<sym::ExprHandle> substituted =
+        sym::substituteExpr(store, expr, substitutions);
+    if (failed(substituted))
+      return failure();
+    expr = *substituted;
+  }
+  FailureOr<SmallVector<sym::PredHandle>> assumptions =
+      substituteIndexExprPredicates(store, rhs.offset.assumptions,
+                                    substitutions);
+  if (failed(assumptions))
+    return failure();
+  return RemappedOffset{std::move(*assumptions), expr};
+}
+
+static FailureOr<sym::ExprHandle>
+computeDefinedAddressDelta(sym::Analysis &analysis, sym::ExprHandle lhs,
+                           sym::ExprHandle rhs) {
+  if (std::optional<int64_t> delta = analysis.constantDifference(lhs, rhs))
+    return analysis.composeInteger(*delta);
+  FailureOr<sym::ExprHandle> diff =
+      analysis.compose(lhs, sym::ExprBinaryOp::Sub, rhs);
+  if (failed(diff))
+    return failure();
+  return analysis.simplify(*diff);
 }
 
 } // namespace
@@ -309,21 +359,31 @@ FailureOr<std::optional<sym::ExprHandle>> mlir::wave::computeMemoryAddressDelta(
     WaveDialect &dialect, const MemoryAddress &lhs, const MemoryAddress &rhs) {
   if (lhs.base != rhs.base)
     return std::optional<sym::ExprHandle>{};
+  if (!assumptionsUseBoundSymbols(lhs.offset) ||
+      !assumptionsUseBoundSymbols(rhs.offset))
+    return std::optional<sym::ExprHandle>{};
 
-  FailureOr<sym::ExprHandle> rhsExpr =
+  FailureOr<RemappedOffset> rhsOffset =
       substituteDeltaBindings(dialect, lhs, rhs);
-  if (failed(rhsExpr))
+  if (failed(rhsOffset))
     return std::optional<sym::ExprHandle>{};
 
   sym::Store &store = dialect.getSymbolStore();
-  FailureOr<sym::ExprHandle> diff = sym::composeExprBinary(
-      store, lhs.offset.expr, sym::ExprBinaryOp::Sub, *rhsExpr);
-  if (failed(diff))
+  SmallVector<sym::PredHandle> assumptions;
+  llvm::append_range(assumptions, lhs.offset.assumptions);
+  llvm::append_range(assumptions, rhsOffset->assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
     return failure();
-  FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, *diff);
-  if (failed(simplified))
+  if ((*analysis)->defined(lhs.offset.expr) != sym::CheckResult::True ||
+      (*analysis)->defined(rhsOffset->expr) != sym::CheckResult::True)
+    return std::optional<sym::ExprHandle>{};
+  FailureOr<sym::ExprHandle> delta =
+      computeDefinedAddressDelta(**analysis, lhs.offset.expr, rhsOffset->expr);
+  if (failed(delta))
     return failure();
-  return std::optional<sym::ExprHandle>{*simplified};
+  return std::optional<sym::ExprHandle>{*delta};
 }
 
 FailureOr<std::optional<int64_t>> mlir::wave::computeConstantMemoryAddressDelta(

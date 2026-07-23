@@ -17,6 +17,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 
+#include <memory>
 #include <optional>
 
 namespace mlir::wave {
@@ -141,50 +142,43 @@ static bool rewriteIndexExpr(IRRewriter &rewriter, IndexExprOp op,
   return true;
 }
 
-static FailureOr<sym::ExprHandle>
-expandAndSimplify(sym::Store &store, sym::ExprHandle expr,
-                  ArrayRef<sym::PredHandle> assumptions) {
-  if (FailureOr<sym::ExprHandle> expanded = sym::expandExpr(store, expr);
+static FailureOr<sym::ExprHandle> expandAndSimplify(sym::Analysis &analysis,
+                                                    sym::ExprHandle expr) {
+  if (FailureOr<sym::ExprHandle> expanded = analysis.expand(expr);
       succeeded(expanded))
     expr = *expanded;
-  if (assumptions.empty())
-    return sym::simplifyExpr(store, expr);
-  return sym::simplifyExpr(store, expr, assumptions);
+  return analysis.simplify(expr);
 }
 
 static FailureOr<std::optional<sym::PredHandle>>
-simplifyExplicitPredicate(sym::Store &store, sym::PredHandle pred,
-                          ArrayRef<sym::PredHandle> bindingPredicates);
+simplifyExplicitPredicate(sym::Analysis &analysis, sym::PredHandle pred);
 
 static FailureOr<std::optional<sym::PredHandle>>
-simplifyExplicitComparison(sym::Store &store, sym::PredView view,
-                           ArrayRef<sym::PredHandle> bindingPredicates) {
+simplifyExplicitComparison(sym::Analysis &analysis, sym::PredView view) {
   std::optional<sym::PredCmpOp> comparison = view.getCmpOp();
   if (!comparison)
     return failure();
   FailureOr<sym::ExprHandle> lhs =
-      expandAndSimplify(store, view.getCmpLhs(), bindingPredicates);
+      expandAndSimplify(analysis, view.getCmpLhs());
   FailureOr<sym::ExprHandle> rhs =
-      expandAndSimplify(store, view.getCmpRhs(), bindingPredicates);
+      expandAndSimplify(analysis, view.getCmpRhs());
   if (failed(lhs) || failed(rhs))
     return failure();
   FailureOr<sym::PredHandle> rewritten =
-      sym::composePredCmp(store, *lhs, *comparison, *rhs);
+      analysis.compare(*lhs, *comparison, *rhs);
   if (failed(rewritten))
     return failure();
-  if (sym::checkPredicate(store, *rewritten, bindingPredicates) ==
-      sym::CheckResult::False)
+  if (analysis.check(*rewritten) == sym::CheckResult::False)
     return std::optional<sym::PredHandle>{};
   return std::optional<sym::PredHandle>{*rewritten};
 }
 
 static FailureOr<std::optional<sym::PredHandle>>
-simplifyExplicitConjunction(sym::Store &store, sym::PredView view,
-                            ArrayRef<sym::PredHandle> bindingPredicates) {
+simplifyExplicitConjunction(sym::Analysis &analysis, sym::PredView view) {
   std::optional<sym::PredHandle> result;
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getLogicArgCount())) {
-    FailureOr<std::optional<sym::PredHandle>> arg = simplifyExplicitPredicate(
-        store, view.getLogicArg(i), bindingPredicates);
+    FailureOr<std::optional<sym::PredHandle>> arg =
+        simplifyExplicitPredicate(analysis, view.getLogicArg(i));
     if (failed(arg))
       return failure();
     if (!*arg)
@@ -193,8 +187,7 @@ simplifyExplicitConjunction(sym::Store &store, sym::PredView view,
       result = **arg;
       continue;
     }
-    FailureOr<sym::PredHandle> combined =
-        sym::composePredAnd(store, *result, **arg);
+    FailureOr<sym::PredHandle> combined = analysis.composeAnd(*result, **arg);
     if (failed(combined))
       return failure();
     result = *combined;
@@ -203,13 +196,12 @@ simplifyExplicitConjunction(sym::Store &store, sym::PredView view,
 }
 
 static FailureOr<std::optional<sym::PredHandle>>
-simplifyExplicitPredicate(sym::Store &store, sym::PredHandle pred,
-                          ArrayRef<sym::PredHandle> bindingPredicates) {
+simplifyExplicitPredicate(sym::Analysis &analysis, sym::PredHandle pred) {
   sym::PredView view(pred);
   if (view.getKind() == sym::PredKind::Cmp)
-    return simplifyExplicitComparison(store, view, bindingPredicates);
+    return simplifyExplicitComparison(analysis, view);
   if (view.getKind() == sym::PredKind::And)
-    return simplifyExplicitConjunction(store, view, bindingPredicates);
+    return simplifyExplicitConjunction(analysis, view);
   if (view.getKind() == sym::PredKind::True ||
       view.getKind() == sym::PredKind::False)
     return std::optional<sym::PredHandle>{};
@@ -220,10 +212,14 @@ static FailureOr<SmallVector<sym::PredHandle>>
 simplifyExplicitPredicates(sym::Store &store,
                            ArrayRef<sym::PredHandle> explicitPredicates,
                            ArrayRef<sym::PredHandle> bindingPredicates) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, bindingPredicates);
+  if (failed(analysis))
+    return failure();
   SmallVector<sym::PredHandle> simplifiedPredicates;
   for (sym::PredHandle pred : explicitPredicates) {
     FailureOr<std::optional<sym::PredHandle>> simplified =
-        simplifyExplicitPredicate(store, pred, bindingPredicates);
+        simplifyExplicitPredicate(**analysis, pred);
     if (failed(simplified))
       return failure();
     if (*simplified && !llvm::is_contained(simplifiedPredicates, **simplified))
@@ -236,13 +232,25 @@ static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
                                          const IndexExprAssumptions &collected,
                                          sym::Store &store) {
   SmallVector<sym::PredHandle> assumptions = collected.all();
-  FailureOr<sym::ExprHandle> simplified =
-      expandAndSimplify(store, op.getExpr().getValue(), assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return op.emitError("failed to create wave.index_expr analysis");
+  sym::ExprHandle original = op.getExpr().getValue();
+  sym::ExprHandle expanded = original;
+  if (FailureOr<sym::ExprHandle> result = (*analysis)->expand(expanded);
+      succeeded(result))
+    expanded = *result;
+  FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(expanded);
   if (failed(simplified))
     return op.emitError("failed to range-simplify wave.index_expr");
+  analysis->reset();
+  sym::ExprHandle result = shouldUseSimplifiedIndexExpr(*simplified, original)
+                               ? *simplified
+                               : original;
 
   llvm::DenseSet<StringRef> freeSymbols;
-  collectFreeSymbols(*simplified, freeSymbols);
+  collectFreeSymbols(result, freeSymbols);
   FailureOr<SmallVector<sym::PredHandle>> simplifiedExplicit =
       simplifyExplicitPredicates(store, collected.explicitPredicates,
                                  collected.bindingPredicates);
@@ -259,14 +267,14 @@ static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
   SmallVector<Value> bindings;
   collectLiveBindings(op, freeSymbols, names, bindings);
 
-  bool exprChanged = !(*simplified == op.getExpr().getValue());
+  bool exprChanged = !(result == op.getExpr().getValue());
   bool bindingsChanged = bindings.size() != op.getBindings().size();
   bool assumptionsChanged =
       !samePredicates(op.getAssumptionsAttr(), liveAssumptions);
   if (!exprChanged && !bindingsChanged && !assumptionsChanged)
     return false;
 
-  return rewriteIndexExpr(rewriter, op, *simplified, names, bindings,
+  return rewriteIndexExpr(rewriter, op, result, names, bindings,
                           liveAssumptions);
 }
 

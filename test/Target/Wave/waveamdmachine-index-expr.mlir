@@ -35,6 +35,34 @@ func.func @mixed_offset(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes 
   return
 }
 
+// CHECK-LABEL: func.func @shallow_factored_root_add
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_y
+// CHECK: %[[SSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGID]],
+// CHECK: %[[VSCALE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
+// CHECK: %[[ADDR:.*]] = waveamdmachine.v_add_u32 %[[SSCALE]], %[[VSCALE]]
+// CHECK: waveamdmachine.global_store_b32 %[[ADDR]], {{.*}} offset 92
+func.func @shallow_factored_root_add(
+    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %wgid_y_raw = wave.workgroup_id 1
+  %wgid_y = wave.assume %wgid_y_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %c7 = arith.constant 7 : index
+  %base = wave.ptr_add %out, %c7
+      : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  %off = wave.index_expr <"16 + wgid_y + 4*lid"> ["lid", "wgid_y"]
+      (%lane, %wgid_y)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %base, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // Single-symbol passthrough: address planning routes lid straight to
 // the voffset slot; the only arith is the byte-scale shift on lid
 // and the value-side adder. No spurious `imm 0` / `imm 1` ops, no
@@ -189,20 +217,17 @@ func.func @buffer_bounded_uniform_arg_uses_soffset(%out: !wave.ptr<#wave.global,
   return
 }
 
-// Expanded uniform polynomial must stay SGPR-side; otherwise the
-// buffer soffset path collapses into voffset.
+// Factored uniform polynomial stays SGPR-side.
 // CHECK-LABEL: func.func @nested_uniform_summand_stays_sgpr
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
 // CHECK: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SX:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGX]],
-// CHECK: %[[SY:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGY]],
-// CHECK: %[[S0:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[SX]], %[[SY]]
-// CHECK: %[[SXY:.*]] = waveamdmachine.s_mul_i32 %[[WGX]], %[[WGY]]
-// CHECK: %[[SXY4:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SXY]],
-// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[S0]], %[[SXY4]]
-// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], %[[LANE]], {{.*}}, %[[SBYTE]] offset 8
+// CHECK: %[[X1:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGX]],
+// CHECK: %[[X4:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[X1]],
+// CHECK: %[[Y2:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGY]],
+// CHECK: %[[SBYTE:.*]] = waveamdmachine.s_mul_i32 %[[X4]], %[[Y2]]
+// CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], %[[LANE]], {{.*}}, %[[SBYTE]]
 func.func @nested_uniform_summand_stays_sgpr(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %wgid_x_raw = wave.workgroup_id 0
@@ -245,6 +270,35 @@ func.func @range_drives_const_fold(%out: !wave.ptr<#wave.global, i32>, %x: i32, 
   return
 }
 
+// CHECK-LABEL: func.func @singleton_facts_staticize_divisors
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[QUOTIENT:.*]] = waveamdmachine.v_lshrrev_b32 %[[LANE]],
+// CHECK: %[[REMAINDER:.*]] = waveamdmachine.v_and_b32 %[[QUOTIENT]],
+// CHECK: %[[BYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[REMAINDER]],
+// CHECK: waveamdmachine.global_store_b32 %[[BYTE]],
+func.func @singleton_facts_staticize_divisors(
+    %out: !wave.ptr<#wave.global, i32>, %scale_raw: i32,
+    %divisor_raw: i32) attributes {wave.kernel} {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
+      : !wave.simd<i32, 32>
+  %scale = wave.assume %scale_raw as "x"
+      [#wave.pred<"x >= 8">, #wave.pred<"x <= 8">] : i32
+  %divisor = wave.assume %divisor_raw as "x"
+      [#wave.pred<"x >= 2">, #wave.pred<"x <= 2">] : i32
+  %off = wave.index_expr <"Mod(floor(lid/scale), divisor)">
+      ["divisor", "lid", "scale"](%divisor, %lane, %scale)
+      : (i32, !wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @divisibility_drives_const_fold
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK-NOT: waveamdmachine.s_add_i32
@@ -257,6 +311,59 @@ func.func @divisibility_drives_const_fold(%out: !wave.ptr<#wave.global, i32>, %u
   %ptrs = wave.ptr_add %out, %off : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %vx = wave.splat %x : i32 -> !wave.simd<i32, 32>
   %tok = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @fact_backed_integer_rational
+// CHECK: waveamdmachine.s_lshr_b32
+func.func @fact_backed_integer_rational(%x_raw: i32) -> index {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"Mod(x, 8) == 0">] : i32
+  %off = wave.index_expr <"1/8*x"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @whole_integer_rational_add
+// CHECK: %[[SUM:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.s_lshr_b32 %[[SUM]],
+func.func @whole_integer_rational_add(%a_raw: i32, %b_raw: i32) -> index {
+  %a = wave.assume %a_raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 63">,
+       #wave.pred<"Mod(x, 2) == 1">] : i32
+  %b = wave.assume %b_raw as "x"
+      [#wave.pred<"x >= 1">, #wave.pred<"x <= 63">,
+       #wave.pred<"Mod(x, 2) == 1">] : i32
+  %off = wave.index_expr <"1/2*(a + b)"> ["a", "b"](%a, %b)
+      : (i32, i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @narrow_floor_large_denominator
+// CHECK-NOT: lshr
+// CHECK: waveamdmachine.imm 0
+func.func @narrow_floor_large_denominator(%x_raw: i32) -> index {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483647">] : i32
+  %off = wave.index_expr <"floor(1/4294967296*x)"> ["x"](%x)
+      : (i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @whole_field_proof_selects_cheaper_material_form
+// CHECK-NOT: waveamdmachine.s_and_b32
+// CHECK: waveamdmachine.s_lshl_b32
+func.func @whole_field_proof_selects_cheaper_material_form(
+    %out: !wave.ptr<#wave.global, i32>, %x_raw: i32)
+    attributes {wave.kernel} {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %off = wave.index_expr <"Mod(x, 1024)"> ["x"](%x) : (i32) -> index
+  %ptr = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %token = wave.store %lane -> %ptr
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
   return
 }
 

@@ -97,26 +97,6 @@ getPointerElementBytes(Type type,
   return *bits / 8;
 }
 
-static std::optional<int64_t> ceilRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator > 0)
-    ++quotient;
-  return quotient;
-}
-
-static std::optional<int64_t> floorRational(sym::RationalEndpoint value) {
-  if (value.denominator <= 0)
-    return std::nullopt;
-  int64_t quotient = value.numerator / value.denominator;
-  int64_t remainder = value.numerator % value.denominator;
-  if (remainder != 0 && value.numerator < 0)
-    --quotient;
-  return quotient;
-}
-
 static std::optional<std::pair<int64_t, int64_t>>
 inferIntegerRangeBounds(sym::Store &store, sym::ExprHandle expr,
                         ArrayRef<sym::PredHandle> assumptions) {
@@ -124,8 +104,8 @@ inferIntegerRangeBounds(sym::Store &store, sym::ExprHandle expr,
       sym::inferRange(store, expr, assumptions);
   if (!range || !range->lower || !range->upper)
     return std::nullopt;
-  std::optional<int64_t> lo = ceilRational(*range->lower);
-  std::optional<int64_t> hi = floorRational(*range->upper);
+  std::optional<int64_t> lo = sym::ceilEndpoint(*range->lower);
+  std::optional<int64_t> hi = sym::floorEndpoint(*range->upper);
   if (!lo || !hi || *lo > *hi)
     return std::nullopt;
   return std::make_pair(*lo, *hi);

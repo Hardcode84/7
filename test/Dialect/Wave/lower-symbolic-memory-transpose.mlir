@@ -44,6 +44,103 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// CHECK-LABEL: func.func @gfx950_b8_fact_transpose(
+// CHECK-NOT: wave.load
+// CHECK: wave.index_expr <"16*item + origin">
+// CHECK-SAME: ["origin", "item"]
+// CHECK: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_fact_transpose(
+      %base: !wave.ptr<#wave.shared, i8>, %origin_raw: index)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %origin = wave.assume %origin_raw as "origin"
+        [#wave.pred<"Mod(origin, 4) == 0">] : index
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * (origin + 256 * floor(Mod(item, 64) / 16) + 16 * floor(Mod(item, 16) / 2) + 4 * Mod(item, 2) + floor(slot / 2) + Mod(origin * slot, 4))">>
+        bindings ["origin"](%origin) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i8>, index)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @gfx950_b8_insufficient_fact(
+// CHECK-NOT: waveamd.transpose_load
+// CHECK: wave.load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_insufficient_fact(
+      %base: !wave.ptr<#wave.shared, i8>, %origin_raw: index)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %origin = wave.assume %origin_raw as "origin"
+        [#wave.pred<"Mod(origin, 2) == 0">] : index
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * (origin + 256 * floor(Mod(item, 64) / 16) + 16 * floor(Mod(item, 16) / 2) + 4 * Mod(item, 2) + floor(slot / 2) + Mod(origin * slot, 4))">>
+        bindings ["origin"](%origin) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i8>, index)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @gfx950_b8_contradicting_fact(
+// CHECK-NOT: waveamd.transpose_load
+// CHECK: wave.load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_contradicting_fact(
+      %base: !wave.ptr<#wave.shared, i8>, %origin_raw: index)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %origin = wave.assume %origin_raw as "origin"
+        [#wave.pred<"Mod(origin, 4) == 1">] : index
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * (origin + 256 * floor(Mod(item, 64) / 16) + 16 * floor(Mod(item, 16) / 2) + 4 * Mod(item, 2) + floor(slot / 2) + Mod(origin * slot, 4))">>
+        bindings ["origin"](%origin) packet_bindings []()
+        : (!wave.ptr<#wave.shared, i8>, index)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @gfx950_b8_fact_keeps_xor_base(
+// CHECK-NOT: wave.load
+// CHECK: wave.index_expr <"origin + 8*Mod(item, 64) + xor(32 + 4*b, 8*c)">
+// CHECK: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_fact_keeps_xor_base(
+      %base: !wave.ptr<#wave.shared, i8>, %origin_raw: index,
+      %b: index, %c: index)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 128, 1, 1>} {
+    %origin = wave.assume %origin_raw as "origin"
+        [#wave.pred<"Mod(origin, 4) == 0">] : index
+    %bounded_b = wave.assume %b as "x"
+        [#wave.pred<"x >= 0 & -1 + x <= 0">] : index
+    %bounded_c = wave.assume %c as "x"
+        [#wave.pred<"x >= 0 & -1 + x <= 0">] : index
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * (origin + xor(32 + 4*b, 8*c) + 128 * floor(Mod(item, 64) / 16) + 4 * Mod(item, 16) + floor(slot / 2) + Mod(origin * slot, 4))">>
+        bindings ["origin", "b", "c"](%origin, %bounded_b, %bounded_c)
+        packet_bindings []()
+        : (!wave.ptr<#wave.shared, i8>, index, index, index)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @gfx950_b16_transpose(
 // CHECK-NOT: wave.load
 // CHECK: wave.index_expr <"8*item">

@@ -25,7 +25,10 @@ func.func @buffer_selected_oob_load_codegen(
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   %active = wave.index_expr <"u + lid"> ["u", "lid"](%u, %lane)
       : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %oob = arith.constant 536870912 : index
+  %oob_source = arith.constant 1073741824 : index
+  %oob = wave.index_expr <"floor(1/2*x)">
+      assuming [#wave.pred<"x >= 0">] ["x"](%oob_source)
+      : (index) -> index
   %oob_simd = wave.splat %oob : index -> !wave.simd<index, 32>
   %active_ptr = wave.ptr_add %buffer, %active
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
