@@ -62,7 +62,7 @@ git submodule update --init --recursive
 python build_tools/build_llvm.py -j$(nproc)
 
 # Configure and build wave-mlir.
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 

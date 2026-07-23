@@ -6,6 +6,13 @@ cmake_minimum_required(VERSION 3.31)
 
 project(wave-mlir LANGUAGES C CXX)
 
+get_property(WAVE_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT WAVE_IS_MULTI_CONFIG AND "${CMAKE_BUILD_TYPE}" STREQUAL "")
+  message(FATAL_ERROR
+    "CMAKE_BUILD_TYPE is required for single-config generators. "
+    "Pass -DCMAKE_BUILD_TYPE=Release.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -38,7 +45,8 @@ if(NOT LLVM_FOUND OR NOT MLIR_FOUND OR NOT Clang_FOUND)
     "Build it first:\n"
     "    python build_tools/build_llvm.py\n"
     "Or point at an existing install:\n"
-    "    cmake -S . -B build -DLLVM_INSTALL_DIR=/path/to/llvm-install")
+    "    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "
+    "-DLLVM_INSTALL_DIR=/path/to/llvm-install")
 endif()
 if(NOT LLD_FOUND)
   message(FATAL_ERROR
@@ -80,6 +88,15 @@ enable_testing()
 # default warning set HandleLLVMOptions installs.
 set(LLVM_ENABLE_WERROR ON CACHE BOOL
   "Treat compiler warnings as errors (delegates to HandleLLVMOptions)")
+
+# Match LLVM's GCC false-positive policy; HandleLLVMOptions consumes these.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15.0)
+    set(USE_NO_UNINITIALIZED ON)
+  else()
+    set(USE_NO_MAYBE_UNINITIALIZED ON)
+  endif()
+endif()
 
 include(HandleLLVMOptions)
 
