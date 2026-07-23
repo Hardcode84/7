@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Support/Timing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Hashing.h"
@@ -48,6 +49,31 @@ using namespace mlir;
 using namespace mlir::wave;
 
 namespace {
+
+struct SymbolicMemoryStageTimingManager {
+  SymbolicMemoryStageTimingManager() {
+    applyDefaultTimingManagerCLOptions(manager);
+  }
+
+  DefaultTimingManager manager;
+};
+
+static DefaultTimingManager &getSymbolicMemoryStageTimingManager() {
+  static SymbolicMemoryStageTimingManager timing;
+  return timing.manager;
+}
+
+struct SymbolicMemoryStageTiming {
+  SymbolicMemoryStageTiming() {
+    rootScope = getSymbolicMemoryStageTimingManager().getRootScope();
+    stageScope = rootScope.nest("wave_lower_symbolic_memory_stages");
+  }
+
+  TimingScope nest(StringRef name) { return stageScope.nest(name); }
+
+  TimingScope rootScope;
+  TimingScope stageScope;
+};
 
 struct NamedBinding {
   std::string name;
@@ -5408,7 +5434,10 @@ prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
 static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
                                  WaveDialect &dialect, DataFlowSolver &solver,
                                  SymbolicRelationProofCache &proofCache,
-                                 uint64_t &factDomainCount) {
+                                 uint64_t &factDomainCount,
+                                 SymbolicMemoryStageTiming &timing) {
+  TimingScope prepareTiming =
+      timing.nest("lower_symbolic_memory_prepare_mappings");
   FailureOr<PreparedAccessMappings> prepared =
       prepareAccessMappings(rewriter, access, dialect, solver);
   if (failed(prepared))
@@ -5419,20 +5448,31 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
                                      factDomainCount);
   if (access.packetWhere)
     rewriter.setInsertionPoint(access.packetWhere);
+  prepareTiming.stop();
+
   if (access.gather) {
+    TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_gather");
     FailureOr<GatherPlan> plan =
         planGatherTransactions(access, store, prepared->mappings,
                                prepared->shape.elementBits, proofContext);
     if (failed(plan))
       return access.op->emitOpError(
           "packet cannot be covered by legal memory transactions");
+    planTiming.stop();
+
+    TimingScope emitTiming = timing.nest("lower_symbolic_memory_emit_gather");
     return lowerGather(rewriter, access, store, prepared->mappings, *plan);
   }
+
+  TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_scatter");
   FailureOr<SmallVector<SmallVector<unsigned>>> transactions = planTransactions(
       store, prepared->mappings, prepared->shape.elementBits, proofContext);
   if (failed(transactions))
     return access.op->emitOpError(
         "packet cannot be covered by legal memory transactions");
+  planTiming.stop();
+
+  TimingScope emitTiming = timing.nest("lower_symbolic_memory_emit_scatter");
   return lowerScatter(rewriter, access, store, prepared->mappings,
                       *transactions);
 }
@@ -5441,13 +5481,14 @@ static LogicalResult lowerAccesses(ArrayRef<Operation *> accesses,
                                    WaveDialect &dialect, IRRewriter &rewriter,
                                    DataFlowSolver &solver,
                                    SymbolicRelationProofCache &proofCache,
-                                   uint64_t &factDomainCount) {
+                                   uint64_t &factDomainCount,
+                                   SymbolicMemoryStageTiming &timing) {
   for (Operation *op : accesses) {
     rewriter.setInsertionPoint(op);
     MemoryAccess access = isa<GatherOp>(op) ? getAccess(cast<GatherOp>(op))
                                             : getAccess(cast<ScatterOp>(op));
     if (failed(lowerAccess(rewriter, access, dialect, solver, proofCache,
-                           factDomainCount)))
+                           factDomainCount, timing)))
       return failure();
   }
   return success();
@@ -5457,20 +5498,29 @@ struct WaveLowerSymbolicMemoryPass
     : public wave::impl::WaveLowerSymbolicMemoryBase<
           WaveLowerSymbolicMemoryPass> {
   void runOnOperation() override {
+    SymbolicMemoryStageTiming timing;
+    TimingScope setupTiming = timing.nest("lower_symbolic_memory_setup");
     Operation *root = getOperation();
     WaveDialect *dialect = getContext().getLoadedDialect<WaveDialect>();
     if (!dialect) {
       root->emitError("Wave dialect is not loaded");
       return signalPassFailure();
     }
+    setupTiming.stop();
+
+    TimingScope collectTiming =
+        timing.nest("lower_symbolic_memory_collect_accesses");
     SmallVector<Operation *> accesses;
     root->walk([&](Operation *op) {
       if (isa<GatherOp, ScatterOp>(op))
         accesses.push_back(op);
     });
+    collectTiming.stop();
     if (accesses.empty())
       return;
 
+    TimingScope analysisTiming =
+        timing.nest("lower_symbolic_memory_integer_range_analysis");
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
@@ -5479,12 +5529,13 @@ struct WaveLowerSymbolicMemoryPass
           "IntegerRangeAnalysis failed for symbolic memory lowering");
       return signalPassFailure();
     }
+    analysisTiming.stop();
 
     IRRewriter rewriter(&getContext());
     SymbolicRelationProofCache proofCache;
     uint64_t factDomainCount = 0;
     if (failed(lowerAccesses(accesses, *dialect, rewriter, solver, proofCache,
-                             factDomainCount)))
+                             factDomainCount, timing)))
       return signalPassFailure();
     numRelationPlanningFactDomains += factDomainCount;
   }

@@ -16,6 +16,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Support/Timing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -41,6 +42,31 @@ using namespace mlir;
 using namespace mlir::wave;
 
 namespace {
+
+struct RedistributeStageTimingManager {
+  RedistributeStageTimingManager() {
+    applyDefaultTimingManagerCLOptions(manager);
+  }
+
+  DefaultTimingManager manager;
+};
+
+static DefaultTimingManager &getRedistributeStageTimingManager() {
+  static RedistributeStageTimingManager timing;
+  return timing.manager;
+}
+
+struct RedistributeStageTiming {
+  RedistributeStageTiming() {
+    rootScope = getRedistributeStageTimingManager().getRootScope();
+    stageScope = rootScope.nest("wave_lower_redistribute_stages");
+  }
+
+  TimingScope nest(StringRef name) { return stageScope.nest(name); }
+
+  TimingScope rootScope;
+  TimingScope stageScope;
+};
 
 static constexpr int64_t kMaxRelationPoints = int64_t{1} << 20;
 static constexpr int64_t kMinScratchVectorizationPoints = int64_t{1} << 16;
@@ -2919,21 +2945,28 @@ static FailureOr<ScratchExecution> executeScratchPlan(
   return execution;
 }
 
-static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
-                                    sym::Store &store,
-                                    const RelationDomain &domain,
-                                    func::FuncOp func,
-                                    WaveLDSAllocationAnalysis &analysis,
-                                    ScratchSequenceMap &sequences) {
+static LogicalResult
+lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
+               const RelationDomain &domain, func::FuncOp func,
+               WaveLDSAllocationAnalysis &analysis,
+               ScratchSequenceMap &sequences, TimingScope &timing) {
+  TimingScope planTiming = timing.nest("lower_redistribute_workgroup_plan");
   FailureOr<ScratchLoweringPlan> plan = buildScratchLoweringPlan(
       rewriter, op, store, domain, func, analysis, sequences);
   if (failed(plan))
     return failure();
+  planTiming.stop();
+
+  TimingScope relationTiming =
+      timing.nest("lower_redistribute_workgroup_prepare_relation");
   Type tokenType = MemTokenType::get(op.getContext());
   RelationMaterializer materializer(rewriter, op, store, domain);
   if (failed(materializer.prepare(plan->materializationPoints)))
     return op.emitOpError("failed to prepare scratch relation");
+  relationTiming.stop();
 
+  TimingScope allocationTiming =
+      timing.nest("lower_redistribute_workgroup_allocate");
   VectorType sourcePacket = getPacketType(op.getSource().getType());
   Type elementType = sourcePacket.getElementType();
   int64_t elementBytes = elementType.getIntOrFloatBitWidth() / 8;
@@ -2943,6 +2976,9 @@ static LogicalResult lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op,
       plan->capacity, analysis, sequences);
   if (failed(scratch))
     return failure();
+  allocationTiming.stop();
+
+  TimingScope emitTiming = timing.nest("lower_redistribute_workgroup_emit");
   Type componentType = getPacketElementType(op.getSource().getType());
   FailureOr<ScratchExecution> execution = executeScratchPlan(
       rewriter, op, materializer, *scratch, plan->sourceWithin,
@@ -3130,7 +3166,9 @@ static LogicalResult lowerWorkgroupRedistribution(
     IRRewriter &rewriter, RedistributeOp op, WaveDialect &dialect,
     const RelationDomain &domain, func::FuncOp func,
     std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
-    ScratchSequenceMap &sequences) {
+    ScratchSequenceMap &sequences, TimingScope &timing) {
+  TimingScope analysisTiming =
+      timing.nest("lower_redistribute_workgroup_analyze_lds");
   if (!func.getBody().hasOneBlock())
     return op.emitOpError(
         "cross-wave redistribution requires a single-block kernel function");
@@ -3141,8 +3179,9 @@ static LogicalResult lowerWorkgroupRedistribution(
       return failure();
     analysis = std::move(*created);
   }
+  analysisTiming.stop();
   return lowerWorkgroup(rewriter, op, dialect.getSymbolStore(), domain, func,
-                        *analysis, sequences);
+                        *analysis, sequences, timing);
 }
 
 static LogicalResult lowerRedistribution(
@@ -3150,7 +3189,8 @@ static LogicalResult lowerRedistribution(
     func::FuncOp func, std::unique_ptr<WaveLDSAllocationAnalysis> &analysis,
     ScratchSequenceMap &sequences,
     std::optional<RedistributionClassification> validatedClassification,
-    CoordinateCache &coordinateCache) {
+    CoordinateCache &coordinateCache, RedistributeStageTiming &timing) {
+  TimingScope prepareTiming = timing.nest("lower_redistribute_prepare");
   rewriter.setInsertionPoint(op);
   FailureOr<RelationDomain> domain =
       buildDomain(dialect.getSymbolStore(), op, coordinateCache);
@@ -3170,18 +3210,27 @@ static LogicalResult lowerRedistribution(
   }
   if (failed(validateBlockLowering(op, classification.blockLowering)))
     return failure();
+  prepareTiming.stop();
 
   switch (classification.movement) {
-  case Movement::Alias:
+  case Movement::Alias: {
+    TimingScope lowerTiming = timing.nest("lower_redistribute_alias");
     rewriter.replaceOp(op, op.getSource());
     return success();
-  case Movement::Workitem:
+  }
+  case Movement::Workitem: {
+    TimingScope lowerTiming = timing.nest("lower_redistribute_workitem");
     return lowerWorkitem(rewriter, op, dialect.getSymbolStore(), *domain);
-  case Movement::Wave:
+  }
+  case Movement::Wave: {
+    TimingScope lowerTiming = timing.nest("lower_redistribute_wave");
     return lowerWave(rewriter, op, dialect.getSymbolStore(), *domain, width);
-  case Movement::Workgroup:
+  }
+  case Movement::Workgroup: {
+    TimingScope lowerTiming = timing.nest("lower_redistribute_workgroup");
     return lowerWorkgroupRedistribution(rewriter, op, dialect, *domain, func,
-                                        analysis, sequences);
+                                        analysis, sequences, lowerTiming);
+  }
   case Movement::Cluster:
     llvm_unreachable("cluster movement must fail contextual validation");
   }
@@ -3189,21 +3238,30 @@ static LogicalResult lowerRedistribution(
 }
 
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
-                               IRRewriter &rewriter) {
+                               IRRewriter &rewriter,
+                               RedistributeStageTiming &timing) {
+  TimingScope collectTiming = timing.nest("lower_redistribute_collect_ops");
   SmallVector<RedistributeOp> ops;
   func.walk([&](RedistributeOp op) { ops.push_back(op); });
+  collectTiming.stop();
   if (ops.empty())
     return success();
+
+  TimingScope validationTiming =
+      timing.nest("lower_redistribute_validate_classify");
   DenseMap<Operation *, RedistributionClassification> classifications;
   CoordinateCacheMap coordinateCaches;
   if (failed(validateAndClassifyRedistributions(
           ops, func, dialect, classifications, coordinateCaches)))
     return failure();
+  validationTiming.stop();
 
+  TimingScope compositionTiming = timing.nest("lower_redistribute_compose");
   DenseSet<Operation *> erased;
   if (failed(composeRedistributions(rewriter, ops, dialect.getSymbolStore(),
                                     erased, classifications, coordinateCaches)))
     return failure();
+  compositionTiming.stop();
 
   ScratchSequenceMap sequences;
   std::unique_ptr<WaveLDSAllocationAnalysis> analysis;
@@ -3224,7 +3282,8 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
                   .first;
     }
     if (failed(lowerRedistribution(rewriter, op, dialect, func, analysis,
-                                   sequences, classification, *cache->second)))
+                                   sequences, classification, *cache->second,
+                                   timing)))
       return failure();
     coordinateCaches.erase(operation);
     classifications.erase(operation);
@@ -3235,6 +3294,8 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
 struct WaveLowerRedistributePass
     : public wave::impl::WaveLowerRedistributeBase<WaveLowerRedistributePass> {
   void runOnOperation() override {
+    RedistributeStageTiming timing;
+    TimingScope setupTiming = timing.nest("lower_redistribute_setup");
     WaveDialect *dialect = getContext().getLoadedDialect<WaveDialect>();
     if (!dialect) {
       getOperation()->emitError("Wave dialect is not loaded");
@@ -3246,8 +3307,9 @@ struct WaveLowerRedistributePass
       funcs.push_back(func);
     else
       getOperation()->walk([&](func::FuncOp func) { funcs.push_back(func); });
+    setupTiming.stop();
     for (func::FuncOp func : funcs)
-      if (failed(lowerFunc(func, *dialect, rewriter)))
+      if (failed(lowerFunc(func, *dialect, rewriter, timing)))
         return signalPassFailure();
   }
 };

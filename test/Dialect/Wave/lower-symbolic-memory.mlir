@@ -1,5 +1,17 @@
-// RUN: wave-opt --wave-lower-symbolic-memory --split-input-file %s | FileCheck %s
+// RUN: wave-opt --wave-lower-symbolic-memory --split-input-file %s \
+// RUN:   --mlir-timing --mlir-timing-display=tree 2>%t | FileCheck %s
+// RUN: FileCheck %s --check-prefix=TIMING < %t
 // RUN: wave-opt --canonicalize --wave-lower-symbolic-memory --split-input-file %s | FileCheck %s --check-prefix=CANONICAL
+
+// TIMING-DAG: wave_lower_symbolic_memory_stages
+// TIMING-DAG: lower_symbolic_memory_setup
+// TIMING-DAG: lower_symbolic_memory_collect_accesses
+// TIMING-DAG: lower_symbolic_memory_integer_range_analysis
+// TIMING-DAG: lower_symbolic_memory_prepare_mappings
+// TIMING-DAG: lower_symbolic_memory_plan_gather
+// TIMING-DAG: lower_symbolic_memory_emit_gather
+// TIMING-DAG: lower_symbolic_memory_plan_scatter
+// TIMING-DAG: lower_symbolic_memory_emit_scatter
 
 // CHECK-LABEL: func.func @contiguous_gather(
 // CHECK-NOT: wave.gather

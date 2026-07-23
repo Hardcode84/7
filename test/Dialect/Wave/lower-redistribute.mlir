@@ -1,4 +1,22 @@
-// RUN: wave-opt --wave-lower-redistribute --split-input-file %s | FileCheck %s
+// RUN: wave-opt --wave-lower-redistribute --split-input-file %s \
+// RUN:   --mlir-timing --mlir-timing-display=tree 2>%t | FileCheck %s
+// RUN: FileCheck %s --check-prefix=TIMING < %t
+
+// TIMING-DAG: wave_lower_redistribute_stages
+// TIMING-DAG: lower_redistribute_setup
+// TIMING-DAG: lower_redistribute_collect_ops
+// TIMING-DAG: lower_redistribute_validate_classify
+// TIMING-DAG: lower_redistribute_compose
+// TIMING-DAG: lower_redistribute_prepare
+// TIMING-DAG: lower_redistribute_alias
+// TIMING-DAG: lower_redistribute_workitem
+// TIMING-DAG: lower_redistribute_wave
+// TIMING-DAG: lower_redistribute_workgroup
+// TIMING-DAG: lower_redistribute_workgroup_analyze_lds
+// TIMING-DAG: lower_redistribute_workgroup_plan
+// TIMING-DAG: lower_redistribute_workgroup_prepare_relation
+// TIMING-DAG: lower_redistribute_workgroup_allocate
+// TIMING-DAG: lower_redistribute_workgroup_emit
 
 // CHECK-LABEL: func.func @identity(
 // CHECK-NOT: wave.redistribute
