@@ -28,10 +28,6 @@ using namespace mlir::wave::sym;
 
 namespace {
 
-static ixs_node *mutableNode(const ixs_node *node) {
-  return const_cast<ixs_node *>(node);
-}
-
 static ExprKind getExprKind(ixs_tag tag) {
   static_assert(IXS_CMP == 12 && IXS_NOT == 15 && IXS_PARSE_ERROR == 17,
                 "update ixs_tag mappings");
@@ -95,12 +91,12 @@ static std::string joinSessionErrors(ixs_session *session) {
 static std::string renderNode(const ixs_node *node) {
   assert(node && "expected non-null ixsimpl node");
   // ixsimpl printer walks immutable graph: no session needed.
-  size_t n = ixs_print(mutableNode(node), nullptr, 0);
+  size_t n = ixs_print(node, nullptr, 0);
   if (n == std::numeric_limits<size_t>::max())
     llvm::report_fatal_error(
         "wave symbolic printer reported an invalid length");
   std::string text(n + 1, '\0');
-  ixs_print(mutableNode(node), text.data(), text.size());
+  ixs_print(node, text.data(), text.size());
   text.resize(n);
   return text;
 }
@@ -114,12 +110,12 @@ static void setDiagnostic(std::string *diagnostic, std::string message) {
     *diagnostic = std::move(message);
 }
 
-static ixs_node *rawExprNode(ExprHandle value, std::string *diagnostic) {
+static const ixs_node *rawExprNode(ExprHandle value, std::string *diagnostic) {
   if (!value) {
     setDiagnostic(diagnostic, "expected non-null wave.expr");
     return nullptr;
   }
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (!ixs_node_is_expr(node)) {
     setDiagnostic(diagnostic, "expected wave.expr node");
     return nullptr;
@@ -127,12 +123,12 @@ static ixs_node *rawExprNode(ExprHandle value, std::string *diagnostic) {
   return node;
 }
 
-static ixs_node *rawPredNode(PredHandle value, std::string *diagnostic) {
+static const ixs_node *rawPredNode(PredHandle value, std::string *diagnostic) {
   if (!value) {
     setDiagnostic(diagnostic, "expected non-null wave.pred");
     return nullptr;
   }
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (!ixs_node_is_pred(node)) {
     setDiagnostic(diagnostic, "expected wave.pred node");
     return nullptr;
@@ -168,8 +164,7 @@ static void walkSymbolNamesImpl(const ixs_node *node,
   stack.push_back(node);
   while (!stack.empty()) {
     const ixs_node *current = stack.pop_back_val();
-    // ixsimpl introspection accessors are read-only but C API lacks const.
-    ixs_node *rawNode = mutableNode(current);
+    const ixs_node *rawNode = current;
     if (ixs_node_tag(rawNode) == IXS_SYM)
       callback(ixs_node_sym_name(rawNode));
 
@@ -178,7 +173,8 @@ static void walkSymbolNamesImpl(const ixs_node *node,
   }
 }
 
-static FailureOr<ExprHandle> finishExpr(ixs_session *session, ixs_node *node,
+static FailureOr<ExprHandle> finishExpr(ixs_session *session,
+                                        const ixs_node *node,
                                         std::string *diagnostic,
                                         const char *fallback) {
   if (!node) {
@@ -193,7 +189,8 @@ static FailureOr<ExprHandle> finishExpr(ixs_session *session, ixs_node *node,
   return ExprHandle(node);
 }
 
-static FailureOr<PredHandle> finishPred(ixs_session *session, ixs_node *node,
+static FailureOr<PredHandle> finishPred(ixs_session *session,
+                                        const ixs_node *node,
                                         std::string *diagnostic,
                                         const char *fallback) {
   if (!node) {
@@ -208,8 +205,9 @@ static FailureOr<PredHandle> finishPred(ixs_session *session, ixs_node *node,
   return PredHandle(node);
 }
 
-static ixs_node *composeRawBinary(ixs_session *session, ixs_node *lhs,
-                                  ExprBinaryOp op, ixs_node *rhs) {
+static const ixs_node *composeRawBinary(ixs_session *session,
+                                        const ixs_node *lhs, ExprBinaryOp op,
+                                        const ixs_node *rhs) {
   switch (op) {
   case ExprBinaryOp::Add:
     return ixs_add(session, lhs, rhs);
@@ -304,10 +302,11 @@ static ixs_cmp_op convertCmpOp(PredCmpOp op) {
   llvm_unreachable("unknown symbolic comparison operation");
 }
 
-static bool collectRawSubstitutions(ArrayRef<ExprSubstitution> substitutions,
-                                    SmallVectorImpl<ixs_node *> &targets,
-                                    SmallVectorImpl<ixs_node *> &replacements,
-                                    std::string *diagnostic) {
+static bool
+collectRawSubstitutions(ArrayRef<ExprSubstitution> substitutions,
+                        SmallVectorImpl<const ixs_node *> &targets,
+                        SmallVectorImpl<const ixs_node *> &replacements,
+                        std::string *diagnostic) {
   if (substitutions.size() > std::numeric_limits<uint32_t>::max()) {
     setDiagnostic(diagnostic, "too many wave.expr substitutions");
     return false;
@@ -315,8 +314,9 @@ static bool collectRawSubstitutions(ArrayRef<ExprSubstitution> substitutions,
   targets.reserve(substitutions.size());
   replacements.reserve(substitutions.size());
   for (const ExprSubstitution &substitution : substitutions) {
-    ixs_node *target = rawExprNode(substitution.target, diagnostic);
-    ixs_node *replacement = rawExprNode(substitution.replacement, diagnostic);
+    const ixs_node *target = rawExprNode(substitution.target, diagnostic);
+    const ixs_node *replacement =
+        rawExprNode(substitution.replacement, diagnostic);
     if (!target || !replacement)
       return false;
     targets.push_back(target);
@@ -374,10 +374,10 @@ Analysis::createDirect(Store &store, ArrayRef<PredHandle> assumptions,
                        std::string *diagnostic) {
   setDiagnostic(diagnostic, {});
   std::unique_ptr<Analysis> analysis(new Analysis(store));
-  SmallVector<ixs_node *, 4> rawAssumptions;
+  SmallVector<const ixs_node *, 4> rawAssumptions;
   rawAssumptions.reserve(assumptions.size());
   for (PredHandle assumption : assumptions) {
-    ixs_node *rawAssumption = rawPredNode(assumption, diagnostic);
+    const ixs_node *rawAssumption = rawPredNode(assumption, diagnostic);
     if (!rawAssumption) {
       analysis->poison(diagnostic, "failed to ingest symbolic assumptions");
       return failure();
@@ -414,7 +414,7 @@ LogicalResult Analysis::assume(PredHandle pred, std::string *diagnostic) {
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  ixs_node *rawPred = rawPredNode(pred, diagnostic);
+  const ixs_node *rawPred = rawPredNode(pred, diagnostic);
   if (!rawPred || !ixs_facts_assume_pred(facts, rawPred)) {
     poison(diagnostic, "failed to ingest symbolic assumption");
     return failure();
@@ -429,10 +429,10 @@ LogicalResult Analysis::assume(ArrayRef<PredHandle> predicates,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  SmallVector<ixs_node *, 4> rawPredicates;
+  SmallVector<const ixs_node *, 4> rawPredicates;
   rawPredicates.reserve(predicates.size());
   for (PredHandle predicate : predicates) {
-    ixs_node *rawPredicate = rawPredNode(predicate, diagnostic);
+    const ixs_node *rawPredicate = rawPredNode(predicate, diagnostic);
     if (!rawPredicate) {
       poison(diagnostic, "failed to ingest symbolic assumptions");
       return failure();
@@ -454,7 +454,7 @@ LogicalResult Analysis::assumeRange(ExprHandle expr, InferredRange range,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  ixs_node *rawExpr = rawExprNode(expr, diagnostic);
+  const ixs_node *rawExpr = rawExprNode(expr, diagnostic);
   if (!rawExpr || (range.lower && range.lower->denominator <= 0) ||
       (range.upper && range.upper->denominator <= 0)) {
     poison(diagnostic, "invalid symbolic range");
@@ -476,8 +476,8 @@ LogicalResult Analysis::deriveAffine(ExprHandle base, int64_t scale,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  ixs_node *rawBase = rawExprNode(base, diagnostic);
-  ixs_node *rawDerived = rawExprNode(derived, diagnostic);
+  const ixs_node *rawBase = rawExprNode(base, diagnostic);
+  const ixs_node *rawDerived = rawExprNode(derived, diagnostic);
   if (!rawBase || !rawDerived ||
       !ixs_facts_derive_affine(facts, rawBase, scale, offset, rawDerived)) {
     poison(diagnostic, "failed to derive symbolic affine range");
@@ -494,8 +494,8 @@ Analysis::substituteFacts(ArrayRef<ExprSubstitution> substitutions,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  SmallVector<ixs_node *, 4> targets;
-  SmallVector<ixs_node *, 4> replacements;
+  SmallVector<const ixs_node *, 4> targets;
+  SmallVector<const ixs_node *, 4> replacements;
   if (!collectRawSubstitutions(substitutions, targets, replacements,
                                diagnostic)) {
     poison(diagnostic, "invalid symbolic fact substitution");
@@ -517,8 +517,8 @@ FailureOr<ExprHandle> Analysis::compose(ExprHandle lhsHandle, ExprBinaryOp op,
                                         ExprHandle rhsHandle,
                                         std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishExpr(session.raw(),
@@ -529,7 +529,7 @@ FailureOr<ExprHandle> Analysis::compose(ExprHandle lhsHandle, ExprBinaryOp op,
 FailureOr<ExprHandle> Analysis::composeCeil(ExprHandle value,
                                             std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawExprNode(value, diagnostic);
+  const ixs_node *raw = rawExprNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishExpr(session.raw(), ixs_ceil(session.raw(), raw), diagnostic,
@@ -539,7 +539,7 @@ FailureOr<ExprHandle> Analysis::composeCeil(ExprHandle value,
 FailureOr<ExprHandle> Analysis::composeFloor(ExprHandle value,
                                              std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawExprNode(value, diagnostic);
+  const ixs_node *raw = rawExprNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishExpr(session.raw(), ixs_floor(session.raw(), raw), diagnostic,
@@ -549,7 +549,7 @@ FailureOr<ExprHandle> Analysis::composeFloor(ExprHandle value,
 FailureOr<ExprHandle> Analysis::composeNeg(ExprHandle value,
                                            std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawExprNode(value, diagnostic);
+  const ixs_node *raw = rawExprNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishExpr(session.raw(), ixs_neg(session.raw(), raw), diagnostic,
@@ -579,13 +579,13 @@ FailureOr<ExprHandle> Analysis::composePiecewise(ArrayRef<PiecewiseCase> cases,
     setDiagnostic(diagnostic, "invalid wave.expr piecewise case count");
     return failure();
   }
-  SmallVector<ixs_node *, 4> values;
-  SmallVector<ixs_node *, 4> conditions;
+  SmallVector<const ixs_node *, 4> values;
+  SmallVector<const ixs_node *, 4> conditions;
   values.reserve(cases.size());
   conditions.reserve(cases.size());
   for (PiecewiseCase piece : cases) {
-    ixs_node *value = rawExprNode(piece.value, diagnostic);
-    ixs_node *condition = rawPredNode(piece.condition, diagnostic);
+    const ixs_node *value = rawExprNode(piece.value, diagnostic);
+    const ixs_node *condition = rawPredNode(piece.condition, diagnostic);
     if (!value || !condition)
       return failure();
     values.push_back(value);
@@ -613,8 +613,8 @@ FailureOr<PredHandle> Analysis::compare(ExprHandle lhsHandle, PredCmpOp op,
                                         ExprHandle rhsHandle,
                                         std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(),
@@ -626,8 +626,8 @@ FailureOr<PredHandle> Analysis::composeAnd(PredHandle lhsHandle,
                                            PredHandle rhsHandle,
                                            std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(), ixs_and(session.raw(), lhs, rhs), diagnostic,
@@ -638,8 +638,8 @@ FailureOr<PredHandle> Analysis::composeOr(PredHandle lhsHandle,
                                           PredHandle rhsHandle,
                                           std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(), ixs_or(session.raw(), lhs, rhs), diagnostic,
@@ -649,7 +649,7 @@ FailureOr<PredHandle> Analysis::composeOr(PredHandle lhsHandle,
 FailureOr<PredHandle> Analysis::composeNot(PredHandle value,
                                            std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawPredNode(value, diagnostic);
+  const ixs_node *raw = rawPredNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishPred(session.raw(), ixs_not(session.raw(), raw), diagnostic,
@@ -660,13 +660,13 @@ FailureOr<ExprHandle>
 Analysis::substitute(ExprHandle value, ArrayRef<ExprSubstitution> substitutions,
                      std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawExprNode(value, diagnostic);
-  SmallVector<ixs_node *, 4> targets;
-  SmallVector<ixs_node *, 4> replacements;
+  const ixs_node *raw = rawExprNode(value, diagnostic);
+  SmallVector<const ixs_node *, 4> targets;
+  SmallVector<const ixs_node *, 4> replacements;
   if (!raw || !collectRawSubstitutions(substitutions, targets, replacements,
                                        diagnostic))
     return failure();
-  ixs_node *result =
+  const ixs_node *result =
       ixs_subs_multi(session.raw(), raw, static_cast<uint32_t>(targets.size()),
                      targets.data(), replacements.data());
   return finishExpr(session.raw(), result, diagnostic,
@@ -677,13 +677,13 @@ FailureOr<PredHandle>
 Analysis::substitute(PredHandle value, ArrayRef<ExprSubstitution> substitutions,
                      std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawPredNode(value, diagnostic);
-  SmallVector<ixs_node *, 4> targets;
-  SmallVector<ixs_node *, 4> replacements;
+  const ixs_node *raw = rawPredNode(value, diagnostic);
+  SmallVector<const ixs_node *, 4> targets;
+  SmallVector<const ixs_node *, 4> replacements;
   if (!raw || !collectRawSubstitutions(substitutions, targets, replacements,
                                        diagnostic))
     return failure();
-  ixs_node *result =
+  const ixs_node *result =
       ixs_subs_multi(session.raw(), raw, static_cast<uint32_t>(targets.size()),
                      targets.data(), replacements.data());
   return finishPred(session.raw(), result, diagnostic,
@@ -696,7 +696,7 @@ FailureOr<ExprHandle> Analysis::simplify(ExprHandle value,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  ixs_node *raw = rawExprNode(value, diagnostic);
+  const ixs_node *raw = rawExprNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishExpr(session.raw(), ixs_simplify_facts(facts, raw), diagnostic,
@@ -709,7 +709,7 @@ FailureOr<PredHandle> Analysis::simplify(PredHandle value,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  ixs_node *raw = rawPredNode(value, diagnostic);
+  const ixs_node *raw = rawPredNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishPred(session.raw(), ixs_simplify_facts(facts, raw), diagnostic,
@@ -722,16 +722,16 @@ LogicalResult Analysis::simplify(MutableArrayRef<ExprHandle> values,
     setDiagnostic(diagnostic, "symbolic analysis is unusable");
     return failure();
   }
-  SmallVector<ixs_node *, 8> rawValues;
+  SmallVector<const ixs_node *, 8> rawValues;
   rawValues.reserve(values.size());
   for (ExprHandle value : values) {
-    ixs_node *raw = rawExprNode(value, diagnostic);
+    const ixs_node *raw = rawExprNode(value, diagnostic);
     if (!raw)
       return failure();
     rawValues.push_back(raw);
   }
   ixs_simplify_batch_facts(facts, rawValues.data(), rawValues.size());
-  for (ixs_node *raw : rawValues) {
+  for (const ixs_node *raw : rawValues) {
     if (!raw || !ixs_node_is_expr(raw)) {
       std::string message = joinSessionErrors(session.raw());
       setDiagnostic(diagnostic, message.empty()
@@ -748,7 +748,7 @@ LogicalResult Analysis::simplify(MutableArrayRef<ExprHandle> values,
 FailureOr<ExprHandle> Analysis::expand(ExprHandle value,
                                        std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawExprNode(value, diagnostic);
+  const ixs_node *raw = rawExprNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishExpr(session.raw(), ixs_expand(session.raw(), raw), diagnostic,
@@ -758,7 +758,7 @@ FailureOr<ExprHandle> Analysis::expand(ExprHandle value,
 FailureOr<PredHandle> Analysis::expand(PredHandle value,
                                        std::string *diagnostic) {
   ixs_session_clear_errors(session.raw());
-  ixs_node *raw = rawPredNode(value, diagnostic);
+  const ixs_node *raw = rawPredNode(value, diagnostic);
   if (!raw)
     return failure();
   return finishPred(session.raw(), ixs_expand(session.raw(), raw), diagnostic,
@@ -768,7 +768,7 @@ FailureOr<PredHandle> Analysis::expand(PredHandle value,
 CheckResult Analysis::check(PredHandle pred) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
   if (!raw)
     return CheckResult::Unknown;
   ixs_check_result result = PredView(pred).getKind() == PredKind::Cmp
@@ -780,8 +780,8 @@ CheckResult Analysis::check(PredHandle pred) {
 CheckResult Analysis::equivalent(ExprHandle lhs, ExprHandle rhs) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
-  ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
+  const ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
+  const ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
   return rawLhs && rawRhs
              ? convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs))
              : CheckResult::Unknown;
@@ -790,8 +790,8 @@ CheckResult Analysis::equivalent(ExprHandle lhs, ExprHandle rhs) {
 CheckResult Analysis::equivalent(PredHandle lhs, PredHandle rhs) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *rawLhs = rawPredNode(lhs, /*diagnostic=*/nullptr);
-  ixs_node *rawRhs = rawPredNode(rhs, /*diagnostic=*/nullptr);
+  const ixs_node *rawLhs = rawPredNode(lhs, /*diagnostic=*/nullptr);
+  const ixs_node *rawRhs = rawPredNode(rhs, /*diagnostic=*/nullptr);
   return rawLhs && rawRhs
              ? convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs))
              : CheckResult::Unknown;
@@ -800,7 +800,7 @@ CheckResult Analysis::equivalent(PredHandle lhs, PredHandle rhs) {
 CheckResult Analysis::defined(ExprHandle expr) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   return raw ? convertCheckResult(ixs_check_defined_facts(facts, raw))
              : CheckResult::Unknown;
 }
@@ -808,7 +808,7 @@ CheckResult Analysis::defined(ExprHandle expr) {
 CheckResult Analysis::defined(PredHandle pred) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
   return raw ? convertCheckResult(ixs_check_defined_facts(facts, raw))
              : CheckResult::Unknown;
 }
@@ -816,7 +816,7 @@ CheckResult Analysis::defined(PredHandle pred) {
 CheckResult Analysis::integerValued(ExprHandle expr) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   return raw ? convertCheckResult(ixs_check_integer_valued_facts(facts, raw))
              : CheckResult::Unknown;
 }
@@ -824,7 +824,7 @@ CheckResult Analysis::integerValued(ExprHandle expr) {
 CheckResult Analysis::divisible(ExprHandle expr, int64_t modulus) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   return raw ? convertCheckResult(
                    ixs_check_divisible_facts(facts, raw, modulus))
              : CheckResult::Unknown;
@@ -834,7 +834,7 @@ CheckResult Analysis::congruent(ExprHandle expr, int64_t modulus,
                                 int64_t residue) {
   if (!prepareQuery())
     return CheckResult::Unknown;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   return raw ? convertCheckResult(
                    ixs_check_congruent_facts(facts, raw, modulus, residue))
              : CheckResult::Unknown;
@@ -843,7 +843,7 @@ CheckResult Analysis::congruent(ExprHandle expr, int64_t modulus,
 ExactDivideResult Analysis::tryExactDivide(ExprHandle expr, int64_t divisor) {
   if (!prepareQuery())
     return {};
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   if (!raw)
     return {};
   ixs_exact_divide_result result =
@@ -864,7 +864,7 @@ ExactDivideResult Analysis::tryExactDivide(ExprHandle expr, int64_t divisor) {
 Pow2Fact Analysis::getPow2Fact(ExprHandle expr) {
   if (!prepareQuery())
     return Pow2Fact::Unknown;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   return raw ? convertPow2Fact(ixs_get_pow2_fact_facts(facts, raw))
              : Pow2Fact::Unknown;
 }
@@ -872,7 +872,7 @@ Pow2Fact Analysis::getPow2Fact(ExprHandle expr) {
 std::optional<KnownBits> Analysis::getKnownBits(ExprHandle expr) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   ixs_known_bits result{};
   if (!raw || !ixs_get_known_bits_facts(facts, raw, &result))
     return std::nullopt;
@@ -883,7 +883,7 @@ std::optional<KnownBits> Analysis::getKnownBits(ExprHandle expr) {
 std::optional<Congruence> Analysis::getSymbolCongruence(ExprHandle symbol) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *raw = rawExprNode(symbol, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(symbol, /*diagnostic=*/nullptr);
   int64_t modulus = 0;
   int64_t residue = 0;
   if (!raw || !ixs_get_symbol_congruence_facts(facts, raw, &modulus, &residue))
@@ -894,7 +894,7 @@ std::optional<Congruence> Analysis::getSymbolCongruence(ExprHandle symbol) {
 std::optional<InferredRange> Analysis::range(ExprHandle expr) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   ixs_range_result result{};
   if (!raw || !ixs_range_facts(facts, raw, &result))
     return std::nullopt;
@@ -905,8 +905,8 @@ std::optional<int64_t> Analysis::constantDifference(ExprHandle lhs,
                                                     ExprHandle rhs) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
-  ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
+  const ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
+  const ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
   int64_t delta = 0;
   if (!rawLhs || !rawRhs ||
       !ixs_constant_difference_facts(facts, rawLhs, rawRhs, &delta))
@@ -918,10 +918,10 @@ std::optional<AffineDecomposition>
 Analysis::affineDecompose(ExprHandle expr, ExprHandle symbol) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
-  ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
-  ixs_node *coefficient = nullptr;
-  ixs_node *residual = nullptr;
+  const ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
+  const ixs_node *coefficient = nullptr;
+  const ixs_node *residual = nullptr;
   if (!rawExpr || !rawSymbol ||
       !ixs_affine_decompose_facts(facts, rawExpr, rawSymbol, &coefficient,
                                   &residual))
@@ -934,10 +934,10 @@ std::optional<ExprHandle> Analysis::finiteDifference(ExprHandle expr,
                                                      ExprHandle step) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
-  ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
-  ixs_node *rawStep = rawExprNode(step, /*diagnostic=*/nullptr);
-  ixs_node *difference = nullptr;
+  const ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
+  const ixs_node *rawStep = rawExprNode(step, /*diagnostic=*/nullptr);
+  const ixs_node *difference = nullptr;
   if (!rawExpr || !rawSymbol || !rawStep ||
       !ixs_finite_difference_facts(facts, rawExpr, rawSymbol, rawStep,
                                    &difference))
@@ -949,8 +949,8 @@ std::optional<SplitAdditiveConstant>
 Analysis::splitAdditiveConstant(ExprHandle expr) {
   if (!prepareQuery())
     return std::nullopt;
-  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
-  ixs_node *residual = nullptr;
+  const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *residual = nullptr;
   int64_t constant = 0;
   if (!raw ||
       !ixs_split_additive_constant_facts(facts, raw, &residual, &constant))
@@ -975,44 +975,44 @@ bool ExprView::isValid() const { return isExpr(value); }
 ExprKind ExprView::getKind() const {
   if (!value)
     return ExprKind::Invalid;
-  return getExprKind(ixs_node_tag(mutableNode(value.raw())));
+  return getExprKind(ixs_node_tag(value.raw()));
 }
 
 std::optional<int64_t> ExprView::getInt() const {
   if (getKind() != ExprKind::Integer)
     return std::nullopt;
-  return ixs_node_int_val(mutableNode(value.raw()));
+  return ixs_node_int_val(value.raw());
 }
 
 std::optional<RationalLiteral> ExprView::getRational() const {
   if (getKind() != ExprKind::Rational)
     return std::nullopt;
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   return RationalLiteral{ixs_node_rat_num(node), ixs_node_rat_den(node)};
 }
 
 StringRef ExprView::getSymbolName() const {
   if (getKind() != ExprKind::Symbol)
     return {};
-  return ixs_node_sym_name(mutableNode(value.raw()));
+  return ixs_node_sym_name(value.raw());
 }
 
 ExprHandle ExprView::getAddConstant() const {
   if (getKind() != ExprKind::Add)
     return {};
-  return ExprHandle(ixs_node_add_coeff(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_add_coeff(value.raw()));
 }
 
 uint32_t ExprView::getAddTermCount() const {
   if (getKind() != ExprKind::Add)
     return 0;
-  return ixs_node_add_nterms(mutableNode(value.raw()));
+  return ixs_node_add_nterms(value.raw());
 }
 
 AddTerm ExprView::getAddTerm(uint32_t index) const {
   if (getKind() != ExprKind::Add)
     return {};
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (index >= ixs_node_add_nterms(node))
     return {};
   return AddTerm{ExprHandle(ixs_node_add_term_coeff(node, index)),
@@ -1022,19 +1022,19 @@ AddTerm ExprView::getAddTerm(uint32_t index) const {
 ExprHandle ExprView::getMulCoefficient() const {
   if (getKind() != ExprKind::Mul)
     return {};
-  return ExprHandle(ixs_node_mul_coeff(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_mul_coeff(value.raw()));
 }
 
 uint32_t ExprView::getMulFactorCount() const {
   if (getKind() != ExprKind::Mul)
     return 0;
-  return ixs_node_mul_nfactors(mutableNode(value.raw()));
+  return ixs_node_mul_nfactors(value.raw());
 }
 
 MulFactor ExprView::getMulFactor(uint32_t index) const {
   if (getKind() != ExprKind::Mul)
     return {};
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (index >= ixs_node_mul_nfactors(node))
     return {};
   return MulFactor{ExprHandle(ixs_node_mul_factor_base(node, index)),
@@ -1045,7 +1045,7 @@ ExprHandle ExprView::getUnaryArg() const {
   ExprKind kind = getKind();
   if (kind != ExprKind::Floor && kind != ExprKind::Ceil)
     return {};
-  return ExprHandle(ixs_node_unary_arg(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_unary_arg(value.raw()));
 }
 
 ExprHandle ExprView::getBinaryLhs() const {
@@ -1053,7 +1053,7 @@ ExprHandle ExprView::getBinaryLhs() const {
   if (kind != ExprKind::Mod && kind != ExprKind::Max && kind != ExprKind::Min &&
       kind != ExprKind::Xor)
     return {};
-  return ExprHandle(ixs_node_binary_lhs(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_binary_lhs(value.raw()));
 }
 
 ExprHandle ExprView::getBinaryRhs() const {
@@ -1061,19 +1061,19 @@ ExprHandle ExprView::getBinaryRhs() const {
   if (kind != ExprKind::Mod && kind != ExprKind::Max && kind != ExprKind::Min &&
       kind != ExprKind::Xor)
     return {};
-  return ExprHandle(ixs_node_binary_rhs(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_binary_rhs(value.raw()));
 }
 
 uint32_t ExprView::getPiecewiseCaseCount() const {
   if (getKind() != ExprKind::Piecewise)
     return 0;
-  return ixs_node_pw_ncases(mutableNode(value.raw()));
+  return ixs_node_pw_ncases(value.raw());
 }
 
 PiecewiseCase ExprView::getPiecewiseCase(uint32_t index) const {
   if (getKind() != ExprKind::Piecewise)
     return {};
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (index >= ixs_node_pw_ncases(node))
     return {};
   return PiecewiseCase{ExprHandle(ixs_node_pw_value(node, index)),
@@ -1085,7 +1085,7 @@ bool PredView::isValid() const { return isPred(value); }
 PredKind PredView::getKind() const {
   if (!value)
     return PredKind::Invalid;
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (ixs_node_tag(node) == IXS_INT) {
     int64_t constant = ixs_node_int_val(node);
     if (constant == 0)
@@ -1099,39 +1099,39 @@ PredKind PredView::getKind() const {
 std::optional<PredCmpOp> PredView::getCmpOp() const {
   if (getKind() != PredKind::Cmp)
     return std::nullopt;
-  return getPredCmpOp(ixs_node_cmp_op(mutableNode(value.raw())));
+  return getPredCmpOp(ixs_node_cmp_op(value.raw()));
 }
 
 ExprHandle PredView::getCmpLhs() const {
   if (getKind() != PredKind::Cmp)
     return {};
-  return ExprHandle(ixs_node_binary_lhs(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_binary_lhs(value.raw()));
 }
 
 ExprHandle PredView::getCmpRhs() const {
   if (getKind() != PredKind::Cmp)
     return {};
-  return ExprHandle(ixs_node_binary_rhs(mutableNode(value.raw())));
+  return ExprHandle(ixs_node_binary_rhs(value.raw()));
 }
 
 PredHandle PredView::getUnaryArg() const {
   if (getKind() != PredKind::Not)
     return {};
-  return PredHandle(ixs_node_unary_arg(mutableNode(value.raw())));
+  return PredHandle(ixs_node_unary_arg(value.raw()));
 }
 
 uint32_t PredView::getLogicArgCount() const {
   PredKind kind = getKind();
   if (kind != PredKind::And && kind != PredKind::Or)
     return 0;
-  return ixs_node_logic_nargs(mutableNode(value.raw()));
+  return ixs_node_logic_nargs(value.raw());
 }
 
 PredHandle PredView::getLogicArg(uint32_t index) const {
   PredKind kind = getKind();
   if (kind != PredKind::And && kind != PredKind::Or)
     return {};
-  ixs_node *node = mutableNode(value.raw());
+  const ixs_node *node = value.raw();
   if (index >= ixs_node_logic_nargs(node))
     return {};
   return PredHandle(ixs_node_logic_arg(node, index));
@@ -1142,8 +1142,8 @@ FailureOr<ExprHandle> mlir::wave::sym::parseExpr(Store &store,
                                                  std::string *diagnostic) {
   std::string nulTerminated(text);
   Session session(store);
-  ixs_node *node = ixs_parse_expr(session.raw(), nulTerminated.c_str(),
-                                  nulTerminated.size());
+  const ixs_node *node = ixs_parse_expr(session.raw(), nulTerminated.c_str(),
+                                        nulTerminated.size());
   if (!node) {
     setDiagnostic(diagnostic, "out of memory parsing wave.expr");
     return failure();
@@ -1163,8 +1163,8 @@ FailureOr<PredHandle> mlir::wave::sym::parsePred(Store &store,
                                                  std::string *diagnostic) {
   std::string nulTerminated(text);
   Session session(store);
-  ixs_node *node = ixs_parse_pred(session.raw(), nulTerminated.c_str(),
-                                  nulTerminated.size());
+  const ixs_node *node = ixs_parse_pred(session.raw(), nulTerminated.c_str(),
+                                        nulTerminated.size());
   if (!node) {
     setDiagnostic(diagnostic, "out of memory parsing wave.pred");
     return failure();
@@ -1212,7 +1212,7 @@ FailureOr<ExprHandle> mlir::wave::sym::importExpr(Store &store,
   }
 
   Session session(store);
-  ixs_node *node = ixs_import_node(session.raw(), foreign);
+  const ixs_node *node = ixs_import_node(session.raw(), foreign);
   if (!node) {
     setDiagnostic(diagnostic, "out of memory importing wave.expr");
     return failure();
@@ -1247,7 +1247,7 @@ FailureOr<PredHandle> mlir::wave::sym::importPred(Store &store,
   }
 
   Session session(store);
-  ixs_node *node = ixs_import_node(session.raw(), foreign);
+  const ixs_node *node = ixs_import_node(session.raw(), foreign);
   if (!node) {
     setDiagnostic(diagnostic, "out of memory importing wave.pred");
     return failure();
@@ -1260,11 +1260,11 @@ mlir::wave::sym::composeExprBinary(Store &store, ExprHandle lhsHandle,
                                    ExprBinaryOp op, ExprHandle rhsHandle,
                                    std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
-  ixs_node *node = composeRawBinary(session.raw(), lhs, op, rhs);
+  const ixs_node *node = composeRawBinary(session.raw(), lhs, op, rhs);
   return finishExpr(session.raw(), node, diagnostic,
                     "failed to compose wave.expr");
 }
@@ -1273,7 +1273,7 @@ FailureOr<ExprHandle>
 mlir::wave::sym::composeExprCeil(Store &store, ExprHandle valueHandle,
                                  std::string *diagnostic) {
   Session session(store);
-  ixs_node *value = rawExprNode(valueHandle, diagnostic);
+  const ixs_node *value = rawExprNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishExpr(session.raw(), ixs_ceil(session.raw(), value), diagnostic,
@@ -1284,7 +1284,7 @@ FailureOr<ExprHandle>
 mlir::wave::sym::composeExprFloor(Store &store, ExprHandle valueHandle,
                                   std::string *diagnostic) {
   Session session(store);
-  ixs_node *value = rawExprNode(valueHandle, diagnostic);
+  const ixs_node *value = rawExprNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishExpr(session.raw(), ixs_floor(session.raw(), value), diagnostic,
@@ -1295,7 +1295,7 @@ FailureOr<ExprHandle> mlir::wave::sym::composeExprNeg(Store &store,
                                                       ExprHandle valueHandle,
                                                       std::string *diagnostic) {
   Session session(store);
-  ixs_node *value = rawExprNode(valueHandle, diagnostic);
+  const ixs_node *value = rawExprNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishExpr(session.raw(), ixs_neg(session.raw(), value), diagnostic,
@@ -1308,7 +1308,7 @@ FailureOr<ExprHandle> mlir::wave::sym::composeExprSym(Store &store,
   // ixs_sym needs NUL-terminated buffer.
   std::string nulTerminated(name);
   Session session(store);
-  ixs_node *node = ixs_sym(session.raw(), nulTerminated.c_str());
+  const ixs_node *node = ixs_sym(session.raw(), nulTerminated.c_str());
   return finishExpr(session.raw(), node, diagnostic,
                     "failed to construct wave.expr symbol");
 }
@@ -1317,7 +1317,7 @@ FailureOr<ExprHandle> mlir::wave::sym::composeExprInt(Store &store,
                                                       int64_t value,
                                                       std::string *diagnostic) {
   Session session(store);
-  ixs_node *node = ixs_int(session.raw(), value);
+  const ixs_node *node = ixs_int(session.raw(), value);
   return finishExpr(session.raw(), node, diagnostic,
                     "failed to construct wave.expr integer literal");
 }
@@ -1330,13 +1330,13 @@ FailureOr<ExprHandle> mlir::wave::sym::composeExprPiecewise(
   }
 
   Session session(store);
-  SmallVector<ixs_node *, 4> values;
-  SmallVector<ixs_node *, 4> conditions;
+  SmallVector<const ixs_node *, 4> values;
+  SmallVector<const ixs_node *, 4> conditions;
   values.reserve(cases.size());
   conditions.reserve(cases.size());
   for (PiecewiseCase piece : cases) {
-    ixs_node *value = rawExprNode(piece.value, diagnostic);
-    ixs_node *condition = rawPredNode(piece.condition, diagnostic);
+    const ixs_node *value = rawExprNode(piece.value, diagnostic);
+    const ixs_node *condition = rawPredNode(piece.condition, diagnostic);
     if (!value || !condition)
       return failure();
     values.push_back(value);
@@ -1369,8 +1369,8 @@ FailureOr<PredHandle> mlir::wave::sym::composePredCmp(Store &store,
                                                       ExprHandle rhsHandle,
                                                       std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
 
@@ -1403,8 +1403,8 @@ mlir::FailureOr<PredHandle>
 mlir::wave::sym::composePredAnd(Store &store, PredHandle lhsHandle,
                                 PredHandle rhsHandle, std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(), ixs_and(session.raw(), lhs, rhs), diagnostic,
@@ -1415,8 +1415,8 @@ mlir::FailureOr<PredHandle>
 mlir::wave::sym::composePredOr(Store &store, PredHandle lhsHandle,
                                PredHandle rhsHandle, std::string *diagnostic) {
   Session session(store);
-  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
-  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
+  const ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  const ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
   if (!lhs || !rhs)
     return failure();
   return finishPred(session.raw(), ixs_or(session.raw(), lhs, rhs), diagnostic,
@@ -1427,7 +1427,7 @@ mlir::FailureOr<PredHandle>
 mlir::wave::sym::composePredNot(Store &store, PredHandle valueHandle,
                                 std::string *diagnostic) {
   Session session(store);
-  ixs_node *value = rawPredNode(valueHandle, diagnostic);
+  const ixs_node *value = rawPredNode(valueHandle, diagnostic);
   if (!value)
     return failure();
   return finishPred(session.raw(), ixs_not(session.raw(), value), diagnostic,
@@ -1438,10 +1438,10 @@ FailureOr<ExprHandle> mlir::wave::sym::simplifyExpr(Store &store,
                                                     ExprHandle value,
                                                     std::string *diagnostic) {
   Session session(store);
-  ixs_node *expr = rawExprNode(value, diagnostic);
+  const ixs_node *expr = rawExprNode(value, diagnostic);
   if (!expr)
     return failure();
-  ixs_node *simplified =
+  const ixs_node *simplified =
       ixs_simplify(session.raw(), expr, /*assumptions=*/nullptr, 0);
   return finishExpr(session.raw(), simplified, diagnostic,
                     "failed to simplify wave.expr");
@@ -1451,10 +1451,10 @@ FailureOr<PredHandle> mlir::wave::sym::simplifyPred(Store &store,
                                                     PredHandle value,
                                                     std::string *diagnostic) {
   Session session(store);
-  ixs_node *pred = rawPredNode(value, diagnostic);
+  const ixs_node *pred = rawPredNode(value, diagnostic);
   if (!pred)
     return failure();
-  ixs_node *simplified =
+  const ixs_node *simplified =
       ixs_simplify(session.raw(), pred, /*assumptions=*/nullptr, 0);
   return finishPred(session.raw(), simplified, diagnostic,
                     "failed to simplify wave.pred");
@@ -1465,17 +1465,18 @@ mlir::wave::sym::substituteExpr(Store &store, ExprHandle value,
                                 ArrayRef<ExprSubstitution> substitutions,
                                 std::string *diagnostic) {
   Session session(store);
-  ixs_node *expr = rawExprNode(value, diagnostic);
+  const ixs_node *expr = rawExprNode(value, diagnostic);
   if (!expr)
     return failure();
 
-  SmallVector<ixs_node *, 4> targets;
-  SmallVector<ixs_node *, 4> replacements;
+  SmallVector<const ixs_node *, 4> targets;
+  SmallVector<const ixs_node *, 4> replacements;
   targets.reserve(substitutions.size());
   replacements.reserve(substitutions.size());
   for (const ExprSubstitution &substitution : substitutions) {
-    ixs_node *target = rawExprNode(substitution.target, diagnostic);
-    ixs_node *replacement = rawExprNode(substitution.replacement, diagnostic);
+    const ixs_node *target = rawExprNode(substitution.target, diagnostic);
+    const ixs_node *replacement =
+        rawExprNode(substitution.replacement, diagnostic);
     if (!target || !replacement)
       return failure();
     targets.push_back(target);
@@ -1486,7 +1487,7 @@ mlir::wave::sym::substituteExpr(Store &store, ExprHandle value,
     setDiagnostic(diagnostic, "too many wave.expr substitutions");
     return failure();
   }
-  ixs_node *result =
+  const ixs_node *result =
       ixs_subs_multi(session.raw(), expr, static_cast<uint32_t>(targets.size()),
                      targets.data(), replacements.data());
   return finishExpr(session.raw(), result, diagnostic,
@@ -1498,17 +1499,18 @@ mlir::wave::sym::substitutePred(Store &store, PredHandle value,
                                 ArrayRef<ExprSubstitution> substitutions,
                                 std::string *diagnostic) {
   Session session(store);
-  ixs_node *pred = rawPredNode(value, diagnostic);
+  const ixs_node *pred = rawPredNode(value, diagnostic);
   if (!pred)
     return failure();
 
-  SmallVector<ixs_node *, 4> targets;
-  SmallVector<ixs_node *, 4> replacements;
+  SmallVector<const ixs_node *, 4> targets;
+  SmallVector<const ixs_node *, 4> replacements;
   targets.reserve(substitutions.size());
   replacements.reserve(substitutions.size());
   for (const ExprSubstitution &substitution : substitutions) {
-    ixs_node *target = rawExprNode(substitution.target, diagnostic);
-    ixs_node *replacement = rawExprNode(substitution.replacement, diagnostic);
+    const ixs_node *target = rawExprNode(substitution.target, diagnostic);
+    const ixs_node *replacement =
+        rawExprNode(substitution.replacement, diagnostic);
     if (!target || !replacement)
       return failure();
     targets.push_back(target);
@@ -1519,7 +1521,7 @@ mlir::wave::sym::substitutePred(Store &store, PredHandle value,
     setDiagnostic(diagnostic, "too many wave.pred substitutions");
     return failure();
   }
-  ixs_node *result =
+  const ixs_node *result =
       ixs_subs_multi(session.raw(), pred, static_cast<uint32_t>(targets.size()),
                      targets.data(), replacements.data());
   return finishPred(session.raw(), result, diagnostic,
@@ -1564,17 +1566,17 @@ mlir::wave::sym::simplifyExpr(Store &store, ExprHandle value,
                               ArrayRef<PredHandle> assumptions,
                               std::string *diagnostic) {
   Session session(store);
-  ixs_node *expr = rawExprNode(value, diagnostic);
+  const ixs_node *expr = rawExprNode(value, diagnostic);
   if (!expr)
     return failure();
-  SmallVector<ixs_node *, 4> rawAssumptions;
+  SmallVector<const ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *raw = rawPredNode(assumption, diagnostic);
+    const ixs_node *raw = rawPredNode(assumption, diagnostic);
     if (!raw)
       return failure();
     rawAssumptions.push_back(raw);
   }
-  ixs_node *simplified = ixs_simplify(
+  const ixs_node *simplified = ixs_simplify(
       session.raw(), expr, rawAssumptions.data(), rawAssumptions.size());
   return finishExpr(session.raw(), simplified, diagnostic,
                     "failed to simplify wave.expr");
@@ -1584,7 +1586,7 @@ FailureOr<ExprHandle> mlir::wave::sym::expandExpr(Store &store,
                                                   ExprHandle value,
                                                   std::string *diagnostic) {
   Session session(store);
-  ixs_node *expr = rawExprNode(value, diagnostic);
+  const ixs_node *expr = rawExprNode(value, diagnostic);
   if (!expr)
     return failure();
   return finishExpr(session.raw(), ixs_expand(session.raw(), expr), diagnostic,
@@ -1618,12 +1620,12 @@ mlir::wave::sym::Pow2Fact
 mlir::wave::sym::getPow2Fact(Store &store, ExprHandle expr,
                              ArrayRef<PredHandle> assumptions) {
   Session session(store);
-  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
   if (!rawExpr)
     return Pow2Fact::Unknown;
-  SmallVector<ixs_node *, 4> rawAssumptions;
+  SmallVector<const ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    const ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
     if (!raw)
       return Pow2Fact::Unknown;
     rawAssumptions.push_back(raw);
@@ -1770,12 +1772,12 @@ std::optional<InferredRange>
 mlir::wave::sym::inferRange(Store &store, ExprHandle expr,
                             ArrayRef<PredHandle> assumptions) {
   Session session(store);
-  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  const ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
   if (!rawExpr)
     return std::nullopt;
-  SmallVector<ixs_node *, 4> rawAssumptions;
+  SmallVector<const ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    const ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
     if (!raw)
       return std::nullopt;
     rawAssumptions.push_back(raw);
