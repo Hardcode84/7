@@ -24,13 +24,13 @@ func.func @packed_wave_f32_math_v4(%a: !wave.simd<vector<4xf32>, 64>,
 
 // SELECT-LABEL: func.func @packed_wave_f32_math_v2
 // SELECT: waveamdmachine.v_pk_add_f32
-// SELECT: waveamdmachine.v_pk_mul_f32
+// SELECT: waveamdmachine.v_pk_mul_f32 {{.*}}contract = true
 func.func @packed_wave_f32_math_v2(%a: !wave.simd<vector<2xf32>, 64>,
                                    %b: !wave.simd<vector<2xf32>, 64>) {
   %add = wave.fadd %a, %b
       : !wave.simd<vector<2xf32>, 64>, !wave.simd<vector<2xf32>, 64>
       -> !wave.simd<vector<2xf32>, 64>
-  %mul = wave.fmul %add, %b
+  %mul = wave.fmul %add, %b fastmath<contract>
       : !wave.simd<vector<2xf32>, 64>, !wave.simd<vector<2xf32>, 64>
       -> !wave.simd<vector<2xf32>, 64>
   return

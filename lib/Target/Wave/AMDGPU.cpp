@@ -1934,42 +1934,58 @@ private:
     return success();
   }
 
+  unsigned packedSrcMods(unsigned opSel, unsigned opSelHi, unsigned negLo,
+                         unsigned negHi, unsigned operandIndex) const {
+    return ((negLo >> operandIndex) & 1) |
+           (((negHi >> operandIndex) & 1) << 1) |
+           (((opSel >> operandIndex) & 1) << 2) |
+           (((opSelHi >> operandIndex) & 1) << 3);
+  }
+
   unsigned packedSrcMods(unsigned opSel, unsigned opSelHi,
                          unsigned operandIndex) const {
-    return (((opSel >> operandIndex) & 1) << 2) |
-           (((opSelHi >> operandIndex) & 1) << 3);
+    return packedSrcMods(opSel, opSelHi, 0, 0, operandIndex);
   }
 
   LogicalResult emitPackedBinary(unsigned opcode, Operation &op) {
     unsigned opSel = getIntAttr(&op, "op_sel", 0);
     unsigned opSelHi = getIntAttr(&op, "op_sel_hi", 3);
+    unsigned negLo = getIntAttr(&op, "neg_lo", 0);
+    unsigned negHi = getIntAttr(&op, "neg_hi", 0);
     return emitMC(
         opcode,
         {toMCOperand(op.getResult(0)),
-         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 0)),
+         llvm::MCOperand::createImm(
+             packedSrcMods(opSel, opSelHi, negLo, negHi, 0)),
          toMCOperand(op.getOperand(0)),
-         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 1)),
+         llvm::MCOperand::createImm(
+             packedSrcMods(opSel, opSelHi, negLo, negHi, 1)),
          toMCOperand(op.getOperand(1)),
          llvm::MCOperand::createImm(getBoolAttr(&op, "clamp", false)),
          llvm::MCOperand::createImm(opSel), llvm::MCOperand::createImm(opSelHi),
-         llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+         llvm::MCOperand::createImm(negLo), llvm::MCOperand::createImm(negHi)});
   }
 
   LogicalResult emitPackedTernary(unsigned opcode, Operation &op) {
     unsigned opSel = getIntAttr(&op, "op_sel", 0);
     unsigned opSelHi = getIntAttr(&op, "op_sel_hi", 7);
+    unsigned negLo = getIntAttr(&op, "neg_lo", 0);
+    unsigned negHi = getIntAttr(&op, "neg_hi", 0);
     return emitMC(
         opcode,
         {toMCOperand(op.getResult(0)),
-         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 0)),
+         llvm::MCOperand::createImm(
+             packedSrcMods(opSel, opSelHi, negLo, negHi, 0)),
          toMCOperand(op.getOperand(0)),
-         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 1)),
+         llvm::MCOperand::createImm(
+             packedSrcMods(opSel, opSelHi, negLo, negHi, 1)),
          toMCOperand(op.getOperand(1)),
-         llvm::MCOperand::createImm(packedSrcMods(opSel, opSelHi, 2)),
+         llvm::MCOperand::createImm(
+             packedSrcMods(opSel, opSelHi, negLo, negHi, 2)),
          toMCOperand(op.getOperand(2)),
          llvm::MCOperand::createImm(getBoolAttr(&op, "clamp", false)),
          llvm::MCOperand::createImm(opSel), llvm::MCOperand::createImm(opSelHi),
-         llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0)});
+         llvm::MCOperand::createImm(negLo), llvm::MCOperand::createImm(negHi)});
   }
 
   LogicalResult emitTernaryF32(unsigned opcode, Operation &op) {
