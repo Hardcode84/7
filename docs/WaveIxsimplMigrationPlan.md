@@ -5,11 +5,107 @@
 This document audits symbolic reasoning in Wave lowering and defines which
 parts belong in ixsimpl.
 
-Audit baseline:
+Original audit baseline:
 
 - Wave: `01f668ad2bca39a657ac907dc513992f2a89fc7c`
 - vendored ixsimpl: `d7e536dd2fbe61dcea5ea727ebcfa45142f38791`
 - audit date: 2026-07-22
+
+Imported implementation baseline:
+
+- Wave integration base: `1c238072`
+- Wave symbolic migration: `369437af70b8a0f21a92800cbae7ddf962c5b7e6`
+- upstream ixsimpl: `56a3f9deb40e292567fd7c2fff1f1eed56bc83ca`
+- profiled ixsimpl fixes: `59371133aee997f9983fc882162587a181589567`
+
+At `56a3f9d`, all general P0/P1 APIs identified below are public: reusable
+facts, fact-backed simplification, definedness, integrality, divisibility,
+exact division, total equivalence, known bits, congruence, expanded ranges,
+constant difference, affine decomposition, finite difference, additive split,
+and simultaneous fact substitution. This revision also canonicalizes nested
+XOR cancellation, lets atomic check APIs consume canonical true/false, and
+makes node ownership validation expected constant time.
+Wave now has a scoped `sym::Analysis` boundary and uses core check,
+definedness, and finite-difference queries. Remaining work is Wave call-site
+migration plus the narrower gaps listed below.
+
+### Import validation status
+
+The Wave integration is implemented. gfx950 runtime and performance validation
+remains open. Current validation at Wave `369437af` and ixsimpl `5937113`:
+
+- all 416 supported Wave tests pass, including 16 PerfGoldens; 24
+  target-dependent tests are unsupported;
+- wavec passes 6 of 6 tests;
+- Integration passes 102 tests; 24 target-dependent tests are unsupported;
+- standalone ixsimpl passes 13 of 13 strict source/ASAN C tests, 10 of 10
+  amalgamated C tests, and 178 of 178 fresh-wheel Python quick tests;
+- all 16 PerfGoldens pass after regenerating 6 reviewed ASM drifts; those 6
+  still require gfx950 A/B.
+
+The `my/goldens` branch update is already present as Wave commit `1c238072`.
+The six regenerated files below are subsequent effects of the ixsimpl import.
+
+Four non-Perf expectations changed under stronger or corrected core proofs:
+
+| Test | Imported behavior | Review action |
+|---|---|---|
+| `lower-redistribute-invalid.mlir` | Range propagation from `3bded15` proves `Mod(floor(1/-1), 2) == 1`, so the first real division failure moves from item 0 to item 1; Piecewise ranges reach the later movement-classification limit | Assert item 1 and the deterministic classification-limit diagnostic |
+| `wave_symbolic_memory_component_cover_codegen.mlir` | Expanded ranges from `3bded15` prove the exact-packet offset fits the buffer form | Require `buffer_store_dword` and reject the short global form |
+| `waveamdmachine-full-address.mlir` | `3bded15` bounds the XOR/floor offset for a 32-bit global-store offset; known-bit fixes in `a9fb4ee` turn disjoint-bit XOR into addition while retaining addr64 for the overflowing byte offset | Assert both the narrow safe case and the high constant plus addr64 addition |
+| `waveamdmachine-gfx950-dma-matmul.mlir` | Expanded ranges prove the descriptor-relative address and select `buffer_load_dwordx4 ... lds` | Require both the buffer opcode and the LDS modifier |
+
+Six gfx950 PerfGoldens drifted:
+
+- `a4w4_mxfp_k16k`;
+- `tlx_fa_8k_async_prefetch`;
+- `tlx_fa_8k_persistent_causal`;
+- `tlx_glu_optimized`;
+- `tlx_glu_optimized_async`;
+- `tlx_glu_persistent`.
+
+All six generated files assemble for gfx950 with `llvm-mc`; this proves
+encoding validity, not runtime performance.
+
+Static old/new ASM review found identical ordered wait/barrier streams,
+unchanged MFMA/DS/VMEM/wait/barrier counts, unchanged LDS/private sizes, and no
+spills. This is triage, not performance proof:
+
+| Golden | Instruction delta | Register delta | Review focus |
+|---|---:|---|---|
+| `a4w4_mxfp_k16k` | -26 | 436 VGPR / 46 SGPR / 180 AGPR unchanged | Hot-loop address/swizzle allocation |
+| `tlx_fa_8k_async_prefetch` | -81 | 440 / 84 / 184 unchanged | Shared prologue swizzles |
+| `tlx_fa_8k_persistent_causal` | -49 | 512 VGPR / 100 SGPR unchanged | Outer-loop LDS addresses; barrier-neighbor scheduling changed |
+| `tlx_glu_optimized_async` | -93 | 136 VGPR / 44 SGPR unchanged | Post-loop LDS addressing |
+| `tlx_glu_persistent` | -38 | 218 / 90 unchanged | New `v_bitop3` folds |
+| `tlx_glu_optimized` | -37 | VGPR 196 unchanged; SGPR 44 -> 46 | Highest risk: three extra scalar multiplies |
+
+Temporarily restoring Wave's assumption-array simplify, range, power-of-two,
+and predicate wrappers does not remove these drifts. Restoring the old
+loop-stride substitute/subtract ladder also produces byte-identical generated
+ASM to the new finite-difference query. The drift therefore comes from the
+imported core, not facade scope or the finite-difference migration.
+
+Commit-by-commit tracing places representative golden drift at `3bded15`:
+finite ranges for nested layout XORs unlock an older disjoint-XOR-to-add rule.
+This matches the reduced XOR/AND/shift/multiply counts while memory-operation
+counts stay fixed. Correctness is expected; gfx950 performance remains
+unproven.
+
+The local GPU is gfx1100; all six regenerated goldens target gfx950. Static
+review accepted the sound codegen canonicalization, but cannot close the
+same-hardware performance gate. On a gfx950 host:
+
+1. Materialize pre-import ASM from commit `1c238072` and current ASM from the
+   worktree. Assemble and link both into separate HSACOs with the same
+   `llvm-mc` and `ld.lld`.
+2. Run identical inputs, warmups, and repeat counts. Record medians and output
+   checks, not only instruction counts.
+3. For `a4w4_mxfp_k16k`, use the `a4w4-mxfp-k16k` calibration profile and
+   `--run-hsaco` for each artifact.
+4. Supply equivalent FA and GLU harness runs for the five TLX kernels.
+5. Record the accepted A/B evidence. If performance regresses, repair the
+   lowering or restore the affected golden before merge.
 
 Scope covers production code under `lib/Dialect/Wave`, Wave conversions,
 Python kernel builders, and wavec. Tests and tracker entries provide examples;
@@ -33,7 +129,8 @@ handles, structural import, and MLIR parse/print stay there. Definedness,
 integrality, divisibility, compound fact ingestion, and generic range
 extensions move into ixsimpl.
 
-The priority order is:
+Core APIs in this priority order are landed; Wave deletions follow the same
+order:
 
 1. Fix compound assumption ingestion.
 2. Export integrality and divisibility; remove denominator-based legality
@@ -143,38 +240,104 @@ The migration must reuse current machinery before adding new solvers.
 | Hash-consed expression DAG | Complete |
 | Structural import, serialization, substitution | Complete |
 | Expansion and assumption-aware simplification | Complete |
-| Batch simplification with one assumption array | Complete |
-| Comparison entailment | Complete for normalized CMP queries |
-| Rational interval range | Complete for supported propagation rules |
-| Power-of-two facts | Public |
+| Batch simplification | Public for assumption arrays and reusable facts |
+| Comparison and predicate-tree entailment | Public through fact sets |
+| Rational interval range | Public for powers, XOR, Piecewise, and existing arithmetic |
+| Power-of-two, known-bit, and congruence facts | Public through fact sets |
 | Mutable fact sets | Public and session-owned |
-| Explicit expression ranges | Public through fact sets |
-| Affine range derivation | Public through fact sets |
-| Fact substitution | Public for one target/replacement |
-| Symbol congruence | Implemented internally; full modulus/remainder query is symbol-only |
-| Arbitrary-expression divisibility | Implemented internally |
-| Low-64-bit known bits | Implemented internally |
-| Fact-aware integrality | Implemented internally |
-| Predicate-tree expansion | Implemented internally by `ixs_expand` |
+| Explicit expression ranges and affine derivation | Public through fact sets |
+| Fact substitution | Public simultaneous multi-target transfer |
+| Structural and fact-aware integrality | Public |
+| Arbitrary-expression divisibility and exact quotient | Public |
+| Total definedness and equivalence | Public through fact sets |
+| Constant, affine, finite-difference, and additive-split algebra | Public through fact sets |
+| Predicate-tree expansion | Public through `ixs_expand` |
 
-Current fact sets accept conjunctions, explicit ranges, affine derivation, and
-substitution. They support `check`, `range`, and power-of-two queries. They do
-not support fact-backed simplification, public integrality/divisibility, public
-known bits, or general predicate equivalence.
+Fact sets accept conjunctions, explicit ranges, affine derivation, and
+simultaneous substitution. Failed mutation poisons the set. Wave must treat
+construction as atomic and keep one session alive for the complete proof
+batch.
+
+### Resolved import gap: nested XOR checks
+
+The first import exposed an atomic-check failure around nested XOR. The initial
+diagnosis was wrong: at `d7e536d` and `be4ac2d`, both assumption-array and
+fact-backed checks returned unknown. Fact ingestion was not the difference.
+The expression constructor retained `a ^ (a ^ b)`, and the resulting equality
+could not be proved.
+
+Upstream `56395e1` fixes the algebra and the query boundary:
+
+- `a ^ (a ^ b)` canonicalizes to `b`, in either operand order;
+- comparison construction then returns canonical true/false;
+- `ixs_check` and `ixs_check_facts` accept those canonical predicates;
+- contradictory fact domains still return unknown.
+
+```c
+ixs_node *x = ixs_sym(s, "x");
+ixs_node *lo = ixs_cmp(s, x, IXS_CMP_GE, ixs_int(s, 0));
+ixs_node *hi = ixs_cmp(s, x, IXS_CMP_LE, ixs_int(s, 31));
+ixs_node *range = ixs_and(s, lo, hi);
+ixs_node *nested = ixs_xor(s, ixs_int(s, 1),
+                           ixs_xor(s, ixs_int(s, 1), x));
+ixs_node *equal = ixs_cmp(s, nested, IXS_CMP_EQ, x);
+ixs_node *assumptions[] = {range};
+
+assert(nested == x);
+assert(ixs_check(s, equal, assumptions, 1) == IXS_CHECK_TRUE);
+
+ixs_facts *facts = ixs_facts_create(s);
+assert(ixs_facts_assume_pred(facts, range));
+assert(ixs_check_facts(facts, equal) == IXS_CHECK_TRUE);
+```
+
+The finite range is retained to exercise reusable fact ingestion; cancellation
+itself is unconditional. Upstream C and Python regressions cover legacy check,
+fact check, predicate check, and equivalence. Wave's `checkPredicate` wrapper
+now uses `sym::Analysis`, including conservative three-valued checks for
+AND/OR/NOT trees. Correct stronger proofs are accepted; unknown remains
+conservative.
+
+### Remaining semantic gaps after `5937113`
+
+These are narrower sufficient rules, not blockers for the scoped facade:
+
+| Issue | Actionable example | Wave use after landing |
+|---|---|---|
+| `4-3ay` symbolic-denominator floor reasoning | Prove `floor(A/D) - floor((A + delta)/D)` when `D > 0` and facts prove no quotient-boundary crossing | Replace cyclic/remainder floor subproofs; keep wrap policy local |
+| `4-xr1c` relational symbolic Mod bounds | Simplify `Mod(a, 8*d) -> a` from `d > 0` and `0 <= a < 8*d` | Remove bounded enumeration around symbolic transaction/layout moduli |
+| `4-bev` interval/congruence intersection | From `0 <= x <= 15` and `x == 2 (mod 4)`, tighten the hull to `[2, 14]` | Improve address and packet bounds without a Wave residue solver |
+| `4-1p9q` equal Mod residues | Prove `Mod(A,m) - Mod(B,m) == 0` when `m` divides `A-B` | Replace remainder-adjacency and activation equality ladders |
+| `4-1kb` batch shared-DAG memoization | Simplify many roots sharing one address subtree once per fact context | Reduce proof cost; no legality or output change allowed |
+
+`5937113` adds deterministic single-node transform caches and atomic
+`assume_many`; it does not implement `4-1kb`'s fact-sensitive shared-DAG
+simplification.
+
+The profiled node-ownership gap is closed by `e05626f`: ownership probes the
+intern table by immutable hash and pointer identity. `56a3f9d` records the
+expected-O(1) hot-path contract.
+
+Fact substitution already handles the inverse affine case: `8 | y, y -> 2*K`
+implies `4 | K`, never `8 | K`. Nonlinear replacements retain facts on the
+complete substituted expression but do not invent symbol congruence or bit
+records. Fixed-width arithmetic, OR assumption branch/join, and unbounded
+relational solving remain deliberate non-goals unless a concrete Wave proof
+requires them.
 
 ## Decision Matrix
 
-| Priority | Core work | Wave result |
-|---|---|---|
-| P0 | Compound assumption ingestion | Delete `flattenAssumption`. |
-| P0 | Public integrality, divisibility, and exact quotient | Stop using `collectDenominator` for legality; delete local exact division. |
-| P0 | Resolve Mod contract and add definedness | Delete recursive `provablyDefined`. |
-| P0 | Fact-backed simplification and a reusable fact context | One fact build per proof batch; no nested Store sessions. |
-| P1 | Known bits, query-specific congruence, total equivalence | Delete possible-bit, modular-equivalence, and `proveEqual` ladders. |
-| P1 | Integer-power, XOR, and Piecewise ranges | Delete generic U32 range recursion; keep U32 target policy. |
-| P1 | Constant difference, affine decomposition, finite difference | Delete local delta, stride, and additive-constant algebra. |
-| P2 | Predicate facade and rational endpoint helpers | Delete predicate rebuilding and repeated endpoint arithmetic. |
-| P2 | Multi-substitution transfer and Python fact provenance | Simplify builders without transporting opaque fact objects. |
+| Priority | Core work | Core status | Wave result |
+|---|---|---|---|
+| P0 | Compound assumption ingestion | Landed | `flattenAssumption` deleted. |
+| P0 | Public integrality, divisibility, and exact quotient | Landed | Stop using `collectDenominator` for legality; delete local exact division. |
+| P0 | Resolve Mod contract and add definedness | Landed | Recursive definedness solver deleted. |
+| P0 | Fact-backed simplification and a reusable fact context | Landed | `sym::Analysis` added; migrate proof batches. |
+| P1 | Known bits, query-specific congruence, total equivalence | Landed | Delete possible-bit, modular-equivalence, and `proveEqual` ladders. |
+| P1 | Integer-power, XOR, and Piecewise ranges | Landed | Delete generic U32 range recursion; keep U32 target policy. |
+| P1 | Constant difference, affine decomposition, finite difference | Landed | Loop stride delta migrated; address algebra remains. |
+| P2 | Predicate facade and rational endpoint helpers | Partial | Delete predicate rebuilding and repeated endpoint arithmetic. |
+| P2 | Multi-substitution transfer and Python fact provenance | Core landed | Simplify builders without transporting opaque fact objects. |
 
 P0 fixes correctness contracts or removes unsafe legality checks. P1 removes
 duplicate solver mechanisms. P2 consolidates plumbing after those APIs settle.
@@ -334,7 +497,11 @@ needs typed AST legality analysis and an exact operation whitelist; use
 
 ## Gap 1: Compound Assumption Ingestion
 
-### Current behavior
+Gap sections preserve the original audit reproducer and implementation action.
+The decision matrix above records current status; gaps 1 through 7 are landed
+in the imported core, while their Wave-side deletions remain incremental.
+
+### Audit-baseline behavior (`d7e536d`)
 
 The public `ixs_simplify` contract accepts CMP/AND/OR assumption nodes.
 `ixs_bounds_build_ctx` sends each array entry to
@@ -392,7 +559,7 @@ After importing the updated submodule, delete `flattenAssumption` from
 
 ## Gap 2: Reusable Facts for Simplification
 
-### Current behavior
+### Audit-baseline behavior (`d7e536d`)
 
 `ixs_facts` supports range, check, and power-of-two queries. Simplification
 still takes an assumption array and rebuilds bounds. Wave creates a fresh
@@ -457,13 +624,15 @@ assumption ingestion must not silently produce a weaker context. Any later
 fact-ingestion failure makes the object unusable for proofs.
 
 All node construction, substitution, and fact mutation performed while the
-object is live must go through session-aware methods on `Analysis`. Calling
-existing Store-level facade functions would open a nested session and
-deadlock. Alternatively, construct every query node before creating the
-analysis object; this is too restrictive for symbolic-memory proof code and is
-not the preferred contract. The sketch shows representative builders;
-implementation needs session-aware equivalents for every compose and
-expression/predicate substitution operation used by migrated callers.
+object is live must go through session-aware methods on `Analysis`. Store-level
+facades currently nest through the recursive Store lock, but they create an
+extra session and rely on scratch-state save/restore. That is supported by core,
+not the Wave integration contract. Alternatively, construct every query node
+before creating the analysis object; this is too restrictive for
+symbolic-memory proof code and is not the preferred contract. The sketch shows
+representative builders; implementation needs session-aware equivalents for
+every compose and expression/predicate substitution operation used by migrated
+callers.
 
 ### First migration targets
 
@@ -481,6 +650,9 @@ expression/predicate substitution operation used by migrated callers.
 - contradictory facts remain conservative;
 - profiling reports fact-build count and time before/after.
 
+The imported core no longer adds context-size-linear ownership work. Repeated
+fact construction in Wave remains the scaling limit.
+
 Core tests for `ixs_simplify_facts` must cover:
 
 - parity with assumption-array simplification;
@@ -494,9 +666,246 @@ Core tests for `ixs_simplify_facts` must cover:
 Wave tests must also prove that failure to ingest any assumption aborts the
 analysis. Dropping one rejected fact and continuing is unsound.
 
+### Profiled scaling failure
+
+At `56395e1`, `tlx_fa_8k_persistent_causal` took over six minutes in
+`wave-translate`. A 30-second, 99 Hz DWARF-callgraph sample of the exact golden
+command collected 3,000 samples with none lost:
+
+```bash
+perf record -F 99 --call-graph dwarf,16384 \
+  -o build/profiles/tlx_fa_8k_persistent_causal.perf.data -- \
+  timeout --signal=INT 30s build/bin/wave-translate \
+  --wave-to-amdgpu-asm \
+  test/PerfGolden/Inputs/tlx_fa_8k_persistent_causal.mlir
+```
+
+| Profile node | Inclusive cycles | Self cycles |
+|---|---:|---:|
+| `bounds_ingest_predicate` | 89.67% | 0.17% |
+| assumption-array `sym::simplifyExpr` | 75.55% | 0.00% |
+| `ixs_bounds_build_ctx` | 74.18% | 0.07% |
+| `ixs_arena_contains` | 54.43% | 53.95% |
+| `planGatherTransactions` | 51.72% | 0.00% |
+| `proveEqual` | 46.35% | 0.00% |
+| `verifyB16OutputSlot` | 38.35% | 0.03% |
+| `checkPredicate` | 16.12% | 0.00% |
+| `Analysis::create` | 15.96% | 0.00% |
+
+After migrating B16 verification to one reusable `Analysis`, an identical
+30-second sample moved `verifyB16OutputSlot` from 38.35% to 5.92% inclusive
+and `ixs_arena_contains` from 53.95% to 33.41% self. Generic adjacency then
+dominated: `adjacent` 73.28%, `proveEqual` 69.87%, and legacy
+assumption-array simplification 57.06% inclusive. Sample shares are
+phase-local; they show hotspot movement, not an end-to-end speedup.
+
+Pair-scoped `Analysis` reuse in adjacency moved bounds ingestion from 77.98%
+to 57.71%, legacy assumption-array simplification from 57.06% to 29.92%, and
+`checkPredicate` from 23.89% to 9.48% in the next identical sample. Fact-set
+creation itself became 29.69% inclusive and arena scanning remained 31.34%
+self. Per-pair reuse removes duplicate queries inside one comparison.
+
+At `56a3f9d`, the same sample contains no `ixs_arena_contains` symbol;
+`ixs_ctx_owns_node` is 0.17% self. Bounds ingestion remains 49.12% inclusive
+because pair-scoped fact construction still repeats. Full causal regeneration
+fell to 143.99 seconds and produced byte-identical ASM.
+
+The next profile was taken after two ixsimpl caches, not a lowering shortcut:
+
+- `ixs_bounds_has_empty` caches contradiction scans until fact mutation;
+- successful top-level expansion is memoized by immutable node identity.
+
+Exact regeneration fell to 107.62 seconds (`101.63` user, `5.93` system),
+again with byte-identical ASM. A fresh 30-second profile showed the intended
+hotspot movement:
+
+| ixsimpl path | Inclusive | Self |
+|---|---:|---:|
+| `bounds_ingest_predicate` | 31.65% | 0.28% |
+| `bounds_expr_without_add_const` | 24.98% | below 0.1% |
+| `Analysis::create` | 18.46% | below 0.1% |
+| `ixs_bounds_check_defined` | 6.71% | below 0.1% |
+| `ixs_bounds_has_empty` | 0.92% | 0.61% |
+| `expand_impl` | 0.77% | below 0.1% |
+
+This exposed two core costs. Shifted ADD bounds rebuilt the same immutable
+ADD-minus-constant node through `simp_add` for every assumption. `Analysis`
+also called `ixs_facts_assume_pred` once per root; every call forked, copied,
+and committed the growing fact set.
+
+ixsimpl now addresses both mechanisms:
+
+- a context-local node-transform table memoizes expansion and
+  ADD-minus-constant results at most 75% load;
+- `ixs_facts_assume_preds` ingests an array through one fork and one commit;
+  C++ `Facts::assume_many`, Python `Facts.assume_many`, and Wave
+  `Analysis::create` use the same atomic batch.
+
+The exact post-transform/batch regeneration took 101.88 seconds (`96.68`
+user, `5.14` system). ASM remained byte-identical. In its fresh 30-second
+profile, `bounds_expr_without_add_const` disappeared above 0.05%,
+`bounds_ingest_predicates` fell to 3.92% inclusive, and `Analysis::create`
+fell to 1.82%. The new leading core costs are definedness scratch-table clears
+and integral rational arithmetic:
+
+| ixsimpl path | Inclusive | Self |
+|---|---:|---:|
+| `ixs_bounds_check_defined` | 17.42% | below 0.1% |
+| `defined_cache_scope_init` | 9.58% | below 0.1% |
+| `memset` | 19.43% | 5.78% |
+| `ixs_rat_mul` | 4.51% | 0.75% |
+| `ixs_gcd` | 4.05% | 3.35% |
+| `bounds_get_expr_overrides` | 2.11% | 1.62% |
+
+The first three percentages overlap. They identify fixed 8K/16K table clears,
+not three independent savings. The remaining target is below 100 seconds;
+run-to-run variance is not acceptance.
+
+The final core pass fixes those measured costs:
+
+- definedness' existing bounded DAG walk returns its visit count; the
+  temporary interval cache is the smallest power-of-two table from 32 through
+  8192 with at least two slots per visit;
+- rational normalize, add, multiply, and equal-positive-denominator compare
+  bypass GCD/cross-products for exact integral inputs while retaining checked
+  overflow and `INT64_MIN` behavior.
+
+The first final-core run took 89.17 seconds, but final Wave review found two
+callers bypassing total equivalence on unknown. After deleting those fallbacks,
+the latest observed exact run takes 92.98 seconds (`92.18` user, `0.76`
+system) and emits byte-identical ASM. This is 51.01 seconds, or 35.4%, below
+the 143.99-second upstream-ownership baseline and 7.02 seconds below the
+target. This is one observed run, not a variance claim.
+
+The output and checked-in golden both hash to
+`f916b8ad2c51c40dc924ee508663b2388f6de564a9acd25186973bcb7fe6e039`.
+Timing output is
+`build/profiles/tlx_fa_8k_persistent_causal.total-equivalence.time`; the fresh
+profile is
+`build/profiles/tlx_fa_8k_persistent_causal.total-equivalence.perf.data`.
+The final 30-second, 3,132-sample profile lost no samples and confirms
+mechanism removal:
+
+| Profile node | Before final core pass | Final |
+|---|---:|---:|
+| `adjacent` inclusive | 37.28% | 16.18% |
+| `ixs_bounds_check_defined` inclusive | 17.42% | 3.30% |
+| `defined_relation_zero` inclusive | 13.24% | 0.72% |
+| `memset` self | 5.78% | 3.61% |
+| `ixs_rat_mul` inclusive | 4.51% | 1.42% |
+| `ixs_gcd` self | 3.35% | 0.54% |
+
+Residual cost is equivalence-driven simplification, not batch ingestion:
+
+| Final profile node | Inclusive |
+|---|---:|
+| `simp_simplify_bounds` | 10.89% |
+| `ixs_equivalent_facts` | 10.93% |
+| `Analysis::create` | 1.80% |
+| `ixs_simplify_batch` | 0.54% |
+
+Within `simp_simplify_bounds`, equivalence paths account for 6.86 percentage
+points, scalar simplify 3.53, and batch simplify 0.48. Issue `4-1kb` remains
+useful for general shared-DAG batches, but it is not the next 10.89% fix for
+this kernel. First measure query-local memoization in `equivalence_core`, which
+simplifies both operands, their difference, and both expanded operands under
+the same immutable facts.
+
+No Wave address cache, assumption grouping, or candidate pruning is part of
+this result.
+
+Before `e05626f`, two costs multiplied. B16 output verification and adjacency
+proofs rebuilt the same bounds from assumption arrays for each slot or pair.
+Every predicate and CMP child called `ixs_ctx_owns_node`, which used
+`ixs_arena_contains` to linearly walk all context arena chunks. Mature stores
+made validation proportional to arena age, not query size.
+
+The linear lookup came from `1bbc1d39` (structural cross-context import).
+`537629c2` (unified compound-assumption ingestion) made it hot by validating
+each predicate root and both CMP children during every bounds build. The safety
+check is correct; the lookup and repeated builds are the scaling failure.
+
+The exact pass is `wave-lower-symbolic-memory`. This input has 128 four-slot
+gathers plus two 64-slot gathers and two 64-slot scatters. Each large access
+tries 4,032 ordered adjacency pairs. Two large gathers can also try 2,016
+deduplication pairs each. `proveEqual` rebuilds facts up to three times per
+nontrivial comparison. Static call-count analysis estimates about 59,976 fact
+builds for the four 64-slot operations before remainder fallbacks.
+
+Wave action:
+
+1. Landed: create one `Analysis` for B16 provider verification and pass it
+   through `getB16AddressOffset`, `verifyB16OutputSlot`, and per-item
+   substitution.
+2. Landed intermediate: create one `Analysis` per adjacency/dedup pair and
+   reuse total equivalence, simplification, and check results within the pair.
+3. Do not use address/assumption grouping as the performance repair. It moves
+   repeated work around Wave while leaving the profiled core mechanisms intact.
+4. Keep pair-specific assumptions separate. Never accumulate one pair's facts
+   into another pair.
+5. Count legacy bounds builds, `Analysis::create`, ingested assumptions,
+   adjacency pairs, and remainder binding pairs. Counting only Analysis
+   objects misses assumption-array simplification.
+
+ixsimpl action:
+
+1. Landed upstream: constant-time intern-table ownership validation.
+2. Vendored in `5937113`: contradiction, expansion, and ADD-minus-constant
+   caches keyed by fact mutation or immutable node identity as appropriate.
+3. Vendored in `5937113`: atomic batch fact ingestion with C, C++, and Python
+   parity.
+4. Vendored in `5937113`: size definedness scratch caches from the bounded
+   query DAG and bypass GCD/normalization for exact integral rational
+   operations.
+
+Add an 8/16-slot `16*offset` regression. Proof queries may scale with the
+candidate graph; fact builds must scale with access/address families, not slot
+pairs. Use counters or pass statistics, never wall time, in lit. For manual
+pass timing, `wave-translate` accepts `--mlir-timing` and
+`--mlir-timing-display=list|tree`.
+
+ixsimpl resolution (`e05626f`):
+
+1. Replace arena-range scanning with exact interning-table membership. Every
+   public node is interned, the table has no deletion, and pointer identity
+   still rejects same-shaped foreign nodes:
+
+   ```c
+   mask = ctx->htab_cap - 1;
+   index = node->hash & mask;
+   for (probes = 0; probes < ctx->htab_cap; ++probes) {
+     if (!ctx->htab[index])
+       return false;
+     if (ctx->htab[index] == node)
+       return true;
+     index = (index + 1) & mask;
+   }
+   return false;
+   ```
+
+   This is expected constant time, adds no metadata, and avoids relational
+   pointer comparisons between unrelated allocations.
+2. Same-store import now always takes the structural path. Tests cover owned,
+   foreign, and deliberately non-interned nodes plus same/cross-store import.
+3. Benchmark old, middle, newest, post-rehash, and wrong-context nodes through
+   public import and proof APIs. Linear degradation with node age fails.
+4. Land shared-DAG batch memoization only after fact-build reuse; it cannot
+   compensate for rebuilding and revalidating the same assumptions.
+
+Existing wrong-context bounds, facts, import, and Python tests remain. Add old,
+middle, newest, post-rehash, same-shaped foreign, non-interned, and interior
+pointer cases. `test_bounds.c` must construct malformed nodes through the raw
+interning constructor; retaining stack-backed children in a hand-allocated
+arena node is invalid test setup.
+
+Ownership acceptance is met: ownership validation is no longer a material
+self-time symbol. The measured core fixes retain exact ASM and reduce the
+full-command wall time from 143.99 to 92.98 seconds. Wave-side adjacency fact
+grouping is deliberately not part of the repair.
+
 ## Gap 3: Integrality, Divisibility, and Exact Quotients
 
-### Current behavior
+### Audit-baseline behavior (`d7e536d`)
 
 Wave legality uses `collectDenominator`. It walks rational coefficients but
 ignores MUL exponents. A factor with exponent `-1` can therefore look
@@ -633,7 +1042,7 @@ Wave tests:
 
 ## Gap 4: Definedness
 
-### Current behavior
+### Audit-baseline behavior (`d7e536d`)
 
 ixsimpl constructors catch literal domain errors such as division by zero, but
 there is no public query asking whether a symbolic expression is defined for
@@ -729,7 +1138,7 @@ retain only the typed adapter.
 
 ## Gap 5: Known Bits, Congruence, and Equivalence
 
-### Current behavior
+### Audit-baseline behavior (`d7e536d`)
 
 ixsimpl internally tracks:
 
@@ -878,7 +1287,7 @@ Do not add unbounded theorem proving.
 
 ## Gap 6: Range Propagation
 
-### Current behavior
+### Audit-baseline behavior (`d7e536d`)
 
 `ixs_range` propagates through Add, Mul factors with exponent `-1` or `1`, Mod,
 floor, ceiling, Min, Max, and constant-mask AND. It does not propagate ranges
@@ -967,7 +1376,7 @@ chosen evaluation order rather than the mathematical result alone.
 
 ## Gap 7: Affine Differences and Correlated Bounds
 
-### Current behavior
+### Audit-baseline behavior (`d7e536d`)
 
 ixsimpl stores expression range facts under raw and expanded aliases. This
 already handles spelling differences such as:
@@ -979,7 +1388,7 @@ already handles spelling differences such as:
 It intentionally does not solve general cross-variable relations such as
 `x < K`.
 
-Wave still performs local affine work:
+At the audit baseline, Wave performed local affine work:
 
 - canonicalizes a query target and comparison residuals together;
 - subtracts them and accepts constant deltas;
@@ -988,6 +1397,8 @@ Wave still performs local affine work:
 - manually matches `scale*Mod(iv + constant, modulus) + base`.
 
 These are bounded algebraic decompositions, not general relational solving.
+`buildStrideExpr` now uses `Analysis::finiteDifference`; the other address and
+predicate ladders above remain migration work.
 
 ### Action
 
@@ -1031,6 +1442,80 @@ finite_difference(8*i + base, i, 1)   -> 8
 split_additive_constant(base + 96)     -> residual base, constant 96
 ```
 
+### Scope of `f(x + N) - f(x) == N`
+
+The exact identity is not a complete replacement for any audited Wave proof
+family. `finiteDifference` returns normalized `f(x + N) - f(x)` only after
+proving `f(x)`, `N`, and `f(x + N)` defined. It proves neither equality with an
+expected stride nor loop invariance. Those require `equivalent(diff,
+expected)` and Wave's `bindLiveExpr` check. Most callers need an expected
+physical stride other than `N`.
+
+| Wave family | Correct core query | Replacement scope |
+|---|---|---|
+| Loop stride construction | `finiteDifference(f, iv, loopStep)` | Fully replaces substitute/add/subtract/expand/simplify; `bindLiveExpr` rejects an IV-dependent result |
+| Cyclic pointer carry | None | Keep ring shape, wrap point, power-of-two legality, and update materialization in Wave |
+| Specialized slot adjacency | `constantDifference(rhs, lhs) == elementBits`, plus base/block equivalence | Replaces direct equality algebra; remainder fallback stays Wave-owned |
+| Remainder successor | Constant difference for dividends; equivalence for divisor/residual | Replaces equality subproofs only; sign, definedness, modular grid, and SSA projection stay local |
+| Coalescing address delta | `constantDifference` after binding and fact remap | Replaces delta construction; parameterizing two existing addresses as one `f(x)` adds no value |
+| Activation comparison residuals | Constant difference plus total predicate equivalence | Moves delta extraction; aligned-grid policy stays local |
+| Point dedup, projection invariance, Redistribute, transaction grammar | Total equivalence | No finite-difference role |
+| Sparse address grouping | `splitAdditiveConstant` | No finite-difference role |
+
+Two conditional fast paths remain plausible:
+
+- before slot specialization, test
+  `finiteDifference(bitOffset, slot, 1) == elementBits` when packet bindings and
+  activation are slot-invariant;
+- before per-lane transaction enumeration, test
+  `finiteDifference(expr, lane, 1) == 0`, then separately prove domain
+  coverage.
+
+Concrete cases:
+
+```text
+f(x) = base + x,       N = 4  -> difference 4       step-preserving proof
+f(x) = base + 8*x,     N = 4  -> difference 32      valid stride; `== N` rejects
+f(x) = x*x,            N = 1  -> difference 2*x+1   not loop invariant
+f(x) = x + Mod(x, 4),  N = 4  -> difference 4       passes only this step
+f(x) = Mod(x, 8),      N = 1  -> 1 or -7            cyclic carry policy still needed
+```
+
+The fourth case admits an `N`-periodic component. Do not promote a fixed-step
+proof to a global affine fact. Other constraints:
+
+- `N` must not contain `x`; `N == 0` makes the identity vacuous;
+- expected strides use element, byte, or bit units and usually differ from
+  the loop step;
+- symbolic expected strides need total equivalence, not literal comparison;
+- success may return an IV-dependent result such as `2*x + 1`;
+- facts must describe iterations with a successor; exclude terminal iterations
+  with no successor or partial `f(x + N)` fails conservatively;
+- the result must be integer-valued and materializable as an index;
+- definedness must hold at `x` and `x + N`; `Mod` needs a positive divisor;
+- fixed-width no-wrap remains a separate Wave proof;
+- `constantDifference(lhs, rhs)` returns `lhs - rhs`, so direction matters.
+
+Coverage count:
+
+- exact `difference == N`: zero production callers and zero complete audited
+  families;
+- general finite difference: one production caller (`buildStrideExpr`) and two
+  optional fast paths;
+- total Wave symbolic lowering: below 10%, because constant difference,
+  equivalence, ranges, divisibility, SSA, memory policy, fixed-width legality,
+  and materialization remain separate.
+
+`buildStrideExpr` now calls `Analysis::finiteDifference` and requires the
+result to be provably integer-valued. `reject_fractional_stride` covers the
+`i/2` case: finite difference `1/2` must not become an index carry. Address and
+adjacency migrations need fact/binding unification first.
+
+Core regressions should also cover `x + Mod(x, 4)` at steps four and one, an
+`x`-free symbolic step, the vacuous zero step, and a successor crossing a
+partial-operator domain boundary. The step-four result is four; step one must
+not be promoted to a step-preserving identity.
+
 `WaveExtractLoopStrides` keeps the rule that only a legal, profitable pointer
 carry is formed. It delegates only the decomposition.
 
@@ -1060,18 +1545,18 @@ specific sufficient rules instead.
 ### Predicate expansion
 
 `ixs_expand` already recurses through comparisons, AND, OR, NOT, and Piecewise
-conditions. Wave manually rebuilds predicate trees because its facade exposes
-only `expandExpr`.
+conditions. `Analysis::expand(PredHandle)` now exposes that core path. The
+remaining manual caller is `expandIndexExprPredicate` in `Wave.cpp`; migrate
+its proof batch to `Analysis`, then delete the recursive rebuild.
 
-Add:
+An isolated-call wrapper is optional:
 
 ```c++
 FailureOr<PredHandle> expandPred(Store &store, PredHandle pred,
                                  std::string *diagnostic = nullptr);
 ```
 
-This is a Wave facade gap, not a new ixsimpl solver feature. Delete
-`expandIndexExprPredicate` from `Wave.cpp` afterward.
+No new ixsimpl solver feature is required.
 
 ### Predicate scaling
 
@@ -1108,14 +1593,9 @@ incorrectly.
 
 ## Gap 9: Fact Transfer and Binding Parity
 
-Lower-priority API gaps:
-
-- simultaneous multi-target fact substitution matching `ixs_subs_multi`;
-- sound transfer of congruence and bit facts through nontrivial replacements;
-- const-correct read-only node introspection;
-- Python and C++ bindings for every new public C API;
-- regenerated `ixsimpl_amalg.c` after public API changes;
-- optional batch structural import if profiling shows import overhead.
+Core status: landed in `d4172db`. C, C++, and Python expose simultaneous fact
+substitution. The amalgamation is current. `ixs_import_many` already covers
+batch structural import.
 
 Example multi-substitution:
 
@@ -1124,12 +1604,18 @@ facts: 0 <= x < 16, Mod(y, 8) == 0
 subs:  x -> lane, y -> 2*K
 ```
 
-Current single-target substitution preserves stored modulus, known-bit, and
-power-of-two records. It does not invert those facts through a replacement.
-The destination should carry the range for `lane`; from `8 | y` and `y -> 2*K`
-it may derive `4 | K`, never `8 | K`. That inverse-congruence rule is new work,
-not record preservation. Simultaneous semantics also matter: replacement
-expressions are not recursively substituted into one another.
+The destination carries the range for `lane`; from `8 | y` and `y -> 2*K` it
+derives `4 | K`, never `8 | K`. Integer-affine replacements invert exact
+ranges, reduce congruences by the scale GCD, transfer a known-low-bit prefix as
+congruence, and transfer power-of-two only for a positive power-of-two scale
+with zero offset. Unsupported nonlinear replacements retain facts on the full
+replacement expression but do not guess a symbol record.
+
+Substitutions are simultaneous: replacement expressions are not recursively
+rewritten through one another, and the first duplicate target wins. Wave's
+remaining gap is binding provenance: remap expression handles and both sides'
+facts in one `Analysis`, then reject any predicate whose symbols no longer have
+SSA bindings. That lifetime policy stays in Wave.
 
 ## Fixed-Width Boundary
 
@@ -1167,11 +1653,11 @@ Keep `IntegerRangeAnalysis` and `APInt` reasoning in:
 A separate typed bitvector layer may be justified later. It is not part of
 this migration.
 
-## Proposed Wave Facade After Migration
+## Implemented Wave Facade
 
 `WaveSymbols` remains the only raw `ixs_*` boundary in Wave C++.
 
-Proposed shape:
+Current shape, omitting diagnostic parameters:
 
 ```c++
 class Analysis {
@@ -1183,16 +1669,31 @@ public:
   LogicalResult assumeRange(ExprHandle value, InferredRange range);
   LogicalResult deriveAffine(ExprHandle base, int64_t scale, int64_t offset,
                              ExprHandle derived);
+  LogicalResult substituteFacts(ArrayRef<ExprSubstitution> substitutions);
 
   FailureOr<ExprHandle> compose(ExprHandle lhs, ExprBinaryOp op,
                                 ExprHandle rhs);
+  FailureOr<ExprHandle> composeCeil(ExprHandle value);
+  FailureOr<ExprHandle> composeFloor(ExprHandle value);
+  FailureOr<ExprHandle> composeNeg(ExprHandle value);
+  FailureOr<ExprHandle> composeSymbol(StringRef name);
+  FailureOr<ExprHandle> composeInteger(int64_t value);
+  FailureOr<ExprHandle> composePiecewise(ArrayRef<PiecewiseCase> cases);
+  FailureOr<PredHandle> composeTrue();
+  FailureOr<PredHandle> composeFalse();
   FailureOr<PredHandle> compare(ExprHandle lhs, PredCmpOp op,
                                 ExprHandle rhs);
+  FailureOr<PredHandle> composeAnd(PredHandle lhs, PredHandle rhs);
+  FailureOr<PredHandle> composeOr(PredHandle lhs, PredHandle rhs);
+  FailureOr<PredHandle> composeNot(PredHandle value);
   FailureOr<ExprHandle>
-  substitute(ExprHandle value, ArrayRef<ExprSubstitution> substitutions);
+    substitute(ExprHandle value, ArrayRef<ExprSubstitution> substitutions);
+  FailureOr<PredHandle>
+    substitute(PredHandle value, ArrayRef<ExprSubstitution> substitutions);
 
   FailureOr<ExprHandle> simplify(ExprHandle value);
   FailureOr<PredHandle> simplify(PredHandle value);
+  LogicalResult simplify(MutableArrayRef<ExprHandle> values);
   FailureOr<ExprHandle> expand(ExprHandle value);
   FailureOr<PredHandle> expand(PredHandle value);
 
@@ -1200,12 +1701,24 @@ public:
   CheckResult equivalent(ExprHandle lhs, ExprHandle rhs);
   CheckResult equivalent(PredHandle lhs, PredHandle rhs);
   CheckResult defined(ExprHandle value);
+  CheckResult defined(PredHandle value);
   CheckResult integerValued(ExprHandle value);
   CheckResult divisible(ExprHandle value, int64_t modulus);
+  CheckResult congruent(ExprHandle value, int64_t modulus, int64_t residue);
+  ExactDivideResult tryExactDivide(ExprHandle value, int64_t divisor);
+  Pow2Fact getPow2Fact(ExprHandle value);
+  std::optional<KnownBits> getKnownBits(ExprHandle value);
+  std::optional<Congruence> getSymbolCongruence(ExprHandle symbol);
 
   std::optional<InferredRange> range(ExprHandle value);
-  std::optional<KnownBits> knownBits(ExprHandle value);
-  ExactDivideResult exactDivide(ExprHandle value, int64_t divisor);
+  std::optional<int64_t> constantDifference(ExprHandle lhs, ExprHandle rhs);
+  std::optional<AffineDecomposition> affineDecompose(ExprHandle value,
+                                                     ExprHandle symbol);
+  std::optional<ExprHandle> finiteDifference(ExprHandle value,
+                                             ExprHandle symbol,
+                                             ExprHandle step);
+  std::optional<SplitAdditiveConstant>
+    splitAdditiveConstant(ExprHandle value);
 };
 ```
 
@@ -1382,27 +1895,31 @@ tracker:
 | `4-xr1c` | remaining relational symbolic-Mod proof |
 | `4-bev` | interval/congruence intersection |
 | `4-1p9q` | Mod-difference divisibility |
-| `4-2jz` | contextual Piecewise substitution |
 | `4-1kb` | batch common-subexpression lifting |
-| `4-sw9` | fixed-point simplification skip |
+
+`4-2jz` is closed: contextual Piecewise substitution landed. `4-sw9` is
+closed and superseded by `4-1kb`; mutable flags on interned nodes are unsafe
+across fact contexts.
 
 Wave issue `7-gifn` covers commutative materialization order and range-aware
 grouping after symbolic reasoning. It does not cover the core proof gaps.
 
-Missing tracker coverage:
+Core contract/API items above landed between `274e93d` and `56a3f9d`.
+Remaining tracker coverage:
 
-- compound assumption contract parity;
-- Mod divisor-contract consistency;
-- public integrality/divisibility and exact quotient;
-- definedness;
-- public known bits and query-specific congruence;
-- fact-backed simplify/equivalence;
-- integer-power, XOR, and Piecewise ranges;
-- fact transfer through nontrivial substitutions;
-- Wave scoped analysis/fact reuse;
-- assumption-backed coalescing and sparse-address decomposition;
-- Python builder/fact provenance cleanup;
-- deletion of the duplicate symbolic-memory solver.
+- `collectDenominator` still decides Redistribute legality in `Wave.cpp`, and
+  `divideCoefficientsExactly` still handles symbolic-memory byte division;
+- `possibleOneBits` and `linearizeDisjointXors` still duplicate core known-bit
+  and equivalence work in `WaveLowerSymbolicMemory.cpp`;
+- legacy `proveEqual` ladders remain in symbolic memory, Redistribute, and the
+  memory-transaction provider; migrated Analysis callers use total
+  equivalence only;
+- `canonicalizeAddressExpr` and `splitAddressConstant` still implement sparse
+  decomposition instead of `splitAdditiveConstant`;
+- `expandIndexExprPredicate` still rebuilds predicate trees in `Wave.cpp`;
+- coalescing still needs simultaneous fact and binding transfer before proving
+  cross-address deltas;
+- Python builder/fact provenance cleanup remains.
 
 Create one epic with separate ixsimpl and Wave children. Do not combine core
 API work, submodule update, and Wave migration in one bead or commit.
