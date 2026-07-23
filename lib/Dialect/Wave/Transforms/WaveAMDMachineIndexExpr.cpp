@@ -37,6 +37,25 @@ std::optional<int64_t> staticIntLiteral(sym::ExprHandle expr) {
   return sym::getIntegerLiteralValue(expr);
 }
 
+std::optional<int64_t>
+staticBoundInt(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+               const llvm::StringMap<Value> &subs) {
+  if (std::optional<int64_t> literal = staticIntLiteral(expr))
+    return literal;
+  sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Symbol)
+    return std::nullopt;
+  auto it = subs.find(view.getSymbolName());
+  if (it == subs.end())
+    return std::nullopt;
+  if (std::optional<int64_t> immediate = S.getImmediateValue(it->second))
+    return immediate;
+  if (auto mov =
+          it->second.getDefiningOp<waveamdmachine::SMovB64ImmOp>())
+    return mov.getValue();
+  return std::nullopt;
+}
+
 FailureOr<Value> materializeRational(WaveAMDMachineSelector &S,
                                      sym::ExprHandle expr, Operation *user) {
   std::optional<sym::RationalLiteral> rational =
@@ -752,7 +771,7 @@ FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   sym::ExprView view(expr);
   sym::ExprHandle lhs = view.getBinaryLhs();
   sym::ExprHandle rhs = view.getBinaryRhs();
-  std::optional<int64_t> rhsInt = staticIntLiteral(rhs);
+  std::optional<int64_t> rhsInt = staticBoundInt(S, rhs, subs);
   if (!rhsInt)
     return user->emitError("wave.index_expr mod needs a static integer "
                            "divisor; got ")
