@@ -354,6 +354,314 @@ func.func @keep_packed_f32_mul_add_separate(%a: !waveamdmachine.reg<vgpr, 2>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @fuse_contract_packed_f32_mul_sub_pair(
+// CHECK-NOT: waveamdmachine.v_pk_mul_f32
+// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements %arg2, %arg3
+// CHECK: [[FMA:%.*]] = waveamdmachine.v_pk_fma_f32 %arg0, %arg1, [[ACC]]
+// CHECK-SAME: neg_hi = 4
+// CHECK-SAME: neg_lo = 4
+// CHECK-NOT: waveamdmachine.v_sub_f32
+// CHECK: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[FMA]]
+// CHECK: return [[PARTS]]#0, [[PARTS]]#1
+func.func @fuse_contract_packed_f32_mul_sub_pair(
+    %a: !waveamdmachine.reg<vgpr, 2>,
+    %b: !waveamdmachine.reg<vgpr, 2>,
+    %c0: !waveamdmachine.reg<vgpr, 1>,
+    %c1: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts:2 = waveamdmachine.tuple_to_elements %mul
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo = waveamdmachine.v_sub_f32 %parts#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi = waveamdmachine.v_sub_f32 %parts#1, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %lo, %hi
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @fuse_contract_packed_f32_mul_sub_broadcasts(
+// CHECK-NOT: waveamdmachine.v_pk_mul_f32
+// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements %arg4, %arg5
+// CHECK: [[FMA0:%.*]] = waveamdmachine.v_pk_fma_f32 %arg0, %arg1, [[ACC]]
+// CHECK-SAME: neg_hi = 4
+// CHECK-SAME: neg_lo = 4
+// CHECK-SAME: op_sel_hi = 3
+// CHECK: [[FMA1:%.*]] = waveamdmachine.v_pk_fma_f32 %arg2, %arg3, [[ACC]]
+// CHECK-SAME: neg_hi = 4
+// CHECK-SAME: neg_lo = 4
+// CHECK-SAME: op_sel = 4
+// CHECK-NOT: waveamdmachine.v_sub_f32
+// CHECK: return
+func.func @fuse_contract_packed_f32_mul_sub_broadcasts(
+    %a0: !waveamdmachine.reg<vgpr, 2>,
+    %b0: !waveamdmachine.reg<vgpr, 2>,
+    %a1: !waveamdmachine.reg<vgpr, 2>,
+    %b1: !waveamdmachine.reg<vgpr, 2>,
+    %c0: !waveamdmachine.reg<vgpr, 1>,
+    %c1: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mul0 = waveamdmachine.v_pk_mul_f32 %a0, %b0 {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts0:2 = waveamdmachine.tuple_to_elements %mul0
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo0 = waveamdmachine.v_sub_f32 %parts0#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi0 = waveamdmachine.v_sub_f32 %parts0#1, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %mul1 = waveamdmachine.v_pk_mul_f32 %a1, %b1 {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts1:2 = waveamdmachine.tuple_to_elements %mul1
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo1 = waveamdmachine.v_sub_f32 %parts1#0, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi1 = waveamdmachine.v_sub_f32 %parts1#1, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %lo0, %hi0, %lo1, %hi1
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_illegal_packed_f32_mul_sub_attrs(
+// CHECK: [[MUL0:%.*]] = waveamdmachine.v_pk_mul_f32
+// CHECK: [[PARTS0:%.*]]:2 = waveamdmachine.tuple_to_elements [[MUL0]]
+// CHECK: waveamdmachine.v_sub_f32 [[PARTS0]]#0
+// CHECK: waveamdmachine.v_sub_f32 [[PARTS0]]#1
+// CHECK: [[MUL1:%.*]] = waveamdmachine.v_pk_mul_f32
+// CHECK-SAME: clamp = true
+// CHECK-SAME: contract = true
+// CHECK: [[PARTS1:%.*]]:2 = waveamdmachine.tuple_to_elements [[MUL1]]
+// CHECK: waveamdmachine.v_sub_f32 [[PARTS1]]#0
+// CHECK: waveamdmachine.v_sub_f32 [[PARTS1]]#1
+// CHECK: return
+func.func @keep_illegal_packed_f32_mul_sub_attrs(
+    %a0: !waveamdmachine.reg<vgpr, 2>,
+    %b0: !waveamdmachine.reg<vgpr, 2>,
+    %a1: !waveamdmachine.reg<vgpr, 2>,
+    %b1: !waveamdmachine.reg<vgpr, 2>,
+    %c0: !waveamdmachine.reg<vgpr, 1>,
+    %c1: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mul0 = waveamdmachine.v_pk_mul_f32 %a0, %b0
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts0:2 = waveamdmachine.tuple_to_elements %mul0
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo0 = waveamdmachine.v_sub_f32 %parts0#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi0 = waveamdmachine.v_sub_f32 %parts0#1, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %mul1 = waveamdmachine.v_pk_mul_f32 %a1, %b1
+      {clamp = true, contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts1:2 = waveamdmachine.tuple_to_elements %mul1
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo1 = waveamdmachine.v_sub_f32 %parts1#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi1 = waveamdmachine.v_sub_f32 %parts1#1, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %lo0, %hi0, %lo1, %hi1
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_shared_packed_f32_mul_sub(
+// CHECK: [[MUL:%.*]] = waveamdmachine.v_pk_mul_f32
+// CHECK-NOT: waveamdmachine.v_pk_fma_f32
+// CHECK: return [[MUL]],
+func.func @keep_shared_packed_f32_mul_sub(
+    %a: !waveamdmachine.reg<vgpr, 2>,
+    %b: !waveamdmachine.reg<vgpr, 2>,
+    %c0: !waveamdmachine.reg<vgpr, 1>,
+    %c1: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts:2 = waveamdmachine.tuple_to_elements %mul
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo = waveamdmachine.v_sub_f32 %parts#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi = waveamdmachine.v_sub_f32 %parts#1, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %mul, %lo, %hi
+      : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_lone_packed_f32_mul_sub_broadcast(
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NOT: waveamdmachine.tuple_from_elements %arg2, %arg2
+// CHECK-NOT: waveamdmachine.v_pk_fma_f32
+// CHECK-COUNT-2: waveamdmachine.v_sub_f32
+// CHECK: return
+func.func @keep_lone_packed_f32_mul_sub_broadcast(
+    %a: !waveamdmachine.reg<vgpr, 2>,
+    %b: !waveamdmachine.reg<vgpr, 2>,
+    %c: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts:2 = waveamdmachine.tuple_to_elements %mul
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo = waveamdmachine.v_sub_f32 %parts#0, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi = waveamdmachine.v_sub_f32 %parts#1, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %lo, %hi
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_late_packed_f32_mul_sub_accumulator(
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NOT: waveamdmachine.v_pk_fma_f32
+// CHECK: [[LO:%.*]] = waveamdmachine.v_sub_f32
+// CHECK: [[LATE:%.*]] = waveamdmachine.v_add_f32
+// CHECK: waveamdmachine.v_sub_f32 {{.*}}, [[LATE]]
+// CHECK: return [[LO]],
+func.func @keep_late_packed_f32_mul_sub_accumulator(
+    %a: !waveamdmachine.reg<vgpr, 2>,
+    %b: !waveamdmachine.reg<vgpr, 2>,
+    %c: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts:2 = waveamdmachine.tuple_to_elements %mul
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo = waveamdmachine.v_sub_f32 %parts#0, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %late = waveamdmachine.v_add_f32 %c, %c
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi = waveamdmachine.v_sub_f32 %parts#1, %late
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %lo, %hi
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @keep_conflicting_packed_f32_acc_pair(
+// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements %arg4, %arg5
+// CHECK: waveamdmachine.v_pk_fma_f32 %arg0, %arg1, [[ACC]]
+// CHECK: [[MUL:%.*]] = waveamdmachine.v_pk_mul_f32 %arg2, %arg3
+// CHECK-NOT: waveamdmachine.tuple_from_elements %arg4, %arg6
+// CHECK-NOT: waveamdmachine.v_pk_fma_f32 %arg2, %arg3
+// CHECK-COUNT-2: waveamdmachine.v_sub_f32
+// CHECK: return
+func.func @keep_conflicting_packed_f32_acc_pair(
+    %a0: !waveamdmachine.reg<vgpr, 2>,
+    %b0: !waveamdmachine.reg<vgpr, 2>,
+    %a1: !waveamdmachine.reg<vgpr, 2>,
+    %b1: !waveamdmachine.reg<vgpr, 2>,
+    %c0: !waveamdmachine.reg<vgpr, 1>,
+    %c1: !waveamdmachine.reg<vgpr, 1>,
+    %c2: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %mul0 = waveamdmachine.v_pk_mul_f32 %a0, %b0 {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts0:2 = waveamdmachine.tuple_to_elements %mul0
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo0 = waveamdmachine.v_sub_f32 %parts0#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi0 = waveamdmachine.v_sub_f32 %parts0#1, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %mul1 = waveamdmachine.v_pk_mul_f32 %a1, %b1 {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts1:2 = waveamdmachine.tuple_to_elements %mul1
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %lo1 = waveamdmachine.v_sub_f32 %parts1#0, %c0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %hi1 = waveamdmachine.v_sub_f32 %parts1#1, %c2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return %lo0, %hi0, %lo1, %hi1
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+        !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950:sramecc-"} {
 
 // CHECK-LABEL: func.func @d16_byte_pack_preserves_low_sramecc_off(
