@@ -5436,15 +5436,11 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
                       *transactions);
 }
 
-static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
-                               IRRewriter &rewriter, DataFlowSolver &solver,
-                               SymbolicRelationProofCache &proofCache,
-                               uint64_t &factDomainCount) {
-  SmallVector<Operation *> accesses;
-  func.walk([&](Operation *op) {
-    if (isa<GatherOp, ScatterOp>(op))
-      accesses.push_back(op);
-  });
+static LogicalResult lowerAccesses(ArrayRef<Operation *> accesses,
+                                   WaveDialect &dialect, IRRewriter &rewriter,
+                                   DataFlowSolver &solver,
+                                   SymbolicRelationProofCache &proofCache,
+                                   uint64_t &factDomainCount) {
   for (Operation *op : accesses) {
     rewriter.setInsertionPoint(op);
     MemoryAccess access = isa<GatherOp>(op) ? getAccess(cast<GatherOp>(op))
@@ -5460,38 +5456,35 @@ struct WaveLowerSymbolicMemoryPass
     : public wave::impl::WaveLowerSymbolicMemoryBase<
           WaveLowerSymbolicMemoryPass> {
   void runOnOperation() override {
+    Operation *root = getOperation();
     WaveDialect *dialect = getContext().getLoadedDialect<WaveDialect>();
     if (!dialect) {
-      getOperation()->emitError("Wave dialect is not loaded");
+      root->emitError("Wave dialect is not loaded");
       return signalPassFailure();
     }
-    bool hasAccess = false;
-    getOperation()->walk(
-        [&](Operation *op) { hasAccess |= isa<GatherOp, ScatterOp>(op); });
-    if (!hasAccess)
+    SmallVector<Operation *> accesses;
+    root->walk([&](Operation *op) {
+      if (isa<GatherOp, ScatterOp>(op))
+        accesses.push_back(op);
+    });
+    if (accesses.empty())
       return;
 
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
-    if (failed(solver.initializeAndRun(getOperation()))) {
-      getOperation()->emitError(
+    if (failed(solver.initializeAndRun(root))) {
+      root->emitError(
           "IntegerRangeAnalysis failed for symbolic memory lowering");
       return signalPassFailure();
     }
 
     IRRewriter rewriter(&getContext());
-    SmallVector<func::FuncOp> funcs;
-    if (func::FuncOp func = dyn_cast<func::FuncOp>(getOperation()))
-      funcs.push_back(func);
-    else
-      getOperation()->walk([&](func::FuncOp func) { funcs.push_back(func); });
     SymbolicRelationProofCache proofCache;
     uint64_t factDomainCount = 0;
-    for (func::FuncOp func : funcs)
-      if (failed(lowerFunc(func, *dialect, rewriter, solver, proofCache,
-                           factDomainCount)))
-        return signalPassFailure();
+    if (failed(lowerAccesses(accesses, *dialect, rewriter, solver, proofCache,
+                             factDomainCount)))
+      return signalPassFailure();
     numRelationPlanningFactDomains += factDomainCount;
   }
 };
