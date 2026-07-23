@@ -236,3 +236,39 @@ func.func @keep_transpose_read() attributes {wave.kernel} {
       -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @module_wide_dead_alloc
+// CHECK-NOT: wave.store
+func.func @module_wide_dead_alloc() attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %alloc, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %token = wave.store %lane -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @module_wide_live_alloc
+// CHECK: wave.store
+// CHECK: wave.load
+func.func @module_wide_live_alloc() attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %alloc = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %alloc, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored = wave.store %lane -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %loaded:2 = wave.load %ptr after %stored
+      : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}

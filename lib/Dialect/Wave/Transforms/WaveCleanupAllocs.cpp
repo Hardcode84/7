@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/PatternMatch.h"
@@ -324,11 +323,11 @@ static void eraseTokenForwardingOp(IRRewriter &rewriter, Operation *op) {
   rewriter.eraseOp(op);
 }
 
-static LogicalResult cleanupFunc(func::FuncOp func, IRRewriter &rewriter) {
+static void cleanupAllocs(Operation *root, IRRewriter &rewriter) {
   SmallVector<AllocOp> allocs;
-  func.walk([&](AllocOp alloc) { allocs.push_back(alloc); });
+  root->walk([&](AllocOp alloc) { allocs.push_back(alloc); });
   if (allocs.empty())
-    return success();
+    return;
 
   llvm::SetVector<Operation *> writes;
   llvm::SetVector<Operation *> releases;
@@ -350,7 +349,6 @@ static LogicalResult cleanupFunc(func::FuncOp func, IRRewriter &rewriter) {
   }
   for (Operation *release : releases)
     eraseTokenForwardingOp(rewriter, release);
-  return success();
 }
 
 struct WaveCleanupAllocsPass
@@ -358,16 +356,7 @@ struct WaveCleanupAllocsPass
   void runOnOperation() override {
     Operation *root = getOperation();
     IRRewriter rewriter(root->getContext());
-
-    SmallVector<func::FuncOp> funcs;
-    if (auto func = dyn_cast<func::FuncOp>(root))
-      funcs.push_back(func);
-    else
-      root->walk([&](func::FuncOp func) { funcs.push_back(func); });
-
-    for (func::FuncOp func : funcs)
-      if (failed(cleanupFunc(func, rewriter)))
-        return signalPassFailure();
+    cleanupAllocs(root, rewriter);
   }
 };
 

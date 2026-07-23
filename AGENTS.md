@@ -199,6 +199,8 @@ cmake --build build --target wave-opt wave-translate WavePythonModules -j $(npro
 - Prefer `StringRef` and `Twine` over `std::string` for string handling.
 - Use `DenseMap::lookup(key)` when a missing key should return a default-constructed value without inserting into the map.
 - Do not root passes on concrete ops until necessary; prefer broader interfaces or dialects.
+- Do not collect `func::FuncOp` just to rescan each body for target ops. Walk
+  pass root once. Iterate functions only for function-scoped state or legality.
 - `op.walk(...)` lambdas can return `WalkResult::interrupt()` to stop early and propagate failure; check the result with `.wasInterrupted()`.
 - Use `return signalPassFailure();` to abort a failed pass.
 - Prefer named accessors to `getResult(0)` when possible.
