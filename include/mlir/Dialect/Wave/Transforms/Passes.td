@@ -434,8 +434,9 @@ def WaveAMDElideSCCBoolRoundtrip
 
 def WaveAMDMachineCleanup
     : Pass<"waveamd-machine-cleanup"> {
-  let summary = "Hoist redundant WaveAMDMachine prep before scheduling";
+  let summary = "Apply pre-scheduling WaveAMDMachine cleanup";
   let description = [{
+    Folds one-use f32 max trees into native three-input max instructions.
     Hoists speculatable, memory-effect-free WaveAMDMachine prep ops out of
     structured EXEC regions when operands are available before the region and
     non-yield users remain inside it. EXEC, M0, and live SCC/VCC users stay in

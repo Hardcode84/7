@@ -1141,6 +1141,9 @@ def WaveAMDMachine_VFmaF32Op
 def WaveAMDMachine_VMaxF32Op
     : WaveAMDMachine_BinaryResult<"v_max_f32", WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
+def WaveAMDMachine_VMax3F32Op
+    : WaveAMDMachine_TernaryResult<"v_max3_f32", WaveAMDMachine_VGPR1,
+                                WaveAMDMachine_VGPR1, [WaveAMDMachine_VALU]>;
 def WaveAMDMachine_VExpF32Op
     : WaveAMDMachine_UnaryResult<"v_exp_f32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
