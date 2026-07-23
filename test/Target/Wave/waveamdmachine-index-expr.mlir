@@ -566,4 +566,89 @@ func.func @uniform_depth_order(%out: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// Preserve IntegerRangeAnalysis width when ixsimpl loses compound bounds.
+// CHECK-LABEL: func.func @bounded_shared_simd_index_stays_narrow
+// CHECK-NOT: !waveamdmachine.reg<vgpr, 2>
+// CHECK: waveamdmachine.buffer_load_u8
+// CHECK-SAME: !waveamdmachine.reg<vgpr, 1>
+// CHECK: return
+func.func @bounded_shared_simd_index_stays_narrow(
+    %in: !wave.ptr<#wave.global, i8>, %stride_raw: i32)
+    attributes {wave.kernel} {
+  %range = arith.constant 2147483647 : i32
+  %buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %stride = wave.assume %stride_raw as "x"
+      [#wave.pred<"2147483648 + x >= 0">,
+       #wave.pred<"-2147483647 + x <= 0">] : i32
+  %source = wave.index_expr <"stride*xor(4*Mod(floor(1/32*lane), 2), xor(2*Mod(floor(1/16*lane), 2), Mod(floor(1/8*lane), 2))) + xor(4*Mod(floor(1/4*lane), 2), xor(2*Mod(floor(1/2*lane), 2), Mod(lane, 2)))"> assuming
+      [#wave.pred<"stride*xor(4*Mod(floor(1/32*lane), 2), xor(2*Mod(floor(1/16*lane), 2), Mod(floor(1/8*lane), 2))) + xor(4*Mod(floor(1/4*lane), 2), xor(2*Mod(floor(1/2*lane), 2), Mod(lane, 2))) >= 0">,
+       #wave.pred<"-2147483647 + stride*xor(4*Mod(floor(1/32*lane), 2), xor(2*Mod(floor(1/16*lane), 2), Mod(floor(1/8*lane), 2))) + xor(4*Mod(floor(1/4*lane), 2), xor(2*Mod(floor(1/2*lane), 2), Mod(lane, 2))) <= 0">]
+      ["lane", "stride"](%lane, %stride)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %bounded = wave.assume %source as "x"
+      [#wave.pred<"x >= 0">,
+       #wave.pred<"-2147483647 + x <= 0">] : !wave.simd<index, 32>
+  %offset = wave.index_expr <"x"> assuming
+      [#wave.pred<"x >= 0">,
+       #wave.pred<"-2147483647 + x <= 0">]
+      ["x"](%bounded)
+      : (!wave.simd<index, 32>) -> !wave.simd<index, 32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %mask = wave.cmpi uge %lane, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %base_token = wave.token : !wave.mem.token
+  %conditional_token = wave.where %mask {
+    %ptr = wave.ptr_add %buffer, %offset
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    %value, %token = wave.load %ptr after %base_token
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>, !wave.mem.token)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
+    wave.yield %token : !wave.mem.token
+  } otherwise {
+    wave.yield %base_token : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
+  return
+}
+
+// Selected machine immediates remain static through symbol bindings.
+// CHECK-LABEL: func.func @simd_constant_staticizes_mod_divisor
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[MASK:.*]] = waveamdmachine.imm 7
+// CHECK: waveamdmachine.v_and_b32 {{.*}}, %[[MASK]]
+// CHECK: waveamdmachine.ds_store_b32
+func.func @simd_constant_staticizes_mod_divisor() attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %c2 = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %c8 = wave.constant 8 : i32 -> !wave.simd<i32, 32>
+  %c16 = wave.constant 16 : i32 -> !wave.simd<i32, 32>
+  %c4 = wave.constant 4 : i32 -> !wave.simd<i32, 32>
+  %c32 = wave.constant 32 : i32 -> !wave.simd<i32, 32>
+  %offset = wave.index_expr <"raw2*xor(floor(1/raw2*xor(raw5*Mod(floor(raw0*1/raw4), raw1), xor(raw2*Mod(raw0, raw1), raw3*Mod(floor(raw0*1/raw1), raw1)))), Mod(floor(1/raw1*raw0), raw2))"> assuming
+      [#wave.pred<"raw0 >= 0 & -255 + raw0 <= 0">,
+       #wave.pred<"-2 + raw1 >= 0 & -2 + raw1 <= 0">,
+       #wave.pred<"-8 + raw2 >= 0 & -8 + raw2 <= 0">,
+       #wave.pred<"-16 + raw3 >= 0 & -16 + raw3 <= 0">,
+       #wave.pred<"-4 + raw4 >= 0 & -4 + raw4 <= 0">,
+       #wave.pred<"-32 + raw5 >= 0 & -32 + raw5 <= 0">]
+      ["raw0", "raw1", "raw2", "raw3", "raw4", "raw5"]
+      (%lane, %c2, %c8, %c16, %c4, %c32)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>,
+         !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+         !wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %ptr = wave.ptr_add %lds, %offset
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %value = wave.binary addi %lane, %c8
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %token = wave.store %value -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 }

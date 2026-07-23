@@ -6576,10 +6576,17 @@ static bool isIndexValueType(Type type) {
   return type.isIndex();
 }
 
+static bool valueRangeFitsU32(WaveAMDMachineSelector &S, Value value) {
+  std::optional<ConstantIntRanges> range = S.finiteSignedRange(value);
+  return range && !range->smin().isNegative() &&
+         range->smax().getActiveBits() <= 32;
+}
+
 static bool needsWideIndexExprValue(WaveAMDMachineSelector &S, IndexExprOp op,
                                     const PointerOffset &offset) {
   return offset.expr && isIndexValueType(op.getResult().getType()) &&
-         !S.slotFitsU32(offset.expr, offset.assumptions);
+         !S.slotFitsU32(offset.expr, offset.assumptions) &&
+         !valueRangeFitsU32(S, op.getResult());
 }
 
 LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
