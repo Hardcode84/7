@@ -28,6 +28,7 @@
 #include "llvm/Support/Mutex.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -299,8 +300,7 @@ substitutePred(Store &store, PredHandle value,
                llvm::ArrayRef<ExprSubstitution> substitutions,
                std::string *diagnostic = nullptr);
 
-/// Simplify `value` under `assumptions`. AND-of-CMP assumption handles
-/// flatten to their CMP leaves before reaching the simplifier.
+/// Simplify `value` under `assumptions`.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          llvm::ArrayRef<PredHandle> assumptions,
                                          std::string *diagnostic = nullptr);
@@ -323,8 +323,133 @@ struct InferredRange {
   std::optional<RationalEndpoint> upper;
 };
 
-/// Decide whether `predicate` is provably true / false under
-/// `assumptions`. Returns `Unknown` when inconclusive.
+struct KnownBits {
+  uint64_t knownZero = 0;
+  uint64_t knownOne = 0;
+  Pow2Fact pow2 = Pow2Fact::Unknown;
+};
+
+struct Congruence {
+  int64_t modulus = 0;
+  int64_t residue = 0;
+};
+
+enum class ExactDivideStatus { Proven, NotExact, Unknown, Error };
+
+struct ExactDivideResult {
+  ExactDivideStatus status = ExactDivideStatus::Error;
+  ExprHandle quotient;
+};
+
+struct AffineDecomposition {
+  ExprHandle coefficient;
+  ExprHandle residual;
+};
+
+struct SplitAdditiveConstant {
+  ExprHandle residual;
+  int64_t constant = 0;
+};
+
+/// Scoped fact set. Mutation failure poisons fact queries, not builders.
+/// Holds Store lock; use Analysis builders while live.
+class Analysis {
+public:
+  static mlir::FailureOr<std::unique_ptr<Analysis>>
+  create(Store &store, llvm::ArrayRef<PredHandle> assumptions = {},
+         std::string *diagnostic = nullptr);
+
+  Analysis(const Analysis &) = delete;
+  Analysis &operator=(const Analysis &) = delete;
+
+  mlir::LogicalResult assume(PredHandle pred,
+                             std::string *diagnostic = nullptr);
+  mlir::LogicalResult assumeRange(ExprHandle expr, InferredRange range,
+                                  std::string *diagnostic = nullptr);
+  mlir::LogicalResult deriveAffine(ExprHandle base, int64_t scale,
+                                   int64_t offset, ExprHandle derived,
+                                   std::string *diagnostic = nullptr);
+  mlir::LogicalResult
+  substituteFacts(llvm::ArrayRef<ExprSubstitution> substitutions,
+                  std::string *diagnostic = nullptr);
+
+  mlir::FailureOr<ExprHandle> compose(ExprHandle lhs, ExprBinaryOp op,
+                                      ExprHandle rhs,
+                                      std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> composeCeil(ExprHandle value,
+                                          std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> composeFloor(ExprHandle value,
+                                           std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> composeNeg(ExprHandle value,
+                                         std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> composeSymbol(llvm::StringRef name,
+                                            std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> composeInteger(int64_t value,
+                                             std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle>
+  composePiecewise(llvm::ArrayRef<PiecewiseCase> cases,
+                   std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> composeTrue(std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> composeFalse(std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> compare(ExprHandle lhs, PredCmpOp op,
+                                      ExprHandle rhs,
+                                      std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> composeAnd(PredHandle lhs, PredHandle rhs,
+                                         std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> composeOr(PredHandle lhs, PredHandle rhs,
+                                        std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> composeNot(PredHandle value,
+                                         std::string *diagnostic = nullptr);
+
+  mlir::FailureOr<ExprHandle>
+  substitute(ExprHandle value, llvm::ArrayRef<ExprSubstitution> substitutions,
+             std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle>
+  substitute(PredHandle value, llvm::ArrayRef<ExprSubstitution> substitutions,
+             std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> simplify(ExprHandle value,
+                                       std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> simplify(PredHandle value,
+                                       std::string *diagnostic = nullptr);
+  mlir::LogicalResult simplify(llvm::MutableArrayRef<ExprHandle> values,
+                               std::string *diagnostic = nullptr);
+  mlir::FailureOr<ExprHandle> expand(ExprHandle value,
+                                     std::string *diagnostic = nullptr);
+  mlir::FailureOr<PredHandle> expand(PredHandle value,
+                                     std::string *diagnostic = nullptr);
+
+  CheckResult check(PredHandle pred);
+  CheckResult equivalent(ExprHandle lhs, ExprHandle rhs);
+  CheckResult equivalent(PredHandle lhs, PredHandle rhs);
+  CheckResult defined(ExprHandle expr);
+  CheckResult defined(PredHandle pred);
+  CheckResult integerValued(ExprHandle expr);
+  CheckResult divisible(ExprHandle expr, int64_t modulus);
+  CheckResult congruent(ExprHandle expr, int64_t modulus, int64_t residue);
+  ExactDivideResult tryExactDivide(ExprHandle expr, int64_t divisor);
+  Pow2Fact getPow2Fact(ExprHandle expr);
+  std::optional<KnownBits> getKnownBits(ExprHandle expr);
+  std::optional<Congruence> getSymbolCongruence(ExprHandle symbol);
+  std::optional<InferredRange> range(ExprHandle expr);
+  std::optional<int64_t> constantDifference(ExprHandle lhs, ExprHandle rhs);
+  std::optional<AffineDecomposition> affineDecompose(ExprHandle expr,
+                                                     ExprHandle symbol);
+  std::optional<ExprHandle> finiteDifference(ExprHandle expr, ExprHandle symbol,
+                                             ExprHandle step);
+  std::optional<SplitAdditiveConstant> splitAdditiveConstant(ExprHandle expr);
+
+private:
+  explicit Analysis(Store &store);
+
+  bool prepareQuery();
+  void poison(std::string *diagnostic, llvm::StringRef fallback);
+
+  Session session;
+  ixs_facts *facts = nullptr;
+  bool usable = false;
+};
+
+/// Check a predicate tree under `assumptions`.
 CheckResult checkPredicate(Store &store, PredHandle predicate,
                            llvm::ArrayRef<PredHandle> assumptions);
 /// Prove evaluation cannot produce a domain error under `assumptions`.

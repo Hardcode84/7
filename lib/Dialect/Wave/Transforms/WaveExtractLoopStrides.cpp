@@ -607,27 +607,20 @@ static FailureOr<BoundExpr> buildStrideExpr(const ExpandedIndexExpr &expanded,
   if (failed(iv) || failed(step))
     return failure();
 
-  FailureOr<sym::ExprHandle> nextIv =
-      sym::composeExprBinary(store, *iv, sym::ExprBinaryOp::Add, *step);
-  if (failed(nextIv))
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, expanded.assumptions);
+  if (failed(analysis))
     return failure();
-
-  FailureOr<sym::ExprHandle> next =
-      sym::substituteExpr(store, expanded.expr, {{*iv, *nextIv}});
-  if (failed(next))
+  std::optional<sym::ExprHandle> difference =
+      (*analysis)->finiteDifference(expanded.expr, *iv, *step);
+  if (!difference ||
+      (*analysis)->integerValued(*difference) != sym::CheckResult::True)
     return failure();
-  FailureOr<sym::ExprHandle> diff = sym::composeExprBinary(
-      store, *next, sym::ExprBinaryOp::Sub, expanded.expr);
-  if (failed(diff))
+  sym::ExprHandle stride = *difference;
+  (*analysis).reset();
+  if (sym::getIntegerLiteralValue(stride) == int64_t{0})
     return failure();
-  FailureOr<sym::ExprHandle> simplified =
-      simplifyExpanded(store, *diff, expanded.assumptions);
-  if (failed(simplified))
-    return failure();
-  if (sym::getIntegerLiteralValue(*simplified) == int64_t{0})
-    return failure();
-  return bindLiveExpr(expanded, *simplified, ivName, expanded.assumptions,
-                      extra);
+  return bindLiveExpr(expanded, stride, ivName, expanded.assumptions, extra);
 }
 
 static bool isPowerOfTwo(int64_t value) {

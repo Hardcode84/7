@@ -1768,6 +1768,11 @@ static bool proveEqual(sym::Store &store, sym::ExprHandle lhs,
                                  sym::CheckResult::True;
 }
 
+static bool proveEqual(sym::Analysis &analysis, sym::ExprHandle lhs,
+                       sym::ExprHandle rhs) {
+  return analysis.equivalent(lhs, rhs) == sym::CheckResult::True;
+}
+
 struct SymbolicProofValue {
   SmallVector<sym::PredHandle> assumptions;
   sym::ExprHandle expression;
@@ -2695,29 +2700,42 @@ static bool samePoint(sym::Store &store, const SlotMapping &lhs,
   if (!sameActivation(store, lhs, rhs))
     return false;
   SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
-  return proveEqual(store, lhs.base, rhs.base, assumptions) &&
-         proveEqual(store, lhs.targetBlock, rhs.targetBlock, assumptions) &&
-         proveEqual(store, lhs.bitOffset, rhs.bitOffset, assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      sym::Analysis::create(store, assumptions);
+  if (failed(created))
+    return false;
+  sym::Analysis &analysis = **created;
+  return proveEqual(analysis, lhs.base, rhs.base) &&
+         proveEqual(analysis, lhs.targetBlock, rhs.targetBlock) &&
+         proveEqual(analysis, lhs.bitOffset, rhs.bitOffset);
 }
 
 static bool adjacent(sym::Store &store, const SlotMapping &lhs,
                      const SlotMapping &rhs, int64_t elementBits,
                      RemainderProofContext &proofContext) {
   SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
-  if (!proveEqual(store, lhs.base, rhs.base, assumptions) ||
-      !proveEqual(store, lhs.targetBlock, rhs.targetBlock, assumptions))
-    return false;
-  FailureOr<sym::ExprHandle> delta = sym::composeExprInt(store, elementBits);
-  if (failed(delta))
-    return false;
-  FailureOr<sym::ExprHandle> expected = sym::composeExprBinary(
-      store, lhs.bitOffset, sym::ExprBinaryOp::Add, *delta);
-  if (failed(expected))
-    return false;
-  if (!proveEqual(store, *expected, rhs.bitOffset, assumptions)) {
-    if (!proveRemainderAdjacent(store, lhs, rhs, elementBits, proofContext))
+  bool directlyAdjacent = false;
+  {
+    FailureOr<std::unique_ptr<sym::Analysis>> created =
+        sym::Analysis::create(store, assumptions);
+    if (failed(created))
       return false;
+    sym::Analysis &analysis = **created;
+    if (!proveEqual(analysis, lhs.base, rhs.base) ||
+        !proveEqual(analysis, lhs.targetBlock, rhs.targetBlock))
+      return false;
+    FailureOr<sym::ExprHandle> delta = analysis.composeInteger(elementBits);
+    if (failed(delta))
+      return false;
+    FailureOr<sym::ExprHandle> expected =
+        analysis.compose(lhs.bitOffset, sym::ExprBinaryOp::Add, *delta);
+    if (failed(expected))
+      return false;
+    directlyAdjacent = proveEqual(analysis, *expected, rhs.bitOffset);
   }
+  if (!directlyAdjacent &&
+      !proveRemainderAdjacent(store, lhs, rhs, elementBits, proofContext))
+    return false;
   return sameActivation(store, lhs, rhs);
 }
 

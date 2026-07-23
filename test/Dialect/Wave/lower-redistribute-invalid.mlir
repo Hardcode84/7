@@ -38,7 +38,7 @@ func.func @partial_piecewise(%source: !wave.simd<vector<2xi32>, 32>)
 
 func.func @partial_division(%source: !wave.simd<vector<2xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{relation is not total at destination (0, 0, 0)}}
+  // expected-error @+1 {{relation is not total at destination (0, 1, 0)}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 32, source_block = "block",
        source_item = "item",
@@ -76,7 +76,7 @@ func.func @partial_source_block(%source: !wave.simd<vector<1xi32>, 32>)
 
 func.func @exhaustive_limit(%source: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 1048608, 1, 1>} {
-  // expected-error @+1 {{relation needs exhaustive validation beyond the 2^20 point limit}}
+  // expected-error @+1 {{symbolic movement classification exceeds the 2^20 point limit}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 1048608, source_block = "block",
        source_item = "Piecewise((item, item >= 0), (0, True))",

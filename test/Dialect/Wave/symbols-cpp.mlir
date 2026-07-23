@@ -37,6 +37,45 @@
 // CHECK: view-pred-args: 2
 // CHECK: view-pred-first-kind: cmp
 
+// Reusable facts serve construction, proof, algebra, and substitution queries.
+// CHECK: analysis-batch-pointer-equal: true
+// CHECK: analysis-undefined-self-equivalent: unknown
+// CHECK: analysis-check: true
+// CHECK: analysis-equivalent-mod: true
+// CHECK: analysis-defined: true
+// CHECK: analysis-integer-valued: true
+// CHECK: analysis-divisible: true
+// CHECK: analysis-congruent: true
+// CHECK: analysis-xor-cancellation: true
+// CHECK: analysis-compound-check: true
+// CHECK: analysis-exact-divide: proven
+// CHECK: analysis-known-zero-low2: 3
+// CHECK: analysis-symbol-congruence: 4,0
+// CHECK: analysis-range-lower: 0
+// CHECK: analysis-range-upper: 961
+// CHECK: analysis-constant-difference: 4
+// CHECK: analysis-split-constant: 5
+// CHECK: analysis-wrapper-xor-cancellation: true
+// CHECK: analysis-wrapper-compound-check: true
+// CHECK: analysis-simplified-mod: 0
+// CHECK: analysis-exact-quotient: 1/4*x
+// CHECK: analysis-affine-coefficient: 3
+// CHECK: analysis-affine-residual: 5
+// CHECK: analysis-finite-difference: 4
+// CHECK: analysis-nonlinear-difference: 16 + 8*x
+// CHECK: analysis-split-residual: 3*x
+// CHECK: analysis-derived-lower: 5
+// CHECK: analysis-derived-upper: 9
+// CHECK: analysis-substituted-upper: 31
+// CHECK: analysis-substituted-congruence: true
+// CHECK: analysis-or-factory-rejected: true
+// CHECK: analysis-partial-factory-rejected: true
+// CHECK: analysis-or-mutator-rejected: true
+// CHECK: analysis-poisoned-query: unknown
+// CHECK: analysis-poisoned-expand: true
+// CHECK: analysis-invalid-handle-rejected: true
+// CHECK: analysis-invalid-handle-diagnostic: expected non-null wave.pred
+
 // Two independently-constructed expressions that ixsimpl folds to the
 // same canonical form. Both `floor((4*x + 2*x) / 3)` and `floor((6*x) / 3)`
 // must simplify to `2*x`, and the simplifier must return the exact same
@@ -66,3 +105,5 @@
 // CHECK: defined-literal-denominator: true
 // CHECK: defined-partial-div: false
 // CHECK: defined-uncovered-piecewise: false
+// CHECK: defined-mod-negative: false
+// CHECK: defined-mod-positive: true

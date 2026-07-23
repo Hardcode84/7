@@ -137,6 +137,49 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// CHECK-LABEL: func.func @gfx950_b16_fact_transpose(
+// CHECK-NOT: wave.load
+// CHECK: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b16_fact_transpose(
+      %base: !wave.ptr<#wave.shared, f16>, %origin_raw: index)
+      -> !wave.simd<vector<4xf16>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %origin = wave.assume %origin_raw as "origin"
+        [#wave.pred<"Mod(origin, 4) == 0">] : index
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16 * (origin + 8 * (item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot) + Mod(item, 4) + Mod(origin * slot, 4))">>
+        bindings ["origin"](%origin) packet_bindings []()
+        : (!wave.ptr<#wave.shared, f16>, index)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<4xf16>, 64>
+  }
+}
+
+// -----
+
+// Missing divisibility fact keeps generic lowering.
+// CHECK-LABEL: func.func @gfx950_b16_missing_fact(
+// CHECK-NOT: waveamd.transpose_load
+// CHECK: wave.load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b16_missing_fact(
+      %base: !wave.ptr<#wave.shared, f16>, %origin: index)
+      -> !wave.simd<vector<4xf16>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16 * (origin + 8 * (item - Mod(item, 64) + 16 * floor(Mod(item, 64) / 16) + floor(Mod(item, 16) / 4) + 4 * slot) + Mod(item, 4) + Mod(origin * slot, 4))">>
+        bindings ["origin"](%origin) packet_bindings []()
+        : (!wave.ptr<#wave.shared, f16>, index)
+        -> (!wave.simd<vector<4xf16>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<4xf16>, 64>
+  }
+}
+
+// -----
+
 // Wrong B16 destination-lane stride keeps generic lowering.
 // CHECK-LABEL: func.func @wrong_b16_relation(
 // CHECK-NOT: waveamd.transpose_load

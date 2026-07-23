@@ -70,7 +70,7 @@
 // ASM: [[ENTRY]]:
 // ASM-NOT: s_load_dword
 // ASM: v_bitop3_b32 {{.*}} bitop3:0x48
-// ASM: global_load_lds_dwordx4
+// ASM: buffer_load_dwordx4 {{.*}} lds
 // ASM: v_mfma_f32_16x16x32_f16
 // ASM: .amdhsa_user_sgpr_kernarg_preload_length 7
 // ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
@@ -192,10 +192,10 @@
 // ASMMXFP4: .amdhsa_user_sgpr_kernarg_preload_length 11
 
 // ASMMXFP4-DMA-LABEL: wmma_f16_matmul_tiled:
-// ASMMXFP4-DMA: global_load_lds_dwordx4
-// ASMMXFP4-DMA: global_load_lds_dwordx4
-// ASMMXFP4-DMA: global_load_lds_dwordx4
-// ASMMXFP4-DMA: global_load_lds_dwordx4
+// ASMMXFP4-DMA: buffer_load_dwordx4 {{.*}} lds
+// ASMMXFP4-DMA: buffer_load_dwordx4 {{.*}} lds
+// ASMMXFP4-DMA: buffer_load_dwordx4 {{.*}} lds
+// ASMMXFP4-DMA: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
 // ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
@@ -205,8 +205,7 @@
 // ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6144
 
 // ASMMXFP4-DMA-K2-LABEL: wmma_f16_matmul_tiled:
-// ASMMXFP4-DMA-K2-COUNT-4: global_load_lds_dwordx4
-// ASMMXFP4-DMA-K2-COUNT-4: buffer_load_dwordx4 {{.*}} lds
+// ASMMXFP4-DMA-K2-COUNT-8: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
@@ -234,7 +233,7 @@
 
 // ASMMXFP4-DMA-PIPE-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-DMA-PIPE: ds_read_b64_tr_b8
-// ASMMXFP4-DMA-PIPE: global_load_lds_dwordx4
+// ASMMXFP4-DMA-PIPE: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA-PIPE: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE: ds_read_b128

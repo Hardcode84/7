@@ -9,9 +9,9 @@
 // CHECK: s_endpgm
 
 // CHECK-LABEL: symbolic_memory_exact_packet_codegen:
-// CHECK-NOT: global_store_short
-// CHECK: global_store_dword
-// CHECK-NOT: global_store_short
+// CHECK-NOT: store_short
+// CHECK: buffer_store_dword
+// CHECK-NOT: store_short
 // CHECK: s_endpgm
 
 // CHECK-LABEL: symbolic_memory_signed_remainder_codegen:

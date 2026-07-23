@@ -269,6 +269,667 @@ Session::Session(Store &store) : store(store), lock(store.mutex) {
 
 Session::~Session() { ixs_session_destroy(&session); }
 
+namespace {
+
+static CheckResult convertCheckResult(ixs_check_result result) {
+  switch (result) {
+  case IXS_CHECK_TRUE:
+    return CheckResult::True;
+  case IXS_CHECK_FALSE:
+    return CheckResult::False;
+  case IXS_CHECK_UNKNOWN:
+    return CheckResult::Unknown;
+  }
+  return CheckResult::Unknown;
+}
+
+static Pow2Fact convertPow2Fact(ixs_pow2_fact fact) {
+  switch (fact) {
+  case IXS_POW2_UNKNOWN:
+    return Pow2Fact::Unknown;
+  case IXS_POW2_OR_ZERO:
+    return Pow2Fact::OrZero;
+  case IXS_POW2_POSITIVE:
+    return Pow2Fact::Positive;
+  }
+  return Pow2Fact::Unknown;
+}
+
+static ixs_cmp_op convertCmpOp(PredCmpOp op) {
+  switch (op) {
+  case PredCmpOp::Lt:
+    return IXS_CMP_LT;
+  case PredCmpOp::Le:
+    return IXS_CMP_LE;
+  case PredCmpOp::Gt:
+    return IXS_CMP_GT;
+  case PredCmpOp::Ge:
+    return IXS_CMP_GE;
+  case PredCmpOp::Eq:
+    return IXS_CMP_EQ;
+  case PredCmpOp::Ne:
+    return IXS_CMP_NE;
+  }
+  llvm_unreachable("unknown symbolic comparison operation");
+}
+
+static bool collectRawSubstitutions(ArrayRef<ExprSubstitution> substitutions,
+                                    SmallVectorImpl<ixs_node *> &targets,
+                                    SmallVectorImpl<ixs_node *> &replacements,
+                                    std::string *diagnostic) {
+  if (substitutions.size() > std::numeric_limits<uint32_t>::max()) {
+    setDiagnostic(diagnostic, "too many wave.expr substitutions");
+    return false;
+  }
+  targets.reserve(substitutions.size());
+  replacements.reserve(substitutions.size());
+  for (const ExprSubstitution &substitution : substitutions) {
+    ixs_node *target = rawExprNode(substitution.target, diagnostic);
+    ixs_node *replacement = rawExprNode(substitution.replacement, diagnostic);
+    if (!target || !replacement)
+      return false;
+    targets.push_back(target);
+    replacements.push_back(replacement);
+  }
+  return true;
+}
+
+static ixs_range_result convertRange(InferredRange range) {
+  ixs_range_result result{};
+  if (range.lower) {
+    result.has_lower = true;
+    result.lower_p = range.lower->numerator;
+    result.lower_q = range.lower->denominator;
+  }
+  if (range.upper) {
+    result.has_upper = true;
+    result.upper_p = range.upper->numerator;
+    result.upper_q = range.upper->denominator;
+  }
+  return result;
+}
+
+static InferredRange convertRange(ixs_range_result range) {
+  InferredRange result;
+  if (range.has_lower)
+    result.lower = RationalEndpoint{range.lower_p, range.lower_q};
+  if (range.has_upper)
+    result.upper = RationalEndpoint{range.upper_p, range.upper_q};
+  return result;
+}
+
+} // namespace
+
+Analysis::Analysis(Store &store) : session(store) {}
+
+FailureOr<std::unique_ptr<Analysis>>
+Analysis::create(Store &store, ArrayRef<PredHandle> assumptions,
+                 std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  std::unique_ptr<Analysis> analysis(new Analysis(store));
+  analysis->facts = ixs_facts_create(analysis->session.raw());
+  if (!analysis->facts) {
+    analysis->poison(diagnostic, "failed to create symbolic fact set");
+    return failure();
+  }
+  analysis->usable = true;
+  SmallVector<ixs_node *, 4> rawAssumptions;
+  rawAssumptions.reserve(assumptions.size());
+  for (PredHandle assumption : assumptions) {
+    ixs_node *rawAssumption = rawPredNode(assumption, diagnostic);
+    if (!rawAssumption) {
+      analysis->poison(diagnostic, "failed to ingest symbolic assumptions");
+      return failure();
+    }
+    rawAssumptions.push_back(rawAssumption);
+  }
+  if (!ixs_facts_assume_preds(analysis->facts, rawAssumptions.data(),
+                              rawAssumptions.size())) {
+    analysis->poison(diagnostic, "failed to ingest symbolic assumptions");
+    return failure();
+  }
+  return analysis;
+}
+
+bool Analysis::prepareQuery() {
+  ixs_session_clear_errors(session.raw());
+  return usable && facts;
+}
+
+void Analysis::poison(std::string *diagnostic, StringRef fallback) {
+  usable = false;
+  std::string message = joinSessionErrors(session.raw());
+  if (!message.empty())
+    setDiagnostic(diagnostic, std::move(message));
+  else if (!diagnostic || diagnostic->empty())
+    setDiagnostic(diagnostic, fallback.str());
+}
+
+LogicalResult Analysis::assume(PredHandle pred, std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  ixs_node *rawPred = rawPredNode(pred, diagnostic);
+  if (!rawPred || !ixs_facts_assume_pred(facts, rawPred)) {
+    poison(diagnostic, "failed to ingest symbolic assumption");
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult Analysis::assumeRange(ExprHandle expr, InferredRange range,
+                                    std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  ixs_node *rawExpr = rawExprNode(expr, diagnostic);
+  if (!rawExpr || (range.lower && range.lower->denominator <= 0) ||
+      (range.upper && range.upper->denominator <= 0)) {
+    poison(diagnostic, "invalid symbolic range");
+    return failure();
+  }
+  ixs_range_result rawRange = convertRange(std::move(range));
+  if (!ixs_facts_assume_range(facts, rawExpr, &rawRange)) {
+    poison(diagnostic, "failed to ingest symbolic range");
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult Analysis::deriveAffine(ExprHandle base, int64_t scale,
+                                     int64_t offset, ExprHandle derived,
+                                     std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  ixs_node *rawBase = rawExprNode(base, diagnostic);
+  ixs_node *rawDerived = rawExprNode(derived, diagnostic);
+  if (!rawBase || !rawDerived ||
+      !ixs_facts_derive_affine(facts, rawBase, scale, offset, rawDerived)) {
+    poison(diagnostic, "failed to derive symbolic affine range");
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult
+Analysis::substituteFacts(ArrayRef<ExprSubstitution> substitutions,
+                          std::string *diagnostic) {
+  setDiagnostic(diagnostic, {});
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  SmallVector<ixs_node *, 4> targets;
+  SmallVector<ixs_node *, 4> replacements;
+  if (!collectRawSubstitutions(substitutions, targets, replacements,
+                               diagnostic)) {
+    poison(diagnostic, "invalid symbolic fact substitution");
+    return failure();
+  }
+  ixs_facts *substituted = ixs_facts_create(session.raw());
+  if (!substituted ||
+      !ixs_facts_substitute_multi(substituted, facts,
+                                  static_cast<uint32_t>(targets.size()),
+                                  targets.data(), replacements.data())) {
+    poison(diagnostic, "failed to substitute symbolic facts");
+    return failure();
+  }
+  facts = substituted;
+  return success();
+}
+
+FailureOr<ExprHandle> Analysis::compose(ExprHandle lhsHandle, ExprBinaryOp op,
+                                        ExprHandle rhsHandle,
+                                        std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
+  if (!lhs || !rhs)
+    return failure();
+  return finishExpr(session.raw(),
+                    composeRawBinary(session.raw(), lhs, op, rhs), diagnostic,
+                    "failed to compose wave.expr");
+}
+
+FailureOr<ExprHandle> Analysis::composeCeil(ExprHandle value,
+                                            std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawExprNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishExpr(session.raw(), ixs_ceil(session.raw(), raw), diagnostic,
+                    "failed to compose wave.expr");
+}
+
+FailureOr<ExprHandle> Analysis::composeFloor(ExprHandle value,
+                                             std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawExprNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishExpr(session.raw(), ixs_floor(session.raw(), raw), diagnostic,
+                    "failed to compose wave.expr");
+}
+
+FailureOr<ExprHandle> Analysis::composeNeg(ExprHandle value,
+                                           std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawExprNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishExpr(session.raw(), ixs_neg(session.raw(), raw), diagnostic,
+                    "failed to compose wave.expr");
+}
+
+FailureOr<ExprHandle> Analysis::composeSymbol(StringRef name,
+                                              std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  std::string nulTerminated(name);
+  return finishExpr(session.raw(),
+                    ixs_sym(session.raw(), nulTerminated.c_str()), diagnostic,
+                    "failed to construct wave.expr symbol");
+}
+
+FailureOr<ExprHandle> Analysis::composeInteger(int64_t value,
+                                               std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  return finishExpr(session.raw(), ixs_int(session.raw(), value), diagnostic,
+                    "failed to construct wave.expr integer literal");
+}
+
+FailureOr<ExprHandle> Analysis::composePiecewise(ArrayRef<PiecewiseCase> cases,
+                                                 std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  if (cases.empty() || cases.size() > std::numeric_limits<uint32_t>::max()) {
+    setDiagnostic(diagnostic, "invalid wave.expr piecewise case count");
+    return failure();
+  }
+  SmallVector<ixs_node *, 4> values;
+  SmallVector<ixs_node *, 4> conditions;
+  values.reserve(cases.size());
+  conditions.reserve(cases.size());
+  for (PiecewiseCase piece : cases) {
+    ixs_node *value = rawExprNode(piece.value, diagnostic);
+    ixs_node *condition = rawPredNode(piece.condition, diagnostic);
+    if (!value || !condition)
+      return failure();
+    values.push_back(value);
+    conditions.push_back(condition);
+  }
+  return finishExpr(session.raw(),
+                    ixs_pw(session.raw(), static_cast<uint32_t>(values.size()),
+                           values.data(), conditions.data()),
+                    diagnostic, "failed to compose wave.expr piecewise");
+}
+
+FailureOr<PredHandle> Analysis::composeTrue(std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  return finishPred(session.raw(), ixs_true(session.raw()), diagnostic,
+                    "failed to compose wave.pred true");
+}
+
+FailureOr<PredHandle> Analysis::composeFalse(std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  return finishPred(session.raw(), ixs_false(session.raw()), diagnostic,
+                    "failed to compose wave.pred false");
+}
+
+FailureOr<PredHandle> Analysis::compare(ExprHandle lhsHandle, PredCmpOp op,
+                                        ExprHandle rhsHandle,
+                                        std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *lhs = rawExprNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawExprNode(rhsHandle, diagnostic);
+  if (!lhs || !rhs)
+    return failure();
+  return finishPred(session.raw(),
+                    ixs_cmp(session.raw(), lhs, convertCmpOp(op), rhs),
+                    diagnostic, "failed to compose wave.pred");
+}
+
+FailureOr<PredHandle> Analysis::composeAnd(PredHandle lhsHandle,
+                                           PredHandle rhsHandle,
+                                           std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
+  if (!lhs || !rhs)
+    return failure();
+  return finishPred(session.raw(), ixs_and(session.raw(), lhs, rhs), diagnostic,
+                    "failed to compose wave.pred AND");
+}
+
+FailureOr<PredHandle> Analysis::composeOr(PredHandle lhsHandle,
+                                          PredHandle rhsHandle,
+                                          std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *lhs = rawPredNode(lhsHandle, diagnostic);
+  ixs_node *rhs = rawPredNode(rhsHandle, diagnostic);
+  if (!lhs || !rhs)
+    return failure();
+  return finishPred(session.raw(), ixs_or(session.raw(), lhs, rhs), diagnostic,
+                    "failed to compose wave.pred OR");
+}
+
+FailureOr<PredHandle> Analysis::composeNot(PredHandle value,
+                                           std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawPredNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishPred(session.raw(), ixs_not(session.raw(), raw), diagnostic,
+                    "failed to compose wave.pred NOT");
+}
+
+FailureOr<ExprHandle>
+Analysis::substitute(ExprHandle value, ArrayRef<ExprSubstitution> substitutions,
+                     std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawExprNode(value, diagnostic);
+  SmallVector<ixs_node *, 4> targets;
+  SmallVector<ixs_node *, 4> replacements;
+  if (!raw || !collectRawSubstitutions(substitutions, targets, replacements,
+                                       diagnostic))
+    return failure();
+  ixs_node *result =
+      ixs_subs_multi(session.raw(), raw, static_cast<uint32_t>(targets.size()),
+                     targets.data(), replacements.data());
+  return finishExpr(session.raw(), result, diagnostic,
+                    "failed to substitute wave.expr");
+}
+
+FailureOr<PredHandle>
+Analysis::substitute(PredHandle value, ArrayRef<ExprSubstitution> substitutions,
+                     std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawPredNode(value, diagnostic);
+  SmallVector<ixs_node *, 4> targets;
+  SmallVector<ixs_node *, 4> replacements;
+  if (!raw || !collectRawSubstitutions(substitutions, targets, replacements,
+                                       diagnostic))
+    return failure();
+  ixs_node *result =
+      ixs_subs_multi(session.raw(), raw, static_cast<uint32_t>(targets.size()),
+                     targets.data(), replacements.data());
+  return finishPred(session.raw(), result, diagnostic,
+                    "failed to substitute wave.pred");
+}
+
+FailureOr<ExprHandle> Analysis::simplify(ExprHandle value,
+                                         std::string *diagnostic) {
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  ixs_node *raw = rawExprNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishExpr(session.raw(), ixs_simplify_facts(facts, raw), diagnostic,
+                    "failed to simplify wave.expr");
+}
+
+FailureOr<PredHandle> Analysis::simplify(PredHandle value,
+                                         std::string *diagnostic) {
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  ixs_node *raw = rawPredNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishPred(session.raw(), ixs_simplify_facts(facts, raw), diagnostic,
+                    "failed to simplify wave.pred");
+}
+
+LogicalResult Analysis::simplify(MutableArrayRef<ExprHandle> values,
+                                 std::string *diagnostic) {
+  if (!prepareQuery()) {
+    setDiagnostic(diagnostic, "symbolic analysis is unusable");
+    return failure();
+  }
+  SmallVector<ixs_node *, 8> rawValues;
+  rawValues.reserve(values.size());
+  for (ExprHandle value : values) {
+    ixs_node *raw = rawExprNode(value, diagnostic);
+    if (!raw)
+      return failure();
+    rawValues.push_back(raw);
+  }
+  ixs_simplify_batch_facts(facts, rawValues.data(), rawValues.size());
+  for (ixs_node *raw : rawValues) {
+    if (!raw || !ixs_node_is_expr(raw)) {
+      std::string message = joinSessionErrors(session.raw());
+      setDiagnostic(diagnostic, message.empty()
+                                    ? "failed to simplify wave.expr batch"
+                                    : message);
+      return failure();
+    }
+  }
+  for (size_t index : llvm::seq<size_t>(values.size()))
+    values[index] = ExprHandle(rawValues[index]);
+  return success();
+}
+
+FailureOr<ExprHandle> Analysis::expand(ExprHandle value,
+                                       std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawExprNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishExpr(session.raw(), ixs_expand(session.raw(), raw), diagnostic,
+                    "failed to expand wave.expr");
+}
+
+FailureOr<PredHandle> Analysis::expand(PredHandle value,
+                                       std::string *diagnostic) {
+  ixs_session_clear_errors(session.raw());
+  ixs_node *raw = rawPredNode(value, diagnostic);
+  if (!raw)
+    return failure();
+  return finishPred(session.raw(), ixs_expand(session.raw(), raw), diagnostic,
+                    "failed to expand wave.pred");
+}
+
+CheckResult Analysis::check(PredHandle pred) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
+  if (!raw)
+    return CheckResult::Unknown;
+  ixs_check_result result = PredView(pred).getKind() == PredKind::Cmp
+                                ? ixs_check_facts(facts, raw)
+                                : ixs_check_predicate_facts(facts, raw);
+  return convertCheckResult(result);
+}
+
+CheckResult Analysis::equivalent(ExprHandle lhs, ExprHandle rhs) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
+  ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
+  return rawLhs && rawRhs
+             ? convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs))
+             : CheckResult::Unknown;
+}
+
+CheckResult Analysis::equivalent(PredHandle lhs, PredHandle rhs) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *rawLhs = rawPredNode(lhs, /*diagnostic=*/nullptr);
+  ixs_node *rawRhs = rawPredNode(rhs, /*diagnostic=*/nullptr);
+  return rawLhs && rawRhs
+             ? convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs))
+             : CheckResult::Unknown;
+}
+
+CheckResult Analysis::defined(ExprHandle expr) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  return raw ? convertCheckResult(ixs_check_defined_facts(facts, raw))
+             : CheckResult::Unknown;
+}
+
+CheckResult Analysis::defined(PredHandle pred) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
+  return raw ? convertCheckResult(ixs_check_defined_facts(facts, raw))
+             : CheckResult::Unknown;
+}
+
+CheckResult Analysis::integerValued(ExprHandle expr) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  return raw ? convertCheckResult(ixs_check_integer_valued_facts(facts, raw))
+             : CheckResult::Unknown;
+}
+
+CheckResult Analysis::divisible(ExprHandle expr, int64_t modulus) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  return raw ? convertCheckResult(
+                   ixs_check_divisible_facts(facts, raw, modulus))
+             : CheckResult::Unknown;
+}
+
+CheckResult Analysis::congruent(ExprHandle expr, int64_t modulus,
+                                int64_t residue) {
+  if (!prepareQuery())
+    return CheckResult::Unknown;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  return raw ? convertCheckResult(
+                   ixs_check_congruent_facts(facts, raw, modulus, residue))
+             : CheckResult::Unknown;
+}
+
+ExactDivideResult Analysis::tryExactDivide(ExprHandle expr, int64_t divisor) {
+  if (!prepareQuery())
+    return {};
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  if (!raw)
+    return {};
+  ixs_exact_divide_result result =
+      ixs_try_exact_divide_facts(facts, raw, divisor);
+  switch (result.status) {
+  case IXS_EXACT_DIVIDE_PROVEN:
+    return {ExactDivideStatus::Proven, ExprHandle(result.quotient)};
+  case IXS_EXACT_DIVIDE_NOT_EXACT:
+    return {ExactDivideStatus::NotExact, {}};
+  case IXS_EXACT_DIVIDE_UNKNOWN:
+    return {ExactDivideStatus::Unknown, {}};
+  case IXS_EXACT_DIVIDE_ERROR:
+    return {ExactDivideStatus::Error, {}};
+  }
+  return {};
+}
+
+Pow2Fact Analysis::getPow2Fact(ExprHandle expr) {
+  if (!prepareQuery())
+    return Pow2Fact::Unknown;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  return raw ? convertPow2Fact(ixs_get_pow2_fact_facts(facts, raw))
+             : Pow2Fact::Unknown;
+}
+
+std::optional<KnownBits> Analysis::getKnownBits(ExprHandle expr) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  ixs_known_bits result{};
+  if (!raw || !ixs_get_known_bits_facts(facts, raw, &result))
+    return std::nullopt;
+  return KnownBits{result.known_zero, result.known_one,
+                   convertPow2Fact(result.pow2)};
+}
+
+std::optional<Congruence> Analysis::getSymbolCongruence(ExprHandle symbol) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *raw = rawExprNode(symbol, /*diagnostic=*/nullptr);
+  int64_t modulus = 0;
+  int64_t residue = 0;
+  if (!raw || !ixs_get_symbol_congruence_facts(facts, raw, &modulus, &residue))
+    return std::nullopt;
+  return Congruence{modulus, residue};
+}
+
+std::optional<InferredRange> Analysis::range(ExprHandle expr) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  ixs_range_result result{};
+  if (!raw || !ixs_range_facts(facts, raw, &result))
+    return std::nullopt;
+  return convertRange(result);
+}
+
+std::optional<int64_t> Analysis::constantDifference(ExprHandle lhs,
+                                                    ExprHandle rhs) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
+  ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
+  int64_t delta = 0;
+  if (!rawLhs || !rawRhs ||
+      !ixs_constant_difference_facts(facts, rawLhs, rawRhs, &delta))
+    return std::nullopt;
+  return delta;
+}
+
+std::optional<AffineDecomposition>
+Analysis::affineDecompose(ExprHandle expr, ExprHandle symbol) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
+  ixs_node *coefficient = nullptr;
+  ixs_node *residual = nullptr;
+  if (!rawExpr || !rawSymbol ||
+      !ixs_affine_decompose_facts(facts, rawExpr, rawSymbol, &coefficient,
+                                  &residual))
+    return std::nullopt;
+  return AffineDecomposition{ExprHandle(coefficient), ExprHandle(residual)};
+}
+
+std::optional<ExprHandle> Analysis::finiteDifference(ExprHandle expr,
+                                                     ExprHandle symbol,
+                                                     ExprHandle step) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
+  ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
+  ixs_node *rawStep = rawExprNode(step, /*diagnostic=*/nullptr);
+  ixs_node *difference = nullptr;
+  if (!rawExpr || !rawSymbol || !rawStep ||
+      !ixs_finite_difference_facts(facts, rawExpr, rawSymbol, rawStep,
+                                   &difference))
+    return std::nullopt;
+  return ExprHandle(difference);
+}
+
+std::optional<SplitAdditiveConstant>
+Analysis::splitAdditiveConstant(ExprHandle expr) {
+  if (!prepareQuery())
+    return std::nullopt;
+  ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
+  ixs_node *residual = nullptr;
+  int64_t constant = 0;
+  if (!raw ||
+      !ixs_split_additive_constant_facts(facts, raw, &residual, &constant))
+    return std::nullopt;
+  return SplitAdditiveConstant{ExprHandle(residual), constant};
+}
+
 bool mlir::wave::sym::isExpr(ExprHandle value) {
   return value && ixs_node_is_expr(value.raw());
 }
@@ -921,21 +1582,6 @@ mlir::wave::sym::substitutePred(Store &store, PredHandle value,
                     "failed to substitute wave.pred");
 }
 
-// `ixs_bounds_add_assumption` only consumes CMP nodes -- an AND-tree
-// produced by `composePredAnd` is silently ignored. Flatten before
-// handing off to ixsimpl queries.
-static void flattenAssumption(ixs_node *node,
-                              SmallVectorImpl<ixs_node *> &out) {
-  if (!node)
-    return;
-  if (ixs_node_tag(node) == IXS_AND) {
-    for (uint32_t i = 0, e = ixs_node_logic_nargs(node); i != e; ++i)
-      flattenAssumption(ixs_node_logic_arg(node, i), out);
-    return;
-  }
-  out.push_back(node);
-}
-
 static int compareRationalToInteger(RationalEndpoint value, int64_t integer) {
   assert(value.denominator > 0 && "expected positive denominator");
   __int128 lhs = static_cast<__int128>(value.numerator);
@@ -968,10 +1614,10 @@ mlir::wave::sym::simplifyExpr(Store &store, ExprHandle value,
     return failure();
   SmallVector<ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *pred = rawPredNode(assumption, diagnostic);
-    if (!pred)
+    ixs_node *raw = rawPredNode(assumption, diagnostic);
+    if (!raw)
       return failure();
-    flattenAssumption(pred, rawAssumptions);
+    rawAssumptions.push_back(raw);
   }
   ixs_node *simplified = ixs_simplify(
       session.raw(), expr, rawAssumptions.data(), rawAssumptions.size());
@@ -993,225 +1639,42 @@ FailureOr<ExprHandle> mlir::wave::sym::expandExpr(Store &store,
 mlir::wave::sym::CheckResult
 mlir::wave::sym::checkPredicate(Store &store, PredHandle predicate,
                                 ArrayRef<PredHandle> assumptions) {
-  if (!predicate)
-    return CheckResult::Unknown;
-  Session session(store);
-  ixs_node *rawPred = rawPredNode(predicate, /*diagnostic=*/nullptr);
-  if (!rawPred)
-    return CheckResult::Unknown;
-  SmallVector<ixs_node *, 4> rawAssumptions;
-  for (PredHandle assumption : assumptions) {
-    ixs_node *rawAssumption = rawPredNode(assumption, /*diagnostic=*/nullptr);
-    if (!rawAssumption)
-      return CheckResult::Unknown;
-    flattenAssumption(rawAssumption, rawAssumptions);
-  }
-  ixs_check_result result = ixs_check(
-      session.raw(), rawPred, rawAssumptions.data(), rawAssumptions.size());
-  switch (result) {
-  case IXS_CHECK_TRUE:
-    return CheckResult::True;
-  case IXS_CHECK_FALSE:
-    return CheckResult::False;
-  case IXS_CHECK_UNKNOWN:
-    return CheckResult::Unknown;
-  }
-  return CheckResult::Unknown;
-}
-
-static bool provablyNonZero(Store &store, ExprHandle expr,
-                            ArrayRef<PredHandle> assumptions) {
-  if (std::optional<int64_t> literal = getIntegerLiteralValue(expr))
-    return *literal != 0;
-  FailureOr<ExprHandle> zero = composeExprInt(store, 0);
-  if (failed(zero))
-    return false;
-  FailureOr<PredHandle> nonZero =
-      composePredCmp(store, expr, PredCmpOp::Ne, *zero);
-  return succeeded(nonZero) &&
-         checkPredicate(store, *nonZero, assumptions) == CheckResult::True;
-}
-
-static bool provablyDefinedAdd(Store &store, ExprView view,
-                               ArrayRef<PredHandle> assumptions) {
-  if (!provablyDefined(store, view.getAddConstant(), assumptions))
-    return false;
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-    AddTerm term = view.getAddTerm(index);
-    if (!provablyDefined(store, term.coefficient, assumptions) ||
-        !provablyDefined(store, term.term, assumptions))
-      return false;
-  }
-  return true;
-}
-
-static bool provablyDefinedMul(Store &store, ExprView view,
-                               ArrayRef<PredHandle> assumptions) {
-  if (!provablyDefined(store, view.getMulCoefficient(), assumptions))
-    return false;
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
-    MulFactor factor = view.getMulFactor(index);
-    if (!provablyDefined(store, factor.base, assumptions))
-      return false;
-    if (factor.exponent < 0 &&
-        !provablyNonZero(store, factor.base, assumptions))
-      return false;
-  }
-  return true;
-}
-
-static bool provablyDefinedPiecewise(Store &store, ExprView view,
-                                     ArrayRef<PredHandle> assumptions) {
-  FailureOr<PredHandle> covered = composePredFalse(store);
-  if (failed(covered))
-    return false;
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getPiecewiseCaseCount())) {
-    PiecewiseCase piece = view.getPiecewiseCase(index);
-    if (!provablyDefined(store, piece.condition, assumptions))
-      return false;
-    if (checkPredicate(store, piece.condition, assumptions) !=
-        CheckResult::False) {
-      SmallVector<PredHandle, 4> caseAssumptions(assumptions);
-      caseAssumptions.push_back(piece.condition);
-      if (!provablyDefined(store, piece.value, caseAssumptions))
-        return false;
-    }
-    covered = composePredOr(store, *covered, piece.condition);
-    if (failed(covered))
-      return false;
-  }
-  return checkPredicate(store, *covered, assumptions) == CheckResult::True;
-}
-
-static std::optional<bool>
-proveSimpleExprDefined(Store &store, ExprView view,
-                       ArrayRef<PredHandle> assumptions) {
-  switch (view.getKind()) {
-  case ExprKind::Integer:
-  case ExprKind::Rational:
-  case ExprKind::Symbol:
-    return true;
-  case ExprKind::Floor:
-  case ExprKind::Ceil:
-    return provablyDefined(store, view.getUnaryArg(), assumptions);
-  case ExprKind::Invalid:
-  case ExprKind::Error:
-  case ExprKind::ParseError:
-    return false;
-  default:
-    return std::nullopt;
-  }
-}
-
-static bool provablyDefinedMod(Store &store, ExprView view,
-                               ArrayRef<PredHandle> assumptions) {
-  return provablyDefined(store, view.getBinaryLhs(), assumptions) &&
-         provablyDefined(store, view.getBinaryRhs(), assumptions) &&
-         provablyNonZero(store, view.getBinaryRhs(), assumptions);
-}
-
-static bool provablyDefinedBinary(Store &store, ExprView view,
-                                  ArrayRef<PredHandle> assumptions) {
-  return provablyDefined(store, view.getBinaryLhs(), assumptions) &&
-         provablyDefined(store, view.getBinaryRhs(), assumptions);
-}
-
-static bool proveCompoundExprDefined(Store &store, ExprView view,
-                                     ArrayRef<PredHandle> assumptions) {
-  switch (view.getKind()) {
-  case ExprKind::Add:
-    return provablyDefinedAdd(store, view, assumptions);
-  case ExprKind::Mul:
-    return provablyDefinedMul(store, view, assumptions);
-  case ExprKind::Mod:
-    return provablyDefinedMod(store, view, assumptions);
-  case ExprKind::Max:
-  case ExprKind::Min:
-  case ExprKind::Xor:
-    return provablyDefinedBinary(store, view, assumptions);
-  case ExprKind::Piecewise:
-    return provablyDefinedPiecewise(store, view, assumptions);
-  default:
-    llvm_unreachable("expected compound expression");
-  }
+  FailureOr<std::unique_ptr<Analysis>> analysis =
+      Analysis::create(store, assumptions);
+  return succeeded(analysis) ? (*analysis)->check(predicate)
+                             : CheckResult::Unknown;
 }
 
 bool mlir::wave::sym::provablyDefined(Store &store, ExprHandle expr,
                                       ArrayRef<PredHandle> assumptions) {
-  ExprView view(expr);
-  if (std::optional<bool> result =
-          proveSimpleExprDefined(store, view, assumptions))
-    return *result;
-  return proveCompoundExprDefined(store, view, assumptions);
-}
-
-static bool provablyDefinedLogic(Store &store, PredView view,
-                                 ArrayRef<PredHandle> assumptions) {
-  for (uint32_t index : llvm::seq<uint32_t>(0, view.getLogicArgCount()))
-    if (!provablyDefined(store, view.getLogicArg(index), assumptions))
-      return false;
-  return true;
-}
-
-static std::optional<bool> proveSimplePredDefined(PredView view) {
-  switch (view.getKind()) {
-  case PredKind::True:
-  case PredKind::False:
-    return true;
-  case PredKind::Invalid:
-  case PredKind::Error:
-  case PredKind::ParseError:
-    return false;
-  default:
-    return std::nullopt;
-  }
+  FailureOr<std::unique_ptr<Analysis>> analysis =
+      Analysis::create(store, assumptions);
+  return succeeded(analysis) && (*analysis)->defined(expr) == CheckResult::True;
 }
 
 bool mlir::wave::sym::provablyDefined(Store &store, PredHandle pred,
                                       ArrayRef<PredHandle> assumptions) {
-  PredView view(pred);
-  if (std::optional<bool> result = proveSimplePredDefined(view))
-    return *result;
-  switch (view.getKind()) {
-  case PredKind::Cmp:
-    return provablyDefined(store, view.getCmpLhs(), assumptions) &&
-           provablyDefined(store, view.getCmpRhs(), assumptions);
-  case PredKind::And:
-  case PredKind::Or:
-    return provablyDefinedLogic(store, view, assumptions);
-  case PredKind::Not:
-    return provablyDefined(store, view.getUnaryArg(), assumptions);
-  default:
-    llvm_unreachable("expected compound predicate");
-  }
+  FailureOr<std::unique_ptr<Analysis>> analysis =
+      Analysis::create(store, assumptions);
+  return succeeded(analysis) && (*analysis)->defined(pred) == CheckResult::True;
 }
 
 mlir::wave::sym::Pow2Fact
 mlir::wave::sym::getPow2Fact(Store &store, ExprHandle expr,
                              ArrayRef<PredHandle> assumptions) {
-  if (!expr)
-    return Pow2Fact::Unknown;
   Session session(store);
   ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
   if (!rawExpr)
     return Pow2Fact::Unknown;
   SmallVector<ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *rawAssumption = rawPredNode(assumption, /*diagnostic=*/nullptr);
-    if (!rawAssumption)
+    ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!raw)
       return Pow2Fact::Unknown;
-    flattenAssumption(rawAssumption, rawAssumptions);
+    rawAssumptions.push_back(raw);
   }
-  switch (ixs_get_pow2_fact(session.raw(), rawExpr, rawAssumptions.data(),
-                            rawAssumptions.size())) {
-  case IXS_POW2_UNKNOWN:
-    return Pow2Fact::Unknown;
-  case IXS_POW2_OR_ZERO:
-    return Pow2Fact::OrZero;
-  case IXS_POW2_POSITIVE:
-    return Pow2Fact::Positive;
-  }
-  return Pow2Fact::Unknown;
+  return convertPow2Fact(ixs_get_pow2_fact(
+      session.raw(), rawExpr, rawAssumptions.data(), rawAssumptions.size()));
 }
 
 FailureOr<PredHandle>
@@ -1423,36 +1886,27 @@ struct I64RangeBounds {
   std::optional<int64_t> upper;
 };
 
-static SmallVector<ixs_node *, 8> expandExprs(Session &session,
-                                              ArrayRef<ExprHandle> values) {
+static void canonicalizeExprs(Store &store, MutableArrayRef<ExprHandle> values,
+                              ArrayRef<PredHandle> assumptions) {
+  Session session(store);
   SmallVector<ixs_node *, 8> expanded;
   expanded.reserve(values.size());
   for (ExprHandle value : values) {
-    ixs_node *expr = rawExprNode(value, /*diagnostic=*/nullptr);
-    if (!expr) {
-      expanded.push_back(nullptr);
-      continue;
-    }
-    ixs_node *result = ixs_expand(session.raw(), expr);
-    expanded.push_back(result && ixs_node_is_expr(result) ? result : expr);
+    ixs_node *raw = rawExprNode(value, /*diagnostic=*/nullptr);
+    expanded.push_back(raw ? ixs_expand(session.raw(), raw) : nullptr);
   }
-  return expanded;
-}
 
-static bool collectRawAssumptions(ArrayRef<PredHandle> assumptions,
-                                  SmallVectorImpl<ixs_node *> &rawAssumptions) {
+  ixs_session_clear_errors(session.raw());
+  SmallVector<ixs_node *, 8> simplified(expanded.begin(), expanded.end());
+  SmallVector<ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *pred = rawPredNode(assumption, /*diagnostic=*/nullptr);
-    if (!pred)
-      return false;
-    flattenAssumption(pred, rawAssumptions);
+    ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!raw)
+      return;
+    rawAssumptions.push_back(raw);
   }
-  return true;
-}
-
-static void copyCanonicalExprs(MutableArrayRef<ExprHandle> values,
-                               ArrayRef<ixs_node *> simplified,
-                               ArrayRef<ixs_node *> expanded) {
+  ixs_simplify_batch(session.raw(), simplified.data(), simplified.size(),
+                     rawAssumptions.data(), rawAssumptions.size());
   for (size_t index : llvm::seq<size_t>(values.size())) {
     ixs_node *result = simplified[index];
     ixs_node *fallback = expanded[index];
@@ -1461,19 +1915,6 @@ static void copyCanonicalExprs(MutableArrayRef<ExprHandle> values,
     else if (fallback && ixs_node_is_expr(fallback))
       values[index] = ExprHandle(fallback);
   }
-}
-
-static void canonicalizeExprs(Store &store, MutableArrayRef<ExprHandle> values,
-                              ArrayRef<PredHandle> assumptions) {
-  Session session(store);
-  SmallVector<ixs_node *, 8> expanded = expandExprs(session, values);
-  ixs_session_clear_errors(session.raw());
-  SmallVector<ixs_node *, 8> simplified(expanded.begin(), expanded.end());
-  SmallVector<ixs_node *, 4> rawAssumptions;
-  if (collectRawAssumptions(assumptions, rawAssumptions))
-    ixs_simplify_batch(session.raw(), simplified.data(), simplified.size(),
-                       rawAssumptions.data(), rawAssumptions.size());
-  copyCanonicalExprs(values, simplified, expanded);
 }
 
 struct TargetComparison {
@@ -1643,29 +2084,22 @@ bool mlir::wave::sym::positiveAddendsFitU32(Store &store, ExprHandle expr,
 std::optional<InferredRange>
 mlir::wave::sym::inferRange(Store &store, ExprHandle expr,
                             ArrayRef<PredHandle> assumptions) {
-  if (!expr)
-    return std::nullopt;
   Session session(store);
   ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
   if (!rawExpr)
     return std::nullopt;
   SmallVector<ixs_node *, 4> rawAssumptions;
   for (PredHandle assumption : assumptions) {
-    ixs_node *rawAssumption = rawPredNode(assumption, /*diagnostic=*/nullptr);
-    if (!rawAssumption)
+    ixs_node *raw = rawPredNode(assumption, /*diagnostic=*/nullptr);
+    if (!raw)
       return std::nullopt;
-    flattenAssumption(rawAssumption, rawAssumptions);
+    rawAssumptions.push_back(raw);
   }
   ixs_range_result rawRange;
   if (!ixs_range(session.raw(), rawExpr, rawAssumptions.data(),
                  rawAssumptions.size(), &rawRange))
     return std::nullopt;
-  InferredRange range;
-  if (rawRange.has_lower)
-    range.lower = RationalEndpoint{rawRange.lower_p, rawRange.lower_q};
-  if (rawRange.has_upper)
-    range.upper = RationalEndpoint{rawRange.upper_p, rawRange.upper_q};
-  return range;
+  return convertRange(rawRange);
 }
 
 std::optional<int64_t>

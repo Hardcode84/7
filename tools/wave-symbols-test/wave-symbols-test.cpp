@@ -68,6 +68,32 @@ const char *pow2FactName(sym::Pow2Fact fact) {
   llvm_unreachable("unknown pow2 fact");
 }
 
+const char *checkResultName(sym::CheckResult result) {
+  switch (result) {
+  case sym::CheckResult::True:
+    return "true";
+  case sym::CheckResult::False:
+    return "false";
+  case sym::CheckResult::Unknown:
+    return "unknown";
+  }
+  llvm_unreachable("unknown check result");
+}
+
+const char *exactDivideStatusName(sym::ExactDivideStatus status) {
+  switch (status) {
+  case sym::ExactDivideStatus::Proven:
+    return "proven";
+  case sym::ExactDivideStatus::NotExact:
+    return "not-exact";
+  case sym::ExactDivideStatus::Unknown:
+    return "unknown";
+  case sym::ExactDivideStatus::Error:
+    return "error";
+  }
+  llvm_unreachable("unknown exact-divide status");
+}
+
 // Write `<label>: <rendered-expr>` for FileCheck.
 void printRendered(sym::Store &store, llvm::StringRef label,
                    sym::ExprHandle handle) {
@@ -117,6 +143,34 @@ sym::ExprHandle mustCompose(sym::Store &store, sym::ExprHandle lhs,
   auto handle = sym::composeExprBinary(store, lhs, op, rhs);
   if (failed(handle)) {
     llvm::errs() << "failed to compose binary expression\n";
+    std::exit(1);
+  }
+  return *handle;
+}
+
+std::unique_ptr<sym::Analysis>
+mustCreateAnalysis(sym::Store &store,
+                   llvm::ArrayRef<sym::PredHandle> assumptions = {}) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis)) {
+    llvm::errs() << "failed to create symbolic analysis\n";
+    std::exit(1);
+  }
+  return std::move(*analysis);
+}
+
+sym::ExprHandle mustBuildAnalysisExpr(FailureOr<sym::ExprHandle> handle) {
+  if (failed(handle)) {
+    llvm::errs() << "failed to build symbolic analysis expression\n";
+    std::exit(1);
+  }
+  return *handle;
+}
+
+sym::PredHandle mustBuildAnalysisPred(FailureOr<sym::PredHandle> handle) {
+  if (failed(handle)) {
+    llvm::errs() << "failed to build symbolic analysis predicate\n";
     std::exit(1);
   }
   return *handle;
@@ -273,6 +327,245 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
                << "\n";
 }
 
+struct AnalysisRenderResults {
+  sym::ExprHandle simplifiedMod;
+  sym::ExprHandle exactQuotient;
+  sym::ExprHandle affineCoefficient;
+  sym::ExprHandle affineResidual;
+  sym::ExprHandle finiteDifference;
+  sym::ExprHandle nonlinearDifference;
+  sym::ExprHandle splitResidual;
+};
+
+static void printAnalysisProofs(sym::Analysis &analysis, sym::ExprHandle x,
+                                sym::ExprHandle xQuarter, sym::ExprHandle safe,
+                                sym::ExprHandle shiftedMod,
+                                sym::ExprHandle baseMod,
+                                sym::PredHandle belowThirtyTwo) {
+  llvm::outs() << "analysis-check: "
+               << checkResultName(analysis.check(belowThirtyTwo)) << "\n";
+  llvm::outs() << "analysis-equivalent-mod: "
+               << checkResultName(analysis.equivalent(shiftedMod, baseMod))
+               << "\n";
+  llvm::outs() << "analysis-defined: "
+               << checkResultName(analysis.defined(safe)) << "\n";
+  llvm::outs() << "analysis-integer-valued: "
+               << checkResultName(analysis.integerValued(xQuarter)) << "\n";
+  llvm::outs() << "analysis-divisible: "
+               << checkResultName(analysis.divisible(x, 4)) << "\n";
+  llvm::outs() << "analysis-congruent: "
+               << checkResultName(analysis.congruent(x, 4, 0)) << "\n";
+}
+
+static void printAnalysisFacts(sym::Analysis &analysis, sym::ExprHandle x,
+                               sym::ExprHandle square,
+                               sym::ExprHandle xPlusFour,
+                               AnalysisRenderResults &results) {
+  sym::ExactDivideResult quotient = analysis.tryExactDivide(x, 4);
+  llvm::outs() << "analysis-exact-divide: "
+               << exactDivideStatusName(quotient.status) << "\n";
+  results.exactQuotient = quotient.quotient;
+
+  std::optional<sym::KnownBits> bits = analysis.getKnownBits(x);
+  llvm::outs() << "analysis-known-zero-low2: "
+               << (bits ? (bits->knownZero & 3) : 0) << "\n";
+  std::optional<sym::Congruence> congruence = analysis.getSymbolCongruence(x);
+  llvm::outs() << "analysis-symbol-congruence: ";
+  if (congruence)
+    llvm::outs() << congruence->modulus << "," << congruence->residue;
+  else
+    llvm::outs() << "none";
+  llvm::outs() << "\n";
+
+  std::optional<sym::InferredRange> squareRange = analysis.range(square);
+  printRational("analysis-range-lower",
+                squareRange ? squareRange->lower : std::nullopt);
+  printRational("analysis-range-upper",
+                squareRange ? squareRange->upper : std::nullopt);
+  printLiteral("analysis-constant-difference",
+               analysis.constantDifference(xPlusFour, x));
+}
+
+static void collectAnalysisAlgebra(sym::Analysis &analysis, sym::ExprHandle x,
+                                   sym::ExprHandle four, sym::ExprHandle square,
+                                   sym::ExprHandle affine,
+                                   sym::ExprHandle unitSlope,
+                                   AnalysisRenderResults &results) {
+  std::optional<sym::AffineDecomposition> decomposition =
+      analysis.affineDecompose(affine, x);
+  std::optional<sym::ExprHandle> finite =
+      analysis.finiteDifference(unitSlope, x, four);
+  std::optional<sym::ExprHandle> nonlinear =
+      analysis.finiteDifference(square, x, four);
+  std::optional<sym::SplitAdditiveConstant> split =
+      analysis.splitAdditiveConstant(affine);
+  if (!decomposition || !finite || !nonlinear || !split) {
+    llvm::errs() << "failed analysis algebra query\n";
+    std::exit(1);
+  }
+  results.affineCoefficient = decomposition->coefficient;
+  results.affineResidual = decomposition->residual;
+  results.finiteDifference = *finite;
+  results.nonlinearDifference = *nonlinear;
+  results.splitResidual = split->residual;
+  llvm::outs() << "analysis-split-constant: " << split->constant << "\n";
+}
+
+static sym::PredHandle buildXorCancellationQuery(sym::Analysis &analysis,
+                                                 sym::ExprHandle x) {
+  sym::ExprHandle one = mustBuildAnalysisExpr(analysis.composeInteger(1));
+  sym::ExprHandle inner =
+      mustBuildAnalysisExpr(analysis.compose(one, sym::ExprBinaryOp::Xor, x));
+  sym::ExprHandle outer = mustBuildAnalysisExpr(
+      analysis.compose(one, sym::ExprBinaryOp::Xor, inner));
+  return mustBuildAnalysisPred(analysis.compare(outer, sym::PredCmpOp::Eq, x));
+}
+
+static void runAnalysisCore(sym::Store &store, sym::ExprHandle x,
+                            sym::PredHandle facts) {
+  sym::ExprHandle xQuarter = mustParseExpr(store, "x/4");
+  sym::ExprHandle safe = mustParseExpr(store, "floor(1/(x + 1))");
+  sym::ExprHandle partial = mustParseExpr(store, "floor(1/x)");
+  sym::ExprHandle square = mustCompose(store, x, sym::ExprBinaryOp::Mul, x);
+  sym::ExprHandle shiftedMod = mustParseExpr(store, "Mod(x + 4, 4)");
+  sym::ExprHandle baseMod = mustParseExpr(store, "Mod(x, 4)");
+  sym::ExprHandle affine = mustParseExpr(store, "3*x + 5");
+  sym::ExprHandle unitSlope = mustParseExpr(store, "x + 5");
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store, {facts});
+  sym::ExprHandle four = mustBuildAnalysisExpr(analysis->composeInteger(4));
+  sym::ExprHandle xPlusFour =
+      mustBuildAnalysisExpr(analysis->compose(x, sym::ExprBinaryOp::Add, four));
+  sym::ExprHandle thirtyTwo =
+      mustBuildAnalysisExpr(analysis->composeInteger(32));
+  sym::ExprHandle zero = mustBuildAnalysisExpr(analysis->composeInteger(0));
+  sym::PredHandle belowThirtyTwo = mustBuildAnalysisPred(
+      analysis->compare(x, sym::PredCmpOp::Lt, thirtyTwo));
+  sym::PredHandle nonNegative =
+      mustBuildAnalysisPred(analysis->compare(x, sym::PredCmpOp::Ge, zero));
+  sym::PredHandle bounded =
+      mustBuildAnalysisPred(analysis->composeAnd(nonNegative, belowThirtyTwo));
+  sym::PredHandle xorCancellation = buildXorCancellationQuery(*analysis, x);
+
+  AnalysisRenderResults results;
+  std::array<sym::ExprHandle, 2> batch{shiftedMod, baseMod};
+  if (failed(analysis->simplify(batch))) {
+    llvm::errs() << "failed to simplify symbolic analysis batch\n";
+    std::exit(1);
+  }
+  results.simplifiedMod = batch[0];
+  llvm::outs() << "analysis-batch-pointer-equal: "
+               << boolName(batch[0] == batch[1]) << "\n";
+  llvm::outs() << "analysis-undefined-self-equivalent: "
+               << checkResultName(analysis->equivalent(partial, partial))
+               << "\n";
+  printAnalysisProofs(*analysis, x, xQuarter, safe, shiftedMod, baseMod,
+                      belowThirtyTwo);
+  llvm::outs() << "analysis-xor-cancellation: "
+               << checkResultName(analysis->check(xorCancellation)) << "\n";
+  llvm::outs() << "analysis-compound-check: "
+               << checkResultName(analysis->check(bounded)) << "\n";
+  printAnalysisFacts(*analysis, x, square, xPlusFour, results);
+  collectAnalysisAlgebra(*analysis, x, four, square, affine, unitSlope,
+                         results);
+  analysis.reset();
+
+  llvm::outs() << "analysis-wrapper-xor-cancellation: "
+               << checkResultName(
+                      sym::checkPredicate(store, xorCancellation, {facts}))
+               << "\n";
+  llvm::outs() << "analysis-wrapper-compound-check: "
+               << checkResultName(sym::checkPredicate(store, bounded, {facts}))
+               << "\n";
+
+  printRendered(store, "analysis-simplified-mod", results.simplifiedMod);
+  printRendered(store, "analysis-exact-quotient", results.exactQuotient);
+  printRendered(store, "analysis-affine-coefficient",
+                results.affineCoefficient);
+  printRendered(store, "analysis-affine-residual", results.affineResidual);
+  printRendered(store, "analysis-finite-difference", results.finiteDifference);
+  printRendered(store, "analysis-nonlinear-difference",
+                results.nonlinearDifference);
+  printRendered(store, "analysis-split-residual", results.splitResidual);
+}
+
+static void runAnalysisRangeMutation(sym::Store &store, sym::ExprHandle x) {
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
+  sym::InferredRange explicitRange;
+  explicitRange.lower = sym::RationalEndpoint{2, 1};
+  explicitRange.upper = sym::RationalEndpoint{4, 1};
+  sym::ExprHandle two = mustBuildAnalysisExpr(analysis->composeInteger(2));
+  sym::ExprHandle one = mustBuildAnalysisExpr(analysis->composeInteger(1));
+  sym::ExprHandle scaled =
+      mustBuildAnalysisExpr(analysis->compose(two, sym::ExprBinaryOp::Mul, x));
+  sym::ExprHandle derived = mustBuildAnalysisExpr(
+      analysis->compose(scaled, sym::ExprBinaryOp::Add, one));
+  if (failed(analysis->assumeRange(x, explicitRange)) ||
+      failed(analysis->deriveAffine(x, 2, 1, derived))) {
+    llvm::errs() << "failed explicit analysis range\n";
+    std::exit(1);
+  }
+  std::optional<sym::InferredRange> range = analysis->range(derived);
+  printRational("analysis-derived-lower", range ? range->lower : std::nullopt);
+  printRational("analysis-derived-upper", range ? range->upper : std::nullopt);
+}
+
+static void runAnalysisFactSubstitution(sym::Store &store, sym::ExprHandle x,
+                                        sym::PredHandle facts) {
+  sym::ExprHandle y = mustBuildSym(store, "y");
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store, {facts});
+  if (failed(analysis->substituteFacts({sym::ExprSubstitution{x, y}}))) {
+    llvm::errs() << "failed to substitute analysis facts\n";
+    std::exit(1);
+  }
+  std::optional<sym::InferredRange> yRange = analysis->range(y);
+  printRational("analysis-substituted-upper",
+                yRange ? yRange->upper : std::nullopt);
+  llvm::outs() << "analysis-substituted-congruence: "
+               << checkResultName(analysis->congruent(y, 4, 0)) << "\n";
+}
+
+static void runAnalysisRejection(sym::Store &store, sym::ExprHandle x,
+                                 sym::PredHandle validFacts,
+                                 sym::PredHandle invalidFacts) {
+  llvm::outs() << "analysis-or-factory-rejected: "
+               << boolName(failed(sym::Analysis::create(store, {invalidFacts})))
+               << "\n";
+  llvm::outs() << "analysis-partial-factory-rejected: "
+               << boolName(failed(
+                      sym::Analysis::create(store, {validFacts, invalidFacts})))
+               << "\n";
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
+  llvm::outs() << "analysis-or-mutator-rejected: "
+               << boolName(failed(analysis->assume(invalidFacts))) << "\n";
+  llvm::outs() << "analysis-poisoned-query: "
+               << checkResultName(analysis->defined(x)) << "\n";
+  FailureOr<sym::ExprHandle> expanded = analysis->expand(x);
+  llvm::outs() << "analysis-poisoned-expand: "
+               << boolName(succeeded(expanded) && *expanded == x) << "\n";
+
+  analysis = mustCreateAnalysis(store);
+  std::string diagnostic = "stale";
+  llvm::outs() << "analysis-invalid-handle-rejected: "
+               << boolName(
+                      failed(analysis->assume(sym::PredHandle{}, &diagnostic)))
+               << "\n";
+  llvm::outs() << "analysis-invalid-handle-diagnostic: " << diagnostic << "\n";
+}
+
+void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
+  sym::PredHandle range =
+      mustBuildAnalysisPred(sym::rangeAssumption(store, "x", 0, 31));
+  sym::PredHandle multipleOfFour = mustParsePred(store, "Mod(x, 4) == 0");
+  sym::PredHandle facts =
+      mustBuildAnalysisPred(sym::composePredAnd(store, range, multipleOfFour));
+  sym::PredHandle invalidFacts = mustBuildAnalysisPred(sym::composePredOr(
+      store, mustParsePred(store, "x < 0"), mustParsePred(store, "x > 31")));
+  runAnalysisCore(store, x, facts);
+  runAnalysisRangeMutation(store, x);
+  runAnalysisFactSubstitution(store, x, facts);
+  runAnalysisRejection(store, x, facts, invalidFacts);
+}
+
 // (4) Range queries: under `x in [0, 31]`, probe `4*x + 1` against
 // several candidate ranges. Hits both bounds plus the assumption-set
 // fast path.
@@ -330,6 +623,9 @@ void runDefinednessQueries(sym::Store &store) {
   sym::ExprHandle literalDenominator = mustParseExpr(store, "floor(1/32*x)");
   sym::ExprHandle partial = mustParseExpr(store, "floor(1 / (x - 1))");
   sym::ExprHandle uncovered = mustParseExpr(store, "Piecewise((x, x < 16))");
+  sym::ExprHandle symbolicMod = mustParseExpr(store, "Mod(x, m)");
+  sym::PredHandle negativeDivisor = mustParsePred(store, "m < 0");
+  sym::PredHandle positiveDivisor = mustParsePred(store, "m > 0");
   llvm::outs() << "defined-safe-div: "
                << boolName(sym::provablyDefined(store, safe, assumptions))
                << "\n";
@@ -341,6 +637,14 @@ void runDefinednessQueries(sym::Store &store) {
                << "\n";
   llvm::outs() << "defined-uncovered-piecewise: "
                << boolName(sym::provablyDefined(store, uncovered, assumptions))
+               << "\n";
+  llvm::outs() << "defined-mod-negative: "
+               << boolName(sym::provablyDefined(store, symbolicMod,
+                                                {negativeDivisor}))
+               << "\n";
+  llvm::outs() << "defined-mod-positive: "
+               << boolName(sym::provablyDefined(store, symbolicMod,
+                                                {positiveDivisor}))
                << "\n";
 }
 
@@ -383,6 +687,7 @@ int main() {
   printUtilitySmoke(store, x);
   sym::ExprHandle threeX = mustCompose(store, three, sym::ExprBinaryOp::Mul, x);
   printFacadeSmoke(store, x, five, threeX);
+  runAnalysisQueries(store, x);
 
   sym::ExprHandle fourX = mustCompose(store, four, sym::ExprBinaryOp::Mul, x);
   sym::ExprHandle twoX = mustCompose(store, two, sym::ExprBinaryOp::Mul, x);

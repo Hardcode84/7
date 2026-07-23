@@ -65,6 +65,30 @@ func.func @non_unit_step(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 
 // -----
 
+// CHECK-LABEL: func.func @reject_fractional_stride
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK: wave.index_expr <"1/2*i + 64*Mod(wi, 16)">
+func.func @reject_fractional_stride(%a: !wave.ptr<#wave.global, f16>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %off = wave.index_expr <"1/2*i + 64*Mod(wi, 16)"> ["i", "wi"](%i, %wi)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, f16>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f16>, 32>
+    %v, %t = wave.load %p
+        : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
+        -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @scaled_nested_iv_binding
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE_OFF:.*]] = wave.index_expr <"128*base + 64*Mod(wi, 16)"> ["base", "wi"](%arg1, %[[WI]]) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
