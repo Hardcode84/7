@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from typing import Literal
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
 from mlir.dialects import scf, wave, waveamd, wavemeta
@@ -508,6 +509,7 @@ _ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR = (
 _DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
 _STATIC_LDS_LIMIT = 64 * 1024
 _MXFP4_SCALE_PACK = 4
+_Mxfp4ScaleAxis = Literal["m", "n"]
 
 
 def _mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
@@ -2144,6 +2146,17 @@ class _Mxfp4ScaleLayout:
 
 
 @dataclass(frozen=True)
+class _Mxfp4ScaleStagingAxis:
+    global_base: dsl.Value
+    packed_scale_base: dsl.Expr
+    unpacked_scale_base: dsl.Expr
+    tile_base: dsl.Expr
+    dimension: int
+    tile_count: int
+    tiles_per_wave: int
+
+
+@dataclass(frozen=True)
 class _Mxfp4ScaleSet:
     a_scales: list[dsl.Value]
     a_scale_idxs: list[int]
@@ -2215,6 +2228,49 @@ def _mxfp4_scale_layout(
         lane_mod16=lane_mod16,
         lane_scale_group=lane_scale_group,
         scale_k=scale_k,
+    )
+
+
+def _mxfp4_scale_staging_axis(
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    layout: _Mxfp4ScaleLayout,
+    axis: _Mxfp4ScaleAxis,
+    m_wave: dsl.Expr,
+    n_wave: dsl.Expr,
+) -> _Mxfp4ScaleStagingAxis:
+    if axis == "m":
+        tile_count = cfg.wave_m_tiles
+        workgroup_waves = cfg.BM
+        workgroup = layout.wg_m
+        wave = m_wave
+        dimension = cfg.M
+        global_base = coords.a_scale_base
+    else:
+        tile_count = cfg.wave_n_tiles
+        workgroup_waves = cfg.BN
+        workgroup = layout.wg_n
+        wave = n_wave
+        dimension = cfg.N
+        global_base = coords.b_scale_base
+    if global_base is None:
+        raise ValueError("MXFP4 scale buffers are required")
+    tiles_per_wave = _mxfp4_scale_tiles_per_wave(tile_count)
+    if axis == "m":
+        packed_scale_base = wave * tiles_per_wave
+        unpacked_scale_base = wave * tile_count
+    else:
+        scale_base = cfg.BM * _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
+        packed_scale_base = scale_base + wave * tiles_per_wave
+        unpacked_scale_base = scale_base + wave * tile_count
+    return _Mxfp4ScaleStagingAxis(
+        global_base=global_base,
+        packed_scale_base=packed_scale_base,
+        unpacked_scale_base=unpacked_scale_base,
+        tile_base=workgroup * (workgroup_waves * tile_count) + wave * tile_count,
+        dimension=dimension,
+        tile_count=tile_count,
+        tiles_per_wave=tiles_per_wave,
     )
 
 
@@ -2318,11 +2374,12 @@ def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
 
     with bld.where(lane_group_mask, [dsl.mem_token_type()]) as active:
         tokens: list[dsl.Value] = []
-        _stage_mxfp4_a_scale_regs(
+        _stage_mxfp4_scale_regs(
             bld,
             cfg,
             coords,
             layout,
+            "m",
             load_type,
             lds,
             dep,
@@ -2330,11 +2387,12 @@ def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
             row_sliced,
             packed_dword,
         )
-        _stage_mxfp4_b_scale_regs(
+        _stage_mxfp4_scale_regs(
             bld,
             cfg,
             coords,
             layout,
+            "n",
             load_type,
             lds,
             dep,
@@ -2397,15 +2455,16 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
     )
     lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     with bld.where(
-        _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
+        _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m"),
         [dsl.mem_token_type()],
     ) as active_a:
         a_tokens: list[dsl.Value] = []
-        _stage_mxfp4_a_scale_regs(
+        _stage_mxfp4_scale_regs(
             bld,
             cfg,
             coords,
             layout,
+            "m",
             load_type,
             lds,
             dep,
@@ -2417,15 +2476,16 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
         with active_a.otherwise():
             bld.yield_([_dep_or_token(bld, dep)])
     with bld.where(
-        _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords),
+        _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "n"),
         [dsl.mem_token_type()],
     ) as active_b:
         b_tokens: list[dsl.Value] = []
-        _stage_mxfp4_b_scale_regs(
+        _stage_mxfp4_scale_regs(
             bld,
             cfg,
             coords,
             layout,
+            "n",
             load_type,
             lds,
             dep,
@@ -2439,11 +2499,12 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
     return bld.join(active_a.results[0], active_b.results[0])
 
 
-def _stage_mxfp4_a_scale_regs(
+def _stage_mxfp4_scale_regs(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
     layout: _Mxfp4ScaleLayout,
+    axis: _Mxfp4ScaleAxis,
     load_type: dsl.Type,
     lds: dsl.Value,
     dep: dsl.Value | None,
@@ -2455,101 +2516,25 @@ def _stage_mxfp4_a_scale_regs(
     local_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = (
         [] if loaded is None else loaded
     )
-    a_pack = cfg.wave_m_tiles % _MXFP4_SCALE_PACK == 0
-    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-    if packed_dword:
-        for packed_idx in range(a_tiles_per_wave):
-            scale_tile = layout.m_wave * a_tiles_per_wave + packed_idx
-            m_tile = (
-                layout.wg_m * (cfg.BM * cfg.wave_m_tiles)
-                + layout.m_wave * cfg.wave_m_tiles
-                + packed_idx * _MXFP4_SCALE_PACK
-            )
-            m = m_tile * 16
-            row_quad = layout.lane_mod16 * 4
-            a_off = bld.index_expr(
-                layout.scale_k * cfg.M + m + row_quad, bindings=layout.bindings
-            )
-            lds_off = bld.index_expr(
-                scale_tile * 512 + layout.lane_scale_group * 128 + row_quad,
-                bindings=layout.bindings,
-            )
-            _append_mxfp4_scale_reg_load(
-                bld,
-                load_type,
-                local_loaded,
-                coords.a_scale_base,
-                a_off,
-                lds,
-                lds_off,
-            )
-        if loaded is None:
-            _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
-        return
-
-    for i in range(cfg.wave_m_tiles):
-        scale_tile = (
-            layout.m_wave * a_tiles_per_wave + i // _MXFP4_SCALE_PACK
-            if a_pack
-            else layout.m_wave * cfg.wave_m_tiles + i
-        )
-        scale_idx = i % _MXFP4_SCALE_PACK if a_pack else 0
-        m_tile = (
-            layout.wg_m * (cfg.BM * cfg.wave_m_tiles)
-            + layout.m_wave * cfg.wave_m_tiles
-            + i
-        )
-        m = m_tile * 16
-        row_quad = layout.lane_mod16 * 4 if row_sliced else 0
-        a_off = bld.index_expr(
-            layout.scale_k * cfg.M + m + row_quad, bindings=layout.bindings
-        )
-        lds_off = bld.index_expr(
-            scale_tile * 512
-            + layout.lane_scale_group * 128
-            + scale_idx * 16
-            + row_quad,
-            bindings=layout.bindings,
-        )
-        _append_mxfp4_scale_reg_load(
-            bld, load_type, local_loaded, coords.a_scale_base, a_off, lds, lds_off
-        )
-    if loaded is None:
-        _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
-
-
-def _stage_mxfp4_b_scale_regs(
-    bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
-    coords: _TileCoords,
-    layout: _Mxfp4ScaleLayout,
-    load_type: dsl.Type,
-    lds: dsl.Value,
-    dep: dsl.Value | None,
-    tokens: list[dsl.Value],
-    row_sliced: bool,
-    packed_dword: bool,
-    loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] | None = None,
-) -> None:
-    local_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = (
-        [] if loaded is None else loaded
+    staging_axis = _mxfp4_scale_staging_axis(
+        cfg, coords, layout, axis, layout.m_wave, layout.n_wave
     )
-    b_pack = cfg.wave_n_tiles % _MXFP4_SCALE_PACK == 0
-    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-    b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
-    b_scale_base = cfg.BM * a_tiles_per_wave
+    global_base = staging_axis.global_base
+    packed_scale_base = staging_axis.packed_scale_base
+    unpacked_scale_base = staging_axis.unpacked_scale_base
+    tile_base = staging_axis.tile_base
+    dimension = staging_axis.dimension
+    tile_count = staging_axis.tile_count
+    tiles_per_wave = staging_axis.tiles_per_wave
+    pack = tile_count % _MXFP4_SCALE_PACK == 0
     if packed_dword:
-        for packed_idx in range(b_tiles_per_wave):
-            scale_tile = b_scale_base + layout.n_wave * b_tiles_per_wave + packed_idx
-            n_tile = (
-                layout.wg_n * (cfg.BN * cfg.wave_n_tiles)
-                + layout.n_wave * cfg.wave_n_tiles
-                + packed_idx * _MXFP4_SCALE_PACK
-            )
-            n = n_tile * 16
+        for packed_idx in range(tiles_per_wave):
+            scale_tile = packed_scale_base + packed_idx
+            tile = tile_base + packed_idx * _MXFP4_SCALE_PACK
             row_quad = layout.lane_mod16 * 4
-            b_off = bld.index_expr(
-                layout.scale_k * cfg.N + n + row_quad, bindings=layout.bindings
+            global_off = bld.index_expr(
+                layout.scale_k * dimension + tile * 16 + row_quad,
+                bindings=layout.bindings,
             )
             lds_off = bld.index_expr(
                 scale_tile * 512 + layout.lane_scale_group * 128 + row_quad,
@@ -2559,8 +2544,8 @@ def _stage_mxfp4_b_scale_regs(
                 bld,
                 load_type,
                 local_loaded,
-                coords.b_scale_base,
-                b_off,
+                global_base,
+                global_off,
                 lds,
                 lds_off,
             )
@@ -2568,22 +2553,18 @@ def _stage_mxfp4_b_scale_regs(
             _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
         return
 
-    for j in range(cfg.wave_n_tiles):
+    for tile_idx in range(tile_count):
         scale_tile = (
-            b_scale_base + layout.n_wave * b_tiles_per_wave + j // _MXFP4_SCALE_PACK
-            if b_pack
-            else b_scale_base + layout.n_wave * cfg.wave_n_tiles + j
+            packed_scale_base + tile_idx // _MXFP4_SCALE_PACK
+            if pack
+            else unpacked_scale_base + tile_idx
         )
-        scale_idx = j % _MXFP4_SCALE_PACK if b_pack else 0
-        n_tile = (
-            layout.wg_n * (cfg.BN * cfg.wave_n_tiles)
-            + layout.n_wave * cfg.wave_n_tiles
-            + j
-        )
-        n = n_tile * 16
+        scale_idx = tile_idx % _MXFP4_SCALE_PACK if pack else 0
+        tile = tile_base + tile_idx
         row_quad = layout.lane_mod16 * 4 if row_sliced else 0
-        b_off = bld.index_expr(
-            layout.scale_k * cfg.N + n + row_quad, bindings=layout.bindings
+        global_off = bld.index_expr(
+            layout.scale_k * dimension + tile * 16 + row_quad,
+            bindings=layout.bindings,
         )
         lds_off = bld.index_expr(
             scale_tile * 512
@@ -2593,7 +2574,7 @@ def _stage_mxfp4_b_scale_regs(
             bindings=layout.bindings,
         )
         _append_mxfp4_scale_reg_load(
-            bld, load_type, local_loaded, coords.b_scale_base, b_off, lds, lds_off
+            bld, load_type, local_loaded, global_base, global_off, lds, lds_off
         )
     if loaded is None:
         _flush_mxfp4_scale_reg_stores(bld, local_loaded, dep, tokens)
@@ -2658,15 +2639,16 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
         for _ in range(cfg.wave_k_tiles * a_tiles_per_wave)
         for item in load_entry_types
     ]
-    a_mask = _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords)
+    a_mask = _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m")
     with bld.where(a_mask, a_result_types) as active_a:
         a_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
         for layout, offset in staged:
-            _stage_mxfp4_a_scale_regs(
+            _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
                 coords,
                 layout,
+                "m",
                 load_type,
                 _scale_shared_memory_base(bld, cfg, offset),
                 dep,
@@ -2683,15 +2665,16 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
         for _ in range(cfg.wave_k_tiles * b_tiles_per_wave)
         for item in load_entry_types
     ]
-    b_mask = _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords)
+    b_mask = _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "n")
     with bld.where(b_mask, b_result_types) as active_b:
         b_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
         for layout, offset in staged:
-            _stage_mxfp4_b_scale_regs(
+            _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
                 coords,
                 layout,
+                "n",
                 load_type,
                 _scale_shared_memory_base(bld, cfg, offset),
                 dep,
@@ -2754,17 +2737,18 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
         offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
         staged.append((_mxfp4_scale_layout(cfg, coords, raw_step), offset))
     with bld.where(
-        _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
+        _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m"),
         [dsl.mem_token_type()],
     ) as active_a:
         a_tokens: list[dsl.Value] = []
         a_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
         for layout, offset in staged:
-            _stage_mxfp4_a_scale_regs(
+            _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
                 coords,
                 layout,
+                "m",
                 load_type,
                 _scale_shared_memory_base(bld, cfg, offset),
                 dep,
@@ -2778,17 +2762,18 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
         with active_a.otherwise():
             bld.yield_([_dep_or_token(bld, dep)])
     with bld.where(
-        _mxfp4_b_scale_regs_cta_mask(bld, cfg, coords),
+        _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "n"),
         [dsl.mem_token_type()],
     ) as active_b:
         b_tokens: list[dsl.Value] = []
         b_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
         for layout, offset in staged:
-            _stage_mxfp4_b_scale_regs(
+            _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
                 coords,
                 layout,
+                "n",
                 load_type,
                 _scale_shared_memory_base(bld, cfg, offset),
                 dep,
@@ -2868,26 +2853,26 @@ def _stage_mxfp4_scale_tiles_dma_after_dep(
             _mxfp4_scale_dma_lane_mask(bld, cfg, coords), [dsl.mem_token_type()]
         ) as active:
             tokens: list[dsl.Value] = []
-            _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, tokens)
-            _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, tokens)
+            _stage_mxfp4_scale_dma(bld, cfg, coords, layout, plan, "m", tokens)
+            _stage_mxfp4_scale_dma(bld, cfg, coords, layout, plan, "n", tokens)
             bld.yield_([_join_tokens(bld, tokens)])
         return active.results[0]
 
     with bld.where(
-        _mxfp4_a_scale_dma_mask(bld, cfg, coords),
+        _mxfp4_scale_dma_mask(bld, cfg, coords, "m"),
         [dsl.mem_token_type()],
     ) as active_a:
         a_tokens: list[dsl.Value] = []
-        _stage_mxfp4_a_scale_dma(bld, cfg, coords, layout, plan, a_tokens)
+        _stage_mxfp4_scale_dma(bld, cfg, coords, layout, plan, "m", a_tokens)
         bld.yield_([_join_tokens(bld, a_tokens)])
         with active_a.otherwise():
             bld.yield_([_dep_or_token(bld, dep)])
     with bld.where(
-        _mxfp4_b_scale_dma_mask(bld, cfg, coords),
+        _mxfp4_scale_dma_mask(bld, cfg, coords, "n"),
         [dsl.mem_token_type()],
     ) as active_b:
         b_tokens: list[dsl.Value] = []
-        _stage_mxfp4_b_scale_dma(bld, cfg, coords, layout, plan, b_tokens)
+        _stage_mxfp4_scale_dma(bld, cfg, coords, layout, plan, "n", b_tokens)
         bld.yield_([_join_tokens(bld, b_tokens)])
         with active_b.otherwise():
             bld.yield_([_dep_or_token(bld, dep)])
@@ -2959,96 +2944,55 @@ def _mxfp4_scale_dma_plan(
     )
 
 
-def _mxfp4_a_scale_dma_mask(
+def _mxfp4_scale_owner_mask(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
+    axis: _Mxfp4ScaleAxis,
+    lane_mask: int,
 ) -> dsl.Value:
+    if axis == "m":
+        owner_kind = dsl.BinaryKind.AndI
+        owner_arg = cfg.BN - 1
+    else:
+        owner_kind = dsl.BinaryKind.ShRUI
+        owner_arg = cfg.log2_BN
     wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
     owner_value = bld.binary(
+        owner_kind,
+        wave_id,
+        bld.splat(bld.constant(dsl.i32(), owner_arg), width=cfg.mma.wave_size),
+    )
+    lane_value = bld.binary(
         dsl.BinaryKind.AndI,
-        wave_id,
-        bld.splat(bld.constant(dsl.i32(), cfg.BN - 1), width=cfg.mma.wave_size),
+        coords.wi,
+        bld.splat(bld.constant(dsl.i32(), lane_mask), width=cfg.mma.wave_size),
     )
-    return _mxfp4_scale_dma_mask_for_owner(bld, cfg, coords, owner_value)
+    active_value = bld.binary(dsl.BinaryKind.OrI, lane_value, owner_value)
+    zero = bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
+    return bld.cmpi("eq", active_value, zero)
 
 
-def _mxfp4_b_scale_dma_mask(
+def _mxfp4_scale_dma_mask(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
+    axis: _Mxfp4ScaleAxis,
 ) -> dsl.Value:
-    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
-    owner_value = bld.binary(
-        dsl.BinaryKind.ShRUI,
-        wave_id,
-        bld.splat(bld.constant(dsl.i32(), cfg.log2_BN), width=cfg.mma.wave_size),
-    )
-    return _mxfp4_scale_dma_mask_for_owner(bld, cfg, coords, owner_value)
+    return _mxfp4_scale_owner_mask(bld, cfg, coords, axis, 39)
 
 
-def _mxfp4_a_scale_regs_cta_mask(
+def _mxfp4_scale_regs_cta_mask(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
-) -> dsl.Value:
-    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
-    owner_value = bld.binary(
-        dsl.BinaryKind.AndI,
-        wave_id,
-        bld.splat(bld.constant(dsl.i32(), cfg.BN - 1), width=cfg.mma.wave_size),
-    )
-    return _mxfp4_scale_regs_cta_mask_for_owner(bld, cfg, coords, owner_value)
-
-
-def _mxfp4_b_scale_regs_cta_mask(
-    bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
-    coords: _TileCoords,
-) -> dsl.Value:
-    wave_id = _mxfp4_scale_dma_wave_id(bld, cfg, coords)
-    owner_value = bld.binary(
-        dsl.BinaryKind.ShRUI,
-        wave_id,
-        bld.splat(bld.constant(dsl.i32(), cfg.log2_BN), width=cfg.mma.wave_size),
-    )
-    return _mxfp4_scale_regs_cta_mask_for_owner(bld, cfg, coords, owner_value)
-
-
-def _mxfp4_scale_regs_cta_mask_for_owner(
-    bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
-    coords: _TileCoords,
-    owner_value: dsl.Value,
+    axis: _Mxfp4ScaleAxis,
 ) -> dsl.Value:
     if _use_mxfp4_scale_reg_packed_dword_staging(cfg):
         lane_mask = 0
     else:
         lane_mask = 12 if _use_mxfp4_scale_reg_dword_staging(cfg) else 15
-    lane_mod16 = bld.binary(
-        dsl.BinaryKind.AndI,
-        coords.wi,
-        bld.splat(bld.constant(dsl.i32(), lane_mask), width=cfg.mma.wave_size),
-    )
-    active_value = bld.binary(dsl.BinaryKind.OrI, lane_mod16, owner_value)
-    zero = bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
-    return bld.cmpi("eq", active_value, zero)
-
-
-def _mxfp4_scale_dma_mask_for_owner(
-    bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
-    coords: _TileCoords,
-    owner_value: dsl.Value,
-) -> dsl.Value:
-    lane_dma = bld.binary(
-        dsl.BinaryKind.AndI,
-        coords.wi,
-        bld.splat(bld.constant(dsl.i32(), 39), width=cfg.mma.wave_size),
-    )
-    active_value = bld.binary(dsl.BinaryKind.OrI, lane_dma, owner_value)
-    zero = bld.splat(bld.constant(dsl.i32(), 0), width=cfg.mma.wave_size)
-    return bld.cmpi("eq", active_value, zero)
+    return _mxfp4_scale_owner_mask(bld, cfg, coords, axis, lane_mask)
 
 
 def _mxfp4_scale_dma_lane_mask(
@@ -3102,30 +3046,36 @@ def _append_mxfp4_scale_dma(
     tokens.append(bld.dma_load_lds(source, lds_off, after=after, bytes=16))
 
 
-def _stage_mxfp4_a_scale_dma(
+def _stage_mxfp4_scale_dma(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
     layout: _Mxfp4ScaleLayout,
     plan: _Mxfp4ScaleDmaPlan,
+    axis: _Mxfp4ScaleAxis,
     tokens: list[dsl.Value],
 ) -> None:
-    a_pack = cfg.wave_m_tiles % _MXFP4_SCALE_PACK == 0
-    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-    for i in range(cfg.wave_m_tiles):
+    staging_axis = _mxfp4_scale_staging_axis(
+        cfg, coords, layout, axis, plan.m_wave, plan.n_wave
+    )
+    global_base = staging_axis.global_base
+    packed_scale_base = staging_axis.packed_scale_base
+    unpacked_scale_base = staging_axis.unpacked_scale_base
+    tile_base = staging_axis.tile_base
+    dimension = staging_axis.dimension
+    tile_count = staging_axis.tile_count
+    pack = tile_count % _MXFP4_SCALE_PACK == 0
+    for tile_idx in range(tile_count):
         scale_tile = (
-            plan.m_wave * a_tiles_per_wave + i // _MXFP4_SCALE_PACK
-            if a_pack
-            else plan.m_wave * cfg.wave_m_tiles + i
+            packed_scale_base + tile_idx // _MXFP4_SCALE_PACK
+            if pack
+            else unpacked_scale_base + tile_idx
         )
-        scale_idx = i % _MXFP4_SCALE_PACK if a_pack else 0
-        m_tile = (
-            layout.wg_m * (cfg.BM * cfg.wave_m_tiles)
-            + plan.m_wave * cfg.wave_m_tiles
-            + i
+        scale_idx = tile_idx % _MXFP4_SCALE_PACK if pack else 0
+        tile = tile_base + tile_idx
+        global_off = bld.index_expr(
+            plan.scale_k * dimension + tile * 16, bindings=plan.bindings
         )
-        m = m_tile * 16
-        a_off = bld.index_expr(plan.scale_k * cfg.M + m, bindings=plan.bindings)
         lds_off = bld.index_expr(
             scale_tile * 128 + scale_idx * 4,
             bindings=plan.first_bindings,
@@ -3134,48 +3084,8 @@ def _stage_mxfp4_a_scale_dma(
             bld,
             plan,
             tokens,
-            coords.a_scale_base,
-            a_off,
-            _mxfp4_scale_dma_dest(bld, plan, lds_off),
-        )
-
-
-def _stage_mxfp4_b_scale_dma(
-    bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
-    coords: _TileCoords,
-    layout: _Mxfp4ScaleLayout,
-    plan: _Mxfp4ScaleDmaPlan,
-    tokens: list[dsl.Value],
-) -> None:
-    b_pack = cfg.wave_n_tiles % _MXFP4_SCALE_PACK == 0
-    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-    b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
-    b_scale_base = cfg.BM * a_tiles_per_wave
-    for j in range(cfg.wave_n_tiles):
-        scale_tile = (
-            b_scale_base + plan.n_wave * b_tiles_per_wave + j // _MXFP4_SCALE_PACK
-            if b_pack
-            else b_scale_base + plan.n_wave * cfg.wave_n_tiles + j
-        )
-        scale_idx = j % _MXFP4_SCALE_PACK if b_pack else 0
-        n_tile = (
-            layout.wg_n * (cfg.BN * cfg.wave_n_tiles)
-            + plan.n_wave * cfg.wave_n_tiles
-            + j
-        )
-        n = n_tile * 16
-        b_off = bld.index_expr(plan.scale_k * cfg.N + n, bindings=plan.bindings)
-        lds_off = bld.index_expr(
-            scale_tile * 128 + scale_idx * 4,
-            bindings=plan.first_bindings,
-        )
-        _append_mxfp4_scale_dma(
-            bld,
-            plan,
-            tokens,
-            coords.b_scale_base,
-            b_off,
+            global_base,
+            global_off,
             _mxfp4_scale_dma_dest(bld, plan, lds_off),
         )
 
@@ -3452,15 +3362,16 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
     lds = _scale_shared_memory_base(bld, cfg, scale_lds_offset)
     load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
     with bld.where(
-        _mxfp4_a_scale_regs_cta_mask(bld, cfg, coords),
+        _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m"),
         [dsl.mem_token_type()],
     ) as active_a:
         a_tokens: list[dsl.Value] = []
-        _stage_mxfp4_a_scale_regs(
+        _stage_mxfp4_scale_regs(
             bld,
             cfg,
             coords,
             layout,
+            "m",
             load_type,
             lds,
             dep,
