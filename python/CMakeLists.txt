@@ -209,13 +209,20 @@ else()
 endif()
 list(JOIN _wave_python_module_names "," WAVE_PYTHON_MODULE_NAMES_CSV)
 
+set(_wave_python_extension_aliases)
 foreach(module_name IN LISTS _wave_python_module_names)
   if(NOT module_name STREQUAL "_mlir")
+    list(APPEND _wave_python_extension_aliases
+      "${WAVE_PYTHON_MLIR_LIBS}/${module_name}${WAVE_PYTHON_MODULE_SUFFIX}")
     add_custom_target(WavePythonModules.extension.${module_name}.dso
       DEPENDS WavePythonModules.extension-links)
   endif()
 endforeach()
-add_custom_target(WavePythonModules.extension-links ALL
+set(_wave_python_extension_links_stamp
+  "${CMAKE_CURRENT_BINARY_DIR}/WavePythonModules.extension-links.stamp")
+add_custom_command(
+  OUTPUT "${_wave_python_extension_links_stamp}"
+  BYPRODUCTS ${_wave_python_extension_aliases}
   COMMAND "${CMAKE_COMMAND}" -DWAVE_PYTHON_MLIR_LIBS=${WAVE_PYTHON_MLIR_LIBS}
           -P "${CMAKE_CURRENT_SOURCE_DIR}/wave-python-cleanup.cmake"
   COMMAND "${CMAKE_COMMAND}"
@@ -224,7 +231,15 @@ add_custom_target(WavePythonModules.extension-links ALL
           -DWAVE_PYTHON_MODULE_SUFFIX=${WAVE_PYTHON_MODULE_SUFFIX}
           -DWAVE_PYTHON_MODULE_NAMES_CSV=${WAVE_PYTHON_MODULE_NAMES_CSV}
           -P "${CMAKE_CURRENT_SOURCE_DIR}/wave-python-link-aliases.cmake"
-  DEPENDS ${WAVE_PYTHON_BUNDLE_TARGET})
+  COMMAND "${CMAKE_COMMAND}" -E touch
+          "${_wave_python_extension_links_stamp}"
+  DEPENDS
+    ${WAVE_PYTHON_BUNDLE_TARGET}
+    "${CMAKE_CURRENT_SOURCE_DIR}/wave-python-cleanup.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/wave-python-link-aliases.cmake"
+  VERBATIM)
+add_custom_target(WavePythonModules.extension-links ALL
+  DEPENDS "${_wave_python_extension_links_stamp}")
 add_dependencies(WavePythonModules
   ${WAVE_PYTHON_BUNDLE_TARGET}
   WavePythonModules.extension-links)
