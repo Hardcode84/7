@@ -14,6 +14,7 @@
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -584,6 +585,29 @@ static void runAnalysisBatchClosure(sym::Store &store) {
                << checkResultName(analysis->check(query)) << "\n";
 }
 
+static void runOrderedGridEquivalence(sym::Store &store) {
+  std::array<sym::PredHandle, 4> facts{
+      mustParsePred(store, "Mod(grid_base, 16) == 0"),
+      mustParsePred(store, "Mod(grid_limit, 16) == 0"),
+      mustParsePred(store, "grid_toggle >= 0"),
+      mustParsePred(store, "grid_toggle <= 1"),
+  };
+  sym::PredHandle lower =
+      mustParsePred(store, "grid_base + 4*grid_toggle < grid_limit");
+  sym::PredHandle upper =
+      mustParsePred(store, "grid_base + 4*grid_toggle + 8 < grid_limit");
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store, facts);
+  SmallVector<sym::PredHandle, 4> lowerForms =
+      analysis->orderedComparisonForms(lower);
+  SmallVector<sym::PredHandle, 4> upperForms =
+      analysis->orderedComparisonForms(upper);
+  bool equivalent = llvm::any_of(lowerForms, [&](sym::PredHandle lhs) {
+    return llvm::is_contained(upperForms, lhs);
+  });
+  llvm::outs() << "analysis-ordered-grid-equivalent: " << boolName(equivalent)
+               << "\n";
+}
+
 static void runAnalysisRejection(sym::Store &store, sym::ExprHandle x,
                                  sym::PredHandle validFacts,
                                  sym::PredHandle invalidFacts) {
@@ -686,6 +710,7 @@ void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
   runAnalysisFactSubstitution(store, x, facts);
   runAnalysisBatchMutation(store, x);
   runAnalysisBatchClosure(store);
+  runOrderedGridEquivalence(store);
   runAnalysisRejection(store, x, facts, invalidFacts);
   runSingletonFactSimplification(store);
   runMaterializationCostQueries(store);

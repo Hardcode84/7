@@ -25,6 +25,7 @@ std::unique_ptr<::mlir::Pass> createWaveAMDDmaZeroFill();
 std::unique_ptr<::mlir::Pass> createWaveLowerSymbolicMemory();
 std::unique_ptr<::mlir::Pass> createWaveLowerRedistribute();
 std::unique_ptr<::mlir::Pass> createWaveMetaSpecialize();
+std::unique_ptr<::mlir::Pass> createWaveOptimizeMasks();
 } // namespace mlir::wave
 #include "llvm/ADT/StringRef.h"
 
@@ -52,6 +53,9 @@ void mlirRegisterWavePasses(void) {
   });
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveLowerRedistribute();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
+    return mlir::wave::createWaveOptimizeMasks();
   });
 }
 

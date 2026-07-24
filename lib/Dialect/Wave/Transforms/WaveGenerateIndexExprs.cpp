@@ -774,14 +774,16 @@ public:
                                 bool requireI32RootRange = false,
                                 bool expandIndexExprRoot = false,
                                 bool foldWaveConstants = false,
-                                bool allowWrappingArithmetic = false)
+                                bool allowWrappingArithmetic = false,
+                                bool modelWrappingArithmetic = false)
       : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
         allowI64Integers(allowI64Integers),
         assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
         requireI32RootRange(requireI32RootRange),
         expandIndexExprRoot(expandIndexExprRoot),
         foldWaveConstants(foldWaveConstants),
-        allowWrappingArithmetic(allowWrappingArithmetic) {}
+        allowWrappingArithmetic(allowWrappingArithmetic),
+        modelWrappingArithmetic(modelWrappingArithmetic) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     return build(value, /*allowRootLeaf=*/false);
@@ -825,14 +827,23 @@ private:
     unsigned index;
   };
 
+  static bool isWrappingArithmeticKind(BinaryKind kind) {
+    return kind == BinaryKind::AddI || kind == BinaryKind::SubI ||
+           kind == BinaryKind::MulI;
+  }
+
   bool canBuildBinary(BinaryOp op) {
     if (canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store))
       return true;
-    if (!allowWrappingArithmetic ||
+    if ((!allowWrappingArithmetic && !modelWrappingArithmetic) ||
         !isSignlessI32StorageType(op.getResult().getType()))
       return false;
-    return op.getKind() == BinaryKind::AddI ||
-           op.getKind() == BinaryKind::SubI || op.getKind() == BinaryKind::MulI;
+    return isWrappingArithmeticKind(op.getKind());
+  }
+
+  bool shouldModelWrappingBinary(BinaryOp op) {
+    return modelWrappingArithmetic && isWrappingArithmeticKind(op.getKind()) &&
+           !rangeProvesNoSignedOverflow(op, solver, store);
   }
 
   static bool isMaskSelect(SelectOp select) {
@@ -1195,6 +1206,13 @@ private:
       skip = true;
       return failure();
     }
+    if (shouldModelWrappingBinary(op))
+      return buildWrappingBinary(op, skip, depth);
+    return buildNonWrappingBinary(op, skip, depth);
+  }
+
+  FailureOr<sym::ExprHandle> buildNonWrappingBinary(BinaryOp op, bool &skip,
+                                                    unsigned depth) {
     switch (op.getKind()) {
     case BinaryKind::ShLI:
       return buildShift(op, skip, depth);
@@ -1211,6 +1229,32 @@ private:
     default:
       return buildPlainBinary(op, skip, depth);
     }
+  }
+
+  FailureOr<sym::ExprHandle> buildWrappingBinary(BinaryOp op, bool &skip,
+                                                 unsigned depth) {
+    FailureOr<sym::ExprHandle> value = buildPlainBinary(op, skip, depth);
+    if (skip || failed(value))
+      return failure();
+    if (sym::provablyInRange(store, *value, offset.assumptions,
+                             -(int64_t{1} << 31), (int64_t{1} << 31) - 1))
+      return value;
+    FailureOr<sym::ExprHandle> bias =
+        sym::composeExprInt(store, int64_t{1} << 31);
+    FailureOr<sym::ExprHandle> modulus =
+        sym::composeExprInt(store, int64_t{1} << 32);
+    if (failed(bias) || failed(modulus))
+      return failure();
+    FailureOr<sym::ExprHandle> biased =
+        sym::composeExprBinary(store, *value, sym::ExprBinaryOp::Add, *bias);
+    if (failed(biased))
+      return failure();
+    FailureOr<sym::ExprHandle> wrapped = sym::composeExprBinary(
+        store, *biased, sym::ExprBinaryOp::Mod, *modulus);
+    if (failed(wrapped))
+      return failure();
+    return sym::composeExprBinary(store, *wrapped, sym::ExprBinaryOp::Sub,
+                                  *bias);
   }
 
   FailureOr<sym::ExprHandle> buildSelect(SelectOp op, bool &skip,
@@ -1523,7 +1567,37 @@ private:
                                                        offset.assumptions)))
         return failure();
     }
+    if (modelWrappingArithmetic &&
+        failed(appendCongruenceTightenedI32Range(value, name)))
+      return failure();
     return success();
+  }
+
+  LogicalResult appendCongruenceTightenedI32Range(Value value, StringRef name) {
+    if (!isSignlessI32StorageType(value.getType()))
+      return success();
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        sym::Analysis::create(store, offset.assumptions);
+    FailureOr<sym::ExprHandle> expression = symbolExpr(store, name);
+    if (failed(analysis) || failed(expression))
+      return failure();
+    std::optional<sym::Congruence> congruence =
+        (*analysis)->getSymbolCongruence(*expression);
+    if (!congruence || congruence->modulus <= 1)
+      return success();
+
+    int64_t modulus = congruence->modulus;
+    auto positiveMod = [modulus](__int128 value) {
+      int64_t remainder = value % modulus;
+      return remainder < 0 ? remainder + modulus : remainder;
+    };
+    int64_t lo = -(int64_t{1} << 31);
+    int64_t hi = (int64_t{1} << 31) - 1;
+    lo += positiveMod(static_cast<__int128>(congruence->residue) - lo);
+    hi -= positiveMod(static_cast<__int128>(hi) - congruence->residue);
+    if (lo > hi)
+      return success();
+    return appendSignedRangeAssumption(store, name, lo, hi, offset.assumptions);
   }
 
   std::optional<SignedI64Range> inferI32RootRange(Value value) {
@@ -1683,6 +1757,7 @@ private:
   bool expandIndexExprRoot = false;
   bool foldWaveConstants = false;
   bool allowWrappingArithmetic = false;
+  bool modelWrappingArithmetic = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -1718,6 +1793,18 @@ mlir::wave::buildSymbolicPacketPredicateRelation(Value value,
       /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
       /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
       /*foldWaveConstants=*/true, /*allowWrappingArithmetic=*/true);
+  return builder.buildPredicate(value);
+}
+
+FailureOr<std::optional<SymbolicPredicate>>
+mlir::wave::buildSymbolicMaskPredicate(Value value, WaveDialect &dialect,
+                                       DataFlowSolver &solver) {
+  SymbolicValueBuilder builder(
+      dialect, solver, /*allowI64Integers=*/false,
+      /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
+      /*foldWaveConstants=*/true, /*allowWrappingArithmetic=*/false,
+      /*modelWrappingArithmetic=*/true);
   return builder.buildPredicate(value);
 }
 

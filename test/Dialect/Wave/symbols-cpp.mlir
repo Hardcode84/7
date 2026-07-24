@@ -76,6 +76,7 @@
 // CHECK: analysis-direct-batch-closure: unknown
 // CHECK: analysis-create-batch-closure: true
 // CHECK: analysis-assume-batch-closure: true
+// CHECK: analysis-ordered-grid-equivalent: true
 // CHECK: analysis-or-factory-rejected: true
 // CHECK: analysis-partial-factory-rejected: true
 // CHECK: analysis-or-mutator-rejected: true

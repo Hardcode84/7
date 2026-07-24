@@ -54,6 +54,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveLowerTokenSelects.cpp
   WaveMetaSpecialize.cpp
   WaveNormalizePointerOffsets.cpp
+  WaveOptimizeMasks.cpp
   WavePromoteGlobalToBuffer.cpp
   WaveResolveAllocs.cpp
   WaveSetTargetAttr.cpp

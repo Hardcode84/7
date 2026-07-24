@@ -24,6 +24,7 @@
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Mutex.h"
 
@@ -428,6 +429,8 @@ public:
   CheckResult check(PredHandle pred);
   CheckResult equivalent(ExprHandle lhs, ExprHandle rhs);
   CheckResult equivalent(PredHandle lhs, PredHandle rhs);
+  /// Return equivalent normalized forms for an ordered comparison.
+  llvm::SmallVector<PredHandle, 4> orderedComparisonForms(PredHandle predicate);
   CheckResult defined(ExprHandle expr);
   CheckResult defined(PredHandle pred);
   CheckResult integerValued(ExprHandle expr);
