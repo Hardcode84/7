@@ -4745,12 +4745,12 @@ struct RegionCollector {
 };
 
 static bool hasAnyWaveMachineOp(func::FuncOp func) {
-  bool found = false;
-  func.walk([&](Operation *op) {
-    if (op != func.getOperation() && isWaveAMDMachineOpForScheduling(op))
-      found = true;
+  WalkResult walk = func.walk([&](Operation *op) {
+    if (op == func.getOperation() || !isWaveAMDMachineOpForScheduling(op))
+      return WalkResult::advance();
+    return WalkResult::interrupt();
   });
-  return found;
+  return walk.wasInterrupted();
 }
 
 static FailureOr<MultiWaveRegionLists>
@@ -4900,10 +4900,12 @@ struct WaveAMDMachineSchedulePass
   }
 
   bool shouldScheduleFunction(func::FuncOp func) const {
-    if (func.isExternal() || !hasAnyWaveMachineOp(func))
+    if (func.isExternal())
       return false;
-    return !applySchedule || !requireSelectedInput ||
-           func->hasAttr(kScheduleInputAttr);
+    if (applySchedule && requireSelectedInput &&
+        !func->hasAttr(kScheduleInputAttr))
+      return false;
+    return hasAnyWaveMachineOp(func);
   }
 
   LogicalResult emitGreedyFailure(const GreedyRegion &region,
