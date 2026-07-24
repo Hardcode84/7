@@ -3319,12 +3319,30 @@ def WaveAMDMachine_SAndB32Op
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SAndB64Op
+    : WaveAMDMachine_Op<"s_and_b64", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "scalar 64-bit bitwise AND";
+  let arguments = (ins WaveAMDMachine_SGPR2:$lhs,
+                       WaveAMDMachine_SGPR2:$rhs);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
 def WaveAMDMachine_SOrB32Op
     : WaveAMDMachine_Op<"s_or_b32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit bitwise OR";
   let arguments = (ins WaveAMDMachine_SGPR1OrImm:$lhs,
                        WaveAMDMachine_SGPR1OrImm:$rhs);
   let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SOrB64Op
+    : WaveAMDMachine_Op<"s_or_b64", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "scalar 64-bit bitwise OR";
+  let arguments = (ins WaveAMDMachine_SGPR2:$lhs,
+                       WaveAMDMachine_SGPR2:$rhs);
+  let results = (outs WaveAMDMachine_SGPR2:$result, WaveAMDMachine_SCC:$scc);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 

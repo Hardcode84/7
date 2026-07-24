@@ -228,6 +228,54 @@ module attributes {transform.with_named_sequence} {
           : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
     }
 
+    // CHECK-LABEL: func.func @remat_relief_rebuilds_wide_scalar_bitwise(
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK-SAME: [[LHS:%[^:]+]]: !waveamdmachine.reg<sgpr, 2>
+    // CHECK-SAME: [[RHS:%[^:]+]]: !waveamdmachine.reg<sgpr, 2>
+    // CHECK: waveamdmachine.uniform_loop
+    // CHECK: [[AND:%.*]], %{{.*}} = waveamdmachine.s_and_b64 [[LHS]], [[RHS]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[OR:%.*]], %{{.*}} = waveamdmachine.s_or_b64 [[AND]], [[LHS]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NEXT: [[USE:%.*]], %{{.*}} = waveamdmachine.s_xor_b64 [[OR]], [[RHS]]
+    // CHECK: return [[LHS]], [[USE]]
+    func.func @remat_relief_rebuilds_wide_scalar_bitwise(
+        %lhs: !waveamdmachine.reg<sgpr, 2>,
+        %rhs: !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+        attributes {waveamdmachine.sgpr_count_max = 6 : i64,
+                    waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %and, %scc0 = waveamdmachine.s_and_b64 %lhs, %rhs
+          : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+            -> (!waveamdmachine.reg<sgpr, 2>,
+                !waveamdmachine.reg<scc, 1>)
+      %root, %scc1 = waveamdmachine.s_or_b64 %and, %lhs
+          : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+            -> (!waveamdmachine.reg<sgpr, 2>,
+                !waveamdmachine.reg<scc, 1>)
+      %cond = waveamdmachine.s_cmp_lt_i32 %zero, %one
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %a = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+        %b = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+        %sum, %scc2 = waveamdmachine.s_add_i32 %a, %b
+            : (!waveamdmachine.reg<sgpr, 1>,
+               !waveamdmachine.reg<sgpr, 1>)
+              -> (!waveamdmachine.reg<sgpr, 1>,
+                  !waveamdmachine.reg<scc, 1>)
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      %use, %scc3 = waveamdmachine.s_xor_b64 %root, %rhs
+          : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+            -> (!waveamdmachine.reg<sgpr, 2>,
+                !waveamdmachine.reg<scc, 1>)
+      return %lhs, %use
+          : !waveamdmachine.reg<sgpr, 2>,
+            !waveamdmachine.reg<sgpr, 2>
+    }
+
     // CHECK-LABEL: func.func @remat_relief_rebuilds_undominated_use_groups(
     // CHECK-SAME: waveamdmachine.regalloc_assignments
     // CHECK-SAME: stage = "linear-scan-success"

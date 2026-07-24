@@ -21,7 +21,9 @@
   X(sFlbitI32B32, S_FLBIT_I32_B32_vi, S_FLBIT_I32_B32_gfx11)                   \
   X(sFlbitI32B64, S_FLBIT_I32_B64_vi, S_FLBIT_I32_B64_gfx11)                   \
   X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
+  X(sAndB64, S_AND_B64_vi, S_AND_B64_gfx11)                                    \
   X(sOrB32, S_OR_B32_vi, S_OR_B32_gfx11)                                       \
+  X(sOrB64, S_OR_B64_vi, S_OR_B64_gfx11)                                       \
   X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
   X(sXorB64, S_XOR_B64_vi, S_XOR_B64_gfx11)                                    \
   X(sAndn2B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                              \

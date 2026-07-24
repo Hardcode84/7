@@ -485,7 +485,9 @@ private:
   unsigned sFlbitI32B32() const { return opcodes.sFlbitI32B32; }
   unsigned sFlbitI32B64() const { return opcodes.sFlbitI32B64; }
   unsigned sAndB32() const { return opcodes.sAndB32; }
+  unsigned sAndB64() const { return opcodes.sAndB64; }
   unsigned sOrB32() const { return opcodes.sOrB32; }
+  unsigned sOrB64() const { return opcodes.sOrB64; }
   unsigned sXorB32() const { return opcodes.sXorB32; }
   unsigned sXorB64() const { return opcodes.sXorB64; }
   unsigned sAndn2B32() const { return opcodes.sAndn2B32; }
@@ -3145,8 +3147,16 @@ private:
       return emitMC(sAndB32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SAndB64Op>(op))
+      return emitMC(sAndB64(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SOrB32Op>(op))
       return emitMC(sOrB32(), {toMCOperand(op.getResult(0)),
+                               toMCOperand(op.getOperand(0)),
+                               toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SOrB64Op>(op))
+      return emitMC(sOrB64(), {toMCOperand(op.getResult(0)),
                                toMCOperand(op.getOperand(0)),
                                toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SXorB32Op>(op))

@@ -1,12 +1,16 @@
 // RUN: wave-opt --waveamd-to-machine --verify-diagnostics %s | FileCheck %s --check-prefix=SELECT
+// RUN: wave-opt --waveamd-to-machine %s | wave-translate --wave-to-amdgpu-asm - | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx942 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
 // SELECT-LABEL: func.func @select_mask64_and_false
-// SELECT: waveamdmachine.s_and_b32
-// SELECT: waveamdmachine.s_and_b32
+// SELECT: waveamdmachine.s_and_b64
+// SELECT-NOT: waveamdmachine.s_and_b32
 // SELECT-NOT: waveamdmachine.s_xor_b32
+// ASM-LABEL: select_mask64_and_false:
+// ASM: s_and_b64
+// ASM-NOT: s_and_b32
 func.func @select_mask64_and_false(%limit: i32, %other: i32) -> i64 {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 64>

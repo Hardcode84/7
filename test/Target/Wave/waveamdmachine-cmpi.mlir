@@ -106,17 +106,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100",
 // CHECK: waveamdmachine.v_cmp_gt_u32
 // CHECK: waveamdmachine.v_cmp_eq_u32
 // CHECK: waveamdmachine.v_cmp_ge_u32
-// CHECK: waveamdmachine.tuple_to_elements
-// CHECK: waveamdmachine.s_and_b32
-// CHECK: waveamdmachine.s_or_b32
-// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.s_and_b64
+// CHECK: waveamdmachine.s_or_b64
 // CHECK: waveamdmachine.v_cmp_gt_i32
 // CHECK: waveamdmachine.v_cmp_eq_u32
 // CHECK: waveamdmachine.v_cmp_ge_u32
-// CHECK: waveamdmachine.tuple_to_elements
-// CHECK: waveamdmachine.s_and_b32
-// CHECK: waveamdmachine.s_or_b32
-// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.s_and_b64
+// CHECK: waveamdmachine.s_or_b64
 func.func @i64_cmpi_gfx1100_wave64(%vlhs: !wave.simd<i64, 64>,
                                    %vrhs: !wave.simd<i64, 64>) {
   %uge = wave.cmpi uge %vlhs, %vrhs
@@ -144,10 +140,8 @@ func.func @index_cmpi_gfx1100_wave64(%vlhs: !wave.simd<index, 64>,
 // CHECK: waveamdmachine.v_cmp_gt_i32
 // CHECK: waveamdmachine.v_cmp_eq_u32
 // CHECK: waveamdmachine.v_cmp_ge_u32
-// CHECK: waveamdmachine.tuple_to_elements
-// CHECK: waveamdmachine.s_and_b32
-// CHECK: waveamdmachine.s_or_b32
-// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.s_and_b64
+// CHECK: waveamdmachine.s_or_b64
 func.func @wide_index_cmpi_gfx1100_wave64() {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %lhs = wave.index_expr <"4294967296 + lid"> ["lid"](%lane)
@@ -170,17 +164,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 // CHECK: waveamdmachine.v_cmp_gt_u32_vcc
 // CHECK: waveamdmachine.v_cmp_eq_u32_vcc
 // CHECK: waveamdmachine.v_cmp_ge_u32_vcc
-// CHECK: waveamdmachine.tuple_to_elements
-// CHECK: waveamdmachine.s_and_b32
-// CHECK: waveamdmachine.s_or_b32
-// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.s_and_b64
+// CHECK: waveamdmachine.s_or_b64
 // CHECK: waveamdmachine.v_cmp_gt_i32_vcc
 // CHECK: waveamdmachine.v_cmp_eq_u32_vcc
 // CHECK: waveamdmachine.v_cmp_ge_u32_vcc
-// CHECK: waveamdmachine.tuple_to_elements
-// CHECK: waveamdmachine.s_and_b32
-// CHECK: waveamdmachine.s_or_b32
-// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.s_and_b64
+// CHECK: waveamdmachine.s_or_b64
 func.func @i64_cmpi_gfx803(%vlhs: !wave.simd<i64, 64>,
                            %vrhs: !wave.simd<i64, 64>) {
   %uge = wave.cmpi uge %vlhs, %vrhs

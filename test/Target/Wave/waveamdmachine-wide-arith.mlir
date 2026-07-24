@@ -5,9 +5,13 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PRINT-LABEL: func.func @wide_xor_machine
+// PRINT: waveamdmachine.s_and_b64
+// PRINT: waveamdmachine.s_or_b64
 // PRINT: waveamdmachine.s_xor_b64
 // PRINT: waveamdmachine.v_xor_b64
 // ASM-LABEL: wide_xor_machine:
+// ASM-DAG: s_and_b64
+// ASM-DAG: s_or_b64
 // ASM-DAG: s_xor_b64
 // ASM-DAG: v_xor_b32
 // ASM-DAG: v_xor_b32
@@ -16,7 +20,13 @@ func.func @wide_xor_machine(%out: !wave.ptr<#wave.global, i32>)
   %a = waveamdmachine.arg {index = 0 : i64, pointer = true}
       : !waveamdmachine.reg<sgpr, 2>
   %b = waveamdmachine.s_mov_b64_imm 7 : !waveamdmachine.reg<sgpr, 2>
-  %sx, %scc = waveamdmachine.s_xor_b64 %a, %b
+  %sa, %scc0 = waveamdmachine.s_and_b64 %a, %b
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
+  %so, %scc1 = waveamdmachine.s_or_b64 %a, %b
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
+  %sx, %scc2 = waveamdmachine.s_xor_b64 %sa, %so
       : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
         -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
   %voff = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>

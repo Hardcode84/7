@@ -1089,6 +1089,21 @@ static Value createWideBitwiseWord(WaveAMDMachineSelector &S, Location loc,
 static Value bitwiseWide(WaveAMDMachineSelector &S, Location loc,
                          BinaryKind kind, Value lhs, Value rhs) {
   bool vgpr = isVGPR(lhs) || isVGPR(rhs);
+  if (!vgpr) {
+    Type resultType =
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR, 2);
+    Type scc = getSCCType(S.builder.getContext());
+    lhs = ensureSGPR2(S, loc, lhs);
+    rhs = ensureSGPR2(S, loc, rhs);
+    if (kind == BinaryKind::AndI)
+      return waveamdmachine::SAndB64Op::create(S.builder, loc, resultType, scc,
+                                               lhs, rhs)
+          .getResult();
+    return waveamdmachine::SOrB64Op::create(S.builder, loc, resultType, scc,
+                                            lhs, rhs)
+        .getResult();
+  }
+
   waveamdmachine::RegClass regClass =
       vgpr ? waveamdmachine::RegClass::VGPR : waveamdmachine::RegClass::SGPR;
   Type wordType = getRegType(S.builder.getContext(), regClass, 1);
@@ -5288,9 +5303,23 @@ static Value gatherMaskWords(WaveAMDMachineSelector &S, Location loc,
 
 enum class MaskCombiner { And, Or };
 
+static unsigned getRegisterWidth(Value value) {
+  waveamdmachine::RegType type =
+      dyn_cast<waveamdmachine::RegType>(value.getType());
+  return type ? type.getWidth() : 0;
+}
+
 static Value combineMasks(WaveAMDMachineSelector &S, Location loc, Value lhs,
                           Value rhs, MaskCombiner combiner,
                           unsigned width = 0) {
+  unsigned maskWidth =
+      width ? width : std::max(getRegisterWidth(lhs), getRegisterWidth(rhs));
+  if (maskWidth == 2)
+    return bitwiseWide(S, loc,
+                       combiner == MaskCombiner::And ? BinaryKind::AndI
+                                                     : BinaryKind::OrI,
+                       lhs, rhs);
+
   SmallVector<Value, 2> lhsWords = splitMaskWords(S, loc, lhs, width);
   SmallVector<Value, 2> rhsWords = splitMaskWords(S, loc, rhs, width);
   assert(lhsWords.size() == rhsWords.size() && "mask word counts must match");

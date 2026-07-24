@@ -49,8 +49,8 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
   return isa<waveamdmachine::SAddI32Op, waveamdmachine::SAddM0I32Op,
              waveamdmachine::SAddU64Op, waveamdmachine::SAddU64U32Op,
              waveamdmachine::DmaIssueDelayOp, waveamdmachine::SAndB32Op,
-             waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndn2ExecB64Op,
-             waveamdmachine::SAndSaveexecB32Op,
+             waveamdmachine::SAndB64Op, waveamdmachine::SAndn2ExecB32Op,
+             waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SAndSaveexecB32Op,
              waveamdmachine::SAndSaveexecB64Op, waveamdmachine::SCmpEqI32Op,
              waveamdmachine::SCmpLgI32Op, waveamdmachine::SCmpGtI32Op,
              waveamdmachine::SCmpGeI32Op, waveamdmachine::SCmpLtI32Op,
@@ -69,8 +69,8 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
              waveamdmachine::SMulU64Op, waveamdmachine::SFf1I32B32Op,
              waveamdmachine::SFf1I32B64Op, waveamdmachine::SFlbitI32B32Op,
              waveamdmachine::SFlbitI32B64Op, waveamdmachine::SOrB32Op,
-             waveamdmachine::SReadVccB32Op, waveamdmachine::SSetprioOp,
-             waveamdmachine::SGetregShaderCyclesOp,
+             waveamdmachine::SOrB64Op, waveamdmachine::SReadVccB32Op,
+             waveamdmachine::SSetprioOp, waveamdmachine::SGetregShaderCyclesOp,
              waveamdmachine::SGetregHwIdOp, waveamdmachine::SXorB32Op,
              waveamdmachine::SXorB64Op, waveamdmachine::CopyTupleOp>(op);
 }
