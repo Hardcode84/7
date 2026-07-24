@@ -187,3 +187,5 @@
 // PIPELINE-NEXT: "require-selected-input" = true }
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.include @waveamd_backend_postschedule
+// PIPELINE: transform.named_sequence @waveamd_backend_emit_only
+// PIPELINE: transform.yield %root : !transform.any_op

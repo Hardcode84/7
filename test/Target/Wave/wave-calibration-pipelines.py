@@ -257,6 +257,12 @@ def check_post_regalloc(label: str, post_passes: list[str]) -> None:
     )
 
 
+def check_emit_only(label: str, emit_only) -> None:
+    ops = body_ops(emit_only)
+    require(label, len(ops) == 1, "emit-only entry should only yield")
+    require(label, ops[0].name == "transform.yield", "emit-only entry mutates IR")
+
+
 def check_calibration_entry(label: str, module) -> None:
     kwargs = {
         "schedule_options": {"apply-schedule": True},
@@ -279,6 +285,7 @@ def check_calibration_entry(label: str, module) -> None:
         )
         post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
         require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
+        emit_only = require_sequence(ir, parsed, label, module.EMIT_ONLY_ENTRY_POINT)
         check_backend_entry(label, ir, entry)
         check_preschedule(label, ir, preschedule)
         check_postschedule(label, ir, postschedule)
@@ -286,6 +293,7 @@ def check_calibration_entry(label: str, module) -> None:
         check_default_finish(label, ir, finish)
         check_transform_finish(label, ir, transform_finish)
         check_post_regalloc(label, applied_passes(ir, post))
+        check_emit_only(label, emit_only)
     print(f"{label}: ok")
 
 

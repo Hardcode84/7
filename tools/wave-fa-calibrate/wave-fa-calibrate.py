@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples/wave/flash_attention.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-fa-calibrate/wave-fa-calibrate-runner.cpp"
 KERNEL_NAME = "flash_attention_f32"
+EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
 sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
 
 from common import default_build_dir, extract_kernel_op, resolve_llvm_tool  # noqa: E402
@@ -327,30 +328,61 @@ def detect_asm_chip(source: Path) -> str:
     return match.group(1)
 
 
-def lower_hsaco(
-    build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
+def lower_asm(
+    build_dir: Path,
+    source: Path,
+    pipeline: Path,
+    tmp: Path,
+    name: str,
+    *,
+    entry_point: str | None = None,
 ) -> Path:
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
     wave_translate = build_dir / "bin/wave-translate"
-    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
-    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
-    for tool in (wave_translate, llvm_mc, ld_lld):
-        if not tool.exists():
-            sys.exit(f"required tool missing: {tool}")
+    if not wave_translate.exists():
+        sys.exit(f"required tool missing: {wave_translate}")
     env = os.environ.copy()
     env["WAVE_PIPELINES_DIR"] = str(pipeline.parent)
+    if entry_point is not None:
+        env["WAVE_PIPELINE_ENTRY_POINT"] = entry_point
     asm = variant_tmp / f"{name}.s"
-    obj = variant_tmp / f"{name}.o"
-    hsaco = variant_tmp / f"{name}.hsaco"
     asm.write_text(
         run([str(wave_translate), "--wave-to-amdgpu-asm", str(source)], env=env)
     )
+    return asm
+
+
+def emit_machine_asm(
+    build_dir: Path, machine: Path, pipeline: Path, tmp: Path, name: str
+) -> Path:
+    return lower_asm(
+        build_dir,
+        machine,
+        pipeline,
+        tmp,
+        name,
+        entry_point=EMIT_ONLY_ENTRY_POINT,
+    )
+
+
+def assemble_hsaco(
+    build_dir: Path, asm: Path, target_ir: Path, tmp: Path, name: str
+) -> Path:
+    variant_tmp = tmp / name
+    variant_tmp.mkdir(parents=True, exist_ok=True)
+    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
+    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
+    for tool in (llvm_mc, ld_lld):
+        if not tool.exists():
+            sys.exit(f"required tool missing: {tool}")
+    obj = variant_tmp / f"{name}.o"
+    hsaco = variant_tmp / f"{name}.hsaco"
     run(
         [
             str(llvm_mc),
             "-triple=amdgcn-amd-amdhsa",
-            f"-mcpu={detect_asm_chip(source)}",
+            f"-mcpu={detect_asm_chip(target_ir)}",
             "-filetype=obj",
             "-o",
             str(obj),
@@ -467,7 +499,8 @@ def run_variant(
     sim_cycles = run_sim_report(args.build_dir, machine, args)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
-    hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
+    asm = emit_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name)
+    hsaco = assemble_hsaco(args.build_dir, asm, machine, tmp, variant.name)
     hw_cycles, hw_us, hw_check = run_hw_repeats(runner, hsaco, args)
     return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
 

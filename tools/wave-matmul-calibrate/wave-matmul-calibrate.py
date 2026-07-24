@@ -31,6 +31,7 @@ V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
+EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
 sys.path.insert(0, str(REPO_ROOT / "examples" / "wave"))
 
 from common import default_build_dir, resolve_llvm_tool  # noqa: E402
@@ -678,7 +679,13 @@ def lower_machine(
 
 
 def lower_asm(
-    build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
+    build_dir: Path,
+    source: Path,
+    pipeline: Path,
+    tmp: Path,
+    name: str,
+    *,
+    entry_point: str | None = None,
 ) -> Path:
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
@@ -687,6 +694,8 @@ def lower_asm(
         sys.exit(f"required tool missing: {wave_translate}")
     env = os.environ.copy()
     env["WAVE_PIPELINES_DIR"] = str(pipeline.parent)
+    if entry_point is not None:
+        env["WAVE_PIPELINE_ENTRY_POINT"] = entry_point
     asm = variant_tmp / f"{name}.s"
     asm.write_text(
         run([str(wave_translate), "--wave-to-amdgpu-asm", str(source)], env=env)
@@ -694,8 +703,34 @@ def lower_asm(
     return asm
 
 
-def lower_hsaco(
-    build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
+def emit_machine_asm(
+    build_dir: Path, machine: Path, pipeline: Path, tmp: Path, name: str
+) -> Path:
+    return lower_asm(
+        build_dir,
+        machine,
+        pipeline,
+        tmp,
+        name,
+        entry_point=EMIT_ONLY_ENTRY_POINT,
+    )
+
+
+def ensure_machine_asm(
+    build_dir: Path,
+    machine: Path,
+    pipeline: Path,
+    tmp: Path,
+    name: str,
+    asm: Path | None,
+) -> Path:
+    if asm is not None:
+        return asm
+    return emit_machine_asm(build_dir, machine, pipeline, tmp, name)
+
+
+def assemble_hsaco(
+    build_dir: Path, asm: Path, target_ir: Path, tmp: Path, name: str
 ) -> Path:
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
@@ -704,14 +739,13 @@ def lower_hsaco(
     for tool in (llvm_mc, ld_lld):
         if not tool.exists():
             sys.exit(f"required tool missing: {tool}")
-    asm = lower_asm(build_dir, source, pipeline, tmp, name)
     obj = variant_tmp / f"{name}.o"
     hsaco = variant_tmp / f"{name}.hsaco"
     run(
         [
             str(llvm_mc),
             "-triple=amdgcn-amd-amdhsa",
-            f"-mcpu={detect_asm_chip(source)}",
+            f"-mcpu={detect_asm_chip(target_ir)}",
             "-filetype=obj",
             "-o",
             str(obj),
@@ -720,6 +754,13 @@ def lower_hsaco(
     )
     run([str(ld_lld), "-shared", str(obj), "-o", str(hsaco)])
     return hsaco
+
+
+def lower_hsaco(
+    build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
+) -> Path:
+    asm = lower_asm(build_dir, source, pipeline, tmp, name)
+    return assemble_hsaco(build_dir, asm, source, tmp, name)
 
 
 def detect_asm_chip(source: Path) -> str:
@@ -1058,14 +1099,16 @@ def run_variant(
         shutil.copyfile(asm, emit_asm)
         return VariantResult(variant.name, None, [], [], None)
     machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
+    asm = None
     if emit_asm is not None:
-        asm = lower_asm(args.build_dir, source, pipeline, tmp, variant.name)
+        asm = emit_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name)
         emit_asm.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(asm, emit_asm)
     sim_cycles = run_sim_report(args.build_dir, machine, args)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
-    hsaco = lower_hsaco(args.build_dir, source, pipeline, tmp, variant.name)
+    asm = ensure_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name, asm)
+    hsaco = assemble_hsaco(args.build_dir, asm, machine, tmp, variant.name)
     hw_cycles, hw_us, hw_check = run_hw_repeats(runner, hsaco, args)
     return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
 

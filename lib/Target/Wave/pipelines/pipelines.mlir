@@ -282,6 +282,11 @@ module attributes {transform.with_named_sequence} {
     transform.yield %r1 : !transform.any_op
   }
 
+  transform.named_sequence @waveamd_backend_emit_only(
+      %root: !transform.any_op) -> !transform.any_op {
+    transform.yield %root : !transform.any_op
+  }
+
   // Default entry: the wave-to-AMDGPU backend. `wave-translate` picks
   // this up implicitly via `__transform_main`.
   transform.named_sequence @__transform_main(
