@@ -8896,6 +8896,8 @@ LogicalResult WaveAMDMachineSelector::selectWhere(WhereOp op) {
     return failure();
 
   Value condition = expect(op.getCondition(), op);
+  if (isImm(condition))
+    condition = materializeSGPR1(op.getLoc(), condition);
   if (failed(createStructuredWhere(*this, op, condition)))
     return failure();
   eraseIfTopLevel(op);
