@@ -1341,6 +1341,22 @@ struct AllocationAnalysis {
   std::unique_ptr<OperationOrder> order;
 };
 
+struct AllocationOps {
+  SmallVector<AllocOp> allocs;
+  SmallVector<AllocReleaseOp> releases;
+};
+
+static AllocationOps collectAllocationOps(Operation *root) {
+  AllocationOps ops;
+  root->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (AllocOp alloc = dyn_cast<AllocOp>(op))
+      ops.allocs.push_back(alloc);
+    else if (AllocReleaseOp release = dyn_cast<AllocReleaseOp>(op))
+      ops.releases.push_back(release);
+  });
+  return ops;
+}
+
 static LogicalResult analyzeAllocations(func::FuncOp func,
                                         ArrayRef<AllocOp> ops,
                                         ArrayRef<AllocReleaseOp> releases,
@@ -1407,13 +1423,10 @@ findLargestAlignedGap(ArrayRef<PlacedAllocation> blocked, int64_t baseOffset,
 static LogicalResult analyzeCurrentAllocations(func::FuncOp func,
                                                int64_t fixedBytes,
                                                AllocationAnalysis &analysis) {
-  SmallVector<AllocOp> ops;
-  SmallVector<AllocReleaseOp> releases;
-  func.walk([&](AllocOp op) { ops.push_back(op); });
-  func.walk([&](AllocReleaseOp op) { releases.push_back(op); });
-  if (ops.empty())
+  AllocationOps ops = collectAllocationOps(func);
+  if (ops.allocs.empty())
     return success();
-  if (failed(analyzeAllocations(func, ops, releases, analysis)))
+  if (failed(analyzeAllocations(func, ops.allocs, ops.releases, analysis)))
     return failure();
   if (failed(assignOffsets(analysis.allocs, fixedBytes, *analysis.ordering)))
     return failure();
@@ -1471,11 +1484,8 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
   if (func.isExternal())
     return success();
 
-  SmallVector<AllocOp> ops;
-  SmallVector<AllocReleaseOp> releases;
-  func.walk([&](AllocOp op) { ops.push_back(op); });
-  func.walk([&](AllocReleaseOp op) { releases.push_back(op); });
-  if (ops.empty() && releases.empty())
+  AllocationOps ops = collectAllocationOps(func);
+  if (ops.allocs.empty() && ops.releases.empty())
     return success();
 
   FailureOr<int64_t> fixedBytes = getFixedLDSBytes(func);
@@ -1483,10 +1493,10 @@ static LogicalResult resolveFuncAllocs(func::FuncOp func,
     return failure();
 
   AllocationAnalysis analysis;
-  if (failed(analyzeAllocations(func, ops, releases, analysis)))
+  if (failed(analyzeAllocations(func, ops.allocs, ops.releases, analysis)))
     return failure();
-  if (failed(materializeAndReanalyzeRepeatedLifetimes(func, ops, releases,
-                                                      rewriter, analysis)))
+  if (failed(materializeAndReanalyzeRepeatedLifetimes(
+          func, ops.allocs, ops.releases, rewriter, analysis)))
     return failure();
 
   FailureOr<int64_t> plannedBytes =
