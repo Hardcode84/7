@@ -1,8 +1,11 @@
 # REQUIRES: wave-python-bindings
 #
 # RUN: %PYTHON %s --build-dir %wave_obj_root --generated-out %t.s | FileCheck %s
+# RUN: %PYTHON %s --build-dir %t.no-build --emit-mlir %t.mlir
+# RUN: FileCheck %s --check-prefix=SOURCE --input-file=%t.mlir
 
 # CHECK: perf-golden: gfx950-tensilelite-mxfp4-256x256-8wave: asm matches golden
+# SOURCE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"}
 
 from __future__ import annotations
 
@@ -28,7 +31,9 @@ def normalize_asm(text: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -> str:
+def run_calibrator(
+    build_dir: Path, generated_out: Path | None, emit_mlir: Path | None
+) -> None:
     cmd = [
         sys.executable,
         str(CALIBRATOR),
@@ -50,8 +55,9 @@ def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -
         "--scale-input=tensilelite",
         "--variants=baseline",
         "--skip-hw",
-        f"--emit-asm={generated_out}",
     ]
+    if generated_out is not None:
+        cmd.append(f"--emit-asm={generated_out}")
     if emit_mlir is not None:
         cmd.append(f"--emit-mlir={emit_mlir}")
     proc = subprocess.run(
@@ -61,11 +67,11 @@ def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -
         check=False,
     )
     if proc.returncode == 0:
-        if not generated_out.exists():
+        if generated_out is not None and not generated_out.exists():
             raise SystemExit(f"calibrator did not write {generated_out}")
         if emit_mlir is not None and not emit_mlir.exists():
             raise SystemExit(f"calibrator did not write {emit_mlir}")
-        return generated_out.read_text(encoding="utf-8")
+        return
     if proc.stdout:
         sys.stdout.write(proc.stdout)
     if proc.stderr:
@@ -100,7 +106,8 @@ def check_asm(
 ) -> None:
     with tempfile.TemporaryDirectory() as td:
         out = generated_out or Path(td) / f"{NAME}.s"
-        generated = normalize_asm(generate_asm(build_dir, out, emit_mlir))
+        run_calibrator(build_dir, out, emit_mlir)
+        generated = normalize_asm(out.read_text(encoding="utf-8"))
         golden = normalize_asm(GOLDEN.read_text(encoding="utf-8"))
 
         if generated == golden:
@@ -127,6 +134,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--max-diff-lines", type=int, default=200)
     args = parser.parse_args(argv)
 
+    if args.emit_mlir is not None and args.generated_out is None:
+        run_calibrator(args.build_dir, None, args.emit_mlir)
+        return 0
     check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
     return 0
 

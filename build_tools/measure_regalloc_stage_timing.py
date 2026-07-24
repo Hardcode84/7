@@ -148,7 +148,6 @@ def prepare_source(
         return perf_golden.isolate_kernel(output_dir)
 
     source = output_dir / f"{perf_golden.name}.mlir"
-    asm = output_dir / f"{perf_golden.name}.bootstrap.s"
     stdout_path = output_dir / f"{perf_golden.name}.emit.stdout.txt"
     stderr_path = output_dir / f"{perf_golden.name}.emit.stderr.txt"
     proc = subprocess.run(
@@ -156,9 +155,7 @@ def prepare_source(
             sys.executable,
             str(perf_golden.script),
             f"--build-dir={build_dir}",
-            f"--generated-out={asm}",
             f"--emit-mlir={source}",
-            "--max-diff-lines=0",
         ],
         capture_output=True,
         text=True,

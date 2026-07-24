@@ -1353,6 +1353,12 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp() if args.keep_tmp else tmp_ctx.name)
     try:
         source = prepare_source(args, chip, tmp)
+        if (
+            args.emit_mlir is not None
+            and args.emit_asm is None
+            and args.emit_hsaco is None
+        ):
+            return 0
         runner = prepare_runner(args, tmp)
         print_header(args, chip)
         results = run_variants(args, source, runner, tmp)
