@@ -16,6 +16,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PYTHON = sys.executable
+sys.path.insert(0, str(REPO_ROOT / "examples" / "wave"))
+
+from common import resolve_wave_tool  # noqa: E402
 
 
 def dump_tail(label: str, stdout: str, stderr: str) -> None:
@@ -142,7 +145,7 @@ def check_gfx950_mfma_dma_report() -> None:
     text = run_case(
         "gfx950_mfma_dma_report",
         [
-            str(REPO_ROOT / "build/bin/wave-opt"),
+            str(resolve_wave_tool("wave-opt")),
             "-",
             "--waveamd-machine-schedule-report=print-candidates=1",
         ],

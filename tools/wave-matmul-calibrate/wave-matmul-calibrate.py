@@ -18,7 +18,6 @@ from pathlib import Path
 from statistics import median
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_BUILD = REPO_ROOT / "build"
 EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
 TENSILELITE_EXAMPLE = REPO_ROOT / "examples/wave/tensilelite_mxfp4_subtile.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
@@ -32,6 +31,9 @@ V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
+sys.path.insert(0, str(REPO_ROOT / "examples" / "wave"))
+
+from common import default_build_dir, resolve_llvm_tool  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -697,8 +699,8 @@ def lower_hsaco(
 ) -> Path:
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
-    llvm_mc = build_dir / "llvm-install/bin/llvm-mc"
-    ld_lld = build_dir / "llvm-install/bin/ld.lld"
+    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
+    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
     for tool in (llvm_mc, ld_lld):
         if not tool.exists():
             sys.exit(f"required tool missing: {tool}")
@@ -1252,7 +1254,7 @@ def add_tool_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--build-dir",
         type=Path,
-        default=Path(os.environ.get("WAVE_BUILD_DIR", str(DEFAULT_BUILD))),
+        default=default_build_dir(REPO_ROOT),
     )
     ap.add_argument(
         "--hipcc",

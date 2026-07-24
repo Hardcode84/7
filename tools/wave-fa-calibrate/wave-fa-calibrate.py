@@ -18,13 +18,12 @@ from pathlib import Path
 from statistics import median
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_BUILD = REPO_ROOT / "build"
 EXAMPLE = REPO_ROOT / "examples/wave/flash_attention.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-fa-calibrate/wave-fa-calibrate-runner.cpp"
 KERNEL_NAME = "flash_attention_f32"
 sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
 
-from common import extract_kernel_op  # noqa: E402
+from common import default_build_dir, extract_kernel_op, resolve_llvm_tool  # noqa: E402
 from flash_attention import flash_attention_f32_flops  # noqa: E402
 
 
@@ -334,8 +333,8 @@ def lower_hsaco(
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
     wave_translate = build_dir / "bin/wave-translate"
-    llvm_mc = build_dir / "llvm-install/bin/llvm-mc"
-    ld_lld = build_dir / "llvm-install/bin/ld.lld"
+    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
+    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
     for tool in (wave_translate, llvm_mc, ld_lld):
         if not tool.exists():
             sys.exit(f"required tool missing: {tool}")
@@ -579,7 +578,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--build-dir",
         type=Path,
-        default=Path(os.environ.get("WAVE_BUILD_DIR", str(DEFAULT_BUILD))),
+        default=default_build_dir(REPO_ROOT),
     )
     ap.add_argument(
         "--hipcc",
