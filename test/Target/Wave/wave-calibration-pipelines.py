@@ -2,6 +2,7 @@
 
 # CHECK: matmul_pipeline: ok
 # CHECK: fa_pipeline: ok
+# CHECK: shared_calibration_support: ok
 # CHECK: matmul_explicit_gfx950_wave_size: ok
 # CHECK: matmul_auto_gfx950_wave_size: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
@@ -295,6 +296,46 @@ def check_calibration_entry(label: str, module) -> None:
         check_post_regalloc(label, applied_passes(ir, post))
         check_emit_only(label, emit_only)
     print(f"{label}: ok")
+
+
+def check_shared_calibration_support(common, matmul, fa) -> None:
+    names = (
+        "run",
+        "detect_chip",
+        "scheduler_policy_options",
+        "schedule_pass_policy_options",
+        "schedule_pass_options",
+        "schedule_report_options",
+        "backend_pipeline_path",
+        "read_backend_pipeline",
+        "import_mlir_bindings",
+        "erase_default_entry",
+        "append_calibration_entry",
+        "pipeline_text",
+        "write_pipeline",
+        "parse_total_cycles",
+        "parse_hw",
+        "run_hw_repeats",
+        "parse_variants",
+    )
+    for name in names:
+        shared = getattr(common, name)
+        require(
+            "shared_calibration_support",
+            getattr(matmul, name) is shared and getattr(fa, name) is shared,
+            f"{name} is not shared",
+        )
+    require(
+        "shared_calibration_support",
+        matmul.Variant is common.Variant and fa.Variant is common.Variant,
+        "Variant is not shared",
+    )
+    require(
+        "shared_calibration_support",
+        matmul.VARIANTS is common.VARIANTS and fa.VARIANTS is common.VARIANTS,
+        "VARIANTS is not shared",
+    )
+    print("shared_calibration_support: ok")
 
 
 def check_matmul_wave_size(matmul) -> None:
@@ -1664,6 +1705,10 @@ def check_calibration_scheduler_region_cap(matmul, fa) -> None:
 
 
 def main() -> int:
+    common = load_module(
+        "wave_calibration",
+        REPO_ROOT / "tools/wave_calibration.py",
+    )
     matmul = load_module(
         "wave_matmul_calibrate",
         REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py",
@@ -1678,6 +1723,7 @@ def main() -> int:
     )
     check_calibration_entry("matmul_pipeline", matmul)
     check_calibration_entry("fa_pipeline", fa)
+    check_shared_calibration_support(common, matmul, fa)
     check_matmul_wave_size(matmul)
     check_matmul_runner_wave_size(matmul)
     check_matmul_runner_output_layout(matmul)
