@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -19,13 +21,51 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def default_build_dir(root: Path | None = None) -> Path:
+    override = os.environ.get("WAVE_BUILD_DIR")
+    if override:
+        return Path(override)
+    root = repo_root() if root is None else root
+    candidates = (root / "build", root / "build" / "wave-build")
+    return next(
+        (path for path in candidates if (path / "bin" / "wave-opt").is_file()),
+        candidates[0],
+    )
+
+
+def resolve_wave_tool(name: str, build_dir: Path | None = None) -> Path:
+    build_dir = default_build_dir() if build_dir is None else build_dir
+    candidate = build_dir / "bin" / name
+    if candidate.is_file():
+        return candidate
+    path = shutil.which(name)
+    return Path(path) if path else candidate
+
+
+def llvm_install_dir(build_dir: Path | None = None) -> Path:
+    override = os.environ.get("WAVE_LLVM_TOOLS_DIR")
+    if override:
+        return Path(override).parent
+    build_dir = default_build_dir() if build_dir is None else build_dir
+    candidates = (build_dir / "llvm-install", build_dir.parent / "llvm-install")
+    return next((path for path in candidates if (path / "bin").is_dir()), candidates[0])
+
+
+def resolve_llvm_tool(name: str, build_dir: Path | None = None) -> Path:
+    candidate = llvm_install_dir(build_dir) / "bin" / name
+    if candidate.is_file():
+        return candidate
+    path = shutil.which(name)
+    return Path(path) if path else candidate
+
+
 def ensure_package_on_path(module_name: str) -> None:
     try:
         importlib.import_module(module_name)
         return
     except ImportError:
         pass
-    path = repo_root() / "build" / "python_packages" / "wave_mlir"
+    path = default_build_dir() / "python_packages" / "wave_mlir"
     if (path / "mlir" / "dialects").is_dir():
         sys.path.insert(0, str(path))
 
@@ -101,12 +141,16 @@ def add_execution_args(
     )
 
 
-def default_shared_libs(root: Path | None = None) -> list[Path]:
+def default_shared_libs(
+    root: Path | None = None, *, build_dir: Path | None = None
+) -> list[Path]:
     root = repo_root() if root is None else root
+    build_dir = default_build_dir(root) if build_dir is None else build_dir
+    llvm_lib_dir = llvm_install_dir(build_dir) / "lib"
     return [
-        root / "build" / "llvm-install" / "lib" / "libmlir_rocm_runtime.so",
-        root / "build" / "llvm-install" / "lib" / "libmlir_runner_utils.so",
-        root / "build" / "lib" / "libwave_runtime.so",
+        llvm_lib_dir / "libmlir_rocm_runtime.so",
+        llvm_lib_dir / "libmlir_runner_utils.so",
+        build_dir / "lib" / "libwave_runtime.so",
     ]
 
 
@@ -197,8 +241,7 @@ def dump_kernel_asm(
 ) -> str:
     if not chip:
         raise SystemExit("--dump-asm needs --chip=<gfx>")
-    root = repo_root()
-    wave_translate = wave_translate or root / "build/bin/wave-translate"
+    wave_translate = wave_translate or resolve_wave_tool("wave-translate")
     kernel = extract_kernel_op(
         module_text, kernel_regex=kernel_regex, kernel_name=kernel_name
     )
@@ -224,10 +267,11 @@ def run_module(
     if not chip:
         raise SystemExit("--run/--compare-cpu needs --chip=<gfx>")
     root = repo_root()
-    wave_opt = wave_opt or root / "build" / "bin" / "wave-opt"
-    mlir_runner = mlir_runner or root / "build" / "llvm-install" / "bin" / "mlir-runner"
+    build_dir = wave_opt.parent.parent if wave_opt else default_build_dir(root)
+    wave_opt = wave_opt or resolve_wave_tool("wave-opt", build_dir)
+    mlir_runner = mlir_runner or resolve_llvm_tool("mlir-runner", build_dir)
     pipeline_lib = (
-        root / "build" / "share" / "wave-mlir" / "pipelines" / "pipelines.mlir"
+        build_dir / "share" / "wave-mlir" / "pipelines" / "pipelines.mlir"
     )
     pass_pipeline = (
         "builtin.module("
@@ -244,7 +288,7 @@ def run_module(
         input_text=module_text,
     )
     runner_cmd = [str(mlir_runner)]
-    for lib in shared_libs or default_shared_libs(root):
+    for lib in shared_libs or default_shared_libs(root, build_dir=build_dir):
         runner_cmd.append(f"--shared-libs={lib}")
     runner_cmd.append("--entry-point-result=void")
     return run_command(runner_cmd, input_text=lowered)

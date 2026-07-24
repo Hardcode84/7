@@ -112,6 +112,18 @@ def WaveGenerateIndexExprs : Pass<"wave-generate-index-exprs"> {
   ];
 }
 
+def WaveOptimizeMasks : Pass<"wave-optimize-masks"> {
+  let summary = "Optimize Wave mask expressions under symbolic assumptions";
+  let description = [{
+    Shares same-block comparisons proven equivalent from symbolic SSA
+    expressions and `wave.assume` facts, and folds comparisons proven
+    constant by those facts.
+  }];
+  let dependentDialects = [
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
   let summary = "Normalize Wave typed pointers to byte-addressed pointers";
   let description = [{

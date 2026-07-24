@@ -12,12 +12,15 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "examples" / "wave"))
+
+from common import resolve_wave_tool  # noqa: E402
 
 
 def run_schedule_report(input_text: str) -> str:
     proc = subprocess.run(
         [
-            str(REPO_ROOT / "build/bin/wave-opt"),
+            str(resolve_wave_tool("wave-opt")),
             "-",
             "--waveamd-machine-schedule-report=print-candidates=1",
         ],

@@ -64,7 +64,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rlicm = transform.apply_registered_pass "loop-invariant-code-motion" to %rzf
         : (!transform.any_op) -> !transform.any_op
-    %rdiv = transform.apply_registered_pass "wave-expand-integer-div-rem" to %rlicm
+    %rmask1 = transform.apply_registered_pass "wave-optimize-masks" to %rlicm
+        : (!transform.any_op) -> !transform.any_op
+    %rdiv = transform.apply_registered_pass "wave-expand-integer-div-rem" to %rmask1
         : (!transform.any_op) -> !transform.any_op
     %rdivc = transform.apply_registered_pass "canonicalize" to %rdiv
         : (!transform.any_op) -> !transform.any_op

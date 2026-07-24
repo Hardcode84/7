@@ -33,6 +33,9 @@ buildSymbolicIndexPredicate(Value value, WaveDialect &dialect,
 FailureOr<std::optional<SymbolicPredicate>>
 buildSymbolicPacketPredicateRelation(Value value, WaveDialect &dialect,
                                      DataFlowSolver &solver);
+FailureOr<std::optional<SymbolicPredicate>>
+buildSymbolicMaskPredicate(Value value, WaveDialect &dialect,
+                           DataFlowSolver &solver);
 
 } // namespace wave
 } // namespace mlir

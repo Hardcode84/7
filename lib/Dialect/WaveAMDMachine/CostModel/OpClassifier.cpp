@@ -119,7 +119,7 @@ static SchedClass classifyMappedOp(Operation *op) {
       // manipulation, nop, delay_alu. Scalar 64-bit add/mul/shl
       // still run on the SALU pipe.
       .Case<SAddI32Op, SAddM0I32Op, SAddU64Op, SAddU64U32Op, DmaIssueDelayOp,
-            SAndB32Op,
+            SAndB32Op, SAndB64Op,
             SAndn2ExecB32Op, SAndn2ExecB64Op, SAndSaveexecB32Op,
             SAndSaveexecB64Op,
             SCmpEqI32Op, SCmpLgI32Op, SCmpGtI32Op, SCmpGeI32Op, SCmpLtI32Op,
@@ -130,7 +130,8 @@ static SchedClass classifyMappedOp(Operation *op) {
             SMovExecB64Op, SMovExecLoOp, SMovM0Op, SMovVccB32Op, SMulI32Op,
             SMulHiU32Op, SMulU64Op, SNopOp, SSleepOp, SFf1I32B32Op,
             SFf1I32B64Op,
-            SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SReadVccB32Op,
+            SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SOrB64Op,
+            SReadVccB32Op,
             SSendmsgDeallocVgprsOp, SSetprioOp, SGetregShaderCyclesOp,
             SGetregHwIdOp, SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })

@@ -274,7 +274,7 @@ func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr(%x: i32, %d: i3
 // SELECT-NOT: waveamdmachine.s_mul_i32
 // SELECT: waveamdmachine.s_mul_u64
 // SELECT: waveamdmachine.s_lshr_b64
-// SELECT: waveamdmachine.s_and_b32
+// SELECT: waveamdmachine.s_and_b64
 func.func @uniform_index_product_signed_div_bounded_range(%m: index, %n: index) attributes {wave.kernel} {
   %a = wave.assume %m as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index
   %b = wave.assume %n as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4000000">] : index

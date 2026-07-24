@@ -114,7 +114,7 @@ func.func @simd_i32_const_signed_rem3_codegen(
 
 // ASM-LABEL: scalar_i64_div_rem_codegen:
 // ASM: s_lshr_b64
-// ASM: s_and_b32
+// ASM: s_and_b64
 // ASM: s_cmp_lt_u32
 // ASM: s_cmp_eq_u32
 // ASM: s_cmp_lt_u32

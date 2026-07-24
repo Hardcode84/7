@@ -36,6 +36,8 @@ else:
 config.test_source_root = str(Path(__file__).parent)
 config.test_exec_root = str(Path(config.wave_mlir_obj_root) / "test")
 
+llvm_config.with_environment("WAVE_BUILD_DIR", config.wave_mlir_obj_root)
+llvm_config.with_environment("WAVE_LLVM_TOOLS_DIR", config.llvm_tools_dir)
 config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 config.substitutions.append(("%python", f'"{sys.executable}"'))

@@ -118,7 +118,8 @@ static bool isCheapRematRoot(Operation *op) {
   return isa_and_nonnull<
              waveamdmachine::SAddI32Op, waveamdmachine::SMulI32Op,
              waveamdmachine::SLshlB32Op, waveamdmachine::SLshrB32Op,
-             waveamdmachine::SAndB32Op, waveamdmachine::SOrB32Op,
+             waveamdmachine::SAndB32Op, waveamdmachine::SAndB64Op,
+             waveamdmachine::SOrB32Op, waveamdmachine::SOrB64Op,
              waveamdmachine::SXorB32Op, waveamdmachine::UninitOp,
              waveamdmachine::VMovB32TupleOp, waveamdmachine::CopyTupleOp,
              waveamdmachine::VLshrrevB32Op, waveamdmachine::VLshlrevB32Op,

@@ -44,6 +44,8 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "loop-invariant-code-motion"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-optimize-masks"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-expand-integer-div-rem"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"

@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/OpImplementation.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -785,6 +786,94 @@ CheckResult Analysis::equivalent(ExprHandle lhs, ExprHandle rhs) {
   return rawLhs && rawRhs
              ? convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs))
              : CheckResult::Unknown;
+}
+
+static FailureOr<PredHandle> scaleOrderedComparison(Analysis &analysis,
+                                                    PredHandle predicate,
+                                                    int64_t divisor) {
+  PredView view(predicate);
+  std::optional<PredCmpOp> op = view.getCmpOp();
+  if (!op || divisor <= 1)
+    return failure();
+
+  bool useFloor;
+  switch (*op) {
+  case PredCmpOp::Lt:
+  case PredCmpOp::Ge:
+    useFloor = true;
+    break;
+  case PredCmpOp::Le:
+  case PredCmpOp::Gt:
+    useFloor = false;
+    break;
+  case PredCmpOp::Eq:
+  case PredCmpOp::Ne:
+    return failure();
+  }
+
+  FailureOr<ExprHandle> difference =
+      analysis.compose(view.getCmpLhs(), ExprBinaryOp::Sub, view.getCmpRhs());
+  if (failed(difference) ||
+      analysis.integerValued(*difference) != CheckResult::True)
+    return failure();
+
+  // For positive d and integer x:
+  //   x < 0  iff floor(x / d) < 0, and
+  //   x > 0  iff ceil(x / d) > 0.
+  // The corresponding non-strict comparisons follow by complementation.
+  FailureOr<ExprHandle> scale = analysis.composeInteger(divisor);
+  if (failed(scale))
+    return failure();
+  FailureOr<ExprHandle> quotient =
+      analysis.compose(*difference, ExprBinaryOp::Div, *scale);
+  if (failed(quotient))
+    return failure();
+  FailureOr<ExprHandle> rounded = useFloor ? analysis.composeFloor(*quotient)
+                                           : analysis.composeCeil(*quotient);
+  FailureOr<ExprHandle> zero = analysis.composeInteger(0);
+  if (failed(rounded) || failed(zero))
+    return failure();
+  FailureOr<PredHandle> scaled = analysis.compare(*rounded, *op, *zero);
+  if (failed(scaled))
+    return failure();
+  return analysis.simplify(*scaled);
+}
+
+static void collectCongruenceModuli(Analysis &analysis, PredHandle predicate,
+                                    SmallVectorImpl<int64_t> &moduli) {
+  walkSymbolNames(predicate, [&](StringRef name) {
+    FailureOr<ExprHandle> symbol = analysis.composeSymbol(name);
+    if (failed(symbol))
+      return;
+    std::optional<Congruence> congruence =
+        analysis.getSymbolCongruence(*symbol);
+    if (!congruence || congruence->modulus <= 1 ||
+        llvm::is_contained(moduli, congruence->modulus))
+      return;
+    moduli.push_back(congruence->modulus);
+  });
+}
+
+SmallVector<PredHandle, 4>
+Analysis::orderedComparisonForms(PredHandle predicate) {
+  SmallVector<PredHandle, 4> forms{predicate};
+  if (!prepareQuery() || defined(predicate) != CheckResult::True)
+    return forms;
+
+  FailureOr<PredHandle> simplified = simplify(predicate);
+  if (succeeded(simplified) && !llvm::is_contained(forms, *simplified))
+    forms.push_back(*simplified);
+
+  SmallVector<int64_t, 4> moduli;
+  collectCongruenceModuli(*this, predicate, moduli);
+  llvm::sort(moduli);
+  for (int64_t modulus : moduli) {
+    FailureOr<PredHandle> scaled =
+        scaleOrderedComparison(*this, predicate, modulus);
+    if (succeeded(scaled) && !llvm::is_contained(forms, *scaled))
+      forms.push_back(*scaled);
+  }
+  return forms;
 }
 
 CheckResult Analysis::equivalent(PredHandle lhs, PredHandle rhs) {
