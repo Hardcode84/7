@@ -263,6 +263,19 @@ func.func @unsupported_mfma_family(%x: i32) {
 
 // -----
 
+// expected-error @below {{malformed waveamdmachine.target `amdgcn-amd-amdhsa--gfx1100--bad`}}
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100--bad"
+} {
+func.func @target_error_precedes_mixed_wave_widths(%x: i32) {
+  %v32 = wave.splat %x : i32 -> !wave.simd<i32, 32>
+  %v64 = wave.splat %x : i32 -> !wave.simd<i32, 64>
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // expected-error @below {{WaveAMDMachine backend target gfx1100 uses wave32 but function requires wave64}}
 func.func @gfx1100_rejects_wave64(%x: i32) {

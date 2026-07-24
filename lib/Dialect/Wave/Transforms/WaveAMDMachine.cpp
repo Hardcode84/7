@@ -435,22 +435,33 @@ static LogicalResult noteOpWaveWidth(Operation *op,
   return noteRegionArgsWaveWidth(op, op->getRegions(), required);
 }
 
-static FailureOr<std::optional<unsigned>>
-getFunctionWaveWidth(func::FuncOp func) {
-  std::optional<unsigned> required;
+struct MachineSelectionFunctionFacts {
+  std::optional<unsigned> requiredWaveWidth;
+  unsigned maxWorkitemIdAxis = 0;
+};
+
+static FailureOr<MachineSelectionFunctionFacts>
+collectMachineSelectionFunctionFacts(func::FuncOp func) {
+  MachineSelectionFunctionFacts facts;
   FunctionType type = func.getFunctionType();
-  if (failed(noteTypesWaveWidth(func, type.getInputs(), required)))
+  if (failed(
+          noteTypesWaveWidth(func, type.getInputs(), facts.requiredWaveWidth)))
     return failure();
-  if (failed(noteTypesWaveWidth(func, type.getResults(), required)))
+  if (failed(
+          noteTypesWaveWidth(func, type.getResults(), facts.requiredWaveWidth)))
     return failure();
 
   WalkResult walk = func.walk([&](Operation *op) {
-    return failed(noteOpWaveWidth(op, required)) ? WalkResult::interrupt()
-                                                 : WalkResult::advance();
+    if (failed(noteOpWaveWidth(op, facts.requiredWaveWidth)))
+      return WalkResult::interrupt();
+    if (auto workitemId = dyn_cast<WorkitemIdOp>(op))
+      facts.maxWorkitemIdAxis = std::max(
+          facts.maxWorkitemIdAxis, static_cast<unsigned>(workitemId.getAxis()));
+    return WalkResult::advance();
   });
   if (walk.wasInterrupted())
     return failure();
-  return required;
+  return facts;
 }
 
 static unsigned getMaxWorkitemIdAxis(func::FuncOp func) {
@@ -461,27 +472,18 @@ static unsigned getMaxWorkitemIdAxis(func::FuncOp func) {
   return maxAxis;
 }
 
-static LogicalResult validateTargetWaveWidth(func::FuncOp func) {
-  if (!waveamdmachine::findAMDGPUTargetModule(func))
-    return success();
-
-  FailureOr<unsigned> targetWidth =
-      waveamdmachine::getAMDGPUWavefrontSize(func, "WaveAMDMachine selection");
-  if (failed(targetWidth))
-    return failure();
-
-  FailureOr<std::optional<unsigned>> required = getFunctionWaveWidth(func);
-  if (failed(required))
-    return failure();
-  if (!*required || **required == *targetWidth)
+static LogicalResult
+validateTargetWaveWidth(func::FuncOp func, unsigned targetWidth,
+                        std::optional<unsigned> requiredWaveWidth) {
+  if (!requiredWaveWidth || *requiredWaveWidth == targetWidth)
     return success();
   FailureOr<waveamdmachine::AMDGPUTarget> target =
       waveamdmachine::getAMDGPUTarget(func, "WaveAMDMachine selection");
   if (failed(target))
     return failure();
   return func.emitError("WaveAMDMachine backend target ")
-         << target->chip << " uses wave" << *targetWidth
-         << " but function requires wave" << **required;
+         << target->chip << " uses wave" << targetWidth
+         << " but function requires wave" << *requiredWaveWidth;
 }
 
 static LogicalResult
@@ -489,14 +491,25 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   func::FuncOp func = selector.func;
   if (!func.getBody().hasOneBlock())
     return func.emitError("WaveAMDMachine selection supports one-block funcs");
-  if (failed(validateTargetWaveWidth(func)))
-    return failure();
-  selector.maxWorkitemIdAxis = getMaxWorkitemIdAxis(func);
-  if (!waveamdmachine::findAMDGPUTargetModule(func)) {
+  ModuleOp targetModule = waveamdmachine::findAMDGPUTargetModule(func);
+  if (!targetModule) {
+    selector.maxWorkitemIdAxis = getMaxWorkitemIdAxis(func);
     // Targetless selection follows the backend's packed default target.
     selector.packedWorkitemIds = selector.maxWorkitemIdAxis != 0;
     return success();
   }
+  FailureOr<unsigned> targetWidth =
+      waveamdmachine::getAMDGPUWavefrontSize(func, "WaveAMDMachine selection");
+  if (failed(targetWidth))
+    return failure();
+  FailureOr<MachineSelectionFunctionFacts> facts =
+      collectMachineSelectionFunctionFacts(func);
+  if (failed(facts))
+    return failure();
+  if (failed(validateTargetWaveWidth(func, *targetWidth,
+                                     facts->requiredWaveWidth)))
+    return failure();
+  selector.maxWorkitemIdAxis = facts->maxWorkitemIdAxis;
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       getTargetIsaVersion(func, "WaveAMDMachine selection");
   if (failed(isa))
@@ -9137,13 +9150,18 @@ static bool reachesWaveDialect(func::FuncOp func) {
 
 static void
 collectMachineSelectionTargets(Operation *root,
-                               SmallVectorImpl<func::FuncOp> &targets) {
+                               SmallVectorImpl<func::FuncOp> &targets,
+                               SmallVectorImpl<func::FuncOp> &scheduleInputs) {
   root->walk([&](func::FuncOp func) {
     if (func.isExternal())
       return;
-    if (func->hasAttr(wave::WaveDialect::getKernelAttrName()) ||
-        reachesWaveDialect(func))
-      targets.push_back(func);
+    bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
+    bool reachesWave = reachesWaveDialect(func);
+    if (!isKernel && !reachesWave)
+      return;
+    targets.push_back(func);
+    if (isKernel && reachesWave)
+      scheduleInputs.push_back(func);
   });
 }
 
@@ -9164,7 +9182,8 @@ struct ConvertWaveAMDToWaveAMDMachinePass
     root->walk([](func::FuncOp func) { func->removeAttr(kScheduleInputAttr); });
 
     SmallVector<func::FuncOp> targets;
-    collectMachineSelectionTargets(root, targets);
+    SmallVector<func::FuncOp> scheduleInputs;
+    collectMachineSelectionTargets(root, targets, scheduleInputs);
 
     if (failed(diagnoseMachineSelectionTargets(targets)))
       return signalPassFailure();
@@ -9173,14 +9192,16 @@ struct ConvertWaveAMDToWaveAMDMachinePass
     if (failed(runRangeAnalysis(root, rangeSolver)))
       return signalPassFailure();
 
+    auto scheduleInputIt = scheduleInputs.begin();
     for (func::FuncOp func : targets) {
       bool scheduleInput =
-          func->hasAttr(wave::WaveDialect::getKernelAttrName()) &&
-          reachesWaveDialect(func);
+          scheduleInputIt != scheduleInputs.end() && *scheduleInputIt == func;
       if (failed(wave::wmsel::WaveAMDMachineSelector(func, rangeSolver).run()))
         return signalPassFailure();
-      if (scheduleInput)
+      if (scheduleInput) {
         func->setAttr(kScheduleInputAttr, UnitAttr::get(func.getContext()));
+        ++scheduleInputIt;
+      }
     }
   }
 };
