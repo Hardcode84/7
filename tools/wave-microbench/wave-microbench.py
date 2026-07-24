@@ -33,8 +33,10 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_BUILD = REPO_ROOT / "build"
 RUNNER_SRC = REPO_ROOT / "tools/wave-microbench/wave-microbench-runner.cpp"
+sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
+
+from common import default_build_dir, resolve_llvm_tool, resolve_wave_tool  # noqa: E402
 
 
 def detect_chip() -> str:
@@ -60,9 +62,9 @@ def lower_to_hsaco(build_dir: Path, chip: str, mlir_in: Path, tmp: Path) -> Path
     """Drive the wave-translate -> llvm-mc -> ld.lld pipeline that
     test/Target/Wave/waveamdmachine-buffer-hw.mlir uses, parameterised
     on the detected chip."""
-    wave_translate = build_dir / "bin/wave-translate"
-    llvm_mc = build_dir / "llvm-install/bin/llvm-mc"
-    ld_lld = build_dir / "llvm-install/bin/ld.lld"
+    wave_translate = resolve_wave_tool("wave-translate", build_dir)
+    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
+    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
     for tool in (wave_translate, llvm_mc, ld_lld):
         if not tool.exists():
             sys.exit(f"required tool missing: {tool}")
@@ -105,7 +107,7 @@ def predict_cycles(
     """Run wave.transform.estimate_cycles on the kernel via wave-opt.
     Returns the predicted i64 from the transform output, or None on
     failure."""
-    wave_opt = build_dir / "bin/wave-opt"
+    wave_opt = resolve_wave_tool("wave-opt", build_dir)
     if not wave_opt.exists():
         return None
     text = mlir_in.read_text()
@@ -166,7 +168,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--build-dir",
         type=Path,
-        default=Path(os.environ.get("WAVE_BUILD_DIR", str(DEFAULT_BUILD))),
+        default=default_build_dir(REPO_ROOT),
     )
     ap.add_argument(
         "--hipcc",

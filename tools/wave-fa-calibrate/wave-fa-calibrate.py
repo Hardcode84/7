@@ -24,7 +24,12 @@ EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
 
-from common import default_build_dir, extract_kernel_op, resolve_llvm_tool  # noqa: E402
+from common import (  # noqa: E402
+    default_build_dir,
+    extract_kernel_op,
+    resolve_llvm_tool,
+    resolve_wave_tool,
+)
 from flash_attention import flash_attention_f32_flops  # noqa: E402
 from wave_calibration import (  # noqa: E402, F401
     VARIANTS,
@@ -90,7 +95,7 @@ def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
 
 def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
     env = os.environ.copy()
-    package_path = REPO_ROOT / "build/python_packages/wave_mlir"
+    package_path = args.build_dir / "python_packages/wave_mlir"
     env["PYTHONPATH"] = (
         str(package_path)
         if not env.get("PYTHONPATH")
@@ -115,7 +120,7 @@ def lower_machine(
     build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
 ) -> Path:
     out = tmp / f"{name}.machine.mlir"
-    wave_opt = build_dir / "bin/wave-opt"
+    wave_opt = resolve_wave_tool("wave-opt", build_dir)
     text = run(
         [
             str(wave_opt),
@@ -150,7 +155,7 @@ def lower_asm(
 ) -> Path:
     variant_tmp = tmp / name
     variant_tmp.mkdir(parents=True, exist_ok=True)
-    wave_translate = build_dir / "bin/wave-translate"
+    wave_translate = resolve_wave_tool("wave-translate", build_dir)
     if not wave_translate.exists():
         sys.exit(f"required tool missing: {wave_translate}")
     env = os.environ.copy()
@@ -207,7 +212,7 @@ def assemble_hsaco(
 def run_sim_report(
     build_dir: Path, machine_mlir: Path, args: argparse.Namespace
 ) -> int:
-    wave_sim = build_dir / "bin/wave-sim-report"
+    wave_sim = resolve_wave_tool("wave-sim-report", build_dir)
     text = run(
         [
             str(wave_sim),
