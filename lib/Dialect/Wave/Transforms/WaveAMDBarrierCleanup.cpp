@@ -829,21 +829,20 @@ static LogicalResult validateProtocolAttrPlacement(Operation *op) {
   return success();
 }
 
-static LogicalResult validateProtocolAttrs(Operation *root) {
-  WalkResult walk = root->walk([&](Operation *op) {
-    return failed(validateProtocolAttrPlacement(op)) ? WalkResult::interrupt()
-                                                     : WalkResult::advance();
-  });
-  return failure(walk.wasInterrupted());
-}
-
-static SmallVector<waveamdmachine::UniformIfOp, 4>
-collectPairedIfs(Operation *root) {
+static FailureOr<SmallVector<waveamdmachine::UniformIfOp, 4>>
+collectPairedIfsAndValidateProtocolAttrs(Operation *root) {
   SmallVector<waveamdmachine::UniformIfOp, 4> paired;
-  root->walk([&](waveamdmachine::UniformIfOp op) {
-    if (op->hasAttr(kPairedBarriersAttr))
-      paired.push_back(op);
+  WalkResult walk = root->walk([&](Operation *op) {
+    if (failed(validateProtocolAttrPlacement(op)))
+      return WalkResult::interrupt();
+    waveamdmachine::UniformIfOp uniformIf =
+        dyn_cast<waveamdmachine::UniformIfOp>(op);
+    if (uniformIf && uniformIf->hasAttr(kPairedBarriersAttr))
+      paired.push_back(uniformIf);
+    return WalkResult::advance();
   });
+  if (walk.wasInterrupted())
+    return failure();
   return paired;
 }
 
@@ -907,15 +906,16 @@ struct WaveAMDBarrierCleanupPass
 
   void runOnOperation() override {
     Operation *root = getOperation();
-    SmallVector<waveamdmachine::UniformIfOp, 4> paired = collectPairedIfs(root);
-    if (failed(validateProtocolAttrs(root)) ||
-        failed(validatePairedIfs(paired)) || failed(cleanupPairedIfs(paired)))
+    FailureOr<SmallVector<waveamdmachine::UniformIfOp, 4>> paired =
+        collectPairedIfsAndValidateProtocolAttrs(root);
+    if (failed(paired) || failed(validatePairedIfs(*paired)) ||
+        failed(cleanupPairedIfs(*paired)))
       return signalPassFailure();
     root->walk([&](Block *block) {
       if (!isInsidePairedIf(block))
         (void)collapseBlock(*block);
     });
-    if (failed(validatePairedIfs(paired)))
+    if (failed(validatePairedIfs(*paired)))
       return signalPassFailure();
   }
 };
@@ -928,11 +928,11 @@ struct WaveAMDFinalizeBarrierProtocolsPass
 
   void runOnOperation() override {
     Operation *root = getOperation();
-    SmallVector<waveamdmachine::UniformIfOp, 4> paired = collectPairedIfs(root);
-    if (failed(validateProtocolAttrs(root)) ||
-        failed(validatePairedIfs(paired)))
+    FailureOr<SmallVector<waveamdmachine::UniformIfOp, 4>> paired =
+        collectPairedIfsAndValidateProtocolAttrs(root);
+    if (failed(paired) || failed(validatePairedIfs(*paired)))
       return signalPassFailure();
-    for (waveamdmachine::UniformIfOp op : paired)
+    for (waveamdmachine::UniformIfOp op : *paired)
       stripPairedProtocol(op);
   }
 };
