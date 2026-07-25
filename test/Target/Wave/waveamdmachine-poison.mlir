@@ -58,6 +58,28 @@ func.func @packed_simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
   return
 }
 
+// CHECK-LABEL: func.func @fragment_poison_store
+// CHECK: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 8>
+// CHECK: waveamdmachine.global_store_tuple_b32
+// REGALLOC-LABEL: func.func @fragment_poison_store
+// REGALLOC: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 8, {{[0-9]+}}>
+func.func @fragment_poison_store(%out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %fragment = ub.poison : !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  %regs = waveamd.fragment_unpack %fragment
+      : !waveamd.fragment<2, f32, 16, 16, 32, 8>
+        -> !wave.simd<vector<8xi32>, 32>
+  %tok = wave.store %regs -> %ptrs
+      : (!wave.simd<vector<8xi32>, 32>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @mask_poison_where32
 // CHECK: %[[MASK:.+]] = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
 // CHECK: waveamdmachine.exec_if %[[MASK]]

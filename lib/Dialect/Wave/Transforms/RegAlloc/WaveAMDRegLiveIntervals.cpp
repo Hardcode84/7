@@ -386,6 +386,12 @@ public:
   }
 
 private:
+  struct UniformIfElseContext {
+    waveamdmachine::UniformIfOp op;
+    unsigned branch = 0;
+    unsigned entry = 0;
+  };
+
   void appendOriginalBlockOps(Block &block, SmallVectorImpl<Operation *> &ops) {
     for (Operation &op : block)
       ops.push_back(&op);
@@ -469,13 +475,54 @@ private:
     return success();
   }
 
-  void extendInterval(Value value, unsigned pos) {
+  bool extendIntervalRange(wave::WaveAMDLiveInterval &interval, Value value,
+                           unsigned start, unsigned pos) {
+    for (auto [index, member] : llvm::enumerate(interval.values)) {
+      if (member != value || interval.valueStarts[index] != start)
+        continue;
+      interval.valueEnds[index] = bumpEnd(interval.valueEnds[index], pos);
+      interval.end = bumpEnd(interval.end, pos);
+      return true;
+    }
+    return false;
+  }
+
+  void extendInterval(Value value, unsigned pos, unsigned contextCount) {
     auto rt = wave::getTrackedWaveAMDRegType(value);
     if (!rt)
       return;
     auto [bucket, table] = intervalsFor(*rt, result.intervals);
-    if (auto it = table->find(value); it != table->end())
-      extendIntervalValue((*bucket)[it->second], value, pos);
+    auto valueIt = table->find(value);
+    if (valueIt == table->end())
+      return;
+
+    std::optional<unsigned> contextIndex;
+    for (unsigned index = contextCount; index > 0; --index) {
+      UniformIfElseContext &context = uniformIfElseContexts[index - 1];
+      if (!valueIsDefinedInside(context.op, value)) {
+        contextIndex = index - 1;
+        break;
+      }
+    }
+    if (!contextIndex) {
+      extendIntervalValue((*bucket)[valueIt->second], value, pos);
+      return;
+    }
+
+    UniformIfElseContext &context = uniformIfElseContexts[*contextIndex];
+    extendInterval(value, context.branch, *contextIndex);
+    valueIt = table->find(value);
+    wave::WaveAMDLiveInterval &interval = (*bucket)[valueIt->second];
+    if (extendIntervalRange(interval, value, context.entry, pos))
+      return;
+    FailureOr<unsigned> slot =
+        getIntervalSlotOffset(value, interval, context.op);
+    if (succeeded(slot))
+      appendIntervalValue(interval, value, *slot, context.entry, pos);
+  }
+
+  void extendInterval(Value value, unsigned pos) {
+    extendInterval(value, pos, uniformIfElseContexts.size());
   }
 
   SmallVector<Value> buildLoopCarryAnchors(waveamdmachine::UniformLoopOp loop) {
@@ -691,11 +738,18 @@ private:
     return success();
   }
 
-  LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf) {
+  LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf,
+                                 unsigned pos) {
     if (failed(walkExecIfRegion(uniformIf.getThenRegion())))
       return failure();
-    if (failed(walkExecIfRegion(uniformIf.getElseRegion())))
-      return failure();
+    if (!uniformIf.getElseRegion().empty()) {
+      uniformIfElseContexts.push_back({uniformIf, pos, cursor});
+      if (failed(walkExecIfRegion(uniformIf.getElseRegion()))) {
+        uniformIfElseContexts.pop_back();
+        return failure();
+      }
+      uniformIfElseContexts.pop_back();
+    }
 
     // Yield aliases cover each arm; parent results start at join.
     unsigned exitPos = cursor - 1;
@@ -712,7 +766,7 @@ private:
     if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
       return processLoop(loop, pos);
     if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
-      return processUniformIf(uniformIf);
+      return processUniformIf(uniformIf, pos);
     if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
       return processExecIf(execIf, pos);
     return walkNestedRegions(op);
@@ -922,6 +976,7 @@ private:
 
   wave::WaveAMDLiveIntervalBuildResult result;
   SmallVector<PendingMFMAAccumulatorAlias, 16> pendingMFMAAccumulatorAliases;
+  SmallVector<UniformIfElseContext, 2> uniformIfElseContexts;
   wave::WaveAMDLiveIntervalOrderOverride orderOverride;
   unsigned cursor = 0;
   bool includeAllocated = false;

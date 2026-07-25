@@ -253,9 +253,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   }
 
   // PREP-LABEL: func.func @loop_clobbering_live_parent_copies(
-  // PREP: [[COPY0:%.*]] = waveamdmachine.copy_tuple
-  // PREP: [[COPY1:%.*]] = waveamdmachine.copy_tuple
-  // PREP: waveamdmachine.tuple_from_elements [[COPY0]], [[COPY1]]
+  // PREP: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements
+  // PREP-NEXT: [[COPY0:%.*]] = waveamdmachine.copy_tuple [[PARTS]]#2
+  // PREP-NEXT: [[COPY1:%.*]] = waveamdmachine.copy_tuple [[PARTS]]#3
+  // PREP-NEXT: [[VIEW:%.*]] = waveamdmachine.tuple_from_elements [[COPY0]], [[COPY1]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[VIEW]]
+  // PREP: waveamdmachine.v_mov_b32_tuple [[SRC:%[^ ]+]]
   func.func @loop_clobbering_live_parent_copies(
       %src: !waveamdmachine.reg<vgpr, 4>,
       %cond: !waveamdmachine.reg<scc, 1>)
@@ -281,6 +285,209 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         : (!waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
     return %loop, %whole
         : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 4>
+  }
+
+  // Tuple update and carried slice cannot clobber post-loop descriptor use.
+  // PREP-LABEL: func.func @loop_update_tuple_base_live_after(
+  // PREP-SAME: [[DESC:%[^:]+]]: !waveamdmachine.reg<sgpr, 4>
+  // PREP: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[DESC]]
+  // PREP: [[DESC_COPY:%.*]] = waveamdmachine.copy_tuple [[DESC]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[PARTS]]#0
+  // PREP: [[UPDATED:%.*]] = waveamdmachine.update_tuple [[DESC_COPY]],
+  // PREP: waveamdmachine.s_mov_b32_tuple [[UPDATED]]
+  // PREP: waveamdmachine.s_mov_b32_tuple [[DESC]]
+  func.func @loop_update_tuple_base_live_after(
+      %desc: !waveamdmachine.reg<sgpr, 4>,
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> !waveamdmachine.reg<sgpr, 4> {
+    %parts:2 = waveamdmachine.tuple_to_elements %desc
+        : (!waveamdmachine.reg<sgpr, 4>)
+          -> (!waveamdmachine.reg<sgpr, 2>,
+              !waveamdmachine.reg<sgpr, 2>)
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%parts#0 : !waveamdmachine.reg<sgpr, 2>) {
+    ^bb0(%base: !waveamdmachine.reg<sgpr, 2>):
+      %updated = waveamdmachine.update_tuple %desc, %base {offsets = [0]}
+          : (!waveamdmachine.reg<sgpr, 4>,
+             !waveamdmachine.reg<sgpr, 2>)
+            -> !waveamdmachine.reg<sgpr, 4>
+      %body = waveamdmachine.s_mov_b32_tuple %updated {registers = 4 : i64}
+          : (!waveamdmachine.reg<sgpr, 4>)
+            -> !waveamdmachine.reg<sgpr, 4>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%base : !waveamdmachine.reg<sgpr, 2>)
+    } -> !waveamdmachine.reg<sgpr, 2>
+    %after = waveamdmachine.s_mov_b32_tuple %desc {registers = 4 : i64}
+        : (!waveamdmachine.reg<sgpr, 4>)
+          -> !waveamdmachine.reg<sgpr, 4>
+    return %after : !waveamdmachine.reg<sgpr, 4>
+  }
+
+  // Loop iterations may take different uniform_if arms.
+  // PREP-LABEL: func.func @loop_branch_update_tuple_base_live_next_iteration(
+  // PREP-SAME: [[DESC:%[^:]+]]: !waveamdmachine.reg<sgpr, 2>
+  // PREP: [[DESC_COPY:%.*]] = waveamdmachine.copy_tuple [[DESC]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP: waveamdmachine.uniform_if
+  // PREP: waveamdmachine.update_tuple [[DESC_COPY]],
+  // PREP: otherwise
+  // PREP: waveamdmachine.s_mov_b32_tuple [[DESC]]
+  func.func @loop_branch_update_tuple_base_live_next_iteration(
+      %desc: !waveamdmachine.reg<sgpr, 2>,
+      %seed: !waveamdmachine.reg<sgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%seed : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%iter: !waveamdmachine.reg<sgpr, 1>):
+      %branch = waveamdmachine.s_cmp_eq_u32 %iter, %zero
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      waveamdmachine.uniform_if %branch {
+        %updated = waveamdmachine.update_tuple %desc, %iter {offsets = [0]}
+            : (!waveamdmachine.reg<sgpr, 2>,
+               !waveamdmachine.reg<sgpr, 1>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        %use = waveamdmachine.s_mov_b32_tuple %updated
+            {registers = 2 : i64}
+            : (!waveamdmachine.reg<sgpr, 2>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        waveamdmachine.yield
+      } otherwise {
+        %use = waveamdmachine.s_mov_b32_tuple %desc {registers = 2 : i64}
+            : (!waveamdmachine.reg<sgpr, 2>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        waveamdmachine.yield
+      } : !waveamdmachine.reg<scc, 1>
+      %next, %next_scc = waveamdmachine.s_add_i32 %iter, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%next : !waveamdmachine.reg<sgpr, 1>)
+    } -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  // Loop-local bases cannot survive a backedge.
+  // PREP-LABEL: func.func @loop_local_update_base_stays_arm_local(
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: waveamdmachine.uniform_loop
+  // PREP: [[BASE:%.*]] = waveamdmachine.s_mov_b32_tuple
+  // PREP: waveamdmachine.uniform_if
+  // PREP: waveamdmachine.update_tuple [[BASE]],
+  // PREP: otherwise
+  // PREP: waveamdmachine.s_mov_b32_tuple [[BASE]]
+  // PREP-NOT: waveamdmachine.copy_tuple
+  func.func @loop_local_update_base_stays_arm_local(
+      %part: !waveamdmachine.reg<sgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1> {
+    ^bb0:
+      %base = waveamdmachine.s_mov_b32_tuple %zero {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 2>
+      waveamdmachine.uniform_if %cond {
+        %updated = waveamdmachine.update_tuple %base, %part {offsets = [0]}
+            : (!waveamdmachine.reg<sgpr, 2>,
+               !waveamdmachine.reg<sgpr, 1>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        %then = waveamdmachine.s_mov_b32_tuple %updated {registers = 2 : i64}
+            : (!waveamdmachine.reg<sgpr, 2>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        waveamdmachine.yield
+      } otherwise {
+        %else = waveamdmachine.s_mov_b32_tuple %base {registers = 2 : i64}
+            : (!waveamdmachine.reg<sgpr, 2>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        waveamdmachine.yield
+      } : !waveamdmachine.reg<scc, 1>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+    }
+    return
+  }
+
+  // Outer loop owns storage reused by nested iterations.
+  // PREP-LABEL: func.func @nested_loop_update_copy_uses_outer_anchor(
+  // PREP-SAME: [[DESC:%[^:]+]]: !waveamdmachine.reg<sgpr, 2>
+  // PREP: [[DESC_COPY:%.*]] = waveamdmachine.copy_tuple [[DESC]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP: waveamdmachine.uniform_loop
+  // PREP: waveamdmachine.update_tuple [[DESC_COPY]],
+  // PREP: waveamdmachine.s_mov_b32_tuple [[DESC]]
+  func.func @nested_loop_update_copy_uses_outer_anchor(
+      %desc: !waveamdmachine.reg<sgpr, 2>,
+      %part: !waveamdmachine.reg<sgpr, 1>,
+      %outer_cond: !waveamdmachine.reg<scc, 1>,
+      %inner_cond: !waveamdmachine.reg<scc, 1>) {
+    waveamdmachine.uniform_loop if %outer_cond
+        : !waveamdmachine.reg<scc, 1> {
+    ^bb0:
+      waveamdmachine.uniform_loop if %inner_cond
+          : !waveamdmachine.reg<scc, 1> {
+      ^bb0:
+        %updated = waveamdmachine.update_tuple %desc, %part {offsets = [0]}
+            : (!waveamdmachine.reg<sgpr, 2>,
+               !waveamdmachine.reg<sgpr, 1>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        %use = waveamdmachine.s_mov_b32_tuple %updated {registers = 2 : i64}
+            : (!waveamdmachine.reg<sgpr, 2>)
+              -> !waveamdmachine.reg<sgpr, 2>
+        waveamdmachine.continue_if %inner_cond
+            : !waveamdmachine.reg<scc, 1>
+      }
+      waveamdmachine.continue_if %outer_cond
+          : !waveamdmachine.reg<scc, 1>
+    }
+    %after = waveamdmachine.s_mov_b32_tuple %desc {registers = 2 : i64}
+        : (!waveamdmachine.reg<sgpr, 2>)
+          -> !waveamdmachine.reg<sgpr, 2>
+    return
+  }
+
+  // Updating one tuple slot does not clobber a shared sibling.
+  // PREP-LABEL: func.func @loop_update_keeps_shared_leaf(
+  // PREP: [[INIT:%.*]] = waveamdmachine.tuple_from_elements
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[INIT]]
+  func.func @loop_update_keeps_shared_leaf(
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> !waveamdmachine.reg<sgpr, 1> {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %base = waveamdmachine.s_mov_b32_value %zero
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %shared = waveamdmachine.s_mov_b32_value %one
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %init = waveamdmachine.tuple_from_elements %base, %shared
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<sgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%init : !waveamdmachine.reg<sgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<sgpr, 2>):
+      %next, %scc = waveamdmachine.s_add_i32 %base, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<scc, 1>)
+      %updated = waveamdmachine.update_tuple %carry, %next {offsets = [0]}
+          : (!waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<sgpr, 2>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%updated : !waveamdmachine.reg<sgpr, 2>)
+    } -> !waveamdmachine.reg<sgpr, 2>
+    %after, %after_scc = waveamdmachine.s_add_i32 %shared, %one
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>,
+              !waveamdmachine.reg<scc, 1>)
+    return %after : !waveamdmachine.reg<sgpr, 1>
   }
 
   // Required reuse cannot clobber a live element borrowed by a packed tuple.

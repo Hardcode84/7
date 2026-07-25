@@ -103,6 +103,38 @@ func.func @uniform_if_simd(%cond: i1, %x: i32, %y: i32) -> i32 {
   return %first : i32
 }
 
+// SELECT-LABEL: func.func @uniform_if_fragment_roundtrip(
+// SELECT: [[SEED:%.*]] = waveamdmachine.v_mov_b32_tuple
+// SELECT-SAME: -> !waveamdmachine.reg<vgpr, 8>
+// SELECT: [[SELECTED:%.*]] = waveamdmachine.uniform_if
+// SELECT: [[IDENTITY:%.*]] = waveamdmachine.update_tuple [[SEED]]
+// SELECT-SAME: offsets = []
+// SELECT-SAME: -> !waveamdmachine.reg<vgpr, 8>
+// SELECT: waveamdmachine.yield [[IDENTITY]]
+// SELECT: otherwise
+// SELECT: waveamdmachine.yield [[SEED]]
+// SELECT: } : !waveamdmachine.reg<scc, 1>
+// SELECT-SAME: -> !waveamdmachine.reg<vgpr, 8>
+func.func @uniform_if_fragment_roundtrip(%cond: i1, %x: i32) {
+  %seed = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  %selected = scf.if %cond -> (!waveamd.fragment<2, f32, 16, 16, 32, 8>) {
+    %regs = waveamd.fragment_unpack %seed
+        : !waveamd.fragment<2, f32, 16, 16, 32, 8>
+          -> !wave.simd<vector<8xi32>, 32>
+    %identity = waveamd.fragment_pack %regs
+        : !wave.simd<vector<8xi32>, 32>
+          -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+    scf.yield %identity : !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  } else {
+    scf.yield %seed : !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  }
+  %regs = waveamd.fragment_unpack %selected
+      : !waveamd.fragment<2, f32, 16, 16, 32, 8>
+        -> !wave.simd<vector<8xi32>, 32>
+  return
+}
+
 }
 
 // -----

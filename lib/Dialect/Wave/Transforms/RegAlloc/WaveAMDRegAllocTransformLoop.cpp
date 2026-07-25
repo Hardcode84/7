@@ -412,31 +412,81 @@ private:
     }
   }
 
-  bool extendValue(Value value, unsigned position) {
-    auto it = valueIds.find(value);
-    if (it == valueIds.end())
-      return false;
-    RegAllocAliasValue &record = values[it->second];
-    record.start = std::min(record.start, position);
-    record.end = std::max(record.end, position);
-    if (record.ranges.empty()) {
-      record.ranges.push_back({position, position});
-      ++valueRangeCount;
-      return true;
-    }
-    if (position >= record.ranges.back().start) {
-      record.ranges.back().end = std::max(record.ranges.back().end, position);
-      return true;
-    }
-    auto pos = llvm::lower_bound(
-        record.ranges, position,
+  void addLiveRange(RegAllocAliasValue &record, unsigned start, unsigned end) {
+    assert(start <= end && "live range must be ordered");
+    record.start = std::min(record.start, start);
+    record.end = std::max(record.end, end);
+    auto first = llvm::lower_bound(
+        record.ranges, start,
         [](wave::RegAllocTransformLiveRange range, unsigned position) {
           return range.end < position;
         });
-    if (pos != record.ranges.end() && pos->start <= position)
+    if (first == record.ranges.end() || first->start > end) {
+      record.ranges.insert(first, {start, end});
+      ++valueRangeCount;
+      return;
+    }
+
+    first->start = std::min(first->start, start);
+    first->end = std::max(first->end, end);
+    auto next = std::next(first);
+    while (next != record.ranges.end() && next->start <= first->end) {
+      first->end = std::max(first->end, next->end);
+      next = record.ranges.erase(next);
+      --valueRangeCount;
+    }
+  }
+
+  static Region *getChildRegion(Operation *parent, Operation *nested) {
+    for (Region *region = nested->getParentRegion(); region;) {
+      Operation *owner = region->getParentOp();
+      if (owner == parent)
+        return region;
+      region = owner ? owner->getParentRegion() : nullptr;
+    }
+    return nullptr;
+  }
+
+  unsigned getRegionEntryPosition(Region &region, unsigned fallback) {
+    if (region.empty() || region.front().empty())
+      return fallback;
+    return positions.lookup(&region.front().front());
+  }
+
+  struct UniformIfRangeSegment {
+    unsigned branch = 0;
+    unsigned entry = 0;
+  };
+
+  bool extendValue(Value value, Operation *user, unsigned end) {
+    auto valueIt = valueIds.find(value);
+    if (valueIt == valueIds.end())
+      return false;
+    RegAllocAliasValue &record = values[valueIt->second];
+    SmallVector<UniformIfRangeSegment, 2> segments;
+    for (Operation *parent = user->getParentOp(); parent;
+         parent = parent->getParentOp()) {
+      auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(parent);
+      if (!uniformIf || isValueDefinedInside(parent, value))
+        continue;
+      Region *arm = getChildRegion(parent, user);
+      if (!arm)
+        continue;
+      unsigned branch = positions.lookup(parent);
+      segments.push_back({branch, getRegionEntryPosition(*arm, branch)});
+    }
+    std::reverse(segments.begin(), segments.end());
+    if (segments.empty()) {
+      addLiveRange(record, record.start, end);
       return true;
-    record.ranges.insert(pos, {position, position});
-    ++valueRangeCount;
+    }
+
+    addLiveRange(record, record.start, segments.front().branch);
+    for (auto [index, segment] : llvm::enumerate(segments)) {
+      unsigned segmentEnd =
+          index + 1 == segments.size() ? end : segments[index + 1].branch;
+      addLiveRange(record, segment.entry, segmentEnd);
+    }
     return true;
   }
 
@@ -462,17 +512,18 @@ private:
     return owner && (owner == scope || scope->isAncestor(owner));
   }
 
-  void collectExternalLoopBodyUse(Value operand, Operation *enclosingLoop) {
-    if (!enclosingLoop)
-      return;
-    for (Operation *scope = enclosingLoop; scope;
-         scope = parentUniformLoops.lookup(scope)) {
-      if (isValueDefinedInside(scope, operand))
+  std::pair<Operation *, unsigned> getUseExtent(Value operand, Operation *user,
+                                                Operation *enclosingLoop,
+                                                unsigned position) {
+    for (Operation *loopOp = enclosingLoop; loopOp;
+         loopOp = parentUniformLoops.lookup(loopOp)) {
+      if (isValueDefinedInside(loopOp, operand))
         break;
-      auto loop = cast<waveamdmachine::UniformLoopOp>(scope);
-      unsigned &end = externalLoopUseEnds[operand];
-      end = std::max(end, getLoopExitPosition(loop));
+      auto loop = cast<waveamdmachine::UniformLoopOp>(loopOp);
+      user = loopOp;
+      position = std::max(position, getLoopExitPosition(loop));
     }
+    return {user, position};
   }
 
   unsigned getLoopExitPosition(waveamdmachine::UniformLoopOp loop) {
@@ -508,17 +559,12 @@ private:
     auto execIf = cast<waveamdmachine::ExecIfOp>(record.op);
     if (!execIf.getElseRegion().empty())
       extendValue(
-          execIf.getCondition(),
+          execIf.getCondition(), record.op,
           getRegionExitPosition(execIf.getThenRegion(), record.position));
     if (needsExecIfConditionForDataMerge(execIf))
       extendValue(
-          execIf.getCondition(),
+          execIf.getCondition(), record.op,
           getRegionExitPosition(execIf.getElseRegion(), record.position));
-  }
-
-  void extendExternalLoopUses() {
-    for (auto [value, end] : externalLoopUseEnds)
-      extendValue(value, end);
   }
 
   void addAliasEdge(Value lhs, Value rhs, int64_t delta) {
@@ -695,12 +741,12 @@ private:
   void collectUses() {
     for (RegAllocAliasOp &record : ops) {
       for (Value operand : record.op->getOperands()) {
-        if (extendValue(operand, record.position))
-          collectExternalLoopBodyUse(operand, record.enclosingLoop);
+        auto [scope, end] = getUseExtent(operand, record.op,
+                                         record.enclosingLoop, record.position);
+        extendValue(operand, scope, end);
       }
       collectExecIfConditionUses(record);
     }
-    extendExternalLoopUses();
   }
 
   void collectAliases() {
@@ -1020,7 +1066,6 @@ private:
   SmallVector<RegAllocAliasEdge> edges;
   SmallVector<RegAllocAliasSet> aliasSets;
   SmallVector<Value> payloadValues;
-  DenseMap<Value, unsigned> externalLoopUseEnds;
   DenseMap<TypeID, bool> mfmaTypes;
   DenseMap<Operation *, Operation *> parentUniformLoops;
   DenseMap<Operation *, unsigned> positions;

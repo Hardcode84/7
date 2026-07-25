@@ -390,6 +390,37 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   return false;
 }
 
+static bool useMayFollowThroughLoop(Value value, Operation *from,
+                                    Operation *user) {
+  for (Operation *parent = from->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(parent);
+    if (loop && !valueIsDefinedInside(loop, value) &&
+        user != loop.getOperation() &&
+        operationIsInside(loop.getOperation(), user))
+      return true;
+  }
+  return false;
+}
+
+static bool useMayFollow(Value value, Operation *from, Operation *user) {
+  if (from == user)
+    return false;
+  if (useMayFollowThroughLoop(value, from, user))
+    return true;
+  if (useCannotFollow(from, user))
+    return false;
+  for (Operation *fromTop = from; fromTop; fromTop = fromTop->getParentOp()) {
+    Operation *userTop = ancestorInBlock(user, fromTop->getBlock());
+    if (!userTop)
+      continue;
+    if (fromTop == userTop)
+      return true;
+    return fromTop->isBeforeInBlock(userTop);
+  }
+  return true;
+}
+
 static bool hasInvariantBodyRead(Value value,
                                  waveamdmachine::UniformLoopOp loop) {
   Operation *terminator = loop.getBody().front().getTerminator();
@@ -418,20 +449,50 @@ static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
 }
 
 static bool hasUseAfterLoop(Value value, waveamdmachine::UniformLoopOp loop) {
-  Block *block = loop->getBlock();
-  for (OpOperand &use : value.getUses()) {
+  return llvm::any_of(value.getUses(), [&](OpOperand &use) {
     Operation *user = use.getOwner();
-    if (user == loop.getOperation() ||
-        operationIsInside(loop.getOperation(), user))
-      continue;
-    Operation *top = ancestorInBlock(user, block);
-    if (!top && useCannotFollow(loop, user))
-      continue;
-    // Reachable cross-block use keeps writable carry storage distinct.
-    if (!top || loop->isBeforeInBlock(top))
-      return true;
+    return user != loop.getOperation() &&
+           !operationIsInside(loop.getOperation(), user) &&
+           useMayFollow(value, loop, user);
+  });
+}
+
+static bool valueIsLiveAfter(Value value, Operation *op) {
+  return llvm::any_of(value.getUses(), [&](OpOperand &use) {
+    return use.getOwner() != op && useMayFollow(value, op, use.getOwner());
+  });
+}
+
+static Operation *
+getUpdateTupleCopyAnchor(waveamdmachine::UpdateTupleOp update) {
+  Operation *anchor = update.getOperation();
+  Value base = update.getBase();
+  for (Operation *parent = update->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(parent) &&
+        !valueIsDefinedInside(parent, base))
+      anchor = parent;
+  return anchor;
+}
+
+static LogicalResult splitLiveUpdateTupleBases(func::FuncOp func) {
+  SmallVector<waveamdmachine::UpdateTupleOp> updates;
+  func.walk([&](waveamdmachine::UpdateTupleOp update) {
+    if (valueIsLiveAfter(update.getBase(), update))
+      updates.push_back(update);
+  });
+
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::UpdateTupleOp update : updates) {
+    Operation *anchor = getUpdateTupleCopyAnchor(update);
+    builder.setInsertionPoint(anchor);
+    FailureOr<Value> copy =
+        duplicateRegValue(builder, update.getLoc(), update.getBase());
+    if (failed(copy))
+      return failure();
+    update.getBaseMutable().assign(*copy);
   }
-  return false;
+  return success();
 }
 
 static bool shouldRematerializeLoopInit(Value init,
@@ -1125,6 +1186,8 @@ static LogicalResult materializeConditionalYieldCopies(func::FuncOp func) {
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   eraseRegAfterOps(func);
+  if (failed(splitLiveUpdateTupleBases(func)))
+    return failure();
   if (failed(materializeConditionalYieldCopies(func)))
     return failure();
   if (failed(materializeLoopBackedgeCopies(func)))

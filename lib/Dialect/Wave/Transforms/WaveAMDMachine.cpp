@@ -65,7 +65,9 @@ static constexpr StringLiteral kDmaIssueAfterDelayAttr =
 
 namespace mlir::wave::wmsel {
 
-static bool isLaneVaryingType(Type type) { return isa<SimdType>(type); }
+static bool isLaneVaryingType(Type type) {
+  return isa<SimdType, waveamd::FragmentType>(type);
+}
 
 static unsigned bitWidth(Type type) {
   if (auto vecTy = dyn_cast<VectorType>(type)) {
@@ -2940,8 +2942,25 @@ LogicalResult WaveAMDMachineSelector::selectConstant(ConstantOp op) {
 }
 
 static FailureOr<unsigned>
+getScalarRegisterPayloadBits(Type type,
+                             function_ref<InFlightDiagnostic()> emitError) {
+  if (type.isIndex())
+    return 64;
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    if (!intType.isSignless())
+      return emitError() << "unsupported register payload type " << type;
+    return intType.getWidth();
+  }
+  if (auto floatType = dyn_cast<FloatType>(type))
+    return floatType.getWidth();
+  return emitError() << "unsupported register payload type " << type;
+}
+
+static FailureOr<unsigned>
 getRegisterPayloadBits(Type type,
                        function_ref<InFlightDiagnostic()> emitError) {
+  if (auto fragmentType = dyn_cast<waveamd::FragmentType>(type))
+    return fragmentType.getRegisters() * 32;
   if (auto simdType = dyn_cast<SimdType>(type))
     type = simdType.getElementType();
   if (auto vectorType = dyn_cast<VectorType>(type)) {
@@ -2953,16 +2972,7 @@ getRegisterPayloadBits(Type type,
       return failure();
     return *elementBits * vectorType.getNumElements();
   }
-  if (type.isIndex())
-    return 64;
-  if (auto intType = dyn_cast<IntegerType>(type)) {
-    if (!intType.isSignless())
-      return emitError() << "unsupported register payload type " << type;
-    return intType.getWidth();
-  }
-  if (auto floatType = dyn_cast<FloatType>(type))
-    return floatType.getWidth();
-  return emitError() << "unsupported register payload type " << type;
+  return getScalarRegisterPayloadBits(type, emitError);
 }
 
 static FailureOr<unsigned>
@@ -3003,7 +3013,7 @@ LogicalResult WaveAMDMachineSelector::selectPoison(ub::PoisonOp op) {
   if (failed(width))
     return failure();
 
-  if (isa<SimdType>(type)) {
+  if (isLaneVaryingType(type)) {
     values[op.getResult()] = materializeUninitGPR(
         builder, op.getLoc(), waveamdmachine::RegClass::VGPR, *width);
   } else {
@@ -7097,12 +7107,17 @@ WaveAMDMachineSelector::selectFragmentFill(waveamd::FragmentFillOp op) {
   return success();
 }
 
-// FragmentPack is a no-op rename at the WaveAMDMachine level: the per-lane
-// register tuple selected for the source SIMD value already has the
-// exact register width required by the destination fragment.
 LogicalResult
 WaveAMDMachineSelector::selectFragmentPack(waveamd::FragmentPackOp op) {
-  values[op.getResult()] = expect(op.getRegisters(), op);
+  Value registers = expect(op.getRegisters(), op);
+  if (op.getRegisters().getDefiningOp<waveamd::FragmentUnpackOp>()) {
+    // Preserve explicit round-trip as arm-local storage identity.
+    values[op.getResult()] = waveamdmachine::UpdateTupleOp::create(
+        builder, op.getLoc(), registers.getType(), registers, ValueRange{},
+        builder.getArrayAttr({}));
+  } else {
+    values[op.getResult()] = registers;
+  }
   eraseIfTopLevel(op);
   return success();
 }
@@ -8640,7 +8655,7 @@ static FailureOr<Type> getScfIfDataResultType(scf::IfOp op, Type sourceType) {
   MLIRContext *context = op.getContext();
   if (isa<MemTokenType>(sourceType))
     return getMemTokenType(context);
-  waveamdmachine::RegClass regClass = isa<SimdType>(sourceType)
+  waveamdmachine::RegClass regClass = isLaneVaryingType(sourceType)
                                           ? waveamdmachine::RegClass::VGPR
                                           : waveamdmachine::RegClass::SGPR;
   unsigned width = 0;

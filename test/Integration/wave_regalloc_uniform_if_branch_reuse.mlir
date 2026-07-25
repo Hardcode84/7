@@ -110,6 +110,47 @@ func.func @uniform_if_sibling_loop_invariant_reuse()
   return
 }
 
+// ALLOC-LABEL: func.func @uniform_if_else_input_skips_then_pressure(
+// ALLOC-SAME: [[LIVE:%[^:]+]]: !waveamdmachine.reg<vgpr, 128, 0>
+// ALLOC-SAME: waveamdmachine.regalloc_assignments
+// ALLOC-SAME: waveamdmachine.vgpr_count = 128 : i64
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC: [[SCRATCH:%.*]] = waveamdmachine.uninit
+// ALLOC-SAME: !waveamdmachine.reg<vgpr, 128, 0>
+// ALLOC: otherwise
+// ALLOC: waveamdmachine.tuple_to_elements [[LIVE]]
+func.func @uniform_if_else_input_skips_then_pressure(
+    %live: !waveamdmachine.reg<vgpr, 128>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  waveamdmachine.uniform_if %cond {
+    %scratch = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 128>
+    %parts:2 = waveamdmachine.tuple_to_elements %scratch
+        : (!waveamdmachine.reg<vgpr, 128>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 127>)
+    waveamdmachine.v_cmpx_eq_u32 %parts#0, %parts#0
+        : (!waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>) -> ()
+    waveamdmachine.yield
+  } otherwise {
+    %parts:2 = waveamdmachine.tuple_to_elements %live
+        : (!waveamdmachine.reg<vgpr, 128>)
+          -> (!waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 127>)
+    waveamdmachine.v_cmpx_eq_u32 %parts#0, %parts#0
+        : (!waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>) -> ()
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<scc, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ALLOC-LABEL: func.func @uniform_if_agpr_branch_storage_reuse()
 // ALLOC-SAME: waveamdmachine.agpr_count = 64 : i64
 // ALLOC: waveamdmachine.uniform_if
