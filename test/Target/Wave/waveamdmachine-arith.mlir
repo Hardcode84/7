@@ -569,6 +569,48 @@ func.func @scalar_arith_cmpi_select(%a: i32, %b: i32, %x: index, %y: index) -> i
   return %sum : i32
 }
 
+// SELECT-LABEL: func.func @scalar_arith_cmpi_i64_equality
+// SELECT-NOT: waveamdmachine.tuple_to_elements
+// SELECT: waveamdmachine.s_cmp_eq_u64
+// SELECT: waveamdmachine.s_cmp_lg_u64
+// SELECT-NOT: waveamdmachine.tuple_to_elements
+// SELECT: return
+func.func @scalar_arith_cmpi_i64_equality(
+    %a: i64, %b: i64, %c: i64) -> i32 {
+  %eq = arith.cmpi eq, %a, %b : i64
+  %ne = arith.cmpi ne, %a, %c : i64
+  %zero = arith.constant 0 : i32
+  %one = arith.constant 1 : i32
+  %eq_value = wave.select %eq, %one, %zero : i32
+  %ne_value = wave.select %ne, %one, %zero : i32
+  %sum = wave.binary addi %eq_value, %ne_value : i32, i32 -> i32
+  return %sum : i32
+}
+
+// SELECT-LABEL: func.func @scalar_arith_cmpi_i64_ordered
+// SELECT-NOT: waveamdmachine.s_cmp_eq_u64
+// SELECT-NOT: waveamdmachine.s_cmp_lg_u64
+// SELECT: waveamdmachine.tuple_to_elements
+// SELECT-NOT: waveamdmachine.s_cmp_eq_u64
+// SELECT-NOT: waveamdmachine.s_cmp_lg_u64
+// SELECT: waveamdmachine.s_cmp_lt_i32
+// SELECT-NOT: waveamdmachine.s_cmp_eq_u64
+// SELECT-NOT: waveamdmachine.s_cmp_lg_u64
+// SELECT: waveamdmachine.s_cmp_lt_u32
+// SELECT-NOT: waveamdmachine.s_cmp_eq_u64
+// SELECT-NOT: waveamdmachine.s_cmp_lg_u64
+// SELECT: return
+func.func @scalar_arith_cmpi_i64_ordered(%a: i64, %b: i64) -> i32 {
+  %slt = arith.cmpi slt, %a, %b : i64
+  %ult = arith.cmpi ult, %a, %b : i64
+  %zero = arith.constant 0 : i32
+  %one = arith.constant 1 : i32
+  %slt_value = wave.select %slt, %one, %zero : i32
+  %ult_value = wave.select %ult, %one, %zero : i32
+  %sum = wave.binary addi %slt_value, %ult_value : i32, i32 -> i32
+  return %sum : i32
+}
+
 }
 
 // -----

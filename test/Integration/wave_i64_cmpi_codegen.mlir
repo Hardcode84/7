@@ -42,6 +42,39 @@ func.func @i64_cmpi_codegen(%out: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// ASM-LABEL: i64_eq_codegen:
+// ASM-NOT: s_cmp_eq_u32
+// ASM-NOT: s_and_b32
+// ASM-NOT: s_or_b32
+// ASM: s_cmp_eq_u64
+// ASM: s_cselect_b32
+// ASM: s_cmp_lg_u64
+// ASM: s_cselect_b32
+// ASM-NOT: s_cmp_eq_u32
+// ASM-NOT: s_and_b32
+// ASM-NOT: s_or_b32
+// ASM: global_store_b32
+func.func @i64_eq_codegen(%out: !wave.ptr<#wave.global, i32>,
+                          %lhs: i64, %rhs: i64, %other: i64)
+    attributes {wave.kernel} {
+  %eq = arith.cmpi eq, %lhs, %rhs : i64
+  %ne = arith.cmpi ne, %lhs, %other : i64
+  %zero = arith.constant 0 : i32
+  %one = arith.constant 1 : i32
+  %eq_value = wave.select %eq, %one, %zero : i32
+  %ne_value = wave.select %ne, %one, %zero : i32
+  %value = wave.binary addi %eq_value, %ne_value : i32, i32 -> i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %values = wave.splat %value : i32 -> !wave.simd<i32, 32>
+  %ptrs = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %values -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: i64_cmpi_literal_codegen:
 // ASM: s_mov_b32
 // ASM: s_cmp_lt_u32

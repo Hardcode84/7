@@ -45,6 +45,8 @@
   X(sCmpGeU32, S_CMP_GE_U32_vi, S_CMP_GE_U32_gfx11)                            \
   X(sCmpLtU32, S_CMP_LT_U32_vi, S_CMP_LT_U32_gfx11)                            \
   X(sCmpLeU32, S_CMP_LE_U32_vi, S_CMP_LE_U32_gfx11)                            \
+  X(sCmpEqU64, S_CMP_EQ_U64_vi, S_CMP_EQ_U64_gfx11)                            \
+  X(sCmpLgU64, S_CMP_LG_U64_vi, S_CMP_LG_U64_gfx11)                            \
   X(sCselectB32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)                        \
   X(sBranch, S_BRANCH_vi, S_BRANCH_gfx11)                                      \
   X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \

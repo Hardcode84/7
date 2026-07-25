@@ -504,6 +504,8 @@ private:
   unsigned sCmpGeU32() const { return opcodes.sCmpGeU32; }
   unsigned sCmpLtU32() const { return opcodes.sCmpLtU32; }
   unsigned sCmpLeU32() const { return opcodes.sCmpLeU32; }
+  unsigned sCmpEqU64() const { return opcodes.sCmpEqU64; }
+  unsigned sCmpLgU64() const { return opcodes.sCmpLgU64; }
   unsigned sCselectB32() const { return opcodes.sCselectB32; }
   unsigned sBranch() const { return opcodes.sBranch; }
   unsigned sCbranchScc0() const { return opcodes.sCbranchScc0; }
@@ -3400,6 +3402,17 @@ private:
            llvm::MCOperand::createImm(
                static_cast<int64_t>(static_cast<uint64_t>(value) >> 32) &
                0xffffffff)});
+    }
+    if (isa<waveamdmachine::SCmpEqU64Op, waveamdmachine::SCmpLgU64Op>(op)) {
+      unsigned opcode =
+          isa<waveamdmachine::SCmpEqU64Op>(op) ? sCmpEqU64() : sCmpLgU64();
+      auto toScalar64Operand = [&](Value value) {
+        if (isVCCType(value.getType()))
+          return llvm::MCOperand::createReg(namedPhysReg("vcc"));
+        return toMCOperand(value);
+      };
+      return emitMC(opcode, {toScalar64Operand(op.getOperand(0)),
+                             toScalar64Operand(op.getOperand(1))});
     }
     if (isa<waveamdmachine::SCmpEqI32Op, waveamdmachine::SCmpLgI32Op,
             waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,

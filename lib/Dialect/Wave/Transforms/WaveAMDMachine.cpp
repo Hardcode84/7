@@ -5664,21 +5664,17 @@ static Value combineScalarBools(WaveAMDMachineSelector &S, Location loc,
 Value createScalarI64Cmp(WaveAMDMachineSelector &S, Location loc,
                          CmpRelation relation, bool signedCmp, Value lhs,
                          Value rhs) {
+  if (relation == CmpRelation::Eq || relation == CmpRelation::Ne) {
+    Type scc = getSCCType(S.builder.getContext());
+    lhs = ensureSGPR2(S, loc, lhs);
+    rhs = ensureSGPR2(S, loc, rhs);
+    if (relation == CmpRelation::Eq)
+      return waveamdmachine::SCmpEqU64Op::create(S.builder, loc, scc, lhs, rhs);
+    return waveamdmachine::SCmpLgU64Op::create(S.builder, loc, scc, lhs, rhs);
+  }
+
   I64Dwords lhsDwords = splitI64Dwords(S, loc, lhs);
   I64Dwords rhsDwords = splitI64Dwords(S, loc, rhs);
-  if (relation == CmpRelation::Eq || relation == CmpRelation::Ne) {
-    Value hi =
-        materializeSCCBool(S, loc,
-                           createScalarWordCmp(S, loc, relation, false,
-                                               lhsDwords.hi, rhsDwords.hi));
-    Value lo =
-        materializeSCCBool(S, loc,
-                           createScalarWordCmp(S, loc, relation, false,
-                                               lhsDwords.lo, rhsDwords.lo));
-    MaskCombiner combiner =
-        relation == CmpRelation::Eq ? MaskCombiner::And : MaskCombiner::Or;
-    return boolToSCC(S, loc, combineScalarBools(S, loc, hi, lo, combiner));
-  }
   Value hiCmp = materializeSCCBool(
       S, loc,
       createScalarWordCmp(S, loc, strictHighRelation(relation), signedCmp,

@@ -179,6 +179,60 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
+  // CHECK-LABEL: func.func @direct_vcc_scalar_i64_cmp
+  // CHECK: %{{.*}}, [[VCC:%.*]] = waveamdmachine.v_cmp_ne_u32_vcc
+  // CHECK-NEXT: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u64 [[VCC]], %arg2
+  // CHECK-NEXT: waveamdmachine.s_cselect_b32 [[CMP]]
+  func.func @direct_vcc_scalar_i64_cmp(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %zero: !waveamdmachine.reg<vgpr, 1>,
+      %expected: !waveamdmachine.reg<sgpr, 2>,
+      %one: !waveamdmachine.reg<sgpr, 1>,
+      %zero_scalar: !waveamdmachine.reg<sgpr, 1>) {
+    %mask, %vcc = waveamdmachine.v_cmp_ne_u32_vcc %a, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    %cmp = waveamdmachine.s_cmp_eq_u64 %mask, %expected
+        : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+        -> !waveamdmachine.reg<scc, 1>
+    %pick = waveamdmachine.s_cselect_b32 %cmp, %one, %zero_scalar
+        : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
+           !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    return
+  }
+
+  // CHECK-LABEL: func.func @keeps_scalar_i64_mask_across_live_vcc
+  // CHECK: [[MASK:%.*]] = waveamdmachine.v_cmp_ne_u32
+  // CHECK-NEXT: [[SUM:%.*]], [[LIVE_VCC:%.*]] = waveamdmachine.v_add_u32_vcc
+  // CHECK-NEXT: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u64 [[MASK]], %arg3
+  // CHECK-NEXT: waveamdmachine.s_cselect_b32 [[CMP]]
+  // CHECK-NEXT: waveamdmachine.v_cndmask_b32_vcc %arg0, [[SUM]], [[LIVE_VCC]]
+  func.func @keeps_scalar_i64_mask_across_live_vcc(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>,
+      %zero: !waveamdmachine.reg<vgpr, 1>,
+      %expected: !waveamdmachine.reg<sgpr, 2>,
+      %one: !waveamdmachine.reg<sgpr, 1>,
+      %zero_scalar: !waveamdmachine.reg<sgpr, 1>) {
+    %mask, %compare_vcc = waveamdmachine.v_cmp_ne_u32_vcc %a, %zero
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+    %sum, %live_vcc = waveamdmachine.v_add_u32_vcc %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+    %cmp = waveamdmachine.s_cmp_eq_u64 %mask, %expected
+        : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>)
+        -> !waveamdmachine.reg<scc, 1>
+    %pick = waveamdmachine.s_cselect_b32 %cmp, %one, %zero_scalar
+        : (!waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1>,
+           !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1>
+    %selected =
+        waveamdmachine.v_cndmask_b32_vcc %a, %sum, %live_vcc
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
   // CHECK-LABEL: func.func @sinks_scc_compare_mask
   // CHECK: [[SUM:%.*]], %{{.*}} = waveamdmachine.s_add_i32 %arg0, %arg1
   // CHECK-NEXT: [[CMP:%.*]] = waveamdmachine.s_cmp_eq_u32 %arg0, %arg1

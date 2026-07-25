@@ -182,6 +182,22 @@ static LogicalResult makeDeadVCCCompareResultsDirect(Operation *root) {
   return success();
 }
 
+static void useVCCScalarCompare(Operation *op) {
+  if (!isa<waveamdmachine::SCmpEqU64Op, waveamdmachine::SCmpLgU64Op>(op))
+    return;
+  for (OpOperand &operand : op->getOpOperands()) {
+    Value mask = operand.get();
+    if (!mask.hasOneUse())
+      continue;
+    Value vcc = getUnusedVCCResult(mask);
+    Operation *compare = mask.getDefiningOp();
+    if (!vcc || compare->getBlock() != op->getBlock() ||
+        !compare->isBeforeInBlock(op) || hasLiveVCCWriteBetween(compare, op))
+      continue;
+    operand.set(vcc);
+  }
+}
+
 static void useVCCExecMask(waveamdmachine::ExecIfOp execIf) {
   Value mask = execIf.getCondition();
   if (!mask.hasOneUse())
@@ -209,6 +225,7 @@ static bool isScalarMaskSinkOp(Operation *op) {
            waveamdmachine::SCmpGeU32Op, waveamdmachine::SCmpEqI32Op,
            waveamdmachine::SCmpLtI32Op, waveamdmachine::SCmpLeI32Op,
            waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,
+           waveamdmachine::SCmpEqU64Op, waveamdmachine::SCmpLgU64Op,
            waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
            waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
            waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
@@ -288,6 +305,8 @@ static void collectOps(Operation *root, SmallVectorImpl<Operation *> &ops) {
 static void sinkScalarMasks(Operation *root) {
   SmallVector<Operation *> ops;
   collectOps(root, ops);
+  for (Operation *op : ops)
+    useVCCScalarCompare(op);
   for (Operation *op : ops)
     sinkScalarMaskClosure(op);
   for (Operation *op : ops)

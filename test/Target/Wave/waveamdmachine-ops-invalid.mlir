@@ -8,6 +8,30 @@ func.func @bad_v_add_operand_count(%x: !waveamdmachine.reg<vgpr, 1>) {
 
 // -----
 
+func.func @bad_s_cmp_eq_u64_lhs(
+    %lhs: !waveamdmachine.reg<sgpr, 1>,
+    %rhs: !waveamdmachine.reg<sgpr, 2>) {
+  // expected-error @below {{operand #0 must be WaveAMDMachine SGPR pair or VCC}}
+  %cmp = "waveamdmachine.s_cmp_eq_u64"(%lhs, %rhs)
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
+        -> !waveamdmachine.reg<scc, 1>
+  return
+}
+
+// -----
+
+func.func @bad_s_cmp_lg_u64_rhs(
+    %lhs: !waveamdmachine.reg<sgpr, 2>,
+    %rhs: !waveamdmachine.reg<vgpr, 2>) {
+  // expected-error @below {{operand #1 must be WaveAMDMachine SGPR pair or VCC}}
+  %cmp = "waveamdmachine.s_cmp_lg_u64"(%lhs, %rhs)
+      : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<scc, 1>
+  return
+}
+
+// -----
+
 func.func @bad_v_mbcnt_result_type() {
   // expected-error @below {{result #0 must be WaveAMDMachine scalar VGPR register}}
   %r = "waveamdmachine.v_mbcnt_lo"() : () -> !waveamdmachine.reg<sgpr, 1>

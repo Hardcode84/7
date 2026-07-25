@@ -409,6 +409,13 @@ def WaveAMDMachine_ExecMask
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VCC)">,
            "WaveAMDMachine SGPR or VCC EXEC mask">;
 
+def WaveAMDMachine_SGPR2OrVCC
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "((::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 2) || "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::VCC)">,
+           "WaveAMDMachine SGPR pair or VCC">;
+
 def WaveAMDMachine_SGPR1OrImm
     : Type<CPred<"(::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
@@ -3572,6 +3579,21 @@ class WaveAMDMachine_SCmp<string mnemonic, list<Trait> traits = [Pure]>
   );
   let results = (outs WaveAMDMachine_SCC:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+class WaveAMDMachine_SCmpU64<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [Pure, WaveAMDMachine_SALU]> {
+  let arguments = (ins WaveAMDMachine_SGPR2OrVCC:$lhs,
+                       WaveAMDMachine_SGPR2OrVCC:$rhs);
+  let results = (outs WaveAMDMachine_SCC:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SCmpEqU64Op : WaveAMDMachine_SCmpU64<"s_cmp_eq_u64"> {
+  let summary = "scalar unsigned 64-bit equal compare";
+}
+def WaveAMDMachine_SCmpLgU64Op : WaveAMDMachine_SCmpU64<"s_cmp_lg_u64"> {
+  let summary = "scalar unsigned 64-bit not-equal compare";
 }
 
 def WaveAMDMachine_SCmpEqU32Op : WaveAMDMachine_SCmp<"s_cmp_eq_u32"> {
