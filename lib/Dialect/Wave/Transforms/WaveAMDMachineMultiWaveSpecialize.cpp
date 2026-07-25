@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -18,6 +19,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <cstdint>
 #include <limits>
@@ -86,6 +88,20 @@ getFlatWorkgroupSize(func::FuncOp func) {
     flat = candidate;
   }
   return flat;
+}
+
+static bool hasLinearWorkitemX(func::FuncOp func) {
+  bool found = false;
+  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+    DenseI32ArrayAttr shape = func->getAttrOfType<DenseI32ArrayAttr>(name);
+    if (!shape)
+      continue;
+    found = true;
+    if (llvm::any_of(shape.asArrayRef().drop_front(),
+                     [](int32_t dim) { return dim != 1; }))
+      return false;
+  }
+  return found;
 }
 
 static FailureOr<std::optional<unsigned>>
@@ -182,18 +198,54 @@ static void setBarrierLineage(const DenseMap<Operation *, int64_t> &sites,
   }
 }
 
+static Value getFirstWorkitemX(OpBuilder &builder, Location loc,
+                               func::FuncOp func,
+                               waveamdmachine::UniformLoopOp loop) {
+  MLIRContext *context = builder.getContext();
+  for (Operation &op : *loop->getBlock()) {
+    if (&op == loop.getOperation())
+      break;
+    auto read = dyn_cast<waveamdmachine::VReadfirstlaneB32Op>(op);
+    if (read && isa_and_nonnull<waveamdmachine::VWorkitemIdXOp>(
+                    read->getOperand(0).getDefiningOp()))
+      return read.getResult();
+  }
+
+  WaveAMDKernelEntryRegs entryRegs = getWaveAMDKernelEntryRegs(func);
+  Type vgpr = waveamdmachine::RegType::get(
+      context, waveamdmachine::RegClass::VGPR, 1, entryRegs.workitemIdVGPR(0));
+  Type sgpr = waveamdmachine::RegType::get(
+      context, waveamdmachine::RegClass::SGPR, 1, -1);
+  Value workitem =
+      waveamdmachine::VWorkitemIdXOp::create(builder, loc, vgpr).getResult();
+  return waveamdmachine::VReadfirstlaneB32Op::create(builder, loc, sgpr,
+                                                     workitem)
+      .getResult();
+}
+
 static Value buildClassCondition(OpBuilder &builder, Location loc,
-                                 int simdIdOffset) {
+                                 func::FuncOp func,
+                                 waveamdmachine::UniformLoopOp loop,
+                                 unsigned wavefront, unsigned simdsPerCU,
+                                 unsigned targetWaves) {
   MLIRContext *context = builder.getContext();
   Type sgpr = waveamdmachine::RegType::get(
       context, waveamdmachine::RegClass::SGPR, 1, -1);
   Type scc = waveamdmachine::RegType::get(context,
                                           waveamdmachine::RegClass::SCC, 1, -1);
   Type imm = waveamdmachine::ImmType::get(context);
+  unsigned classShift = llvm::Log2_32(wavefront);
+  if (targetWaves > 1)
+    classShift += llvm::Log2_32(simdsPerCU);
+  Value shift =
+      waveamdmachine::ImmOp::create(builder, loc, imm, classShift).getResult();
+  Value one = waveamdmachine::ImmOp::create(builder, loc, imm, 1).getResult();
+  Value firstWorkitem = getFirstWorkitemX(builder, loc, func, loop);
+  Value ordinal = waveamdmachine::SLshrB32Op::create(builder, loc, sgpr, scc,
+                                                     firstWorkitem, shift)
+                      .getResult();
   Value parity =
-      waveamdmachine::SGetregHwIdOp::create(
-          builder, loc, sgpr, builder.getI32IntegerAttr(simdIdOffset),
-          builder.getI32IntegerAttr(1))
+      waveamdmachine::SAndB32Op::create(builder, loc, sgpr, scc, ordinal, one)
           .getResult();
   Value zero = waveamdmachine::ImmOp::create(builder, loc, imm, 0).getResult();
   return waveamdmachine::SCmpEqU32Op::create(builder, loc, scc, parity, zero)
@@ -221,7 +273,8 @@ static void replaceSavedUses(waveamdmachine::UniformIfOp uniformIf,
 }
 
 static LogicalResult specializeLoop(waveamdmachine::UniformLoopOp loop,
-                                    const waveamdmachine::ArchData &arch) {
+                                    const waveamdmachine::ArchData &arch,
+                                    unsigned wavefront, unsigned targetWaves) {
   FailureOr<DenseMap<Operation *, int64_t>> barrierSites =
       buildBarrierLineage(loop);
   if (failed(barrierSites))
@@ -237,7 +290,9 @@ static LogicalResult specializeLoop(waveamdmachine::UniformLoopOp loop,
 
   OpBuilder builder(loop);
   Location loc = loop.getLoc();
-  Value firstClass = buildClassCondition(builder, loc, arch.simdIdOffset);
+  Value firstClass =
+      buildClassCondition(builder, loc, loop->getParentOfType<func::FuncOp>(),
+                          loop, wavefront, arch.simdsPerCU, targetWaves);
   waveamdmachine::UniformIfOp uniformIf = waveamdmachine::UniformIfOp::create(
       builder, loc, loop.getResultTypes(), firstClass);
   uniformIf->setAttr(kScheduleMarkerAttr, builder.getUnitAttr());
@@ -281,11 +336,17 @@ collectSpecializationLoops(func::FuncOp func) {
 
 static LogicalResult specializeFunction(func::FuncOp func) {
   const waveamdmachine::ArchData *arch = resolveArch(func);
-  if (!arch || !hasSpecializationOccupancy(func, *arch) ||
-      !waveamdmachine::SGetregHwIdOp::isSupportedOnIsa(arch->isa))
+  if (!arch || !hasLinearWorkitemX(func) ||
+      !hasSpecializationOccupancy(func, *arch))
     return success();
+  std::optional<unsigned> targetWaves = getTargetWaves(func);
+  FailureOr<unsigned> wavefront = waveamdmachine::getAMDGPUWavefrontSize(
+      func, "waveamd-machine-multi-wave-specialize");
+  if (!targetWaves || failed(wavefront) || !llvm::isPowerOf2_32(*wavefront) ||
+      !llvm::isPowerOf2_32(arch->simdsPerCU))
+    return failure();
   for (waveamdmachine::UniformLoopOp loop : collectSpecializationLoops(func))
-    if (failed(specializeLoop(loop, *arch)))
+    if (failed(specializeLoop(loop, *arch, *wavefront, *targetWaves)))
       return failure();
   return success();
 }

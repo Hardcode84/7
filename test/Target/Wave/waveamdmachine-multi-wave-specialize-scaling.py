@@ -61,7 +61,8 @@ def main() -> None:
         raise SystemExit("large loop was not cloned")
     if "waveamdmachine.multi_wave_schedule" in proc.stdout:
         raise SystemExit("large loop scheduling marker was not consumed")
-    if proc.stdout.count("waveamdmachine.imm 1") != 2 * OP_COUNT:
+    # Cohort predicate contributes one fixed `imm 1`.
+    if proc.stdout.count("waveamdmachine.imm 1") != 2 * OP_COUNT + 1:
         raise SystemExit("large loop clone lost operations")
     print(f"multi-wave specialization: {OP_COUNT}-op loop cloned and scheduled")
 

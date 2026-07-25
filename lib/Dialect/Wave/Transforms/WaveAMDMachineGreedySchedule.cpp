@@ -229,8 +229,10 @@ struct ComputeResourceState {
   int64_t currentSlot = 0;
 };
 
-static unsigned getMultiWaveClass(waveamdmachine::WavePlacement placement) {
-  return placement.simd % kMultiWaveClassCount;
+static unsigned
+getMultiWaveClass(const waveamdmachine::MultiWaveExecutionState &state,
+                  unsigned wave) {
+  return state.getWaveCohort(wave, kMultiWaveClassCount);
 }
 
 class IssueExecutionModel {
@@ -4784,7 +4786,7 @@ initializeMultiWaveState(waveamdmachine::MultiWaveExecutionState &state,
                          const MultiWaveRegions &regions,
                          const ValueOriginMap &origins) {
   for (unsigned wave : llvm::seq<unsigned>(state.getWaveCount())) {
-    unsigned classId = getMultiWaveClass(state.getPlacement(wave));
+    unsigned classId = getMultiWaveClass(state, wave);
     waveamdmachine::UniformLoopOp loop =
         getCompleteUniformLoop(regions[classId]);
     bindMultiWaveValueOrigins(state, wave, origins, regions[classId].block);
@@ -4881,7 +4883,7 @@ public:
           std::make_unique<waveamdmachine::MultiWaveExecutionState>(
               *steadyState);
     for (unsigned wave : llvm::seq<unsigned>(localState->getWaveCount())) {
-      unsigned classId = getMultiWaveClass(localState->getPlacement(wave));
+      unsigned classId = getMultiWaveClass(*localState, wave);
       classWaves[classId].push_back(wave);
     }
     for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
@@ -5103,7 +5105,7 @@ Operation *MultiWaveOrderReplay::getCurrentOp(unsigned wave) const {
   const MultiWaveReplayPosition &position = positions[wave];
   if (position.iteration >= iterations)
     return nullptr;
-  unsigned classId = getMultiWaveClass(state.getPlacement(wave));
+  unsigned classId = getMultiWaveClass(state, wave);
   return regions[classId].ops[orders[classId][position.offset]];
 }
 
@@ -5139,7 +5141,7 @@ LogicalResult MultiWaveOrderReplay::commitWave(unsigned wave) {
   Operation *op = getCurrentOp(wave);
   if (!op || failed(state.commit(wave, op)))
     return failure();
-  unsigned classId = getMultiWaveClass(state.getPlacement(wave));
+  unsigned classId = getMultiWaveClass(state, wave);
   bindMultiWaveValueOrigins(state, wave, origins, regions[classId].block);
   MultiWaveReplayPosition &position = positions[wave];
   ++position.offset;

@@ -6,16 +6,24 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // ENABLED-LABEL: func.func @specialize(
-// ENABLED: [[HW_ID:%.*]] = waveamdmachine.s_getreg_hw_id offset 4 width 1
+// ENABLED: [[SHIFT:%.*]] = waveamdmachine.imm 6
+// ENABLED: [[ONE:%.*]] = waveamdmachine.imm 1
+// ENABLED: [[WORKITEM:%.*]] = waveamdmachine.v_workitem_id_x
+// ENABLED: [[FIRST:%.*]] = waveamdmachine.v_readfirstlane_b32 [[WORKITEM]]
+// ENABLED: [[ORDINAL:%.*]], {{%.*}} = waveamdmachine.s_lshr_b32 [[FIRST]], [[SHIFT]]
+// ENABLED: [[PARITY:%.*]], {{%.*}} = waveamdmachine.s_and_b32 [[ORDINAL]], [[ONE]]
 // ENABLED: [[ZERO:%.*]] = waveamdmachine.imm 0
-// ENABLED: [[CLASS:%.*]] = waveamdmachine.s_cmp_eq_u32 [[HW_ID]], [[ZERO]]
+// ENABLED: [[CLASS:%.*]] = waveamdmachine.s_cmp_eq_u32 [[PARITY]], [[ZERO]]
 // ENABLED: waveamdmachine.uniform_if [[CLASS]]
 // ENABLED-COUNT-2: waveamdmachine.uniform_loop
 // ENABLED: } {waveamdmachine.multi_wave_schedule}
 
 // SCHEDULED-LABEL: func.func @specialize(
 // SCHEDULED-NOT: waveamdmachine.schedule_input
-// SCHEDULED: waveamdmachine.s_getreg_hw_id offset 4 width 1
+// SCHEDULED: waveamdmachine.v_workitem_id_x
+// SCHEDULED: waveamdmachine.v_readfirstlane_b32
+// SCHEDULED: waveamdmachine.s_lshr_b32
+// SCHEDULED: waveamdmachine.s_and_b32
 // SCHEDULED: waveamdmachine.uniform_if
 // SCHEDULED-COUNT-2: waveamdmachine.uniform_loop
 // SCHEDULED-NOT: waveamdmachine.multi_wave_schedule
@@ -43,6 +51,56 @@ func.func @specialize(%cond: !waveamdmachine.reg<scc, 1>,
         carries(%next : !waveamdmachine.reg<sgpr, 1>)
   } -> !waveamdmachine.reg<sgpr, 1>
   return %result : !waveamdmachine.reg<sgpr, 1>
+}
+
+// ENABLED-LABEL: func.func @specialize_two_slots(
+// ENABLED: [[SHIFT:%.*]] = waveamdmachine.imm 8
+// ENABLED: [[WORKITEM:%.*]] = waveamdmachine.v_workitem_id_x
+// ENABLED: [[FIRST:%.*]] = waveamdmachine.v_readfirstlane_b32 [[WORKITEM]]
+// ENABLED: waveamdmachine.s_lshr_b32 [[FIRST]], [[SHIFT]]
+// ENABLED: waveamdmachine.uniform_if
+// ENABLED-COUNT-2: waveamdmachine.uniform_loop
+func.func @specialize_two_slots(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 2 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// ENABLED-LABEL: func.func @wave_workgroup_size_only(
+// ENABLED: waveamdmachine.uniform_if
+// ENABLED-COUNT-2: waveamdmachine.uniform_loop
+func.func @wave_workgroup_size_only(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// ENABLED-LABEL: func.func @known_block_size_only(
+// ENABLED: waveamdmachine.uniform_if
+// ENABLED-COUNT-2: waveamdmachine.uniform_loop
+func.func @known_block_size_only(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
 }
 
 // SCHEDULED-LABEL: func.func @barrier_first(
@@ -314,7 +372,7 @@ func.func @pressure_fallback(
 }
 
 // DISABLED-LABEL: func.func @unmarked(
-// DISABLED-NOT: waveamdmachine.s_getreg_hw_id
+// DISABLED-NOT: waveamdmachine.v_workitem_id_x
 // DISABLED-NOT: waveamdmachine.uniform_if
 // DISABLED-COUNT-1: waveamdmachine.uniform_loop
 func.func @unmarked(%cond: !waveamdmachine.reg<scc, 1>)
@@ -323,6 +381,69 @@ func.func @unmarked(%cond: !waveamdmachine.reg<scc, 1>)
                 wave.workgroup_size = array<i32: 256, 1, 1>,
                 waveamdmachine.schedule_input,
                 waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// DISABLED-LABEL: func.func @conflicting_shapes(
+// DISABLED-NOT: waveamdmachine.uniform_if
+// DISABLED-COUNT-1: waveamdmachine.uniform_loop
+func.func @conflicting_shapes(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// DISABLED-LABEL: func.func @conflicting_wave_count(
+// DISABLED-NOT: waveamdmachine.uniform_if
+// DISABLED-COUNT-1: waveamdmachine.uniform_loop
+func.func @conflicting_wave_count(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {wave.kernel,
+                wave.waves_per_workgroup = 8 : i64,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// DISABLED-LABEL: func.func @multidimensional(
+// DISABLED-NOT: waveamdmachine.uniform_if
+// DISABLED-COUNT-1: waveamdmachine.uniform_loop
+func.func @multidimensional(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {gpu.known_block_size = array<i32: 64, 4, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 64, 4, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
+// DISABLED-LABEL: func.func @unknown_shape(
+// DISABLED-NOT: waveamdmachine.uniform_if
+// DISABLED-COUNT-1: waveamdmachine.uniform_loop
+func.func @unknown_shape(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {wave.kernel,
+                wave.waves_per_workgroup = 8 : i64,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 2 : i64} {
   waveamdmachine.uniform_loop {
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
   }

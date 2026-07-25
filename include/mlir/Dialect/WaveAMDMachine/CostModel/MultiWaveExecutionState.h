@@ -32,6 +32,7 @@ public:
 
   unsigned getWaveCount() const { return waves.size(); }
   WavePlacement getPlacement(unsigned wave) const;
+  unsigned getWaveCohort(unsigned wave, unsigned cohortCount) const;
   int64_t getCurrentCycle(unsigned wave) const;
   void rendezvous();
   int64_t getValueReadyCycle(unsigned wave, Value value) const;

@@ -216,6 +216,16 @@ WavePlacement MultiWaveExecutionState::getPlacement(unsigned wave) const {
   return placements[wave];
 }
 
+unsigned MultiWaveExecutionState::getWaveCohort(unsigned wave,
+                                                unsigned cohortCount) const {
+  assert(cohortCount != 0 && "cohort count must be nonzero");
+  WavePlacement placement = getPlacement(wave);
+  unsigned ordinal = placements.size() > static_cast<size_t>(arch->simdsPerCU)
+                         ? placement.slot
+                         : placement.simd;
+  return ordinal % cohortCount;
+}
+
 int64_t MultiWaveExecutionState::getCurrentCycle(unsigned wave) const {
   assert(wave < waves.size() && "wave index out of range");
   return waves[wave].getCurrentCycle();
