@@ -40,5 +40,8 @@
 // MACHINE: } {fetch_alignment = 32 : i64, fetch_phase = 12 : i64}
 
 // SPECIALIZED-ASM-LABEL: wmma_f16_matmul_tiled:
-// SPECIALIZED-ASM: s_getreg_b32 {{s[0-9]+}}, hwreg(HW_REG_HW_ID, 4, 1)
+// SPECIALIZED-ASM: v_readfirstlane_b32 [[FIRST:s[0-9]+]], {{v[0-9]+}}
+// SPECIALIZED-ASM: s_lshr_b32 [[ORDINAL:s[0-9]+]], [[FIRST]], 6
+// SPECIALIZED-ASM: s_and_b32 [[PARITY:s[0-9]+]], [[ORDINAL]], 1
+// SPECIALIZED-ASM: s_cmp_eq_u32 [[PARITY]], 0
 // SPECIALIZED-ASM-COUNT-32: buffer_store_dwordx4 {{.*}} sc0 nt
