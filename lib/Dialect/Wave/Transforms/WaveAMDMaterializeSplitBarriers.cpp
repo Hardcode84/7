@@ -39,6 +39,12 @@ struct LDSReservation {
   unsigned newFixedBytes = 0;
 };
 
+struct LDSAddressOps {
+  SmallVector<Operation *, 64> ldsOps;
+  SmallVector<Value> sAddRoots;
+  SmallVector<Value> dmaDelayRoots;
+};
+
 struct SplitBarrierOps {
   SmallVector<waveamdmachine::BarrierInitOp> inits;
   SmallVector<waveamdmachine::BarrierArriveOp> arrives;
@@ -364,6 +370,22 @@ static bool isLDSAddressUser(Operation *op) {
          op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
 }
 
+static LDSAddressOps collectLDSAddressOps(func::FuncOp func) {
+  LDSAddressOps ops;
+  func.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (isLDSAddressUser(op))
+      ops.ldsOps.push_back(op);
+    if (waveamdmachine::SAddM0I32Op add =
+            dyn_cast<waveamdmachine::SAddM0I32Op>(op)) {
+      if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+        ops.sAddRoots.push_back(findM0ChainRoot(add.getM0()));
+    } else if (waveamdmachine::DmaIssueDelayOp delay =
+                   dyn_cast<waveamdmachine::DmaIssueDelayOp>(op))
+      ops.dmaDelayRoots.push_back(findM0ChainRoot(delay.getDelayedM0()));
+  });
+  return ops;
+}
+
 static bool m0ChainOnlyAddressesLDS(Value m0, DenseSet<Value> &visited) {
   if (!visited.insert(m0).second)
     return true;
@@ -387,15 +409,13 @@ static bool m0ChainOnlyAddressesLDS(Value m0, DenseSet<Value> &visited) {
   return true;
 }
 
-static DenseSet<Value> collectM0ChainRoots(func::FuncOp func) {
+static DenseSet<Value> collectM0ChainRoots(const LDSAddressOps &ops) {
   DenseSet<Value> roots;
-  func.walk([&](waveamdmachine::SAddM0I32Op add) {
-    if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
-      roots.insert(findM0ChainRoot(add.getM0()));
-  });
-  func.walk([&](waveamdmachine::DmaIssueDelayOp delay) {
-    roots.insert(findM0ChainRoot(delay.getDelayedM0()));
-  });
+  // Preserve SAdd-before-DMA root insertion.
+  for (Value root : ops.sAddRoots)
+    roots.insert(root);
+  for (Value root : ops.dmaDelayRoots)
+    roots.insert(root);
   return roots;
 }
 
@@ -453,15 +473,6 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder,
   return success();
 }
 
-static SmallVector<Operation *, 64> collectLDSOps(func::FuncOp func) {
-  SmallVector<Operation *, 64> ldsOps;
-  func.walk([&](Operation *op) {
-    if (isLDSAddressUser(op))
-      ldsOps.push_back(op);
-  });
-  return ldsOps;
-}
-
 static void collectUsedM0Chains(ArrayRef<Operation *> ldsOps,
                                 const DenseSet<Value> &chainRoots,
                                 DenseSet<Value> &usedRoots,
@@ -505,16 +516,16 @@ static LogicalResult shiftExistingLDSAddresses(func::FuncOp func,
   if (bytes == 0)
     return success();
 
-  SmallVector<Operation *, 64> ldsOps = collectLDSOps(func);
-  DenseSet<Value> m0AtDefs = collectM0ValuesShiftedAtDef(ldsOps);
+  LDSAddressOps ops = collectLDSAddressOps(func);
+  DenseSet<Value> m0AtDefs = collectM0ValuesShiftedAtDef(ops.ldsOps);
   OpBuilder builder(func.getContext());
-  DenseSet<Value> chainRoots = collectM0ChainRoots(func);
+  DenseSet<Value> chainRoots = collectM0ChainRoots(ops);
   DenseSet<Value> usedRoots;
   DenseSet<Operation *> chainLDSOps;
-  collectUsedM0Chains(ldsOps, chainRoots, usedRoots, chainLDSOps);
+  collectUsedM0Chains(ops.ldsOps, chainRoots, usedRoots, chainLDSOps);
   if (failed(shiftM0ChainRoots(builder, types, usedRoots, bytes)))
     return failure();
-  return shiftUnchainedLDSAddresses(builder, types, ldsOps, chainLDSOps,
+  return shiftUnchainedLDSAddresses(builder, types, ops.ldsOps, chainLDSOps,
                                     m0AtDefs, bytes);
 }
 
