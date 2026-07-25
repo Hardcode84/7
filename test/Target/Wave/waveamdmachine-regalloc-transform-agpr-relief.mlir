@@ -308,6 +308,7 @@ module attributes {transform.with_named_sequence} {
     // DIRECT-LABEL: func.func @agpr_relief_direct_allows_bridged_narrow_progress()
     // DIRECT-NOT: waveamdmachine.regalloc_transform_state
     // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple [[ZERO]]
     // DIRECT: [[AGPR:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
     // DIRECT: [[REQUEST:%.*]] = waveamdmachine.uninit
     // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AGPR]]
@@ -353,12 +354,250 @@ module attributes {transform.with_named_sequence} {
           : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4, 252>
     }
 
+    // DIRECT-LABEL: func.func @agpr_relief_scores_constant_replacements()
+    // DIRECT-NOT: waveamdmachine.regalloc_transform_state
+    // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT: [[EVEN_ZERO:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple [[ZERO]]
+    // DIRECT: [[AGPR:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT: [[LITERAL:%.*]] = waveamdmachine.imm 65
+    // DIRECT: [[LITERAL_FILL:%.*]] = waveamdmachine.v_mov_b32_tuple [[LITERAL]]
+    // DIRECT: [[ONE:%.*]] = waveamdmachine.imm 1
+    // DIRECT: [[ONE_FILL:%.*]] = waveamdmachine.v_mov_b32_tuple [[ONE]]
+    // DIRECT: [[REQUEST:%.*]] = waveamdmachine.uninit
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AGPR]]
+    // DIRECT: return [[EVEN_ZERO]], [[READ]], [[LITERAL_FILL]], [[ONE_FILL]], [[REQUEST]]
+    func.func @agpr_relief_scores_constant_replacements()
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+            !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+            !waveamdmachine.reg<vgpr, 12, 244>)
+        attributes {waveamdmachine.agpr_count_max = 256 : i64,
+                    waveamdmachine.target_waves = 1 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 2 : i64,
+             members = [{value = 2 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 3 : i64,
+             members = [{value = 3 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 4 : i64,
+             members = [{value = 4 : i64}], width = 12 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 244 : i64, class = "vgpr", end = 8 : i64,
+               set = 0 : i64, start = 1 : i64, width = 2 : i64},
+              {base = 247 : i64, class = "vgpr", end = 8 : i64,
+               set = 1 : i64, start = 2 : i64, width = 2 : i64},
+              {base = 250 : i64, class = "vgpr", end = 8 : i64,
+               set = 2 : i64, start = 4 : i64, width = 2 : i64},
+              {base = 252 : i64, class = "vgpr", end = 8 : i64,
+               set = 3 : i64, start = 6 : i64, width = 2 : i64}
+            ],
+            position = 7 : i64,
+            reason = "pressure",
+            set = 4 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 8 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 1], set = 0 : i64, start = 1 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 8 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2], set = 1 : i64, start = 2 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 8 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 4], set = 2 : i64, start = 4 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 8 : i64, id = 3 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 6], set = 3 : i64, start = 6 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 8 : i64, fixed = 244 : i64, id = 4 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 7], set = 4 : i64, start = 7 : i64,
+             width = 12 : i64}
+          ]
+        }} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %even_zero = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %odd_zero = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %literal = waveamdmachine.imm 65 : !waveamdmachine.imm
+      %literal_fill =
+          waveamdmachine.v_mov_b32_tuple %literal {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %inline = waveamdmachine.v_mov_b32_tuple %one {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %request = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 12, 244>
+      return %even_zero, %odd_zero, %literal_fill, %inline, %request
+          : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+            !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+            !waveamdmachine.reg<vgpr, 12, 244>
+    }
+
+    // DIRECT-LABEL: func.func @agpr_relief_prefers_inline_nonzero_replacement()
+    // DIRECT-NOT: waveamdmachine.regalloc_transform_state
+    // DIRECT: [[LITERAL:%.*]] = waveamdmachine.imm 65
+    // DIRECT: [[KEEP:%.*]] = waveamdmachine.v_mov_b32_tuple [[LITERAL]]
+    // DIRECT: [[ONE:%.*]] = waveamdmachine.imm 1
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple [[ONE]]
+    // DIRECT: [[AGPR:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ONE]]
+    // DIRECT: [[REQUEST:%.*]] = waveamdmachine.uninit
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AGPR]]
+    // DIRECT: return [[KEEP]], [[READ]], [[REQUEST]]
+    func.func @agpr_relief_prefers_inline_nonzero_replacement()
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+            !waveamdmachine.reg<vgpr, 4, 252>)
+        attributes {waveamdmachine.agpr_count_max = 256 : i64,
+                    waveamdmachine.target_waves = 1 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 2 : i64,
+             members = [{value = 2 : i64}], width = 4 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 252 : i64, class = "vgpr", end = 5 : i64,
+               set = 0 : i64, start = 1 : i64, width = 2 : i64},
+              {base = 254 : i64, class = "vgpr", end = 5 : i64,
+               set = 1 : i64, start = 3 : i64, width = 2 : i64}
+            ],
+            position = 4 : i64,
+            reason = "pressure",
+            set = 2 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 5 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 1], set = 0 : i64, start = 1 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 5 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 3], set = 1 : i64, start = 3 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 5 : i64, fixed = 252 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 4], set = 2 : i64, start = 4 : i64,
+             width = 4 : i64}
+          ]
+        }} {
+      %literal = waveamdmachine.imm 65 : !waveamdmachine.imm
+      %materialized =
+          waveamdmachine.v_mov_b32_tuple %literal {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %inline = waveamdmachine.v_mov_b32_tuple %one {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %request = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 252>
+      return %materialized, %inline, %request
+          : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+            !waveamdmachine.reg<vgpr, 4, 252>
+    }
+
+    // DIRECT-LABEL: func.func @agpr_relief_keeps_loop_bridge_cost(
+    // DIRECT-SAME: [[OUTSIDE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+    // DIRECT-NOT: waveamdmachine.regalloc_transform_state
+    // DIRECT: [[AGPR:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[OUTSIDE]]
+    // DIRECT: [[ONE:%.*]] = waveamdmachine.imm 1
+    // DIRECT: [[INLINE:%.*]] = waveamdmachine.v_mov_b32_tuple [[ONE]]
+    // DIRECT: waveamdmachine.uniform_loop
+    // DIRECT: waveamdmachine.global_store_b32 [[INLINE]]
+    // DIRECT: [[REQUEST:%.*]] = waveamdmachine.uninit
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AGPR]]
+    // DIRECT: return [[READ]], [[INLINE]]
+    func.func @agpr_relief_keeps_loop_bridge_cost(
+        %outside: !waveamdmachine.reg<vgpr, 1>,
+        %base: !waveamdmachine.reg<sgpr, 2, 0>,
+        %cond: !waveamdmachine.reg<scc, 1>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        attributes {waveamdmachine.agpr_count_max = 256 : i64,
+                    waveamdmachine.target_waves = 1 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 1 : i64},
+            {class = "sgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 2 : i64},
+            {class = "vgpr", id = 2 : i64,
+             members = [{value = 2 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 3 : i64,
+             members = [{value = 3 : i64}], width = 2 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 6 : i64,
+               set = 0 : i64, start = 0 : i64, width = 1 : i64},
+              {base = 1 : i64, class = "vgpr", end = 6 : i64,
+               set = 2 : i64, start = 1 : i64, width = 1 : i64}
+            ],
+            position = 4 : i64,
+            reason = "pressure",
+            set = 3 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 6 : i64, id = 0 : i64,
+             kind = "block_arg", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0], set = 0 : i64, start = 0 : i64,
+             width = 1 : i64},
+            {class = "sgpr", end = 6 : i64, fixed = 0 : i64, id = 1 : i64,
+             kind = "block_arg", number = 1 : i64, offset = 0 : i64,
+             path = [0, 0], set = 1 : i64, start = 0 : i64,
+             width = 2 : i64},
+            {class = "vgpr", end = 6 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 1], set = 2 : i64, start = 1 : i64,
+             width = 1 : i64},
+            {class = "vgpr", end = 4 : i64, fixed = 2 : i64, id = 3 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 3], set = 3 : i64, start = 4 : i64,
+             width = 2 : i64}
+          ]
+        }} {
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %inline = waveamdmachine.v_mov_b32_tuple %one
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {
+        %token = waveamdmachine.global_store_b32 %inline, %one, %base
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm,
+               !waveamdmachine.reg<sgpr, 2, 0>)
+              -> !waveamdmachine.mem.token
+        waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+      }
+      %request = waveamdmachine.uninit
+          : !waveamdmachine.reg<vgpr, 2, 2>
+      return %outside, %inline
+          : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+    }
+
     // DIRECT-LABEL: func.func @agpr_relief_rebanks_tuple_from_elements_replacements(
     // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple
     // DIRECT: [[AG0:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple
     // DIRECT: [[AG1:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple
     // DIRECT: [[AG2:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple
     // DIRECT: [[AG3:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT-NOT: waveamdmachine.v_mov_b32_tuple
     // DIRECT-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG0]]
     // DIRECT: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements [[AG0]], [[AG1]], [[AG2]], [[AG3]]
     // DIRECT-SAME: (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>) -> !waveamdmachine.reg<agpr, 4>
@@ -467,8 +706,9 @@ module attributes {transform.with_named_sequence} {
     // CHECK-LABEL: func.func @agpr_relief_promotes_loop_carry(
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
     // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
-    // CHECK: [[INIT:%.*]] = waveamdmachine.v_mov_b32_tuple
+    // CHECK-NOT: waveamdmachine.v_mov_b32_tuple
     // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // CHECK: [[INIT:%.*]] = waveamdmachine.v_mov_b32_tuple
     // CHECK-NOT: waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
     // CHECK: waveamdmachine.uniform_loop {{.*}} carries([[AG]] : !waveamdmachine.reg<agpr, 4>)
     // CHECK: ^bb0([[CARRY:%[^:]+]]: !waveamdmachine.reg<agpr, 4>):

@@ -632,6 +632,52 @@ static int64_t getAGPRReliefLoopCostScale(Operation *op) {
   return int64_t{1} << std::min<unsigned>(depth * 4, 20);
 }
 
+static waveamdmachine::VMovB32TupleOp
+getReplaceableAGPRReliefMove(Value value) {
+  waveamdmachine::VMovB32TupleOp mov =
+      value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
+  if (!mov || !waveamdmachine::isInlineImm32(mov.getSource()))
+    return {};
+  return mov;
+}
+
+static bool isZeroAGPRReliefMove(waveamdmachine::VMovB32TupleOp mov) {
+  waveamdmachine::ImmOp imm =
+      mov.getSource().getDefiningOp<waveamdmachine::ImmOp>();
+  return imm && imm.getValue() == 0;
+}
+
+static std::optional<unsigned>
+getAGPRReliefMoveVGPRBase(const ResolvedRegAllocValue &value,
+                          const RegAllocTransformFailure &failureRecord) {
+  const wave::RegAllocTransformValue &tracked = *value.second;
+  if (const wave::RegAllocTransformAssignment *overlap =
+          findFailureOverlap(failureRecord, tracked.set))
+    return overlap->base + tracked.offset;
+  return tracked.fixed;
+}
+
+static bool
+isZeroCostAGPRReliefMove(const ResolvedRegAllocValue &value,
+                         const RegAllocTransformFailure &failureRecord,
+                         const llvm::AMDGPU::IsaVersion &isaVersion) {
+  waveamdmachine::VMovB32TupleOp mov =
+      getReplaceableAGPRReliefMove(value.first);
+  if (!mov)
+    return false;
+  if (!isZeroAGPRReliefMove(mov) ||
+      !waveamdmachine::VMovB64TupleOp::isSupportedOnIsa(isaVersion))
+    return true;
+  waveamdmachine::RegType type =
+      cast<waveamdmachine::RegType>(mov.getResult().getType());
+  if (type.getWidth() < 2)
+    return true;
+  std::optional<unsigned> base =
+      getAGPRReliefMoveVGPRBase(value, failureRecord);
+  // v_mov_b64 can make zero fills cheaper than AGPR writes.
+  return type.getWidth() == 2 && base && *base % 2 != 0;
+}
+
 struct AGPRReliefBridgeCost {
   int64_t cost = 0;
   int64_t count = 0;
@@ -650,12 +696,14 @@ struct AGPRReliefBridgeCost {
 static AGPRReliefBridgeCost
 getAGPRReliefBridgeCost(ArrayRef<ResolvedRegAllocValue> values,
                         const DenseSet<Value> &groupValues,
+                        const RegAllocTransformFailure &failureRecord,
                         const llvm::AMDGPU::IsaVersion &isaVersion) {
   AGPRReliefBridgeCost cost;
   for (const ResolvedRegAllocValue &value : values) {
     Operation *def = value.first.getDefiningOp();
     if (def && !canDefineAGPR(value.first, groupValues, isaVersion) &&
-        !canRebankTupleAliasOp(def, groupValues))
+        !canRebankTupleAliasOp(def, groupValues) &&
+        !isZeroCostAGPRReliefMove(value, failureRecord, isaVersion))
       cost.add(def);
     for (OpOperand &use : value.first.getUses()) {
       if (isa<waveamdmachine::VAccvgprWriteB32TupleOp>(use.getOwner()))
@@ -708,17 +756,17 @@ static AGPRReliefScore
 getAGPRReliefScore(const AGPRReliefSetGroup &group,
                    ArrayRef<wave::RegAllocTransformValue> values,
                    ArrayRef<ResolvedRegAllocValue> resolvedValues,
-                   unsigned position,
+                   const RegAllocTransformFailure &failureRecord,
                    const llvm::AMDGPU::IsaVersion &isaVersion) {
   DenseSet<Value> groupValues;
   for (const ResolvedRegAllocValue &value : resolvedValues)
     groupValues.insert(value.first);
-  AGPRReliefBridgeCost bridgeCost =
-      getAGPRReliefBridgeCost(resolvedValues, groupValues, isaVersion);
+  AGPRReliefBridgeCost bridgeCost = getAGPRReliefBridgeCost(
+      resolvedValues, groupValues, failureRecord, isaVersion);
   unsigned liveDwords = 0;
   unsigned end = 0;
   for (const wave::RegAllocTransformAliasSet *set : group.sets) {
-    liveDwords += getAGPRReliefLiveDwords(*set, values, position);
+    liveDwords += getAGPRReliefLiveDwords(*set, values, failureRecord.position);
     end = std::max(end, getAGPRReliefEnd(*set, values));
   }
   return {liveDwords, bridgeCost.cost, bridgeCost.count, bridgeCost.loopCost,
@@ -900,8 +948,8 @@ buildAGPRReliefCandidate(func::FuncOp func, unsigned setId,
   unsigned agprFootprint = 0;
   if (!canAllocateAGPRReliefCandidate(group, fitState, agprFootprint))
     return std::optional<AGPRReliefCandidate>();
-  AGPRReliefScore score = getAGPRReliefScore(
-      group, values, groupValues, failureRecord.position, isaVersion);
+  AGPRReliefScore score =
+      getAGPRReliefScore(group, values, groupValues, failureRecord, isaVersion);
   FailureOr<bool> respectsFamilyBudget = respectsCombinedVGPRFamilyBudget(
       func, group, failureRecord, setIndex, agprFootprint);
   if (failed(respectsFamilyBudget))
@@ -950,12 +998,8 @@ getRegAllocTransformClassType(Value value, waveamdmachine::RegClass regClass) {
 }
 
 static Value getAGPRReliefWriteSource(Value value) {
-  auto mov = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-  if (!mov)
-    return value;
-  Value source = mov.getSource();
-  if (waveamdmachine::isInlineImm32(source))
-    return source;
+  if (waveamdmachine::VMovB32TupleOp mov = getReplaceableAGPRReliefMove(value))
+    return mov.getSource();
   return value;
 }
 
@@ -1089,11 +1133,20 @@ static void materializeAGPRRelief(OpBuilder &builder,
                                   const llvm::AMDGPU::IsaVersion &isaVersion) {
   DenseSet<Value> groupValues;
   DenseMap<Value, Value> replacements;
+  SmallVector<waveamdmachine::VMovB32TupleOp> replacedMoves;
   for (const ResolvedRegAllocValue &value : candidate.values)
     groupValues.insert(value.first);
-  for (const ResolvedRegAllocValue &value : candidate.values)
+  for (const ResolvedRegAllocValue &value : candidate.values) {
+    if (waveamdmachine::VMovB32TupleOp mov =
+            getReplaceableAGPRReliefMove(value.first))
+      replacedMoves.push_back(mov);
     materializeAGPRReliefValue(builder, value.first, groupValues, replacements,
                                isaVersion);
+  }
+  for (waveamdmachine::VMovB32TupleOp mov : llvm::reverse(replacedMoves)) {
+    assert(mov->use_empty() && "replaced AGPR relief move still has uses");
+    mov.erase();
+  }
 }
 
 static unsigned countAGPRReliefDwords(const AGPRReliefCandidate &candidate) {
