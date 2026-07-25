@@ -290,6 +290,11 @@ struct WaveSimplifyIndexExprsPass
       return signalPassFailure();
     }
 
+    SmallVector<IndexExprOp> ops;
+    root->walk([&](IndexExprOp op) { ops.push_back(op); });
+    if (ops.empty())
+      return;
+
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
@@ -297,9 +302,6 @@ struct WaveSimplifyIndexExprsPass
       root->emitError("IntegerRangeAnalysis failed for wave.index_expr pass");
       return signalPassFailure();
     }
-
-    SmallVector<IndexExprOp> ops;
-    root->walk([&](IndexExprOp op) { ops.push_back(op); });
 
     llvm::DenseMap<Operation *, IndexExprAssumptions> assumptionsByOp;
     for (IndexExprOp op : ops)
