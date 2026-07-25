@@ -394,7 +394,16 @@ static Value addVGPRByteOffset(OpBuilder &builder, Location loc, Value value,
                                unsigned bytes) {
   if (bytes == 0)
     return value;
-  Value offset = createLDSByteImm(builder, loc, bytes);
+  uint64_t total = bytes;
+  while (auto add = value.getDefiningOp<waveamdmachine::VAddU32Op>()) {
+    auto imm = add.getRhs().getDefiningOp<waveamdmachine::ImmOp>();
+    if (!imm || static_cast<uint64_t>(imm.getValue()) >
+                    std::numeric_limits<unsigned>::max() - total)
+      break;
+    total += static_cast<unsigned>(imm.getValue());
+    value = add.getLhs();
+  }
+  Value offset = createLDSByteImm(builder, loc, static_cast<unsigned>(total));
   return waveamdmachine::VAddU32Op::create(
       builder, loc,
       waveamdmachine::RegType::get(builder.getContext(),
@@ -780,16 +789,30 @@ static bool allResultsUnused(Operation *op) {
 
 static bool isErasableAddressOp(Operation *op) {
   return op && isa<waveamdmachine::SMovM0Op, waveamdmachine::SAddM0I32Op,
-                   waveamdmachine::SAddI32Op, waveamdmachine::ImmOp>(op);
+                   waveamdmachine::SAddI32Op, waveamdmachine::VAddU32Op,
+                   waveamdmachine::ImmOp>(op);
 }
 
 static void eraseDeadAddressOp(Operation *op) {
-  if (!isErasableAddressOp(op) || !allResultsUnused(op))
+  if (!isErasableAddressOp(op))
     return;
-  SmallVector<Value, 4> operands(op->operand_begin(), op->operand_end());
-  op->erase();
-  for (Value operand : operands)
-    eraseDeadAddressOp(operand.getDefiningOp());
+  SmallVector<Operation *, 8> worklist{op};
+  DenseSet<Operation *> pending{op};
+  while (!worklist.empty()) {
+    Operation *current = worklist.pop_back_val();
+    pending.erase(current);
+    if (!allResultsUnused(current))
+      continue;
+    SmallVector<Operation *, 4> definitions;
+    for (Value operand : current->getOperands())
+      if (Operation *definition = operand.getDefiningOp();
+          isErasableAddressOp(definition))
+        definitions.push_back(definition);
+    current->erase();
+    for (Operation *definition : definitions)
+      if (pending.insert(definition).second)
+        worklist.push_back(definition);
+  }
 }
 
 static Value findM0ChainRoot(Value m0) {
@@ -861,8 +884,9 @@ static LogicalResult shiftM0ChainRoot(OpBuilder &builder, Value root,
   return success();
 }
 
-static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
-                                            unsigned bytes) {
+static LogicalResult
+shiftLDSAddressOperand(OpBuilder &builder, Operation *op, unsigned bytes,
+                       DenseMap<std::pair<Block *, Value>, Value> &shifted) {
   for (OpOperand &operand : op->getOpOperands()) {
     if (!isa<waveamdmachine::M0Type>(operand.get().getType()))
       continue;
@@ -900,8 +924,17 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
   Value addr = op->getOperand(0);
   if (!waveamdmachine::isVGPRValue(addr))
     return success();
+  std::pair<Block *, Value> key{op->getBlock(), addr};
+  if (Value cached = shifted.lookup(key)) {
+    op->setOperand(0, cached);
+    eraseDeadAddressOp(addr.getDefiningOp());
+    return success();
+  }
   builder.setInsertionPoint(op);
-  op->setOperand(0, addVGPRByteOffset(builder, op->getLoc(), addr, bytes));
+  Value replacement = addVGPRByteOffset(builder, op->getLoc(), addr, bytes);
+  shifted.try_emplace(key, replacement);
+  op->setOperand(0, replacement);
+  eraseDeadAddressOp(addr.getDefiningOp());
   return success();
 }
 
@@ -951,9 +984,10 @@ static LogicalResult
 shiftUnchainedLDSAddresses(OpBuilder &builder, ArrayRef<Operation *> ldsOps,
                            const DenseSet<Operation *> &chainLDSOps,
                            unsigned bytes) {
+  DenseMap<std::pair<Block *, Value>, Value> shifted;
   for (Operation *op : ldsOps)
     if (!chainLDSOps.contains(op) &&
-        failed(shiftLDSAddressOperand(builder, op, bytes)))
+        failed(shiftLDSAddressOperand(builder, op, bytes, shifted)))
       return failure();
   return success();
 }
