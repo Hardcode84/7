@@ -15,6 +15,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/OperationSupport.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -54,6 +55,13 @@ struct RematReliefPlan {
   SmallVector<RematReliefRoot, 0> roots;
   int64_t cost = 0;
 };
+
+struct ScheduledRematReliefSlot {
+  const RematReliefSlot *slot = nullptr;
+  unsigned rootIndex = 0;
+};
+
+using RematComputationTable = DenseMap<OperationName, SmallVector<Operation *>>;
 
 struct RematRootExtension {
   int64_t gain = 0;
@@ -135,8 +143,11 @@ static bool isCheapRematRoot(Operation *op) {
 static bool isRematRootValue(Value value) {
   Operation *def = value.getDefiningOp();
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+  bool isRematTemp = wave::regalloc::isRegAllocRematTempOp(def);
   return def && type && type.getIndex() < 0 && !isAnchoredRematSource(value) &&
-         !wave::regalloc::isRegAllocRematTempOp(def) && isCheapRematRoot(def) &&
+         (!isRematTemp ||
+          def->hasAttr(wave::regalloc::kRegAllocRematSharedAttr)) &&
+         isCheapRematRoot(def) &&
          !def->hasAttr(wave::regalloc::kRegAllocSGPRToVGPRPinnedAttr) &&
          !isRegAllocTransformBridgeRelated(value);
 }
@@ -1070,11 +1081,46 @@ selectRematReliefPlan(func::FuncOp func,
   return best;
 }
 
+static Value
+shareOrRegisterRematComputation(Operation *clone, unsigned resultNumber,
+                                Operation *user,
+                                RematComputationTable &availableComputations,
+                                DenseSet<Operation *> &sharedComputations) {
+  Value result = clone->getResult(resultNumber);
+  if (!isCheapRematRoot(clone) || clone->getNumResults() != 1 ||
+      clone->getNumRegions() != 0 ||
+      isa<waveamdmachine::UninitOp, waveamdmachine::VMovB32TupleOp,
+          waveamdmachine::CopyTupleOp>(clone) ||
+      clone->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>() ||
+      !isa<waveamdmachine::RegType>(result.getType()))
+    return result;
+
+  SmallVector<Operation *> &sameKind = availableComputations[clone->getName()];
+  auto equivalent = llvm::find_if(sameKind, [&](Operation *candidate) {
+    return insertionBeforeDominatesUse(candidate, user) &&
+           OperationEquivalence::isEquivalentTo(
+               candidate, clone, OperationEquivalence::exactValueMatch,
+               /*markEquivalent=*/nullptr,
+               OperationEquivalence::IgnoreLocations);
+  });
+  if (equivalent == sameKind.end()) {
+    sameKind.push_back(clone);
+    return result;
+  }
+
+  result = (*equivalent)->getResult(resultNumber);
+  sharedComputations.insert(*equivalent);
+  clone->erase();
+  return result;
+}
+
 static FailureOr<Value>
 materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
                         const RegAllocTransformFailure &failureRecord,
                         const RematReliefContext &context,
                         DenseMap<Value, Value> &cache,
+                        RematComputationTable &availableComputations,
+                        DenseSet<Operation *> &sharedComputations,
                         const DenseSet<Value> &forcedRematValues) {
   auto cached = cache.find(value);
   if (cached != cache.end())
@@ -1091,9 +1137,9 @@ materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
       FailureOr<SmallVector<Value>> extendedLeaves = collectExtendedRematLeaves(
           operand, user, failureRecord, context, &forcedRematValues);
       if (succeeded(extendedLeaves)) {
-        FailureOr<Value> rematOperand =
-            materializeRematValueAt(builder, operand, user, failureRecord,
-                                    context, cache, forcedRematValues);
+        FailureOr<Value> rematOperand = materializeRematValueAt(
+            builder, operand, user, failureRecord, context, cache,
+            availableComputations, sharedComputations, forcedRematValues);
         if (failed(rematOperand))
           return failure();
         mapped = *rematOperand;
@@ -1108,8 +1154,11 @@ materializeRematValueAt(OpBuilder &builder, Value value, Operation *user,
   }
 
   Operation *clone = builder.clone(*def, mapping);
+  clone->removeAttr(wave::regalloc::kRegAllocRematSharedAttr);
   clone->setAttr(wave::regalloc::kRegAllocRematTempAttr, builder.getUnitAttr());
-  Value result = clone->getResult(cast<OpResult>(value).getResultNumber());
+  unsigned resultNumber = cast<OpResult>(value).getResultNumber();
+  Value result = shareOrRegisterRematComputation(
+      clone, resultNumber, user, availableComputations, sharedComputations);
   cache[value] = result;
   return result;
 }
@@ -1118,12 +1167,13 @@ static LogicalResult materializeRematReliefSlot(
     OpBuilder &builder, const RematReliefSlot &slot,
     const RegAllocTransformFailure &failureRecord,
     const RematReliefContext &context, const DenseSet<Value> &forcedRematValues,
-    DenseMap<Value, Value> &cache,
+    DenseMap<Value, Value> &cache, RematComputationTable &availableComputations,
+    DenseSet<Operation *> &sharedComputations,
     SmallVectorImpl<std::pair<const RematReliefSlot *, Value>> &rebuiltSlots) {
   builder.setInsertionPoint(slot.rebuildOp);
-  FailureOr<Value> rebuilt =
-      materializeRematValueAt(builder, slot.value, slot.rebuildOp,
-                              failureRecord, context, cache, forcedRematValues);
+  FailureOr<Value> rebuilt = materializeRematValueAt(
+      builder, slot.value, slot.rebuildOp, failureRecord, context, cache,
+      availableComputations, sharedComputations, forcedRematValues);
   if (failed(rebuilt))
     return failure();
   rebuiltSlots.push_back({&slot, *rebuilt});
@@ -1135,18 +1185,36 @@ materializeRematRelief(OpBuilder &builder, const RematReliefPlan &plan,
                        const RegAllocTransformFailure &failureRecord,
                        const RematReliefContext &context) {
   DenseMap<Operation *, DenseMap<Value, Value>> siteCaches;
+  RematComputationTable availableComputations;
+  DenseSet<Operation *> sharedComputations;
   SmallVector<std::pair<const RematReliefSlot *, Value>> rebuiltSlots;
-  for (const RematReliefRoot &root : plan.roots) {
-    DenseSet<Value> forcedRematValues(root.rematValues.begin(),
-                                      root.rematValues.end());
-    for (const RematReliefSlot &slot : root.slots) {
-      DenseMap<Value, Value> &cache = siteCaches[slot.rebuildOp];
-      if (failed(materializeRematReliefSlot(builder, slot, failureRecord,
-                                            context, forcedRematValues, cache,
-                                            rebuiltSlots)))
-        return failure();
-    }
+  SmallVector<DenseSet<Value>, 0> forcedRematValues(plan.roots.size());
+  SmallVector<ScheduledRematReliefSlot> scheduledSlots;
+  for (auto [rootIndex, root] : llvm::enumerate(plan.roots)) {
+    forcedRematValues[rootIndex].insert(root.rematValues.begin(),
+                                        root.rematValues.end());
+    for (const RematReliefSlot &slot : root.slots)
+      scheduledSlots.push_back({&slot, static_cast<unsigned>(rootIndex)});
   }
+  llvm::stable_sort(scheduledSlots, [](ScheduledRematReliefSlot lhs,
+                                       ScheduledRematReliefSlot rhs) {
+    return std::tie(lhs.slot->rebuildPosition, lhs.slot->stateValue->id,
+                    lhs.rootIndex) < std::tie(rhs.slot->rebuildPosition,
+                                              rhs.slot->stateValue->id,
+                                              rhs.rootIndex);
+  });
+  for (ScheduledRematReliefSlot scheduled : scheduledSlots) {
+    const RematReliefSlot &slot = *scheduled.slot;
+    DenseMap<Value, Value> &cache = siteCaches[slot.rebuildOp];
+    if (failed(materializeRematReliefSlot(
+            builder, slot, failureRecord, context,
+            forcedRematValues[scheduled.rootIndex], cache,
+            availableComputations, sharedComputations, rebuiltSlots)))
+      return failure();
+  }
+  for (Operation *op : sharedComputations)
+    op->setAttr(wave::regalloc::kRegAllocRematSharedAttr,
+                builder.getUnitAttr());
   for (auto [slot, rebuilt] : rebuiltSlots)
     for (OpOperand *use : slot->uses)
       use->set(rebuilt);

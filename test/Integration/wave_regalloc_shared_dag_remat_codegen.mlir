@@ -43,7 +43,13 @@ func.func @regalloc_shared_dag_remat()
     %pressure = waveamdmachine.v_add_u32 %a, %b
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
-    %rootSum = waveamdmachine.v_add_u32 %root0, %root1
+    %use0 = waveamdmachine.v_add_u32 %root0, %one
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %use1 = waveamdmachine.v_add_u32 %root1, %two
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %rootSum = waveamdmachine.v_add_u32 %use0, %use1
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>

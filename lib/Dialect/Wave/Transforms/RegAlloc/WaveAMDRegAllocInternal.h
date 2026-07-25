@@ -39,6 +39,8 @@ inline constexpr llvm::StringLiteral kRegAllocTempAttr =
     "waveamdmachine.regalloc_debug_temp";
 inline constexpr llvm::StringLiteral kRegAllocRematTempAttr =
     "waveamdmachine.regalloc_remat_temp";
+inline constexpr llvm::StringLiteral kRegAllocRematSharedAttr =
+    "waveamdmachine.regalloc_remat_shared";
 inline constexpr llvm::StringLiteral kRegAllocSGPRToVGPRTempAttr =
     "waveamdmachine.regalloc_sgpr_to_vgpr_temp";
 inline constexpr llvm::StringLiteral kRegAllocSGPRToVGPRPinnedAttr =
