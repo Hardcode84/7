@@ -2511,6 +2511,8 @@ private:
               waveamdmachine::RegClass regClass,
               const DenseMap<Operation *, unsigned> &nodes,
               unsigned regionStart, unsigned regionEnd) {
+    if (end < regionStart || start > regionEnd)
+      return std::nullopt;
     ReadyPressureMember member;
     member.value = value;
     member.regClass = regClass;
