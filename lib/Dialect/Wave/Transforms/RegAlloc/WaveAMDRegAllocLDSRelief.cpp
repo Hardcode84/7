@@ -905,23 +905,21 @@ static LogicalResult shiftLDSAddressOperand(OpBuilder &builder, Operation *op,
   return success();
 }
 
-static SmallVector<Operation *, 64> collectDynamicLDSOps(func::FuncOp func) {
+struct DynamicLDSOps {
   SmallVector<Operation *, 64> ldsOps;
-  func.walk([&](Operation *op) {
-    if (wave::regalloc::isRegAllocTempOp(op) || !isLDSAddressUser(op))
-      return;
-    ldsOps.push_back(op);
-  });
-  return ldsOps;
-}
+  DenseSet<Value> m0ChainRoots;
+};
 
-static DenseSet<Value> collectM0ChainRoots(func::FuncOp func) {
-  DenseSet<Value> roots;
-  func.walk([&](waveamdmachine::SAddM0I32Op add) {
-    if (isa<waveamdmachine::M0Type>(add.getLhs().getType()))
-      roots.insert(findM0ChainRoot(add.getM0()));
+static DynamicLDSOps collectDynamicLDSOps(func::FuncOp func) {
+  DynamicLDSOps ops;
+  func.walk([&](Operation *op) {
+    if (!wave::regalloc::isRegAllocTempOp(op) && isLDSAddressUser(op))
+      ops.ldsOps.push_back(op);
+    waveamdmachine::SAddM0I32Op add = dyn_cast<waveamdmachine::SAddM0I32Op>(op);
+    if (add && isa<waveamdmachine::M0Type>(add.getLhs().getType()))
+      ops.m0ChainRoots.insert(findM0ChainRoot(add.getM0()));
   });
-  return roots;
+  return ops;
 }
 
 static void collectUsedM0Chains(ArrayRef<Operation *> ldsOps,
@@ -965,14 +963,13 @@ static LogicalResult shiftDynamicLDSAddresses(func::FuncOp func,
                                               unsigned bytes) {
   if (bytes == 0)
     return success();
-  SmallVector<Operation *, 64> ldsOps = collectDynamicLDSOps(func);
-  DenseSet<Value> chainRoots = collectM0ChainRoots(func);
+  DynamicLDSOps ops = collectDynamicLDSOps(func);
   DenseSet<Value> usedRoots;
   DenseSet<Operation *> chainLDSOps;
-  collectUsedM0Chains(ldsOps, chainRoots, usedRoots, chainLDSOps);
+  collectUsedM0Chains(ops.ldsOps, ops.m0ChainRoots, usedRoots, chainLDSOps);
   if (failed(shiftM0ChainRoots(builder, usedRoots, bytes)))
     return failure();
-  return shiftUnchainedLDSAddresses(builder, ldsOps, chainLDSOps, bytes);
+  return shiftUnchainedLDSAddresses(builder, ops.ldsOps, chainLDSOps, bytes);
 }
 
 static bool shouldShiftDynamicLDS(const LDSReliefCandidate &candidate) {
