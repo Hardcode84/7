@@ -1032,17 +1032,22 @@ splitTupleElementSharing(func::FuncOp func,
   DenseMap<Value, unsigned> anchorSlot;
   ToElementsSourceMap toElementsSource;
   DenseSet<Value> consumedByFromElements;
-  func.walk([&](waveamdmachine::TupleToElementsOp op) {
-    unsigned cumOffset = 0;
-    for (Value element : op.getElements()) {
-      anchorSlot[element] = cumOffset;
-      toElementsSource[element] = {op.getTuple(), cumOffset};
-      cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
-    }
+  SmallVector<waveamdmachine::TupleFromElementsOp> fromElementsOps;
+  func.walk([&](Operation *op) {
+    if (waveamdmachine::TupleToElementsOp toElements =
+            dyn_cast<waveamdmachine::TupleToElementsOp>(op)) {
+      unsigned cumOffset = 0;
+      for (Value element : toElements.getElements()) {
+        anchorSlot[element] = cumOffset;
+        toElementsSource[element] = {toElements.getTuple(), cumOffset};
+        cumOffset +=
+            cast<waveamdmachine::RegType>(element.getType()).getWidth();
+      }
+    } else if (waveamdmachine::TupleFromElementsOp fromElements =
+                   dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
+      fromElementsOps.push_back(fromElements);
   });
-  SmallVector<waveamdmachine::TupleFromElementsOp> ops;
-  func.walk([&](waveamdmachine::TupleFromElementsOp op) { ops.push_back(op); });
-  for (waveamdmachine::TupleFromElementsOp op : ops) {
+  for (waveamdmachine::TupleFromElementsOp op : fromElementsOps) {
     if (failed(rewriteFromElementsForSharing(op, builder, anchorSlot,
                                              toElementsSource,
                                              consumedByFromElements, isaCache)))
