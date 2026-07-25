@@ -4,7 +4,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func private @fixed_declaration() -> !waveamdmachine.reg<vgpr, 1, 7>
 
   // CHECK-LABEL: func.func @remat_sharing_first()
-  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 2 : i64}
+  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 3 : i64}
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: stage = "linear-scan-success"
   // CHECK-NOT: scratch_spill_bytes
@@ -60,7 +60,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // Fixed declaration keeps module-wide assignment rollback illegal.
   // CHECK-LABEL: func.func @fixed_call_boundary()
   // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 7>
-  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 2 : i64}
+  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 3 : i64}
   // CHECK: [[FIXED:%.*]] = call @fixed_declaration()
   // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 1, 7>
   // CHECK: return [[FIXED]] : !waveamdmachine.reg<vgpr, 1, 7>
@@ -71,7 +71,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   }
 
   // CHECK-LABEL: func.func @remat_sharing_second()
-  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 2 : i64}
+  // CHECK-SAME: waveamdmachine.metadata = [{name = "wave.regalloc.iterations", value = 3 : i64}
   // CHECK-SAME: waveamdmachine.regalloc_assignments
   // CHECK-SAME: stage = "linear-scan-success"
   // CHECK-NOT: scratch_spill_bytes

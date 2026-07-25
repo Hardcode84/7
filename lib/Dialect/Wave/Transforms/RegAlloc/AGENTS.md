@@ -7,7 +7,8 @@ Scope: WaveAMD regalloc implementation files in this directory.
 - Regalloc is an inspectable IR transform loop, not one allocator with deferred
   side plans.
 - Each iteration rebuilds regalloc state from current IR, runs linear scan, then
-  either commits physical registers or applies one pressure-relief rewrite.
+  commits registers, applies one pressure-relief rewrite, or runs final
+  assignment-dependent canonicalization.
 - Driver order is fixed:
 
 ```text
@@ -21,6 +22,7 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 ```
 
 - First relief transform that rewrites IR wins. Restart from alias-state build.
+- Final canonicalization clears assignments for rewritten functions and restarts.
 - No hidden C++ state may survive an IR rewrite. Recompute, or store enough
   inspectable state in IR.
 - Physical assignment is final-only: write indices into
@@ -107,6 +109,8 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 - Cut the long live range by cloning once at the first consumer after the failure
   point. Later dominated consumers use the rebuilt value.
 - Rebuilt values are normal IR and can be remat candidates in later iterations.
+- Keep relief-plan remats site-local. Merge equivalent completed scalar VGPR
+  remats only after a successful scan, then clear that function's assignments.
 - Leaves need not all be live at the rebuild point. Extending cheaper leaves
   across the failure point is legal when rebuilt IR lowers pressure there.
 - Fixed hardware inputs such as `v_workitem_id_x`, workgroup id, and fixed
@@ -149,8 +153,8 @@ AGPR -> Remat -> SGPRToVGPR -> LDS -> Scratch
 
 ## Convergence
 
-- Successful scan exits. Unchanged failure state stalls. Provider rewrite
-  clears state and restarts.
+- Successful scan exits after final canonicalization reaches a fixed point.
+  Unchanged failure state stalls. Any IR rewrite clears state and restarts.
 - Providers clear state only after semantic IR progress.
 - Default `max_iterations` is 1024. Cap exhaustion is a diagnostic backstop.
 - Do not raise the cap without a converging workload, progress argument, and
