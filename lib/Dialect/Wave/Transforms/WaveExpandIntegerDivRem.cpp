@@ -1358,6 +1358,14 @@ class WaveExpandIntegerDivRemPass
 public:
   void runOnOperation() override {
     Operation *root = getOperation();
+    SmallVector<BinaryOp> ops;
+    root->walk([&](BinaryOp op) {
+      if (isDivRem(op.getKind()))
+        ops.push_back(op);
+    });
+    if (ops.empty())
+      return;
+
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
@@ -1368,11 +1376,6 @@ public:
 
     sym::Store &store =
         root->getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
-    SmallVector<BinaryOp> ops;
-    root->walk([&](BinaryOp op) {
-      if (isDivRem(op.getKind()))
-        ops.push_back(op);
-    });
     for (BinaryOp op : ops) {
       if (elementBits(op.getResult().getType()) <= 64)
         continue;
