@@ -70,10 +70,14 @@ reference measures 1090-1093 TFLOP/s; the generic AITER Triton path measures
 | Profile | Allocation | Random-data result | TFLOP/s |
 | --- | --- | --- | ---: |
 | 8-wave baseline, `BN=64` | 240 VGPR, no spill, 8 resident waves | pass | 1070-1089 |
+| 8-wave baseline, forced target 3 | 160 VGPR, 3,872 B scratch/thread | pass | 25.1 |
 | 8-wave resident, `BN=32` | 128 VGPR, no spill, 16 resident waves | pass | 1013-1032 |
+| 8-wave streamed, `BN=128` | 256 VGPR, no spill, 134,144 B LDS | pass | 1024-1038 |
 | 4-wave resident, `BM=128` | 128 VGPR, no spill | pass | 978-984 |
 | 12-wave streamed | 160 VGPR, no spill | pass | 995-999 |
 | 16-wave streamed, `BM=512` | 128 VGPR, 16 remats, no spill | pass | 991-993 |
+| 16-wave QK/PV role split | 128 VGPR, no spill, 136,448 B LDS | pass | 395 |
+| 8-wave Q reload, target 2 | 240 VGPR, no spill | pass | 604 |
 | 8-wave `BN=64`, FP16 output state | 160 VGPR, no spill, 12 resident waves | pass | 821 |
 | 8-wave `BN=64`, FP16 output state | 128 VGPR, 192 B scratch/thread | launch fault | n/a |
 | 8-wave paired `BN=32` softmax | 128 VGPR, 5 LDS relief plans | pass | 706 |
@@ -104,6 +108,19 @@ stagger at exit. The packed MFMA peephole measured 1113.2-1115.7 TFLOP/s,
 versus 1108.9-1109.9 without it. The polynomial spilled 2,236 bytes/thread.
 gfx950 FP8 MFMA needs an explicit scaled-input contract.
 
+`BN=128` halves online-softmax and barrier frequency. Just-in-time K/V loads
+avoid the bulk fragment live set; V DMA packs eight row classes across two
+64-row slabs. The kernel passes random input checks (`max_abs_diff=7.72e-4`)
+with no spill. Splitting 32 PV MFMAs at 16 gives the best result,
+1037.7 TFLOP/s. It remains 3.3% behind `BN=64`. Reusing the `BN=64` paired
+priority stagger fails correctness; larger phases cannot use that rendezvous
+unchanged.
+
+The 16-wave role split assigns QK/softmax to eight waves and PV to eight
+waves. A compact single K/V tile keeps LDS to 136,448 bytes and random checks
+pass. Three full-workgroup barriers leave half the waves idle in each compute
+phase, reducing throughput to 395.4 TFLOP/s.
+
 Artifacts are under `build/fa-resident-20260725/`. Relevant files:
 
 - `baseline-current.hsaco`
@@ -111,6 +128,11 @@ Artifacts are under `build/fa-resident-20260725/`. Relevant files:
 - `resident8-bn32-hwid-multiwg-n8192.hsaco`
 - `resident8-bn64-compressed-target3-n8192.hsaco`
 - `resident8-bn64-compressed-n256-codegen.s`
+
+Additional artifacts:
+
+- `build/fa-bn128-20260725/`
+- `build/fa-remat-target3-20260725/`
 
 ## Rematerialization limit
 
@@ -129,10 +151,40 @@ recreate global/LDS loads, MFMA score chains, or MFMA output chains. Forced
 target-three/four builds therefore move score/output state to LDS and scratch;
 more aggressive remat selection cannot remove that state.
 
+The unmodified `BN=64` kernel forced to target three uses 160 VGPR,
+19 rematerialized dwords, 6 LDS-relief dwords, and 968 scratch dwords
+(3,872 bytes/thread). It passes random correctness but reaches only
+25.1 TFLOP/s. Reloading Q does not open the budget: target four still fails at
+144 dwords; target three needs 1,156 bytes/thread of scratch and 17 remats.
+The spill-free target-two Q-reload kernel reaches 603.8 TFLOP/s.
+
 Increasing residency needs a different algorithmic live set. Narrow output
 storage was measured and rejected. Reloading Q would trade 32 registers for
 large repeated LDS or global traffic; storing a full `BM=256` Q tile needs
 64 KiB per workgroup and prevents two-workgroup residency.
+
+## Rejected ISA and scheduling experiments
+
+| Experiment | Random-data result | TFLOP/s |
+| --- | --- | ---: |
+| Independent-frontier loop replay | pass | 904-922 |
+| Software split barriers, no priority stagger | pass | 921 |
+| Software split barriers, shared counter | pass | 933 |
+| Degree-four FP32 `exp2` polynomial | pass, `max_abs_diff=0.0155` | 80.7 |
+
+Independent-frontier scheduling was 5-8% slower than an interleaved baseline
+in the same busy-GPU run. Priority-staggered software barriers deadlocked:
+wave-conditional barriers cannot share one static-site arrival counter.
+Unstaggered variants remained correct but lost 13-14%.
+
+The polynomial removed most `v_exp_f32` instructions but raised allocation to
+256 VGPR plus 2,236 bytes of scratch per thread. Arithmetic replacement cannot
+win while the approximation's intermediate state spills.
+
+gfx950 supports `v_cvt_pk_fp8_f32` and FP8 MFMA, but has no direct packed
+BF16/FP16-to-FP8 conversion. An internal FP8 QK path would first unpack inputs
+to FP32, then repack them and produce scales. Use an explicit FP8/block-scaled
+input contract instead of paying that conversion in the attention loop.
 
 ## Specialization model
 
@@ -154,9 +206,9 @@ schedule policy. Existing eight-wave FA performance is unchanged.
    scores through LDS, run softmax once, then split PV output columns. This can
    reduce Q, score, and output state per wave without duplicating MFMA work.
    LDS score exchange and producer/consumer balance are the main risks.
-2. Generalize the V transpose layout to `BN=128`, retain rolling 64-key
-   softmax, and double-buffer the 128-key K/V tiles. This targets barrier and
-   DMA amortization, not occupancy.
+2. Single-buffer K to cut LDS from 68,096 to 51,456 bytes and permit three
+   workgroups by LDS capacity. This only helps after an algorithmic live-set
+   reduction: forced target-three allocation spills 3,872 bytes/thread.
 3. Add an explicit FP8/block-scaled attention contract. Faster MFMA alone is
    insufficient; scale production, accuracy bounds, and reference coverage
    must be part of the variant.
