@@ -772,6 +772,30 @@ func.func @cmpi_result_mask_width(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 3
 
 // -----
 
+func.func @cmpf_operand_types(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 64>) {
+  // expected-error @+1 {{operands must have the same SIMD type}}
+  %m = wave.cmpf olt %a, %b : !wave.simd<f32, 32>, !wave.simd<f32, 64> -> !wave.mask<32>
+  return
+}
+
+// -----
+
+func.func @cmpf_requires_float(%a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{operands must have floating-point SIMD elements}}
+  %m = wave.cmpf olt %a, %b : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return
+}
+
+// -----
+
+func.func @cmpf_result_mask_width(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>) {
+  // expected-error @+1 {{result mask width must match operand SIMD width}}
+  %m = wave.cmpf olt %a, %b : !wave.simd<f32, 32>, !wave.simd<f32, 32> -> !wave.mask<64>
+  return
+}
+
+// -----
+
 func.func @select_rejects_bad_condition(%pred: i32, %a: i32, %b: i32) {
   // expected-error @+1 {{condition must be i1 or !wave.mask}}
   %r = "wave.select"(%pred, %a, %b) : (i32, i32, i32) -> i32

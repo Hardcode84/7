@@ -26,12 +26,14 @@ using namespace mlir;
 namespace {
 
 static bool isVCCCompare(Operation *op) {
-  return isa<waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
-             waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
-             waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp,
-             waveamdmachine::VCmpLtI32VccOp, waveamdmachine::VCmpLeI32VccOp,
-             waveamdmachine::VCmpGtI32VccOp, waveamdmachine::VCmpGeI32VccOp>(
-      op);
+  return isa<waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
+             waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
+             waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
+             waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
+             waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
+             waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
+             waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
+             waveamdmachine::VCmpGeI32VccOp>(op);
 }
 
 static bool hasLiveVCCWrite(Operation *op) {
@@ -131,6 +133,22 @@ static bool makeSignedCompareResultDirect(OpBuilder &builder, Operation *op) {
   return true;
 }
 
+static bool makeFloatCompareResultDirect(OpBuilder &builder, Operation *op) {
+  if (auto compare = dyn_cast<waveamdmachine::VCmpEqF32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpEqF32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpLtF32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpLtF32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpLeF32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpLeF32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpGtF32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpGtF32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpGeF32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpGeF32Op>(builder, compare);
+  else
+    return false;
+  return true;
+}
+
 static bool makeDeadVCCCompareResultDirect(OpBuilder &builder, Operation *op,
                                            unsigned wavefrontSize) {
   if (!isVCCCompare(op) || !op->getResult(1).use_empty())
@@ -139,7 +157,8 @@ static bool makeDeadVCCCompareResultDirect(OpBuilder &builder, Operation *op,
       cast<waveamdmachine::RegType>(op->getResult(0).getType());
   if (resultType.getWidth() * 32 != wavefrontSize)
     return false;
-  if (makeUnsignedCompareResultDirect(builder, op) ||
+  if (makeFloatCompareResultDirect(builder, op) ||
+      makeUnsignedCompareResultDirect(builder, op) ||
       makeSignedCompareResultDirect(builder, op))
     return true;
   llvm_unreachable("unhandled VCC compare");
@@ -190,11 +209,14 @@ static bool isScalarMaskSinkOp(Operation *op) {
            waveamdmachine::SCmpGeU32Op, waveamdmachine::SCmpEqI32Op,
            waveamdmachine::SCmpLtI32Op, waveamdmachine::SCmpLeI32Op,
            waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,
-           waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
-           waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
-           waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp,
-           waveamdmachine::VCmpLtI32VccOp, waveamdmachine::VCmpLeI32VccOp,
-           waveamdmachine::VCmpGtI32VccOp, waveamdmachine::VCmpGeI32VccOp>(op))
+           waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
+           waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
+           waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
+           waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
+           waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
+           waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
+           waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
+           waveamdmachine::VCmpGeI32VccOp>(op))
     return false;
   return llvm::all_of(op->getResults(), [](Value result) {
     auto type = dyn_cast<waveamdmachine::RegType>(result.getType());

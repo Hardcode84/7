@@ -661,6 +661,11 @@ private:
       return llvm::AMDGPU::V_PK_FMA_F32_gfx12;
     llvm_unreachable("v_pk_fma_f32 is unsupported on this ISA");
   }
+  unsigned vCmpEqF32() const { return opcodes.vCmpEqF32; }
+  unsigned vCmpLtF32() const { return opcodes.vCmpLtF32; }
+  unsigned vCmpLeF32() const { return opcodes.vCmpLeF32; }
+  unsigned vCmpGtF32() const { return opcodes.vCmpGtF32; }
+  unsigned vCmpGeF32() const { return opcodes.vCmpGeF32; }
   unsigned vCmpEqU32() const { return opcodes.vCmpEqU32; }
   unsigned vCmpNeU32() const { return opcodes.vCmpNeU32; }
   unsigned vCmpLtU32() const { return opcodes.vCmpLtU32; }
@@ -3020,7 +3025,12 @@ private:
       return emitMC(
           opcode, {exec, toMCB32(op.getOperand(0)), toMCB32(op.getOperand(1))});
     }
-    if (isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp,
+    if (isa<waveamdmachine::VCmpEqF32Op, waveamdmachine::VCmpEqF32VccOp,
+            waveamdmachine::VCmpLtF32Op, waveamdmachine::VCmpLtF32VccOp,
+            waveamdmachine::VCmpLeF32Op, waveamdmachine::VCmpLeF32VccOp,
+            waveamdmachine::VCmpGtF32Op, waveamdmachine::VCmpGtF32VccOp,
+            waveamdmachine::VCmpGeF32Op, waveamdmachine::VCmpGeF32VccOp,
+            waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp,
             waveamdmachine::VCmpNeU32Op, waveamdmachine::VCmpNeU32VccOp,
             waveamdmachine::VCmpLtU32Op, waveamdmachine::VCmpLtU32VccOp,
             waveamdmachine::VCmpLeU32Op, waveamdmachine::VCmpLeU32VccOp,
@@ -3030,8 +3040,24 @@ private:
             waveamdmachine::VCmpLeI32Op, waveamdmachine::VCmpLeI32VccOp,
             waveamdmachine::VCmpGtI32Op, waveamdmachine::VCmpGtI32VccOp,
             waveamdmachine::VCmpGeI32Op, waveamdmachine::VCmpGeI32VccOp>(op)) {
+      bool floatCmp =
+          isa<waveamdmachine::VCmpEqF32Op, waveamdmachine::VCmpEqF32VccOp,
+              waveamdmachine::VCmpLtF32Op, waveamdmachine::VCmpLtF32VccOp,
+              waveamdmachine::VCmpLeF32Op, waveamdmachine::VCmpLeF32VccOp,
+              waveamdmachine::VCmpGtF32Op, waveamdmachine::VCmpGtF32VccOp,
+              waveamdmachine::VCmpGeF32Op, waveamdmachine::VCmpGeF32VccOp>(op);
       unsigned opcode =
-          isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp>(op)
+          isa<waveamdmachine::VCmpEqF32Op, waveamdmachine::VCmpEqF32VccOp>(op)
+              ? vCmpEqF32()
+          : isa<waveamdmachine::VCmpLtF32Op, waveamdmachine::VCmpLtF32VccOp>(op)
+              ? vCmpLtF32()
+          : isa<waveamdmachine::VCmpLeF32Op, waveamdmachine::VCmpLeF32VccOp>(op)
+              ? vCmpLeF32()
+          : isa<waveamdmachine::VCmpGtF32Op, waveamdmachine::VCmpGtF32VccOp>(op)
+              ? vCmpGtF32()
+          : isa<waveamdmachine::VCmpGeF32Op, waveamdmachine::VCmpGeF32VccOp>(op)
+              ? vCmpGeF32()
+          : isa<waveamdmachine::VCmpEqU32Op, waveamdmachine::VCmpEqU32VccOp>(op)
               ? vCmpEqU32()
           : isa<waveamdmachine::VCmpNeU32Op, waveamdmachine::VCmpNeU32VccOp>(op)
               ? vCmpNeU32()
@@ -3051,12 +3077,14 @@ private:
               ? vCmpGtI32()
               : vCmpGeI32();
       bool writesVcc =
-          isa<waveamdmachine::VCmpEqU32VccOp, waveamdmachine::VCmpNeU32VccOp,
-              waveamdmachine::VCmpLtU32VccOp, waveamdmachine::VCmpLeU32VccOp,
-              waveamdmachine::VCmpGtU32VccOp, waveamdmachine::VCmpGeU32VccOp,
-              waveamdmachine::VCmpLtI32VccOp, waveamdmachine::VCmpLeI32VccOp,
-              waveamdmachine::VCmpGtI32VccOp, waveamdmachine::VCmpGeI32VccOp>(
-              op);
+          isa<waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
+              waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
+              waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
+              waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
+              waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
+              waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
+              waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
+              waveamdmachine::VCmpGeI32VccOp>(op);
       waveamdmachine::RegType resultType =
           cast<waveamdmachine::RegType>(result().getType());
       if (!writesVcc && resultType.getWidth() * 32 != wavefrontSize)
@@ -3069,8 +3097,13 @@ private:
                     : toMCOperand(result());
       if (failed(requireOperandLegality(op, op.getName().stripDialect())))
         return failure();
-      if (failed(emitMC(opcode, {dst, toMCB32(op.getOperand(0)),
-                                 toMCB32(op.getOperand(1))})))
+      if (floatCmp) {
+        llvm::MCOperand zero = llvm::MCOperand::createImm(0);
+        if (failed(emitMC(opcode, {dst, zero, toMCB32(op.getOperand(0)), zero,
+                                   toMCB32(op.getOperand(1)), zero})))
+          return failure();
+      } else if (failed(emitMC(opcode, {dst, toMCB32(op.getOperand(0)),
+                                        toMCB32(op.getOperand(1))})))
         return failure();
       if (!writesVcc)
         return success();

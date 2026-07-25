@@ -77,4 +77,37 @@ func.func @direct_compare_mask_chain_codegen(
   return
 }
 
+// ASM-LABEL: ordered_f32_compare_codegen:
+// ASM: v_cmp_lt_f32_e64 vcc,
+// ASM-NEXT: s_and_saveexec_b64 [[FLOAT_SAVE:s\[[0-9]+:[0-9]+\]]], vcc
+// ASM-NOT: s_mov_b64 {{.*}}, vcc
+// ASM: buffer_store_dword
+// ASM: s_mov_b64 exec, [[FLOAT_SAVE]]
+// ASM: s_endpgm
+func.func @ordered_f32_compare_codegen(
+    %out: !wave.ptr<#wave.global, i32>,
+    %lhs: f32,
+    %rhs: f32) attributes {wave.kernel} {
+  %range = arith.constant 4096 : i32
+  %buffer = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32
+      -> !wave.ptr<#waveamd.buffer, i32>
+  %vlhs = wave.splat %lhs : f32 -> !wave.simd<f32, 64>
+  %vrhs = wave.splat %rhs : f32 -> !wave.simd<f32, 64>
+  %active = wave.cmpf olt %vlhs, %vrhs
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.mask<64>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %ptr = wave.ptr_add %buffer, %lane
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+  wave.where %active {
+    %stored = wave.store %lane -> %ptr
+        : (!wave.simd<i32, 64>,
+           !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
+        -> !wave.mem.token
+    wave.yield
+  } : !wave.mask<64>
+  return
+}
+
 }

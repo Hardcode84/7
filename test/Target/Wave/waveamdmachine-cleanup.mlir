@@ -205,6 +205,27 @@ func.func @fold_vcc_cndmask(%a: !waveamdmachine.reg<vgpr, 1>,
   return %sel : !waveamdmachine.reg<vgpr, 1>
 }
 
+// CHECK-LABEL: func.func @fold_float_vcc_cndmask(
+// CHECK: %{{.*}}, [[VCC:%.*]] = waveamdmachine.v_cmp_lt_f32_vcc
+// CHECK-NEXT: [[SEL:%.*]] = waveamdmachine.v_cndmask_b32_vcc {{.*}}, {{.*}}, [[VCC]]
+// CHECK-NEXT: return [[SEL]]
+func.func @fold_float_vcc_cndmask(
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>,
+    %false: !waveamdmachine.reg<vgpr, 1>,
+    %true: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %mask, %vcc = waveamdmachine.v_cmp_lt_f32_vcc %a, %b
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  %sel = waveamdmachine.v_cndmask_b32_tuple %false, %true, %mask
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  return %sel : !waveamdmachine.reg<vgpr, 1>
+}
+
 // CHECK-LABEL: func.func @fold_vcc_cndmask_immediates(
 // CHECK-DAG: [[FALSE:%.*]] = waveamdmachine.imm 0
 // CHECK-DAG: [[TRUE_IMM:%.*]] = waveamdmachine.imm 1

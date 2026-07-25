@@ -379,6 +379,7 @@ public:
   LogicalResult selectFRcp(FRcpOp op);
   LogicalResult selectIndexExpr(IndexExprOp op);
   LogicalResult selectCmp(CmpIOp op);
+  LogicalResult selectCmpF(CmpFOp op);
   LogicalResult selectSelect(SelectOp op);
   LogicalResult selectTokenSelect(SelectOp op);
   LogicalResult selectBallot(BallotOp op);

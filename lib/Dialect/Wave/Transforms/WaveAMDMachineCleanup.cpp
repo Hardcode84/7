@@ -1786,10 +1786,11 @@ static bool chainDmaM0Increments(func::FuncOp func) {
 }
 
 static bool isVccCompare(Operation *op) {
-  return isa_and_nonnull<VCmpEqU32VccOp, VCmpNeU32VccOp, VCmpLtU32VccOp,
-                         VCmpLeU32VccOp, VCmpGtU32VccOp, VCmpGeU32VccOp,
-                         VCmpLtI32VccOp, VCmpLeI32VccOp, VCmpGtI32VccOp,
-                         VCmpGeI32VccOp>(op);
+  return isa_and_nonnull<VCmpEqF32VccOp, VCmpLtF32VccOp, VCmpLeF32VccOp,
+                         VCmpGtF32VccOp, VCmpGeF32VccOp, VCmpEqU32VccOp,
+                         VCmpNeU32VccOp, VCmpLtU32VccOp, VCmpLeU32VccOp,
+                         VCmpGtU32VccOp, VCmpGeU32VccOp, VCmpLtI32VccOp,
+                         VCmpLeI32VccOp, VCmpGtI32VccOp, VCmpGeI32VccOp>(op);
 }
 
 static bool writesVcc(Operation *op) {

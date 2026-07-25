@@ -630,6 +630,24 @@ def test_mask_where():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_float_mask
+@run
+def test_float_mask():
+    with w.module() as m:
+        with m.function("float_mask", [w.f32(), w.f32()]) as f:
+            lhs, rhs = f.args
+            vlhs = f.splat(lhs)
+            vrhs = f.splat(rhs)
+            mask = f.cmpf("ole", vlhs, vrhs)
+            f.ballot(mask)
+        # CHECK: [[LHS:%.*]] = wave.splat
+        # CHECK: [[RHS:%.*]] = wave.splat
+        # CHECK: [[MASK:%.*]] = wave.cmpf ole [[LHS]], [[RHS]]
+        # CHECK-SAME: -> !wave.mask<32>
+        # CHECK: wave.ballot [[MASK]]
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_mask_where_otherwise
 @run
 def test_mask_where_otherwise():

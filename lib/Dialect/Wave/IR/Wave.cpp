@@ -2780,6 +2780,19 @@ LogicalResult CmpIOp::verify() {
   return success();
 }
 
+LogicalResult CmpFOp::verify() {
+  SimdType lhsType = cast<SimdType>(getLhs().getType());
+  SimdType rhsType = cast<SimdType>(getRhs().getType());
+  if (lhsType != rhsType)
+    return emitOpError("operands must have the same SIMD type");
+  if (!isa<FloatType>(lhsType.getElementType()))
+    return emitOpError("operands must have floating-point SIMD elements");
+  MaskType resultType = cast<MaskType>(getResult().getType());
+  if (lhsType.getWidth() != resultType.getWidth())
+    return emitOpError("result mask width must match operand SIMD width");
+  return success();
+}
+
 static std::optional<bool> foldWaveCmpIAttrs(arith::CmpIPredicate predicate,
                                              Attribute lhsAttr,
                                              Attribute rhsAttr) {

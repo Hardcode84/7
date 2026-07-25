@@ -1292,6 +1292,36 @@ def WaveAMDMachine_VCmpGeU32VccOp
     : WaveAMDMachine_VCmpVcc<"v_cmp_ge_u32_vcc">;
 def WaveAMDMachine_VCmpxGeU32Op
     : WaveAMDMachine_VCmpx<"v_cmpx_ge_u32">;
+def WaveAMDMachine_VCmpEqF32Op
+    : WaveAMDMachine_BinaryResult<"v_cmp_eq_f32", WaveAMDMachine_RegOrImm,
+                               WaveAMDMachine_SGPR, [WaveAMDMachine_VALU]>,
+      WaveAMDMachine_VCmpLegality;
+def WaveAMDMachine_VCmpEqF32VccOp
+    : WaveAMDMachine_VCmpVcc<"v_cmp_eq_f32_vcc">;
+def WaveAMDMachine_VCmpLtF32Op
+    : WaveAMDMachine_BinaryResult<"v_cmp_lt_f32", WaveAMDMachine_RegOrImm,
+                               WaveAMDMachine_SGPR, [WaveAMDMachine_VALU]>,
+      WaveAMDMachine_VCmpLegality;
+def WaveAMDMachine_VCmpLtF32VccOp
+    : WaveAMDMachine_VCmpVcc<"v_cmp_lt_f32_vcc">;
+def WaveAMDMachine_VCmpLeF32Op
+    : WaveAMDMachine_BinaryResult<"v_cmp_le_f32", WaveAMDMachine_RegOrImm,
+                               WaveAMDMachine_SGPR, [WaveAMDMachine_VALU]>,
+      WaveAMDMachine_VCmpLegality;
+def WaveAMDMachine_VCmpLeF32VccOp
+    : WaveAMDMachine_VCmpVcc<"v_cmp_le_f32_vcc">;
+def WaveAMDMachine_VCmpGtF32Op
+    : WaveAMDMachine_BinaryResult<"v_cmp_gt_f32", WaveAMDMachine_RegOrImm,
+                               WaveAMDMachine_SGPR, [WaveAMDMachine_VALU]>,
+      WaveAMDMachine_VCmpLegality;
+def WaveAMDMachine_VCmpGtF32VccOp
+    : WaveAMDMachine_VCmpVcc<"v_cmp_gt_f32_vcc">;
+def WaveAMDMachine_VCmpGeF32Op
+    : WaveAMDMachine_BinaryResult<"v_cmp_ge_f32", WaveAMDMachine_RegOrImm,
+                               WaveAMDMachine_SGPR, [WaveAMDMachine_VALU]>,
+      WaveAMDMachine_VCmpLegality;
+def WaveAMDMachine_VCmpGeF32VccOp
+    : WaveAMDMachine_VCmpVcc<"v_cmp_ge_f32_vcc">;
 def WaveAMDMachine_VCmpLtI32Op
     : WaveAMDMachine_BinaryResult<"v_cmp_lt_i32", WaveAMDMachine_RegOrImm,
                                WaveAMDMachine_SGPR, [WaveAMDMachine_VALU]>,

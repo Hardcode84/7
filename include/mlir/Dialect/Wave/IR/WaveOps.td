@@ -400,6 +400,16 @@ def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Wave_CmpFOp : Wave_Op<"cmpf", [Pure]> {
+  let summary = "lane-wise floating-point comparison";
+  let arguments = (ins Arith_CmpFPredicateAttr:$predicate,
+                       Wave_Simd:$lhs,
+                       Wave_Simd:$rhs);
+  let results = (outs Wave_Mask:$result);
+  let assemblyFormat = "$predicate $lhs `,` $rhs attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
 def Wave_ReadFirstOp : Wave_Op<"read_first", [NoMemoryEffect,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "broadcast the first active lane's value";

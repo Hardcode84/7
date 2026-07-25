@@ -2790,6 +2790,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
       .Case<arith::CmpIOp>([&](auto o) { return selectArithCmp(o); })
       .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
+      .Case<CmpFOp>([&](auto o) { return selectCmpF(o); })
       .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
@@ -5129,6 +5130,24 @@ getCmpRelation(arith::CmpIPredicate predicate) {
   }
 }
 
+static std::optional<CmpRelation>
+getOrderedCmpRelation(arith::CmpFPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpFPredicate::OEQ:
+    return CmpRelation::Eq;
+  case arith::CmpFPredicate::OLT:
+    return CmpRelation::Lt;
+  case arith::CmpFPredicate::OLE:
+    return CmpRelation::Le;
+  case arith::CmpFPredicate::OGT:
+    return CmpRelation::Gt;
+  case arith::CmpFPredicate::OGE:
+    return CmpRelation::Ge;
+  default:
+    return std::nullopt;
+  }
+}
+
 static Value createVCmpU32(OpBuilder &builder, Location loc,
                            CmpRelation relation, Type resultType, Value lhs,
                            Value rhs) {
@@ -5153,6 +5172,31 @@ static Value createVCmpU32(OpBuilder &builder, Location loc,
                                                rhs);
   }
   llvm_unreachable("handled unsigned compare relation");
+}
+
+static Value createVCmpF32(OpBuilder &builder, Location loc,
+                           CmpRelation relation, Type resultType, Value lhs,
+                           Value rhs) {
+  switch (relation) {
+  case CmpRelation::Eq:
+    return waveamdmachine::VCmpEqF32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case CmpRelation::Lt:
+    return waveamdmachine::VCmpLtF32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case CmpRelation::Le:
+    return waveamdmachine::VCmpLeF32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case CmpRelation::Gt:
+    return waveamdmachine::VCmpGtF32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case CmpRelation::Ge:
+    return waveamdmachine::VCmpGeF32Op::create(builder, loc, resultType, lhs,
+                                               rhs);
+  case CmpRelation::Ne:
+    llvm_unreachable("ordered f32 not-equal compare is unsupported");
+  }
+  llvm_unreachable("handled ordered f32 compare relation");
 }
 
 static Value createVCmpI32(OpBuilder &builder, Location loc,
@@ -5208,6 +5252,36 @@ static Value createVCmpU32Vcc(OpBuilder &builder, Location loc,
         .getResult();
   }
   llvm_unreachable("handled unsigned compare relation");
+}
+
+static Value createVCmpF32Vcc(OpBuilder &builder, Location loc,
+                              CmpRelation relation, Type resultType,
+                              Type vccType, Value lhs, Value rhs) {
+  switch (relation) {
+  case CmpRelation::Eq:
+    return waveamdmachine::VCmpEqF32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case CmpRelation::Lt:
+    return waveamdmachine::VCmpLtF32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case CmpRelation::Le:
+    return waveamdmachine::VCmpLeF32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case CmpRelation::Gt:
+    return waveamdmachine::VCmpGtF32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case CmpRelation::Ge:
+    return waveamdmachine::VCmpGeF32VccOp::create(builder, loc, resultType,
+                                                  vccType, lhs, rhs)
+        .getResult();
+  case CmpRelation::Ne:
+    llvm_unreachable("ordered f32 not-equal compare is unsupported");
+  }
+  llvm_unreachable("handled ordered f32 compare relation");
 }
 
 static Value createVCmpI32Vcc(OpBuilder &builder, Location loc,
@@ -5394,6 +5468,28 @@ Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
   shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
                     rhs);
   return createVCmp(S.builder, loc, relation, signedCmp, resultType, lhs, rhs);
+}
+
+static Value createF32Cmp(WaveAMDMachineSelector &S, Location loc,
+                          CmpRelation relation, Type resultType, Value lhs,
+                          Value rhs) {
+  bool legacyVcc = usesLegacyVCmpVcc(S);
+  if (legacyVcc) {
+    if (isa<waveamdmachine::ImmType>(lhs.getType()))
+      lhs = S.materializeSGPR1(loc, lhs);
+    if (isa<waveamdmachine::ImmType>(rhs.getType()))
+      rhs = S.materializeSGPR1(loc, rhs);
+    shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
+                      rhs);
+    return createVCmpF32Vcc(S.builder, loc, relation, resultType,
+                            getVCCType(S.builder.getContext()), lhs, rhs);
+  }
+  if (isa<waveamdmachine::ImmType>(lhs.getType()) &&
+      isa<waveamdmachine::ImmType>(rhs.getType()))
+    lhs = S.materializeSGPR1(loc, lhs);
+  shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
+                    rhs);
+  return createVCmpF32(S.builder, loc, relation, resultType, lhs, rhs);
 }
 
 static Value signExtendVGPR2(WaveAMDMachineSelector &S, Location loc,
@@ -5712,6 +5808,31 @@ LogicalResult WaveAMDMachineSelector::selectCmp(CmpIOp op) {
                              : createWordCmp(*this, op.getLoc(), *relation,
                                              signedCmp, sgprType, lhs, rhs);
   values[op.getResult()] = result;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectCmpF(CmpFOp op) {
+  MaskType maskType = cast<MaskType>(op.getType());
+  if (maskType.getWidth() != 32 && maskType.getWidth() != 64)
+    return op.emitError(
+        "WaveAMDMachine backend supports only !wave.mask<32/64>");
+  SimdType operandType = cast<SimdType>(op.getLhs().getType());
+  if (!operandType.getElementType().isF32())
+    return op.emitError(
+        "WaveAMDMachine backend supports only !wave.simd<f32, W> cmpf "
+        "operands");
+  std::optional<CmpRelation> relation =
+      getOrderedCmpRelation(op.getPredicate());
+  if (!relation)
+    return op.emitError("WaveAMDMachine backend supports only ordered "
+                        "eq/lt/le/gt/ge wave.cmpf predicates");
+  Type sgprType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR,
+                             maskType.getWidth() / 32);
+  Value lhs = expect(op.getLhs(), op);
+  Value rhs = expect(op.getRhs(), op);
+  values[op.getResult()] =
+      createF32Cmp(*this, op.getLoc(), *relation, sgprType, lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }

@@ -55,7 +55,7 @@ from mlir._mlir_libs._waveDialectsNanobind import (
     register_passes,
 )
 from mlir.dialects import arith, func, gpu, memref, scf, wave, waveamd, wavemeta
-from mlir.dialects.arith import CmpIPredicate
+from mlir.dialects.arith import CmpFPredicate, CmpIPredicate
 from mlir.ir import (
     ArrayAttr,
     Attribute,
@@ -847,6 +847,18 @@ class FunctionBuilder:
             predicate = CmpIPredicate[predicate]
         width = SimdType(lhs.type).width
         return wave.CmpIOp(mask_type(width), predicate, lhs, rhs).result
+
+    def cmpf(
+        self,
+        predicate: CmpFPredicate | str,
+        lhs: Value,
+        rhs: Value,
+    ) -> Value:
+        """Emit `wave.cmpf`; result mask width tracks the SIMD operands."""
+        if isinstance(predicate, str):
+            predicate = CmpFPredicate[predicate.upper()]
+        width = SimdType(lhs.type).width
+        return wave.CmpFOp(mask_type(width), predicate, lhs, rhs).result
 
     def ballot(self, mask: Value, result_type: Type | None = None) -> Value:
         """Materialize `!wave.mask<W>` as integer bits via `wave.ballot`."""
