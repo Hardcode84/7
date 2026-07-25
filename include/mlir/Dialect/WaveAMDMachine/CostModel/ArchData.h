@@ -89,6 +89,9 @@ struct ArchData {
 
   // Selection policy among ready resident waves on one SIMD.
   WaveIssueArbitration waveIssueArbitration;
+
+  // AGPR allocation consumes VGPR-file capacity.
+  bool agprCountsAgainstVGPRs;
 };
 
 // Lookup by IsaVersion. Aborts (report_fatal_error) on unsupported

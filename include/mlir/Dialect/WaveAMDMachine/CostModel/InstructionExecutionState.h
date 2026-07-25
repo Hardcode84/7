@@ -91,6 +91,71 @@ struct InstructionCommitResult {
 
 enum class DmaIssueDelayCohortPolicy : uint8_t { Delayed, Skipped };
 
+struct ReadyRegisterPressure {
+  int64_t sgpr = 0;
+  int64_t vgpr = 0;
+  int64_t agpr = 0;
+};
+
+struct ReadyRegisterPressureCeiling {
+  unsigned sgpr = 0;
+  unsigned vgpr = 0;
+  unsigned agpr = 0;
+  unsigned vgprFamily = 0;
+};
+
+struct ReadyCandidateMetrics {
+  ReadyRegisterPressure pressureDelta;
+  ReadyRegisterPressureCeiling pressureCeiling;
+};
+
+struct ReadyRegisterPressureLimits {
+  unsigned sgpr = 0;
+  unsigned vgpr = 0;
+  unsigned agpr = 0;
+  unsigned vgprFamily = 0;
+  unsigned sgprAllocGranule = 0;
+  unsigned vgprAllocGranule = 0;
+  unsigned agprAllocGranule = 0;
+};
+
+struct InstructionExecutionConfig;
+
+class InstructionScheduleModel {
+public:
+  bool canPreserveDmaIssueLead() const { return issueStreams > 1; }
+  bool requiresStrictBarrierTokenReorder() const { return issueStreams == 1; }
+  bool shouldBlockStallFillerMemoryResource() const {
+    return issueStreams == 1;
+  }
+  bool shouldPrioritizeSteadyStateProducer() const { return issueStreams == 1; }
+  bool shouldSelectResourceStallFiller(unsigned waitSlots,
+                                       unsigned releaseSlots,
+                                       ReadyRegisterPressure current,
+                                       const ReadyCandidateMetrics &next) const;
+  bool canSelectReadyCandidate(ReadyRegisterPressure current,
+                               const ReadyCandidateMetrics &candidate,
+                               const ReadyCandidateMetrics &baseline) const;
+  bool canSelectReadyFiller(ReadyRegisterPressure current,
+                            const ReadyCandidateMetrics &candidate,
+                            const ReadyCandidateMetrics &baseline) const;
+  bool shouldPreferReadyPressure(ReadyRegisterPressure current,
+                                 const ReadyCandidateMetrics &candidate,
+                                 const ReadyCandidateMetrics &selected) const;
+  bool shouldPreferReadyFiller(ReadyRegisterPressure current,
+                               const ReadyCandidateMetrics &candidate,
+                               const ReadyCandidateMetrics &selected) const;
+
+private:
+  friend void
+  configureInstructionScheduleModel(InstructionExecutionConfig &config,
+                                    const ArchData &arch, Operation *context,
+                                    ReadyRegisterPressureLimits pressureLimits);
+
+  ReadyRegisterPressureLimits pressureLimits;
+  unsigned issueStreams = 1;
+};
+
 struct InstructionExecutionConfig {
   const CalibrationData *calibration = nullptr;
   MemoryCounterLatencies counterLatencies;
@@ -102,9 +167,15 @@ struct InstructionExecutionConfig {
   unsigned valuMaxInFlight = 0;
   unsigned saluMaxInFlight = 0;
   unsigned xdlMaxInFlight = 0;
+  InstructionScheduleModel scheduleModel;
   DmaIssueDelayCohortPolicy dmaIssueDelayCohortPolicy =
       DmaIssueDelayCohortPolicy::Delayed;
 };
+
+void configureInstructionScheduleModel(
+    InstructionExecutionConfig &config, const ArchData &arch,
+    Operation *context, ReadyRegisterPressureLimits pressureLimits = {});
+unsigned getTargetWaveCount(Operation *context);
 
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa);
@@ -156,6 +227,9 @@ struct InstructionExecutionState {
   int64_t getValueReadyCycle(Value value) const;
   void bindValue(Value result, Value source);
   void bindValue(Value result, ArrayRef<Value> sources);
+  const InstructionScheduleModel &getScheduleModel() const {
+    return config.scheduleModel;
+  }
   unsigned getPendingMemoryEventCount(InstructionWaitCounterKind kind) const;
   unsigned getPipeInFlightCount(InstructionPipeKind kind) const;
 

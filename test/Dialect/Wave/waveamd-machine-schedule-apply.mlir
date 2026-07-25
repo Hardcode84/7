@@ -557,6 +557,183 @@ func.func @barrier_memory_gap_fill(%addr: !waveamdmachine.reg<vgpr, 1>,
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @single_issue_stream_keeps_first_filler(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %dep: !waveamdmachine.mem.token,
+    %inc0: !waveamdmachine.reg<vgpr, 1>,
+    %inc1: !waveamdmachine.reg<vgpr, 1>,
+    %keep0: !waveamdmachine.reg<sgpr, 1>,
+    %keep1: !waveamdmachine.reg<sgpr, 1>)
+    attributes {waveamdmachine.target_waves = 1 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 56 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 56>
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b32 %off, %ptr, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %raised = waveamdmachine.v_add_u32 %inc0, %inc1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %neutral = waveamdmachine.s_cmp_eq_u32 %keep0, %keep1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  %use0 = waveamdmachine.v_xor_b32 %raised, %inc0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use1 = waveamdmachine.v_xor_b32 %use0, %inc1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %looped = waveamdmachine.uniform_loop if %neutral
+      : !waveamdmachine.reg<scc, 1>
+      carries(%wide : !waveamdmachine.reg<vgpr, 56>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 56>):
+    waveamdmachine.continue_if %neutral : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 56>)
+  } -> !waveamdmachine.reg<vgpr, 56>
+  return
+}
+
+func.func @shared_issue_streams_prefer_pressure_neutral_filler(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %dep: !waveamdmachine.mem.token,
+    %inc0: !waveamdmachine.reg<vgpr, 1>,
+    %inc1: !waveamdmachine.reg<vgpr, 1>,
+    %keep0: !waveamdmachine.reg<sgpr, 1>,
+    %keep1: !waveamdmachine.reg<sgpr, 1>)
+    attributes {waveamdmachine.target_waves = 8 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 56 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 56>
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b32 %off, %ptr, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %raised = waveamdmachine.v_add_u32 %inc0, %inc1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %neutral = waveamdmachine.s_cmp_eq_u32 %keep0, %keep1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  %use0 = waveamdmachine.v_xor_b32 %raised, %inc0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %use1 = waveamdmachine.v_xor_b32 %use0, %inc1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %looped = waveamdmachine.uniform_loop if %neutral
+      : !waveamdmachine.reg<scc, 1>
+      carries(%wide : !waveamdmachine.reg<vgpr, 56>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 56>):
+    waveamdmachine.continue_if %neutral : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 56>)
+  } -> !waveamdmachine.reg<vgpr, 56>
+  return
+}
+
+func.func @shared_issue_streams_reserve_sgpr_granule(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %dep: !waveamdmachine.mem.token)
+    attributes {waveamdmachine.target_waves = 8 : i64,
+                waveamdmachine.sgpr_count_max = 48 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wide = waveamdmachine.s_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 29>
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b32 %off, %ptr, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %neutral = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %looped = waveamdmachine.uniform_loop if %neutral
+      : !waveamdmachine.reg<scc, 1>
+      carries(%wide : !waveamdmachine.reg<sgpr, 29>) {
+  ^bb0(%carry: !waveamdmachine.reg<sgpr, 29>):
+    waveamdmachine.continue_if %neutral : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<sgpr, 29>)
+  } -> !waveamdmachine.reg<sgpr, 29>
+  %raised = waveamdmachine.s_mov_b32_value %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+  %done = waveamdmachine.s_cmp_eq_u32 %raised, %raised
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  return
+}
+
+func.func @shared_issue_streams_account_agpr_in_vgpr_family(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %ptr: !waveamdmachine.reg<sgpr, 2>,
+    %dep: !waveamdmachine.mem.token)
+    attributes {waveamdmachine.target_waves = 8 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 55 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 55>
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %tok = waveamdmachine.global_load_lds_b32 %off, %ptr, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %neutral = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %looped = waveamdmachine.uniform_loop if %neutral
+      : !waveamdmachine.reg<scc, 1>
+      carries(%wide : !waveamdmachine.reg<vgpr, 55>) {
+  ^bb0(%carry: !waveamdmachine.reg<vgpr, 55>):
+    waveamdmachine.continue_if %neutral : !waveamdmachine.reg<scc, 1>
+        carries(%carry : !waveamdmachine.reg<vgpr, 55>)
+  } -> !waveamdmachine.reg<vgpr, 55>
+  %raised = waveamdmachine.v_accvgpr_write_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<agpr, 1>
+  %read = waveamdmachine.v_accvgpr_read_b32_tuple %raised
+      : (!waveamdmachine.reg<agpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @single_issue_stream_keeps_first_filler
+// IR: [[SINGLE_M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: [[RAISED:%.*]] = waveamdmachine.v_add_u32
+
+// IR-LABEL: func.func @shared_issue_streams_prefer_pressure_neutral_filler
+// IR: [[SHARED_M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: [[NEUTRAL:%.*]] = waveamdmachine.s_cmp_eq_u32
+// IR-NOT: waveamdmachine.v_add_u32
+// IR: waveamdmachine.global_load_lds_b32
+// DIAG: waveamd-machine-schedule region func=shared_issue_streams_prefer_pressure_neutral_filler
+// DIAG-SAME: action=apply reason=m0_hazard
+// DIAG-SAME: m0_gaps={{[1-9][0-9]*}}
+
+// IR-LABEL: func.func @shared_issue_streams_reserve_sgpr_granule
+// IR: [[SGPR_M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: [[SGPR_NEUTRAL:%.*]] = waveamdmachine.s_cmp_eq_u32
+// IR-NOT: waveamdmachine.s_mov_b32_value
+// IR: waveamdmachine.global_load_lds_b32
+
+// IR-LABEL: func.func @shared_issue_streams_account_agpr_in_vgpr_family
+// IR: [[AGPR_M0:%.*]] = waveamdmachine.s_mov_m0
+// IR-NEXT: [[AGPR_NEUTRAL:%.*]] = waveamdmachine.s_cmp_eq_u32
+// IR-NOT: waveamdmachine.v_accvgpr_write_b32_tuple
+// IR: waveamdmachine.global_load_lds_b32
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @set_priority_cuts_prefetch(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>,
@@ -774,6 +951,50 @@ func.func @compute_resource_stall_fill(
 // DIAG-SAME: action=apply reason=compute_resource
 // DIAG-SAME: resource_priority_moves=0
 // DIAG-SAME: resource_stall_fills=3
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @single_wave_pressure_retry_drops_resource_filler(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %acc1: !waveamdmachine.reg<vgpr, 4>,
+    %x: !waveamdmachine.reg<sgpr, 1>,
+    %y: !waveamdmachine.reg<sgpr, 1>)
+    -> !waveamdmachine.reg<sgpr, 1>
+    attributes {waveamdmachine.target_waves = 1 : i64,
+                waveamdmachine.sgpr_count_max = 1 : i64} {
+  %keep = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %parts:4 = waveamdmachine.tuple_to_elements %r1
+      : (!waveamdmachine.reg<vgpr, 4>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %used = waveamdmachine.v_add_u32 %parts#0, %keep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %sum, %scc = waveamdmachine.s_add_i32 %x, %y
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  return %sum : !waveamdmachine.reg<sgpr, 1>
+}
+}
+
+// IR-LABEL: func.func @single_wave_pressure_retry_drops_resource_filler
+// IR: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements
+// IR-NEXT: [[SUM:%.*]], {{%.*}} = waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.v_add_u32 [[PARTS]]#0
+// IR-NEXT: return [[SUM]]
+// DIAG: waveamd-machine-schedule region func=single_wave_pressure_retry_drops_resource_filler
+// DIAG-SAME: resource_stall_fills=0
 
 // -----
 

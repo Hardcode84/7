@@ -19,6 +19,8 @@ bool areWavePlacementsValid(const ArchData &arch,
                             ArrayRef<WavePlacement> placements);
 SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
                                                    unsigned wavesPerSIMD);
+SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
+                                                   Operation *context);
 
 class MultiWaveExecutionState {
 public:
@@ -35,6 +37,7 @@ public:
   int64_t getValueReadyCycle(unsigned wave, Value value) const;
   void bindValue(unsigned wave, Value result, Value source);
   void bindValue(unsigned wave, Value result, ArrayRef<Value> sources);
+  const InstructionScheduleModel &getScheduleModel() const;
   unsigned getPendingMemoryEventCount(unsigned wave,
                                       InstructionWaitCounterKind kind) const;
   unsigned getPipeInFlightCount(unsigned wave, InstructionPipeKind kind) const;
@@ -72,6 +75,7 @@ public:
   int64_t getCurrentCycle() const;
   void bindValue(Value result, Value source);
   void bindValue(Value result, ArrayRef<Value> sources);
+  const InstructionScheduleModel &getScheduleModel() const;
   void setState(std::unique_ptr<MultiWaveExecutionState> newState);
   std::unique_ptr<MultiWaveExecutionState> takeState();
 

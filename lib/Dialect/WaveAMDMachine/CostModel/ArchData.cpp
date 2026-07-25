@@ -33,6 +33,7 @@ static constexpr ArchData kGfx803{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*agprCountsAgainstVGPRs=*/false,
 };
 
 // CDNA3 / MI300. LLVM AMDGPUBaseInfo gives 8 waves/EU,
@@ -56,6 +57,7 @@ static constexpr ArchData kGfx942{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*agprCountsAgainstVGPRs=*/true,
 };
 
 // CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
@@ -78,6 +80,7 @@ static constexpr ArchData kGfx950{
     /*ldsDmaIssueLatency=*/180,
     /*ldsDmaIssuePeriod=*/4,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*agprCountsAgainstVGPRs=*/true,
 };
 
 // RDNA3 Navi31 (RX 7900 series). FeatureGFX10_3Insts +
@@ -101,6 +104,7 @@ static constexpr ArchData kGfx1100{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*agprCountsAgainstVGPRs=*/false,
 };
 
 // RDNA4. FeatureISAVersion12 carries Feature1536VGPRs by default.
@@ -123,6 +127,7 @@ static constexpr ArchData kGfx1200{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*agprCountsAgainstVGPRs=*/false,
 };
 
 template <const ArchData &A> static constexpr bool saneLdsDmaIssue() {

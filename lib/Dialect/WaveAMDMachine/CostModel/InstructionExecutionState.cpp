@@ -21,6 +21,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,37 @@
 #include <limits>
 
 namespace mlir::waveamdmachine {
+
+unsigned getTargetWaveCount(Operation *context) {
+  for (Operation *op = context; op; op = op->getParentOp()) {
+    IntegerAttr targetWaves =
+        op->getAttrOfType<IntegerAttr>("waveamdmachine.target_waves");
+    if (!targetWaves || targetWaves.getInt() <= 0)
+      continue;
+    return static_cast<unsigned>(targetWaves.getValue().getLimitedValue(
+        std::numeric_limits<unsigned>::max()));
+  }
+  return 1;
+}
+
+void configureInstructionScheduleModel(
+    InstructionExecutionConfig &config, const ArchData &arch,
+    Operation *context, ReadyRegisterPressureLimits pressureLimits) {
+  unsigned targetWaveCount = getTargetWaveCount(context);
+  config.ldsDmaIssueWaveStreams =
+      std::min(targetWaveCount, static_cast<unsigned>(arch.wavesPerSIMD));
+  config.scheduleModel.issueStreams = config.ldsDmaIssueWaveStreams;
+  config.scheduleModel.pressureLimits = pressureLimits;
+  if (arch.agprCountsAgainstVGPRs) {
+    unsigned familyLimit = static_cast<unsigned>(arch.vgprFileSize) /
+                           config.ldsDmaIssueWaveStreams;
+    config.scheduleModel.pressureLimits.vgprFamily =
+        familyLimit / static_cast<unsigned>(arch.vgprAllocGranule) *
+        static_cast<unsigned>(arch.vgprAllocGranule);
+  }
+  // Sibling resident waves supply issue spacing absent at one-wave occupancy.
+  config.smoothLdsDmaIssue = config.ldsDmaIssueWaveStreams == 1;
+}
 
 namespace {
 
@@ -549,6 +581,194 @@ InstructionExecutionState::InstructionExecutionState(
     const ArchData &arch, InstructionExecutionConfig config)
     : config(config), arch(arch),
       issueSlotHazardConfig(getInstructionIssueSlotHazardConfig(arch.isa)) {}
+
+static bool canUseReadyRegisterClass(int64_t current, int64_t delta,
+                                     unsigned limit) {
+  if (delta <= 0)
+    return true;
+  return limit != 0 && current + delta <= static_cast<int64_t>(limit);
+}
+
+static unsigned getReadyRegisterPressureLimit(unsigned limit,
+                                              unsigned allocGranule) {
+  if (allocGranule == 0)
+    return limit;
+  return limit > allocGranule ? limit - allocGranule : 0;
+}
+
+static unsigned getReadyRegisterPressureCeiling(unsigned limit,
+                                                unsigned allocGranule,
+                                                unsigned baseline) {
+  return std::max(getReadyRegisterPressureLimit(limit, allocGranule), baseline);
+}
+
+static bool canUseReadyCandidate(ReadyRegisterPressure current,
+                                 const ReadyCandidateMetrics &candidate,
+                                 const ReadyRegisterPressureLimits &limits) {
+  unsigned sgprLimit = getReadyRegisterPressureCeiling(
+      limits.sgpr, limits.sgprAllocGranule, candidate.pressureCeiling.sgpr);
+  unsigned vgprLimit = getReadyRegisterPressureCeiling(
+      limits.vgpr, limits.vgprAllocGranule, candidate.pressureCeiling.vgpr);
+  unsigned agprLimit = getReadyRegisterPressureCeiling(
+      limits.agpr, limits.agprAllocGranule, candidate.pressureCeiling.agpr);
+  if (!canUseReadyRegisterClass(current.sgpr, candidate.pressureDelta.sgpr,
+                                sgprLimit))
+    return false;
+  if (limits.vgprFamily == 0)
+    return canUseReadyRegisterClass(current.vgpr, candidate.pressureDelta.vgpr,
+                                    vgprLimit) &&
+           canUseReadyRegisterClass(current.agpr, candidate.pressureDelta.agpr,
+                                    agprLimit);
+  unsigned familyGranule =
+      std::max(limits.vgprAllocGranule, limits.agprAllocGranule);
+  unsigned familyLimit = getReadyRegisterPressureCeiling(
+      limits.vgprFamily, familyGranule, candidate.pressureCeiling.vgprFamily);
+  return canUseReadyRegisterClass(
+      current.vgpr + current.agpr,
+      candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr, familyLimit);
+}
+
+bool InstructionScheduleModel::shouldSelectResourceStallFiller(
+    unsigned waitSlots, unsigned releaseSlots, ReadyRegisterPressure current,
+    const ReadyCandidateMetrics &next) const {
+  if (issueStreams <= 1 || waitSlots == 0)
+    return false;
+  unsigned siblingOverlap = 0;
+  if (issueStreams > 1 && releaseSlots > 1) {
+    if (canUseReadyCandidate(current, next, pressureLimits))
+      siblingOverlap =
+          releaseSlots - llvm::divideCeil(releaseSlots, issueStreams);
+    else
+      siblingOverlap = std::min(releaseSlots - 1, issueStreams - 1);
+  }
+  return waitSlots > siblingOverlap;
+}
+
+struct ReadyRegisterPressureScore {
+  uint64_t maximum = 0;
+};
+
+static void addReadyRegisterPressureScore(int64_t pressure, unsigned limit,
+                                          ReadyRegisterPressureScore &score) {
+  if (limit == 0)
+    return;
+  constexpr uint64_t scale = uint64_t{1} << 20;
+  uint64_t used = static_cast<uint64_t>(std::max<int64_t>(pressure, 0));
+  uint64_t normalized = used * scale / limit;
+  score.maximum = std::max(score.maximum, normalized);
+}
+
+static ReadyRegisterPressureScore
+getReadyRegisterPressureScore(ReadyRegisterPressure current,
+                              const ReadyCandidateMetrics &candidate,
+                              const ReadyRegisterPressureLimits &limits) {
+  ReadyRegisterPressureScore score;
+  unsigned sgprLimit = getReadyRegisterPressureCeiling(
+      limits.sgpr, limits.sgprAllocGranule, candidate.pressureCeiling.sgpr);
+  addReadyRegisterPressureScore(current.sgpr + candidate.pressureDelta.sgpr,
+                                sgprLimit, score);
+  if (limits.vgprFamily != 0) {
+    unsigned familyGranule =
+        std::max(limits.vgprAllocGranule, limits.agprAllocGranule);
+    unsigned familyLimit = getReadyRegisterPressureCeiling(
+        limits.vgprFamily, familyGranule, candidate.pressureCeiling.vgprFamily);
+    addReadyRegisterPressureScore(current.vgpr + current.agpr +
+                                      candidate.pressureDelta.vgpr +
+                                      candidate.pressureDelta.agpr,
+                                  familyLimit, score);
+  } else {
+    unsigned vgprLimit = getReadyRegisterPressureCeiling(
+        limits.vgpr, limits.vgprAllocGranule, candidate.pressureCeiling.vgpr);
+    unsigned agprLimit = getReadyRegisterPressureCeiling(
+        limits.agpr, limits.agprAllocGranule, candidate.pressureCeiling.agpr);
+    addReadyRegisterPressureScore(current.vgpr + candidate.pressureDelta.vgpr,
+                                  vgprLimit, score);
+    addReadyRegisterPressureScore(current.agpr + candidate.pressureDelta.agpr,
+                                  agprLimit, score);
+  }
+  return score;
+}
+
+static ReadyCandidateMetrics
+reserveReadyCandidatePressure(const ReadyCandidateMetrics &candidate,
+                              const ReadyCandidateMetrics &baseline) {
+  ReadyCandidateMetrics reserved = candidate;
+  reserved.pressureDelta.sgpr +=
+      std::max<int64_t>(0, baseline.pressureDelta.sgpr);
+  reserved.pressureDelta.vgpr +=
+      std::max<int64_t>(0, baseline.pressureDelta.vgpr);
+  reserved.pressureDelta.agpr +=
+      std::max<int64_t>(0, baseline.pressureDelta.agpr);
+  return reserved;
+}
+
+bool InstructionScheduleModel::shouldPreferReadyPressure(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &selected) const {
+  if (issueStreams <= 1)
+    return false;
+  ReadyCandidateMetrics reserved =
+      reserveReadyCandidatePressure(candidate, selected);
+  bool candidateFits = canUseReadyCandidate(current, reserved, pressureLimits);
+  bool selectedFits = canUseReadyCandidate(current, selected, pressureLimits);
+  if (candidateFits != selectedFits)
+    return candidateFits;
+  if (candidateFits)
+    return false;
+  ReadyRegisterPressureScore candidatePressure =
+      getReadyRegisterPressureScore(current, reserved, pressureLimits);
+  ReadyRegisterPressureScore selectedPressure =
+      getReadyRegisterPressureScore(current, selected, pressureLimits);
+  return candidatePressure.maximum < selectedPressure.maximum;
+}
+
+bool InstructionScheduleModel::canSelectReadyCandidate(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &baseline) const {
+  if (issueStreams <= 1)
+    return true;
+  ReadyCandidateMetrics reserved =
+      reserveReadyCandidatePressure(candidate, baseline);
+  return canUseReadyCandidate(current, reserved, pressureLimits);
+}
+
+bool InstructionScheduleModel::canSelectReadyFiller(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &baseline) const {
+  if (issueStreams <= 1)
+    return true;
+  if (pressureLimits.vgprFamily != 0) {
+    unsigned familyGranule = std::max(pressureLimits.vgprAllocGranule,
+                                      pressureLimits.agprAllocGranule);
+    unsigned familyLimit =
+        getReadyRegisterPressureLimit(pressureLimits.vgprFamily, familyGranule);
+    // Above occupancy budget, optional fillers cannot lengthen the family.
+    if (candidate.pressureCeiling.vgprFamily > familyLimit &&
+        candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr > 0)
+      return false;
+  }
+  return canSelectReadyCandidate(current, candidate, baseline);
+}
+
+bool InstructionScheduleModel::shouldPreferReadyFiller(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &selected) const {
+  if (issueStreams <= 1)
+    return false;
+  if (pressureLimits.vgprFamily != 0) {
+    int64_t candidateFamily =
+        candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr;
+    int64_t selectedFamily =
+        selected.pressureDelta.vgpr + selected.pressureDelta.agpr;
+    if (candidateFamily != selectedFamily)
+      return candidateFamily < selectedFamily;
+  }
+  ReadyRegisterPressureScore candidatePressure =
+      getReadyRegisterPressureScore(current, candidate, pressureLimits);
+  ReadyRegisterPressureScore selectedPressure =
+      getReadyRegisterPressureScore(current, selected, pressureLimits);
+  return candidatePressure.maximum < selectedPressure.maximum;
+}
 
 InstructionResourceCapacities InstructionExecutionState::getResourceCapacities(
     const InstructionExecutionConfig &config) {

@@ -89,6 +89,11 @@ SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
   return placements;
 }
 
+SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
+                                                   Operation *context) {
+  return getFullCUWavePlacements(arch, getTargetWaveCount(context));
+}
+
 MultiWaveExecutionState::MultiWaveExecutionState(
     const ArchData &arch, ArrayRef<WavePlacement> placements,
     InstructionExecutionConfig config)
@@ -188,6 +193,11 @@ void MultiWaveCohortExecutionState::bindValue(Value result,
     state->bindValue(wave, result, sources);
 }
 
+const InstructionScheduleModel &
+MultiWaveCohortExecutionState::getScheduleModel() const {
+  return state->getScheduleModel();
+}
+
 void MultiWaveCohortExecutionState::setState(
     std::unique_ptr<MultiWaveExecutionState> newState) {
   assert(newState && areCohortWavesValid(*newState, waves) &&
@@ -235,6 +245,12 @@ void MultiWaveExecutionState::bindValue(unsigned wave, Value result,
                                         ArrayRef<Value> sources) {
   assert(wave < waves.size() && "wave index out of range");
   waves[wave].bindValue(result, sources);
+}
+
+const InstructionScheduleModel &
+MultiWaveExecutionState::getScheduleModel() const {
+  assert(!waves.empty() && "multi-wave state has no waves");
+  return waves.front().getScheduleModel();
 }
 
 unsigned MultiWaveExecutionState::getPendingMemoryEventCount(
