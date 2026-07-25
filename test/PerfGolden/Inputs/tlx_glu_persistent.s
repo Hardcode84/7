@@ -83,28 +83,22 @@ tlx_addmm_glu_kernel_persistent:
 		v_mov_b32_e32 v29, 16
 		v_mul_lo_u32 v29, v29, v28
 		v_xor_b32_e32 v27, v27, v29
-		v_cmp_lt_i32_e64 vcc, v27, s14
-		s_mov_b64 s[24:25], vcc
 		v_mov_b32_e32 v28, 2
 		v_mul_lo_u32 v28, v28, v14
+		v_cmp_lt_i32_e64 s[24:25], v27, s14
 		v_bitop3_b32 v29, v10, v12, v28 bitop3:0x96
 		v_mov_b32_e32 v30, 8
 		v_mul_lo_u32 v30, v30, v16
 		v_xor_b32_e32 v16, v29, v30
 		v_bitop3_b32 v10, 4, v10, v12 bitop3:0x96
 		v_bitop3_b32 v10, v10, v28, v30 bitop3:0x96
-		v_cmp_lt_i32_e64 vcc, v16, s14
-		s_mov_b64 s[26:27], vcc
+		v_cmp_lt_i32_e64 s[26:27], v16, s14
 		s_add_i32 s23, s14, 0xffffffe0
-		v_cmp_lt_i32_e64 vcc, v27, s23
-		s_mov_b64 s[28:29], vcc
-		v_cmp_lt_i32_e64 vcc, v16, s23
-		s_mov_b64 s[30:31], vcc
+		v_cmp_lt_i32_e64 s[28:29], v27, s23
+		v_cmp_lt_i32_e64 s[30:31], v16, s23
 		s_add_i32 s23, s14, 0xffffffc0
-		v_cmp_lt_i32_e64 vcc, v27, s23
-		s_mov_b64 s[32:33], vcc
-		v_cmp_lt_i32_e64 vcc, v16, s23
-		s_mov_b64 s[34:35], vcc
+		v_cmp_lt_i32_e64 s[32:33], v27, s23
+		v_cmp_lt_i32_e64 s[34:35], v16, s23
 		s_add_i32 s23, s21, -3
 		s_add_i32 s36, s21, -2
 		s_cmp_lt_i32 s36, 0
@@ -168,10 +162,8 @@ tlx_addmm_glu_kernel_persistent:
 		s_mov_b32 s54, s42
 		s_mov_b32 s55, s43
 		s_mov_b32 s2, 0
-		v_cmp_eq_u32_e64 vcc, v15, s2
-		s_mov_b64 s[8:9], vcc
-		v_cmp_ne_u32_e64 vcc, v15, s2
-		s_mov_b64 s[10:11], vcc
+		v_cmp_eq_u32_e64 s[8:9], v15, s2
+		v_cmp_ne_u32_e64 s[10:11], v15, s2
 		v_mov_b32_e32 v28, 2
 		v_mul_lo_u32 v28, v28, v12
 		v_mov_b32_e32 v12, 4
@@ -797,19 +789,18 @@ tlx_addmm_glu_kernel_persistent:
 		s_add_i32 s75, s75, 1
 		s_add_i32 s75, s14, s75
 		v_cmp_lt_i32_e64 vcc, v27, s75
-		s_lshl_b32 s76, s69, 6
-		s_mul_i32 s77, 0x2100, s68
+		v_cmp_lt_i32_e64 s[76:77], v16, s75
+		s_lshl_b32 s78, s69, 6
 		v_cndmask_b32_e32 v43, v40, v69, vcc
-		v_cmp_lt_i32_e64 vcc, v16, s75
-		s_mov_b64 s[78:79], vcc
-		s_add_i32 m0, s65, s77
-		s_mul_i32 s77, s17, s69
-		buffer_load_dwordx4 v43, s[40:43], s76 offen lds
+		s_mul_i32 s79, 0x2100, s68
 		v_cmp_lt_i32_e64 vcc, v10, s75
-		s_lshl_b32 s75, s77, 6
+		s_add_i32 m0, s65, s79
+		s_mul_i32 s75, s17, s69
+		buffer_load_dwordx4 v43, s[40:43], s78 offen lds
+		s_lshl_b32 s75, s75, 6
 		s_add_i32 s75, s58, s75
 		v_add_u32_e32 v43, s75, v71
-		v_cndmask_b32_e64 v43, v40, v43, s[78:79]
+		v_cndmask_b32_e64 v43, v40, v43, s[76:77]
 		s_mul_i32 s68, 0x4200, s68
 		v_add_u32_e32 v72, s75, v70
 		s_add_i32 s68, s65, s68
@@ -1151,32 +1142,23 @@ tlx_addmm_glu_kernel_persistent:
 		v_pk_fma_f32 v[54:55], v[58:59], v[194:195], v[58:59]
 		v_pk_fma_f32 v[58:59], v[88:89], v[196:197], v[88:89]
 		v_pk_fma_f32 v[88:89], v[90:91], v[200:201], v[90:91]
-		v_cmp_lt_i32_e64 vcc, v67, s12
-		s_mov_b64 s[68:69], vcc
-		v_cmp_lt_i32_e64 vcc, v66, s12
-		s_mov_b64 s[72:73], vcc
-		v_cmp_lt_i32_e64 vcc, v65, s12
-		s_mov_b64 s[74:75], vcc
-		v_cmp_lt_i32_e64 vcc, v64, s12
-		s_mov_b64 s[76:77], vcc
-		v_cmp_lt_i32_e64 vcc, v63, s12
-		s_mov_b64 s[78:79], vcc
-		v_cmp_lt_i32_e64 vcc, v62, s12
-		s_mov_b64 s[80:81], vcc
-		v_cmp_lt_i32_e64 vcc, v61, s12
-		s_mov_b64 s[82:83], vcc
-		v_cmp_lt_i32_e64 vcc, v57, s12
-		s_mov_b64 s[84:85], vcc
+		v_cmp_lt_i32_e64 s[68:69], v67, s12
+		v_cmp_lt_i32_e64 s[72:73], v66, s12
+		v_cmp_lt_i32_e64 s[74:75], v65, s12
+		v_cmp_lt_i32_e64 s[76:77], v64, s12
+		v_cmp_lt_i32_e64 s[78:79], v63, s12
+		v_cmp_lt_i32_e64 s[80:81], v62, s12
+		v_cmp_lt_i32_e64 s[82:83], v61, s12
+		v_cmp_lt_i32_e64 s[84:85], v57, s12
 		v_add_u32_e32 v43, s70, v2
-		v_cmp_lt_i32_e64 vcc, v43, s13
-		s_mov_b64 s[70:71], vcc
 		v_cvt_pk_f16_f32 v60, v144, v145
-		s_and_b64 s[68:69], s[68:69], s[70:71]
+		v_cmp_lt_i32_e64 s[70:71], v43, s13
 		v_cvt_pk_f16_f32 v61, v72, v73
-		s_and_b64 s[72:73], s[72:73], s[70:71]
+		s_and_b64 s[68:69], s[68:69], s[70:71]
 		v_cvt_pk_f16_f32 v62, v74, v75
-		s_and_b64 s[74:75], s[74:75], s[70:71]
+		s_and_b64 s[72:73], s[72:73], s[70:71]
 		v_cvt_pk_f16_f32 v63, v68, v69
+		s_and_b64 s[74:75], s[74:75], s[70:71]
 		s_and_b64 s[76:77], s[76:77], s[70:71]
 		s_and_b64 s[78:79], s[78:79], s[70:71]
 		s_and_b64 s[80:81], s[80:81], s[70:71]

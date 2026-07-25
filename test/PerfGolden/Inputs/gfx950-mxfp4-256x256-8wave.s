@@ -109,9 +109,8 @@ wmma_f16_matmul_tiled:
 		s_add_i32 m0, m0, 0x2000
 		s_add_i32 s36, s19, 0x80040
 		v_and_or_b32 v7, 1, s7, v6
-		v_cmp_eq_u32_e64 vcc, v7, s35
-		s_mov_b64 s[38:39], vcc
 		s_lshl_b32 s37, s6, 9
+		v_cmp_eq_u32_e64 s[38:39], v7, s35
 		s_lshl_b32 s6, s6, 6
 		s_add_i32 s40, s6, s1
 		s_lshl_b32 s0, s0, 8
@@ -146,9 +145,8 @@ wmma_f16_matmul_tiled:
 		s_mov_b64 exec, s[60:61]
 		v_lshrrev_b32_e32 v7, 1, v5
 		v_or_b32_e32 v6, v6, v7
-		v_cmp_eq_u32_e64 vcc, v6, s35
-		s_mov_b64 s[40:41], vcc
 		s_and_b32 s36, s7, 1
+		v_cmp_eq_u32_e64 s[40:41], v6, s35
 		s_lshl_b32 s42, s36, 10
 		s_lshl_b32 s12, s12, 8
 		s_lshl_b32 s36, s36, 7
@@ -1268,7 +1266,7 @@ wmma_f16_matmul_tiled:
 		.amdhsa_next_free_vgpr 256
 		.amdhsa_next_free_sgpr 62
 		.amdhsa_accum_offset 256
-		.amdhsa_reserve_vcc 1
+		.amdhsa_reserve_vcc 0
 		.amdhsa_float_round_mode_32 0
 		.amdhsa_float_round_mode_16_64 0
 		.amdhsa_float_denorm_mode_32 3
@@ -1283,7 +1281,7 @@ wmma_f16_matmul_tiled:
 	.set .Lwmma_f16_matmul_tiled.numbered_sgpr, 62
 	.set .Lwmma_f16_matmul_tiled.num_named_barrier, 0
 	.set .Lwmma_f16_matmul_tiled.private_seg_size, 0
-	.set .Lwmma_f16_matmul_tiled.uses_vcc, 1
+	.set .Lwmma_f16_matmul_tiled.uses_vcc, 0
 	.set .Lwmma_f16_matmul_tiled.uses_flat_scratch, 0
 	.set .Lwmma_f16_matmul_tiled.has_dyn_sized_stack, 0
 	.set .Lwmma_f16_matmul_tiled.has_recursion, 0

@@ -3057,8 +3057,12 @@ private:
               waveamdmachine::VCmpLtI32VccOp, waveamdmachine::VCmpLeI32VccOp,
               waveamdmachine::VCmpGtI32VccOp, waveamdmachine::VCmpGeI32VccOp>(
               op);
-      if (isGfx8Or9() && !writesVcc)
-        return op.emitError("v_cmp_* without VCC result unsupported on gfx8/9");
+      waveamdmachine::RegType resultType =
+          cast<waveamdmachine::RegType>(result().getType());
+      if (!writesVcc && resultType.getWidth() * 32 != wavefrontSize)
+        return op.emitError()
+               << "direct result width " << resultType.getWidth() * 32
+               << " does not match wave" << wavefrontSize;
       llvm::MCOperand dst =
           writesVcc ? llvm::MCOperand::createReg(
                           namedPhysReg(wavefrontSize == 32 ? "vcc_lo" : "vcc"))
@@ -3070,7 +3074,6 @@ private:
         return failure();
       if (!writesVcc)
         return success();
-      auto resultType = cast<waveamdmachine::RegType>(result().getType());
       if (result().use_empty())
         return success();
       if (resultType.getWidth() == 2)

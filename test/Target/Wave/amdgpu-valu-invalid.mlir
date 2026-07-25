@@ -81,6 +81,24 @@ func.func @bad_v_cmp_eq_u32(%lhs: !waveamdmachine.reg<sgpr, 1, 0>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+func.func @bad_direct_v_cmp_width(
+    %lhs: !waveamdmachine.reg<vgpr, 1, 0>,
+    %rhs: !waveamdmachine.reg<vgpr, 1, 1>)
+    -> !waveamdmachine.reg<sgpr, 1, 2> {
+  // expected-error @below {{direct result width 32 does not match wave64}}
+  %out = waveamdmachine.v_cmp_eq_u32 %lhs, %rhs
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<sgpr, 1, 2>
+  return %out : !waveamdmachine.reg<sgpr, 1, 2>
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 func.func @bad_v_add3_u32_unique_literals(

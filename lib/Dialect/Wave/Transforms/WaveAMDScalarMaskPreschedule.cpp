@@ -88,6 +88,81 @@ static Value getUnusedVCCResult(Value mask) {
   return vcc.use_empty() ? vcc : Value();
 }
 
+template <typename DirectCompareOp, typename VCCCompareOp>
+static void makeCompareResultDirect(OpBuilder &builder, VCCCompareOp compare) {
+  builder.setInsertionPoint(compare);
+  DirectCompareOp direct = DirectCompareOp::create(
+      builder, compare.getLoc(), compare.getResult().getType(),
+      compare.getLhs(), compare.getRhs());
+  direct->setAttrs(compare->getAttrs());
+  compare.getResult().replaceAllUsesWith(direct.getResult());
+  compare.erase();
+}
+
+static bool makeUnsignedCompareResultDirect(OpBuilder &builder, Operation *op) {
+  if (auto compare = dyn_cast<waveamdmachine::VCmpEqU32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpEqU32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpNeU32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpNeU32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpLtU32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpLtU32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpLeU32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpLeU32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpGtU32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpGtU32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpGeU32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpGeU32Op>(builder, compare);
+  else
+    return false;
+  return true;
+}
+
+static bool makeSignedCompareResultDirect(OpBuilder &builder, Operation *op) {
+  if (auto compare = dyn_cast<waveamdmachine::VCmpLtI32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpLtI32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpLeI32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpLeI32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpGtI32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpGtI32Op>(builder, compare);
+  else if (auto compare = dyn_cast<waveamdmachine::VCmpGeI32VccOp>(op))
+    makeCompareResultDirect<waveamdmachine::VCmpGeI32Op>(builder, compare);
+  else
+    return false;
+  return true;
+}
+
+static bool makeDeadVCCCompareResultDirect(OpBuilder &builder, Operation *op,
+                                           unsigned wavefrontSize) {
+  if (!isVCCCompare(op) || !op->getResult(1).use_empty())
+    return false;
+  waveamdmachine::RegType resultType =
+      cast<waveamdmachine::RegType>(op->getResult(0).getType());
+  if (resultType.getWidth() * 32 != wavefrontSize)
+    return false;
+  if (makeUnsignedCompareResultDirect(builder, op) ||
+      makeSignedCompareResultDirect(builder, op))
+    return true;
+  llvm_unreachable("unhandled VCC compare");
+}
+
+static LogicalResult makeDeadVCCCompareResultsDirect(Operation *root) {
+  if (!waveamdmachine::findAMDGPUTargetModule(root))
+    return success();
+  FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
+      root, "waveamd-scalar-mask-preschedule");
+  if (failed(wavefrontSize))
+    return failure();
+  SmallVector<Operation *> compares;
+  root->walk([&](Operation *op) {
+    if (isVCCCompare(op))
+      compares.push_back(op);
+  });
+  OpBuilder builder(root->getContext());
+  for (Operation *compare : compares)
+    makeDeadVCCCompareResultDirect(builder, compare, *wavefrontSize);
+  return success();
+}
+
 static void useVCCExecMask(waveamdmachine::ExecIfOp execIf) {
   Value mask = execIf.getCondition();
   if (!mask.hasOneUse())
@@ -203,7 +278,11 @@ struct WaveAMDScalarMaskPreschedulePass
           WaveAMDScalarMaskPreschedulePass> {
   using WaveAMDScalarMaskPrescheduleBase::WaveAMDScalarMaskPrescheduleBase;
 
-  void runOnOperation() override { sinkScalarMasks(getOperation()); }
+  void runOnOperation() override {
+    sinkScalarMasks(getOperation());
+    if (failed(makeDeadVCCCompareResultsDirect(getOperation())))
+      return signalPassFailure();
+  }
 };
 
 struct WaveAMDScalarMaskPostSchedulePass

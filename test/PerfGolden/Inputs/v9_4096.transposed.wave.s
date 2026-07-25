@@ -909,14 +909,10 @@ v9_beyond_hotloop:
 		v_xor_b32_e32 v2, v2, v8
 		v_bitop3_b32 v2, v2, v19, v21 bitop3:0x96
 		v_xad_u32 v2, v2, v16, s15
-		v_cmp_lt_i32_e64 vcc, v6, s8
-		s_mov_b64 s[2:3], vcc
-		v_cmp_lt_i32_e64 vcc, v11, s8
-		s_mov_b64 s[4:5], vcc
-		v_cmp_lt_i32_e64 vcc, v112, s8
-		s_mov_b64 s[6:7], vcc
-		v_cmp_lt_i32_e64 vcc, v2, s8
-		s_mov_b64 s[10:11], vcc
+		v_cmp_lt_i32_e64 s[2:3], v6, s8
+		v_cmp_lt_i32_e64 s[4:5], v11, s8
+		v_cmp_lt_i32_e64 s[6:7], v112, s8
+		v_cmp_lt_i32_e64 s[10:11], v2, s8
 		v_lshrrev_b32_e32 v2, 4, v0
 		v_and_b32_e32 v6, 1, v2
 		v_mov_b32_e32 v8, 4
@@ -940,14 +936,10 @@ v9_beyond_hotloop:
 		v_xor_b32_e32 v8, v8, v9
 		v_xor_b32_e32 v8, v8, v11
 		v_add_u32_e32 v9, s31, v8
-		v_cmp_lt_i32_e64 vcc, v16, s9
-		s_mov_b64 s[20:21], vcc
-		v_cmp_lt_i32_e64 vcc, v19, s9
-		s_mov_b64 s[22:23], vcc
-		v_cmp_lt_i32_e64 vcc, v112, s9
-		s_mov_b64 s[24:25], vcc
-		v_cmp_lt_i32_e64 vcc, v9, s9
-		s_mov_b64 s[26:27], vcc
+		v_cmp_lt_i32_e64 s[20:21], v16, s9
+		v_cmp_lt_i32_e64 s[22:23], v19, s9
+		v_cmp_lt_i32_e64 s[24:25], v112, s9
+		v_cmp_lt_i32_e64 s[26:27], v9, s9
 		s_and_b64 s[28:29], s[2:3], s[20:21]
 		s_and_b64 s[32:33], s[2:3], s[22:23]
 		s_and_b64 s[34:35], s[2:3], s[24:25]
@@ -1237,16 +1229,12 @@ v9_beyond_hotloop:
 		v_mfma_f32_16x16x32_f16 v[164:167], v[60:63], v[24:27], v[164:167]
 		v_add_u32_e32 v4, s1, v21
 		v_add_u32_e32 v5, s1, v8
-		v_cmp_lt_i32_e64 vcc, v1, s9
-		s_mov_b64 s[20:21], vcc
+		v_cmp_lt_i32_e64 s[20:21], v1, s9
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[168:171], v[68:71], v[24:27], v[168:171]
-		v_cmp_lt_i32_e64 vcc, v3, s9
-		s_mov_b64 s[22:23], vcc
-		v_cmp_lt_i32_e64 vcc, v4, s9
-		s_mov_b64 s[24:25], vcc
-		v_cmp_lt_i32_e64 vcc, v5, s9
-		s_mov_b64 s[26:27], vcc
+		v_cmp_lt_i32_e64 s[22:23], v3, s9
+		v_cmp_lt_i32_e64 s[24:25], v4, s9
+		v_cmp_lt_i32_e64 s[26:27], v5, s9
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[172:175], v[76:79], v[24:27], v[172:175]
 		s_and_b64 s[30:31], s[2:3], s[20:21]
