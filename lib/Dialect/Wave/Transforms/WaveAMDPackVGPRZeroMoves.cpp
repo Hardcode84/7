@@ -14,6 +14,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include <iterator>
@@ -391,6 +392,56 @@ static void eraseDeadScalarB32Moves(Operation *root) {
     op.erase();
 }
 
+static Value getZeroFillImmediate(Value value) {
+  if (auto move = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>())
+    return isZeroImm(move.getSource()) ? move.getSource() : Value{};
+  if (auto move = value.getDefiningOp<waveamdmachine::VMovB64TupleOp>())
+    return isZeroImm(move.getSource()) ? move.getSource() : Value{};
+  auto tuple = value.getDefiningOp<waveamdmachine::TupleFromElementsOp>();
+  if (!tuple)
+    return {};
+  Value zero;
+  for (Value element : tuple.getElements()) {
+    Value elementZero = getZeroFillImmediate(element);
+    if (!elementZero)
+      return {};
+    zero = elementZero;
+  }
+  return zero;
+}
+
+static void eraseDeadZeroFill(Operation *def,
+                              llvm::DenseSet<Operation *> &erased) {
+  if (!def || erased.contains(def) || !def->use_empty() ||
+      !isa<waveamdmachine::VMovB32TupleOp, waveamdmachine::VMovB64TupleOp,
+           waveamdmachine::TupleFromElementsOp>(def))
+    return;
+  SmallVector<Operation *> operandDefs;
+  for (Value operand : def->getOperands())
+    if (Operation *operandDef = operand.getDefiningOp())
+      operandDefs.push_back(operandDef);
+  erased.insert(def);
+  def->erase();
+  for (Operation *operandDef : operandDefs)
+    eraseDeadZeroFill(operandDef, erased);
+}
+
+static void foldAGPRZeroFills(Operation *root) {
+  SmallVector<waveamdmachine::VAccvgprWriteB32TupleOp> writes;
+  root->walk([&](waveamdmachine::VAccvgprWriteB32TupleOp op) {
+    writes.push_back(op);
+  });
+  llvm::DenseSet<Operation *> erased;
+  for (waveamdmachine::VAccvgprWriteB32TupleOp write : writes) {
+    Value source = write.getSource();
+    Value zero = getZeroFillImmediate(source);
+    if (!zero)
+      continue;
+    write.getSourceMutable().assign(zero);
+    eraseDeadZeroFill(source.getDefiningOp(), erased);
+  }
+}
+
 struct WaveAMDPackVGPRZeroMovesPass
     : public wave::impl::WaveAMDPackVGPRZeroMovesBase<
           WaveAMDPackVGPRZeroMovesPass> {
@@ -401,6 +452,7 @@ struct WaveAMDPackVGPRZeroMovesPass
       return signalPassFailure();
     if (failed(materializeCopyTuples(root)))
       return signalPassFailure();
+    foldAGPRZeroFills(root);
     eraseRedundantAllocatedVGPRMoves(root);
     if (!waveamdmachine::VMovB64TupleOp::isSupportedOnIsa(*isaVersion))
       return;

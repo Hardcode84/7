@@ -268,6 +268,141 @@ func.func @dead_scalar_zero_move_before_agpr_write() {
   return
 }
 
+// PACK-LABEL: func.func @fold_agpr_zero_fill_widths
+// PACK: %[[ZERO:.+]] = waveamdmachine.imm 0
+// PACK-NOT: waveamdmachine.v_mov
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[ZERO]]
+// PACK-SAME: -> !waveamdmachine.reg<agpr, 1, 0>
+// PACK-NOT: waveamdmachine.v_mov
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[ZERO]]
+// PACK-SAME: -> !waveamdmachine.reg<agpr, 2, 2>
+// PACK-NOT: waveamdmachine.v_mov
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[ZERO]]
+// PACK-SAME: -> !waveamdmachine.reg<agpr, 4, 4>
+// PACK-NOT: waveamdmachine.v_mov
+// PACK: return
+func.func @fold_agpr_zero_fill_widths() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 32>
+  %acc1 = waveamdmachine.v_accvgpr_write_b32_tuple %one
+      : (!waveamdmachine.reg<vgpr, 1, 32>)
+        -> !waveamdmachine.reg<agpr, 1, 0>
+  %two = waveamdmachine.v_mov_b64_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 34>
+  %acc2 = waveamdmachine.v_accvgpr_write_b32_tuple %two
+      : (!waveamdmachine.reg<vgpr, 2, 34>)
+        -> !waveamdmachine.reg<agpr, 2, 2>
+  %four = waveamdmachine.v_mov_b32_tuple %zero {registers = 4 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 4, 36>
+  %acc4 = waveamdmachine.v_accvgpr_write_b32_tuple %four
+      : (!waveamdmachine.reg<vgpr, 4, 36>)
+        -> !waveamdmachine.reg<agpr, 4, 4>
+  return
+}
+
+// PACK-LABEL: func.func @fold_nested_agpr_zero_fill
+// PACK: %[[ZERO:.+]] = waveamdmachine.imm 0
+// PACK-NOT: waveamdmachine.v_mov
+// PACK-NOT: waveamdmachine.tuple_from_elements
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[ZERO]]
+// PACK: return
+func.func @fold_nested_agpr_zero_fill() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %lo = waveamdmachine.v_mov_b64_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 32>
+  %a = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 34>
+  %b = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 35>
+  %hi = waveamdmachine.tuple_from_elements %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 34>,
+         !waveamdmachine.reg<vgpr, 1, 35>)
+      -> !waveamdmachine.reg<vgpr, 2, 34>
+  %wide = waveamdmachine.tuple_from_elements %lo, %hi
+      : (!waveamdmachine.reg<vgpr, 2, 32>,
+         !waveamdmachine.reg<vgpr, 2, 34>)
+      -> !waveamdmachine.reg<vgpr, 4, 32>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %wide
+      : (!waveamdmachine.reg<vgpr, 4, 32>)
+        -> !waveamdmachine.reg<agpr, 4, 0>
+  return
+}
+
+// PACK-LABEL: func.func @fold_duplicate_agpr_zero_leaf
+// PACK: %[[ZERO:.+]] = waveamdmachine.imm 0
+// PACK-NOT: waveamdmachine.v_mov
+// PACK-NOT: waveamdmachine.tuple_from_elements
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[ZERO]]
+// PACK: return
+func.func @fold_duplicate_agpr_zero_leaf() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %leaf = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %pair = waveamdmachine.tuple_from_elements %leaf, %leaf
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 2>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %pair
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<agpr, 2>
+  return
+}
+
+// PACK-LABEL: func.func @keep_shared_agpr_zero_fill
+// PACK: %[[ZERO:.+]] = waveamdmachine.imm 0
+// PACK: %[[FILL:.+]] = waveamdmachine.v_mov_b64_tuple %[[ZERO]]
+// PACK: %[[KEPT:.+]] = waveamdmachine.tuple_from_elements %[[FILL]]
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[ZERO]]
+// PACK: return %[[KEPT]]
+func.func @keep_shared_agpr_zero_fill()
+    -> !waveamdmachine.reg<vgpr, 2, 32> {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %fill = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 32>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %fill
+      : (!waveamdmachine.reg<vgpr, 2, 32>)
+        -> !waveamdmachine.reg<agpr, 2, 0>
+  return %fill : !waveamdmachine.reg<vgpr, 2, 32>
+}
+
+// PACK-LABEL: func.func @keep_nonzero_agpr_fill
+// PACK: %[[ONE:.+]] = waveamdmachine.imm 1
+// PACK: %[[FILL:.+]] = waveamdmachine.v_mov_b32_tuple %[[ONE]]
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[FILL]]
+func.func @keep_nonzero_agpr_fill() {
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %fill = waveamdmachine.v_mov_b32_tuple %one {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 32>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %fill
+      : (!waveamdmachine.reg<vgpr, 2, 32>)
+        -> !waveamdmachine.reg<agpr, 2, 0>
+  return
+}
+
+// PACK-LABEL: func.func @keep_mixed_agpr_fill
+// PACK: %[[ZERO:.+]] = waveamdmachine.imm 0
+// PACK: %[[ONE:.+]] = waveamdmachine.imm 1
+// PACK: %[[ZERO_FILL:.+]] = waveamdmachine.v_mov_b32_tuple %[[ZERO]]
+// PACK: %[[ONE_FILL:.+]] = waveamdmachine.v_mov_b32_tuple %[[ONE]]
+// PACK: %[[PAIR:.+]] = waveamdmachine.tuple_from_elements %[[ZERO_FILL]], %[[ONE_FILL]]
+// PACK: waveamdmachine.v_accvgpr_write_b32_tuple %[[PAIR]]
+func.func @keep_mixed_agpr_fill() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %zero_fill = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 32>
+  %one_fill = waveamdmachine.v_mov_b32_tuple %one
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1, 33>
+  %pair = waveamdmachine.tuple_from_elements %zero_fill, %one_fill
+      : (!waveamdmachine.reg<vgpr, 1, 32>,
+         !waveamdmachine.reg<vgpr, 1, 33>)
+      -> !waveamdmachine.reg<vgpr, 2, 32>
+  %acc = waveamdmachine.v_accvgpr_write_b32_tuple %pair
+      : (!waveamdmachine.reg<vgpr, 2, 32>)
+        -> !waveamdmachine.reg<agpr, 2, 0>
+  return
+}
+
 // PACK-LABEL: func.func @b64_result_feeds_hazards
 // PACK: waveamdmachine.v_mov_b64_tuple
 // WAITS-LABEL: func.func @b64_result_feeds_hazards

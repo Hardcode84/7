@@ -74,4 +74,42 @@ func.func @same_phys_vgpr_copy_codegen(
   return
 }
 
+// ASM-LABEL: fold_agpr_zero_fill_codegen:
+// ASM-NOT: v_mov
+// ASM: v_accvgpr_write_b32 a0, 0
+// ASM: v_accvgpr_write_b32 a1, 0
+// ASM: v_accvgpr_write_b32 a2, 0
+// ASM: v_accvgpr_write_b32 a3, 0
+// ASM-NOT: v_mov
+// ASM: global_store_dwordx2 v[0:1], v[8:9], off
+// ASM: global_store_dwordx2 v[0:1], v[10:11], off
+func.func @fold_agpr_zero_fill_codegen(
+    %addr: !waveamdmachine.reg<vgpr, 2, 0>) {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %first = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 4>
+  %acc0 = waveamdmachine.v_accvgpr_write_b32_tuple %first
+      : (!waveamdmachine.reg<vgpr, 2, 4>)
+        -> !waveamdmachine.reg<agpr, 2, 0>
+  %second = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 4>
+  %acc1 = waveamdmachine.v_accvgpr_write_b32_tuple %second
+      : (!waveamdmachine.reg<vgpr, 2, 4>)
+        -> !waveamdmachine.reg<agpr, 2, 2>
+  %read0 = waveamdmachine.v_accvgpr_read_b32_tuple %acc0
+      : (!waveamdmachine.reg<agpr, 2, 0>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %read1 = waveamdmachine.v_accvgpr_read_b32_tuple %acc1
+      : (!waveamdmachine.reg<agpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 10>
+  %tok0 = waveamdmachine.global_store_b64_addr64 %addr, %read0
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 8>)
+        -> !waveamdmachine.mem.token
+  %tok1 = waveamdmachine.global_store_b64_addr64 %addr, %read1
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 10>)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 }
