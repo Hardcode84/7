@@ -427,20 +427,14 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[182:183], 0
 		v_mov_b64_e32 v[184:185], 0
 		v_mov_b64_e32 v[186:187], 0
-		v_mov_b64_e32 v[188:189], 0
-		v_mov_b64_e32 v[190:191], 0
 		v_accvgpr_write_b32 a132, 0
 		v_accvgpr_write_b32 a133, 0
 		v_accvgpr_write_b32 a134, 0
 		v_accvgpr_write_b32 a135, 0
-		v_mov_b64_e32 v[188:189], 0
-		v_mov_b64_e32 v[190:191], 0
 		v_accvgpr_write_b32 a136, 0
 		v_accvgpr_write_b32 a137, 0
 		v_accvgpr_write_b32 a138, 0
 		v_accvgpr_write_b32 a139, 0
-		v_mov_b64_e32 v[188:189], 0
-		v_mov_b64_e32 v[190:191], 0
 		v_accvgpr_write_b32 a140, 0
 		v_accvgpr_write_b32 a141, 0
 		v_accvgpr_write_b32 a142, 0
@@ -453,26 +447,18 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[198:199], 0
 		v_mov_b64_e32 v[200:201], 0
 		v_mov_b64_e32 v[202:203], 0
-		v_mov_b64_e32 v[204:205], 0
-		v_mov_b64_e32 v[206:207], 0
 		v_accvgpr_write_b32 a144, 0
 		v_accvgpr_write_b32 a145, 0
 		v_accvgpr_write_b32 a146, 0
 		v_accvgpr_write_b32 a147, 0
-		v_mov_b64_e32 v[204:205], 0
-		v_mov_b64_e32 v[206:207], 0
 		v_accvgpr_write_b32 a148, 0
 		v_accvgpr_write_b32 a149, 0
 		v_accvgpr_write_b32 a150, 0
 		v_accvgpr_write_b32 a151, 0
-		v_mov_b64_e32 v[204:205], 0
-		v_mov_b64_e32 v[206:207], 0
 		v_accvgpr_write_b32 a152, 0
 		v_accvgpr_write_b32 a153, 0
 		v_accvgpr_write_b32 a154, 0
 		v_accvgpr_write_b32 a155, 0
-		v_mov_b64_e32 v[204:205], 0
-		v_mov_b64_e32 v[206:207], 0
 		v_accvgpr_write_b32 a156, 0
 		v_accvgpr_write_b32 a157, 0
 		v_accvgpr_write_b32 a158, 0
@@ -485,26 +471,18 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[214:215], 0
 		v_mov_b64_e32 v[216:217], 0
 		v_mov_b64_e32 v[218:219], 0
-		v_mov_b64_e32 v[220:221], 0
-		v_mov_b64_e32 v[222:223], 0
 		v_accvgpr_write_b32 a160, 0
 		v_accvgpr_write_b32 a161, 0
 		v_accvgpr_write_b32 a162, 0
 		v_accvgpr_write_b32 a163, 0
-		v_mov_b64_e32 v[220:221], 0
-		v_mov_b64_e32 v[222:223], 0
 		v_accvgpr_write_b32 a164, 0
 		v_accvgpr_write_b32 a165, 0
 		v_accvgpr_write_b32 a166, 0
 		v_accvgpr_write_b32 a167, 0
-		v_mov_b64_e32 v[220:221], 0
-		v_mov_b64_e32 v[222:223], 0
 		v_accvgpr_write_b32 a168, 0
 		v_accvgpr_write_b32 a169, 0
 		v_accvgpr_write_b32 a170, 0
 		v_accvgpr_write_b32 a171, 0
-		v_mov_b64_e32 v[220:221], 0
-		v_mov_b64_e32 v[222:223], 0
 		v_accvgpr_write_b32 a172, 0
 		v_accvgpr_write_b32 a173, 0
 		v_accvgpr_write_b32 a174, 0
@@ -517,26 +495,18 @@ wmma_f16_matmul_tiled:
 		v_mov_b64_e32 v[230:231], 0
 		v_mov_b64_e32 v[232:233], 0
 		v_mov_b64_e32 v[234:235], 0
-		v_mov_b64_e32 v[236:237], 0
-		v_mov_b64_e32 v[238:239], 0
 		v_accvgpr_write_b32 a176, 0
 		v_accvgpr_write_b32 a177, 0
 		v_accvgpr_write_b32 a178, 0
 		v_accvgpr_write_b32 a179, 0
-		v_mov_b64_e32 v[236:237], 0
-		v_mov_b64_e32 v[238:239], 0
 		v_accvgpr_write_b32 a180, 0
 		v_accvgpr_write_b32 a181, 0
 		v_accvgpr_write_b32 a182, 0
 		v_accvgpr_write_b32 a183, 0
-		v_mov_b64_e32 v[236:237], 0
-		v_mov_b64_e32 v[238:239], 0
 		v_accvgpr_write_b32 a184, 0
 		v_accvgpr_write_b32 a185, 0
 		v_accvgpr_write_b32 a186, 0
 		v_accvgpr_write_b32 a187, 0
-		v_mov_b64_e32 v[236:237], 0
-		v_mov_b64_e32 v[238:239], 0
 		v_accvgpr_write_b32 a188, 0
 		v_accvgpr_write_b32 a189, 0
 		v_accvgpr_write_b32 a190, 0
