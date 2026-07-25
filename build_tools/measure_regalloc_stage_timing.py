@@ -327,7 +327,12 @@ def print_summary(samples: list[TimingSample], tools: list[TimingTool]) -> None:
             baseline = tools[0].label
             candidate = tools[-1].label
             delta = medians[candidate] - medians[baseline]
-            row.extend([f"{delta:+.4f}", f"{delta / medians[baseline] * 100:+.2f}%"])
+            delta_pct = (
+                "n/a"
+                if medians[baseline] == 0
+                else f"{delta / medians[baseline] * 100:+.2f}%"
+            )
+            row.extend([f"{delta:+.4f}", delta_pct])
         writer.writerow(row)
 
 
