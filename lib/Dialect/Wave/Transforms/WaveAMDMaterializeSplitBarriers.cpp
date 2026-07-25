@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveAMDSplitBarrierEligibility.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -72,10 +73,6 @@ struct BarrierPoll {
   Value cont;
 };
 
-static bool isPowerOfTwo(unsigned value) {
-  return value != 0 && (value & (value - 1)) == 0;
-}
-
 static int64_t alignTo(int64_t value, int64_t align) {
   return ((value + align - 1) / align) * align;
 }
@@ -102,65 +99,6 @@ static Value makeVGPRImm(OpBuilder &builder, Location loc, MachineTypes types,
   Value imm = makeImm(builder, loc, types, value);
   return waveamdmachine::VMovB32TupleOp::create(builder, loc, types.vgpr1, imm)
       .getResult();
-}
-
-static std::optional<int64_t> getKnownWorkgroupDim(func::FuncOp func,
-                                                   unsigned axis) {
-  if (axis > 2)
-    return std::nullopt;
-  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
-    DenseI32ArrayAttr attr = func->getAttrOfType<DenseI32ArrayAttr>(name);
-    if (!attr)
-      continue;
-    int32_t dim = axis < attr.size() ? attr.asArrayRef()[axis] : 1;
-    if (dim > 0)
-      return dim;
-  }
-  return std::nullopt;
-}
-
-static std::optional<uint64_t> checkedMul(uint64_t lhs, uint64_t rhs) {
-  if (lhs > std::numeric_limits<uint64_t>::max() / rhs)
-    return std::nullopt;
-  return lhs * rhs;
-}
-
-static std::optional<uint64_t> getFlatWorkgroupSize(func::FuncOp func) {
-  uint64_t flat = 1;
-  for (unsigned axis : llvm::seq<unsigned>(0, 3)) {
-    std::optional<int64_t> dim = getKnownWorkgroupDim(func, axis);
-    if (!dim)
-      return std::nullopt;
-    std::optional<uint64_t> next =
-        checkedMul(flat, static_cast<uint64_t>(*dim));
-    if (!next)
-      return std::nullopt;
-    flat = *next;
-  }
-  return flat;
-}
-
-static bool hasConsistentWavesPerWorkgroup(func::FuncOp func, unsigned waves) {
-  IntegerAttr attr =
-      func->getAttrOfType<IntegerAttr>("wave.waves_per_workgroup");
-  return !attr || attr.getInt() == waves;
-}
-
-static std::optional<unsigned> getExpectedWaves(func::FuncOp func,
-                                                unsigned wavefrontSize) {
-  std::optional<uint64_t> flat = getFlatWorkgroupSize(func);
-  if (!flat || wavefrontSize == 0)
-    return std::nullopt;
-
-  uint64_t waves64 = ((*flat - 1) / wavefrontSize) + 1;
-  if (waves64 > std::numeric_limits<unsigned>::max())
-    return std::nullopt;
-  unsigned waves = static_cast<unsigned>(waves64);
-  if (!isPowerOfTwo(waves))
-    return std::nullopt;
-  if (!hasConsistentWavesPerWorkgroup(func, waves))
-    return std::nullopt;
-  return waves;
 }
 
 static FailureOr<unsigned> getUnsignedAttr(Operation *op, StringRef name) {
@@ -834,7 +772,8 @@ static FailureOr<unsigned> getMaterializationWavefrontSize(func::FuncOp func) {
 
 static FailureOr<unsigned>
 getMaterializationExpectedWaves(func::FuncOp func, unsigned wavefrontSize) {
-  std::optional<unsigned> expectedWaves = getExpectedWaves(func, wavefrontSize);
+  std::optional<unsigned> expectedWaves =
+      split_barrier_detail::getExpectedWaves(func, wavefrontSize);
   if (!expectedWaves)
     return func.emitError(
         "split barriers require known power-of-two waves per workgroup");
