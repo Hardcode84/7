@@ -117,11 +117,6 @@ checkSupportedBackendTarget(ModuleOp module, StringRef triple, StringRef chip) {
                                      llvm::AMDGPU::getIsaVersion(chip));
 }
 
-static bool isWM(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
-}
-
 struct KernelArgInfo {
   std::string name;
   unsigned offset = 0;
@@ -1202,7 +1197,7 @@ private:
     for (Operation &op : func.getBody().front()) {
       if (isa<func::ReturnOp>(op))
         continue;
-      if (!isWM(&op))
+      if (!waveamdmachine::isWaveAMDMachineOp(&op))
         return op.emitError(
             "unexpected non-WaveAMDMachine operation in emitter");
       if (failed(emitOperation(op)))

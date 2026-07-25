@@ -48,6 +48,8 @@ namespace mlir::wave {
 
 using namespace mlir;
 using namespace mlir::dataflow;
+using mlir::waveamdmachine::getWaitcntInfo;
+using mlir::waveamdmachine::isWaveAMDMachineOp;
 
 namespace {
 
@@ -695,13 +697,6 @@ static bool isTransOp(Operation *op) {
 static bool isVMEM(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::VMEMLoadOp>() ||
          op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
-}
-
-static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
-  if (waveamdmachine::WaitcntInfoOpInterface info =
-          dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
-    return info.getWaitcntInfo();
-  return {};
 }
 
 struct HazardOpInfo {
@@ -1842,8 +1837,7 @@ private:
   LogicalResult validateInput(func::FuncOp func) {
     SmallVector<Operation *> ops;
     func.walk<WalkOrder::PreOrder>([&](Operation *op) {
-      if (op->getName().getDialectNamespace() ==
-          waveamdmachine::WaveAMDMachineDialect::getDialectNamespace())
+      if (isWaveAMDMachineOp(op))
         ops.push_back(op);
     });
     for (Operation *op : ops) {
@@ -1932,11 +1926,6 @@ private:
     if (!lgkm || *lgkm >= cfg.defaultLgkmcnt)
       return std::nullopt;
     return 1;
-  }
-
-  static bool isWaveAMDMachineOp(Operation *op) {
-    return op->getName().getDialectNamespace() ==
-           waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
   }
 
   static bool isKnownMemoryOp(Operation *op) {

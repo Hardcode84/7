@@ -21,11 +21,6 @@
 
 namespace mlir::waveamdmachine {
 
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static InstructionResourceKind resourceForPipe(InstructionPipeKind kind) {
   switch (kind) {
   case InstructionPipeKind::None:

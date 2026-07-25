@@ -150,11 +150,6 @@ static func::FuncOp selectFunc(ModuleOp mod) {
   return nullptr;
 }
 
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static void appendBlockOps(Block &block, SmallVectorImpl<Operation *> &ops);
 
 static void appendOp(Operation *op, SmallVectorImpl<Operation *> &ops) {

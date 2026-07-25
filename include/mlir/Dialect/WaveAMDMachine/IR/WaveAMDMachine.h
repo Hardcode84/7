@@ -63,4 +63,18 @@ LogicalResult removeKernelMetadataEntries(Operation *op, Builder &builder,
 #define GET_OP_CLASSES
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOps.h.inc"
 
+namespace mlir::waveamdmachine {
+
+inline WaitcntInfo getWaitcntInfo(Operation *op) {
+  if (WaitcntInfoOpInterface info = dyn_cast<WaitcntInfoOpInterface>(op))
+    return info.getWaitcntInfo();
+  return {};
+}
+
+inline bool isWaveAMDMachineOp(Operation *op) {
+  return isa<WaveAMDMachineDialect>(op->getDialect());
+}
+
+} // namespace mlir::waveamdmachine
+
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINE_H

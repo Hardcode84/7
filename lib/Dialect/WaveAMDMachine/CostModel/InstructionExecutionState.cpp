@@ -33,17 +33,6 @@ namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 
-static bool isaEq(const llvm::AMDGPU::IsaVersion &lhs,
-                  const llvm::AMDGPU::IsaVersion &rhs) {
-  return lhs.Major == rhs.Major && lhs.Minor == rhs.Minor &&
-         lhs.Stepping == rhs.Stepping;
-}
-
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static bool isMemToken(Value value) {
   return isa<MemTokenType>(value.getType());
 }
@@ -151,12 +140,6 @@ static bool producesStoreWriteData(Operation *op) {
   return llvm::any_of(op->getResults(), [&](Value result) {
     return reachesStoreWriteData(result, seenAliases);
   });
-}
-
-static WaitcntInfo getWaitcntInfo(Operation *op) {
-  if (WaitcntInfoOpInterface info = dyn_cast<WaitcntInfoOpInterface>(op))
-    return info.getWaitcntInfo();
-  return {};
 }
 
 static int getConfiguredLatency(const ArchData &arch, SchedClass cls,

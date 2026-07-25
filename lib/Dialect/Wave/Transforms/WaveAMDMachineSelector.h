@@ -139,11 +139,6 @@ inline mlir::waveamdmachine::MemTokenType getMemTokenType(MLIRContext *ctx) {
   return mlir::waveamdmachine::MemTokenType::get(ctx);
 }
 
-inline bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         mlir::waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
-}
-
 inline bool isVGPR(Value v) { return mlir::waveamdmachine::isVGPRValue(v); }
 
 inline bool isImm(Value v) { return mlir::waveamdmachine::isMachineImm(v); }

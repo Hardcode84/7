@@ -177,11 +177,6 @@ static_assert(sane<kGfx950>());
 static_assert(sane<kGfx1100>());
 static_assert(sane<kGfx1200>());
 
-static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
-                  const llvm::AMDGPU::IsaVersion &b) {
-  return a.Major == b.Major && a.Minor == b.Minor && a.Stepping == b.Stepping;
-}
-
 bool isArchSupported(const llvm::AMDGPU::IsaVersion &isa) {
   return isaEq(isa, kGfx803.isa) || isaEq(isa, kGfx942.isa) ||
          isaEq(isa, kGfx950.isa) || isaEq(isa, kGfx1100.isa) ||

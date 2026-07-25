@@ -49,6 +49,8 @@ namespace mlir::wave {
 using namespace mlir;
 using namespace mlir::dataflow;
 using namespace mlir::wave;
+using mlir::waveamdmachine::getWaitcntInfo;
+using mlir::waveamdmachine::isWaveAMDMachineOp;
 
 namespace {
 
@@ -389,11 +391,6 @@ ChangeResult WaitLattice::joinWith(const WaitState &incoming) {
 // WaveAMDMachine op classification
 //===----------------------------------------------------------------------===//
 
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static bool isWaitcntOp(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::WaitcntOp>();
 }
@@ -401,12 +398,6 @@ static bool isWaitcntOp(Operation *op) {
 static bool isTokenOnlyOp(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::TokenOp>() ||
          op->hasTrait<OpTrait::waveamdmachine::TokenJoinOp>();
-}
-
-static waveamdmachine::WaitcntInfo getWaitcntInfo(Operation *op) {
-  if (auto info = dyn_cast<waveamdmachine::WaitcntInfoOpInterface>(op))
-    return info.getWaitcntInfo();
-  return {};
 }
 
 static bool isMemoryIssuer(Operation *op) {

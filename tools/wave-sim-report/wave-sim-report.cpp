@@ -184,11 +184,6 @@ static llvm::StringRef counterName(EventSimCounter counter) {
   llvm_unreachable("bad counter");
 }
 
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static unsigned getIssueCount(Operation *op) {
   if (isa<DsLoadTupleB32Op, GlobalLoadTupleB32Op, BufferLoadTupleB32Op>(op))
     return cast<RegType>(op->getResult(0).getType()).getWidth();

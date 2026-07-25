@@ -27,11 +27,6 @@ SchedClass parseSchedClassName(llvm::StringRef name) {
   return SchedClass::NumSchedClasses;
 }
 
-static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
-                  const llvm::AMDGPU::IsaVersion &b) {
-  return a.Major == b.Major && a.Minor == b.Minor && a.Stepping == b.Stepping;
-}
-
 namespace {
 struct Parser {
   CalibrationData out;

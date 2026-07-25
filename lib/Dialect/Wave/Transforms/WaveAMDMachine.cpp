@@ -580,7 +580,7 @@ LogicalResult WaveAMDMachineSelector::run() {
 
   SmallVector<Operation *> topLevelOps;
   for (Operation &op : llvm::make_early_inc_range(block))
-    if (!isWaveAMDMachineOp(&op))
+    if (!waveamdmachine::isWaveAMDMachineOp(&op))
       topLevelOps.push_back(&op);
 
   for (Operation *op : topLevelOps)

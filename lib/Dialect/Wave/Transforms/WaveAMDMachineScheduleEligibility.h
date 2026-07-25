@@ -20,8 +20,7 @@
 namespace mlir::wave {
 
 static inline bool isWaveAMDMachineOpForScheduling(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         waveamdmachine::WaveAMDMachineDialect::getDialectNamespace();
+  return waveamdmachine::isWaveAMDMachineOp(op);
 }
 
 static inline bool isSchedulerRegionBoundary(Operation *op) {

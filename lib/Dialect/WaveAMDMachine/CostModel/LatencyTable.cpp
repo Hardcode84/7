@@ -37,11 +37,6 @@ static constexpr ArchTable kArchTables[] = {
     {{12, 0, 0}, &kLatencyGfx1200, &kResourceCyclesGfx1200},
 };
 
-static bool isaEq(const llvm::AMDGPU::IsaVersion &a,
-                  const llvm::AMDGPU::IsaVersion &b) {
-  return a.Major == b.Major && a.Minor == b.Minor && a.Stepping == b.Stepping;
-}
-
 static const ArchTable *selectTable(const llvm::AMDGPU::IsaVersion &isa) {
   for (const ArchTable &e : kArchTables)
     if (isaEq(e.isa, isa))

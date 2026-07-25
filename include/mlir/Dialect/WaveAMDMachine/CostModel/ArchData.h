@@ -24,6 +24,12 @@ namespace mlir::waveamdmachine {
 
 enum class WaveIssueArbitration : uint8_t { RoundRobin };
 
+inline bool isaEq(const llvm::AMDGPU::IsaVersion &lhs,
+                  const llvm::AMDGPU::IsaVersion &rhs) {
+  return lhs.Major == rhs.Major && lhs.Minor == rhs.Minor &&
+         lhs.Stepping == rhs.Stepping;
+}
+
 // Structural parameters of one AMDGPU compute-unit + SIMD pipeline.
 // One instance per supported gfx target. All counts are integers;
 // fields use the same wave size as the arch's native mode (wave32

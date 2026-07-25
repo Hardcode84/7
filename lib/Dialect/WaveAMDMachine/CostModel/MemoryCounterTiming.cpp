@@ -23,12 +23,6 @@ namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 
-static WaitcntInfo getWaitcntInfo(Operation *op) {
-  if (auto info = dyn_cast<WaitcntInfoOpInterface>(op))
-    return info.getWaitcntInfo();
-  return {};
-}
-
 static bool isLDSCounterIssuer(Operation *op) {
   return getWaitcntInfo(op).event == WaitcntEvent::Lds;
 }

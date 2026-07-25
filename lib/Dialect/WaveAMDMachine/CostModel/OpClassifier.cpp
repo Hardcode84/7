@@ -39,12 +39,6 @@ static SchedClass fallbackClassify(Operation *op) {
 #endif
 }
 
-static WaitcntInfo getWaitcntInfo(Operation *op) {
-  if (WaitcntInfoOpInterface info = dyn_cast<WaitcntInfoOpInterface>(op))
-    return info.getWaitcntInfo();
-  return {};
-}
-
 static bool issuesLdsWaitcnt(Operation *op) {
   return getWaitcntInfo(op).event == WaitcntEvent::Lds;
 }

@@ -83,11 +83,6 @@ namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static bool isMemToken(Value value) {
   return isa<MemTokenType>(value.getType());
 }

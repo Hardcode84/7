@@ -198,7 +198,7 @@ static LogicalResult tryFuseScalarAdd(PatternRewriter &rewriter, VAddU32Op op,
 }
 
 static bool isScalarAddBaseHardBoundary(Operation *op) {
-  if (!isa<WaveAMDMachineDialect>(op->getDialect()))
+  if (!isWaveAMDMachineOp(op))
     return true;
   if (op->hasTrait<OpTrait::IsTerminator>())
     return true;

@@ -103,11 +103,6 @@ static bool valueIsDefinedInside(Operation *root, Value value) {
   return arg && operationIsInside(root, arg.getOwner()->getParentOp());
 }
 
-static bool isWaveAMDMachineOp(Operation *op) {
-  return op->getName().getDialectNamespace() ==
-         WaveAMDMachineDialect::getDialectNamespace();
-}
-
 static bool hasOnlyLocalNonYieldUsers(Operation *root, Operation *op) {
   bool sawUse = false;
   for (OpResult result : op->getResults()) {
@@ -1691,8 +1686,7 @@ static std::optional<Value> findPreviousDmaM0(SAddM0I32Op add) {
   Value dmaM0;
   for (Operation *op = add->getPrevNode(); op; op = op->getPrevNode()) {
     // Region op may hide physical M0 writes.
-    if (!isa<WaveAMDMachineDialect>(op->getDialect()) ||
-        op->getNumRegions() != 0)
+    if (!isWaveAMDMachineOp(op) || op->getNumRegions() != 0)
       return std::nullopt;
 
     if (Value m0 = findM0Result(op)) {

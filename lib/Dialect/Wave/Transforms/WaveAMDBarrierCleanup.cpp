@@ -119,7 +119,7 @@ static bool isMemToken(Value value) {
 static bool isFlatNoInst(Operation *op) {
   if (op->hasTrait<OpTrait::IsTerminator>() || op->getNumRegions() != 0)
     return false;
-  if (!isa<waveamdmachine::WaveAMDMachineDialect>(op->getDialect()))
+  if (!waveamdmachine::isWaveAMDMachineOp(op))
     return false;
   if (isa<waveamdmachine::LabelOp>(op))
     return false;

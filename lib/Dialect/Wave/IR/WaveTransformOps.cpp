@@ -626,7 +626,7 @@ computePerFuCycles(Operation *target, const waveamdmachine::ArchData &arch) {
   target->walk([&](Operation *op) {
     if (op == target)
       return;
-    if (!isa<waveamdmachine::WaveAMDMachineDialect>(op->getDialect()))
+    if (!waveamdmachine::isWaveAMDMachineOp(op))
       return;
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
     if (cls == waveamdmachine::SchedClass::NoInst)
@@ -718,7 +718,7 @@ static void collectSimpleRegionOp(Operation &op,
         collectSimpleRegions(nested, arch, regions);
     return;
   }
-  if (!isa<waveamdmachine::WaveAMDMachineDialect>(op.getDialect()))
+  if (!waveamdmachine::isWaveAMDMachineOp(&op))
     return;
   waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(&op);
   if (cls == waveamdmachine::SchedClass::NoInst)
