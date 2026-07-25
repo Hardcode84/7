@@ -1089,11 +1089,20 @@ materializeExternalRegionYieldCopies(Operation *regionBranch, Region &region,
   return success();
 }
 
-static LogicalResult materializeUniformIfYieldCopies(func::FuncOp func) {
-  SmallVector<waveamdmachine::UniformIfOp> ops;
-  func.walk([&](waveamdmachine::UniformIfOp op) { ops.push_back(op); });
+static LogicalResult materializeConditionalYieldCopies(func::FuncOp func) {
+  SmallVector<waveamdmachine::UniformIfOp> uniformIfOps;
+  SmallVector<waveamdmachine::ExecIfOp> execIfOps;
+  func.walk([&](Operation *op) {
+    if (waveamdmachine::UniformIfOp uniformIf =
+            dyn_cast<waveamdmachine::UniformIfOp>(op))
+      uniformIfOps.push_back(uniformIf);
+    else if (waveamdmachine::ExecIfOp execIf =
+                 dyn_cast<waveamdmachine::ExecIfOp>(op))
+      execIfOps.push_back(execIf);
+  });
+
   OpBuilder builder(func.getContext());
-  for (waveamdmachine::UniformIfOp op : ops) {
+  for (waveamdmachine::UniformIfOp op : uniformIfOps) {
     if (failed(materializeExternalRegionYieldCopies(
             op.getOperation(), op.getThenRegion(), builder)))
       return failure();
@@ -1101,14 +1110,7 @@ static LogicalResult materializeUniformIfYieldCopies(func::FuncOp func) {
             op.getOperation(), op.getElseRegion(), builder)))
       return failure();
   }
-  return success();
-}
-
-static LogicalResult materializeExecIfYieldCopies(func::FuncOp func) {
-  SmallVector<waveamdmachine::ExecIfOp> ops;
-  func.walk([&](waveamdmachine::ExecIfOp op) { ops.push_back(op); });
-  OpBuilder builder(func.getContext());
-  for (waveamdmachine::ExecIfOp op : ops) {
+  for (waveamdmachine::ExecIfOp op : execIfOps) {
     if (failed(materializeExternalRegionYieldCopies(
             op.getOperation(), op.getThenRegion(), builder)))
       return failure();
@@ -1123,9 +1125,7 @@ static LogicalResult materializeExecIfYieldCopies(func::FuncOp func) {
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   eraseRegAfterOps(func);
-  if (failed(materializeUniformIfYieldCopies(func)))
-    return failure();
-  if (failed(materializeExecIfYieldCopies(func)))
+  if (failed(materializeConditionalYieldCopies(func)))
     return failure();
   if (failed(materializeLoopBackedgeCopies(func)))
     return failure();
