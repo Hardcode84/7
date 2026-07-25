@@ -13,22 +13,11 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/MathExtras.h"
 #include <limits>
 
 using namespace mlir;
 
 namespace mlir::wave::regalloc_detail {
-
-bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd, unsigned rhsStart,
-                       unsigned rhsEnd) {
-  return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
-}
-
-bool liveRangesOverlap(const wave::RegAllocTransformLiveRange &lhs,
-                       const wave::RegAllocTransformLiveRange &rhs) {
-  return liveRangesOverlap(lhs.start, lhs.end, rhs.start, rhs.end);
-}
 
 bool valueLiveAtPosition(const wave::RegAllocTransformValue &value,
                          unsigned position) {
@@ -54,23 +43,6 @@ bool valueLiveAcrossPosition(const wave::RegAllocTransformValue &value,
                       });
 }
 
-bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
-                      unsigned position) {
-  return llvm::any_of(value.ranges,
-                      [position](wave::RegAllocTransformLiveRange range) {
-                        return range.end == position;
-                      });
-}
-
-bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
-  return regClass == waveamdmachine::RegClass::VGPR ||
-         regClass == waveamdmachine::RegClass::AGPR;
-}
-
-unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
-  return static_cast<unsigned>(regClass);
-}
-
 void addRegClassPressure(RegClassPressure &pressure,
                          waveamdmachine::RegClass regClass, int64_t dwords) {
   unsigned index = getRegClassIndex(regClass);
@@ -83,11 +55,6 @@ int64_t getTotalPressure(RegClassPressure pressure) {
   for (int64_t dwords : pressure)
     total += dwords;
   return total;
-}
-
-unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
-                                       unsigned vgprFootprint) {
-  return agprFootprint + llvm::alignTo(vgprFootprint, 4);
 }
 
 static bool hasSingleTrackedGPRResult(Operation *op) {

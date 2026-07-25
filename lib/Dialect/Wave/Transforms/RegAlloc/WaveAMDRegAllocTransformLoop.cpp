@@ -29,8 +29,16 @@
 #include <optional>
 
 using namespace mlir;
+using wave::regalloc_detail::getCombinedVGPRFamilyPressure;
+using wave::regalloc_detail::getRegClassIndex;
+using wave::regalloc_detail::isVGPRFamilyClass;
+using wave::regalloc_detail::kRegClassCount;
+using wave::regalloc_detail::kRegClasses;
+using wave::regalloc_detail::liveRangeListsOverlap;
+using wave::regalloc_detail::liveRangesOverlap;
 using wave::regalloc_detail::RegAllocTransformDecodedState;
 using wave::regalloc_detail::RegAllocTransformStateCache;
+using wave::regalloc_detail::valueRangeEndsAt;
 
 namespace {
 
@@ -1049,16 +1057,6 @@ assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
   return base < assignedEnd && assignment.base < end;
 }
 
-static bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd,
-                              unsigned rhsStart, unsigned rhsEnd) {
-  return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
-}
-
-static bool liveRangesOverlap(const wave::RegAllocTransformLiveRange &lhs,
-                              const wave::RegAllocTransformLiveRange &rhs) {
-  return liveRangesOverlap(lhs.start, lhs.end, rhs.start, rhs.end);
-}
-
 static bool
 liveRangesContainPosition(ArrayRef<wave::RegAllocTransformLiveRange> ranges,
                           unsigned position) {
@@ -1078,32 +1076,6 @@ liveRangesOverlapRange(ArrayRef<wave::RegAllocTransformLiveRange> ranges,
   return it != ranges.end() && it->start <= end;
 }
 
-static bool
-liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
-                      ArrayRef<wave::RegAllocTransformLiveRange> rhs) {
-  unsigned lhsIndex = 0;
-  unsigned rhsIndex = 0;
-  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
-    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
-    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
-    if (liveRangesOverlap(lhsRange, rhsRange))
-      return true;
-    if (lhsRange.end < rhsRange.start)
-      ++lhsIndex;
-    else
-      ++rhsIndex;
-  }
-  return false;
-}
-
-static bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
-                             unsigned position) {
-  return llvm::any_of(value.ranges,
-                      [&](wave::RegAllocTransformLiveRange range) {
-                        return range.end == position;
-                      });
-}
-
 static bool aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
                                    unsigned position) {
   return liveRangesContainPosition(set.ranges, position);
@@ -1112,30 +1084,6 @@ static bool aliasSetLiveAtPosition(const wave::RegAllocTransformAliasSet &set,
 static bool aliasSetOverlapsRange(const wave::RegAllocTransformAliasSet &set,
                                   unsigned start, unsigned end) {
   return liveRangesOverlapRange(set.ranges, start, end);
-}
-
-static bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
-  return regClass == waveamdmachine::RegClass::VGPR ||
-         regClass == waveamdmachine::RegClass::AGPR;
-}
-
-static constexpr unsigned kRegClassCount = 5;
-
-static constexpr std::array<waveamdmachine::RegClass, kRegClassCount>
-    kRegClasses = {
-        waveamdmachine::RegClass::SGPR, waveamdmachine::RegClass::VGPR,
-        waveamdmachine::RegClass::AGPR, waveamdmachine::RegClass::SCC,
-        waveamdmachine::RegClass::VCC};
-
-static unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
-  unsigned index = static_cast<unsigned>(regClass);
-  assert(index < kRegClassCount && "unknown register class");
-  return index;
-}
-
-static unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
-                                              unsigned vgprFootprint) {
-  return agprFootprint + llvm::alignTo(vgprFootprint, 4);
 }
 
 using ResolvedRegAllocValue = wave::regalloc_detail::ResolvedRegAllocValue;

@@ -22,7 +22,6 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/MathExtras.h"
 #include <algorithm>
-#include <array>
 #include <limits>
 #include <optional>
 
@@ -74,24 +73,6 @@ struct AGPRReliefFitState {
   SmallVector<AGPRReliefFitSet> sets;
   wave::RegAllocTransformBudget budget;
 };
-
-static bool
-liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
-                      ArrayRef<wave::RegAllocTransformLiveRange> rhs) {
-  unsigned lhsIndex = 0;
-  unsigned rhsIndex = 0;
-  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
-    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
-    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
-    if (liveRangesOverlap(lhsRange, rhsRange))
-      return true;
-    if (lhsRange.end < rhsRange.start)
-      ++lhsIndex;
-    else
-      ++rhsIndex;
-  }
-  return false;
-}
 
 struct ActiveAGPRReliefAssignments {
   struct Assignment {

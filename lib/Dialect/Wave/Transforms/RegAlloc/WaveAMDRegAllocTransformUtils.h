@@ -19,8 +19,11 @@
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 #include <array>
+#include <cassert>
 #include <memory>
 #include <optional>
 
@@ -82,25 +85,68 @@ FailureOr<T> failRegAllocStateIdentity(Operation *diagOp) {
   return failure();
 }
 
-bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd, unsigned rhsStart,
-                       unsigned rhsEnd);
-bool liveRangesOverlap(const wave::RegAllocTransformLiveRange &lhs,
-                       const wave::RegAllocTransformLiveRange &rhs);
+inline bool liveRangesOverlap(unsigned lhsStart, unsigned lhsEnd,
+                              unsigned rhsStart, unsigned rhsEnd) {
+  return lhsStart <= rhsEnd && rhsStart <= lhsEnd;
+}
+
+inline bool liveRangesOverlap(const wave::RegAllocTransformLiveRange &lhs,
+                              const wave::RegAllocTransformLiveRange &rhs) {
+  return liveRangesOverlap(lhs.start, lhs.end, rhs.start, rhs.end);
+}
+
+inline bool
+liveRangeListsOverlap(ArrayRef<wave::RegAllocTransformLiveRange> lhs,
+                      ArrayRef<wave::RegAllocTransformLiveRange> rhs) {
+  unsigned lhsIndex = 0;
+  unsigned rhsIndex = 0;
+  while (lhsIndex < lhs.size() && rhsIndex < rhs.size()) {
+    wave::RegAllocTransformLiveRange lhsRange = lhs[lhsIndex];
+    wave::RegAllocTransformLiveRange rhsRange = rhs[rhsIndex];
+    if (liveRangesOverlap(lhsRange, rhsRange))
+      return true;
+    if (lhsRange.end < rhsRange.start)
+      ++lhsIndex;
+    else
+      ++rhsIndex;
+  }
+  return false;
+}
+
 bool valueLiveAtPosition(const wave::RegAllocTransformValue &value,
                          unsigned position);
 bool valueLiveBeforeAtPosition(const wave::RegAllocTransformValue &value,
                                unsigned position);
 bool valueLiveAcrossPosition(const wave::RegAllocTransformValue &value,
                              unsigned position);
-bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
-                      unsigned position);
-bool isVGPRFamilyClass(waveamdmachine::RegClass regClass);
-unsigned getRegClassIndex(waveamdmachine::RegClass regClass);
+
+inline bool valueRangeEndsAt(const wave::RegAllocTransformValue &value,
+                             unsigned position) {
+  return llvm::any_of(value.ranges,
+                      [position](wave::RegAllocTransformLiveRange range) {
+                        return range.end == position;
+                      });
+}
+
+inline bool isVGPRFamilyClass(waveamdmachine::RegClass regClass) {
+  return regClass == waveamdmachine::RegClass::VGPR ||
+         regClass == waveamdmachine::RegClass::AGPR;
+}
+
+inline unsigned getRegClassIndex(waveamdmachine::RegClass regClass) {
+  unsigned index = static_cast<unsigned>(regClass);
+  assert(index < kRegClassCount && "unknown register class");
+  return index;
+}
+
 void addRegClassPressure(RegClassPressure &pressure,
                          waveamdmachine::RegClass regClass, int64_t dwords);
 int64_t getTotalPressure(RegClassPressure pressure);
-unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
-                                       unsigned vgprFootprint);
+
+inline unsigned getCombinedVGPRFamilyPressure(unsigned agprFootprint,
+                                              unsigned vgprFootprint) {
+  return agprFootprint + llvm::alignTo(vgprFootprint, 4);
+}
 
 void collectRegAllocValues(Region &region, SmallVectorImpl<Value> &values);
 FailureOr<Value>
