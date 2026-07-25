@@ -81,7 +81,7 @@ beat group 8 on device 2: `818.454` versus `822.964 us` in long runs.
 VGPR address space: 396
 VGPRs below AGPR base: 256
 AGPRs used: 140
-SGPRs: 24
+SGPRs: 25
 spills: 0
 static f16 MFMAs: 384
 static direct-to-LDS loads: 48
@@ -100,19 +100,19 @@ the gap.
 
 ## Artifacts
 
-Current hashes include branch-local liveness and shared-greedy scheduling.
+Current hashes include all generic-backend port slices through AGPR relief.
 gfx950 A/B was waived; timings above are not attributed to these hashes.
 
 - Specialized compiler ASM:
   `test/PerfGolden/Inputs/gfx950-f16-256x256-4wave-specialized.s`.
 - Specialized ASM SHA-256:
-  `a45e380824c525a128f9d48b2b1570a1375f3fd28a46e8e03678b9c462e8c225`.
-- Specialized ASM lines/bytes: 1,715 / 72,617.
+  `83f72664ae4e12145fd7afdaa59c88b9a8f8e09ec28121d10d856f1fb65a3a8e`.
+- Specialized ASM lines/bytes: 1,690 / 71,817.
 - ASM: `test/PerfGolden/Inputs/gfx950-f16-256x256-4wave.s`.
 - Generator/check: `test/PerfGolden/test_gfx950_f16_256x256_4wave.py`.
 - ASM SHA-256:
-  `4cc21fe29955b0dfae798cca594e24e9646d648799660713b3787d1a13e6014e`.
-- Lines/bytes: 1,327 / 55,866.
+  `db776c0c9ff870de4c67f91f2347c10212ecb5901104d35c25b7f26919aa9ee1`.
+- Lines/bytes: 1,313 / 55,446.
 
 ## Commands
 
