@@ -56,29 +56,39 @@ These results came from the `my/gemm` branch before the current-tree port.
 They were recorded by `0eeabee2` and `f27a7446`; they are experiment evidence,
 not current-tree measurements.
 
-The eight-wave `BN=64` baseline passed random checks at 1070-1089 TFLOP/s.
-The same local system measured its ROCm forward reference at 1090-1093
-TFLOP/s. No tested branch variant reached the 1200 TFLOP/s target.
+## Target
 
-| Experiment | Allocation | Result | TFLOP/s |
+Shape: `B=2, H=64, N=8192, D=128`, BF16 input/output, random data.
+Target is 1200 TFLOP/s with sampled reference checks.
+
+Current eight-wave kernel measures 1070-1089 TFLOP/s. The local ROCm forward
+reference measures 1090-1093 TFLOP/s; the generic AITER Triton path measures
+584 TFLOP/s. No measured local implementation reaches 1200 TFLOP/s.
+
+## Resident-wave experiments
+
+| Profile | Allocation | Random-data result | TFLOP/s |
 | --- | --- | --- | ---: |
-| Eight-wave `BN=32` | 128 VGPR | pass | 1013-1032 |
-| Eight-wave `BN=128` | 256 VGPR, 134,144 B LDS | pass | 1024-1038 |
-| Four-wave `BM=128` | 128 VGPR | pass | 978-984 |
-| Twelve-wave streamed | 160 VGPR | pass | 995-999 |
-| Sixteen-wave streamed | 128 VGPR, 16 remats | pass | 991-993 |
-| Sixteen-wave QK/PV role split | 128 VGPR, 136,448 B LDS | pass | 395 |
-| Eight-wave Q reload | 240 VGPR | pass | 604 |
-| FP16 output state | 160 VGPR | pass | 821 |
-| Forced target three | 160 VGPR, 3,872 B scratch/thread | pass | 25.1 |
+| 8-wave baseline, `BN=64` | 240 VGPR, no spill, 8 resident waves | pass | 1070-1089 |
+| 8-wave resident, `BN=32` | 128 VGPR, no spill, 16 resident waves | pass | 1013-1032 |
+| 4-wave resident, `BM=128` | 128 VGPR, no spill | pass | 978-984 |
+| 12-wave streamed | 160 VGPR, no spill | pass | 995-999 |
+| 16-wave streamed, `BM=512` | 128 VGPR, 16 remats, no spill | pass | 991-993 |
+| 8-wave `BN=64`, FP16 output state | 160 VGPR, no spill, 12 resident waves | pass | 821 |
+| 8-wave `BN=64`, FP16 output state | 128 VGPR, 192 B scratch/thread | launch fault | n/a |
+| 8-wave paired `BN=32` softmax | 128 VGPR, 5 LDS relief plans | pass | 706 |
+| 4-wave FP32 score LDS spill | 160 VGPR, 4 LDS relief plans | pass | 790-793 |
 
-`BN=32` doubles online max/sum, reduction, exponential, and rescale work.
-`BN=128` halves softmax and barrier frequency but needs more LDS and still
-trails `BN=64`. Role splitting leaves half the waves idle across three
-full-workgroup barriers. Reloading or narrowing state cuts residency pressure
-but loses more throughput than it recovers.
+`BN=32` reaches the requested register budget cleanly. Performance drops
+because online max/sum, reductions, exponentials, and rescaling run twice as
+often. Joint scheduling across two resident workgroups changes its result by
+less than run-to-run noise. Priority-staggering either half of the 16 resident
+waves loses about 2%.
 
-Rejected scheduling and ISA experiments:
+Packing four FP32 output fragments to FP16 at loop boundaries preserves one
+softmax update per 64 keys and passes the full random check
+(`max_abs_diff=2.29e-4`). Pack/unpack work drops throughput to 821 TFLOP/s.
+Target-four allocation still requires non-rematerializable spills.
 
 | Experiment | Result | TFLOP/s |
 | --- | --- | ---: |
@@ -94,6 +104,67 @@ stagger at exit. The packed MFMA peephole measured 1113.2-1115.7 TFLOP/s,
 versus 1108.9-1109.9 without it. The polynomial spilled 2,236 bytes/thread.
 gfx950 FP8 MFMA needs an explicit scaled-input contract.
 
-Next useful experiment needs a smaller algorithmic live set, not a tighter
-allocator budget: split query/output ownership without idle phases, or define
-a block-scaled FP8 attention contract with accuracy coverage.
+Artifacts are under `build/fa-resident-20260725/`. Relevant files:
+
+- `baseline-current.hsaco`
+- `resident8-bn32-n8192.hsaco`
+- `resident8-bn32-hwid-multiwg-n8192.hsaco`
+- `resident8-bn64-compressed-target3-n8192.hsaco`
+- `resident8-bn64-compressed-n256-codegen.s`
+
+## Rematerialization limit
+
+The target-four budget is 128 dwords per wave. Before K/V fragments and
+softmax temporaries, the `BN=64` loop needs:
+
+| State | Dwords |
+| --- | ---: |
+| FP32 output accumulators | 64 |
+| BF16 Q fragments | 32 |
+| FP32 score packets | 32 |
+| Total | 128 |
+
+Rematerialization already rebuilds cheap address and control DAGs. It cannot
+recreate global/LDS loads, MFMA score chains, or MFMA output chains. Forced
+target-three/four builds therefore move score/output state to LDS and scratch;
+more aggressive remat selection cannot remove that state.
+
+Increasing residency needs a different algorithmic live set. Narrow output
+storage was measured and rejected. Reloading Q would trade 32 registers for
+large repeated LDS or global traffic; storing a full `BM=256` Q tile needs
+64 KiB per workgroup and prevents two-workgroup residency.
+
+## Specialization model
+
+Multi-wave specialization dispatches from the model's class identity:
+
+- one workgroup filling the CU: local wave ordinal;
+- multiple workgroups: physical SIMD or wave-slot parity.
+
+A workgroup may occupy a divisor of total modeled resident waves. This lets two
+eight-wave workgroups use a target-four, 16-wave model. Local wave ordinal
+remains byte-stable for existing full-CU kernels.
+
+The change is target-topology driven. It adds no attention profile checks or
+schedule policy. Existing eight-wave FA performance is unchanged.
+
+## Remaining structural options
+
+1. Pair waves by query tile and split QK head-dimension work. Exchange partial
+   scores through LDS, run softmax once, then split PV output columns. This can
+   reduce Q, score, and output state per wave without duplicating MFMA work.
+   LDS score exchange and producer/consumer balance are the main risks.
+2. Generalize the V transpose layout to `BN=128`, retain rolling 64-key
+   softmax, and double-buffer the 128-key K/V tiles. This targets barrier and
+   DMA amortization, not occupancy.
+3. Add an explicit FP8/block-scaled attention contract. Faster MFMA alone is
+   insufficient; scale production, accuracy bounds, and reference coverage
+   must be part of the variant.
+4. Split K across workgroups and merge `(max, sum, numerator)` in a second
+   kernel. The shape already has ample grid parallelism, so extra global
+   traffic makes this a fallback rather than the next experiment.
+
+Packed FP16 exponentials do not halve instruction count on gfx950:
+`v_exp_f16` handles one half value and no packed `v_pk_exp_f16` instruction is
+available. Balanced reductions and dot-product packed sums were also neutral
+or slower in paired runs.
