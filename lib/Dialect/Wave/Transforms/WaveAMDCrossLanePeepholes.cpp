@@ -177,11 +177,16 @@ private:
   }
 
   std::optional<uint32_t> evaluateBitop3(VBitOp3B32Op op) {
-    if (op.getBitop3() != 0x96)
-      return std::nullopt;
     return evaluateTernary(op.getA(), op.getB(), op.getC(),
-                           [](uint32_t a, uint32_t b, uint32_t c) {
-                             return std::optional<uint32_t>(a ^ b ^ c);
+                           [&](uint32_t a, uint32_t b, uint32_t c) {
+                             uint32_t result = 0;
+                             for (unsigned bit : llvm::seq<unsigned>(32)) {
+                               unsigned input = ((a >> bit) & 1) << 2 |
+                                                ((b >> bit) & 1) << 1 |
+                                                ((c >> bit) & 1);
+                               result |= ((op.getBitop3() >> input) & 1) << bit;
+                             }
+                             return std::optional<uint32_t>(result);
                            });
   }
 
@@ -617,10 +622,70 @@ static bool isHalfExchangePair(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
   return true;
 }
 
+static bool isOtherHalfExchange(DsBpermuteB32Op op, unsigned workgroupSize) {
+  if (!op || workgroupSize < 64 || workgroupSize % 64 != 0)
+    return false;
+  for (unsigned wave : llvm::seq<unsigned>(workgroupSize / 64)) {
+    unsigned waveBase = wave * 64;
+    for (unsigned lane : llvm::seq<unsigned>(0, 64)) {
+      std::optional<unsigned> source =
+          evaluateBpermuteSource(op, lane, waveBase + lane);
+      if (!source || *source != (lane ^ 32))
+        return false;
+    }
+  }
+  return true;
+}
+
 template <typename BinaryOp>
 struct BpermuteHalfReductionToPermlanePattern
     : public OpRewritePattern<BinaryOp> {
   BpermuteHalfReductionToPermlanePattern(MLIRContext *context,
+                                         unsigned workgroupSize)
+      : OpRewritePattern<BinaryOp>(context), workgroupSize(workgroupSize) {}
+
+  LogicalResult matchAndRewrite(BinaryOp op,
+                                PatternRewriter &rewriter) const override {
+    DsBpermuteB32Op permute =
+        op.getLhs().template getDefiningOp<DsBpermuteB32Op>();
+    Value direct = op.getRhs();
+    if (!permute) {
+      permute = op.getRhs().template getDefiningOp<DsBpermuteB32Op>();
+      direct = op.getLhs();
+    }
+    if (!permute || permute.getData() != direct ||
+        !isOtherHalfExchange(permute, workgroupSize))
+      return failure();
+
+    Type pairType =
+        RegType::get(op.getContext(), RegClass::VGPR, 2, /*index=*/-1);
+    Value source =
+        VMovB32TupleOp::create(rewriter, op.getLoc(), pairType, direct)
+            .getResult();
+    VPermlane32SwapB32TupleOp swap = VPermlane32SwapB32TupleOp::create(
+        rewriter, op.getLoc(), pairType, source);
+    Type wordType = direct.getType();
+    std::array<Type, 2> resultTypes{wordType, wordType};
+    TupleToElementsOp split = TupleToElementsOp::create(
+        rewriter, op.getLoc(), resultTypes, swap.getResult());
+    BinaryOp replacement =
+        BinaryOp::create(rewriter, op.getLoc(), op.getResult().getType(),
+                         split.getElements()[0], split.getElements()[1]);
+
+    Value addr = permute.getAddr();
+    rewriter.replaceOp(op, replacement.getResult());
+    eraseIfDead(rewriter, permute);
+    eraseDeadAddressChain(rewriter, addr);
+    return success();
+  }
+
+  unsigned workgroupSize;
+};
+
+template <typename BinaryOp>
+struct BpermutePairReductionToPermlanePattern
+    : public OpRewritePattern<BinaryOp> {
+  BpermutePairReductionToPermlanePattern(MLIRContext *context,
                                          unsigned workgroupSize)
       : OpRewritePattern<BinaryOp>(context), workgroupSize(workgroupSize) {}
 
@@ -687,7 +752,9 @@ static LogicalResult runOnFunc(func::FuncOp func) {
     patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(),
                                                       *workgroupSize);
     patterns.add<BpermuteHalfReductionToPermlanePattern<VAddF32Op>,
-                 BpermuteHalfReductionToPermlanePattern<VMaxF32Op>>(
+                 BpermuteHalfReductionToPermlanePattern<VMaxF32Op>,
+                 BpermutePairReductionToPermlanePattern<VAddF32Op>,
+                 BpermutePairReductionToPermlanePattern<VMaxF32Op>>(
         func.getContext(), *workgroupSize);
   }
   return applyPatternsGreedily(

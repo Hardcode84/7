@@ -97,4 +97,50 @@ func.func @half_exchange_reduction_permlane32() attributes {
   waveamdmachine.s_endpgm
   return
 }
+
+// ASM-LABEL: direct_half_exchange_reduction_permlane32:
+// ASM-NOT: ds_bpermute
+// ASM-NOT: v_bitop3
+// ASM: v_mov_b32_e32
+// ASM: v_permlane32_swap_b32_e32
+// ASM-NOT: ds_bpermute
+// ASM-NOT: v_bitop3
+// ASM: v_max_f32_e32
+// ASM: buffer_store_dword
+// ASM: s_endpgm
+func.func @direct_half_exchange_reduction_permlane32() attributes {
+    wave.kernel,
+    wave.workgroup_size = array<i32: 512, 1, 1>,
+    wave.waves_per_workgroup = 8 : i64} {
+  %data = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %workitem = waveamdmachine.v_workitem_id_x
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
+  %c32 = waveamdmachine.imm 32 : !waveamdmachine.imm
+  // (workitem & 63) ^ 32
+  %other_lane = waveamdmachine.v_bitop3_b32 %c32, %workitem, %c63
+      bitop3 40
+      : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %c2 = waveamdmachine.imm 2 : !waveamdmachine.imm
+  %other_addr = waveamdmachine.v_lshlrev_b32 %other_lane, %c2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %other = waveamdmachine.ds_bpermute_b32 %other_addr, %data
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %result = waveamdmachine.v_max_f32 %other, %data
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1>
+  %offset = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %token = waveamdmachine.buffer_store_b32 %offset, %result, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
+      -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
 }
