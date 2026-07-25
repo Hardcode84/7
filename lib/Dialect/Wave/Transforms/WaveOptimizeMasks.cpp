@@ -167,10 +167,10 @@ static LogicalResult optimizeMaskComparison(CmpIOp op, WaveDialect &dialect,
   return success();
 }
 
-static LogicalResult shareEquivalentMasks(Operation *root, WaveDialect &dialect,
-                                          DataFlowSolver &solver) {
-  BlockComparisons blockComparisons = collectMaskComparisons(root);
-  for (BlockComparisons::value_type &entry : blockComparisons) {
+static LogicalResult
+shareEquivalentMasks(const BlockComparisons &blockComparisons,
+                     WaveDialect &dialect, DataFlowSolver &solver) {
+  for (const BlockComparisons::value_type &entry : blockComparisons) {
     MaskBlockState state;
     for (CmpIOp op : entry.second) {
       if (op.getResult().use_empty())
@@ -192,6 +192,10 @@ struct WaveOptimizeMasksPass
       return signalPassFailure();
     }
 
+    BlockComparisons blockComparisons = collectMaskComparisons(root);
+    if (blockComparisons.empty())
+      return;
+
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
@@ -199,7 +203,7 @@ struct WaveOptimizeMasksPass
       root->emitError("IntegerRangeAnalysis failed for mask optimization pass");
       return signalPassFailure();
     }
-    if (failed(shareEquivalentMasks(root, *dialect, solver)))
+    if (failed(shareEquivalentMasks(blockComparisons, *dialect, solver)))
       return signalPassFailure();
   }
 };
