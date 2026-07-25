@@ -13,6 +13,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include <optional>
@@ -122,6 +123,8 @@ FailureOr<std::optional<RegAllocTransformBudget>>
 getRegAllocTransformVGPRFamilyBudget(func::FuncOp func);
 
 void clearRegAllocTransformState(Operation *target);
+LogicalResult clearRegAllocAssignments(ModuleOp root);
+LogicalResult clearRegAllocAssignments(func::FuncOp func);
 
 void beginRegAllocPreparationTracking(Operation *target);
 void endRegAllocPreparationTracking(Operation *target);

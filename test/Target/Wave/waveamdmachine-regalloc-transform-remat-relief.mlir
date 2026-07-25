@@ -1011,6 +1011,33 @@ module attributes {transform.with_named_sequence} {
             !waveamdmachine.reg<sgpr, 1>
     }
 
+    // CHECK-LABEL: func.func @remat_relief_merges_equivalent_completed_remats(
+    // CHECK-NOT: waveamdmachine.regalloc_assignments
+    // CHECK: [[ONE:%.*]] = waveamdmachine.imm 1
+    // CHECK: [[TID:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK: [[SHARED:%.*]] = waveamdmachine.v_and_b32 [[TID]], [[ONE]] {waveamdmachine.regalloc_remat_temp}
+    // CHECK-NOT: waveamdmachine.v_and_b32
+    // CHECK: waveamdmachine.v_add_u32 [[SHARED]], [[SHARED]]
+    func.func @remat_relief_merges_equivalent_completed_remats()
+        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+      %tid = waveamdmachine.v_workitem_id_x
+          : !waveamdmachine.reg<vgpr, 1, 0>
+      %lhs = waveamdmachine.v_and_b32 %tid, %one
+          {waveamdmachine.regalloc_remat_temp}
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %rhs = waveamdmachine.v_and_b32 %tid, %one
+          {waveamdmachine.regalloc_remat_temp}
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %sum = waveamdmachine.v_add_u32 %lhs, %rhs
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      return
+    }
+
     // CHECK-LABEL: func.func @remat_relief_rejects_unaddressable_default_sgpr(
     // CHECK-SAME: waveamdmachine.regalloc_transform_state
     // CHECK-SAME: budget_mode = "target_addressable"

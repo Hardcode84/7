@@ -14,6 +14,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OperationSupport.h"
 #include "llvm/ADT/DenseMap.h"
@@ -1222,6 +1223,104 @@ materializeRematRelief(OpBuilder &builder, const RematReliefPlan &plan,
   return success();
 }
 
+static bool isShareableRematComputation(Operation *op) {
+  if (!wave::regalloc::isRegAllocRematTempOp(op) || !isCheapRematRoot(op) ||
+      op->getNumResults() != 1 || op->getNumRegions() != 0 ||
+      isa<waveamdmachine::UninitOp, waveamdmachine::VMovB32TupleOp,
+          waveamdmachine::CopyTupleOp>(op) ||
+      op->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>())
+    return false;
+  auto type = dyn_cast<waveamdmachine::RegType>(op->getResult(0).getType());
+  return type && type.getRegClass() == waveamdmachine::RegClass::VGPR &&
+         type.getWidth() == 1;
+}
+
+static bool haveEquivalentAssignedRegTypes(Type lhs, Type rhs) {
+  auto lhsReg = dyn_cast<waveamdmachine::RegType>(lhs);
+  auto rhsReg = dyn_cast<waveamdmachine::RegType>(rhs);
+  return lhsReg && rhsReg && lhsReg.getRegClass() == rhsReg.getRegClass() &&
+         lhsReg.getWidth() == rhsReg.getWidth();
+}
+
+static bool areEquivalentAssignedRematComputations(Operation *lhs,
+                                                   Operation *rhs) {
+  if (lhs->getName() != rhs->getName() ||
+      lhs->getRawDictionaryAttrs() != rhs->getRawDictionaryAttrs() ||
+      !lhs->getName().compareOpProperties(lhs->getPropertiesStorage(),
+                                          rhs->getPropertiesStorage()) ||
+      !llvm::equal(lhs->getOperands(), rhs->getOperands()) ||
+      lhs->getNumResults() != rhs->getNumResults())
+    return false;
+  return llvm::all_of(llvm::zip(lhs->getResultTypes(), rhs->getResultTypes()),
+                      [](auto types) {
+                        return haveEquivalentAssignedRegTypes(
+                            std::get<0>(types), std::get<1>(types));
+                      });
+}
+
+static bool hasEquivalentRematComputations(func::FuncOp func) {
+  if (func->hasAttr(wave::regalloc::kLDSSpillBytesAttr) ||
+      func->hasAttr(wave::regalloc::kScratchSpillBytesAttr))
+    return false;
+  DominanceInfo dominance(func);
+  DenseMap<OperationName, SmallVector<Operation *>> available;
+  WalkResult walk = func.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (!isShareableRematComputation(op))
+      return WalkResult::advance();
+    SmallVector<Operation *> &sameKind = available[op->getName()];
+    if (llvm::any_of(sameKind, [&](Operation *candidate) {
+          return dominance.properlyDominates(candidate, op) &&
+                 areEquivalentAssignedRematComputations(candidate, op);
+        }))
+      return WalkResult::interrupt();
+    sameKind.push_back(op);
+    return WalkResult::advance();
+  });
+  return walk.wasInterrupted();
+}
+
+static bool mergeEquivalentRematComputations(func::FuncOp func) {
+  DominanceInfo dominance(func);
+  DenseMap<OperationName, SmallVector<Operation *>> available;
+  SmallVector<Operation *> candidates;
+  bool changed = false;
+  func.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (isShareableRematComputation(op))
+      candidates.push_back(op);
+  });
+
+  for (Operation *op : candidates) {
+    SmallVector<Operation *> &sameKind = available[op->getName()];
+    auto equivalent = llvm::find_if(sameKind, [&](Operation *candidate) {
+      return dominance.properlyDominates(candidate, op) &&
+             OperationEquivalence::isEquivalentTo(
+                 candidate, op, OperationEquivalence::IgnoreLocations);
+    });
+    if (equivalent == sameKind.end()) {
+      sameKind.push_back(op);
+      continue;
+    }
+    op->replaceAllUsesWith((*equivalent)->getResults());
+    op->erase();
+    changed = true;
+  }
+  return changed;
+}
+
+static LogicalResult shareEquivalentRematComputationsAfterAllocation(
+    func::FuncOp func, RegAllocTransformStateCache &cache) {
+  if (!func->hasAttr(wave::getRegAllocTransformAssignmentsAttrName()) ||
+      !hasEquivalentRematComputations(func))
+    return success();
+  if (failed(wave::clearRegAllocAssignments(func)))
+    return failure();
+  cache.clear();
+  if (!mergeEquivalentRematComputations(func))
+    return func.emitError(
+        "failed to share equivalent rematerialized computations");
+  return success();
+}
+
 static LogicalResult
 materializeSelectedRematRelief(OpBuilder &builder, func::FuncOp func,
                                const RematReliefPlan &plan,
@@ -1240,7 +1339,7 @@ runRegAllocRematRelief(func::FuncOp func, RegAllocTransformStateCache &cache) {
   if (failed(failureRecord))
     return failure();
   if (!*failureRecord)
-    return success();
+    return shareEquivalentRematComputationsAfterAllocation(func, cache);
   if (!isRematRelievableFailure(**failureRecord))
     return success();
 
