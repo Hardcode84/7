@@ -40,6 +40,22 @@ def reject(label: str, text: str, pattern: str) -> None:
         raise SystemExit(1)
 
 
+def require_true(label: str, condition: bool, message: str) -> None:
+    if not condition:
+        print(f"{label}: {message}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def greedy_pressure_stats(label: str, text: str) -> dict[str, int]:
+    prefix = f"candidate func={label} region=0 name=greedy "
+    line = next((line for line in text.splitlines() if prefix in line), "")
+    require_true(label, bool(line), "missing greedy pressure stats")
+    return {
+        name: int(value)
+        for name, value in re.findall(r"\b(pressure_[a-z_]+)=([0-9]+)", line)
+    }
+
+
 def run_case(
     label: str, cmd: list[str], timeout: float, input_text: str | None = None
 ) -> str:
@@ -123,6 +139,12 @@ def gfx950_mfma_dma_mlir(cma_count: int = 384) -> str:
                 "      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,",
                 "         !waveamdmachine.reg<vgpr, 4>) -> "
                 "!waveamdmachine.reg<vgpr, 4>",
+                f"  %parts{i}:4 = waveamdmachine.tuple_to_elements %r{i}",
+                "      : (!waveamdmachine.reg<vgpr, 4>) -> "
+                "(!waveamdmachine.reg<vgpr, 1>, "
+                "!waveamdmachine.reg<vgpr, 1>, "
+                "!waveamdmachine.reg<vgpr, 1>, "
+                "!waveamdmachine.reg<vgpr, 1>)",
             ]
         )
     lines.extend(
@@ -142,6 +164,7 @@ def gfx950_mfma_dma_mlir(cma_count: int = 384) -> str:
 
 
 def check_gfx950_mfma_dma_report() -> None:
+    cma_count = 384
     text = run_case(
         "gfx950_mfma_dma_report",
         [
@@ -149,7 +172,7 @@ def check_gfx950_mfma_dma_report() -> None:
             "-",
             "--waveamd-machine-schedule-report=print-candidates=1",
         ],
-        input_text=gfx950_mfma_dma_mlir(),
+        input_text=gfx950_mfma_dma_mlir(cma_count),
         timeout=10.0,
     )
     require(
@@ -169,6 +192,27 @@ def check_gfx950_mfma_dma_report() -> None:
         r".*action=apply reason=better",
     )
     reject("gfx950_mfma_dma_report", text, r"unsupported op")
+    stats = greedy_pressure_stats("gfx950_mfma_dma", text)
+    require_true(
+        "gfx950_mfma_dma_report",
+        stats["pressure_state_builds"] <= cma_count + 1,
+        "ready-pressure state rebuilt more than once per scheduled node",
+    )
+    require_true(
+        "gfx950_mfma_dma_report",
+        stats["pressure_member_visits"] <= stats["pressure_state_builds"] * cma_count,
+        "ready-pressure state scanned non-region members",
+    )
+    require_true(
+        "gfx950_mfma_dma_report",
+        stats["pressure_projected_nodes"] <= 2 * stats["pressure_projections"],
+        "candidate projection escaped reachable no-inst closures",
+    )
+    require_true(
+        "gfx950_mfma_dma_report",
+        stats["pressure_projection_checks"] <= stats["pressure_projections"],
+        "candidate projection rescanned unrelated no-inst nodes",
+    )
 
 
 def main() -> int:

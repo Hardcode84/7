@@ -10,6 +10,7 @@
 // TIMING: machine_schedule_prepare_function
 // TIMING: machine_schedule_collect_regions
 // TIMING: machine_schedule_build_value_origins
+// TIMING: machine_schedule_build_liveness
 // TIMING: machine_schedule_build_graph
 // TIMING: machine_schedule_build_order
 // TIMING: machine_schedule_pressure_checks
