@@ -2103,6 +2103,38 @@ class FunctionBuilder:
         )
         return op.old_value, op.token
 
+    def vmem_wait_poll(self, dependency: Value, *, sleep_cycles: int = 1) -> Value:
+        return waveamd.VmemWaitPollOp(
+            mem_token_type(), dependency, sleep_cycles=sleep_cycles
+        ).token
+
+    def lds_poll_eq(
+        self,
+        ptr: Value,
+        expected: Value,
+        *,
+        after: Value | None = None,
+        sleep_cycles: int = 1,
+    ) -> Value:
+        return waveamd.LdsPollEqOp(
+            mem_token_type(),
+            ptr,
+            expected,
+            dependency=after,
+            sleep_cycles=sleep_cycles,
+        ).token
+
+    def lds_atomic_add(
+        self, ptr: Value, value: Value, *, after: Value | None = None
+    ) -> tuple[Value, Value]:
+        op = waveamd.LdsAtomicAddOp(
+            value.type, mem_token_type(), ptr, value, dependency=after
+        )
+        return op.old_value, op.token
+
+    def wakeup(self, dependency: Value) -> Value:
+        return waveamd.WakeupOp(mem_token_type(), dependency).token
+
     def dma_load_lds(
         self,
         source: Value,

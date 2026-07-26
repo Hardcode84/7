@@ -1606,6 +1606,12 @@ static void observeExpertWaitcnt(Operation *op, WaitState &state,
 
 static void observeExistingWaitcnt(Operation *op, WaitState &state,
                                    const WaitTarget &target) {
+  if (auto poll = llvm::dyn_cast<waveamdmachine::VmemPollCompleteOp>(op)) {
+    lat::dropDrained(state.tokens, Counter::Vmem, 0);
+    deriveResultTokens(poll, state);
+    return;
+  }
+
   observeRegularWaitcnt(op, state, target);
   observeExpertWaitcnt(op, state, target);
 }

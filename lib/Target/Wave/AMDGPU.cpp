@@ -842,6 +842,7 @@ private:
   unsigned sNop() const { return opcodes.sNop; }
   unsigned sDelayAlu() const { return postVIOpcode(llvm::AMDGPU::S_DELAY_ALU); }
   unsigned sSleep() const { return opcodes.sSleep; }
+  unsigned sWakeup() const { return opcodes.sWakeup; }
   unsigned sSetprio() const { return opcodes.sSetprio; }
   unsigned sSendmsg() const { return opcodes.sSendmsg; }
   unsigned sBarrier() const { return opcodes.sBarrier; }
@@ -4655,6 +4656,12 @@ private:
       return emitMC(sGetregB32(), {toMCOperand(result()),
                                    llvm::MCOperand::createImm(encoding)});
     }
+    if (isa<waveamdmachine::SGetregIbStsOp>(op)) {
+      uint64_t encoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+          llvm::AMDGPU::Hwreg::ID_IB_STS, 0, 32);
+      return emitMC(sGetregB32(), {toMCOperand(result()),
+                                   llvm::MCOperand::createImm(encoding)});
+    }
     if (auto copy = dyn_cast<waveamdmachine::CopyTupleOp>(op))
       return emitCopy(copy.getResult(), copy.getSource(), copy.getOperation());
     if (isa<waveamdmachine::VMovB32TupleOp>(op)) {
@@ -5621,6 +5628,8 @@ private:
       return emitDmaIssueDelay(delay);
     if (isa<waveamdmachine::SSleepOp>(op))
       return emitMCValues(sSleep(), op.getOperands());
+    if (isa<waveamdmachine::SWakeupOp>(op))
+      return emitMC(sWakeup(), {});
     if (isa<waveamdmachine::SSetprioOp>(op))
       return emitMCValues(sSetprio(), op.getOperands());
     if (auto setprio = dyn_cast<waveamdmachine::SSetprioIncWgOp>(op)) {

@@ -73,6 +73,45 @@ def WaveAMD_GlobalAtomicAddAcqRelOp
   let hasVerifier = 1;
 }
 
+def WaveAMD_VmemWaitPollOp : WaveAMD_Op<"vmem_wait_poll"> {
+  let summary = "poll VMEM completion through HW_REG_IB_STS";
+  let arguments = (ins Wave_MemToken:$dependency,
+                       DefaultValuedAttr<ConfinedAttr<I64Attr,
+                         [IntMinValue<0>, IntMaxValue<15>]>, "1">:$sleep_cycles);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = "$dependency attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMD_LdsPollEqOp : WaveAMD_Op<"lds_poll_eq"> {
+  let summary = "wait until an LDS word equals a uniform value";
+  let arguments = (ins Arg<Wave_Ptr, "", [MemRead]>:$ptr,
+                       AnySignlessInteger:$expected,
+                       Optional<Wave_MemToken>:$dependency,
+                       DefaultValuedAttr<ConfinedAttr<I64Attr,
+                         [IntMinValue<0>, IntMaxValue<15>]>, "1">:$sleep_cycles);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = "$ptr `equals` $expected (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def WaveAMD_LdsAtomicAddOp : WaveAMD_Op<"lds_atomic_add"> {
+  let summary = "add a lane-varying value to an LDS word";
+  let arguments = (ins Arg<Wave_Ptr, "", [MemRead, MemWrite]>:$ptr,
+                       Wave_Simd:$value,
+                       Optional<Wave_MemToken>:$dependency);
+  let results = (outs Wave_Simd:$old_value,
+                      Wave_MemToken:$token);
+  let assemblyFormat = "$value `to` $ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def WaveAMD_WakeupOp : WaveAMD_Op<"wakeup"> {
+  let summary = "wake sleeping waves in the workgroup";
+  let arguments = (ins Wave_MemToken:$dependency);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = "$dependency attr-dict `:` functional-type(operands, results)";
+}
+
 def WaveAMD_MakeBufferOp : WaveAMD_Op<"make_buffer", [Pure]> {
   let summary = "construct an AMD buffer pointer from a flat/global pointer";
   let description = [{

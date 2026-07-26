@@ -783,6 +783,36 @@ LogicalResult GlobalAtomicAddAcqRelOp::verify() {
   return success();
 }
 
+static LogicalResult verifyMailboxPointer(Operation *op, Value value,
+                                          StringRef name) {
+  FailureOr<SharedPointerInfo> info = getSharedPointerInfo(op, value, name);
+  if (failed(info))
+    return failure();
+  Type elementType = info->ptr.getElementType();
+  if (elementType && !elementType.isInteger(32))
+    return op->emitOpError() << name << " element type must be i32";
+  return success();
+}
+
+LogicalResult LdsPollEqOp::verify() {
+  if (failed(verifyMailboxPointer(getOperation(), getPtr(), "poll pointer")))
+    return failure();
+  if (!getExpected().getType().isInteger(32))
+    return emitOpError("expected value must be i32");
+  return success();
+}
+
+LogicalResult LdsAtomicAddOp::verify() {
+  if (failed(verifyMailboxPointer(getOperation(), getPtr(), "atomic pointer")))
+    return failure();
+  wave::SimdType valueType = cast<wave::SimdType>(getValue().getType());
+  if (!valueType.getElementType().isInteger(32))
+    return emitOpError("atomic value must have i32 SIMD elements");
+  if (getOldValue().getType() != valueType)
+    return emitOpError("result type must match atomic value type");
+  return success();
+}
+
 LogicalResult TransposeLoadOp::verify() {
   FailureOr<SharedPointerInfo> source =
       getSharedPointerInfo(getOperation(), getSource(), "source");

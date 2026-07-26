@@ -3065,6 +3065,12 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
           [&](auto o) { return selectSetPriorityIncWg(o); })
       .Case<waveamd::GlobalAtomicAddAcqRelOp>(
           [&](auto o) { return selectGlobalAtomicAddAcqRel(*this, o); })
+      .Case<waveamd::VmemWaitPollOp>(
+          [&](auto o) { return selectVmemWaitPoll(o); })
+      .Case<waveamd::LdsPollEqOp>([&](auto o) { return selectLdsPollEq(o); })
+      .Case<waveamd::LdsAtomicAddOp>(
+          [&](auto o) { return selectLdsAtomicAdd(o); })
+      .Case<waveamd::WakeupOp>([&](auto o) { return selectWakeup(o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
       .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
@@ -7850,6 +7856,109 @@ WaveAMDMachineSelector::selectSetPriorityIncWg(waveamd::SetPriorityIncWgOp op) {
   return success();
 }
 
+struct PollMachineTypes {
+  Type imm;
+  Type token;
+  Type vgpr1;
+  Type sgpr1;
+  Type sgpr2;
+  Type scc;
+};
+
+static PollMachineTypes getPollMachineTypes(MLIRContext *ctx) {
+  return {
+      waveamdmachine::ImmType::get(ctx),
+      getMemTokenType(ctx),
+      getRegType(ctx, waveamdmachine::RegClass::VGPR),
+      getRegType(ctx, waveamdmachine::RegClass::SGPR),
+      getRegType(ctx, waveamdmachine::RegClass::SGPR, 2),
+      getRegType(ctx, waveamdmachine::RegClass::SCC),
+  };
+}
+
+static Value pollImm(OpBuilder &builder, Location loc, PollMachineTypes types,
+                     uint64_t value) {
+  return waveamdmachine::ImmOp::create(builder, loc, types.imm, value);
+}
+
+static Value sampleVmcnt(OpBuilder &builder, Location loc,
+                         PollMachineTypes types, Value dependency) {
+  Value raw = waveamdmachine::SGetregIbStsOp::create(builder, loc, types.sgpr1,
+                                                     dependency);
+  Value low =
+      waveamdmachine::SAndB32Op::create(builder, loc, types.sgpr1, types.scc,
+                                        raw, pollImm(builder, loc, types, 0xf))
+          .getResult();
+  Value shifted =
+      waveamdmachine::SLshrB32Op::create(builder, loc, types.sgpr1, types.scc,
+                                         raw, pollImm(builder, loc, types, 18))
+          .getResult();
+  Value high = waveamdmachine::SAndB32Op::create(
+                   builder, loc, types.sgpr1, types.scc, shifted,
+                   pollImm(builder, loc, types, 0x30))
+                   .getResult();
+  return waveamdmachine::SOrB32Op::create(builder, loc, types.sgpr1, types.scc,
+                                          low, high)
+      .getResult();
+}
+
+static Value vmcntNonzero(OpBuilder &builder, Location loc,
+                          PollMachineTypes types, Value dependency) {
+  Value vmcnt = sampleVmcnt(builder, loc, types, dependency);
+  return waveamdmachine::SCmpLgU32Op::create(builder, loc, types.scc, vmcnt,
+                                             pollImm(builder, loc, types, 0))
+      .getResult();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectVmemWaitPoll(waveamd::VmemWaitPollOp op) {
+  PollMachineTypes types = getPollMachineTypes(op.getContext());
+  Location loc = op.getLoc();
+  Value dependency = expect(op.getDependency(), op);
+  Value firstCont = vmcntNonzero(builder, loc, types, dependency);
+
+  waveamdmachine::UniformIfOp slowPath = waveamdmachine::UniformIfOp::create(
+      builder, loc, TypeRange{types.token}, firstCont);
+  Block *thenBlock = builder.createBlock(&slowPath.getThenRegion());
+  builder.setInsertionPointToStart(thenBlock);
+
+  waveamdmachine::UniformLoopOp loop = waveamdmachine::UniformLoopOp::create(
+      builder, loc, TypeRange{types.token}, Value(), ValueRange{dependency},
+      IntegerAttr(), IntegerAttr());
+  SmallVector<Location, 1> argLocs(1, loc);
+  Block *body = builder.createBlock(&loop.getBody(), loop.getBody().end(),
+                                    TypeRange{types.token}, argLocs);
+  builder.setInsertionPointToStart(body);
+  if (op.getSleepCycles() != 0)
+    waveamdmachine::SSleepOp::create(
+        builder, loc, pollImm(builder, loc, types, op.getSleepCycles()));
+  Value cont = vmcntNonzero(builder, loc, types, body->getArgument(0));
+  waveamdmachine::ContinueIfOp::create(builder, loc, cont,
+                                       ValueRange{body->getArgument(0)});
+  builder.setInsertionPointAfter(loop);
+  waveamdmachine::YieldOp::create(builder, loc, loop.getResult(0));
+
+  Block *elseBlock = builder.createBlock(&slowPath.getElseRegion());
+  builder.setInsertionPointToStart(elseBlock);
+  waveamdmachine::YieldOp::create(builder, loc, dependency);
+
+  builder.setInsertionPointAfter(slowPath);
+  Value complete = waveamdmachine::VmemPollCompleteOp::create(
+      builder, loc, types.token, slowPath.getResult(0));
+  values[op.getToken()] = complete;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectWakeup(waveamd::WakeupOp op) {
+  Value wake = waveamdmachine::SWakeupOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()),
+      expect(op.getDependency(), op));
+  values[op.getToken()] = wake;
+  eraseIfTopLevel(op);
+  return success();
+}
+
 LogicalResult WaveAMDMachineSelector::selectIssueToken(IssueTokenOp op) {
   SmallVector<Value> operands;
   for (Value dependency : op.getDependencies())
@@ -8048,6 +8157,135 @@ lookupLdsPointer(WaveAMDMachineSelector &S, Value ptr, Operation *op) {
   if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
     return op->emitError("WaveAMDMachine backend expects selected LDS pointer");
   return std::make_pair(baseIt->second, offsetIt->second);
+}
+
+static Value enterPollLane(OpBuilder &builder, Location loc,
+                           PollMachineTypes types, unsigned wavefrontSize) {
+  if (wavefrontSize == 64) {
+    Value lane0 =
+        waveamdmachine::SMovB64ImmOp::create(builder, loc, types.sgpr2, 1);
+    return waveamdmachine::SAndSaveexecB64Op::create(builder, loc, types.sgpr2,
+                                                     types.scc, lane0)
+        .getSavedExec();
+  }
+  Value lane0 = waveamdmachine::SMovB32TupleOp::create(
+      builder, loc, types.sgpr1, pollImm(builder, loc, types, 1));
+  return waveamdmachine::SAndSaveexecB32Op::create(builder, loc, types.sgpr1,
+                                                   types.scc, lane0)
+      .getSavedExec();
+}
+
+static void restorePollExec(OpBuilder &builder, Location loc,
+                            unsigned wavefrontSize, Value savedExec) {
+  if (wavefrontSize == 64) {
+    waveamdmachine::SMovExecB64Op::create(builder, loc, savedExec);
+    return;
+  }
+  waveamdmachine::SMovExecLoOp::create(builder, loc, savedExec);
+}
+
+struct LdsPollSample {
+  Value cont;
+  Value token;
+};
+
+static LdsPollSample sampleLdsWord(OpBuilder &builder, Location loc,
+                                   PollMachineTypes types, Value addr,
+                                   Value expected, Value dependency,
+                                   int64_t offset) {
+  waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
+      builder, loc, types.vgpr1, types.token, addr, dependency, offset);
+  Value seen = waveamdmachine::VReadfirstlaneB32Op::create(
+      builder, loc, types.sgpr1, load.getResult());
+  Value cont = waveamdmachine::SCmpLgU32Op::create(builder, loc, types.scc,
+                                                   seen, expected);
+  return {cont, load.getToken()};
+}
+
+LogicalResult WaveAMDMachineSelector::selectLdsPollEq(waveamd::LdsPollEqOp op) {
+  FailureOr<std::pair<Value, PointerOffset>> ptr =
+      lookupLdsPointer(*this, op.getPtr(), op);
+  if (failed(ptr))
+    return failure();
+  FailureOr<MaterializedLdsAddress> address =
+      materializeLdsAddress(*this, op, ptr->first, ptr->second,
+                            waveamdmachine::DsLoadB32Op::getAddressFieldSpec());
+  if (failed(address))
+    return failure();
+  FailureOr<unsigned> wavefrontSize =
+      waveamdmachine::getAMDGPUWavefrontSize(op, "LDS polling");
+  if (failed(wavefrontSize))
+    return failure();
+
+  PollMachineTypes types = getPollMachineTypes(op.getContext());
+  Location loc = op.getLoc();
+  Value dependency =
+      op.getDependency() ? expect(op.getDependency(), op) : Value();
+  Value expected = ensureSGPR1(loc, expect(op.getExpected(), op));
+  Value savedExec = enterPollLane(builder, loc, types, *wavefrontSize);
+  LdsPollSample first =
+      sampleLdsWord(builder, loc, types, address->addr, expected, dependency,
+                    address->instOffset);
+
+  waveamdmachine::UniformIfOp slowPath = waveamdmachine::UniformIfOp::create(
+      builder, loc, TypeRange{types.token}, first.cont);
+  Block *thenBlock = builder.createBlock(&slowPath.getThenRegion());
+  builder.setInsertionPointToStart(thenBlock);
+
+  waveamdmachine::UniformLoopOp loop = waveamdmachine::UniformLoopOp::create(
+      builder, loc, TypeRange{types.token}, Value(), ValueRange{first.token},
+      IntegerAttr(), IntegerAttr());
+  SmallVector<Location, 1> argLocs(1, loc);
+  Block *body = builder.createBlock(&loop.getBody(), loop.getBody().end(),
+                                    TypeRange{types.token}, argLocs);
+  builder.setInsertionPointToStart(body);
+  if (op.getSleepCycles() != 0)
+    waveamdmachine::SSleepOp::create(
+        builder, loc, pollImm(builder, loc, types, op.getSleepCycles()));
+  LdsPollSample current =
+      sampleLdsWord(builder, loc, types, address->addr, expected,
+                    body->getArgument(0), address->instOffset);
+  waveamdmachine::ContinueIfOp::create(builder, loc, current.cont,
+                                       ValueRange{current.token});
+  builder.setInsertionPointAfter(loop);
+  waveamdmachine::YieldOp::create(builder, loc, loop.getResult(0));
+
+  Block *elseBlock = builder.createBlock(&slowPath.getElseRegion());
+  builder.setInsertionPointToStart(elseBlock);
+  waveamdmachine::YieldOp::create(builder, loc, first.token);
+
+  builder.setInsertionPointAfter(slowPath);
+  waveamdmachine::SchedBarrierOp::create(builder, loc);
+  restorePollExec(builder, loc, *wavefrontSize, savedExec);
+  waveamdmachine::SchedBarrierOp::create(builder, loc);
+  values[op.getToken()] = slowPath.getResult(0);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectLdsAtomicAdd(waveamd::LdsAtomicAddOp op) {
+  FailureOr<std::pair<Value, PointerOffset>> ptr =
+      lookupLdsPointer(*this, op.getPtr(), op);
+  if (failed(ptr))
+    return failure();
+  FailureOr<MaterializedLdsAddress> address = materializeLdsAddress(
+      *this, op, ptr->first, ptr->second,
+      waveamdmachine::DsAddRtnU32Op::getAddressFieldSpec());
+  if (failed(address))
+    return failure();
+  Value dependency =
+      op.getDependency() ? expect(op.getDependency(), op) : Value();
+  Value value = ensureVGPRForVSrc1(op.getLoc(), expect(op.getValue(), op));
+  waveamdmachine::DsAddRtnU32Op atomic = waveamdmachine::DsAddRtnU32Op::create(
+      builder, op.getLoc(),
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR),
+      getMemTokenType(op.getContext()), address->addr, value, dependency,
+      address->instOffset);
+  values[op.getOldValue()] = atomic.getResult();
+  values[op.getToken()] = atomic.getToken();
+  eraseIfTopLevel(op);
+  return success();
 }
 
 enum class DsReadTrKind { B4, B6, B8, B16 };

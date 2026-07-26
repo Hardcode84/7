@@ -33,16 +33,17 @@ static inline bool isPinnedSchedulerBoundary(Operation *op) {
 }
 
 static inline bool isSupportedSchedulerPseudo(Operation *op) {
-  return isa<
-      waveamdmachine::ArgOp, waveamdmachine::KernargPreloadOp,
-      waveamdmachine::UninitOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
-      waveamdmachine::TokenJoinOp, waveamdmachine::IssueTokenOp,
-      waveamdmachine::AfterOp, waveamdmachine::RegAfterOp,
-      waveamdmachine::BarrierInitOp, waveamdmachine::SWorkgroupIdXOp,
-      waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
-      waveamdmachine::VWorkitemIdZOp, waveamdmachine::TupleToElementsOp,
-      waveamdmachine::TupleFromElementsOp, waveamdmachine::UpdateTupleOp>(op);
+  return isa<waveamdmachine::ArgOp, waveamdmachine::KernargPreloadOp,
+             waveamdmachine::UninitOp, waveamdmachine::ImmOp,
+             waveamdmachine::TokenOp, waveamdmachine::TokenJoinOp,
+             waveamdmachine::IssueTokenOp, waveamdmachine::AfterOp,
+             waveamdmachine::RegAfterOp, waveamdmachine::VmemPollCompleteOp,
+             waveamdmachine::BarrierInitOp, waveamdmachine::SWorkgroupIdXOp,
+             waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
+             waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
+             waveamdmachine::VWorkitemIdZOp, waveamdmachine::TupleToElementsOp,
+             waveamdmachine::TupleFromElementsOp,
+             waveamdmachine::UpdateTupleOp>(op);
 }
 
 static inline bool isSupportedSchedulerSALU(Operation *op) {
@@ -81,9 +82,11 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
              waveamdmachine::SClusterWorkgroupMaxIdXOp,
              waveamdmachine::SClusterWorkgroupMaxIdYOp,
              waveamdmachine::SClusterWorkgroupMaxIdZOp,
+             waveamdmachine::SSleepOp, waveamdmachine::SWakeupOp,
              waveamdmachine::SGetregShaderCyclesOp,
-             waveamdmachine::SGetregHwIdOp, waveamdmachine::SXorB32Op,
-             waveamdmachine::SXorB64Op, waveamdmachine::CopyTupleOp>(op);
+             waveamdmachine::SGetregHwIdOp, waveamdmachine::SGetregIbStsOp,
+             waveamdmachine::SXorB32Op, waveamdmachine::SXorB64Op,
+             waveamdmachine::CopyTupleOp>(op);
 }
 
 static inline bool isSupportedSchedulerClass(waveamdmachine::SchedClass cls) {

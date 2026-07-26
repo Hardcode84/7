@@ -319,6 +319,8 @@ populatePointerOffsetNormalizationPatterns(RewritePatternSet &patterns,
       ConvertNoRegionOp<SelectOp>, ConvertNoRegionOp<waveamd::MakeBufferOp>,
       ConvertNoRegionOp<waveamd::TransposeLoadOp>,
       ConvertNoRegionOp<waveamd::GlobalAtomicAddAcqRelOp>,
+      ConvertNoRegionOp<waveamd::LdsPollEqOp>,
+      ConvertNoRegionOp<waveamd::LdsAtomicAddOp>,
       ConvertNoRegionOp<waveamd::DmaLoadLdsOp>>(converter, ctx);
   populateAnyFunctionOpInterfaceTypeConversionPattern(patterns, converter);
   populateReturnOpTypeConversionPattern(patterns, converter);

@@ -1728,6 +1728,26 @@ def WaveAMDMachine_SGetregHwIdOp
   let archPredicate = WaveAMDMachine_Gfx8To13;
   let hasVerifier = 1;
 }
+def WaveAMDMachine_SGetregIbStsOp
+    : WaveAMDMachine_Op<"s_getreg_ib_sts",
+                        [WaveAMDMachine_SALU,
+                         WaveAMDMachine_CompletionFreeTokenTrait]> {
+  let summary = "read HW_REG_IB_STS after an issued memory operation";
+  let arguments = (ins Optional<WaveAMDMachine_MemToken>:$dependency);
+  let results = (outs WaveAMDMachine_SGPR1:$result);
+  let assemblyFormat = "(`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let archPredicate = WaveAMDMachine_Gfx950;
+}
+def WaveAMDMachine_VmemPollCompleteOp
+    : WaveAMDMachine_Op<"vmem_poll_complete",
+                        [WaveAMDMachine_Waitcnt,
+                         WaveAMDMachine_NoMachineInst,
+                         WaveAMDMachine_NoAsmEmission]> {
+  let summary = "mark a VMEM dependency drained by an explicit poll";
+  let arguments = (ins WaveAMDMachine_MemToken:$dependency);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = "$dependency attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_SWaitcntOp
     : WaveAMDMachine_Op<"s_waitcnt",
                         [WaveAMDMachine_Waitcnt,
@@ -1795,6 +1815,15 @@ def WaveAMDMachine_SNopOp
 def WaveAMDMachine_SSleepOp
     : WaveAMDMachine_UnaryNoResult<"s_sleep", WaveAMDMachine_Imm,
                                    [WaveAMDMachine_SALU]>;
+def WaveAMDMachine_SWakeupOp
+    : WaveAMDMachine_Op<"s_wakeup",
+                        [WaveAMDMachine_SALU,
+                         WaveAMDMachine_CompletionFreeTokenTrait]> {
+  let arguments = (ins WaveAMDMachine_MemToken:$dependency);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = "$dependency attr-dict `:` functional-type(operands, results)";
+  let archPredicate = "isa.Major >= 8 && isa.Major <= 12";
+}
 // Set wave issue priority (0..3). Free, dynamic nudge for the HW
 // issue arbiter -- prefer this over cycle counting when biasing
 // multi-wave co-execution (e.g. ping-pong phase entry: the wave

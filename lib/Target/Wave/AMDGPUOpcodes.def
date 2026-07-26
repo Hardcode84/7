@@ -67,6 +67,7 @@
   X(sWaitcnt, S_WAITCNT, S_WAITCNT_vi, S_WAITCNT_gfx11)                        \
   X(sNop, S_NOP, S_NOP_vi, S_NOP_gfx11)                                        \
   X(sSleep, S_SLEEP, S_SLEEP_vi, S_SLEEP_gfx11)                                \
+  X(sWakeup, S_WAKEUP, S_WAKEUP_vi, S_WAKEUP_gfx11)                            \
   X(sSetprio, S_SETPRIO, S_SETPRIO_vi, S_SETPRIO_gfx11)                        \
   X(sSendmsg, S_SENDMSG, S_SENDMSG_vi, S_SENDMSG_gfx11)                        \
   X(sBarrier, S_BARRIER, S_BARRIER_vi, S_BARRIER_gfx11)                        \
