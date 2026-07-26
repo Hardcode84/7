@@ -149,6 +149,24 @@ class PreparedRun:
 
 
 KERNELS = {
+    "f16-persistent-pipelined-k64": KernelSpec(
+        key="f16-persistent-pipelined-k64",
+        label="f16-persistent-pipelined-k64",
+        workload=Workload.MATMUL,
+        profile="gfx950-f16-256x256-16wave-persistent-pipelined-k64",
+        variants="scheduled",
+        default_k_values=F16_DOC_K_VALUES,
+        sweep_k=True,
+    ),
+    "f16-persistent-pipelined": KernelSpec(
+        key="f16-persistent-pipelined",
+        label="f16-persistent-pipelined",
+        workload=Workload.MATMUL,
+        profile="gfx950-f16-256x256-16wave-persistent-pipelined",
+        variants="scheduled",
+        default_k_values=F16_DOC_K_VALUES,
+        sweep_k=True,
+    ),
     "f16-persistent": KernelSpec(
         key="f16-persistent",
         label="f16-persistent",
@@ -327,7 +345,11 @@ KERNEL_ALIASES = {
     "f16-4wave": ("f16-4wave",),
     "f16-streamk": ("f16-streamk",),
     "f16-persistent": ("f16-persistent",),
+    "f16-persistent-pipelined": ("f16-persistent-pipelined",),
+    "f16-persistent-pipelined-k64": ("f16-persistent-pipelined-k64",),
     "persistent-gemm": ("f16-persistent",),
+    "persistent-gemm-pipelined": ("f16-persistent-pipelined",),
+    "persistent-gemm-pipelined-k64": ("f16-persistent-pipelined-k64",),
     "v9": ("v9",),
     "v9-original": ("v9",),
     "v9-transposed": ("v9-transposed",),
@@ -879,7 +901,8 @@ def add_shape_arguments(parser: argparse.ArgumentParser) -> None:
         default=parse_kernel_csv("all"),
         help=(
             "comma-separated f16,f16-spatial,f16-4wave,f16-streamk,"
-            "f16-persistent,mxfp4,"
+            "f16-persistent,f16-persistent-pipelined,"
+            "f16-persistent-pipelined-k64,mxfp4,"
             "mxfp4-4wave,mxfp4-aiter,v9,v9-transposed,fa-8wave,all; "
             "f16-8wave aliases f16, "
             "mxfp/mxfp4-8wave alias mxfp4, and fa aliases fa-8wave"

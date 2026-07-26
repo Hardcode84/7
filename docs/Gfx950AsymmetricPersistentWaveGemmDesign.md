@@ -2,11 +2,17 @@
 
 ## Status
 
-Implemented as an opt-in profile. Profiling rejected it from the default
-sweep: the current 4-wave kernel remains 45% faster at 8192x8192x8192.
+Implemented as three opt-in profiles:
 
-Profile: `gfx950-f16-256x256-16wave-persistent`. Sweep alias:
-`f16-persistent`. Existing profiles remain unchanged.
+- `gfx950-f16-256x256-16wave-persistent`: original streamed consumer;
+- `gfx950-f16-256x256-16wave-persistent-pipelined`: buffered B reads and early
+  stage release;
+- `gfx950-f16-256x256-16wave-persistent-pipelined-k64`: two K32 slices per
+  mailbox generation.
+
+The K64 profile reaches 1073.2 TFLOP/s at 8192x8192x8192, 11.3% above the
+pipelined K32 profile. It remains 27.4% below the current 4-wave kernel, so all
+three profiles stay out of the default sweep.
 
 ## Goal
 
@@ -214,6 +220,11 @@ mailboxes:   allocated after stage data
 Triple buffering permits one stage being consumed, one complete stage waiting,
 and one stage being filled. It also bounds producer lead to three K stages.
 
+The K64 variant batches two adjacent K32 slices into one mailbox generation.
+Each stage is 64 KiB. Two stages plus four mailbox words use 131104 dynamic
+bytes. This halves publication and polling frequency per K32 without changing
+the direct-to-LDS instruction count.
+
 The runner must request the full dynamic LDS byte count. Its 64 KiB constant is
 the threshold for dynamic allocation, not the gfx950 capacity. Mailboxes and
 any padding participate in normal `wave.lds_size` or
@@ -331,6 +342,11 @@ stage while the compute tail runs.
 
 The done atomic must depend on the completion token for the last LDS read.
 Depending only on LDS issue would permit early overwrite.
+
+Pipelined consumers prefetch four B fragments for 64x80 strips and two for
+64x96 strips. The done atomic issues after the final B read completes and
+before the final four MFMAs. K64 consumers repeat this sequence for both K32
+slices and publish only after the second slice.
 
 ## DMA Completion Poll
 
@@ -552,10 +568,12 @@ otherwise:
 function return
 ```
 
-The profile remains a separate generator configuration, tentatively:
+The profiles remain separate generator configurations:
 
 ```text
 gfx950-f16-256x256-16wave-persistent
+gfx950-f16-256x256-16wave-persistent-pipelined
+gfx950-f16-256x256-16wave-persistent-pipelined-k64
 ```
 
 Unsupported shapes fail clearly in the first version:
@@ -565,6 +583,7 @@ Unsupported shapes fail clearly in the first version:
 - exactly 16 waves per workgroup;
 - M and N multiples of 256;
 - K multiple of 32;
+- K64 mode requires K multiple of 64 and K at least 192;
 - combined register allocation at most 128 dwords;
 - aggregate LDS allocation within target capacity.
 
@@ -677,25 +696,52 @@ performance.
 
 ## Measured Result
 
-Strict random checks pass at K=32 and K=128 for both completion modes. The
-K=128 test reuses ring slot zero. A 256x256x8192 polling kernel passes random
-data exactly and HPL data with 0.5 maximum f16 difference. Two thousand
-consecutive K=8192 polling launches complete under a 30-second watchdog.
-Scheduled K=8192 compilation takes 0.55 seconds and 105 MiB peak RSS.
+Strict K64 random checks pass exactly at K=192 and K=256 for seeds 1, 7, 29,
+83, and 211. HPL checks pass with maximum differences 0.003906 and 0.007812.
+K=64 and K=128 trigger Scratch relief; K=128 then fails strict random checks
+nondeterministically. K64 mode rejects K below 192 until `7-2bb` fixes that
+general regalloc path.
 
-All throughput rows use random 8192x8192x8192 inputs, 20 launches, five
-warmups, and nine same-session repeats. Medians use the same generated runner
-and no clock changes.
+Two thousand consecutive K=8192 polling launches complete under a 30-second
+watchdog. Scheduled K64 K=8192 compilation takes 0.93 seconds and 105 MiB peak
+RSS.
 
-| Kernel | Completion | Median us | TFLOP/s | vs 4-wave |
-|---|---|---:|---:|---:|
-| persistent | tight `IB_STS` poll | 1188.799 | 924.893 | -31.70% |
-| persistent | `IB_STS` poll + `s_sleep 1` | 1195.288 | 919.870 | -32.07% |
-| persistent | `s_waitcnt vmcnt(0)` | 1176.327 | 934.700 | -30.98% |
-| existing 4-wave | `s_waitcnt` | 811.930 | 1354.195 | baseline |
-| existing 8-wave | `s_waitcnt` | 863.081 | 1273.938 | -5.93% |
+All measurements use the same generated runner and no clock changes. The
+original completion controls use 20 launches, five warmups, and nine repeats:
 
-Polling is not the gap: blocking waitcnt is 1.3% faster than the best poll.
+| Completion | Median us | TFLOP/s |
+|---|---:|---:|
+| tight `IB_STS` poll | 1188.799 | 924.893 |
+| `IB_STS` poll + `s_sleep 1` | 1195.288 | 919.870 |
+| `s_waitcnt vmcnt(0)` | 1176.327 | 934.700 |
+
+Polling is not the original gap: blocking waitcnt is 1.3% faster than the best
+unpipelined poll.
+
+The final random 8192x8192x8192 sweep uses 200 launches, 25 warmups, and nine
+repeats:
+
+| Kernel | Median us | TFLOP/s | vs 4-wave |
+|---|---:|---:|---:|
+| pipelined K32 | 1139.889 | 964.58 | -34.72% |
+| pipelined K64 | 1024.521 | 1073.20 | -27.37% |
+| existing 8-wave | 804.503 | 1366.70 | -7.51% |
+| existing 4-wave | 744.067 | 1477.71 | baseline |
+
+K64 batching gains 11.26% over pipelined K32. HPL medians are 939.43 and
+856.20 TFLOP/s respectively, a 9.72% K64 gain.
+
+A coordinator-only publication experiment replaced every returning atomic with
+a non-returning atomic and made one wave poll the final target. It regressed
+1.24% in an interleaved run:
+
+| Publication | Median us | TFLOP/s |
+|---|---:|---:|
+| participant returning atomics | 1049.847 | 1047.307 |
+| coordinator target poll | 1063.077 | 1034.273 |
+
+The coordinator serializes progress and adds another poller. The general
+non-returning atomic support and coordinator profile were removed.
 
 ATT captured one workgroup batch from the persistent waitcnt control and the
 4-wave baseline. Both execute 131072 MFMAs and 16384 direct-to-LDS loads in
@@ -713,21 +759,36 @@ doubles because three compute waves per SIMD repeatedly block on streamed B
 reads and mailbox waits. The baseline wave carries enough independent MFMA
 work to cover those dependencies at one resident wave per SIMD.
 
-One-launch PMC collection confirms that attribution:
+ATT isolates the K64 gain and its remaining cost:
 
-| Counter | Persistent | 4-wave | Ratio |
+| ATT metric | K32 waitcnt | Pipelined K64 | Delta |
 |---|---:|---:|---:|
-| `MfmaUtil` | 47.058% | 82.006% | 0.57x |
-| `MeanOccupancyPerActiveCU` | 3.745 | 1.000 | 3.74x |
-| `SQ_WAIT_INST_ANY` | 650293084 | 178321342 | 3.65x |
-| `SQ_WAIT_INST_LDS` | 111408952 | 13305217 | 8.37x |
-| `SQ_LDS_CMD_FIFO_FULL` | 18023329 | 854881 | 21.08x |
-| `LdsLatency` | 58.260 | 54.652 | 1.07x |
-| `LdsUtil` | 28.667% | 40.759% | 0.70x |
+| mailbox atomic hits | 8192 | 4096 | -50.0% |
+| wait instruction cycles | 4076474 | 2042010 | -49.9% |
+| direct-to-LDS cycles/op | 11.621 | 7.465 | -35.8% |
+| MFMA cycles/op | 24.493 | 26.817 | +9.5% |
 
-The persistent ISA uses 124 vector dwords, 26 SGPRs, no scratch, no relief,
-98336 bytes of dynamic LDS, and one startup barrier. Resource fit and
-cross-wave protocol are correct; the role partition is slower.
+One-launch PMC collection shows higher useful issue despite the slower traced
+MFMA instruction:
+
+| Counter | K32 waitcnt | Pipelined K64 | Delta |
+|---|---:|---:|---:|
+| `MfmaUtil` | 47.058% | 55.039% | +7.981 pp |
+| `MeanOccupancyPerActiveCU` | 3.745 | 3.713 | -0.9% |
+| `SQ_WAIT_INST_ANY` | 650293084 | 615746710 | -5.3% |
+| `SQ_WAIT_INST_LDS` | 111408952 | 97563948 | -12.4% |
+| `SQ_LDS_CMD_FIFO_FULL` | 18023329 | 14431714 | -19.9% |
+| `LdsLatency` | 58.260 | 56.386 | -3.2% |
+| `LdsUtil` | 28.667% | 31.399% | +2.732 pp |
+
+The K64 ISA uses 128 vector dwords, 26 SGPRs, no scratch, no relief, 131104
+bytes of dynamic LDS, and one startup barrier. Batching removes mailbox and
+producer-wait overhead. Consumer MFMA/LDS interleave remains the bottleneck.
+
+The default `all` sweep completed 31 of 31 kernels. Against the preceding
+same-command CSV, non-K512 rows range from -0.71% to +1.42%. K512 rechecks are
+-0.91% for 8-wave and -1.54% for 4-wave at roughly 21 microseconds per launch;
+their checked assembly is unchanged.
 
 ## Acceptance
 
@@ -743,8 +804,9 @@ Required:
 - no scheduler special path;
 - no regression in the existing full perf sweep.
 
-The profile stays out of the default sweep. It remains available through
-`--kernels=f16-persistent` for follow-up experiments.
+The profiles stay out of the default sweep. They remain available through
+`--kernels=f16-persistent`, `--kernels=f16-persistent-pipelined`, and
+`--kernels=f16-persistent-pipelined-k64`.
 
 ## Findings
 
@@ -756,18 +818,18 @@ This is empirical gfx950 evidence, not a portable ISA guarantee.
 ### Compute Occupancy
 
 Three compute waves per SIMD do not cover streamed-read and MFMA dependencies.
-Measured MFMA utilization is 47.1% despite 3.745 mean occupancy.
+K64 batching raises MFMA utilization from 47.1% to 55.0% without changing
+occupancy.
 
 ### Register Limit
 
-The largest consumer fits at 124 vector dwords without spill or relief.
-Keeping all six B fragments would exceed the 128-dword occupancy budget.
+The largest K32 consumer fits at 124 vector dwords. Pipelined K64 reaches the
+128-dword occupancy limit without spill or relief.
 
 ### Mailbox Cost
 
-Every K32 stage adds four ready atomics, twelve done atomics, LDS polls, and
-wakeups. `SQ_WAIT_INST_LDS` rises 8.37x and command-FIFO-full cycles rise
-21.08x.
+Every publication adds four ready atomics and twelve done atomics. K64 batches
+two K32 slices per publication, halving atomic hits and ATT wait cycles.
 
 ### Logical-To-Physical Mapping
 
@@ -782,14 +844,13 @@ wider.
 
 ## Follow-Up Questions
 
-- Is ring depth three useful once consumer release moves before the MFMA tail?
 - Should producers run at elevated priority only while issuing DMA?
 - Does a two-producer, one-per-SIMD-pair variant offset its less regular
   consumer partition?
 - Can a different ownership split retain baseline MFMA ILP without exceeding
   128 vector dwords?
-- Can publication avoid sixteen returning atomics per K32 without a full
-  workgroup barrier?
+- Can MFMA/LDS ordering improve without increasing the 128-dword register
+  footprint?
 
 ## References
 
