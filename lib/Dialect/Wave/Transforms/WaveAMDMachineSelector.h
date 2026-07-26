@@ -452,6 +452,10 @@ public:
   LogicalResult selectSchedBarrier(SchedBarrierOp op);
   LogicalResult selectSetPriority(waveamd::SetPriorityOp op);
   LogicalResult selectSetPriorityIncWg(waveamd::SetPriorityIncWgOp op);
+  LogicalResult selectVmemWaitPoll(waveamd::VmemWaitPollOp op);
+  LogicalResult selectLdsPollEq(waveamd::LdsPollEqOp op);
+  LogicalResult selectLdsAtomicAdd(waveamd::LdsAtomicAddOp op);
+  LogicalResult selectWakeup(waveamd::WakeupOp op);
   LogicalResult selectToken(TokenOp op);
   LogicalResult selectIssueToken(IssueTokenOp op);
   LogicalResult selectTokenJoin(Operation *op);
