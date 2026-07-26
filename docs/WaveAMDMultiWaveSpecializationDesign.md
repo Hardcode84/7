@@ -29,9 +29,9 @@ compile work scales with input IR and never iterates to convergence.
 Build several static schedules for one code chunk while modeling all resident
 waves and their shared machine resources.
 
-Primary case: two schedules selected by SIMD identity. When one schedule has a
-shared resource busy, the other can put an independent operation at its next
-issue point.
+Primary case: two schedules selected by hardware SIMD or wave-slot identity.
+When one schedule has a shared resource busy, the other can put an independent
+operation at its next issue point.
 
 The optimization must:
 
@@ -116,7 +116,8 @@ topology disables specialization; it does not fabricate a placement.
 cohorts. Target placement data maps those cohorts onto resident placements.
 Multiple workgroups may fill the target occupancy.
 
-Class mapping is separate from placement. A two-class CDNA example is:
+Class mapping is separate from placement. With one slot per SIMD, a two-class
+CDNA example is:
 
 ```text
 SIMD 0 -> class 0
@@ -126,9 +127,19 @@ SIMD 3 -> class 1
 ```
 
 At `target_waves = 1`, this creates four placements with two instances of each
-class. At `target_waves = 2`, it creates eight placements; both slots on one
-SIMD use that SIMD's class. Class multiplicity participates in every shared
-reservation.
+class. With multiple slots per SIMD, class follows wave-slot parity:
+
+```text
+slot 0 -> class 0
+slot 1 -> class 1
+slot 2 -> class 0
+slot 3 -> class 1
+```
+
+Class multiplicity participates in every shared reservation. Workgroup wave
+count must divide total modeled placements; multiple workgroups may fill one
+CU. A full-CU workgroup uses its local wave ordinal. Multiple workgroups use
+the hardware-ID field matching modeled placement.
 
 The mapping is target topology, not GEMM policy. Current IR specialization uses
 two classes. Model placement count follows target occupancy.
@@ -285,7 +296,7 @@ The function-gated clone pass runs before scheduling:
 
 1. Validate target topology, workgroup occupancy, loop shape, and barrier
    lineage.
-2. Read the target hardware-ID field through `s_getreg_hw_id`.
+2. Build class identity from local wave ordinal or target hardware-ID field.
 3. Build a wave-uniform class condition.
 4. Create a marked `waveamdmachine.uniform_if`.
 5. Move the source loop into one arm and clone it into the other.
@@ -299,7 +310,7 @@ Unsupported topology or loop shape leaves the original loop unchanged. A
 malformed barrier lineage fails before rewriting.
 
 Dispatch and branch overhead sit outside the recurring loop body. Target data
-provides the SIMD-ID slice; do not branch on chip-name strings.
+provides hardware-ID slices; do not branch on chip-name strings.
 
 ## Register Allocation
 

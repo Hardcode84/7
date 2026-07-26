@@ -103,6 +103,23 @@ func.func @known_block_size_only(%cond: !waveamdmachine.reg<scc, 1>)
   return
 }
 
+// ENABLED-LABEL: func.func @specialize_two_workgroups(
+// ENABLED: waveamdmachine.s_getreg_hw_id offset 0 width 1
+// ENABLED: waveamdmachine.uniform_if
+// ENABLED-COUNT-2: waveamdmachine.uniform_loop
+func.func @specialize_two_workgroups(%cond: !waveamdmachine.reg<scc, 1>)
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 4 : i64} {
+  waveamdmachine.uniform_loop {
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
 // SCHEDULED-LABEL: func.func @barrier_first(
 // SCHEDULED: waveamdmachine.uniform_if
 // SCHEDULED: waveamdmachine.uniform_loop

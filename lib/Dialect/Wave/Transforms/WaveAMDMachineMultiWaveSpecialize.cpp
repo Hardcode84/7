@@ -226,27 +226,36 @@ static Value getFirstWorkitemX(OpBuilder &builder, Location loc,
 static Value buildClassCondition(OpBuilder &builder, Location loc,
                                  func::FuncOp func,
                                  waveamdmachine::UniformLoopOp loop,
-                                 unsigned wavefront, unsigned simdsPerCU,
-                                 unsigned targetWaves) {
+                                 const waveamdmachine::ArchData &arch,
+                                 unsigned wavefront, unsigned targetWaves,
+                                 bool multipleWorkgroups) {
   MLIRContext *context = builder.getContext();
   Type sgpr = waveamdmachine::RegType::get(
       context, waveamdmachine::RegClass::SGPR, 1, -1);
   Type scc = waveamdmachine::RegType::get(context,
                                           waveamdmachine::RegClass::SCC, 1, -1);
   Type imm = waveamdmachine::ImmType::get(context);
-  unsigned classShift = llvm::Log2_32(wavefront);
-  if (targetWaves > 1)
-    classShift += llvm::Log2_32(simdsPerCU);
-  Value shift =
-      waveamdmachine::ImmOp::create(builder, loc, imm, classShift).getResult();
-  Value one = waveamdmachine::ImmOp::create(builder, loc, imm, 1).getResult();
-  Value firstWorkitem = getFirstWorkitemX(builder, loc, func, loop);
-  Value ordinal = waveamdmachine::SLshrB32Op::create(builder, loc, sgpr, scc,
-                                                     firstWorkitem, shift)
+  Value parity;
+  if (multipleWorkgroups) {
+    unsigned idOffset = targetWaves > 1 ? arch.waveIdOffset : arch.simdIdOffset;
+    parity =
+        waveamdmachine::SGetregHwIdOp::create(builder, loc, sgpr, idOffset, 1)
+            .getResult();
+  } else {
+    unsigned classShift = llvm::Log2_32(wavefront);
+    if (targetWaves > 1)
+      classShift += llvm::Log2_32(arch.simdsPerCU);
+    Value shift = waveamdmachine::ImmOp::create(builder, loc, imm, classShift)
                       .getResult();
-  Value parity =
-      waveamdmachine::SAndB32Op::create(builder, loc, sgpr, scc, ordinal, one)
-          .getResult();
+    Value one = waveamdmachine::ImmOp::create(builder, loc, imm, 1).getResult();
+    Value firstWorkitem = getFirstWorkitemX(builder, loc, func, loop);
+    Value ordinal = waveamdmachine::SLshrB32Op::create(builder, loc, sgpr, scc,
+                                                       firstWorkitem, shift)
+                        .getResult();
+    parity =
+        waveamdmachine::SAndB32Op::create(builder, loc, sgpr, scc, ordinal, one)
+            .getResult();
+  }
   Value zero = waveamdmachine::ImmOp::create(builder, loc, imm, 0).getResult();
   return waveamdmachine::SCmpEqU32Op::create(builder, loc, scc, parity, zero)
       .getResult();
@@ -274,7 +283,8 @@ static void replaceSavedUses(waveamdmachine::UniformIfOp uniformIf,
 
 static LogicalResult specializeLoop(waveamdmachine::UniformLoopOp loop,
                                     const waveamdmachine::ArchData &arch,
-                                    unsigned wavefront, unsigned targetWaves) {
+                                    unsigned wavefront, unsigned targetWaves,
+                                    bool multipleWorkgroups) {
   FailureOr<DenseMap<Operation *, int64_t>> barrierSites =
       buildBarrierLineage(loop);
   if (failed(barrierSites))
@@ -290,9 +300,9 @@ static LogicalResult specializeLoop(waveamdmachine::UniformLoopOp loop,
 
   OpBuilder builder(loop);
   Location loc = loop.getLoc();
-  Value firstClass =
-      buildClassCondition(builder, loc, loop->getParentOfType<func::FuncOp>(),
-                          loop, wavefront, arch.simdsPerCU, targetWaves);
+  Value firstClass = buildClassCondition(
+      builder, loc, loop->getParentOfType<func::FuncOp>(), loop, arch,
+      wavefront, targetWaves, multipleWorkgroups);
   waveamdmachine::UniformIfOp uniformIf = waveamdmachine::UniformIfOp::create(
       builder, loc, loop.getResultTypes(), firstClass);
   uniformIf->setAttr(kScheduleMarkerAttr, builder.getUnitAttr());
@@ -312,16 +322,35 @@ static LogicalResult specializeLoop(waveamdmachine::UniformLoopOp loop,
   return success();
 }
 
-static bool hasSpecializationOccupancy(func::FuncOp func,
-                                       const waveamdmachine::ArchData &arch) {
+struct SpecializationConfig {
+  const waveamdmachine::ArchData *arch;
+  unsigned wavefront;
+  unsigned targetWaves;
+  bool multipleWorkgroups;
+};
+
+static std::optional<SpecializationConfig>
+getSpecializationConfig(func::FuncOp func) {
+  const waveamdmachine::ArchData *arch = resolveArch(func);
+  if (!arch || !hasLinearWorkitemX(func))
+    return std::nullopt;
   std::optional<unsigned> targetWaves = getTargetWaves(func);
   std::optional<unsigned> workgroupWaves = getWorkgroupWaves(func);
   if (!targetWaves || !workgroupWaves)
-    return false;
-  if (*targetWaves > static_cast<unsigned>(arch.wavesPerSIMD))
-    return false;
-  return *workgroupWaves ==
-         static_cast<unsigned>(arch.simdsPerCU) * *targetWaves;
+    return std::nullopt;
+  FailureOr<unsigned> wavefront = waveamdmachine::getAMDGPUWavefrontSize(
+      func, "waveamd-machine-multi-wave-specialize");
+  if (failed(wavefront) || !llvm::isPowerOf2_32(*wavefront) ||
+      !llvm::isPowerOf2_32(arch->simdsPerCU))
+    return std::nullopt;
+  if (*targetWaves > static_cast<unsigned>(arch->wavesPerSIMD))
+    return std::nullopt;
+  unsigned residentWaves =
+      static_cast<unsigned>(arch->simdsPerCU) * *targetWaves;
+  if (residentWaves % *workgroupWaves != 0)
+    return std::nullopt;
+  return SpecializationConfig{arch, *wavefront, *targetWaves,
+                              *workgroupWaves != residentWaves};
 }
 
 static SmallVector<waveamdmachine::UniformLoopOp, 2>
@@ -335,18 +364,12 @@ collectSpecializationLoops(func::FuncOp func) {
 }
 
 static LogicalResult specializeFunction(func::FuncOp func) {
-  const waveamdmachine::ArchData *arch = resolveArch(func);
-  if (!arch || !hasLinearWorkitemX(func) ||
-      !hasSpecializationOccupancy(func, *arch))
+  std::optional<SpecializationConfig> config = getSpecializationConfig(func);
+  if (!config)
     return success();
-  std::optional<unsigned> targetWaves = getTargetWaves(func);
-  FailureOr<unsigned> wavefront = waveamdmachine::getAMDGPUWavefrontSize(
-      func, "waveamd-machine-multi-wave-specialize");
-  if (!targetWaves || failed(wavefront) || !llvm::isPowerOf2_32(*wavefront) ||
-      !llvm::isPowerOf2_32(arch->simdsPerCU))
-    return failure();
   for (waveamdmachine::UniformLoopOp loop : collectSpecializationLoops(func))
-    if (failed(specializeLoop(loop, *arch, *wavefront, *targetWaves)))
+    if (failed(specializeLoop(loop, *config->arch, config->wavefront,
+                              config->targetWaves, config->multipleWorkgroups)))
       return failure();
   return success();
 }

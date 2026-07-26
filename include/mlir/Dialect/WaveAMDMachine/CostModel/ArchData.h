@@ -51,6 +51,9 @@ struct ArchData {
   // Low SIMD-ID bit in the target hardware-ID register.
   int simdIdOffset;
 
+  // Low wave-slot bit in the target hardware-ID register.
+  int waveIdOffset;
+
   // VGPR file size in 32-bit lanes per SIMD (RDNA) / per EU (CDNA),
   // in the arch's native wave mode.
   int vgprFileSize;

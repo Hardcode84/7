@@ -21,6 +21,7 @@ static constexpr ArchData kGfx803{
     /*wavesPerSIMD=*/10,
     /*simdsPerCU=*/4,
     /*simdIdOffset=*/4,
+    /*waveIdOffset=*/0,
     /*vgprFileSize=*/256,
     /*vgprAllocGranule=*/4,
     /*valuPipelineDepth=*/4,
@@ -45,6 +46,7 @@ static constexpr ArchData kGfx942{
     /*wavesPerSIMD=*/8,
     /*simdsPerCU=*/4,
     /*simdIdOffset=*/4,
+    /*waveIdOffset=*/0,
     /*vgprFileSize=*/512,
     /*vgprAllocGranule=*/8,
     /*valuPipelineDepth=*/4,
@@ -68,6 +70,7 @@ static constexpr ArchData kGfx950{
     /*wavesPerSIMD=*/8,
     /*simdsPerCU=*/4,
     /*simdIdOffset=*/4,
+    /*waveIdOffset=*/0,
     /*vgprFileSize=*/512,
     /*vgprAllocGranule=*/8,
     /*valuPipelineDepth=*/4,
@@ -92,6 +95,7 @@ static constexpr ArchData kGfx1100{
     /*wavesPerSIMD=*/16,
     /*simdsPerCU=*/2,
     /*simdIdOffset=*/8,
+    /*waveIdOffset=*/0,
     /*vgprFileSize=*/1536,
     /*vgprAllocGranule=*/24,
     /*valuPipelineDepth=*/5,
@@ -115,6 +119,7 @@ static constexpr ArchData kGfx1200{
     /*wavesPerSIMD=*/16,
     /*simdsPerCU=*/2,
     /*simdIdOffset=*/8,
+    /*waveIdOffset=*/0,
     /*vgprFileSize=*/1536,
     /*vgprAllocGranule=*/24,
     /*valuPipelineDepth=*/5,
@@ -157,6 +162,8 @@ template <const ArchData &A> static constexpr bool sane() {
                 "simdsPerCU is 2 (RDNA) or 4 (CDNA)");
   static_assert(static_cast<unsigned>(A.simdIdOffset) < 32,
                 "simdIdOffset out of range");
+  static_assert(static_cast<unsigned>(A.waveIdOffset) < 32,
+                "waveIdOffset out of range");
   static_assert(A.vgprFileSize >= 256 && A.vgprFileSize <= 2048,
                 "vgprFileSize out of range");
   static_assert(A.vgprAllocGranule > 0 &&

@@ -150,4 +150,29 @@ func.func @two_slot_replay_cohorts(
   return
 }
 
+// CHECK-LABEL: func.func @multi_workgroup_block_schedule(
+// CHECK: waveamdmachine.s_getreg_hw_id offset 0 width 1
+// CHECK: waveamdmachine.uniform_if
+// CHECK-COUNT-2: waveamdmachine.uniform_loop
+func.func @multi_workgroup_block_schedule(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>)
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 4 : i64} {
+  waveamdmachine.uniform_loop {
+    %sum = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.v_cmpx_eq_u32 %sum, %sum
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
 }
