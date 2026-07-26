@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module, Type
@@ -21,19 +22,12 @@ _CONSUMER_WAVES = _WORKGROUP_WAVES - _PRODUCER_WAVES
 _TILE_M = 256
 _TILE_N = 256
 _TILE_K = 32
-_RING_STAGES = 3
 _TILES_PER_PANEL = 16
 _DWORDS_PER_TILE = 256
-_DWORDS_PER_STAGE = 2 * _TILES_PER_PANEL * _DWORDS_PER_TILE
-_DATA_DWORDS = _RING_STAGES * _DWORDS_PER_STAGE
-_READY_DWORD = _DATA_DWORDS
-_DONE_DWORD = _READY_DWORD + _RING_STAGES
-LDS_BYTES = 98_336
+_LDS_ALLOCATION_GRANULE = 32
 
 _READY_MASK = (1 << _PRODUCER_WAVES) - 1
 _DONE_MASK = (1 << _CONSUMER_WAVES) - 1
-_READY_REUSE_EXTRA = _RING_STAGES * (1 << _PRODUCER_WAVES) - _READY_MASK
-_DONE_REUSE_EXTRA = _RING_STAGES * (1 << _CONSUMER_WAVES) - _DONE_MASK
 
 _A_FRAGMENT_ROLE = 0
 _B_FRAGMENT_ROLE = 1
@@ -43,13 +37,81 @@ _ACC_REGISTERS = 4
 _MMA_KIND = "mfma.f32.16x16x32.f16"
 
 
-def _validate_shape(M: int, N: int, K: int, poll_sleep_cycles: int) -> None:
-    if M <= 0 or M % _TILE_M:
-        raise ValueError(f"M must be a positive multiple of {_TILE_M}; got {M}")
-    if N <= 0 or N % _TILE_N:
-        raise ValueError(f"N must be a positive multiple of {_TILE_N}; got {N}")
-    if K <= 0 or K % _TILE_K:
-        raise ValueError(f"K must be a positive multiple of {_TILE_K}; got {K}")
+@dataclass(frozen=True)
+class _PersistentConfig:
+    k_slices: int
+    ring_stages: int
+
+    @property
+    def generation_k(self) -> int:
+        return self.k_slices * _TILE_K
+
+    @property
+    def dwords_per_tile(self) -> int:
+        return self.k_slices * _DWORDS_PER_TILE
+
+    @property
+    def dwords_per_stage(self) -> int:
+        return 2 * _TILES_PER_PANEL * self.dwords_per_tile
+
+    @property
+    def data_dwords(self) -> int:
+        return self.ring_stages * self.dwords_per_stage
+
+    @property
+    def ready_dword(self) -> int:
+        return self.data_dwords
+
+    @property
+    def done_dword(self) -> int:
+        return self.ready_dword + self.ring_stages
+
+    @property
+    def lds_bytes(self) -> int:
+        bytes_used = (self.done_dword + self.ring_stages) * 4
+        granule = _LDS_ALLOCATION_GRANULE
+        return (bytes_used + granule - 1) // granule * granule
+
+    @property
+    def ready_reuse_extra(self) -> int:
+        return self.ring_stages * (1 << _PRODUCER_WAVES) - _READY_MASK
+
+    @property
+    def done_reuse_extra(self) -> int:
+        return self.ring_stages * (1 << _CONSUMER_WAVES) - _DONE_MASK
+
+
+_DEFAULT_CONFIG = _PersistentConfig(k_slices=1, ring_stages=3)
+LDS_BYTES = _DEFAULT_CONFIG.lds_bytes
+
+
+def _persistent_config(k_slices: int) -> _PersistentConfig:
+    if k_slices == 1:
+        return _DEFAULT_CONFIG
+    if k_slices == 2:
+        return _PersistentConfig(k_slices=2, ring_stages=2)
+    raise ValueError(f"k_slices must be 1 or 2; got {k_slices}")
+
+
+def _require_positive_multiple(name: str, value: int, multiple: int) -> None:
+    if value <= 0 or value % multiple:
+        raise ValueError(
+            f"{name} must be a positive multiple of {multiple}; got {value}"
+        )
+
+
+def _validate_shape(
+    M: int,
+    N: int,
+    K: int,
+    poll_sleep_cycles: int,
+    config: _PersistentConfig,
+) -> None:
+    _require_positive_multiple("M", M, _TILE_M)
+    _require_positive_multiple("N", N, _TILE_N)
+    _require_positive_multiple("K", K, config.generation_k)
+    if config.k_slices == 2 and 3 * config.generation_k > K:
+        raise ValueError(f"two-slice persistent GEMM requires K >= 192; got {K}")
     if poll_sleep_cycles < 0 or poll_sleep_cycles > 15:
         raise ValueError("poll_sleep_cycles must be in [0, 15]")
 
@@ -104,11 +166,12 @@ def _mailbox_ptr(
     bld: dsl.FunctionBuilder,
     lds: dsl.Value,
     stage: dsl.Value,
+    config: _PersistentConfig,
     *,
     done: bool,
 ) -> dsl.Value:
     s = dsl.sym("persistent_mailbox_stage")
-    base = _DONE_DWORD if done else _READY_DWORD
+    base = config.done_dword if done else config.ready_dword
     offset = bld.index_expr(base + s, {s: stage})
     return bld.ptr_add(lds, offset)
 
@@ -117,6 +180,7 @@ def _initialize_mailboxes(
     bld: dsl.FunctionBuilder,
     lds: dsl.Value,
     wi: dsl.Value,
+    config: _PersistentConfig,
 ) -> dsl.Value:
     root = bld.token()
     zero = bld.splat(bld.constant(dsl.i32(), 0), width=_WAVE_SIZE)
@@ -125,10 +189,10 @@ def _initialize_mailboxes(
         stores = [
             bld.store(
                 zero,
-                bld.ptr_add(lds, bld.constant(dsl.i32(), _READY_DWORD + i)),
+                bld.ptr_add(lds, bld.constant(dsl.i32(), config.ready_dword + i)),
                 after=root,
             )
-            for i in range(2 * _RING_STAGES)
+            for i in range(2 * config.ring_stages)
         ]
         bld.yield_([bld.join(*stores)])
         with active.otherwise():
@@ -156,13 +220,14 @@ def _generation_extra(
     *,
     shift: int,
     reused_extra: int,
+    ring_stages: int,
 ) -> dsl.Value:
     zero = bld.constant(dsl.i32(), 0)
     is_coordinator = bld.scalar_cmpi("eq", participant, zero)
 
     def coordinator_extra() -> dsl.Value:
         initial = bld.scalar_cmpi(
-            "ult", generation, bld.constant(dsl.i32(), _RING_STAGES)
+            "ult", generation, bld.constant(dsl.i32(), ring_stages)
         )
 
         def initial_extra() -> dsl.Value:
@@ -191,14 +256,13 @@ def _if_value(
     return conditional.results[0]
 
 
-def _publish(
+def _issue_publication(
     bld: dsl.FunctionBuilder,
     ptr: dsl.Value,
     dependency: dsl.Value,
     contribution: dsl.Value,
-    target: dsl.Value,
     lane_zero: dsl.Value,
-) -> dsl.Value:
+) -> tuple[dsl.Value, dsl.Value]:
     zero = bld.splat(bld.constant(dsl.i32(), 0), width=_WAVE_SIZE)
     value = bld.splat(contribution, width=_WAVE_SIZE)
     with bld.where(
@@ -209,29 +273,51 @@ def _publish(
         bld.yield_([old, published])
         with active.otherwise():
             bld.yield_([zero, dependency])
+    return active.results[0], active.results[1]
 
-    old = bld.read_first(active.results[0])
+
+def _finish_publication(
+    bld: dsl.FunctionBuilder,
+    old: dsl.Value,
+    published: dsl.Value,
+    contribution: dsl.Value,
+    target: dsl.Value,
+) -> dsl.Value:
+    old = bld.read_first(old)
     complete = bld.scalar_cmpi("eq", bld.addi(old, contribution), target)
-    return _if_token(
-        bld, complete, lambda: bld.wakeup(active.results[1]), active.results[1]
-    )
+    return _if_token(bld, complete, lambda: bld.wakeup(published), published)
+
+
+def _publish(
+    bld: dsl.FunctionBuilder,
+    ptr: dsl.Value,
+    dependency: dsl.Value,
+    contribution: dsl.Value,
+    target: dsl.Value,
+    lane_zero: dsl.Value,
+) -> dsl.Value:
+    old, published = _issue_publication(bld, ptr, dependency, contribution, lane_zero)
+    return _finish_publication(bld, old, published, contribution, target)
 
 
 def _stage_value(
     bld: dsl.FunctionBuilder,
     generation: dsl.Value,
+    config: _PersistentConfig,
 ) -> dsl.Value:
     g = dsl.sym("persistent_stage_generation")
-    return bld.index_expr(dsl.mod(g, _RING_STAGES), {g: generation})
+    return bld.index_expr(dsl.mod(g, config.ring_stages), {g: generation})
 
 
 def _producer_source(
     bld: dsl.FunctionBuilder,
     buffer: dsl.Value,
+    config: _PersistentConfig,
     *,
     cta: dsl.Value,
     slot: dsl.Value,
     generation: dsl.Value,
+    k_slice: int,
     wi: dsl.Value,
     leading: int,
     elements: int,
@@ -247,7 +333,8 @@ def _producer_source(
     offset = (
         c * (_TILE_M * leading)
         + t * (16 * leading)
-        + g * _TILE_K
+        + g * config.generation_k
+        + k_slice * _TILE_K
         + row * leading
         + logical_col * 8
     )
@@ -263,6 +350,7 @@ def _producer_contribution(
     bld: dsl.FunctionBuilder,
     generation: dsl.Value,
     producer: dsl.Value,
+    config: _PersistentConfig,
 ) -> tuple[dsl.Value, dsl.Value]:
     bit = bld.shli(bld.constant(dsl.i32(), 1), producer)
     extra = _generation_extra(
@@ -270,7 +358,8 @@ def _producer_contribution(
         generation,
         producer,
         shift=_PRODUCER_WAVES,
-        reused_extra=_READY_REUSE_EXTRA,
+        reused_extra=config.ready_reuse_extra,
+        ring_stages=config.ring_stages,
     )
     contribution = bld.addi(bit, extra)
     target = bld.addi(
@@ -286,11 +375,14 @@ def _producer_reuse(
     done_ptr: dsl.Value,
     dependency: dsl.Value,
     sleep_cycles: int,
+    config: _PersistentConfig,
 ) -> dsl.Value:
-    reused = bld.scalar_cmpi("uge", generation, bld.constant(dsl.i32(), _RING_STAGES))
+    reused = bld.scalar_cmpi(
+        "uge", generation, bld.constant(dsl.i32(), config.ring_stages)
+    )
 
     def poll() -> dsl.Value:
-        prior = bld.subi(generation, bld.constant(dsl.i32(), _RING_STAGES))
+        prior = bld.subi(generation, bld.constant(dsl.i32(), config.ring_stages))
         expected = bld.addi(
             bld.shli(prior, bld.constant(dsl.i32(), _CONSUMER_WAVES)),
             bld.constant(dsl.i32(), _DONE_MASK),
@@ -305,8 +397,95 @@ def _producer_reuse(
     return _if_token(bld, reused, poll, dependency)
 
 
+def _issue_producer_slice(
+    bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
+    *,
+    M: int,
+    N: int,
+    K: int,
+    a: dsl.Value,
+    b: dsl.Value,
+    producer: dsl.Value,
+    generation: dsl.Value,
+    k_slice: int,
+    wi: dsl.Value,
+    wg_m: dsl.Value,
+    wg_n: dsl.Value,
+    lds: dsl.Value,
+    stage: dsl.Value,
+    dependency: dsl.Value,
+) -> dsl.Value:
+    tokens: list[dsl.Value] = []
+    for index in range(4):
+        slot = bld.assume_range(
+            bld.addi(
+                producer,
+                bld.constant(dsl.i32(), _PRODUCER_WAVES * index),
+            ),
+            _PRODUCER_WAVES * index,
+            _PRODUCER_WAVES * index + 3,
+        )
+        a_src = _producer_source(
+            bld,
+            a,
+            config,
+            cta=wg_m,
+            slot=slot,
+            generation=generation,
+            k_slice=k_slice,
+            wi=wi,
+            leading=K,
+            elements=M * K,
+        )
+        b_src = _producer_source(
+            bld,
+            b,
+            config,
+            cta=wg_n,
+            slot=slot,
+            generation=generation,
+            k_slice=k_slice,
+            wi=wi,
+            leading=K,
+            elements=N * K,
+        )
+        s = dsl.sym(f"persistent_dma_stage_{index}_{k_slice}")
+        t = dsl.sym(f"persistent_dma_tile_{index}_{k_slice}")
+        a_offset = bld.index_expr(
+            s * config.dwords_per_stage
+            + t * config.dwords_per_tile
+            + k_slice * _DWORDS_PER_TILE,
+            {s: stage, t: slot},
+        )
+        b_offset = bld.index_expr(
+            s * config.dwords_per_stage
+            + (_TILES_PER_PANEL + t) * config.dwords_per_tile
+            + k_slice * _DWORDS_PER_TILE,
+            {s: stage, t: slot},
+        )
+        tokens.append(
+            bld.dma_load_lds(
+                a_src,
+                bld.ptr_add(lds, a_offset),
+                after=dependency,
+                bytes=16,
+            )
+        )
+        tokens.append(
+            bld.dma_load_lds(
+                b_src,
+                bld.ptr_add(lds, b_offset),
+                after=dependency,
+                bytes=16,
+            )
+        )
+    return bld.join(*tokens)
+
+
 def _emit_producer(
     bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
     *,
     M: int,
     N: int,
@@ -330,70 +509,44 @@ def _emit_producer(
     upper = bld.addi(trip_count, one)
 
     with bld.for_loop(zero, upper, one, init_args=[startup], nonzero_trip=True) as loop:
-        generation = bld.assume_range(loop.induction_variable, 0, K // _TILE_K - 1)
+        generation = bld.assume_range(
+            loop.induction_variable, 0, K // config.generation_k - 1
+        )
         dependency = loop.inner_iter_args[0]
-        stage = _stage_value(bld, generation)
-        ready_ptr = _mailbox_ptr(bld, lds, stage, done=False)
-        done_ptr = _mailbox_ptr(bld, lds, stage, done=True)
+        stage = _stage_value(bld, generation, config)
+        ready_ptr = _mailbox_ptr(bld, lds, stage, config, done=False)
+        done_ptr = _mailbox_ptr(bld, lds, stage, config, done=True)
         reuse = _producer_reuse(
-            bld, generation, done_ptr, dependency, poll_sleep_cycles
+            bld, generation, done_ptr, dependency, poll_sleep_cycles, config
         )
 
-        tokens: list[dsl.Value] = []
-        for index in range(4):
-            slot = bld.assume_range(
-                bld.addi(
-                    producer,
-                    bld.constant(dsl.i32(), _PRODUCER_WAVES * index),
-                ),
-                _PRODUCER_WAVES * index,
-                _PRODUCER_WAVES * index + 3,
-            )
-            a_src = _producer_source(
+        slice_dependency = reuse
+        for k_slice in range(config.k_slices):
+            complete = _issue_producer_slice(
                 bld,
-                a,
-                cta=wg_m,
-                slot=slot,
+                config,
+                M=M,
+                N=N,
+                K=K,
+                a=a,
+                b=b,
+                producer=producer,
                 generation=generation,
+                k_slice=k_slice,
                 wi=wi,
-                leading=K,
-                elements=M * K,
+                wg_m=wg_m,
+                wg_n=wg_n,
+                lds=lds,
+                stage=stage,
+                dependency=slice_dependency,
             )
-            b_src = _producer_source(
-                bld,
-                b,
-                cta=wg_n,
-                slot=slot,
-                generation=generation,
-                wi=wi,
-                leading=K,
-                elements=N * K,
-            )
-            s = dsl.sym(f"persistent_dma_stage_{index}")
-            t = dsl.sym(f"persistent_dma_tile_{index}")
-            a_offset = bld.index_expr(
-                s * _DWORDS_PER_STAGE + t * _DWORDS_PER_TILE,
-                {s: stage, t: slot},
-            )
-            b_offset = bld.index_expr(
-                s * _DWORDS_PER_STAGE + (_TILES_PER_PANEL + t) * _DWORDS_PER_TILE,
-                {s: stage, t: slot},
-            )
-            tokens.append(
-                bld.dma_load_lds(
-                    a_src, bld.ptr_add(lds, a_offset), after=reuse, bytes=16
+            if k_slice != config.k_slices - 1:
+                slice_dependency = bld.vmem_wait_poll(
+                    complete, sleep_cycles=poll_sleep_cycles
                 )
-            )
-            tokens.append(
-                bld.dma_load_lds(
-                    b_src, bld.ptr_add(lds, b_offset), after=reuse, bytes=16
-                )
-            )
-
-        complete = bld.join(*tokens)
         if poll_vmem:
             complete = bld.vmem_wait_poll(complete, sleep_cycles=poll_sleep_cycles)
-        contribution, target = _producer_contribution(bld, generation, producer)
+        contribution, target = _producer_contribution(bld, generation, producer, config)
         published = _publish(bld, ready_ptr, complete, contribution, target, lane_zero)
         bld.yield_([published])
 
@@ -401,9 +554,11 @@ def _emit_producer(
 def _consumer_read_ptr(
     bld: dsl.FunctionBuilder,
     lds: dsl.Value,
+    config: _PersistentConfig,
     *,
     stage: dsl.Value,
     slot: dsl.Value,
+    k_slice: int,
     wi: dsl.Value,
     is_b: bool,
 ) -> dsl.Value:
@@ -416,8 +571,9 @@ def _consumer_read_ptr(
     logical_col = dsl.xor(dsl.mod(dsl.floor(row / 2), 4), physical_col)
     panel = _TILES_PER_PANEL if is_b else 0
     offset = (
-        s * _DWORDS_PER_STAGE
-        + (panel + t) * _DWORDS_PER_TILE
+        s * config.dwords_per_stage
+        + (panel + t) * config.dwords_per_tile
+        + k_slice * _DWORDS_PER_TILE
         + row * 16
         + logical_col * 4
     )
@@ -428,6 +584,7 @@ def _consumer_contribution(
     bld: dsl.FunctionBuilder,
     generation: dsl.Value,
     consumer: dsl.Value,
+    config: _PersistentConfig,
 ) -> tuple[dsl.Value, dsl.Value]:
     bit = bld.shli(bld.constant(dsl.i32(), 1), consumer)
     extra = _generation_extra(
@@ -435,7 +592,8 @@ def _consumer_contribution(
         generation,
         consumer,
         shift=_CONSUMER_WAVES,
-        reused_extra=_DONE_REUSE_EXTRA,
+        reused_extra=config.done_reuse_extra,
+        ring_stages=config.ring_stages,
     )
     contribution = bld.addi(bit, extra)
     target = bld.addi(
@@ -445,8 +603,289 @@ def _consumer_contribution(
     return contribution, target
 
 
+def _load_consumer_b(
+    bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
+    *,
+    index: int,
+    n_start: dsl.Value,
+    stage: dsl.Value,
+    k_slice: int,
+    wi: dsl.Value,
+    lds: dsl.Value,
+    ready: dsl.Value,
+    load_type: Type,
+    b_type: Type,
+) -> tuple[dsl.Value, dsl.Value]:
+    slot = bld.addi(n_start, bld.constant(dsl.i32(), index))
+    regs, token = bld.load(
+        _consumer_read_ptr(
+            bld,
+            lds,
+            config,
+            stage=stage,
+            slot=slot,
+            k_slice=k_slice,
+            wi=wi,
+            is_b=True,
+        ),
+        load_type,
+        after=ready,
+    )
+    return bld.fragment_pack(regs, b_type), token
+
+
+def _apply_consumer_b(
+    bld: dsl.FunctionBuilder,
+    *,
+    width: int,
+    column: int,
+    a_frags: list[dsl.Value],
+    b_frag: dsl.Value,
+    accs: list[dsl.Value],
+) -> None:
+    for row, a_frag in enumerate(a_frags):
+        index = row * width + column
+        accs[index] = bld.mma(_MMA_KIND, a_frag, b_frag, accs[index])
+
+
+def _append_consumer_b(
+    bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
+    *,
+    index: int,
+    n_start: dsl.Value,
+    stage: dsl.Value,
+    k_slice: int,
+    wi: dsl.Value,
+    lds: dsl.Value,
+    ready: dsl.Value,
+    load_type: Type,
+    b_type: Type,
+    read_tokens: list[dsl.Value],
+    b_frags: list[dsl.Value],
+) -> None:
+    b_frag, token = _load_consumer_b(
+        bld,
+        config,
+        index=index,
+        n_start=n_start,
+        stage=stage,
+        k_slice=k_slice,
+        wi=wi,
+        lds=lds,
+        ready=ready,
+        load_type=load_type,
+        b_type=b_type,
+    )
+    b_frags.append(b_frag)
+    read_tokens.append(token)
+
+
+def _consumer_publication_inputs(
+    bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
+    generation: dsl.Value,
+    consumer: dsl.Value,
+    publish_done: bool,
+) -> tuple[dsl.Value, dsl.Value] | None:
+    if not publish_done:
+        return None
+    return _consumer_contribution(bld, generation, consumer, config)
+
+
+def _issue_consumer_publication(
+    bld: dsl.FunctionBuilder,
+    done_ptr: dsl.Value,
+    read_tokens: list[dsl.Value],
+    lane_zero: dsl.Value,
+    inputs: tuple[dsl.Value, dsl.Value] | None,
+) -> tuple[dsl.Value, dsl.Value] | None:
+    if inputs is None:
+        return None
+    contribution, _ = inputs
+    return _issue_publication(
+        bld,
+        done_ptr,
+        bld.join(*read_tokens),
+        contribution,
+        lane_zero,
+    )
+
+
+def _finish_consumer_publication(
+    bld: dsl.FunctionBuilder,
+    publication: tuple[dsl.Value, dsl.Value] | None,
+    inputs: tuple[dsl.Value, dsl.Value] | None,
+) -> dsl.Value | None:
+    if publication is None or inputs is None:
+        return None
+    old, published = publication
+    contribution, target = inputs
+    return _finish_publication(bld, old, published, contribution, target)
+
+
+def _consume_b_baseline(
+    bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
+    *,
+    width: int,
+    n_start: dsl.Value,
+    consumer: dsl.Value,
+    generation: dsl.Value,
+    k_slice: int,
+    publish_done: bool,
+    wi: dsl.Value,
+    lds: dsl.Value,
+    lane_zero: dsl.Value,
+    stage: dsl.Value,
+    ready: dsl.Value,
+    done_ptr: dsl.Value,
+    read_tokens: list[dsl.Value],
+    a_frags: list[dsl.Value],
+    accs: list[dsl.Value],
+    b_type: Type,
+    load_type: Type,
+) -> tuple[list[dsl.Value], dsl.Value | None]:
+    for column in range(width):
+        b_frag, token = _load_consumer_b(
+            bld,
+            config,
+            index=column,
+            n_start=n_start,
+            stage=stage,
+            k_slice=k_slice,
+            wi=wi,
+            lds=lds,
+            ready=ready,
+            load_type=load_type,
+            b_type=b_type,
+        )
+        read_tokens.append(token)
+        _apply_consumer_b(
+            bld,
+            width=width,
+            column=column,
+            a_frags=a_frags,
+            b_frag=b_frag,
+            accs=accs,
+        )
+
+    if not publish_done:
+        return accs, None
+
+    contribution, target = _consumer_contribution(bld, generation, consumer, config)
+    published = _publish(
+        bld,
+        done_ptr,
+        bld.join(*read_tokens),
+        contribution,
+        target,
+        lane_zero,
+    )
+    return accs, published
+
+
+def _consume_b_pipelined(
+    bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
+    *,
+    width: int,
+    n_start: dsl.Value,
+    consumer: dsl.Value,
+    generation: dsl.Value,
+    k_slice: int,
+    publish_done: bool,
+    wi: dsl.Value,
+    lds: dsl.Value,
+    lane_zero: dsl.Value,
+    stage: dsl.Value,
+    ready: dsl.Value,
+    done_ptr: dsl.Value,
+    read_tokens: list[dsl.Value],
+    a_frags: list[dsl.Value],
+    accs: list[dsl.Value],
+    b_type: Type,
+    load_type: Type,
+) -> tuple[list[dsl.Value], dsl.Value | None]:
+    prefetch = 4 if width == 5 else 2
+    b_frags: list[dsl.Value] = []
+    for column in range(prefetch):
+        _append_consumer_b(
+            bld,
+            config,
+            index=column,
+            n_start=n_start,
+            stage=stage,
+            k_slice=k_slice,
+            wi=wi,
+            lds=lds,
+            ready=ready,
+            load_type=load_type,
+            b_type=b_type,
+            read_tokens=read_tokens,
+            b_frags=b_frags,
+        )
+
+    publication_inputs = _consumer_publication_inputs(
+        bld, config, generation, consumer, publish_done
+    )
+    last_column = width - 1
+    _apply_consumer_b(
+        bld,
+        width=width,
+        column=0,
+        a_frags=a_frags,
+        b_frag=b_frags[0],
+        accs=accs,
+    )
+    for column in range(1, last_column):
+        if len(b_frags) < width:
+            _append_consumer_b(
+                bld,
+                config,
+                index=len(b_frags),
+                n_start=n_start,
+                stage=stage,
+                k_slice=k_slice,
+                wi=wi,
+                lds=lds,
+                ready=ready,
+                load_type=load_type,
+                b_type=b_type,
+                read_tokens=read_tokens,
+                b_frags=b_frags,
+            )
+        _apply_consumer_b(
+            bld,
+            width=width,
+            column=column,
+            a_frags=a_frags,
+            b_frag=b_frags[column],
+            accs=accs,
+        )
+
+    publication = _issue_consumer_publication(
+        bld,
+        done_ptr,
+        read_tokens,
+        lane_zero,
+        publication_inputs,
+    )
+    _apply_consumer_b(
+        bld,
+        width=width,
+        column=last_column,
+        a_frags=a_frags,
+        b_frag=b_frags[last_column],
+        accs=accs,
+    )
+    return accs, _finish_consumer_publication(bld, publication, publication_inputs)
+
+
 def _consume_stage(
     bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
     *,
     width: int,
     n_start: dsl.Value,
@@ -462,10 +901,11 @@ def _consume_stage(
     b_type: Type,
     load_type: Type,
     poll_sleep_cycles: int,
+    consumer_pipeline: bool,
 ) -> tuple[list[dsl.Value], dsl.Value]:
-    stage = _stage_value(bld, generation)
-    ready_ptr = _mailbox_ptr(bld, lds, stage, done=False)
-    done_ptr = _mailbox_ptr(bld, lds, stage, done=True)
+    stage = _stage_value(bld, generation, config)
+    ready_ptr = _mailbox_ptr(bld, lds, stage, config, done=False)
+    done_ptr = _mailbox_ptr(bld, lds, stage, config, done=True)
     ready_target = bld.addi(
         bld.shli(generation, bld.constant(dsl.i32(), _PRODUCER_WAVES)),
         bld.constant(dsl.i32(), _READY_MASK),
@@ -478,50 +918,57 @@ def _consume_stage(
     )
 
     read_tokens: list[dsl.Value] = []
-    a_frags: list[dsl.Value] = []
-    for i in range(4):
-        slot = bld.addi(
-            bld.muli(row_group, bld.constant(dsl.i32(), 4)),
-            bld.constant(dsl.i32(), i),
-        )
-        regs, token = bld.load(
-            _consumer_read_ptr(
-                bld,
-                lds,
-                stage=stage,
-                slot=slot,
-                wi=wi,
-                is_b=False,
-            ),
-            load_type,
-            after=ready,
-        )
-        a_frags.append(bld.fragment_pack(regs, a_type))
-        read_tokens.append(token)
+    published: dsl.Value | None = None
+    consume_b = _consume_b_pipelined if consumer_pipeline else _consume_b_baseline
+    for k_slice in range(config.k_slices):
+        a_frags: list[dsl.Value] = []
+        for i in range(4):
+            slot = bld.addi(
+                bld.muli(row_group, bld.constant(dsl.i32(), 4)),
+                bld.constant(dsl.i32(), i),
+            )
+            regs, token = bld.load(
+                _consumer_read_ptr(
+                    bld,
+                    lds,
+                    config,
+                    stage=stage,
+                    slot=slot,
+                    k_slice=k_slice,
+                    wi=wi,
+                    is_b=False,
+                ),
+                load_type,
+                after=ready,
+            )
+            a_frags.append(bld.fragment_pack(regs, a_type))
+            read_tokens.append(token)
 
-    for j in range(width):
-        slot = bld.addi(n_start, bld.constant(dsl.i32(), j))
-        regs, token = bld.load(
-            _consumer_read_ptr(
-                bld,
-                lds,
-                stage=stage,
-                slot=slot,
-                wi=wi,
-                is_b=True,
-            ),
-            load_type,
-            after=ready,
+        accs, slice_publication = consume_b(
+            bld,
+            config,
+            width=width,
+            n_start=n_start,
+            consumer=consumer,
+            generation=generation,
+            k_slice=k_slice,
+            publish_done=k_slice == config.k_slices - 1,
+            wi=wi,
+            lds=lds,
+            lane_zero=lane_zero,
+            stage=stage,
+            ready=ready,
+            done_ptr=done_ptr,
+            read_tokens=read_tokens,
+            a_frags=a_frags,
+            accs=accs,
+            b_type=b_type,
+            load_type=load_type,
         )
-        b_frag = bld.fragment_pack(regs, b_type)
-        read_tokens.append(token)
-        for i, a_frag in enumerate(a_frags):
-            index = i * width + j
-            accs[index] = bld.mma(_MMA_KIND, a_frag, b_frag, accs[index])
+        if slice_publication is not None:
+            published = slice_publication
 
-    reads_complete = bld.join(*read_tokens)
-    contribution, target = _consumer_contribution(bld, generation, consumer)
-    published = _publish(bld, done_ptr, reads_complete, contribution, target, lane_zero)
+    assert published is not None
     return accs, published
 
 
@@ -586,6 +1033,7 @@ def _store_consumer_tiles(
 
 def _emit_consumer_width(
     bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
     *,
     M: int,
     N: int,
@@ -602,6 +1050,7 @@ def _emit_consumer_width(
     lane_zero: dsl.Value,
     trip_count: dsl.Value,
     poll_sleep_cycles: int,
+    consumer_pipeline: bool,
 ) -> None:
     a_type = dsl.fragment_type(
         _A_FRAGMENT_ROLE,
@@ -637,11 +1086,14 @@ def _emit_consumer_width(
     init_args = [init] * (4 * width) + [startup]
 
     with bld.for_loop(zero, upper, one, init_args=init_args, nonzero_trip=True) as loop:
-        generation = bld.assume_range(loop.induction_variable, 0, K // _TILE_K - 1)
+        generation = bld.assume_range(
+            loop.induction_variable, 0, K // config.generation_k - 1
+        )
         accs = list(loop.inner_iter_args[:-1])
         dependency = loop.inner_iter_args[-1]
         accs, published = _consume_stage(
             bld,
+            config,
             width=width,
             n_start=n_start,
             consumer=consumer,
@@ -656,6 +1108,7 @@ def _emit_consumer_width(
             b_type=b_type,
             load_type=load_type,
             poll_sleep_cycles=poll_sleep_cycles,
+            consumer_pipeline=consumer_pipeline,
         )
         bld.yield_([*accs, published])
 
@@ -675,6 +1128,7 @@ def _emit_consumer_width(
 
 def _emit_consumer(
     bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
     *,
     M: int,
     N: int,
@@ -688,6 +1142,7 @@ def _emit_consumer(
     lane_zero: dsl.Value,
     trip_count: dsl.Value,
     poll_sleep_cycles: int,
+    consumer_pipeline: bool,
 ) -> None:
     consumer = wave_id
     quotient_hi = bld.binary(
@@ -716,6 +1171,7 @@ def _emit_consumer(
     with bld.if_(last, otherwise=True) as branch:
         _emit_consumer_width(
             bld,
+            config,
             M=M,
             N=N,
             K=K,
@@ -731,10 +1187,12 @@ def _emit_consumer(
             lane_zero=lane_zero,
             trip_count=trip_count,
             poll_sleep_cycles=poll_sleep_cycles,
+            consumer_pipeline=consumer_pipeline,
         )
         with branch.otherwise():
             _emit_consumer_width(
                 bld,
+                config,
                 M=M,
                 N=N,
                 K=K,
@@ -750,24 +1208,27 @@ def _emit_consumer(
                 lane_zero=lane_zero,
                 trip_count=trip_count,
                 poll_sleep_cycles=poll_sleep_cycles,
+                consumer_pipeline=consumer_pipeline,
             )
 
 
 def _emit_kernel(
     bld: dsl.FunctionBuilder,
+    config: _PersistentConfig,
     *,
     M: int,
     N: int,
     K: int,
     poll_vmem: bool,
     poll_sleep_cycles: int,
+    consumer_pipeline: bool,
 ) -> None:
     wi = bld.assume_range(
         bld.workitem_id(axis=0, width=_WAVE_SIZE),
         0,
         _WORKGROUP_WAVES * _WAVE_SIZE - 1,
     )
-    trip_count = bld.assume_range(bld.args[3], 0, K // _TILE_K - 1)
+    trip_count = bld.assume_range(bld.args[3], 0, K // config.generation_k - 1)
     wave_id = bld.assume_range(
         bld.binary(
             dsl.BinaryKind.ShRUI,
@@ -780,12 +1241,13 @@ def _emit_kernel(
     wg_m, wg_n = _cta_coords(bld, M, N)
     lds = bld.shared_memory_base(dsl.i32())
     lane_zero = _lane_zero_mask(bld, wi)
-    startup = _initialize_mailboxes(bld, lds, wi)
+    startup = _initialize_mailboxes(bld, lds, wi, config)
     producer = bld.scalar_cmpi("uge", wave_id, bld.constant(dsl.i32(), _CONSUMER_WAVES))
 
     with bld.if_(producer, otherwise=True) as role:
         _emit_producer(
             bld,
+            config,
             M=M,
             N=N,
             K=K,
@@ -803,6 +1265,7 @@ def _emit_kernel(
         with role.otherwise():
             _emit_consumer(
                 bld,
+                config,
                 M=M,
                 N=N,
                 K=K,
@@ -815,6 +1278,7 @@ def _emit_kernel(
                 lane_zero=lane_zero,
                 trip_count=trip_count,
                 poll_sleep_cycles=poll_sleep_cycles,
+                consumer_pipeline=consumer_pipeline,
             )
 
 
@@ -825,13 +1289,16 @@ def build_gfx950_persistent_f16_gemm_module(
     *,
     poll_vmem: bool = True,
     poll_sleep_cycles: int = 1,
+    consumer_pipeline: bool = False,
+    k_slices: int = 1,
 ) -> Module:
     """Build fixed-shape asymmetric persistent-wave GEMM."""
-    _validate_shape(M, N, K, poll_sleep_cycles)
+    config = _persistent_config(k_slices)
+    _validate_shape(M, N, K, poll_sleep_cycles, config)
     bld = dsl.ModuleBuilder()
     with bld:
         attrs = {
-            "wave.dynamic_lds_size": dsl.i64_attr(LDS_BYTES),
+            "wave.dynamic_lds_size": dsl.i64_attr(config.lds_bytes),
             "waveamdmachine.target_waves": dsl.i64_attr(4),
         }
         with (
@@ -851,11 +1318,13 @@ def build_gfx950_persistent_f16_gemm_module(
         ):
             _emit_kernel(
                 kernel,
+                config,
                 M=M,
                 N=N,
                 K=K,
                 poll_vmem=poll_vmem,
                 poll_sleep_cycles=poll_sleep_cycles,
+                consumer_pipeline=consumer_pipeline,
             )
     return bld.module
 

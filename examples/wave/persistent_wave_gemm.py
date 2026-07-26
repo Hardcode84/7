@@ -25,6 +25,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default="poll",
     )
     parser.add_argument("--poll-sleep-cycles", type=int, default=1)
+    parser.add_argument("--consumer-pipeline", action="store_true")
+    parser.add_argument("--k-slices", type=int, choices=(1, 2), default=1)
     return parser.parse_args(argv)
 
 
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         args.k,
         poll_vmem=args.completion == "poll",
         poll_sleep_cycles=args.poll_sleep_cycles,
+        consumer_pipeline=args.consumer_pipeline,
+        k_slices=args.k_slices,
     )
     sys.stdout.write(str(module))
     return 0
