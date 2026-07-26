@@ -34,6 +34,7 @@
 # CHECK: matmul_perf_sweep_f16_profiles: ok
 # CHECK: matmul_perf_sweep_spatial: ok
 # CHECK: matmul_perf_sweep_streamk: ok
+# CHECK: matmul_persistent_profiles: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: matmul_perf_sweep_mxfp4_aiter: ok
 # CHECK: perf_sweep_fa_8wave: ok
@@ -2522,6 +2523,68 @@ def check_matmul_perf_sweep_streamk(perf_sweep) -> None:
     print(f"{check_name}: ok")
 
 
+def check_matmul_persistent_profiles(matmul, perf_sweep) -> None:
+    check_name = "matmul_persistent_profiles"
+    args = matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-16wave-persistent-pipelined-k64",
+            "--m=256",
+            "--n=256",
+            "--k=192",
+            "--skip-hw",
+        ]
+    )
+    matmul.validate_args(args)
+    require(
+        check_name,
+        args.persistent_consumer_pipeline
+        and args.persistent_completion == "waitcnt"
+        and args.persistent_k_slices == 2,
+        "bad K64 pipeline profile",
+    )
+    require(
+        check_name,
+        matmul.compute_lds_bytes(args) == 131104,
+        "bad K64 LDS byte accounting",
+    )
+    require(
+        check_name,
+        matmul.compute_kernel_arg_trip_count(args) == 2
+        and matmul.compute_sim_loop_trip_count(args) == 3,
+        "bad K64 generation trip counts",
+    )
+    cmd = matmul.build_persistent_example_args(args, "gfx950")
+    require(
+        check_name,
+        "--consumer-pipeline" in cmd and "--k-slices=2" in cmd,
+        "K64 pipeline flags not forwarded",
+    )
+
+    args.k = 128
+    try:
+        matmul.validate_args(args)
+    except SystemExit:
+        pass
+    else:
+        require(check_name, False, "K64 profile should reject K below 192")
+
+    selected = perf_sweep.parse_kernel_csv("f16-persistent-pipelined-k64")
+    require(
+        check_name,
+        len(selected) == 1
+        and selected[0].profile == "gfx950-f16-256x256-16wave-persistent-pipelined-k64",
+        "K64 sweep alias selected the wrong profile",
+    )
+    default_profiles = {kernel.profile for kernel in perf_sweep.parse_kernel_csv("all")}
+    require(
+        check_name,
+        not any("persistent" in profile for profile in default_profiles),
+        "persistent profiles must remain opt-in",
+    )
+    print(f"{check_name}: ok")
+
+
 def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     args = perf_sweep.build_argparser().parse_args(
         [
@@ -2960,6 +3023,7 @@ def main() -> int:
     check_matmul_perf_sweep_f16_profiles(perf_sweep)
     check_matmul_perf_sweep_spatial(perf_sweep)
     check_matmul_perf_sweep_streamk(perf_sweep)
+    check_matmul_persistent_profiles(matmul, perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_matmul_perf_sweep_mxfp4_aiter(perf_sweep, matmul)
     check_perf_sweep_fa_8wave(perf_sweep)

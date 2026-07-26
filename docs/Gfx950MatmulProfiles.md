@@ -585,15 +585,25 @@ replace steady-state barriers.
 
 ```bash
 python tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py \
-  --kernels=f16-persistent --m=8192 --n=8192 --k-values=8192
+  --kernels=f16-persistent,f16-persistent-pipelined,f16-persistent-pipelined-k64 \
+  --m=8192 --n=8192 --k-values=8192
 ```
 
 `--extra-calibrator-arg=--persistent-completion=waitcnt` selects the blocking
 control. Default is `IB_STS.VM_CNT` polling with `s_sleep 1`.
 
-Random 8192x8192x8192 medians are 919.9 TFLOP/s for polling and 934.7 TFLOP/s
-for waitcnt, versus 1354.2 TFLOP/s for the existing 4-wave kernel. The profile
-therefore stays out of `all`. See
+`gfx950-f16-256x256-16wave-persistent-pipelined` buffers B fragments and
+publishes stage completion before its final MFMA group. Its random
+8192x8192x8192 median is 964.6 TFLOP/s.
+
+`gfx950-f16-256x256-16wave-persistent-pipelined-k64` batches two K32 slices per
+mailbox generation. It uses two 64 KiB stages, 131104 dynamic LDS bytes, and
+a mid-batch poll plus blocking final VMEM completion. K must be a multiple of
+64 and at least 192. Its random 8192x8192x8192 median is 1073.2 TFLOP/s, 11.3%
+above pipelined K32 and 27.4% below the existing 4-wave kernel. HPL medians are
+939.4 TFLOP/s for K64 and 856.2 TFLOP/s for K32.
+
+All persistent profiles stay out of `all`. See
 [asymmetric persistent-wave GEMM](Gfx950AsymmetricPersistentWaveGemmDesign.md)
 for protocol, correctness, ATT, and PMC results.
 

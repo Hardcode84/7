@@ -54,6 +54,7 @@ struct Args {
   int warmupIters = 10;
   int dynamicLdsBytes = 0;
   int streamKWorkers = 1;
+  int kernelTripCount = -1;
   int seed = 0;
   bool checkOutput = true;
   bool allOnes = false;
@@ -91,6 +92,7 @@ static void usage() {
       "  --output-layout automatic|tile-packed|row-major|column-major\n"
       "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
       "  --streamk-workers N    persistent Stream-K workgroups\n"
+      "  --kernel-trip-count N  override matmul loop trip count\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
       "  --seed N               deterministic input seed (default 0)\n"
@@ -251,6 +253,9 @@ static void setDynamicLds(Args &a, const char *v) {
 static void setStreamKWorkers(Args &a, const char *v) {
   a.streamKWorkers = parseInt(v);
 }
+static void setKernelTripCount(Args &a, const char *v) {
+  a.kernelTripCount = parseInt(v);
+}
 
 static constexpr FlagHandler kFlags[] = {
     {"--m", setM},
@@ -271,6 +276,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--mxfp4-input-layout", setMXFP4InputLayout},
     {"--dynamic-lds", setDynamicLds},
     {"--streamk-workers", setStreamKWorkers},
+    {"--kernel-trip-count", setKernelTripCount},
     {"--iters", setIters},
     {"--warmup", setWarmup},
     {"--seed", setSeed},
@@ -600,7 +606,7 @@ static void validateHipBLASLtArgs(const Args &a) {
     die("hipBLASLt ABI requires tile-aligned M/N and K >= 128");
 }
 
-static void validateArgs(const Args &a) {
+static void validateShapeArgs(const Args &a) {
   requirePositive(a.m, "m must be positive");
   requirePositive(a.n, "n must be positive");
   requirePositive(a.k, "k must be positive");
@@ -615,6 +621,11 @@ static void validateArgs(const Args &a) {
     die("warmup must be non-negative");
   if (a.dynamicLdsBytes < 0)
     die("dynamic LDS bytes must be non-negative");
+  if (a.kernelTripCount < -1)
+    die("kernel trip count must be non-negative");
+}
+
+static void validateInputArgs(const Args &a) {
   validateMXFP4InputArgs(a);
   if (static_cast<int>(a.allOnes) + static_cast<int>(a.randInt) +
           static_cast<int>(a.hpl) >
@@ -622,6 +633,11 @@ static void validateArgs(const Args &a) {
     die("--all-ones, --rand-int, and --hpl are mutually exclusive");
   if ((a.randInt || a.hpl) && a.inputType == InputType::MXFP4)
     die("--rand-int/--hpl support f16/bf16 inputs only");
+}
+
+static void validateArgs(const Args &a) {
+  validateShapeArgs(a);
+  validateInputArgs(a);
   validateV9GoldenArgs(a);
   validateTLXMXFPArgs(a);
   validateStreamKArgs(a);
@@ -1801,6 +1817,8 @@ static LaunchShape makeLaunchShape(const Args &a) {
   shape.displayTripCount = usesFlattenedGrid(a)
                                ? std::max((blocking.virtualKSteps - 2) / 2, 0)
                                : shape.tripCount;
+  if (a.kernelTripCount >= 0)
+    shape.tripCount = shape.displayTripCount = a.kernelTripCount;
   return shape;
 }
 

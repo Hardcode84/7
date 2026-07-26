@@ -25,7 +25,7 @@ RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runn
 KERNEL_NAME = "wmma_f16_matmul_tiled"
 STREAMK_KERNEL_NAME = "gfx950_f16_streamk_gemm"
 PERSISTENT_KERNEL_NAME = "gfx950_persistent_f16_gemm"
-PERSISTENT_LDS_BYTES = 98_336
+PERSISTENT_LDS_ALLOCATION_GRANULE = 32
 V9_GOLDEN_NAME = "v9_4096.original.wave"
 V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
@@ -119,25 +119,37 @@ _MXFP4_AITER_PROFILE: dict[str, ProfileValue] = {
     "cta_group_m": 4,
 }
 
+_PERSISTENT_PROFILE: dict[str, ProfileValue] = {
+    "example": "persistent-gemm",
+    "bm": 4,
+    "bn": 4,
+    "wave_m_tiles": 4,
+    "wave_n_tiles": 4,
+    "wave_k_tiles": 1,
+    "target_waves": 4,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "f16",
+    "output_type": "f16",
+    "output_layout": "column-major",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+    "persistent_completion": "poll",
+    "persistent_poll_sleep_cycles": 1,
+}
+
 KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
-    "gfx950-f16-256x256-16wave-persistent": {
-        "example": "persistent-gemm",
-        "bm": 4,
-        "bn": 4,
-        "wave_m_tiles": 4,
-        "wave_n_tiles": 4,
-        "wave_k_tiles": 1,
-        "target_waves": 4,
-        "use_buffer": True,
-        "use_dma_lds": True,
-        "matrix_intrinsic": "mfma_gfx950",
-        "input_type": "f16",
-        "output_type": "f16",
-        "output_layout": "column-major",
-        "cta_swizzle_xcds": 8,
-        "cta_group_m": 4,
-        "persistent_completion": "poll",
-        "persistent_poll_sleep_cycles": 1,
+    "gfx950-f16-256x256-16wave-persistent": {**_PERSISTENT_PROFILE},
+    "gfx950-f16-256x256-16wave-persistent-pipelined": {
+        **_PERSISTENT_PROFILE,
+        "persistent_consumer_pipeline": True,
+    },
+    "gfx950-f16-256x256-16wave-persistent-pipelined-k64": {
+        **_PERSISTENT_PROFILE,
+        "persistent_completion": "waitcnt",
+        "persistent_consumer_pipeline": True,
+        "persistent_k_slices": 2,
     },
     "gfx950-f16-256x256-16wave": {
         "bm": 4,
@@ -560,7 +572,7 @@ def build_streamk_example_args(args: argparse.Namespace, chip: str) -> list[str]
 
 
 def build_persistent_example_args(args: argparse.Namespace, chip: str) -> list[str]:
-    return [
+    cmd = [
         sys.executable,
         str(PERSISTENT_EXAMPLE),
         f"--chip={chip}",
@@ -570,6 +582,14 @@ def build_persistent_example_args(args: argparse.Namespace, chip: str) -> list[s
         f"--completion={args.persistent_completion}",
         f"--poll-sleep-cycles={args.persistent_poll_sleep_cycles}",
     ]
+    append_option_if(
+        cmd,
+        getattr(args, "persistent_consumer_pipeline", False),
+        "--consumer-pipeline",
+    )
+    k_slices = getattr(args, "persistent_k_slices", 1)
+    append_option_if(cmd, k_slices != 1, f"--k-slices={k_slices}")
+    return cmd
 
 
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
@@ -832,6 +852,8 @@ def compute_virtual_k_steps(args: argparse.Namespace) -> int:
 def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
     if is_checked_in_perf_golden(args) or is_streamk_gemm(args):
         return 0
+    if is_persistent_gemm(args):
+        return max(compute_persistent_generations(args) - 1, 0)
     virtual_k_steps = compute_virtual_k_steps(args)
     return max(virtual_k_steps - 1, 0)
 
@@ -843,11 +865,11 @@ def kernel_arg_trip_count_text(args: argparse.Namespace) -> str:
 
 
 def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
+    if is_persistent_gemm(args):
+        return compute_persistent_generations(args)
     virtual_k_steps = compute_virtual_k_steps(args)
     if is_checked_in_perf_golden(args):
         return max((virtual_k_steps - 2) // 2, 0)
-    if is_persistent_gemm(args):
-        return virtual_k_steps
     if (
         selected_example(args) == "tensilelite-subtile"
         and selected_scale_input(args) == "tensilelite"
@@ -889,6 +911,14 @@ def div_exact(num: int, den: int, what: str) -> int:
     if den <= 0 or num % den != 0:
         sys.exit(what)
     return num // den
+
+
+def persistent_generation_k(args: argparse.Namespace) -> int:
+    return 32 * getattr(args, "persistent_k_slices", 1)
+
+
+def compute_persistent_generations(args: argparse.Namespace) -> int:
+    return div_exact(args.k, persistent_generation_k(args), "bad persistent K blocking")
 
 
 def lds_dwords_per_frag(args: argparse.Namespace) -> int:
@@ -959,7 +989,12 @@ def dma_buffer_count(args: argparse.Namespace) -> int:
 
 def compute_lds_bytes(args: argparse.Namespace) -> int:
     if is_persistent_gemm(args):
-        return PERSISTENT_LDS_BYTES
+        k_slices = getattr(args, "persistent_k_slices", 1)
+        ring_stages = 3 if k_slices == 1 else 2
+        dwords_per_stage = 2 * 16 * k_slices * 256
+        bytes_used = (ring_stages * dwords_per_stage + 2 * ring_stages) * 4
+        granule = PERSISTENT_LDS_ALLOCATION_GRANULE
+        return (bytes_used + granule - 1) // granule * granule
     if selected_example(args) == "tensilelite-subtile":
         slots = args.wave_k_tiles * (
             args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
@@ -1036,6 +1071,8 @@ def compile_runner(args: argparse.Namespace, tmp: Path) -> Path:
 def append_hw_runner_options(cmd: list[str], args: argparse.Namespace) -> None:
     if is_streamk_gemm(args):
         cmd.extend(["--streamk-workers", str(args.streamk_workers)])
+    if is_persistent_gemm(args):
+        cmd.extend(["--kernel-trip-count", str(compute_kernel_arg_trip_count(args))])
     if selected_scale_input(args) == "tensilelite":
         cmd.extend(["--scale-layout", "tensilelite"])
     if getattr(args, "mxfp4_input_layout", "canonical") != "canonical":
@@ -1267,6 +1304,8 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         default="poll",
     )
     ap.add_argument("--persistent-poll-sleep-cycles", type=int, default=1)
+    ap.add_argument("--persistent-consumer-pipeline", action="store_true")
+    ap.add_argument("--persistent-k-slices", type=int, choices=(1, 2), default=1)
 
 
 def add_runtime_args(ap: argparse.ArgumentParser) -> None:
@@ -1564,9 +1603,17 @@ def _validate_persistent_gemm_args(args: argparse.Namespace) -> None:
         selected_matrix_intrinsic(args) == "mfma_gfx950",
         "--example=persistent-gemm requires gfx950 MFMA",
     )
+    generation_k = persistent_generation_k(args)
     _require_arg(
-        args.m % 256 == 0 and args.n % 256 == 0 and args.k % 32 == 0,
-        "--example=persistent-gemm requires M/N multiples of 256 and K of 32",
+        args.m % 256 == 0 and args.n % 256 == 0 and args.k % generation_k == 0,
+        (
+            "--example=persistent-gemm requires M/N multiples of 256 "
+            f"and K of {generation_k}"
+        ),
+    )
+    _require_arg(
+        args.persistent_k_slices == 1 or args.k >= 192,
+        "--persistent-k-slices=2 requires K >= 192",
     )
     _require_arg(
         (
@@ -1833,7 +1880,9 @@ def print_header(args: argparse.Namespace, chip: str) -> None:
     if is_persistent_gemm(args):
         print(
             f"persistent_completion={args.persistent_completion} "
-            f"poll_sleep_cycles={args.persistent_poll_sleep_cycles}"
+            f"poll_sleep_cycles={args.persistent_poll_sleep_cycles} "
+            f"consumer_pipeline={args.persistent_consumer_pipeline} "
+            f"k_slices={args.persistent_k_slices}"
         )
 
 
