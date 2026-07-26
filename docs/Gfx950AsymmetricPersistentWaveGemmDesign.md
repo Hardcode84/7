@@ -2,17 +2,18 @@
 
 ## Status
 
-Proposed. Design only.
+Implemented as an opt-in profile. Profiling rejected it from the default
+sweep: the current 4-wave kernel remains 45% faster at 8192x8192x8192.
 
-First implementation is a separate f16 GEMM profile. Existing 4-wave, 8-wave,
-and 16-wave profiles remain unchanged.
+Profile: `gfx950-f16-256x256-16wave-persistent`. Sweep alias:
+`f16-persistent`. Existing profiles remain unchanged.
 
 ## Goal
 
 Keep direct-to-LDS traffic on persistent producer waves and MFMA work on
 persistent consumer waves. Producers observe their own DMA completion through
 `HW_REG_IB_STS`, publish ready stages through LDS atomics, and continue without
-a workgroup barrier. Consumers wait on generation-tagged LDS mailboxes, copy
+a workgroup barrier. Consumers wait on monotonic LDS mailboxes, copy
 operands into registers, release the LDS stage, and finish MFMA work after the
 release.
 
@@ -229,79 +230,50 @@ Only stage count and wave ownership change in the first experiment.
 
 ## Mailbox State
 
-Each ring slot owns two 32-bit LDS words:
-
-| Word | Encoding |
-|---|---|
-| `ready` | `(generation << 4) | producer_mask[3:0]` |
-| `done` | `(generation << 12) | consumer_mask[11:0]` |
-
-Generation fields wrap modulo their packed width. At most three generations
-are live, so wrapped equality is safe: no participant can lag by a full tag
-space while obeying ring backpressure.
-
-Each participant publishes a unique bit with a returning atomic add:
+Each ring slot owns one `ready` and one `done` i32. Values only increase;
+steady-state code never resets a mailbox.
 
 ```text
-old = atomic_add(word, 1 << participant)
-last = old + (1 << participant) == target
+ready_target(g) = 16 * g + 15
+done_target(g)  = 4096 * g + 4095
 ```
 
-Distinct powers of two make addition equivalent to OR while each bit is added
-exactly once. Duplicate publication is a protocol violation; it can carry into
-the generation field.
+Each participant publishes one distinct power of two with returning
+`ds_add_rtn_u32`. Participant zero also supplies the generation increment.
 
-Plain monotonic counts are insufficient. A fast participant from generation
-`g + 1` could satisfy a delayed count for generation `g`. Packed generation
-and exact target equality prevent that.
+For a slot's first use:
+
+```text
+ready extra = 16 * g
+done extra  = 4096 * g
+```
+
+For every reuse three generations later:
+
+```text
+ready contribution sum = 15 + 33     = 48
+done contribution sum  = 4095 + 8193 = 12288
+```
+
+Those increments equal each target's three-generation delta. Exact equality
+identifies the last participant without a reset race. Duplicate publication
+corrupts all later targets and is a protocol violation.
 
 ## Runtime Protocol
 
-Let:
-
-```text
-R = 3
-g = K-stage generation
-s = g % R
-
-ready_base(g)   = ready_tag(g) << 4
-ready_target(g) = ready_base(g) | 0x00f
-done_base(g)    = done_tag(g) << 12
-done_target(g)  = done_base(g) | 0xfff
-```
+Let `g` be the K-stage generation and `s = g % 3`.
 
 ### Startup
 
 All waves execute one startup sequence:
 
 1. Elect one workitem.
-2. Initialize every mailbox word to an invalid generation.
+2. Initialize every mailbox word to zero.
 3. Drain the LDS initialization stores.
 4. Execute one full workgroup barrier.
 5. Enter the wave-uniform producer/consumer branch.
 
 No full barrier appears in the recurring K loop.
-
-### Slot Publication
-
-Producer 0 is the slot coordinator.
-
-Before generation `g`:
-
-1. For `g >= R`, poll `done[s] == done_target(g - R)`.
-2. Store `done_base(g)` to `done[s]`.
-3. Wait for that store to complete.
-4. Store `ready_base(g)` to `ready[s]`.
-5. Wait for that store to complete.
-6. Execute `s_wakeup`.
-
-The ready base is the slot-generation publication. Producer peers accept the
-new ready generation with any producer-mask value: the coordinator may finish
-its DMA and set its bit before a peer observes the base.
-
-Waiting for the prior exact done target prevents a reset from racing with a
-late consumer atomic. Publishing ready only after done initialization prevents
-consumers from reaching an uninitialized done word.
 
 ### Producer Loop
 
@@ -310,15 +282,15 @@ Every producer executes:
 ```text
 for g in K / 32:
   s = g % 3
-  wait until ready[s] has generation g
+  if g >= 3:
+    wait until done[s] == done_target(g - 3)
   issue eight direct-to-LDS loads for owned A/B slabs
   wait until this wave's DMA completion condition holds
-  old = atomic_add(ready[s], 1 << producer_id)
-  if old + bit == ready_target(g):
+  contribution = producer bit + producer-0 generation increment
+  old = atomic_add(ready[s], contribution)
+  if old + contribution == ready_target(g):
     s_wakeup
 ```
-
-Producer 0 performs slot publication before its generation wait.
 
 The first variant polls to VM count zero. The producer branch issues no other
 VMEM operation inside the hot loop, so the counter has one owner and at most
@@ -345,8 +317,9 @@ for g in K / 32:
     read one B fragment
     issue four MFMAs
   wait for the final LDS read to complete
-  old = atomic_add(done[s], 1 << consumer_id)
-  if old + bit == done_target(g):
+  contribution = consumer bit + consumer-0 generation increment
+  old = atomic_add(done[s], contribution)
+  if old + contribution == done_target(g):
     s_wakeup
   finish MFMAs that only consume register fragments
 store owned output tile
@@ -361,40 +334,34 @@ Depending only on LDS issue would permit early overwrite.
 
 ## DMA Completion Poll
 
-The semantic operation is a generic counter wait:
+The Wave semantic operation waits for all VMEM represented by one dependency:
 
 ```mlir
-%complete = waveamdmachine.waitcnt_poll vmcnt after %dma
-    : !waveamdmachine.mem.token
+%complete = waveamd.vmem_wait_poll %dma
+    : (!wave.mem.token) -> !wave.mem.token
 ```
 
 It consumes ordinary memory tokens and returns an ordinary memory token. No
 issue-token type is needed.
 
-Waitcnt analysis resolves the minimal concrete threshold from scheduled token
-order, using the same ticket accounting as `s_waitcnt`. Late materialization
-expands it to:
+Machine selection expands it to a bounded runtime loop:
 
 ```text
 poll:
   raw = s_getreg_b32 HW_REG_IB_STS
   vmcnt = (raw & 0xf) | ((raw >> 18) & 0x30)
-  if vmcnt > threshold:
+  if vmcnt != 0:
     optional s_sleep 1
     goto poll
 ```
-
-Use unsigned `<= threshold`, not equality. Counter retirement may skip an
-observed value between samples.
 
 Requirements:
 
 - one full `IB_STS` read per iteration;
 - volatile hardware-state read, never `Pure`;
 - no CSE, hoisting, or rematerialization;
-- local verifier checks the counter enum and field width;
-- target lowering rejects unavailable counters or registers;
-- concrete threshold remains within the hardware counter range;
+- the read carries the DMA dependency without forcing completion;
+- a marker tells normal waitcnt analysis that the dependency is drained;
 - materialization is bounded in compile time; the loop is a runtime loop.
 
 Initial comparisons:
@@ -422,7 +389,6 @@ CDNA4 specifies `s_sleep 1` as an approximate 1 through 64 cycle sleep.
 
 Publishers call `s_wakeup` only after a visible publication:
 
-- coordinator after a new slot generation is initialized;
 - last producer after the ready target is reached;
 - last consumer after the done target is reached.
 
@@ -463,15 +429,6 @@ ready mailbox poll
   -> conditional s_wakeup
 ```
 
-Coordinator chain:
-
-```text
-prior done poll
-  -> done-base store completion
-  -> ready-base store completion
-  -> s_wakeup
-```
-
 Cross-wave communication uses LDS values. SSA values never cross mutually
 exclusive role branches. No transform may infer ordering from LDS addresses,
 operation names, or assumed aliasing.
@@ -501,12 +458,9 @@ Existing constant-like hardware-ID reads need not share the volatile trait.
 
 ### Counter Poll
 
-`waitcnt_poll` owns token-to-threshold semantics. It is counter-generic; the
-initial target implementation supports `vmcnt` because CDNA4 exposes that
-field through `IB_STS`.
-
-The op does not carry DMA timing attributes or kernel names. Waitcnt analysis,
-not operation pattern matching, supplies the threshold.
+`waveamd.vmem_wait_poll` is VMEM-specific because CDNA4 exposes that counter
+through `IB_STS`. It carries no DMA timing attributes, kernel names, or
+scheduler policy.
 
 ### Wakeup
 
@@ -526,16 +480,14 @@ Required relative order:
 
 ```text
 Wave Python DSL emits role control and explicit memory dependencies
-Wave lowering creates ordinary uniform control and machine memory ops
+machine selection expands finite poll loops into ordinary uniform control
 normal hazard repair and greedy scheduling
-normal waitcnt ticket analysis resolves waitcnt_poll thresholds
-late waitcnt-poll and mailbox-loop materialization
+normal waitcnt ticket analysis observes the poll-completion marker
 ordinary regalloc, hazard waits, resource info, and AMDGPU lowering
 ```
 
-Late materialization keeps generated loop temporaries in normal regalloc and
-hazard handling. It must run early enough for every generated register and
-memory event to be visible to those passes.
+Generated loop temporaries participate in normal scheduling, regalloc, and
+hazard handling.
 
 ## Scheduler And Model
 
@@ -569,7 +521,7 @@ Runtime mailbox loops do not cause compiler iteration to convergence.
 
 ## Register Allocation
 
-No regalloc change is part of the feature.
+No role-specific regalloc machinery is part of the feature.
 
 `uniform_if` already denotes mutually exclusive control flow. Required
 behavior:
@@ -579,8 +531,10 @@ behavior:
 - branch-local accumulators end before the join;
 - the join carries only the final token.
 
-A synthetic integration test must pin this behavior at the 128-dword boundary.
-Failure is a generic `uniform_if` liveness bug, not a reason for role metadata.
+The profile exposed one generic bug: fixed-register reservations used the
+envelope of disjoint branch ranges. Reservations now retain each range's
+start/end, allowing the same physical register in sibling branches. A
+one-VGPR regression test pins this behavior.
 
 ## Wave Python DSL Shape
 
@@ -721,6 +675,60 @@ Golden drift is acceptable only when correctness holds and measured
 performance does not regress. Existing profiles must retain their current
 performance.
 
+## Measured Result
+
+Strict random checks pass at K=32 and K=128 for both completion modes. The
+K=128 test reuses ring slot zero. A 256x256x8192 polling kernel passes random
+data exactly and HPL data with 0.5 maximum f16 difference. Two thousand
+consecutive K=8192 polling launches complete under a 30-second watchdog.
+Scheduled K=8192 compilation takes 0.55 seconds and 105 MiB peak RSS.
+
+All throughput rows use random 8192x8192x8192 inputs, 20 launches, five
+warmups, and nine same-session repeats. Medians use the same generated runner
+and no clock changes.
+
+| Kernel | Completion | Median us | TFLOP/s | vs 4-wave |
+|---|---|---:|---:|---:|
+| persistent | tight `IB_STS` poll | 1188.799 | 924.893 | -31.70% |
+| persistent | `IB_STS` poll + `s_sleep 1` | 1195.288 | 919.870 | -32.07% |
+| persistent | `s_waitcnt vmcnt(0)` | 1176.327 | 934.700 | -30.98% |
+| existing 4-wave | `s_waitcnt` | 811.930 | 1354.195 | baseline |
+| existing 8-wave | `s_waitcnt` | 863.081 | 1273.938 | -5.93% |
+
+Polling is not the gap: blocking waitcnt is 1.3% faster than the best poll.
+
+ATT captured one workgroup batch from the persistent waitcnt control and the
+4-wave baseline. Both execute 131072 MFMAs and 16384 direct-to-LDS loads in
+the captured waves.
+
+| Wave role | Traced waves | Wall cycles/wave | MFMA/wave | MFMA cycles/op | Wait cycles/wave | D2L cycles/op |
+|---|---:|---:|---:|---:|---:|---:|
+| persistent 64x80 consumer | 16 | 494913 | 5120 | 25.00 | 79566 | 0 |
+| persistent 64x96 consumer | 8 | 508438 | 6144 | 23.64 | 130874 | 0 |
+| persistent producer | 8 | 452870 | 0 | 0 | 219551 | 11.62 |
+| existing 4-wave | 8 | 294704 | 16384 | 11.94 | 5771 | 14.49 |
+
+Dedicated producers reduce direct-to-LDS cost. Consumer MFMA issue cost still
+doubles because three compute waves per SIMD repeatedly block on streamed B
+reads and mailbox waits. The baseline wave carries enough independent MFMA
+work to cover those dependencies at one resident wave per SIMD.
+
+One-launch PMC collection confirms that attribution:
+
+| Counter | Persistent | 4-wave | Ratio |
+|---|---:|---:|---:|
+| `MfmaUtil` | 47.058% | 82.006% | 0.57x |
+| `MeanOccupancyPerActiveCU` | 3.745 | 1.000 | 3.74x |
+| `SQ_WAIT_INST_ANY` | 650293084 | 178321342 | 3.65x |
+| `SQ_WAIT_INST_LDS` | 111408952 | 13305217 | 8.37x |
+| `SQ_LDS_CMD_FIFO_FULL` | 18023329 | 854881 | 21.08x |
+| `LdsLatency` | 58.260 | 54.652 | 1.07x |
+| `LdsUtil` | 28.667% | 40.759% | 0.70x |
+
+The persistent ISA uses 124 vector dwords, 26 SGPRs, no scratch, no relief,
+98336 bytes of dynamic LDS, and one startup barrier. Resource fit and
+cross-wave protocol are correct; the role partition is slower.
+
 ## Acceptance
 
 Required:
@@ -735,58 +743,53 @@ Required:
 - no scheduler special path;
 - no regression in the existing full perf sweep.
 
-The profile enters the default sweep only after it shows a repeatable win over
-the current 16-wave kernel on the same random and HPL inputs. Assembly shape or
-modeled cycles alone are not evidence.
+The profile stays out of the default sweep. It remains available through
+`--kernels=f16-persistent` for follow-up experiments.
 
-## Main Risks
+## Findings
 
 ### Counter Semantics
 
-`IB_STS.VM_CNT` may not provide the direct-to-LDS visibility point required by
-the protocol. Phase 0 decides this before kernel work.
+Poll-mode random and HPL checks through 256 K-stages observe no stale LDS.
+This is empirical gfx950 evidence, not a portable ISA guarantee.
 
 ### Compute Occupancy
 
-Three compute waves per SIMD may fail to cover MFMA dependencies even at four
-resident waves per SIMD. Dedicated producer work then consumes issue slots
-without hiding enough latency.
+Three compute waves per SIMD do not cover streamed-read and MFMA dependencies.
+Measured MFMA utilization is 47.1% despite 3.745 mean occupancy.
 
 ### Register Limit
 
-The `64x96` consumer has no slack beyond roughly twelve control dwords. Address
-hoisting, double-buffered B fragments, or wide mailbox temporaries can force
-an occupancy drop.
+The largest consumer fits at 124 vector dwords without spill or relief.
+Keeping all six B fragments would exceed the 128-dword occupancy budget.
 
 ### Mailbox Cost
 
 Every K32 stage adds four ready atomics, twelve done atomics, LDS polls, and
-wakeups. Reduced barriers and LDS reads must repay that traffic.
+wakeups. `SQ_WAIT_INST_LDS` rises 8.37x and command-FIFO-full cycles rise
+21.08x.
 
 ### Logical-To-Physical Mapping
 
-Four logical producers may not remain one per SIMD. The protocol stays correct,
-but D2L issue balance may collapse. Validate mapping and ATT distribution.
+ATT sees the producer slot on each selected SIMD. D2L cost falls from 14.49 to
+11.62 cycles per instruction, so producer placement is not the loss.
 
 ### Store Layout
 
-`64x80` and `64x96` ownership must preserve coalesced, disjoint output stores.
-Do not accept extra transpose LDS or a store regression without measuring the
-whole-kernel tradeoff.
+Strict random checks confirm disjoint 5/5/6 ownership. Ordinary MFMA output
+requires 64-bit column-major stores; the baseline's coalesced output path is
+wider.
 
-## Open Questions
+## Follow-Up Questions
 
-- Does gfx950 retire direct-to-LDS data before `IB_STS.VM_CNT` reaches zero?
-- Is a tight scalar poll cheaper than blocking `s_waitcnt`?
-- Does `s_sleep 1` reduce issue pressure without delaying ready publication?
 - Is ring depth three useful once consumer release moves before the MFMA tail?
-- Does logical slot 3 place one producer on every SIMD for a full-CU workgroup?
-- Can current coalesced output lowering express 5/5/6 N-tile ownership without
-  extra LDS?
 - Should producers run at elevated priority only while issuing DMA?
 - Does a two-producer, one-per-SIMD-pair variant offset its less regular
   consumer partition?
-- Are returning atomics more expensive than the eliminated barrier protocol?
+- Can a different ownership split retain baseline MFMA ILP without exceeding
+  128 vector dwords?
+- Can publication avoid sixteen returning atomics per K32 without a full
+  workgroup barrier?
 
 ## References
 

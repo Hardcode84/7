@@ -19,10 +19,13 @@ from statistics import median
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
 STREAMK_EXAMPLE = REPO_ROOT / "examples/wave/streamk_f16_gemm.py"
+PERSISTENT_EXAMPLE = REPO_ROOT / "examples/wave/persistent_wave_gemm.py"
 TENSILELITE_EXAMPLE = REPO_ROOT / "examples/wave/tensilelite_mxfp4_subtile.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
 STREAMK_KERNEL_NAME = "gfx950_f16_streamk_gemm"
+PERSISTENT_KERNEL_NAME = "gfx950_persistent_f16_gemm"
+PERSISTENT_LDS_BYTES = 98_336
 V9_GOLDEN_NAME = "v9_4096.original.wave"
 V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
@@ -117,6 +120,25 @@ _MXFP4_AITER_PROFILE: dict[str, ProfileValue] = {
 }
 
 KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
+    "gfx950-f16-256x256-16wave-persistent": {
+        "example": "persistent-gemm",
+        "bm": 4,
+        "bn": 4,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 1,
+        "target_waves": 4,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "output_layout": "column-major",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+        "persistent_completion": "poll",
+        "persistent_poll_sleep_cycles": 1,
+    },
     "gfx950-f16-256x256-16wave": {
         "bm": 4,
         "bn": 4,
@@ -366,9 +388,15 @@ def is_streamk_gemm(args: argparse.Namespace) -> bool:
     return selected_example(args) == "streamk-gemm"
 
 
+def is_persistent_gemm(args: argparse.Namespace) -> bool:
+    return selected_example(args) == "persistent-gemm"
+
+
 def kernel_name(args: argparse.Namespace) -> str:
     if is_streamk_gemm(args):
         return STREAMK_KERNEL_NAME
+    if is_persistent_gemm(args):
+        return PERSISTENT_KERNEL_NAME
     if is_v9_perf_golden(args):
         return V9_GOLDEN_KERNEL_NAME
     if is_tlx_mxfp_perf_golden(args):
@@ -531,9 +559,24 @@ def build_streamk_example_args(args: argparse.Namespace, chip: str) -> list[str]
     ]
 
 
+def build_persistent_example_args(args: argparse.Namespace, chip: str) -> list[str]:
+    return [
+        sys.executable,
+        str(PERSISTENT_EXAMPLE),
+        f"--chip={chip}",
+        f"--m={args.m}",
+        f"--n={args.n}",
+        f"--k={args.k}",
+        f"--completion={args.persistent_completion}",
+        f"--poll-sleep-cycles={args.persistent_poll_sleep_cycles}",
+    ]
+
+
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     if is_streamk_gemm(args):
         return build_streamk_example_args(args, chip)
+    if is_persistent_gemm(args):
+        return build_persistent_example_args(args, chip)
     if selected_example(args) == "tensilelite-subtile":
         return build_tensilelite_example_args(args, chip)
     if is_checked_in_perf_golden(args):
@@ -803,6 +846,8 @@ def compute_sim_loop_trip_count(args: argparse.Namespace) -> int:
     virtual_k_steps = compute_virtual_k_steps(args)
     if is_checked_in_perf_golden(args):
         return max((virtual_k_steps - 2) // 2, 0)
+    if is_persistent_gemm(args):
+        return virtual_k_steps
     if (
         selected_example(args) == "tensilelite-subtile"
         and selected_scale_input(args) == "tensilelite"
@@ -913,6 +958,8 @@ def dma_buffer_count(args: argparse.Namespace) -> int:
 
 
 def compute_lds_bytes(args: argparse.Namespace) -> int:
+    if is_persistent_gemm(args):
+        return PERSISTENT_LDS_BYTES
     if selected_example(args) == "tensilelite-subtile":
         slots = args.wave_k_tiles * (
             args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
@@ -1153,6 +1200,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         choices=(
             "matmul",
             "streamk-gemm",
+            "persistent-gemm",
             "tensilelite-subtile",
             "v9-perf-golden",
             "tlx-mxfp-perf-golden",
@@ -1213,6 +1261,12 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--coalesced-mfma-output", action="store_true")
     ap.add_argument("--streamk-workers", type=int, default=1)
+    ap.add_argument(
+        "--persistent-completion",
+        choices=("poll", "waitcnt"),
+        default="poll",
+    )
+    ap.add_argument("--persistent-poll-sleep-cycles", type=int, default=1)
 
 
 def add_runtime_args(ap: argparse.ArgumentParser) -> None:
@@ -1500,6 +1554,44 @@ def _validate_streamk_gemm_args(args: argparse.Namespace) -> None:
     _validate_streamk_work(args, tile_count)
 
 
+def _validate_persistent_gemm_args(args: argparse.Namespace) -> None:
+    _require_arg(args.chip == "gfx950", "--example=persistent-gemm requires gfx950")
+    _require_arg(
+        args.input_type == "f16" and args.output_type == "f16",
+        "--example=persistent-gemm requires f16 input and output",
+    )
+    _require_arg(
+        selected_matrix_intrinsic(args) == "mfma_gfx950",
+        "--example=persistent-gemm requires gfx950 MFMA",
+    )
+    _require_arg(
+        args.m % 256 == 0 and args.n % 256 == 0 and args.k % 32 == 0,
+        "--example=persistent-gemm requires M/N multiples of 256 and K of 32",
+    )
+    _require_arg(
+        (
+            args.bm == 4
+            and args.bn == 4
+            and args.wave_m_tiles == 4
+            and args.wave_n_tiles == 4
+            and args.wave_k_tiles == 1
+        ),
+        "--example=persistent-gemm requires the 256x256x32 16-wave shape",
+    )
+    _require_arg(
+        args.cta_swizzle_xcds == 8 and args.cta_group_m == 4,
+        "--example=persistent-gemm requires NUM_XCDS=8 and GROUP_SIZE_M=4",
+    )
+    _require_arg(
+        args.output_layout == "column-major",
+        "--example=persistent-gemm requires column-major output",
+    )
+    _require_arg(
+        0 <= args.persistent_poll_sleep_cycles <= 15,
+        "--persistent-poll-sleep-cycles must be in [0, 15]",
+    )
+
+
 def _validate_v9_perf_golden_args(args: argparse.Namespace) -> None:
     _require_arg(args.chip == "gfx950", "--example=v9-perf-golden requires gfx950")
     _require_arg(
@@ -1583,6 +1675,9 @@ def _validate_tlx_mxfp_perf_golden_args(args: argparse.Namespace) -> None:
 def validate_example_args(args: argparse.Namespace) -> None:
     if is_streamk_gemm(args):
         _validate_streamk_gemm_args(args)
+        return
+    if is_persistent_gemm(args):
+        _validate_persistent_gemm_args(args)
         return
     if selected_example(args) == "matmul":
         _require_arg(
@@ -1734,6 +1829,11 @@ def print_header(args: argparse.Namespace, chip: str) -> None:
         print(
             f"streamk_workers={args.streamk_workers} "
             f"scratch_bytes={scratch_bytes} counter_bytes={counter_bytes}"
+        )
+    if is_persistent_gemm(args):
+        print(
+            f"persistent_completion={args.persistent_completion} "
+            f"poll_sleep_cycles={args.persistent_poll_sleep_cycles}"
         )
 
 

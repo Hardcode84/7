@@ -576,6 +576,27 @@ FlashAttention kernel. Use `--kernels=fa` for FA alone; its shape overrides are
 See [Wave gfx950 FlashAttention](PerfReferences/WaveGfx950FlashAttention.md)
 for the current ISA profile and retained branch experiments.
 
+## `gfx950-f16-256x256-16wave-persistent`
+
+Opt-in 4-producer/12-consumer experiment. Four persistent waves issue
+direct-to-LDS traffic; twelve waves compute 64x80 or 64x96 output strips.
+Three LDS stages use 98336 dynamic bytes. Monotonic returning-atomic mailboxes
+replace steady-state barriers.
+
+```bash
+python tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py \
+  --kernels=f16-persistent --m=8192 --n=8192 --k-values=8192
+```
+
+`--extra-calibrator-arg=--persistent-completion=waitcnt` selects the blocking
+control. Default is `IB_STS.VM_CNT` polling with `s_sleep 1`.
+
+Random 8192x8192x8192 medians are 919.9 TFLOP/s for polling and 934.7 TFLOP/s
+for waitcnt, versus 1354.2 TFLOP/s for the existing 4-wave kernel. The profile
+therefore stays out of `all`. See
+[asymmetric persistent-wave GEMM](Gfx950AsymmetricPersistentWaveGemmDesign.md)
+for protocol, correctness, ATT, and PMC results.
+
 ## `gfx950-mxfp4-256x256-4wave`
 
 Lower-occupancy MXFP4 GEMM profile for 4096x4096xK:
