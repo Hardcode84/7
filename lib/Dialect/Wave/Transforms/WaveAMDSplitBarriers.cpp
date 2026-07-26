@@ -30,12 +30,13 @@ namespace {
 static constexpr StringLiteral kEnableSplitBarriersAttr =
     "waveamdmachine.enable_split_barriers";
 
-static bool isUnderExecIf(waveamdmachine::SBarrierOp barrier) {
-  return barrier->getParentOfType<waveamdmachine::ExecIfOp>() != nullptr;
+static bool isUnderWaveConditional(waveamdmachine::SBarrierOp barrier) {
+  return barrier->getParentOfType<waveamdmachine::ExecIfOp>() ||
+         barrier->getParentOfType<waveamdmachine::UniformIfOp>();
 }
 
 static bool isEligibleBarrier(waveamdmachine::SBarrierOp barrier) {
-  if (isUnderExecIf(barrier))
+  if (isUnderWaveConditional(barrier))
     return false;
   return true;
 }

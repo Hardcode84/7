@@ -152,3 +152,28 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 }
+
+// -----
+
+// CHECK-LABEL: func.func @keeps_uniform_if_barrier(
+// CHECK: waveamdmachine.uniform_if
+// CHECK: waveamdmachine.s_barrier
+// CHECK-NOT: waveamdmachine.barrier_init
+// CHECK-NOT: waveamdmachine.barrier_arrive
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @keeps_uniform_if_barrier(
+      %cond: !waveamdmachine.reg<scc, 1>)
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>,
+                  wave.waves_per_workgroup = 8 : i64,
+                  waveamdmachine.enable_split_barriers} {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    waveamdmachine.uniform_if %cond {
+      %ready = waveamdmachine.s_barrier %root
+          : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield
+    } otherwise {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<scc, 1>
+    return
+  }
+}
