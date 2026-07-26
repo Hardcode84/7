@@ -860,6 +860,16 @@ class FunctionBuilder:
         width = SimdType(lhs.type).width
         return wave.CmpFOp(mask_type(width), predicate, lhs, rhs).result
 
+    def scalar_cmpi(
+        self,
+        predicate: CmpIPredicate | str,
+        lhs: Value,
+        rhs: Value,
+    ) -> Value:
+        if isinstance(predicate, str):
+            predicate = CmpIPredicate[predicate]
+        return arith.CmpIOp(predicate, lhs, rhs).result
+
     def ballot(self, mask: Value, result_type: Type | None = None) -> Value:
         """Materialize `!wave.mask<W>` as integer bits via `wave.ballot`."""
         result_type = result_type or IntegerType.get_signless(32)
@@ -943,6 +953,9 @@ class FunctionBuilder:
     def fmul(self, lhs: Value, rhs: Value) -> Value:
         return wave.FMulOp(lhs.type, lhs, rhs).result
 
+    def fma(self, lhs: Value, rhs: Value, acc: Value) -> Value:
+        return wave.FmaOp(lhs.type, lhs, rhs, acc).result
+
     def fmax(self, lhs: Value, rhs: Value) -> Value:
         return wave.FMaxOp(lhs.type, lhs, rhs).result
 
@@ -951,6 +964,12 @@ class FunctionBuilder:
 
     def frcp(self, value: Value) -> Value:
         return wave.FRcpOp(value.type, value).result
+
+    def pack(self, inputs: Sequence[Value], result_type: Type) -> Value:
+        return wave.PackOp(result_type, list(inputs)).result
+
+    def extract(self, source: Value, index: int, result_type: Type) -> Value:
+        return wave.ExtractOp(result_type, source, index).result
 
     def index_expr(
         self,
@@ -1245,7 +1264,9 @@ class FunctionBuilder:
         """
         return waveamd.FragmentPackOp(frag_type, registers).result
 
-    def fragment_unpack(self, fragment: Value) -> Value:
+    def fragment_unpack(
+        self, fragment: Value, result_type: Type | None = None
+    ) -> Value:
         """Expose a WMMA fragment as a SIMD-of-vector register tuple.
 
         Inverse rename for :meth:`fragment_pack`: surfaces a
@@ -1256,7 +1277,7 @@ class FunctionBuilder:
         WaveAMDMachine level.
         """
         frag = FragmentType(fragment.type)
-        result_type = simd_type(
+        result_type = result_type or simd_type(
             vector_type(frag.registers, i32()), width=frag.wave_size
         )
         return waveamd.FragmentUnpackOp(result_type, fragment).result

@@ -124,6 +124,28 @@ def test_waveamd_matrix_kernel():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_packed_fragment_math
+@run
+def test_packed_fragment_math():
+    with w.module() as m:
+        packet = w.simd_type(w.vector_type(16, w.f32()), width=64)
+        scalar = w.simd_type(w.f32(), width=64)
+        frag_t = w.fragment_type(2, w.f32(), 32, 32, 64, 16)
+        with m.function("packed_fragment_math", [scalar], kernel=True) as f:
+            (value,) = f.args
+            packed = f.pack([value] * 16, packet)
+            fragment = f.fragment_pack(packed, frag_t)
+            unpacked = f.fragment_unpack(fragment, packet)
+            first = f.extract(unpacked, 0, scalar)
+            f.fma(first, first, first)
+        # CHECK: wave.pack
+        # CHECK: waveamd.fragment_pack
+        # CHECK: waveamd.fragment_unpack
+        # CHECK: wave.extract
+        # CHECK: wave.fma
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_waveamd_load_and_fragment_pack
 @run
 def test_waveamd_load_and_fragment_pack():
@@ -645,6 +667,24 @@ def test_float_mask():
         # CHECK: [[MASK:%.*]] = wave.cmpf ole [[LHS]], [[RHS]]
         # CHECK-SAME: -> !wave.mask<32>
         # CHECK: wave.ballot [[MASK]]
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_float_mask_uniform_vote
+@run
+def test_float_mask_uniform_vote():
+    with w.module() as m:
+        with m.function("float_mask_uniform_vote", [w.f32()]) as f:
+            (limit,) = f.args
+            lhs = f.splat(limit, width=64)
+            rhs = f.splat(f.constant(w.f32(), 8.0), width=64)
+            mask = f.cmpf("ole", lhs, rhs)
+            bits = f.ballot(mask, w.i64())
+            all_lanes = f.constant(w.i64(), -1)
+            f.scalar_cmpi("eq", bits, all_lanes)
+        # CHECK: wave.cmpf ole
+        # CHECK: wave.ballot
+        # CHECK: arith.cmpi eq
         print(m.module)
 
 
