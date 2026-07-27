@@ -18,6 +18,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -264,15 +265,16 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
   if (failed(sti))
     return failure();
 
+  llvm::AMDGPU::GPUKind gpuKind =
+      llvm::AMDGPU::parseArchAMDGCN((*sti)->getCPU());
   WaveAMDRegisterLimits limits;
-  limits.addressableSGPRs =
-      llvm::AMDGPU::IsaInfo::getAddressableNumSGPRs(**sti);
+  limits.addressableSGPRs = llvm::AMDGPU::getAddressableNumSGPRs(gpuKind);
   limits.addressableVGPRs =
       std::min(llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
                    **sti, /*DynamicVGPRBlockSize=*/0),
                kTextAsmVGPRLimit);
   limits.addressableAGPRs = getAddressableAGPRs(**sti);
-  limits.sgprAllocGranule = llvm::AMDGPU::IsaInfo::getSGPRAllocGranule(**sti);
+  limits.sgprAllocGranule = llvm::AMDGPU::getSGPRAllocGranule(gpuKind);
   limits.vgprAllocGranule = llvm::AMDGPU::IsaInfo::getVGPRAllocGranule(
       **sti, /*DynamicVGPRBlockSize=*/0);
   limits.agprAllocGranule = limits.vgprAllocGranule;

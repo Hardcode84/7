@@ -76,7 +76,7 @@ mlir::waveamdmachine::parseAMDGPUTargetAttr(StringRef value) {
   StringRef features;
   if (!splitChipAndFeatures(parts->chipAndFeatures, chip, features))
     return std::nullopt;
-  if (llvm::Triple(parts->triple).getArch() != llvm::Triple::amdgcn)
+  if (llvm::Triple(parts->triple).getArch() != llvm::Triple::amdgpu)
     return std::nullopt;
   return AMDGPUTarget{parts->triple.str(), chip.str(), features.str()};
 }
