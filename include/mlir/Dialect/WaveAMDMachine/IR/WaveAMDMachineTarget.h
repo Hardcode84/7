@@ -17,8 +17,16 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+
+namespace llvm {
+class MCSubtargetInfo;
+}
+
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTargetEnums.h.inc"
 
 namespace mlir::waveamdmachine {
 
@@ -26,6 +34,43 @@ struct AMDGPUTarget {
   std::string triple;
   std::string chip;
   std::string features;
+  llvm::AMDGPU::IsaVersion isa = {0, 0, 0};
+  llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::GK_NONE;
+};
+
+struct AMDGPUKernelDescriptorCapabilities {
+  bool dx10ClampAndIEEEMode = false;
+  bool wgpMode = false;
+  bool sharedVGPRCount = false;
+  bool roundRobin = false;
+  bool namedBarrierCount = false;
+  bool architectedPrivateSegment = false;
+};
+
+struct AMDGPUTargetCapabilities {
+  llvm::AMDGPU::IsaVersion isa = {0, 0, 0};
+  unsigned defaultWavefrontSize = 0;
+  unsigned addressableSGPRs = 0;
+  unsigned addressableVGPRs = 0;
+  unsigned addressableAGPRs = 0;
+  unsigned vgprAllocationGranule = 0;
+  unsigned vgprTupleAlignment = 0;
+  unsigned localMemoryBytes = 0;
+  unsigned addressableLocalMemoryBytes = 0;
+  unsigned localMemoryBankCount = 0;
+  unsigned maxWavesPerEU = 0;
+  unsigned maxUserSGPRs = 0;
+  unsigned bufferResourceBaseBits = 0;
+  unsigned bufferResourceNumRecordsBits = 0;
+  AMDGPUKernelDescriptorCapabilities kernelDescriptor;
+  WaitCounterFamily waitCounterFamily = WaitCounterFamily::Legacy;
+  MatrixFamily matrixFamily = MatrixFamily::None;
+  bool supportsWave32 = false;
+  bool supportsWave64 = false;
+  bool architectedFlatScratch = false;
+  bool kernargPreload = false;
+  bool vgprWindowing = false;
+  bool setregVGPRMSBFixup = false;
 };
 
 std::optional<AMDGPUTarget> parseAMDGPUTargetAttr(llvm::StringRef value);
@@ -41,6 +86,18 @@ FailureOr<AMDGPUTarget> getAMDGPUTarget(Operation *op,
 
 FailureOr<llvm::AMDGPU::IsaVersion>
 getAMDGPUTargetIsaVersion(Operation *op, llvm::StringRef consumer);
+
+std::unique_ptr<llvm::MCSubtargetInfo>
+createAMDGPUMCSubtargetInfo(const AMDGPUTarget &target,
+                            std::string *error = nullptr);
+
+FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
+createAMDGPUMCSubtargetInfo(Operation *op, llvm::StringRef consumer);
+
+std::optional<AMDGPUTargetCapabilities>
+getAMDGPUTargetCapabilities(const llvm::MCSubtargetInfo &sti);
+
+unsigned getAMDGPUAddressableAGPRs(const llvm::MCSubtargetInfo &sti);
 
 bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);
 

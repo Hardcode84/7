@@ -10,8 +10,13 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
   MLIRWaveAMDMachineEnumsIncGen
   MLIRWaveAMDMachineInterfacesIncGen
   MLIRWaveAMDMachineOpsIncGen
+  MLIRWaveAMDMachineTargetEnumsIncGen
 
   LINK_COMPONENTS
+
+  AMDGPUDesc
+  AMDGPUInfo
+  AMDGPUUtils
   TargetParser
 
   LINK_LIBS PUBLIC
@@ -19,4 +24,10 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
   MLIRInferIntRangeCommon
   MLIRInferIntRangeInterface
   MLIRIR
+  )
+
+target_include_directories(obj.MLIRWaveAMDMachineDialect
+  PRIVATE
+  ${LLVM_MAIN_SRC_DIR}/lib/Target/AMDGPU
+  ${LLVM_BINARY_DIR}/lib/Target/AMDGPU
   )

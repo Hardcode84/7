@@ -16,11 +16,8 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/TargetRegistry.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 #include "llvm/TargetParser/TargetParser.h"
-#include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
 #include <limits>
@@ -110,33 +107,7 @@ std::string getWaveAMDSGPRName(unsigned index, unsigned width) {
 
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(Operation *op, StringRef consumer) {
-  FailureOr<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::getAMDGPUTarget(op, consumer);
-  if (failed(target))
-    return failure();
-
-  static llvm::once_flag initializeBackendOnce;
-  llvm::call_once(initializeBackendOnce, []() {
-    LLVMInitializeAMDGPUTargetInfo();
-    LLVMInitializeAMDGPUTargetMC();
-  });
-
-  llvm::Triple triple(target->triple);
-  std::string error;
-  const llvm::Target *llvmTarget =
-      llvm::TargetRegistry::lookupTarget(triple, error);
-  if (!llvmTarget)
-    return op->emitError("failed to lookup AMDGPU target: ") << error;
-
-  std::unique_ptr<llvm::MCSubtargetInfo> sti(
-      llvmTarget->createMCSubtargetInfo(triple, target->chip, /*Features=*/""));
-  if (!sti)
-    return op->emitError("unsupported AMDGPU target: ")
-           << target->triple << "--" << target->chip;
-  if (llvm::AMDGPU::getIsaVersion(target->chip).Major == 0)
-    return op->emitError("unsupported AMDGPU target: ")
-           << target->triple << "--" << target->chip;
-  return sti;
+  return waveamdmachine::createAMDGPUMCSubtargetInfo(op, consumer);
 }
 
 FailureOr<bool> hasWaveAMDPackedTID(Operation *op, StringRef consumer) {
@@ -194,16 +165,16 @@ unsigned getWaveAMDDefaultKernargPreloadDwords(func::FuncOp func) {
   return getCompletePrefixDwords(layout, *maxDwords);
 }
 
-static bool isGfx125x(const llvm::AMDGPU::IsaVersion &isa) {
-  return isa.Major == 12 && isa.Minor == 5;
-}
-
 // Text ISA names only v0..v255.
 static constexpr unsigned kTextAsmVGPRLimit = 256;
 
+static std::optional<waveamdmachine::AMDGPUTargetCapabilities>
+getTargetCapabilities(const llvm::MCSubtargetInfo &sti) {
+  return waveamdmachine::getAMDGPUTargetCapabilities(sti);
+}
+
 static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
-  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
-  return waveamdmachine::supportsAGPRs(isa) ? 256 : 0;
+  return waveamdmachine::getAMDGPUAddressableAGPRs(sti);
 }
 
 FailureOr<WaveAMDLocalMemoryLimits>
@@ -212,6 +183,10 @@ getWaveAMDLocalMemoryLimits(Operation *op, StringRef consumer) {
       createSubtargetInfo(op, consumer);
   if (failed(sti))
     return failure();
+  if (std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+          getTargetCapabilities(**sti))
+    return WaveAMDLocalMemoryLimits{capabilities->localMemoryBytes,
+                                    capabilities->addressableLocalMemoryBytes};
   return WaveAMDLocalMemoryLimits{
       llvm::AMDGPU::IsaInfo::getLocalMemorySize(**sti),
       llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(**sti)};
@@ -225,8 +200,7 @@ FailureOr<bool> needsWaveAMDKernargPreloadCompatProlog(Operation *op,
     return failure();
   if (!llvm::AMDGPU::hasKernargPreload(**sti))
     return false;
-  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
-  return !isGfx125x(isa);
+  return !llvm::AMDGPU::isGFX1250Plus(**sti);
 }
 
 LogicalResult verifyWaveAMDKernargPreloadTarget(func::FuncOp func,
@@ -267,18 +241,32 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
 
   llvm::AMDGPU::GPUKind gpuKind =
       llvm::AMDGPU::parseArchAMDGCN((*sti)->getCPU());
+  std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+      getTargetCapabilities(**sti);
+  unsigned addressableSGPRs =
+      capabilities ? capabilities->addressableSGPRs
+                   : llvm::AMDGPU::getAddressableNumSGPRs(gpuKind);
+  unsigned addressableVGPRs =
+      capabilities ? capabilities->addressableVGPRs
+                   : llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
+                         **sti, /*DynamicVGPRBlockSize=*/0);
+  unsigned addressableAGPRs = capabilities ? capabilities->addressableAGPRs
+                                           : getAddressableAGPRs(**sti);
+  unsigned vgprAllocGranule = capabilities
+                                  ? capabilities->vgprAllocationGranule
+                                  : llvm::AMDGPU::IsaInfo::getVGPRAllocGranule(
+                                        **sti, /*DynamicVGPRBlockSize=*/0);
+  unsigned maxWavesPerEU = capabilities
+                               ? capabilities->maxWavesPerEU
+                               : llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(**sti);
   WaveAMDRegisterLimits limits;
-  limits.addressableSGPRs = llvm::AMDGPU::getAddressableNumSGPRs(gpuKind);
-  limits.addressableVGPRs =
-      std::min(llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
-                   **sti, /*DynamicVGPRBlockSize=*/0),
-               kTextAsmVGPRLimit);
-  limits.addressableAGPRs = getAddressableAGPRs(**sti);
+  limits.addressableSGPRs = addressableSGPRs;
+  limits.addressableVGPRs = std::min(addressableVGPRs, kTextAsmVGPRLimit);
+  limits.addressableAGPRs = addressableAGPRs;
   limits.sgprAllocGranule = llvm::AMDGPU::getSGPRAllocGranule(gpuKind);
-  limits.vgprAllocGranule = llvm::AMDGPU::IsaInfo::getVGPRAllocGranule(
-      **sti, /*DynamicVGPRBlockSize=*/0);
+  limits.vgprAllocGranule = vgprAllocGranule;
   limits.agprAllocGranule = limits.vgprAllocGranule;
-  limits.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(**sti);
+  limits.maxWavesPerEU = maxWavesPerEU;
   limits.agprCountsAgainstVGPRs = llvm::AMDGPU::isGFX90A(**sti);
   limits.maxSGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   limits.maxVGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);

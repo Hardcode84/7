@@ -20,6 +20,7 @@ set(WAVE_MLIR_TEST_DEPENDS
   wave-opt
   wave-sim-report
   wave-symbols-test
+  wave-target-info
   wave-translate
   wavec
 )
