@@ -584,6 +584,167 @@ All loops are runtime loops:
 Compiler simulation and reporting keep their existing bounded trip-count
 policy. No transform iterates to runtime `P`, `T`, `I`, or split count.
 
+## Initial results
+
+Measured 2026-07-26 on one idle MI350X (`gfx950`, reported shader clock
+2200 MHz), HPL inputs, seven repeats:
+
+| Shape | Kernel | Workers | Median us | TFLOP/s |
+|---|---|---:|---:|---:|
+| 8192x8192x8192 | four-wave baseline | 1024 CTAs | 900.701 | 1220.73 |
+| 8192x8192x8192 | Stream-K | 1024 | 903.487 | 1216.96 |
+| 8192x8192x8192 | Stream-K | 256 | 974.404 | 1128.39 |
+| 2048x2048x8192 | four-wave baseline | 64 CTAs | 134.655 | 510.34 |
+| 2048x2048x8192 | Stream-K | 64 | 135.781 | 506.11 |
+| 2048x2048x8192 | Stream-K | 128 | 260.910 | 263.38 |
+| 2048x2048x8192 | Stream-K | 256 | 280.370 | 245.10 |
+
+Initial aligned one-tile workers reproduced baseline within 0.4%. Persistent
+tile transitions cost about 18 us per device-wide round at 8192. Initial split
+tiles lacked the full tile's subpanel pipeline, then wrote and reloaded a full
+FP32 accumulator tile. The profile below isolates those costs and their fixes.
+
+### Aligned fast path
+
+Matched 2026-07-26 HPL medians:
+
+| Kernel | Workers | Median us | TFLOP/s |
+|---|---:|---:|---:|
+| Stream-K before aligned lowering | 256 | 976.356 | 1126.14 |
+| Stream-K aligned, contiguous tiles | 256 | 968.068 | 1135.78 |
+| Stream-K aligned, round-robin tiles | 256 | 902.388 | 1218.45 |
+| Four-wave control | 1024 CTAs | 902.086 | 1218.85 |
+
+Round-robin removes 7.58% from the pre-change Stream-K time and matches the
+non-persistent control within 0.03%. Nine-repeat random medians were 744.116 us
+(1477.61 TFLOP/s) for Stream-K and 748.226 us (1469.49 TFLOP/s) for the
+four-wave control.
+
+The generated 8192 assembly shrank from 5885 to 1331 lines. It uses 392 total
+vector registers, 48 SGPRs, no private segment, and no scratch or atomic
+instructions. Module-to-assembly compilation fell from about 4.8 seconds to
+about 0.9 seconds.
+
+Cache probes rejected balanced 16-by-16 rounds at 934.552 us and transposed
+8-by-32 rounds at 978.790 us. Group-M 2 regressed to 919.801 us; group-M 8
+overlapped the retained group-M 4. Removing the tile-transition barrier and
+flushing denorm modes did not help.
+
+Final-K column stores now enter the normal scheduler as soon as their eight
+accumulators are complete. The scheduler interleaves the 32 packet stores with
+remaining MFMA groups. Resources stay at 392 VGPRs, 48 SGPRs, and zero scratch.
+Matched 500-iteration, nine-repeat medians:
+
+| Input | Stores after all MFMA | Column stores in final MFMA | Delta |
+|---|---:|---:|---:|
+| HPL | 905.629 us | 903.860 us | +0.20% |
+| random integer | 726.836 us | 723.523 us | +0.46% |
+
+Alternating base/candidate runs at `4096x4096` covered every sweep K. K=512
+improved 2.54%; all other points were flat to 0.30% faster.
+
+Three aligned experiments were rejected:
+
+- Hoisting the M traversal state across tile rounds raised VGPRs from 392 to
+  396 and SGPRs from 48 to 102. HPL and random regressed 2.6% and 2.8%.
+- Two 256x256 outputs sharing one operand exceed the practical accumulator
+  budget. The 8-wave form failed LDS relief; the 16-wave form needed 132 VGPRs
+  against its 128-register occupancy limit.
+- Splitting LDS-reuse and output-store completion tokens emitted identical
+  scheduled code plus one exit `s_barrier`. No cross-tile overlap appeared.
+
+### Cross-tile DMA carry
+
+The aligned multi-tile path now carries the subpanel pipeline across output
+tiles. Each transition computes the current tile's final two K64 stages with
+the normal step emitter while issuing the next tile's first two stages into
+the released LDS slots. Accumulators reset at the transition; DMA and LDS-read
+tokens remain loop-carried. A separate final drain avoids dummy prefetches.
+Column stores retain the final-MFMA interleave.
+
+Matched random-input measurements used `M=N=8192`, 256 workers, 25 warmups,
+300 launches, and three repeats:
+
+| K | Before us | Carried us | Throughput delta |
+|---:|---:|---:|---:|
+| 512 | 76.079 | 70.876 | +7.34% |
+| 1024 | 120.877 | 117.012 | +3.30% |
+| 2048 | 204.049 | 201.799 | +1.11% |
+| 3072 | 294.558 | 289.849 | +1.62% |
+| 4096 | 379.643 | 375.689 | +1.05% |
+| 8192 | 739.870 | 736.817 | +0.41% |
+| 16384 | 1558.734 | 1559.641 | -0.06% |
+
+A separate seven-repeat 8K pair measured 741.747 versus 738.714 us
+(1.482 versus 1.488 PFLOP/s). Strict random checks passed at K=256 and K=8192.
+
+Porting the eight-wave spatial pipeline into Stream-K was rejected. Explicit
+cross-tile carry improved that form from 752.555 to 746.937 us, but remained
+behind the four-wave control. A dedicated final drain measured 748.538 us.
+
+### Split-tile profile
+
+Profiled at `2048x2048x8192`, 128 workers, HPL inputs, 25 warmups, 200
+iterations, and seven timing repeats:
+
+| Change | Median us | TFLOP/s |
+|---|---:|---:|
+| Initial same-kernel reduction | 261.113 | 263.18 |
+| 128-bit fragment scratch stores | 235.792 | 291.44 |
+| Runtime-bounded DMA subpanel pipeline | 197.611 | 347.75 |
+| 128-bit full-address scratch loads | 145.976 | 470.76 |
+| One-column spill-free reduction | 112.461 | 611.05 |
+| Two-column spill-free reduction | 110.218 | 623.49 |
+| Buffer scratch without overlap | 112.497 | 610.86 |
+| Buffer scratch with two-owner output overlap | 110.222 | 623.46 |
+
+Four columns remained spill-free but regressed to 120.050 us. Retaining the
+elected workgroup's full accumulator forced a 3752-byte private segment and
+regressed to 847.171 us.
+
+Final PMC comparison:
+
+| Counter | Four-wave control | Initial split | Final split |
+|---|---:|---:|---:|
+| `MfmaUtil` | 20.652% | 10.899% | 26.383% |
+| `SQ_WAIT_ANY` | 726334 | 19997592 | 4220974 |
+| `SQ_INSTS_VMEM_RD` | 524288 | 656256 | 557952 |
+| `SQ_INSTS_VMEM_WR` | 8192 | 139712 | 41408 |
+
+The initial scalar scratch layout generated 256 store sites and 8x TCC write
+sector amplification. Bounded scratch now uses `buffer_*_dwordx4` with i32
+offsets; allocations larger than the 32-bit descriptor range keep addr64
+global operations. No private loads or stores remain.
+
+Removing addr64 arithmetic exposed scratch latency: the first buffer form
+regressed by 2.1%. The two-owner path issues both load groups, then computes
+output offsets while VMEM is outstanding. Other owner counts retain the
+nonzero reduction loop. Loop-carried owner lookahead failed random-data
+correctness and was rejected.
+
+At 2048 with 128 workers, paired medians were 110.340 us for frozen global
+scratch and 110.220/110.224 us for buffer scratch. At 8192, 255 workers measured
+1606.024 versus 1604.493 us; aligned 256 workers measured 969.404 versus
+970.103 us. Both 8192 comparisons have overlapping samples.
+
+The random-input 4096 sweep covered every documented FP16 K value. It reached
+1450.99 TFLOP/s at K=8192 and 1421.97 TFLOP/s at K=16384; all completion
+counters passed. The 31 non-Stream-K sweep HSACOs remained byte-identical, with
+a +0.09% median timing delta.
+
+Freezing the worker count improved the matched 2048 split median from 111.543
+to 109.889 us. A separate uniform-split lowering was 0.3-1.3% slower in binary
+A/B runs and was rejected.
+
+`rocprofv3 --att` captured raw gfx950 traces, but the installed decoder rejects
+them with error 37. No packages or profiler components were changed; PMC and
+ISA correlation supplied the measurements above.
+
+Random and HPL split-tile checks pass exactly within the existing FP16
+tolerance. Random and HPL aligned multi-tile checks also pass. A five-worker
+uneven partition passes 1,000 consecutive launches with every completion
+counter returned to zero.
+
 ## Implementation sequence
 
 1. Add pure partition and scratch-slot helpers with exhaustive Python tests.
