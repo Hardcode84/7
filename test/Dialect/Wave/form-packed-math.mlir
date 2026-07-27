@@ -2,6 +2,60 @@
 
 module {
 
+// CHECK-LABEL: func.func @balanced_f32_reduction
+// CHECK: [[AE:%.*]] = wave.pack
+// CHECK: [[BF:%.*]] = wave.pack
+// CHECK: [[LEFT:%.*]] = wave.fadd [[AE]], [[BF]] fastmath<reassoc>
+// CHECK: [[CG:%.*]] = wave.pack
+// CHECK: [[DH:%.*]] = wave.pack
+// CHECK: [[RIGHT:%.*]] = wave.fadd [[CG]], [[DH]] fastmath<reassoc>
+// CHECK: [[BRANCHES:%.*]] = wave.fadd [[LEFT]], [[RIGHT]] fastmath<reassoc>
+// CHECK-NEXT: [[LO:%.*]] = wave.extract [[BRANCHES]][0]
+// CHECK-NEXT: [[HI:%.*]] = wave.extract [[BRANCHES]][1]
+// CHECK-NEXT: [[RESULT:%.*]] = wave.fadd [[LO]], [[HI]] fastmath<reassoc>
+// CHECK: return [[RESULT]]
+func.func @balanced_f32_reduction(
+    %a: !wave.simd<f32, 64>, %b: !wave.simd<f32, 64>,
+    %c: !wave.simd<f32, 64>, %d: !wave.simd<f32, 64>,
+    %e: !wave.simd<f32, 64>, %f: !wave.simd<f32, 64>,
+    %g: !wave.simd<f32, 64>, %h: !wave.simd<f32, 64>)
+    -> !wave.simd<f32, 64> {
+  %s0 = wave.fadd %a, %b fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s1 = wave.fadd %c, %d fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s2 = wave.fadd %e, %f fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s3 = wave.fadd %g, %h fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s4 = wave.fadd %s0, %s1 fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s5 = wave.fadd %s2, %s3 fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %result = wave.fadd %s4, %s5 fastmath<reassoc>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  return %result : !wave.simd<f32, 64>
+}
+
+// CHECK-LABEL: func.func @fastmath_intersection
+// CHECK: [[LHS:%.*]] = wave.pack
+// CHECK: [[RHS:%.*]] = wave.pack
+// CHECK: [[ADD:%.*]] = wave.fadd [[LHS]], [[RHS]] fastmath<reassoc>
+// CHECK-NOT: nnan
+// CHECK-NOT: ninf
+// CHECK: wave.extract [[ADD]][0]
+// CHECK: wave.extract [[ADD]][1]
+func.func @fastmath_intersection(
+    %a: !wave.simd<f32, 64>, %b: !wave.simd<f32, 64>,
+    %c: !wave.simd<f32, 64>, %d: !wave.simd<f32, 64>)
+    -> (!wave.simd<f32, 64>, !wave.simd<f32, 64>) {
+  %x = wave.fadd %a, %b fastmath<reassoc,nnan>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %y = wave.fadd %c, %d fastmath<reassoc,ninf>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  return %x, %y : !wave.simd<f32, 64>, !wave.simd<f32, 64>
+}
+
 // CHECK-LABEL: func.func @cast_pair
 // CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 32>, [[B:%.*]]: !wave.simd<f32, 32>)
 // CHECK: [[SRC:%.*]] = wave.pack [[A]], [[B]]

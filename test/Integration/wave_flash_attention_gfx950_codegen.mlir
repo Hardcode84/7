@@ -56,8 +56,9 @@
 // CHECK-4W-NEXT: s_barrier
 // CHECK-4W: v_mfma_f32_32x32x16_bf16
 // CHECK-4W: v_exp_f32
+// CHECK-4W: v_pk_add_f32
 // CHECK-4W: v_rcp_f32
-// CHECK-4W: .amdhsa_next_free_vgpr 412
+// CHECK-4W: .amdhsa_next_free_vgpr 408
 // CHECK-4W: .amdhsa_next_free_sgpr 28
 //
 // CHECK-8W-LABEL: flash_attention_bf16_gfx950:
@@ -69,6 +70,7 @@
 // CHECK-8W-NEXT: s_barrier
 // CHECK-8W: v_mfma_f32_32x32x16_bf16
 // CHECK-8W: v_exp_f32
+// CHECK-8W: v_pk_add_f32
 // CHECK-8W: v_rcp_f32
 // CHECK-8W: .amdhsa_next_free_vgpr 240
 // CHECK-8W: .amdhsa_next_free_sgpr 28

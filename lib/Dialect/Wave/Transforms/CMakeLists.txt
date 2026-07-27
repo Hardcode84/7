@@ -40,6 +40,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDSplitBarriers.cpp
   WaveAMDVerifyMachineOperands.cpp
   WaveAttachGPUBinary.cpp
+  WaveBalanceReassociableMath.cpp
   WaveCleanupAllocs.cpp
   WaveCoalesceMemory.cpp
   WaveCoalesceWhere.cpp

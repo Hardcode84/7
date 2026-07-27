@@ -9,10 +9,11 @@ The current golden is
 `test/PerfGolden/Inputs/gfx950-fa-b2-h64-n8192-d128-bf16-8wave.s`:
 
 - SHA-256:
-  `5ae246acdeb380fc1b49c30979dd1d13abde75d33b4cde756d71d882cd0052`
-- 240 VGPR, 24 SGPR, no scratch
+  `7a4dad19ede679feefc425fa7ce7f6c4b5d1864eeda457d7d620d33f3db42065`
+- 256 VGPR, 24 SGPR, no scratch
 - 68,096 bytes dynamic LDS; fixed group segment size remains zero
 - 192 BF16 MFMA instructions, 288 LDS reads, 28 DMA-to-LDS loads
+- 90 packed FP32 adds replace 180 scalar FP32 adds
 
 Current codegen, assembly, linking, and deterministic PerfGolden checks pass.
 Random correctness and timing need gfx950. The available host is gfx1100, so no

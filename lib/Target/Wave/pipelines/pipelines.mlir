@@ -42,7 +42,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rcse0 = transform.apply_registered_pass "cse" to %rcanon0
         : (!transform.any_op) -> !transform.any_op
-    %rpack = transform.apply_registered_pass "wave-form-packed-math" to %rcse0
+    %rbalance = transform.apply_registered_pass "wave-balance-reassociable-math" to %rcse0
+        : (!transform.any_op) -> !transform.any_op
+    %rpack = transform.apply_registered_pass "wave-form-packed-math" to %rbalance
         : (!transform.any_op) -> !transform.any_op
     %rcanon1 = transform.apply_registered_pass "canonicalize" to %rpack
         : (!transform.any_op) -> !transform.any_op

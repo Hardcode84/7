@@ -6,6 +6,7 @@
 
 # CHECK: perf-golden: gfx950-fa-b2-h64-n8192-d128-bf16-8wave: asm matches golden
 # SOURCE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"}
+# SOURCE-COUNT-31: wave.fadd {{.*}} fastmath<reassoc>
 
 from __future__ import annotations
 

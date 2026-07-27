@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -149,6 +150,14 @@ static bool isCommutative(PairKind kind) {
   return kind == PairKind::FAdd || kind == PairKind::FMul;
 }
 
+static arith::FastMathFlags getFastmath(Operation *op) {
+  if (auto add = dyn_cast<FAddOp>(op))
+    return add.getFastmath();
+  if (auto mul = dyn_cast<FMulOp>(op))
+    return mul.getFastmath();
+  return cast<FmaOp>(op).getFastmath();
+}
+
 static bool dependsOn(Value value, Operation *needle,
                       SmallPtrSetImpl<Operation *> &seen) {
   Operation *def = value.getDefiningOp();
@@ -242,6 +251,8 @@ public:
       if (isCandidateSupported(&op, capabilities))
         candidates.push_back(&op);
 
+    formReductionBranchPairs(candidates);
+
     for (auto [index, op] : llvm::enumerate(candidates)) {
       if (vectorizedOps.contains(op))
         continue;
@@ -261,6 +272,25 @@ public:
   }
 
 private:
+  bool isUnvectorizedKind(Operation *op, PairKind kind) {
+    return op && getCandidateKind(op) == std::optional<PairKind>(kind) &&
+           !vectorizedOps.contains(op);
+  }
+
+  void formReductionBranchPairs(ArrayRef<Operation *> candidates) {
+    for (Operation *parent : llvm::reverse(candidates)) {
+      std::optional<PairKind> kind = getCandidateKind(parent);
+      if (!kind || !isCommutative(*kind) || parent->getNumOperands() != 2)
+        continue;
+      Operation *lo = parent->getOperand(0).getDefiningOp();
+      Operation *hi = parent->getOperand(1).getDefiningOp();
+      if (!isUnvectorizedKind(lo, *kind) || !isUnvectorizedKind(hi, *kind) ||
+          !canVectorizeRootPair(lo, hi))
+        continue;
+      (void)getOrCreatePackedOp(lo, hi);
+    }
+  }
+
   bool canFormPackedPair(Operation *lo, Operation *hi) {
     return compatiblePair(lo, hi) && independentPair(lo, hi) &&
            isCandidateSupported(lo, capabilities) &&
@@ -362,7 +392,7 @@ private:
 
     builder.setInsertionPoint(insertBefore);
     Type packedType = getPackedSimdType(lo->getResult(0).getType());
-    Value packed = createPackedOp(lo, packedType, packedOperands);
+    Value packed = createPackedOp(lo, hi, packedType, packedOperands);
     packedValueForPair[key] = packed;
     packedPairs.push_back({lo->getResult(0), hi->getResult(0), packed});
     vectorizedOps.insert(lo);
@@ -373,26 +403,25 @@ private:
     return packed;
   }
 
-  Value createPackedOp(Operation *op, Type packedType,
+  Value createPackedOp(Operation *lo, Operation *hi, Type packedType,
                        ArrayRef<Value> packedOperands) {
-    Location loc = op->getLoc();
-    if (auto castOp = dyn_cast<CastOp>(op))
+    Location loc = lo->getLoc();
+    if (auto castOp = dyn_cast<CastOp>(lo))
       return CastOp::create(builder, loc, packedType, CastKind::FpConvert,
                             packedOperands[0], castOp.getPolicyAttr())
           .getResult();
-    if (isa<FAddOp>(op))
+    arith::FastMathFlagsAttr fastmath = arith::FastMathFlagsAttr::get(
+        lo->getContext(), getFastmath(lo) & getFastmath(hi));
+    if (isa<FAddOp>(lo))
       return FAddOp::create(builder, loc, packedType, packedOperands[0],
-                            packedOperands[1],
-                            cast<FAddOp>(op).getFastmathAttr())
+                            packedOperands[1], fastmath)
           .getResult();
-    if (isa<FMulOp>(op))
+    if (isa<FMulOp>(lo))
       return FMulOp::create(builder, loc, packedType, packedOperands[0],
-                            packedOperands[1],
-                            cast<FMulOp>(op).getFastmathAttr())
+                            packedOperands[1], fastmath)
           .getResult();
     return FmaOp::create(builder, loc, packedType, packedOperands[0],
-                         packedOperands[1], packedOperands[2],
-                         cast<FmaOp>(op).getFastmathAttr())
+                         packedOperands[1], packedOperands[2], fastmath)
         .getResult();
   }
 

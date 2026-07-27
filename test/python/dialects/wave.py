@@ -1,6 +1,7 @@
 # RUN: %PYTHON %s | FileCheck %s
 
 import ixsimpl
+from mlir.dialects import arith
 from mlir.dialects import wave_dsl as w
 
 
@@ -143,6 +144,35 @@ def test_packed_fragment_math():
         # CHECK: waveamd.fragment_unpack
         # CHECK: wave.extract
         # CHECK: wave.fma
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_float_fastmath
+@run
+def test_float_fastmath():
+    with w.module() as m:
+        scalar = w.simd_type(w.f32(), width=64)
+        with m.function("float_fastmath", [scalar, scalar], kernel=True) as f:
+            lhs, rhs = f.args
+            add = f.fadd(lhs, rhs, fastmath=arith.FastMathFlags.reassoc)
+            sub = f.fsub(add, rhs, fastmath=arith.FastMathFlags.nnan)
+            mul = f.fmul(sub, rhs, fastmath=arith.FastMathFlags.ninf)
+            f.fma(
+                mul,
+                lhs,
+                rhs,
+                fastmath=arith.FastMathFlags.reassoc | arith.FastMathFlags.contract,
+            )
+            f.fmax(lhs, rhs, fastmath=arith.FastMathFlags.nsz)
+            f.fexp2(lhs, fastmath=arith.FastMathFlags.afn)
+            f.frcp(rhs, fastmath=arith.FastMathFlags.arcp)
+        # CHECK: wave.fadd {{.*}} fastmath<reassoc>
+        # CHECK: wave.fsub {{.*}} fastmath<nnan>
+        # CHECK: wave.fmul {{.*}} fastmath<ninf>
+        # CHECK: wave.fma {{.*}} fastmath<reassoc,contract>
+        # CHECK: wave.fmax {{.*}} fastmath<nsz>
+        # CHECK: wave.fexp2 {{.*}} fastmath<afn>
+        # CHECK: wave.frcp {{.*}} fastmath<arcp>
         print(m.module)
 
 

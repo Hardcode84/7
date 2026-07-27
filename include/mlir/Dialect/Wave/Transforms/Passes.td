@@ -43,6 +43,19 @@ def WaveFormPackedMath : Pass<"wave-form-packed-math"> {
   ];
 }
 
+def WaveBalanceReassociableMath : Pass<"wave-balance-reassociable-math"> {
+  let summary = "Balance reassociable Wave FP32 trees";
+  let description = [{
+    Rebuilds same-block scalar SIMD f32 add and multiply trees to minimum
+    depth when every consumed operation permits reassociation. Shared
+    subexpressions remain tree leaves.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveDelayLoopCarriedPacks : Pass<"wave-delay-loop-carried-packs"> {
   let summary = "Delay loop-carried sub-dword packs until their first use";
   let description = [{

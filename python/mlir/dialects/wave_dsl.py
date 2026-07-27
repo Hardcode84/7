@@ -944,26 +944,61 @@ class FunctionBuilder:
     ) -> Value:
         return self.binary(BinaryKind.ShLI, lhs, rhs, nsw=nsw, nuw=nuw)
 
-    def fadd(self, lhs: Value, rhs: Value) -> Value:
-        return wave.FAddOp(lhs.type, lhs, rhs).result
+    def fadd(
+        self,
+        lhs: Value,
+        rhs: Value,
+        *,
+        fastmath: arith.FastMathFlags | None = None,
+    ) -> Value:
+        return wave.FAddOp(lhs.type, lhs, rhs, fastmath=fastmath).result
 
-    def fsub(self, lhs: Value, rhs: Value) -> Value:
-        return wave.FSubOp(lhs.type, lhs, rhs).result
+    def fsub(
+        self,
+        lhs: Value,
+        rhs: Value,
+        *,
+        fastmath: arith.FastMathFlags | None = None,
+    ) -> Value:
+        return wave.FSubOp(lhs.type, lhs, rhs, fastmath=fastmath).result
 
-    def fmul(self, lhs: Value, rhs: Value) -> Value:
-        return wave.FMulOp(lhs.type, lhs, rhs).result
+    def fmul(
+        self,
+        lhs: Value,
+        rhs: Value,
+        *,
+        fastmath: arith.FastMathFlags | None = None,
+    ) -> Value:
+        return wave.FMulOp(lhs.type, lhs, rhs, fastmath=fastmath).result
 
-    def fma(self, lhs: Value, rhs: Value, acc: Value) -> Value:
-        return wave.FmaOp(lhs.type, lhs, rhs, acc).result
+    def fma(
+        self,
+        lhs: Value,
+        rhs: Value,
+        acc: Value,
+        *,
+        fastmath: arith.FastMathFlags | None = None,
+    ) -> Value:
+        return wave.FmaOp(lhs.type, lhs, rhs, acc, fastmath=fastmath).result
 
-    def fmax(self, lhs: Value, rhs: Value) -> Value:
-        return wave.FMaxOp(lhs.type, lhs, rhs).result
+    def fmax(
+        self,
+        lhs: Value,
+        rhs: Value,
+        *,
+        fastmath: arith.FastMathFlags | None = None,
+    ) -> Value:
+        return wave.FMaxOp(lhs.type, lhs, rhs, fastmath=fastmath).result
 
-    def fexp2(self, value: Value) -> Value:
-        return wave.FExp2Op(value.type, value).result
+    def fexp2(
+        self, value: Value, *, fastmath: arith.FastMathFlags | None = None
+    ) -> Value:
+        return wave.FExp2Op(value.type, value, fastmath=fastmath).result
 
-    def frcp(self, value: Value) -> Value:
-        return wave.FRcpOp(value.type, value).result
+    def frcp(
+        self, value: Value, *, fastmath: arith.FastMathFlags | None = None
+    ) -> Value:
+        return wave.FRcpOp(value.type, value, fastmath=fastmath).result
 
     def pack(self, inputs: Sequence[Value], result_type: Type) -> Value:
         return wave.PackOp(result_type, list(inputs)).result

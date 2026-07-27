@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 
 import ixsimpl
+from mlir.dialects import arith
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module, UnitAttr
 
@@ -445,7 +446,7 @@ def _reduce_max(bld: dsl.FunctionBuilder, values: list[dsl.Value]) -> dsl.Value:
 def _reduce_sum(bld: dsl.FunctionBuilder, values: list[dsl.Value]) -> dsl.Value:
     result = values[0]
     for value in values[1:]:
-        result = bld.fadd(result, value)
+        result = bld.fadd(result, value, fastmath=arith.FastMathFlags.reassoc)
     return result
 
 
