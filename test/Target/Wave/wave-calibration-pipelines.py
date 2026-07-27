@@ -25,6 +25,7 @@
 # CHECK: matmul_a4w4_mxfp_k16k_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
+# CHECK: perf_sweep_fa_8wave: ok
 # CHECK: matmul_perf_sweep_rand_int_forwarding: ok
 # CHECK: calibration_scheduler_region_cap: ok
 # CHECK: matmul_pingpong_removed: ok
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1598,7 +1600,9 @@ def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     perf_sweep.validate_args(args)
     specs = perf_sweep.build_run_specs(args)
     prepared = perf_sweep.prepare_runs(
-        args, specs, Path("/tmp/wave-sweep-artifacts/runner")
+        args,
+        specs,
+        {perf_sweep.Workload.MATMUL: Path("/tmp/wave-sweep-artifacts/runner")},
     )
     require(
         "matmul_perf_sweep_precompile_plan",
@@ -1618,6 +1622,140 @@ def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
         "run command should consume precompiled HSACO through a runner",
     )
     print("matmul_perf_sweep_precompile_plan: ok")
+
+
+def make_perf_sweep_fa_args(perf_sweep) -> argparse.Namespace:
+    args = perf_sweep.build_argparser().parse_args(
+        [
+            "--kernels=fa",
+            "--fa-batch=3",
+            "--fa-heads=5",
+            "--fa-sequence=1024",
+            "--fa-xcds=2",
+            "--rocm-lib=/tmp/rocm-lib",
+            "--check",
+            "--skip-rebuild",
+            "--dry-run",
+            "--artifact-dir=/tmp/wave-sweep-artifacts",
+        ]
+    )
+    perf_sweep.validate_args(args)
+    return args
+
+
+def check_perf_sweep_fa_shape(perf_sweep, spec, check_name: str) -> None:
+    shape = spec.shape
+    valid_shape = (
+        isinstance(shape, perf_sweep.FlashAttentionShape)
+        and shape.batch == 3
+        and shape.heads == 5
+        and shape.sequence == 1024
+        and shape.head_dim == 128
+        and shape.xcds == 2
+        and shape.waves == 8
+    )
+    require(check_name, valid_shape, "FA sweep shape mismatch")
+    require(
+        check_name,
+        spec.flops == 4 * 3 * 5 * 1024 * 1024 * 128,
+        "FA sweep FLOP count mismatch",
+    )
+
+
+def check_perf_sweep_fa_plan(perf_sweep, args, spec, check_name: str):
+    command = perf_sweep.calibrator_command(args, spec)
+    has_shape_args = all(
+        option in command for option in ("--batch", "--heads", "--sequence", "--waves")
+    )
+    require(
+        check_name,
+        has_shape_args
+        and "--check" in command
+        and "--kernel-profile" not in command
+        and command[command.index("--rocm-lib") + 1] == "/tmp/rocm-lib",
+        "FA calibrator command mismatch",
+    )
+    runners = {
+        perf_sweep.Workload.FLASH_ATTENTION: Path("/tmp/wave-sweep-artifacts/fa-runner")
+    }
+    prepared = perf_sweep.prepare_runs(args, [spec], runners)[0]
+    repeated = perf_sweep.prepare_runs(args, [spec], runners)[0]
+    require(check_name, prepared == repeated, "FA command plan is not deterministic")
+    require(
+        check_name,
+        "--emit-hsaco" in prepared.compile_command
+        and "--run-hsaco" in prepared.run_command
+        and prepared.run_command[-1] == "/tmp/wave-sweep-artifacts/fa-runner",
+        "FA precompile plan mismatch",
+    )
+    require(
+        check_name,
+        prepared.hsaco.name == "000-fa-8wave-b3-h5-s1024-d128-w8-scheduled.hsaco",
+        "FA artifact name mismatch",
+    )
+    return prepared
+
+
+def check_perf_sweep_fa_result(perf_sweep, spec, prepared, check_name: str) -> None:
+    output = "output_check: passed max_abs_diff=0.001\nmedian_per_launch_us: 100.000\n"
+    result = perf_sweep.parse_result(
+        spec,
+        prepared.run_command,
+        subprocess.CompletedProcess(prepared.run_command, 0, output, ""),
+    )
+    require(
+        check_name,
+        result.micros == 100.0
+        and result.check == "passed"
+        and result.tflops == spec.flops / 100.0 * 1.0e-6,
+        "FA result parsing mismatch",
+    )
+
+
+def check_perf_sweep_fa_validation(perf_sweep, check_name: str) -> None:
+    bad_args = (
+        ["--kernels=fa", "--all-ones"],
+        ["--kernels=fa", "--chip=gfx1100"],
+        ["--kernels=fa", "--variants=baseline"],
+    )
+    for argv in bad_args:
+        bad = perf_sweep.build_argparser().parse_args(argv)
+        try:
+            perf_sweep.validate_args(bad)
+        except SystemExit:
+            continue
+        require(check_name, False, f"FA sweep accepted invalid args: {argv}")
+
+
+def check_perf_sweep_fa_8wave(perf_sweep) -> None:
+    check_name = "perf_sweep_fa_8wave"
+    default_keys = [kernel.key for kernel in perf_sweep.parse_kernel_csv("all")]
+    require(
+        check_name,
+        default_keys.count("fa-8wave") == 1,
+        "default sweep should include 8-wave FA exactly once",
+    )
+    deduplicated = [
+        kernel.key for kernel in perf_sweep.parse_kernel_csv("all,fa,fa-8wave")
+    ]
+    require(
+        check_name,
+        deduplicated == default_keys,
+        "FA aliases should not duplicate or reorder the full sweep",
+    )
+    args = make_perf_sweep_fa_args(perf_sweep)
+    specs = perf_sweep.build_run_specs(args)
+    require(
+        check_name,
+        len(specs) == 1 and specs == perf_sweep.build_run_specs(args),
+        "FA alias should select one deterministic run",
+    )
+    spec = specs[0]
+    check_perf_sweep_fa_shape(perf_sweep, spec, check_name)
+    prepared = check_perf_sweep_fa_plan(perf_sweep, args, spec, check_name)
+    check_perf_sweep_fa_result(perf_sweep, spec, prepared, check_name)
+    check_perf_sweep_fa_validation(perf_sweep, check_name)
+    print(f"{check_name}: ok")
 
 
 def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
@@ -1747,6 +1885,7 @@ def main() -> int:
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_matmul_perf_sweep_f16_profiles(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
+    check_perf_sweep_fa_8wave(perf_sweep)
     check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)
     check_calibration_scheduler_region_cap(matmul, fa)
     try:

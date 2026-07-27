@@ -500,7 +500,13 @@ See [Wave gfx950 f16 four-wave experiment](PerfReferences/WaveGfx950F16Gemm4Wave
 for hardware results and saved ISA.
 
 Sweep only this profile with `--kernels=f16-4wave`. Default `all` includes both
-four-wave and eight-wave f16 profiles.
+f16 profiles, both MXFP4 profiles, both v9 goldens, and the B2/H64/N8192/D128
+eight-wave BF16 FlashAttention kernel. Use `--kernels=fa` for FA alone; its
+shape overrides are `--fa-batch`, `--fa-heads`, `--fa-sequence`, and
+`--fa-xcds`.
+
+See [Wave gfx950 FlashAttention](PerfReferences/WaveGfx950FlashAttention.md)
+for the current ISA profile and retained branch experiments.
 
 ## `gfx950-mxfp4-256x256-4wave`
 
