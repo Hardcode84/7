@@ -14,11 +14,11 @@
 # SOURCE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"}
 # SOURCE-LABEL: func.func @gfx950_f16_streamk_gemm
 # SOURCE-DAG: [[WORKERS:%.*]] = arith.constant 256 : i32
-# SOURCE-DAG: [[TILE_COUNT:%.*]] = arith.constant 1024 : i32
+# SOURCE-DAG: [[TRANSITION_END:%.*]] = arith.constant 768 : i32
 # SOURCE: [[RAW_WORKER:%.*]] = wave.workgroup_id 0
 # SOURCE: [[WORKER:%.*]] = wave.assume [[RAW_WORKER]]
 # SOURCE-NOT: waveamd.make_buffer %arg3
-# SOURCE: scf.for [[TILE:%.*]] = [[WORKER]] to [[TILE_COUNT]] step [[WORKERS]]
+# SOURCE: scf.for [[TILE:%.*]] = [[WORKER]] to [[TRANSITION_END]] step [[WORKERS]]
 # SOURCE-NOT: waveamd.global_atomic_add_acq_rel
 # SOURCE-NOT: waveamd.make_buffer %arg3
 # SOURCE: return
