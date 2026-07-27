@@ -472,6 +472,31 @@ func.func @assumed_existing_index_expr_binding_expands(
 
 // -----
 
+// CHECK-LABEL: func.func @rewritten_index_expr_range_expands
+// CHECK-SAME: (%[[X_RAW:.*]]: i32, %[[Y_RAW:.*]]: i32)
+func.func @rewritten_index_expr_range_expands(
+    %x_raw: i32, %y_raw: i32) -> index {
+  %c2 = arith.constant 2 : i32
+  // CHECK: %[[X:.*]] = wave.assume %[[X_RAW]]
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 3">] : i32
+  // CHECK: %[[Y:.*]] = wave.assume %[[Y_RAW]]
+  %y = wave.assume %y_raw as "y"
+      [#wave.pred<"y >= 0">, #wave.pred<"y <= 3">] : i32
+  %twice = wave.binary muli %x, %c2 : i32, i32 -> i32
+  %base = wave.index_expr <"65536*slot"> ["slot"](%twice)
+      : (i32) -> index
+  %lane = wave.index_expr <"lane"> ["lane"](%y) : (i32) -> index
+  %sum = wave.binary addi %base, %lane : index, index -> index
+  // CHECK-NOT: wave.binary
+  // CHECK: wave.index_expr <"4*(lane + 131072*raw0)">
+  // CHECK-SAME: ["raw0", "lane"](%[[X]], %[[Y]]) : (i32, i32) -> index
+  %out = wave.index_expr <"4*orig"> ["orig"](%sum) : (index) -> index
+  return %out : index
+}
+
+// -----
+
 // CHECK-LABEL: func.func @multi_use_binding_expands
 // CHECK-SAME: (%{{.*}}: !wave.simd<i32, 32>)
 func.func @multi_use_binding_expands(%idx_raw: !wave.simd<i32, 32>)

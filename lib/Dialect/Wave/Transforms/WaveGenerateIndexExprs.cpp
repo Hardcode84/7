@@ -587,6 +587,23 @@ computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
                       unsigned depth);
 
 static std::optional<SignedI64Range>
+computeIndexExprSignedI64Range(IndexExprOp op, DataFlowSolver &solver,
+                               sym::Store &store, unsigned depth) {
+  SmallVector<sym::PredHandle, 4> assumptions;
+  appendIndexExprPredicates(op, assumptions);
+  for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    appendAssumePredicates(store, binding, name, assumptions);
+    std::optional<SignedI64Range> range =
+        computeSignedI64Range(binding, solver, store, depth + 1);
+    if (range && failed(appendSignedRangeAssumption(
+                     store, name, range->first, range->second, assumptions)))
+      return std::nullopt;
+  }
+  return inferSignedI64Range(store, op.getExpr().getValue(), assumptions);
+}
+
+static std::optional<SignedI64Range>
 computeBinaryValueSignedI64Range(BinaryOp binary, DataFlowSolver &solver,
                                  sym::Store &store, unsigned depth) {
   unsigned bits = elementStorageBitWidth(binary.getResult().getType());
@@ -617,28 +634,38 @@ computeSelectValueSignedI64Range(SelectOp select, DataFlowSolver &solver,
 }
 
 static std::optional<SignedI64Range>
-computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
-                      unsigned depth = 0) {
-  if (depth > kMaxSymbolicValueDepth)
-    return std::nullopt;
+computeLeafSignedI64Range(Value value, DataFlowSolver &solver) {
   if (std::optional<int64_t> constant = getSplatOrConstantInt(value))
     return SignedI64Range{*constant, *constant};
   if (WorkitemIdOp workitem = value.getDefiningOp<WorkitemIdOp>())
     if (std::optional<SignedI64Range> range = workitemIdRange(workitem))
       return range;
+  return finiteSignedI64Range(solver, value);
+}
+
+static std::optional<SignedI64Range>
+computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
+                      unsigned depth = 0) {
+  if (depth > kMaxSymbolicValueDepth)
+    return std::nullopt;
   if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
     return intersectRange(
         computeSignedI64Range(assume.getValue(), solver, store, depth + 1),
         finiteAssumeSignedI64Range(store, assume));
   if (SplatOp splat = value.getDefiningOp<SplatOp>())
     return computeSignedI64Range(splat.getSource(), solver, store, depth + 1);
-
+  if (IndexExprOp indexExpr = value.getDefiningOp<IndexExprOp>()) {
+    if (std::optional<SignedI64Range> range =
+            finiteSignedI64Range(solver, value))
+      return range;
+    return computeIndexExprSignedI64Range(indexExpr, solver, store, depth);
+  }
   if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
     return computeBinaryValueSignedI64Range(binary, solver, store, depth);
   if (SelectOp select = value.getDefiningOp<SelectOp>())
     return computeSelectValueSignedI64Range(select, solver, store, depth);
 
-  return finiteSignedI64Range(solver, value);
+  return computeLeafSignedI64Range(value, solver);
 }
 
 static bool rangeProvesNoSignedOverflow(BinaryOp op, DataFlowSolver &solver,
