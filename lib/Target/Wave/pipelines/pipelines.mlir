@@ -266,7 +266,9 @@ module attributes {transform.with_named_sequence} {
         options = { "apply-schedule" = true,
                     "require-selected-input" = true }
         to %rjoint : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rs)
+    %rpack = transform.apply_registered_pass "waveamd-mfma-packed-peephole"
+        to %rs : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rpack)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op
   }

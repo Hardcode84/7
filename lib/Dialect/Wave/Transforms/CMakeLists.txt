@@ -30,6 +30,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDMaterializeSplitBarriers.cpp
   WaveAMDMemoryTransactionProvider.cpp
   WaveAMDMetadata.cpp
+  WaveAMDMFMAPackedPeephole.cpp
   WaveAMDMMAReusePreschedule.cpp
   WaveAMDNarrowWideInt.cpp
   WaveAMDPackVGPRZeroMoves.cpp

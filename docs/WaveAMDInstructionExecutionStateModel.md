@@ -272,6 +272,13 @@ its resource-release interval. TRANS and represented packed FP16/FP32
 arithmetic also consume it; ordinary VALU remains available as stall filler.
 Shared-CU simulation uses the same resource per SIMD.
 
+`waveamd-mfma-packed-peephole` runs after machine scheduling. It replays the
+scheduled compute slots and decomposes packed F32 add, multiply, and FMA only
+when scalar lanes fit inside a remaining MFMA exclusion window. Source
+selectors and FMA negation survive the rewrite; clamped operations stay
+packed. Fixed-register clobber candidates also stay packed. Exact tuple
+join/split round trips are removed while unpacking.
+
 Memory value wait:
 
 - If an operand is produced by a queued memory event, wait until that entry's

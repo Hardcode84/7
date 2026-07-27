@@ -500,6 +500,20 @@ def WaveAMDLateTuples
   ];
 }
 
+def WaveAMDMFMAPackedPeephole
+    : Pass<"waveamd-mfma-packed-peephole"> {
+  let summary = "Unpack packed F32 operations still blocked by MFMA";
+  let description = [{
+    On targets with MFMA coissue exclusion, replays the final compute-slot
+    order and decomposes packed F32 add, multiply, and FMA operations only when
+    their scalar lanes fit inside the remaining MFMA window. Exact tuple
+    join/split round trips collapse during rewriting.
+  }];
+  let dependentDialects = [
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDBufferRsrcToTuples
     : Pass<"waveamd-buffer-rsrc-to-tuples"> {
   let summary = "Convert buffer descriptor pseudo ops to tuple aliases";
