@@ -156,6 +156,15 @@ KERNELS = {
         default_k_values=F16_DOC_K_VALUES,
         sweep_k=True,
     ),
+    "f16-spatial": KernelSpec(
+        key="f16-spatial",
+        label="f16-spatial",
+        workload=Workload.MATMUL,
+        profile="gfx950-f16-256x256-8wave-spatial",
+        variants="scheduled",
+        default_k_values=F16_DOC_K_VALUES,
+        sweep_k=True,
+    ),
     "f16-4wave": KernelSpec(
         key="f16-4wave",
         label="f16-4wave",
@@ -226,6 +235,7 @@ KERNELS = {
 KERNEL_ALIASES = {
     "all": (
         "f16",
+        "f16-spatial",
         "f16-4wave",
         "f16-streamk",
         "mxfp4",
@@ -240,6 +250,7 @@ KERNEL_ALIASES = {
     "mxfp4-4wave": ("mxfp4-4wave",),
     "f16": ("f16",),
     "f16-8wave": ("f16",),
+    "f16-spatial": ("f16-spatial",),
     "f16-4wave": ("f16-4wave",),
     "f16-streamk": ("f16-streamk",),
     "v9": ("v9",),
@@ -777,8 +788,8 @@ def add_shape_arguments(parser: argparse.ArgumentParser) -> None:
         type=parse_kernel_csv,
         default=parse_kernel_csv("all"),
         help=(
-            "comma-separated f16,f16-4wave,f16-streamk,mxfp4,mxfp4-4wave,v9,"
-            "v9-transposed,fa-8wave,all; f16-8wave aliases f16, "
+            "comma-separated f16,f16-spatial,f16-4wave,f16-streamk,mxfp4,"
+            "mxfp4-4wave,v9,v9-transposed,fa-8wave,all; f16-8wave aliases f16, "
             "mxfp/mxfp4-8wave alias mxfp4, and fa aliases fa-8wave"
         ),
     )

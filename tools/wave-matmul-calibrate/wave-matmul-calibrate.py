@@ -88,10 +88,16 @@ class VariantResult:
 
 ProfileValue = bool | int | str
 _PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
+_SPATIAL_DMA_PROFILE = "gfx950-f16-256x256-8wave-spatial"
 _FOUR_WAVE_PHASED_DMA_PROFILE = "gfx950-f16-256x256-4wave"
 _STREAMK_PROFILE = "gfx950-f16-256x256-4wave-streamk"
 _PHASED_DMA_PROFILES = frozenset(
-    (_PHASED_DMA_PROFILE, _FOUR_WAVE_PHASED_DMA_PROFILE, _STREAMK_PROFILE)
+    (
+        _PHASED_DMA_PROFILE,
+        _SPATIAL_DMA_PROFILE,
+        _FOUR_WAVE_PHASED_DMA_PROFILE,
+        _STREAMK_PROFILE,
+    )
 )
 
 KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
@@ -121,6 +127,22 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
         "output_type": "f16",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+    },
+    _SPATIAL_DMA_PROFILE: {
+        "bm": 2,
+        "bn": 4,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 2,
+        "target_waves": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "output_layout": "tile-packed",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },

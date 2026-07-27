@@ -18,6 +18,7 @@
 # CHECK: matmul_mxfp4_profile_kernel_only_target_waves: ok
 # CHECK: matmul_profile_cli_override: ok
 # CHECK: matmul_f16_8wave_profile: ok
+# CHECK: matmul_f16_spatial_profile: ok
 # CHECK: matmul_mxfp4_4wave_profile: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_f16_dma_buffer_count: ok
@@ -26,6 +27,8 @@
 # CHECK: matmul_v9_transposed_perf_golden_profile: ok
 # CHECK: matmul_a4w4_mxfp_k16k_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
+# CHECK: matmul_perf_sweep_f16_profiles: ok
+# CHECK: matmul_perf_sweep_spatial: ok
 # CHECK: matmul_perf_sweep_streamk: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: perf_sweep_fa_8wave: ok
@@ -1161,6 +1164,80 @@ def check_matmul_f16_8wave_profile(matmul) -> None:
     print("matmul_f16_8wave_profile: ok")
 
 
+def check_matmul_f16_spatial_profile(matmul) -> None:
+    argv = [
+        "--chip=gfx950",
+        "--kernel-profile=gfx950-f16-256x256-8wave-spatial",
+        "--m=2048",
+        "--n=256",
+        "--k=128",
+        "--skip-hw",
+    ]
+    args = matmul.parse_args(argv)
+    matmul.validate_args(args)
+    require(
+        "matmul_f16_spatial_profile",
+        (
+            args.bm,
+            args.bn,
+            args.wave_m_tiles,
+            args.wave_n_tiles,
+            args.wave_k_tiles,
+            matmul.effective_target_waves(args),
+        )
+        == (2, 4, 8, 4, 2, 2),
+        "bad spatial tile shape",
+    )
+    require(
+        "matmul_f16_spatial_profile",
+        args.output_layout == "tile-packed"
+        and matmul.dma_buffer_count(args) == 2
+        and matmul.compute_dynamic_lds_bytes(args) == 131072,
+        "bad spatial output layout or LDS accounting",
+    )
+    command = matmul.build_matmul_example_args(args, "gfx950")
+    require(
+        "matmul_f16_spatial_profile",
+        command == matmul.build_matmul_example_args(matmul.parse_args(argv), "gfx950"),
+        "spatial generator command is not deterministic",
+    )
+    require(
+        "matmul_f16_spatial_profile",
+        "--kernel-profile=gfx950-f16-256x256-8wave-spatial" in command,
+        "calibrator did not forward the spatial profile",
+    )
+
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return (
+                "per_launch_cycles_wallclock: 1\n"
+                "per_launch_us: 1.0\n"
+                "output_check: passed mode=strict\n"
+            )
+
+        matmul.run = fake_run
+        result = matmul.run_hw(
+            Path("runner"), Path("kernel.hsaco"), args, "/tmp/rocm-lib"
+        )
+    finally:
+        matmul.run = old_run
+
+    runner = captured[0]
+    require(
+        "matmul_f16_spatial_profile",
+        result == (1, 1.0, "passed")
+        and runner.count("--output-layout") == 1
+        and runner[runner.index("--output-layout") + 1] == "tile-packed"
+        and "--no-check" not in runner,
+        "spatial runner lost tile-packed strict checking",
+    )
+    print("matmul_f16_spatial_profile: ok")
+
+
 def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     args = matmul.parse_args(
         [
@@ -1805,8 +1882,16 @@ def check_matmul_perf_sweep_f16_profiles(perf_sweep) -> None:
     require(
         "matmul_perf_sweep_f16_profiles",
         "gfx950-f16-256x256-8wave" in default_profiles
-        and "gfx950-f16-256x256-4wave" in default_profiles,
-        "default sweep should include both f16 profiles",
+        and "gfx950-f16-256x256-8wave-spatial" in default_profiles
+        and "gfx950-f16-256x256-4wave" in default_profiles
+        and "gfx950-f16-256x256-4wave-streamk" in default_profiles,
+        "default sweep should include all f16 profiles",
+    )
+    spatial = perf_sweep.parse_kernel_csv("f16-spatial")
+    require(
+        "matmul_perf_sweep_f16_profiles",
+        len(spatial) == 1 and spatial[0].profile == "gfx950-f16-256x256-8wave-spatial",
+        "f16 spatial alias should select only its profile",
     )
     four_wave = perf_sweep.parse_kernel_csv("f16-4wave")
     require(
@@ -1815,6 +1900,106 @@ def check_matmul_perf_sweep_f16_profiles(perf_sweep) -> None:
         "f16 four-wave alias should select only its profile",
     )
     print("matmul_perf_sweep_f16_profiles: ok")
+
+
+def spatial_sweep_args(perf_sweep, *, k_values: str, check: bool) -> argparse.Namespace:
+    argv = [
+        "--kernels=f16-spatial",
+        "--m=4096",
+        "--n=4096",
+        f"--k-values={k_values}",
+        "--dry-run",
+        "--skip-rebuild",
+        "--artifact-dir=/tmp/wave-sweep-artifacts",
+    ]
+    if check:
+        argv.append("--check")
+    args = perf_sweep.build_argparser().parse_args(argv)
+    perf_sweep.validate_args(args)
+    return args
+
+
+def check_spatial_sweep_specs(perf_sweep, args: argparse.Namespace):
+    specs = perf_sweep.build_run_specs(args)
+    actual = [
+        (
+            spec.kernel.profile,
+            spec.variants,
+            spec.streamk_workers,
+            spec.shape.k,
+        )
+        for spec in specs
+    ]
+    expected = [
+        ("gfx950-f16-256x256-8wave-spatial", "scheduled", 0, 64),
+        ("gfx950-f16-256x256-8wave-spatial", "scheduled", 0, 128),
+    ]
+    require(
+        "matmul_perf_sweep_spatial",
+        specs == perf_sweep.build_run_specs(args) and actual == expected,
+        "spatial dry-run matrix is not deterministic",
+    )
+    return specs
+
+
+def check_spatial_sweep_artifacts(perf_sweep, args, specs) -> None:
+    runners = {perf_sweep.Workload.MATMUL: Path("/tmp/wave-sweep-artifacts/runner")}
+    prepared = perf_sweep.prepare_runs(args, specs, runners)
+    require(
+        "matmul_perf_sweep_spatial",
+        prepared == perf_sweep.prepare_runs(args, specs, runners)
+        and [run.hsaco.name for run in prepared]
+        == [
+            "000-f16-spatial-m4096-n4096-k64-scheduled.hsaco",
+            "001-f16-spatial-m4096-n4096-k128-scheduled.hsaco",
+        ],
+        "spatial artifact plan is not deterministic",
+    )
+    command_modes = [
+        (
+            "--no-check" in run.compile_command,
+            "--no-check" in run.run_command,
+            "--streamk-workers" in run.compile_command,
+            run.run_command[-1],
+        )
+        for run in prepared
+    ]
+    require(
+        "matmul_perf_sweep_spatial",
+        command_modes
+        == [
+            (False, False, False, "/tmp/wave-sweep-artifacts/runner"),
+            (False, False, False, "/tmp/wave-sweep-artifacts/runner"),
+        ],
+        "checked spatial command plan changed",
+    )
+
+
+def check_spatial_sweep_modes(perf_sweep) -> None:
+    unchecked = spatial_sweep_args(perf_sweep, k_values="64", check=False)
+    unchecked_spec = perf_sweep.build_run_specs(unchecked)[0]
+    require(
+        "matmul_perf_sweep_spatial",
+        "--no-check" in perf_sweep.calibrator_command(unchecked, unchecked_spec),
+        "default spatial perf command should skip output checking",
+    )
+    default_keys = [kernel.key for kernel in perf_sweep.parse_kernel_csv("all")]
+    deduplicated = [
+        kernel.key for kernel in perf_sweep.parse_kernel_csv("all,f16-spatial")
+    ]
+    require(
+        "matmul_perf_sweep_spatial",
+        (default_keys.count("f16-spatial"), deduplicated) == (1, default_keys),
+        "spatial alias should not duplicate or reorder the full sweep",
+    )
+
+
+def check_matmul_perf_sweep_spatial(perf_sweep) -> None:
+    args = spatial_sweep_args(perf_sweep, k_values="64,128", check=True)
+    specs = check_spatial_sweep_specs(perf_sweep, args)
+    check_spatial_sweep_artifacts(perf_sweep, args, specs)
+    check_spatial_sweep_modes(perf_sweep)
+    print("matmul_perf_sweep_spatial: ok")
 
 
 def streamk_sweep_args(
@@ -2260,6 +2445,7 @@ def main() -> int:
     check_matmul_mxfp4_profile_kernel_only_target_waves(matmul)
     check_matmul_profile_cli_override(matmul)
     check_matmul_f16_8wave_profile(matmul)
+    check_matmul_f16_spatial_profile(matmul)
     check_matmul_mxfp4_4wave_profile(matmul)
     check_matmul_f16_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
@@ -2270,6 +2456,7 @@ def main() -> int:
     check_matmul_a4w4_mxfp_k16k_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_matmul_perf_sweep_f16_profiles(perf_sweep)
+    check_matmul_perf_sweep_spatial(perf_sweep)
     check_matmul_perf_sweep_streamk(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_perf_sweep_fa_8wave(perf_sweep)

@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 
 _ProfileValue = bool | int | str
 _PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
+_SPATIAL_DMA_PROFILE = "gfx950-f16-256x256-8wave-spatial"
 _FOUR_WAVE_PHASED_DMA_PROFILE = "gfx950-f16-256x256-4wave"
 _PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int | bool]] = {
     _PHASED_DMA_PROFILE: {
@@ -67,6 +68,16 @@ _PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int | bool]] = {
         "delayed_waves": 4,
         "fetch_alignment": 32,
         "fetch_phase": 16,
+    },
+    _SPATIAL_DMA_PROFILE: {
+        "issue_group_size": 7,
+        "initial_delay_cycles": 0,
+        "loop_delay_cycles": 0,
+        "loop_overlap_cycles": 0,
+        "delayed_waves": 0,
+        "fetch_alignment": 32,
+        "fetch_phase": 12,
+        "spatial_subpanel_pipeline": True,
     },
     _FOUR_WAVE_PHASED_DMA_PROFILE: {
         "issue_group_size": 7,
@@ -184,6 +195,7 @@ _KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
     "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
     "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
     "gfx950-f16-256x256-8wave": _GFX950_F16_256X256_8WAVE,
+    _SPATIAL_DMA_PROFILE: _GFX950_F16_256X256_8WAVE,
     "gfx950-f16-256x256-4wave": _GFX950_F16_256X256_4WAVE,
     "gfx950-mxfp4-256x256-8wave": _GFX950_MXFP4_256X256_8WAVE,
     "gfx950-mxfp4-256x256-4wave": _GFX950_MXFP4_256X256_4WAVE,
