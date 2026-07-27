@@ -1875,6 +1875,51 @@ def WaveAMDMachine_GlobalLoadB32Addr64Op
   }];
 }
 
+def WaveAMDMachine_GlobalLoadB64Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b64_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global 64-bit load through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR2:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalLoadB96Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b96_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global 96-bit load through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR3:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def WaveAMDMachine_GlobalLoadB128Addr64Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_b128_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "global 128-bit load through a VGPR64 address";
+  let arguments = (ins WaveAMDMachine_VGPR2:$address,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR4:$result,
+                      Optional<WaveAMDMachine_MemToken>:$token);
+  let assemblyFormat = [{
+    $address (`after` $dependency^)? (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
 // HW-fused multi-dword global loads. The single op corresponds 1:1 to
 // one `global_load_dwordx{2,3,4}` instruction on gfx9 (and the
 // `_b{64,96,128}` syntax on gfx11/12). Operand shape mirrors

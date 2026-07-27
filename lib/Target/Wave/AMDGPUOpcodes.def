@@ -144,6 +144,12 @@
     GLOBAL_LOAD_DWORDX3_SADDR_gfx11)                                           \
   X(globalLoadB128, GLOBAL_LOAD_DWORDX4_SADDR_vi,                              \
     GLOBAL_LOAD_DWORDX4_SADDR_gfx11)                                           \
+  X(globalLoadB64Addr64, GLOBAL_LOAD_DWORDX2_vi,                               \
+    GLOBAL_LOAD_DWORDX2_gfx11)                                                 \
+  X(globalLoadB96Addr64, GLOBAL_LOAD_DWORDX3_vi,                               \
+    GLOBAL_LOAD_DWORDX3_gfx11)                                                 \
+  X(globalLoadB128Addr64, GLOBAL_LOAD_DWORDX4_vi,                              \
+    GLOBAL_LOAD_DWORDX4_gfx11)                                                 \
   X(globalStoreB64, GLOBAL_STORE_DWORDX2_SADDR_vi,                             \
     GLOBAL_STORE_DWORDX2_SADDR_gfx11)                                          \
   X(globalStoreB96, GLOBAL_STORE_DWORDX3_SADDR_vi,                             \

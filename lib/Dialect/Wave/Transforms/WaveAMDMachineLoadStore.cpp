@@ -590,6 +590,78 @@ static Operation *buildGlobalLoad(WaveAMDMachineSelector &S, LoadOp op,
                      cache);
 }
 
+static Operation *buildWideFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
+                                           Value address, Value dep,
+                                           unsigned registers, bool useB8Op,
+                                           bool useB16Op) {
+  if (useB8Op || useB16Op)
+    return nullptr;
+  Type resultType =
+      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, registers);
+  Type tokenType = getMemTokenType(op.getContext());
+  Operation *load = nullptr;
+  switch (registers) {
+  case 2:
+    load = waveamdmachine::GlobalLoadB64Addr64Op::create(
+        S.builder, op.getLoc(), resultType, tokenType, address, dep, 0);
+    break;
+  case 3:
+    load = waveamdmachine::GlobalLoadB96Addr64Op::create(
+        S.builder, op.getLoc(), resultType, tokenType, address, dep, 0);
+    break;
+  case 4:
+    load = waveamdmachine::GlobalLoadB128Addr64Op::create(
+        S.builder, op.getLoc(), resultType, tokenType, address, dep, 0);
+    break;
+  default:
+    return nullptr;
+  }
+  return attachCache(load, getCacheAttr(op.getOperation()));
+}
+
+static void buildScalarFullAddressLoads(WaveAMDMachineSelector &S, LoadOp op,
+                                        Value address, Value dep,
+                                        unsigned registers, bool useB8Op,
+                                        bool useB16Op,
+                                        SmallVectorImpl<Value> &elements,
+                                        SmallVectorImpl<Value> &tokens) {
+  Type tokenType = getMemTokenType(op.getContext());
+  Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
+  Attribute cache = getCacheAttr(op.getOperation());
+  if (useB8Op) {
+    Operation *load = attachCache(
+        waveamdmachine::GlobalLoadU8Addr64Op::create(
+            S.builder, op.getLoc(), vgpr1, tokenType, address, dep, 0),
+        cache);
+    elements.push_back(load->getResult(0));
+    tokens.push_back(load->getResult(1));
+  } else if (useB16Op) {
+    Operation *load = attachCache(
+        waveamdmachine::GlobalLoadB16Addr64Op::create(
+            S.builder, op.getLoc(), vgpr1, tokenType, address, dep, 0),
+        cache);
+    elements.push_back(load->getResult(0));
+    tokens.push_back(load->getResult(1));
+  } else if (registers == 1) {
+    Operation *load = attachCache(
+        waveamdmachine::GlobalLoadB32Addr64Op::create(
+            S.builder, op.getLoc(), vgpr1, tokenType, address, dep, 0),
+        cache);
+    elements.push_back(load->getResult(0));
+    tokens.push_back(load->getResult(1));
+  } else {
+    for (unsigned idx : llvm::seq<unsigned>(0, registers)) {
+      Operation *load =
+          attachCache(waveamdmachine::GlobalLoadB32Addr64Op::create(
+                          S.builder, op.getLoc(), vgpr1, tokenType, address,
+                          dep, static_cast<int64_t>(idx) * 4),
+                      cache);
+      elements.push_back(load->getResult(0));
+      tokens.push_back(load->getResult(1));
+    }
+  }
+}
+
 LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
                                     Value globalBase, const AddressPlan &plan,
                                     unsigned registers, bool useB8Op,
@@ -601,42 +673,15 @@ LogicalResult selectFullAddressLoad(WaveAMDMachineSelector &S, LoadOp op,
     return failure();
   Value dep = op.getDependency() ? S.expect(op.getDependency(), op) : Value{};
   Type tokenType = getMemTokenType(op.getContext());
-  Type vgpr1 = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR, 1);
-  Attribute cache = getCacheAttr(op.getOperation());
+  if (Operation *wideLoad = buildWideFullAddressLoad(
+          S, op, *addr, dep, registers, useB8Op, useB16Op)) {
+    bindLoadResults(S, op, wideLoad);
+    return success();
+  }
   SmallVector<Value> elements;
   SmallVector<Value> tokens;
-  if (useB8Op) {
-    Operation *load = attachCache(
-        waveamdmachine::GlobalLoadU8Addr64Op::create(
-            S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0),
-        cache);
-    elements.push_back(load->getResult(0));
-    tokens.push_back(load->getResult(1));
-  } else if (useB16Op) {
-    Operation *load = attachCache(
-        waveamdmachine::GlobalLoadB16Addr64Op::create(
-            S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0),
-        cache);
-    elements.push_back(load->getResult(0));
-    tokens.push_back(load->getResult(1));
-  } else if (registers == 1) {
-    Operation *load = attachCache(
-        waveamdmachine::GlobalLoadB32Addr64Op::create(
-            S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep, 0),
-        cache);
-    elements.push_back(load->getResult(0));
-    tokens.push_back(load->getResult(1));
-  } else {
-    for (unsigned idx : llvm::seq<unsigned>(0, registers)) {
-      Operation *load =
-          attachCache(waveamdmachine::GlobalLoadB32Addr64Op::create(
-                          S.builder, op.getLoc(), vgpr1, tokenType, *addr, dep,
-                          static_cast<int64_t>(idx) * 4),
-                      cache);
-      elements.push_back(load->getResult(0));
-      tokens.push_back(load->getResult(1));
-    }
-  }
+  buildScalarFullAddressLoads(S, op, *addr, dep, registers, useB8Op, useB16Op,
+                              elements, tokens);
   Value result = elements.front();
   if (registers != 1) {
     Type resultType =

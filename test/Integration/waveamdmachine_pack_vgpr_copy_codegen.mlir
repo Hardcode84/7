@@ -49,6 +49,21 @@ func.func @pack_vgpr_copy_codegen(
   return
 }
 
+// ASM-LABEL: addr64_wide_load_codegen:
+// ASM: global_load_dwordx4 v[8:11], v[0:1], off
+func.func @addr64_wide_load_codegen(
+    %addr: !waveamdmachine.reg<vgpr, 2, 0>) {
+  %value, %token = waveamdmachine.global_load_b128_addr64 %addr
+      : (!waveamdmachine.reg<vgpr, 2, 0>)
+        -> (!waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.mem.token)
+  %stored = waveamdmachine.global_store_b128_addr64 %addr, %value after %token
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ASM-LABEL: same_phys_vgpr_copy_codegen:
 // ASM-NOT: v_mov_b32_e32 v4, v4
 // ASM-NOT: v_mov_b32_e32 v5, v5

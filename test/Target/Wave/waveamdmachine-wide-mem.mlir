@@ -36,6 +36,43 @@ func.func @wide_global_loads(%arg0: !wave.ptr<#wave.global, i32>) attributes {wa
   return
 }
 
+// CHECK-LABEL: func.func @addr64_wide_global_loads
+// CHECK: waveamdmachine.global_load_b64_addr64
+// CHECK: waveamdmachine.global_load_b96_addr64
+// CHECK: waveamdmachine.global_load_b128_addr64
+
+// ASM11-LABEL: addr64_wide_global_loads:
+// ASM11: global_load_b64 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, off
+// ASM11: global_load_b96 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, off offset:8
+// ASM11: global_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, off offset:16
+// ASM11: s_endpgm
+func.func @addr64_wide_global_loads(
+    %addr: !waveamdmachine.reg<vgpr, 2, 0>) {
+  %v2, %t1 = waveamdmachine.global_load_b64_addr64 %addr
+      : (!waveamdmachine.reg<vgpr, 2, 0>)
+        -> (!waveamdmachine.reg<vgpr, 2, 2>, !waveamdmachine.mem.token)
+  %v3, %t2 = waveamdmachine.global_load_b96_addr64 %addr after %t1 offset 8
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 3, 4>, !waveamdmachine.mem.token)
+  %v4, %t3 = waveamdmachine.global_load_b128_addr64 %addr after %t2 offset 16
+      : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.mem.token)
+  %t4 = waveamdmachine.global_store_b64_addr64 %addr, %v2 after %t3
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %t5 = waveamdmachine.global_store_b96_addr64 %addr, %v3 after %t4 offset 8
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 3, 4>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %t6 = waveamdmachine.global_store_b128_addr64 %addr, %v4 after %t5 offset 16
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 // CHECK-LABEL: func.func @wide_global_stores
 // CHECK: waveamdmachine.global_store_b64
 // CHECK: waveamdmachine.global_store_b96
