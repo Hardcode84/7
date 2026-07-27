@@ -21,6 +21,7 @@
 // ALIGNED-NOT: global_atomic_add
 // ALIGNED: v_mfma_f32_16x16x32_f16
 // ALIGNED-NOT: global_atomic_add
+// ALIGNED-COUNT-64: buffer_store_dwordx4
 // ALIGNED: s_endpgm
 //
 // SPLIT-LABEL: gfx950_f16_streamk_gemm:

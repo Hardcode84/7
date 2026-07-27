@@ -2279,6 +2279,13 @@ class _DmaSubpanelReuseState:
 
 
 @dataclass(frozen=True)
+class _DmaSubpanelStepInputs:
+    a_ptrs: tuple[dsl.Value, ...]
+    b_ptrs: tuple[dsl.Value, ...]
+    next_dma_lds_byte_base: dsl.Value
+
+
+@dataclass(frozen=True)
 class _DmaSpatialTokens:
     a_top: dsl.Value
     a_bottom: dsl.Value
@@ -5695,6 +5702,24 @@ def _split_dma_subpanel_loop_state(
     )
 
 
+def _flatten_dma_subpanel_loop_state(
+    state: _DmaSubpanelLoopState,
+) -> tuple[dsl.Value, ...]:
+    return (
+        *state.accs,
+        *state.a_frags,
+        *state.b_frags,
+        state.a_read,
+        state.b_read,
+        state.current_access,
+        state.current_read_bases.a,
+        state.current_read_bases.b,
+        state.current_lds_offset,
+        state.current_dma_lds_byte_base,
+        *_flatten_dma_subpanel_tokens(state.ready),
+    )
+
+
 def _issue_dma_operand_subpanels(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -5974,6 +5999,8 @@ def _emit_dma_subpanel_phase1_with_reads(
     access: dsl.Value,
     ready_read_bases: _DmaSubpanelReadBases,
     mma_begin: int,
+    *,
+    on_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[
     tuple[dsl.Value, ...],
     tuple[dsl.Value, ...],
@@ -6014,6 +6041,8 @@ def _emit_dma_subpanel_phase1_with_reads(
         i, j = _serpentine_mma_coords(len(a_frags), ordinal)
         index = _mma_acc_index(cfg, i, j)
         new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
+        if on_column is not None and (ordinal + 1) % len(a_frags) == 0:
+            on_column(tuple(new_accs), j)
         suffix_ordinal = ordinal - mma_begin + 1
         target = (suffix_ordinal * len(reads) + read_span - 1) // read_span
         while emitted < target:
@@ -6407,6 +6436,8 @@ def _finish_dma_subpanel_step(
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
     next_dma_lds_byte_base: dsl.Value,
+    *,
+    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     next_a0, next_a1 = _issue_next_dma_subpanel_a(
         bld, cfg, staging, state, reuse, a_ptrs
@@ -6431,13 +6462,15 @@ def _finish_dma_subpanel_step(
     phase1_mmas = len(reuse.a1_frags) * len(reuse.b1_frags)
     read_suffix_mmas = min(phase1_mmas, 2 * ready_read_count + 3)
     phase1_prefix_mmas = phase1_mmas - read_suffix_mmas
-    accs = _emit_dma_subpanel_mma_prefix(
+    accs = _emit_dma_subpanel_mma_range(
         bld,
         cfg,
         reuse.a1_frags,
         reuse.b1_frags,
         accs,
+        0,
         phase1_prefix_mmas,
+        on_column=on_final_column,
     )
     ready_access = bld.barrier(*_flatten_dma_subpanel_tokens(state.ready))
     late_access = bld.join(reuse.reuse_access, ready_access)
@@ -6469,6 +6502,7 @@ def _finish_dma_subpanel_step(
             ready_access,
             ready_read_bases,
             phase1_prefix_mmas,
+            on_column=on_final_column,
         )
     )
     next_b1 = bld.join(next_b1_early, next_b1_late)
@@ -6523,6 +6557,41 @@ def _emit_dma_subpanel_step(
         a_ptrs,
         b_ptrs,
         next_dma_lds_byte_base,
+    )
+
+
+def _emit_dma_subpanel_cross_tile_step(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    state: _DmaSubpanelLoopState,
+    inputs: _DmaSubpanelStepInputs,
+    *,
+    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
+) -> _DmaSubpanelLoopState:
+    reuse = _emit_dma_subpanel_reuse(
+        bld,
+        cfg,
+        types,
+        staging,
+        state,
+        inputs.a_ptrs,
+    )
+    return _split_dma_subpanel_loop_state(
+        _finish_dma_subpanel_step(
+            bld,
+            cfg,
+            types,
+            staging,
+            state,
+            reuse,
+            inputs.a_ptrs,
+            inputs.b_ptrs,
+            inputs.next_dma_lds_byte_base,
+            on_final_column=on_final_column,
+        ),
+        cfg,
     )
 
 
@@ -6725,7 +6794,7 @@ def _init_dma_subpanel_loop(
     )
 
 
-def _emit_dma_subpanel_loop(
+def _emit_dma_subpanel_step_loop(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     types: _KernelTypes,
@@ -6734,8 +6803,7 @@ def _emit_dma_subpanel_loop(
     init_args: tuple[dsl.Value, ...],
     *,
     trip_count: dsl.Value | None = None,
-    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
-) -> tuple[dsl.Value, ...]:
+) -> _DmaSubpanelLoopState:
     zero = bld.constant(dsl.i32(), 0)
     one = bld.constant(dsl.i32(), 1)
     if trip_count is None:
@@ -6766,8 +6834,28 @@ def _emit_dma_subpanel_loop(
         )
         bld.yield_((*step_results, *a_ptrs, *b_ptrs))
 
-    final_state = _split_dma_subpanel_loop_state(
-        tuple(forop.results)[:state_count], cfg
+    return _split_dma_subpanel_loop_state(tuple(forop.results)[:state_count], cfg)
+
+
+def _emit_dma_subpanel_loop(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    virtual_k_stride: dsl.Value,
+    init_args: tuple[dsl.Value, ...],
+    *,
+    trip_count: dsl.Value | None = None,
+    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
+) -> tuple[dsl.Value, ...]:
+    final_state = _emit_dma_subpanel_step_loop(
+        bld,
+        cfg,
+        types,
+        staging,
+        virtual_k_stride,
+        init_args,
+        trip_count=trip_count,
     )
     return _emit_dma_subpanel_tail(
         bld,
@@ -7689,6 +7777,16 @@ class _StreamKPartition:
 class _StreamKScratch:
     base: dsl.Value
     buffer_elements: int | None
+
+
+@dataclass(frozen=True)
+class _StreamKSubpanelPipeline:
+    inputs: _TileInputs
+    types: _KernelTypes
+    virtual_k_stride: dsl.Value
+    store_root: dsl.Value
+    worker_stride: dsl.Value
+    tile_count: int
 
 
 def _streamk_select(
@@ -8858,6 +8956,20 @@ def _emit_aligned_streamk_kernel(
     index = dsl.i32()
     worker = bld.assume_range(bld.workgroup_id(axis=0), 0, workers - 1)
     inputs = _emit_tile_inputs(bld, cfg)
+    if (
+        _uses_dma_subpanel_pipeline(cfg)
+        and tiles_per_worker > 1
+        and cfg.virtual_k_steps > 2
+    ):
+        _emit_pipelined_subpanel_streamk_kernel(
+            bld,
+            cfg,
+            inputs,
+            worker,
+            workers=workers,
+            tile_count=tile_count,
+        )
+        return
     if tiles_per_worker == 1:
         raw_m, raw_n = _streamk_raw_tile_coords(bld, cfg, worker)
         _emit_streamk_full_tile(
@@ -8896,6 +9008,233 @@ def _emit_aligned_streamk_kernel(
                 )
             ]
         )
+
+
+def _emit_streamk_tile_staging(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    inputs: _TileInputs,
+    tile: dsl.Value,
+) -> tuple[_TileCoords, _LdsStaging]:
+    raw_m, raw_n = _streamk_raw_tile_coords(bld, cfg, tile)
+    coords = _emit_tile_coords(
+        bld,
+        cfg,
+        inputs=inputs,
+        wg_m_raw=raw_m,
+        wg_n_raw=raw_n,
+    )
+    return coords, _emit_lds_staging(bld, cfg, coords)
+
+
+def _emit_pipelined_subpanel_transition(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    pipeline: _StreamKSubpanelPipeline,
+    tile: dsl.Value,
+    state_values: tuple[dsl.Value, ...],
+) -> tuple[dsl.Value, ...]:
+    coords, staging = _emit_streamk_tile_staging(bld, cfg, pipeline.inputs, tile)
+    state = _emit_dma_subpanel_step_loop(
+        bld,
+        cfg,
+        pipeline.types,
+        staging,
+        pipeline.virtual_k_stride,
+        state_values,
+    )
+    next_tile = bld.assume_range(
+        bld.addi(tile, pipeline.worker_stride),
+        0,
+        pipeline.tile_count - 1,
+    )
+    _, next_staging = _emit_streamk_tile_staging(bld, cfg, pipeline.inputs, next_tile)
+    state = _emit_dma_subpanel_cross_tile_step(
+        bld,
+        cfg,
+        pipeline.types,
+        staging,
+        state,
+        _DmaSubpanelStepInputs(
+            next_staging.a_dma_src_ptrs,
+            next_staging.b_dma_src_ptrs,
+            _dma_subpanel_lds_byte_base(
+                bld,
+                cfg,
+                staging,
+                cfg.virtual_k_steps - 1,
+            ),
+        ),
+    )
+
+    def store_column(accs: tuple[dsl.Value, ...], column: int) -> None:
+        _store_streamk_output_column(
+            bld,
+            cfg,
+            coords,
+            accs,
+            column,
+            pipeline.store_root,
+        )
+
+    state = _emit_dma_subpanel_cross_tile_step(
+        bld,
+        cfg,
+        pipeline.types,
+        staging,
+        state,
+        _DmaSubpanelStepInputs(
+            _advance_ptrs(
+                bld,
+                next_staging.a_dma_src_ptrs,
+                pipeline.virtual_k_stride,
+            ),
+            _advance_ptrs(
+                bld,
+                next_staging.b_dma_src_ptrs,
+                pipeline.virtual_k_stride,
+            ),
+            _dma_subpanel_lds_byte_base(
+                bld,
+                cfg,
+                staging,
+                cfg.virtual_k_steps,
+            ),
+        ),
+        on_final_column=store_column,
+    )
+    init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), pipeline.types.acc)
+    return _flatten_dma_subpanel_loop_state(
+        replace(
+            state,
+            accs=tuple(init_acc for _ in range(cfg.tiles_per_wave)),
+        )
+    )
+
+
+def _emit_pipelined_subpanel_final_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    pipeline: _StreamKSubpanelPipeline,
+    state: _DmaSubpanelLoopState,
+    tile: dsl.Value,
+) -> None:
+    coords, staging = _emit_streamk_tile_staging(bld, cfg, pipeline.inputs, tile)
+    state = _emit_dma_subpanel_step_loop(
+        bld,
+        cfg,
+        pipeline.types,
+        staging,
+        pipeline.virtual_k_stride,
+        _flatten_dma_subpanel_loop_state(state),
+    )
+
+    def store_column(accs: tuple[dsl.Value, ...], column: int) -> None:
+        _store_streamk_output_column(
+            bld,
+            cfg,
+            coords,
+            accs,
+            column,
+            pipeline.store_root,
+        )
+
+    _emit_dma_subpanel_tail(
+        bld,
+        cfg,
+        pipeline.types,
+        staging,
+        state,
+        on_final_column=store_column,
+    )
+
+
+def _emit_pipelined_subpanel_streamk_kernel(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    inputs: _TileInputs,
+    worker: dsl.Value,
+    *,
+    workers: int,
+    tile_count: int,
+) -> None:
+    index = dsl.i32()
+    types = _kernel_types(cfg)
+    tiles_per_worker = tile_count // workers
+    virtual_k_stride = bld.constant(
+        index,
+        cfg.storage_k_tile * cfg.wave_k_tiles,
+    )
+    _, first_staging = _emit_streamk_tile_staging(
+        bld,
+        cfg,
+        inputs,
+        worker,
+    )
+    store_root = bld.token()
+    init_accs, first_ready, empty = _init_dma_subpanel_kernel(
+        bld,
+        cfg,
+        types,
+        first_staging,
+        after=store_root,
+    )
+    state = _split_dma_subpanel_loop_state(
+        _init_dma_subpanel_loop(
+            bld,
+            cfg,
+            types,
+            first_staging,
+            first_ready,
+            empty,
+            init_accs,
+            virtual_k_stride,
+        ),
+        cfg,
+    )
+    worker_stride = bld.constant(index, workers)
+    pipeline = _StreamKSubpanelPipeline(
+        inputs,
+        types,
+        virtual_k_stride,
+        store_root,
+        worker_stride,
+        tile_count,
+    )
+    transition_end = bld.constant(index, tile_count - workers)
+    with bld.for_loop(
+        worker,
+        transition_end,
+        worker_stride,
+        init_args=_flatten_dma_subpanel_loop_state(state),
+        nonzero_trip=True,
+    ) as loop:
+        bld.yield_(
+            _emit_pipelined_subpanel_transition(
+                bld,
+                cfg,
+                pipeline,
+                loop.induction_variable,
+                tuple(loop.inner_iter_args),
+            )
+        )
+
+    state = _split_dma_subpanel_loop_state(tuple(loop.results), cfg)
+    last_tile = bld.assume_range(
+        bld.addi(
+            worker,
+            bld.constant(index, (tiles_per_worker - 1) * workers),
+        ),
+        0,
+        tile_count - 1,
+    )
+    _emit_pipelined_subpanel_final_tile(
+        bld,
+        cfg,
+        pipeline,
+        state,
+        last_tile,
+    )
 
 
 def _emit_streamk_kernel(

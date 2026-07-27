@@ -13,6 +13,13 @@ def operations(operation):
                 yield from operations(child.operation)
 
 
+def direct_operations(operation):
+    for region in operation.regions:
+        for block in region.blocks:
+            for child in block.operations:
+                yield child.operation
+
+
 def build(m: int, n: int, k: int, workers: int):
     return build_gfx950_f16_streamk_matmul_module(
         m,
@@ -55,6 +62,63 @@ aligned_kernel = next(
 aligned_args = aligned_kernel.regions[0].blocks[0].arguments
 assert not list(aligned_args[3].uses)
 assert not list(aligned_args[4].uses)
+aligned_kernel_ops = list(direct_operations(aligned_kernel))
+transition_index, transition = next(
+    (index, operation)
+    for index, operation in enumerate(aligned_kernel_ops)
+    if operation.name == "scf.for"
+    and len(operation.results) > 1
+    and any(child.name == "wave.store" for child in direct_operations(operation))
+)
+transition_ops = list(direct_operations(transition))
+transition_stores = [
+    operation for operation in transition_ops if operation.name == "wave.store"
+]
+final_stores = [
+    operation
+    for operation in aligned_kernel_ops[transition_index + 1 :]
+    if operation.name == "wave.store"
+]
+assert len(transition_stores) == 32
+assert len(final_stores) == 32
+assert (
+    sum(operation.name == "waveamd.fragment_fill" for operation in transition_ops) == 1
+)
+assert sum(str(result.type) == "!wave.mem.token" for result in transition.results) == 7
+transition_yield = transition.regions[0].blocks[0].operations[-1].operation
+assert transition_yield.name == "scf.yield"
+assert len(transition_yield.operands) == len(transition.results)
+store_root = next(
+    operation for operation in aligned_kernel_ops if operation.name == "wave.token"
+)
+assert all(
+    store.operands[2] == store_root.results[0]
+    for store in (*transition_stores, *final_stores)
+)
+
+single_tile = build(512, 512, 256, 4)
+single_tile_ops = list(operations(single_tile.operation))
+assert not any(
+    operation.name == "scf.for"
+    and len(operation.results) > 1
+    and any(child.name == "wave.store" for child in direct_operations(operation))
+    for operation in single_tile_ops
+)
+
+short_k = build(512, 512, 128, 2)
+short_k_ops = list(operations(short_k.operation))
+assert any(
+    operation.name == "scf.for"
+    and len(operation.results) == 1
+    and any(child.name == "wave.store" for child in direct_operations(operation))
+    for operation in short_k_ops
+)
+assert not any(
+    operation.name == "scf.for"
+    and len(operation.results) > 1
+    and any(child.name == "wave.store" for child in direct_operations(operation))
+    for operation in short_k_ops
+)
 
 split = build(512, 512, 256, 3)
 split_ops = list(operations(split.operation))
