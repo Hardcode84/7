@@ -96,6 +96,54 @@ subpanel_schedule = wm.PhasedDmaSchedule(
     fetch_phase=0,
     subpanel_pipeline=True,
 )
+spatial_schedule = wm.PhasedDmaSchedule(
+    issue_group_size=7,
+    initial_delay_cycles=0,
+    loop_delay_cycles=0,
+    loop_overlap_cycles=0,
+    delayed_waves=0,
+    fetch_alignment=32,
+    fetch_phase=12,
+    spatial_subpanel_pipeline=True,
+)
+
+
+def build_spatial_subpanel(**overrides):
+    args = {
+        "M": 256,
+        "N": 256,
+        "K": 256,
+        "BM": 2,
+        "BN": 4,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "output_type": "f16",
+        "phased_dma_schedule": spatial_schedule,
+        "include_host": False,
+    }
+    args.update(overrides)
+    return build_wmma_f16_matmul_module(**args)
+
+
+assert_raises(
+    ValueError,
+    "DMA subpanel pipelines are mutually exclusive",
+    lambda: wm.PhasedDmaSchedule(
+        issue_group_size=1,
+        initial_delay_cycles=0,
+        loop_delay_cycles=0,
+        loop_overlap_cycles=0,
+        delayed_waves=0,
+        fetch_alignment=4,
+        fetch_phase=0,
+        subpanel_pipeline=True,
+        spatial_subpanel_pipeline=True,
+    ),
+)
 assert_raises(
     ValueError,
     "DMA subpanel pipeline requires two K32 phases",
@@ -139,6 +187,84 @@ assert_raises(
     ),
 )
 print("subpanel-validation ok")
+
+assert_raises(
+    ValueError,
+    "DMA spatial subpanel pipeline requires eight waves",
+    lambda: build_spatial_subpanel(N=128, BN=2),
+)
+assert_raises(
+    ValueError,
+    "DMA spatial subpanel pipeline requires two K32 phases",
+    lambda: build_spatial_subpanel(wave_k_tiles=1),
+)
+assert_raises(
+    ValueError,
+    "DMA spatial subpanel pipeline does not support packed MXFP4",
+    lambda: build_spatial_subpanel(input_type="mxfp4"),
+)
+assert_raises(
+    ValueError,
+    "DMA spatial subpanel pipeline requires tile-packed output",
+    lambda: build_spatial_subpanel(
+        BM=2,
+        BN=2,
+        wave_n_tiles=8,
+        coalesced_mfma_output=True,
+    ),
+)
+assert_raises(
+    ValueError,
+    "DMA spatial subpanel pipeline requires even wave tiles",
+    lambda: build_spatial_subpanel(M=224, wave_m_tiles=7),
+)
+assert_raises(
+    ValueError,
+    "DMA spatial subpanel pipeline requires four DMA slots per operand",
+    lambda: build_spatial_subpanel(M=512, N=128, BM=4, BN=2),
+)
+module_spatial_subpanel = build_spatial_subpanel()
+spatial_text = str(module_spatial_subpanel)
+spatial_loops = [
+    op
+    for block in operation_blocks(module_spatial_subpanel.operation)
+    for op in block.operations
+    if op.name == "scf.for"
+]
+assert len(spatial_loops) == 1
+spatial_loop_ops = [
+    op for block in operation_blocks(spatial_loops[0]) for op in block.operations
+]
+assert sum(op.name == "waveamd.mma" for op in spatial_loop_ops) == 128
+assert sum(op.name == "waveamd.dma_load_lds" for op in spatial_loop_ops) == 16
+assert sum(op.name == "wave.barrier" for op in spatial_loop_ops) == 16
+assert spatial_text.count("scf.if ") == 2
+print("spatial-subpanel ok")
+
+for k, expected in (
+    (64, (0, 64, 8, 3, 0)),
+    (128, (0, 128, 16, 7, 0)),
+):
+    short_module = build_spatial_subpanel(K=k)
+    names = [
+        op.name
+        for block in operation_blocks(short_module.operation)
+        for op in block.operations
+    ]
+    assert (
+        tuple(
+            names.count(name)
+            for name in (
+                "scf.for",
+                "waveamd.mma",
+                "waveamd.dma_load_lds",
+                "wave.barrier",
+                "scf.if",
+            )
+        )
+        == expected
+    )
+print("spatial-subpanel-short-k ok")
 
 module_regular_subpanel = build_wmma_f16_matmul_module(
     M=64,
@@ -537,6 +663,8 @@ assert_external_assumption_count(static_bld.module, 2)
 print(static_bld.module)
 
 # CHECK: subpanel-validation ok
+# CHECK: spatial-subpanel ok
+# CHECK: spatial-subpanel-short-k ok
 # CHECK: regular-subpanel ok
 # CHECK: cta-remap-symbolic-ranges ok
 # CHECK: rectangular-subpanel-serpentine ok
