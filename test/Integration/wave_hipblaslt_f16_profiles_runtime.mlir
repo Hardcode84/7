@@ -6,6 +6,8 @@
 // RUN:   | FileCheck %s --check-prefix=F4R
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-8wave --m=1024 --n=512 --k=256 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --rand-int --multi-wave-specialize \
 // RUN:   | FileCheck %s --check-prefix=F8
+// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-8wave-spatial --m=1024 --n=512 --k=256 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --seed=23 \
+// RUN:   | FileCheck %s --check-prefix=F8S
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-16wave --m=1024 --n=512 --k=256 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --rand-int \
 // RUN:   | FileCheck %s --check-prefix=F16
 //
@@ -31,6 +33,15 @@
 // F8: output_check: passed mode=strict
 // F8: variant: scheduled
 // F8: hw_output_check: passed
+// F8S: bm=2 bn=4 wave_m_tiles=8 wave_n_tiles=4 wave_k_tiles=2 target_waves=2
+// F8S-SAME: input_type=f16 output_type=f16
+// F8S-SAME: output_store_cache=none
+// F8S: seed=23 input_mode=random
+// F8S: cta_swizzle_xcds=8 cta_group_m=4
+// F8S: kernel_abi=matmul output_layout=tile-packed
+// F8S: output_check: passed mode=strict
+// F8S: variant: scheduled
+// F8S: hw_output_check: passed
 // F16: bm=4 bn=4 wave_m_tiles=4 wave_n_tiles=4 wave_k_tiles=1 target_waves=4
 // F16-SAME: input_type=f16 output_type=f16
 // F16: seed=0 input_mode=rand-int
