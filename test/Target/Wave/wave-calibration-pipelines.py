@@ -10,6 +10,8 @@
 # CHECK: matmul_bf16_forwarding: ok
 # CHECK: matmul_multi_wave_specialization_forwarding: ok
 # CHECK: matmul_rand_int_forwarding: ok
+# CHECK: matmul_hpl_forwarding: ok
+# CHECK: matmul_streamk_profile: ok
 # CHECK: matmul_mxfp4_forwarding_and_trip_count: ok
 # CHECK: matmul_mxfp4_dma_forwarding: ok
 # CHECK: matmul_mxfp4_scale_regs_forwarding: ok
@@ -624,6 +626,232 @@ def check_matmul_rand_int_forwarding(matmul) -> None:
             "calibrator accepted MXFP4 rand_int",
         )
     print("matmul_rand_int_forwarding: ok")
+
+
+def check_matmul_hpl_forwarding(matmul) -> None:
+    args = matmul.parse_args(
+        ["--chip=gfx950", "--input-type=bf16", "--hpl", "--variants=baseline"]
+    )
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return (
+                "per_launch_cycles_wallclock: 1\n"
+                "per_launch_us: 1.0\n"
+                "output_check: passed\n"
+            )
+
+        matmul.run = fake_run
+        _, _, check = matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    require(
+        "matmul_hpl_forwarding",
+        bool(captured) and "--hpl" in captured[0],
+        "runner command missing --hpl",
+    )
+    require(
+        "matmul_hpl_forwarding",
+        check == "passed" and matmul.input_mode_name(args) == "hpl",
+        "HPL should retain CPU checking and header mode",
+    )
+
+    bad = matmul.parse_args(["--chip=gfx950", "--input-type=mxfp4", "--hpl"])
+    try:
+        matmul.validate_args(bad)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_hpl_forwarding",
+            False,
+            "calibrator accepted MXFP4 HPL",
+        )
+    print("matmul_hpl_forwarding: ok")
+
+
+def make_streamk_profile_args(matmul) -> argparse.Namespace:
+    return matmul.parse_args(
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave-streamk",
+            "--m=512",
+            "--n=512",
+            "--k=256",
+            "--streamk-workers=5",
+            "--cta-swizzle-xcds=4",
+            "--cta-group-m=2",
+            "--variants=scheduled",
+            "--hpl",
+            "--skip-hw",
+        ]
+    )
+
+
+def check_streamk_profile_metadata(matmul, args, label: str) -> None:
+    matmul.validate_args(args)
+    require(
+        label,
+        (matmul.kernel_name(args), matmul.kernel_abi(args))
+        == ("gfx950_f16_streamk_gemm", "streamk"),
+        "bad kernel name or ABI",
+    )
+    require(
+        label,
+        (args.output_layout, matmul.compute_dynamic_lds_bytes(args))
+        == ("column-major", 133152),
+        "bad output layout or LDS size",
+    )
+    require(
+        label,
+        (
+            matmul.compute_kernel_arg_trip_count(args),
+            matmul.kernel_arg_trip_count_text(args),
+        )
+        == (0, "n/a"),
+        "Stream-K should not forward a trip count",
+    )
+    require(
+        label,
+        matmul.streamk_workspace_sizes(args.m, args.n, args.streamk_workers)
+        == (2621440, 16),
+        "bad workspace sizes",
+    )
+    example = matmul.build_example_args(args, "gfx950")
+    for expected in (
+        "--workers=5",
+        "--cta-swizzle-xcds=4",
+        "--cta-group-m=2",
+    ):
+        require(label, expected in example, f"generator command missing {expected}")
+
+
+def check_streamk_module_isolation(matmul, args, label: str) -> None:
+    generated = """
+module {
+    func.func @wmma_f16_matmul_tiled() attributes {gpu.kernel} {
+      return
+    }
+    func.func @gfx950_f16_streamk_gemm() attributes {gpu.kernel} {
+      return
+    }
+}
+"""
+    old_run = matmul.run
+    try:
+        matmul.run = lambda cmd, env=None: generated
+        isolated = matmul.generate_kernel_module(args, "gfx950")
+    finally:
+        matmul.run = old_run
+    require(
+        label,
+        "@gfx950_f16_streamk_gemm" in isolated
+        and "@wmma_f16_matmul_tiled" not in isolated,
+        "wrong generated kernel isolated",
+    )
+
+
+def capture_streamk_runner_command(matmul, args) -> list[str]:
+    captured: list[list[str]] = []
+    old_run = matmul.run
+    try:
+
+        def fake_run(cmd, env=None):
+            captured.append(cmd)
+            return (
+                "per_launch_cycles_wallclock: 1\n"
+                "per_launch_us: 1.0\n"
+                "output_check: passed\n"
+            )
+
+        matmul.run = fake_run
+        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
+    finally:
+        matmul.run = old_run
+    return captured[0]
+
+
+def check_streamk_runner_command(runner: list[str], label: str) -> None:
+    expected_pairs = (
+        ("--kernel-abi", "streamk"),
+        ("--output-layout", "column-major"),
+        ("--streamk-workers", "5"),
+    )
+    for option, value in expected_pairs:
+        require(
+            label,
+            option in runner and runner[runner.index(option) + 1] == value,
+            f"runner command missing {option}={value}",
+        )
+    require(label, "--hpl" in runner, "runner command missing HPL mode")
+
+
+def require_invalid_args(matmul, label: str, argv: list[str]) -> None:
+    bad = matmul.parse_args(argv)
+    try:
+        matmul.validate_args(bad)
+    except SystemExit:
+        return
+    require(label, False, f"accepted invalid Stream-K args: {argv}")
+
+
+def check_streamk_invalid_args(matmul, label: str) -> None:
+    invalid = (
+        ["--streamk-workers=2"],
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave-streamk",
+            "--m=512",
+            "--n=512",
+            "--k=256",
+            "--streamk-workers=0",
+        ],
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave-streamk",
+            "--m=512",
+            "--n=512",
+            "--k=256",
+            "--streamk-workers=5",
+            "--output-layout=row-major",
+        ],
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave-streamk",
+            f"--m={1 << 31}",
+            "--n=256",
+            "--k=256",
+        ],
+        [
+            "--chip=gfx950",
+            "--kernel-profile=gfx950-f16-256x256-4wave-streamk",
+            "--m=2147481600",
+            "--n=256",
+            "--k=64",
+        ],
+    )
+    for argv in invalid:
+        require_invalid_args(matmul, label, argv)
+    try:
+        matmul.streamk_workspace_sizes(256, 256, 1 << 63)
+    except OverflowError:
+        pass
+    else:
+        require(label, False, "workspace overflow accepted")
+
+
+def check_matmul_streamk_profile(matmul) -> None:
+    label = "matmul_streamk_profile"
+    args = make_streamk_profile_args(matmul)
+    check_streamk_profile_metadata(matmul, args, label)
+    check_streamk_module_isolation(matmul, args, label)
+    runner = capture_streamk_runner_command(matmul, args)
+    check_streamk_runner_command(runner, label)
+    check_streamk_invalid_args(matmul, label)
+    print(f"{label}: ok")
 
 
 def make_mxfp4_args() -> argparse.Namespace:
@@ -1868,6 +2096,8 @@ def main() -> int:
     check_matmul_bf16_forwarding(matmul)
     check_matmul_multi_wave_specialization_forwarding(matmul)
     check_matmul_rand_int_forwarding(matmul)
+    check_matmul_hpl_forwarding(matmul)
+    check_matmul_streamk_profile(matmul)
     check_matmul_mxfp4_forwarding_and_trip_count(matmul)
     check_matmul_mxfp4_dma_forwarding(matmul)
     check_matmul_mxfp4_scale_regs_forwarding(matmul)

@@ -1,4 +1,4 @@
-//===- wave_matmul_rand_int_test.cpp - rand_int input test ------*- C++ -*-===//
+//===- wave_matmul_rand_int_test.cpp - Matmul runner test -------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -32,10 +32,12 @@ static void checkType(InputType type, const char *label) {
   const std::array<float, 15> expectedB = {2, -2, -0.0f, 0,  -1, 0,  -1,   2,
                                            1, -2, -0.0f, -1, 2,  -2, -0.0f};
 
-  std::vector<uint8_t> a = makeInputBytes(rows, k, type, 0, 0, false, true);
+  std::vector<uint8_t> a =
+      makeInputBytes(rows, k, type, 0, 0, false, true, false);
   std::vector<uint8_t> repeated =
-      makeInputBytes(rows, k, type, 91, 0, false, true);
-  std::vector<uint8_t> b = makeInputBytes(rows, k, type, 0, 1, false, true);
+      makeInputBytes(rows, k, type, 91, 0, false, true, false);
+  std::vector<uint8_t> b =
+      makeInputBytes(rows, k, type, 0, 1, false, true, false);
   if (a != repeated)
     fail("rand_int changed with calibration seed");
   if (a == b)
@@ -43,6 +45,26 @@ static void checkType(InputType type, const char *label) {
   checkValues(a, type, expectedA);
   checkValues(b, type, expectedB);
   std::printf("rand_int_%s: ok\n", label);
+}
+
+static void checkHplType(InputType type, const char *label,
+                         const std::array<uint16_t, 15> &expected) {
+  constexpr int rows = 3;
+  constexpr int k = 5;
+  std::vector<uint8_t> a =
+      makeInputBytes(rows, k, type, 0, 0, false, false, true);
+  std::vector<uint8_t> repeated =
+      makeInputBytes(rows, k, type, 91, 0, false, false, true);
+  std::vector<uint8_t> b =
+      makeInputBytes(rows, k, type, 0, 1, false, false, true);
+  if (a != repeated)
+    fail("HPL changed with calibration seed");
+  if (a != b)
+    fail("HPL A/B streams differ");
+  for (size_t i = 0; i < expected.size(); ++i)
+    if (readU16(a, i) != expected[i])
+      fail("HPL value mismatch");
+  std::printf("hpl_%s: ok\n", label);
 }
 
 static void checkCPUReference(InputType type, const char *label) {
@@ -62,6 +84,23 @@ static void checkCPUReference(InputType type, const char *label) {
     }
   }
   std::printf("rand_int_%s_cpu_reference: ok\n", label);
+}
+
+static void checkHplCPUReference(InputType type, const char *label) {
+  Args args;
+  args.m = 2;
+  args.n = 2;
+  args.k = 4;
+  args.inputType = type;
+  args.hpl = true;
+  HostInputs inputs = makeHostInputs(args);
+  float c00 = computeExpectedElement(inputs, args, 0, 0);
+  float c01 = computeExpectedElement(inputs, args, 0, 1);
+  float c10 = computeExpectedElement(inputs, args, 1, 0);
+  float c11 = computeExpectedElement(inputs, args, 1, 1);
+  if (c00 <= 0.0f || c11 <= 0.0f || c01 != c10)
+    fail("HPL CPU reference mismatch");
+  std::printf("hpl_%s_cpu_reference: ok\n", label);
 }
 
 static void checkCoordinate(const Args &args, int index, int m, int n) {
@@ -111,36 +150,137 @@ static void checkOutputLayouts() {
   args.kernelABI = KernelABI::TLXMXFP;
   if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked)
     fail("TLX automatic output layout mismatch");
+  args.kernelABI = KernelABI::StreamK;
+  if (getEffectiveOutputLayout(args) != OutputLayout::ColumnMajor)
+    fail("Stream-K automatic output layout mismatch");
   args.outputLayout = OutputLayout::ColumnMajor;
   if (getEffectiveOutputLayout(args) != OutputLayout::ColumnMajor)
     fail("explicit output layout mismatch");
   std::printf("output_layouts: ok\n");
 }
 
-int main(int argc, char **argv) {
-  if (argc == 2) {
-    Args args;
-    if (std::strcmp(argv[1], "mutual-exclusion") == 0) {
-      args.allOnes = true;
-      args.randInt = true;
-    } else if (std::strcmp(argv[1], "mxfp4") == 0) {
-      args.inputType = InputType::MXFP4;
-      args.waveSize = 64;
-      args.randInt = true;
-    } else {
-      fail("unknown test mode");
-    }
-    validateArgs(args);
-    fail("invalid rand_int arguments accepted");
+static Args makeStreamKArgs() {
+  Args args;
+  args.m = 512;
+  args.n = 256;
+  args.k = 256;
+  args.bm = 2;
+  args.bn = 2;
+  args.waveMTiles = 8;
+  args.waveNTiles = 8;
+  args.waveKTiles = 2;
+  args.waveSize = 64;
+  args.cType = CType::F16;
+  args.kernelABI = KernelABI::StreamK;
+  args.streamKWorkers = 5;
+  return args;
+}
+
+static void checkStreamKWorkspace(const Args &args) {
+  StreamKWorkspaceSizes sizes = getStreamKWorkspaceSizes(args);
+  if (sizes.scratchBytes != 5 * 2 * 256 * 256 * sizeof(float) ||
+      sizes.counterElements != 2 || sizes.counterBytes != 2 * sizeof(uint32_t))
+    fail("Stream-K workspace size mismatch");
+}
+
+static void checkStreamKLaunch(const Args &args) {
+  LaunchShape launch = makeLaunchShape(args);
+  if (launch.gridX != 5 || launch.gridY != 1 || launch.blockThreads != 256)
+    fail("Stream-K launch shape mismatch");
+}
+
+static void checkStreamKArgStorage(Args &args) {
+  LaunchShape launch = makeLaunchShape(args);
+  DeviceBuffers first;
+  first.deviceStreamKScratch = reinterpret_cast<void *>(uintptr_t{0x1000});
+  first.deviceStreamKCounters = reinterpret_cast<void *>(uintptr_t{0x2000});
+  DeviceBuffers second;
+  second.deviceStreamKScratch = reinterpret_cast<void *>(uintptr_t{0x3000});
+  second.deviceStreamKCounters = reinterpret_cast<void *>(uintptr_t{0x4000});
+  KernelArgStorage firstStorage;
+  KernelArgStorage secondStorage;
+  initKernelArgStorage(firstStorage, args, first, launch.tripCount);
+  initKernelArgStorage(secondStorage, args, second, launch.tripCount);
+  if (firstStorage.active != firstStorage.streamKArgs.data() ||
+      secondStorage.active != secondStorage.streamKArgs.data())
+    fail("Stream-K argument block not selected");
+  if (*static_cast<void **>(firstStorage.streamKArgs[3]) ==
+          *static_cast<void **>(secondStorage.streamKArgs[3]) ||
+      *static_cast<void **>(firstStorage.streamKArgs[4]) ==
+          *static_cast<void **>(secondStorage.streamKArgs[4]))
+    fail("Stream-K workspaces alias");
+}
+
+static void checkStreamKABI() {
+  Args args = makeStreamKArgs();
+  validateArgs(args);
+  checkStreamKWorkspace(args);
+  checkStreamKLaunch(args);
+  checkStreamKArgStorage(args);
+  std::printf("streamk_kernel_abi: ok\n");
+}
+
+[[noreturn]] static void runInvalidMode(const char *mode) {
+  Args args;
+  if (std::strcmp(mode, "mutual-exclusion") == 0) {
+    args.allOnes = true;
+    args.hpl = true;
+  } else if (std::strcmp(mode, "mxfp4") == 0) {
+    args.inputType = InputType::MXFP4;
+    args.waveSize = 64;
+    args.randInt = true;
+  } else if (std::strcmp(mode, "hpl-mxfp4") == 0) {
+    args.inputType = InputType::MXFP4;
+    args.waveSize = 64;
+    args.hpl = true;
+  } else if (std::strcmp(mode, "streamk-workers") == 0) {
+    args = makeStreamKArgs();
+    args.streamKWorkers = 0;
+  } else if (std::strcmp(mode, "streamk-layout") == 0) {
+    args = makeStreamKArgs();
+    args.outputLayout = OutputLayout::RowMajor;
+  } else if (std::strcmp(mode, "streamk-work-overflow") == 0) {
+    args = makeStreamKArgs();
+    args.m = 256 * 32768;
+    args.n = 256 * 32768;
+  } else if (std::strcmp(mode, "streamk-buffer-overflow") == 0) {
+    args = makeStreamKArgs();
+    args.m = 2147481600;
+    args.n = 256;
+    args.k = 64;
+    args.streamKWorkers = 1;
+  } else if (std::strcmp(mode, "workspace-overflow") == 0) {
+    checkedSizeProduct(std::numeric_limits<size_t>::max(), 2,
+                       "Stream-K workspace size overflow");
+  } else if (std::strcmp(mode, "integer-overflow") == 0) {
+    (void)parseInt("2147483648");
+  } else {
+    fail("unknown test mode");
   }
+  validateArgs(args);
+  fail("invalid input arguments accepted");
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2)
+    runInvalidMode(argv[1]);
   if (argc != 1)
     fail("unexpected test arguments");
 
   checkType(InputType::F16, "f16");
   checkType(InputType::BF16, "bf16");
+  checkHplType(InputType::F16, "f16",
+               {0xb5dc, 0x33a1, 0xb028, 0xb61c, 0x2a95, 0x3581, 0xb509, 0xb583,
+                0xb537, 0xaaa8, 0x365c, 0xb48d, 0xa801, 0x2b96, 0x304a});
+  checkHplType(InputType::BF16, "bf16",
+               {0xbebb, 0x3e74, 0xbe05, 0xbec3, 0x3d53, 0x3eb0, 0xbea1, 0xbeb0,
+                0xbea7, 0xbd55, 0x3ecb, 0xbe92, 0xbd00, 0x3d73, 0x3e09});
   checkCPUReference(InputType::F16, "f16");
   checkCPUReference(InputType::BF16, "bf16");
+  checkHplCPUReference(InputType::F16, "f16");
+  checkHplCPUReference(InputType::BF16, "bf16");
   checkOutputCoordinates();
   checkOutputLayouts();
+  checkStreamKABI();
   return 0;
 }

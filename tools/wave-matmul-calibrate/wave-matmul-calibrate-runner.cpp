@@ -11,18 +11,21 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
 
 enum class CType { F32, F16, BF16 };
 enum class InputType { F16, BF16, MXFP4 };
-enum class KernelABI { Matmul, V9Golden, TLXMXFP };
+enum class KernelABI { Matmul, V9Golden, TLXMXFP, StreamK };
 enum class AccumulatorLayout { Automatic, Wmma, Mfma };
 enum class OutputLayout { Automatic, TilePacked, RowMajor, ColumnMajor };
 enum class ScaleLayout { Canonical, TensileLite };
@@ -47,10 +50,12 @@ struct Args {
   int iters = 1000;
   int warmupIters = 10;
   int dynamicLdsBytes = 0;
+  int streamKWorkers = 1;
   int seed = 0;
   bool checkOutput = true;
   bool allOnes = false;
   bool randInt = false;
+  bool hpl = false;
   ScaleLayout scaleLayout = ScaleLayout::Canonical;
 };
 
@@ -75,23 +80,27 @@ static void usage() {
       "  --wave-size N          lanes per wave (default 32)\n"
       "  --input-type f16|bf16|mxfp4  input element type (default f16)\n"
       "  --c-type f32|f16|bf16  output element type (default f32)\n"
-      "  --kernel-abi matmul|v9-golden|tlx-mxfp  kernel argument ABI\n"
+      "  --kernel-abi matmul|v9-golden|tlx-mxfp|streamk  kernel argument "
+      "ABI\n"
       "  --accumulator-layout automatic|wmma|mfma\n"
       "  --output-layout automatic|tile-packed|row-major|column-major\n"
       "  --dynamic-lds N        dynamic LDS bytes (default 0)\n"
+      "  --streamk-workers N    persistent Stream-K workgroups\n"
       "  --iters N              launch iterations (default 1000)\n"
       "  --warmup N             warmup launches (default 10)\n"
       "  --seed N               deterministic input seed (default 0)\n"
       "  --scale-layout canonical|tensilelite  MXFP4 scale upload layout\n"
       "  --all-ones             fill A/B with ones and MXFP4 scales with 1\n"
       "  --rand-int             match hipBLASLt f16/bf16 rand_int inputs\n"
+      "  --hpl                  match hipBLASLt f16/bf16 HPL inputs\n"
       "  --no-check             skip random-output check\n");
 }
 
 static int parseInt(const char *s) {
+  errno = 0;
   char *end = nullptr;
   long v = std::strtol(s, &end, 10);
-  if (!end || *end != '\0')
+  if (!end || *end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX)
     die("bad integer arg");
   return static_cast<int>(v);
 }
@@ -170,7 +179,11 @@ static void setKernelABI(Args &a, const char *v) {
     a.kernelABI = KernelABI::TLXMXFP;
     return;
   }
-  die("bad --kernel-abi; expected matmul, v9-golden, or tlx-mxfp");
+  if (std::strcmp(v, "streamk") == 0) {
+    a.kernelABI = KernelABI::StreamK;
+    return;
+  }
+  die("bad --kernel-abi; expected matmul, v9-golden, tlx-mxfp, or streamk");
 }
 static void setAccumulatorLayout(Args &a, const char *v) {
   if (std::strcmp(v, "automatic") == 0) {
@@ -213,6 +226,9 @@ static void setSeed(Args &a, const char *v) { a.seed = parseInt(v); }
 static void setDynamicLds(Args &a, const char *v) {
   a.dynamicLdsBytes = parseInt(v);
 }
+static void setStreamKWorkers(Args &a, const char *v) {
+  a.streamKWorkers = parseInt(v);
+}
 
 static constexpr FlagHandler kFlags[] = {
     {"--m", setM},
@@ -231,6 +247,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--output-layout", setOutputLayout},
     {"--scale-layout", setScaleLayout},
     {"--dynamic-lds", setDynamicLds},
+    {"--streamk-workers", setStreamKWorkers},
     {"--iters", setIters},
     {"--warmup", setWarmup},
     {"--seed", setSeed},
@@ -281,6 +298,10 @@ static int handleOneArg(int argc, char **argv, int i, Args &a,
     a.randInt = true;
     return i + 1;
   }
+  if (std::strcmp(arg, "--hpl") == 0) {
+    a.hpl = true;
+    return i + 1;
+  }
   if (isFlag(arg)) {
     if (i + 1 >= argc)
       die("missing value for flag");
@@ -305,6 +326,110 @@ static bool hasV9GoldenTileShape(const Args &a) {
 static bool hasTLXMXFPTileShape(const Args &a) {
   return a.bm == 2 && a.bn == 2 && a.waveMTiles == 8 && a.waveNTiles == 8 &&
          a.waveKTiles == 2;
+}
+
+static bool isStreamK(const Args &a) {
+  return a.kernelABI == KernelABI::StreamK;
+}
+
+static uint64_t checkedU64Product(uint64_t lhs, uint64_t rhs,
+                                  const char *message) {
+  if (rhs && lhs > std::numeric_limits<uint64_t>::max() / rhs)
+    die(message);
+  return lhs * rhs;
+}
+
+static size_t checkedSizeProduct(size_t lhs, size_t rhs, const char *message) {
+  if (rhs && lhs > std::numeric_limits<size_t>::max() / rhs)
+    die(message);
+  return lhs * rhs;
+}
+
+struct StreamKWorkspaceSizes {
+  size_t scratchBytes = 0;
+  size_t counterElements = 0;
+  size_t counterBytes = 0;
+};
+
+static StreamKWorkspaceSizes getStreamKWorkspaceSizes(const Args &a) {
+  StreamKWorkspaceSizes sizes;
+  sizes.scratchBytes = checkedSizeProduct(static_cast<size_t>(a.streamKWorkers),
+                                          2, "Stream-K scratch size overflow");
+  sizes.scratchBytes = checkedSizeProduct(sizes.scratchBytes, 256 * 256,
+                                          "Stream-K scratch size overflow");
+  sizes.scratchBytes = checkedSizeProduct(sizes.scratchBytes, sizeof(float),
+                                          "Stream-K scratch size overflow");
+  sizes.counterElements = checkedSizeProduct(static_cast<size_t>(a.m / 256),
+                                             static_cast<size_t>(a.n / 256),
+                                             "Stream-K counter size overflow");
+  sizes.counterBytes =
+      checkedSizeProduct(sizes.counterElements, sizeof(uint32_t),
+                         "Stream-K counter size overflow");
+  return sizes;
+}
+
+static uint64_t getStreamKTotalIterations(const Args &a) {
+  uint64_t tiles = checkedU64Product(static_cast<uint64_t>(a.m / 256),
+                                     static_cast<uint64_t>(a.n / 256),
+                                     "Stream-K work size overflow");
+  return checkedU64Product(tiles, static_cast<uint64_t>(a.k / 64),
+                           "Stream-K work size overflow");
+}
+
+static void validateStreamKBufferRange(uint64_t elements, const char *message) {
+  uint64_t bytes = checkedU64Product(elements, 2, message);
+  if (bytes > UINT32_MAX)
+    die(message);
+}
+
+static void validateStreamKTypesAndShape(const Args &a) {
+  if (a.inputType != InputType::F16 || a.cType != CType::F16)
+    die("Stream-K ABI requires f16 input and output");
+  if (a.waveSize != 64)
+    die("Stream-K ABI requires wave-size 64");
+  if (!hasTLXMXFPTileShape(a))
+    die("Stream-K ABI requires the 256x256x64 four-wave shape");
+}
+
+static void validateStreamKGeometry(const Args &a) {
+  if (a.m % 256 || a.n % 256 || a.k % 64)
+    die("Stream-K ABI requires M/N multiples of 256 and K of 64");
+  if (a.outputLayout != OutputLayout::Automatic &&
+      a.outputLayout != OutputLayout::ColumnMajor)
+    die("Stream-K ABI requires column-major output");
+}
+
+static void validateStreamKWork(const Args &a) {
+  uint64_t totalIterations = getStreamKTotalIterations(a);
+  if (totalIterations > INT_MAX)
+    die("Stream-K work index exceeds i32");
+  if (a.streamKWorkers <= 0 ||
+      static_cast<uint64_t>(a.streamKWorkers) > totalIterations)
+    die("Stream-K worker count must fit the work");
+  validateStreamKBufferRange(
+      checkedU64Product(static_cast<uint64_t>(a.m), static_cast<uint64_t>(a.k),
+                        "Stream-K A buffer range overflow"),
+      "Stream-K A buffer range overflow");
+  validateStreamKBufferRange(
+      checkedU64Product(static_cast<uint64_t>(a.n), static_cast<uint64_t>(a.k),
+                        "Stream-K B buffer range overflow"),
+      "Stream-K B buffer range overflow");
+  validateStreamKBufferRange(
+      checkedU64Product(static_cast<uint64_t>(a.m), static_cast<uint64_t>(a.n),
+                        "Stream-K C buffer range overflow"),
+      "Stream-K C buffer range overflow");
+  (void)getStreamKWorkspaceSizes(a);
+}
+
+static void validateStreamKArgs(const Args &a) {
+  if (!isStreamK(a)) {
+    if (a.streamKWorkers != 1)
+      die("--streamk-workers requires the Stream-K ABI");
+    return;
+  }
+  validateStreamKTypesAndShape(a);
+  validateStreamKGeometry(a);
+  validateStreamKWork(a);
 }
 
 static void validateV9GoldenArgs(const Args &a) {
@@ -354,12 +479,15 @@ static void validateArgs(const Args &a) {
   if (a.scaleLayout == ScaleLayout::TensileLite &&
       a.inputType != InputType::MXFP4)
     die("tensilelite scale layout requires MXFP4 input");
-  if (a.allOnes && a.randInt)
-    die("--all-ones and --rand-int are mutually exclusive");
-  if (a.randInt && a.inputType == InputType::MXFP4)
-    die("--rand-int supports f16/bf16 inputs only");
+  if (static_cast<int>(a.allOnes) + static_cast<int>(a.randInt) +
+          static_cast<int>(a.hpl) >
+      1)
+    die("--all-ones, --rand-int, and --hpl are mutually exclusive");
+  if ((a.randInt || a.hpl) && a.inputType == InputType::MXFP4)
+    die("--rand-int/--hpl support f16/bf16 inputs only");
   validateV9GoldenArgs(a);
   validateTLXMXFPArgs(a);
+  validateStreamKArgs(a);
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -461,6 +589,16 @@ static float hipblasLtRandInt(size_t index) {
   state = hipblasLtXorShift(state);
   state = hipblasLtXorShift(state);
   return static_cast<float>(static_cast<uint32_t>(state) % 5) - 2.0f;
+}
+
+static float hipblasLtHpl(size_t index) {
+  uint64_t state = index * 1664525 + 1013904223;
+  state = hipblasLtXorShift(state);
+  state = hipblasLtXorShift(state);
+  state = hipblasLtXorShift(state);
+  return static_cast<float>(static_cast<double>(static_cast<uint32_t>(state)) /
+                                static_cast<double>(UINT32_MAX) -
+                            0.5);
 }
 
 static uint8_t randomMXFP4Code(uint32_t &state) {
@@ -678,6 +816,8 @@ static const char *getKernelABIName(KernelABI abi) {
     return "v9-golden";
   case KernelABI::TLXMXFP:
     return "tlx-mxfp";
+  case KernelABI::StreamK:
+    return "streamk";
   }
   die("unknown kernel ABI");
 }
@@ -705,6 +845,8 @@ static const char *getInputModeName(const Args &a) {
     return "all-ones";
   if (a.randInt)
     return "rand-int";
+  if (a.hpl)
+    return "hpl";
   return "random";
 }
 
@@ -735,11 +877,13 @@ static OutputLayout getEffectiveOutputLayout(const Args &a) {
     return a.outputLayout;
   if (isV9Golden(a))
     return OutputLayout::RowMajor;
+  if (isStreamK(a))
+    return OutputLayout::ColumnMajor;
   return OutputLayout::TilePacked;
 }
 
 static bool usesFlattenedGrid(const Args &a) {
-  return isV9Golden(a) || isTLXMXFP(a);
+  return isV9Golden(a) || isTLXMXFP(a) || isStreamK(a);
 }
 
 static int mmaKTile(const Args &a) {
@@ -774,12 +918,20 @@ static uint16_t inputBits(InputType type, float value) {
 static std::vector<uint8_t> make16BitInputBytes(size_t elements, int k,
                                                 InputType type, int seed,
                                                 int stream, bool allOnes,
-                                                bool randInt) {
+                                                bool randInt, bool hpl) {
   std::vector<uint8_t> bytes(elements * sizeof(uint16_t));
   if (allOnes) {
     uint16_t bits = oneBits(type);
     for (size_t i = 0; i < elements; ++i)
       std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+    return bytes;
+  }
+
+  if (hpl) {
+    for (size_t i = 0; i < elements; ++i) {
+      uint16_t bits = inputBits(type, hipblasLtHpl(i));
+      std::memcpy(bytes.data() + i * sizeof(bits), &bits, sizeof(bits));
+    }
     return bytes;
   }
 
@@ -807,11 +959,12 @@ static std::vector<uint8_t> make16BitInputBytes(size_t elements, int k,
 
 static std::vector<uint8_t> makeInputBytes(int rows, int k, InputType type,
                                            int seed, int stream, bool allOnes,
-                                           bool randInt) {
+                                           bool randInt, bool hpl) {
   size_t elements = static_cast<size_t>(rows) * k;
   if (isMXFP4(type))
     return makeMXFP4InputBytes(elements, seed, stream, allOnes);
-  return make16BitInputBytes(elements, k, type, seed, stream, allOnes, randInt);
+  return make16BitInputBytes(elements, k, type, seed, stream, allOnes, randInt,
+                             hpl);
 }
 
 static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k, int seed,
@@ -975,9 +1128,10 @@ static int inputCols(const Args &a, bool isA) {
 static HostInputs makeHostInputs(const Args &a) {
   HostInputs inputs;
   inputs.a = makeInputBytes(inputRows(a, true), inputCols(a, true), a.inputType,
-                            a.seed, 0, a.allOnes, a.randInt);
-  inputs.b = makeInputBytes(inputRows(a, false), inputCols(a, false),
-                            a.inputType, a.seed, 1, a.allOnes, a.randInt);
+                            a.seed, 0, a.allOnes, a.randInt, a.hpl);
+  inputs.b =
+      makeInputBytes(inputRows(a, false), inputCols(a, false), a.inputType,
+                     a.seed, 1, a.allOnes, a.randInt, a.hpl);
   if (isMXFP4(a.inputType)) {
     inputs.aScale = makeMXFP4ScaleBytes(a.m, a.k, a.seed, 2, a.allOnes);
     inputs.bScale = makeMXFP4ScaleBytes(a.n, a.k, a.seed, 3, a.allOnes);
@@ -1042,8 +1196,13 @@ struct DeviceBuffers {
   void *deviceAScale = nullptr;
   void *deviceBScale = nullptr;
   void *deviceC = nullptr;
-  int cElements = 0;
+  void *deviceStreamKScratch = nullptr;
+  void *deviceStreamKCounters = nullptr;
   size_t cBytes = 0;
+  size_t streamKScratchBytes = 0;
+  size_t streamKCounterBytes = 0;
+  int cElements = 0;
+  size_t streamKCounterElements = 0;
 };
 
 static DeviceBuffers prepareDeviceBuffers(const Args &a,
@@ -1061,6 +1220,20 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
              "hipMalloc B scale");
   }
   checkHip(hipMalloc(&b.deviceC, b.cBytes), "hipMalloc C");
+  if (isStreamK(a)) {
+    StreamKWorkspaceSizes sizes = getStreamKWorkspaceSizes(a);
+    b.streamKScratchBytes = sizes.scratchBytes;
+    b.streamKCounterElements = sizes.counterElements;
+    b.streamKCounterBytes = sizes.counterBytes;
+    checkHip(hipMalloc(&b.deviceStreamKScratch, b.streamKScratchBytes),
+             "hipMalloc Stream-K scratch");
+    checkHip(hipMalloc(&b.deviceStreamKCounters, b.streamKCounterBytes),
+             "hipMalloc Stream-K counters");
+    checkHip(hipMemset(b.deviceStreamKScratch, 0, b.streamKScratchBytes),
+             "hipMemset Stream-K scratch");
+    checkHip(hipMemset(b.deviceStreamKCounters, 0, b.streamKCounterBytes),
+             "hipMemset Stream-K counters");
+  }
   checkHip(hipMemcpy(b.deviceA, inputs.a.data(), inputs.a.size(),
                      hipMemcpyHostToDevice),
            "hipMemcpy A");
@@ -1087,6 +1260,10 @@ static void freeDeviceBuffers(DeviceBuffers &b) {
   if (b.deviceBScale)
     checkHip(hipFree(b.deviceBScale), "hipFree B scale");
   checkHip(hipFree(b.deviceC), "hipFree C");
+  if (b.deviceStreamKScratch)
+    checkHip(hipFree(b.deviceStreamKScratch), "hipFree Stream-K scratch");
+  if (b.deviceStreamKCounters)
+    checkHip(hipFree(b.deviceStreamKCounters), "hipFree Stream-K counters");
 }
 
 static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
@@ -1129,6 +1306,23 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
   validateOutput(cElements, a, inputs, [&](int i) { return hostC[i]; });
 }
 
+static void checkStreamKCounters(const DeviceBuffers &b, const Args &a) {
+  if (!isStreamK(a))
+    return;
+  std::vector<uint32_t> counters(b.streamKCounterElements);
+  checkHip(hipMemcpy(counters.data(), b.deviceStreamKCounters,
+                     b.streamKCounterBytes, hipMemcpyDeviceToHost),
+           "hipMemcpy Stream-K counters");
+  for (size_t i = 0; i < counters.size(); ++i) {
+    if (counters[i] == 0)
+      continue;
+    std::fprintf(stderr, "Stream-K counter %zu did not reset: %u\n", i,
+                 counters[i]);
+    std::exit(2);
+  }
+  std::printf("streamk_counter_check: passed\n");
+}
+
 struct LaunchShape {
   int gridX = 1;
   int gridY = 1;
@@ -1143,8 +1337,13 @@ static LaunchShape makeLaunchShape(const Args &a) {
   int virtualKSteps =
       divExact(a.k, mmaKTile(a) * a.waveKTiles, "bad K blocking");
   LaunchShape shape;
-  shape.gridX = usesFlattenedGrid(a) ? blocksX * blocksY : blocksX;
-  shape.gridY = usesFlattenedGrid(a) ? 1 : blocksY;
+  if (isStreamK(a)) {
+    shape.gridX = a.streamKWorkers;
+    shape.gridY = 1;
+  } else {
+    shape.gridX = usesFlattenedGrid(a) ? blocksX * blocksY : blocksX;
+    shape.gridY = usesFlattenedGrid(a) ? 1 : blocksY;
+  }
   shape.blockThreads = a.bm * a.bn * a.waveSize;
   shape.tripCount = std::max(virtualKSteps - 1, 0);
   shape.displayTripCount = usesFlattenedGrid(a)
@@ -1158,6 +1357,7 @@ struct KernelArgStorage {
   std::array<void *, 6> mxfp4Args;
   std::array<void *, 8> v9Args;
   std::array<void *, 12> tlxArgs;
+  std::array<void *, 6> streamKArgs;
   void **active = nullptr;
   int strideAM = 0;
   int strideBK = 0;
@@ -1195,6 +1395,16 @@ static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
                      &storage.strideCM,
                      &storage.scaleKStride,
                      &storage.scaleKStride};
+  storage.streamKArgs = {&buffers.deviceA,
+                         &buffers.deviceB,
+                         &buffers.deviceC,
+                         &buffers.deviceStreamKScratch,
+                         &buffers.deviceStreamKCounters,
+                         &a.streamKWorkers};
+  if (isStreamK(a)) {
+    storage.active = storage.streamKArgs.data();
+    return;
+  }
   if (isTLXMXFP(a)) {
     storage.active = storage.tlxArgs.data();
     return;
@@ -1275,6 +1485,7 @@ int main(int argc, char **argv) {
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
   copyAndCheckOutput(buffers.deviceC, buffers.cBytes, buffers.cElements, a,
                      inputs);
+  checkStreamKCounters(buffers, a);
   freeDeviceBuffers(buffers);
   return 0;
 }

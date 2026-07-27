@@ -18,9 +18,11 @@ from statistics import median
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples/wave/wmma_matmul_tiled.py"
+STREAMK_EXAMPLE = REPO_ROOT / "examples/wave/streamk_f16_gemm.py"
 TENSILELITE_EXAMPLE = REPO_ROOT / "examples/wave/tensilelite_mxfp4_subtile.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate-runner.cpp"
 KERNEL_NAME = "wmma_f16_matmul_tiled"
+STREAMK_KERNEL_NAME = "gfx950_f16_streamk_gemm"
 V9_GOLDEN_NAME = "v9_4096.original.wave"
 V9_TRANSPOSED_GOLDEN_NAME = "v9_4096.transposed.wave"
 V9_GOLDEN_KERNEL_NAME = "v9_beyond_hotloop"
@@ -31,6 +33,11 @@ V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
 EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
+_INT32_MAX = (1 << 31) - 1
+_UINT32_MAX = (1 << 32) - 1
+_SIZE_T_MAX = 2 * sys.maxsize + 1
+_STREAMK_TILE_ELEMENTS = 256 * 256
+_STREAMK_PARTIAL_SLOTS = 2
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(REPO_ROOT / "examples" / "wave"))
 
@@ -82,7 +89,10 @@ class VariantResult:
 ProfileValue = bool | int | str
 _PHASED_DMA_PROFILE = "gfx950-f16-256x256-8wave"
 _FOUR_WAVE_PHASED_DMA_PROFILE = "gfx950-f16-256x256-4wave"
-_PHASED_DMA_PROFILES = frozenset((_PHASED_DMA_PROFILE, _FOUR_WAVE_PHASED_DMA_PROFILE))
+_STREAMK_PROFILE = "gfx950-f16-256x256-4wave-streamk"
+_PHASED_DMA_PROFILES = frozenset(
+    (_PHASED_DMA_PROFILE, _FOUR_WAVE_PHASED_DMA_PROFILE, _STREAMK_PROFILE)
+)
 
 KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
     "gfx950-f16-256x256-16wave": {
@@ -130,6 +140,26 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
         "coalesced_mfma_output": True,
+    },
+    _STREAMK_PROFILE: {
+        "example": "streamk-gemm",
+        "bm": 2,
+        "bn": 2,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 8,
+        "wave_k_tiles": 2,
+        "target_waves": 1,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "f16",
+        "output_type": "f16",
+        "output_store_cache": "cs",
+        "output_layout": "column-major",
+        "cta_swizzle_xcds": 8,
+        "cta_group_m": 4,
+        "coalesced_mfma_output": True,
+        "streamk_workers": 256,
     },
     "gfx950-mxfp4-256x256-8wave": {
         "bm": 4,
@@ -247,7 +277,13 @@ def is_checked_in_perf_golden(args: argparse.Namespace) -> bool:
     return is_v9_perf_golden(args) or is_tlx_mxfp_perf_golden(args)
 
 
+def is_streamk_gemm(args: argparse.Namespace) -> bool:
+    return selected_example(args) == "streamk-gemm"
+
+
 def kernel_name(args: argparse.Namespace) -> str:
+    if is_streamk_gemm(args):
+        return STREAMK_KERNEL_NAME
     if is_v9_perf_golden(args):
         return V9_GOLDEN_KERNEL_NAME
     if is_tlx_mxfp_perf_golden(args):
@@ -256,6 +292,8 @@ def kernel_name(args: argparse.Namespace) -> str:
 
 
 def kernel_abi(args: argparse.Namespace) -> str:
+    if is_streamk_gemm(args):
+        return "streamk"
     if is_v9_perf_golden(args):
         return "v9-golden"
     if is_tlx_mxfp_perf_golden(args):
@@ -272,6 +310,8 @@ def input_mode_name(args: argparse.Namespace) -> str:
         return "all-ones"
     if getattr(args, "rand_int", False):
         return "rand-int"
+    if getattr(args, "hpl", False):
+        return "hpl"
     return "random"
 
 
@@ -370,7 +410,23 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     return cmd
 
 
+def build_streamk_example_args(args: argparse.Namespace, chip: str) -> list[str]:
+    return [
+        sys.executable,
+        str(STREAMK_EXAMPLE),
+        f"--chip={chip}",
+        f"--m={args.m}",
+        f"--n={args.n}",
+        f"--k={args.k}",
+        f"--workers={args.streamk_workers}",
+        f"--cta-swizzle-xcds={args.cta_swizzle_xcds}",
+        f"--cta-group-m={args.cta_group_m}",
+    ]
+
+
 def build_example_args(args: argparse.Namespace, chip: str) -> list[str]:
+    if is_streamk_gemm(args):
+        return build_streamk_example_args(args, chip)
     if selected_example(args) == "tensilelite-subtile":
         return build_tensilelite_example_args(args, chip)
     if is_checked_in_perf_golden(args):
@@ -432,16 +488,17 @@ def generate_kernel_module(args: argparse.Namespace, chip: str) -> str:
         else str(package_path) + os.pathsep + env["PYTHONPATH"]
     )
     module_text = run(build_example_args(args, chip), env=env)
-    pretty = rf"(func\.func @{KERNEL_NAME}\w*.*?\n    \}})"
+    name = re.escape(kernel_name(args))
+    pretty = rf"(func\.func @{name}\w*.*?\n    \}})"
     generic = (
-        rf'(\s+"func\.func"\(\).*?sym_name = "{KERNEL_NAME}".*?'
+        rf'(\s+"func\.func"\(\).*?sym_name = "{name}".*?'
         r"\n\s+\}\) \{gpu\.kernel[^\n]*\} : \(\) -> \(\))"
     )
     match = re.search(pretty, module_text, re.S) or re.search(
         generic, module_text, re.S
     )
     if not match:
-        sys.exit("could not isolate matmul kernel from generated module")
+        sys.exit(f"could not isolate {kernel_name(args)} from generated module")
     kernel = re.sub(r"^    ", "  ", match.group(1).lstrip(), flags=re.M)
     target = f"amdgcn-amd-amdhsa--{chip}"
     return (
@@ -604,14 +661,14 @@ def compute_virtual_k_steps(args: argparse.Namespace) -> int:
 
 
 def compute_kernel_arg_trip_count(args: argparse.Namespace) -> int:
-    if is_checked_in_perf_golden(args):
+    if is_checked_in_perf_golden(args) or is_streamk_gemm(args):
         return 0
     virtual_k_steps = compute_virtual_k_steps(args)
     return max(virtual_k_steps - 1, 0)
 
 
 def kernel_arg_trip_count_text(args: argparse.Namespace) -> str:
-    if is_checked_in_perf_golden(args):
+    if is_checked_in_perf_golden(args) or is_streamk_gemm(args):
         return "n/a"
     return str(compute_kernel_arg_trip_count(args))
 
@@ -724,6 +781,8 @@ def compute_lds_bytes(args: argparse.Namespace) -> int:
         one_buffer = slots * dwords_per_slot * 4
         data_lds = one_buffer * dma_buffer_count(args)
         if getattr(args, "input_type", "f16") != "mxfp4":
+            if is_streamk_gemm(args):
+                return (data_lds + 4 + 31) // 32 * 32
             return data_lds
         return data_lds + mxfp4_scale_lds_bytes(args)
     slots = (
@@ -827,12 +886,16 @@ def run_hw(
         "--seed",
         str(getattr(args, "seed", 0)),
     ]
+    if is_streamk_gemm(args):
+        cmd.extend(["--streamk-workers", str(args.streamk_workers)])
     if selected_scale_input(args) == "tensilelite":
         cmd.extend(["--scale-layout", "tensilelite"])
     if getattr(args, "all_ones", False):
         cmd.append("--all-ones")
     if getattr(args, "rand_int", False):
         cmd.append("--rand-int")
+    if getattr(args, "hpl", False):
+        cmd.append("--hpl")
     if args.no_check:
         cmd.append("--no-check")
     cmd += [str(hsaco), kernel_name(args)]
@@ -881,13 +944,19 @@ def run_variant(
         asm = emit_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name)
         emit_asm.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(asm, emit_asm)
-    sim_cycles = run_sim_report(args.build_dir, machine, args)
+    sim_cycles = run_simulation(args, machine)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
     asm = ensure_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name, asm)
     hsaco = assemble_hsaco(args.build_dir, asm, machine, tmp, variant.name)
     hw_cycles, hw_us, hw_check = run_hw_repeats(runner, hsaco, args, run_hw=run_hw)
     return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
+
+
+def run_simulation(args: argparse.Namespace, machine: Path) -> int | None:
+    if is_streamk_gemm(args):
+        return None
+    return run_sim_report(args.build_dir, machine, args)
 
 
 def print_result(result: VariantResult) -> None:
@@ -929,6 +998,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         "--example",
         choices=(
             "matmul",
+            "streamk-gemm",
             "tensilelite-subtile",
             "v9-perf-golden",
             "tlx-mxfp-perf-golden",
@@ -985,6 +1055,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
         help="stamp waveamdmachine.enable_split_barriers on generated matmul kernels",
     )
     ap.add_argument("--coalesced-mfma-output", action="store_true")
+    ap.add_argument("--streamk-workers", type=int, default=1)
 
 
 def add_runtime_args(ap: argparse.ArgumentParser) -> None:
@@ -1006,6 +1077,11 @@ def add_runtime_args(ap: argparse.ArgumentParser) -> None:
         "--rand-int",
         action="store_true",
         help="match hipBLASLt f16/bf16 rand_int inputs",
+    )
+    input_mode.add_argument(
+        "--hpl",
+        action="store_true",
+        help="match hipBLASLt f16/bf16 HPL inputs",
     )
     ap.add_argument(
         "--repeats",
@@ -1138,6 +1214,110 @@ def _validate_tensilelite_example_args(args: argparse.Namespace) -> None:
         )
 
 
+def _checked_size_product(*values: int) -> int:
+    result = 1
+    for value in values:
+        if value < 0 or (value and result > _SIZE_T_MAX // value):
+            raise OverflowError("Stream-K workspace size exceeds size_t")
+        result *= value
+    return result
+
+
+def streamk_workspace_sizes(m: int, n: int, workers: int) -> tuple[int, int]:
+    scratch_bytes = _checked_size_product(
+        workers,
+        _STREAMK_PARTIAL_SLOTS,
+        _STREAMK_TILE_ELEMENTS,
+        4,
+    )
+    counter_bytes = _checked_size_product(m // 256, n // 256, 4)
+    return scratch_bytes, counter_bytes
+
+
+def _validate_streamk_target_and_shape(args: argparse.Namespace) -> None:
+    _require_arg(args.chip == "gfx950", "--example=streamk-gemm requires gfx950")
+    _require_arg(
+        (args.input_type, args.output_type) == ("f16", "f16"),
+        "--example=streamk-gemm requires f16 input and output",
+    )
+    _require_arg(
+        selected_matrix_intrinsic(args) == "mfma_gfx950",
+        "--example=streamk-gemm requires gfx950 MFMA",
+    )
+    _require_arg(
+        all(0 < value <= _INT32_MAX for value in (args.m, args.n, args.k)),
+        "--example=streamk-gemm dimensions must fit positive i32",
+    )
+    _require_arg(
+        (args.m % 256, args.n % 256, args.k % 64) == (0, 0, 0),
+        "--example=streamk-gemm requires M/N multiples of 256 and K of 64",
+    )
+    _require_arg(
+        (
+            args.bm,
+            args.bn,
+            args.wave_m_tiles,
+            args.wave_n_tiles,
+            args.wave_k_tiles,
+        )
+        == (2, 2, 8, 8, 2),
+        "--example=streamk-gemm requires the 256x256x64 four-wave shape",
+    )
+
+
+def _validate_streamk_topology(args: argparse.Namespace, tile_count: int) -> None:
+    _require_arg(
+        args.cta_swizzle_xcds in (1, 2, 4, 8)
+        and tile_count % args.cta_swizzle_xcds == 0,
+        "--example=streamk-gemm requires a dividing gfx950 XCD count",
+    )
+    _require_arg(
+        (args.m // 256) % args.cta_group_m == 0,
+        "--example=streamk-gemm requires GROUP_SIZE_M to divide M tiles",
+    )
+    _require_arg(
+        args.output_layout == "column-major",
+        "--example=streamk-gemm requires column-major output",
+    )
+
+
+def _validate_streamk_buffer_ranges(args: argparse.Namespace) -> None:
+    ranges = (
+        ("A", args.m * args.k),
+        ("B", args.n * args.k),
+        ("C", args.m * args.n),
+    )
+    for name, elements in ranges:
+        _require_arg(
+            elements * 2 <= _UINT32_MAX,
+            f"--example=streamk-gemm {name} buffer range exceeds u32",
+        )
+
+
+def _validate_streamk_work(args: argparse.Namespace, tile_count: int) -> None:
+    total_iterations = tile_count * (args.k // 64)
+    _require_arg(
+        total_iterations <= _INT32_MAX,
+        "--example=streamk-gemm work index exceeds i32",
+    )
+    _require_arg(
+        1 <= args.streamk_workers <= total_iterations,
+        f"--streamk-workers must be in [1, {total_iterations}]",
+    )
+    try:
+        streamk_workspace_sizes(args.m, args.n, args.streamk_workers)
+    except OverflowError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _validate_streamk_gemm_args(args: argparse.Namespace) -> None:
+    _validate_streamk_target_and_shape(args)
+    tile_count = (args.m // 256) * (args.n // 256)
+    _validate_streamk_topology(args, tile_count)
+    _validate_streamk_buffer_ranges(args)
+    _validate_streamk_work(args, tile_count)
+
+
 def _validate_v9_perf_golden_args(args: argparse.Namespace) -> None:
     _require_arg(args.chip == "gfx950", "--example=v9-perf-golden requires gfx950")
     _require_arg(
@@ -1215,6 +1395,9 @@ def _validate_tlx_mxfp_perf_golden_args(args: argparse.Namespace) -> None:
 
 
 def validate_example_args(args: argparse.Namespace) -> None:
+    if is_streamk_gemm(args):
+        _validate_streamk_gemm_args(args)
+        return
     if selected_example(args) == "matmul":
         _require_arg(
             selected_scale_input(args) == "canonical",
@@ -1264,6 +1447,16 @@ def validate_run_hsaco_args(
         sys.exit(f"HSACO not found: {run_hsaco}")
 
 
+def validate_streamk_runtime_args(args: argparse.Namespace) -> None:
+    if not is_streamk_gemm(args) and getattr(args, "streamk_workers", 1) != 1:
+        sys.exit("--streamk-workers requires --example=streamk-gemm")
+
+
+def validate_input_mode_args(args: argparse.Namespace) -> None:
+    if input_mode_name(args) in ("rand-int", "hpl") and args.input_type == "mxfp4":
+        sys.exit("--rand-int/--hpl support f16/bf16 inputs only")
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
@@ -1277,8 +1470,8 @@ def validate_args(args: argparse.Namespace) -> None:
         sys.exit("--sim-trip-count must be >= -1")
     if args.calibration_file is not None and not args.calibration_file.exists():
         sys.exit(f"--calibration-file does not exist: {args.calibration_file}")
-    if getattr(args, "rand_int", False) and args.input_type == "mxfp4":
-        sys.exit("--rand-int supports f16/bf16 inputs only")
+    validate_streamk_runtime_args(args)
+    validate_input_mode_args(args)
     validate_tool_output_args(args)
     validate_example_args(args)
     validate_mxfp4_args(args)
@@ -1321,6 +1514,14 @@ def print_header(args: argparse.Namespace, chip: str) -> None:
         f"sim_loop_trip_count: {compute_sim_loop_trip_count(args)}\n"
         f"sim_report_trip_count: {compute_report_trip_count(args)}"
     )
+    if is_streamk_gemm(args):
+        scratch_bytes, counter_bytes = streamk_workspace_sizes(
+            args.m, args.n, args.streamk_workers
+        )
+        print(
+            f"streamk_workers={args.streamk_workers} "
+            f"scratch_bytes={scratch_bytes} counter_bytes={counter_bytes}"
+        )
 
 
 def run_variants(
