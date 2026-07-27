@@ -38,6 +38,7 @@ FA_DEFAULT_XCDS = 8
 DEFAULT_ITERS = 200
 DEFAULT_WARMUP = 25
 DEFAULT_REPEATS = 9
+DEFAULT_STREAMK_WORKERS = 256
 V9_K = 4096
 
 
@@ -56,6 +57,7 @@ class KernelSpec:
     default_k_values: tuple[int, ...]
     sweep_k: bool
     waves: int = 0
+    default_streamk_workers: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ class RunSpec:
     kernel: KernelSpec
     shape: RunShape
     variants: str
+    streamk_workers: int = 0
 
     @property
     def flops(self) -> int:
@@ -161,6 +164,16 @@ KERNELS = {
         variants="scheduled",
         default_k_values=F16_DOC_K_VALUES,
         sweep_k=True,
+    ),
+    "f16-streamk": KernelSpec(
+        key="f16-streamk",
+        label="f16-streamk",
+        workload=Workload.MATMUL,
+        profile="gfx950-f16-256x256-4wave-streamk",
+        variants="scheduled",
+        default_k_values=F16_DOC_K_VALUES,
+        sweep_k=True,
+        default_streamk_workers=DEFAULT_STREAMK_WORKERS,
     ),
     "mxfp4": KernelSpec(
         key="mxfp4",
@@ -214,6 +227,7 @@ KERNEL_ALIASES = {
     "all": (
         "f16",
         "f16-4wave",
+        "f16-streamk",
         "mxfp4",
         "mxfp4-4wave",
         "v9",
@@ -227,6 +241,7 @@ KERNEL_ALIASES = {
     "f16": ("f16",),
     "f16-8wave": ("f16",),
     "f16-4wave": ("f16-4wave",),
+    "f16-streamk": ("f16-streamk",),
     "v9": ("v9",),
     "v9-original": ("v9",),
     "v9-transposed": ("v9-transposed",),
@@ -376,6 +391,14 @@ def compile_runners(
     }
 
 
+def resolve_streamk_workers(args: argparse.Namespace, kernel: KernelSpec) -> int:
+    if not kernel.default_streamk_workers:
+        return 0
+    if args.streamk_workers is not None:
+        return args.streamk_workers
+    return kernel.default_streamk_workers
+
+
 def build_run_specs(args: argparse.Namespace) -> list[RunSpec]:
     specs: list[RunSpec] = []
     for kernel in args.kernels:
@@ -395,9 +418,17 @@ def build_run_specs(args: argparse.Namespace) -> list[RunSpec]:
             k_values = args.k_values or kernel.default_k_values
         else:
             k_values = kernel.default_k_values
+        streamk_workers = resolve_streamk_workers(args, kernel)
         for variant in variants:
             for k in k_values:
-                specs.append(RunSpec(kernel, MatmulShape(args.m, args.n, k), variant))
+                specs.append(
+                    RunSpec(
+                        kernel,
+                        MatmulShape(args.m, args.n, k),
+                        variant,
+                        streamk_workers,
+                    )
+                )
     return specs
 
 
@@ -417,6 +448,7 @@ def artifact_stem(index: int, spec: RunSpec) -> str:
         f"{index:03d}",
         spec.kernel.key,
         *spec.shape.artifact_parts(),
+        *((f"w{spec.streamk_workers}",) if spec.streamk_workers else ()),
         spec.variants,
     ]
     return safe_stem("-".join(parts))
@@ -459,6 +491,10 @@ def matmul_calibrator_command(
         cmd.append("--all-ones")
     if args.rand_int:
         cmd.append("--rand-int")
+    if args.hpl:
+        cmd.append("--hpl")
+    if spec.streamk_workers:
+        cmd.extend(["--streamk-workers", str(spec.streamk_workers)])
     if args.multi_wave_specialize:
         cmd.append("--multi-wave-specialize")
     if args.rocm_lib:
@@ -741,13 +777,18 @@ def add_shape_arguments(parser: argparse.ArgumentParser) -> None:
         type=parse_kernel_csv,
         default=parse_kernel_csv("all"),
         help=(
-            "comma-separated f16,f16-4wave,mxfp4,mxfp4-4wave,v9,"
+            "comma-separated f16,f16-4wave,f16-streamk,mxfp4,mxfp4-4wave,v9,"
             "v9-transposed,fa-8wave,all; f16-8wave aliases f16, "
             "mxfp/mxfp4-8wave alias mxfp4, and fa aliases fa-8wave"
         ),
     )
     parser.add_argument("--m", type=int, default=4096)
     parser.add_argument("--n", type=int, default=4096)
+    parser.add_argument(
+        "--streamk-workers",
+        type=int,
+        help=f"Stream-K workers; default {DEFAULT_STREAMK_WORKERS}",
+    )
     parser.add_argument("--fa-batch", type=int, default=FA_DEFAULT_BATCH)
     parser.add_argument("--fa-heads", type=int, default=FA_DEFAULT_HEADS)
     parser.add_argument("--fa-sequence", type=int, default=FA_DEFAULT_SEQUENCE)
@@ -793,6 +834,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     input_mode = parser.add_mutually_exclusive_group()
     input_mode.add_argument("--all-ones", action="store_true")
     input_mode.add_argument("--rand-int", action="store_true")
+    input_mode.add_argument("--hpl", action="store_true")
     parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rebuild", action="store_true")
@@ -855,12 +897,14 @@ def build_argparser() -> argparse.ArgumentParser:
 
 
 def validate_input_mode(args: argparse.Namespace) -> None:
-    if (args.all_ones or args.rand_int) and any(
+    if (args.all_ones or args.rand_int or args.hpl) and any(
         kernel.workload == Workload.FLASH_ATTENTION for kernel in args.kernels
     ):
         raise SystemExit("FA sweep supports random floating-point inputs only")
-    if args.rand_int and any(kernel.key.startswith("mxfp4") for kernel in args.kernels):
-        raise SystemExit("--rand-int supports f16 kernels only")
+    if (args.rand_int or args.hpl) and any(
+        kernel.key.startswith("mxfp4") for kernel in args.kernels
+    ):
+        raise SystemExit("--rand-int/--hpl support f16 kernels only")
 
 
 def validate_positive_args(args: argparse.Namespace) -> None:
@@ -882,6 +926,14 @@ def validate_positive_args(args: argparse.Namespace) -> None:
         raise SystemExit("--compile-jobs must be non-negative")
     if args.sim_trip_count < -1:
         raise SystemExit("--sim-trip-count must be >= -1")
+    if args.streamk_workers is not None and args.streamk_workers <= 0:
+        raise SystemExit("--streamk-workers must be positive")
+
+
+def validate_streamk_args(args: argparse.Namespace) -> None:
+    has_streamk = any(kernel.key == "f16-streamk" for kernel in args.kernels)
+    if args.streamk_workers is not None and not has_streamk:
+        raise SystemExit("--streamk-workers requires --kernels=f16-streamk")
 
 
 def validate_v9_args(args: argparse.Namespace) -> None:
@@ -904,6 +956,7 @@ def validate_fa_args(args: argparse.Namespace) -> None:
 def validate_args(args: argparse.Namespace) -> None:
     validate_positive_args(args)
     validate_input_mode(args)
+    validate_streamk_args(args)
     validate_v9_args(args)
     validate_fa_args(args)
 

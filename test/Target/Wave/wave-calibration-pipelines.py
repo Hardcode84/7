@@ -26,6 +26,7 @@
 # CHECK: matmul_v9_transposed_perf_golden_profile: ok
 # CHECK: matmul_a4w4_mxfp_k16k_profile: ok
 # CHECK: matmul_perf_sweep_v9_defaults: ok
+# CHECK: matmul_perf_sweep_streamk: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: perf_sweep_fa_8wave: ok
 # CHECK: matmul_perf_sweep_rand_int_forwarding: ok
@@ -1816,6 +1817,139 @@ def check_matmul_perf_sweep_f16_profiles(perf_sweep) -> None:
     print("matmul_perf_sweep_f16_profiles: ok")
 
 
+def streamk_sweep_args(
+    perf_sweep, *, m: int, n: int, k: int, workers: int, input_mode: str
+) -> argparse.Namespace:
+    args = perf_sweep.build_argparser().parse_args(
+        [
+            "--kernels=f16-streamk",
+            f"--m={m}",
+            f"--n={n}",
+            f"--k-values={k}",
+            f"--streamk-workers={workers}",
+            f"--{input_mode}",
+            "--skip-rebuild",
+            "--dry-run",
+            "--artifact-dir=/tmp/wave-sweep-artifacts",
+        ]
+    )
+    perf_sweep.validate_args(args)
+    return args
+
+
+def check_streamk_sweep_plan(
+    perf_sweep,
+    args: argparse.Namespace,
+    *,
+    workers: int,
+    input_mode: str,
+) -> None:
+    check_name = "matmul_perf_sweep_streamk"
+    specs = perf_sweep.build_run_specs(args)
+    require(
+        check_name,
+        len(specs) == 1 and specs == perf_sweep.build_run_specs(args),
+        "Stream-K dry-run matrix is not deterministic",
+    )
+    spec = specs[0]
+    require(
+        check_name,
+        spec.kernel.profile == "gfx950-f16-256x256-4wave-streamk"
+        and spec.streamk_workers == workers,
+        "Stream-K profile or worker count mismatch",
+    )
+    command = perf_sweep.calibrator_command(args, spec)
+    require(
+        check_name,
+        command[command.index("--streamk-workers") + 1] == str(workers)
+        and f"--{input_mode}" in command,
+        "Stream-K worker count or input mode not forwarded",
+    )
+    runners = {perf_sweep.Workload.MATMUL: Path("/tmp/wave-sweep-artifacts/runner")}
+    prepared = perf_sweep.prepare_runs(args, specs, runners)
+    require(
+        check_name,
+        prepared == perf_sweep.prepare_runs(args, specs, runners)
+        and f"-w{workers}-" in prepared[0].hsaco.name,
+        "Stream-K artifact plan is not deterministic",
+    )
+
+
+def check_matmul_perf_sweep_streamk(perf_sweep) -> None:
+    check_name = "matmul_perf_sweep_streamk"
+    default_keys = [kernel.key for kernel in perf_sweep.parse_kernel_csv("all")]
+    require(
+        check_name,
+        default_keys.count("f16-streamk") == 1,
+        "default sweep should include Stream-K exactly once",
+    )
+    deduplicated = [
+        kernel.key
+        for kernel in perf_sweep.parse_kernel_csv("all,f16-streamk,f16-streamk")
+    ]
+    require(
+        check_name,
+        deduplicated == default_keys,
+        "Stream-K aliases should not duplicate or reorder the full sweep",
+    )
+    default_args = perf_sweep.build_argparser().parse_args(
+        ["--k-values=8192", "--skip-rebuild", "--dry-run"]
+    )
+    perf_sweep.validate_args(default_args)
+    default_streamk = [
+        spec
+        for spec in perf_sweep.build_run_specs(default_args)
+        if spec.kernel.key == "f16-streamk"
+    ]
+    require(
+        check_name,
+        len(default_streamk) == 1 and default_streamk[0].streamk_workers == 256,
+        "default run matrix should contain one 256-worker Stream-K run",
+    )
+
+    aligned = streamk_sweep_args(
+        perf_sweep,
+        m=8192,
+        n=8192,
+        k=8192,
+        workers=256,
+        input_mode="hpl",
+    )
+    check_streamk_sweep_plan(perf_sweep, aligned, workers=256, input_mode="hpl")
+    split = streamk_sweep_args(
+        perf_sweep,
+        m=2048,
+        n=2048,
+        k=8192,
+        workers=128,
+        input_mode="rand-int",
+    )
+    check_streamk_sweep_plan(perf_sweep, split, workers=128, input_mode="rand-int")
+
+    regular = perf_sweep.build_argparser().parse_args(
+        ["--kernels=f16", "--k-values=8192", "--dry-run", "--skip-rebuild"]
+    )
+    perf_sweep.validate_args(regular)
+    regular_spec = perf_sweep.build_run_specs(regular)[0]
+    require(
+        check_name,
+        "--streamk-workers" not in perf_sweep.calibrator_command(regular, regular_spec),
+        "regular f16 sweep gained Stream-K controls",
+    )
+
+    for argv in (
+        ["--kernels=f16-streamk", "--streamk-workers=0"],
+        ["--kernels=f16", "--streamk-workers=128"],
+    ):
+        bad = perf_sweep.build_argparser().parse_args(argv)
+        try:
+            perf_sweep.validate_args(bad)
+        except SystemExit:
+            continue
+        require(check_name, False, f"accepted invalid Stream-K sweep args: {argv}")
+    print(f"{check_name}: ok")
+
+
 def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     args = perf_sweep.build_argparser().parse_args(
         [
@@ -2009,6 +2143,17 @@ def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
         "--multi-wave-specialize" in cmd,
         "perf sweep command missing specialization flag",
     )
+    hpl_args = perf_sweep.build_argparser().parse_args(
+        ["--kernels=f16", "--hpl", "--skip-rebuild", "--dry-run"]
+    )
+    perf_sweep.validate_args(hpl_args)
+    hpl_spec = perf_sweep.build_run_specs(hpl_args)[0]
+    hpl_cmd = perf_sweep.calibrator_command(hpl_args, hpl_spec)
+    require(
+        "matmul_perf_sweep_rand_int_forwarding",
+        "--hpl" in hpl_cmd,
+        "perf sweep command missing --hpl",
+    )
 
     try:
         perf_sweep.build_argparser().parse_args(["--all-ones", "--rand-int"])
@@ -2031,6 +2176,17 @@ def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
             "matmul_perf_sweep_rand_int_forwarding",
             False,
             "perf sweep accepted MXFP4 rand_int",
+        )
+    bad = perf_sweep.build_argparser().parse_args(["--kernels=mxfp4", "--hpl"])
+    try:
+        perf_sweep.validate_args(bad)
+    except SystemExit:
+        pass
+    else:
+        require(
+            "matmul_perf_sweep_rand_int_forwarding",
+            False,
+            "perf sweep accepted MXFP4 HPL",
         )
     print("matmul_perf_sweep_rand_int_forwarding: ok")
 
@@ -2114,6 +2270,7 @@ def main() -> int:
     check_matmul_a4w4_mxfp_k16k_profile(matmul)
     check_matmul_perf_sweep_v9_defaults(perf_sweep)
     check_matmul_perf_sweep_f16_profiles(perf_sweep)
+    check_matmul_perf_sweep_streamk(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_perf_sweep_fa_8wave(perf_sweep)
     check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)

@@ -499,11 +499,26 @@ this tile. Profile stays separate from the locked
 See [Wave gfx950 f16 four-wave experiment](PerfReferences/WaveGfx950F16Gemm4Wave.md)
 for hardware results and saved ISA.
 
-Sweep only this profile with `--kernels=f16-4wave`. Default `all` includes both
-f16 profiles, both MXFP4 profiles, both v9 goldens, and the B2/H64/N8192/D128
-eight-wave BF16 FlashAttention kernel. Use `--kernels=fa` for FA alone; its
-shape overrides are `--fa-batch`, `--fa-heads`, `--fa-sequence`, and
-`--fa-xcds`.
+`gfx950-f16-256x256-4wave-streamk` adds static persistent Stream-K
+partitioning and same-kernel FP32 last-arriver reduction. Select it explicitly
+and set the persistent grid:
+
+```bash
+python tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py \
+  --kernels=f16-streamk --m=8192 --n=8192 --k-values=8192 \
+  --streamk-workers=256 --hpl
+```
+
+Automatic profile selection remains disabled. See
+[same-kernel Stream-K design](Gfx950StreamKSameKernelReductionDesign.md) for
+workspace cost, selection limits, current artifact hashes, reproduction
+commands, and source-branch measurements.
+
+Sweep only the regular four-wave profile with `--kernels=f16-4wave`. Default
+`all` includes all three f16 profiles, both MXFP4 profiles, both v9 goldens,
+and the B2/H64/N8192/D128 eight-wave BF16 FlashAttention kernel. Use
+`--kernels=fa` for FA alone; its shape overrides are `--fa-batch`,
+`--fa-heads`, `--fa-sequence`, and `--fa-xcds`.
 
 See [Wave gfx950 FlashAttention](PerfReferences/WaveGfx950FlashAttention.md)
 for the current ISA profile and retained branch experiments.
