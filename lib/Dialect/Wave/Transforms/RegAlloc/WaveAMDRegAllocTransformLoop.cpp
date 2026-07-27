@@ -1781,9 +1781,11 @@ private:
       if (!fixedBase)
         continue;
       wave::RegAllocTransformBudget budget = getBudget(set.regClass);
-      if (*fixedBase + set.width <= budget.limit)
-        fixedReservations.push_back(
-            {set.regClass, set.id, *fixedBase, set.width, set.start, set.end});
+      if (*fixedBase + set.width > budget.limit)
+        continue;
+      for (wave::RegAllocTransformLiveRange range : set.ranges)
+        fixedReservations.push_back({set.regClass, set.id, *fixedBase,
+                                     set.width, range.start, range.end});
     }
   }
 
@@ -1800,13 +1802,18 @@ private:
       std::optional<unsigned> base = getEntryRegFixedBase(value, regs);
       if (!base)
         continue;
-      unsigned end = stateValue.end;
+      unsigned implicitEnd = 0;
       if (isFixedHardwareRead(value))
-        end = std::max(end, getImplicitABIUseEnd(value.getDefiningOp(),
-                                                 positions, endCache));
-      unsigned setId = sets.size() + fixedReservations.size();
-      fixedReservations.push_back({stateValue.regClass, setId, *base,
-                                   stateValue.width, /*start=*/0, end});
+        implicitEnd =
+            getImplicitABIUseEnd(value.getDefiningOp(), positions, endCache);
+      for (auto [index, range] : llvm::enumerate(stateValue.ranges)) {
+        unsigned setId = sets.size() + fixedReservations.size();
+        // Entry values exist before the first modeled op.
+        unsigned start = index == 0 ? 0 : range.start;
+        fixedReservations.push_back({stateValue.regClass, setId, *base,
+                                     stateValue.width, start,
+                                     std::max(range.end, implicitEnd)});
+      }
     }
     return success();
   }

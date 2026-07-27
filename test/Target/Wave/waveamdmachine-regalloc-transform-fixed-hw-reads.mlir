@@ -74,5 +74,39 @@ module attributes {transform.with_named_sequence} {
       } -> !waveamdmachine.reg<vgpr, 1>
       return %loop : !waveamdmachine.reg<vgpr, 1>
     }
+
+    // CHECK-LABEL: func.func @branch_disjoint_entry_workitem_reservation
+    // CHECK: [[WI:%.*]] = waveamdmachine.v_workitem_id_x
+    // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 0>
+    // CHECK: waveamdmachine.uniform_if
+    // CHECK: [[SCRATCH:%.*]] = waveamdmachine.uninit
+    // CHECK-SAME: !waveamdmachine.reg<vgpr, 1, 0>
+    // CHECK: waveamdmachine.v_cmpx_eq_u32 [[SCRATCH]], [[SCRATCH]]
+    // CHECK: otherwise
+    // CHECK: waveamdmachine.v_cmpx_eq_u32 [[WI]], [[WI]]
+    func.func @branch_disjoint_entry_workitem_reservation()
+        attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    waveamdmachine.vgpr_count_max = 1 : i64} {
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+          : (!waveamdmachine.imm, !waveamdmachine.imm)
+            -> !waveamdmachine.reg<scc, 1>
+      %wi = waveamdmachine.v_workitem_id_x
+          : !waveamdmachine.reg<vgpr, 1, 0>
+      waveamdmachine.uniform_if %cond {
+        %scratch = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+        waveamdmachine.v_cmpx_eq_u32 %scratch, %scratch
+            : (!waveamdmachine.reg<vgpr, 1>,
+               !waveamdmachine.reg<vgpr, 1>) -> ()
+        waveamdmachine.yield
+      } otherwise {
+        waveamdmachine.v_cmpx_eq_u32 %wi, %wi
+            : (!waveamdmachine.reg<vgpr, 1, 0>,
+               !waveamdmachine.reg<vgpr, 1, 0>) -> ()
+        waveamdmachine.yield
+      } : !waveamdmachine.reg<scc, 1>
+      waveamdmachine.s_endpgm
+      return
+    }
   }
 }

@@ -423,12 +423,12 @@ static bool isAllowedReservedValue(Value value,
 }
 
 static void noteReservedSpan(SmallVectorImpl<ReservedLiveRange> &ranges,
-                             unsigned begin, unsigned width, unsigned end,
-                             unsigned reserved) {
+                             unsigned begin, unsigned width, unsigned start,
+                             unsigned end, unsigned reserved) {
   for (unsigned phys : llvm::seq<unsigned>(begin, begin + width)) {
     if (phys >= reserved)
       continue;
-    ranges.push_back(ReservedLiveRange{/*start=*/0, end, phys, phys + 1});
+    ranges.push_back(ReservedLiveRange{start, end, phys, phys + 1});
   }
 }
 
@@ -510,12 +510,13 @@ static void collectImplicitReservedSGPRRanges(
     if (base) {
       if (std::optional<std::pair<unsigned, unsigned>> span =
               parseSGPRSpan(*base))
-        noteReservedSpan(ranges, span->first, span->second, end,
+        noteReservedSpan(ranges, span->first, span->second, /*start=*/0, end,
                          regs.reservedSGPRs);
     }
     if (isPreload)
       noteReservedSpan(ranges, regs.kernargSegmentPtrSGPR,
-                       regs.kernargSegmentPtrWidth, end, regs.reservedSGPRs);
+                       regs.kernargSegmentPtrWidth, /*start=*/0, end,
+                       regs.reservedSGPRs);
   }
 }
 
@@ -526,6 +527,14 @@ static void collectReservedRanges(
     SmallVectorImpl<ReservedLiveRange> &ranges) {
   if (regClass == "SGPR")
     collectImplicitReservedSGPRRanges(orderedOps, positions, regs, ranges);
+  DenseMap<Value, unsigned> firstStarts;
+  for (const PhysicalLiveRange &range : liveRanges) {
+    if (!isAllowedReservedValue(range.value, regs))
+      continue;
+    auto [it, inserted] = firstStarts.try_emplace(range.value, range.start);
+    if (!inserted)
+      it->second = std::min(it->second, range.start);
+  }
   DenseMap<Operation *, unsigned> endCache;
   for (const PhysicalLiveRange &range : liveRanges) {
     if (!isAllowedReservedValue(range.value, regs))
@@ -534,8 +543,11 @@ static void collectReservedRanges(
     if (isFixedHardwareRead(range.value))
       end = std::max(end, getImplicitABIUseEnd(range.value.getDefiningOp(),
                                                positions, endCache));
+    // Entry values exist before the first modeled op.
+    unsigned start =
+        range.start == firstStarts.lookup(range.value) ? 0 : range.start;
     noteReservedSpan(ranges, range.physStart, range.physEnd - range.physStart,
-                     end, reserved);
+                     start, end, reserved);
   }
 }
 
