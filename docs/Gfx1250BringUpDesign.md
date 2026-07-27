@@ -9,6 +9,9 @@ Source baseline checked 2026-07-28:
 - Wave: `810b1188a6e21353d1ea1e95cd5ab667c72b71f8`
 - pinned LLVM: `30bff76d3a294fe0882a05472234b25bb752b16a`
 
+Audited high-VGPR implementation and tests match latest public LLVM sources as
+of the check date.
+
 LLVM already owns gfx1250 target parsing, encodings, ELF identity, instruction
 descriptions, intrinsics, descriptor fields, wait instructions, and schedule
 classes. Wave must consume that support. Wave must not duplicate an ISA
@@ -35,6 +38,7 @@ Initial production support includes:
 
 - exact gfx1250 target selection;
 - valid MCInst emission and object generation;
+- full `v0` through `v1023` allocation with late VGPR-window lowering;
 - legal HSA kernel descriptors and entry sequence;
 - split gfx12.5 wait counters driven by explicit memory tokens;
 - correct buffer-resource packing, LDS facts, tuple alignment, and register
@@ -48,7 +52,6 @@ Initial production support includes:
 
 Initial bring-up does not include:
 
-- registers above `v255`;
 - async global-to-LDS or LDS-to-global staging;
 - tensor DMA;
 - expert scheduling mode 2;
@@ -61,15 +64,15 @@ Initial bring-up does not include:
 These need separate work after the scalar/vector and base WMMA path is proven.
 Unsupported paths must fail with target-specific diagnostics.
 
-## Upstream Contract
+## LLVM Contract
 
 | Property | gfx1250 contract | Initial Wave policy |
 |---|---|---|
 | ISA | 12.5.0 | exact stepping match |
 | wave size | 32 only | reject any other value |
 | execution mode | CU mode, four SIMDs per CU | no WGP descriptor field |
-| VGPRs | 1024 addressable, allocation granule 16 | cap allocation and emission at 256 |
-| VGPR tuples | aligned multi-register operands | enforce at allocation and emission |
+| VGPRs | 1024 addressable in four 256-entry windows; allocation granule 16 | allocate the full range and lower window state after allocation |
+| VGPR tuples | target-selected aligned multi-register operands | derive alignment from LLVM register classes |
 | SGPRs | 106 architected; at most 32 user SGPRs | preserve ABI reservations and descriptor limit |
 | accumulators | VGPR-backed | no AGPR allocation |
 | LDS | 320 KiB, 32 banks | use both facts in legality and layout scoring |
@@ -89,7 +92,10 @@ LLVM source is the executable specification:
 - `llvm/lib/Target/AMDGPU/GCNProcessors.td`
 - `llvm/lib/Target/AMDGPU/SISchedule.td`
 - `llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp`
+- `llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp`
 - `llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp`
+- `llvm/lib/Target/AMDGPU/SIRegisterInfo.td`
+- `llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUInstPrinter.cpp`
 - `llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp`
 - `llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`
 - `llvm/docs/AMDGPUUsage.rst`
@@ -100,6 +106,9 @@ Pinned LLVM source:
 - [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/AMDGPU.td)
 - [schedule model](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SISchedule.td)
 - [wait-counter implementation](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
+- [high-VGPR lowering](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp)
+- [VGPR register classes](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SIRegisterInfo.td)
+- [high-VGPR assembly printing](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUInstPrinter.cpp)
 - [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/docs/AMDGPUUsage.rst)
 
 No public gfx1250 ISA manual was found. Every encoded instruction therefore
@@ -115,7 +124,7 @@ Extend `WaveAMDMachineTarget` with shared queries for:
 
 - exact ISA identity;
 - supported wave sizes;
-- addressable register counts and initial Wave caps;
+- addressable register counts and VGPR-window support;
 - allocation granules and tuple alignment;
 - LDS size and bank count;
 - architected scratch and kernarg preload;
@@ -141,7 +150,8 @@ Required changes:
 3. Select instructions with `IsaVersion` and `MCSubtargetInfo` predicates.
 4. Audit operand schemas, implicit operands, cache-policy fields, and tuple
    classes for every enabled operation.
-5. Emit through `MCInst`, `MCCodeEmitter`, and `MCInstPrinter`.
+5. Preserve physical high-VGPR identities in `MCInst` operands.
+6. Finalize window state before `MCCodeEmitter` and `MCInstPrinter`.
 
 Core audit set:
 
@@ -162,6 +172,58 @@ emission and name the unsupported WaveAMDMachine operation.
 This work should reuse the declarative WaveAMDMachine MC-emission project.
 Bring-up owns gfx1250 mappings and coverage; it should not create a parallel
 handwritten emitter.
+
+### VGPR Addressing Windows
+
+gfx1250 encodes only the low eight bits of each VGPR operand. Four two-bit
+selectors supply the high bits for logical `src0`, `src1`, `src2`, and `dst`
+fields. `S_SET_VGPR_MSB` changes those selectors.
+
+```text
+S_SET immediate: src0[1:0] src1[3:2] src2[5:4] dst[7:6]
+MODE register:   dst[13:12] src0[15:14] src1[17:16] src2[19:18]
+```
+
+Register allocation must keep real physical `v0` through `v1023` identities.
+Do not fold a register to its low alias or pass it through text. Late MC
+finalization:
+
+1. uses `getVGPRLoweringOperandTables` to map each opcode's operands to the
+   four logical fields;
+2. gets each physical register's selector with `getVGPREncodingMSBs`;
+3. inserts `S_SET_VGPR_MSB` when required;
+4. encodes the new selector byte in bits 7:0 and the previous selector byte in
+   bits 15:8;
+5. lets `AMDGPUInstPrinter` print low aliases plus high-register comments.
+
+The assembler accepts the low aliases, not source operands named `v256` or
+higher. Disassembly reconstructs high-register comments from MC state.
+
+Window mode is ABI-zero at entry. Finalization restores zero before branches,
+calls, returns, and block fallthrough. `s_endpgm` needs no restore. It must
+also:
+
+- patch compatible `S_SETREG_IMM32_B32(MODE)` writes with current selectors;
+- insert the required `s_nop` before a switch after an incompatible MODE write,
+  including a write in a fallthrough predecessor;
+- keep switches outside hard clauses;
+- place switches correctly around barriers, waits, and `s_delay_alu`;
+- treat a switch as an implicit X-counter drain;
+- reject unsupported high-VGPR operand maps and incompatible VOPD windows;
+- reset to the low window around inline assembly.
+
+Current emission prints each `MCInst` immediately. That cannot move a switch
+before an already printed instruction or patch a preceding MODE write. Add a
+buffered finalization stage. Centralize branches and fallthrough labels for
+uniform conditionals, EXEC conditionals, loops, and DMA-delay regions. No later
+pass may change physical VGPR operands.
+
+Landing is gated:
+
+- MC bring-up preserves high registers, buffers instructions, and round-trips
+  explicit switches while allocation remains below 256;
+- register-resource work enables automatic window lowering and removes the cap
+  only after split X-counter handling is available.
 
 ## Wait Counters And Ordering
 
@@ -324,25 +386,40 @@ and future protocol reservations in one accounting path.
 
 ## Register Allocation
 
-gfx1250 exposes 1024 VGPRs, but the first milestone remains in the low 256
-register window.
+gfx1250 register allocation uses one physical VGPR file, not four allocator
+register banks. The addressing windows are late encoding state.
 
-Reasons:
+Required allocator changes:
 
-- current text and MC register helpers assume `v0` through `v255`;
-- high registers require VGPR-MSB state setup;
-- setreg state adds control-flow and scheduling hazards;
-- high-register memory operations interact with X-counter rules.
+- remove the text-emission cap from `WaveAMDRegisterLimits.cpp`;
+- use LLVM's occupancy limit, 1024 architectural maximum, and 16-register
+  allocation granule;
+- honor `target_waves` through `maxVGPRsForWaves`;
+- clamp explicit budgets and fixed base-plus-width ranges to target
+  addressability;
+- keep physical indices `0` through `1023` in `RegType`;
+- use gfx1250 even-base alignment for multi-dword tuples instead of
+  `PowerOf2Ceil(width)`;
+- keep low-256 constraints for `LD_SCALE` and inline-assembly operands;
+- keep the existing low-to-high linear scan so low windows win naturally;
+- keep accumulators in VGPRs and reject AGPR requests;
+- report the real high-water mark through resource metadata;
+- verify final addressability, fixed ranges, and tuple alignment.
 
-The allocator therefore:
+Allocation and encoding legality remain separate. The allocator may choose a
+tuple spanning a 256-entry boundary when LLVM's class permits it. MC
+finalization derives the selector from the physical base register.
 
-- uses wave32 occupancy facts and a 16-register allocation granule;
-- enforces gfx1250 tuple alignment;
-- keeps accumulators in VGPRs;
-- rejects AGPR requests;
-- emits a clear diagnostic when allocation needs a register above `v255`.
+No switch-cost heuristic is required for correctness. Each operand field has
+independent state, so assigning every operand to one window is not the cost
+model. Scheduler work may add field-aware affinity after measuring emitted
+transitions, but cannot create a separate register class or reserve high
+windows unconditionally.
 
-Raising the cap is a separate feature. Changing one constant is not support.
+High allocation stays disabled until automatic window finalization, MODE
+hazards, block resets, X-counter interaction, and high-water resource reporting
+pass together. Failure then means target occupancy exhausted, index above
+`v1023`, or unsupported operand encoding—not merely crossing `v255`.
 
 ## WMMA And Fragment Layouts
 
@@ -403,7 +480,8 @@ Hazard repair must audit:
 - unclaused initial VMEM behavior;
 - scratch-base forwarding;
 - waits followed by dependent VALU;
-- setreg state, even though high VGPRs remain disabled;
+- VGPR-window switches, MODE writes, and fallthrough state;
+- delay-ALU skip regions crossing `S_SET_VGPR_MSB`;
 - terminal memory operations.
 
 Reuse existing instruction traits and LLVM feature predicates. No
@@ -446,7 +524,9 @@ Reject unsupported work before final emission. Required diagnostics include:
 - gfx11 WMMA kind selected for gfx1250;
 - gfx1250 WMMA kind selected for another target;
 - AGPR requested;
-- register index above `v255`;
+- register index above `v1023` or the occupancy budget;
+- high-VGPR operand without a lowering table;
+- incompatible VOPD operand windows;
 - async, tensor, cluster, multicast, named-barrier, or SWMMAC operation used;
 - missing gfx1250 MC opcode mapping;
 - descriptor value outside the target field width.
@@ -461,7 +541,8 @@ Reject unsupported work before final emission. Required diagnostics include:
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
 | waits | independent LOAD/STORE/DS/KM/X, joins, loops, atomics, termination |
-| resources | 32-bank choice, 320 KiB bound, tuple alignment, 256-VGPR cap |
+| VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, inline assembly, X drains |
+| resources | 32-bank choice, 320 KiB bound, target tuple alignment, 1024-VGPR maximum and 16-register granule |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, target hazards |
 | Python | exact profile selection and wrong-family rejection |
@@ -475,10 +556,10 @@ closure. Missing hardware keeps the validation and closeout work open.
 ## Landing Order
 
 1. target capability contract;
-2. gfx12.5 MC emission;
+2. gfx12.5 MC emission and buffered VGPR-window finalization;
 3. kernel ABI and entry;
 4. split wait counters;
-5. buffer, LDS, alignment, and register-resource fixes;
+5. buffer, LDS, full VGPR allocation, and register-resource fixes;
 6. scalar/vector Integration bring-up;
 7. f16/bf16 WMMA and fragment layouts;
 8. scheduler and hazard model;
@@ -487,7 +568,8 @@ closure. Missing hardware keeps the validation and closeout work open.
 11. integrated-tree audit and epic closure.
 
 Dependencies form a DAG where ABI and waits can proceed in parallel after MC
-emission, and resource fixes can proceed after the target contract.
+emission. High-VGPR enablement waits for both MC finalization and X-counter
+support.
 
 ## Tracked Work
 
@@ -496,10 +578,10 @@ Epic: `7-gfx1250-wave-backend-bringup-fa4l`
 | Bead | Scope | Blocking dependencies |
 |---|---|---|
 | `.1` | target capability contract | none |
-| `.2` | gfx12.5 MC emission | `.1` |
+| `.2` | gfx12.5 MC emission and VGPR-window finalization foundation | `.1` |
 | `.3` | kernel ABI and entry | `.2` |
 | `.4` | split wait counters | `.2` |
-| `.5` | resources, SRDs, and tuple alignment | `.1` |
+| `.5` | resources, SRDs, full VGPR allocation, and automatic window lowering | `.1`, `.2`, `.4` |
 | `.6` | scalar/vector Integration bring-up | `.3`, `.4`, `.5` |
 | `.7` | f16/bf16 WMMA layouts | `.6` |
 | `.8` | scheduler resources and hazards | `.7` |
@@ -528,7 +610,8 @@ Bring-up is complete when:
 
 - unsupported target-family fallback is impossible;
 - scalar/vector and f16/bf16 GEMM objects assemble and disassemble as gfx1250;
-- descriptor, waits, resources, and fragments match the upstream contract;
+- all four VGPR windows pass MC, CFG, hazard, resource, and Integration tests;
+- descriptor, waits, resources, and fragments match the LLVM contract;
 - Integration tests compile in normal CI;
 - hardware results match CPU references;
 - checked-in assembly has a same-hardware benchmark record;
