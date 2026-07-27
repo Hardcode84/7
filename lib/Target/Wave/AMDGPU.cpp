@@ -832,6 +832,10 @@ private:
 
   unsigned globalLoadB32() const { return opcodes.globalLoadB32; }
 
+  unsigned globalAtomicAddSaddrRtnU32() const {
+    return llvm::AMDGPU::GLOBAL_ATOMIC_ADD_SADDR_RTN_vi;
+  }
+
   unsigned globalLoadU8() const {
     if (isGfx8Or9())
       return llvm::AMDGPU::GLOBAL_LOAD_UBYTE_SADDR_vi;
@@ -2076,6 +2080,31 @@ private:
                    toMCOperand(op.getOperand(2)),
                    llvm::MCOperand::createImm(instOffset),
                    llvm::MCOperand::createImm(*cpol)});
+  }
+
+  LogicalResult emitGlobalAtomicAddAcqRel(Operation &op) {
+    if (!waveamdmachine::GlobalAtomicAddAcqRelU32Op::isSupportedOnIsa(
+            isaVersion))
+      return op.emitError(
+          "agent-scoped acquire-release global atomic requires gfx940+");
+
+    unsigned waitAll = llvm::AMDGPU::encodeWaitcnt(
+        isaVersion, /*vmcnt=*/0, /*expcnt=*/~0u, /*lgkmcnt=*/0);
+    unsigned waitVmem = llvm::AMDGPU::encodeWaitcnt(
+        isaVersion, /*vmcnt=*/0, /*expcnt=*/~0u, /*lgkmcnt=*/~0u);
+    if (failed(emitMC(llvm::AMDGPU::BUFFER_WBL2_gfx940,
+                      {llvm::MCOperand::createImm(llvm::AMDGPU::CPol::SC1)})) ||
+        failed(emitMC(sWaitcnt(), {llvm::MCOperand::createImm(waitAll)})) ||
+        failed(emitMC(
+            globalAtomicAddSaddrRtnU32(),
+            {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+             toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+             llvm::MCOperand::createImm(getIntAttr(&op, "inst_offset", 0)),
+             llvm::MCOperand::createImm(llvm::AMDGPU::CPol::SC0)})) ||
+        failed(emitMC(sWaitcnt(), {llvm::MCOperand::createImm(waitVmem)})))
+      return failure();
+    return emitMC(llvm::AMDGPU::BUFFER_INV_gfx940,
+                  {llvm::MCOperand::createImm(llvm::AMDGPU::CPol::SC1)});
   }
 
   LogicalResult emitGlobalAddrLoad(Operation &op, unsigned opcode) {
@@ -3631,6 +3660,8 @@ private:
       return emitGlobalLoad(op, globalLoadB16());
     if (isa<waveamdmachine::GlobalLoadB32Op>(op))
       return emitGlobalLoad(op, globalLoadB32());
+    if (isa<waveamdmachine::GlobalAtomicAddAcqRelU32Op>(op))
+      return emitGlobalAtomicAddAcqRel(op);
     if (isa<waveamdmachine::GlobalLoadB64Op>(op))
       return emitGlobalLoad(op, globalLoadB64());
     if (isa<waveamdmachine::GlobalLoadB96Op>(op))

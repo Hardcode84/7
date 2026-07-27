@@ -14,6 +14,7 @@
 
 #include "WaveAMDMachineSelector.h"
 
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/StringRef.h"
 
 using namespace mlir;
@@ -759,6 +760,49 @@ LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op) {
   return selectGlobalOrBufferLoad(S, op, baseIt->second, globalBase,
                                   symIt->second, isBuffer, shape->registers,
                                   shape->useB8Op, shape->useB16Op);
+}
+
+LogicalResult selectGlobalAtomicAddAcqRel(WaveAMDMachineSelector &S,
+                                          waveamd::GlobalAtomicAddAcqRelOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(op, "global atomic lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::GlobalAtomicAddAcqRelU32Op::isSupportedOnIsa(*isa))
+    return op.emitError(
+        "agent-scoped acquire-release global atomic requires gfx940+");
+
+  auto baseIt = S.pointerBases.find(op.getPtr());
+  auto offsetIt = S.pointerIndexOffsets.find(op.getPtr());
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
+    return op.emitError("WaveAMDMachine backend expects selected wave pointer");
+
+  waveamdmachine::AddressFieldSpec spec =
+      waveamdmachine::GlobalAtomicAddAcqRelU32Op::getAddressFieldSpec();
+  FailureOr<AddressPlan> plan = planGlobalOrBufferAddress(
+      S, op, offsetIt->second, /*isBuffer=*/false, spec);
+  if (failed(plan))
+    return failure();
+  if (plan->fullAddressRemainderExpr)
+    return op.emitError("global atomic address does not fit SADDR form");
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
+      materializePlanBuckets(S, op, *plan, spec);
+  if (failed(buckets))
+    return failure();
+
+  Value dependency =
+      op.getDependency() ? S.expect(op.getDependency(), op) : Value();
+  Value value = S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getValue(), op));
+  waveamdmachine::GlobalAtomicAddAcqRelU32Op atomic =
+      waveamdmachine::GlobalAtomicAddAcqRelU32Op::create(
+          S.builder, op.getLoc(),
+          getRegType(op.getContext(), waveamdmachine::RegClass::VGPR),
+          getMemTokenType(op.getContext()), buckets->voffset, value,
+          baseIt->second, dependency, buckets->instOffset);
+  S.values[op.getOldValue()] = atomic.getOldValue();
+  S.values[op.getToken()] = atomic.getToken();
+  S.eraseIfTopLevel(op);
+  return success();
 }
 
 } // namespace mlir::wave::wmsel

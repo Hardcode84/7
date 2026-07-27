@@ -676,6 +676,30 @@ static LogicalResult verifyTransposeLoadSourceElement(Operation *op,
 }
 } // namespace
 
+LogicalResult GlobalAtomicAddAcqRelOp::verify() {
+  Type ptrStorageType = getPtr().getType();
+  std::optional<int64_t> ptrWidth;
+  if (auto simdType = dyn_cast<wave::SimdType>(ptrStorageType)) {
+    ptrWidth = simdType.getWidth();
+    ptrStorageType = simdType.getElementType();
+  }
+  auto ptrType = cast<wave::PtrType>(ptrStorageType);
+  if (!isa<wave::GlobalAddressSpaceAttr>(ptrType.getAddressSpace()))
+    return emitOpError("atomic pointer must be global");
+  Type elementType = ptrType.getElementType();
+  if (elementType && !elementType.isInteger(32))
+    return emitOpError("atomic pointer element type must be i32");
+
+  wave::SimdType valueType = cast<wave::SimdType>(getValue().getType());
+  if (!valueType.getElementType().isInteger(32))
+    return emitOpError("atomic value must have i32 SIMD elements");
+  if (ptrWidth && *ptrWidth != valueType.getWidth())
+    return emitOpError("atomic pointer and value SIMD widths must match");
+  if (getOldValue().getType() != valueType)
+    return emitOpError("result type must match atomic value type");
+  return success();
+}
+
 LogicalResult TransposeLoadOp::verify() {
   FailureOr<SharedPointerInfo> source =
       getSharedPointerInfo(getOperation(), getSource(), "source");

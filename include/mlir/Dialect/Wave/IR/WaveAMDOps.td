@@ -32,6 +32,22 @@ def WaveAMD_SetPriorityOp : WaveAMD_Op<"set_priority"> {
   let assemblyFormat = "$priority attr-dict";
 }
 
+def WaveAMD_GlobalAtomicAddAcqRelOp
+    : WaveAMD_Op<"global_atomic_add_acq_rel"> {
+  let summary = "agent-scoped acquire-release global atomic add";
+  let description = [{
+    Atomically adds a lane-varying i32 value and returns the old value.
+    Completion includes gfx940+ agent-scope release and acquire cache actions.
+  }];
+  let arguments = (ins Arg<Wave_PtrOrSimdPtr, "", [MemRead, MemWrite]>:$ptr,
+                       Wave_Simd:$value,
+                       Optional<Wave_MemToken>:$dependency);
+  let results = (outs Wave_Simd:$old_value,
+                      Wave_MemToken:$token);
+  let assemblyFormat = "$value `to` $ptr (`after` $dependency^)? attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
 def WaveAMD_MakeBufferOp : WaveAMD_Op<"make_buffer", [Pure]> {
   let summary = "construct an AMD buffer pointer from a flat/global pointer";
   let description = [{

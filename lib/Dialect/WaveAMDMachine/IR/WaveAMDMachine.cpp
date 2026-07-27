@@ -980,6 +980,14 @@ void VMovB64TupleOp::getEffects(
   addNestedUniformLoopInitEffect(getOperation(), getResult(), effects);
 }
 
+LogicalResult GlobalAtomicAddAcqRelU32Op::verify() {
+  auto [minOffset, maxOffset] = instOffsetRange(getAddressFieldSpec());
+  int64_t offset = getInstOffsetAttr().getInt();
+  if (offset < minOffset || offset > maxOffset)
+    return emitOpError("instruction offset must fit signed 13-bit field");
+  return success();
+}
+
 static LogicalResult verifyUniformLoopTerminator(UniformLoopOp loop,
                                                  ContinueIfOp terminator) {
   if (terminator.getCarries().size() != loop.getInits().size())

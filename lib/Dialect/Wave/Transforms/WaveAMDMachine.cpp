@@ -2799,6 +2799,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
       .Case<waveamd::SetPriorityOp>(
           [&](auto o) { return selectSetPriority(o); })
+      .Case<waveamd::GlobalAtomicAddAcqRelOp>(
+          [&](auto o) { return selectGlobalAtomicAddAcqRel(*this, o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
       .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })

@@ -256,6 +256,8 @@ LogicalResult selectScfFor(WaveAMDMachineSelector &S, scf::ForOp op);
 // `finalizeLoad` live in that TU's anon namespace.
 LogicalResult selectStore(WaveAMDMachineSelector &S, StoreOp op);
 LogicalResult selectLoad(WaveAMDMachineSelector &S, LoadOp op);
+LogicalResult selectGlobalAtomicAddAcqRel(WaveAMDMachineSelector &S,
+                                          waveamd::GlobalAtomicAddAcqRelOp op);
 
 class WaveAMDMachineSelector {
 public:

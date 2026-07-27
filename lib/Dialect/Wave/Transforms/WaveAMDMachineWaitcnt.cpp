@@ -465,6 +465,8 @@ enum class OpKind {
 static OpKind classifyOp(Operation *op) {
   if (isWaitcntOp(op) || isControlFlowOp(op))
     return OpKind::Skip;
+  if (llvm::isa<waveamdmachine::GlobalAtomicAddAcqRelU32Op>(op))
+    return OpKind::Barrier;
   if (isMemoryIssuer(op))
     return OpKind::Issuer;
   if (llvm::isa<waveamdmachine::SBarrierOp>(op))
@@ -685,8 +687,7 @@ static void deriveIssuerDependencyTokens(Operation *op, WaitState &state) {
   }
 }
 
-// Each result inherits per-counter MIN over operands. Used by s_barrier,
-// waveamdmachine.after, waveamdmachine.token_join.
+// Fences and token-forwarding ops inherit per-counter operand minima.
 static void deriveResultTokens(Operation *op, WaitState &state) {
   for (Value result : op->getResults()) {
     SmallVector<Token, 3> derived =

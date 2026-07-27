@@ -1786,6 +1786,29 @@ def WaveAMDMachine_GlobalLoadB32Op
   }];
 }
 
+def WaveAMDMachine_GlobalAtomicAddAcqRelU32Op
+    : WaveAMDMachine_GlobalMemoryOp<"global_atomic_add_acq_rel_u32", [
+        WaveAMDMachine_VMEMLoad, WaveAMDMachine_VMEMStore,
+        MemoryEffects<[MemRead, MemWrite]>
+      ]>,
+      WaveAMDMachine_InstructionIssueCount<"5"> {
+  let summary = "synchronous agent-scoped acquire-release global atomic add";
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset,
+                       WaveAMDMachine_VGPR1:$value,
+                       WaveAMDMachine_SGPR2:$base,
+                       Optional<WaveAMDMachine_MemToken>:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_VGPR1:$old_value,
+                      WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $offset `,` $value `,` $base (`after` $dependency^)?
+    (`offset` $inst_offset^)?
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+  let archPredicate = WaveAMDMachine_Gfx940Plus;
+}
+
 def WaveAMDMachine_GlobalLoadU8Addr64Op
     : WaveAMDMachine_GlobalMemoryOp<"global_load_u8_addr64", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMLoadInfo {

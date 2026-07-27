@@ -1210,6 +1210,14 @@ class FunctionBuilder:
         """Set hardware issue priority for the current wave."""
         waveamd.SetPriorityOp(priority)
 
+    def global_atomic_add_acq_rel(
+        self, ptr: Value, value: Value, *, after: Value | None = None
+    ) -> tuple[Value, Value]:
+        op = waveamd.GlobalAtomicAddAcqRelOp(
+            value.type, mem_token_type(), ptr, value, dependency=after
+        )
+        return op.old_value, op.token
+
     def dma_load_lds(
         self,
         source: Value,
