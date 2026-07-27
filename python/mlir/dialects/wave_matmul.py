@@ -49,7 +49,8 @@ Shape constraints:
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
@@ -65,6 +66,98 @@ from mlir.ir import (
     StringAttr,
     UnitAttr,
 )
+
+
+@dataclass(frozen=True)
+class StreamKSegment:
+    tile: int
+    k_begin: int
+    k_end: int
+    scratch_slot: int | None
+
+    @property
+    def is_whole(self) -> bool:
+        return self.scratch_slot is None
+
+
+def streamk_worker_interval(
+    total_iterations: int, workers: int, worker: int
+) -> tuple[int, int]:
+    if total_iterations <= 0:
+        raise ValueError("total_iterations must be positive")
+    if not 1 <= workers <= total_iterations:
+        raise ValueError("workers must be in [1, total_iterations]")
+    if not 0 <= worker < workers:
+        raise ValueError("worker must be in [0, workers)")
+    quotient, remainder = divmod(total_iterations, workers)
+    begin = worker * quotient + min(worker, remainder)
+    return begin, begin + quotient + int(worker < remainder)
+
+
+def streamk_owner_for_iteration(
+    total_iterations: int, workers: int, iteration: int
+) -> int:
+    if not 0 <= iteration < total_iterations:
+        raise ValueError("iteration must be in [0, total_iterations)")
+    quotient, remainder = divmod(total_iterations, workers)
+    if quotient == 0:
+        raise ValueError("workers must not exceed total_iterations")
+    large_end = remainder * (quotient + 1)
+    if iteration < large_end:
+        return iteration // (quotient + 1)
+    return remainder + (iteration - large_end) // quotient
+
+
+def streamk_tile_contributors(
+    tile: int, k_iterations: int, total_iterations: int, workers: int
+) -> tuple[int, int]:
+    if k_iterations <= 0 or total_iterations % k_iterations:
+        raise ValueError("k_iterations must divide total_iterations")
+    tile_count = total_iterations // k_iterations
+    if not 0 <= tile < tile_count:
+        raise ValueError("tile must be in [0, tile_count)")
+    return (
+        streamk_owner_for_iteration(total_iterations, workers, tile * k_iterations),
+        streamk_owner_for_iteration(
+            total_iterations, workers, (tile + 1) * k_iterations - 1
+        ),
+    )
+
+
+def streamk_worker_segments(
+    tile_count: int, k_iterations: int, workers: int, worker: int
+) -> tuple[StreamKSegment, ...]:
+    if tile_count <= 0 or k_iterations <= 0:
+        raise ValueError("tile_count and k_iterations must be positive")
+    total_iterations = tile_count * k_iterations
+    begin, end = streamk_worker_interval(total_iterations, workers, worker)
+    first_tile = begin // k_iterations
+    last_tile = (end - 1) // k_iterations
+    segments: list[StreamKSegment] = []
+    partial_slot = 0
+    for tile in range(first_tile, last_tile + 1):
+        tile_begin = tile * k_iterations
+        k_begin = max(begin, tile_begin) - tile_begin
+        k_end = min(end, tile_begin + k_iterations) - tile_begin
+        whole = k_begin == 0 and k_end == k_iterations
+        slot = None if whole else partial_slot
+        segments.append(StreamKSegment(tile, k_begin, k_end, slot))
+        partial_slot += int(not whole)
+    if partial_slot > 2:
+        raise AssertionError("contiguous worker interval has more than two boundaries")
+    return tuple(segments)
+
+
+def streamk_scratch_elements(workers: int) -> int:
+    if workers <= 0:
+        raise ValueError("workers must be positive")
+    return workers * STREAMK_PARTIAL_SLOTS_PER_WORKER * STREAMK_TILE_ELEMENTS
+
+
+def streamk_counter_elements(M: int, N: int) -> int:
+    if M <= 0 or N <= 0 or M % 256 or N % 256:
+        raise ValueError("M and N must be positive multiples of 256")
+    return (M // 256) * (N // 256)
 
 
 def _is_power_of_two(value: int) -> bool:
@@ -495,6 +588,11 @@ def _validate_mxfp4_shape(cfg: _MatmulConfig) -> None:
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
 _GPU_MODULE_NAME = "kernels"
+STREAMK_KERNEL_NAME = "gfx950_f16_streamk_gemm"
+STREAMK_TILE_ELEMENTS = 256 * 256
+STREAMK_PARTIAL_SLOTS_PER_WORKER = 2
+_STREAMK_MAILBOX_BYTES = 32
+_MAX_BUFFER_BYTES = (1 << 32) - 1
 _F16_PTR_HELPER = "wave_memref_to_ptr_global_f16"
 _BF16_PTR_HELPER = "wave_memref_to_ptr_global_bf16"
 _I8_PTR_HELPER = "wave_memref_to_ptr_global_i8"
@@ -810,6 +908,7 @@ class _TileCoords:
     wg_n: dsl.Value
     a_base: dsl.Value
     b_base: dsl.Value
+    c_base: dsl.Value
     a_tile_base: dsl.Value
     b_tile_base: dsl.Value
     a_lane_base: dsl.Value
@@ -817,6 +916,16 @@ class _TileCoords:
     a_scale_base: dsl.Value | None
     b_scale_base: dsl.Value | None
     c_ptr: dsl.Value
+    explicit_cta: bool = False
+
+
+@dataclass(frozen=True)
+class _TileInputs:
+    a: dsl.Value
+    b: dsl.Value
+    c: dsl.Value
+    a_scale: dsl.Value | None
+    b_scale: dsl.Value | None
 
 
 def _wrap_in_buffer(
@@ -840,6 +949,15 @@ def _emit_cta_coords(
 ) -> tuple[dsl.Value, dsl.Value]:
     wg_m_raw = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.M_blocks - 1)
     wg_n_raw = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.N_blocks - 1)
+    return _emit_cta_coords_from_raw(bld, cfg, wg_m_raw, wg_n_raw)
+
+
+def _emit_cta_coords_from_raw(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    wg_m_raw: dsl.Value,
+    wg_n_raw: dsl.Value,
+) -> tuple[dsl.Value, dsl.Value]:
     if cfg.cta_swizzle_xcds == 1 and cfg.cta_group_m == 1:
         return wg_m_raw, wg_n_raw
 
@@ -875,6 +993,8 @@ def _emit_c_ptr(
     m_wave: dsl.Expr,
     n_wave: dsl.Expr,
     bindings: dict[dsl.Expr, dsl.Value],
+    *,
+    assume_bounds: bool = False,
 ) -> dsl.Value:
     if cfg.coalesced_mfma_output:
         wave_m = 16 * cfg.wave_m_tiles
@@ -885,6 +1005,14 @@ def _emit_c_ptr(
             + (wg_n * (cfg.BN * wave_n) + m_wave * wave_n) * cfg.M,
             bindings=bindings,
         )
+        if assume_bounds:
+            wave_m = 16 * cfg.wave_m_tiles
+            wave_n = 16 * cfg.wave_n_tiles
+            c_wave_off = bld.assume_range(
+                c_wave_off,
+                0,
+                cfg.c_elements - 1 - (wave_m - 1) - (wave_n - 1) * cfg.M,
+            )
         return bld.ptr_add(c_arg, c_wave_off)
 
     c_cta_off = bld.index_expr(
@@ -908,37 +1036,30 @@ def _emit_c_ptr(
     return bld.ptr_add(c_base, c_wave_off)
 
 
-def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoords:
+def _emit_tile_coords(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    *,
+    inputs: _TileInputs | None = None,
+    wg_m_raw: dsl.Value | None = None,
+    wg_n_raw: dsl.Value | None = None,
+) -> _TileCoords:
     """Compute per-wave A/B/C pointer coordinates."""
-    a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
-    a_scale_arg = bld.args[3] if cfg.uses_packed_mxfp4 else None
-    b_scale_arg = bld.args[4] if cfg.uses_packed_mxfp4 else None
-    if cfg.use_buffer:
-        a_arg = _wrap_in_buffer(
-            bld,
-            a_arg,
-            cfg.a_elements,
-            cfg.input_element_type,
-            cfg.input_element_bytes,
-        )
-        b_arg = _wrap_in_buffer(
-            bld,
-            b_arg,
-            cfg.b_elements,
-            cfg.input_element_type,
-            cfg.input_element_bytes,
-        )
-        if cfg.coalesced_mfma_output:
-            c_arg = _wrap_in_buffer(
-                bld,
-                c_arg,
-                cfg.c_elements,
-                _output_element_type(cfg),
-                cfg.c_element_bytes,
-            )
+    explicit_cta = wg_m_raw is not None
+    if inputs is None:
+        inputs = _emit_tile_inputs(bld, cfg)
+    a_arg, b_arg, c_arg = inputs.a, inputs.b, inputs.c
+    a_scale_arg, b_scale_arg = inputs.a_scale, inputs.b_scale
 
     wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
-    wg_m_val, wg_n_val = _emit_cta_coords(bld, cfg)
+    if wg_m_raw is None:
+        assert wg_n_raw is None
+        wg_m_val, wg_n_val = _emit_cta_coords(bld, cfg)
+    else:
+        assert wg_n_raw is not None
+        wg_m_val, wg_n_val = _emit_cta_coords_from_raw(bld, cfg, wg_m_raw, wg_n_raw)
+        wg_m_val = bld.assume_range(wg_m_val, 0, cfg.M_blocks - 1)
+        wg_n_val = bld.assume_range(wg_n_val, 0, cfg.N_blocks - 1)
 
     # Symbolic offset side via the shared `dsl.sym_ctx`. wave_id /
     # m_wave / n_wave / lane_mod16 ride floor / mod nodes lowered to shr / and.
@@ -982,6 +1103,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         m_wave,
         n_wave,
         sym_to_val,
+        assume_bounds=explicit_cta,
     )
 
     return _TileCoords(
@@ -990,6 +1112,7 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         wg_n=wg_n_val,
         a_base=a_arg,
         b_base=b_arg,
+        c_base=c_arg,
         a_tile_base=a_tile_base,
         b_tile_base=b_tile_base,
         a_lane_base=a_lane_base,
@@ -997,6 +1120,43 @@ def _emit_tile_coords(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileCoor
         a_scale_base=a_scale_arg,
         b_scale_base=b_scale_arg,
         c_ptr=c_ptr,
+        explicit_cta=explicit_cta,
+    )
+
+
+def _emit_tile_inputs(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileInputs:
+    a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
+    a_scale_arg = bld.args[3] if cfg.uses_packed_mxfp4 else None
+    b_scale_arg = bld.args[4] if cfg.uses_packed_mxfp4 else None
+    if cfg.use_buffer:
+        a_arg = _wrap_in_buffer(
+            bld,
+            a_arg,
+            cfg.a_elements,
+            cfg.input_element_type,
+            cfg.input_element_bytes,
+        )
+        b_arg = _wrap_in_buffer(
+            bld,
+            b_arg,
+            cfg.b_elements,
+            cfg.input_element_type,
+            cfg.input_element_bytes,
+        )
+        if cfg.coalesced_mfma_output:
+            c_arg = _wrap_in_buffer(
+                bld,
+                c_arg,
+                cfg.c_elements,
+                _output_element_type(cfg),
+                cfg.c_element_bytes,
+            )
+    return _TileInputs(
+        a=a_arg,
+        b=b_arg,
+        c=c_arg,
+        a_scale=a_scale_arg,
+        b_scale=b_scale_arg,
     )
 
 
@@ -1163,6 +1323,7 @@ class _DmaCtaStagingContext:
     src_row: dsl.Expr
     src_k_group: int | dsl.Expr
     read_k_group: int | dsl.Expr
+    k_step: dsl.Expr | None
     lds_wave_byte_base: dsl.Value
     chunks_per_row: int
 
@@ -1182,6 +1343,7 @@ def _make_dma_cta_staging_context(
     cfg: _MatmulConfig,
     coords: _TileCoords,
     lds: dsl.Value,
+    k_step: dsl.Value | None = None,
 ) -> _DmaCtaStagingContext:
     wi = dsl.sym("wi")
     wi_first = dsl.sym("wi_first")
@@ -1199,6 +1361,9 @@ def _make_dma_cta_staging_context(
     src_k_group = dsl.mod(lane, chunks_per_row)
     src_k_group = _dma_logical_col(cfg, src_row, src_k_group)
     read_k_group = _dma_logical_col(cfg, lane_mod16, lane_k_group)
+    k_step_expr = dsl.sym("dma_k_step") if k_step is not None else None
+    if k_step_expr is not None:
+        bindings[k_step_expr] = k_step
     geom = _dma_cta_geometry(cfg)
     lds_bytes = bld.shared_memory_base(dsl.i8())
     lds_wave_byte_offset = bld.index_expr(
@@ -1227,6 +1392,7 @@ def _make_dma_cta_staging_context(
         src_row=src_row,
         src_k_group=src_k_group,
         read_k_group=read_k_group,
+        k_step=k_step_expr,
         lds_wave_byte_base=lds_wave_byte_base,
         chunks_per_row=chunks_per_row,
     )
@@ -1256,6 +1422,9 @@ def _dma_lds_byte_ptr(
 def _a_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
     cfg = ctx.cfg
     slot = _dma_slot_expr(cfg, slot_per_wave, ctx.wave_id)
+    k_offset = (
+        0 if ctx.k_step is None else ctx.k_step * cfg.storage_k_tile * cfg.wave_k_tiles
+    )
     if cfg.coalesced_mfma_output:
         row = slot * cfg.wave_m_tiles + dsl.floor(
             ctx.lane / (ctx.chunks_per_row * cfg.wave_k_tiles)
@@ -1264,9 +1433,24 @@ def _a_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
         off = ctx.bld.index_expr(
             ctx.wg_m * (ctx.geom.block_m_tiles * 16 * cfg.storage_K)
             + row * cfg.storage_K
-            + k_group * cfg.storage_lane_k_elems,
+            + k_group * cfg.storage_lane_k_elems
+            + k_offset,
             bindings=ctx.bindings,
         )
+        if ctx.coords.explicit_cta:
+            upper = (
+                cfg.a_elements - cfg.storage_lane_k_elems
+                if ctx.k_step is not None
+                else cfg.a_elements
+                - cfg.storage_K
+                + cfg.storage_k_tile * cfg.wave_k_tiles
+                - cfg.storage_lane_k_elems
+            )
+            off = ctx.bld.assume_range(
+                off,
+                0,
+                upper,
+            )
         return ctx.bld.ptr_add(ctx.coords.a_base, off)
     k_tile, m_tile = _dma_slot_major_minor(slot, ctx.geom.block_m_tiles)
     off = ctx.bld.index_expr(
@@ -1274,15 +1458,21 @@ def _a_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
         + m_tile * (16 * cfg.storage_K)
         + k_tile * cfg.storage_k_tile
         + ctx.src_row * cfg.storage_K
-        + ctx.src_k_group * cfg.storage_lane_k_elems,
+        + ctx.src_k_group * cfg.storage_lane_k_elems
+        + k_offset,
         bindings=ctx.bindings,
     )
+    if ctx.coords.explicit_cta and ctx.k_step is not None:
+        off = ctx.bld.assume_range(off, 0, cfg.a_elements - cfg.storage_lane_k_elems)
     return ctx.bld.ptr_add(ctx.coords.a_base, off)
 
 
 def _b_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
     cfg = ctx.cfg
     slot = _dma_slot_expr(cfg, slot_per_wave, ctx.wave_id)
+    k_offset = (
+        0 if ctx.k_step is None else ctx.k_step * cfg.storage_k_tile * cfg.wave_k_tiles
+    )
     if cfg.coalesced_mfma_output:
         row = slot * cfg.wave_n_tiles + dsl.floor(
             ctx.lane / (ctx.chunks_per_row * cfg.wave_k_tiles)
@@ -1291,9 +1481,24 @@ def _b_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
         off = ctx.bld.index_expr(
             ctx.wg_n * (ctx.geom.block_n_tiles * 16 * cfg.storage_K)
             + row * cfg.storage_K
-            + k_group * cfg.storage_lane_k_elems,
+            + k_group * cfg.storage_lane_k_elems
+            + k_offset,
             bindings=ctx.bindings,
         )
+        if ctx.coords.explicit_cta:
+            upper = (
+                cfg.b_elements - cfg.storage_lane_k_elems
+                if ctx.k_step is not None
+                else cfg.b_elements
+                - cfg.storage_K
+                + cfg.storage_k_tile * cfg.wave_k_tiles
+                - cfg.storage_lane_k_elems
+            )
+            off = ctx.bld.assume_range(
+                off,
+                0,
+                upper,
+            )
         return ctx.bld.ptr_add(ctx.coords.b_base, off)
     k_tile, n_tile = _dma_slot_major_minor(slot, ctx.geom.block_n_tiles)
     off = ctx.bld.index_expr(
@@ -1301,9 +1506,12 @@ def _b_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
         + n_tile * (16 * cfg.storage_K)
         + k_tile * cfg.storage_k_tile
         + ctx.src_row * cfg.storage_K
-        + ctx.src_k_group * cfg.storage_lane_k_elems,
+        + ctx.src_k_group * cfg.storage_lane_k_elems
+        + k_offset,
         bindings=ctx.bindings,
     )
+    if ctx.coords.explicit_cta and ctx.k_step is not None:
+        off = ctx.bld.assume_range(off, 0, cfg.b_elements - cfg.storage_lane_k_elems)
     return ctx.bld.ptr_add(ctx.coords.b_base, off)
 
 
@@ -1509,15 +1717,20 @@ def _emit_dma_cta_staging_ptrs(
     cfg: _MatmulConfig,
     coords: _TileCoords,
     lds: dsl.Value,
+    k_step: dsl.Value | None = None,
 ) -> _DmaCtaStagingPtrs:
-    ctx = _make_dma_cta_staging_context(bld, cfg, coords, lds)
+    ctx = _make_dma_cta_staging_context(bld, cfg, coords, lds, k_step)
     if cfg.coalesced_mfma_output:
         return _emit_coalesced_dma_cta_staging_ptrs(ctx)
     return _emit_regular_dma_cta_staging_ptrs(ctx)
 
 
 def _emit_lds_staging(
-    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    *,
+    k_step: dsl.Value | None = None,
 ) -> _LdsStaging:
     """Materialize per-wave A/B LDS slot pointers."""
     reg_simd_type = dsl.simd_type(
@@ -1559,6 +1772,7 @@ def _emit_lds_staging(
         cfg,
         coords,
         lds,
+        k_step,
     )
     return _LdsStaging(
         reg_simd_type=reg_simd_type,
@@ -1588,9 +1802,11 @@ def _load_fragment_group_through_lds(
     a_type: dsl.Type,
     b_type: dsl.Type,
     staging: _LdsStaging,
+    *,
+    after: dsl.Value | None = None,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     """Round-trip one K-step's A/B fragment group through LDS."""
-    a_loads, b_loads = _lds_global_loads(bld, a_ptrs, b_ptrs, staging)
+    a_loads, b_loads = _lds_global_loads(bld, a_ptrs, b_ptrs, staging, after=after)
     return _lds_store_reload(bld, a_loads, b_loads, a_type, b_type, staging)
 
 
@@ -1599,11 +1815,13 @@ def _lds_global_loads(
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
     staging: _LdsStaging,
+    *,
+    after: dsl.Value | None = None,
 ) -> tuple[
     tuple[tuple[dsl.Value, dsl.Value], ...], tuple[tuple[dsl.Value, dsl.Value], ...]
 ]:
-    a_loads = tuple(bld.load(ptr, staging.reg_simd_type) for ptr in a_ptrs)
-    b_loads = tuple(bld.load(ptr, staging.reg_simd_type) for ptr in b_ptrs)
+    a_loads = tuple(bld.load(ptr, staging.reg_simd_type, after=after) for ptr in a_ptrs)
+    b_loads = tuple(bld.load(ptr, staging.reg_simd_type, after=after) for ptr in b_ptrs)
     return a_loads, b_loads
 
 
@@ -1644,8 +1862,12 @@ def _load_fragment_group_through_dma_lds(
     a_type: dsl.Type,
     b_type: dsl.Type,
     staging: _LdsStaging,
+    *,
+    after: dsl.Value | None = None,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
-    dma_tokens = _dma_issue(bld, cfg, a_ptrs, b_ptrs, staging, in_loop=False)
+    dma_tokens = _dma_issue(
+        bld, cfg, a_ptrs, b_ptrs, staging, after=after, in_loop=False
+    )
     a_frags, b_frags, reuse_token = _dma_drain(
         bld, _join_tokens(bld, dma_tokens), a_type, b_type, staging
     )
@@ -1853,13 +2075,15 @@ def _load_fragment_group(
     b_ptrs: tuple[dsl.Value, ...],
     types: _KernelTypes,
     staging: _LdsStaging,
+    *,
+    after: dsl.Value | None = None,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     if cfg.use_dma_lds:
         return _load_fragment_group_through_dma_lds(
-            bld, cfg, a_ptrs, b_ptrs, types.a, types.b, staging
+            bld, cfg, a_ptrs, b_ptrs, types.a, types.b, staging, after=after
         )
     return _load_fragment_group_through_lds(
-        bld, a_ptrs, b_ptrs, types.a, types.b, staging
+        bld, a_ptrs, b_ptrs, types.a, types.b, staging, after=after
     )
 
 
@@ -4838,29 +5062,34 @@ def _store_acc_tiles(
     n_end: int,
     *,
     after: dsl.Value | None = None,
-) -> None:
+) -> dsl.Value:
     cache = _output_store_cache(cfg)
     if cfg.coalesced_mfma_output:
-        _store_acc_tiles_mfma_coalesced(
+        return _store_acc_tiles_mfma_coalesced(
             bld, cfg, accs, c_ptrs[0], n_begin, n_end, after=after
         )
-        return
+    tokens: list[dsl.Value] = []
     for i in range(cfg.wave_m_tiles):
         for j in range(n_begin, n_end):
             acc_idx = i * cfg.wave_n_tiles + j
             if cfg.output_type == "f16":
-                _fragment_store_f16(
-                    bld,
-                    cfg,
-                    accs[acc_idx],
-                    c_ptrs[acc_idx],
-                    after=after,
-                    cache=cache,
+                tokens.append(
+                    _fragment_store_f16(
+                        bld,
+                        cfg,
+                        accs[acc_idx],
+                        c_ptrs[acc_idx],
+                        after=after,
+                        cache=cache,
+                    )
                 )
             else:
-                bld.fragment_store(
-                    accs[acc_idx], c_ptrs[acc_idx], after=after, cache=cache
+                tokens.append(
+                    bld.fragment_store(
+                        accs[acc_idx], c_ptrs[acc_idx], after=after, cache=cache
+                    )
                 )
+    return _join_tokens(bld, tokens)
 
 
 def _output_store_cache(cfg: _MatmulConfig) -> Attribute | None:
@@ -4879,7 +5108,7 @@ def _store_acc_tiles_mfma_coalesced(
     n_end: int,
     *,
     after: dsl.Value | None = None,
-) -> None:
+) -> dsl.Value:
     cache = _output_store_cache(cfg)
     regs_type = dsl.simd_type(
         dsl.vector_type(cfg.mma.acc_registers, dsl.f32()), width=cfg.mma.wave_size
@@ -4897,6 +5126,7 @@ def _store_acc_tiles_mfma_coalesced(
     lane = dsl.mod(wi_sym, cfg.mma.wave_size)
     lane_m = dsl.mod(lane, 16) * cfg.wave_m_tiles
     lane_n = dsl.floor(lane / 16) * (cfg.mma.acc_registers * cfg.wave_n_tiles)
+    tokens: list[dsl.Value] = []
     for reg in range(cfg.mma.acc_registers):
         for j in range(n_begin, n_end):
             values = [
@@ -4912,12 +5142,15 @@ def _store_acc_tiles_mfma_coalesced(
                 lane_m + (lane_n + reg * cfg.wave_n_tiles + j) * cfg.M,
                 bindings={wi_sym: wi_val},
             )
-            bld.store(
-                wave.PackOp(packed_type, values).result,
-                bld.ptr_add(c_ptr, offset),
-                after=after,
-                cache=cache,
+            tokens.append(
+                bld.store(
+                    wave.PackOp(packed_type, values).result,
+                    bld.ptr_add(c_ptr, offset),
+                    after=after,
+                    cache=cache,
+                )
             )
+    return _join_tokens(bld, tokens)
 
 
 def _store_acc_tiles_lds_coalesced(
@@ -5510,6 +5743,7 @@ def _emit_dma_subpanel_mmas(
     *,
     m_begin: int = 0,
     m_end: int | None = None,
+    on_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     if m_end is None:
         m_end = len(a_frags)
@@ -5521,6 +5755,7 @@ def _emit_dma_subpanel_mmas(
         accs,
         m_begin * len(b_frags),
         m_end * len(b_frags),
+        on_column=on_column,
     )
 
 
@@ -5539,6 +5774,8 @@ def _emit_dma_subpanel_mma_range(
     accs: tuple[dsl.Value, ...],
     begin: int,
     end: int,
+    *,
+    on_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     total = len(a_frags) * len(b_frags)
     if not 0 <= begin <= end <= total:
@@ -5548,6 +5785,8 @@ def _emit_dma_subpanel_mma_range(
         i, j = _serpentine_mma_coords(len(a_frags), ordinal)
         index = _mma_acc_index(cfg, i, j)
         new_accs[index] = _emit_mma(bld, cfg, a_frags[i], b_frags[j], new_accs[index])
+        if on_column is not None and (ordinal + 1) % len(a_frags) == 0:
+            on_column(tuple(new_accs), j)
     return tuple(new_accs)
 
 
@@ -6165,6 +6404,8 @@ def _drain_dma_subpanel_tile(
     ready: _DmaSubpanelTokens,
     accs: tuple[dsl.Value, ...],
     read_bases: _DmaSubpanelReadBases,
+    *,
+    on_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     access = bld.barrier(*_flatten_dma_subpanel_tokens(ready))
     a0, _ = _read_dma_subpanel(
@@ -6204,7 +6445,14 @@ def _drain_dma_subpanel_tile(
         types.a,
         staging,
     )
-    return _emit_dma_subpanel_mmas(bld, cfg, a1, b1, accs)
+    return _emit_dma_subpanel_mmas(
+        bld,
+        cfg,
+        a1,
+        b1,
+        accs,
+        on_column=on_column,
+    )
 
 
 def _emit_dma_subpanel_tail(
@@ -6213,6 +6461,8 @@ def _emit_dma_subpanel_tail(
     types: _KernelTypes,
     staging: _LdsStaging,
     state: _DmaSubpanelLoopState,
+    *,
+    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     current_b_ptrs = _dma_subpanel_read_ptrs(
         bld, staging, state.current_read_bases.b, staging.b_dma_read_offsets
@@ -6244,7 +6494,14 @@ def _emit_dma_subpanel_tail(
         bld, cfg, staging, state.current_lds_offset
     )
     return _drain_dma_subpanel_tile(
-        bld, cfg, types, staging, state.ready, accs, ready_read_bases
+        bld,
+        cfg,
+        types,
+        staging,
+        state.ready,
+        accs,
+        ready_read_bases,
+        on_column=on_final_column,
     )
 
 
@@ -6253,8 +6510,10 @@ def _init_dma_subpanel_kernel(
     cfg: _MatmulConfig,
     types: _KernelTypes,
     staging: _LdsStaging,
+    *,
+    after: dsl.Value | None = None,
 ) -> tuple[tuple[dsl.Value, ...], _DmaSubpanelTokens, _DmaSubpanelTokens]:
-    root = bld.token()
+    root = _dep_or_token(bld, after)
     roots = tuple(root for _ in range(cfg.wave_k_tiles))
     empty = _DmaSubpanelTokens(roots, roots)
     first_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 0)
@@ -6343,10 +6602,14 @@ def _emit_dma_subpanel_loop(
     staging: _LdsStaging,
     virtual_k_stride: dsl.Value,
     init_args: tuple[dsl.Value, ...],
+    *,
+    trip_count: dsl.Value | None = None,
+    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     zero = bld.constant(dsl.i32(), 0)
     one = bld.constant(dsl.i32(), 1)
-    trip_count = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
+    if trip_count is None:
+        trip_count = bld.constant(dsl.i32(), max(cfg.virtual_k_steps - 2, 0))
     loop_a_ptrs = _advance_ptrs(bld, staging.a_dma_src_ptrs, virtual_k_stride)
     loop_b_ptrs = _advance_ptrs(bld, staging.b_dma_src_ptrs, virtual_k_stride)
     state_count = len(init_args)
@@ -6376,7 +6639,106 @@ def _emit_dma_subpanel_loop(
     final_state = _split_dma_subpanel_loop_state(
         tuple(forop.results)[:state_count], cfg
     )
-    return _emit_dma_subpanel_tail(bld, cfg, types, staging, final_state)
+    return _emit_dma_subpanel_tail(
+        bld,
+        cfg,
+        types,
+        staging,
+        final_state,
+        on_final_column=on_final_column,
+    )
+
+
+def _compute_dma_subpanel_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    virtual_k_stride: dsl.Value,
+    *,
+    after: dsl.Value | None = None,
+    step_count: dsl.Value | None = None,
+    on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
+) -> tuple[dsl.Value, ...]:
+    if step_count is not None and on_final_column is not None:
+        raise ValueError("dynamic K cannot emit final-column callbacks")
+    init_accs, first_ready, empty = _init_dma_subpanel_kernel(
+        bld, cfg, types, staging, after=after
+    )
+    if step_count is not None:
+        one = bld.constant(dsl.i32(), 1)
+        single_step = bld.scalar_cmpi("eq", step_count, one)
+        result_types = [types.acc] * cfg.tiles_per_wave
+        with bld.if_(single_step, result_types, otherwise=True) as dynamic:
+            bld.yield_(
+                _drain_dma_subpanel_tile(
+                    bld,
+                    cfg,
+                    types,
+                    staging,
+                    first_ready,
+                    init_accs,
+                    _dma_subpanel_read_bases(bld, staging, 0),
+                )
+            )
+            with dynamic.otherwise():
+                init_args = _init_dma_subpanel_loop(
+                    bld,
+                    cfg,
+                    types,
+                    staging,
+                    first_ready,
+                    empty,
+                    init_accs,
+                    virtual_k_stride,
+                )
+                trip_count = bld.assume_range(
+                    bld.subi(step_count, bld.constant(dsl.i32(), 2)),
+                    0,
+                    max(cfg.virtual_k_steps - 2, 0),
+                )
+                bld.yield_(
+                    _emit_dma_subpanel_loop(
+                        bld,
+                        cfg,
+                        types,
+                        staging,
+                        virtual_k_stride,
+                        init_args,
+                        trip_count=trip_count,
+                    )
+                )
+        return tuple(dynamic.results)
+    if cfg.virtual_k_steps == 1:
+        return _drain_dma_subpanel_tile(
+            bld,
+            cfg,
+            types,
+            staging,
+            first_ready,
+            init_accs,
+            _dma_subpanel_read_bases(bld, staging, 0),
+            on_column=on_final_column,
+        )
+    init_args = _init_dma_subpanel_loop(
+        bld,
+        cfg,
+        types,
+        staging,
+        first_ready,
+        empty,
+        init_accs,
+        virtual_k_stride,
+    )
+    return _emit_dma_subpanel_loop(
+        bld,
+        cfg,
+        types,
+        staging,
+        virtual_k_stride,
+        init_args,
+        on_final_column=on_final_column,
+    )
 
 
 def _emit_dma_subpanel_kernel(
@@ -6387,31 +6749,7 @@ def _emit_dma_subpanel_kernel(
     ptrs: _TilePtrs,
     virtual_k_stride: dsl.Value,
 ) -> None:
-    init_accs, first_ready, empty = _init_dma_subpanel_kernel(bld, cfg, types, staging)
-    if cfg.virtual_k_steps == 1:
-        final_accs = _drain_dma_subpanel_tile(
-            bld,
-            cfg,
-            types,
-            staging,
-            first_ready,
-            init_accs,
-            _dma_subpanel_read_bases(bld, staging, 0),
-        )
-    else:
-        init_args = _init_dma_subpanel_loop(
-            bld,
-            cfg,
-            types,
-            staging,
-            first_ready,
-            empty,
-            init_accs,
-            virtual_k_stride,
-        )
-        final_accs = _emit_dma_subpanel_loop(
-            bld, cfg, types, staging, virtual_k_stride, init_args
-        )
+    final_accs = _compute_dma_subpanel_tile(bld, cfg, types, staging, virtual_k_stride)
     _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles)
 
 
@@ -6426,6 +6764,1297 @@ def _dma_loop_offsets(
         bld, cfg, bld.addi(loop_iv, bld.constant(dsl.i32(), 2))
     )
     return current, ready, next_offset
+
+
+@dataclass(frozen=True)
+class _StreamKPartition:
+    worker: dsl.Value
+    workers: dsl.Value
+    quotient: dsl.Value
+    remainder: dsl.Value
+    begin: dsl.Value
+    end: dsl.Value
+    first_tile: dsl.Value
+    last_tile: dsl.Value
+
+
+@dataclass(frozen=True)
+class _StreamKScratch:
+    base: dsl.Value
+    buffer_elements: int | None
+
+
+def _streamk_select(
+    condition: dsl.Value, true_value: dsl.Value, false_value: dsl.Value
+) -> dsl.Value:
+    return wave.SelectOp(true_value.type, condition, true_value, false_value).result
+
+
+def _streamk_div(
+    bld: dsl.FunctionBuilder, numerator: dsl.Value, denominator: dsl.Value
+) -> dsl.Value:
+    return bld.binary(dsl.BinaryKind.DivUI, numerator, denominator)
+
+
+def _streamk_rem(
+    bld: dsl.FunctionBuilder, numerator: dsl.Value, denominator: dsl.Value
+) -> dsl.Value:
+    return bld.binary(dsl.BinaryKind.RemUI, numerator, denominator)
+
+
+def _streamk_partition(
+    bld: dsl.FunctionBuilder,
+    *,
+    total_iterations: int,
+    workers: int,
+    k_iterations: int,
+) -> _StreamKPartition:
+    index = dsl.i32()
+    worker = bld.assume_range(bld.workgroup_id(axis=0), 0, workers - 1)
+    worker_count = bld.constant(index, workers)
+    total = bld.constant(index, total_iterations)
+    quotient = bld.assume_range(
+        _streamk_div(bld, total, worker_count), 1, total_iterations
+    )
+    remainder = _streamk_rem(bld, total, worker_count)
+    zero = bld.constant(index, 0)
+    one = bld.constant(index, 1)
+    before_remainder = bld.scalar_cmpi("ult", worker, remainder)
+    short_prefix = _streamk_select(before_remainder, worker, remainder)
+    begin = bld.addi(bld.muli(worker, quotient), short_prefix)
+    length_extra = _streamk_select(before_remainder, one, zero)
+    end = bld.addi(begin, bld.addi(quotient, length_extra))
+    k_width = bld.constant(index, k_iterations)
+    first_tile = _streamk_div(bld, begin, k_width)
+    last_tile = _streamk_div(bld, bld.subi(end, one), k_width)
+    return _StreamKPartition(
+        worker,
+        worker_count,
+        quotient,
+        remainder,
+        begin,
+        end,
+        first_tile,
+        last_tile,
+    )
+
+
+def _streamk_owner(
+    bld: dsl.FunctionBuilder,
+    work: dsl.Value,
+    partition: _StreamKPartition,
+) -> dsl.Value:
+    index = dsl.i32()
+    one = bld.constant(index, 1)
+    large_size = bld.addi(partition.quotient, one)
+    large_end = bld.muli(partition.remainder, large_size)
+    in_large_prefix = bld.scalar_cmpi("ult", work, large_end)
+    large_owner = _streamk_div(bld, work, large_size)
+    small_owner = bld.addi(
+        partition.remainder,
+        _streamk_div(
+            bld,
+            bld.subi(work, large_end),
+            partition.quotient,
+        ),
+    )
+    return _streamk_select(in_large_prefix, large_owner, small_owner)
+
+
+def _streamk_worker_begin(
+    bld: dsl.FunctionBuilder,
+    worker: dsl.Value,
+    partition: _StreamKPartition,
+) -> dsl.Value:
+    before_remainder = bld.scalar_cmpi("ult", worker, partition.remainder)
+    prefix = _streamk_select(before_remainder, worker, partition.remainder)
+    return bld.addi(bld.muli(worker, partition.quotient), prefix)
+
+
+def _compute_streamk_partial_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    coords: _TileCoords,
+    k_begin: dsl.Value,
+    k_end: dsl.Value,
+    after: dsl.Value,
+) -> tuple[tuple[dsl.Value, ...], dsl.Value]:
+    step_count = bld.assume_range(
+        bld.subi(k_end, k_begin),
+        1,
+        cfg.virtual_k_steps,
+    )
+    staging = _emit_lds_staging(bld, cfg, coords, k_step=k_begin)
+    accs = _compute_dma_subpanel_tile(
+        bld,
+        cfg,
+        types,
+        staging,
+        bld.constant(
+            dsl.i32(),
+            cfg.storage_k_tile * cfg.wave_k_tiles,
+        ),
+        after=after,
+        step_count=step_count,
+    )
+    return accs, after
+
+
+def _streamk_acc_column_packets(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    accs: tuple[dsl.Value, ...],
+    column: int,
+) -> tuple[dsl.Value, ...]:
+    regs_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()),
+        width=cfg.mma.wave_size,
+    )
+    unpacked = tuple(
+        bld.fragment_unpack(accs[_mma_acc_index(cfg, i, column)], regs_type)
+        for i in range(cfg.wave_m_tiles)
+    )
+    f32_simd = dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size)
+    packed_type = dsl.simd_type(
+        dsl.vector_type(cfg.wave_m_tiles, dsl.f32()),
+        width=cfg.mma.wave_size,
+    )
+    return tuple(
+        bld.pack(
+            [bld.extract(value, reg, f32_simd) for value in unpacked],
+            packed_type,
+        )
+        for reg in range(cfg.mma.acc_registers)
+    )
+
+
+def _streamk_acc_registers(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    accs: tuple[dsl.Value, ...],
+) -> tuple[dsl.Value, ...]:
+    regs_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()),
+        width=cfg.mma.wave_size,
+    )
+    return tuple(bld.fragment_unpack(acc, regs_type) for acc in accs)
+
+
+def _streamk_scratch_base(
+    bld: dsl.FunctionBuilder,
+    workers: int,
+) -> _StreamKScratch:
+    scratch_elements = streamk_scratch_elements(workers)
+    if scratch_elements * 4 > _MAX_BUFFER_BYTES:
+        return _StreamKScratch(bld.args[3], None)
+    return _StreamKScratch(
+        _wrap_in_buffer(
+            bld,
+            bld.args[3],
+            scratch_elements,
+            dsl.f32(),
+            4,
+        ),
+        scratch_elements,
+    )
+
+
+def _streamk_scratch_lane_base(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, wi: dsl.Value
+) -> dsl.Value:
+    thread = dsl.sym("streamk_scratch_wi")
+    lane = dsl.mod(thread, cfg.mma.wave_size)
+    wave_id = dsl.floor(thread / cfg.mma.wave_size)
+    offset = (
+        wave_id * cfg.tiles_per_wave * cfg.mma.acc_registers * cfg.mma.wave_size
+        + lane * cfg.mma.acc_registers
+    )
+    return bld.index_expr(offset, {thread: wi})
+
+
+def _streamk_buffer_scratch_lane_base(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, wi: dsl.Value
+) -> dsl.Value:
+    width = cfg.mma.wave_size
+    lane = bld.binary(
+        dsl.BinaryKind.AndI,
+        wi,
+        bld.splat(bld.constant(dsl.i32(), width - 1), width=width),
+    )
+    wave_id = bld.binary(
+        dsl.BinaryKind.ShRUI,
+        wi,
+        bld.splat(bld.constant(dsl.i32(), (width - 1).bit_length()), width=width),
+    )
+    wave_stride = cfg.tiles_per_wave * cfg.mma.acc_registers * width
+    return bld.addi(
+        bld.muli(
+            wave_id,
+            bld.splat(bld.constant(dsl.i32(), wave_stride), width=width),
+            nuw=True,
+        ),
+        bld.muli(
+            lane,
+            bld.splat(
+                bld.constant(dsl.i32(), cfg.mma.acc_registers),
+                width=width,
+            ),
+            nuw=True,
+        ),
+        nuw=True,
+    )
+
+
+def _streamk_scratch_ptrs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    wi: dsl.Value,
+    worker: dsl.Value,
+    slot: dsl.Value,
+    ordinals: range | tuple[int, ...] | None = None,
+) -> tuple[dsl.Value, ...]:
+    global_slot_i32 = bld.addi(
+        bld.muli(
+            worker,
+            bld.constant(dsl.i32(), STREAMK_PARTIAL_SLOTS_PER_WORKER),
+        ),
+        slot,
+    )
+    if scratch.buffer_elements is None:
+        global_slot = dsl.sym("streamk_global_slot")
+        slot_base = bld.index_expr(
+            global_slot * STREAMK_TILE_ELEMENTS,
+            {global_slot: global_slot_i32},
+        )
+        lane_base = bld.addi(slot_base, _streamk_scratch_lane_base(bld, cfg, wi))
+        offset_type = dsl.index_type()
+    else:
+        slot_base = bld.splat(
+            bld.muli(
+                global_slot_i32,
+                bld.constant(dsl.i32(), STREAMK_TILE_ELEMENTS),
+                nuw=True,
+            ),
+            width=cfg.mma.wave_size,
+        )
+        lane_base = bld.addi(
+            slot_base,
+            _streamk_buffer_scratch_lane_base(bld, cfg, wi),
+            nuw=True,
+        )
+        offset_type = dsl.i32()
+    if ordinals is None:
+        ordinals = range(cfg.tiles_per_wave)
+    pointers: list[dsl.Value] = []
+    for ordinal in ordinals:
+        ordinal_offset = bld.constant(
+            offset_type,
+            _mma_acc_index(
+                cfg,
+                ordinal // cfg.wave_n_tiles,
+                ordinal % cfg.wave_n_tiles,
+            )
+            * cfg.mma.acc_registers
+            * cfg.mma.wave_size,
+        )
+        if scratch.buffer_elements is not None:
+            ordinal_offset = bld.splat(
+                ordinal_offset,
+                width=cfg.mma.wave_size,
+            )
+        offset = bld.addi(
+            lane_base,
+            ordinal_offset,
+            nuw=scratch.buffer_elements is not None,
+        )
+        if scratch.buffer_elements is not None:
+            offset = bld.assume_range(
+                offset,
+                0,
+                scratch.buffer_elements - cfg.mma.acc_registers,
+            )
+        pointers.append(bld.ptr_add(scratch.base, offset))
+    return tuple(pointers)
+
+
+def _store_streamk_partial(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    worker: dsl.Value,
+    slot: dsl.Value,
+    accs: tuple[dsl.Value, ...],
+    after: dsl.Value,
+) -> dsl.Value:
+    registers = _streamk_acc_registers(bld, cfg, accs)
+    pointers = _streamk_scratch_ptrs(bld, cfg, scratch, coords.wi, worker, slot)
+    return _join_tokens(
+        bld,
+        [
+            bld.store(regs, ptr, after=after)
+            for regs, ptr in zip(registers, pointers, strict=True)
+        ],
+    )
+
+
+def _streamk_global_zero_mask(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, wi: dsl.Value
+) -> dsl.Value:
+    zero = bld.splat(
+        bld.constant(dsl.i32(), 0),
+        width=cfg.mma.wave_size,
+    )
+    return bld.cmpi("eq", wi, zero)
+
+
+def _streamk_lane_zero_mask(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, wi: dsl.Value
+) -> dsl.Value:
+    lane = bld.binary(
+        dsl.BinaryKind.AndI,
+        wi,
+        bld.splat(
+            bld.constant(dsl.i32(), cfg.mma.wave_size - 1),
+            width=cfg.mma.wave_size,
+        ),
+    )
+    zero = bld.splat(
+        bld.constant(dsl.i32(), 0),
+        width=cfg.mma.wave_size,
+    )
+    return bld.cmpi("eq", lane, zero)
+
+
+def _streamk_masked_atomic_add(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    ptr: dsl.Value,
+    value: dsl.Value,
+    mask: dsl.Value,
+    after: dsl.Value,
+) -> tuple[dsl.Value, dsl.Value]:
+    simd_i32 = dsl.simd_type(dsl.i32(), width=cfg.mma.wave_size)
+    zero = bld.splat(
+        bld.constant(dsl.i32(), 0),
+        width=cfg.mma.wave_size,
+    )
+    with bld.where(
+        mask,
+        [simd_i32, dsl.mem_token_type()],
+    ) as active:
+        old, token = bld.global_atomic_add_acq_rel(ptr, value, after=after)
+        bld.yield_([old, token])
+        with active.otherwise():
+            bld.yield_([zero, after])
+    return active.results[0], active.results[1]
+
+
+def _streamk_tile_owners(
+    bld: dsl.FunctionBuilder,
+    tile: dsl.Value,
+    partition: _StreamKPartition,
+    k_iterations: int,
+) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
+    index = dsl.i32()
+    one = bld.constant(index, 1)
+    k_width = bld.constant(index, k_iterations)
+    tile_begin = bld.muli(tile, k_width)
+    tile_end = bld.subi(bld.muli(bld.addi(tile, one), k_width), one)
+    first = _streamk_owner(bld, tile_begin, partition)
+    last = _streamk_owner(bld, tile_end, partition)
+    return first, last, bld.addi(bld.subi(last, first), one)
+
+
+def _streamk_owner_slot(
+    bld: dsl.FunctionBuilder,
+    tile: dsl.Value,
+    owner: dsl.Value,
+    partition: _StreamKPartition,
+    k_iterations: int,
+) -> dsl.Value:
+    index = dsl.i32()
+    begin = _streamk_worker_begin(bld, owner, partition)
+    first_tile = _streamk_div(
+        bld,
+        begin,
+        bld.constant(index, k_iterations),
+    )
+    is_head = bld.scalar_cmpi("eq", tile, first_tile)
+    return _streamk_select(
+        is_head,
+        bld.constant(index, 0),
+        bld.constant(index, 1),
+    )
+
+
+def _streamk_output_offset(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    ordinal: int,
+) -> dsl.Value:
+    reg, j = divmod(ordinal, cfg.wave_n_tiles)
+    thread = dsl.sym("streamk_output_wi")
+    wg_m = dsl.sym("streamk_output_wg_m")
+    wg_n = dsl.sym("streamk_output_wg_n")
+    lane = dsl.mod(thread, cfg.mma.wave_size)
+    wave_id = dsl.floor(thread / cfg.mma.wave_size)
+    m_wave = dsl.floor(wave_id / cfg.BN)
+    n_wave = dsl.mod(wave_id, cfg.BN)
+    lane_m = dsl.mod(lane, 16) * cfg.wave_m_tiles
+    lane_n = dsl.floor(lane / 16) * (cfg.mma.acc_registers * cfg.wave_n_tiles)
+    offset = bld.index_expr(
+        wg_m * 256
+        + n_wave * (16 * cfg.wave_m_tiles)
+        + (
+            wg_n * 256
+            + m_wave * (16 * cfg.wave_n_tiles)
+            + lane_n
+            + reg * cfg.wave_n_tiles
+            + j
+        )
+        * cfg.M
+        + lane_m,
+        {
+            thread: coords.wi,
+            wg_m: coords.wg_m,
+            wg_n: coords.wg_n,
+        },
+    )
+    return bld.assume_range(
+        offset,
+        0,
+        cfg.c_elements - cfg.wave_m_tiles,
+    )
+
+
+def _streamk_reduction_ordinals(
+    cfg: _MatmulConfig,
+    columns: range,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    scratch = tuple(
+        column * cfg.wave_m_tiles + row
+        for column in columns
+        for row in range(cfg.wave_m_tiles)
+    )
+    output = tuple(
+        reg * cfg.wave_n_tiles + column
+        for column in columns
+        for reg in range(cfg.mma.acc_registers)
+    )
+    return scratch, output
+
+
+def _load_streamk_owner_registers(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    owner: dsl.Value,
+    ordinals: tuple[int, ...],
+    partition: _StreamKPartition,
+    k_iterations: int,
+    after: dsl.Value,
+) -> list[dsl.Value]:
+    registers_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()),
+        width=cfg.mma.wave_size,
+    )
+    slot = _streamk_owner_slot(bld, tile, owner, partition, k_iterations)
+    pointers = _streamk_scratch_ptrs(
+        bld,
+        cfg,
+        scratch,
+        coords.wi,
+        owner,
+        slot,
+        ordinals,
+    )
+    return [bld.load(ptr, registers_type, after=after)[0] for ptr in pointers]
+
+
+def _yield_streamk_two_owner_reduction(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    first_owner: dsl.Value,
+    last_owner: dsl.Value,
+    ordinals: tuple[int, ...],
+    output_ordinals: tuple[int, ...],
+    partition: _StreamKPartition,
+    k_iterations: int,
+    after: dsl.Value,
+    zero_registers: dsl.Value,
+) -> None:
+    first_registers = _load_streamk_owner_registers(
+        bld,
+        cfg,
+        scratch,
+        coords,
+        tile,
+        first_owner,
+        ordinals,
+        partition,
+        k_iterations,
+        after,
+    )
+    second_registers = _load_streamk_owner_registers(
+        bld,
+        cfg,
+        scratch,
+        coords,
+        tile,
+        last_owner,
+        ordinals,
+        partition,
+        k_iterations,
+        after,
+    )
+    output_offsets = [
+        _streamk_output_offset(bld, cfg, coords, ordinal) for ordinal in output_ordinals
+    ]
+    first_accumulated = [bld.fadd(zero_registers, first) for first in first_registers]
+    bld.yield_(
+        [
+            *[
+                bld.fadd(current, second)
+                for current, second in zip(
+                    first_accumulated,
+                    second_registers,
+                    strict=True,
+                )
+            ],
+            *output_offsets,
+        ]
+    )
+
+
+def _yield_streamk_owner_reduction_loop(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    first_owner: dsl.Value,
+    last_owner: dsl.Value,
+    ordinals: tuple[int, ...],
+    output_ordinals: tuple[int, ...],
+    partition: _StreamKPartition,
+    k_iterations: int,
+    after: dsl.Value,
+    registers_type: dsl.Type,
+    zero_registers: dsl.Value,
+    one: dsl.Value,
+) -> None:
+    with bld.for_loop(
+        first_owner,
+        bld.addi(last_owner, one),
+        one,
+        init_args=[zero_registers] * len(ordinals),
+        nonzero_trip=True,
+    ) as loop:
+        loaded_registers = _load_streamk_owner_registers(
+            bld,
+            cfg,
+            scratch,
+            coords,
+            tile,
+            loop.induction_variable,
+            ordinals,
+            partition,
+            k_iterations,
+            after,
+        )
+        bld.yield_(
+            [
+                bld.fadd(current, loaded)
+                for current, loaded in zip(
+                    loop.inner_iter_args,
+                    loaded_registers,
+                    strict=True,
+                )
+            ]
+        )
+    output_offsets = [
+        _streamk_output_offset(bld, cfg, coords, ordinal) for ordinal in output_ordinals
+    ]
+    bld.yield_([*loop.results, *output_offsets])
+
+
+def _reduce_streamk_partial_columns(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    columns: range,
+    first_owner: dsl.Value,
+    last_owner: dsl.Value,
+    partition: _StreamKPartition,
+    k_iterations: int,
+    after: dsl.Value,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...]]:
+    registers_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()),
+        width=cfg.mma.wave_size,
+    )
+    zero_scalar = bld.splat(
+        bld.constant(dsl.f32(), 0.0),
+        dsl.f32(),
+        cfg.mma.wave_size,
+    )
+    zero_registers = bld.pack(
+        [zero_scalar] * cfg.mma.acc_registers,
+        registers_type,
+    )
+    ordinals, output_ordinals = _streamk_reduction_ordinals(cfg, columns)
+    index = dsl.i32()
+    one = bld.constant(index, 1)
+    output_offset_type = dsl.simd_type(
+        dsl.index_type(),
+        cfg.mma.wave_size,
+    )
+    result_types = [registers_type] * len(ordinals)
+    result_types += [output_offset_type] * len(output_ordinals)
+
+    two_owners = bld.scalar_cmpi("eq", bld.addi(first_owner, one), last_owner)
+    with bld.if_(
+        two_owners,
+        result_types,
+        otherwise=True,
+    ) as reduction:
+        _yield_streamk_two_owner_reduction(
+            bld,
+            cfg,
+            scratch,
+            coords,
+            tile,
+            first_owner,
+            last_owner,
+            ordinals,
+            output_ordinals,
+            partition,
+            k_iterations,
+            after,
+            zero_registers,
+        )
+        with reduction.otherwise():
+            _yield_streamk_owner_reduction_loop(
+                bld,
+                cfg,
+                scratch,
+                coords,
+                tile,
+                first_owner,
+                last_owner,
+                ordinals,
+                output_ordinals,
+                partition,
+                k_iterations,
+                after,
+                registers_type,
+                zero_registers,
+                one,
+            )
+    count = len(ordinals)
+    return (
+        tuple(reduction.results[:count]),
+        tuple(reduction.results[count:]),
+    )
+
+
+def _store_streamk_output_packet(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    ordinal: int,
+    packet: dsl.Value,
+    after: dsl.Value,
+    *,
+    offset: dsl.Value | None = None,
+) -> dsl.Value:
+    packed_f16 = dsl.simd_type(
+        dsl.vector_type(cfg.wave_m_tiles, dsl.f16()),
+        width=cfg.mma.wave_size,
+    )
+    cache = dsl.store_cache(dsl.StoreCacheAttr.CS)
+    if offset is None:
+        offset = _streamk_output_offset(bld, cfg, coords, ordinal)
+    return bld.store(
+        bld.fpconvert(packet, packed_f16),
+        bld.ptr_add(coords.c_base, offset),
+        after=after,
+        cache=cache,
+    )
+
+
+def _store_streamk_output_column(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    accs: tuple[dsl.Value, ...],
+    column: int,
+    after: dsl.Value,
+) -> dsl.Value:
+    return _join_tokens(
+        bld,
+        [
+            _store_streamk_output_packet(
+                bld,
+                cfg,
+                coords,
+                reg * cfg.wave_n_tiles + column,
+                packet,
+                after,
+            )
+            for reg, packet in enumerate(
+                _streamk_acc_column_packets(bld, cfg, accs, column)
+            )
+        ],
+    )
+
+
+def _reduce_and_store_streamk_partials(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    first_owner: dsl.Value,
+    last_owner: dsl.Value,
+    partition: _StreamKPartition,
+    k_iterations: int,
+    after: dsl.Value,
+) -> dsl.Value:
+    f32_simd = dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size)
+    packed_type = dsl.simd_type(
+        dsl.vector_type(cfg.wave_m_tiles, dsl.f32()),
+        width=cfg.mma.wave_size,
+    )
+    tokens: list[dsl.Value] = []
+    # Two columns need 64 carry VGPRs and keep reduction spill-free.
+    columns_per_batch = 2
+    for column_begin in range(0, cfg.wave_n_tiles, columns_per_batch):
+        columns = range(
+            column_begin,
+            min(column_begin + columns_per_batch, cfg.wave_n_tiles),
+        )
+        registers, output_offsets = _reduce_streamk_partial_columns(
+            bld,
+            cfg,
+            scratch,
+            coords,
+            tile,
+            columns,
+            first_owner,
+            last_owner,
+            partition,
+            k_iterations,
+            after,
+        )
+        for column_index, column in enumerate(columns):
+            begin = column_index * cfg.wave_m_tiles
+            column_registers = registers[begin : begin + cfg.wave_m_tiles]
+            for reg in range(cfg.mma.acc_registers):
+                packet = bld.pack(
+                    [bld.extract(value, reg, f32_simd) for value in column_registers],
+                    packed_type,
+                )
+                ordinal = reg * cfg.wave_n_tiles + column
+                tokens.append(
+                    _store_streamk_output_packet(
+                        bld,
+                        cfg,
+                        coords,
+                        ordinal,
+                        packet,
+                        after,
+                        offset=output_offsets[
+                            column_index * cfg.mma.acc_registers + reg
+                        ],
+                    )
+                )
+    return _join_tokens(bld, tokens)
+
+
+def _finish_streamk_reduction(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    first_owner: dsl.Value,
+    last_owner: dsl.Value,
+    parts: dsl.Value,
+    partition: _StreamKPartition,
+    k_iterations: int,
+    counter_ptr: dsl.Value,
+    global_zero: dsl.Value,
+    after: dsl.Value,
+) -> dsl.Value:
+    lane_zero = _streamk_lane_zero_mask(bld, cfg, coords.wi)
+    zero = bld.splat(
+        bld.constant(dsl.i32(), 0),
+        width=cfg.mma.wave_size,
+    )
+    _, acquired = _streamk_masked_atomic_add(
+        bld,
+        cfg,
+        counter_ptr,
+        zero,
+        lane_zero,
+        after,
+    )
+    output = _reduce_and_store_streamk_partials(
+        bld,
+        cfg,
+        scratch,
+        coords,
+        tile,
+        first_owner,
+        last_owner,
+        partition,
+        k_iterations,
+        acquired,
+    )
+    output_ready = bld.barrier(output)
+    negative_parts = bld.splat(
+        bld.subi(bld.constant(dsl.i32(), 0), parts),
+        width=cfg.mma.wave_size,
+    )
+    _, reset = _streamk_masked_atomic_add(
+        bld,
+        cfg,
+        counter_ptr,
+        negative_parts,
+        global_zero,
+        output_ready,
+    )
+    return bld.barrier(reset)
+
+
+def _streamk_counter_ptr(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    tile: dsl.Value,
+) -> dsl.Value:
+    offset = bld.assume_range(tile, 0, cfg.M_blocks * cfg.N_blocks - 1)
+    return bld.ptr_add(
+        bld.args[4],
+        bld.splat(offset, width=cfg.mma.wave_size),
+    )
+
+
+def _publish_streamk_partial(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    coords: _TileCoords,
+    tile: dsl.Value,
+    worker: dsl.Value,
+    slot: dsl.Value,
+    accs: tuple[dsl.Value, ...],
+    partition: _StreamKPartition,
+    k_iterations: int,
+    after: dsl.Value,
+) -> dsl.Value:
+    scratch_stores = _store_streamk_partial(
+        bld,
+        cfg,
+        scratch,
+        coords,
+        worker,
+        slot,
+        accs,
+        after,
+    )
+    published_ready = bld.barrier(scratch_stores)
+    counter_ptr = _streamk_counter_ptr(bld, cfg, tile)
+    global_zero = _streamk_global_zero_mask(bld, cfg, coords.wi)
+    one = bld.splat(
+        bld.constant(dsl.i32(), 1),
+        width=cfg.mma.wave_size,
+    )
+    old, published = _streamk_masked_atomic_add(
+        bld,
+        cfg,
+        counter_ptr,
+        one,
+        global_zero,
+        published_ready,
+    )
+    count = bld.addi(
+        bld.read_first(old),
+        bld.constant(dsl.i32(), 1),
+    )
+    mailbox = bld.shared_memory_base(
+        dsl.i32(),
+        offset=cfg.lds_bytes,
+    )
+    with bld.where(global_zero, [dsl.mem_token_type()]) as active:
+        mailbox_store = bld.store(
+            bld.splat(count, width=cfg.mma.wave_size),
+            mailbox,
+            after=published,
+        )
+        bld.yield_([mailbox_store])
+        with active.otherwise():
+            bld.yield_([published])
+    mailbox_ready = bld.barrier(active.results[0])
+    count_value, count_loaded = bld.load(
+        mailbox,
+        dsl.simd_type(dsl.i32(), width=cfg.mma.wave_size),
+        after=mailbox_ready,
+    )
+    count = bld.read_first(count_value)
+    first_owner, last_owner, parts = _streamk_tile_owners(
+        bld, tile, partition, k_iterations
+    )
+    parts_i32 = parts
+    is_last = bld.cmpi(
+        "eq",
+        bld.splat(count, width=cfg.mma.wave_size),
+        bld.splat(parts_i32, width=cfg.mma.wave_size),
+    )
+    with bld.where(
+        is_last,
+        [dsl.mem_token_type()],
+    ) as elected:
+        bld.yield_(
+            [
+                _finish_streamk_reduction(
+                    bld,
+                    cfg,
+                    scratch,
+                    coords,
+                    tile,
+                    first_owner,
+                    last_owner,
+                    parts_i32,
+                    partition,
+                    k_iterations,
+                    counter_ptr,
+                    global_zero,
+                    count_loaded,
+                )
+            ]
+        )
+        with elected.otherwise():
+            bld.yield_([count_loaded])
+    return elected.results[0]
+
+
+def _emit_streamk_full_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    inputs: _TileInputs,
+    raw_m: dsl.Value,
+    raw_n: dsl.Value,
+    after: dsl.Value,
+) -> dsl.Value:
+    coords = _emit_tile_coords(
+        bld,
+        cfg,
+        inputs=inputs,
+        wg_m_raw=raw_m,
+        wg_n_raw=raw_n,
+    )
+    staging = _emit_lds_staging(bld, cfg, coords)
+    stores: list[dsl.Value] = []
+
+    def store_column(accs: tuple[dsl.Value, ...], column: int) -> None:
+        stores.append(
+            _store_streamk_output_column(bld, cfg, coords, accs, column, after)
+        )
+
+    _compute_dma_subpanel_tile(
+        bld,
+        cfg,
+        _kernel_types(cfg),
+        staging,
+        bld.constant(
+            dsl.i32(),
+            cfg.storage_k_tile * cfg.wave_k_tiles,
+        ),
+        after=after,
+        on_final_column=store_column,
+    )
+    return bld.barrier(bld.issue_token(_join_tokens(bld, stores)))
+
+
+def _emit_streamk_partial(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    inputs: _TileInputs,
+    partition: _StreamKPartition,
+    tile: dsl.Value,
+    slot: dsl.Value,
+    k_begin: dsl.Value,
+    k_end: dsl.Value,
+    raw_m: dsl.Value,
+    raw_n: dsl.Value,
+    after: dsl.Value,
+) -> dsl.Value:
+    coords = _emit_tile_coords(
+        bld,
+        cfg,
+        inputs=inputs,
+        wg_m_raw=raw_m,
+        wg_n_raw=raw_n,
+    )
+    types = _kernel_types(cfg)
+    accs, reuse = _compute_streamk_partial_tile(
+        bld,
+        cfg,
+        types,
+        coords,
+        k_begin,
+        k_end,
+        after,
+    )
+    return _publish_streamk_partial(
+        bld,
+        cfg,
+        scratch,
+        coords,
+        tile,
+        partition.worker,
+        slot,
+        accs,
+        partition,
+        cfg.virtual_k_steps,
+        reuse,
+    )
+
+
+def _streamk_raw_tile_coords(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    tile: dsl.Value,
+) -> tuple[dsl.Value, dsl.Value]:
+    index = dsl.i32()
+    raw_m = bld.assume_range(
+        _streamk_rem(
+            bld,
+            tile,
+            bld.constant(index, cfg.M_blocks),
+        ),
+        0,
+        cfg.M_blocks - 1,
+    )
+    raw_n = bld.assume_range(
+        _streamk_div(
+            bld,
+            tile,
+            bld.constant(index, cfg.M_blocks),
+        ),
+        0,
+        cfg.N_blocks - 1,
+    )
+    return raw_m, raw_n
+
+
+def _emit_streamk_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    scratch: _StreamKScratch,
+    full_inputs: _TileInputs,
+    partial_cfg: _MatmulConfig,
+    partial_inputs: _TileInputs,
+    partition: _StreamKPartition,
+    tile: dsl.Value,
+    k_begin: dsl.Value,
+    k_end: dsl.Value,
+    after: dsl.Value,
+) -> dsl.Value:
+    index = dsl.i32()
+    raw_m, raw_n = _streamk_raw_tile_coords(bld, cfg, tile)
+    zero = bld.constant(index, 0)
+    one = bld.constant(index, 1)
+    k_width = bld.constant(index, cfg.virtual_k_steps)
+    end_full = _streamk_select(
+        bld.scalar_cmpi("eq", k_end, k_width),
+        one,
+        zero,
+    )
+    full = _streamk_select(
+        bld.scalar_cmpi("eq", k_begin, zero),
+        end_full,
+        zero,
+    )
+    full_mask = bld.cmpi(
+        "eq",
+        bld.splat(full, width=cfg.mma.wave_size),
+        bld.splat(
+            one,
+            width=cfg.mma.wave_size,
+        ),
+    )
+    slot = _streamk_select(
+        bld.scalar_cmpi("eq", tile, partition.first_tile),
+        zero,
+        one,
+    )
+    with bld.where(
+        full_mask,
+        [dsl.mem_token_type()],
+    ) as path:
+        bld.yield_(
+            [
+                _emit_streamk_full_tile(
+                    bld,
+                    cfg,
+                    full_inputs,
+                    raw_m,
+                    raw_n,
+                    after,
+                )
+            ]
+        )
+        with path.otherwise():
+            bld.yield_(
+                [
+                    _emit_streamk_partial(
+                        bld,
+                        partial_cfg,
+                        scratch,
+                        partial_inputs,
+                        partition,
+                        tile,
+                        slot,
+                        k_begin,
+                        k_end,
+                        raw_m,
+                        raw_n,
+                        after,
+                    )
+                ]
+            )
+    return path.results[0]
+
+
+def _emit_aligned_streamk_kernel(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    *,
+    workers: int,
+) -> None:
+    tile_count = cfg.M_blocks * cfg.N_blocks
+    tiles_per_worker = tile_count // workers
+    index = dsl.i32()
+    worker = bld.assume_range(bld.workgroup_id(axis=0), 0, workers - 1)
+    inputs = _emit_tile_inputs(bld, cfg)
+    if tiles_per_worker == 1:
+        raw_m, raw_n = _streamk_raw_tile_coords(bld, cfg, worker)
+        _emit_streamk_full_tile(
+            bld,
+            cfg,
+            inputs,
+            raw_m,
+            raw_n,
+            bld.token(),
+        )
+        return
+
+    tile_end = bld.constant(index, tile_count)
+    worker_stride = bld.constant(index, workers)
+    with bld.for_loop(
+        worker,
+        tile_end,
+        worker_stride,
+        init_args=[bld.token()],
+        nonzero_trip=True,
+    ) as loop:
+        raw_m, raw_n = _streamk_raw_tile_coords(
+            bld,
+            cfg,
+            loop.induction_variable,
+        )
+        bld.yield_(
+            [
+                _emit_streamk_full_tile(
+                    bld,
+                    cfg,
+                    inputs,
+                    raw_m,
+                    raw_n,
+                    loop.inner_iter_args[0],
+                )
+            ]
+        )
+
+
+def _emit_streamk_kernel(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    *,
+    workers: int,
+) -> None:
+    tile_count = cfg.M_blocks * cfg.N_blocks
+    if tile_count % workers == 0:
+        _emit_aligned_streamk_kernel(bld, cfg, workers=workers)
+        return
+
+    total_iterations = tile_count * cfg.virtual_k_steps
+    partition = _streamk_partition(
+        bld,
+        total_iterations=total_iterations,
+        workers=workers,
+        k_iterations=cfg.virtual_k_steps,
+    )
+    index = dsl.i32()
+    one = bld.constant(index, 1)
+    k_width = bld.constant(index, cfg.virtual_k_steps)
+    tile_end = bld.addi(partition.last_tile, one)
+    scratch = _streamk_scratch_base(bld, workers)
+    full_inputs = _emit_tile_inputs(bld, cfg)
+    partial_cfg = replace(cfg, use_buffer=False)
+    partial_inputs = _emit_tile_inputs(bld, partial_cfg)
+    with bld.for_loop(
+        partition.first_tile,
+        tile_end,
+        one,
+        init_args=[bld.token()],
+        nonzero_trip=True,
+    ) as loop:
+        tile = loop.induction_variable
+        tile_work_begin = bld.muli(tile, k_width)
+        is_first = bld.scalar_cmpi("eq", tile, partition.first_tile)
+        is_last = bld.scalar_cmpi("eq", tile, partition.last_tile)
+        k_begin = _streamk_select(
+            is_first,
+            bld.subi(partition.begin, tile_work_begin),
+            bld.constant(index, 0),
+        )
+        k_end = _streamk_select(
+            is_last,
+            bld.subi(partition.end, tile_work_begin),
+            k_width,
+        )
+        bld.yield_(
+            [
+                _emit_streamk_tile(
+                    bld,
+                    cfg,
+                    scratch,
+                    full_inputs,
+                    partial_cfg,
+                    partial_inputs,
+                    partition,
+                    tile,
+                    k_begin,
+                    k_end,
+                    loop.inner_iter_args[0],
+                )
+            ]
+        )
 
 
 def _kernel_loop_trip_count(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> dsl.Value:
@@ -6605,6 +8234,50 @@ def _make_matmul_config(
     )
 
 
+def _make_gfx950_f16_streamk_config(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    cta_swizzle_xcds: int,
+    cta_group_m: int,
+) -> _MatmulConfig:
+    schedule = PhasedDmaSchedule(
+        issue_group_size=7,
+        initial_delay_cycles=0,
+        loop_delay_cycles=0,
+        loop_overlap_cycles=0,
+        delayed_waves=0,
+        fetch_alignment=32,
+        fetch_phase=12,
+        subpanel_pipeline=True,
+    )
+    return _make_matmul_config(
+        M=M,
+        N=N,
+        K=K,
+        BM=2,
+        BN=2,
+        wave_m_tiles=8,
+        wave_n_tiles=8,
+        wave_k_tiles=2,
+        use_buffer=True,
+        use_dma_lds=True,
+        matrix_intrinsic="mfma_gfx950",
+        input_type="f16",
+        output_type="f16",
+        output_store_cache="cs",
+        mxfp4_scale_path="dma",
+        random_data=False,
+        random_seed=0,
+        cta_swizzle_xcds=cta_swizzle_xcds,
+        cta_group_m=cta_group_m,
+        target_waves=1,
+        phased_dma_schedule=schedule,
+        coalesced_mfma_output=True,
+    )
+
+
 def _declare_matmul_externals(bld: dsl.ModuleBuilder, cfg: _MatmulConfig) -> None:
     if cfg.input_type == "mxfp4":
         input_helper = _I8_PTR_HELPER
@@ -6737,6 +8410,78 @@ def build_wmma_f16_matmul_module(
     return bld.module
 
 
+def build_gfx950_f16_streamk_matmul_module(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    workers: int,
+    cta_swizzle_xcds: int = 8,
+    cta_group_m: int = 4,
+    skip_specialize: bool = False,
+) -> Module:
+    cfg = _make_gfx950_f16_streamk_config(
+        M,
+        N,
+        K,
+        cta_swizzle_xcds=cta_swizzle_xcds,
+        cta_group_m=cta_group_m,
+    )
+    total_iterations = cfg.M_blocks * cfg.N_blocks * cfg.virtual_k_steps
+    if total_iterations > (1 << 31) - 1:
+        raise ValueError("Stream-K work index exceeds the initial i32 ABI")
+    if not 1 <= workers <= total_iterations:
+        raise ValueError(f"workers must be in [1, {total_iterations}]; got {workers}")
+    buffer_ranges = (
+        ("A", cfg.a_elements * cfg.input_element_bytes),
+        ("B", cfg.b_elements * cfg.input_element_bytes),
+        ("C", cfg.c_elements * cfg.c_element_bytes),
+    )
+    for name, byte_count in buffer_ranges:
+        if byte_count > _MAX_BUFFER_BYTES:
+            raise ValueError(
+                f"Stream-K {name} buffer needs {byte_count} bytes; "
+                f"32-bit buffer range holds at most {_MAX_BUFFER_BYTES}"
+            )
+    lds_bytes = (
+        (cfg.lds_bytes + 4 + _STREAMK_MAILBOX_BYTES - 1)
+        // _STREAMK_MAILBOX_BYTES
+        * _STREAMK_MAILBOX_BYTES
+    )
+    fixed_lds = lds_bytes
+    dynamic_lds = lds_bytes >= _STATIC_LDS_LIMIT
+    if dynamic_lds:
+        fixed_lds = 0
+
+    bld = dsl.ModuleBuilder()
+    with bld:
+        attrs = _kernel_attrs(cfg, target_waves=1)
+        if dynamic_lds:
+            attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(lds_bytes)
+        with (
+            bld.gpu_module(_GPU_MODULE_NAME) as gpu_module,
+            gpu_module.kernel(
+                STREAMK_KERNEL_NAME,
+                [
+                    dsl.ptr_type(dsl.f16()),
+                    dsl.ptr_type(dsl.f16()),
+                    dsl.ptr_type(dsl.f16()),
+                    dsl.ptr_type(dsl.f32()),
+                    dsl.ptr_type(dsl.i32()),
+                    dsl.i32(),
+                ],
+                lds_size=fixed_lds,
+                workgroup_size=[cfg.threads_per_workgroup, 1, 1],
+                attrs=attrs,
+            ) as kernel,
+        ):
+            _emit_streamk_kernel(kernel, cfg, workers=workers)
+        _attach_wavemeta_params(bld.module, cfg)
+        if not skip_specialize:
+            dsl.specialize_wavemeta(bld.module)
+    return bld.module
+
+
 def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
     """Install the `wavemeta.params` dict the specialiser reads."""
     index = IndexType.get()
@@ -6749,10 +8494,21 @@ def _attach_wavemeta_params(module: Module, cfg: _MatmulConfig) -> None:
 
 
 __all__ = [
+    "STREAMK_KERNEL_NAME",
+    "STREAMK_PARTIAL_SLOTS_PER_WORKER",
+    "STREAMK_TILE_ELEMENTS",
     "PhasedDmaSchedule",
+    "StreamKSegment",
+    "build_gfx950_f16_streamk_matmul_module",
     "build_wmma_f16_matmul_module",
     "compute_wmma_f16_matmul_reference_buffer",
     "generate_mxfp4_packed_matmul_inputs",
     "generate_mxfp4_scale_inputs",
     "generate_wmma_f16_matmul_inputs",
+    "streamk_counter_elements",
+    "streamk_owner_for_iteration",
+    "streamk_scratch_elements",
+    "streamk_tile_contributors",
+    "streamk_worker_interval",
+    "streamk_worker_segments",
 ]
