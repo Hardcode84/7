@@ -8,11 +8,6 @@ Source baseline checked 2026-07-28:
 
 - Wave: `810b1188a6e21353d1ea1e95cd5ab667c72b71f8`
 - pinned LLVM: `30bff76d3a294fe0882a05472234b25bb752b16a`
-- LLVM upstream main: `05eba618a37839999d3eb6ca7328337cd4765dfd`
-
-LLVM main is nine commits ahead of the pin. None of those commits changes the
-AMDGPU backend, AMDGPU MC, or MLIR AMDGPU support. The pin contains the
-upstream base assumed by this design.
 
 LLVM already owns gfx1250 target parsing, encodings, ELF identity, instruction
 descriptions, intrinsics, descriptor fields, wait instructions, and schedule
@@ -99,14 +94,13 @@ LLVM source is the executable specification:
 - `llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`
 - `llvm/docs/AMDGPUUsage.rst`
 
-Public source snapshot:
+Pinned LLVM source:
 
-- [LLVM main at the audited commit](https://github.com/llvm/llvm-project/tree/05eba618a37839999d3eb6ca7328337cd4765dfd)
-- [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/GCNProcessors.td)
-- [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/AMDGPU.td)
-- [schedule model](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/SISchedule.td)
-- [wait-counter implementation](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
-- [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/docs/AMDGPUUsage.rst)
+- [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/GCNProcessors.td)
+- [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/AMDGPU.td)
+- [schedule model](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SISchedule.td)
+- [wait-counter implementation](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
+- [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/docs/AMDGPUUsage.rst)
 
 No public gfx1250 ISA manual was found. Every encoded instruction therefore
 needs LLVM MC assembly and disassembly coverage. Hardware tests remain the
