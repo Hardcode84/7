@@ -22,10 +22,12 @@ namespace mlir::waveamdmachine {
 
 namespace {
 
+static constexpr size_t kInstructionResourceKindCount =
+    static_cast<size_t>(InstructionResourceKind::NumResources);
+
 static size_t resourceIndex(InstructionResourceKind kind) {
   size_t index = static_cast<size_t>(kind);
-  assert(index < static_cast<size_t>(InstructionResourceKind::NumResources) &&
-         "resource kind out of range");
+  assert(index < kInstructionResourceKindCount && "resource kind out of range");
   return index;
 }
 
@@ -39,6 +41,8 @@ static size_t simdResourceIndex(InstructionResourceKind kind) {
     return 2;
   case InstructionResourceKind::XdlPipe:
     return 3;
+  case InstructionResourceKind::MfmaCoissue:
+    return 4;
   default:
     llvm_unreachable("resource is not SIMD-scoped");
   }
@@ -101,48 +105,25 @@ getInstructionResourceScopeName(InstructionResourceScope scope) {
 }
 
 llvm::StringRef getInstructionResourceKindName(InstructionResourceKind kind) {
-  switch (kind) {
-  case InstructionResourceKind::None:
-    return "none";
-  case InstructionResourceKind::SimdIssue:
-    return "simd_issue";
-  case InstructionResourceKind::CuIssue:
-    return "cu_issue";
-  case InstructionResourceKind::ValuPipe:
-    return "valu_pipe";
-  case InstructionResourceKind::SaluPipe:
-    return "salu_pipe";
-  case InstructionResourceKind::XdlPipe:
-    return "xdl_pipe";
-  case InstructionResourceKind::LdsIssue:
-    return "lds_issue";
-  case InstructionResourceKind::LdsDmaIssue:
-    return "lds_dma_issue";
-  case InstructionResourceKind::NumResources:
-    break;
-  }
-  llvm_unreachable("bad instruction resource kind");
+  static constexpr std::array<llvm::StringLiteral,
+                              kInstructionResourceKindCount>
+      names = {"none",         "simd_issue", "cu_issue",
+               "valu_pipe",    "salu_pipe",  "xdl_pipe",
+               "mfma_coissue", "lds_issue",  "lds_dma_issue"};
+  return names[resourceIndex(kind)];
 }
 
 InstructionResourceScope
 getInstructionResourceScope(InstructionResourceKind kind) {
-  switch (kind) {
-  case InstructionResourceKind::None:
-    return InstructionResourceScope::Wave;
-  case InstructionResourceKind::SimdIssue:
-  case InstructionResourceKind::ValuPipe:
-  case InstructionResourceKind::SaluPipe:
-  case InstructionResourceKind::XdlPipe:
-    return InstructionResourceScope::SIMD;
-  case InstructionResourceKind::LdsIssue:
-  case InstructionResourceKind::LdsDmaIssue:
-    return InstructionResourceScope::SIMDPair;
-  case InstructionResourceKind::CuIssue:
-    return InstructionResourceScope::CU;
-  case InstructionResourceKind::NumResources:
-    break;
-  }
-  llvm_unreachable("bad instruction resource kind");
+  static constexpr std::array<InstructionResourceScope,
+                              kInstructionResourceKindCount>
+      scopes = {
+          InstructionResourceScope::Wave,    InstructionResourceScope::SIMD,
+          InstructionResourceScope::CU,      InstructionResourceScope::SIMD,
+          InstructionResourceScope::SIMD,    InstructionResourceScope::SIMD,
+          InstructionResourceScope::SIMD,    InstructionResourceScope::SIMDPair,
+          InstructionResourceScope::SIMDPair};
+  return scopes[resourceIndex(kind)];
 }
 
 InstructionResourceState::InstructionResourceState(
@@ -161,6 +142,8 @@ InstructionResourceState::InstructionResourceState(
   configure(InstructionResourceKind::ValuPipe, capacities.valuPipe);
   configure(InstructionResourceKind::SaluPipe, capacities.saluPipe);
   configure(InstructionResourceKind::XdlPipe, capacities.xdlPipe);
+  configure(InstructionResourceKind::MfmaCoissue,
+            arch.hasMfmaCoissueRestriction ? 1 : 0);
   configure(InstructionResourceKind::LdsIssue,
             arch.ldsIssuePeriod == 0 ? 0 : 1);
   configure(InstructionResourceKind::LdsDmaIssue,

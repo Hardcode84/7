@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 
+#include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/Operation.h"
@@ -148,6 +149,16 @@ unsigned getInstructionIssueCount(Operation *op,
           dyn_cast<InstructionIssueOpInterface>(op))
     return std::max(1u, info.getInstructionIssueCount(isa));
   return 1;
+}
+
+bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
+                             const ArchData &arch) {
+  if (!arch.hasMfmaCoissueRestriction)
+    return false;
+  if (op->hasTrait<traits::MFMAOp>() || cls == SchedClass::WriteTrans32)
+    return true;
+  return isa<VPkAddF16Op, VPkMulF16Op, VPkFmaF16Op, VPkAddF32Op, VPkMulF32Op,
+             VPkFmaF32Op>(op);
 }
 
 bool hasSchedClassMapping(Operation *op) {

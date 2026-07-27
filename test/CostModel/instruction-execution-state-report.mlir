@@ -22,6 +22,11 @@
 // RUN: wave-instruction-state-report --func=dma_issue_delay_chunks --arch=gfx950 %s | FileCheck %s --check-prefix=DMACHUNKS
 // RUN: wave-instruction-state-report --func=dma_issue_delay_conditional --arch=gfx950 %s | FileCheck %s --check-prefix=DMADELAY
 // RUN: wave-instruction-state-report --func=dma_issue_delay_conditional --arch=gfx950 --dma-issue-delay-cohort=skipped %s | FileCheck %s --check-prefix=DMASKIP
+// RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-PACKED
+// RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-PACKED-CDNA3
+// RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx1100 %s | FileCheck %s --check-prefix=MFMA-PACKED-RDNA
+// RUN: wave-instruction-state-report --func=mfma_scalar_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-SCALAR
+// RUN: wave-instruction-state-report --func=mfma_trans_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-TRANS
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @smem_value_ready(%zero: !waveamdmachine.imm,
@@ -314,6 +319,52 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
            !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.m0
     return
   }
+
+  func.func @mfma_packed_coissue(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 2>,
+      %y: !waveamdmachine.reg<vgpr, 2>) {
+    %mfma = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %packed = waveamdmachine.v_pk_add_f32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    return
+  }
+
+  func.func @mfma_scalar_coissue(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 1>,
+      %y: !waveamdmachine.reg<vgpr, 1>) {
+    %mfma = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %scalar = waveamdmachine.v_add_f32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @mfma_trans_coissue(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 1>) {
+    %mfma = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %trans = waveamdmachine.v_exp_f32 %x
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -397,3 +448,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // DMASKIP: func: dma_issue_delay_conditional
 // DMASKIP: query op_index=1 cycle=0 op=waveamdmachine.dma_issue_delay stall=operand_value cycles=3 components=operand_value:3
 // DMASKIP: commit op_index=1 issue=3 next=7 value_ready=7
+
+// MFMA-PACKED: func: mfma_packed_coissue
+// MFMA-PACKED: query op_index=1 cycle=4 op=waveamdmachine.v_pk_add_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+
+// MFMA-PACKED-CDNA3: arch: gfx942
+// MFMA-PACKED-CDNA3: query op_index=1 cycle=4 op=waveamdmachine.v_pk_add_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+
+// MFMA-PACKED-RDNA: arch: gfx1100
+// MFMA-PACKED-RDNA: query op_index=1 cycle=1 op=waveamdmachine.v_pk_add_f32 stall=none cycles=0 components=none
+
+// MFMA-SCALAR: query op_index=1 cycle=4 op=waveamdmachine.v_add_f32 stall=none cycles=0 components=none
+
+// MFMA-TRANS: query op_index=1 cycle=4 op=waveamdmachine.v_exp_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue

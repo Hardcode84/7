@@ -34,6 +34,7 @@ static constexpr ArchData kGfx803{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*hasMfmaCoissueRestriction=*/false,
     /*agprCountsAgainstVGPRs=*/false,
 };
 
@@ -59,6 +60,7 @@ static constexpr ArchData kGfx942{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*hasMfmaCoissueRestriction=*/true,
     /*agprCountsAgainstVGPRs=*/true,
 };
 
@@ -83,6 +85,7 @@ static constexpr ArchData kGfx950{
     /*ldsDmaIssueLatency=*/180,
     /*ldsDmaIssuePeriod=*/4,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*hasMfmaCoissueRestriction=*/true,
     /*agprCountsAgainstVGPRs=*/true,
 };
 
@@ -108,6 +111,7 @@ static constexpr ArchData kGfx1100{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*hasMfmaCoissueRestriction=*/false,
     /*agprCountsAgainstVGPRs=*/false,
 };
 
@@ -132,6 +136,7 @@ static constexpr ArchData kGfx1200{
     /*ldsDmaIssueLatency=*/0,
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
+    /*hasMfmaCoissueRestriction=*/false,
     /*agprCountsAgainstVGPRs=*/false,
 };
 

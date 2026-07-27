@@ -208,6 +208,7 @@ struct StaticIssueInfo {
   bool realInst = false;
   bool memoryIssuer = false;
   bool hasMemoryValue = false;
+  bool mfmaCoissueResource = false;
 };
 
 using StaticIssueInfoMap = DenseMap<Operation *, StaticIssueInfo>;
@@ -227,6 +228,7 @@ struct ComputeResourceState {
                           waveamdmachine::FunctionalUnit::NumFunctionalUnits)>
       readyAt{};
   int64_t currentSlot = 0;
+  int64_t mfmaCoissueReadyAt = 0;
 };
 
 static unsigned
@@ -565,6 +567,8 @@ buildStaticIssueInfo(Operation *op, const waveamdmachine::ArchData &arch) {
   info.memoryIssuer = waveamdmachine::getMemoryCounterKind(op) !=
                       waveamdmachine::MemoryCounterKind::None;
   info.hasMemoryValue = waveamdmachine::hasMemoryValueLatency(op);
+  info.mfmaCoissueResource =
+      waveamdmachine::usesMfmaCoissueResource(op, info.cls, arch);
   if (tracksComputeResource(info.fu))
     info.releaseSlots =
         std::max(1, waveamdmachine::getResourceCycles(arch, info.cls));
@@ -593,7 +597,10 @@ ComputeResourceState::preview(const StaticIssueInfo &info) const {
 
   result.releaseSlots = info.releaseSlots;
   size_t index = static_cast<size_t>(result.fu);
-  result.waitSlots = std::max<int64_t>(0, readyAt[index] - currentSlot);
+  int64_t readySlot = readyAt[index];
+  if (info.mfmaCoissueResource)
+    readySlot = std::max(readySlot, mfmaCoissueReadyAt);
+  result.waitSlots = std::max<int64_t>(0, readySlot - currentSlot);
   return result;
 }
 
@@ -607,11 +614,15 @@ void ComputeResourceState::commit(const StaticIssueInfo &info) {
     // Resource scheduling does not cross compute-island boundaries.
     currentSlot = issueSlot + info.issues;
     readyAt.fill(currentSlot);
+    mfmaCoissueReadyAt = currentSlot;
     return;
   }
   size_t index = static_cast<size_t>(resource.fu);
-  readyAt[index] =
-      issueSlot + std::max<unsigned>(resource.releaseSlots, info.issues);
+  unsigned releaseSlots =
+      std::max<unsigned>(resource.releaseSlots, info.issues);
+  readyAt[index] = issueSlot + releaseSlots;
+  if (info.mfmaCoissueResource)
+    mfmaCoissueReadyAt = issueSlot + releaseSlots;
   currentSlot = issueSlot + info.issues;
 }
 

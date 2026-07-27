@@ -57,6 +57,7 @@ Out of current support:
 In scope:
 
 - VALU, SALU, and XDL issue/backpressure counters.
+- GFX942/GFX950 MFMA coissue exclusion for TRANS and packed VALU.
 - Wait-counter queues for issued, not-yet-retired events.
 - Memory value dependencies.
 - Memory token dependencies, including transitive token deps.
@@ -215,6 +216,7 @@ struct InstructionExecutionState {
   DenseMap<EventId, PendingEvent> events;
   std::array<SmallVector<EventId, 8>, 4> waitQueues;
   std::array<SmallVector<int64_t, 8>, 3> pipeQueues;
+  int64_t mfmaCoissueReadyCycle = 0;
   bool m0GapArmed = false;
 };
 ```
@@ -234,12 +236,13 @@ one independent real instruction first. Pseudos do not clear it.
 
 1. Build `InstructionDesc`.
 2. Compute pipe wait from VALU/SALU/XDL state.
-3. Compute normal operand wait from `valueReadyAt`.
-4. Compute memory value wait from wait-counter queue result readiness.
-5. Compute token wait from pending event deps.
-6. Compute explicit waitcnt drain wait when `op` is a waitcnt.
-7. Compute M0 gap wait.
-8. Return max wait and all nonzero components.
+3. Compute target MFMA coissue wait.
+4. Compute normal operand wait from `valueReadyAt`.
+5. Compute memory value wait from wait-counter queue result readiness.
+6. Compute token wait from pending event deps.
+7. Compute explicit waitcnt drain wait when `op` is a waitcnt.
+8. Compute M0 gap wait.
+9. Return max wait and all nonzero components.
 
 Pseudo-code:
 
@@ -263,6 +266,11 @@ InstructionExecutionState::query(Operation *op) const {
   return makePrimaryStall(waits);
 }
 ```
+
+GFX942/GFX950 use a SIMD-scoped `mfma_coissue` resource. MFMA holds it for
+its resource-release interval. TRANS and represented packed FP16/FP32
+arithmetic also consume it; ordinary VALU remains available as stall filler.
+Shared-CU simulation uses the same resource per SIMD.
 
 Memory value wait:
 

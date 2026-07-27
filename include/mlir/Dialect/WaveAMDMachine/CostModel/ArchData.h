@@ -93,6 +93,9 @@ struct ArchData {
   // Selection policy among ready resident waves on one SIMD.
   WaveIssueArbitration waveIssueArbitration;
 
+  // MFMA excludes TRANS, DOT, and packed VALU while its resource is live.
+  bool hasMfmaCoissueRestriction;
+
   // AGPR allocation consumes VGPR-file capacity.
   bool agprCountsAgainstVGPRs;
 };

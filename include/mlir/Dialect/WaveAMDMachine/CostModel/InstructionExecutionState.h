@@ -267,6 +267,7 @@ private:
     bool waitcnt = false;
     bool legacyVALU = false;
     bool trans = false;
+    bool mfmaCoissueResource = false;
     bool laneRead = false;
     bool ldsDmaIssue = false;
     bool m0Writer = false;
@@ -323,6 +324,10 @@ private:
   appendPipeResourceUse(Operation *op, const InstructionDesc &desc,
                         const InstructionResourceState &resourceState,
                         SmallVectorImpl<InstructionResourceUse> &uses) const;
+  void appendMfmaCoissueResourceUse(
+      const InstructionDesc &desc,
+      const InstructionResourceState &resourceState,
+      SmallVectorImpl<InstructionResourceUse> &uses) const;
   void
   appendLdsResourceUses(const InstructionDesc &desc,
                         const InstructionResourceState &resourceState,
@@ -411,6 +416,7 @@ private:
   InstructionIssueSlotHazardConfig issueSlotHazardConfig;
   int64_t currentCycle = 0;
   int64_t nextLdsDmaIssueCycle = 0;
+  int64_t mfmaCoissueReadyCycle = 0;
   uint64_t currentIssueSlot = 0;
   EventId nextEventId = 1;
   unsigned storeDataGap = 0;

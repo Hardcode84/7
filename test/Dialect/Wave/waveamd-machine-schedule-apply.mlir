@@ -956,6 +956,50 @@ func.func @compute_resource_stall_fill(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @mfma_packed_coissue_stall_fill(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %packed_lhs: !waveamdmachine.reg<vgpr, 2>,
+    %packed_rhs: !waveamdmachine.reg<vgpr, 2>,
+    %x0: !waveamdmachine.reg<vgpr, 1>,
+    %y0: !waveamdmachine.reg<vgpr, 1>,
+    %x1: !waveamdmachine.reg<vgpr, 1>,
+    %y1: !waveamdmachine.reg<vgpr, 1>,
+    %x2: !waveamdmachine.reg<vgpr, 1>,
+    %y2: !waveamdmachine.reg<vgpr, 1>) {
+  %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %packed = waveamdmachine.v_pk_add_f32 %packed_lhs, %packed_rhs
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %fill0 = waveamdmachine.v_add_f32 %x0, %y0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %fill1 = waveamdmachine.v_add_f32 %x1, %y1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %fill2 = waveamdmachine.v_add_f32 %x2, %y2
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @mfma_packed_coissue_stall_fill
+// IR: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.v_add_f32
+// IR-NEXT: waveamdmachine.v_add_f32
+// IR-NEXT: waveamdmachine.v_add_f32
+// IR-NEXT: waveamdmachine.v_pk_add_f32
+// DIAG: waveamd-machine-schedule region func=mfma_packed_coissue_stall_fill
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_stall_fills=3
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @single_wave_pressure_retry_drops_resource_filler(
     %a: !waveamdmachine.reg<vgpr, 4>,
     %b: !waveamdmachine.reg<vgpr, 4>,

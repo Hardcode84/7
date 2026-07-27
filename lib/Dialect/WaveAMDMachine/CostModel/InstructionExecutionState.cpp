@@ -948,6 +948,9 @@ InstructionExecutionState::commitWithResources(
     commitMemoryIssue(desc, result.issueCycle);
   } else {
     commitPipe(desc.pipe, valueReadyCycle);
+    if (desc.mfmaCoissueResource)
+      mfmaCoissueReadyCycle =
+          saturatingAdd(result.issueCycle, desc.resourceDuration);
     commitMemoryIssue(desc, result.issueCycle);
   }
   currentIssueSlot += desc.issueSlots;
@@ -981,6 +984,7 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.noMachineInst = cls == SchedClass::NoInst;
   desc.legacyVALU = isLegacyVALU(op);
   desc.trans = cls == SchedClass::WriteTrans32;
+  desc.mfmaCoissueResource = usesMfmaCoissueResource(op, cls, arch);
   desc.laneRead = desc.legacyVALU &&
                   hasRegClass(op->getOperands(), RegClass::VGPR) &&
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
@@ -1027,6 +1031,7 @@ InstructionExecutionState::getResourceUses(
                             issuePeriod, uses);
 
   appendPipeResourceUse(op, desc, resourceState, uses);
+  appendMfmaCoissueResourceUse(desc, resourceState, uses);
   appendLdsResourceUses(desc, resourceState, issuePeriod, uses);
   return uses;
 }
@@ -1044,6 +1049,17 @@ void InstructionExecutionState::appendPipeResourceUse(
   uses.push_back({pipe, getInstructionResourceScope(pipe), /*units=*/1,
                   /*count=*/1, /*offset=*/0, /*period=*/0,
                   desc.resourceDuration});
+}
+
+void InstructionExecutionState::appendMfmaCoissueResourceUse(
+    const InstructionDesc &desc, const InstructionResourceState &resourceState,
+    SmallVectorImpl<InstructionResourceUse> &uses) const {
+  if (!desc.mfmaCoissueResource || desc.resourceDuration <= 0 ||
+      !resourceState.isEnabled(InstructionResourceKind::MfmaCoissue))
+    return;
+  uses.push_back({InstructionResourceKind::MfmaCoissue,
+                  InstructionResourceScope::SIMD, /*units=*/1, /*count=*/1,
+                  /*offset=*/0, /*period=*/0, desc.resourceDuration});
 }
 
 void InstructionExecutionState::appendLdsResourceUses(
@@ -1194,6 +1210,12 @@ void InstructionExecutionState::addLocalResourceStalls(
   int64_t pipeReady = pipeReadyCycle(desc.pipe, currentCycle);
   addComponent(stall, InstructionStallKind::IssueBackpressure,
                pipeReady - currentCycle);
+
+  if (desc.mfmaCoissueResource)
+    addComponent(stall, InstructionStallKind::IssueBackpressure,
+                 mfmaCoissueReadyCycle - currentCycle,
+                 InstructionResourceKind::MfmaCoissue,
+                 InstructionResourceScope::SIMD);
 
   addLocalMemoryIssueStalls(desc, stall);
 

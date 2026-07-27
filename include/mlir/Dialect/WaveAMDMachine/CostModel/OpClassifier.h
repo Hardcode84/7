@@ -21,6 +21,8 @@ class Operation;
 
 namespace mlir::waveamdmachine {
 
+struct ArchData;
+
 // Bucket a wave.amd.machine op into a SchedClass. Aborts in debug
 // builds on an unmapped op so coverage gaps surface during testing;
 // release builds fall back to Write32Bit and emit a warning via
@@ -29,6 +31,9 @@ SchedClass classifyOp(Operation *op);
 
 unsigned getInstructionIssueCount(Operation *op,
                                   const llvm::AMDGPU::IsaVersion &isa);
+
+bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
+                             const ArchData &arch);
 
 // True when the cost model has a non-fallback mapping for the op.
 bool hasSchedClassMapping(Operation *op);
