@@ -230,9 +230,10 @@ static void bindAdvancedYieldPointers(WaveAMDMachineSelector &S, scf::ForOp op,
     auto offset = S.pointerIndexOffsets.find(iterArg);
     assert(offset != S.pointerIndexOffsets.end() &&
            "strided pointer carry must have offset");
+    PointerOffset carriedOffset = offset->second;
     S.pointerBases[yielded] = group.bodyNextPointerBase;
     S.pointerGlobalBases[yielded] = group.bodyNextBase;
-    S.pointerIndexOffsets[yielded] = offset->second;
+    S.pointerIndexOffsets[yielded] = std::move(carriedOffset);
     S.pointerBuffers[yielded] = snap.isBuffer;
     S.values[yielded] = group.bodyNextPointerBase;
     if (preselect)
