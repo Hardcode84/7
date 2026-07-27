@@ -175,6 +175,10 @@ issues DMA, then reset immediately. Compare it as a replacement for part of
 the explicit phase delay, not another delay. Model priority as greedy-scheduler
 state. Never use full simulated cycles to veto a post-greedy schedule.
 
+Result: [cohort-ring experiments](WaveGfx950InterWaveExperiments.md) rejected
+the mechanism. Correct 16-MFMA phasing reached `0.656 PFLOP/s`; `s_setprio`
+recovered less than 0.3%.
+
 ### Acceptance
 
 Capture TCP pending-stall, TagRAM distribution, TCC read/DRAM request, and LDS
