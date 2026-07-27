@@ -8,9 +8,9 @@ Source baseline checked 2026-07-28:
 
 - Wave: `810b1188a6e21353d1ea1e95cd5ab667c72b71f8`
 - pinned LLVM: `30bff76d3a294fe0882a05472234b25bb752b16a`
-- LLVM upstream main: `61225df551b071f07dbf9fab98242a7477506b49`
+- LLVM upstream main: `05eba618a37839999d3eb6ca7328337cd4765dfd`
 
-LLVM main is six commits ahead of the pin. None of those commits changes the
+LLVM main is nine commits ahead of the pin. None of those commits changes the
 AMDGPU backend, AMDGPU MC, or MLIR AMDGPU support. The pin contains the
 upstream base assumed by this design.
 
@@ -56,6 +56,7 @@ Initial bring-up does not include:
 - registers above `v255`;
 - async global-to-LDS or LDS-to-global staging;
 - tensor DMA;
+- expert scheduling mode 2;
 - cluster or multicast memory;
 - named or split hardware barriers;
 - SWMMAC, scaled WMMA, sparse WMMA, FP4, FP6, FP8, or BF8;
@@ -100,12 +101,12 @@ LLVM source is the executable specification:
 
 Public source snapshot:
 
-- [LLVM main at the audited commit](https://github.com/llvm/llvm-project/tree/61225df551b071f07dbf9fab98242a7477506b49)
-- [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/61225df551b071f07dbf9fab98242a7477506b49/llvm/lib/Target/AMDGPU/GCNProcessors.td)
-- [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/61225df551b071f07dbf9fab98242a7477506b49/llvm/lib/Target/AMDGPU/AMDGPU.td)
-- [schedule model](https://github.com/llvm/llvm-project/blob/61225df551b071f07dbf9fab98242a7477506b49/llvm/lib/Target/AMDGPU/SISchedule.td)
-- [wait-counter implementation](https://github.com/llvm/llvm-project/blob/61225df551b071f07dbf9fab98242a7477506b49/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
-- [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/61225df551b071f07dbf9fab98242a7477506b49/llvm/docs/AMDGPUUsage.rst)
+- [LLVM main at the audited commit](https://github.com/llvm/llvm-project/tree/05eba618a37839999d3eb6ca7328337cd4765dfd)
+- [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/GCNProcessors.td)
+- [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/AMDGPU.td)
+- [schedule model](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/SISchedule.td)
+- [wait-counter implementation](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
+- [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/05eba618a37839999d3eb6ca7328337cd4765dfd/llvm/docs/AMDGPUUsage.rst)
 
 No public gfx1250 ISA manual was found. Every encoded instruction therefore
 needs LLVM MC assembly and disassembly coverage. Hardware tests remain the
@@ -199,8 +200,7 @@ out-of-order completion, and writes-memory state. Dataflow joins keep the
 conservative oldest live ticket. Loops converge through the existing lattice.
 
 Base bring-up handles LOAD, STORE, DS, KM, and X. ASYNC and TENSOR stay
-unavailable until their operations carry explicit tokens and the selected LLVM
-revision contains the required wait-simplification fixes.
+unavailable until their operations carry explicit tokens.
 
 Required cases:
 
@@ -216,14 +216,53 @@ Required cases:
 Combined LOAD+DS and STORE+DS waits are an encoding choice after the semantic
 requirements are known. They are not separate IR semantics.
 
-Two open LLVM changes block advanced async enablement:
+## Expert Scheduling Mode 2
 
-- [LLVM PR 211333](https://github.com/llvm/llvm-project/pull/211333): track
-  async events during `vm_vsrc` simplification;
-- [LLVM PR 211684](https://github.com/llvm/llvm-project/pull/211684): check
-  every loop predecessor before deleting soft waits.
+Expert scheduling mode 2 is separate from LLVM's gfx1250 coexecution scheduler:
 
-Carry equivalent fixes in the pin or keep async paths rejected.
+- `amdgpu-sched-strategy=coexec` selects a pre-register-allocation ordering
+  policy;
+- `amdgpu-expert-scheduling-mode` changes hardware dependency handling and runs
+  in late, post-register-allocation wait insertion.
+
+Neither enables the other. Initial bring-up keeps `HW_REG_WAVE_SCHED_MODE` at
+zero. Coexecution scheduling and normal split completion waits do not require
+expert mode.
+
+Expert mode makes the compiler track physical-VGPR hazards that normal hardware
+mode handles. LLVM maintains software `VA_VDST_RD` and `VA_VDST_WR` scores over
+one hardware `VA_VDST` field, plus `VM_VSRC`. It classifies:
+
+- Core/Side-MACC, DP-MACC, TRANS, and XDL VALU reads and writes;
+- LDS, FLAT, and VMEM VGPR source reads.
+
+Late wait insertion then emits `s_waitcnt_depctr`. It also programs scheduling
+mode 2 at function entry, disables it around calls and returns, and drains
+incoming dependency state for non-entry functions.
+
+Wave's post-regalloc ticket-wait pass is the right placement, but its current
+scoreboard tracks memory completion tickets, not physical VGPR RAW, WAR, and WAW
+hazards. A separate opt-in project must add:
+
+- target and function controls, default off;
+- physical-register event scores and conservative CFG/loop joins;
+- exact VALU and memory-family classification;
+- scaled-WMMA double increments and LDS-DMA classification;
+- `s_waitcnt_depctr` and scheduling-mode machine ops with MCInst emission;
+- entry, call, return, and non-entry transition rules;
+- late wait placement that avoids WMMA coexecution shadows.
+
+Open upstream correctness work remains:
+
+- [LLVM PR 211333](https://github.com/llvm/llvm-project/pull/211333): preserve
+  `vm_vsrc` waits with outstanding async operations and marks;
+- [LLVM PR 211684](https://github.com/llvm/llvm-project/pull/211684): retain soft
+  waits until every loop predecessor has contributed state;
+- [LLVM issue 175248](https://github.com/llvm/llvm-project/issues/175248): hoist
+  dependency waits out of WMMA coexecution shadows.
+
+These do not block normal-mode ASYNC or TENSOR counters. Keep expert mode
+rejected until Wave carries equivalent correctness and placement logic.
 
 ## Kernel ABI And Entry
 
