@@ -24,6 +24,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -78,49 +79,7 @@ struct HazardRepairStageTiming {
   TimingScope stageScope;
 };
 
-//===----------------------------------------------------------------------===//
-// Vendored AMDGPU hazard-delay encodings.
-//
-// Mirrors `llvm::AMDGPU::SNop` and `llvm::AMDGPU::SDelayAlu`, introduced
-// upstream on the wave-dsl branch in commit 6490bb708b51 ("[mlir][wave]
-// Share AMDGPU hazard delay encodings") but not yet merged into
-// llvm/llvm-project main. When that commit lands, delete this block and
-// replace `amdgpu_compat::` with `llvm::AMDGPU::` at the call sites below.
-//===----------------------------------------------------------------------===//
 namespace amdgpu_compat {
-namespace SDelayAlu {
-
-enum class DelayType { None, VALU, TRANS32, SALU };
-
-inline unsigned encodeDelay(DelayType Type, unsigned Count) {
-  switch (Type) {
-  case DelayType::None:
-    return 0;
-  case DelayType::VALU:
-    assert(Count < 5 && "VALU dependency id must fit s_delay_alu");
-    return Count;
-  case DelayType::TRANS32:
-    assert(Count < 4 && "TRANS32 dependency id must fit s_delay_alu");
-    return Count + 4;
-  case DelayType::SALU:
-    assert(Count < 4 && "SALU cycle id must fit s_delay_alu");
-    return Count + 8;
-  }
-  llvm_unreachable("unknown s_delay_alu delay type");
-}
-
-inline unsigned encode(DelayType Type0, unsigned Count0, unsigned Skip = 0,
-                       DelayType Type1 = DelayType::None, unsigned Count1 = 0) {
-  unsigned Encoded = encodeDelay(Type0, Count0);
-  unsigned Second = encodeDelay(Type1, Count1);
-  if (!Second)
-    return Encoded;
-  assert(Skip < 8 && "skip count must fit s_delay_alu");
-  return Encoded | (Skip << 4) | (Second << 7);
-}
-
-} // namespace SDelayAlu
-
 namespace SNop {
 
 inline unsigned getBitWidth(const llvm::MCSubtargetInfo &STI) {
@@ -263,8 +222,7 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       llvm::AMDGPU::decodeLgkmcnt(isaVersion,
                                   llvm::AMDGPU::getWaitcntBitMask(isaVersion)),
       /*valuDep1=*/
-      amdgpu_compat::SDelayAlu::encode(
-          amdgpu_compat::SDelayAlu::DelayType::VALU, 1),
+      waveamdmachine::encodeSDelayAluVALU(1),
       /*m0PipelineDelay=*/1,
       /*m0DmaCaptureDelay=*/isCDNA4Family(isaVersion) ? 1u : 0u,
       /*valuWriteVGPRMfmaLatency=*/

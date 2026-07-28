@@ -39,6 +39,8 @@ bool isInlineImm32(Value value);
 bool usesConstantBus(Value value);
 std::optional<int64_t> getNonInlineLiteral(Value value);
 unsigned getConstantBusLimit(const llvm::AMDGPU::IsaVersion &isa);
+unsigned encodeSDelayAluVALU(unsigned dependency);
+unsigned encodeSDelayAluSALUCycle(unsigned cycles);
 
 bool sameConstantBusUse(Value lhs, Value rhs,
                         SamePhysicalRegFn samePhysicalReg);

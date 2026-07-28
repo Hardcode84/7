@@ -197,8 +197,30 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
-// expected-error @below {{gfx1250 kernel ABI emission is not implemented}}
-func.func @kernel_abi() attributes {wave.kernel} {
+// expected-error @below {{wave-to-amdgpu-asm sgpr_count 5 does not cover kernel ABI register count 6}}
+func.func @short_sgpr_count() attributes {
+    wave.kernel,
+    waveamdmachine.sgpr_count = 5 : i64
+  } {
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+// expected-error @below {{wave-to-amdgpu-asm sgpr_count 6 does not cover kernel ABI register count 7}}
+func.func @short_cluster_workgroup_sgpr_count() attributes {
+    wave.kernel,
+    waveamdmachine.sgpr_count = 6 : i64
+  } {
+  %x = waveamdmachine.s_workgroup_id_x
+      : !waveamdmachine.reg<sgpr, 1, 2>
   waveamdmachine.s_endpgm
   return
 }

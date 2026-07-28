@@ -96,6 +96,10 @@ unsigned getWaveAMDReservedVGPRs(func::FuncOp func) {
   return getWaveAMDKernelEntryRegs(func).reservedVGPRs;
 }
 
+unsigned getWaveAMDMinReportedVGPRs(func::FuncOp func) {
+  return std::max(1u, getWaveAMDReservedVGPRs(func));
+}
+
 std::string getWaveAMDSGPRName(unsigned index, unsigned width) {
   assert(width > 0 && "SGPR tuple must be non-empty");
   if (width == 1)
@@ -108,6 +112,40 @@ std::string getWaveAMDSGPRName(unsigned index, unsigned width) {
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(Operation *op, StringRef consumer) {
   return waveamdmachine::createAMDGPUMCSubtargetInfo(op, consumer);
+}
+
+static bool usesWorkgroupId(func::FuncOp func) {
+  return func
+      .walk([&](Operation *op) {
+        if (isa<waveamdmachine::SWorkgroupIdXOp,
+                waveamdmachine::SWorkgroupIdYOp,
+                waveamdmachine::SWorkgroupIdZOp>(op))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+FailureOr<unsigned> getWaveAMDMinReportedSGPRs(func::FuncOp func,
+                                               StringRef consumer) {
+  unsigned minimum = std::max(1u, getWaveAMDReservedSGPRs(func) + 1);
+  if (!func || !func->hasAttr(wave::WaveDialect::getKernelAttrName()) ||
+      !usesWorkgroupId(func))
+    return minimum;
+
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      createSubtargetInfo(func, consumer);
+  if (failed(sti))
+    return failure();
+  std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+      waveamdmachine::getAMDGPUTargetCapabilities(**sti);
+  if (!capabilities || !capabilities->architectedSGPRs ||
+      !capabilities->clusters)
+    return minimum;
+
+  constexpr unsigned clusterWorkgroupIdTemps = 2;
+  return std::max(minimum,
+                  getWaveAMDReservedSGPRs(func) + clusterWorkgroupIdTemps);
 }
 
 FailureOr<bool> hasWaveAMDPackedTID(Operation *op, StringRef consumer) {

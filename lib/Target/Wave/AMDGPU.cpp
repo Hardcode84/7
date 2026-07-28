@@ -49,6 +49,7 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/AMDHSAKernelDescriptor.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MathExtras.h"
@@ -60,9 +61,12 @@
 #include "llvm/TargetParser/TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <variant>
 
 LLD_HAS_DRIVER(elf)
@@ -239,6 +243,13 @@ struct KernelRegisterUsage {
   unsigned agprCount = 0;
 };
 
+struct KernelEntryValueUsage {
+  bool workgroupIdX = false;
+  bool workgroupIdY = false;
+  bool workgroupIdZ = false;
+  unsigned maxWorkitemIdAxis = 0;
+};
+
 struct BufferedMCInstruction {
   llvm::MCInst inst;
   Operation *origin = nullptr;
@@ -407,6 +418,7 @@ private:
   std::unique_ptr<llvm::MCInstPrinter> instPrinter;
   SmallVector<KernelInfo> kernels;
   SmallVector<BufferedMCItem> mcBuffer;
+  std::optional<waveamdmachine::AMDGPUTargetCapabilities> targetCapabilities;
   llvm::AMDGPU::IsaVersion isaVersion;
   llvm::AMDGPU::GPUKind targetKind = llvm::AMDGPU::GK_NONE;
   AMDGPUOpcodeSet opcodes;
@@ -492,6 +504,7 @@ private:
     if (!sti)
       return module.emitError("unsupported AMDGPU target: ")
              << targetTriple << "--" << targetChip;
+    targetCapabilities = waveamdmachine::getAMDGPUTargetCapabilities(*sti);
     opcodes = makeAMDGPUOpcodeSet(isaVersion, *sti);
     mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
     unsigned asmVariant = mai->getOutputAssemblerDialect();
@@ -510,11 +523,66 @@ private:
   bool hasVGPRWindowing() const {
     return sti->hasFeature(llvm::AMDGPU::Feature1024AddressableVGPRs);
   }
+  bool hasSetregVGPRMSBFixup() const {
+    if (targetCapabilities)
+      return targetCapabilities->setregVGPRMSBFixup;
+    return sti->hasFeature(llvm::AMDGPU::FeatureSetregVGPRMSBFixup);
+  }
   bool isGfx90APlus() const { return llvm::AMDGPU::isGFX90A(*sti); }
   bool isGfx940Plus() const { return isGfx940PlusIsa(isaVersion); }
   bool hasAGPRs() const { return waveamdmachine::supportsAGPRs(isaVersion); }
+  bool hasArchitectedSGPRs() const {
+    if (targetCapabilities)
+      return targetCapabilities->architectedSGPRs;
+    return sti->hasFeature(llvm::AMDGPU::FeatureArchitectedSGPRs);
+  }
+  bool hasClusters() const {
+    if (targetCapabilities)
+      return targetCapabilities->clusters;
+    return sti->hasFeature(llvm::AMDGPU::FeatureClusters);
+  }
+  bool requiresInitialUnclausedVmem() const {
+    if (targetCapabilities)
+      return targetCapabilities->requiresInitialUnclausedVmem;
+    return sti->hasFeature(llvm::AMDGPU::FeatureRequiresInitialUnclausedVmem);
+  }
+  bool hasWaitXcnt() const {
+    if (targetCapabilities)
+      return targetCapabilities->waitXcnt;
+    return sti->hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
+  }
   bool supportsPrivateSegmentEnable() const {
-    return isGfx11() || isGfx940Plus();
+    if (targetCapabilities)
+      return targetCapabilities->kernelDescriptor.architectedPrivateSegment;
+    return llvm::AMDGPU::hasArchitectedFlatScratch(*sti);
+  }
+  bool supportsDescriptorDX10AndIEEE() const {
+    if (targetCapabilities)
+      return targetCapabilities->kernelDescriptor.dx10ClampAndIEEEMode;
+    return sti->hasFeature(llvm::AMDGPU::FeatureDX10ClampAndIEEEMode);
+  }
+  bool supportsDescriptorWGPMode() const {
+    if (targetCapabilities)
+      return targetCapabilities->kernelDescriptor.wgpMode;
+    return llvm::AMDGPU::supportsWGP(*sti);
+  }
+  bool supportsMetadataWGPMode() const {
+    return isGfx8Or9() || supportsDescriptorWGPMode();
+  }
+  bool supportsDescriptorSharedVGPRCount() const {
+    if (targetCapabilities)
+      return targetCapabilities->kernelDescriptor.sharedVGPRCount;
+    return llvm::AMDGPU::isGFX10_GFX11(*sti);
+  }
+  bool supportsDescriptorRoundRobin() const {
+    if (targetCapabilities)
+      return targetCapabilities->kernelDescriptor.roundRobin;
+    return llvm::AMDGPU::isGFX12Plus(*sti);
+  }
+  bool supportsDescriptorNamedBarrierCount() const {
+    if (targetCapabilities)
+      return targetCapabilities->kernelDescriptor.namedBarrierCount;
+    return llvm::AMDGPU::isGFX1250Plus(*sti);
   }
   unsigned postVIOpcode(unsigned pseudoOpcode) const {
     unsigned family = isGfx1250() ? llvm::SIEncodingFamily::GFX1250
@@ -568,12 +636,14 @@ private:
   unsigned sCbranchVccnz() const { return opcodes.sCbranchVccnz; }
   unsigned sCbranchExecz() const { return opcodes.sCbranchExecz; }
   unsigned sGetregB32() const { return opcodes.sGetregB32; }
+  unsigned sSetregImm32B32() const { return opcodes.sSetregImm32B32; }
   unsigned sLoadB32() const { return opcodes.sLoadB32; }
   unsigned sLoadB64() const { return opcodes.sLoadB64; }
   unsigned sLoadB128() const { return opcodes.sLoadB128; }
   unsigned sLoadB256() const { return opcodes.sLoadB256; }
   unsigned sWaitcnt() const { return opcodes.sWaitcnt; }
   unsigned sNop() const { return opcodes.sNop; }
+  unsigned sDelayAlu() const { return postVIOpcode(llvm::AMDGPU::S_DELAY_ALU); }
   unsigned sSleep() const { return opcodes.sSleep; }
   unsigned sSetprio() const { return opcodes.sSetprio; }
   unsigned sSendmsg() const { return opcodes.sSendmsg; }
@@ -582,6 +652,7 @@ private:
   unsigned sSetpcB64() const { return opcodes.sSetpcB64; }
   unsigned vMbcntLo() const { return opcodes.vMbcntLo; }
   unsigned vMbcntHi() const { return opcodes.vMbcntHi; }
+  unsigned vNop() const { return opcodes.vNop; }
   unsigned vMovB32() const { return opcodes.vMovB32; }
   unsigned vMovB64() const { return opcodes.vMovB64; }
   unsigned vCndmaskB32() const { return opcodes.vCndmaskB32; }
@@ -793,6 +864,12 @@ private:
     if (isGfx90APlus())
       return llvm::AMDGPU::BUFFER_STORE_DWORD_OFFEN_gfx90a;
     return opcodes.bufferStoreB32;
+  }
+
+  unsigned globalPrefetchB8() const { return opcodes.globalPrefetchB8; }
+
+  unsigned sSetVgprMsb() const {
+    return postVIOpcode(llvm::AMDGPU::S_SET_VGPR_MSB);
   }
 
   unsigned bufferStoreB8() const {
@@ -1124,7 +1201,48 @@ private:
       os << '\t';
   }
 
+  bool isModeSetreg(const llvm::MCInst &inst) const {
+    if (inst.getOpcode() != sSetregImm32B32())
+      return false;
+    int simm16Index = llvm::AMDGPU::getNamedOperandIdx(
+        inst.getOpcode(), llvm::AMDGPU::OpName::simm16);
+    if (simm16Index < 0 ||
+        static_cast<unsigned>(simm16Index) >= inst.getNumOperands())
+      return false;
+    const llvm::MCOperand &simm16 = inst.getOperand(simm16Index);
+    if (!simm16.isImm())
+      return false;
+    return std::get<0>(llvm::AMDGPU::Hwreg::HwregEncoding::decode(
+               simm16.getImm())) == llvm::AMDGPU::Hwreg::ID_MODE;
+  }
+
+  void finalizeMCBuffer() {
+    if (!hasSetregVGPRMSBFixup())
+      return;
+
+    SmallVector<BufferedMCItem> finalized;
+    const llvm::MCInst *previous = nullptr;
+    for (const BufferedMCItem &item : mcBuffer) {
+      if (const auto *instruction = std::get_if<BufferedMCInstruction>(&item)) {
+        if (previous && isModeSetreg(*previous) &&
+            instruction->inst.getOpcode() == sSetVgprMsb()) {
+          llvm::MCInst nop;
+          nop.setOpcode(sNop());
+          nop.addOperand(llvm::MCOperand::createImm(0));
+          finalized.push_back(BufferedMCInstruction{nop, instruction->origin,
+                                                    instruction->indent});
+        }
+        finalized.push_back(item);
+        previous = &instruction->inst;
+        continue;
+      }
+      finalized.push_back(item);
+    }
+    mcBuffer = std::move(finalized);
+  }
+
   void printMCBuffer() {
+    finalizeMCBuffer();
     for (const BufferedMCItem &item : mcBuffer) {
       if (const auto *instruction = std::get_if<BufferedMCInstruction>(&item)) {
         printIndent(instruction->indent);
@@ -1297,13 +1415,205 @@ private:
     return fallback;
   }
 
+  static KernelEntryValueUsage getKernelEntryValueUsage(func::FuncOp func) {
+    KernelEntryValueUsage usage;
+    func.walk([&](Operation *op) {
+      if (isa<waveamdmachine::SWorkgroupIdXOp>(op))
+        usage.workgroupIdX = true;
+      if (isa<waveamdmachine::SWorkgroupIdYOp>(op))
+        usage.workgroupIdY = true;
+      if (isa<waveamdmachine::SWorkgroupIdZOp>(op))
+        usage.workgroupIdZ = true;
+      if (waveamdmachine::VWorkitemIdXOp workitemX =
+              dyn_cast<waveamdmachine::VWorkitemIdXOp>(op)) {
+        IntegerAttr axis = workitemX->getAttrOfType<IntegerAttr>(
+            wave::getWaveAMDWorkitemIdAxisAttrName());
+        if (axis && axis.getInt() >= 0 && axis.getInt() <= 2)
+          usage.maxWorkitemIdAxis = std::max(
+              usage.maxWorkitemIdAxis, static_cast<unsigned>(axis.getInt()));
+      }
+      if (isa<waveamdmachine::VWorkitemIdYOp>(op))
+        usage.maxWorkitemIdAxis = std::max(usage.maxWorkitemIdAxis, 1u);
+      if (isa<waveamdmachine::VWorkitemIdZOp>(op))
+        usage.maxWorkitemIdAxis = 2;
+    });
+    return usage;
+  }
+
+  FailureOr<unsigned> getKernelSGPRCount(func::FuncOp func) const {
+    FailureOr<unsigned> minimum =
+        wave::getWaveAMDMinReportedSGPRs(func, "wave-to-amdgpu-asm");
+    if (failed(minimum))
+      return failure();
+    return getIntAttr(func, "waveamdmachine.sgpr_count", *minimum);
+  }
+
+  LogicalResult
+  emitKernelEntrySequence(func::FuncOp func,
+                          const wave::WaveAMDKernelEntryRegs &entryRegs) {
+    if (requiresInitialUnclausedVmem()) {
+      if (entryRegs.kernargSegmentPtrWidth != 2)
+        return func.emitError(
+            "wave-to-amdgpu-asm target entry sequence requires an SGPR pair "
+            "kernarg pointer");
+      unsigned kernargPtr = mcSGPRReg(entryRegs.kernargSegmentPtrSGPR,
+                                      entryRegs.kernargSegmentPtrWidth);
+      unsigned workitemX = mcVGPRReg(entryRegs.workitemIdVGPR(0), /*width=*/1);
+      unsigned requiredKernargPtr =
+          llvm::AMDGPU::getMCReg(llvm::AMDGPU::SGPR0_SGPR1, *sti).id();
+      unsigned requiredWorkitemX =
+          llvm::AMDGPU::getMCReg(llvm::AMDGPU::VGPR0, *sti).id();
+      if (kernargPtr != requiredKernargPtr || workitemX != requiredWorkitemX)
+        return func.emitError(
+            "wave-to-amdgpu-asm entry register layout does not satisfy "
+            "target prologue operands");
+      if (failed(emitMC(
+              globalPrefetchB8(),
+              {llvm::MCOperand::createReg(kernargPtr),
+               llvm::MCOperand::createReg(workitemX),
+               llvm::MCOperand::createImm(0),
+               llvm::MCOperand::createImm(llvm::AMDGPU::CPol::SCOPE_SE |
+                                          llvm::AMDGPU::CPol::TH_RT)})) ||
+          failed(emitMC(vNop(), {})))
+        return failure();
+    }
+
+    if (!hasWaitXcnt())
+      return success();
+    unsigned replayMask = llvm::AMDGPU::Hwreg::REPLAY_MODE;
+    unsigned replayOffset = llvm::countr_zero(replayMask);
+    unsigned replayWidth = llvm::popcount(replayMask);
+    unsigned replayEncoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+        llvm::AMDGPU::Hwreg::ID_MODE, replayOffset, replayWidth);
+    return emitMC(sSetregImm32B32(),
+                  {llvm::MCOperand::createImm(1),
+                   llvm::MCOperand::createImm(replayEncoding)});
+  }
+
+  LogicalResult
+  emitArchitectedWorkgroupIdRaw(const wave::WaveAMDKernelEntryRegs &entryRegs,
+                                unsigned axis) {
+    unsigned result = mcSGPRReg(entryRegs.workgroupIdSGPR(axis), /*width=*/1);
+    if (axis == 0) {
+      unsigned ttmp9 = llvm::AMDGPU::getMCReg(llvm::AMDGPU::TTMP9, *sti).id();
+      return emitMC(sMovB32(), {llvm::MCOperand::createReg(result),
+                                llvm::MCOperand::createReg(ttmp9)});
+    }
+
+    unsigned ttmp7 = llvm::AMDGPU::getMCReg(llvm::AMDGPU::TTMP7, *sti).id();
+    constexpr unsigned halfBits = std::numeric_limits<uint16_t>::digits;
+    if (axis == 1)
+      return emitMC(sAndB32(), {llvm::MCOperand::createReg(result),
+                                llvm::MCOperand::createReg(ttmp7),
+                                llvm::MCOperand::createImm(
+                                    std::numeric_limits<uint16_t>::max())});
+    if (axis == 2)
+      return emitMC(sLshrB32(), {llvm::MCOperand::createReg(result),
+                                 llvm::MCOperand::createReg(ttmp7),
+                                 llvm::MCOperand::createImm(halfBits)});
+    return emissionSource->emitError("invalid architected workgroup ID axis");
+  }
+
+  LogicalResult emitSALUCycleDelay() {
+    return emitMC(sDelayAlu(),
+                  {llvm::MCOperand::createImm(
+                      waveamdmachine::encodeSDelayAluSALUCycle(/*cycles=*/1))});
+  }
+
+  LogicalResult
+  emitClusterWorkgroupId(const wave::WaveAMDKernelEntryRegs &entryRegs,
+                         unsigned axis, unsigned temp0, unsigned temp1,
+                         unsigned statusEncoding) {
+    constexpr unsigned clusterFieldBits = 4;
+    constexpr unsigned clusterFieldMask = (unsigned{1} << clusterFieldBits) - 1;
+    unsigned ttmp6 = llvm::AMDGPU::getMCReg(llvm::AMDGPU::TTMP6, *sti).id();
+    unsigned result = mcSGPRReg(entryRegs.workgroupIdSGPR(axis), /*width=*/1);
+    unsigned localShift = axis * clusterFieldBits;
+    unsigned maxShift = (3 + axis) * clusterFieldBits;
+
+    if (failed(emitArchitectedWorkgroupIdRaw(entryRegs, axis)) ||
+        failed(emitMC(sLshrB32(), {llvm::MCOperand::createReg(temp0),
+                                   llvm::MCOperand::createReg(ttmp6),
+                                   llvm::MCOperand::createImm(maxShift)})) ||
+        failed(emitMC(sLshrB32(), {llvm::MCOperand::createReg(temp1),
+                                   llvm::MCOperand::createReg(ttmp6),
+                                   llvm::MCOperand::createImm(localShift)})) ||
+        failed(emitMC(sAndB32(),
+                      {llvm::MCOperand::createReg(temp0),
+                       llvm::MCOperand::createReg(temp0),
+                       llvm::MCOperand::createImm(clusterFieldMask)})) ||
+        failed(emitMC(sAndB32(),
+                      {llvm::MCOperand::createReg(temp1),
+                       llvm::MCOperand::createReg(temp1),
+                       llvm::MCOperand::createImm(clusterFieldMask)})) ||
+        failed(emitMC(sAddI32(), {llvm::MCOperand::createReg(temp0),
+                                  llvm::MCOperand::createReg(temp0),
+                                  llvm::MCOperand::createImm(1)})) ||
+        failed(emitSALUCycleDelay()) ||
+        failed(emitMC(sMulI32(), {llvm::MCOperand::createReg(temp0),
+                                  llvm::MCOperand::createReg(result),
+                                  llvm::MCOperand::createReg(temp0)})) ||
+        failed(emitSALUCycleDelay()) ||
+        failed(emitMC(sAddI32(), {llvm::MCOperand::createReg(temp1),
+                                  llvm::MCOperand::createReg(temp1),
+                                  llvm::MCOperand::createReg(temp0)})) ||
+        failed(emitMC(sGetregB32(),
+                      {llvm::MCOperand::createReg(temp0),
+                       llvm::MCOperand::createImm(statusEncoding)})) ||
+        failed(emitSALUCycleDelay()) ||
+        failed(emitMC(sCmpEqU32(), {llvm::MCOperand::createReg(temp0),
+                                    llvm::MCOperand::createImm(0)})) ||
+        failed(emitMC(sCselectB32(), {llvm::MCOperand::createReg(result),
+                                      llvm::MCOperand::createReg(result),
+                                      llvm::MCOperand::createReg(temp1)})))
+      return failure();
+    return success();
+  }
+
+  LogicalResult
+  emitArchitectedWorkgroupIds(func::FuncOp func,
+                              const wave::WaveAMDKernelEntryRegs &entryRegs) {
+    if (!hasArchitectedSGPRs())
+      return success();
+
+    KernelEntryValueUsage usage = getKernelEntryValueUsage(func);
+    std::array<bool, 3> used = {usage.workgroupIdX, usage.workgroupIdY,
+                                usage.workgroupIdZ};
+    if (!hasClusters()) {
+      for (unsigned axis : llvm::seq<unsigned>(0, 3))
+        if (used[axis] &&
+            failed(emitArchitectedWorkgroupIdRaw(entryRegs, axis)))
+          return failure();
+      return success();
+    }
+
+    constexpr unsigned clusterStatusOffset = 6;
+    constexpr unsigned clusterStatusBits = 4;
+    unsigned statusEncoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+        llvm::AMDGPU::Hwreg::ID_IB_STS2, clusterStatusOffset,
+        clusterStatusBits);
+    unsigned temp0 = mcSGPRReg(entryRegs.reservedSGPRs, /*width=*/1);
+    unsigned temp1 = mcSGPRReg(entryRegs.reservedSGPRs + 1, /*width=*/1);
+    bool emitted = false;
+    // TTMP6: local XYZ nibbles, then max XYZ nibbles.
+    for (unsigned axis : llvm::seq<unsigned>(0, 3)) {
+      if (!used[axis])
+        continue;
+      if (failed(emitClusterWorkgroupId(entryRegs, axis, temp0, temp1,
+                                        statusEncoding)))
+        return failure();
+      emitted = true;
+    }
+    if (emitted)
+      return emitSALUCycleDelay();
+    return success();
+  }
+
   LogicalResult emitFunction(func::FuncOp func) {
     if (!func.getBody().hasOneBlock())
       return func.emitError(
           "WaveAMDMachine AMDGPU emitter supports one-block funcs");
     bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
-    if (isKernel && isGfx1250())
-      return func.emitError("gfx1250 kernel ABI emission is not implemented");
     wave::WaveAMDKernelEntryRegs entryRegs;
     if (isKernel) {
       entryRegs = wave::getWaveAMDKernelEntryRegs(func);
@@ -1347,6 +1657,8 @@ private:
     mcBuffer.clear();
     llvm::SaveAndRestore<bool> saveBuffering(bufferingMC, true);
     llvm::SaveAndRestore<Operation *> saveSource(emissionSource, func);
+    if (isKernel && failed(emitKernelEntrySequence(func, entryRegs)))
+      return failure();
     if (emitPreloadCompatProlog) {
       std::string realEntryLabel = funcLabelPrefix + ".kernarg_preload_entry";
       if (failed(emitKernargPreloadCompatProlog(entryRegs, realEntryLabel)))
@@ -1354,6 +1666,8 @@ private:
       emitAlign(8);
       emitLabel(realEntryLabel);
     }
+    if (isKernel && failed(emitArchitectedWorkgroupIds(func, entryRegs)))
+      return failure();
     emitLine(
         StringRef("; wave backend: WaveAMDMachine MLIR pipeline finalized"));
 
@@ -1368,13 +1682,23 @@ private:
     }
 
     printMCBuffer();
-    os << "\t.size\t" << func.getSymName() << ", .-" << func.getSymName()
-       << "\n";
+    if (isKernel && supportsDescriptorRoundRobin()) {
+      std::string functionEndLabel = funcLabelPrefix + ".end";
+      os << functionEndLabel << ":\n";
+      os << "\t.size\t" << func.getSymName() << ", " << functionEndLabel << "-"
+         << func.getSymName() << "\n";
+    } else {
+      os << "\t.size\t" << func.getSymName() << ", .-" << func.getSymName()
+         << "\n";
+    }
     if (isKernel) {
       KernelInfo info;
       info.name = func.getSymName().str();
       info.kernargSize = getKernelArgSize(func);
-      info.sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
+      FailureOr<unsigned> sgprCount = getKernelSGPRCount(func);
+      if (failed(sgprCount))
+        return failure();
+      info.sgprCount = *sgprCount;
       KernelRegisterUsage regUsage = getKernelRegisterUsage(func);
       info.agprCount = regUsage.agprCount;
       info.vgprCount = getTotalVGPRCount(regUsage.vgprCount, info.agprCount);
@@ -1498,7 +1822,8 @@ private:
             noteRegisterUsage(arg, usage);
       return WalkResult::advance();
     });
-    usage.vgprCount = std::max(usage.vgprCount, 1u);
+    usage.vgprCount =
+        std::max(usage.vgprCount, wave::getWaveAMDMinReportedVGPRs(func));
     return usage;
   }
 
@@ -1597,10 +1922,23 @@ private:
       return func.emitError("wave-to-amdgpu-asm kernarg preload consumes ")
              << entryRegs.userSGPRCount << " user SGPRs, but target supports "
              << maxUserSGPRs;
+    constexpr unsigned preloadOffsetWidth =
+        llvm::amdhsa::KERNARG_PRELOAD_SPEC_OFFSET_WIDTH;
     if (entryRegs.kernargPreloadDwords != 0 &&
-        entryRegs.kernargPreloadOffsetDwords >= 512)
+        !llvm::isUInt<preloadOffsetWidth>(entryRegs.kernargPreloadOffsetDwords))
       return func.emitError("wave-to-amdgpu-asm kernarg preload offset must be "
-                            "less than 512 dwords");
+                            "less than ")
+             << (uint64_t{1} << preloadOffsetWidth) << " dwords";
+    FailureOr<unsigned> minSGPRCount =
+        wave::getWaveAMDMinReportedSGPRs(func, "wave-to-amdgpu-asm");
+    if (failed(minSGPRCount))
+      return failure();
+    unsigned sgprCount =
+        getIntAttr(func, "waveamdmachine.sgpr_count", *minSGPRCount);
+    if (sgprCount < *minSGPRCount)
+      return func.emitError("wave-to-amdgpu-asm sgpr_count ")
+             << sgprCount << " does not cover kernel ABI register count "
+             << *minSGPRCount;
     FailureOr<unsigned> privateSegmentFixedSize =
         getPrivateSegmentFixedSize(func);
     if (failed(privateSegmentFixedSize))
@@ -1666,7 +2004,9 @@ private:
 
   LogicalResult emitKernelDescriptor(func::FuncOp func) {
     unsigned kernargSize = getKernelArgSize(func);
-    unsigned sgprCount = getIntAttr(func, "waveamdmachine.sgpr_count", 6);
+    FailureOr<unsigned> sgprCount = getKernelSGPRCount(func);
+    if (failed(sgprCount))
+      return failure();
     KernelRegisterUsage regUsage = getKernelRegisterUsage(func);
     unsigned vgprCount = regUsage.vgprCount;
     unsigned agprCount = regUsage.agprCount;
@@ -1682,29 +2022,11 @@ private:
     if (failed(privateSegmentFixedSize))
       return failure();
     bool usesFlatScratch = getBoolAttr(func, kUsesFlatScratchAttr, false);
-    bool usesWgY = false;
-    bool usesWgZ = false;
-    unsigned maxWorkitemIdAxis = 0;
+    KernelEntryValueUsage entryUsage = getKernelEntryValueUsage(func);
+    bool usesWgY = entryUsage.workgroupIdY;
+    bool usesWgZ = entryUsage.workgroupIdZ;
     wave::WaveAMDKernelEntryRegs entryRegs =
         wave::getWaveAMDKernelEntryRegs(func);
-    func.walk([&](Operation *op) {
-      if (isa<waveamdmachine::SWorkgroupIdYOp>(op))
-        usesWgY = true;
-      if (isa<waveamdmachine::SWorkgroupIdZOp>(op))
-        usesWgZ = true;
-      if (waveamdmachine::VWorkitemIdXOp workitemX =
-              dyn_cast<waveamdmachine::VWorkitemIdXOp>(op)) {
-        IntegerAttr axis = workitemX->getAttrOfType<IntegerAttr>(
-            wave::getWaveAMDWorkitemIdAxisAttrName());
-        if (axis && axis.getInt() >= 0 && axis.getInt() <= 2)
-          maxWorkitemIdAxis =
-              std::max(maxWorkitemIdAxis, static_cast<unsigned>(axis.getInt()));
-      }
-      if (isa<waveamdmachine::VWorkitemIdYOp>(op))
-        maxWorkitemIdAxis = std::max(maxWorkitemIdAxis, 1u);
-      if (isa<waveamdmachine::VWorkitemIdZOp>(op))
-        maxWorkitemIdAxis = 2;
-    });
     if (failed(verifyKernelDescriptor(func, entryRegs)))
       return failure();
 
@@ -1738,27 +2060,40 @@ private:
     os << "\t\t.amdhsa_system_sgpr_workgroup_id_z " << (usesWgZ ? 1 : 0)
        << "\n";
     os << "\t\t.amdhsa_system_sgpr_workgroup_info 0\n";
-    os << "\t\t.amdhsa_system_vgpr_workitem_id " << maxWorkitemIdAxis << "\n";
+    os << "\t\t.amdhsa_system_vgpr_workitem_id " << entryUsage.maxWorkitemIdAxis
+       << "\n";
     os << "\t\t.amdhsa_next_free_vgpr " << totalVGPRCount << "\n";
-    os << "\t\t.amdhsa_next_free_sgpr " << sgprCount << "\n";
+    os << "\t\t.amdhsa_next_free_sgpr " << *sgprCount << "\n";
     if (isGfx90APlus()) {
       unsigned accumOffset = alignUp(std::max(vgprCount, 1u), 4);
       os << "\t\t.amdhsa_accum_offset " << accumOffset << "\n";
     }
+    if (supportsDescriptorNamedBarrierCount())
+      os << "\t\t.amdhsa_named_barrier_count 0\n";
     os << "\t\t.amdhsa_reserve_vcc " << (reserveVCC ? 1 : 0) << "\n";
     os << "\t\t.amdhsa_float_round_mode_32 0\n";
     os << "\t\t.amdhsa_float_round_mode_16_64 0\n";
     os << "\t\t.amdhsa_float_denorm_mode_32 3\n";
     os << "\t\t.amdhsa_float_denorm_mode_16_64 3\n";
-    os << "\t\t.amdhsa_dx10_clamp 1\n";
-    os << "\t\t.amdhsa_ieee_mode 1\n";
+    if (supportsDescriptorDX10AndIEEE()) {
+      os << "\t\t.amdhsa_dx10_clamp 1\n";
+      os << "\t\t.amdhsa_ieee_mode 1\n";
+    }
     os << "\t\t.amdhsa_fp16_overflow 0\n";
     if (!isGfx8Or9()) {
-      os << "\t\t.amdhsa_workgroup_processor_mode 1\n";
+      if (supportsDescriptorWGPMode())
+        os << "\t\t.amdhsa_workgroup_processor_mode 1\n";
       os << "\t\t.amdhsa_memory_ordered 1\n";
       os << "\t\t.amdhsa_forward_progress 1\n";
-      os << "\t\t.amdhsa_shared_vgpr_count 0\n";
-      os << "\t\t.amdhsa_inst_pref_size 1\n";
+      if (supportsDescriptorSharedVGPRCount())
+        os << "\t\t.amdhsa_shared_vgpr_count 0\n";
+      if (supportsDescriptorRoundRobin()) {
+        os << "\t\t.amdhsa_inst_pref_size instprefsize(" << funcLabelPrefix
+           << ".end-" << func.getSymName() << ")\n";
+        os << "\t\t.amdhsa_round_robin_scheduling 0\n";
+      } else {
+        os << "\t\t.amdhsa_inst_pref_size 1\n";
+      }
     }
     os << "\t.end_amdhsa_kernel\n";
     os << "\t.text\n";
@@ -1766,7 +2101,7 @@ private:
        << "\n";
     os << "\t.set .L" << func.getSymName() << ".num_agpr, " << agprCount
        << "\n";
-    os << "\t.set .L" << func.getSymName() << ".numbered_sgpr, " << sgprCount
+    os << "\t.set .L" << func.getSymName() << ".numbered_sgpr, " << *sgprCount
        << "\n";
     os << "\t.set .L" << func.getSymName() << ".num_named_barrier, 0\n";
     os << "\t.set .L" << func.getSymName() << ".private_seg_size, "
@@ -1829,7 +2164,8 @@ private:
         os << "    .agpr_count:     " << kernel.agprCount << "\n";
       os << "    .vgpr_spill_count: " << kernel.vgprSpillCount << "\n";
       os << "    .wavefront_size: " << wavefrontSize << "\n";
-      os << "    .workgroup_processor_mode: 1\n";
+      if (supportsMetadataWGPMode())
+        os << "    .workgroup_processor_mode: 1\n";
       for (const KernelMetadataEntryInfo &entry : kernel.metadataEntries)
         os << "    " << entry.name << ": " << entry.value << "\n";
     }
@@ -2158,7 +2494,8 @@ private:
                << reg.id() << " for " << mcii->getName(opcode) << " operand "
                << index;
       const llvm::MCRegisterClass &regClass = mri->getRegClass(regClassId);
-      if (regClass.contains(reg))
+      if (regClass.contains(reg) ||
+          regClass.contains(llvm::AMDGPU::mc2PseudoReg(reg)))
         continue;
       return emissionSource->emitError("LLVM MC register-class mismatch for ")
              << mcii->getName(opcode) << " operand " << index << ": "
@@ -3922,14 +4259,13 @@ private:
       if (!immediate ||
           immediate.getValue() > std::numeric_limits<uint16_t>::max())
         return op.emitError("s_set_vgpr_msb immediate must fit u16");
-      return emitMC(postVIOpcode(llvm::AMDGPU::S_SET_VGPR_MSB),
+      return emitMC(sSetVgprMsb(),
                     {llvm::MCOperand::createImm(immediate.getValue())});
     }
     if (isa<waveamdmachine::SDelayAluOp>(op)) {
       if (isGfx8Or9())
         return success();
-      return emitMCValues(postVIOpcode(llvm::AMDGPU::S_DELAY_ALU),
-                          op.getOperands());
+      return emitMCValues(sDelayAlu(), op.getOperands());
     }
     if (isa<waveamdmachine::SAndSaveexecB32Op>(op)) {
       if (isGfx8Or9()) {

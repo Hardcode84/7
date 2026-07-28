@@ -66,6 +66,9 @@ LogicalResult verifyWaveAMDKernargPreloadRuntimeSupport(func::FuncOp func,
                                                         StringRef consumer);
 unsigned getWaveAMDReservedSGPRs(func::FuncOp func);
 unsigned getWaveAMDReservedVGPRs(func::FuncOp func);
+FailureOr<unsigned> getWaveAMDMinReportedSGPRs(func::FuncOp func,
+                                               StringRef consumer);
+unsigned getWaveAMDMinReportedVGPRs(func::FuncOp func);
 std::string getWaveAMDSGPRName(unsigned index, unsigned width);
 
 } // namespace wave

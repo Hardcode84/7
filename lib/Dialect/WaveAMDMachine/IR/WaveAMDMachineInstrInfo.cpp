@@ -92,6 +92,15 @@ mlir::waveamdmachine::getConstantBusLimit(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major >= 10 ? 2 : 1;
 }
 
+unsigned mlir::waveamdmachine::encodeSDelayAluVALU(unsigned dependency) {
+  return dependency;
+}
+
+unsigned mlir::waveamdmachine::encodeSDelayAluSALUCycle(unsigned cycles) {
+  // LLVM keeps this MC encoding private to AMDGPUInsertDelayAlu.
+  return cycles + 8;
+}
+
 static bool isGfx8Or9(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 8 || isa.Major == 9;
 }

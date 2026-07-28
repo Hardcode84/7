@@ -4,13 +4,8 @@
 
 Proposed.
 
-Source baseline checked 2026-07-28:
-
-- Wave: `810b1188a6e21353d1ea1e95cd5ab667c72b71f8`
-- pinned LLVM: `30bff76d3a294fe0882a05472234b25bb752b16a`
-
-Audited high-VGPR implementation and tests match latest public LLVM sources as
-of the check date.
+LLVM source check: 2026-07-28. Audited high-VGPR implementation and tests match
+public LLVM sources as of that date.
 
 LLVM already owns gfx1250 target parsing, encodings, ELF identity, instruction
 descriptions, intrinsics, descriptor fields, wait instructions, and schedule
@@ -100,16 +95,19 @@ LLVM source is the executable specification:
 - `llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`
 - `llvm/docs/AMDGPUUsage.rst`
 
-Pinned LLVM source:
+Public LLVM source:
 
-- [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/GCNProcessors.td)
-- [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/AMDGPU.td)
-- [schedule model](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SISchedule.td)
-- [wait-counter implementation](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
-- [high-VGPR lowering](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp)
-- [VGPR register classes](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SIRegisterInfo.td)
-- [high-VGPR assembly printing](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUInstPrinter.cpp)
-- [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/docs/AMDGPUUsage.rst)
+- [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/GCNProcessors.td)
+- [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPU.td)
+- [schedule model](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SISchedule.td)
+- [wait-counter implementation](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
+- [high-VGPR lowering](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp)
+- [VGPR register classes](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIRegisterInfo.td)
+- [high-VGPR assembly printing](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUInstPrinter.cpp)
+- [architected workgroup-ID lowering](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIISelLowering.cpp)
+- [SALU delay insertion](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPUInsertDelayAlu.cpp)
+- [gfx1250 descriptor reference](https://github.com/llvm/llvm-project/blob/main/llvm/test/tools/llvm-objdump/ELF/AMDGPU/kd-gfx1250.s)
+- [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/main/llvm/docs/AMDGPUUsage.rst)
 
 No public gfx1250 ISA manual was found. Every encoded instruction therefore
 needs LLVM MC assembly and disassembly coverage. Hardware tests remain the
@@ -346,6 +344,18 @@ The startup `global_prefetch_b8 ... scope:SCOPE_SE` plus `v_nop` sequence used
 by current gfx1250 code generation is a target workaround. Model it as an
 entry-sequence capability and emit it through MCInst before user instructions.
 Keep its reserved input registers visible to entry-register accounting.
+Targets with LLVM's wait-xcnt feature also set replay mode through LLVM's
+HWREG encoding.
+
+Architected workgroup IDs need explicit Wave ABI materialization: X from
+TTMP9, Y from TTMP7 low half, Z from TTMP7 high half. Cluster-capable targets
+reconstruct grid workgroup IDs from TTMP6 local/max fields, then use LLVM's
+IB_STS2 encoding to select raw IDs when clustered dispatch is disabled. Count
+the two entry temporaries in SGPR metadata; regalloc may reuse them after the
+prelude.
+
+Entry materialization runs after Wave hazard repair. Its dependent SALU chains
+must emit `s_delay_alu` themselves, including the final ID-to-kernel-body edge.
 
 Validation is object-level:
 

@@ -277,6 +277,9 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
       llvm::AMDGPU::hasArchitectedFlatScratch(sti);
   capabilities.kernelDescriptor.architectedPrivateSegment =
       capabilities.architectedFlatScratch;
+  capabilities.architectedSGPRs =
+      sti.hasFeature(llvm::AMDGPU::FeatureArchitectedSGPRs);
+  capabilities.clusters = sti.hasFeature(llvm::AMDGPU::FeatureClusters);
   capabilities.waitCounterFamily = llvm::AMDGPU::isGFX12Plus(sti)
                                        ? WaitCounterFamily::Gfx12Split
                                        : WaitCounterFamily::Legacy;
@@ -285,6 +288,9 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
           ? MatrixFamily::Gfx1251
           : MatrixFamily::Gfx1250;
   capabilities.kernargPreload = llvm::AMDGPU::hasKernargPreload(sti);
+  capabilities.requiresInitialUnclausedVmem =
+      sti.hasFeature(llvm::AMDGPU::FeatureRequiresInitialUnclausedVmem);
+  capabilities.waitXcnt = sti.hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
   capabilities.vgprWindowing =
       sti.hasFeature(llvm::AMDGPU::Feature1024AddressableVGPRs);
   capabilities.setregVGPRMSBFixup =

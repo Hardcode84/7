@@ -68,7 +68,11 @@ struct AMDGPUTargetCapabilities {
   bool supportsWave32 = false;
   bool supportsWave64 = false;
   bool architectedFlatScratch = false;
+  bool architectedSGPRs = false;
+  bool clusters = false;
   bool kernargPreload = false;
+  bool requiresInitialUnclausedVmem = false;
+  bool waitXcnt = false;
   bool vgprWindowing = false;
   bool setregVGPRMSBFixup = false;
 };

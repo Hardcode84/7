@@ -59,14 +59,6 @@ static void clearModuleResourceAttrs(ModuleOp mod) {
   mod->removeAttr("waveamdmachine.private_segment_fixed_size_max");
 }
 
-static unsigned getMinReportedSGPRs(func::FuncOp func) {
-  return std::max(1u, wave::getWaveAMDReservedSGPRs(func) + 1);
-}
-
-static unsigned getMinReportedVGPRs(func::FuncOp func) {
-  return std::max(1u, wave::getWaveAMDReservedVGPRs(func));
-}
-
 static FailureOr<int64_t> getLDSAttr(func::FuncOp func, StringRef name) {
   IntegerAttr attr = func->getAttrOfType<IntegerAttr>(name);
   if (!attr)
@@ -207,14 +199,22 @@ struct WaveAMDResourceInfoPass
     }
   }
 
-  MaxRegs collectMaxRegs(func::FuncOp func, bool &failed) {
+  MaxRegs collectMaxRegs(func::FuncOp func, bool &scanFailed) {
     MaxRegs out{wave::getWaveAMDReservedSGPRs(func),
                 wave::getWaveAMDReservedVGPRs(func), 0};
     for (Operation &op : func.getBody().front()) {
-      scanOp(op, out, failed);
-      if (failed)
+      scanOp(op, out, scanFailed);
+      if (scanFailed)
         return out;
     }
+    FailureOr<unsigned> minReportedSGPRs =
+        wave::getWaveAMDMinReportedSGPRs(func, "waveamd-resource-info");
+    if (failed(minReportedSGPRs)) {
+      scanFailed = true;
+      return out;
+    }
+    out.sgpr = std::max(out.sgpr, *minReportedSGPRs);
+    out.vgpr = std::max(out.vgpr, wave::getWaveAMDMinReportedVGPRs(func));
     return out;
   }
 
@@ -246,8 +246,8 @@ struct WaveAMDResourceInfoPass
       if (scanFailed)
         return signalPassFailure();
       bool isKernel = func->hasAttr(wave::WaveDialect::getKernelAttrName());
-      unsigned sgprCount = std::max(regs.sgpr, getMinReportedSGPRs(func));
-      unsigned vgprCount = std::max(regs.vgpr, getMinReportedVGPRs(func));
+      unsigned sgprCount = regs.sgpr;
+      unsigned vgprCount = regs.vgpr;
       unsigned agprCount = regs.agpr;
       sgprCount = wave::getWaveAMDExecIfReservedSGPRCount(func, sgprCount);
       func->setAttr("waveamdmachine.sgpr_count",

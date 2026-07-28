@@ -62,8 +62,14 @@ static void printCapabilities(const AMDGPUTargetCapabilities &capabilities) {
                << stringifyMatrixFamily(capabilities.matrixFamily) << '\n';
   llvm::outs() << "architected_flat_scratch: "
                << boolString(capabilities.architectedFlatScratch) << '\n';
+  llvm::outs() << "architected_sgprs: "
+               << boolString(capabilities.architectedSGPRs) << '\n';
+  llvm::outs() << "clusters: " << boolString(capabilities.clusters) << '\n';
   llvm::outs() << "kernarg_preload: " << boolString(capabilities.kernargPreload)
                << '\n';
+  llvm::outs() << "requires_initial_unclaused_vmem: "
+               << boolString(capabilities.requiresInitialUnclausedVmem) << '\n';
+  llvm::outs() << "wait_xcnt: " << boolString(capabilities.waitXcnt) << '\n';
   llvm::outs() << "vgpr_windowing: " << boolString(capabilities.vgprWindowing)
                << '\n';
   llvm::outs() << "setreg_vgpr_msb_fixup: "

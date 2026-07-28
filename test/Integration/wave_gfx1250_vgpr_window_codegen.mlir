@@ -15,17 +15,23 @@ module attributes {
 } {
 
 // ASM-LABEL: explicit_vgpr_window_codegen:
+// ASM: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// ASM-NEXT: v_nop
+// ASM-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // ASM: windowed:
-// ASM: s_set_vgpr_msb 0xf9
+// ASM-NEXT: s_nop 0
+// ASM-NEXT: s_set_vgpr_msb 0xf9
 // ASM: v_fma_f32 v255 /*v1023*/, v44 /*v300*/, v44 /*v556*/, v44 /*v812*/
 // ASM: s_set_vgpr_msb 0xf900
 // ASM: s_endpgm
-// DIS-LABEL: <windowed>:
-// DIS: s_set_vgpr_msb 0xf9
+// DIS-LABEL: <explicit_vgpr_window_codegen>:
+// DIS: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
+// DIS: s_nop 0
+// DIS-NEXT: s_set_vgpr_msb 0xf9
 // DIS: v_fma_f32 v255 /*v1023*/, v44 /*v300*/, v44 /*v556*/, v44 /*v812*/
 // DIS: s_set_vgpr_msb 0xf900
 // DIS: s_endpgm
-func.func @explicit_vgpr_window_codegen() {
+func.func @explicit_vgpr_window_codegen() attributes {wave.kernel} {
   %src0 = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 1, 300>
   %src1 = waveamdmachine.uninit
