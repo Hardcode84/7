@@ -33,6 +33,9 @@ int main(int argc, char **argv) {
       +[](mlir::MLIRContext *ctx, mlir::transform::TransformDialect *dialect) {
         (void)dialect;
         ctx->getOrLoadDialect<mlir::wave::WaveDialect>();
+        ctx->getOrLoadDialect<mlir::waveamd::WaveAMDDialect>();
+        ctx->getOrLoadDialect<mlir::wavemeta::WaveMetaDialect>();
+        ctx->getOrLoadDialect<mlir::waveamdmachine::WaveAMDMachineDialect>();
       });
   mlir::wave::registerWavePasses();
   mlir::wave::registerConvertWaveToLLVMInterface(registry);
