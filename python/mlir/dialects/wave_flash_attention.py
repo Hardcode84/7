@@ -765,7 +765,6 @@ def _pipeline_phase_bulk(
     dsl.Value,
     dsl.Value,
 ]:
-    v_reuse = _stage_end(bld, current_v_free)
     current_v_ready = _issue_operand(
         bld,
         cfg,
@@ -775,13 +774,14 @@ def _pipeline_phase_bulk(
         workitem,
         workitem_first,
         tile,
-        v_reuse,
+        current_v_free,
         name=f"{name}_v",
     )
     k_access = _stage_end(bld, current_k_ready)
     k_fragments, k_tokens = _load_k_tile(
         bld, types, current_lds.k, workitem, after=k_access
     )
+    v_operands_ready = _stage_end(bld, *k_tokens)
     scores = _score_tiles(bld, types, q_fragments, k_fragments)
     probabilities: list[tuple[dsl.Value, ...]] = []
     next_states: list[_AttentionState] = []
@@ -792,7 +792,7 @@ def _pipeline_phase_bulk(
         probabilities.append(group_probabilities)
         next_states.append(state)
     states = tuple(next_states)
-    v_operands_ready = _stage_end(bld, *k_tokens)
+    bld.sched_barrier()
     next_k_ready = v_operands_ready
     if prefetch_tile is not None:
         next_k_ready = _issue_operand(
@@ -811,6 +811,7 @@ def _pipeline_phase_bulk(
     v_fragments, v_tokens = _load_v_tile(
         bld, types, previous_lds.v, workitem, after=v_access
     )
+    v_done = _stage_end(bld, *v_tokens)
     outputs = _pv_tiles_mfma_range(
         bld,
         tuple(probabilities),
@@ -860,7 +861,7 @@ def _pipeline_phase_bulk(
         tuple(next_states),
         next_k_ready,
         current_v_ready,
-        _join(bld, v_tokens),
+        v_done,
     )
 
 

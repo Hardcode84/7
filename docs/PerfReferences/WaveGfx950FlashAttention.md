@@ -9,15 +9,18 @@ The current golden is
 `test/PerfGolden/Inputs/gfx950-fa-b2-h64-n8192-d128-bf16-8wave.s`:
 
 - SHA-256:
-  `7a4dad19ede679feefc425fa7ce7f6c4b5d1864eeda457d7d620d33f3db42065`
+  `00c84ecc0641e0d705ec7b10c5caa59b0f12221e42c0ee29da8a8016b609f9b5`
 - 256 VGPR, 24 SGPR, no scratch
 - 68,096 bytes dynamic LDS; fixed group segment size remains zero
 - 192 BF16 MFMA instructions, 288 LDS reads, 28 DMA-to-LDS loads
 - 90 packed FP32 adds replace 180 scalar FP32 adds
 
 Current codegen, assembly, linking, and deterministic PerfGolden checks pass.
-Random correctness and timing need gfx950. The available host is gfx1100, so no
-current-tree TFLOP/s result is claimed.
+Three random seeds pass with maximum absolute error below `1.62e-4`. On an
+otherwise idle gfx950, a seven-sample matched A-B-A run measured the current
+assembly at 970.8 TFLOP/s versus 860.9 and 864.3 TFLOP/s for the prior
+assembly. DMA completion and LDS-read completion use separate workgroup
+rendezvous.
 
 Run the checked sweep on gfx950:
 
