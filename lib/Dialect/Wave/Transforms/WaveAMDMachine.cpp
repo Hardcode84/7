@@ -5005,6 +5005,53 @@ trySelectPackedF16ExtractToF32Cast(WaveAMDMachineSelector &S, CastOp op,
       S.builder, op.getLoc(), vgprType, word, S.builder.getI64IntegerAttr(5)));
 }
 
+static LogicalResult selectScalarF32ToBF16Cast(WaveAMDMachineSelector &S,
+                                               CastOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "scalar f32 to bf16 lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::VCvtPkBF16F32Op::isSupportedOnIsa(*isa))
+    return op.emitError("v_cvt_pk_bf16_f32 unsupported on target");
+  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  Value source =
+      S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
+  S.values[op.getResult()] = waveamdmachine::VCvtPkBF16F32Op::create(
+      S.builder, op.getLoc(), vgprType, source,
+      createUninitVGPR1(S, op.getLoc()));
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectScalarF16ToF32Cast(WaveAMDMachineSelector &S,
+                                              CastOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "scalar f16 to f32 lowering");
+  if (failed(isa))
+    return failure();
+  FailureOr<std::optional<Value>> packedExtract =
+      trySelectPackedF16ExtractToF32Cast(S, op, *isa);
+  if (failed(packedExtract))
+    return failure();
+  if (*packedExtract)
+    S.values[op.getResult()] = **packedExtract;
+  else {
+    Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+    Value source =
+        S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
+    S.values[op.getResult()] =
+        supportsF16ToF32HalfSelect(*isa)
+            ? waveamdmachine::VCvtF32F16E32Op::create(S.builder, op.getLoc(),
+                                                      vgprType, source)
+                  .getResult()
+            : waveamdmachine::VCvtF32F16Op::create(S.builder, op.getLoc(),
+                                                   vgprType, source)
+                  .getResult();
+  }
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
 static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
                                            Type sourceElement,
                                            Type resultElement,
@@ -5013,8 +5060,8 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
     return op.emitError(
         "WaveAMDMachine fpconvert lowering supports only rne rounding");
 
-  Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
   if (sourceElement.isF32() && resultElement.isF16()) {
+    Type vgprType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
     Value source =
         S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
     S.values[op.getResult()] = waveamdmachine::VCvtF16F32Op::create(
@@ -5022,34 +5069,13 @@ static LogicalResult selectScalarFpConvert(WaveAMDMachineSelector &S, CastOp op,
     S.eraseIfTopLevel(op);
     return success();
   }
-  if (sourceElement.isF16() && resultElement.isF32()) {
-    FailureOr<llvm::AMDGPU::IsaVersion> isa =
-        getTargetIsaVersion(op, "scalar f16 to f32 lowering");
-    if (failed(isa))
-      return failure();
-    FailureOr<std::optional<Value>> packedExtract =
-        trySelectPackedF16ExtractToF32Cast(S, op, *isa);
-    if (failed(packedExtract))
-      return failure();
-    if (*packedExtract)
-      S.values[op.getResult()] = **packedExtract;
-    else {
-      Value source =
-          S.ensureVGPRForVSrc1(op.getLoc(), S.expect(op.getSource(), op));
-      S.values[op.getResult()] =
-          supportsF16ToF32HalfSelect(*isa)
-              ? waveamdmachine::VCvtF32F16E32Op::create(S.builder, op.getLoc(),
-                                                        vgprType, source)
-                    .getResult()
-              : waveamdmachine::VCvtF32F16Op::create(S.builder, op.getLoc(),
-                                                     vgprType, source)
-                    .getResult();
-    }
-    S.eraseIfTopLevel(op);
-    return success();
-  }
+  if (sourceElement.isF32() && resultElement.isBF16())
+    return selectScalarF32ToBF16Cast(S, op);
+  if (sourceElement.isF16() && resultElement.isF32())
+    return selectScalarF16ToF32Cast(S, op);
   return op.emitError(
-      "WaveAMDMachine fpconvert lowering supports only f32/f16 SIMD, "
+      "WaveAMDMachine fpconvert lowering supports only f32 to f16/bf16 SIMD, "
+      "f16 to f32 SIMD, "
       "vector<2^nxf32> to vector<2^nxf16> SIMD, or vector<2^nxf32> to "
       "vector<2^nxbf16> SIMD");
 }
