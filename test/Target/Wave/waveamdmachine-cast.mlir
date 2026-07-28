@@ -62,6 +62,13 @@ func.func @cast_f16_to_f32_gfx950(%x: !wave.simd<f16, 64>) attributes {wave.kern
   return
 }
 
+// SELECT-LABEL: func.func @cast_f32_to_bf16_gfx950
+// SELECT: waveamdmachine.v_cvt_pk_bf16_f32 {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+func.func @cast_f32_to_bf16_gfx950(%x: !wave.simd<f32, 64>) attributes {wave.kernel} {
+  %f = wave.cast fpconvert %x : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  return
+}
+
 }
 
 // -----
