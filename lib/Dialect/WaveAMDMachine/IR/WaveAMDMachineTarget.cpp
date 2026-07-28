@@ -195,7 +195,8 @@ mlir::waveamdmachine::createAMDGPUMCSubtargetInfo(Operation *op,
   return sti;
 }
 
-static unsigned getLocalMemoryBankCount(const llvm::MCSubtargetInfo &sti) {
+unsigned mlir::waveamdmachine::getAMDGPULocalMemoryBankCount(
+    const llvm::MCSubtargetInfo &sti) {
   // MC exposes LDS bank count through feature bits only.
   if (sti.hasFeature(llvm::AMDGPU::FeatureLDSBankCount32))
     return 32;
@@ -246,8 +247,8 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
   capabilities.supportsWave64 =
       capabilities.defaultWavefrontSize == 64 || supportsAlternateWaveSize;
   capabilities.addressableSGPRs = llvm::AMDGPU::getAddressableNumSGPRs(kind);
-  capabilities.addressableVGPRs = llvm::AMDGPU::IsaInfo::getAddressableNumVGPRs(
-      sti, /*DynamicVGPRBlockSize=*/0);
+  capabilities.addressableVGPRs =
+      llvm::AMDGPU::IsaInfo::getAddressableNumArchVGPRs(sti);
   capabilities.addressableAGPRs = getAMDGPUAddressableAGPRs(sti);
   capabilities.vgprAllocationGranule =
       llvm::AMDGPU::IsaInfo::getVGPRAllocGranule(sti,
@@ -257,7 +258,7 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
       llvm::AMDGPU::IsaInfo::getLocalMemorySize(sti);
   capabilities.addressableLocalMemoryBytes =
       llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(sti);
-  capabilities.localMemoryBankCount = getLocalMemoryBankCount(sti);
+  capabilities.localMemoryBankCount = getAMDGPULocalMemoryBankCount(sti);
   capabilities.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(sti);
   capabilities.maxUserSGPRs = llvm::AMDGPU::getMaxNumUserSGPRs(sti);
   if (sti.hasFeature(llvm::AMDGPU::Feature45BitNumRecordsBufferResource)) {

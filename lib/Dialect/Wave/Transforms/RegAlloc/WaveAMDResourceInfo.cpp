@@ -147,19 +147,13 @@ static int64_t collectPrivateSegmentBytes(func::FuncOp func,
 
 struct WaveAMDResourceInfoPass
     : public wave::impl::WaveAMDResourceInfoBase<WaveAMDResourceInfoPass> {
-  // Walk a kernel func's allocated WaveAMDMachine register results and
-  // return the highest end-of-register for each class. Sets `failed` if
-  // any result still has an unallocated `-1` index.
   struct MaxRegs {
     unsigned sgpr;
     unsigned vgpr;
     unsigned agpr;
   };
-  // Update `out` with the high-water mark of a single result's
-  // register footprint. Returns true on a hard error (unallocated
-  // index) so the caller can short-circuit the walk.
-  bool scanResult(Operation &op, Value result, MaxRegs &out) {
-    auto regType = dyn_cast<waveamdmachine::RegType>(result.getType());
+  bool scanValue(Operation &op, Value value, MaxRegs &out) {
+    auto regType = dyn_cast<waveamdmachine::RegType>(value.getType());
     if (!regType)
       return false;
     // Hardware flags are single global resources; no physical numbering.
@@ -168,7 +162,7 @@ struct WaveAMDResourceInfoPass
       return false;
     int64_t index = regType.getIndex();
     if (index < 0) {
-      op.emitError("waveamd-resource-info requires allocated register results");
+      op.emitError("waveamd-resource-info requires allocated register values");
       return true;
     }
     unsigned end = index + regType.getWidth();
@@ -183,13 +177,19 @@ struct WaveAMDResourceInfoPass
 
   void scanOp(Operation &op, MaxRegs &out, bool &failed) {
     for (Value result : op.getResults()) {
-      if (scanResult(op, result, out)) {
+      if (scanValue(op, result, out)) {
         failed = true;
         return;
       }
     }
     for (Region &region : op.getRegions()) {
       for (Block &block : region) {
+        for (BlockArgument arg : block.getArguments()) {
+          if (scanValue(op, arg, out)) {
+            failed = true;
+            return;
+          }
+        }
         for (Operation &nested : block) {
           scanOp(nested, out, failed);
           if (failed)
@@ -202,10 +202,18 @@ struct WaveAMDResourceInfoPass
   MaxRegs collectMaxRegs(func::FuncOp func, bool &scanFailed) {
     MaxRegs out{wave::getWaveAMDReservedSGPRs(func),
                 wave::getWaveAMDReservedVGPRs(func), 0};
-    for (Operation &op : func.getBody().front()) {
-      scanOp(op, out, scanFailed);
-      if (scanFailed)
-        return out;
+    for (Block &block : func.getBody()) {
+      for (BlockArgument arg : block.getArguments()) {
+        if (scanValue(*func, arg, out)) {
+          scanFailed = true;
+          return out;
+        }
+      }
+      for (Operation &op : block) {
+        scanOp(op, out, scanFailed);
+        if (scanFailed)
+          return out;
+      }
     }
     FailureOr<unsigned> minReportedSGPRs =
         wave::getWaveAMDMinReportedSGPRs(func, "waveamd-resource-info");

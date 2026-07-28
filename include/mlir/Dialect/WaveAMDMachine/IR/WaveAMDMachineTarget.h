@@ -101,6 +101,8 @@ createAMDGPUMCSubtargetInfo(Operation *op, llvm::StringRef consumer);
 std::optional<AMDGPUTargetCapabilities>
 getAMDGPUTargetCapabilities(const llvm::MCSubtargetInfo &sti);
 
+unsigned getAMDGPULocalMemoryBankCount(const llvm::MCSubtargetInfo &sti);
+
 unsigned getAMDGPUAddressableAGPRs(const llvm::MCSubtargetInfo &sti);
 
 bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);

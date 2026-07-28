@@ -20,6 +20,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -944,20 +945,23 @@ inferScratchVectorSelectors(const ScratchRelationMap &map,
   return selectors;
 }
 
-static int64_t getSharedMemoryBankCount(Operation *op) {
+static FailureOr<int64_t> getSharedMemoryBankCount(Operation *op) {
   ModuleOp targetModule = waveamdmachine::findAMDGPUTargetModule(op);
   if (!targetModule)
     return 32;
-  StringAttr targetAttr =
-      targetModule->getAttrOfType<StringAttr>("waveamdmachine.target");
-  if (!targetAttr)
-    return 32;
-  std::optional<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::parseAMDGPUTargetAttr(targetAttr.getValue());
-  if (!target)
-    return 32;
-  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(target->chip);
-  if ((isa.Major == 9 && isa.Minor == 5) || (isa.Major == 12 && isa.Minor == 5))
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      waveamdmachine::createAMDGPUMCSubtargetInfo(op,
+                                                  "wave-lower-redistribute");
+  if (failed(sti))
+    return failure();
+  if (std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+          waveamdmachine::getAMDGPUTargetCapabilities(**sti))
+    return capabilities->localMemoryBankCount;
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(op, "wave-lower-redistribute");
+  if (failed(isa))
+    return failure();
+  if (isa->Major == 9 && isa->Minor == 5)
     return 64;
   return 32;
 }
@@ -1250,19 +1254,21 @@ selectScratchLayout(RedistributeOp op, const ScratchAccessPattern &pattern,
                     int64_t waveWidth) {
   ScratchLayoutPlan best;
   best.vectorElements = vectorElements;
-  int64_t banks = getSharedMemoryBankCount(op);
+  FailureOr<int64_t> banks = getSharedMemoryBankCount(op);
+  if (failed(banks))
+    return failure();
   best.bankConflicts =
-      scoreScratchLayout(op, pattern, best, sourceSlots, waveWidth, banks);
+      scoreScratchLayout(op, pattern, best, sourceSlots, waveWidth, *banks);
 
   int64_t items = op.getRelation().getItems();
   int64_t groups = sourceSlots / best.vectorElements;
   unsigned groupBits = groups > 1 ? llvm::Log2_64_Ceil(groups) : 0;
   // Low item bits stay inside every aligned power-of-two item tile.
   unsigned itemBits = llvm::countr_zero(static_cast<uint64_t>(items));
-  best = selectPhaseScratchLayout(op, pattern, sourceSlots, waveWidth, banks,
+  best = selectPhaseScratchLayout(op, pattern, sourceSlots, waveWidth, *banks,
                                   groupBits, itemBits, std::move(best));
   // Upper-triangular item-bit XORs preserve footprint and invertibility.
-  return selectItemXorScratchLayout(op, pattern, sourceSlots, waveWidth, banks,
+  return selectItemXorScratchLayout(op, pattern, sourceSlots, waveWidth, *banks,
                                     itemBits, std::move(best));
 }
 

@@ -12,6 +12,18 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+  // expected-error @+1 {{waveamd-resource-info LDS usage 327681 bytes exceeds target-addressable capacity 327680 bytes}}
+  func.func @gfx1250_lds_overflow() attributes {
+    wave.kernel,
+    wave.lds_size = 327681 : i64
+  } {
+    return
+  }
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   // expected-error @+1 {{waveamd-resource-info LDS usage 65537 bytes exceeds target-addressable capacity 65536 bytes}}
   func.func @dynamic_overflow() attributes {

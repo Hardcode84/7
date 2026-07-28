@@ -7124,6 +7124,19 @@ LogicalResult WaveAMDMachineSelector::selectPtrCast(PtrCastOp op) {
   return success();
 }
 
+static Value materializeMakeBufferRange(WaveAMDMachineSelector &S,
+                                        waveamd::MakeBufferOp op) {
+  auto rangeType = dyn_cast<IntegerType>(op.getRange().getType());
+  auto rangeConstant = op.getRange().getDefiningOp<arith::ConstantIntOp>();
+  if (rangeType && rangeType.getWidth() == 32 && rangeConstant) {
+    APInt bits = cast<IntegerAttr>(rangeConstant.getValue()).getValue();
+    return bits.isNegative()
+               ? createImm(S.builder, op.getLoc(), bits.getZExtValue())
+               : S.expect(op.getRange(), op);
+  }
+  return S.expect(op.getRange(), op);
+}
+
 LogicalResult
 WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
   auto baseIt = pointerBases.find(op.getBase());
@@ -7147,10 +7160,11 @@ WaveAMDMachineSelector::selectMakeBuffer(waveamd::MakeBufferOp op) {
     globalBase = baseValue;
     baseOffset = {};
   }
+  Value range = materializeMakeBufferRange(*this, op);
   Value descriptor = waveamdmachine::MakeBufferRsrcOp::create(
       builder, op.getLoc(),
       getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 4), baseValue,
-      expect(op.getRange(), op));
+      range);
   pointerBases[op.getResult()] = descriptor;
   pointerGlobalBases[op.getResult()] = globalBase ? globalBase : baseValue;
   pointerIndexOffsets[op.getResult()] = std::move(baseOffset);

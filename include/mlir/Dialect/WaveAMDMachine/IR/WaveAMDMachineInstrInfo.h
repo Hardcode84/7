@@ -23,6 +23,10 @@ namespace mlir::waveamdmachine {
 
 enum class RegClass : uint32_t;
 
+inline constexpr unsigned kSClauseLengthBits = 6;
+inline constexpr unsigned kSClauseBreakBits = 4;
+inline constexpr unsigned kSClauseBreakShift = 8;
+
 using SamePhysicalRegFn = llvm::function_ref<bool(Value, Value)>;
 
 struct OperandLegalitySpec {

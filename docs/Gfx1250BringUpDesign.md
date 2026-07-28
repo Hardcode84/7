@@ -26,8 +26,9 @@ Current Wave support is partial:
 - packed f16 and bf16 conversions have broad ISA 12.5 capability checks;
 - kernarg preload and terminal VGPR deallocation contain broad ISA 12.5
   handling;
-- resource descriptors, matrix lowering, and scheduling still use older target
-  assumptions.
+- buffer descriptors, LDS accounting, and register allocation use gfx1250
+  target facts;
+- matrix lowering and scheduling still use older target assumptions.
 
 ## Goal
 
@@ -215,7 +216,8 @@ also:
 - patch compatible `S_SETREG_IMM32_B32(MODE)` writes with current selectors;
 - insert the required `s_nop` before a switch after an incompatible MODE write,
   including a write in a fallthrough predecessor;
-- keep switches outside hard clauses;
+- move a first-member switch before its hard clause, then resize or drop a
+  clause when a later member needs a switch;
 - place switches correctly around barriers, waits, and `s_delay_alu`;
 - treat a switch as an implicit X-counter drain;
 - reject unsupported high-VGPR operand maps and incompatible VOPD windows;
@@ -227,6 +229,11 @@ between a MODE write and a following switch before printing. Automatic switch
 insertion and compatible MODE patching remain `.5`. Branches and fallthrough
 labels for uniform conditionals, EXEC conditionals, loops, and DMA-delay
 regions use the same buffer. No later pass may change physical VGPR operands.
+Typed inline-assembly islands and VOPD pairs are `.12`; `.5` does not fabricate
+raw `MCInst` producers to test missing WaveAMDMachine operations.
+Wave-visible state enums use TableGen-generated stringify and symbolize
+helpers; selector field order otherwise comes directly from LLVM's operand
+tables.
 
 Landing is gated:
 
@@ -596,7 +603,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
 | waits | independent LOAD/STORE/DS/KM/X, joins, loops, atomics, termination |
-| VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, inline assembly, X drains |
+| VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, X drains; `.12` adds typed inline assembly and VOPD |
 | resources | 32-bank choice, 320 KiB bound, target tuple alignment, 1024-VGPR maximum and 16-register granule |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, target hazards |
@@ -620,7 +627,8 @@ closure. Missing hardware keeps the validation and closeout work open.
 8. scheduler and hazard model;
 9. Python profile and GEMM Integration;
 10. hardware validation and measured PerfGolden;
-11. integrated-tree audit and epic closure.
+11. typed inline-assembly and VOPD MC surfaces;
+12. integrated-tree audit and epic closure.
 
 Dependencies form a DAG where ABI and waits can proceed in parallel after MC
 emission. High-VGPR enablement waits for both MC finalization and X-counter
@@ -642,7 +650,8 @@ Epic: `7-gfx1250-wave-backend-bringup-fa4l`
 | `.8` | scheduler resources and hazards | `.7` |
 | `.9` | Python profile and GEMM Integration | `.7`, `.8` |
 | `.10` | hardware validation and measured ASM | `.9` |
-| `.11` | integrated-tree audit and epic closure | `.1` through `.10` |
+| `.11` | integrated-tree audit and epic closure | `.1` through `.10`, `.12` |
+| `.12` | typed inline-assembly and VOPD MC surfaces | `.5` |
 
 `.2` is related to `7-wavemachine-mc-tablegen-s1g6`. `.8` is related to
 `7-amdgpu-scheduler-sy5.9`. Related edges record reuse; they do not block the

@@ -182,12 +182,32 @@ func.func @cross_wave_swizzled_vector(
 
 // -----
 
-// CHECK-LABEL: func.func @cross_wave_swizzled_64_banks(
+// CHECK-LABEL: func.func @cross_wave_swizzled_gfx950(
 // CHECK: wave.index_expr <"2*(64 + xor(16, item))">
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"
 } {
-  func.func @cross_wave_swizzled_64_banks(
+  func.func @cross_wave_swizzled_gfx950(
+      %source: !wave.simd<vector<4xi32>, 32>)
+      -> !wave.simd<vector<2xi32>, 32>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %result = wave.redistribute %source,
+        <blocks = 1, items = 64, source_block = "block",
+         source_item = "xor(floor(item / 2), 32)",
+         source_slot = "2*Mod(item, 2) + slot">
+        : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
+    return %result : !wave.simd<vector<2xi32>, 32>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_swizzled_gfx1250(
+// CHECK: wave.index_expr <"2*(64 + xor(8, item))">
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+  func.func @cross_wave_swizzled_gfx1250(
       %source: !wave.simd<vector<4xi32>, 32>)
       -> !wave.simd<vector<2xi32>, 32>
       attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {

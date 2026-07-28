@@ -12,6 +12,7 @@
 #include "WaveAMDRegAllocPrep.h"
 #include "WaveAMDRegAllocTransformState.h"
 #include "WaveAMDRegAllocTransformUtils.h"
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
@@ -1097,9 +1098,14 @@ struct RegAllocScanFailure {
 static bool
 assignedRangesOverlap(const wave::RegAllocTransformAssignment &assignment,
                       unsigned base, unsigned width) {
-  unsigned end = base + width;
-  unsigned assignedEnd = assignment.base + assignment.width;
+  uint64_t end = static_cast<uint64_t>(base) + width;
+  uint64_t assignedEnd =
+      static_cast<uint64_t>(assignment.base) + assignment.width;
   return base < assignedEnd && assignment.base < end;
+}
+
+static bool registerRangeFits(unsigned base, unsigned width, unsigned limit) {
+  return base <= limit && width <= limit - base;
 }
 
 static bool
@@ -1677,6 +1683,13 @@ private:
     if (failed(familyBudget))
       return failure();
     vgprFamilyBudget = *familyBudget;
+    if (waveamdmachine::findAMDGPUTargetModule(func)) {
+      FailureOr<wave::WaveAMDRegisterLimits> limits =
+          wave::getWaveAMDRegisterLimits(func);
+      if (failed(limits))
+        return failure();
+      vgprTupleAlignment = limits->vgprTupleAlignment;
+    }
     if (failed(computeFixedBases()))
       return failure();
     if (failed(collectFixedHardwareReadSets()))
@@ -1753,7 +1766,22 @@ private:
         return recordFixedFailure(set, "fixed-conflict");
       fixedBase = base;
     }
+    if (fixedBase && !fixedSetMembersAreAligned(set, *fixedBase))
+      return recordFixedFailure(set, "fixed-alignment");
     return success();
+  }
+
+  bool fixedSetMembersAreAligned(const wave::RegAllocTransformAliasSet &set,
+                                 unsigned base) const {
+    if (set.regClass != waveamdmachine::RegClass::VGPR || !vgprTupleAlignment)
+      return true;
+    return llvm::all_of(set.members, [&](unsigned valueId) {
+      const wave::RegAllocTransformValue &value = values[valueId];
+      if (value.width <= 1)
+        return true;
+      uint64_t physicalBase = static_cast<uint64_t>(base) + value.offset;
+      return physicalBase % vgprTupleAlignment == 0;
+    });
   }
 
   std::optional<unsigned>
@@ -1781,7 +1809,7 @@ private:
       if (!fixedBase)
         continue;
       wave::RegAllocTransformBudget budget = getBudget(set.regClass);
-      if (*fixedBase + set.width > budget.limit)
+      if (!registerRangeFits(*fixedBase, set.width, budget.limit))
         continue;
       for (wave::RegAllocTransformLiveRange range : set.ranges)
         fixedReservations.push_back({set.regClass, set.id, *fixedBase,
@@ -1915,7 +1943,7 @@ private:
           findReusableInputBase(set, budget.limit);
       conflict = !reusableBase || reusableBase->base != fixedBase;
     }
-    if (fixedBase + set.width > budget.limit || conflict) {
+    if (!registerRangeFits(fixedBase, set.width, budget.limit) || conflict) {
       recordPressureFailure(set, budget);
       return success();
     }
@@ -1936,7 +1964,7 @@ private:
         return std::nullopt;
       maxBase = std::min(maxBase, *beforeBase - 1);
     }
-    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(set.width));
+    unsigned align = getRequiredAlignment(set.regClass, set.width);
     for (unsigned base = 0; base <= maxBase; base += align) {
       std::optional<unsigned> conflictEnd = findActiveConflictEnd(set, base);
       if (!conflictEnd)
@@ -1952,9 +1980,18 @@ private:
     return std::nullopt;
   }
 
-  static bool isAlignedBase(unsigned base, unsigned width) {
-    unsigned align = std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
-    return base % align == 0;
+  unsigned getRequiredAlignment(waveamdmachine::RegClass regClass,
+                                unsigned width) const {
+    if (width <= 1)
+      return 1;
+    if (regClass == waveamdmachine::RegClass::VGPR && vgprTupleAlignment)
+      return vgprTupleAlignment;
+    return std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
+  }
+
+  bool isAlignedBase(unsigned base, waveamdmachine::RegClass regClass,
+                     unsigned width) const {
+    return base % getRequiredAlignment(regClass, width) == 0;
   }
 
   const wave::RegAllocTransformValue *
@@ -2041,7 +2078,7 @@ private:
                               const wave::RegAllocTransformAliasSet &sourceSet,
                               const wave::RegAllocTransformValue &sourceValue) {
     return valueRangeEndsAt(sourceValue, set.start) &&
-           sourceValue.offset + set.width <= sourceSet.width &&
+           registerRangeFits(sourceValue.offset, set.width, sourceSet.width) &&
            sourceSubrangeDiesAtBoundary(set, sourceSet, sourceValue);
   }
 
@@ -2111,9 +2148,9 @@ private:
       const wave::RegAllocTransformAliasSet &sourceSet,
       const wave::RegAllocTransformAssignment &sourceAssignment, unsigned base,
       unsigned limit) {
-    if (base + set.width > limit)
+    if (!registerRangeFits(base, set.width, limit))
       return false;
-    if (!isAlignedBase(base, set.width))
+    if (!isAlignedBase(base, set.regClass, set.width))
       return false;
     if (conflictsWithActiveIgnoring(set, base, sourceSet.id))
       return false;
@@ -2139,6 +2176,8 @@ private:
     if (!reusableOperandCoversResult(set, *sourceSet, sourceValue))
       return std::nullopt;
 
+    if (!registerRangeFits(sourceAssignment->base, sourceValue.offset, limit))
+      return std::nullopt;
     unsigned base = sourceAssignment->base + sourceValue.offset;
     if (!reusableBaseIsAvailable(set, *sourceSet, *sourceAssignment, base,
                                  limit))
@@ -2691,6 +2730,7 @@ private:
   func::FuncOp func;
   Builder &builder;
   unsigned memberConflictGeneration = 0;
+  unsigned vgprTupleAlignment = 0;
   bool killedOperandReuseIsaFailed = false;
 };
 

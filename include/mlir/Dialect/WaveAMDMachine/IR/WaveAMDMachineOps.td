@@ -1613,6 +1613,22 @@ def WaveAMDMachine_SSleepOp
 def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
                                                              WaveAMDMachine_Imm,
                                                              [WaveAMDMachine_SALU]>;
+def WaveAMDMachine_SSetregImm32B32Op
+    : WaveAMDMachine_Op<"s_setreg_imm32_b32", [WaveAMDMachine_SALU]> {
+  let arguments = (ins I64Attr:$imm, I32Attr:$hwreg,
+                       I32Attr:$offset, I32Attr:$width);
+  let assemblyFormat =
+      "`value` $imm `hwreg` `(` $hwreg `,` $offset `,` $width `)` attr-dict";
+  let archPredicate = WaveAMDMachine_Gfx8To13;
+  let hasVerifier = 1;
+}
+def WaveAMDMachine_SClauseOp
+    : WaveAMDMachine_Op<"s_clause", [WaveAMDMachine_SALU]> {
+  let arguments = (ins I32Attr:$length, I32Attr:$breaks);
+  let assemblyFormat = "`length` $length `breaks` $breaks attr-dict";
+  let archPredicate = WaveAMDMachine_Gfx1250;
+  let hasVerifier = 1;
+}
 def WaveAMDMachine_SSetVgprMsbOp
     : WaveAMDMachine_UnaryNoResult<"s_set_vgpr_msb",
                                    WaveAMDMachine_Imm,

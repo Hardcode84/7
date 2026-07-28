@@ -9,6 +9,7 @@
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
+#include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -523,6 +524,33 @@ LogicalResult SGetregHwIdOp::verify() {
     return emitOpError("offset must be in [0, 31]");
   if (width <= 0 || width > 32 || offset + width > 32)
     return emitOpError("width must be in [1, 32 - offset]");
+  return success();
+}
+
+LogicalResult SSetregImm32B32Op::verify() {
+  if (!llvm::isUInt<32>(getImm()))
+    return emitOpError("value must fit u32");
+  if (!llvm::isUInt<llvm::AMDGPU::Hwreg::HwregId::Width>(getHwreg()))
+    return emitOpError("hardware register ID exceeds LLVM encoding");
+  if (!llvm::isUInt<llvm::AMDGPU::Hwreg::HwregOffset::Width>(getOffset()))
+    return emitOpError("offset exceeds LLVM encoding");
+  constexpr int64_t registerWidth = int64_t(1)
+                                    << llvm::AMDGPU::Hwreg::HwregSize::Width;
+  if (getWidth() <= 0 || getWidth() > registerWidth ||
+      getOffset() + getWidth() > registerWidth)
+    return emitOpError("width must be in [1, 32 - offset]");
+  return success();
+}
+
+LogicalResult SClauseOp::verify() {
+  unsigned maxLength = llvm::maskTrailingOnes<unsigned>(kSClauseLengthBits);
+  int64_t length = getLengthAttr().getInt();
+  if (length < 2 || static_cast<uint64_t>(length) > maxLength)
+    return emitOpError() << "length must be in [2, " << maxLength << ']';
+  unsigned maxBreaks = llvm::maskTrailingOnes<unsigned>(kSClauseBreakBits);
+  int64_t breaks = getBreaksAttr().getInt();
+  if (breaks < 0 || static_cast<uint64_t>(breaks) > maxBreaks)
+    return emitOpError() << "breaks must be in [0, " << maxBreaks << ']';
   return success();
 }
 

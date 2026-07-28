@@ -246,7 +246,10 @@ static LDSSpillPlan buildCapacityPlan(
   plan.reservedSpillBytes = reservedBytes;
   plan.limitBytes = static_cast<unsigned>(limitBytes);
   plan.availableBytes = static_cast<unsigned>(limitBytes - usedBytes);
-  plan.slotBase = fixedBytes + reservedBytes;
+  unsigned spillBase = fixedBytes;
+  if (fixedBytes != 0 && dynamicBytes != 0)
+    spillBase += dynamicBytes;
+  plan.slotBase = spillBase + reservedBytes;
   plan.slotBytes = static_cast<unsigned>(waveStride * wavesPerWorkgroup);
   plan.waveStride = static_cast<unsigned>(waveStride);
   plan.valueBytes = valueBytes;

@@ -53,8 +53,9 @@ LogicalResult MakeBufferOp::verify() {
     return emitOpError("result must be a waveamd buffer pointer");
   if (baseType.getElementType() != resultType.getElementType())
     return emitOpError("base and result element types must match");
-  if (!getRange().getType().isInteger(32))
-    return emitOpError("range must be i32 bytes");
+  if (!getRange().getType().isInteger(32) &&
+      !getRange().getType().isInteger(64))
+    return emitOpError("range must be i32 or i64 bytes");
   return success();
 }
 

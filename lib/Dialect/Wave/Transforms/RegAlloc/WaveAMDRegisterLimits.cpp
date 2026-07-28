@@ -8,6 +8,7 @@
 
 #include "WaveAMDRegisterLimits.h"
 
+#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
@@ -15,6 +16,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 #include "llvm/TargetParser/TargetParser.h"
@@ -203,12 +205,18 @@ unsigned getWaveAMDDefaultKernargPreloadDwords(func::FuncOp func) {
   return getCompletePrefixDwords(layout, *maxDwords);
 }
 
-// Text ISA names only v0..v255.
-static constexpr unsigned kTextAsmVGPRLimit = 256;
-
 static std::optional<waveamdmachine::AMDGPUTargetCapabilities>
 getTargetCapabilities(const llvm::MCSubtargetInfo &sti) {
   return waveamdmachine::getAMDGPUTargetCapabilities(sti);
+}
+
+static unsigned getLowVGPRAddressableCount(const llvm::MCSubtargetInfo &sti) {
+  llvm::AMDGPUDwarfFlavour flavour =
+      llvm::AMDGPU::IsaInfo::getWavefrontSize(sti) == 32 ? llvm::Wave32
+                                                         : llvm::Wave64;
+  std::unique_ptr<llvm::MCRegisterInfo> mri(
+      llvm::createGCNMCRegisterInfo(flavour));
+  return mri->getRegClass(llvm::AMDGPU::VGPR_32_Lo256RegClassID).getNumRegs();
 }
 
 static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
@@ -299,12 +307,18 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
                                : llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(**sti);
   WaveAMDRegisterLimits limits;
   limits.addressableSGPRs = addressableSGPRs;
-  limits.addressableVGPRs = std::min(addressableVGPRs, kTextAsmVGPRLimit);
+  limits.addressableVGPRs =
+      capabilities
+          ? addressableVGPRs
+          : std::min(addressableVGPRs, getLowVGPRAddressableCount(**sti));
   limits.addressableAGPRs = addressableAGPRs;
   limits.sgprAllocGranule = llvm::AMDGPU::getSGPRAllocGranule(gpuKind);
   limits.vgprAllocGranule = vgprAllocGranule;
   limits.agprAllocGranule = limits.vgprAllocGranule;
+  limits.vgprTupleAlignment =
+      capabilities ? capabilities->vgprTupleAlignment : 0;
   limits.maxWavesPerEU = maxWavesPerEU;
+  limits.hasTargetCapabilityContract = capabilities.has_value();
   limits.agprCountsAgainstVGPRs = llvm::AMDGPU::isGFX90A(**sti);
   limits.maxSGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);
   limits.maxVGPRsForWaves.assign(limits.maxWavesPerEU + 1, 0);

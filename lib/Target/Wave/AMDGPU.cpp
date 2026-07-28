@@ -37,6 +37,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Config/Targets.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -271,6 +272,98 @@ struct BufferedMCAlign {
 
 using BufferedMCItem = std::variant<BufferedMCInstruction, BufferedMCLine,
                                     BufferedMCLabel, BufferedMCAlign>;
+
+static constexpr std::array<unsigned, 4> kVGPRWindowModeFieldMasks = {
+    static_cast<unsigned>(llvm::AMDGPU::Hwreg::SRC0_VGPR_MSB),
+    static_cast<unsigned>(llvm::AMDGPU::Hwreg::SRC1_VGPR_MSB),
+    static_cast<unsigned>(llvm::AMDGPU::Hwreg::SRC2_VGPR_MSB),
+    static_cast<unsigned>(llvm::AMDGPU::Hwreg::DST_VGPR_MSB)};
+static constexpr unsigned kVGPRWindowFieldCount =
+    kVGPRWindowModeFieldMasks.size();
+static constexpr unsigned kVGPRWindowModeRegisterShift =
+    llvm::countr_zero_constexpr<unsigned>(
+        static_cast<unsigned>(llvm::AMDGPU::Hwreg::VGPR_MSB_MASK));
+static constexpr unsigned kVGPRWindowModeWidth =
+    llvm::popcount(static_cast<unsigned>(llvm::AMDGPU::Hwreg::VGPR_MSB_MASK));
+static constexpr unsigned kVGPRWindowFieldWidth =
+    llvm::popcount(static_cast<unsigned>(llvm::AMDGPU::Hwreg::DST_VGPR_MSB));
+static constexpr unsigned kVGPRWindowModeMask =
+    static_cast<unsigned>(llvm::AMDGPU::Hwreg::VGPR_MSB_MASK) >>
+    kVGPRWindowModeRegisterShift;
+static constexpr unsigned kVGPRWindowModeRotation =
+    llvm::countr_zero_constexpr<unsigned>(
+        static_cast<unsigned>(llvm::AMDGPU::Hwreg::SRC0_VGPR_MSB)) -
+    kVGPRWindowModeRegisterShift;
+static constexpr unsigned kSClauseMaxLength =
+    llvm::maskTrailingOnes<unsigned>(waveamdmachine::kSClauseLengthBits);
+static constexpr unsigned kSClauseBreakMask =
+    llvm::maskTrailingOnes<unsigned>(waveamdmachine::kSClauseBreakBits);
+
+static constexpr unsigned getVGPRWindowFieldShift(unsigned modeFieldMask) {
+  unsigned modeOffset =
+      llvm::countr_zero_constexpr(modeFieldMask) - kVGPRWindowModeRegisterShift;
+  return (modeOffset + kVGPRWindowModeWidth - kVGPRWindowModeRotation) %
+         kVGPRWindowModeWidth;
+}
+
+static constexpr unsigned convertVGPRWindowModeToSetreg(unsigned mode) {
+  if (!kVGPRWindowModeRotation)
+    return mode & kVGPRWindowModeMask;
+  return ((mode << kVGPRWindowModeRotation) |
+          (mode >> (kVGPRWindowModeWidth - kVGPRWindowModeRotation))) &
+         kVGPRWindowModeMask;
+}
+
+struct VGPRWindowMode {
+  std::array<std::optional<unsigned>, kVGPRWindowFieldCount> fields;
+
+  bool update(const VGPRWindowMode &newMode, bool &rewritten) {
+    bool updated = false;
+    for (unsigned field : llvm::seq<unsigned>(0, kVGPRWindowFieldCount)) {
+      if (!newMode.fields[field])
+        continue;
+      if (*newMode.fields[field] != fields[field].value_or(0)) {
+        updated = true;
+        rewritten |= fields[field].has_value();
+      }
+      fields[field] = newMode.fields[field];
+    }
+    return updated;
+  }
+
+  unsigned encode() const {
+    unsigned value = 0;
+    for (unsigned field : llvm::seq<unsigned>(0, kVGPRWindowFieldCount))
+      value |= fields[field].value_or(0)
+               << getVGPRWindowFieldShift(kVGPRWindowModeFieldMasks[field]);
+    return value;
+  }
+
+  static VGPRWindowMode concrete(unsigned value) {
+    VGPRWindowMode mode;
+    unsigned fieldMask =
+        llvm::maskTrailingOnes<unsigned>(kVGPRWindowFieldWidth);
+    for (unsigned field : llvm::seq<unsigned>(0, kVGPRWindowFieldCount))
+      mode.fields[field] =
+          (value >> getVGPRWindowFieldShift(kVGPRWindowModeFieldMasks[field])) &
+          fieldMask;
+    return mode;
+  }
+};
+
+struct VGPRWindowClauseState {
+  std::optional<size_t> itemIndex;
+  unsigned length = 0;
+  unsigned remaining = 0;
+  unsigned breaks = 0;
+
+  void clear() {
+    itemIndex.reset();
+    length = 0;
+    remaining = 0;
+    breaks = 0;
+  }
+};
 
 #include "AMDGPUOpcodes.def"
 
@@ -877,6 +970,8 @@ private:
   unsigned sSetVgprMsb() const {
     return postVIOpcode(llvm::AMDGPU::S_SET_VGPR_MSB);
   }
+  unsigned sClause() const { return postVIOpcode(llvm::AMDGPU::S_CLAUSE); }
+  unsigned sWaitXcnt() const { return postVIOpcode(llvm::AMDGPU::S_WAIT_XCNT); }
 
   unsigned bufferStoreB8() const {
     if (isGfx90APlus())
@@ -1224,33 +1319,508 @@ private:
                simm16.getImm())) == llvm::AMDGPU::Hwreg::ID_MODE;
   }
 
-  void finalizeMCBuffer() {
-    if (!hasSetregVGPRMSBFixup())
-      return;
-
-    SmallVector<BufferedMCItem> finalized;
-    const llvm::MCInst *previous = nullptr;
-    for (const BufferedMCItem &item : mcBuffer) {
-      if (const auto *instruction = std::get_if<BufferedMCInstruction>(&item)) {
-        if (previous && isModeSetreg(*previous) &&
-            instruction->inst.getOpcode() == sSetVgprMsb()) {
-          llvm::MCInst nop;
-          nop.setOpcode(sNop());
-          nop.addOperand(llvm::MCOperand::createImm(0));
-          finalized.push_back(BufferedMCInstruction{nop, instruction->origin,
-                                                    instruction->indent});
-        }
-        finalized.push_back(item);
-        previous = &instruction->inst;
-        continue;
-      }
-      finalized.push_back(item);
-    }
-    mcBuffer = std::move(finalized);
+  int getVGPRWindowOperandIndex(unsigned opcode,
+                                const llvm::AMDGPU::OpName *table,
+                                unsigned field) const {
+    if (!table || table[field] == llvm::AMDGPU::OpName::NUM_OPERAND_NAMES)
+      return -1;
+    return llvm::AMDGPU::getNamedOperandIdx(opcode, table[field]);
   }
 
-  void printMCBuffer() {
-    finalizeMCBuffer();
+  bool hasUnsupportedVGPRWindowMapping(const llvm::MCInstrDesc &desc) const {
+    return llvm::SIInstrFlags::isMIMG(desc) ||
+           llvm::SIInstrFlags::isVSAMPLE(desc) ||
+           llvm::SIInstrFlags::isEXP(desc);
+  }
+
+  std::optional<unsigned> getVGPRWindowMSBs(const llvm::MCInst &inst,
+                                            const llvm::AMDGPU::OpName *table,
+                                            unsigned field) const {
+    int index = getVGPRWindowOperandIndex(inst.getOpcode(), table, field);
+    if (index < 0 || static_cast<unsigned>(index) >= inst.getNumOperands())
+      return std::nullopt;
+    const llvm::MCInstrDesc &desc = mcii->get(inst.getOpcode());
+    if (static_cast<unsigned>(index) >= desc.getNumOperands())
+      return std::nullopt;
+    // Concrete VOP3 MC src2 is encoded; LLVM skips shrinkable pre-MC pseudos.
+    if (table[field] == llvm::AMDGPU::OpName::src2 &&
+        llvm::SIInstrFlags::isVOP2(desc) &&
+        static_cast<unsigned>(index) >= desc.getNumDefs() &&
+        desc.getOperandConstraint(index, llvm::MCOI::TIED_TO) >= 0)
+      return std::nullopt;
+    const llvm::MCOperand &operand = inst.getOperand(index);
+    if (!operand.isReg())
+      return std::nullopt;
+    llvm::MCRegister reg = operand.getReg();
+    if (!llvm::AMDGPU::getVGPRPhysRegClass(reg, *mri))
+      return std::nullopt;
+    return llvm::AMDGPU::getVGPREncodingMSBs(reg, *mri);
+  }
+
+  FailureOr<VGPRWindowMode>
+  computeVGPRWindowMode(const BufferedMCInstruction &instruction) const {
+    const llvm::MCInst &inst = instruction.inst;
+    const llvm::MCInstrDesc &desc = mcii->get(inst.getOpcode());
+    Operation *origin =
+        instruction.origin ? instruction.origin : emissionSource;
+    if (hasUnsupportedVGPRWindowMapping(desc)) {
+      for (auto [index, operand] : llvm::enumerate(inst)) {
+        if (!operand.isReg() ||
+            !llvm::AMDGPU::getVGPRPhysRegClass(operand.getReg(), *mri) ||
+            llvm::AMDGPU::getVGPREncodingMSBs(operand.getReg(), *mri) == 0)
+          continue;
+        origin->emitError("LLVM VGPR-window mapping is unavailable for ")
+            << mcii->getName(inst.getOpcode()) << " emitted by "
+            << origin->getName() << ": operand " << index << " has MSBs "
+            << llvm::AMDGPU::getVGPREncodingMSBs(operand.getReg(), *mri);
+        return failure();
+      }
+      return VGPRWindowMode();
+    }
+
+    auto [primary, secondary] =
+        llvm::AMDGPU::getVGPRLoweringOperandTables(desc);
+    VGPRWindowMode mode;
+    unsigned fieldMask =
+        llvm::maskTrailingOnes<unsigned>(kVGPRWindowFieldWidth);
+    for (unsigned field : llvm::seq<unsigned>(0, kVGPRWindowFieldCount)) {
+      std::optional<unsigned> primaryMSBs =
+          getVGPRWindowMSBs(inst, primary, field);
+      std::optional<unsigned> secondaryMSBs =
+          getVGPRWindowMSBs(inst, secondary, field);
+      if (primaryMSBs && secondaryMSBs && primaryMSBs != secondaryMSBs) {
+        int primaryIndex =
+            getVGPRWindowOperandIndex(inst.getOpcode(), primary, field);
+        int secondaryIndex =
+            getVGPRWindowOperandIndex(inst.getOpcode(), secondary, field);
+        origin->emitError("incompatible VGPR windows for ")
+            << mcii->getName(inst.getOpcode()) << " emitted by "
+            << origin->getName() << ": field " << field << ", operands "
+            << primaryIndex << '/' << secondaryIndex << " have MSBs "
+            << *primaryMSBs << '/' << *secondaryMSBs;
+        return failure();
+      }
+      mode.fields[field] = primaryMSBs ? primaryMSBs : secondaryMSBs;
+      if (mode.fields[field] && *mode.fields[field] > fieldMask) {
+        origin->emitError("VGPR window for ")
+            << mcii->getName(inst.getOpcode()) << " field " << field
+            << " exceeds LLVM selector encoding";
+        return failure();
+      }
+    }
+    return mode;
+  }
+
+  bool isVGPRWindowProgramStateInstruction(const llvm::MCInst &inst) const {
+    unsigned opcode = inst.getOpcode();
+    return opcode == sWaitcnt() || opcode == sDelayAlu() ||
+           opcode == sBarrier() || opcode == sWaitXcnt() ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT_DSCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_STORECNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_STORECNT_DSCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_SAMPLECNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_BVHCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_EXPCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_DSCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_KMCNT) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_IDLE) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM) ||
+           opcode == postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT);
+  }
+
+  size_t getVGPRWindowInsertionPoint(ArrayRef<BufferedMCItem> finalized,
+                                     size_t before) const {
+    size_t insertion = before;
+    size_t cursor = before;
+    while (cursor != 0) {
+      const BufferedMCItem &item = finalized[cursor - 1];
+      if (const auto *instruction = std::get_if<BufferedMCInstruction>(&item)) {
+        if (!isVGPRWindowProgramStateInstruction(instruction->inst))
+          break;
+        insertion = cursor - 1;
+        --cursor;
+        continue;
+      }
+      if (std::holds_alternative<BufferedMCLabel>(item) ||
+          std::holds_alternative<BufferedMCAlign>(item))
+        break;
+      --cursor;
+    }
+    return insertion;
+  }
+
+  const BufferedMCInstruction *
+  getPreviousMCInstruction(ArrayRef<BufferedMCItem> finalized,
+                           size_t insertion) const {
+    while (insertion != 0) {
+      --insertion;
+      if (const auto *instruction =
+              std::get_if<BufferedMCInstruction>(&finalized[insertion]))
+        return instruction;
+    }
+    return nullptr;
+  }
+
+  static void trackBufferedInsert(std::optional<size_t> &tracked,
+                                  size_t insertion) {
+    if (tracked && *tracked >= insertion)
+      ++*tracked;
+  }
+
+  static void trackBufferedErase(std::optional<size_t> &tracked,
+                                 size_t erased) {
+    if (!tracked)
+      return;
+    if (*tracked == erased) {
+      tracked.reset();
+      return;
+    }
+    if (*tracked > erased)
+      --*tracked;
+  }
+
+  FailureOr<size_t>
+  prepareVGPRWindowClauseInsertion(SmallVectorImpl<BufferedMCItem> &finalized,
+                                   std::optional<size_t> &mostRecentModeSet,
+                                   VGPRWindowClauseState &clause,
+                                   Operation *origin) const {
+    if (!clause.remaining)
+      return getVGPRWindowInsertionPoint(finalized, finalized.size());
+    if (!clause.itemIndex) {
+      origin->emitError("missing buffered s_clause");
+      return failure();
+    }
+    if (clause.remaining == clause.length)
+      return getVGPRWindowInsertionPoint(finalized, *clause.itemIndex);
+
+    size_t clauseIndex = *clause.itemIndex;
+    if (clause.breaks) {
+      finalized.erase(finalized.begin() + clauseIndex);
+      trackBufferedErase(mostRecentModeSet, clauseIndex);
+      clause.clear();
+      return getVGPRWindowInsertionPoint(finalized, finalized.size());
+    }
+
+    auto *clauseInstruction =
+        std::get_if<BufferedMCInstruction>(&finalized[clauseIndex]);
+    if (!clauseInstruction ||
+        clauseInstruction->inst.getOpcode() != sClause() ||
+        clauseInstruction->inst.getNumOperands() != 1 ||
+        !clauseInstruction->inst.getOperand(0).isImm()) {
+      origin->emitError("malformed buffered s_clause");
+      return failure();
+    }
+    if (clause.length < kSClauseMaxLength)
+      clauseInstruction->inst.getOperand(0).setImm(
+          clause.length |
+          (clause.breaks << waveamdmachine::kSClauseBreakShift));
+    ++clause.length;
+    return getVGPRWindowInsertionPoint(finalized, finalized.size());
+  }
+
+  BufferedMCInstruction
+  makeImmediateMCInstruction(unsigned opcode, int64_t immediate,
+                             Operation *origin,
+                             unsigned instructionIndent) const {
+    llvm::MCInst inst;
+    inst.setOpcode(opcode);
+    inst.addOperand(llvm::MCOperand::createImm(immediate));
+    return {inst, origin, instructionIndent};
+  }
+
+  LogicalResult insertVGPRWindowMode(VGPRWindowMode newMode,
+                                     SmallVectorImpl<BufferedMCItem> &finalized,
+                                     VGPRWindowMode &currentMode,
+                                     std::optional<size_t> &mostRecentModeSet,
+                                     VGPRWindowClauseState &clause,
+                                     bool &xCntIsZero, Operation *origin,
+                                     unsigned instructionIndent) const {
+    unsigned oldMode = currentMode.encode();
+    bool rewritten = false;
+    if (!currentMode.update(newMode, rewritten))
+      return success();
+
+    if (mostRecentModeSet && !rewritten) {
+      auto *modeSet =
+          std::get_if<BufferedMCInstruction>(&finalized[*mostRecentModeSet]);
+      if (modeSet && modeSet->inst.getNumOperands() == 1 &&
+          modeSet->inst.getOperand(0).isImm()) {
+        int64_t oldModeBits = modeSet->inst.getOperand(0).getImm() &
+                              (kVGPRWindowModeMask << kVGPRWindowModeWidth);
+        modeSet->inst.getOperand(0).setImm(currentMode.encode() | oldModeBits);
+        return success();
+      }
+      mostRecentModeSet.reset();
+    }
+
+    FailureOr<size_t> preparedInsertion = prepareVGPRWindowClauseInsertion(
+        finalized, mostRecentModeSet, clause, origin);
+    if (failed(preparedInsertion))
+      return failure();
+    size_t insertion = *preparedInsertion;
+    for (size_t index = insertion; index < finalized.size();) {
+      const auto *instruction =
+          std::get_if<BufferedMCInstruction>(&finalized[index]);
+      if (instruction && instruction->inst.getOpcode() == sWaitXcnt()) {
+        finalized.erase(finalized.begin() + index);
+        trackBufferedErase(mostRecentModeSet, index);
+        trackBufferedErase(clause.itemIndex, index);
+        continue;
+      }
+      ++index;
+    }
+
+    const BufferedMCInstruction *previous =
+        getPreviousMCInstruction(finalized, insertion);
+    if (hasSetregVGPRMSBFixup() && previous && isModeSetreg(previous->inst)) {
+      trackBufferedInsert(clause.itemIndex, insertion);
+      finalized.insert(
+          finalized.begin() + insertion,
+          makeImmediateMCInstruction(sNop(), 0, origin, instructionIndent));
+      ++insertion;
+    }
+
+    int64_t immediate = newMode.encode() | (oldMode << kVGPRWindowModeWidth);
+    trackBufferedInsert(clause.itemIndex, insertion);
+    finalized.insert(finalized.begin() + insertion,
+                     makeImmediateMCInstruction(sSetVgprMsb(), immediate,
+                                                origin, instructionIndent));
+    mostRecentModeSet = insertion;
+    currentMode = newMode;
+    xCntIsZero = true;
+    return success();
+  }
+
+  LogicalResult handleModeSetreg(BufferedMCInstruction instruction,
+                                 SmallVectorImpl<BufferedMCItem> &finalized,
+                                 VGPRWindowMode &currentMode,
+                                 std::optional<size_t> &mostRecentModeSet,
+                                 bool &xCntIsZero) const {
+    Operation *origin =
+        instruction.origin ? instruction.origin : emissionSource;
+    int simm16Index = llvm::AMDGPU::getNamedOperandIdx(
+        instruction.inst.getOpcode(), llvm::AMDGPU::OpName::simm16);
+    int immediateIndex = llvm::AMDGPU::getNamedOperandIdx(
+        instruction.inst.getOpcode(), llvm::AMDGPU::OpName::imm);
+    if (simm16Index < 0 || immediateIndex < 0 ||
+        static_cast<unsigned>(simm16Index) >=
+            instruction.inst.getNumOperands() ||
+        static_cast<unsigned>(immediateIndex) >=
+            instruction.inst.getNumOperands() ||
+        !instruction.inst.getOperand(simm16Index).isImm() ||
+        !instruction.inst.getOperand(immediateIndex).isImm())
+      return origin->emitError("malformed LLVM MC operands for MODE setreg");
+
+    if (instruction.inst.getOpcode() !=
+            llvm::AMDGPU::S_SETREG_IMM32_B32_gfx12 ||
+        immediateIndex != 0 || simm16Index != 1)
+      return origin->emitError(
+          "unsupported LLVM MC operand layout for MODE setreg");
+    std::optional<unsigned> encodedMode =
+        llvm::AMDGPU::convertSetRegImmToVgprMSBs(instruction.inst,
+                                                 hasSetregVGPRMSBFixup());
+    if (!encodedMode) {
+      finalized.push_back(instruction);
+      return success();
+    }
+    mostRecentModeSet.reset();
+
+    auto encoding = llvm::AMDGPU::Hwreg::HwregEncoding::decode(
+        instruction.inst.getOperand(simm16Index).getImm());
+    unsigned offset = std::get<1>(encoding);
+    unsigned size = std::get<2>(encoding);
+
+    constexpr unsigned vgprMSBShift = llvm::countr_zero_constexpr<unsigned>(
+        llvm::AMDGPU::Hwreg::DST_VGPR_MSB);
+    unsigned setregMode = convertVGPRWindowModeToSetreg(currentMode.encode());
+    llvm::MCOperand &immediate = instruction.inst.getOperand(immediateIndex);
+    if (!offset || size <= vgprMSBShift) {
+      int64_t value =
+          (immediate.getImm() & ~int64_t(llvm::AMDGPU::Hwreg::VGPR_MSB_MASK)) |
+          (int64_t(setregMode) << vgprMSBShift);
+      immediate.setImm(value);
+      finalized.push_back(instruction);
+      return success();
+    }
+
+    finalized.push_back(instruction);
+    if (*encodedMode == currentMode.encode())
+      return success();
+
+    finalized.push_back(
+        makeImmediateMCInstruction(sNop(), 0, origin, instruction.indent));
+    int64_t restoreMode =
+        currentMode.encode() | (currentMode.encode() << kVGPRWindowModeWidth);
+    finalized.push_back(makeImmediateMCInstruction(sSetVgprMsb(), restoreMode,
+                                                   origin, instruction.indent));
+    mostRecentModeSet = finalized.size() - 1;
+    xCntIsZero = true;
+    return success();
+  }
+
+  LogicalResult handleExplicitVGPRWindowMode(
+      BufferedMCInstruction instruction,
+      SmallVectorImpl<BufferedMCItem> &finalized, VGPRWindowMode &currentMode,
+      std::optional<size_t> &mostRecentModeSet, bool &xCntIsZero) const {
+    Operation *origin =
+        instruction.origin ? instruction.origin : emissionSource;
+    if (instruction.inst.getNumOperands() != 1 ||
+        !instruction.inst.getOperand(0).isImm())
+      return origin->emitError("malformed LLVM MC operands for s_set_vgpr_msb");
+
+    mostRecentModeSet.reset();
+    const BufferedMCInstruction *previous =
+        getPreviousMCInstruction(finalized, finalized.size());
+    if (hasSetregVGPRMSBFixup() && previous && isModeSetreg(previous->inst))
+      finalized.push_back(
+          makeImmediateMCInstruction(sNop(), 0, origin, instruction.indent));
+    unsigned newMode =
+        instruction.inst.getOperand(0).getImm() & kVGPRWindowModeMask;
+    instruction.inst.getOperand(0).setImm(
+        newMode | (currentMode.encode() << kVGPRWindowModeWidth));
+    finalized.push_back(instruction);
+    currentMode = VGPRWindowMode::concrete(newMode);
+    xCntIsZero = true;
+    return success();
+  }
+
+  LogicalResult finalizeMCBuffer() {
+    if (!hasVGPRWindowing())
+      return success();
+
+    SmallVector<BufferedMCItem> finalized;
+    VGPRWindowMode currentMode;
+    std::optional<size_t> mostRecentModeSet;
+    VGPRWindowClauseState clause;
+    bool xCntIsZero = false;
+    auto consumeClauseMember = [&]() {
+      if (!clause.remaining)
+        return;
+      --clause.remaining;
+      if (!clause.remaining)
+        clause.clear();
+    };
+    for (const BufferedMCItem &item : mcBuffer) {
+      if (std::holds_alternative<BufferedMCLabel>(item)) {
+        if (clause.remaining)
+          return emissionSource->emitError("s_clause crosses a label");
+        if (failed(insertVGPRWindowMode(VGPRWindowMode::concrete(0), finalized,
+                                        currentMode, mostRecentModeSet, clause,
+                                        xCntIsZero, emissionSource, indent)))
+          return failure();
+        finalized.push_back(item);
+        mostRecentModeSet.reset();
+        xCntIsZero = false;
+        continue;
+      }
+
+      const auto *bufferedInstruction =
+          std::get_if<BufferedMCInstruction>(&item);
+      if (!bufferedInstruction) {
+        finalized.push_back(item);
+        continue;
+      }
+
+      BufferedMCInstruction instruction = *bufferedInstruction;
+      llvm::MCInst &inst = instruction.inst;
+      Operation *origin =
+          instruction.origin ? instruction.origin : emissionSource;
+      if (inst.getOpcode() == sClause()) {
+        if (clause.remaining)
+          return origin->emitError("nested s_clause is unsupported");
+        if (inst.getNumOperands() != 1 || !inst.getOperand(0).isImm())
+          return origin->emitError("malformed LLVM MC operands for s_clause");
+        int64_t immediate = inst.getOperand(0).getImm();
+        unsigned validMask =
+            kSClauseMaxLength |
+            (kSClauseBreakMask << waveamdmachine::kSClauseBreakShift);
+        if (immediate < 0 ||
+            (static_cast<uint64_t>(immediate) & ~uint64_t(validMask)) != 0)
+          return origin->emitError("invalid s_clause immediate");
+        unsigned encodedLength = immediate & kSClauseMaxLength;
+        if (encodedLength == 0 || encodedLength == kSClauseMaxLength)
+          return origin->emitError("invalid s_clause length");
+        clause.itemIndex = finalized.size();
+        clause.length = encodedLength + 1;
+        clause.remaining = clause.length;
+        clause.breaks = (immediate >> waveamdmachine::kSClauseBreakShift) &
+                        kSClauseBreakMask;
+        finalized.push_back(instruction);
+        continue;
+      }
+      if (inst.getOpcode() == sSetVgprMsb()) {
+        if (clause.remaining)
+          return origin->emitError(
+              "s_set_vgpr_msb cannot be a hard-clause member");
+        if (failed(handleExplicitVGPRWindowMode(instruction, finalized,
+                                                currentMode, mostRecentModeSet,
+                                                xCntIsZero)))
+          return failure();
+        continue;
+      }
+      if (hasSetregVGPRMSBFixup() && isModeSetreg(inst)) {
+        if (clause.remaining)
+          return origin->emitError(
+              "MODE setreg cannot be a hard-clause member");
+        if (failed(handleModeSetreg(instruction, finalized, currentMode,
+                                    mostRecentModeSet, xCntIsZero)))
+          return failure();
+        continue;
+      }
+
+      const llvm::MCInstrDesc &desc = mcii->get(inst.getOpcode());
+      if (desc.isTerminator() || desc.isCall()) {
+        if (clause.remaining)
+          return origin->emitError(
+              "s_clause reaches a terminator before all members");
+        if (inst.getOpcode() == sEndpgm())
+          currentMode = {};
+        else if (failed(insertVGPRWindowMode(
+                     VGPRWindowMode::concrete(0), finalized, currentMode,
+                     mostRecentModeSet, clause, xCntIsZero, origin,
+                     instruction.indent)))
+          return failure();
+        finalized.push_back(instruction);
+        mostRecentModeSet.reset();
+        xCntIsZero = false;
+        continue;
+      }
+
+      if (inst.getOpcode() == sWaitXcnt() && xCntIsZero) {
+        if (clause.remaining)
+          return origin->emitError(
+              "redundant s_wait_xcnt cannot be a hard-clause member");
+        continue;
+      }
+
+      FailureOr<VGPRWindowMode> newMode = computeVGPRWindowMode(instruction);
+      if (failed(newMode))
+        return failure();
+      if (failed(insertVGPRWindowMode(*newMode, finalized, currentMode,
+                                      mostRecentModeSet, clause, xCntIsZero,
+                                      origin, instruction.indent)))
+        return failure();
+      finalized.push_back(instruction);
+      consumeClauseMember();
+      if (llvm::SIInstrFlags::isVMEM(desc) || llvm::SIInstrFlags::isSMRD(desc))
+        xCntIsZero = false;
+    }
+
+    if (clause.remaining)
+      return emissionSource->emitError(
+          "s_clause reaches function end before all members");
+    if (failed(insertVGPRWindowMode(VGPRWindowMode::concrete(0), finalized,
+                                    currentMode, mostRecentModeSet, clause,
+                                    xCntIsZero, emissionSource, indent)))
+      return failure();
+    mcBuffer = std::move(finalized);
+    return success();
+  }
+
+  LogicalResult printMCBuffer() {
+    if (failed(finalizeMCBuffer()))
+      return failure();
     for (const BufferedMCItem &item : mcBuffer) {
       if (const auto *instruction = std::get_if<BufferedMCInstruction>(&item)) {
         printIndent(instruction->indent);
@@ -1271,6 +1841,7 @@ private:
       os << "\t.p2align\t" << std::get<BufferedMCAlign>(item).log2 << '\n';
     }
     mcBuffer.clear();
+    return success();
   }
 
   unsigned getIntAttr(Operation *op, StringRef name, unsigned fallback) const {
@@ -1689,7 +2260,8 @@ private:
         return failure();
     }
 
-    printMCBuffer();
+    if (failed(printMCBuffer()))
+      return failure();
     if (isKernel && supportsDescriptorRoundRobin()) {
       std::string functionEndLabel = funcLabelPrefix + ".end";
       os << functionEndLabel << ":\n";
@@ -2302,25 +2874,40 @@ private:
   }
 
   unsigned mcVGPRReg(unsigned phys, unsigned width) const {
+    unsigned lowVGPRCount = (mri->getEncodingValue(llvm::AMDGPU::VGPR255) &
+                             llvm::AMDGPU::HWEncoding::REG_IDX_MASK) +
+                            1;
+    unsigned lowPhys = phys % lowVGPRCount;
+    unsigned msbs = phys / lowVGPRCount;
+    unsigned lowReg;
     switch (width) {
     case 1:
-      return llvm::AMDGPU::VGPR0 + phys;
+      lowReg = llvm::AMDGPU::VGPR0 + lowPhys;
+      break;
     case 2:
-      return llvm::AMDGPU::VGPR0_VGPR1 + phys;
+      lowReg = llvm::AMDGPU::VGPR0_VGPR1 + lowPhys;
+      break;
     case 3:
-      return llvm::AMDGPU::VGPR0_VGPR1_VGPR2 + phys;
+      lowReg = llvm::AMDGPU::VGPR0_VGPR1_VGPR2 + lowPhys;
+      break;
     case 4:
-      return llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3 + phys;
+      lowReg = llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3 + lowPhys;
+      break;
     case 8:
-      return llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 +
-             phys;
+      lowReg = llvm::AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7 +
+               lowPhys;
+      break;
     case 16:
-      return llvm::AMDGPU::
-                 VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8_VGPR9_VGPR10_VGPR11_VGPR12_VGPR13_VGPR14_VGPR15 +
-             phys;
+      lowReg =
+          llvm::AMDGPU::
+              VGPR0_VGPR1_VGPR2_VGPR3_VGPR4_VGPR5_VGPR6_VGPR7_VGPR8_VGPR9_VGPR10_VGPR11_VGPR12_VGPR13_VGPR14_VGPR15 +
+          lowPhys;
+      break;
     default:
       llvm_unreachable("unsupported VGPR tuple width");
     }
+    return llvm::AMDGPU::getVGPRWithMSBs(llvm::MCRegister(lowReg), msbs, *mri)
+        .id();
   }
 
   unsigned mcAGPRReg(unsigned phys, unsigned width) const {
@@ -2418,28 +3005,38 @@ private:
         llvm::MCSymbolRefExpr::create(sym, *mcContext));
   }
 
-  int getVGPRWindowOperandIndex(unsigned opcode,
-                                const llvm::AMDGPU::OpName *table,
-                                unsigned field) const {
-    if (!table || table[field] == llvm::AMDGPU::OpName::NUM_OPERAND_NAMES)
-      return -1;
-    return llvm::AMDGPU::getNamedOperandIdx(opcode, table[field]);
-  }
-
   LogicalResult validateHighVGPREncoding(const llvm::MCInst &inst) const {
     if (!hasVGPRWindowing())
       return success();
     unsigned opcode = inst.getOpcode();
     const llvm::MCInstrDesc &desc = mcii->get(opcode);
+    if (hasUnsupportedVGPRWindowMapping(desc)) {
+      for (auto [index, operand] : llvm::enumerate(inst)) {
+        if (!operand.isReg() ||
+            !llvm::AMDGPU::getVGPRPhysRegClass(operand.getReg(), *mri) ||
+            llvm::AMDGPU::getVGPREncodingMSBs(operand.getReg(), *mri) == 0)
+          continue;
+        return emissionSource->emitError(
+                   "LLVM VGPR-window mapping is unavailable for ")
+               << mcii->getName(opcode) << " emitted by "
+               << emissionSource->getName() << ": operand " << index
+               << " has MSBs "
+               << llvm::AMDGPU::getVGPREncodingMSBs(operand.getReg(), *mri);
+      }
+      return success();
+    }
+
     auto [primary, secondary] =
         llvm::AMDGPU::getVGPRLoweringOperandTables(desc);
 
     if (secondary) {
-      for (unsigned field = 0; field < 4; ++field) {
+      for (unsigned field : llvm::seq<unsigned>(0, kVGPRWindowFieldCount)) {
         int primaryIndex = getVGPRWindowOperandIndex(opcode, primary, field);
         int secondaryIndex =
             getVGPRWindowOperandIndex(opcode, secondary, field);
-        if (primaryIndex < 0 || secondaryIndex < 0)
+        if (primaryIndex < 0 || secondaryIndex < 0 ||
+            static_cast<unsigned>(primaryIndex) >= inst.getNumOperands() ||
+            static_cast<unsigned>(secondaryIndex) >= inst.getNumOperands())
           continue;
         const llvm::MCOperand &primaryOperand = inst.getOperand(primaryIndex);
         const llvm::MCOperand &secondaryOperand =
@@ -2451,12 +3048,17 @@ private:
         if (!llvm::AMDGPU::getVGPRPhysRegClass(primaryReg, *mri) ||
             !llvm::AMDGPU::getVGPRPhysRegClass(secondaryReg, *mri))
           continue;
-        if (llvm::AMDGPU::getVGPREncodingMSBs(primaryReg, *mri) ==
-            llvm::AMDGPU::getVGPREncodingMSBs(secondaryReg, *mri))
+        unsigned primaryMSBs =
+            llvm::AMDGPU::getVGPREncodingMSBs(primaryReg, *mri);
+        unsigned secondaryMSBs =
+            llvm::AMDGPU::getVGPREncodingMSBs(secondaryReg, *mri);
+        if (primaryMSBs == secondaryMSBs)
           continue;
         return emissionSource->emitError("incompatible VGPR windows for ")
                << mcii->getName(opcode) << " emitted by "
-               << emissionSource->getName();
+               << emissionSource->getName() << ": field " << field
+               << ", operands " << primaryIndex << '/' << secondaryIndex
+               << " have MSBs " << primaryMSBs << '/' << secondaryMSBs;
       }
     }
 
@@ -2468,7 +3070,8 @@ private:
           llvm::AMDGPU::getVGPREncodingMSBs(reg, *mri) == 0)
         continue;
       bool mapped = false;
-      for (unsigned field = 0; field < 4 && !mapped; ++field)
+      for (unsigned field = 0; field < kVGPRWindowFieldCount && !mapped;
+           ++field)
         mapped = getVGPRWindowOperandIndex(opcode, primary, field) ==
                      static_cast<int>(index) ||
                  getVGPRWindowOperandIndex(opcode, secondary, field) ==
@@ -2476,7 +3079,9 @@ private:
       if (mapped)
         continue;
       return emissionSource->emitError("high VGPR operand ")
-             << index << " of " << mcii->getName(opcode) << " emitted by "
+             << index << " (MSBs "
+             << llvm::AMDGPU::getVGPREncodingMSBs(reg, *mri) << ") of "
+             << mcii->getName(opcode) << " emitted by "
              << emissionSource->getName() << " has no LLVM VGPR-window mapping";
     }
     return success();
@@ -4358,12 +4963,28 @@ private:
       return emitMCValues(sSleep(), op.getOperands());
     if (isa<waveamdmachine::SSetprioOp>(op))
       return emitMCValues(sSetprio(), op.getOperands());
+    if (auto setreg = dyn_cast<waveamdmachine::SSetregImm32B32Op>(op)) {
+      if (!waveamdmachine::SSetregImm32B32Op::isSupportedOnIsa(isaVersion))
+        return op.emitError("s_setreg_imm32_b32 unsupported on target");
+      uint64_t encoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+          setreg.getHwreg(), setreg.getOffset(), setreg.getWidth());
+      return emitMC(sSetregImm32B32(),
+                    {llvm::MCOperand::createImm(setreg.getImm()),
+                     llvm::MCOperand::createImm(encoding)});
+    }
+    if (auto clause = dyn_cast<waveamdmachine::SClauseOp>(op)) {
+      if (!waveamdmachine::SClauseOp::isSupportedOnIsa(isaVersion))
+        return op.emitError("s_clause unsupported on target");
+      unsigned immediate =
+          (clause.getLength() - 1) |
+          (clause.getBreaks() << waveamdmachine::kSClauseBreakShift);
+      return emitMC(sClause(), {llvm::MCOperand::createImm(immediate)});
+    }
     if (auto set = dyn_cast<waveamdmachine::SSetVgprMsbOp>(op)) {
       if (!hasVGPRWindowing())
         return op.emitError("s_set_vgpr_msb unsupported on target");
       auto immediate = set.getSource().getDefiningOp<waveamdmachine::ImmOp>();
-      if (!immediate ||
-          immediate.getValue() > std::numeric_limits<uint16_t>::max())
+      if (!immediate || !llvm::isUInt<16>(immediate.getValue()))
         return op.emitError("s_set_vgpr_msb immediate must fit u16");
       return emitMC(sSetVgprMsb(),
                     {llvm::MCOperand::createImm(immediate.getValue())});

@@ -14,7 +14,6 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/MathExtras.h"
 #include <array>
 #include <limits>
 
@@ -580,21 +579,26 @@ static StringRef getRegClassBudgetAttr(waveamdmachine::RegClass regClass) {
   llvm_unreachable("unknown register class");
 }
 
-static std::optional<unsigned>
-getTargetAddressableBudget(func::FuncOp func,
-                           waveamdmachine::RegClass regClass) {
+static std::optional<WaveAMDRegisterLimits>
+getTargetRegisterLimits(func::FuncOp func) {
   if (!waveamdmachine::findAMDGPUTargetModule(func))
     return std::nullopt;
   FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(func);
   if (failed(limits))
     return std::nullopt;
+  return *limits;
+}
+
+static std::optional<unsigned>
+getTargetAddressableBudget(const WaveAMDRegisterLimits &limits,
+                           waveamdmachine::RegClass regClass) {
   switch (regClass) {
   case waveamdmachine::RegClass::SGPR:
-    return limits->addressableSGPRs;
+    return limits.addressableSGPRs;
   case waveamdmachine::RegClass::VGPR:
-    return limits->addressableVGPRs;
+    return limits.addressableVGPRs;
   case waveamdmachine::RegClass::AGPR:
-    return limits->addressableAGPRs;
+    return limits.addressableAGPRs;
   case waveamdmachine::RegClass::SCC:
   case waveamdmachine::RegClass::VCC:
     return std::nullopt;
@@ -646,22 +650,72 @@ static Attribute findAncestorAttr(Operation *op, StringRef name) {
   return {};
 }
 
-static bool hasCombinedVGPRFamilyPressure(const llvm::AMDGPU::IsaVersion &isa) {
-  return isa.Major == 9 &&
-         ((isa.Minor == 0 && isa.Stepping == 10) || isa.Minor == 4 ||
-          (isa.Minor == 5 && isa.Stepping == 0));
+static RegAllocTransformBudget selectRegAllocTransformBudget(
+    func::FuncOp func, waveamdmachine::RegClass regClass,
+    const std::optional<WaveAMDRegisterLimits> &targetLimits) {
+  StringRef attrName = getRegClassBudgetAttr(regClass);
+  if (std::optional<unsigned> limit =
+          getUnsignedIntegerAttr(func.getOperation(), attrName))
+    return {*limit, "func_attr"};
+  if (std::optional<unsigned> limit =
+          getUnsignedIntegerAttr(func->getParentOp(), attrName))
+    return {*limit, "module_attr"};
+  if (targetLimits)
+    if (std::optional<unsigned> limit =
+            getTargetAddressableBudget(*targetLimits, regClass))
+      return {*limit, "target_addressable"};
+  return {getRegAllocTransformDefaultBudgetLimit(regClass), "default"};
 }
 
-static unsigned getMaxWavesPerEU(const llvm::AMDGPU::IsaVersion &isa) {
-  if (hasCombinedVGPRFamilyPressure(isa))
-    return 8;
-  if (isa.Major < 10)
-    return 10;
-  return isa.Major == 10 && isa.Minor < 3 ? 20 : 16;
+static void clampRegAllocTransformBudgetToAddressable(
+    RegAllocTransformBudget &budget,
+    const std::optional<WaveAMDRegisterLimits> &targetLimits,
+    waveamdmachine::RegClass regClass) {
+  if (!targetLimits || !targetLimits->hasTargetCapabilityContract)
+    return;
+  std::optional<unsigned> limit =
+      getTargetAddressableBudget(*targetLimits, regClass);
+  if (!limit || *limit >= budget.limit)
+    return;
+  budget = {*limit, "target_addressable"};
 }
 
-static unsigned getCombinedVGPRFamilyBudget(unsigned targetWaves) {
-  return llvm::alignDown(512 / targetWaves, 8);
+static std::optional<unsigned> getRegAllocBudgetTargetWaves(func::FuncOp func) {
+  auto intAttr =
+      dyn_cast_or_null<IntegerAttr>(findAncestorAttr(func, kTargetWavesAttr));
+  if (!intAttr)
+    return std::nullopt;
+  int64_t value = intAttr.getInt();
+  if (value <= 0 ||
+      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+    return std::nullopt;
+  return static_cast<unsigned>(value);
+}
+
+static unsigned getRegAllocOccupancyBudget(const WaveAMDRegisterLimits &limits,
+                                           waveamdmachine::RegClass regClass,
+                                           unsigned targetWaves) {
+  if (regClass == waveamdmachine::RegClass::SGPR)
+    return getMaxWaveAMDRegisterBudgetForWaves(limits.maxSGPRsForWaves,
+                                               targetWaves);
+  if (regClass == waveamdmachine::RegClass::VGPR)
+    return getMaxWaveAMDRegisterBudgetForWaves(limits.maxVGPRsForWaves,
+                                               targetWaves);
+  return 0;
+}
+
+static void clampRegAllocTransformBudgetToOccupancy(
+    RegAllocTransformBudget &budget,
+    const std::optional<WaveAMDRegisterLimits> &targetLimits,
+    waveamdmachine::RegClass regClass, std::optional<unsigned> targetWaves) {
+  if (!targetLimits || !targetLimits->hasTargetCapabilityContract ||
+      !targetWaves || *targetWaves > targetLimits->maxWavesPerEU)
+    return;
+  unsigned limit =
+      getRegAllocOccupancyBudget(*targetLimits, regClass, *targetWaves);
+  if (limit == 0 || limit >= budget.limit)
+    return;
+  budget = {limit, "target_waves"};
 }
 
 static FailureOr<std::optional<unsigned>>
@@ -686,40 +740,33 @@ getTargetWaves(func::FuncOp func, unsigned maxWavesPerEU) {
 RegAllocTransformBudget
 getRegAllocTransformBudget(func::FuncOp func,
                            waveamdmachine::RegClass regClass) {
-  StringRef attrName = getRegClassBudgetAttr(regClass);
-  if (std::optional<unsigned> limit =
-          getUnsignedIntegerAttr(func.getOperation(), attrName))
-    return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, *limit),
-            "func_attr"};
-  Operation *parent = func->getParentOp();
-  if (std::optional<unsigned> limit = getUnsignedIntegerAttr(parent, attrName))
-    return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, *limit),
-            "module_attr"};
-  if (std::optional<unsigned> limit =
-          getTargetAddressableBudget(func, regClass))
-    return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, *limit),
-            "target_addressable"};
-  unsigned defaultLimit = getRegAllocTransformDefaultBudgetLimit(regClass);
-  return {adjustSGPRBudgetForExecIfSaveStack(func, regClass, defaultLimit),
-          "default"};
+  std::optional<WaveAMDRegisterLimits> targetLimits =
+      getTargetRegisterLimits(func);
+  RegAllocTransformBudget budget =
+      selectRegAllocTransformBudget(func, regClass, targetLimits);
+  clampRegAllocTransformBudgetToAddressable(budget, targetLimits, regClass);
+  clampRegAllocTransformBudgetToOccupancy(budget, targetLimits, regClass,
+                                          getRegAllocBudgetTargetWaves(func));
+  budget.limit =
+      adjustSGPRBudgetForExecIfSaveStack(func, regClass, budget.limit);
+  return budget;
 }
 
 FailureOr<std::optional<RegAllocTransformBudget>>
 getRegAllocTransformVGPRFamilyBudget(func::FuncOp func) {
   if (!findAncestorAttr(func, kTargetWavesAttr))
     return std::optional<RegAllocTransformBudget>();
-  FailureOr<llvm::AMDGPU::IsaVersion> isa =
-      waveamdmachine::getAMDGPUTargetIsaVersion(
-          func, "regalloc transform target_waves budget");
-  if (failed(isa))
+  FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(func);
+  if (failed(limits))
     return failure();
   FailureOr<std::optional<unsigned>> targetWaves =
-      getTargetWaves(func, getMaxWavesPerEU(*isa));
+      getTargetWaves(func, limits->maxWavesPerEU);
   if (failed(targetWaves))
     return failure();
-  if (!*targetWaves || !hasCombinedVGPRFamilyPressure(*isa))
+  if (!*targetWaves || !limits->agprCountsAgainstVGPRs)
     return std::optional<RegAllocTransformBudget>();
-  unsigned limit = getCombinedVGPRFamilyBudget(**targetWaves);
+  unsigned limit = getMaxWaveAMDRegisterBudgetForWaves(limits->maxVGPRsForWaves,
+                                                       **targetWaves);
   if (limit == 0)
     return func.emitError("regalloc transform ")
            << kTargetWavesAttr << " has no VGPR-family budget for this target";

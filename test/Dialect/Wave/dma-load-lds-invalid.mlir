@@ -188,9 +188,9 @@ func.func @make_buffer_element_mismatch(%p: !wave.ptr<#wave.global, i32>, %r: i3
 
 // -----
 
-func.func @make_buffer_range_not_i32(%p: !wave.ptr<#wave.global, i32>, %r: i64) {
-  // expected-error @below {{range must be i32 bytes}}
-  %b = waveamd.make_buffer %p, %r : !wave.ptr<#wave.global, i32>, i64 -> !wave.ptr<#waveamd.buffer, i32>
+func.func @make_buffer_range_wrong_width(%p: !wave.ptr<#wave.global, i32>, %r: i16) {
+  // expected-error @below {{range must be i32 or i64 bytes}}
+  %b = waveamd.make_buffer %p, %r : !wave.ptr<#wave.global, i32>, i16 -> !wave.ptr<#waveamd.buffer, i32>
   return
 }
 

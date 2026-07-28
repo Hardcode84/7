@@ -52,6 +52,18 @@ static bool isAllocatedClass(waveamdmachine::RegType type) {
          wave::isWaveAMDAGPR(type);
 }
 
+static std::optional<unsigned>
+getAddressableRegisterCount(const wave::WaveAMDRegisterLimits &limits,
+                            waveamdmachine::RegType type) {
+  if (wave::isWaveAMDSGPR(type))
+    return limits.addressableSGPRs;
+  if (wave::isWaveAMDVGPR(type))
+    return limits.addressableVGPRs;
+  if (wave::isWaveAMDAGPR(type))
+    return limits.addressableAGPRs;
+  return std::nullopt;
+}
+
 static StringRef getRegClassName(waveamdmachine::RegType type) {
   if (wave::isWaveAMDSGPR(type))
     return "SGPR";
@@ -87,8 +99,42 @@ static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
   return lhs.getDefiningOp()->getName() == rhs.getDefiningOp()->getName();
 }
 
-static LogicalResult verifyValueAllocated(Value value, func::FuncOp func,
-                                          StringRef consumer) {
+static LogicalResult
+verifyTargetRegisterRange(Operation *diagOp, waveamdmachine::RegType type,
+                          StringRef consumer,
+                          const wave::WaveAMDRegisterLimits &targetLimits) {
+  std::optional<unsigned> limit =
+      getAddressableRegisterCount(targetLimits, type);
+  if (!limit)
+    return diagOp->emitError()
+           << consumer << " cannot verify target register addressability";
+  uint64_t base = static_cast<uint64_t>(type.getIndex());
+  uint64_t end = base + static_cast<uint64_t>(type.getWidth());
+  if (end <= *limit)
+    return success();
+  return diagOp->emitError() << consumer << " found " << getRegClassName(type)
+                             << " register range [" << base << ", " << end
+                             << ") beyond target addressable count " << *limit;
+}
+
+static LogicalResult verifyTargetVGPRTupleAlignment(
+    Operation *diagOp, waveamdmachine::RegType type, StringRef consumer,
+    const wave::WaveAMDRegisterLimits &targetLimits) {
+  if (!wave::isWaveAMDVGPR(type) || type.getWidth() <= 1 ||
+      targetLimits.vgprTupleAlignment <= 1)
+    return success();
+  uint64_t base = static_cast<uint64_t>(type.getIndex());
+  if (base % targetLimits.vgprTupleAlignment == 0)
+    return success();
+  return diagOp->emitError()
+         << consumer << " found VGPR tuple at v" << base << " with width "
+         << type.getWidth() << " misaligned; target requires base alignment "
+         << targetLimits.vgprTupleAlignment;
+}
+
+static LogicalResult
+verifyValueAllocated(Value value, func::FuncOp func, StringRef consumer,
+                     const wave::WaveAMDRegisterLimits *targetLimits) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!type || wave::isWaveAMDFlagReg(type))
     return success();
@@ -100,31 +146,38 @@ static LogicalResult verifyValueAllocated(Value value, func::FuncOp func,
   if (type.getIndex() < 0)
     return diagOp->emitError()
            << consumer << " requires allocated register values";
-  return success();
+  if (!targetLimits)
+    return success();
+  if (failed(verifyTargetRegisterRange(diagOp, type, consumer, *targetLimits)))
+    return failure();
+  return verifyTargetVGPRTupleAlignment(diagOp, type, consumer, *targetLimits);
 }
 
-static LogicalResult verifyOperandsAllocated(Operation *op, func::FuncOp func,
-                                             StringRef consumer) {
+static LogicalResult
+verifyOperandsAllocated(Operation *op, func::FuncOp func, StringRef consumer,
+                        const wave::WaveAMDRegisterLimits *targetLimits) {
   for (Value operand : op->getOperands())
-    if (failed(verifyValueAllocated(operand, func, consumer)))
+    if (failed(verifyValueAllocated(operand, func, consumer, targetLimits)))
       return failure();
   return success();
 }
 
-static LogicalResult verifyResultsAllocated(Operation *op, func::FuncOp func,
-                                            StringRef consumer) {
+static LogicalResult
+verifyResultsAllocated(Operation *op, func::FuncOp func, StringRef consumer,
+                       const wave::WaveAMDRegisterLimits *targetLimits) {
   for (Value result : op->getResults())
-    if (failed(verifyValueAllocated(result, func, consumer)))
+    if (failed(verifyValueAllocated(result, func, consumer, targetLimits)))
       return failure();
   return success();
 }
 
-static LogicalResult verifyBlockArgsAllocated(Operation *op, func::FuncOp func,
-                                              StringRef consumer) {
+static LogicalResult
+verifyBlockArgsAllocated(Operation *op, func::FuncOp func, StringRef consumer,
+                         const wave::WaveAMDRegisterLimits *targetLimits) {
   for (Region &region : op->getRegions()) {
     for (Block &block : region) {
       for (BlockArgument arg : block.getArguments())
-        if (failed(verifyValueAllocated(arg, func, consumer)))
+        if (failed(verifyValueAllocated(arg, func, consumer, targetLimits)))
           return failure();
     }
   }
@@ -133,22 +186,25 @@ static LogicalResult verifyBlockArgsAllocated(Operation *op, func::FuncOp func,
 
 static LogicalResult
 verifyOpValuesAllocated(Operation *op, func::FuncOp func, StringRef consumer,
-                        wave::WaveAMDRegAllocVerificationScope scope) {
+                        wave::WaveAMDRegAllocVerificationScope scope,
+                        const wave::WaveAMDRegisterLimits *targetLimits) {
   if (scope == wave::WaveAMDRegAllocVerificationScope::AllValues &&
-      failed(verifyOperandsAllocated(op, func, consumer)))
+      failed(verifyOperandsAllocated(op, func, consumer, targetLimits)))
     return failure();
-  if (failed(verifyResultsAllocated(op, func, consumer)))
+  if (failed(verifyResultsAllocated(op, func, consumer, targetLimits)))
     return failure();
   if (scope == wave::WaveAMDRegAllocVerificationScope::Results)
     return success();
-  return verifyBlockArgsAllocated(op, func, consumer);
+  return verifyBlockArgsAllocated(op, func, consumer, targetLimits);
 }
 
 static LogicalResult
 verifyValuesAllocated(func::FuncOp func, StringRef consumer,
-                      wave::WaveAMDRegAllocVerificationScope scope) {
+                      wave::WaveAMDRegAllocVerificationScope scope,
+                      const wave::WaveAMDRegisterLimits *targetLimits) {
   WalkResult walk = func.walk([&](Operation *op) {
-    return failed(verifyOpValuesAllocated(op, func, consumer, scope))
+    return failed(
+               verifyOpValuesAllocated(op, func, consumer, scope, targetLimits))
                ? WalkResult::interrupt()
                : WalkResult::advance();
   });
@@ -679,6 +735,37 @@ verifyNoInterference(func::FuncOp func,
   return verifyNoRangeInterference(func, ranges, positions, consumer, regClass);
 }
 
+static FailureOr<std::optional<wave::WaveAMDRegisterLimits>>
+getVerificationTargetLimits(func::FuncOp func) {
+  if (!waveamdmachine::findAMDGPUTargetModule(func))
+    return std::optional<wave::WaveAMDRegisterLimits>();
+  FailureOr<wave::WaveAMDRegisterLimits> limits =
+      wave::getWaveAMDRegisterLimits(func);
+  if (failed(limits))
+    return failure();
+  return std::optional<wave::WaveAMDRegisterLimits>(*limits);
+}
+
+static LogicalResult verifyRegisterInterference(
+    func::FuncOp func,
+    const wave::WaveAMDLiveIntervalBuildResult &builtIntervals,
+    StringRef consumer) {
+  wave::WaveAMDKernelEntryRegs regs = wave::getWaveAMDKernelEntryRegs(func);
+  if (failed(verifyNoInterference(func, builtIntervals.intervals.sgprs,
+                                  builtIntervals.orderedOps,
+                                  builtIntervals.positions, consumer, "SGPR",
+                                  regs.reservedSGPRs, regs)))
+    return failure();
+  if (failed(verifyNoInterference(func, builtIntervals.intervals.vgprs,
+                                  builtIntervals.orderedOps,
+                                  builtIntervals.positions, consumer, "VGPR",
+                                  regs.reservedVGPRs, regs)))
+    return failure();
+  return verifyNoInterference(
+      func, builtIntervals.intervals.agprs, builtIntervals.orderedOps,
+      builtIntervals.positions, consumer, "AGPR", /*reserved=*/0, regs);
+}
+
 } // namespace
 
 StringRef mlir::wave::getWaveAMDRegAllocOverflowedAttrName() {
@@ -708,7 +795,12 @@ mlir::wave::verifyWaveAMDRegAllocation(func::FuncOp func, StringRef consumer,
     return success();
   if (failed(failIfWaveAMDRegAllocOverflowed(func, consumer)))
     return failure();
-  if (failed(verifyValuesAllocated(func, consumer, scope)))
+  FailureOr<std::optional<WaveAMDRegisterLimits>> targetLimits =
+      getVerificationTargetLimits(func);
+  if (failed(targetLimits))
+    return failure();
+  if (failed(verifyValuesAllocated(func, consumer, scope,
+                                   *targetLimits ? &**targetLimits : nullptr)))
     return failure();
   if (failed(verifyFixedLoopCarryStorage(func, consumer)))
     return failure();
@@ -716,21 +808,7 @@ mlir::wave::verifyWaveAMDRegAllocation(func::FuncOp func, StringRef consumer,
       buildAllocatedWaveAMDLiveIntervals(func);
   if (failed(builtIntervals))
     return failure();
-  wave::WaveAMDKernelEntryRegs regs = wave::getWaveAMDKernelEntryRegs(func);
-  if (failed(verifyNoInterference(func, builtIntervals->intervals.sgprs,
-                                  builtIntervals->orderedOps,
-                                  builtIntervals->positions, consumer, "SGPR",
-                                  regs.reservedSGPRs, regs)))
-    return failure();
-  if (failed(verifyNoInterference(func, builtIntervals->intervals.vgprs,
-                                  builtIntervals->orderedOps,
-                                  builtIntervals->positions, consumer, "VGPR",
-                                  regs.reservedVGPRs, regs)))
-    return failure();
-  return verifyNoInterference(func, builtIntervals->intervals.agprs,
-                              builtIntervals->orderedOps,
-                              builtIntervals->positions, consumer, "AGPR",
-                              /*reserved=*/0, regs);
+  return verifyRegisterInterference(func, *builtIntervals, consumer);
 }
 
 LogicalResult mlir::wave::verifyWaveAMDRegAllocations(

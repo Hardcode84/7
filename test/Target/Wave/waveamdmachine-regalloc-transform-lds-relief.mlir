@@ -885,14 +885,57 @@ module attributes {transform.with_named_sequence} {
     // CHECK-LABEL: func.func @lds_relief_after_fixed_and_dynamic_lds(
     // CHECK-SAME: wave.dynamic_lds_size = 512 : i64
     // CHECK-SAME: wave.lds_size = 2048 : i64
-    // CHECK-SAME: waveamdmachine.regalloc_transform_state
-    // CHECK-NOT: waveamdmachine.lds_spill_bytes
-    // CHECK-NOT: waveamdmachine.ds_store_addtid_b32
-    // CHECK-NOT: waveamdmachine.ds_load_addtid_b32
+    // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[WAVE_BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
+    // CHECK: [[USER_BYTES:%.*]] = waveamdmachine.imm 2560
+    // CHECK: [[SPILL_BASE:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[WAVE_BASE]], [[USER_BYTES]]
+    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[SPILL_BASE]]
+    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
+    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[SPILL_BASE]]
+    // CHECK: waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
     func.func @lds_relief_after_fixed_and_dynamic_lds()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     wave.lds_size = 2048 : i64,
                     wave.dynamic_lds_size = 512 : i64,
+                    waveamdmachine.vgpr_count_max = 3 : i64,
+                    waveamdmachine.agpr_count_max = 0 : i64} {
+      %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
+      %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
+      %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
+      %spill, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %a, %tok2 = waveamdmachine.global_load_b32 %off, %base after %tok1
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %b, %tok3 = waveamdmachine.global_load_b32 %off, %base after %tok2
+          : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.mem.token)
+            -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      %sum = waveamdmachine.v_add_u32 %a, %b
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      %use = waveamdmachine.v_add_u32 %spill, %sum
+          : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 1>
+      waveamdmachine.s_endpgm
+      return
+    }
+
+    // CHECK-LABEL: func.func @lds_relief_rejects_mixed_lds_over_budget(
+    // CHECK-SAME: wave.dynamic_lds_size = 1 : i64
+    // CHECK-SAME: wave.lds_size = 261888 : i64
+    // CHECK-SAME: waveamdmachine.regalloc_transform_state
+    // CHECK-NOT: waveamdmachine.lds_spill_bytes
+    // CHECK-NOT: waveamdmachine.ds_store_addtid_b32
+    // CHECK-NOT: waveamdmachine.ds_load_addtid_b32
+    func.func @lds_relief_rejects_mixed_lds_over_budget()
+        attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    wave.lds_size = 261888 : i64,
+                    wave.dynamic_lds_size = 1 : i64,
                     waveamdmachine.vgpr_count_max = 3 : i64,
                     waveamdmachine.agpr_count_max = 0 : i64} {
       %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>

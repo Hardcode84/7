@@ -38,6 +38,32 @@ module attributes {transform.with_named_sequence} {
           ]}} {
       return
     }
+
+    // CHECK-LABEL: func.func @fixed_range_addition_overflow(
+    // CHECK-NOT: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: limit = 256 : i64
+    // CHECK-SAME: reason = "pressure"
+    // CHECK-SAME: request = 4294967295 : i64
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @fixed_range_addition_overflow(
+        %arg0: !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 2>
+        attributes {waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{end = 1 : i64, offset = 0 : i64, start = 0 : i64,
+                         value = 0 : i64, width = 1 : i64}],
+             width = 4294967295 : i64}
+          ],
+          values = [
+            {class = "vgpr", end = 1 : i64, fixed = 2 : i64, id = 0 : i64,
+             kind = "block_arg", number = 0 : i64, offset = 0 : i64,
+             path = [0 : i64, 0 : i64],
+             ranges = [{end = 1 : i64, start = 0 : i64}],
+             set = 0 : i64, start = 0 : i64, width = 1 : i64}
+          ]}} {
+      return %arg0 : !waveamdmachine.reg<vgpr, 1, 2>
+    }
   }
 
   module @combined_payload_module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {

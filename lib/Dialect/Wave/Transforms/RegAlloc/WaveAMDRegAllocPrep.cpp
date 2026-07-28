@@ -11,6 +11,7 @@
 #include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocTransformUtils.h"
+#include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/Builders.h"
@@ -43,6 +44,16 @@ static bool isVGPR(waveamdmachine::RegType type) {
 
 static bool isAGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::AGPR;
+}
+
+static unsigned getRequiredTupleAlignment(waveamdmachine::RegType type,
+                                          unsigned vgprTupleAlignment) {
+  unsigned width = type.getWidth();
+  if (width <= 1)
+    return 1;
+  if (isVGPR(type) && vgprTupleAlignment)
+    return vgprTupleAlignment;
+  return std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
 }
 
 static std::optional<waveamdmachine::RegType> trackedRegType(Value v) {
@@ -778,7 +789,8 @@ static bool addAlignedTupleViewElement(Value element,
 
 static std::optional<AlignedTupleView>
 getAlignedTupleView(waveamdmachine::TupleFromElementsOp op,
-                    const ToElementsSourceMap &source) {
+                    const ToElementsSourceMap &source,
+                    unsigned vgprTupleAlignment) {
   AlignedTupleViewState state;
   for (Value element : op.getElements())
     if (!addAlignedTupleViewElement(element, source, state))
@@ -787,15 +799,16 @@ getAlignedTupleView(waveamdmachine::TupleFromElementsOp op,
     return std::nullopt;
   if (!state.sourceOffset)
     return std::nullopt;
-  unsigned tupleWidth =
-      cast<waveamdmachine::RegType>(op.getTuple().getType()).getWidth();
+  waveamdmachine::RegType tupleType =
+      cast<waveamdmachine::RegType>(op.getTuple().getType());
+  unsigned tupleWidth = tupleType.getWidth();
   unsigned sourceWidth =
       cast<waveamdmachine::RegType>(state.sourceTuple.getType()).getWidth();
   if (state.consumerOffset != tupleWidth)
     return std::nullopt;
   if (*state.sourceOffset + tupleWidth > sourceWidth)
     return std::nullopt;
-  unsigned alignment = std::max<unsigned>(1, llvm::PowerOf2Ceil(tupleWidth));
+  unsigned alignment = getRequiredTupleAlignment(tupleType, vgprTupleAlignment);
   if (*state.sourceOffset % alignment != 0)
     return std::nullopt;
   return AlignedTupleView{state.sourceTuple, *state.sourceOffset};
@@ -864,10 +877,11 @@ getReanchorShift(waveamdmachine::TupleFromElementsOp op, Value element,
   return slotIt->second - sourceIt->second.second;
 }
 
-static bool
-isReanchorableSource(waveamdmachine::TupleFromElementsOp op, Value sourceTuple,
-                     Value representative, const ToElementsSourceMap &source,
-                     const DenseMap<Value, unsigned> &consumerSlots) {
+static bool isReanchorableSource(waveamdmachine::TupleFromElementsOp op,
+                                 Value sourceTuple, Value representative,
+                                 const ToElementsSourceMap &source,
+                                 const DenseMap<Value, unsigned> &consumerSlots,
+                                 unsigned vgprTupleAlignment) {
   auto split =
       representative.getDefiningOp<waveamdmachine::TupleToElementsOp>();
   if (!split)
@@ -884,13 +898,20 @@ isReanchorableSource(waveamdmachine::TupleFromElementsOp op, Value sourceTuple,
       return false;
     shift = elementShift;
   }
-  return shift.has_value();
+  if (!shift)
+    return false;
+  waveamdmachine::RegType sourceType =
+      cast<waveamdmachine::RegType>(sourceTuple.getType());
+  if (!isVGPR(sourceType) || !vgprTupleAlignment)
+    return true;
+  return *shift % vgprTupleAlignment == 0;
 }
 
 static DenseSet<Value>
 getReanchorableSources(waveamdmachine::TupleFromElementsOp op,
                        const ToElementsSourceMap &source,
-                       const DenseMap<Value, unsigned> &consumerSlots) {
+                       const DenseMap<Value, unsigned> &consumerSlots,
+                       unsigned vgprTupleAlignment) {
   DenseMap<Value, Value> representatives;
   for (Value element : op.getElements()) {
     auto sourceIt = source.find(element);
@@ -901,7 +922,7 @@ getReanchorableSources(waveamdmachine::TupleFromElementsOp op,
   DenseSet<Value> result;
   for (auto [sourceTuple, representative] : representatives)
     if (isReanchorableSource(op, sourceTuple, representative, source,
-                             consumerSlots))
+                             consumerSlots, vgprTupleAlignment))
       result.insert(sourceTuple);
   return result;
 }
@@ -1040,19 +1061,18 @@ static FailureOr<Value> rewriteTupleElementForSharing(
   return *duplicate;
 }
 
-static LogicalResult
-rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
-                              OpBuilder &builder,
-                              DenseMap<Value, unsigned> &anchorSlot,
-                              const ToElementsSourceMap &toElementsSource,
-                              DenseSet<Value> &consumedByFromElements,
-                              KilledOperandReuseIsaCache &isaCache) {
+static LogicalResult rewriteFromElementsForSharing(
+    waveamdmachine::TupleFromElementsOp op, OpBuilder &builder,
+    DenseMap<Value, unsigned> &anchorSlot,
+    const ToElementsSourceMap &toElementsSource,
+    DenseSet<Value> &consumedByFromElements,
+    KilledOperandReuseIsaCache &isaCache, unsigned vgprTupleAlignment) {
   builder.setInsertionPoint(op);
   DenseMap<Value, unsigned> consumerSlots = getTupleElementSlots(op);
-  DenseSet<Value> reanchorableSources =
-      getReanchorableSources(op, toElementsSource, consumerSlots);
+  DenseSet<Value> reanchorableSources = getReanchorableSources(
+      op, toElementsSource, consumerSlots, vgprTupleAlignment);
   std::optional<AlignedTupleView> alignedView =
-      getAlignedTupleView(op, toElementsSource);
+      getAlignedTupleView(op, toElementsSource, vgprTupleAlignment);
   if (alignedView &&
       !canPreserveAlignedView(op, *alignedView, toElementsSource, isaCache)) {
     reanchorableSources.erase(alignedView->sourceTuple);
@@ -1088,7 +1108,8 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
 
 static LogicalResult
 splitTupleElementSharing(func::FuncOp func,
-                         KilledOperandReuseIsaCache &isaCache) {
+                         KilledOperandReuseIsaCache &isaCache,
+                         unsigned vgprTupleAlignment) {
   OpBuilder builder(func.getContext());
   DenseMap<Value, unsigned> anchorSlot;
   ToElementsSourceMap toElementsSource;
@@ -1109,9 +1130,9 @@ splitTupleElementSharing(func::FuncOp func,
       fromElementsOps.push_back(fromElements);
   });
   for (waveamdmachine::TupleFromElementsOp op : fromElementsOps) {
-    if (failed(rewriteFromElementsForSharing(op, builder, anchorSlot,
-                                             toElementsSource,
-                                             consumedByFromElements, isaCache)))
+    if (failed(rewriteFromElementsForSharing(
+            op, builder, anchorSlot, toElementsSource, consumedByFromElements,
+            isaCache, vgprTupleAlignment)))
       return failure();
   }
   return success();
@@ -1185,6 +1206,13 @@ static LogicalResult materializeConditionalYieldCopies(func::FuncOp func) {
 } // namespace
 
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  unsigned vgprTupleAlignment = 0;
+  if (waveamdmachine::findAMDGPUTargetModule(func)) {
+    FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(func);
+    if (failed(limits))
+      return failure();
+    vgprTupleAlignment = limits->vgprTupleAlignment;
+  }
   eraseRegAfterOps(func);
   if (failed(splitLiveUpdateTupleBases(func)))
     return failure();
@@ -1199,5 +1227,5 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   KilledOperandReuseIsaCache isaCache(func);
   if (failed(splitRequiredKilledOperandInputs(func, isaCache)))
     return failure();
-  return splitTupleElementSharing(func, isaCache);
+  return splitTupleElementSharing(func, isaCache, vgprTupleAlignment);
 }

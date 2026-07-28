@@ -27,7 +27,9 @@ struct WaveAMDRegisterLimits {
   unsigned sgprAllocGranule = 0;
   unsigned vgprAllocGranule = 0;
   unsigned agprAllocGranule = 0;
+  unsigned vgprTupleAlignment = 0;
   unsigned maxWavesPerEU = 0;
+  bool hasTargetCapabilityContract = false;
   bool agprCountsAgainstVGPRs = false;
 };
 

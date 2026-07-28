@@ -87,8 +87,6 @@ getLDSPlansForValue(const LDSReliefPlanningState &planning,
                     waveamdmachine::RegType type, unsigned extraReservedBytes) {
   if (type.getWidth() == 0)
     return std::nullopt;
-  if (planning.fixedLDS != 0 && planning.dynamicLDS != 0)
-    return std::nullopt;
   SmallVector<wave::regalloc::LDSSpillPlan, 4> plans;
   plans.reserve(type.getWidth());
   unsigned reserved = planning.committedBytes + extraReservedBytes;
@@ -331,7 +329,9 @@ getLDSBaseBytes(func::FuncOp func, const LDSReliefCandidate &candidate) {
   std::optional<unsigned> baseBytes;
   for (const LDSReliefSlot &slot : candidate.slots) {
     for (wave::regalloc::LDSSpillPlan plan : slot.plan) {
-      unsigned planBase = plan.existingFixedBytes;
+      if (plan.slotBase < plan.reservedSpillBytes)
+        return func.emitError("LDS relief spill slot precedes its base");
+      unsigned planBase = plan.slotBase - plan.reservedSpillBytes;
       if (!baseBytes) {
         baseBytes = planBase;
         continue;
