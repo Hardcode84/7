@@ -45,8 +45,6 @@ static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize,
                                const waveamdmachine::ArchData &arch) {
   if (func.isExternal())
     return success();
-  if (!func->hasAttr(kEnableSplitBarriersAttr))
-    return success();
 
   std::optional<unsigned> expectedWaves =
       split_barrier_detail::getExpectedWaves(func, wavefrontSize);
@@ -97,6 +95,14 @@ struct WaveAMDSplitBarriersPass
 
   void runOnOperation() override {
     Operation *root = getOperation();
+    SmallVector<func::FuncOp> functions;
+    root->walk([&](func::FuncOp func) {
+      if (func->hasAttr(kEnableSplitBarriersAttr))
+        functions.push_back(func);
+    });
+    if (functions.empty())
+      return;
+
     FailureOr<unsigned> wavefrontSize =
         waveamdmachine::getAMDGPUWavefrontSize(root, "waveamd-split-barriers");
     if (failed(wavefrontSize))
@@ -112,13 +118,9 @@ struct WaveAMDSplitBarriersPass
     }
     const waveamdmachine::ArchData &arch = waveamdmachine::getArchData(*isa);
 
-    WalkResult result = root->walk([&](func::FuncOp func) {
+    for (func::FuncOp func : functions)
       if (failed(splitFunc(func, *wavefrontSize, arch)))
-        return WalkResult::interrupt();
-      return WalkResult::advance();
-    });
-    if (result.wasInterrupted())
-      return signalPassFailure();
+        return signalPassFailure();
   }
 };
 

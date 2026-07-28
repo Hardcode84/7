@@ -140,6 +140,22 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// CHECK-LABEL: func.func @keeps_disabled_on_gfx1250(
+// CHECK: waveamdmachine.s_barrier
+// CHECK-NOT: waveamdmachine.barrier_init
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+  func.func @keeps_disabled_on_gfx1250()
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
+                  wave.waves_per_workgroup = 4 : i64} {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %ready = waveamdmachine.s_barrier %root
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    return
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @keeps_unknown_workgroup(
 // CHECK: waveamdmachine.s_barrier
 // CHECK-NOT: waveamdmachine.barrier_init
