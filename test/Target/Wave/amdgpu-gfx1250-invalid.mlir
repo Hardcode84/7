@@ -1,0 +1,206 @@
+// RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
+// RUN:   wave-translate --wave-to-amdgpu-asm --verify-diagnostics \
+// RUN:     --split-input-file %s
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @old_wait() {
+  // expected-error @below {{s_waitcnt requires gfx1250 split-wait lowering}}
+  waveamdmachine.s_waitcnt vmcnt(0)
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @old_store_wait() {
+  // expected-error @below {{s_waitcnt_vscnt requires gfx1250 split-wait lowering}}
+  waveamdmachine.s_waitcnt_vscnt vscnt(0)
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @old_lds_dma() {
+  %off = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %base = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 2, 0>
+  %m0_source = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 1, 2>
+  %m0 = waveamdmachine.s_mov_m0 %m0_source
+      : (!waveamdmachine.reg<sgpr, 1, 2>)
+        -> !waveamdmachine.m0
+  %dependency = waveamdmachine.token
+      : !waveamdmachine.mem.token
+  // expected-error @below {{no gfx1250 MC mapping for waveamdmachine.global_load_lds_b32}}
+  %token = waveamdmachine.global_load_lds_b32
+      %off, %base, %m0 after %dependency
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 2, 0>,
+         !waveamdmachine.m0,
+         !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @unsupported_cache() {
+  %off = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %base = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 2, 0>
+  // expected-error @below {{gfx1250 load cache modifier is not implemented: cg}}
+  %value = waveamdmachine.global_load_b32 %off, %base
+      {cache = #waveamd.load_cache<cg>}
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 2, 0>)
+        -> !waveamdmachine.reg<vgpr, 1, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @wide_switch_immediate() {
+  %mode = waveamdmachine.imm 65536 : !waveamdmachine.imm
+  // expected-error @below {{s_set_vgpr_msb immediate must fit u16}}
+  waveamdmachine.s_set_vgpr_msb %mode
+      : (!waveamdmachine.imm) -> ()
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @truncated_switch_immediate() {
+  %mode = waveamdmachine.imm 4294967296 : !waveamdmachine.imm
+  // expected-error @below {{s_set_vgpr_msb immediate must fit u16}}
+  waveamdmachine.s_set_vgpr_msb %mode
+      : (!waveamdmachine.imm) -> ()
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @out_of_range_vgpr() {
+  %src0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %src1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %src2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 2>
+  // expected-error @below {{VGPR range v1024:v1024 exceeds LLVM addressable count 1024}}
+  %result = waveamdmachine.v_fma_f32 %src0, %src1, %src2
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 1024>
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @unmapped_high_vgpr() {
+  %src = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 300>
+  // expected-error @below {{high VGPR operand 1 of S_MOV_B32_gfx12 emitted by waveamdmachine.s_mov_b32 has no LLVM VGPR-window mapping}}
+  waveamdmachine.s_mov_b32 "s0", %src
+      : (!waveamdmachine.reg<vgpr, 1, 300>) -> ()
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @unaligned_wide_vgpr() {
+  %off = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %base = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 2, 0>
+  // expected-error @below {{LLVM MC register-class mismatch for GLOBAL_LOAD_DWORDX2_SADDR_gfx12 operand 0}}
+  %value = waveamdmachine.global_load_b64 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 2, 0>)
+        -> !waveamdmachine.reg<vgpr, 2, 1>
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"
+} {
+
+func.func @switch_without_windows() {
+  %mode = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-error @below {{s_set_vgpr_msb unsupported on target}}
+  waveamdmachine.s_set_vgpr_msb %mode
+      : (!waveamdmachine.imm) -> ()
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+// expected-error @below {{gfx1250 kernel ABI emission is not implemented}}
+func.func @kernel_abi() attributes {wave.kernel} {
+  waveamdmachine.s_endpgm
+  return
+}
+
+}

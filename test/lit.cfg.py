@@ -216,6 +216,7 @@ tools = [
     ToolSubst("wave-target-info", unresolved="fatal"),
     ToolSubst("wave-translate", unresolved="fatal"),
     ToolSubst("llvm-mc", unresolved="ignore"),
+    ToolSubst("llvm-objdump", unresolved="ignore"),
     ToolSubst("ld.lld", unresolved="ignore"),
     ToolSubst("llvm-readelf", unresolved="ignore"),
     ToolSubst("mlir-runner", unresolved="ignore"),

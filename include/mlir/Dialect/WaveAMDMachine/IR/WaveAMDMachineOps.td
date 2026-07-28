@@ -25,7 +25,12 @@ defvar WaveAMDMachine_Gfx90APlus =
 defvar WaveAMDMachine_Gfx940Plus =
     "isa.Major == 9 && (isa.Minor == 4 || " #
     "(isa.Minor == 5 && isa.Stepping == 0))";
-defvar WaveAMDMachine_BitOp3Target = WaveAMDMachine_Gfx940Plus;
+defvar WaveAMDMachine_Gfx1250 =
+    "isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_BitOp3Target =
+    "(isa.Major == 9 && (isa.Minor == 4 || " #
+    "(isa.Minor == 5 && isa.Stepping == 0))) || " #
+    "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
 defvar WaveAMDMachine_Gfx950 =
     "isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0";
 defvar WaveAMDMachine_Permlane32SwapTarget = WaveAMDMachine_Gfx950;
@@ -34,7 +39,8 @@ defvar WaveAMDMachine_VMovB64Target =
     "(isa.Minor == 5 && isa.Stepping == 0))) || " #
     "(isa.Major == 12 && isa.Minor == 5)";
 defvar WaveAMDMachine_FlatScratchTarget =
-    "isa.Major == 11 || (isa.Major == 9 && isa.Minor >= 4)";
+    "isa.Major == 11 || (isa.Major == 9 && isa.Minor >= 4) || " #
+    "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
 defvar WaveAMDMachine_AGPRTarget =
     "isa.Major == 9 && ((isa.Minor == 0 && " #
     "(isa.Stepping == 8 || isa.Stepping == 10)) || " #
@@ -618,7 +624,9 @@ class WaveAMDMachine_BinaryU32Result<string mnemonic>
 
 class WaveAMDMachine_PackedBinaryResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
-  let archPredicate = "isa.Major == 9 || isa.Major == 11";
+  let archPredicate =
+      "isa.Major == 9 || isa.Major == 11 || " #
+      "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
   let arguments = (ins WaveAMDMachine_VGPR1:$lhs,
                        WaveAMDMachine_VGPR1:$rhs,
                        DefaultValuedAttr<BoolAttr, "false">:$clamp,
@@ -632,7 +640,9 @@ class WaveAMDMachine_PackedBinaryResult<string mnemonic>
 
 class WaveAMDMachine_PackedTernaryResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
-  let archPredicate = "isa.Major == 9 || isa.Major == 11";
+  let archPredicate =
+      "isa.Major == 9 || isa.Major == 11 || " #
+      "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
   let arguments = (ins WaveAMDMachine_VGPR1:$a,
                        WaveAMDMachine_VGPR1:$b,
                        WaveAMDMachine_VGPR1:$c,
@@ -1205,7 +1215,9 @@ def WaveAMDMachine_VCvtPkRtzF16F32Op
                                WaveAMDMachine_VGPR1,
                                WaveAMDMachine_VGPR1,
                                [WaveAMDMachine_VALU]> {
-  let archPredicate = "isa.Major == 8 || isa.Major == 9 || isa.Major == 11";
+  let archPredicate =
+      "isa.Major == 8 || isa.Major == 9 || isa.Major == 11 || " #
+      "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
 }
 def WaveAMDMachine_VCvtPkF16F32Op
     : WaveAMDMachine_BinaryResult<"v_cvt_pk_f16_f32",
@@ -1570,6 +1582,12 @@ def WaveAMDMachine_SSleepOp
 def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
                                                              WaveAMDMachine_Imm,
                                                              [WaveAMDMachine_SALU]>;
+def WaveAMDMachine_SSetVgprMsbOp
+    : WaveAMDMachine_UnaryNoResult<"s_set_vgpr_msb",
+                                   WaveAMDMachine_Imm,
+                                   [WaveAMDMachine_SALU]> {
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
                                                          WaveAMDMachine_Imm,
                                                          [WaveAMDMachine_SALU]>;
@@ -2337,7 +2355,9 @@ def WaveAMDMachine_BufferLoadU8D16Op
     : WaveAMDMachine_BufferMemoryOp<"buffer_load_u8_d16", [WaveAMDMachine_VMEMLoad, MemoryEffects<[MemRead]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "buffer unsigned 8-bit D16 low-half load";
-  let archPredicate = "isa.Major == 9 || isa.Major == 11";
+  let archPredicate =
+      "isa.Major == 9 || isa.Major == 11 || " #
+      "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
@@ -2357,7 +2377,9 @@ def WaveAMDMachine_BufferLoadU8D16HiOp
       WaveAMDMachine_RequiredKilledOperandReuse<
           "&operand == &this->getPreservedMutable()"> {
   let summary = "buffer unsigned 8-bit D16 high-half load";
-  let archPredicate = "isa.Major == 9 || isa.Major == 11";
+  let archPredicate =
+      "isa.Major == 9 || isa.Major == 11 || " #
+      "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$preserved,
                        WaveAMDMachine_SGPR4:$descriptor,
                        WaveAMDMachine_SGPR1OrImm:$soffset,

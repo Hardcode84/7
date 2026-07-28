@@ -8,203 +8,242 @@
 //===----------------------------------------------------------------------===//
 
 #define WAVE_AMDGPU_OPCODE_LIST(X)                                             \
-  X(sMovB32, S_MOV_B32_vi, S_MOV_B32_gfx11)                                    \
-  X(sAddI32, S_ADD_I32_vi, S_ADD_I32_gfx11)                                    \
-  X(sMulI32, S_MUL_I32_vi, S_MUL_I32_gfx11)                                    \
-  X(sLshlB32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                                 \
-  X(sLshrB32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                                 \
-  X(sAshrI32, S_ASHR_I32_vi, S_ASHR_I32_gfx11)                                 \
-  X(sLshrB64, S_LSHR_B64_vi, S_LSHR_B64_gfx11)                                 \
-  X(sAshrI64, S_ASHR_I64_vi, S_ASHR_I64_gfx11)                                 \
-  X(sFf1I32B32, S_FF1_I32_B32_vi, S_FF1_I32_B32_gfx11)                         \
-  X(sFf1I32B64, S_FF1_I32_B64_vi, S_FF1_I32_B64_gfx11)                         \
-  X(sFlbitI32B32, S_FLBIT_I32_B32_vi, S_FLBIT_I32_B32_gfx11)                   \
-  X(sFlbitI32B64, S_FLBIT_I32_B64_vi, S_FLBIT_I32_B64_gfx11)                   \
-  X(sAndB32, S_AND_B32_vi, S_AND_B32_gfx11)                                    \
-  X(sAndB64, S_AND_B64_vi, S_AND_B64_gfx11)                                    \
-  X(sOrB32, S_OR_B32_vi, S_OR_B32_gfx11)                                       \
-  X(sOrB64, S_OR_B64_vi, S_OR_B64_gfx11)                                       \
-  X(sXorB32, S_XOR_B32_vi, S_XOR_B32_gfx11)                                    \
-  X(sXorB64, S_XOR_B64_vi, S_XOR_B64_gfx11)                                    \
-  X(sAndn2B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                              \
-  X(sAndn2B64, S_ANDN2_B64_vi, S_ANDN2_B64_gfx11)                              \
-  X(sAndSaveexecB64, S_AND_SAVEEXEC_B64_vi, S_AND_SAVEEXEC_B64_gfx11)          \
-  X(sMovB64, S_MOV_B64_vi, S_MOV_B64_gfx11)                                    \
-  X(sAddU32, S_ADD_U32_vi, S_ADD_U32_gfx11)                                    \
-  X(sAddcU32, S_ADDC_U32_vi, S_ADDC_U32_gfx11)                                 \
-  X(sMulHiU32, S_MUL_HI_U32_vi, S_MUL_HI_U32_gfx11)                            \
-  X(sCmpEqI32, S_CMP_EQ_I32_vi, S_CMP_EQ_I32_gfx11)                            \
-  X(sCmpLgI32, S_CMP_LG_I32_vi, S_CMP_LG_I32_gfx11)                            \
-  X(sCmpGtI32, S_CMP_GT_I32_vi, S_CMP_GT_I32_gfx11)                            \
-  X(sCmpGeI32, S_CMP_GE_I32_vi, S_CMP_GE_I32_gfx11)                            \
-  X(sCmpLtI32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)                            \
-  X(sCmpLeI32, S_CMP_LE_I32_vi, S_CMP_LE_I32_gfx11)                            \
-  X(sCmpEqU32, S_CMP_EQ_U32_vi, S_CMP_EQ_U32_gfx11)                            \
-  X(sCmpLgU32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)                            \
-  X(sCmpGtU32, S_CMP_GT_U32_vi, S_CMP_GT_U32_gfx11)                            \
-  X(sCmpGeU32, S_CMP_GE_U32_vi, S_CMP_GE_U32_gfx11)                            \
-  X(sCmpLtU32, S_CMP_LT_U32_vi, S_CMP_LT_U32_gfx11)                            \
-  X(sCmpLeU32, S_CMP_LE_U32_vi, S_CMP_LE_U32_gfx11)                            \
-  X(sCmpEqU64, S_CMP_EQ_U64_vi, S_CMP_EQ_U64_gfx11)                            \
-  X(sCmpLgU64, S_CMP_LG_U64_vi, S_CMP_LG_U64_gfx11)                            \
-  X(sCselectB32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)                        \
-  X(sBranch, S_BRANCH_vi, S_BRANCH_gfx11)                                      \
-  X(sCbranchScc0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)                     \
-  X(sCbranchScc1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)                     \
-  X(sCbranchVccnz, S_CBRANCH_VCCNZ_vi, S_CBRANCH_VCCNZ_gfx11)                  \
-  X(sCbranchExecz, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11)                  \
-  X(sGetregB32, S_GETREG_B32_vi, S_GETREG_B32_gfx11)                            \
-  X(sLoadB32, S_LOAD_DWORD_IMM_vi, S_LOAD_B32_IMM_gfx11)                       \
-  X(sLoadB64, S_LOAD_DWORDX2_IMM_vi, S_LOAD_B64_IMM_gfx11)                     \
-  X(sLoadB128, S_LOAD_DWORDX4_IMM_vi, S_LOAD_B128_IMM_gfx11)                   \
-  X(sLoadB256, S_LOAD_DWORDX8_IMM_vi, S_LOAD_B256_IMM_gfx11)                   \
-  X(sWaitcnt, S_WAITCNT_vi, S_WAITCNT_gfx11)                                   \
-  X(sNop, S_NOP_vi, S_NOP_gfx11)                                               \
-  X(sSleep, S_SLEEP_vi, S_SLEEP_gfx11)                                         \
-  X(sSetprio, S_SETPRIO_vi, S_SETPRIO_gfx11)                                   \
-  X(sSendmsg, S_SENDMSG_vi, S_SENDMSG_gfx11)                                   \
-  X(sBarrier, S_BARRIER_vi, S_BARRIER_gfx11)                                   \
-  X(sEndpgm, S_ENDPGM_vi, S_ENDPGM_gfx11)                                      \
-  X(sSetpcB64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                              \
-  X(vMbcntLo, V_MBCNT_LO_U32_B32_e64_vi, V_MBCNT_LO_U32_B32_e64_gfx11)         \
-  X(vMbcntHi, V_MBCNT_HI_U32_B32_e64_vi, V_MBCNT_HI_U32_B32_e64_gfx11)         \
-  X(vMovB32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)                            \
-  X(vMovB64, V_MOV_B64_e32_vi, V_MOV_B64_e32_vi)                                \
-  X(vCndmaskB32, V_CNDMASK_B32_e64_vi, V_CNDMASK_B32_e64_gfx11)                \
-  X(vCndmaskB32Vcc, V_CNDMASK_B32_e32_vi, V_CNDMASK_B32_e32_gfx11)             \
-  X(vAndB32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)                            \
-  X(vOrB32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                               \
-  X(vXorB32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)                            \
-  X(vLshlrevB32, V_LSHLREV_B32_e32_vi, V_LSHLREV_B32_e32_gfx11)                \
-  X(vLshrrevB32, V_LSHRREV_B32_e32_vi, V_LSHRREV_B32_e32_gfx11)                \
-  X(vAshrrevI32, V_ASHRREV_I32_e32_vi, V_ASHRREV_I32_e32_gfx11)                \
-  X(vLshrrevB64, V_LSHRREV_B64_vi, V_LSHRREV_B64_e64_gfx11)                    \
-  X(vAshrrevI64, V_ASHRREV_I64_vi, V_ASHRREV_I64_e64_gfx11)                    \
-  X(vFfbhU32, V_FFBH_U32_e32_vi, V_CLZ_I32_U32_e32_gfx11)                      \
-  X(vFfblB32, V_FFBL_B32_e32_vi, V_CTZ_I32_B32_e32_gfx11)                      \
-  X(vReadfirstlaneB32, V_READFIRSTLANE_B32_vi, V_READFIRSTLANE_B32_gfx11)      \
-  X(vMulLoU32, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)                        \
-  X(vMulHiU32, V_MUL_HI_U32_vi, V_MUL_HI_U32_e64_gfx11)                        \
-  X(vAdd3U32, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)                             \
-  X(vBfeU32, V_BFE_U32_vi, V_BFE_U32_e64_gfx11)                                \
-  X(vMadI32I24, V_MAD_I32_I24_vi, V_MAD_I32_I24_e64_gfx11)                     \
-  X(vMadU32U24, V_MAD_U32_U24_vi, V_MAD_U32_U24_e64_gfx11)                     \
-  X(vLshlAddU32, V_LSHL_ADD_U32_vi, V_LSHL_ADD_U32_e64_gfx11)                  \
-  X(vAddLshlU32, V_ADD_LSHL_U32_vi, V_ADD_LSHL_U32_e64_gfx11)                  \
-  X(vAndOrB32, V_AND_OR_B32_vi, V_AND_OR_B32_e64_gfx11)                        \
-  X(vOr3B32, V_OR3_B32_vi, V_OR3_B32_e64_gfx11)                                \
-  X(vXadU32, V_XAD_U32_vi, V_XAD_U32_e64_gfx11)                                \
-  X(vPermB32, V_PERM_B32_vi, V_PERM_B32_e64_gfx11)                             \
-  X(vBitOp3B32, V_BITOP3_B32_gfx9, V_BITOP3_B32_e64_gfx1250)                   \
-  X(vAddF32, V_ADD_F32_e32_vi, V_ADD_F32_e32_gfx11)                            \
-  X(vSubF32, V_SUB_F32_e32_vi, V_SUB_F32_e32_gfx11)                            \
-  X(vMulF32, V_MUL_F32_e32_vi, V_MUL_F32_e32_gfx11)                            \
-  X(vFmaF32, V_FMA_F32_vi, V_FMA_F32_e64_gfx11)                                 \
-  X(vMaxF32, V_MAX_F32_e32_vi, V_MAX_F32_e32_gfx11)                            \
-  X(vMax3F32, V_MAX3_F32_vi, V_MAX3_F32_e64_gfx11)                             \
-  X(vExpF32, V_EXP_F32_e32_vi, V_EXP_F32_e32_gfx11)                            \
-  X(vRcpF32, V_RCP_F32_e32_vi, V_RCP_F32_e32_gfx11)                            \
-  X(vRcpIFlagF32, V_RCP_IFLAG_F32_e32_vi, V_RCP_IFLAG_F32_e32_gfx11)           \
-  X(vCvtF32U32, V_CVT_F32_U32_e32_vi, V_CVT_F32_U32_e32_gfx11)                 \
-  X(vCvtU32F32, V_CVT_U32_F32_e32_vi, V_CVT_U32_F32_e32_gfx11)                 \
-  X(vCmpEqF32, V_CMP_EQ_F32_e64_vi, V_CMP_EQ_F32_e64_gfx11)                    \
-  X(vCmpLtF32, V_CMP_LT_F32_e64_vi, V_CMP_LT_F32_e64_gfx11)                    \
-  X(vCmpLeF32, V_CMP_LE_F32_e64_vi, V_CMP_LE_F32_e64_gfx11)                    \
-  X(vCmpGtF32, V_CMP_GT_F32_e64_vi, V_CMP_GT_F32_e64_gfx11)                    \
-  X(vCmpGeF32, V_CMP_GE_F32_e64_vi, V_CMP_GE_F32_e64_gfx11)                    \
-  X(vCmpEqU32, V_CMP_EQ_U32_e64_vi, V_CMP_EQ_U32_e64_gfx11)                    \
-  X(vCmpNeU32, V_CMP_NE_U32_e64_vi, V_CMP_NE_U32_e64_gfx11)                    \
-  X(vCmpLtU32, V_CMP_LT_U32_e64_vi, V_CMP_LT_U32_e64_gfx11)                    \
-  X(vCmpLeU32, V_CMP_LE_U32_e64_vi, V_CMP_LE_U32_e64_gfx11)                    \
-  X(vCmpGtU32, V_CMP_GT_U32_e64_vi, V_CMP_GT_U32_e64_gfx11)                    \
-  X(vCmpGeU32, V_CMP_GE_U32_e64_vi, V_CMP_GE_U32_e64_gfx11)                    \
-  X(vCmpLtI32, V_CMP_LT_I32_e64_vi, V_CMP_LT_I32_e64_gfx11)                    \
-  X(vCmpLeI32, V_CMP_LE_I32_e64_vi, V_CMP_LE_I32_e64_gfx11)                    \
-  X(vCmpGtI32, V_CMP_GT_I32_e64_vi, V_CMP_GT_I32_e64_gfx11)                    \
-  X(vCmpGeI32, V_CMP_GE_I32_e64_vi, V_CMP_GE_I32_e64_gfx11)                    \
-  X(vCmpxEqU32, V_CMPX_EQ_U32_e64_vi, V_CMPX_EQ_U32_e64_gfx11)                 \
-  X(vCmpxNeU32, V_CMPX_NE_U32_e64_vi, V_CMPX_NE_U32_e64_gfx11)                 \
-  X(vCmpxLtU32, V_CMPX_LT_U32_e64_vi, V_CMPX_LT_U32_e64_gfx11)                 \
-  X(vCmpxLeU32, V_CMPX_LE_U32_e64_vi, V_CMPX_LE_U32_e64_gfx11)                 \
-  X(vCmpxGtU32, V_CMPX_GT_U32_e64_vi, V_CMPX_GT_U32_e64_gfx11)                 \
-  X(vCmpxGeU32, V_CMPX_GE_U32_e64_vi, V_CMPX_GE_U32_e64_gfx11)                 \
-  X(vCmpxLtI32, V_CMPX_LT_I32_e64_vi, V_CMPX_LT_I32_e64_gfx11)                 \
-  X(vCmpxLeI32, V_CMPX_LE_I32_e64_vi, V_CMPX_LE_I32_e64_gfx11)                 \
-  X(vCmpxGtI32, V_CMPX_GT_I32_e64_vi, V_CMPX_GT_I32_e64_gfx11)                 \
-  X(vCmpxGeI32, V_CMPX_GE_I32_e64_vi, V_CMPX_GE_I32_e64_gfx11)                 \
-  X(bufferStoreB32, BUFFER_STORE_DWORD_OFFEN_vi,                               \
+  X(sMovB32, S_MOV_B32, S_MOV_B32_vi, S_MOV_B32_gfx11)                         \
+  X(sAddI32, S_ADD_I32, S_ADD_I32_vi, S_ADD_I32_gfx11)                         \
+  X(sMulI32, S_MUL_I32, S_MUL_I32_vi, S_MUL_I32_gfx11)                         \
+  X(sLshlB32, S_LSHL_B32, S_LSHL_B32_vi, S_LSHL_B32_gfx11)                     \
+  X(sLshrB32, S_LSHR_B32, S_LSHR_B32_vi, S_LSHR_B32_gfx11)                     \
+  X(sAshrI32, S_ASHR_I32, S_ASHR_I32_vi, S_ASHR_I32_gfx11)                     \
+  X(sLshrB64, S_LSHR_B64, S_LSHR_B64_vi, S_LSHR_B64_gfx11)                     \
+  X(sAshrI64, S_ASHR_I64, S_ASHR_I64_vi, S_ASHR_I64_gfx11)                     \
+  X(sFf1I32B32, S_FF1_I32_B32, S_FF1_I32_B32_vi, S_FF1_I32_B32_gfx11)          \
+  X(sFf1I32B64, S_FF1_I32_B64, S_FF1_I32_B64_vi, S_FF1_I32_B64_gfx11)          \
+  X(sFlbitI32B32, S_FLBIT_I32_B32, S_FLBIT_I32_B32_vi, S_FLBIT_I32_B32_gfx11)  \
+  X(sFlbitI32B64, S_FLBIT_I32_B64, S_FLBIT_I32_B64_vi, S_FLBIT_I32_B64_gfx11)  \
+  X(sAndB32, S_AND_B32, S_AND_B32_vi, S_AND_B32_gfx11)                         \
+  X(sAndB64, S_AND_B64, S_AND_B64_vi, S_AND_B64_gfx11)                         \
+  X(sOrB32, S_OR_B32, S_OR_B32_vi, S_OR_B32_gfx11)                             \
+  X(sOrB64, S_OR_B64, S_OR_B64_vi, S_OR_B64_gfx11)                             \
+  X(sXorB32, S_XOR_B32, S_XOR_B32_vi, S_XOR_B32_gfx11)                         \
+  X(sXorB64, S_XOR_B64, S_XOR_B64_vi, S_XOR_B64_gfx11)                         \
+  X(sAndn2B32, S_ANDN2_B32, S_ANDN2_B32_vi, S_ANDN2_B32_gfx11)                 \
+  X(sAndn2B64, S_ANDN2_B64, S_ANDN2_B64_vi, S_ANDN2_B64_gfx11)                 \
+  X(sAndSaveexecB64, S_AND_SAVEEXEC_B64, S_AND_SAVEEXEC_B64_vi,                \
+    S_AND_SAVEEXEC_B64_gfx11)                                                  \
+  X(sMovB64, S_MOV_B64, S_MOV_B64_vi, S_MOV_B64_gfx11)                         \
+  X(sAddU32, S_ADD_U32, S_ADD_U32_vi, S_ADD_U32_gfx11)                         \
+  X(sAddcU32, S_ADDC_U32, S_ADDC_U32_vi, S_ADDC_U32_gfx11)                     \
+  X(sMulHiU32, S_MUL_HI_U32, S_MUL_HI_U32_vi, S_MUL_HI_U32_gfx11)              \
+  X(sCmpEqI32, S_CMP_EQ_I32, S_CMP_EQ_I32_vi, S_CMP_EQ_I32_gfx11)              \
+  X(sCmpLgI32, S_CMP_LG_I32, S_CMP_LG_I32_vi, S_CMP_LG_I32_gfx11)              \
+  X(sCmpGtI32, S_CMP_GT_I32, S_CMP_GT_I32_vi, S_CMP_GT_I32_gfx11)              \
+  X(sCmpGeI32, S_CMP_GE_I32, S_CMP_GE_I32_vi, S_CMP_GE_I32_gfx11)              \
+  X(sCmpLtI32, S_CMP_LT_I32, S_CMP_LT_I32_vi, S_CMP_LT_I32_gfx11)              \
+  X(sCmpLeI32, S_CMP_LE_I32, S_CMP_LE_I32_vi, S_CMP_LE_I32_gfx11)              \
+  X(sCmpEqU32, S_CMP_EQ_U32, S_CMP_EQ_U32_vi, S_CMP_EQ_U32_gfx11)              \
+  X(sCmpLgU32, S_CMP_LG_U32, S_CMP_LG_U32_vi, S_CMP_LG_U32_gfx11)              \
+  X(sCmpGtU32, S_CMP_GT_U32, S_CMP_GT_U32_vi, S_CMP_GT_U32_gfx11)              \
+  X(sCmpGeU32, S_CMP_GE_U32, S_CMP_GE_U32_vi, S_CMP_GE_U32_gfx11)              \
+  X(sCmpLtU32, S_CMP_LT_U32, S_CMP_LT_U32_vi, S_CMP_LT_U32_gfx11)              \
+  X(sCmpLeU32, S_CMP_LE_U32, S_CMP_LE_U32_vi, S_CMP_LE_U32_gfx11)              \
+  X(sCmpEqU64, S_CMP_EQ_U64, S_CMP_EQ_U64_vi, S_CMP_EQ_U64_gfx11)              \
+  X(sCmpLgU64, S_CMP_LG_U64, S_CMP_LG_U64_vi, S_CMP_LG_U64_gfx11)              \
+  X(sCselectB32, S_CSELECT_B32, S_CSELECT_B32_vi, S_CSELECT_B32_gfx11)         \
+  X(sBranch, S_BRANCH, S_BRANCH_vi, S_BRANCH_gfx11)                            \
+  X(sCbranchScc0, S_CBRANCH_SCC0, S_CBRANCH_SCC0_vi, S_CBRANCH_SCC0_gfx11)     \
+  X(sCbranchScc1, S_CBRANCH_SCC1, S_CBRANCH_SCC1_vi, S_CBRANCH_SCC1_gfx11)     \
+  X(sCbranchVccnz, S_CBRANCH_VCCNZ, S_CBRANCH_VCCNZ_vi, S_CBRANCH_VCCNZ_gfx11) \
+  X(sCbranchExecz, S_CBRANCH_EXECZ, S_CBRANCH_EXECZ_vi, S_CBRANCH_EXECZ_gfx11) \
+  X(sGetregB32, S_GETREG_B32, S_GETREG_B32_vi, S_GETREG_B32_gfx11)             \
+  X(sLoadB32, S_LOAD_DWORD_IMM, S_LOAD_DWORD_IMM_vi, S_LOAD_B32_IMM_gfx11)     \
+  X(sLoadB64, S_LOAD_DWORDX2_IMM, S_LOAD_DWORDX2_IMM_vi, S_LOAD_B64_IMM_gfx11) \
+  X(sLoadB128, S_LOAD_DWORDX4_IMM, S_LOAD_DWORDX4_IMM_vi,                      \
+    S_LOAD_B128_IMM_gfx11)                                                     \
+  X(sLoadB256, S_LOAD_DWORDX8_IMM, S_LOAD_DWORDX8_IMM_vi,                      \
+    S_LOAD_B256_IMM_gfx11)                                                     \
+  X(sWaitcnt, S_WAITCNT, S_WAITCNT_vi, S_WAITCNT_gfx11)                        \
+  X(sNop, S_NOP, S_NOP_vi, S_NOP_gfx11)                                        \
+  X(sSleep, S_SLEEP, S_SLEEP_vi, S_SLEEP_gfx11)                                \
+  X(sSetprio, S_SETPRIO, S_SETPRIO_vi, S_SETPRIO_gfx11)                        \
+  X(sSendmsg, S_SENDMSG, S_SENDMSG_vi, S_SENDMSG_gfx11)                        \
+  X(sBarrier, S_BARRIER, S_BARRIER_vi, S_BARRIER_gfx11)                        \
+  X(sEndpgm, S_ENDPGM, S_ENDPGM_vi, S_ENDPGM_gfx11)                            \
+  X(sSetpcB64, S_SETPC_B64, S_SETPC_B64_vi, S_SETPC_B64_gfx11)                 \
+  X(vMbcntLo, V_MBCNT_LO_U32_B32_e64, V_MBCNT_LO_U32_B32_e64_vi,               \
+    V_MBCNT_LO_U32_B32_e64_gfx11)                                              \
+  X(vMbcntHi, V_MBCNT_HI_U32_B32_e64, V_MBCNT_HI_U32_B32_e64_vi,               \
+    V_MBCNT_HI_U32_B32_e64_gfx11)                                              \
+  X(vMovB32, V_MOV_B32_e32, V_MOV_B32_e32_vi, V_MOV_B32_e32_gfx11)             \
+  X(vMovB64, V_MOV_B64_e32, V_MOV_B64_e32_vi, V_MOV_B64_e32_vi)                \
+  X(vCndmaskB32, V_CNDMASK_B32_e64, V_CNDMASK_B32_e64_vi,                      \
+    V_CNDMASK_B32_e64_gfx11)                                                   \
+  X(vCndmaskB32Vcc, V_CNDMASK_B32_e32, V_CNDMASK_B32_e32_vi,                   \
+    V_CNDMASK_B32_e32_gfx11)                                                   \
+  X(vAndB32, V_AND_B32_e32, V_AND_B32_e32_vi, V_AND_B32_e32_gfx11)             \
+  X(vOrB32, V_OR_B32_e32, V_OR_B32_e32_vi, V_OR_B32_e32_gfx11)                 \
+  X(vXorB32, V_XOR_B32_e32, V_XOR_B32_e32_vi, V_XOR_B32_e32_gfx11)             \
+  X(vLshlrevB32, V_LSHLREV_B32_e32, V_LSHLREV_B32_e32_vi,                      \
+    V_LSHLREV_B32_e32_gfx11)                                                   \
+  X(vLshrrevB32, V_LSHRREV_B32_e32, V_LSHRREV_B32_e32_vi,                      \
+    V_LSHRREV_B32_e32_gfx11)                                                   \
+  X(vAshrrevI32, V_ASHRREV_I32_e32, V_ASHRREV_I32_e32_vi,                      \
+    V_ASHRREV_I32_e32_gfx11)                                                   \
+  X(vLshrrevB64, V_LSHRREV_B64_e64, V_LSHRREV_B64_vi, V_LSHRREV_B64_e64_gfx11) \
+  X(vAshrrevI64, V_ASHRREV_I64_e64, V_ASHRREV_I64_vi, V_ASHRREV_I64_e64_gfx11) \
+  X(vFfbhU32, V_FFBH_U32_e32, V_FFBH_U32_e32_vi, V_CLZ_I32_U32_e32_gfx11)      \
+  X(vFfblB32, V_FFBL_B32_e32, V_FFBL_B32_e32_vi, V_CTZ_I32_B32_e32_gfx11)      \
+  X(vReadfirstlaneB32, V_READFIRSTLANE_B32, V_READFIRSTLANE_B32_vi,            \
+    V_READFIRSTLANE_B32_gfx11)                                                 \
+  X(vMulLoU32, V_MUL_LO_U32_e64, V_MUL_LO_U32_vi, V_MUL_LO_U32_e64_gfx11)      \
+  X(vMulHiU32, V_MUL_HI_U32_e64, V_MUL_HI_U32_vi, V_MUL_HI_U32_e64_gfx11)      \
+  X(vAdd3U32, V_ADD3_U32_e64, V_ADD3_U32_vi, V_ADD3_U32_e64_gfx11)             \
+  X(vBfeU32, V_BFE_U32_e64, V_BFE_U32_vi, V_BFE_U32_e64_gfx11)                 \
+  X(vMadI32I24, V_MAD_I32_I24_e64, V_MAD_I32_I24_vi, V_MAD_I32_I24_e64_gfx11)  \
+  X(vMadU32U24, V_MAD_U32_U24_e64, V_MAD_U32_U24_vi, V_MAD_U32_U24_e64_gfx11)  \
+  X(vLshlAddU32, V_LSHL_ADD_U32_e64, V_LSHL_ADD_U32_vi,                        \
+    V_LSHL_ADD_U32_e64_gfx11)                                                  \
+  X(vAddLshlU32, V_ADD_LSHL_U32_e64, V_ADD_LSHL_U32_vi,                        \
+    V_ADD_LSHL_U32_e64_gfx11)                                                  \
+  X(vAndOrB32, V_AND_OR_B32_e64, V_AND_OR_B32_vi, V_AND_OR_B32_e64_gfx11)      \
+  X(vOr3B32, V_OR3_B32_e64, V_OR3_B32_vi, V_OR3_B32_e64_gfx11)                 \
+  X(vXadU32, V_XAD_U32_e64, V_XAD_U32_vi, V_XAD_U32_e64_gfx11)                 \
+  X(vPermB32, V_PERM_B32_e64, V_PERM_B32_vi, V_PERM_B32_e64_gfx11)             \
+  X(vBitOp3B32, V_BITOP3_B32_e64, V_BITOP3_B32_gfx9, V_BITOP3_B32_e64_gfx1250) \
+  X(vAddF32, V_ADD_F32_e32, V_ADD_F32_e32_vi, V_ADD_F32_e32_gfx11)             \
+  X(vSubF32, V_SUB_F32_e32, V_SUB_F32_e32_vi, V_SUB_F32_e32_gfx11)             \
+  X(vMulF32, V_MUL_F32_e32, V_MUL_F32_e32_vi, V_MUL_F32_e32_gfx11)             \
+  X(vFmaF32, V_FMA_F32_e64, V_FMA_F32_vi, V_FMA_F32_e64_gfx11)                 \
+  X(vMaxF32, V_MAX_F32_e32, V_MAX_F32_e32_vi, V_MAX_F32_e32_gfx11)             \
+  X(vMax3F32, V_MAX3_F32_e64, V_MAX3_F32_vi, V_MAX3_F32_e64_gfx11)             \
+  X(vExpF32, V_EXP_F32_e32, V_EXP_F32_e32_vi, V_EXP_F32_e32_gfx11)             \
+  X(vRcpF32, V_RCP_F32_e32, V_RCP_F32_e32_vi, V_RCP_F32_e32_gfx11)             \
+  X(vRcpIFlagF32, V_RCP_IFLAG_F32_e32, V_RCP_IFLAG_F32_e32_vi,                 \
+    V_RCP_IFLAG_F32_e32_gfx11)                                                 \
+  X(vCvtF32U32, V_CVT_F32_U32_e32, V_CVT_F32_U32_e32_vi,                       \
+    V_CVT_F32_U32_e32_gfx11)                                                   \
+  X(vCvtU32F32, V_CVT_U32_F32_e32, V_CVT_U32_F32_e32_vi,                       \
+    V_CVT_U32_F32_e32_gfx11)                                                   \
+  X(vCmpEqF32, V_CMP_EQ_F32_e64, V_CMP_EQ_F32_e64_vi, V_CMP_EQ_F32_e64_gfx11)  \
+  X(vCmpLtF32, V_CMP_LT_F32_e64, V_CMP_LT_F32_e64_vi, V_CMP_LT_F32_e64_gfx11)  \
+  X(vCmpLeF32, V_CMP_LE_F32_e64, V_CMP_LE_F32_e64_vi, V_CMP_LE_F32_e64_gfx11)  \
+  X(vCmpGtF32, V_CMP_GT_F32_e64, V_CMP_GT_F32_e64_vi, V_CMP_GT_F32_e64_gfx11)  \
+  X(vCmpGeF32, V_CMP_GE_F32_e64, V_CMP_GE_F32_e64_vi, V_CMP_GE_F32_e64_gfx11)  \
+  X(vCmpEqU32, V_CMP_EQ_U32_e64, V_CMP_EQ_U32_e64_vi, V_CMP_EQ_U32_e64_gfx11)  \
+  X(vCmpNeU32, V_CMP_NE_U32_e64, V_CMP_NE_U32_e64_vi, V_CMP_NE_U32_e64_gfx11)  \
+  X(vCmpLtU32, V_CMP_LT_U32_e64, V_CMP_LT_U32_e64_vi, V_CMP_LT_U32_e64_gfx11)  \
+  X(vCmpLeU32, V_CMP_LE_U32_e64, V_CMP_LE_U32_e64_vi, V_CMP_LE_U32_e64_gfx11)  \
+  X(vCmpGtU32, V_CMP_GT_U32_e64, V_CMP_GT_U32_e64_vi, V_CMP_GT_U32_e64_gfx11)  \
+  X(vCmpGeU32, V_CMP_GE_U32_e64, V_CMP_GE_U32_e64_vi, V_CMP_GE_U32_e64_gfx11)  \
+  X(vCmpLtI32, V_CMP_LT_I32_e64, V_CMP_LT_I32_e64_vi, V_CMP_LT_I32_e64_gfx11)  \
+  X(vCmpLeI32, V_CMP_LE_I32_e64, V_CMP_LE_I32_e64_vi, V_CMP_LE_I32_e64_gfx11)  \
+  X(vCmpGtI32, V_CMP_GT_I32_e64, V_CMP_GT_I32_e64_vi, V_CMP_GT_I32_e64_gfx11)  \
+  X(vCmpGeI32, V_CMP_GE_I32_e64, V_CMP_GE_I32_e64_vi, V_CMP_GE_I32_e64_gfx11)  \
+  X(vCmpxEqU32, V_CMPX_EQ_U32_nosdst_e64, V_CMPX_EQ_U32_e64_vi,                \
+    V_CMPX_EQ_U32_e64_gfx11)                                                   \
+  X(vCmpxNeU32, V_CMPX_NE_U32_nosdst_e64, V_CMPX_NE_U32_e64_vi,                \
+    V_CMPX_NE_U32_e64_gfx11)                                                   \
+  X(vCmpxLtU32, V_CMPX_LT_U32_nosdst_e64, V_CMPX_LT_U32_e64_vi,                \
+    V_CMPX_LT_U32_e64_gfx11)                                                   \
+  X(vCmpxLeU32, V_CMPX_LE_U32_nosdst_e64, V_CMPX_LE_U32_e64_vi,                \
+    V_CMPX_LE_U32_e64_gfx11)                                                   \
+  X(vCmpxGtU32, V_CMPX_GT_U32_nosdst_e64, V_CMPX_GT_U32_e64_vi,                \
+    V_CMPX_GT_U32_e64_gfx11)                                                   \
+  X(vCmpxGeU32, V_CMPX_GE_U32_nosdst_e64, V_CMPX_GE_U32_e64_vi,                \
+    V_CMPX_GE_U32_e64_gfx11)                                                   \
+  X(vCmpxLtI32, V_CMPX_LT_I32_nosdst_e64, V_CMPX_LT_I32_e64_vi,                \
+    V_CMPX_LT_I32_e64_gfx11)                                                   \
+  X(vCmpxLeI32, V_CMPX_LE_I32_nosdst_e64, V_CMPX_LE_I32_e64_vi,                \
+    V_CMPX_LE_I32_e64_gfx11)                                                   \
+  X(vCmpxGtI32, V_CMPX_GT_I32_nosdst_e64, V_CMPX_GT_I32_e64_vi,                \
+    V_CMPX_GT_I32_e64_gfx11)                                                   \
+  X(vCmpxGeI32, V_CMPX_GE_I32_nosdst_e64, V_CMPX_GE_I32_e64_vi,                \
+    V_CMPX_GE_I32_e64_gfx11)                                                   \
+  X(bufferStoreB32, BUFFER_STORE_DWORD_OFFEN, BUFFER_STORE_DWORD_OFFEN_vi,     \
     BUFFER_STORE_DWORD_OFFEN_gfx11)                                            \
-  X(bufferLoadB32, BUFFER_LOAD_DWORD_OFFEN_vi, BUFFER_LOAD_DWORD_OFFEN_gfx11)  \
-  X(globalStoreB32, GLOBAL_STORE_DWORD_SADDR_vi,                               \
+  X(bufferLoadB32, BUFFER_LOAD_DWORD_OFFEN, BUFFER_LOAD_DWORD_OFFEN_vi,        \
+    BUFFER_LOAD_DWORD_OFFEN_gfx11)                                             \
+  X(globalStoreB32, GLOBAL_STORE_DWORD_SADDR, GLOBAL_STORE_DWORD_SADDR_vi,     \
     GLOBAL_STORE_DWORD_SADDR_gfx11)                                            \
-  X(globalLoadB32, GLOBAL_LOAD_DWORD_SADDR_vi, GLOBAL_LOAD_DWORD_SADDR_gfx11)  \
-  X(globalLoadB64, GLOBAL_LOAD_DWORDX2_SADDR_vi,                               \
+  X(globalLoadB32, GLOBAL_LOAD_DWORD_SADDR, GLOBAL_LOAD_DWORD_SADDR_vi,        \
+    GLOBAL_LOAD_DWORD_SADDR_gfx11)                                             \
+  X(globalLoadB64, GLOBAL_LOAD_DWORDX2_SADDR, GLOBAL_LOAD_DWORDX2_SADDR_vi,    \
     GLOBAL_LOAD_DWORDX2_SADDR_gfx11)                                           \
-  X(globalLoadB96, GLOBAL_LOAD_DWORDX3_SADDR_vi,                               \
+  X(globalLoadB96, GLOBAL_LOAD_DWORDX3_SADDR, GLOBAL_LOAD_DWORDX3_SADDR_vi,    \
     GLOBAL_LOAD_DWORDX3_SADDR_gfx11)                                           \
-  X(globalLoadB128, GLOBAL_LOAD_DWORDX4_SADDR_vi,                              \
+  X(globalLoadB128, GLOBAL_LOAD_DWORDX4_SADDR, GLOBAL_LOAD_DWORDX4_SADDR_vi,   \
     GLOBAL_LOAD_DWORDX4_SADDR_gfx11)                                           \
-  X(globalLoadB64Addr64, GLOBAL_LOAD_DWORDX2_vi,                               \
+  X(globalLoadB64Addr64, GLOBAL_LOAD_DWORDX2, GLOBAL_LOAD_DWORDX2_vi,          \
     GLOBAL_LOAD_DWORDX2_gfx11)                                                 \
-  X(globalLoadB96Addr64, GLOBAL_LOAD_DWORDX3_vi,                               \
+  X(globalLoadB96Addr64, GLOBAL_LOAD_DWORDX3, GLOBAL_LOAD_DWORDX3_vi,          \
     GLOBAL_LOAD_DWORDX3_gfx11)                                                 \
-  X(globalLoadB128Addr64, GLOBAL_LOAD_DWORDX4_vi,                              \
+  X(globalLoadB128Addr64, GLOBAL_LOAD_DWORDX4, GLOBAL_LOAD_DWORDX4_vi,         \
     GLOBAL_LOAD_DWORDX4_gfx11)                                                 \
-  X(globalStoreB64, GLOBAL_STORE_DWORDX2_SADDR_vi,                             \
+  X(globalStoreB64, GLOBAL_STORE_DWORDX2_SADDR, GLOBAL_STORE_DWORDX2_SADDR_vi, \
     GLOBAL_STORE_DWORDX2_SADDR_gfx11)                                          \
-  X(globalStoreB96, GLOBAL_STORE_DWORDX3_SADDR_vi,                             \
+  X(globalStoreB96, GLOBAL_STORE_DWORDX3_SADDR, GLOBAL_STORE_DWORDX3_SADDR_vi, \
     GLOBAL_STORE_DWORDX3_SADDR_gfx11)                                          \
-  X(globalStoreB128, GLOBAL_STORE_DWORDX4_SADDR_vi,                            \
-    GLOBAL_STORE_DWORDX4_SADDR_gfx11)                                          \
-  X(globalStoreB64Addr64, GLOBAL_STORE_DWORDX2_vi,                             \
+  X(globalStoreB128, GLOBAL_STORE_DWORDX4_SADDR,                               \
+    GLOBAL_STORE_DWORDX4_SADDR_vi, GLOBAL_STORE_DWORDX4_SADDR_gfx11)           \
+  X(globalStoreB64Addr64, GLOBAL_STORE_DWORDX2, GLOBAL_STORE_DWORDX2_vi,       \
     GLOBAL_STORE_DWORDX2_gfx11)                                                \
-  X(globalStoreB96Addr64, GLOBAL_STORE_DWORDX3_vi,                             \
+  X(globalStoreB96Addr64, GLOBAL_STORE_DWORDX3, GLOBAL_STORE_DWORDX3_vi,       \
     GLOBAL_STORE_DWORDX3_gfx11)                                                \
-  X(globalStoreB128Addr64, GLOBAL_STORE_DWORDX4_vi,                            \
+  X(globalStoreB128Addr64, GLOBAL_STORE_DWORDX4, GLOBAL_STORE_DWORDX4_vi,      \
     GLOBAL_STORE_DWORDX4_gfx11)                                                \
-  X(scratchLoadB32, SCRATCH_LOAD_DWORD_SADDR_vi,                               \
+  X(scratchLoadB32, SCRATCH_LOAD_DWORD_SADDR, SCRATCH_LOAD_DWORD_SADDR_vi,     \
     SCRATCH_LOAD_DWORD_SADDR_gfx11)                                            \
-  X(scratchStoreB32, SCRATCH_STORE_DWORD_SADDR_vi,                             \
+  X(scratchStoreB32, SCRATCH_STORE_DWORD_SADDR, SCRATCH_STORE_DWORD_SADDR_vi,  \
     SCRATCH_STORE_DWORD_SADDR_gfx11)                                           \
-  X(bufferLoadB64, BUFFER_LOAD_DWORDX2_OFFEN_vi,                               \
+  X(bufferLoadB64, BUFFER_LOAD_DWORDX2_OFFEN, BUFFER_LOAD_DWORDX2_OFFEN_vi,    \
     BUFFER_LOAD_DWORDX2_OFFEN_gfx11)                                           \
-  X(bufferLoadB96, BUFFER_LOAD_DWORDX3_OFFEN_vi,                               \
+  X(bufferLoadB96, BUFFER_LOAD_DWORDX3_OFFEN, BUFFER_LOAD_DWORDX3_OFFEN_vi,    \
     BUFFER_LOAD_DWORDX3_OFFEN_gfx11)                                           \
-  X(bufferLoadB128, BUFFER_LOAD_DWORDX4_OFFEN_vi,                              \
+  X(bufferLoadB128, BUFFER_LOAD_DWORDX4_OFFEN, BUFFER_LOAD_DWORDX4_OFFEN_vi,   \
     BUFFER_LOAD_DWORDX4_OFFEN_gfx11)                                           \
-  X(bufferStoreB64, BUFFER_STORE_DWORDX2_OFFEN_vi,                             \
+  X(bufferStoreB64, BUFFER_STORE_DWORDX2_OFFEN, BUFFER_STORE_DWORDX2_OFFEN_vi, \
     BUFFER_STORE_DWORDX2_OFFEN_gfx11)                                          \
-  X(bufferStoreB96, BUFFER_STORE_DWORDX3_OFFEN_vi,                             \
+  X(bufferStoreB96, BUFFER_STORE_DWORDX3_OFFEN, BUFFER_STORE_DWORDX3_OFFEN_vi, \
     BUFFER_STORE_DWORDX3_OFFEN_gfx11)                                          \
-  X(bufferStoreB128, BUFFER_STORE_DWORDX4_OFFEN_vi,                            \
-    BUFFER_STORE_DWORDX4_OFFEN_gfx11)                                          \
-  X(dsReadB64, DS_READ_B64_vi_gfx9, DS_READ_B64_gfx11)                         \
-  X(dsReadB64TrB4, DS_READ_B64_TR_B4_vi, DS_READ_B64_TR_B4)                    \
-  X(dsReadB96TrB6, DS_READ_B96_TR_B6_vi, DS_READ_B96_TR_B6)                    \
-  X(dsReadB64TrB8, DS_READ_B64_TR_B8_vi, DS_READ_B64_TR_B8)                    \
-  X(dsReadB64TrB16, DS_READ_B64_TR_B16_vi, DS_READ_B64_TR_B16)                 \
-  X(dsReadB96, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)                         \
-  X(dsReadB128, DS_READ_B128_vi_gfx9, DS_READ_B128_gfx11)                      \
-  X(dsRead2B32, DS_READ2_B32_vi_gfx9, DS_READ2_B32_gfx11)                      \
-  X(dsRead2B64, DS_READ2_B64_vi_gfx9, DS_READ2_B64_gfx11)                      \
-  X(dsRead2St64B32, DS_READ2ST64_B32_vi_gfx9, DS_READ2ST64_B32_gfx11)          \
-  X(dsRead2St64B64, DS_READ2ST64_B64_vi_gfx9, DS_READ2ST64_B64_gfx11)          \
-  X(dsWriteB8, DS_WRITE_B8_vi_gfx9, DS_WRITE_B8_gfx11)                         \
-  X(dsWriteB64, DS_WRITE_B64_vi_gfx9, DS_WRITE_B64_gfx11)                      \
-  X(dsWriteB96, DS_WRITE_B96_vi_gfx9, DS_WRITE_B96_gfx11)                      \
-  X(dsWriteB128, DS_WRITE_B128_vi_gfx9, DS_WRITE_B128_gfx11)                   \
-  X(dsWrite2B32, DS_WRITE2_B32_vi_gfx9, DS_WRITE2_B32_gfx11)                   \
-  X(dsWrite2B64, DS_WRITE2_B64_vi_gfx9, DS_WRITE2_B64_gfx11)                   \
-  X(dsWrite2St64B32, DS_WRITE2ST64_B32_vi_gfx9, DS_WRITE2ST64_B32_gfx11)       \
-  X(dsWrite2St64B64, DS_WRITE2ST64_B64_vi_gfx9, DS_WRITE2ST64_B64_gfx11)       \
-  X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN_vi,                          \
-    BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)                                         \
-  X(dsReadB32, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)                         \
-  X(dsReadAddTidB32, DS_READ_ADDTID_B32_vi, DS_READ_ADDTID_B32_gfx11)           \
-  X(dsSwizzleB32, DS_SWIZZLE_B32_vi, DS_SWIZZLE_B32_gfx11)                     \
-  X(dsPermuteB32, DS_PERMUTE_B32_vi, DS_PERMUTE_B32_gfx11)                     \
-  X(dsBpermuteB32, DS_BPERMUTE_B32_vi, DS_BPERMUTE_B32_gfx11)                  \
-  X(dsAddU32, DS_ADD_U32_vi_gfx9, DS_ADD_U32_gfx11)                            \
-  X(dsAddRtnU32, DS_ADD_RTN_U32_vi_gfx9, DS_ADD_RTN_U32_gfx11)                 \
-  X(dsWriteB32, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)                      \
-  X(dsWriteAddTidB32, DS_WRITE_ADDTID_B32_vi, DS_WRITE_ADDTID_B32_gfx11)
+  X(bufferStoreB128, BUFFER_STORE_DWORDX4_OFFEN,                               \
+    BUFFER_STORE_DWORDX4_OFFEN_vi, BUFFER_STORE_DWORDX4_OFFEN_gfx11)           \
+  X(dsReadB64, DS_READ_B64_gfx9, DS_READ_B64_vi_gfx9, DS_READ_B64_gfx11)       \
+  X(dsReadB64TrB4, DS_READ_B64_TR_B4, DS_READ_B64_TR_B4_vi, DS_READ_B64_TR_B4) \
+  X(dsReadB96TrB6, DS_READ_B96_TR_B6, DS_READ_B96_TR_B6_vi, DS_READ_B96_TR_B6) \
+  X(dsReadB64TrB8, DS_READ_B64_TR_B8, DS_READ_B64_TR_B8_vi, DS_READ_B64_TR_B8) \
+  X(dsReadB64TrB16, DS_READ_B64_TR_B16, DS_READ_B64_TR_B16_vi,                 \
+    DS_READ_B64_TR_B16)                                                        \
+  X(dsReadB96, DS_READ_B96_gfx9, DS_READ_B96_vi_gfx9, DS_READ_B96_gfx11)       \
+  X(dsReadB128, DS_READ_B128_gfx9, DS_READ_B128_vi_gfx9, DS_READ_B128_gfx11)   \
+  X(dsRead2B32, DS_READ2_B32_gfx9, DS_READ2_B32_vi_gfx9, DS_READ2_B32_gfx11)   \
+  X(dsRead2B64, DS_READ2_B64_gfx9, DS_READ2_B64_vi_gfx9, DS_READ2_B64_gfx11)   \
+  X(dsRead2St64B32, DS_READ2ST64_B32_gfx9, DS_READ2ST64_B32_vi_gfx9,           \
+    DS_READ2ST64_B32_gfx11)                                                    \
+  X(dsRead2St64B64, DS_READ2ST64_B64_gfx9, DS_READ2ST64_B64_vi_gfx9,           \
+    DS_READ2ST64_B64_gfx11)                                                    \
+  X(dsWriteB8, DS_WRITE_B8_gfx9, DS_WRITE_B8_vi_gfx9, DS_WRITE_B8_gfx11)       \
+  X(dsWriteB64, DS_WRITE_B64_gfx9, DS_WRITE_B64_vi_gfx9, DS_WRITE_B64_gfx11)   \
+  X(dsWriteB96, DS_WRITE_B96_gfx9, DS_WRITE_B96_vi_gfx9, DS_WRITE_B96_gfx11)   \
+  X(dsWriteB128, DS_WRITE_B128_gfx9, DS_WRITE_B128_vi_gfx9,                    \
+    DS_WRITE_B128_gfx11)                                                       \
+  X(dsWrite2B32, DS_WRITE2_B32_gfx9, DS_WRITE2_B32_vi_gfx9,                    \
+    DS_WRITE2_B32_gfx11)                                                       \
+  X(dsWrite2B64, DS_WRITE2_B64_gfx9, DS_WRITE2_B64_vi_gfx9,                    \
+    DS_WRITE2_B64_gfx11)                                                       \
+  X(dsWrite2St64B32, DS_WRITE2ST64_B32_gfx9, DS_WRITE2ST64_B32_vi_gfx9,        \
+    DS_WRITE2ST64_B32_gfx11)                                                   \
+  X(dsWrite2St64B64, DS_WRITE2ST64_B64_gfx9, DS_WRITE2ST64_B64_vi_gfx9,        \
+    DS_WRITE2ST64_B64_gfx11)                                                   \
+  X(bufferLoadLdsB32, BUFFER_LOAD_DWORD_LDS_OFFEN,                             \
+    BUFFER_LOAD_DWORD_LDS_OFFEN_vi, BUFFER_LOAD_DWORD_LDS_OFFEN_gfx10)         \
+  X(dsReadB32, DS_READ_B32_gfx9, DS_READ_B32_vi_gfx9, DS_READ_B32_gfx11)       \
+  X(dsReadAddTidB32, DS_READ_ADDTID_B32, DS_READ_ADDTID_B32_vi,                \
+    DS_READ_ADDTID_B32_gfx11)                                                  \
+  X(dsSwizzleB32, DS_SWIZZLE_B32, DS_SWIZZLE_B32_vi, DS_SWIZZLE_B32_gfx11)     \
+  X(dsPermuteB32, DS_PERMUTE_B32, DS_PERMUTE_B32_vi, DS_PERMUTE_B32_gfx11)     \
+  X(dsBpermuteB32, DS_BPERMUTE_B32, DS_BPERMUTE_B32_vi, DS_BPERMUTE_B32_gfx11) \
+  X(dsAddU32, DS_ADD_U32_gfx9, DS_ADD_U32_vi_gfx9, DS_ADD_U32_gfx11)           \
+  X(dsAddRtnU32, DS_ADD_RTN_U32_gfx9, DS_ADD_RTN_U32_vi_gfx9,                  \
+    DS_ADD_RTN_U32_gfx11)                                                      \
+  X(dsWriteB32, DS_WRITE_B32_gfx9, DS_WRITE_B32_vi_gfx9, DS_WRITE_B32_gfx11)   \
+  X(dsWriteAddTidB32, DS_WRITE_ADDTID_B32, DS_WRITE_ADDTID_B32_vi,             \
+    DS_WRITE_ADDTID_B32_gfx11)

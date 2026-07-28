@@ -1,0 +1,192 @@
+// RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
+// RUN:   wave-translate --wave-to-amdgpu-asm %s \
+// RUN:   | FileCheck %s --check-prefix=ASM
+// RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
+// RUN:   wave-translate --wave-to-amdgpu-asm %s \
+// RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1250 \
+// RUN:       -filetype=obj -o %t.o
+// RUN: llvm-objdump -d --mcpu=gfx1250 %t.o \
+// RUN:   | FileCheck %s --check-prefix=DIS
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+// ASM-LABEL: scalar_vector_control:
+// ASM: s_add_co_i32 s5, s4, 1
+// ASM: s_cbranch_scc1 control_taken
+// ASM: control_taken:
+// ASM: v_add_nc_u32_e32 v2, v0, v1
+// ASM: v_cmp_eq_u32_e64 vcc_lo, v2, v1
+// ASM: s_and_saveexec_b32 s6, s5
+// ASM: s_mov_b32 exec_lo, s6
+// ASM: s_endpgm
+// DIS-LABEL: <scalar_vector_control>:
+// DIS: s_add_co_i32 s5, s4, 1
+// DIS: s_cbranch_scc1
+// DIS: v_add_nc_u32_e32 v2, v0, v1
+// DIS: v_cmp_eq_u32_e64 vcc_lo, v2, v1
+// DIS: s_and_saveexec_b32 s6, s5
+// DIS: s_mov_b32 exec_lo, s6
+// DIS: s_endpgm
+func.func @scalar_vector_control() {
+  %s4 = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 1, 4>
+  %v0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %v1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %sum, %scc = waveamdmachine.s_add_i32 %s4, %one
+      : (!waveamdmachine.reg<sgpr, 1, 4>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1, 5>,
+            !waveamdmachine.reg<scc, 1>)
+  waveamdmachine.s_cbranch_scc1 %scc
+      : !waveamdmachine.reg<scc, 1>, "control_taken"
+  waveamdmachine.label "control_taken"
+  %vsum = waveamdmachine.v_add_u32 %v0, %v1
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<vgpr, 1, 2>
+  %mask, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %vsum, %v1
+      : (!waveamdmachine.reg<vgpr, 1, 2>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1, 7>,
+            !waveamdmachine.reg<vcc, 1>)
+  %saved, %exec_scc = waveamdmachine.s_and_saveexec_b32 %sum
+      : (!waveamdmachine.reg<sgpr, 1, 5>)
+        -> (!waveamdmachine.reg<sgpr, 1, 6>,
+            !waveamdmachine.reg<scc, 1>)
+  waveamdmachine.s_mov_exec_lo %saved
+      : (!waveamdmachine.reg<sgpr, 1, 6>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: memory_and_sync:
+// ASM: s_load_b32 s12, s[0:1], 0x0{{$}}
+// ASM: global_load_b32 v3, v0, s[0:1]{{$}}
+// ASM: global_store_b32 v0, v3, s[0:1]{{$}}
+// ASM: buffer_load_b32 v4, v0, s[8:11], null offen{{$}}
+// ASM: buffer_store_b32 v4, v0, s[8:11], null offen{{$}}
+// ASM: buffer_load_d16_u8 v7, v0, s[8:11], null offen{{$}}
+// ASM: buffer_load_d16_hi_u8 v7, v0, s[8:11], null offen{{$}}
+// ASM: ds_load_b32 v5, v0
+// ASM: ds_store_b32 v0, v5
+// ASM: scratch_load_b32 v6, off, s13 nv
+// ASM: scratch_store_b32 off, v6, s13 nv
+// ASM: s_barrier_signal -1
+// ASM-NEXT: s_barrier_wait -1
+// ASM-NEXT: s_endpgm
+// DIS-LABEL: <memory_and_sync>:
+// DIS: s_load_b32 s12, s[0:1], 0x0{{[[:space:]]*//}}
+// DIS: global_load_b32 v3, v0, s[0:1]{{[[:space:]]*//}}
+// DIS: global_store_b32 v0, v3, s[0:1]{{[[:space:]]*//}}
+// DIS: buffer_load_b32 v4, v0, s[8:11], null offen{{[[:space:]]*//}}
+// DIS: buffer_store_b32 v4, v0, s[8:11], null offen{{[[:space:]]*//}}
+// DIS: buffer_load_d16_u8 v7, v0, s[8:11], null offen{{[[:space:]]*//}}
+// DIS: buffer_load_d16_hi_u8 v7, v0, s[8:11], null offen{{[[:space:]]*//}}
+// DIS: ds_load_b32 v5, v0
+// DIS: ds_store_b32 v0, v5
+// DIS: scratch_load_b32 v6, off, s13 nv
+// DIS: scratch_store_b32 off, v6, s13 nv
+// DIS: s_barrier_signal -1
+// DIS-NEXT: s_barrier_wait 0xffff
+// DIS-NEXT: s_endpgm
+func.func @memory_and_sync() {
+  %off = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %base = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 2, 0>
+  %desc = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 4, 8>
+  %saddr = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 1, 13>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %smem = waveamdmachine.s_load_b32 %zero, "s[0:1]"
+      : (!waveamdmachine.imm)
+        -> !waveamdmachine.reg<sgpr, 1, 12>
+  %global = waveamdmachine.global_load_b32 %off, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 2, 0>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  waveamdmachine.global_store_b32 %off, %global, %base
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 3>,
+         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+  %buffer = waveamdmachine.buffer_load_b32 %off, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 4, 8>,
+         !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1, 4>
+  waveamdmachine.buffer_store_b32 %off, %buffer, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 4>,
+         !waveamdmachine.reg<sgpr, 4, 8>,
+         !waveamdmachine.imm) -> ()
+  %d16_lo = waveamdmachine.buffer_load_u8_d16 %off, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<sgpr, 4, 8>,
+         !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1, 7>
+  %d16_hi = waveamdmachine.buffer_load_u8_d16_hi
+      %off, %d16_lo, %desc, %zero
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 7>,
+         !waveamdmachine.reg<sgpr, 4, 8>,
+         !waveamdmachine.imm)
+        -> !waveamdmachine.reg<vgpr, 1, 7>
+  %lds = waveamdmachine.ds_load_b32 %off
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1, 5>
+  waveamdmachine.ds_store_b32 %off, %lds
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 5>) -> ()
+  %scratch = waveamdmachine.scratch_load_b32 %zero, %saddr
+      : (!waveamdmachine.imm,
+         !waveamdmachine.reg<sgpr, 1, 13>)
+        -> !waveamdmachine.reg<vgpr, 1, 6>
+  waveamdmachine.scratch_store_b32 %zero, %scratch, %saddr
+      : (!waveamdmachine.imm,
+         !waveamdmachine.reg<vgpr, 1, 6>,
+         !waveamdmachine.reg<sgpr, 1, 13>) -> ()
+  waveamdmachine.s_barrier : () -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: exact_extensions:
+// ASM: v_cvt_pk_rtz_f16_f32_e32 v3, v0, v1
+// ASM: v_pk_add_f16 v4, v3, v0
+// ASM: v_bitop3_b32 v5, v0, v1, v2 bitop3:0x6a
+// ASM: s_endpgm
+// DIS-LABEL: <exact_extensions>:
+// DIS: v_cvt_pk_rtz_f16_f32_e32 v3, v0, v1
+// DIS: v_pk_add_f16 v4, v3, v0
+// DIS: v_bitop3_b32 v5, v0, v1, v2 bitop3:0x6a
+// DIS: s_endpgm
+func.func @exact_extensions() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %c = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 2>
+  %rtz = waveamdmachine.v_cvt_pk_rtz_f16_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  %sum = waveamdmachine.v_pk_add_f16 %rtz, %a
+      : (!waveamdmachine.reg<vgpr, 1, 3>,
+         !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1, 4>
+  %bits = waveamdmachine.v_bitop3_b32 %a, %b, %c bitop3 106
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 5>
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
