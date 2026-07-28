@@ -248,6 +248,54 @@ func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>)
   return
 }
 
+// SELECT-LABEL: func.func @mfma_gfx950_mxfp4_32x32_kernel
+// SELECT: waveamdmachine.mfma_scale_f32_32x32x64_f4_f4{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 16>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 16>
+
+// PIPELINE-LABEL: func.func @mfma_gfx950_mxfp4_32x32_kernel
+// PIPELINE: waveamdmachine.mfma_scale_f32_32x32x64_f4_f4{{.*}} -> !waveamdmachine.reg<vgpr, 16,
+
+// ROUNDTRIP-LABEL: func.func @mfma_gfx950_mxfp4_32x32_kernel
+// ROUNDTRIP: waveamd.mma_scale "mfma.scale.f32.32x32x64.f4.f4" {{.*}} {scale_idx_a = 2 : i64, scale_idx_b = 3 : i64}
+
+// ASM-LABEL: mfma_gfx950_mxfp4_32x32_kernel:
+// ASM: v_mfma_scale_f32_32x32x64_f8f6f4 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]], [[SA:v[0-9]+]], [[SB:v[0-9]+]] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+func.func @mfma_gfx950_mxfp4_32x32_kernel(
+    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %zero = arith.constant 0 : i32
+  %scale_bits = arith.constant 2139062143 : i32
+  %scale = wave.splat %scale_bits : i32 -> !wave.simd<i32, 64>
+  %a = waveamd.fragment_fill %zero
+      : i32 -> !waveamd.fragment<0, i8, 32, 32, 64, 4>
+  %b = waveamd.fragment_fill %zero
+      : i32 -> !waveamd.fragment<1, i8, 32, 32, 64, 4>
+  %acc = waveamd.fragment_fill %zero
+      : i32 -> !waveamd.fragment<2, f32, 32, 32, 64, 16>
+  %result = waveamd.mma_scale "mfma.scale.f32.32x32x64.f4.f4"
+      %a, %scale, %b, %scale, %acc
+      {scale_idx_a = 2 : i64, scale_idx_b = 3 : i64}
+      : !waveamd.fragment<0, i8, 32, 32, 64, 4>,
+        !wave.simd<i32, 64>,
+        !waveamd.fragment<1, i8, 32, 32, 64, 4>,
+        !wave.simd<i32, 64>,
+        !waveamd.fragment<2, f32, 32, 32, 64, 16>
+     -> !waveamd.fragment<2, f32, 32, 32, 64, 16>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %sixteen = arith.constant 16 : i32
+  %sixteen_simd = wave.splat %sixteen : i32 -> !wave.simd<i32, 64>
+  %lane_off = wave.binary muli %lane, %sixteen_simd
+      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  %tuple_ptr = wave.ptr_add %out, %lane_off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %regs = waveamd.fragment_unpack %result
+      : !waveamd.fragment<2, f32, 32, 32, 64, 16>
+      -> !wave.simd<vector<16xi32>, 64>
+  %store_token = wave.store %regs -> %tuple_ptr
+      : (!wave.simd<vector<16xi32>, 64>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
+  return
+}
+
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_transposed_scale_kernel
 // SELECT: %[[TR:.*]], %[[TOK:.*]] = waveamdmachine.ds_read_tr_b64_b8
 // SELECT-NEXT: %[[SPLIT:.*]]:2 = waveamdmachine.tuple_to_elements %[[TR]]

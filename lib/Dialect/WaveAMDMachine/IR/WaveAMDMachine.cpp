@@ -954,6 +954,11 @@ LogicalResult MfmaScaleF32_16x16x128_F4F4Op::verify() {
   return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/4, /*hasScale=*/true);
 }
 
+LogicalResult MfmaScaleF32_32x32x64_F4F4Op::verify() {
+  return verifyMFMA(*this, /*abWidth=*/4, /*accWidth=*/16,
+                    /*hasScale=*/true);
+}
+
 static bool isUniformLoopInitUse(OpOperand &use, UniformLoopOp loop) {
   if (use.getOwner() != loop.getOperation())
     return false;

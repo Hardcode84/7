@@ -623,6 +623,24 @@ class WaveAMDMachine_MfmaResult<string mnemonic>
   let killedOperandReusePredicate = "&operand == &this->getAccMutable()";
 }
 
+class WaveAMDMachine_MfmaScaleResult<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic,
+                        [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
+                         WaveAMDMachine_MMAOpInterface,
+                         WaveAMDMachine_ReadsExec, Pure]> {
+  let arguments = (ins WaveAMDMachine_AVGPR:$a,
+                       WaveAMDMachine_AVGPR:$b,
+                       WaveAMDMachine_AVGPR:$acc,
+                       WaveAMDMachine_VGPR1:$a_scale,
+                       WaveAMDMachine_VGPR1:$b_scale,
+                       DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_a,
+                       DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_b);
+  let results = (outs WaveAMDMachine_AVGPR:$result);
+  let assemblyFormat = "$a `,` $b `,` $acc `,` $a_scale `,` $b_scale attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+  let killedOperandReusePredicate = "&operand == &this->getAccMutable()";
+}
+
 class WaveAMDMachine_TernaryIntResult<string mnemonic>
     : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
   let archPredicate = WaveAMDMachine_Gfx8To13;
@@ -1447,22 +1465,12 @@ def WaveAMDMachine_MfmaF32_32x32x16_BF16Op
   let archPredicate = WaveAMDMachine_Gfx950;
 }
 def WaveAMDMachine_MfmaScaleF32_16x16x128_F4F4Op
-    : WaveAMDMachine_Op<"mfma_scale_f32_16x16x128_f4_f4",
-                        [WaveAMDMachine_VALU, WaveAMDMachine_MFMA,
-                         WaveAMDMachine_MMAOpInterface,
-                         WaveAMDMachine_ReadsExec, Pure]> {
-  let arguments = (ins WaveAMDMachine_AVGPR:$a,
-                       WaveAMDMachine_AVGPR:$b,
-                       WaveAMDMachine_AVGPR:$acc,
-                       WaveAMDMachine_VGPR1:$a_scale,
-                       WaveAMDMachine_VGPR1:$b_scale,
-                       DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_a,
-                       DefaultValuedAttr<WaveAMDMachine_ScaleIndexAttr, "0">:$scale_idx_b);
-  let results = (outs WaveAMDMachine_AVGPR:$result);
-  let assemblyFormat = "$a `,` $b `,` $acc `,` $a_scale `,` $b_scale attr-dict `:` functional-type(operands, results)";
-  let hasVerifier = 1;
+    : WaveAMDMachine_MfmaScaleResult<"mfma_scale_f32_16x16x128_f4_f4"> {
   let archPredicate = WaveAMDMachine_Gfx950;
-  let killedOperandReusePredicate = "&operand == &this->getAccMutable()";
+}
+def WaveAMDMachine_MfmaScaleF32_32x32x64_F4F4Op
+    : WaveAMDMachine_MfmaScaleResult<"mfma_scale_f32_32x32x64_f4_f4"> {
+  let archPredicate = WaveAMDMachine_Gfx950;
 }
 
 def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",
