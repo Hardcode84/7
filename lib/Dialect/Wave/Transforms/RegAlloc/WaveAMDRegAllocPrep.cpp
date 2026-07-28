@@ -535,6 +535,19 @@ static bool valueIsLiveAfter(Value value, Operation *op) {
   });
 }
 
+static bool valueUseRepeatsAfter(Value value, Operation *op) {
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (isa<waveamdmachine::UniformLoopOp>(parent) &&
+        !valueIsDefinedInside(parent, value))
+      return true;
+  return false;
+}
+
+static bool valueDiesAt(Value value, Operation *op) {
+  return !valueUseRepeatsAfter(value, op) && !valueIsLiveAfter(value, op);
+}
+
 static Operation *
 getUpdateTupleCopyAnchor(waveamdmachine::UpdateTupleOp update) {
   Operation *anchor = update.getOperation();
@@ -1044,6 +1057,61 @@ static bool hasStorageClobberUse(Value value,
   });
 }
 
+struct RegSplatMove {
+  Operation *op;
+  Value source;
+  Value result;
+};
+
+static std::optional<RegSplatMove> getRegSplatMove(Operation *op) {
+  waveamdmachine::RegisterCopyOpInterface copy =
+      dyn_cast<waveamdmachine::RegisterCopyOpInterface>(op);
+  if (!copy)
+    return std::nullopt;
+  return RegSplatMove{op, copy.getRegisterCopySource(),
+                      copy.getRegisterCopyResult()};
+}
+
+static bool isLastUseRegSplat(RegSplatMove move,
+                              KilledOperandReuseIsaCache &isaCache) {
+  std::optional<waveamdmachine::RegType> sourceType =
+      copyableRegType(move.source);
+  waveamdmachine::RegType resultType =
+      cast<waveamdmachine::RegType>(move.result.getType());
+  return sourceType && sourceType->getRegClass() == resultType.getRegClass() &&
+         sourceType->getWidth() == 1 && sourceType->getIndex() < 0 &&
+         resultType.getIndex() < 0 && resultType.getWidth() > 1 &&
+         llvm::hasSingleElement(move.result.getUses()) &&
+         isStorageClobberUse(*move.result.use_begin(), isaCache) &&
+         valueDiesAt(move.source, move.op);
+}
+
+static void
+decomposeLastUseRegSplatCopies(func::FuncOp func,
+                               KilledOperandReuseIsaCache &isaCache,
+                               DenseSet<Operation *> &decomposedSplatTuples) {
+  SmallVector<RegSplatMove> moves;
+  func.walk([&](Operation *op) {
+    std::optional<RegSplatMove> move = getRegSplatMove(op);
+    if (move && isLastUseRegSplat(*move, isaCache))
+      moves.push_back(*move);
+  });
+
+  OpBuilder builder(func.getContext());
+  for (RegSplatMove move : moves) {
+    builder.setInsertionPoint(move.op);
+    waveamdmachine::RegType resultType =
+        cast<waveamdmachine::RegType>(move.result.getType());
+    SmallVector<Value> elements(resultType.getWidth(), move.source);
+    waveamdmachine::TupleFromElementsOp tuple =
+        waveamdmachine::TupleFromElementsOp::create(builder, move.op->getLoc(),
+                                                    resultType, elements);
+    decomposedSplatTuples.insert(tuple.getOperation());
+    move.result.replaceAllUsesWith(tuple.getTuple());
+    move.op->erase();
+  }
+}
+
 static bool
 hasAlignedViewLifetimeConflict(waveamdmachine::TupleFromElementsOp op,
                                AlignedTupleView view,
@@ -1121,10 +1189,76 @@ static bool hasFixedElementConflict(Value element,
   return cast<waveamdmachine::RegType>(element.getType()).getIndex() >= 0;
 }
 
+static bool isUnitReg(Value value, waveamdmachine::RegClass regClass) {
+  std::optional<waveamdmachine::RegType> type = trackedRegType(value);
+  return type && type->getRegClass() == regClass && type->getWidth() == 1;
+}
+
+static bool isUnassignedUnitReg(Value value,
+                                waveamdmachine::RegClass regClass) {
+  std::optional<waveamdmachine::RegType> type = trackedRegType(value);
+  return type && type->getRegClass() == regClass && type->getWidth() == 1 &&
+         type->getIndex() < 0;
+}
+
+static Value getTupleCopySource(Value value) {
+  waveamdmachine::RegisterCopyOpInterface copy =
+      dyn_cast_or_null<waveamdmachine::RegisterCopyOpInterface>(
+          value.getDefiningOp());
+  return copy ? copy.getRegisterCopySource() : Value{};
+}
+
+static Value getUnitRegTupleCopySource(Value value, Operation *tuple,
+                                       waveamdmachine::RegClass regClass) {
+  if (!hasSingleUseBy(value, tuple) || !isUnitReg(value, regClass))
+    return {};
+  Value source = getTupleCopySource(value);
+  if (!source || !isUnitReg(source, regClass))
+    return {};
+  return source;
+}
+
+struct RegSplatSource {
+  Value value;
+  unsigned directElements = 0;
+};
+
+static std::optional<RegSplatSource>
+getRegSplatSource(waveamdmachine::TupleFromElementsOp op,
+                  waveamdmachine::RegClass regClass) {
+  RegSplatSource source;
+  for (Value element : op.getElements()) {
+    Value root =
+        getUnitRegTupleCopySource(element, op.getOperation(), regClass);
+    if (!root) {
+      root = element;
+      ++source.directElements;
+    }
+    if (!isUnassignedUnitReg(root, regClass))
+      return std::nullopt;
+    if (source.value && source.value != root)
+      return std::nullopt;
+    source.value = root;
+  }
+  return source.value ? std::optional<RegSplatSource>(source) : std::nullopt;
+}
+
+static bool isLastUseRegSplat(waveamdmachine::TupleFromElementsOp op,
+                              bool newlyDecomposed) {
+  std::optional<waveamdmachine::RegType> tupleType =
+      copyableRegType(op.getTuple());
+  if (!tupleType || tupleType->getIndex() >= 0 || tupleType->getWidth() <= 1)
+    return false;
+  std::optional<RegSplatSource> source =
+      getRegSplatSource(op, tupleType->getRegClass());
+  return source && (newlyDecomposed || source->directElements == 1) &&
+         valueDiesAt(source->value, op.getOperation());
+}
+
 static FailureOr<Value> rewriteTupleElementForSharing(
     waveamdmachine::TupleFromElementsOp op, OpBuilder &builder, Value element,
     unsigned slot, waveamdmachine::RegType tupleType, bool preserveAlignedView,
-    bool preserveLayout, bool tupleIsClobbered,
+    bool preserveLayout, bool tupleIsClobbered, bool lastUseSplat,
     DenseMap<Value, unsigned> &anchorSlot, const ToElementsSourceMap &source,
     DenseSet<Value> &consumedByFromElements) {
   bool slotMismatch =
@@ -1134,8 +1268,9 @@ static FailureOr<Value> rewriteTupleElementForSharing(
   bool dragInConflict = hasSourceDragConflict(element, source, preserveLayout);
   bool fixedConflict =
       hasFixedElementConflict(element, tupleType, preserveAlignedView);
-  bool liveThroughClobber =
-      tupleIsClobbered && !hasSingleUseBy(element, op.getOperation());
+  bool elementDies = lastUseSplat ? valueDiesAt(element, op.getOperation())
+                                  : hasSingleUseBy(element, op.getOperation());
+  bool liveThroughClobber = tupleIsClobbered && !elementDies;
   if (!needsTupleElementCopy(element, slotMismatch, reuse, dragInConflict,
                              fixedConflict, liveThroughClobber)) {
     if (!preserveAlignedView)
@@ -1152,14 +1287,14 @@ static FailureOr<Value> rewriteTupleElementForSharing(
   return *duplicate;
 }
 
-static LogicalResult
-rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
-                              OpBuilder &builder,
-                              DenseMap<Value, unsigned> &anchorSlot,
-                              const ToElementsSourceMap &toElementsSource,
-                              DenseSet<Value> &consumedByFromElements,
-                              KilledOperandReuseIsaCache &isaCache,
-                              const wave::WaveAMDRegisterLimits *targetLimits) {
+static LogicalResult rewriteFromElementsForSharing(
+    waveamdmachine::TupleFromElementsOp op, OpBuilder &builder,
+    DenseMap<Value, unsigned> &anchorSlot,
+    const ToElementsSourceMap &toElementsSource,
+    DenseSet<Value> &consumedByFromElements,
+    const DenseSet<Operation *> &decomposedSplatTuples,
+    KilledOperandReuseIsaCache &isaCache,
+    const wave::WaveAMDRegisterLimits *targetLimits) {
   builder.setInsertionPoint(op);
   DenseMap<Value, unsigned> consumerSlots = getTupleElementSlots(op);
   DenseSet<Value> reanchorableSources =
@@ -1179,6 +1314,9 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
       cast<waveamdmachine::RegType>(op.getTuple().getType());
   bool preserveAlignedView = alignedView.has_value();
   bool tupleIsClobbered = hasStorageClobberUse(op.getTuple(), isaCache);
+  bool lastUseSplat =
+      tupleIsClobbered &&
+      isLastUseRegSplat(op, decomposedSplatTuples.contains(op.getOperation()));
   for (Value element : op.getElements()) {
     unsigned slot = cumOffset;
     bool reanchorSource =
@@ -1186,8 +1324,8 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
     bool preserveLayout = preserveAlignedView || reanchorSource;
     FailureOr<Value> use = rewriteTupleElementForSharing(
         op, builder, element, slot, tupleType, preserveAlignedView,
-        preserveLayout, tupleIsClobbered, anchorSlot, toElementsSource,
-        consumedByFromElements);
+        preserveLayout, tupleIsClobbered, lastUseSplat, anchorSlot,
+        toElementsSource, consumedByFromElements);
     if (failed(use))
       return failure();
     changed |= *use != element;
@@ -1202,6 +1340,7 @@ rewriteFromElementsForSharing(waveamdmachine::TupleFromElementsOp op,
 static LogicalResult
 splitTupleElementSharing(func::FuncOp func,
                          KilledOperandReuseIsaCache &isaCache,
+                         const DenseSet<Operation *> &decomposedSplatTuples,
                          const wave::WaveAMDRegisterLimits *targetLimits) {
   OpBuilder builder(func.getContext());
   DenseMap<Value, unsigned> anchorSlot;
@@ -1225,7 +1364,7 @@ splitTupleElementSharing(func::FuncOp func,
   for (waveamdmachine::TupleFromElementsOp op : fromElementsOps) {
     if (failed(rewriteFromElementsForSharing(
             op, builder, anchorSlot, toElementsSource, consumedByFromElements,
-            isaCache, targetLimits)))
+            decomposedSplatTuples, isaCache, targetLimits)))
       return failure();
   }
   return success();
@@ -1320,6 +1459,8 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   KilledOperandReuseIsaCache isaCache(func);
   if (failed(splitRequiredKilledOperandInputs(func, isaCache)))
     return failure();
-  return splitTupleElementSharing(func, isaCache,
+  DenseSet<Operation *> decomposedSplatTuples;
+  decomposeLastUseRegSplatCopies(func, isaCache, decomposedSplatTuples);
+  return splitTupleElementSharing(func, isaCache, decomposedSplatTuples,
                                   targetLimits ? &*targetLimits : nullptr);
 }

@@ -1103,9 +1103,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v2, v2, v127, v6
 		v_max3_f32 v6, v7, v159, v12
 		v_max3_f32 v2, v2, v143, v6
-		v_max_f32_e32 v2, v2, v175
-		v_mov_b32_e32 v6, v2
-		v_mov_b32_e32 v7, v2
+		v_max_f32_e32 v6, v2, v175
+		v_mov_b32_e32 v7, v6
 		v_max3_f32 v2, v192, v193, v194
 		v_max3_f32 v12, v196, v197, v198
 		v_max3_f32 v13, v200, v201, v202
@@ -1138,9 +1137,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v2, v2, v207, v12
 		v_max3_f32 v12, v13, v239, v18
 		v_max3_f32 v2, v2, v223, v12
-		v_max_f32_e32 v2, v2, v191
-		v_mov_b32_e32 v12, v2
-		v_mov_b32_e32 v13, v2
+		v_max_f32_e32 v12, v2, v191
+		v_mov_b32_e32 v13, v12
 		v_max_f32_e32 v18, v6, v7
 		v_mov_b32_e32 v6, v16
 		v_permlane32_swap_b32_e32 v12, v13
@@ -2748,9 +2746,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v11, v11, v233, v23
 		v_max3_f32 v23, v138, v253, v139
 		v_max3_f32 v11, v11, v243, v23
-		v_max_f32_e32 v11, v11, v157
-		v_mov_b32_e32 v138, v11
-		v_mov_b32_e32 v139, v11
+		v_max_f32_e32 v138, v11, v157
+		v_mov_b32_e32 v139, v138
 		v_cndmask_b32_e64 v140, v7, v176, s[42:43]
 		v_cndmask_b32_e64 v141, v7, v177, s[54:55]
 		v_permlane32_swap_b32_e32 v138, v139
@@ -2785,9 +2782,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v11, v11, v105, v23
 		v_max3_f32 v23, v162, v199, v163
 		v_max3_f32 v11, v11, v185, v23
-		v_max_f32_e32 v11, v11, v161
-		v_mov_b32_e32 v162, v11
-		v_mov_b32_e32 v163, v11
+		v_max_f32_e32 v162, v11, v161
+		v_mov_b32_e32 v163, v162
 		v_max_f32_e32 v164, v138, v139
 		s_add_i32 s19, s46, 0x80
 		s_cmp_lt_i32 s19, s25
@@ -4511,9 +4507,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v2, v2, v111, v5
 		v_max3_f32 v5, v6, v143, v10
 		v_max3_f32 v2, v2, v127, v5
-		v_max_f32_e32 v2, v2, v159
-		v_mov_b32_e32 v10, v2
-		v_mov_b32_e32 v11, v2
+		v_max_f32_e32 v10, v2, v159
+		v_mov_b32_e32 v11, v10
 		v_max3_f32 v2, v176, v177, v178
 		v_max3_f32 v5, v180, v181, v182
 		v_max3_f32 v6, v184, v185, v186
@@ -4546,9 +4541,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v2, v2, v191, v5
 		v_max3_f32 v5, v6, v223, v16
 		v_max3_f32 v2, v2, v207, v5
-		v_max_f32_e32 v2, v2, v175
-		v_mov_b32_e32 v16, v2
-		v_mov_b32_e32 v17, v2
+		v_max_f32_e32 v16, v2, v175
+		v_mov_b32_e32 v17, v16
 		v_max_f32_e32 v18, v10, v11
 		v_mov_b32_e32 v10, v14
 		v_permlane32_swap_b32_e32 v16, v17
@@ -6162,9 +6156,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v20, v20, v233, v138
 		v_max3_f32 v138, v139, v253, v140
 		v_max3_f32 v20, v20, v243, v138
-		v_max_f32_e32 v20, v20, v157
-		v_mov_b32_e32 v138, v20
-		v_mov_b32_e32 v139, v20
+		v_max_f32_e32 v138, v20, v157
+		v_mov_b32_e32 v139, v138
 		v_cndmask_b32_e64 v140, v6, v176, s[52:53]
 		v_cndmask_b32_e64 v141, v6, v177, s[54:55]
 		v_permlane32_swap_b32_e32 v138, v139
@@ -6199,9 +6192,8 @@ _attn_fwd_persistent:
 		v_max3_f32 v20, v20, v99, v162
 		v_max3_f32 v162, v163, v197, v164
 		v_max3_f32 v20, v20, v183, v162
-		v_max_f32_e32 v20, v20, v161
-		v_mov_b32_e32 v162, v20
-		v_mov_b32_e32 v163, v20
+		v_max_f32_e32 v162, v20, v161
+		v_mov_b32_e32 v163, v162
 		v_max_f32_e32 v164, v138, v139
 		s_add_i32 s19, s43, 0x80
 		s_cmp_lt_i32 s19, s24

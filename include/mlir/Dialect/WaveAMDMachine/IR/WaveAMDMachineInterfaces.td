@@ -155,6 +155,32 @@ def WaveAMDMachine_KilledOperandReuseOpInterface
   ];
 }
 
+def WaveAMDMachine_RegisterCopyOpInterface
+    : OpInterface<"RegisterCopyOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Register copy or scalar-to-tuple broadcast.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Copied or broadcast source.}],
+      "::mlir::Value",
+      "getRegisterCopySource",
+      (ins),
+      [{}],
+      [{ return $_op.getSource(); }]
+    >,
+    InterfaceMethod<
+      [{Copy result.}],
+      "::mlir::Value",
+      "getRegisterCopyResult",
+      (ins),
+      [{}],
+      [{ return $_op.getResult(); }]
+    >,
+  ];
+}
+
 def WaveAMDMachine_M0WriteHazardOpInterface
     : OpInterface<"M0WriteHazardOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

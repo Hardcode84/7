@@ -708,8 +708,9 @@ def WaveAMDPrepareRegAlloc
   let summary = "Expose register-allocation copies in WaveAMDMachine IR";
   let description = [{
     Materializes copies required by tuple aliases, loop carries, destructive
-    operands, and region yields. Rematerializes profitable isolated loop and
-    MFMA inputs before hazard repair and allocation.
+    operands, and region yields. Reuses dead same-class splat sources in
+    destructive tuples. Rematerializes profitable isolated loop and MFMA inputs
+    before hazard repair and allocation.
   }];
   let dependentDialects = [
     "func::FuncDialect",

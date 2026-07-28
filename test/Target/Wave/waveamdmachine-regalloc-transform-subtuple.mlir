@@ -1,5 +1,6 @@
 // RUN: wave-opt %s --waveamd-prepare-regalloc | FileCheck %s --check-prefix=PREP
 // RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop})' | FileCheck %s --check-prefix=SCAN
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-prepare-regalloc,waveamd-pack-vgpr-zero-moves,waveamd-hazard-repair{hoist-m0-across-regions=false},waveamd-prepare-regalloc)' | FileCheck %s --check-prefix=REPREP
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   // PREP-LABEL: func.func @erase_reg_after(
@@ -549,6 +550,175 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
           -> !waveamdmachine.reg<vgpr, 2>
     return %swapped, %use
         : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>
+  }
+
+  // PREP-LABEL: func.func @last_use_vgpr_splat_reuses_source(
+  // PREP-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP: [[EARLIER:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE]]
+  // PREP-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SOURCE]]
+  // PREP-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // PREP-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[PAIR]]
+  // PREP: return [[SWAPPED]], [[EARLIER]]
+  // SCAN-LABEL: func.func @last_use_vgpr_splat_reuses_source(
+  // SCAN-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[#BASE:]]>
+  // SCAN: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SOURCE]]
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 1, [[#BASE+1]]>
+  // SCAN-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE]]>
+  // SCAN-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[PAIR]]
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE]]>
+  func.func @last_use_vgpr_splat_reuses_source(
+      %source: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+    %earlier = waveamdmachine.v_mov_b32_tuple %source {registers = 1 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %pair = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    return %swapped, %earlier
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // REPREP-LABEL: func.func @repeated_prep_reuses_last_use_splat(
+  // REPREP-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // REPREP: [[COPY:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE]]
+  // REPREP-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // REPREP-NEXT: waveamdmachine.v_permlane32_swap_b32_tuple [[PAIR]]
+  func.func @repeated_prep_reuses_last_use_splat(
+      %source: !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 2> {
+    %pair = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    return %swapped : !waveamdmachine.reg<vgpr, 2>
+  }
+
+  // PREP-LABEL: func.func @last_use_vgpr_splat_loop_init_reuses_source(
+  // PREP-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SOURCE]]
+  // PREP-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[PAIR]]
+  func.func @last_use_vgpr_splat_loop_init_reuses_source(
+      %source: !waveamdmachine.reg<vgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> !waveamdmachine.reg<vgpr, 2> {
+    %pair = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%pair : !waveamdmachine.reg<vgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 2>)
+    } -> !waveamdmachine.reg<vgpr, 2>
+    return %loop : !waveamdmachine.reg<vgpr, 2>
+  }
+
+  // PREP-LABEL: func.func @last_use_sgpr_splat_reuses_source(
+  // PREP-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+  // PREP: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SOURCE]]
+  // PREP-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[PAIR]]
+  // REPREP-LABEL: func.func @last_use_sgpr_splat_reuses_source(
+  // REPREP-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<sgpr, 1>
+  // REPREP: [[COPY:%.*]] = waveamdmachine.s_mov_b32_tuple [[SOURCE]]
+  // REPREP-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // REPREP-NEXT: waveamdmachine.uniform_loop
+  // REPREP-SAME: carries([[PAIR]]
+  // SCAN-LABEL: func.func @last_use_sgpr_splat_reuses_source(
+  // SCAN-SAME: [[SOURCE:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, [[#BASE:]]>
+  // SCAN: [[COPY:%.*]] = waveamdmachine.copy_tuple [[SOURCE]]
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 1, [[#BASE+1]]>
+  // SCAN-NEXT: [[PAIR:%.*]] = waveamdmachine.tuple_from_elements [[SOURCE]], [[COPY]]
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 2, [[#BASE]]>
+  func.func @last_use_sgpr_splat_reuses_source(
+      %source: !waveamdmachine.reg<sgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> !waveamdmachine.reg<sgpr, 2> {
+    %pair = waveamdmachine.s_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<sgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%pair : !waveamdmachine.reg<sgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<sgpr, 2>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<sgpr, 2>)
+    } -> !waveamdmachine.reg<sgpr, 2>
+    return %loop : !waveamdmachine.reg<sgpr, 2>
+  }
+
+  // PREP-LABEL: func.func @cross_class_splat_keeps_full_copy(
+  // PREP: [[PAIR:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE:%[^ ]+]]
+  // PREP-NEXT: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[PAIR]]
+  func.func @cross_class_splat_keeps_full_copy(
+      %source: !waveamdmachine.reg<sgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> !waveamdmachine.reg<vgpr, 2> {
+    %pair = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%pair : !waveamdmachine.reg<vgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 2>)
+    } -> !waveamdmachine.reg<vgpr, 2>
+    return %loop : !waveamdmachine.reg<vgpr, 2>
+  }
+
+  // PREP-LABEL: func.func @live_vgpr_splat_keeps_full_copy(
+  // PREP: [[PAIR:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE:%[^ ]+]]
+  // PREP-NEXT: [[SWAPPED:%.*]] = waveamdmachine.v_permlane32_swap_b32_tuple [[PAIR]]
+  // PREP-NEXT: [[LATER:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE]]
+  // PREP: return [[SWAPPED]], [[LATER]]
+  func.func @live_vgpr_splat_keeps_full_copy(
+      %source: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+    %pair = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+        : (!waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %later = waveamdmachine.v_mov_b32_tuple %source {registers = 1 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return %swapped, %later
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // PREP-LABEL: func.func @loop_invariant_vgpr_splat_keeps_full_copy(
+  // PREP: waveamdmachine.uniform_loop
+  // PREP: [[PAIR:%.*]] = waveamdmachine.v_mov_b32_tuple [[SOURCE:%[^ ]+]]
+  // PREP-NEXT: waveamdmachine.v_permlane32_swap_b32_tuple [[PAIR]]
+  func.func @loop_invariant_vgpr_splat_keeps_full_copy(
+      %source: !waveamdmachine.reg<vgpr, 1>,
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1> {
+    ^bb0:
+      %pair = waveamdmachine.v_mov_b32_tuple %source {registers = 2 : i64}
+          : (!waveamdmachine.reg<vgpr, 1>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+          : (!waveamdmachine.reg<vgpr, 2>)
+            -> !waveamdmachine.reg<vgpr, 2>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+    }
+    return
   }
 
   // Inner carry storage cannot borrow an outer invariant live after the loop.

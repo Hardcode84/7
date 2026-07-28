@@ -51,6 +51,7 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: half_exchange_reduction_permlane32:
 // ASM-NOT: ds_bpermute
 // ASM: v_mov_b32_e32
+// ASM-NOT: v_mov_b32_e32
 // ASM: v_permlane32_swap_b32_e32
 // ASM-NOT: ds_bpermute
 // ASM: v_add_f32_e32
@@ -60,7 +61,11 @@ func.func @half_exchange_reduction_permlane32() attributes {
     wave.kernel,
     wave.workgroup_size = array<i32: 64, 1, 1>,
     wave.waves_per_workgroup = 1 : i64} {
-  %data = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %seed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+  %c1 = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %data = waveamdmachine.v_add_u32 %seed, %c1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+      -> !waveamdmachine.reg<vgpr, 1>
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm

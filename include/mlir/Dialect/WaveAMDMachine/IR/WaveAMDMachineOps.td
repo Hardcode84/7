@@ -898,6 +898,7 @@ def WaveAMDMachine_VMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"v_mov_b32_tuple", WaveAMDMachine_RegOrImm,
                               WaveAMDMachine_VGPR,
                               [WaveAMDMachine_VALU, AlwaysSpeculatable,
+                               WaveAMDMachine_RegisterCopyOpInterface,
                                DeclareOpInterfaceMethods<
                                    MemoryEffectsOpInterface>]>,
       WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
@@ -1020,6 +1021,7 @@ def WaveAMDMachine_CopyTupleOp
     : WaveAMDMachine_UnaryResult<"copy_tuple", WaveAMDMachine_GPR,
                                  WaveAMDMachine_GPR,
                                  [AlwaysSpeculatable,
+                                  WaveAMDMachine_RegisterCopyOpInterface,
                                   DeclareOpInterfaceMethods<
                                       MemoryEffectsOpInterface>]> {
   let summary = "copy a SGPR/VGPR tuple after register allocation";
@@ -1539,6 +1541,7 @@ def WaveAMDMachine_SMovB32TupleOp
     : WaveAMDMachine_UnaryResult<"s_mov_b32_tuple", WaveAMDMachine_RegOrImm,
                               WaveAMDMachine_SGPR,
                               [WaveAMDMachine_SALU, AlwaysSpeculatable,
+                               WaveAMDMachine_RegisterCopyOpInterface,
                                DeclareOpInterfaceMethods<
                                    MemoryEffectsOpInterface>]>,
       WaveAMDMachine_InstructionIssueCount<WaveAMDMachine_ResultRegWidth> {
