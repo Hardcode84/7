@@ -171,6 +171,8 @@ def configure_and_build(
         "-DLLVM_ENABLE_RTTI=ON",
         "-DLLVM_ENABLE_ZSTD=OFF",
         "-DLLVM_INSTALL_UTILS=ON",
+        "-DLLVM_INCLUDE_TESTS=OFF",
+        "-DMLIR_INCLUDE_TESTS=OFF",
         "-DLLVM_INCLUDE_BENCHMARKS=OFF",
         "-DLLVM_INCLUDE_EXAMPLES=OFF",
         "-DLLVM_INCLUDE_DOCS=OFF",
