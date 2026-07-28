@@ -42,8 +42,14 @@ def Wave_ConstantOp : Wave_Op<"constant", [
   }];
 }
 
-def Wave_YieldOp : Wave_Op<"yield", [Pure, ReturnLike, Terminator,
-                                     ParentOneOf<["WhereOp"]>]> {
+def Wave_YieldOp : Wave_Op<"yield", [
+    Pure,
+    ReturnLike,
+    Terminator,
+    ParentOneOf<["WhereOp"]>,
+    DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
+        ["getMutableSuccessorOperands"]>
+]> {
   let summary = "terminator for wave structured regions";
   let description = [{
     Terminates a Wave dialect structured region.
@@ -723,6 +729,8 @@ def Wave_LoadOp : Wave_Op<"load"> {
 
 def Wave_WhereOp : Wave_Op<"where", [
     SingleBlockImplicitTerminator<"YieldOp">,
+    DeclareOpInterfaceMethods<RegionBranchOpInterface,
+        ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
     RecursiveMemoryEffects,
     NoRegionArguments]> {
   let summary = "structured lane-mask predication";

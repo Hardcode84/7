@@ -51,6 +51,7 @@ struct PackedMathCapabilities {
   bool packedF32Math = true;
   bool packedF32ToF16Rtz = true;
   bool packedF32ToF16Rne = false;
+  bool packedF32ToBF16Rne = true;
 };
 
 static bool isScalarSimdF16(Type type) {
@@ -63,6 +64,11 @@ static bool isScalarSimdF32(Type type) {
   return simd && simd.getElementType().isF32();
 }
 
+static bool isScalarSimdBF16(Type type) {
+  SimdType simd = dyn_cast<SimdType>(type);
+  return simd && simd.getElementType().isBF16();
+}
+
 static Type getPackedSimdType(Type scalarSimdType, int64_t elements = 2) {
   SimdType simd = cast<SimdType>(scalarSimdType);
   VectorType vectorType = VectorType::get({elements}, simd.getElementType());
@@ -70,14 +76,15 @@ static Type getPackedSimdType(Type scalarSimdType, int64_t elements = 2) {
                        simd.getWidth());
 }
 
-static std::optional<int64_t> getPackedF16SimdElements(Type type) {
+static std::optional<int64_t> getPackedNarrowFloatSimdElements(Type type) {
   SimdType simd = dyn_cast<SimdType>(type);
   if (!simd)
     return std::nullopt;
   VectorType vectorType = dyn_cast<VectorType>(simd.getElementType());
   if (!vectorType || vectorType.getRank() != 1 || vectorType.isScalable())
     return std::nullopt;
-  if (!vectorType.getElementType().isF16())
+  Type elementType = vectorType.getElementType();
+  if (!elementType.isF16() && !elementType.isBF16())
     return std::nullopt;
   int64_t elements = vectorType.getNumElements();
   if (!llvm::isPowerOf2_64(elements))
@@ -85,10 +92,11 @@ static std::optional<int64_t> getPackedF16SimdElements(Type type) {
   return elements;
 }
 
-static bool isF32ToF16Cast(CastOp op) {
+static bool isPackableF32Cast(CastOp op) {
   return op.getKind() == CastKind::FpConvert &&
          isScalarSimdF32(op.getSource().getType()) &&
-         isScalarSimdF16(op.getResult().getType());
+         (isScalarSimdF16(op.getResult().getType()) ||
+          isScalarSimdBF16(op.getResult().getType()));
 }
 
 static CastRounding getFpConvertRounding(CastOp op) {
@@ -118,7 +126,7 @@ static std::optional<PairKind> getFloatMathKind(Operation *op) {
 
 static std::optional<PairKind> getCandidateKind(Operation *op) {
   if (CastOp castOp = dyn_cast<CastOp>(op)) {
-    if (isF32ToF16Cast(castOp))
+    if (isPackableF32Cast(castOp))
       return PairKind::Cast;
     return std::nullopt;
   }
@@ -131,7 +139,10 @@ static bool isCandidateSupported(Operation *op,
   if (!kind)
     return false;
   if (*kind == PairKind::Cast) {
-    CastRounding rounding = getFpConvertRounding(cast<CastOp>(op));
+    CastOp castOp = cast<CastOp>(op);
+    CastRounding rounding = getFpConvertRounding(castOp);
+    if (isScalarSimdBF16(castOp.getResult().getType()))
+      return rounding == CastRounding::RNE && capabilities.packedF32ToBF16Rne;
     if (rounding == CastRounding::RTZ)
       return capabilities.packedF32ToF16Rtz;
     if (rounding == CastRounding::RNE)
@@ -235,6 +246,8 @@ getPackedMathCapabilities(Operation *op) {
       waveamdmachine::VCvtPkRtzF16F32Op::isSupportedOnIsa(*isa);
   capabilities.packedF32ToF16Rne =
       waveamdmachine::VCvtPkF16F32Op::isSupportedOnIsa(*isa);
+  capabilities.packedF32ToBF16Rne =
+      waveamdmachine::VCvtPkBF16F32Op::isSupportedOnIsa(*isa);
   return capabilities;
 }
 
@@ -433,7 +446,7 @@ private:
 
   std::optional<SmallVector<CastOp, 8>> getPackCastInputs(PackOp pack) {
     std::optional<int64_t> elements =
-        getPackedF16SimdElements(pack.getResult().getType());
+        getPackedNarrowFloatSimdElements(pack.getResult().getType());
     if (!elements || *elements != static_cast<int64_t>(pack.getInputs().size()))
       return std::nullopt;
 
