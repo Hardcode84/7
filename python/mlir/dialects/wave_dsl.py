@@ -28,8 +28,10 @@ Usage::
 
 from __future__ import annotations
 
+import typing
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum, auto
 from types import TracebackType
 from typing import Any
@@ -134,6 +136,8 @@ xor = ixsimpl.xor_
 
 BinaryKind = wave.BinaryKind
 CastKind = wave.CastKind
+TDMDescriptorKind = waveamd.TDMDescriptorKind
+TDMPrefetchMode = waveamd.TDMPrefetchMode
 
 
 class _YieldKind(Enum):
@@ -295,6 +299,416 @@ def fragment_type(
         registers=registers,
         context=_current_context(),
     )
+
+
+def _tdm_words(name: str, words: Sequence[int], width: int) -> tuple[int, ...]:
+    if len(words) != width:
+        raise ValueError(f"{name} must contain {width} dwords")
+    result = tuple(int(word) for word in words)
+    if any(word < 0 or word > 0xFFFFFFFF for word in result):
+        raise ValueError(f"{name} dwords must fit unsigned i32")
+    return result
+
+
+@dataclass(frozen=True)
+class TDMDescriptorWords:
+    """Packed gfx1250 descriptor bits before MLIR materialization."""
+
+    d0: tuple[int, ...]
+    d1: tuple[int, ...]
+    d2: tuple[int, ...] | None = None
+    d3: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "d0", _tdm_words("d0", self.d0, 4))
+        object.__setattr__(self, "d1", _tdm_words("d1", self.d1, 8))
+        if (self.d2 is None) != (self.d3 is None):
+            raise ValueError("d2 and d3 must both be present or absent")
+        d2, d3 = self.d2, self.d3
+        if d2 is not None and d3 is not None:
+            object.__setattr__(self, "d2", _tdm_words("d2", d2, 4))
+            object.__setattr__(self, "d3", _tdm_words("d3", d3, 4))
+
+    @property
+    def groups(self) -> tuple[tuple[int, ...], ...]:
+        d2, d3 = self.d2, self.d3
+        if d2 is None or d3 is None:
+            return (self.d0, self.d1)
+        return (self.d0, self.d1, d2, d3)
+
+    @property
+    def kind(self) -> int:
+        if self.d2 is None:
+            return typing.cast(int, TDMDescriptorKind.D2)
+        return typing.cast(int, TDMDescriptorKind.D4)
+
+    def materialize(self, builder: FunctionBuilder) -> TDMDescriptor:
+        groups = tuple(
+            builder.pack(
+                [builder.constant(i32(), word) for word in words],
+                vector_type(len(words), i32()),
+            )
+            for words in self.groups
+        )
+        return TDMDescriptor.from_groups(groups)
+
+
+def _validate_tdm_group(name: str, value: Value, width: int) -> None:
+    try:
+        value_type = VectorType(value.type)
+    except ValueError as exc:
+        raise TypeError(f"{name} must be vector<{width}xi32>") from exc
+    if list(value_type.shape) != [width]:
+        raise TypeError(f"{name} must be vector<{width}xi32>")
+    try:
+        element_type = IntegerType(value_type.element_type)
+    except ValueError as exc:
+        raise TypeError(f"{name} must be vector<{width}xi32>") from exc
+    if element_type.width != 32:
+        raise TypeError(f"{name} must be vector<{width}xi32>")
+
+
+@dataclass(frozen=True)
+class TDMDescriptor:
+    """Raw gfx1250 descriptor tuple carried by Wave SSA."""
+
+    d0: Value
+    d1: Value
+    d2: Value | None = None
+    d3: Value | None = None
+
+    def __post_init__(self) -> None:
+        _validate_tdm_group("d0", self.d0, 4)
+        _validate_tdm_group("d1", self.d1, 8)
+        if (self.d2 is None) != (self.d3 is None):
+            raise ValueError("d2 and d3 must both be present or absent")
+        d2, d3 = self.d2, self.d3
+        if d2 is not None and d3 is not None:
+            _validate_tdm_group("d2", d2, 4)
+            _validate_tdm_group("d3", d3, 4)
+
+    @classmethod
+    def from_groups(cls, groups: Sequence[Value]) -> TDMDescriptor:
+        if len(groups) == 2:
+            return cls(groups[0], groups[1])
+        if len(groups) == 4:
+            return cls(groups[0], groups[1], groups[2], groups[3])
+        raise ValueError("TDM descriptor requires two or four groups")
+
+    @property
+    def groups(self) -> tuple[Value, ...]:
+        d2, d3 = self.d2, self.d3
+        if d2 is None or d3 is None:
+            return (self.d0, self.d1)
+        return (self.d0, self.d1, d2, d3)
+
+    @property
+    def extra_groups(self) -> tuple[Value, ...]:
+        return self.groups[2:]
+
+    @property
+    def kind(self) -> int:
+        if self.d2 is None:
+            return typing.cast(int, TDMDescriptorKind.D2)
+        return typing.cast(int, TDMDescriptorKind.D4)
+
+
+def _tdm_u32(value: int) -> int:
+    return value & 0xFFFFFFFF
+
+
+def _tdm_rank(shape: Sequence[int]) -> int:
+    rank = len(shape)
+    if rank < 1 or rank > 5:
+        raise ValueError("TDM supports one to five dimensions")
+    return rank
+
+
+def _require_tdm_length(name: str, values: Sequence[int], rank: int) -> None:
+    if len(values) != rank:
+        raise ValueError(f"{name} must have length {rank}")
+
+
+def _normalize_tdm_sequences(
+    shape: Sequence[int],
+    strides: Sequence[int],
+    block_shape: Sequence[int],
+    offsets: Sequence[int] | None,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    rank = _tdm_rank(shape)
+    _require_tdm_length("strides", strides, rank)
+    _require_tdm_length("block_shape", block_shape, rank)
+    if offsets is None:
+        offsets = (0,) * rank
+    _require_tdm_length("offsets", offsets, rank)
+    return (
+        tuple(int(extent) for extent in shape),
+        tuple(int(stride) for stride in strides),
+        tuple(int(extent) for extent in block_shape),
+        tuple(int(offset) for offset in offsets),
+    )
+
+
+def _validate_tdm_static_mode(
+    element_bit_width: int, num_warps: int, is_store: bool | None
+) -> None:
+    if element_bit_width not in (8, 16, 32, 64):
+        raise ValueError("element_bit_width must be 8, 16, 32, or 64")
+    if num_warps != 1:
+        raise ValueError("static TDM descriptors require one issuing wave")
+    if is_store is not None and not isinstance(is_store, bool):
+        raise TypeError("is_store must be bool or None")
+
+
+def _validate_tdm_addresses(
+    global_address: int, lds_address: int, predicate: int
+) -> None:
+    if global_address < 0 or global_address >= 1 << 57:
+        raise ValueError("global_address must fit 57 bits")
+    if lds_address < 0 or lds_address > 0xFFFFFFFF:
+        raise ValueError("lds_address must fit unsigned i32")
+    if predicate < 0 or predicate > 3:
+        raise ValueError("predicate must fit two bits")
+
+
+def _validate_tdm_shape(shape: tuple[int, ...]) -> None:
+    if any(extent < 0 or extent > 0xFFFFFFFF for extent in shape):
+        raise ValueError("shape dimensions must fit unsigned i32")
+
+
+def _validate_tdm_strides(strides: tuple[int, ...]) -> None:
+    if any(stride < 0 or stride >= 1 << 48 for stride in strides):
+        raise ValueError("strides must fit unsigned 48-bit fields")
+    if strides[-1] != 1:
+        raise ValueError("innermost stride must be one")
+
+
+def _validate_tdm_block_shape(block_shape: tuple[int, ...]) -> None:
+    if any(extent <= 0 for extent in block_shape):
+        raise ValueError("block_shape dimensions must be positive")
+
+
+def _validate_tdm_offsets(offsets: tuple[int, ...]) -> None:
+    if any(offset < -(1 << 31) or offset >= 1 << 31 for offset in offsets):
+        raise ValueError("offsets must fit signed i32")
+
+
+def _validate_tdm_layout(
+    shape: tuple[int, ...],
+    strides: tuple[int, ...],
+    block_shape: tuple[int, ...],
+    offsets: tuple[int, ...],
+) -> None:
+    _validate_tdm_shape(shape)
+    _validate_tdm_strides(strides)
+    _validate_tdm_block_shape(block_shape)
+    _validate_tdm_offsets(offsets)
+
+
+def _normalize_tdm_padding(
+    padding: tuple[int, int], is_store: bool | None
+) -> tuple[int, int]:
+    if len(padding) != 2:
+        raise ValueError("padding must contain interval and amount")
+    pad_interval, pad_amount = int(padding[0]), int(padding[1])
+    if (pad_interval, pad_amount) != (0, 0) and is_store is None:
+        raise ValueError("padded TDM descriptors require is_store")
+    if (pad_interval == 0) != (pad_amount == 0):
+        raise ValueError("padding interval and amount must both be zero or positive")
+    if pad_interval < 0 or pad_amount < 0:
+        raise ValueError("padding interval and amount cannot be negative")
+    return pad_interval, pad_amount
+
+
+def _encode_tdm_control(
+    element_bit_width: int,
+    pad_interval: int,
+    pad_amount: int,
+    block_inner: int,
+    is_store: bool | None,
+) -> int:
+    element_size = element_bit_width // 8
+    result = (element_size.bit_length() - 1) << 16
+    if not pad_interval:
+        return result
+
+    interval_dwords, amount_dwords = _tdm_padding_dwords(
+        pad_interval, pad_amount, element_bit_width
+    )
+    if is_store and pad_interval != block_inner:
+        raise ValueError(
+            "padded TDM store requires padding interval to equal "
+            "innermost block dimension"
+        )
+    result |= 1 << 20
+    result |= (interval_dwords.bit_length() - 2) << 22
+    result |= (amount_dwords - 1) << 25
+    return result
+
+
+def _tdm_padding_dwords(
+    pad_interval: int, pad_amount: int, element_bit_width: int
+) -> tuple[int, int]:
+    interval_bits = pad_interval * element_bit_width
+    amount_bits = pad_amount * element_bit_width
+    if interval_bits % 32 or amount_bits % 32:
+        raise ValueError("padding interval and amount must be dword-aligned")
+    interval_dwords = interval_bits // 32
+    amount_dwords = amount_bits // 32
+    if (
+        interval_dwords < 2
+        or interval_dwords > 256
+        or interval_dwords & (interval_dwords - 1)
+    ):
+        raise ValueError("padding interval must encode two to 256 dwords")
+    if amount_dwords < 1 or amount_dwords > 128:
+        raise ValueError("padding amount must encode one to 128 dwords")
+    return interval_dwords, amount_dwords
+
+
+def _apply_tdm_offsets(
+    global_address: int,
+    shape: tuple[int, ...],
+    strides: tuple[int, ...],
+    offsets: tuple[int, ...],
+    element_size: int,
+) -> tuple[int, tuple[int, ...]]:
+    byte_offset = (
+        sum(offset * stride for offset, stride in zip(offsets, strides, strict=True))
+        * element_size
+    )
+    global_address += byte_offset
+    if global_address < 0 or global_address >= 1 << 57:
+        raise ValueError("offset global address must fit 57 bits")
+    adjusted_shape = tuple(
+        0 if offset < 0 else max(0, extent - offset)
+        for extent, offset in zip(shape, offsets, strict=True)
+    )
+    return global_address, adjusted_shape
+
+
+def _finalize_tdm_shapes(
+    shape: tuple[int, ...],
+    block_shape: tuple[int, ...],
+    pad_interval: int,
+    pad_amount: int,
+    is_store: bool | None,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    tile_shape = list(block_shape)
+    if pad_interval and is_store:
+        shape = (*shape[:-1], min(shape[-1], block_shape[-1]))
+        tile_shape[-1] += pad_amount
+    if any(extent > 0xFFFF for extent in tile_shape):
+        raise ValueError("block dimensions must fit unsigned i16")
+    return shape, tuple(tile_shape)
+
+
+def _pack_tdm_d1(
+    shape: tuple[int, ...],
+    tile_shape: tuple[int, ...],
+    strides: tuple[int, ...],
+    control: int,
+) -> tuple[int, ...]:
+    rank = len(shape)
+    d1 = [0] * 8
+    d1[0] = _tdm_u32(control)
+    d1[1] = _tdm_u32(shape[-1] << 16)
+    d1[2] = shape[-1] >> 16
+    if rank >= 2:
+        d1[2] |= _tdm_u32(shape[-2] << 16)
+        d1[3] = shape[-2] >> 16
+    d1[3] |= tile_shape[-1] << 16
+    if rank >= 2:
+        d1[4] = tile_shape[-2] & 0xFFFF
+    if rank >= 3:
+        d1[4] |= tile_shape[-3] << 16
+    if rank >= 2:
+        stride = strides[-2]
+        d1[5] = _tdm_u32(stride)
+        d1[6] = (stride >> 32) & 0xFFFF
+    if rank >= 3:
+        stride = strides[-3]
+        d1[6] |= (stride & 0xFFFF) << 16
+        d1[7] = _tdm_u32(stride >> 16)
+    return tuple(map(_tdm_u32, d1))
+
+
+def _pack_tdm_extra_groups(
+    shape: tuple[int, ...],
+    tile_shape: tuple[int, ...],
+    strides: tuple[int, ...],
+) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    rank = len(shape)
+    if rank <= 2:
+        return None
+    d2 = [0] * 4
+    d3 = [0] * 4
+    d2[0] = shape[-3]
+    if rank >= 4:
+        stride = strides[-4]
+        d2[1] = shape[-4]
+        d2[2] = _tdm_u32(stride)
+        d2[3] = (stride >> 32) & 0xFFFF
+        d2[3] |= tile_shape[-4] << 16
+    if rank == 5:
+        stride = strides[-5]
+        d3[0] = _tdm_u32(stride)
+        d3[1] = (stride >> 32) & 0xFFFF
+        d3[1] |= _tdm_u32(shape[-5] << 16)
+        d3[2] = shape[-5] >> 16
+        d3[2] |= tile_shape[-5] << 16
+    return tuple(map(_tdm_u32, d2)), tuple(map(_tdm_u32, d3))
+
+
+def pack_gfx1250_tdm_descriptor(
+    global_address: int,
+    shape: Sequence[int],
+    strides: Sequence[int],
+    block_shape: Sequence[int],
+    *,
+    element_bit_width: int,
+    num_warps: int = 1,
+    offsets: Sequence[int] | None = None,
+    lds_address: int = 0,
+    predicate: int = 1,
+    padding: tuple[int, int] = (0, 0),
+    is_store: bool | None = None,
+) -> TDMDescriptorWords:
+    """Pack one finalized descriptor for one issuing wave."""
+
+    shape, strides, block_shape, offsets = _normalize_tdm_sequences(
+        shape, strides, block_shape, offsets
+    )
+    _validate_tdm_static_mode(element_bit_width, num_warps, is_store)
+    _validate_tdm_addresses(global_address, lds_address, predicate)
+    _validate_tdm_layout(shape, strides, block_shape, offsets)
+    pad_interval, pad_amount = _normalize_tdm_padding(padding, is_store)
+    element_size = element_bit_width // 8
+    control = _encode_tdm_control(
+        element_bit_width,
+        pad_interval,
+        pad_amount,
+        block_shape[-1],
+        is_store,
+    )
+    global_address, shape = _apply_tdm_offsets(
+        global_address, shape, strides, offsets, element_size
+    )
+    shape, tile_shape = _finalize_tdm_shapes(
+        shape, block_shape, pad_interval, pad_amount, is_store
+    )
+
+    d0 = (
+        predicate,
+        lds_address,
+        _tdm_u32(global_address),
+        _tdm_u32((global_address >> 32) & 0x01FFFFFF) | 0x80000000,
+    )
+    d1 = _pack_tdm_d1(shape, tile_shape, strides, control)
+    extra_groups = _pack_tdm_extra_groups(shape, tile_shape, strides)
+    if extra_groups is None:
+        return TDMDescriptorWords(d0, d1)
+    return TDMDescriptorWords(d0, d1, *extra_groups)
 
 
 def _current_context() -> Context:
@@ -1241,6 +1655,125 @@ class FunctionBuilder:
 
     # --- WaveAMD ops -------------------------------------------------------
 
+    def gfx1250_tdm_descriptor(
+        self,
+        global_address: int,
+        shape: Sequence[int],
+        strides: Sequence[int],
+        block_shape: Sequence[int],
+        *,
+        element_bit_width: int,
+        num_warps: int = 1,
+        offsets: Sequence[int] | None = None,
+        lds_address: int = 0,
+        predicate: int = 1,
+        padding: tuple[int, int] = (0, 0),
+        is_store: bool | None = None,
+    ) -> TDMDescriptor:
+        words = pack_gfx1250_tdm_descriptor(
+            global_address,
+            shape,
+            strides,
+            block_shape,
+            element_bit_width=element_bit_width,
+            num_warps=num_warps,
+            offsets=offsets,
+            lds_address=lds_address,
+            predicate=predicate,
+            padding=padding,
+            is_store=is_store,
+        )
+        return words.materialize(self)
+
+    def _materialize_tdm_descriptor(
+        self, descriptor: TDMDescriptor | TDMDescriptorWords
+    ) -> TDMDescriptor:
+        if isinstance(descriptor, TDMDescriptorWords):
+            return descriptor.materialize(self)
+        if isinstance(descriptor, TDMDescriptor):
+            return descriptor
+        raise TypeError("expected TDMDescriptor or TDMDescriptorWords")
+
+    def tdm_select(
+        self,
+        condition: Value,
+        true_descriptor: TDMDescriptor | TDMDescriptorWords,
+        false_descriptor: TDMDescriptor | TDMDescriptorWords,
+    ) -> TDMDescriptor:
+        try:
+            condition_type = IntegerType(condition.type)
+        except ValueError as exc:
+            raise TypeError("tdm_select condition must be uniform i1") from exc
+        if condition_type.width != 1:
+            raise TypeError("tdm_select condition must be uniform i1")
+        if true_descriptor.kind != false_descriptor.kind:
+            raise ValueError("tdm_select requires matching descriptor forms")
+        true_descriptor = self._materialize_tdm_descriptor(true_descriptor)
+        false_descriptor = self._materialize_tdm_descriptor(false_descriptor)
+        return TDMDescriptor.from_groups(
+            [
+                self.select(condition, true_group, false_group)
+                for true_group, false_group in zip(
+                    true_descriptor.groups,
+                    false_descriptor.groups,
+                    strict=True,
+                )
+            ]
+        )
+
+    def tdm_load(
+        self,
+        descriptor: TDMDescriptor | TDMDescriptorWords,
+        *,
+        after: Value,
+        cache: Attribute | None = None,
+    ) -> Value:
+        descriptor = self._materialize_tdm_descriptor(descriptor)
+        return waveamd.TDMLoadOp(
+            mem_token_type(),
+            descriptor.d0,
+            descriptor.d1,
+            after,
+            descriptor.extra_groups,
+            descriptor.kind,
+            cache=cache,
+        ).token
+
+    def tdm_store(
+        self,
+        descriptor: TDMDescriptor | TDMDescriptorWords,
+        *,
+        after: Value,
+        cache: Attribute | None = None,
+    ) -> Value:
+        descriptor = self._materialize_tdm_descriptor(descriptor)
+        return waveamd.TDMStoreOp(
+            mem_token_type(),
+            descriptor.d0,
+            descriptor.d1,
+            after,
+            descriptor.extra_groups,
+            descriptor.kind,
+            cache=cache,
+        ).token
+
+    def tdm_prefetch(
+        self,
+        descriptor: TDMDescriptor | TDMDescriptorWords,
+        byte_offset: Value,
+        *,
+        after: Value,
+        mode: int = typing.cast(int, TDMPrefetchMode.Regular),
+    ) -> Value:
+        descriptor = self._materialize_tdm_descriptor(descriptor)
+        return waveamd.TDMPrefetchOp(
+            mem_token_type(),
+            descriptor.d0,
+            byte_offset,
+            after,
+            mode=mode,
+        ).token
+
     def set_priority(self, priority: int) -> None:
         """Set hardware issue priority for the current wave."""
         waveamd.SetPriorityOp(priority)
@@ -1599,6 +2132,10 @@ __all__ = [
     "SharedAddressSpaceAttr",
     "SimdType",
     "StoreCacheAttr",
+    "TDMDescriptor",
+    "TDMDescriptorKind",
+    "TDMDescriptorWords",
+    "TDMPrefetchMode",
     "bf16",
     "buffer_address_space",
     "buffer_ptr_type",
@@ -1618,6 +2155,7 @@ __all__ = [
     "module",
     "opaque_buffer_ptr_type",
     "opaque_ptr_type",
+    "pack_gfx1250_tdm_descriptor",
     "private_address_space",
     "ptr_type",
     "shared_address_space",

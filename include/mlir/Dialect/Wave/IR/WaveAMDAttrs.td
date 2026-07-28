@@ -46,6 +46,30 @@ def WaveAMD_StoreCacheKind : I32EnumAttr<"StoreCacheKind",
   let cppNamespace = "::mlir::waveamd";
 }
 
+def WaveAMD_TDMDescriptorD2 :
+    I32EnumAttrCase<"D2", 0, "d2">;
+def WaveAMD_TDMDescriptorD4 :
+    I32EnumAttrCase<"D4", 1, "d4">;
+
+def WaveAMD_TDMDescriptorKind : I32EnumAttr<"TDMDescriptorKind",
+    "gfx1250 TDM descriptor form", [
+      WaveAMD_TDMDescriptorD2, WaveAMD_TDMDescriptorD4
+    ]> {
+  let cppNamespace = "::mlir::waveamd";
+}
+
+def WaveAMD_TDMPrefetchRegular :
+    I32EnumAttrCase<"Regular", 0, "regular">;
+def WaveAMD_TDMPrefetchSpeculative :
+    I32EnumAttrCase<"Speculative", 1, "speculative">;
+
+def WaveAMD_TDMPrefetchMode : I32EnumAttr<"TDMPrefetchMode",
+    "gfx1250 TDM prefetch mode", [
+      WaveAMD_TDMPrefetchRegular, WaveAMD_TDMPrefetchSpeculative
+    ]> {
+  let cppNamespace = "::mlir::waveamd";
+}
+
 def WaveAMD_MmaWmmaI32_16x16x16_IU8 :
     I32EnumAttrCase<"WmmaI32_16x16x16_IU8", 0,
                     "wmma.i32.16x16x16.iu8">;

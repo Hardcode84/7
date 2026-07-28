@@ -608,6 +608,40 @@ LogicalResult DmaLoadLdsOp::verify() {
   return success();
 }
 
+template <typename TDMOp>
+static LogicalResult verifyTDMTransfer(TDMOp op, bool load) {
+  size_t expectedGroups =
+      op.getDescriptorKind() == TDMDescriptorKind::D2 ? 0 : 2;
+  if (op.getExtraGroups().size() != expectedGroups)
+    return op.emitOpError()
+           << stringifyTDMDescriptorKind(op.getDescriptorKind()) << " requires "
+           << expectedGroups << " extra dword groups";
+
+  Attribute cache = op.getCacheAttr();
+  if (!cache)
+    return success();
+  if (load && !isa<LoadCacheAttr>(cache))
+    return op.emitOpError("cache must use #waveamd.load_cache");
+  if (!load && !isa<StoreCacheAttr>(cache))
+    return op.emitOpError("cache must use #waveamd.store_cache");
+  return success();
+}
+
+LogicalResult TDMLoadOp::verify() {
+  return verifyTDMTransfer(*this, /*load=*/true);
+}
+
+LogicalResult TDMStoreOp::verify() {
+  return verifyTDMTransfer(*this, /*load=*/false);
+}
+
+LogicalResult TDMPrefetchOp::verify() {
+  auto offsetType = cast<wave::SimdType>(getByteOffset().getType());
+  if (!offsetType.getElementType().isInteger(32))
+    return emitOpError("byte offset must have i32 SIMD elements");
+  return success();
+}
+
 namespace {
 struct SharedPointerInfo {
   wave::PtrType ptr;

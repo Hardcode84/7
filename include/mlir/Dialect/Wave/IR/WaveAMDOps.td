@@ -9,6 +9,7 @@
 #ifndef MLIR_DIALECT_WAVE_IR_WAVEAMDOPS_TD
 #define MLIR_DIALECT_WAVE_IR_WAVEAMDOPS_TD
 
+include "mlir/Dialect/Wave/IR/WaveAMDAttrs.td"
 include "mlir/Dialect/Wave/IR/WaveAMDBase.td"
 include "mlir/Dialect/Wave/IR/WaveAMDTypes.td"
 include "mlir/Dialect/Wave/IR/WaveTypes.td"
@@ -18,6 +19,19 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class WaveAMD_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveAMD_Dialect, mnemonic, traits>;
+
+class WaveAMD_I32Vector<int width>
+    : Type<CPred<"::llvm::isa<::mlir::VectorType>($_self) && "
+                 "::llvm::cast<::mlir::VectorType>($_self).getRank() == 1 && "
+                 "!::llvm::cast<::mlir::VectorType>($_self).isScalable() && "
+                 "::llvm::cast<::mlir::VectorType>($_self).getNumElements() == " #
+                 width # " && "
+                 "::llvm::cast<::mlir::VectorType>($_self)"
+                 ".getElementType().isInteger(32)">,
+           "fixed i32 vector">;
+
+def WaveAMD_TDMDwordGroup4 : WaveAMD_I32Vector<4>;
+def WaveAMD_TDMDwordGroup8 : WaveAMD_I32Vector<8>;
 
 def WaveAMD_SetPriorityOp : WaveAMD_Op<"set_priority"> {
   let summary = "set AMD wave issue priority";
@@ -169,6 +183,47 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds"> {
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = [{
     $source `->` $dest `after` $dependency
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+class WaveAMD_TDMTransfer<string mnemonic>
+    : WaveAMD_Op<mnemonic, [MemoryEffects<[MemRead, MemWrite]>]> {
+  let arguments = (ins WaveAMD_TDMDwordGroup4:$d0,
+                       WaveAMD_TDMDwordGroup8:$d1,
+                       Wave_MemToken:$dependency,
+                       Variadic<WaveAMD_TDMDwordGroup4>:$extra_groups,
+                       WaveAMD_TDMDescriptorKind:$descriptor_kind,
+                       OptionalAttr<AnyAttr>:$cache);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = [{
+    $descriptor_kind $d0 `,` $d1 (`,` $extra_groups^)?
+    `after` $dependency attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def WaveAMD_TDMLoadOp : WaveAMD_TDMTransfer<"tdm_load"> {
+  let summary = "gfx1250 tensor load to LDS";
+}
+
+def WaveAMD_TDMStoreOp : WaveAMD_TDMTransfer<"tdm_store"> {
+  let summary = "gfx1250 tensor store from LDS";
+}
+
+// MemWrite prevents DCE; dependency token carries ordering.
+def WaveAMD_TDMPrefetchOp
+    : WaveAMD_Op<"tdm_prefetch", [MemoryEffects<[MemWrite]>]> {
+  let summary = "prefetch one descriptor-derived address to L2";
+  let arguments = (ins WaveAMD_TDMDwordGroup4:$d0,
+                       Wave_Simd:$byte_offset,
+                       Wave_MemToken:$dependency,
+                       DefaultValuedAttr<WaveAMD_TDMPrefetchMode,
+                          "::mlir::waveamd::TDMPrefetchMode::Regular">:$mode);
+  let results = (outs Wave_MemToken:$token);
+  let assemblyFormat = [{
+    $mode $d0 `,` $byte_offset `after` $dependency
     attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
