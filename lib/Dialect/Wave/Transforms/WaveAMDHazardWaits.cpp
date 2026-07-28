@@ -151,12 +151,6 @@ getValuWriteExecConsumerLatency(const llvm::AMDGPU::IsaVersion &isa) {
   return isa.Major == 9 ? 4 : 0;
 }
 
-static unsigned
-getValuWriteVGPRPermlane32SwapLatency(const llvm::AMDGPU::IsaVersion &isa) {
-  return waveamdmachine::VPermlane32SwapB32TupleOp::isSupportedOnIsa(isa) ? 2
-                                                                          : 0;
-}
-
 struct HazardConfig {
   const waveamdmachine::ArchData *arch;
   llvm::AMDGPU::IsaVersion isaVersion;
@@ -214,7 +208,7 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       /*valuWriteVGPRReadlaneLatency=*/
       issueHazards.valuWriteVGPRScalarRead,
       /*valuWriteVGPRPermlane32SwapLatency=*/
-      getValuWriteVGPRPermlane32SwapLatency(isaVersion),
+      issueHazards.valuWriteVGPRPermlane32Swap,
       /*valuWriteSGPRValuReadLatency=*/
       issueHazards.valuWriteSGPRValuRead,
       /*valuWriteSGPRVmemReadLatency=*/getValuWriteSGPRVmemReadLatency(),
@@ -287,11 +281,15 @@ static bool isControlFlowOp(Operation *op) {
 struct ValueHazards {
   unsigned m0 = 0;
   unsigned mfmaStore = 0;
+  unsigned permlane32Swap = 0;
 
-  bool empty() const { return m0 == 0 && mfmaStore == 0; }
+  bool empty() const {
+    return m0 == 0 && mfmaStore == 0 && permlane32Swap == 0;
+  }
 
   bool operator==(const ValueHazards &rhs) const {
-    return m0 == rhs.m0 && mfmaStore == rhs.mfmaStore;
+    return m0 == rhs.m0 && mfmaStore == rhs.mfmaStore &&
+           permlane32Swap == rhs.permlane32Swap;
   }
 
   bool operator!=(const ValueHazards &rhs) const { return !(*this == rhs); }
@@ -299,15 +297,19 @@ struct ValueHazards {
   bool joinWith(ValueHazards rhs) {
     unsigned nextM0 = std::max(m0, rhs.m0);
     unsigned nextMfmaStore = std::max(mfmaStore, rhs.mfmaStore);
-    bool changed = nextM0 != m0 || nextMfmaStore != mfmaStore;
+    unsigned nextPermlane32Swap = std::max(permlane32Swap, rhs.permlane32Swap);
+    bool changed = nextM0 != m0 || nextMfmaStore != mfmaStore ||
+                   nextPermlane32Swap != permlane32Swap;
     m0 = nextM0;
     mfmaStore = nextMfmaStore;
+    permlane32Swap = nextPermlane32Swap;
     return changed;
   }
 
   void advance(unsigned count) {
     m0 = m0 > count ? m0 - count : 0;
     mfmaStore = mfmaStore > count ? mfmaStore - count : 0;
+    permlane32Swap = permlane32Swap > count ? permlane32Swap - count : 0;
   }
 };
 
@@ -1066,6 +1068,11 @@ static void addProducedValuRegHazard(Value result, HazardState &state,
         std::max(state.valuWriteVcc, cfg.valuWriteSGPRValuReadLatency);
     return;
   }
+  if (type.getRegClass() == waveamdmachine::RegClass::VGPR)
+    mergeValueHazards(
+        state, result,
+        {/*m0=*/0, /*mfmaStore=*/0,
+         /*permlane32Swap=*/cfg.valuWriteVGPRPermlane32SwapLatency});
   std::optional<RegSpan> span = getAllocatedRegSpan(result);
   if (!span)
     return;
@@ -1196,14 +1203,16 @@ static void addProducedHazards(Operation *op, HazardState &state,
   if (auto m0Writer = dyn_cast<waveamdmachine::M0WriteHazardOpInterface>(op))
     mergeValueHazards(state, m0Writer.getM0HazardValue(),
                       {/*m0=*/cfg.m0PipelineDelay,
-                       /*mfmaStore=*/0});
+                       /*mfmaStore=*/0,
+                       /*permlane32Swap=*/0});
   if (info ? info->mfma : op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()) {
     unsigned passes = info ? info->mfmaPasses : getMfmaPassCount(op);
     unsigned resultLatency = getXdlResultLatency(passes, cfg);
     for (Value result : op->getResults())
       mergeValueHazards(state, result,
                         {/*m0=*/0,
-                         /*mfmaStore=*/resultLatency});
+                         /*mfmaStore=*/resultLatency,
+                         /*permlane32Swap=*/0});
   }
   addProducedPhysicalHazards(op, state, cfg, info);
 }
@@ -1488,12 +1497,15 @@ static unsigned getRequiredSsaWait(Operation *op, const HazardState &state,
                       ? state.m0DmaCapture
                       : 0;
   bool vmemStore = info ? info->vmemStore : isVMEMStore(*op);
+  bool permlane32Swap = isCachedPermlane32Swap(op, info);
   for (Value operand : op->getOperands()) {
     ValueHazards hazards = lookupValueHazards(state, operand);
     if (isa<waveamdmachine::M0Type>(operand.getType()))
       wait = std::max(wait, hazards.m0);
     if (vmemStore)
       wait = std::max(wait, hazards.mfmaStore);
+    if (permlane32Swap)
+      wait = std::max(wait, hazards.permlane32Swap);
   }
   return wait;
 }

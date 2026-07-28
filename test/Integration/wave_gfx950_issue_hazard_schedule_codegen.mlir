@@ -222,4 +222,34 @@ func.func @valu_to_mfma_hazard_schedule_codegen() attributes {wave.kernel} {
   return
 }
 
+// ASM-LABEL: permlane32_hazard_schedule_codegen:
+// ASM: v_mov_b32_e32 v8, v0
+// ASM-NEXT: v_mov_b32_e32 v9, v0
+// ASM-NEXT: v_xor_b32_e32 v10, v1, v2
+// ASM-NEXT: v_add_u32_e32 v11, v1, v2
+// ASM-NEXT: v_permlane32_swap_b32_e32 v8, v9
+// ASM-NOT: s_nop
+// ASM: s_endpgm
+func.func @permlane32_hazard_schedule_codegen() attributes {wave.kernel} {
+  %src = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %x = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+  %y = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 2>
+  %pair = waveamdmachine.v_mov_b32_tuple %src {registers = 2 : i64}
+      : (!waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+      : (!waveamdmachine.reg<vgpr, 2, 8>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %fill0 = waveamdmachine.v_xor_b32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 10>
+  %fill1 = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 11>
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

@@ -12,6 +12,7 @@
 // RUN: wave-instruction-state-report --func=lds_dma_issue_backpressure --arch=gfx950 %s | FileCheck %s --check-prefix=LDSDMA
 // RUN: wave-instruction-state-report --func=trans_forwarding_gap --arch=gfx950 %s | FileCheck %s --check-prefix=TRANS
 // RUN: wave-instruction-state-report --func=readfirstlane_gap --arch=gfx950 %s | FileCheck %s --check-prefix=READLANE
+// RUN: wave-instruction-state-report --func=permlane32_gap --arch=gfx950 %s | FileCheck %s --check-prefix=PERMLANE
 // RUN: wave-instruction-state-report --func=vcc_gap --arch=gfx950 %s | FileCheck %s --check-prefix=VCC
 // RUN: wave-instruction-state-report --func=noinst_memory_alias_zero_cycle --arch=gfx950 --vmem-value-latency=20 %s | FileCheck %s --check-prefix=ALIAS
 // RUN: wave-instruction-state-report --func=noinst_token_alias --arch=gfx950 --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=TOKENALIAS
@@ -219,6 +220,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  func.func @permlane32_gap(%a: !waveamdmachine.reg<vgpr, 1>) {
+    %pair = waveamdmachine.v_mov_b32_tuple %a {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+        : (!waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+    return
+  }
+
   func.func @vcc_gap(%a: !waveamdmachine.reg<vgpr, 1>,
                      %b: !waveamdmachine.reg<vgpr, 1>,
                      %c: !waveamdmachine.reg<vgpr, 1>) {
@@ -412,6 +421,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TRANS: query op_index=1 cycle=4 op=waveamdmachine.v_mul_f32 stall=instruction_hazard cycles=1 components=instruction_hazard:1
 
 // READLANE: query op_index=1 cycle=4 op=waveamdmachine.v_readfirstlane_b32 stall=instruction_hazard cycles=1 components=instruction_hazard:1
+
+// PERMLANE: query op_index=1 cycle=8 op=waveamdmachine.v_permlane32_swap_b32_tuple stall=instruction_hazard cycles=2 components=instruction_hazard:2
 
 // VCC: query op_index=2 cycle=8 op=waveamdmachine.v_cndmask_b32_vcc stall=instruction_hazard cycles=1 components=instruction_hazard:1
 

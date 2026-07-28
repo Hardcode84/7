@@ -175,12 +175,14 @@ struct StoreWriteDataHazard {
 struct InstructionIssueSlotHazardConfig {
   unsigned valuWriteVGPRScalarRead = 0;
   unsigned valuWriteVGPRMfmaRead = 0;
+  unsigned valuWriteVGPRPermlane32Swap = 0;
   unsigned valuWriteSGPRValuRead = 0;
   unsigned transWriteVGPRValuRead = 0;
 
   bool empty() const {
     return valuWriteVGPRScalarRead == 0 && valuWriteVGPRMfmaRead == 0 &&
-           valuWriteSGPRValuRead == 0 && transWriteVGPRValuRead == 0;
+           valuWriteVGPRPermlane32Swap == 0 && valuWriteSGPRValuRead == 0 &&
+           transWriteVGPRValuRead == 0;
   }
 };
 
@@ -267,6 +269,7 @@ private:
   struct IssueSlotHazards {
     uint64_t valuWriteVGPRScalarReadyAt = 0;
     uint64_t valuWriteVGPRMfmaReadyAt = 0;
+    uint64_t valuWriteVGPRPermlane32SwapReadyAt = 0;
     uint64_t transWriteVGPRReadyAt = 0;
     uint64_t valuWriteVCCReadyAt = 0;
     uint64_t mfmaResultReadyAt = 0;
@@ -275,6 +278,7 @@ private:
 
     bool empty() const {
       return valuWriteVGPRScalarReadyAt == 0 && valuWriteVGPRMfmaReadyAt == 0 &&
+             valuWriteVGPRPermlane32SwapReadyAt == 0 &&
              transWriteVGPRReadyAt == 0 && valuWriteVCCReadyAt == 0 &&
              mfmaResultReadyAt == 0 && mfmaSrcCOverlapReadyAt == 0 &&
              mfmaSrcCExactReadyAt == 0;
@@ -285,6 +289,9 @@ private:
           std::max(valuWriteVGPRScalarReadyAt, rhs.valuWriteVGPRScalarReadyAt);
       valuWriteVGPRMfmaReadyAt =
           std::max(valuWriteVGPRMfmaReadyAt, rhs.valuWriteVGPRMfmaReadyAt);
+      valuWriteVGPRPermlane32SwapReadyAt =
+          std::max(valuWriteVGPRPermlane32SwapReadyAt,
+                   rhs.valuWriteVGPRPermlane32SwapReadyAt);
       transWriteVGPRReadyAt =
           std::max(transWriteVGPRReadyAt, rhs.transWriteVGPRReadyAt);
       valuWriteVCCReadyAt =
@@ -370,6 +377,9 @@ private:
   unsigned legacyValuIssueSlotHazardWait(Value operand,
                                          const InstructionDesc &desc,
                                          const IssueSlotHazards &hazards) const;
+  unsigned
+  permlane32SwapIssueSlotHazardWait(Operation *op,
+                                    const IssueSlotHazards &hazards) const;
   int64_t tokenReadyCycle(Operation *op) const;
   int64_t pipeReadyCycle(InstructionPipeKind pipe, int64_t cycle) const;
   int64_t memoryIssueReadyCycle(MemoryIssueResource resource,

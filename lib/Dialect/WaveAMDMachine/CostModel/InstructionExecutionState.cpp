@@ -451,6 +451,8 @@ getInstructionIssueSlotHazardConfig(const llvm::AMDGPU::IsaVersion &isa) {
   if (isCDNA3Or4(isa))
     return {/*valuWriteVGPRScalarRead=*/1,
             /*valuWriteVGPRMfmaRead=*/getValuWriteVGPRMfmaHazardLatency(),
+            /*valuWriteVGPRPermlane32Swap=*/
+            VPermlane32SwapB32TupleOp::isSupportedOnIsa(isa) ? 2u : 0u,
             /*valuWriteSGPRValuRead=*/2,
             /*transWriteVGPRValuRead=*/1};
   return {};
@@ -1288,6 +1290,14 @@ unsigned InstructionExecutionState::legacyValuIssueSlotHazardWait(
   return wait;
 }
 
+unsigned InstructionExecutionState::permlane32SwapIssueSlotHazardWait(
+    Operation *op, const IssueSlotHazards &hazards) const {
+  if (!isa<VPermlane32SwapB32TupleOp>(op))
+    return 0;
+  return issueSlotsUntil(hazards.valuWriteVGPRPermlane32SwapReadyAt,
+                         currentIssueSlot);
+}
+
 unsigned InstructionExecutionState::issueSlotHazardWait(
     Operation *op, const InstructionDesc &desc) const {
   unsigned wait = 0;
@@ -1300,6 +1310,7 @@ unsigned InstructionExecutionState::issueSlotHazardWait(
         wait, mfmaIssueSlotHazardWait(op, desc, operandIndex, it->second));
     wait = std::max(wait,
                     legacyValuIssueSlotHazardWait(operand, desc, it->second));
+    wait = std::max(wait, permlane32SwapIssueSlotHazardWait(op, it->second));
   }
   return wait;
 }
@@ -1674,6 +1685,10 @@ void InstructionExecutionState::commitIssueSlotProducer(
           currentIssueSlot + issueSlotHazardConfig.valuWriteVGPRScalarRead;
       hazards.valuWriteVGPRMfmaReadyAt =
           currentIssueSlot + issueSlotHazardConfig.valuWriteVGPRMfmaRead;
+      if (issueSlotHazardConfig.valuWriteVGPRPermlane32Swap)
+        hazards.valuWriteVGPRPermlane32SwapReadyAt =
+            currentIssueSlot +
+            issueSlotHazardConfig.valuWriteVGPRPermlane32Swap;
       if (desc.trans)
         hazards.transWriteVGPRReadyAt =
             currentIssueSlot + issueSlotHazardConfig.transWriteVGPRValuRead;

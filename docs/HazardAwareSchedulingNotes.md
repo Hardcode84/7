@@ -1,8 +1,8 @@
 # Hazard-aware scheduling notes
 
 Current `waveamd-insert-hazard-waits` dataflow is the correctness
-baseline. It tracks LGKM pending state plus SSA-carried M0/MFMA
-hazards, then inserts mitigation after register allocation.
+baseline. It tracks LGKM pending state plus SSA-carried M0, MFMA, and
+VALU-to-permlane hazards, then inserts mitigation after register allocation.
 
 Scheduler integration should be optional scoring help, not the sole
 correctness mechanism. If scheduling cannot prove a hazard is covered,

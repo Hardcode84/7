@@ -9,6 +9,28 @@
 // TIMING: hazard_repair_blocks
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  // CHECK-LABEL: func.func @permlane32_gap_filled_through_ssa
+  // CHECK: [[PAIR:%.*]] = waveamdmachine.v_mov_b32_tuple
+  // CHECK-NEXT: waveamdmachine.v_xor_b32
+  // CHECK-NEXT: waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.v_permlane32_swap_b32_tuple [[PAIR]]
+  func.func @permlane32_gap_filled_through_ssa(
+      %src: !waveamdmachine.reg<vgpr, 1>,
+      %x: !waveamdmachine.reg<vgpr, 1>,
+      %y: !waveamdmachine.reg<vgpr, 1>) {
+    %pair = waveamdmachine.v_mov_b32_tuple %src {registers = 2 : i64}
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+    %swapped = waveamdmachine.v_permlane32_swap_b32_tuple %pair
+        : (!waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+    %fill0 = waveamdmachine.v_xor_b32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %fill1 = waveamdmachine.v_add_u32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
   // CHECK-LABEL: func.func @m0_gap_filled_by_later_valu
   // CHECK: waveamdmachine.s_mov_m0
   // CHECK-NEXT: waveamdmachine.v_add_u32
