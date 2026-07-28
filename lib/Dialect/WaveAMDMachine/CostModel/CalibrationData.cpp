@@ -18,12 +18,9 @@
 namespace mlir::waveamdmachine {
 
 SchedClass parseSchedClassName(llvm::StringRef name) {
-  for (size_t i = 0; i < static_cast<size_t>(SchedClass::NumSchedClasses);
-       ++i) {
-    SchedClass cls = static_cast<SchedClass>(i);
-    if (getSchedClassName(cls) == name)
-      return cls;
-  }
+  std::optional<SchedClass> cls = symbolizeSchedClass(name);
+  if (cls && *cls != SchedClass::NumSchedClasses)
+    return *cls;
   return SchedClass::NumSchedClasses;
 }
 

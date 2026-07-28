@@ -417,3 +417,67 @@ func.func @wmma_wrong_target() {
 }
 
 }
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @packed_delay_crosses_label() {
+  %delay = waveamdmachine.imm 273 : !waveamdmachine.imm
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-error @below {{packed s_delay_alu crosses a label}}
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_nop %zero : (!waveamdmachine.imm) -> ()
+  waveamdmachine.label "packed_target"
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @packed_delay_invalid_id() {
+  %delay = waveamdmachine.imm 1537 : !waveamdmachine.imm
+  // expected-error @below {{invalid packed s_delay_alu instruction ID}}
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @packed_delay_crosses_control_flow() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %delay = waveamdmachine.imm 273 : !waveamdmachine.imm
+  // expected-error @below {{packed s_delay_alu crosses control flow}}
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  waveamdmachine.uniform_if %cond {
+    waveamdmachine.s_nop %zero : (!waveamdmachine.imm) -> ()
+    waveamdmachine.yield
+  } otherwise {
+    waveamdmachine.yield
+  } : !waveamdmachine.reg<scc, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
+}

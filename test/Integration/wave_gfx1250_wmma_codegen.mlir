@@ -4,13 +4,15 @@
 // RUN: FileCheck %s --check-prefix=IR < %t.mlir
 // RUN: env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline \
 // RUN:   wave-translate --wave-to-amdgpu-asm %t.mlir > %t.s
-// RUN: FileCheck %s --check-prefix=ASM < %t.s
+// RUN: FileCheck %s --check-prefix=ASM \
+// RUN:   --implicit-check-not=HW_REG_WAVE_SCHED_MODE < %t.s
 // RUN: llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1250 \
 // RUN:   -filetype=obj %t.s -o %t.o 2> %t.mc.err
 // RUN: not grep -i warning %t.mc.err
 // RUN: ld.lld -shared %t.o -o %t.hsaco
 // RUN: llvm-objdump -d --mcpu=gfx1250 %t.hsaco \
-// RUN:   | FileCheck %s --check-prefix=DIS
+// RUN:   | FileCheck %s --check-prefix=DIS \
+// RUN:       --implicit-check-not=HW_REG_WAVE_SCHED_MODE
 
 // IR-LABEL: func.func @gfx1250_wmma_f16_threeaddr(
 // IR: [[F16:%.*]] = waveamdmachine.wmma_f32_16x16x32_f16

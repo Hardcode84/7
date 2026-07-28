@@ -58,7 +58,10 @@ struct AMDGPUTargetCapabilities {
   unsigned localMemoryBytes = 0;
   unsigned addressableLocalMemoryBytes = 0;
   unsigned localMemoryBankCount = 0;
+  unsigned executionUnitsPerCU = 0;
   unsigned maxWavesPerEU = 0;
+  unsigned totalVGPRs = 0;
+  unsigned scheduleIssueWidth = 0;
   unsigned maxUserSGPRs = 0;
   unsigned bufferResourceBaseBits = 0;
   unsigned bufferResourceNumRecordsBits = 0;
@@ -75,6 +78,9 @@ struct AMDGPUTargetCapabilities {
   bool waitXcnt = false;
   bool vgprWindowing = false;
   bool setregVGPRMSBFixup = false;
+  bool transCoexecutionHazard = false;
+  bool wmmaCoexecutionHazard = false;
+  bool scratchBaseForwardingHazard = false;
 };
 
 std::optional<AMDGPUTarget> parseAMDGPUTargetAttr(llvm::StringRef value);

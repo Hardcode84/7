@@ -12,7 +12,7 @@
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 // RUN: wave-sim-report --func=trip_loop --trip-count=10000 %s | FileCheck %s --check-prefix=TRIPBIG
 // RUN: wave-sim-report --func=wmma_latency --op-latencies %s | FileCheck %s --check-prefix=WMMA
-// RUN: wave-sim-report --func=mfma_32x32_latency --op-latencies %s | FileCheck %s --check-prefix=MFMA32
+// RUN: not wave-sim-report --func=mfma_32x32_latency --op-latencies %s 2>&1 | FileCheck %s --check-prefix=MFMA32
 // RUN: wave-sim-report --func=two_independent_valu --wave-size=64 --timeline %s | FileCheck %s --check-prefix=W64
 // RUN: wave-sim-report --func=vmem_value_ready --timeline %s | FileCheck %s --check-prefix=VMEMVALUE
 // RUN: wave-sim-report --func=uniform_if_report %s | FileCheck %s --check-prefix=UIF
@@ -304,10 +304,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TRIPBIG: issued_ops: 10000
 
 // WMMA: op_latencies:
-// WMMA: op=waveamdmachine.wmma_f32_16x16x16_f16 class=Write16PassWMMA fu=VALU latency=64
+// WMMA: op=waveamdmachine.wmma_f32_16x16x16_f16 class=Write16PassWMMA fu=VALU latency=5
 
-// MFMA32: op_latencies:
-// MFMA32: op=waveamdmachine.mfma_f32_32x32x16_f16 class=Write8PassMAI fu=MFMA_XDL latency=8
+// MFMA32: error: 'waveamdmachine.mfma_f32_32x32x16_f16' op Write8PassMAI is unsupported on gfx1100
 
 // W64: func: two_independent_valu
 // W64: wave_size: 64

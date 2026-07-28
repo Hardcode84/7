@@ -129,8 +129,8 @@ func.func @fixed_pressure() {
 // INVALID: waveamd-machine-schedule-report score func=candidate_invalid region=0 order=original cycles=10 issued_ops=2
 // INVALID: waveamd-machine-schedule-report score func=candidate_invalid region=0 order=candidate fallback=original reason=candidate_order_breaks_dependency
 
-// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=128 issued_ops=2
-// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=128 issued_ops=2
+// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=original cycles=10 issued_ops=2
+// WMMA: waveamd-machine-schedule-report score func=wmma_latency region=0 order=candidate cycles=10 issued_ops=2
 
 // ALIAS: waveamd-machine-schedule-report score func=noinst_alias region=0 order=original cycles=325 issued_ops=3
 

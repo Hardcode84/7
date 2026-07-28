@@ -92,9 +92,9 @@ repos:
         files: '^(include/.+\.(h|td)|lib/.+\.(cpp|h|td)|python/.+\.(cpp|h)|tools/.+\.(cpp|h)|build_tools/check_ixsimpl_boundary\.py|\.pre-commit-config\.yaml)$'
 
       - id: gen-sched-table
-        name: check generated scheduler tables vs SISchedule.td
+        name: check generated scheduler tables vs LLVM schedule data
         entry: python build_tools/gen_sched_table.py --check
         language: python
-        # Reads generated latencies, FunctionalUnit.cpp, and LLVM checkout.
+        # Reads LLVM sources and queries build/bin/wave-target-info.
         pass_filenames: false
-        files: '^(lib/Dialect/WaveAMDMachine/CostModel/(LatencyTable\.cpp|LatencyTable\.inc|FunctionalUnit\.cpp)|include/mlir/Dialect/WaveAMDMachine/CostModel/SchedClass\.h|build_tools/gen_sched_table\.py)$'
+        files: '^(lib/Dialect/WaveAMDMachine/(CostModel/(LatencyTable\.cpp|LatencyTable\.inc|FunctionalUnit\.cpp|FunctionalUnitTable\.inc)|IR/WaveAMDMachineTarget\.cpp)|include/mlir/Dialect/WaveAMDMachine/(CMakeLists\.txt|CostModel/(CMakeLists\.txt|CostModelEnums\.(h|td)|FunctionalUnit\.h|LatencyTable\.h|SchedClass\.h)|IR/WaveAMDMachineTarget\.h)|tools/wave-target-info/(CMakeLists\.txt|wave-target-info\.cpp)|build_tools/gen_sched_table\.py)$'

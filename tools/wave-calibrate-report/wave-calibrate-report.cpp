@@ -81,16 +81,24 @@ static int reportFor(const CalibrationData &calib) {
   }
   llvm::outs() << "  SchedClass             LLVM       Measured       Delta\n";
   llvm::outs() << "  ----------             ----       --------       -----\n";
-  int total = static_cast<int>(SchedClass::NumSchedClasses);
+  int total = 0;
   int covered = 0;
-  for (int i = 0; i < total; ++i) {
+  for (int i = 0; i < static_cast<int>(SchedClass::NumSchedClasses); ++i) {
     SchedClass cls = static_cast<SchedClass>(i);
     llvm::StringRef name = getSchedClassName(cls);
-    int llvmDefault = getLatency(*arch, cls);
     const CalibrationOverride *over = calib.getOverride(cls);
+    if (!isSchedClassSupported(*arch, cls)) {
+      if (over) {
+        llvm::errs() << "calibration override " << name << " is unsupported on "
+                     << arch->name << "\n";
+        return 1;
+      }
+      continue;
+    }
+    ++total;
     if (over)
       ++covered;
-    printRow(name, llvmDefault, over);
+    printRow(name, getLatency(*arch, cls), over);
   }
   llvm::outs() << "\n  coverage: " << covered << " / " << total
                << " SchedClasses\n";

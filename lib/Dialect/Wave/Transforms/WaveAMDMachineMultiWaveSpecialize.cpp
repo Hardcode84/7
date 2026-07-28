@@ -329,6 +329,13 @@ struct SpecializationConfig {
   bool multipleWorkgroups;
 };
 
+static bool hasValidWaveTopology(const waveamdmachine::ArchData &arch,
+                                 unsigned wavefront) {
+  return llvm::isPowerOf2_32(wavefront) &&
+         llvm::isPowerOf2_32(arch.simdsPerCU) && arch.simdIdOffset >= 0 &&
+         arch.waveIdOffset >= 0;
+}
+
 static std::optional<SpecializationConfig>
 getSpecializationConfig(func::FuncOp func) {
   const waveamdmachine::ArchData *arch = resolveArch(func);
@@ -340,8 +347,9 @@ getSpecializationConfig(func::FuncOp func) {
     return std::nullopt;
   FailureOr<unsigned> wavefront = waveamdmachine::getAMDGPUWavefrontSize(
       func, "waveamd-machine-multi-wave-specialize");
-  if (failed(wavefront) || !llvm::isPowerOf2_32(*wavefront) ||
-      !llvm::isPowerOf2_32(arch->simdsPerCU))
+  if (failed(wavefront))
+    return std::nullopt;
+  if (!hasValidWaveTopology(*arch, *wavefront))
     return std::nullopt;
   if (*targetWaves > static_cast<unsigned>(arch->wavesPerSIMD))
     return std::nullopt;

@@ -280,6 +280,8 @@ def WaveAMDMachine_SMEMLoad : NativeOpTrait<"waveamdmachine::SMEMLoadOp">;
 def WaveAMDMachine_LDSLoad : NativeOpTrait<"waveamdmachine::LDSLoadOp">;
 def WaveAMDMachine_LDSStore : NativeOpTrait<"waveamdmachine::LDSStoreOp">;
 def WaveAMDMachine_LDSDma : NativeOpTrait<"waveamdmachine::LDSDmaOp">;
+def WaveAMDMachine_ScratchMemory
+    : NativeOpTrait<"waveamdmachine::ScratchMemoryOp">;
 def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
 def WaveAMDMachine_TupleMemory : NativeOpTrait<"waveamdmachine::TupleMemoryOp">;
@@ -292,6 +294,7 @@ def WaveAMDMachine_CompletionFreeTokenTrait
 def WaveAMDMachine_NoMachineInst : NativeOpTrait<"waveamdmachine::NoMachineInst">;
 def WaveAMDMachine_NoAsmEmission : NativeOpTrait<"waveamdmachine::NoAsmEmission">;
 def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
+def WaveAMDMachine_WMMA : NativeOpTrait<"waveamdmachine::WMMAOp">;
 def WaveAMDMachine_ReadsExec : NativeOpTrait<"waveamdmachine::ReadsExecOp">;
 def WaveAMDMachine_WritesExec : NativeOpTrait<"waveamdmachine::WritesExecOp">;
 
@@ -530,7 +533,8 @@ class WaveAMDMachine_BufferMemoryOp<string mnemonic, list<Trait> traits = []>
 class WaveAMDMachine_ScratchMemoryOp<string mnemonic, list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic,
         !listconcat(traits,
-          [DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
+          [WaveAMDMachine_ScratchMemory,
+           DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
   let archPredicate = WaveAMDMachine_FlatScratchTarget;
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
@@ -600,7 +604,8 @@ class WaveAMDMachine_MmaResult<string mnemonic, Type operandType, Type accType,
 class WaveAMDMachine_WmmaResult<string mnemonic>
     : WaveAMDMachine_MmaResult<mnemonic, WaveAMDMachine_VGPR,
                                WaveAMDMachine_VGPROrImm,
-                               WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]>;
+                               WaveAMDMachine_VGPR,
+                               [WaveAMDMachine_VALU, WaveAMDMachine_WMMA]>;
 
 class WaveAMDMachine_Gfx1250WmmaResult<string mnemonic>
     : WaveAMDMachine_WmmaResult<mnemonic>,
@@ -1610,6 +1615,18 @@ def WaveAMDMachine_SWaitcntSplitOp
          | `xcnt` `(` $xcnt `)`) attr-dict
   }];
 }
+def WaveAMDMachine_SWaitAluOp
+    : WaveAMDMachine_Op<"s_wait_alu", [WaveAMDMachine_Waitcnt]> {
+  let arguments = (ins OptionalAttr<I32Attr>:$va_vdst,
+                       OptionalAttr<I32Attr>:$sa_sdst,
+                       OptionalAttr<I32Attr>:$va_sdst);
+  let assemblyFormat = [{
+    oilist(`va_vdst` `(` $va_vdst `)`
+         | `sa_sdst` `(` $sa_sdst `)`
+         | `va_sdst` `(` $va_sdst `)`) attr-dict
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
 def WaveAMDMachine_SNopOp
     : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm,
                                    [WaveAMDMachine_SALU]>;
@@ -1649,6 +1666,10 @@ def WaveAMDMachine_SSetVgprMsbOp
 def WaveAMDMachine_SDelayAluOp : WaveAMDMachine_UnaryNoResult<"s_delay_alu",
                                                          WaveAMDMachine_Imm,
                                                          [WaveAMDMachine_SALU]>;
+def WaveAMDMachine_VNopOp
+    : WaveAMDMachine_Op<"v_nop", [WaveAMDMachine_VALU]> {
+  let assemblyFormat = "attr-dict";
+}
 def WaveAMDMachine_SAndSaveexecB32Op
     : WaveAMDMachine_Op<"s_and_saveexec_b32",
                         [WaveAMDMachine_SALU,

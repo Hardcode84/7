@@ -24,7 +24,6 @@
 // RUN: wave-instruction-state-report --func=dma_issue_delay_conditional --arch=gfx950 --dma-issue-delay-cohort=skipped %s | FileCheck %s --check-prefix=DMASKIP
 // RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-PACKED
 // RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-PACKED-CDNA3
-// RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx1100 %s | FileCheck %s --check-prefix=MFMA-PACKED-RDNA
 // RUN: wave-instruction-state-report --func=mfma_scalar_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-SCALAR
 // RUN: wave-instruction-state-report --func=mfma_trans_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-TRANS
 
@@ -454,9 +453,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // MFMA-PACKED-CDNA3: arch: gfx942
 // MFMA-PACKED-CDNA3: query op_index=1 cycle=4 op=waveamdmachine.v_pk_add_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
-
-// MFMA-PACKED-RDNA: arch: gfx1100
-// MFMA-PACKED-RDNA: query op_index=1 cycle=1 op=waveamdmachine.v_pk_add_f32 stall=none cycles=0 components=none
 
 // MFMA-SCALAR: query op_index=1 cycle=4 op=waveamdmachine.v_add_f32 stall=none cycles=0 components=none
 

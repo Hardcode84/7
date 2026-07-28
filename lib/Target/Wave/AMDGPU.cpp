@@ -255,7 +255,9 @@ struct KernelEntryValueUsage {
 struct BufferedMCInstruction {
   llvm::MCInst inst;
   Operation *origin = nullptr;
+  size_t bufferId = 0;
   unsigned indent = 0;
+  bool synthetic = false;
 };
 
 struct BufferedMCLine {
@@ -273,6 +275,14 @@ struct BufferedMCAlign {
 
 using BufferedMCItem = std::variant<BufferedMCInstruction, BufferedMCLine,
                                     BufferedMCLabel, BufferedMCAlign>;
+
+struct PackedDelayAluSpan {
+  SmallVector<size_t> skippedIds;
+  size_t delayId = 0;
+  size_t targetId = 0;
+  unsigned id0 = 0;
+  unsigned id1 = 0;
+};
 
 static constexpr std::array<unsigned, 4> kVGPRWindowModeFieldMasks = {
     static_cast<unsigned>(llvm::AMDGPU::Hwreg::SRC0_VGPR_MSB),
@@ -743,6 +753,9 @@ private:
   unsigned sLoadB128() const { return opcodes.sLoadB128; }
   unsigned sLoadB256() const { return opcodes.sLoadB256; }
   unsigned sWaitcnt() const { return opcodes.sWaitcnt; }
+  unsigned sWaitAlu() const {
+    return postVIOpcode(llvm::AMDGPU::S_WAITCNT_DEPCTR);
+  }
   unsigned sNop() const { return opcodes.sNop; }
   unsigned sDelayAlu() const { return postVIOpcode(llvm::AMDGPU::S_DELAY_ALU); }
   unsigned sSleep() const { return opcodes.sSleep; }
@@ -1415,8 +1428,9 @@ private:
 
   bool isVGPRWindowProgramStateInstruction(const llvm::MCInst &inst) const {
     unsigned opcode = inst.getOpcode();
-    return opcode == sWaitcnt() || opcode == sDelayAlu() ||
-           opcode == sBarrier() || opcode == sWaitXcnt() ||
+    return opcode == sWaitcnt() || opcode == sWaitAlu() ||
+           opcode == sDelayAlu() || opcode == sBarrier() ||
+           opcode == sWaitXcnt() ||
            opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT) ||
            opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT_DSCNT) ||
            opcode == postVIOpcode(llvm::AMDGPU::S_WAIT_STORECNT) ||
@@ -1528,16 +1542,195 @@ private:
     llvm::MCInst inst;
     inst.setOpcode(opcode);
     inst.addOperand(llvm::MCOperand::createImm(immediate));
-    return {inst, origin, instructionIndent};
+    return {inst, origin, /*bufferId=*/0, instructionIndent,
+            /*synthetic=*/true};
   }
 
-  LogicalResult insertVGPRWindowMode(VGPRWindowMode newMode,
-                                     SmallVectorImpl<BufferedMCItem> &finalized,
-                                     VGPRWindowMode &currentMode,
-                                     std::optional<size_t> &mostRecentModeSet,
-                                     VGPRWindowClauseState &clause,
-                                     bool &xCntIsZero, Operation *origin,
-                                     unsigned instructionIndent) const {
+  FailureOr<std::optional<size_t>>
+  getClauseCoveringInstruction(ArrayRef<BufferedMCItem> items,
+                               size_t targetIndex) const {
+    std::optional<size_t> clauseIndex;
+    unsigned remaining = 0;
+    for (size_t index = 0; index <= targetIndex; ++index) {
+      if (std::holds_alternative<BufferedMCLabel>(items[index])) {
+        if (remaining)
+          return emissionSource->emitError("s_clause crosses a label");
+        continue;
+      }
+      const auto *instruction =
+          std::get_if<BufferedMCInstruction>(&items[index]);
+      if (!instruction || instruction->synthetic)
+        continue;
+      if (instruction->inst.getOpcode() == sClause()) {
+        Operation *origin =
+            instruction->origin ? instruction->origin : emissionSource;
+        if (remaining)
+          return origin->emitError("nested s_clause is unsupported");
+        if (instruction->inst.getNumOperands() != 1 ||
+            !instruction->inst.getOperand(0).isImm())
+          return origin->emitError("malformed LLVM MC operands for s_clause");
+        int64_t immediate = instruction->inst.getOperand(0).getImm();
+        unsigned validMask =
+            kSClauseMaxLength |
+            (kSClauseBreakMask << waveamdmachine::kSClauseBreakShift);
+        if (immediate < 0 ||
+            (static_cast<uint64_t>(immediate) & ~uint64_t(validMask)) != 0)
+          return origin->emitError("invalid s_clause immediate");
+        unsigned encodedLength = immediate & kSClauseMaxLength;
+        if (encodedLength == 0 || encodedLength == kSClauseMaxLength)
+          return origin->emitError("invalid s_clause length");
+        clauseIndex = index;
+        remaining = encodedLength + 1;
+        if (index == targetIndex)
+          return std::optional<size_t>();
+        continue;
+      }
+      if (index == targetIndex)
+        return remaining ? clauseIndex : std::optional<size_t>();
+      if (remaining && --remaining == 0)
+        clauseIndex.reset();
+    }
+    return std::optional<size_t>();
+  }
+
+  FailureOr<SmallVector<PackedDelayAluSpan>>
+  collectPackedDelayAluSpans(ArrayRef<BufferedMCItem> items) const {
+    // LLVM exposes SDelayALU as a raw immediate; mirror its MC parser domain.
+    constexpr unsigned id0Mask = 0xf;
+    constexpr unsigned skipShift = 4;
+    constexpr unsigned skipMask = 0x7;
+    constexpr unsigned id1Shift = 7;
+    constexpr unsigned id1Mask = 0xf;
+    constexpr unsigned maxPackedSkip = 5;
+    constexpr unsigned numInstructionIds = 12;
+    constexpr unsigned packedMask =
+        id0Mask | (skipMask << skipShift) | (id1Mask << id1Shift);
+
+    SmallVector<PackedDelayAluSpan> spans;
+    for (size_t delayIndex = 0; delayIndex < items.size(); ++delayIndex) {
+      const auto *delay =
+          std::get_if<BufferedMCInstruction>(&items[delayIndex]);
+      if (!delay || delay->inst.getOpcode() != sDelayAlu() ||
+          delay->inst.getNumOperands() != 1 ||
+          !delay->inst.getOperand(0).isImm())
+        continue;
+
+      int64_t immediate = delay->inst.getOperand(0).getImm();
+      Operation *origin = delay->origin ? delay->origin : emissionSource;
+      if (immediate < 0 ||
+          (static_cast<uint64_t>(immediate) & ~uint64_t(packedMask)) != 0)
+        return origin->emitError("invalid packed s_delay_alu immediate");
+      unsigned id0 = immediate & id0Mask;
+      unsigned id1 = (immediate >> id1Shift) & id1Mask;
+      if (id0 >= numInstructionIds || id1 >= numInstructionIds)
+        return origin->emitError("invalid packed s_delay_alu instruction ID");
+      if (!id1)
+        continue;
+      unsigned skip = (immediate >> skipShift) & skipMask;
+      if (skip > maxPackedSkip)
+        return origin->emitError("invalid packed s_delay_alu skip");
+
+      PackedDelayAluSpan span;
+      span.delayId = delay->bufferId;
+      span.id0 = id0;
+      span.id1 = id1;
+      unsigned remaining = skip;
+      for (size_t index = delayIndex + 1; index < items.size(); ++index) {
+        if (std::holds_alternative<BufferedMCLabel>(items[index]))
+          return origin->emitError("packed s_delay_alu crosses a label");
+        const auto *instruction =
+            std::get_if<BufferedMCInstruction>(&items[index]);
+        if (!instruction || instruction->synthetic)
+          continue;
+        if (remaining == 0) {
+          span.targetId = instruction->bufferId;
+          break;
+        }
+        const llvm::MCInstrDesc &desc =
+            mcii->get(instruction->inst.getOpcode());
+        if (desc.isTerminator() || desc.isCall())
+          return origin->emitError("packed s_delay_alu crosses control flow");
+        span.skippedIds.push_back(instruction->bufferId);
+        --remaining;
+      }
+      if (!span.targetId)
+        return origin->emitError("packed s_delay_alu target is missing");
+      spans.push_back(std::move(span));
+    }
+    return spans;
+  }
+
+  std::optional<size_t> findBufferedInstruction(ArrayRef<BufferedMCItem> items,
+                                                size_t bufferId) const {
+    for (size_t index = 0; index < items.size(); ++index) {
+      const auto *instruction =
+          std::get_if<BufferedMCInstruction>(&items[index]);
+      if (instruction && instruction->bufferId == bufferId)
+        return index;
+    }
+    return std::nullopt;
+  }
+
+  bool
+  packedDelayAluSurvivesFinalization(const PackedDelayAluSpan &span,
+                                     ArrayRef<BufferedMCItem> finalized) const {
+    std::optional<size_t> delayIndex =
+        findBufferedInstruction(finalized, span.delayId);
+    std::optional<size_t> targetIndex =
+        findBufferedInstruction(finalized, span.targetId);
+    if (!delayIndex || !targetIndex || *targetIndex <= *delayIndex)
+      return false;
+
+    SmallVector<size_t> skippedIds;
+    for (size_t index = *delayIndex + 1; index < *targetIndex; ++index) {
+      const auto *instruction =
+          std::get_if<BufferedMCInstruction>(&finalized[index]);
+      if (!instruction)
+        continue;
+      if (instruction->synthetic || !instruction->bufferId ||
+          instruction->inst.getOpcode() == sSetVgprMsb())
+        return false;
+      skippedIds.push_back(instruction->bufferId);
+    }
+    return skippedIds == span.skippedIds;
+  }
+
+  LogicalResult unpackPackedDelayAlu(SmallVectorImpl<BufferedMCItem> &items,
+                                     ArrayRef<PackedDelayAluSpan> spans) const {
+    for (const PackedDelayAluSpan &span : spans) {
+      std::optional<size_t> delayIndex =
+          findBufferedInstruction(items, span.delayId);
+      std::optional<size_t> targetIndex =
+          findBufferedInstruction(items, span.targetId);
+      if (!delayIndex || !targetIndex)
+        return emissionSource->emitError(
+            "packed s_delay_alu buffer identity is missing");
+
+      auto *delay = std::get_if<BufferedMCInstruction>(&items[*delayIndex]);
+      Operation *origin = delay->origin ? delay->origin : emissionSource;
+      FailureOr<std::optional<size_t>> clauseIndex =
+          getClauseCoveringInstruction(items, *targetIndex);
+      if (failed(clauseIndex))
+        return failure();
+      delay->inst.getOperand(0).setImm(span.id0);
+      BufferedMCInstruction second = makeImmediateMCInstruction(
+          sDelayAlu(), span.id1, origin, delay->indent);
+      if (*clauseIndex) {
+        size_t erased = **clauseIndex;
+        items.erase(items.begin() + erased);
+        if (erased < *targetIndex)
+          --*targetIndex;
+      }
+      items.insert(items.begin() + *targetIndex, std::move(second));
+    }
+    return success();
+  }
+
+  LogicalResult insertVGPRWindowMode(
+      VGPRWindowMode newMode, SmallVectorImpl<BufferedMCItem> &finalized,
+      VGPRWindowMode &currentMode, std::optional<size_t> &mostRecentModeSet,
+      VGPRWindowClauseState &clause, bool &xCntIsZero, bool &fallthroughModeSet,
+      Operation *origin, unsigned instructionIndent) const {
     unsigned oldMode = currentMode.encode();
     bool rewritten = false;
     if (!currentMode.update(newMode, rewritten))
@@ -1575,7 +1768,8 @@ private:
 
     const BufferedMCInstruction *previous =
         getPreviousMCInstruction(finalized, insertion);
-    if (hasSetregVGPRMSBFixup() && previous && isModeSetreg(previous->inst)) {
+    if (hasSetregVGPRMSBFixup() &&
+        (fallthroughModeSet || (previous && isModeSetreg(previous->inst)))) {
       trackBufferedInsert(clause.itemIndex, insertion);
       finalized.insert(
           finalized.begin() + insertion,
@@ -1591,6 +1785,7 @@ private:
     mostRecentModeSet = insertion;
     currentMode = newMode;
     xCntIsZero = true;
+    fallthroughModeSet = false;
     return success();
   }
 
@@ -1664,7 +1859,8 @@ private:
   LogicalResult handleExplicitVGPRWindowMode(
       BufferedMCInstruction instruction,
       SmallVectorImpl<BufferedMCItem> &finalized, VGPRWindowMode &currentMode,
-      std::optional<size_t> &mostRecentModeSet, bool &xCntIsZero) const {
+      std::optional<size_t> &mostRecentModeSet, bool &xCntIsZero,
+      bool &fallthroughModeSet) const {
     Operation *origin =
         instruction.origin ? instruction.origin : emissionSource;
     if (instruction.inst.getNumOperands() != 1 ||
@@ -1674,7 +1870,8 @@ private:
     mostRecentModeSet.reset();
     const BufferedMCInstruction *previous =
         getPreviousMCInstruction(finalized, finalized.size());
-    if (hasSetregVGPRMSBFixup() && previous && isModeSetreg(previous->inst))
+    if (hasSetregVGPRMSBFixup() &&
+        (fallthroughModeSet || (previous && isModeSetreg(previous->inst))))
       finalized.push_back(
           makeImmediateMCInstruction(sNop(), 0, origin, instruction.indent));
     unsigned newMode =
@@ -1684,18 +1881,18 @@ private:
     finalized.push_back(instruction);
     currentMode = VGPRWindowMode::concrete(newMode);
     xCntIsZero = true;
+    fallthroughModeSet = false;
     return success();
   }
 
-  LogicalResult finalizeMCBuffer() {
-    if (!hasVGPRWindowing())
-      return success();
-
+  LogicalResult
+  finalizeVGPRWindowBuffer(SmallVector<BufferedMCItem> &items) const {
     SmallVector<BufferedMCItem> finalized;
     VGPRWindowMode currentMode;
     std::optional<size_t> mostRecentModeSet;
     VGPRWindowClauseState clause;
     bool xCntIsZero = false;
+    bool fallthroughModeSet = false;
     auto consumeClauseMember = [&]() {
       if (!clause.remaining)
         return;
@@ -1703,14 +1900,18 @@ private:
       if (!clause.remaining)
         clause.clear();
     };
-    for (const BufferedMCItem &item : mcBuffer) {
+    for (const BufferedMCItem &item : items) {
       if (std::holds_alternative<BufferedMCLabel>(item)) {
         if (clause.remaining)
           return emissionSource->emitError("s_clause crosses a label");
         if (failed(insertVGPRWindowMode(VGPRWindowMode::concrete(0), finalized,
                                         currentMode, mostRecentModeSet, clause,
-                                        xCntIsZero, emissionSource, indent)))
+                                        xCntIsZero, fallthroughModeSet,
+                                        emissionSource, indent)))
           return failure();
+        const BufferedMCInstruction *previous =
+            getPreviousMCInstruction(finalized, finalized.size());
+        fallthroughModeSet = previous && isModeSetreg(previous->inst);
         finalized.push_back(item);
         mostRecentModeSet.reset();
         xCntIsZero = false;
@@ -1755,9 +1956,9 @@ private:
         if (clause.remaining)
           return origin->emitError(
               "s_set_vgpr_msb cannot be a hard-clause member");
-        if (failed(handleExplicitVGPRWindowMode(instruction, finalized,
-                                                currentMode, mostRecentModeSet,
-                                                xCntIsZero)))
+        if (failed(handleExplicitVGPRWindowMode(
+                instruction, finalized, currentMode, mostRecentModeSet,
+                xCntIsZero, fallthroughModeSet)))
           return failure();
         continue;
       }
@@ -1768,6 +1969,7 @@ private:
         if (failed(handleModeSetreg(instruction, finalized, currentMode,
                                     mostRecentModeSet, xCntIsZero)))
           return failure();
+        fallthroughModeSet = false;
         continue;
       }
 
@@ -1780,8 +1982,8 @@ private:
           currentMode = {};
         else if (failed(insertVGPRWindowMode(
                      VGPRWindowMode::concrete(0), finalized, currentMode,
-                     mostRecentModeSet, clause, xCntIsZero, origin,
-                     instruction.indent)))
+                     mostRecentModeSet, clause, xCntIsZero, fallthroughModeSet,
+                     origin, instruction.indent)))
           return failure();
         finalized.push_back(instruction);
         mostRecentModeSet.reset();
@@ -1799,12 +2001,14 @@ private:
       FailureOr<VGPRWindowMode> newMode = computeVGPRWindowMode(instruction);
       if (failed(newMode))
         return failure();
-      if (failed(insertVGPRWindowMode(*newMode, finalized, currentMode,
-                                      mostRecentModeSet, clause, xCntIsZero,
-                                      origin, instruction.indent)))
+      if (failed(insertVGPRWindowMode(
+              *newMode, finalized, currentMode, mostRecentModeSet, clause,
+              xCntIsZero, fallthroughModeSet, origin, instruction.indent)))
         return failure();
       finalized.push_back(instruction);
       consumeClauseMember();
+      if (!isVGPRWindowProgramStateInstruction(inst))
+        fallthroughModeSet = false;
       if (llvm::SIInstrFlags::isVMEM(desc) || llvm::SIInstrFlags::isSMRD(desc))
         xCntIsZero = false;
     }
@@ -1814,9 +2018,51 @@ private:
           "s_clause reaches function end before all members");
     if (failed(insertVGPRWindowMode(VGPRWindowMode::concrete(0), finalized,
                                     currentMode, mostRecentModeSet, clause,
-                                    xCntIsZero, emissionSource, indent)))
+                                    xCntIsZero, fallthroughModeSet,
+                                    emissionSource, indent)))
       return failure();
-    mcBuffer = std::move(finalized);
+    items = std::move(finalized);
+    return success();
+  }
+
+  LogicalResult finalizeMCBuffer() {
+    if (!hasVGPRWindowing())
+      return success();
+
+    size_t nextBufferId = 1;
+    for (BufferedMCItem &item : mcBuffer) {
+      auto *instruction = std::get_if<BufferedMCInstruction>(&item);
+      if (instruction)
+        instruction->bufferId = nextBufferId++;
+    }
+
+    FailureOr<SmallVector<PackedDelayAluSpan>> spans =
+        collectPackedDelayAluSpans(mcBuffer);
+    if (failed(spans))
+      return failure();
+
+    SmallVector<PackedDelayAluSpan> unpackedSpans;
+    DenseSet<size_t> unpackedIds;
+    while (true) {
+      SmallVector<BufferedMCItem> finalized = mcBuffer;
+      if (failed(unpackPackedDelayAlu(finalized, unpackedSpans)) ||
+          failed(finalizeVGPRWindowBuffer(finalized)))
+        return failure();
+
+      bool changed = false;
+      for (const PackedDelayAluSpan &span : *spans) {
+        if (unpackedIds.contains(span.delayId) ||
+            packedDelayAluSurvivesFinalization(span, finalized))
+          continue;
+        unpackedSpans.push_back(span);
+        unpackedIds.insert(span.delayId);
+        changed = true;
+      }
+      if (changed)
+        continue;
+      mcBuffer = std::move(finalized);
+      break;
+    }
     return success();
   }
 
@@ -3139,7 +3385,8 @@ private:
         failed(validateMCRegisterClasses(inst)))
       return failure();
     if (bufferingMC) {
-      mcBuffer.push_back(BufferedMCInstruction{inst, emissionSource, indent});
+      mcBuffer.push_back(
+          BufferedMCInstruction{inst, emissionSource, /*bufferId=*/0, indent});
       return success();
     }
     printIndent(indent);
@@ -5012,8 +5259,24 @@ private:
                     {llvm::MCOperand::createReg(namedPhysReg("null")),
                      llvm::MCOperand::createImm(wait.getVscnt())});
     }
+    if (auto wait = dyn_cast<waveamdmachine::SWaitAluOp>(op)) {
+      if (!waveamdmachine::SWaitAluOp::isSupportedOnIsa(isaVersion))
+        return op.emitError("s_wait_alu unsupported on target");
+      if ((wait.getVaVdst() &&
+           *wait.getVaVdst() > llvm::AMDGPU::DepCtr::getVaVdstBitMask()) ||
+          (wait.getSaSdst() &&
+           *wait.getSaSdst() > llvm::AMDGPU::DepCtr::getSaSdstBitMask()) ||
+          (wait.getVaSdst() &&
+           *wait.getVaSdst() > llvm::AMDGPU::DepCtr::getVaSdstBitMask()))
+        return op.emitError("s_wait_alu dependency count out of range");
+      unsigned encoded = waveamdmachine::encodeDepCtrWait(
+          wait.getVaVdst(), wait.getSaSdst(), wait.getVaSdst(), *sti);
+      return emitMC(sWaitAlu(), {llvm::MCOperand::createImm(encoded)});
+    }
     if (isa<waveamdmachine::SNopOp>(op))
       return emitMCValues(sNop(), op.getOperands());
+    if (isa<waveamdmachine::VNopOp>(op))
+      return emitMC(vNop(), {});
     if (auto delay = dyn_cast<waveamdmachine::DmaIssueDelayOp>(op))
       return emitDmaIssueDelay(delay);
     if (isa<waveamdmachine::SSleepOp>(op))

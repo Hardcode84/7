@@ -107,16 +107,17 @@ struct WaveAMDSplitBarriersPass
         waveamdmachine::getAMDGPUWavefrontSize(root, "waveamd-split-barriers");
     if (failed(wavefrontSize))
       return signalPassFailure();
-    FailureOr<llvm::AMDGPU::IsaVersion> isa =
-        waveamdmachine::getAMDGPUTargetIsaVersion(root,
-                                                  "waveamd-split-barriers");
-    if (failed(isa))
+    FailureOr<waveamdmachine::AMDGPUTarget> target =
+        waveamdmachine::getAMDGPUTarget(root, "waveamd-split-barriers");
+    if (failed(target))
       return signalPassFailure();
-    if (!waveamdmachine::isArchSupported(*isa)) {
+    if (target->kind == llvm::AMDGPU::GK_GFX1250 ||
+        !waveamdmachine::isArchSupported(target->isa)) {
       root->emitError("waveamd-split-barriers unsupported target");
       return signalPassFailure();
     }
-    const waveamdmachine::ArchData &arch = waveamdmachine::getArchData(*isa);
+    const waveamdmachine::ArchData &arch =
+        waveamdmachine::getArchData(target->isa);
 
     for (func::FuncOp func : functions)
       if (failed(splitFunc(func, *wavefrontSize, arch)))

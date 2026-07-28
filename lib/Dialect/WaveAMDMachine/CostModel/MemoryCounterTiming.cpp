@@ -129,7 +129,9 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
   if (event == WaitcntEvent::VmemStore || event == WaitcntEvent::ScratchStore)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
   if (isLDSCounterIssuer(op))
-    return overrideOrDefault(overrides.lds, arch.ldsCounterLatency);
+    return overrideOrDefault(overrides.lds, arch.ldsCounterLatency == 0
+                                                ? defaultLatency
+                                                : arch.ldsCounterLatency);
   if (isSMEMLoad(op))
     return overrideOrDefault(overrides.smemLoad, defaultLatency);
   llvm_unreachable("op has no memory counter timing");

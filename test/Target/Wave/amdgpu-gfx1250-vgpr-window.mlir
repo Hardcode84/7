@@ -1,12 +1,14 @@
 // RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
 // RUN:   wave-translate --wave-to-amdgpu-asm %s \
-// RUN:   | FileCheck %s --check-prefix=ASM
+// RUN:   | FileCheck %s --check-prefix=ASM \
+// RUN:       --implicit-check-not=HW_REG_WAVE_SCHED_MODE
 // RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
 // RUN:   wave-translate --wave-to-amdgpu-asm %s \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1250 \
 // RUN:       -filetype=obj -o %t.o
 // RUN: llvm-objdump -d --mcpu=gfx1250 %t.o \
-// RUN:   | FileCheck %s --check-prefix=DIS
+// RUN:   | FileCheck %s --check-prefix=DIS \
+// RUN:       --implicit-check-not=HW_REG_WAVE_SCHED_MODE
 
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
@@ -124,6 +126,67 @@ module attributes {
 // DIS-NOT: s_clause
 // DIS: v_fma_f32 v3, v0, v1, v2
 // DIS-NEXT: s_set_vgpr_msb 0xf9
+// ASM-LABEL: packed_delay_preserved_clause:
+// ASM: s_delay_alu instid0(VALU_DEP_1) | instskip(SKIP_1) | instid1(VALU_DEP_2)
+// ASM-NEXT: s_clause 0x1
+// ASM-NEXT: v_fma_f32 v3, v0, v1, v2
+// ASM-NEXT: v_fma_f32 v4, v0, v1, v2
+// DIS-LABEL: <packed_delay_preserved_clause>:
+// DIS: s_delay_alu instid0(VALU_DEP_1) | instskip(SKIP_1) | instid1(VALU_DEP_2)
+// DIS-NEXT: s_clause 0x1
+// DIS-NEXT: v_fma_f32 v3, v0, v1, v2
+// DIS-NEXT: v_fma_f32 v4, v0, v1, v2
+// ASM-LABEL: packed_delay_window:
+// ASM: s_delay_alu instid0(VALU_DEP_1)
+// ASM-NEXT: v_fma_f32 v3, v0, v1, v2
+// ASM-NEXT: s_set_vgpr_msb 0xf9
+// ASM-NEXT: s_delay_alu instid0(VALU_DEP_2)
+// ASM-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// DIS-LABEL: <packed_delay_window>:
+// DIS: s_delay_alu instid0(VALU_DEP_1)
+// DIS-NEXT: v_fma_f32 v3, v0, v1, v2
+// DIS-NEXT: s_set_vgpr_msb 0xf9
+// DIS-NEXT: s_delay_alu instid0(VALU_DEP_2)
+// DIS-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// ASM-LABEL: packed_delay_erased_wait:
+// ASM-NOT: s_wait_xcnt
+// ASM: s_delay_alu instid0(VALU_DEP_1)
+// ASM-NEXT: v_fma_f32 v3, v0, v1, v2
+// ASM-NEXT: s_set_vgpr_msb 0xf9
+// ASM-NEXT: s_delay_alu instid0(VALU_DEP_2)
+// ASM-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// DIS-LABEL: <packed_delay_erased_wait>:
+// DIS-NOT: s_wait_xcnt
+// DIS: s_delay_alu instid0(VALU_DEP_1)
+// DIS-NEXT: v_fma_f32 v3, v0, v1, v2
+// DIS-NEXT: s_set_vgpr_msb 0xf9
+// DIS-NEXT: s_delay_alu instid0(VALU_DEP_2)
+// DIS-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// ASM-LABEL: packed_delay_clause:
+// ASM-NOT: s_clause
+// ASM: s_delay_alu instid0(VALU_DEP_1)
+// ASM-NEXT: v_fma_f32 v3, v0, v1, v2
+// ASM-NEXT: s_set_vgpr_msb 0xf9
+// ASM-NEXT: s_delay_alu instid0(VALU_DEP_2)
+// ASM-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// DIS-LABEL: <packed_delay_clause>:
+// DIS-NOT: s_clause
+// DIS: s_delay_alu instid0(VALU_DEP_1)
+// DIS-NEXT: v_fma_f32 v3, v0, v1, v2
+// DIS-NEXT: s_set_vgpr_msb 0xf9
+// DIS-NEXT: s_delay_alu instid0(VALU_DEP_2)
+// DIS-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// ASM-LABEL: mode_fallthrough_switch:
+// ASM: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 1, 31), 0
+// ASM: mode_fallthrough_target:
+// ASM-NEXT: s_nop 0
+// ASM-NEXT: s_set_vgpr_msb 0xf9
+// ASM-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
+// DIS-LABEL: <mode_fallthrough_switch>:
+// DIS: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 1, 31), 0
+// DIS: s_nop 0
+// DIS-NEXT: s_set_vgpr_msb 0xf9
+// DIS-NEXT: v_fma_f32 v255 /*v1023*/, v0 /*v256*/, v0 /*v512*/, v0 /*v768*/
 func.func @vgpr_window() {
   %src0 = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 1, 256>
@@ -332,6 +395,141 @@ func.func @clause_break_drop() {
          !waveamdmachine.reg<vgpr, 1, 1>,
          !waveamdmachine.reg<vgpr, 1, 2>)
         -> !waveamdmachine.reg<vgpr, 1, 3>
+  %high = waveamdmachine.v_fma_f32 %src0, %src1, %src2
+      : (!waveamdmachine.reg<vgpr, 1, 256>,
+         !waveamdmachine.reg<vgpr, 1, 512>,
+         !waveamdmachine.reg<vgpr, 1, 768>)
+        -> !waveamdmachine.reg<vgpr, 1, 1023>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @packed_delay_preserved_clause() {
+  %delay = waveamdmachine.imm 289 : !waveamdmachine.imm
+  %low0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %low1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %low2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 2>
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_clause length 2 breaks 0
+  %first = waveamdmachine.v_fma_f32 %low0, %low1, %low2
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  %second = waveamdmachine.v_fma_f32 %low0, %low1, %low2
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 4>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @packed_delay_window() {
+  %delay = waveamdmachine.imm 273 : !waveamdmachine.imm
+  %low0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %low1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %low2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 2>
+  %src0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 256>
+  %src1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 512>
+  %src2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 768>
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  %low = waveamdmachine.v_fma_f32 %low0, %low1, %low2
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  %high = waveamdmachine.v_fma_f32 %src0, %src1, %src2
+      : (!waveamdmachine.reg<vgpr, 1, 256>,
+         !waveamdmachine.reg<vgpr, 1, 512>,
+         !waveamdmachine.reg<vgpr, 1, 768>)
+        -> !waveamdmachine.reg<vgpr, 1, 1023>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @packed_delay_erased_wait() {
+  %delay = waveamdmachine.imm 289 : !waveamdmachine.imm
+  %low0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %low1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %low2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 2>
+  %src0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 256>
+  %src1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 512>
+  %src2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 768>
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  %low = waveamdmachine.v_fma_f32 %low0, %low1, %low2
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  waveamdmachine.s_waitcnt_split xcnt(0)
+  %high = waveamdmachine.v_fma_f32 %src0, %src1, %src2
+      : (!waveamdmachine.reg<vgpr, 1, 256>,
+         !waveamdmachine.reg<vgpr, 1, 512>,
+         !waveamdmachine.reg<vgpr, 1, 768>)
+        -> !waveamdmachine.reg<vgpr, 1, 1023>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @packed_delay_clause() {
+  %delay = waveamdmachine.imm 289 : !waveamdmachine.imm
+  %low0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %low1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %low2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 2>
+  %src0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 256>
+  %src1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 512>
+  %src2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 768>
+  waveamdmachine.s_delay_alu %delay
+      : (!waveamdmachine.imm) -> ()
+  waveamdmachine.s_clause length 2 breaks 0
+  %low = waveamdmachine.v_fma_f32 %low0, %low1, %low2
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  %high = waveamdmachine.v_fma_f32 %src0, %src1, %src2
+      : (!waveamdmachine.reg<vgpr, 1, 256>,
+         !waveamdmachine.reg<vgpr, 1, 512>,
+         !waveamdmachine.reg<vgpr, 1, 768>)
+        -> !waveamdmachine.reg<vgpr, 1, 1023>
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @mode_fallthrough_switch() {
+  %src0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 256>
+  %src1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 512>
+  %src2 = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 768>
+  waveamdmachine.s_setreg_imm32_b32 value 0 hwreg(1, 1, 31)
+  waveamdmachine.label "mode_fallthrough_target"
   %high = waveamdmachine.v_fma_f32 %src0, %src1, %src2
       : (!waveamdmachine.reg<vgpr, 1, 256>,
          !waveamdmachine.reg<vgpr, 1, 512>,

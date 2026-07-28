@@ -136,7 +136,8 @@ InstructionResourceState::InstructionResourceState(
   simdResources.resize(static_cast<unsigned>(arch.simdsPerCU));
   simdPairResources.resize(static_cast<unsigned>(arch.simdsPerCU / 2));
 
-  configure(InstructionResourceKind::SimdIssue, 1);
+  configure(InstructionResourceKind::SimdIssue,
+            static_cast<unsigned>(arch.simdIssueWidth));
   configure(InstructionResourceKind::CuIssue,
             static_cast<unsigned>(arch.issuesPerCUPerCycle));
   configure(InstructionResourceKind::ValuPipe, capacities.valuPipe);

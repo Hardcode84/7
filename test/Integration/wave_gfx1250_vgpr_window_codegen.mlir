@@ -1,14 +1,16 @@
 // RUN: wave-opt %s \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline \
 // RUN:       wave-translate --wave-to-amdgpu-asm - \
-// RUN:   | FileCheck %s --check-prefix=ASM
+// RUN:   | FileCheck %s --check-prefix=ASM \
+// RUN:       --implicit-check-not=HW_REG_WAVE_SCHED_MODE
 // RUN: wave-opt %s \
 // RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline \
 // RUN:       wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1250 \
 // RUN:       -filetype=obj -o %t.o
 // RUN: llvm-objdump -d --mcpu=gfx1250 %t.o \
-// RUN:   | FileCheck %s --check-prefix=DIS
+// RUN:   | FileCheck %s --check-prefix=DIS \
+// RUN:       --implicit-check-not=HW_REG_WAVE_SCHED_MODE
 
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"

@@ -28,7 +28,6 @@ MODEL_LATENCIES = {
     "WriteVMEM": 320,
     "WriteLDS": 20,
     "WriteBarrier": 2000,
-    "Write16PassWMMA": 64,
     "WriteBranch": 32,
     "Unknown": "",
 }

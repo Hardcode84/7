@@ -6,8 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Per-(arch, SchedClass) latency in SIMD cycles. Generated from
-// LLVM's SISchedule.td for gfx942 / gfx950 / gfx1100 / gfx1200.
+// Per-(arch, SchedClass) LLVM scheduling data.
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,11 +18,9 @@
 
 namespace mlir::waveamdmachine {
 
-// Latency in SIMD cycles for `cls` on `arch`. Always returns a
-// non-negative value; for class/arch combinations the upstream
-// SchedModel doesn't bind (e.g. WMMA on CDNA, MAI on RDNA), the
-// returned value is a sensible default rather than an error --
-// applicability is the caller's concern.
+bool isSchedClassSupported(const ArchData &arch, SchedClass cls);
+
+// Latency in SIMD cycles. Unsupported class/arch pairs are fatal.
 int getLatency(const ArchData &arch, SchedClass cls);
 
 // Resource release interval from the target scheduling model.

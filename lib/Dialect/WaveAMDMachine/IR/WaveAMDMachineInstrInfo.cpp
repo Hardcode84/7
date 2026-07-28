@@ -8,6 +8,8 @@
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 
+#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+#include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/STLExtras.h"
 
@@ -145,6 +147,35 @@ unsigned mlir::waveamdmachine::encodeSDelayAluVALU(unsigned dependency) {
 unsigned mlir::waveamdmachine::encodeSDelayAluSALUCycle(unsigned cycles) {
   // LLVM keeps this MC encoding private to AMDGPUInsertDelayAlu.
   return cycles + 8;
+}
+
+unsigned mlir::waveamdmachine::encodeDepCtrWait(
+    std::optional<unsigned> vaVdst, std::optional<unsigned> saSdst,
+    std::optional<unsigned> vaSdst, const llvm::MCSubtargetInfo &sti) {
+  unsigned encoded = llvm::AMDGPU::DepCtr::getDefaultDepCtrEncoding(sti);
+  if (vaVdst)
+    encoded = llvm::AMDGPU::DepCtr::encodeFieldVaVdst(encoded, *vaVdst);
+  if (saSdst)
+    encoded = llvm::AMDGPU::DepCtr::encodeFieldSaSdst(encoded, *saSdst);
+  if (vaSdst)
+    encoded = llvm::AMDGPU::DepCtr::encodeFieldVaSdst(encoded, *vaSdst);
+  return encoded;
+}
+
+static PhysicalRegisterSpan getSGPRSpan(unsigned llvmRegister) {
+  int64_t index = llvmRegister - llvm::AMDGPU::SGPR0;
+  return PhysicalRegisterSpan(RegClass::SGPR, index, index + 1);
+}
+
+std::array<PhysicalRegisterSpan, 2>
+mlir::waveamdmachine::getFlatScratchBaseSGPRSpans() {
+  return {getSGPRSpan(llvm::AMDGPU::SGPR102),
+          getSGPRSpan(llvm::AMDGPU::SGPR103)};
+}
+
+unsigned mlir::waveamdmachine::getScratchBaseForwardingSGPRWriteLimit() {
+  // LLVM exposes no query for this post-RA hazard window.
+  return 10;
 }
 
 static bool isGfx8Or9(const llvm::AMDGPU::IsaVersion &isa) {

@@ -554,6 +554,24 @@ static bool tracksComputeResource(waveamdmachine::FunctionalUnit fu) {
   }
 }
 
+static LogicalResult
+validateSchedClassSupport(Operation *op, const waveamdmachine::ArchData &arch) {
+  waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+  if (waveamdmachine::isSchedClassSupported(arch, cls))
+    return success();
+  return op->emitOpError() << waveamdmachine::getSchedClassName(cls)
+                           << " is unsupported on " << arch.name;
+}
+
+static LogicalResult
+validateSchedClassSupport(const GreedyRegion &region,
+                          const waveamdmachine::ArchData &arch) {
+  for (Operation *op : region.ops)
+    if (failed(validateSchedClassSupport(op, arch)))
+      return failure();
+  return success();
+}
+
 static StaticIssueInfo
 buildStaticIssueInfo(Operation *op, const waveamdmachine::ArchData &arch) {
   StaticIssueInfo info;
@@ -575,9 +593,11 @@ buildStaticIssueInfo(Operation *op, const waveamdmachine::ArchData &arch) {
   return info;
 }
 
-static StaticIssueInfoMap
+static FailureOr<StaticIssueInfoMap>
 buildStaticIssueInfoMap(const GreedyRegion &region,
                         const waveamdmachine::ArchData &arch) {
+  if (failed(validateSchedClassSupport(region, arch)))
+    return failure();
   StaticIssueInfoMap result;
   result.reserve(region.ops.size());
   for (Operation *op : region.ops)
@@ -4267,9 +4287,14 @@ static GreedyResult buildGreedyOrder(
     const WaveAMDLiveIntervalBuildResult &liveness,
     bool prioritizeRecurrences = true, bool prioritizeLongLatencyVmem = true,
     bool prioritizeComputeResources = true, bool prioritizeLatency = true) {
-  StaticIssueInfoMap staticInfo = buildStaticIssueInfoMap(region, arch);
+  FailureOr<StaticIssueInfoMap> staticInfo =
+      buildStaticIssueInfoMap(region, arch);
+  if (failed(staticInfo)) {
+    GreedyResult result;
+    return failGreedyModel(result);
+  }
   return buildGreedyOrderFromState(
-      region, graph, arch, config, origins, staticInfo, liveness,
+      region, graph, arch, config, origins, *staticInfo, liveness,
       /*initialState=*/nullptr, prioritizeRecurrences,
       prioritizeLongLatencyVmem, prioritizeComputeResources, prioritizeLatency);
 }
@@ -4655,15 +4680,20 @@ static GreedyResult buildBoundedGreedyOrder(
                             prioritizeRecurrences, prioritizeLongLatencyVmem,
                             prioritizeComputeResources, prioritizeLatency);
 
-  StaticIssueInfoMap staticInfo = buildStaticIssueInfoMap(region, arch);
+  FailureOr<StaticIssueInfoMap> staticInfo =
+      buildStaticIssueInfoMap(region, arch);
+  if (failed(staticInfo)) {
+    GreedyResult result;
+    return failGreedyModel(result);
+  }
   GreedyResult best = buildGreedyOrderFromState(
-      region, graph, arch, config, origins, staticInfo, liveness,
+      region, graph, arch, config, origins, *staticInfo, liveness,
       /*initialState=*/nullptr, prioritizeRecurrences,
       prioritizeLongLatencyVmem, prioritizeComputeResources, prioritizeLatency);
   if (!best.success)
     return best;
   return refineSteadyStateGreedyOrder(
-      region, graph, arch, config, origins, staticInfo, liveness,
+      region, graph, arch, config, origins, *staticInfo, liveness,
       std::move(best), prioritizeRecurrences, prioritizeLongLatencyVmem,
       prioritizeComputeResources, prioritizeLatency);
 }
@@ -4898,7 +4928,13 @@ public:
       classWaves[classId].push_back(wave);
     }
     for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
-      staticInfo[classId] = buildStaticIssueInfoMap(regions[classId], arch);
+      FailureOr<StaticIssueInfoMap> info =
+          buildStaticIssueInfoMap(regions[classId], arch);
+      if (failed(info)) {
+        initializationFailed = true;
+        return;
+      }
+      staticInfo[classId] = std::move(*info);
       FailureOr<ComputeIslandInfo> computeIslands = buildComputeIslandInfo(
           regions[classId], graphs[classId], staticInfo[classId], liveness);
       if (failed(computeIslands)) {
@@ -5854,9 +5890,12 @@ static void printReportRegion(const GreedyRegion &region) {
                << " last=" << region.last->getName().getStringRef() << "\n";
 }
 
-static void printReportClasses(const GreedyRegion &region,
-                               const waveamdmachine::ArchData &arch,
-                               const waveamdmachine::EventSimConfig &config) {
+static LogicalResult
+printReportClasses(const GreedyRegion &region,
+                   const waveamdmachine::ArchData &arch,
+                   const waveamdmachine::EventSimConfig &config) {
+  if (failed(validateSchedClassSupport(region, arch)))
+    return failure();
   for (auto [index, op] : llvm::enumerate(region.ops)) {
     waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
     waveamdmachine::FunctionalUnit fu = waveamdmachine::funit(arch, cls);
@@ -5869,6 +5908,7 @@ static void printReportClasses(const GreedyRegion &region,
                  << " resource_cycles="
                  << waveamdmachine::getResourceCycles(arch, cls) << "\n";
   }
+  return success();
 }
 
 static void printReportDeps(const GreedyRegion &region,
@@ -6166,16 +6206,27 @@ struct WaveAMDMachineScheduleReportPass
                                  arch, config, origins, *liveness);
   }
 
+  LogicalResult
+  prepareRegionReport(const GreedyRegion &region,
+                      const waveamdmachine::ArchData &arch,
+                      const waveamdmachine::EventSimConfig &config) {
+    if (printRegions)
+      printReportRegion(region);
+    if (printCandidates && failed(validateSchedClassSupport(region, arch)))
+      return failure();
+    if (printClasses && failed(printReportClasses(region, arch, config)))
+      return failure();
+    return success();
+  }
+
   LogicalResult reportRegion(const GreedyRegion &region,
                              const waveamdmachine::ArchData &arch,
                              const waveamdmachine::EventSimConfig &config,
                              ArrayRef<unsigned> parsedOrder,
                              const ValueOriginMap &origins,
                              const WaveAMDLiveIntervalBuildResult *liveness) {
-    if (printRegions)
-      printReportRegion(region);
-    if (printClasses)
-      printReportClasses(region, arch, config);
+    if (failed(prepareRegionReport(region, arch, config)))
+      return failure();
 
     if (!wantsGraphForRegion(region))
       return success();

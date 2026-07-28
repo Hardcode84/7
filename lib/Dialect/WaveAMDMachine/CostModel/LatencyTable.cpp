@@ -18,6 +18,8 @@ namespace mlir::waveamdmachine {
 
 using ClassCycles =
     std::array<int, static_cast<size_t>(SchedClass::NumSchedClasses)>;
+using ClassSupport =
+    std::array<bool, static_cast<size_t>(SchedClass::NumSchedClasses)>;
 
 #include "LatencyTable.inc"
 
@@ -26,18 +28,24 @@ struct ArchTable {
   llvm::AMDGPU::IsaVersion isa;
   const ClassCycles *latencies;
   const ClassCycles *resourceCycles;
+  const ClassSupport *supported;
 };
 } // namespace
 
 static constexpr ArchTable kArchTables[] = {
-    {{8, 0, 3}, &kLatencyGfx942, &kResourceCyclesGfx942},
-    {{9, 4, 2}, &kLatencyGfx942, &kResourceCyclesGfx942},
-    {{9, 5, 0}, &kLatencyGfx950, &kResourceCyclesGfx950},
-    {{11, 0, 0}, &kLatencyGfx1100, &kResourceCyclesGfx1100},
-    {{12, 0, 0}, &kLatencyGfx1200, &kResourceCyclesGfx1200},
+    {{8, 0, 3}, &kLatencyGfx942, &kResourceCyclesGfx942, &kSupportedGfx942},
+    {{9, 4, 2}, &kLatencyGfx942, &kResourceCyclesGfx942, &kSupportedGfx942},
+    {{9, 5, 0}, &kLatencyGfx950, &kResourceCyclesGfx950, &kSupportedGfx950},
+    {{11, 0, 0}, &kLatencyGfx1100, &kResourceCyclesGfx1100, &kSupportedGfx1100},
+    {{12, 0, 0}, &kLatencyGfx1200, &kResourceCyclesGfx1200, &kSupportedGfx1200},
 };
 
 static const ArchTable *selectTable(const llvm::AMDGPU::IsaVersion &isa) {
+  static const ArchTable gfx1250 = {getGfx1250IsaVersion(), &kLatencyGfx1250,
+                                    &kResourceCyclesGfx1250,
+                                    &kSupportedGfx1250};
+  if (isaEq(gfx1250.isa, isa))
+    return &gfx1250;
   for (const ArchTable &e : kArchTables)
     if (isaEq(e.isa, isa))
       return &e;
@@ -65,7 +73,18 @@ static int getTableCycles(const ArchData &arch, SchedClass cls,
   const ClassCycles &cycles = *(table->*member);
   if (idx >= cycles.size())
     llvm_unreachable("invalid SchedClass");
+  if (!(*table->supported)[idx])
+    llvm::report_fatal_error(llvm::Twine(getSchedClassName(cls)) +
+                             " is unsupported on " + arch.name);
   return cycles[idx];
+}
+
+bool isSchedClassSupported(const ArchData &arch, SchedClass cls) {
+  const ArchTable *table = selectTable(arch.isa);
+  if (!table)
+    return false;
+  size_t idx = static_cast<size_t>(cls);
+  return idx < table->supported->size() && (*table->supported)[idx];
 }
 
 int getLatency(const ArchData &arch, SchedClass cls) {

@@ -82,6 +82,8 @@ static SchedClass classifyMappedOp(Operation *op) {
       // Barrier.
       .Case<BarrierWaitOp, SBarrierOp>(
           [](auto) { return SchedClass::WriteBarrier; })
+      .Case<SWaitAluOp>(
+          [](auto) { return SchedClass::WaitcntPseudo; })
       // Branches / control flow / endpgm. UniformLoopOp + ContinueIfOp
       // are NoInst above -- region-structural, real branches come from
       // codegen lowering. Loop body cost is dataflow-handled via
@@ -101,7 +103,7 @@ static SchedClass classifyMappedOp(Operation *op) {
       })
       .Case<VFmaF32Op>(
           [](auto) { return SchedClass::WriteFloatFMA; })
-      .Case<VCvtF16F32Op, VCvtF32F16Op, VCvtF32U32Op, VCvtU32F32Op,
+      .Case<VNopOp, VCvtF16F32Op, VCvtF32F16Op, VCvtF32U32Op, VCvtU32F32Op,
             VCvtPkRtzF16F32Op, VCvtPkF16F32Op, VCvtPkBF16F32Op,
             VPkAddF16Op, VPkMulF16Op, VPkFmaF16Op, VPkAddF32Op,
             VPkMulF32Op, VPkFmaF32Op, VAdd3U32Op, VBfeU32Op,

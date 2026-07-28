@@ -21,7 +21,9 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
@@ -35,10 +37,9 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/TargetRegistry.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/TargetParser/TargetParser.h"
-#include "llvm/TargetParser/Triple.h"
+#include "llvm/Support/MathExtras.h"
+
+#include <array>
 #include <optional>
 
 namespace mlir::wave {
@@ -124,33 +125,7 @@ static void insertNoops(OpBuilder &builder, Location loc, unsigned count,
 static FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>>
 createSubtargetInfo(Operation *op,
                     StringRef passName = "waveamd-insert-hazard-waits") {
-  FailureOr<waveamdmachine::AMDGPUTarget> target =
-      waveamdmachine::getAMDGPUTarget(op, passName);
-  if (failed(target))
-    return failure();
-
-  static llvm::once_flag initializeBackendOnce;
-  llvm::call_once(initializeBackendOnce, []() {
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargetMCs();
-  });
-
-  llvm::Triple triple(target->triple);
-  std::string error;
-  const llvm::Target *llvmTarget =
-      llvm::TargetRegistry::lookupTarget(triple, error);
-  if (!llvmTarget)
-    return op->emitError("failed to lookup AMDGPU target: ") << error;
-
-  std::unique_ptr<llvm::MCSubtargetInfo> sti(
-      llvmTarget->createMCSubtargetInfo(triple, target->chip, /*Features=*/""));
-  if (!sti)
-    return op->emitError("unsupported AMDGPU target: ")
-           << target->triple << "--" << target->chip;
-  if (llvm::AMDGPU::getIsaVersion(target->chip).Major == 0)
-    return op->emitError("unsupported AMDGPU target: ")
-           << target->triple << "--" << target->chip;
-  return sti;
+  return waveamdmachine::createAMDGPUMCSubtargetInfo(op, passName);
 }
 
 static bool isVMEMStore(Operation &op) {
@@ -183,6 +158,7 @@ getValuWriteVGPRPermlane32SwapLatency(const llvm::AMDGPU::IsaVersion &isa) {
 }
 
 struct HazardConfig {
+  const waveamdmachine::ArchData *arch;
   llvm::AMDGPU::IsaVersion isaVersion;
   unsigned defaultLgkmcnt;
   unsigned valuDep1;
@@ -205,16 +181,24 @@ struct HazardConfig {
   bool hasDelayAlu;
   bool lgkmWaitNeedsValuGap;
   bool hasTransForwardingHazard;
+  bool hasTransCoexecutionHazard;
+  bool hasWmmaCoexecutionHazard;
+  bool hasScratchBaseForwardingHazard;
   bool legacyWaitCounters;
 };
 
 static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
   llvm::AMDGPU::IsaVersion isaVersion =
       llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  const waveamdmachine::ArchData *arch =
+      waveamdmachine::isArchSupported(isaVersion)
+          ? &waveamdmachine::getArchData(isaVersion)
+          : nullptr;
   bool legacyWaitCounters = !llvm::AMDGPU::isGFX12Plus(sti);
   waveamdmachine::InstructionIssueSlotHazardConfig issueHazards =
       waveamdmachine::getInstructionIssueSlotHazardConfig(isaVersion);
   return HazardConfig{
+      /*arch=*/arch,
       /*isaVersion=*/isaVersion,
       /*defaultLgkmcnt=*/
       legacyWaitCounters
@@ -242,6 +226,11 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       legacyWaitCounters && !isCDNA4Family(isaVersion),
       /*hasTransForwardingHazard=*/
       isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
+      /*hasTransCoexecutionHazard=*/
+      arch && arch->hasTransCoexecutionHazard,
+      /*hasWmmaCoexecutionHazard=*/arch && arch->hasWmmaCoexecutionHazard,
+      /*hasScratchBaseForwardingHazard=*/
+      arch && arch->hasScratchBaseForwardingHazard,
       /*legacyWaitCounters=*/legacyWaitCounters,
   };
 }
@@ -251,6 +240,19 @@ static void insertSNopMitigation(Operation &op, unsigned count, OpBuilder &b,
                                  const llvm::MCSubtargetInfo &sti) {
   b.setInsertionPoint(&op);
   insertNoops(b, op.getLoc(), count, sti);
+}
+
+static void insertVNopMitigation(Operation &op, unsigned count, OpBuilder &b) {
+  b.setInsertionPoint(&op);
+  while (count--)
+    waveamdmachine::VNopOp::create(b, op.getLoc());
+}
+
+static void insertScratchBaseWait(Operation &op, OpBuilder &b) {
+  b.setInsertionPoint(&op);
+  waveamdmachine::SWaitAluOp::create(b, op.getLoc(), /*va_vdst=*/IntegerAttr(),
+                                     /*sa_sdst=*/b.getI32IntegerAttr(0),
+                                     /*va_sdst=*/b.getI32IntegerAttr(0));
 }
 
 // Emit the VALU-after-LGKM mitigation right before `op`: `s_delay_alu`
@@ -341,12 +343,34 @@ struct PhysicalHazard {
   }
 };
 
+enum class CoexecHazardKind : uint8_t {
+  TransDef,
+  TransUse,
+  WmmaDef,
+  WmmaUse,
+};
+
+struct CoexecHazard {
+  RegSpan span;
+  CoexecHazardKind kind;
+  unsigned wmmaRemaining = 0;
+  unsigned valuRemaining = 0;
+
+  bool operator==(const CoexecHazard &rhs) const {
+    return span == rhs.span && kind == rhs.kind &&
+           wmmaRemaining == rhs.wmmaRemaining &&
+           valuRemaining == rhs.valuRemaining;
+  }
+};
+
 struct HazardState {
   unsigned lgkmToValu = 0;
   unsigned lgkmPending = 0;
   unsigned m0DmaCapture = 0;
   DenseMap<Value, ValueHazards> values;
   SmallVector<PhysicalHazard, 16> physical;
+  SmallVector<CoexecHazard, 16> coexec;
+  std::array<unsigned, 2> scratchBase = {};
   unsigned valuWriteVcc = 0;
   unsigned execWriteHazard = 0;
 
@@ -357,10 +381,18 @@ struct HazardState {
            });
   }
 
+  bool hasSameCoexecHazards(const HazardState &rhs) const {
+    return coexec.size() == rhs.coexec.size() &&
+           llvm::all_of(coexec, [&](const CoexecHazard &hazard) {
+             return llvm::is_contained(rhs.coexec, hazard);
+           });
+  }
+
   bool operator==(const HazardState &rhs) const {
     return lgkmToValu == rhs.lgkmToValu && lgkmPending == rhs.lgkmPending &&
            m0DmaCapture == rhs.m0DmaCapture && values == rhs.values &&
-           hasSamePhysicalHazards(rhs) && valuWriteVcc == rhs.valuWriteVcc &&
+           hasSamePhysicalHazards(rhs) && hasSameCoexecHazards(rhs) &&
+           scratchBase == rhs.scratchBase && valuWriteVcc == rhs.valuWriteVcc &&
            execWriteHazard == rhs.execWriteHazard;
   }
 
@@ -384,6 +416,18 @@ struct HazardState {
     return true;
   }
 
+  bool joinCoexecHazard(const CoexecHazard &hazard) {
+    for (CoexecHazard &existing : coexec) {
+      if (!(existing.span == hazard.span) || existing.kind != hazard.kind)
+        continue;
+      bool changed = joinMax(existing.wmmaRemaining, hazard.wmmaRemaining);
+      changed |= joinMax(existing.valuRemaining, hazard.valuRemaining);
+      return changed;
+    }
+    coexec.push_back(hazard);
+    return true;
+  }
+
   bool joinWith(const HazardState &rhs) {
     bool changed = false;
     changed |= joinMax(lgkmToValu, rhs.lgkmToValu);
@@ -396,6 +440,10 @@ struct HazardState {
     }
     for (const PhysicalHazard &hazard : rhs.physical)
       changed |= joinPhysicalHazard(hazard);
+    for (const CoexecHazard &hazard : rhs.coexec)
+      changed |= joinCoexecHazard(hazard);
+    for (auto [lhs, incoming] : llvm::zip(scratchBase, rhs.scratchBase))
+      changed |= joinMax(lhs, incoming);
     changed |= joinMax(valuWriteVcc, rhs.valuWriteVcc);
     changed |= joinMax(execWriteHazard, rhs.execWriteHazard);
     return changed;
@@ -422,8 +470,10 @@ public:
   ChangeResult reset() {
     bool changed = state.lgkmToValu || state.lgkmPending ||
                    state.m0DmaCapture || !state.values.empty() ||
-                   !state.physical.empty() || state.valuWriteVcc ||
-                   state.execWriteHazard;
+                   !state.physical.empty() || !state.coexec.empty() ||
+                   llvm::any_of(state.scratchBase,
+                                [](unsigned value) { return value != 0; }) ||
+                   state.valuWriteVcc || state.execWriteHazard;
     state = HazardState();
     return changed ? ChangeResult::Change : ChangeResult::NoChange;
   }
@@ -431,7 +481,8 @@ public:
   void print(raw_ostream &os) const override {
     os << "lgkm=" << state.lgkmToValu << " pending=" << state.lgkmPending
        << " m0-dma=" << state.m0DmaCapture << " values=" << state.values.size()
-       << " physical=" << state.physical.size() << " vcc=" << state.valuWriteVcc
+       << " physical=" << state.physical.size()
+       << " coexec=" << state.coexec.size() << " vcc=" << state.valuWriteVcc
        << " exec=" << state.execWriteHazard;
   }
 
@@ -472,6 +523,10 @@ static std::optional<RegSpan> getAllocatedRegSpan(Value value) {
                  type.getIndex() + type.getWidth()};
 }
 
+static RegSpan toRegSpan(const waveamdmachine::PhysicalRegisterSpan &span) {
+  return RegSpan{span.regClass, span.begin, span.end};
+}
+
 static bool overlaps(RegSpan lhs, RegSpan rhs) {
   return lhs.regClass == rhs.regClass && lhs.begin < rhs.end &&
          rhs.begin < lhs.end;
@@ -483,6 +538,22 @@ static bool isVGPRSpan(RegSpan span) {
 
 static bool isSGPRSpan(RegSpan span) {
   return span.regClass == waveamdmachine::RegClass::SGPR;
+}
+
+static bool hasSGPRDef(Operation *op) {
+  if (llvm::any_of(op->getResults(), [](Value result) {
+        std::optional<RegSpan> span = getAllocatedRegSpan(result);
+        return span && isSGPRSpan(*span);
+      }))
+    return true;
+  waveamdmachine::FixedPhysicalRegisterDefsOpInterface fixedDefs =
+      dyn_cast<waveamdmachine::FixedPhysicalRegisterDefsOpInterface>(op);
+  if (!fixedDefs)
+    return false;
+  return llvm::any_of(fixedDefs.getFixedPhysicalRegisterDefs(),
+                      [](const waveamdmachine::PhysicalRegisterSpan &span) {
+                        return span.regClass == waveamdmachine::RegClass::SGPR;
+                      });
 }
 
 static void mergePhysicalHazard(HazardState &state, PhysicalHazard hazard) {
@@ -497,6 +568,21 @@ static void mergePhysicalHazard(HazardState &state, PhysicalHazard hazard) {
     return;
   }
   state.physical.push_back(hazard);
+}
+
+static void mergeCoexecHazard(HazardState &state, CoexecHazard hazard) {
+  if (hazard.wmmaRemaining == 0 && hazard.valuRemaining == 0)
+    return;
+  for (CoexecHazard &existing : state.coexec) {
+    if (!(existing.span == hazard.span) || existing.kind != hazard.kind)
+      continue;
+    existing.wmmaRemaining =
+        std::max(existing.wmmaRemaining, hazard.wmmaRemaining);
+    existing.valuRemaining =
+        std::max(existing.valuRemaining, hazard.valuRemaining);
+    return;
+  }
+  state.coexec.push_back(hazard);
 }
 
 static void advancePhysicalHazards(HazardState &state, unsigned count = 1) {
@@ -514,6 +600,27 @@ static void advancePhysicalHazards(HazardState &state, unsigned count = 1) {
       state.valuWriteVcc > count ? state.valuWriteVcc - count : 0;
   state.execWriteHazard =
       state.execWriteHazard > count ? state.execWriteHazard - count : 0;
+}
+
+static void advanceCoexecHazards(HazardState &state, unsigned count = 1) {
+  if (count == 0)
+    return;
+  SmallVector<CoexecHazard, 16> kept;
+  kept.reserve(state.coexec.size());
+  for (CoexecHazard hazard : state.coexec) {
+    hazard.wmmaRemaining =
+        hazard.wmmaRemaining > count ? hazard.wmmaRemaining - count : 0;
+    hazard.valuRemaining =
+        hazard.valuRemaining > count ? hazard.valuRemaining - count : 0;
+    if (hazard.wmmaRemaining || hazard.valuRemaining)
+      kept.push_back(hazard);
+  }
+  state.coexec = std::move(kept);
+}
+
+static void advanceScratchBaseHazards(HazardState &state, unsigned count = 1) {
+  for (unsigned &remaining : state.scratchBase)
+    remaining = remaining > count ? remaining - count : 0;
 }
 
 static void advanceHazards(HazardState &state, unsigned count = 1,
@@ -597,6 +704,15 @@ static bool isMFMA(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::MFMAOp>();
 }
 
+static bool isXdlWmma(Operation *op, const HazardConfig &cfg) {
+  if (!cfg.arch || !op->hasTrait<OpTrait::waveamdmachine::WMMAOp>())
+    return false;
+  waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+  return waveamdmachine::isSchedClassSupported(*cfg.arch, cls) &&
+         waveamdmachine::funit(*cfg.arch, cls) ==
+             waveamdmachine::FunctionalUnit::MFMA_XDL;
+}
+
 static bool isPermlane32Swap(Operation *op) {
   return isa<waveamdmachine::VPermlane32SwapB32TupleOp>(op);
 }
@@ -647,15 +763,27 @@ static unsigned getXdlSrcCReadWarLatency(unsigned passes,
   return passes == 2 ? 1 : passes - 1;
 }
 
-static bool isLegacyVALU(Operation *op) {
-  return op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && !isMFMA(op);
+static bool isLegacyVALU(Operation *op, const HazardConfig &cfg) {
+  return op->hasTrait<OpTrait::waveamdmachine::VALUOp>() && !isMFMA(op) &&
+         !isXdlWmma(op, cfg);
 }
 
-static bool isTransOp(Operation *op) {
-  if (!isLegacyVALU(op))
+static bool isTransOp(Operation *op, const HazardConfig &cfg) {
+  if (!isLegacyVALU(op, cfg))
     return false;
   return waveamdmachine::classifyOp(op) ==
          waveamdmachine::SchedClass::WriteTrans32;
+}
+
+static bool isVALUForCoexecution(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::VALUOp>() ||
+         op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
+}
+
+static bool isCoexecutableVALU(Operation *op, const HazardConfig &cfg) {
+  return isVALUForCoexecution(op) && !isTransOp(op, cfg) &&
+         !op->hasTrait<OpTrait::waveamdmachine::WMMAOp>() &&
+         !op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
 }
 
 static bool isVMEM(Operation *op) {
@@ -667,12 +795,20 @@ struct HazardOpInfo {
   std::optional<waveamdmachine::StoreWriteDataHazard> storeWriteData;
   std::optional<unsigned> lgkmWaitLimit;
   waveamdmachine::WaitcntInfo waitcnt;
+  waveamdmachine::SchedClass schedClass =
+      waveamdmachine::SchedClass::NumSchedClasses;
+  unsigned instructionIssueCount = 1;
   unsigned mfmaPasses = 0;
   bool noMachineInst = false;
   bool controlFlow = false;
   bool mfma = false;
   bool legacyValu = false;
   bool trans = false;
+  bool xdlWmma = false;
+  bool valuForCoexec = false;
+  bool coexecValu = false;
+  bool sgprWrite = false;
+  bool scratchMemory = false;
   bool vmem = false;
   bool vmemStore = false;
   bool execWriteConsumer = false;
@@ -700,8 +836,9 @@ static bool isLdsDmaIssue(Operation *op) {
   return op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>();
 }
 
-static bool isCachedLegacyVALU(Operation *op, const HazardOpInfo *info) {
-  return info ? info->legacyValu : isLegacyVALU(op);
+static bool isCachedLegacyVALU(Operation *op, const HazardConfig &cfg,
+                               const HazardOpInfo *info) {
+  return info ? info->legacyValu : isLegacyVALU(op, cfg);
 }
 
 static bool isCachedVALU(Operation *op, const HazardOpInfo *info) {
@@ -754,8 +891,8 @@ static unsigned getTransForwardingUseWait(Operation *op, RegSpan use,
                                           const HazardOpInfo *info) {
   if (hazard.kind != PhysicalHazardKind::TransWriteVGPR)
     return 0;
-  bool legacyValu = isCachedLegacyVALU(op, info);
-  bool trans = info ? info->trans : isTransOp(op);
+  bool legacyValu = isCachedLegacyVALU(op, cfg, info);
+  bool trans = info ? info->trans : isTransOp(op, cfg);
   if (!isVGPRSpan(use) || !legacyValu || trans)
     return 0;
   return waitForHazardAge(hazard, cfg.transForwardingWaitStates);
@@ -769,7 +906,7 @@ static unsigned getValuWriteSGPRUseWait(Operation *op, RegSpan use,
     return 0;
   if (info ? info->vmem : isVMEM(op))
     return waitForHazardAge(hazard, cfg.valuWriteSGPRVmemReadLatency);
-  if (isCachedLegacyVALU(op, info))
+  if (isCachedLegacyVALU(op, cfg, info))
     return waitForHazardAge(hazard, cfg.valuWriteSGPRValuReadLatency);
   return 0;
 }
@@ -821,7 +958,7 @@ static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
         hazard, getXdlResultLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead &&
-      isCachedLegacyVALU(op, info))
+      isCachedLegacyVALU(op, cfg, info))
     return waitForHazardAge(
         hazard, getXdlSrcCReadWarLatency(getHazardMfmaPassCount(hazard), cfg));
 
@@ -975,10 +1112,22 @@ static HazardOpInfoMap collectHazardOpInfo(Operation *root,
     info.waitcnt = getWaitcntInfo(op);
     info.noMachineInst = emitsNoMachineInst(*op);
     info.controlFlow = isControlFlowOp(op);
+    info.instructionIssueCount =
+        waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion);
     info.mfma = isMFMA(op);
     info.mfmaPasses = info.mfma ? getMfmaPassCount(op) : 0;
-    info.legacyValu = isLegacyVALU(op);
-    info.trans = isTransOp(op);
+    info.legacyValu = isLegacyVALU(op, cfg);
+    info.trans = isTransOp(op, cfg);
+    info.xdlWmma = isXdlWmma(op, cfg);
+    if (info.xdlWmma)
+      info.schedClass = waveamdmachine::classifyOp(op);
+    info.valuForCoexec = isVALUForCoexecution(op);
+    info.coexecValu = isCoexecutableVALU(op, cfg);
+    info.sgprWrite = (op->hasTrait<OpTrait::waveamdmachine::SALUOp>() ||
+                      info.valuForCoexec) &&
+                     hasSGPRDef(op);
+    info.scratchMemory =
+        op->hasTrait<OpTrait::waveamdmachine::ScratchMemoryOp>();
     info.vmem = isVMEM(op);
     info.vmemStore = isVMEMStore(*op);
     info.execWriteConsumer = isExecWriteHazardConsumer(op);
@@ -1002,7 +1151,7 @@ static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
     state.execWriteHazard =
         std::max(state.execWriteHazard, cfg.valuWriteExecConsumerLatency);
   bool transOp =
-      cfg.hasTransForwardingHazard && (info ? info->trans : isTransOp(op));
+      cfg.hasTransForwardingHazard && (info ? info->trans : isTransOp(op, cfg));
   for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
     if (resultIndex == 0 &&
         (info ? info->copiedVccCompare
@@ -1034,7 +1183,7 @@ static void addProducedPhysicalHazards(Operation *op, HazardState &state,
     addProducedMfmaPhysicalHazards(op, state, cfg, info);
     return;
   }
-  if (info ? info->legacyValu : isLegacyVALU(op))
+  if (info ? info->legacyValu : isLegacyVALU(op, cfg))
     addProducedValuPhysicalHazards(op, state, cfg, info);
   addProducedStorePhysicalHazards(op, state, cfg, info);
 }
@@ -1057,6 +1206,220 @@ static void addProducedHazards(Operation *op, HazardState &state,
                          /*mfmaStore=*/resultLatency});
   }
   addProducedPhysicalHazards(op, state, cfg, info);
+}
+
+static waveamdmachine::SchedClass
+getCachedSchedClass(Operation *op, const HazardOpInfo *info) {
+  return info ? info->schedClass : waveamdmachine::classifyOp(op);
+}
+
+static bool isCachedXdlWmma(Operation *op, const HazardConfig &cfg,
+                            const HazardOpInfo *info) {
+  return info ? info->xdlWmma : isXdlWmma(op, cfg);
+}
+
+static bool isCachedVALUForCoexecution(Operation *op,
+                                       const HazardOpInfo *info) {
+  return info ? info->valuForCoexec : isVALUForCoexecution(op);
+}
+
+static bool isCachedCoexecutableVALU(Operation *op, const HazardConfig &cfg,
+                                     const HazardOpInfo *info) {
+  return info ? info->coexecValu : isCoexecutableVALU(op, cfg);
+}
+
+static bool isCachedSGPRWrite(Operation *op, const HazardOpInfo *info) {
+  if (info)
+    return info->sgprWrite;
+  return (op->hasTrait<OpTrait::waveamdmachine::SALUOp>() ||
+          isVALUForCoexecution(op)) &&
+         hasSGPRDef(op);
+}
+
+static bool isCachedScratchMemory(Operation *op, const HazardOpInfo *info) {
+  return info ? info->scratchMemory
+              : op->hasTrait<OpTrait::waveamdmachine::ScratchMemoryOp>();
+}
+
+static unsigned getCachedInstructionIssueCount(Operation *op,
+                                               const HazardConfig &cfg,
+                                               const HazardOpInfo *info) {
+  return info ? info->instructionIssueCount
+              : waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion);
+}
+
+static unsigned getWmmaVALUWaitSlots(Operation *op, const HazardConfig &cfg,
+                                     const HazardOpInfo *info) {
+  int latency =
+      waveamdmachine::getLatency(*cfg.arch, getCachedSchedClass(op, info));
+  // LLVM hazard category 6 maps latency 4 to one coexecution slot.
+  if (latency == 4)
+    return 1;
+  return llvm::divideCeil(static_cast<unsigned>(latency), 2u);
+}
+
+static void addCoexecSpan(HazardState &state, Value value,
+                          CoexecHazardKind kind, unsigned wmmaRemaining,
+                          unsigned valuRemaining) {
+  std::optional<RegSpan> span = getAllocatedRegSpan(value);
+  if (!span)
+    return;
+  mergeCoexecHazard(state,
+                    CoexecHazard{*span, kind, wmmaRemaining, valuRemaining});
+}
+
+static void addProducedCoexecHazards(Operation *op, HazardState &state,
+                                     const HazardConfig &cfg,
+                                     const HazardOpInfo *info) {
+  bool trans = info ? info->trans : isTransOp(op, cfg);
+  if (cfg.hasTransCoexecutionHazard && trans) {
+    for (Value result : op->getResults())
+      addCoexecSpan(state, result, CoexecHazardKind::TransDef,
+                    /*wmmaRemaining=*/0, /*valuRemaining=*/1);
+    for (Value operand : op->getOperands())
+      addCoexecSpan(state, operand, CoexecHazardKind::TransUse,
+                    /*wmmaRemaining=*/0, /*valuRemaining=*/1);
+  }
+
+  if (!cfg.hasWmmaCoexecutionHazard || !isCachedXdlWmma(op, cfg, info))
+    return;
+  waveamdmachine::MMAOpInterface mma = cast<waveamdmachine::MMAOpInterface>(op);
+  unsigned valuRemaining = getWmmaVALUWaitSlots(op, cfg, info);
+  addCoexecSpan(state, mma.getAccResult(), CoexecHazardKind::WmmaDef,
+                /*wmmaRemaining=*/valuRemaining + 1, valuRemaining);
+  addCoexecSpan(state, mma.getA(), CoexecHazardKind::WmmaUse,
+                /*wmmaRemaining=*/0, valuRemaining);
+  addCoexecSpan(state, mma.getB(), CoexecHazardKind::WmmaUse,
+                /*wmmaRemaining=*/0, valuRemaining);
+}
+
+static unsigned getCoexecValueWait(Value value, const HazardState &state,
+                                   CoexecHazardKind kind,
+                                   unsigned CoexecHazard::*remainingField) {
+  std::optional<RegSpan> span = getAllocatedRegSpan(value);
+  if (!span)
+    return 0;
+  unsigned wait = 0;
+  for (const CoexecHazard &hazard : state.coexec)
+    if (hazard.kind == kind && overlaps(*span, hazard.span))
+      wait = std::max(wait, hazard.*remainingField);
+  return wait;
+}
+
+static unsigned getCoexecValuesWait(ValueRange values, const HazardState &state,
+                                    CoexecHazardKind kind,
+                                    unsigned CoexecHazard::*remainingField) {
+  unsigned wait = 0;
+  for (Value value : values)
+    wait =
+        std::max(wait, getCoexecValueWait(value, state, kind, remainingField));
+  return wait;
+}
+
+static unsigned getTransCoexecWait(Operation *op, const HazardState &state,
+                                   const HazardConfig &cfg,
+                                   const HazardOpInfo *info) {
+  if (!cfg.hasTransCoexecutionHazard || !isCachedVALUForCoexecution(op, info) ||
+      (info ? info->trans : isTransOp(op, cfg)))
+    return 0;
+
+  return std::max(
+      getCoexecValuesWait(op->getOperands(), state, CoexecHazardKind::TransDef,
+                          &CoexecHazard::valuRemaining),
+      getCoexecValuesWait(op->getResults(), state, CoexecHazardKind::TransUse,
+                          &CoexecHazard::valuRemaining));
+}
+
+static unsigned getWmmaCoexecWait(Operation *op, const HazardState &state,
+                                  const HazardConfig &cfg,
+                                  const HazardOpInfo *info) {
+  if (!cfg.hasWmmaCoexecutionHazard)
+    return 0;
+
+  unsigned wait = 0;
+  if (isCachedXdlWmma(op, cfg, info)) {
+    waveamdmachine::MMAOpInterface mma =
+        cast<waveamdmachine::MMAOpInterface>(op);
+    return std::max(
+        getCoexecValueWait(mma.getA(), state, CoexecHazardKind::WmmaDef,
+                           &CoexecHazard::wmmaRemaining),
+        getCoexecValueWait(mma.getB(), state, CoexecHazardKind::WmmaDef,
+                           &CoexecHazard::wmmaRemaining));
+  }
+
+  if (!isCachedCoexecutableVALU(op, cfg, info))
+    return 0;
+  wait =
+      getCoexecValuesWait(op->getOperands(), state, CoexecHazardKind::WmmaDef,
+                          &CoexecHazard::valuRemaining);
+  wait = std::max(wait, getCoexecValuesWait(op->getResults(), state,
+                                            CoexecHazardKind::WmmaDef,
+                                            &CoexecHazard::valuRemaining));
+  wait = std::max(wait, getCoexecValuesWait(op->getResults(), state,
+                                            CoexecHazardKind::WmmaUse,
+                                            &CoexecHazard::valuRemaining));
+  return wait;
+}
+
+static unsigned getRequiredCoexecVNops(Operation *op, const HazardState &state,
+                                       const HazardConfig &cfg,
+                                       const HazardOpInfo *info = nullptr) {
+  if (info ? info->controlFlow : isControlFlowOp(op))
+    return 0;
+  return std::max(getTransCoexecWait(op, state, cfg, info),
+                  getWmmaCoexecWait(op, state, cfg, info));
+}
+
+static void addProducedScratchBaseHazards(Operation *op, HazardState &state,
+                                          const HazardConfig &cfg,
+                                          const HazardOpInfo *info) {
+  if (!cfg.hasScratchBaseForwardingHazard || !isCachedSGPRWrite(op, info))
+    return;
+  unsigned limit = waveamdmachine::getScratchBaseForwardingSGPRWriteLimit();
+  std::array<waveamdmachine::PhysicalRegisterSpan, 2> bases =
+      waveamdmachine::getFlatScratchBaseSGPRSpans();
+  auto addSpan = [&](RegSpan span) {
+    for (auto [index, base] : llvm::enumerate(bases))
+      if (overlaps(span, toRegSpan(base)))
+        state.scratchBase[index] = limit;
+  };
+  for (Value result : op->getResults())
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(result))
+      addSpan(*span);
+  waveamdmachine::FixedPhysicalRegisterDefsOpInterface fixedDefs =
+      dyn_cast<waveamdmachine::FixedPhysicalRegisterDefsOpInterface>(op);
+  if (!fixedDefs)
+    return;
+  for (const waveamdmachine::PhysicalRegisterSpan &span :
+       fixedDefs.getFixedPhysicalRegisterDefs())
+    addSpan(toRegSpan(span));
+}
+
+static bool needsScratchBaseWait(Operation *op, const HazardState &state,
+                                 const HazardConfig &cfg,
+                                 const HazardOpInfo *info = nullptr) {
+  return cfg.hasScratchBaseForwardingHazard &&
+         isCachedScratchMemory(op, info) &&
+         llvm::any_of(state.scratchBase,
+                      [](unsigned remaining) { return remaining != 0; });
+}
+
+static void applySWaitAlu(Operation *op, HazardState &state) {
+  waveamdmachine::SWaitAluOp wait = dyn_cast<waveamdmachine::SWaitAluOp>(op);
+  if (!wait)
+    return;
+  if (wait.getVaVdst() == 0) {
+    llvm::erase_if(state.physical, [](const PhysicalHazard &hazard) {
+      return hazard.kind == PhysicalHazardKind::TransWriteVGPR ||
+             hazard.kind == PhysicalHazardKind::ValuWriteVGPR;
+    });
+  }
+  if (wait.getVaSdst() == 0)
+    llvm::erase_if(state.physical, [](const PhysicalHazard &hazard) {
+      return hazard.kind == PhysicalHazardKind::ValuWriteSGPR;
+    });
+  if (wait.getSaSdst() == 0 && wait.getVaSdst() == 0)
+    state.scratchBase.fill(0);
 }
 
 static unsigned getMaxTrackedLgkmPending(const HazardConfig &cfg) {
@@ -1096,14 +1459,23 @@ static void transferHazards(Operation *op, HazardState &state,
                             const HazardConfig &cfg,
                             const HazardOpInfo *info = nullptr) {
   bool controlFlow = info ? info->controlFlow : isControlFlowOp(op);
-  if (!(info ? info->noMachineInst : emitsNoMachineInst(*op)))
+  if (!(info ? info->noMachineInst : emitsNoMachineInst(*op))) {
     advanceHazards(state, /*count=*/1, /*advanceLgkm=*/!controlFlow);
+    unsigned issueCount = getCachedInstructionIssueCount(op, cfg, info);
+    if (isCachedVALUForCoexecution(op, info))
+      advanceCoexecHazards(state, issueCount);
+    if (isCachedSGPRWrite(op, info))
+      advanceScratchBaseHazards(state, issueCount);
+  }
 
   if (controlFlow)
     return;
 
   inheritNoInstOperandHazards(op, state);
+  applySWaitAlu(op, state);
   addProducedHazards(op, state, cfg, info);
+  addProducedCoexecHazards(op, state, cfg, info);
+  addProducedScratchBaseHazards(op, state, cfg, info);
   addPendingLgkmIssue(op, state, cfg, info);
   applyLgkmWait(op, state, cfg, info);
 }
@@ -1154,6 +1526,17 @@ static unsigned getRequiredMitigation(Operation *op, HazardState &state,
     ++count;
     advanceHazards(state);
   }
+  unsigned vnops = getRequiredCoexecVNops(op, state, cfg, info);
+  if (vnops) {
+    count += vnops;
+    advanceHazards(state, vnops);
+    advanceCoexecHazards(state, vnops);
+  }
+  if (needsScratchBaseWait(op, state, cfg, info)) {
+    ++count;
+    advanceHazards(state);
+    state.scratchBase.fill(0);
+  }
   return count;
 }
 
@@ -1200,7 +1583,8 @@ static bool definesLoopCarry(Operation *op) {
 }
 
 static bool isRepairCandidate(Operation *op) {
-  if (emitsNoMachineInst(*op) || !isPure(op) || isMFMA(op))
+  if (emitsNoMachineInst(*op) || !isPure(op) ||
+      isa<waveamdmachine::MMAOpInterface>(op))
     return false;
   if (!op->hasTrait<OpTrait::waveamdmachine::VALUOp>() &&
       !op->hasTrait<OpTrait::waveamdmachine::SALUOp>())
@@ -1851,6 +2235,19 @@ private:
     if (needsValuMitigation(op, local)) {
       insertValuMitigation(*op, builder, cfg, sti);
       advanceHazards(local);
+    }
+
+    unsigned vnops = getRequiredCoexecVNops(op, local, cfg);
+    if (vnops) {
+      insertVNopMitigation(*op, vnops, builder);
+      advanceHazards(local, vnops);
+      advanceCoexecHazards(local, vnops);
+    }
+
+    if (needsScratchBaseWait(op, local, cfg)) {
+      insertScratchBaseWait(*op, builder);
+      advanceHazards(local);
+      local.scratchBase.fill(0);
     }
 
     transferHazards(op, local, cfg);

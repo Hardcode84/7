@@ -32,7 +32,9 @@ Current Wave support is partial:
 - direct-to-LDS operations reject during instruction selection;
 - f16 and bf16 `16x16x32` WMMA lower through regalloc, MC assembly, object
   linking, and disassembly;
-- scheduling still uses older target assumptions.
+- schedule classes and resources come from LLVM MC schedule queries;
+- normal-mode TRANS, WMMA, and scratch hazards emit visible repair
+  instructions.
 
 ## Goal
 
@@ -78,7 +80,7 @@ Unsupported paths must fail with target-specific diagnostics.
 | ISA | 12.5.0 | exact stepping match |
 | wave size | 32 only | reject any other value |
 | execution mode | CU mode, four SIMDs per CU | no WGP descriptor field |
-| VGPRs | 1024 addressable in four 256-entry windows; allocation granule 16 | allocate the full range and lower window state after allocation |
+| VGPRs | LLVM reports 1024 addressable in four 256-entry windows and a 16-register allocation granule | query LLVM, allocate the full range, then lower window state |
 | VGPR tuples | target-selected aligned multi-register operands | derive alignment from LLVM register classes |
 | SGPRs | 106 architected; at most 32 user SGPRs | preserve ABI reservations and descriptor limit |
 | accumulators | VGPR-backed | no AGPR allocation |
@@ -271,8 +273,8 @@ Wait modeling has two layers:
 
 The gfx1250 mapping must mirror LLVM's `WaitEventMaskForInstGFX12Plus`.
 Existing targets keep their current VMEM/LGKM/VSCNT mapping.
-Scheduler timing still buckets semantic events into legacy resources. `.8`
-owns independent split-counter scheduling data.
+Scheduler timing keeps semantic events separate from split completion counters.
+Target MC schedule resources provide issue timing.
 
 Completion and source lifetime use separate scoreboards:
 
@@ -346,9 +348,10 @@ one hardware `VA_VDST` field, plus `VM_VSRC`. It classifies:
 - Core/Side-MACC, DP-MACC, TRANS, and XDL VALU reads and writes;
 - LDS, FLAT, and VMEM VGPR source reads.
 
-Late wait insertion then emits `s_waitcnt_depctr`. It also programs scheduling
-mode 2 at function entry, disables it around calls and returns, and drains
-incoming dependency state for non-entry functions.
+Late wait insertion then emits a typed dependency-counter machine op.
+`MCInstPrinter` renders the gfx1250 spelling as `s_wait_alu`. It also programs
+scheduling mode 2 at function entry, disables it around calls and returns, and
+drains incoming dependency state for non-entry functions.
 
 Wave's post-regalloc ticket-wait pass is the right placement, but its current
 scoreboard tracks memory completion tickets, not physical VGPR RAW, WAR, and WAW
@@ -358,7 +361,7 @@ hazards. A separate opt-in project must add:
 - physical-register event scores and conservative CFG/loop joins;
 - exact VALU and memory-family classification;
 - scaled-WMMA double increments and LDS-DMA classification;
-- `s_waitcnt_depctr` and scheduling-mode machine ops with MCInst emission;
+- dependency-counter and scheduling-mode machine ops with MCInst emission;
 - entry, call, return, and non-entry transition rules;
 - late wait placement that avoids WMMA coexecution shadows.
 
@@ -458,8 +461,8 @@ register banks. The addressing windows are late encoding state.
 Required allocator changes:
 
 - remove the text-emission cap from `WaveAMDRegisterLimits.cpp`;
-- use LLVM's occupancy limit, 1024 architectural maximum, and 16-register
-  allocation granule;
+- query LLVM for occupancy limit, architectural maximum, and allocation
+  granule;
 - honor `target_waves` through `maxVGPRsForWaves`;
 - clamp explicit budgets and fixed base-plus-width ranges to target
   addressability;
@@ -522,10 +525,20 @@ loads. Async staging waits for the advanced memory model.
 
 ## Scheduler And Hazards
 
-`ArchData.cpp` and related generated tables do not accept ISA 12.5. Add an
-exact gfx1250 entry based on LLVM's `GFX1250SpeedModel`.
+Build the exact gfx1250 entry from LLVM subtarget and MC scheduling data:
 
-Initial bucket values:
+- execution-unit, wave, VGPR, and LDS facts come from AMDGPU target helpers;
+- representative AMDGPU opcodes resolve through `MCInstrInfo` and
+  `MCSubtargetInfo`;
+- schedule latency and resource acquire/release cycles come from the resolved
+  MC schedule class;
+- direct MC probes supply legal classes with no same-named `WriteRes`;
+- Wave schedule classes and functional units use TableGen enums and generated
+  symbolizers;
+- generated tables contain no fallback timing constants and fail closed when a
+  required gfx1250 class or resource is absent.
+
+The initial resolved buckets are:
 
 | Class | Cycles |
 |---|---:|
@@ -539,23 +552,39 @@ Initial bucket values:
 
 These are scheduling inputs, not measured throughput claims.
 
-Hazard repair must audit:
+Normal-mode hazard repair follows LLVM target features:
 
-- WMMA and TRANS coexecution windows;
-- WMMA accumulator reuse and source reuse;
+- XDL2 WMMA has eight-cycle latency and release occupancy;
+- WMMA-to-WMMA overlap needs five intervening VALU slots;
+- WMMA-to-coexecutable-VALU overlap needs four intervening VALU slots;
+- TRANS RAW or WAR overlap needs one `v_nop`; SALU does not age the window;
+- scratch-base forwarding tracks physical `s102` and `s103` writes for ten
+  SGPR-defining SALU or VALU instructions;
+- scratch repair emits typed `s_wait_alu sa_sdst(0) va_sdst(0)`;
+- `va_vdst(0)` clears VALU/TRANS VGPR dependencies;
+- `va_sdst(0)` clears VALU-to-SGPR dependencies; VCC and EXEC stay live;
+- CFG and loop joins retain the maximum incoming obligation.
+
+WMMA stays distinct from legacy VALU and MFMA classification. Inserted
+`v_nop` and `s_wait_alu` operations flow through `MCInst` and remain visible in
+assembly and disassembly.
+
+Final MC buffering also enforces:
+
 - unclaused initial VMEM behavior;
-- scratch-base forwarding;
-- waits followed by dependent VALU;
-- VGPR-window switches, MODE writes, and fallthrough state;
-- delay-ALU skip regions crossing `S_SET_VGPR_MSB`;
-- terminal memory operations.
+- MODE-to-window-switch separation across fallthrough labels;
+- paired delay-ALU dependencies unpack only for destructive window edits;
+- affected hard clauses drop; unaffected packed delays and clauses survive;
+- delay targets cannot cross labels or control flow;
+- terminal memory completion and scratch-store deallocation rules.
 
 Reuse existing instruction traits and LLVM feature predicates. No
 provider-specific gfx1250 code belongs in base register allocation.
 
 The existing AMDGPU scheduler project may supply common schedule-table and
-hazard infrastructure. gfx1250 bring-up owns its exact data, classification,
-and tests.
+hazard infrastructure. gfx1250 bring-up owns classification, repair, and tests.
+Expert scheduling mode 2 stays disabled; normal coexecution and forwarding
+repair must not emit `HW_REG_WAVE_SCHED_MODE`.
 
 ## Python And Tools
 
@@ -608,7 +637,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | ABI | object descriptor and entry-sequence round trip |
 | waits | independent LOAD/STORE/DS/KM/X, joins, loops, atomics, termination |
 | VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, X drains; `.12` adds typed inline assembly and VOPD |
-| resources | 32-bank choice, 320 KiB bound, target tuple alignment, 1024-VGPR maximum and 16-register granule |
+| resources | 32-bank choice, 320 KiB bound, target tuple alignment, and LLVM-reported VGPR limits |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, target hazards |
 | Python | exact profile selection and wrong-family rejection |

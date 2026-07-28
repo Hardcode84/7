@@ -34,6 +34,9 @@ template <typename ConcreteType>
 class LDSDmaOp : public TraitBase<ConcreteType, LDSDmaOp> {};
 
 template <typename ConcreteType>
+class ScratchMemoryOp : public TraitBase<ConcreteType, ScratchMemoryOp> {};
+
+template <typename ConcreteType>
 class VMEMLoadOp : public TraitBase<ConcreteType, VMEMLoadOp> {};
 
 template <typename ConcreteType>
@@ -72,6 +75,9 @@ class NoAsmEmission : public TraitBase<ConcreteType, NoAsmEmission> {};
 // pipeline hazard.
 template <typename ConcreteType>
 class MFMAOp : public TraitBase<ConcreteType, MFMAOp> {};
+
+template <typename ConcreteType>
+class WMMAOp : public TraitBase<ConcreteType, WMMAOp> {};
 
 template <typename ConcreteType>
 class ReadsExecOp : public TraitBase<ConcreteType, ReadsExecOp> {};

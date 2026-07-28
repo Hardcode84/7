@@ -16,8 +16,13 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
+
+namespace llvm {
+class MCSubtargetInfo;
+}
 
 namespace mlir::waveamdmachine {
 
@@ -65,6 +70,12 @@ std::optional<int64_t> getNonInlineLiteral(Value value);
 unsigned getConstantBusLimit(const llvm::AMDGPU::IsaVersion &isa);
 unsigned encodeSDelayAluVALU(unsigned dependency);
 unsigned encodeSDelayAluSALUCycle(unsigned cycles);
+unsigned encodeDepCtrWait(std::optional<unsigned> vaVdst,
+                          std::optional<unsigned> saSdst,
+                          std::optional<unsigned> vaSdst,
+                          const llvm::MCSubtargetInfo &sti);
+std::array<PhysicalRegisterSpan, 2> getFlatScratchBaseSGPRSpans();
+unsigned getScratchBaseForwardingSGPRWriteLimit();
 
 bool sameConstantBusUse(Value lhs, Value rhs,
                         SamePhysicalRegFn samePhysicalReg);

@@ -278,16 +278,29 @@ MultiWaveExecutionState::getPipeInFlightCount(unsigned wave,
 }
 
 unsigned MultiWaveExecutionState::getRoundRobinRank(unsigned wave) const {
-  assert(arch->waveIssueArbitration == WaveIssueArbitration::RoundRobin &&
-         "unsupported wave issue arbitration");
   WavePlacement placement = placements[wave];
   unsigned cursor = roundRobinCursor[placement.simd];
   return (placement.slot + arch->wavesPerSIMD - cursor) % arch->wavesPerSIMD;
 }
 
+static LogicalResult validateWaveArbitration(const ArchData &arch,
+                                             ArrayRef<Operation *> candidates) {
+  if (arch.waveIssueArbitration == WaveIssueArbitration::RoundRobin)
+    return success();
+  for (Operation *op : candidates)
+    if (op) {
+      op->emitOpError("multi-wave arbitration is unavailable for ")
+          << arch.name;
+      break;
+    }
+  return failure();
+}
+
 FailureOr<unsigned>
 MultiWaveExecutionState::selectWave(ArrayRef<Operation *> candidates) const {
   assert(candidates.size() == waves.size() && "one candidate per wave");
+  if (failed(validateWaveArbitration(*arch, candidates)))
+    return failure();
   std::optional<MultiWaveCandidate> best;
   for (unsigned wave : llvm::seq<unsigned>(getWaveCount())) {
     Operation *op = candidates[wave];
@@ -357,16 +370,20 @@ MultiWaveExecutionState::query(unsigned wave, Operation *op) const {
     return failure();
   }
   if (!isInstructionExecutionStateArchSupported(arch->isa)) {
-    op->emitOpError("instruction execution state supports gfx942, gfx950, "
-                    "and RDNA3 only");
+    op->emitOpError(
+        "instruction execution state supports gfx942, gfx950, RDNA3, and "
+        "gfx1250 only");
     return failure();
   }
   if (!isWaveAMDMachineOp(op)) {
     op->emitOpError("instruction execution state expects a waveamdmachine op");
     return failure();
   }
-  InstructionExecutionState::InstructionDesc desc = waves[wave].describe(op);
-  return waves[wave].queryWithResources(op, desc, &resources, wave,
+  FailureOr<InstructionExecutionState::InstructionDesc> desc =
+      waves[wave].describe(op);
+  if (failed(desc))
+    return failure();
+  return waves[wave].queryWithResources(op, *desc, &resources, wave,
                                         placements[wave]);
 }
 

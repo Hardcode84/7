@@ -259,7 +259,10 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
   capabilities.addressableLocalMemoryBytes =
       llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(sti);
   capabilities.localMemoryBankCount = getAMDGPULocalMemoryBankCount(sti);
+  capabilities.executionUnitsPerCU = llvm::AMDGPU::IsaInfo::getEUsPerCU(sti);
   capabilities.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(sti);
+  capabilities.totalVGPRs = llvm::AMDGPU::IsaInfo::getTotalNumVGPRs(sti);
+  capabilities.scheduleIssueWidth = sti.getSchedModel().IssueWidth;
   capabilities.maxUserSGPRs = llvm::AMDGPU::getMaxNumUserSGPRs(sti);
   if (sti.hasFeature(llvm::AMDGPU::Feature45BitNumRecordsBufferResource)) {
     // LLVM exposes this layout as one feature, not two field-width queries.
@@ -296,6 +299,11 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
       sti.hasFeature(llvm::AMDGPU::Feature1024AddressableVGPRs);
   capabilities.setregVGPRMSBFixup =
       sti.hasFeature(llvm::AMDGPU::FeatureSetregVGPRMSBFixup);
+  capabilities.transCoexecutionHazard =
+      sti.hasFeature(llvm::AMDGPU::FeatureTransCoexecutionHazard);
+  capabilities.wmmaCoexecutionHazard =
+      sti.hasFeature(llvm::AMDGPU::FeatureWMMACoexecutionHazards);
+  capabilities.scratchBaseForwardingHazard = llvm::AMDGPU::isGFX1250(sti);
   return capabilities;
 }
 

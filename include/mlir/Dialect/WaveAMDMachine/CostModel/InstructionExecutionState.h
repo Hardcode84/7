@@ -311,7 +311,7 @@ private:
     }
   };
 
-  InstructionDesc describe(Operation *op) const;
+  FailureOr<InstructionDesc> describe(Operation *op) const;
   static InstructionResourceCapacities
   getResourceCapacities(const InstructionExecutionConfig &config);
   SmallVector<InstructionResourceUse, 6>

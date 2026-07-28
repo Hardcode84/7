@@ -15,14 +15,11 @@
 #ifndef MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_ARCHDATA_H
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_ARCHDATA_H
 
+#include "mlir/Dialect/WaveAMDMachine/CostModel/CostModelEnums.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
-#include <cstdint>
-
 namespace mlir::waveamdmachine {
-
-enum class WaveIssueArbitration : uint8_t { RoundRobin };
 
 inline bool isaEq(const llvm::AMDGPU::IsaVersion &lhs,
                   const llvm::AMDGPU::IsaVersion &rhs) {
@@ -48,10 +45,10 @@ struct ArchData {
   // SIMD units per CU. RDNA: 2 SIMD32. CDNA: 4 SIMD16.
   int simdsPerCU;
 
-  // Low SIMD-ID bit in the target hardware-ID register.
+  // Low SIMD-ID bit in the target hardware-ID register. Negative if unknown.
   int simdIdOffset;
 
-  // Low wave-slot bit in the target hardware-ID register.
+  // Low wave-slot bit in the target hardware-ID register. Negative if unknown.
   int waveIdOffset;
 
   // VGPR file size in 32-bit lanes per SIMD (RDNA) / per EU (CDNA),
@@ -61,17 +58,17 @@ struct ArchData {
   // VGPR allocation granule in the arch's native wave mode.
   int vgprAllocGranule;
 
-  // Dependent-VALU latency in SIMD cycles. RDNA: 5 (exposed, filled
-  // by other waves). CDNA: 4 (wave64 occupies SIMD16 for 4 cycles).
+  // Minimum dependent-VALU latency. Zero trusts the LLVM class latency.
   int valuPipelineDepth;
 
-  // Wave64 cost relative to wave32. RDNA executes wave64 as two
-  // wave32 halves (=2). CDNA's wave64 is the native unit (=1).
+  // Wave64 cost relative to wave32. Zero leaves it unmodeled.
   int wave64IssueMultiplier;
 
-  // Hardware cap on instructions issued per CU per cycle (5 per
-  // rocprofiler-compute pipeline-descriptions doc).
+  // Hardware cap on instructions issued per CU per cycle. Zero disables it.
   int issuesPerCUPerCycle;
+
+  // LLVM scheduler issue width per SIMD.
+  int simdIssueWidth;
 
   // SIMD issue period in cycles. RDNA issues every cycle (=1).
   // CDNA issues one wave64 over SIMD16 every 4 cycles (=4).
@@ -98,6 +95,10 @@ struct ArchData {
 
   // AGPR allocation consumes VGPR-file capacity.
   bool agprCountsAgainstVGPRs;
+
+  bool hasTransCoexecutionHazard;
+  bool hasWmmaCoexecutionHazard;
+  bool hasScratchBaseForwardingHazard;
 };
 
 // Lookup by IsaVersion. Aborts (report_fatal_error) on unsupported
@@ -107,6 +108,8 @@ const ArchData &getArchData(const llvm::AMDGPU::IsaVersion &isa);
 // Returns true if the arch is in the supported set without
 // asserting. Useful for early validation paths.
 bool isArchSupported(const llvm::AMDGPU::IsaVersion &isa);
+
+const llvm::AMDGPU::IsaVersion &getGfx1250IsaVersion();
 
 } // namespace mlir::waveamdmachine
 

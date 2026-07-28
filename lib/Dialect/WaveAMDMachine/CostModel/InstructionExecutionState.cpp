@@ -486,7 +486,8 @@ bool isXdlResultHazardConsumer(Operation *op) {
 
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa) {
-  return isaEq(isa, {9, 4, 2}) || isaEq(isa, {9, 5, 0}) || isa.Major == 11;
+  return isaEq(isa, {9, 4, 2}) || isaEq(isa, {9, 5, 0}) || isa.Major == 11 ||
+         isaEq(isa, getGfx1250IsaVersion());
 }
 
 bool waitsForMemoryTokenDepsBeforeIssue(Operation *op) {
@@ -858,16 +859,19 @@ unsigned InstructionExecutionState::getPipeInFlightCount(
 FailureOr<InstructionStall>
 InstructionExecutionState::query(Operation *op) const {
   if (!isInstructionExecutionStateArchSupported(arch.isa)) {
-    op->emitOpError("instruction execution state supports gfx942, gfx950, "
-                    "and RDNA3 only");
+    op->emitOpError(
+        "instruction execution state supports gfx942, gfx950, RDNA3, and "
+        "gfx1250 only");
     return failure();
   }
   if (!isWaveAMDMachineOp(op)) {
     op->emitOpError("instruction execution state expects a waveamdmachine op");
     return failure();
   }
-  InstructionDesc desc = describe(op);
-  return query(op, desc);
+  FailureOr<InstructionDesc> desc = describe(op);
+  if (failed(desc))
+    return failure();
+  return query(op, *desc);
 }
 
 static unsigned getIssueHazardWait(const InstructionStall &stall) {
@@ -886,6 +890,20 @@ InstructionExecutionState::commit(Operation *op) {
                              /*placement=*/{});
 }
 
+static LogicalResult validateCommitOp(Operation *op, const ArchData &arch) {
+  if (!isInstructionExecutionStateArchSupported(arch.isa)) {
+    op->emitOpError(
+        "instruction execution state supports gfx942, gfx950, RDNA3, and "
+        "gfx1250 only");
+    return failure();
+  }
+  if (!isWaveAMDMachineOp(op)) {
+    op->emitOpError("instruction execution state expects a waveamdmachine op");
+    return failure();
+  }
+  return success();
+}
+
 void InstructionExecutionState::advanceToCycle(int64_t cycle) {
   assert(cycle >= currentCycle && "wave timeline moved back");
   currentCycle = cycle;
@@ -896,19 +914,14 @@ FailureOr<InstructionCommitResult>
 InstructionExecutionState::commitWithResources(
     Operation *op, InstructionResourceState *resourceState, unsigned wave,
     WavePlacement placement) {
-  if (!isInstructionExecutionStateArchSupported(arch.isa)) {
-    op->emitOpError("instruction execution state supports gfx942, gfx950, "
-                    "and RDNA3 only");
+  if (failed(validateCommitOp(op, arch)))
     return failure();
-  }
-  if (!isWaveAMDMachineOp(op)) {
-    op->emitOpError("instruction execution state expects a waveamdmachine op");
-    return failure();
-  }
 
-  InstructionDesc desc = describe(op);
+  FailureOr<InstructionDesc> desc = describe(op);
+  if (failed(desc))
+    return failure();
   FailureOr<InstructionStall> queried =
-      queryWithResources(op, desc, resourceState, wave, placement);
+      queryWithResources(op, *desc, resourceState, wave, placement);
   if (failed(queried))
     return failure();
 
@@ -920,42 +933,42 @@ InstructionExecutionState::commitWithResources(
   result.stall = *queried;
   result.issueCycle = currentCycle;
 
-  if (desc.noMachineInst) {
+  if (desc->noMachineInst) {
     result.valueReadyCycle = commitNoMachineInst(op);
-    commitM0(desc);
-    commitStoreData(desc);
+    commitM0(*desc);
+    commitStoreData(*desc);
     result.nextIssueCycle = currentCycle;
     result.tokenReadyCycle = tokenReadyCycle(op);
     return result;
   }
 
   SmallVector<EventId, 4> newEvents =
-      commitMemoryEvents(op, desc, result.issueCycle);
-  if (desc.ldsDmaIssue && config.smoothLdsDmaIssue && !resourceState)
+      commitMemoryEvents(op, *desc, result.issueCycle);
+  if (desc->ldsDmaIssue && config.smoothLdsDmaIssue && !resourceState)
     nextLdsDmaIssueCycle =
         saturatingAdd(result.issueCycle,
                       getLdsDmaServiceInterval(arch, getIssuePeriod(),
                                                config.ldsDmaIssueWaveStreams));
-  int64_t valueReadyCycle = getResultReadyCycle(op, desc, result.issueCycle);
-  commitResults(op, desc, result.issueCycle, newEvents);
+  int64_t valueReadyCycle = getResultReadyCycle(op, *desc, result.issueCycle);
+  commitResults(op, *desc, result.issueCycle, newEvents);
   if (resourceState) {
     SmallVector<InstructionResourceUse, 6> uses =
-        getResourceUses(op, desc, *resourceState);
+        getResourceUses(op, *desc, *resourceState);
     resourceState->commit(wave, placement, uses, result.issueCycle);
-    commitMemoryIssue(desc, result.issueCycle);
+    commitMemoryIssue(*desc, result.issueCycle);
   } else {
-    commitPipe(desc.pipe, valueReadyCycle);
-    if (desc.mfmaCoissueResource)
+    commitPipe(desc->pipe, valueReadyCycle);
+    if (desc->mfmaCoissueResource)
       mfmaCoissueReadyCycle =
-          saturatingAdd(result.issueCycle, desc.resourceDuration);
-    commitMemoryIssue(desc, result.issueCycle);
+          saturatingAdd(result.issueCycle, desc->resourceDuration);
+    commitMemoryIssue(*desc, result.issueCycle);
   }
-  currentIssueSlot += desc.issueSlots;
-  commitIssueSlotHazards(op, desc);
-  commitM0(desc);
-  commitStoreData(desc);
+  currentIssueSlot += desc->issueSlots;
+  commitIssueSlotHazards(op, *desc);
+  commitM0(*desc);
+  commitStoreData(*desc);
 
-  currentCycle = saturatingAdd(result.issueCycle, getInstructionSpan(desc));
+  currentCycle = saturatingAdd(result.issueCycle, getInstructionSpan(*desc));
   pruneRetiredEvents(currentCycle);
   result.nextIssueCycle = currentCycle;
   result.valueReadyCycle = valueReadyCycle;
@@ -963,8 +976,15 @@ InstructionExecutionState::commitWithResources(
   return result;
 }
 
-InstructionExecutionState::InstructionDesc
+FailureOr<InstructionExecutionState::InstructionDesc>
 InstructionExecutionState::describe(Operation *op) const {
+  SchedClass cls = classifyOp(op);
+  if (!isSchedClassSupported(arch, cls)) {
+    op->emitOpError() << getSchedClassName(cls) << " is unsupported on "
+                      << arch.name;
+    return failure();
+  }
+
   InstructionDesc desc;
   desc.waitcnt = op->hasTrait<traits::WaitcntOp>();
   desc.ldsDmaIssue = op->hasTrait<traits::LDSDmaOp>();
@@ -977,7 +997,6 @@ InstructionExecutionState::describe(Operation *op) const {
     desc.storeDataProducer = producesStoreWriteData(op);
   desc.waitsForTokenDeps = waitsForMemoryTokenDepsBeforeIssue(op);
 
-  SchedClass cls = classifyOp(op);
   desc.noMachineInst = cls == SchedClass::NoInst;
   desc.legacyVALU = isLegacyVALU(op);
   desc.trans = cls == SchedClass::WriteTrans32;
@@ -1089,9 +1108,10 @@ void InstructionExecutionState::appendIssueResourceUses(
   uses.push_back({InstructionResourceKind::SimdIssue,
                   InstructionResourceScope::SIMD, /*units=*/1, count, offset,
                   period, getIssuePeriod()});
-  uses.push_back({InstructionResourceKind::CuIssue,
-                  InstructionResourceScope::CU, /*units=*/1, count, offset,
-                  period, /*duration=*/1});
+  if (arch.issuesPerCUPerCycle != 0)
+    uses.push_back({InstructionResourceKind::CuIssue,
+                    InstructionResourceScope::CU, /*units=*/1, count, offset,
+                    period, /*duration=*/1});
 }
 
 void InstructionExecutionState::appendDmaIssueResourceUses(
