@@ -369,3 +369,51 @@ func.func @short_cluster_workgroup_sgpr_count() attributes {
 }
 
 }
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @wmma_wrong_tuple_width() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 4, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  // expected-error @below {{LLVM MC register-class mismatch for}}
+  %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 24>
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"
+} {
+
+func.func @wmma_wrong_target() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  // expected-error @below {{gfx1250 WMMA unsupported on target}}
+  %result = waveamdmachine.wmma_f32_16x16x32_bf16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 24>
+  return
+}
+
+}

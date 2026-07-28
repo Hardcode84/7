@@ -21,7 +21,43 @@ func.func @bad_mma_kind(%x: i32) {
   %b = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<1, i8, 16, 16, 32, 4>
   %acc = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
   // expected-error @below {{unsupported matrix operation kind}}
-  %result = waveamd.mma "wmma.f32.16x16x32.f16" %a, %b, %acc : !waveamd.fragment<0, i8, 16, 16, 32, 4>, !waveamd.fragment<1, i8, 16, 16, 32, 4>, !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
+  %result = waveamd.mma "wmma.f32.8x8x8.f16" %a, %b, %acc : !waveamd.fragment<0, i8, 16, 16, 32, 4>, !waveamd.fragment<1, i8, 16, 16, 32, 4>, !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !waveamd.fragment<2, i32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @bad_gfx1250_wmma_a_payload(%x: i32) {
+  %a = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 4>
+  %b = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<1, f16, 16, 16, 32, 8>
+  %acc = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  // expected-error @below {{A operand must be a 16x16 wave32 fragment carrying 16 f16 elements}}
+  %result = waveamd.mma "wmma.f32.16x16x32.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 16, 16, 32, 4>,
+        !waveamd.fragment<1, f16, 16, 16, 32, 8>,
+        !waveamd.fragment<2, f32, 16, 16, 32, 8>
+     -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+
+// -----
+
+func.func @bad_gfx1250_wmma_acc_payload(%x: i32) {
+  %a = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<0, bf16, 16, 16, 32, 8>
+  %b = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<1, bf16, 16, 16, 32, 8>
+  %acc = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 4>
+  // expected-error @below {{accumulator must be a 16x16 wave32 fragment carrying 8 f32 elements}}
+  %result = waveamd.mma "wmma.f32.16x16x32.bf16" %a, %b, %acc
+      : !waveamd.fragment<0, bf16, 16, 16, 32, 8>,
+        !waveamd.fragment<1, bf16, 16, 16, 32, 8>,
+        !waveamd.fragment<2, f32, 16, 16, 32, 4>
+     -> !waveamd.fragment<2, f32, 16, 16, 32, 4>
   return
 }
 

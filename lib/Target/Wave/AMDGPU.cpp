@@ -34,6 +34,7 @@
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -3147,6 +3148,53 @@ private:
     return success();
   }
 
+  LogicalResult emitGfx1250Wmma(unsigned pseudoOpcode, Value dst, Value a,
+                                Value b, Value acc) {
+    if (!isGfx1250())
+      return emissionSource->emitError("gfx1250 WMMA unsupported on target");
+    llvm::MCOperand dstOperand = toMCOperand(dst);
+    llvm::MCOperand accOperand = toMCOperand(acc);
+    if (!accOperand.isReg() || accOperand.getReg() != dstOperand.getReg()) {
+      pseudoOpcode = llvm::AMDGPU::mapWMMA2AddrTo3AddrOpcode(pseudoOpcode);
+      if (pseudoOpcode == ~0u)
+        return emissionSource->emitError(
+            "LLVM WMMA three-address mapping is unavailable");
+    }
+    unsigned opcode = postVIOpcode(pseudoOpcode);
+    if (opcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
+        opcode >= mcii->getNumOpcodes())
+      return emissionSource->emitError(
+          "LLVM WMMA MC opcode mapping is unavailable");
+    const llvm::MCInstrDesc &desc = mcii->get(opcode);
+    SmallVector<llvm::MCOperand> operands(desc.getNumOperands(),
+                                          llvm::MCOperand::createImm(0));
+    llvm::SmallBitVector assigned(desc.getNumOperands());
+    auto setOperand = [&](llvm::AMDGPU::OpName name,
+                          llvm::MCOperand operand) -> LogicalResult {
+      int index = llvm::AMDGPU::getNamedOperandIdx(opcode, name);
+      if (index < 0 || static_cast<unsigned>(index) >= operands.size())
+        return emissionSource->emitError(
+            "LLVM MC WMMA operand schema mismatch");
+      operands[index] = operand;
+      assigned.set(index);
+      return success();
+    };
+    llvm::MCOperand zero = llvm::MCOperand::createImm(0);
+    if (failed(setOperand(llvm::AMDGPU::OpName::vdst, dstOperand)) ||
+        failed(setOperand(llvm::AMDGPU::OpName::src0, toMCOperand(a))) ||
+        failed(setOperand(llvm::AMDGPU::OpName::src1, toMCOperand(b))) ||
+        failed(setOperand(llvm::AMDGPU::OpName::src2_modifiers, zero)) ||
+        failed(setOperand(llvm::AMDGPU::OpName::src2, accOperand)) ||
+        failed(setOperand(llvm::AMDGPU::OpName::matrix_a_reuse, zero)) ||
+        failed(setOperand(llvm::AMDGPU::OpName::matrix_b_reuse, zero)) ||
+        failed(setOperand(llvm::AMDGPU::OpName::neg_lo, zero)) ||
+        failed(setOperand(llvm::AMDGPU::OpName::neg_hi, zero)))
+      return failure();
+    if (!assigned.all())
+      return emissionSource->emitError("LLVM MC WMMA operand schema changed");
+    return emitMC(opcode, operands);
+  }
+
   LogicalResult emitLegacyLdsDma(unsigned opcode,
                                  SmallVector<llvm::MCOperand> operands) {
     int isAsyncIndex =
@@ -4172,6 +4220,14 @@ private:
            toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
            toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
+    if (isa<waveamdmachine::WmmaF32_16x16x32_F16Op>(op))
+      return emitGfx1250Wmma(llvm::AMDGPU::V_WMMA_F32_16X16X32_F16_w32_twoaddr,
+                             result(), op.getOperand(0), op.getOperand(1),
+                             op.getOperand(2));
+    if (isa<waveamdmachine::WmmaF32_16x16x32_BF16Op>(op))
+      return emitGfx1250Wmma(llvm::AMDGPU::V_WMMA_F32_16X16X32_BF16_w32_twoaddr,
+                             result(), op.getOperand(0), op.getOperand(1),
+                             op.getOperand(2));
     if (isa<waveamdmachine::MfmaF32_16x16x16_F16Op>(op)) {
       if (!isGfx90APlus())
         return op.emitError("mfma.f32.16x16x16.f16 requires gfx90a+");

@@ -68,6 +68,8 @@ static SchedClass classifyMappedOp(Operation *op) {
       .Case<WmmaF32_16x16x16_F16Op, WmmaF32_16x16x16_BF16Op,
             WmmaI32_16x16x16_IU8Op>(
           [](auto) { return SchedClass::Write16PassWMMA; })
+      .Case<WmmaF32_16x16x32_F16Op, WmmaF32_16x16x32_BF16Op>(
+          [](auto) { return SchedClass::WriteXDL2PassWMMA; })
       // Scalar memory (s_load_*).
       .Case<SLoadB32Op, SLoadB64Op, SLoadB128Op>(
           [](auto) { return SchedClass::WriteSMEM; })

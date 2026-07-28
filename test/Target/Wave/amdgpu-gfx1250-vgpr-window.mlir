@@ -55,6 +55,14 @@ module attributes {
 // DIS: s_set_vgpr_msb 0x81
 // DIS-NEXT: buffer_store_b32 v0 /*v512*/, v0 /*v256*/, s[8:11], null offen
 // DIS-NEXT: s_endpgm
+// ASM-LABEL: wmma_vgpr_window:
+// ASM: s_set_vgpr_msb 0xf9
+// ASM-NEXT: v_wmma_f32_16x16x32_f16 v[0:7] /*v[768:775]*/, v[0:7] /*v[256:263]*/, v[0:7] /*v[512:519]*/, v[0:7] /*v[768:775]*/
+// ASM-NEXT: s_endpgm
+// DIS-LABEL: <wmma_vgpr_window>:
+// DIS: s_set_vgpr_msb 0xf9
+// DIS-NEXT: v_wmma_f32_16x16x32_f16 v[0:7] /*v[768:775]*/, v[0:7] /*v[256:263]*/, v[0:7] /*v[512:519]*/, v[0:7] /*v[768:775]*/
+// DIS-NEXT: s_endpgm
 // ASM-LABEL: coissue_vgpr_window:
 // ASM: s_set_vgpr_msb 0xf9
 // ASM-NEXT: s_wait_loadcnt 0x0
@@ -173,6 +181,22 @@ func.func @buffer_vgpr_window() {
          !waveamdmachine.reg<vgpr, 1, 512>,
          !waveamdmachine.reg<sgpr, 4, 8>,
          !waveamdmachine.imm) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+func.func @wmma_vgpr_window() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 256>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 512>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 768>
+  %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8, 256>,
+         !waveamdmachine.reg<vgpr, 8, 512>,
+         !waveamdmachine.reg<vgpr, 8, 768>)
+     -> !waveamdmachine.reg<vgpr, 8, 768>
   waveamdmachine.s_endpgm
   return
 }

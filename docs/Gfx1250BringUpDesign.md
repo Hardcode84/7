@@ -4,9 +4,6 @@
 
 In progress.
 
-LLVM source check: 2026-07-28. Audited high-VGPR implementation and tests match
-public LLVM sources as of that date.
-
 LLVM already owns gfx1250 target parsing, encodings, ELF identity, instruction
 descriptions, intrinsics, descriptor fields, wait instructions, and schedule
 classes. Wave must consume that support. Wave must not duplicate an ISA
@@ -33,7 +30,9 @@ Current Wave support is partial:
 - pressure-driven allocation crosses `v255` and restores visible VGPR-window
   state across conditional edges and joins;
 - direct-to-LDS operations reject during instruction selection;
-- matrix lowering and scheduling still use older target assumptions.
+- f16 and bf16 `16x16x32` WMMA lower through regalloc, MC assembly, object
+  linking, and disassembly;
+- scheduling still uses older target assumptions.
 
 ## Goal
 
@@ -504,15 +503,15 @@ Each wave32 lane provides:
 - 8 f32 accumulator elements: 8 VGPR dwords;
 - 8 f32 result elements: 8 VGPR dwords.
 
-The implementation needs:
+The implementation uses:
 
-- dedicated `MmaKind` entries;
-- dedicated WaveAMDMachine operations or one typed gfx1250 WMMA operation;
+- TableGen `MmaKind` entries and generated stringifiers;
+- dedicated WaveAMDMachine operations;
 - exact target legality;
 - exact A, B, accumulator, and result fragment layouts;
 - fill-zero, extract, unpack, and output-store mappings;
 - two-address or killed-accumulator semantics;
-- MC operand order and modifiers from LLVM's WMMA profile;
+- LLVM opcode mapping, named operands, register classes, and WMMA modifiers;
 - XDL2 schedule classification with an initial eight-cycle latency.
 
 Do not alias the existing gfx11 `16x16x16` WMMA kind. Shape, operand widths,

@@ -46,6 +46,60 @@ def WaveAMD_StoreCacheKind : I32EnumAttr<"StoreCacheKind",
   let cppNamespace = "::mlir::waveamd";
 }
 
+def WaveAMD_MmaWmmaI32_16x16x16_IU8 :
+    I32EnumAttrCase<"WmmaI32_16x16x16_IU8", 0,
+                    "wmma.i32.16x16x16.iu8">;
+def WaveAMD_MmaWmmaF32_16x16x16_F16 :
+    I32EnumAttrCase<"WmmaF32_16x16x16_F16", 1,
+                    "wmma.f32.16x16x16.f16">;
+def WaveAMD_MmaWmmaF32_16x16x16_BF16 :
+    I32EnumAttrCase<"WmmaF32_16x16x16_BF16", 2,
+                    "wmma.f32.16x16x16.bf16">;
+def WaveAMD_MmaMfmaF32_16x16x16_F16 :
+    I32EnumAttrCase<"MfmaF32_16x16x16_F16", 3,
+                    "mfma.f32.16x16x16.f16">;
+def WaveAMD_MmaMfmaF32_16x16x16_BF16 :
+    I32EnumAttrCase<"MfmaF32_16x16x16_BF16", 4,
+                    "mfma.f32.16x16x16.bf16">;
+def WaveAMD_MmaMfmaF32_16x16x32_F16 :
+    I32EnumAttrCase<"MfmaF32_16x16x32_F16", 5,
+                    "mfma.f32.16x16x32.f16">;
+def WaveAMD_MmaMfmaF32_16x16x32_BF16 :
+    I32EnumAttrCase<"MfmaF32_16x16x32_BF16", 6,
+                    "mfma.f32.16x16x32.bf16">;
+def WaveAMD_MmaMfmaF32_32x32x16_F16 :
+    I32EnumAttrCase<"MfmaF32_32x32x16_F16", 7,
+                    "mfma.f32.32x32x16.f16">;
+def WaveAMD_MmaMfmaF32_32x32x16_BF16 :
+    I32EnumAttrCase<"MfmaF32_32x32x16_BF16", 8,
+                    "mfma.f32.32x32x16.bf16">;
+def WaveAMD_MmaMfmaScaleF32_16x16x128_F4F4 :
+    I32EnumAttrCase<"MfmaScaleF32_16x16x128_F4F4", 9,
+                    "mfma.scale.f32.16x16x128.f4.f4">;
+def WaveAMD_MmaWmmaF32_16x16x32_F16 :
+    I32EnumAttrCase<"WmmaF32_16x16x32_F16", 10,
+                    "wmma.f32.16x16x32.f16">;
+def WaveAMD_MmaWmmaF32_16x16x32_BF16 :
+    I32EnumAttrCase<"WmmaF32_16x16x32_BF16", 11,
+                    "wmma.f32.16x16x32.bf16">;
+
+def WaveAMD_MmaKind : I32EnumAttr<"MmaKind", "WaveAMD matrix operation kind", [
+    WaveAMD_MmaWmmaI32_16x16x16_IU8,
+    WaveAMD_MmaWmmaF32_16x16x16_F16,
+    WaveAMD_MmaWmmaF32_16x16x16_BF16,
+    WaveAMD_MmaMfmaF32_16x16x16_F16,
+    WaveAMD_MmaMfmaF32_16x16x16_BF16,
+    WaveAMD_MmaMfmaF32_16x16x32_F16,
+    WaveAMD_MmaMfmaF32_16x16x32_BF16,
+    WaveAMD_MmaMfmaF32_32x32x16_F16,
+    WaveAMD_MmaMfmaF32_32x32x16_BF16,
+    WaveAMD_MmaMfmaScaleF32_16x16x128_F4F4,
+    WaveAMD_MmaWmmaF32_16x16x32_F16,
+    WaveAMD_MmaWmmaF32_16x16x32_BF16
+  ]> {
+  let cppNamespace = "::mlir::waveamd";
+}
+
 def WaveAMD_LoadCacheAttr : WaveAMD_Attr<"LoadCache", "load_cache"> {
   let summary = "AMD load cache modifier";
   let parameters = (ins EnumParameter<WaveAMD_LoadCacheKind>:$value);

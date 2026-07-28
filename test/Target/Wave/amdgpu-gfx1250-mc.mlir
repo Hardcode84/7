@@ -189,4 +189,84 @@ func.func @exact_extensions() {
   return
 }
 
+// ASM-LABEL: wmma_f16_tied:
+// ASM: v_wmma_f32_16x16x32_f16 v[16:23], v[0:7], v[8:15], v[16:23]
+// DIS-LABEL: <wmma_f16_tied>:
+// DIS: v_wmma_f32_16x16x32_f16 v[16:23], v[0:7], v[8:15], v[16:23]
+func.func @wmma_f16_tied() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 16>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: wmma_f16_distinct:
+// ASM: v_wmma_f32_16x16x32_f16 v[24:31], v[0:7], v[8:15], v[16:23]
+// DIS-LABEL: <wmma_f16_distinct>:
+// DIS: v_wmma_f32_16x16x32_f16 v[24:31], v[0:7], v[8:15], v[16:23]
+func.func @wmma_f16_distinct() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 24>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: wmma_bf16_tied:
+// ASM: v_wmma_f32_16x16x32_bf16 v[16:23], v[0:7], v[8:15], v[16:23]
+// DIS-LABEL: <wmma_bf16_tied>:
+// DIS: v_wmma_f32_16x16x32_bf16 v[16:23], v[0:7], v[8:15], v[16:23]
+func.func @wmma_bf16_tied() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  %result = waveamdmachine.wmma_f32_16x16x32_bf16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 16>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: wmma_bf16_distinct:
+// ASM: v_wmma_f32_16x16x32_bf16 v[24:31], v[0:7], v[8:15], v[16:23]
+// DIS-LABEL: <wmma_bf16_distinct>:
+// DIS: v_wmma_f32_16x16x32_bf16 v[24:31], v[0:7], v[8:15], v[16:23]
+func.func @wmma_bf16_distinct() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  %result = waveamdmachine.wmma_f32_16x16x32_bf16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 24>
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

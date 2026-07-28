@@ -37,7 +37,6 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -186,36 +185,6 @@ static FailureOr<bool> supportsPackedRneCvtTarget(CastOp op) {
   return waveamdmachine::VCvtPkF16F32Op::isSupportedOnIsa(*isa);
 }
 
-enum class MmaKind {
-  WmmaI32_16x16x16_IU8,
-  WmmaF32_16x16x16_F16,
-  WmmaF32_16x16x16_BF16,
-  MfmaF32_16x16x16_F16,
-  MfmaF32_16x16x16_BF16,
-  MfmaF32_16x16x32_F16,
-  MfmaF32_16x16x32_BF16,
-  MfmaF32_32x32x16_F16,
-  MfmaF32_32x32x16_BF16,
-  MfmaScaleF32_16x16x128_F4F4,
-  Unsupported,
-};
-
-static MmaKind parseMmaKind(StringRef kind) {
-  return llvm::StringSwitch<MmaKind>(kind)
-      .Case("wmma.i32.16x16x16.iu8", MmaKind::WmmaI32_16x16x16_IU8)
-      .Case("wmma.f32.16x16x16.f16", MmaKind::WmmaF32_16x16x16_F16)
-      .Case("wmma.f32.16x16x16.bf16", MmaKind::WmmaF32_16x16x16_BF16)
-      .Case("mfma.f32.16x16x16.f16", MmaKind::MfmaF32_16x16x16_F16)
-      .Case("mfma.f32.16x16x16.bf16", MmaKind::MfmaF32_16x16x16_BF16)
-      .Case("mfma.f32.16x16x32.f16", MmaKind::MfmaF32_16x16x32_F16)
-      .Case("mfma.f32.16x16x32.bf16", MmaKind::MfmaF32_16x16x32_BF16)
-      .Case("mfma.f32.32x32x16.f16", MmaKind::MfmaF32_32x32x16_F16)
-      .Case("mfma.f32.32x32x16.bf16", MmaKind::MfmaF32_32x32x16_BF16)
-      .Case("mfma.scale.f32.16x16x128.f4.f4",
-            MmaKind::MfmaScaleF32_16x16x128_F4F4)
-      .Default(MmaKind::Unsupported);
-}
-
 using MmaSupportFn = bool (*)(const llvm::AMDGPU::IsaVersion &);
 using MmaCreateFn = Value (*)(OpBuilder &, Location, Type, Value, Value, Value);
 
@@ -235,39 +204,57 @@ struct MmaKindInfo {
   MmaSupportFn isSupported;
   MmaCreateFn create;
   const char *requirement;
+  waveamdmachine::MatrixFamily matrixFamily;
 };
 
-static constexpr std::array<MmaKindInfo, 10> kMmaKindInfos = {{
+static constexpr std::array<MmaKindInfo, 12> kMmaKindInfos = {{
     {MmaKind::WmmaI32_16x16x16_IU8,
      isMmaOpSupportedOnIsa<waveamdmachine::WmmaI32_16x16x16_IU8Op>,
-     createMmaMachineOp<waveamdmachine::WmmaI32_16x16x16_IU8Op>, "gfx11"},
+     createMmaMachineOp<waveamdmachine::WmmaI32_16x16x16_IU8Op>, "gfx11",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::WmmaF32_16x16x16_F16,
      isMmaOpSupportedOnIsa<waveamdmachine::WmmaF32_16x16x16_F16Op>,
-     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x16_F16Op>, "gfx11"},
+     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x16_F16Op>, "gfx11",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::WmmaF32_16x16x16_BF16,
      isMmaOpSupportedOnIsa<waveamdmachine::WmmaF32_16x16x16_BF16Op>,
-     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x16_BF16Op>, "gfx11"},
+     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x16_BF16Op>, "gfx11",
+     waveamdmachine::MatrixFamily::None},
+    {MmaKind::WmmaF32_16x16x32_F16,
+     isMmaOpSupportedOnIsa<waveamdmachine::WmmaF32_16x16x32_F16Op>,
+     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x32_F16Op>, "gfx1250",
+     waveamdmachine::MatrixFamily::Gfx1250},
+    {MmaKind::WmmaF32_16x16x32_BF16,
+     isMmaOpSupportedOnIsa<waveamdmachine::WmmaF32_16x16x32_BF16Op>,
+     createMmaMachineOp<waveamdmachine::WmmaF32_16x16x32_BF16Op>, "gfx1250",
+     waveamdmachine::MatrixFamily::Gfx1250},
     {MmaKind::MfmaF32_16x16x16_F16,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x16_F16Op>,
-     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x16_F16Op>, "gfx90a+"},
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x16_F16Op>, "gfx90a+",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::MfmaF32_16x16x16_BF16,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x16_BF16Op>,
-     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x16_BF16Op>, "gfx940+"},
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x16_BF16Op>, "gfx940+",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::MfmaF32_16x16x32_F16,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x32_F16Op>,
-     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x32_F16Op>, "gfx950"},
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x32_F16Op>, "gfx950",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::MfmaF32_16x16x32_BF16,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_16x16x32_BF16Op>,
-     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x32_BF16Op>, "gfx950"},
+     createMmaMachineOp<waveamdmachine::MfmaF32_16x16x32_BF16Op>, "gfx950",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::MfmaF32_32x32x16_F16,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_32x32x16_F16Op>,
-     createMmaMachineOp<waveamdmachine::MfmaF32_32x32x16_F16Op>, "gfx950"},
+     createMmaMachineOp<waveamdmachine::MfmaF32_32x32x16_F16Op>, "gfx950",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::MfmaF32_32x32x16_BF16,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaF32_32x32x16_BF16Op>,
-     createMmaMachineOp<waveamdmachine::MfmaF32_32x32x16_BF16Op>, "gfx950"},
+     createMmaMachineOp<waveamdmachine::MfmaF32_32x32x16_BF16Op>, "gfx950",
+     waveamdmachine::MatrixFamily::None},
     {MmaKind::MfmaScaleF32_16x16x128_F4F4,
      isMmaOpSupportedOnIsa<waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op>,
-     nullptr, "gfx950"},
+     nullptr, "gfx950", waveamdmachine::MatrixFamily::None},
 }};
 
 static const MmaKindInfo *lookupMmaKindInfo(MmaKind kind) {
@@ -278,9 +265,13 @@ static const MmaKindInfo *lookupMmaKindInfo(MmaKind kind) {
 }
 
 static bool isMmaTargetSupported(MmaKind kind,
-                                 const llvm::AMDGPU::IsaVersion &isa) {
+                                 const llvm::AMDGPU::IsaVersion &isa,
+                                 waveamdmachine::MatrixFamily matrixFamily) {
   const MmaKindInfo *info = lookupMmaKindInfo(kind);
-  return !info || info->isSupported(isa);
+  if (!info || !info->isSupported(isa))
+    return false;
+  return info->matrixFamily == waveamdmachine::MatrixFamily::None ||
+         info->matrixFamily == matrixFamily;
 }
 
 static StringRef mmaTargetRequirement(MmaKind kind) {
@@ -290,8 +281,9 @@ static StringRef mmaTargetRequirement(MmaKind kind) {
 
 static LogicalResult requireMmaTarget(Operation *op, StringRef kindName,
                                       MmaKind kind,
-                                      const llvm::AMDGPU::IsaVersion &isa) {
-  if (isMmaTargetSupported(kind, isa))
+                                      const llvm::AMDGPU::IsaVersion &isa,
+                                      waveamdmachine::MatrixFamily family) {
+  if (isMmaTargetSupported(kind, isa, family))
     return success();
   return op->emitError() << kindName << " lowering requires "
                          << mmaTargetRequirement(kind);
@@ -488,6 +480,8 @@ static LogicalResult validateTargetWaveWidth(
 struct MachineSelectionTargetInfo {
   waveamdmachine::AMDGPUTarget target;
   unsigned wavefrontSize = 0;
+  waveamdmachine::MatrixFamily matrixFamily =
+      waveamdmachine::MatrixFamily::None;
   bool rejectLegacyVMemToLDS = false;
 };
 
@@ -509,7 +503,13 @@ getMachineSelectionTargetInfo(func::FuncOp func, ModuleOp targetModule) {
       func, *target, *sti, "WaveAMDMachine selection");
   if (failed(wavefrontSize))
     return failure();
+  std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+      waveamdmachine::getAMDGPUTargetCapabilities(*sti);
+  waveamdmachine::MatrixFamily matrixFamily =
+      capabilities ? capabilities->matrixFamily
+                   : waveamdmachine::MatrixFamily::None;
   return MachineSelectionTargetInfo{std::move(*target), *wavefrontSize,
+                                    matrixFamily,
                                     llvm::AMDGPU::isGFX1250(*sti)};
 }
 
@@ -530,6 +530,7 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   if (failed(targetInfo))
     return failure();
   selector.target = std::move(targetInfo->target);
+  selector.matrixFamily = targetInfo->matrixFamily;
   selector.rejectLegacyVMemToLDS = targetInfo->rejectLegacyVMemToLDS;
   FailureOr<MachineSelectionFunctionFacts> facts =
       collectMachineSelectionFunctionFacts(func);
@@ -7317,12 +7318,15 @@ LogicalResult WaveAMDMachineSelector::selectBarrier(BarrierOp op) {
 
 LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
   StringRef kind = op.getKind();
-  MmaKind mmaKind = parseMmaKind(kind);
+  std::optional<MmaKind> mmaKind = symbolizeMmaKind(kind);
+  if (!mmaKind)
+    return op.emitError("unsupported WaveAMDMachine matrix operation kind");
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       getTargetIsaVersion(op, "matrix lowering");
   if (failed(isa))
     return failure();
-  if (failed(requireMmaTarget(op.getOperation(), kind, mmaKind, *isa)))
+  if (failed(requireMmaTarget(op.getOperation(), kind, *mmaKind, *isa,
+                              matrixFamily)))
     return failure();
   auto resultType = cast<waveamd::FragmentType>(op.getResult().getType());
   Type vgprTuple = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
@@ -7332,7 +7336,7 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
   Value acc = foldZeroMmaAccumulator(expect(op.getAcc(), op),
                                      foldedMmaAccumulatorMaterializations);
   Value result =
-      createMachineMma(mmaKind, builder, op.getLoc(), vgprTuple, a, b, acc);
+      createMachineMma(*mmaKind, builder, op.getLoc(), vgprTuple, a, b, acc);
   if (!result)
     return op.emitError("unsupported WaveAMDMachine matrix operation kind");
   values[op.getResult()] = result;
@@ -7341,7 +7345,7 @@ LogicalResult WaveAMDMachineSelector::selectMma(waveamd::MmaOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
-  MmaKind mmaKind = parseMmaKind(op.getKind());
+  std::optional<MmaKind> mmaKind = symbolizeMmaKind(op.getKind());
   if (mmaKind != MmaKind::MfmaScaleF32_16x16x128_F4F4)
     return op.emitError("unsupported WaveAMDMachine scaled matrix operation "
                         "kind");
@@ -7349,7 +7353,8 @@ LogicalResult WaveAMDMachineSelector::selectMmaScale(waveamd::MmaScaleOp op) {
       getTargetIsaVersion(op, "scaled matrix lowering");
   if (failed(isa))
     return failure();
-  if (failed(requireMmaTarget(op.getOperation(), op.getKind(), mmaKind, *isa)))
+  if (failed(requireMmaTarget(op.getOperation(), op.getKind(), *mmaKind, *isa,
+                              matrixFamily)))
     return failure();
 
   waveamd::FragmentType resultType =

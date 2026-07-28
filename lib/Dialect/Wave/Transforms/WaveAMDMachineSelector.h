@@ -301,6 +301,8 @@ public:
   Value dmaIssueSkipCondition;
   unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
+  waveamdmachine::MatrixFamily matrixFamily =
+      waveamdmachine::MatrixFamily::None;
   bool dmaIssueTimingEnabled = false;
   bool lastDmaHadIssueDelay = false;
   bool packedWorkitemIds = false;

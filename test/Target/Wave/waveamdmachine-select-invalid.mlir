@@ -205,6 +205,66 @@ func.func @unsupported_wmma_gfx12_target(%x: i32) {
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @unsupported_gfx1250_wmma_target(%x: i32) {
+  %a = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 8>
+  %b = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<1, f16, 16, 16, 32, 8>
+  %acc = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  // expected-error @below {{wmma.f32.16x16x32.f16 lowering requires gfx1250}}
+  %result = waveamd.mma "wmma.f32.16x16x32.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 16, 16, 32, 8>,
+        !waveamd.fragment<1, f16, 16, 16, 32, 8>,
+        !waveamd.fragment<2, f32, 16, 16, 32, 8>
+     -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1251"} {
+func.func @unsupported_gfx1250_wmma_family(%x: i32) {
+  %a = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<0, bf16, 16, 16, 32, 8>
+  %b = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<1, bf16, 16, 16, 32, 8>
+  %acc = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  // expected-error @below {{wmma.f32.16x16x32.bf16 lowering requires gfx1250}}
+  %result = waveamd.mma "wmma.f32.16x16x32.bf16" %a, %b, %acc
+      : !waveamd.fragment<0, bf16, 16, 16, 32, 8>,
+        !waveamd.fragment<1, bf16, 16, 16, 32, 8>,
+        !waveamd.fragment<2, f32, 16, 16, 32, 8>
+     -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+func.func @unsupported_gfx11_wmma_family(%x: i32) {
+  %a = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<0, f16, 16, 16, 32, 8>
+  %b = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<1, f16, 16, 16, 32, 8>
+  %acc = waveamd.fragment_fill %x
+      : i32 -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  // expected-error @below {{wmma.f32.16x16x16.f16 lowering requires gfx11}}
+  %result = waveamd.mma "wmma.f32.16x16x16.f16" %a, %b, %acc
+      : !waveamd.fragment<0, f16, 16, 16, 32, 8>,
+        !waveamd.fragment<1, f16, 16, 16, 32, 8>,
+        !waveamd.fragment<2, f32, 16, 16, 32, 8>
+     -> !waveamd.fragment<2, f32, 16, 16, 32, 8>
+  return
+}
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 func.func @unsupported_mfma_gfx950_target(%x: i32) {
   %a = waveamd.fragment_fill %x : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 4>

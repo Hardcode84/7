@@ -602,6 +602,13 @@ class WaveAMDMachine_WmmaResult<string mnemonic>
                                WaveAMDMachine_VGPROrImm,
                                WaveAMDMachine_VGPR, [WaveAMDMachine_VALU]>;
 
+class WaveAMDMachine_Gfx1250WmmaResult<string mnemonic>
+    : WaveAMDMachine_WmmaResult<mnemonic>,
+      WaveAMDMachine_KilledOperandReuse<
+          "&operand == &this->getAccMutable()"> {
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
 class WaveAMDMachine_MfmaResult<string mnemonic>
     : WaveAMDMachine_MmaResult<mnemonic, WaveAMDMachine_AVGPR,
                                WaveAMDMachine_AVGPROrImm,
@@ -1400,6 +1407,10 @@ def WaveAMDMachine_WmmaF32_16x16x16_BF16Op
   let hasVerifier = 1;
   let archPredicate = "isa.Major == 11";
 }
+def WaveAMDMachine_WmmaF32_16x16x32_F16Op
+    : WaveAMDMachine_Gfx1250WmmaResult<"wmma_f32_16x16x32_f16">;
+def WaveAMDMachine_WmmaF32_16x16x32_BF16Op
+    : WaveAMDMachine_Gfx1250WmmaResult<"wmma_f32_16x16x32_bf16">;
 def WaveAMDMachine_MfmaF32_16x16x16_F16Op
     : WaveAMDMachine_MfmaResult<"mfma_f32_16x16x16_f16"> {
   let hasVerifier = 1;
