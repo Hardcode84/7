@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import sys
@@ -67,31 +68,45 @@ def _detect_amdgpu_chip() -> str | None:
     return None
 
 
-def _default_wave_width(chip: str) -> int | None:
-    if chip.startswith(("gfx10", "gfx11", "gfx12")):
-        return 32
-    if chip.startswith(("gfx8", "gfx9")):
-        return 64
-    return None
+def _query_amdgpu_capabilities(chip: str) -> dict[str, object] | None:
+    target_info = Path(config.wave_mlir_tools_dir) / "wave-target-info"
+    if not target_info.exists():
+        return None
+    try:
+        result = subprocess.run(
+            [target_info, "--json", chip],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        capabilities = json.loads(result.stdout) if result.returncode == 0 else None
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError):
+        return None
+    return capabilities if isinstance(capabilities, dict) else None
 
 
 _chip = _detect_amdgpu_chip()
 if _chip:
     config.available_features.add("host-supports-amdgpu")
     config.substitutions.append(("%chip", _chip))
-    _wave_width = _default_wave_width(_chip)
-    if _wave_width:
+    _capabilities = _query_amdgpu_capabilities(_chip)
+    _wave_width = _capabilities.get("default_wavefront_size") if _capabilities else None
+    if isinstance(_wave_width, int) and _wave_width > 0:
         config.available_features.add("host-supports-amdgpu-wave")
         config.available_features.add(f"host-supports-amdgpu-wave{_wave_width}")
         config.substitutions.append(("%wave_width", str(_wave_width)))
         config.substitutions.append(("%wave_last", str(_wave_width - 1)))
         config.substitutions.append(("%wave_bytes", str(_wave_width * 4)))
-    # WMMA (`v_wmma_*`) instructions exist on gfx11 and gfx12 only.
-    if _chip.startswith(("gfx11", "gfx12")):
+    if _capabilities and _capabilities.get("supports_legacy_wmma") is True:
         config.available_features.add("host-supports-amdgpu-wmma")
-    if _chip == "gfx90a" or _chip.startswith(("gfx94", "gfx95")):
+    if _capabilities and _capabilities.get("supports_mfma") is True:
         config.available_features.add("host-supports-amdgpu-mfma")
-    if _chip == "gfx950":
+    _matrix_family = _capabilities.get("matrix_family") if _capabilities else None
+    if _matrix_family == "gfx1250":
+        config.available_features.add("host-supports-amdgpu-gfx1250")
+        config.available_features.add("host-supports-amdgpu-gfx1250-wmma")
+    if _capabilities and _capabilities.get("target") == "gfx950":
         config.available_features.add("host-supports-amdgpu-gfx950")
 
 # Runtime shared libs for the MLIR GPU integration tests.

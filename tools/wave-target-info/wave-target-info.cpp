@@ -31,9 +31,6 @@
 #include <optional>
 #include <string>
 
-#define GET_AVAILABLE_OPCODE_CHECKER
-#include "AMDGPUGenInstrInfo.inc"
-
 using namespace mlir::waveamdmachine;
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/CostModelEnums.cpp.inc"
@@ -43,8 +40,7 @@ static llvm::cl::opt<std::string> chip(llvm::cl::Positional, llvm::cl::Required,
 static llvm::cl::opt<bool>
     scheduleModel("schedule-model",
                   llvm::cl::desc("print LLVM MC scheduling facts"));
-static llvm::cl::opt<bool> json("json",
-                                llvm::cl::desc("print schedule model as JSON"));
+static llvm::cl::opt<bool> json("json", llvm::cl::desc("print JSON"));
 
 struct ScheduleResource {
   LLVMProcResource resource;
@@ -269,10 +265,10 @@ static bool isWaveOwnedSchedClass(SchedClass schedClass) {
 
 static bool areProbeOpcodesAvailable(const ScheduleProbe &probe,
                                      const llvm::FeatureBitset &features) {
-  if (!llvm::AMDGPU_MC::isOpcodeAvailable(probe.opcode, features))
+  if (!isAMDGPUOpcodeAvailable(probe.opcode, features))
     return false;
   return !probe.aliasOpcode ||
-         llvm::AMDGPU_MC::isOpcodeAvailable(probe.aliasOpcode, features);
+         isAMDGPUOpcodeAvailable(probe.aliasOpcode, features);
 }
 
 static bool queryAliasSchedule(const llvm::MCSubtargetInfo &sti,
@@ -487,6 +483,44 @@ static void printCapabilities(const AMDGPUTargetCapabilities &capabilities) {
                << '\n';
 }
 
+static void printCapabilitiesJSON(
+    llvm::StringRef target, const llvm::MCSubtargetInfo &sti,
+    const std::optional<AMDGPUTargetCapabilities> &capabilities) {
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  MatrixFamily matrixFamily =
+      capabilities ? capabilities->matrixFamily : MatrixFamily::None;
+  bool supportsLegacyWMMA =
+      llvm::AMDGPU::isGFX11(sti) &&
+      (sti.hasFeature(llvm::AMDGPU::FeatureWMMA256bInsts) ||
+       sti.hasFeature(llvm::AMDGPU::FeatureWMMA128bInsts));
+
+  llvm::json::OStream output(llvm::outs(), /*IndentSize=*/2);
+  output.object([&]() {
+    output.attribute("target", target);
+    output.attributeObject("isa", [&]() {
+      output.attribute("major", static_cast<int64_t>(isa.Major));
+      output.attribute("minor", static_cast<int64_t>(isa.Minor));
+      output.attribute("stepping", static_cast<int64_t>(isa.Stepping));
+    });
+    output.attribute(
+        "default_wavefront_size",
+        static_cast<int64_t>(llvm::AMDGPU::IsaInfo::getWavefrontSize(sti)));
+    output.attribute("supports_legacy_wmma", supportsLegacyWMMA);
+    output.attribute("supports_mfma", llvm::AMDGPU::hasMAIInsts(sti));
+    output.attribute("matrix_family", stringifyMatrixFamily(matrixFamily));
+    if (!capabilities)
+      return;
+    output.attribute("local_memory_bytes",
+                     static_cast<int64_t>(capabilities->localMemoryBytes));
+    output.attribute(
+        "addressable_local_memory_bytes",
+        static_cast<int64_t>(capabilities->addressableLocalMemoryBytes));
+    output.attribute("local_memory_banks",
+                     static_cast<int64_t>(capabilities->localMemoryBankCount));
+  });
+  llvm::outs() << '\n';
+}
+
 static std::optional<AMDGPUTarget> parseTarget() {
   AMDGPUTarget target;
   target.triple = "amdgcn-amd-amdhsa";
@@ -526,12 +560,12 @@ static int reportScheduleModel(const AMDGPUTarget &target,
 }
 
 static int reportCapabilities(const llvm::MCSubtargetInfo &sti) {
-  if (json) {
-    llvm::errs() << "--json requires --schedule-model\n";
-    return 1;
-  }
   std::optional<AMDGPUTargetCapabilities> capabilities =
       getAMDGPUTargetCapabilities(sti);
+  if (json) {
+    printCapabilitiesJSON(chip, sti, capabilities);
+    return 0;
+  }
   if (!capabilities) {
     llvm::errs() << "no Wave capability contract for target: " << chip << '\n';
     return 1;

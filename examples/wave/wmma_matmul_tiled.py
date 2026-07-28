@@ -264,6 +264,9 @@ def _add_tile_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import MATRIX_INTRINSIC_CHOICES
+
     parser.add_argument(
         "--kernel-profile",
         choices=("manual", *_KERNEL_PROFILES),
@@ -285,9 +288,9 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--matrix-intrinsic",
-        choices=("auto", "wmma", "mfma", "mfma_gfx950"),
+        choices=MATRIX_INTRINSIC_CHOICES,
         default="auto",
-        help="matrix instruction family to emit; auto picks MFMA for gfx9/gfx950",
+        help="matrix instruction family to emit; auto uses the exact target profile",
     )
     parser.add_argument(
         "--target-waves",
@@ -376,6 +379,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--mxfp4-scale-path=regs requires --input-type=mxfp4")
     if args.kernel_only and (args.run or args.compare_cpu):
         parser.error("--kernel-only cannot be used with --run/--compare-cpu")
+    try:
+        args.matrix_intrinsic = _select_matrix_intrinsic(
+            args.chip, args.matrix_intrinsic
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -393,11 +402,10 @@ def _profile_defaults(argv: list[str]) -> dict[str, bool | int | str]:
 
 
 def _select_matrix_intrinsic(chip: str, requested: str) -> str:
-    if requested != "auto":
-        return requested
-    if chip.startswith("gfx95"):
-        return "mfma_gfx950"
-    return "mfma" if chip.startswith("gfx9") else "wmma"
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import select_matrix_intrinsic
+
+    return str(select_matrix_intrinsic(chip, requested))
 
 
 def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
@@ -483,7 +491,6 @@ def main(argv: list[str] | None = None) -> int:
         compute_wmma_f16_matmul_reference_buffer,
     )
 
-    matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
     random_data = args.random_data or (args.compare_cpu and args.input_type != "mxfp4")
     phased_dma_schedule = _make_phased_dma_schedule(
         PhasedDmaSchedule, args.kernel_profile
@@ -499,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         wave_k_tiles=args.wave_k_tiles,
         use_buffer=args.use_buffer,
         use_dma_lds=args.use_dma_lds,
-        matrix_intrinsic=matrix_intrinsic,
+        matrix_intrinsic=args.matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
         output_store_cache=args.output_store_cache,
@@ -545,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
         wave_k_tiles=args.wave_k_tiles,
         random_data=random_data,
         random_seed=args.seed,
-        matrix_intrinsic=matrix_intrinsic,
+        matrix_intrinsic=args.matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
         cta_swizzle_xcds=args.cta_swizzle_xcds,

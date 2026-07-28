@@ -11,15 +11,22 @@
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIDefines.h"
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Triple.h"
+
+#include <algorithm>
+
+#define GET_AVAILABLE_OPCODE_CHECKER
+#include "AMDGPUGenInstrInfo.inc"
 
 using namespace mlir;
 using namespace mlir::waveamdmachine;
@@ -146,14 +153,25 @@ mlir::waveamdmachine::getAMDGPUTargetIsaVersion(Operation *op,
   return target->isa;
 }
 
-std::unique_ptr<llvm::MCSubtargetInfo>
-mlir::waveamdmachine::createAMDGPUMCSubtargetInfo(const AMDGPUTarget &target,
-                                                  std::string *error) {
+static bool validateAMDGPUSubtarget(const AMDGPUTarget &target,
+                                    std::string *error) {
   if (target.kind == llvm::AMDGPU::GK_NONE || target.isa.Major == 0) {
     if (error)
       *error = "unsupported AMDGPU processor: " + target.chip;
-    return nullptr;
+    return false;
   }
+  if (target.features.empty() || parseTargetIDFeatures(target.features))
+    return true;
+  if (error)
+    *error = "malformed AMDGPU target features: " + target.features;
+  return false;
+}
+
+std::unique_ptr<llvm::MCSubtargetInfo>
+mlir::waveamdmachine::createAMDGPUMCSubtargetInfo(const AMDGPUTarget &target,
+                                                  std::string *error) {
+  if (!validateAMDGPUSubtarget(target, error))
+    return nullptr;
 
   static llvm::once_flag initializeBackendOnce;
   llvm::call_once(initializeBackendOnce, []() {
@@ -305,6 +323,136 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
       sti.hasFeature(llvm::AMDGPU::FeatureWMMACoexecutionHazards);
   capabilities.scratchBaseForwardingHazard = llvm::AMDGPU::isGFX1250(sti);
   return capabilities;
+}
+
+namespace {
+struct MCRegisterTuple {
+  RegClass bank;
+  unsigned dwords;
+  unsigned alignment;
+};
+
+static std::optional<RegClass>
+getMCRegisterBank(const llvm::MCRegisterClass &regClass) {
+  unsigned bankFlags =
+      regClass.TSFlags & (llvm::SIRCFlags::HasSGPR | llvm::SIRCFlags::HasVGPR |
+                          llvm::SIRCFlags::HasAGPR);
+  switch (bankFlags) {
+  case llvm::SIRCFlags::HasSGPR:
+    return RegClass::SGPR;
+  case llvm::SIRCFlags::HasVGPR:
+    return RegClass::VGPR;
+  case llvm::SIRCFlags::HasAGPR:
+    return RegClass::AGPR;
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<MCRegisterTuple>
+getMCRegisterTuple(unsigned opcode, llvm::AMDGPU::OpName operandName,
+                   const llvm::MCSubtargetInfo &sti,
+                   const llvm::MCInstrInfo &mcii,
+                   const llvm::MCRegisterInfo &mri) {
+  int operandIndex = llvm::AMDGPU::getNamedOperandIdx(opcode, operandName);
+  if (operandIndex < 0)
+    return std::nullopt;
+  const llvm::MCInstrDesc &desc = mcii.get(opcode);
+  if (static_cast<unsigned>(operandIndex) >= desc.getNumOperands())
+    return std::nullopt;
+  unsigned hwMode = sti.getHwMode(llvm::MCSubtargetInfo::HwMode_RegInfo);
+  int16_t classID = mcii.getOpRegClassID(desc.operands()[operandIndex], hwMode);
+  if (classID < 0 || static_cast<unsigned>(classID) >= mri.getNumRegClasses())
+    return std::nullopt;
+  const llvm::MCRegisterClass &regClass = mri.getRegClass(classID);
+  unsigned size = regClass.getSizeInBits();
+  if (size == 0 || size % 32 != 0 || regClass.getNumRegs() == 0)
+    return std::nullopt;
+  std::optional<RegClass> bank = getMCRegisterBank(regClass);
+  if (!bank)
+    return std::nullopt;
+  unsigned alignment =
+      regClass.TSFlags & llvm::SIRCFlags::RegTupleAlignUnitsMask;
+  return MCRegisterTuple{*bank, size / 32, std::max(alignment, 1u)};
+}
+
+static bool sameMCRegisterTuple(const MCRegisterTuple &lhs,
+                                const MCRegisterTuple &rhs) {
+  return lhs.bank == rhs.bank && lhs.dwords == rhs.dwords &&
+         lhs.alignment == rhs.alignment;
+}
+
+static std::optional<unsigned>
+getGfx1250WmmaOpcode(bool bf16, const llvm::MCSubtargetInfo &sti,
+                     const llvm::MCInstrInfo &mcii) {
+  unsigned pseudoOpcode =
+      bf16 ? llvm::AMDGPU::V_WMMA_F32_16X16X32_BF16_w32_twoaddr
+           : llvm::AMDGPU::V_WMMA_F32_16X16X32_F16_w32_twoaddr;
+  int32_t concreteOpcode =
+      llvm::AMDGPU::getMCOpcode(pseudoOpcode, llvm::SIEncodingFamily::GFX1250);
+  if (concreteOpcode < 0)
+    return std::nullopt;
+  unsigned opcode = static_cast<unsigned>(concreteOpcode);
+  if (opcode >= mcii.getNumOpcodes())
+    return std::nullopt;
+  if (!isAMDGPUOpcodeAvailable(opcode, sti.getFeatureBits()))
+    return std::nullopt;
+  return opcode;
+}
+
+static std::optional<AMDGPUMmaCapabilities>
+getMCMmaRegisterCapabilities(unsigned opcode, const llvm::MCSubtargetInfo &sti,
+                             const llvm::MCInstrInfo &mcii,
+                             const llvm::MCRegisterInfo &mri) {
+  std::optional<MCRegisterTuple> result =
+      getMCRegisterTuple(opcode, llvm::AMDGPU::OpName::vdst, sti, mcii, mri);
+  if (!result)
+    return std::nullopt;
+  std::optional<MCRegisterTuple> a =
+      getMCRegisterTuple(opcode, llvm::AMDGPU::OpName::src0, sti, mcii, mri);
+  if (!a)
+    return std::nullopt;
+  std::optional<MCRegisterTuple> b =
+      getMCRegisterTuple(opcode, llvm::AMDGPU::OpName::src1, sti, mcii, mri);
+  if (!b)
+    return std::nullopt;
+  std::optional<MCRegisterTuple> accumulator =
+      getMCRegisterTuple(opcode, llvm::AMDGPU::OpName::src2, sti, mcii, mri);
+  if (!accumulator)
+    return std::nullopt;
+  if (!sameMCRegisterTuple(*a, *b))
+    return std::nullopt;
+  if (!sameMCRegisterTuple(*result, *accumulator))
+    return std::nullopt;
+  return AMDGPUMmaCapabilities{a->bank,      accumulator->bank,
+                               a->dwords,    accumulator->dwords,
+                               a->alignment, accumulator->alignment};
+}
+} // namespace
+
+std::optional<AMDGPUMmaCapabilities>
+mlir::waveamdmachine::getAMDGPUWmmaCapabilities(
+    const llvm::MCSubtargetInfo &sti, bool bf16) {
+  llvm::Triple triple(sti.getTargetTriple());
+  std::string error;
+  const llvm::Target *target =
+      llvm::TargetRegistry::lookupTarget(triple, error);
+  if (!target)
+    return std::nullopt;
+  std::unique_ptr<llvm::MCInstrInfo> mcii(target->createMCInstrInfo());
+  std::unique_ptr<llvm::MCRegisterInfo> mri(target->createMCRegInfo(triple));
+  if (!mcii || !mri)
+    return std::nullopt;
+
+  std::optional<unsigned> opcode = getGfx1250WmmaOpcode(bf16, sti, *mcii);
+  if (!opcode)
+    return std::nullopt;
+  return getMCMmaRegisterCapabilities(*opcode, sti, *mcii, *mri);
+}
+
+bool mlir::waveamdmachine::isAMDGPUOpcodeAvailable(
+    unsigned opcode, const llvm::FeatureBitset &features) {
+  return llvm::AMDGPU_MC::isOpcodeAvailable(opcode, features);
 }
 
 bool mlir::waveamdmachine::supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa) {

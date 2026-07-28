@@ -9,10 +9,268 @@
 #include "Wave-c/Dialects.h"
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
+#include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
 namespace nb = nanobind;
 using mlir::python::nanobind_adaptors::mlir_attribute_subclass;
 using mlir::python::nanobind_adaptors::mlir_type_subclass;
+
+static MlirStringRef asMlirStringRef(const std::string &value) {
+  return MlirStringRef{value.data(), value.size()};
+}
+
+struct PyTargetCapabilities {
+  std::string chip;
+  MlirWaveAMDTargetCapabilities value;
+};
+
+template <typename T>
+static auto targetCapability(T MlirWaveAMDTargetCapabilities::*member) {
+  return [member](const PyTargetCapabilities &capabilities) {
+    return capabilities.value.*member;
+  };
+}
+
+static void bindTargetEnums(nb::module_ &m) {
+  using mlir::waveamd::MmaKind;
+  using mlir::waveamdmachine::MatrixFamily;
+  using mlir::waveamdmachine::RegClass;
+  using mlir::waveamdmachine::WaitCounterFamily;
+
+  nb::enum_<MmaKind>(m, "MmaKind")
+      .value("WmmaI32_16x16x16_IU8", MmaKind::WmmaI32_16x16x16_IU8)
+      .value("WmmaF32_16x16x16_F16", MmaKind::WmmaF32_16x16x16_F16)
+      .value("WmmaF32_16x16x16_BF16", MmaKind::WmmaF32_16x16x16_BF16)
+      .value("MfmaF32_16x16x16_F16", MmaKind::MfmaF32_16x16x16_F16)
+      .value("MfmaF32_16x16x16_BF16", MmaKind::MfmaF32_16x16x16_BF16)
+      .value("MfmaF32_16x16x32_F16", MmaKind::MfmaF32_16x16x32_F16)
+      .value("MfmaF32_16x16x32_BF16", MmaKind::MfmaF32_16x16x32_BF16)
+      .value("MfmaF32_32x32x16_F16", MmaKind::MfmaF32_32x32x16_F16)
+      .value("MfmaF32_32x32x16_BF16", MmaKind::MfmaF32_32x32x16_BF16)
+      .value("MfmaScaleF32_16x16x128_F4F4",
+             MmaKind::MfmaScaleF32_16x16x128_F4F4)
+      .value("WmmaF32_16x16x32_F16", MmaKind::WmmaF32_16x16x32_F16)
+      .value("WmmaF32_16x16x32_BF16", MmaKind::WmmaF32_16x16x32_BF16)
+      .def("__str__", [](MmaKind value) {
+        return mlir::waveamd::stringifyMmaKind(value).str();
+      });
+  nb::enum_<MatrixFamily>(m, "MatrixFamily")
+      .value("None", MatrixFamily::None)
+      .value("Gfx1250", MatrixFamily::Gfx1250)
+      .value("Gfx1251", MatrixFamily::Gfx1251)
+      .def("__str__", [](MatrixFamily value) {
+        return mlir::waveamdmachine::stringifyMatrixFamily(value).str();
+      });
+  nb::enum_<WaitCounterFamily>(m, "WaitCounterFamily")
+      .value("Legacy", WaitCounterFamily::Legacy)
+      .value("Gfx12Split", WaitCounterFamily::Gfx12Split)
+      .def("__str__", [](WaitCounterFamily value) {
+        return mlir::waveamdmachine::stringifyWaitCounterFamily(value).str();
+      });
+  nb::enum_<RegClass>(m, "RegClass")
+      .value("SGPR", RegClass::SGPR)
+      .value("VGPR", RegClass::VGPR)
+      .value("AGPR", RegClass::AGPR)
+      .value("SCC", RegClass::SCC)
+      .value("VCC", RegClass::VCC)
+      .def("__str__", [](RegClass value) {
+        return mlir::waveamdmachine::stringifyRegClass(value).str();
+      });
+}
+
+static void
+bindTargetFeatureCapabilities(nb::class_<PyTargetCapabilities> &cls) {
+  cls.def_prop_ro(
+         "supports_wave32",
+         targetCapability(&MlirWaveAMDTargetCapabilities::supportsWave32))
+      .def_prop_ro(
+          "supports_wave64",
+          targetCapability(&MlirWaveAMDTargetCapabilities::supportsWave64))
+      .def_prop_ro("architected_flat_scratch",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::architectedFlatScratch))
+      .def_prop_ro(
+          "architected_sgprs",
+          targetCapability(&MlirWaveAMDTargetCapabilities::architectedSGPRs))
+      .def_prop_ro("clusters",
+                   targetCapability(&MlirWaveAMDTargetCapabilities::clusters))
+      .def_prop_ro(
+          "kernarg_preload",
+          targetCapability(&MlirWaveAMDTargetCapabilities::kernargPreload))
+      .def_prop_ro(
+          "requires_initial_unclaused_vmem",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::requiresInitialUnclausedVmem))
+      .def_prop_ro("wait_xcnt",
+                   targetCapability(&MlirWaveAMDTargetCapabilities::waitXcnt))
+      .def_prop_ro(
+          "vgpr_windowing",
+          targetCapability(&MlirWaveAMDTargetCapabilities::vgprWindowing))
+      .def_prop_ro(
+          "setreg_vgpr_msb_fixup",
+          targetCapability(&MlirWaveAMDTargetCapabilities::setregVGPRMSBFixup))
+      .def_prop_ro("trans_coexecution_hazard",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::transCoexecutionHazard))
+      .def_prop_ro("wmma_coexecution_hazard",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::wmmaCoexecutionHazard))
+      .def_prop_ro(
+          "scratch_base_forwarding_hazard",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::scratchBaseForwardingHazard))
+      .def_prop_ro(
+          "descriptor_dx10_clamp_and_ieee_mode",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::descriptorDX10ClampAndIEEEMode))
+      .def_prop_ro(
+          "descriptor_wgp_mode",
+          targetCapability(&MlirWaveAMDTargetCapabilities::descriptorWGPMode))
+      .def_prop_ro(
+          "descriptor_shared_vgpr_count",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::descriptorSharedVGPRCount))
+      .def_prop_ro("descriptor_round_robin",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::descriptorRoundRobin))
+      .def_prop_ro(
+          "descriptor_named_barrier_count",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::descriptorNamedBarrierCount))
+      .def_prop_ro("descriptor_architected_private_segment",
+                   targetCapability(&MlirWaveAMDTargetCapabilities::
+                                        descriptorArchitectedPrivateSegment));
+}
+
+static void bindTargetCapabilities(nb::module_ &m) {
+  using mlir::waveamdmachine::MatrixFamily;
+  using mlir::waveamdmachine::WaitCounterFamily;
+
+  nb::class_<PyTargetCapabilities> cls(m, "TargetCapabilities");
+  cls.def_ro("chip", &PyTargetCapabilities::chip)
+      .def_prop_ro("isa_major",
+                   targetCapability(&MlirWaveAMDTargetCapabilities::isaMajor))
+      .def_prop_ro("isa_minor",
+                   targetCapability(&MlirWaveAMDTargetCapabilities::isaMinor))
+      .def_prop_ro(
+          "isa_stepping",
+          targetCapability(&MlirWaveAMDTargetCapabilities::isaStepping))
+      .def_prop_ro("default_wavefront_size",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::defaultWavefrontSize))
+      .def_prop_ro(
+          "addressable_sgprs",
+          targetCapability(&MlirWaveAMDTargetCapabilities::addressableSGPRs))
+      .def_prop_ro(
+          "addressable_vgprs",
+          targetCapability(&MlirWaveAMDTargetCapabilities::addressableVGPRs))
+      .def_prop_ro(
+          "addressable_agprs",
+          targetCapability(&MlirWaveAMDTargetCapabilities::addressableAGPRs))
+      .def_prop_ro("vgpr_allocation_granule",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::vgprAllocationGranule))
+      .def_prop_ro(
+          "vgpr_tuple_alignment",
+          targetCapability(&MlirWaveAMDTargetCapabilities::vgprTupleAlignment))
+      .def_prop_ro(
+          "local_memory_bytes",
+          targetCapability(&MlirWaveAMDTargetCapabilities::localMemoryBytes))
+      .def_prop_ro(
+          "addressable_local_memory_bytes",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::addressableLocalMemoryBytes))
+      .def_prop_ro("local_memory_bank_count",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::localMemoryBankCount))
+      .def_prop_ro(
+          "execution_units_per_cu",
+          targetCapability(&MlirWaveAMDTargetCapabilities::executionUnitsPerCU))
+      .def_prop_ro(
+          "max_waves_per_eu",
+          targetCapability(&MlirWaveAMDTargetCapabilities::maxWavesPerEU))
+      .def_prop_ro("total_vgprs",
+                   targetCapability(&MlirWaveAMDTargetCapabilities::totalVGPRs))
+      .def_prop_ro(
+          "schedule_issue_width",
+          targetCapability(&MlirWaveAMDTargetCapabilities::scheduleIssueWidth))
+      .def_prop_ro(
+          "max_user_sgprs",
+          targetCapability(&MlirWaveAMDTargetCapabilities::maxUserSGPRs))
+      .def_prop_ro("buffer_resource_base_bits",
+                   targetCapability(
+                       &MlirWaveAMDTargetCapabilities::bufferResourceBaseBits))
+      .def_prop_ro(
+          "buffer_resource_num_records_bits",
+          targetCapability(
+              &MlirWaveAMDTargetCapabilities::bufferResourceNumRecordsBits))
+      .def_prop_ro("wait_counter_family",
+                   [](const PyTargetCapabilities &capabilities) {
+                     return static_cast<WaitCounterFamily>(
+                         capabilities.value.waitCounterFamily);
+                   })
+      .def_prop_ro(
+          "matrix_family", [](const PyTargetCapabilities &capabilities) {
+            return static_cast<MatrixFamily>(capabilities.value.matrixFamily);
+          });
+  bindTargetFeatureCapabilities(cls);
+
+  m.def(
+      "get_target_capabilities",
+      [](const std::string &chip, const std::string &features) -> nb::object {
+        PyTargetCapabilities capabilities{chip, {}};
+        if (!mlirWaveAMDGetTargetCapabilities(asMlirStringRef(chip),
+                                              asMlirStringRef(features),
+                                              &capabilities.value))
+          return nb::none();
+        return nb::cast(capabilities);
+      },
+      nb::arg("chip"), nb::arg("features") = "");
+}
+
+static void bindMmaCapabilities(nb::module_ &m) {
+  using mlir::waveamd::MmaKind;
+  using mlir::waveamdmachine::RegClass;
+
+  nb::class_<MlirWaveAMDMmaCapabilities>(m, "MmaCapabilities")
+      .def_prop_ro("kind",
+                   [](const MlirWaveAMDMmaCapabilities &capabilities) {
+                     return static_cast<MmaKind>(capabilities.kind);
+                   })
+      .def_prop_ro("operand_bank",
+                   [](const MlirWaveAMDMmaCapabilities &capabilities) {
+                     return static_cast<RegClass>(capabilities.operandBank);
+                   })
+      .def_prop_ro("accumulator_bank",
+                   [](const MlirWaveAMDMmaCapabilities &capabilities) {
+                     return static_cast<RegClass>(capabilities.accumulatorBank);
+                   })
+      .def_ro("operand_dwords", &MlirWaveAMDMmaCapabilities::operandDwords)
+      .def_ro("accumulator_dwords",
+              &MlirWaveAMDMmaCapabilities::accumulatorDwords)
+      .def_ro("operand_alignment",
+              &MlirWaveAMDMmaCapabilities::operandAlignment)
+      .def_ro("accumulator_alignment",
+              &MlirWaveAMDMmaCapabilities::accumulatorAlignment)
+      .def_ro("m_tile", &MlirWaveAMDMmaCapabilities::mTile)
+      .def_ro("n_tile", &MlirWaveAMDMmaCapabilities::nTile)
+      .def_ro("k_tile", &MlirWaveAMDMmaCapabilities::kTile)
+      .def_ro("lane_k_elements", &MlirWaveAMDMmaCapabilities::laneKElements);
+
+  m.def(
+      "get_mma_capabilities",
+      [](const std::string &chip, MmaKind kind,
+         const std::string &features) -> nb::object {
+        MlirWaveAMDMmaCapabilities capabilities{};
+        if (!mlirWaveAMDGetMmaCapabilities(
+                asMlirStringRef(chip), static_cast<uint32_t>(kind),
+                asMlirStringRef(features), &capabilities))
+          return nb::none();
+        return nb::cast(capabilities);
+      },
+      nb::arg("chip"), nb::arg("kind"), nb::arg("features") = "");
+}
 
 // Address-space attribute subclass.
 //
@@ -385,6 +643,10 @@ static void bindPTupleType(nb::module_ &m) {
 }
 
 NB_MODULE(_waveDialectsNanobind, m) {
+  bindTargetEnums(m);
+  bindTargetCapabilities(m);
+  bindMmaCapabilities(m);
+
   bindRegisterDialects(m);
   bindRegisterPasses(m);
 

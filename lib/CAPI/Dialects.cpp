@@ -17,7 +17,9 @@
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 
 namespace mlir::wave {
 // Python registers the small pass set used by in-process pipeline entrypoints.
@@ -57,6 +59,133 @@ void mlirRegisterWavePasses(void) {
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return mlir::wave::createWaveOptimizeMasks();
   });
+}
+
+//===----------------------------------------------------------------------===//
+// AMDGPU target capabilities
+//===----------------------------------------------------------------------===//
+
+static std::unique_ptr<llvm::MCSubtargetInfo>
+createAMDGPUSubtarget(MlirStringRef chipRef, MlirStringRef featuresRef) {
+  llvm::StringRef chip(chipRef.data, chipRef.length);
+  llvm::StringRef features(featuresRef.data, featuresRef.length);
+  waveamdmachine::AMDGPUTarget target;
+  target.triple = "amdgcn-amd-amdhsa";
+  target.chip = chip.str();
+  target.features = features.str();
+  target.isa = llvm::AMDGPU::getIsaVersion(chip);
+  target.kind = llvm::AMDGPU::parseArchAMDGCN(chip);
+  return waveamdmachine::createAMDGPUMCSubtargetInfo(target);
+}
+
+bool mlirWaveAMDGetTargetCapabilities(MlirStringRef chip,
+                                      MlirStringRef features,
+                                      MlirWaveAMDTargetCapabilities *out) {
+  if (!out)
+    return false;
+  std::unique_ptr<llvm::MCSubtargetInfo> sti =
+      createAMDGPUSubtarget(chip, features);
+  if (!sti)
+    return false;
+  std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+      waveamdmachine::getAMDGPUTargetCapabilities(*sti);
+  if (!capabilities)
+    return false;
+
+  out->isaMajor = capabilities->isa.Major;
+  out->isaMinor = capabilities->isa.Minor;
+  out->isaStepping = capabilities->isa.Stepping;
+  out->defaultWavefrontSize = capabilities->defaultWavefrontSize;
+  out->addressableSGPRs = capabilities->addressableSGPRs;
+  out->addressableVGPRs = capabilities->addressableVGPRs;
+  out->addressableAGPRs = capabilities->addressableAGPRs;
+  out->vgprAllocationGranule = capabilities->vgprAllocationGranule;
+  out->vgprTupleAlignment = capabilities->vgprTupleAlignment;
+  out->localMemoryBytes = capabilities->localMemoryBytes;
+  out->addressableLocalMemoryBytes = capabilities->addressableLocalMemoryBytes;
+  out->localMemoryBankCount = capabilities->localMemoryBankCount;
+  out->executionUnitsPerCU = capabilities->executionUnitsPerCU;
+  out->maxWavesPerEU = capabilities->maxWavesPerEU;
+  out->totalVGPRs = capabilities->totalVGPRs;
+  out->scheduleIssueWidth = capabilities->scheduleIssueWidth;
+  out->maxUserSGPRs = capabilities->maxUserSGPRs;
+  out->bufferResourceBaseBits = capabilities->bufferResourceBaseBits;
+  out->bufferResourceNumRecordsBits =
+      capabilities->bufferResourceNumRecordsBits;
+  out->waitCounterFamily =
+      static_cast<uint32_t>(capabilities->waitCounterFamily);
+  out->matrixFamily = static_cast<uint32_t>(capabilities->matrixFamily);
+  out->supportsWave32 = capabilities->supportsWave32;
+  out->supportsWave64 = capabilities->supportsWave64;
+  out->architectedFlatScratch = capabilities->architectedFlatScratch;
+  out->architectedSGPRs = capabilities->architectedSGPRs;
+  out->clusters = capabilities->clusters;
+  out->kernargPreload = capabilities->kernargPreload;
+  out->requiresInitialUnclausedVmem =
+      capabilities->requiresInitialUnclausedVmem;
+  out->waitXcnt = capabilities->waitXcnt;
+  out->vgprWindowing = capabilities->vgprWindowing;
+  out->setregVGPRMSBFixup = capabilities->setregVGPRMSBFixup;
+  out->transCoexecutionHazard = capabilities->transCoexecutionHazard;
+  out->wmmaCoexecutionHazard = capabilities->wmmaCoexecutionHazard;
+  out->scratchBaseForwardingHazard = capabilities->scratchBaseForwardingHazard;
+  out->descriptorDX10ClampAndIEEEMode =
+      capabilities->kernelDescriptor.dx10ClampAndIEEEMode;
+  out->descriptorWGPMode = capabilities->kernelDescriptor.wgpMode;
+  out->descriptorSharedVGPRCount =
+      capabilities->kernelDescriptor.sharedVGPRCount;
+  out->descriptorRoundRobin = capabilities->kernelDescriptor.roundRobin;
+  out->descriptorNamedBarrierCount =
+      capabilities->kernelDescriptor.namedBarrierCount;
+  out->descriptorArchitectedPrivateSegment =
+      capabilities->kernelDescriptor.architectedPrivateSegment;
+  return true;
+}
+
+bool mlirWaveAMDGetMmaCapabilities(MlirStringRef chip, uint32_t kindValue,
+                                   MlirStringRef features,
+                                   MlirWaveAMDMmaCapabilities *out) {
+  if (!out)
+    return false;
+  std::optional<waveamd::MmaKind> kind = waveamd::symbolizeMmaKind(kindValue);
+  if (!kind)
+    return false;
+  bool bf16;
+  uint32_t operandElementBits;
+  switch (*kind) {
+  case waveamd::MmaKind::WmmaF32_16x16x32_F16:
+    bf16 = false;
+    operandElementBits = 16;
+    break;
+  case waveamd::MmaKind::WmmaF32_16x16x32_BF16:
+    bf16 = true;
+    operandElementBits = 16;
+    break;
+  default:
+    return false;
+  }
+
+  std::unique_ptr<llvm::MCSubtargetInfo> sti =
+      createAMDGPUSubtarget(chip, features);
+  if (!sti)
+    return false;
+  std::optional<waveamdmachine::AMDGPUMmaCapabilities> capabilities =
+      waveamdmachine::getAMDGPUWmmaCapabilities(*sti, bf16);
+  if (!capabilities)
+    return false;
+
+  out->kind = kindValue;
+  out->operandBank = static_cast<uint32_t>(capabilities->operandBank);
+  out->accumulatorBank = static_cast<uint32_t>(capabilities->accumulatorBank);
+  out->operandDwords = capabilities->operandDwords;
+  out->accumulatorDwords = capabilities->accumulatorDwords;
+  out->operandAlignment = capabilities->operandAlignment;
+  out->accumulatorAlignment = capabilities->accumulatorAlignment;
+  out->mTile = 16;
+  out->nTile = 16;
+  out->kTile = 32;
+  out->laneKElements = capabilities->operandDwords * 32 / operandElementBits;
+  return true;
 }
 
 //===----------------------------------------------------------------------===//

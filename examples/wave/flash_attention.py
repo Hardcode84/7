@@ -21,9 +21,13 @@ from common import (
 
 
 def _select_matrix_intrinsic(chip: str, requested: str) -> str:
-    if requested != "auto":
-        return requested
-    return "mfma_gfx950" if chip.startswith("gfx950") else "wmma"
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import select_matrix_intrinsic
+
+    selected = str(select_matrix_intrinsic(chip, requested))
+    if selected not in ("wmma", "mfma_gfx950"):
+        raise ValueError(f"flash attention does not support {selected}")
+    return selected
 
 
 def flash_attention_f32_flops(
@@ -63,7 +67,11 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         bool(args.head_dim & (args.head_dim - 1)),
         "--head-dim must be a power of two",
     )
-    matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
+    try:
+        matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.matrix_intrinsic = matrix_intrinsic
     _parser_error_if(
         parser,
         args.block_m > 16 or args.block_n > 16,
@@ -113,15 +121,20 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import (
+        GFX1250_MATRIX_INTRINSIC,
+    )
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--block-m", type=int, default=16)
     parser.add_argument("--block-n", type=int, default=16)
     parser.add_argument("--head-dim", type=int, default=32)
     parser.add_argument(
         "--matrix-intrinsic",
-        choices=("auto", "wmma", "mfma_gfx950"),
+        choices=("auto", "wmma", "mfma_gfx950", GFX1250_MATRIX_INTRINSIC),
         default="auto",
-        help="matrix instruction family to emit; auto picks gfx950 MFMA only",
+        help="matrix instruction family to emit; auto uses the exact target profile",
     )
     parser.add_argument(
         "--seq-n",
@@ -177,14 +190,13 @@ def main(argv: list[str] | None = None) -> int:
         compute_flash_attention_f32_reference,
     )
 
-    matrix_intrinsic = _select_matrix_intrinsic(args.chip, args.matrix_intrinsic)
     module = build_flash_attention_f32_module(
         block_m=args.block_m,
         block_n=args.block_n,
         head_dim=args.head_dim,
         random_seed=args.seed,
         seq_n=args.seq_n,
-        matrix_intrinsic=matrix_intrinsic,
+        matrix_intrinsic=args.matrix_intrinsic,
         target_waves=args.target_waves or None,
         tile_loop_unroll=args.tile_loop_unroll or None,
     )

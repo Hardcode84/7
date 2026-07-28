@@ -1,6 +1,36 @@
 // RUN: wave-target-info gfx1250 | FileCheck %s --check-prefix=GFX1250
 // RUN: wave-target-info gfx1251 | FileCheck %s --check-prefix=GFX1251
 // RUN: not wave-target-info gfx12-5-generic 2>&1 | FileCheck %s --check-prefix=GENERIC
+// RUN: wave-target-info --json gfx1100 | FileCheck %s --check-prefix=JSON-GFX11
+// RUN: wave-target-info --json gfx1200 | FileCheck %s --check-prefix=JSON-GFX12
+// RUN: wave-target-info --json gfx1250 | FileCheck %s --check-prefix=JSON-GFX1250
+// RUN: wave-target-info --json gfx1251 | FileCheck %s --check-prefix=JSON-GFX1251
+// RUN: wave-target-info --json gfx12-5-generic | FileCheck %s --check-prefix=JSON-GENERIC
+
+// JSON-GFX11:      "target": "gfx1100",
+// JSON-GFX11:      "supports_legacy_wmma": true,
+// JSON-GFX11-NEXT: "supports_mfma": false,
+// JSON-GFX11-NEXT: "matrix_family": "none"
+
+// JSON-GFX12:      "target": "gfx1200",
+// JSON-GFX12:      "supports_legacy_wmma": false,
+// JSON-GFX12-NEXT: "supports_mfma": false,
+// JSON-GFX12-NEXT: "matrix_family": "none"
+
+// JSON-GFX1250:      "target": "gfx1250",
+// JSON-GFX1250:      "supports_legacy_wmma": false,
+// JSON-GFX1250-NEXT: "supports_mfma": false,
+// JSON-GFX1250-NEXT: "matrix_family": "gfx1250",
+
+// JSON-GFX1251:      "target": "gfx1251",
+// JSON-GFX1251:      "supports_legacy_wmma": false,
+// JSON-GFX1251-NEXT: "supports_mfma": false,
+// JSON-GFX1251-NEXT: "matrix_family": "gfx1251",
+
+// JSON-GENERIC:      "target": "gfx12-5-generic",
+// JSON-GENERIC:      "supports_legacy_wmma": false,
+// JSON-GENERIC-NEXT: "supports_mfma": false,
+// JSON-GENERIC-NEXT: "matrix_family": "none"
 
 // GFX1250: isa: 12.5.0
 // GFX1250-NEXT: default_wavefront_size: 32

@@ -41,7 +41,11 @@ _STREAMK_PARTIAL_SLOTS = 2
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(REPO_ROOT / "examples" / "wave"))
 
-from common import default_build_dir, resolve_llvm_tool  # noqa: E402
+from common import (  # noqa: E402
+    default_build_dir,
+    ensure_package_on_path,
+    resolve_llvm_tool,
+)
 from wave_calibration import (  # noqa: E402, F401
     VARIANTS,
     Variant,
@@ -660,19 +664,38 @@ def detect_asm_chip(source: Path) -> str:
 
 def selected_matrix_intrinsic(args: argparse.Namespace) -> str:
     requested = getattr(args, "matrix_intrinsic", "auto")
-    if requested != "auto":
-        return requested
     chip = getattr(args, "chip", "")
-    if chip.startswith("gfx95"):
-        return "mfma_gfx950"
-    if chip.startswith("gfx9"):
-        return "mfma"
-    return "wmma"
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import select_matrix_intrinsic
+
+    try:
+        return select_matrix_intrinsic(chip, requested)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def matmul_target_profile(args: argparse.Namespace):
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import get_matmul_target_profile
+
+    return get_matmul_target_profile(getattr(args, "chip", ""))
+
+
+def target_mma_profile(args: argparse.Namespace):
+    profile = matmul_target_profile(args)
+    if profile is None:
+        return None
+    try:
+        return profile.mma(getattr(args, "input_type", "f16"))
+    except ValueError as exc:
+        sys.exit(str(exc))
 
 
 def mma_k_tile(args: argparse.Namespace) -> int:
     if getattr(args, "input_type", "f16") == "mxfp4":
         return 128
+    if mma := target_mma_profile(args):
+        return mma.k_tile
     if selected_matrix_intrinsic(args) == "mfma_gfx950":
         return 32
     return 16
@@ -722,15 +745,18 @@ def compute_loop_trip_count(args: argparse.Namespace) -> int:
 
 
 def kernel_wave_size(args: argparse.Namespace) -> int:
-    if args.matrix_intrinsic == "mfma_gfx950":
-        return 64
-    if args.matrix_intrinsic == "auto" and args.chip.startswith("gfx95"):
-        return 64
-    return 32
+    intrinsic = selected_matrix_intrinsic(args)
+    if profile := matmul_target_profile(args):
+        return profile.wave_size
+    return 64 if intrinsic == "mfma_gfx950" else 32
 
 
 def accumulator_layout(args: argparse.Namespace) -> str:
-    return "wmma" if selected_matrix_intrinsic(args) == "wmma" else "mfma"
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import GFX1250_MATRIX_INTRINSIC
+
+    intrinsic = selected_matrix_intrinsic(args)
+    return "wmma" if intrinsic in ("wmma", GFX1250_MATRIX_INTRINSIC) else "mfma"
 
 
 def div_exact(num: int, den: int, what: str) -> int:
@@ -740,6 +766,9 @@ def div_exact(num: int, den: int, what: str) -> int:
 
 
 def lds_dwords_per_frag(args: argparse.Namespace) -> int:
+    if mma := target_mma_profile(args):
+        selected_matrix_intrinsic(args)
+        return mma.operand_dwords * kernel_wave_size(args)
     intrinsic = selected_matrix_intrinsic(args)
     if intrinsic == "mfma_gfx950":
         regs = 4
@@ -1015,6 +1044,9 @@ def print_delta(results: list[VariantResult]) -> None:
 
 
 def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import MATRIX_INTRINSIC_CHOICES
+
     ap.add_argument("--chip", default="", help="gfx target; default from rocminfo")
     ap.add_argument(
         "--example",
@@ -1052,7 +1084,7 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--use-dma-lds", action="store_true")
     ap.add_argument(
         "--matrix-intrinsic",
-        choices=("auto", "wmma", "mfma", "mfma_gfx950"),
+        choices=MATRIX_INTRINSIC_CHOICES,
         default="auto",
     )
     ap.add_argument("--output-type", choices=("f32", "f16", "bf16"), default="f32")
@@ -1479,6 +1511,26 @@ def validate_input_mode_args(args: argparse.Namespace) -> None:
         sys.exit("--rand-int/--hpl support f16/bf16 inputs only")
 
 
+def validate_matmul_target_args(args: argparse.Namespace) -> None:
+    profile = matmul_target_profile(args)
+    selected_matrix_intrinsic(args)
+    if profile is None:
+        return
+    requires_dma_lds = profile.staging.value != "base"
+    _require_arg(
+        args.use_dma_lds == requires_dma_lds,
+        f"{profile.chip} profile requires {profile.staging.value} staging",
+    )
+    _require_arg(
+        effective_target_waves(args) <= profile.max_waves_per_eu,
+        f"target waves exceed {profile.chip} capacity",
+    )
+    _require_arg(
+        compute_lds_bytes(args) <= profile.static_lds_limit_bytes,
+        f"LDS allocation exceeds {profile.chip} capacity",
+    )
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
@@ -1497,6 +1549,7 @@ def validate_args(args: argparse.Namespace) -> None:
     validate_tool_output_args(args)
     validate_example_args(args)
     validate_mxfp4_args(args)
+    validate_matmul_target_args(args)
 
 
 def prepare_source(args: argparse.Namespace, chip: str, tmp: Path) -> Path | None:

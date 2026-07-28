@@ -28,6 +28,76 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(WaveMeta, wavemeta);
 MLIR_CAPI_EXPORTED void mlirRegisterWavePasses(void);
 
 //===----------------------------------------------------------------------===//
+// AMDGPU target capabilities
+//===----------------------------------------------------------------------===//
+
+typedef struct MlirWaveAMDTargetCapabilities {
+  uint32_t isaMajor;
+  uint32_t isaMinor;
+  uint32_t isaStepping;
+  uint32_t defaultWavefrontSize;
+  uint32_t addressableSGPRs;
+  uint32_t addressableVGPRs;
+  uint32_t addressableAGPRs;
+  uint32_t vgprAllocationGranule;
+  uint32_t vgprTupleAlignment;
+  uint32_t localMemoryBytes;
+  uint32_t addressableLocalMemoryBytes;
+  uint32_t localMemoryBankCount;
+  uint32_t executionUnitsPerCU;
+  uint32_t maxWavesPerEU;
+  uint32_t totalVGPRs;
+  uint32_t scheduleIssueWidth;
+  uint32_t maxUserSGPRs;
+  uint32_t bufferResourceBaseBits;
+  uint32_t bufferResourceNumRecordsBits;
+  uint32_t waitCounterFamily;
+  uint32_t matrixFamily;
+  bool supportsWave32;
+  bool supportsWave64;
+  bool architectedFlatScratch;
+  bool architectedSGPRs;
+  bool clusters;
+  bool kernargPreload;
+  bool requiresInitialUnclausedVmem;
+  bool waitXcnt;
+  bool vgprWindowing;
+  bool setregVGPRMSBFixup;
+  bool transCoexecutionHazard;
+  bool wmmaCoexecutionHazard;
+  bool scratchBaseForwardingHazard;
+  bool descriptorDX10ClampAndIEEEMode;
+  bool descriptorWGPMode;
+  bool descriptorSharedVGPRCount;
+  bool descriptorRoundRobin;
+  bool descriptorNamedBarrierCount;
+  bool descriptorArchitectedPrivateSegment;
+} MlirWaveAMDTargetCapabilities;
+
+typedef struct MlirWaveAMDMmaCapabilities {
+  uint32_t kind;
+  uint32_t operandBank;
+  uint32_t accumulatorBank;
+  uint32_t operandDwords;
+  uint32_t accumulatorDwords;
+  uint32_t operandAlignment;
+  uint32_t accumulatorAlignment;
+  uint32_t mTile;
+  uint32_t nTile;
+  uint32_t kTile;
+  uint32_t laneKElements;
+} MlirWaveAMDMmaCapabilities;
+
+MLIR_CAPI_EXPORTED bool
+mlirWaveAMDGetTargetCapabilities(MlirStringRef chip, MlirStringRef features,
+                                 MlirWaveAMDTargetCapabilities *capabilities);
+
+MLIR_CAPI_EXPORTED bool
+mlirWaveAMDGetMmaCapabilities(MlirStringRef chip, uint32_t kind,
+                              MlirStringRef features,
+                              MlirWaveAMDMmaCapabilities *capabilities);
+
+//===----------------------------------------------------------------------===//
 // Wave types
 //===----------------------------------------------------------------------===//
 

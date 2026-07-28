@@ -5,6 +5,8 @@
 # CHECK: shared_calibration_support: ok
 # CHECK: matmul_explicit_gfx950_wave_size: ok
 # CHECK: matmul_auto_gfx950_wave_size: ok
+# CHECK: matmul_gfx1250_profile: ok
+# CHECK: matmul_gfx1250_selection_rejection: ok
 # CHECK: matmul_runner_gfx950_wave_size: ok
 # CHECK: matmul_runner_output_layout: ok
 # CHECK: matmul_bf16_forwarding: ok
@@ -359,11 +361,20 @@ def check_matmul_wave_size(matmul) -> None:
         "explicit gfx950 should use MFMA accumulator layout",
     )
     forced = argparse.Namespace(chip="gfx1100", matrix_intrinsic="mfma_gfx950")
-    require(
-        "matmul_explicit_gfx950_wave_size",
-        matmul.kernel_wave_size(forced) == 64,
-        "explicit mfma_gfx950 should use wave64",
-    )
+    try:
+        matmul.kernel_wave_size(forced)
+    except SystemExit as exc:
+        require(
+            "matmul_explicit_gfx950_wave_size",
+            "incompatible with gfx1100" in str(exc),
+            f"bad diagnostic: {exc}",
+        )
+    else:
+        require(
+            "matmul_explicit_gfx950_wave_size",
+            False,
+            "gfx1100 accepted gfx950 MFMA",
+        )
     rdna = argparse.Namespace(chip="gfx1100", matrix_intrinsic="auto")
     require(
         "matmul_explicit_gfx950_wave_size",
@@ -396,6 +407,76 @@ def check_matmul_wave_size(matmul) -> None:
         "auto gfx950 should use wave64",
     )
     print("matmul_auto_gfx950_wave_size: ok")
+
+
+def check_matmul_gfx1250_profile(matmul) -> None:
+    args = matmul.parse_args(["--chip=gfx1250", "--skip-hw"])
+    profile = matmul.matmul_target_profile(args)
+    require("matmul_gfx1250_profile", profile is not None, "profile missing")
+    for input_type in ("f16", "bf16"):
+        args.input_type = input_type
+        mma = profile.mma(input_type)
+        require(
+            "matmul_gfx1250_profile",
+            matmul.selected_matrix_intrinsic(args) == profile.matrix_intrinsic,
+            f"{input_type} selected wrong intrinsic",
+        )
+        require(
+            "matmul_gfx1250_profile",
+            matmul.mma_k_tile(args) == mma.k_tile,
+            f"{input_type} selected wrong K tile",
+        )
+        require(
+            "matmul_gfx1250_profile",
+            matmul.lds_dwords_per_frag(args) == mma.operand_dwords * profile.wave_size,
+            f"{input_type} selected wrong LDS fragment size",
+        )
+    require(
+        "matmul_gfx1250_profile",
+        matmul.kernel_wave_size(args) == profile.wave_size,
+        "selected wrong wave size",
+    )
+    require(
+        "matmul_gfx1250_profile",
+        matmul.accumulator_layout(args) == "wmma",
+        "selected wrong accumulator layout",
+    )
+    require(
+        "matmul_gfx1250_profile",
+        profile.local_memory_bytes > 0
+        and profile.local_memory_bank_count > 0
+        and profile.max_waves_per_eu > 0,
+        "LLVM target capacities missing",
+    )
+    matmul.validate_args(args)
+    print("matmul_gfx1250_profile: ok")
+
+
+def check_matmul_gfx1250_selection_rejection(matmul) -> None:
+    cases = (
+        (
+            ["--chip=gfx1250", "--matrix-intrinsic=wmma", "--skip-hw"],
+            "incompatible with gfx1250",
+        ),
+        (["--chip=gfx1251", "--skip-hw"], "no matrix intrinsic profile"),
+    )
+    for argv, message in cases:
+        args = matmul.parse_args(argv)
+        try:
+            matmul.validate_args(args)
+        except SystemExit as exc:
+            require(
+                "matmul_gfx1250_selection_rejection",
+                message in str(exc),
+                f"bad diagnostic: {exc}",
+            )
+        else:
+            require(
+                "matmul_gfx1250_selection_rejection",
+                False,
+                f"accepted {' '.join(argv)}",
+            )
+    print("matmul_gfx1250_selection_rejection: ok")
 
 
 def check_matmul_runner_wave_size(matmul) -> None:
@@ -2432,6 +2513,8 @@ def main() -> int:
     check_calibration_entry("fa_pipeline", fa)
     check_shared_calibration_support(common, matmul, fa)
     check_matmul_wave_size(matmul)
+    check_matmul_gfx1250_profile(matmul)
+    check_matmul_gfx1250_selection_rejection(matmul)
     check_matmul_runner_wave_size(matmul)
     check_matmul_runner_output_layout(matmul)
     check_matmul_bf16_forwarding(matmul)

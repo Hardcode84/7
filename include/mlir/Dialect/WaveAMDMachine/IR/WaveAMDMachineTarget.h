@@ -16,6 +16,7 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
+#include "llvm/TargetParser/SubtargetFeature.h"
 
 #include <cstdint>
 #include <memory>
@@ -29,6 +30,8 @@ class MCSubtargetInfo;
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTargetEnums.h.inc"
 
 namespace mlir::waveamdmachine {
+
+enum class RegClass : uint32_t;
 
 struct AMDGPUTarget {
   std::string triple;
@@ -83,6 +86,15 @@ struct AMDGPUTargetCapabilities {
   bool scratchBaseForwardingHazard = false;
 };
 
+struct AMDGPUMmaCapabilities {
+  RegClass operandBank;
+  RegClass accumulatorBank;
+  unsigned operandDwords = 0;
+  unsigned accumulatorDwords = 0;
+  unsigned operandAlignment = 0;
+  unsigned accumulatorAlignment = 0;
+};
+
 std::optional<AMDGPUTarget> parseAMDGPUTargetAttr(llvm::StringRef value);
 
 FailureOr<AMDGPUTarget>
@@ -106,6 +118,12 @@ createAMDGPUMCSubtargetInfo(Operation *op, llvm::StringRef consumer);
 
 std::optional<AMDGPUTargetCapabilities>
 getAMDGPUTargetCapabilities(const llvm::MCSubtargetInfo &sti);
+
+std::optional<AMDGPUMmaCapabilities>
+getAMDGPUWmmaCapabilities(const llvm::MCSubtargetInfo &sti, bool bf16);
+
+bool isAMDGPUOpcodeAvailable(unsigned opcode,
+                             const llvm::FeatureBitset &features);
 
 unsigned getAMDGPULocalMemoryBankCount(const llvm::MCSubtargetInfo &sti);
 

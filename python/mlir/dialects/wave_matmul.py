@@ -56,6 +56,11 @@ from typing import Literal
 from mlir._mlir_libs._waveDialectsNanobind import PTupleType
 from mlir.dialects import scf, wave, waveamd, wavemeta
 from mlir.dialects import wave_dsl as dsl
+from mlir.dialects.wave_target import (
+    GFX1250_CHIP,
+    GFX1250_MATRIX_INTRINSIC,
+    require_matmul_target_profile,
+)
 from mlir.ir import (
     Attribute,
     DictAttr,
@@ -194,6 +199,19 @@ _MMA_VARIANTS = {
         "mfma_gfx950", "mfma.scale.f32.16x16x128.f4.f4", 4, 4, 64, 32, 128
     ),
 }
+
+_GFX1250_PROFILE = require_matmul_target_profile(GFX1250_CHIP)
+for _input_type in ("f16", "bf16"):
+    _mma = _GFX1250_PROFILE.mma(_input_type)
+    _MMA_VARIANTS[(GFX1250_MATRIX_INTRINSIC, _input_type)] = _MmaVariant(
+        GFX1250_MATRIX_INTRINSIC,
+        _mma.kind_name,
+        _mma.operand_dwords,
+        _mma.accumulator_dwords,
+        _GFX1250_PROFILE.wave_size,
+        _mma.lane_k_elements,
+        _mma.k_tile,
+    )
 
 
 def _select_mma_variant(name: str, input_type: str) -> _MmaVariant:
