@@ -901,6 +901,8 @@ InstructionExecutionState::commitWithResources(
 
   InstructionCommitResult result;
   result.stall = *queried;
+  result.priorityStall = *queried;
+  result.computePriorityStall = *queried;
   result.issueCycle = currentCycle;
 
   if (desc->noMachineInst) {

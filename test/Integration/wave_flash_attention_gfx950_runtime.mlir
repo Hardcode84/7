@@ -10,6 +10,16 @@
 // RUN:   --xcds=1 --waves=8 --seed=23 --iters=1 --warmup=1 --repeats=1 \
 // RUN:   --rocm-lib=%rocm_lib \
 // RUN:   --check --skip-rebuild | FileCheck %s --check-prefix=CHECK-8W
+// RUN: %python %S/../../tools/wave-fa-calibrate/wave-fa-gfx950.py \
+// RUN:   --build-dir=%wave_obj_root --batch=1 --heads=1 --sequence=256 \
+// RUN:   --xcds=1 --waves=8 --qk-max-abs=1 --seed=29 \
+// RUN:   --iters=1 --warmup=1 --repeats=1 --rocm-lib=%rocm_lib \
+// RUN:   --check --skip-rebuild | FileCheck %s --check-prefix=CHECK-BOUNDED
+// RUN: %python %S/../../tools/wave-fa-calibrate/wave-fa-gfx950.py \
+// RUN:   --build-dir=%wave_obj_root --batch=1 --heads=1 --sequence=256 \
+// RUN:   --xcds=1 --waves=8 --seed=23 --input-scale=4 \
+// RUN:   --iters=1 --warmup=1 --repeats=1 --rocm-lib=%rocm_lib \
+// RUN:   --check --skip-rebuild | FileCheck %s --check-prefix=CHECK-ADAPTIVE-RANGE
 //
 // CHECK-4W: shape: B=1 H=1 N=256 D=128
 // CHECK-4W: grid: 1,1,1 block: 256,1,1
@@ -18,3 +28,11 @@
 // CHECK-8W: shape: B=1 H=1 N=256 D=128
 // CHECK-8W: grid: 1,1,1 block: 512,1,1
 // CHECK-8W: output_check: passed
+//
+// CHECK-BOUNDED: shape: B=1 H=1 N=256 D=128
+// CHECK-BOUNDED: grid: 1,1,1 block: 512,1,1
+// CHECK-BOUNDED: output_check: passed
+//
+// CHECK-ADAPTIVE-RANGE: shape: B=1 H=1 N=256 D=128
+// CHECK-ADAPTIVE-RANGE: grid: 1,1,1 block: 512,1,1
+// CHECK-ADAPTIVE-RANGE: output_check: passed

@@ -127,6 +127,34 @@ static bool areCohortWavesValid(const MultiWaveExecutionState &state,
   });
 }
 
+template <typename Keep>
+static InstructionStall filterStall(const InstructionStall &stall, Keep keep) {
+  InstructionStall result;
+  for (InstructionStallComponent component : stall.components) {
+    if (!keep(component))
+      continue;
+    result.components.push_back(component);
+    if (component.cycles > result.cycles) {
+      result.kind = component.kind;
+      result.cycles = component.cycles;
+    }
+  }
+  return result;
+}
+
+static InstructionStall getPriorityStall(const InstructionStall &stall) {
+  return filterStall(stall, [](const InstructionStallComponent &component) {
+    return component.kind != InstructionStallKind::IssueBackpressure ||
+           component.resource != InstructionResourceKind::MfmaCoissue;
+  });
+}
+
+static InstructionStall getComputePriorityStall(const InstructionStall &stall) {
+  return filterStall(stall, [](const InstructionStallComponent &component) {
+    return component.kind != InstructionStallKind::IssueBackpressure;
+  });
+}
+
 MultiWaveCohortExecutionState::MultiWaveCohortExecutionState(
     const MultiWaveExecutionState &state, ArrayRef<unsigned> waves)
     : waves(waves.begin(), waves.end()),
@@ -166,6 +194,8 @@ MultiWaveCohortExecutionState::commit(Operation *op) {
       return failure();
     if (!first) {
       result->stall = std::move(*stall);
+      result->priorityStall = getPriorityStall(result->stall);
+      result->computePriorityStall = getComputePriorityStall(result->stall);
       first = *result;
     }
     candidates[*wave] = nullptr;
@@ -395,6 +425,10 @@ MultiWaveExecutionState::commit(unsigned wave, Operation *op) {
   }
   FailureOr<InstructionCommitResult> result =
       waves[wave].commitWithResources(op, &resources, wave, placements[wave]);
+  if (succeeded(result)) {
+    result->priorityStall = getPriorityStall(result->stall);
+    result->computePriorityStall = getComputePriorityStall(result->stall);
+  }
   if (failed(result) || classifyOp(op) == SchedClass::NoInst)
     return result;
   WavePlacement placement = placements[wave];

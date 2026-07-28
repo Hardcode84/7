@@ -6,7 +6,8 @@
 
 # CHECK: perf-golden: gfx950-fa-b2-h64-n8192-d128-bf16-8wave: asm matches golden
 # SOURCE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"}
-# SOURCE-COUNT-31: wave.fadd {{.*}} fastmath<reassoc>
+# SOURCE-NOT: wave.fadd {{.*}} fastmath<reassoc>
+# SOURCE-NOT: wave.ballot
 
 from __future__ import annotations
 
@@ -44,6 +45,7 @@ def run_calibrator(
         "--sequence=8192",
         "--xcds=8",
         "--waves=8",
+        "--qk-max-abs=1",
         "--skip-rebuild",
     ]
     if generated_out is not None:

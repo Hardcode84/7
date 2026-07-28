@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import math
 import os
 import re
 import shutil
@@ -532,6 +533,8 @@ def flash_attention_calibrator_command(
         str(shape.xcds),
         "--waves",
         str(shape.waves),
+        "--qk-max-abs",
+        str(args.fa_qk_max_abs),
         "--iters",
         str(args.iters),
         "--warmup",
@@ -805,6 +808,12 @@ def add_shape_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fa-sequence", type=int, default=FA_DEFAULT_SEQUENCE)
     parser.add_argument("--fa-xcds", type=int, default=FA_DEFAULT_XCDS)
     parser.add_argument(
+        "--fa-qk-max-abs",
+        type=float,
+        default=1.0,
+        help="fixed-reference |Q|,|K| bound for FA",
+    )
+    parser.add_argument(
         "--k-values",
         type=parse_int_csv,
         default=None,
@@ -958,6 +967,8 @@ def validate_fa_args(args: argparse.Namespace) -> None:
     has_fa = any(kernel.workload == Workload.FLASH_ATTENTION for kernel in args.kernels)
     if has_fa and args.chip != "gfx950":
         raise SystemExit("FA sweep requires --chip=gfx950")
+    if has_fa and (not math.isfinite(args.fa_qk_max_abs) or args.fa_qk_max_abs <= 0):
+        raise SystemExit("--fa-qk-max-abs must be finite and positive")
     if has_fa and args.variants:
         variants = parse_variant_csv(args.variants)
         if variants != ["scheduled"]:

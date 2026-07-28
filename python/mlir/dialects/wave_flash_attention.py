@@ -10,7 +10,6 @@ import math
 from dataclasses import dataclass
 
 import ixsimpl
-from mlir.dialects import arith
 from mlir.dialects import wave_dsl as dsl
 from mlir.ir import Module, UnitAttr
 
@@ -29,8 +28,9 @@ _MFMA_TILE = 32
 _MFMA_K = 16
 _AB_REGISTERS = 4
 _ACC_REGISTERS = 16
-_PV_PREFIX_MFMAS = 4
-_HEAD_EXP_COUNT = 16
+_PV_PREFIX_MFMAS = 3
+_HEAD_EXP_COUNT = 21
+_BF16_MIN_NORMAL_LOG2 = -126.0
 _K_ROW_GROUPS = _BLOCK_N // 8
 _K_STRIDE = 512 + 8
 _V_STRIDE = 8 * _BLOCK_N + 32
@@ -38,7 +38,7 @@ _K_TILE_ELEMENTS = 2 * _K_ROW_GROUPS * _K_STRIDE
 _V_TILE_ELEMENTS = 2 * 8 * _V_STRIDE
 _K_TILE_BYTES = 2 * _K_TILE_ELEMENTS
 _V_TILE_BYTES = 2 * _V_TILE_ELEMENTS
-_LDS_BYTES = 2 * (_K_TILE_BYTES + _V_TILE_BYTES)
+_PING_PONG_STAGES = 2
 
 
 @dataclass(frozen=True)
@@ -48,8 +48,9 @@ class Gfx950FlashAttentionConfig:
     sequence: int = 8192
     xcds: int = 8
     waves: int = _DEFAULT_WAVES
+    qk_max_abs: float | None = None
 
-    def __post_init__(self) -> None:
+    def _validate_positive(self) -> None:
         for name, value in (
             ("batch", self.batch),
             ("heads", self.heads),
@@ -59,10 +60,28 @@ class Gfx950FlashAttentionConfig:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive; got {value}")
+
+    def _validate_qk_bound(self) -> None:
+        if self.qk_max_abs is None:
+            return
+        if not math.isfinite(self.qk_max_abs) or self.qk_max_abs <= 0:
+            raise ValueError(
+                f"qk_max_abs must be finite and positive; got {self.qk_max_abs}"
+            )
+        score_bound = self.log2_score_bound
+        if score_bound is not None and -2.0 * score_bound < _BF16_MIN_NORMAL_LOG2:
+            raise ValueError(
+                "qk_max_abs fixed reference exceeds BF16 range; "
+                "use adaptive reference"
+            )
+
+    def __post_init__(self) -> None:
+        self._validate_positive()
         if self.xcds not in (1, 2, 4, 8):
             raise ValueError(f"xcds must be 1, 2, 4, or 8; got {self.xcds}")
         if self.waves not in (4, 8):
             raise ValueError(f"waves must be 4 or 8; got {self.waves}")
+        self._validate_qk_bound()
         if self.sequence % _BLOCK_M:
             raise ValueError(
                 f"sequence must be a multiple of {_BLOCK_M}; got {self.sequence}"
@@ -87,6 +106,14 @@ class Gfx950FlashAttentionConfig:
         return self.sequence // _BLOCK_N
 
     @property
+    def log2_score_bound(self) -> float | None:
+        if self.qk_max_abs is None:
+            return None
+        return (
+            math.log2(math.e) * math.sqrt(_HEAD_DIM) * self.qk_max_abs * self.qk_max_abs
+        )
+
+    @property
     def threads(self) -> int:
         return self.waves * _WAVE_SIZE
 
@@ -96,7 +123,21 @@ class Gfx950FlashAttentionConfig:
 
     @property
     def dynamic_lds_bytes(self) -> int:
-        return _LDS_BYTES
+        return self.data_lds_bytes
+
+    @property
+    def data_lds_bytes(self) -> int:
+        return self.k_lds_stages * _K_TILE_BYTES + self.v_lds_stages * _V_TILE_BYTES
+
+    @property
+    def k_lds_stages(self) -> int:
+        if self.waves == 8:
+            return 2 * _PING_PONG_STAGES
+        return _PING_PONG_STAGES
+
+    @property
+    def v_lds_stages(self) -> int:
+        return self.k_lds_stages
 
     @property
     def flops(self) -> int:
@@ -136,20 +177,24 @@ class _KernelContext:
     k_buffer: dsl.Value
     v_buffer: dsl.Value
     output_buffer: dsl.Value
-    lds0: _LdsBuffer
-    lds1: _LdsBuffer
+    lds: tuple[_LdsBuffer, ...]
     q_fragments: tuple[tuple[dsl.Value, ...], ...]
     root: dsl.Value
+
+
+@dataclass(frozen=True)
+class _PipelineTokens:
+    k_ready: tuple[dsl.Value, ...]
+    k_free: tuple[dsl.Value, ...]
+    previous_v_ready: dsl.Value
+    v_free: tuple[dsl.Value, ...]
 
 
 @dataclass(frozen=True)
 class _PipelineSeed:
     scores: tuple[tuple[dsl.Value, ...], ...]
     states: tuple[_AttentionState, ...]
-    k_ready2: dsl.Value
-    k_ready3: dsl.Value
-    v_ready1: dsl.Value
-    v_done0: dsl.Value
+    tokens: _PipelineTokens
 
 
 @dataclass(frozen=True)
@@ -237,12 +282,34 @@ def _workgroup_coords(
     )
 
 
-def _lds_buffers(bld: dsl.FunctionBuilder) -> tuple[_LdsBuffer, _LdsBuffer]:
-    k0 = bld.shared_memory_base(dsl.bf16())
-    k1 = bld.shared_memory_base(dsl.bf16(), offset=_K_TILE_BYTES)
-    v0 = bld.shared_memory_base(dsl.bf16(), offset=2 * _K_TILE_BYTES)
-    v1 = bld.shared_memory_base(dsl.bf16(), offset=2 * _K_TILE_BYTES + _V_TILE_BYTES)
-    return _LdsBuffer(k0, v0), _LdsBuffer(k1, v1)
+def _lds_buffers(
+    bld: dsl.FunctionBuilder,
+    cfg: Gfx950FlashAttentionConfig,
+) -> tuple[_LdsBuffer, ...]:
+    k_base = bld.shared_memory_base(dsl.bf16())
+    v_base = bld.shared_memory_base(
+        dsl.bf16(),
+        offset=cfg.k_lds_stages * _K_TILE_BYTES,
+    )
+    return tuple(
+        _LdsBuffer(
+            bld.ptr_add(
+                k_base,
+                bld.constant(
+                    dsl.index_type(),
+                    stage * _K_TILE_ELEMENTS,
+                ),
+            ),
+            bld.ptr_add(
+                v_base,
+                bld.constant(
+                    dsl.index_type(),
+                    stage * _V_TILE_ELEMENTS,
+                ),
+            ),
+        )
+        for stage in range(cfg.k_lds_stages)
+    )
 
 
 def _issue_operand(
@@ -270,8 +337,8 @@ def _issue_operand(
     d_group = dsl.mod(lane, 8) * 8
     dma_ptr_type = dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
     dma_lds = bld.ptr_cast(lds, dma_ptr_type)
-    tokens: list[dsl.Value] = []
 
+    tokens: list[dsl.Value] = []
     dma_waves = _BLOCK_N * _HEAD_DIM * 2 // (_WAVE_SIZE * 16)
     for wave_packet in range(dma_waves // cfg.waves):
         packet_wave = wave + wave_packet * cfg.waves
@@ -446,7 +513,7 @@ def _reduce_max(bld: dsl.FunctionBuilder, values: list[dsl.Value]) -> dsl.Value:
 def _reduce_sum(bld: dsl.FunctionBuilder, values: list[dsl.Value]) -> dsl.Value:
     result = values[0]
     for value in values[1:]:
-        result = bld.fadd(result, value, fastmath=arith.FastMathFlags.reassoc)
+        result = bld.fadd(result, value)
     return result
 
 
@@ -532,23 +599,33 @@ def _prepare_softmax_head(
     *,
     items: int,
     initialize: bool = False,
+    log2_score_bound: float | None = None,
 ) -> _PendingSoftmax:
     scale = bld.splat(
         bld.constant(dsl.f32(), math.log2(math.e) / math.sqrt(_HEAD_DIM)),
         dsl.f32(),
         _WAVE_SIZE,
     )
-    score_components = [
-        _extract_components(bld, score, types.scalar) for score in scores
-    ]
-    flattened = [component for packet in score_components for component in packet]
-    local_max = _reduce_max(bld, flattened)
-    tile_max = bld.fmax(
-        local_max, _exchange_half(bld, local_max, types.scalar, items=items)
-    )
-    tile_max = bld.fmul(tile_max, scale)
     previous_max = state.row_max
-    row_max = tile_max if initialize else bld.fmax(state.row_max, tile_max)
+    if log2_score_bound is not None:
+        row_max = state.row_max
+        if initialize:
+            row_max = bld.splat(
+                bld.constant(dsl.f32(), log2_score_bound),
+                dsl.f32(),
+                _WAVE_SIZE,
+            )
+    else:
+        score_components = [
+            _extract_components(bld, score, types.scalar) for score in scores
+        ]
+        flattened = [component for packet in score_components for component in packet]
+        local_max = _reduce_max(bld, flattened)
+        tile_max = bld.fmax(
+            local_max, _exchange_half(bld, local_max, types.scalar, items=items)
+        )
+        tile_max = bld.fmul(tile_max, scale)
+        row_max = tile_max if initialize else bld.fmax(state.row_max, tile_max)
     state = _AttentionState(state.outputs, row_max, state.row_sum)
     return _PendingSoftmax(state, previous_max, scale, initialize)
 
@@ -558,9 +635,11 @@ def _finish_softmax_head(
     types: _KernelTypes,
     scores: tuple[dsl.Value, ...],
     pending: _PendingSoftmax,
+    *,
+    adaptive_reference: bool,
 ) -> tuple[tuple[dsl.Value, ...], _AttentionState]:
     state = pending.state
-    if not pending.initialize:
+    if not pending.initialize and adaptive_reference:
         state = _lazy_rescale_outputs(bld, types, state, pending.previous_max)
     score_components = [
         _extract_components(bld, score, types.scalar) for score in scores
@@ -592,11 +671,24 @@ def _softmax_head(
     *,
     items: int,
     initialize: bool = False,
+    log2_score_bound: float | None = None,
 ) -> tuple[tuple[dsl.Value, ...], _AttentionState]:
     pending = _prepare_softmax_head(
-        bld, types, scores, state, items=items, initialize=initialize
+        bld,
+        types,
+        scores,
+        state,
+        items=items,
+        initialize=initialize,
+        log2_score_bound=log2_score_bound,
     )
-    return _finish_softmax_head(bld, types, scores, pending)
+    return _finish_softmax_head(
+        bld,
+        types,
+        scores,
+        pending,
+        adaptive_reference=log2_score_bound is None,
+    )
 
 
 def _softmax_tail(
@@ -747,11 +839,14 @@ def _pipeline_phase_bulk(
     v_buffer: dsl.Value,
     current_lds: _LdsBuffer,
     previous_lds: _LdsBuffer,
+    prefetch_lds: _LdsBuffer,
     workitem: dsl.Value,
     workitem_first: dsl.Value,
     tile: dsl.Value,
     prefetch_tile: dsl.Value | None,
     current_k_ready: dsl.Value,
+    publish_k_ready: dsl.Value,
+    prefetch_k_free: dsl.Value,
     previous_v_ready: dsl.Value,
     current_v_free: dsl.Value,
     previous_scores: tuple[tuple[dsl.Value, ...], ...],
@@ -764,8 +859,8 @@ def _pipeline_phase_bulk(
     dsl.Value,
     dsl.Value,
     dsl.Value,
+    dsl.Value,
 ]:
-    v_reuse = _stage_end(bld, current_v_free)
     current_v_ready = _issue_operand(
         bld,
         cfg,
@@ -775,42 +870,58 @@ def _pipeline_phase_bulk(
         workitem,
         workitem_first,
         tile,
-        v_reuse,
+        current_v_free,
         name=f"{name}_v",
     )
-    k_access = _stage_end(bld, current_k_ready)
+    k_access_dependencies = [current_k_ready]
+    if cfg.waves == 8:
+        k_access_dependencies.append(previous_v_ready)
+    k_access = _stage_end(bld, *k_access_dependencies)
     k_fragments, k_tokens = _load_k_tile(
         bld, types, current_lds.k, workitem, after=k_access
     )
-    scores = _score_tiles(bld, types, q_fragments, k_fragments)
     probabilities: list[tuple[dsl.Value, ...]] = []
     next_states: list[_AttentionState] = []
     for group_scores, state in zip(previous_scores, states, strict=True):
         group_probabilities, state = _softmax_tail(
-            bld, types, group_scores, state, items=cfg.threads
+            bld,
+            types,
+            group_scores,
+            state,
+            items=cfg.threads,
         )
         probabilities.append(group_probabilities)
         next_states.append(state)
     states = tuple(next_states)
-    v_operands_ready = _stage_end(bld, *k_tokens)
-    next_k_ready = v_operands_ready
+    current_k_done = _stage_end(bld, *k_tokens)
+    next_k_ready = prefetch_k_free
     if prefetch_tile is not None:
+        prefetch_access = prefetch_k_free
+        if cfg.k_lds_stages == _PING_PONG_STAGES:
+            prefetch_access = bld.join(current_k_done, prefetch_k_free)
         next_k_ready = _issue_operand(
             bld,
             cfg,
             k_buffer,
-            current_lds.k,
+            prefetch_lds.k,
             _K_STRIDE,
             workitem,
             workitem_first,
             prefetch_tile,
-            v_operands_ready,
+            prefetch_access,
             name=f"{name}_k",
         )
-    v_access = _stage_end(bld, previous_v_ready)
+    scores = _score_tiles(bld, types, q_fragments, k_fragments)
+    bld.sched_barrier()
+    v_access_dependencies = [previous_v_ready]
+    if cfg.waves == 8:
+        # Trailing cohort publishes next K before the leading cohort reads it.
+        v_access_dependencies = [k_access, publish_k_ready]
+    v_access = _stage_end(bld, *v_access_dependencies)
     v_fragments, v_tokens = _load_v_tile(
         bld, types, previous_lds.v, workitem, after=v_access
     )
+    v_done = _stage_end(bld, *v_tokens)
     outputs = _pv_tiles_mfma_range(
         bld,
         tuple(probabilities),
@@ -827,6 +938,7 @@ def _pipeline_phase_bulk(
             group_scores,
             _AttentionState(group_outputs, state.row_max, state.row_sum),
             items=cfg.threads,
+            log2_score_bound=cfg.log2_score_bound,
         )
         for group_scores, group_outputs, state in zip(
             scores, outputs, states, strict=True
@@ -852,15 +964,22 @@ def _pipeline_phase_bulk(
     next_scores: list[tuple[dsl.Value, ...]] = []
     next_states = []
     for group_scores, group in zip(scores, pending, strict=True):
-        group_scores, state = _finish_softmax_head(bld, types, group_scores, group)
+        group_scores, state = _finish_softmax_head(
+            bld,
+            types,
+            group_scores,
+            group,
+            adaptive_reference=cfg.qk_max_abs is None,
+        )
         next_scores.append(group_scores)
         next_states.append(state)
     return (
         tuple(next_scores),
         tuple(next_states),
         next_k_ready,
+        current_k_done,
         current_v_ready,
-        _join(bld, v_tokens),
+        v_done,
     )
 
 
@@ -873,11 +992,14 @@ def _pipeline_phase(
     v_buffer: dsl.Value,
     current_lds: _LdsBuffer,
     previous_lds: _LdsBuffer,
+    prefetch_lds: _LdsBuffer,
     workitem: dsl.Value,
     workitem_first: dsl.Value,
     tile: dsl.Value,
     prefetch_tile: dsl.Value | None,
     current_k_ready: dsl.Value,
+    publish_k_ready: dsl.Value,
+    prefetch_k_free: dsl.Value,
     previous_v_ready: dsl.Value,
     current_v_free: dsl.Value,
     previous_scores: tuple[tuple[dsl.Value, ...], ...],
@@ -887,6 +1009,7 @@ def _pipeline_phase(
 ) -> tuple[
     tuple[tuple[dsl.Value, ...], ...],
     tuple[_AttentionState, ...],
+    dsl.Value,
     dsl.Value,
     dsl.Value,
     dsl.Value,
@@ -900,11 +1023,14 @@ def _pipeline_phase(
         v_buffer,
         current_lds,
         previous_lds,
+        prefetch_lds,
         workitem,
         workitem_first,
         tile,
         prefetch_tile,
         current_k_ready,
+        publish_k_ready,
+        prefetch_k_free,
         previous_v_ready,
         current_v_free,
         previous_scores,
@@ -988,9 +1114,10 @@ def _setup_kernel(
     k_buffer = _head_buffer(bld, k_arg, head, cfg)
     v_buffer = _head_buffer(bld, v_arg, head, cfg)
     output_buffer = _head_buffer(bld, output_arg, head, cfg)
-    lds0, lds1 = _lds_buffers(bld)
+    lds = _lds_buffers(bld, cfg)
     types = _kernel_types()
     q_fragments = _load_q(bld, cfg, types, q_buffer, workgroup_m, workitem)
+    root = bld.token()
     return _KernelContext(
         cfg,
         types,
@@ -1000,10 +1127,9 @@ def _setup_kernel(
         k_buffer,
         v_buffer,
         output_buffer,
-        lds0,
-        lds1,
+        lds,
         q_fragments,
-        bld.token(),
+        root,
     )
 
 
@@ -1012,9 +1138,12 @@ def _kernel_pipeline_phase(
     ctx: _KernelContext,
     current_lds: _LdsBuffer,
     previous_lds: _LdsBuffer,
+    prefetch_lds: _LdsBuffer,
     tile: dsl.Value,
     prefetch_tile: dsl.Value | None,
     current_k_ready: dsl.Value,
+    publish_k_ready: dsl.Value,
+    prefetch_k_free: dsl.Value,
     previous_v_ready: dsl.Value,
     current_v_free: dsl.Value,
     previous_scores: tuple[tuple[dsl.Value, ...], ...],
@@ -1024,6 +1153,7 @@ def _kernel_pipeline_phase(
 ) -> tuple[
     tuple[tuple[dsl.Value, ...], ...],
     tuple[_AttentionState, ...],
+    dsl.Value,
     dsl.Value,
     dsl.Value,
     dsl.Value,
@@ -1037,11 +1167,14 @@ def _kernel_pipeline_phase(
         ctx.v_buffer,
         current_lds,
         previous_lds,
+        prefetch_lds,
         ctx.workitem,
         ctx.workitem_first,
         tile,
         prefetch_tile,
         current_k_ready,
+        publish_k_ready,
+        prefetch_k_free,
         previous_v_ready,
         current_v_free,
         previous_scores,
@@ -1079,123 +1212,40 @@ def _initial_softmax(
             state,
             items=ctx.cfg.threads,
             initialize=True,
+            log2_score_bound=ctx.cfg.log2_score_bound,
         )
         next_scores.append(group_scores)
         next_states.append(state)
     return tuple(next_scores), tuple(next_states)
 
 
-def _emit_prologue(bld: dsl.FunctionBuilder, ctx: _KernelContext) -> _PipelineSeed:
-    k_ready0 = _issue_operand(
-        bld,
-        ctx.cfg,
-        ctx.k_buffer,
-        ctx.lds0.k,
-        _K_STRIDE,
-        ctx.workitem,
-        ctx.workitem_first,
-        0,
-        ctx.root,
-        name="fa_prologue_k0",
+def _flatten_pipeline_state(
+    scores: tuple[tuple[dsl.Value, ...], ...],
+    states: tuple[_AttentionState, ...],
+    tokens: _PipelineTokens,
+) -> tuple[dsl.Value, ...]:
+    return (
+        *(score for group in scores for score in group),
+        *(
+            value
+            for state in states
+            for value in (*state.outputs, state.row_max, state.row_sum)
+        ),
+        *tokens.k_ready,
+        *tokens.k_free,
+        tokens.previous_v_ready,
+        *tokens.v_free,
     )
-    k_ready1 = _issue_operand(
-        bld,
-        ctx.cfg,
-        ctx.k_buffer,
-        ctx.lds1.k,
-        _K_STRIDE,
-        ctx.workitem,
-        ctx.workitem_first,
-        1,
-        ctx.root,
-        name="fa_prologue_k1",
-    )
-    v_ready0 = _issue_operand(
-        bld,
-        ctx.cfg,
-        ctx.v_buffer,
-        ctx.lds0.v,
-        _V_STRIDE,
-        ctx.workitem,
-        ctx.workitem_first,
-        0,
-        ctx.root,
-        name="fa_prologue_v0",
-    )
-    states = _initial_states(bld, ctx)
-    operands_ready = _stage_end(bld, k_ready0, k_ready1, v_ready0)
-    first_k_fragments, first_k_tokens = _load_k_tile(
-        bld, ctx.types, ctx.lds0.k, ctx.workitem, after=operands_ready
-    )
-    _stage_end(bld, *first_k_tokens)
-    first_scores = _score_tiles(bld, ctx.types, ctx.q_fragments, first_k_fragments)
-    first_k_done = _stage_end(bld, *first_k_tokens)
-    tile2 = bld.constant(dsl.i32(), 2)
-    k_ready2 = _issue_operand(
-        bld,
-        ctx.cfg,
-        ctx.k_buffer,
-        ctx.lds0.k,
-        _K_STRIDE,
-        ctx.workitem,
-        ctx.workitem_first,
-        tile2,
-        first_k_done,
-        name="fa_prologue_k2",
-    )
-    scores, states = _initial_softmax(bld, ctx, first_scores, states)
-    if ctx.cfg.waves == 8:
-        stagger = bld.scalar_cmpi(
-            "uge",
-            ctx.workitem_first,
-            bld.constant(dsl.i32(), ctx.cfg.waves // 2 * _WAVE_SIZE),
-        )
-        with bld.if_(stagger):
-            _stage_end(bld)
-            bld.set_priority(3)
-    scores, states, k_ready3, v_ready1, v_done0 = _kernel_pipeline_phase(
-        bld,
-        ctx,
-        ctx.lds1,
-        ctx.lds0,
-        bld.constant(dsl.i32(), 1),
-        bld.constant(dsl.i32(), 3),
-        k_ready1,
-        v_ready0,
-        ctx.root,
-        scores,
-        states,
-        name="fa_pipeline_1",
-    )
-    return _PipelineSeed(scores, states, k_ready2, k_ready3, v_ready1, v_done0)
 
 
-def _loop_tiles(
-    bld: dsl.FunctionBuilder, cfg: Gfx950FlashAttentionConfig, even_tile: dsl.Value
-) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
-    odd_tile = bld.addi(even_tile, bld.constant(dsl.i32(), 1))
-    tile_count = bld.constant(dsl.i32(), cfg.tile_count)
-    prefetch_even_raw = bld.addi(even_tile, bld.constant(dsl.i32(), 2))
-    prefetch_odd_raw = bld.addi(even_tile, bld.constant(dsl.i32(), 3))
-    prefetch_even = bld.select(
-        bld.scalar_cmpi("ult", prefetch_even_raw, tile_count),
-        prefetch_even_raw,
-        bld.constant(dsl.i32(), cfg.tile_count - 2),
-    )
-    prefetch_odd = bld.select(
-        bld.scalar_cmpi("ult", prefetch_odd_raw, tile_count),
-        prefetch_odd_raw,
-        bld.constant(dsl.i32(), cfg.tile_count - 1),
-    )
-    return odd_tile, prefetch_even, prefetch_odd
-
-
-def _emit_pipeline_iteration(
-    bld: dsl.FunctionBuilder,
+def _unpack_pipeline_state(
     ctx: _KernelContext,
     args: tuple[dsl.Value, ...],
-    even_tile: dsl.Value,
-) -> tuple[dsl.Value, ...]:
+) -> tuple[
+    tuple[tuple[dsl.Value, ...], ...],
+    tuple[_AttentionState, ...],
+    _PipelineTokens,
+]:
     score_count = _BLOCK_N // _MFMA_TILE
     state_base = ctx.cfg.query_groups * score_count
     token_base = state_base + ctx.cfg.query_groups * 6
@@ -1211,67 +1261,358 @@ def _emit_pipeline_iteration(
         )
         for group in range(ctx.cfg.query_groups)
     )
-    odd_tile, prefetch_even, prefetch_odd = _loop_tiles(bld, ctx.cfg, even_tile)
-    scores, states, next_k_ready0, v_ready0, v_done1 = _kernel_pipeline_phase(
-        bld,
-        ctx,
-        ctx.lds0,
-        ctx.lds1,
-        even_tile,
-        prefetch_even,
-        args[token_base],
-        args[token_base + 2],
-        args[token_base + 3],
-        scores,
-        states,
-        name="fa_pipeline_even",
-    )
-    scores, states, next_k_ready1, v_ready1, v_done0 = _kernel_pipeline_phase(
-        bld,
-        ctx,
-        ctx.lds1,
-        ctx.lds0,
-        odd_tile,
-        prefetch_odd,
-        args[token_base + 1],
-        v_ready0,
-        v_done1,
-        scores,
-        states,
-        name="fa_pipeline_odd",
-    )
+    stages = ctx.cfg.k_lds_stages
+    k_ready = tuple(args[token_base : token_base + stages])
+    k_free_base = token_base + stages
+    k_free = tuple(args[k_free_base : k_free_base + stages])
+    previous_v_ready = args[k_free_base + stages]
+    v_free_base = k_free_base + stages + 1
+    v_free = tuple(args[v_free_base : v_free_base + ctx.cfg.v_lds_stages])
     return (
-        *(score for group in scores for score in group),
-        *(
-            value
-            for state in states
-            for value in (*state.outputs, state.row_max, state.row_sum)
-        ),
-        next_k_ready0,
-        next_k_ready1,
-        v_ready1,
-        v_done0,
+        scores,
+        states,
+        _PipelineTokens(k_ready, k_free, previous_v_ready, v_free),
     )
+
+
+def _run_pipeline_phase(
+    bld: dsl.FunctionBuilder,
+    ctx: _KernelContext,
+    scores: tuple[tuple[dsl.Value, ...], ...],
+    states: tuple[_AttentionState, ...],
+    current_lds: _LdsBuffer,
+    previous_lds: _LdsBuffer,
+    prefetch_lds: _LdsBuffer,
+    tile: dsl.Value,
+    prefetch_tile: dsl.Value | None,
+    current_k_ready: dsl.Value,
+    publish_k_ready: dsl.Value,
+    prefetch_k_free: dsl.Value,
+    previous_v_ready: dsl.Value,
+    current_v_free: dsl.Value,
+    *,
+    name: str,
+) -> tuple[
+    tuple[tuple[dsl.Value, ...], ...],
+    tuple[_AttentionState, ...],
+    dsl.Value,
+    dsl.Value,
+    dsl.Value,
+    dsl.Value,
+]:
+    return _kernel_pipeline_phase(
+        bld,
+        ctx,
+        current_lds,
+        previous_lds,
+        prefetch_lds,
+        tile,
+        prefetch_tile,
+        current_k_ready,
+        publish_k_ready,
+        prefetch_k_free,
+        previous_v_ready,
+        current_v_free,
+        scores,
+        states,
+        name=name,
+    )
+
+
+def _run_indexed_pipeline_phase(
+    bld: dsl.FunctionBuilder,
+    ctx: _KernelContext,
+    scores: tuple[tuple[dsl.Value, ...], ...],
+    states: tuple[_AttentionState, ...],
+    tokens: _PipelineTokens,
+    tile: dsl.Value,
+    prefetch_tile: dsl.Value | None,
+    current_k_stage: int,
+    current_v_stage: int,
+    previous_v_stage: int,
+    prefetch_k_stage: int,
+    *,
+    name: str,
+) -> tuple[
+    tuple[tuple[dsl.Value, ...], ...],
+    tuple[_AttentionState, ...],
+    _PipelineTokens,
+]:
+    publish_k_ready = ctx.root
+    if ctx.cfg.waves == 8:
+        publish_k_stage = (current_k_stage + 1) % ctx.cfg.k_lds_stages
+        publish_k_ready = tokens.k_ready[publish_k_stage]
+    (
+        scores,
+        states,
+        next_k_ready,
+        current_k_done,
+        current_v_ready,
+        previous_v_done,
+    ) = _run_pipeline_phase(
+        bld,
+        ctx,
+        scores,
+        states,
+        _LdsBuffer(ctx.lds[current_k_stage].k, ctx.lds[current_v_stage].v),
+        ctx.lds[previous_v_stage],
+        ctx.lds[prefetch_k_stage],
+        tile,
+        prefetch_tile,
+        tokens.k_ready[current_k_stage],
+        publish_k_ready,
+        tokens.k_free[prefetch_k_stage],
+        tokens.previous_v_ready,
+        tokens.v_free[current_v_stage],
+        name=name,
+    )
+    k_ready = list(tokens.k_ready)
+    k_free = list(tokens.k_free)
+    v_free = list(tokens.v_free)
+    k_ready[prefetch_k_stage] = next_k_ready
+    k_free[current_k_stage] = current_k_done
+    v_free[previous_v_stage] = previous_v_done
+    return (
+        scores,
+        states,
+        _PipelineTokens(
+            tuple(k_ready),
+            tuple(k_free),
+            current_v_ready,
+            tuple(v_free),
+        ),
+    )
+
+
+def _emit_prologue(bld: dsl.FunctionBuilder, ctx: _KernelContext) -> _PipelineSeed:
+    k_ready0 = _issue_operand(
+        bld,
+        ctx.cfg,
+        ctx.k_buffer,
+        ctx.lds[0].k,
+        _K_STRIDE,
+        ctx.workitem,
+        ctx.workitem_first,
+        0,
+        ctx.root,
+        name="fa_prologue_k0",
+    )
+    k_ready1 = _issue_operand(
+        bld,
+        ctx.cfg,
+        ctx.k_buffer,
+        ctx.lds[1].k,
+        _K_STRIDE,
+        ctx.workitem,
+        ctx.workitem_first,
+        1,
+        ctx.root,
+        name="fa_prologue_k1",
+    )
+    v_ready0 = _issue_operand(
+        bld,
+        ctx.cfg,
+        ctx.v_buffer,
+        ctx.lds[0].v,
+        _V_STRIDE,
+        ctx.workitem,
+        ctx.workitem_first,
+        0,
+        ctx.root,
+        name="fa_prologue_v0",
+    )
+    states = _initial_states(bld, ctx)
+    operands_ready = _stage_end(bld, k_ready0, k_ready1, v_ready0)
+    first_k_fragments, first_k_tokens = _load_k_tile(
+        bld, ctx.types, ctx.lds[0].k, ctx.workitem, after=operands_ready
+    )
+    _stage_end(bld, *first_k_tokens)
+    first_scores = _score_tiles(bld, ctx.types, ctx.q_fragments, first_k_fragments)
+    first_k_done = _stage_end(bld, *first_k_tokens)
+    k2_stage = 2 % ctx.cfg.k_lds_stages
+    k_ready2 = _issue_operand(
+        bld,
+        ctx.cfg,
+        ctx.k_buffer,
+        ctx.lds[k2_stage].k,
+        _K_STRIDE,
+        ctx.workitem,
+        ctx.workitem_first,
+        bld.constant(dsl.i32(), 2),
+        first_k_done,
+        name="fa_prologue_k2",
+    )
+    scores, states = _initial_softmax(bld, ctx, first_scores, states)
+    if ctx.cfg.waves == 8:
+        stagger = bld.scalar_cmpi(
+            "uge",
+            ctx.workitem_first,
+            bld.constant(dsl.i32(), ctx.cfg.waves // 2 * _WAVE_SIZE),
+        )
+        bld.sched_barrier()
+        with bld.if_(stagger):
+            # One barrier event separates cohorts until the matching exit barrier.
+            _stage_end(bld)
+            bld.set_priority(3)
+        bld.sched_barrier()
+    k_ready = [ctx.root] * ctx.cfg.k_lds_stages
+    k_ready[0] = k_ready0
+    k_ready[1] = k_ready1
+    k_ready[k2_stage] = k_ready2
+    k_free = [ctx.root] * ctx.cfg.k_lds_stages
+    k_free[0] = first_k_done
+    tokens = _PipelineTokens(
+        tuple(k_ready),
+        tuple(k_free),
+        v_ready0,
+        (ctx.root,) * ctx.cfg.v_lds_stages,
+    )
+    scores, states, tokens = _run_indexed_pipeline_phase(
+        bld,
+        ctx,
+        scores,
+        states,
+        tokens,
+        bld.constant(dsl.i32(), 1),
+        bld.constant(dsl.i32(), 3),
+        1,
+        1,
+        0,
+        3 % ctx.cfg.k_lds_stages,
+        name="fa_pipeline_1",
+    )
+    return _PipelineSeed(scores, states, tokens)
+
+
+def _emit_pipeline_iteration(
+    bld: dsl.FunctionBuilder,
+    ctx: _KernelContext,
+    args: tuple[dsl.Value, ...],
+    first_tile: dsl.Value,
+) -> tuple[dsl.Value, ...]:
+    scores, states, tokens = _unpack_pipeline_state(ctx, args)
+    tile_count = bld.constant(dsl.i32(), ctx.cfg.tile_count)
+    if ctx.cfg.k_lds_stages == _PING_PONG_STAGES:
+        odd_tile = bld.addi(first_tile, bld.constant(dsl.i32(), 1))
+        prefetch_even_raw = bld.addi(first_tile, bld.constant(dsl.i32(), 2))
+        prefetch_odd_raw = bld.addi(first_tile, bld.constant(dsl.i32(), 3))
+        prefetch_even = bld.select(
+            bld.scalar_cmpi("ult", prefetch_even_raw, tile_count),
+            prefetch_even_raw,
+            bld.constant(dsl.i32(), ctx.cfg.tile_count - 2),
+        )
+        prefetch_odd = bld.select(
+            bld.scalar_cmpi("ult", prefetch_odd_raw, tile_count),
+            prefetch_odd_raw,
+            bld.constant(dsl.i32(), ctx.cfg.tile_count - 1),
+        )
+        scores, states, tokens = _run_indexed_pipeline_phase(
+            bld,
+            ctx,
+            scores,
+            states,
+            tokens,
+            first_tile,
+            prefetch_even,
+            0,
+            0,
+            1,
+            0,
+            name="fa_pipeline_even",
+        )
+        scores, states, tokens = _run_indexed_pipeline_phase(
+            bld,
+            ctx,
+            scores,
+            states,
+            tokens,
+            odd_tile,
+            prefetch_odd,
+            1,
+            1,
+            0,
+            1,
+            name="fa_pipeline_odd",
+        )
+        return _flatten_pipeline_state(scores, states, tokens)
+
+    phase_count = math.lcm(ctx.cfg.k_lds_stages, ctx.cfg.v_lds_stages)
+    tiles = tuple(
+        bld.addi(first_tile, bld.constant(dsl.i32(), offset))
+        for offset in range(phase_count)
+    )
+    prefetches = tuple(
+        bld.addi(first_tile, bld.constant(dsl.i32(), offset))
+        for offset in range(2, phase_count + 2)
+    )
+    prefetches = tuple(
+        bld.select(
+            bld.scalar_cmpi("ult", prefetch, tile_count),
+            prefetch,
+            bld.constant(dsl.i32(), ctx.cfg.tile_count - 1),
+        )
+        for prefetch in prefetches
+    )
+    for phase in range(phase_count):
+        tile_stage = 2 + phase
+        scores, states, tokens = _run_indexed_pipeline_phase(
+            bld,
+            ctx,
+            scores,
+            states,
+            tokens,
+            tiles[phase],
+            prefetches[phase],
+            tile_stage % ctx.cfg.k_lds_stages,
+            tile_stage % ctx.cfg.v_lds_stages,
+            (tile_stage - 1) % ctx.cfg.v_lds_stages,
+            (tile_stage + 2) % ctx.cfg.k_lds_stages,
+            name=f"fa_pipeline_ring{phase}",
+        )
+    return _flatten_pipeline_state(scores, states, tokens)
+
+
+def _emit_pipeline_remainder(
+    bld: dsl.FunctionBuilder,
+    ctx: _KernelContext,
+    args: tuple[dsl.Value, ...],
+    first_tile: int,
+) -> tuple[dsl.Value, ...]:
+    scores, states, tokens = _unpack_pipeline_state(ctx, args)
+    for tile in range(first_tile, ctx.cfg.tile_count):
+        k_stage = tile % ctx.cfg.k_lds_stages
+        v_stage = tile % ctx.cfg.v_lds_stages
+        prefetch_tile = tile + 2
+        prefetch = prefetch_tile if prefetch_tile < ctx.cfg.tile_count else None
+        scores, states, tokens = _run_indexed_pipeline_phase(
+            bld,
+            ctx,
+            scores,
+            states,
+            tokens,
+            bld.constant(dsl.i32(), tile),
+            prefetch,
+            k_stage,
+            v_stage,
+            (v_stage - 1) % ctx.cfg.v_lds_stages,
+            prefetch_tile % ctx.cfg.k_lds_stages,
+            name=f"fa_pipeline_tail{tile - first_tile}",
+        )
+    return _flatten_pipeline_state(scores, states, tokens)
 
 
 def _emit_pipeline_loop(
     bld: dsl.FunctionBuilder, ctx: _KernelContext, seed: _PipelineSeed
 ) -> tuple[dsl.Value, ...]:
-    init_args = (
-        *(score for group in seed.scores for score in group),
-        *(
-            value
-            for state in seed.states
-            for value in (*state.outputs, state.row_max, state.row_sum)
-        ),
-        seed.k_ready2,
-        seed.k_ready3,
-        seed.v_ready1,
-        seed.v_done0,
-    )
+    init_args = _flatten_pipeline_state(seed.scores, seed.states, seed.tokens)
     lower = bld.constant(dsl.i32(), 2)
-    upper = bld.constant(dsl.i32(), ctx.cfg.tile_count)
-    step = bld.constant(dsl.i32(), 2)
+    step_value = math.lcm(ctx.cfg.k_lds_stages, ctx.cfg.v_lds_stages)
+    grouped_tiles = (ctx.cfg.tile_count - 2) // step_value * step_value
+    grouped_end = 2 + grouped_tiles
+    if grouped_tiles == 0:
+        return _emit_pipeline_remainder(bld, ctx, init_args, grouped_end)
+    upper = bld.constant(dsl.i32(), grouped_end)
+    step = bld.constant(dsl.i32(), step_value)
     with bld.for_loop(
         lower,
         upper,
@@ -1287,7 +1628,7 @@ def _emit_pipeline_loop(
                 loop.induction_variable,
             )
         )
-    return tuple(loop.results)
+    return _emit_pipeline_remainder(bld, ctx, tuple(loop.results), grouped_end)
 
 
 def _emit_epilogue(
@@ -1295,21 +1636,7 @@ def _emit_epilogue(
     ctx: _KernelContext,
     tail_args: tuple[dsl.Value, ...],
 ) -> None:
-    score_count = _BLOCK_N // _MFMA_TILE
-    state_base = ctx.cfg.query_groups * score_count
-    token_base = state_base + ctx.cfg.query_groups * 6
-    final_scores = tuple(
-        tuple(tail_args[group * score_count : (group + 1) * score_count])
-        for group in range(ctx.cfg.query_groups)
-    )
-    final_states = tuple(
-        _AttentionState(
-            tuple(tail_args[state_base + group * 6 : state_base + group * 6 + 4]),
-            tail_args[state_base + group * 6 + 4],
-            tail_args[state_base + group * 6 + 5],
-        )
-        for group in range(ctx.cfg.query_groups)
-    )
+    final_scores, final_states, tokens = _unpack_pipeline_state(ctx, tail_args)
     final_probabilities: list[tuple[dsl.Value, ...]] = []
     next_states: list[_AttentionState] = []
     for group_scores, state in zip(final_scores, final_states, strict=True):
@@ -1319,9 +1646,13 @@ def _emit_epilogue(
         final_probabilities.append(probabilities)
         next_states.append(state)
     final_states = tuple(next_states)
-    final_v_ready = _stage_end(bld, tail_args[token_base + 2])
+    final_v_ready = _stage_end(bld, tokens.previous_v_ready)
     final_v_fragments, final_v_tokens = _load_v_tile(
-        bld, ctx.types, ctx.lds1.v, ctx.workitem, after=final_v_ready
+        bld,
+        ctx.types,
+        ctx.lds[(ctx.cfg.tile_count - 1) % ctx.cfg.v_lds_stages].v,
+        ctx.workitem,
+        after=final_v_ready,
     )
     _stage_end(bld, *final_v_tokens)
     final_outputs = _pv_tiles(
@@ -1340,9 +1671,11 @@ def _emit_epilogue(
             ctx.workitem_first,
             bld.constant(dsl.i32(), ctx.cfg.waves // 2 * _WAVE_SIZE),
         )
+        bld.sched_barrier()
         with bld.if_(leading):
             _stage_end(bld)
         bld.set_priority(0)
+        bld.sched_barrier()
     for query_group, final_state in enumerate(final_states):
         _store_output(
             bld,
@@ -1375,8 +1708,16 @@ def build_gfx950_flash_attention_module(
     sequence: int = 8192,
     xcds: int = 8,
     waves: int = _DEFAULT_WAVES,
+    qk_max_abs: float | None = None,
 ) -> Module:
-    cfg = Gfx950FlashAttentionConfig(batch, heads, sequence, xcds, waves)
+    cfg = Gfx950FlashAttentionConfig(
+        batch=batch,
+        heads=heads,
+        sequence=sequence,
+        xcds=xcds,
+        waves=waves,
+        qk_max_abs=qk_max_abs,
+    )
     bld = dsl.ModuleBuilder()
     with bld:
         attrs: dict[str, dsl.Attribute] = {

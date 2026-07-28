@@ -77,6 +77,7 @@ public:
   void bindValue(Value result, Value source);
   void bindValue(Value result, ArrayRef<Value> sources);
   const InstructionScheduleModel &getScheduleModel() const;
+  bool hasSharedResourceState() const { return true; }
   void setState(std::unique_ptr<MultiWaveExecutionState> newState);
   std::unique_ptr<MultiWaveExecutionState> takeState();
 

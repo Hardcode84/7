@@ -68,6 +68,8 @@ struct InstructionStall {
 
 struct InstructionCommitResult {
   InstructionStall stall;
+  InstructionStall priorityStall;
+  InstructionStall computePriorityStall;
   int64_t issueCycle = 0;
   int64_t nextIssueCycle = 0;
   int64_t valueReadyCycle = 0;
@@ -212,6 +214,7 @@ struct InstructionExecutionState {
   const InstructionScheduleModel &getScheduleModel() const {
     return config.scheduleModel;
   }
+  bool hasSharedResourceState() const { return false; }
   unsigned getPendingMemoryEventCount(InstructionWaitCounterKind kind) const;
   unsigned getPipeInFlightCount(InstructionPipeKind kind) const;
 

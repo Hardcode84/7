@@ -221,6 +221,9 @@ getStaticIssueInfo(const StaticIssueInfoMap &staticInfo, Operation *op) {
 }
 
 struct ComputeResourceState {
+  explicit ComputeResourceState(bool trackMfmaCoissue)
+      : trackMfmaCoissue(trackMfmaCoissue) {}
+
   ComputeResourcePreview preview(const StaticIssueInfo &info) const;
   void commit(const StaticIssueInfo &info);
 
@@ -229,6 +232,7 @@ struct ComputeResourceState {
       readyAt{};
   int64_t currentSlot = 0;
   int64_t mfmaCoissueReadyAt = 0;
+  bool trackMfmaCoissue = false;
 };
 
 static unsigned
@@ -304,6 +308,14 @@ public:
         .getScheduleModel();
   }
 
+  bool hasSharedResourceState() const {
+    if (const auto *single =
+            std::get_if<waveamdmachine::InstructionExecutionState>(&state))
+      return single->hasSharedResourceState();
+    return std::get<waveamdmachine::MultiWaveCohortExecutionState>(state)
+        .hasSharedResourceState();
+  }
+
 private:
   std::variant<waveamdmachine::InstructionExecutionState,
                waveamdmachine::MultiWaveCohortExecutionState>
@@ -315,14 +327,14 @@ struct IssueState {
              waveamdmachine::InstructionExecutionConfig config,
              const StaticIssueInfoMap &staticInfo,
              Block *frozenLoopArgs = nullptr)
-      : model(arch, config), staticInfo(&staticInfo),
-        frozenLoopArgs(frozenLoopArgs) {}
+      : model(arch, config), resources(!model.hasSharedResourceState()),
+        staticInfo(&staticInfo), frozenLoopArgs(frozenLoopArgs) {}
 
   IssueState(const waveamdmachine::MultiWaveExecutionState &state,
              ArrayRef<unsigned> waves, const StaticIssueInfoMap &staticInfo,
              Block *frozenLoopArgs = nullptr)
-      : model(state, waves), staticInfo(&staticInfo),
-        frozenLoopArgs(frozenLoopArgs) {}
+      : model(state, waves), resources(!model.hasSharedResourceState()),
+        staticInfo(&staticInfo), frozenLoopArgs(frozenLoopArgs) {}
 
   const StaticIssueInfo &getStaticInfo(Operation *op) const {
     return getStaticIssueInfo(*staticInfo, op);
@@ -357,6 +369,8 @@ struct IssuePreview {
   bool hasMemoryValue = false;
   bool m0Hazard = false;
   bool storeDataHazard = false;
+  bool priorityStall = false;
+  bool computePriorityStall = false;
   ComputeResourcePreview resource;
 };
 
@@ -618,7 +632,7 @@ ComputeResourceState::preview(const StaticIssueInfo &info) const {
   result.releaseSlots = info.releaseSlots;
   size_t index = static_cast<size_t>(result.fu);
   int64_t readySlot = readyAt[index];
-  if (info.mfmaCoissueResource)
+  if (trackMfmaCoissue && info.mfmaCoissueResource)
     readySlot = std::max(readySlot, mfmaCoissueReadyAt);
   result.waitSlots = std::max<int64_t>(0, readySlot - currentSlot);
   return result;
@@ -641,7 +655,7 @@ void ComputeResourceState::commit(const StaticIssueInfo &info) {
   unsigned releaseSlots =
       std::max<unsigned>(resource.releaseSlots, info.issues);
   readyAt[index] = issueSlot + releaseSlots;
-  if (info.mfmaCoissueResource)
+  if (trackMfmaCoissue && info.mfmaCoissueResource)
     mfmaCoissueReadyAt = issueSlot + releaseSlots;
   currentSlot = issueSlot + info.issues;
 }
@@ -714,6 +728,8 @@ previewIssue(const IssueState &state, Operation *op,
     return failure();
 
   recordPreviewStall(preview, commit->stall);
+  preview.priorityStall = commit->priorityStall.cycles != 0;
+  preview.computePriorityStall = commit->computePriorityStall.cycles != 0;
   preview.issueCycle = commit->issueCycle;
   preview.readyCycle = commit->valueReadyCycle;
   preview.nextIssueCycle = commit->nextIssueCycle;
@@ -727,6 +743,16 @@ static bool stalls(const IssuePreview &preview) {
          preview.fuWaitCycles != 0 || preview.issueWaitCycles != 0 ||
          preview.cuIssueWaitCycles != 0 || preview.cmaIssueWaitCycles != 0 ||
          preview.hazardWaitInsts != 0;
+}
+
+static bool stallsPriority(const IssuePreview &preview) {
+  return preview.priorityStall || preview.issueWaitCycles != 0 ||
+         preview.cuIssueWaitCycles != 0 || preview.cmaIssueWaitCycles != 0;
+}
+
+static bool stallsComputePriority(const IssuePreview &preview) {
+  return preview.computePriorityStall || preview.issueWaitCycles != 0 ||
+         preview.cuIssueWaitCycles != 0 || preview.cmaIssueWaitCycles != 0;
 }
 
 static LogicalResult commitIssue(IssueState &state, Operation *op,
@@ -2737,7 +2763,7 @@ static BitVector buildNoInsts(const GreedyRegion &region,
 }
 
 static bool isReadyComputeResourceCandidate(const IssuePreview &preview) {
-  return !stalls(preview) && preview.resource.releaseSlots != 0 &&
+  return !stallsPriority(preview) && preview.resource.releaseSlots != 0 &&
          preview.resource.waitSlots == 0;
 }
 
@@ -3027,7 +3053,8 @@ buildReadyComputeResourceContext(unsigned next, const GreedyRegion &region,
   FailureOr<IssuePreview> nextPreview = previewIssue(state, nextOp);
   if (failed(nextPreview))
     return failure();
-  if (stalls(*nextPreview) || nextPreview->resource.releaseSlots == 0)
+  if (stallsComputePriority(*nextPreview) ||
+      nextPreview->resource.releaseSlots == 0)
     return std::optional<ReadyComputeResourceContext>{};
   if (nextPreview->resource.waitSlots == 0 && !prioritizeComputeResources)
     return std::optional<ReadyComputeResourceContext>{};
@@ -3136,7 +3163,7 @@ findReadyLatencyCandidate(const BitVector &ready, unsigned next,
     FailureOr<IssuePreview> preview = previewIssue(state, region.ops[index]);
     if (failed(preview))
       return failure();
-    if (stalls(*preview))
+    if (stallsPriority(*preview))
       continue;
     waveamdmachine::ReadyCandidateMetrics metrics = getReadyCandidateMetrics(
         index, region, scheduled, computeIslands, *ranking.pressureState);
@@ -3169,7 +3196,7 @@ static FailureOr<std::optional<unsigned>> findReadyLatencyAlternative(
   FailureOr<IssuePreview> nextPreview = previewIssue(state, region.ops[next]);
   if (failed(nextPreview))
     return failure();
-  if (stalls(*nextPreview))
+  if (stallsPriority(*nextPreview))
     return std::optional<unsigned>{};
 
   int64_t requiredLatency =

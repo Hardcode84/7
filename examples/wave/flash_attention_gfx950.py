@@ -22,6 +22,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sequence", type=int, default=8192)
     parser.add_argument("--xcds", type=int, default=8)
     parser.add_argument("--waves", type=int, choices=(4, 8), default=8)
+    parser.add_argument(
+        "--qk-max-abs",
+        type=float,
+        help="use fixed softmax reference for |Q|,|K| <= VALUE",
+    )
     parser.add_argument("--chip", default="gfx950")
     parser.add_argument("--dump-asm", action="store_true")
     parser.add_argument("--wave-translate", type=str, default=None)
@@ -42,7 +47,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = Gfx950FlashAttentionConfig(
-            args.batch, args.heads, args.sequence, args.xcds, args.waves
+            batch=args.batch,
+            heads=args.heads,
+            sequence=args.sequence,
+            xcds=args.xcds,
+            waves=args.waves,
+            qk_max_abs=args.qk_max_abs,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
@@ -55,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         sequence=args.sequence,
         xcds=args.xcds,
         waves=args.waves,
+        qk_max_abs=args.qk_max_abs,
     )
     module_text = str(module)
     if args.dump_asm:

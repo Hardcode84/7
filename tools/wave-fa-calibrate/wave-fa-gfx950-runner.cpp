@@ -24,7 +24,7 @@ namespace {
 
 constexpr int kBlockM = 256;
 constexpr int kHeadDim = 128;
-constexpr int kDynamicLDS = 68096;
+constexpr int kCohortDynamicLDS = 68096;
 
 struct Args {
   const char *hsaco = nullptr;
@@ -33,9 +33,11 @@ struct Args {
   int heads = 1;
   int sequence = 256;
   int threads = 512;
+  int dynamicLDS = kCohortDynamicLDS;
   int seed = 0;
   int iters = 20;
   int warmup = 5;
+  int inputScale = 1;
   bool check = false;
   bool zeroQK = false;
 };
@@ -81,8 +83,9 @@ static int parseInt(const char *text) {
 static void usage() {
   std::fprintf(stderr,
                "usage: wave-fa-gfx950-runner [options] <hsaco> <kernel>\n"
-               "  --batch N --heads N --sequence N --threads N --seed N\n"
-               "  --iters N --warmup N --check --zero-qk\n");
+               "  --batch N --heads N --sequence N --threads N "
+               "--dynamic-lds N --seed N\n"
+               "  --iters N --warmup N --input-scale N --check --zero-qk\n");
 }
 
 static bool parseSwitch(const char *arg, Args &args) {
@@ -98,14 +101,16 @@ static bool parseSwitch(const char *arg, Args &args) {
 }
 
 static bool parseIntOption(const char *arg, int value, Args &args) {
-  static constexpr std::array<IntOption, 7> options{{
+  static constexpr std::array<IntOption, 9> options{{
       {&Args::batch, "--batch"},
       {&Args::heads, "--heads"},
       {&Args::sequence, "--sequence"},
       {&Args::threads, "--threads"},
+      {&Args::dynamicLDS, "--dynamic-lds"},
       {&Args::seed, "--seed"},
       {&Args::iters, "--iters"},
       {&Args::warmup, "--warmup"},
+      {&Args::inputScale, "--input-scale"},
   }};
   for (const IntOption &option : options) {
     if (std::strcmp(arg, option.name) != 0)
@@ -128,7 +133,8 @@ static void parsePositional(const char *arg, int &positional, Args &args) {
 
 static bool hasInvalidCounts(const Args &args) {
   return args.batch <= 0 || args.heads <= 0 || args.sequence <= 0 ||
-         args.iters <= 0 || args.warmup < 0;
+         args.dynamicLDS <= 0 || args.iters <= 0 || args.warmup < 0 ||
+         args.inputScale <= 0;
 }
 
 static void validateArgs(const Args &args) {
@@ -343,7 +349,8 @@ findNearestRow(const std::vector<uint16_t> &output,
   return nearestRow;
 }
 
-static void reportMismatch(const std::vector<uint16_t> &output,
+static void reportMismatch(const Args &args,
+                           const std::vector<uint16_t> &output,
                            const std::vector<ReferenceRow> &reference,
                            const WorstError &worst) {
   std::fprintf(stderr,
@@ -363,6 +370,15 @@ static void reportMismatch(const std::vector<uint16_t> &output,
     std::fprintf(stderr, "output_check: d=%d expected=%.6f got=%.6f\n", i,
                  worst.row->values[i], got);
   }
+  size_t headElements = static_cast<size_t>(args.sequence) * kHeadDim;
+  for (const ReferenceRow &candidate : reference) {
+    if (candidate.head != worst.row->head || candidate.row % 32)
+      continue;
+    size_t index = static_cast<size_t>(candidate.head) * headElements +
+                   static_cast<size_t>(candidate.row) * kHeadDim;
+    std::fprintf(stderr, "output_check: row=%d d=0 expected=%.6f got=%.6f\n",
+                 candidate.row, candidate.values[0], fromBf16(output[index]));
+  }
 }
 
 static void validateOutput(const Args &args,
@@ -370,7 +386,7 @@ static void validateOutput(const Args &args,
                            const std::vector<ReferenceRow> &reference) {
   WorstError worst = findWorstError(args, output, reference);
   if (worst.difference > 3.0e-2) {
-    reportMismatch(output, reference, worst);
+    reportMismatch(args, output, reference, worst);
     std::exit(1);
   }
   std::printf("output_check: passed max_abs_diff=%.8f index=%zu\n",
@@ -381,7 +397,7 @@ static void launch(hipFunction_t function, const Args &args,
                    void **kernelArgs) {
   checkHip(hipModuleLaunchKernel(function, args.sequence / kBlockM,
                                  args.batch * args.heads, 1, args.threads, 1, 1,
-                                 kDynamicLDS, nullptr, kernelArgs, nullptr),
+                                 args.dynamicLDS, nullptr, kernelArgs, nullptr),
            "hipModuleLaunchKernel");
 }
 
@@ -391,8 +407,9 @@ int main(int argc, char **argv) {
   Args args = parseArgs(argc, argv);
   size_t elements =
       static_cast<size_t>(args.batch) * args.heads * args.sequence * kHeadDim;
-  std::vector<uint16_t> hostQ = makeInput(elements, args.seed, 0, 0.125f);
-  std::vector<uint16_t> hostK = makeInput(elements, args.seed, 1, 0.125f);
+  float qkScale = 0.125f * static_cast<float>(args.inputScale);
+  std::vector<uint16_t> hostQ = makeInput(elements, args.seed, 0, qkScale);
+  std::vector<uint16_t> hostK = makeInput(elements, args.seed, 1, qkScale);
   std::vector<uint16_t> hostV = makeInput(elements, args.seed, 2, 0.25f);
   if (args.zeroQK) {
     std::fill(hostQ.begin(), hostQ.end(), 0);
@@ -407,7 +424,7 @@ int main(int argc, char **argv) {
            "hipModuleGetFunction");
   checkHip(hipFuncSetAttribute(reinterpret_cast<const void *>(function),
                                hipFuncAttributeMaxDynamicSharedMemorySize,
-                               kDynamicLDS),
+                               args.dynamicLDS),
            "hipFuncSetAttribute");
 
   uint16_t *deviceQ = nullptr;
@@ -456,7 +473,7 @@ int main(int argc, char **argv) {
               args.sequence, kHeadDim);
   std::printf("grid: %d,%d,1 block: %d,1,1 dynamic_lds=%d\n",
               args.sequence / kBlockM, args.batch * args.heads, args.threads,
-              kDynamicLDS);
+              args.dynamicLDS);
   std::printf("per_launch_us: %.3f\n", microseconds);
   std::printf("tflops: %.3f\n", tflops);
   if (args.check)

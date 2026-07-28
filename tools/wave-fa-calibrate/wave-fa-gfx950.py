@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -57,13 +58,24 @@ def _run(
 def _validate_positive_args(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> None:
-    for name in ("batch", "heads", "sequence", "iters", "repeats"):
+    for name in ("batch", "heads", "sequence", "iters", "repeats", "input_scale"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name} must be positive")
     if args.warmup < 0:
         parser.error("--warmup must be non-negative")
     if args.device is not None and args.device < 0:
         parser.error("--device must be non-negative")
+
+
+def _validate_qk_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.qk_max_abs is None:
+        return
+    if not math.isfinite(args.qk_max_abs) or args.qk_max_abs <= 0:
+        parser.error("--qk-max-abs must be finite and positive")
+    if args.qk_max_abs < args.input_scale:
+        parser.error("--qk-max-abs must cover the generated input range")
 
 
 def _validate_output_args(
@@ -88,7 +100,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sequence", type=int, default=8192)
     parser.add_argument("--xcds", type=int, default=8)
     parser.add_argument("--waves", type=int, choices=(4, 8), default=8)
+    parser.add_argument(
+        "--qk-max-abs",
+        type=float,
+        help="use fixed softmax reference for |Q|,|K| <= VALUE",
+    )
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--input-scale", type=int, default=1)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=1)
@@ -109,6 +127,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--runner", type=Path, default=None)
     args = parser.parse_args(argv)
     _validate_positive_args(parser, args)
+    _validate_qk_args(parser, args)
     _validate_output_args(parser, args)
     return args
 
@@ -140,6 +159,20 @@ def _import_builder(build_dir: Path):
     return build_gfx950_flash_attention_module
 
 
+def _dynamic_lds_bytes(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(args.build_dir / "python_packages/wave_mlir"))
+    from mlir.dialects.wave_flash_attention import Gfx950FlashAttentionConfig
+
+    return Gfx950FlashAttentionConfig(
+        batch=args.batch,
+        heads=args.heads,
+        sequence=args.sequence,
+        xcds=args.xcds,
+        waves=args.waves,
+        qk_max_abs=args.qk_max_abs,
+    ).dynamic_lds_bytes
+
+
 def _source(args: argparse.Namespace) -> str:
     build = _import_builder(args.build_dir)
     try:
@@ -149,6 +182,7 @@ def _source(args: argparse.Namespace) -> str:
             sequence=args.sequence,
             xcds=args.xcds,
             waves=args.waves,
+            qk_max_abs=args.qk_max_abs,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
@@ -234,8 +268,12 @@ def _run_hardware(
         str(args.sequence),
         "--threads",
         str(args.waves * 64),
+        "--dynamic-lds",
+        str(_dynamic_lds_bytes(args)),
         "--seed",
         str(args.seed),
+        "--input-scale",
+        str(args.input_scale),
         "--iters",
         str(args.iters),
         "--warmup",

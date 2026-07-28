@@ -2,22 +2,46 @@
 
 ## Current-tree profile
 
-Shape: `B=2, H=64, N=8192, D=128`, BF16 input/output, random data, eight
-waves, eight XCDs.
+Shape: `B=2, H=64, N=8192, D=128`, BF16 input/output, bounded random data,
+eight waves, eight XCDs. The perf profile declares `|Q|, |K| <= 1`.
 
 The current golden is
 `test/PerfGolden/Inputs/gfx950-fa-b2-h64-n8192-d128-bf16-8wave.s`:
 
 - SHA-256:
-  `7a4dad19ede679feefc425fa7ce7f6c4b5d1864eeda457d7d620d33f3db42065`
-- 256 VGPR, 24 SGPR, no scratch
-- 68,096 bytes dynamic LDS; fixed group segment size remains zero
-- 192 BF16 MFMA instructions, 288 LDS reads, 28 DMA-to-LDS loads
-- 90 packed FP32 adds replace 180 scalar FP32 adds
+  `2866fc967b574febc7d7e78a45bc5f751abc6b4d0dad7c8be192dd03d48f4891`
+- 256 VGPR, 28 SGPR, no scratch
+- 136,192 bytes dynamic LDS; fixed group segment size remains zero
+- 384 BF16 MFMA instructions, 576 LDS reads, 48 DMA-to-LDS loads
+- 384 exponentials, 32 packed FP32 multiplies, no online-max instructions
 
-Current codegen, assembly, linking, and deterministic PerfGolden checks pass.
-Random correctness and timing need gfx950. The available host is gfx1100, so no
-current-tree TFLOP/s result is claimed.
+`qk_max_abs=1` uses the analytic fixed reference
+`log2(e) * sqrt(128)`. The declared bound keeps every shifted probability in
+BF16 normal range, so numerator and denominator share one constant scale.
+Omitting the bound keeps adaptive online-max and rescale handling.
+
+The eight-wave kernel uses a four-stage shared K/V ring. A conditional entry
+barrier keeps the two four-wave cohorts one barrier event apart; a
+complementary exit barrier restores convergence. All eight waves cooperatively
+fill each tile. Explicit token edges make the trailing cohort publish previous
+V at the next phase's first barrier and next K at the preceding phase's third
+barrier.
+
+Packed reduction branches cannot span scheduling barriers. Ordinary root
+pairing remains enabled; unrestricted branch pairing spills 2,640 bytes per
+thread here. Regeneration replaces the branch golden's eight `v_pk_add_f32`
+instructions with sixteen scalar adds; every other opcode count is unchanged.
+Both checked-in TLX FA goldens remain byte-identical.
+
+Current-tree IR generation, gfx950 object assembly, HSACO linking, and
+deterministic golden checks pass.
+
+The source branch's gfx950 runs passed fifty `N=256` random checks with maximum
+absolute error below `0.00135` and nine production-shape checks below
+`0.000183`. Focused runs measured 1111.1-1115.6 TFLOP/s, 1113.9 median; the
+final full-sweep row measured 1110.2-1112.4 TFLOP/s, 1111.1 median. A 45-row
+rerun produced byte-identical HSACOs. Current host is gfx1100, so current-tree
+gfx950 correctness and throughput remain unmeasured locally.
 
 Run the checked sweep on gfx950:
 
@@ -61,12 +85,14 @@ Rejected scheduling and ISA experiments:
 | Independent-frontier loop replay | pass | 904-922 |
 | Software split barriers, no priority stagger | pass | 921 |
 | Software split barriers, shared counter | pass | 933 |
-| Degree-four FP32 `exp2` polynomial | `max_abs_diff=0.0155` | 80.7 |
+| Remove post-schedule packed peephole | pass | 1108.9-1109.9 |
+| Degree-four FP32 `exp2` polynomial | pass, `max_abs_diff=0.0155` | 80.7 |
 
 Priority-staggered software barriers deadlocked because conditional waves
-shared one static arrival counter. The polynomial removed exponentials but
-spilled 2,236 bytes/thread. gfx950 FP8 MFMA needs an explicit scaled-input
-contract; converting BF16 through FP32 inside the loop is not a viable shortcut.
+shared one static arrival counter. Hardware arrival accounting balances the
+stagger at exit. The packed MFMA peephole measured 1113.2-1115.7 TFLOP/s,
+versus 1108.9-1109.9 without it. The polynomial spilled 2,236 bytes/thread.
+gfx950 FP8 MFMA needs an explicit scaled-input contract.
 
 Next useful experiment needs a smaller algorithmic live set, not a tighter
 allocator budget: split query/output ownership without idle phases, or define
