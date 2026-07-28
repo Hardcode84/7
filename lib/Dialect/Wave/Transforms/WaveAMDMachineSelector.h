@@ -28,6 +28,7 @@
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
@@ -288,6 +289,7 @@ public:
   DenseSet<Value> preselectedPointerAdds;
   DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
       slotFitsU32Cache;
+  std::optional<waveamdmachine::AMDGPUTarget> target;
   PointerOffset lastDmaDstOffset;
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
@@ -297,12 +299,12 @@ public:
   Value lastDmaDstBase;
   Value dmaIssueSkipFlag;
   Value dmaIssueSkipCondition;
-  std::optional<unsigned> targetIsaMajor;
   unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
   bool dmaIssueTimingEnabled = false;
   bool lastDmaHadIssueDelay = false;
   bool packedWorkitemIds = false;
+  bool rejectLegacyVMemToLDS = false;
 
   // ---- address-planning helpers -----------------------------------------
   void appendBindingAssumptions(Value binding, StringRef name,

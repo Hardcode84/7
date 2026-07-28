@@ -39,6 +39,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -474,18 +475,42 @@ static unsigned getMaxWorkitemIdAxis(func::FuncOp func) {
   return maxAxis;
 }
 
-static LogicalResult
-validateTargetWaveWidth(func::FuncOp func, unsigned targetWidth,
-                        std::optional<unsigned> requiredWaveWidth) {
+static LogicalResult validateTargetWaveWidth(
+    func::FuncOp func, const waveamdmachine::AMDGPUTarget &target,
+    unsigned targetWidth, std::optional<unsigned> requiredWaveWidth) {
   if (!requiredWaveWidth || *requiredWaveWidth == targetWidth)
     return success();
+  return func.emitError("WaveAMDMachine backend target ")
+         << target.chip << " uses wave" << targetWidth
+         << " but function requires wave" << *requiredWaveWidth;
+}
+
+struct MachineSelectionTargetInfo {
+  waveamdmachine::AMDGPUTarget target;
+  unsigned wavefrontSize = 0;
+  bool rejectLegacyVMemToLDS = false;
+};
+
+static FailureOr<MachineSelectionTargetInfo>
+getMachineSelectionTargetInfo(func::FuncOp func, ModuleOp targetModule) {
   FailureOr<waveamdmachine::AMDGPUTarget> target =
       waveamdmachine::getAMDGPUTarget(func, "WaveAMDMachine selection");
   if (failed(target))
     return failure();
-  return func.emitError("WaveAMDMachine backend target ")
-         << target->chip << " uses wave" << targetWidth
-         << " but function requires wave" << *requiredWaveWidth;
+  if (target->isa.Major == 0)
+    return targetModule.emitError("unsupported AMDGPU target: ")
+           << target->triple << "--" << target->chip;
+  std::string error;
+  std::unique_ptr<llvm::MCSubtargetInfo> sti =
+      waveamdmachine::createAMDGPUMCSubtargetInfo(*target, &error);
+  if (!sti)
+    return func.emitError("failed to create AMDGPU subtarget: ") << error;
+  FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
+      func, *target, *sti, "WaveAMDMachine selection");
+  if (failed(wavefrontSize))
+    return failure();
+  return MachineSelectionTargetInfo{std::move(*target), *wavefrontSize,
+                                    llvm::AMDGPU::isGFX1250(*sti)};
 }
 
 static LogicalResult
@@ -500,23 +525,21 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
     selector.packedWorkitemIds = selector.maxWorkitemIdAxis != 0;
     return success();
   }
-  FailureOr<unsigned> targetWidth =
-      waveamdmachine::getAMDGPUWavefrontSize(func, "WaveAMDMachine selection");
-  if (failed(targetWidth))
+  FailureOr<MachineSelectionTargetInfo> targetInfo =
+      getMachineSelectionTargetInfo(func, targetModule);
+  if (failed(targetInfo))
     return failure();
+  selector.target = std::move(targetInfo->target);
+  selector.rejectLegacyVMemToLDS = targetInfo->rejectLegacyVMemToLDS;
   FailureOr<MachineSelectionFunctionFacts> facts =
       collectMachineSelectionFunctionFacts(func);
   if (failed(facts))
     return failure();
-  if (failed(validateTargetWaveWidth(func, *targetWidth,
+  if (failed(validateTargetWaveWidth(func, *selector.target,
+                                     targetInfo->wavefrontSize,
                                      facts->requiredWaveWidth)))
     return failure();
   selector.maxWorkitemIdAxis = facts->maxWorkitemIdAxis;
-  FailureOr<llvm::AMDGPU::IsaVersion> isa =
-      getTargetIsaVersion(func, "WaveAMDMachine selection");
-  if (failed(isa))
-    return failure();
-  selector.targetIsaMajor = isa->Major;
   if (selector.maxWorkitemIdAxis != 0) {
     FailureOr<bool> packed =
         hasWaveAMDPackedTID(func, "WaveAMDMachine workitem id selection");
@@ -5332,7 +5355,7 @@ static Value createVCmpVcc(OpBuilder &builder, Location loc,
 }
 
 static bool usesLegacyVCmpVcc(const WaveAMDMachineSelector &selector) {
-  return selector.targetIsaMajor && *selector.targetIsaMajor < 10;
+  return selector.target && selector.target->isa.Major < 10;
 }
 
 struct I64Dwords {
@@ -6524,7 +6547,7 @@ static Value createVAddU32(WaveAMDMachineSelector &selector, Location loc,
                            Value lhs, Value rhs) {
   Type vgprType =
       getRegType(selector.builder.getContext(), waveamdmachine::RegClass::VGPR);
-  if (selector.targetIsaMajor && *selector.targetIsaMajor == 8)
+  if (selector.target && selector.target->isa.Major == 8)
     return waveamdmachine::VAddU32VccOp::create(
                selector.builder, loc, vgprType,
                getVCCType(selector.builder.getContext()), lhs, rhs)
@@ -8146,14 +8169,25 @@ selectPlannedDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   return success();
 }
 
-LogicalResult
-WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
+static LogicalResult
+validateDmaLoadLdsSelection(WaveAMDMachineSelector &selector,
+                            waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
     return op.emitError("WaveAMDMachine backend supports only bytes = 4 or 16");
+  if (selector.target && selector.rejectLegacyVMemToLDS)
+    return op.emitOpError() << selector.target->chip
+                            << " does not support direct-to-LDS lowering";
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
+  if (failed(validateDmaLoadLdsSelection(*this, op)))
+    return failure();
+  bool isBuffer = pointerBuffers.lookup(op.getSource());
   FailureOr<DmaPointers> ptrs = lookupDmaPointers(*this, op);
   if (failed(ptrs))
     return failure();
-  bool isBuffer = pointerBuffers.lookup(op.getSource());
   waveamdmachine::AddressFieldSpec spec =
       dmaAddressSpec(isBuffer, op.getBytes());
   FailureOr<std::optional<Value>> selectedToken =

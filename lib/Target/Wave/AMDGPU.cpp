@@ -644,6 +644,7 @@ private:
       return targetCapabilities->waitXcnt;
     return sti->hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
   }
+  bool rejectLegacyVMemToLDS() const { return llvm::AMDGPU::isGFX1250(*sti); }
   bool usesSplitWaitCounters() const {
     if (targetCapabilities)
       return targetCapabilities->waitCounterFamily ==
@@ -5156,11 +5157,12 @@ private:
       return emitScratchLoad(op);
     if (isa<waveamdmachine::ScratchStoreB32Op>(op))
       return emitScratchStore(op);
-    if (isGfx1250() && isa<waveamdmachine::GlobalLoadLdsB32Op,
-                           waveamdmachine::GlobalLoadLdsB128Op,
-                           waveamdmachine::BufferLoadLdsB32Op,
-                           waveamdmachine::BufferLoadLdsB128Op>(op))
-      return op.emitError("no gfx1250 MC mapping for ") << op.getName();
+    if (rejectLegacyVMemToLDS() && isa<waveamdmachine::GlobalLoadLdsB32Op,
+                                       waveamdmachine::GlobalLoadLdsB128Op,
+                                       waveamdmachine::BufferLoadLdsB32Op,
+                                       waveamdmachine::BufferLoadLdsB128Op>(op))
+      return op.emitError("no legacy VMEM-to-LDS MC mapping for target ")
+             << targetChip << ": " << op.getName();
     if (isa<waveamdmachine::GlobalLoadLdsB32Op>(op)) {
       if (failed(rejectCacheAttr(op, "global LDS load")))
         return failure();

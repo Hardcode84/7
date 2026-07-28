@@ -370,19 +370,10 @@ static FailureOr<unsigned> readWavefrontSizeAttr(ModuleOp mod,
   return static_cast<unsigned>(width);
 }
 
-FailureOr<unsigned>
-mlir::waveamdmachine::getAMDGPUWavefrontSize(Operation *op,
-                                             StringRef consumer) {
-  FailureOr<AMDGPUTarget> target = getAMDGPUTarget(op, consumer);
-  if (failed(target))
-    return failure();
-
-  std::string error;
-  std::unique_ptr<llvm::MCSubtargetInfo> sti =
-      createAMDGPUMCSubtargetInfo(*target, &error);
-  if (!sti)
-    return op->emitError("failed to create AMDGPU subtarget: ") << error;
-  unsigned defaultWavefrontSize = llvm::AMDGPU::IsaInfo::getWavefrontSize(*sti);
+FailureOr<unsigned> mlir::waveamdmachine::getAMDGPUWavefrontSize(
+    Operation *op, const AMDGPUTarget &target, const llvm::MCSubtargetInfo &sti,
+    StringRef consumer) {
+  unsigned defaultWavefrontSize = llvm::AMDGPU::IsaInfo::getWavefrontSize(sti);
 
   unsigned width = defaultWavefrontSize;
   ModuleOp mod = findAMDGPUTargetModule(op);
@@ -394,10 +385,29 @@ mlir::waveamdmachine::getAMDGPUWavefrontSize(Operation *op,
     return failure();
   width = *attrWidth;
 
-  if (!supportsWavefrontSize(*sti, width, defaultWavefrontSize))
+  if (!supportsWavefrontSize(sti, width, defaultWavefrontSize))
     return mod.emitError(consumer)
-           << " target " << target->chip << " does not support wave" << width;
+           << " target " << target.chip << " does not support wave" << width;
   return width;
+}
+
+FailureOr<unsigned> mlir::waveamdmachine::getAMDGPUWavefrontSize(
+    Operation *op, const AMDGPUTarget &target, StringRef consumer) {
+  std::string error;
+  std::unique_ptr<llvm::MCSubtargetInfo> sti =
+      createAMDGPUMCSubtargetInfo(target, &error);
+  if (!sti)
+    return op->emitError("failed to create AMDGPU subtarget: ") << error;
+  return getAMDGPUWavefrontSize(op, target, *sti, consumer);
+}
+
+FailureOr<unsigned>
+mlir::waveamdmachine::getAMDGPUWavefrontSize(Operation *op,
+                                             StringRef consumer) {
+  FailureOr<AMDGPUTarget> target = getAMDGPUTarget(op, consumer);
+  if (failed(target))
+    return failure();
+  return getAMDGPUWavefrontSize(op, *target, consumer);
 }
 
 static void appendTargetFeature(SmallString<128> &features, StringRef feature) {

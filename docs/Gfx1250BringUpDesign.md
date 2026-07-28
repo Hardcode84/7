@@ -28,6 +28,11 @@ Current Wave support is partial:
   handling;
 - buffer descriptors, LDS accounting, and register allocation use gfx1250
   target facts;
+- the dedicated unscheduled pipeline lowers scalar/vector global, buffer, LDS,
+  SMEM, and scratch kernels through object link and disassembly;
+- pressure-driven allocation crosses `v255` and restores visible VGPR-window
+  state across conditional edges and joins;
+- direct-to-LDS operations reject during instruction selection;
 - matrix lowering and scheduling still use older target assumptions.
 
 ## Goal
@@ -608,7 +613,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, target hazards |
 | Python | exact profile selection and wrong-family rejection |
-| Integration | scalar/vector kernel, f16 GEMM, bf16 GEMM |
+| Integration | scalar/vector global, buffer, LDS, SMEM, scratch, high-VGPR CFG, f16 GEMM, bf16 GEMM |
 | hardware | reference correctness, descriptor/scratch smoke, GEMM runtime |
 | PerfGolden | deterministic checked-in ASM after same-hardware benchmark |
 

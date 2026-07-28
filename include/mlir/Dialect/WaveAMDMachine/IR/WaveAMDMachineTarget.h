@@ -119,6 +119,15 @@ FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
 FailureOr<unsigned> getAMDGPUWavefrontSize(Operation *op,
                                            llvm::StringRef consumer);
 
+FailureOr<unsigned> getAMDGPUWavefrontSize(Operation *op,
+                                           const AMDGPUTarget &target,
+                                           llvm::StringRef consumer);
+
+FailureOr<unsigned> getAMDGPUWavefrontSize(Operation *op,
+                                           const AMDGPUTarget &target,
+                                           const llvm::MCSubtargetInfo &sti,
+                                           llvm::StringRef consumer);
+
 FailureOr<bool> getAMDGPUD16PreservesUnusedBits(Operation *op,
                                                 llvm::StringRef consumer);
 
