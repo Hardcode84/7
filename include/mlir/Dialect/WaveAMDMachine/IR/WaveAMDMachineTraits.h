@@ -43,6 +43,9 @@ template <typename ConcreteType>
 class VMEMStoreOp : public TraitBase<ConcreteType, VMEMStoreOp> {};
 
 template <typename ConcreteType>
+class TensorMemoryOp : public TraitBase<ConcreteType, TensorMemoryOp> {};
+
+template <typename ConcreteType>
 class TupleMemoryOp : public TraitBase<ConcreteType, TupleMemoryOp> {};
 
 template <typename ConcreteType>
@@ -61,6 +64,11 @@ class TokenJoinOp : public TraitBase<ConcreteType, TokenJoinOp> {};
 template <typename ConcreteType>
 class CompletionFreeTokenOp
     : public TraitBase<ConcreteType, CompletionFreeTokenOp> {};
+
+// Adds no completion event; result inherits dependency events.
+template <typename ConcreteType>
+class CompletionNeutralTokenOp
+    : public TraitBase<ConcreteType, CompletionNeutralTokenOp> {};
 
 // Does not advance instruction-distance hazards. May still emit asm.
 template <typename ConcreteType>

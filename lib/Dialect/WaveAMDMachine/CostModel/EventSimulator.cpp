@@ -115,6 +115,8 @@ static EventSimCounter toEventCounter(MemoryCounterKind kind) {
     return EventSimCounter::Lgkm;
   case MemoryCounterKind::Vscnt:
     return EventSimCounter::Vscnt;
+  case MemoryCounterKind::Tensor:
+    return EventSimCounter::Tensor;
   case MemoryCounterKind::None:
     return EventSimCounter::None;
   }

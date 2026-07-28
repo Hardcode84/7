@@ -37,6 +37,63 @@ module attributes {transform.with_named_sequence} {
             !waveamdmachine.reg<vgpr, 4>
     }
 
+    // CHECK-LABEL: func.func @uses_llvm_sgpr_tuple_bases
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
+    // CHECK: waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4, 0>
+    // CHECK: waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 8, 4>
+    func.func @uses_llvm_sgpr_tuple_bases()
+        -> (!waveamdmachine.reg<sgpr, 4, 0>,
+            !waveamdmachine.reg<sgpr, 8>) {
+      %reserved = waveamdmachine.uninit
+          : !waveamdmachine.reg<sgpr, 4, 0>
+      %wide = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 8>
+      %root = waveamdmachine.token : !waveamdmachine.mem.token
+      %done = waveamdmachine.tdm_load %reserved, %wide after %root
+          : (!waveamdmachine.reg<sgpr, 4, 0>,
+             !waveamdmachine.reg<sgpr, 8>,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      return %reserved, %wide
+          : !waveamdmachine.reg<sgpr, 4, 0>,
+            !waveamdmachine.reg<sgpr, 8>
+    }
+
+    // CHECK-LABEL: func.func @accepts_llvm_sgpr_tuple_base
+    // CHECK-SAME: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: stage = "linear-scan-success"
+    func.func @accepts_llvm_sgpr_tuple_base()
+        -> !waveamdmachine.reg<sgpr, 8, 4> {
+      %wide = waveamdmachine.uninit
+          : !waveamdmachine.reg<sgpr, 8, 4>
+      %d0 = waveamdmachine.uninit
+          : !waveamdmachine.reg<sgpr, 4, 0>
+      %root = waveamdmachine.token : !waveamdmachine.mem.token
+      %done = waveamdmachine.tdm_load %d0, %wide after %root
+          : (!waveamdmachine.reg<sgpr, 4, 0>,
+             !waveamdmachine.reg<sgpr, 8, 4>,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      return %wide : !waveamdmachine.reg<sgpr, 8, 4>
+    }
+
+    // CHECK-LABEL: func.func @rejects_nonexistent_sgpr_tuple_base
+    // CHECK-NOT: waveamdmachine.regalloc_assignments
+    // CHECK-SAME: assignments = []
+    // CHECK-SAME: reason = "fixed-alignment"
+    // CHECK-SAME: stage = "linear-scan-failure"
+    func.func @rejects_nonexistent_sgpr_tuple_base()
+        -> !waveamdmachine.reg<sgpr, 8, 6> {
+      %wide = waveamdmachine.uninit
+          : !waveamdmachine.reg<sgpr, 8, 6>
+      %d0 = waveamdmachine.uninit
+          : !waveamdmachine.reg<sgpr, 4, 0>
+      %root = waveamdmachine.token : !waveamdmachine.mem.token
+      %done = waveamdmachine.tdm_load %d0, %wide after %root
+          : (!waveamdmachine.reg<sgpr, 4, 0>,
+             !waveamdmachine.reg<sgpr, 8, 6>,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      return %wide : !waveamdmachine.reg<sgpr, 8, 6>
+    }
+
     // CHECK-LABEL: func.func @accepts_even_fixed_tuple
     // CHECK-SAME: waveamdmachine.regalloc_assignments
     // CHECK-SAME: stage = "linear-scan-success"

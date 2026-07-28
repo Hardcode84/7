@@ -38,6 +38,7 @@ struct OperandLegalitySpec {
   uint32_t constantBusMask = 0;
   uint32_t anyVGPRMask = 0;
   uint32_t vgprValueMask = 0;
+  uint32_t mcTupleMask = 0;
 };
 
 struct PhysicalRegisterSpan {
@@ -63,6 +64,7 @@ bool isMachineImm(Value value);
 std::optional<int64_t> getMachineImmValue(Value value);
 bool isSamePhysicalReg(Value lhs, Value rhs);
 std::optional<PhysicalRegisterSpan> parseSGPRRegisterSpan(StringRef text);
+bool requiresMCTupleEncoding(OpOperand &operand);
 
 bool isInlineImm32(Value value);
 bool usesConstantBus(Value value);

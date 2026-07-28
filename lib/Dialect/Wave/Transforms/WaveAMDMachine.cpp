@@ -480,6 +480,7 @@ static LogicalResult validateTargetWaveWidth(
 struct MachineSelectionTargetInfo {
   waveamdmachine::AMDGPUTarget target;
   unsigned wavefrontSize = 0;
+  unsigned bufferResourceBaseBits = 0;
   waveamdmachine::MatrixFamily matrixFamily =
       waveamdmachine::MatrixFamily::None;
   bool rejectLegacyVMemToLDS = false;
@@ -508,8 +509,10 @@ getMachineSelectionTargetInfo(func::FuncOp func, ModuleOp targetModule) {
   waveamdmachine::MatrixFamily matrixFamily =
       capabilities ? capabilities->matrixFamily
                    : waveamdmachine::MatrixFamily::None;
+  unsigned bufferResourceBaseBits =
+      capabilities ? capabilities->bufferResourceBaseBits : 0;
   return MachineSelectionTargetInfo{std::move(*target), *wavefrontSize,
-                                    matrixFamily,
+                                    bufferResourceBaseBits, matrixFamily,
                                     llvm::AMDGPU::isGFX1250(*sti)};
 }
 
@@ -530,6 +533,7 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   if (failed(targetInfo))
     return failure();
   selector.target = std::move(targetInfo->target);
+  selector.bufferResourceBaseBits = targetInfo->bufferResourceBaseBits;
   selector.matrixFamily = targetInfo->matrixFamily;
   selector.rejectLegacyVMemToLDS = targetInfo->rejectLegacyVMemToLDS;
   FailureOr<MachineSelectionFunctionFacts> facts =
@@ -2845,6 +2849,10 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<waveamd::TransposeLoadOp>(
           [&](auto o) { return selectTransposeLoad(o); })
       .Case<waveamd::DmaLoadLdsOp>([&](auto o) { return selectDmaLoadLds(o); })
+      .Case<waveamd::TDMLoadOp>([&](auto o) { return selectTDMLoad(o); })
+      .Case<waveamd::TDMStoreOp>([&](auto o) { return selectTDMStore(o); })
+      .Case<waveamd::TDMPrefetchOp>(
+          [&](auto o) { return selectTDMPrefetch(o); })
       .Case<waveamd::FragmentUnpackOp>(
           [&](auto o) { return selectFragmentUnpack(o); })
       .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
@@ -4533,13 +4541,36 @@ static bool canPackMmaScaleLowDword(WaveAMDMachineSelector &S, PackOp op) {
   return true;
 }
 
-LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
+static bool trySelectDirectPack(WaveAMDMachineSelector &S, PackOp op) {
+  auto vectorType = dyn_cast<VectorType>(op.getResult().getType());
+  if (vectorType && vectorType.getRank() == 1 && !vectorType.isScalable() &&
+      vectorType.getElementType().isInteger(32) &&
+      llvm::all_of(op.getInputs(),
+                   [](Value value) { return value.getType().isInteger(32); })) {
+    SmallVector<Value> elements;
+    elements.reserve(op.getInputs().size());
+    for (Value input : op.getInputs())
+      elements.push_back(
+          S.materializeSGPR1(op.getLoc(), S.expect(input, op.getOperation())));
+    Type tupleType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR,
+                                elements.size());
+    S.values[op.getResult()] = waveamdmachine::TupleFromElementsOp::create(
+        S.builder, op.getLoc(), tupleType, elements);
+    S.eraseIfTopLevel(op);
+    return true;
+  }
   if (op.getInputs().size() == 1 &&
       hasFixedSingletonSimdVectorPayload(op.getResult().getType())) {
-    values[op.getResult()] = expect(op.getInputs().front(), op);
-    eraseIfTopLevel(op);
-    return success();
+    S.values[op.getResult()] = S.expect(op.getInputs().front(), op);
+    S.eraseIfTopLevel(op);
+    return true;
   }
+  return false;
+}
+
+LogicalResult WaveAMDMachineSelector::selectPack(PackOp op) {
+  if (trySelectDirectPack(*this, op))
+    return success();
 
   FailureOr<MemoryPayloadShape> shape =
       getSimdVectorPayloadShape(op, op.getResult().getType(), "pack");
@@ -7548,6 +7579,105 @@ LogicalResult
 WaveAMDMachineSelector::selectTransposeLoad(waveamd::TransposeLoadOp op) {
   return selectDsReadTr(*this, op.getOperation(), op.getSource(),
                         op.getDependency(), op.getValue(), op.getToken());
+}
+
+static LogicalResult requireTDMTarget(Operation *op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "TDM lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::TDMLoadOp::isSupportedOnIsa(*isa))
+    return op->emitError("TDM lowering requires gfx1250");
+  return success();
+}
+
+static FailureOr<Value> expectTDMSGPRGroup(WaveAMDMachineSelector &S,
+                                           Operation *op, Value source,
+                                           StringRef name) {
+  unsigned width = cast<VectorType>(source.getType()).getNumElements();
+  Value group = S.expect(source, op);
+  auto type = dyn_cast<waveamdmachine::RegType>(group.getType());
+  if (!type || type.getRegClass() != waveamdmachine::RegClass::SGPR ||
+      type.getWidth() != width)
+    return op->emitError() << name << " must lower to an SGPR" << width
+                           << " tuple";
+  return group;
+}
+
+template <typename SourceOp, typename MachineOp>
+static LogicalResult selectTDMTransfer(WaveAMDMachineSelector &S, SourceOp op) {
+  if (failed(requireTDMTarget(op)))
+    return failure();
+
+  FailureOr<Value> d0 = expectTDMSGPRGroup(S, op, op.getD0(), "D0");
+  FailureOr<Value> d1 = expectTDMSGPRGroup(S, op, op.getD1(), "D1");
+  if (failed(d0) || failed(d1))
+    return failure();
+
+  SmallVector<Value> extraGroups;
+  extraGroups.reserve(op.getExtraGroups().size());
+  for (auto [index, group] : llvm::enumerate(op.getExtraGroups())) {
+    FailureOr<Value> selected =
+        expectTDMSGPRGroup(S, op, group, index == 0 ? "D2" : "D3");
+    if (failed(selected))
+      return failure();
+    extraGroups.push_back(*selected);
+  }
+
+  MachineOp selected = MachineOp::create(
+      S.builder, op.getLoc(), getMemTokenType(op.getContext()), *d0, *d1,
+      S.expect(op.getDependency(), op), extraGroups);
+  if (Attribute cache = op.getCacheAttr())
+    selected->setAttr("cache", cache);
+  S.values[op.getToken()] = selected.getToken();
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectTDMLoad(waveamd::TDMLoadOp op) {
+  return selectTDMTransfer<waveamd::TDMLoadOp, waveamdmachine::TDMLoadOp>(*this,
+                                                                          op);
+}
+
+LogicalResult WaveAMDMachineSelector::selectTDMStore(waveamd::TDMStoreOp op) {
+  return selectTDMTransfer<waveamd::TDMStoreOp, waveamdmachine::TDMStoreOp>(
+      *this, op);
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectTDMPrefetch(waveamd::TDMPrefetchOp op) {
+  if (failed(requireTDMTarget(op)))
+    return failure();
+  if (bufferResourceBaseBits <= 32 || bufferResourceBaseBits > 64)
+    return op.emitError("TDM lowering requires target address width");
+  FailureOr<Value> d0 = expectTDMSGPRGroup(*this, op, op.getD0(), "D0");
+  if (failed(d0))
+    return failure();
+
+  Type wordType = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR);
+  SmallVector<Type, 4> wordTypes(4, wordType);
+  waveamdmachine::TupleToElementsOp words =
+      waveamdmachine::TupleToElementsOp::create(builder, op.getLoc(), wordTypes,
+                                                *d0);
+  Value high = waveamdmachine::SAndB32Op::create(
+                   builder, op.getLoc(), wordType, getSCCType(op.getContext()),
+                   words.getElements()[3],
+                   createImm(builder, op.getLoc(),
+                             llvm::maskTrailingOnes<uint32_t>(
+                                 bufferResourceBaseBits - 32)))
+                   .getResult();
+  Type baseType =
+      getRegType(op.getContext(), waveamdmachine::RegClass::SGPR, 2);
+  Value base = waveamdmachine::TupleFromElementsOp::create(
+      builder, op.getLoc(), baseType, ValueRange{words.getElements()[2], high});
+  waveamdmachine::TDMPrefetchOp selected =
+      waveamdmachine::TDMPrefetchOp::create(
+          builder, op.getLoc(), getMemTokenType(op.getContext()), base,
+          expect(op.getByteOffset(), op), expect(op.getDependency(), op),
+          op.getMode() == waveamd::TDMPrefetchMode::Speculative);
+  values[op.getToken()] = selected.getToken();
+  eraseIfTopLevel(op);
+  return success();
 }
 
 struct DmaPointers {

@@ -29,6 +29,8 @@ def WaveAMDMachine_WaitcntCounterKm :
     I32EnumCase<"Km", 7, "km">;
 def WaveAMDMachine_WaitcntCounterX :
     I32EnumCase<"X", 8, "x">;
+def WaveAMDMachine_WaitcntCounterTensor :
+    I32EnumCase<"Tensor", 9, "tensor">;
 
 def WaveAMDMachine_WaitcntCounterEnum :
     I32Enum<"WaitcntCounter", "AMDGPU physical wait counter", [
@@ -40,7 +42,8 @@ def WaveAMDMachine_WaitcntCounterEnum :
       WaveAMDMachine_WaitcntCounterStore,
       WaveAMDMachine_WaitcntCounterDs,
       WaveAMDMachine_WaitcntCounterKm,
-      WaveAMDMachine_WaitcntCounterX
+      WaveAMDMachine_WaitcntCounterX,
+      WaveAMDMachine_WaitcntCounterTensor
     ]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }

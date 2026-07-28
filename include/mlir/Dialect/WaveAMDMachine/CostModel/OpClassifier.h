@@ -30,7 +30,7 @@ struct ArchData;
 SchedClass classifyOp(Operation *op);
 
 unsigned getInstructionIssueCount(Operation *op,
-                                  const llvm::AMDGPU::IsaVersion &isa);
+                                  const llvm::AMDGPU::IsaVersion &targetIsa);
 
 bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
                              const ArchData &arch);

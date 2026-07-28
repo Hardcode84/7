@@ -301,6 +301,7 @@ public:
   Value dmaIssueSkipCondition;
   unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
+  unsigned bufferResourceBaseBits = 0;
   waveamdmachine::MatrixFamily matrixFamily =
       waveamdmachine::MatrixFamily::None;
   bool dmaIssueTimingEnabled = false;
@@ -411,6 +412,9 @@ public:
   LogicalResult selectMmaScale(waveamd::MmaScaleOp op);
   LogicalResult selectTransposeLoad(waveamd::TransposeLoadOp op);
   LogicalResult selectDmaLoadLds(waveamd::DmaLoadLdsOp op);
+  LogicalResult selectTDMLoad(waveamd::TDMLoadOp op);
+  LogicalResult selectTDMStore(waveamd::TDMStoreOp op);
+  LogicalResult selectTDMPrefetch(waveamd::TDMPrefetchOp op);
   LogicalResult selectReturn(func::ReturnOp op);
 };
 

@@ -41,6 +41,7 @@ static constexpr CounterMappingRule splitRules[] = {
     {WaitcntEvent::Lds, WaitcntCounter::Ds, false},
     {WaitcntEvent::Smem, WaitcntCounter::Km, true},
     {WaitcntEvent::Message, WaitcntCounter::Km, false},
+    {WaitcntEvent::Tensor, WaitcntCounter::Tensor, false},
 };
 
 static std::optional<WaitcntCounterMapping>

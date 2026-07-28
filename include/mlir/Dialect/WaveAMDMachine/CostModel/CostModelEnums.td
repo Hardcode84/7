@@ -36,12 +36,13 @@ def Write16PassWMMA :
 def WriteVMEM : I32EnumCase<"WriteVMEM", 17, "WriteVMEM">;
 def WriteSMEM : I32EnumCase<"WriteSMEM", 18, "WriteSMEM">;
 def WriteLDS : I32EnumCase<"WriteLDS", 19, "WriteLDS">;
-def WriteBranch : I32EnumCase<"WriteBranch", 20, "WriteBranch">;
-def WriteBarrier : I32EnumCase<"WriteBarrier", 21, "WriteBarrier">;
-def WriteExport : I32EnumCase<"WriteExport", 22, "WriteExport">;
-def WaitcntPseudo : I32EnumCase<"WaitcntPseudo", 23, "WaitcntPseudo">;
+def WriteTDM : I32EnumCase<"WriteTDM", 20, "WriteTDM">;
+def WriteBranch : I32EnumCase<"WriteBranch", 21, "WriteBranch">;
+def WriteBarrier : I32EnumCase<"WriteBarrier", 22, "WriteBarrier">;
+def WriteExport : I32EnumCase<"WriteExport", 23, "WriteExport">;
+def WaitcntPseudo : I32EnumCase<"WaitcntPseudo", 24, "WaitcntPseudo">;
 def NumSchedClasses :
-    I32EnumCase<"NumSchedClasses", 24, "NumSchedClasses">;
+    I32EnumCase<"NumSchedClasses", 25, "NumSchedClasses">;
 
 def SchedClassEnum : I32Enum<"SchedClass", "AMDGPU scheduling class", [
   NoInst,
@@ -64,6 +65,7 @@ def SchedClassEnum : I32Enum<"SchedClass", "AMDGPU scheduling class", [
   WriteVMEM,
   WriteSMEM,
   WriteLDS,
+  WriteTDM,
   WriteBranch,
   WriteBarrier,
   WriteExport,
@@ -136,6 +138,67 @@ def LLVMProcResourceEnum :
       LLVMHWBranch,
       LLVMHWExport,
       LLVMHWRC
+    ]> {
+  let cppNamespace = "::mlir::waveamdmachine";
+}
+
+def MemoryCounterNone : I32EnumCase<"None", 0, "none">;
+def MemoryCounterVmem : I32EnumCase<"Vmem", 1, "vmem">;
+def MemoryCounterLgkm : I32EnumCase<"Lgkm", 2, "lgkm">;
+def MemoryCounterVscnt : I32EnumCase<"Vscnt", 3, "vscnt">;
+def MemoryCounterTensor : I32EnumCase<"Tensor", 4, "tensor">;
+
+def MemoryCounterKindEnum :
+    I32Enum<"MemoryCounterKind", "memory completion counter", [
+      MemoryCounterNone,
+      MemoryCounterVmem,
+      MemoryCounterLgkm,
+      MemoryCounterVscnt,
+      MemoryCounterTensor
+    ]> {
+  let cppNamespace = "::mlir::waveamdmachine";
+}
+
+def InstructionWaitCounterNone : I32EnumCase<"None", 0, "none">;
+def InstructionWaitCounterVmem : I32EnumCase<"Vmem", 1, "vmem">;
+def InstructionWaitCounterLgkm : I32EnumCase<"Lgkm", 2, "lgkm">;
+def InstructionWaitCounterVscnt : I32EnumCase<"Vscnt", 3, "vscnt">;
+def InstructionWaitCounterExpcnt : I32EnumCase<"Expcnt", 4, "expcnt">;
+def InstructionWaitCounterTensor : I32EnumCase<"Tensor", 5, "tensor">;
+
+def InstructionWaitCounterKindEnum :
+    I32Enum<"InstructionWaitCounterKind", "instruction wait counter", [
+      InstructionWaitCounterNone,
+      InstructionWaitCounterVmem,
+      InstructionWaitCounterLgkm,
+      InstructionWaitCounterVscnt,
+      InstructionWaitCounterExpcnt,
+      InstructionWaitCounterTensor
+    ]> {
+  let cppNamespace = "::mlir::waveamdmachine";
+}
+
+def InstructionEventNone : I32EnumCase<"None", 0, "none">;
+def InstructionEventVmemLoad :
+    I32EnumCase<"VmemLoad", 1, "vmem_load">;
+def InstructionEventVmemStore :
+    I32EnumCase<"VmemStore", 2, "vmem_store">;
+def InstructionEventLdsDs : I32EnumCase<"LdsDs", 3, "lds_ds">;
+def InstructionEventSmem : I32EnumCase<"Smem", 4, "smem">;
+def InstructionEventMessage : I32EnumCase<"Message", 5, "message">;
+def InstructionEventExport : I32EnumCase<"Export", 6, "export">;
+def InstructionEventTensor : I32EnumCase<"Tensor", 7, "tensor">;
+
+def InstructionEventClassEnum :
+    I32Enum<"InstructionEventClass", "instruction completion event class", [
+      InstructionEventNone,
+      InstructionEventVmemLoad,
+      InstructionEventVmemStore,
+      InstructionEventLdsDs,
+      InstructionEventSmem,
+      InstructionEventMessage,
+      InstructionEventExport,
+      InstructionEventTensor
     ]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }

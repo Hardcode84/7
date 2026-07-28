@@ -67,6 +67,17 @@ bool mlir::waveamdmachine::isSamePhysicalReg(Value lhs, Value rhs) {
          lhsType.getIndex() == rhsType.getIndex();
 }
 
+bool mlir::waveamdmachine::requiresMCTupleEncoding(OpOperand &operand) {
+  Operation *owner = operand.getOwner();
+  if (!isa<OperandLegalityOpInterface>(owner))
+    return false;
+  OperandLegalitySpec spec =
+      cast<OperandLegalityOpInterface>(owner).getOperandLegality();
+  unsigned operandNumber = operand.getOperandNumber();
+  return operandNumber < 32 &&
+         (spec.mcTupleMask & (uint32_t{1} << operandNumber)) != 0;
+}
+
 static std::optional<int64_t> parseRegisterIndex(StringRef text) {
   int64_t index = 0;
   if (text.empty())

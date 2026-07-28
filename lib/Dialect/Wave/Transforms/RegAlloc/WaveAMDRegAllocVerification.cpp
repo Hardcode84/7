@@ -16,6 +16,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <tuple>
 
@@ -117,24 +118,39 @@ verifyTargetRegisterRange(Operation *diagOp, waveamdmachine::RegType type,
                              << ") beyond target addressable count " << *limit;
 }
 
-static LogicalResult verifyTargetVGPRTupleAlignment(
+static LogicalResult verifyTargetTupleBase(
     Operation *diagOp, waveamdmachine::RegType type, StringRef consumer,
-    const wave::WaveAMDRegisterLimits &targetLimits) {
-  if (!wave::isWaveAMDVGPR(type) || type.getWidth() <= 1 ||
-      targetLimits.vgprTupleAlignment <= 1)
+    const wave::WaveAMDRegisterLimits &targetLimits, bool requireMCSGPRTuple) {
+  if (type.getWidth() <= 1)
+    return success();
+  bool hasTargetConstraint =
+      (wave::isWaveAMDSGPR(type) && requireMCSGPRTuple) ||
+      (wave::isWaveAMDVGPR(type) && targetLimits.vgprTupleAlignment > 1);
+  if (!hasTargetConstraint)
     return success();
   uint64_t base = static_cast<uint64_t>(type.getIndex());
-  if (base % targetLimits.vgprTupleAlignment == 0)
+  if (base > std::numeric_limits<unsigned>::max())
+    return diagOp->emitError() << consumer << " found " << getRegClassName(type)
+                               << " tuple base outside unsigned range";
+  unsigned physicalBase = static_cast<unsigned>(base);
+  bool legal =
+      wave::isWaveAMDSGPR(type)
+          ? targetLimits.isSGPRTupleBaseLegal(type.getWidth(), physicalBase)
+          : wave::isWaveAMDRegisterTupleBaseLegal(
+                targetLimits, type.getRegClass(), type.getWidth(),
+                physicalBase);
+  if (legal)
     return success();
   return diagOp->emitError()
-         << consumer << " found VGPR tuple at v" << base << " with width "
-         << type.getWidth() << " misaligned; target requires base alignment "
-         << targetLimits.vgprTupleAlignment;
+         << consumer << " found " << getRegClassName(type) << " tuple at base "
+         << base << " with width " << type.getWidth()
+         << " unsupported by target register classes";
 }
 
 static LogicalResult
 verifyValueAllocated(Value value, func::FuncOp func, StringRef consumer,
-                     const wave::WaveAMDRegisterLimits *targetLimits) {
+                     const wave::WaveAMDRegisterLimits *targetLimits,
+                     bool requireMCSGPRTuple) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!type || wave::isWaveAMDFlagReg(type))
     return success();
@@ -150,14 +166,17 @@ verifyValueAllocated(Value value, func::FuncOp func, StringRef consumer,
     return success();
   if (failed(verifyTargetRegisterRange(diagOp, type, consumer, *targetLimits)))
     return failure();
-  return verifyTargetVGPRTupleAlignment(diagOp, type, consumer, *targetLimits);
+  return verifyTargetTupleBase(diagOp, type, consumer, *targetLimits,
+                               requireMCSGPRTuple);
 }
 
 static LogicalResult
 verifyOperandsAllocated(Operation *op, func::FuncOp func, StringRef consumer,
                         const wave::WaveAMDRegisterLimits *targetLimits) {
-  for (Value operand : op->getOperands())
-    if (failed(verifyValueAllocated(operand, func, consumer, targetLimits)))
+  for (OpOperand &operand : op->getOpOperands())
+    if (failed(verifyValueAllocated(
+            operand.get(), func, consumer, targetLimits,
+            waveamdmachine::requiresMCTupleEncoding(operand))))
       return failure();
   return success();
 }
@@ -166,7 +185,8 @@ static LogicalResult
 verifyResultsAllocated(Operation *op, func::FuncOp func, StringRef consumer,
                        const wave::WaveAMDRegisterLimits *targetLimits) {
   for (Value result : op->getResults())
-    if (failed(verifyValueAllocated(result, func, consumer, targetLimits)))
+    if (failed(verifyValueAllocated(result, func, consumer, targetLimits,
+                                    /*requireMCSGPRTuple=*/false)))
       return failure();
   return success();
 }
@@ -177,7 +197,8 @@ verifyBlockArgsAllocated(Operation *op, func::FuncOp func, StringRef consumer,
   for (Region &region : op->getRegions()) {
     for (Block &block : region) {
       for (BlockArgument arg : block.getArguments())
-        if (failed(verifyValueAllocated(arg, func, consumer, targetLimits)))
+        if (failed(verifyValueAllocated(arg, func, consumer, targetLimits,
+                                        /*requireMCSGPRTuple=*/false)))
           return failure();
     }
   }

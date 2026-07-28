@@ -94,6 +94,7 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   string operandConstantBusMask = "0";
   string operandAnyVGPRMask = "0";
   string operandVGPRValueMask = "0";
+  string operandMCTupleMask = "0";
   string agprOperandMask = "0";
   string agprResultMask = "0";
   string agprPredicate = "true";
@@ -130,7 +131,8 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     ::mlir::waveamdmachine::OperandLegalitySpec getOperandLegality() {
       return {static_cast<uint32_t>(}] # operandConstantBusMask # [{),
               static_cast<uint32_t>(}] # operandAnyVGPRMask # [{),
-              static_cast<uint32_t>(}] # operandVGPRValueMask # [{)};
+              static_cast<uint32_t>(}] # operandVGPRValueMask # [{),
+              static_cast<uint32_t>(}] # operandMCTupleMask # [{)};
     }
 
     bool isOperandAGPRValid(const ::llvm::AMDGPU::IsaVersion &isa,
@@ -200,10 +202,12 @@ class WaveAMDMachine_SMEMInfo<string count = "1">
 
 class WaveAMDMachine_OperandLegality<string constantBusMask = "0",
                                      string anyVGPRMask = "0",
-                                     string vgprValueMask = "0"> {
+                                     string vgprValueMask = "0",
+                                     string mcTupleMask = "0"> {
   string operandConstantBusMask = constantBusMask;
   string operandAnyVGPRMask = anyVGPRMask;
   string operandVGPRValueMask = vgprValueMask;
+  string operandMCTupleMask = mcTupleMask;
 }
 
 class WaveAMDMachine_AGPRBanking<string operandMask = "0",
@@ -284,6 +288,8 @@ def WaveAMDMachine_ScratchMemory
     : NativeOpTrait<"waveamdmachine::ScratchMemoryOp">;
 def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
+def WaveAMDMachine_TensorMemory
+    : NativeOpTrait<"waveamdmachine::TensorMemoryOp">;
 def WaveAMDMachine_TupleMemory : NativeOpTrait<"waveamdmachine::TupleMemoryOp">;
 def WaveAMDMachine_TupleAlias : NativeOpTrait<"waveamdmachine::TupleAliasOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
@@ -291,6 +297,8 @@ def WaveAMDMachine_TokenTrait : NativeOpTrait<"waveamdmachine::TokenOp">;
 def WaveAMDMachine_TokenJoinTrait : NativeOpTrait<"waveamdmachine::TokenJoinOp">;
 def WaveAMDMachine_CompletionFreeTokenTrait
     : NativeOpTrait<"waveamdmachine::CompletionFreeTokenOp">;
+def WaveAMDMachine_CompletionNeutralTokenTrait
+    : NativeOpTrait<"waveamdmachine::CompletionNeutralTokenOp">;
 def WaveAMDMachine_NoMachineInst : NativeOpTrait<"waveamdmachine::NoMachineInst">;
 def WaveAMDMachine_NoAsmEmission : NativeOpTrait<"waveamdmachine::NoAsmEmission">;
 def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
@@ -320,6 +328,12 @@ def WaveAMDMachine_SGPR4
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
                  "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 4">,
            "WaveAMDMachine SGPR quad register">;
+
+def WaveAMDMachine_SGPR8
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getRegClass() == ::mlir::waveamdmachine::RegClass::SGPR && "
+                 "::llvm::cast<::mlir::waveamdmachine::RegType>($_self).getWidth() == 8">,
+           "WaveAMDMachine eight-dword SGPR tuple">;
 
 def WaveAMDMachine_VGPR
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
@@ -1606,13 +1620,15 @@ def WaveAMDMachine_SWaitcntSplitOp
                        OptionalAttr<I32Attr>:$storecnt,
                        OptionalAttr<I32Attr>:$dscnt,
                        OptionalAttr<I32Attr>:$kmcnt,
-                       OptionalAttr<I32Attr>:$xcnt);
+                       OptionalAttr<I32Attr>:$xcnt,
+                       OptionalAttr<I32Attr>:$tensorcnt);
   let assemblyFormat = [{
     oilist(`loadcnt` `(` $loadcnt `)`
          | `storecnt` `(` $storecnt `)`
          | `dscnt` `(` $dscnt `)`
          | `kmcnt` `(` $kmcnt `)`
-         | `xcnt` `(` $xcnt `)`) attr-dict
+         | `xcnt` `(` $xcnt `)`
+         | `tensorcnt` `(` $tensorcnt `)`) attr-dict
   }];
 }
 def WaveAMDMachine_SWaitAluOp
@@ -1809,6 +1825,58 @@ def WaveAMDMachine_UniformIfOp : WaveAMDMachine_Op<"uniform_if", [
     `:` type($condition) (`->` type($results)^)?
   }];
   let hasVerifier = 1;
+}
+
+class WaveAMDMachine_TDMTransfer<string mnemonic, list<Trait> traits>
+    : WaveAMDMachine_Op<mnemonic,
+          !listconcat(traits, [WaveAMDMachine_TensorMemory,
+                               MemoryEffects<[MemRead, MemWrite]>])>,
+      WaveAMDMachine_WaitcntInfo<"Tensor">,
+      WaveAMDMachine_OperandLegality<"0", "0", "0", "0x1b"> {
+  let arguments = (ins WaveAMDMachine_SGPR4:$d0,
+                       WaveAMDMachine_SGPR8:$d1,
+                       WaveAMDMachine_MemToken:$dependency,
+                       Variadic<WaveAMDMachine_SGPR4>:$extra_groups);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $d0 `,` $d1 (`,` $extra_groups^)? `after` $dependency
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+  let hasVerifier = 1;
+}
+
+def WaveAMDMachine_TDMLoadOp
+    : WaveAMDMachine_TDMTransfer<"tdm_load",
+          [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSStore]> {
+  let summary = "gfx1250 tensor load to LDS";
+}
+
+def WaveAMDMachine_TDMStoreOp
+    : WaveAMDMachine_TDMTransfer<"tdm_store",
+          [WaveAMDMachine_VMEMStore, WaveAMDMachine_LDSLoad]> {
+  let summary = "gfx1250 tensor store from LDS";
+}
+
+// MemWrite prevents DCE; dependency token carries ordering.
+def WaveAMDMachine_TDMPrefetchOp
+    : WaveAMDMachine_Op<"tdm_prefetch", [
+        WaveAMDMachine_VMEMLoad,
+        WaveAMDMachine_CompletionNeutralTokenTrait,
+        MemoryEffects<[MemWrite]>
+      ]>,
+      WaveAMDMachine_OperandLegality<"0", "0", "0", "0x1"> {
+  let summary = "descriptor-derived global prefetch";
+  let arguments = (ins WaveAMDMachine_SGPR2:$base,
+                       WaveAMDMachine_VGPR1:$byte_offset,
+                       WaveAMDMachine_MemToken:$dependency,
+                       DefaultValuedAttr<BoolAttr, "false">:$speculative);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $base `,` $byte_offset `after` $dependency
+    attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
 }
 
 def WaveAMDMachine_GlobalLoadU8Op

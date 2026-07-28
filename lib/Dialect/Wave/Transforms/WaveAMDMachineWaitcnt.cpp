@@ -571,13 +571,14 @@ static bool isControlFlowOp(Operation *op) {
 }
 
 enum class OpKind {
-  Skip,           // s_waitcnt, control-flow: handled separately.
-  Issuer,         // VMEM/SMEM/LDS load or store: drain, then issue.
-  Barrier,        // s_barrier: drain AND derive result tokens.
-  CompletionFree, // Issue order only; no drain or completion transfer.
-  TokenOp,        // waveamdmachine.after / token_join: derive only.
-  Endpgm,         // s_endpgm: implicit full drain.
-  Generic,        // any other op: drain its operands.
+  Skip,              // s_waitcnt, control-flow: handled separately.
+  Issuer,            // VMEM/SMEM/LDS load or store: drain, then issue.
+  Barrier,           // s_barrier: drain AND derive result tokens.
+  CompletionNeutral, // No new event; forward dependency completion.
+  CompletionFree,    // Issue order only; no drain or completion transfer.
+  TokenOp,           // waveamdmachine.after / token_join: derive only.
+  Endpgm,            // s_endpgm: implicit full drain.
+  Generic,           // any other op: drain its operands.
 };
 
 static OpKind classifyOp(Operation *op) {
@@ -589,6 +590,8 @@ static OpKind classifyOp(Operation *op) {
     return OpKind::Issuer;
   if (llvm::isa<waveamdmachine::SBarrierOp>(op))
     return OpKind::Barrier;
+  if (op->hasTrait<OpTrait::waveamdmachine::CompletionNeutralTokenOp>())
+    return OpKind::CompletionNeutral;
   if (op->hasTrait<OpTrait::waveamdmachine::CompletionFreeTokenOp>())
     return OpKind::CompletionFree;
   if (isTokenOnlyOp(op))
@@ -690,6 +693,8 @@ static unsigned getSplitCounterMax(Counter counter,
     return llvm::AMDGPU::getKmcntBitMask(isa);
   case Counter::X:
     return llvm::AMDGPU::getXcntBitMask(isa);
+  case Counter::Tensor:
+    return waveamdmachine::getAMDGPUTensorcntBitMask(isa);
   default:
     llvm_unreachable("expected split wait counter");
   }
@@ -1051,12 +1056,13 @@ static void observeExistingWaitcnt(Operation *op, WaitState &state,
     observed.requireDrain(Counter::Vscnt, wait.getVscnt());
   }
   if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntSplitOp>(op)) {
-    const std::array<std::pair<Counter, std::optional<uint32_t>>, 5> counts = {{
+    const std::array<std::pair<Counter, std::optional<uint32_t>>, 6> counts = {{
         {Counter::Load, wait.getLoadcnt()},
         {Counter::Store, wait.getStorecnt()},
         {Counter::Ds, wait.getDscnt()},
         {Counter::Km, wait.getKmcnt()},
         {Counter::X, wait.getXcnt()},
+        {Counter::Tensor, wait.getTensorcnt()},
     }};
     for (auto [counter, count] : counts)
       if (count)
@@ -1122,6 +1128,9 @@ static void runTransfer(Operation *op, WaitState &state,
     // loads of the same arena depend on it.
     applyDrain(op, state, target, emit);
     applyImplicitXGroupSwitch(op, state, target);
+    deriveResultTokens(op, state);
+    break;
+  case OpKind::CompletionNeutral:
     deriveResultTokens(op, state);
     break;
   case OpKind::CompletionFree:
@@ -1332,7 +1341,8 @@ static void emitWaits(OpBuilder &builder, Operation *op,
     };
     waveamdmachine::SWaitcntSplitOp::create(
         builder, op->getLoc(), attr(Counter::Load), attr(Counter::Store),
-        attr(Counter::Ds), attr(Counter::Km), attr(Counter::X));
+        attr(Counter::Ds), attr(Counter::Km), attr(Counter::X),
+        attr(Counter::Tensor));
     return;
   }
 

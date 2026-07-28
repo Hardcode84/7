@@ -57,11 +57,13 @@ struct ScheduleResource {
 struct OpcodeSchedule {
   int latency = 0;
   int resourceCycles = 0;
+  unsigned issueCount = 0;
   FunctionalUnit functionalUnit = FunctionalUnit::None;
   llvm::SmallVector<ScheduleResource> resources;
 
   bool operator==(const OpcodeSchedule &other) const {
     return latency == other.latency && resourceCycles == other.resourceCycles &&
+           issueCount == other.issueCount &&
            functionalUnit == other.functionalUnit &&
            resources == other.resources;
   }
@@ -110,6 +112,7 @@ static constexpr std::array<ScheduleProbe,
         {SchedClass::WriteVMEM, llvm::AMDGPU::GLOBAL_LOAD_DWORD_SADDR_gfx12, 0},
         {SchedClass::WriteSMEM, llvm::AMDGPU::S_LOAD_B32_IMM_gfx12, 0},
         {SchedClass::WriteLDS, llvm::AMDGPU::DS_READ_B32_gfx12, 0},
+        {SchedClass::WriteTDM, llvm::AMDGPU::TENSOR_LOAD_TO_LDS_d2, 0},
         {SchedClass::WriteBranch, llvm::AMDGPU::S_BRANCH_gfx12, 0},
         {SchedClass::WriteBarrier, llvm::AMDGPU::S_BARRIER_WAIT_gfx12, 0},
         {SchedClass::WriteExport, llvm::AMDGPU::EXP_gfx12, 0},
@@ -235,6 +238,11 @@ static bool queryOpcodeSchedule(const llvm::MCSubtargetInfo &sti,
     error = "invalid scheduling class for " + mcii.getName(opcode).str();
     return false;
   }
+  schedule.issueCount = descriptor->NumMicroOps;
+  if (schedule.issueCount == 0) {
+    error = "invalid micro-op count for " + mcii.getName(opcode).str();
+    return false;
+  }
   schedule.latency = llvm::MCSchedModel::computeInstrLatency(sti, *descriptor);
   if (schedule.latency < 0) {
     error = "invalid latency for " + mcii.getName(opcode).str();
@@ -348,6 +356,8 @@ static void printScheduleModelJSON(llvm::StringRef target,
                            static_cast<int64_t>(entry.schedule.latency));
           output.attribute("resource_cycles",
                            static_cast<int64_t>(entry.schedule.resourceCycles));
+          output.attribute("issue_count",
+                           static_cast<int64_t>(entry.schedule.issueCount));
           output.attribute(
               "functional_unit",
               stringifyFunctionalUnit(entry.schedule.functionalUnit));
@@ -389,6 +399,7 @@ static void printScheduleModelText(llvm::StringRef target,
     llvm::outs() << "  latency: " << entry.schedule.latency << '\n';
     llvm::outs() << "  resource_cycles: " << entry.schedule.resourceCycles
                  << '\n';
+    llvm::outs() << "  issue_count: " << entry.schedule.issueCount << '\n';
     llvm::outs() << "  functional_unit: "
                  << stringifyFunctionalUnit(entry.schedule.functionalUnit)
                  << '\n';

@@ -14,11 +14,20 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+
+#include <cstdint>
+
+namespace mlir::waveamdmachine {
+enum class RegClass : uint32_t;
+}
 
 namespace mlir::wave {
 
 struct WaveAMDRegisterLimits {
+  llvm::DenseMap<unsigned, llvm::BitVector> sgprTupleLegalBases;
   SmallVector<unsigned, 32> maxSGPRsForWaves;
   SmallVector<unsigned, 32> maxVGPRsForWaves;
   unsigned addressableSGPRs = 0;
@@ -31,6 +40,9 @@ struct WaveAMDRegisterLimits {
   unsigned maxWavesPerEU = 0;
   bool hasTargetCapabilityContract = false;
   bool agprCountsAgainstVGPRs = false;
+
+  bool hasSGPRTupleLegalBases(unsigned width) const;
+  bool isSGPRTupleBaseLegal(unsigned width, unsigned base) const;
 };
 
 struct WaveAMDLocalMemoryLimits {
@@ -41,6 +53,9 @@ struct WaveAMDLocalMemoryLimits {
 FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op);
 FailureOr<WaveAMDLocalMemoryLimits>
 getWaveAMDLocalMemoryLimits(Operation *op, StringRef consumer);
+bool isWaveAMDRegisterTupleBaseLegal(const WaveAMDRegisterLimits &limits,
+                                     waveamdmachine::RegClass regClass,
+                                     unsigned width, unsigned base);
 unsigned getEffectiveWaveAMDRegisterBudget(unsigned budget, unsigned reserved);
 unsigned getMaxWaveAMDRegisterBudgetForWaves(ArrayRef<unsigned> budgets,
                                              unsigned targetWaves);

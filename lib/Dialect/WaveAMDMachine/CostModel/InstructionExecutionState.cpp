@@ -190,13 +190,15 @@ static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
     return InstructionWaitCounterKind::Lgkm;
   case MemoryCounterKind::Vscnt:
     return InstructionWaitCounterKind::Vscnt;
+  case MemoryCounterKind::Tensor:
+    return InstructionWaitCounterKind::Tensor;
   case MemoryCounterKind::None:
     return InstructionWaitCounterKind::None;
   }
   llvm_unreachable("bad memory counter");
 }
 
-static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 9>
+static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 10>
     eventClasses = {
         {{WaitcntEvent::Vmem, InstructionEventClass::VmemLoad},
          {WaitcntEvent::Flat, InstructionEventClass::VmemLoad},
@@ -204,8 +206,9 @@ static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 9>
          {WaitcntEvent::ScratchStore, InstructionEventClass::VmemStore},
          {WaitcntEvent::Lds, InstructionEventClass::LdsDs},
          {WaitcntEvent::Gds, InstructionEventClass::LdsDs},
-         {WaitcntEvent::Message, InstructionEventClass::LdsDs},
+         {WaitcntEvent::Message, InstructionEventClass::Message},
          {WaitcntEvent::Smem, InstructionEventClass::Smem},
+         {WaitcntEvent::Tensor, InstructionEventClass::Tensor},
          {WaitcntEvent::None, InstructionEventClass::None}}};
 
 static InstructionEventClass toInstructionEventClass(Operation *op) {
@@ -314,6 +317,8 @@ static unsigned counterIndex(InstructionWaitCounterKind kind) {
     return 2;
   case InstructionWaitCounterKind::Expcnt:
     return 3;
+  case InstructionWaitCounterKind::Tensor:
+    return 4;
   case InstructionWaitCounterKind::None:
     break;
   }
@@ -538,41 +543,6 @@ llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind) {
     return "xdl";
   }
   llvm_unreachable("bad pipe kind");
-}
-
-llvm::StringRef
-getInstructionWaitCounterKindName(InstructionWaitCounterKind kind) {
-  switch (kind) {
-  case InstructionWaitCounterKind::None:
-    return "none";
-  case InstructionWaitCounterKind::Vmem:
-    return "vmem";
-  case InstructionWaitCounterKind::Lgkm:
-    return "lgkm";
-  case InstructionWaitCounterKind::Vscnt:
-    return "vscnt";
-  case InstructionWaitCounterKind::Expcnt:
-    return "expcnt";
-  }
-  llvm_unreachable("bad wait counter kind");
-}
-
-llvm::StringRef getInstructionEventClassName(InstructionEventClass eventClass) {
-  switch (eventClass) {
-  case InstructionEventClass::None:
-    return "none";
-  case InstructionEventClass::VmemLoad:
-    return "vmem_load";
-  case InstructionEventClass::VmemStore:
-    return "vmem_store";
-  case InstructionEventClass::LdsDs:
-    return "lds_ds";
-  case InstructionEventClass::Smem:
-    return "smem";
-  case InstructionEventClass::Export:
-    return "export";
-  }
-  llvm_unreachable("bad event class");
 }
 
 InstructionExecutionState::InstructionExecutionState(
@@ -1332,51 +1302,104 @@ unsigned InstructionExecutionState::issueSlotHazardWait(
   return wait;
 }
 
+LogicalResult InstructionExecutionState::combineCounterReadyCycle(
+    int64_t &ready, InstructionWaitCounterKind kind,
+    std::optional<uint32_t> limit, int64_t cycle,
+    ArrayRef<InstructionEventClass> eventClasses) const {
+  if (!limit)
+    return success();
+  FailureOr<int64_t> counterReady =
+      counterReadyCycle(kind, *limit, cycle, eventClasses);
+  if (failed(counterReady))
+    return failure();
+  ready = std::max(ready, *counterReady);
+  return success();
+}
+
+FailureOr<int64_t>
+InstructionExecutionState::waitcntReadyCycle(SWaitcntOp wait,
+                                             int64_t cycle) const {
+  int64_t ready = cycle;
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Vmem,
+                                      wait.getVmcnt(), cycle, {})))
+    return failure();
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Lgkm,
+                                      wait.getLgkmcnt(), cycle, {}))) {
+    wait.emitOpError(
+        "nonzero lgkmcnt with pending SMEM event is unsupported by "
+        "instruction execution state");
+    return failure();
+  }
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Expcnt,
+                                      wait.getExpcnt(), cycle, {})))
+    return failure();
+  return ready;
+}
+
+FailureOr<int64_t>
+InstructionExecutionState::waitcntReadyCycle(SWaitcntSplitOp wait,
+                                             int64_t cycle) const {
+  if (wait.getXcnt()) {
+    wait.emitOpError("xcnt is unsupported by instruction execution state");
+    return failure();
+  }
+
+  static constexpr std::array<InstructionEventClass, 1> loadEvents = {
+      InstructionEventClass::VmemLoad};
+  static constexpr std::array<InstructionEventClass, 1> storeEvents = {
+      InstructionEventClass::VmemStore};
+  static constexpr std::array<InstructionEventClass, 1> dsEvents = {
+      InstructionEventClass::LdsDs};
+  static constexpr std::array<InstructionEventClass, 2> kmEvents = {
+      InstructionEventClass::Smem, InstructionEventClass::Message};
+  static constexpr std::array<InstructionEventClass, 1> tensorEvents = {
+      InstructionEventClass::Tensor};
+
+  int64_t ready = cycle;
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Vmem,
+                                      wait.getLoadcnt(), cycle, loadEvents)) ||
+      failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Vscnt,
+                                      wait.getStorecnt(), cycle,
+                                      storeEvents)) ||
+      failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Lgkm,
+                                      wait.getDscnt(), cycle, dsEvents)))
+    return failure();
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Lgkm,
+                                      wait.getKmcnt(), cycle, kmEvents))) {
+    wait.emitOpError("nonzero kmcnt with pending SMEM event is unsupported by "
+                     "instruction execution state");
+    return failure();
+  }
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Tensor,
+                                      wait.getTensorcnt(), cycle,
+                                      tensorEvents)))
+    return failure();
+  return ready;
+}
+
 FailureOr<int64_t>
 InstructionExecutionState::waitcntReadyCycle(Operation *op,
                                              int64_t cycle) const {
   if (SWaitcntVscntOp wait = dyn_cast<SWaitcntVscntOp>(op))
     return counterReadyCycle(InstructionWaitCounterKind::Vscnt, wait.getVscnt(),
                              cycle);
-
-  if (SWaitcntOp wait = dyn_cast<SWaitcntOp>(op)) {
-    int64_t ready = cycle;
-    if (std::optional<uint32_t> vmcnt = wait.getVmcnt()) {
-      FailureOr<int64_t> counterReady =
-          counterReadyCycle(InstructionWaitCounterKind::Vmem, *vmcnt, cycle);
-      if (failed(counterReady))
-        return failure();
-      ready = std::max(ready, *counterReady);
-    }
-    if (std::optional<uint32_t> lgkmcnt = wait.getLgkmcnt()) {
-      FailureOr<int64_t> counterReady =
-          counterReadyCycle(InstructionWaitCounterKind::Lgkm, *lgkmcnt, cycle);
-      if (failed(counterReady)) {
-        op->emitOpError("nonzero lgkmcnt with pending SMEM event is "
-                        "unsupported by instruction execution state");
-        return failure();
-      }
-      ready = std::max(ready, *counterReady);
-    }
-    if (std::optional<uint32_t> expcnt = wait.getExpcnt()) {
-      FailureOr<int64_t> counterReady =
-          counterReadyCycle(InstructionWaitCounterKind::Expcnt, *expcnt, cycle);
-      if (failed(counterReady))
-        return failure();
-      ready = std::max(ready, *counterReady);
-    }
-    return ready;
-  }
-
+  if (SWaitcntOp wait = dyn_cast<SWaitcntOp>(op))
+    return waitcntReadyCycle(wait, cycle);
+  if (SWaitcntSplitOp wait = dyn_cast<SWaitcntSplitOp>(op))
+    return waitcntReadyCycle(wait, cycle);
   return cycle;
 }
 
 FailureOr<int64_t> InstructionExecutionState::counterReadyCycle(
-    InstructionWaitCounterKind kind, unsigned limit, int64_t cycle) const {
+    InstructionWaitCounterKind kind, unsigned limit, int64_t cycle,
+    ArrayRef<InstructionEventClass> eventClasses) const {
   SmallVector<const PendingEvent *, 8> pending;
   for (EventId id : waitQueues[counterIndex(kind)]) {
     DenseMap<EventId, PendingEvent>::const_iterator it = events.find(id);
     if (it == events.end() || it->second.retireCycle <= cycle)
+      continue;
+    if (!eventClasses.empty() &&
+        !llvm::is_contained(eventClasses, it->second.eventClass))
       continue;
     if (kind == InstructionWaitCounterKind::Lgkm && limit != 0 &&
         it->second.eventClass == InstructionEventClass::Smem)
@@ -1387,9 +1410,8 @@ FailureOr<int64_t> InstructionExecutionState::counterReadyCycle(
   if (pending.size() <= limit)
     return cycle;
   llvm::sort(pending, [](const PendingEvent *lhs, const PendingEvent *rhs) {
-    if (lhs->retireCycle != rhs->retireCycle)
-      return lhs->retireCycle < rhs->retireCycle;
-    return lhs->id < rhs->id;
+    return std::pair(lhs->retireCycle, lhs->id) <
+           std::pair(rhs->retireCycle, rhs->id);
   });
   return pending[pending.size() - limit - 1]->retireCycle;
 }

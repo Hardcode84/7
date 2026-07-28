@@ -33,6 +33,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
@@ -417,17 +418,6 @@ static AMDGPUOpcodeSet makeAMDGPUOpcodeSet(const llvm::AMDGPU::IsaVersion &isa,
 
 #undef WAVE_AMDGPU_OPCODE_LIST
 
-static_assert(llvm::AMDGPU::SGPR1 == llvm::AMDGPU::SGPR0 + 1,
-              "SGPR enum layout must be contiguous");
-static_assert(llvm::AMDGPU::SGPR2_SGPR3 == llvm::AMDGPU::SGPR0_SGPR1 + 1,
-              "SGPR pair enum layout must be contiguous");
-static_assert(llvm::AMDGPU::SGPR4_SGPR5_SGPR6_SGPR7 ==
-                  llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + 1,
-              "SGPR quad enum layout must be contiguous");
-static_assert(
-    llvm::AMDGPU::SGPR4_SGPR5_SGPR6_SGPR7_SGPR8_SGPR9_SGPR10_SGPR11 ==
-        llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7 + 1,
-    "SGPR octuple enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1 == llvm::AMDGPU::VGPR0 + 1,
               "VGPR enum layout must be contiguous");
 static_assert(llvm::AMDGPU::VGPR1_LO16 == llvm::AMDGPU::VGPR0_LO16 + 1,
@@ -522,6 +512,7 @@ private:
   std::unique_ptr<llvm::MCInstPrinter> instPrinter;
   SmallVector<KernelInfo> kernels;
   SmallVector<BufferedMCItem> mcBuffer;
+  llvm::DenseMap<uint64_t, unsigned> mcSGPRRegisters;
   std::optional<waveamdmachine::AMDGPUTargetCapabilities> targetCapabilities;
   llvm::AMDGPU::IsaVersion isaVersion;
   llvm::AMDGPU::GPUKind targetKind = llvm::AMDGPU::GK_NONE;
@@ -541,6 +532,22 @@ private:
   std::string funcLabelPrefix;
   Operation *emissionSource = nullptr;
   bool bufferingMC = false;
+  bool sgprTupleEmissionFailed = false;
+
+  static uint64_t getMCSGPRKey(unsigned phys, unsigned width) {
+    return (static_cast<uint64_t>(width) << 32) | phys;
+  }
+
+  void initializeMCSGPRRegisters() {
+    mcSGPRRegisters.clear();
+    unsigned addressableSGPRs =
+        llvm::AMDGPU::getAddressableNumSGPRs(targetKind);
+    waveamdmachine::forEachAMDGPUAllocatableSGPRTuple(
+        *mri, addressableSGPRs,
+        [&](unsigned width, unsigned base, unsigned mcRegister) {
+          mcSGPRRegisters.try_emplace(getMCSGPRKey(base, width), mcRegister);
+        });
+  }
 
   LogicalResult initializeMC(Operation *op) {
     static llvm::once_flag initializeBackendOnce;
@@ -608,6 +615,7 @@ private:
     if (!sti)
       return module.emitError("unsupported AMDGPU target: ")
              << targetTriple << "--" << targetChip;
+    initializeMCSGPRRegisters();
     targetCapabilities = waveamdmachine::getAMDGPUTargetCapabilities(*sti);
     opcodes = makeAMDGPUOpcodeSet(isaVersion, *sti);
     mcContext = std::make_unique<llvm::MCContext>(triple, *mai, *mri, *sti);
@@ -2463,6 +2471,7 @@ private:
     execIfCounter = 0;
     dmaIssueDelayCounter = 0;
     execIfSaveCursor = 0;
+    sgprTupleEmissionFailed = false;
     funcLabelPrefix = (".L" + Twine(func.getSymName())).str();
     wave::WaveAMDExecIfSaveStackInfo execIfSaveInfo =
         wave::getWaveAMDExecIfSaveStackInfo(func);
@@ -3041,7 +3050,7 @@ private:
     return physReg(value);
   }
 
-  unsigned namedPhysReg(StringRef name) const {
+  unsigned namedPhysReg(StringRef name) {
     if (name.consume_front("s[")) {
       StringRef first;
       StringRef last;
@@ -3053,16 +3062,12 @@ private:
       if (first.getAsInteger(10, start) || last.getAsInteger(10, end))
         llvm_unreachable("unknown physical register name");
       unsigned width = end - start + 1;
-      if (width == 2)
-        return llvm::AMDGPU::SGPR0_SGPR1 + start / 2;
-      if (width == 4)
-        return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + start / 4;
-      llvm_unreachable("unknown physical register name");
+      return mcSGPRReg(start, width);
     }
     if (name.consume_front("s")) {
       unsigned phys = 0;
       if (!name.getAsInteger(10, phys))
-        return llvm::AMDGPU::SGPR0 + phys;
+        return mcSGPRReg(phys, /*width=*/1);
       llvm_unreachable("unknown physical register name");
     }
     if (name.consume_front("a")) {
@@ -3071,10 +3076,6 @@ private:
         return llvm::AMDGPU::AGPR0 + phys;
       llvm_unreachable("unknown physical register name");
     }
-    if (name == "s0")
-      return llvm::AMDGPU::SGPR0;
-    if (name == "s[0:1]")
-      return llvm::AMDGPU::SGPR0_SGPR1;
     if (name == "vcc")
       return llvm::AMDGPU::VCC;
     if (name == "m0")
@@ -3092,7 +3093,7 @@ private:
     llvm_unreachable("unknown physical register name");
   }
 
-  unsigned mcReg(Value value) const {
+  unsigned mcReg(Value value) {
     auto regType = cast<waveamdmachine::RegType>(value.getType());
     unsigned phys = getPhys(value);
     if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
@@ -3102,23 +3103,15 @@ private:
     return mcSGPRReg(phys, regType.getWidth());
   }
 
-  unsigned mcSGPRReg(unsigned phys, unsigned width) const {
-    switch (width) {
-    case 1:
-      return llvm::AMDGPU::SGPR0 + phys;
-    case 2:
-      assert(phys % 2 == 0 && "SGPR pair must be aligned");
-      return llvm::AMDGPU::SGPR0_SGPR1 + phys / 2;
-    case 4:
-      assert(phys % 4 == 0 && "SGPR quad must be aligned");
-      return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3 + phys / 4;
-    case 8:
-      assert(phys % 4 == 0 && "SGPR octuple must be SReg_256 aligned");
-      return llvm::AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7 +
-             phys / 4;
-    default:
-      llvm_unreachable("unsupported SGPR tuple width");
-    }
+  unsigned mcSGPRReg(unsigned phys, unsigned width) {
+    auto it = mcSGPRRegisters.find(getMCSGPRKey(phys, width));
+    if (it != mcSGPRRegisters.end())
+      return it->second;
+    if (!sgprTupleEmissionFailed)
+      emissionSource->emitError("LLVM MC has no SGPR tuple at base ")
+          << phys << " with width " << width << " on " << targetChip;
+    sgprTupleEmissionFailed = true;
+    return llvm::MCRegister::NoRegister;
   }
 
   unsigned mcVGPRReg(unsigned phys, unsigned width) const {
@@ -3206,13 +3199,13 @@ private:
                                       getPhys(value));
   }
 
-  llvm::MCOperand toMCSGPRComponent(Value value, unsigned component) const {
+  llvm::MCOperand toMCSGPRComponent(Value value, unsigned component) {
     auto regType = cast<waveamdmachine::RegType>(value.getType());
     if (regType.getRegClass() != waveamdmachine::RegClass::SGPR ||
         component >= regType.getWidth())
       llvm_unreachable("expected valid SGPR tuple component");
-    return llvm::MCOperand::createReg(llvm::AMDGPU::SGPR0 + getPhys(value) +
-                                      component);
+    return llvm::MCOperand::createReg(
+        mcSGPRReg(getPhys(value) + component, /*width=*/1));
   }
 
   llvm::MCOperand toMCAGPRComponent(Value value, unsigned component) const {
@@ -3367,6 +3360,8 @@ private:
   }
 
   LogicalResult emitMC(unsigned opcode, ArrayRef<llvm::MCOperand> operands) {
+    if (sgprTupleEmissionFailed)
+      return failure();
     if (opcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
         opcode >= mcii->getNumOpcodes())
       return emissionSource->emitError("no LLVM MC opcode mapping for ")
@@ -3393,6 +3388,81 @@ private:
     instPrinter->printInst(&inst, /*Address=*/0, /*Annot=*/"", *sti, os);
     os << '\n';
     return success();
+  }
+
+  LogicalResult emitNamedMC(
+      unsigned opcode,
+      ArrayRef<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>> namedOperands,
+      StringRef schema) {
+    if (sgprTupleEmissionFailed)
+      return failure();
+    if (opcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
+        opcode >= mcii->getNumOpcodes())
+      return emissionSource->emitError("no LLVM MC opcode mapping for ")
+             << schema << " on " << targetChip;
+    const llvm::MCInstrDesc &desc = mcii->get(opcode);
+    SmallVector<llvm::MCOperand> operands(desc.getNumOperands(),
+                                          llvm::MCOperand::createImm(0));
+    llvm::SmallBitVector assigned(desc.getNumOperands());
+    for (const auto &[name, operand] : namedOperands) {
+      int index = llvm::AMDGPU::getNamedOperandIdx(opcode, name);
+      if (index < 0 || static_cast<unsigned>(index) >= operands.size())
+        return emissionSource->emitError("LLVM MC operand schema mismatch for ")
+               << schema;
+      operands[index] = operand;
+      assigned.set(index);
+    }
+    if (!assigned.all())
+      return emissionSource->emitError("LLVM MC operand schema changed for ")
+             << schema;
+    return emitMC(opcode, operands);
+  }
+
+  template <typename TDMOp> LogicalResult emitTDMTransfer(TDMOp op, bool load) {
+    if (!isGfx1250())
+      return op.emitError("TDM transfer requires gfx1250");
+    bool d4 = op.getExtraGroups().size() == 2;
+    unsigned pseudo = load ? (d4 ? llvm::AMDGPU::TENSOR_LOAD_TO_LDS_d4
+                                 : llvm::AMDGPU::TENSOR_LOAD_TO_LDS_d2)
+                           : (d4 ? llvm::AMDGPU::TENSOR_STORE_FROM_LDS_d4
+                                 : llvm::AMDGPU::TENSOR_STORE_FROM_LDS_d2);
+    FailureOr<unsigned> cpol =
+        load ? getLoadCacheCPol(*op) : getStoreCacheCPol(*op);
+    if (failed(cpol))
+      return failure();
+
+    SmallVector<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>, 6> operands =
+        {
+            {llvm::AMDGPU::OpName::vaddr0, toMCOperand(op.getD0())},
+            {llvm::AMDGPU::OpName::vaddr1, toMCOperand(op.getD1())},
+            // LLVM tensor selection requires r128=0.
+            {llvm::AMDGPU::OpName::r128, llvm::MCOperand::createImm(0)},
+            {llvm::AMDGPU::OpName::cpol, llvm::MCOperand::createImm(*cpol)},
+        };
+    if (d4) {
+      operands.push_back(
+          {llvm::AMDGPU::OpName::vaddr2, toMCOperand(op.getExtraGroups()[0])});
+      operands.push_back(
+          {llvm::AMDGPU::OpName::vaddr3, toMCOperand(op.getExtraGroups()[1])});
+    }
+    return emitNamedMC(postVIOpcode(pseudo), operands, "TDM transfer");
+  }
+
+  LogicalResult emitTDMPrefetch(waveamdmachine::TDMPrefetchOp op) {
+    if (!isGfx1250())
+      return op.emitError("TDM prefetch requires gfx1250");
+    unsigned cpol = llvm::AMDGPU::CPol::SCOPE_SE |
+                    (op.getSpeculative() ? llvm::AMDGPU::CPol::TH_NT
+                                         : llvm::AMDGPU::CPol::TH_RT);
+    SmallVector<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>, 4> operands =
+        {
+            {llvm::AMDGPU::OpName::saddr, toMCOperand(op.getBase())},
+            {llvm::AMDGPU::OpName::vaddr, toMCOperand(op.getByteOffset())},
+            {llvm::AMDGPU::OpName::offset, llvm::MCOperand::createImm(0)},
+            {llvm::AMDGPU::OpName::cpol, llvm::MCOperand::createImm(cpol)},
+        };
+    return emitNamedMC(postVIOpcode(llvm::AMDGPU::GLOBAL_PREFETCH_B8_SADDR),
+                       operands, "TDM prefetch");
   }
 
   LogicalResult emitGfx1250Wmma(unsigned pseudoOpcode, Value dst, Value a,
@@ -4089,7 +4159,7 @@ private:
     return success();
   }
 
-  llvm::MCOperand getExecSaveOperand(unsigned slot, unsigned width) const {
+  llvm::MCOperand getExecSaveOperand(unsigned slot, unsigned width) {
     return llvm::MCOperand::createReg(mcSGPRReg(execIfSaveBase + slot, width));
   }
 
@@ -4173,6 +4243,7 @@ private:
     std::optional<uint32_t> dscnt = wait.getDscnt();
     std::optional<uint32_t> kmcnt = wait.getKmcnt();
     std::optional<uint32_t> xcnt = wait.getXcnt();
+    std::optional<uint32_t> tensorcnt = wait.getTensorcnt();
 
     auto validate = [&](StringRef name, std::optional<uint32_t> count,
                         unsigned max) -> LogicalResult {
@@ -4190,10 +4261,14 @@ private:
         failed(validate("kmcnt", kmcnt,
                         llvm::AMDGPU::getKmcntBitMask(isaVersion))) ||
         failed(
-            validate("xcnt", xcnt, llvm::AMDGPU::getXcntBitMask(isaVersion))))
+            validate("xcnt", xcnt, llvm::AMDGPU::getXcntBitMask(isaVersion))) ||
+        failed(validate("tensorcnt", tensorcnt,
+                        waveamdmachine::getAMDGPUTensorcntBitMask(isaVersion))))
       return failure();
     if (xcnt && !hasWaitXcnt())
       return wait.emitError("xcnt unsupported on target");
+    if (tensorcnt && !isGfx1250())
+      return wait.emitError("tensorcnt requires gfx1250");
 
     if (dscnt && loadcnt) {
       unsigned encoded =
@@ -4223,7 +4298,8 @@ private:
         failed(emit(storecnt, llvm::AMDGPU::S_WAIT_STORECNT)) ||
         failed(emit(dscnt, llvm::AMDGPU::S_WAIT_DSCNT)) ||
         failed(emit(kmcnt, llvm::AMDGPU::S_WAIT_KMCNT)) ||
-        failed(emit(xcnt, llvm::AMDGPU::S_WAIT_XCNT)))
+        failed(emit(xcnt, llvm::AMDGPU::S_WAIT_XCNT)) ||
+        failed(emit(tensorcnt, llvm::AMDGPU::S_WAIT_TENSORCNT)))
       return failure();
     return success();
   }
@@ -4291,6 +4367,7 @@ private:
 
   LogicalResult emitOperation(Operation &op) {
     llvm::SaveAndRestore<Operation *> saveSource(emissionSource, &op);
+    sgprTupleEmissionFailed = false;
     if (failed(verifyVGPRAddressability(op)))
       return failure();
     auto operandString = [&](unsigned i) {
@@ -5362,6 +5439,12 @@ private:
     if (isa<waveamdmachine::VReadfirstlaneB32Op>(op))
       return emitMC(vReadfirstlaneB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(0))});
+    if (auto tdm = dyn_cast<waveamdmachine::TDMLoadOp>(op))
+      return emitTDMTransfer(tdm, /*load=*/true);
+    if (auto tdm = dyn_cast<waveamdmachine::TDMStoreOp>(op))
+      return emitTDMTransfer(tdm, /*load=*/false);
+    if (auto prefetch = dyn_cast<waveamdmachine::TDMPrefetchOp>(op))
+      return emitTDMPrefetch(prefetch);
     if (isa<waveamdmachine::GlobalStoreB8Addr64Op>(op))
       return emitGlobalAddrStore(op, globalStoreB8Addr64());
     if (isa<waveamdmachine::GlobalStoreB16Addr64Op>(op))

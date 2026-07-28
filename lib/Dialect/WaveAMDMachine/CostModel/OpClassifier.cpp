@@ -9,6 +9,7 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/Operation.h"
@@ -49,6 +50,8 @@ static SchedClass classifyMappedOp(Operation *op) {
   // instruction-distance hazards and the full VMEM load/store family.
   if (op->hasTrait<traits::NoMachineInst>())
     return SchedClass::NoInst;
+  if (op->hasTrait<traits::TensorMemoryOp>())
+    return SchedClass::WriteTDM;
   if (op->hasTrait<traits::VMEMLoadOp>() || op->hasTrait<traits::VMEMStoreOp>())
     return SchedClass::WriteVMEM;
   if (issuesLdsWaitcnt(op))
@@ -76,7 +79,7 @@ static SchedClass classifyMappedOp(Operation *op) {
       // Structural pseudos: emit no real instruction. Region terminators
       // only carry structured-control operands; actual branches come from
       // codegen lowering, not from this op directly.
-      .Case<LabelOp, AfterOp, ContinueIfOp, YieldOp, UniformIfOp,
+      .Case<LabelOp, AfterOp, ContinueIfOp, YieldOp, ExecIfOp, UniformIfOp,
             UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
@@ -148,11 +151,18 @@ SchedClass classifyOp(Operation *op) {
 }
 
 unsigned getInstructionIssueCount(Operation *op,
-                                  const llvm::AMDGPU::IsaVersion &isa) {
-  if (InstructionIssueOpInterface info =
-          dyn_cast<InstructionIssueOpInterface>(op))
-    return std::max(1u, info.getInstructionIssueCount(isa));
-  return 1;
+                                  const llvm::AMDGPU::IsaVersion &targetIsa) {
+  if (!isa<InstructionIssueOpInterface>(op))
+    return 1;
+  InstructionIssueOpInterface info = cast<InstructionIssueOpInterface>(op);
+  unsigned declaredIssues = info.getInstructionIssueCount(targetIsa);
+  if (!isa<TDMLoadOp, TDMStoreOp>(op))
+    return std::max(1u, declaredIssues);
+  SchedClass cls = classifyOp(op);
+  const ArchData &arch = getArchData(targetIsa);
+  unsigned llvmIssues =
+      isSchedClassSupported(arch, cls) ? getIssueCount(arch, cls) : 1;
+  return std::max({1u, declaredIssues, llvmIssues});
 }
 
 bool usesMfmaCoissueResource(Operation *op, SchedClass cls,

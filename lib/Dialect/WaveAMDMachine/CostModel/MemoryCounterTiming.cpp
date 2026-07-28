@@ -77,7 +77,21 @@ static constexpr std::array<std::pair<WaitcntEvent, MemoryIssueResourceMask>, 9>
           getMemoryIssueResourceMask(MemoryIssueResource::Smem)},
          {WaitcntEvent::None, 0}}};
 
-static MemoryIssueResourceMask getWaitcntIssueResources(WaitcntInfo info) {
+static MemoryIssueResourceMask getWaitcntIssueResources(Operation *op) {
+  WaitcntInfo info = getWaitcntInfo(op);
+  if (info.event == WaitcntEvent::Tensor) {
+    MemoryIssueResourceMask resources =
+        getMemoryIssueResourceMask(MemoryIssueResource::Lds);
+    if (op->hasTrait<traits::VMEMLoadOp>())
+      resources |= getMemoryIssueResourceMask(MemoryIssueResource::VmemLoad);
+    if (op->hasTrait<traits::VMEMStoreOp>())
+      resources |= getMemoryIssueResourceMask(MemoryIssueResource::VmemStore);
+    return resources;
+  }
+  if (info.event == WaitcntEvent::None && op->hasTrait<traits::VMEMLoadOp>())
+    return getMemoryIssueResourceMask(MemoryIssueResource::VmemLoad);
+  if (info.event == WaitcntEvent::None && op->hasTrait<traits::VMEMStoreOp>())
+    return getMemoryIssueResourceMask(MemoryIssueResource::VmemStore);
   auto it = llvm::find_if(waitcntIssueResources, [&](const auto &mapping) {
     return mapping.first == info.event;
   });
@@ -89,28 +103,26 @@ static MemoryIssueResourceMask getWaitcntIssueResources(WaitcntInfo info) {
 } // namespace
 
 MemoryCounterKind getMemoryCounterKind(Operation *op) {
-  switch (getLegacyWaitcntCounter(getWaitcntInfo(op).event)) {
-  case WaitcntCounter::Vmem:
-    return MemoryCounterKind::Vmem;
-  case WaitcntCounter::Lgkm:
-    return MemoryCounterKind::Lgkm;
-  case WaitcntCounter::Vscnt:
-    return MemoryCounterKind::Vscnt;
-  case WaitcntCounter::None:
-    break;
-  case WaitcntCounter::Load:
-  case WaitcntCounter::Store:
-  case WaitcntCounter::Ds:
-  case WaitcntCounter::Km:
-  case WaitcntCounter::X:
+  WaitcntEvent event = getWaitcntInfo(op).event;
+  if (event == WaitcntEvent::Tensor)
+    return MemoryCounterKind::Tensor;
+  static constexpr std::array<std::pair<WaitcntCounter, MemoryCounterKind>, 3>
+      counterKinds = {{{WaitcntCounter::Vmem, MemoryCounterKind::Vmem},
+                       {WaitcntCounter::Lgkm, MemoryCounterKind::Lgkm},
+                       {WaitcntCounter::Vscnt, MemoryCounterKind::Vscnt}}};
+  WaitcntCounter counter = getLegacyWaitcntCounter(event);
+  if (counter == WaitcntCounter::None)
+    return MemoryCounterKind::None;
+  auto it = llvm::find_if(counterKinds, [&](const auto &mapping) {
+    return mapping.first == counter;
+  });
+  if (it == counterKinds.end())
     llvm_unreachable("expected legacy counter");
-  }
-  return MemoryCounterKind::None;
+  return it->second;
 }
 
 MemoryIssueResourceMask getMemoryIssueResources(Operation *op) {
-  MemoryIssueResourceMask resources =
-      getWaitcntIssueResources(getWaitcntInfo(op));
+  MemoryIssueResourceMask resources = getWaitcntIssueResources(op);
   if (op->hasTrait<traits::LDSDmaOp>() && op->hasTrait<traits::VMEMLoadOp>())
     resources |= getMemoryIssueResourceMask(MemoryIssueResource::LdsDmaAccept);
   return resources;
@@ -128,6 +140,8 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (event == WaitcntEvent::VmemStore || event == WaitcntEvent::ScratchStore)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
+  if (event == WaitcntEvent::Tensor)
+    return defaultLatency;
   if (isLDSCounterIssuer(op))
     return overrideOrDefault(overrides.lds, arch.ldsCounterLatency == 0
                                                 ? defaultLatency

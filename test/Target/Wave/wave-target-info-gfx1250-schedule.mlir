@@ -10,6 +10,7 @@
 // GFX1100-NEXT:   source: llvm-mc
 // GFX1100-NEXT:   latency: 5
 // GFX1100-NEXT:   resource_cycles: 1
+// GFX1100-NEXT:   issue_count: 1
 // GFX1100-NEXT:   functional_unit: VALU
 // GFX1100-NEXT:   opcode: V_WMMA_F32_16X16X16_F16_twoaddr_w32
 // GFX1100-NEXT:   opcode: V_WMMA_F32_16X16X16_BF16_twoaddr_w32
@@ -22,6 +23,7 @@
 // CHECK-NEXT:   source: llvm-mc
 // CHECK-NEXT:   latency: 2
 // CHECK-NEXT:   resource_cycles: 1
+// CHECK-NEXT:   issue_count: 1
 // CHECK-NEXT:   functional_unit: SALU
 // CHECK-NEXT:   opcode: S_ADD_U32_gfx12
 // CHECK:        resource: HWSALU acquire=0 release=1
@@ -48,6 +50,7 @@
 // CHECK-NEXT:   source: llvm-mc
 // CHECK-NEXT:   latency: 8
 // CHECK-NEXT:   resource_cycles: 8
+// CHECK-NEXT:   issue_count: 1
 // CHECK-NEXT:   functional_unit: MFMA_XDL
 // CHECK-NEXT:   opcode: V_WMMA_F32_16X16X32_F16_w32_twoaddr_gfx1250
 // CHECK-NEXT:   opcode: V_WMMA_F32_16X16X32_BF16_w32_twoaddr_gfx1250
@@ -78,6 +81,18 @@
 // CHECK-LABEL: class: WriteLDS
 // CHECK:        latency: 20
 // CHECK:        functional_unit: LGKM
+
+// CHECK-LABEL: class: WriteTDM
+// CHECK-NEXT:   supported: true
+// CHECK-NEXT:   source: llvm-mc
+// CHECK-NEXT:   latency: 320
+// CHECK-NEXT:   resource_cycles: 1
+// CHECK-NEXT:   issue_count: 2
+// CHECK-NEXT:   functional_unit: LGKM
+// CHECK-NEXT:   opcode: TENSOR_LOAD_TO_LDS_d2
+// CHECK-NEXT:   resource: HWLGKM acquire=0 release=1
+// CHECK-NEXT:   resource: HWRC acquire=0 release=2
+// CHECK-NEXT:   resource: HWVMEM acquire=0 release=1
 
 // CHECK-LABEL: class: WriteBarrier
 // CHECK:        latency: 2000

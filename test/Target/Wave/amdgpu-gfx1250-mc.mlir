@@ -269,4 +269,22 @@ func.func @wmma_bf16_distinct() {
   return
 }
 
+// ASM-LABEL: tdm_sgpr_tuple_base_four:
+// ASM: tensor_load_to_lds s[0:3], s[4:11]
+// DIS-LABEL: <tdm_sgpr_tuple_base_four>:
+// DIS: tensor_load_to_lds s[0:3], s[4:11]
+func.func @tdm_sgpr_tuple_base_four() {
+  %d0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 4, 0>
+  %d1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 8, 4>
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %loaded = waveamdmachine.tdm_load %d0, %d1 after %root
+      : (!waveamdmachine.reg<sgpr, 4, 0>,
+         !waveamdmachine.reg<sgpr, 8, 4>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

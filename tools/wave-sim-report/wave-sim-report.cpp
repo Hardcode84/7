@@ -171,25 +171,7 @@ static llvm::StringRef eventKindName(EventSimEventKind kind) {
 }
 
 static llvm::StringRef counterName(EventSimCounter counter) {
-  switch (counter) {
-  case EventSimCounter::None:
-    return "none";
-  case EventSimCounter::Vmem:
-    return "vmem";
-  case EventSimCounter::Lgkm:
-    return "lgkm";
-  case EventSimCounter::Vscnt:
-    return "vscnt";
-  }
-  llvm_unreachable("bad counter");
-}
-
-static unsigned getIssueCount(Operation *op) {
-  if (isa<DsLoadTupleB32Op, GlobalLoadTupleB32Op, BufferLoadTupleB32Op>(op))
-    return cast<RegType>(op->getResult(0).getType()).getWidth();
-  if (isa<DsStoreTupleB32Op>(op))
-    return cast<RegType>(op->getOperand(1).getType()).getWidth();
-  return 1;
+  return stringifyMemoryCounterKind(counter);
 }
 
 static int64_t getTripCount(UniformLoopOp loop) {
@@ -330,7 +312,7 @@ static void printOpLatencies(func::FuncOp func, const ArchData &arch,
       llvm::outs() << " value_latency="
                    << getMemoryValueLatency(arch, op, valueLatencies,
                                             calibration);
-    llvm::outs() << " issues=" << getIssueCount(op);
+    llvm::outs() << " issues=" << getInstructionIssueCount(op, arch.isa);
     if (op->hasTrait<::mlir::OpTrait::waveamdmachine::WaitcntOp>())
       llvm::outs() << " waitcnt=1";
     llvm::outs() << "\n";

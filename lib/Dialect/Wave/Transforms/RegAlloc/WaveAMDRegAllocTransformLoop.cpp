@@ -135,6 +135,12 @@ static bool isAGPR(waveamdmachine::RegType type) {
   return type.getRegClass() == waveamdmachine::RegClass::AGPR;
 }
 
+static bool requiresMCTupleEncoding(Value value) {
+  return llvm::any_of(value.getUses(), [](OpOperand &use) {
+    return waveamdmachine::requiresMCTupleEncoding(use);
+  });
+}
+
 static bool isFixedHardwareRead(Value value) {
   Operation *def = value.getDefiningOp();
   if (!def)
@@ -1688,7 +1694,7 @@ private:
           wave::getWaveAMDRegisterLimits(func);
       if (failed(limits))
         return failure();
-      vgprTupleAlignment = limits->vgprTupleAlignment;
+      targetLimits = std::move(*limits);
     }
     if (failed(computeFixedBases()))
       return failure();
@@ -1766,22 +1772,63 @@ private:
         return recordFixedFailure(set, "fixed-conflict");
       fixedBase = base;
     }
-    if (fixedBase && !fixedSetMembersAreAligned(set, *fixedBase))
+    if (fixedBase && !setMembersMeetTargetConstraints(set, *fixedBase))
       return recordFixedFailure(set, "fixed-alignment");
     return success();
   }
 
-  bool fixedSetMembersAreAligned(const wave::RegAllocTransformAliasSet &set,
-                                 unsigned base) const {
-    if (set.regClass != waveamdmachine::RegClass::VGPR || !vgprTupleAlignment)
-      return true;
+  bool
+  hasTargetTupleConstraint(const wave::RegAllocTransformValue &value) const {
+    if (!targetLimits || value.width <= 1)
+      return false;
+    if (value.regClass == waveamdmachine::RegClass::SGPR)
+      return requiresMCTupleEncoding(payloadValues[value.id]);
+    return value.regClass == waveamdmachine::RegClass::VGPR &&
+           targetLimits->vgprTupleAlignment > 1;
+  }
+
+  bool targetTupleBaseIsLegal(unsigned base,
+                              const wave::RegAllocTransformValue &value) const {
+    if (!hasTargetTupleConstraint(value))
+      return false;
+    if (value.regClass == waveamdmachine::RegClass::SGPR)
+      return targetLimits->isSGPRTupleBaseLegal(value.width, base);
+    return wave::isWaveAMDRegisterTupleBaseLegal(*targetLimits, value.regClass,
+                                                 value.width, base);
+  }
+
+  bool
+  setMembersMeetTargetConstraints(const wave::RegAllocTransformAliasSet &set,
+                                  unsigned base) const {
     return llvm::all_of(set.members, [&](unsigned valueId) {
       const wave::RegAllocTransformValue &value = values[valueId];
-      if (value.width <= 1)
+      if (!hasTargetTupleConstraint(value))
         return true;
       uint64_t physicalBase = static_cast<uint64_t>(base) + value.offset;
-      return physicalBase % vgprTupleAlignment == 0;
+      return physicalBase <= std::numeric_limits<unsigned>::max() &&
+             targetTupleBaseIsLegal(static_cast<unsigned>(physicalBase), value);
     });
+  }
+
+  unsigned
+  getRequiredAlignment(const wave::RegAllocTransformAliasSet &set) const {
+    if (set.width <= 1)
+      return 1;
+    if (set.regClass == waveamdmachine::RegClass::SGPR &&
+        llvm::any_of(set.members, [&](unsigned valueId) {
+          return hasTargetTupleConstraint(values[valueId]);
+        }))
+      return 1;
+    if (targetLimits && set.regClass == waveamdmachine::RegClass::VGPR &&
+        targetLimits->vgprTupleAlignment)
+      return targetLimits->vgprTupleAlignment;
+    return llvm::PowerOf2Ceil(set.width);
+  }
+
+  bool setBaseIsLegal(const wave::RegAllocTransformAliasSet &set,
+                      unsigned base) const {
+    return base % getRequiredAlignment(set) == 0 &&
+           setMembersMeetTargetConstraints(set, base);
   }
 
   std::optional<unsigned>
@@ -1964,34 +2011,22 @@ private:
         return std::nullopt;
       maxBase = std::min(maxBase, *beforeBase - 1);
     }
-    unsigned align = getRequiredAlignment(set.regClass, set.width);
-    for (unsigned base = 0; base <= maxBase; base += align) {
+    unsigned alignment = getRequiredAlignment(set);
+    for (unsigned base = 0; base <= maxBase; base += alignment) {
+      if (!setBaseIsLegal(set, base))
+        continue;
       std::optional<unsigned> conflictEnd = findActiveConflictEnd(set, base);
       if (!conflictEnd)
         conflictEnd = findFixedReservationConflictEnd(set, base);
       if (!conflictEnd)
         return base;
       if (*conflictEnd > base) {
-        unsigned next = llvm::alignTo(*conflictEnd, align);
+        unsigned next = llvm::alignTo(*conflictEnd, alignment);
         if (next > base)
-          base = next - align;
+          base = next - alignment;
       }
     }
     return std::nullopt;
-  }
-
-  unsigned getRequiredAlignment(waveamdmachine::RegClass regClass,
-                                unsigned width) const {
-    if (width <= 1)
-      return 1;
-    if (regClass == waveamdmachine::RegClass::VGPR && vgprTupleAlignment)
-      return vgprTupleAlignment;
-    return std::max<unsigned>(1, llvm::PowerOf2Ceil(width));
-  }
-
-  bool isAlignedBase(unsigned base, waveamdmachine::RegClass regClass,
-                     unsigned width) const {
-    return base % getRequiredAlignment(regClass, width) == 0;
   }
 
   const wave::RegAllocTransformValue *
@@ -2150,7 +2185,7 @@ private:
       unsigned limit) {
     if (!registerRangeFits(base, set.width, limit))
       return false;
-    if (!isAlignedBase(base, set.regClass, set.width))
+    if (!setBaseIsLegal(set, base))
       return false;
     if (conflictsWithActiveIgnoring(set, base, sourceSet.id))
       return false;
@@ -2722,6 +2757,7 @@ private:
   DenseMap<unsigned, unsigned> assignmentIndexBySet;
   DenseMap<unsigned, Value> fixedHardwareReadValues;
   std::optional<wave::RegAllocTransformBudget> vgprFamilyBudget;
+  std::optional<wave::WaveAMDRegisterLimits> targetLimits;
   std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
   std::array<std::optional<wave::RegAllocTransformBudget>, kRegClassCount>
       budgetCache;
@@ -2730,7 +2766,6 @@ private:
   func::FuncOp func;
   Builder &builder;
   unsigned memberConflictGeneration = 0;
-  unsigned vgprTupleAlignment = 0;
   bool killedOperandReuseIsaFailed = false;
 };
 

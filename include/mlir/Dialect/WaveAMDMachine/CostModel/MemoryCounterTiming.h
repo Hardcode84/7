@@ -9,6 +9,8 @@
 #ifndef MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_MEMORYCOUNTERTIMING_H
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_MEMORYCOUNTERTIMING_H
 
+#include "mlir/Dialect/WaveAMDMachine/CostModel/CostModelEnums.h"
+
 #include <cstdint>
 
 namespace mlir {
@@ -19,13 +21,6 @@ namespace mlir::waveamdmachine {
 
 struct ArchData;
 class CalibrationData;
-
-enum class MemoryCounterKind : uint8_t {
-  None,
-  Vmem,
-  Lgkm,
-  Vscnt,
-};
 
 enum class MemoryIssueResource : uint8_t {
   VmemLoad,

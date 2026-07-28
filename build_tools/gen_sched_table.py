@@ -45,6 +45,7 @@ CLASS_TO_LLVM: dict[str, str | None] = {
     "WriteVMEM": "WriteVMEM",
     "WriteSMEM": "WriteSMEM",
     "WriteLDS": "WriteLDS",
+    "WriteTDM": None,
     "WriteBranch": "WriteBranch",
     "WriteBarrier": "WriteBarrier",
     "WriteExport": "WriteExport",
@@ -310,6 +311,7 @@ def render_latency_inc(
     class_order: list[str],
     latency_tables: dict[str, list[int]],
     resource_cycle_tables: dict[str, list[int]],
+    issue_count_tables: dict[str, list[int]],
     support_tables: dict[str, list[bool]],
 ) -> str:
     lines = [
@@ -337,6 +339,13 @@ def render_latency_inc(
         lines.append(f"static constexpr ClassCycles kResourceCycles{arch_key} = {{")
         for class_name, value in zip(
             class_order, resource_cycle_tables[arch_key], strict=True
+        ):
+            lines.append(f"    /*{class_name}=*/{value},")
+        lines.append("};")
+        lines.append("")
+        lines.append(f"static constexpr ClassCycles kIssueCounts{arch_key} = {{")
+        for class_name, value in zip(
+            class_order, issue_count_tables[arch_key], strict=True
         ):
             lines.append(f"    /*{class_name}=*/{value},")
         lines.append("};")
@@ -439,17 +448,22 @@ def index_schedule_classes(
     return by_name
 
 
-def get_schedule_numbers(tool: Path, name: str, entry: dict) -> tuple[int, int, str]:
+def get_schedule_numbers(
+    tool: Path, name: str, entry: dict
+) -> tuple[int, int, int, str]:
     latency = entry.get("latency")
     cycles = entry.get("resource_cycles")
+    issue_count = entry.get("issue_count")
     functional_unit = entry.get("functional_unit")
     if not is_integer(latency) or latency < 0:
         raise ValueError(f"{tool} returned invalid latency for {name}")
     if not is_integer(cycles) or cycles < 0:
         raise ValueError(f"{tool} returned invalid resource cycles for {name}")
+    if not is_integer(issue_count) or issue_count < 0:
+        raise ValueError(f"{tool} returned invalid issue count for {name}")
     if functional_unit not in FUNCTIONAL_UNITS:
         raise ValueError(f"{tool} returned invalid functional unit for {name}")
-    return latency, cycles, functional_unit
+    return latency, cycles, issue_count, functional_unit
 
 
 def is_valid_schedule_resource(resource: object) -> bool:
@@ -492,42 +506,58 @@ def validate_schedule_source(
 
 def get_schedule_class(
     tool: Path, name: str, entry: dict
-) -> tuple[int, int, str, bool]:
+) -> tuple[int, int, int, str, bool]:
     supported = entry.get("supported")
     if not isinstance(supported, bool):
         raise ValueError(f"{tool} returned invalid support state for {name}")
     if not supported:
-        return 0, 0, "None", False
-    latency, cycles, functional_unit = get_schedule_numbers(tool, name, entry)
+        return 0, 0, 0, "None", False
+    latency, cycles, issue_count, functional_unit = get_schedule_numbers(
+        tool, name, entry
+    )
     opcodes, resources = get_schedule_lists(tool, name, entry)
     validate_schedule_source(tool, name, entry, opcodes, resources)
-    return latency, cycles, functional_unit, True
+    return latency, cycles, issue_count, functional_unit, True
 
 
 def query_schedule(
     tool: Path, chip: str, class_order: list[str]
-) -> tuple[list[int], list[int], list[str], list[bool]]:
+) -> tuple[list[int], list[int], list[int], list[str], list[bool]]:
     manifest = load_schedule_manifest(tool, chip)
     raw_classes = get_raw_schedule_classes(tool, chip, manifest)
     by_name = index_schedule_classes(tool, raw_classes, class_order)
     schedules = [get_schedule_class(tool, name, by_name[name]) for name in class_order]
     latencies = [schedule[0] for schedule in schedules]
     resource_cycles = [schedule[1] for schedule in schedules]
-    functional_units = [schedule[2] for schedule in schedules]
-    supported_classes = [schedule[3] for schedule in schedules]
-    return latencies, resource_cycles, functional_units, supported_classes
+    issue_counts = [schedule[2] for schedule in schedules]
+    functional_units = [schedule[3] for schedule in schedules]
+    supported_classes = [schedule[4] for schedule in schedules]
+    return (
+        latencies,
+        resource_cycles,
+        issue_counts,
+        functional_units,
+        supported_classes,
+    )
 
 
 def merge_mc_fallback(
     arch_key: str,
     class_order: list[str],
-    queried: tuple[list[int], list[int], list[str], list[bool]],
+    queried: tuple[list[int], list[int], list[int], list[str], list[bool]],
     latency_tables: dict[str, list[int]],
     resource_cycle_tables: dict[str, list[int]],
+    issue_count_tables: dict[str, list[int]],
     fu_tables: dict[str, list[str]],
     support_tables: dict[str, list[bool]],
 ) -> None:
-    queried_latencies, queried_cycles, queried_fus, queried_support = queried
+    (
+        queried_latencies,
+        queried_cycles,
+        queried_issue_counts,
+        queried_fus,
+        queried_support,
+    ) = queried
     for index, class_name in enumerate(class_order):
         if not queried_support[index]:
             continue
@@ -547,9 +577,11 @@ def merge_mc_fallback(
                     f"{arch_key} {class_name} LLVM source and MC schedules "
                     f"disagree: source={source}, mc={direct}"
                 )
+            issue_count_tables[arch_key][index] = queried_issue_counts[index]
             continue
         latency_tables[arch_key][index] = queried_latencies[index]
         resource_cycle_tables[arch_key][index] = queried_cycles[index]
+        issue_count_tables[arch_key][index] = queried_issue_counts[index]
         fu_tables[arch_key][index] = queried_fus[index]
         support_tables[arch_key][index] = True
 
@@ -642,6 +674,7 @@ def build_schedule_tables(td_path: Path, query_tool: Path) -> tuple[
     list[str],
     dict[str, list[int]],
     dict[str, list[int]],
+    dict[str, list[int]],
     dict[str, list[str]],
     dict[str, list[bool]],
 ]:
@@ -651,6 +684,15 @@ def build_schedule_tables(td_path: Path, query_tool: Path) -> tuple[
     resource_cycle_tables = build_resource_cycle_tables(class_order, td_tables)
     fu_tables = build_fu_tables(class_order, td_tables)
     support_tables = build_support_tables(class_order, td_tables)
+    issue_count_tables = {
+        arch_key: [
+            0 if class_name in WAVE_PSEUDO_CLASSES or not supported else 1
+            for class_name, supported in zip(
+                class_order, support_tables[arch_key], strict=True
+            )
+        ]
+        for arch_key, _, _, _ in LEGACY_ARCHES
+    }
     for arch_key, _, _, _ in LEGACY_ARCHES:
         merge_mc_fallback(
             arch_key,
@@ -658,12 +700,14 @@ def build_schedule_tables(td_path: Path, query_tool: Path) -> tuple[
             query_schedule(query_tool, arch_key.lower(), class_order),
             latency_tables,
             resource_cycle_tables,
+            issue_count_tables,
             fu_tables,
             support_tables,
         )
     (
         latency_tables[QUERY_ARCH_KEY],
         resource_cycle_tables[QUERY_ARCH_KEY],
+        issue_count_tables[QUERY_ARCH_KEY],
         fu_tables[QUERY_ARCH_KEY],
         gfx1250_support,
     ) = query_schedule(query_tool, QUERY_CHIP, class_order)
@@ -672,6 +716,7 @@ def build_schedule_tables(td_path: Path, query_tool: Path) -> tuple[
         class_order,
         latency_tables,
         resource_cycle_tables,
+        issue_count_tables,
         fu_tables,
         support_tables,
     )
@@ -681,6 +726,7 @@ def render_schedule_outputs(
     class_order: list[str],
     latency_tables: dict[str, list[int]],
     resource_cycle_tables: dict[str, list[int]],
+    issue_count_tables: dict[str, list[int]],
     fu_tables: dict[str, list[str]],
     support_tables: dict[str, list[bool]],
 ) -> tuple[str, str]:
@@ -688,6 +734,7 @@ def render_schedule_outputs(
         class_order,
         latency_tables,
         resource_cycle_tables,
+        issue_count_tables,
         support_tables,
     )
     generated += "\n"

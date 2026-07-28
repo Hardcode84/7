@@ -24,8 +24,9 @@
 #include <string>
 
 namespace llvm {
+class MCRegisterInfo;
 class MCSubtargetInfo;
-}
+} // namespace llvm
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTargetEnums.h.inc"
 
@@ -119,6 +120,11 @@ createAMDGPUMCSubtargetInfo(Operation *op, llvm::StringRef consumer);
 std::optional<AMDGPUTargetCapabilities>
 getAMDGPUTargetCapabilities(const llvm::MCSubtargetInfo &sti);
 
+void forEachAMDGPUAllocatableSGPRTuple(
+    const llvm::MCRegisterInfo &mri, unsigned addressableSGPRs,
+    llvm::function_ref<void(unsigned width, unsigned base, unsigned mcRegister)>
+        callback);
+
 std::optional<AMDGPUMmaCapabilities>
 getAMDGPUWmmaCapabilities(const llvm::MCSubtargetInfo &sti, bool bf16);
 
@@ -134,6 +140,8 @@ bool supportsAGPRs(const llvm::AMDGPU::IsaVersion &isa);
 bool supportsCvtPkF16F32Inst(const llvm::AMDGPU::IsaVersion &isa);
 
 bool supportsCvtPkBF16F32Inst(const llvm::AMDGPU::IsaVersion &isa);
+
+unsigned getAMDGPUTensorcntBitMask(const llvm::AMDGPU::IsaVersion &isa);
 
 std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
 

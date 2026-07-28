@@ -223,6 +223,61 @@ unsigned mlir::waveamdmachine::getAMDGPULocalMemoryBankCount(
   return 0;
 }
 
+static std::optional<unsigned>
+getAllocatableSGPRTupleWidth(const llvm::MCRegisterClass &regClass,
+                             unsigned unitBits, unsigned addressableSGPRs) {
+  unsigned bankFlags =
+      regClass.TSFlags & (llvm::SIRCFlags::HasSGPR | llvm::SIRCFlags::HasVGPR |
+                          llvm::SIRCFlags::HasAGPR);
+  unsigned size = regClass.getSizeInBits();
+  if (!regClass.isAllocatable() || bankFlags != llvm::SIRCFlags::HasSGPR ||
+      size == 0 || size % unitBits != 0)
+    return std::nullopt;
+  unsigned width = size / unitBits;
+  if (width > addressableSGPRs)
+    return std::nullopt;
+  return width;
+}
+
+static std::optional<unsigned>
+getSGPRTupleBase(const llvm::MCRegisterInfo &mri,
+                 const llvm::MCRegisterClass &sgpr32, llvm::MCRegister reg,
+                 unsigned width, unsigned addressableSGPRs) {
+  llvm::MCRegister first =
+      width == 1 ? reg : mri.getSubReg(reg, llvm::AMDGPU::sub0);
+  if (!first || !sgpr32.contains(first))
+    return std::nullopt;
+  unsigned base =
+      mri.getEncodingValue(first) & llvm::AMDGPU::HWEncoding::REG_IDX_MASK;
+  if (base > addressableSGPRs - width)
+    return std::nullopt;
+  return base;
+}
+
+void mlir::waveamdmachine::forEachAMDGPUAllocatableSGPRTuple(
+    const llvm::MCRegisterInfo &mri, unsigned addressableSGPRs,
+    function_ref<void(unsigned width, unsigned base, unsigned mcRegister)>
+        callback) {
+  const llvm::MCRegisterClass &sgpr32 =
+      mri.getRegClass(llvm::AMDGPU::SGPR_32RegClassID);
+  unsigned unitBits = sgpr32.getSizeInBits();
+  if (unitBits == 0)
+    return;
+  for (unsigned classID = 0; classID < mri.getNumRegClasses(); ++classID) {
+    const llvm::MCRegisterClass &regClass = mri.getRegClass(classID);
+    std::optional<unsigned> width =
+        getAllocatableSGPRTupleWidth(regClass, unitBits, addressableSGPRs);
+    if (!width)
+      continue;
+    for (llvm::MCRegister reg : regClass.getRegisters()) {
+      std::optional<unsigned> base =
+          getSGPRTupleBase(mri, sgpr32, reg, *width, addressableSGPRs);
+      if (base)
+        callback(*width, *base, reg.id());
+    }
+  }
+}
+
 static unsigned getVGPRTupleAlignment(const llvm::MCSubtargetInfo &sti) {
   llvm::AMDGPUDwarfFlavour flavour =
       llvm::AMDGPU::IsaInfo::getWavefrontSize(sti) == 32 ? llvm::Wave32
@@ -477,6 +532,12 @@ bool mlir::waveamdmachine::supportsCvtPkF16F32Inst(
 bool mlir::waveamdmachine::supportsCvtPkBF16F32Inst(
     const llvm::AMDGPU::IsaVersion &isa) {
   return isGfx950(isa) || isGfx125Isa(isa) || isa.Major == 13;
+}
+
+unsigned mlir::waveamdmachine::getAMDGPUTensorcntBitMask(
+    const llvm::AMDGPU::IsaVersion &isa) {
+  // gfx1250 tensorcnt uses LLVM's async-counter width.
+  return llvm::AMDGPU::getAsynccntBitMask(isa);
 }
 
 std::optional<unsigned>

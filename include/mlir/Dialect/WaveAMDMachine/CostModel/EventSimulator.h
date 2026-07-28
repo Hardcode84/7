@@ -40,12 +40,7 @@ struct EventSimConfig {
   MemoryValueLatencies valueLatencies;
 };
 
-enum class EventSimCounter : uint8_t {
-  None,
-  Vmem,
-  Lgkm,
-  Vscnt,
-};
+using EventSimCounter = MemoryCounterKind;
 
 enum class EventSimEventKind : uint8_t {
   OpIssued,

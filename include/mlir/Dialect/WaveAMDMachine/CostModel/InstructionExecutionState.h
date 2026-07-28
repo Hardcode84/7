@@ -31,6 +31,8 @@ namespace mlir::waveamdmachine {
 
 struct ArchData;
 class CalibrationData;
+class SWaitcntOp;
+class SWaitcntSplitOp;
 
 enum class InstructionStallKind : uint8_t {
   None,
@@ -49,23 +51,6 @@ enum class InstructionPipeKind : uint8_t {
   VALU,
   SALU,
   XDL,
-};
-
-enum class InstructionWaitCounterKind : uint8_t {
-  None,
-  Vmem,
-  Lgkm,
-  Vscnt,
-  Expcnt,
-};
-
-enum class InstructionEventClass : uint8_t {
-  None,
-  VmemLoad,
-  VmemStore,
-  LdsDs,
-  Smem,
-  Export,
 };
 
 struct InstructionStallComponent {
@@ -212,9 +197,6 @@ bool isXdlResultHazardConsumer(Operation *op);
 bool waitsForMemoryTokenDepsBeforeIssue(Operation *op);
 llvm::StringRef getInstructionStallKindName(InstructionStallKind kind);
 llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind);
-llvm::StringRef
-getInstructionWaitCounterKindName(InstructionWaitCounterKind kind);
-llvm::StringRef getInstructionEventClassName(InstructionEventClass eventClass);
 
 struct InstructionExecutionState {
   InstructionExecutionState(const ArchData &arch,
@@ -237,7 +219,8 @@ private:
   friend class MultiWaveExecutionState;
   void advanceToCycle(int64_t cycle);
   using EventId = uint64_t;
-  static constexpr unsigned kWaitCounterCount = 4;
+  static constexpr unsigned kWaitCounterCount =
+      getMaxEnumValForInstructionWaitCounterKind();
   static constexpr unsigned kPipeCount = 3;
 
   struct PendingEvent {
@@ -357,8 +340,17 @@ private:
   commitWithResources(Operation *op, InstructionResourceState *resourceState,
                       unsigned wave, WavePlacement placement);
   FailureOr<int64_t> waitcntReadyCycle(Operation *op, int64_t cycle) const;
-  FailureOr<int64_t> counterReadyCycle(InstructionWaitCounterKind kind,
-                                       unsigned limit, int64_t cycle) const;
+  FailureOr<int64_t> waitcntReadyCycle(SWaitcntOp wait, int64_t cycle) const;
+  FailureOr<int64_t> waitcntReadyCycle(SWaitcntSplitOp wait,
+                                       int64_t cycle) const;
+  LogicalResult
+  combineCounterReadyCycle(int64_t &ready, InstructionWaitCounterKind kind,
+                           std::optional<uint32_t> limit, int64_t cycle,
+                           ArrayRef<InstructionEventClass> eventClasses) const;
+  FailureOr<int64_t>
+  counterReadyCycle(InstructionWaitCounterKind kind, unsigned limit,
+                    int64_t cycle,
+                    ArrayRef<InstructionEventClass> eventClasses = {}) const;
   int64_t operandReadyCycle(Operation *op,
                             InstructionStallKind &stallKind) const;
   int64_t issueReadyCycle(Operation *op, InstructionStallKind &stallKind) const;

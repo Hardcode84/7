@@ -34,6 +34,20 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
+func.func @oversized_tensor_wait() {
+  // expected-error @below {{tensorcnt value 64 exceeds target maximum 63}}
+  waveamdmachine.s_waitcnt_split tensorcnt(64)
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
 func.func @old_store_wait() {
   // expected-error @below {{s_waitcnt_vscnt requires split-wait lowering}}
   waveamdmachine.s_waitcnt_vscnt vscnt(0)
@@ -308,7 +322,7 @@ func.func @unaligned_wide_vgpr() {
       : !waveamdmachine.reg<vgpr, 1, 0>
   %base = waveamdmachine.uninit
       : !waveamdmachine.reg<sgpr, 2, 0>
-  // expected-error @below {{wave-to-amdgpu-asm found VGPR tuple at v1 with width 2 misaligned; target requires base alignment 2}}
+  // expected-error @below {{wave-to-amdgpu-asm found VGPR tuple at base 1 with width 2 unsupported by target register classes}}
   %value = waveamdmachine.global_load_b64 %off, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<sgpr, 2, 0>)
@@ -477,6 +491,45 @@ func.func @packed_delay_crosses_control_flow() {
     waveamdmachine.yield
   } : !waveamdmachine.reg<scc, 1>
   waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @tdm_illegal_sgpr_tuple_base() {
+  %d0 = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 4, 0>
+  // expected-error @below {{wave-to-amdgpu-asm found SGPR tuple at base 6 with width 8 unsupported by target register classes}}
+  %d1 = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 8, 6>
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %loaded = waveamdmachine.tdm_load %d0, %d1 after %root
+      : (!waveamdmachine.reg<sgpr, 4, 0>,
+         !waveamdmachine.reg<sgpr, 8, 6>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @unsupported_named_sgpr_tuple() {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  // expected-error @below {{LLVM MC has no SGPR tuple at base 6 with width 8 on gfx1250}}
+  waveamdmachine.s_mov_b32 "s[6:13]", %zero
+      : (!waveamdmachine.imm) -> ()
   return
 }
 

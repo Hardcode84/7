@@ -601,6 +601,17 @@ LogicalResult UniformIfOp::verify() {
   return verifyUniformIfYield(*this, getElseRegion(), "else");
 }
 
+template <typename TDMOp> static LogicalResult verifyTDMTransfer(TDMOp op) {
+  size_t groups = op.getExtraGroups().size();
+  if (groups != 0 && groups != 2)
+    return op.emitOpError("requires zero or two extra dword groups");
+  return success();
+}
+
+LogicalResult TDMLoadOp::verify() { return verifyTDMTransfer(*this); }
+
+LogicalResult TDMStoreOp::verify() { return verifyTDMTransfer(*this); }
+
 void UniformIfOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   bool hasElse = !getElseRegion().empty();

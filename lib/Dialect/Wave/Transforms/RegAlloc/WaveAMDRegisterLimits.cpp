@@ -18,6 +18,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 #include "llvm/TargetParser/TargetParser.h"
 
@@ -27,6 +28,31 @@
 using namespace mlir;
 
 namespace mlir::wave {
+
+bool WaveAMDRegisterLimits::hasSGPRTupleLegalBases(unsigned width) const {
+  return sgprTupleLegalBases.contains(width);
+}
+
+bool WaveAMDRegisterLimits::isSGPRTupleBaseLegal(unsigned width,
+                                                 unsigned base) const {
+  auto it = sgprTupleLegalBases.find(width);
+  return it != sgprTupleLegalBases.end() && base < it->second.size() &&
+         it->second.test(base);
+}
+
+bool isWaveAMDRegisterTupleBaseLegal(const WaveAMDRegisterLimits &limits,
+                                     waveamdmachine::RegClass regClass,
+                                     unsigned width, unsigned base) {
+  if (width <= 1)
+    return true;
+  if (regClass == waveamdmachine::RegClass::SGPR &&
+      limits.hasSGPRTupleLegalBases(width))
+    return limits.isSGPRTupleBaseLegal(width, base);
+  unsigned alignment = llvm::PowerOf2Ceil(width);
+  if (regClass == waveamdmachine::RegClass::VGPR && limits.vgprTupleAlignment)
+    alignment = limits.vgprTupleAlignment;
+  return base % alignment == 0;
+}
 
 StringRef getWaveAMDKernargPreloadLengthAttrName() {
   return "waveamdmachine.kernarg_preload_length";
@@ -223,6 +249,25 @@ static unsigned getAddressableAGPRs(const llvm::MCSubtargetInfo &sti) {
   return waveamdmachine::getAMDGPUAddressableAGPRs(sti);
 }
 
+static llvm::DenseMap<unsigned, llvm::BitVector>
+getSGPRTupleLegalBases(const llvm::MCSubtargetInfo &sti,
+                       unsigned addressableSGPRs) {
+  llvm::AMDGPUDwarfFlavour flavour =
+      llvm::AMDGPU::IsaInfo::getWavefrontSize(sti) == 32 ? llvm::Wave32
+                                                         : llvm::Wave64;
+  std::unique_ptr<llvm::MCRegisterInfo> mri(
+      llvm::createGCNMCRegisterInfo(flavour));
+  llvm::DenseMap<unsigned, llvm::BitVector> legalBases;
+  waveamdmachine::forEachAMDGPUAllocatableSGPRTuple(
+      *mri, addressableSGPRs, [&](unsigned width, unsigned base, unsigned) {
+        llvm::BitVector &widthBases = legalBases[width];
+        if (widthBases.empty())
+          widthBases.resize(addressableSGPRs);
+        widthBases.set(base);
+      });
+  return legalBases;
+}
+
 FailureOr<WaveAMDLocalMemoryLimits>
 getWaveAMDLocalMemoryLimits(Operation *op, StringRef consumer) {
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
@@ -306,6 +351,7 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
                                ? capabilities->maxWavesPerEU
                                : llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(**sti);
   WaveAMDRegisterLimits limits;
+  limits.sgprTupleLegalBases = getSGPRTupleLegalBases(**sti, addressableSGPRs);
   limits.addressableSGPRs = addressableSGPRs;
   limits.addressableVGPRs =
       capabilities
