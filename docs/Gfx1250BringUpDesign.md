@@ -2,14 +2,16 @@
 
 ## Status
 
-In progress.
+Compile-time bring-up complete. No gfx1250 hardware is available for this
+closeout. Runtime correctness, performance, and same-hardware assembly
+benchmarking remain unvalidated and are not claimed.
 
 LLVM already owns gfx1250 target parsing, encodings, ELF identity, instruction
 descriptions, intrinsics, descriptor fields, wait instructions, and schedule
 classes. Wave must consume that support. Wave must not duplicate an ISA
 database.
 
-Current Wave support is partial:
+Initial Wave support includes:
 
 - target parsing recognizes ISA 12.5;
 - gfx1250 defaults to wave32 and rejects wave64;
@@ -43,7 +45,7 @@ Compile and run correct gfx1250 Wave kernels in two steps:
 1. scalar/vector kernels using global, buffer, LDS, scalar, and scratch memory;
 2. f16 and bf16 GEMM using gfx1250 `16x16x32` wave32 WMMA.
 
-Initial production support includes:
+Initial compile-time support includes:
 
 - exact gfx1250 target selection;
 - valid MCInst emission and object generation;
@@ -54,8 +56,7 @@ Initial production support includes:
   budgets;
 - gfx1250 WMMA fragment layouts and accumulator semantics;
 - target-specific scheduling and hazard repair;
-- Python target selection, compile-time Integration coverage, hardware
-  correctness, and measured assembly goldens.
+- Python target selection and compile-time Integration coverage.
 
 ## Non-goals
 
@@ -67,6 +68,8 @@ Initial bring-up does not include:
 - cluster or multicast memory;
 - named or split hardware barriers;
 - SWMMAC, scaled WMMA, sparse WMMA, FP4, FP6, FP8, or BF8;
+- typed inline assembly;
+- VOPD pairing;
 - attention tuning;
 - gfx1251 enablement.
 
@@ -226,8 +229,7 @@ also:
   clause when a later member needs a switch;
 - place switches correctly around barriers, waits, and `s_delay_alu`;
 - treat a switch as an implicit X-counter drain;
-- reject unsupported high-VGPR operand maps and incompatible VOPD windows;
-- reset to the low window around inline assembly.
+- reject unsupported high-VGPR operand maps.
 
 Emission buffers each function's `MCInst` values, labels, directives, and
 alignment until finalization. The buffered stage inserts the required `s_nop`
@@ -235,8 +237,8 @@ between a MODE write and a following switch before printing. Automatic switch
 insertion and compatible MODE patching remain `.5`. Branches and fallthrough
 labels for uniform conditionals, EXEC conditionals, loops, and DMA-delay
 regions use the same buffer. No later pass may change physical VGPR operands.
-Typed inline-assembly islands and VOPD pairs are `.12`; `.5` does not fabricate
-raw `MCInst` producers to test missing WaveAMDMachine operations.
+Initial WaveAMDMachine support has no inline-assembly or VOPD producer.
+Finalization does not fabricate raw `MCInst` values for absent operations.
 Wave-visible state enums use TableGen-generated stringify and symbolize
 helpers; selector field order otherwise comes directly from LLVM's operand
 tables.
@@ -621,7 +623,6 @@ Reject unsupported work before final emission. Required diagnostics include:
 - AGPR requested;
 - register index above `v1023` or the occupancy budget;
 - high-VGPR operand without a lowering table;
-- incompatible VOPD operand windows;
 - async, tensor, cluster, multicast, named-barrier, or SWMMAC operation used;
 - missing gfx1250 MC opcode mapping;
 - descriptor value outside the target field width.
@@ -636,17 +637,17 @@ Reject unsupported work before final emission. Required diagnostics include:
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
 | waits | independent LOAD/STORE/DS/KM/X, joins, loops, atomics, termination |
-| VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, X drains; `.12` adds typed inline assembly and VOPD |
+| VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, X drains |
 | resources | 32-bank choice, 320 KiB bound, target tuple alignment, and LLVM-reported VGPR limits |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, target hazards |
 | Python | exact profile selection and wrong-family rejection |
 | Integration | scalar/vector global, buffer, LDS, SMEM, scratch, high-VGPR CFG, f16 GEMM, bf16 GEMM |
-| hardware | reference correctness, descriptor/scratch smoke, GEMM runtime |
-| PerfGolden | deterministic checked-in ASM after same-hardware benchmark |
+| hardware | deferred; required before a runtime-correctness claim |
+| measured PerfGolden | deferred; required before a performance claim |
 
-MC tests run without hardware. Hardware tests are required before production
-closure. Missing hardware keeps the validation and closeout work open.
+MC tests run without hardware. Hardware and measured PerfGolden rows are waived
+for this closeout. Compile-time assembly and disassembly are the only evidence.
 
 ## Landing Order
 
@@ -659,13 +660,11 @@ closure. Missing hardware keeps the validation and closeout work open.
 7. f16/bf16 WMMA and fragment layouts;
 8. scheduler and hazard model;
 9. Python profile and GEMM Integration;
-10. hardware validation and measured PerfGolden;
-11. typed inline-assembly and VOPD MC surfaces;
-12. integrated-tree audit and epic closure.
+10. integrated-tree audit and epic closure.
 
 Dependencies form a DAG where ABI and waits can proceed in parallel after MC
 emission. High-VGPR enablement waits for both MC finalization and X-counter
-support.
+support. Hardware validation remains deferred.
 
 ## Tracked Work
 
@@ -682,9 +681,9 @@ Epic: `7-gfx1250-wave-backend-bringup-fa4l`
 | `.7` | f16/bf16 WMMA layouts | `.6` |
 | `.8` | scheduler resources and hazards | `.7` |
 | `.9` | Python profile and GEMM Integration | `.7`, `.8` |
-| `.10` | hardware validation and measured ASM | `.9` |
-| `.11` | integrated-tree audit and epic closure | `.1` through `.10`, `.12` |
-| `.12` | typed inline-assembly and VOPD MC surfaces | `.5` |
+| `.10` | hardware validation and measured ASM; closed with no-device waiver | `.9` |
+| `.11` | integrated-tree audit and epic closure | `.1` through `.10` |
+| `.12` | typed inline-assembly and VOPD surfaces; closed outside scope | none |
 
 `.2` is related to `7-wavemachine-mc-tablegen-s1g6`. `.8` is related to
 `7-amdgpu-scheduler-sy5.9`. Related edges record reuse; they do not block the
@@ -701,16 +700,17 @@ Run affected Integration, Target, Python, and PerfGolden tests in addition.
 Final closeout runs full sequential gates, hooks, `git diff --check`, tracker
 sync, and an unchanged regeneration check.
 
-## Completion
+## Compile-Time Completion
 
-Bring-up is complete when:
+Initial compile-time bring-up is complete when:
 
 - unsupported target-family fallback is impossible;
 - scalar/vector and f16/bf16 GEMM objects assemble and disassemble as gfx1250;
 - all four VGPR windows pass MC, CFG, hazard, resource, and Integration tests;
 - descriptor, waits, resources, and fragments match the LLVM contract;
 - Integration tests compile in normal CI;
-- hardware results match CPU references;
-- checked-in assembly has a same-hardware benchmark record;
 - the integrated tree passes all required gates;
 - remaining advanced features have explicit diagnostics and separate scope.
+
+Runtime correctness and performance remain deferred. This closeout claims no
+CPU-reference agreement or same-hardware benchmark.
