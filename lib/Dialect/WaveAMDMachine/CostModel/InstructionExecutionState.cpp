@@ -27,6 +27,7 @@
 #include <array>
 #include <cassert>
 #include <limits>
+#include <utility>
 
 namespace mlir::waveamdmachine {
 
@@ -181,11 +182,6 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
-static InstructionEventClass getVmemEventClass(WaitcntCounter counter) {
-  return counter == WaitcntCounter::Vscnt ? InstructionEventClass::VmemStore
-                                          : InstructionEventClass::VmemLoad;
-}
-
 static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
   switch (kind) {
   case MemoryCounterKind::Vmem:
@@ -200,25 +196,26 @@ static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
   llvm_unreachable("bad memory counter");
 }
 
+static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 9>
+    eventClasses = {
+        {{WaitcntEvent::Vmem, InstructionEventClass::VmemLoad},
+         {WaitcntEvent::Flat, InstructionEventClass::VmemLoad},
+         {WaitcntEvent::VmemStore, InstructionEventClass::VmemStore},
+         {WaitcntEvent::ScratchStore, InstructionEventClass::VmemStore},
+         {WaitcntEvent::Lds, InstructionEventClass::LdsDs},
+         {WaitcntEvent::Gds, InstructionEventClass::LdsDs},
+         {WaitcntEvent::Message, InstructionEventClass::LdsDs},
+         {WaitcntEvent::Smem, InstructionEventClass::Smem},
+         {WaitcntEvent::None, InstructionEventClass::None}}};
+
 static InstructionEventClass toInstructionEventClass(Operation *op) {
   WaitcntInfo info = getWaitcntInfo(op);
-  switch (info.event) {
-  case WaitcntEvent::Vmem:
-  case WaitcntEvent::Flat:
-    return getVmemEventClass(info.counter);
-  case WaitcntEvent::VmemStore:
-  case WaitcntEvent::ScratchStore:
-    return InstructionEventClass::VmemStore;
-  case WaitcntEvent::Lds:
-  case WaitcntEvent::Gds:
-  case WaitcntEvent::Message:
-    return InstructionEventClass::LdsDs;
-  case WaitcntEvent::Smem:
-    return InstructionEventClass::Smem;
-  case WaitcntEvent::None:
-    return InstructionEventClass::None;
-  }
-  llvm_unreachable("bad waitcnt event");
+  auto it = llvm::find_if(eventClasses, [&](const auto &mapping) {
+    return mapping.first == info.event;
+  });
+  if (it == eventClasses.end())
+    llvm_unreachable("unsupported wait event");
+  return it->second;
 }
 
 static int64_t saturatingAdd(int64_t lhs, int64_t rhs) {

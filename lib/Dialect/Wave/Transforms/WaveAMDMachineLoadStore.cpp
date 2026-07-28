@@ -815,7 +815,8 @@ LogicalResult selectGlobalAtomicAddAcqRel(WaveAMDMachineSelector &S,
     return failure();
   if (!waveamdmachine::GlobalAtomicAddAcqRelU32Op::isSupportedOnIsa(*isa))
     return op.emitError(
-        "agent-scoped acquire-release global atomic requires gfx940+");
+        "agent-scoped acquire-release global atomic requires gfx940+ or "
+        "gfx1250");
 
   auto baseIt = S.pointerBases.find(op.getPtr());
   auto offsetIt = S.pointerIndexOffsets.find(op.getPtr());

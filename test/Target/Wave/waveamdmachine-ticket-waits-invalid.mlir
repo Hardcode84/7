@@ -53,3 +53,27 @@ func.func @tuple_store_not_decomposed(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+
+func.func @legacy_wait_on_split_target() {
+  // expected-error @below {{legacy wait-counter op unsupported on target}}
+  waveamdmachine.s_waitcnt vmcnt(0)
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @split_wait_on_legacy_target() {
+  // expected-error @below {{split wait-counter op unsupported on target}}
+  waveamdmachine.s_waitcnt_split loadcnt(0)
+  return
+}
+
+}

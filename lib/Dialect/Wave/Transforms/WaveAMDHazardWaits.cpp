@@ -183,9 +183,6 @@ getValuWriteVGPRPermlane32SwapLatency(const llvm::AMDGPU::IsaVersion &isa) {
 }
 
 struct HazardConfig {
-  bool hasDelayAlu;
-  bool lgkmWaitNeedsValuGap;
-  bool hasTransForwardingHazard;
   llvm::AMDGPU::IsaVersion isaVersion;
   unsigned defaultLgkmcnt;
   unsigned valuDep1;
@@ -205,22 +202,25 @@ struct HazardConfig {
   unsigned valuWriteSGPRVmemReadLatency;
   unsigned valuWriteExecConsumerLatency;
   unsigned transForwardingWaitStates;
+  bool hasDelayAlu;
+  bool lgkmWaitNeedsValuGap;
+  bool hasTransForwardingHazard;
+  bool legacyWaitCounters;
 };
 
 static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
   llvm::AMDGPU::IsaVersion isaVersion =
       llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  bool legacyWaitCounters = !llvm::AMDGPU::isGFX12Plus(sti);
   waveamdmachine::InstructionIssueSlotHazardConfig issueHazards =
       waveamdmachine::getInstructionIssueSlotHazardConfig(isaVersion);
   return HazardConfig{
-      /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(sti),
-      /*lgkmWaitNeedsValuGap=*/!isCDNA4Family(isaVersion),
-      /*hasTransForwardingHazard=*/
-      isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
       /*isaVersion=*/isaVersion,
       /*defaultLgkmcnt=*/
-      llvm::AMDGPU::decodeLgkmcnt(isaVersion,
-                                  llvm::AMDGPU::getWaitcntBitMask(isaVersion)),
+      legacyWaitCounters
+          ? llvm::AMDGPU::decodeLgkmcnt(
+                isaVersion, llvm::AMDGPU::getWaitcntBitMask(isaVersion))
+          : 0,
       /*valuDep1=*/
       waveamdmachine::encodeSDelayAluVALU(1),
       /*m0PipelineDelay=*/1,
@@ -237,6 +237,12 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
       /*valuWriteExecConsumerLatency=*/
       getValuWriteExecConsumerLatency(isaVersion),
       /*transForwardingWaitStates=*/issueHazards.transWriteVGPRValuRead,
+      /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(sti),
+      /*lgkmWaitNeedsValuGap=*/
+      legacyWaitCounters && !isCDNA4Family(isaVersion),
+      /*hasTransForwardingHazard=*/
+      isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
+      /*legacyWaitCounters=*/legacyWaitCounters,
   };
 }
 
@@ -1060,9 +1066,13 @@ static unsigned getMaxTrackedLgkmPending(const HazardConfig &cfg) {
 static void addPendingLgkmIssue(Operation *op, HazardState &state,
                                 const HazardConfig &cfg,
                                 const HazardOpInfo *opInfo) {
+  if (!cfg.legacyWaitCounters)
+    return;
   waveamdmachine::WaitcntInfo info =
       opInfo ? opInfo->waitcnt : getWaitcntInfo(op);
-  if (info.counter != waveamdmachine::WaitcntCounter::Lgkm || !info.issueCount)
+  if (waveamdmachine::getLegacyWaitcntCounter(info.event) !=
+          waveamdmachine::WaitcntCounter::Lgkm ||
+      !info.issueCount)
     return;
   unsigned maxTrackedPending = getMaxTrackedLgkmPending(cfg);
   state.lgkmPending = std::min(

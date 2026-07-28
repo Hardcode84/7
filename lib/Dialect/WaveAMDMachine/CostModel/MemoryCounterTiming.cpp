@@ -17,6 +17,9 @@
 #include "mlir/IR/Operation.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include <array>
+#include <utility>
+
 namespace mlir::waveamdmachine {
 
 namespace {
@@ -54,36 +57,39 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
-static MemoryIssueResource getVmemIssueResource(WaitcntCounter counter) {
-  if (counter == WaitcntCounter::Vscnt)
-    return MemoryIssueResource::VmemStore;
-  return MemoryIssueResource::VmemLoad;
-}
+static constexpr std::array<std::pair<WaitcntEvent, MemoryIssueResourceMask>, 9>
+    waitcntIssueResources = {
+        {{WaitcntEvent::Vmem,
+          getMemoryIssueResourceMask(MemoryIssueResource::VmemLoad)},
+         {WaitcntEvent::Flat,
+          getMemoryIssueResourceMask(MemoryIssueResource::VmemLoad)},
+         {WaitcntEvent::VmemStore,
+          getMemoryIssueResourceMask(MemoryIssueResource::VmemStore)},
+         {WaitcntEvent::ScratchStore,
+          getMemoryIssueResourceMask(MemoryIssueResource::VmemStore)},
+         {WaitcntEvent::Lds,
+          getMemoryIssueResourceMask(MemoryIssueResource::Lds)},
+         {WaitcntEvent::Gds,
+          getMemoryIssueResourceMask(MemoryIssueResource::Lds)},
+         {WaitcntEvent::Message,
+          getMemoryIssueResourceMask(MemoryIssueResource::Lds)},
+         {WaitcntEvent::Smem,
+          getMemoryIssueResourceMask(MemoryIssueResource::Smem)},
+         {WaitcntEvent::None, 0}}};
 
 static MemoryIssueResourceMask getWaitcntIssueResources(WaitcntInfo info) {
-  switch (info.event) {
-  case WaitcntEvent::Vmem:
-  case WaitcntEvent::Flat:
-    return getMemoryIssueResourceMask(getVmemIssueResource(info.counter));
-  case WaitcntEvent::VmemStore:
-  case WaitcntEvent::ScratchStore:
-    return getMemoryIssueResourceMask(MemoryIssueResource::VmemStore);
-  case WaitcntEvent::Lds:
-  case WaitcntEvent::Gds:
-  case WaitcntEvent::Message:
-    return getMemoryIssueResourceMask(MemoryIssueResource::Lds);
-  case WaitcntEvent::Smem:
-    return getMemoryIssueResourceMask(MemoryIssueResource::Smem);
-  case WaitcntEvent::None:
-    return 0;
-  }
-  llvm_unreachable("bad waitcnt event");
+  auto it = llvm::find_if(waitcntIssueResources, [&](const auto &mapping) {
+    return mapping.first == info.event;
+  });
+  if (it == waitcntIssueResources.end())
+    llvm_unreachable("unsupported wait event");
+  return it->second;
 }
 
 } // namespace
 
 MemoryCounterKind getMemoryCounterKind(Operation *op) {
-  switch (getWaitcntInfo(op).counter) {
+  switch (getLegacyWaitcntCounter(getWaitcntInfo(op).event)) {
   case WaitcntCounter::Vmem:
     return MemoryCounterKind::Vmem;
   case WaitcntCounter::Lgkm:
@@ -92,6 +98,12 @@ MemoryCounterKind getMemoryCounterKind(Operation *op) {
     return MemoryCounterKind::Vscnt;
   case WaitcntCounter::None:
     break;
+  case WaitcntCounter::Load:
+  case WaitcntCounter::Store:
+  case WaitcntCounter::Ds:
+  case WaitcntCounter::Km:
+  case WaitcntCounter::X:
+    llvm_unreachable("expected legacy counter");
   }
   return MemoryCounterKind::None;
 }
@@ -111,9 +123,10 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const CalibrationData *calibration) {
   SchedClass cls = classifyOp(op);
   int defaultLatency = getConfiguredLatency(arch, cls, calibration);
-  if (getWaitcntInfo(op).counter == WaitcntCounter::Vmem)
+  WaitcntEvent event = getWaitcntInfo(op).event;
+  if (event == WaitcntEvent::Vmem || event == WaitcntEvent::Flat)
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
-  if (getWaitcntInfo(op).counter == WaitcntCounter::Vscnt)
+  if (event == WaitcntEvent::VmemStore || event == WaitcntEvent::ScratchStore)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
   if (isLDSCounterIssuer(op))
     return overrideOrDefault(overrides.lds, arch.ldsCounterLatency);
@@ -125,8 +138,9 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
 bool hasMemoryValueLatency(Operation *op) {
   if (!hasRegisterResult(op))
     return false;
-  return getWaitcntInfo(op).counter == WaitcntCounter::Vmem || isLDSLoad(op) ||
-         isSMEMLoad(op);
+  WaitcntEvent event = getWaitcntInfo(op).event;
+  return event == WaitcntEvent::Vmem || event == WaitcntEvent::Flat ||
+         isLDSLoad(op) || isSMEMLoad(op);
 }
 
 int getMemoryValueLatency(const ArchData &arch, Operation *op,
@@ -140,7 +154,8 @@ int getMemoryValueLatency(const ArchData &arch, Operation *op,
                           const MemoryCounterLatencies &counterOverrides,
                           const MemoryValueLatencies &valueOverrides,
                           const CalibrationData *calibration) {
-  if (getWaitcntInfo(op).counter == WaitcntCounter::Vmem)
+  WaitcntEvent event = getWaitcntInfo(op).event;
+  if (event == WaitcntEvent::Vmem || event == WaitcntEvent::Flat)
     return overrideOrDefault(
         valueOverrides.vmemLoad,
         getMemoryCounterLatency(arch, op, counterOverrides, calibration));

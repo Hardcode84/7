@@ -21,6 +21,8 @@
 
 namespace mlir::waveamdmachine {
 
+enum class RegClass : uint32_t;
+
 using SamePhysicalRegFn = llvm::function_ref<bool(Value, Value)>;
 
 struct OperandLegalitySpec {
@@ -29,11 +31,29 @@ struct OperandLegalitySpec {
   uint32_t vgprValueMask = 0;
 };
 
+struct PhysicalRegisterSpan {
+  int64_t begin = 0;
+  int64_t end = 0;
+  RegClass regClass;
+
+  PhysicalRegisterSpan(RegClass regClass, int64_t begin, int64_t end)
+      : begin(begin), end(end), regClass(regClass) {}
+
+  bool operator==(const PhysicalRegisterSpan &rhs) const {
+    return regClass == rhs.regClass && begin == rhs.begin && end == rhs.end;
+  }
+
+  bool operator!=(const PhysicalRegisterSpan &rhs) const {
+    return !(*this == rhs);
+  }
+};
+
 bool isSGPRValue(Value value);
 bool isVGPRValue(Value value);
 bool isMachineImm(Value value);
 std::optional<int64_t> getMachineImmValue(Value value);
 bool isSamePhysicalReg(Value lhs, Value rhs);
+std::optional<PhysicalRegisterSpan> parseSGPRRegisterSpan(StringRef text);
 
 bool isInlineImm32(Value value);
 bool usesConstantBus(Value value);

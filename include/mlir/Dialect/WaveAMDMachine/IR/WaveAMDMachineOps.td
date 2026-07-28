@@ -27,6 +27,9 @@ defvar WaveAMDMachine_Gfx940Plus =
     "(isa.Minor == 5 && isa.Stepping == 0))";
 defvar WaveAMDMachine_Gfx1250 =
     "isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0";
+defvar WaveAMDMachine_GlobalAtomicAcqRelTarget =
+    !strconcat("(", WaveAMDMachine_Gfx940Plus, ") || (",
+               WaveAMDMachine_Gfx1250, ")");
 defvar WaveAMDMachine_BitOp3Target =
     "(isa.Major == 9 && (isa.Minor == 4 || " #
     "(isa.Minor == 5 && isa.Stepping == 0))) || " #
@@ -78,13 +81,13 @@ defvar WaveAMDMachine_DefaultKilledOperandReuse =
 class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     Op<WaveAMDMachine_Dialect, mnemonic,
        !listconcat(traits, [WaveAMDMachine_WaitcntInfoOpInterface,
+                            WaveAMDMachine_FixedPhysicalRegisterDefsOpInterface,
                             WaveAMDMachine_InstructionIssueOpInterface,
                             WaveAMDMachine_OperandLegalityOpInterface,
                             WaveAMDMachine_AGPRBankingOpInterface,
                             WaveAMDMachine_KilledOperandReuseOpInterface])> {
   string archPredicate = "true";
   string instructionIssueCount = "1";
-  string waitcntCounter = "None";
   string waitcntEvent = "None";
   string waitcntIssueCount = "0";
   bit waitcntOutOfOrder = 0;
@@ -98,6 +101,7 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
       WaveAMDMachine_DefaultKilledOperandReuse;
   string requiredKilledOperandReusePredicate = "false";
   bit hasRequiredKilledOperandReuse = 0;
+  string fixedPhysicalRegisterDefs = "return {};";
 
   let extraClassDeclaration = [{
     static bool isSupportedOnIsa(const ::llvm::AMDGPU::IsaVersion &isa) {
@@ -106,10 +110,15 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     }
 
     ::mlir::waveamdmachine::WaitcntInfo getWaitcntInfo() {
-      return {::mlir::waveamdmachine::WaitcntCounter::}] # waitcntCounter # [{,
-              ::mlir::waveamdmachine::WaitcntEvent::}] # waitcntEvent # [{,
+      return {::mlir::waveamdmachine::WaitcntEvent::}] # waitcntEvent # [{,
               static_cast<unsigned>(}] # waitcntIssueCount # [{),
               }] # !if(waitcntOutOfOrder, "true", "false") # [{};
+    }
+
+    ::llvm::SmallVector<
+        ::mlir::waveamdmachine::PhysicalRegisterSpan, 1>
+    getFixedPhysicalRegisterDefs() {
+      }] # fixedPhysicalRegisterDefs # [{
     }
 
     unsigned getInstructionIssueCount(
@@ -168,9 +177,8 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   }];
 }
 
-class WaveAMDMachine_WaitcntInfo<string counter, string event,
-                                 string count = "1", bit outOfOrder = 0> {
-  string waitcntCounter = counter;
+class WaveAMDMachine_WaitcntInfo<string event, string count = "1",
+                                 bit outOfOrder = 0> {
   string waitcntEvent = event;
   string waitcntIssueCount = count;
   bit waitcntOutOfOrder = outOfOrder;
@@ -180,16 +188,15 @@ class WaveAMDMachine_InstructionIssueCount<string count> {
   string instructionIssueCount = count;
 }
 
-class WaveAMDMachine_VMEMLoadInfo
-    : WaveAMDMachine_WaitcntInfo<"Vmem", "Vmem">;
+class WaveAMDMachine_VMEMLoadInfo : WaveAMDMachine_WaitcntInfo<"Vmem">;
 class WaveAMDMachine_VMEMStoreInfo
-    : WaveAMDMachine_WaitcntInfo<"Vscnt", "VmemStore">;
+    : WaveAMDMachine_WaitcntInfo<"VmemStore">;
 class WaveAMDMachine_ScratchStoreInfo
-    : WaveAMDMachine_WaitcntInfo<"Vscnt", "ScratchStore">;
+    : WaveAMDMachine_WaitcntInfo<"ScratchStore">;
 class WaveAMDMachine_LDSInfo<string count = "1">
-    : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds", count>;
+    : WaveAMDMachine_WaitcntInfo<"Lds", count>;
 class WaveAMDMachine_SMEMInfo<string count = "1">
-    : WaveAMDMachine_WaitcntInfo<"Lgkm", "Smem", count, 1>;
+    : WaveAMDMachine_WaitcntInfo<"Smem", count, 1>;
 
 class WaveAMDMachine_OperandLegality<string constantBusMask = "0",
                                      string anyVGPRMask = "0",
@@ -242,27 +249,27 @@ defvar WaveAMDMachine_ValueRegChunkCount =
     "this->getOperation()->getOperand(1).getType()).getWidth() + 3) / 4)";
 
 class WaveAMDMachine_VMEMTupleLoadInfo
-    : WaveAMDMachine_WaitcntInfo<"Vmem", "Vmem",
+    : WaveAMDMachine_WaitcntInfo<"Vmem",
                                  WaveAMDMachine_ResultRegChunkCount>,
       WaveAMDMachine_InstructionIssueCount<
           WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_VMEMTupleStoreInfo
-    : WaveAMDMachine_WaitcntInfo<"Vscnt", "VmemStore",
+    : WaveAMDMachine_WaitcntInfo<"VmemStore",
                                  WaveAMDMachine_ValueRegChunkCount>,
       WaveAMDMachine_InstructionIssueCount<
           WaveAMDMachine_ValueRegChunkCount>;
 class WaveAMDMachine_ScratchTupleStoreInfo
-    : WaveAMDMachine_WaitcntInfo<"Vscnt", "ScratchStore",
+    : WaveAMDMachine_WaitcntInfo<"ScratchStore",
                                  WaveAMDMachine_ValueRegChunkCount>,
       WaveAMDMachine_InstructionIssueCount<
           WaveAMDMachine_ValueRegChunkCount>;
 class WaveAMDMachine_LDSTupleLoadInfo
-    : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
+    : WaveAMDMachine_WaitcntInfo<"Lds",
                                  WaveAMDMachine_ResultRegChunkCount>,
       WaveAMDMachine_InstructionIssueCount<
           WaveAMDMachine_ResultRegChunkCount>;
 class WaveAMDMachine_LDSTupleStoreInfo
-    : WaveAMDMachine_WaitcntInfo<"Lgkm", "Lds",
+    : WaveAMDMachine_WaitcntInfo<"Lds",
                                  WaveAMDMachine_ValueRegChunkCount>,
       WaveAMDMachine_InstructionIssueCount<
           WaveAMDMachine_ValueRegChunkCount>;
@@ -1447,6 +1454,13 @@ def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",
                                                        [WaveAMDMachine_SALU]> {
   let arguments = (ins StrAttr:$dst, WaveAMDMachine_RegOrImm:$source);
   let assemblyFormat = "$dst `,` $source attr-dict `:` functional-type(operands, results)";
+  let fixedPhysicalRegisterDefs = [{
+    ::std::optional<::mlir::waveamdmachine::PhysicalRegisterSpan> span =
+        ::mlir::waveamdmachine::parseSGPRRegisterSpan(getDst());
+    if (span)
+      return {*span};
+    return {};
+  }];
 }
 
 def WaveAMDMachine_SCSelectB32Op
@@ -1568,6 +1582,23 @@ def WaveAMDMachine_SWaitcntVscntOp
   let arguments = (ins I32Attr:$vscnt);
   let assemblyFormat = "`vscnt` `(` $vscnt `)` attr-dict";
 }
+def WaveAMDMachine_SWaitcntSplitOp
+    : WaveAMDMachine_Op<"s_waitcnt_split",
+                        [WaveAMDMachine_Waitcnt,
+                         WaveAMDMachine_NoMachineInst]> {
+  let arguments = (ins OptionalAttr<I32Attr>:$loadcnt,
+                       OptionalAttr<I32Attr>:$storecnt,
+                       OptionalAttr<I32Attr>:$dscnt,
+                       OptionalAttr<I32Attr>:$kmcnt,
+                       OptionalAttr<I32Attr>:$xcnt);
+  let assemblyFormat = [{
+    oilist(`loadcnt` `(` $loadcnt `)`
+         | `storecnt` `(` $storecnt `)`
+         | `dscnt` `(` $dscnt `)`
+         | `kmcnt` `(` $kmcnt `)`
+         | `xcnt` `(` $xcnt `)`) attr-dict
+  }];
+}
 def WaveAMDMachine_SNopOp
     : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm,
                                    [WaveAMDMachine_SALU]>;
@@ -1665,7 +1696,8 @@ def WaveAMDMachine_SMovM0Op
 }
 def WaveAMDMachine_SSendmsgDeallocVgprsOp
     : WaveAMDMachine_ZeroResult<"s_sendmsg_dealloc_vgprs",
-                                [WaveAMDMachine_SALU]> {
+                                [WaveAMDMachine_SALU]>,
+      WaveAMDMachine_WaitcntInfo<"Message"> {
   let archPredicate = "isa.Major >= 11";
   let summary = "release VGPRs before terminal s_endpgm";
 }
@@ -1809,7 +1841,8 @@ def WaveAMDMachine_GlobalAtomicAddAcqRelU32Op
         WaveAMDMachine_VMEMLoad, WaveAMDMachine_VMEMStore,
         MemoryEffects<[MemRead, MemWrite]>
       ]>,
-      WaveAMDMachine_InstructionIssueCount<"5"> {
+      WaveAMDMachine_InstructionIssueCount<
+          !strconcat("(", WaveAMDMachine_Gfx1250, ") ? 10 : 5")> {
   let summary = "synchronous agent-scoped acquire-release global atomic add";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset,
                        WaveAMDMachine_VGPR1:$value,
@@ -1824,7 +1857,7 @@ def WaveAMDMachine_GlobalAtomicAddAcqRelU32Op
     attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
-  let archPredicate = WaveAMDMachine_Gfx940Plus;
+  let archPredicate = WaveAMDMachine_GlobalAtomicAcqRelTarget;
 }
 
 def WaveAMDMachine_GlobalLoadU8Addr64Op

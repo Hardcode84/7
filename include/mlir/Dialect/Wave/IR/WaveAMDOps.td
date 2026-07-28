@@ -37,7 +37,8 @@ def WaveAMD_GlobalAtomicAddAcqRelOp
   let summary = "agent-scoped acquire-release global atomic add";
   let description = [{
     Atomically adds a lane-varying i32 value and returns the old value.
-    Completion includes gfx940+ agent-scope release and acquire cache actions.
+    Completion includes gfx940+ or gfx1250 agent-scope release and acquire
+    cache actions.
   }];
   let arguments = (ins Arg<Wave_PtrOrSimdPtr, "", [MemRead, MemWrite]>:$ptr,
                        Wave_Simd:$value,

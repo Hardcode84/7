@@ -41,13 +41,29 @@ def WaveAMDMachine_WaitcntInfoOpInterface
     : OpInterface<"WaitcntInfoOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";
   let description = [{
-    Waitcnt counter metadata for machine ops.
+    Semantic wait-event metadata for machine ops.
   }];
   let methods = [
     InterfaceMethod<
-      [{Waitcnt counter metadata for this op.}],
+      [{Semantic wait-event metadata for this op.}],
       "::mlir::waveamdmachine::WaitcntInfo",
       "getWaitcntInfo",
+      (ins)
+    >,
+  ];
+}
+
+def WaveAMDMachine_FixedPhysicalRegisterDefsOpInterface
+    : OpInterface<"FixedPhysicalRegisterDefsOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Physical register definitions not represented by SSA results.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Fixed physical register definitions emitted by this op.}],
+      "::llvm::SmallVector<::mlir::waveamdmachine::PhysicalRegisterSpan, 1>",
+      "getFixedPhysicalRegisterDefs",
       (ins)
     >,
   ];

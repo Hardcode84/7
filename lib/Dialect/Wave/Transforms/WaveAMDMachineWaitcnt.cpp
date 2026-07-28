@@ -7,26 +7,21 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Token-based waitcnt insertion. Each in-flight memory op is named by its
-// SSA result Value (or nullptr for fire-and-forget stores). Lattice entry
-// is (value, counter, event, position): position counts newer same-counter
-// issues queued behind it, so `vmcnt(position)` is the exact in-order drain.
-// SMEM and mixed LGKM event brackets are out-of-order, so they clamp to
-// `lgkmcnt(0)`. CFG joins merge with MIN -- a wait larger than the
-// path-minimum returns before the token drains. Tokens whose def block
-// doesn't dominate the successor collapse to a per-counter nullptr sentinel
-// at MIN of escaping positions. `s_endpgm` drains counters in hardware; on
-// supported VGPR-limited targets, ordinary stores can overlap VGPR release.
+// Tracks semantic completion tickets plus physical source-register tickets.
+// LLVM target state supplies counter mapping and widths. CFG joins take MIN:
+// a larger wait can return while an escaping ticket remains.
 //
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "RegAlloc/WaveAMDRegisterLimits.h"
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Analysis/DataFlow/DenseAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -35,10 +30,14 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/TargetParser/TargetParser.h"
+#include <array>
 #include <cassert>
+#include <limits>
 #include <optional>
 
 namespace mlir::wave {
@@ -58,9 +57,9 @@ namespace {
 // Counter and token model
 //===----------------------------------------------------------------------===//
 
-enum class Counter : unsigned { Vmem = 0, Lgkm = 1, Vscnt = 2 };
-static constexpr unsigned kNumCounters = 3;
-static constexpr unsigned kSaturatePosition = 63;
+using Counter = waveamdmachine::WaitcntCounter;
+static constexpr unsigned kNumCounters =
+    waveamdmachine::getMaxEnumValForWaitcntCounter() + 1;
 
 static unsigned eventMask(waveamdmachine::WaitcntEvent event) {
   return static_cast<unsigned>(event);
@@ -70,67 +69,117 @@ static bool hasMultipleEvents(unsigned mask) {
   return mask && (mask & (mask - 1));
 }
 
-static std::optional<Counter>
-toCounter(waveamdmachine::WaitcntCounter counter) {
-  switch (counter) {
-  case waveamdmachine::WaitcntCounter::Vmem:
-    return Counter::Vmem;
-  case waveamdmachine::WaitcntCounter::Lgkm:
-    return Counter::Lgkm;
-  case waveamdmachine::WaitcntCounter::Vscnt:
-    return Counter::Vscnt;
-  case waveamdmachine::WaitcntCounter::None:
-    return std::nullopt;
-  }
-  llvm_unreachable("bad waitcnt counter");
+static unsigned vmemSourceEventMask() {
+  return eventMask(waveamdmachine::WaitcntEvent::Vmem) |
+         eventMask(waveamdmachine::WaitcntEvent::VmemStore) |
+         eventMask(waveamdmachine::WaitcntEvent::ScratchStore);
 }
 
-// Null `id` is the per-counter unknown sentinel.
+static unsigned xSourceGroup(unsigned events) {
+  unsigned group = 0;
+  if (events & vmemSourceEventMask())
+    group |= eventMask(waveamdmachine::WaitcntEvent::Vmem);
+  if (events & eventMask(waveamdmachine::WaitcntEvent::Smem))
+    group |= eventMask(waveamdmachine::WaitcntEvent::Smem);
+  return group;
+}
+
+static bool hasMixedXGroups(unsigned mask) {
+  return (mask & vmemSourceEventMask()) &&
+         (mask & eventMask(waveamdmachine::WaitcntEvent::Smem));
+}
+
+using RegSpan = waveamdmachine::PhysicalRegisterSpan;
+
+static bool overlaps(RegSpan lhs, RegSpan rhs) {
+  return lhs.regClass == rhs.regClass && lhs.begin < rhs.end &&
+         rhs.begin < lhs.end;
+}
+
+struct ExecSourceTag {};
+
+// Null `id` without a source is the per-counter unknown sentinel.
 struct Token {
+  std::optional<RegSpan> source;
   Value id;
-  Counter counter;
   unsigned events;
   unsigned position;
+  Counter counter;
   bool outOfOrder;
   bool writesMemory;
+  bool execSource;
 
-  bool isUnknown() const { return !id; }
+  Token(Value id, Counter counter, unsigned events, unsigned position,
+        bool outOfOrder, bool writesMemory)
+      : id(id), events(events), position(position), counter(counter),
+        outOfOrder(outOfOrder), writesMemory(writesMemory), execSource(false) {}
+
+  Token(RegSpan source, Counter counter, unsigned events, unsigned position,
+        bool outOfOrder)
+      : source(source), events(events), position(position), counter(counter),
+        outOfOrder(outOfOrder), writesMemory(false), execSource(false) {}
+
+  Token(ExecSourceTag, Counter counter, unsigned events, unsigned position,
+        bool outOfOrder)
+      : events(events), position(position), counter(counter),
+        outOfOrder(outOfOrder), writesMemory(false), execSource(true) {}
+
+  bool isSource() const { return source.has_value() || execSource; }
+  bool isUnknown() const { return !id && !isSource(); }
 };
 
 static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter);
 
+static bool sortSourceKey(const Token &a, const Token &b) {
+  if (a.execSource != b.execSource)
+    return a.execSource < b.execSource;
+  if (a.execSource)
+    return xSourceGroup(a.events) < xSourceGroup(b.events);
+  assert(a.source && b.source && "physical source key requires spans");
+  if (a.source->regClass != b.source->regClass)
+    return static_cast<unsigned>(a.source->regClass) <
+           static_cast<unsigned>(b.source->regClass);
+  if (a.source->begin != b.source->begin)
+    return a.source->begin < b.source->begin;
+  if (a.source->end != b.source->end)
+    return a.source->end < b.source->end;
+  return xSourceGroup(a.events) < xSourceGroup(b.events);
+}
+
 static bool sortKey(const Token &a, const Token &b) {
   if (a.counter != b.counter)
     return static_cast<unsigned>(a.counter) < static_cast<unsigned>(b.counter);
+  if (a.isSource() != b.isSource())
+    return a.isSource() < b.isSource();
+  if (a.isSource())
+    return sortSourceKey(a, b);
   return a.id.getAsOpaquePointer() < b.id.getAsOpaquePointer();
 }
 
 static bool sameKey(const Token &a, const Token &b) {
-  return a.counter == b.counter && a.id == b.id;
+  if (a.counter != b.counter || a.source != b.source || a.id != b.id ||
+      a.execSource != b.execSource)
+    return false;
+  return !a.isSource() || xSourceGroup(a.events) == xSourceGroup(b.events);
 }
 
 struct WaitRequirement {
-  std::optional<unsigned> vmcnt;
-  std::optional<unsigned> lgkmcnt;
-  std::optional<unsigned> vscnt;
+  std::array<std::optional<unsigned>, kNumCounters> counts;
 
-  bool hasWait() const { return vmcnt || lgkmcnt || vscnt; }
+  bool hasWait() const {
+    return llvm::any_of(counts, [](const std::optional<unsigned> &count) {
+      return count.has_value();
+    });
+  }
 
-  std::optional<unsigned> &slotFor(Counter c) {
-    switch (c) {
-    case Counter::Vmem:
-      return vmcnt;
-    case Counter::Lgkm:
-      return lgkmcnt;
-    case Counter::Vscnt:
-      return vscnt;
-    }
-    llvm_unreachable("bad counter");
+  std::optional<unsigned> get(Counter counter) const {
+    return counts[static_cast<unsigned>(counter)];
   }
 
   // MIN over required positions: `cnt(N)` drains everything at position >= N.
   void requireDrain(Counter counter, unsigned position) {
-    auto &slot = slotFor(counter);
+    assert(counter != Counter::None && "cannot drain absent counter");
+    std::optional<unsigned> &slot = counts[static_cast<unsigned>(counter)];
     if (!slot || position < *slot)
       slot = position;
   }
@@ -141,7 +190,7 @@ struct WaitRequirement {
 //===----------------------------------------------------------------------===//
 
 struct WaitState {
-  // Sorted by (counter, id); each (counter, id) appears at most once.
+  // Sorted by counter and source/value key; each key appears once.
   SmallVector<Token, 4> tokens;
 
   bool operator==(const WaitState &rhs) const {
@@ -262,7 +311,10 @@ static void bumpCounter(SmallVectorImpl<Token> &tokens, Counter counter,
   for (Token &t : tokens) {
     if (t.counter != counter)
       continue;
-    t.position = std::min<unsigned>(t.position + delta, kSaturatePosition);
+    if (delta > std::numeric_limits<unsigned>::max() - t.position)
+      t.position = std::numeric_limits<unsigned>::max();
+    else
+      t.position += delta;
   }
 }
 
@@ -275,23 +327,56 @@ static void dropDrained(SmallVectorImpl<Token> &tokens, Counter counter,
                      [&](const Token &t) {
                        if (t.counter != counter || t.position < threshold)
                          return false;
-                       if (threshold == 0 || t.counter != Counter::Lgkm)
+                       if (threshold == 0 || (t.counter != Counter::Lgkm &&
+                                              t.counter != Counter::X))
                          return true;
-                       if (t.outOfOrder || hasMultipleEvents(liveEvents))
+                       bool mixed = t.counter == Counter::Lgkm
+                                        ? hasMultipleEvents(liveEvents)
+                                        : hasMixedXGroups(liveEvents);
+                       if (t.outOfOrder || mixed)
                          return false;
                        return true;
                      }),
       tokens.end());
 }
 
+static void dropXGroup(SmallVectorImpl<Token> &tokens, unsigned group,
+                       unsigned threshold) {
+  tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                              [&](const Token &t) {
+                                return t.counter == Counter::X &&
+                                       (xSourceGroup(t.events) & group) &&
+                                       t.position >= threshold;
+                              }),
+               tokens.end());
+}
+
 static void applyWait(SmallVectorImpl<Token> &tokens,
                       const WaitRequirement &req) {
-  if (req.vmcnt)
-    dropDrained(tokens, Counter::Vmem, *req.vmcnt);
-  if (req.lgkmcnt)
-    dropDrained(tokens, Counter::Lgkm, *req.lgkmcnt);
-  if (req.vscnt)
-    dropDrained(tokens, Counter::Vscnt, *req.vscnt);
+  for (unsigned i = 1; i < kNumCounters; ++i) {
+    Counter counter = static_cast<Counter>(i);
+    if (counter == Counter::X)
+      continue;
+    if (std::optional<unsigned> count = req.get(counter))
+      dropDrained(tokens, counter, *count);
+  }
+
+  if (req.get(Counter::Km) == 0)
+    dropXGroup(tokens, eventMask(waveamdmachine::WaitcntEvent::Smem), 0);
+  bool pendingStore = llvm::any_of(
+      tokens, [](const Token &t) { return t.counter == Counter::Store; });
+  if (std::optional<unsigned> load = req.get(Counter::Load);
+      load && !pendingStore)
+    dropXGroup(tokens, eventMask(waveamdmachine::WaitcntEvent::Vmem), *load);
+  if (std::optional<unsigned> xcnt = req.get(Counter::X))
+    dropDrained(tokens, Counter::X, *xcnt);
+}
+
+static void clearCounter(SmallVectorImpl<Token> &tokens, Counter counter) {
+  tokens.erase(
+      std::remove_if(tokens.begin(), tokens.end(),
+                     [&](const Token &t) { return t.counter == counter; }),
+      tokens.end());
 }
 
 static const Token *find(ArrayRef<Token> tokens, Counter counter, Value id) {
@@ -320,6 +405,10 @@ static void collapseEscaping(WaitState &state, Block *target,
   SmallVector<Token, 4> kept;
   kept.reserve(state.tokens.size());
   for (const Token &t : state.tokens) {
+    if (t.isSource()) {
+      kept.push_back(t);
+      continue;
+    }
     Block *defBlock = t.isUnknown() ? nullptr : definingBlock(t.id);
     if (t.isUnknown() || (defBlock && dom.dominates(defBlock, target))) {
       kept.push_back(t);
@@ -328,7 +417,7 @@ static void collapseEscaping(WaitState &state, Block *target,
     mergeInto(escaping[static_cast<unsigned>(t.counter)], t);
   }
   state.tokens = std::move(kept);
-  for (unsigned i = 0; i < kNumCounters; ++i) {
+  for (unsigned i = 1; i < kNumCounters; ++i) {
     if (escaping[i].position)
       insertOrMin(state.tokens,
                   Token{Value(), static_cast<Counter>(i), escaping[i].events,
@@ -357,19 +446,38 @@ static bool issue(WaitState &state, Counter counter, unsigned count,
   return changed;
 }
 
+static bool issueSources(WaitState &state, Counter counter, unsigned count,
+                         unsigned events, bool outOfOrder,
+                         ArrayRef<RegSpan> sources, bool execSource) {
+  if (count == 0)
+    count = 1;
+  bumpCounter(state.tokens, counter, count);
+  bool changed = false;
+  if (execSource)
+    changed |= insertOrReplace(
+        state.tokens, Token{ExecSourceTag{}, counter, events, 0, outOfOrder});
+  for (RegSpan source : sources) {
+    for (int64_t unit = source.begin; unit < source.end; ++unit)
+      changed |= insertOrReplace(state.tokens,
+                                 Token{RegSpan{source.regClass, unit, unit + 1},
+                                       counter, events, 0, outOfOrder});
+  }
+  return changed;
+}
+
 // Per-counter MIN over `sources`' tokens, re-keyed under `result`.
 static SmallVector<Token, 3> mergeSources(ArrayRef<Token> tokens,
                                           ValueRange sources, Value result) {
   std::array<TokenAggregate, kNumCounters> merged = {};
   for (Value src : sources) {
     for (const Token &t : tokens) {
-      if (t.id != src)
+      if (t.isSource() || t.id != src)
         continue;
       mergeInto(merged[static_cast<unsigned>(t.counter)], t);
     }
   }
   SmallVector<Token, 3> out;
-  for (unsigned i = 0; i < kNumCounters; ++i) {
+  for (unsigned i = 1; i < kNumCounters; ++i) {
     if (merged[i].position)
       out.push_back(Token{result, static_cast<Counter>(i), merged[i].events,
                           *merged[i].position, merged[i].outOfOrder,
@@ -422,12 +530,6 @@ static bool isMemToken(Value value) {
   return isa<waveamdmachine::MemTokenType>(value.getType());
 }
 
-struct RegSpan {
-  waveamdmachine::RegClass regClass;
-  int64_t begin = 0;
-  int64_t end = 0;
-};
-
 static std::optional<RegSpan> getAllocatedRegSpan(Value value) {
   auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
   if (!type || type.getIndex() < 0)
@@ -436,9 +538,25 @@ static std::optional<RegSpan> getAllocatedRegSpan(Value value) {
                  type.getIndex() + type.getWidth()};
 }
 
-static bool overlaps(RegSpan lhs, RegSpan rhs) {
-  return lhs.regClass == rhs.regClass && lhs.begin < rhs.end &&
-         rhs.begin < lhs.end;
+static std::optional<unsigned> getExecIfEmissionSGPRCount(func::FuncOp func) {
+  if (IntegerAttr count =
+          func->getAttrOfType<IntegerAttr>("waveamdmachine.sgpr_count"))
+    return static_cast<unsigned>(count.getInt());
+
+  unsigned sgprCount = wave::getWaveAMDReservedSGPRs(func);
+  func.walk([&](Operation *op) {
+    for (Value result : op->getResults()) {
+      std::optional<RegSpan> span = getAllocatedRegSpan(result);
+      if (span && span->regClass == waveamdmachine::RegClass::SGPR)
+        sgprCount = std::max(sgprCount, static_cast<unsigned>(span->end));
+    }
+  });
+  FailureOr<unsigned> minimum =
+      wave::getWaveAMDMinReportedSGPRs(func, "waveamd-insert-ticket-waits");
+  if (failed(minimum))
+    return std::nullopt;
+  sgprCount = std::max(sgprCount, *minimum);
+  return wave::getWaveAMDExecIfReservedSGPRCount(func, sgprCount);
 }
 
 static bool emitsMachineInst(Operation *op) {
@@ -488,12 +606,103 @@ static void collectIssuerResults(Operation *op, SmallVectorImpl<Value> &out) {
 }
 
 //===----------------------------------------------------------------------===//
-// IsaVersion / waitcnt encoding helpers
+// Target wait-counter model
 //===----------------------------------------------------------------------===//
 
-static FailureOr<llvm::AMDGPU::IsaVersion> getIsaVersion(Operation *op) {
-  return waveamdmachine::getAMDGPUTargetIsaVersion(
-      op, "waveamd-insert-ticket-waits");
+struct WaitTarget {
+  std::optional<unsigned> execIfSaveBase;
+  llvm::AMDGPU::IsaVersion isa;
+  waveamdmachine::WaitCounterFamily family =
+      waveamdmachine::WaitCounterFamily::Legacy;
+  bool waitXcnt = false;
+  bool requiresNopBeforeDeallocVGPRs = true;
+};
+
+static FailureOr<WaitTarget> getWaitTarget(Operation *op) {
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      waveamdmachine::createAMDGPUMCSubtargetInfo(
+          op, "waveamd-insert-ticket-waits");
+  if (failed(sti))
+    return failure();
+  WaitTarget target{std::nullopt, llvm::AMDGPU::getIsaVersion((*sti)->getCPU()),
+                    llvm::AMDGPU::isGFX12Plus(**sti)
+                        ? waveamdmachine::WaitCounterFamily::Gfx12Split
+                        : waveamdmachine::WaitCounterFamily::Legacy,
+                    (**sti).hasFeature(llvm::AMDGPU::FeatureWaitXcnt),
+                    !(**sti).hasFeature(llvm::AMDGPU::FeatureGFX1250Insts)};
+  if (auto func = dyn_cast<func::FuncOp>(op)) {
+    std::optional<unsigned> sgprCount = getExecIfEmissionSGPRCount(func);
+    if (sgprCount)
+      target.execIfSaveBase = wave::getWaveAMDExecIfSaveBase(func, *sgprCount);
+  }
+  return target;
+}
+
+static std::optional<RegSpan> getExecIfSaveSpan(waveamdmachine::ExecIfOp execIf,
+                                                const WaitTarget &target) {
+  if (!target.execIfSaveBase)
+    return std::nullopt;
+
+  SmallVector<waveamdmachine::ExecIfOp, 4> nesting;
+  for (Operation *op = execIf; op; op = op->getParentOp())
+    if (auto nested = dyn_cast<waveamdmachine::ExecIfOp>(op))
+      nesting.push_back(nested);
+
+  unsigned cursor = 0;
+  unsigned saveSlot = 0;
+  unsigned width = 1;
+  for (waveamdmachine::ExecIfOp nested : llvm::reverse(nesting)) {
+    width = wave::getWaveAMDExecIfMaskDwords(nested);
+    saveSlot = wave::alignWaveAMDExecIfSaveSlot(cursor, width);
+    cursor = saveSlot + width;
+  }
+  return RegSpan{waveamdmachine::RegClass::SGPR,
+                 *target.execIfSaveBase + saveSlot,
+                 *target.execIfSaveBase + saveSlot + width};
+}
+
+static unsigned getLegacyCounterMax(Counter counter,
+                                    const llvm::AMDGPU::IsaVersion &isa) {
+  switch (counter) {
+  case Counter::Vmem:
+    return llvm::AMDGPU::getVmcntBitMask(isa);
+  case Counter::Lgkm:
+    return llvm::AMDGPU::getLgkmcntBitMask(isa);
+  case Counter::Vscnt: {
+    unsigned storeMax = llvm::AMDGPU::getStorecntBitMask(isa);
+    return storeMax ? storeMax : llvm::AMDGPU::getVmcntBitMask(isa);
+  }
+  default:
+    llvm_unreachable("expected legacy wait counter");
+  }
+}
+
+static unsigned getSplitCounterMax(Counter counter,
+                                   const llvm::AMDGPU::IsaVersion &isa) {
+  switch (counter) {
+  case Counter::Store:
+    return llvm::AMDGPU::getStorecntBitMask(isa);
+  case Counter::Load:
+    return llvm::AMDGPU::getLoadcntBitMask(isa);
+  case Counter::Ds:
+    return llvm::AMDGPU::getDscntBitMask(isa);
+  case Counter::Km:
+    return llvm::AMDGPU::getKmcntBitMask(isa);
+  case Counter::X:
+    return llvm::AMDGPU::getXcntBitMask(isa);
+  default:
+    llvm_unreachable("expected split wait counter");
+  }
+}
+
+static unsigned getCounterMax(Counter counter,
+                              const llvm::AMDGPU::IsaVersion &isa) {
+  if (counter == Counter::None)
+    return 0;
+  if (counter == Counter::Vmem || counter == Counter::Lgkm ||
+      counter == Counter::Vscnt)
+    return getLegacyCounterMax(counter, isa);
+  return getSplitCounterMax(counter, isa);
 }
 
 static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter) {
@@ -507,8 +716,9 @@ static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter) {
 static unsigned waitPosition(const WaitState &state, const Token &token) {
   if (token.outOfOrder)
     return 0;
-  if (token.counter == Counter::Lgkm &&
-      hasMultipleEvents(activeEventMask(state.tokens, Counter::Lgkm)))
+  unsigned activeEvents = activeEventMask(state.tokens, token.counter);
+  if ((token.counter == Counter::Lgkm && hasMultipleEvents(activeEvents)) ||
+      (token.counter == Counter::X && hasMixedXGroups(activeEvents)))
     return 0;
   return token.position;
 }
@@ -517,9 +727,19 @@ static unsigned waitPosition(const WaitState &state, const Token &token) {
 // Consumer-dep collection and wait computation
 //===----------------------------------------------------------------------===//
 
-static LogicalResult validateWaveAMDMachineOp(Operation *op) {
-  if (!isWaveAMDMachineOp(op))
-    return success();
+static LogicalResult validateWaitOpFamily(Operation *op,
+                                          const WaitTarget &target) {
+  bool split = target.family == waveamdmachine::WaitCounterFamily::Gfx12Split;
+  if (split &&
+      llvm::isa<waveamdmachine::SWaitcntOp, waveamdmachine::SWaitcntVscntOp>(
+          op))
+    return op->emitError("legacy wait-counter op unsupported on target");
+  if (!split && llvm::isa<waveamdmachine::SWaitcntSplitOp>(op))
+    return op->emitError("split wait-counter op unsupported on target");
+  return success();
+}
+
+static LogicalResult validateWaitLoweringPreconditions(Operation *op) {
   if (isTupleMemoryOp(op))
     return op->emitError("waveamd-insert-ticket-waits expects tuple memory "
                          "ops to be decomposed first");
@@ -536,10 +756,33 @@ static LogicalResult validateWaveAMDMachineOp(Operation *op) {
   return success();
 }
 
+static LogicalResult validateWaitEvent(Operation *op,
+                                       const WaitTarget &target) {
+  waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
+  if (info.isIssuer() && !waveamdmachine::getWaitcntCounterMapping(
+                             info.event, target.family, target.waitXcnt))
+    return op->emitError() << waveamdmachine::stringifyWaitcntEvent(info.event)
+                           << " wait event unsupported on target";
+  return success();
+}
+
+static LogicalResult validateWaveAMDMachineOp(Operation *op,
+                                              const WaitTarget &target) {
+  if (!isWaveAMDMachineOp(op))
+    return success();
+  if (failed(validateWaitOpFamily(op, target)))
+    return failure();
+  if (failed(validateWaitLoweringPreconditions(op)))
+    return failure();
+  return validateWaitEvent(op, target);
+}
+
 static void requireValue(WaitRequirement &req, Value value,
                          const WaitState &state) {
-  for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+  for (unsigned ci = 1; ci < kNumCounters; ++ci) {
     Counter c = static_cast<Counter>(ci);
+    if (c == Counter::X)
+      continue;
     if (const Token *t = lat::find(state.tokens, c, value))
       req.requireDrain(c, waitPosition(state, *t));
   }
@@ -551,11 +794,26 @@ static void requireIssuerToken(WaitRequirement &req, Value value,
     requireValue(req, value, state);
     return;
   }
-  for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+  for (unsigned ci = 1; ci < kNumCounters; ++ci) {
     Counter c = static_cast<Counter>(ci);
+    if (c == Counter::X)
+      continue;
     const Token *t = lat::find(state.tokens, c, value);
     if (t && t->writesMemory)
       req.requireDrain(c, waitPosition(state, *t));
+  }
+}
+
+static void requireOverlappingRegisterDef(WaitRequirement &req, RegSpan def,
+                                          const WaitState &state) {
+  for (const Token &t : state.tokens) {
+    std::optional<RegSpan> pendingSpan;
+    if (t.isSource())
+      pendingSpan = t.source;
+    else if (!t.isUnknown())
+      pendingSpan = getAllocatedRegSpan(t.id);
+    if (pendingSpan && overlaps(def, *pendingSpan))
+      req.requireDrain(t.counter, waitPosition(state, t));
   }
 }
 
@@ -563,18 +821,21 @@ static void requireOverlappingRegisterDefs(WaitRequirement &req, Operation *op,
                                            const WaitState &state) {
   if (!emitsMachineInst(op))
     return;
-  for (Value result : op->getResults()) {
-    std::optional<RegSpan> resultSpan = getAllocatedRegSpan(result);
-    if (!resultSpan)
-      continue;
-    for (const Token &t : state.tokens) {
-      if (t.isUnknown())
-        continue;
-      std::optional<RegSpan> pendingSpan = getAllocatedRegSpan(t.id);
-      if (pendingSpan && overlaps(*resultSpan, *pendingSpan))
-        req.requireDrain(t.counter, waitPosition(state, t));
-    }
-  }
+  for (Value result : op->getResults())
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(result))
+      requireOverlappingRegisterDef(req, *span, state);
+  auto fixedDefs =
+      dyn_cast<waveamdmachine::FixedPhysicalRegisterDefsOpInterface>(op);
+  if (!fixedDefs)
+    return;
+  for (RegSpan span : fixedDefs.getFixedPhysicalRegisterDefs())
+    requireOverlappingRegisterDef(req, span, state);
+}
+
+static void requireExecDef(WaitRequirement &req, const WaitState &state) {
+  for (const Token &t : state.tokens)
+    if (t.execSource)
+      req.requireDrain(t.counter, waitPosition(state, t));
 }
 
 static bool hasSameAllocatedReg(Value lhs, Value rhs) {
@@ -589,12 +850,13 @@ static bool hasSameAllocatedReg(Value lhs, Value rhs) {
          lhsType.getIndex() == rhsType.getIndex();
 }
 
-static void requireExecIfYieldCopies(WaitRequirement &req,
-                                     waveamdmachine::YieldOp yield,
-                                     const WaitState &state) {
+static void requireExecIfYieldTransition(WaitRequirement &req,
+                                         waveamdmachine::YieldOp yield,
+                                         const WaitState &state) {
   auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(yield->getParentOp());
   if (!execIf)
     return;
+  requireExecDef(req, state);
   for (auto [result, value] :
        llvm::zip_equal(execIf.getResults(), yield.getValues())) {
     if (isa<waveamdmachine::MemTokenType>(result.getType()))
@@ -604,22 +866,25 @@ static void requireExecIfYieldCopies(WaitRequirement &req,
     if (hasSameAllocatedReg(result, value))
       continue;
     requireValue(req, value, state);
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(result))
+      requireOverlappingRegisterDef(req, *span, state);
   }
 }
 
 static WaitRequirement computeControlFlowRequirement(Operation *op,
-                                                     const WaitState &state) {
+                                                     const WaitState &state,
+                                                     const WaitTarget &target) {
   WaitRequirement req;
   if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op)) {
     requireValue(req, execIf.getCondition(), state);
-    return req;
-  }
-  if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op)) {
+    if (std::optional<RegSpan> save = getExecIfSaveSpan(execIf, target))
+      requireOverlappingRegisterDef(req, *save, state);
+  } else if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
     requireValue(req, uniformIf.getCondition(), state);
-    return req;
-  }
-  if (auto yield = dyn_cast<waveamdmachine::YieldOp>(op))
-    requireExecIfYieldCopies(req, yield, state);
+  else if (auto yield = dyn_cast<waveamdmachine::YieldOp>(op))
+    requireExecIfYieldTransition(req, yield, state);
+  if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
+    requireExecDef(req, state);
   return req;
 }
 
@@ -630,10 +895,10 @@ static bool isD16LowPreservedOperand(OpOperand &operand) {
   return load.getPreserved().getDefiningOp<waveamdmachine::BufferLoadU8D16Op>();
 }
 
-static WaitRequirement computeRequirement(Operation *op,
-                                          const WaitState &state) {
+static WaitRequirement computeRequirement(Operation *op, const WaitState &state,
+                                          const WaitTarget &target) {
   if (isControlFlowOp(op))
-    return computeControlFlowRequirement(op, state);
+    return computeControlFlowRequirement(op, state, target);
   WaitRequirement req;
   if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
     return req;
@@ -651,18 +916,75 @@ static WaitRequirement computeRequirement(Operation *op,
     requireValue(req, operand.get(), state);
   }
   requireOverlappingRegisterDefs(req, op, state);
+  if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
+    requireExecDef(req, state);
   return req;
 }
 
-static void recordIssue(Operation *op, WaitState &state) {
+static void collectIssuerSources(Operation *op,
+                                 SmallVectorImpl<RegSpan> &sources) {
+  for (Value operand : op->getOperands())
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(operand))
+      sources.push_back(*span);
+
+  if (auto load = dyn_cast<waveamdmachine::SLoadB32Op>(op)) {
+    if (std::optional<RegSpan> span =
+            waveamdmachine::parseSGPRRegisterSpan(load.getBase()))
+      sources.push_back(*span);
+  } else if (auto load = dyn_cast<waveamdmachine::SLoadB64Op>(op)) {
+    if (std::optional<RegSpan> span =
+            waveamdmachine::parseSGPRRegisterSpan(load.getBase()))
+      sources.push_back(*span);
+  } else if (auto load = dyn_cast<waveamdmachine::SLoadB128Op>(op)) {
+    if (std::optional<RegSpan> span =
+            waveamdmachine::parseSGPRRegisterSpan(load.getBase()))
+      sources.push_back(*span);
+  }
+}
+
+static bool isVmemSourceEvent(waveamdmachine::WaitcntEvent event) {
+  return event == waveamdmachine::WaitcntEvent::Vmem ||
+         event == waveamdmachine::WaitcntEvent::VmemStore ||
+         event == waveamdmachine::WaitcntEvent::ScratchStore;
+}
+
+static bool isSmemSourceEvent(waveamdmachine::WaitcntEvent event) {
+  return event == waveamdmachine::WaitcntEvent::Smem;
+}
+
+static void applyImplicitXGroupSwitch(Operation *op, WaitState &state,
+                                      const WaitTarget &target) {
+  if (!target.waitXcnt || !isMemoryIssuer(op))
+    return;
+  waveamdmachine::WaitcntEvent event = getWaitcntInfo(op).event;
+  if (isVmemSourceEvent(event))
+    lat::dropXGroup(state.tokens, eventMask(waveamdmachine::WaitcntEvent::Smem),
+                    0);
+  else if (isSmemSourceEvent(event))
+    lat::dropXGroup(state.tokens, eventMask(waveamdmachine::WaitcntEvent::Vmem),
+                    0);
+}
+
+static void recordIssue(Operation *op, WaitState &state,
+                        const WaitTarget &target) {
   waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
-  std::optional<Counter> counter = toCounter(info.counter);
-  if (!counter)
+  std::optional<waveamdmachine::WaitcntCounterMapping> mapping =
+      waveamdmachine::getWaitcntCounterMapping(info.event, target.family,
+                                               target.waitXcnt);
+  if (!mapping)
     return;
   SmallVector<Value, 2> results;
   collectIssuerResults(op, results);
-  lat::issue(state, *counter, info.issueCount, eventMask(info.event),
+  lat::issue(state, mapping->completion, info.issueCount, eventMask(info.event),
              info.outOfOrder, isMemoryWriteIssuer(op), results);
+  if (mapping->source == Counter::None)
+    return;
+
+  SmallVector<RegSpan, 4> sources;
+  collectIssuerSources(op, sources);
+  lat::issueSources(state, mapping->source, info.issueCount,
+                    eventMask(info.event), info.outOfOrder, sources,
+                    isVmemSourceEvent(info.event));
 }
 
 static void deriveIssuerDependencyTokens(Operation *op, WaitState &state) {
@@ -697,79 +1019,125 @@ static void deriveResultTokens(Operation *op, WaitState &state) {
   }
 }
 
-// Apply explicit waitcnt drain attrs to the state.
-static void observeExistingWaitcnt(Operation *op, WaitState &state,
-                                   const llvm::AMDGPU::IsaVersion &isaVer) {
-  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntOp>(op)) {
-    unsigned vmMax = llvm::AMDGPU::getVmcntBitMask(isaVer);
-    unsigned lgMax = llvm::AMDGPU::getLgkmcntBitMask(isaVer);
-    if (std::optional<uint32_t> vm = wait.getVmcnt(); vm && *vm < vmMax)
-      lat::dropDrained(state.tokens, Counter::Vmem, *vm);
-    if (std::optional<uint32_t> lg = wait.getLgkmcnt(); lg && *lg < lgMax)
-      lat::dropDrained(state.tokens, Counter::Lgkm, *lg);
-    return;
-  }
-  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntVscntOp>(op))
-    lat::dropDrained(state.tokens, Counter::Vscnt, wait.getVscnt());
+static bool implicitlyDrainsXcnt(Operation *op) {
+  if (llvm::isa<waveamdmachine::ExecIfOp, waveamdmachine::UniformIfOp,
+                waveamdmachine::ContinueIfOp, waveamdmachine::SCBranchExeczOp,
+                waveamdmachine::SCBranchScc0Op, waveamdmachine::SCBranchScc1Op,
+                BranchOpInterface>(op))
+    return true;
+  if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
+    return static_cast<bool>(loop.getEntryCond());
+  return llvm::isa<waveamdmachine::BarrierArriveOp,
+                   waveamdmachine::BarrierWaitOp, waveamdmachine::SBarrierOp,
+                   waveamdmachine::SEndpgmOp, waveamdmachine::SGetregHwIdOp,
+                   waveamdmachine::SGetregShaderCyclesOp,
+                   waveamdmachine::SSendmsgDeallocVgprsOp,
+                   waveamdmachine::SSetpcB64Op, waveamdmachine::SSetVgprMsbOp>(
+      op);
 }
 
-static void
-clampSaturatedCounterFields(WaitRequirement &req,
-                            const llvm::AMDGPU::IsaVersion &isaVer) {
-  unsigned vmMax = llvm::AMDGPU::getVmcntBitMask(isaVer);
-  unsigned lgMax = llvm::AMDGPU::getLgkmcntBitMask(isaVer);
-  if (req.vmcnt && vmMax > 0 && *req.vmcnt >= vmMax)
-    req.vmcnt = vmMax - 1;
-  if (req.lgkmcnt && lgMax > 0 && *req.lgkmcnt >= lgMax)
-    req.lgkmcnt = lgMax - 1;
+static void observeExistingWaitcnt(Operation *op, WaitState &state,
+                                   const WaitTarget &target) {
+  WaitRequirement observed;
+  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntOp>(op)) {
+    unsigned vmMax = getCounterMax(Counter::Vmem, target.isa);
+    unsigned lgMax = getCounterMax(Counter::Lgkm, target.isa);
+    if (std::optional<uint32_t> vm = wait.getVmcnt(); vm && *vm < vmMax)
+      observed.requireDrain(Counter::Vmem, *vm);
+    if (std::optional<uint32_t> lg = wait.getLgkmcnt(); lg && *lg < lgMax)
+      observed.requireDrain(Counter::Lgkm, *lg);
+  }
+  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntVscntOp>(op)) {
+    observed.requireDrain(Counter::Vscnt, wait.getVscnt());
+  }
+  if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntSplitOp>(op)) {
+    const std::array<std::pair<Counter, std::optional<uint32_t>>, 5> counts = {{
+        {Counter::Load, wait.getLoadcnt()},
+        {Counter::Store, wait.getStorecnt()},
+        {Counter::Ds, wait.getDscnt()},
+        {Counter::Km, wait.getKmcnt()},
+        {Counter::X, wait.getXcnt()},
+    }};
+    for (auto [counter, count] : counts)
+      if (count)
+        observed.requireDrain(counter, *count);
+  }
+  lat::applyWait(state.tokens, observed);
+}
+
+static void clampSaturatedCounterFields(WaitRequirement &req,
+                                        const WaitTarget &target) {
+  for (unsigned i = 1; i < kNumCounters; ++i) {
+    Counter counter = static_cast<Counter>(i);
+    std::optional<unsigned> &count = req.counts[i];
+    unsigned max = getCounterMax(counter, target.isa);
+    // VSCNT max is a valid partial drain on legacy targets.
+    if (counter == Counter::Vscnt) {
+      if (count && *count > max)
+        count = max;
+      continue;
+    }
+    if (count && max > 0 && *count >= max)
+      count = max - 1;
+  }
 }
 
 // `emit` is a no-op during analysis, the s_waitcnt emitter during rewrite.
 template <typename EmitFn>
 static void applyDrain(Operation *op, WaitState &state,
-                       const llvm::AMDGPU::IsaVersion &isaVer, EmitFn emit) {
-  WaitRequirement req = computeRequirement(op, state);
-  clampSaturatedCounterFields(req, isaVer);
+                       const WaitTarget &target, EmitFn emit) {
+  WaitRequirement req = computeRequirement(op, state, target);
+  clampSaturatedCounterFields(req, target);
   emit(op, req);
   lat::applyWait(state.tokens, req);
+}
+
+static void applyImplicitXDrain(Operation *op, WaitState &state,
+                                const WaitTarget &target) {
+  if (target.waitXcnt && implicitlyDrainsXcnt(op))
+    lat::clearCounter(state.tokens, Counter::X);
 }
 
 // Shared dispatch for analysis and rewrite: same state transfer, the
 // only delta is the (conditional) `emit`.
 template <typename EmitFn>
 static void runTransfer(Operation *op, WaitState &state,
-                        const llvm::AMDGPU::IsaVersion &isaVer, EmitFn emit) {
+                        const WaitTarget &target, EmitFn emit) {
   switch (classifyOp(op)) {
   case OpKind::Skip:
     if (isWaitcntOp(op)) {
-      observeExistingWaitcnt(op, state, isaVer);
+      observeExistingWaitcnt(op, state, target);
       return;
     }
-    applyDrain(op, state, isaVer, emit);
-    return;
+    applyDrain(op, state, target, emit);
+    break;
   case OpKind::Issuer:
-    applyDrain(op, state, isaVer, emit);
-    recordIssue(op, state);
+    applyDrain(op, state, target, emit);
+    applyImplicitXGroupSwitch(op, state, target);
+    recordIssue(op, state, target);
     deriveIssuerDependencyTokens(op, state);
-    return;
+    break;
   case OpKind::Barrier:
     // Drain ahead of the fence AND seed result tokens so downstream
     // loads of the same arena depend on it.
-    applyDrain(op, state, isaVer, emit);
+    applyDrain(op, state, target, emit);
+    applyImplicitXGroupSwitch(op, state, target);
     deriveResultTokens(op, state);
-    return;
+    break;
   case OpKind::CompletionFree:
-    return;
+    break;
   case OpKind::TokenOp:
     deriveResultTokens(op, state);
-    return;
+    break;
   case OpKind::Endpgm:
     state.tokens.clear();
     return;
   case OpKind::Generic:
-    applyDrain(op, state, isaVer, emit);
-    return;
+    applyDrain(op, state, target, emit);
+    break;
   }
+  // Def hazards precede the instruction's implicit X drain.
+  applyImplicitXDrain(op, state, target);
 }
 
 //===----------------------------------------------------------------------===//
@@ -781,8 +1149,8 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TokenWaitAnalysis)
 
   TokenWaitAnalysis(DataFlowSolver &solver, DominanceInfo &dom,
-                    const llvm::AMDGPU::IsaVersion &isaVer)
-      : DenseForwardDataFlowAnalysis(solver), dom(dom), isaVer(isaVer) {}
+                    const WaitTarget &target)
+      : DenseForwardDataFlowAnalysis(solver), dom(dom), target(target) {}
 
   LogicalResult initialize(Operation *top) override {
     // Solver needs every block + CFG edge marked live or it stalls.
@@ -814,7 +1182,7 @@ public:
 
   LogicalResult visitOperation(Operation *op, const WaitLattice &before,
                                WaitLattice *after) override {
-    if (failed(validateWaveAMDMachineOp(op)))
+    if (failed(validateWaveAMDMachineOp(op, target)))
       return failure();
 
     WaitState next = before.get();
@@ -854,6 +1222,9 @@ public:
     propagateOperandsThrough(sources, branch.getSuccessorInputs(successor),
                              next);
 
+    if (regionTo && target.waitXcnt &&
+        implicitlyDrainsXcnt(branch.getOperation()))
+      lat::clearCounter(next.tokens, Counter::X);
     Block *targetBlock =
         regionTo ? &branch->getRegion(*regionTo).front() : branch->getBlock();
     if (targetBlock)
@@ -864,7 +1235,7 @@ public:
 private:
   void transferOp(Operation *op, WaitState &state) {
     auto noop = [](Operation *, const WaitRequirement &) {};
-    runTransfer(op, state, isaVer, noop);
+    runTransfer(op, state, target, noop);
   }
 
   void markCFGSuccessorsLive(Operation *op, const WaitState &state) {
@@ -928,7 +1299,7 @@ private:
                                 WaitState &state) {
     SmallVector<Token, 4> added;
     for (auto [op, dst] : llvm::zip_equal(operands, destinations)) {
-      for (unsigned ci = 0; ci < kNumCounters; ++ci) {
+      for (unsigned ci = 1; ci < kNumCounters; ++ci) {
         Counter c = static_cast<Counter>(ci);
         if (const Token *t = lat::find(state.tokens, c, op))
           added.push_back(Token{dst, c, t->events, t->position, t->outOfOrder,
@@ -940,7 +1311,7 @@ private:
   }
 
   DominanceInfo &dom;
-  const llvm::AMDGPU::IsaVersion &isaVer;
+  const WaitTarget &target;
 };
 
 //===----------------------------------------------------------------------===//
@@ -952,18 +1323,31 @@ static IntegerAttr getCounterAttr(OpBuilder &builder, unsigned value) {
 }
 
 static void emitWaits(OpBuilder &builder, Operation *op,
-                      const WaitRequirement &req) {
+                      const WaitRequirement &req, const WaitTarget &target) {
   builder.setInsertionPoint(op);
-  if (req.vmcnt || req.lgkmcnt) {
+  if (target.family == waveamdmachine::WaitCounterFamily::Gfx12Split) {
+    auto attr = [&](Counter counter) -> IntegerAttr {
+      std::optional<unsigned> count = req.get(counter);
+      return count ? getCounterAttr(builder, *count) : IntegerAttr();
+    };
+    waveamdmachine::SWaitcntSplitOp::create(
+        builder, op->getLoc(), attr(Counter::Load), attr(Counter::Store),
+        attr(Counter::Ds), attr(Counter::Km), attr(Counter::X));
+    return;
+  }
+
+  std::optional<unsigned> vmcnt = req.get(Counter::Vmem);
+  std::optional<unsigned> lgkmcnt = req.get(Counter::Lgkm);
+  if (vmcnt || lgkmcnt) {
     waveamdmachine::SWaitcntOp::create(
         builder, op->getLoc(),
-        req.vmcnt ? getCounterAttr(builder, *req.vmcnt) : IntegerAttr(),
+        vmcnt ? getCounterAttr(builder, *vmcnt) : IntegerAttr(),
         /*expcnt=*/IntegerAttr(),
-        req.lgkmcnt ? getCounterAttr(builder, *req.lgkmcnt) : IntegerAttr());
+        lgkmcnt ? getCounterAttr(builder, *lgkmcnt) : IntegerAttr());
   }
-  if (req.vscnt) {
-    waveamdmachine::SWaitcntVscntOp::create(
-        builder, op->getLoc(), getCounterAttr(builder, *req.vscnt));
+  if (std::optional<unsigned> vscnt = req.get(Counter::Vscnt)) {
+    waveamdmachine::SWaitcntVscntOp::create(builder, op->getLoc(),
+                                            getCounterAttr(builder, *vscnt));
   }
 }
 
@@ -1010,24 +1394,23 @@ static bool hasPendingEvent(const WaitState &state, Counter counter,
   return (activeEventMask(state.tokens, counter) & eventMask(event)) != 0;
 }
 
-static bool canDeallocVGPRs(const WaitState &state) {
+static bool canDeallocVGPRs(const WaitState &state, const WaitTarget &target) {
+  Counter storeCounter =
+      target.family == waveamdmachine::WaitCounterFamily::Gfx12Split
+          ? Counter::Store
+          : Counter::Vscnt;
   return llvm::any_of(state.tokens,
-                      [](const Token &token) {
-                        return token.counter == Counter::Vscnt;
+                      [&](const Token &token) {
+                        return token.counter == storeCounter;
                       }) &&
-         !hasPendingEvent(state, Counter::Vscnt,
+         !hasPendingEvent(state, storeCounter,
                           waveamdmachine::WaitcntEvent::ScratchStore);
 }
 
-static bool
-requiresNopBeforeDeallocVGPRs(const llvm::AMDGPU::IsaVersion &isaVersion) {
-  return !(isaVersion.Major == 12 && isaVersion.Minor == 5);
-}
-
 static void emitVGPRDealloc(OpBuilder &builder, Operation *endpgm,
-                            const llvm::AMDGPU::IsaVersion &isaVersion) {
+                            const WaitTarget &target) {
   builder.setInsertionPoint(endpgm);
-  if (requiresNopBeforeDeallocVGPRs(isaVersion)) {
+  if (target.requiresNopBeforeDeallocVGPRs) {
     Value zero = waveamdmachine::ImmOp::create(
         builder, endpgm->getLoc(),
         waveamdmachine::ImmType::get(builder.getContext()), 0);
@@ -1052,38 +1435,37 @@ struct WaveAMDTicketWaitsPass
   }
 
   LogicalResult runOnFunc(func::FuncOp func) {
-    FailureOr<llvm::AMDGPU::IsaVersion> isaVersion = getIsaVersion(func);
-    if (failed(isaVersion))
+    FailureOr<WaitTarget> target = getWaitTarget(func);
+    if (failed(target))
       return failure();
-    FailureOr<bool> vgprLimited = isVGPRLimited(func, *isaVersion);
+    FailureOr<bool> vgprLimited = isVGPRLimited(func, target->isa);
     if (failed(vgprLimited))
       return failure();
 
     DominanceInfo dom(func);
     DataFlowSolver solver;
     loadBaselineAnalyses(solver);
-    solver.load<TokenWaitAnalysis>(dom, *isaVersion);
+    solver.load<TokenWaitAnalysis>(dom, *target);
     if (failed(solver.initializeAndRun(func)))
       return failure();
 
-    rewriteWithSolver(func, solver, *isaVersion, *vgprLimited);
+    rewriteWithSolver(func, solver, *target, *vgprLimited);
     return success();
   }
 
   // Per-block local state so consecutive consumers see drains from the
   // wait we just emitted (the solver's per-op state does not).
   void rewriteWithSolver(func::FuncOp func, DataFlowSolver &solver,
-                         const llvm::AMDGPU::IsaVersion &isaVer,
-                         bool vgprLimited) {
+                         const WaitTarget &target, bool vgprLimited) {
     OpBuilder builder(func.getContext());
     SmallVector<Block *> blocks;
     collectBlocks(func.getBody(), blocks);
     for (Block *block : blocks)
-      rewriteBlock(block, solver, isaVer, vgprLimited, builder);
+      rewriteBlock(block, solver, target, vgprLimited, builder);
   }
 
   void rewriteBlock(Block *block, DataFlowSolver &solver,
-                    const llvm::AMDGPU::IsaVersion &isaVer, bool vgprLimited,
+                    const WaitTarget &target, bool vgprLimited,
                     OpBuilder &builder) {
     auto *blockLat =
         solver.lookupState<WaitLattice>(solver.getProgramPointBefore(block));
@@ -1096,31 +1478,31 @@ struct WaveAMDTicketWaitsPass
       ops.push_back(&op);
 
     for (Operation *op : ops)
-      rewriteOp(op, local, solver, isaVer, vgprLimited, builder);
+      rewriteOp(op, local, solver, target, vgprLimited, builder);
   }
 
   void rewriteOp(Operation *op, WaitState &local, DataFlowSolver &solver,
-                 const llvm::AMDGPU::IsaVersion &isaVer, bool vgprLimited,
+                 const WaitTarget &target, bool vgprLimited,
                  OpBuilder &builder) {
     auto emit = [&](Operation *op, const WaitRequirement &req) {
       if (req.hasWait())
-        emitWaits(builder, op, req);
+        emitWaits(builder, op, req, target);
     };
     if (vgprLimited && llvm::isa<waveamdmachine::SEndpgmOp>(op) &&
-        canDeallocVGPRs(local))
-      emitVGPRDealloc(builder, op, isaVer);
+        canDeallocVGPRs(local, target))
+      emitVGPRDealloc(builder, op, target);
 
     // Control-flow ops: framework hooks computed the post-op state.
     // Refresh `local` so a downstream consumer sees the joined region
     // result. Inner regions are visited separately via collectBlocks.
     if (isControlFlowOp(op)) {
-      runTransfer(op, local, isaVer, emit);
+      runTransfer(op, local, target, emit);
       if (auto *post =
               solver.lookupState<WaitLattice>(solver.getProgramPointAfter(op)))
         local = post->get();
       return;
     }
-    runTransfer(op, local, isaVer, emit);
+    runTransfer(op, local, target, emit);
   }
 
   static void collectBlocks(Region &region, SmallVectorImpl<Block *> &blocks) {

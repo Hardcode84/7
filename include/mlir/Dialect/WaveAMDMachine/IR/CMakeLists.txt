@@ -11,6 +11,11 @@ mlir_tablegen(WaveAMDMachineTargetEnums.h.inc -gen-enum-decls)
 mlir_tablegen(WaveAMDMachineTargetEnums.cpp.inc -gen-enum-defs)
 add_public_tablegen_target(MLIRWaveAMDMachineTargetEnumsIncGen)
 
+set(LLVM_TARGET_DEFINITIONS WaveAMDMachineWaitEnums.td)
+mlir_tablegen(WaveAMDMachineWaitEnums.h.inc -gen-enum-decls)
+mlir_tablegen(WaveAMDMachineWaitEnums.cpp.inc -gen-enum-defs)
+add_public_tablegen_target(MLIRWaveAMDMachineWaitEnumsIncGen)
+
 set(LLVM_TARGET_DEFINITIONS WaveAMDMachineInterfaces.td)
 mlir_tablegen(WaveAMDMachineInterfaces.h.inc -gen-op-interface-decls)
 mlir_tablegen(WaveAMDMachineInterfaces.cpp.inc -gen-op-interface-defs)

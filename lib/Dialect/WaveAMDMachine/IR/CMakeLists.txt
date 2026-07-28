@@ -2,6 +2,7 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
   WaveAMDMachine.cpp
   WaveAMDMachineInstrInfo.cpp
   WaveAMDMachineTarget.cpp
+  WaveAMDMachineWaitcntInfo.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/WaveAMDMachine
@@ -11,6 +12,7 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
   MLIRWaveAMDMachineInterfacesIncGen
   MLIRWaveAMDMachineOpsIncGen
   MLIRWaveAMDMachineTargetEnumsIncGen
+  MLIRWaveAMDMachineWaitEnumsIncGen
 
   LINK_COMPONENTS
 

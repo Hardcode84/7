@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <tuple>
 #include <utility>
 
 using namespace mlir;
@@ -62,6 +63,51 @@ bool mlir::waveamdmachine::isSamePhysicalReg(Value lhs, Value rhs) {
   return lhsType.getRegClass() == rhsType.getRegClass() &&
          lhsType.getWidth() == rhsType.getWidth() &&
          lhsType.getIndex() == rhsType.getIndex();
+}
+
+static std::optional<int64_t> parseRegisterIndex(StringRef text) {
+  int64_t index = 0;
+  if (text.empty())
+    return std::nullopt;
+  if (text.getAsInteger(10, index))
+    return std::nullopt;
+  if (index < 0 || index == std::numeric_limits<int64_t>::max())
+    return std::nullopt;
+  return index;
+}
+
+static std::optional<PhysicalRegisterSpan>
+parseSGPRRegisterPair(StringRef text) {
+  StringRef beginText;
+  StringRef endText;
+  std::tie(beginText, text) = text.split(':');
+  std::tie(endText, text) = text.split(']');
+  if (!text.empty())
+    return std::nullopt;
+
+  std::optional<int64_t> begin = parseRegisterIndex(beginText);
+  std::optional<int64_t> end = parseRegisterIndex(endText);
+  if (!begin || !end || *end < *begin)
+    return std::nullopt;
+  return PhysicalRegisterSpan{RegClass::SGPR, *begin, *end + 1};
+}
+
+static std::optional<PhysicalRegisterSpan>
+parseSingleSGPRRegister(StringRef text) {
+  std::optional<int64_t> reg = parseRegisterIndex(text);
+  if (!reg)
+    return std::nullopt;
+  return PhysicalRegisterSpan{RegClass::SGPR, *reg, *reg + 1};
+}
+
+std::optional<PhysicalRegisterSpan>
+mlir::waveamdmachine::parseSGPRRegisterSpan(StringRef text) {
+  text = text.trim();
+  if (!text.consume_front("s"))
+    return std::nullopt;
+  if (text.consume_front("["))
+    return parseSGPRRegisterPair(text);
+  return parseSingleSGPRRegister(text);
 }
 
 bool mlir::waveamdmachine::isInlineImm32(Value value) {

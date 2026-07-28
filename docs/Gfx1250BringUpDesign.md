@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed.
+In progress.
 
 LLVM source check: 2026-07-28. Audited high-VGPR implementation and tests match
 public LLVM sources as of that date.
@@ -16,11 +16,18 @@ Current Wave support is partial:
 
 - target parsing recognizes ISA 12.5;
 - gfx1250 defaults to wave32 and rejects wave64;
-- packed f16 and bf16 conversions have gfx125x capability checks;
-- kernarg preload and terminal VGPR deallocation contain gfx125x handling;
-- final emission rejects every ISA except gfx8, gfx9, and gfx11;
-- memory waits, kernel descriptors, resource descriptors, matrix lowering, and
-  scheduling still use older target assumptions.
+- final emission accepts the audited gfx1250 scalar/vector subset and rejects
+  missing target mappings;
+- MC finalization preserves high-VGPR identities and emits visible
+  `S_SET_VGPR_MSB` window switches;
+- LOAD, STORE, DS, KM, and X waits use the split-counter model below;
+- agent-scoped acquire-release global atomic add uses the gfx1250 cache and
+  split-wait sequence;
+- packed f16 and bf16 conversions have broad ISA 12.5 capability checks;
+- kernarg preload and terminal VGPR deallocation contain broad ISA 12.5
+  handling;
+- resource descriptors, matrix lowering, and scheduling still use older target
+  assumptions.
 
 ## Goal
 
@@ -76,9 +83,9 @@ Unsupported paths must fail with target-specific diagnostics.
 | matrix base | f16/bf16 `16x16x32` WMMA | f32 accumulator only |
 | code object | target accepts HSA code objects; Wave emits v6 | validate descriptor with LLVM tools |
 
-gfx1251 remains distinct. Common behavior may use an ISA-major/minor predicate.
-Instruction selection, resource limits, schedule data, and performance features
-must use exact stepping or LLVM feature predicates.
+gfx1251 remains distinct. New bring-up gates use exact gfx1250 identity or LLVM
+feature predicates. Instruction selection, resource limits, schedule data, and
+performance features must not infer shared behavior from ISA 12.5 alone.
 
 LLVM source is the executable specification:
 
@@ -101,6 +108,9 @@ Public LLVM source:
 - [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPU.td)
 - [schedule model](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SISchedule.td)
 - [wait-counter implementation](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
+- [wait event classification](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPUHWEvents.cpp)
+- [global atomic ordering](https://github.com/llvm/llvm-project/blob/main/llvm/test/CodeGen/AMDGPU/memory-legalizer-global-agent.ll)
+- [terminal VGPR deallocation](https://github.com/llvm/llvm-project/blob/main/llvm/test/CodeGen/AMDGPU/release-vgprs.mir)
 - [high-VGPR lowering](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp)
 - [VGPR register classes](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIRegisterInfo.td)
 - [high-VGPR assembly printing](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUInstPrinter.cpp)
@@ -133,18 +143,19 @@ Extend `WaveAMDMachineTarget` with shared queries for:
 Stable architecture facts may derive from `llvm::AMDGPU::IsaVersion`. MC
 legality and opcode selection use `MCSubtargetInfo` feature predicates.
 
-Do not make `isGfx125x()` the matrix or schedule gate. It currently combines
-two steppings with different capabilities.
+Do not use a broad ISA 12.5 helper as the matrix or schedule gate. Exact
+gfx1250 identity and LLVM feature predicates carry those decisions.
 
 ## MC Emission
 
-`lib/Target/Wave/AMDGPU.cpp` currently selects one VI or gfx11 opcode for each
-machine operation. gfx1250 is a third encoding and operand-schema family.
+`lib/Target/Wave/AMDGPU.cpp` resolves VI, gfx11, and gfx1250 opcodes through
+LLVM MC tables. gfx1250 remains a distinct encoding and operand-schema family.
 
-Required changes:
+MC policy:
 
-1. Accept exact gfx1250 only after its opcode and ABI coverage is complete.
-2. Extend the declarative opcode mapping used by `AMDGPUOpcodes.def`.
+1. Enable each gfx1250 operation only after its opcode and ABI coverage is
+   complete.
+2. Extend the declarative mapping used by `AMDGPUOpcodes.def`.
 3. Select instructions with `IsaVersion` and `MCSubtargetInfo` predicates.
 4. Audit operand schemas, implicit operands, cache-policy fields, and tuple
    classes for every enabled operation.
@@ -210,11 +221,12 @@ also:
 - reject unsupported high-VGPR operand maps and incompatible VOPD windows;
 - reset to the low window around inline assembly.
 
-Current emission prints each `MCInst` immediately. That cannot move a switch
-before an already printed instruction or patch a preceding MODE write. Add a
-buffered finalization stage. Centralize branches and fallthrough labels for
-uniform conditionals, EXEC conditionals, loops, and DMA-delay regions. No later
-pass may change physical VGPR operands.
+Emission buffers each function's `MCInst` values, labels, directives, and
+alignment until finalization. The buffered stage inserts the required `s_nop`
+between a MODE write and a following switch before printing. Automatic switch
+insertion and compatible MODE patching remain `.5`. Branches and fallthrough
+labels for uniform conditionals, EXEC conditionals, loops, and DMA-delay
+regions use the same buffer. No later pass may change physical VGPR operands.
 
 Landing is gated:
 
@@ -228,8 +240,8 @@ Landing is gated:
 Wave memory ordering remains explicit SSA token ordering. gfx1250 support must
 not add alias inference, implicit barriers, or loop-carried dependencies.
 
-Current Wave operations expose three physical counter classes: VMEM, LGKM, and
-VSCNT. gfx1250 uses split wait instructions:
+Legacy Wave targets use three physical counter classes: VMEM, LGKM, and VSCNT.
+gfx1250 uses split wait instructions:
 
 ```text
 s_wait_loadcnt
@@ -241,17 +253,46 @@ s_wait_asynccnt
 s_wait_tensorcnt
 ```
 
-Refactor wait modeling into two layers:
+Wait modeling has two layers:
 
 1. operation traits describe semantic completion events;
 2. a target mapping assigns events to physical counters and emitted waits.
 
 The gfx1250 mapping must mirror LLVM's `WaitEventMaskForInstGFX12Plus`.
 Existing targets keep their current VMEM/LGKM/VSCNT mapping.
+Scheduler timing still buckets semantic events into legacy resources. `.8`
+owns independent split-counter scheduling data.
 
-The scoreboard still tracks issue order per counter, token identity,
-out-of-order completion, and writes-memory state. Dataflow joins keep the
-conservative oldest live ticket. Loops converge through the existing lattice.
+Completion and source lifetime use separate scoreboards:
+
+- completion tickets retain SSA identity, issue order, out-of-order state, and
+  writes-memory state;
+- X tickets name allocated physical register units used as VMEM or SMEM
+  sources; VMEM also records its implicit EXEC use.
+
+X waits occur only before a physical definition overlaps a pending source.
+Reads do not wait. Physical definitions are checked before the current
+instruction's implicit drain or SMEM/VMEM group switch. Structured EXEC
+lowering includes hidden save-stack SGPR definitions and EXEC writes at arm
+transitions. SMEM and VMEM interleaving then drains the previous source group.
+Branches, barriers, register-control operations, messages, termination, and
+`S_SET_VGPR_MSB` drain X implicitly. LOAD waits retire matching VMEM X tickets
+when no STORE remains; `KM(0)` retires SMEM X tickets.
+
+Dataflow joins keep the conservative oldest live ticket. Loops converge through
+the existing lattice. Counter field limits and combined-wait encoding come from
+LLVM AMDGPU helpers; Wave does not duplicate field widths.
+
+| Semantic event | Existing targets | gfx1250 completion | gfx1250 source |
+|---|---|---|---|
+| VMEM read | VMEM | LOAD | X |
+| VMEM or scratch write | VSCNT | STORE | X |
+| LDS | LGKM | DS | none |
+| SMEM | LGKM | KM | X |
+| message | LGKM | KM | none |
+
+FLAT, GDS, ASYNC, and TENSOR remain rejected until Wave models every required
+counter and token obligation.
 
 Base bring-up handles LOAD, STORE, DS, KM, and X. ASYNC and TENSOR stay
 unavailable until their operations carry explicit tokens.
@@ -259,16 +300,20 @@ unavailable until their operations carry explicit tokens.
 Required cases:
 
 - load result use waits on LOAD;
-- store ordering and kernel termination wait on STORE;
+- store token consumers wait on STORE;
 - LDS consumers and barriers wait on DS;
 - scalar-memory consumers wait on KM;
 - operations classified by LLVM as X events wait on X;
-- atomics preserve both returned-value and memory-completion obligations;
+- synchronous acquire-release global atomics use LLVM's split-wait, cache
+  writeback, returning atomic, and cache-invalidate sequence;
 - CFG joins and loop backedges retain all incoming obligations;
-- terminal scratch stores cannot escape without a STORE drain.
+- `s_endpgm` provides the implicit terminal STORE drain; pending scratch stores
+  forbid early VGPR deallocation.
 
 Combined LOAD+DS and STORE+DS waits are an encoding choice after the semantic
-requirements are known. They are not separate IR semantics.
+requirements are known. They are not separate IR semantics. The abstract split
+wait op reaches assembly only through `MCInst`; the emitter prefers LOAD+DS,
+then STORE+DS, and emits remaining counters independently.
 
 ## Expert Scheduling Mode 2
 
@@ -306,7 +351,7 @@ hazards. A separate opt-in project must add:
 - entry, call, return, and non-entry transition rules;
 - late wait placement that avoids WMMA coexecution shadows.
 
-Open upstream correctness work remains:
+Public correctness gaps to account for:
 
 - [LLVM PR 211333](https://github.com/llvm/llvm-project/pull/211333): preserve
   `vm_vsrc` waits with outstanding async operations and marks;
@@ -603,7 +648,7 @@ Epic: `7-gfx1250-wave-backend-bringup-fa4l`
 `7-amdgpu-scheduler-sy5.9`. Related edges record reuse; they do not block the
 bring-up DAG.
 
-Before each implementation commit:
+Before each implementation change:
 
 ```bash
 cmake --build build --target check-wave-mlir -j $(nproc)

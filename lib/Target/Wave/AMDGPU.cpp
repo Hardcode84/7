@@ -551,6 +551,12 @@ private:
       return targetCapabilities->waitXcnt;
     return sti->hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
   }
+  bool usesSplitWaitCounters() const {
+    if (targetCapabilities)
+      return targetCapabilities->waitCounterFamily ==
+             waveamdmachine::WaitCounterFamily::Gfx12Split;
+    return llvm::AMDGPU::isGFX12Plus(*sti);
+  }
   bool supportsPrivateSegmentEnable() const {
     if (targetCapabilities)
       return targetCapabilities->kernelDescriptor.architectedPrivateSegment;
@@ -969,6 +975,8 @@ private:
   unsigned globalLoadB32() const { return opcodes.globalLoadB32; }
 
   unsigned globalAtomicAddSaddrRtnU32() const {
+    if (usesSplitWaitCounters())
+      return postVIOpcode(llvm::AMDGPU::GLOBAL_ATOMIC_ADD_SADDR_RTN);
     return llvm::AMDGPU::GLOBAL_ATOMIC_ADD_SADDR_RTN_vi;
   }
 
@@ -2727,7 +2735,40 @@ private:
     if (!waveamdmachine::GlobalAtomicAddAcqRelU32Op::isSupportedOnIsa(
             isaVersion))
       return op.emitError(
-          "agent-scoped acquire-release global atomic requires gfx940+");
+          "agent-scoped acquire-release global atomic requires gfx940+ or "
+          "gfx1250");
+
+    if (usesSplitWaitCounters()) {
+      unsigned scope = llvm::AMDGPU::CPol::SCOPE_DEV;
+      unsigned atomicCpol = llvm::AMDGPU::CPol::TH_ATOMIC_RETURN | scope;
+      unsigned loadDsZero = llvm::AMDGPU::encodeLoadcntDscnt(isaVersion, 0, 0);
+      if (failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT),
+                        {llvm::MCOperand::createImm(0)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_STORECNT),
+                        {llvm::MCOperand::createImm(0)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::GLOBAL_WB),
+                        {llvm::MCOperand::createImm(scope)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_STORECNT),
+                        {llvm::MCOperand::createImm(0)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_XCNT),
+                        {llvm::MCOperand::createImm(0)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT_DSCNT),
+                        {llvm::MCOperand::createImm(loadDsZero)})) ||
+          failed(emitMC(
+              globalAtomicAddSaddrRtnU32(),
+              {toMCOperand(op.getResult(0)), toMCOperand(op.getOperand(0)),
+               toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(2)),
+               llvm::MCOperand::createImm(getIntAttr(&op, "inst_offset", 0)),
+               llvm::MCOperand::createImm(atomicCpol)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT),
+                        {llvm::MCOperand::createImm(0)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::GLOBAL_INV),
+                        {llvm::MCOperand::createImm(scope)})) ||
+          failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT),
+                        {llvm::MCOperand::createImm(0)})))
+        return failure();
+      return success();
+    }
 
     unsigned waitAll = llvm::AMDGPU::encodeWaitcnt(
         isaVersion, /*vmcnt=*/0, /*expcnt=*/~0u, /*lgkmcnt=*/0);
@@ -3220,6 +3261,70 @@ private:
       return success();
     }
     return op->emitError("copy supports only SGPR/VGPR results");
+  }
+
+  LogicalResult emitSplitWaitcnt(waveamdmachine::SWaitcntSplitOp wait) {
+    if (!usesSplitWaitCounters())
+      return wait.emitError("s_waitcnt_split requires split wait counters");
+
+    std::optional<uint32_t> loadcnt = wait.getLoadcnt();
+    std::optional<uint32_t> storecnt = wait.getStorecnt();
+    std::optional<uint32_t> dscnt = wait.getDscnt();
+    std::optional<uint32_t> kmcnt = wait.getKmcnt();
+    std::optional<uint32_t> xcnt = wait.getXcnt();
+
+    auto validate = [&](StringRef name, std::optional<uint32_t> count,
+                        unsigned max) -> LogicalResult {
+      if (!count || *count <= max)
+        return success();
+      return wait.emitError() << name << " value " << *count
+                              << " exceeds target maximum " << max;
+    };
+    if (failed(validate("loadcnt", loadcnt,
+                        llvm::AMDGPU::getLoadcntBitMask(isaVersion))) ||
+        failed(validate("storecnt", storecnt,
+                        llvm::AMDGPU::getStorecntBitMask(isaVersion))) ||
+        failed(validate("dscnt", dscnt,
+                        llvm::AMDGPU::getDscntBitMask(isaVersion))) ||
+        failed(validate("kmcnt", kmcnt,
+                        llvm::AMDGPU::getKmcntBitMask(isaVersion))) ||
+        failed(
+            validate("xcnt", xcnt, llvm::AMDGPU::getXcntBitMask(isaVersion))))
+      return failure();
+    if (xcnt && !hasWaitXcnt())
+      return wait.emitError("xcnt unsupported on target");
+
+    if (dscnt && loadcnt) {
+      unsigned encoded =
+          llvm::AMDGPU::encodeLoadcntDscnt(isaVersion, *loadcnt, *dscnt);
+      if (failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_LOADCNT_DSCNT),
+                        {llvm::MCOperand::createImm(encoded)})))
+        return failure();
+      loadcnt.reset();
+      dscnt.reset();
+    } else if (dscnt && storecnt) {
+      unsigned encoded =
+          llvm::AMDGPU::encodeStorecntDscnt(isaVersion, *storecnt, *dscnt);
+      if (failed(emitMC(postVIOpcode(llvm::AMDGPU::S_WAIT_STORECNT_DSCNT),
+                        {llvm::MCOperand::createImm(encoded)})))
+        return failure();
+      storecnt.reset();
+      dscnt.reset();
+    }
+
+    auto emit = [&](std::optional<uint32_t> count,
+                    unsigned opcode) -> LogicalResult {
+      if (!count)
+        return success();
+      return emitMC(postVIOpcode(opcode), {llvm::MCOperand::createImm(*count)});
+    };
+    if (failed(emit(loadcnt, llvm::AMDGPU::S_WAIT_LOADCNT)) ||
+        failed(emit(storecnt, llvm::AMDGPU::S_WAIT_STORECNT)) ||
+        failed(emit(dscnt, llvm::AMDGPU::S_WAIT_DSCNT)) ||
+        failed(emit(kmcnt, llvm::AMDGPU::S_WAIT_KMCNT)) ||
+        failed(emit(xcnt, llvm::AMDGPU::S_WAIT_XCNT)))
+      return failure();
+    return success();
   }
 
   LogicalResult emitYieldCopies(waveamdmachine::ExecIfOp execIf,
@@ -4221,18 +4326,19 @@ private:
            llvm::MCOperand::createReg(
                namedPhysReg(op.getAttrOfType<StringAttr>("base").getValue())),
            toMCOperand(op.getOperand(0)), llvm::MCOperand::createImm(0)});
+    if (auto wait = dyn_cast<waveamdmachine::SWaitcntSplitOp>(op))
+      return emitSplitWaitcnt(wait);
     if (auto wait = dyn_cast<waveamdmachine::SWaitcntOp>(op)) {
-      if (isGfx1250())
-        return op.emitError("s_waitcnt requires gfx1250 split-wait lowering");
+      if (usesSplitWaitCounters())
+        return op.emitError("s_waitcnt requires split-wait lowering");
       unsigned encoded = llvm::AMDGPU::encodeWaitcnt(
           isaVersion, wait.getVmcnt().value_or(~0u),
           wait.getExpcnt().value_or(~0u), wait.getLgkmcnt().value_or(~0u));
       return emitMC(sWaitcnt(), {llvm::MCOperand::createImm(encoded)});
     }
     if (auto wait = dyn_cast<waveamdmachine::SWaitcntVscntOp>(op)) {
-      if (isGfx1250())
-        return op.emitError(
-            "s_waitcnt_vscnt requires gfx1250 split-wait lowering");
+      if (usesSplitWaitCounters())
+        return op.emitError("s_waitcnt_vscnt requires split-wait lowering");
       if (isGfx8Or9()) {
         unsigned vmcnt = wait.getVscnt();
         unsigned encoded =

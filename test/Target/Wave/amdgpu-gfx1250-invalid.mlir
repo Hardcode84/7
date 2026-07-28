@@ -7,7 +7,7 @@ module attributes {
 } {
 
 func.func @old_wait() {
-  // expected-error @below {{s_waitcnt requires gfx1250 split-wait lowering}}
+  // expected-error @below {{s_waitcnt requires split-wait lowering}}
   waveamdmachine.s_waitcnt vmcnt(0)
   return
 }
@@ -20,8 +20,22 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
+func.func @oversized_split_wait() {
+  // expected-error @below {{loadcnt value 64 exceeds target maximum 63}}
+  waveamdmachine.s_waitcnt_split loadcnt(64)
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
 func.func @old_store_wait() {
-  // expected-error @below {{s_waitcnt_vscnt requires gfx1250 split-wait lowering}}
+  // expected-error @below {{s_waitcnt_vscnt requires split-wait lowering}}
   waveamdmachine.s_waitcnt_vscnt vscnt(0)
   return
 }
