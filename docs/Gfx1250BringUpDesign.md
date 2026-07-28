@@ -1,17 +1,16 @@
 # gfx1250 Wave Backend Bring-Up
 
-## Status
+## Validation Boundary
 
-Compile-time bring-up complete. No gfx1250 hardware is available for this
-closeout. Runtime correctness, performance, and same-hardware assembly
-benchmarking remain unvalidated and are not claimed.
+Compile-time evidence does not establish runtime correctness, performance, or
+same-hardware assembly quality. Those claims require hardware validation.
 
 LLVM already owns gfx1250 target parsing, encodings, ELF identity, instruction
 descriptions, intrinsics, descriptor fields, wait instructions, and schedule
 classes. Wave must consume that support. Wave must not duplicate an ISA
 database.
 
-Initial Wave support includes:
+Wave support includes:
 
 - target parsing recognizes ISA 12.5;
 - gfx1250 defaults to wave32 and rejects wave64;
@@ -31,21 +30,33 @@ Initial Wave support includes:
   SMEM, and scratch kernels through object link and disassembly;
 - pressure-driven allocation crosses `v255` and restores visible VGPR-window
   state across conditional edges and joins;
-- direct-to-LDS operations reject during instruction selection;
+- legacy per-lane direct-to-LDS operations reject during instruction
+  selection;
 - f16 and bf16 `16x16x32` WMMA lower through regalloc, MC assembly, object
   linking, and disassembly;
 - schedule classes and resources come from LLVM MC schedule queries;
 - normal-mode TRANS, WMMA, and scratch hazards emit visible repair
   instructions.
 
+TDM support adds:
+
+- raw D0/D1 and D0-D3 SGPR tuple transfers;
+- Python descriptor packing and tuple-selection sugar;
+- explicit issue dependencies and completion tokens;
+- partial `s_wait_tensorcnt`, including nonzero counts;
+- completion-neutral descriptor-derived L2 prefetch;
+- LLVM-derived two-micro-op HWLGKM+HWVMEM scheduling;
+- compile-only IR, MC, object, and disassembly coverage.
+
 ## Goal
 
-Compile and run correct gfx1250 Wave kernels in two steps:
+Compile and run correct gfx1250 Wave kernels in three steps:
 
 1. scalar/vector kernels using global, buffer, LDS, scalar, and scratch memory;
-2. f16 and bf16 GEMM using gfx1250 `16x16x32` wave32 WMMA.
+2. f16 and bf16 GEMM using gfx1250 `16x16x32` wave32 WMMA;
+3. tokenized TDM load, store, and prefetch over raw LLVM descriptor tuples.
 
-Initial compile-time support includes:
+Compile-time support includes:
 
 - exact gfx1250 target selection;
 - valid MCInst emission and object generation;
@@ -58,12 +69,20 @@ Initial compile-time support includes:
 - target-specific scheduling and hazard repair;
 - Python target selection and compile-time Integration coverage.
 
+TDM compile-time support includes:
+
+- D2 and D4 descriptor forms without a second descriptor IR;
+- SGPR tuple allocation and LLVM MC operand validation;
+- tensor completion waits through CFG joins and loops;
+- visible TDM and tensor-wait assembly;
+- conservative scheduling without measured hardware timing.
+
 ## Non-goals
 
-Initial bring-up does not include:
+gfx1250 scope does not include:
 
-- async global-to-LDS or LDS-to-global staging;
-- tensor DMA;
+- legacy `waveamd.dma_load_lds` enablement on gfx1250;
+- high-level TDM descriptor IR, fused loads, and gather or scatter;
 - expert scheduling mode 2;
 - cluster or multicast memory;
 - named or split hardware barriers;
@@ -73,12 +92,11 @@ Initial bring-up does not include:
 - attention tuning;
 - gfx1251 enablement.
 
-These need separate work after the scalar/vector and base WMMA path is proven.
 Unsupported paths must fail with target-specific diagnostics.
 
 ## LLVM Contract
 
-| Property | gfx1250 contract | Initial Wave policy |
+| Property | gfx1250 contract | Wave policy |
 |---|---|---|
 | ISA | 12.5.0 | exact stepping match |
 | wave size | 32 only | reject any other value |
@@ -89,7 +107,7 @@ Unsupported paths must fail with target-specific diagnostics.
 | accumulators | VGPR-backed | no AGPR allocation |
 | LDS | 320 KiB, 32 banks | use both facts in legality and layout scoring |
 | buffer resource | 57-bit base, 45-bit `NumRecords` | target-specific structural packing |
-| waits | LOAD, STORE, DS, KM, X, ASYNC, TENSOR | base path implements first five |
+| waits | LOAD, STORE, DS, KM, X, ASYNC, TENSOR | base path implements first five; TDM implements TENSOR |
 | matrix base | f16/bf16 `16x16x32` WMMA | f32 accumulator only |
 | code object | target accepts HSA code objects; Wave emits v6 | validate descriptor with LLVM tools |
 
@@ -104,13 +122,17 @@ LLVM source is the executable specification:
 - `llvm/lib/Target/AMDGPU/GCNProcessors.td`
 - `llvm/lib/Target/AMDGPU/SISchedule.td`
 - `llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp`
+- `llvm/lib/Target/AMDGPU/AMDGPUWaitcntUtils.h`
+- `llvm/lib/Target/AMDGPU/MIMGInstructions.td`
 - `llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp`
 - `llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp`
 - `llvm/lib/Target/AMDGPU/SIRegisterInfo.td`
 - `llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUInstPrinter.cpp`
 - `llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp`
 - `llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`
+- `mlir/lib/Conversion/AMDGPUToROCDL/AMDGPUToROCDL.cpp`
 - `llvm/docs/AMDGPUUsage.rst`
+- `llvm/docs/AMDGPUDMAOperations.md`
 
 Public LLVM source:
 
@@ -118,6 +140,12 @@ Public LLVM source:
 - [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPU.td)
 - [schedule model](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SISchedule.td)
 - [wait-counter implementation](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
+- [TDM instruction definitions](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/MIMGInstructions.td)
+- [TDM descriptor lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Conversion/AMDGPUToROCDL/AMDGPUToROCDL.cpp)
+- [DMA operation contract](https://github.com/llvm/llvm-project/blob/main/llvm/docs/AMDGPUDMAOperations.md)
+- [Triton Gluon TDM DSL](https://github.com/triton-lang/triton/blob/main/python/triton/experimental/gluon/language/amd/gfx1250/tdm.py)
+- [Triton TDM wait accounting](https://github.com/triton-lang/triton/blob/main/third_party/amd/lib/TritonAMDGPUTransforms/UpdateAsyncWaitCount.cpp)
+- [Triton TDM store pipelining](https://github.com/triton-lang/triton/blob/main/third_party/amd/lib/TritonAMDGPUTransforms/TDMStoresPipeline.cpp)
 - [wait event classification](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPUHWEvents.cpp)
 - [global atomic ordering](https://github.com/llvm/llvm-project/blob/main/llvm/test/CodeGen/AMDGPU/memory-legalizer-global-agent.ll)
 - [terminal VGPR deallocation](https://github.com/llvm/llvm-project/blob/main/llvm/test/CodeGen/AMDGPU/release-vgprs.mir)
@@ -129,9 +157,16 @@ Public LLVM source:
 - [gfx1250 descriptor reference](https://github.com/llvm/llvm-project/blob/main/llvm/test/tools/llvm-objdump/ELF/AMDGPU/kd-gfx1250.s)
 - [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/main/llvm/docs/AMDGPUUsage.rst)
 
-No public gfx1250 ISA manual was found. Every encoded instruction therefore
-needs LLVM MC assembly and disassembly coverage. Hardware tests remain the
-authority for runtime behavior and performance.
+LLVM source and MC are the public instruction evidence used here. Every encoded
+instruction needs MC assembly and disassembly coverage. Hardware tests remain
+the authority for runtime behavior and performance.
+
+Triton and Gluon provide compiler prior art, not an ABI dependency. Their
+surface includes high-level descriptors, fused loads, gather/scatter, prefetch,
+barrier signaling, partial tensor waits, and loop-pipelined stores. Late wait
+accounting converts logical operations to emitted TDM instruction counts. Wave
+keeps one TENSOR ticket per emitted instruction; LLVM micro-op count affects
+issue slots, not `s_wait_tensorcnt`.
 
 ## Target Capability Boundary
 
@@ -192,6 +227,54 @@ This work should reuse the declarative WaveAMDMachine MC-emission project.
 Bring-up owns gfx1250 mappings and coverage; it should not create a parallel
 handwritten emitter.
 
+### TDM Transfer ABI
+
+Core Wave IR accepts hardware descriptor groups, not tensor shapes or strides:
+
+| Form | Operands |
+|---|---|
+| D2 | D0: SGPR4, D1: SGPR8 |
+| D4 | D0: SGPR4, D1: SGPR8, D2: SGPR4, D3: SGPR4 |
+
+Tuple widths, register classes, alignment, and named operand positions come
+from LLVM instruction and register metadata. D4 form has exactly D0 through D3.
+LLVM's internal `r128` selector stays zero and never becomes Wave IR or assembly
+syntax.
+
+Descriptor kind, prefetch mode, and cache policy use TableGen enums with
+generated stringify and symbolize helpers. Python static sugar mirrors LLVM's
+public descriptor layout for one issuing wave, including finalized load/store
+padding. Multi-wave or dynamically finalized descriptors enter as raw external
+groups. C++ lowering does not duplicate the descriptor encoder. Packing stays
+structural. No string round-trip.
+
+Grouped issue is sugar. Python builds each member's tuples, selects D0 through
+D3 tuple-wise by uniform predicate, then emits one ordinary TDM transfer. No
+fused Wave or WaveAMDMachine operation. Unsupported group shapes fail before
+selection.
+
+TDM load and store consume a dependency token and produce a completion token.
+The input orders issue. The result denotes TENSOR completion. Load reads global
+memory and writes LDS. Store reads LDS and writes global memory. No implicit
+alias edge or barrier is inferred.
+
+Descriptor-derived prefetch consumes an issue dependency and returns a
+completion-neutral token. It forwards dependency completion events but adds no
+event of its own. It does not issue tensor memory, allocate a TENSOR ticket, or
+require `s_wait_tensorcnt`. Regular and speculative modes remain distinct typed
+values.
+
+MC emission selects LLVM's D2 or D4 opcode from descriptor kind and emits real
+`MCInst` values:
+
+```text
+tensor_load_to_lds
+tensor_store_from_lds
+s_wait_tensorcnt
+```
+
+Assembly keeps transfers and waits visible. No direct ISA text printing.
+
 ### VGPR Addressing Windows
 
 gfx1250 encodes only the low eight bits of each VGPR operand. Four two-bit
@@ -234,10 +317,10 @@ also:
 Emission buffers each function's `MCInst` values, labels, directives, and
 alignment until finalization. The buffered stage inserts the required `s_nop`
 between a MODE write and a following switch before printing. Automatic switch
-insertion and compatible MODE patching remain `.5`. Branches and fallthrough
-labels for uniform conditionals, EXEC conditionals, loops, and DMA-delay
-regions use the same buffer. No later pass may change physical VGPR operands.
-Initial WaveAMDMachine support has no inline-assembly or VOPD producer.
+insertion and compatible MODE patching use this buffered stage. Branches and
+fallthrough labels for uniform conditionals, EXEC conditionals, loops, and
+DMA-delay regions use the same buffer. No later pass may change physical VGPR
+operands. WaveAMDMachine has no inline-assembly or VOPD producer.
 Finalization does not fabricate raw `MCInst` values for absent operations.
 Wave-visible state enums use TableGen-generated stringify and symbolize
 helpers; selector field order otherwise comes directly from LLVM's operand
@@ -305,12 +388,13 @@ LLVM AMDGPU helpers; Wave does not duplicate field widths.
 | LDS | LGKM | DS | none |
 | SMEM | LGKM | KM | X |
 | message | LGKM | KM | none |
+| TDM load or store | unavailable | TENSOR | none |
 
-FLAT, GDS, ASYNC, and TENSOR remain rejected until Wave models every required
-counter and token obligation.
+FLAT, GDS, and ASYNC remain rejected until Wave models every required counter
+and token obligation. TENSOR is legal only for tokenized TDM load and store.
 
-Base bring-up handles LOAD, STORE, DS, KM, and X. ASYNC and TENSOR stay
-unavailable until their operations carry explicit tokens.
+Base memory handles LOAD, STORE, DS, KM, and X. TDM adds TENSOR.
+ASYNC stays unavailable.
 
 Required cases:
 
@@ -318,6 +402,7 @@ Required cases:
 - store token consumers wait on STORE;
 - LDS consumers and barriers wait on DS;
 - scalar-memory consumers wait on KM;
+- TDM completion consumers wait on TENSOR;
 - operations classified by LLVM as X events wait on X;
 - synchronous acquire-release global atomics use LLVM's split-wait, cache
   writeback, returning atomic, and cache-invalidate sequence;
@@ -325,10 +410,20 @@ Required cases:
 - `s_endpgm` provides the implicit terminal STORE drain; pending scratch stores
   forbid early VGPR deallocation.
 
+Each TDM load or store creates one ordered TENSOR ticket. A consumer waits with
+the count of younger live tickets, so independent newer transfers may remain
+in flight. `s_wait_tensorcnt 0` drains all. Nonzero waits are required for
+pipelines. CFG joins and loops retain the oldest required ticket.
+
+Tensor-wait capacity comes from LLVM's AMDGPU counter-width helper. The MC
+operand schema performs final encoding validation. Wave does not duplicate a
+counter maximum or field width. Prefetch creates no TENSOR ticket and cannot
+force a tensor wait.
+
 Combined LOAD+DS and STORE+DS waits are an encoding choice after the semantic
 requirements are known. They are not separate IR semantics. The abstract split
 wait op reaches assembly only through `MCInst`; the emitter prefers LOAD+DS,
-then STORE+DS, and emits remaining counters independently.
+then STORE+DS, and emits remaining counters, including TENSOR, independently.
 
 ## Expert Scheduling Mode 2
 
@@ -367,17 +462,8 @@ hazards. A separate opt-in project must add:
 - entry, call, return, and non-entry transition rules;
 - late wait placement that avoids WMMA coexecution shadows.
 
-Public correctness gaps to account for:
-
-- [LLVM PR 211333](https://github.com/llvm/llvm-project/pull/211333): preserve
-  `vm_vsrc` waits with outstanding async operations and marks;
-- [LLVM PR 211684](https://github.com/llvm/llvm-project/pull/211684): retain soft
-  waits until every loop predecessor has contributed state;
-- [LLVM issue 175248](https://github.com/llvm/llvm-project/issues/175248): hoist
-  dependency waits out of WMMA coexecution shadows.
-
-These do not block normal-mode ASYNC or TENSOR counters. Keep expert mode
-rejected until Wave carries equivalent correctness and placement logic.
+Keep expert mode rejected until Wave carries equivalent async-source,
+loop-join, and WMMA-shadow correctness.
 
 ## Kernel ABI And Entry
 
@@ -469,8 +555,8 @@ Required allocator changes:
 - clamp explicit budgets and fixed base-plus-width ranges to target
   addressability;
 - keep physical indices `0` through `1023` in `RegType`;
-- use gfx1250 even-base alignment for multi-dword tuples instead of
-  `PowerOf2Ceil(width)`;
+- derive every multi-dword tuple's legal bases from LLVM register classes
+  instead of `PowerOf2Ceil(width)`;
 - keep low-256 constraints for `LD_SCALE` and inline-assembly operands;
 - keep the existing low-to-high linear scan so low windows win naturally;
 - keep accumulators in VGPRs and reject AGPR requests;
@@ -491,6 +577,13 @@ High allocation stays disabled until automatic window finalization, MODE
 hazards, block resets, X-counter interaction, and high-water resource reporting
 pass together. Failure then means target occupancy exhausted, index above
 `v1023`, or unsupported operand encoding—not merely crossing `v255`.
+
+TDM descriptors stay in SGPR tuples. Selection reads each LLVM operand's
+register class and constrains D0, D1, D2, and D3 accordingly. Regalloc derives
+legal tuple bases from `MCRegisterInfo`; it does not apply a generic
+power-of-two width rule or add gfx1250 register-count constants. D1 uses the
+LLVM class accepting its eight-register tuple. D0, D2, and D3 use the class
+accepting their four-register tuples.
 
 ## WMMA And Fragment Layouts
 
@@ -540,19 +633,16 @@ Build the exact gfx1250 entry from LLVM subtarget and MC scheduling data:
 - generated tables contain no fallback timing constants and fail closed when a
   required gfx1250 class or resource is absent.
 
-The initial resolved buckets are:
+TDM load and store classify both LDS and VMEM memory paths. The generated
+`WriteTDM` class probes the real LLVM opcode: 320-cycle latency, two micro-ops,
+HWLGKM `[0,1)`, HWVMEM `[0,1)`, and HWRC `[0,2)`. Two SIMD issue slots cover
+that single-wave MC envelope. Memory-path masks do not claim an independent
+gfx1250 port or multi-wave throughput model.
 
-| Class | Cycles |
-|---|---:|
-| f16/bf16 `16x16x32` WMMA, XDL2 | 8 |
-| normal VALU/FMA write | 5 |
-| transcendental write | 8 |
-| SALU write | 2 |
-| LDS | 20 |
-| scalar memory | 20 |
-| VMEM | 320 |
+Prefetch uses its resolved ordinary prefetch resources. It has no TENSOR
+completion event.
 
-These are scheduling inputs, not measured throughput claims.
+Generated tables are scheduling inputs, not measured throughput claims.
 
 Normal-mode hazard repair follows LLVM target features:
 
@@ -601,7 +691,11 @@ The gfx1250 profile contains:
 - f16/bf16 `16x16x32` kinds;
 - K tile 32;
 - VGPR accumulator layout;
-- base-path memory staging;
+- base-path and TDM memory staging;
+- D2/D4 descriptor packing and grouped tuple-selection helpers;
+- static packing limited to one issuing wave, with explicit load/store padding;
+- raw tuple entry for externally finalized descriptors;
+- partial tensor waits and completion-neutral prefetch;
 - occupancy and static-LDS limits.
 
 Auto selection must choose this profile only for exact gfx1250. The current
@@ -623,7 +717,11 @@ Reject unsupported work before final emission. Required diagnostics include:
 - AGPR requested;
 - register index above `v1023` or the occupancy budget;
 - high-VGPR operand without a lowering table;
-- async, tensor, cluster, multicast, named-barrier, or SWMMAC operation used;
+- legacy async, cluster, multicast, named-barrier, or SWMMAC operation used;
+- TDM operation used on another target;
+- D2 with extra groups or D4 without exactly D2 and D3;
+- TDM tuple outside its LLVM operand register class;
+- tensor wait count outside LLVM-reported counter capacity;
 - missing gfx1250 MC opcode mapping;
 - descriptor value outside the target field width.
 
@@ -636,20 +734,26 @@ Reject unsupported work before final emission. Required diagnostics include:
 | machine lowering | operation legality and exact gfx1250 opcode selection |
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
-| waits | independent LOAD/STORE/DS/KM/X, joins, loops, atomics, termination |
+| TDM IR | D2/D4 tuple forms, typed modes, tuple-wise grouped selection, token chains |
+| TDM MC | load/store forms, SGPR tuple classes, visible assembly and disassembly |
+| waits | independent LOAD/STORE/DS/KM/X/TENSOR, nonzero tensor waits, joins, loops, atomics, termination |
+| prefetch | issue ordering without TENSOR tickets or tensor waits |
 | VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, X drains |
 | resources | 32-bank choice, 320 KiB bound, target tuple alignment, and LLVM-reported VGPR limits |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
-| scheduler | generated-table check, XDL2 class, target hazards |
-| Python | exact profile selection and wrong-family rejection |
-| Integration | scalar/vector global, buffer, LDS, SMEM, scratch, high-VGPR CFG, f16 GEMM, bf16 GEMM |
-| hardware | deferred; required before a runtime-correctness claim |
-| measured PerfGolden | deferred; required before a performance claim |
+| scheduler | generated-table check, XDL2 class, TDM WriteTDM/HWLGKM/HWVMEM pressure, target hazards |
+| Python | exact profile selection, descriptor packing, grouped selects, wrong-family rejection |
+| Integration | scalar/vector memory, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
+| hardware | separate runtime-correctness gate |
+| measured PerfGolden | separate performance gate |
 
-MC tests run without hardware. Hardware and measured PerfGolden rows are waived
-for this closeout. Compile-time assembly and disassembly are the only evidence.
+MC tests run without hardware. Hardware and measured PerfGolden rows are
+outside compile-time acceptance. Evidence is limited to verifier and lowering
+tests, MC assembly and disassembly, object linking, and schedule-table
+comparison against LLVM's `llvm-mca` model. No runtime-correctness or
+performance claim.
 
-## Landing Order
+## Dependency Order
 
 1. target capability contract;
 2. gfx12.5 MC emission and buffered VGPR-window finalization;
@@ -660,57 +764,35 @@ for this closeout. Compile-time assembly and disassembly are the only evidence.
 7. f16/bf16 WMMA and fragment layouts;
 8. scheduler and hazard model;
 9. Python profile and GEMM Integration;
-10. integrated-tree audit and epic closure.
+10. integrated-tree validation.
 
 Dependencies form a DAG where ABI and waits can proceed in parallel after MC
 emission. High-VGPR enablement waits for both MC finalization and X-counter
-support. Hardware validation remains deferred.
+support. Runtime validation is a separate dependency.
 
-## Tracked Work
+TDM support divides into three layers:
 
-Epic: `7-gfx1250-wave-backend-bringup-fa4l`
+1. raw tuple IR and Python packing/select sugar;
+2. machine selection, MC emission, tensor waits, and conservative scheduling;
+3. compile-only dialect, Integration, assembly, and disassembly validation.
 
-| Bead | Scope | Blocking dependencies |
-|---|---|---|
-| `.1` | target capability contract | none |
-| `.2` | gfx12.5 MC emission and VGPR-window finalization foundation | `.1` |
-| `.3` | kernel ABI and entry | `.2` |
-| `.4` | split wait counters | `.2` |
-| `.5` | resources, SRDs, full VGPR allocation, and automatic window lowering | `.1`, `.2`, `.4` |
-| `.6` | scalar/vector Integration bring-up | `.3`, `.4`, `.5` |
-| `.7` | f16/bf16 WMMA layouts | `.6` |
-| `.8` | scheduler resources and hazards | `.7` |
-| `.9` | Python profile and GEMM Integration | `.7`, `.8` |
-| `.10` | hardware validation and measured ASM; closed with no-device waiver | `.9` |
-| `.11` | integrated-tree audit and epic closure | `.1` through `.10` |
-| `.12` | typed inline-assembly and VOPD surfaces; closed outside scope | none |
+## Compile-Time Acceptance
 
-`.2` is related to `7-wavemachine-mc-tablegen-s1g6`. `.8` is related to
-`7-amdgpu-scheduler-sy5.9`. Related edges record reuse; they do not block the
-bring-up DAG.
-
-Before each implementation change:
-
-```bash
-cmake --build build --target check-wave-mlir -j $(nproc)
-cmake --build build --target check-wavec -j $(nproc)
-```
-
-Run affected Integration, Target, Python, and PerfGolden tests in addition.
-Final closeout runs full sequential gates, hooks, `git diff --check`, tracker
-sync, and an unchanged regeneration check.
-
-## Compile-Time Completion
-
-Initial compile-time bring-up is complete when:
+Compile-time support is complete when:
 
 - unsupported target-family fallback is impossible;
 - scalar/vector and f16/bf16 GEMM objects assemble and disassemble as gfx1250;
 - all four VGPR windows pass MC, CFG, hazard, resource, and Integration tests;
 - descriptor, waits, resources, and fragments match the LLVM contract;
+- TDM D2/D4 tuples select legal LLVM opcodes and register classes;
+- issue dependencies and completion tokens place zero and nonzero tensor
+  waits correctly;
+- prefetch forwards dependencies without adding a completion event;
+- TDM schedule pressure includes generated WriteTDM, HWLGKM, and HWVMEM data;
+- TDM assembly remains visible and round-trips through LLVM MC;
 - Integration tests compile in normal CI;
 - the integrated tree passes all required gates;
 - remaining advanced features have explicit diagnostics and separate scope.
 
-Runtime correctness and performance remain deferred. This closeout claims no
-CPU-reference agreement or same-hardware benchmark.
+Runtime correctness and performance require CPU-reference agreement and
+same-hardware benchmarks.
