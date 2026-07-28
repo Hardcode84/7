@@ -188,6 +188,17 @@ static Operation *laterOp(Operation *lhs, Operation *rhs) {
   return lhs->isBeforeInBlock(rhs) ? rhs : lhs;
 }
 
+static bool crossesSchedBarrier(Operation *lhs, Operation *rhs) {
+  assert(lhs->getBlock() == rhs->getBlock() && "expected same-block ops");
+  Operation *earlier = lhs->isBeforeInBlock(rhs) ? lhs : rhs;
+  Operation *later = earlier == lhs ? rhs : lhs;
+  for (Operation *op = earlier->getNextNode(); op != later;
+       op = op->getNextNode())
+    if (isa<SchedBarrierOp>(op))
+      return true;
+  return false;
+}
+
 static bool compatibleCastPair(CastOp lo, CastOp hi) {
   return lo.getSource().getType() == hi.getSource().getType() &&
          lo.getResult().getType() == hi.getResult().getType() &&
@@ -292,8 +303,8 @@ private:
   }
 
   bool canFormPackedPair(Operation *lo, Operation *hi) {
-    return compatiblePair(lo, hi) && independentPair(lo, hi) &&
-           isCandidateSupported(lo, capabilities) &&
+    return compatiblePair(lo, hi) && !crossesSchedBarrier(lo, hi) &&
+           independentPair(lo, hi) && isCandidateSupported(lo, capabilities) &&
            isCandidateSupported(hi, capabilities);
   }
 

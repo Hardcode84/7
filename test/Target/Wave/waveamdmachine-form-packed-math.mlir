@@ -1,4 +1,5 @@
 // RUN: wave-opt %s --split-input-file --wave-form-packed-math --waveamd-to-machine | FileCheck %s
+// RUN: wave-opt %s --split-input-file --wave-form-packed-math | FileCheck %s --check-prefix=PACK
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -142,6 +143,64 @@ func.func @gfx950_f32_math_forms(%a0: !wave.simd<f32, 64>,
   %r0 = wave.read_first %m0 : !wave.simd<f32, 64> -> f32
   %r1 = wave.read_first %m1 : !wave.simd<f32, 64> -> f32
   return %r0 : f32
+}
+
+// CHECK-LABEL: func.func @gfx950_sched_barrier_partitions_packing
+// CHECK: waveamdmachine.v_pk_add_f32
+// CHECK: waveamdmachine.sched_barrier
+// CHECK: waveamdmachine.v_pk_add_f32
+// CHECK: return
+// PACK-LABEL: func.func @gfx950_sched_barrier_partitions_packing
+// PACK: [[LEFT:%.*]] = wave.fadd {{.*}} -> !wave.simd<vector<2xf32>, 64>
+// PACK-NEXT: wave.sched_barrier
+// PACK: [[RIGHT:%.*]] = wave.fadd {{.*}} -> !wave.simd<vector<2xf32>, 64>
+// PACK: wave.extract [[LEFT]]
+// PACK: wave.extract [[RIGHT]]
+// PACK: wave.fadd {{.*}} -> !wave.simd<f32, 64>
+// PACK: return
+func.func @gfx950_sched_barrier_partitions_packing(
+    %a0: !wave.simd<f32, 64>, %a1: !wave.simd<f32, 64>,
+    %b0: !wave.simd<f32, 64>, %b1: !wave.simd<f32, 64>,
+    %c0: !wave.simd<f32, 64>, %c1: !wave.simd<f32, 64>,
+    %d0: !wave.simd<f32, 64>, %d1: !wave.simd<f32, 64>) -> f32 {
+  %s0 = wave.fadd %a0, %b0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %p0 = wave.fadd %c0, %d0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  wave.sched_barrier
+  %s1 = wave.fadd %a1, %b1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %p1 = wave.fadd %c1, %d1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %sum = wave.fadd %s0, %s1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %m0 = wave.fmul %sum, %b0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %m1 = wave.fmul %p0, %p1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %r0 = wave.read_first %m0 : !wave.simd<f32, 64> -> f32
+  %r1 = wave.read_first %m1 : !wave.simd<f32, 64> -> f32
+  return %r0 : f32
+}
+
+// PACK-LABEL: func.func @gfx950_sched_barrier_blocks_lone_reduction_pair
+// PACK: [[LEFT:%.*]] = wave.fadd {{.*}} -> !wave.simd<f32, 64>
+// PACK-NEXT: wave.sched_barrier
+// PACK: [[RIGHT:%.*]] = wave.fadd {{.*}} -> !wave.simd<f32, 64>
+// PACK: wave.fadd [[LEFT]], [[RIGHT]]
+// PACK: return
+func.func @gfx950_sched_barrier_blocks_lone_reduction_pair(
+    %a0: !wave.simd<f32, 64>, %a1: !wave.simd<f32, 64>,
+    %b0: !wave.simd<f32, 64>, %b1: !wave.simd<f32, 64>) -> f32 {
+  %s0 = wave.fadd %a0, %b0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  wave.sched_barrier
+  %s1 = wave.fadd %a1, %b1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %sum = wave.fadd %s0, %s1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %result = wave.read_first %sum : !wave.simd<f32, 64> -> f32
+  return %result : f32
 }
 
 }
