@@ -190,6 +190,8 @@ static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
     return InstructionWaitCounterKind::Lgkm;
   case MemoryCounterKind::Vscnt:
     return InstructionWaitCounterKind::Vscnt;
+  case MemoryCounterKind::Async:
+    return InstructionWaitCounterKind::Async;
   case MemoryCounterKind::Tensor:
     return InstructionWaitCounterKind::Tensor;
   case MemoryCounterKind::None:
@@ -198,7 +200,7 @@ static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
   llvm_unreachable("bad memory counter");
 }
 
-static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 10>
+static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 11>
     eventClasses = {
         {{WaitcntEvent::Vmem, InstructionEventClass::VmemLoad},
          {WaitcntEvent::Flat, InstructionEventClass::VmemLoad},
@@ -208,6 +210,7 @@ static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 10>
          {WaitcntEvent::Gds, InstructionEventClass::LdsDs},
          {WaitcntEvent::Message, InstructionEventClass::Message},
          {WaitcntEvent::Smem, InstructionEventClass::Smem},
+         {WaitcntEvent::Async, InstructionEventClass::Async},
          {WaitcntEvent::Tensor, InstructionEventClass::Tensor},
          {WaitcntEvent::None, InstructionEventClass::None}}};
 
@@ -319,6 +322,8 @@ static unsigned counterIndex(InstructionWaitCounterKind kind) {
     return 3;
   case InstructionWaitCounterKind::Tensor:
     return 4;
+  case InstructionWaitCounterKind::Async:
+    return 5;
   case InstructionWaitCounterKind::None:
     break;
   }
@@ -1365,6 +1370,8 @@ InstructionExecutionState::waitcntReadyCycle(SWaitcntSplitOp wait,
       InstructionEventClass::LdsDs};
   static constexpr std::array<InstructionEventClass, 2> kmEvents = {
       InstructionEventClass::Smem, InstructionEventClass::Message};
+  static constexpr std::array<InstructionEventClass, 1> asyncEvents = {
+      InstructionEventClass::Async};
   static constexpr std::array<InstructionEventClass, 1> tensorEvents = {
       InstructionEventClass::Tensor};
 
@@ -1383,6 +1390,9 @@ InstructionExecutionState::waitcntReadyCycle(SWaitcntSplitOp wait,
                      "instruction execution state");
     return failure();
   }
+  if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Async,
+                                      wait.getAsynccnt(), cycle, asyncEvents)))
+    return failure();
   if (failed(combineCounterReadyCycle(ready, InstructionWaitCounterKind::Tensor,
                                       wait.getTensorcnt(), cycle,
                                       tensorEvents)))

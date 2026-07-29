@@ -4279,6 +4279,7 @@ private:
     std::optional<uint32_t> dscnt = wait.getDscnt();
     std::optional<uint32_t> kmcnt = wait.getKmcnt();
     std::optional<uint32_t> xcnt = wait.getXcnt();
+    std::optional<uint32_t> asynccnt = wait.getAsynccnt();
     std::optional<uint32_t> tensorcnt = wait.getTensorcnt();
 
     auto validate = [&](StringRef name, std::optional<uint32_t> count,
@@ -4298,11 +4299,15 @@ private:
                         llvm::AMDGPU::getKmcntBitMask(isaVersion))) ||
         failed(
             validate("xcnt", xcnt, llvm::AMDGPU::getXcntBitMask(isaVersion))) ||
+        failed(validate("asynccnt", asynccnt,
+                        llvm::AMDGPU::getAsynccntBitMask(isaVersion))) ||
         failed(validate("tensorcnt", tensorcnt,
                         waveamdmachine::getAMDGPUTensorcntBitMask(isaVersion))))
       return failure();
     if (xcnt && !hasWaitXcnt())
       return wait.emitError("xcnt unsupported on target");
+    if (asynccnt && !isGfx1250())
+      return wait.emitError("asynccnt requires gfx1250");
     if (tensorcnt && !isGfx1250())
       return wait.emitError("tensorcnt requires gfx1250");
 
@@ -4335,6 +4340,7 @@ private:
         failed(emit(dscnt, llvm::AMDGPU::S_WAIT_DSCNT)) ||
         failed(emit(kmcnt, llvm::AMDGPU::S_WAIT_KMCNT)) ||
         failed(emit(xcnt, llvm::AMDGPU::S_WAIT_XCNT)) ||
+        failed(emit(asynccnt, llvm::AMDGPU::S_WAIT_ASYNCCNT)) ||
         failed(emit(tensorcnt, llvm::AMDGPU::S_WAIT_TENSORCNT)))
       return failure();
     return success();

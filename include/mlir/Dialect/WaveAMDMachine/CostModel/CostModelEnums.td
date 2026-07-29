@@ -147,6 +147,7 @@ def MemoryCounterVmem : I32EnumCase<"Vmem", 1, "vmem">;
 def MemoryCounterLgkm : I32EnumCase<"Lgkm", 2, "lgkm">;
 def MemoryCounterVscnt : I32EnumCase<"Vscnt", 3, "vscnt">;
 def MemoryCounterTensor : I32EnumCase<"Tensor", 4, "tensor">;
+def MemoryCounterAsync : I32EnumCase<"Async", 5, "async">;
 
 def MemoryCounterKindEnum :
     I32Enum<"MemoryCounterKind", "memory completion counter", [
@@ -154,7 +155,8 @@ def MemoryCounterKindEnum :
       MemoryCounterVmem,
       MemoryCounterLgkm,
       MemoryCounterVscnt,
-      MemoryCounterTensor
+      MemoryCounterTensor,
+      MemoryCounterAsync
     ]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }
@@ -165,6 +167,7 @@ def InstructionWaitCounterLgkm : I32EnumCase<"Lgkm", 2, "lgkm">;
 def InstructionWaitCounterVscnt : I32EnumCase<"Vscnt", 3, "vscnt">;
 def InstructionWaitCounterExpcnt : I32EnumCase<"Expcnt", 4, "expcnt">;
 def InstructionWaitCounterTensor : I32EnumCase<"Tensor", 5, "tensor">;
+def InstructionWaitCounterAsync : I32EnumCase<"Async", 6, "async">;
 
 def InstructionWaitCounterKindEnum :
     I32Enum<"InstructionWaitCounterKind", "instruction wait counter", [
@@ -173,7 +176,8 @@ def InstructionWaitCounterKindEnum :
       InstructionWaitCounterLgkm,
       InstructionWaitCounterVscnt,
       InstructionWaitCounterExpcnt,
-      InstructionWaitCounterTensor
+      InstructionWaitCounterTensor,
+      InstructionWaitCounterAsync
     ]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }
@@ -188,6 +192,7 @@ def InstructionEventSmem : I32EnumCase<"Smem", 4, "smem">;
 def InstructionEventMessage : I32EnumCase<"Message", 5, "message">;
 def InstructionEventExport : I32EnumCase<"Export", 6, "export">;
 def InstructionEventTensor : I32EnumCase<"Tensor", 7, "tensor">;
+def InstructionEventAsync : I32EnumCase<"Async", 8, "async">;
 
 def InstructionEventClassEnum :
     I32Enum<"InstructionEventClass", "instruction completion event class", [
@@ -198,7 +203,8 @@ def InstructionEventClassEnum :
       InstructionEventSmem,
       InstructionEventMessage,
       InstructionEventExport,
-      InstructionEventTensor
+      InstructionEventTensor,
+      InstructionEventAsync
     ]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }

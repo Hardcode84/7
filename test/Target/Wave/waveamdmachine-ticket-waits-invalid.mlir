@@ -77,3 +77,24 @@ func.func @split_wait_on_legacy_target() {
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+func.func @async_event_on_legacy_target(
+    %lds: !waveamdmachine.reg<vgpr, 1>,
+    %offset: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>) {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  // expected-error @below {{async wait event unsupported on target}}
+  %loaded = waveamdmachine.global_load_async_to_lds_b8
+      %lds, %offset, %base after %root
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+}

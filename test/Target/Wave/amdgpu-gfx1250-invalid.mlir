@@ -62,6 +62,20 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
+func.func @oversized_async_wait() {
+  // expected-error @below {{asynccnt value 64 exceeds target maximum 63}}
+  waveamdmachine.s_waitcnt_split asynccnt(64)
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
 func.func @old_store_wait() {
   // expected-error @below {{s_waitcnt_vscnt requires split-wait lowering}}
   waveamdmachine.s_waitcnt_vscnt vscnt(0)

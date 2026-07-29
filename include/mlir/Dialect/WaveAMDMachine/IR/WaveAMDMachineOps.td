@@ -1655,6 +1655,7 @@ def WaveAMDMachine_SWaitcntSplitOp
                        OptionalAttr<I32Attr>:$dscnt,
                        OptionalAttr<I32Attr>:$kmcnt,
                        OptionalAttr<I32Attr>:$xcnt,
+                       OptionalAttr<I32Attr>:$asynccnt,
                        OptionalAttr<I32Attr>:$tensorcnt);
   let assemblyFormat = [{
     oilist(`loadcnt` `(` $loadcnt `)`
@@ -1662,6 +1663,7 @@ def WaveAMDMachine_SWaitcntSplitOp
          | `dscnt` `(` $dscnt `)`
          | `kmcnt` `(` $kmcnt `)`
          | `xcnt` `(` $xcnt `)`
+         | `asynccnt` `(` $asynccnt `)`
          | `tensorcnt` `(` $tensorcnt `)`) attr-dict
   }];
 }
@@ -2204,7 +2206,8 @@ class WaveAMDMachine_GlobalLoadAsyncToLdsOp<string mnemonic>
     : WaveAMDMachine_Op<
           mnemonic,
           [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma,
-           WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]> {
+           WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]>,
+      WaveAMDMachine_WaitcntInfo<"Async"> {
   let summary = "gfx1250 async global-to-LDS load";
   let arguments = (ins WaveAMDMachine_VGPR1:$lds_address,
                        WaveAMDMachine_VGPR1:$offset,

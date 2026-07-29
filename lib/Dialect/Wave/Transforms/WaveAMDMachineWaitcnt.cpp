@@ -953,6 +953,8 @@ static unsigned getSplitCounterMax(Counter counter,
     return llvm::AMDGPU::getKmcntBitMask(isa);
   case Counter::X:
     return llvm::AMDGPU::getXcntBitMask(isa);
+  case Counter::Async:
+    return llvm::AMDGPU::getAsynccntBitMask(isa);
   case Counter::Tensor:
     return waveamdmachine::getAMDGPUTensorcntBitMask(isa);
   default:
@@ -1492,12 +1494,13 @@ static void observeRegularWaitcnt(Operation *op, WaitState &state,
     observed.requireDrain(Counter::Vscnt, wait.getVscnt());
   }
   if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntSplitOp>(op)) {
-    const std::array<std::pair<Counter, std::optional<uint32_t>>, 6> counts = {{
+    const std::array<std::pair<Counter, std::optional<uint32_t>>, 7> counts = {{
         {Counter::Load, wait.getLoadcnt()},
         {Counter::Store, wait.getStorecnt()},
         {Counter::Ds, wait.getDscnt()},
         {Counter::Km, wait.getKmcnt()},
         {Counter::X, wait.getXcnt()},
+        {Counter::Async, wait.getAsynccnt()},
         {Counter::Tensor, wait.getTensorcnt()},
     }};
     for (auto [counter, count] : counts)
@@ -1848,7 +1851,7 @@ static void emitWaits(OpBuilder &builder, Operation *op,
     waveamdmachine::SWaitcntSplitOp::create(
         builder, op->getLoc(), attr(Counter::Load), attr(Counter::Store),
         attr(Counter::Ds), attr(Counter::Km), attr(Counter::X),
-        attr(Counter::Tensor));
+        attr(Counter::Async), attr(Counter::Tensor));
     return;
   }
 
@@ -1942,7 +1945,8 @@ static void materializeExpertModeProtocol(func::FuncOp func,
     IntegerAttr zero = builder.getI32IntegerAttr(0);
     waveamdmachine::SWaitcntSplitOp::create(
         builder, func.getLoc(), zero, /*storecnt=*/IntegerAttr(), zero, zero,
-        /*xcnt=*/IntegerAttr(), /*tensorcnt=*/IntegerAttr());
+        /*xcnt=*/IntegerAttr(), /*asynccnt=*/IntegerAttr(),
+        /*tensorcnt=*/IntegerAttr());
     waveamdmachine::SWaitAluOp::create(builder, func.getLoc(), zero, zero,
                                        /*sa_sdst=*/IntegerAttr(),
                                        /*va_sdst=*/IntegerAttr());

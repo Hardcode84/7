@@ -20,6 +20,7 @@ module attributes {
 // ASM-NEXT: s_wait_dscnt 0x3
 // ASM-NEXT: s_wait_kmcnt 0x4
 // ASM-NEXT: s_wait_xcnt 0x5
+// ASM-NEXT: s_wait_asynccnt 0x11
 // ASM-NEXT: s_wait_tensorcnt 0x3f
 // ASM-NEXT: s_wait_loadcnt_dscnt 0x607
 // ASM-NEXT: s_wait_storecnt_dscnt 0x809
@@ -32,6 +33,7 @@ module attributes {
 // DIS-NEXT: s_wait_dscnt 0x3
 // DIS-NEXT: s_wait_kmcnt 0x4
 // DIS-NEXT: s_wait_xcnt 0x5
+// DIS-NEXT: s_wait_asynccnt 0x11
 // DIS-NEXT: s_wait_tensorcnt 0x3f
 // DIS-NEXT: s_wait_loadcnt_dscnt 0x607
 // DIS-NEXT: s_wait_storecnt_dscnt 0x809
@@ -44,6 +46,7 @@ func.func @split_waitcnts() {
   waveamdmachine.s_waitcnt_split dscnt(3)
   waveamdmachine.s_waitcnt_split kmcnt(4)
   waveamdmachine.s_waitcnt_split xcnt(5)
+  waveamdmachine.s_waitcnt_split asynccnt(17)
   waveamdmachine.s_waitcnt_split tensorcnt(63)
   waveamdmachine.s_waitcnt_split loadcnt(6) dscnt(7)
   waveamdmachine.s_waitcnt_split storecnt(8) dscnt(9)

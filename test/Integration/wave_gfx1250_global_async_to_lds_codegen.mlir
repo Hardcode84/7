@@ -12,9 +12,12 @@ module attributes {
 
 // ASM-LABEL: global_async_to_lds_codegen:
 // ASM: global_load_async_to_lds_b8 [[LDS:v[0-9]+]], [[GLOBAL:v[0-9]+]], [[BASE:s\[[0-9]+:[0-9]+\]]]
-// ASM: global_load_async_to_lds_b32 [[LDS]], [[GLOBAL]], [[BASE]]
-// ASM: global_load_async_to_lds_b64 [[LDS]], [[GLOBAL]], [[BASE]]
-// ASM: global_load_async_to_lds_b128 [[LDS]], [[GLOBAL]], [[BASE]]
+// ASM-NEXT: s_wait_asynccnt 0x0
+// ASM-NEXT: global_load_async_to_lds_b32 [[LDS]], [[GLOBAL]], [[BASE]]
+// ASM-NEXT: s_wait_asynccnt 0x0
+// ASM-NEXT: global_load_async_to_lds_b64 [[LDS]], [[GLOBAL]], [[BASE]]
+// ASM-NEXT: s_wait_asynccnt 0x0
+// ASM-NEXT: global_load_async_to_lds_b128 [[LDS]], [[GLOBAL]], [[BASE]]
 func.func @global_async_to_lds_codegen()
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 32, 1, 1>} {

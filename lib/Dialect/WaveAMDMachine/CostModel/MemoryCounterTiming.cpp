@@ -79,7 +79,7 @@ static constexpr std::array<std::pair<WaitcntEvent, MemoryIssueResourceMask>, 9>
 
 static MemoryIssueResourceMask getWaitcntIssueResources(Operation *op) {
   WaitcntInfo info = getWaitcntInfo(op);
-  if (info.event == WaitcntEvent::Tensor) {
+  if (info.event == WaitcntEvent::Async || info.event == WaitcntEvent::Tensor) {
     MemoryIssueResourceMask resources =
         getMemoryIssueResourceMask(MemoryIssueResource::Lds);
     if (op->hasTrait<traits::VMEMLoadOp>())
@@ -104,6 +104,8 @@ static MemoryIssueResourceMask getWaitcntIssueResources(Operation *op) {
 
 MemoryCounterKind getMemoryCounterKind(Operation *op) {
   WaitcntEvent event = getWaitcntInfo(op).event;
+  if (event == WaitcntEvent::Async)
+    return MemoryCounterKind::Async;
   if (event == WaitcntEvent::Tensor)
     return MemoryCounterKind::Tensor;
   static constexpr std::array<std::pair<WaitcntCounter, MemoryCounterKind>, 3>
@@ -140,7 +142,7 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (event == WaitcntEvent::VmemStore || event == WaitcntEvent::ScratchStore)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
-  if (event == WaitcntEvent::Tensor)
+  if (event == WaitcntEvent::Async || event == WaitcntEvent::Tensor)
     return defaultLatency;
   if (isLDSCounterIssuer(op))
     return overrideOrDefault(overrides.lds, arch.ldsCounterLatency == 0
