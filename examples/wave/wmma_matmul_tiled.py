@@ -408,6 +408,13 @@ def _select_matrix_intrinsic(chip: str, requested: str) -> str:
     return str(select_matrix_intrinsic(chip, requested))
 
 
+def _split_barriers_enabled(requested: bool, matrix_intrinsic: str) -> bool:
+    ensure_package_on_path("mlir.dialects.wave_target")
+    from mlir.dialects.wave_target import GFX1250_MATRIX_INTRINSIC
+
+    return requested or matrix_intrinsic == GFX1250_MATRIX_INTRINSIC
+
+
 def _dump_asm(module_text: str, args: argparse.Namespace) -> str:
     return dump_kernel_asm(
         module_text,
@@ -516,7 +523,9 @@ def main(argv: list[str] | None = None) -> int:
         cta_swizzle_xcds=args.cta_swizzle_xcds,
         cta_group_m=args.cta_group_m,
         target_waves=args.target_waves or None,
-        enable_split_barriers=args.enable_split_barriers,
+        enable_split_barriers=_split_barriers_enabled(
+            args.enable_split_barriers, args.matrix_intrinsic
+        ),
         enable_multi_wave_specialization=args.multi_wave_specialize,
         phased_dma_schedule=phased_dma_schedule,
         coalesced_mfma_output=args.coalesced_mfma_output,

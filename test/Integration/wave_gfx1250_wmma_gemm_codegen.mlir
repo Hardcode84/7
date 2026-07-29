@@ -45,6 +45,7 @@
 // F16-IR-LABEL: func.func @wmma_f16_matmul_tiled(
 // F16-IR-SAME: gpu.known_block_size = array<i32: 32, 1, 1>
 // F16-IR-SAME: wave.lds_size = 2048 : i64
+// F16-IR-SAME: waveamdmachine.enable_split_barriers
 // F16-IR: wave.load
 // F16-IR-SAME: !wave.simd<vector<8xi32>, 32>
 // F16-IR: wave.store
@@ -59,6 +60,7 @@
 // BF16-IR-LABEL: func.func @wmma_f16_matmul_tiled(
 // BF16-IR-SAME: gpu.known_block_size = array<i32: 32, 1, 1>
 // BF16-IR-SAME: wave.lds_size = 2048 : i64
+// BF16-IR-SAME: waveamdmachine.enable_split_barriers
 // BF16-IR: wave.load
 // BF16-IR-SAME: !wave.simd<vector<8xi32>, 32>
 // BF16-IR: wave.store

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 _Inputs = tuple[tuple[float, ...], tuple[float, ...]]
 _KERNEL_NAME = "gfx1250_tdm_f16_gemm"
 _GPU_MODULE_NAME = "kernels"
+_ENABLE_SPLIT_BARRIERS_ATTR = "waveamdmachine.enable_split_barriers"
 
 
 @dataclass(frozen=True)
@@ -383,6 +384,7 @@ def build_gfx1250_tdm_f16_gemm_module(
         GFX1250_CHIP,
         require_matmul_target_profile,
     )
+    from mlir.ir import UnitAttr
 
     profile = require_matmul_target_profile(GFX1250_CHIP)
     mma = profile.mma("f16")
@@ -411,6 +413,7 @@ def build_gfx1250_tdm_f16_gemm_module(
                 [w.i64(), w.i64(), w.i64()],
                 lds_size=config.lds_bytes,
                 workgroup_size=[config.wave_size, 1, 1],
+                attrs={_ENABLE_SPLIT_BARRIERS_ATTR: UnitAttr.get()},
             ) as kernel,
         ):
             _emit_kernel(kernel, config, M, N, K)
