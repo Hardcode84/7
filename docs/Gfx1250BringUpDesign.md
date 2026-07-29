@@ -518,6 +518,11 @@ Expert scheduling mode 2 is separate from LLVM's gfx1250 coexecution scheduler:
 Neither enables the other. Attribute absence keeps normal mode. Coexecution
 scheduling and split completion waits do not require expert mode.
 
+`waveamd.set_priority_inc_wg` selects the distinct
+`waveamdmachine.s_setprio_inc_wg` operation only under the expert-mode
+attribute. LLVM opcode availability gates selection and MC emission.
+`waveamd.set_priority` always remains ordinary `s_setprio`.
+
 Expert mode makes the compiler track physical-VGPR hazards that normal hardware
 mode handles. LLVM maintains software `VA_VDST_RD` and `VA_VDST_WR` scores over
 one hardware `VA_VDST` field, plus `VM_VSRC`. It classifies:

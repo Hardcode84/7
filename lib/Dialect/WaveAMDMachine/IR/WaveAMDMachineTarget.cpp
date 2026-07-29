@@ -378,6 +378,8 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
       sti.hasFeature(llvm::AMDGPU::Feature1024AddressableVGPRs);
   capabilities.setregVGPRMSBFixup =
       sti.hasFeature(llvm::AMDGPU::FeatureSetregVGPRMSBFixup);
+  capabilities.setPrioIncWg = isAMDGPUOpcodeAvailable(
+      llvm::AMDGPU::S_SETPRIO_INC_WG, sti.getFeatureBits());
   capabilities.transCoexecutionHazard =
       sti.hasFeature(llvm::AMDGPU::FeatureTransCoexecutionHazard);
   capabilities.wmmaCoexecutionHazard =

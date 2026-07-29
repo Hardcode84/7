@@ -310,6 +310,7 @@ public:
   bool lastDmaHadIssueDelay = false;
   bool packedWorkitemIds = false;
   bool rejectLegacyVMemToLDS = false;
+  bool setPrioIncWg = false;
 
   // ---- address-planning helpers -----------------------------------------
   void appendBindingAssumptions(Value binding, StringRef name,
@@ -403,6 +404,7 @@ public:
   LogicalResult selectMakeBuffer(waveamd::MakeBufferOp op);
   LogicalResult selectSchedBarrier(SchedBarrierOp op);
   LogicalResult selectSetPriority(waveamd::SetPriorityOp op);
+  LogicalResult selectSetPriorityIncWg(waveamd::SetPriorityIncWgOp op);
   LogicalResult selectToken(TokenOp op);
   LogicalResult selectIssueToken(IssueTokenOp op);
   LogicalResult selectTokenJoin(Operation *op);

@@ -113,6 +113,16 @@ def test_set_priority():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_set_priority_inc_wg
+@run
+def test_set_priority_inc_wg():
+    with w.module() as m:
+        with m.function("set_priority_inc_wg_kernel", [], kernel=True) as f:
+            f.set_priority_inc_wg(100)
+        # CHECK: waveamd.set_priority_inc_wg 100
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_generic_wave_kernel_attrs
 @run
 def test_generic_wave_kernel_attrs():

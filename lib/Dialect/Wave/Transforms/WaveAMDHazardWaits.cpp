@@ -2325,10 +2325,11 @@ private:
             waveamdmachine::SBarrierSignalIsFirstOp,
             waveamdmachine::SBarrierSignalOp, waveamdmachine::SBarrierWaitOp,
             waveamdmachine::SBarrierOp, waveamdmachine::SSetprioOp,
-            waveamdmachine::SNopOp, waveamdmachine::SDelayAluOp,
-            waveamdmachine::SAndSaveexecB32Op, waveamdmachine::SAndn2ExecB32Op,
-            waveamdmachine::SAndSaveexecB64Op, waveamdmachine::SAndn2ExecB64Op,
-            waveamdmachine::SMovExecLoOp, waveamdmachine::SMovExecB64Op,
+            waveamdmachine::SSetprioIncWgOp, waveamdmachine::SNopOp,
+            waveamdmachine::SDelayAluOp, waveamdmachine::SAndSaveexecB32Op,
+            waveamdmachine::SAndn2ExecB32Op, waveamdmachine::SAndSaveexecB64Op,
+            waveamdmachine::SAndn2ExecB64Op, waveamdmachine::SMovExecLoOp,
+            waveamdmachine::SMovExecB64Op,
             waveamdmachine::SSendmsgDeallocVgprsOp, waveamdmachine::SEndpgmOp,
             waveamdmachine::SSetpcB64Op>(op))
       return true;

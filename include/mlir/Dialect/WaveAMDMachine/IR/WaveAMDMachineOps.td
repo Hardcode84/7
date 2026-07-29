@@ -1759,6 +1759,12 @@ def WaveAMDMachine_SSleepOp
 def WaveAMDMachine_SSetprioOp : WaveAMDMachine_UnaryNoResult<"s_setprio",
                                                              WaveAMDMachine_Imm,
                                                              [WaveAMDMachine_SALU]>;
+def WaveAMDMachine_SSetprioIncWgOp
+    : WaveAMDMachine_Op<"s_setprio_inc_wg", [WaveAMDMachine_SALU]> {
+  let arguments = (ins I16Attr:$imm);
+  let assemblyFormat = "$imm attr-dict";
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
 def WaveAMDMachine_SSetregImm32B32Op
     : WaveAMDMachine_Op<"s_setreg_imm32_b32", [WaveAMDMachine_SALU]> {
   let arguments = (ins I64Attr:$imm, I32Attr:$hwreg,

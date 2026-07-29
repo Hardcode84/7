@@ -609,3 +609,17 @@ func.func @unmaterialized_cluster_barrier() {
 }
 
 }
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"
+} {
+
+func.func @unsupported_set_priority_inc_wg() {
+  // expected-error @below {{s_setprio_inc_wg unsupported on target}}
+  waveamdmachine.s_setprio_inc_wg 100
+  return
+}
+
+}

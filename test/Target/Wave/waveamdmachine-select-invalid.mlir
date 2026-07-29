@@ -789,3 +789,26 @@ func.func @global_loop_dynamic_carry_negative_rejected(%out: !wave.ptr<#wave.glo
   return
 }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+func.func @set_priority_inc_wg_requires_expert_mode() attributes {wave.kernel} {
+  // expected-error @below {{requires unit function attribute waveamdmachine.expert_scheduling_mode}}
+  waveamd.set_priority_inc_wg 100
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @set_priority_inc_wg_requires_target_support() attributes {
+    wave.kernel,
+    waveamdmachine.expert_scheduling_mode
+  } {
+  // expected-error @below {{unsupported on WaveAMDMachine target}}
+  waveamd.set_priority_inc_wg 100
+  return
+}
+}

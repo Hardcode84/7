@@ -46,6 +46,16 @@ def WaveAMD_SetPriorityOp : WaveAMD_Op<"set_priority"> {
   let assemblyFormat = "$priority attr-dict";
 }
 
+def WaveAMD_SetPriorityIncWgOp : WaveAMD_Op<"set_priority_inc_wg"> {
+  let summary = "change AMD wave priority and increment workgroup priority";
+  let description = [{
+    Selects `s_setprio_inc_wg` for functions opting into expert scheduling.
+    Ordinary `set_priority` remains `s_setprio`.
+  }];
+  let arguments = (ins I16Attr:$imm);
+  let assemblyFormat = "$imm attr-dict";
+}
+
 def WaveAMD_GlobalAtomicAddAcqRelOp
     : WaveAMD_Op<"global_atomic_add_acq_rel"> {
   let summary = "agent-scoped acquire-release global atomic add";

@@ -1980,6 +1980,10 @@ class FunctionBuilder:
         """Set hardware issue priority for the current wave."""
         waveamd.SetPriorityOp(priority)
 
+    def set_priority_inc_wg(self, imm: int) -> None:
+        """Change wave priority and increment workgroup priority."""
+        waveamd.SetPriorityIncWgOp(imm)
+
     def global_atomic_add_acq_rel(
         self, ptr: Value, value: Value, *, after: Value | None = None
     ) -> tuple[Value, Value]:

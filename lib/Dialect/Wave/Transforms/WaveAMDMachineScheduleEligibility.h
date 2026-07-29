@@ -24,11 +24,12 @@ static inline bool isWaveAMDMachineOpForScheduling(Operation *op) {
 }
 
 static inline bool isSchedulerRegionBoundary(Operation *op) {
-  return isa<waveamdmachine::SchedBarrierOp, waveamdmachine::SSetprioOp>(op);
+  return isa<waveamdmachine::SchedBarrierOp, waveamdmachine::SSetprioOp,
+             waveamdmachine::SSetprioIncWgOp>(op);
 }
 
 static inline bool isPinnedSchedulerBoundary(Operation *op) {
-  return isa<waveamdmachine::SSetprioOp>(op);
+  return isa<waveamdmachine::SSetprioOp, waveamdmachine::SSetprioIncWgOp>(op);
 }
 
 static inline bool isSupportedSchedulerPseudo(Operation *op) {
@@ -71,8 +72,9 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
              waveamdmachine::SFf1I32B64Op, waveamdmachine::SFlbitI32B32Op,
              waveamdmachine::SFlbitI32B64Op, waveamdmachine::SOrB32Op,
              waveamdmachine::SOrB64Op, waveamdmachine::SReadVccB32Op,
-             waveamdmachine::SSetprioOp, waveamdmachine::SClusterIdXOp,
-             waveamdmachine::SClusterIdYOp, waveamdmachine::SClusterIdZOp,
+             waveamdmachine::SSetprioOp, waveamdmachine::SSetprioIncWgOp,
+             waveamdmachine::SClusterIdXOp, waveamdmachine::SClusterIdYOp,
+             waveamdmachine::SClusterIdZOp,
              waveamdmachine::SClusterWorkgroupIdXOp,
              waveamdmachine::SClusterWorkgroupIdYOp,
              waveamdmachine::SClusterWorkgroupIdZOp,

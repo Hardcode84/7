@@ -82,6 +82,7 @@ struct AMDGPUTargetCapabilities {
   bool waitXcnt = false;
   bool vgprWindowing = false;
   bool setregVGPRMSBFixup = false;
+  bool setPrioIncWg = false;
   bool transCoexecutionHazard = false;
   bool wmmaCoexecutionHazard = false;
   bool scratchBaseForwardingHazard = false;

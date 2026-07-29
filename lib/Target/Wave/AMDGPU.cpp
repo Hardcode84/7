@@ -1072,6 +1072,9 @@ private:
   unsigned sSetVgprMsb() const {
     return postVIOpcode(llvm::AMDGPU::S_SET_VGPR_MSB);
   }
+  unsigned sSetprioIncWg() const {
+    return postVIOpcode(llvm::AMDGPU::S_SETPRIO_INC_WG);
+  }
   unsigned sClause() const { return postVIOpcode(llvm::AMDGPU::S_CLAUSE); }
   unsigned sWaitXcnt() const { return postVIOpcode(llvm::AMDGPU::S_WAIT_XCNT); }
 
@@ -5637,6 +5640,16 @@ private:
       return emitMCValues(sSleep(), op.getOperands());
     if (isa<waveamdmachine::SSetprioOp>(op))
       return emitMCValues(sSetprio(), op.getOperands());
+    if (auto setprio = dyn_cast<waveamdmachine::SSetprioIncWgOp>(op)) {
+      if (!waveamdmachine::SSetprioIncWgOp::isSupportedOnIsa(isaVersion) ||
+          !waveamdmachine::isAMDGPUOpcodeAvailable(
+              llvm::AMDGPU::S_SETPRIO_INC_WG, sti->getFeatureBits()))
+        return op.emitError("s_setprio_inc_wg unsupported on target");
+      return emitNamedMC(sSetprioIncWg(), llvm::AMDGPU::S_SETPRIO_INC_WG,
+                         {{llvm::AMDGPU::OpName::simm16,
+                           llvm::MCOperand::createImm(setprio.getImm())}},
+                         "s_setprio_inc_wg");
+    }
     if (auto setreg = dyn_cast<waveamdmachine::SSetregImm32B32Op>(op)) {
       if (!waveamdmachine::SSetregImm32B32Op::isSupportedOnIsa(isaVersion))
         return op.emitError("s_setreg_imm32_b32 unsupported on target");

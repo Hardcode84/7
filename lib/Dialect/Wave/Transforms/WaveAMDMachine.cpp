@@ -517,6 +517,7 @@ struct MachineSelectionTargetInfo {
   waveamdmachine::MatrixFamily matrixFamily =
       waveamdmachine::MatrixFamily::None;
   bool clusters = false;
+  bool setPrioIncWg = false;
   bool rejectLegacyVMemToLDS = false;
 };
 
@@ -547,9 +548,14 @@ getMachineSelectionTargetInfo(func::FuncOp func, ModuleOp targetModule) {
       capabilities ? capabilities->bufferResourceBaseBits : 0;
   bool clusters = capabilities && capabilities->clusters &&
                   target->kind == llvm::AMDGPU::GK_GFX1250;
-  return MachineSelectionTargetInfo{
-      std::move(*target), *wavefrontSize, bufferResourceBaseBits,
-      matrixFamily,       clusters,       llvm::AMDGPU::isGFX1250(*sti)};
+  bool setPrioIncWg = capabilities && capabilities->setPrioIncWg;
+  return MachineSelectionTargetInfo{std::move(*target),
+                                    *wavefrontSize,
+                                    bufferResourceBaseBits,
+                                    matrixFamily,
+                                    clusters,
+                                    setPrioIncWg,
+                                    llvm::AMDGPU::isGFX1250(*sti)};
 }
 
 static LogicalResult configureMachineSelectionClusterDims(
@@ -587,6 +593,7 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   selector.bufferResourceBaseBits = targetInfo->bufferResourceBaseBits;
   selector.matrixFamily = targetInfo->matrixFamily;
   selector.rejectLegacyVMemToLDS = targetInfo->rejectLegacyVMemToLDS;
+  selector.setPrioIncWg = targetInfo->setPrioIncWg;
   if (failed(configureMachineSelectionClusterDims(selector, *targetInfo)))
     return failure();
   FailureOr<MachineSelectionFunctionFacts> facts =
@@ -2885,6 +2892,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
       .Case<waveamd::SetPriorityOp>(
           [&](auto o) { return selectSetPriority(o); })
+      .Case<waveamd::SetPriorityIncWgOp>(
+          [&](auto o) { return selectSetPriorityIncWg(o); })
       .Case<waveamd::GlobalAtomicAddAcqRelOp>(
           [&](auto o) { return selectGlobalAtomicAddAcqRel(*this, o); })
       .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
@@ -7421,6 +7430,20 @@ LogicalResult
 WaveAMDMachineSelector::selectSetPriority(waveamd::SetPriorityOp op) {
   Value priority = createImm(builder, op.getLoc(), op.getPriority());
   waveamdmachine::SSetprioOp::create(builder, op.getLoc(), priority);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectSetPriorityIncWg(waveamd::SetPriorityIncWgOp op) {
+  StringRef expertAttr = waveamdmachine::getExpertSchedulingModeAttrName();
+  if (!isa_and_nonnull<UnitAttr>(func->getAttr(expertAttr)))
+    return op.emitOpError()
+           << "requires unit function attribute " << expertAttr;
+  if (!setPrioIncWg)
+    return op.emitOpError("unsupported on WaveAMDMachine target");
+  waveamdmachine::SSetprioIncWgOp::create(builder, op.getLoc(),
+                                          op.getImmAttr());
   eraseIfTopLevel(op);
   return success();
 }

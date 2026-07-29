@@ -58,8 +58,7 @@ static bool isBarrierClassOp(Operation *op) {
 }
 
 static SchedClass classifyMappedOp(Operation *op) {
-  // Trait pre-filter for two large categories: ops that do not advance
-  // instruction-distance hazards and the full VMEM load/store family.
+  // Traits cover no-inst and memory families.
   if (op->hasTrait<traits::NoMachineInst>())
     return SchedClass::NoInst;
   if (op->hasTrait<traits::TensorMemoryOp>())
@@ -147,8 +146,9 @@ static SchedClass classifyMappedOp(Operation *op) {
             SFf1I32B64Op,
             SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SOrB64Op,
             SReadVccB32Op,
-            SSendmsgDeallocVgprsOp, SSetprioOp, SGetregShaderCyclesOp,
-            SGetregHwIdOp, SSetSchedulingModeOp, SXorB32Op, SXorB64Op>(
+            SSendmsgDeallocVgprsOp, SSetprioOp, SSetprioIncWgOp,
+            SGetregShaderCyclesOp, SGetregHwIdOp, SSetSchedulingModeOp,
+            SXorB32Op, SXorB64Op>(
           [](auto) { return SchedClass::WriteSALU; })
       .Default([](Operation *op) {
         if (op->hasTrait<traits::VALUOp>())
