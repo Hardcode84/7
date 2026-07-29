@@ -1,8 +1,8 @@
 // RUN: wave-opt %s --waveamd-split-barriers --verify-diagnostics
 
 // expected-error @below {{waveamd-split-barriers unsupported target}}
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
-  func.func @rejects_enabled_split_barriers()
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+  func.func @rejects_unsupported_target()
       attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>,
                   wave.waves_per_workgroup = 8 : i64,
                   waveamdmachine.enable_split_barriers} {

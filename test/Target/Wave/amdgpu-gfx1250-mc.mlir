@@ -155,6 +155,34 @@ func.func @memory_and_sync() {
   return
 }
 
+// ASM-LABEL: split_barrier_phases:
+// ASM: s_barrier_signal -1
+// ASM-NEXT: v_add_nc_u32_e32 v2, v0, v1
+// ASM-NEXT: s_barrier_wait -1
+// ASM-NEXT: s_endpgm
+// DIS-LABEL: <split_barrier_phases>:
+// DIS: s_barrier_signal -1
+// DIS-NEXT: v_add_nc_u32_e32 v2, v0, v1
+// DIS-NEXT: s_barrier_wait 0xffff
+// DIS-NEXT: s_endpgm
+func.func @split_barrier_phases() {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %signal = waveamdmachine.s_barrier_signal %root
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1, 1>
+  %sum = waveamdmachine.v_add_u32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<vgpr, 1, 2>
+  %wait = waveamdmachine.s_barrier_wait %signal
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ASM-LABEL: exact_extensions:
 // ASM: v_cvt_pk_rtz_f16_f32_e32 v3, v0, v1
 // ASM: v_pk_add_f16 v4, v3, v0

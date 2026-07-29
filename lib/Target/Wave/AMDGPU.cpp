@@ -5711,12 +5711,32 @@ private:
       return emitDsStore(op, dsWriteB96());
     if (isa<waveamdmachine::DsStoreB128Op>(op))
       return emitDsStore(op, dsWriteB128());
+    if (isa<waveamdmachine::SBarrierSignalOp>(op)) {
+      if (!waveamdmachine::SBarrierSignalOp::isSupportedOnIsa(isaVersion) ||
+          !waveamdmachine::isAMDGPUOpcodeAvailable(
+              llvm::AMDGPU::S_BARRIER_SIGNAL_IMM, sti->getFeatureBits()))
+        return op.emitError("s_barrier_signal unsupported on target");
+      return emitMC(
+          postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM),
+          {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)});
+    }
+    if (isa<waveamdmachine::SBarrierWaitOp>(op)) {
+      if (!waveamdmachine::SBarrierWaitOp::isSupportedOnIsa(isaVersion) ||
+          !waveamdmachine::isAMDGPUOpcodeAvailable(llvm::AMDGPU::S_BARRIER_WAIT,
+                                                   sti->getFeatureBits()))
+        return op.emitError("s_barrier_wait unsupported on target");
+      return emitMC(
+          postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT),
+          {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)});
+    }
     if (isa<waveamdmachine::SBarrierOp>(op) && isGfx1250()) {
-      if (failed(emitMC(postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM),
-                        {llvm::MCOperand::createImm(-1)})))
+      if (failed(emitMC(
+              postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM),
+              {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)})))
         return failure();
-      return emitMC(postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT),
-                    {llvm::MCOperand::createImm(-1)});
+      return emitMC(
+          postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT),
+          {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)});
     }
     if (isa<waveamdmachine::SBarrierOp>(op))
       return emitMC(sBarrier(), {});

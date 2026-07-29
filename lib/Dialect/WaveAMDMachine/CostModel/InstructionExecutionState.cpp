@@ -500,7 +500,7 @@ bool isInstructionExecutionStateArchSupported(
 bool waitsForMemoryTokenDepsBeforeIssue(Operation *op) {
   if (!hasMemoryTokenOperand(op))
     return false;
-  if (isa<SBarrierOp, BarrierArriveOp>(op))
+  if (isa<SBarrierOp, SBarrierSignalOp, BarrierArriveOp>(op))
     return true;
   if (op->hasTrait<traits::LDSDmaOp>())
     return true;

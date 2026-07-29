@@ -3505,6 +3505,27 @@ def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
+def WaveAMDMachine_SBarrierSignalOp
+    : WaveAMDMachine_Op<"s_barrier_signal"> {
+  let summary = "signal default workgroup barrier";
+  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $dependencies attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_SBarrierWaitOp : WaveAMDMachine_Op<"s_barrier_wait"> {
+  let summary = "wait on default workgroup barrier";
+  let arguments = (ins WaveAMDMachine_MemToken:$arrival);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $arrival attr-dict `:` functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
 //===----------------------------------------------------------------------===//
 // Scalar ALU + branches (used by structured uniform loops)
 //===----------------------------------------------------------------------===//

@@ -84,7 +84,7 @@ static SchedClass classifyMappedOp(Operation *op) {
             UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       // Barrier.
-      .Case<BarrierWaitOp, SBarrierOp>(
+      .Case<BarrierWaitOp, SBarrierSignalOp, SBarrierWaitOp, SBarrierOp>(
           [](auto) { return SchedClass::WriteBarrier; })
       .Case<SWaitAluOp>(
           [](auto) { return SchedClass::WaitcntPseudo; })

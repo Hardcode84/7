@@ -550,7 +550,7 @@ static LogicalResult validateMultiWaveProgramOp(Operation *op) {
   if (op->getNumRegions() != 0)
     return op->emitOpError(
         "multi-wave event simulation requires linear machine control flow");
-  if (isa<SBarrierOp, BarrierWaitOp>(op))
+  if (isa<SBarrierOp, SBarrierWaitOp, BarrierWaitOp>(op))
     return op->emitOpError(
         "multi-wave event simulation does not model wave rendezvous");
   return success();

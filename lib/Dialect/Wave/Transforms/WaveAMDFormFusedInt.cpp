@@ -208,10 +208,10 @@ static bool isScalarAddBaseHardBoundary(Operation *op) {
     return true;
   if (op->hasTrait<traits::WritesExecOp>())
     return true;
-  return isa<LabelOp, SBarrierOp, SSetprioOp, SCBranchExeczOp, SCBranchScc0Op,
-             SCBranchScc1Op, SAndSaveexecB32Op, SAndn2ExecB32Op,
-             SAndSaveexecB64Op, SAndn2ExecB64Op, SMovExecLoOp, SMovExecB64Op,
-             SEndpgmOp, SSetpcB64Op>(op);
+  return isa<LabelOp, SBarrierSignalOp, SBarrierWaitOp, SBarrierOp, SSetprioOp,
+             SCBranchExeczOp, SCBranchScc0Op, SCBranchScc1Op, SAndSaveexecB32Op,
+             SAndn2ExecB32Op, SAndSaveexecB64Op, SAndn2ExecB64Op, SMovExecLoOp,
+             SMovExecB64Op, SEndpgmOp, SSetpcB64Op>(op);
 }
 
 struct ScalarAddBaseCandidate {

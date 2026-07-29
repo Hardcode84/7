@@ -798,7 +798,8 @@ static OpKind classifyOp(Operation *op) {
     return OpKind::Barrier;
   if (isMemoryIssuer(op))
     return OpKind::Issuer;
-  if (llvm::isa<waveamdmachine::SBarrierOp>(op))
+  if (llvm::isa<waveamdmachine::SBarrierOp, waveamdmachine::SBarrierSignalOp,
+                waveamdmachine::SBarrierWaitOp>(op))
     return OpKind::Barrier;
   if (std::optional<OpKind> kind = classifyProtocolOp(op))
     return *kind;
@@ -1435,13 +1436,13 @@ static bool implicitlyDrainsXcnt(Operation *op) {
     return true;
   if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
     return static_cast<bool>(loop.getEntryCond());
-  return llvm::isa<waveamdmachine::BarrierArriveOp,
-                   waveamdmachine::BarrierWaitOp, waveamdmachine::SBarrierOp,
-                   waveamdmachine::SEndpgmOp, waveamdmachine::SGetregHwIdOp,
-                   waveamdmachine::SGetregShaderCyclesOp,
-                   waveamdmachine::SSendmsgDeallocVgprsOp,
-                   waveamdmachine::SSetpcB64Op, waveamdmachine::SSetVgprMsbOp>(
-      op);
+  return llvm::isa<
+      waveamdmachine::BarrierArriveOp, waveamdmachine::BarrierWaitOp,
+      waveamdmachine::SBarrierSignalOp, waveamdmachine::SBarrierWaitOp,
+      waveamdmachine::SBarrierOp, waveamdmachine::SEndpgmOp,
+      waveamdmachine::SGetregHwIdOp, waveamdmachine::SGetregShaderCyclesOp,
+      waveamdmachine::SSendmsgDeallocVgprsOp, waveamdmachine::SSetpcB64Op,
+      waveamdmachine::SSetVgprMsbOp>(op);
 }
 
 static unsigned getExpertCounterMax(ExpertCounter counter) {

@@ -111,8 +111,7 @@ struct WaveAMDSplitBarriersPass
         waveamdmachine::getAMDGPUTarget(root, "waveamd-split-barriers");
     if (failed(target))
       return signalPassFailure();
-    if (target->kind == llvm::AMDGPU::GK_GFX1250 ||
-        !waveamdmachine::isArchSupported(target->isa)) {
+    if (!waveamdmachine::isArchSupported(target->isa)) {
       root->emitError("waveamd-split-barriers unsupported target");
       return signalPassFailure();
     }

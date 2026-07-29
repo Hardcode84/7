@@ -26,4 +26,20 @@ func.func @split_barrier_ops() {
   return
 }
 
+// ROUNDTRIP-LABEL: func.func @native_split_barrier_ops(
+// ROUNDTRIP: [[ROOT:%.*]] = waveamdmachine.token
+// ROUNDTRIP-NEXT: [[SIGNAL:%.*]] = waveamdmachine.s_barrier_signal [[ROOT]]
+// ROUNDTRIP-NEXT: [[WAIT:%.*]] = waveamdmachine.s_barrier_wait [[SIGNAL]]
+// ROUNDTRIP-NEXT: waveamdmachine.token_join [[WAIT]]
+func.func @native_split_barrier_ops() {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %signal = waveamdmachine.s_barrier_signal %root
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %wait = waveamdmachine.s_barrier_wait %signal
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %joined = waveamdmachine.token_join %wait
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
 }

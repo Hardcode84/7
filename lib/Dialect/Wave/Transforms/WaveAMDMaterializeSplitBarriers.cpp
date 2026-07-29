@@ -8,14 +8,17 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "WaveAMDSplitBarrierEligibility.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 
 #include <limits>
 #include <optional>
@@ -620,6 +623,130 @@ validateArriveWaitPairs(ArrayRef<waveamdmachine::BarrierArriveOp> arrives,
   return success();
 }
 
+static FailureOr<bool> supportsNativeSplitBarriers(func::FuncOp func) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      waveamdmachine::getAMDGPUTargetIsaVersion(
+          func, "waveamd-materialize-split-barriers");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::SBarrierSignalOp::isSupportedOnIsa(*isa) ||
+      !waveamdmachine::SBarrierWaitOp::isSupportedOnIsa(*isa))
+    return false;
+
+  FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
+      waveamdmachine::createAMDGPUMCSubtargetInfo(
+          func, "waveamd-materialize-split-barriers");
+  if (failed(sti))
+    return failure();
+  const llvm::FeatureBitset &features = (*sti)->getFeatureBits();
+  return waveamdmachine::isAMDGPUOpcodeAvailable(
+             llvm::AMDGPU::S_BARRIER_SIGNAL_IMM, features) &&
+         waveamdmachine::isAMDGPUOpcodeAvailable(llvm::AMDGPU::S_BARRIER_WAIT,
+                                                 features);
+}
+
+static bool isBarrierProtocolOp(Operation *op) {
+  return isa<waveamdmachine::BarrierArriveOp, waveamdmachine::BarrierWaitOp,
+             waveamdmachine::SBarrierSignalOp, waveamdmachine::SBarrierWaitOp,
+             waveamdmachine::SBarrierOp>(op);
+}
+
+static Operation *findNativeBarrierConflict(Operation *root) {
+  Operation *conflict = nullptr;
+  WalkResult result = root->walk([&](Operation *op) {
+    if (!isBarrierProtocolOp(op) && !isa<CallOpInterface>(op))
+      return WalkResult::advance();
+    conflict = op;
+    return WalkResult::interrupt();
+  });
+  return result.wasInterrupted() ? conflict : nullptr;
+}
+
+static LogicalResult
+validateNativeBarrierHandles(ArrayRef<waveamdmachine::BarrierInitOp> inits,
+                             ArrayRef<waveamdmachine::BarrierArriveOp> arrives,
+                             ArrayRef<waveamdmachine::BarrierWaitOp> waits) {
+  DenseSet<Value> handles;
+  DenseSet<Operation *> protocolOps;
+  for (waveamdmachine::BarrierInitOp init : inits)
+    handles.insert(init.getBarrier());
+  for (waveamdmachine::BarrierArriveOp arrive : arrives) {
+    protocolOps.insert(arrive.getOperation());
+    if (!handles.contains(arrive.getBarrier()))
+      return arrive.emitError(
+          "native split barrier requires a local barrier_init");
+  }
+  for (waveamdmachine::BarrierWaitOp wait : waits)
+    protocolOps.insert(wait.getOperation());
+  for (waveamdmachine::BarrierInitOp init : inits)
+    for (Operation *user : init->getUsers())
+      if (!protocolOps.contains(user))
+        return init.emitError(
+            "native split barrier handle has unsupported use");
+  return success();
+}
+
+static LogicalResult
+validateNativeBarrierPair(waveamdmachine::BarrierWaitOp wait) {
+  FailureOr<waveamdmachine::BarrierArriveOp> arrive = getMatchingArrive(wait);
+  if (failed(arrive))
+    return failure();
+  waveamdmachine::BarrierArriveOp matchingArrive = *arrive;
+  Operation *arriveOp = matchingArrive.getOperation();
+  if (!matchingArrive.getTicket().hasOneUse())
+    return matchingArrive.emitError(
+        "native split barrier ticket must only feed barrier_wait");
+  if (arriveOp->getBlock() != wait->getBlock() ||
+      !arriveOp->isBeforeInBlock(wait))
+    return wait.emitError("native split barrier pair must share ordered block");
+  for (Operation *op = arriveOp->getNextNode(); op != wait.getOperation();
+       op = op->getNextNode()) {
+    Operation *conflict = findNativeBarrierConflict(op);
+    if (!conflict)
+      continue;
+    if (isa<CallOpInterface>(conflict))
+      return conflict->emitError(
+          "native split barrier pair cannot cross a call");
+    return conflict->emitError("native workgroup barrier pairs overlap");
+  }
+  return success();
+}
+
+static LogicalResult
+validateNativeSplitBarriers(ArrayRef<waveamdmachine::BarrierInitOp> inits,
+                            ArrayRef<waveamdmachine::BarrierArriveOp> arrives,
+                            ArrayRef<waveamdmachine::BarrierWaitOp> waits) {
+  if (failed(validateNativeBarrierHandles(inits, arrives, waits)))
+    return failure();
+  for (waveamdmachine::BarrierWaitOp wait : waits)
+    if (failed(validateNativeBarrierPair(wait)))
+      return failure();
+  return success();
+}
+
+static LogicalResult materializeNativeSplitBarriers(
+    MLIRContext *ctx, ArrayRef<waveamdmachine::BarrierArriveOp> arrives,
+    ArrayRef<waveamdmachine::BarrierWaitOp> waits) {
+  OpBuilder builder(ctx);
+  for (waveamdmachine::BarrierArriveOp arrive : arrives) {
+    builder.setInsertionPoint(arrive);
+    auto signal = waveamdmachine::SBarrierSignalOp::create(
+        builder, arrive.getLoc(), arrive.getToken().getType(),
+        arrive.getDependencies());
+    arrive.getToken().replaceAllUsesWith(signal.getToken());
+  }
+  for (waveamdmachine::BarrierWaitOp wait : waits) {
+    builder.setInsertionPoint(wait);
+    auto nativeWait = waveamdmachine::SBarrierWaitOp::create(
+        builder, wait.getLoc(), wait.getToken().getType(), wait.getArrival());
+    wait.getToken().replaceAllUsesWith(nativeWait.getToken());
+    wait.erase();
+  }
+  for (waveamdmachine::BarrierArriveOp arrive : arrives)
+    arrive.erase();
+  return success();
+}
+
 static LogicalResult materializeArrive(OpBuilder &builder,
                                        waveamdmachine::BarrierArriveOp arrive,
                                        BarrierSlot slot, MachineTypes types,
@@ -822,24 +949,23 @@ eraseMaterializedInits(ArrayRef<waveamdmachine::BarrierInitOp> inits) {
   return success();
 }
 
-static LogicalResult materializeFunc(func::FuncOp func) {
-  if (func.isExternal())
-    return success();
+static LogicalResult materializeNativeFunc(func::FuncOp func,
+                                           const SplitBarrierOps &ops) {
+  if (failed(validateNativeSplitBarriers(ops.inits, ops.arrives, ops.waits)) ||
+      failed(materializeNativeSplitBarriers(func.getContext(), ops.arrives,
+                                            ops.waits)))
+    return failure();
+  return eraseMaterializedInits(ops.inits);
+}
 
-  SplitBarrierOps ops = collectSplitBarrierOps(func);
-  if (ops.empty())
-    return success();
-  if (ops.inits.empty())
-    return func.emitError("split barrier materialization found no init ops");
-
+static LogicalResult materializeLegacyFunc(func::FuncOp func,
+                                           const SplitBarrierOps &ops) {
   FailureOr<unsigned> wavefrontSize = getMaterializationWavefrontSize(func);
   if (failed(wavefrontSize))
     return failure();
   FailureOr<unsigned> expectedWaves =
       getMaterializationExpectedWaves(func, *wavefrontSize);
   if (failed(expectedWaves))
-    return failure();
-  if (failed(validateArriveWaitPairs(ops.arrives, ops.waits)))
     return failure();
 
   MachineTypes types = getMachineTypes(func.getContext());
@@ -855,6 +981,26 @@ static LogicalResult materializeFunc(func::FuncOp func) {
                               *wavefrontSize)))
     return failure();
   return eraseMaterializedInits(ops.inits);
+}
+
+static LogicalResult materializeFunc(func::FuncOp func) {
+  if (func.isExternal())
+    return success();
+
+  SplitBarrierOps ops = collectSplitBarrierOps(func);
+  if (ops.empty())
+    return success();
+  if (ops.inits.empty())
+    return func.emitError("split barrier materialization found no init ops");
+  if (failed(validateArriveWaitPairs(ops.arrives, ops.waits)))
+    return failure();
+
+  FailureOr<bool> native = supportsNativeSplitBarriers(func);
+  if (failed(native))
+    return failure();
+  if (*native)
+    return materializeNativeFunc(func, ops);
+  return materializeLegacyFunc(func, ops);
 }
 
 struct WaveAMDMaterializeSplitBarriersPass

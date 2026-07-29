@@ -78,6 +78,50 @@ func.func @materialize_split_barrier()
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+
+// CHECK-LABEL: func.func @materialize_native_split_barrier(
+// CHECK-SAME: wave.lds_size = 16 : i64
+// CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_b32
+// CHECK-NEXT: [[SIGNAL:%.*]] = waveamdmachine.s_barrier_signal [[STORE]]
+// CHECK-NEXT: waveamdmachine.v_add_u32
+// CHECK-NEXT: [[WAIT:%.*]] = waveamdmachine.s_barrier_wait [[SIGNAL]]
+// CHECK-NEXT: waveamdmachine.token_join [[WAIT]]
+// CHECK-NOT: waveamdmachine.ds_add_rtn_u32
+// CHECK-NOT: waveamdmachine.ds_load_b32
+// CHECK-NOT: waveamdmachine.s_sleep
+func.func @materialize_native_split_barrier()
+    attributes {wave.kernel, wave.lds_size = 16 : i64} {
+  %state = waveamdmachine.barrier_init : !waveamdmachine.barrier
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %addr = waveamdmachine.v_workitem_id_x
+      : !waveamdmachine.reg<vgpr, 1, 0>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %value = waveamdmachine.v_mov_b32_tuple %zero
+      : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+  %store = waveamdmachine.ds_store_b32 %addr, %value after %root
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %ticket, %arrived = waveamdmachine.barrier_arrive %state after %store
+      : (!waveamdmachine.barrier, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %sum = waveamdmachine.v_add_u32 %addr, %addr
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 0>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  %ready = waveamdmachine.barrier_wait %state, %ticket after %arrived
+      : (!waveamdmachine.barrier, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %joined = waveamdmachine.token_join %ready
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @dynamic_vgpr_shift(

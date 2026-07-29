@@ -107,6 +107,25 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // -----
 
+// CHECK-LABEL: func.func @splits_gfx1250(
+// CHECK: waveamdmachine.barrier_init
+// CHECK: waveamdmachine.barrier_arrive
+// CHECK: waveamdmachine.barrier_wait
+// CHECK-NOT: waveamdmachine.s_barrier
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+  func.func @splits_gfx1250()
+      attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>,
+                  wave.waves_per_workgroup = 8 : i64,
+                  waveamdmachine.enable_split_barriers} {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    %ready = waveamdmachine.s_barrier %root
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    return
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @keeps_four_wave_gfx950(
 // CHECK: waveamdmachine.s_barrier
 // CHECK-NOT: waveamdmachine.barrier_init
