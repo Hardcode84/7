@@ -2200,6 +2200,39 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
   }];
 }
 
+class WaveAMDMachine_GlobalLoadAsyncToLdsOp<string mnemonic>
+    : WaveAMDMachine_Op<
+          mnemonic,
+          [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma,
+           WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "gfx1250 async global-to-LDS load";
+  let arguments = (ins WaveAMDMachine_VGPR1:$lds_address,
+                       WaveAMDMachine_VGPR1:$offset,
+                       WaveAMDMachine_SGPR2:$base,
+                       WaveAMDMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $lds_address `,` $offset `,` $base `after` $dependency
+    (`offset` $inst_offset^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_GlobalLoadAsyncToLdsB8Op
+    : WaveAMDMachine_GlobalLoadAsyncToLdsOp<
+          "global_load_async_to_lds_b8">;
+def WaveAMDMachine_GlobalLoadAsyncToLdsB32Op
+    : WaveAMDMachine_GlobalLoadAsyncToLdsOp<
+          "global_load_async_to_lds_b32">;
+def WaveAMDMachine_GlobalLoadAsyncToLdsB64Op
+    : WaveAMDMachine_GlobalLoadAsyncToLdsOp<
+          "global_load_async_to_lds_b64">;
+def WaveAMDMachine_GlobalLoadAsyncToLdsB128Op
+    : WaveAMDMachine_GlobalLoadAsyncToLdsOp<
+          "global_load_async_to_lds_b128">;
+
 // Global LDS DMA ops have no inst-offset slot in the hardware
 // encoding (the `global_load_lds_*` form addresses through V + base
 // only). The `inst_offset` attribute remains for IR shape uniformity

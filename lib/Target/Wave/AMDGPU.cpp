@@ -3471,6 +3471,36 @@ private:
                        operands, "TDM prefetch");
   }
 
+  template <typename AsyncLoadOp>
+  LogicalResult emitGlobalAsyncToLds(AsyncLoadOp op, unsigned pseudoOpcode) {
+    if (!AsyncLoadOp::isSupportedOnIsa(isaVersion))
+      return op.emitError(
+          "gfx1250 async global-to-LDS load unsupported on target");
+    unsigned opcode = postVIOpcode(pseudoOpcode);
+    if (opcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
+        opcode >= mcii->getNumOpcodes() ||
+        !waveamdmachine::isAMDGPUOpcodeAvailable(opcode, sti->getFeatureBits()))
+      return op.emitError(
+          "LLVM async global-to-LDS opcode unavailable on target");
+
+    int64_t instOffset = op.getInstOffsetAttr().getInt();
+    unsigned offsetBits = llvm::AMDGPU::getNumFlatOffsetBits(*sti);
+    if (!llvm::isIntN(offsetBits, instOffset))
+      return op.emitError(
+          "global async-to-LDS offset does not fit target flat offset field");
+    FailureOr<unsigned> cpol = getLoadCacheCPol(*op);
+    if (failed(cpol))
+      return failure();
+
+    std::array<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>, 5> operands = {
+        {{llvm::AMDGPU::OpName::vdst, toMCOperand(op.getLdsAddress())},
+         {llvm::AMDGPU::OpName::saddr, toMCOperand(op.getBase())},
+         {llvm::AMDGPU::OpName::vaddr, toMCOperand(op.getOffset())},
+         {llvm::AMDGPU::OpName::offset, llvm::MCOperand::createImm(instOffset)},
+         {llvm::AMDGPU::OpName::cpol, llvm::MCOperand::createImm(*cpol)}}};
+    return emitNamedMC(opcode, operands, "gfx1250 async global-to-LDS load");
+  }
+
   LogicalResult emitGfx1250Wmma(unsigned pseudoOpcode, Value dst, Value a,
                                 Value b, Value acc) {
     if (!isGfx1250())
@@ -5591,6 +5621,22 @@ private:
       return emitScratchLoad(op);
     if (isa<waveamdmachine::ScratchStoreB32Op>(op))
       return emitScratchStore(op);
+    if (isa<waveamdmachine::GlobalLoadAsyncToLdsB8Op>(op))
+      return emitGlobalAsyncToLds(
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB8Op>(op),
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B8_SADDR);
+    if (isa<waveamdmachine::GlobalLoadAsyncToLdsB32Op>(op))
+      return emitGlobalAsyncToLds(
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB32Op>(op),
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B32_SADDR);
+    if (isa<waveamdmachine::GlobalLoadAsyncToLdsB64Op>(op))
+      return emitGlobalAsyncToLds(
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB64Op>(op),
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B64_SADDR);
+    if (isa<waveamdmachine::GlobalLoadAsyncToLdsB128Op>(op))
+      return emitGlobalAsyncToLds(
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB128Op>(op),
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B128_SADDR);
     if (rejectLegacyVMemToLDS() && isa<waveamdmachine::GlobalLoadLdsB32Op,
                                        waveamdmachine::GlobalLoadLdsB128Op,
                                        waveamdmachine::BufferLoadLdsB32Op,
