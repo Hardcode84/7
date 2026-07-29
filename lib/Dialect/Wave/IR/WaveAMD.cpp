@@ -12,6 +12,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -255,6 +256,10 @@ static bool matchMfmaGfx95032x32BF16AB(FragmentType type, int64_t role) {
   return type.getRole() == role && type.getElementType().isBF16() &&
          type.getRegisters() == 4 && isMfmaGfx95032x32x16(type);
 }
+static bool matchMfmaGfx95032x32F4AB(FragmentType type, int64_t role) {
+  return type.getRole() == role && type.getElementType().isInteger(8) &&
+         type.getRegisters() == 4 && isMfmaGfx95032x32x16(type);
+}
 static bool matchMfmaGfx95032x32F32Acc(FragmentType type) {
   return type.getRole() == 2 && type.getElementType().isF32() &&
          type.getRegisters() == 16 && isMfmaGfx95032x32x16(type);
@@ -320,6 +325,25 @@ static constexpr MmaShape kMmaShapes[] = {
      "accumulator must be a 32x32 f32 wave64 fragment with 16 registers"},
 };
 
+static constexpr MmaShape kMmaScaleShapes[] = {
+    {MmaKind::MfmaScaleF32_16x16x128_F4F4, matchMfmaGfx950F4AB,
+     matchMfmaGfx950F32Acc,
+     "must be a 16x16 packed-f4 wave64 fragment with 4 registers",
+     "accumulator must be a 16x16 f32 wave64 fragment with 4 registers"},
+    {MmaKind::MfmaScaleF32_32x32x64_F4F4, matchMfmaGfx95032x32F4AB,
+     matchMfmaGfx95032x32F32Acc,
+     "must be a 32x32 packed-f4 wave64 fragment with 4 registers",
+     "accumulator must be a 32x32 f32 wave64 fragment with 16 registers"},
+};
+
+static const MmaShape *lookupMmaShape(llvm::ArrayRef<MmaShape> shapes,
+                                      MmaKind kind) {
+  for (const MmaShape &shape : shapes)
+    if (shape.kind == kind)
+      return &shape;
+  return nullptr;
+}
+
 static bool haveSameWaveSize(FragmentType aType, FragmentType bType,
                              FragmentType accType, FragmentType resultType) {
   int64_t waveSize = aType.getWaveSize();
@@ -332,12 +356,7 @@ LogicalResult MmaOp::verify() {
   std::optional<MmaKind> kind = symbolizeMmaKind(getKind());
   if (!kind)
     return emitOpError("unsupported matrix operation kind");
-  const MmaShape *shape = nullptr;
-  for (const MmaShape &candidate : kMmaShapes)
-    if (candidate.kind == *kind) {
-      shape = &candidate;
-      break;
-    }
+  const MmaShape *shape = lookupMmaShape(kMmaShapes, *kind);
   if (!shape)
     return emitOpError("unsupported matrix operation kind");
 
@@ -359,26 +378,20 @@ LogicalResult MmaOp::verify() {
   return success();
 }
 
-static LogicalResult verifyMmaScaleAttrs(MmaScaleOp op) {
-  if (symbolizeMmaKind(op.getKind()) != MmaKind::MfmaScaleF32_16x16x128_F4F4)
-    return op.emitOpError("unsupported scaled matrix operation kind");
-  return success();
-}
-
-static LogicalResult verifyMmaScaleFragments(MmaScaleOp op) {
+static LogicalResult verifyMmaScaleFragments(MmaScaleOp op,
+                                             const MmaShape &shape) {
   auto aType = cast<FragmentType>(op.getA().getType());
   auto bType = cast<FragmentType>(op.getB().getType());
   auto accType = cast<FragmentType>(op.getAcc().getType());
   auto resultType = cast<FragmentType>(op.getResult().getType());
-  if (!matchMfmaGfx950F4AB(aType, 0))
-    return op.emitOpError("A operand must be a 16x16 packed-f4 wave64 fragment "
-                          "with 4 registers");
-  if (!matchMfmaGfx950F4AB(bType, 1))
-    return op.emitOpError("B operand must be a 16x16 packed-f4 wave64 fragment "
-                          "with 4 registers");
-  if (!matchMfmaGfx950F32Acc(accType))
-    return op.emitOpError(
-        "accumulator must be a 16x16 f32 wave64 fragment with 4 registers");
+  if (!shape.matchAB(aType, 0))
+    return op.emitOpError("A operand ") << shape.abError;
+  if (!shape.matchAB(bType, 1))
+    return op.emitOpError("B operand ") << shape.abError;
+  if (!shape.matchAcc(accType))
+    return op.emitOpError(shape.accError);
+  if (!haveSameWaveSize(aType, bType, accType, resultType))
+    return op.emitOpError("operand/result fragment wave sizes must match");
   if (resultType != accType)
     return op.emitOpError("result type must match accumulator type");
   return success();
@@ -397,9 +410,13 @@ static LogicalResult verifyMmaScaleTypes(MmaScaleOp op) {
 }
 
 LogicalResult MmaScaleOp::verify() {
-  if (failed(verifyMmaScaleAttrs(*this)))
-    return failure();
-  if (failed(verifyMmaScaleFragments(*this)))
+  std::optional<MmaKind> kind = symbolizeMmaKind(getKind());
+  if (!kind)
+    return emitOpError("unsupported scaled matrix operation kind");
+  const MmaShape *shape = lookupMmaShape(kMmaScaleShapes, *kind);
+  if (!shape)
+    return emitOpError("unsupported scaled matrix operation kind");
+  if (failed(verifyMmaScaleFragments(*this, *shape)))
     return failure();
   if (failed(verifyMmaScaleTypes(*this)))
     return failure();

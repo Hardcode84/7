@@ -134,6 +134,22 @@ func.func @bad_mfma_scale_acc_width(%a: !waveamdmachine.reg<vgpr, 4>,
 
 // -----
 
+func.func @bad_mfma_scale_32x32_acc_width(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %scale: !waveamdmachine.reg<vgpr, 1>) {
+  // expected-error @below {{accumulator operand must be !waveamdmachine.reg<vgpr|agpr, 16>}}
+  %r = waveamdmachine.mfma_scale_f32_32x32x64_f4_f4
+      %a, %b, %acc, %scale, %scale
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 16>
+  return
+}
+
+// -----
+
 func.func @bad_mfma_scale_a_scale_width(%a: !waveamdmachine.reg<vgpr, 4>,
                                         %b: !waveamdmachine.reg<vgpr, 4>,
                                         %acc: !waveamdmachine.reg<vgpr, 4>,

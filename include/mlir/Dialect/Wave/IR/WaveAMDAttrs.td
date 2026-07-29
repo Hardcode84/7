@@ -100,6 +100,9 @@ def WaveAMD_MmaMfmaF32_32x32x16_BF16 :
 def WaveAMD_MmaMfmaScaleF32_16x16x128_F4F4 :
     I32EnumAttrCase<"MfmaScaleF32_16x16x128_F4F4", 9,
                     "mfma.scale.f32.16x16x128.f4.f4">;
+def WaveAMD_MmaMfmaScaleF32_32x32x64_F4F4 :
+    I32EnumAttrCase<"MfmaScaleF32_32x32x64_F4F4", 12,
+                    "mfma.scale.f32.32x32x64.f4.f4">;
 def WaveAMD_MmaWmmaF32_16x16x32_F16 :
     I32EnumAttrCase<"WmmaF32_16x16x32_F16", 10,
                     "wmma.f32.16x16x32.f16">;
@@ -118,6 +121,7 @@ def WaveAMD_MmaKind : I32EnumAttr<"MmaKind", "WaveAMD matrix operation kind", [
     WaveAMD_MmaMfmaF32_32x32x16_F16,
     WaveAMD_MmaMfmaF32_32x32x16_BF16,
     WaveAMD_MmaMfmaScaleF32_16x16x128_F4F4,
+    WaveAMD_MmaMfmaScaleF32_32x32x64_F4F4,
     WaveAMD_MmaWmmaF32_16x16x32_F16,
     WaveAMD_MmaWmmaF32_16x16x32_BF16
   ]> {

@@ -973,6 +973,12 @@ private:
                   : llvm::AMDGPU::
                         V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_gfx940_vcd;
   }
+  unsigned mfmaScaleF32_32x32x64F4F4(bool agprCD) const {
+    return agprCD
+               ? llvm::AMDGPU::V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f4_gfx940_acd
+               : llvm::AMDGPU::
+                     V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f4_gfx940_vcd;
+  }
 
   unsigned vAccvgprReadB32() const {
     return llvm::AMDGPU::V_ACCVGPR_READ_B32_vi;
@@ -4612,15 +4618,11 @@ private:
            llvm::MCOperand::createImm(0), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
     }
-    if (waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op scaleOp =
-            dyn_cast<waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op>(op)) {
-      if (!isGfx950(isaVersion))
-        return scaleOp.emitError(
-            "mfma.scale.f32.16x16x128.f4.f4 requires gfx950");
+    auto emitMfmaScale = [&](auto scaleOp, unsigned opcode) -> LogicalResult {
       unsigned scaleIdxA = scaleOp.getScaleIdxA();
       unsigned scaleIdxB = scaleOp.getScaleIdxB();
       return emitMC(
-          mfmaScaleF32_16x16x128F4F4(isAGPRType(result().getType())),
+          opcode,
           {toMCOperand(result()), toMCOperand(scaleOp.getA()),
            toMCOperand(scaleOp.getB()), toMCOperand(scaleOp.getAcc()),
            llvm::MCOperand::createImm(4), llvm::MCOperand::createImm(4),
@@ -4629,6 +4631,22 @@ private:
                packedSrcMods(scaleIdxA & 1, scaleIdxA >> 1, 0)),
            llvm::MCOperand::createImm(
                packedSrcMods(scaleIdxB & 1, scaleIdxB >> 1, 0))});
+    };
+    if (waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op scaleOp =
+            dyn_cast<waveamdmachine::MfmaScaleF32_16x16x128_F4F4Op>(op)) {
+      if (!isGfx950(isaVersion))
+        return scaleOp.emitError(
+            "mfma.scale.f32.16x16x128.f4.f4 requires gfx950");
+      return emitMfmaScale(
+          scaleOp, mfmaScaleF32_16x16x128F4F4(isAGPRType(result().getType())));
+    }
+    if (waveamdmachine::MfmaScaleF32_32x32x64_F4F4Op scaleOp =
+            dyn_cast<waveamdmachine::MfmaScaleF32_32x32x64_F4F4Op>(op)) {
+      if (!isGfx950(isaVersion))
+        return scaleOp.emitError(
+            "mfma.scale.f32.32x32x64.f4.f4 requires gfx950");
+      return emitMfmaScale(
+          scaleOp, mfmaScaleF32_32x32x64F4F4(isAGPRType(result().getType())));
     }
     if (isa<waveamdmachine::VAddU32Op>(op)) {
       Value lhs = op.getOperand(0);

@@ -13,6 +13,7 @@
 // RUN: wave-sim-report --func=trip_loop --trip-count=10000 %s | FileCheck %s --check-prefix=TRIPBIG
 // RUN: wave-sim-report --func=wmma_latency --op-latencies %s | FileCheck %s --check-prefix=WMMA
 // RUN: not wave-sim-report --func=mfma_32x32_latency --op-latencies %s 2>&1 | FileCheck %s --check-prefix=MFMA32
+// RUN: not wave-sim-report --func=mfma_scale_32x32_latency --op-latencies %s 2>&1 | FileCheck %s --check-prefix=MFMASCALE32
 // RUN: wave-sim-report --func=two_independent_valu --wave-size=64 --timeline %s | FileCheck %s --check-prefix=W64
 // RUN: wave-sim-report --func=vmem_value_ready --timeline %s | FileCheck %s --check-prefix=VMEMVALUE
 // RUN: wave-sim-report --func=uniform_if_report %s | FileCheck %s --check-prefix=UIF
@@ -164,6 +165,19 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  func.func @mfma_scale_32x32_latency(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 16>,
+      %scale: !waveamdmachine.reg<vgpr, 1>) {
+    %result = waveamdmachine.mfma_scale_f32_32x32x64_f4_f4
+        %a, %b, %acc, %scale, %scale
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
+
   func.func @two_independent_valu(%a: !waveamdmachine.reg<vgpr, 1>,
                                   %b: !waveamdmachine.reg<vgpr, 1>,
                                   %c: !waveamdmachine.reg<vgpr, 1>,
@@ -307,6 +321,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WMMA: op=waveamdmachine.wmma_f32_16x16x16_f16 class=Write16PassWMMA fu=VALU latency=5
 
 // MFMA32: error: 'waveamdmachine.mfma_f32_32x32x16_f16' op Write8PassMAI is unsupported on gfx1100
+
+// MFMASCALE32: error: 'waveamdmachine.mfma_scale_f32_32x32x64_f4_f4' op Write8PassMAI is unsupported on gfx1100
 
 // W64: func: two_independent_valu
 // W64: wave_size: 64
