@@ -11,6 +11,7 @@
 
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
@@ -906,6 +907,36 @@ LogicalResult WmmaF32_16x16x16_F16Op::verify() {
 
 LogicalResult WmmaF32_16x16x16_BF16Op::verify() {
   return verifyWMMA(*this, /*abWidth=*/8);
+}
+
+static LogicalResult
+verifyGfx1250WMMA(Operation *op,
+                  const std::optional<AMDGPUMmaCapabilities> &capabilities,
+                  unsigned negLo, unsigned negHi) {
+  if (!capabilities)
+    return failure();
+  MMAOpInterface mma = cast<MMAOpInterface>(op);
+  if (failed(verifyMMA(mma, capabilities->operandDwords,
+                       capabilities->accumulatorDwords, verifyVGPRWidth,
+                       verifyImmediateOrVGPRWidth)))
+    return failure();
+  if (negLo & ~capabilities->negLoMask)
+    return op->emitOpError("neg_lo selects an unsupported source");
+  if (negHi & ~capabilities->negHiMask)
+    return op->emitOpError("neg_hi selects an unsupported source");
+  return success();
+}
+
+LogicalResult WmmaF32_16x16x32_F16Op::verify() {
+  static const std::optional<AMDGPUMmaCapabilities> capabilities =
+      getAMDGPUGfx1250WmmaCapabilities(/*bf16=*/false);
+  return verifyGfx1250WMMA(*this, capabilities, getNegLo(), getNegHi());
+}
+
+LogicalResult WmmaF32_16x16x32_BF16Op::verify() {
+  static const std::optional<AMDGPUMmaCapabilities> capabilities =
+      getAMDGPUGfx1250WmmaCapabilities(/*bf16=*/true);
+  return verifyGfx1250WMMA(*this, capabilities, getNegLo(), getNegHi());
 }
 
 static LogicalResult verifyMFMA(Operation *op, int64_t abWidth,

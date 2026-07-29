@@ -707,7 +707,9 @@ The implementation uses:
 - exact A, B, accumulator, and result fragment layouts;
 - fill-zero, extract, unpack, and output-store mappings;
 - two-address or killed-accumulator semantics;
-- LLVM opcode mapping, named operands, register classes, and WMMA modifiers;
+- LLVM opcode mapping, named operands, and register classes;
+- explicit A/B reuse hints and legal C negation modifiers preserved through
+  regalloc and LLVM MC emission;
 - XDL2 schedule classification with an initial eight-cycle latency.
 
 Do not alias the existing gfx11 `16x16x16` WMMA kind. Shape, operand widths,

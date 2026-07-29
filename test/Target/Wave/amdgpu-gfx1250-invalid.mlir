@@ -442,7 +442,7 @@ func.func @wmma_wrong_tuple_width() {
       : !waveamdmachine.reg<vgpr, 8, 8>
   %acc = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 8, 16>
-  // expected-error @below {{LLVM MC register-class mismatch for}}
+  // expected-error @below {{A operand must be !waveamdmachine.reg<vgpr, 8>}}
   %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
       : (!waveamdmachine.reg<vgpr, 4, 0>,
          !waveamdmachine.reg<vgpr, 8, 8>,

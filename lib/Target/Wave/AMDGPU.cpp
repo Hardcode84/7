@@ -3666,7 +3666,9 @@ private:
   }
 
   LogicalResult emitGfx1250Wmma(unsigned pseudoOpcode, Value dst, Value a,
-                                Value b, Value acc) {
+                                Value b, Value acc, bool matrixAReuse,
+                                bool matrixBReuse, unsigned negLo,
+                                unsigned negHi) {
     if (!isGfx1250())
       return emissionSource->emitError("gfx1250 WMMA unsupported on target");
     llvm::MCOperand dstOperand = toMCOperand(dst);
@@ -3696,16 +3698,23 @@ private:
       assigned.set(index);
       return success();
     };
-    llvm::MCOperand zero = llvm::MCOperand::createImm(0);
+    llvm::MCOperand src2Modifiers = llvm::MCOperand::createImm(
+        packedSrcMods(/*opSel=*/0, /*opSelHi=*/0, negLo, negHi,
+                      /*operandIndex=*/2));
     if (failed(setOperand(llvm::AMDGPU::OpName::vdst, dstOperand)) ||
         failed(setOperand(llvm::AMDGPU::OpName::src0, toMCOperand(a))) ||
         failed(setOperand(llvm::AMDGPU::OpName::src1, toMCOperand(b))) ||
-        failed(setOperand(llvm::AMDGPU::OpName::src2_modifiers, zero)) ||
+        failed(
+            setOperand(llvm::AMDGPU::OpName::src2_modifiers, src2Modifiers)) ||
         failed(setOperand(llvm::AMDGPU::OpName::src2, accOperand)) ||
-        failed(setOperand(llvm::AMDGPU::OpName::matrix_a_reuse, zero)) ||
-        failed(setOperand(llvm::AMDGPU::OpName::matrix_b_reuse, zero)) ||
-        failed(setOperand(llvm::AMDGPU::OpName::neg_lo, zero)) ||
-        failed(setOperand(llvm::AMDGPU::OpName::neg_hi, zero)))
+        failed(setOperand(llvm::AMDGPU::OpName::matrix_a_reuse,
+                          llvm::MCOperand::createImm(matrixAReuse))) ||
+        failed(setOperand(llvm::AMDGPU::OpName::matrix_b_reuse,
+                          llvm::MCOperand::createImm(matrixBReuse))) ||
+        failed(setOperand(llvm::AMDGPU::OpName::neg_lo,
+                          llvm::MCOperand::createImm(negLo))) ||
+        failed(setOperand(llvm::AMDGPU::OpName::neg_hi,
+                          llvm::MCOperand::createImm(negHi))))
       return failure();
     if (!assigned.all())
       return emissionSource->emitError("LLVM MC WMMA operand schema changed");
@@ -4776,14 +4785,18 @@ private:
            toMCOperand(op.getOperand(1)), llvm::MCOperand::createImm(0),
            toMCOperand(op.getOperand(2)), llvm::MCOperand::createImm(0),
            llvm::MCOperand::createImm(0)});
-    if (isa<waveamdmachine::WmmaF32_16x16x32_F16Op>(op))
+    if (waveamdmachine::WmmaF32_16x16x32_F16Op wmma =
+            dyn_cast<waveamdmachine::WmmaF32_16x16x32_F16Op>(op))
       return emitGfx1250Wmma(llvm::AMDGPU::V_WMMA_F32_16X16X32_F16_w32_twoaddr,
-                             result(), op.getOperand(0), op.getOperand(1),
-                             op.getOperand(2));
-    if (isa<waveamdmachine::WmmaF32_16x16x32_BF16Op>(op))
+                             result(), wmma.getA(), wmma.getB(), wmma.getAcc(),
+                             wmma.getMatrixAReuse(), wmma.getMatrixBReuse(),
+                             wmma.getNegLo(), wmma.getNegHi());
+    if (waveamdmachine::WmmaF32_16x16x32_BF16Op wmma =
+            dyn_cast<waveamdmachine::WmmaF32_16x16x32_BF16Op>(op))
       return emitGfx1250Wmma(llvm::AMDGPU::V_WMMA_F32_16X16X32_BF16_w32_twoaddr,
-                             result(), op.getOperand(0), op.getOperand(1),
-                             op.getOperand(2));
+                             result(), wmma.getA(), wmma.getB(), wmma.getAcc(),
+                             wmma.getMatrixAReuse(), wmma.getMatrixBReuse(),
+                             wmma.getNegLo(), wmma.getNegHi());
     if (isa<waveamdmachine::MfmaF32_16x16x16_F16Op>(op)) {
       if (!isGfx90APlus())
         return op.emitError("mfma.f32.16x16x16.f16 requires gfx90a+");

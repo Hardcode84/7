@@ -94,6 +94,8 @@ struct AMDGPUMmaCapabilities {
   unsigned accumulatorDwords = 0;
   unsigned operandAlignment = 0;
   unsigned accumulatorAlignment = 0;
+  unsigned negLoMask = 0;
+  unsigned negHiMask = 0;
 };
 
 llvm::StringRef getExpertSchedulingModeAttrName();
@@ -129,6 +131,9 @@ void forEachAMDGPUAllocatableSGPRTuple(
 
 std::optional<AMDGPUMmaCapabilities>
 getAMDGPUWmmaCapabilities(const llvm::MCSubtargetInfo &sti, bool bf16);
+
+std::optional<AMDGPUMmaCapabilities>
+getAMDGPUGfx1250WmmaCapabilities(bool bf16);
 
 bool isAMDGPUOpcodeAvailable(unsigned opcode,
                              const llvm::FeatureBitset &features);

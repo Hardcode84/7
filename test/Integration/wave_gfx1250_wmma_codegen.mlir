@@ -21,6 +21,12 @@
 // IR: [[BF16:%.*]] = waveamdmachine.wmma_f32_16x16x32_bf16
 // IR-SAME: !waveamdmachine.imm
 // IR: waveamdmachine.tuple_to_elements [[BF16]]
+// IR-LABEL: func.func @gfx1250_wmma_modifiers()
+// IR: waveamdmachine.wmma_f32_16x16x32_f16
+// IR-SAME: matrix_a_reuse = true
+// IR-SAME: matrix_b_reuse = true
+// IR-SAME: neg_hi = 4
+// IR-SAME: neg_lo = 4
 
 // ASM-LABEL: gfx1250_wmma_f16_threeaddr:
 // ASM: v_wmma_f32_16x16x32_f16 [[F16_D:v\[[0-9]+:[0-9]+\]]], [[F16_A:v\[[0-9]+:[0-9]+\]]], [[F16_B:v\[[0-9]+:[0-9]+\]]], [[F16_C:v\[[0-9]+:[0-9]+\]]]
@@ -28,12 +34,18 @@
 // ASM-LABEL: gfx1250_wmma_bf16_immediate:
 // ASM: v_wmma_f32_16x16x32_bf16 [[BF16_D:v\[[0-9]+:[0-9]+\]]], [[BF16_A:v\[[0-9]+:[0-9]+\]]], [[BF16_B:v\[[0-9]+:[0-9]+\]]], 0
 // ASM: buffer_store_b32
+// ASM-LABEL: gfx1250_wmma_modifiers:
+// ASM: v_wmma_f32_16x16x32_f16 {{.*}} matrix_a_reuse matrix_b_reuse neg_lo:[0,0,1] neg_hi:[0,0,1]
+// ASM: buffer_store_b32
 
 // DIS-LABEL: <gfx1250_wmma_f16_threeaddr>:
 // DIS: v_wmma_f32_16x16x32_f16
 // DIS: buffer_store_b128
 // DIS-LABEL: <gfx1250_wmma_bf16_immediate>:
 // DIS: v_wmma_f32_16x16x32_bf16
+// DIS: buffer_store_b32
+// DIS-LABEL: <gfx1250_wmma_modifiers>:
+// DIS: v_wmma_f32_16x16x32_f16 {{.*}} matrix_a_reuse matrix_b_reuse neg_lo:[0,0,1] neg_hi:[0,0,1]
 // DIS: buffer_store_b32
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
@@ -97,6 +109,40 @@ func.func @gfx1250_wmma_bf16_immediate(%out: !wave.ptr<#wave.global, i32>)
   %stored = wave.store %last -> %ptrs
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
+  return
+}
+
+func.func @gfx1250_wmma_modifiers() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8>
+  %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      {matrix_a_reuse = true, matrix_b_reuse = true,
+       neg_lo = 4 : i64, neg_hi = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<vgpr, 8>)
+        -> !waveamdmachine.reg<vgpr, 8>
+  %parts:8 = waveamdmachine.tuple_to_elements %result
+      : (!waveamdmachine.reg<vgpr, 8>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %offset = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 1>
+  %descriptor = waveamdmachine.uninit
+      : !waveamdmachine.reg<sgpr, 4>
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  waveamdmachine.buffer_store_b32 %offset, %parts#0, %descriptor, %zero
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm) -> ()
+  waveamdmachine.s_endpgm
   return
 }
 

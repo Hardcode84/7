@@ -10,6 +10,7 @@
 // RUN:       -filetype=obj -o %t.o
 // RUN: llvm-objdump -d --mcpu=gfx1250 %t.o \
 // RUN:   | FileCheck %s --check-prefix=DIS
+// RUN: wave-opt %s | FileCheck %s --check-prefix=ROUNDTRIP
 
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
@@ -409,6 +410,55 @@ func.func @wmma_bf16_distinct() {
          !waveamdmachine.reg<vgpr, 8, 8>,
          !waveamdmachine.reg<vgpr, 8, 16>)
      -> !waveamdmachine.reg<vgpr, 8, 24>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: wmma_f16_modifiers:
+// ASM: v_wmma_f32_16x16x32_f16 v[16:23], v[0:7], v[8:15], v[16:23] matrix_a_reuse matrix_b_reuse neg_lo:[0,0,1] neg_hi:[0,0,1]
+// DIS-LABEL: <wmma_f16_modifiers>:
+// DIS: v_wmma_f32_16x16x32_f16 v[16:23], v[0:7], v[8:15], v[16:23] matrix_a_reuse matrix_b_reuse neg_lo:[0,0,1] neg_hi:[0,0,1]
+// ROUNDTRIP-LABEL: func.func @wmma_f16_modifiers
+// ROUNDTRIP: waveamdmachine.wmma_f32_16x16x32_f16
+// ROUNDTRIP-SAME: matrix_a_reuse = true
+// ROUNDTRIP-SAME: matrix_b_reuse = true
+// ROUNDTRIP-SAME: neg_hi = 4
+// ROUNDTRIP-SAME: neg_lo = 4
+func.func @wmma_f16_modifiers() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      {matrix_a_reuse = true, matrix_b_reuse = true,
+       neg_lo = 4 : i64, neg_hi = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 16>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: wmma_bf16_modifiers:
+// ASM: v_wmma_f32_16x16x32_bf16 v[16:23], v[0:7], v[8:15], v[16:23] matrix_b_reuse neg_lo:[0,0,1]
+// DIS-LABEL: <wmma_bf16_modifiers>:
+// DIS: v_wmma_f32_16x16x32_bf16 v[16:23], v[0:7], v[8:15], v[16:23] matrix_b_reuse neg_lo:[0,0,1]
+func.func @wmma_bf16_modifiers() {
+  %a = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 0>
+  %b = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 8>
+  %acc = waveamdmachine.uninit
+      : !waveamdmachine.reg<vgpr, 8, 16>
+  %result = waveamdmachine.wmma_f32_16x16x32_bf16 %a, %b, %acc
+      {matrix_b_reuse = true, neg_lo = 4 : i64}
+      : (!waveamdmachine.reg<vgpr, 8, 0>,
+         !waveamdmachine.reg<vgpr, 8, 8>,
+         !waveamdmachine.reg<vgpr, 8, 16>)
+     -> !waveamdmachine.reg<vgpr, 8, 16>
   waveamdmachine.s_endpgm
   return
 }

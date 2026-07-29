@@ -443,6 +443,20 @@ static bool sameMCRegisterTuple(const MCRegisterTuple &lhs,
          lhs.alignment == rhs.alignment;
 }
 
+static unsigned getMCNegMask(unsigned opcode, llvm::AMDGPU::OpName negName) {
+  if (llvm::AMDGPU::getNamedOperandIdx(opcode, negName) < 0)
+    return 0;
+
+  constexpr std::array sourceModifiers = {llvm::AMDGPU::OpName::src0_modifiers,
+                                          llvm::AMDGPU::OpName::src1_modifiers,
+                                          llvm::AMDGPU::OpName::src2_modifiers};
+  unsigned mask = 0;
+  for (auto [index, modifier] : llvm::enumerate(sourceModifiers))
+    if (llvm::AMDGPU::getNamedOperandIdx(opcode, modifier) >= 0)
+      mask |= 1u << index;
+  return mask;
+}
+
 static std::optional<unsigned>
 getGfx1250WmmaOpcode(bool bf16, const llvm::MCSubtargetInfo &sti,
                      const llvm::MCInstrInfo &mcii) {
@@ -485,9 +499,17 @@ getMCMmaRegisterCapabilities(unsigned opcode, const llvm::MCSubtargetInfo &sti,
     return std::nullopt;
   if (!sameMCRegisterTuple(*result, *accumulator))
     return std::nullopt;
-  return AMDGPUMmaCapabilities{a->bank,      accumulator->bank,
-                               a->dwords,    accumulator->dwords,
-                               a->alignment, accumulator->alignment};
+
+  AMDGPUMmaCapabilities capabilities;
+  capabilities.operandBank = a->bank;
+  capabilities.accumulatorBank = accumulator->bank;
+  capabilities.operandDwords = a->dwords;
+  capabilities.accumulatorDwords = accumulator->dwords;
+  capabilities.operandAlignment = a->alignment;
+  capabilities.accumulatorAlignment = accumulator->alignment;
+  capabilities.negLoMask = getMCNegMask(opcode, llvm::AMDGPU::OpName::neg_lo);
+  capabilities.negHiMask = getMCNegMask(opcode, llvm::AMDGPU::OpName::neg_hi);
+  return capabilities;
 }
 } // namespace
 
@@ -509,6 +531,25 @@ mlir::waveamdmachine::getAMDGPUWmmaCapabilities(
   if (!opcode)
     return std::nullopt;
   return getMCMmaRegisterCapabilities(*opcode, sti, *mcii, *mri);
+}
+
+std::optional<AMDGPUMmaCapabilities>
+mlir::waveamdmachine::getAMDGPUGfx1250WmmaCapabilities(bool bf16) {
+  constexpr llvm::AMDGPU::GPUKind kind = llvm::AMDGPU::GK_GFX1250;
+  StringRef chip = llvm::AMDGPU::getArchNameAMDGCN(kind);
+  if (chip.empty())
+    return std::nullopt;
+
+  AMDGPUTarget target;
+  target.triple = "amdgcn-amd-amdhsa";
+  target.chip = chip.str();
+  target.isa = llvm::AMDGPU::getIsaVersion(chip);
+  target.kind = kind;
+  std::unique_ptr<llvm::MCSubtargetInfo> sti =
+      createAMDGPUMCSubtargetInfo(target);
+  if (!sti)
+    return std::nullopt;
+  return getAMDGPUWmmaCapabilities(*sti, bf16);
 }
 
 bool mlir::waveamdmachine::isAMDGPUOpcodeAvailable(

@@ -9,6 +9,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 // CHECK-SAME: %[[B:.*]]: !waveamdmachine.reg<vgpr, 8, 8>
 // CHECK-SAME: %[[ACC:.*]]: !waveamdmachine.reg<vgpr, 8, 16>
 // CHECK: %[[MMA:.*]] = waveamdmachine.wmma_f32_16x16x32_f16 %[[A]], %[[B]], %[[ACC]]
+// CHECK-SAME: matrix_a_reuse = true
+// CHECK-SAME: matrix_b_reuse = true
+// CHECK-SAME: neg_hi = 4
+// CHECK-SAME: neg_lo = 4
 // CHECK-SAME: -> !waveamdmachine.reg<vgpr, 8, 16>
 // CHECK: return %[[MMA]]
 func.func @reuse_killed_acc(
@@ -18,6 +22,8 @@ func.func @reuse_killed_acc(
     -> !waveamdmachine.reg<vgpr, 8>
     attributes {waveamdmachine.vgpr_count_max = 24 : i64} {
   %result = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      {matrix_a_reuse = true, matrix_b_reuse = true,
+       neg_lo = 4 : i64, neg_hi = 4 : i64}
       : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
          !waveamdmachine.reg<vgpr, 8>)
      -> !waveamdmachine.reg<vgpr, 8>

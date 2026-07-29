@@ -662,6 +662,16 @@ class WaveAMDMachine_Gfx1250WmmaResult<string mnemonic>
       WaveAMDMachine_KilledOperandReuse<
           "&operand == &this->getAccMutable()"> {
   let archPredicate = WaveAMDMachine_Gfx1250;
+  let arguments = (ins WaveAMDMachine_VGPR:$a,
+                       WaveAMDMachine_VGPR:$b,
+                       WaveAMDMachine_VGPROrImm:$acc,
+                       DefaultValuedAttr<BoolAttr, "false">:$matrix_a_reuse,
+                       DefaultValuedAttr<BoolAttr, "false">:$matrix_b_reuse,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel3Attr,
+                                         "0">:$neg_lo,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel3Attr,
+                                         "0">:$neg_hi);
+  let hasVerifier = 1;
 }
 
 class WaveAMDMachine_MfmaResult<string mnemonic>

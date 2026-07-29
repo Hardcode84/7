@@ -64,6 +64,36 @@ func.func @bad_wmma_width(%a: !waveamdmachine.reg<vgpr, 8>, %b: !waveamdmachine.
 
 // -----
 
+func.func @bad_gfx1250_wmma_neg_lo_source(
+    %a: !waveamdmachine.reg<vgpr, 8>,
+    %b: !waveamdmachine.reg<vgpr, 8>,
+    %acc: !waveamdmachine.reg<vgpr, 8>) {
+  // expected-error @below {{neg_lo selects an unsupported source}}
+  %r = waveamdmachine.wmma_f32_16x16x32_f16 %a, %b, %acc
+      {neg_lo = 1 : i64}
+      : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<vgpr, 8>)
+        -> !waveamdmachine.reg<vgpr, 8>
+  return
+}
+
+// -----
+
+func.func @bad_gfx1250_wmma_neg_hi_source(
+    %a: !waveamdmachine.reg<vgpr, 8>,
+    %b: !waveamdmachine.reg<vgpr, 8>,
+    %acc: !waveamdmachine.reg<vgpr, 8>) {
+  // expected-error @below {{neg_hi selects an unsupported source}}
+  %r = waveamdmachine.wmma_f32_16x16x32_bf16 %a, %b, %acc
+      {neg_hi = 2 : i64}
+      : (!waveamdmachine.reg<vgpr, 8>, !waveamdmachine.reg<vgpr, 8>,
+         !waveamdmachine.reg<vgpr, 8>)
+        -> !waveamdmachine.reg<vgpr, 8>
+  return
+}
+
+// -----
+
 func.func @bad_mfma_scale_index(%a: !waveamdmachine.reg<vgpr, 4>,
                                 %b: !waveamdmachine.reg<vgpr, 4>,
                                 %acc: !waveamdmachine.reg<vgpr, 4>,
