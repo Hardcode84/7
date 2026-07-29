@@ -127,6 +127,13 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type);
 // Wave symbolic attributes
 //===----------------------------------------------------------------------===//
 
+MLIR_CAPI_EXPORTED bool
+mlirWaveAttributeIsACastExtensionPolicy(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirWaveCastExtensionPolicyAttrGet(MlirContext ctx, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t
+mlirWaveCastExtensionPolicyAttrGetValue(MlirAttribute attr);
+
 // Returns a #wave.expr attribute parsed from `text`. On parse failure
 // emits a diagnostic on the context and returns a null MlirAttribute.
 // Note: the dialect-owned symbol store hash-conses the underlying node,

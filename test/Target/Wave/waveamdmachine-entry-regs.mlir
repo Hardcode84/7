@@ -55,6 +55,16 @@ func.func @preloaded_arg_prefix(%x: i32, %wide: i64,
   return
 }
 
+// REGALLOC-LABEL: func.func @preloaded_arg_tuple_slices
+// REGALLOC: [[PRELOAD:%.*]] = waveamdmachine.kernarg_preload {dword_offset = 0 : i64} : !waveamdmachine.reg<sgpr, 2, 2>
+// REGALLOC-NEXT: [[WORDS:%.*]]:2 = waveamdmachine.tuple_to_elements [[PRELOAD]]
+
+func.func @preloaded_arg_tuple_slices(%wide: i64)
+    attributes {wave.kernel, waveamdmachine.kernarg_preload_length = 2 : i64} {
+  %low = wave.cast intconvert %wide : i64 -> i32
+  return
+}
+
 // ABI-LABEL: func.func @preloaded_pointer_args
 // ABI-SAME: waveamdmachine.kernarg_size = 24 : i64
 // ABI: waveamdmachine.kernarg_preload {dword_offset = 0 : i64} : !waveamdmachine.reg<sgpr, 2, 2>

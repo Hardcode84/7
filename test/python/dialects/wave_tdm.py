@@ -211,6 +211,68 @@ def test_tdm_d4_builders_and_select():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_dynamic_descriptor_builder
+@run
+def test_dynamic_descriptor_builder():
+    with w.module() as m:
+        with m.function("dynamic_descriptor", [w.i64()], kernel=True) as f:
+            (address,) = f.args
+            descriptor = f.gfx1250_tdm_descriptor(
+                address,
+                [16, 32],
+                [128, 1],
+                [16, 32],
+                element_bit_width=16,
+                lds_address=1024,
+            )
+            f.tdm_load(descriptor, after=f.token())
+
+        # CHECK: [[LOW:%.*]] = wave.cast intconvert %arg0 : i64 -> i32
+        # CHECK: [[SHIFTED:%.*]] = wave.binary shrui %arg0, {{.*}} : i64, i64 -> i64
+        # CHECK: [[HIGH:%.*]] = wave.cast intconvert [[SHIFTED]] : i64 -> i32
+        # CHECK: [[HIGH_MASKED:%.*]] = wave.binary andi [[HIGH]], {{.*}} : i32, i32 -> i32
+        # CHECK: [[HIGH_VALID:%.*]] = wave.binary ori [[HIGH_MASKED]], {{.*}} : i32, i32 -> i32
+        # CHECK: [[D0:%.*]] = wave.pack {{.*}}, {{.*}}, [[LOW]], [[HIGH_VALID]] : i32, i32, i32, i32 -> vector<4xi32>
+        # CHECK: waveamd.tdm_load d2 [[D0]],
+        assert m.module.operation.verify()
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_dynamic_index_descriptor_builder
+@run
+def test_dynamic_index_descriptor_builder():
+    with w.module() as m:
+        with m.function("dynamic_index_descriptor", [w.index_type()]) as f:
+            (address,) = f.args
+            descriptor = f.gfx1250_tdm_descriptor(
+                address,
+                [16, 32],
+                [128, 1],
+                [16, 32],
+                element_bit_width=16,
+            )
+            f.tdm_load(descriptor, after=f.token())
+
+        # CHECK: [[LOW:%.*]] = wave.cast intconvert %arg0 : index -> i32
+        # CHECK: [[SHIFTED:%.*]] = wave.binary shrui %arg0, {{.*}} : index, index -> index
+        # CHECK: wave.cast intconvert [[SHIFTED]] : index -> i32
+        assert m.module.operation.verify()
+        print(m.module)
+
+
+# CHECK-LABEL: TEST: test_intconvert_extension_builder
+@run
+def test_intconvert_extension_builder():
+    with w.module() as m:
+        with m.function("intconvert_extension", [w.i32()]) as f:
+            (value,) = f.args
+            f.intconvert(value, w.i64(), extension=w.CastExtension.Zero)
+
+        # CHECK: wave.cast intconvert %arg0 policy {extension = #wave.cast_extension<zero>} : i32 -> i64
+        assert m.module.operation.verify()
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_static_descriptor_errors
 @run
 def test_static_descriptor_errors():
@@ -284,6 +346,32 @@ def test_static_descriptor_errors():
         is_store=False,
     )
     assert non_power_of_two_padding.d1[0] >> 25 & 0x7F == 2
+    with w.module() as m, m.function("dynamic_errors", [w.i32()]) as f:
+        (address,) = f.args
+        assert_raises(
+            TypeError,
+            "dynamic TDM address must be uniform i64 or index",
+            lambda: f.gfx1250_tdm_descriptor(
+                address,
+                [16, 32],
+                [32, 1],
+                [16, 32],
+                element_bit_width=16,
+            ),
+        )
+        address64 = f.constant(w.i64(), 0)
+        assert_raises(
+            ValueError,
+            "dynamic TDM descriptor offsets must be folded into global_address",
+            lambda: f.gfx1250_tdm_descriptor(
+                address64,
+                [16, 32],
+                [32, 1],
+                [16, 32],
+                element_bit_width=16,
+                offsets=[1, 0],
+            ),
+        )
     print("static errors")
 
 

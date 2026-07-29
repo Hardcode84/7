@@ -259,6 +259,21 @@ MlirAttribute mlirWavePtrTypeGetAddressSpace(MlirType type) {
 // Wave symbolic attributes
 //===----------------------------------------------------------------------===//
 
+bool mlirWaveAttributeIsACastExtensionPolicy(MlirAttribute attr) {
+  return llvm::isa<wave::CastExtensionPolicyAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirWaveCastExtensionPolicyAttrGet(MlirContext ctx,
+                                                 uint32_t value) {
+  return wrap(wave::CastExtensionPolicyAttr::get(
+      unwrap(ctx), static_cast<wave::CastExtension>(value)));
+}
+
+uint32_t mlirWaveCastExtensionPolicyAttrGetValue(MlirAttribute attr) {
+  return static_cast<uint32_t>(
+      llvm::cast<wave::CastExtensionPolicyAttr>(unwrap(attr)).getValue());
+}
+
 bool mlirWaveAttributeIsAExpr(MlirAttribute attr) {
   return llvm::isa<wave::ExprAttr>(unwrap(attr));
 }

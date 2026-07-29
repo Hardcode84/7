@@ -325,6 +325,20 @@ static void bindStoreCacheAttr(nb::module_ &m) {
   cls.get_class().attr("WT") = nb::int_(4);
 }
 
+static void bindCastExtensionPolicyAttr(nb::module_ &m) {
+  auto cls = mlir_attribute_subclass(m, "CastExtensionPolicyAttr",
+                                     mlirWaveAttributeIsACastExtensionPolicy);
+  cls.def_classmethod(
+         "get",
+         [](nb::object &cls, uint32_t value, MlirContext ctx) {
+           return cls(mlirWaveCastExtensionPolicyAttrGet(ctx, value));
+         },
+         nb::arg("cls"), nb::arg("value"), nb::arg("context"))
+      .def_property_readonly("value", [](MlirAttribute self) {
+        return mlirWaveCastExtensionPolicyAttrGetValue(self);
+      });
+}
+
 // Single `register_dialects(context, load=True)` entry point that exposes
 // the user-facing `wave` / `waveamd` / `wavemeta` dialects and the
 // lower-level `waveamdmachine` dialect. Callers normally only need the
@@ -657,6 +671,7 @@ NB_MODULE(_waveDialectsNanobind, m) {
   bindPtrType(m);
 
   // Wave symbolic attributes.
+  bindCastExtensionPolicyAttr(m);
   bindExprAttr(m);
   bindPredAttr(m);
   bindRedistributionAttr(m);

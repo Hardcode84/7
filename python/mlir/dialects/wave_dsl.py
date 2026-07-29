@@ -39,6 +39,7 @@ from typing import Any
 import ixsimpl
 from mlir._mlir_libs._waveDialectsNanobind import (
     BufferAddressSpaceAttr,
+    CastExtensionPolicyAttr,
     ExprAttr,
     FragmentType,
     GlobalAddressSpaceAttr,
@@ -65,6 +66,7 @@ from mlir.ir import (
     Block,
     Context,
     DenseI32ArrayAttr,
+    DictAttr,
     F16Type,
     F32Type,
     IndexType,
@@ -135,6 +137,7 @@ xor = ixsimpl.xor_
 
 
 BinaryKind = wave.BinaryKind
+CastExtension = wave.CastExtension
 CastKind = wave.CastKind
 TDMDescriptorKind = waveamd.TDMDescriptorKind
 TDMPrefetchMode = waveamd.TDMPrefetchMode
@@ -342,15 +345,52 @@ class TDMDescriptorWords:
             return typing.cast(int, TDMDescriptorKind.D2)
         return typing.cast(int, TDMDescriptorKind.D4)
 
-    def materialize(self, builder: FunctionBuilder) -> TDMDescriptor:
-        groups = tuple(
+    def materialize(
+        self,
+        builder: FunctionBuilder,
+        *,
+        global_address: Value | None = None,
+    ) -> TDMDescriptor:
+        groups = list(self.groups)
+        materialized = []
+        if global_address is not None:
+            address_type = global_address.type
+            is_i64 = isinstance(address_type, IntegerType) and address_type.width == 64
+            if not is_i64 and not isinstance(address_type, IndexType):
+                raise TypeError("dynamic TDM address must be uniform i64 or index")
+            low = builder.cast(global_address, i32(), CastKind.IntConvert)
+            shifted = builder.binary(
+                BinaryKind.ShRUI,
+                global_address,
+                builder.constant(address_type, 32),
+            )
+            high = builder.cast(shifted, i32(), CastKind.IntConvert)
+            high = builder.binary(
+                BinaryKind.AndI,
+                high,
+                builder.constant(i32(), 0x01FFFFFF),
+            )
+            high = builder.binary(
+                BinaryKind.OrI,
+                high,
+                builder.constant(i32(), 0x80000000),
+            )
+            d0 = [
+                builder.constant(i32(), self.d0[0]),
+                builder.constant(i32(), self.d0[1]),
+                low,
+                high,
+            ]
+            materialized.append(builder.pack(d0, vector_type(4, i32())))
+            groups = groups[1:]
+        materialized.extend(
             builder.pack(
                 [builder.constant(i32(), word) for word in words],
                 vector_type(len(words), i32()),
             )
-            for words in self.groups
+            for words in groups
         )
-        return TDMDescriptor.from_groups(groups)
+        return TDMDescriptor.from_groups(tuple(materialized))
 
 
 def _validate_tdm_group(name: str, value: Value, width: int) -> None:
@@ -1244,6 +1284,24 @@ class FunctionBuilder:
     ) -> Value:
         return wave.CastOp(result_type, kind, source, policy=policy).result
 
+    def intconvert(
+        self,
+        source: Value,
+        result_type: Type,
+        *,
+        extension: object | None = None,
+    ) -> Value:
+        policy = None
+        if extension is not None:
+            policy = DictAttr.get(
+                {
+                    "extension": CastExtensionPolicyAttr.get(
+                        extension, context=_current_context()
+                    )
+                }
+            )
+        return self.cast(source, result_type, CastKind.IntConvert, policy=policy)
+
     def fpconvert(self, source: Value, result_type: Type) -> Value:
         return self.cast(source, result_type, CastKind.FpConvert)
 
@@ -1657,7 +1715,7 @@ class FunctionBuilder:
 
     def gfx1250_tdm_descriptor(
         self,
-        global_address: int,
+        global_address: int | Value,
         shape: Sequence[int],
         strides: Sequence[int],
         block_shape: Sequence[int],
@@ -1670,6 +1728,13 @@ class FunctionBuilder:
         padding: tuple[int, int] = (0, 0),
         is_store: bool | None = None,
     ) -> TDMDescriptor:
+        dynamic_address = global_address if isinstance(global_address, Value) else None
+        if dynamic_address is not None:
+            if offsets is not None and any(int(offset) != 0 for offset in offsets):
+                raise ValueError(
+                    "dynamic TDM descriptor offsets must be folded into global_address"
+                )
+            global_address = 0
         words = pack_gfx1250_tdm_descriptor(
             global_address,
             shape,
@@ -1683,7 +1748,7 @@ class FunctionBuilder:
             padding=padding,
             is_store=is_store,
         )
-        return words.materialize(self)
+        return words.materialize(self, global_address=dynamic_address)
 
     def _materialize_tdm_descriptor(
         self, descriptor: TDMDescriptor | TDMDescriptorWords
@@ -1960,6 +2025,9 @@ class FunctionBuilder:
     def memref_store(self, value: Value, buf: Value, indices: Sequence[Value]) -> None:
         memref.StoreOp(value, buf, list(indices))
 
+    def aligned_pointer_as_index(self, buf: Value) -> Value:
+        return memref.ExtractAlignedPointerAsIndexOp(buf).aligned_pointer
+
     def cast_unranked(self, buf: Value) -> Value:
         return memref.CastOp(unranked_memref_type(buf.type.element_type), buf).result
 
@@ -2108,6 +2176,8 @@ __all__ = [
     "BF16Type",
     "BinaryKind",
     "BufferAddressSpaceAttr",
+    "CastExtension",
+    "CastExtensionPolicyAttr",
     "CastKind",
     "CmpIPredicate",
     "Expr",

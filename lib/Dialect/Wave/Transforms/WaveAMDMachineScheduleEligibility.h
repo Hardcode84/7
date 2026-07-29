@@ -77,7 +77,7 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
 
 static inline bool isSupportedSchedulerClass(waveamdmachine::SchedClass cls) {
   using waveamdmachine::SchedClass;
-  static constexpr std::array<SchedClass, 20> kSupportedClasses = {
+  static constexpr std::array<SchedClass, 21> kSupportedClasses = {
       SchedClass::Write32Bit,        SchedClass::Write64Bit,
       SchedClass::WriteFloatFMA,     SchedClass::WriteDouble,
       SchedClass::WriteTrans32,      SchedClass::WriteSFPU,
@@ -87,7 +87,8 @@ static inline bool isSupportedSchedulerClass(waveamdmachine::SchedClass cls) {
       SchedClass::Write4PassWMMA,    SchedClass::Write8PassWMMA,
       SchedClass::Write16PassWMMA,   SchedClass::WriteVMEM,
       SchedClass::WriteSMEM,         SchedClass::WriteLDS,
-      SchedClass::WriteBarrier,      SchedClass::WriteExport};
+      SchedClass::WriteTDM,          SchedClass::WriteBarrier,
+      SchedClass::WriteExport};
   for (SchedClass supported : kSupportedClasses)
     if (cls == supported)
       return true;

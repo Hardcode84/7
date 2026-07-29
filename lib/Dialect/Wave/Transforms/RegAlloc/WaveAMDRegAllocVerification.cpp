@@ -494,6 +494,19 @@ static bool isAllowedReservedValue(Value value,
   int64_t index = type.getIndex();
   if (isa<waveamdmachine::KernargPreloadOp>(def))
     return isAllowedKernargPreloadValue(type, regs);
+  if (waveamdmachine::TupleToElementsOp split =
+          dyn_cast<waveamdmachine::TupleToElementsOp>(def)) {
+    waveamdmachine::RegType sourceType =
+        cast<waveamdmachine::RegType>(split.getTuple().getType());
+    unsigned offset = 0;
+    for (Value element : split.getElements()) {
+      if (element == value)
+        return isAllowedReservedValue(split.getTuple(), regs) &&
+               index == sourceType.getIndex() + offset;
+      offset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
+    }
+    return false;
+  }
   if (type.getWidth() != 1)
     return false;
   return isAllowedEntryRegValue(def, index, regs);
