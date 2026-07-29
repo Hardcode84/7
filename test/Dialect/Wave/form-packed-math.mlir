@@ -302,6 +302,33 @@ func.func @gfx950_rne_cast_quad_reused_by_pack(
   return %packed : !wave.simd<vector<4xf16>, 64>
 }
 
+// CHECK-LABEL: func.func @gfx950_bf16_cast_quad_reused_by_pack
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 64>, [[B:%.*]]: !wave.simd<f32, 64>, [[C:%.*]]: !wave.simd<f32, 64>, [[D:%.*]]: !wave.simd<f32, 64>)
+// CHECK: [[SRC:%.*]] = wave.pack [[A]], [[B]], [[C]], [[D]]
+// CHECK-SAME: -> !wave.simd<vector<4xf32>, 64>
+// CHECK: [[PACKED:%.*]] = wave.cast fpconvert [[SRC]]
+// CHECK-SAME: -> !wave.simd<vector<4xbf16>, 64>
+// CHECK-NOT: wave.extract [[PACKED]]
+// CHECK: return [[PACKED]]
+func.func @gfx950_bf16_cast_quad_reused_by_pack(
+    %a: !wave.simd<f32, 64>, %b: !wave.simd<f32, 64>,
+    %c: !wave.simd<f32, 64>, %d: !wave.simd<f32, 64>)
+    -> !wave.simd<vector<4xbf16>, 64> {
+  %x = wave.cast fpconvert %a
+      : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  %y = wave.cast fpconvert %b
+      : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  %z = wave.cast fpconvert %c
+      : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  %w = wave.cast fpconvert %d
+      : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  %packed = wave.pack %x, %y, %z, %w
+      : !wave.simd<bf16, 64>, !wave.simd<bf16, 64>,
+        !wave.simd<bf16, 64>, !wave.simd<bf16, 64>
+      -> !wave.simd<vector<4xbf16>, 64>
+  return %packed : !wave.simd<vector<4xbf16>, 64>
+}
+
 }
 
 // -----
@@ -323,6 +350,27 @@ func.func @gfx8_f16_math_stays_scalar(%a0: !wave.simd<f16, 64>,
   %s1 = wave.fadd %a1, %b1
       : !wave.simd<f16, 64>, !wave.simd<f16, 64> -> !wave.simd<f16, 64>
   return %s0, %s1 : !wave.simd<f16, 64>, !wave.simd<f16, 64>
+}
+
+// CHECK-LABEL: func.func @gfx8_bf16_cast_pack_stays_scalar
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 64>, [[B:%.*]]: !wave.simd<f32, 64>)
+// CHECK: [[X:%.*]] = wave.cast fpconvert [[A]]
+// CHECK-SAME: -> !wave.simd<bf16, 64>
+// CHECK: [[Y:%.*]] = wave.cast fpconvert [[B]]
+// CHECK-SAME: -> !wave.simd<bf16, 64>
+// CHECK: [[PACKED:%.*]] = wave.pack [[X]], [[Y]]
+// CHECK: return [[PACKED]]
+func.func @gfx8_bf16_cast_pack_stays_scalar(
+    %a: !wave.simd<f32, 64>, %b: !wave.simd<f32, 64>)
+    -> !wave.simd<vector<2xbf16>, 64> {
+  %x = wave.cast fpconvert %a
+      : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  %y = wave.cast fpconvert %b
+      : !wave.simd<f32, 64> -> !wave.simd<bf16, 64>
+  %packed = wave.pack %x, %y
+      : !wave.simd<bf16, 64>, !wave.simd<bf16, 64>
+      -> !wave.simd<vector<2xbf16>, 64>
+  return %packed : !wave.simd<vector<2xbf16>, 64>
 }
 
 }
