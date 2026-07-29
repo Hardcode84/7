@@ -32,6 +32,8 @@ Wave support includes:
   cluster signal/wait operations without LDS state;
 - synchronous B32/B64/B128 and async-to-LDS B8/B32/B64/B128 cluster loads
   carry explicit addresses, M0, and memory tokens;
+- cluster launch coverage builds an HSACO on every host, then runs exact
+  sentinel and broadcast checks when gfx1250 is present;
 - the dedicated unscheduled pipeline lowers scalar/vector global, buffer, LDS,
   SMEM, and scratch kernels through object link and disassembly;
 - pressure-driven allocation crosses `v255` and restores visible VGPR-window
@@ -147,7 +149,7 @@ LLVM source is the executable specification:
 - `llvm/docs/AMDGPUUsage.rst`
 - `llvm/docs/AMDGPUDMAOperations.md`
 
-Public LLVM source:
+Public source:
 
 - [gfx1250 processor model](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/GCNProcessors.td)
 - [gfx1250 feature set](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPU.td)
@@ -170,6 +172,7 @@ Public LLVM source:
 - [SALU delay insertion](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPUInsertDelayAlu.cpp)
 - [gfx1250 descriptor reference](https://github.com/llvm/llvm-project/blob/main/llvm/test/tools/llvm-objdump/ELF/AMDGPU/kd-gfx1250.s)
 - [AMDGPU target and ABI guide](https://github.com/llvm/llvm-project/blob/main/llvm/docs/AMDGPUUsage.rst)
+- [HIP cluster launch API](https://github.com/ROCm/rocm-systems/blob/develop/projects/hip/include/hip/hip_runtime_api.h)
 
 LLVM source and MC are the public instruction evidence used here. Every encoded
 instruction needs MC assembly and disassembly coverage. Hardware tests remain
@@ -266,7 +269,7 @@ cluster capability come from LLVM. Materialization allocates no LDS and leaves
 the function LDS size unchanged. Cluster pseudos are rejected inside
 structured control flow until cluster-uniform participation can be proven.
 Compile-only tests cover lowering, ticket waits, assembly, object generation,
-and disassembly. Runtime behavior remains a hardware gate.
+and disassembly. Runtime execution remains a hardware gate.
 
 ### Cluster Loads
 
@@ -290,6 +293,18 @@ during emission with LLVM subtarget data, not a duplicated Wave field width.
 LLVM models a synchronous load as one micro-op. Async-to-LDS uses two issue
 slots and both VMEM and LDS resources, but creates one ASYNC ticket and one
 expert VM-source event. Partial `s_wait_asynccnt` values remain legal.
+
+### Cluster Launch
+
+Cluster kernels use `hipDrvLaunchKernelEx` with one cluster-dimension launch
+attribute. Test compilation, LLVM assembly, HSACO linking, and disassembly run
+before host discovery. Missing gfx1250 hardware skips only kernel execution.
+
+Runtime coverage launches two clusters of four workgroups. Each workgroup
+writes unique lane IDs into sentinel-filled scratch. Cluster barrier completion
+precedes synchronous or async-to-LDS multicast from the cluster-base row.
+Scratch must contain every producer value. Every output lane must contain its
+exact cluster-base value; workgroup equality alone does not pass.
 
 ### TDM Transfer ABI
 
@@ -828,6 +843,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | cluster IDs | fixed-dimension folding, runtime TTMP reads, metadata assembly and disassembly |
 | cluster barriers | scope selection, election protocol, exact SCC-write retirement, no LDS allocation, assembly and disassembly |
 | cluster loads | all sync and async widths, explicit M0, token waits, assembly and disassembly |
+| cluster launch | unconditional HSACO build; conditional exact scratch and multicast checks through extended HIP launch |
 | TDM IR | D2/D4 tuple forms, typed modes, tuple-wise grouped selection, token chains |
 | TDM MC | load/store forms, SGPR tuple classes, visible assembly and disassembly |
 | waits | independent LOAD/STORE/DS/KM/X/ASYNC/TENSOR, nonzero async and tensor waits, joins, loops, atomics, termination |
