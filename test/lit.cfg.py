@@ -49,7 +49,7 @@ config.substitutions.append(("%wave_obj_root", config.wave_mlir_obj_root))
 if sys.platform.startswith("linux"):
     config.available_features.add("linux")
 
-_host_environment = ["HOME", "INCLUDE", "LIB", "TMP", "TEMP"]
+_host_environment = ["HOME", "HIP_RUNTIME_LIB", "INCLUDE", "LIB", "TMP", "TEMP"]
 # Runtime selection uses HSA_* variables that lit does not preserve by default.
 _host_environment.extend(sorted(name for name in os.environ if name.startswith("HSA_")))
 llvm_config.with_system_environment(_host_environment)
