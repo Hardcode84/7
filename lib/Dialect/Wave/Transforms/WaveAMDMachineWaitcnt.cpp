@@ -199,6 +199,17 @@ struct Token {
 
 static unsigned activeEventMask(ArrayRef<Token> tokens, Counter counter);
 
+static bool requiresZeroWait(Counter counter, unsigned activeEvents) {
+  if (counter == Counter::Km)
+    return (activeEvents & eventMask(waveamdmachine::WaitcntEvent::Smem)) ||
+           hasMultipleEvents(activeEvents);
+  if (counter == Counter::Lgkm)
+    return hasMultipleEvents(activeEvents);
+  if (counter == Counter::X)
+    return hasMixedXGroups(activeEvents);
+  return false;
+}
+
 static bool sortSourceKey(const Token &a, const Token &b) {
   if (a.execSource != b.execSource)
     return a.execSource < b.execSource;
@@ -409,22 +420,19 @@ static void bumpCounter(SmallVectorImpl<Token> &tokens, Counter counter,
 static void dropDrained(SmallVectorImpl<Token> &tokens, Counter counter,
                         unsigned threshold) {
   unsigned liveEvents = activeEventMask(tokens, counter);
-  tokens.erase(
-      std::remove_if(tokens.begin(), tokens.end(),
-                     [&](const Token &t) {
-                       if (t.counter != counter || t.position < threshold)
-                         return false;
-                       if (threshold == 0 || (t.counter != Counter::Lgkm &&
-                                              t.counter != Counter::X))
-                         return true;
-                       bool mixed = t.counter == Counter::Lgkm
-                                        ? hasMultipleEvents(liveEvents)
-                                        : hasMixedXGroups(liveEvents);
-                       if (t.outOfOrder || mixed)
-                         return false;
-                       return true;
-                     }),
-      tokens.end());
+  tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                              [&](const Token &t) {
+                                if (t.counter != counter ||
+                                    t.position < threshold)
+                                  return false;
+                                if (threshold == 0)
+                                  return true;
+                                if (t.outOfOrder ||
+                                    requiresZeroWait(t.counter, liveEvents))
+                                  return false;
+                                return true;
+                              }),
+               tokens.end());
 }
 
 static void dropXGroup(SmallVectorImpl<Token> &tokens, unsigned group,
@@ -436,6 +444,34 @@ static void dropXGroup(SmallVectorImpl<Token> &tokens, unsigned group,
                                        t.position >= threshold;
                               }),
                tokens.end());
+}
+
+static bool matchesIssuedEvent(const Token &token, Counter counter,
+                               ValueRange ids, unsigned mask) {
+  return token.counter == counter && llvm::is_contained(ids, token.id) &&
+         (token.events & mask);
+}
+
+static void dropIssuedEvent(SmallVectorImpl<Token> &tokens, Counter counter,
+                            ValueRange ids,
+                            waveamdmachine::WaitcntEvent event) {
+  unsigned mask = eventMask(event);
+  std::optional<unsigned> completedPosition;
+  for (Token &token : tokens)
+    if (matchesIssuedEvent(token, counter, ids, mask)) {
+      if (!completedPosition || token.position < *completedPosition)
+        completedPosition = token.position;
+      token.events &= ~mask;
+    }
+  tokens.erase(
+      std::remove_if(tokens.begin(), tokens.end(),
+                     [](const Token &token) { return token.events == 0; }),
+      tokens.end());
+  if (!completedPosition)
+    return;
+  for (Token &token : tokens)
+    if (token.counter == counter && token.position > *completedPosition)
+      --token.position;
 }
 
 static void applyWait(SmallVectorImpl<Token> &tokens,
@@ -765,6 +801,7 @@ static bool isControlFlowOp(Operation *op) {
 enum class OpKind {
   Skip,              // s_waitcnt, control-flow: handled separately.
   Issuer,            // VMEM/SMEM/LDS load or store: drain, then issue.
+  BarrierIssuer,     // Barrier fence which also creates a completion ticket.
   Barrier,           // s_barrier: drain AND derive result tokens.
   CompletionNeutral, // No new event; forward dependency completion.
   CompletionFree,    // Issue order only; no drain or completion transfer.
@@ -796,9 +833,13 @@ static OpKind classifyOp(Operation *op) {
     return OpKind::Skip;
   if (llvm::isa<waveamdmachine::GlobalAtomicAddAcqRelU32Op>(op))
     return OpKind::Barrier;
+  if (isMemoryIssuer(op) &&
+      llvm::isa<waveamdmachine::SBarrierSignalIsFirstOp>(op))
+    return OpKind::BarrierIssuer;
   if (isMemoryIssuer(op))
     return OpKind::Issuer;
-  if (llvm::isa<waveamdmachine::SBarrierOp, waveamdmachine::SBarrierSignalOp,
+  if (llvm::isa<waveamdmachine::ClusterBarrierOp, waveamdmachine::SBarrierOp,
+                waveamdmachine::SBarrierSignalOp,
                 waveamdmachine::SBarrierWaitOp>(op))
     return OpKind::Barrier;
   if (std::optional<OpKind> kind = classifyProtocolOp(op))
@@ -984,8 +1025,7 @@ static unsigned waitPosition(const WaitState &state, const Token &token) {
   if (token.outOfOrder)
     return 0;
   unsigned activeEvents = activeEventMask(state.tokens, token.counter);
-  if ((token.counter == Counter::Lgkm && hasMultipleEvents(activeEvents)) ||
-      (token.counter == Counter::X && hasMixedXGroups(activeEvents)))
+  if (requiresZeroWait(token.counter, activeEvents))
     return 0;
   return token.position;
 }
@@ -1192,7 +1232,8 @@ computeCallableBoundaryRequirement(const WaitState &state) {
 
 static void requireOperationOperands(WaitRequirement &req, Operation *op,
                                      const WaitState &state) {
-  bool issuer = isMemoryIssuer(op);
+  bool issuer = isMemoryIssuer(op) &&
+                !llvm::isa<waveamdmachine::SBarrierSignalIsFirstOp>(op);
   for (OpOperand &operand : op->getOpOperands()) {
     if (isD16LowPreservedOperand(operand))
       continue;
@@ -1325,6 +1366,25 @@ static void applyImplicitXGroupSwitch(Operation *op, WaitState &state,
                     0);
 }
 
+static void applyBarrierWaitCompletion(Operation *op, WaitState &state,
+                                       const WaitTarget &target) {
+  auto wait = dyn_cast<waveamdmachine::SBarrierWaitOp>(op);
+  if (!wait)
+    return;
+  auto signal = wait.getArrival()
+                    .getDefiningOp<waveamdmachine::SBarrierSignalIsFirstOp>();
+  if (!signal || signal.getScope() != wait.getScope())
+    return;
+  std::optional<waveamdmachine::WaitcntCounterMapping> mapping =
+      waveamdmachine::getWaitcntCounterMapping(
+          waveamdmachine::WaitcntEvent::SccWrite, target.family,
+          target.waitXcnt);
+  if (!mapping)
+    return;
+  lat::dropIssuedEvent(state.tokens, mapping->completion, signal->getResults(),
+                       waveamdmachine::WaitcntEvent::SccWrite);
+}
+
 static void recordIssue(Operation *op, WaitState &state,
                         const WaitTarget &target) {
   waveamdmachine::WaitcntInfo info = getWaitcntInfo(op);
@@ -1440,6 +1500,7 @@ static bool implicitlyDrainsXcnt(Operation *op) {
     return static_cast<bool>(loop.getEntryCond());
   return llvm::isa<
       waveamdmachine::BarrierArriveOp, waveamdmachine::BarrierWaitOp,
+      waveamdmachine::ClusterBarrierOp, waveamdmachine::SBarrierSignalIsFirstOp,
       waveamdmachine::SBarrierSignalOp, waveamdmachine::SBarrierWaitOp,
       waveamdmachine::SBarrierOp, waveamdmachine::SEndpgmOp,
       waveamdmachine::SGetregHwIdOp, waveamdmachine::SGetregShaderCyclesOp,
@@ -1632,9 +1693,14 @@ static void runTransfer(Operation *op, WaitState &state,
     recordIssue(op, state, target);
     deriveIssuerDependencyTokens(op, state);
     break;
+  case OpKind::BarrierIssuer:
+    applyDrain(op, state, target, emit);
+    recordIssue(op, state, target);
+    break;
   case OpKind::Barrier:
     // Drain ahead of the fence AND seed result tokens so downstream
     // loads of the same arena depend on it.
+    applyBarrierWaitCompletion(op, state, target);
     applyDrain(op, state, target, emit);
     applyImplicitXGroupSwitch(op, state, target);
     deriveResultTokens(op, state);

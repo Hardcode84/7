@@ -7515,9 +7515,22 @@ LogicalResult WaveAMDMachineSelector::selectBarrier(BarrierOp op) {
   SmallVector<Value> operands;
   for (Value dependency : op.getDependencies())
     operands.push_back(expect(dependency, op));
-  auto barrier = waveamdmachine::SBarrierOp::create(
-      builder, op.getLoc(), getMemTokenType(op.getContext()), operands);
-  values[op.getToken()] = barrier->getResult(0);
+  Type tokenType = getMemTokenType(op.getContext());
+  if (op.getScope() == BarrierScope::Cluster) {
+    FailureOr<llvm::AMDGPU::IsaVersion> isa =
+        getTargetIsaVersion(op, "cluster barrier lowering");
+    if (failed(isa))
+      return failure();
+    if (!waveamdmachine::ClusterBarrierOp::isSupportedOnIsa(*isa))
+      return op.emitError("cluster barrier unsupported on target");
+    values[op.getToken()] = waveamdmachine::ClusterBarrierOp::create(
+                                builder, op.getLoc(), tokenType, operands)
+                                .getToken();
+  } else {
+    values[op.getToken()] = waveamdmachine::SBarrierOp::create(
+                                builder, op.getLoc(), tokenType, operands)
+                                ->getResult(0);
+  }
   eraseIfTopLevel(op);
   return success();
 }

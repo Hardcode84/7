@@ -73,6 +73,8 @@ def WaveAMDMachine_WaitcntEventAsync :
     I32BitEnumCaseBit<"Async", 8, "async">;
 def WaveAMDMachine_WaitcntEventTensor :
     I32BitEnumCaseBit<"Tensor", 9, "tensor">;
+def WaveAMDMachine_WaitcntEventSccWrite :
+    I32BitEnumCaseBit<"SccWrite", 10, "scc_write">;
 
 def WaveAMDMachine_WaitcntEventEnum :
     I32BitEnum<"WaitcntEvent", "AMDGPU semantic wait event", [
@@ -86,7 +88,8 @@ def WaveAMDMachine_WaitcntEventEnum :
       WaveAMDMachine_WaitcntEventMessage,
       WaveAMDMachine_WaitcntEventScratchStore,
       WaveAMDMachine_WaitcntEventAsync,
-      WaveAMDMachine_WaitcntEventTensor
+      WaveAMDMachine_WaitcntEventTensor,
+      WaveAMDMachine_WaitcntEventSccWrite
     ]> {
   let cppNamespace = "::mlir::waveamdmachine";
 }

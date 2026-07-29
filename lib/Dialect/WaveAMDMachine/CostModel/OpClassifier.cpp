@@ -52,6 +52,11 @@ static bool isClusterIdentityRead(Operation *op) {
              SClusterWorkgroupMaxIdYOp, SClusterWorkgroupMaxIdZOp>(op);
 }
 
+static bool isBarrierClassOp(Operation *op) {
+  return isa<BarrierWaitOp, ClusterBarrierOp, SBarrierSignalIsFirstOp,
+             SBarrierSignalOp, SBarrierWaitOp, SBarrierOp>(op);
+}
+
 static SchedClass classifyMappedOp(Operation *op) {
   // Trait pre-filter for two large categories: ops that do not advance
   // instruction-distance hazards and the full VMEM load/store family.
@@ -65,6 +70,8 @@ static SchedClass classifyMappedOp(Operation *op) {
     return SchedClass::WriteLDS;
   if (isClusterIdentityRead(op))
     return SchedClass::WriteSALU;
+  if (isBarrierClassOp(op))
+    return SchedClass::WriteBarrier;
 
   // Type-driven dispatch for the rest. Lists are exhaustive over
   // the current dialect; new ops trigger the fallback path which
@@ -92,9 +99,6 @@ static SchedClass classifyMappedOp(Operation *op) {
       .Case<LabelOp, AfterOp, ContinueIfOp, YieldOp, ExecIfOp, UniformIfOp,
             UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
-      // Barrier.
-      .Case<BarrierWaitOp, SBarrierSignalOp, SBarrierWaitOp, SBarrierOp>(
-          [](auto) { return SchedClass::WriteBarrier; })
       .Case<SWaitAluOp>(
           [](auto) { return SchedClass::WaitcntPseudo; })
       // Branches / control flow / endpgm. UniformLoopOp + ContinueIfOp
@@ -133,8 +137,9 @@ static SchedClass classifyMappedOp(Operation *op) {
             SAndn2ExecB32Op, SAndn2ExecB64Op, SAndSaveexecB32Op,
             SAndSaveexecB64Op,
             SCmpEqI32Op, SCmpLgI32Op, SCmpGtI32Op, SCmpGeI32Op, SCmpLtI32Op,
-            SCmpLeI32Op, SCmpEqU32Op, SCmpLgU32Op, SCmpGtU32Op, SCmpGeU32Op,
-            SCmpLtU32Op, SCmpLeU32Op, SCmpEqU64Op, SCmpLgU64Op, SCSelectB32Op,
+            SCmpLeI32Op, SCmpEqU32Op, SCmpEqU32BarrierSeedOp, SCmpLgU32Op,
+            SCmpGtU32Op, SCmpGeU32Op, SCmpLtU32Op, SCmpLeU32Op,
+            SCmpEqU64Op, SCmpLgU64Op, SCSelectB32Op,
             SDelayAluOp, SLshlB32Op, SLshlB64Op, SLshrB32Op, SLshrB64Op,
             SAshrI32Op, SAshrI64Op, SMovB32Op, SMovB32TupleOp, SMovB32ValueOp,
             SMovB64ImmOp, SMovExecB64Op, SMovExecLoOp, SMovM0Op, SMovVccB32Op,

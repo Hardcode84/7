@@ -137,6 +137,7 @@ xor = ixsimpl.xor_
 
 
 BinaryKind = wave.BinaryKind
+BarrierScope = wave.BarrierScope
 CastExtension = wave.CastExtension
 CastKind = wave.CastKind
 ClusterAxis = wave.ClusterAxis
@@ -1838,9 +1839,13 @@ class FunctionBuilder:
         """End a ``wave.alloc`` lifetime after a memory dependency."""
         return wave.AllocReleaseOp(mem_token_type(), allocation, after).token
 
-    def barrier(self, *dependencies: Value) -> Value:
-        """Emit a workgroup-wide barrier sequenced after ``dependencies``."""
-        return wave.BarrierOp(mem_token_type(), list(dependencies)).token
+    def barrier(
+        self,
+        *dependencies: Value,
+        scope: object = BarrierScope.Workgroup,
+    ) -> Value:
+        """Emit a barrier sequenced after ``dependencies``."""
+        return wave.BarrierOp(mem_token_type(), list(dependencies), scope=scope).token
 
     # --- WaveAMD ops -------------------------------------------------------
 
@@ -2306,6 +2311,7 @@ def module() -> ModuleBuilder:
 
 __all__ = [
     "BF16Type",
+    "BarrierScope",
     "BinaryKind",
     "BufferAddressSpaceAttr",
     "CastExtension",

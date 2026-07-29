@@ -634,11 +634,13 @@ def WaveAMDSplitBarriers
 
 def WaveAMDMaterializeSplitBarriers
     : Pass<"waveamd-materialize-split-barriers"> {
-  let summary = "Lower WaveAMDMachine split barriers to LDS atomics";
+  let summary = "Materialize target barrier protocols";
   let description = [{
-    Lowers split-barrier pseudos to LDS counter init, returning arrive atomics,
-    and wait-side poll loops. Updates LDS accounting and shifts existing
-    dynamic LDS addresses when barrier state is reserved as a prefix.
+    Lowers gfx1250 workgroup and cluster barriers to native signal and wait
+    operations. Cluster barriers elect one signaling wave per workgroup.
+    Other targets lower split-barrier pseudos to LDS counter init, returning
+    arrive atomics, and wait-side poll loops. LDS accounting changes only for
+    the software protocol.
   }];
   let dependentDialects = [
     "func::FuncDialect",

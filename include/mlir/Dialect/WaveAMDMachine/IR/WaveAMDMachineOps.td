@@ -31,6 +31,19 @@ def WaveAMDMachine_SchedulingModeEnum :
   let cppNamespace = "::mlir::waveamdmachine";
 }
 
+def WaveAMDMachine_BarrierScopeWorkgroup :
+    I32EnumAttrCase<"Workgroup", 0, "workgroup">;
+def WaveAMDMachine_BarrierScopeCluster :
+    I32EnumAttrCase<"Cluster", 1, "cluster">;
+
+def WaveAMDMachine_BarrierScopeEnum :
+    I32EnumAttr<"BarrierScope", "AMDGPU barrier synchronization scope", [
+      WaveAMDMachine_BarrierScopeWorkgroup,
+      WaveAMDMachine_BarrierScopeCluster
+    ]> {
+  let cppNamespace = "::mlir::waveamdmachine";
+}
+
 defvar WaveAMDMachine_Gfx90APlus =
     "isa.Major == 9 && ((isa.Minor == 0 && isa.Stepping == 10) || " #
     "(isa.Minor == 4 && isa.Stepping == 2) || " #
@@ -3644,23 +3657,64 @@ def WaveAMDMachine_SBarrierOp : WaveAMDMachine_Op<"s_barrier"> {
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_SBarrierSignalOp
-    : WaveAMDMachine_Op<"s_barrier_signal"> {
-  let summary = "signal default workgroup barrier";
+def WaveAMDMachine_ClusterBarrierOp
+    : WaveAMDMachine_Op<"cluster_barrier"> {
+  let summary = "cluster-wide barrier";
   let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
   let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat =
+      "$dependencies attr-dict `:` functional-type(operands, results)";
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_SBarrierSignalOp
+    : WaveAMDMachine_Op<"s_barrier_signal"> {
+  let summary = "signal hardware barrier";
+  let arguments = (ins
+    Variadic<WaveAMDMachine_MemToken>:$dependencies,
+    DefaultValuedAttr<WaveAMDMachine_BarrierScopeEnum,
+      "::mlir::waveamdmachine::BarrierScope::Workgroup">:$scope
+  );
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
-    $dependencies attr-dict `:` functional-type(operands, results)
+    $dependencies (`scope` $scope^)? attr-dict `:`
+    functional-type(operands, results)
   }];
   let archPredicate = WaveAMDMachine_Gfx1250;
 }
 
 def WaveAMDMachine_SBarrierWaitOp : WaveAMDMachine_Op<"s_barrier_wait"> {
-  let summary = "wait on default workgroup barrier";
-  let arguments = (ins WaveAMDMachine_MemToken:$arrival);
+  let summary = "wait on hardware barrier";
+  let arguments = (ins
+    WaveAMDMachine_MemToken:$arrival,
+    DefaultValuedAttr<WaveAMDMachine_BarrierScopeEnum,
+      "::mlir::waveamdmachine::BarrierScope::Workgroup">:$scope
+  );
   let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
-    $arrival attr-dict `:` functional-type(operands, results)
+    $arrival (`scope` $scope^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_SBarrierSignalIsFirstOp
+    : WaveAMDMachine_Op<"s_barrier_signal_isfirst">,
+      WaveAMDMachine_WaitcntInfo<"SccWrite"> {
+  let summary = "signal hardware barrier and elect first arriving wave";
+  let arguments = (ins
+    WaveAMDMachine_SCC:$seed,
+    Variadic<WaveAMDMachine_MemToken>:$dependencies,
+    DefaultValuedAttr<WaveAMDMachine_BarrierScopeEnum,
+      "::mlir::waveamdmachine::BarrierScope::Workgroup">:$scope
+  );
+  let results = (outs
+    WaveAMDMachine_SCC:$is_first,
+    WaveAMDMachine_MemToken:$token
+  );
+  let assemblyFormat = [{
+    $seed (`after` $dependencies^)? (`scope` $scope^)? attr-dict `:`
+    functional-type(operands, results)
   }];
   let archPredicate = WaveAMDMachine_Gfx1250;
 }
@@ -4045,6 +4099,14 @@ def WaveAMDMachine_SCmpLgU64Op : WaveAMDMachine_SCmpU64<"s_cmp_lg_u64"> {
 
 def WaveAMDMachine_SCmpEqU32Op : WaveAMDMachine_SCmp<"s_cmp_eq_u32"> {
   let summary = "scalar unsigned equal compare";
+}
+// Election seed must survive singleton-state preservation and CSE.
+def WaveAMDMachine_SCmpEqU32BarrierSeedOp
+    : WaveAMDMachine_Op<"s_cmp_eq_u32_barrier_seed",
+                        [WaveAMDMachine_SALU]> {
+  let summary = "seed SCC before barrier wave election";
+  let results = (outs WaveAMDMachine_SCC:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
 }
 // SCC reload form writes singleton flag state; LICM must keep it local.
 def WaveAMDMachine_SCmpLgU32Op : WaveAMDMachine_SCmp<"s_cmp_lg_u32", []> {

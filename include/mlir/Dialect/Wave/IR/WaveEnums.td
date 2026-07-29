@@ -32,6 +32,17 @@ def Wave_ClusterAxisEnum : I32EnumAttr<"ClusterAxis", "Cluster axis", [
   let cppNamespace = "::mlir::wave";
 }
 
+def Wave_BarrierScopeWorkgroup :
+    I32EnumAttrCase<"Workgroup", 0, "workgroup">;
+def Wave_BarrierScopeCluster :
+    I32EnumAttrCase<"Cluster", 1, "cluster">;
+
+def Wave_BarrierScopeEnum : I32EnumAttr<"BarrierScope",
+    "Barrier synchronization scope",
+    [Wave_BarrierScopeWorkgroup, Wave_BarrierScopeCluster]> {
+  let cppNamespace = "::mlir::wave";
+}
+
 def Wave_BinaryKindAddI : I32EnumAttrCase<"AddI", 0, "addi">;
 def Wave_BinaryKindSubI : I32EnumAttrCase<"SubI", 1, "subi">;
 def Wave_BinaryKindMulI : I32EnumAttrCase<"MulI", 2, "muli">;

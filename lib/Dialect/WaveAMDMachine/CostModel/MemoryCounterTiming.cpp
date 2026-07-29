@@ -57,7 +57,8 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
-static constexpr std::array<std::pair<WaitcntEvent, MemoryIssueResourceMask>, 9>
+static constexpr std::array<std::pair<WaitcntEvent, MemoryIssueResourceMask>,
+                            10>
     waitcntIssueResources = {
         {{WaitcntEvent::Vmem,
           getMemoryIssueResourceMask(MemoryIssueResource::VmemLoad)},
@@ -73,6 +74,7 @@ static constexpr std::array<std::pair<WaitcntEvent, MemoryIssueResourceMask>, 9>
           getMemoryIssueResourceMask(MemoryIssueResource::Lds)},
          {WaitcntEvent::Message,
           getMemoryIssueResourceMask(MemoryIssueResource::Lds)},
+         {WaitcntEvent::SccWrite, 0},
          {WaitcntEvent::Smem,
           getMemoryIssueResourceMask(MemoryIssueResource::Smem)},
          {WaitcntEvent::None, 0}}};
@@ -135,6 +137,8 @@ bool isLdsDmaIssuer(Operation *op) { return op->hasTrait<traits::LDSDmaOp>(); }
 int getMemoryCounterLatency(const ArchData &arch, Operation *op,
                             const MemoryCounterLatencies &overrides,
                             const CalibrationData *calibration) {
+  static constexpr std::array defaultLatencyEvents = {
+      WaitcntEvent::Async, WaitcntEvent::Tensor, WaitcntEvent::SccWrite};
   SchedClass cls = classifyOp(op);
   int defaultLatency = getConfiguredLatency(arch, cls, calibration);
   WaitcntEvent event = getWaitcntInfo(op).event;
@@ -142,7 +146,7 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemLoad, defaultLatency);
   if (event == WaitcntEvent::VmemStore || event == WaitcntEvent::ScratchStore)
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
-  if (event == WaitcntEvent::Async || event == WaitcntEvent::Tensor)
+  if (llvm::is_contained(defaultLatencyEvents, event))
     return defaultLatency;
   if (isLDSCounterIssuer(op))
     return overrideOrDefault(overrides.lds, arch.ldsCounterLatency == 0

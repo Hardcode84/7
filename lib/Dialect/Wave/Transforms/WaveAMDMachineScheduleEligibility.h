@@ -54,6 +54,7 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
              waveamdmachine::SCmpLgI32Op, waveamdmachine::SCmpGtI32Op,
              waveamdmachine::SCmpGeI32Op, waveamdmachine::SCmpLtI32Op,
              waveamdmachine::SCmpLeI32Op, waveamdmachine::SCmpEqU32Op,
+             waveamdmachine::SCmpEqU32BarrierSeedOp,
              waveamdmachine::SCmpLgU32Op, waveamdmachine::SCmpGtU32Op,
              waveamdmachine::SCmpGeU32Op, waveamdmachine::SCmpLtU32Op,
              waveamdmachine::SCmpLeU32Op, waveamdmachine::SCmpEqU64Op,

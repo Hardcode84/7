@@ -28,6 +28,8 @@ Wave support includes:
   target facts;
 - fixed cluster dimensions emit HSA metadata and cluster identity reads lower
   from architected TTMP inputs;
+- cluster barriers use native wave election, workgroup rendezvous, and
+  cluster signal/wait operations without LDS state;
 - synchronous B32/B64/B128 and async-to-LDS B8/B32/B64/B128 cluster loads
   carry explicit addresses, M0, and memory tokens;
 - the dedicated unscheduled pipeline lowers scalar/vector global, buffer, LDS,
@@ -68,6 +70,7 @@ Compile-time support includes:
 - full `v0` through `v1023` allocation with late VGPR-window lowering;
 - legal HSA kernel descriptors and entry sequence;
 - LLVM-compatible cluster metadata and identity lowering;
+- native workgroup and cluster barrier protocols with explicit memory tokens;
 - tokenized cluster multicast loads with LLVM-backed MC emission;
 - split gfx12.5 wait counters driven by explicit memory tokens;
 - correct buffer-resource packing, LDS facts, tuple alignment, and register
@@ -237,6 +240,33 @@ emission and name the unsupported WaveAMDMachine operation.
 This work should reuse the declarative WaveAMDMachine MC-emission project.
 Bring-up owns gfx1250 mappings and coverage; it should not create a parallel
 handwritten emitter.
+
+### Cluster Barriers
+
+`wave.barrier` defaults to workgroup scope. Cluster scope selects a dedicated
+`waveamdmachine.cluster_barrier` scheduling pseudo. Both scopes preserve only
+explicit memory-token edges.
+
+Late barrier materialization expands each cluster pseudo:
+
+1. seed SCC true;
+2. signal-and-elect on the workgroup barrier;
+3. wait on that workgroup barrier;
+4. let the elected wave signal the cluster barrier;
+5. let every wave wait on the cluster barrier.
+
+The seed is a non-CSE machine op. `signal_isfirst` creates an SCC-write KM
+ticket. A same-scope workgroup wait on its token completes only that ticket.
+Other KM work survives. Mixed SCC-write and SMEM state requires a zero KM
+wait. Ticket analysis owns these waits; MC emission maps each final machine op
+to one MC instruction.
+
+Cluster and workgroup barrier IDs, operand names, opcode availability, and
+cluster capability come from LLVM. Materialization allocates no LDS and leaves
+the function LDS size unchanged. Cluster pseudos are rejected inside
+structured control flow until cluster-uniform participation can be proven.
+Compile-only tests cover lowering, ticket waits, assembly, object generation,
+and disassembly. Runtime behavior remains a hardware gate.
 
 ### Cluster Loads
 
@@ -776,6 +806,9 @@ Reject unsupported work before final emission. Required diagnostics include:
 - register index above `v1023` or the occupancy budget;
 - high-VGPR operand without a lowering table;
 - legacy async, named-barrier, or SWMMAC operation used;
+- cluster barrier used on another target or inside unproven structured control
+  flow;
+- unmaterialized gfx1250 barrier pseudo reaching MC emission;
 - TDM operation used on another target;
 - D2 with extra groups or D4 without exactly D2 and D3;
 - TDM tuple outside its LLVM operand register class;
@@ -793,6 +826,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
 | cluster IDs | fixed-dimension folding, runtime TTMP reads, metadata assembly and disassembly |
+| cluster barriers | scope selection, election protocol, exact SCC-write retirement, no LDS allocation, assembly and disassembly |
 | cluster loads | all sync and async widths, explicit M0, token waits, assembly and disassembly |
 | TDM IR | D2/D4 tuple forms, typed modes, tuple-wise grouped selection, token chains |
 | TDM MC | load/store forms, SGPR tuple classes, visible assembly and disassembly |
@@ -802,8 +836,8 @@ Reject unsupported work before final emission. Required diagnostics include:
 | resources | 32-bank choice, 320 KiB bound, target tuple alignment, and LLVM-reported VGPR limits |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, TDM WriteTDM/HWLGKM/HWVMEM pressure, target hazards |
-| Python | exact profile selection, descriptor packing, grouped selects, wrong-family rejection |
-| Integration | scalar/vector and cluster memory, cluster IDs, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
+| Python | typed barrier scope, exact profile selection, descriptor packing, grouped selects, wrong-family rejection |
+| Integration | scalar/vector and cluster memory, cluster IDs and barriers, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
 | hardware | separate runtime-correctness gate |
 | measured PerfGolden | separate performance gate |
 
@@ -845,6 +879,8 @@ Compile-time support is complete when:
 - all four VGPR windows pass MC, CFG, hazard, resource, and Integration tests;
 - descriptor, waits, resources, and fragments match the LLVM contract;
 - cluster metadata and identity reads assemble and disassemble;
+- cluster barriers preserve token order, emit one cluster signal per workgroup,
+  allocate no LDS state, and round-trip through LLVM MC;
 - every cluster load width preserves explicit token and M0 dependencies through
   assembly and disassembly;
 - TDM D2/D4 tuples select legal LLVM opcodes and register classes;

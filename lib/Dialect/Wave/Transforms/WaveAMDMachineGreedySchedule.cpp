@@ -1330,8 +1330,12 @@ static unsigned findFirstReadyByOriginal(const BitVector &ready) {
   return ready.size();
 }
 
+static bool isFullBarrierOp(Operation *op) {
+  return isa<waveamdmachine::ClusterBarrierOp, waveamdmachine::SBarrierOp>(op);
+}
+
 static bool isBarrierOp(Operation *op) {
-  return isa<waveamdmachine::BarrierWaitOp, waveamdmachine::SBarrierOp>(op);
+  return isa<waveamdmachine::BarrierWaitOp>(op) || isFullBarrierOp(op);
 }
 
 static void recordGapStats(Operation *op, const IssuePreview &preview,
@@ -1934,13 +1938,13 @@ static unsigned findReadyBarrierPairFiller(const BitVector &ready,
                                            const GreedyRegion &region,
                                            const BitVector &scheduled,
                                            unsigned next) {
-  if (!isa<waveamdmachine::SBarrierOp>(region.ops[next]))
+  if (!isFullBarrierOp(region.ops[next]))
     return region.ops.size();
 
   unsigned filler = region.ops.size();
   for (unsigned index : llvm::seq(next + 1, ready.size())) {
     Operation *op = region.ops[index];
-    if (isa<waveamdmachine::SBarrierOp>(op))
+    if (isFullBarrierOp(op))
       return scheduled.test(index) ? region.ops.size() : filler;
     if (!isPure(op))
       return region.ops.size();
@@ -1968,8 +1972,7 @@ findReadyTokenConsumer(const BitVector &ready, const GreedyRegion &region,
     if (findReadyBarrierPairFiller(ready, region, scheduled, index) !=
         region.ops.size())
       return region.ops.size();
-    if (isa<waveamdmachine::SBarrierOp>(region.ops[next]) &&
-        isa<waveamdmachine::SBarrierOp>(region.ops[index]))
+    if (isFullBarrierOp(region.ops[next]) && isFullBarrierOp(region.ops[index]))
       return region.ops.size();
     FailureOr<bool> canMove = canIssueTokenConsumerBeforeNext(
         region, graph, scheduled, next, index, state, origins);
@@ -2842,8 +2845,8 @@ canUseGenericStallFiller(unsigned candidate, unsigned next,
                          FillableStall stall) {
   if (candidate == next)
     return false;
-  if (isa<waveamdmachine::SBarrierOp>(region.ops[next]) &&
-      isa<waveamdmachine::SBarrierOp>(region.ops[candidate]))
+  if (isFullBarrierOp(region.ops[next]) &&
+      isFullBarrierOp(region.ops[candidate]))
     return false;
   if (!canUseStallFiller(graph, scheduled, next, candidate))
     return false;

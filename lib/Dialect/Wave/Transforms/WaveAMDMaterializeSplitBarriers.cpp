@@ -59,6 +59,12 @@ struct SplitBarrierOps {
   }
 };
 
+struct NativeBarrierSupport {
+  bool split = false;
+  bool signalIsFirst = false;
+  bool clusters = false;
+};
+
 struct MachineTypes {
   Type imm;
   Type token;
@@ -623,15 +629,17 @@ validateArriveWaitPairs(ArrayRef<waveamdmachine::BarrierArriveOp> arrives,
   return success();
 }
 
-static FailureOr<bool> supportsNativeSplitBarriers(func::FuncOp func) {
+static FailureOr<NativeBarrierSupport>
+getNativeBarrierSupport(func::FuncOp func) {
   FailureOr<llvm::AMDGPU::IsaVersion> isa =
       waveamdmachine::getAMDGPUTargetIsaVersion(
           func, "waveamd-materialize-split-barriers");
   if (failed(isa))
     return failure();
+  NativeBarrierSupport support;
   if (!waveamdmachine::SBarrierSignalOp::isSupportedOnIsa(*isa) ||
       !waveamdmachine::SBarrierWaitOp::isSupportedOnIsa(*isa))
-    return false;
+    return support;
 
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
       waveamdmachine::createAMDGPUMCSubtargetInfo(
@@ -639,14 +647,24 @@ static FailureOr<bool> supportsNativeSplitBarriers(func::FuncOp func) {
   if (failed(sti))
     return failure();
   const llvm::FeatureBitset &features = (*sti)->getFeatureBits();
-  return waveamdmachine::isAMDGPUOpcodeAvailable(
-             llvm::AMDGPU::S_BARRIER_SIGNAL_IMM, features) &&
-         waveamdmachine::isAMDGPUOpcodeAvailable(llvm::AMDGPU::S_BARRIER_WAIT,
-                                                 features);
+  support.split = waveamdmachine::isAMDGPUOpcodeAvailable(
+                      llvm::AMDGPU::S_BARRIER_SIGNAL_IMM, features) &&
+                  waveamdmachine::isAMDGPUOpcodeAvailable(
+                      llvm::AMDGPU::S_BARRIER_WAIT, features);
+  support.signalIsFirst =
+      waveamdmachine::SBarrierSignalIsFirstOp::isSupportedOnIsa(*isa) &&
+      waveamdmachine::isAMDGPUOpcodeAvailable(
+          llvm::AMDGPU::S_BARRIER_SIGNAL_ISFIRST_IMM, features);
+  std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
+      waveamdmachine::getAMDGPUTargetCapabilities(**sti);
+  support.clusters = capabilities && capabilities->clusters;
+  return support;
 }
 
 static bool isBarrierProtocolOp(Operation *op) {
   return isa<waveamdmachine::BarrierArriveOp, waveamdmachine::BarrierWaitOp,
+             waveamdmachine::ClusterBarrierOp,
+             waveamdmachine::SBarrierSignalIsFirstOp,
              waveamdmachine::SBarrierSignalOp, waveamdmachine::SBarrierWaitOp,
              waveamdmachine::SBarrierOp>(op);
 }
@@ -724,6 +742,34 @@ validateNativeSplitBarriers(ArrayRef<waveamdmachine::BarrierInitOp> inits,
   return success();
 }
 
+static Value materializeNativeClusterArrival(OpBuilder &builder, Location loc,
+                                             ValueRange dependencies,
+                                             MachineTypes types) {
+  Value seed =
+      waveamdmachine::SCmpEqU32BarrierSeedOp::create(builder, loc, types.scc)
+          .getResult();
+  auto first = waveamdmachine::SBarrierSignalIsFirstOp::create(
+      builder, loc, types.scc, types.token, seed, dependencies,
+      waveamdmachine::BarrierScope::Workgroup);
+  auto localReady = waveamdmachine::SBarrierWaitOp::create(
+      builder, loc, types.token, first.getToken(),
+      waveamdmachine::BarrierScope::Workgroup);
+  auto elected = waveamdmachine::UniformIfOp::create(
+      builder, loc, TypeRange{types.token}, first.getIsFirst());
+
+  Block *thenBlock = builder.createBlock(&elected.getThenRegion());
+  builder.setInsertionPointToStart(thenBlock);
+  auto clusterSignal = waveamdmachine::SBarrierSignalOp::create(
+      builder, loc, types.token, ValueRange{localReady.getToken()},
+      waveamdmachine::BarrierScope::Cluster);
+  waveamdmachine::YieldOp::create(builder, loc, clusterSignal.getToken());
+
+  Block *elseBlock = builder.createBlock(&elected.getElseRegion());
+  builder.setInsertionPointToStart(elseBlock);
+  waveamdmachine::YieldOp::create(builder, loc, localReady.getToken());
+  return elected.getResult(0);
+}
+
 static LogicalResult materializeNativeSplitBarriers(
     MLIRContext *ctx, ArrayRef<waveamdmachine::BarrierArriveOp> arrives,
     ArrayRef<waveamdmachine::BarrierWaitOp> waits) {
@@ -732,19 +778,66 @@ static LogicalResult materializeNativeSplitBarriers(
     builder.setInsertionPoint(arrive);
     auto signal = waveamdmachine::SBarrierSignalOp::create(
         builder, arrive.getLoc(), arrive.getToken().getType(),
-        arrive.getDependencies());
+        arrive.getDependencies(), waveamdmachine::BarrierScope::Workgroup);
     arrive.getToken().replaceAllUsesWith(signal.getToken());
   }
   for (waveamdmachine::BarrierWaitOp wait : waits) {
     builder.setInsertionPoint(wait);
     auto nativeWait = waveamdmachine::SBarrierWaitOp::create(
-        builder, wait.getLoc(), wait.getToken().getType(), wait.getArrival());
+        builder, wait.getLoc(), wait.getToken().getType(), wait.getArrival(),
+        waveamdmachine::BarrierScope::Workgroup);
     wait.getToken().replaceAllUsesWith(nativeWait.getToken());
     wait.erase();
   }
   for (waveamdmachine::BarrierArriveOp arrive : arrives)
     arrive.erase();
   return success();
+}
+
+static LogicalResult
+validateClusterBarriers(ArrayRef<waveamdmachine::ClusterBarrierOp> barriers) {
+  for (waveamdmachine::ClusterBarrierOp barrier : barriers)
+    if (barrier->getParentOfType<waveamdmachine::ExecIfOp>() ||
+        barrier->getParentOfType<waveamdmachine::UniformIfOp>() ||
+        barrier->getParentOfType<waveamdmachine::UniformLoopOp>())
+      return barrier.emitError(
+          "cluster barrier cannot be nested in structured control flow");
+  return success();
+}
+
+static void materializeClusterBarriers(
+    func::FuncOp func, ArrayRef<waveamdmachine::ClusterBarrierOp> barriers) {
+  MachineTypes types = getMachineTypes(func.getContext());
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::ClusterBarrierOp barrier : barriers) {
+    builder.setInsertionPoint(barrier);
+    Value arrival = materializeNativeClusterArrival(
+        builder, barrier.getLoc(), barrier.getDependencies(), types);
+    builder.setInsertionPoint(barrier);
+    auto ready = waveamdmachine::SBarrierWaitOp::create(
+        builder, barrier.getLoc(), types.token, arrival,
+        waveamdmachine::BarrierScope::Cluster);
+    barrier.getToken().replaceAllUsesWith(ready.getToken());
+    barrier.erase();
+  }
+}
+
+static void materializeFullWorkgroupBarriers(
+    func::FuncOp func, ArrayRef<waveamdmachine::SBarrierOp> barriers) {
+  Type tokenType = waveamdmachine::MemTokenType::get(func.getContext());
+  OpBuilder builder(func.getContext());
+  for (waveamdmachine::SBarrierOp barrier : barriers) {
+    builder.setInsertionPoint(barrier);
+    auto signal = waveamdmachine::SBarrierSignalOp::create(
+        builder, barrier.getLoc(), tokenType, barrier.getDependencies(),
+        waveamdmachine::BarrierScope::Workgroup);
+    auto wait = waveamdmachine::SBarrierWaitOp::create(
+        builder, barrier.getLoc(), tokenType, signal.getToken(),
+        waveamdmachine::BarrierScope::Workgroup);
+    for (Value result : barrier->getResults())
+      result.replaceAllUsesWith(wait.getToken());
+    barrier.erase();
+  }
 }
 
 static LogicalResult materializeArrive(OpBuilder &builder,
@@ -887,6 +980,23 @@ static SplitBarrierOps collectSplitBarrierOps(func::FuncOp func) {
   return ops;
 }
 
+static SmallVector<waveamdmachine::ClusterBarrierOp>
+collectClusterBarriers(func::FuncOp func) {
+  SmallVector<waveamdmachine::ClusterBarrierOp> barriers;
+  func.walk([&](waveamdmachine::ClusterBarrierOp barrier) {
+    barriers.push_back(barrier);
+  });
+  return barriers;
+}
+
+static SmallVector<waveamdmachine::SBarrierOp>
+collectFullWorkgroupBarriers(func::FuncOp func) {
+  SmallVector<waveamdmachine::SBarrierOp> barriers;
+  func.walk(
+      [&](waveamdmachine::SBarrierOp barrier) { barriers.push_back(barrier); });
+  return barriers;
+}
+
 static FailureOr<unsigned> getMaterializationWavefrontSize(func::FuncOp func) {
   FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
       func, "waveamd-materialize-split-barriers");
@@ -951,8 +1061,7 @@ eraseMaterializedInits(ArrayRef<waveamdmachine::BarrierInitOp> inits) {
 
 static LogicalResult materializeNativeFunc(func::FuncOp func,
                                            const SplitBarrierOps &ops) {
-  if (failed(validateNativeSplitBarriers(ops.inits, ops.arrives, ops.waits)) ||
-      failed(materializeNativeSplitBarriers(func.getContext(), ops.arrives,
+  if (failed(materializeNativeSplitBarriers(func.getContext(), ops.arrives,
                                             ops.waits)))
     return failure();
   return eraseMaterializedInits(ops.inits);
@@ -983,23 +1092,73 @@ static LogicalResult materializeLegacyFunc(func::FuncOp func,
   return eraseMaterializedInits(ops.inits);
 }
 
+static bool
+hasBarrierWork(const SplitBarrierOps &ops,
+               ArrayRef<waveamdmachine::ClusterBarrierOp> clusterBarriers,
+               ArrayRef<waveamdmachine::SBarrierOp> workgroupBarriers) {
+  return !ops.empty() || !clusterBarriers.empty() || !workgroupBarriers.empty();
+}
+
+static LogicalResult validateBarrierInputs(
+    func::FuncOp func, const SplitBarrierOps &ops,
+    ArrayRef<waveamdmachine::ClusterBarrierOp> clusterBarriers) {
+  if (ops.empty())
+    return validateClusterBarriers(clusterBarriers);
+  if (ops.inits.empty())
+    return func.emitError("split barrier materialization found no init ops");
+  if (failed(validateArriveWaitPairs(ops.arrives, ops.waits)))
+    return failure();
+  return validateClusterBarriers(clusterBarriers);
+}
+
+static LogicalResult validateNativeClusterSupport(
+    ArrayRef<waveamdmachine::ClusterBarrierOp> clusterBarriers,
+    const NativeBarrierSupport &support) {
+  if (clusterBarriers.empty() ||
+      (support.split && support.signalIsFirst && support.clusters))
+    return success();
+  return clusterBarriers.front()->emitError(
+      "cluster barriers unsupported on target");
+}
+
+static LogicalResult materializeNativeBarriers(
+    func::FuncOp func, const SplitBarrierOps &ops,
+    ArrayRef<waveamdmachine::ClusterBarrierOp> clusterBarriers,
+    ArrayRef<waveamdmachine::SBarrierOp> workgroupBarriers) {
+  if (!ops.empty() &&
+      failed(validateNativeSplitBarriers(ops.inits, ops.arrives, ops.waits)))
+    return failure();
+  materializeFullWorkgroupBarriers(func, workgroupBarriers);
+  materializeClusterBarriers(func, clusterBarriers);
+  if (!ops.empty())
+    return materializeNativeFunc(func, ops);
+  return success();
+}
+
 static LogicalResult materializeFunc(func::FuncOp func) {
   if (func.isExternal())
     return success();
 
   SplitBarrierOps ops = collectSplitBarrierOps(func);
-  if (ops.empty())
+  SmallVector<waveamdmachine::ClusterBarrierOp> clusterBarriers =
+      collectClusterBarriers(func);
+  SmallVector<waveamdmachine::SBarrierOp> workgroupBarriers =
+      collectFullWorkgroupBarriers(func);
+  if (!hasBarrierWork(ops, clusterBarriers, workgroupBarriers))
     return success();
-  if (ops.inits.empty())
-    return func.emitError("split barrier materialization found no init ops");
-  if (failed(validateArriveWaitPairs(ops.arrives, ops.waits)))
+  if (failed(validateBarrierInputs(func, ops, clusterBarriers)))
     return failure();
 
-  FailureOr<bool> native = supportsNativeSplitBarriers(func);
-  if (failed(native))
+  FailureOr<NativeBarrierSupport> support = getNativeBarrierSupport(func);
+  if (failed(support))
     return failure();
-  if (*native)
-    return materializeNativeFunc(func, ops);
+  if (failed(validateNativeClusterSupport(clusterBarriers, *support)))
+    return failure();
+  if (support->split)
+    return materializeNativeBarriers(func, ops, clusterBarriers,
+                                     workgroupBarriers);
+  if (ops.empty())
+    return success();
   return materializeLegacyFunc(func, ops);
 }
 

@@ -200,7 +200,7 @@ static InstructionWaitCounterKind toInstructionCounter(MemoryCounterKind kind) {
   llvm_unreachable("bad memory counter");
 }
 
-static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 11>
+static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 12>
     eventClasses = {
         {{WaitcntEvent::Vmem, InstructionEventClass::VmemLoad},
          {WaitcntEvent::Flat, InstructionEventClass::VmemLoad},
@@ -209,6 +209,7 @@ static constexpr std::array<std::pair<WaitcntEvent, InstructionEventClass>, 11>
          {WaitcntEvent::Lds, InstructionEventClass::LdsDs},
          {WaitcntEvent::Gds, InstructionEventClass::LdsDs},
          {WaitcntEvent::Message, InstructionEventClass::Message},
+         {WaitcntEvent::SccWrite, InstructionEventClass::Message},
          {WaitcntEvent::Smem, InstructionEventClass::Smem},
          {WaitcntEvent::Async, InstructionEventClass::Async},
          {WaitcntEvent::Tensor, InstructionEventClass::Tensor},
@@ -505,7 +506,8 @@ bool isInstructionExecutionStateArchSupported(
 bool waitsForMemoryTokenDepsBeforeIssue(Operation *op) {
   if (!hasMemoryTokenOperand(op))
     return false;
-  if (isa<SBarrierOp, SBarrierSignalOp, BarrierArriveOp>(op))
+  if (isa<ClusterBarrierOp, SBarrierOp, SBarrierSignalIsFirstOp,
+          SBarrierSignalOp, BarrierArriveOp>(op))
     return true;
   if (op->hasTrait<traits::LDSDmaOp>())
     return true;

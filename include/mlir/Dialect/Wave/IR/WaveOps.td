@@ -638,21 +638,27 @@ def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
 }
 
 def Wave_BarrierOp : Wave_Op<"barrier", [MemoryEffects<[MemWrite, MemRead]>]> {
-  let summary = "workgroup-wide barrier";
+  let summary = "barrier with selectable synchronization scope";
   let description = [{
-    Synchronizes all waves of the workgroup. Lowering must ensure that
-    all memory operations preceding the barrier in any wave are visible
-    to all waves after the barrier, via the usual hardware fences
-    (`s_waitcnt lgkmcnt(0)` before `s_barrier` on RDNA3).
+    Synchronizes all waves of the workgroup by default. Cluster scope
+    synchronizes all workgroups in the workgroup cluster.
 
     The optional `dependencies` carry token-level ordering: a barrier
     that depends on an earlier LDS store cannot be moved above it, and
     the returned token sequences subsequent LDS loads after the barrier.
+    No memory dependency is inferred.
   }];
 
-  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
+  let arguments = (ins
+    Variadic<Wave_MemToken>:$dependencies,
+    DefaultValuedAttr<Wave_BarrierScopeEnum,
+      "::mlir::wave::BarrierScope::Workgroup">:$scope
+  );
   let results = (outs Wave_MemToken:$token);
-  let assemblyFormat = "($dependencies^)? attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    ($dependencies^)? (`scope` $scope^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
 }
 
 def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure, ViewLikeOpInterface]> {

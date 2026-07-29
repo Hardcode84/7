@@ -232,7 +232,11 @@ func.func @memory_and_sync() {
       : (!waveamdmachine.imm,
          !waveamdmachine.reg<vgpr, 1, 6>,
          !waveamdmachine.reg<sgpr, 1, 13>) -> ()
-  waveamdmachine.s_barrier : () -> ()
+  %barrier_root = waveamdmachine.token : !waveamdmachine.mem.token
+  %barrier_signal = waveamdmachine.s_barrier_signal %barrier_root
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %barrier_ready = waveamdmachine.s_barrier_wait %barrier_signal
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   waveamdmachine.s_endpgm
   return
 }
@@ -260,6 +264,36 @@ func.func @split_barrier_phases() {
          !waveamdmachine.reg<vgpr, 1, 1>)
         -> !waveamdmachine.reg<vgpr, 1, 2>
   %wait = waveamdmachine.s_barrier_wait %signal
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: cluster_barrier_instructions:
+// ASM: s_cmp_eq_u32 0, 0
+// ASM-NEXT: s_barrier_signal_isfirst -1
+// ASM-NEXT: s_barrier_wait -1
+// ASM-NEXT: s_barrier_signal -3
+// ASM-NEXT: s_barrier_wait -3
+// ASM-NEXT: s_endpgm
+// DIS-LABEL: <cluster_barrier_instructions>:
+// DIS: s_cmp_eq_u32 0, 0
+// DIS-NEXT: s_barrier_signal_isfirst -1
+// DIS-NEXT: s_barrier_wait 0xffff
+// DIS-NEXT: s_barrier_signal -3
+// DIS-NEXT: s_barrier_wait 0xfffd
+// DIS-NEXT: s_endpgm
+func.func @cluster_barrier_instructions() {
+  %seed = waveamdmachine.s_cmp_eq_u32_barrier_seed
+      : !waveamdmachine.reg<scc, 1>
+  %first, %local = waveamdmachine.s_barrier_signal_isfirst %seed
+      : (!waveamdmachine.reg<scc, 1>)
+        -> (!waveamdmachine.reg<scc, 1>, !waveamdmachine.mem.token)
+  %local_ready = waveamdmachine.s_barrier_wait %local
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %cluster = waveamdmachine.s_barrier_signal %local_ready scope cluster
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %ready = waveamdmachine.s_barrier_wait %cluster scope cluster
       : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   waveamdmachine.s_endpgm
   return

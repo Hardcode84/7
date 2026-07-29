@@ -285,6 +285,11 @@ static LogicalResult specializeLoop(waveamdmachine::UniformLoopOp loop,
                                     const waveamdmachine::ArchData &arch,
                                     unsigned wavefront, unsigned targetWaves,
                                     bool multipleWorkgroups) {
+  WalkResult clusterBarrier = loop.walk([&](waveamdmachine::ClusterBarrierOp) {
+    return WalkResult::interrupt();
+  });
+  if (clusterBarrier.wasInterrupted())
+    return success();
   FailureOr<DenseMap<Operation *, int64_t>> barrierSites =
       buildBarrierLineage(loop);
   if (failed(barrierSites))

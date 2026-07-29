@@ -579,3 +579,33 @@ func.func @unsupported_named_sgpr_tuple() {
 }
 
 }
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @unmaterialized_workgroup_barrier() {
+  // expected-error @below {{s_barrier must be materialized before MC}}
+  waveamdmachine.s_barrier : () -> ()
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
+func.func @unmaterialized_cluster_barrier() {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  // expected-error @below {{cluster_barrier must be materialized before MC}}
+  %ready = waveamdmachine.cluster_barrier %root
+      : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return
+}
+
+}

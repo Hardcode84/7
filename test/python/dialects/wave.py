@@ -51,6 +51,18 @@ def test_sched_barrier():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_cluster_barrier
+@run
+def test_cluster_barrier():
+    with w.module() as m:
+        with m.function("cluster_barrier_kernel", [], kernel=True) as f:
+            source = f.token()
+            f.barrier(source, scope=w.BarrierScope.Cluster)
+        # CHECK: [[SOURCE:%.*]] = wave.token
+        # CHECK-NEXT: wave.barrier [[SOURCE]] scope cluster
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_cluster_ids
 @run
 def test_cluster_ids():

@@ -82,3 +82,67 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
     return
   }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  func.func @cluster_barrier_unsupported() {
+    %root = waveamdmachine.token : !waveamdmachine.mem.token
+    // expected-error @below {{cluster barriers unsupported on target}}
+    %ready = waveamdmachine.cluster_barrier %root
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    return
+  }
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+  func.func @cluster_barrier_in_conditional(
+      %condition: !waveamdmachine.reg<scc, 1>) {
+    waveamdmachine.uniform_if %condition {
+      %root = waveamdmachine.token : !waveamdmachine.mem.token
+      // expected-error @below {{cluster barrier cannot be nested in structured control flow}}
+      %ready = waveamdmachine.cluster_barrier %root
+          : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield
+    } otherwise {
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<scc, 1>
+    return
+  }
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+  func.func @cluster_barrier_in_loop(
+      %condition: !waveamdmachine.reg<scc, 1>) {
+    waveamdmachine.uniform_loop
+        if %condition : !waveamdmachine.reg<scc, 1> {
+      %root = waveamdmachine.token : !waveamdmachine.mem.token
+      // expected-error @below {{cluster barrier cannot be nested in structured control flow}}
+      %ready = waveamdmachine.cluster_barrier %root
+          : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.continue_if %condition
+          : !waveamdmachine.reg<scc, 1>
+    }
+    return
+  }
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+  func.func @cluster_barrier_in_exec_if(
+      %mask: !waveamdmachine.reg<sgpr, 2>) {
+    waveamdmachine.exec_if %mask {
+      %root = waveamdmachine.token : !waveamdmachine.mem.token
+      // expected-error @below {{cluster barrier cannot be nested in structured control flow}}
+      %ready = waveamdmachine.cluster_barrier %root
+          : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      waveamdmachine.yield
+    } : !waveamdmachine.reg<sgpr, 2>
+    return
+  }
+}

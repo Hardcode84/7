@@ -41,6 +41,7 @@ static constexpr CounterMappingRule splitRules[] = {
     {WaitcntEvent::Lds, WaitcntCounter::Ds, false},
     {WaitcntEvent::Smem, WaitcntCounter::Km, true},
     {WaitcntEvent::Message, WaitcntCounter::Km, false},
+    {WaitcntEvent::SccWrite, WaitcntCounter::Km, false},
     {WaitcntEvent::Async, WaitcntCounter::Async, false},
     {WaitcntEvent::Tensor, WaitcntCounter::Tensor, false},
 };

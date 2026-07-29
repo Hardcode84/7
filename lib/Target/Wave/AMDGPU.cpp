@@ -713,6 +713,18 @@ private:
       return targetCapabilities->clusters;
     return sti->hasFeature(llvm::AMDGPU::FeatureClusters);
   }
+  FailureOr<int64_t> getBarrierId(Operation &op,
+                                  waveamdmachine::BarrierScope scope) const {
+    switch (scope) {
+    case waveamdmachine::BarrierScope::Workgroup:
+      return llvm::AMDGPU::Barrier::WORKGROUP;
+    case waveamdmachine::BarrierScope::Cluster:
+      if (!hasClusters())
+        return op.emitError("cluster barrier unsupported on target");
+      return llvm::AMDGPU::Barrier::CLUSTER;
+    }
+    llvm_unreachable("unknown barrier scope");
+  }
   bool requiresInitialUnclausedVmem() const {
     if (targetCapabilities)
       return targetCapabilities->requiresInitialUnclausedVmem;
@@ -3537,21 +3549,26 @@ private:
   }
 
   LogicalResult emitNamedMC(
-      unsigned opcode,
+      unsigned opcode, unsigned schemaOpcode,
       ArrayRef<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>> namedOperands,
       StringRef schema) {
     if (sgprTupleEmissionFailed)
       return failure();
     if (opcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
-        opcode >= mcii->getNumOpcodes())
+        opcode >= mcii->getNumOpcodes() ||
+        schemaOpcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
+        schemaOpcode >= mcii->getNumOpcodes())
       return emissionSource->emitError("no LLVM MC opcode mapping for ")
              << schema << " on " << targetChip;
     const llvm::MCInstrDesc &desc = mcii->get(opcode);
+    if (desc.getNumOperands() != mcii->get(schemaOpcode).getNumOperands())
+      return emissionSource->emitError("LLVM MC operand schema changed for ")
+             << schema;
     SmallVector<llvm::MCOperand> operands(desc.getNumOperands(),
                                           llvm::MCOperand::createImm(0));
     llvm::SmallBitVector assigned(desc.getNumOperands());
     for (const auto &[name, operand] : namedOperands) {
-      int index = llvm::AMDGPU::getNamedOperandIdx(opcode, name);
+      int index = llvm::AMDGPU::getNamedOperandIdx(schemaOpcode, name);
       if (index < 0 || static_cast<unsigned>(index) >= operands.size())
         return emissionSource->emitError("LLVM MC operand schema mismatch for ")
                << schema;
@@ -3562,6 +3579,13 @@ private:
       return emissionSource->emitError("LLVM MC operand schema changed for ")
              << schema;
     return emitMC(opcode, operands);
+  }
+
+  LogicalResult emitNamedMC(
+      unsigned opcode,
+      ArrayRef<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>> namedOperands,
+      StringRef schema) {
+    return emitNamedMC(opcode, opcode, namedOperands, schema);
   }
 
   template <typename TDMOp> LogicalResult emitTDMTransfer(TDMOp op, bool load) {
@@ -5438,6 +5462,12 @@ private:
       return emitMC(opcode, {toScalar64Operand(op.getOperand(0)),
                              toScalar64Operand(op.getOperand(1))});
     }
+    if (isa<waveamdmachine::SCmpEqU32BarrierSeedOp>(op))
+      return emitNamedMC(
+          sCmpEqU32(),
+          {{llvm::AMDGPU::OpName::src0, llvm::MCOperand::createImm(0)},
+           {llvm::AMDGPU::OpName::src1, llvm::MCOperand::createImm(0)}},
+          "s_cmp_eq_u32 barrier seed");
     if (isa<waveamdmachine::SCmpEqI32Op, waveamdmachine::SCmpLgI32Op,
             waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,
             waveamdmachine::SCmpLtI32Op, waveamdmachine::SCmpLeI32Op,
@@ -5980,33 +6010,55 @@ private:
       return emitDsStore(op, dsWriteB96());
     if (isa<waveamdmachine::DsStoreB128Op>(op))
       return emitDsStore(op, dsWriteB128());
-    if (isa<waveamdmachine::SBarrierSignalOp>(op)) {
+    if (auto signalIsFirst =
+            dyn_cast<waveamdmachine::SBarrierSignalIsFirstOp>(op)) {
+      if (!waveamdmachine::SBarrierSignalIsFirstOp::isSupportedOnIsa(
+              isaVersion) ||
+          !waveamdmachine::isAMDGPUOpcodeAvailable(
+              llvm::AMDGPU::S_BARRIER_SIGNAL_ISFIRST_IMM,
+              sti->getFeatureBits()))
+        return op.emitError("s_barrier_signal_isfirst unsupported on target");
+      FailureOr<int64_t> barrierId = getBarrierId(op, signalIsFirst.getScope());
+      if (failed(barrierId))
+        return failure();
+      return emitNamedMC(
+          postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_ISFIRST_IMM),
+          llvm::AMDGPU::S_BARRIER_SIGNAL_ISFIRST_IMM,
+          {{llvm::AMDGPU::OpName::src0,
+            llvm::MCOperand::createImm(*barrierId)}},
+          "s_barrier_signal_isfirst");
+    }
+    if (auto signal = dyn_cast<waveamdmachine::SBarrierSignalOp>(op)) {
       if (!waveamdmachine::SBarrierSignalOp::isSupportedOnIsa(isaVersion) ||
           !waveamdmachine::isAMDGPUOpcodeAvailable(
               llvm::AMDGPU::S_BARRIER_SIGNAL_IMM, sti->getFeatureBits()))
         return op.emitError("s_barrier_signal unsupported on target");
-      return emitMC(
-          postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM),
-          {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)});
+      FailureOr<int64_t> barrierId = getBarrierId(op, signal.getScope());
+      if (failed(barrierId))
+        return failure();
+      return emitNamedMC(postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM),
+                         llvm::AMDGPU::S_BARRIER_SIGNAL_IMM,
+                         {{llvm::AMDGPU::OpName::src0,
+                           llvm::MCOperand::createImm(*barrierId)}},
+                         "s_barrier_signal");
     }
-    if (isa<waveamdmachine::SBarrierWaitOp>(op)) {
+    if (auto wait = dyn_cast<waveamdmachine::SBarrierWaitOp>(op)) {
       if (!waveamdmachine::SBarrierWaitOp::isSupportedOnIsa(isaVersion) ||
           !waveamdmachine::isAMDGPUOpcodeAvailable(llvm::AMDGPU::S_BARRIER_WAIT,
                                                    sti->getFeatureBits()))
         return op.emitError("s_barrier_wait unsupported on target");
-      return emitMC(
-          postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT),
-          {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)});
-    }
-    if (isa<waveamdmachine::SBarrierOp>(op) && isGfx1250()) {
-      if (failed(emitMC(
-              postVIOpcode(llvm::AMDGPU::S_BARRIER_SIGNAL_IMM),
-              {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)})))
+      FailureOr<int64_t> barrierId = getBarrierId(op, wait.getScope());
+      if (failed(barrierId))
         return failure();
-      return emitMC(
-          postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT),
-          {llvm::MCOperand::createImm(llvm::AMDGPU::Barrier::WORKGROUP)});
+      return emitNamedMC(postVIOpcode(llvm::AMDGPU::S_BARRIER_WAIT),
+                         {{llvm::AMDGPU::OpName::simm16,
+                           llvm::MCOperand::createImm(*barrierId)}},
+                         "s_barrier_wait");
     }
+    if (isa<waveamdmachine::ClusterBarrierOp>(op))
+      return op.emitError("cluster_barrier must be materialized before MC");
+    if (isa<waveamdmachine::SBarrierOp>(op) && isGfx1250())
+      return op.emitError("s_barrier must be materialized before MC");
     if (isa<waveamdmachine::SBarrierOp>(op))
       return emitMC(sBarrier(), {});
     if (isa<waveamdmachine::SSendmsgDeallocVgprsOp>(op)) {
