@@ -8,6 +8,9 @@
 // ASM-LABEL: symbolic_memory_strided_transpose_codegen:
 // ASM-COUNT-1: ds_read_b64_tr_b8
 // ASM: s_endpgm
+// ASM-LABEL: symbolic_memory_packet_bound_b8_transpose_codegen:
+// ASM-COUNT-1: ds_read_b64_tr_b8
+// ASM: s_endpgm
 // ASM-LABEL: symbolic_memory_b16_transpose_codegen:
 // ASM-COUNT-1: ds_read_b64_tr_b16
 // ASM: s_endpgm
@@ -61,6 +64,61 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %first = wave.extract %value[0]
         : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
     %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %out = wave.ptr_add %dst, %item
+        : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
+        -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>
+    %stored = wave.store %first -> %out after %token
+        : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
+           !wave.mem.token) -> !wave.mem.token
+    return
+  }
+
+  func.func @symbolic_memory_packet_bound_b8_transpose_codegen(
+      %dst: !wave.ptr<#wave.global, i8>)
+      attributes {wave.kernel,
+                  wave.workgroup_size = array<i32: 64, 1, 1>,
+                  wave.waves_per_workgroup = 1 : i64} {
+    %lds = wave.alloc() {align = 16 : i64, bytesize = 512 : i64}
+        : !wave.ptr<#wave.shared, i8>
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %c16 = wave.constant 16 : i32 -> !wave.simd<i32, 64>
+    %c128 = wave.constant 128 : i32 -> !wave.simd<i32, 64>
+    %lane = wave.binary remui %item, %c16
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %group = wave.binary divui %item, %c16
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %group_offset = wave.binary muli %group, %c128 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset0 = wave.binary addi %group_offset, %lane overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset1 = wave.binary addi %offset0, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset2 = wave.binary addi %offset1, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset3 = wave.binary addi %offset2, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset4 = wave.binary addi %offset3, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset5 = wave.binary addi %offset4, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset6 = wave.binary addi %offset5, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset7 = wave.binary addi %offset6, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offsets = wave.pack %offset0, %offset1, %offset2, %offset3,
+        %offset4, %offset5, %offset6, %offset7
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>
+        -> !wave.simd<vector<8xi32>, 64>
+    %value, %token = wave.gather %lds mapping
+        <bit_offset = <"8 * offset">>
+        bindings []() packet_bindings ["offset"](%offsets)
+        : (!wave.ptr<#wave.shared, i8>, !wave.simd<vector<8xi32>, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    %first = wave.extract %value[0]
+        : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
     %out = wave.ptr_add %dst, %item
         : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
         -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>

@@ -23,6 +23,95 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// Packet binding hides workitem ID behind a generated symbol.
+// CHECK-LABEL: func.func @gfx950_b8_packet_bound_transpose(
+// CHECK-NOT: wave.load
+// CHECK: [[ITEM:%.*]] = wave.workitem_id 0
+// CHECK: [[OFFSET:%.*]] = wave.index_expr <"8*raw0">
+// CHECK-SAME: ["raw0"]([[ITEM]])
+// CHECK: [[PTR:%.*]] = wave.ptr_add %arg0, [[OFFSET]]
+// CHECK: waveamd.transpose_load [[PTR]]
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_packet_bound_transpose(
+      %base: !wave.ptr<#wave.shared, i8>)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %c16 = wave.constant 16 : i32 -> !wave.simd<i32, 64>
+    %c128 = wave.constant 128 : i32 -> !wave.simd<i32, 64>
+    %lane = wave.binary remui %item, %c16
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %group = wave.binary divui %item, %c16
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %group_offset = wave.binary muli %group, %c128 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset0 = wave.binary addi %group_offset, %lane overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset1 = wave.binary addi %offset0, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset2 = wave.binary addi %offset1, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset3 = wave.binary addi %offset2, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset4 = wave.binary addi %offset3, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset5 = wave.binary addi %offset4, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset6 = wave.binary addi %offset5, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offset7 = wave.binary addi %offset6, %c16 overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offsets = wave.pack %offset0, %offset1, %offset2, %offset3,
+        %offset4, %offset5, %offset6, %offset7
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>
+        -> !wave.simd<vector<8xi32>, 64>
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * offset">>
+        bindings []() packet_bindings ["offset"](%offsets)
+        : (!wave.ptr<#wave.shared, i8>, !wave.simd<vector<8xi32>, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
+// Failed packet proof keeps generic lowering.
+// CHECK-LABEL: func.func @gfx950_b8_packet_bound_wrong_relation(
+// CHECK-NOT: waveamd.transpose_load
+// CHECK: wave.load
+// CHECK-NOT: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_packet_bound_wrong_relation(
+      %base: !wave.ptr<#wave.shared, i8>)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %square = wave.binary muli %item, %item
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+    %offsets = wave.pack %item, %item, %item, %item,
+        %item, %item, %item, %square
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>
+        -> !wave.simd<vector<8xi32>, 64>
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * offset">>
+        bindings []() packet_bindings ["offset"](%offsets)
+        : (!wave.ptr<#wave.shared, i8>, !wave.simd<vector<8xi32>, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @gfx950_b16_wide_transpose(
 // CHECK-NOT: wave.load
 // CHECK: %{{.*}}, [[TOKEN0:%.*]] = waveamd.transpose_load

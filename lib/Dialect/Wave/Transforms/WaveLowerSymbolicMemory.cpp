@@ -4433,17 +4433,12 @@ static Value findElementOffsetMaterialization(const SlotMapping &slot,
       divideExactlyProof(analysis, byteOffset, elementBits / 8);
   if (failed(elementOffset))
     return {};
-  FailureOr<sym::ExprHandle> materializationElementOffset =
-      divideExactlyProof(analysis, slot.materializationBitOffset, elementBits);
   for (const MaterializationCandidate &candidate :
        slot.materializationCandidates) {
     if (!isLegalPtrAddOffset(candidate.value.getType()))
       continue;
-    if ((succeeded(materializationElementOffset) &&
-         analysis.equivalent(*materializationElementOffset,
-                             candidate.expression) == sym::CheckResult::True) ||
-        analysis.equivalent(*elementOffset, candidate.expression) ==
-            sym::CheckResult::True)
+    if (analysis.equivalent(*elementOffset, candidate.expression) ==
+        sym::CheckResult::True)
       return candidate.value;
   }
   return {};

@@ -125,10 +125,11 @@ findBinding(const wave::memory_lowering::MemoryTransactionPoint &point,
 
 static bool hasOnlyUniformBindings(
     sym::ExprHandle expr,
-    const wave::memory_lowering::MemoryTransactionPoint &point) {
+    const wave::memory_lowering::MemoryTransactionPoint &point,
+    StringRef executionItemName = "item") {
   bool uniform = true;
   sym::walkSymbolNames(expr, [&](StringRef name) {
-    if (!uniform || name == "item")
+    if (!uniform || name == executionItemName)
       return;
     const wave::memory_lowering::MemoryTransactionBinding *binding =
         findBinding(point, name);
@@ -140,25 +141,30 @@ static bool hasOnlyUniformBindings(
 static FailureOr<sym::ExprHandle> selectAddressForMaterialization(
     sym::Analysis &analysis, sym::ExprHandle proof,
     sym::ExprHandle materialization,
-    const wave::memory_lowering::MemoryTransactionPoint &point) {
+    const wave::memory_lowering::MemoryTransactionPoint &point,
+    StringRef executionItemName = "item") {
   if (!proveEqual(analysis, proof, materialization))
     return failure();
   sym::ExprHandle selected =
       shouldUseSimplifiedIndexExpr(proof, materialization) ? proof
                                                            : materialization;
-  if (!hasOnlyUniformBindings(selected, point))
+  if (!hasOnlyUniformBindings(selected, point, executionItemName))
     return failure();
   return selected;
 }
 
-static std::optional<int64_t> getWorkgroupItemCount(Operation *op) {
+static DenseI32ArrayAttr getWorkgroupShape(Operation *op) {
   func::FuncOp func = op->getParentOfType<func::FuncOp>();
   if (!func)
-    return std::nullopt;
-  DenseI32ArrayAttr shape;
+    return {};
   for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"})
-    if ((shape = func->getAttrOfType<DenseI32ArrayAttr>(name)))
-      break;
+    if (DenseI32ArrayAttr shape = func->getAttrOfType<DenseI32ArrayAttr>(name))
+      return shape;
+  return {};
+}
+
+static std::optional<int64_t> getWorkgroupItemCount(Operation *op) {
+  DenseI32ArrayAttr shape = getWorkgroupShape(op);
   if (!shape || shape.size() != 3)
     return std::nullopt;
 
@@ -171,6 +177,72 @@ static std::optional<int64_t> getWorkgroupItemCount(Operation *op) {
   if (count % 64 != 0)
     return std::nullopt;
   return count;
+}
+
+static bool hasSymbol(sym::ExprHandle expression, StringRef name) {
+  bool found = false;
+  sym::walkSymbolNames(
+      expression, [&](StringRef candidate) { found |= candidate == name; });
+  return found;
+}
+
+struct ExecutionItem {
+  StringRef name;
+  sym::ExprHandle expression;
+};
+
+static FailureOr<ExecutionItem> getCanonicalExecutionItem(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis) {
+  if (!llvm::any_of(request.points, [](const auto &point) {
+        return hasSymbol(point.byteOffset, "item");
+      }))
+    return failure();
+  FailureOr<sym::ExprHandle> item = analysis.composeSymbol("item");
+  if (failed(item))
+    return failure();
+  return ExecutionItem{"item", *item};
+}
+
+static bool
+bindsXAxisWorkitem(const wave::memory_lowering::MemoryTransactionPoint &point,
+                   StringRef name) {
+  const wave::memory_lowering::MemoryTransactionBinding *binding =
+      findBinding(point, name);
+  if (!binding || !hasSymbol(point.byteOffset, name))
+    return false;
+  WorkitemIdOp workitem = binding->value.getDefiningOp<WorkitemIdOp>();
+  return workitem && workitem.getAxis() == 0;
+}
+
+static FailureOr<ExecutionItem> getBoundExecutionItem(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis) {
+  DenseI32ArrayAttr shape = getWorkgroupShape(request.op);
+  if (!shape || shape.size() != 3 || shape[1] != 1 || shape[2] != 1)
+    return failure();
+  for (const wave::memory_lowering::MemoryTransactionBinding &binding :
+       request.points.front().bindings) {
+    bool common = llvm::all_of(request.points, [&](const auto &point) {
+      return bindsXAxisWorkitem(point, binding.name);
+    });
+    if (!common)
+      continue;
+    FailureOr<sym::ExprHandle> item = analysis.composeSymbol(binding.name);
+    if (succeeded(item))
+      return ExecutionItem{binding.name, *item};
+  }
+  return failure();
+}
+
+static FailureOr<ExecutionItem>
+getExecutionItem(const wave::memory_lowering::GatherTransactionRequest &request,
+                 sym::Analysis &analysis) {
+  FailureOr<ExecutionItem> canonical =
+      getCanonicalExecutionItem(request, analysis);
+  if (succeeded(canonical))
+    return canonical;
+  return getBoundExecutionItem(request, analysis);
 }
 
 static FailureOr<sym::ExprHandle> substituteItem(sym::Analysis &analysis,
@@ -420,6 +492,65 @@ addBitAffineB8Contribution(sym::Analysis &analysis, sym::ExprHandle address,
   return compose(analysis, address, sym::ExprBinaryOp::Add, *contribution);
 }
 
+static FailureOr<sym::ExprHandle> getHardwareB8Coefficient(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis, sym::ExprHandle item, sym::ExprHandle base,
+    int64_t bit, int64_t bitValue, AddressForm form) {
+  size_t slot = 0;
+  int64_t outputItem = 0;
+  if (bit == 0) {
+    // Source lane bit 0 becomes destination lane bit 3.
+    outputItem = 8;
+  } else if (bit < 4) {
+    // Source lane bits 1..3 select one of the eight result bytes.
+    slot = static_cast<size_t>(bitValue / 2);
+  } else {
+    // Wave and 16-lane group bits are unchanged.
+    outputItem = bitValue;
+  }
+  FailureOr<sym::ExprHandle> sample =
+      substituteAddressItem(analysis, getByteOffset(request.points[slot], form),
+                            item, outputItem, form);
+  if (failed(sample))
+    return failure();
+  FailureOr<sym::ExprHandle> coefficient =
+      compose(analysis, *sample, sym::ExprBinaryOp::Sub, base);
+  if (failed(coefficient))
+    return failure();
+  return simplifyAddress(analysis, *coefficient, form);
+}
+
+static FailureOr<sym::ExprHandle> synthesizeHardwareB8SourceAddress(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis, sym::ExprHandle item, int64_t itemCount,
+    AddressForm form) {
+  FailureOr<sym::ExprHandle> base = substituteAddressItem(
+      analysis, getByteOffset(request.points.front(), form), item, 0, form);
+  if (failed(base))
+    return failure();
+
+  FailureOr<sym::ExprHandle> offset = analysis.composeInteger(0);
+  if (failed(offset))
+    return failure();
+  for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
+       ++bit, bitValue <<= 1) {
+    FailureOr<sym::ExprHandle> coefficient = getHardwareB8Coefficient(
+        request, analysis, item, *base, bit, bitValue, form);
+    if (failed(coefficient))
+      return failure();
+    FailureOr<sym::ExprHandle> next = addBitAffineB8Contribution(
+        analysis, *offset, *coefficient, item, bitValue);
+    if (failed(next))
+      return failure();
+    offset = next;
+  }
+  FailureOr<sym::ExprHandle> address =
+      compose(analysis, *base, sym::ExprBinaryOp::Add, *offset);
+  if (failed(address))
+    return failure();
+  return simplifyAddress(analysis, *address, form);
+}
+
 static FailureOr<sym::ExprHandle> synthesizeBitAffineB8SourceAddress(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::Analysis &analysis, sym::ExprHandle item, int64_t itemCount,
@@ -462,6 +593,67 @@ static bool hasCommonTransactionBase(
       return false;
   }
   return true;
+}
+
+static LogicalResult verifyHardwareB8Output(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis, sym::ExprHandle item,
+    sym::ExprHandle sourceAddress, int64_t outputItem) {
+  int64_t lane = outputItem % 64;
+  int64_t waveBase = outputItem - lane;
+  for (auto [slot, point] : llvm::enumerate(request.points)) {
+    int64_t sourceItem = waveBase + 16 * (lane / 16) + (lane % 16) / 8 +
+                         2 * static_cast<int64_t>(slot);
+    FailureOr<sym::ExprHandle> source =
+        substituteItem(analysis, sourceAddress, item, sourceItem);
+    FailureOr<sym::ExprHandle> actual =
+        substituteItem(analysis, point.byteOffset, item, outputItem);
+    if (failed(source) || failed(actual))
+      return failure();
+    FailureOr<sym::ExprHandle> expected =
+        composeInt(analysis, *source, sym::ExprBinaryOp::Add, lane % 8);
+    if (failed(expected) || !proveEqual(analysis, *expected, *actual))
+      return failure();
+  }
+  return success();
+}
+
+static LogicalResult verifyHardwareB8Points(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis, sym::ExprHandle item, int64_t itemCount,
+    sym::ExprHandle sourceAddress) {
+  if (!hasCommonTransactionBase(request, analysis))
+    return failure();
+  for (int64_t outputItem : llvm::seq<int64_t>(itemCount))
+    if (failed(verifyHardwareB8Output(request, analysis, item, sourceAddress,
+                                      outputItem)))
+      return failure();
+  return success();
+}
+
+static FailureOr<sym::ExprHandle> getHardwareB8AddressOffset(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Analysis &analysis) {
+  FailureOr<ExecutionItem> executionItem = getExecutionItem(request, analysis);
+  std::optional<int64_t> itemCount = getWorkgroupItemCount(request.op);
+  if (failed(executionItem) || !itemCount)
+    return failure();
+  ExecutionItem item = *executionItem;
+  FailureOr<sym::ExprHandle> proofAddress = synthesizeHardwareB8SourceAddress(
+      request, analysis, item.expression, *itemCount, AddressForm::Proof);
+  if (failed(proofAddress) ||
+      failed(verifyHardwareB8Points(request, analysis, item.expression,
+                                    *itemCount, *proofAddress)))
+    return failure();
+  FailureOr<sym::ExprHandle> materializationAddress =
+      synthesizeHardwareB8SourceAddress(request, analysis, item.expression,
+                                        *itemCount,
+                                        AddressForm::Materialization);
+  if (failed(materializationAddress))
+    return failure();
+  return selectAddressForMaterialization(analysis, *proofAddress,
+                                         *materializationAddress,
+                                         request.points.front(), item.name);
 }
 
 static LogicalResult verifyBitAffineB8Output(
@@ -533,6 +725,10 @@ static FailureOr<sym::ExprHandle> getB8AddressOffset(
   if (failed(created))
     return failure();
   sym::Analysis &analysis = **created;
+  FailureOr<sym::ExprHandle> hardware =
+      getHardwareB8AddressOffset(request, analysis);
+  if (succeeded(hardware))
+    return hardware;
   FailureOr<sym::ExprHandle> canonical =
       getCanonicalB8AddressOffset(request, analysis);
   if (succeeded(canonical))
