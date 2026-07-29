@@ -1,6 +1,7 @@
 # RUN: %PYTHON %s | FileCheck %s
 
 from mlir.dialects import wave_dsl as w
+from mlir.dialects.wave_target import GFX1250_CHIP, require_matmul_target_profile
 
 
 def run(test):
@@ -73,6 +74,22 @@ def test_pack_d4_descriptor():
         (360, 0x00020000, 0x00020000, 0),
     )
     print("packed d4")
+
+
+# CHECK-LABEL: TEST: test_pack_descriptor_ranks
+@run
+def test_pack_descriptor_ranks():
+    for rank in range(1, 6):
+        descriptor = w.pack_gfx1250_tdm_descriptor(
+            0x1000,
+            [2] * rank,
+            [2 ** (rank - axis - 1) for axis in range(rank)],
+            [2] * rank,
+            element_bit_width=16,
+        )
+        expected = w.TDMDescriptorKind.D2 if rank <= 2 else w.TDMDescriptorKind.D4
+        assert descriptor.kind is expected
+    print("packed ranks 1 through 5")
 
 
 # CHECK-LABEL: TEST: test_pack_padded_descriptors
@@ -260,6 +277,70 @@ def test_dynamic_index_descriptor_builder():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_multi_wave_dynamic_descriptors
+@run
+def test_multi_wave_dynamic_descriptors():
+    wave_size = require_matmul_target_profile(GFX1250_CHIP).wave_size
+    with w.module() as m:
+        with m.function(
+            "multi_wave_dynamic_descriptors",
+            [w.i64(), w.i32(), w.i32()],
+            kernel=True,
+            workgroup_size=[4 * wave_size, 1, 1],
+        ) as f:
+            base, global_offset, lds_address = f.args
+            workitem_first = w.sym("tdm_workitem_first")
+            first = f.read_first(f.workitem_id(0, width=wave_size))
+            wave_id = w.floor(workitem_first / wave_size)
+            per_wave_global_offset = f.index_expr(
+                wave_id * 128, {workitem_first: first}
+            )
+            per_wave_lds_address = f.index_expr(wave_id * 512, {workitem_first: first})
+            d2 = f.gfx1250_tdm_descriptor(
+                base,
+                [16, 32],
+                [32, 1],
+                [16, 32],
+                element_bit_width=16,
+                global_byte_offset=global_offset,
+                lds_address=lds_address,
+            )
+            d4 = f.gfx1250_tdm_descriptor(
+                base,
+                [4, 8, 16, 32],
+                [4096, 512, 32, 1],
+                [4, 8, 16, 32],
+                element_bit_width=16,
+                global_byte_offset=per_wave_global_offset,
+                lds_address=per_wave_lds_address,
+            )
+            d2_done = f.tdm_load(d2, after=f.token())
+            f.tdm_load(d4, after=d2_done)
+
+        # CHECK: wave.workgroup_size = array<i32: 128, 1, 1>
+        # CHECK: [[WORKITEMS:%.*]] = wave.workitem_id
+        # CHECK: [[FIRST:%.*]] = wave.read_first [[WORKITEMS]]
+        # CHECK: [[PER_WAVE_GLOBAL:%.*]] = wave.index_expr
+        # CHECK: [[PER_WAVE_LDS:%.*]] = wave.index_expr
+        # CHECK: [[OFFSET64:%.*]] = wave.cast intconvert %arg1 policy {extension = #wave.cast_extension<zero>} : i32 -> i64
+        # CHECK: [[ADDRESS:%.*]] = wave.binary addi %arg0, [[OFFSET64]] : i64, i64 -> i64
+        # CHECK: [[LOW:%.*]] = wave.cast intconvert [[ADDRESS]] : i64 -> i32
+        # CHECK: [[SHIFTED:%.*]] = wave.binary shrui [[ADDRESS]], {{.*}} : i64, i64 -> i64
+        # CHECK: [[HIGH:%.*]] = wave.cast intconvert [[SHIFTED]] : i64 -> i32
+        # CHECK: [[HIGH_MASKED:%.*]] = wave.binary andi [[HIGH]], {{.*}} : i32, i32 -> i32
+        # CHECK: [[HIGH_VALID:%.*]] = wave.binary ori [[HIGH_MASKED]], {{.*}} : i32, i32 -> i32
+        # CHECK: [[D2_D0:%.*]] = wave.pack {{.*}}, %arg2, [[LOW]], [[HIGH_VALID]]
+        # CHECK: [[PER_WAVE_GLOBAL32:%.*]] = wave.cast intconvert [[PER_WAVE_GLOBAL]] : index -> i32
+        # CHECK: [[PER_WAVE_GLOBAL64:%.*]] = wave.cast intconvert [[PER_WAVE_GLOBAL32]] policy {extension = #wave.cast_extension<zero>} : i32 -> i64
+        # CHECK: [[PER_WAVE_ADDRESS:%.*]] = wave.binary addi %arg0, [[PER_WAVE_GLOBAL64]] : i64, i64 -> i64
+        # CHECK: [[PER_WAVE_LDS32:%.*]] = wave.cast intconvert [[PER_WAVE_LDS]] : index -> i32
+        # CHECK: [[D4_D0:%.*]] = wave.pack {{.*}}, [[PER_WAVE_LDS32]],
+        # CHECK: [[DONE:%.*]] = waveamd.tdm_load d2 [[D2_D0]],
+        # CHECK: waveamd.tdm_load d4 [[D4_D0]], {{.*}} after [[DONE]]
+        assert m.module.operation.verify()
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_intconvert_extension_builder
 @run
 def test_intconvert_extension_builder():
@@ -301,18 +382,6 @@ def test_static_descriptor_errors():
     )
     assert_raises(
         ValueError,
-        "static TDM descriptors require one issuing wave",
-        lambda: w.pack_gfx1250_tdm_descriptor(
-            0,
-            [4],
-            [1],
-            [4],
-            element_bit_width=16,
-            num_warps=2,
-        ),
-    )
-    assert_raises(
-        ValueError,
         "padded TDM descriptors require is_store",
         lambda: w.pack_gfx1250_tdm_descriptor(
             0,
@@ -346,6 +415,12 @@ def test_static_descriptor_errors():
         is_store=False,
     )
     assert non_power_of_two_padding.d1[0] >> 25 & 0x7F == 2
+    print("static errors")
+
+
+# CHECK-LABEL: TEST: test_dynamic_descriptor_errors
+@run
+def test_dynamic_descriptor_errors():
     with w.module() as m, m.function("dynamic_errors", [w.i32()]) as f:
         (address,) = f.args
         assert_raises(
@@ -362,7 +437,7 @@ def test_static_descriptor_errors():
         address64 = f.constant(w.i64(), 0)
         assert_raises(
             ValueError,
-            "dynamic TDM descriptor offsets must be folded into global_address",
+            "dynamic TDM addresses require tensor offsets folded into global_byte_offset",
             lambda: f.gfx1250_tdm_descriptor(
                 address64,
                 [16, 32],
@@ -372,7 +447,31 @@ def test_static_descriptor_errors():
                 offsets=[1, 0],
             ),
         )
-    print("static errors")
+        assert_raises(
+            TypeError,
+            "dynamic TDM byte offset must be uniform i32, i64, or index",
+            lambda: f.gfx1250_tdm_descriptor(
+                address64,
+                [16, 32],
+                [32, 1],
+                [16, 32],
+                element_bit_width=16,
+                global_byte_offset=f.constant(w.i16(), 1),
+            ),
+        )
+        assert_raises(
+            TypeError,
+            "dynamic TDM LDS address must be uniform i32 or index",
+            lambda: f.gfx1250_tdm_descriptor(
+                address64,
+                [16, 32],
+                [32, 1],
+                [16, 32],
+                element_bit_width=16,
+                lds_address=address64,
+            ),
+        )
+    print("dynamic errors")
 
 
 # CHECK-LABEL: TEST: test_raw_descriptor_validation

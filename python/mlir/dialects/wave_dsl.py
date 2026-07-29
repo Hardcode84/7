@@ -313,6 +313,133 @@ def _tdm_words(name: str, words: Sequence[int], width: int) -> tuple[int, ...]:
     return result
 
 
+def _tdm_address_operand_i64(
+    builder: FunctionBuilder,
+    value: int | Value,
+    type_error: str,
+    *,
+    allow_i32: bool,
+) -> Value:
+    if isinstance(value, int):
+        if value < -(1 << 63) or value >= 1 << 63:
+            raise ValueError("dynamic TDM address operand must fit signed i64")
+        return builder.constant(i64(), value)
+    if not isinstance(value, Value):
+        raise TypeError(type_error)
+    value_type = value.type
+    if isinstance(value_type, IndexType):
+        value = builder.cast(value, i32(), CastKind.IntConvert)
+        return builder.intconvert(value, i64(), extension=CastExtension.Zero)
+    if not isinstance(value_type, IntegerType):
+        raise TypeError(type_error)
+    if value_type.width == 64:
+        return value
+    if allow_i32 and value_type.width == 32:
+        return builder.intconvert(value, i64(), extension=CastExtension.Zero)
+    raise TypeError(type_error)
+
+
+def _resolve_tdm_global_address(
+    builder: FunctionBuilder,
+    global_address: int | Value,
+    global_byte_offset: int | Value,
+) -> tuple[int, Value | None]:
+    if not isinstance(global_byte_offset, int | Value):
+        raise TypeError("global_byte_offset must be int or Value")
+    if isinstance(global_address, int) and (
+        global_address < 0 or global_address >= 1 << 57
+    ):
+        raise ValueError("global_address must fit 57 bits")
+    if isinstance(global_address, int) and isinstance(global_byte_offset, int):
+        return global_address + global_byte_offset, None
+    if (
+        isinstance(global_address, Value)
+        and isinstance(global_byte_offset, int)
+        and global_byte_offset == 0
+    ):
+        return 0, global_address
+    address = _tdm_address_operand_i64(
+        builder,
+        global_address,
+        "dynamic TDM address must be uniform i64 or index",
+        allow_i32=False,
+    )
+    byte_offset = _tdm_address_operand_i64(
+        builder,
+        global_byte_offset,
+        "dynamic TDM byte offset must be uniform i32, i64, or index",
+        allow_i32=True,
+    )
+    return 0, builder.addi(address, byte_offset)
+
+
+def _resolve_tdm_lds_address(lds_address: int | Value) -> tuple[int, Value | None]:
+    if not isinstance(lds_address, int | Value):
+        raise TypeError("lds_address must be int or Value")
+    if isinstance(lds_address, Value):
+        return 0, lds_address
+    return lds_address, None
+
+
+def _validate_tdm_dynamic_offsets(
+    dynamic_address: Value | None, offsets: Sequence[int] | None
+) -> None:
+    if dynamic_address is None or offsets is None:
+        return
+    if any(int(offset) != 0 for offset in offsets):
+        raise ValueError(
+            "dynamic TDM addresses require tensor offsets folded into "
+            "global_byte_offset"
+        )
+
+
+def _materialize_tdm_lds_address(
+    builder: FunctionBuilder,
+    static_address: int,
+    dynamic_address: Value | None,
+) -> Value:
+    if dynamic_address is None:
+        return builder.constant(i32(), static_address)
+    address_type = dynamic_address.type
+    if isinstance(address_type, IndexType):
+        return builder.cast(dynamic_address, i32(), CastKind.IntConvert)
+    if isinstance(address_type, IntegerType) and address_type.width == 32:
+        return dynamic_address
+    raise TypeError("dynamic TDM LDS address must be uniform i32 or index")
+
+
+def _materialize_tdm_global_address(
+    builder: FunctionBuilder,
+    low_word: int,
+    high_word: int,
+    dynamic_address: Value | None,
+) -> tuple[Value, Value]:
+    if dynamic_address is None:
+        return builder.constant(i32(), low_word), builder.constant(i32(), high_word)
+    address_type = dynamic_address.type
+    is_i64 = isinstance(address_type, IntegerType) and address_type.width == 64
+    if not is_i64 and not isinstance(address_type, IndexType):
+        raise TypeError("dynamic TDM address must be uniform i64 or index")
+    low = builder.cast(dynamic_address, i32(), CastKind.IntConvert)
+    shifted = builder.binary(
+        BinaryKind.ShRUI,
+        dynamic_address,
+        builder.constant(address_type, 32),
+    )
+    high = builder.cast(shifted, i32(), CastKind.IntConvert)
+    high = builder.binary(
+        BinaryKind.AndI,
+        high,
+        builder.constant(i32(), 0x01FFFFFF),
+    )
+    high = builder.binary(
+        BinaryKind.OrI,
+        high,
+        builder.constant(i32(), 0x80000000),
+    )
+    return low, high
+
+
 @dataclass(frozen=True)
 class TDMDescriptorWords:
     """Packed gfx1250 descriptor bits before MLIR materialization."""
@@ -350,34 +477,23 @@ class TDMDescriptorWords:
         builder: FunctionBuilder,
         *,
         global_address: Value | None = None,
+        lds_address: Value | None = None,
     ) -> TDMDescriptor:
         groups = list(self.groups)
         materialized = []
-        if global_address is not None:
-            address_type = global_address.type
-            is_i64 = isinstance(address_type, IntegerType) and address_type.width == 64
-            if not is_i64 and not isinstance(address_type, IndexType):
-                raise TypeError("dynamic TDM address must be uniform i64 or index")
-            low = builder.cast(global_address, i32(), CastKind.IntConvert)
-            shifted = builder.binary(
-                BinaryKind.ShRUI,
+        if global_address is not None or lds_address is not None:
+            materialized_lds_address = _materialize_tdm_lds_address(
+                builder, self.d0[1], lds_address
+            )
+            low, high = _materialize_tdm_global_address(
+                builder,
+                self.d0[2],
+                self.d0[3],
                 global_address,
-                builder.constant(address_type, 32),
-            )
-            high = builder.cast(shifted, i32(), CastKind.IntConvert)
-            high = builder.binary(
-                BinaryKind.AndI,
-                high,
-                builder.constant(i32(), 0x01FFFFFF),
-            )
-            high = builder.binary(
-                BinaryKind.OrI,
-                high,
-                builder.constant(i32(), 0x80000000),
             )
             d0 = [
                 builder.constant(i32(), self.d0[0]),
-                builder.constant(i32(), self.d0[1]),
+                materialized_lds_address,
                 low,
                 high,
             ]
@@ -489,13 +605,9 @@ def _normalize_tdm_sequences(
     )
 
 
-def _validate_tdm_static_mode(
-    element_bit_width: int, num_warps: int, is_store: bool | None
-) -> None:
+def _validate_tdm_mode(element_bit_width: int, is_store: bool | None) -> None:
     if element_bit_width not in (8, 16, 32, 64):
         raise ValueError("element_bit_width must be 8, 16, 32, or 64")
-    if num_warps != 1:
-        raise ValueError("static TDM descriptors require one issuing wave")
     if is_store is not None and not isinstance(is_store, bool):
         raise TypeError("is_store must be bool or None")
 
@@ -707,19 +819,18 @@ def pack_gfx1250_tdm_descriptor(
     block_shape: Sequence[int],
     *,
     element_bit_width: int,
-    num_warps: int = 1,
     offsets: Sequence[int] | None = None,
     lds_address: int = 0,
     predicate: int = 1,
     padding: tuple[int, int] = (0, 0),
     is_store: bool | None = None,
 ) -> TDMDescriptorWords:
-    """Pack one finalized descriptor for one issuing wave."""
+    """Pack finalized gfx1250 descriptor fields."""
 
     shape, strides, block_shape, offsets = _normalize_tdm_sequences(
         shape, strides, block_shape, offsets
     )
-    _validate_tdm_static_mode(element_bit_width, num_warps, is_store)
+    _validate_tdm_mode(element_bit_width, is_store)
     _validate_tdm_addresses(global_address, lds_address, predicate)
     _validate_tdm_layout(shape, strides, block_shape, offsets)
     pad_interval, pad_amount = _normalize_tdm_padding(padding, is_store)
@@ -1721,34 +1832,35 @@ class FunctionBuilder:
         block_shape: Sequence[int],
         *,
         element_bit_width: int,
-        num_warps: int = 1,
+        global_byte_offset: int | Value = 0,
         offsets: Sequence[int] | None = None,
-        lds_address: int = 0,
+        lds_address: int | Value = 0,
         predicate: int = 1,
         padding: tuple[int, int] = (0, 0),
         is_store: bool | None = None,
     ) -> TDMDescriptor:
-        dynamic_address = global_address if isinstance(global_address, Value) else None
-        if dynamic_address is not None:
-            if offsets is not None and any(int(offset) != 0 for offset in offsets):
-                raise ValueError(
-                    "dynamic TDM descriptor offsets must be folded into global_address"
-                )
-            global_address = 0
+        static_address, dynamic_address = _resolve_tdm_global_address(
+            self, global_address, global_byte_offset
+        )
+        _validate_tdm_dynamic_offsets(dynamic_address, offsets)
+        static_lds_address, dynamic_lds_address = _resolve_tdm_lds_address(lds_address)
         words = pack_gfx1250_tdm_descriptor(
-            global_address,
+            static_address,
             shape,
             strides,
             block_shape,
             element_bit_width=element_bit_width,
-            num_warps=num_warps,
             offsets=offsets,
-            lds_address=lds_address,
+            lds_address=static_lds_address,
             predicate=predicate,
             padding=padding,
             is_store=is_store,
         )
-        return words.materialize(self, global_address=dynamic_address)
+        return words.materialize(
+            self,
+            global_address=dynamic_address,
+            lds_address=dynamic_lds_address,
+        )
 
     def _materialize_tdm_descriptor(
         self, descriptor: TDMDescriptor | TDMDescriptorWords

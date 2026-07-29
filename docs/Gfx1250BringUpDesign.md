@@ -242,11 +242,11 @@ LLVM's internal `r128` selector stays zero and never becomes Wave IR or assembly
 syntax.
 
 Descriptor kind, prefetch mode, and cache policy use TableGen enums with
-generated stringify and symbolize helpers. Python static sugar mirrors LLVM's
-public descriptor layout for one issuing wave, including finalized load/store
-padding. Multi-wave or dynamically finalized descriptors enter as raw external
-groups. C++ lowering does not duplicate the descriptor encoder. Packing stays
-structural. No string round-trip.
+generated stringify and symbolize helpers. Python sugar mirrors LLVM's public
+descriptor layout, including finalized load/store padding. Uniform global and
+LDS offsets finalize D0 per issuing wave. Workgroup wave count is scheduling
+policy, not a descriptor field. C++ lowering does not duplicate the descriptor
+encoder. Packing stays structural. No string round-trip.
 
 Grouped issue is sugar. Python builds each member's tuples, selects D0 through
 D3 tuple-wise by uniform predicate, then emits one ordinary TDM transfer. No
@@ -701,7 +701,7 @@ The gfx1250 profile contains:
 - VGPR accumulator layout;
 - base-path and TDM memory staging;
 - D2/D4 descriptor packing and grouped tuple-selection helpers;
-- static packing limited to one issuing wave, with explicit load/store padding;
+- 1D through 5D packing with runtime per-wave global and LDS offsets;
 - raw tuple entry for externally finalized descriptors;
 - partial tensor waits and completion-neutral prefetch;
 - occupancy and static-LDS limits.
