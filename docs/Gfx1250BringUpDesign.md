@@ -28,6 +28,8 @@ Wave support includes:
   target facts;
 - fixed cluster dimensions emit HSA metadata and cluster identity reads lower
   from architected TTMP inputs;
+- synchronous B32/B64/B128 and async-to-LDS B8/B32/B64/B128 cluster loads
+  carry explicit addresses, M0, and memory tokens;
 - the dedicated unscheduled pipeline lowers scalar/vector global, buffer, LDS,
   SMEM, and scratch kernels through object link and disassembly;
 - pressure-driven allocation crosses `v255` and restores visible VGPR-window
@@ -54,7 +56,8 @@ TDM support adds:
 
 Compile and run correct gfx1250 Wave kernels in three steps:
 
-1. scalar/vector kernels using global, buffer, LDS, scalar, and scratch memory;
+1. scalar/vector kernels using global, buffer, LDS, scalar, scratch, and
+   cluster memory;
 2. f16 and bf16 GEMM using gfx1250 `16x16x32` wave32 WMMA;
 3. tokenized TDM load, store, and prefetch over raw LLVM descriptor tuples.
 
@@ -65,6 +68,7 @@ Compile-time support includes:
 - full `v0` through `v1023` allocation with late VGPR-window lowering;
 - legal HSA kernel descriptors and entry sequence;
 - LLVM-compatible cluster metadata and identity lowering;
+- tokenized cluster multicast loads with LLVM-backed MC emission;
 - split gfx12.5 wait counters driven by explicit memory tokens;
 - correct buffer-resource packing, LDS facts, tuple alignment, and register
   budgets;
@@ -87,8 +91,7 @@ gfx1250 scope does not include:
 
 - legacy `waveamd.dma_load_lds` enablement on gfx1250;
 - high-level TDM descriptor IR, fused loads, and gather or scatter;
-- cluster or multicast memory transfers;
-- named or split hardware barriers;
+- named hardware barriers;
 - SWMMAC, scaled WMMA, sparse WMMA, FP4, FP6, FP8, or BF8;
 - typed inline assembly;
 - VOPD pairing;
@@ -110,8 +113,8 @@ Unsupported paths must fail with target-specific diagnostics.
 | accumulators | VGPR-backed | no AGPR allocation |
 | LDS | 320 KiB, 32 banks | use both facts in legality and layout scoring |
 | buffer resource | 57-bit base, 45-bit `NumRecords` | target-specific structural packing |
-| waits | LOAD, STORE, DS, KM, X, ASYNC, TENSOR | base path implements first five; TDM implements TENSOR |
-| clusters | fixed dimensions plus runtime identity inputs | emit metadata; expose cluster, local workgroup, and max workgroup IDs |
+| waits | LOAD, STORE, DS, KM, X, ASYNC, TENSOR | base path implements through ASYNC; TDM implements TENSOR |
+| clusters | fixed dimensions, runtime identity inputs, and multicast loads | emit metadata and IDs; expose tokenized cluster machine operations |
 | matrix base | f16/bf16 `16x16x32` WMMA | f32 accumulator only |
 | code object | target accepts HSA code objects; Wave emits v6 | validate descriptor with LLVM tools |
 
@@ -130,6 +133,7 @@ LLVM source is the executable specification:
 - `llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.h`
 - `llvm/lib/Target/AMDGPU/AMDGPUWaitcntUtils.h`
 - `llvm/lib/Target/AMDGPU/MIMGInstructions.td`
+- `llvm/lib/Target/AMDGPU/FLATInstructions.td`
 - `llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp`
 - `llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp`
 - `llvm/lib/Target/AMDGPU/SIRegisterInfo.td`
@@ -147,6 +151,7 @@ Public LLVM source:
 - [schedule model](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SISchedule.td)
 - [wait-counter implementation](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp)
 - [TDM instruction definitions](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/MIMGInstructions.td)
+- [cluster load instruction definitions](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/FLATInstructions.td)
 - [TDM descriptor lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Conversion/AMDGPUToROCDL/AMDGPUToROCDL.cpp)
 - [DMA operation contract](https://github.com/llvm/llvm-project/blob/main/llvm/docs/AMDGPUDMAOperations.md)
 - [Triton Gluon TDM DSL](https://github.com/triton-lang/triton/blob/main/python/triton/experimental/gluon/language/amd/gfx1250/tdm.py)
@@ -232,6 +237,29 @@ emission and name the unsupported WaveAMDMachine operation.
 This work should reuse the declarative WaveAMDMachine MC-emission project.
 Bring-up owns gfx1250 mappings and coverage; it should not create a parallel
 handwritten emitter.
+
+### Cluster Loads
+
+WaveAMDMachine exposes the LLVM SADDR forms. Each operation takes a per-lane
+VGPR offset, SGPR2 base, M0 cluster mask, and input memory token. Async forms
+also take a per-lane VGPR LDS byte address; their immediate offset adjusts both
+the source and LDS addresses.
+
+Synchronous B32/B64/B128 loads return a VGPR tuple and LOAD completion token.
+Async-to-LDS B8/B32/B64/B128 loads return an ASYNC completion token. Input
+tokens order issue. Read-only issuer chains may overlap; memory-writing
+dependencies and non-issuer consumers wait on carried completion tickets.
+`wave.issue_token` forwards issue order without completion events. No alias,
+barrier, or cluster-wide ordering is inferred.
+
+M0 stays explicit in machine IR and implicit in LLVM MC. Opcode enums, named
+operand positions, register classes, default/CA cache-policy encoding, and
+immediate-offset legality come from LLVM. Target-dependent offsets are checked
+during emission with LLVM subtarget data, not a duplicated Wave field width.
+
+LLVM models a synchronous load as one micro-op. Async-to-LDS uses two issue
+slots and both VMEM and LDS resources, but creates one ASYNC ticket and one
+expert VM-source event. Partial `s_wait_asynccnt` values remain legal.
 
 ### TDM Transfer ABI
 
@@ -394,13 +422,14 @@ LLVM AMDGPU helpers; Wave does not duplicate field widths.
 | LDS | LGKM | DS | none |
 | SMEM | LGKM | KM | X |
 | message | LGKM | KM | none |
+| cluster load | unavailable | LOAD | X |
+| async global or cluster load to LDS | unavailable | ASYNC | none |
 | TDM load or store | unavailable | TENSOR | none |
 
-FLAT, GDS, and ASYNC remain rejected until Wave models every required counter
-and token obligation. TENSOR is legal only for tokenized TDM load and store.
+GDS remains rejected. ASYNC is legal only for tokenized global-to-LDS and
+cluster-to-LDS loads. TENSOR is legal only for tokenized TDM load and store.
 
-Base memory handles LOAD, STORE, DS, KM, and X. TDM adds TENSOR.
-ASYNC stays unavailable.
+Base memory handles LOAD, STORE, DS, KM, X, and ASYNC. TDM adds TENSOR.
 
 Required cases:
 
@@ -408,6 +437,7 @@ Required cases:
 - store token consumers wait on STORE;
 - LDS consumers and barriers wait on DS;
 - scalar-memory consumers wait on KM;
+- async-to-LDS completion consumers wait on ASYNC;
 - TDM completion consumers wait on TENSOR;
 - operations classified by LLVM as X events wait on X;
 - synchronous acquire-release global atomics use LLVM's split-wait, cache
@@ -454,8 +484,8 @@ one hardware `VA_VDST` field, plus `VM_VSRC`. It classifies:
 allocation. It keys hazards by full physical VGPR index, before MC window
 lowering, and keeps separate read, write, and VM-source scores. Typed operation
 traits classify event families. TableGen enums supply event, counter, and mode
-names. Issue increments come from the shared cost-model query and its generated
-operation interfaces; no operation count is duplicated in the pass.
+names. Expanded VALU pseudos use the shared issue-count query; each LDS, FLAT,
+or VMEM instruction advances one VM-source event.
 
 CFG and loop joins take the oldest incoming score. A nonzero wait is retained
 when all live events share one family. Mixed families drain to zero because
@@ -665,6 +695,10 @@ gfx1250 port or multi-wave throughput model.
 Prefetch uses its resolved ordinary prefetch resources. It has no TENSOR
 completion event.
 
+Cluster async-to-LDS operations use the LLVM two-micro-op envelope and both
+HWLGKM and HWVMEM resources. The completion scoreboard records one ASYNC ticket
+per instruction.
+
 Generated tables are scheduling inputs, not measured throughput claims.
 
 Normal-mode hazard repair follows LLVM target features:
@@ -741,8 +775,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 - AGPR requested;
 - register index above `v1023` or the occupancy budget;
 - high-VGPR operand without a lowering table;
-- legacy async, cluster-memory, multicast, named-barrier, or SWMMAC operation
-  used;
+- legacy async, named-barrier, or SWMMAC operation used;
 - TDM operation used on another target;
 - D2 with extra groups or D4 without exactly D2 and D3;
 - TDM tuple outside its LLVM operand register class;
@@ -760,16 +793,17 @@ Reject unsupported work before final emission. Required diagnostics include:
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
 | cluster IDs | fixed-dimension folding, runtime TTMP reads, metadata assembly and disassembly |
+| cluster loads | all sync and async widths, explicit M0, token waits, assembly and disassembly |
 | TDM IR | D2/D4 tuple forms, typed modes, tuple-wise grouped selection, token chains |
 | TDM MC | load/store forms, SGPR tuple classes, visible assembly and disassembly |
-| waits | independent LOAD/STORE/DS/KM/X/TENSOR, nonzero tensor waits, joins, loops, atomics, termination |
+| waits | independent LOAD/STORE/DS/KM/X/ASYNC/TENSOR, nonzero async and tensor waits, joins, loops, atomics, termination |
 | prefetch | issue ordering without TENSOR tickets or tensor waits |
 | VGPR windows | all four operand fields, `v256`/`v512`/`v768`/`v1023`, tuples across 256, CFG resets, MODE writes, clauses, X drains |
 | resources | 32-bank choice, 320 KiB bound, target tuple alignment, and LLVM-reported VGPR limits |
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, TDM WriteTDM/HWLGKM/HWVMEM pressure, target hazards |
 | Python | exact profile selection, descriptor packing, grouped selects, wrong-family rejection |
-| Integration | scalar/vector memory, cluster IDs, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
+| Integration | scalar/vector and cluster memory, cluster IDs, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
 | hardware | separate runtime-correctness gate |
 | measured PerfGolden | separate performance gate |
 
@@ -811,6 +845,8 @@ Compile-time support is complete when:
 - all four VGPR windows pass MC, CFG, hazard, resource, and Integration tests;
 - descriptor, waits, resources, and fragments match the LLVM contract;
 - cluster metadata and identity reads assemble and disassemble;
+- every cluster load width preserves explicit token and M0 dependencies through
+  assembly and disassembly;
 - TDM D2/D4 tuples select legal LLVM opcodes and register classes;
 - issue dependencies and completion tokens place zero and nonzero tensor
   waits correctly;

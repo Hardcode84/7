@@ -1388,7 +1388,7 @@ static void recordExpertIssue(Operation *op, WaitState &state,
   SmallVector<RegSpan, 4> operands;
   collectExpertSpans(op->getOperands(), operands);
   if (!isVALUExpertEvent(event)) {
-    expert::issue(state, ExpertCounter::VmSource, count, event, operands);
+    expert::issue(state, ExpertCounter::VmSource, 1, event, operands);
     return;
   }
 

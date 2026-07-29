@@ -47,6 +47,52 @@ func.func @overlapping_partial_async_completion(
   return
 }
 
+// CHECK-LABEL: func.func @cluster_async_partial_completion
+// CHECK: [[FIRST:%.*]] = waveamdmachine.cluster_load_async_to_lds_b8
+// CHECK-NEXT: [[SECOND:%.*]] = waveamdmachine.cluster_load_async_to_lds_b32
+// CHECK-NEXT: [[THIRD:%.*]] = waveamdmachine.cluster_load_async_to_lds_b64
+// CHECK-NEXT: waveamdmachine.s_waitcnt_split asynccnt(2)
+// CHECK-NEXT: waveamdmachine.s_barrier [[FIRST]]
+// CHECK-NEXT: waveamdmachine.s_waitcnt_split asynccnt(1)
+// CHECK-NEXT: waveamdmachine.s_barrier [[SECOND]]
+// CHECK-NEXT: waveamdmachine.s_waitcnt_split asynccnt(0)
+// CHECK-NEXT: waveamdmachine.s_barrier [[THIRD]]
+func.func @cluster_async_partial_completion(
+    %lds: !waveamdmachine.reg<vgpr, 1>,
+    %offset: !waveamdmachine.reg<vgpr, 1>,
+    %base: !waveamdmachine.reg<sgpr, 2>,
+    %m0: !waveamdmachine.m0) {
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %first = waveamdmachine.cluster_load_async_to_lds_b8
+      %lds, %offset, %base, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %second = waveamdmachine.cluster_load_async_to_lds_b32
+      %lds, %offset, %base, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %third = waveamdmachine.cluster_load_async_to_lds_b64
+      %lds, %offset, %base, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>,
+         !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_barrier %first
+      : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %second
+      : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_barrier %third
+      : (!waveamdmachine.mem.token) -> ()
+  return
+}
+
 // CHECK-LABEL: func.func @explicit_async_issue_order
 // CHECK: [[FIRST:%.*]] = waveamdmachine.global_load_async_to_lds_b8
 // CHECK-NEXT: waveamdmachine.s_waitcnt_split asynccnt(0)

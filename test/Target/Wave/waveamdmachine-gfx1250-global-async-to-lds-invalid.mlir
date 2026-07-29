@@ -41,7 +41,7 @@ func.func @invalid_offset() {
   %base = waveamdmachine.uninit
       : !waveamdmachine.reg<sgpr, 2, 0>
   %root = waveamdmachine.token : !waveamdmachine.mem.token
-  // expected-error @below {{global async-to-LDS offset does not fit target flat offset field}}
+  // expected-error @below {{gfx1250 async global-to-LDS load offset does not fit target flat offset field}}
   %loaded = waveamdmachine.global_load_async_to_lds_b8
       %lds, %global, %base after %root offset 9223372036854775807
       : (!waveamdmachine.reg<vgpr, 1, 0>,

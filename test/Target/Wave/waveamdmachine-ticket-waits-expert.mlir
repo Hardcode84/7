@@ -175,6 +175,44 @@ func.func @partial_prefetch_source() attributes {
   return
 }
 
+// CHECK-LABEL: func.func @multi_uop_memory_is_one_vm_source_event
+// CHECK: waveamdmachine.cluster_load_async_to_lds_b32
+// CHECK-NEXT: waveamdmachine.cluster_load_async_to_lds_b32
+// CHECK-NEXT: waveamdmachine.s_wait_alu vm_vsrc(1)
+// CHECK-NEXT: waveamdmachine.v_add_u32
+func.func @multi_uop_memory_is_one_vm_source_event(
+    %m0: !waveamdmachine.m0) attributes {
+    wave.kernel,
+    waveamdmachine.expert_scheduling_mode
+  } {
+  %lds = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %old = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 512>
+  %newer = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 513>
+  %x = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+  %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %first = waveamdmachine.cluster_load_async_to_lds_b32
+      %lds, %old, %base, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 512>,
+         !waveamdmachine.reg<sgpr, 2, 0>,
+         !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %second = waveamdmachine.cluster_load_async_to_lds_b32
+      %lds, %newer, %base, %m0 after %root
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 513>,
+         !waveamdmachine.reg<sgpr, 2, 0>,
+         !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %overwrite = waveamdmachine.v_add_u32 %x, %x
+      : (!waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<vgpr, 1, 512>
+  waveamdmachine.s_endpgm
+  return
+}
+
 // CHECK-LABEL: func.func @mixed_vm_families_drain
 // CHECK: waveamdmachine.tdm_prefetch
 // CHECK-NEXT: waveamdmachine.buffer_store_b32

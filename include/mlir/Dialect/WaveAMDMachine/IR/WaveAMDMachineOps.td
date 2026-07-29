@@ -2237,12 +2237,80 @@ def WaveAMDMachine_GlobalLoadTupleB32Op
   }];
 }
 
+class WaveAMDMachine_ClusterLoadOp<string mnemonic, Type resultType>
+    : WaveAMDMachine_Op<
+          mnemonic,
+          [WaveAMDMachine_VMEMLoad, WaveAMDMachine_FlatMemory,
+           MemoryEffects<[MemRead]>]>,
+      WaveAMDMachine_VMEMLoadInfo {
+  let summary = "gfx1250 cluster multicast load";
+  let arguments = (ins WaveAMDMachine_VGPR1:$offset,
+                       WaveAMDMachine_SGPR2:$base,
+                       WaveAMDMachine_M0:$m0,
+                       WaveAMDMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs resultType:$result, WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $offset `,` $base `,` $m0 `after` $dependency
+    (`offset` $inst_offset^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_ClusterLoadB32Op
+    : WaveAMDMachine_ClusterLoadOp<"cluster_load_b32",
+                                   WaveAMDMachine_VGPR1>;
+def WaveAMDMachine_ClusterLoadB64Op
+    : WaveAMDMachine_ClusterLoadOp<"cluster_load_b64",
+                                   WaveAMDMachine_VGPR2>;
+def WaveAMDMachine_ClusterLoadB128Op
+    : WaveAMDMachine_ClusterLoadOp<"cluster_load_b128",
+                                   WaveAMDMachine_VGPR4>;
+
+class WaveAMDMachine_ClusterLoadAsyncToLdsOp<string mnemonic>
+    : WaveAMDMachine_Op<
+          mnemonic,
+          [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma,
+           WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]>,
+      WaveAMDMachine_WaitcntInfo<"Async">,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
+  let summary = "gfx1250 async cluster multicast load to LDS";
+  let arguments = (ins WaveAMDMachine_VGPR1:$lds_address,
+                       WaveAMDMachine_VGPR1:$offset,
+                       WaveAMDMachine_SGPR2:$base,
+                       WaveAMDMachine_M0:$m0,
+                       WaveAMDMachine_MemToken:$dependency,
+                       DefaultValuedAttr<I64Attr, "0">:$inst_offset);
+  let results = (outs WaveAMDMachine_MemToken:$token);
+  let assemblyFormat = [{
+    $lds_address `,` $offset `,` $base `,` $m0 `after` $dependency
+    (`offset` $inst_offset^)? attr-dict `:`
+    functional-type(operands, results)
+  }];
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_ClusterLoadAsyncToLdsB8Op
+    : WaveAMDMachine_ClusterLoadAsyncToLdsOp<
+          "cluster_load_async_to_lds_b8">;
+def WaveAMDMachine_ClusterLoadAsyncToLdsB32Op
+    : WaveAMDMachine_ClusterLoadAsyncToLdsOp<
+          "cluster_load_async_to_lds_b32">;
+def WaveAMDMachine_ClusterLoadAsyncToLdsB64Op
+    : WaveAMDMachine_ClusterLoadAsyncToLdsOp<
+          "cluster_load_async_to_lds_b64">;
+def WaveAMDMachine_ClusterLoadAsyncToLdsB128Op
+    : WaveAMDMachine_ClusterLoadAsyncToLdsOp<
+          "cluster_load_async_to_lds_b128">;
+
 class WaveAMDMachine_GlobalLoadAsyncToLdsOp<string mnemonic>
     : WaveAMDMachine_Op<
           mnemonic,
           [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma,
            WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]>,
-      WaveAMDMachine_WaitcntInfo<"Async"> {
+      WaveAMDMachine_WaitcntInfo<"Async">,
+      WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "gfx1250 async global-to-LDS load";
   let arguments = (ins WaveAMDMachine_VGPR1:$lds_address,
                        WaveAMDMachine_VGPR1:$offset,

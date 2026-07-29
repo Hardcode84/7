@@ -3611,34 +3611,34 @@ private:
                        operands, "TDM prefetch");
   }
 
-  template <typename AsyncLoadOp>
-  LogicalResult emitGlobalAsyncToLds(AsyncLoadOp op, unsigned pseudoOpcode) {
-    if (!AsyncLoadOp::isSupportedOnIsa(isaVersion))
-      return op.emitError(
-          "gfx1250 async global-to-LDS load unsupported on target");
+  template <typename LoadOp>
+  LogicalResult emitGfx1250FlatLoad(LoadOp op, unsigned pseudoOpcode,
+                                    Value destination, StringRef description) {
+    if (!LoadOp::isSupportedOnIsa(isaVersion))
+      return op.emitError() << description << " unsupported on target";
     unsigned opcode = postVIOpcode(pseudoOpcode);
     if (opcode == llvm::AMDGPU::INSTRUCTION_LIST_END ||
         opcode >= mcii->getNumOpcodes() ||
         !waveamdmachine::isAMDGPUOpcodeAvailable(opcode, sti->getFeatureBits()))
-      return op.emitError(
-          "LLVM async global-to-LDS opcode unavailable on target");
+      return op.emitError()
+             << "LLVM " << description << " opcode unavailable on target";
 
     int64_t instOffset = op.getInstOffsetAttr().getInt();
     unsigned offsetBits = llvm::AMDGPU::getNumFlatOffsetBits(*sti);
     if (!llvm::isIntN(offsetBits, instOffset))
-      return op.emitError(
-          "global async-to-LDS offset does not fit target flat offset field");
+      return op.emitError()
+             << description << " offset does not fit target flat offset field";
     FailureOr<unsigned> cpol = getLoadCacheCPol(*op);
     if (failed(cpol))
       return failure();
 
     std::array<std::pair<llvm::AMDGPU::OpName, llvm::MCOperand>, 5> operands = {
-        {{llvm::AMDGPU::OpName::vdst, toMCOperand(op.getLdsAddress())},
+        {{llvm::AMDGPU::OpName::vdst, toMCOperand(destination)},
          {llvm::AMDGPU::OpName::saddr, toMCOperand(op.getBase())},
          {llvm::AMDGPU::OpName::vaddr, toMCOperand(op.getOffset())},
          {llvm::AMDGPU::OpName::offset, llvm::MCOperand::createImm(instOffset)},
          {llvm::AMDGPU::OpName::cpol, llvm::MCOperand::createImm(*cpol)}}};
-    return emitNamedMC(opcode, operands, "gfx1250 async global-to-LDS load");
+    return emitNamedMC(opcode, operands, description);
   }
 
   LogicalResult emitGfx1250Wmma(unsigned pseudoOpcode, Value dst, Value a,
@@ -5794,21 +5794,72 @@ private:
     if (isa<waveamdmachine::ScratchStoreB32Op>(op))
       return emitScratchStore(op);
     if (isa<waveamdmachine::GlobalLoadAsyncToLdsB8Op>(op))
-      return emitGlobalAsyncToLds(
+      return emitGfx1250FlatLoad(
           cast<waveamdmachine::GlobalLoadAsyncToLdsB8Op>(op),
-          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B8_SADDR);
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B8_SADDR,
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB8Op>(op).getLdsAddress(),
+          "gfx1250 async global-to-LDS load");
     if (isa<waveamdmachine::GlobalLoadAsyncToLdsB32Op>(op))
-      return emitGlobalAsyncToLds(
+      return emitGfx1250FlatLoad(
           cast<waveamdmachine::GlobalLoadAsyncToLdsB32Op>(op),
-          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B32_SADDR);
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B32_SADDR,
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB32Op>(op).getLdsAddress(),
+          "gfx1250 async global-to-LDS load");
     if (isa<waveamdmachine::GlobalLoadAsyncToLdsB64Op>(op))
-      return emitGlobalAsyncToLds(
+      return emitGfx1250FlatLoad(
           cast<waveamdmachine::GlobalLoadAsyncToLdsB64Op>(op),
-          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B64_SADDR);
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B64_SADDR,
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB64Op>(op).getLdsAddress(),
+          "gfx1250 async global-to-LDS load");
     if (isa<waveamdmachine::GlobalLoadAsyncToLdsB128Op>(op))
-      return emitGlobalAsyncToLds(
+      return emitGfx1250FlatLoad(
           cast<waveamdmachine::GlobalLoadAsyncToLdsB128Op>(op),
-          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B128_SADDR);
+          llvm::AMDGPU::GLOBAL_LOAD_ASYNC_TO_LDS_B128_SADDR,
+          cast<waveamdmachine::GlobalLoadAsyncToLdsB128Op>(op).getLdsAddress(),
+          "gfx1250 async global-to-LDS load");
+    // LLVM models the cluster mask as an implicit M0 use.
+    if (isa<waveamdmachine::ClusterLoadB32Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadB32Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_B32_SADDR,
+          cast<waveamdmachine::ClusterLoadB32Op>(op).getResult(),
+          "gfx1250 cluster load");
+    if (isa<waveamdmachine::ClusterLoadB64Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadB64Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_B64_SADDR,
+          cast<waveamdmachine::ClusterLoadB64Op>(op).getResult(),
+          "gfx1250 cluster load");
+    if (isa<waveamdmachine::ClusterLoadB128Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadB128Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_B128_SADDR,
+          cast<waveamdmachine::ClusterLoadB128Op>(op).getResult(),
+          "gfx1250 cluster load");
+    if (isa<waveamdmachine::ClusterLoadAsyncToLdsB8Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB8Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_ASYNC_TO_LDS_B8_SADDR,
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB8Op>(op).getLdsAddress(),
+          "gfx1250 async cluster-to-LDS load");
+    if (isa<waveamdmachine::ClusterLoadAsyncToLdsB32Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB32Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_ASYNC_TO_LDS_B32_SADDR,
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB32Op>(op).getLdsAddress(),
+          "gfx1250 async cluster-to-LDS load");
+    if (isa<waveamdmachine::ClusterLoadAsyncToLdsB64Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB64Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_ASYNC_TO_LDS_B64_SADDR,
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB64Op>(op).getLdsAddress(),
+          "gfx1250 async cluster-to-LDS load");
+    if (isa<waveamdmachine::ClusterLoadAsyncToLdsB128Op>(op))
+      return emitGfx1250FlatLoad(
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB128Op>(op),
+          llvm::AMDGPU::CLUSTER_LOAD_ASYNC_TO_LDS_B128_SADDR,
+          cast<waveamdmachine::ClusterLoadAsyncToLdsB128Op>(op).getLdsAddress(),
+          "gfx1250 async cluster-to-LDS load");
     if (rejectLegacyVMemToLDS() && isa<waveamdmachine::GlobalLoadLdsB32Op,
                                        waveamdmachine::GlobalLoadLdsB128Op,
                                        waveamdmachine::BufferLoadLdsB32Op,
