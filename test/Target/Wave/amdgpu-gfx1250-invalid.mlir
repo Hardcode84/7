@@ -20,6 +20,20 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
+func.func @oversized_dependency_wait() {
+  // expected-error @below {{s_wait_alu dependency count out of range}}
+  waveamdmachine.s_wait_alu vm_vsrc(8)
+  return
+}
+
+}
+
+// -----
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
+} {
+
 func.func @oversized_split_wait() {
   // expected-error @below {{loadcnt value 64 exceeds target maximum 63}}
   waveamdmachine.s_waitcnt_split loadcnt(64)

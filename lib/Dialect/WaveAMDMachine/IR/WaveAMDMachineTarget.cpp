@@ -34,6 +34,12 @@ using namespace mlir::waveamdmachine;
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTargetEnums.cpp.inc"
 
 static constexpr char kWavefrontSizeAttr[] = "waveamdmachine.wavefront_size";
+static constexpr char kExpertSchedulingModeAttr[] =
+    "waveamdmachine.expert_scheduling_mode";
+
+StringRef mlir::waveamdmachine::getExpertSchedulingModeAttrName() {
+  return kExpertSchedulingModeAttr;
+}
 
 static void appendTargetIDFeatures(SmallString<128> &resolved,
                                    const AMDGPUTarget &target);

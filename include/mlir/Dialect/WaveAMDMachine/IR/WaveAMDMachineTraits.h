@@ -46,6 +46,21 @@ template <typename ConcreteType>
 class TensorMemoryOp : public TraitBase<ConcreteType, TensorMemoryOp> {};
 
 template <typename ConcreteType>
+class FlatMemoryOp : public TraitBase<ConcreteType, FlatMemoryOp> {};
+
+template <typename ConcreteType>
+class DSOp : public TraitBase<ConcreteType, DSOp> {};
+
+template <typename ConcreteType>
+class TransOp : public TraitBase<ConcreteType, TransOp> {};
+
+template <typename ConcreteType>
+class DPMACCOp : public TraitBase<ConcreteType, DPMACCOp> {};
+
+template <typename ConcreteType>
+class ExpertVALUOp : public TraitBase<ConcreteType, ExpertVALUOp> {};
+
+template <typename ConcreteType>
 class TupleMemoryOp : public TraitBase<ConcreteType, TupleMemoryOp> {};
 
 template <typename ConcreteType>

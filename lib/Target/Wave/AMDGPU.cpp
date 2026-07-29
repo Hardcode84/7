@@ -5359,14 +5359,28 @@ private:
         return op.emitError("s_wait_alu unsupported on target");
       if ((wait.getVaVdst() &&
            *wait.getVaVdst() > llvm::AMDGPU::DepCtr::getVaVdstBitMask()) ||
+          (wait.getVmVsrc() &&
+           *wait.getVmVsrc() > llvm::AMDGPU::DepCtr::getVmVsrcBitMask()) ||
           (wait.getSaSdst() &&
            *wait.getSaSdst() > llvm::AMDGPU::DepCtr::getSaSdstBitMask()) ||
           (wait.getVaSdst() &&
            *wait.getVaSdst() > llvm::AMDGPU::DepCtr::getVaSdstBitMask()))
         return op.emitError("s_wait_alu dependency count out of range");
       unsigned encoded = waveamdmachine::encodeDepCtrWait(
-          wait.getVaVdst(), wait.getSaSdst(), wait.getVaSdst(), *sti);
+          wait.getVaVdst(), wait.getVmVsrc(), wait.getSaSdst(),
+          wait.getVaSdst(), *sti);
       return emitMC(sWaitAlu(), {llvm::MCOperand::createImm(encoded)});
+    }
+    if (auto mode = dyn_cast<waveamdmachine::SSetSchedulingModeOp>(op)) {
+      if (!waveamdmachine::SSetSchedulingModeOp::isSupportedOnIsa(isaVersion))
+        return op.emitError("s_set_sched_mode unsupported on target");
+      unsigned encoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
+          llvm::AMDGPU::Hwreg::ID_SCHED_MODE,
+          llvm::AMDGPU::Hwreg::HwregOffset::Default, 2);
+      return emitMC(
+          sSetregImm32B32(),
+          {llvm::MCOperand::createImm(static_cast<unsigned>(mode.getMode())),
+           llvm::MCOperand::createImm(encoding)});
     }
     if (isa<waveamdmachine::SNopOp>(op))
       return emitMCValues(sNop(), op.getOperands());

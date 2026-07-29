@@ -18,6 +18,19 @@ include "mlir/Interfaces/InferIntRangeInterface.td"
 include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+def WaveAMDMachine_SchedulingModeNormal :
+    I32EnumAttrCase<"Normal", 0, "normal">;
+def WaveAMDMachine_SchedulingModeExpert2 :
+    I32EnumAttrCase<"Expert2", 2, "expert2">;
+
+def WaveAMDMachine_SchedulingModeEnum :
+    I32EnumAttr<"SchedulingMode", "AMDGPU wave scheduling mode", [
+      WaveAMDMachine_SchedulingModeNormal,
+      WaveAMDMachine_SchedulingModeExpert2
+    ]> {
+  let cppNamespace = "::mlir::waveamdmachine";
+}
+
 defvar WaveAMDMachine_Gfx90APlus =
     "isa.Major == 9 && ((isa.Minor == 0 && isa.Stepping == 10) || " #
     "(isa.Minor == 4 && isa.Stepping == 2) || " #
@@ -290,6 +303,13 @@ def WaveAMDMachine_VMEMLoad : NativeOpTrait<"waveamdmachine::VMEMLoadOp">;
 def WaveAMDMachine_VMEMStore : NativeOpTrait<"waveamdmachine::VMEMStoreOp">;
 def WaveAMDMachine_TensorMemory
     : NativeOpTrait<"waveamdmachine::TensorMemoryOp">;
+def WaveAMDMachine_FlatMemory
+    : NativeOpTrait<"waveamdmachine::FlatMemoryOp">;
+def WaveAMDMachine_DS : NativeOpTrait<"waveamdmachine::DSOp">;
+def WaveAMDMachine_Trans : NativeOpTrait<"waveamdmachine::TransOp">;
+def WaveAMDMachine_DPMACC : NativeOpTrait<"waveamdmachine::DPMACCOp">;
+def WaveAMDMachine_ExpertVALU
+    : NativeOpTrait<"waveamdmachine::ExpertVALUOp">;
 def WaveAMDMachine_TupleMemory : NativeOpTrait<"waveamdmachine::TupleMemoryOp">;
 def WaveAMDMachine_TupleAlias : NativeOpTrait<"waveamdmachine::TupleAliasOp">;
 def WaveAMDMachine_Waitcnt : NativeOpTrait<"waveamdmachine::WaitcntOp">;
@@ -522,7 +542,8 @@ class WaveAMDMachine_ZeroResult<string mnemonic, list<Trait> traits = []>
 class WaveAMDMachine_GlobalMemoryOp<string mnemonic, list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic,
         !listconcat(traits,
-          [DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
+          [WaveAMDMachine_FlatMemory,
+           DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/13, /*instOffsetSigned=*/true,
@@ -548,6 +569,7 @@ class WaveAMDMachine_ScratchMemoryOp<string mnemonic, list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic,
         !listconcat(traits,
           [WaveAMDMachine_ScratchMemory,
+           WaveAMDMachine_FlatMemory,
            DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
   let archPredicate = WaveAMDMachine_FlatScratchTarget;
   let extraClassDefinition = [{
@@ -562,7 +584,8 @@ class WaveAMDMachine_ScratchMemoryOp<string mnemonic, list<Trait> traits = []>
 class WaveAMDMachine_DsOp<string mnemonic, list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic,
         !listconcat(traits,
-          [DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
+          [WaveAMDMachine_DS,
+           DeclareOpInterfaceMethods<WaveAMDMachine_AddressFieldsOpInterface>])> {
   let extraClassDefinition = [{
     ::mlir::waveamdmachine::AddressFieldSpec $cppClass::getAddressFieldSpec() {
       return {/*instOffsetBits=*/16, /*instOffsetSigned=*/false,
@@ -1222,15 +1245,15 @@ def WaveAMDMachine_VMax3F32Op
 def WaveAMDMachine_VExpF32Op
     : WaveAMDMachine_UnaryResult<"v_exp_f32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
-                              [WaveAMDMachine_VALU, Pure]>;
+                              [WaveAMDMachine_VALU, WaveAMDMachine_Trans, Pure]>;
 def WaveAMDMachine_VRcpF32Op
     : WaveAMDMachine_UnaryResult<"v_rcp_f32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
-                              [WaveAMDMachine_VALU, Pure]>;
+                              [WaveAMDMachine_VALU, WaveAMDMachine_Trans, Pure]>;
 def WaveAMDMachine_VRcpIFlagF32Op
     : WaveAMDMachine_UnaryResult<"v_rcp_iflag_f32", WaveAMDMachine_VGPR1,
                               WaveAMDMachine_VGPR1,
-                              [WaveAMDMachine_VALU, Pure]>;
+                              [WaveAMDMachine_VALU, WaveAMDMachine_Trans, Pure]>;
 def WaveAMDMachine_VCvtF32U32Op
     : WaveAMDMachine_UnaryResult<"v_cvt_f32_u32", WaveAMDMachine_Reg1OrImm,
                               WaveAMDMachine_VGPR1,
@@ -1645,14 +1668,22 @@ def WaveAMDMachine_SWaitcntSplitOp
 def WaveAMDMachine_SWaitAluOp
     : WaveAMDMachine_Op<"s_wait_alu", [WaveAMDMachine_Waitcnt]> {
   let arguments = (ins OptionalAttr<I32Attr>:$va_vdst,
+                       OptionalAttr<I32Attr>:$vm_vsrc,
                        OptionalAttr<I32Attr>:$sa_sdst,
                        OptionalAttr<I32Attr>:$va_sdst);
   let assemblyFormat = [{
     oilist(`va_vdst` `(` $va_vdst `)`
+         | `vm_vsrc` `(` $vm_vsrc `)`
          | `sa_sdst` `(` $sa_sdst `)`
          | `va_sdst` `(` $va_sdst `)`) attr-dict
   }];
-  let archPredicate = WaveAMDMachine_Gfx1250;
+  let archPredicate = "isa.Major >= 12";
+}
+def WaveAMDMachine_SSetSchedulingModeOp
+    : WaveAMDMachine_Op<"s_set_sched_mode", [WaveAMDMachine_SALU]> {
+  let arguments = (ins WaveAMDMachine_SchedulingModeEnum:$mode);
+  let assemblyFormat = "$mode attr-dict";
+  let archPredicate = "isa.Major >= 12";
 }
 def WaveAMDMachine_SNopOp
     : WaveAMDMachine_UnaryNoResult<"s_nop", WaveAMDMachine_Imm,
@@ -1873,6 +1904,7 @@ def WaveAMDMachine_TDMStoreOp
 def WaveAMDMachine_TDMPrefetchOp
     : WaveAMDMachine_Op<"tdm_prefetch", [
         WaveAMDMachine_VMEMLoad,
+        WaveAMDMachine_FlatMemory,
         WaveAMDMachine_CompletionNeutralTokenTrait,
         MemoryEffects<[MemWrite]>
       ]>,
@@ -3679,7 +3711,8 @@ def WaveAMDMachine_SAddU64U32Op
 }
 
 // 64-bit vector add. Expanded as a target carry-chain pair through VCC.
-def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]>,
+def WaveAMDMachine_VAddU64Op
+    : WaveAMDMachine_Op<"v_add_u64", [WaveAMDMachine_ExpertVALU, Pure]>,
     WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "vector 64-bit unsigned add";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);
@@ -3689,7 +3722,7 @@ def WaveAMDMachine_VAddU64Op : WaveAMDMachine_Op<"v_add_u64", [Pure]>,
 
 // Vector mirror of s_add_u64_u32: high addend is literal zero.
 def WaveAMDMachine_VAddU64U32Op
-    : WaveAMDMachine_Op<"v_add_u64_u32", [Pure]>,
+    : WaveAMDMachine_Op<"v_add_u64_u32", [WaveAMDMachine_ExpertVALU, Pure]>,
       WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "vector 64-bit base + zero-extended 32-bit offset";
   let arguments = (ins
@@ -3719,7 +3752,8 @@ def WaveAMDMachine_SMulU64Op
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_VMulU64Op : WaveAMDMachine_Op<"v_mul_u64", [Pure]>,
+def WaveAMDMachine_VMulU64Op
+    : WaveAMDMachine_Op<"v_mul_u64", [WaveAMDMachine_ExpertVALU, Pure]>,
     WaveAMDMachine_InstructionIssueCount<"6"> {
   let summary = "vector 64-bit unsigned multiply (low half)";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs, WaveAMDMachine_VGPR2:$rhs);
@@ -3749,7 +3783,8 @@ def WaveAMDMachine_SLshlB64Op
   let assemblyFormat = "$lhs `,` $shift attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_VLshlrevB64Op : WaveAMDMachine_Op<"v_lshlrev_b64", [Pure]> {
+def WaveAMDMachine_VLshlrevB64Op
+    : WaveAMDMachine_Op<"v_lshlrev_b64", [WaveAMDMachine_ExpertVALU, Pure]> {
   let summary = "vector 64-bit logical left shift";
   let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
                        WaveAMDMachine_VGPR2:$value);
@@ -3791,7 +3826,8 @@ def WaveAMDMachine_SFf1I32B64Op
   let summary = "scalar 64-bit count trailing zeros, -1 on zero";
 }
 
-def WaveAMDMachine_VLshrrevB64Op : WaveAMDMachine_Op<"v_lshrrev_b64", [Pure]> {
+def WaveAMDMachine_VLshrrevB64Op
+    : WaveAMDMachine_Op<"v_lshrrev_b64", [WaveAMDMachine_ExpertVALU, Pure]> {
   let summary = "vector 64-bit logical right shift";
   let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
                        WaveAMDMachine_VGPR2:$value);
@@ -3799,7 +3835,8 @@ def WaveAMDMachine_VLshrrevB64Op : WaveAMDMachine_Op<"v_lshrrev_b64", [Pure]> {
   let assemblyFormat = "$shift `,` $value attr-dict `:` functional-type(operands, results)";
 }
 
-def WaveAMDMachine_VAshrrevI64Op : WaveAMDMachine_Op<"v_ashrrev_i64", [Pure]> {
+def WaveAMDMachine_VAshrrevI64Op
+    : WaveAMDMachine_Op<"v_ashrrev_i64", [WaveAMDMachine_ExpertVALU, Pure]> {
   let summary = "vector 64-bit arithmetic right shift";
   let arguments = (ins WaveAMDMachine_Reg1OrImm:$shift,
                        WaveAMDMachine_VGPR2:$value);

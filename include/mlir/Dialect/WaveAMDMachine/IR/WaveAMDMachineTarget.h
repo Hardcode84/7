@@ -96,6 +96,8 @@ struct AMDGPUMmaCapabilities {
   unsigned accumulatorAlignment = 0;
 };
 
+llvm::StringRef getExpertSchedulingModeAttrName();
+
 std::optional<AMDGPUTarget> parseAMDGPUTargetAttr(llvm::StringRef value);
 
 FailureOr<AMDGPUTarget>

@@ -67,6 +67,7 @@ Compile-time support includes:
   budgets;
 - gfx1250 WMMA fragment layouts and accumulator semantics;
 - target-specific scheduling and hazard repair;
+- opt-in expert scheduling with post-regalloc dependency waits;
 - Python target selection and compile-time Integration coverage.
 
 TDM compile-time support includes:
@@ -83,7 +84,6 @@ gfx1250 scope does not include:
 
 - legacy `waveamd.dma_load_lds` enablement on gfx1250;
 - high-level TDM descriptor IR, fused loads, and gather or scatter;
-- expert scheduling mode 2;
 - cluster or multicast memory;
 - named or split hardware barriers;
 - SWMMAC, scaled WMMA, sparse WMMA, FP4, FP6, FP8, or BF8;
@@ -431,12 +431,11 @@ Expert scheduling mode 2 is separate from LLVM's gfx1250 coexecution scheduler:
 
 - `amdgpu-sched-strategy=coexec` selects a pre-register-allocation ordering
   policy;
-- `amdgpu-expert-scheduling-mode` changes hardware dependency handling and runs
-  in late, post-register-allocation wait insertion.
+- `waveamdmachine.expert_scheduling_mode` is a unit function attribute that
+  selects hardware mode 2 and late physical-register dependency waits.
 
-Neither enables the other. Initial bring-up keeps `HW_REG_WAVE_SCHED_MODE` at
-zero. Coexecution scheduling and normal split completion waits do not require
-expert mode.
+Neither enables the other. Attribute absence keeps normal mode. Coexecution
+scheduling and split completion waits do not require expert mode.
 
 Expert mode makes the compiler track physical-VGPR hazards that normal hardware
 mode handles. LLVM maintains software `VA_VDST_RD` and `VA_VDST_WR` scores over
@@ -445,25 +444,33 @@ one hardware `VA_VDST` field, plus `VM_VSRC`. It classifies:
 - Core/Side-MACC, DP-MACC, TRANS, and XDL VALU reads and writes;
 - LDS, FLAT, and VMEM VGPR source reads.
 
-Late wait insertion then emits a typed dependency-counter machine op.
-`MCInstPrinter` renders the gfx1250 spelling as `s_wait_alu`. It also programs
-scheduling mode 2 at function entry, disables it around calls and returns, and
-drains incoming dependency state for non-entry functions.
+`waveamd-insert-ticket-waits` owns the expert scoreboard after register
+allocation. It keys hazards by full physical VGPR index, before MC window
+lowering, and keeps separate read, write, and VM-source scores. Typed operation
+traits classify event families. TableGen enums supply event, counter, and mode
+names. Issue increments come from the shared cost-model query and its generated
+operation interfaces; no operation count is duplicated in the pass.
 
-Wave's post-regalloc ticket-wait pass is the right placement, but its current
-scoreboard tracks memory completion tickets, not physical VGPR RAW, WAR, and WAW
-hazards. A separate opt-in project must add:
+CFG and loop joins take the oldest incoming score. A nonzero wait is retained
+when all live events share one family. Mixed families drain to zero because
+completion may be out of order. Current VALU consumers omit VA waits: hardware
+handles VALU-to-VALU hazards in expert mode. Dependency field limits come from
+LLVM's AMDGPU helpers.
 
-- target and function controls, default off;
-- physical-register event scores and conservative CFG/loop joins;
-- exact VALU and memory-family classification;
-- scaled-WMMA double increments and LDS-DMA classification;
-- dependency-counter and scheduling-mode machine ops with MCInst emission;
-- entry, call, return, and non-entry transition rules;
-- late wait placement that avoids WMMA coexecution shadows.
+TDM transfers consume raw SGPR tuples and do not participate in expert
+dependency counters. Prefetch tracks its VGPR offset as a FLAT-family source.
+Dependency waits do not imply TENSOR completion and never force
+`tensorcnt(0)`; memory-token consumers retain independent partial TENSOR waits.
 
-Keep expert mode rejected until Wave carries equivalent async-source,
-loop-join, and WMMA-shadow correctness.
+Kernel entry enables mode 2. Callable entry enables mode 2 before draining
+incoming LOAD, DS, KM, VA, and VM-source state. Calls run in normal mode and
+restore mode 2 afterward. Returns drain callable state and restore normal mode.
+Kernel termination stays in mode 2.
+
+`waveamdmachine.s_wait_alu` and `waveamdmachine.s_set_sched_mode` are typed
+machine operations. MC emission only validates fields and builds `MCInst`.
+`MCInstPrinter` keeps dependency waits and scheduling-mode writes visible in
+assembly and disassembly.
 
 ## Kernel ABI And Entry
 
@@ -675,7 +682,8 @@ provider-specific gfx1250 code belongs in base register allocation.
 
 The existing AMDGPU scheduler project may supply common schedule-table and
 hazard infrastructure. gfx1250 bring-up owns classification, repair, and tests.
-Expert scheduling mode 2 stays disabled; normal coexecution and forwarding
+Expert scheduling stays disabled unless the function carries
+`waveamdmachine.expert_scheduling_mode`. Normal coexecution and forwarding
 repair must not emit `HW_REG_WAVE_SCHED_MODE`.
 
 ## Python And Tools

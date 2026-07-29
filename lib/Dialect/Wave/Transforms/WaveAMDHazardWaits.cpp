@@ -245,6 +245,7 @@ static void insertVNopMitigation(Operation &op, unsigned count, OpBuilder &b) {
 static void insertScratchBaseWait(Operation &op, OpBuilder &b) {
   b.setInsertionPoint(&op);
   waveamdmachine::SWaitAluOp::create(b, op.getLoc(), /*va_vdst=*/IntegerAttr(),
+                                     /*vm_vsrc=*/IntegerAttr(),
                                      /*sa_sdst=*/b.getI32IntegerAttr(0),
                                      /*va_sdst=*/b.getI32IntegerAttr(0));
 }

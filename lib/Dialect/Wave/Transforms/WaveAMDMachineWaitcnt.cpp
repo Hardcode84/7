@@ -22,11 +22,13 @@
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -53,6 +55,8 @@ using mlir::waveamdmachine::isWaveAMDMachineOp;
 
 namespace {
 
+namespace machine_traits = OpTrait::waveamdmachine;
+
 //===----------------------------------------------------------------------===//
 // Counter and token model
 //===----------------------------------------------------------------------===//
@@ -60,6 +64,10 @@ namespace {
 using Counter = waveamdmachine::WaitcntCounter;
 static constexpr unsigned kNumCounters =
     waveamdmachine::getMaxEnumValForWaitcntCounter() + 1;
+using ExpertCounter = waveamdmachine::ExpertCounter;
+using ExpertEvent = waveamdmachine::ExpertEvent;
+static constexpr unsigned kNumExpertCounters =
+    waveamdmachine::getMaxEnumValForExpertCounter() + 1;
 
 static unsigned eventMask(waveamdmachine::WaitcntEvent event) {
   return static_cast<unsigned>(event);
@@ -95,6 +103,67 @@ static bool overlaps(RegSpan lhs, RegSpan rhs) {
   return lhs.regClass == rhs.regClass && lhs.begin < rhs.end &&
          rhs.begin < lhs.end;
 }
+
+struct ExpertToken {
+  std::optional<RegSpan> source;
+  ExpertEvent event;
+  unsigned position;
+  ExpertCounter counter;
+
+  ExpertToken(RegSpan source, ExpertCounter counter, unsigned position)
+      : source(source), event(ExpertEvent::None), position(position),
+        counter(counter) {}
+
+  ExpertToken(ExpertEvent event, ExpertCounter counter, unsigned position)
+      : event(event), position(position), counter(counter) {}
+
+  bool isEventMarker() const { return !source; }
+};
+
+static bool sortExpertKey(const ExpertToken &lhs, const ExpertToken &rhs) {
+  if (lhs.counter != rhs.counter)
+    return static_cast<unsigned>(lhs.counter) <
+           static_cast<unsigned>(rhs.counter);
+  if (lhs.isEventMarker() != rhs.isEventMarker())
+    return lhs.isEventMarker();
+  if (lhs.isEventMarker())
+    return static_cast<unsigned>(lhs.event) < static_cast<unsigned>(rhs.event);
+  assert(lhs.source && rhs.source && "expert source key requires spans");
+  if (lhs.source->regClass != rhs.source->regClass)
+    return static_cast<unsigned>(lhs.source->regClass) <
+           static_cast<unsigned>(rhs.source->regClass);
+  if (lhs.source->begin != rhs.source->begin)
+    return lhs.source->begin < rhs.source->begin;
+  return lhs.source->end < rhs.source->end;
+}
+
+static bool sameExpertKey(const ExpertToken &lhs, const ExpertToken &rhs) {
+  if (lhs.counter != rhs.counter || lhs.isEventMarker() != rhs.isEventMarker())
+    return false;
+  if (lhs.isEventMarker())
+    return lhs.event == rhs.event;
+  return lhs.source == rhs.source;
+}
+
+struct ExpertWaitRequirement {
+  std::array<std::optional<unsigned>, kNumExpertCounters> counts;
+
+  bool hasWait() const {
+    return llvm::any_of(counts, [](const std::optional<unsigned> &count) {
+      return count.has_value();
+    });
+  }
+
+  std::optional<unsigned> get(ExpertCounter counter) const {
+    return counts[static_cast<unsigned>(counter)];
+  }
+
+  void requireDrain(ExpertCounter counter, unsigned position) {
+    std::optional<unsigned> &slot = counts[static_cast<unsigned>(counter)];
+    if (!slot || position < *slot)
+      slot = position;
+  }
+};
 
 struct ExecSourceTag {};
 
@@ -189,18 +258,34 @@ struct WaitRequirement {
 // Lattice payload
 //===----------------------------------------------------------------------===//
 
+static bool sameTokenState(const Token &a, const Token &b) {
+  return sameKey(a, b) && a.events == b.events && a.position == b.position &&
+         a.outOfOrder == b.outOfOrder && a.writesMemory == b.writesMemory;
+}
+
+static bool sameExpertTokenState(const ExpertToken &a, const ExpertToken &b) {
+  return sameExpertKey(a, b) && a.position == b.position;
+}
+
+template <typename T, typename Equal>
+static bool sameTokenSequence(ArrayRef<T> lhs, ArrayRef<T> rhs, Equal equal) {
+  if (lhs.size() != rhs.size())
+    return false;
+  for (auto [a, b] : llvm::zip(lhs, rhs))
+    if (!equal(a, b))
+      return false;
+  return true;
+}
+
 struct WaitState {
   // Sorted by counter and source/value key; each key appears once.
   SmallVector<Token, 4> tokens;
+  SmallVector<ExpertToken, 4> expertTokens;
 
   bool operator==(const WaitState &rhs) const {
-    if (tokens.size() != rhs.tokens.size())
-      return false;
-    for (auto [a, b] : llvm::zip(tokens, rhs.tokens))
-      if (!sameKey(a, b) || a.events != b.events || a.position != b.position ||
-          a.outOfOrder != b.outOfOrder || a.writesMemory != b.writesMemory)
-        return false;
-    return true;
+    return sameTokenSequence<Token>(tokens, rhs.tokens, sameTokenState) &&
+           sameTokenSequence<ExpertToken>(expertTokens, rhs.expertTokens,
+                                          sameExpertTokenState);
   }
 
   bool operator!=(const WaitState &rhs) const { return !(*this == rhs); }
@@ -222,14 +307,16 @@ public:
   }
 
   ChangeResult reset() {
-    if (state.tokens.empty())
+    if (state.tokens.empty() && state.expertTokens.empty())
       return ChangeResult::NoChange;
     state.tokens.clear();
+    state.expertTokens.clear();
     return ChangeResult::Change;
   }
 
   void print(raw_ostream &os) const override {
-    os << "tokens=" << state.tokens.size();
+    os << "tokens=" << state.tokens.size()
+       << " expert=" << state.expertTokens.size();
   }
 
 private:
@@ -488,10 +575,115 @@ static SmallVector<Token, 3> mergeSources(ArrayRef<Token> tokens,
 
 } // namespace lat
 
+namespace expert {
+
+static bool insertOrMin(SmallVectorImpl<ExpertToken> &tokens,
+                        ExpertToken token) {
+  auto it = llvm::lower_bound(tokens, token, sortExpertKey);
+  if (it != tokens.end() && sameExpertKey(*it, token)) {
+    if (token.position >= it->position)
+      return false;
+    it->position = token.position;
+    return true;
+  }
+  tokens.insert(it, token);
+  return true;
+}
+
+static bool insertOrReplace(SmallVectorImpl<ExpertToken> &tokens,
+                            ExpertToken token) {
+  auto it = llvm::lower_bound(tokens, token, sortExpertKey);
+  if (it != tokens.end() && sameExpertKey(*it, token)) {
+    if (token.position == it->position)
+      return false;
+    *it = token;
+    return true;
+  }
+  tokens.insert(it, token);
+  return true;
+}
+
+static void bumpCounter(SmallVectorImpl<ExpertToken> &tokens,
+                        ExpertCounter counter, unsigned delta) {
+  for (ExpertToken &token : tokens) {
+    if (token.counter != counter)
+      continue;
+    if (delta > std::numeric_limits<unsigned>::max() - token.position)
+      token.position = std::numeric_limits<unsigned>::max();
+    else
+      token.position += delta;
+  }
+}
+
+static void issue(WaitState &state, ExpertCounter counter, unsigned count,
+                  ExpertEvent event, ArrayRef<RegSpan> sources) {
+  if (count == 0)
+    return;
+  bumpCounter(state.expertTokens, counter, count);
+  insertOrReplace(state.expertTokens, ExpertToken{event, counter, 0});
+  for (RegSpan source : sources)
+    for (int64_t unit = source.begin; unit < source.end; ++unit)
+      insertOrReplace(
+          state.expertTokens,
+          ExpertToken{RegSpan{source.regClass, unit, unit + 1}, counter, 0});
+}
+
+static unsigned activeEventMask(ArrayRef<ExpertToken> tokens,
+                                ExpertCounter counter) {
+  unsigned mask = 0;
+  for (const ExpertToken &token : tokens)
+    if (token.counter == counter && token.isEventMarker())
+      mask |= static_cast<unsigned>(token.event);
+  return mask;
+}
+
+static void requireSpan(ExpertWaitRequirement &req, RegSpan span,
+                        ExpertCounter counter, const WaitState &state) {
+  bool mixed = hasMultipleEvents(activeEventMask(state.expertTokens, counter));
+  for (const ExpertToken &token : state.expertTokens) {
+    if (token.counter != counter || !token.source ||
+        !overlaps(span, *token.source))
+      continue;
+    req.requireDrain(counter, mixed ? 0 : token.position);
+  }
+}
+
+static void requireAll(ExpertWaitRequirement &req, ExpertCounter counter,
+                       const WaitState &state) {
+  if (llvm::any_of(state.expertTokens, [&](const ExpertToken &token) {
+        return token.counter == counter;
+      }))
+    req.requireDrain(counter, 0);
+}
+
+static void applyCounterWait(SmallVectorImpl<ExpertToken> &tokens,
+                             ExpertCounter counter, unsigned threshold) {
+  tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                              [&](const ExpertToken &token) {
+                                return token.counter == counter &&
+                                       token.position >= threshold;
+                              }),
+               tokens.end());
+}
+
+static void applyWait(WaitState &state, const ExpertWaitRequirement &req) {
+  for (unsigned i = 0; i < kNumExpertCounters; ++i) {
+    ExpertCounter counter = static_cast<ExpertCounter>(i);
+    if (std::optional<unsigned> count = req.get(counter))
+      applyCounterWait(state.expertTokens, counter, *count);
+  }
+}
+
+static void clear(WaitState &state) { state.expertTokens.clear(); }
+
+} // namespace expert
+
 ChangeResult WaitLattice::joinWith(const WaitState &incoming) {
   bool changed = false;
   for (const Token &tok : incoming.tokens)
     changed |= lat::insertOrMin(state.tokens, tok);
+  for (const ExpertToken &token : incoming.expertTokens)
+    changed |= expert::insertOrMin(state.expertTokens, token);
   return changed ? ChangeResult::Change : ChangeResult::NoChange;
 }
 
@@ -577,9 +769,27 @@ enum class OpKind {
   CompletionNeutral, // No new event; forward dependency completion.
   CompletionFree,    // Issue order only; no drain or completion transfer.
   TokenOp,           // waveamdmachine.after / token_join: derive only.
+  Call,              // callee prologue drains incoming ABI state.
+  Return,            // drain callable-function state.
   Endpgm,            // s_endpgm: implicit full drain.
   Generic,           // any other op: drain its operands.
 };
+
+static std::optional<OpKind> classifyProtocolOp(Operation *op) {
+  if (op->hasTrait<OpTrait::waveamdmachine::CompletionNeutralTokenOp>())
+    return OpKind::CompletionNeutral;
+  if (op->hasTrait<OpTrait::waveamdmachine::CompletionFreeTokenOp>())
+    return OpKind::CompletionFree;
+  if (isTokenOnlyOp(op))
+    return OpKind::TokenOp;
+  if (llvm::isa<CallOpInterface>(op))
+    return OpKind::Call;
+  if (llvm::isa<waveamdmachine::SSetpcB64Op>(op))
+    return OpKind::Return;
+  if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
+    return OpKind::Endpgm;
+  return std::nullopt;
+}
 
 static OpKind classifyOp(Operation *op) {
   if (isWaitcntOp(op) || isControlFlowOp(op))
@@ -590,15 +800,47 @@ static OpKind classifyOp(Operation *op) {
     return OpKind::Issuer;
   if (llvm::isa<waveamdmachine::SBarrierOp>(op))
     return OpKind::Barrier;
-  if (op->hasTrait<OpTrait::waveamdmachine::CompletionNeutralTokenOp>())
-    return OpKind::CompletionNeutral;
-  if (op->hasTrait<OpTrait::waveamdmachine::CompletionFreeTokenOp>())
-    return OpKind::CompletionFree;
-  if (isTokenOnlyOp(op))
-    return OpKind::TokenOp;
-  if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
-    return OpKind::Endpgm;
+  if (std::optional<OpKind> kind = classifyProtocolOp(op))
+    return *kind;
   return OpKind::Generic;
+}
+
+static bool isExpertVALU(Operation *op) {
+  return op->hasTrait<machine_traits::VALUOp>() ||
+         op->hasTrait<machine_traits::ExpertVALUOp>();
+}
+
+static ExpertEvent classifyExpertVALUEvent(Operation *op) {
+  if (op->hasTrait<machine_traits::MFMAOp>() ||
+      op->hasTrait<machine_traits::WMMAOp>() ||
+      llvm::isa<waveamdmachine::MMAOpInterface>(op))
+    return ExpertEvent::Xdl;
+  if (op->hasTrait<machine_traits::TransOp>())
+    return ExpertEvent::Trans;
+  if (op->hasTrait<machine_traits::DPMACCOp>())
+    return ExpertEvent::DPMACC;
+  return ExpertEvent::CSMACC;
+}
+
+static ExpertEvent classifyExpertMemoryEvent(Operation *op) {
+  if (op->hasTrait<machine_traits::TensorMemoryOp>())
+    return ExpertEvent::None;
+  if (op->hasTrait<machine_traits::FlatMemoryOp>())
+    return ExpertEvent::Flat;
+  if (op->hasTrait<machine_traits::DSOp>())
+    return ExpertEvent::Lds;
+  if (op->hasTrait<machine_traits::VMEMLoadOp>() ||
+      op->hasTrait<machine_traits::VMEMStoreOp>())
+    return ExpertEvent::Vmem;
+  return ExpertEvent::None;
+}
+
+static ExpertEvent classifyExpertEvent(Operation *op) {
+  if (!isWaveAMDMachineOp(op) || op->hasTrait<machine_traits::NoMachineInst>())
+    return ExpertEvent::None;
+  if (isExpertVALU(op))
+    return classifyExpertVALUEvent(op);
+  return classifyExpertMemoryEvent(op);
 }
 
 // Both MemToken and register results tag the same issue so consumers
@@ -619,6 +861,7 @@ struct WaitTarget {
       waveamdmachine::WaitCounterFamily::Legacy;
   bool waitXcnt = false;
   bool requiresNopBeforeDeallocVGPRs = true;
+  bool expertScheduling = false;
 };
 
 static FailureOr<WaitTarget> getWaitTarget(Operation *op) {
@@ -627,13 +870,29 @@ static FailureOr<WaitTarget> getWaitTarget(Operation *op) {
           op, "waveamd-insert-ticket-waits");
   if (failed(sti))
     return failure();
-  WaitTarget target{std::nullopt, llvm::AMDGPU::getIsaVersion((*sti)->getCPU()),
-                    llvm::AMDGPU::isGFX12Plus(**sti)
-                        ? waveamdmachine::WaitCounterFamily::Gfx12Split
-                        : waveamdmachine::WaitCounterFamily::Legacy,
-                    (**sti).hasFeature(llvm::AMDGPU::FeatureWaitXcnt),
-                    !(**sti).hasFeature(llvm::AMDGPU::FeatureGFX1250Insts)};
+  WaitTarget target;
+  target.isa = llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
+  bool gfx12Plus = llvm::AMDGPU::isGFX12Plus(**sti);
+  target.family = gfx12Plus ? waveamdmachine::WaitCounterFamily::Gfx12Split
+                            : waveamdmachine::WaitCounterFamily::Legacy;
+  target.waitXcnt = (**sti).hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
+  target.requiresNopBeforeDeallocVGPRs =
+      !(**sti).hasFeature(llvm::AMDGPU::FeatureGFX1250Insts);
   if (auto func = dyn_cast<func::FuncOp>(op)) {
+    StringRef attrName = waveamdmachine::getExpertSchedulingModeAttrName();
+    if (Attribute attr = func->getAttr(attrName)) {
+      if (!isa<UnitAttr>(attr)) {
+        func.emitError() << attrName << " must be a unit attribute";
+        return failure();
+      }
+      if (!gfx12Plus || llvm::AMDGPU::DepCtr::getVaVdstBitMask() == 0 ||
+          llvm::AMDGPU::DepCtr::getVmVsrcBitMask() == 0) {
+        func.emitError() << attrName
+                         << " requires GFX12+ expert scheduling support";
+        return failure();
+      }
+      target.expertScheduling = true;
+    }
     std::optional<unsigned> sgprCount = getExecIfEmissionSGPRCount(func);
     if (sgprCount)
       target.execIfSaveBase = wave::getWaveAMDExecIfSaveBase(func, *sgprCount);
@@ -771,6 +1030,20 @@ static LogicalResult validateWaitEvent(Operation *op,
   return success();
 }
 
+static LogicalResult validateExpertScheduling(Operation *op,
+                                              const WaitTarget &target) {
+  if (!target.expertScheduling)
+    return success();
+  for (Value value : llvm::concat<Value>(op->getOperands(), op->getResults())) {
+    auto type = dyn_cast<waveamdmachine::RegType>(value.getType());
+    if (type && type.getRegClass() == waveamdmachine::RegClass::VGPR &&
+        type.getIndex() < 0)
+      return op->emitError(
+          "expert scheduling requires allocated VGPR operands and results");
+  }
+  return success();
+}
+
 static LogicalResult validateWaveAMDMachineOp(Operation *op,
                                               const WaitTarget &target) {
   if (!isWaveAMDMachineOp(op))
@@ -779,7 +1052,9 @@ static LogicalResult validateWaveAMDMachineOp(Operation *op,
     return failure();
   if (failed(validateWaitLoweringPreconditions(op)))
     return failure();
-  return validateWaitEvent(op, target);
+  if (failed(validateWaitEvent(op, target)))
+    return failure();
+  return validateExpertScheduling(op, target);
 }
 
 static void requireValue(WaitRequirement &req, Value value,
@@ -900,13 +1175,20 @@ static bool isD16LowPreservedOperand(OpOperand &operand) {
   return load.getPreserved().getDefiningOp<waveamdmachine::BufferLoadU8D16Op>();
 }
 
-static WaitRequirement computeRequirement(Operation *op, const WaitState &state,
-                                          const WaitTarget &target) {
-  if (isControlFlowOp(op))
-    return computeControlFlowRequirement(op, state, target);
+static WaitRequirement
+computeCallableBoundaryRequirement(const WaitState &state) {
   WaitRequirement req;
-  if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
-    return req;
+  for (Counter counter :
+       {Counter::Load, Counter::Store, Counter::Ds, Counter::Km})
+    if (llvm::any_of(state.tokens, [&](const Token &token) {
+          return token.counter == counter;
+        }))
+      req.requireDrain(counter, 0);
+  return req;
+}
+
+static void requireOperationOperands(WaitRequirement &req, Operation *op,
+                                     const WaitState &state) {
   bool issuer = isMemoryIssuer(op);
   for (OpOperand &operand : op->getOpOperands()) {
     if (isD16LowPreservedOperand(operand))
@@ -920,9 +1202,79 @@ static WaitRequirement computeRequirement(Operation *op, const WaitState &state,
     }
     requireValue(req, operand.get(), state);
   }
+}
+
+static WaitRequirement computeRequirement(Operation *op, const WaitState &state,
+                                          const WaitTarget &target) {
+  if (isControlFlowOp(op))
+    return computeControlFlowRequirement(op, state, target);
+  if (llvm::isa<waveamdmachine::SEndpgmOp>(op))
+    return {};
+  if (target.expertScheduling &&
+      llvm::isa<CallOpInterface, waveamdmachine::SSetpcB64Op>(op))
+    return computeCallableBoundaryRequirement(state);
+  WaitRequirement req;
+  requireOperationOperands(req, op, state);
   requireOverlappingRegisterDefs(req, op, state);
   if (op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
     requireExecDef(req, state);
+  return req;
+}
+
+static bool isVGPRSpan(RegSpan span) {
+  return span.regClass == waveamdmachine::RegClass::VGPR;
+}
+
+static void requireExpertDef(ExpertWaitRequirement &req, RegSpan span,
+                             const WaitState &state) {
+  if (!isVGPRSpan(span))
+    return;
+  expert::requireSpan(req, span, ExpertCounter::VaWrite, state);
+  expert::requireSpan(req, span, ExpertCounter::VaRead, state);
+  expert::requireSpan(req, span, ExpertCounter::VmSource, state);
+}
+
+static ExpertWaitRequirement
+computeExpertReturnRequirement(const WaitState &state) {
+  ExpertWaitRequirement req;
+  for (unsigned i = 0; i < kNumExpertCounters; ++i)
+    expert::requireAll(req, static_cast<ExpertCounter>(i), state);
+  return req;
+}
+
+static void requireExpertOperands(ExpertWaitRequirement &req, Operation *op,
+                                  const WaitState &state) {
+  for (Value operand : op->getOperands())
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(operand);
+        span && isVGPRSpan(*span))
+      expert::requireSpan(req, *span, ExpertCounter::VaWrite, state);
+}
+
+static void requireExpertDefinitions(ExpertWaitRequirement &req, Operation *op,
+                                     const WaitState &state) {
+  for (Value result : op->getResults())
+    if (std::optional<RegSpan> span = getAllocatedRegSpan(result))
+      requireExpertDef(req, *span, state);
+  if (auto fixedDefs =
+          dyn_cast<waveamdmachine::FixedPhysicalRegisterDefsOpInterface>(op))
+    for (RegSpan span : fixedDefs.getFixedPhysicalRegisterDefs())
+      requireExpertDef(req, span, state);
+}
+
+static ExpertWaitRequirement
+computeExpertRequirement(Operation *op, const WaitState &state,
+                         const WaitTarget &target) {
+  ExpertWaitRequirement req;
+  if (!target.expertScheduling || llvm::isa<waveamdmachine::SEndpgmOp>(op))
+    return req;
+  if (llvm::isa<CallOpInterface, waveamdmachine::SSetpcB64Op>(op))
+    return computeExpertReturnRequirement(state);
+  requireExpertOperands(req, op, state);
+  requireExpertDefinitions(req, op, state);
+  if (isExpertVALU(op)) {
+    req.counts[static_cast<unsigned>(ExpertCounter::VaRead)].reset();
+    req.counts[static_cast<unsigned>(ExpertCounter::VaWrite)].reset();
+  }
   return req;
 }
 
@@ -992,6 +1344,57 @@ static void recordIssue(Operation *op, WaitState &state,
                     isVmemSourceEvent(info.event));
 }
 
+static void collectExpertSpans(ValueRange values,
+                               SmallVectorImpl<RegSpan> &spans) {
+  for (Value value : values) {
+    std::optional<RegSpan> span = getAllocatedRegSpan(value);
+    if (span && isVGPRSpan(*span))
+      spans.push_back(*span);
+  }
+}
+
+static bool isVALUExpertEvent(ExpertEvent event) {
+  switch (event) {
+  case ExpertEvent::CSMACC:
+  case ExpertEvent::DPMACC:
+  case ExpertEvent::Trans:
+  case ExpertEvent::Xdl:
+    return true;
+  case ExpertEvent::None:
+  case ExpertEvent::Lds:
+  case ExpertEvent::Flat:
+  case ExpertEvent::Vmem:
+    return false;
+  }
+  llvm_unreachable("unknown expert scheduling event");
+}
+
+static void recordExpertIssue(Operation *op, WaitState &state,
+                              const WaitTarget &target) {
+  if (!target.expertScheduling)
+    return;
+  if (classifyOp(op) == OpKind::Barrier)
+    return;
+  ExpertEvent event = classifyExpertEvent(op);
+  if (event == ExpertEvent::None)
+    return;
+  unsigned count = waveamdmachine::getInstructionIssueCount(op, target.isa);
+  if (count == 0)
+    return;
+
+  SmallVector<RegSpan, 4> operands;
+  collectExpertSpans(op->getOperands(), operands);
+  if (!isVALUExpertEvent(event)) {
+    expert::issue(state, ExpertCounter::VmSource, count, event, operands);
+    return;
+  }
+
+  SmallVector<RegSpan, 2> results;
+  collectExpertSpans(op->getResults(), results);
+  expert::issue(state, ExpertCounter::VaRead, count, event, operands);
+  expert::issue(state, ExpertCounter::VaWrite, count, event, results);
+}
+
 static void deriveIssuerDependencyTokens(Operation *op, WaitState &state) {
   if (!isReadOnlyIssuer(op))
     return;
@@ -1041,8 +1444,40 @@ static bool implicitlyDrainsXcnt(Operation *op) {
       op);
 }
 
-static void observeExistingWaitcnt(Operation *op, WaitState &state,
-                                   const WaitTarget &target) {
+static unsigned getExpertCounterMax(ExpertCounter counter) {
+  switch (counter) {
+  case ExpertCounter::VaRead:
+  case ExpertCounter::VaWrite:
+    return llvm::AMDGPU::DepCtr::getVaVdstBitMask();
+  case ExpertCounter::VmSource:
+    return llvm::AMDGPU::DepCtr::getVmVsrcBitMask();
+  }
+  llvm_unreachable("unknown expert scheduling counter");
+}
+
+static void normalizeExpertWait(ExpertWaitRequirement &req) {
+  std::optional<unsigned> vaRead = req.get(ExpertCounter::VaRead);
+  std::optional<unsigned> vaWrite = req.get(ExpertCounter::VaWrite);
+  if (vaRead || vaWrite) {
+    unsigned va =
+        std::min(vaRead.value_or(std::numeric_limits<unsigned>::max()),
+                 vaWrite.value_or(std::numeric_limits<unsigned>::max()));
+    req.counts[static_cast<unsigned>(ExpertCounter::VaRead)] = va;
+    req.counts[static_cast<unsigned>(ExpertCounter::VaWrite)] = va;
+  }
+
+  for (unsigned i = 0; i < kNumExpertCounters; ++i) {
+    std::optional<unsigned> &count = req.counts[i];
+    if (!count)
+      continue;
+    unsigned max = getExpertCounterMax(static_cast<ExpertCounter>(i));
+    if (*count >= max)
+      count = max - 1;
+  }
+}
+
+static void observeRegularWaitcnt(Operation *op, WaitState &state,
+                                  const WaitTarget &target) {
   WaitRequirement observed;
   if (auto wait = llvm::dyn_cast<waveamdmachine::SWaitcntOp>(op)) {
     unsigned vmMax = getCounterMax(Counter::Vmem, target.isa);
@@ -1071,6 +1506,29 @@ static void observeExistingWaitcnt(Operation *op, WaitState &state,
   lat::applyWait(state.tokens, observed);
 }
 
+static void observeExpertWaitcnt(Operation *op, WaitState &state,
+                                 const WaitTarget &target) {
+  if (!target.expertScheduling)
+    return;
+  auto waitAlu = dyn_cast<waveamdmachine::SWaitAluOp>(op);
+  if (!waitAlu)
+    return;
+  ExpertWaitRequirement expertWait;
+  if (std::optional<uint32_t> va = waitAlu.getVaVdst()) {
+    expertWait.requireDrain(ExpertCounter::VaRead, *va);
+    expertWait.requireDrain(ExpertCounter::VaWrite, *va);
+  }
+  if (std::optional<uint32_t> vm = waitAlu.getVmVsrc())
+    expertWait.requireDrain(ExpertCounter::VmSource, *vm);
+  expert::applyWait(state, expertWait);
+}
+
+static void observeExistingWaitcnt(Operation *op, WaitState &state,
+                                   const WaitTarget &target) {
+  observeRegularWaitcnt(op, state, target);
+  observeExpertWaitcnt(op, state, target);
+}
+
 static void clampSaturatedCounterFields(WaitRequirement &req,
                                         const WaitTarget &target) {
   for (unsigned i = 1; i < kNumCounters; ++i) {
@@ -1088,14 +1546,17 @@ static void clampSaturatedCounterFields(WaitRequirement &req,
   }
 }
 
-// `emit` is a no-op during analysis, the s_waitcnt emitter during rewrite.
+// `emit` is a no-op during analysis, the wait emitter during rewrite.
 template <typename EmitFn>
 static void applyDrain(Operation *op, WaitState &state,
                        const WaitTarget &target, EmitFn emit) {
   WaitRequirement req = computeRequirement(op, state, target);
+  ExpertWaitRequirement expertReq = computeExpertRequirement(op, state, target);
   clampSaturatedCounterFields(req, target);
-  emit(op, req);
+  normalizeExpertWait(expertReq);
+  emit(op, req, expertReq);
   lat::applyWait(state.tokens, req);
+  expert::applyWait(state, expertReq);
 }
 
 static void applyImplicitXDrain(Operation *op, WaitState &state,
@@ -1104,19 +1565,63 @@ static void applyImplicitXDrain(Operation *op, WaitState &state,
     lat::clearCounter(state.tokens, Counter::X);
 }
 
+enum class TransferAction { Unhandled, Finish, FinishAndRecord };
+
+template <typename EmitFn>
+static TransferAction runSimpleTransfer(OpKind kind, Operation *op,
+                                        WaitState &state,
+                                        const WaitTarget &target, EmitFn emit) {
+  switch (kind) {
+  case OpKind::Skip:
+    if (isWaitcntOp(op)) {
+      observeExistingWaitcnt(op, state, target);
+      return TransferAction::Finish;
+    }
+    applyDrain(op, state, target, emit);
+    return TransferAction::FinishAndRecord;
+  case OpKind::CompletionNeutral:
+  case OpKind::TokenOp:
+    deriveResultTokens(op, state);
+    return TransferAction::FinishAndRecord;
+  case OpKind::CompletionFree:
+    return TransferAction::FinishAndRecord;
+  case OpKind::Endpgm:
+    state.tokens.clear();
+    expert::clear(state);
+    return TransferAction::Finish;
+  default:
+    return TransferAction::Unhandled;
+  }
+}
+
+template <typename EmitFn>
+static void transferCall(Operation *op, WaitState &state,
+                         const WaitTarget &target, EmitFn emit) {
+  applyDrain(op, state, target, emit);
+  if (!target.expertScheduling)
+    return;
+  for (Counter counter :
+       {Counter::Load, Counter::Store, Counter::Ds, Counter::Km})
+    lat::clearCounter(state.tokens, counter);
+  expert::clear(state);
+}
+
 // Shared dispatch for analysis and rewrite: same state transfer, the
 // only delta is the (conditional) `emit`.
 template <typename EmitFn>
 static void runTransfer(Operation *op, WaitState &state,
                         const WaitTarget &target, EmitFn emit) {
-  switch (classifyOp(op)) {
-  case OpKind::Skip:
-    if (isWaitcntOp(op)) {
-      observeExistingWaitcnt(op, state, target);
-      return;
+  OpKind kind = classifyOp(op);
+  TransferAction action = runSimpleTransfer(kind, op, state, target, emit);
+  if (action != TransferAction::Unhandled) {
+    if (action == TransferAction::FinishAndRecord) {
+      recordExpertIssue(op, state, target);
+      applyImplicitXDrain(op, state, target);
     }
-    applyDrain(op, state, target, emit);
-    break;
+    return;
+  }
+
+  switch (kind) {
   case OpKind::Issuer:
     applyDrain(op, state, target, emit);
     applyImplicitXGroupSwitch(op, state, target);
@@ -1130,21 +1635,20 @@ static void runTransfer(Operation *op, WaitState &state,
     applyImplicitXGroupSwitch(op, state, target);
     deriveResultTokens(op, state);
     break;
-  case OpKind::CompletionNeutral:
-    deriveResultTokens(op, state);
+  case OpKind::Call:
+    transferCall(op, state, target, emit);
     break;
-  case OpKind::CompletionFree:
+  case OpKind::Return:
+    applyDrain(op, state, target, emit);
+    expert::clear(state);
     break;
-  case OpKind::TokenOp:
-    deriveResultTokens(op, state);
-    break;
-  case OpKind::Endpgm:
-    state.tokens.clear();
-    return;
   case OpKind::Generic:
     applyDrain(op, state, target, emit);
     break;
+  default:
+    llvm_unreachable("simple transfer was not handled");
   }
+  recordExpertIssue(op, state, target);
   // Def hazards precede the instruction's implicit X drain.
   applyImplicitXDrain(op, state, target);
 }
@@ -1243,7 +1747,8 @@ public:
 
 private:
   void transferOp(Operation *op, WaitState &state) {
-    auto noop = [](Operation *, const WaitRequirement &) {};
+    auto noop = [](Operation *, const WaitRequirement &,
+                   const ExpertWaitRequirement &) {};
     runTransfer(op, state, target, noop);
   }
 
@@ -1361,6 +1866,88 @@ static void emitWaits(OpBuilder &builder, Operation *op,
   }
 }
 
+static void emitExpertWait(OpBuilder &builder, Operation *op,
+                           const ExpertWaitRequirement &req) {
+  std::optional<unsigned> va = req.get(ExpertCounter::VaRead);
+  std::optional<unsigned> vm = req.get(ExpertCounter::VmSource);
+  if (!va && !vm)
+    return;
+  builder.setInsertionPoint(op);
+  waveamdmachine::SWaitAluOp::create(
+      builder, op->getLoc(), va ? getCounterAttr(builder, *va) : IntegerAttr(),
+      vm ? getCounterAttr(builder, *vm) : IntegerAttr(),
+      /*sa_sdst=*/IntegerAttr(), /*va_sdst=*/IntegerAttr());
+}
+
+static bool isSchedulingMode(Operation *op,
+                             waveamdmachine::SchedulingMode mode) {
+  auto setMode = dyn_cast_or_null<waveamdmachine::SSetSchedulingModeOp>(op);
+  return setMode && setMode.getMode() == mode;
+}
+
+static bool hasEntryExpertMode(func::FuncOp func) {
+  for (Operation &op : func.getBody().front()) {
+    if (auto mode = dyn_cast<waveamdmachine::SSetSchedulingModeOp>(&op))
+      return mode.getMode() == waveamdmachine::SchedulingMode::Expert2;
+    if (isWaitcntOp(&op) ||
+        op.hasTrait<OpTrait::waveamdmachine::NoMachineInst>())
+      continue;
+    return false;
+  }
+  return false;
+}
+
+static void materializeExpertModeProtocol(func::FuncOp func,
+                                          OpBuilder &builder) {
+  SmallVector<Operation *> calls;
+  SmallVector<waveamdmachine::SSetpcB64Op> returns;
+  func.walk([&](Operation *op) {
+    if (isa<CallOpInterface>(op))
+      calls.push_back(op);
+    if (auto ret = dyn_cast<waveamdmachine::SSetpcB64Op>(op))
+      returns.push_back(ret);
+  });
+
+  for (Operation *call : calls) {
+    if (!isSchedulingMode(call->getPrevNode(),
+                          waveamdmachine::SchedulingMode::Normal)) {
+      builder.setInsertionPoint(call);
+      waveamdmachine::SSetSchedulingModeOp::create(
+          builder, call->getLoc(), waveamdmachine::SchedulingMode::Normal);
+    }
+    if (!isSchedulingMode(call->getNextNode(),
+                          waveamdmachine::SchedulingMode::Expert2)) {
+      builder.setInsertionPointAfter(call);
+      waveamdmachine::SSetSchedulingModeOp::create(
+          builder, call->getLoc(), waveamdmachine::SchedulingMode::Expert2);
+    }
+  }
+
+  for (waveamdmachine::SSetpcB64Op ret : returns) {
+    if (isSchedulingMode(ret->getPrevNode(),
+                         waveamdmachine::SchedulingMode::Normal))
+      continue;
+    builder.setInsertionPoint(ret);
+    waveamdmachine::SSetSchedulingModeOp::create(
+        builder, ret.getLoc(), waveamdmachine::SchedulingMode::Normal);
+  }
+
+  if (hasEntryExpertMode(func))
+    return;
+  builder.setInsertionPointToStart(&func.getBody().front());
+  waveamdmachine::SSetSchedulingModeOp::create(
+      builder, func.getLoc(), waveamdmachine::SchedulingMode::Expert2);
+  if (!func->hasAttr(wave::WaveDialect::getKernelAttrName())) {
+    IntegerAttr zero = builder.getI32IntegerAttr(0);
+    waveamdmachine::SWaitcntSplitOp::create(
+        builder, func.getLoc(), zero, /*storecnt=*/IntegerAttr(), zero, zero,
+        /*xcnt=*/IntegerAttr(), /*tensorcnt=*/IntegerAttr());
+    waveamdmachine::SWaitAluOp::create(builder, func.getLoc(), zero, zero,
+                                       /*sa_sdst=*/IntegerAttr(),
+                                       /*va_sdst=*/IntegerAttr());
+  }
+}
+
 static void noteAllocatedVGPR(Value value, unsigned &count) {
   waveamdmachine::RegType type =
       dyn_cast<waveamdmachine::RegType>(value.getType());
@@ -1460,6 +2047,10 @@ struct WaveAMDTicketWaitsPass
       return failure();
 
     rewriteWithSolver(func, solver, *target, *vgprLimited);
+    if (target->expertScheduling) {
+      OpBuilder builder(func.getContext());
+      materializeExpertModeProtocol(func, builder);
+    }
     return success();
   }
 
@@ -1494,9 +2085,12 @@ struct WaveAMDTicketWaitsPass
   void rewriteOp(Operation *op, WaitState &local, DataFlowSolver &solver,
                  const WaitTarget &target, bool vgprLimited,
                  OpBuilder &builder) {
-    auto emit = [&](Operation *op, const WaitRequirement &req) {
+    auto emit = [&](Operation *op, const WaitRequirement &req,
+                    const ExpertWaitRequirement &expertReq) {
       if (req.hasWait())
         emitWaits(builder, op, req, target);
+      if (expertReq.hasWait())
+        emitExpertWait(builder, op, expertReq);
     };
     if (vgprLimited && llvm::isa<waveamdmachine::SEndpgmOp>(op) &&
         canDeallocVGPRs(local, target))

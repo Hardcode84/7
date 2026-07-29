@@ -73,6 +73,7 @@ unsigned getConstantBusLimit(const llvm::AMDGPU::IsaVersion &isa);
 unsigned encodeSDelayAluVALU(unsigned dependency);
 unsigned encodeSDelayAluSALUCycle(unsigned cycles);
 unsigned encodeDepCtrWait(std::optional<unsigned> vaVdst,
+                          std::optional<unsigned> vmVsrc,
                           std::optional<unsigned> saSdst,
                           std::optional<unsigned> vaSdst,
                           const llvm::MCSubtargetInfo &sti);

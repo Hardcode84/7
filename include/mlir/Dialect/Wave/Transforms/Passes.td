@@ -554,7 +554,9 @@ def WaveAMDTicketWaits
     it after register allocation and memory-tuple decomposition. Pipeline
     hazards remain a separate concern. Terminal drains use `s_endpgm`'s
     implicit wait; VGPR-limited targets can release VGPRs while non-scratch
-    stores finish.
+    stores finish. Functions carrying
+    `waveamdmachine.expert_scheduling_mode` also get physical-VGPR dependency
+    waits and scheduling-mode transitions.
   }];
   let dependentDialects = [
     "waveamdmachine::WaveAMDMachineDialect"

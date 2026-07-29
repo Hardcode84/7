@@ -161,11 +161,14 @@ unsigned mlir::waveamdmachine::encodeSDelayAluSALUCycle(unsigned cycles) {
 }
 
 unsigned mlir::waveamdmachine::encodeDepCtrWait(
-    std::optional<unsigned> vaVdst, std::optional<unsigned> saSdst,
-    std::optional<unsigned> vaSdst, const llvm::MCSubtargetInfo &sti) {
+    std::optional<unsigned> vaVdst, std::optional<unsigned> vmVsrc,
+    std::optional<unsigned> saSdst, std::optional<unsigned> vaSdst,
+    const llvm::MCSubtargetInfo &sti) {
   unsigned encoded = llvm::AMDGPU::DepCtr::getDefaultDepCtrEncoding(sti);
   if (vaVdst)
     encoded = llvm::AMDGPU::DepCtr::encodeFieldVaVdst(encoded, *vaVdst);
+  if (vmVsrc)
+    encoded = llvm::AMDGPU::DepCtr::encodeFieldVmVsrc(encoded, *vmVsrc);
   if (saSdst)
     encoded = llvm::AMDGPU::DepCtr::encodeFieldSaSdst(encoded, *saSdst);
   if (vaSdst)
