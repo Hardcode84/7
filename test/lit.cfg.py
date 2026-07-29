@@ -1,7 +1,9 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import lit.formats
@@ -47,7 +49,10 @@ config.substitutions.append(("%wave_obj_root", config.wave_mlir_obj_root))
 if sys.platform.startswith("linux"):
     config.available_features.add("linux")
 
-llvm_config.with_system_environment(["HOME", "INCLUDE", "LIB", "TMP", "TEMP"])
+_host_environment = ["HOME", "INCLUDE", "LIB", "TMP", "TEMP"]
+# Runtime selection uses HSA_* variables that lit does not preserve by default.
+_host_environment.extend(sorted(name for name in os.environ if name.startswith("HSA_")))
+llvm_config.with_system_environment(_host_environment)
 
 
 def _detect_amdgpu_chip() -> str | None:
@@ -56,9 +61,15 @@ def _detect_amdgpu_chip() -> str | None:
     if not Path(rocminfo).exists():
         return None
     try:
-        out = subprocess.run(
-            [rocminfo], capture_output=True, text=True, timeout=5, check=False
-        ).stdout
+        with tempfile.TemporaryDirectory(prefix="wave-rocminfo-") as work_dir:
+            out = subprocess.run(
+                [rocminfo],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                cwd=work_dir,
+            ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     for line in out.splitlines():
