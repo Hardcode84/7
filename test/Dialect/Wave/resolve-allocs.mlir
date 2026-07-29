@@ -773,3 +773,31 @@ func.func @release_after_conditional_access(%condition: i1)
       -> !wave.mem.token
   return
 }
+
+// -----
+
+// Yielded token covers active-lane access; inactive lanes touch no allocation.
+// CHECK-LABEL: func.func @release_after_where_access
+// CHECK-SAME: wave.lds_size = 16 : i64
+func.func @release_after_where_access(%condition: !wave.mask<32>)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %done = wave.where %condition {
+    %stored = wave.store %lane -> %ap after %initial
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %initial : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
+  %released = wave.alloc_release %a after %done
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}

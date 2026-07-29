@@ -1124,6 +1124,37 @@ LogicalResult WhereOp::verify() {
   return success();
 }
 
+void WhereOp::getSuccessorRegions(RegionBranchPoint point,
+                                  SmallVectorImpl<RegionSuccessor> &regions) {
+  bool hasElse = !getElseRegion().empty();
+  if (point.isParent()) {
+    regions.push_back(RegionSuccessor(&getThenRegion()));
+    if (hasElse)
+      regions.push_back(RegionSuccessor(&getElseRegion()));
+    else if (getNumResults() == 0)
+      regions.push_back(RegionSuccessor(getOperation()));
+    return;
+  }
+
+  regions.push_back(RegionSuccessor(getOperation()));
+}
+
+OperandRange WhereOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  return OperandRange((*this)->operand_end(), (*this)->operand_end());
+}
+
+ValueRange WhereOp::getSuccessorInputs(RegionSuccessor successor) {
+  return successor.isOperation() ? ValueRange(getResults()) : ValueRange();
+}
+
+MutableOperandRange
+YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
+  MutableOperandRange values = getValuesMutable();
+  if (successor.isOperation())
+    return values;
+  return values.slice(0, 0);
+}
+
 namespace {
 enum class WaveCastElementKind { Int, Float };
 
