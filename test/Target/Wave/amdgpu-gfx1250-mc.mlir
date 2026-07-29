@@ -3,6 +3,9 @@
 // RUN:   | FileCheck %s --check-prefix=ASM
 // RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
 // RUN:   wave-translate --wave-to-amdgpu-asm %s \
+// RUN:   | FileCheck %s --check-prefix=META
+// RUN: env WAVE_PIPELINES_DIR=%S/Inputs/emit-only-pipeline \
+// RUN:   wave-translate --wave-to-amdgpu-asm %s \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1250 \
 // RUN:       -filetype=obj -o %t.o
 // RUN: llvm-objdump -d --mcpu=gfx1250 %t.o \
@@ -11,6 +14,85 @@
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
+
+// ASM-LABEL: cluster_ids:
+// ASM: s_mov_b32 s6, ttmp9
+// ASM: s_and_b32 s7, ttmp7, 0xffff
+// ASM: s_lshr_b32 s8, ttmp7, 16
+// ASM: s_and_b32 s9, ttmp6, 15
+// ASM: s_bfe_u32 s10, ttmp6, 0x40004
+// ASM: s_bfe_u32 s11, ttmp6, 0x40008
+// ASM: s_bfe_u32 s12, ttmp6, 0x4000c
+// ASM: s_bfe_u32 s13, ttmp6, 0x40010
+// ASM: s_bfe_u32 s14, ttmp6, 0x40014
+// ASM: s_endpgm
+// ASM: .amdhsa_system_sgpr_workgroup_id_y 1
+// ASM: .amdhsa_system_sgpr_workgroup_id_z 1
+// META-COUNT-1: .cluster_dims: [ 2, 2, 1 ]
+// DIS-LABEL: <cluster_ids>:
+// DIS: s_mov_b32 s6, ttmp9
+// DIS: s_and_b32 s7, ttmp7, 0xffff
+// DIS: s_lshr_b32 s8, ttmp7, 16
+// DIS: s_and_b32 s9, ttmp6, 15
+// DIS: s_bfe_u32 s10, ttmp6, 0x40004
+// DIS: s_bfe_u32 s11, ttmp6, 0x40008
+// DIS: s_bfe_u32 s12, ttmp6, 0x4000c
+// DIS: s_bfe_u32 s13, ttmp6, 0x40010
+// DIS: s_bfe_u32 s14, ttmp6, 0x40014
+// DIS: s_endpgm
+func.func @cluster_ids() attributes {
+    wave.kernel,
+    wave.cluster_dims = array<i32: 2, 2, 1>,
+    waveamdmachine.sgpr_count = 15 : i64
+  } {
+  %cluster_x = waveamdmachine.s_cluster_id_x
+      : !waveamdmachine.reg<sgpr, 1, 6>
+  %cluster_y, %cluster_y_scc = waveamdmachine.s_cluster_id_y
+      : !waveamdmachine.reg<sgpr, 1, 7>, !waveamdmachine.reg<scc, 1>
+  %cluster_z, %cluster_z_scc = waveamdmachine.s_cluster_id_z
+      : !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.reg<scc, 1>
+  %local_x, %local_x_scc = waveamdmachine.s_cluster_workgroup_id_x
+      : !waveamdmachine.reg<sgpr, 1, 9>, !waveamdmachine.reg<scc, 1>
+  %local_y, %local_y_scc = waveamdmachine.s_cluster_workgroup_id_y
+      : !waveamdmachine.reg<sgpr, 1, 10>, !waveamdmachine.reg<scc, 1>
+  %local_z, %local_z_scc = waveamdmachine.s_cluster_workgroup_id_z
+      : !waveamdmachine.reg<sgpr, 1, 11>, !waveamdmachine.reg<scc, 1>
+  %max_x, %max_x_scc = waveamdmachine.s_cluster_workgroup_max_id_x
+      : !waveamdmachine.reg<sgpr, 1, 12>, !waveamdmachine.reg<scc, 1>
+  %max_y, %max_y_scc = waveamdmachine.s_cluster_workgroup_max_id_y
+      : !waveamdmachine.reg<sgpr, 1, 13>, !waveamdmachine.reg<scc, 1>
+  %max_z, %max_z_scc = waveamdmachine.s_cluster_workgroup_max_id_z
+      : !waveamdmachine.reg<sgpr, 1, 14>, !waveamdmachine.reg<scc, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ASM-LABEL: fixed_cluster_workgroup_id:
+// ASM: s_mov_b32 s2, ttmp9
+// ASM-NEXT: s_and_b32 s5, ttmp6, 15
+// ASM-NEXT: s_mul_i32 s2, s2, 2
+// ASM-NEXT: s_delay_alu instid0(SALU_CYCLE_1)
+// ASM-NEXT: s_add_co_i32 s2, s2, s5
+// ASM-NEXT: s_delay_alu instid0(SALU_CYCLE_1)
+// ASM: s_endpgm
+// ASM: .amdhsa_next_free_sgpr 6
+// DIS-LABEL: <fixed_cluster_workgroup_id>:
+// DIS: s_mov_b32 s2, ttmp9
+// DIS-NEXT: s_and_b32 s5, ttmp6, 15
+// DIS-NEXT: s_mul_i32 s2, s2, 2
+// DIS-NEXT: s_delay_alu instid0(SALU_CYCLE_1)
+// DIS-NEXT: s_add_co_i32 s2, s2, s5
+// DIS-NEXT: s_delay_alu instid0(SALU_CYCLE_1)
+// DIS: s_endpgm
+func.func @fixed_cluster_workgroup_id() attributes {
+    wave.kernel,
+    wave.cluster_dims = array<i32: 2, 1, 1>
+  } {
+  %x = waveamdmachine.s_workgroup_id_x
+      : !waveamdmachine.reg<sgpr, 1, 2>
+  waveamdmachine.s_endpgm
+  return
+}
 
 // ASM-LABEL: scalar_vector_control:
 // ASM: s_add_co_i32 s5, s4, 1

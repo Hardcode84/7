@@ -51,6 +51,32 @@ def test_sched_barrier():
         print(m.module)
 
 
+# CHECK-LABEL: TEST: test_cluster_ids
+@run
+def test_cluster_ids():
+    with w.module() as m:
+        with m.function("cluster_ids", [], kernel=True, cluster_dims=(2, 2, 1)) as f:
+            f.cluster_id(w.ClusterAxis.X)
+            f.cluster_workgroup_id(1)
+            f.cluster_workgroup_max_id(2)
+        with (
+            m.gpu_module("cluster_module") as g,
+            g.kernel("cluster_kernel", [], cluster_dims=(4, 1, 1)) as f,
+        ):
+            f.cluster_id()
+        # CHECK: func.func @cluster_ids()
+        # CHECK-SAME: gpu.known_cluster_size = array<i32: 2, 2, 1>
+        # CHECK-SAME: wave.cluster_dims = array<i32: 2, 2, 1>
+        # CHECK: wave.cluster_id x
+        # CHECK: wave.cluster_workgroup_id y
+        # CHECK: wave.cluster_workgroup_max_id z
+        # CHECK: func.func @cluster_kernel()
+        # CHECK-SAME: gpu.known_cluster_size = array<i32: 4, 1, 1>
+        # CHECK-SAME: wave.cluster_dims = array<i32: 4, 1, 1>
+        # CHECK: wave.cluster_id x
+        print(m.module)
+
+
 # CHECK-LABEL: TEST: test_issue_token
 @run
 def test_issue_token():

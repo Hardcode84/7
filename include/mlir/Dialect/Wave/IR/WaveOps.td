@@ -116,6 +116,23 @@ def Wave_WorkgroupIdOp : Wave_Op<"workgroup_id", [Pure,
   let hasVerifier = 1;
 }
 
+class Wave_ClusterAxisIdOp<string mnemonic, string summaryText>
+    : Wave_Op<mnemonic, [Pure]> {
+  let summary = summaryText;
+  let arguments = (ins Wave_ClusterAxisEnum:$axis);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$axis attr-dict";
+}
+
+def Wave_ClusterIdOp
+    : Wave_ClusterAxisIdOp<"cluster_id", "id of the current workgroup cluster">;
+
+def Wave_ClusterWorkgroupIdOp : Wave_ClusterAxisIdOp<
+    "cluster_workgroup_id", "workgroup id within the current cluster">;
+
+def Wave_ClusterWorkgroupMaxIdOp : Wave_ClusterAxisIdOp<
+    "cluster_workgroup_max_id", "maximum workgroup id within the current cluster">;
+
 def Wave_WorkitemIdOp : Wave_Op<"workitem_id", [Pure,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "id of the current workitem along the given workgroup axis";

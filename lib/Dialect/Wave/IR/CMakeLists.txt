@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   WaveMemoryAddress.cpp
   WaveSymbols.cpp
   WaveTransformOps.cpp
+  ../Transforms/WaveAMDClusterInfo.cpp
   ../Transforms/WaveAMDExecIfUtils.cpp
   ../Transforms/WaveAMDHardwareResources.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocLDSPlanning.cpp

@@ -139,6 +139,7 @@ xor = ixsimpl.xor_
 BinaryKind = wave.BinaryKind
 CastExtension = wave.CastExtension
 CastKind = wave.CastKind
+ClusterAxis = wave.ClusterAxis
 TDMDescriptorKind = waveamd.TDMDescriptorKind
 TDMPrefetchMode = waveamd.TDMPrefetchMode
 
@@ -1154,6 +1155,7 @@ class ModuleBuilder:
         kernel: bool = False,
         lds_size: int | None = None,
         workgroup_size: Sequence[int] | None = None,
+        cluster_dims: Sequence[int] | None = None,
         attrs: Mapping[str, Attribute] | None = None,
     ) -> Iterator[FunctionBuilder]:
         """Generic ``func.func`` builder at module scope.
@@ -1172,6 +1174,10 @@ class ModuleBuilder:
             attr = i32_array_attr(workgroup_size)
             op.attributes["wave.workgroup_size"] = attr
             op.attributes["gpu.known_block_size"] = attr
+        if cluster_dims is not None:
+            attr = i32_array_attr(cluster_dims)
+            op.attributes["wave.cluster_dims"] = attr
+            op.attributes["gpu.known_cluster_size"] = attr
         if attrs is not None:
             for attr_name, attr in attrs.items():
                 op.attributes[attr_name] = attr
@@ -1222,6 +1228,7 @@ class _GpuModuleBuilder:
         *,
         lds_size: int | None = None,
         workgroup_size: Sequence[int] | None = None,
+        cluster_dims: Sequence[int] | None = None,
         attrs: Mapping[str, Attribute] | None = None,
     ) -> Iterator[FunctionBuilder]:
         op = func.FuncOp(name, (list(inputs), list(results)))
@@ -1233,6 +1240,10 @@ class _GpuModuleBuilder:
             attr = i32_array_attr(workgroup_size)
             op.attributes["wave.workgroup_size"] = attr
             op.attributes["gpu.known_block_size"] = attr
+        if cluster_dims is not None:
+            attr = i32_array_attr(cluster_dims)
+            op.attributes["wave.cluster_dims"] = attr
+            op.attributes["gpu.known_cluster_size"] = attr
         if attrs is not None:
             for attr_name, attr in attrs.items():
                 op.attributes[attr_name] = attr
@@ -1332,6 +1343,15 @@ class FunctionBuilder:
 
     def workgroup_id(self, axis: int = 0) -> Value:
         return wave.WorkgroupIdOp(i32(), axis).result
+
+    def cluster_id(self, axis: object = ClusterAxis.X) -> Value:
+        return wave.ClusterIdOp(i32(), ClusterAxis(axis)).result
+
+    def cluster_workgroup_id(self, axis: object = ClusterAxis.X) -> Value:
+        return wave.ClusterWorkgroupIdOp(i32(), ClusterAxis(axis)).result
+
+    def cluster_workgroup_max_id(self, axis: object = ClusterAxis.X) -> Value:
+        return wave.ClusterWorkgroupMaxIdOp(i32(), ClusterAxis(axis)).result
 
     def workitem_id(
         self, axis: int = 0, element_type: Type | None = None, width: int = 32
@@ -2291,6 +2311,7 @@ __all__ = [
     "CastExtension",
     "CastExtensionPolicyAttr",
     "CastKind",
+    "ClusterAxis",
     "CmpIPredicate",
     "Expr",
     "ExprAttr",

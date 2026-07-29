@@ -921,6 +921,41 @@ def WaveAMDMachine_SWorkgroupIdZOp
                                        [WaveAMDMachine_NoMachineInst,
                                         WaveAMDMachine_NoAsmEmission, Pure]>;
 
+class WaveAMDMachine_SClusterSGPROp<string mnemonic>
+    : WaveAMDMachine_ZeroOperandResult<mnemonic, WaveAMDMachine_SGPR1,
+                                       [WaveAMDMachine_SALU, Pure]> {
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+class WaveAMDMachine_SClusterSGPRSCCOp<string mnemonic>
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_SALU, Pure]> {
+  let results = (outs WaveAMDMachine_SGPR1:$result,
+                      WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "attr-dict `:` type($result) `,` type($scc)";
+  let archPredicate = WaveAMDMachine_Gfx1250;
+}
+
+def WaveAMDMachine_SClusterIdXOp
+    : WaveAMDMachine_SClusterSGPROp<"s_cluster_id_x">;
+def WaveAMDMachine_SClusterIdYOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_id_y">;
+def WaveAMDMachine_SClusterIdZOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_id_z">;
+
+def WaveAMDMachine_SClusterWorkgroupIdXOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_workgroup_id_x">;
+def WaveAMDMachine_SClusterWorkgroupIdYOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_workgroup_id_y">;
+def WaveAMDMachine_SClusterWorkgroupIdZOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_workgroup_id_z">;
+
+def WaveAMDMachine_SClusterWorkgroupMaxIdXOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_workgroup_max_id_x">;
+def WaveAMDMachine_SClusterWorkgroupMaxIdYOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_workgroup_max_id_y">;
+def WaveAMDMachine_SClusterWorkgroupMaxIdZOp
+    : WaveAMDMachine_SClusterSGPRSCCOp<"s_cluster_workgroup_max_id_z">;
+
 // Workitem entry values live in layout-assigned VGPRs.
 def WaveAMDMachine_VWorkitemIdXOp
     : WaveAMDMachine_ZeroOperandResult<"v_workitem_id_x", WaveAMDMachine_VGPR1,

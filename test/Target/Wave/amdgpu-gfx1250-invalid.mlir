@@ -17,6 +17,23 @@ func.func @old_wait() {
 // -----
 
 module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"
+} {
+
+// expected-error @below {{wave-to-amdgpu-asm target does not support clusters}}
+func.func @cluster_dims_without_cluster_target() attributes {
+    wave.kernel,
+    wave.cluster_dims = array<i32: 2, 1, 1>
+  } {
+  waveamdmachine.s_endpgm
+  return
+}
+
+}
+
+// -----
+
+module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 

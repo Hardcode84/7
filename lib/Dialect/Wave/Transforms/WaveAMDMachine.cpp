@@ -24,6 +24,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/IR/WaveMeta.h"
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDClusterInfo.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -515,6 +516,7 @@ struct MachineSelectionTargetInfo {
   unsigned bufferResourceBaseBits = 0;
   waveamdmachine::MatrixFamily matrixFamily =
       waveamdmachine::MatrixFamily::None;
+  bool clusters = false;
   bool rejectLegacyVMemToLDS = false;
 };
 
@@ -543,9 +545,26 @@ getMachineSelectionTargetInfo(func::FuncOp func, ModuleOp targetModule) {
                    : waveamdmachine::MatrixFamily::None;
   unsigned bufferResourceBaseBits =
       capabilities ? capabilities->bufferResourceBaseBits : 0;
-  return MachineSelectionTargetInfo{std::move(*target), *wavefrontSize,
-                                    bufferResourceBaseBits, matrixFamily,
-                                    llvm::AMDGPU::isGFX1250(*sti)};
+  bool clusters = capabilities && capabilities->clusters &&
+                  target->kind == llvm::AMDGPU::GK_GFX1250;
+  return MachineSelectionTargetInfo{
+      std::move(*target), *wavefrontSize, bufferResourceBaseBits,
+      matrixFamily,       clusters,       llvm::AMDGPU::isGFX1250(*sti)};
+}
+
+static LogicalResult configureMachineSelectionClusterDims(
+    WaveAMDMachineSelector &selector,
+    const MachineSelectionTargetInfo &targetInfo) {
+  func::FuncOp func = selector.func;
+  FailureOr<std::optional<std::array<unsigned, 3>>> clusterDims =
+      wave::getWaveAMDFixedClusterDims(func, "WaveAMDMachine selection");
+  if (failed(clusterDims))
+    return failure();
+  if (*clusterDims && !targetInfo.clusters)
+    return func.emitError(
+        "WaveAMDMachine selection target does not support clusters");
+  selector.fixedClusterDims = *clusterDims;
+  return success();
 }
 
 static LogicalResult
@@ -568,6 +587,8 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   selector.bufferResourceBaseBits = targetInfo->bufferResourceBaseBits;
   selector.matrixFamily = targetInfo->matrixFamily;
   selector.rejectLegacyVMemToLDS = targetInfo->rejectLegacyVMemToLDS;
+  if (failed(configureMachineSelectionClusterDims(selector, *targetInfo)))
+    return failure();
   FailureOr<MachineSelectionFunctionFacts> facts =
       collectMachineSelectionFunctionFacts(func);
   if (failed(facts))
@@ -2831,6 +2852,11 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
       .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
       .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
+      .Case<ClusterIdOp>([&](auto o) { return selectClusterId(o); })
+      .Case<ClusterWorkgroupIdOp>(
+          [&](auto o) { return selectClusterWorkgroupId(o); })
+      .Case<ClusterWorkgroupMaxIdOp>(
+          [&](auto o) { return selectClusterWorkgroupMaxId(o); })
       .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
       .Case<SplatOp>([&](auto o) { return selectSplat(o); })
       .Case<AssumeOp>([&](auto o) { return selectAssume(o); })
@@ -3150,6 +3176,97 @@ LogicalResult WaveAMDMachineSelector::selectWorkgroupId(WorkgroupIdOp op) {
     break;
   }
   values[op.getResult()] = result;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+template <typename SourceOp>
+static LogicalResult requireClusterIdTarget(SourceOp op) {
+  FailureOr<llvm::AMDGPU::IsaVersion> isa =
+      getTargetIsaVersion(op, "cluster ID lowering");
+  if (failed(isa))
+    return failure();
+  if (!waveamdmachine::SClusterIdXOp::isSupportedOnIsa(*isa))
+    return op.emitError("cluster ID lowering requires gfx1250");
+  return success();
+}
+
+template <typename MachineOp>
+static Value createClusterSCCRead(WaveAMDMachineSelector &selector,
+                                  Location loc) {
+  Type sgpr = getRegType(loc.getContext(), waveamdmachine::RegClass::SGPR);
+  Type scc = getSCCType(loc.getContext());
+  return MachineOp::create(selector.builder, loc, sgpr, scc).getResult();
+}
+
+template <typename XOp, typename YOp, typename ZOp>
+static Value createClusterSCCAxisRead(WaveAMDMachineSelector &selector,
+                                      Location loc, ClusterAxis axis) {
+  switch (axis) {
+  case ClusterAxis::X:
+    return createClusterSCCRead<XOp>(selector, loc);
+  case ClusterAxis::Y:
+    return createClusterSCCRead<YOp>(selector, loc);
+  case ClusterAxis::Z:
+    return createClusterSCCRead<ZOp>(selector, loc);
+  }
+  llvm_unreachable("unknown cluster axis");
+}
+
+LogicalResult WaveAMDMachineSelector::selectClusterId(ClusterIdOp op) {
+  if (failed(requireClusterIdTarget(op)))
+    return failure();
+  Value result;
+  if (op.getAxis() == ClusterAxis::X) {
+    Type sgpr = getRegType(op.getContext(), waveamdmachine::RegClass::SGPR);
+    result = waveamdmachine::SClusterIdXOp::create(builder, op.getLoc(), sgpr);
+  } else if (op.getAxis() == ClusterAxis::Y) {
+    result =
+        createClusterSCCRead<waveamdmachine::SClusterIdYOp>(*this, op.getLoc());
+  } else {
+    result =
+        createClusterSCCRead<waveamdmachine::SClusterIdZOp>(*this, op.getLoc());
+  }
+  values[op.getResult()] = result;
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult
+WaveAMDMachineSelector::selectClusterWorkgroupId(ClusterWorkgroupIdOp op) {
+  if (failed(requireClusterIdTarget(op)))
+    return failure();
+  unsigned axis = static_cast<unsigned>(op.getAxis());
+  if (fixedClusterDims && (*fixedClusterDims)[axis] == 1) {
+    values[op.getResult()] = createImm(builder, op.getLoc(), 0);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  values[op.getResult()] =
+      createClusterSCCAxisRead<waveamdmachine::SClusterWorkgroupIdXOp,
+                               waveamdmachine::SClusterWorkgroupIdYOp,
+                               waveamdmachine::SClusterWorkgroupIdZOp>(
+          *this, op.getLoc(), op.getAxis());
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectClusterWorkgroupMaxId(
+    ClusterWorkgroupMaxIdOp op) {
+  if (failed(requireClusterIdTarget(op)))
+    return failure();
+  unsigned axis = static_cast<unsigned>(op.getAxis());
+  if (fixedClusterDims) {
+    values[op.getResult()] =
+        createImm(builder, op.getLoc(), (*fixedClusterDims)[axis] - 1);
+    eraseIfTopLevel(op);
+    return success();
+  }
+  values[op.getResult()] =
+      createClusterSCCAxisRead<waveamdmachine::SClusterWorkgroupMaxIdXOp,
+                               waveamdmachine::SClusterWorkgroupMaxIdYOp,
+                               waveamdmachine::SClusterWorkgroupMaxIdZOp>(
+          *this, op.getLoc(), op.getAxis());
   eraseIfTopLevel(op);
   return success();
 }

@@ -9,6 +9,7 @@
 
 #include "mlir/Target/Wave/AMDGPU.h"
 
+#include "AMDGPUArgumentUsageInfo.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIDefines.h"
 #include "Utils/AMDGPUBaseInfo.h"
@@ -21,6 +22,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDClusterInfo.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDExecIfUtils.h"
 #include "mlir/Dialect/Wave/Transforms/WaveAMDRegAllocVerification.h"
@@ -146,6 +148,7 @@ struct KernelInfo {
   std::string name;
   SmallVector<KernelArgInfo> args;
   SmallVector<KernelMetadataEntryInfo> metadataEntries;
+  std::optional<std::array<unsigned, 3>> clusterDims;
   unsigned kernargSize = 0;
   unsigned sgprCount = 0;
   unsigned vgprCount = 0;
@@ -250,8 +253,65 @@ struct KernelEntryValueUsage {
   bool workgroupIdX = false;
   bool workgroupIdY = false;
   bool workgroupIdZ = false;
+  bool clusterIdY = false;
+  bool clusterIdZ = false;
   unsigned maxWorkitemIdAxis = 0;
 };
+
+using AMDGPUPreloadedValue = llvm::AMDGPUFunctionArgInfo::PreloadedValue;
+
+static constexpr std::array<AMDGPUPreloadedValue, 3> kClusterIdInputs = {
+    llvm::AMDGPUFunctionArgInfo::WORKGROUP_ID_X,
+    llvm::AMDGPUFunctionArgInfo::WORKGROUP_ID_Y,
+    llvm::AMDGPUFunctionArgInfo::WORKGROUP_ID_Z};
+static constexpr std::array<AMDGPUPreloadedValue, 3> kClusterWorkgroupIdInputs =
+    {llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_X,
+     llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Y,
+     llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Z};
+static constexpr std::array<AMDGPUPreloadedValue, 3>
+    kClusterWorkgroupMaxIdInputs = {
+        llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_X,
+        llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Y,
+        llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Z};
+
+// LLVM keeps cluster input masks local to intrinsic lowering.
+static llvm::ArgDescriptor
+getArchitectedClusterInput(AMDGPUPreloadedValue input) {
+  constexpr unsigned fieldMask =
+      llvm::maskTrailingOnes<unsigned>(wave::kWaveAMDClusterDimensionBits);
+  auto ttmp6Field = [&](unsigned field) {
+    return llvm::ArgDescriptor::createRegister(
+        llvm::AMDGPU::TTMP6,
+        fieldMask << (field * wave::kWaveAMDClusterDimensionBits));
+  };
+
+  switch (input) {
+  case llvm::AMDGPUFunctionArgInfo::WORKGROUP_ID_X:
+    return llvm::ArgDescriptor::createRegister(llvm::AMDGPU::TTMP9);
+  case llvm::AMDGPUFunctionArgInfo::WORKGROUP_ID_Y:
+    return llvm::ArgDescriptor::createRegister(
+        llvm::AMDGPU::TTMP7, std::numeric_limits<uint16_t>::max());
+  case llvm::AMDGPUFunctionArgInfo::WORKGROUP_ID_Z:
+    return llvm::ArgDescriptor::createRegister(
+        llvm::AMDGPU::TTMP7,
+        static_cast<unsigned>(std::numeric_limits<uint16_t>::max())
+            << std::numeric_limits<uint16_t>::digits);
+  case llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_X:
+    return ttmp6Field(0);
+  case llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Y:
+    return ttmp6Field(1);
+  case llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_ID_Z:
+    return ttmp6Field(2);
+  case llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_X:
+    return ttmp6Field(3);
+  case llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Y:
+    return ttmp6Field(4);
+  case llvm::AMDGPUFunctionArgInfo::CLUSTER_WORKGROUP_MAX_ID_Z:
+    return ttmp6Field(5);
+  default:
+    llvm_unreachable("not an architected cluster input");
+  }
+}
 
 struct BufferedMCInstruction {
   llvm::MCInst inst;
@@ -715,6 +775,7 @@ private:
   unsigned sLshlB32() const { return opcodes.sLshlB32; }
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
   unsigned sAshrI32() const { return opcodes.sAshrI32; }
+  unsigned sBfeU32() const { return opcodes.sBfeU32; }
   unsigned sLshrB64() const { return opcodes.sLshrB64; }
   unsigned sAshrI64() const { return opcodes.sAshrI64; }
   unsigned sFf1I32B32() const { return opcodes.sFf1I32B32; }
@@ -2265,6 +2326,10 @@ private:
         usage.workgroupIdY = true;
       if (isa<waveamdmachine::SWorkgroupIdZOp>(op))
         usage.workgroupIdZ = true;
+      if (isa<waveamdmachine::SClusterIdYOp>(op))
+        usage.clusterIdY = true;
+      if (isa<waveamdmachine::SClusterIdZOp>(op))
+        usage.clusterIdZ = true;
       if (waveamdmachine::VWorkitemIdXOp workitemX =
               dyn_cast<waveamdmachine::VWorkitemIdXOp>(op)) {
         IntegerAttr axis = workitemX->getAttrOfType<IntegerAttr>(
@@ -2331,28 +2396,42 @@ private:
                    llvm::MCOperand::createImm(replayEncoding)});
   }
 
+  LogicalResult emitArchitectedClusterInput(unsigned result,
+                                            AMDGPUPreloadedValue input) {
+    llvm::ArgDescriptor descriptor = getArchitectedClusterInput(input);
+    unsigned source =
+        llvm::AMDGPU::getMCReg(descriptor.getRegister(), *sti).id();
+    if (!descriptor.isMasked())
+      return emitMC(sMovB32(), {llvm::MCOperand::createReg(result),
+                                llvm::MCOperand::createReg(source)});
+
+    unsigned mask = descriptor.getMask();
+    unsigned shift = llvm::countr_zero(mask);
+    unsigned width = llvm::popcount(mask);
+    assert(mask == (llvm::maskTrailingOnes<unsigned>(width) << shift) &&
+           "architected cluster input mask must be contiguous");
+    if (shift == 0)
+      return emitMC(sAndB32(), {llvm::MCOperand::createReg(result),
+                                llvm::MCOperand::createReg(source),
+                                llvm::MCOperand::createImm(mask)});
+    if (shift + width == std::numeric_limits<unsigned>::digits)
+      return emitMC(sLshrB32(), {llvm::MCOperand::createReg(result),
+                                 llvm::MCOperand::createReg(source),
+                                 llvm::MCOperand::createImm(shift)});
+
+    unsigned packed = shift | (width << std::numeric_limits<uint16_t>::digits);
+    return emitMC(sBfeU32(), {llvm::MCOperand::createReg(result),
+                              llvm::MCOperand::createReg(source),
+                              llvm::MCOperand::createImm(packed)});
+  }
+
   LogicalResult
   emitArchitectedWorkgroupIdRaw(const wave::WaveAMDKernelEntryRegs &entryRegs,
                                 unsigned axis) {
+    if (axis >= kClusterIdInputs.size())
+      return emissionSource->emitError("invalid architected workgroup ID axis");
     unsigned result = mcSGPRReg(entryRegs.workgroupIdSGPR(axis), /*width=*/1);
-    if (axis == 0) {
-      unsigned ttmp9 = llvm::AMDGPU::getMCReg(llvm::AMDGPU::TTMP9, *sti).id();
-      return emitMC(sMovB32(), {llvm::MCOperand::createReg(result),
-                                llvm::MCOperand::createReg(ttmp9)});
-    }
-
-    unsigned ttmp7 = llvm::AMDGPU::getMCReg(llvm::AMDGPU::TTMP7, *sti).id();
-    constexpr unsigned halfBits = std::numeric_limits<uint16_t>::digits;
-    if (axis == 1)
-      return emitMC(sAndB32(), {llvm::MCOperand::createReg(result),
-                                llvm::MCOperand::createReg(ttmp7),
-                                llvm::MCOperand::createImm(
-                                    std::numeric_limits<uint16_t>::max())});
-    if (axis == 2)
-      return emitMC(sLshrB32(), {llvm::MCOperand::createReg(result),
-                                 llvm::MCOperand::createReg(ttmp7),
-                                 llvm::MCOperand::createImm(halfBits)});
-    return emissionSource->emitError("invalid architected workgroup ID axis");
+    return emitArchitectedClusterInput(result, kClusterIdInputs[axis]);
   }
 
   LogicalResult emitSALUCycleDelay() {
@@ -2362,31 +2441,63 @@ private:
   }
 
   LogicalResult
+  emitFixedClusterWorkgroupId(const wave::WaveAMDKernelEntryRegs &entryRegs,
+                              unsigned axis, unsigned clusterDim,
+                              unsigned temp) {
+    if (failed(emitArchitectedWorkgroupIdRaw(entryRegs, axis)))
+      return failure();
+    if (clusterDim == 1)
+      return success();
+    unsigned result = mcSGPRReg(entryRegs.workgroupIdSGPR(axis), /*width=*/1);
+    if (failed(emitArchitectedClusterInput(temp,
+                                           kClusterWorkgroupIdInputs[axis])) ||
+        failed(emitMC(sMulI32(), {llvm::MCOperand::createReg(result),
+                                  llvm::MCOperand::createReg(result),
+                                  llvm::MCOperand::createImm(clusterDim)})) ||
+        failed(emitSALUCycleDelay()) ||
+        failed(emitMC(sAddI32(), {llvm::MCOperand::createReg(result),
+                                  llvm::MCOperand::createReg(result),
+                                  llvm::MCOperand::createReg(temp)})))
+      return failure();
+    return success();
+  }
+
+  LogicalResult
   emitClusterWorkgroupId(const wave::WaveAMDKernelEntryRegs &entryRegs,
                          unsigned axis, unsigned temp0, unsigned temp1,
                          unsigned statusEncoding) {
-    constexpr unsigned clusterFieldBits = 4;
-    constexpr unsigned clusterFieldMask = (unsigned{1} << clusterFieldBits) - 1;
-    unsigned ttmp6 = llvm::AMDGPU::getMCReg(llvm::AMDGPU::TTMP6, *sti).id();
+    if (axis >= kClusterIdInputs.size())
+      return emissionSource->emitError("invalid architected workgroup ID axis");
     unsigned result = mcSGPRReg(entryRegs.workgroupIdSGPR(axis), /*width=*/1);
-    unsigned localShift = axis * clusterFieldBits;
-    unsigned maxShift = (3 + axis) * clusterFieldBits;
+    llvm::ArgDescriptor maxDescriptor =
+        getArchitectedClusterInput(kClusterWorkgroupMaxIdInputs[axis]);
+    llvm::ArgDescriptor localDescriptor =
+        getArchitectedClusterInput(kClusterWorkgroupIdInputs[axis]);
+    unsigned maxMask = maxDescriptor.getMask();
+    unsigned localMask = localDescriptor.getMask();
+    unsigned maxShift = llvm::countr_zero(maxMask);
+    unsigned localShift = llvm::countr_zero(localMask);
+    unsigned maxFieldMask = maxMask >> maxShift;
+    unsigned localFieldMask = localMask >> localShift;
+    unsigned maxSource =
+        llvm::AMDGPU::getMCReg(maxDescriptor.getRegister(), *sti).id();
+    unsigned localSource =
+        llvm::AMDGPU::getMCReg(localDescriptor.getRegister(), *sti).id();
 
     if (failed(emitArchitectedWorkgroupIdRaw(entryRegs, axis)) ||
         failed(emitMC(sLshrB32(), {llvm::MCOperand::createReg(temp0),
-                                   llvm::MCOperand::createReg(ttmp6),
+                                   llvm::MCOperand::createReg(maxSource),
                                    llvm::MCOperand::createImm(maxShift)})) ||
         failed(emitMC(sLshrB32(), {llvm::MCOperand::createReg(temp1),
-                                   llvm::MCOperand::createReg(ttmp6),
+                                   llvm::MCOperand::createReg(localSource),
                                    llvm::MCOperand::createImm(localShift)})) ||
-        failed(emitMC(sAndB32(),
-                      {llvm::MCOperand::createReg(temp0),
-                       llvm::MCOperand::createReg(temp0),
-                       llvm::MCOperand::createImm(clusterFieldMask)})) ||
-        failed(emitMC(sAndB32(),
-                      {llvm::MCOperand::createReg(temp1),
-                       llvm::MCOperand::createReg(temp1),
-                       llvm::MCOperand::createImm(clusterFieldMask)})) ||
+        failed(emitMC(sAndB32(), {llvm::MCOperand::createReg(temp0),
+                                  llvm::MCOperand::createReg(temp0),
+                                  llvm::MCOperand::createImm(maxFieldMask)})) ||
+        failed(
+            emitMC(sAndB32(), {llvm::MCOperand::createReg(temp1),
+                               llvm::MCOperand::createReg(temp1),
+                               llvm::MCOperand::createImm(localFieldMask)})) ||
         failed(emitMC(sAddI32(), {llvm::MCOperand::createReg(temp0),
                                   llvm::MCOperand::createReg(temp0),
                                   llvm::MCOperand::createImm(1)})) ||
@@ -2414,6 +2525,13 @@ private:
   LogicalResult
   emitArchitectedWorkgroupIds(func::FuncOp func,
                               const wave::WaveAMDKernelEntryRegs &entryRegs) {
+    FailureOr<std::optional<std::array<unsigned, 3>>> clusterDims =
+        wave::getWaveAMDFixedClusterDims(func, "wave-to-amdgpu-asm");
+    if (failed(clusterDims))
+      return failure();
+    if (*clusterDims && (!hasArchitectedSGPRs() || !hasClusters()))
+      return func.emitError(
+          "wave-to-amdgpu-asm target does not support clusters");
     if (!hasArchitectedSGPRs())
       return success();
 
@@ -2428,12 +2546,25 @@ private:
       return success();
     }
 
+    unsigned temp0 = mcSGPRReg(entryRegs.reservedSGPRs, /*width=*/1);
+    if (*clusterDims) {
+      bool emitted = false;
+      for (unsigned axis : llvm::seq<unsigned>(0, used.size())) {
+        if (!used[axis])
+          continue;
+        if (failed(emitFixedClusterWorkgroupId(entryRegs, axis,
+                                               (**clusterDims)[axis], temp0)))
+          return failure();
+        emitted = true;
+      }
+      return emitted ? emitSALUCycleDelay() : success();
+    }
+
     constexpr unsigned clusterStatusOffset = 6;
     constexpr unsigned clusterStatusBits = 4;
     unsigned statusEncoding = llvm::AMDGPU::Hwreg::HwregEncoding::encode(
         llvm::AMDGPU::Hwreg::ID_IB_STS2, clusterStatusOffset,
         clusterStatusBits);
-    unsigned temp0 = mcSGPRReg(entryRegs.reservedSGPRs, /*width=*/1);
     unsigned temp1 = mcSGPRReg(entryRegs.reservedSGPRs + 1, /*width=*/1);
     bool emitted = false;
     // TTMP6: local XYZ nibbles, then max XYZ nibbles.
@@ -2560,6 +2691,11 @@ private:
       if (failed(privateSegmentFixedSize))
         return failure();
       info.privateSegmentFixedSize = *privateSegmentFixedSize;
+      FailureOr<std::optional<std::array<unsigned, 3>>> clusterDims =
+          wave::getWaveAMDFixedClusterDims(func, "wave-to-amdgpu-asm");
+      if (failed(clusterDims))
+        return failure();
+      info.clusterDims = *clusterDims;
       SmallVector<waveamd::KernargSlot> layout =
           waveamd::getKernargLayout(func.getFunctionType().getInputs());
       for (auto [index, slot] : llvm::enumerate(layout)) {
@@ -2866,8 +3002,8 @@ private:
       return failure();
     bool usesFlatScratch = getBoolAttr(func, kUsesFlatScratchAttr, false);
     KernelEntryValueUsage entryUsage = getKernelEntryValueUsage(func);
-    bool usesWgY = entryUsage.workgroupIdY;
-    bool usesWgZ = entryUsage.workgroupIdZ;
+    bool usesWgY = entryUsage.workgroupIdY || entryUsage.clusterIdY;
+    bool usesWgZ = entryUsage.workgroupIdZ || entryUsage.clusterIdZ;
     wave::WaveAMDKernelEntryRegs entryRegs =
         wave::getWaveAMDKernelEntryRegs(func);
     if (failed(verifyKernelDescriptor(func, entryRegs)))
@@ -2990,6 +3126,10 @@ private:
           os << "        .value_kind:     by_value\n";
         }
       }
+      if (kernel.clusterDims)
+        os << "    .cluster_dims: [ " << (*kernel.clusterDims)[0] << ", "
+           << (*kernel.clusterDims)[1] << ", " << (*kernel.clusterDims)[2]
+           << " ]\n";
       os << "    .group_segment_fixed_size: " << kernel.fixedLdsSize << "\n";
       os << "    .kernarg_segment_align: 8\n";
       os << "    .kernarg_segment_size: " << kernel.kernargSize << "\n";
@@ -4437,6 +4577,32 @@ private:
           llvm::AMDGPU::Hwreg::ID_SHADER_CYCLES, 0, 32);
       return emitMC(sGetregB32(), {toMCOperand(result()),
                                    llvm::MCOperand::createImm(encoding)});
+    }
+    std::optional<AMDGPUPreloadedValue> clusterInput;
+    if (isa<waveamdmachine::SClusterIdXOp>(op))
+      clusterInput = kClusterIdInputs[0];
+    if (isa<waveamdmachine::SClusterIdYOp>(op))
+      clusterInput = kClusterIdInputs[1];
+    if (isa<waveamdmachine::SClusterIdZOp>(op))
+      clusterInput = kClusterIdInputs[2];
+    if (isa<waveamdmachine::SClusterWorkgroupIdXOp>(op))
+      clusterInput = kClusterWorkgroupIdInputs[0];
+    if (isa<waveamdmachine::SClusterWorkgroupIdYOp>(op))
+      clusterInput = kClusterWorkgroupIdInputs[1];
+    if (isa<waveamdmachine::SClusterWorkgroupIdZOp>(op))
+      clusterInput = kClusterWorkgroupIdInputs[2];
+    if (isa<waveamdmachine::SClusterWorkgroupMaxIdXOp>(op))
+      clusterInput = kClusterWorkgroupMaxIdInputs[0];
+    if (isa<waveamdmachine::SClusterWorkgroupMaxIdYOp>(op))
+      clusterInput = kClusterWorkgroupMaxIdInputs[1];
+    if (isa<waveamdmachine::SClusterWorkgroupMaxIdZOp>(op))
+      clusterInput = kClusterWorkgroupMaxIdInputs[2];
+    if (clusterInput) {
+      if (!waveamdmachine::SClusterIdXOp::isSupportedOnIsa(isaVersion) ||
+          !hasArchitectedSGPRs() || !hasClusters())
+        return op.emitError() << name << " unsupported on target";
+      return emitArchitectedClusterInput(toMCOperand(result()).getReg(),
+                                         *clusterInput);
     }
     if (waveamdmachine::SGetregHwIdOp hwId =
             dyn_cast<waveamdmachine::SGetregHwIdOp>(op)) {

@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
+#include "mlir/Dialect/Wave/Transforms/WaveAMDClusterInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/Twine.h"
@@ -169,6 +170,13 @@ FailureOr<unsigned> getWaveAMDMinReportedSGPRs(func::FuncOp func,
       waveamdmachine::getAMDGPUTargetCapabilities(**sti);
   if (!capabilities || !capabilities->architectedSGPRs ||
       !capabilities->clusters)
+    return minimum;
+
+  FailureOr<std::optional<std::array<unsigned, 3>>> clusterDims =
+      getWaveAMDFixedClusterDims(func, consumer);
+  if (failed(clusterDims))
+    return failure();
+  if (*clusterDims)
     return minimum;
 
   constexpr unsigned clusterWorkgroupIdTemps = 2;

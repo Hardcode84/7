@@ -70,7 +70,15 @@ static inline bool isSupportedSchedulerSALU(Operation *op) {
              waveamdmachine::SFf1I32B64Op, waveamdmachine::SFlbitI32B32Op,
              waveamdmachine::SFlbitI32B64Op, waveamdmachine::SOrB32Op,
              waveamdmachine::SOrB64Op, waveamdmachine::SReadVccB32Op,
-             waveamdmachine::SSetprioOp, waveamdmachine::SGetregShaderCyclesOp,
+             waveamdmachine::SSetprioOp, waveamdmachine::SClusterIdXOp,
+             waveamdmachine::SClusterIdYOp, waveamdmachine::SClusterIdZOp,
+             waveamdmachine::SClusterWorkgroupIdXOp,
+             waveamdmachine::SClusterWorkgroupIdYOp,
+             waveamdmachine::SClusterWorkgroupIdZOp,
+             waveamdmachine::SClusterWorkgroupMaxIdXOp,
+             waveamdmachine::SClusterWorkgroupMaxIdYOp,
+             waveamdmachine::SClusterWorkgroupMaxIdZOp,
+             waveamdmachine::SGetregShaderCyclesOp,
              waveamdmachine::SGetregHwIdOp, waveamdmachine::SXorB32Op,
              waveamdmachine::SXorB64Op, waveamdmachine::CopyTupleOp>(op);
 }

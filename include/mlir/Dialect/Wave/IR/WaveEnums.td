@@ -23,6 +23,15 @@ def Wave_CastKindEnum : I32EnumAttr<"CastKind", "Wave cast kind", [
   let cppNamespace = "::mlir::wave";
 }
 
+def Wave_ClusterAxisX : I32EnumAttrCase<"X", 0, "x">;
+def Wave_ClusterAxisY : I32EnumAttrCase<"Y", 1, "y">;
+def Wave_ClusterAxisZ : I32EnumAttrCase<"Z", 2, "z">;
+
+def Wave_ClusterAxisEnum : I32EnumAttr<"ClusterAxis", "Cluster axis", [
+    Wave_ClusterAxisX, Wave_ClusterAxisY, Wave_ClusterAxisZ]> {
+  let cppNamespace = "::mlir::wave";
+}
+
 def Wave_BinaryKindAddI : I32EnumAttrCase<"AddI", 0, "addi">;
 def Wave_BinaryKindSubI : I32EnumAttrCase<"SubI", 1, "subi">;
 def Wave_BinaryKindMulI : I32EnumAttrCase<"MulI", 2, "muli">;

@@ -45,6 +45,13 @@ static bool issuesLdsWaitcnt(Operation *op) {
   return getWaitcntInfo(op).event == WaitcntEvent::Lds;
 }
 
+static bool isClusterIdentityRead(Operation *op) {
+  return isa<SClusterIdXOp, SClusterIdYOp, SClusterIdZOp,
+             SClusterWorkgroupIdXOp, SClusterWorkgroupIdYOp,
+             SClusterWorkgroupIdZOp, SClusterWorkgroupMaxIdXOp,
+             SClusterWorkgroupMaxIdYOp, SClusterWorkgroupMaxIdZOp>(op);
+}
+
 static SchedClass classifyMappedOp(Operation *op) {
   // Trait pre-filter for two large categories: ops that do not advance
   // instruction-distance hazards and the full VMEM load/store family.
@@ -56,6 +63,8 @@ static SchedClass classifyMappedOp(Operation *op) {
     return SchedClass::WriteVMEM;
   if (issuesLdsWaitcnt(op))
     return SchedClass::WriteLDS;
+  if (isClusterIdentityRead(op))
+    return SchedClass::WriteSALU;
 
   // Type-driven dispatch for the rest. Lists are exhaustive over
   // the current dialect; new ops trigger the fallback path which

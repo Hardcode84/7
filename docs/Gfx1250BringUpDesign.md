@@ -26,6 +26,8 @@ Wave support includes:
   handling;
 - buffer descriptors, LDS accounting, and register allocation use gfx1250
   target facts;
+- fixed cluster dimensions emit HSA metadata and cluster identity reads lower
+  from architected TTMP inputs;
 - the dedicated unscheduled pipeline lowers scalar/vector global, buffer, LDS,
   SMEM, and scratch kernels through object link and disassembly;
 - pressure-driven allocation crosses `v255` and restores visible VGPR-window
@@ -62,6 +64,7 @@ Compile-time support includes:
 - valid MCInst emission and object generation;
 - full `v0` through `v1023` allocation with late VGPR-window lowering;
 - legal HSA kernel descriptors and entry sequence;
+- LLVM-compatible cluster metadata and identity lowering;
 - split gfx12.5 wait counters driven by explicit memory tokens;
 - correct buffer-resource packing, LDS facts, tuple alignment, and register
   budgets;
@@ -84,7 +87,7 @@ gfx1250 scope does not include:
 
 - legacy `waveamd.dma_load_lds` enablement on gfx1250;
 - high-level TDM descriptor IR, fused loads, and gather or scatter;
-- cluster or multicast memory;
+- cluster or multicast memory transfers;
 - named or split hardware barriers;
 - SWMMAC, scaled WMMA, sparse WMMA, FP4, FP6, FP8, or BF8;
 - typed inline assembly;
@@ -108,6 +111,7 @@ Unsupported paths must fail with target-specific diagnostics.
 | LDS | 320 KiB, 32 banks | use both facts in legality and layout scoring |
 | buffer resource | 57-bit base, 45-bit `NumRecords` | target-specific structural packing |
 | waits | LOAD, STORE, DS, KM, X, ASYNC, TENSOR | base path implements first five; TDM implements TENSOR |
+| clusters | fixed dimensions plus runtime identity inputs | emit metadata; expose cluster, local workgroup, and max workgroup IDs |
 | matrix base | f16/bf16 `16x16x32` WMMA | f32 accumulator only |
 | code object | target accepts HSA code objects; Wave emits v6 | validate descriptor with LLVM tools |
 
@@ -122,6 +126,8 @@ LLVM source is the executable specification:
 - `llvm/lib/Target/AMDGPU/GCNProcessors.td`
 - `llvm/lib/Target/AMDGPU/SISchedule.td`
 - `llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp`
+- `llvm/lib/Target/AMDGPU/SIISelLowering.cpp`
+- `llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.h`
 - `llvm/lib/Target/AMDGPU/AMDGPUWaitcntUtils.h`
 - `llvm/lib/Target/AMDGPU/MIMGInstructions.td`
 - `llvm/lib/Target/AMDGPU/AMDGPULowerVGPREncoding.cpp`
@@ -503,10 +509,20 @@ HWREG encoding.
 
 Architected workgroup IDs need explicit Wave ABI materialization: X from
 TTMP9, Y from TTMP7 low half, Z from TTMP7 high half. Cluster-capable targets
-reconstruct grid workgroup IDs from TTMP6 local/max fields, then use LLVM's
-IB_STS2 encoding to select raw IDs when clustered dispatch is disabled. Count
-the two entry temporaries in SGPR metadata; regalloc may reuse them after the
+reconstruct grid workgroup IDs from the same cluster identity inputs exposed
+by `wave.cluster_id`, `wave.cluster_workgroup_id`, and
+`wave.cluster_workgroup_max_id`. A TableGen axis enum keeps X/Y/Z structural.
+Fixed `wave.cluster_dims` or `gpu.known_cluster_size` follow LLVM's fixed
+cluster-dimension semantics and fold local and max IDs. Unknown dimensions use
+LLVM's IB_STS2 encoding to select raw IDs when clustered dispatch is disabled.
+Fixed reconstruction needs at most one entry temporary; runtime reconstruction
+needs two. Count them in SGPR metadata; regalloc may reuse them after the
 prelude.
+
+Fixed dimensions emit `.cluster_dims` in HSA kernel metadata. Selection and
+metadata emission share one structural validator; malformed, conflicting,
+non-positive, or unsupported dimensions fail before object emission. Machine
+reads model every SCC write from the selected LLVM opcode.
 
 Entry materialization runs after Wave hazard repair. Its dependent SALU chains
 must emit `s_delay_alu` themselves, including the final ID-to-kernel-body edge.
@@ -725,7 +741,8 @@ Reject unsupported work before final emission. Required diagnostics include:
 - AGPR requested;
 - register index above `v1023` or the occupancy budget;
 - high-VGPR operand without a lowering table;
-- legacy async, cluster, multicast, named-barrier, or SWMMAC operation used;
+- legacy async, cluster-memory, multicast, named-barrier, or SWMMAC operation
+  used;
 - TDM operation used on another target;
 - D2 with extra groups or D4 without exactly D2 and D3;
 - TDM tuple outside its LLVM operand register class;
@@ -742,6 +759,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | machine lowering | operation legality and exact gfx1250 opcode selection |
 | MC | assemble and disassemble each enabled instruction family |
 | ABI | object descriptor and entry-sequence round trip |
+| cluster IDs | fixed-dimension folding, runtime TTMP reads, metadata assembly and disassembly |
 | TDM IR | D2/D4 tuple forms, typed modes, tuple-wise grouped selection, token chains |
 | TDM MC | load/store forms, SGPR tuple classes, visible assembly and disassembly |
 | waits | independent LOAD/STORE/DS/KM/X/TENSOR, nonzero tensor waits, joins, loops, atomics, termination |
@@ -751,7 +769,7 @@ Reject unsupported work before final emission. Required diagnostics include:
 | WMMA | exact fragments, killed accumulator, f16 and bf16 emission |
 | scheduler | generated-table check, XDL2 class, TDM WriteTDM/HWLGKM/HWVMEM pressure, target hazards |
 | Python | exact profile selection, descriptor packing, grouped selects, wrong-family rejection |
-| Integration | scalar/vector memory, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
+| Integration | scalar/vector memory, cluster IDs, high-VGPR CFG, f16/bf16 GEMM, TDM load/store/prefetch |
 | hardware | separate runtime-correctness gate |
 | measured PerfGolden | separate performance gate |
 
@@ -792,6 +810,7 @@ Compile-time support is complete when:
 - scalar/vector and f16/bf16 GEMM objects assemble and disassemble as gfx1250;
 - all four VGPR windows pass MC, CFG, hazard, resource, and Integration tests;
 - descriptor, waits, resources, and fragments match the LLVM contract;
+- cluster metadata and identity reads assemble and disassemble;
 - TDM D2/D4 tuples select legal LLVM opcodes and register classes;
 - issue dependencies and completion tokens place zero and nonzero tensor
   waits correctly;

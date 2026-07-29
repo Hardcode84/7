@@ -28,6 +28,34 @@ func.func @preserve_scc(%a: !waveamdmachine.reg<sgpr, 1>,
 
 // -----
 
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
+
+// CHECK-LABEL: func.func @preserve_scc_across_cluster_read
+// CHECK: %[[SCC:.+]] = waveamdmachine.s_cmp_lt_i32
+// CHECK: %[[ONE:.+]] = waveamdmachine.imm 1 : !waveamdmachine.imm
+// CHECK: %[[ZERO:.+]] = waveamdmachine.imm 0 : !waveamdmachine.imm
+// CHECK: %[[SAVED:.+]] = waveamdmachine.s_cselect_b32 %[[SCC]], %[[ONE]], %[[ZERO]]
+// CHECK: %[[LOCAL:.+]], %[[LOCAL_SCC:.+]] = waveamdmachine.s_cluster_workgroup_id_x
+// CHECK: %[[RELOAD_ZERO:.+]] = waveamdmachine.imm 0 : !waveamdmachine.imm
+// CHECK: %[[RELOADED:.+]] = waveamdmachine.s_cmp_lg_u32 %[[SAVED]], %[[RELOAD_ZERO]]
+// CHECK: waveamdmachine.s_cbranch_scc1 %[[RELOADED]]
+func.func @preserve_scc_across_cluster_read(
+    %a: !waveamdmachine.reg<sgpr, 1>,
+    %b: !waveamdmachine.reg<sgpr, 1>) {
+  %scc = waveamdmachine.s_cmp_lt_i32 %a, %b
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  %local, %local_scc = waveamdmachine.s_cluster_workgroup_id_x
+      : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>
+  waveamdmachine.s_cbranch_scc1 %scc
+      : !waveamdmachine.reg<scc, 1>, "taken"
+  return
+}
+
+}
+
+// -----
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @carry_m0_into_exec_if

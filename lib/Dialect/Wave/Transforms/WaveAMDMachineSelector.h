@@ -37,6 +37,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -294,6 +295,7 @@ public:
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
   std::optional<int64_t> dmaIssueSkipThreadThreshold;
+  std::optional<std::array<unsigned, 3>> fixedClusterDims;
   Value lastDmaM0;
   Value lastDmaToken;
   Value lastDmaDstBase;
@@ -359,6 +361,9 @@ public:
   LogicalResult selectLaneId(LaneIdOp op);
   LogicalResult selectReadCycles(ReadCyclesOp op);
   LogicalResult selectWorkgroupId(WorkgroupIdOp op);
+  LogicalResult selectClusterId(ClusterIdOp op);
+  LogicalResult selectClusterWorkgroupId(ClusterWorkgroupIdOp op);
+  LogicalResult selectClusterWorkgroupMaxId(ClusterWorkgroupMaxIdOp op);
   LogicalResult selectWorkitemId(WorkitemIdOp op);
   LogicalResult selectSplat(SplatOp op);
   LogicalResult selectAssume(AssumeOp op);
