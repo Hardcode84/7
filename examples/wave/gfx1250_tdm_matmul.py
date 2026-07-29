@@ -22,7 +22,7 @@ from common import (
 )
 
 if TYPE_CHECKING:
-    from mlir.dialects.wave_dsl import Expr, FunctionBuilder
+    from mlir.dialects.wave_dsl import Expr, FunctionBuilder, TDMDescriptor
     from mlir.ir import Module, Type, Value
 
 _Inputs = tuple[tuple[float, ...], tuple[float, ...]]
@@ -41,6 +41,46 @@ class _KernelConfig:
     accumulator_dwords: int
     lane_k_elements: int
     wave_size: int
+    waves_m: int = 1
+    waves_n: int = 1
+    subtiles_m: int = 1
+    subtiles_n: int = 1
+
+    @property
+    def wave_count(self) -> int:
+        return self.waves_m * self.waves_n
+
+    @property
+    def wave_tile_m(self) -> int:
+        return self.subtiles_m * self.tile_m
+
+    @property
+    def wave_tile_n(self) -> int:
+        return self.subtiles_n * self.tile_n
+
+    @property
+    def workgroup_tile_m(self) -> int:
+        return self.waves_m * self.wave_tile_m
+
+    @property
+    def workgroup_tile_n(self) -> int:
+        return self.waves_n * self.wave_tile_n
+
+    @property
+    def workgroup_threads(self) -> int:
+        return self.wave_count * self.wave_size
+
+    @property
+    def a_wave_bytes(self) -> int:
+        return self.wave_tile_m * self.tile_k * 2
+
+    @property
+    def b_wave_bytes(self) -> int:
+        return self.wave_tile_n * self.tile_k * 2
+
+    @property
+    def c_wave_bytes(self) -> int:
+        return self.wave_tile_m * self.wave_tile_n * 4
 
     @property
     def a_lds_offset(self) -> int:
@@ -48,22 +88,26 @@ class _KernelConfig:
 
     @property
     def b_lds_offset(self) -> int:
-        return self.tile_m * self.tile_k * 2
+        return self.wave_count * self.a_wave_bytes
 
     @property
     def c_lds_offset(self) -> int:
-        return self.b_lds_offset + self.tile_n * self.tile_k * 2
+        return self.b_lds_offset + self.wave_count * self.b_wave_bytes
 
     @property
     def lds_bytes(self) -> int:
-        return self.c_lds_offset + self.tile_m * self.tile_n * 4
+        return self.c_lds_offset + self.wave_count * self.c_wave_bytes
 
 
 def _validate_shape(config: _KernelConfig, M: int, N: int, K: int) -> None:
-    if M <= 0 or M % config.tile_m:
-        raise ValueError(f"M must be a positive multiple of {config.tile_m}; got {M}")
-    if N <= 0 or N % config.tile_n:
-        raise ValueError(f"N must be a positive multiple of {config.tile_n}; got {N}")
+    if M <= 0 or M % config.workgroup_tile_m:
+        raise ValueError(
+            f"M must be a positive multiple of {config.workgroup_tile_m}; got {M}"
+        )
+    if N <= 0 or N % config.workgroup_tile_n:
+        raise ValueError(
+            f"N must be a positive multiple of {config.workgroup_tile_n}; got {N}"
+        )
     if K <= 0 or K % config.tile_k:
         raise ValueError(f"K must be a positive multiple of {config.tile_k}; got {K}")
 
@@ -121,6 +165,407 @@ def _fragment_types(config: _KernelConfig) -> tuple[Type, Type, Type, Type]:
         w.vector_type(config.operand_dwords, w.i32()), width=config.wave_size
     )
     return a_type, b_type, acc_type, registers_type
+
+
+def _emit_wave_coordinates(
+    builder: FunctionBuilder, config: _KernelConfig
+) -> tuple[Value, Value, Value]:
+    from mlir.dialects import wave_dsl as w
+
+    workitem_first = w.sym("tdm_workitem_first")
+    first = builder.read_first(builder.workitem_id(0, width=config.wave_size))
+    wave_id_expr = w.floor(workitem_first / config.wave_size)
+    bindings = {workitem_first: first}
+    wave_id = builder.intconvert(
+        builder.index_expr(wave_id_expr, bindings),
+        w.i32(),
+    )
+    wave_m = builder.intconvert(
+        builder.index_expr(
+            w.floor(wave_id_expr / config.waves_n),
+            bindings,
+        ),
+        w.i32(),
+    )
+    wave_n = builder.intconvert(
+        builder.index_expr(
+            w.mod(wave_id_expr, config.waves_n),
+            bindings,
+        ),
+        w.i32(),
+    )
+    return wave_id, wave_m, wave_n
+
+
+def _emit_subtile_input_lds_pointers(
+    builder: FunctionBuilder,
+    config: _KernelConfig,
+    lane: Value,
+    wave_id: Value,
+) -> tuple[list[Value], list[Value], Expr]:
+    from mlir.dialects import wave_dsl as w
+
+    lane_sym = w.sym("tdm_subtile_lane")
+    lane_index = config.lane_k_elements * w.mod(
+        lane_sym, config.tile_m
+    ) + config.operand_dwords * w.floor(lane_sym / config.tile_m)
+    fragment_dwords = config.tile_m * config.tile_k * 2 // 4
+    a_wave_offset = builder.muli(
+        wave_id,
+        builder.constant(w.i32(), config.a_wave_bytes // 4),
+    )
+    b_wave_offset = builder.muli(
+        wave_id,
+        builder.constant(w.i32(), config.b_wave_bytes // 4),
+    )
+    a_base = builder.ptr_add(
+        builder.shared_memory_base(w.i32(), offset=config.a_lds_offset),
+        a_wave_offset,
+    )
+    b_base = builder.ptr_add(
+        builder.shared_memory_base(w.i32(), offset=config.b_lds_offset),
+        b_wave_offset,
+    )
+    a_pointers = [
+        builder.ptr_add(
+            a_base,
+            builder.index_expr(
+                lane_index + subtile * fragment_dwords,
+                {lane_sym: lane},
+            ),
+        )
+        for subtile in range(config.subtiles_m)
+    ]
+    b_pointers = [
+        builder.ptr_add(
+            b_base,
+            builder.index_expr(
+                lane_index + subtile * fragment_dwords,
+                {lane_sym: lane},
+            ),
+        )
+        for subtile in range(config.subtiles_n)
+    ]
+    return a_pointers, b_pointers, lane_sym
+
+
+def _emit_subtile_descriptors(
+    builder: FunctionBuilder,
+    config: _KernelConfig,
+    K: int,
+    a_base: Value,
+    b_base: Value,
+    a_row_wide: Value,
+    b_row_wide: Value,
+    k_iter: Value,
+    a_lds_address: Value,
+    b_lds_address: Value,
+) -> tuple[TDMDescriptor, TDMDescriptor]:
+    from mlir.dialects import wave_dsl as w
+
+    k_iter_wide = builder.intconvert(k_iter, w.i64(), extension=w.CastExtension.Zero)
+    k_offset = builder.muli(
+        k_iter_wide,
+        builder.constant(w.i64(), config.tile_k),
+    )
+    a_offset = builder.muli(
+        builder.addi(
+            builder.muli(a_row_wide, builder.constant(w.i64(), K)),
+            k_offset,
+        ),
+        builder.constant(w.i64(), 2),
+    )
+    b_offset = builder.muli(
+        builder.addi(
+            builder.muli(b_row_wide, builder.constant(w.i64(), K)),
+            k_offset,
+        ),
+        builder.constant(w.i64(), 2),
+    )
+    a_descriptor = builder.gfx1250_tdm_descriptor(
+        a_base,
+        [config.wave_tile_m, config.tile_k],
+        [K, 1],
+        [config.wave_tile_m, config.tile_k],
+        element_bit_width=16,
+        global_byte_offset=a_offset,
+        lds_address=a_lds_address,
+    )
+    b_descriptor = builder.gfx1250_tdm_descriptor(
+        b_base,
+        [config.wave_tile_n, config.tile_k],
+        [K, 1],
+        [config.wave_tile_n, config.tile_k],
+        element_bit_width=16,
+        global_byte_offset=b_offset,
+        lds_address=b_lds_address,
+    )
+    return a_descriptor, b_descriptor
+
+
+def _emit_subtile_k_loop(
+    builder: FunctionBuilder,
+    config: _KernelConfig,
+    K: int,
+    a_base: Value,
+    b_base: Value,
+    a_row_wide: Value,
+    b_row_wide: Value,
+    a_lds_address: Value,
+    b_lds_address: Value,
+    a_lds: list[Value],
+    b_lds: list[Value],
+    prefetch_byte_offset: Value,
+) -> tuple[list[Value], Value]:
+    from mlir.dialects import wave_dsl as w
+
+    a_type, b_type, acc_type, _ = _fragment_types(config)
+    accumulators = [
+        builder.fragment_fill(builder.constant(w.i32(), 0), acc_type)
+        for _ in range(config.subtiles_m * config.subtiles_n)
+    ]
+    zero = builder.constant(w.i32(), 0)
+    steps = builder.constant(w.i32(), K // config.tile_k)
+    one = builder.constant(w.i32(), 1)
+
+    with builder.for_loop(
+        zero,
+        steps,
+        one,
+        init_args=[*accumulators, builder.token()],
+        nonzero_trip=True,
+    ) as loop:
+        k_iter = loop.induction_variable
+        *accumulators, reusable = loop.inner_iter_args
+        a_descriptor, b_descriptor = _emit_subtile_descriptors(
+            builder,
+            config,
+            K,
+            a_base,
+            b_base,
+            a_row_wide,
+            b_row_wide,
+            k_iter,
+            a_lds_address,
+            b_lds_address,
+        )
+        a_prefetched = builder.tdm_prefetch(
+            a_descriptor,
+            prefetch_byte_offset,
+            after=reusable,
+            mode=w.TDMPrefetchMode.Regular,
+        )
+        b_prefetched = builder.tdm_prefetch(
+            b_descriptor,
+            prefetch_byte_offset,
+            after=a_prefetched,
+            mode=w.TDMPrefetchMode.Regular,
+        )
+        a_loaded = builder.tdm_load(a_descriptor, after=b_prefetched)
+        b_loaded = builder.tdm_load(
+            b_descriptor,
+            after=builder.issue_token(a_loaded),
+        )
+        a_ready = builder.after(a_loaded, builder.issue_token(b_loaded))
+        a_fragments = []
+        read_tokens = []
+        for ptr in a_lds:
+            fragment, token = builder.fragment_load(ptr, a_type, after=a_ready)
+            a_fragments.append(fragment)
+            read_tokens.append(token)
+        b_fragments = []
+        for ptr in b_lds:
+            fragment, token = builder.fragment_load(ptr, b_type, after=b_loaded)
+            b_fragments.append(fragment)
+            read_tokens.append(token)
+
+        next_accumulators = []
+        for m_subtile in range(config.subtiles_m):
+            for n_subtile in range(config.subtiles_n):
+                index = m_subtile * config.subtiles_n + n_subtile
+                next_accumulators.append(
+                    builder.mma(
+                        config.mma_kind,
+                        a_fragments[m_subtile],
+                        b_fragments[n_subtile],
+                        accumulators[index],
+                    )
+                )
+        builder.yield_([*next_accumulators, builder.join(*read_tokens)])
+
+    return list(loop.results[:-1]), loop.results[-1]
+
+
+def _emit_subtile_output(
+    builder: FunctionBuilder,
+    config: _KernelConfig,
+    N: int,
+    c_base: Value,
+    c_row_wide: Value,
+    c_column_wide: Value,
+    wave_id: Value,
+    lane: Value,
+    lane_sym: Expr,
+    accumulators: list[Value],
+    reusable: Value,
+) -> None:
+    from mlir.dialects import wave_dsl as w
+
+    c_wave_offset = builder.muli(
+        wave_id,
+        builder.constant(w.i32(), config.c_wave_bytes // 4),
+    )
+    c_lds_base = builder.ptr_add(
+        builder.shared_memory_base(w.i32(), offset=config.c_lds_offset),
+        c_wave_offset,
+    )
+    output_stores = []
+    for m_subtile in range(config.subtiles_m):
+        for n_subtile in range(config.subtiles_n):
+            accumulator = accumulators[m_subtile * config.subtiles_n + n_subtile]
+            unpacked = builder.fragment_unpack(accumulator)
+            for register in range(config.accumulator_dwords):
+                output_index = builder.index_expr(
+                    config.wave_tile_n
+                    * (
+                        config.tile_m * m_subtile
+                        + config.accumulator_dwords * w.floor(lane_sym / config.tile_n)
+                        + register
+                    )
+                    + config.tile_n * n_subtile
+                    + w.mod(lane_sym, config.tile_n),
+                    {lane_sym: lane},
+                )
+                output_ptr = builder.ptr_add(c_lds_base, output_index)
+                value = builder.extract(
+                    unpacked,
+                    register,
+                    w.simd_type(w.i32(), width=config.wave_size),
+                )
+                output_stores.append(builder.store(value, output_ptr, after=reusable))
+
+    output_ready = builder.barrier(*output_stores)
+    c_offset = builder.muli(
+        builder.addi(
+            builder.muli(c_row_wide, builder.constant(w.i64(), N)),
+            c_column_wide,
+        ),
+        builder.constant(w.i64(), 4),
+    )
+    c_lds_address = builder.addi(
+        builder.constant(w.i32(), config.c_lds_offset),
+        builder.muli(
+            wave_id,
+            builder.constant(w.i32(), config.c_wave_bytes),
+        ),
+    )
+    c_descriptor = builder.gfx1250_tdm_descriptor(
+        c_base,
+        [config.wave_tile_m, config.wave_tile_n],
+        [N, 1],
+        [config.wave_tile_m, config.wave_tile_n],
+        element_bit_width=32,
+        global_byte_offset=c_offset,
+        lds_address=c_lds_address,
+        is_store=True,
+    )
+    stored = builder.tdm_store(c_descriptor, after=output_ready)
+    builder.barrier(stored)
+
+
+def _emit_subtile_kernel(
+    builder: FunctionBuilder, config: _KernelConfig, M: int, N: int, K: int
+) -> None:
+    from mlir.dialects import wave_dsl as w
+
+    a_base, b_base, c_base = builder.args
+    wg_m = builder.assume_range(
+        builder.workgroup_id(0),
+        0,
+        M // config.workgroup_tile_m - 1,
+    )
+    wg_n = builder.assume_range(
+        builder.workgroup_id(1),
+        0,
+        N // config.workgroup_tile_n - 1,
+    )
+    lane = builder.lane_id(width=config.wave_size)
+    wave_id, wave_m, wave_n = _emit_wave_coordinates(builder, config)
+    wg_m_wide = builder.intconvert(wg_m, w.i64(), extension=w.CastExtension.Zero)
+    wg_n_wide = builder.intconvert(wg_n, w.i64(), extension=w.CastExtension.Zero)
+    wave_m_wide = builder.intconvert(wave_m, w.i64(), extension=w.CastExtension.Zero)
+    wave_n_wide = builder.intconvert(wave_n, w.i64(), extension=w.CastExtension.Zero)
+    a_row_wide = builder.addi(
+        builder.muli(
+            wg_m_wide,
+            builder.constant(w.i64(), config.workgroup_tile_m),
+        ),
+        builder.muli(
+            wave_m_wide,
+            builder.constant(w.i64(), config.wave_tile_m),
+        ),
+    )
+    b_row_wide = builder.addi(
+        builder.muli(
+            wg_n_wide,
+            builder.constant(w.i64(), config.workgroup_tile_n),
+        ),
+        builder.muli(
+            wave_n_wide,
+            builder.constant(w.i64(), config.wave_tile_n),
+        ),
+    )
+    a_lds_address = builder.muli(
+        wave_id,
+        builder.constant(w.i32(), config.a_wave_bytes),
+    )
+    b_lds_address = builder.addi(
+        builder.constant(w.i32(), config.b_lds_offset),
+        builder.muli(
+            wave_id,
+            builder.constant(w.i32(), config.b_wave_bytes),
+        ),
+    )
+    a_lds, b_lds, lane_sym = _emit_subtile_input_lds_pointers(
+        builder,
+        config,
+        lane,
+        wave_id,
+    )
+    prefetch_byte_offset = builder.muli(
+        lane,
+        builder.splat(
+            builder.constant(w.i32(), 2),
+            width=config.wave_size,
+        ),
+    )
+    accumulators, reusable = _emit_subtile_k_loop(
+        builder,
+        config,
+        K,
+        a_base,
+        b_base,
+        a_row_wide,
+        b_row_wide,
+        a_lds_address,
+        b_lds_address,
+        a_lds,
+        b_lds,
+        prefetch_byte_offset,
+    )
+    _emit_subtile_output(
+        builder,
+        config,
+        N,
+        c_base,
+        a_row_wide,
+        b_row_wide,
+        wave_id,
+        lane,
+        lane_sym,
+        accumulators,
+        reusable,
+    )
 
 
 def _emit_k_loop(
@@ -356,9 +801,9 @@ def _emit_host(
         builder.index_cast(builder.aligned_pointer_as_index(buffer), w.i64())
         for buffer in (a, b, c)
     ]
-    blocks_m = builder.constant(index_type, M // config.tile_m)
-    blocks_n = builder.constant(index_type, N // config.tile_n)
-    threads = builder.constant(index_type, config.wave_size)
+    blocks_m = builder.constant(index_type, M // config.workgroup_tile_m)
+    blocks_n = builder.constant(index_type, N // config.workgroup_tile_n)
+    threads = builder.constant(index_type, config.workgroup_threads)
     builder.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
@@ -377,6 +822,8 @@ def build_gfx1250_tdm_f16_gemm_module(
     *,
     random_data: bool = False,
     seed: int = 0,
+    four_wave: bool = False,
+    include_host: bool = True,
 ) -> tuple[Module, _Inputs]:
     ensure_package_on_path("mlir.dialects.wave_dsl")
     from mlir.dialects import wave_dsl as w
@@ -397,36 +844,51 @@ def build_gfx1250_tdm_f16_gemm_module(
         accumulator_dwords=mma.accumulator_dwords,
         lane_k_elements=mma.lane_k_elements,
         wave_size=profile.wave_size,
+        waves_m=2 if four_wave else 1,
+        waves_n=2 if four_wave else 1,
+        subtiles_m=4 if four_wave else 1,
+        subtiles_n=4 if four_wave else 1,
     )
     _validate_shape(config, M, N, K)
+    if config.lds_bytes > profile.static_lds_limit_bytes:
+        raise ValueError(
+            f"kernel requires {config.lds_bytes} LDS bytes; "
+            f"{profile.chip} exposes {profile.static_lds_limit_bytes}"
+        )
     module_builder = w.ModuleBuilder()
     with module_builder:
-        module_builder.declare_external(
-            "printMemrefF32",
-            [w.unranked_memref_type(w.f32())],
-            [],
-        )
+        if include_host:
+            module_builder.declare_external(
+                "printMemrefF32",
+                [w.unranked_memref_type(w.f32())],
+                [],
+            )
         with (
             module_builder.gpu_module(_GPU_MODULE_NAME) as gpu_module,
             gpu_module.kernel(
                 _KERNEL_NAME,
                 [w.i64(), w.i64(), w.i64()],
                 lds_size=config.lds_bytes,
-                workgroup_size=[config.wave_size, 1, 1],
+                workgroup_size=[config.workgroup_threads, 1, 1],
                 attrs={_ENABLE_SPLIT_BARRIERS_ATTR: UnitAttr.get()},
             ) as kernel,
         ):
-            _emit_kernel(kernel, config, M, N, K)
-        with module_builder.host_main() as host:
-            inputs = _emit_host(
-                host,
-                config,
-                M,
-                N,
-                K,
-                random_data=random_data,
-                seed=seed,
-            )
+            if four_wave:
+                _emit_subtile_kernel(kernel, config, M, N, K)
+            else:
+                _emit_kernel(kernel, config, M, N, K)
+        inputs: _Inputs = ((), ())
+        if include_host:
+            with module_builder.host_main() as host:
+                inputs = _emit_host(
+                    host,
+                    config,
+                    M,
+                    N,
+                    K,
+                    random_data=random_data,
+                    seed=seed,
+                )
     return module_builder.module, inputs
 
 
@@ -449,13 +911,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--m", type=int, default=16)
     parser.add_argument("--n", type=int, default=16)
     parser.add_argument("--k", type=int, default=32)
+    parser.add_argument(
+        "--four-wave",
+        action="store_true",
+        help="use a 2x2-wave, 4x4-WMMA subtile per wave",
+    )
+    parser.add_argument(
+        "--kernel-only",
+        action="store_true",
+        help="omit host allocation and launch IR",
+    )
     parser.add_argument("--random-data", action="store_true")
     add_execution_args(parser, default_atol=1.0e-3, default_rtol=1.0e-3)
     return parser.parse_args(argv)
 
 
+def _validate_execution_args(args: argparse.Namespace) -> None:
+    if args.kernel_only and (args.run or args.compare_cpu):
+        raise SystemExit("--kernel-only cannot run the module")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    _validate_execution_args(args)
     random_data = args.random_data or args.compare_cpu
     try:
         module, inputs = build_gfx1250_tdm_f16_gemm_module(
@@ -464,6 +942,8 @@ def main(argv: list[str] | None = None) -> int:
             args.k,
             random_data=random_data,
             seed=args.seed,
+            four_wave=args.four_wave,
+            include_host=not args.kernel_only,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
