@@ -212,22 +212,22 @@ static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
   return emitError(loc, "regalloc transform cannot duplicate register value");
 }
 
-using LoopInitAliasEdge = std::pair<Value, int64_t>;
-using LoopInitAliasGraph = DenseMap<Value, SmallVector<LoopInitAliasEdge, 4>>;
+using LoopCarryAliasEdge = std::pair<Value, int64_t>;
+using LoopCarryAliasGraph = DenseMap<Value, SmallVector<LoopCarryAliasEdge, 4>>;
 
-static void addLoopInitAliasEdge(LoopInitAliasGraph &graph, Value tuple,
-                                 Value element, int64_t offset) {
+static void addLoopCarryAliasEdge(LoopCarryAliasGraph &graph, Value tuple,
+                                  Value element, int64_t offset) {
   graph[tuple].push_back({element, offset});
   graph[element].push_back({tuple, -offset});
 }
 
-static LoopInitAliasGraph buildLoopInitAliasGraph(func::FuncOp func) {
-  LoopInitAliasGraph graph;
+static LoopCarryAliasGraph buildLoopCarryAliasGraph(func::FuncOp func) {
+  LoopCarryAliasGraph graph;
   func.walk([&](Operation *op) {
     auto collect = [&](Value tuple, ValueRange elements) {
       int64_t offset = 0;
       for (Value element : elements) {
-        addLoopInitAliasEdge(graph, tuple, element, offset);
+        addLoopCarryAliasEdge(graph, tuple, element, offset);
         offset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
       }
     };
@@ -236,11 +236,11 @@ static LoopInitAliasGraph buildLoopInitAliasGraph(func::FuncOp func) {
     if (auto fromElements = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
       collect(fromElements.getTuple(), fromElements.getElements());
     if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op)) {
-      addLoopInitAliasEdge(graph, update.getResult(), update.getBase(), 0);
+      addLoopCarryAliasEdge(graph, update.getResult(), update.getBase(), 0);
       for (auto [value, offset] :
            llvm::zip_equal(update.getUpdates(), update.getOffsets()))
-        addLoopInitAliasEdge(graph, update.getResult(), value,
-                             cast<IntegerAttr>(offset).getInt());
+        addLoopCarryAliasEdge(graph, update.getResult(), value,
+                              cast<IntegerAttr>(offset).getInt());
     }
   });
   return graph;
@@ -249,7 +249,8 @@ static LoopInitAliasGraph buildLoopInitAliasGraph(func::FuncOp func) {
 // Returns rhs' register offset relative to lhs when tuple aliasing constrains
 // both values to the same storage.
 static std::optional<int64_t>
-getLoopInitAliasOffset(const LoopInitAliasGraph &graph, Value lhs, Value rhs) {
+getLoopCarryAliasOffset(const LoopCarryAliasGraph &graph, Value lhs,
+                        Value rhs) {
   if (lhs == rhs)
     return 0;
   DenseMap<Value, int64_t> offsets;
@@ -272,14 +273,14 @@ getLoopInitAliasOffset(const LoopInitAliasGraph &graph, Value lhs, Value rhs) {
   return std::nullopt;
 }
 
-static bool loopInitStorageOverlaps(const LoopInitAliasGraph &graph, Value lhs,
-                                    waveamdmachine::RegType lhsType,
-                                    Value rhs) {
+static bool loopCarryStorageOverlaps(const LoopCarryAliasGraph &graph,
+                                     Value lhs, waveamdmachine::RegType lhsType,
+                                     Value rhs) {
   std::optional<waveamdmachine::RegType> rhsType =
       wave::getRegAllocTransformTrackedRegType(rhs);
   if (!rhsType || lhsType.getRegClass() != rhsType->getRegClass())
     return false;
-  std::optional<int64_t> rhsOffset = getLoopInitAliasOffset(graph, lhs, rhs);
+  std::optional<int64_t> rhsOffset = getLoopCarryAliasOffset(graph, lhs, rhs);
   if (!rhsOffset)
     return false;
   int64_t lhsEnd = lhsType.getWidth();
@@ -287,38 +288,91 @@ static bool loopInitStorageOverlaps(const LoopInitAliasGraph &graph, Value lhs,
   return std::max<int64_t>(0, *rhsOffset) < std::min(lhsEnd, rhsEnd);
 }
 
-static LogicalResult splitOverlappingLoopInits(func::FuncOp func) {
+static void markOverlappingLoopInitCopies(const LoopCarryAliasGraph &graph,
+                                          ValueRange inits,
+                                          SmallVectorImpl<bool> &needsCopy) {
+  for (auto [lhsIndex, lhs] : llvm::enumerate(inits)) {
+    std::optional<waveamdmachine::RegType> lhsType =
+        wave::getRegAllocTransformTrackedRegType(lhs);
+    if (!lhsType)
+      continue;
+    for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < inits.size();
+         ++rhsIndex) {
+      Value rhs = inits[rhsIndex];
+      if (!loopCarryStorageOverlaps(graph, lhs, *lhsType, rhs))
+        continue;
+      needsCopy[lhsIndex] = true;
+      needsCopy[rhsIndex] = true;
+    }
+  }
+}
+
+static void
+markOverlappingLoopBackedgeCopies(const LoopCarryAliasGraph &graph,
+                                  ValueRange carries,
+                                  SmallVectorImpl<bool> &needsCopy) {
+  for (auto [lhsIndex, lhs] : llvm::enumerate(carries)) {
+    std::optional<waveamdmachine::RegType> lhsType =
+        wave::getRegAllocTransformTrackedRegType(lhs);
+    if (!lhsType)
+      continue;
+    for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < carries.size();
+         ++rhsIndex) {
+      Value rhs = carries[rhsIndex];
+      if (!loopCarryStorageOverlaps(graph, lhs, *lhsType, rhs))
+        continue;
+      if (needsCopy[lhsIndex] || needsCopy[rhsIndex])
+        continue;
+      std::optional<waveamdmachine::RegType> rhsType =
+          wave::getRegAllocTransformTrackedRegType(rhs);
+      assert(rhsType && "overlapping carry must have a tracked register type");
+      unsigned copyIndex =
+          lhsType->getWidth() <= rhsType->getWidth() ? lhsIndex : rhsIndex;
+      needsCopy[copyIndex] = true;
+    }
+  }
+}
+
+static LogicalResult duplicateMarkedRegValues(OpBuilder &builder, Location loc,
+                                              ValueRange values,
+                                              MutableOperandRange mutableValues,
+                                              ArrayRef<bool> needsCopy) {
+  assert(values.size() == mutableValues.size() &&
+         values.size() == needsCopy.size() && "loop carry arity mismatch");
+  for (auto [index, value] : llvm::enumerate(values)) {
+    if (!needsCopy[index])
+      continue;
+    FailureOr<Value> duplicate = duplicateRegValue(builder, loc, value);
+    if (failed(duplicate))
+      return failure();
+    mutableValues[index].assign(*duplicate);
+  }
+  return success();
+}
+
+static LogicalResult splitOverlappingLoopCarryStorage(func::FuncOp func) {
   SmallVector<waveamdmachine::UniformLoopOp> loops;
   func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
-  LoopInitAliasGraph aliasGraph = buildLoopInitAliasGraph(func);
+  LoopCarryAliasGraph aliasGraph = buildLoopCarryAliasGraph(func);
   OpBuilder builder(func.getContext());
   for (waveamdmachine::UniformLoopOp loop : loops) {
-    SmallVector<bool> needsCopy(loop.getInits().size(), false);
-    for (auto [lhsIndex, lhs] : llvm::enumerate(loop.getInits())) {
-      std::optional<waveamdmachine::RegType> lhsType =
-          wave::getRegAllocTransformTrackedRegType(lhs);
-      if (!lhsType)
-        continue;
-      for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < loop.getInits().size();
-           ++rhsIndex) {
-        Value rhs = loop.getInits()[rhsIndex];
-        if (!loopInitStorageOverlaps(aliasGraph, lhs, *lhsType, rhs))
-          continue;
-        needsCopy[lhsIndex] = true;
-        needsCopy[rhsIndex] = true;
-      }
-    }
-
+    SmallVector<bool> initNeedsCopy(loop.getInits().size(), false);
+    markOverlappingLoopInitCopies(aliasGraph, loop.getInits(), initNeedsCopy);
     builder.setInsertionPoint(loop);
-    for (auto [index, init] : llvm::enumerate(loop.getInits())) {
-      if (!needsCopy[index])
-        continue;
-      FailureOr<Value> duplicate =
-          duplicateRegValue(builder, loop.getLoc(), init);
-      if (failed(duplicate))
-        return failure();
-      loop.getInitsMutable()[index].assign(*duplicate);
-    }
+    if (failed(duplicateMarkedRegValues(builder, loop.getLoc(), loop.getInits(),
+                                        loop.getInitsMutable(), initNeedsCopy)))
+      return failure();
+
+    auto term = cast<waveamdmachine::ContinueIfOp>(
+        loop.getBody().front().getTerminator());
+    SmallVector<bool> backedgeNeedsCopy(term.getCarries().size(), false);
+    markOverlappingLoopBackedgeCopies(aliasGraph, term.getCarries(),
+                                      backedgeNeedsCopy);
+    builder.setInsertionPoint(term);
+    if (failed(duplicateMarkedRegValues(
+            builder, term.getLoc(), term.getCarries(), term.getCarriesMutable(),
+            backedgeNeedsCopy)))
+      return failure();
   }
   return success();
 }
@@ -2794,7 +2848,7 @@ setRegAllocTransformState(func::FuncOp func, Builder &builder,
   if (!wave::isRegAllocPreparationValid(func)) {
     if (failed(wave::prepareWaveAMDRegAllocIR(func)))
       return failure();
-    if (failed(splitOverlappingLoopInits(func)))
+    if (failed(splitOverlappingLoopCarryStorage(func)))
       return failure();
     wave::markRegAllocPreparationValid(func);
   }

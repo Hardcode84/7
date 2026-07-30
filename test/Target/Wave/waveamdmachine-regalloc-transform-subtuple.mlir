@@ -491,6 +491,47 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %after : !waveamdmachine.reg<sgpr, 1>
   }
 
+  // Backedge tuple insertion cannot alias a distinct loop carry.
+  // SCAN-LABEL: func.func @loop_update_does_not_alias_distinct_carry(
+  // SCAN-SAME: !waveamdmachine.reg<sgpr, 1, [[#BASE:]]>
+  // SCAN-SAME: !waveamdmachine.reg<sgpr, 2, [[#BASE+2]]>
+  // SCAN: [[NEXT:%.*]], {{%.*}} = waveamdmachine.s_add_i32
+  // SCAN-SAME: -> (!waveamdmachine.reg<sgpr, 1, [[#BASE+2]]>
+  // SCAN: [[UPDATED:%.*]] = waveamdmachine.update_tuple {{%.*}}, [[NEXT]]
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 2, [[#BASE+2]]>
+  // SCAN: [[NEXT_COPY:%.*]] = waveamdmachine.copy_tuple [[NEXT]]
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 1, [[#BASE]]>
+  // SCAN-NEXT: waveamdmachine.continue_if
+  // SCAN-SAME: carries([[NEXT_COPY]], [[UPDATED]]
+  func.func @loop_update_does_not_alias_distinct_carry(
+      %scalar_init: !waveamdmachine.reg<sgpr, 1>,
+      %tuple_init: !waveamdmachine.reg<sgpr, 2>,
+      %cond: !waveamdmachine.reg<scc, 1>) {
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %loop:2 = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%scalar_init, %tuple_init
+            : !waveamdmachine.reg<sgpr, 1>,
+              !waveamdmachine.reg<sgpr, 2>) {
+    ^bb0(%scalar: !waveamdmachine.reg<sgpr, 1>,
+         %tuple: !waveamdmachine.reg<sgpr, 2>):
+      %next, %scc = waveamdmachine.s_add_i32 %scalar, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<scc, 1>)
+      %updated = waveamdmachine.update_tuple %tuple, %next {offsets = [0]}
+          : (!waveamdmachine.reg<sgpr, 2>,
+             !waveamdmachine.reg<sgpr, 1>)
+            -> !waveamdmachine.reg<sgpr, 2>
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%next, %updated
+              : !waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<sgpr, 2>)
+    } -> !waveamdmachine.reg<sgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>
+    return
+  }
+
   // Required reuse cannot clobber a live element borrowed by a packed tuple.
   // PREP-LABEL: func.func @required_reuse_packed_tuple_copies_live_element(
   // PREP-SAME: [[LIVE:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
