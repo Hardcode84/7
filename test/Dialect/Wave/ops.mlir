@@ -166,6 +166,16 @@ func.func @wave_redistribute(
   return %result : !wave.simd<vector<2xf32>, 32>
 }
 
+// CHECK-LABEL: func.func @wave_redistribute_scalar
+func.func @wave_redistribute_scalar(%source: !wave.simd<i32, 32>)
+    -> !wave.simd<i32, 32> {
+  // CHECK: wave.redistribute {{.*}} : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 32, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %result : !wave.simd<i32, 32>
+}
+
 // CHECK-LABEL: func.func @wave_vector_memory_payloads
 func.func @wave_vector_memory_payloads(%p8: !wave.ptr<#wave.global, i8>,
                                        %p16: !wave.ptr<#wave.global, i16>,

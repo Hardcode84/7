@@ -40,4 +40,42 @@ func.func @glu_epilogue_redistribute_lds_overflow(
          !wave.mem.token) -> !wave.mem.token
   return
 }
+
+// ASM-LABEL: redistribute_capacity_partial:
+// ASM-COUNT-2: ds_write_b128
+// ASM: ds_read_b128
+// ASM-COUNT-2: ds_write_b128
+// ASM: ds_read_b128
+// ASM: .amdhsa_group_segment_fixed_size 163840
+func.func @redistribute_capacity_partial(
+    %src: !wave.ptr<#wave.global, f32>,
+    %dst: !wave.ptr<#wave.global, f32>)
+    attributes {wave.kernel,
+                wave.lds_size = 159744 : i64,
+                wave.workgroup_size = array<i32: 128, 1, 1>,
+                wave.waves_per_workgroup = 2 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %src_ptr = wave.ptr_add %src, %lane
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+  %value, %loaded = wave.load %src_ptr
+      : (!wave.simd<!wave.ptr<#wave.global, f32>, 64>)
+      -> (!wave.simd<vector<16xf32>, 64>, !wave.mem.token)
+  %moved = wave.redistribute %value,
+      <blocks = 1, items = 128,
+       source_block = "block",
+       source_item = "Mod(item + 64, 128)",
+       source_slot = "4*Mod(floor(1/32*item), 4) + slot">
+      : !wave.simd<vector<16xf32>, 64>
+     -> !wave.simd<vector<4xf32>, 64>
+  %result = wave.extract %moved[0]
+      : !wave.simd<vector<4xf32>, 64> -> !wave.simd<f32, 64>
+  %dst_ptr = wave.ptr_add %dst, %lane
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+  %stored = wave.store %result -> %dst_ptr after %loaded
+      : (!wave.simd<f32, 64>, !wave.simd<!wave.ptr<#wave.global, f32>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return
+}
 }

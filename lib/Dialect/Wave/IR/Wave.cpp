@@ -3022,17 +3022,33 @@ verifyRedistributionRelationSymbols(RedistributeOp op,
   return success();
 }
 
+static LogicalResult
+verifyRedistributionPayload(RedistributeOp op, SimdType type, StringRef role) {
+  Type payload = type.getElementType();
+  if (VectorType vector = dyn_cast<VectorType>(payload)) {
+    if (vector.getRank() != 1)
+      return op.emitOpError() << role << " packet vector must be 1-D";
+    if (vector.isScalable())
+      return op.emitOpError() << role << " packet vector must be fixed-size";
+    payload = vector.getElementType();
+  }
+  if (!payload.isIntOrFloat())
+    return op.emitOpError()
+           << role << " packet element type must be integer or float";
+  return success();
+}
+
 LogicalResult RedistributeOp::verify() {
   SimdType sourceType = cast<SimdType>(getSource().getType());
   SimdType resultType = cast<SimdType>(getResult().getType());
-  VectorType sourceVector = cast<VectorType>(sourceType.getElementType());
-  VectorType resultVector = cast<VectorType>(resultType.getElementType());
 
-  if (sourceVector.isScalable() || resultVector.isScalable())
-    return emitOpError("packet vectors must be fixed-size");
+  if (failed(verifyRedistributionPayload(*this, sourceType, "source")) ||
+      failed(verifyRedistributionPayload(*this, resultType, "result")))
+    return failure();
   if (sourceType.getWidth() != resultType.getWidth())
     return emitOpError("source and result SIMD widths must match");
-  if (sourceVector.getElementType() != resultVector.getElementType())
+  if (getWavePayloadElementType(sourceType) !=
+      getWavePayloadElementType(resultType))
     return emitOpError("source and result packet element types must match");
   return verifyRedistributionRelationSymbols(*this, getRelation());
 }

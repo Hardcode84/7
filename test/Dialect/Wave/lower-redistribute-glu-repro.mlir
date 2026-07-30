@@ -8,6 +8,7 @@
 
 // RUN: wave-opt %s --pass-pipeline='builtin.module(wave-lower-redistribute,wave-normalize-pointer-offsets,wave-generate-index-exprs,wave-simplify-index-exprs,wave-coalesce-memory,canonicalize,cse)' > %t
 // RUN: FileCheck %s --check-prefixes=F32-256,F32-512,DOT-A,DOT-B < %t
+// RUN: FileCheck %s --check-prefix=CAPACITY < %t
 
 // F32-256-LABEL: func.func @glu_mfma_to_blocked_128x128(
 // F32-256: wave.alloc() {align = 16 : i64, bytesize = 16384 : i64}
@@ -120,4 +121,37 @@ func.func @glu_blocked_to_dot_operand_b(
       : !wave.simd<vector<16xf16>, 64>
      -> !wave.simd<vector<32xf16>, 64>
   return %result : !wave.simd<vector<32xf16>, 64>
+}
+
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"
+} {
+  // Result group spans more source groups than remaining LDS holds.
+  // CAPACITY-LABEL: func.func @capacity_bounded_partial_result_group(
+  // CAPACITY: wave.alloc() {align = 16 : i64, bytesize = 4096 : i64, offset = 159744 : i64}
+  // CAPACITY: wave.cmpi eq
+  // CAPACITY: wave.where
+  // CAPACITY: wave.load
+  // CAPACITY: wave.cmpi eq
+  // CAPACITY: wave.where
+  // CAPACITY: wave.load
+  // CAPACITY-NOT: wave.redistribute
+  // CAPACITY: return
+  func.func @capacity_bounded_partial_result_group(
+      %source: !wave.simd<vector<16xf32>, 64>)
+      -> !wave.simd<vector<4xf32>, 64>
+      attributes {wave.workgroup_size = array<i32: 128, 1, 1>} {
+    %live = wave.alloc() {align = 16 : i64, bytesize = 159744 : i64}
+        : !wave.ptr<#wave.shared, f32>
+    %result = wave.redistribute %source,
+        <blocks = 1, items = 128,
+         source_block = "block",
+         source_item = "Mod(item + 64, 128)",
+         source_slot = "4*Mod(floor(1/32*item), 4) + slot">
+        : !wave.simd<vector<16xf32>, 64>
+       -> !wave.simd<vector<4xf32>, 64>
+    %keep_live = wave.ptr_cast %live
+        : !wave.ptr<#wave.shared, f32> -> !wave.ptr<#wave.shared, i32>
+    return %result : !wave.simd<vector<4xf32>, 64>
+  }
 }

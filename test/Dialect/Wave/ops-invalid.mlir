@@ -967,8 +967,35 @@ func.func @redistribute_width_mismatch(
 
 func.func @redistribute_scalable_packet(
     %v: !wave.simd<vector<[2]xi32>, 32>) {
-  // expected-error @+1 {{packet vectors must be fixed-size}}
+  // expected-error @+1 {{source packet vector must be fixed-size}}
   %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot"> : !wave.simd<vector<[2]xi32>, 32> -> !wave.simd<vector<[2]xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_multidimensional_source(
+    %v: !wave.simd<vector<2x2xi32>, 32>) {
+  // expected-error @+1 {{source packet vector must be 1-D}}
+  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot"> : !wave.simd<vector<2x2xi32>, 32> -> !wave.simd<vector<2x2xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_multidimensional_result(
+    %v: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{result packet vector must be 1-D}}
+  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot"> : !wave.simd<i32, 32> -> !wave.simd<vector<1x1xi32>, 32>
+  return
+}
+
+// -----
+
+func.func @redistribute_nonnumeric_scalar(
+    %v: !wave.simd<index, 32>) {
+  // expected-error @+1 {{source packet element type must be integer or float}}
+  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot"> : !wave.simd<index, 32> -> !wave.simd<index, 32>
   return
 }
 

@@ -50,6 +50,23 @@ func.func @reverse_slots(%source: !wave.simd<vector<2xf32>, 32>)
 
 // -----
 
+// CHECK-LABEL: func.func @select_scalar_slot(
+// CHECK-NOT: wave.shuffle
+// CHECK-NOT: wave.alloc
+// CHECK: %[[SELECTED:.*]] = wave.extract %{{.*}}[1] : !wave.simd<vector<2xf32>, 32> -> !wave.simd<f32, 32>
+// CHECK-NOT: wave.pack
+// CHECK: return %[[SELECTED]]
+func.func @select_scalar_slot(%source: !wave.simd<vector<2xf32>, 32>)
+    -> !wave.simd<f32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "1">
+      : !wave.simd<vector<2xf32>, 32> -> !wave.simd<f32, 32>
+  return %result : !wave.simd<f32, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @item_selected_slot(
 // CHECK-NOT: wave.shuffle
 // CHECK-NOT: wave.alloc
@@ -98,6 +115,22 @@ func.func @same_wave(%source: !wave.simd<vector<2xi32>, 32>)
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @same_wave_scalar(
+// CHECK-NOT: wave.extract
+// CHECK: %[[SHUFFLED:.*]] = wave.shuffle %{{.*}} from %{{.*}} : !wave.simd<i32, 32>, !wave.simd<index, 32> -> !wave.simd<i32, 32>
+// CHECK-NOT: wave.pack
+// CHECK: return %[[SHUFFLED]]
+func.func @same_wave_scalar(%source: !wave.simd<i32, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %result : !wave.simd<i32, 32>
 }
 
 // -----
@@ -151,6 +184,27 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cross_wave_scalar(
+// CHECK: %[[ALLOC:.*]] = wave.alloc() {align = 4 : i64, bytesize = 256 : i64}
+// CHECK: %[[STORE:.*]] = wave.store %{{.*}}
+// CHECK: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
+// CHECK: %[[LOAD:.*]], %[[TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]] {{.*}} -> (!wave.simd<i32, 32>, !wave.mem.token)
+// CHECK-NOT: wave.extract
+// CHECK-NOT: wave.pack
+// CHECK: %[[DONE:.*]] = wave.join %[[TOKEN]]
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
+// CHECK: return %[[LOAD]]
+func.func @cross_wave_scalar(%source: !wave.simd<i32, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %result : !wave.simd<i32, 32>
 }
 
 // -----

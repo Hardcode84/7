@@ -30,6 +30,28 @@ func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
   return
 }
 
+// ASM-LABEL: redistribute_same_wave_scalar:
+// ASM: ds_bpermute_b32
+// ASM-NOT: s_barrier
+// ASM: buffer_store_b32
+func.func @redistribute_same_wave_scalar(
+    %dst: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 64, 1, 1>,
+                wave.waves_per_workgroup = 2 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %moved = wave.redistribute %item,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %dst, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %moved -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: redistribute_same_wave_packet_select:
 // ASM-COUNT-8: ds_bpermute_b32
 // ASM-COUNT-4: v_cndmask_b32
@@ -106,6 +128,31 @@ func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %value -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// ASM-LABEL: redistribute_cross_wave_scalar:
+// ASM: ds_store_b32
+// ASM: s_barrier
+// ASM: ds_load_b32
+// ASM-NOT: s_barrier
+// ASM: buffer_store_b32
+// ASM: .amdhsa_group_segment_fixed_size 256
+func.func @redistribute_cross_wave_scalar(
+    %dst: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 64, 1, 1>,
+                wave.waves_per_workgroup = 2 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %moved = wave.redistribute %item,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %dst, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %moved -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return
