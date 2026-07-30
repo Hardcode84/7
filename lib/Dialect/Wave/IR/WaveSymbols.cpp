@@ -354,6 +354,12 @@ static InferredRange convertRange(ixs_range_result range) {
 
 Analysis::Analysis(Store &store) : session(store) {}
 
+void Analysis::invalidateQueryCaches() {
+  exactDivideCache.clear();
+  simplifyExprCache.clear();
+  definedCache.clear();
+}
+
 FailureOr<std::unique_ptr<Analysis>>
 Analysis::create(Store &store, ArrayRef<PredHandle> assumptions,
                  std::string *diagnostic) {
@@ -420,6 +426,7 @@ LogicalResult Analysis::assume(PredHandle pred, std::string *diagnostic) {
     poison(diagnostic, "failed to ingest symbolic assumption");
     return failure();
   }
+  invalidateQueryCaches();
   return success();
 }
 
@@ -445,6 +452,7 @@ LogicalResult Analysis::assume(ArrayRef<PredHandle> predicates,
     poison(diagnostic, "failed to ingest symbolic assumptions");
     return failure();
   }
+  invalidateQueryCaches();
   return success();
 }
 
@@ -466,6 +474,7 @@ LogicalResult Analysis::assumeRange(ExprHandle expr, InferredRange range,
     poison(diagnostic, "failed to ingest symbolic range");
     return failure();
   }
+  invalidateQueryCaches();
   return success();
 }
 
@@ -484,6 +493,7 @@ LogicalResult Analysis::deriveAffine(ExprHandle base, int64_t scale,
     poison(diagnostic, "failed to derive symbolic affine range");
     return failure();
   }
+  invalidateQueryCaches();
   return success();
 }
 
@@ -511,6 +521,7 @@ Analysis::substituteFacts(ArrayRef<ExprSubstitution> substitutions,
     return failure();
   }
   facts = substituted;
+  invalidateQueryCaches();
   return success();
 }
 
@@ -700,8 +711,14 @@ FailureOr<ExprHandle> Analysis::simplify(ExprHandle value,
   const ixs_node *raw = rawExprNode(value, diagnostic);
   if (!raw)
     return failure();
-  return finishExpr(session.raw(), ixs_simplify_facts(facts, raw), diagnostic,
-                    "failed to simplify wave.expr");
+  if (const ixs_node *cached = simplifyExprCache.lookup(raw))
+    return ExprHandle(cached);
+  FailureOr<ExprHandle> simplified =
+      finishExpr(session.raw(), ixs_simplify_facts(facts, raw), diagnostic,
+                 "failed to simplify wave.expr");
+  if (succeeded(simplified))
+    simplifyExprCache.try_emplace(raw, simplified->raw());
+  return simplified;
 }
 
 FailureOr<PredHandle> Analysis::simplify(PredHandle value,
@@ -902,16 +919,24 @@ CheckResult Analysis::defined(ExprHandle expr) {
   if (!prepareQuery())
     return CheckResult::Unknown;
   const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
-  return raw ? convertCheckResult(ixs_check_defined_facts(facts, raw))
-             : CheckResult::Unknown;
+  if (!raw)
+    return CheckResult::Unknown;
+  auto [it, inserted] = definedCache.try_emplace(raw);
+  if (inserted)
+    it->second = convertCheckResult(ixs_check_defined_facts(facts, raw));
+  return it->second;
 }
 
 CheckResult Analysis::defined(PredHandle pred) {
   if (!prepareQuery())
     return CheckResult::Unknown;
   const ixs_node *raw = rawPredNode(pred, /*diagnostic=*/nullptr);
-  return raw ? convertCheckResult(ixs_check_defined_facts(facts, raw))
-             : CheckResult::Unknown;
+  if (!raw)
+    return CheckResult::Unknown;
+  auto [it, inserted] = definedCache.try_emplace(raw);
+  if (inserted)
+    it->second = convertCheckResult(ixs_check_defined_facts(facts, raw));
+  return it->second;
 }
 
 CheckResult Analysis::integerValued(ExprHandle expr) {
@@ -947,19 +972,28 @@ ExactDivideResult Analysis::tryExactDivide(ExprHandle expr, int64_t divisor) {
   const ixs_node *raw = rawExprNode(expr, /*diagnostic=*/nullptr);
   if (!raw)
     return {};
+  auto key = std::make_pair(raw, divisor);
+  auto cached = exactDivideCache.find(key);
+  if (cached != exactDivideCache.end())
+    return cached->second;
   ixs_exact_divide_result result =
       ixs_try_exact_divide_facts(facts, raw, divisor);
+  ExactDivideResult converted;
   switch (result.status) {
   case IXS_EXACT_DIVIDE_PROVEN:
-    return {ExactDivideStatus::Proven, ExprHandle(result.quotient)};
+    converted = {ExactDivideStatus::Proven, ExprHandle(result.quotient)};
+    break;
   case IXS_EXACT_DIVIDE_NOT_EXACT:
-    return {ExactDivideStatus::NotExact, {}};
+    converted = {ExactDivideStatus::NotExact, {}};
+    break;
   case IXS_EXACT_DIVIDE_UNKNOWN:
-    return {ExactDivideStatus::Unknown, {}};
+    converted = {ExactDivideStatus::Unknown, {}};
+    break;
   case IXS_EXACT_DIVIDE_ERROR:
     return {ExactDivideStatus::Error, {}};
   }
-  return {};
+  exactDivideCache.try_emplace(key, converted);
+  return converted;
 }
 
 Pow2Fact Analysis::getPow2Fact(ExprHandle expr) {

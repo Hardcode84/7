@@ -940,33 +940,59 @@ specializeCoordinates(sym::Analysis &analysis,
 }
 
 static bool coordinatesProvablyDefined(sym::Analysis &analysis,
-                                       const MappingCoordinates &coordinates) {
-  return analysis.defined(coordinates.base) == sym::CheckResult::True &&
-         analysis.defined(coordinates.targetBlock) == sym::CheckResult::True &&
-         analysis.defined(coordinates.bitOffset) == sym::CheckResult::True;
+                                       const MappingCoordinates &coordinates,
+                                       bool defaultBase,
+                                       bool defaultTargetBlock) {
+  if (analysis.defined(coordinates.bitOffset) != sym::CheckResult::True)
+    return false;
+  if (!defaultBase &&
+      analysis.defined(coordinates.base) != sym::CheckResult::True)
+    return false;
+  return defaultTargetBlock ||
+         analysis.defined(coordinates.targetBlock) == sym::CheckResult::True;
+}
+
+static bool coordinatesAreLocal(sym::Analysis &analysis,
+                                const MappingCoordinates &coordinates,
+                                sym::ExprHandle block, bool defaultBase,
+                                bool defaultTargetBlock) {
+  if (!defaultBase && hasSymbol(coordinates.base, "block"))
+    return false;
+  if (hasSymbol(coordinates.bitOffset, "block"))
+    return false;
+  return defaultTargetBlock ||
+         analysis.equivalent(coordinates.targetBlock, block) ==
+             sym::CheckResult::True;
+}
+
+static FailureOr<int64_t>
+getLocalBaseIndex(const MemoryAccess &access,
+                  const MappingCoordinates &coordinates, bool defaultBase) {
+  int64_t baseIndex = 0;
+  if (!defaultBase) {
+    std::optional<int64_t> literal =
+        sym::getIntegerLiteralValue(coordinates.base);
+    if (!literal || *literal < 0)
+      return failure();
+    baseIndex = *literal;
+  }
+  if (static_cast<uint64_t>(baseIndex) >= access.bases.size())
+    return failure();
+  return baseIndex;
 }
 
 static FailureOr<int64_t>
 validateLocalCoordinates(const MemoryAccess &access, sym::Analysis &analysis,
                          const MappingCoordinates &coordinates,
-                         sym::ExprHandle block) {
-  if (!coordinatesProvablyDefined(analysis, coordinates))
+                         sym::ExprHandle block, bool defaultBase,
+                         bool defaultTargetBlock) {
+  if (!coordinatesProvablyDefined(analysis, coordinates, defaultBase,
+                                  defaultTargetBlock))
     return failure();
-  if (hasSymbol(coordinates.base, "block") ||
-      hasSymbol(coordinates.bitOffset, "block"))
+  if (!coordinatesAreLocal(analysis, coordinates, block, defaultBase,
+                           defaultTargetBlock))
     return failure();
-  if (analysis.equivalent(coordinates.targetBlock, block) !=
-      sym::CheckResult::True)
-    return failure();
-  std::optional<int64_t> baseIndex =
-      sym::getIntegerLiteralValue(coordinates.base);
-  if (!baseIndex)
-    return failure();
-  if (*baseIndex < 0)
-    return failure();
-  if (static_cast<uint64_t>(*baseIndex) >= access.bases.size())
-    return failure();
-  return *baseIndex;
+  return getLocalBaseIndex(access, coordinates, defaultBase);
 }
 
 static FailureOr<sym::ExprHandle> getByteOffset(sym::Analysis &analysis,
@@ -1007,6 +1033,44 @@ static FailureOr<PreparedSlotMapping> prepareSlotMapping(
   return prepared;
 }
 
+static FailureOr<sym::ExprHandle>
+specializeCoordinate(sym::Analysis &analysis, sym::ExprHandle coordinate,
+                     ArrayRef<sym::ExprSubstitution> substitutions) {
+  FailureOr<sym::ExprHandle> specialized =
+      analysis.substitute(coordinate, substitutions);
+  if (failed(specialized))
+    return failure();
+  return analysis.simplify(*specialized);
+}
+
+static FailureOr<MappingCoordinates> specializeProofCoordinates(
+    sym::Analysis &analysis, const MappingCoordinates &coordinates,
+    ArrayRef<sym::ExprSubstitution> substitutions,
+    sym::ExprHandle materializationBitOffset, sym::ExprHandle block,
+    sym::ExprHandle zero, bool defaultBase, bool defaultTargetBlock) {
+  MappingCoordinates specialized{zero, block, {}};
+  FailureOr<sym::ExprHandle> bitOffset =
+      analysis.simplify(materializationBitOffset);
+  if (failed(bitOffset))
+    return failure();
+  specialized.bitOffset = *bitOffset;
+  if (!defaultBase) {
+    FailureOr<sym::ExprHandle> base =
+        specializeCoordinate(analysis, coordinates.base, substitutions);
+    if (failed(base))
+      return failure();
+    specialized.base = *base;
+  }
+  if (!defaultTargetBlock) {
+    FailureOr<sym::ExprHandle> targetBlock =
+        specializeCoordinate(analysis, coordinates.targetBlock, substitutions);
+    if (failed(targetBlock))
+      return failure();
+    specialized.targetBlock = *targetBlock;
+  }
+  return specialized;
+}
+
 static FailureOr<SlotMapping> analyzeSlotMapping(const MemoryAccess &access,
                                                  sym::Analysis &analysis,
                                                  sym::ExprHandle blockSymbol,
@@ -1015,16 +1079,20 @@ static FailureOr<SlotMapping> analyzeSlotMapping(const MemoryAccess &access,
   SlotMapping &result = prepared.mapping;
   MappingCoordinates coordinates =
       getMappingCoordinates(access, blockSymbol, zero);
+  bool defaultBase = !access.mapping.getBase();
+  bool defaultTargetBlock = !access.mapping.getTargetBlock();
   FailureOr<sym::ExprHandle> materializationBitOffset =
       analysis.substitute(coordinates.bitOffset, prepared.substitutions);
   if (failed(materializationBitOffset))
     return failure();
-  FailureOr<MappingCoordinates> specialized =
-      specializeCoordinates(analysis, coordinates, prepared.substitutions);
+  FailureOr<MappingCoordinates> specialized = specializeProofCoordinates(
+      analysis, coordinates, prepared.substitutions, *materializationBitOffset,
+      blockSymbol, zero, defaultBase, defaultTargetBlock);
   if (failed(specialized))
     return failure();
   FailureOr<int64_t> baseIndex =
-      validateLocalCoordinates(access, analysis, *specialized, blockSymbol);
+      validateLocalCoordinates(access, analysis, *specialized, blockSymbol,
+                               defaultBase, defaultTargetBlock);
   if (failed(baseIndex))
     return failure();
   std::array<sym::ExprSubstitution, 1> blockSubstitution{
@@ -1033,10 +1101,9 @@ static FailureOr<SlotMapping> analyzeSlotMapping(const MemoryAccess &access,
       analysis.substitute(*materializationBitOffset, blockSubstitution);
   if (failed(materializationBitOffset))
     return failure();
-  FailureOr<MappingCoordinates> local =
-      specializeCoordinates(analysis, *specialized, blockSubstitution);
-  if (failed(local))
-    return failure();
+  // Validation makes base/offset block-invariant and targetBlock == block.
+  MappingCoordinates local = *specialized;
+  local.targetBlock = zero;
   result.materializationBitOffset = *materializationBitOffset;
   FailureOr<sym::ExprHandle> materializationByteOffset =
       divideExactlyForMaterialization(analysis, result.materializationBitOffset,
@@ -1048,19 +1115,15 @@ static FailureOr<SlotMapping> analyzeSlotMapping(const MemoryAccess &access,
   if (failed(materializationByteOffset))
     return failure();
   result.materializationByteOffset = *materializationByteOffset;
-  FailureOr<sym::ExprHandle> bitOffset = analysis.simplify(local->bitOffset);
-  if (failed(bitOffset))
-    return failure();
-  local->bitOffset = *bitOffset;
   FailureOr<sym::ExprHandle> byteOffset =
-      getByteOffset(analysis, local->bitOffset);
+      getByteOffset(analysis, local.bitOffset);
   if (failed(byteOffset))
     return failure();
-  result.base = local->base;
-  result.targetBlock = local->targetBlock;
-  result.bitOffset = local->bitOffset;
+  result.base = local.base;
+  result.targetBlock = local.targetBlock;
+  result.bitOffset = local.bitOffset;
   result.byteOffset = *byteOffset;
-  result.proofOffset = analysis.splitAdditiveConstant(local->bitOffset);
+  result.proofOffset = analysis.splitAdditiveConstant(local.bitOffset);
   result.baseIndex = *baseIndex;
   return std::move(prepared.mapping);
 }
@@ -3596,9 +3659,37 @@ static bool adjacent(sym::Store &store, const SlotMapping &lhs,
   return proofContext.sameActivation(lhs, rhs);
 }
 
+constexpr size_t kRelationPairByteBudget = 4 * 1024 * 1024;
+constexpr size_t kMaxRelationBatchPairs =
+    kRelationPairByteBudget / sizeof(RelationPair);
+
+static void prepareGatherDedupRelations(ArrayRef<SlotMapping> slots,
+                                        int64_t elementBits,
+                                        RemainderProofContext &proofContext) {
+  if (slots.size() < 2)
+    return;
+  size_t lhsCount = slots.size();
+  size_t rhsCount = slots.size() - 1;
+  if (lhsCount % 2 == 0)
+    lhsCount /= 2;
+  else
+    rhsCount /= 2;
+  if (rhsCount && lhsCount > kMaxRelationBatchPairs / rhsCount)
+    return;
+  size_t pairCount = lhsCount * rhsCount;
+  SmallVector<RelationPair> pairs;
+  pairs.reserve(pairCount);
+  for (auto [position, lhs] : llvm::enumerate(slots))
+    for (const SlotMapping &rhs : slots.drop_front(position + 1))
+      pairs.push_back({lhs.proofIndex, rhs.proofIndex});
+  proofContext.prepareRelations(pairs, elementBits);
+}
+
 static SmallVector<SlotMapping, 4>
 deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots,
+                       int64_t elementBits,
                        RemainderProofContext &proofContext) {
+  prepareGatherDedupRelations(slots, elementBits, proofContext);
   SmallVector<SlotMapping, 4> unique;
   for (SlotMapping &slot : slots) {
     auto found = llvm::find_if(unique, [&](const SlotMapping &candidate) {
@@ -3612,10 +3703,6 @@ deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots,
   }
   return unique;
 }
-
-constexpr size_t kRelationPairByteBudget = 4 * 1024 * 1024;
-constexpr size_t kMaxRelationBatchPairs =
-    kRelationPairByteBudget / sizeof(RelationPair);
 
 using SparseAddressKey =
     std::pair<sym::ExprHandle, std::pair<sym::ExprHandle, sym::ExprHandle>>;
@@ -4293,9 +4380,15 @@ findMatchingCover(ArrayRef<SmallVector<unsigned>> edges, int64_t elementBits) {
 
 static FailureOr<SmallVector<SmallVector<unsigned>>>
 planTransactions(sym::Store &store, ArrayRef<SlotMapping> slots,
-                 int64_t elementBits, RemainderProofContext &proofContext) {
+                 int64_t elementBits, RemainderProofContext &proofContext,
+                 SymbolicMemoryStageTiming &timing) {
+  TimingScope graphTiming =
+      timing.nest("lower_symbolic_memory_build_successor_graph");
   SmallVector<SmallVector<unsigned>> edges =
       buildSuccessorGraph(store, slots, elementBits, proofContext);
+  graphTiming.stop();
+  TimingScope coverTiming =
+      timing.nest("lower_symbolic_memory_select_transaction_cover");
   SmallVector<SmallVector<unsigned>> transactions;
   for (ArrayRef<unsigned> component : buildConnectedComponents(edges)) {
     SmallVector<SmallVector<unsigned>> localEdges =
@@ -4320,18 +4413,22 @@ planTransactions(sym::Store &store, ArrayRef<SlotMapping> slots,
 static FailureOr<GatherPlan>
 buildGenericGatherPlan(const MemoryAccess &access, sym::Store &store,
                        ArrayRef<SlotMapping> mappings, int64_t elementBits,
-                       RemainderProofContext &proofContext) {
+                       RemainderProofContext &proofContext,
+                       SymbolicMemoryStageTiming &timing) {
   GatherPlan plan;
+  TimingScope dedupTiming =
+      timing.nest("lower_symbolic_memory_deduplicate_gather");
   if (access.packetWhere) {
     plan.physicalSlots =
         SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end());
   } else {
     plan.physicalSlots = deduplicateGatherSlots(
         store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()),
-        proofContext);
+        elementBits, proofContext);
   }
-  FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
-      planTransactions(store, plan.physicalSlots, elementBits, proofContext);
+  dedupTiming.stop();
+  FailureOr<SmallVector<SmallVector<unsigned>>> transactions = planTransactions(
+      store, plan.physicalSlots, elementBits, proofContext, timing);
   if (failed(transactions))
     return failure();
   for (SmallVector<unsigned> &transaction : *transactions) {
@@ -4497,36 +4594,52 @@ static LogicalResult selectGatherCover(GatherPlan &plan, int64_t slotCount) {
 static FailureOr<GatherPlan>
 planGatherTransactions(const MemoryAccess &access, sym::Store &store,
                        ArrayRef<SlotMapping> mappings, int64_t elementBits,
-                       RemainderProofContext &proofContext) {
+                       RemainderProofContext &proofContext,
+                       SymbolicMemoryStageTiming &timing) {
   if (access.packetWhere || mappings.size() > kMaxExactCoverNodes)
     return buildGenericGatherPlan(access, store, mappings, elementBits,
-                                  proofContext);
+                                  proofContext, timing);
 
   FailureOr<GatherPlan> genericPlan = buildGenericGatherPlan(
-      access, store, mappings, elementBits, proofContext);
+      access, store, mappings, elementBits, proofContext, timing);
   if (failed(genericPlan))
     return failure();
 
+  TimingScope providerTiming =
+      timing.nest("lower_symbolic_memory_enumerate_provider_gather");
   SmallVector<wave::memory_lowering::GatherTransactionCandidate>
       providerCandidates = getProviderGatherCandidates(access, store, mappings);
+  providerTiming.stop();
   if (providerCandidates.empty())
     return genericPlan;
 
   GatherPlan plan;
+  TimingScope providerDedupTiming =
+      timing.nest("lower_symbolic_memory_deduplicate_provider_gather");
   plan.physicalSlots = deduplicateGatherSlots(
       store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()),
-      proofContext);
+      elementBits, proofContext);
+  providerDedupTiming.stop();
+  TimingScope providerGraphTiming =
+      timing.nest("lower_symbolic_memory_build_provider_successor_graph");
   SmallVector<SmallVector<unsigned>> edges =
       buildSuccessorGraph(store, plan.physicalSlots, elementBits, proofContext);
+  providerGraphTiming.stop();
+  TimingScope providerCandidateTiming =
+      timing.nest("lower_symbolic_memory_enumerate_generic_gather_candidates");
   FailureOr<SmallVector<TransactionCandidate>> genericCandidates =
       enumerateTransactionCandidates(edges, elementBits);
+  providerCandidateTiming.stop();
   if (failed(genericCandidates))
     return genericPlan;
 
+  TimingScope providerCoverTiming =
+      timing.nest("lower_symbolic_memory_select_provider_gather_cover");
   appendGenericGatherCandidates(plan, *genericCandidates, mappings.size());
   appendProviderGatherCandidates(plan, providerCandidates, mappings.size());
   if (failed(selectGatherCover(plan, mappings.size())))
     return genericPlan;
+  providerCoverTiming.stop();
   return plan;
 }
 
@@ -5566,11 +5679,14 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
     int64_t slotCount, const MappedItem &item,
     ArrayRef<sym::ExprSubstitution> bindingSubstitutions,
     ArrayRef<PacketComponents> packetComponents,
-    ArrayRef<ActiveControl> controls, ArrayRef<PacketControl> packetControls) {
+    ArrayRef<ActiveControl> controls, ArrayRef<PacketControl> packetControls,
+    SymbolicMemoryStageTiming &timing) {
   PacketBindingState bindingState;
   seedPacketBindingState(access, item, bindingState);
   SmallVector<PreparedSlotMapping, 4> preparedMappings;
   preparedMappings.reserve(slotCount);
+  TimingScope prepareSlotsTiming =
+      timing.nest("lower_symbolic_memory_prepare_mapping_slot_coordinates");
   for (int64_t index : llvm::seq<int64_t>(0, slotCount)) {
     FailureOr<PreparedSlotMapping> prepared = prepareSlotMapping(
         access, store, domain.slot, index, item, bindingSubstitutions,
@@ -5589,19 +5705,30 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
     }
     preparedMappings.push_back(std::move(*prepared));
   }
+  prepareSlotsTiming.stop();
 
+  TimingScope groupSlotsTiming =
+      timing.nest("lower_symbolic_memory_group_mapping_fact_domains");
   SmallVector<SlotMapping, 4> mappings(preparedMappings.size());
   SmallVector<ExactFactDomainGroup> groups;
   llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
   groupPreparedMappings(preparedMappings, domain, mappings, groups, buckets);
+  groupSlotsTiming.stop();
 
+  TimingScope analyzeSlotsTiming =
+      timing.nest("lower_symbolic_memory_analyze_mapping_slots");
   for (ExactFactDomainGroup &group : groups) {
+    TimingScope analysisTiming =
+        timing.nest("lower_symbolic_memory_create_mapping_analysis");
     FailureOr<std::unique_ptr<sym::Analysis>> analysis =
         sym::Analysis::create(store, group.assumptions);
     if (failed(analysis)) {
       access.op->emitOpError("mapping fact domain is inconsistent");
       return failure();
     }
+    analysisTiming.stop();
+    TimingScope mappingsTiming =
+        timing.nest("lower_symbolic_memory_analyze_mapping_coordinates");
     for (size_t index : group.tasks) {
       FailureOr<SlotMapping> mapping =
           analyzeSlotMapping(access, **analysis, domain.block, domain.zero,
@@ -5615,13 +5742,17 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
       }
       mappings[index] = std::move(*mapping);
     }
+    mappingsTiming.stop();
   }
   return mappings;
 }
 
 static FailureOr<PreparedAccessMappings>
 prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
-                      WaveDialect &dialect, DataFlowSolver &solver) {
+                      WaveDialect &dialect, DataFlowSolver &solver,
+                      SymbolicMemoryStageTiming &timing) {
+  TimingScope setupTiming =
+      timing.nest("lower_symbolic_memory_prepare_mapping_setup");
   FailureOr<AccessShape> shape = getAccessShape(access);
   if (failed(shape))
     return failure();
@@ -5635,17 +5766,26 @@ prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
       buildConstantBindingSubstitutions(access, store, solver);
   if (failed(bindingSubstitutions))
     return failure();
+  setupTiming.stop();
+  TimingScope itemTiming =
+      timing.nest("lower_symbolic_memory_prepare_mapping_item");
   bool needsItem = mappingNeedsItemAfterSlotSpecialization(
       access, store, *domain, shape->slotCount, *bindingSubstitutions);
   FailureOr<MappedItem> item =
       getMappedItem(rewriter, access, store, needsItem);
   if (failed(item))
     return failure();
+  itemTiming.stop();
+  TimingScope componentsTiming =
+      timing.nest("lower_symbolic_memory_prepare_mapping_components");
   FailureOr<SmallVector<PacketComponents, 4>> packetComponents =
       buildPacketComponents(rewriter, access, shape->slotCount, dialect,
                             solver);
   if (failed(packetComponents))
     return failure();
+  componentsTiming.stop();
+  TimingScope controlsTiming =
+      timing.nest("lower_symbolic_memory_prepare_mapping_controls");
   SmallVector<ActiveControl> controls =
       buildActiveControls(access, dialect, solver);
   FailureOr<SmallVector<PacketControl>> packetControls =
@@ -5653,9 +5793,12 @@ prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
   if (failed(packetControls))
     return access.op->emitOpError(
         "failed to analyze symbolic memory packet predicates");
+  controlsTiming.stop();
+  TimingScope slotsTiming =
+      timing.nest("lower_symbolic_memory_prepare_mapping_slots");
   FailureOr<SmallVector<SlotMapping, 4>> mappings = buildAccessSlotMappings(
       access, store, *domain, shape->slotCount, *item, *bindingSubstitutions,
-      *packetComponents, controls, *packetControls);
+      *packetComponents, controls, *packetControls, timing);
   if (failed(mappings))
     return failure();
   return PreparedAccessMappings{std::move(*mappings), *shape};
@@ -7747,13 +7890,14 @@ struct PreparedDmaCopy {
 static std::optional<PreparedDmaCopy>
 prepareDmaCopy(IRRewriter &rewriter, MemoryAccess &source,
                MemoryAccess &destination, const DmaCopyMatch &match,
-               WaveDialect &dialect, DataFlowSolver &solver) {
+               WaveDialect &dialect, DataFlowSolver &solver,
+               SymbolicMemoryStageTiming &timing) {
   rewriter.setInsertionPoint(source.op);
   FailureOr<PreparedAccessMappings> sourcePrepared =
-      prepareAccessMappings(rewriter, source, dialect, solver);
+      prepareAccessMappings(rewriter, source, dialect, solver, timing);
   rewriter.setInsertionPoint(destination.op);
   FailureOr<PreparedAccessMappings> destinationPrepared =
-      prepareAccessMappings(rewriter, destination, dialect, solver);
+      prepareAccessMappings(rewriter, destination, dialect, solver, timing);
   if (failed(sourcePrepared) || failed(destinationPrepared))
     return std::nullopt;
   if (!hasCompatibleDmaMappings(*sourcePrepared, *destinationPrepared) ||
@@ -8033,11 +8177,10 @@ emitDmaCopy(IRRewriter &rewriter, ScatterOp scatter, const DmaCopyMatch &match,
   return success();
 }
 
-static FailureOr<bool> tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect,
-                                       IRRewriter &rewriter,
-                                       DataFlowSolver &solver,
-                                       SymbolicRelationProofCache &proofCache,
-                                       uint64_t &factDomainCount) {
+static FailureOr<bool>
+tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect, IRRewriter &rewriter,
+                DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
+                uint64_t &factDomainCount, SymbolicMemoryStageTiming &timing) {
   std::optional<DmaCopyMatch> matched = matchDmaCopy(scatter);
   if (!matched)
     return false;
@@ -8054,31 +8197,36 @@ static FailureOr<bool> tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect,
   if (supportedByteWidths.empty())
     return false;
 
-  std::optional<PreparedDmaCopy> prepared =
-      prepareDmaCopy(rewriter, source, destination, *matched, dialect, solver);
+  TimingScope prepareTiming = timing.nest("lower_symbolic_memory_prepare_dma");
+  std::optional<PreparedDmaCopy> prepared = prepareDmaCopy(
+      rewriter, source, destination, *matched, dialect, solver, timing);
   if (!prepared)
     return false;
+  prepareTiming.stop();
+  TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_dma");
   std::optional<DmaCopyPlan> plan =
       planDmaCopy(*matched, destination, *prepared, dialect, solver, proofCache,
                   factDomainCount, supportedByteWidths);
   if (!plan)
     return false;
+  planTiming.stop();
+  TimingScope emitTiming = timing.nest("lower_symbolic_memory_emit_dma");
   if (failed(emitDmaCopy(rewriter, scatter, *matched, source, destination,
                          *prepared, *plan, dialect.getSymbolStore(), *emitter)))
     return failure();
   return true;
 }
 
-static LogicalResult lowerDmaCopies(Operation *root, WaveDialect &dialect,
-                                    IRRewriter &rewriter,
-                                    DataFlowSolver &solver,
-                                    SymbolicRelationProofCache &proofCache,
-                                    uint64_t &factDomainCount) {
+static LogicalResult
+lowerDmaCopies(Operation *root, WaveDialect &dialect, IRRewriter &rewriter,
+               DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
+               uint64_t &factDomainCount, SymbolicMemoryStageTiming &timing) {
   SmallVector<ScatterOp> scatters;
   root->walk([&](ScatterOp scatter) { scatters.push_back(scatter); });
   for (ScatterOp scatter : scatters) {
-    FailureOr<bool> lowered = tryLowerDmaCopy(
-        scatter, dialect, rewriter, solver, proofCache, factDomainCount);
+    FailureOr<bool> lowered =
+        tryLowerDmaCopy(scatter, dialect, rewriter, solver, proofCache,
+                        factDomainCount, timing);
     if (failed(lowered))
       return failure();
   }
@@ -8093,7 +8241,7 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
   TimingScope prepareTiming =
       timing.nest("lower_symbolic_memory_prepare_mappings");
   FailureOr<PreparedAccessMappings> prepared =
-      prepareAccessMappings(rewriter, access, dialect, solver);
+      prepareAccessMappings(rewriter, access, dialect, solver, timing);
   if (failed(prepared))
     return failure();
   sym::Store &store = dialect.getSymbolStore();
@@ -8106,9 +8254,9 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
 
   if (access.gather) {
     TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_gather");
-    FailureOr<GatherPlan> plan =
-        planGatherTransactions(access, store, prepared->mappings,
-                               prepared->shape.elementBits, proofContext);
+    FailureOr<GatherPlan> plan = planGatherTransactions(
+        access, store, prepared->mappings, prepared->shape.elementBits,
+        proofContext, timing);
     if (failed(plan))
       return access.op->emitOpError(
           "packet cannot be covered by legal memory transactions");
@@ -8119,8 +8267,9 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
   }
 
   TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_scatter");
-  FailureOr<SmallVector<SmallVector<unsigned>>> transactions = planTransactions(
-      store, prepared->mappings, prepared->shape.elementBits, proofContext);
+  FailureOr<SmallVector<SmallVector<unsigned>>> transactions =
+      planTransactions(store, prepared->mappings, prepared->shape.elementBits,
+                       proofContext, timing);
   if (failed(transactions))
     return access.op->emitOpError(
         "packet cannot be covered by legal memory transactions");
@@ -8188,9 +8337,12 @@ struct WaveLowerSymbolicMemoryPass
     IRRewriter rewriter(&getContext());
     SymbolicRelationProofCache proofCache;
     uint64_t factDomainCount = 0;
+    TimingScope dmaTiming =
+        timing.nest("lower_symbolic_memory_lower_dma_copies");
     if (failed(lowerDmaCopies(root, *dialect, rewriter, solver, proofCache,
-                              factDomainCount)))
+                              factDomainCount, timing)))
       return signalPassFailure();
+    dmaTiming.stop();
     accesses.clear();
     root->walk([&](Operation *op) {
       if (isa<GatherOp, ScatterOp>(op))

@@ -21,6 +21,7 @@
 #include "ixsimpl.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -451,9 +452,14 @@ public:
 private:
   explicit Analysis(Store &store);
 
+  void invalidateQueryCaches();
   bool prepareQuery();
   void poison(std::string *diagnostic, llvm::StringRef fallback);
 
+  llvm::DenseMap<std::pair<const ixs_node *, int64_t>, ExactDivideResult>
+      exactDivideCache;
+  llvm::DenseMap<const ixs_node *, const ixs_node *> simplifyExprCache;
+  llvm::DenseMap<const ixs_node *, CheckResult> definedCache;
   Session session;
   ixs_facts *facts = nullptr;
   bool usable = false;

@@ -557,6 +557,106 @@ static void runAnalysisBatchMutation(sym::Store &store, sym::ExprHandle x) {
                << checkResultName(analysis->defined(x)) << "\n";
 }
 
+struct QueryCacheState {
+  std::optional<int64_t> simplified;
+  sym::CheckResult defined = sym::CheckResult::Unknown;
+  sym::ExactDivideStatus exactDivide = sym::ExactDivideStatus::Error;
+};
+
+static QueryCacheState queryCacheState(sym::Analysis &analysis,
+                                       sym::ExprHandle mod,
+                                       sym::ExprHandle safe,
+                                       sym::ExprHandle divisible) {
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(mod);
+  if (failed(simplified)) {
+    llvm::errs() << "failed cached simplification query\n";
+    std::exit(1);
+  }
+  QueryCacheState state;
+  state.simplified = sym::getIntegerLiteralValue(*simplified);
+  state.defined = analysis.defined(safe);
+  state.exactDivide = analysis.tryExactDivide(divisible, 3).status;
+  return state;
+}
+
+static bool isUnconstrainedCacheState(const QueryCacheState &state) {
+  return !state.simplified && state.defined != sym::CheckResult::True &&
+         state.exactDivide != sym::ExactDivideStatus::Proven;
+}
+
+static bool isSixCacheState(const QueryCacheState &state) {
+  return state.simplified == 2 && state.defined == sym::CheckResult::True &&
+         state.exactDivide == sym::ExactDivideStatus::Proven;
+}
+
+static void runAnalysisQueryCacheInvalidation(sym::Store &store,
+                                              sym::ExprHandle x) {
+  sym::ExprHandle mod = mustParseExpr(store, "Mod(x, 4)");
+  sym::ExprHandle safe = mustParseExpr(store, "floor(1/(x + 1))");
+  sym::PredHandle six = mustParsePred(store, "x == 6");
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
+
+  QueryCacheState initial = queryCacheState(*analysis, mod, safe, x);
+  (void)queryCacheState(*analysis, mod, safe, x);
+  if (failed(analysis->assume(six))) {
+    llvm::errs() << "failed cached-query assumption\n";
+    std::exit(1);
+  }
+  QueryCacheState assumed = queryCacheState(*analysis, mod, safe, x);
+  llvm::outs() << "analysis-query-cache-assume-invalidated: "
+               << boolName(isUnconstrainedCacheState(initial) &&
+                           isSixCacheState(assumed))
+               << "\n";
+
+  sym::ExprHandle y = mustBuildSym(store, "cache_y");
+  if (failed(analysis->substituteFacts({sym::ExprSubstitution{x, y}}))) {
+    llvm::errs() << "failed cached-query fact substitution\n";
+    std::exit(1);
+  }
+  QueryCacheState substituted = queryCacheState(*analysis, mod, safe, x);
+  llvm::outs() << "analysis-query-cache-substitute-invalidated: "
+               << boolName(isUnconstrainedCacheState(substituted)) << "\n";
+
+  sym::InferredRange range;
+  range.lower = sym::RationalEndpoint{6, 1};
+  range.upper = sym::RationalEndpoint{6, 1};
+  if (failed(analysis->assumeRange(x, range))) {
+    llvm::errs() << "failed cached-query range assumption\n";
+    std::exit(1);
+  }
+  QueryCacheState ranged = queryCacheState(*analysis, mod, safe, x);
+  llvm::outs() << "analysis-query-cache-range-invalidated: "
+               << boolName(isSixCacheState(ranged)) << "\n";
+
+  analysis = mustCreateAnalysis(store);
+  (void)queryCacheState(*analysis, mod, safe, x);
+  std::array<sym::PredHandle, 2> bounds{mustParsePred(store, "x >= 6"),
+                                        mustParsePred(store, "x <= 6")};
+  if (failed(analysis->assume(bounds))) {
+    llvm::errs() << "failed cached-query batch assumption\n";
+    std::exit(1);
+  }
+  QueryCacheState batchAssumed = queryCacheState(*analysis, mod, safe, x);
+  llvm::outs() << "analysis-query-cache-batch-assume-invalidated: "
+               << boolName(isSixCacheState(batchAssumed)) << "\n";
+
+  sym::ExprHandle yMod = mustParseExpr(store, "Mod(cache_y, 4)");
+  sym::ExprHandle ySafe = mustParseExpr(store, "floor(1/(cache_y + 1))");
+  analysis = mustCreateAnalysis(store);
+  if (failed(analysis->assumeRange(x, range))) {
+    llvm::errs() << "failed cached-query derived range base\n";
+    std::exit(1);
+  }
+  (void)queryCacheState(*analysis, yMod, ySafe, y);
+  if (failed(analysis->deriveAffine(x, 1, 0, y))) {
+    llvm::errs() << "failed cached-query affine derivation\n";
+    std::exit(1);
+  }
+  QueryCacheState derived = queryCacheState(*analysis, yMod, ySafe, y);
+  llvm::outs() << "analysis-query-cache-derive-invalidated: "
+               << boolName(isSixCacheState(derived)) << "\n";
+}
+
 static void runAnalysisBatchClosure(sym::Store &store) {
   std::array<sym::PredHandle, 2> predicates{
       mustParsePred(store, "closure_divisor == 8"),
@@ -709,6 +809,7 @@ void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
   runAnalysisRangeMutation(store, x);
   runAnalysisFactSubstitution(store, x, facts);
   runAnalysisBatchMutation(store, x);
+  runAnalysisQueryCacheInvalidation(store, x);
   runAnalysisBatchClosure(store);
   runOrderedGridEquivalence(store);
   runAnalysisRejection(store, x, facts, invalidFacts);
