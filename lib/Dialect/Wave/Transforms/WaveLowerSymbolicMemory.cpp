@@ -27,6 +27,8 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -5659,6 +5661,2430 @@ prepareAccessMappings(IRRewriter &rewriter, MemoryAccess &access,
   return PreparedAccessMappings{std::move(*mappings), *shape};
 }
 
+struct DmaCopyTransaction {
+  SmallVector<unsigned> sourceSlots;
+  SmallVector<unsigned> destinationSlots;
+  std::unique_ptr<SlotMapping> sourcePoint;
+  std::unique_ptr<SlotMapping> destinationPoint;
+  std::optional<sym::PredHandle> activationPredicate;
+  int64_t bytes = 0;
+};
+
+struct DmaExecutionBinding {
+  std::string name;
+  Value value;
+};
+
+struct DmaCopyMatch {
+  GatherOp gather;
+  WhereOp predicate;
+  bool zeroFillInactive = false;
+};
+
+static bool hasUnpredicatedMappings(ArrayRef<SlotMapping> mappings) {
+  return llvm::all_of(mappings, [](const SlotMapping &mapping) {
+    return !mapping.activationPredicate && !mapping.packetCondition;
+  });
+}
+
+static bool isZeroPacket(Value value) {
+  if (matchPattern(value, m_Zero()))
+    return true;
+  if (ConstantOp constant = value.getDefiningOp<ConstantOp>()) {
+    Attribute attribute = constant.getValue();
+    if (IntegerAttr integer = dyn_cast<IntegerAttr>(attribute))
+      return integer.getValue().isZero();
+    if (FloatAttr floating = dyn_cast<FloatAttr>(attribute))
+      return floating.getValue().isZero();
+  }
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return isZeroPacket(splat.getSource());
+  PackOp pack = value.getDefiningOp<PackOp>();
+  return pack && llvm::all_of(pack.getInputs(), isZeroPacket);
+}
+
+static std::optional<DmaCopyMatch> matchDirectDmaCopy(ScatterOp scatter) {
+  GatherOp gather = scatter.getValue().getDefiningOp<GatherOp>();
+  if (!gather || gather->getBlock() != scatter->getBlock() ||
+      !gather.getValue().hasOneUse() || !gather.getToken().hasOneUse() ||
+      scatter.getDependency() != gather.getToken())
+    return std::nullopt;
+  return DmaCopyMatch{gather, {}, false};
+}
+
+static GatherOp matchDmaCopyThenRegion(WhereOp where) {
+  Block &block = where.getThenRegion().front();
+  GatherOp gather = dyn_cast<GatherOp>(&block.front());
+  YieldOp yield = dyn_cast<YieldOp>(block.getTerminator());
+  if (!gather || !yield || gather->getNextNode() != yield ||
+      yield.getNumOperands() != 2 || yield.getOperand(0) != gather.getValue() ||
+      yield.getOperand(1) != gather.getToken() ||
+      !gather.getValue().hasOneUse() || !gather.getToken().hasOneUse())
+    return {};
+  return gather;
+}
+
+static bool hasDmaCopyZeroFallback(WhereOp where, GatherOp gather) {
+  Block &block = where.getElseRegion().front();
+  YieldOp yield = dyn_cast<YieldOp>(block.getTerminator());
+  return yield && &block.front() == yield.getOperation() &&
+         yield.getNumOperands() == 2 && gather.getDependency() &&
+         yield.getOperand(1) == gather.getDependency() &&
+         isZeroPacket(yield.getOperand(0));
+}
+
+static bool hasDmaCopyWhereResults(ScatterOp scatter, WhereOp where) {
+  return where->getBlock() == scatter->getBlock() &&
+         where.getNumResults() == 2 &&
+         scatter.getValue() == where.getResult(0) &&
+         scatter.getDependency() == where.getResult(1) &&
+         where.getResult(0).hasOneUse() && where.getResult(1).hasOneUse();
+}
+
+static bool hasDmaCopyWhereRegions(WhereOp where) {
+  return !where.getThenRegion().empty() && !where.getElseRegion().empty();
+}
+
+static std::optional<DmaCopyMatch> matchPredicatedDmaCopy(ScatterOp scatter) {
+  WhereOp where = scatter.getValue().getDefiningOp<WhereOp>();
+  if (!where)
+    return std::nullopt;
+  if (!hasDmaCopyWhereResults(scatter, where) || !hasDmaCopyWhereRegions(where))
+    return std::nullopt;
+
+  GatherOp gather = matchDmaCopyThenRegion(where);
+  if (!gather || !hasDmaCopyZeroFallback(where, gather))
+    return std::nullopt;
+  return DmaCopyMatch{gather, where, true};
+}
+
+static std::optional<DmaCopyMatch> matchDmaCopy(ScatterOp scatter) {
+  if (std::optional<DmaCopyMatch> direct = matchDirectDmaCopy(scatter))
+    return direct;
+  return matchPredicatedDmaCopy(scatter);
+}
+
+static FailureOr<Value>
+getDmaCopyCondition(const DmaCopyMatch &match, ArrayRef<SlotMapping> mappings,
+                    ArrayRef<unsigned> transaction,
+                    RemainderProofContext &proofContext) {
+  if (!match.zeroFillInactive)
+    return Value{};
+  WhereOp predicate = match.predicate;
+  if (predicate.getConditions().size() == 1)
+    return predicate.getCondition();
+  if (transaction.empty())
+    return failure();
+
+  const SlotMapping &reference = mappings[transaction.front()];
+  if (!reference.packetCondition)
+    return failure();
+  for (unsigned index : transaction) {
+    if (index >= mappings.size() || !mappings[index].packetCondition ||
+        !proofContext.sameActivation(reference, mappings[index]))
+      return failure();
+  }
+  return reference.packetCondition;
+}
+
+static bool mappingUsesDmaExecution(const SlotMapping &mapping,
+                                    const NamedBinding &candidate) {
+  auto found =
+      llvm::find_if(mapping.bindings, [&](const NamedBinding &binding) {
+        return binding.name == candidate.name &&
+               binding.value == candidate.value;
+      });
+  if (found == mapping.bindings.end())
+    return false;
+  return hasSymbol(mapping.base, candidate.name) ||
+         hasSymbol(mapping.targetBlock, candidate.name) ||
+         hasSymbol(mapping.byteOffset, candidate.name) ||
+         hasSymbol(mapping.materializationByteOffset, candidate.name);
+}
+
+static bool isDmaExecutionBinding(const NamedBinding &candidate,
+                                  ArrayRef<SlotMapping> mappings) {
+  WorkitemIdOp workitem = candidate.value.getDefiningOp<WorkitemIdOp>();
+  return workitem && workitem.getAxis() == 0 &&
+         llvm::all_of(mappings, [&](const SlotMapping &mapping) {
+           return mappingUsesDmaExecution(mapping, candidate);
+         });
+}
+
+static std::optional<DmaExecutionBinding>
+findDmaExecutionBinding(ArrayRef<SlotMapping> mappings) {
+  if (mappings.empty())
+    return std::nullopt;
+  auto found = llvm::find_if(
+      mappings.front().bindings, [&](const NamedBinding &candidate) {
+        return isDmaExecutionBinding(candidate, mappings);
+      });
+  if (found == mappings.front().bindings.end())
+    return std::nullopt;
+  return DmaExecutionBinding{found->name, found->value};
+}
+
+static void rebindDmaExecution(MutableArrayRef<SlotMapping> mappings,
+                               const DmaExecutionBinding &source,
+                               Value replacement) {
+  for (SlotMapping &mapping : mappings)
+    for (NamedBinding &binding : mapping.bindings)
+      if (binding.name == source.name && binding.value == source.value)
+        binding.value = replacement;
+}
+
+static FailureOr<sym::ExprHandle>
+substituteDmaExecutionItem(sym::Analysis &analysis, sym::ExprHandle expression,
+                           sym::ExprHandle item, sym::ExprHandle replacement) {
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{item, replacement}};
+  FailureOr<sym::ExprHandle> result =
+      analysis.substitute(expression, substitution);
+  if (failed(result))
+    return failure();
+  return analysis.simplify(*result);
+}
+
+static bool proveEquivalent(sym::Analysis &analysis, sym::ExprHandle lhs,
+                            sym::ExprHandle rhs) {
+  return analysis.equivalent(lhs, rhs) == sym::CheckResult::True;
+}
+
+static FailureOr<sym::ExprHandle> addDmaConstant(sym::Analysis &analysis,
+                                                 sym::ExprHandle expression,
+                                                 int64_t value) {
+  if (value == 0)
+    return expression;
+  FailureOr<sym::ExprHandle> constant = analysis.composeInteger(value);
+  if (failed(constant))
+    return failure();
+  return analysis.compose(expression, sym::ExprBinaryOp::Add, *constant);
+}
+
+static FailureOr<sym::ExprHandle> buildDmaWaveBase(sym::Analysis &analysis,
+                                                   sym::ExprHandle item,
+                                                   int64_t waveWidth) {
+  FailureOr<sym::ExprHandle> width = analysis.composeInteger(waveWidth);
+  if (failed(width))
+    return failure();
+  FailureOr<sym::ExprHandle> lane =
+      analysis.compose(item, sym::ExprBinaryOp::Mod, *width);
+  if (failed(lane))
+    return failure();
+  return analysis.compose(item, sym::ExprBinaryOp::Sub, *lane);
+}
+
+struct DmaDestinationReference {
+  sym::ExprHandle address;
+  sym::ExprHandle base;
+  sym::ExprHandle targetBlock;
+};
+
+static FailureOr<DmaDestinationReference>
+getDmaDestinationReference(sym::Analysis &analysis, const SlotMapping &first,
+                           sym::ExprHandle item,
+                           sym::ExprHandle referenceItem) {
+  FailureOr<sym::ExprHandle> address = substituteDmaExecutionItem(
+      analysis, first.byteOffset, item, referenceItem);
+  FailureOr<sym::ExprHandle> base =
+      substituteDmaExecutionItem(analysis, first.base, item, referenceItem);
+  FailureOr<sym::ExprHandle> targetBlock = substituteDmaExecutionItem(
+      analysis, first.targetBlock, item, referenceItem);
+  if (failed(address) || failed(base) || failed(targetBlock))
+    return failure();
+  return DmaDestinationReference{*address, *base, *targetBlock};
+}
+
+static bool proveDmaDestinationSlot(sym::Analysis &analysis,
+                                    const SlotMapping &slot,
+                                    const SlotMapping &first,
+                                    const DmaDestinationReference &reference,
+                                    sym::ExprHandle expectedAddress) {
+  if (slot.baseIndex != first.baseIndex)
+    return false;
+  if (!proveEquivalent(analysis, slot.base, reference.base) ||
+      !proveEquivalent(analysis, slot.targetBlock, reference.targetBlock))
+    return false;
+  return proveEquivalent(analysis, slot.byteOffset, expectedAddress);
+}
+
+static bool proveDmaDestinationAlgebraically(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> slots,
+    ArrayRef<unsigned> transaction, sym::ExprHandle item, int64_t waveWidth,
+    int64_t elementBytes, int64_t transactionBytes) {
+  const SlotMapping &first = slots[transaction.front()];
+  FailureOr<sym::ExprHandle> waveBase =
+      buildDmaWaveBase(analysis, item, waveWidth);
+  if (failed(waveBase))
+    return false;
+  FailureOr<sym::ExprHandle> lane =
+      analysis.compose(item, sym::ExprBinaryOp::Sub, *waveBase);
+  FailureOr<sym::ExprHandle> bytes = analysis.composeInteger(transactionBytes);
+  if (failed(lane) || failed(bytes))
+    return false;
+  FailureOr<sym::ExprHandle> laneBytes =
+      analysis.compose(*lane, sym::ExprBinaryOp::Mul, *bytes);
+  if (failed(laneBytes))
+    return false;
+  FailureOr<DmaDestinationReference> reference =
+      getDmaDestinationReference(analysis, first, item, *waveBase);
+  if (failed(reference))
+    return false;
+
+  FailureOr<sym::ExprHandle> laneAddress =
+      analysis.compose(reference->address, sym::ExprBinaryOp::Add, *laneBytes);
+  if (failed(laneAddress))
+    return false;
+  for (auto [position, slotIndex] : llvm::enumerate(transaction)) {
+    const SlotMapping &slot = slots[slotIndex];
+    FailureOr<sym::ExprHandle> expected = addDmaConstant(
+        analysis, *laneAddress, static_cast<int64_t>(position) * elementBytes);
+    if (failed(expected) ||
+        !proveDmaDestinationSlot(analysis, slot, first, *reference, *expected))
+      return false;
+  }
+  return true;
+}
+
+static bool proveEnumeratedDmaDestinationSlot(
+    sym::Analysis &analysis, const SlotMapping &slot, const SlotMapping &first,
+    const DmaDestinationReference &reference, sym::ExprHandle item,
+    sym::ExprHandle executionValue, int64_t byteOffset) {
+  FailureOr<sym::ExprHandle> actual = substituteDmaExecutionItem(
+      analysis, slot.byteOffset, item, executionValue);
+  FailureOr<sym::ExprHandle> actualBase =
+      substituteDmaExecutionItem(analysis, slot.base, item, executionValue);
+  FailureOr<sym::ExprHandle> actualTarget = substituteDmaExecutionItem(
+      analysis, slot.targetBlock, item, executionValue);
+  FailureOr<sym::ExprHandle> expected =
+      addDmaConstant(analysis, reference.address, byteOffset);
+  if (failed(actual) || failed(actualBase) || failed(actualTarget) ||
+      failed(expected) || slot.baseIndex != first.baseIndex)
+    return false;
+  return proveEquivalent(analysis, *actualBase, reference.base) &&
+         proveEquivalent(analysis, *actualTarget, reference.targetBlock) &&
+         proveEquivalent(analysis, *actual, *expected);
+}
+
+static bool
+proveDmaDestinationForItem(sym::Analysis &analysis, ArrayRef<SlotMapping> slots,
+                           ArrayRef<unsigned> transaction, sym::ExprHandle item,
+                           int64_t executionItem, int64_t waveWidth,
+                           int64_t elementBytes, int64_t transactionBytes) {
+  const SlotMapping &first = slots[transaction.front()];
+  int64_t waveBaseItem = executionItem - executionItem % waveWidth;
+  FailureOr<sym::ExprHandle> executionValue =
+      analysis.composeInteger(executionItem);
+  FailureOr<sym::ExprHandle> waveBaseValue =
+      analysis.composeInteger(waveBaseItem);
+  if (failed(executionValue) || failed(waveBaseValue))
+    return false;
+  FailureOr<DmaDestinationReference> reference =
+      getDmaDestinationReference(analysis, first, item, *waveBaseValue);
+  if (failed(reference))
+    return false;
+  return llvm::all_of(llvm::enumerate(transaction), [&](auto indexedSlot) {
+    int64_t offset = (executionItem % waveWidth) * transactionBytes +
+                     static_cast<int64_t>(indexedSlot.index()) * elementBytes;
+    return proveEnumeratedDmaDestinationSlot(
+        analysis, slots[indexedSlot.value()], first, *reference, item,
+        *executionValue, offset);
+  });
+}
+
+static bool proveDmaDestinationByEnumeration(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> slots,
+    ArrayRef<unsigned> transaction, sym::ExprHandle item, int64_t itemCount,
+    int64_t waveWidth, int64_t elementBytes, int64_t transactionBytes) {
+  return llvm::all_of(
+      llvm::seq<int64_t>(0, itemCount), [&](int64_t executionItem) {
+        return proveDmaDestinationForItem(analysis, slots, transaction, item,
+                                          executionItem, waveWidth,
+                                          elementBytes, transactionBytes);
+      });
+}
+
+static std::optional<int64_t> getDmaItemCount(const MemoryAccess &access,
+                                              int64_t waveWidth) {
+  DenseI32ArrayAttr shape = getWorkgroupShape(access.op);
+  if (!shape || shape.size() != 3 || shape[0] <= 0 || shape[1] != 1 ||
+      shape[2] != 1 || waveWidth <= 0 || shape[0] % waveWidth != 0)
+    return std::nullopt;
+  return shape[0];
+}
+
+static bool proveDmaDestinationTransaction(
+    const MemoryAccess &access, ArrayRef<SlotMapping> slots,
+    ArrayRef<unsigned> transaction, const DmaExecutionBinding &execution,
+    int64_t elementBytes, int64_t transactionBytes, sym::Store &store) {
+  int64_t waveWidth = access.packetType.getWidth();
+  std::optional<int64_t> itemCount = getDmaItemCount(access, waveWidth);
+  if (!itemCount)
+    return false;
+
+  SmallVector<sym::PredHandle> assumptions;
+  for (unsigned slotIndex : transaction)
+    llvm::append_range(assumptions, slots[slotIndex].assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return false;
+  FailureOr<sym::ExprHandle> item = (*analysis)->composeSymbol(execution.name);
+  if (failed(item))
+    return false;
+  if (proveDmaDestinationAlgebraically(**analysis, slots, transaction, *item,
+                                       waveWidth, elementBytes,
+                                       transactionBytes))
+    return true;
+  return proveDmaDestinationByEnumeration(**analysis, slots, transaction, *item,
+                                          *itemCount, waveWidth, elementBytes,
+                                          transactionBytes);
+}
+
+struct DmaCopyPoint {
+  int64_t item = 0;
+  unsigned sourceSlot = 0;
+  unsigned destinationSlot = 0;
+};
+
+struct RankedDmaCopyPoint {
+  DmaCopyPoint point;
+  int64_t destinationOffset = 0;
+};
+
+using DmaMappingExpression = sym::ExprHandle SlotMapping::*;
+
+static FailureOr<sym::ExprHandle> specializeDmaItem(sym::Analysis &analysis,
+                                                    sym::ExprHandle expression,
+                                                    sym::ExprHandle item,
+                                                    int64_t value) {
+  FailureOr<sym::ExprHandle> replacement = analysis.composeInteger(value);
+  if (failed(replacement))
+    return failure();
+  return substituteDmaExecutionItem(analysis, expression, item, *replacement);
+}
+
+static FailureOr<int64_t> getDmaConstantDifference(sym::Analysis &analysis,
+                                                   sym::ExprHandle expression,
+                                                   sym::ExprHandle reference) {
+  FailureOr<sym::ExprHandle> difference =
+      analysis.compose(expression, sym::ExprBinaryOp::Sub, reference);
+  if (failed(difference))
+    return failure();
+  difference = analysis.simplify(*difference);
+  if (failed(difference))
+    return failure();
+  std::optional<int64_t> value = sym::getIntegerLiteralValue(*difference);
+  if (!value)
+    return failure();
+  return *value;
+}
+
+static FailureOr<sym::ExprHandle>
+composeDmaItemBit(sym::Analysis &analysis, sym::ExprHandle item, unsigned bit) {
+  FailureOr<sym::ExprHandle> divisor =
+      analysis.composeInteger(int64_t{1} << bit);
+  if (failed(divisor))
+    return failure();
+  FailureOr<sym::ExprHandle> divided =
+      analysis.compose(item, sym::ExprBinaryOp::Div, *divisor);
+  if (failed(divided))
+    return failure();
+  divided = analysis.composeFloor(*divided);
+  FailureOr<sym::ExprHandle> two = analysis.composeInteger(2);
+  if (failed(divided) || failed(two))
+    return failure();
+  return analysis.compose(*divided, sym::ExprBinaryOp::Mod, *two);
+}
+
+static FailureOr<sym::ExprHandle>
+appendDmaAdditiveTerm(sym::Analysis &analysis, sym::ExprHandle result,
+                      sym::ExprHandle item, unsigned bit, int64_t coefficient) {
+  if (coefficient == 0)
+    return result;
+  FailureOr<sym::ExprHandle> itemBit = composeDmaItemBit(analysis, item, bit);
+  FailureOr<sym::ExprHandle> coefficientExpr =
+      analysis.composeInteger(coefficient);
+  if (failed(itemBit) || failed(coefficientExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> term =
+      analysis.compose(*itemBit, sym::ExprBinaryOp::Mul, *coefficientExpr);
+  if (failed(term))
+    return failure();
+  return analysis.compose(result, sym::ExprBinaryOp::Add, *term);
+}
+
+static bool isDmaAdditiveSequence(ArrayRef<int64_t> differences,
+                                  ArrayRef<int64_t> coefficients) {
+  for (uint64_t value = 0; value < differences.size(); ++value) {
+    int64_t expected = 0;
+    for (auto [bit, coefficient] : llvm::enumerate(coefficients))
+      if (value & (uint64_t{1} << bit))
+        expected += coefficient;
+    if (expected != differences[value])
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<SmallVector<int64_t>>
+getDmaAdditiveCoefficients(ArrayRef<int64_t> differences) {
+  if (differences.empty() || differences.front() != 0 ||
+      !llvm::isPowerOf2_64(differences.size()))
+    return failure();
+  unsigned bits = llvm::Log2_64(differences.size());
+  SmallVector<int64_t> coefficients;
+  coefficients.reserve(bits);
+  for (unsigned bit = 0; bit < bits; ++bit)
+    coefficients.push_back(differences[int64_t{1} << bit]);
+  if (!isDmaAdditiveSequence(differences, coefficients))
+    return failure();
+  return coefficients;
+}
+
+static FailureOr<sym::ExprHandle>
+synthesizeDmaAdditiveExpression(sym::Analysis &analysis, sym::ExprHandle item,
+                                sym::ExprHandle reference,
+                                ArrayRef<int64_t> differences) {
+  FailureOr<SmallVector<int64_t>> coefficients =
+      getDmaAdditiveCoefficients(differences);
+  if (failed(coefficients))
+    return failure();
+  sym::ExprHandle result = reference;
+  for (auto [bit, coefficient] : llvm::enumerate(*coefficients)) {
+    FailureOr<sym::ExprHandle> sum =
+        appendDmaAdditiveTerm(analysis, result, item, bit, coefficient);
+    if (failed(sum))
+      return failure();
+    result = *sum;
+  }
+  return analysis.simplify(result);
+}
+
+struct DmaBitAffineSequence {
+  SmallVector<uint64_t> normalized;
+  int64_t minimum = 0;
+  uint64_t maximum = 0;
+};
+
+static FailureOr<DmaBitAffineSequence>
+normalizeDmaBitAffineSequence(ArrayRef<int64_t> differences) {
+  if (differences.empty() || differences.front() != 0 ||
+      !llvm::isPowerOf2_64(differences.size()))
+    return failure();
+  DmaBitAffineSequence sequence;
+  sequence.minimum = *llvm::min_element(differences);
+  sequence.normalized.reserve(differences.size());
+  for (int64_t difference : differences) {
+    std::optional<int64_t> shifted =
+        llvm::checkedSub(difference, sequence.minimum);
+    if (!shifted || *shifted < 0)
+      return failure();
+    uint64_t value = static_cast<uint64_t>(*shifted);
+    sequence.normalized.push_back(value);
+    sequence.maximum = std::max(sequence.maximum, value);
+  }
+  return sequence;
+}
+
+static SmallVector<bool> getDmaBitAffineCoefficients(ArrayRef<uint64_t> values,
+                                                     unsigned inputBits,
+                                                     unsigned outputBit,
+                                                     bool constant) {
+  SmallVector<bool> coefficients;
+  coefficients.reserve(inputBits);
+  for (unsigned inputBit = 0; inputBit < inputBits; ++inputBit)
+    coefficients.push_back(
+        constant ^
+        static_cast<bool>((values[uint64_t{1} << inputBit] >> outputBit) & 1));
+  return coefficients;
+}
+
+static bool verifyDmaBitAffineOutput(ArrayRef<uint64_t> values,
+                                     ArrayRef<bool> coefficients,
+                                     unsigned outputBit, bool constant) {
+  for (uint64_t value = 0; value < values.size(); ++value) {
+    bool expected = constant;
+    for (auto [inputBit, coefficient] : llvm::enumerate(coefficients))
+      if (coefficient && (value & (uint64_t{1} << inputBit)))
+        expected = !expected;
+    if (expected != static_cast<bool>((values[value] >> outputBit) & 1))
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<sym::ExprHandle>
+composeDmaBitAffineOutput(sym::Analysis &analysis, sym::ExprHandle item,
+                          ArrayRef<bool> coefficients, bool constant) {
+  FailureOr<sym::ExprHandle> output = analysis.composeInteger(constant ? 1 : 0);
+  if (failed(output))
+    return failure();
+  for (auto [inputBit, coefficient] : llvm::enumerate(coefficients)) {
+    if (!coefficient)
+      continue;
+    FailureOr<sym::ExprHandle> input =
+        composeDmaItemBit(analysis, item, inputBit);
+    if (failed(input))
+      return failure();
+    output = analysis.compose(*output, sym::ExprBinaryOp::Xor, *input);
+    if (failed(output))
+      return failure();
+  }
+  return output;
+}
+
+static FailureOr<sym::ExprHandle>
+appendDmaBitAffineOutput(sym::Analysis &analysis, sym::ExprHandle result,
+                         sym::ExprHandle output, unsigned outputBit) {
+  FailureOr<sym::ExprHandle> weight =
+      analysis.composeInteger(int64_t{1} << outputBit);
+  if (failed(weight))
+    return failure();
+  FailureOr<sym::ExprHandle> term =
+      analysis.compose(output, sym::ExprBinaryOp::Mul, *weight);
+  if (failed(term))
+    return failure();
+  return analysis.compose(result, sym::ExprBinaryOp::Add, *term);
+}
+
+static FailureOr<sym::ExprHandle>
+synthesizeDmaBitAffineExpression(sym::Analysis &analysis, sym::ExprHandle item,
+                                 sym::ExprHandle reference,
+                                 ArrayRef<int64_t> differences) {
+  FailureOr<DmaBitAffineSequence> sequence =
+      normalizeDmaBitAffineSequence(differences);
+  if (failed(sequence))
+    return failure();
+  FailureOr<sym::ExprHandle> result =
+      addDmaConstant(analysis, reference, sequence->minimum);
+  if (failed(result) || sequence->maximum == 0)
+    return result;
+
+  unsigned inputBits = llvm::Log2_64(differences.size());
+  unsigned outputBits = llvm::Log2_64(sequence->maximum) + 1;
+  for (unsigned outputBit = 0; outputBit < outputBits; ++outputBit) {
+    bool constant = (sequence->normalized.front() >> outputBit) & 1;
+    SmallVector<bool> coefficients = getDmaBitAffineCoefficients(
+        sequence->normalized, inputBits, outputBit, constant);
+    if (!verifyDmaBitAffineOutput(sequence->normalized, coefficients, outputBit,
+                                  constant))
+      return failure();
+    if (!constant &&
+        llvm::none_of(coefficients, [](bool value) { return value; }))
+      continue;
+    FailureOr<sym::ExprHandle> output =
+        composeDmaBitAffineOutput(analysis, item, coefficients, constant);
+    if (failed(output))
+      return failure();
+    result = appendDmaBitAffineOutput(analysis, *result, *output, outputBit);
+    if (failed(result))
+      return failure();
+  }
+  return analysis.simplify(*result);
+}
+
+static unsigned getDmaPointSlot(const DmaCopyPoint &point, bool source) {
+  return source ? point.sourceSlot : point.destinationSlot;
+}
+
+static FailureOr<sym::ExprHandle>
+synthesizeDmaExpressionSequence(sym::Analysis &analysis,
+                                ArrayRef<sym::ExprHandle> expressions,
+                                sym::ExprHandle item) {
+  if (expressions.empty())
+    return failure();
+  sym::ExprHandle reference = expressions.front();
+  SmallVector<int64_t> differences;
+  differences.reserve(expressions.size());
+  for (sym::ExprHandle expression : expressions) {
+    FailureOr<int64_t> difference =
+        getDmaConstantDifference(analysis, expression, reference);
+    if (failed(difference))
+      return failure();
+    differences.push_back(*difference);
+  }
+  FailureOr<sym::ExprHandle> additive =
+      synthesizeDmaAdditiveExpression(analysis, item, reference, differences);
+  if (succeeded(additive))
+    return additive;
+  return synthesizeDmaBitAffineExpression(analysis, item, reference,
+                                          differences);
+}
+
+static FailureOr<sym::ExprHandle> synthesizeDmaMappingExpression(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> mappings,
+    ArrayRef<DmaCopyPoint> points, bool source, sym::ExprHandle item,
+    DmaMappingExpression member) {
+  if (points.empty())
+    return failure();
+  SmallVector<sym::ExprHandle> expressions;
+  expressions.reserve(points.size());
+  for (const DmaCopyPoint &point : points) {
+    const SlotMapping &mapping = mappings[getDmaPointSlot(point, source)];
+    FailureOr<sym::ExprHandle> expression =
+        specializeDmaItem(analysis, mapping.*member, item, point.item);
+    if (failed(expression))
+      return failure();
+    expressions.push_back(*expression);
+  }
+  return synthesizeDmaExpressionSequence(analysis, expressions, item);
+}
+
+static FailureOr<sym::PredHandle> synthesizeDmaPredicateSequence(
+    sym::Analysis &analysis, ArrayRef<sym::PredHandle> predicates,
+    ArrayRef<DmaCopyPoint> points, sym::ExprHandle item);
+
+static std::optional<sym::PredKind>
+getCommonDmaPredicateKind(ArrayRef<sym::PredHandle> predicates) {
+  if (predicates.empty())
+    return std::nullopt;
+  sym::PredKind kind = sym::PredView(predicates.front()).getKind();
+  if (llvm::any_of(predicates, [&](sym::PredHandle predicate) {
+        return sym::PredView(predicate).getKind() != kind;
+      }))
+    return std::nullopt;
+  return kind;
+}
+
+static FailureOr<sym::PredHandle> synthesizeDmaComparisonPredicate(
+    sym::Analysis &analysis, ArrayRef<sym::PredHandle> predicates,
+    ArrayRef<DmaCopyPoint> points, sym::ExprHandle item) {
+  std::optional<sym::PredCmpOp> comparison =
+      sym::PredView(predicates.front()).getCmpOp();
+  if (!comparison)
+    return failure();
+  if (llvm::any_of(predicates, [&](sym::PredHandle predicate) {
+        return sym::PredView(predicate).getCmpOp() != comparison;
+      }))
+    return failure();
+
+  SmallVector<sym::ExprHandle> lhsExpressions;
+  SmallVector<sym::ExprHandle> rhsExpressions;
+  for (auto [predicate, point] : llvm::zip(predicates, points)) {
+    sym::PredView view(predicate);
+    FailureOr<sym::ExprHandle> lhs =
+        specializeDmaItem(analysis, view.getCmpLhs(), item, point.item);
+    FailureOr<sym::ExprHandle> rhs =
+        specializeDmaItem(analysis, view.getCmpRhs(), item, point.item);
+    if (failed(lhs) || failed(rhs))
+      return failure();
+    lhsExpressions.push_back(*lhs);
+    rhsExpressions.push_back(*rhs);
+  }
+  FailureOr<sym::ExprHandle> lhs =
+      synthesizeDmaExpressionSequence(analysis, lhsExpressions, item);
+  FailureOr<sym::ExprHandle> rhs =
+      synthesizeDmaExpressionSequence(analysis, rhsExpressions, item);
+  if (failed(lhs) || failed(rhs))
+    return failure();
+  return analysis.compare(*lhs, *comparison, *rhs);
+}
+
+static FailureOr<sym::PredHandle>
+synthesizeDmaNotPredicate(sym::Analysis &analysis,
+                          ArrayRef<sym::PredHandle> predicates,
+                          ArrayRef<DmaCopyPoint> points, sym::ExprHandle item) {
+  SmallVector<sym::PredHandle> arguments;
+  arguments.reserve(predicates.size());
+  for (sym::PredHandle predicate : predicates)
+    arguments.push_back(sym::PredView(predicate).getUnaryArg());
+  FailureOr<sym::PredHandle> argument =
+      synthesizeDmaPredicateSequence(analysis, arguments, points, item);
+  if (failed(argument))
+    return failure();
+  return analysis.composeNot(*argument);
+}
+
+static std::optional<uint32_t>
+getDmaLogicArgumentCount(ArrayRef<sym::PredHandle> predicates) {
+  uint32_t count = sym::PredView(predicates.front()).getLogicArgCount();
+  if (count == 0)
+    return std::nullopt;
+  if (llvm::any_of(predicates, [&](sym::PredHandle predicate) {
+        return sym::PredView(predicate).getLogicArgCount() != count;
+      }))
+    return std::nullopt;
+  return count;
+}
+
+static FailureOr<sym::PredHandle>
+composeDmaLogicPredicate(sym::Analysis &analysis,
+                         ArrayRef<sym::PredHandle> arguments,
+                         sym::PredKind kind) {
+  FailureOr<sym::PredHandle> result = arguments.front();
+  for (sym::PredHandle argument : ArrayRef(arguments).drop_front()) {
+    result = kind == sym::PredKind::And ? analysis.composeAnd(*result, argument)
+                                        : analysis.composeOr(*result, argument);
+    if (failed(result))
+      return failure();
+  }
+  return result;
+}
+
+static FailureOr<sym::PredHandle> synthesizeDmaLogicPredicate(
+    sym::Analysis &analysis, ArrayRef<sym::PredHandle> predicates,
+    ArrayRef<DmaCopyPoint> points, sym::ExprHandle item, sym::PredKind kind) {
+  std::optional<uint32_t> argumentCount = getDmaLogicArgumentCount(predicates);
+  if (!argumentCount)
+    return failure();
+  SmallVector<sym::PredHandle> arguments;
+  arguments.reserve(*argumentCount);
+  for (uint32_t index = 0; index < *argumentCount; ++index) {
+    SmallVector<sym::PredHandle> pointArguments;
+    for (sym::PredHandle predicate : predicates)
+      pointArguments.push_back(sym::PredView(predicate).getLogicArg(index));
+    FailureOr<sym::PredHandle> argument =
+        synthesizeDmaPredicateSequence(analysis, pointArguments, points, item);
+    if (failed(argument))
+      return failure();
+    arguments.push_back(*argument);
+  }
+  return composeDmaLogicPredicate(analysis, arguments, kind);
+}
+
+static FailureOr<sym::PredHandle> synthesizeDmaPredicateSequence(
+    sym::Analysis &analysis, ArrayRef<sym::PredHandle> predicates,
+    ArrayRef<DmaCopyPoint> points, sym::ExprHandle item) {
+  if (predicates.size() != points.size())
+    return failure();
+  std::optional<sym::PredKind> kind = getCommonDmaPredicateKind(predicates);
+  if (!kind)
+    return failure();
+  FailureOr<sym::PredHandle> result = failure();
+  switch (*kind) {
+  case sym::PredKind::True:
+    result = analysis.composeTrue();
+    break;
+  case sym::PredKind::False:
+    result = analysis.composeFalse();
+    break;
+  case sym::PredKind::Cmp:
+    result =
+        synthesizeDmaComparisonPredicate(analysis, predicates, points, item);
+    break;
+  case sym::PredKind::Not:
+    result = synthesizeDmaNotPredicate(analysis, predicates, points, item);
+    break;
+  case sym::PredKind::And:
+  case sym::PredKind::Or:
+    result =
+        synthesizeDmaLogicPredicate(analysis, predicates, points, item, *kind);
+    break;
+  default:
+    return failure();
+  }
+  if (failed(result))
+    return failure();
+  return analysis.simplify(*result);
+}
+
+static FailureOr<std::optional<sym::PredHandle>>
+synthesizeDmaActivationPredicate(sym::Analysis &analysis,
+                                 ArrayRef<SlotMapping> mappings,
+                                 ArrayRef<DmaCopyPoint> points,
+                                 sym::ExprHandle item) {
+  if (points.empty())
+    return failure();
+  bool hasPacketCondition =
+      llvm::any_of(points, [&](const DmaCopyPoint &point) {
+        return static_cast<bool>(mappings[point.sourceSlot].packetCondition);
+      });
+  if (!hasPacketCondition)
+    return std::optional<sym::PredHandle>{};
+
+  SmallVector<sym::PredHandle> predicates;
+  predicates.reserve(points.size());
+  for (const DmaCopyPoint &point : points) {
+    const SlotMapping &mapping = mappings[point.sourceSlot];
+    if (!mapping.packetCondition || !mapping.activationPredicate)
+      return failure();
+    predicates.push_back(*mapping.activationPredicate);
+  }
+  FailureOr<sym::PredHandle> predicate =
+      synthesizeDmaPredicateSequence(analysis, predicates, points, item);
+  if (failed(predicate))
+    return failure();
+  return std::optional<sym::PredHandle>{*predicate};
+}
+
+static bool verifySynthesizedDmaActivationPredicate(
+    sym::Analysis &analysis, sym::PredHandle synthesized,
+    ArrayRef<SlotMapping> mappings,
+    ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem, sym::ExprHandle item) {
+  for (auto [newItem, points] : llvm::enumerate(pointsByItem)) {
+    FailureOr<sym::ExprHandle> newItemValue =
+        analysis.composeInteger(static_cast<int64_t>(newItem));
+    if (failed(newItemValue))
+      return false;
+    FailureOr<sym::PredHandle> actual = analysis.substitute(
+        synthesized, ArrayRef<sym::ExprSubstitution>{
+                         sym::ExprSubstitution{item, *newItemValue}});
+    if (failed(actual))
+      return false;
+    for (const DmaCopyPoint &point : points) {
+      const SlotMapping &mapping = mappings[point.sourceSlot];
+      if (!mapping.activationPredicate)
+        return false;
+      FailureOr<sym::ExprHandle> pointValue =
+          analysis.composeInteger(point.item);
+      if (failed(pointValue))
+        return false;
+      FailureOr<sym::PredHandle> expected =
+          analysis.substitute(*mapping.activationPredicate,
+                              ArrayRef<sym::ExprSubstitution>{
+                                  sym::ExprSubstitution{item, *pointValue}});
+      if (failed(expected) ||
+          analysis.equivalent(*actual, *expected) != sym::CheckResult::True)
+        return false;
+    }
+  }
+  return true;
+}
+
+static FailureOr<sym::ExprHandle> getInvariantDmaMappingExpression(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> mappings,
+    ArrayRef<DmaCopyPoint> points, bool source, sym::ExprHandle item,
+    DmaMappingExpression member) {
+  if (points.empty())
+    return failure();
+  const SlotMapping &first = mappings[getDmaPointSlot(points.front(), source)];
+  FailureOr<sym::ExprHandle> reference =
+      specializeDmaItem(analysis, first.*member, item, points.front().item);
+  if (failed(reference))
+    return failure();
+  for (const DmaCopyPoint &point : points) {
+    const SlotMapping &mapping = mappings[getDmaPointSlot(point, source)];
+    FailureOr<sym::ExprHandle> expression =
+        specializeDmaItem(analysis, mapping.*member, item, point.item);
+    if (failed(expression) ||
+        !proveEquivalent(analysis, *expression, *reference))
+      return failure();
+  }
+  return *reference;
+}
+
+static bool mergeDmaMappingMetadata(SlotMapping &target,
+                                    const SlotMapping &source) {
+  if (target.baseIndex != source.baseIndex)
+    return false;
+  for (const NamedBinding &binding : source.bindings) {
+    auto found =
+        llvm::find_if(target.bindings, [&](const NamedBinding &candidate) {
+          return candidate.name == binding.name;
+        });
+    if (found == target.bindings.end()) {
+      target.bindings.push_back(binding);
+      continue;
+    }
+    if (found->value != binding.value)
+      return false;
+  }
+  for (sym::PredHandle assumption : source.assumptions)
+    if (!llvm::is_contained(target.assumptions, assumption))
+      target.assumptions.push_back(assumption);
+  return true;
+}
+
+struct DmaClosedRange {
+  int64_t lower = 0;
+  int64_t upper = 0;
+};
+
+static std::optional<DmaClosedRange>
+getClosedDmaRange(const std::optional<sym::InferredRange> &range) {
+  if (!range || !range->lower || !range->upper)
+    return std::nullopt;
+  std::optional<int64_t> lower = sym::ceilEndpoint(*range->lower);
+  std::optional<int64_t> upper = sym::floorEndpoint(*range->upper);
+  if (!lower || !upper || *lower > *upper)
+    return std::nullopt;
+  return DmaClosedRange{*lower, *upper};
+}
+
+static LogicalResult
+appendInferredExpressionRange(sym::Analysis &analysis,
+                              sym::ExprHandle expression,
+                              SmallVectorImpl<sym::PredHandle> &assumptions) {
+  std::optional<DmaClosedRange> range =
+      getClosedDmaRange(analysis.range(expression));
+  if (!range)
+    return success();
+  FailureOr<sym::ExprHandle> lowerValue = analysis.composeInteger(range->lower);
+  FailureOr<sym::ExprHandle> upperValue = analysis.composeInteger(range->upper);
+  if (failed(lowerValue) || failed(upperValue))
+    return failure();
+  FailureOr<sym::PredHandle> lowerBound =
+      analysis.compare(expression, sym::PredCmpOp::Ge, *lowerValue);
+  FailureOr<sym::PredHandle> upperBound =
+      analysis.compare(expression, sym::PredCmpOp::Le, *upperValue);
+  if (failed(lowerBound) || failed(upperBound))
+    return failure();
+  if (!llvm::is_contained(assumptions, *lowerBound))
+    assumptions.push_back(*lowerBound);
+  if (!llvm::is_contained(assumptions, *upperBound))
+    assumptions.push_back(*upperBound);
+  return success();
+}
+
+static LogicalResult
+appendDmaExpressionRange(sym::Store &store, sym::ExprHandle expression,
+                         int64_t lower, int64_t upper,
+                         SmallVectorImpl<sym::PredHandle> &assumptions) {
+  FailureOr<sym::ExprHandle> lowerValue = sym::composeExprInt(store, lower);
+  FailureOr<sym::ExprHandle> upperValue = sym::composeExprInt(store, upper);
+  if (failed(lowerValue) || failed(upperValue))
+    return failure();
+  FailureOr<sym::PredHandle> lowerBound =
+      sym::composePredCmp(store, expression, sym::PredCmpOp::Ge, *lowerValue);
+  FailureOr<sym::PredHandle> upperBound =
+      sym::composePredCmp(store, expression, sym::PredCmpOp::Le, *upperValue);
+  if (failed(lowerBound) || failed(upperBound))
+    return failure();
+  if (!llvm::is_contained(assumptions, *lowerBound))
+    assumptions.push_back(*lowerBound);
+  if (!llvm::is_contained(assumptions, *upperBound))
+    assumptions.push_back(*upperBound);
+  return success();
+}
+
+static FailureOr<DmaClosedRange> getDmaPointRange(sym::Store &store,
+                                                  const SlotMapping &mapping,
+                                                  const DmaCopyPoint &point,
+                                                  sym::ExprHandle item,
+                                                  DmaMappingExpression member) {
+  FailureOr<sym::ExprHandle> value = sym::composeExprInt(store, point.item);
+  if (failed(value))
+    return failure();
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{item, *value}};
+  FailureOr<sym::ExprHandle> expression =
+      sym::substituteExpr(store, mapping.*member, substitution);
+  FailureOr<SmallVector<sym::PredHandle>> assumptions =
+      substituteIndexExprPredicates(store, mapping.assumptions, substitution);
+  if (failed(expression) || failed(assumptions))
+    return failure();
+  std::optional<DmaClosedRange> range =
+      getClosedDmaRange(sym::inferRange(store, *expression, *assumptions));
+  if (!range)
+    return failure();
+  return *range;
+}
+
+static LogicalResult appendDmaPointUnionRange(sym::Store &store,
+                                              SlotMapping &synthesized,
+                                              ArrayRef<SlotMapping> mappings,
+                                              ArrayRef<DmaCopyPoint> points,
+                                              bool source, sym::ExprHandle item,
+                                              DmaMappingExpression member) {
+  std::optional<int64_t> unionLower;
+  std::optional<int64_t> unionUpper;
+  for (const DmaCopyPoint &point : points) {
+    const SlotMapping &mapping = mappings[getDmaPointSlot(point, source)];
+    FailureOr<DmaClosedRange> range =
+        getDmaPointRange(store, mapping, point, item, member);
+    if (failed(range))
+      return failure();
+    unionLower = unionLower ? std::min(*unionLower, range->lower)
+                            : std::optional(range->lower);
+    unionUpper = unionUpper ? std::max(*unionUpper, range->upper)
+                            : std::optional(range->upper);
+  }
+  if (!unionLower || !unionUpper)
+    return failure();
+  return appendDmaExpressionRange(store, synthesized.*member, *unionLower,
+                                  *unionUpper, synthesized.assumptions);
+}
+
+struct DmaMappingExpressions {
+  sym::ExprHandle base;
+  sym::ExprHandle targetBlock;
+  sym::ExprHandle bitOffset;
+  sym::ExprHandle materializationBitOffset;
+  sym::ExprHandle byteOffset;
+  sym::ExprHandle materializationByteOffset;
+};
+
+static FailureOr<DmaMappingExpressions> synthesizeDmaMappingExpressions(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> mappings,
+    ArrayRef<DmaCopyPoint> points, bool source, sym::ExprHandle item) {
+  FailureOr<sym::ExprHandle> base = getInvariantDmaMappingExpression(
+      analysis, mappings, points, source, item, &SlotMapping::base);
+  FailureOr<sym::ExprHandle> targetBlock = getInvariantDmaMappingExpression(
+      analysis, mappings, points, source, item, &SlotMapping::targetBlock);
+  FailureOr<sym::ExprHandle> bitOffset = synthesizeDmaMappingExpression(
+      analysis, mappings, points, source, item, &SlotMapping::bitOffset);
+  FailureOr<sym::ExprHandle> materializationBitOffset =
+      synthesizeDmaMappingExpression(analysis, mappings, points, source, item,
+                                     &SlotMapping::materializationBitOffset);
+  FailureOr<sym::ExprHandle> byteOffset = synthesizeDmaMappingExpression(
+      analysis, mappings, points, source, item, &SlotMapping::byteOffset);
+  FailureOr<sym::ExprHandle> materializationByteOffset =
+      synthesizeDmaMappingExpression(analysis, mappings, points, source, item,
+                                     &SlotMapping::materializationByteOffset);
+  if (failed(base) || failed(targetBlock) || failed(bitOffset) ||
+      failed(materializationBitOffset) || failed(byteOffset) ||
+      failed(materializationByteOffset))
+    return failure();
+  return DmaMappingExpressions{*base,       *targetBlock,
+                               *bitOffset,  *materializationBitOffset,
+                               *byteOffset, *materializationByteOffset};
+}
+
+static void setDmaMappingExpressions(SlotMapping &mapping,
+                                     const DmaMappingExpressions &expressions) {
+  mapping.base = expressions.base;
+  mapping.targetBlock = expressions.targetBlock;
+  mapping.bitOffset = expressions.bitOffset;
+  mapping.materializationBitOffset = expressions.materializationBitOffset;
+  mapping.byteOffset = expressions.byteOffset;
+  mapping.materializationByteOffset = expressions.materializationByteOffset;
+  mapping.logicalSlots.clear();
+  mapping.activationPredicate.reset();
+  mapping.activationRelationPredicate = {};
+  mapping.proofOffset.reset();
+  mapping.packetCondition = {};
+  mapping.materializationCandidates.clear();
+  mapping.proofIndex = std::numeric_limits<size_t>::max();
+}
+
+static LogicalResult
+bindDmaMappingExecution(SlotMapping &mapping,
+                        const DmaExecutionBinding &execution) {
+  auto found =
+      llvm::find_if(mapping.bindings, [&](const NamedBinding &binding) {
+        return binding.name == execution.name;
+      });
+  if (found == mapping.bindings.end()) {
+    mapping.bindings.push_back({execution.name, execution.value});
+    return success();
+  }
+  return success(found->value == execution.value);
+}
+
+static FailureOr<SlotMapping> synthesizeDmaMappingPoint(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> mappings,
+    ArrayRef<DmaCopyPoint> points, bool source,
+    const DmaExecutionBinding &execution, sym::ExprHandle item) {
+  if (points.empty())
+    return failure();
+  SlotMapping result = mappings[getDmaPointSlot(points.front(), source)];
+  for (const DmaCopyPoint &point : points)
+    if (!mergeDmaMappingMetadata(result,
+                                 mappings[getDmaPointSlot(point, source)]))
+      return failure();
+
+  FailureOr<DmaMappingExpressions> expressions =
+      synthesizeDmaMappingExpressions(analysis, mappings, points, source, item);
+  if (failed(expressions))
+    return failure();
+  setDmaMappingExpressions(result, *expressions);
+  if (failed(appendInferredExpressionRange(
+          analysis, result.materializationByteOffset, result.assumptions)))
+    return failure();
+  if (failed(bindDmaMappingExecution(result, execution)))
+    return failure();
+  return result;
+}
+
+static FailureOr<sym::ExprHandle>
+getDmaPointExpression(sym::Analysis &analysis, ArrayRef<SlotMapping> mappings,
+                      const DmaCopyPoint &point, bool source,
+                      sym::ExprHandle item, DmaMappingExpression member) {
+  const SlotMapping &mapping = mappings[getDmaPointSlot(point, source)];
+  return specializeDmaItem(analysis, mapping.*member, item, point.item);
+}
+
+static bool verifyDmaPointPacket(sym::Analysis &analysis,
+                                 ArrayRef<SlotMapping> mappings,
+                                 ArrayRef<DmaCopyPoint> points, bool source,
+                                 sym::ExprHandle item, int64_t elementBytes,
+                                 DmaMappingExpression member) {
+  if (points.empty())
+    return false;
+  FailureOr<sym::ExprHandle> first = getDmaPointExpression(
+      analysis, mappings, points.front(), source, item, member);
+  if (failed(first))
+    return false;
+  for (auto [position, point] : llvm::enumerate(points)) {
+    FailureOr<sym::ExprHandle> actual =
+        getDmaPointExpression(analysis, mappings, point, source, item, member);
+    FailureOr<sym::ExprHandle> expected = addDmaConstant(
+        analysis, *first, static_cast<int64_t>(position) * elementBytes);
+    if (failed(actual) || failed(expected) ||
+        !proveEquivalent(analysis, *actual, *expected))
+      return false;
+  }
+  return true;
+}
+
+static bool verifySynthesizedDmaMappingExpression(
+    sym::Analysis &analysis, const SlotMapping &synthesized,
+    ArrayRef<SlotMapping> mappings, ArrayRef<DmaCopyPoint> points, bool source,
+    sym::ExprHandle item, DmaMappingExpression member) {
+  for (auto [newItem, point] : llvm::enumerate(points)) {
+    FailureOr<sym::ExprHandle> actual =
+        specializeDmaItem(analysis, synthesized.*member, item, newItem);
+    FailureOr<sym::ExprHandle> expected =
+        getDmaPointExpression(analysis, mappings, point, source, item, member);
+    if (failed(actual) || failed(expected) ||
+        !proveEquivalent(analysis, *actual, *expected))
+      return false;
+  }
+  return true;
+}
+
+static bool verifySynthesizedDmaMapping(sym::Analysis &analysis,
+                                        const SlotMapping &synthesized,
+                                        ArrayRef<SlotMapping> mappings,
+                                        ArrayRef<DmaCopyPoint> points,
+                                        bool source, sym::ExprHandle item) {
+  if (points.empty())
+    return false;
+  const SlotMapping &first = mappings[getDmaPointSlot(points.front(), source)];
+  if (synthesized.baseIndex != first.baseIndex)
+    return false;
+  constexpr DmaMappingExpression members[] = {
+      &SlotMapping::base,       &SlotMapping::targetBlock,
+      &SlotMapping::bitOffset,  &SlotMapping::materializationBitOffset,
+      &SlotMapping::byteOffset, &SlotMapping::materializationByteOffset,
+  };
+  return llvm::all_of(members, [&](DmaMappingExpression member) {
+    return verifySynthesizedDmaMappingExpression(
+        analysis, synthesized, mappings, points, source, item, member);
+  });
+}
+
+static std::optional<int64_t> getDmaTransactionStep(int64_t bytes,
+                                                    int64_t elementBytes,
+                                                    int64_t covered,
+                                                    int64_t elementCount) {
+  if (bytes <= 0 || bytes % elementBytes)
+    return std::nullopt;
+  int64_t elements = bytes / elementBytes;
+  if (covered + elements > elementCount)
+    return std::nullopt;
+  return elements;
+}
+
+static void fillDmaTransactionSteps(MutableArrayRef<int64_t> steps,
+                                    int64_t elementBytes,
+                                    ArrayRef<int64_t> supportedByteWidths) {
+  int64_t elementCount = steps.size() - 1;
+  steps[elementCount] = 0;
+  for (int64_t covered = elementCount - 1; covered >= 0; --covered) {
+    for (int64_t bytes : supportedByteWidths) {
+      std::optional<int64_t> elements =
+          getDmaTransactionStep(bytes, elementBytes, covered, elementCount);
+      if (elements && steps[covered + *elements] >= 0) {
+        steps[covered] = *elements;
+        break;
+      }
+    }
+  }
+}
+
+static SmallVector<int64_t>
+collectDmaTransactionElements(ArrayRef<int64_t> steps) {
+  SmallVector<int64_t> result;
+  int64_t elementCount = steps.size() - 1;
+  for (int64_t covered = 0; covered < elementCount;) {
+    int64_t elements = steps[covered];
+    result.push_back(elements);
+    covered += elements;
+  }
+  return result;
+}
+
+static FailureOr<SmallVector<int64_t>>
+planDmaTransactionElements(int64_t elementCount, int64_t elementBytes,
+                           ArrayRef<int64_t> supportedByteWidths) {
+  if (elementCount <= 0 || elementBytes <= 0)
+    return failure();
+  SmallVector<int64_t> steps(elementCount + 1, -1);
+  fillDmaTransactionSteps(steps, elementBytes, supportedByteWidths);
+  if (steps[0] < 0)
+    return failure();
+  return collectDmaTransactionElements(steps);
+}
+
+static bool indexDmaMappings(ArrayRef<SlotMapping> mappings,
+                             MutableArrayRef<int64_t> indices) {
+  for (auto [index, mapping] : llvm::enumerate(mappings)) {
+    if (mapping.logicalSlots.size() != 1)
+      return false;
+    unsigned logical = mapping.logicalSlots.front();
+    if (logical >= indices.size() || indices[logical] >= 0)
+      return false;
+    indices[logical] = static_cast<int64_t>(index);
+  }
+  return llvm::none_of(indices, [](int64_t index) { return index < 0; });
+}
+
+struct DmaRepackShape {
+  int64_t itemCount = 0;
+  int64_t waveWidth = 0;
+  int64_t elementBytes = 0;
+  int64_t waveCount = 0;
+};
+
+static bool hasDmaRepackExecutionShape(int64_t itemCount, int64_t waveWidth,
+                                       int64_t elementBits) {
+  return itemCount > 0 && waveWidth > 0 && itemCount % waveWidth == 0 &&
+         llvm::isPowerOf2_64(itemCount) && elementBits > 0 &&
+         elementBits % 8 == 0;
+}
+
+static bool
+hasDmaRepackMappingShape(const AccessShape &shape,
+                         ArrayRef<SlotMapping> sourceMappings,
+                         ArrayRef<SlotMapping> destinationMappings) {
+  return sourceMappings.size() == static_cast<size_t>(shape.slotCount) &&
+         destinationMappings.size() == static_cast<size_t>(shape.slotCount);
+}
+
+static std::optional<DmaRepackShape>
+getDmaRepackShape(const MemoryAccess &access, const AccessShape &shape,
+                  ArrayRef<SlotMapping> sourceMappings,
+                  ArrayRef<SlotMapping> destinationMappings) {
+  DenseI32ArrayAttr workgroupShape = getWorkgroupShape(access.op);
+  int64_t itemCount =
+      workgroupShape && workgroupShape.size() == 3 ? workgroupShape[0] : 0;
+  int64_t waveWidth = access.packetType.getWidth();
+  if (!hasDmaRepackExecutionShape(itemCount, waveWidth, shape.elementBits) ||
+      !hasDmaRepackMappingShape(shape, sourceMappings, destinationMappings))
+    return std::nullopt;
+  return DmaRepackShape{itemCount, waveWidth, shape.elementBits / 8,
+                        itemCount / waveWidth};
+}
+
+static void
+appendUniqueDmaAssumptions(ArrayRef<SlotMapping> mappings,
+                           bool includeActivation,
+                           SmallVectorImpl<sym::PredHandle> &assumptions) {
+  for (const SlotMapping &mapping : mappings) {
+    SmallVector<sym::PredHandle> selected =
+        includeActivation ? mapping.assumptions
+                          : getNonActivationAssumptions(mapping);
+    for (sym::PredHandle assumption : selected)
+      if (!llvm::is_contained(assumptions, assumption))
+        assumptions.push_back(assumption);
+  }
+}
+
+struct DmaRepackAnalyses {
+  std::unique_ptr<sym::Analysis> mapping;
+  std::unique_ptr<sym::Analysis> predicate;
+  sym::ExprHandle sourceItem;
+  sym::ExprHandle destinationItem;
+  sym::ExprHandle predicateItem;
+};
+
+static FailureOr<DmaRepackAnalyses>
+createDmaRepackAnalyses(sym::Store &store, ArrayRef<SlotMapping> sourceMappings,
+                        ArrayRef<SlotMapping> destinationMappings,
+                        const DmaExecutionBinding &sourceExecution,
+                        const DmaExecutionBinding &destinationExecution) {
+  SmallVector<sym::PredHandle> assumptions;
+  appendUniqueDmaAssumptions(sourceMappings, true, assumptions);
+  appendUniqueDmaAssumptions(destinationMappings, true, assumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> mapping =
+      sym::Analysis::create(store, assumptions);
+  if (failed(mapping))
+    return failure();
+
+  SmallVector<sym::PredHandle> predicateAssumptions;
+  appendUniqueDmaAssumptions(sourceMappings, false, predicateAssumptions);
+  appendUniqueDmaAssumptions(destinationMappings, false, predicateAssumptions);
+  FailureOr<std::unique_ptr<sym::Analysis>> predicate =
+      sym::Analysis::create(store, predicateAssumptions);
+  if (failed(predicate))
+    return failure();
+
+  FailureOr<sym::ExprHandle> sourceItem =
+      (*mapping)->composeSymbol(sourceExecution.name);
+  FailureOr<sym::ExprHandle> destinationItem =
+      (*mapping)->composeSymbol(destinationExecution.name);
+  FailureOr<sym::ExprHandle> predicateItem =
+      (*predicate)->composeSymbol(sourceExecution.name);
+  if (failed(sourceItem) || failed(destinationItem) || failed(predicateItem))
+    return failure();
+  return DmaRepackAnalyses{std::move(*mapping), std::move(*predicate),
+                           *sourceItem, *destinationItem, *predicateItem};
+}
+
+static FailureOr<SmallVector<RankedDmaCopyPoint>>
+rankDmaWavePoints(int64_t wave, const DmaRepackShape &shape,
+                  ArrayRef<SlotMapping> destinationMappings,
+                  ArrayRef<int64_t> sourceByLogical, sym::Analysis &analysis,
+                  sym::ExprHandle destinationItem,
+                  sym::ExprHandle referenceDestination) {
+  SmallVector<RankedDmaCopyPoint> ranked;
+  ranked.reserve(shape.waveWidth * destinationMappings.size());
+  int64_t waveBase = wave * shape.waveWidth;
+  for (int64_t oldItem = waveBase; oldItem < waveBase + shape.waveWidth;
+       ++oldItem) {
+    for (auto [destinationSlot, mapping] :
+         llvm::enumerate(destinationMappings)) {
+      unsigned logical = mapping.logicalSlots.front();
+      DmaCopyPoint point{oldItem,
+                         static_cast<unsigned>(sourceByLogical[logical]),
+                         static_cast<unsigned>(destinationSlot)};
+      FailureOr<sym::ExprHandle> destination =
+          getDmaPointExpression(analysis, destinationMappings, point, false,
+                                destinationItem, &SlotMapping::byteOffset);
+      if (failed(destination))
+        return failure();
+      FailureOr<int64_t> offset = getDmaConstantDifference(
+          analysis, *destination, referenceDestination);
+      if (failed(offset))
+        return failure();
+      ranked.push_back({point, *offset});
+    }
+  }
+  llvm::sort(ranked,
+             [](const RankedDmaCopyPoint &lhs, const RankedDmaCopyPoint &rhs) {
+               return lhs.destinationOffset < rhs.destinationOffset;
+             });
+  auto duplicate = llvm::adjacent_find(
+      ranked, [](const RankedDmaCopyPoint &lhs, const RankedDmaCopyPoint &rhs) {
+        return lhs.destinationOffset == rhs.destinationOffset;
+      });
+  if (duplicate != ranked.end())
+    return failure();
+  return ranked;
+}
+
+static FailureOr<SmallVector<SmallVector<RankedDmaCopyPoint>>>
+rankDmaPoints(const DmaRepackShape &shape,
+              ArrayRef<SlotMapping> destinationMappings,
+              ArrayRef<int64_t> sourceByLogical, sym::Analysis &analysis,
+              sym::ExprHandle destinationItem) {
+  FailureOr<sym::ExprHandle> referenceDestination = specializeDmaItem(
+      analysis, destinationMappings.front().byteOffset, destinationItem, 0);
+  if (failed(referenceDestination))
+    return failure();
+  SmallVector<SmallVector<RankedDmaCopyPoint>> rankedByWave(shape.waveCount);
+  for (int64_t wave = 0; wave < shape.waveCount; ++wave) {
+    FailureOr<SmallVector<RankedDmaCopyPoint>> ranked =
+        rankDmaWavePoints(wave, shape, destinationMappings, sourceByLogical,
+                          analysis, destinationItem, *referenceDestination);
+    if (failed(ranked))
+      return failure();
+    rankedByWave[wave] = std::move(*ranked);
+  }
+  return rankedByWave;
+}
+
+using DmaTransactionPointGrid =
+    SmallVector<SmallVector<SmallVector<DmaCopyPoint>>>;
+
+static DmaTransactionPointGrid
+createDmaTransactionPointGrid(ArrayRef<int64_t> transactionElements,
+                              int64_t itemCount) {
+  DmaTransactionPointGrid grid(transactionElements.size());
+  for (auto [transactionIndex, elements] :
+       llvm::enumerate(transactionElements)) {
+    grid[transactionIndex].resize(itemCount);
+    for (SmallVector<DmaCopyPoint> &points : grid[transactionIndex])
+      points.resize(elements);
+  }
+  return grid;
+}
+
+static bool isContiguousDmaRankedSegment(ArrayRef<RankedDmaCopyPoint> ranked,
+                                         int64_t start, int64_t count,
+                                         int64_t elementBytes) {
+  int64_t base = ranked[start].destinationOffset;
+  return llvm::all_of(llvm::seq<int64_t>(0, count), [&](int64_t index) {
+    return ranked[start + index].destinationOffset ==
+           base + index * elementBytes;
+  });
+}
+
+static bool assignDmaWaveTransactions(int64_t wave, const DmaRepackShape &shape,
+                                      ArrayRef<RankedDmaCopyPoint> ranked,
+                                      ArrayRef<int64_t> transactionElements,
+                                      DmaTransactionPointGrid &grid) {
+  int64_t segmentStart = 0;
+  for (auto [transactionIndex, elements] :
+       llvm::enumerate(transactionElements)) {
+    int64_t segmentPoints = shape.waveWidth * elements;
+    if (!isContiguousDmaRankedSegment(ranked, segmentStart, segmentPoints,
+                                      shape.elementBytes))
+      return false;
+    for (int64_t lane = 0; lane < shape.waveWidth; ++lane) {
+      int64_t newItem = wave * shape.waveWidth + lane;
+      for (int64_t position = 0; position < elements; ++position)
+        grid[transactionIndex][newItem][position] =
+            ranked[segmentStart + lane * elements + position].point;
+    }
+    segmentStart += segmentPoints;
+  }
+  return segmentStart == static_cast<int64_t>(ranked.size());
+}
+
+static FailureOr<DmaTransactionPointGrid> buildDmaTransactionPointGrid(
+    const DmaRepackShape &shape,
+    ArrayRef<SmallVector<RankedDmaCopyPoint>> rankedByWave,
+    ArrayRef<int64_t> transactionElements) {
+  DmaTransactionPointGrid grid =
+      createDmaTransactionPointGrid(transactionElements, shape.itemCount);
+  for (int64_t wave = 0; wave < shape.waveCount; ++wave)
+    if (!assignDmaWaveTransactions(wave, shape, rankedByWave[wave],
+                                   transactionElements, grid))
+      return failure();
+  return grid;
+}
+
+static SmallVector<DmaCopyPoint>
+getDmaTransactionStarts(ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem) {
+  SmallVector<DmaCopyPoint> starts;
+  starts.reserve(pointsByItem.size());
+  for (ArrayRef<DmaCopyPoint> points : pointsByItem)
+    starts.push_back(points.front());
+  return starts;
+}
+
+static bool verifyRepackedDmaMappings(
+    sym::Analysis &analysis, const SlotMapping &sourcePoint,
+    const SlotMapping &destinationPoint, ArrayRef<SlotMapping> sourceMappings,
+    ArrayRef<SlotMapping> destinationMappings, ArrayRef<DmaCopyPoint> starts,
+    sym::ExprHandle sourceItem, sym::ExprHandle destinationItem) {
+  return verifySynthesizedDmaMapping(analysis, sourcePoint, sourceMappings,
+                                     starts, true, sourceItem) &&
+         verifySynthesizedDmaMapping(analysis, destinationPoint,
+                                     destinationMappings, starts, false,
+                                     destinationItem);
+}
+
+static bool verifyRepackedDmaPackets(
+    sym::Analysis &analysis, ArrayRef<SlotMapping> sourceMappings,
+    ArrayRef<SlotMapping> destinationMappings,
+    ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem,
+    sym::ExprHandle sourceItem, sym::ExprHandle destinationItem,
+    int64_t elementBytes) {
+  for (ArrayRef<DmaCopyPoint> points : pointsByItem)
+    if (!verifyDmaPointPacket(analysis, sourceMappings, points, true,
+                              sourceItem, elementBytes,
+                              &SlotMapping::byteOffset) ||
+        !verifyDmaPointPacket(analysis, sourceMappings, points, true,
+                              sourceItem, elementBytes,
+                              &SlotMapping::materializationByteOffset) ||
+        !verifyDmaPointPacket(analysis, destinationMappings, points, false,
+                              destinationItem, elementBytes,
+                              &SlotMapping::byteOffset) ||
+        !verifyDmaPointPacket(analysis, destinationMappings, points, false,
+                              destinationItem, elementBytes,
+                              &SlotMapping::materializationByteOffset))
+      return false;
+  return true;
+}
+
+static bool
+mergeRepackedDmaMetadata(SlotMapping &sourcePoint,
+                         SlotMapping &destinationPoint,
+                         ArrayRef<SlotMapping> sourceMappings,
+                         ArrayRef<SlotMapping> destinationMappings,
+                         ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem) {
+  for (ArrayRef<DmaCopyPoint> points : pointsByItem)
+    for (const DmaCopyPoint &point : points)
+      if (!mergeDmaMappingMetadata(sourcePoint,
+                                   sourceMappings[point.sourceSlot]) ||
+          !mergeDmaMappingMetadata(destinationPoint,
+                                   destinationMappings[point.destinationSlot]))
+        return false;
+  return true;
+}
+
+static FailureOr<std::optional<sym::PredHandle>>
+setRepackedDmaActivation(sym::Analysis &analysis, SlotMapping &sourcePoint,
+                         ArrayRef<SlotMapping> sourceMappings,
+                         ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem,
+                         ArrayRef<DmaCopyPoint> starts,
+                         sym::ExprHandle predicateItem) {
+  FailureOr<std::optional<sym::PredHandle>> predicate =
+      synthesizeDmaActivationPredicate(analysis, sourceMappings, starts,
+                                       predicateItem);
+  if (failed(predicate))
+    return failure();
+  if (*predicate &&
+      !verifySynthesizedDmaActivationPredicate(
+          analysis, **predicate, sourceMappings, pointsByItem, predicateItem))
+    return failure();
+  for (const SlotMapping &mapping : sourceMappings)
+    if (mapping.activationPredicate)
+      llvm::erase(sourcePoint.assumptions, *mapping.activationPredicate);
+  sourcePoint.activationPredicate = *predicate;
+  sourcePoint.activationRelationPredicate = {};
+  if (*predicate && !llvm::is_contained(sourcePoint.assumptions, **predicate))
+    sourcePoint.assumptions.push_back(**predicate);
+  return predicate;
+}
+
+static FailureOr<DmaCopyTransaction> buildRepackedDmaTransaction(
+    sym::Analysis &mappingAnalysis, sym::Analysis &predicateAnalysis,
+    ArrayRef<SlotMapping> sourceMappings,
+    ArrayRef<SlotMapping> destinationMappings,
+    ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem,
+    const DmaExecutionBinding &sourceExecution,
+    const DmaExecutionBinding &destinationExecution, sym::ExprHandle sourceItem,
+    sym::ExprHandle destinationItem, sym::ExprHandle predicateItem,
+    int64_t elementBytes, int64_t transactionElements) {
+  SmallVector<DmaCopyPoint> starts = getDmaTransactionStarts(pointsByItem);
+  FailureOr<SlotMapping> sourcePoint =
+      synthesizeDmaMappingPoint(mappingAnalysis, sourceMappings, starts, true,
+                                sourceExecution, sourceItem);
+  FailureOr<SlotMapping> destinationPoint =
+      synthesizeDmaMappingPoint(mappingAnalysis, destinationMappings, starts,
+                                false, destinationExecution, destinationItem);
+  if (failed(sourcePoint) || failed(destinationPoint))
+    return failure();
+  if (!verifyRepackedDmaMappings(
+          mappingAnalysis, *sourcePoint, *destinationPoint, sourceMappings,
+          destinationMappings, starts, sourceItem, destinationItem))
+    return failure();
+  if (!verifyRepackedDmaPackets(mappingAnalysis, sourceMappings,
+                                destinationMappings, pointsByItem, sourceItem,
+                                destinationItem, elementBytes))
+    return failure();
+  if (!mergeRepackedDmaMetadata(*sourcePoint, *destinationPoint, sourceMappings,
+                                destinationMappings, pointsByItem))
+    return failure();
+  FailureOr<std::optional<sym::PredHandle>> predicate =
+      setRepackedDmaActivation(predicateAnalysis, *sourcePoint, sourceMappings,
+                               pointsByItem, starts, predicateItem);
+  if (failed(predicate))
+    return failure();
+
+  DmaCopyTransaction transaction;
+  transaction.bytes = transactionElements * elementBytes;
+  transaction.activationPredicate = *predicate;
+  transaction.sourcePoint =
+      std::make_unique<SlotMapping>(std::move(*sourcePoint));
+  transaction.destinationPoint =
+      std::make_unique<SlotMapping>(std::move(*destinationPoint));
+  return transaction;
+}
+
+struct RepackedDmaTransactions {
+  SmallVector<DmaCopyTransaction> transactions;
+  SmallVector<SmallVector<DmaCopyPoint>> starts;
+};
+
+static FailureOr<RepackedDmaTransactions> buildRepackedDmaTransactions(
+    DmaRepackAnalyses &analyses, ArrayRef<SlotMapping> sourceMappings,
+    ArrayRef<SlotMapping> destinationMappings,
+    const DmaTransactionPointGrid &pointGrid,
+    ArrayRef<int64_t> transactionElements,
+    const DmaExecutionBinding &sourceExecution,
+    const DmaExecutionBinding &destinationExecution, int64_t elementBytes) {
+  RepackedDmaTransactions result;
+  result.transactions.reserve(transactionElements.size());
+  result.starts.reserve(transactionElements.size());
+  for (auto [transactionIndex, elements] :
+       llvm::enumerate(transactionElements)) {
+    ArrayRef<SmallVector<DmaCopyPoint>> pointsByItem =
+        pointGrid[transactionIndex];
+    FailureOr<DmaCopyTransaction> transaction = buildRepackedDmaTransaction(
+        *analyses.mapping, *analyses.predicate, sourceMappings,
+        destinationMappings, pointsByItem, sourceExecution,
+        destinationExecution, analyses.sourceItem, analyses.destinationItem,
+        analyses.predicateItem, elementBytes, elements);
+    if (failed(transaction))
+      return failure();
+    result.transactions.push_back(std::move(*transaction));
+    result.starts.push_back(getDmaTransactionStarts(pointsByItem));
+  }
+  return result;
+}
+
+static LogicalResult appendRepackedDmaRanges(
+    sym::Store &store, MutableArrayRef<DmaCopyTransaction> transactions,
+    ArrayRef<SmallVector<DmaCopyPoint>> starts,
+    ArrayRef<SlotMapping> sourceMappings,
+    ArrayRef<SlotMapping> destinationMappings, sym::ExprHandle sourceItem,
+    sym::ExprHandle destinationItem) {
+  for (auto [transaction, transactionStarts] : llvm::zip(transactions, starts))
+    if (failed(appendDmaPointUnionRange(
+            store, *transaction.sourcePoint, sourceMappings, transactionStarts,
+            true, sourceItem, &SlotMapping::materializationByteOffset)) ||
+        failed(appendDmaPointUnionRange(
+            store, *transaction.destinationPoint, destinationMappings,
+            transactionStarts, false, destinationItem,
+            &SlotMapping::materializationByteOffset)))
+      return failure();
+  return success();
+}
+
+static FailureOr<SmallVector<DmaCopyTransaction>>
+planRepackedDmaCopyTransactions(const MemoryAccess &access,
+                                ArrayRef<SlotMapping> sourceMappings,
+                                ArrayRef<SlotMapping> destinationMappings,
+                                const AccessShape &shape,
+                                const DmaExecutionBinding &sourceExecution,
+                                const DmaExecutionBinding &destinationExecution,
+                                ArrayRef<int64_t> supportedByteWidths,
+                                sym::Store &store) {
+  std::optional<DmaRepackShape> repackShape =
+      getDmaRepackShape(access, shape, sourceMappings, destinationMappings);
+  if (!repackShape)
+    return failure();
+
+  SmallVector<int64_t> sourceByLogical(shape.slotCount, -1);
+  SmallVector<int64_t> destinationByLogical(shape.slotCount, -1);
+  if (!indexDmaMappings(sourceMappings, sourceByLogical) ||
+      !indexDmaMappings(destinationMappings, destinationByLogical))
+    return failure();
+
+  FailureOr<DmaRepackAnalyses> analyses =
+      createDmaRepackAnalyses(store, sourceMappings, destinationMappings,
+                              sourceExecution, destinationExecution);
+  if (failed(analyses))
+    return failure();
+
+  FailureOr<SmallVector<SmallVector<RankedDmaCopyPoint>>> rankedByWave =
+      rankDmaPoints(*repackShape, destinationMappings, sourceByLogical,
+                    *analyses->mapping, analyses->destinationItem);
+  if (failed(rankedByWave))
+    return failure();
+
+  FailureOr<SmallVector<int64_t>> transactionElements =
+      planDmaTransactionElements(shape.slotCount, repackShape->elementBytes,
+                                 supportedByteWidths);
+  if (failed(transactionElements))
+    return failure();
+  FailureOr<DmaTransactionPointGrid> pointGrid = buildDmaTransactionPointGrid(
+      *repackShape, *rankedByWave, *transactionElements);
+  if (failed(pointGrid))
+    return failure();
+  FailureOr<RepackedDmaTransactions> transactions =
+      buildRepackedDmaTransactions(
+          *analyses, sourceMappings, destinationMappings, *pointGrid,
+          *transactionElements, sourceExecution, destinationExecution,
+          repackShape->elementBytes);
+  if (failed(transactions))
+    return failure();
+
+  analyses->mapping.reset();
+  if (failed(appendRepackedDmaRanges(store, transactions->transactions,
+                                     transactions->starts, sourceMappings,
+                                     destinationMappings, analyses->sourceItem,
+                                     analyses->destinationItem)))
+    return failure();
+  return std::move(transactions->transactions);
+}
+
+static SmallVector<SmallVector<unsigned>>
+buildCommonDmaEdges(ArrayRef<SlotMapping> sourceMappings,
+                    ArrayRef<int64_t> destinationByLogical,
+                    ArrayRef<SmallVector<unsigned>> sourceEdges,
+                    ArrayRef<SmallVector<unsigned>> destinationEdges) {
+  SmallVector<SmallVector<unsigned>> commonEdges(sourceMappings.size());
+  for (auto [sourceIndex, successors] : llvm::enumerate(sourceEdges)) {
+    unsigned logical = sourceMappings[sourceIndex].logicalSlots.front();
+    unsigned destinationIndex =
+        static_cast<unsigned>(destinationByLogical[logical]);
+    for (unsigned sourceSuccessor : successors) {
+      unsigned successorLogical =
+          sourceMappings[sourceSuccessor].logicalSlots.front();
+      unsigned destinationSuccessor =
+          static_cast<unsigned>(destinationByLogical[successorLogical]);
+      if (llvm::is_contained(destinationEdges[destinationIndex],
+                             destinationSuccessor))
+        commonEdges[sourceIndex].push_back(sourceSuccessor);
+    }
+  }
+  return commonEdges;
+}
+
+static LogicalResult appendDmaChainTransactions(
+    ArrayRef<unsigned> chain, ArrayRef<SlotMapping> sourceMappings,
+    ArrayRef<int64_t> destinationByLogical, int64_t elementBytes,
+    ArrayRef<int64_t> supportedByteWidths,
+    SmallVectorImpl<DmaCopyTransaction> &transactions) {
+  FailureOr<SmallVector<int64_t>> transactionElements =
+      planDmaTransactionElements(chain.size(), elementBytes,
+                                 supportedByteWidths);
+  if (failed(transactionElements))
+    return failure();
+  size_t position = 0;
+  for (int64_t elements : *transactionElements) {
+    DmaCopyTransaction transaction;
+    transaction.bytes = elements * elementBytes;
+    llvm::append_range(transaction.sourceSlots,
+                       chain.slice(position, static_cast<size_t>(elements)));
+    for (unsigned sourceIndex : transaction.sourceSlots) {
+      unsigned logical = sourceMappings[sourceIndex].logicalSlots.front();
+      transaction.destinationSlots.push_back(
+          static_cast<unsigned>(destinationByLogical[logical]));
+    }
+    transactions.push_back(std::move(transaction));
+    position += static_cast<size_t>(elements);
+  }
+  return success();
+}
+
+static FailureOr<SmallVector<DmaCopyTransaction>>
+planDmaCopyTransactions(sym::Store &store, ArrayRef<SlotMapping> sourceMappings,
+                        ArrayRef<SlotMapping> destinationMappings,
+                        const AccessShape &shape,
+                        RemainderProofContext &sourceProofContext,
+                        RemainderProofContext &destinationProofContext,
+                        ArrayRef<int64_t> supportedByteWidths) {
+  if (shape.elementBits <= 0 || shape.elementBits % 8 != 0 ||
+      sourceMappings.size() != static_cast<size_t>(shape.slotCount) ||
+      destinationMappings.size() != static_cast<size_t>(shape.slotCount))
+    return failure();
+
+  SmallVector<int64_t> sourceByLogical(shape.slotCount, -1);
+  SmallVector<int64_t> destinationByLogical(shape.slotCount, -1);
+  if (!indexDmaMappings(sourceMappings, sourceByLogical) ||
+      !indexDmaMappings(destinationMappings, destinationByLogical))
+    return failure();
+
+  SmallVector<SmallVector<unsigned>> sourceEdges = buildSuccessorGraph(
+      store, sourceMappings, shape.elementBits, sourceProofContext);
+  SmallVector<SmallVector<unsigned>> destinationEdges = buildSuccessorGraph(
+      store, destinationMappings, shape.elementBits, destinationProofContext);
+  SmallVector<SmallVector<unsigned>> commonEdges = buildCommonDmaEdges(
+      sourceMappings, destinationByLogical, sourceEdges, destinationEdges);
+
+  int64_t elementBytes = shape.elementBits / 8;
+  SmallVector<DmaCopyTransaction> transactions;
+  for (ArrayRef<unsigned> chain : buildContiguousChains(commonEdges))
+    if (failed(appendDmaChainTransactions(chain, sourceMappings,
+                                          destinationByLogical, elementBytes,
+                                          supportedByteWidths, transactions)))
+      return failure();
+  return transactions;
+}
+
+static std::string getDmaWaveBaseBindingName(ArrayRef<SlotMapping> mappings) {
+  llvm::StringSet<> names;
+  for (const SlotMapping &mapping : mappings)
+    for (const NamedBinding &binding : mapping.bindings)
+      names.insert(binding.name);
+  std::string name = "dma_wave_base";
+  for (unsigned suffix = 0; names.contains(name); ++suffix)
+    name = ("dma_wave_base_" + Twine(suffix)).str();
+  return name;
+}
+
+static FailureOr<SlotMapping> buildDmaDestinationPoint(
+    const SlotMapping &source, const DmaExecutionBinding &execution,
+    StringRef waveBaseName, Value waveBaseValue, sym::Store &store) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, source.assumptions);
+  if (failed(analysis))
+    return failure();
+  FailureOr<sym::ExprHandle> item = (*analysis)->composeSymbol(execution.name);
+  FailureOr<sym::ExprHandle> waveBase =
+      (*analysis)->composeSymbol(waveBaseName);
+  if (failed(item) || failed(waveBase))
+    return failure();
+
+  SlotMapping point = source;
+  FailureOr<sym::ExprHandle> proofOffset = substituteDmaExecutionItem(
+      **analysis, source.byteOffset, *item, *waveBase);
+  FailureOr<sym::ExprHandle> materializationOffset = substituteDmaExecutionItem(
+      **analysis, source.materializationByteOffset, *item, *waveBase);
+  if (failed(proofOffset) || failed(materializationOffset))
+    return failure();
+  point.byteOffset = *proofOffset;
+  point.materializationByteOffset = *materializationOffset;
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{*item, *waveBase}};
+  FailureOr<SmallVector<sym::PredHandle>> assumptions =
+      substituteIndexExprPredicates(store, point.assumptions, substitution);
+  if (failed(assumptions))
+    return failure();
+  point.assumptions = std::move(*assumptions);
+  llvm::erase_if(point.bindings, [&](const NamedBinding &binding) {
+    return binding.name == execution.name;
+  });
+  point.bindings.push_back({waveBaseName.str(), waveBaseValue});
+  point.materializationCandidates.clear();
+
+  llvm::DenseSet<StringRef> freeSymbols;
+  sym::walkSymbolNames(point.materializationByteOffset,
+                       [&](StringRef name) { freeSymbols.insert(name); });
+  for (const NamedBinding &binding : point.bindings)
+    if (freeSymbols.contains(binding.name) &&
+        isa<SimdType>(binding.value.getType()))
+      return failure();
+  return point;
+}
+
+static FailureOr<Value> materializeDmaPredicateExpression(
+    IRRewriter &rewriter, const MemoryAccess &access, const SlotMapping &point,
+    sym::ExprHandle expression, int64_t waveWidth) {
+  llvm::DenseSet<StringRef> freeSymbols;
+  sym::walkSymbolNames(expression,
+                       [&](StringRef name) { freeSymbols.insert(name); });
+  SmallVector<StringRef> names;
+  SmallVector<Value> values;
+  for (const NamedBinding &binding : point.bindings) {
+    if (!freeSymbols.contains(binding.name))
+      continue;
+    names.push_back(binding.name);
+    values.push_back(binding.value);
+    freeSymbols.erase(binding.name);
+  }
+  if (!freeSymbols.empty())
+    return failure();
+
+  Value result;
+  if (std::optional<int64_t> literal =
+          sym::getIntegerLiteralValue(expression)) {
+    result = ConstantOp::create(rewriter, access.op->getLoc(),
+                                rewriter.getIndexType(),
+                                rewriter.getIndexAttr(*literal));
+  } else {
+    llvm::DenseSet<StringRef> liveSymbols;
+    for (StringRef name : names)
+      liveSymbols.insert(name);
+    SmallVector<sym::PredHandle> assumptions =
+        filterIndexExprPredicatesBySymbols(point.assumptions, liveSymbols);
+    Type resultType = getIndexExprResultType(access.op->getContext(), values);
+    result = IndexExprOp::create(
+        rewriter, access.op->getLoc(), resultType,
+        ExprAttr::get(access.op->getContext(), expression),
+        getIndexExprPredArrayAttr(access.op->getContext(), assumptions),
+        rewriter.getStrArrayAttr(names), values);
+  }
+
+  Type simdIndexType = SimdType::get(access.op->getContext(),
+                                     rewriter.getIndexType(), waveWidth);
+  if (result.getType().isIndex())
+    return SplatOp::create(rewriter, access.op->getLoc(), simdIndexType, result)
+        .getResult();
+  if (result.getType() != simdIndexType)
+    return failure();
+  return result;
+}
+
+static std::optional<arith::CmpIPredicate>
+convertDmaPredicateComparison(sym::PredCmpOp comparison) {
+  switch (comparison) {
+  case sym::PredCmpOp::Lt:
+    return arith::CmpIPredicate::slt;
+  case sym::PredCmpOp::Le:
+    return arith::CmpIPredicate::sle;
+  case sym::PredCmpOp::Gt:
+    return arith::CmpIPredicate::sgt;
+  case sym::PredCmpOp::Ge:
+    return arith::CmpIPredicate::sge;
+  case sym::PredCmpOp::Eq:
+    return arith::CmpIPredicate::eq;
+  case sym::PredCmpOp::Ne:
+    return arith::CmpIPredicate::ne;
+  }
+  return std::nullopt;
+}
+
+static Value createDmaMaskConstant(IRRewriter &rewriter, Location loc,
+                                   Type maskType, bool value) {
+  return ConstantOp::create(rewriter, loc, maskType,
+                            rewriter.getBoolAttr(value));
+}
+
+static FailureOr<Value> materializeDmaActivationPredicate(
+    IRRewriter &rewriter, const MemoryAccess &access, const SlotMapping &point,
+    sym::PredHandle predicate, int64_t waveWidth);
+
+static FailureOr<Value> materializeDmaComparison(IRRewriter &rewriter,
+                                                 const MemoryAccess &access,
+                                                 const SlotMapping &point,
+                                                 sym::PredView view,
+                                                 int64_t waveWidth) {
+  std::optional<sym::PredCmpOp> symbolicComparison = view.getCmpOp();
+  if (!symbolicComparison)
+    return failure();
+  std::optional<arith::CmpIPredicate> comparison =
+      convertDmaPredicateComparison(*symbolicComparison);
+  FailureOr<Value> lhs = materializeDmaPredicateExpression(
+      rewriter, access, point, view.getCmpLhs(), waveWidth);
+  FailureOr<Value> rhs = materializeDmaPredicateExpression(
+      rewriter, access, point, view.getCmpRhs(), waveWidth);
+  if (!comparison || failed(lhs) || failed(rhs))
+    return failure();
+  Type maskType = MaskType::get(access.op->getContext(), waveWidth);
+  return CmpIOp::create(rewriter, access.op->getLoc(), maskType, *comparison,
+                        *lhs, *rhs)
+      .getResult();
+}
+
+static FailureOr<Value> materializeDmaNot(IRRewriter &rewriter,
+                                          const MemoryAccess &access,
+                                          const SlotMapping &point,
+                                          sym::PredView view,
+                                          int64_t waveWidth) {
+  FailureOr<Value> argument = materializeDmaActivationPredicate(
+      rewriter, access, point, view.getUnaryArg(), waveWidth);
+  if (failed(argument))
+    return failure();
+  Type maskType = MaskType::get(access.op->getContext(), waveWidth);
+  Location loc = access.op->getLoc();
+  Value falseValue = createDmaMaskConstant(rewriter, loc, maskType, false);
+  Value trueValue = createDmaMaskConstant(rewriter, loc, maskType, true);
+  return SelectOp::create(rewriter, loc, maskType, *argument, falseValue,
+                          trueValue)
+      .getResult();
+}
+
+static Value combineDmaMasks(IRRewriter &rewriter, Location loc, Type maskType,
+                             Value lhs, Value rhs, sym::PredKind kind) {
+  bool disjunction = kind == sym::PredKind::Or;
+  Value constant = createDmaMaskConstant(rewriter, loc, maskType, disjunction);
+  return disjunction
+             ? SelectOp::create(rewriter, loc, maskType, lhs, constant, rhs)
+                   .getResult()
+             : SelectOp::create(rewriter, loc, maskType, lhs, rhs, constant)
+                   .getResult();
+}
+
+static FailureOr<Value> materializeDmaLogic(IRRewriter &rewriter,
+                                            const MemoryAccess &access,
+                                            const SlotMapping &point,
+                                            sym::PredView view,
+                                            int64_t waveWidth) {
+  if (view.getLogicArgCount() == 0)
+    return failure();
+  FailureOr<Value> result = materializeDmaActivationPredicate(
+      rewriter, access, point, view.getLogicArg(0), waveWidth);
+  if (failed(result))
+    return failure();
+  Type maskType = MaskType::get(access.op->getContext(), waveWidth);
+  for (uint32_t index = 1; index < view.getLogicArgCount(); ++index) {
+    FailureOr<Value> argument = materializeDmaActivationPredicate(
+        rewriter, access, point, view.getLogicArg(index), waveWidth);
+    if (failed(argument))
+      return failure();
+    result = combineDmaMasks(rewriter, access.op->getLoc(), maskType, *result,
+                             *argument, view.getKind());
+  }
+  return result;
+}
+
+static FailureOr<Value> materializeDmaActivationPredicate(
+    IRRewriter &rewriter, const MemoryAccess &access, const SlotMapping &point,
+    sym::PredHandle predicate, int64_t waveWidth) {
+  sym::PredView view(predicate);
+  Type maskType = MaskType::get(access.op->getContext(), waveWidth);
+  Location loc = access.op->getLoc();
+  switch (view.getKind()) {
+  case sym::PredKind::True:
+    return createDmaMaskConstant(rewriter, loc, maskType, true);
+  case sym::PredKind::False:
+    return createDmaMaskConstant(rewriter, loc, maskType, false);
+  case sym::PredKind::Cmp:
+    return materializeDmaComparison(rewriter, access, point, view, waveWidth);
+  case sym::PredKind::Not:
+    return materializeDmaNot(rewriter, access, point, view, waveWidth);
+  case sym::PredKind::And:
+  case sym::PredKind::Or:
+    return materializeDmaLogic(rewriter, access, point, view, waveWidth);
+  default:
+    return failure();
+  }
+}
+
+static bool hasDmaCopyAccessShape(const MemoryAccess &source,
+                                  const MemoryAccess &destination) {
+  return !source.cache && !destination.cache && source.bases.size() == 1 &&
+         destination.bases.size() == 1 &&
+         source.packetType == destination.packetType;
+}
+
+static std::unique_ptr<wave::memory_lowering::CopyTransactionEmitter>
+matchDmaCopyEmitter(ScatterOp scatter, const DmaCopyMatch &match,
+                    const MemoryAccess &source,
+                    const MemoryAccess &destination) {
+  SmallVector<std::unique_ptr<wave::memory_lowering::CopyTransactionProvider>>
+      providers;
+  wave::memory_lowering::populateCopyTransactionProviders(providers);
+  wave::memory_lowering::CopyTransactionRequest request{
+      source.bases.front(), destination.bases.front(), scatter,
+      match.zeroFillInactive};
+  for (const std::unique_ptr<wave::memory_lowering::CopyTransactionProvider>
+           &provider : providers)
+    if (std::unique_ptr<wave::memory_lowering::CopyTransactionEmitter> emitter =
+            provider->match(request))
+      return emitter;
+  return {};
+}
+
+static bool
+hasCompatibleDmaMappings(const PreparedAccessMappings &source,
+                         const PreparedAccessMappings &destination) {
+  return source.shape.slotCount == destination.shape.slotCount &&
+         source.shape.elementBits == destination.shape.elementBits &&
+         hasUnpredicatedMappings(destination.mappings);
+}
+
+static bool
+hasSupportedDmaSourcePredication(const DmaCopyMatch &match,
+                                 const MemoryAccess &source,
+                                 const PreparedAccessMappings &prepared) {
+  if (match.zeroFillInactive)
+    return !source.packetWhere || source.packetWhere == match.predicate;
+  return !source.packetWhere && hasUnpredicatedMappings(prepared.mappings);
+}
+
+static bool hasDmaExecutionType(const DmaExecutionBinding &execution) {
+  SimdType type = dyn_cast<SimdType>(execution.value.getType());
+  return type && type.getElementType().isInteger(32) && type.getWidth() > 0;
+}
+
+struct PreparedDmaCopy {
+  PreparedAccessMappings source;
+  PreparedAccessMappings destination;
+  std::optional<DmaExecutionBinding> sourceExecution;
+  DmaExecutionBinding destinationExecution;
+};
+
+static std::optional<PreparedDmaCopy>
+prepareDmaCopy(IRRewriter &rewriter, MemoryAccess &source,
+               MemoryAccess &destination, const DmaCopyMatch &match,
+               WaveDialect &dialect, DataFlowSolver &solver) {
+  rewriter.setInsertionPoint(source.op);
+  FailureOr<PreparedAccessMappings> sourcePrepared =
+      prepareAccessMappings(rewriter, source, dialect, solver);
+  rewriter.setInsertionPoint(destination.op);
+  FailureOr<PreparedAccessMappings> destinationPrepared =
+      prepareAccessMappings(rewriter, destination, dialect, solver);
+  if (failed(sourcePrepared) || failed(destinationPrepared))
+    return std::nullopt;
+  if (!hasCompatibleDmaMappings(*sourcePrepared, *destinationPrepared) ||
+      !hasSupportedDmaSourcePredication(match, source, *sourcePrepared))
+    return std::nullopt;
+
+  std::optional<DmaExecutionBinding> destinationExecution =
+      findDmaExecutionBinding(destinationPrepared->mappings);
+  if (!destinationExecution || !hasDmaExecutionType(*destinationExecution))
+    return std::nullopt;
+  std::optional<DmaExecutionBinding> sourceExecution =
+      findDmaExecutionBinding(sourcePrepared->mappings);
+  if (sourceExecution &&
+      sourceExecution->value != destinationExecution->value) {
+    rebindDmaExecution(sourcePrepared->mappings, *sourceExecution,
+                       destinationExecution->value);
+    sourceExecution->value = destinationExecution->value;
+  }
+  return PreparedDmaCopy{
+      std::move(*sourcePrepared), std::move(*destinationPrepared),
+      std::move(sourceExecution), std::move(*destinationExecution)};
+}
+
+static bool isValidDirectDmaPlan(
+    const FailureOr<SmallVector<DmaCopyTransaction>> &transactions,
+    const MemoryAccess &destination, const PreparedDmaCopy &prepared,
+    int64_t elementBytes, sym::Store &store) {
+  if (failed(transactions) || transactions->empty())
+    return false;
+  return llvm::all_of(
+      *transactions, [&](const DmaCopyTransaction &transaction) {
+        return proveDmaDestinationTransaction(
+            destination, prepared.destination.mappings,
+            transaction.destinationSlots, prepared.destinationExecution,
+            elementBytes, transaction.bytes, store);
+      });
+}
+
+static std::optional<SmallVector<Value>> getDmaTransactionConditions(
+    const DmaCopyMatch &match, const PreparedDmaCopy &prepared,
+    ArrayRef<DmaCopyTransaction> transactions, bool repacked,
+    RemainderProofContext &sourceProofContext) {
+  SmallVector<Value> conditions;
+  conditions.reserve(transactions.size());
+  for (const DmaCopyTransaction &transaction : transactions) {
+    if (repacked) {
+      if (match.zeroFillInactive && !transaction.activationPredicate)
+        return std::nullopt;
+      conditions.push_back({});
+      continue;
+    }
+    FailureOr<Value> condition =
+        getDmaCopyCondition(match, prepared.source.mappings,
+                            transaction.sourceSlots, sourceProofContext);
+    if (failed(condition))
+      return std::nullopt;
+    conditions.push_back(*condition);
+  }
+  return conditions;
+}
+
+struct DmaCopyPlan {
+  SmallVector<DmaCopyTransaction> transactions;
+  SmallVector<Value> conditions;
+  bool repacked = false;
+};
+
+static std::optional<DmaCopyPlan>
+planDmaCopy(const DmaCopyMatch &match, const MemoryAccess &destination,
+            PreparedDmaCopy &prepared, WaveDialect &dialect,
+            DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
+            uint64_t &factDomainCount, ArrayRef<int64_t> supportedByteWidths) {
+  sym::Store &store = dialect.getSymbolStore();
+  RemainderProofContext sourceProofContext(dialect, solver, match.gather,
+                                           prepared.source.mappings, proofCache,
+                                           factDomainCount);
+  RemainderProofContext destinationProofContext(dialect, solver, destination.op,
+                                                prepared.destination.mappings,
+                                                proofCache, factDomainCount);
+  FailureOr<SmallVector<DmaCopyTransaction>> transactions =
+      planDmaCopyTransactions(store, prepared.source.mappings,
+                              prepared.destination.mappings,
+                              prepared.source.shape, sourceProofContext,
+                              destinationProofContext, supportedByteWidths);
+  int64_t elementBytes = prepared.source.shape.elementBits / 8;
+  bool repacked = !isValidDirectDmaPlan(transactions, destination, prepared,
+                                        elementBytes, store);
+  if (repacked) {
+    if (!prepared.sourceExecution)
+      return std::nullopt;
+    transactions = planRepackedDmaCopyTransactions(
+        destination, prepared.source.mappings, prepared.destination.mappings,
+        prepared.source.shape, *prepared.sourceExecution,
+        prepared.destinationExecution, supportedByteWidths, store);
+  }
+  if (failed(transactions) || transactions->empty())
+    return std::nullopt;
+  std::optional<SmallVector<Value>> conditions = getDmaTransactionConditions(
+      match, prepared, *transactions, repacked, sourceProofContext);
+  if (!conditions)
+    return std::nullopt;
+  return DmaCopyPlan{std::move(*transactions), std::move(*conditions),
+                     repacked};
+}
+
+static Value materializeDmaWaveBase(IRRewriter &rewriter, Location loc,
+                                    const DmaExecutionBinding &execution) {
+  SimdType type = cast<SimdType>(execution.value.getType());
+  Value width = ConstantOp::create(
+      rewriter, loc, type,
+      rewriter.getI32IntegerAttr(static_cast<int32_t>(type.getWidth())));
+  Value lane = BinaryOp::create(rewriter, loc, type, BinaryKind::RemUI,
+                                execution.value, width);
+  Value base = BinaryOp::create(rewriter, loc, type, BinaryKind::SubI,
+                                execution.value, lane);
+  return ReadFirstOp::create(rewriter, loc, rewriter.getI32Type(), base);
+}
+
+struct DmaCopyEmissionState {
+  std::string waveBaseName;
+  SmallVector<Value> sourceByteBases;
+  SmallVector<Value> destinationByteBases;
+  SmallVector<Value> tokens;
+  Value dependency;
+  Value waveBase;
+};
+
+static DmaCopyEmissionState initializeDmaCopyEmission(
+    IRRewriter &rewriter, ScatterOp scatter, const MemoryAccess &source,
+    const MemoryAccess &destination, const PreparedDmaCopy &prepared,
+    size_t transactionCount) {
+  rewriter.setInsertionPoint(scatter);
+  Value dependency = source.dependency;
+  if (!dependency)
+    dependency = TokenOp::create(rewriter, scatter.getLoc(), source.tokenType)
+                     .getResult();
+  Value waveBase = materializeDmaWaveBase(rewriter, scatter.getLoc(),
+                                          prepared.destinationExecution);
+  DmaCopyEmissionState state;
+  state.waveBaseName = getDmaWaveBaseBindingName(prepared.destination.mappings);
+  state.sourceByteBases.resize(source.bases.size());
+  state.destinationByteBases.resize(destination.bases.size());
+  state.tokens.reserve(transactionCount);
+  state.dependency = dependency;
+  state.waveBase = waveBase;
+  return state;
+}
+
+static FailureOr<Value> materializeDmaTransactionCondition(
+    IRRewriter &rewriter, ScatterOp scatter, const MemoryAccess &source,
+    const DmaCopyTransaction &transaction, const SlotMapping &sourcePoint,
+    Value condition, bool repacked) {
+  if (!repacked || !transaction.activationPredicate)
+    return condition;
+  SlotMapping conditionPoint = sourcePoint;
+  conditionPoint.assumptions = getNonActivationAssumptions(conditionPoint);
+  FailureOr<Value> materialized = materializeDmaActivationPredicate(
+      rewriter, source, conditionPoint, *transaction.activationPredicate,
+      source.packetType.getWidth());
+  if (failed(materialized))
+    return scatter.emitOpError(
+        "failed to materialize repacked DMA activation predicate");
+  return materialized;
+}
+
+static FailureOr<Value>
+materializeDmaSourcePointer(IRRewriter &rewriter, ScatterOp scatter,
+                            const MemoryAccess &source,
+                            SlotMapping &sourcePoint, sym::Store &store,
+                            SmallVectorImpl<Value> &sourceByteBases) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, sourcePoint.assumptions);
+  if (failed(analysis))
+    return scatter.emitOpError("failed to prove fused DMA source range");
+  if (failed(appendInferredExpressionRange(
+          **analysis, sourcePoint.materializationByteOffset,
+          sourcePoint.assumptions)))
+    return scatter.emitOpError("failed to prove fused DMA source range");
+
+  // Keep proven range on address consumed by machine selection.
+  sourcePoint.materializationCandidates.clear();
+  SmallVector<TypedPointerRequest> requests{
+      TypedPointerRequest{&sourcePoint, sourcePoint.materializationByteOffset,
+                          sourcePoint.baseIndex}};
+  SmallVector<TypedPointerPlan> plans =
+      prepareTypedPointerPlans(source, store, requests);
+  return materializePointer(rewriter, source, sourcePoint, plans.front(),
+                            sourceByteBases);
+}
+
+static FailureOr<Value> materializeDmaDestinationPointer(
+    IRRewriter &rewriter, ScatterOp scatter, const MemoryAccess &destination,
+    const PreparedDmaCopy &prepared, const DmaCopyTransaction &transaction,
+    sym::Store &store, DmaCopyEmissionState &state) {
+  const SlotMapping &start =
+      transaction.destinationPoint
+          ? *transaction.destinationPoint
+          : prepared.destination.mappings[transaction.destinationSlots.front()];
+  FailureOr<SlotMapping> point =
+      buildDmaDestinationPoint(start, prepared.destinationExecution,
+                               state.waveBaseName, state.waveBase, store);
+  if (failed(point))
+    return scatter.emitOpError("failed to materialize proven DMA copy");
+  TypedPointerPlan noTypedDestination;
+  FailureOr<Value> pointer =
+      materializePointer(rewriter, destination, *point, noTypedDestination,
+                         state.destinationByteBases);
+  if (failed(pointer))
+    return scatter.emitOpError("failed to materialize proven DMA destination");
+
+  PtrType destinationType = cast<PtrType>(destination.bases.front().getType());
+  PtrType i32Type = PtrType::get(scatter.getContext(), rewriter.getI32Type(),
+                                 destinationType.getAddressSpace());
+  return PtrCastOp::create(rewriter, scatter.getLoc(), i32Type, *pointer)
+      .getResult();
+}
+
+static FailureOr<Value>
+emitDmaTransaction(IRRewriter &rewriter, ScatterOp scatter,
+                   const MemoryAccess &source, const MemoryAccess &destination,
+                   const PreparedDmaCopy &prepared,
+                   const DmaCopyTransaction &transaction,
+                   Value initialCondition, bool repacked, sym::Store &store,
+                   const wave::memory_lowering::CopyTransactionEmitter &emitter,
+                   DmaCopyEmissionState &state) {
+  SlotMapping sourcePoint =
+      transaction.sourcePoint
+          ? *transaction.sourcePoint
+          : buildTransactionPoint(prepared.source.mappings,
+                                  transaction.sourceSlots,
+                                  transaction.sourceSlots.front());
+  FailureOr<Value> condition = materializeDmaTransactionCondition(
+      rewriter, scatter, source, transaction, sourcePoint, initialCondition,
+      repacked);
+  if (failed(condition))
+    return failure();
+  FailureOr<Value> sourcePointer = materializeDmaSourcePointer(
+      rewriter, scatter, source, sourcePoint, store, state.sourceByteBases);
+  if (failed(sourcePointer))
+    return failure();
+  FailureOr<Value> destinationPointer = materializeDmaDestinationPointer(
+      rewriter, scatter, destination, prepared, transaction, store, state);
+  if (failed(destinationPointer))
+    return failure();
+  FailureOr<Value> token = emitter.emit(
+      rewriter, scatter.getLoc(), destination.tokenType, *sourcePointer,
+      *destinationPointer, state.dependency, transaction.bytes, *condition);
+  if (failed(token))
+    return scatter.emitOpError("failed to emit fused DMA copy");
+  return token;
+}
+
+static LogicalResult
+emitDmaCopy(IRRewriter &rewriter, ScatterOp scatter, const DmaCopyMatch &match,
+            const MemoryAccess &source, const MemoryAccess &destination,
+            const PreparedDmaCopy &prepared, DmaCopyPlan &plan,
+            sym::Store &store,
+            const wave::memory_lowering::CopyTransactionEmitter &emitter) {
+  DmaCopyEmissionState state =
+      initializeDmaCopyEmission(rewriter, scatter, source, destination,
+                                prepared, plan.transactions.size());
+  for (auto [transaction, condition] :
+       llvm::zip(plan.transactions, plan.conditions)) {
+    FailureOr<Value> token = emitDmaTransaction(
+        rewriter, scatter, source, destination, prepared, transaction,
+        condition, plan.repacked, store, emitter, state);
+    if (failed(token))
+      return failure();
+    state.tokens.push_back(*token);
+  }
+  Value token = joinTokens(rewriter, destination, state.tokens);
+  rewriter.replaceOp(scatter, token);
+  if (match.predicate)
+    rewriter.eraseOp(match.predicate);
+  else
+    rewriter.eraseOp(match.gather);
+  return success();
+}
+
+static FailureOr<bool> tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect,
+                                       IRRewriter &rewriter,
+                                       DataFlowSolver &solver,
+                                       SymbolicRelationProofCache &proofCache,
+                                       uint64_t &factDomainCount) {
+  std::optional<DmaCopyMatch> matched = matchDmaCopy(scatter);
+  if (!matched)
+    return false;
+  MemoryAccess source = getAccess(matched->gather);
+  MemoryAccess destination = getAccess(scatter);
+  if (!hasDmaCopyAccessShape(source, destination))
+    return false;
+
+  std::unique_ptr<wave::memory_lowering::CopyTransactionEmitter> emitter =
+      matchDmaCopyEmitter(scatter, *matched, source, destination);
+  if (!emitter)
+    return false;
+  ArrayRef<int64_t> supportedByteWidths = emitter->getSupportedByteWidths();
+  if (supportedByteWidths.empty())
+    return false;
+
+  std::optional<PreparedDmaCopy> prepared =
+      prepareDmaCopy(rewriter, source, destination, *matched, dialect, solver);
+  if (!prepared)
+    return false;
+  std::optional<DmaCopyPlan> plan =
+      planDmaCopy(*matched, destination, *prepared, dialect, solver, proofCache,
+                  factDomainCount, supportedByteWidths);
+  if (!plan)
+    return false;
+  if (failed(emitDmaCopy(rewriter, scatter, *matched, source, destination,
+                         *prepared, *plan, dialect.getSymbolStore(), *emitter)))
+    return failure();
+  return true;
+}
+
+static LogicalResult lowerDmaCopies(Operation *root, WaveDialect &dialect,
+                                    IRRewriter &rewriter,
+                                    DataFlowSolver &solver,
+                                    SymbolicRelationProofCache &proofCache,
+                                    uint64_t &factDomainCount) {
+  SmallVector<ScatterOp> scatters;
+  root->walk([&](ScatterOp scatter) { scatters.push_back(scatter); });
+  for (ScatterOp scatter : scatters) {
+    FailureOr<bool> lowered = tryLowerDmaCopy(
+        scatter, dialect, rewriter, solver, proofCache, factDomainCount);
+    if (failed(lowered))
+      return failure();
+  }
+  return success();
+}
+
 static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
                                  WaveDialect &dialect, DataFlowSolver &solver,
                                  SymbolicRelationProofCache &proofCache,
@@ -5762,6 +8188,14 @@ struct WaveLowerSymbolicMemoryPass
     IRRewriter rewriter(&getContext());
     SymbolicRelationProofCache proofCache;
     uint64_t factDomainCount = 0;
+    if (failed(lowerDmaCopies(root, *dialect, rewriter, solver, proofCache,
+                              factDomainCount)))
+      return signalPassFailure();
+    accesses.clear();
+    root->walk([&](Operation *op) {
+      if (isa<GatherOp, ScatterOp>(op))
+        accesses.push_back(op);
+    });
     if (failed(lowerAccesses(accesses, *dialect, rewriter, solver, proofCache,
                              factDomainCount, timing)))
       return signalPassFailure();

@@ -3,8 +3,8 @@
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 
 // ASM-LABEL: symbolic_memory_codegen:
-// ASM: buffer_load_dwordx4
-// ASM: ds_write_b128
+// ASM: buffer_load_dwordx4 {{.*}} lds
+// ASM-NOT: ds_write
 // ASM: ds_read_b128
 // ASM: buffer_store_dwordx4
 // ASM: s_endpgm

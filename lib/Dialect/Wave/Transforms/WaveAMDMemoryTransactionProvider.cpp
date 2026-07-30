@@ -9,9 +9,11 @@
 #include "WaveMemoryTransactionProvider.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
@@ -1220,9 +1222,138 @@ public:
   }
 };
 
+static PtrType getPointerType(Type type) {
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return dyn_cast<PtrType>(type);
+}
+
+static Value stripBufferPointerOps(Value value) {
+  while (true) {
+    if (PtrAddOp add = value.getDefiningOp<PtrAddOp>()) {
+      value = add.getBase();
+      continue;
+    }
+    if (PtrCastOp cast = value.getDefiningOp<PtrCastOp>()) {
+      value = cast.getSource();
+      continue;
+    }
+    return value;
+  }
+}
+
+static bool hasBufferSentinel(Value value, DenseSet<Value> &seen) {
+  if (!seen.insert(value).second)
+    return false;
+  PtrType pointer = getPointerType(value.getType());
+  if (!pointer ||
+      !isa<waveamd::BufferAddressSpaceAttr>(pointer.getAddressSpace()))
+    return false;
+
+  value = stripBufferPointerOps(value);
+  if (value.getDefiningOp<waveamd::MakeBufferOp>())
+    return true;
+  BlockArgument argument = dyn_cast<BlockArgument>(value);
+  if (!argument || argument.getArgNumber() == 0)
+    return false;
+  scf::ForOp loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+  if (!loop)
+    return false;
+  unsigned index = argument.getArgNumber() - 1;
+  if (index >= loop.getNumRegionIterArgs())
+    return false;
+  return hasBufferSentinel(loop.getInitArgs()[index], seen);
+}
+
+static bool hasBufferSentinel(Value value) {
+  DenseSet<Value> seen;
+  return hasBufferSentinel(value, seen);
+}
+
+static bool supportsDmaLoadLds(Operation *op) {
+  ModuleOp targetModule = waveamdmachine::findAMDGPUTargetModule(op);
+  if (!targetModule)
+    return false;
+  StringAttr attr =
+      targetModule->getAttrOfType<StringAttr>("waveamdmachine.target");
+  if (!attr)
+    return false;
+  std::optional<waveamdmachine::AMDGPUTarget> target =
+      waveamdmachine::parseAMDGPUTargetAttr(attr.getValue());
+  return target && !(target->isa.Major == 12 && target->isa.Minor == 5);
+}
+
+class AMDCopyTransactionEmitter final
+    : public wave::memory_lowering::CopyTransactionEmitter {
+public:
+  ArrayRef<int64_t> getSupportedByteWidths() const override {
+    static constexpr std::array<int64_t, 2> widths{16, 4};
+    return widths;
+  }
+
+  FailureOr<Value> emit(IRRewriter &rewriter, Location loc, Type tokenType,
+                        Value source, Value destination, Value dependency,
+                        int64_t bytes, Value condition) const override {
+    if (!llvm::is_contained(getSupportedByteWidths(), bytes))
+      return failure();
+    if (!condition)
+      return create(rewriter, loc, tokenType, source, destination, dependency,
+                    bytes, false);
+
+    WhereOp where = WhereOp::create(rewriter, loc, TypeRange{tokenType},
+                                    ValueRange{condition});
+    Block &thenBlock = where.getThenRegion().emplaceBlock();
+    rewriter.setInsertionPointToStart(&thenBlock);
+    Value token = create(rewriter, loc, tokenType, source, destination,
+                         dependency, bytes, true);
+    YieldOp::create(rewriter, loc, token);
+    rewriter.setInsertionPointAfter(where);
+    return where.getResult(0);
+  }
+
+private:
+  static Value create(IRRewriter &rewriter, Location loc, Type tokenType,
+                      Value source, Value destination, Value dependency,
+                      int64_t bytes, bool zeroFillInactive) {
+    UnitAttr zeroFill = zeroFillInactive ? rewriter.getUnitAttr() : UnitAttr{};
+    return waveamd::DmaLoadLdsOp::create(
+               rewriter, loc, tokenType, source, destination, dependency,
+               rewriter.getI64IntegerAttr(bytes), rewriter.getI64IntegerAttr(0),
+               zeroFill, IntegerAttr{}, IntegerAttr{}, IntegerAttr{})
+        .getToken();
+  }
+};
+
+class AMDCopyTransactionProvider final
+    : public wave::memory_lowering::CopyTransactionProvider {
+public:
+  std::unique_ptr<wave::memory_lowering::CopyTransactionEmitter>
+  match(const wave::memory_lowering::CopyTransactionRequest &request)
+      const override {
+    PtrType source = getPointerType(request.sourceBase.getType());
+    PtrType destination = getPointerType(request.destinationBase.getType());
+    if (!source || !destination || !supportsDmaLoadLds(request.op))
+      return {};
+    if (!isa<GlobalAddressSpaceAttr, waveamd::BufferAddressSpaceAttr>(
+            source.getAddressSpace()) ||
+        !isa<SharedAddressSpaceAttr>(destination.getAddressSpace()))
+      return {};
+    if (request.zeroFillInactive &&
+        (!isa<waveamd::BufferAddressSpaceAttr>(source.getAddressSpace()) ||
+         !hasBufferSentinel(request.sourceBase)))
+      return {};
+    return std::make_unique<AMDCopyTransactionEmitter>();
+  }
+};
+
 } // namespace
 
 void mlir::wave::memory_lowering::populateGatherTransactionProviders(
     SmallVectorImpl<std::unique_ptr<GatherTransactionProvider>> &providers) {
   providers.push_back(std::make_unique<AMDGatherTransactionProvider>());
+}
+
+void mlir::wave::memory_lowering::populateCopyTransactionProviders(
+    SmallVectorImpl<std::unique_ptr<CopyTransactionProvider>> &providers) {
+  providers.push_back(std::make_unique<AMDCopyTransactionProvider>());
 }

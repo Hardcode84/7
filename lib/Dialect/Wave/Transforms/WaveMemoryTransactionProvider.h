@@ -77,8 +77,38 @@ public:
             SmallVectorImpl<GatherTransactionCandidate> &candidates) const = 0;
 };
 
+struct CopyTransactionRequest {
+  Value sourceBase;
+  Value destinationBase;
+  Operation *op = nullptr;
+  bool zeroFillInactive = false;
+};
+
+class CopyTransactionEmitter {
+public:
+  virtual ~CopyTransactionEmitter() = default;
+
+  virtual ArrayRef<int64_t> getSupportedByteWidths() const = 0;
+
+  virtual FailureOr<Value> emit(IRRewriter &rewriter, Location loc,
+                                Type tokenType, Value source, Value destination,
+                                Value dependency, int64_t bytes,
+                                Value condition) const = 0;
+};
+
+class CopyTransactionProvider {
+public:
+  virtual ~CopyTransactionProvider() = default;
+
+  virtual std::unique_ptr<CopyTransactionEmitter>
+  match(const CopyTransactionRequest &request) const = 0;
+};
+
 void populateGatherTransactionProviders(
     SmallVectorImpl<std::unique_ptr<GatherTransactionProvider>> &providers);
+
+void populateCopyTransactionProviders(
+    SmallVectorImpl<std::unique_ptr<CopyTransactionProvider>> &providers);
 
 } // namespace mlir::wave::memory_lowering
 
