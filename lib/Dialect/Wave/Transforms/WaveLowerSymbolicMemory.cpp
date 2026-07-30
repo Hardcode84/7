@@ -102,6 +102,7 @@ struct SlotMapping {
   sym::ExprHandle materializationByteOffset;
   size_t proofIndex = std::numeric_limits<size_t>::max();
   int64_t baseIndex = 0;
+  bool staticallyInactive = false;
 };
 
 struct PacketBindingState {
@@ -224,6 +225,7 @@ struct MappedItem {
 
 static constexpr unsigned kMaxExactCoverNodes = 20;
 static constexpr unsigned kMaxTransactionCandidates = 4096;
+static constexpr int64_t kMaxItemEnumerationPoints = 4096;
 
 static SmallVector<std::string> getNames(ArrayAttr attrs) {
   SmallVector<std::string> names;
@@ -598,6 +600,37 @@ static LogicalResult appendBinding(SlotMapping &mapping, StringRef name,
   return success();
 }
 
+static void canonicalizePacketWorkitems(const MemoryAccess &access,
+                                        PacketBindingState &state) {
+  Type workitemType = SimdType::get(
+      access.op->getContext(), IntegerType::get(access.op->getContext(), 32),
+      access.packetType.getWidth());
+  for (ArrayRef<Value> workitems :
+       collectPacketWorkitemIds(access, workitemType)) {
+    if (workitems.empty())
+      continue;
+    Value representative = workitems.front();
+    for (Value alias : workitems)
+      state.canonicalValues.try_emplace(alias, representative);
+  }
+}
+
+static void canonicalizePacketAssumptions(const MemoryAccess &access,
+                                          PacketBindingState &state) {
+  for (const PacketBinding &binding : access.packetBindings) {
+    for (Value value : binding.values) {
+      Value alias = value;
+      while (AssumeOp assume = alias.getDefiningOp<AssumeOp>()) {
+        Value source = assume.getValue();
+        Value canonical = state.canonicalValues.lookup(source);
+        state.canonicalValues.try_emplace(alias,
+                                          canonical ? canonical : source);
+        alias = source;
+      }
+    }
+  }
+}
+
 static void seedPacketBindingState(const MemoryAccess &access,
                                    const MappedItem &item,
                                    PacketBindingState &state) {
@@ -610,6 +643,9 @@ static void seedPacketBindingState(const MemoryAccess &access,
     for (Value alias : item.aliases)
       state.canonicalValues.try_emplace(alias, item.value);
   }
+
+  canonicalizePacketWorkitems(access, state);
+  canonicalizePacketAssumptions(access, state);
 
   for (auto [name, value] : llvm::zip(access.bindingNames, access.bindings)) {
     auto [it, inserted] = state.reserved.try_emplace(name, value);
@@ -1042,6 +1078,33 @@ getNonActivationAssumptions(const SlotMapping &slot) {
   return assumptions;
 }
 
+static bool isProvablyFalseActivation(sym::Store &store,
+                                      const SlotMapping &slot) {
+  if (!slot.activationPredicate)
+    return false;
+  SmallVector<sym::PredHandle> assumptions = getNonActivationAssumptions(slot);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return false;
+  sym::PredHandle relation = slot.activationRelationPredicate
+                                 ? slot.activationRelationPredicate
+                                 : *slot.activationPredicate;
+  std::array<sym::PredHandle, 2> predicates{relation,
+                                            *slot.activationPredicate};
+  for (sym::PredHandle predicate : predicates) {
+    FailureOr<sym::PredHandle> simplified = (*analysis)->simplify(predicate);
+    if (succeeded(simplified) &&
+        sym::PredView(*simplified).getKind() == sym::PredKind::False)
+      return true;
+    FailureOr<sym::PredHandle> negated = (*analysis)->composeNot(predicate);
+    if (succeeded(negated) &&
+        (*analysis)->check(*negated) == sym::CheckResult::True)
+      return true;
+  }
+  return false;
+}
+
 static SmallVector<sym::PredHandle>
 combineNonActivationAssumptions(const SlotMapping &lhs,
                                 const SlotMapping &rhs) {
@@ -1061,6 +1124,8 @@ static sym::PredHandle getActivationRelation(const SlotMapping &mapping) {
 static std::optional<bool>
 getStructuralActivationRelation(const SlotMapping &lhs,
                                 const SlotMapping &rhs) {
+  if (lhs.staticallyInactive || rhs.staticallyInactive)
+    return lhs.staticallyInactive && rhs.staticallyInactive;
   if (!lhs.packetCondition)
     return !rhs.packetCondition;
   if (!rhs.packetCondition)
@@ -1786,7 +1851,6 @@ public:
 
   void prepareRelations(ArrayRef<RelationPair> pairs, int64_t elementBits) {
     relations.prepare(pairs, elementBits, factDomainCount);
-    prepareRemainderRelations(pairs, elementBits, false);
   }
 
   const RelationProof *lookupPreparedRelation(const SlotMapping &lhs,
@@ -1822,6 +1886,8 @@ public:
   bool sameActivation(const SlotMapping &lhs, const SlotMapping &rhs) {
     return relations.sameActivation(lhs, rhs, factDomainCount);
   }
+
+  Operation *getAccess() const { return access; }
 
   void recordFactDomain() { ++factDomainCount; }
 
@@ -3386,15 +3452,144 @@ getAddressAdjacency(sym::Store &store, const SlotMapping &lhs,
   return proveDirectAddressAdjacency(store, lhs, rhs, elementBits);
 }
 
+static std::optional<int64_t> getBoundedItemCount(DenseI32ArrayAttr shape) {
+  if (!shape || shape.size() != 3 ||
+      llvm::any_of(shape.asArrayRef(), [](int32_t dim) { return dim <= 0; }))
+    return std::nullopt;
+  int64_t count = 1;
+  for (int32_t dim : shape.asArrayRef()) {
+    if (count > kMaxItemEnumerationPoints / dim)
+      return std::nullopt;
+    count *= dim;
+  }
+  return count;
+}
+
+static bool isLinearItemBinding(const NamedBinding &binding,
+                                DenseI32ArrayAttr shape) {
+  if (binding.name == "item")
+    return true;
+  WorkitemIdOp workitem = binding.value.getDefiningOp<WorkitemIdOp>();
+  return shape[1] == 1 && shape[2] == 1 && workitem && workitem.getAxis() == 0;
+}
+
+static const NamedBinding *
+findLinearItemBinding(ArrayRef<NamedBinding> bindings,
+                      DenseI32ArrayAttr shape) {
+  ArrayRef<NamedBinding>::iterator found =
+      llvm::find_if(bindings, [&](const NamedBinding &binding) {
+        return isLinearItemBinding(binding, shape);
+      });
+  return found == bindings.end() ? nullptr : found;
+}
+
+static bool hasMatchingBinding(ArrayRef<NamedBinding> bindings,
+                               const NamedBinding &sought) {
+  return llvm::any_of(bindings, [&](const NamedBinding &binding) {
+    return binding.name == sought.name && binding.value == sought.value;
+  });
+}
+
+static bool mappingAddressHasSymbol(const SlotMapping &mapping,
+                                    StringRef name) {
+  return hasSymbol(mapping.base, name) ||
+         hasSymbol(mapping.targetBlock, name) ||
+         hasSymbol(mapping.bitOffset, name);
+}
+
+static bool haveEquivalentAddressRoots(sym::Analysis &analysis,
+                                       const SlotMapping &lhs,
+                                       const SlotMapping &rhs) {
+  return analysis.equivalent(lhs.base, rhs.base) == sym::CheckResult::True &&
+         analysis.equivalent(lhs.targetBlock, rhs.targetBlock) ==
+             sym::CheckResult::True;
+}
+
+static std::optional<bool>
+proveEnumeratedDifference(sym::Analysis &analysis, sym::ExprHandle difference,
+                          sym::ExprHandle item, sym::ExprHandle expected,
+                          int64_t itemCount, int64_t elementBits) {
+  if (std::optional<int64_t> constant = sym::getIntegerLiteralValue(difference))
+    return *constant == elementBits;
+  for (int64_t index : llvm::seq<int64_t>(0, itemCount)) {
+    FailureOr<sym::ExprHandle> replacement = analysis.composeInteger(index);
+    if (failed(replacement))
+      return std::nullopt;
+    std::array<sym::ExprSubstitution, 1> substitutions{
+        sym::ExprSubstitution{item, *replacement}};
+    FailureOr<sym::ExprHandle> specialized =
+        analysis.substitute(difference, substitutions);
+    if (failed(specialized))
+      return std::nullopt;
+    std::optional<int64_t> constant = sym::getIntegerLiteralValue(*specialized);
+    if ((constant && *constant != elementBits) ||
+        (!constant &&
+         analysis.equivalent(*specialized, expected) != sym::CheckResult::True))
+      return std::nullopt;
+  }
+  return true;
+}
+
+static std::optional<bool>
+proveEnumeratedAddressAdjacency(sym::Analysis &analysis, const SlotMapping &lhs,
+                                const SlotMapping &rhs, StringRef itemName,
+                                int64_t itemCount, int64_t elementBits) {
+  FailureOr<sym::ExprHandle> item = analysis.composeSymbol(itemName);
+  if (failed(item) || !haveEquivalentAddressRoots(analysis, lhs, rhs))
+    return std::nullopt;
+  FailureOr<sym::ExprHandle> difference =
+      analysis.compose(rhs.bitOffset, sym::ExprBinaryOp::Sub, lhs.bitOffset);
+  if (failed(difference))
+    return std::nullopt;
+  difference = analysis.simplify(*difference);
+  FailureOr<sym::ExprHandle> expected = analysis.composeInteger(elementBits);
+  if (failed(difference) || failed(expected))
+    return std::nullopt;
+  return proveEnumeratedDifference(analysis, *difference, *item, *expected,
+                                   itemCount, elementBits);
+}
+
+static std::optional<bool> getAddressAdjacencyByItemEnumeration(
+    sym::Store &store, const SlotMapping &lhs, const SlotMapping &rhs,
+    int64_t elementBits, RemainderProofContext &proofContext) {
+  DenseI32ArrayAttr shape = getWorkgroupShape(proofContext.getAccess());
+  std::optional<int64_t> itemCount = getBoundedItemCount(shape);
+  if (!itemCount)
+    return std::nullopt;
+  const NamedBinding *lhsItem = findLinearItemBinding(lhs.bindings, shape);
+  if (!lhsItem || !hasMatchingBinding(rhs.bindings, *lhsItem))
+    return std::nullopt;
+  if (!mappingAddressHasSymbol(lhs, lhsItem->name) &&
+      !mappingAddressHasSymbol(rhs, lhsItem->name))
+    return std::nullopt;
+  SmallVector<sym::PredHandle> assumptions = combineAssumptions(lhs, rhs);
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, assumptions);
+  if (failed(analysis))
+    return std::nullopt;
+  return proveEnumeratedAddressAdjacency(**analysis, lhs, rhs, lhsItem->name,
+                                         *itemCount, elementBits);
+}
+
 static bool adjacent(sym::Store &store, const SlotMapping &lhs,
                      const SlotMapping &rhs, int64_t elementBits,
                      RemainderProofContext &proofContext) {
   std::optional<bool> directlyAdjacent =
       getAddressAdjacency(store, lhs, rhs, elementBits, proofContext);
-  if (!directlyAdjacent)
-    return false;
-  if (!*directlyAdjacent &&
-      !proveRemainderAdjacent(store, lhs, rhs, elementBits, proofContext))
+  bool addressAdjacent = directlyAdjacent.value_or(false);
+  if (!addressAdjacent) {
+    std::optional<bool> enumerated = getAddressAdjacencyByItemEnumeration(
+        store, lhs, rhs, elementBits, proofContext);
+    if (enumerated) {
+      if (!*enumerated)
+        return false;
+      addressAdjacent = true;
+    } else {
+      addressAdjacent =
+          proveRemainderAdjacent(store, lhs, rhs, elementBits, proofContext);
+    }
+  }
+  if (!addressAdjacent)
     return false;
   return proofContext.sameActivation(lhs, rhs);
 }
@@ -3419,41 +3614,6 @@ deduplicateGatherSlots(sym::Store &store, SmallVector<SlotMapping, 4> slots,
 constexpr size_t kRelationPairByteBudget = 4 * 1024 * 1024;
 constexpr size_t kMaxRelationBatchPairs =
     kRelationPairByteBudget / sizeof(RelationPair);
-
-static std::optional<size_t> getUnorderedPairCount(size_t count) {
-  if (count < 2)
-    return 0;
-  size_t lhs = count;
-  size_t rhs = count - 1;
-  if ((lhs & 1) == 0)
-    lhs /= 2;
-  else
-    rhs /= 2;
-  if (lhs > std::numeric_limits<size_t>::max() / rhs)
-    return std::nullopt;
-  return lhs * rhs;
-}
-
-static std::optional<SmallVector<RelationPair>>
-buildAllRelationPairs(ArrayRef<SlotMapping> slots) {
-  std::optional<size_t> pairCount = getUnorderedPairCount(slots.size());
-  if (!pairCount || *pairCount > kMaxRelationBatchPairs)
-    return std::nullopt;
-  SmallVector<RelationPair> pairs;
-  pairs.reserve(*pairCount);
-  for (size_t low = 0; low < slots.size(); ++low)
-    for (size_t high = low + 1; high < slots.size(); ++high)
-      pairs.push_back({slots[low].proofIndex, slots[high].proofIndex});
-  return pairs;
-}
-
-static void prepareAllRelations(ArrayRef<SlotMapping> slots,
-                                int64_t elementBits,
-                                RemainderProofContext &proofContext) {
-  std::optional<SmallVector<RelationPair>> pairs = buildAllRelationPairs(slots);
-  if (pairs)
-    proofContext.prepareRelations(*pairs, elementBits);
-}
 
 using SparseAddressKey =
     std::pair<sym::ExprHandle, std::pair<sym::ExprHandle, sym::ExprHandle>>;
@@ -4164,7 +4324,6 @@ buildGenericGatherPlan(const MemoryAccess &access, sym::Store &store,
     plan.physicalSlots =
         SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end());
   } else {
-    prepareAllRelations(mappings, elementBits, proofContext);
     plan.physicalSlots = deduplicateGatherSlots(
         store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()),
         proofContext);
@@ -4340,14 +4499,18 @@ planGatherTransactions(const MemoryAccess &access, sym::Store &store,
   if (access.packetWhere || mappings.size() > kMaxExactCoverNodes)
     return buildGenericGatherPlan(access, store, mappings, elementBits,
                                   proofContext);
+
+  FailureOr<GatherPlan> genericPlan = buildGenericGatherPlan(
+      access, store, mappings, elementBits, proofContext);
+  if (failed(genericPlan))
+    return failure();
+
   SmallVector<wave::memory_lowering::GatherTransactionCandidate>
       providerCandidates = getProviderGatherCandidates(access, store, mappings);
   if (providerCandidates.empty())
-    return buildGenericGatherPlan(access, store, mappings, elementBits,
-                                  proofContext);
+    return genericPlan;
 
   GatherPlan plan;
-  prepareAllRelations(mappings, elementBits, proofContext);
   plan.physicalSlots = deduplicateGatherSlots(
       store, SmallVector<SlotMapping, 4>(mappings.begin(), mappings.end()),
       proofContext);
@@ -4356,14 +4519,12 @@ planGatherTransactions(const MemoryAccess &access, sym::Store &store,
   FailureOr<SmallVector<TransactionCandidate>> genericCandidates =
       enumerateTransactionCandidates(edges, elementBits);
   if (failed(genericCandidates))
-    return buildGenericGatherPlan(access, store, mappings, elementBits,
-                                  proofContext);
+    return genericPlan;
 
   appendGenericGatherCandidates(plan, *genericCandidates, mappings.size());
   appendProviderGatherCandidates(plan, providerCandidates, mappings.size());
   if (failed(selectGatherCover(plan, mappings.size())))
-    return buildGenericGatherPlan(access, store, mappings, elementBits,
-                                  proofContext);
+    return genericPlan;
   return plan;
 }
 
@@ -4375,6 +4536,21 @@ static bool isLegalPtrAddOffset(Type type) {
   SimdType simd = dyn_cast<SimdType>(type);
   return simd && (simd.getElementType().isIndex() ||
                   simd.getElementType().isInteger(32));
+}
+
+static Value findUnconstrainedBinding(const SlotMapping &slot,
+                                      StringRef symbol) {
+  if (symbol.empty())
+    return {};
+  llvm::DenseSet<StringRef> liveSymbols{symbol};
+  SmallVector<sym::PredHandle> assumptions =
+      filterIndexExprPredicatesBySymbols(slot.assumptions, liveSymbols);
+  if (!assumptions.empty())
+    return {};
+  for (const NamedBinding &binding : slot.bindings)
+    if (binding.name == symbol && isLegalPtrAddOffset(binding.value.getType()))
+      return binding.value;
+  return {};
 }
 
 static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
@@ -4389,11 +4565,8 @@ static FailureOr<Value> materializeExpr(IRRewriter &rewriter,
   }
 
   StringRef symbol = sym::ExprView(expr).getSymbolName();
-  if (!symbol.empty())
-    for (const NamedBinding &binding : slot.bindings)
-      if (binding.name == symbol &&
-          isLegalPtrAddOffset(binding.value.getType()))
-        return binding.value;
+  if (Value binding = findUnconstrainedBinding(slot, symbol))
+    return binding;
 
   llvm::DenseSet<StringRef> freeSymbols;
   sym::walkSymbolNames(expr, [&](StringRef name) { freeSymbols.insert(name); });
@@ -4434,7 +4607,7 @@ static Value findElementOffsetMaterialization(const SlotMapping &slot,
   if (failed(elementOffset))
     return {};
   for (const MaterializationCandidate &candidate :
-       slot.materializationCandidates) {
+       llvm::reverse(slot.materializationCandidates)) {
     if (!isLegalPtrAddOffset(candidate.value.getType()))
       continue;
     if (analysis.equivalent(*elementOffset, candidate.expression) ==
@@ -4708,6 +4881,13 @@ emitPredicatedLoad(IRRewriter &rewriter, const MemoryAccess &access,
   return PredicatedLoadResult{where.getResult(0), where.getResult(1)};
 }
 
+static bool isStaticallyInactiveTransaction(ArrayRef<SlotMapping> slots,
+                                            ArrayRef<unsigned> transaction) {
+  return llvm::all_of(transaction, [&](unsigned index) {
+    return slots[index].staticallyInactive;
+  });
+}
+
 static Value buildInactivePacketValue(IRRewriter &rewriter,
                                       const MemoryAccess &access,
                                       ArrayRef<unsigned> logicalSlots,
@@ -4828,12 +5008,29 @@ static LogicalResult emitProviderGatherCandidate(
                                   componentType, state);
 }
 
+static bool emitStaticallyInactiveGather(const MemoryAccess &access,
+                                         const GatherPlan &plan,
+                                         ArrayRef<unsigned> transaction,
+                                         GatherEmissionState &state) {
+  if (!isStaticallyInactiveTransaction(plan.physicalSlots, transaction))
+    return false;
+  for (unsigned nodeIndex : transaction)
+    for (unsigned logicalSlot : plan.physicalSlots[nodeIndex].logicalSlots)
+      state.components[logicalSlot] = access.inactiveComponents[logicalSlot];
+  if (access.inactiveToken &&
+      !llvm::is_contained(state.tokens, access.inactiveToken))
+    state.tokens.push_back(access.inactiveToken);
+  return true;
+}
+
 static LogicalResult emitGenericGatherCandidate(
     IRRewriter &rewriter, const MemoryAccess &access, const GatherPlan &plan,
     const GatherCandidate &candidate, const SlotMapping &point,
     const TypedPointerPlan &typedPlan, Type componentType,
     GatherEmissionState &state) {
   ArrayRef<unsigned> transaction = candidate.physicalNodes;
+  if (emitStaticallyInactiveGather(access, plan, transaction, state))
+    return success();
   Type valueType = getTransactionType(access, transaction.size());
   Value loadedValue;
   if (access.packetWhere) {
@@ -5051,6 +5248,8 @@ emitScatterTransaction(IRRewriter &rewriter, const MemoryAccess &access,
                        ArrayRef<unsigned> transaction, SlotMapping &point,
                        const TypedPointerPlan &typedPlan, Type componentType,
                        ScatterEmissionState &state) {
+  if (isStaticallyInactiveTransaction(slots, transaction))
+    return access.inactiveToken;
   Value value = buildScatterTransactionValue(
       rewriter, access, slots, transaction, componentType, state.components);
   if (access.packetWhere)
@@ -5330,6 +5529,36 @@ buildPacketControls(const MemoryAccess &access, WaveDialect &dialect,
   return controls;
 }
 
+static SlotMapping buildInactiveSlotMapping(PreparedSlotMapping &prepared,
+                                            const MappingDomain &domain) {
+  SlotMapping mapping = std::move(prepared.mapping);
+  mapping.materializationCandidates.clear();
+  mapping.base = domain.zero;
+  mapping.targetBlock = domain.block;
+  mapping.bitOffset = domain.zero;
+  mapping.materializationBitOffset = domain.zero;
+  mapping.byteOffset = domain.zero;
+  mapping.materializationByteOffset = domain.zero;
+  mapping.proofOffset.reset();
+  mapping.baseIndex = 0;
+  return mapping;
+}
+
+static void groupPreparedMappings(
+    SmallVectorImpl<PreparedSlotMapping> &preparedMappings,
+    const MappingDomain &domain, SmallVectorImpl<SlotMapping> &mappings,
+    SmallVectorImpl<ExactFactDomainGroup> &groups,
+    llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> &buckets) {
+  for (auto [index, prepared] : llvm::enumerate(preparedMappings)) {
+    if (prepared.mapping.staticallyInactive) {
+      mappings[index] = buildInactiveSlotMapping(prepared, domain);
+      continue;
+    }
+    appendExactFactDomainTask(prepared.mapping.assumptions, index, groups,
+                              buckets);
+  }
+}
+
 static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
     const MemoryAccess &access, sym::Store &store, const MappingDomain &domain,
     int64_t slotCount, const MappedItem &item,
@@ -5351,22 +5580,24 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
           "mapping is not a defined, byte-addressable local memory point");
       return failure();
     }
+    if (isProvablyFalseActivation(store, prepared->mapping)) {
+      prepared->mapping.staticallyInactive = true;
+      prepared->mapping.assumptions =
+          getNonActivationAssumptions(prepared->mapping);
+    }
     preparedMappings.push_back(std::move(*prepared));
   }
 
+  SmallVector<SlotMapping, 4> mappings(preparedMappings.size());
   SmallVector<ExactFactDomainGroup> groups;
   llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
-  for (auto [index, prepared] : llvm::enumerate(preparedMappings))
-    appendExactFactDomainTask(prepared.mapping.assumptions, index, groups,
-                              buckets);
+  groupPreparedMappings(preparedMappings, domain, mappings, groups, buckets);
 
-  SmallVector<SlotMapping, 4> mappings(preparedMappings.size());
   for (ExactFactDomainGroup &group : groups) {
     FailureOr<std::unique_ptr<sym::Analysis>> analysis =
         sym::Analysis::create(store, group.assumptions);
     if (failed(analysis)) {
-      access.op->emitOpError(
-          "mapping is not a defined, byte-addressable local memory point");
+      access.op->emitOpError("mapping fact domain is inconsistent");
       return failure();
     }
     for (size_t index : group.tasks) {
@@ -5375,7 +5606,9 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
                              std::move(preparedMappings[index]));
       if (failed(mapping)) {
         access.op->emitOpError(
-            "mapping is not a defined, byte-addressable local memory point");
+            "mapping is not a defined, byte-addressable local memory point at "
+            "packet slot ")
+            << index;
         return failure();
       }
       mappings[index] = std::move(*mapping);

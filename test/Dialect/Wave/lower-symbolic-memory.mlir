@@ -1650,3 +1650,159 @@ func.func @exact_division_keeps_factored_materialization(
       -> (!wave.simd<vector<1xi8>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<1xi8>, 32>
 }
+
+// -----
+
+// Inactive slots keep packet order and the fallback token.
+// CHECK-LABEL: func.func @statically_inactive_packet_lanes(
+// CHECK: [[DEP:%.*]] = wave.token
+// CHECK: [[ZERO:%.*]] = wave.constant 0.000000e+00
+// CHECK-NOT: wave.gather
+// CHECK: [[ACTIVE:%.*]]:2 = wave.where
+// CHECK: wave.load {{.*}} after [[DEP]]
+// CHECK: wave.pack [[ZERO]], [[ACTIVE]]#0, [[ZERO]]
+// CHECK: wave.join [[DEP]], [[ACTIVE]]#1
+func.func @statically_inactive_packet_lanes(
+    %base: !wave.ptr<#waveamd.buffer, f32>)
+    -> !wave.simd<vector<3xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %offset0 = wave.binary addi %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %offset2 = wave.binary addi %item, %two
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %active0 = wave.cmpi slt %offset0, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active1 = wave.cmpi slt %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active2 = wave.cmpi slt %offset2, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %dependency = wave.token : !wave.mem.token
+  %zero = wave.constant 0.0 : f32 -> !wave.simd<f32, 32>
+  %fallback = wave.pack %zero, %zero, %zero
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32>, !wave.simd<f32, 32>
+      -> !wave.simd<vector<3xf32>, 32>
+  %result:2 = wave.where %active0, %active1, %active2 {
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"32*offset">> bindings []()
+        packet_bindings ["offset", "offset", "offset"]
+                        (%offset0, %item, %offset2)
+        after %dependency
+        : (!wave.ptr<#waveamd.buffer, f32>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+           !wave.simd<i32, 32>, !wave.mem.token)
+        -> (!wave.simd<vector<3xf32>, 32>, !wave.mem.token)
+    wave.yield %value, %token
+        : !wave.simd<vector<3xf32>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %dependency
+        : !wave.simd<vector<3xf32>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<3xf32>, 32>, !wave.mem.token
+  return %result#0 : !wave.simd<vector<3xf32>, 32>
+}
+
+// -----
+
+// Inactive stores keep the incoming dependency.
+// CHECK-LABEL: func.func @statically_inactive_packet_store(
+// CHECK: [[DEP:%.*]] = wave.token
+// CHECK-NOT: wave.scatter
+// CHECK: [[ACTIVE:%.*]] = wave.where
+// CHECK-COUNT-1: wave.store {{.*}} after [[DEP]]
+// CHECK: wave.join [[ACTIVE]], [[DEP]]
+func.func @statically_inactive_packet_store(
+    %input: !wave.simd<vector<2xf32>, 32>,
+    %base: !wave.ptr<#waveamd.buffer, f32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %offset1 = wave.binary addi %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %active0 = wave.cmpi slt %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active1 = wave.cmpi slt %offset1, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %dependency = wave.token : !wave.mem.token
+  %result = wave.where %active0, %active1 {
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"32*offset">> bindings []()
+        packet_bindings ["offset", "offset"](%item, %offset1)
+        after %dependency
+        : (!wave.simd<vector<2xf32>, 32>,
+           !wave.ptr<#waveamd.buffer, f32>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+           !wave.mem.token)
+        -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %dependency : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32> -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @finite_item_enumeration(
+// CHECK: [[DEP:%.*]] = wave.token
+// CHECK-NOT: wave.gather
+// CHECK-COUNT-1: wave.load {{.*}} after [[DEP]]
+// CHECK-SAME: !wave.simd<vector<2xf32>, 32>
+func.func @finite_item_enumeration(
+    %base: !wave.ptr<#wave.shared, f32>)
+    -> !wave.simd<vector<2xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 4, 1, 1>} {
+  %dependency = wave.token : !wave.mem.token
+  %value, %token = wave.gather %base mapping
+      <bit_offset =
+        <"32*Piecewise((slot, item*(item - 1)*(item - 2)*(item - 3) == 0), (2*slot, True))">>
+      bindings []() packet_bindings []() after %dependency
+      : (!wave.ptr<#wave.shared, f32>, !wave.mem.token)
+      -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xf32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @finite_item_proof_failure(
+// CHECK: [[DEP:%.*]] = wave.token
+// CHECK-NOT: wave.gather
+// CHECK-COUNT-2: wave.load {{.*}} after [[DEP]] {{.*}} -> (!wave.simd<f32, 32>,
+func.func @finite_item_proof_failure(
+    %base: !wave.ptr<#wave.shared, f32>)
+    -> !wave.simd<vector<2xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 5, 1, 1>} {
+  %dependency = wave.token : !wave.mem.token
+  %value, %token = wave.gather %base mapping
+      <bit_offset =
+        <"32*Piecewise((slot, item*(item - 1)*(item - 2)*(item - 3) == 0), (2*slot, True))">>
+      bindings []() packet_bindings []() after %dependency
+      : (!wave.ptr<#wave.shared, f32>, !wave.mem.token)
+      -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xf32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @bounded_item_enumeration_fallback(
+// CHECK: [[DEP:%.*]] = wave.token
+// CHECK-NOT: wave.gather
+// CHECK-COUNT-2: wave.load {{.*}} after [[DEP]] {{.*}} -> (!wave.simd<f32, 32>,
+func.func @bounded_item_enumeration_fallback(
+    %base: !wave.ptr<#wave.shared, f32>)
+    -> !wave.simd<vector<2xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 4097, 1, 1>} {
+  %dependency = wave.token : !wave.mem.token
+  %value, %token = wave.gather %base mapping
+      <bit_offset =
+        <"32*Piecewise((slot, item*(item - 1)*(item - 2)*(item - 3) == 0), (2*slot, True))">>
+      bindings []() packet_bindings []() after %dependency
+      : (!wave.ptr<#wave.shared, f32>, !wave.mem.token)
+      -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xf32>, 32>
+}

@@ -39,6 +39,19 @@ func.func @non_byte_addressable(%base: !wave.ptr<#wave.shared, i32>) {
 
 // -----
 
+func.func @packet_slot_diagnostic(
+    %base: !wave.ptr<#wave.shared, i32>) {
+  // expected-error @+1 {{mapping is not a defined, byte-addressable local memory point at packet slot 1}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"Piecewise((0, slot == 0), (1, True))">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
 func.func @unsupported_i4(%base: !wave.ptr<#wave.shared, i4>) {
   // expected-error @+1 {{lowering requires 8-, 16-, or 32-bit packet elements}}
   %value, %token = wave.gather %base mapping
