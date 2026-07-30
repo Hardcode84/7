@@ -23,6 +23,28 @@ func.func @load_pair(%in: !wave.ptr<#wave.global, f16>)
 
 // -----
 
+// CHECK-LABEL: func.func @dead_load_tokens_stay
+// CHECK-NOT: vector<2xf16>
+// CHECK: wave.load
+// CHECK: wave.load
+func.func @dead_load_tokens_stay(
+    %in: !wave.ptr<#wave.global, f16>, %dep: !wave.mem.token)
+    -> (!wave.simd<f16, 32>, !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %in, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %v0, %t0 = wave.load %in after %dep
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  %v1, %t1 = wave.load %p1 after %dep
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  return %v0, %v1 : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @load_quad_recursive
 // CHECK-SAME: ([[IN:%.*]]: !wave.ptr<#wave.global, i16>)
 func.func @load_quad_recursive(%in: !wave.ptr<#wave.global, i16>)

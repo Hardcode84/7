@@ -157,9 +157,27 @@ static bool tokensUsedOnlyBySameJoin(const MemoryGroup &lhs,
   return rhsJoin && *lhsJoin == *rhsJoin;
 }
 
+static bool deadStoreTokensShareDependency(const MemoryGroup &lhs,
+                                           const MemoryGroup &rhs) {
+  if (lhs.kind != MemoryGroupKind::Store || rhs.kind != MemoryGroupKind::Store)
+    return false;
+  Value dependency = getMemoryDependency(lhs.firstOp);
+  if (!dependency || getMemoryDependency(rhs.firstOp) != dependency)
+    return false;
+  auto hasDeadTokens = [&](const MemoryGroup &group) {
+    return llvm::all_of(group.ops, [&](Operation *op) {
+      return getMemoryToken(op).use_empty() &&
+             getMemoryDependency(op) == dependency;
+    });
+  };
+  return hasDeadTokens(lhs) && hasDeadTokens(rhs);
+}
+
 static bool tokensMergeable(const MemoryGroup &before,
                             const MemoryGroup &after) {
   if (tokenUsedOnlyBy(getMemoryToken(before.lastOp), after.firstOp))
+    return true;
+  if (deadStoreTokensShareDependency(before, after))
     return true;
   return tokensUsedOnlyBySameJoin(before, after);
 }
@@ -258,12 +276,16 @@ static bool mergeableGroupWidth(const MemoryGroup &lhs,
 }
 
 static std::optional<std::pair<const MemoryGroup *, const MemoryGroup *>>
-getTokenOrderedGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
+getRewriteOrderedGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
   if (lhs.lastOp->isBeforeInBlock(rhs.firstOp))
     return std::make_pair(&lhs, &rhs);
   if (rhs.lastOp->isBeforeInBlock(lhs.firstOp))
     return std::make_pair(&rhs, &lhs);
-  return std::nullopt;
+  if (!deadStoreTokensShareDependency(lhs, rhs))
+    return std::nullopt;
+  if (lhs.firstOp->isBeforeInBlock(rhs.firstOp))
+    return std::make_pair(&lhs, &rhs);
+  return std::make_pair(&rhs, &lhs);
 }
 
 static FailureOr<std::optional<AddressOrderedGroups>>
@@ -291,14 +313,17 @@ buildMergedGroup(std::pair<const MemoryGroup *, const MemoryGroup *> ordered,
   MemoryGroup merged;
   merged.ops.append(ordered.first->ops);
   merged.ops.append(ordered.second->ops);
+  llvm::sort(merged.ops, [](Operation *lhs, Operation *rhs) {
+    return lhs->isBeforeInBlock(rhs);
+  });
   merged.payloads.append(addressOrdered.lo->payloads);
   merged.payloads.append(addressOrdered.hi->payloads);
   merged.address = addressOrdered.lo->address;
   merged.accessPtr = addressOrdered.lo->accessPtr;
   merged.scalarElementType = ordered.first->scalarElementType;
   merged.cache = ordered.first->cache;
-  merged.firstOp = ordered.first->firstOp;
-  merged.lastOp = ordered.second->lastOp;
+  merged.firstOp = merged.ops.front();
+  merged.lastOp = merged.ops.back();
   merged.simdWidth = ordered.first->simdWidth;
   merged.spanElements =
       ordered.first->spanElements + ordered.second->spanElements;
@@ -312,7 +337,7 @@ tryMergeGroups(WaveDialect &dialect, const MemoryGroup &lhs,
   if (!compatibleGroups(lhs, rhs) || !mergeableGroupWidth(lhs, rhs))
     return std::optional<MemoryGroup>{};
   std::optional<std::pair<const MemoryGroup *, const MemoryGroup *>> ordered =
-      getTokenOrderedGroups(lhs, rhs);
+      getRewriteOrderedGroups(lhs, rhs);
   if (!ordered)
     return std::optional<MemoryGroup>{};
   if (!tokensMergeable(*ordered->first, *ordered->second))

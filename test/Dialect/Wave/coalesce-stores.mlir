@@ -24,6 +24,148 @@ func.func @store_pair(%out: !wave.ptr<#wave.global, f16>,
 
 // -----
 
+// Dead tokens with a shared dependency permit one wider store.
+// CHECK-LABEL: func.func @store_pair_dead_tokens
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, f16>, [[DEP:%.*]]: !wave.mem.token, [[A:%.*]]: !wave.simd<f16, 32>, [[B:%.*]]: !wave.simd<f16, 32>)
+// CHECK: [[PACK:%.*]] = wave.pack [[A]], [[B]] : !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<2xf16>, 32>
+// CHECK: wave.store [[PACK]] -> [[OUT]] after [[DEP]]
+// CHECK-NOT: wave.store {{.*}} -> %{{.*}} : (!wave.simd<f16, 32>
+func.func @store_pair_dead_tokens(%out: !wave.ptr<#wave.global, f16>,
+                                  %dep: !wave.mem.token,
+                                  %a: !wave.simd<f16, 32>,
+                                  %b: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @interleaved_dead_store_tokens
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, f16>, [[DEP:%.*]]: !wave.mem.token, [[A0:%.*]]: !wave.simd<f16, 32>, [[A1:%.*]]: !wave.simd<f16, 32>, [[A2:%.*]]: !wave.simd<f16, 32>, [[A3:%.*]]: !wave.simd<f16, 32>)
+// CHECK: [[PACK:%.*]] = wave.pack [[A0]], [[A1]], [[A2]], [[A3]] : !wave.simd<f16, 32>, !wave.simd<f16, 32>, !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<4xf16>, 32>
+// CHECK: wave.store [[PACK]] -> [[OUT]] after [[DEP]]
+func.func @interleaved_dead_store_tokens(
+    %out: !wave.ptr<#wave.global, f16>, %dep: !wave.mem.token,
+    %a0: !wave.simd<f16, 32>, %a1: !wave.simd<f16, 32>,
+    %a2: !wave.simd<f16, 32>, %a3: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c3 = arith.constant 3 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %p2 = wave.ptr_add %out, %c2
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %p3 = wave.ptr_add %out, %c3
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a0 -> %out after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t2 = wave.store %a2 -> %p2 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %a1 -> %p1 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t3 = wave.store %a3 -> %p3 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @live_store_token_stays
+// CHECK-NOT: wave.pack
+// CHECK: wave.store
+// CHECK: wave.store
+// CHECK: wave.load
+func.func @live_store_token_stays(
+    %out: !wave.ptr<#wave.global, f16>,
+    %other: !wave.ptr<#wave.global, f16>, %dep: !wave.mem.token,
+    %a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %value, %read = wave.load %other after %t0
+      : (!wave.ptr<#wave.global, f16>, !wave.mem.token)
+      -> (!wave.simd<f16, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @different_store_dependencies_stay
+// CHECK-NOT: wave.pack
+// CHECK: wave.store
+// CHECK: wave.store
+func.func @different_store_dependencies_stay(
+    %out: !wave.ptr<#wave.global, f16>, %dep0: !wave.mem.token,
+    %dep1: !wave.mem.token, %a: !wave.simd<f16, 32>,
+    %b: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out after %dep0
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %dep1
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @missing_store_dependency_stays
+// CHECK-NOT: wave.pack
+// CHECK: wave.store
+// CHECK: wave.store
+func.func @missing_store_dependency_stays(
+    %out: !wave.ptr<#wave.global, f16>,
+    %a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 32>)
+    attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @store_quad_recursive
 // CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, i16>, [[A0:%.*]]: !wave.simd<i16, 32>, [[A1:%.*]]: !wave.simd<i16, 32>, [[A2:%.*]]: !wave.simd<i16, 32>, [[A3:%.*]]: !wave.simd<i16, 32>)
 func.func @store_quad_recursive(%out: !wave.ptr<#wave.global, i16>,
