@@ -136,6 +136,110 @@ func.func @distinct_identical_store(
 
 // -----
 
+// CHECK-LABEL: func.func @ordered_then_independent_store
+// CHECK: {{%.*}}, [[READ:%.*]] = wave.load
+// CHECK: [[STORE:%.*]] = wave.store {{.*}} after [[READ]]
+// CHECK-NOT: wave.store
+// CHECK: wave.join [[STORE]]
+func.func @ordered_then_independent_store(
+    %source: !wave.ptr<#wave.global, i32>,
+    %value: !wave.simd<i32, 64>,
+    %destination: !wave.ptr<#wave.global, i32>) {
+  %unused, %read = wave.load %source
+      : (!wave.ptr<#wave.global, i32>)
+      -> (!wave.simd<i32, 64>, !wave.mem.token)
+  %ordered = wave.store %value -> %destination after %read
+      : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>, !wave.mem.token)
+      -> !wave.mem.token
+  %independent = wave.store %value -> %destination
+      : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  %joined = wave.join %ordered, %independent
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @independent_then_ordered_store
+// CHECK: {{%.*}}, [[READ:%.*]] = wave.load
+// CHECK: [[STORE:%.*]] = wave.store {{.*}} after [[READ]]
+// CHECK-NOT: wave.store
+// CHECK: wave.join [[STORE]]
+func.func @independent_then_ordered_store(
+    %source: !wave.ptr<#wave.global, i32>,
+    %value: !wave.simd<i32, 64>,
+    %destination: !wave.ptr<#wave.global, i32>) {
+  %unused, %read = wave.load %source
+      : (!wave.ptr<#wave.global, i32>)
+      -> (!wave.simd<i32, 64>, !wave.mem.token)
+  %independent = wave.store %value -> %destination
+      : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  %ordered = wave.store %value -> %destination after %read
+      : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>, !wave.mem.token)
+      -> !wave.mem.token
+  %joined = wave.join %independent, %ordered
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @distinct_store_dependencies_join
+// CHECK: {{%.*}}, [[FIRST_READ:%.*]] = wave.load
+// CHECK: {{%.*}}, [[SECOND_READ:%.*]] = wave.load
+// CHECK: [[DEPENDENCIES:%.*]] = wave.join [[FIRST_READ]], [[SECOND_READ]]
+// CHECK: [[STORE:%.*]] = wave.store {{.*}} after [[DEPENDENCIES]]
+// CHECK-NOT: wave.store
+// CHECK: wave.join [[STORE]]
+func.func @distinct_store_dependencies_join(
+    %first_source: !wave.ptr<#wave.global, i32>,
+    %second_source: !wave.ptr<#wave.global, i32>,
+    %value: !wave.simd<i32, 64>,
+    %destination: !wave.ptr<#wave.global, i32>) {
+  %first_unused, %first_read = wave.load %first_source
+      : (!wave.ptr<#wave.global, i32>)
+      -> (!wave.simd<i32, 64>, !wave.mem.token)
+  %second_unused, %second_read = wave.load %second_source
+      : (!wave.ptr<#wave.global, i32>)
+      -> (!wave.simd<i32, 64>, !wave.mem.token)
+  %first = wave.store %value -> %destination after %first_read
+      : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>, !wave.mem.token)
+      -> !wave.mem.token
+  %second = wave.store %value -> %destination after %second_read
+      : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>, !wave.mem.token)
+      -> !wave.mem.token
+  %joined = wave.join %first, %second
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @different_dma_dependencies_stay
+// CHECK-COUNT-2: waveamd.dma_load_lds
+// CHECK: wave.join
+func.func @different_dma_dependencies_stay(
+    %source: !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>,
+    %destination: !wave.ptr<#wave.shared, i32>,
+    %first_dependency: !wave.mem.token,
+    %second_dependency: !wave.mem.token) {
+  %first = waveamd.dma_load_lds
+      %source -> %destination after %first_dependency {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %second = waveamd.dma_load_lds
+      %source -> %destination after %second_dependency {bytes = 16 : i64}
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 64>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %joined = wave.join %first, %second
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @repeated_token_retains_store
 // CHECK: [[STORE:%.*]] = wave.store
 // CHECK-NOT: wave.store

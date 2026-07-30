@@ -27,6 +27,12 @@
 // ASM: s_barrier
 // ASM: s_endpgm
 
+// ASM-LABEL: ordered_then_independent_store_codegen:
+// ASM-COUNT-1: buffer_load_dword
+// ASM-COUNT-1: buffer_store_dword
+// ASM: s_barrier
+// ASM: s_endpgm
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @distinct_identical_dma_codegen(
     %input: !wave.ptr<#wave.global, i32>)
@@ -153,6 +159,36 @@ func.func @external_store_token_use_codegen(
       : !wave.mem.token, !wave.mem.token -> !wave.mem.token
   %barrier = wave.barrier %first, %joined
       : (!wave.mem.token, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+func.func @ordered_then_independent_store_codegen(
+    %input: !wave.ptr<#wave.global, i32>,
+    %output: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %source = wave.ptr_add %input, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %unused, %read = wave.load %source
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>)
+      -> (!wave.simd<i32, 64>, !wave.mem.token)
+  %destination = wave.ptr_add %output, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %ordered = wave.store %item -> %destination after %read
+      : (!wave.simd<i32, 64>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
+      -> !wave.mem.token
+  %independent = wave.store %item -> %destination
+      : (!wave.simd<i32, 64>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
+      -> !wave.mem.token
+  %joined = wave.join %ordered, %independent
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %barrier = wave.barrier %joined
+      : (!wave.mem.token) -> !wave.mem.token
   return
 }
 }

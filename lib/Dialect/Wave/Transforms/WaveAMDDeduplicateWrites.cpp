@@ -29,11 +29,31 @@ static bool isDeduplicableWrite(Operation *op) {
   return isa<StoreOp, waveamd::DmaLoadLdsOp>(op);
 }
 
-static bool areDistinctIdenticalWrites(Operation *lhs, Operation *rhs) {
-  return lhs != rhs && lhs->getName() == rhs->getName() &&
-         llvm::equal(lhs->getResultTypes(), rhs->getResultTypes()) &&
-         lhs->getAttrDictionary() == rhs->getAttrDictionary() &&
-         llvm::equal(lhs->getOperands(), rhs->getOperands());
+static bool haveSameWriteEffect(Operation *lhs, Operation *rhs) {
+  if (lhs == rhs || lhs->getName() != rhs->getName() ||
+      !llvm::equal(lhs->getResultTypes(), rhs->getResultTypes()) ||
+      lhs->getAttrDictionary() != rhs->getAttrDictionary())
+    return false;
+  if (StoreOp lhsStore = dyn_cast<StoreOp>(lhs)) {
+    StoreOp rhsStore = cast<StoreOp>(rhs);
+    return lhsStore.getValue() == rhsStore.getValue() &&
+           lhsStore.getPtr() == rhsStore.getPtr();
+  }
+  return llvm::equal(lhs->getOperands(), rhs->getOperands());
+}
+
+static Value getWriteDependency(Operation *write) {
+  if (StoreOp store = dyn_cast<StoreOp>(write))
+    return store.getDependency();
+  return cast<waveamd::DmaLoadLdsOp>(write).getDependency();
+}
+
+static void setWriteDependency(Operation *write, Value dependency) {
+  if (StoreOp store = dyn_cast<StoreOp>(write)) {
+    store.getDependencyMutable().assign(dependency);
+    return;
+  }
+  cast<waveamd::DmaLoadLdsOp>(write).getDependencyMutable().set(dependency);
 }
 
 static bool tokenUsedOnlyByJoin(Value token, JoinOp join) {
@@ -58,25 +78,72 @@ static SmallVector<Operation *> collectWriteCandidates(JoinOp join) {
   return candidates;
 }
 
-static SmallVector<Operation *>
-findDuplicateWrites(ArrayRef<Operation *> candidates) {
-  SmallVector<Operation *> representatives;
-  SmallVector<Operation *> duplicates;
+using WriteGroup = SmallVector<Operation *, 4>;
+
+static SmallVector<WriteGroup>
+groupEquivalentWrites(ArrayRef<Operation *> candidates) {
+  SmallVector<WriteGroup> groups;
   for (Operation *write : candidates) {
-    auto found = llvm::find_if(representatives, [&](Operation *candidate) {
-      return areDistinctIdenticalWrites(candidate, write);
+    auto found = llvm::find_if(groups, [&](ArrayRef<Operation *> group) {
+      return haveSameWriteEffect(group.front(), write);
     });
-    if (found == representatives.end())
-      representatives.push_back(write);
+    if (found == groups.end())
+      groups.push_back({write});
     else
-      duplicates.push_back(write);
+      found->push_back(write);
+  }
+  return groups;
+}
+
+static bool dependenciesMatch(ArrayRef<Operation *> writes) {
+  Value dependency = getWriteDependency(writes.front());
+  return llvm::all_of(writes, [&](Operation *write) {
+    return getWriteDependency(write) == dependency;
+  });
+}
+
+static Value mergeDependencies(IRRewriter &rewriter,
+                               ArrayRef<Operation *> writes,
+                               Operation *survivor) {
+  llvm::SmallDenseSet<Value, 4> seen;
+  SmallVector<Value> dependencies;
+  for (Operation *write : writes) {
+    Value dependency = getWriteDependency(write);
+    if (dependency && seen.insert(dependency).second)
+      dependencies.push_back(dependency);
+  }
+  if (dependencies.empty())
+    return {};
+  if (dependencies.size() == 1)
+    return dependencies.front();
+  rewriter.setInsertionPoint(survivor);
+  return JoinOp::create(rewriter, survivor->getLoc(),
+                        dependencies.front().getType(), dependencies);
+}
+
+static SmallVector<Operation *> prepareWriteGroups(IRRewriter &rewriter,
+                                                   JoinOp join) {
+  SmallVector<Operation *> duplicates;
+  for (WriteGroup &group :
+       groupEquivalentWrites(collectWriteCandidates(join))) {
+    if (group.size() == 1)
+      continue;
+    // Differing dependencies all dominate the last writer.
+    Operation *survivor =
+        dependenciesMatch(group) ? group.front() : group.back();
+    Value dependency = mergeDependencies(rewriter, group, survivor);
+    if (getWriteDependency(survivor) != dependency)
+      rewriter.modifyOpInPlace(
+          survivor, [&] { setWriteDependency(survivor, dependency); });
+    for (Operation *write : group)
+      if (write != survivor)
+        duplicates.push_back(write);
   }
   return duplicates;
 }
 
 static void deduplicateJoinedWrites(IRRewriter &rewriter, JoinOp join) {
-  SmallVector<Operation *> duplicates =
-      findDuplicateWrites(collectWriteCandidates(join));
+  SmallVector<Operation *> duplicates = prepareWriteGroups(rewriter, join);
   if (duplicates.empty())
     return;
 

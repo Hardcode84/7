@@ -284,9 +284,10 @@ def WaveAMDDeduplicateWrites
     : Pass<"waveamd-deduplicate-writes"> {
   let summary = "Collapse identical joined Wave memory writes";
   let description = [{
-    Removes identical `wave.store` and `waveamd.dma_load_lds` operations whose
-    tokens are used only by the same `wave.join`. The surviving token keeps
-    explicit completion and async group membership.
+    Removes same-effect `wave.store` and identical `waveamd.dma_load_lds`
+    operations whose tokens are used only by the same `wave.join`. Distinct
+    store dependencies join before the surviving write. The surviving token
+    keeps explicit completion and async group membership.
   }];
   let dependentDialects = [
     "func::FuncDialect",
