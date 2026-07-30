@@ -1367,18 +1367,23 @@ static LogicalResult tryFuseBitOp3(PatternRewriter &rewriter, Operation *op,
   if (!table || candidate.bitOpCount < minBitOps || candidate.sources.empty())
     return failure();
 
+  // Repeated source has same constant-bus cost as zero inline padding.
+  SmallVector<Value, 3> legalityOperands = candidate.sources;
+  while (legalityOperands.size() < 3)
+    legalityOperands.push_back(legalityOperands.front());
+  if (!canCreateTernary<VBitOp3B32Op>(legalityOperands, isa))
+    return failure();
+
   rewriter.setInsertionPoint(op);
   while (candidate.sources.size() < 3) {
     Value zero = ImmOp::create(rewriter, op->getLoc(),
                                ImmType::get(op->getContext()), 0);
     candidate.sources.push_back(zero);
   }
-
   std::array<Value, 3> operands = {candidate.sources[0], candidate.sources[1],
                                    candidate.sources[2]};
-  if (!canCreateTernary<VBitOp3B32Op>(operands, isa))
-    return failure();
-
+  assert(canCreateTernary<VBitOp3B32Op>(operands, isa) &&
+         "zero inline padding must preserve legality");
   VBitOp3B32Op fused = VBitOp3B32Op::create(
       rewriter, op->getLoc(), op->getResult(0).getType(), operands[0],
       operands[1], operands[2], rewriter.getI64IntegerAttr(*table));

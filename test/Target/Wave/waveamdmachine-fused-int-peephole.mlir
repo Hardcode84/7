@@ -812,6 +812,44 @@ func.func @bitop3_or_and_xor(%a: !waveamdmachine.reg<vgpr, 1>,
   return %out : !waveamdmachine.reg<vgpr, 1>
 }
 
+// CHECK-LABEL: func.func @bitop3_checks_legality_before_padding(
+// CHECK-SAME: [[A:%.*]]:
+// CHECK: [[MASK:%.*]] = waveamdmachine.imm 63
+// CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+// CHECK-NOT: waveamdmachine.v_and_b32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_bitop3_b32 [[A]], [[MASK]], [[ZERO]] bitop3 192
+// CHECK: return [[OUT]]
+func.func @bitop3_checks_legality_before_padding(
+    %a: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %mask = waveamdmachine.imm 63 : !waveamdmachine.imm
+  %masked0 = waveamdmachine.v_and_b32 %a, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %masked1 = waveamdmachine.v_and_b32 %masked0, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %masked1 : !waveamdmachine.reg<vgpr, 1>
+}
+
+// CHECK-LABEL: func.func @bitop3_failed_match_is_read_only
+// CHECK: [[MASK:%.*]] = waveamdmachine.imm 255
+// CHECK-NEXT: [[MASKED0:%.*]] = waveamdmachine.v_and_b32
+// CHECK-NEXT: [[MASKED1:%.*]] = waveamdmachine.v_and_b32
+// CHECK-NEXT: return [[MASKED1]]
+func.func @bitop3_failed_match_is_read_only(
+    %a: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %mask = waveamdmachine.imm 255 : !waveamdmachine.imm
+  %masked0 = waveamdmachine.v_and_b32 %a, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %masked1 = waveamdmachine.v_and_b32 %masked0, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %masked1 : !waveamdmachine.reg<vgpr, 1>
+}
+
 }
 
 // -----
