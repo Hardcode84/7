@@ -4443,8 +4443,11 @@ buildGenericGatherPlan(const MemoryAccess &access, sym::Store &store,
 }
 
 static SmallVector<wave::memory_lowering::GatherTransactionCandidate>
-getProviderGatherCandidates(const MemoryAccess &access, sym::Store &store,
-                            ArrayRef<SlotMapping> mappings) {
+getProviderGatherCandidates(
+    const MemoryAccess &access, sym::Store &store,
+    ArrayRef<SlotMapping> mappings,
+    ArrayRef<std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
+        providers) {
   SmallVector<SmallVector<wave::memory_lowering::MemoryTransactionBinding>>
       bindingStorage;
   bindingStorage.reserve(mappings.size());
@@ -4472,9 +4475,6 @@ getProviderGatherCandidates(const MemoryAccess &access, sym::Store &store,
   request.dependency = access.dependency;
   request.cache = access.cache;
   request.tokenType = access.tokenType;
-  SmallVector<std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
-      providers;
-  wave::memory_lowering::populateGatherTransactionProviders(providers);
   SmallVector<wave::memory_lowering::GatherTransactionCandidate> candidates;
   for (const auto &provider : providers)
     provider->enumerate(request, candidates);
@@ -4591,11 +4591,12 @@ static LogicalResult selectGatherCover(GatherPlan &plan, int64_t slotCount) {
   return success();
 }
 
-static FailureOr<GatherPlan>
-planGatherTransactions(const MemoryAccess &access, sym::Store &store,
-                       ArrayRef<SlotMapping> mappings, int64_t elementBits,
-                       RemainderProofContext &proofContext,
-                       SymbolicMemoryStageTiming &timing) {
+static FailureOr<GatherPlan> planGatherTransactions(
+    const MemoryAccess &access, sym::Store &store,
+    ArrayRef<SlotMapping> mappings, int64_t elementBits,
+    RemainderProofContext &proofContext, SymbolicMemoryStageTiming &timing,
+    ArrayRef<std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
+        providers) {
   if (access.packetWhere || mappings.size() > kMaxExactCoverNodes)
     return buildGenericGatherPlan(access, store, mappings, elementBits,
                                   proofContext, timing);
@@ -4608,7 +4609,8 @@ planGatherTransactions(const MemoryAccess &access, sym::Store &store,
   TimingScope providerTiming =
       timing.nest("lower_symbolic_memory_enumerate_provider_gather");
   SmallVector<wave::memory_lowering::GatherTransactionCandidate>
-      providerCandidates = getProviderGatherCandidates(access, store, mappings);
+      providerCandidates =
+          getProviderGatherCandidates(access, store, mappings, providers);
   providerTiming.stop();
   if (providerCandidates.empty())
     return genericPlan;
@@ -5824,6 +5826,119 @@ struct DmaCopyMatch {
   bool zeroFillInactive = false;
 };
 
+static void
+deduplicateAssumptions(SmallVectorImpl<sym::PredHandle> &assumptions) {
+  SmallVector<sym::PredHandle> unique;
+  unique.reserve(assumptions.size());
+  for (sym::PredHandle assumption : assumptions)
+    if (!llvm::is_contained(unique, assumption))
+      unique.push_back(assumption);
+  assumptions.assign(unique.begin(), unique.end());
+}
+
+static llvm::hash_code
+hashAssumptionSet(ArrayRef<sym::PredHandle> assumptions) {
+  size_t xorHash = 0;
+  size_t sumHash = 0;
+  for (sym::PredHandle assumption : assumptions) {
+    size_t valueHash = hash_value(assumption);
+    xorHash ^= valueHash;
+    sumHash += valueHash;
+  }
+  return llvm::hash_combine(assumptions.size(), xorHash, sumHash);
+}
+
+static bool sameAssumptionSet(ArrayRef<sym::PredHandle> lhs,
+                              ArrayRef<sym::PredHandle> rhs) {
+  return lhs.size() == rhs.size() &&
+         llvm::all_of(lhs, [&](sym::PredHandle assumption) {
+           return llvm::is_contained(rhs, assumption);
+         });
+}
+
+struct DmaDestinationSlotShape {
+  SmallVector<sym::PredHandle> assumptions;
+  sym::ExprHandle base;
+  sym::ExprHandle targetBlock;
+  sym::ExprHandle offset;
+  int64_t relativeConstant = 0;
+  int64_t baseIndex = 0;
+
+  friend bool operator==(const DmaDestinationSlotShape &lhs,
+                         const DmaDestinationSlotShape &rhs) {
+    return sameAssumptionSet(lhs.assumptions, rhs.assumptions) &&
+           lhs.base == rhs.base && lhs.targetBlock == rhs.targetBlock &&
+           lhs.offset == rhs.offset &&
+           lhs.relativeConstant == rhs.relativeConstant &&
+           lhs.baseIndex == rhs.baseIndex;
+  }
+};
+
+struct DmaDestinationProofShape {
+  SmallVector<DmaDestinationSlotShape> slots;
+  std::string executionName;
+  Operation *function = nullptr;
+  int64_t waveWidth = 0;
+  int64_t itemCount = 0;
+  int64_t elementBytes = 0;
+  int64_t transactionBytes = 0;
+
+  friend bool operator==(const DmaDestinationProofShape &lhs,
+                         const DmaDestinationProofShape &rhs) {
+    return lhs.function == rhs.function &&
+           lhs.executionName == rhs.executionName &&
+           lhs.waveWidth == rhs.waveWidth && lhs.itemCount == rhs.itemCount &&
+           lhs.elementBytes == rhs.elementBytes &&
+           lhs.transactionBytes == rhs.transactionBytes &&
+           lhs.slots == rhs.slots;
+  }
+};
+
+static llvm::hash_code
+hashDmaDestinationProofShape(const DmaDestinationProofShape &shape) {
+  llvm::hash_code hash = llvm::hash_combine(
+      shape.function, shape.executionName, shape.waveWidth, shape.itemCount,
+      shape.elementBytes, shape.transactionBytes);
+  for (const DmaDestinationSlotShape &slot : shape.slots)
+    hash = llvm::hash_combine(hash, slot.base, slot.targetBlock, slot.offset,
+                              slot.relativeConstant, slot.baseIndex,
+                              hashAssumptionSet(slot.assumptions));
+  return hash;
+}
+
+class DmaDestinationProofCache {
+public:
+  std::optional<bool> lookup(const DmaDestinationProofShape &shape) const {
+    llvm::hash_code hash = hashDmaDestinationProofShape(shape);
+    auto bucket = buckets.find(hash);
+    if (bucket == buckets.end())
+      return std::nullopt;
+    for (size_t index : bucket->second)
+      if (entries[index].shape == shape)
+        return entries[index].result;
+    return std::nullopt;
+  }
+
+  void insert(DmaDestinationProofShape shape, bool result) {
+    llvm::hash_code hash = hashDmaDestinationProofShape(shape);
+    SmallVector<size_t> &bucket = buckets[hash];
+    for (size_t index : bucket)
+      if (entries[index].shape == shape)
+        return;
+    bucket.push_back(entries.size());
+    entries.push_back({std::move(shape), result});
+  }
+
+private:
+  struct Entry {
+    DmaDestinationProofShape shape;
+    bool result = false;
+  };
+
+  SmallVector<Entry> entries;
+  llvm::DenseMap<llvm::hash_code, SmallVector<size_t>> buckets;
+};
+
 static bool hasUnpredicatedMappings(ArrayRef<SlotMapping> mappings) {
   return llvm::all_of(mappings, [](const SlotMapping &mapping) {
     return !mapping.activationPredicate && !mapping.packetCondition;
@@ -6156,32 +6271,117 @@ static std::optional<int64_t> getDmaItemCount(const MemoryAccess &access,
   return shape[0];
 }
 
+static DmaDestinationSlotShape
+buildDmaDestinationSlotShape(const SlotMapping &slot) {
+  DmaDestinationSlotShape shape;
+  shape.assumptions = slot.assumptions;
+  deduplicateAssumptions(shape.assumptions);
+  shape.base = slot.base;
+  shape.targetBlock = slot.targetBlock;
+  shape.baseIndex = slot.baseIndex;
+  return shape;
+}
+
+static SmallVector<DmaDestinationSlotShape>
+buildRawDmaDestinationSlotShapes(ArrayRef<SlotMapping> slots,
+                                 ArrayRef<unsigned> transaction) {
+  SmallVector<DmaDestinationSlotShape> shapes;
+  shapes.reserve(transaction.size());
+  for (unsigned index : transaction) {
+    DmaDestinationSlotShape shape = buildDmaDestinationSlotShape(slots[index]);
+    shape.offset = slots[index].byteOffset;
+    shapes.push_back(std::move(shape));
+  }
+  return shapes;
+}
+
+static std::optional<SmallVector<DmaDestinationSlotShape>>
+buildNormalizedDmaDestinationSlotShapes(ArrayRef<SlotMapping> slots,
+                                        ArrayRef<unsigned> transaction) {
+  if (transaction.empty())
+    return std::nullopt;
+  for (unsigned index : transaction)
+    if (index >= slots.size() || !slots[index].proofOffset)
+      return std::nullopt;
+
+  int64_t referenceConstant = slots[transaction.front()].proofOffset->constant;
+  SmallVector<DmaDestinationSlotShape> shapes;
+  shapes.reserve(transaction.size());
+  for (unsigned index : transaction) {
+    const SlotMapping &slot = slots[index];
+    std::optional<int64_t> relative =
+        llvm::checkedSub(slot.proofOffset->constant, referenceConstant);
+    if (!relative)
+      return std::nullopt;
+    DmaDestinationSlotShape shape = buildDmaDestinationSlotShape(slot);
+    shape.offset = slot.proofOffset->residual;
+    shape.relativeConstant = *relative;
+    shapes.push_back(std::move(shape));
+  }
+  return shapes;
+}
+
+static DmaDestinationProofShape buildDmaDestinationProofShape(
+    const MemoryAccess &access, ArrayRef<SlotMapping> slots,
+    ArrayRef<unsigned> transaction, const DmaExecutionBinding &execution,
+    int64_t itemCount, int64_t waveWidth, int64_t elementBytes,
+    int64_t transactionBytes) {
+  DmaDestinationProofShape shape;
+  if (func::FuncOp function = access.op->getParentOfType<func::FuncOp>())
+    shape.function = function.getOperation();
+  shape.executionName = execution.name;
+  shape.itemCount = itemCount;
+  shape.waveWidth = waveWidth;
+  shape.elementBytes = elementBytes;
+  shape.transactionBytes = transactionBytes;
+  std::optional<SmallVector<DmaDestinationSlotShape>> normalized =
+      buildNormalizedDmaDestinationSlotShapes(slots, transaction);
+  shape.slots = normalized
+                    ? std::move(*normalized)
+                    : buildRawDmaDestinationSlotShapes(slots, transaction);
+  return shape;
+}
+
 static bool proveDmaDestinationTransaction(
     const MemoryAccess &access, ArrayRef<SlotMapping> slots,
     ArrayRef<unsigned> transaction, const DmaExecutionBinding &execution,
-    int64_t elementBytes, int64_t transactionBytes, sym::Store &store) {
+    int64_t elementBytes, int64_t transactionBytes, sym::Store &store,
+    DmaDestinationProofCache &proofCache) {
+  if (transaction.empty())
+    return false;
   int64_t waveWidth = access.packetType.getWidth();
   std::optional<int64_t> itemCount = getDmaItemCount(access, waveWidth);
   if (!itemCount)
     return false;
 
+  DmaDestinationProofShape proofShape = buildDmaDestinationProofShape(
+      access, slots, transaction, execution, *itemCount, waveWidth,
+      elementBytes, transactionBytes);
+  if (std::optional<bool> cached = proofCache.lookup(proofShape))
+    return *cached;
   SmallVector<sym::PredHandle> assumptions;
   for (unsigned slotIndex : transaction)
     llvm::append_range(assumptions, slots[slotIndex].assumptions);
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
       sym::Analysis::create(store, assumptions);
-  if (failed(analysis))
+  if (failed(analysis)) {
+    proofCache.insert(std::move(proofShape), false);
     return false;
+  }
   FailureOr<sym::ExprHandle> item = (*analysis)->composeSymbol(execution.name);
-  if (failed(item))
+  if (failed(item)) {
+    proofCache.insert(std::move(proofShape), false);
     return false;
-  if (proveDmaDestinationAlgebraically(**analysis, slots, transaction, *item,
-                                       waveWidth, elementBytes,
-                                       transactionBytes))
-    return true;
-  return proveDmaDestinationByEnumeration(**analysis, slots, transaction, *item,
-                                          *itemCount, waveWidth, elementBytes,
-                                          transactionBytes);
+  }
+  bool proven = proveDmaDestinationAlgebraically(**analysis, slots, transaction,
+                                                 *item, waveWidth, elementBytes,
+                                                 transactionBytes);
+  if (!proven)
+    proven = proveDmaDestinationByEnumeration(**analysis, slots, transaction,
+                                              *item, *itemCount, waveWidth,
+                                              elementBytes, transactionBytes);
+  proofCache.insert(std::move(proofShape), proven);
+  return proven;
 }
 
 struct DmaCopyPoint {
@@ -7924,7 +8124,8 @@ prepareDmaCopy(IRRewriter &rewriter, MemoryAccess &source,
 static bool isValidDirectDmaPlan(
     const FailureOr<SmallVector<DmaCopyTransaction>> &transactions,
     const MemoryAccess &destination, const PreparedDmaCopy &prepared,
-    int64_t elementBytes, sym::Store &store) {
+    int64_t elementBytes, sym::Store &store,
+    DmaDestinationProofCache &proofCache) {
   if (failed(transactions) || transactions->empty())
     return false;
   return llvm::all_of(
@@ -7932,7 +8133,7 @@ static bool isValidDirectDmaPlan(
         return proveDmaDestinationTransaction(
             destination, prepared.destination.mappings,
             transaction.destinationSlots, prepared.destinationExecution,
-            elementBytes, transaction.bytes, store);
+            elementBytes, transaction.bytes, store, proofCache);
       });
 }
 
@@ -7969,7 +8170,9 @@ static std::optional<DmaCopyPlan>
 planDmaCopy(const DmaCopyMatch &match, const MemoryAccess &destination,
             PreparedDmaCopy &prepared, WaveDialect &dialect,
             DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
-            uint64_t &factDomainCount, ArrayRef<int64_t> supportedByteWidths) {
+            DmaDestinationProofCache &dmaProofCache, uint64_t &factDomainCount,
+            ArrayRef<int64_t> supportedByteWidths,
+            SymbolicMemoryStageTiming &timing) {
   sym::Store &store = dialect.getSymbolStore();
   RemainderProofContext sourceProofContext(dialect, solver, match.gather,
                                            prepared.source.mappings, proofCache,
@@ -7977,14 +8180,20 @@ planDmaCopy(const DmaCopyMatch &match, const MemoryAccess &destination,
   RemainderProofContext destinationProofContext(dialect, solver, destination.op,
                                                 prepared.destination.mappings,
                                                 proofCache, factDomainCount);
+  TimingScope transactionsTiming =
+      timing.nest("lower_symbolic_memory_plan_dma_transactions");
   FailureOr<SmallVector<DmaCopyTransaction>> transactions =
       planDmaCopyTransactions(store, prepared.source.mappings,
                               prepared.destination.mappings,
                               prepared.source.shape, sourceProofContext,
                               destinationProofContext, supportedByteWidths);
+  transactionsTiming.stop();
   int64_t elementBytes = prepared.source.shape.elementBits / 8;
+  TimingScope validationTiming =
+      timing.nest("lower_symbolic_memory_validate_dma_transactions");
   bool repacked = !isValidDirectDmaPlan(transactions, destination, prepared,
-                                        elementBytes, store);
+                                        elementBytes, store, dmaProofCache);
+  validationTiming.stop();
   if (repacked) {
     if (!prepared.sourceExecution)
       return std::nullopt;
@@ -7995,10 +8204,13 @@ planDmaCopy(const DmaCopyMatch &match, const MemoryAccess &destination,
   }
   if (failed(transactions) || transactions->empty())
     return std::nullopt;
+  TimingScope conditionTiming =
+      timing.nest("lower_symbolic_memory_prepare_dma_conditions");
   std::optional<SmallVector<Value>> conditions = getDmaTransactionConditions(
       match, prepared, *transactions, repacked, sourceProofContext);
   if (!conditions)
     return std::nullopt;
+  conditionTiming.stop();
   return DmaCopyPlan{std::move(*transactions), std::move(*conditions),
                      repacked};
 }
@@ -8180,6 +8392,7 @@ emitDmaCopy(IRRewriter &rewriter, ScatterOp scatter, const DmaCopyMatch &match,
 static FailureOr<bool>
 tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect, IRRewriter &rewriter,
                 DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
+                DmaDestinationProofCache &dmaProofCache,
                 uint64_t &factDomainCount, SymbolicMemoryStageTiming &timing) {
   std::optional<DmaCopyMatch> matched = matchDmaCopy(scatter);
   if (!matched)
@@ -8206,7 +8419,7 @@ tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect, IRRewriter &rewriter,
   TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_dma");
   std::optional<DmaCopyPlan> plan =
       planDmaCopy(*matched, destination, *prepared, dialect, solver, proofCache,
-                  factDomainCount, supportedByteWidths);
+                  dmaProofCache, factDomainCount, supportedByteWidths, timing);
   if (!plan)
     return false;
   planTiming.stop();
@@ -8223,21 +8436,23 @@ lowerDmaCopies(Operation *root, WaveDialect &dialect, IRRewriter &rewriter,
                uint64_t &factDomainCount, SymbolicMemoryStageTiming &timing) {
   SmallVector<ScatterOp> scatters;
   root->walk([&](ScatterOp scatter) { scatters.push_back(scatter); });
+  DmaDestinationProofCache dmaProofCache;
   for (ScatterOp scatter : scatters) {
     FailureOr<bool> lowered =
         tryLowerDmaCopy(scatter, dialect, rewriter, solver, proofCache,
-                        factDomainCount, timing);
+                        dmaProofCache, factDomainCount, timing);
     if (failed(lowered))
       return failure();
   }
   return success();
 }
 
-static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
-                                 WaveDialect &dialect, DataFlowSolver &solver,
-                                 SymbolicRelationProofCache &proofCache,
-                                 uint64_t &factDomainCount,
-                                 SymbolicMemoryStageTiming &timing) {
+static LogicalResult lowerAccess(
+    IRRewriter &rewriter, MemoryAccess &access, WaveDialect &dialect,
+    DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
+    uint64_t &factDomainCount, SymbolicMemoryStageTiming &timing,
+    ArrayRef<std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
+        providers) {
   TimingScope prepareTiming =
       timing.nest("lower_symbolic_memory_prepare_mappings");
   FailureOr<PreparedAccessMappings> prepared =
@@ -8256,7 +8471,7 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
     TimingScope planTiming = timing.nest("lower_symbolic_memory_plan_gather");
     FailureOr<GatherPlan> plan = planGatherTransactions(
         access, store, prepared->mappings, prepared->shape.elementBits,
-        proofContext, timing);
+        proofContext, timing, providers);
     if (failed(plan))
       return access.op->emitOpError(
           "packet cannot be covered by legal memory transactions");
@@ -8280,18 +8495,18 @@ static LogicalResult lowerAccess(IRRewriter &rewriter, MemoryAccess &access,
                       *transactions);
 }
 
-static LogicalResult lowerAccesses(ArrayRef<Operation *> accesses,
-                                   WaveDialect &dialect, IRRewriter &rewriter,
-                                   DataFlowSolver &solver,
-                                   SymbolicRelationProofCache &proofCache,
-                                   uint64_t &factDomainCount,
-                                   SymbolicMemoryStageTiming &timing) {
+static LogicalResult lowerAccesses(
+    ArrayRef<Operation *> accesses, WaveDialect &dialect, IRRewriter &rewriter,
+    DataFlowSolver &solver, SymbolicRelationProofCache &proofCache,
+    uint64_t &factDomainCount, SymbolicMemoryStageTiming &timing,
+    ArrayRef<std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
+        providers) {
   for (Operation *op : accesses) {
     rewriter.setInsertionPoint(op);
     MemoryAccess access = isa<GatherOp>(op) ? getAccess(cast<GatherOp>(op))
                                             : getAccess(cast<ScatterOp>(op));
     if (failed(lowerAccess(rewriter, access, dialect, solver, proofCache,
-                           factDomainCount, timing)))
+                           factDomainCount, timing, providers)))
       return failure();
   }
   return success();
@@ -8336,6 +8551,11 @@ struct WaveLowerSymbolicMemoryPass
 
     IRRewriter rewriter(&getContext());
     SymbolicRelationProofCache proofCache;
+    // Provider caches span one pass invocation.
+    SmallVector<
+        std::unique_ptr<wave::memory_lowering::GatherTransactionProvider>>
+        providers;
+    wave::memory_lowering::populateGatherTransactionProviders(providers);
     uint64_t factDomainCount = 0;
     TimingScope dmaTiming =
         timing.nest("lower_symbolic_memory_lower_dma_copies");
@@ -8349,7 +8569,7 @@ struct WaveLowerSymbolicMemoryPass
         accesses.push_back(op);
     });
     if (failed(lowerAccesses(accesses, *dialect, rewriter, solver, proofCache,
-                             factDomainCount, timing)))
+                             factDomainCount, timing, providers)))
       return signalPassFailure();
     numRelationPlanningFactDomains += factDomainCount;
   }
