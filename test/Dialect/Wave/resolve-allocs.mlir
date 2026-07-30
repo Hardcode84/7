@@ -686,6 +686,197 @@ func.func @collective_loop_backedge(%n: index)
 
 // -----
 
+// Dropped completion edge keeps later allocation live.
+// CHECK-LABEL: func.func @no_reuse_after_dropped_loop_completion
+// CHECK-SAME: wave.lds_size = 32 : i64
+func.func @no_reuse_after_dropped_loop_completion()
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_a = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %released_a = wave.alloc_release %a after %stored_a
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %done = scf.for %i = %c0 to %c1 step %c1
+      iter_args(%ready = %released_a) -> (!wave.mem.token) {
+    %complete = wave.barrier %ready
+        : (!wave.mem.token) -> !wave.mem.token
+    %issued = wave.issue_token %complete
+        : !wave.mem.token -> !wave.mem.token
+    scf.yield %issued : !wave.mem.token
+  }
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_b = wave.store %lane -> %bp
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Dynamic loop may skip wait.
+// CHECK-LABEL: func.func @no_reuse_after_wait_in_maybe_zero_trip_loop
+// CHECK-SAME: wave.lds_size = 32 : i64
+func.func @no_reuse_after_wait_in_maybe_zero_trip_loop(%n: index)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_a = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %released_a = wave.alloc_release %a after %stored_a
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %done = scf.for %i = %c0 to %n step %c1
+      iter_args(%ready = %released_a) -> (!wave.mem.token) {
+    %complete = wave.barrier %ready
+        : (!wave.mem.token) -> !wave.mem.token
+    %issued = wave.issue_token %complete
+        : !wave.mem.token -> !wave.mem.token
+    scf.yield %issued : !wave.mem.token
+  }
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_b = wave.store %lane -> %bp
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// issue_token carries order, not completion.
+// CHECK-LABEL: func.func @no_reuse_after_wait_on_issue_token
+// CHECK-SAME: wave.lds_size = 32 : i64
+func.func @no_reuse_after_wait_on_issue_token()
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_a = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %released_a = wave.alloc_release %a after %stored_a
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %issued = wave.issue_token %released_a
+      : !wave.mem.token -> !wave.mem.token
+  scf.for %i = %c0 to %c1 step %c1 {
+    %complete = wave.barrier %issued : (!wave.mem.token) -> !wave.mem.token
+  }
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_b = wave.store %lane -> %bp
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Wait must cover every path.
+// CHECK-LABEL: func.func @no_reuse_after_path_partial_wait
+// CHECK-SAME: wave.lds_size = 32 : i64
+func.func @no_reuse_after_path_partial_wait(%condition: i1)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_a = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %released_a = wave.alloc_release %a after %stored_a
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  %selected = scf.if %condition -> (!wave.mem.token) {
+    scf.yield %released_a : !wave.mem.token
+  } else {
+    scf.yield %initial : !wave.mem.token
+  }
+  scf.for %i = %c0 to %c1 step %c1 {
+    %complete = wave.barrier %selected : (!wave.mem.token) -> !wave.mem.token
+  }
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_b = wave.store %lane -> %bp
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Conditional wait may not execute.
+// CHECK-LABEL: func.func @no_reuse_after_conditional_wait
+// CHECK-SAME: wave.lds_size = 32 : i64
+func.func @no_reuse_after_conditional_wait(%condition: i1)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %a = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %ap = wave.ptr_add %a, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_a = wave.store %lane -> %ap
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  %released_a = wave.alloc_release %a after %stored_a
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  scf.for %i = %c0 to %c1 step %c1 {
+    scf.if %condition {
+      %complete = wave.barrier %released_a
+          : (!wave.mem.token) -> !wave.mem.token
+    }
+  }
+  %b = wave.alloc() {align = 16 : i64, bytesize = 16 : i64}
+      : !wave.ptr<#wave.shared, i32>
+  %bp = wave.ptr_add %b, %lane
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+  %stored_b = wave.store %lane -> %bp
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @fixed_allocation_offset
 // CHECK-SAME: wave.lds_size = 160 : i64
 func.func @fixed_allocation_offset()
