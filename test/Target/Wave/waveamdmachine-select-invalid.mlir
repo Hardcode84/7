@@ -428,45 +428,10 @@ func.func @index_expr_byte_scale_overflow(%out: !wave.ptr<#wave.global, i32>) at
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @floor_unknown_value(%x: i32) -> index {
-  // expected-error @below {{index_expr floor shift lowering needs nonnegative operand}}
-  %off = wave.index_expr <"floor(1/2*x)"> ["x"](%x) : (i32) -> index
-  return %off : index
-}
-}
-
-// -----
-
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @integer_rational_without_divisibility(%x_raw: i32) -> index {
   %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">] : i32
   // expected-error @below {{wave.index_expr selection rejects non-integer rational}}
   %off = wave.index_expr <"1/8*x"> ["x"](%x) : (i32) -> index
-  return %off : index
-}
-}
-
-// -----
-
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @integer_rational_numerator_overflow(
-    %a_raw: i32, %b_raw: i32, %c_raw: i32, %d_raw: i32) -> index {
-  %a = wave.assume %a_raw as "x"
-      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
-       #wave.pred<"Mod(x, 4) == 0">] : i32
-  %b = wave.assume %b_raw as "x"
-      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
-       #wave.pred<"Mod(x, 4) == 0">] : i32
-  %c = wave.assume %c_raw as "x"
-      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
-       #wave.pred<"Mod(x, 4) == 0">] : i32
-  %d = wave.assume %d_raw as "x"
-      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
-       #wave.pred<"Mod(x, 4) == 0">] : i32
-  // expected-error @below {{wave.index_expr rational numerator does not provably fit u32}}
-  %off = wave.index_expr <"1/4*a + 1/4*b + 1/4*c + 1/4*d">
-      ["a", "b", "c", "d"](%a, %b, %c, %d)
-      : (i32, i32, i32, i32) -> index
   return %off : index
 }
 }

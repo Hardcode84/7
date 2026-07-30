@@ -173,10 +173,20 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 
 FailureOr<AddressPlan>
 planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
-                  const mlir::waveamdmachine::AddressFieldSpec &spec);
+                  const mlir::waveamdmachine::AddressFieldSpec &spec,
+                  bool allowFullAddressRemainder = true);
 
 bool needsWideAddressMaterialization(sym::ExprHandle expr,
                                      const AddressPlan &plan);
+
+bool hasRationalIndexExpr(sym::ExprHandle expr);
+
+bool needsIntegerRationalMaterialization(sym::ExprHandle expr);
+
+bool requiresWideRationalIntermediates(WaveAMDMachineSelector &S,
+                                       sym::ExprHandle expr,
+                                       ArrayRef<sym::PredHandle> assumptions,
+                                       const llvm::StringMap<Value> &bindings);
 
 FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
                                                Operation *user,
@@ -197,7 +207,8 @@ FailureOr<Value> materializePointerOffsetCarry(WaveAMDMachineSelector &S,
 FailureOr<AddressPlan>
 planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
                   const PointerOffset &offset,
-                  const mlir::waveamdmachine::AddressFieldSpec &spec);
+                  const mlir::waveamdmachine::AddressFieldSpec &spec,
+                  bool allowFullAddressRemainder = true);
 
 struct MaterializedLdsAddress {
   Value addr;

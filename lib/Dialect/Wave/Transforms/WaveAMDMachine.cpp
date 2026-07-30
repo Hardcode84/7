@@ -32,6 +32,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -1245,6 +1246,29 @@ static Value lshrWidePow2(WaveAMDMachineSelector &S, Location loc, Value v,
       .getResult();
 }
 
+static Value ashrWidePow2(WaveAMDMachineSelector &S, Location loc, Value v,
+                          unsigned log2Den) {
+  if (log2Den == 0)
+    return v;
+  if (waveamdmachine::SMovB64ImmOp mov =
+          v.getDefiningOp<waveamdmachine::SMovB64ImmOp>()) {
+    llvm::APInt bits(64, static_cast<uint64_t>(mov.getValue()));
+    return createWideImm(S, loc, bits.ashr(log2Den).getSExtValue());
+  }
+  Value shift = createImm(S.builder, loc, log2Den);
+  if (isVGPR(v))
+    return waveamdmachine::VAshrrevI64Op::create(
+        S.builder, loc,
+        getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR, 2),
+        shift, ensureVGPR2(S, loc, v));
+  return waveamdmachine::SAshrI64Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR,
+                        2),
+             getSCCType(S.builder.getContext()), ensureSGPR2(S, loc, v), shift)
+      .getResult();
+}
+
 static Value andWideMask(WaveAMDMachineSelector &S, Location loc, Value v,
                          int64_t mask) {
   if (std::optional<int64_t> imm = S.getImmediateValue(v)) {
@@ -2147,17 +2171,6 @@ static bool isProvablyNonNegativeForWideShift(sym::Analysis &analysis,
          analysis.check(*nonNegative) == sym::CheckResult::True;
 }
 
-static LogicalResult
-requireWideNonNegativeRoundedExpr(WideMaterializationContext &context,
-                                  sym::ExprHandle sourceExpr, Operation *user,
-                                  StringRef opName) {
-  sym::Analysis *analysis = context.getAnalysis();
-  if (analysis && isProvablyNonNegativeForWideShift(*analysis, sourceExpr))
-    return success();
-  return user->emitError("full-address index_expr ")
-         << opName << " shift lowering needs nonnegative operand";
-}
-
 static FailureOr<Value> materializeWideRounded(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
@@ -2175,15 +2188,16 @@ static FailureOr<Value> materializeWideRounded(
                "full-address index_expr rounded denominator must be a "
                "power of two (got ")
            << den << ")";
-  StringRef opName = isCeil ? "ceil" : "floor";
-  if (failed(
-          requireWideNonNegativeRoundedExpr(context, childExpr, user, opName)))
-    return failure();
+  sym::Analysis *analysis = context.getAnalysis();
+  bool nonNegative =
+      analysis && isProvablyNonNegativeForWideShift(*analysis, childExpr);
   Value numerator = child->numerator;
   if (isCeil)
     numerator = addWide(S, user->getLoc(), numerator,
                         createWideImm(S, user->getLoc(), den - 1));
-  return lshrWidePow2(S, user->getLoc(), numerator, llvm::Log2_64(den));
+  unsigned shift = llvm::Log2_64(den);
+  return nonNegative ? lshrWidePow2(S, user->getLoc(), numerator, shift)
+                     : ashrWidePow2(S, user->getLoc(), numerator, shift);
 }
 
 static FailureOr<Value>
@@ -2280,11 +2294,41 @@ static FailureOr<Value> materializeWideIndexExprNode(
                                               symbolsAreUniform, addOrder);
 }
 
+static FailureOr<Value> materializeWideIntegerRationalExpr(
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
+    bool symbolsAreUniform) {
+  sym::Analysis *analysis = context.getAnalysis();
+  if (!analysis || analysis->integerValued(expr) != sym::CheckResult::True)
+    return failure();
+  FailureOr<WideRationalValue> value = materializeWideRationalIndexExprNode(
+      S, context, expr, user, bindings, symbolsAreUniform);
+  if (failed(value))
+    return failure();
+  if (value->denominator == 1)
+    return value->numerator;
+  if (!isPositivePowerOfTwo(value->denominator))
+    return user->emitError(
+               "full-address index_expr integer rational denominator must be "
+               "a power of two (got ")
+           << value->denominator << ")";
+  unsigned shift = llvm::Log2_64(value->denominator);
+  return isProvablyNonNegativeForWideShift(*analysis, expr)
+             ? lshrWidePow2(S, user->getLoc(), value->numerator, shift)
+             : ashrWidePow2(S, user->getLoc(), value->numerator, shift);
+}
+
 static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
     ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   WideMaterializationContext context(S, assumptions);
+  if (needsIntegerRationalMaterialization(expr)) {
+    sym::Analysis *analysis = context.getAnalysis();
+    if (analysis && analysis->integerValued(expr) == sym::CheckResult::True)
+      return materializeWideIntegerRationalExpr(S, context, expr, user,
+                                                bindings, symbolsAreUniform);
+  }
   return materializeWideIndexExprNode(S, context, expr, user, bindings,
                                       symbolsAreUniform, addOrder);
 }
@@ -2512,8 +2556,10 @@ indexExprAddOrder(waveamdmachine::VOffsetAddOrder order) {
 FailureOr<AddressPlan>
 planMemoryAddress(WaveAMDMachineSelector &S, Operation *user,
                   const PointerOffset &offset,
-                  const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan = planAddressFields(S, offset, spec);
+                  const waveamdmachine::AddressFieldSpec &spec,
+                  bool allowFullAddressRemainder) {
+  FailureOr<AddressPlan> plan =
+      planAddressFields(S, offset, spec, allowFullAddressRemainder);
   if (failed(plan))
     return user->emitError("failed to plan memory address fields");
   if (failed(demotePlanRemainderToFields(S, *plan, spec)))
@@ -2739,6 +2785,8 @@ static FailureOr<Value> materializePlanLowDword(
     WaveAMDMachineSelector &S, Operation *user, sym::ExprHandle expr,
     const AddressPlanBindings &bindings, ArrayRef<sym::PredHandle> assumptions,
     bool useWide, bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+  useWide |=
+      requiresWideRationalIntermediates(S, expr, assumptions, bindings.narrow);
   if (useWide) {
     FailureOr<Value> wide = materializeWideIndexExprNode(
         S, expr, user, bindings.wide, assumptions, symbolsAreUniform, addOrder);
@@ -6993,9 +7041,14 @@ static bool valueRangeFitsU32(WaveAMDMachineSelector &S, Value value) {
 }
 
 static bool needsWideIndexExprValue(WaveAMDMachineSelector &S, IndexExprOp op,
-                                    const PointerOffset &offset) {
-  return offset.expr && isIndexValueType(op.getResult().getType()) &&
-         !S.slotFitsU32(offset.expr, offset.assumptions) &&
+                                    const PointerOffset &offset,
+                                    const llvm::StringMap<Value> &bindings) {
+  if (!offset.expr || !isIndexValueType(op.getResult().getType()))
+    return false;
+  if (requiresWideRationalIntermediates(S, offset.expr, offset.assumptions,
+                                        bindings))
+    return true;
+  return !S.slotFitsU32(offset.expr, offset.assumptions) &&
          !valueRangeFitsU32(S, op.getResult());
 }
 
@@ -7008,8 +7061,11 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
                    [](Operation *user) { return !isa<PtrAddOp>(user); });
   indexOffsets[op.getResult()] = *pointerOffset;
   if (needsValue) {
+    llvm::StringMap<Value> bindings;
+    for (const PointerOffsetBinding &binding : pointerOffset->bindings)
+      bindings[binding.name] = expect(binding.value, op);
     FailureOr<Value> value = failure();
-    if (needsWideIndexExprValue(*this, op, *pointerOffset)) {
+    if (needsWideIndexExprValue(*this, op, *pointerOffset, bindings)) {
       value =
           op.getResult().getType().isIndex()
               ? materializeUniformPointerOffsetWideValue(*this, op,
@@ -7112,20 +7168,93 @@ static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
   return out;
 }
 
+static FailureOr<sym::ExprSubstitution>
+composePointerBindingRename(WaveAMDMachineSelector &S, StringRef sourceName,
+                            StringRef replacementName) {
+  FailureOr<sym::ExprHandle> source =
+      sym::composeExprSym(S.symbolStore(), sourceName);
+  FailureOr<sym::ExprHandle> replacement =
+      sym::composeExprSym(S.symbolStore(), replacementName);
+  if (failed(source) || failed(replacement))
+    return failure();
+  return sym::ExprSubstitution{*source, *replacement};
+}
+
+static LogicalResult collectPointerBindingRenames(
+    WaveAMDMachineSelector &S, PointerOffset &offset,
+    llvm::StringMap<Value> &reserved,
+    SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
+  for (PointerOffsetBinding &binding : offset.bindings) {
+    llvm::StringMap<Value>::iterator existing = reserved.find(binding.name);
+    if (existing == reserved.end() || existing->second == binding.value) {
+      reserved[binding.name] = binding.value;
+      continue;
+    }
+    std::string fresh =
+        getFreshIndexExprBindingName(binding.name, reserved, "_");
+    FailureOr<sym::ExprSubstitution> substitution =
+        composePointerBindingRename(S, binding.name, fresh);
+    if (failed(substitution))
+      return failure();
+    substitutions.push_back(*substitution);
+    binding.name = fresh;
+    reserved[fresh] = binding.value;
+  }
+  return success();
+}
+
+static LogicalResult
+applyPointerBindingRenames(WaveAMDMachineSelector &S, PointerOffset &offset,
+                           ArrayRef<sym::ExprSubstitution> substitutions) {
+  if (substitutions.empty())
+    return success();
+  FailureOr<sym::ExprHandle> expr =
+      sym::substituteExpr(S.symbolStore(), offset.expr, substitutions);
+  if (failed(expr))
+    return failure();
+  offset.expr = *expr;
+  for (sym::PredHandle &assumption : offset.assumptions) {
+    FailureOr<sym::PredHandle> renamed =
+        sym::substitutePred(S.symbolStore(), assumption, substitutions);
+    if (failed(renamed))
+      return failure();
+    assumption = *renamed;
+  }
+  return success();
+}
+
+static FailureOr<PointerOffset>
+renameConflictingPointerBindings(WaveAMDMachineSelector &S,
+                                 const PointerOffset &base,
+                                 const PointerOffset &add) {
+  PointerOffset renamed = add;
+  llvm::StringMap<Value> reserved;
+  for (const PointerOffsetBinding &binding : base.bindings)
+    reserved[binding.name] = binding.value;
+  SmallVector<sym::ExprSubstitution, 2> substitutions;
+  if (failed(
+          collectPointerBindingRenames(S, renamed, reserved, substitutions)) ||
+      failed(applyPointerBindingRenames(S, renamed, substitutions)))
+    return failure();
+  return renamed;
+}
+
 static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
                                                     const PointerOffset &base,
                                                     const PointerOffset &add) {
   PointerOffset out = base;
-  if (failed(appendPointerBindings(out, add)))
+  FailureOr<PointerOffset> renamedAdd =
+      renameConflictingPointerBindings(S, base, add);
+  if (failed(renamedAdd) || failed(appendPointerBindings(out, *renamedAdd)))
     return failure();
   if (!out.expr) {
-    out.expr = add.expr;
+    out.expr = renamedAdd->expr;
     return out;
   }
-  if (!add.expr)
+  if (!renamedAdd->expr)
     return out;
   FailureOr<sym::ExprHandle> expr = sym::composeExprBinary(
-      S.symbolStore(), out.expr, sym::ExprBinaryOp::Add, add.expr);
+      S.symbolStore(), out.expr, sym::ExprBinaryOp::Add, renamedAdd->expr);
   if (failed(expr))
     return failure();
   out.expr = *expr;
@@ -7870,6 +7999,7 @@ struct DmaPointers {
   PointerOffset srcOffset;
   PointerOffset dstOffset;
   Value srcBase;
+  Value srcGlobalBase;
   Value dstBase;
 };
 
@@ -7894,8 +8024,9 @@ static FailureOr<DmaPointers> lookupDmaPointers(WaveAMDMachineSelector &S,
       dstBaseIt == S.pointerBases.end() ||
       dstOffsetIt == S.pointerIndexOffsets.end())
     return op.emitError("WaveAMDMachine backend expects selected DMA pointers");
-  return DmaPointers{srcOffsetIt->second, dstOffsetIt->second,
-                     srcBaseIt->second, dstBaseIt->second};
+  return DmaPointers{
+      srcOffsetIt->second, dstOffsetIt->second, srcBaseIt->second,
+      S.pointerGlobalBases.lookup(op.getSource()), dstBaseIt->second};
 }
 
 static LogicalResult requireUniformDmaDest(WaveAMDMachineSelector &S,
@@ -8149,10 +8280,19 @@ planDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   FailureOr<AddressPlan> plan = planMemoryAddress(S, op, offset, spec);
   if (failed(plan))
     return failure();
-  if (isBuffer && plan->fullAddressRemainderExpr)
+  if (isBuffer && plan->fullAddressRemainderExpr) {
     if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
                                                   /*includeInstOffset=*/false)))
       return failure();
+    if (plan->fullAddressRemainderExpr) {
+      FailureOr<AddressPlan> whole = planMemoryAddress(
+          S, op, offset, spec, /*allowFullAddressRemainder=*/false);
+      if (failed(whole))
+        return failure();
+      if (!whole->fullAddressRemainderExpr)
+        plan = std::move(whole);
+    }
+  }
   return *plan;
 }
 
@@ -8274,11 +8414,10 @@ static FailureOr<DmaSourceAddress>
 materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
                             Value base, AddressPlan &plan, bool isBuffer,
                             const waveamdmachine::AddressFieldSpec &spec) {
-  if (plan.fullAddressRemainderExpr) {
-    if (isBuffer)
-      return emitBufferAddressFieldError(op.getOperation());
+  if (plan.fullAddressRemainderExpr && isBuffer)
+    return emitBufferAddressFieldError(op.getOperation());
+  if (plan.fullAddressRemainderExpr)
     return materializeGlobalDmaFullSourceAddress(S, op, base, plan, spec);
-  }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
       materializePlanBuckets(S, op, plan, spec);
   if (failed(buckets))
@@ -8516,6 +8655,80 @@ selectPlannedDmaLoadLds(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   return success();
 }
 
+static bool bufferDmaRemainderIsNonNegative(WaveAMDMachineSelector &S,
+                                            const AddressPlan &bufferPlan) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), bufferPlan.assumptions);
+  return succeeded(analysis) &&
+         isProvablyNonNegativeForWideShift(**analysis,
+                                           bufferPlan.fullAddressRemainderExpr);
+}
+
+static FailureOr<bool> selectDmaLoadLdsAddr64FallbackWithIssueCheck(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+    const DmaPointers &ptrs, const AddressPlan &sourcePlan, bool isBuffer) {
+  FailureOr<bool> selected =
+      selectDmaLoadLdsAddr64FallbackIfNeeded(S, op, ptrs, sourcePlan, isBuffer);
+  if (failed(selected) || !*selected)
+    return selected;
+  if (op->hasAttr("issue_delay_cycles"))
+    return op.emitOpError("issue delay requires direct-to-LDS lowering");
+  return true;
+}
+
+static FailureOr<bool> selectPlannedGlobalDmaFallback(WaveAMDMachineSelector &S,
+                                                      waveamd::DmaLoadLdsOp op,
+                                                      const DmaPointers &ptrs) {
+  waveamdmachine::AddressFieldSpec globalSpec =
+      dmaAddressSpec(/*isBuffer=*/false, op.getBytes());
+  FailureOr<AddressPlan> globalPlan = planDmaSourceAddress(
+      S, op, ptrs.srcOffset, /*isBuffer=*/false, globalSpec);
+  if (failed(globalPlan))
+    return failure();
+  DmaPointers globalPointers = ptrs;
+  globalPointers.srcBase = ptrs.srcGlobalBase;
+  FailureOr<bool> selected = selectDmaLoadLdsAddr64FallbackWithIssueCheck(
+      S, op, globalPointers, *globalPlan, /*isBuffer=*/false);
+  if (failed(selected) || *selected)
+    return selected;
+  if (failed(selectPlannedDmaLoadLds(S, op, globalPointers, *globalPlan,
+                                     globalSpec, /*isBuffer=*/false)))
+    return failure();
+  return true;
+}
+
+static FailureOr<bool> selectBufferDmaGlobalAddressFallbackIfNeeded(
+    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+    const DmaPointers &ptrs, const AddressPlan &bufferPlan, bool isBuffer) {
+  if (!isBuffer || !bufferPlan.fullAddressRemainderExpr)
+    return false;
+  if (!ptrs.srcGlobalBase || !bufferDmaRemainderIsNonNegative(S, bufferPlan))
+    return emitBufferAddressFieldError(op.getOperation());
+  // Descriptor overflow: re-plan from preserved global provenance.
+  return selectPlannedGlobalDmaFallback(S, op, ptrs);
+}
+
+static LogicalResult
+selectDmaLoadLdsSourcePlan(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                           const DmaPointers &ptrs, AddressPlan &sourcePlan,
+                           const waveamdmachine::AddressFieldSpec &spec,
+                           bool isBuffer) {
+  FailureOr<bool> selectedGlobal = selectBufferDmaGlobalAddressFallbackIfNeeded(
+      S, op, ptrs, sourcePlan, isBuffer);
+  if (failed(selectedGlobal))
+    return failure();
+  if (*selectedGlobal)
+    return success();
+  FailureOr<bool> selectedFallback =
+      selectDmaLoadLdsAddr64FallbackWithIssueCheck(S, op, ptrs, sourcePlan,
+                                                   isBuffer);
+  if (failed(selectedFallback))
+    return failure();
+  if (*selectedFallback)
+    return success();
+  return selectPlannedDmaLoadLds(S, op, ptrs, sourcePlan, spec, isBuffer);
+}
+
 static LogicalResult
 validateDmaLoadLdsSelection(WaveAMDMachineSelector &selector,
                             waveamd::DmaLoadLdsOp op) {
@@ -8550,16 +8763,8 @@ WaveAMDMachineSelector::selectDmaLoadLds(waveamd::DmaLoadLdsOp op) {
       planDmaSourceAddress(*this, op, ptrs->srcOffset, isBuffer, spec);
   if (failed(sourcePlan))
     return failure();
-  FailureOr<bool> selectedFallback = selectDmaLoadLdsAddr64FallbackIfNeeded(
-      *this, op, *ptrs, *sourcePlan, isBuffer);
-  if (failed(selectedFallback))
-    return failure();
-  if (*selectedFallback) {
-    if (op->hasAttr("issue_delay_cycles"))
-      return op.emitOpError("issue delay requires direct-to-LDS lowering");
-    return success();
-  }
-  return selectPlannedDmaLoadLds(*this, op, *ptrs, *sourcePlan, spec, isBuffer);
+  return selectDmaLoadLdsSourcePlan(*this, op, *ptrs, *sourcePlan, spec,
+                                    isBuffer);
 }
 
 // Ensure `v` is an SGPR1 by inserting a v_readfirstlane_b32 if it is

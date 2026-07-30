@@ -114,6 +114,12 @@ planSelectedBufferSourceAddress(WaveAMDMachineSelector &S, Operation *user,
   if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
                                                 /*includeInstOffset=*/true)))
     return failure();
+  if (plan->fullAddressRemainderExpr) {
+    plan = planMemoryAddress(S, user, source.offset, spec,
+                             /*allowFullAddressRemainder=*/false);
+    if (failed(plan))
+      return failure();
+  }
   if (!hasOnlyVOffsetField(*plan))
     return std::optional<AddressPlan>{};
   return std::optional<AddressPlan>{*plan};
@@ -219,6 +225,12 @@ planGlobalOrBufferAddress(WaveAMDMachineSelector &S, Operation *user,
     if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
                                                   /*includeInstOffset=*/true)))
       return failure();
+  if (isBuffer && plan->fullAddressRemainderExpr) {
+    plan = planMemoryAddress(S, user, offset, spec,
+                             /*allowFullAddressRemainder=*/false);
+    if (failed(plan))
+      return failure();
+  }
   if (isBuffer && plan->fullAddressRemainderExpr)
     return emitBufferAddressFieldError(user);
   return *plan;

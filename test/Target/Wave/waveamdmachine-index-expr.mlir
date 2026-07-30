@@ -651,4 +651,72 @@ func.func @simd_constant_staticizes_mod_divisor() attributes {wave.kernel} {
   return
 }
 
+// CHECK-LABEL: func.func @pointer_offset_binding_collision
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.global_store_b32
+func.func @pointer_offset_binding_collision(
+    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %lane, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %base_offset = wave.index_expr <"offset"> ["offset"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %base = wave.ptr_add %out, %base_offset
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %packet_offset = wave.index_expr <"offset"> ["offset"](%next)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %base, %packet_offset
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+        !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// Signed rational floor uses arithmetic shift.
+// CHECK-LABEL: func.func @signed_floor_index
+// CHECK: %[[X:.*]] = waveamdmachine.arg
+// CHECK: waveamdmachine.s_ashr_i64
+func.func @signed_floor_index(%x: i32) -> index {
+  %off = wave.index_expr <"floor(1/2*x)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+
+// Signed rational ceil uses arithmetic shift after bias.
+// CHECK-LABEL: func.func @signed_ceil_index
+// CHECK: waveamdmachine.s_ashr_i64
+func.func @signed_ceil_index(%x: i32) -> index {
+  %off = wave.index_expr <"ceiling(1/2*x)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @integer_rational_wide_intermediate
+// CHECK: waveamdmachine.s_add_u64
+// CHECK: waveamdmachine.s_lshr_b64
+func.func @integer_rational_wide_intermediate(
+    %a_raw: i32, %b_raw: i32, %c_raw: i32, %d_raw: i32) -> index {
+  %a = wave.assume %a_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %b = wave.assume %b_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %c = wave.assume %c_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %d = wave.assume %d_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
+       #wave.pred<"Mod(x, 4) == 0">] : i32
+  %off = wave.index_expr <"1/4*a + 1/4*b + 1/4*c + 1/4*d">
+      ["a", "b", "c", "d"](%a, %b, %c, %d)
+      : (i32, i32, i32, i32) -> index
+  return %off : index
+}
+
 }

@@ -83,11 +83,10 @@ static TermKind materializationKind(WaveAMDMachineSelector &S,
 static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
                                          const llvm::StringMap<Value> &subs);
 
-static FailureOr<bool>
-canMaterializeIntegerRationalExpr(WaveAMDMachineSelector &S,
-                                  sym::ExprHandle expr, Operation *user,
-                                  ArrayRef<sym::PredHandle> assumptions,
-                                  std::unique_ptr<sym::Analysis> &analysis);
+static FailureOr<bool> canMaterializeIntegerRationalExpr(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
+    std::unique_ptr<sym::Analysis> &analysis);
 
 static FailureOr<Value> materializeIntegerRationalExpr(
     WaveAMDMachineSelector &S, sym::Analysis &analysis, sym::ExprHandle expr,
@@ -558,8 +557,8 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 ArrayRef<sym::PredHandle> assumptions,
                                 IndexExprAddOrder addOrder) {
   std::unique_ptr<sym::Analysis> analysis;
-  FailureOr<bool> rational =
-      canMaterializeIntegerRationalExpr(S, expr, user, assumptions, analysis);
+  FailureOr<bool> rational = canMaterializeIntegerRationalExpr(
+      S, expr, user, subs, assumptions, analysis);
   if (failed(rational))
     return failure();
   if (*rational)
@@ -633,8 +632,8 @@ FailureOr<Value> materializeMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 ArrayRef<sym::PredHandle> assumptions,
                                 IndexExprAddOrder addOrder) {
   std::unique_ptr<sym::Analysis> analysis;
-  FailureOr<bool> rational =
-      canMaterializeIntegerRationalExpr(S, expr, user, assumptions, analysis);
+  FailureOr<bool> rational = canMaterializeIntegerRationalExpr(
+      S, expr, user, subs, assumptions, analysis);
   if (failed(rational))
     return failure();
   if (*rational)
@@ -1063,16 +1062,447 @@ static bool needsRationalMaterialization(sym::ExprHandle expr) {
   }
 }
 
-static FailureOr<bool>
-canMaterializeIntegerRationalExpr(WaveAMDMachineSelector &S,
-                                  sym::ExprHandle expr, Operation *user,
-                                  ArrayRef<sym::PredHandle> assumptions,
-                                  std::unique_ptr<sym::Analysis> &analysis) {
+static bool containsRationalMaterialization(sym::ExprHandle expr);
+
+static bool addContainsRationalMaterialization(sym::ExprView view) {
+  if (containsRationalMaterialization(view.getAddConstant()))
+    return true;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    if (containsRationalMaterialization(term.coefficient) ||
+        containsRationalMaterialization(term.term))
+      return true;
+  }
+  return false;
+}
+
+static bool mulContainsRationalMaterialization(sym::ExprView view) {
+  if (containsRationalMaterialization(view.getMulCoefficient()))
+    return true;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
+    if (containsRationalMaterialization(view.getMulFactor(i).base))
+      return true;
+  return false;
+}
+
+static bool binaryContainsRationalMaterialization(sym::ExprView view) {
+  return containsRationalMaterialization(view.getBinaryLhs()) ||
+         containsRationalMaterialization(view.getBinaryRhs());
+}
+
+static bool containsRationalMaterialization(sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Rational: {
+    std::optional<sym::RationalLiteral> rational = view.getRational();
+    return rational && rational->denominator != 1;
+  }
+  case sym::ExprKind::Add:
+    return addContainsRationalMaterialization(view);
+  case sym::ExprKind::Mul:
+    return mulContainsRationalMaterialization(view);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return containsRationalMaterialization(view.getUnaryArg());
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return binaryContainsRationalMaterialization(view);
+  default:
+    return false;
+  }
+}
+
+static bool rationalNumeratorFitsRange(sym::Analysis &analysis,
+                                       sym::ExprHandle expr, int64_t min,
+                                       int64_t max) {
+  if (std::optional<sym::InferredRange> range = analysis.range(expr);
+      range && range->lower && range->upper &&
+      sym::compareEndpointToInteger(*range->lower, min) >= 0 &&
+      sym::compareEndpointToInteger(*range->upper, max) <= 0)
+    return true;
+  if (sym::provablyInRange(analysis, expr, min, max))
+    return true;
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(expr);
+  return succeeded(simplified) &&
+         sym::provablyInRange(analysis, *simplified, min, max);
+}
+
+static bool rationalNumeratorFitsB32(sym::Analysis &analysis,
+                                     sym::ExprHandle expr) {
+  constexpr int64_t min = std::numeric_limits<int32_t>::min();
+  constexpr int64_t max = (int64_t{1} << 32) - 1;
+  return rationalNumeratorFitsRange(analysis, expr, min, max);
+}
+
+static bool rationalNumeratorFitsI32(sym::Analysis &analysis,
+                                     sym::ExprHandle expr) {
+  return rationalNumeratorFitsRange(analysis, expr,
+                                    std::numeric_limits<int32_t>::min(),
+                                    std::numeric_limits<int32_t>::max());
+}
+
+static LogicalResult
+assumeNarrowBindingRanges(WaveAMDMachineSelector &S, sym::Analysis &analysis,
+                          const llvm::StringMap<Value> &bindings) {
+  for (const auto &binding : bindings) {
+    std::optional<sym::InferredRange> range;
+    if (std::optional<int64_t> value =
+            S.getImmediateValue(binding.getValue())) {
+      sym::RationalEndpoint endpoint{*value, 1};
+      range = sym::InferredRange{endpoint, endpoint};
+    } else if (waveamdmachine::RegType type = dyn_cast<waveamdmachine::RegType>(
+                   binding.getValue().getType());
+               type && type.getWidth() == 1) {
+      range = sym::InferredRange{
+          sym::RationalEndpoint{std::numeric_limits<int32_t>::min(), 1},
+          sym::RationalEndpoint{std::numeric_limits<int32_t>::max(), 1}};
+    }
+    if (!range)
+      continue;
+    FailureOr<sym::ExprHandle> symbol =
+        analysis.composeSymbol(binding.getKey());
+    if (failed(symbol) || failed(analysis.assumeRange(*symbol, *range)))
+      return failure();
+  }
+  return success();
+}
+
+struct RationalNarrowingProof {
+  sym::ExprHandle numerator;
+  int64_t denominator = 1;
+  bool fitsB32 = true;
+};
+
+static FailureOr<RationalNarrowingProof>
+proveRationalNarrowing(sym::Analysis &analysis, sym::ExprHandle expr);
+
+static FailureOr<sym::ExprHandle> composeProofInteger(sym::Analysis &analysis,
+                                                      int64_t value) {
+  return analysis.composeInteger(value);
+}
+
+static FailureOr<sym::ExprHandle> composeProofBinary(sym::Analysis &analysis,
+                                                     sym::ExprHandle lhs,
+                                                     sym::ExprBinaryOp op,
+                                                     sym::ExprHandle rhs) {
+  return analysis.compose(lhs, op, rhs);
+}
+
+static FailureOr<RationalNarrowingProof>
+multiplyRationalProof(sym::Analysis &analysis, RationalNarrowingProof lhs,
+                      RationalNarrowingProof rhs) {
+  std::optional<int64_t> denominator =
+      llvm::checkedMul(lhs.denominator, rhs.denominator);
+  if (!denominator)
+    return failure();
+  FailureOr<sym::ExprHandle> numerator = composeProofBinary(
+      analysis, lhs.numerator, sym::ExprBinaryOp::Mul, rhs.numerator);
+  if (failed(numerator))
+    return failure();
+  return RationalNarrowingProof{
+      *numerator, *denominator,
+      lhs.fitsB32 && rhs.fitsB32 &&
+          rationalNumeratorFitsB32(analysis, *numerator)};
+}
+
+static FailureOr<sym::ExprHandle> scaleProofNumerator(sym::Analysis &analysis,
+                                                      sym::ExprHandle numerator,
+                                                      int64_t scale) {
+  if (scale == 1)
+    return numerator;
+  FailureOr<sym::ExprHandle> scaleExpr = composeProofInteger(analysis, scale);
+  if (failed(scaleExpr))
+    return failure();
+  return composeProofBinary(analysis, numerator, sym::ExprBinaryOp::Mul,
+                            *scaleExpr);
+}
+
+static FailureOr<RationalNarrowingProof>
+addRationalProof(sym::Analysis &analysis, RationalNarrowingProof lhs,
+                 RationalNarrowingProof rhs) {
+  std::optional<int64_t> denominator =
+      checkedLCM(lhs.denominator, rhs.denominator);
+  if (!denominator)
+    return failure();
+  FailureOr<sym::ExprHandle> lhsNumerator = scaleProofNumerator(
+      analysis, lhs.numerator, *denominator / lhs.denominator);
+  FailureOr<sym::ExprHandle> rhsNumerator = scaleProofNumerator(
+      analysis, rhs.numerator, *denominator / rhs.denominator);
+  if (failed(lhsNumerator) || failed(rhsNumerator))
+    return failure();
+  FailureOr<sym::ExprHandle> numerator = composeProofBinary(
+      analysis, *lhsNumerator, sym::ExprBinaryOp::Add, *rhsNumerator);
+  if (failed(numerator))
+    return failure();
+  bool scaledFit = rationalNumeratorFitsB32(analysis, *lhsNumerator) &&
+                   rationalNumeratorFitsB32(analysis, *rhsNumerator);
+  return RationalNarrowingProof{
+      *numerator, *denominator,
+      lhs.fitsB32 && rhs.fitsB32 && scaledFit &&
+          rationalNumeratorFitsB32(analysis, *numerator)};
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalAdd(sym::Analysis &analysis, sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  FailureOr<RationalNarrowingProof> acc =
+      proveRationalNarrowing(analysis, view.getAddConstant());
+  if (failed(acc))
+    return failure();
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    FailureOr<RationalNarrowingProof> coefficient =
+        proveRationalNarrowing(analysis, term.coefficient);
+    FailureOr<RationalNarrowingProof> value =
+        proveRationalNarrowing(analysis, term.term);
+    if (failed(coefficient) || failed(value))
+      return failure();
+    FailureOr<RationalNarrowingProof> product =
+        multiplyRationalProof(analysis, *coefficient, *value);
+    if (failed(product))
+      return failure();
+    acc = addRationalProof(analysis, *acc, *product);
+    if (failed(acc))
+      return failure();
+  }
+  return *acc;
+}
+
+static FailureOr<RationalNarrowingProof>
+raiseRationalProof(sym::Analysis &analysis, RationalNarrowingProof base,
+                   int32_t exponent) {
+  FailureOr<sym::ExprHandle> oneExpr = composeProofInteger(analysis, 1);
+  if (failed(oneExpr) || exponent <= 0)
+    return failure();
+  RationalNarrowingProof power{*oneExpr, 1, true};
+  for ([[maybe_unused]] int32_t e : llvm::seq<int32_t>(0, exponent)) {
+    FailureOr<RationalNarrowingProof> next =
+        multiplyRationalProof(analysis, power, base);
+    if (failed(next))
+      return failure();
+    power = *next;
+  }
+  return power;
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalMul(sym::Analysis &analysis, sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  FailureOr<RationalNarrowingProof> acc =
+      proveRationalNarrowing(analysis, view.getMulCoefficient());
+  if (failed(acc))
+    return failure();
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    FailureOr<RationalNarrowingProof> base =
+        proveRationalNarrowing(analysis, factor.base);
+    if (failed(base))
+      return failure();
+    FailureOr<RationalNarrowingProof> power =
+        raiseRationalProof(analysis, *base, factor.exponent);
+    if (failed(power))
+      return failure();
+    acc = multiplyRationalProof(analysis, *acc, *power);
+    if (failed(acc))
+      return failure();
+  }
+  return *acc;
+}
+
+static FailureOr<sym::ExprHandle>
+composeCeilProofNumerator(sym::Analysis &analysis,
+                          RationalNarrowingProof child) {
+  FailureOr<sym::ExprHandle> bias =
+      composeProofInteger(analysis, child.denominator - 1);
+  if (failed(bias))
+    return failure();
+  return composeProofBinary(analysis, child.numerator, sym::ExprBinaryOp::Add,
+                            *bias);
+}
+
+static FailureOr<bool> roundedProofFitsB32(sym::Analysis &analysis,
+                                           RationalNarrowingProof child,
+                                           sym::ExprHandle childExpr,
+                                           bool isCeil) {
+  bool nonNegative = isProvablyNonNegative(analysis, childExpr);
+  bool fits =
+      child.fitsB32 && rationalNumeratorFitsB32(analysis, child.numerator);
+  if (!nonNegative)
+    fits &= rationalNumeratorFitsI32(analysis, child.numerator);
+  if (!isCeil || child.denominator <= 1)
+    return fits;
+  FailureOr<sym::ExprHandle> biased =
+      composeCeilProofNumerator(analysis, child);
+  if (failed(biased))
+    return failure();
+  fits &= rationalNumeratorFitsB32(analysis, *biased);
+  if (!nonNegative)
+    fits &= rationalNumeratorFitsI32(analysis, *biased);
+  return fits;
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalRounded(sym::Analysis &analysis, sym::ExprHandle expr,
+                     bool isCeil) {
+  sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
+  FailureOr<RationalNarrowingProof> child =
+      proveRationalNarrowing(analysis, childExpr);
+  if (failed(child))
+    return failure();
+  FailureOr<bool> fits =
+      roundedProofFitsB32(analysis, *child, childExpr, isCeil);
+  if (failed(fits))
+    return failure();
+  return RationalNarrowingProof{
+      expr, 1, *fits && rationalNumeratorFitsB32(analysis, expr)};
+}
+
+static RationalNarrowingProof proveRationalIntegerNode(sym::Analysis &analysis,
+                                                       sym::ExprHandle expr) {
+  return RationalNarrowingProof{expr, 1,
+                                rationalNumeratorFitsB32(analysis, expr)};
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalLiteral(sym::Analysis &analysis, sym::ExprView view) {
+  std::optional<sym::RationalLiteral> rational = view.getRational();
+  if (!rational || rational->denominator <= 0)
+    return failure();
+  FailureOr<sym::ExprHandle> numerator =
+      composeProofInteger(analysis, rational->numerator);
+  if (failed(numerator))
+    return failure();
+  return RationalNarrowingProof{*numerator, rational->denominator,
+                                rationalNumeratorFitsB32(analysis, *numerator)};
+}
+
+static bool canTruncateModuloDividend(sym::ExprView view) {
+  std::optional<int64_t> divisor =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  return divisor && *divisor > 0 &&
+         llvm::isPowerOf2_64(static_cast<uint64_t>(*divisor)) &&
+         static_cast<uint64_t>(*divisor) <= (uint64_t{1} << 32);
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalBinary(sym::Analysis &analysis, sym::ExprHandle expr,
+                    sym::ExprView view) {
+  FailureOr<RationalNarrowingProof> lhs =
+      proveRationalNarrowing(analysis, view.getBinaryLhs());
+  FailureOr<RationalNarrowingProof> rhs =
+      proveRationalNarrowing(analysis, view.getBinaryRhs());
+  if (failed(lhs) || failed(rhs) ||
+      analysis.integerValued(expr) != sym::CheckResult::True)
+    return failure();
+  RationalNarrowingProof result = proveRationalIntegerNode(analysis, expr);
+  bool operandsFit = lhs->fitsB32 && rhs->fitsB32;
+  // B32 truncation preserves remainder for power-of-two divisors up to 2^32.
+  if (view.getKind() == sym::ExprKind::Mod && canTruncateModuloDividend(view))
+    operandsFit = rhs->fitsB32;
+  result.fitsB32 &= operandsFit;
+  return result;
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalNarrowing(sym::Analysis &analysis, sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Integer:
+  case sym::ExprKind::Symbol:
+    return proveRationalIntegerNode(analysis, expr);
+  case sym::ExprKind::Rational:
+    return proveRationalLiteral(analysis, view);
+  case sym::ExprKind::Add:
+    return proveRationalAdd(analysis, expr);
+  case sym::ExprKind::Mul:
+    return proveRationalMul(analysis, expr);
+  case sym::ExprKind::Floor:
+    return proveRationalRounded(analysis, expr, /*isCeil=*/false);
+  case sym::ExprKind::Ceil:
+    return proveRationalRounded(analysis, expr, /*isCeil=*/true);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return proveRationalBinary(analysis, expr, view);
+  default:
+    return failure();
+  }
+}
+
+static bool rationalProofNeedsWide(sym::Analysis &analysis,
+                                   sym::ExprHandle expr) {
+  FailureOr<RationalNarrowingProof> proof =
+      proveRationalNarrowing(analysis, expr);
+  return failed(proof) || !proof->fitsB32;
+}
+
+static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr);
+
+static bool addRequiresWideRationalIntermediates(sym::Analysis &analysis,
+                                                 sym::ExprHandle expr) {
+  if (needsRationalMaterialization(expr))
+    return rationalProofNeedsWide(analysis, expr);
+  sym::ExprView view(expr);
+  if (requiresWideRationalIntermediatesImpl(analysis, view.getAddConstant()))
+    return true;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    if (requiresWideRationalIntermediatesImpl(analysis, term.coefficient) ||
+        requiresWideRationalIntermediatesImpl(analysis, term.term))
+      return true;
+  }
+  return false;
+}
+
+static bool mulRequiresWideRationalIntermediates(sym::Analysis &analysis,
+                                                 sym::ExprHandle expr) {
+  if (needsRationalMaterialization(expr))
+    return rationalProofNeedsWide(analysis, expr);
+  sym::ExprView view(expr);
+  if (requiresWideRationalIntermediatesImpl(analysis, view.getMulCoefficient()))
+    return true;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
+    if (requiresWideRationalIntermediatesImpl(analysis,
+                                              view.getMulFactor(i).base))
+      return true;
+  return false;
+}
+
+static bool binaryRequiresWideRationalIntermediates(sym::Analysis &analysis,
+                                                    sym::ExprView view) {
+  return requiresWideRationalIntermediatesImpl(analysis, view.getBinaryLhs()) ||
+         requiresWideRationalIntermediatesImpl(analysis, view.getBinaryRhs());
+}
+
+static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return addRequiresWideRationalIntermediates(analysis, expr);
+  case sym::ExprKind::Mul:
+    return mulRequiresWideRationalIntermediates(analysis, expr);
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return rationalProofNeedsWide(analysis, expr);
+  case sym::ExprKind::Mod:
+  case sym::ExprKind::Xor:
+    return binaryRequiresWideRationalIntermediates(analysis, view);
+  default:
+    return false;
+  }
+}
+
+static FailureOr<bool> canMaterializeIntegerRationalExpr(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
+    std::unique_ptr<sym::Analysis> &analysis) {
   if (!needsRationalMaterialization(expr))
     return false;
   FailureOr<std::unique_ptr<sym::Analysis>> created =
       sym::Analysis::create(S.symbolStore(), assumptions);
   if (failed(created) ||
+      failed(assumeNarrowBindingRanges(S, **created, subs)) ||
       (*created)->integerValued(expr) != sym::CheckResult::True)
     return false;
   if (!isProvablyNonNegative(**created, expr))
@@ -1110,10 +1540,10 @@ static LogicalResult requireNarrowRationalNumerator(WaveAMDMachineSelector &S,
                                                     sym::Analysis &analysis,
                                                     sym::ExprHandle numerator,
                                                     Operation *user) {
-  if (S.slotFitsU32(analysis, numerator))
+  if (rationalNumeratorFitsB32(analysis, numerator))
     return success();
   return user->emitError(
-      "wave.index_expr rational numerator does not provably fit u32");
+      "wave.index_expr rational numerator does not provably fit 32 bits");
 }
 
 static std::optional<int64_t> getStaticInt(WaveAMDMachineSelector &S,
@@ -1435,6 +1865,28 @@ static LogicalResult requireNonNegativeRoundedExpr(sym::Analysis &analysis,
          << opName << " shift lowering needs nonnegative operand";
 }
 
+static Value materializeSignedShrPow2(WaveAMDMachineSelector &S, Location loc,
+                                      Value value, unsigned shift) {
+  if (shift == 0)
+    return value;
+  Value shiftValue = createImm(S.builder, loc, shift);
+  if (std::optional<int64_t> immediate = S.getImmediateValue(value)) {
+    llvm::APInt bits(32, static_cast<uint64_t>(*immediate));
+    return createImm(S.builder, loc, bits.ashr(shift).getSExtValue());
+  }
+  if (S.isUniformValue(value))
+    return waveamdmachine::SAshrI32Op::create(
+               S.builder, loc,
+               getRegType(S.builder.getContext(),
+                          waveamdmachine::RegClass::SGPR),
+               getSCCType(S.builder.getContext()), value, shiftValue)
+        .getResult();
+  return waveamdmachine::VAshrrevI32Op::create(
+      S.builder, loc,
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+      S.ensureVGPRForVSrc1(loc, value), shiftValue);
+}
+
 static FailureOr<Value> materializeFloorRational(WaveAMDMachineSelector &S,
                                                  sym::Analysis &analysis,
                                                  RationalIndexValue value,
@@ -1453,16 +1905,20 @@ static FailureOr<Value> materializeFloorRational(WaveAMDMachineSelector &S,
   if (failed(requireNarrowRationalNumerator(S, analysis, value.numeratorExpr,
                                             user)))
     return failure();
-  if (failed(
-          requireNonNegativeRoundedExpr(analysis, sourceExpr, user, "floor")))
-    return failure();
   if (den > std::numeric_limits<uint32_t>::max())
     return createImm(S.builder, user->getLoc(), 0);
   FailureOr<Value> numerator =
       materializeValue(S, user->getLoc(), value.numerator, user);
   if (failed(numerator))
     return failure();
-  return S.shrPow2(user->getLoc(), *numerator, llvm::Log2_64(den));
+  unsigned shift = llvm::Log2_64(den);
+  if (isProvablyNonNegative(analysis, sourceExpr))
+    return S.shrPow2(user->getLoc(), *numerator, shift);
+  if (!rationalNumeratorFitsI32(analysis, value.numeratorExpr)) {
+    (void)requireNonNegativeRoundedExpr(analysis, sourceExpr, user, "floor");
+    return failure();
+  }
+  return materializeSignedShrPow2(S, user->getLoc(), *numerator, shift);
 }
 
 static FailureOr<Value> materializeWideCeilRational(WaveAMDMachineSelector &S,
@@ -1505,6 +1961,33 @@ static FailureOr<Value> materializeBiasedCeilRational(WaveAMDMachineSelector &S,
   return S.shrPow2(user->getLoc(), biased, llvm::Log2_64(denominator));
 }
 
+static FailureOr<Value>
+materializeSignedCeilRational(WaveAMDMachineSelector &S,
+                              sym::Analysis &analysis, RationalIndexValue value,
+                              sym::ExprHandle sourceExpr, int64_t denominator,
+                              Operation *user) {
+  FailureOr<Value> numerator =
+      materializeValue(S, user->getLoc(), value.numerator, user);
+  FailureOr<sym::ExprHandle> biasExpr =
+      composeRationalInteger(analysis, denominator - 1, user);
+  if (failed(numerator) || failed(biasExpr))
+    return failure();
+  FailureOr<sym::ExprHandle> biasedExpr = composeRationalBinary(
+      analysis, value.numeratorExpr, sym::ExprBinaryOp::Add, *biasExpr, user);
+  if (failed(biasedExpr))
+    return failure();
+  if (!rationalNumeratorFitsI32(analysis, *biasedExpr)) {
+    (void)requireNonNegativeRoundedExpr(analysis, sourceExpr, user, "ceil");
+    return failure();
+  }
+  Value bias = createImm(S.builder, user->getLoc(), denominator - 1);
+  Value biased = S.isUniformValue(*numerator)
+                     ? S.addUniformBytes(user->getLoc(), *numerator, bias)
+                     : S.addByteOffsets(user->getLoc(), *numerator, bias);
+  return materializeSignedShrPow2(S, user->getLoc(), biased,
+                                  llvm::Log2_64(denominator));
+}
+
 static FailureOr<Value> materializeCeilRational(WaveAMDMachineSelector &S,
                                                 sym::Analysis &analysis,
                                                 RationalIndexValue value,
@@ -1523,11 +2006,12 @@ static FailureOr<Value> materializeCeilRational(WaveAMDMachineSelector &S,
   if (failed(requireNarrowRationalNumerator(S, analysis, value.numeratorExpr,
                                             user)))
     return failure();
-  if (failed(requireNonNegativeRoundedExpr(analysis, sourceExpr, user, "ceil")))
-    return failure();
   if (den > std::numeric_limits<uint32_t>::max())
     return materializeWideCeilRational(S, analysis, value, user);
-  return materializeBiasedCeilRational(S, analysis, value, den, user);
+  if (isProvablyNonNegative(analysis, sourceExpr))
+    return materializeBiasedCeilRational(S, analysis, value, den, user);
+  return materializeSignedCeilRational(S, analysis, value, sourceExpr, den,
+                                       user);
 }
 
 static FailureOr<Value> materializeIntegerRationalExpr(
@@ -1956,7 +2440,8 @@ static FailureOr<Value> materializeFloor(WaveAMDMachineSelector &S,
                                          IndexExprAddOrder addOrder) {
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
       sym::Analysis::create(S.symbolStore(), assumptions);
-  if (failed(analysis))
+  if (failed(analysis) ||
+      failed(assumeNarrowBindingRanges(S, **analysis, subs)))
     return failure();
   sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
   FailureOr<RationalIndexValue> value = materializeRationalIndexExprNode(
@@ -1973,7 +2458,8 @@ static FailureOr<Value> materializeCeil(WaveAMDMachineSelector &S,
                                         IndexExprAddOrder addOrder) {
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
       sym::Analysis::create(S.symbolStore(), assumptions);
-  if (failed(analysis))
+  if (failed(analysis) ||
+      failed(assumeNarrowBindingRanges(S, **analysis, subs)))
     return failure();
   sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
   FailureOr<RationalIndexValue> value = materializeRationalIndexExprNode(
@@ -2554,6 +3040,28 @@ bool needsWideAddressMaterialization(sym::ExprHandle expr,
   return needsWideAddressMaterializationImpl(expr, plan);
 }
 
+bool hasRationalIndexExpr(sym::ExprHandle expr) {
+  return expr && containsRationalMaterialization(expr);
+}
+
+bool needsIntegerRationalMaterialization(sym::ExprHandle expr) {
+  return expr && needsRationalMaterialization(expr);
+}
+
+bool requiresWideRationalIntermediates(WaveAMDMachineSelector &S,
+                                       sym::ExprHandle expr,
+                                       ArrayRef<sym::PredHandle> assumptions,
+                                       const llvm::StringMap<Value> &bindings) {
+  if (!hasRationalIndexExpr(expr))
+    return false;
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), assumptions);
+  if (failed(analysis) ||
+      failed(assumeNarrowBindingRanges(S, **analysis, bindings)))
+    return true;
+  return requiresWideRationalIntermediatesImpl(**analysis, expr);
+}
+
 static FailureOr<Value> materializeCompoundIndexExprNode(
     WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
     const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
@@ -2683,7 +3191,8 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 
 FailureOr<AddressPlan>
 planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
-                  const waveamdmachine::AddressFieldSpec &spec) {
+                  const waveamdmachine::AddressFieldSpec &spec,
+                  bool allowFullAddressRemainder) {
   AddressPlan plan;
   plan.bindings = offset.bindings;
   plan.assumptions = offset.assumptions;
@@ -2710,6 +3219,9 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
       S, **analysis, spec, symKinds, candidates->materialExpr, plan);
   if (failed(whole))
     return failure();
+  if (!allowFullAddressRemainder &&
+      candidates->decomposed.fullAddressRemainderExpr)
+    return *whole;
   if (preferWholeAddressPlan(*whole, candidates->decomposed))
     return *whole;
   return candidates->decomposed;
