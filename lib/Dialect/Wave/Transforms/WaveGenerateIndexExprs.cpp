@@ -668,9 +668,11 @@ computeSignedI64Range(Value value, DataFlowSolver &solver, sym::Store &store,
   return computeLeafSignedI64Range(value, solver);
 }
 
-static bool rangeProvesNoSignedOverflow(BinaryOp op, DataFlowSolver &solver,
-                                        sym::Store &store) {
-  if (op.hasNoSignedWrap())
+static bool
+rangeProvesNoSignedOverflow(BinaryOp op, DataFlowSolver &solver,
+                            sym::Store &store,
+                            bool assumeAddressArithmeticNoOverflow = false) {
+  if (op.hasNoSignedWrap() || assumeAddressArithmeticNoOverflow)
     return true;
 
   unsigned bits = elementStorageBitWidth(op.getResult().getType());
@@ -690,12 +692,13 @@ static bool rangeProvesNoSignedOverflow(BinaryOp op, DataFlowSolver &solver,
 }
 
 static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers,
-                                     DataFlowSolver &solver,
-                                     sym::Store &store) {
+                                     DataFlowSolver &solver, sym::Store &store,
+                                     bool assumeAddressArithmeticNoOverflow) {
   if (!isSymbolicBinaryOp(op, allowI64Integers))
     return false;
   if (isNoSignedWrapSymbolicArithmetic(op.getKind()))
-    return rangeProvesNoSignedOverflow(op, solver, store);
+    return rangeProvesNoSignedOverflow(op, solver, store,
+                                       assumeAddressArithmeticNoOverflow);
   switch (op.getKind()) {
   case BinaryKind::XOrI:
   case BinaryKind::ShRUI:
@@ -802,7 +805,8 @@ public:
                                 bool expandIndexExprRoot = false,
                                 bool foldWaveConstants = false,
                                 bool allowWrappingArithmetic = false,
-                                bool modelWrappingArithmetic = false)
+                                bool modelWrappingArithmetic = false,
+                                bool assumeAddressArithmeticNoOverflow = false)
       : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
         allowI64Integers(allowI64Integers),
         assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
@@ -810,7 +814,8 @@ public:
         expandIndexExprRoot(expandIndexExprRoot),
         foldWaveConstants(foldWaveConstants),
         allowWrappingArithmetic(allowWrappingArithmetic),
-        modelWrappingArithmetic(modelWrappingArithmetic) {}
+        modelWrappingArithmetic(modelWrappingArithmetic),
+        assumeAddressArithmeticNoOverflow(assumeAddressArithmeticNoOverflow) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     return build(value, /*allowRootLeaf=*/false);
@@ -860,7 +865,8 @@ private:
   }
 
   bool canBuildBinary(BinaryOp op) {
-    if (canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store))
+    if (canBuildSymbolicBinaryOp(op, allowI64Integers, solver, store,
+                                 assumeAddressArithmeticNoOverflow))
       return true;
     if ((!allowWrappingArithmetic && !modelWrappingArithmetic) ||
         !isSignlessI32StorageType(op.getResult().getType()))
@@ -870,7 +876,8 @@ private:
 
   bool shouldModelWrappingBinary(BinaryOp op) {
     return modelWrappingArithmetic && isWrappingArithmeticKind(op.getKind()) &&
-           !rangeProvesNoSignedOverflow(op, solver, store);
+           !rangeProvesNoSignedOverflow(op, solver, store,
+                                        assumeAddressArithmeticNoOverflow);
   }
 
   static bool isMaskSelect(SelectOp select) {
@@ -1631,7 +1638,12 @@ private:
     if (std::optional<SignedI64Range> range =
             computeSignedI64Range(value, solver, store))
       return intersectRange(range, signedI32StorageRange());
-    SymbolicValueBuilder expanded(dialect, solver, allowI64Integers);
+    SymbolicValueBuilder expanded(
+        dialect, solver, allowI64Integers,
+        /*assumeI32StorageRange=*/false, /*bindI32Root=*/false,
+        /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/false,
+        /*foldWaveConstants=*/false, /*allowWrappingArithmetic=*/false,
+        /*modelWrappingArithmetic=*/false, assumeAddressArithmeticNoOverflow);
     FailureOr<std::optional<SymbolicOffset>> symbolic = expanded.build(value);
     if (failed(symbolic) || !*symbolic || !(*symbolic)->expr)
       return std::nullopt;
@@ -1785,6 +1797,7 @@ private:
   bool foldWaveConstants = false;
   bool allowWrappingArithmetic = false;
   bool modelWrappingArithmetic = false;
+  bool assumeAddressArithmeticNoOverflow = false;
   unsigned nextRawSymbol = 0;
 };
 
@@ -1796,7 +1809,10 @@ mlir::wave::buildSymbolicIndexValue(Value value, WaveDialect &dialect,
   SymbolicValueBuilder builder(
       dialect, solver, /*allowI64Integers=*/false,
       /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
-      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true);
+      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
+      /*foldWaveConstants=*/false, /*allowWrappingArithmetic=*/false,
+      /*modelWrappingArithmetic=*/false,
+      hasAddressArithmeticNoOverflowAssumption(value));
   return builder.buildAllowingRootLeaf(value);
 }
 
@@ -1915,6 +1931,20 @@ static bool hasGlobalPointerBase(PtrAddOp op) {
   return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
 }
 
+static bool shouldPreserveUniformI32GlobalOffset(PtrAddOp op,
+                                                 const SymbolicOffset &offset,
+                                                 WaveDialect &dialect) {
+  IntegerType type = dyn_cast<IntegerType>(op.getOffset().getType());
+  if (!type || !type.isSignless() || type.getWidth() != 32 ||
+      !hasGlobalPointerBase(op))
+    return false;
+
+  // Index widening changes negative i32 offsets; require a U31 proof.
+  return !sym::provablyInRange(dialect.getSymbolStore(), offset.expr,
+                               offset.assumptions, 0,
+                               std::numeric_limits<int32_t>::max());
+}
+
 static Type getIndexExprType(MLIRContext *ctx,
                              ArrayRef<IndexExprBinding> bindings) {
   SmallVector<Value> values;
@@ -1932,11 +1962,18 @@ static Type getIndexExprType(MLIRContext *ctx, const SymbolicOffset &offset) {
 
 static SymbolicValueBuilder
 createGeneratedIndexExprBuilder(WaveDialect &dialect, DataFlowSolver &solver,
+                                Operation *addressOp,
                                 bool allowI64Integers = false) {
-  return SymbolicValueBuilder(dialect, solver, allowI64Integers,
-                              /*assumeI32StorageRange=*/true,
-                              /*bindI32Root=*/false,
-                              /*requireI32RootRange=*/false);
+  return SymbolicValueBuilder(
+      dialect, solver, allowI64Integers,
+      /*assumeI32StorageRange=*/true,
+      /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false,
+      /*expandIndexExprRoot=*/false,
+      /*foldWaveConstants=*/false,
+      /*allowWrappingArithmetic=*/false,
+      /*modelWrappingArithmetic=*/false,
+      hasAddressArithmeticNoOverflowAssumption(addressOp));
 }
 
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
@@ -1947,12 +1984,14 @@ static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
     return false;
 
   SymbolicValueBuilder builder = createGeneratedIndexExprBuilder(
-      dialect, solver, hasGlobalPointerBase(op));
+      dialect, solver, op, hasGlobalPointerBase(op));
   FailureOr<std::optional<SymbolicOffset>> offset =
       builder.build(op.getOffset());
   if (failed(offset))
     return op.emitError("failed to generate wave.index_expr offset");
   if (!*offset)
+    return false;
+  if (shouldPreserveUniformI32GlobalOffset(op, **offset, dialect))
     return false;
 
   Type indexType = getIndexExprType(op.getContext(), **offset);
@@ -2056,12 +2095,17 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
   if (shouldPreserveGeneratedBinding(value, preserveI32Binding))
     return preserveGeneratedBinding(state, name, value);
 
-  SymbolicValueBuilder builder(dialect, solver,
-                               /*allowI64Integers=*/false,
-                               /*assumeI32StorageRange=*/true,
-                               /*bindI32Root=*/false,
-                               /*requireI32RootRange=*/false,
-                               /*expandIndexExprRoot=*/true);
+  SymbolicValueBuilder builder(
+      dialect, solver,
+      /*allowI64Integers=*/false,
+      /*assumeI32StorageRange=*/true,
+      /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false,
+      /*expandIndexExprRoot=*/true,
+      /*foldWaveConstants=*/false,
+      /*allowWrappingArithmetic=*/false,
+      /*modelWrappingArithmetic=*/false,
+      hasAddressArithmeticNoOverflowAssumption(op.getOperation()));
   FailureOr<std::optional<SymbolicOffset>> symbolic = builder.build(value);
   if (failed(symbolic))
     return op.emitError("failed to generate wave.index_expr binding");

@@ -570,6 +570,75 @@ func.func @simd_stride_scalar_base(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 
 // -----
 
+// CHECK-LABEL: func.func @address_contract_expands_unflagged_stride
+// CHECK: %[[WI:.*]] = wave.workitem_id 0
+// CHECK: %[[BASE_OFF:.*]] = wave.index_expr <"8 + 64*Mod(wi, 16)">
+// CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE_OFF]]
+// CHECK: %[[STRIDE:.*]] = wave.index_expr <"4"> []() : () -> index
+// CHECK: scf.for {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
+// CHECK: wave.load %[[PTR]]
+// CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
+// CHECK: scf.yield %[[NEXT]]
+func.func @address_contract_expands_unflagged_stride(
+    %a: !wave.ptr<#wave.global, i8>, %n: i32)
+    attributes {wave.address_arithmetic_no_overflow, wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c8 = arith.constant 8 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %scaled = wave.binary muli %i, %c2 : i32, i32 -> i32
+    %shifted = wave.binary shli %scaled, %c1 : i32, i32 -> i32
+    %offset = wave.binary addi %shifted, %c8 : i32, i32 -> i32
+    %off = wave.index_expr <"x + 64*Mod(wi, 16)"> ["x", "wi"]
+        (%offset, %wi)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @unflagged_stride_without_contract_stays_in_loop
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK: wave.binary muli
+// CHECK: wave.binary shli
+// CHECK: wave.binary addi
+// CHECK: wave.index_expr <"x + 64*Mod(wi, 16)">
+func.func @unflagged_stride_without_contract_stays_in_loop(
+    %a: !wave.ptr<#wave.global, i8>, %n: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c8 = arith.constant 8 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %scaled = wave.binary muli %i, %c2 : i32, i32 -> i32
+    %shifted = wave.binary shli %scaled, %c1 : i32, i32 -> i32
+    %offset = wave.binary addi %shifted, %c8 : i32, i32 -> i32
+    %off = wave.index_expr <"x + 64*Mod(wi, 16)"> ["x", "wi"]
+        (%offset, %wi)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#wave.global, i8>, 32>)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @drop_dead_simd_offset_carries
 // CHECK-SAME: %[[A:.*]]: !wave.ptr<#wave.global, i32>
 // CHECK: %[[WI:.*]] = wave.workitem_id 0

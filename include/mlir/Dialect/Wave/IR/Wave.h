@@ -122,6 +122,8 @@ FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     function_ref<InFlightDiagnostic(const Twine &)> emitError);
 std::optional<PtrType> getWavePointerType(Type type);
 bool isWavePointerLikeType(Type type);
+bool hasAddressArithmeticNoOverflowAssumption(Operation *op);
+bool hasAddressArithmeticNoOverflowAssumption(Value value);
 FailureOr<std::optional<MemoryAddress>>
 normalizeMemoryAddress(Value ptr, WaveDialect &dialect);
 FailureOr<std::optional<sym::ExprHandle>>

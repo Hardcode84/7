@@ -338,7 +338,8 @@ resultRange(BinaryOp op, std::pair<int64_t, int64_t> lhs,
 }
 
 static bool rangeProvesNoSignedOverflow(BinaryOp op, DataFlowSolver &solver) {
-  if (op.hasNoSignedWrap())
+  if (op.hasNoSignedWrap() ||
+      hasAddressArithmeticNoOverflowAssumption(op.getOperation()))
     return true;
 
   unsigned bits = elementStorageBitWidth(op.getResult().getType());

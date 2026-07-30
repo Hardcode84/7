@@ -24,8 +24,9 @@ namespace {
 
 class MemoryAddressOffsetBuilder {
 public:
-  explicit MemoryAddressOffsetBuilder(WaveDialect &dialect)
-      : store(dialect.getSymbolStore()) {}
+  explicit MemoryAddressOffsetBuilder(WaveDialect &dialect,
+                                      bool assumeNoOverflow)
+      : store(dialect.getSymbolStore()), assumeNoOverflow(assumeNoOverflow) {}
 
   LogicalResult append(Value offset, bool &skip) {
     if (IndexExprOp indexExpr = offset.getDefiningOp<IndexExprOp>())
@@ -147,19 +148,23 @@ private:
 
   FailureOr<sym::ExprHandle> buildBinaryValueExpr(BinaryOp bin, bool &skip,
                                                   unsigned depth) {
-    if (bin.getKind() == BinaryKind::AddI && bin.hasNoSignedWrap())
+    if (bin.getKind() == BinaryKind::AddI && hasNoSignedOverflow(bin))
       return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Add, bin.getRhs(),
                              skip, depth);
-    if (bin.getKind() == BinaryKind::MulI && bin.hasNoSignedWrap())
+    if (bin.getKind() == BinaryKind::MulI && hasNoSignedOverflow(bin))
       return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Mul, bin.getRhs(),
                              skip, depth);
-    if (bin.getKind() == BinaryKind::ShLI && bin.hasNoSignedWrap())
+    if (bin.getKind() == BinaryKind::ShLI && hasNoSignedOverflow(bin))
       return buildShiftExpr(bin, skip, depth);
     if (bin.getKind() == BinaryKind::XOrI)
       return buildBinaryExpr(bin.getLhs(), sym::ExprBinaryOp::Xor, bin.getRhs(),
                              skip, depth);
     skip = true;
     return failure();
+  }
+
+  bool hasNoSignedOverflow(BinaryOp op) const {
+    return op.hasNoSignedWrap() || assumeNoOverflow;
   }
 
   FailureOr<sym::ExprHandle> buildBinaryExpr(Value lhs, sym::ExprBinaryOp op,
@@ -176,7 +181,10 @@ private:
 
   FailureOr<sym::ExprHandle> buildShiftExpr(BinaryOp op, bool &skip,
                                             unsigned depth) {
-    std::optional<int64_t> shift = getConstantIntValue(op.getRhs());
+    Value shiftValue = op.getRhs();
+    if (SplatOp splat = shiftValue.getDefiningOp<SplatOp>())
+      shiftValue = splat.getSource();
+    std::optional<int64_t> shift = getConstantIntValue(shiftValue);
     if (!shift || *shift < 0 || *shift >= 63) {
       skip = true;
       return failure();
@@ -238,6 +246,7 @@ private:
   sym::Store &store;
   sym::ExprHandle expr;
   unsigned nextRawSymbol = 0;
+  bool assumeNoOverflow = false;
 };
 
 static SmallVector<PtrAddOp> collectPtrAddChain(PtrAddOp op) {
@@ -333,7 +342,8 @@ mlir::wave::normalizeMemoryAddress(Value ptr, WaveDialect &dialect) {
   if (!isWavePointerLikeType(ptr.getType()))
     return std::optional<MemoryAddress>{};
 
-  MemoryAddressOffsetBuilder builder(dialect);
+  MemoryAddressOffsetBuilder builder(
+      dialect, hasAddressArithmeticNoOverflowAssumption(ptr));
   if (PtrAddOp ptrAdd = ptr.getDefiningOp<PtrAddOp>()) {
     bool skip = false;
     SmallVector<PtrAddOp> chain = collectPtrAddChain(ptrAdd);

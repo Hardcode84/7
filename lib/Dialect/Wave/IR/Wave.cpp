@@ -2157,6 +2157,21 @@ static bool hasContract(arith::FastMathFlags flags) {
   return arith::bitEnumContainsAll(flags, arith::FastMathFlags::contract);
 }
 
+bool mlir::wave::hasAddressArithmeticNoOverflowAssumption(Operation *op) {
+  for (Operation *scope = op; scope; scope = scope->getParentOp())
+    if (scope->hasAttr("wave.address_arithmetic_no_overflow"))
+      return true;
+  return false;
+}
+
+bool mlir::wave::hasAddressArithmeticNoOverflowAssumption(Value value) {
+  if (Operation *definingOp = value.getDefiningOp())
+    return hasAddressArithmeticNoOverflowAssumption(definingOp);
+  BlockArgument argument = dyn_cast<BlockArgument>(value);
+  return argument && hasAddressArithmeticNoOverflowAssumption(
+                         argument.getOwner()->getParentOp());
+}
+
 namespace {
 struct FuseFAddFMul final : OpRewritePattern<FAddOp> {
   using OpRewritePattern::OpRewritePattern;

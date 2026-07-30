@@ -575,6 +575,83 @@ func.func @multi_use_scalar_ptr_add_offset_expands(
 
 // -----
 
+// CHECK-LABEL: func.func @address_contract_keeps_unbounded_uniform_i32_global
+func.func @address_contract_keeps_unbounded_uniform_i32_global(
+    %out: !wave.ptr<#wave.global, i8>, %x: i32, %y: i32)
+    -> !wave.ptr<#wave.global, i8>
+    attributes {wave.address_arithmetic_no_overflow} {
+  // CHECK: [[SUM:%.*]] = wave.binary addi
+  %sum = wave.binary addi %x, %y : i32, i32 -> i32
+  // CHECK-NOT: wave.index_expr
+  // CHECK: wave.ptr_add %{{.*}}, [[SUM]]
+  %ptr = wave.ptr_add %out, %sum
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#wave.global, i8>
+  return %ptr : !wave.ptr<#wave.global, i8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @address_contract_widens_bounded_uniform_i32_global
+func.func @address_contract_widens_bounded_uniform_i32_global(
+    %out: !wave.ptr<#wave.global, i8>, %x: i32, %y: i32)
+    -> !wave.ptr<#wave.global, i8>
+    attributes {wave.address_arithmetic_no_overflow} {
+  %sum = wave.binary addi %x, %y : i32, i32 -> i32
+  %bounded = wave.assume %sum as "offset"
+      [#wave.pred<"offset >= 0">, #wave.pred<"offset <= 31">] : i32
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"raw0 + raw1">
+  // CHECK-SAME: assuming
+  // CHECK-SAME: #wave.pred<"raw0 + raw1 >= 0">
+  // CHECK-SAME: #wave.pred<"-31 + raw0 + raw1 <= 0">
+  // CHECK-SAME: ["raw0", "raw1"](%{{.*}}, %{{.*}}) : (i32, i32) -> index
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %bounded
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#wave.global, i8>
+  return %ptr : !wave.ptr<#wave.global, i8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @address_contract_expands_unflagged_simd_arithmetic
+func.func @address_contract_expands_unflagged_simd_arithmetic(
+    %out: !wave.ptr<#wave.global, i8>, %x: !wave.simd<i32, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+    attributes {wave.address_arithmetic_no_overflow} {
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
+  %scaled = wave.binary muli %x, %s2
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %shifted = wave.binary shli %scaled, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %offset = wave.binary addi %shifted, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"1 + 4*raw0">
+  // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
+  %ptr = wave.ptr_add %out, %offset
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+  return %ptr : !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @address_contract_expands_index_expr_binding
+func.func @address_contract_expands_index_expr_binding(%x: i32, %y: i32)
+    -> index attributes {wave.address_arithmetic_no_overflow} {
+  %sum = wave.binary addi %x, %y : i32, i32 -> i32
+  // CHECK: wave.index_expr <"2*(raw0 + raw1)">
+  // CHECK-SAME: ["raw0", "raw1"](%arg0, %arg1) : (i32, i32) -> index
+  %index = wave.index_expr <"2*z"> ["z"](%sum) : (i32) -> index
+  return %index : index
+}
+
+// -----
+
 // CHECK-LABEL: func.func @multi_use_identity_binding_stays_shared
 func.func @multi_use_identity_binding_stays_shared(
     %idx_raw: !wave.simd<i32, 32>)

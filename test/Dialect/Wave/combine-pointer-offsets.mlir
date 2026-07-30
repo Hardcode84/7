@@ -68,6 +68,40 @@ func.func @unflagged_raw_wave_arith_skips(%out: !wave.ptr<#wave.global, i32>)
 
 // -----
 
+// CHECK-LABEL: func.func @address_contract_composes_unflagged_arithmetic
+func.func @address_contract_composes_unflagged_arithmetic(
+    %out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.address_arithmetic_no_overflow, wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c8 = arith.constant 8 : i32
+  %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %s2 = wave.splat %c2 : i32 -> !wave.simd<i32, 32>
+  %scaled = wave.binary muli %lane, %s2
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %shifted = wave.binary shli %scaled, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %offset = wave.binary addi %shifted, %s1
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %base = wave.ptr_add %out, %c8
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
+  // CHECK: %[[OFF:.*]] = wave.index_expr <"9 + 4*raw0">
+  // CHECK: wave.ptr_add %arg0, %[[OFF]]
+  %ptrs = wave.ptr_add %base, %offset
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %value, %token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @raw_wave_xor
 func.func @raw_wave_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
