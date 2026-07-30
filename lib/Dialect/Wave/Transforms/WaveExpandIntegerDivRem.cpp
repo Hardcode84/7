@@ -30,6 +30,7 @@
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEEXPANDINTEGERDIVREM
+#define GEN_PASS_DEF_WAVENORMALIZEINTEGERDIVREM
 #define GEN_PASS_DEF_WAVESTRENGTHREDUCEMODULO
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 } // namespace mlir::wave
@@ -1349,6 +1350,44 @@ public:
     IRRewriter rewriter(root->getContext());
     if (failed(strengthReduceModuloRecurrences(root, rewriter, solver, store)))
       return signalPassFailure();
+  }
+};
+
+class WaveNormalizeIntegerDivRemPass
+    : public wave::impl::WaveNormalizeIntegerDivRemBase<
+          WaveNormalizeIntegerDivRemPass> {
+public:
+  void runOnOperation() override {
+    Operation *root = getOperation();
+    SmallVector<BinaryOp> ops;
+    root->walk([&](BinaryOp op) {
+      if (isSignedDivRem(op.getKind()))
+        ops.push_back(op);
+    });
+    if (ops.empty())
+      return;
+
+    DataFlowSolver solver;
+    dataflow::loadBaselineAnalyses(solver);
+    solver.load<dataflow::IntegerRangeAnalysis>();
+    if (failed(solver.initializeAndRun(root))) {
+      root->emitError(
+          "IntegerRangeAnalysis failed for integer div/rem normalization");
+      return signalPassFailure();
+    }
+
+    sym::Store &store =
+        root->getContext()->getLoadedDialect<WaveDialect>()->getSymbolStore();
+    IRRewriter rewriter(root->getContext());
+    for (BinaryOp op : ops) {
+      if (!isProvenNonNegative(solver, store, op.getLhs()) ||
+          !isProvenPositive(solver, store, op.getRhs()))
+        continue;
+      rewriter.modifyOpInPlace(op, [&] {
+        op.setKind(op.getKind() == BinaryKind::DivSI ? BinaryKind::DivUI
+                                                     : BinaryKind::RemUI);
+      });
+    }
   }
 };
 

@@ -1,5 +1,7 @@
 // RUN: wave-opt --split-input-file --wave-strength-reduce-modulo \
 // RUN:   --wave-expand-integer-div-rem --canonicalize --cse %s | FileCheck %s
+// RUN: wave-opt --split-input-file --wave-normalize-integer-div-rem %s \
+// RUN:   | FileCheck %s --check-prefix=NORMALIZE
 
 // CHECK-LABEL: func.func @dynamic_unsigned_i32
 // CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
@@ -59,6 +61,9 @@ func.func @signed_simd_i32(%x: !wave.simd<i32, 32>, %d: i32)
 // CHECK: [[RCP:%.*]] = wave.urecip [[POS]]
 // CHECK: wave.binary mulhui [[NONNEG]]
 // CHECK-NOT: divsi
+// NORMALIZE-LABEL: func.func @signed_dynamic_i32_nonnegative_positive
+// NORMALIZE: wave.binary divui
+// NORMALIZE-NOT: wave.binary divsi
 func.func @signed_dynamic_i32_nonnegative_positive(%x: i32, %d: i32)
     -> i32 {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
@@ -75,6 +80,9 @@ func.func @signed_dynamic_i32_nonnegative_positive(%x: i32, %d: i32)
 // CHECK-NOT: arith.cmpi slt
 // CHECK: wave.binary mulhui [[NONNEG]]
 // CHECK-NOT: remsi
+// NORMALIZE-LABEL: func.func @signed_const_i32_rem3_nonnegative
+// NORMALIZE: wave.binary remui
+// NORMALIZE-NOT: wave.binary remsi
 func.func @signed_const_i32_rem3_nonnegative(%x: i32) -> i32 {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %three = arith.constant 3 : i32
@@ -94,6 +102,9 @@ func.func @signed_const_i32_rem3_nonnegative(%x: i32) -> i32 {
 // CHECK: return
 // CHECK-NOT: divsi
 // CHECK-NOT: remsi
+// NORMALIZE-LABEL: func.func @signed_const_i32_divrem_unknown_sign
+// NORMALIZE: wave.binary divsi
+// NORMALIZE: wave.binary remsi
 func.func @signed_const_i32_divrem_unknown_sign(%x: i32) -> (i32, i32) {
   %three = arith.constant 3 : i32
   %q = wave.binary divsi %x, %three : i32, i32 -> i32
@@ -112,6 +123,10 @@ func.func @signed_const_i32_divrem_unknown_sign(%x: i32) -> (i32, i32) {
 // CHECK-NOT: wave.binary andi
 // CHECK: return
 // CHECK-NOT: remsi
+// NORMALIZE-LABEL: func.func @signed_const_simd_i32_rem_negative_divisor
+// NORMALIZE: wave.binary remsi
+// NORMALIZE-NOT: wave.binary remui
+// NORMALIZE: return
 func.func @signed_const_simd_i32_rem_negative_divisor(
     %x: !wave.simd<i32, 32>) -> !wave.simd<i32, 32> {
   %minus_three = arith.constant -3 : i32
@@ -119,6 +134,23 @@ func.func @signed_const_simd_i32_rem_negative_divisor(
   %r = wave.binary remsi %x, %divisor
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   return %r : !wave.simd<i32, 32>
+}
+
+// -----
+
+// NORMALIZE-LABEL: func.func @signed_dynamic_nonpositive_divisor
+// NORMALIZE: wave.binary divsi
+// NORMALIZE: wave.binary remsi
+// NORMALIZE-NOT: wave.binary divui
+// NORMALIZE-NOT: wave.binary remui
+// NORMALIZE: return
+func.func @signed_dynamic_nonpositive_divisor(%x: i32, %d: i32)
+    -> (i32, i32) {
+  %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
+  %nonpos = wave.assume %d as "d" [#wave.pred<"d <= 0">] : i32
+  %q = wave.binary divsi %nonneg, %nonpos : i32, i32 -> i32
+  %r = wave.binary remsi %nonneg, %nonpos : i32, i32 -> i32
+  return %q, %r : i32, i32
 }
 
 // -----
@@ -574,4 +606,20 @@ func.func @bounded_dynamic_simd_index_rem_uses_i32(
       : !wave.simd<index, 32>, !wave.simd<index, 32>
       -> !wave.simd<index, 32>
   return %r : !wave.simd<index, 32>
+}
+
+// -----
+
+// NORMALIZE-LABEL: func.func @normalize_workgroup_divrem
+// NORMALIZE: %[[WG:.*]] = wave.workgroup_id 0
+// NORMALIZE: %[[DIV:.*]] = wave.binary divui %[[WG]]
+// NORMALIZE: %[[REM:.*]] = wave.binary remui %[[WG]]
+// NORMALIZE-NOT: wave.binary divsi
+// NORMALIZE-NOT: wave.binary remsi
+func.func @normalize_workgroup_divrem() -> (i32, i32) {
+  %wg = wave.workgroup_id 0
+  %eight = arith.constant 8 : i32
+  %q = wave.binary divsi %wg, %eight : i32, i32 -> i32
+  %r = wave.binary remsi %wg, %eight : i32, i32 -> i32
+  return %q, %r : i32, i32
 }

@@ -20,7 +20,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rmeta = transform.apply_registered_pass "canonicalize" to %rm
         : (!transform.any_op) -> !transform.any_op
-    %rmemory = transform.apply_registered_pass "wave-lower-symbolic-memory" to %rmeta
+    %rdivnorm = transform.apply_registered_pass "wave-normalize-integer-div-rem" to %rmeta
+        : (!transform.any_op) -> !transform.any_op
+    %rmemory = transform.apply_registered_pass "wave-lower-symbolic-memory" to %rdivnorm
         : (!transform.any_op) -> !transform.any_op
     %rredistribute = transform.apply_registered_pass "wave-lower-redistribute" to %rmemory
         : (!transform.any_op) -> !transform.any_op

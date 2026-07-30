@@ -309,6 +309,22 @@ def WaveStrengthReduceModulo : Pass<"wave-strength-reduce-modulo"> {
   ];
 }
 
+def WaveNormalizeIntegerDivRem : Pass<"wave-normalize-integer-div-rem"> {
+  let summary = "Canonicalize proven-nonnegative signed integer div/rem";
+  let description = [{
+    Rewrites signed Wave integer div/rem to the corresponding unsigned
+    operation when integer-range analysis proves that the dividend is
+    nonnegative and the divisor is positive. This preserves the source
+    semantics while making the unsigned result domain explicit to downstream
+    symbolic index and address analysis.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveExpandIntegerDivRem : Pass<"wave-expand-integer-div-rem"> {
   let summary = "Expand Wave integer div/rem into primitive integer ops";
   let description = [{
