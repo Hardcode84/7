@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDBufferRsrcToTuples.cpp
   WaveAMDCrossLanePeepholes.cpp
   WaveAMDDecomposeMemTuples.cpp
+  WaveAMDDeduplicateWrites.cpp
   WaveAMDDmaZeroFill.cpp
   WaveAMDElideSCCBoolRoundtrip.cpp
   WaveAMDFormFusedInt.cpp

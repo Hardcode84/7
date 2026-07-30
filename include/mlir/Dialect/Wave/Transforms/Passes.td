@@ -280,6 +280,21 @@ def WaveAMDDmaZeroFill : Pass<"waveamd-dma-zero-fill"> {
   ];
 }
 
+def WaveAMDDeduplicateWrites
+    : Pass<"waveamd-deduplicate-writes"> {
+  let summary = "Collapse identical joined Wave memory writes";
+  let description = [{
+    Removes identical `wave.store` and `waveamd.dma_load_lds` operations whose
+    tokens are used only by the same `wave.join`. The surviving token keeps
+    explicit completion and async group membership.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
+  ];
+}
+
 def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
   let summary = "Expose IV-linear Wave pointer offsets as loop-carried strides";
   let description = [{
