@@ -123,40 +123,30 @@ _a4w4_kernel:
 		v_mov_b32_e32 v1, s21
 		v_cvt_f32_u32_e32 v1, v1
 		v_rcp_iflag_f32_e32 v1, v1
-		s_cselect_b32 s23, 1, 0
-		s_xor_b32 s24, s21, -1
-		v_mul_f32_e32 v1, v2, v1
-		v_cvt_u32_f32_e32 v1, v1
-		s_add_i32 s24, s24, 1
-		v_readfirstlane_b32 s25, v1
-		s_mul_i32 s26, s24, s25
-		s_mul_hi_u32 s26, s25, s26
-		s_add_i32 s25, s25, s26
-		s_mul_hi_u32 s25, s13, s25
-		s_mul_i32 s25, s25, s21
-		s_xor_b32 s25, s25, -1
-		s_add_i32 s25, s25, 1
-		s_add_i32 s25, s13, s25
-		s_add_i32 s26, s25, s24
-		s_cmp_ge_u32 s25, s21
-		s_cselect_b32 s25, s26, s25
-		s_add_i32 s24, s25, s24
-		s_cmp_ge_u32 s25, s21
-		s_cselect_b32 s21, s24, s25
-		s_xor_b32 s24, s21, -1
-		s_add_i32 s24, s24, 1
-		s_cmp_lg_u32 s20, 0
-		s_cselect_b32 s20, s24, s21
-		s_add_i32 s16, s16, s20
-		s_cmp_lg_u32 s23, 0
-		s_cselect_b32 s21, s22, s0
-		v_mov_b32_e32 v1, s21
-		v_cvt_f32_u32_e32 v1, v1
-		v_rcp_iflag_f32_e32 v1, v1
 		s_xor_b32 s22, s21, -1
 		v_mul_f32_e32 v1, v2, v1
 		v_cvt_u32_f32_e32 v1, v1
 		s_add_i32 s22, s22, 1
+		v_readfirstlane_b32 s23, v1
+		s_mul_i32 s24, s22, s23
+		s_mul_hi_u32 s24, s23, s24
+		s_add_i32 s23, s23, s24
+		s_mul_hi_u32 s23, s13, s23
+		s_mul_i32 s23, s23, s21
+		s_xor_b32 s23, s23, -1
+		s_add_i32 s23, s23, 1
+		s_add_i32 s23, s13, s23
+		s_add_i32 s24, s23, s22
+		s_cmp_ge_u32 s23, s21
+		s_cselect_b32 s23, s24, s23
+		s_add_i32 s24, s23, s22
+		s_cmp_ge_u32 s23, s21
+		s_cselect_b32 s23, s24, s23
+		s_xor_b32 s24, s23, -1
+		s_add_i32 s24, s24, 1
+		s_cmp_lg_u32 s20, 0
+		s_cselect_b32 s20, s24, s23
+		s_add_i32 s16, s16, s20
 		v_readfirstlane_b32 s23, v1
 		s_mul_i32 s24, s22, s23
 		s_mul_hi_u32 s24, s23, s24

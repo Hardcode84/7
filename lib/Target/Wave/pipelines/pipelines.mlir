@@ -163,9 +163,7 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
         : (!transform.any_op) -> !transform.any_op
-    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rclr
-        : (!transform.any_op) -> !transform.any_op
-    %rc = transform.apply_registered_pass "canonicalize" to %r4
+    %rc = transform.apply_registered_pass "canonicalize" to %rclr
         : (!transform.any_op) -> !transform.any_op
     %rcs = transform.apply_registered_pass "cse" to %rc
         : (!transform.any_op) -> !transform.any_op
@@ -178,7 +176,10 @@ module attributes {transform.with_named_sequence} {
     %rrepair = transform.apply_registered_pass "waveamd-hazard-repair" with
         options = { "hoist-m0-across-regions" = false } to %rpack
         : (!transform.any_op) -> !transform.any_op
-    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%rrepair)
+    // Preserve singleton values after hazard repair's instruction motion.
+    %r4 = transform.apply_registered_pass "waveamd-preserve-hw-regs" to %rrepair
+        : (!transform.any_op) -> !transform.any_op
+    %r5 = transform.include @waveamd_regalloc_transform_loop failures(propagate) (%r4)
         : (!transform.any_op) -> !transform.any_op
     %r9 = transform.include @waveamd_backend_post_regalloc failures(propagate) (%r5)
         : (!transform.any_op) -> !transform.any_op

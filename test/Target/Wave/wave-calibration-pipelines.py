@@ -220,13 +220,13 @@ def check_transform_finish(label: str, ir, transform_finish) -> None:
         transform_finish_passes,
         [
             "waveamd-clear-regalloc-assignments",
-            "waveamd-preserve-hw-regs",
             "canonicalize",
             "cse",
             "waveamd-late-tuples",
             "waveamd-prepare-regalloc",
             "waveamd-pack-vgpr-zero-moves",
             "waveamd-hazard-repair",
+            "waveamd-preserve-hw-regs",
         ],
         "transform finish cleanup order drifted",
     )

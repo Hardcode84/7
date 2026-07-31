@@ -725,7 +725,6 @@ tlx_addmm_glu_kernel_persistent:
 		v_add_u32_e32 v69, v48, v43
 		s_mov_b32 s68, 0
 		s_mov_b32 s69, 0
-		s_cmp_lg_u32 s21, 0
 		v_mov_b64_e32 v[108:109], 0
 		v_mov_b64_e32 v[110:111], 0
 		v_mov_b64_e32 v[112:113], 0
@@ -756,6 +755,7 @@ tlx_addmm_glu_kernel_persistent:
 		v_mov_b64_e32 v[162:163], 0
 		v_mov_b64_e32 v[164:165], 0
 		v_mov_b64_e32 v[166:167], 0
+		s_cmp_lg_u32 s21, 0
 		s_cbranch_scc0 .Ltlx_addmm_glu_kernel_persistent.loop_exit_1
 .Ltlx_addmm_glu_kernel_persistent.loop_head_1:
 		v_mfma_f32_16x16x32_f16 v[72:75], v[92:95], v[76:79], v[72:75]
@@ -770,10 +770,9 @@ tlx_addmm_glu_kernel_persistent:
 		s_cmp_lg_u32 s71, 0
 		s_cselect_b32 s71, s72, s73
 		v_mfma_f32_16x16x32_f16 v[120:123], v[92:95], v[80:83], v[120:123]
-		s_cselect_b32 s74, 1, 0
-		s_add_i32 s75, s69, 3
+		s_add_i32 s72, s69, 3
 		v_mfma_f32_16x16x32_f16 v[124:127], v[96:99], v[80:83], v[124:127]
-		s_mul_i32 s75, s75, 32
+		s_mul_i32 s72, s72, 32
 		v_mfma_f32_16x16x32_f16 v[128:131], v[100:103], v[80:83], v[128:131]
 		v_mfma_f32_16x16x32_f16 v[144:147], v[100:103], v[84:87], v[144:147]
 		v_mfma_f32_16x16x32_f16 v[136:139], v[92:95], v[84:87], v[136:139]
@@ -785,25 +784,25 @@ tlx_addmm_glu_kernel_persistent:
 		v_mfma_f32_16x16x32_f16 v[160:163], v[100:103], v[88:91], v[160:163]
 		s_setprio 1
 		s_barrier
-		s_xor_b32 s75, s75, -1
-		s_add_i32 s75, s75, 1
-		s_add_i32 s75, s14, s75
-		v_cmp_lt_i32_e64 vcc, v27, s75
-		v_cmp_lt_i32_e64 s[76:77], v29, s75
-		s_lshl_b32 s78, s69, 6
+		s_xor_b32 s72, s72, -1
+		s_add_i32 s72, s72, 1
+		s_add_i32 s72, s14, s72
+		v_cmp_lt_i32_e64 vcc, v27, s72
+		v_cmp_lt_i32_e64 s[74:75], v29, s72
+		s_lshl_b32 s73, s69, 6
 		v_cndmask_b32_e32 v43, v40, v69, vcc
-		s_mul_i32 s79, 0x2100, s68
-		v_cmp_lt_i32_e64 vcc, v10, s75
-		s_add_i32 m0, s65, s79
+		s_mul_i32 s76, 0x2100, s68
+		v_cmp_lt_i32_e64 vcc, v10, s72
+		s_add_i32 m0, s65, s76
 		s_mul_i32 s68, 0x4200, s68
-		buffer_load_dwordx4 v43, s[40:43], s78 offen lds
-		s_mul_i32 s75, s17, s69
-		s_lshl_b32 s75, s75, 6
-		s_add_i32 s75, s58, s75
-		v_add_u32_e32 v43, s75, v71
-		v_cndmask_b32_e64 v43, v40, v43, s[76:77]
+		buffer_load_dwordx4 v43, s[40:43], s73 offen lds
+		s_mul_i32 s72, s17, s69
+		s_lshl_b32 s72, s72, 6
+		s_add_i32 s72, s58, s72
+		v_add_u32_e32 v43, s72, v71
+		v_cndmask_b32_e64 v43, v40, v43, s[74:75]
 		s_add_i32 s68, s65, s68
-		v_add_u32_e32 v76, s75, v70
+		v_add_u32_e32 v76, s72, v70
 		s_add_i32 m0, s68, 0x62e0
 		v_cndmask_b32_e32 v76, v40, v76, vcc
 		buffer_load_dwordx4 v43, s[44:47], 0 offen lds
@@ -830,10 +829,9 @@ tlx_addmm_glu_kernel_persistent:
 		s_setprio 0
 		s_waitcnt lgkmcnt(0)
 		s_barrier
-		s_cmp_lg_u32 s74, 0
-		s_cselect_b32 s68, s72, s73
 		s_add_i32 s69, s69, 1
 		s_cmp_lt_i32 s69, s23
+		s_mov_b32 s68, s71
 		s_cbranch_scc1 .Ltlx_addmm_glu_kernel_persistent.loop_head_1
 .Ltlx_addmm_glu_kernel_persistent.loop_exit_1:
 		s_setprio 0

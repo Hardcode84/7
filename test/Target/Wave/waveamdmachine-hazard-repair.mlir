@@ -1,5 +1,6 @@
 // RUN: wave-opt --split-input-file %s --waveamd-hazard-repair | FileCheck %s
 // RUN: wave-opt --split-input-file %s --waveamd-hazard-repair='hoist-m0-across-regions=0' | FileCheck %s --check-prefix=NO-CROSS
+// RUN: wave-opt --split-input-file %s --waveamd-hazard-repair --waveamd-preserve-hw-regs | FileCheck %s --check-prefix=PRESERVE
 // RUN: wave-opt --split-input-file %s --waveamd-hazard-repair --mlir-timing --mlir-timing-display=tree 2>&1 >/dev/null | FileCheck %s --check-prefix=TIMING
 
 // TIMING: wave_hazard_repair_stages
@@ -119,6 +120,46 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %fill, %scc = waveamdmachine.s_add_i32 %x, %inc
         : (!waveamdmachine.reg<sgpr, 1, 10>, !waveamdmachine.imm)
         -> (!waveamdmachine.reg<sgpr, 1, 11>, !waveamdmachine.reg<scc, 1>)
+    return
+  }
+
+  // Preserve live SCC before hazard repair's moved dead-SCC writer.
+  // PRESERVE-LABEL: func.func @preserve_scc_after_hazard_motion
+  // PRESERVE: [[COND:%.*]] = waveamdmachine.s_cmp_lt_i32
+  // PRESERVE: waveamdmachine.s_mov_m0
+  // PRESERVE: [[SAVED:%.*]] = waveamdmachine.s_cselect_b32 [[COND]]
+  // PRESERVE-NEXT: {{%.*}}, {{%.*}} = waveamdmachine.s_add_i32
+  // PRESERVE-NEXT: waveamdmachine.buffer_load_lds_b128
+  // PRESERVE: [[RELOADED:%.*]] = waveamdmachine.s_cmp_lg_u32 [[SAVED]]
+  // PRESERVE-NEXT: waveamdmachine.s_cbranch_scc1 [[RELOADED]]
+  func.func @preserve_scc_after_hazard_motion(
+      %a: !waveamdmachine.reg<sgpr, 1, 0>,
+      %b: !waveamdmachine.reg<sgpr, 1, 1>,
+      %off: !waveamdmachine.reg<vgpr, 1, 0>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %x: !waveamdmachine.reg<sgpr, 1, 10>,
+      %dep: !waveamdmachine.mem.token) {
+    %inc = waveamdmachine.imm 256 : !waveamdmachine.imm
+    %cond = waveamdmachine.s_cmp_lt_i32 %a, %b
+        : (!waveamdmachine.reg<sgpr, 1, 0>,
+           !waveamdmachine.reg<sgpr, 1, 1>)
+          -> !waveamdmachine.reg<scc, 1>
+    %m0 = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+    %tok = waveamdmachine.buffer_load_lds_b128
+        %off, %desc, %soff, %m0 after %dep
+        : (!waveamdmachine.reg<vgpr, 1, 0>,
+           !waveamdmachine.reg<sgpr, 4, 4>,
+           !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %fill, %dead_scc = waveamdmachine.s_add_i32 %x, %inc
+        : (!waveamdmachine.reg<sgpr, 1, 10>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1, 11>,
+              !waveamdmachine.reg<scc, 1>)
+    waveamdmachine.s_cbranch_scc1 %cond
+        : !waveamdmachine.reg<scc, 1>, "taken"
     return
   }
 
