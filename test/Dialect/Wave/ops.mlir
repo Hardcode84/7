@@ -176,6 +176,30 @@ func.func @wave_redistribute_scalar(%source: !wave.simd<i32, 32>)
   return %result : !wave.simd<i32, 32>
 }
 
+// CHECK-LABEL: func.func @wave_reduce
+func.func @wave_reduce(%source: !wave.simd<vector<2xi32>, 32>)
+    -> !wave.simd<i32, 32> {
+  // CHECK: wave.reduce
+  // CHECK: {associative, commutative} : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  // CHECK: ^bb0(%[[LHS:.*]]: !wave.simd<i32, 32>, %[[RHS:.*]]: !wave.simd<i32, 32>):
+  // CHECK: wave.binary addi %[[LHS]], %[[RHS]]
+  // CHECK: wave.yield
+  %result = wave.reduce %source using [
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "0">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "1">
+    ] {associative, commutative}
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %sum = wave.binary addi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %sum : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
 // CHECK-LABEL: func.func @wave_vector_memory_payloads
 func.func @wave_vector_memory_payloads(%p8: !wave.ptr<#wave.global, i8>,
                                        %p16: !wave.ptr<#wave.global, i16>,

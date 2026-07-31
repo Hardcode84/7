@@ -4,6 +4,7 @@
 
 // TIMING-DAG: wave_lower_redistribute_stages
 // TIMING-DAG: lower_redistribute_setup
+// TIMING-DAG: lower_redistribute_reductions
 // TIMING-DAG: lower_redistribute_collect_ops
 // TIMING-DAG: lower_redistribute_validate_classify
 // TIMING-DAG: lower_redistribute_compose
@@ -17,6 +18,173 @@
 // TIMING-DAG: lower_redistribute_workgroup_prepare_relation
 // TIMING-DAG: lower_redistribute_workgroup_allocate
 // TIMING-DAG: lower_redistribute_workgroup_emit
+
+// CHECK-LABEL: func.func @reduce_ordered_odd(
+// CHECK-DAG: %[[S0:.*]] = wave.extract %{{.*}}[0]
+// CHECK-DAG: %[[S1:.*]] = wave.extract %{{.*}}[1]
+// CHECK-DAG: %[[S2:.*]] = wave.extract %{{.*}}[2]
+// CHECK: %[[FIRST:.*]] = wave.binary subi %[[S0]], %[[S1]]
+// CHECK: %[[SECOND:.*]] = wave.binary subi %[[FIRST]], %[[S2]]
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+// CHECK: return %[[SECOND]]
+func.func @reduce_ordered_odd(
+    %source: !wave.simd<vector<3xi32>, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using [
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "0">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "1">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "2">
+    ] : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %difference = wave.binary subi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %difference : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_ordered_movement_groups(
+// CHECK: %[[S0:.*]] = wave.extract %{{.*}}[0]
+// CHECK: %[[S1:.*]] = wave.extract %{{.*}}[1]
+// CHECK: %[[M1:.*]] = wave.shuffle %[[S1]]
+// CHECK: %[[S2:.*]] = wave.extract %{{.*}}[2]
+// CHECK: %[[S3:.*]] = wave.extract %{{.*}}[3]
+// CHECK: %[[M3:.*]] = wave.shuffle %[[S3]]
+// CHECK: %[[R1:.*]] = wave.binary subi %[[S0]], %[[M1]]
+// CHECK: %[[R2:.*]] = wave.binary subi %[[R1]], %[[S2]]
+// CHECK: %[[R3:.*]] = wave.binary subi %[[R2]], %[[M3]]
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+// CHECK: return %[[R3]]
+func.func @reduce_ordered_movement_groups(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using [
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "0">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "xor(item, 1)", source_slot = "1">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "2">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "xor(item, 1)", source_slot = "3">
+    ] : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %difference = wave.binary subi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %difference : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_reorderable_movement_groups(
+// CHECK: %[[LOCAL:.*]] = wave.binary addi
+// CHECK: %[[REMOTE_LOCAL:.*]] = wave.binary addi
+// CHECK: %[[REMOTE:.*]] = wave.shuffle %[[REMOTE_LOCAL]]
+// CHECK: wave.binary addi %[[LOCAL]], %[[REMOTE]]
+// CHECK-NOT: wave.shuffle
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+func.func @reduce_reorderable_movement_groups(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using [
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "0">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "xor(item, 1)", source_slot = "1">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "2">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "xor(item, 1)", source_slot = "3">
+    ] {associative, commutative}
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %sum = wave.binary addi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %sum : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_register_two_results(
+// CHECK: %[[S0:.*]] = wave.extract %{{.*}}[0]
+// CHECK: %[[S2:.*]] = wave.extract %{{.*}}[2]
+// CHECK: %[[R0:.*]] = wave.binary addi %[[S0]], %[[S2]]
+// CHECK: %[[S1:.*]] = wave.extract %{{.*}}[1]
+// CHECK: %[[S3:.*]] = wave.extract %{{.*}}[3]
+// CHECK: %[[R1:.*]] = wave.binary addi %[[S1]], %[[S3]]
+// CHECK: wave.pack %[[R0]], %[[R1]]
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+func.func @reduce_register_two_results(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<vector<2xi32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using [
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "slot">,
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "slot + 2">
+    ] : !wave.simd<vector<4xi32>, 32>
+      -> !wave.simd<vector<2xi32>, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %sum = wave.binary addi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %sum : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_cross_wave(
+// CHECK: %[[ALLOC:.*]] = wave.alloc()
+// CHECK: %[[STORE:.*]] = wave.store
+// CHECK: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
+// CHECK: %[[MOVED:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
+// CHECK: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
+// CHECK: wave.fadd
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+func.func @reduce_cross_wave(
+    %source: !wave.simd<vector<2xf32>, 32>)
+    -> !wave.simd<f32, 32>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.reduce %source using [
+      #wave.redistribution<blocks = 1, items = 64, source_block = "block",
+                           source_item = "item", source_slot = "0">,
+      #wave.redistribution<blocks = 1, items = 64, source_block = "block",
+                           source_item = "xor(item, 32)", source_slot = "1">
+    ] : !wave.simd<vector<2xf32>, 32> -> !wave.simd<f32, 32> {
+    ^bb0(%lhs: !wave.simd<f32, 32>, %rhs: !wave.simd<f32, 32>):
+      %sum = wave.fadd %lhs, %rhs
+          : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+          -> !wave.simd<f32, 32>
+      wave.yield %sum : !wave.simd<f32, 32>
+    }
+  return %result : !wave.simd<f32, 32>
+}
+
+// -----
 
 // CHECK-LABEL: func.func @identity(
 // CHECK-NOT: wave.redistribute

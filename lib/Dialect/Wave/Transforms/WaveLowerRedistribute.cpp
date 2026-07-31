@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Wave/Transforms/WaveLDSAllocation.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/Timing.h"
 #include "llvm/ADT/DenseMap.h"
@@ -215,6 +216,281 @@ static SimdType getPacketElementType(Type type) {
   SimdType packet = cast<SimdType>(type);
   return SimdType::get(type.getContext(), getPacketScalarType(type),
                        packet.getWidth());
+}
+
+struct SpecializedReductionRelation {
+  int64_t blocks = 0;
+  int64_t items = 0;
+  sym::ExprHandle sourceBlock;
+  sym::ExprHandle sourceItem;
+  sym::ExprHandle sourceSlot;
+};
+
+static FailureOr<sym::ExprHandle>
+specializeReductionExpr(sym::Analysis &analysis, sym::ExprHandle expression,
+                        sym::ExprHandle slot, sym::ExprHandle slotValue) {
+  std::array<sym::ExprSubstitution, 1> substitutions{
+      sym::ExprSubstitution{slot, slotValue}};
+  FailureOr<sym::ExprHandle> specialized =
+      analysis.substitute(expression, substitutions);
+  if (failed(specialized))
+    return failure();
+  return analysis.simplify(*specialized);
+}
+
+static FailureOr<SpecializedReductionRelation>
+specializeReductionRelation(sym::Analysis &analysis,
+                            RedistributionAttr relation, int64_t resultSlot) {
+  FailureOr<sym::ExprHandle> slot = analysis.composeSymbol("slot");
+  FailureOr<sym::ExprHandle> slotValue = analysis.composeInteger(resultSlot);
+  if (failed(slot) || failed(slotValue))
+    return failure();
+  FailureOr<sym::ExprHandle> sourceBlock = specializeReductionExpr(
+      analysis, relation.getSourceBlock(), *slot, *slotValue);
+  FailureOr<sym::ExprHandle> sourceItem = specializeReductionExpr(
+      analysis, relation.getSourceItem(), *slot, *slotValue);
+  FailureOr<sym::ExprHandle> sourceSlot = specializeReductionExpr(
+      analysis, relation.getSourceSlot(), *slot, *slotValue);
+  if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
+    return failure();
+  return SpecializedReductionRelation{relation.getBlocks(), relation.getItems(),
+                                      *sourceBlock, *sourceItem, *sourceSlot};
+}
+
+static Value applyReductionCombiner(IRRewriter &rewriter, ReduceOp op,
+                                    Value lhs, Value rhs) {
+  Block &body = op.getCombiner().front();
+  IRMapping mapping;
+  mapping.map(body.getArgument(0), lhs);
+  mapping.map(body.getArgument(1), rhs);
+  for (Operation &bodyOp : body.without_terminator())
+    rewriter.clone(bodyOp, mapping);
+  YieldOp yield = cast<YieldOp>(body.getTerminator());
+  return mapping.lookup(yield.getValues().front());
+}
+
+static FailureOr<Value> buildOrderedReduction(IRRewriter &rewriter, ReduceOp op,
+                                              ArrayRef<Value> terms) {
+  if (terms.empty()) {
+    op.emitOpError("lowering produced an empty reduction");
+    return failure();
+  }
+  Value result = terms.front();
+  for (Value term : terms.drop_front())
+    result = applyReductionCombiner(rewriter, op, result, term);
+  return result;
+}
+
+static FailureOr<Value> buildReductionTree(IRRewriter &rewriter, ReduceOp op,
+                                           ArrayRef<Value> leaves) {
+  if (leaves.empty()) {
+    op.emitOpError("lowering produced an empty reduction tree");
+    return failure();
+  }
+  SmallVector<Value> level(leaves);
+  while (level.size() > 1) {
+    SmallVector<Value> next;
+    next.reserve((level.size() + 1) / 2);
+    for (size_t index = 0; index < level.size(); index += 2) {
+      if (index + 1 == level.size()) {
+        next.push_back(level[index]);
+        continue;
+      }
+      next.push_back(
+          applyReductionCombiner(rewriter, op, level[index], level[index + 1]));
+    }
+    level = std::move(next);
+  }
+  return level.front();
+}
+
+struct ReductionRelationGroup {
+  SpecializedReductionRelation relation;
+  SmallVector<Value> values;
+};
+
+static FailureOr<Value> extractReductionSourceSlot(IRRewriter &rewriter,
+                                                   ReduceOp op,
+                                                   MutableArrayRef<Value> cache,
+                                                   int64_t slot) {
+  if (slot < 0 || slot >= static_cast<int64_t>(cache.size())) {
+    op.emitOpError("relation source slot ")
+        << slot << " is outside the source packet";
+    return failure();
+  }
+  if (cache[slot])
+    return cache[slot];
+  if (cache.size() == 1 &&
+      !isa<VectorType>(getPacketPayloadType(op.getSource().getType())))
+    cache[slot] = op.getSource();
+  else
+    cache[slot] = ExtractOp::create(
+        rewriter, op.getLoc(), getPacketElementType(op.getSource().getType()),
+        op.getSource(), slot);
+  return cache[slot];
+}
+
+static Value
+redistributeReductionValue(IRRewriter &rewriter, ReduceOp op, Value source,
+                           const SpecializedReductionRelation &relation,
+                           sym::ExprHandle sourceSlot) {
+  RedistributionAttr attr = RedistributionAttr::get(
+      op.getContext(), relation.blocks, relation.items, relation.sourceBlock,
+      relation.sourceItem, sourceSlot);
+  return RedistributeOp::create(rewriter, op.getLoc(),
+                                getPacketElementType(op.getResult().getType()),
+                                source, attr)
+      .getResult();
+}
+
+static FailureOr<Value>
+materializeReductionTerm(IRRewriter &rewriter, ReduceOp op,
+                         const SpecializedReductionRelation &relation,
+                         sym::ExprHandle zero,
+                         MutableArrayRef<Value> extracted) {
+  std::optional<int64_t> sourceSlot =
+      sym::getIntegerLiteralValue(relation.sourceSlot);
+  if (!sourceSlot)
+    return redistributeReductionValue(rewriter, op, op.getSource(), relation,
+                                      relation.sourceSlot);
+  FailureOr<Value> source =
+      extractReductionSourceSlot(rewriter, op, extracted, *sourceSlot);
+  if (failed(source))
+    return failure();
+  return redistributeReductionValue(rewriter, op, *source, relation, zero);
+}
+
+static FailureOr<Value>
+lowerOrderedReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
+                                sym::Analysis &analysis, sym::ExprHandle zero,
+                                int64_t resultSlot,
+                                MutableArrayRef<Value> extracted) {
+  SmallVector<Value> terms;
+  terms.reserve(op.getRelations().size());
+  for (Attribute attr : op.getRelations()) {
+    RedistributionAttr relation = cast<RedistributionAttr>(attr);
+    FailureOr<SpecializedReductionRelation> specialized =
+        specializeReductionRelation(analysis, relation, resultSlot);
+    if (failed(specialized)) {
+      op.emitOpError("failed to specialize a reduction relation");
+      return failure();
+    }
+    FailureOr<Value> term =
+        materializeReductionTerm(rewriter, op, *specialized, zero, extracted);
+    if (failed(term))
+      return failure();
+    terms.push_back(*term);
+  }
+  return buildOrderedReduction(rewriter, op, terms);
+}
+
+static bool
+hasSameReductionMovement(const ReductionRelationGroup &group,
+                         const SpecializedReductionRelation &relation) {
+  return group.relation.blocks == relation.blocks &&
+         group.relation.items == relation.items &&
+         group.relation.sourceBlock == relation.sourceBlock &&
+         group.relation.sourceItem == relation.sourceItem;
+}
+
+static LogicalResult
+appendGroupedReductionTerms(IRRewriter &rewriter, ReduceOp op,
+                            sym::ExprHandle zero,
+                            MutableArrayRef<ReductionRelationGroup> groups,
+                            SmallVectorImpl<Value> &terms) {
+  for (ReductionRelationGroup &group : groups) {
+    FailureOr<Value> local = buildReductionTree(rewriter, op, group.values);
+    if (failed(local))
+      return failure();
+    terms.push_back(
+        redistributeReductionValue(rewriter, op, *local, group.relation, zero));
+  }
+  return success();
+}
+
+static FailureOr<Value>
+lowerReorderableReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
+                                    sym::Analysis &analysis,
+                                    sym::ExprHandle zero, int64_t resultSlot,
+                                    MutableArrayRef<Value> extracted) {
+  SmallVector<ReductionRelationGroup> groups;
+  SmallVector<Value> terms;
+  for (Attribute attr : op.getRelations()) {
+    RedistributionAttr relation = cast<RedistributionAttr>(attr);
+    FailureOr<SpecializedReductionRelation> specialized =
+        specializeReductionRelation(analysis, relation, resultSlot);
+    if (failed(specialized)) {
+      op.emitOpError("failed to specialize a reduction relation");
+      return failure();
+    }
+
+    std::optional<int64_t> sourceSlot =
+        sym::getIntegerLiteralValue(specialized->sourceSlot);
+    if (!sourceSlot) {
+      terms.push_back(redistributeReductionValue(
+          rewriter, op, op.getSource(), *specialized, specialized->sourceSlot));
+      continue;
+    }
+
+    FailureOr<Value> source =
+        extractReductionSourceSlot(rewriter, op, extracted, *sourceSlot);
+    if (failed(source))
+      return failure();
+    SmallVector<ReductionRelationGroup>::iterator group =
+        llvm::find_if(groups, [&](const ReductionRelationGroup &candidate) {
+          return hasSameReductionMovement(candidate, *specialized);
+        });
+    if (group == groups.end()) {
+      groups.push_back(ReductionRelationGroup{*specialized, {}});
+      group = std::prev(groups.end());
+    }
+    group->values.push_back(*source);
+  }
+
+  if (failed(appendGroupedReductionTerms(rewriter, op, zero, groups, terms)))
+    return failure();
+  return buildReductionTree(rewriter, op, terms);
+}
+
+static LogicalResult lowerReduction(IRRewriter &rewriter, ReduceOp op,
+                                    WaveDialect &dialect) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(dialect.getSymbolStore());
+  if (failed(analysis))
+    return op.emitOpError("failed to construct symbolic reduction analysis");
+  FailureOr<sym::ExprHandle> zero = (*analysis)->composeInteger(0);
+  if (failed(zero))
+    return op.emitOpError("failed to construct the reduction slot origin");
+
+  int64_t sourceSlots = getPacketElementCount(op.getSource().getType());
+  int64_t resultSlots = getPacketElementCount(op.getResult().getType());
+  SmallVector<Value> extracted(sourceSlots);
+  SmallVector<Value> results;
+  results.reserve(resultSlots);
+  rewriter.setInsertionPoint(op);
+
+  bool reorderable = op.getAssociativeAttr() && op.getCommutativeAttr();
+  for (int64_t resultSlot : llvm::seq<int64_t>(0, resultSlots)) {
+    FailureOr<Value> result =
+        reorderable
+            ? lowerReorderableReductionResultSlot(rewriter, op, **analysis,
+                                                  *zero, resultSlot, extracted)
+            : lowerOrderedReductionResultSlot(rewriter, op, **analysis, *zero,
+                                              resultSlot, extracted);
+    if (failed(result))
+      return failure();
+    results.push_back(*result);
+  }
+
+  Value result;
+  if (results.size() == 1 &&
+      !isa<VectorType>(getPacketPayloadType(op.getResult().getType())))
+    result = results.front();
+  else
+    result = PackOp::create(rewriter, op.getLoc(), op.getResult().getType(),
+                            results);
+  rewriter.replaceOp(op, result);
+  return success();
 }
 
 static SimdType getPacketSliceType(Type type, int64_t elements) {
@@ -3437,9 +3713,24 @@ static LogicalResult lowerRedistribution(
   llvm_unreachable("unknown redistribution movement");
 }
 
+static LogicalResult lowerReductions(func::FuncOp func, WaveDialect &dialect,
+                                     IRRewriter &rewriter,
+                                     RedistributeStageTiming &timing) {
+  TimingScope reductionTiming = timing.nest("lower_redistribute_reductions");
+  SmallVector<ReduceOp> reductions;
+  func.walk([&](ReduceOp op) { reductions.push_back(op); });
+  for (ReduceOp op : reductions)
+    if (failed(lowerReduction(rewriter, op, dialect)))
+      return failure();
+  reductionTiming.stop();
+  return success();
+}
+
 static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
                                IRRewriter &rewriter,
                                RedistributeStageTiming &timing) {
+  if (failed(lowerReductions(func, dialect, rewriter, timing)))
+    return failure();
   TimingScope collectTiming = timing.nest("lower_redistribute_collect_ops");
   SmallVector<RedistributeOp> ops;
   func.walk([&](RedistributeOp op) { ops.push_back(op); });

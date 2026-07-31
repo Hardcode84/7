@@ -20,6 +20,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
@@ -3007,7 +3008,7 @@ LogicalResult ShuffleOp::verify() {
   return success();
 }
 
-static LogicalResult verifyRedistributionSymbols(RedistributeOp op,
+static LogicalResult verifyRedistributionSymbols(Operation *op,
                                                  sym::ExprHandle expr,
                                                  StringRef coordinate) {
   std::optional<std::string> badSymbol;
@@ -3016,17 +3017,17 @@ static LogicalResult verifyRedistributionSymbols(RedistributeOp op,
       badSymbol = name.str();
   });
   if (badSymbol)
-    return op.emitOpError(coordinate)
+    return op->emitOpError(coordinate)
            << " expression references unsupported symbol `" << *badSymbol
            << "`";
   if (!sym::isIntegerValued(expr))
-    return op.emitOpError(coordinate)
+    return op->emitOpError(coordinate)
            << " expression must be structurally integral";
   return success();
 }
 
 static LogicalResult
-verifyRedistributionRelationSymbols(RedistributeOp op,
+verifyRedistributionRelationSymbols(Operation *op,
                                     RedistributionAttr relation) {
   if (failed(verifyRedistributionSymbols(op, relation.getSourceBlock(),
                                          "source block")))
@@ -3040,18 +3041,18 @@ verifyRedistributionRelationSymbols(RedistributeOp op,
   return success();
 }
 
-static LogicalResult
-verifyRedistributionPayload(RedistributeOp op, SimdType type, StringRef role) {
+static LogicalResult verifyRedistributionPayload(Operation *op, SimdType type,
+                                                 StringRef role) {
   Type payload = type.getElementType();
   if (VectorType vector = dyn_cast<VectorType>(payload)) {
     if (vector.getRank() != 1)
-      return op.emitOpError() << role << " packet vector must be 1-D";
+      return op->emitOpError() << role << " packet vector must be 1-D";
     if (vector.isScalable())
-      return op.emitOpError() << role << " packet vector must be fixed-size";
+      return op->emitOpError() << role << " packet vector must be fixed-size";
     payload = vector.getElementType();
   }
   if (!payload.isIntOrFloat())
-    return op.emitOpError()
+    return op->emitOpError()
            << role << " packet element type must be integer or float";
   return success();
 }
@@ -3060,15 +3061,138 @@ LogicalResult RedistributeOp::verify() {
   SimdType sourceType = cast<SimdType>(getSource().getType());
   SimdType resultType = cast<SimdType>(getResult().getType());
 
-  if (failed(verifyRedistributionPayload(*this, sourceType, "source")) ||
-      failed(verifyRedistributionPayload(*this, resultType, "result")))
+  if (failed(
+          verifyRedistributionPayload(getOperation(), sourceType, "source")) ||
+      failed(verifyRedistributionPayload(getOperation(), resultType, "result")))
     return failure();
   if (sourceType.getWidth() != resultType.getWidth())
     return emitOpError("source and result SIMD widths must match");
   if (getWavePayloadElementType(sourceType) !=
       getWavePayloadElementType(resultType))
     return emitOpError("source and result packet element types must match");
-  return verifyRedistributionRelationSymbols(*this, getRelation());
+  return verifyRedistributionRelationSymbols(getOperation(), getRelation());
+}
+
+static LogicalResult verifyReductionPacketTypes(ReduceOp op) {
+  SimdType sourceType = cast<SimdType>(op.getSource().getType());
+  SimdType resultType = cast<SimdType>(op.getResult().getType());
+  if (failed(verifyRedistributionPayload(op.getOperation(), sourceType,
+                                         "source")) ||
+      failed(
+          verifyRedistributionPayload(op.getOperation(), resultType, "result")))
+    return failure();
+  if (sourceType.getWidth() != resultType.getWidth())
+    return op.emitOpError("source and result SIMD widths must match");
+  if (getWavePayloadElementType(sourceType) !=
+      getWavePayloadElementType(resultType))
+    return op.emitOpError("source and result packet element types must match");
+  return success();
+}
+
+static bool operationHasMemoryToken(Operation *operation) {
+  return llvm::any_of(operation->getOperandTypes(),
+                      [](Type type) { return isa<MemTokenType>(type); }) ||
+         llvm::any_of(operation->getResultTypes(),
+                      [](Type type) { return isa<MemTokenType>(type); });
+}
+
+static Operation *
+findReductionCombinerOperation(Region &combiner,
+                               function_ref<bool(Operation *)> predicate) {
+  Operation *found = nullptr;
+  combiner.walk([&](Operation *nested) {
+    if (!predicate(nested))
+      return WalkResult::advance();
+    found = nested;
+    return WalkResult::interrupt();
+  });
+  return found;
+}
+
+static LogicalResult verifyReductionCombinerBody(ReduceOp op) {
+  Region &combiner = op.getCombiner();
+  Block &block = combiner.front();
+  if (llvm::any_of(block.getArgumentTypes(),
+                   [](Type type) { return isa<MemTokenType>(type); }))
+    return op.emitOpError("combiner must not contain memory tokens");
+
+  Operation *tokenOperation =
+      findReductionCombinerOperation(combiner, operationHasMemoryToken);
+  if (tokenOperation)
+    return op.emitOpError("combiner must not contain memory tokens");
+
+  Operation *capturingOperation =
+      findReductionCombinerOperation(combiner, [&](Operation *nested) {
+        return llvm::any_of(nested->getOperands(), [&](Value value) {
+          return !combiner.isAncestor(value.getParentRegion());
+        });
+      });
+  if (capturingOperation)
+    return op.emitOpError(
+        "combiner must not capture values from outside the reduction");
+
+  Operation *impureOperation = findReductionCombinerOperation(
+      combiner, [](Operation *nested) { return !isPure(nested); });
+  if (impureOperation)
+    return op.emitOpError("combiner contains non-pure operation '")
+           << impureOperation->getName() << "'";
+  return success();
+}
+
+static LogicalResult verifyReductionCombiner(ReduceOp op) {
+  SimdType sourceType = cast<SimdType>(op.getSource().getType());
+  Type combinerType =
+      SimdType::get(op.getContext(), getWavePayloadElementType(sourceType),
+                    sourceType.getWidth());
+  Region &combiner = op.getCombiner();
+  Block &block = combiner.front();
+  if (block.getNumArguments() != 2)
+    return op.emitOpError("combiner block must have exactly two arguments");
+  for (BlockArgument argument : block.getArguments())
+    if (argument.getType() != combinerType)
+      return op.emitOpError("combiner block arguments must have type ")
+             << combinerType;
+  YieldOp yield = dyn_cast<YieldOp>(block.getTerminator());
+  if (!yield)
+    return op.emitOpError("combiner block must terminate with wave.yield");
+  if (yield.getValues().size() != 1 ||
+      yield.getValues().front().getType() != combinerType)
+    return op.emitOpError("combiner must yield exactly one value of type ")
+           << combinerType;
+  return verifyReductionCombinerBody(op);
+}
+
+static LogicalResult verifyReductionRelations(ReduceOp op) {
+  if (op.getRelations().empty())
+    return op.emitOpError("requires at least one symbolic relation");
+  std::optional<std::pair<int64_t, int64_t>> domain;
+  for (Attribute attr : op.getRelations()) {
+    RedistributionAttr relation = dyn_cast<RedistributionAttr>(attr);
+    if (!relation)
+      return op.emitOpError(
+          "relations must contain only #wave.redistribution attributes");
+    std::pair<int64_t, int64_t> relationDomain{relation.getBlocks(),
+                                               relation.getItems()};
+    if (domain && *domain != relationDomain)
+      return op.emitOpError("all relations must use the same packet domain");
+    domain = relationDomain;
+    if (failed(
+            verifyRedistributionRelationSymbols(op.getOperation(), relation)))
+      return failure();
+  }
+  return success();
+}
+
+LogicalResult ReduceOp::verify() {
+  if (static_cast<bool>(getAssociativeAttr()) !=
+      static_cast<bool>(getCommutativeAttr()))
+    return emitOpError(
+        "associative and commutative permissions must appear together");
+  if (failed(verifyReductionPacketTypes(*this)))
+    return failure();
+  if (failed(verifyReductionCombiner(*this)))
+    return failure();
+  return verifyReductionRelations(*this);
 }
 
 OpFoldResult RedistributeOp::fold(FoldAdaptor) {

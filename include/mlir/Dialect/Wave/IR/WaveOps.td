@@ -46,7 +46,7 @@ def Wave_YieldOp : Wave_Op<"yield", [
     Pure,
     ReturnLike,
     Terminator,
-    ParentOneOf<["WhereOp"]>,
+    ParentOneOf<["WhereOp", "ReduceOp"]>,
     DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
         ["getMutableSuccessorOperands"]>
 ]> {
@@ -56,7 +56,7 @@ def Wave_YieldOp : Wave_Op<"yield", [
 
     `wave.where` regions yield the values forwarded as the parent op results.
     Without an `otherwise` region, inactive lanes in yielded data values are
-    unspecified.
+    unspecified. `wave.reduce` regions yield one combined value.
   }];
 
   let arguments = (ins Variadic<AnyType>:$values);
@@ -488,6 +488,32 @@ def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
     qualified(type($result))
   }];
   let hasFolder = 1;
+  let hasVerifier = 1;
+}
+
+def Wave_ReduceOp : Wave_Op<"reduce", [RecursiveMemoryEffects]> {
+  let summary = "reduce a symbolic packet dimension";
+  let description = [{
+    Each relation selects one source value for each result packet slot. Relation
+    order defines a left fold unless both `associative` and `commutative` are
+    present. Those attributes permit regrouping; they do not infer legality
+    from the combiner operations.
+
+    The combiner region takes two scalar-packet SIMD values and yields one.
+    Combiners are closed and pure; token-bearing reductions need another op
+    contract.
+  }];
+
+  let arguments = (ins Wave_Simd:$source,
+                       ArrayAttr:$relations,
+                       OptionalAttr<UnitAttr>:$associative,
+                       OptionalAttr<UnitAttr>:$commutative);
+  let results = (outs Wave_Simd:$result);
+  let regions = (region SizedRegion<1>:$combiner);
+  let assemblyFormat = [{
+    $source `using` $relations attr-dict `:`
+    qualified(type($source)) `->` qualified(type($result)) $combiner
+  }];
   let hasVerifier = 1;
 }
 
