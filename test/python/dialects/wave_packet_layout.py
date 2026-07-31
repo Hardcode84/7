@@ -64,6 +64,40 @@ SPLIT_SOURCE = w.PacketLayout(
         ("lane", tuple((value, 0) for (value,) in LANE_BASES)),
     ),
 )
+REGISTER_REDUCTION_SOURCE = w.PacketLayout(
+    32,
+    (("x", 32), ("reduce", 4)),
+    (
+        ("register", ((0, 1), (0, 2))),
+        ("lane", tuple((value, 0) for (value,) in LANE_BASES)),
+    ),
+)
+LANE_REDUCTION_SOURCE = w.PacketLayout(
+    32,
+    (("reduce", 2), ("x", 16)),
+    (("lane", ((1, 0), (0, 1), (0, 2), (0, 4), (0, 8))),),
+)
+LANE_REDUCTION_RESULT = w.PacketLayout(
+    32,
+    (("x", 16),),
+    (("lane", ((0,), (1,), (2,), (4,), (8,))),),
+)
+WAVE_REDUCTION_SOURCE = w.PacketLayout(
+    32,
+    (("reduce", 2), ("x", 32)),
+    (
+        ("lane", ((0, 1), (0, 2), (0, 4), (0, 8), (0, 16))),
+        ("warp", ((1, 0),)),
+    ),
+)
+WAVE_REDUCTION_RESULT = w.PacketLayout(
+    32,
+    (("x", 32),),
+    (
+        ("lane", ((1,), (2,), (4,), (8,), (16,))),
+        ("warp", ((0,),)),
+    ),
+)
 
 
 # CHECK-LABEL: TEST: test_packet_layout_transforms
@@ -143,11 +177,108 @@ def test_packet_layout_transforms():
     assert w.PacketTransform.expand_dims(0).axis == 0
     assert w.PacketTransform.transpose([1, 0]).order == (1, 0)
     assert w.PacketTransform.split(1).selector == 1
+    assert w.PacketTransform.reduction(1, 2).axis == 1
+    assert w.PacketTransform.reduction(1, 2).selector == 2
     assert "PacketLayout" in w.__all__
     assert "PacketTransform" in w.__all__
     assert "join_packet_layout" in w.__all__
     print("ok")
     # CHECK: ok
+
+
+# CHECK-LABEL: TEST: test_packet_layout_reductions
+@run
+def test_packet_layout_reductions():
+    with w.module() as module_builder:
+        scalar = w.simd_type(w.i32(), width=32)
+        register_source = w.simd_type(w.vector_type(4, w.i32()), width=32)
+        with module_builder.function(
+            "packet_layout_reduce_register",
+            [register_source],
+            workgroup_size=[32, 1, 1],
+        ) as function_builder:
+            with function_builder.reduce_layout(
+                function_builder.args[0],
+                scalar,
+                source_layout=REGISTER_REDUCTION_SOURCE,
+                result_layout=IDENTITY_LAYOUT,
+                axis=1,
+            ) as reduction:
+                lhs, rhs = reduction.arguments
+                assert lhs.type == scalar
+                assert rhs.type == scalar
+                function_builder.yield_((function_builder.addi(lhs, rhs),))
+            assert reduction.result.type == scalar
+
+        with (
+            module_builder.function(
+                "packet_layout_reduce_lane",
+                [scalar],
+                workgroup_size=[32, 1, 1],
+            ) as function_builder,
+            function_builder.reduce_layout(
+                function_builder.args[0],
+                scalar,
+                source_layout=LANE_REDUCTION_SOURCE,
+                result_layout=LANE_REDUCTION_RESULT,
+                axis=0,
+            ) as reduction,
+        ):
+            lhs, rhs = reduction.arguments
+            function_builder.yield_((function_builder.addi(lhs, rhs),))
+
+        with (
+            module_builder.function(
+                "packet_layout_reduce_wave",
+                [scalar],
+                workgroup_size=[64, 1, 1],
+                attrs={"wave.waves_per_workgroup": w.i64_attr(2)},
+            ) as function_builder,
+            function_builder.reduce_layout(
+                function_builder.args[0],
+                scalar,
+                source_layout=WAVE_REDUCTION_SOURCE,
+                result_layout=WAVE_REDUCTION_RESULT,
+                axis=0,
+            ) as reduction,
+        ):
+            lhs, rhs = reduction.arguments
+            function_builder.yield_((function_builder.addi(lhs, rhs),))
+
+        # CHECK-LABEL: func.func @packet_layout_reduce_register
+        # CHECK-COUNT-4: #wave.redistribution
+        # CHECK: ^bb0(%[[REGISTER_LHS:.*]]: !wave.simd<i32, 32>, %[[REGISTER_RHS:.*]]: !wave.simd<i32, 32>):
+        # CHECK: wave.binary addi %[[REGISTER_LHS]], %[[REGISTER_RHS]]
+        # CHECK: wave.yield
+        # CHECK-LABEL: func.func @packet_layout_reduce_lane
+        # CHECK-COUNT-2: #wave.redistribution
+        # CHECK-LABEL: func.func @packet_layout_reduce_wave
+        # CHECK-COUNT-2: #wave.redistribution
+        print(module_builder.module)
+
+        w.PassManager.parse("builtin.module(wave-lower-redistribute)").run(
+            module_builder.module.operation
+        )
+        print("LOWERED")
+        # CHECK-LABEL: LOWERED
+        # CHECK-LABEL: func.func @packet_layout_reduce_register
+        # CHECK: wave.extract
+        # CHECK: wave.binary addi
+        # CHECK-NOT: wave.reduce
+        # CHECK-LABEL: func.func @packet_layout_reduce_lane
+        # CHECK: wave.shuffle
+        # CHECK: wave.binary addi
+        # CHECK-NOT: wave.reduce
+        # CHECK-LABEL: func.func @packet_layout_reduce_wave
+        # CHECK: wave.alloc
+        # CHECK: wave.store
+        # CHECK: wave.barrier
+        # CHECK: wave.load
+        # CHECK: wave.join
+        # CHECK: wave.alloc_release
+        # CHECK: wave.binary addi
+        # CHECK-NOT: wave.reduce
+        print(module_builder.module)
 
 
 def check_packet_layout_diagnostics():
@@ -207,6 +338,16 @@ def check_packet_transform_diagnostics():
         ValueError,
         "split packet transform requires selector 0 or 1",
         lambda: w.PacketTransform.split(2),
+    )
+    assert_raises(
+        ValueError,
+        "reduction packet transform requires nonnegative axis and coordinate",
+        lambda: w.PacketTransform.reduction(-1, 0),
+    )
+    assert_raises(
+        ValueError,
+        "reduction packet transform requires nonnegative axis and coordinate",
+        lambda: w.PacketTransform.reduction(0, -1),
     )
 
     other_layout = w.PacketLayout(
@@ -301,11 +442,71 @@ def check_packet_relation_diagnostics():
             )
 
 
+def check_packet_reduction_diagnostics():
+    with w.module() as module_builder:
+        scalar = w.simd_type(w.i32(), width=32)
+        source_type = w.simd_type(w.vector_type(4, w.i32()), width=32)
+        with module_builder.function(
+            "packet_reduction_diagnostics", [source_type]
+        ) as function_builder:
+            source = function_builder.args[0]
+
+            def reduce(axis, result_layout=IDENTITY_LAYOUT):
+                return function_builder.reduce_layout(
+                    source,
+                    scalar,
+                    source_layout=REGISTER_REDUCTION_SOURCE,
+                    result_layout=result_layout,
+                    axis=axis,
+                )
+
+            def enter_reduce(axis):
+                with reduce(axis):
+                    pass
+
+            assert_raises(
+                TypeError,
+                "packet reduction axis must be an integer",
+                lambda: enter_reduce(1.5),
+            )
+            assert_raises(
+                ValueError,
+                "packet reduction axis is out of range",
+                lambda: enter_reduce(2),
+            )
+            assert_raises(
+                ValueError,
+                "packet reduction result shape does not remove its source axis",
+                lambda: enter_reduce(0),
+            )
+
+            def missing_yield():
+                with reduce(1):
+                    pass
+
+            assert_raises(
+                RuntimeError,
+                "wave.reduce combiner must end with wave.yield",
+                missing_yield,
+            )
+
+            def empty_yield():
+                with reduce(1):
+                    function_builder.yield_()
+
+            assert_raises(
+                RuntimeError,
+                "wave.reduce combiner must yield one value of its argument type",
+                empty_yield,
+            )
+
+
 # CHECK-LABEL: TEST: test_packet_layout_diagnostics
 @run
 def test_packet_layout_diagnostics():
     check_packet_layout_diagnostics()
     check_packet_transform_diagnostics()
     check_packet_relation_diagnostics()
+    check_packet_reduction_diagnostics()
     print("ok")
     # CHECK: ok

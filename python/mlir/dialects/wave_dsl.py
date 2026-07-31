@@ -135,7 +135,15 @@ xor = ixsimpl.xor_
 
 _PACKET_INPUT_DIMS = ("register", "lane", "warp", "block")
 _PACKET_TRANSFORMS = frozenset(
-    {"identity", "broadcast", "expand_dims", "reshape", "transpose", "split"}
+    {
+        "identity",
+        "broadcast",
+        "expand_dims",
+        "reduction",
+        "reshape",
+        "transpose",
+        "split",
+    }
 )
 
 
@@ -327,6 +335,15 @@ def _validate_split_transform(
         raise ValueError("split packet transform requires selector 0 or 1")
 
 
+def _validate_reduction_transform(
+    axis: int | None, order: tuple[int, ...], selector: int | None
+) -> None:
+    if axis is None or axis < 0 or order or selector is None or selector < 0:
+        raise ValueError(
+            "reduction packet transform requires nonnegative axis and coordinate"
+        )
+
+
 def _validate_parameterless_transform(
     kind: str, axis: int | None, order: tuple[int, ...], selector: int | None
 ) -> None:
@@ -369,6 +386,8 @@ class PacketTransform:
             return _validate_transpose_transform(axis, order, selector)
         if self.kind == "split":
             return _validate_split_transform(axis, order, selector)
+        if self.kind == "reduction":
+            return _validate_reduction_transform(axis, order, selector)
         return _validate_parameterless_transform(self.kind, axis, order, selector)
 
     @staticmethod
@@ -394,6 +413,10 @@ class PacketTransform:
     @staticmethod
     def split(selector: int) -> PacketTransform:
         return PacketTransform("split", selector=selector)
+
+    @staticmethod
+    def reduction(axis: int, coordinate: int) -> PacketTransform:
+        return PacketTransform("reduction", axis=axis, selector=coordinate)
 
 
 def join_packet_layout(first: PacketLayout, second: PacketLayout) -> PacketLayout:
@@ -582,6 +605,27 @@ def _split_packet_transform(
     return lambda coordinate: (*map(int, coordinate), selector)
 
 
+def _reduction_packet_transform(
+    transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    axis = transform.axis
+    selector = transform.selector
+    assert axis is not None and selector is not None
+    if (
+        axis >= len(source_shape)
+        or selector >= source_shape[axis]
+        or source_shape[:axis] + source_shape[axis + 1 :] != result_shape
+    ):
+        raise ValueError("reduction packet transform has incompatible shapes")
+    return lambda coordinate: (
+        *map(int, coordinate[:axis]),
+        selector,
+        *map(int, coordinate[axis:]),
+    )
+
+
 _PACKET_COORDINATE_TRANSFORMS = {
     "identity": _identity_packet_transform,
     "broadcast": _broadcast_packet_transform,
@@ -589,6 +633,7 @@ _PACKET_COORDINATE_TRANSFORMS = {
     "reshape": _reshape_packet_transform,
     "transpose": _transpose_packet_transform,
     "split": _split_packet_transform,
+    "reduction": _reduction_packet_transform,
 }
 
 
@@ -881,6 +926,28 @@ def _packet_relation(
     )
 
 
+def _redistribution_attr(
+    blocks: int,
+    items: int,
+    source_block: ixsimpl.Expr,
+    source_item: ixsimpl.Expr,
+    source_slot: ixsimpl.Expr,
+) -> RedistributionAttr:
+    return RedistributionAttr.get(
+        blocks,
+        items,
+        ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(source_block), context=_current_context()
+        ),
+        ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(source_item), context=_current_context()
+        ),
+        ExprAttr.get_from_node_ptr(
+            _ixsimpl_node_ptr(source_slot), context=_current_context()
+        ),
+    )
+
+
 def _packet_type_info(type_: Type, role: str) -> tuple[int, int, Type]:
     if not SimdType.isinstance(type_):
         raise ValueError(f"{role} must be a Wave SIMD packet")
@@ -908,11 +975,29 @@ def _validate_redistribute_layout_types(
     result_type: Type,
     source_layout: PacketLayout,
     result_layout: PacketLayout,
-) -> None:
+) -> Type:
     source_element = _validate_packet_type(source_type, source_layout, "source")
     result_element = _validate_packet_type(result_type, result_layout, "result")
     if source_element != result_element:
         raise ValueError("source and result packet element types must match")
+    return source_element
+
+
+def _validate_reduce_layouts(
+    source_layout: PacketLayout, result_layout: PacketLayout, axis: Any
+) -> int:
+    normalized_axis = _packet_int(axis, "packet reduction axis")
+    if normalized_axis < 0 or normalized_axis >= len(source_layout.shape):
+        raise ValueError("packet reduction axis is out of range")
+    if (
+        source_layout.shape[:normalized_axis]
+        + source_layout.shape[normalized_axis + 1 :]
+        != result_layout.shape
+    ):
+        raise ValueError(
+            "packet reduction result shape does not remove its source axis"
+        )
+    return normalized_axis
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +1030,16 @@ def _finish_wave_region(block: Block, result_types: Sequence[Type]) -> None:
     if result_types:
         raise RuntimeError("result-bearing wave.where region must yield values")
     wave.YieldOp([])
+
+
+def _finish_reduce_region(block: Block, result_type: Type) -> None:
+    if not _ends_with(block, wave.YieldOp):
+        raise RuntimeError("wave.reduce combiner must end with wave.yield")
+    terminator = typing.cast(wave.YieldOp, block.operations[-1])
+    if len(terminator.values) != 1 or terminator.values[0].type != result_type:
+        raise RuntimeError(
+            "wave.reduce combiner must yield one value of its argument type"
+        )
 
 
 def _finish_scf_region(block: Block, result_types: Sequence[Type]) -> None:
@@ -2069,6 +2164,20 @@ class _WhereBuilder:
                 self.builder._yield_stack.pop()
 
 
+class _ReduceBuilder:
+    def __init__(self, op: wave.ReduceOp, block: Block) -> None:
+        self.op = op
+        self.block = block
+
+    @property
+    def arguments(self) -> tuple[Value, Value]:
+        return typing.cast(tuple[Value, Value], tuple(self.block.arguments))
+
+    @property
+    def result(self) -> Value:
+        return typing.cast(Value, self.op.result)
+
+
 class _IfBuilder:
     def __init__(
         self,
@@ -2513,17 +2622,12 @@ class FunctionBuilder:
         """Build symbolic cluster packet redistribution."""
         if source_block is None:
             source_block = sym("block")
-        block_attr = ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(source_block), context=_current_context()
-        )
-        item_attr = ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(source_item), context=_current_context()
-        )
-        slot_attr = ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(source_slot), context=_current_context()
-        )
-        relation = RedistributionAttr.get(
-            blocks, items, block_attr, item_attr, slot_attr
+        relation = _redistribution_attr(
+            blocks,
+            items,
+            source_block,
+            source_item,
+            source_slot,
         )
         return wave.RedistributeOp(result_type, source, relation).result
 
@@ -2554,6 +2658,49 @@ class FunctionBuilder:
             source_item=source_item,
             source_slot=source_slot,
         )
+
+    @contextmanager
+    def reduce_layout(
+        self,
+        source: Value,
+        result_type: Type,
+        *,
+        source_layout: PacketLayout,
+        result_layout: PacketLayout,
+        axis: int,
+    ) -> Iterator[_ReduceBuilder]:
+        """Build a packet-layout reduction with a two-argument combiner."""
+        axis = _validate_reduce_layouts(source_layout, result_layout, axis)
+        element_type = _validate_redistribute_layout_types(
+            source.type, result_type, source_layout, result_layout
+        )
+        relations = []
+        for coordinate in range(source_layout.shape[axis]):
+            source_block, source_item, source_slot = _packet_relation(
+                source_layout,
+                result_layout,
+                PacketTransform.reduction(axis, coordinate),
+            )
+            relations.append(
+                _redistribution_attr(
+                    result_layout.block_count,
+                    result_layout.item_count,
+                    source_block,
+                    source_item,
+                    source_slot,
+                )
+            )
+        op = wave.ReduceOp(result_type, source, ArrayAttr.get(relations))
+        combiner_type = simd_type(element_type, source_layout.lane_width)
+        block = op.combiner.blocks.append(combiner_type, combiner_type)
+        reduction = _ReduceBuilder(op, block)
+        with InsertionPoint(block):
+            self._yield_stack.append(_YieldKind.WAVE)
+            try:
+                yield reduction
+                _finish_reduce_region(block, combiner_type)
+            finally:
+                self._yield_stack.pop()
 
     def ptr_add(
         self, base: Value, offset: Value, result_type: Type | None = None
