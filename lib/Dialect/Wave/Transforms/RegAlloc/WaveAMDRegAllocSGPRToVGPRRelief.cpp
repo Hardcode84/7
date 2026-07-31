@@ -123,7 +123,8 @@ classifySGPRToVGPRValue(func::FuncOp func,
   const wave::RegAllocTransformValue &stateValue = *resolved.second;
   if (!hasValidSGPRToVGPRState(value, stateValue))
     return SGPRToVGPRValueState::Illegal;
-  if (stateValue.fixed)
+  if (stateValue.fixed ||
+      wave::regalloc::isRegAllocTempOp(value.getDefiningOp()))
     return SGPRToVGPRValueState::Illegal;
   if (isa<BlockArgument>(value))
     return isFuncEntryBlockArgument(value, func)

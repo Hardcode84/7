@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocTransformLoop.h"
 #include "WaveAMDRegAllocTransformState.h"
@@ -41,9 +42,16 @@ struct RematReliefSlot {
   unsigned rebuildPosition = 0;
 };
 
+struct RematSCCSave {
+  Operation *site = nullptr;
+  Value live;
+  unsigned position = 0;
+};
+
 struct RematReliefRoot {
   DenseMap<Operation *, DenseSet<Value>> siteValues;
   SmallVector<RematReliefSlot> slots;
+  SmallVector<RematSCCSave> sccSaves;
   SmallVector<Value> rematValues;
   SmallVector<unsigned> pressureLeafSets;
   const wave::RegAllocTransformAliasSet *set = nullptr;
@@ -54,6 +62,7 @@ struct RematReliefRoot {
 
 struct RematReliefPlan {
   SmallVector<RematReliefRoot, 0> roots;
+  SmallVector<RematSCCSave> sccSaves;
   int64_t cost = 0;
 };
 
@@ -67,10 +76,12 @@ struct RematBundleState {
   DenseMap<Operation *, DenseSet<Value>> siteValues;
   DenseSet<unsigned> selectedRoots;
   DenseSet<unsigned> pressureLeafSets;
+  DenseSet<Operation *> sccSaveSites;
   SmallVector<unsigned> indices;
   RegClassPressure added = {};
   RegClassPressure removed = {};
   int64_t cost = 0;
+  int64_t failureSCCSaveDwords = 0;
   bool usesFailurePosition = false;
 };
 
@@ -79,6 +90,7 @@ struct RematBundleSearchContext {
   RegClassPressure before = {};
   RegClassPressure allowed = {};
   StringRef failureClassName;
+  unsigned failurePosition = 0;
 };
 
 static bool isRematRelievableFailureClass(StringRef className) {
@@ -101,6 +113,53 @@ static bool insertionBeforeDominatesUse(Operation *anchor, Operation *user) {
     return anchor->isBeforeInBlock(user);
   Operation *ancestor = getAncestorInBlock(user, anchor->getBlock());
   return ancestor && (ancestor == anchor || anchor->isBeforeInBlock(ancestor));
+}
+
+static bool valueAvailableBefore(Value value, Operation *anchor) {
+  if (Operation *def = value.getDefiningOp()) {
+    if (def->getBlock() == anchor->getBlock())
+      return def->isBeforeInBlock(anchor);
+    Operation *ancestor = getAncestorInBlock(anchor, def->getBlock());
+    return ancestor && def->isBeforeInBlock(ancestor);
+  }
+  auto arg = dyn_cast<BlockArgument>(value);
+  return arg && getAncestorInBlock(anchor, arg.getOwner());
+}
+
+struct LiveSCCAtRematSite {
+  Value value;
+  bool overlaps = false;
+};
+
+static LiveSCCAtRematSite findLiveSCCBefore(Operation *anchor) {
+  LiveSCCAtRematSite result;
+  func::FuncOp func = anchor->getParentOfType<func::FuncOp>();
+  func.walk([&](Operation *op) {
+    if (!insertionBeforeDominatesUse(anchor, op))
+      return WalkResult::advance();
+    for (Value operand : op->getOperands()) {
+      if (wave::getHardwareResourceForValue(operand) !=
+              wave::HardwareResourceKind::SCC ||
+          !valueAvailableBefore(operand, anchor))
+        continue;
+      if (result.value && result.value != operand) {
+        result.overlaps = true;
+        return WalkResult::interrupt();
+      }
+      result.value = operand;
+    }
+    return WalkResult::advance();
+  });
+  return result;
+}
+
+static bool rematValuesWriteSCC(const DenseSet<Value> &values) {
+  return llvm::any_of(values, [](Value value) {
+    Operation *def = value.getDefiningOp();
+    return def &&
+           llvm::is_contained(wave::getHardwareResourceEffects(def).writes,
+                              wave::HardwareResourceKind::SCC);
+  });
 }
 
 static bool isTrackedRegValue(Value value) {
@@ -410,14 +469,13 @@ getRegClassPressureAtPosition(ArrayRef<wave::RegAllocTransformAliasSet> sets,
 }
 
 static bool
-extendedLeafAddsPressureAtFailure(Value leaf, const RematReliefSlot &slot,
-                                  const RegAllocTransformFailure &failureRecord,
-                                  const RematReliefContext &context) {
+extendedLeafAddsPressureAtPosition(Value leaf, const RematReliefSlot &slot,
+                                   unsigned position,
+                                   const RematReliefContext &context) {
   auto it = context.values.find(leaf);
   if (it == context.values.end())
     return false;
   const wave::RegAllocTransformValue &stateValue = *it->second;
-  unsigned position = failureRecord.position;
   if (stateValue.start > position || slot.rebuildPosition < position)
     return false;
   return !isStateValueLiveAt(leaf, position, context);
@@ -434,8 +492,8 @@ collectRematPressureLeafSets(ArrayRef<const RematReliefRoot *> roots,
         auto it = context.values.find(leaf);
         if (it == context.values.end())
           continue;
-        if (extendedLeafAddsPressureAtFailure(leaf, slot, failureRecord,
-                                              context))
+        if (extendedLeafAddsPressureAtPosition(leaf, slot,
+                                               failureRecord.position, context))
           countedSets.insert(it->second->set);
       }
   SmallVector<unsigned> result(countedSets.begin(), countedSets.end());
@@ -457,6 +515,18 @@ getRematExtendedLeafPressure(ArrayRef<const RematReliefRoot *> roots,
       assert(set && "remat leaf alias set missing");
       addRegClassPressure(pressure, set->regClass, set->width);
     }
+  return pressure;
+}
+
+static RegClassPressure
+getRematSCCSavePressureAtPosition(ArrayRef<const RematReliefRoot *> roots,
+                                  unsigned position) {
+  RegClassPressure pressure = {};
+  DenseSet<Operation *> countedSites;
+  for (const RematReliefRoot *root : roots)
+    for (const RematSCCSave &save : root->sccSaves)
+      if (save.position == position && countedSites.insert(save.site).second)
+        addRegClassPressure(pressure, waveamdmachine::RegClass::SGPR, 1);
   return pressure;
 }
 
@@ -491,20 +561,25 @@ static int64_t getFailurePressure(RegClassPressure pressure,
   return result;
 }
 
-static bool rematRootsReduceFailurePressure(
+static bool rematRootsPassFailurePressureCheck(
     func::FuncOp func, ArrayRef<const RematReliefRoot *> roots,
     const RegAllocTransformFailure &failureRecord,
-    ArrayRef<wave::RegAllocTransformAliasSet> sets) {
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    bool requirePressureReduction) {
   RegClassPressure added = getRematExtendedLeafPressure(roots, sets);
+  RegClassPressure saves =
+      getRematSCCSavePressureAtPosition(roots, failureRecord.position);
   RegClassPressure removed = getRematRemovedPressure(roots);
   RegClassPressure before =
       getRegClassPressureAtPosition(sets, failureRecord.position);
   RegClassPressure after = before;
   for (waveamdmachine::RegClass regClass : kRegClasses)
-    after[getRegClassIndex(regClass)] +=
-        added[getRegClassIndex(regClass)] - removed[getRegClassIndex(regClass)];
-  if (getFailurePressure(after, failureRecord.className) >=
-      getFailurePressure(before, failureRecord.className))
+    after[getRegClassIndex(regClass)] += added[getRegClassIndex(regClass)] +
+                                         saves[getRegClassIndex(regClass)] -
+                                         removed[getRegClassIndex(regClass)];
+  if (requirePressureReduction &&
+      getFailurePressure(after, failureRecord.className) >=
+          getFailurePressure(before, failureRecord.className))
     return false;
   for (waveamdmachine::RegClass regClass : kRegClasses) {
     unsigned index = getRegClassIndex(regClass);
@@ -541,6 +616,102 @@ rematRootsUseFailurePosition(ArrayRef<const RematReliefRoot *> roots) {
   });
 }
 
+static bool rematRootsHaveFailureClassSCCSave(
+    ArrayRef<const RematReliefRoot *> roots,
+    const RegAllocTransformFailure &failureRecord) {
+  if (!isFailurePressureClass(waveamdmachine::RegClass::SGPR,
+                              failureRecord.className))
+    return false;
+  return llvm::any_of(roots, [&](const RematReliefRoot *root) {
+    return llvm::any_of(root->sccSaves, [&](const RematSCCSave &save) {
+      return save.position == failureRecord.position;
+    });
+  });
+}
+
+static void addRematRootLeafPressureAtPosition(
+    RegClassPressure &pressure, DenseSet<unsigned> &addedLeafSets,
+    const RematReliefRoot &root, unsigned position,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    const RematReliefContext &context) {
+  for (const RematReliefSlot &slot : root.slots)
+    for (Value leaf : slot.extendedLeaves) {
+      auto it = context.values.find(leaf);
+      if (it == context.values.end())
+        continue;
+      if (!extendedLeafAddsPressureAtPosition(leaf, slot, position, context))
+        continue;
+      if (!addedLeafSets.insert(it->second->set).second)
+        continue;
+      const wave::RegAllocTransformAliasSet *set =
+          findRegAllocTransformSet(sets, it->second->set);
+      assert(set && "remat leaf alias set missing");
+      addRegClassPressure(pressure, set->regClass, set->width);
+    }
+}
+
+static RegClassPressure getRematPressureAfterSCCSaveAtPosition(
+    ArrayRef<const RematReliefRoot *> roots, unsigned position,
+    ArrayRef<wave::RegAllocTransformAliasSet> sets,
+    const RematReliefContext &context) {
+  RegClassPressure pressure = getRegClassPressureAtPosition(sets, position);
+  DenseSet<unsigned> removedSets;
+  DenseSet<unsigned> addedLeafSets;
+  for (const RematReliefRoot *root : roots) {
+    if (removedSets.insert(root->set->id).second &&
+        aliasSetLiveAtPosition(*root->set, position))
+      addRegClassPressure(pressure, root->set->regClass,
+                          -static_cast<int64_t>(root->set->width));
+    addRematRootLeafPressureAtPosition(pressure, addedLeafSets, *root, position,
+                                       sets, context);
+  }
+  addRegClassPressure(pressure, waveamdmachine::RegClass::SGPR, 1);
+  return pressure;
+}
+
+static bool
+rematSCCSaveSiteRespectsBudgets(func::FuncOp func, Operation *site,
+                                ArrayRef<const RematReliefRoot *> roots,
+                                const RegAllocTransformFailure &failureRecord,
+                                ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                                const RematReliefContext &context) {
+  unsigned position = context.positions->lookup(site);
+  RegClassPressure before = getRegClassPressureAtPosition(sets, position);
+  RegClassPressure after =
+      getRematPressureAfterSCCSaveAtPosition(roots, position, sets, context);
+  for (waveamdmachine::RegClass regClass : kRegClasses) {
+    unsigned index = getRegClassIndex(regClass);
+    if (after[index] < 0)
+      return false;
+    if (position == failureRecord.position &&
+        isFailurePressureClass(regClass, failureRecord.className))
+      continue;
+    wave::RegAllocTransformBudget budget =
+        wave::getRegAllocTransformBudget(func, regClass);
+    int64_t allowed =
+        std::max(before[index], static_cast<int64_t>(budget.limit));
+    if (after[index] > allowed)
+      return false;
+  }
+  return true;
+}
+
+static bool
+rematSCCSaveSitesRespectBudgets(func::FuncOp func,
+                                ArrayRef<const RematReliefRoot *> roots,
+                                const RegAllocTransformFailure &failureRecord,
+                                ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                                const RematReliefContext &context) {
+  DenseSet<Operation *> sites;
+  for (const RematReliefRoot *root : roots)
+    for (const RematSCCSave &save : root->sccSaves)
+      sites.insert(save.site);
+  return llvm::all_of(sites, [&](Operation *site) {
+    return rematSCCSaveSiteRespectsBudgets(func, site, roots, failureRecord,
+                                           sets, context);
+  });
+}
+
 static FailureOr<RematReliefSlot> buildRematReliefSlot(
     Value value, const wave::RegAllocTransformValue &stateValue,
     const RegAllocTransformFailure &failureRecord,
@@ -574,15 +745,39 @@ static void sortRematReliefSlots(MutableArrayRef<RematReliefSlot> slots) {
                     });
 }
 
-static void collectRematRootCost(RematReliefRoot &root) {
+static void collectRematRootSiteValues(RematReliefRoot &root) {
   for (const RematReliefSlot &slot : root.slots) {
     root.useCost += slot.uses.size();
     DenseSet<Value> &values = root.siteValues[slot.rebuildOp];
     values.insert(slot.dagValues.begin(), slot.dagValues.end());
   }
+}
+
+static void collectRematRootCost(RematReliefRoot &root) {
   root.cost = root.useCost;
   for (auto &[site, values] : root.siteValues)
     root.cost += values.size() * getRematReliefLoopCostScale(site);
+  for (const RematSCCSave &save : root.sccSaves)
+    root.cost += 2 * getRematReliefLoopCostScale(save.site);
+}
+
+static bool collectRematSCCSaves(RematReliefRoot &root,
+                                 const RematReliefContext &context) {
+  for (const auto &[site, values] : root.siteValues) {
+    if (!rematValuesWriteSCC(values))
+      continue;
+    LiveSCCAtRematSite live = findLiveSCCBefore(site);
+    if (live.overlaps)
+      return false;
+    if (live.value)
+      root.sccSaves.push_back(
+          {site, live.value, context.positions->lookup(site)});
+  }
+  llvm::sort(root.sccSaves,
+             [](const RematSCCSave &lhs, const RematSCCSave &rhs) {
+               return lhs.position < rhs.position;
+             });
+  return true;
 }
 
 static void addForcedRematValues(ArrayRef<ResolvedRegAllocValue> values,
@@ -680,10 +875,16 @@ static bool
 rematRootsPassPressureCheck(func::FuncOp func,
                             ArrayRef<const RematReliefRoot *> roots,
                             const RegAllocTransformFailure &failureRecord,
-                            ArrayRef<wave::RegAllocTransformAliasSet> sets) {
-  if (rematRootsUseFailurePosition(roots))
-    return true;
-  return rematRootsReduceFailurePressure(func, roots, failureRecord, sets);
+                            ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                            const RematReliefContext &context) {
+  bool usesFailurePosition = rematRootsUseFailurePosition(roots);
+  bool failureClassSave =
+      rematRootsHaveFailureClassSCCSave(roots, failureRecord);
+  return rematRootsPassFailurePressureCheck(func, roots, failureRecord, sets,
+                                            !usesFailurePosition ||
+                                                failureClassSave) &&
+         rematSCCSaveSitesRespectBudgets(func, roots, failureRecord, sets,
+                                         context);
 }
 
 static FailureOr<std::optional<RematReliefRoot>>
@@ -718,6 +919,9 @@ buildRematReliefRoot(func::FuncOp func, unsigned setId,
   if (root.slots.empty())
     return std::optional<RematReliefRoot>();
   sortRematReliefSlots(root.slots);
+  collectRematRootSiteValues(root);
+  if (!collectRematSCCSaves(root, context))
+    return std::optional<RematReliefRoot>();
   collectRematRootCost(root);
   std::array<const RematReliefRoot *, 1> roots = {&root};
   root.pressureLeafSets =
@@ -729,6 +933,7 @@ buildRematReliefRoot(func::FuncOp func, unsigned setId,
 
 static int64_t getRematPlanCost(ArrayRef<const RematReliefRoot *> roots) {
   DenseMap<Operation *, DenseSet<Value>> siteValues;
+  DenseSet<Operation *> sccSaveSites;
   int64_t cost = 0;
   for (const RematReliefRoot *root : roots) {
     cost += root->useCost;
@@ -736,9 +941,13 @@ static int64_t getRematPlanCost(ArrayRef<const RematReliefRoot *> roots) {
       DenseSet<Value> &values = siteValues[site];
       values.insert(rootValues.begin(), rootValues.end());
     }
+    for (const RematSCCSave &save : root->sccSaves)
+      sccSaveSites.insert(save.site);
   }
   for (auto &[site, values] : siteValues)
     cost += values.size() * getRematReliefLoopCostScale(site);
+  for (Operation *site : sccSaveSites)
+    cost += 2 * getRematReliefLoopCostScale(site);
   return cost;
 }
 
@@ -749,6 +958,7 @@ buildRematBundleSearchContext(func::FuncOp func,
   RematBundleSearchContext context;
   context.before = getRegClassPressureAtPosition(sets, failureRecord.position);
   context.failureClassName = failureRecord.className;
+  context.failurePosition = failureRecord.position;
   for (const wave::RegAllocTransformAliasSet &set : sets) {
     assert(!context.sets.contains(set.id) && "duplicate remat alias set ID");
     context.sets[set.id] = &set;
@@ -781,6 +991,9 @@ static int64_t getRematRootIncrementalCost(const RematReliefRoot &root,
           !existing->second.contains(value))
         cost += scale;
   }
+  for (const RematSCCSave &save : root.sccSaves)
+    if (!state.sccSaveSites.contains(save.site))
+      cost += 2 * getRematReliefLoopCostScale(save.site);
   return cost;
 }
 
@@ -796,6 +1009,10 @@ getRematRootExtensionAddedPressure(const RematReliefRoot &root,
         getRematBundleSet(context, setId);
     addRegClassPressure(added, set.regClass, set.width);
   }
+  for (const RematSCCSave &save : root.sccSaves)
+    if (save.position == context.failurePosition &&
+        !state.sccSaveSites.contains(save.site))
+      addRegClassPressure(added, waveamdmachine::RegClass::SGPR, 1);
   return added;
 }
 
@@ -834,9 +1051,13 @@ static bool rootConnectsToBundle(const RematReliefRoot &root,
                                  const RematBundleState &state) {
   if (state.indices.empty())
     return true;
-  return llvm::any_of(root.pressureLeafSets, [&](unsigned setId) {
-    return state.pressureLeafSets.contains(setId);
-  });
+  return llvm::any_of(root.pressureLeafSets,
+                      [&](unsigned setId) {
+                        return state.pressureLeafSets.contains(setId);
+                      }) ||
+         llvm::any_of(root.sccSaves, [&](const RematSCCSave &save) {
+           return state.sccSaveSites.contains(save.site);
+         });
 }
 
 static std::optional<RematRootExtension>
@@ -851,11 +1072,8 @@ getRematRootExtension(unsigned index, ArrayRef<RematReliefRoot> roots,
   RegClassPressure added =
       getRematRootExtensionAddedPressure(root, state, context);
   RegClassPressure removed = getRematRootExtensionRemovedPressure(root, state);
-  bool usesFailurePosition =
-      state.usesFailurePosition || root.usesFailurePosition;
   // Other-class overflow cannot recover: roots remove failure-class pressure.
-  if (!usesFailurePosition &&
-      !rematPressuresRespectOtherClassBudgets(added, removed, context))
+  if (!rematPressuresRespectOtherClassBudgets(added, removed, context))
     return std::nullopt;
   return RematRootExtension{
       getRematBundleFailurePressureGain(added, removed, context),
@@ -883,42 +1101,85 @@ static void addRematRootToBundle(unsigned index,
         getRematBundleSet(context, setId);
     addRegClassPressure(state.added, set.regClass, set.width);
   }
+  for (const RematSCCSave &save : root.sccSaves) {
+    if (!state.sccSaveSites.insert(save.site).second)
+      continue;
+    if (save.position == context.failurePosition) {
+      addRegClassPressure(state.added, waveamdmachine::RegClass::SGPR, 1);
+      ++state.failureSCCSaveDwords;
+    }
+  }
   state.usesFailurePosition |= root.usesFailurePosition;
 }
 
 static bool
 rematBundlePassesPressureCheck(const RematBundleState &state,
                                const RematBundleSearchContext &context) {
-  if (state.usesFailurePosition)
-    return true;
+  bool failureClassSave = state.failureSCCSaveDwords != 0 &&
+                          isFailurePressureClass(waveamdmachine::RegClass::SGPR,
+                                                 context.failureClassName);
+  if (state.usesFailurePosition && !failureClassSave)
+    return rematPressuresRespectOtherClassBudgets(state.added, state.removed,
+                                                  context);
   return getRematBundleFailurePressureGain(state.added, state.removed,
                                            context) > 0 &&
          rematPressuresRespectOtherClassBudgets(state.added, state.removed,
                                                 context);
 }
 
+struct RematRootAdjacency {
+  DenseMap<unsigned, SmallVector<unsigned>> rootsByLeaf;
+  DenseMap<Operation *, SmallVector<unsigned>> rootsBySCCSite;
+};
+
+static RematRootAdjacency
+buildRematRootAdjacency(ArrayRef<const RematReliefRoot *> roots) {
+  RematRootAdjacency adjacency;
+  for (auto [index, root] : llvm::enumerate(roots)) {
+    for (unsigned setId : root->pressureLeafSets)
+      adjacency.rootsByLeaf[setId].push_back(static_cast<unsigned>(index));
+    for (const RematSCCSave &save : root->sccSaves)
+      adjacency.rootsBySCCSite[save.site].push_back(
+          static_cast<unsigned>(index));
+  }
+  return adjacency;
+}
+
+static void reachRematRoots(ArrayRef<unsigned> neighbors,
+                            SmallVectorImpl<char> &reached,
+                            SmallVectorImpl<unsigned> &worklist) {
+  for (unsigned neighbor : neighbors)
+    if (!reached[neighbor]) {
+      reached[neighbor] = true;
+      worklist.push_back(neighbor);
+    }
+}
+
+static void reachRematRootNeighbors(const RematReliefRoot &root,
+                                    const RematRootAdjacency &adjacency,
+                                    SmallVectorImpl<char> &reached,
+                                    SmallVectorImpl<unsigned> &worklist) {
+  for (unsigned setId : root.pressureLeafSets) {
+    auto neighbors = adjacency.rootsByLeaf.find(setId);
+    assert(neighbors != adjacency.rootsByLeaf.end() &&
+           "remat leaf has no roots");
+    reachRematRoots(neighbors->second, reached, worklist);
+  }
+  for (const RematSCCSave &save : root.sccSaves)
+    reachRematRoots(adjacency.rootsBySCCSite.lookup(save.site), reached,
+                    worklist);
+}
+
 static bool rematRootsAreConnected(ArrayRef<const RematReliefRoot *> roots) {
   if (roots.size() < 2)
     return true;
-  DenseMap<unsigned, SmallVector<unsigned>> rootsByLeaf;
-  for (auto [index, root] : llvm::enumerate(roots))
-    for (unsigned setId : root->pressureLeafSets)
-      rootsByLeaf[setId].push_back(static_cast<unsigned>(index));
+  RematRootAdjacency adjacency = buildRematRootAdjacency(roots);
   SmallVector<char> reached(roots.size(), false);
   SmallVector<unsigned> worklist = {0};
   reached.front() = true;
-  for (unsigned cursor = 0; cursor < worklist.size(); ++cursor) {
-    unsigned index = worklist[cursor];
-    for (unsigned setId : roots[index]->pressureLeafSets) {
-      auto neighbors = rootsByLeaf.find(setId);
-      assert(neighbors != rootsByLeaf.end() && "remat leaf has no roots");
-      for (unsigned neighbor : neighbors->second)
-        if (!reached[neighbor]) {
-          reached[neighbor] = true;
-          worklist.push_back(neighbor);
-        }
-    }
-  }
+  for (unsigned cursor = 0; cursor < worklist.size(); ++cursor)
+    reachRematRootNeighbors(*roots[worklist[cursor]], adjacency, reached,
+                            worklist);
   return llvm::all_of(reached, [](char value) { return value; });
 }
 
@@ -948,7 +1209,8 @@ static void
 pruneRematRootIndices(func::FuncOp func, SmallVectorImpl<unsigned> &indices,
                       ArrayRef<RematReliefRoot> roots,
                       const RegAllocTransformFailure &failureRecord,
-                      ArrayRef<wave::RegAllocTransformAliasSet> sets) {
+                      ArrayRef<wave::RegAllocTransformAliasSet> sets,
+                      const RematReliefContext &context) {
   while (indices.size() > 1) {
     SmallVector<unsigned> removalOrder(indices.begin(), indices.end());
     llvm::stable_sort(removalOrder, [&](unsigned lhs, unsigned rhs) {
@@ -964,7 +1226,8 @@ pruneRematRootIndices(func::FuncOp func, SmallVectorImpl<unsigned> &indices,
       SmallVector<const RematReliefRoot *> refs =
           getRematRootRefs(roots, trial);
       if (!rematRootsAreConnected(refs) ||
-          !rematRootsPassPressureCheck(func, refs, failureRecord, sets))
+          !rematRootsPassPressureCheck(func, refs, failureRecord, sets,
+                                       context))
         continue;
       indices.assign(trial.begin(), trial.end());
       removed = true;
@@ -980,7 +1243,8 @@ growRematRootBundle(func::FuncOp func, unsigned seed,
                     ArrayRef<RematReliefRoot> roots,
                     const RegAllocTransformFailure &failureRecord,
                     ArrayRef<wave::RegAllocTransformAliasSet> sets,
-                    const RematBundleSearchContext &context) {
+                    const RematBundleSearchContext &context,
+                    const RematReliefContext &rematContext) {
   RematBundleState state;
   std::optional<RematRootExtension> seedExtension =
       getRematRootExtension(seed, roots, state, context);
@@ -988,8 +1252,13 @@ growRematRootBundle(func::FuncOp func, unsigned seed,
     return std::nullopt;
   addRematRootToBundle(seed, roots, context, state);
   while (true) {
-    if (rematBundlePassesPressureCheck(state, context)) {
-      pruneRematRootIndices(func, state.indices, roots, failureRecord, sets);
+    SmallVector<const RematReliefRoot *> refs =
+        getRematRootRefs(roots, state.indices);
+    if (rematBundlePassesPressureCheck(state, context) &&
+        rematSCCSaveSitesRespectBudgets(func, refs, failureRecord, sets,
+                                        rematContext)) {
+      pruneRematRootIndices(func, state.indices, roots, failureRecord, sets,
+                            rematContext);
       return state.indices;
     }
 
@@ -1011,13 +1280,28 @@ growRematRootBundle(func::FuncOp func, unsigned seed,
 static RematReliefPlan buildRematReliefPlan(ArrayRef<RematReliefRoot> roots,
                                             ArrayRef<unsigned> indices) {
   RematReliefPlan plan;
+  DenseMap<Operation *, Value> sccSaveSites;
   SmallVector<const RematReliefRoot *> refs = getRematRootRefs(roots, indices);
   plan.cost = getRematPlanCost(refs);
-  for (unsigned index : indices)
+  for (unsigned index : indices) {
     plan.roots.push_back(roots[index]);
+    for (const RematSCCSave &save : roots[index].sccSaves) {
+      Value &live = sccSaveSites[save.site];
+      assert((!live || live == save.live) &&
+             "remat SCC site live value changed");
+      if (!live) {
+        live = save.live;
+        plan.sccSaves.push_back(save);
+      }
+    }
+  }
   llvm::sort(plan.roots,
              [](const RematReliefRoot &lhs, const RematReliefRoot &rhs) {
                return lhs.set->id < rhs.set->id;
+             });
+  llvm::sort(plan.sccSaves,
+             [](const RematSCCSave &lhs, const RematSCCSave &rhs) {
+               return lhs.position < rhs.position;
              });
   return plan;
 }
@@ -1062,7 +1346,7 @@ selectRematReliefPlan(func::FuncOp func,
   std::optional<RematReliefPlan> best;
   for (unsigned seed : llvm::seq<unsigned>(roots.size())) {
     std::optional<SmallVector<unsigned>> indices = growRematRootBundle(
-        func, seed, roots, failureRecord, sets, searchContext);
+        func, seed, roots, failureRecord, sets, searchContext, context);
     if (!indices)
       continue;
     RematReliefPlan candidate = buildRematReliefPlan(roots, *indices);
@@ -1132,22 +1416,97 @@ static LogicalResult materializeRematReliefSlot(
   return success();
 }
 
+static waveamdmachine::RegType getRematVirtualSGPR1(MLIRContext *context) {
+  return waveamdmachine::RegType::get(context, waveamdmachine::RegClass::SGPR,
+                                      1, /*index=*/-1);
+}
+
+static Value createRematImm(OpBuilder &builder, Location loc, uint64_t value) {
+  return waveamdmachine::ImmOp::create(
+      builder, loc, waveamdmachine::ImmType::get(builder.getContext()), value);
+}
+
+static Value saveSCCBeforeRemat(OpBuilder &builder, const RematSCCSave &save) {
+  builder.setInsertionPoint(save.site);
+  Location loc = save.site->getLoc();
+  Value one = createRematImm(builder, loc, 1);
+  Value zero = createRematImm(builder, loc, 0);
+  waveamdmachine::SCSelectB32Op saved = waveamdmachine::SCSelectB32Op::create(
+      builder, loc, getRematVirtualSGPR1(builder.getContext()), save.live, one,
+      zero);
+  saved->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  return saved.getResult();
+}
+
+static void reloadSCCAfterRemat(OpBuilder &builder, const RematSCCSave &save,
+                                Value saved) {
+  builder.setInsertionPoint(save.site);
+  waveamdmachine::SCSelectB32Op savedOp =
+      saved.getDefiningOp<waveamdmachine::SCSelectB32Op>();
+  assert(savedOp && "remat SCC save op missing");
+  Value live = savedOp.getCond();
+  Value zero = createRematImm(builder, save.site->getLoc(), 0);
+  waveamdmachine::SCmpLgU32Op reloaded = waveamdmachine::SCmpLgU32Op::create(
+      builder, save.site->getLoc(), live.getType(), saved, zero);
+  reloaded->setAttr(wave::regalloc::kRegAllocTempAttr, builder.getUnitAttr());
+  for (OpOperand &use : llvm::make_early_inc_range(live.getUses()))
+    if (insertionBeforeDominatesUse(save.site, use.getOwner()))
+      use.set(reloaded.getResult());
+}
+
+struct RematSlotRef {
+  const RematReliefRoot *root = nullptr;
+  const RematReliefSlot *slot = nullptr;
+};
+
+static SmallVector<RematSlotRef>
+collectRematSlotRefs(const RematReliefPlan &plan) {
+  SmallVector<RematSlotRef> slots;
+  for (const RematReliefRoot &root : plan.roots)
+    for (const RematReliefSlot &slot : root.slots)
+      slots.push_back({&root, &slot});
+  llvm::stable_sort(slots, [](RematSlotRef lhs, RematSlotRef rhs) {
+    return std::tie(lhs.slot->rebuildPosition, lhs.root->set->id,
+                    lhs.slot->stateValue->id) <
+           std::tie(rhs.slot->rebuildPosition, rhs.root->set->id,
+                    rhs.slot->stateValue->id);
+  });
+  return slots;
+}
+
 static LogicalResult
 materializeRematRelief(OpBuilder &builder, const RematReliefPlan &plan,
                        const RegAllocTransformFailure &failureRecord,
                        const RematReliefContext &context) {
   DenseMap<Operation *, DenseMap<Value, Value>> siteCaches;
+  DenseMap<Operation *, Value> savedSCCs;
   SmallVector<std::pair<const RematReliefSlot *, Value>> rebuiltSlots;
-  for (const RematReliefRoot &root : plan.roots) {
-    DenseSet<Value> forcedRematValues(root.rematValues.begin(),
-                                      root.rematValues.end());
-    for (const RematReliefSlot &slot : root.slots) {
-      DenseMap<Value, Value> &cache = siteCaches[slot.rebuildOp];
+  for (const RematSCCSave &save : plan.sccSaves)
+    savedSCCs[save.site] = saveSCCBeforeRemat(builder, save);
+
+  SmallVector<RematSlotRef> slots = collectRematSlotRefs(plan);
+  for (unsigned begin = 0; begin < slots.size();) {
+    Operation *site = slots[begin].slot->rebuildOp;
+    unsigned end = begin;
+    while (end < slots.size() && slots[end].slot->rebuildOp == site) {
+      const RematReliefRoot &root = *slots[end].root;
+      const RematReliefSlot &slot = *slots[end].slot;
+      DenseSet<Value> forcedRematValues(root.rematValues.begin(),
+                                        root.rematValues.end());
+      DenseMap<Value, Value> &cache = siteCaches[site];
       if (failed(materializeRematReliefSlot(builder, slot, failureRecord,
                                             context, forcedRematValues, cache,
                                             rebuiltSlots)))
         return failure();
+      ++end;
     }
+    auto save =
+        llvm::find_if(plan.sccSaves, [&](const RematSCCSave &candidate) {
+          return candidate.site == site;
+        });
+    if (save != plan.sccSaves.end())
+      reloadSCCAfterRemat(builder, *save, savedSCCs.lookup(site));
+    begin = end;
   }
   for (auto [slot, rebuilt] : rebuiltSlots)
     for (OpOperand *use : slot->uses)
