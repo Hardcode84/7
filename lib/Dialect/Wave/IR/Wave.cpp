@@ -2005,6 +2005,9 @@ LogicalResult ExtractOp::verify() {
 }
 
 OpFoldResult ExtractOp::fold(FoldAdaptor) {
+  if (getIndex() == 0 && getSource().getType() == getResult().getType())
+    return getSource();
+
   PackOp pack = getSource().getDefiningOp<PackOp>();
   if (!pack)
     return {};
@@ -3066,6 +3069,22 @@ LogicalResult RedistributeOp::verify() {
       getWavePayloadElementType(resultType))
     return emitOpError("source and result packet element types must match");
   return verifyRedistributionRelationSymbols(*this, getRelation());
+}
+
+OpFoldResult RedistributeOp::fold(FoldAdaptor) {
+  if (getSource().getType() != getResult().getType())
+    return {};
+
+  RedistributionAttr relation = getRelation();
+  sym::ExprView sourceBlock(relation.getSourceBlock());
+  bool identityBlock = sourceBlock.getSymbolName() == "block";
+  if (relation.getBlocks() == 1)
+    identityBlock |= sourceBlock.getInt() == 0;
+  if (!identityBlock ||
+      sym::ExprView(relation.getSourceItem()).getSymbolName() != "item" ||
+      sym::ExprView(relation.getSourceSlot()).getSymbolName() != "slot")
+    return {};
+  return getSource();
 }
 
 LogicalResult WorkgroupIdOp::verify() {

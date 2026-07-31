@@ -487,6 +487,7 @@ def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
     $source `,` $relation attr-dict `:` qualified(type($source)) `->`
     qualified(type($result))
   }];
+  let hasFolder = 1;
   let hasVerifier = 1;
 }
 

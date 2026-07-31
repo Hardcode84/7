@@ -427,6 +427,91 @@ func.func @cmpi_mask_constant_fold() -> !wave.mask<32> {
   return %mask : !wave.mask<32>
 }
 
+// CHECK-LABEL: func.func @redistribute_identity_fold
+// CHECK-SAME: (%[[PACKET:.*]]: !wave.simd<vector<4xi32>, 64>)
+// CHECK-NOT: wave.redistribute
+// CHECK: return %[[PACKET]], %[[PACKET]]
+func.func @redistribute_identity_fold(
+    %packet: !wave.simd<vector<4xi32>, 64>)
+    -> (!wave.simd<vector<4xi32>, 64>, !wave.simd<vector<4xi32>, 64>) {
+  %symbolic = wave.redistribute %packet,
+      <blocks = 2, items = 128, source_block = "block",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<4xi32>, 64>
+  %literal = wave.redistribute %packet,
+      <blocks = 1, items = 256, source_block = "0",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<4xi32>, 64>
+  return %symbolic, %literal
+      : !wave.simd<vector<4xi32>, 64>, !wave.simd<vector<4xi32>, 64>
+}
+
+// CHECK-LABEL: func.func @redistribute_nonidentity_stays
+// CHECK-COUNT-5: wave.redistribute
+func.func @redistribute_nonidentity_stays(
+    %packet: !wave.simd<vector<4xi32>, 64>)
+    -> (!wave.simd<vector<4xi32>, 64>, !wave.simd<vector<4xi32>, 64>,
+        !wave.simd<vector<4xi32>, 64>, !wave.simd<vector<4xi32>, 64>,
+        !wave.simd<vector<2xi32>, 64>) {
+  %constant_block = wave.redistribute %packet,
+      <blocks = 2, items = 128, source_block = "0",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<4xi32>, 64>
+  %changed_block = wave.redistribute %packet,
+      <blocks = 2, items = 128, source_block = "1 - block",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<4xi32>, 64>
+  %changed_item = wave.redistribute %packet,
+      <blocks = 1, items = 256, source_block = "0",
+       source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<4xi32>, 64>
+  %changed_slot = wave.redistribute %packet,
+      <blocks = 1, items = 256, source_block = "0",
+       source_item = "item", source_slot = "3 - slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<4xi32>, 64>
+  %changed_type = wave.redistribute %packet,
+      <blocks = 1, items = 256, source_block = "0",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 64>
+        -> !wave.simd<vector<2xi32>, 64>
+  return %constant_block, %changed_block, %changed_item, %changed_slot,
+      %changed_type
+      : !wave.simd<vector<4xi32>, 64>, !wave.simd<vector<4xi32>, 64>,
+        !wave.simd<vector<4xi32>, 64>, !wave.simd<vector<4xi32>, 64>,
+        !wave.simd<vector<2xi32>, 64>
+}
+
+// CHECK-LABEL: func.func @extract_whole_packet_fold
+// CHECK-SAME: (%[[PACKET:.*]]: !wave.simd<vector<16xf32>, 64>)
+// CHECK-NOT: wave.extract
+// CHECK: return %[[PACKET]] : !wave.simd<vector<16xf32>, 64>
+func.func @extract_whole_packet_fold(
+    %packet: !wave.simd<vector<16xf32>, 64>)
+    -> !wave.simd<vector<16xf32>, 64> {
+  %identity = wave.extract %packet[0]
+      : !wave.simd<vector<16xf32>, 64>
+        -> !wave.simd<vector<16xf32>, 64>
+  return %identity : !wave.simd<vector<16xf32>, 64>
+}
+
+// CHECK-LABEL: func.func @extract_partial_packet_stays
+// CHECK: %[[SLICE:.*]] = wave.extract %{{.*}}[0]
+// CHECK: return %[[SLICE]] : !wave.simd<vector<8xf32>, 64>
+func.func @extract_partial_packet_stays(
+    %packet: !wave.simd<vector<16xf32>, 64>)
+    -> !wave.simd<vector<8xf32>, 64> {
+  %slice = wave.extract %packet[0]
+      : !wave.simd<vector<16xf32>, 64>
+        -> !wave.simd<vector<8xf32>, 64>
+  return %slice : !wave.simd<vector<8xf32>, 64>
+}
+
 // CHECK-LABEL: func.func @index_expr_substitute_const
 // CHECK-SAME: (%[[LANE:.*]]: !wave.simd<i32, 32>)
 // CHECK: %[[OFF:.*]] = wave.index_expr <"4 + 2*lid"> ["lid"](%[[LANE]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
