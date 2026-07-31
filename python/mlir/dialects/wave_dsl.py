@@ -28,8 +28,10 @@ Usage::
 
 from __future__ import annotations
 
+import math
+import operator
 import typing
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -129,6 +131,788 @@ floor = ixsimpl.floor
 ceil = ixsimpl.ceil
 mod = ixsimpl.mod
 xor = ixsimpl.xor_
+
+
+_PACKET_INPUT_DIMS = ("register", "lane", "warp", "block")
+_PACKET_TRANSFORMS = frozenset(
+    {"identity", "broadcast", "expand_dims", "reshape", "transpose", "split"}
+)
+
+
+def _packet_int(value: Any, name: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an integer") from exc
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and value & (value - 1) == 0
+
+
+def _packet_pair(value: Any, message: str) -> tuple[Any, Any]:
+    try:
+        first, second = value
+    except (TypeError, ValueError) as exc:
+        raise TypeError(message) from exc
+    return first, second
+
+
+def _normalize_packet_out_dims(value: Any) -> tuple[tuple[str, int], ...]:
+    try:
+        dimensions = tuple(value)
+    except TypeError as exc:
+        raise TypeError("packet layout tensor dimensions must be iterable") from exc
+    result = []
+    for dimension in dimensions:
+        name, size = _packet_pair(
+            dimension, "packet layout tensor dimensions must be name-size pairs"
+        )
+        if not isinstance(name, str):
+            raise TypeError("packet layout tensor dimension names must be strings")
+        result.append((name, _packet_int(size, "packet layout tensor size")))
+    return tuple(result)
+
+
+def _normalize_packet_basis(value: Any) -> tuple[tuple[int, ...], ...]:
+    try:
+        raw_values = tuple(value)
+    except TypeError as exc:
+        raise TypeError("packet layout input bases must be iterable") from exc
+    result = []
+    for raw_value in raw_values:
+        try:
+            components = tuple(raw_value)
+        except TypeError as exc:
+            raise TypeError("packet layout basis must be iterable") from exc
+        result.append(
+            tuple(
+                _packet_int(component, "packet layout basis component")
+                for component in components
+            )
+        )
+    return tuple(result)
+
+
+def _normalize_packet_bases(
+    value: Any,
+) -> tuple[tuple[str, tuple[tuple[int, ...], ...]], ...]:
+    try:
+        bases = tuple(value)
+    except TypeError as exc:
+        raise TypeError("packet layout bases must be iterable") from exc
+    result = []
+    for entry in bases:
+        name, values = _packet_pair(
+            entry, "packet layout bases must be input-basis pairs"
+        )
+        if not isinstance(name, str):
+            raise TypeError("packet layout input dimension names must be strings")
+        result.append((name, _normalize_packet_basis(values)))
+    return tuple(result)
+
+
+def _validate_packet_out_dims(out_dims: tuple[tuple[str, int], ...]) -> None:
+    if not out_dims:
+        raise ValueError("packet layout requires at least one tensor dimension")
+    if len({name for name, _size in out_dims}) != len(out_dims):
+        raise ValueError("packet layout tensor dimension names must be unique")
+    if any(not name or not _is_power_of_two(size) for name, size in out_dims):
+        raise ValueError(
+            "packet layout tensor dimensions must be named positive powers of two"
+        )
+
+
+def _validate_packet_basis(
+    out_dims: tuple[tuple[str, int], ...], value: tuple[int, ...]
+) -> None:
+    rank = len(out_dims)
+    if len(value) != rank:
+        raise ValueError("packet layout basis rank does not match its tensor rank")
+    if any(
+        component < 0 or component >= out_dims[index][1]
+        for index, component in enumerate(value)
+    ):
+        raise ValueError("packet layout basis is outside its tensor shape")
+
+
+def _validate_packet_bases(
+    out_dims: tuple[tuple[str, int], ...],
+    bases: tuple[tuple[str, tuple[tuple[int, ...], ...]], ...],
+) -> None:
+    if len({name for name, _values in bases}) != len(bases):
+        raise ValueError("packet layout input dimension names must be unique")
+    if any(name not in _PACKET_INPUT_DIMS for name, _values in bases):
+        raise ValueError("packet layout has an unsupported input dimension")
+    for _name, values in bases:
+        for value in values:
+            _validate_packet_basis(out_dims, value)
+
+
+@dataclass(frozen=True)
+class PacketLayout:
+    """Bit-linear hardware-to-tensor packet mapping."""
+
+    lane_width: int
+    out_dims: tuple[tuple[str, int], ...]
+    bases: tuple[tuple[str, tuple[tuple[int, ...], ...]], ...]
+
+    def __post_init__(self) -> None:
+        lane_width = _packet_int(self.lane_width, "packet layout lane width")
+        out_dims = _normalize_packet_out_dims(self.out_dims)
+        bases = _normalize_packet_bases(self.bases)
+        object.__setattr__(self, "lane_width", lane_width)
+        object.__setattr__(self, "out_dims", out_dims)
+        object.__setattr__(self, "bases", bases)
+        if not _is_power_of_two(lane_width):
+            raise ValueError("packet layout lane width must be a positive power of two")
+        _validate_packet_out_dims(out_dims)
+        _validate_packet_bases(out_dims, bases)
+        if self.input_size("lane") != self.lane_width:
+            raise ValueError("packet layout lane domain does not match its lane width")
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(size for _name, size in self.out_dims)
+
+    @property
+    def slot_count(self) -> int:
+        return self.input_size("register")
+
+    @property
+    def item_count(self) -> int:
+        return self.lane_width * self.input_size("warp")
+
+    @property
+    def block_count(self) -> int:
+        return self.input_size("block")
+
+    def input_size(self, name: str) -> int:
+        for input_name, values in self.bases:
+            if input_name == name:
+                return 1 << len(values)
+        return 1
+
+
+def _normalize_packet_order(value: Any) -> tuple[int, ...]:
+    try:
+        order = tuple(value)
+    except TypeError as exc:
+        raise TypeError("packet transform order must be iterable") from exc
+    return tuple(_packet_int(dim, "packet transform order dimension") for dim in order)
+
+
+def _validate_expand_dims_transform(
+    axis: int | None, order: tuple[int, ...], selector: int | None
+) -> None:
+    if axis is None or axis < 0 or order or selector is not None:
+        raise ValueError("expand_dims packet transform requires one axis")
+
+
+def _validate_transpose_transform(
+    axis: int | None, order: tuple[int, ...], selector: int | None
+) -> None:
+    if axis is not None or not order or selector is not None:
+        raise ValueError("transpose packet transform requires an order")
+    if len(set(order)) != len(order) or any(dim < 0 for dim in order):
+        raise ValueError("transpose packet transform order must be a permutation")
+
+
+def _validate_split_transform(
+    axis: int | None, order: tuple[int, ...], selector: int | None
+) -> None:
+    if axis is not None or order or selector not in (0, 1):
+        raise ValueError("split packet transform requires selector 0 or 1")
+
+
+def _validate_parameterless_transform(
+    kind: str, axis: int | None, order: tuple[int, ...], selector: int | None
+) -> None:
+    if axis is not None or order or selector is not None:
+        raise ValueError(f"{kind} packet transform takes no parameters")
+
+
+@dataclass(frozen=True)
+class PacketTransform:
+    """Tensor transform relating source and result layouts."""
+
+    kind: str = "identity"
+    axis: int | None = None
+    order: tuple[int, ...] = ()
+    selector: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str):
+            raise TypeError("packet transform kind must be a string")
+        if self.kind not in _PACKET_TRANSFORMS:
+            raise ValueError(f"unsupported packet transform {self.kind!r}")
+        axis = (
+            None
+            if self.axis is None
+            else _packet_int(self.axis, "packet transform axis")
+        )
+        selector = (
+            None
+            if self.selector is None
+            else _packet_int(self.selector, "packet transform selector")
+        )
+        order = _normalize_packet_order(self.order)
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "selector", selector)
+
+        if self.kind == "expand_dims":
+            return _validate_expand_dims_transform(axis, order, selector)
+        if self.kind == "transpose":
+            return _validate_transpose_transform(axis, order, selector)
+        if self.kind == "split":
+            return _validate_split_transform(axis, order, selector)
+        return _validate_parameterless_transform(self.kind, axis, order, selector)
+
+    @staticmethod
+    def identity() -> PacketTransform:
+        return PacketTransform()
+
+    @staticmethod
+    def broadcast() -> PacketTransform:
+        return PacketTransform("broadcast")
+
+    @staticmethod
+    def expand_dims(axis: int) -> PacketTransform:
+        return PacketTransform("expand_dims", axis=axis)
+
+    @staticmethod
+    def reshape() -> PacketTransform:
+        return PacketTransform("reshape")
+
+    @staticmethod
+    def transpose(order: Sequence[int]) -> PacketTransform:
+        return PacketTransform("transpose", order=tuple(order))
+
+    @staticmethod
+    def split(selector: int) -> PacketTransform:
+        return PacketTransform("split", selector=selector)
+
+
+def join_packet_layout(first: PacketLayout, second: PacketLayout) -> PacketLayout:
+    """Return the packet layout of two equally laid-out joined operands."""
+    if first != second:
+        raise ValueError("joined packet operands must have identical layouts")
+    selector_name = f"dim{len(first.out_dims)}"
+    existing_names = {name for name, _size in first.out_dims}
+    while selector_name in existing_names:
+        selector_name = f"_{selector_name}"
+    bases = []
+    saw_register = False
+    for name, values in first.bases:
+        extended = tuple((*value, 0) for value in values)
+        if name == "register":
+            saw_register = True
+            extended += ((0,) * len(first.out_dims) + (1,),)
+        bases.append((name, extended))
+    if not saw_register:
+        bases.append(
+            (
+                "register",
+                ((0,) * len(first.out_dims) + (1,),),
+            )
+        )
+    return PacketLayout(
+        first.lane_width,
+        (*first.out_dims, (selector_name, 2)),
+        tuple(bases),
+    )
+
+
+def _layout_columns(
+    layout: PacketLayout,
+) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[int, ...], ...]]:
+    columns = []
+    values = []
+    for name, bases in layout.bases:
+        for bit, basis in enumerate(bases):
+            columns.append((name, bit))
+            values.append(tuple(int(component) for component in basis))
+    return tuple(columns), tuple(values)
+
+
+def _logical_offsets(layout: PacketLayout) -> tuple[int, ...]:
+    offsets = []
+    offset = 0
+    for _name, size in layout.out_dims:
+        offsets.append(offset)
+        offset += int(size).bit_length() - 1
+    return tuple(offsets)
+
+
+def _flatten_logical(layout: PacketLayout, coordinate: Sequence[int]) -> int:
+    if len(coordinate) != len(layout.out_dims):
+        raise ValueError("packet transform returned the wrong tensor rank")
+    result = 0
+    for index, (component, (_name, size), offset) in enumerate(
+        zip(coordinate, layout.out_dims, _logical_offsets(layout), strict=True)
+    ):
+        component = int(component)
+        if component < 0 or component >= int(size):
+            raise ValueError(
+                f"packet transform coordinate {index} is outside its source shape"
+            )
+        result |= component << offset
+    return result
+
+
+def _source_equations(layout: PacketLayout) -> tuple[tuple[int, ...], int]:
+    columns, values = _layout_columns(layout)
+    logical_bits = sum(int(size).bit_length() - 1 for _name, size in layout.out_dims)
+    equations = [0] * logical_bits
+    offsets = _logical_offsets(layout)
+    for column, value in enumerate(values):
+        for dim, component in enumerate(value):
+            for bit in range(int(layout.out_dims[dim][1]).bit_length() - 1):
+                if int(component) & (1 << bit):
+                    equations[offsets[dim] + bit] |= 1 << column
+    return tuple(equations), len(columns)
+
+
+def _reshape_coordinate(
+    coordinate: Sequence[int],
+    result_shape: Sequence[int],
+    source_shape: Sequence[int],
+) -> tuple[int, ...]:
+    linear = 0
+    for component, extent in zip(coordinate, result_shape, strict=True):
+        linear = linear * int(extent) + int(component)
+    source = [0] * len(source_shape)
+    for dim in reversed(range(len(source_shape))):
+        source[dim] = linear % int(source_shape[dim])
+        linear //= int(source_shape[dim])
+    return tuple(source)
+
+
+_PacketCoordinateTransform = Callable[[Sequence[int]], tuple[int, ...]]
+
+
+def _identity_packet_transform(
+    _transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    if source_shape != result_shape:
+        raise ValueError("identity packet transform requires equal tensor shapes")
+    return lambda coordinate: tuple(int(value) for value in coordinate)
+
+
+def _broadcast_packet_transform(
+    _transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    if len(source_shape) != len(result_shape) or any(
+        source not in (1, result)
+        for source, result in zip(source_shape, result_shape, strict=True)
+    ):
+        raise ValueError("broadcast packet transform has incompatible shapes")
+    return lambda coordinate: tuple(
+        0 if source == 1 else int(value)
+        for source, value in zip(source_shape, coordinate, strict=True)
+    )
+
+
+def _expand_dims_packet_transform(
+    transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    axis = transform.axis
+    assert axis is not None
+    if (
+        axis >= len(result_shape)
+        or result_shape[axis] != 1
+        or result_shape[:axis] + result_shape[axis + 1 :] != source_shape
+    ):
+        raise ValueError("expand_dims packet transform has incompatible shapes")
+    return lambda coordinate: tuple(coordinate[:axis]) + tuple(coordinate[axis + 1 :])
+
+
+def _reshape_packet_transform(
+    _transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    if math.prod(source_shape) != math.prod(result_shape):
+        raise ValueError("reshape packet transform changes the element count")
+    return lambda coordinate: _reshape_coordinate(
+        coordinate, result_shape, source_shape
+    )
+
+
+def _transpose_packet_transform(
+    transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    order = transform.order
+    if (
+        len(order) != len(source_shape)
+        or sorted(order) != list(range(len(source_shape)))
+        or tuple(source_shape[dim] for dim in order) != result_shape
+    ):
+        raise ValueError("transpose packet transform has an invalid order")
+
+    def transpose_coordinate(coordinate: Sequence[int]) -> tuple[int, ...]:
+        source = [0] * len(source_shape)
+        for result_dim, source_dim in enumerate(order):
+            source[source_dim] = int(coordinate[result_dim])
+        return tuple(source)
+
+    return transpose_coordinate
+
+
+def _split_packet_transform(
+    transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    selector = transform.selector
+    assert selector is not None
+    if not source_shape or source_shape[-1] != 2 or source_shape[:-1] != result_shape:
+        raise ValueError("split packet transform has incompatible shapes")
+    return lambda coordinate: (*map(int, coordinate), selector)
+
+
+_PACKET_COORDINATE_TRANSFORMS = {
+    "identity": _identity_packet_transform,
+    "broadcast": _broadcast_packet_transform,
+    "expand_dims": _expand_dims_packet_transform,
+    "reshape": _reshape_packet_transform,
+    "transpose": _transpose_packet_transform,
+    "split": _split_packet_transform,
+}
+
+
+def _packet_coordinate_transform(
+    transform: PacketTransform,
+    source_shape: tuple[int, ...],
+    result_shape: tuple[int, ...],
+) -> _PacketCoordinateTransform:
+    return _PACKET_COORDINATE_TRANSFORMS[transform.kind](
+        transform, source_shape, result_shape
+    )
+
+
+def _gf2_rows(
+    equations: Sequence[int], rhs: int, constraints: Sequence[tuple[int, int]]
+) -> list[list[int]]:
+    rows = [[mask, (rhs >> index) & 1] for index, mask in enumerate(equations)]
+    rows.extend([[1 << variable, value] for variable, value in constraints])
+    return rows
+
+
+def _gf2_find_pivot(
+    rows: Sequence[Sequence[int]], start: int, column: int
+) -> int | None:
+    return next(
+        (row for row in range(start, len(rows)) if rows[row][0] & (1 << column)),
+        None,
+    )
+
+
+def _gf2_eliminate(rows: list[list[int]], pivot_row: int, column: int) -> None:
+    pivot_mask, pivot_rhs = rows[pivot_row]
+    for row, values in enumerate(rows):
+        if row == pivot_row or not values[0] & (1 << column):
+            continue
+        values[0] ^= pivot_mask
+        values[1] ^= pivot_rhs
+
+
+def _gf2_read_solution(
+    rows: Sequence[Sequence[int]], pivots: Sequence[tuple[int, int]]
+) -> int:
+    return sum(1 << column for column, row in pivots if rows[row][1])
+
+
+def _gf2_solve(
+    equations: Sequence[int],
+    rhs: int,
+    variable_count: int,
+    constraints: Sequence[tuple[int, int]],
+) -> int | None:
+    rows = _gf2_rows(equations, rhs, constraints)
+    pivot_row = 0
+    pivots: list[tuple[int, int]] = []
+    for column in range(variable_count):
+        pivot = _gf2_find_pivot(rows, pivot_row, column)
+        if pivot is None:
+            continue
+        rows[pivot_row], rows[pivot] = rows[pivot], rows[pivot_row]
+        _gf2_eliminate(rows, pivot_row, column)
+        pivots.append((column, pivot_row))
+        pivot_row += 1
+    if any(mask == 0 and value for mask, value in rows):
+        return None
+    return _gf2_read_solution(rows, pivots)
+
+
+def _physical_column_groups(
+    source_columns: Sequence[tuple[str, int]],
+) -> dict[str, tuple[int, ...]]:
+    return {
+        name: tuple(
+            index
+            for index, (column_name, _bit) in enumerate(source_columns)
+            if column_name == name
+        )
+        for name in _PACKET_INPUT_DIMS
+    }
+
+
+def _preferred_group_constraints(
+    equations: Sequence[int],
+    rhs: int,
+    variable_count: int,
+    groups: Mapping[str, Sequence[int]],
+    preferred: Mapping[int, int],
+) -> list[tuple[int, int]]:
+    constraints: list[tuple[int, int]] = []
+    for name in reversed(_PACKET_INPUT_DIMS):
+        proposed = constraints + [
+            (variable, preferred[variable]) for variable in groups[name]
+        ]
+        if _gf2_solve(equations, rhs, variable_count, proposed) is not None:
+            constraints = proposed
+    return constraints
+
+
+def _complete_solution_constraints(
+    equations: Sequence[int],
+    rhs: int,
+    variable_count: int,
+    source_columns: Sequence[tuple[str, int]],
+    groups: Mapping[str, Sequence[int]],
+    constraints: list[tuple[int, int]],
+) -> None:
+    constrained = {variable for variable, _value in constraints}
+    for name in _PACKET_INPUT_DIMS:
+        by_high_bit = sorted(
+            groups[name], key=lambda index: source_columns[index][1], reverse=True
+        )
+        for variable in by_high_bit:
+            if variable in constrained:
+                continue
+            proposed = [*constraints, (variable, 0)]
+            value = int(_gf2_solve(equations, rhs, variable_count, proposed) is None)
+            constraints.append((variable, value))
+            constrained.add(variable)
+
+
+def _preferred_physical_solution(
+    equations: Sequence[int],
+    rhs: int,
+    source_columns: Sequence[tuple[str, int]],
+    destination_column: tuple[str, int] | None,
+) -> int:
+    variable_count = len(source_columns)
+    groups = _physical_column_groups(source_columns)
+    preferred = {
+        index: int(destination_column == source_column)
+        for index, source_column in enumerate(source_columns)
+    }
+    constraints = _preferred_group_constraints(
+        equations, rhs, variable_count, groups, preferred
+    )
+    _complete_solution_constraints(
+        equations, rhs, variable_count, source_columns, groups, constraints
+    )
+    solution = _gf2_solve(equations, rhs, variable_count, constraints)
+    if solution is None:
+        raise ValueError("packet layouts do not define a total redistribution")
+    return solution
+
+
+def _packet_source_group(
+    source_columns: Sequence[tuple[str, int]], name: str
+) -> dict[int, int]:
+    return {
+        source_index: source_bit
+        for source_index, (source_name, source_bit) in enumerate(source_columns)
+        if source_name == name
+    }
+
+
+def _packet_input_is_direct(
+    source: PacketLayout,
+    result: PacketLayout,
+    name: str,
+    source_group: Mapping[int, int],
+    result_columns: Sequence[tuple[str, int]],
+    basis_solutions: Sequence[int],
+    origin: int,
+) -> bool:
+    if source.input_size(name) != result.input_size(name):
+        return False
+    if any(origin & (1 << source_index) for source_index in source_group):
+        return False
+    for result_index, (result_name, result_bit) in enumerate(result_columns):
+        actual = {
+            source_bit
+            for source_index, source_bit in source_group.items()
+            if basis_solutions[result_index] & (1 << source_index)
+        }
+        expected = {result_bit} if result_name == name else set()
+        if actual != expected:
+            return False
+    return True
+
+
+def _packet_input_origin(
+    source_columns: Sequence[tuple[str, int]], name: str, origin: int
+) -> int:
+    return sum(
+        1 << source_bit
+        for source_index, (source_name, source_bit) in enumerate(source_columns)
+        if source_name == name and origin & (1 << source_index)
+    )
+
+
+def _packet_input_coefficient(
+    source_columns: Sequence[tuple[str, int]],
+    basis_solution: int,
+    name: str,
+) -> int:
+    return sum(
+        1 << source_bit
+        for source_index, (source_name, source_bit) in enumerate(source_columns)
+        if source_name == name and basis_solution & (1 << source_index)
+    )
+
+
+def _packet_source_input(
+    source: PacketLayout,
+    result: PacketLayout,
+    name: str,
+    source_columns: Sequence[tuple[str, int]],
+    result_columns: Sequence[tuple[str, int]],
+    basis_solutions: Sequence[int],
+    origin: int,
+    destination_inputs: Mapping[str, ixsimpl.Expr],
+) -> ixsimpl.Expr:
+    source_group = _packet_source_group(source_columns, name)
+    if _packet_input_is_direct(
+        source,
+        result,
+        name,
+        source_group,
+        result_columns,
+        basis_solutions,
+        origin,
+    ):
+        return destination_inputs[name]
+    expression = sym_ctx.int_(_packet_input_origin(source_columns, name, origin))
+    for result_index, (result_name, result_bit) in enumerate(result_columns):
+        coefficient = _packet_input_coefficient(
+            source_columns, basis_solutions[result_index], name
+        )
+        if not coefficient:
+            continue
+        source_bit_value = mod(
+            floor(destination_inputs[result_name] / (1 << result_bit)), 2
+        )
+        expression = xor(expression, coefficient * source_bit_value)
+    return expression
+
+
+def _packet_relation(
+    source: PacketLayout,
+    result: PacketLayout,
+    transform: PacketTransform,
+) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
+    if (
+        source.lane_width != result.lane_width
+        or source.item_count != result.item_count
+        or source.block_count != result.block_count
+    ):
+        raise ValueError("packet redistribution changes its hardware domain")
+    coordinate_transform = _packet_coordinate_transform(
+        transform, source.shape, result.shape
+    )
+    source_columns, _source_values = _layout_columns(source)
+    result_columns, result_values = _layout_columns(result)
+    equations, variable_count = _source_equations(source)
+    if variable_count != len(source_columns):
+        raise AssertionError("packet source equation width is inconsistent")
+    origin_coordinate = coordinate_transform((0,) * len(result.shape))
+    origin_rhs = _flatten_logical(source, origin_coordinate)
+    origin = _preferred_physical_solution(equations, origin_rhs, source_columns, None)
+    basis_solutions = []
+    for column, value in zip(result_columns, result_values, strict=True):
+        transformed = coordinate_transform(value)
+        rhs = _flatten_logical(source, transformed) ^ origin_rhs
+        basis_solutions.append(
+            _preferred_physical_solution(equations, rhs, source_columns, column)
+        )
+
+    item = sym("item")
+    destination_inputs = {
+        "register": sym("slot"),
+        "lane": mod(item, result.lane_width),
+        "warp": floor(item / result.lane_width),
+        "block": sym("block"),
+    }
+    source_inputs = {
+        name: _packet_source_input(
+            source,
+            result,
+            name,
+            source_columns,
+            result_columns,
+            basis_solutions,
+            origin,
+            destination_inputs,
+        )
+        for name in ("block", "lane", "warp", "register")
+    }
+    return (
+        source_inputs["block"],
+        source_inputs["lane"] + source.lane_width * source_inputs["warp"],
+        source_inputs["register"],
+    )
+
+
+def _packet_type_info(type_: Type, role: str) -> tuple[int, int, Type]:
+    if not SimdType.isinstance(type_):
+        raise ValueError(f"{role} must be a Wave SIMD packet")
+    simd = SimdType(type_)
+    payload = simd.element_type
+    if not isinstance(payload, VectorType):
+        return int(simd.width), 1, payload
+    vector = VectorType(payload)
+    if len(vector.shape) != 1:
+        raise ValueError(f"{role} packet vector must be 1-D")
+    return int(simd.width), int(vector.shape[0]), vector.element_type
+
+
+def _validate_packet_type(type_: Type, layout: PacketLayout, role: str) -> Type:
+    width, slots, element_type = _packet_type_info(type_, role)
+    if width != layout.lane_width:
+        raise ValueError(f"{role} SIMD width does not match its packet layout")
+    if slots != layout.slot_count:
+        raise ValueError(f"{role} slot count does not match its packet layout")
+    return element_type
+
+
+def _validate_redistribute_layout_types(
+    source_type: Type,
+    result_type: Type,
+    source_layout: PacketLayout,
+    result_layout: PacketLayout,
+) -> None:
+    source_element = _validate_packet_type(source_type, source_layout, "source")
+    result_element = _validate_packet_type(result_type, result_layout, "result")
+    if source_element != result_element:
+        raise ValueError("source and result packet element types must match")
 
 
 # ---------------------------------------------------------------------------
@@ -1743,6 +2527,34 @@ class FunctionBuilder:
         )
         return wave.RedistributeOp(result_type, source, relation).result
 
+    def redistribute_layout(
+        self,
+        source: Value,
+        result_type: Type,
+        *,
+        source_layout: PacketLayout,
+        result_layout: PacketLayout,
+        transform: PacketTransform | None = None,
+    ) -> Value:
+        """Build redistribution derived from packet layouts."""
+        _validate_redistribute_layout_types(
+            source.type, result_type, source_layout, result_layout
+        )
+        source_block, source_item, source_slot = _packet_relation(
+            source_layout,
+            result_layout,
+            transform or PacketTransform.identity(),
+        )
+        return self.redistribute(
+            source,
+            result_type,
+            blocks=result_layout.block_count,
+            items=result_layout.item_count,
+            source_block=source_block,
+            source_item=source_item,
+            source_slot=source_slot,
+        )
+
     def ptr_add(
         self, base: Value, offset: Value, result_type: Type | None = None
     ) -> Value:
@@ -2338,6 +3150,8 @@ __all__ = [
     "MemTokenType",
     "MemoryMappingAttr",
     "ModuleBuilder",
+    "PacketLayout",
+    "PacketTransform",
     "PredAttr",
     "PrivateAddressSpaceAttr",
     "PtrType",
@@ -2361,6 +3175,7 @@ __all__ = [
     "i8",
     "i32",
     "index_type",
+    "join_packet_layout",
     "load_cache",
     "mask_type",
     "mem_token_type",
