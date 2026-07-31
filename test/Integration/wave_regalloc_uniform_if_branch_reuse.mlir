@@ -110,6 +110,213 @@ func.func @uniform_if_sibling_loop_invariant_reuse()
   return
 }
 
+// ALLOC-LABEL: func.func @uniform_if_dead_passthrough_reuses_vgpr(
+// ALLOC-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 64, [[REG:[0-9]+]]>
+// ALLOC-SAME: waveamdmachine.vgpr_count = 64 : i64
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NEXT: [[RENAME:%.*]] = waveamdmachine.update_tuple [[INPUT]],
+// ALLOC-SAME: !waveamdmachine.reg<vgpr, 64, [[REG]]>
+// ALLOC-NEXT: waveamdmachine.yield [[RENAME]]
+// ALLOC-NOT: waveamdmachine.copy_tuple
+// ASM-LABEL: uniform_if_dead_passthrough_reuses_vgpr:
+// ASM-NOT: v_mov_b32
+// ASM: s_cbranch_scc0
+// ASM: s_branch
+// ASM-NOT: v_mov_b32
+// ASM: s_endpgm
+func.func @uniform_if_dead_passthrough_reuses_vgpr(
+    %input: !waveamdmachine.reg<vgpr, 64>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %input : !waveamdmachine.reg<vgpr, 64>
+  } otherwise {
+    %changed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 64>
+    waveamdmachine.yield %changed : !waveamdmachine.reg<vgpr, 64>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 64>
+  %parts:2 = waveamdmachine.tuple_to_elements %selected
+      : (!waveamdmachine.reg<vgpr, 64>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 63>)
+  waveamdmachine.v_cmpx_eq_u32 %parts#0, %parts#0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @uniform_if_other_writer_reads_dead_input(
+// ALLOC-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[REG:[0-9]+]]>
+// ALLOC-SAME: waveamdmachine.vgpr_count = 1 : i64
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NEXT: [[RENAME:%.*]] = waveamdmachine.update_tuple [[INPUT]],
+// ALLOC-SAME: !waveamdmachine.reg<vgpr, 1, [[REG]]>
+// ALLOC-NEXT: waveamdmachine.yield [[RENAME]]
+// ALLOC: otherwise
+// ALLOC-NEXT: [[CHANGED:%.*]] = waveamdmachine.v_add_u32 [[INPUT]], [[INPUT]]
+// ALLOC-SAME: -> !waveamdmachine.reg<vgpr, 1, [[REG]]>
+// ALLOC-NEXT: waveamdmachine.yield [[CHANGED]]
+// ALLOC-NOT: waveamdmachine.copy_tuple
+// ALLOC: return
+func.func @uniform_if_other_writer_reads_dead_input(
+    %input: !waveamdmachine.reg<vgpr, 1>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %input : !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %changed = waveamdmachine.v_add_u32 %input, %input
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield %changed : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %selected, %selected
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// SGPR input storage can be reserved by the kernel ABI.
+// ALLOC-LABEL: func.func @uniform_if_dead_passthrough_copies_sgpr(
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple
+// ALLOC-NEXT: waveamdmachine.yield [[COPY]]
+func.func @uniform_if_dead_passthrough_copies_sgpr(
+    %input: !waveamdmachine.reg<sgpr, 1>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %input : !waveamdmachine.reg<sgpr, 1>
+  } otherwise {
+    %changed = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 1>
+    waveamdmachine.yield %changed : !waveamdmachine.reg<sgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<sgpr, 1>
+  waveamdmachine.s_cmp_eq_u32 %selected, %selected
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> !waveamdmachine.reg<scc, 1>
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @uniform_if_live_passthrough_keeps_copy(
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple
+// ALLOC-NEXT: waveamdmachine.yield [[COPY]]
+func.func @uniform_if_live_passthrough_keeps_copy(
+    %input: !waveamdmachine.reg<vgpr, 1>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %input : !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %changed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield %changed : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %selected, %input
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %sum, %sum
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @uniform_if_sibling_late_use_keeps_copy(
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple
+// ALLOC-NEXT: waveamdmachine.yield [[COPY]]
+func.func @uniform_if_sibling_late_use_keeps_copy(
+    %input: !waveamdmachine.reg<vgpr, 1>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %input : !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %changed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %late = waveamdmachine.v_add_u32 %input, %input
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.v_cmpx_eq_u32 %late, %late
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+    waveamdmachine.yield %changed : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %selected, %selected
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @uniform_if_duplicate_passthrough_keeps_copies(
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NEXT: [[COPY0:%.*]] = waveamdmachine.copy_tuple
+// ALLOC-NEXT: [[COPY1:%.*]] = waveamdmachine.copy_tuple
+// ALLOC-NEXT: waveamdmachine.yield [[COPY0]], [[COPY1]]
+func.func @uniform_if_duplicate_passthrough_keeps_copies(
+    %input: !waveamdmachine.reg<vgpr, 1>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_eq_u32 %zero, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm)
+        -> !waveamdmachine.reg<scc, 1>
+  %selected:2 = waveamdmachine.uniform_if %cond {
+    waveamdmachine.yield %input, %input
+        : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %changed0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    %changed1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield %changed0, %changed1
+        : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1>
+      -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  %sum = waveamdmachine.v_add_u32 %selected#0, %selected#1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %sum, %sum
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @exec_if_dead_passthrough_keeps_copy(
+// ALLOC: waveamdmachine.exec_if
+// ALLOC-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple
+// ALLOC-NEXT: waveamdmachine.yield [[COPY]]
+func.func @exec_if_dead_passthrough_keeps_copy(
+    %cond: !waveamdmachine.reg<sgpr, 2>,
+    %input: !waveamdmachine.reg<vgpr, 1>)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %selected = waveamdmachine.exec_if %cond {
+    waveamdmachine.yield %input : !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %changed = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.yield %changed : !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<sgpr, 2> -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %selected, %selected
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ALLOC-LABEL: func.func @uniform_if_else_input_skips_then_pressure(
 // ALLOC-SAME: [[LIVE:%[^:]+]]: !waveamdmachine.reg<vgpr, 128, 0>
 // ALLOC-SAME: waveamdmachine.regalloc_assignments

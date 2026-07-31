@@ -1375,13 +1375,70 @@ static bool isRegionCopyableYield(Value value) {
   return rt && (isSGPR(rt) || isVGPR(rt));
 }
 
+static waveamdmachine::YieldOp getRegionYield(Region &region) {
+  if (region.empty())
+    return {};
+  return dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+}
+
+static bool isUniqueUniformIfIncoming(waveamdmachine::UniformIfOp uniformIf,
+                                      unsigned resultIndex, Value value) {
+  for (Region *region :
+       {&uniformIf.getThenRegion(), &uniformIf.getElseRegion()}) {
+    waveamdmachine::YieldOp yield = getRegionYield(*region);
+    if (!yield)
+      continue;
+    for (auto [index, incoming] : llvm::enumerate(yield.getValues()))
+      if (index != resultIndex && incoming == value)
+        return false;
+  }
+  return true;
+}
+
+static bool
+uniformIfAlternativesCanOverwrite(waveamdmachine::UniformIfOp uniformIf,
+                                  unsigned resultIndex, Value value) {
+  for (Region *region :
+       {&uniformIf.getThenRegion(), &uniformIf.getElseRegion()}) {
+    waveamdmachine::YieldOp yield = getRegionYield(*region);
+    if (!yield || resultIndex >= yield.getValues().size())
+      return false;
+    Value incoming = yield.getValues()[resultIndex];
+    if (incoming == value)
+      continue;
+    Operation *def = incoming.getDefiningOp();
+    if (!def || !valueIsDefinedInside(uniformIf, incoming) ||
+        !valueDiesAt(value, def))
+      return false;
+  }
+  return true;
+}
+
+static bool
+canAliasExternalUniformIfYield(waveamdmachine::UniformIfOp uniformIf,
+                               unsigned resultIndex, Value value,
+                               waveamdmachine::YieldOp currentYield) {
+  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
+  // SGPR inputs may occupy reserved ABI registers; keep their edge copies.
+  if (!isVGPR(type) || !valueDiesAt(value, currentYield))
+    return false;
+  if (!isUniqueUniformIfIncoming(uniformIf, resultIndex, value))
+    return false;
+  return uniformIfAlternativesCanOverwrite(uniformIf, resultIndex, value);
+}
+
+static Value createBranchLocalRegAlias(OpBuilder &builder, Location loc,
+                                       Value value) {
+  return waveamdmachine::UpdateTupleOp::create(builder, loc, value.getType(),
+                                               value, ValueRange{},
+                                               builder.getArrayAttr({}))
+      .getResult();
+}
+
 static LogicalResult
 materializeExternalRegionYieldCopies(Operation *regionBranch, Region &region,
                                      OpBuilder &builder) {
-  if (region.empty())
-    return success();
-  auto yield =
-      dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+  waveamdmachine::YieldOp yield = getRegionYield(region);
   if (!yield)
     return success();
   SmallVector<Value> values(yield.getValues());
@@ -1392,6 +1449,14 @@ materializeExternalRegionYieldCopies(Operation *regionBranch, Region &region,
       continue;
     if (valueIsDefinedInside(regionBranch, value))
       continue;
+    if (waveamdmachine::UniformIfOp uniformIf =
+            dyn_cast<waveamdmachine::UniformIfOp>(regionBranch);
+        uniformIf &&
+        canAliasExternalUniformIfYield(uniformIf, index, value, yield)) {
+      values[index] = createBranchLocalRegAlias(builder, yield.getLoc(), value);
+      changed = true;
+      continue;
+    }
     FailureOr<Value> dup = duplicateRegValue(builder, yield.getLoc(), value);
     if (failed(dup))
       return failure();
