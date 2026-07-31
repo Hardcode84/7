@@ -3318,14 +3318,34 @@ static LogicalResult verifyMemoryMappingPacketBindingNames(
   return success();
 }
 
-static LogicalResult verifyMemoryMappingBases(Operation *op, ValueRange bases) {
+static FailureOr<PtrType> verifyMemoryMappingBase(Operation *op, Type baseType,
+                                                  SimdType packetType) {
+  auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
+  FailureOr<WavePtrCastShape> shape = classifyWavePtrCastType(baseType, emit);
+  if (failed(shape))
+    return failure();
+  if (shape->simdWidth && *shape->simdWidth != packetType.getWidth()) {
+    op->emitOpError("SIMD pointer base width must match packet SIMD width");
+    return failure();
+  }
+  return shape->ptr;
+}
+
+static LogicalResult verifyMemoryMappingBases(Operation *op, ValueRange bases,
+                                              SimdType packetType) {
   if (bases.empty())
     return op->emitOpError("requires at least one pointer base");
-  PtrType firstBase = cast<PtrType>(bases.front().getType());
+  FailureOr<PtrType> first =
+      verifyMemoryMappingBase(op, bases.front().getType(), packetType);
+  if (failed(first))
+    return failure();
   for (Value base : bases.drop_front()) {
-    PtrType type = cast<PtrType>(base.getType());
-    if (type.getAddressSpace() != firstBase.getAddressSpace() ||
-        type.getElementType() != firstBase.getElementType())
+    FailureOr<PtrType> type =
+        verifyMemoryMappingBase(op, base.getType(), packetType);
+    if (failed(type))
+      return failure();
+    if (type->getAddressSpace() != first->getAddressSpace() ||
+        type->getElementType() != first->getElementType())
       return op->emitOpError(
           "pointer bases must have identical address spaces and element types");
   }
@@ -3454,7 +3474,7 @@ verifyMemoryMappingOp(Operation *op, MemoryMappingAttr mapping,
   VectorType packetVector = cast<VectorType>(packetType.getElementType());
   if (packetVector.isScalable())
     return op->emitOpError("packet vector must be fixed-size");
-  if (failed(verifyMemoryMappingBases(op, bases)))
+  if (failed(verifyMemoryMappingBases(op, bases, packetType)))
     return failure();
   if (failed(verifyMemoryMappingNames(op, mapping, bindings, bindingNames,
                                       packetBindings, packetBindingNames)))

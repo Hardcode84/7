@@ -436,3 +436,41 @@ func.func @gfx1250_fallback(%source: !wave.ptr<#wave.global, i32>,
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// LOWER-LABEL: func.func @simd_base_copy_fallback
+// LOWER-NOT: waveamd.dma_load_lds
+// LOWER: [[DEP:%.*]] = wave.token
+// LOWER: [[VALUE:%.*]], [[READ:%.*]] = wave.load {{%.*}} after [[DEP]]
+// LOWER: wave.store {{%.*}} -> {{%.*}} after [[READ]]
+// LOWER-NOT: wave.gather
+// LOWER-NOT: wave.scatter
+func.func @simd_base_copy_fallback(
+    %source: !wave.ptr<#wave.global, i32>,
+    %destination: !wave.ptr<#wave.shared, i32>) {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %source_base = wave.ptr_add %source, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %destination_base = wave.ptr_add %destination, %item
+      : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.shared, i32>, 64>
+  %dependency = wave.token : !wave.mem.token
+  %value, %loaded = wave.gather %source_base mapping
+      <bit_offset = <"32*slot">>
+      bindings []() packet_bindings []() after %dependency
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
+      -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
+  %stored = wave.scatter %value to %destination_base mapping
+      <bit_offset = <"32*slot">>
+      bindings []() packet_bindings []() after %loaded
+      : (!wave.simd<vector<4xi32>, 64>,
+         !wave.simd<!wave.ptr<#wave.shared, i32>, 64>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
+}

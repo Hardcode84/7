@@ -4734,6 +4734,21 @@ static Value findElementOffsetMaterialization(const SlotMapping &slot,
   return {};
 }
 
+static PtrType getMemoryBasePtrType(Type type) {
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return cast<PtrType>(type);
+}
+
+static Type getMemoryBaseTypeWithElement(Type type, Type elementType) {
+  PtrType pointer = getMemoryBasePtrType(type);
+  PtrType converted =
+      PtrType::get(type.getContext(), elementType, pointer.getAddressSpace());
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    return SimdType::get(type.getContext(), converted, simd.getWidth());
+  return converted;
+}
+
 struct TypedPointerRequest {
   const SlotMapping *slot = nullptr;
   sym::ExprHandle byteOffset;
@@ -4749,9 +4764,8 @@ struct TypedPointerPlan {
 static Value getByteBase(IRRewriter &rewriter, const MemoryAccess &access,
                          unsigned index, SmallVectorImpl<Value> &byteBases) {
   Value &byteBase = byteBases[index];
-  PtrType sourceType = cast<PtrType>(access.bases[index].getType());
-  PtrType byteType = PtrType::get(access.op->getContext(), rewriter.getI8Type(),
-                                  sourceType.getAddressSpace());
+  Type byteType = getMemoryBaseTypeWithElement(access.bases[index].getType(),
+                                               rewriter.getI8Type());
   if (byteBase)
     return byteBase;
   Value source = access.bases[index];
@@ -4773,7 +4787,7 @@ static void materializePredicatedByteBases(IRRewriter &rewriter,
 
 static std::optional<int64_t>
 getTypedPointerElementBits(const MemoryAccess &access, unsigned baseIndex) {
-  PtrType sourceType = cast<PtrType>(access.bases[baseIndex].getType());
+  PtrType sourceType = getMemoryBasePtrType(access.bases[baseIndex].getType());
   VectorType packet = cast<VectorType>(access.packetType.getElementType());
   Type sourceElement = sourceType.getElementType();
   if (!sourceElement)
@@ -4790,8 +4804,10 @@ getTypedPointerElementBits(const MemoryAccess &access, unsigned baseIndex) {
   return elementBits;
 }
 
-static Type getPointerAddResultType(MLIRContext *context, PtrType pointerType,
-                                    Value offset) {
+static Type getPointerAddResultType(MLIRContext *context, Type baseType,
+                                    PtrType pointerType, Value offset) {
+  if (SimdType simd = dyn_cast<SimdType>(baseType))
+    return SimdType::get(context, pointerType, simd.getWidth());
   if (SimdType simd = dyn_cast<SimdType>(offset.getType()))
     return SimdType::get(context, pointerType, simd.getWidth());
   return pointerType;
@@ -4859,10 +4875,10 @@ static FailureOr<Value> materializeTypedPointer(IRRewriter &rewriter,
   if (!plan.available)
     return failure();
   Value source = access.bases[baseIndex];
-  PtrType sourceType = cast<PtrType>(source.getType());
+  PtrType sourceType = getMemoryBasePtrType(source.getType());
   if (plan.offset) {
-    Type resultType = getPointerAddResultType(access.op->getContext(),
-                                              sourceType, plan.offset);
+    Type resultType = getPointerAddResultType(
+        access.op->getContext(), source.getType(), sourceType, plan.offset);
     return PtrAddOp::create(rewriter, access.op->getLoc(), resultType, source,
                             plan.offset)
         .getResult();
@@ -4871,8 +4887,8 @@ static FailureOr<Value> materializeTypedPointer(IRRewriter &rewriter,
       materializeExpr(rewriter, access, slot, plan.elementOffset);
   if (failed(offset))
     return failure();
-  Type resultType =
-      getPointerAddResultType(access.op->getContext(), sourceType, *offset);
+  Type resultType = getPointerAddResultType(
+      access.op->getContext(), source.getType(), sourceType, *offset);
   return PtrAddOp::create(rewriter, access.op->getLoc(), resultType, source,
                           *offset)
       .getResult();
@@ -5447,7 +5463,7 @@ static FailureOr<AccessShape> getAccessShape(const MemoryAccess &access) {
     return failure();
   }
   Attribute addressSpace =
-      cast<PtrType>(access.bases.front().getType()).getAddressSpace();
+      getMemoryBasePtrType(access.bases.front().getType()).getAddressSpace();
   if (!isa<GlobalAddressSpaceAttr, SharedAddressSpaceAttr,
            waveamd::BufferAddressSpaceAttr>(addressSpace)) {
     access.op->emitOpError(

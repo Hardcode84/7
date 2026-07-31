@@ -1653,8 +1653,8 @@ public:
   std::unique_ptr<wave::memory_lowering::CopyTransactionEmitter>
   match(const wave::memory_lowering::CopyTransactionRequest &request)
       const override {
-    PtrType source = getPointerType(request.sourceBase.getType());
-    PtrType destination = getPointerType(request.destinationBase.getType());
+    PtrType source = dyn_cast<PtrType>(request.sourceBase.getType());
+    PtrType destination = dyn_cast<PtrType>(request.destinationBase.getType());
     if (!source || !destination || !supportsDmaLoadLds(request.op))
       return {};
     if (!isa<GlobalAddressSpaceAttr, waveamd::BufferAddressSpaceAttr>(

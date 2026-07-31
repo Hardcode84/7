@@ -497,7 +497,7 @@ def Wave_GatherOp : Wave_Op<"gather", [AttrSizedOperandSegments]> {
     physical coordinates only; lowering derives transaction shape.
   }];
 
-  let arguments = (ins Arg<Variadic<Wave_Ptr>, "", [MemRead]>:$bases,
+  let arguments = (ins Arg<Variadic<Wave_PtrOrSimdPtr>, "", [MemRead]>:$bases,
                        Variadic<AnyType>:$bindings,
                        Variadic<AnyType>:$packet_bindings,
                        Optional<Wave_MemToken>:$dependency,
@@ -523,7 +523,7 @@ def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
   }];
 
   let arguments = (ins Wave_SimdOf1DVector:$value,
-                       Arg<Variadic<Wave_Ptr>, "", [MemWrite]>:$bases,
+                       Arg<Variadic<Wave_PtrOrSimdPtr>, "", [MemWrite]>:$bases,
                        Variadic<AnyType>:$bindings,
                        Variadic<AnyType>:$packet_bindings,
                        Optional<Wave_MemToken>:$dependency,

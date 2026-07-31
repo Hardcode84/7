@@ -1220,3 +1220,47 @@ func.func @gather_pointer_type_mismatch(
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
 }
+
+// -----
+
+func.func @gather_simd_base_width_mismatch(
+    %base: !wave.simd<!wave.ptr<#wave.global, i32>, 64>) {
+  // expected-error @+1 {{SIMD pointer base width must match packet SIMD width}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * slot">>
+      bindings []() packet_bindings []()
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_simd_base_address_space_mismatch(
+    %global: !wave.ptr<#wave.global, i32>,
+    %shared: !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) {
+  // expected-error @+1 {{pointer bases must have identical address spaces and element types}}
+  %value, %token = wave.gather %global, %shared mapping
+      <base = <"slot">, bit_offset = <"0">>
+      bindings []() packet_bindings []()
+      : (!wave.ptr<#wave.global, i32>,
+         !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @scatter_simd_base_element_type_mismatch(
+    %value: !wave.simd<vector<2xi32>, 32>,
+    %first: !wave.ptr<#wave.global, i32>,
+    %second: !wave.simd<!wave.ptr<#wave.global, f32>, 32>) {
+  // expected-error @+1 {{pointer bases must have identical address spaces and element types}}
+  %token = wave.scatter %value to %first, %second mapping
+      <base = <"slot">, bit_offset = <"0">>
+      bindings []() packet_bindings []()
+      : (!wave.simd<vector<2xi32>, 32>, !wave.ptr<#wave.global, i32>,
+         !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+      -> !wave.mem.token
+  return
+}

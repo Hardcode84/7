@@ -1821,3 +1821,29 @@ func.func @bounded_item_enumeration_fallback(
       -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<2xf32>, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @simd_base_byte_address(
+// CHECK: [[BASE:%.*]] = wave.ptr_add %arg0, %arg1
+// CHECK-SAME: -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+// CHECK: [[BYTE:%.*]] = wave.ptr_cast [[BASE]]
+// CHECK-SAME: -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+// CHECK: [[OFFSET:%.*]] = wave.constant 1
+// CHECK: [[PTR:%.*]] = wave.ptr_add [[BYTE]], [[OFFSET]]
+// CHECK-SAME: -> !wave.simd<!wave.ptr<#wave.global, i8>, 32>
+// CHECK: wave.load [[PTR]]
+// CHECK-NOT: wave.gather
+func.func @simd_base_byte_address(
+    %base: !wave.ptr<#wave.global, i32>, %offset: !wave.simd<i32, 32>)
+    -> !wave.simd<vector<2xi32>, 32> {
+  %simd_base = wave.ptr_add %base, %offset
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %value, %token = wave.gather %simd_base mapping
+      <bit_offset = <"8 + 32*slot">>
+      bindings []() packet_bindings []()
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<2xi32>, 32>
+}
