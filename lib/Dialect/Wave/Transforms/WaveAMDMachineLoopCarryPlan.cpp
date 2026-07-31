@@ -259,13 +259,29 @@ static TermKind classifyIndexExprResult(WaveAMDMachineSelector &S,
   return classifyPointerOffset(S, *offset);
 }
 
-static TermKind classifyPointerYield(WaveAMDMachineSelector &S, Value value,
-                                     Value iterArg, TermKind iterKind) {
+static Value getLoopCarryInit(scf::ForOp op, Value value) {
+  for (auto [idx, iterArg] : llvm::enumerate(op.getRegionIterArgs()))
+    if (value == iterArg)
+      return op.getInitArgs()[idx];
+  return {};
+}
+
+static TermKind classifyPointerYield(WaveAMDMachineSelector &S, scf::ForOp op,
+                                     Value value, Value iterArg,
+                                     TermKind iterKind) {
   if (value == iterArg)
     return iterKind;
+  if (Value init = getLoopCarryInit(op, value)) {
+    auto it = S.pointerIndexOffsets.find(init);
+    return it == S.pointerIndexOffsets.end()
+               ? TermKind::Lane
+               : classifyPointerOffset(S, it->second);
+  }
+  if (auto cast = value.getDefiningOp<PtrCastOp>())
+    return classifyPointerYield(S, op, cast.getSource(), iterArg, iterKind);
   if (auto add = value.getDefiningOp<PtrAddOp>()) {
     TermKind baseKind =
-        classifyPointerYield(S, add.getBase(), iterArg, iterKind);
+        classifyPointerYield(S, op, add.getBase(), iterArg, iterKind);
     TermKind offsetKind = isLaneVaryingValue(add.getOffset().getType())
                               ? TermKind::Lane
                               : TermKind::Uniform;
@@ -297,6 +313,184 @@ constantPtrAdvanceBytes(WaveAMDMachineSelector &S, Value value, Value iterArg) {
     return std::nullopt;
   return llvm::checkedMul(
       elems, static_cast<int64_t>(S.elementSizeBytes(iterArg.getType())));
+}
+
+struct AbsolutePointerOffset {
+  PointerOffset byteOffset;
+  Value base;
+};
+
+enum class AbsolutePointerFailure {
+  None,
+  Unsupported,
+  CrossCarry,
+  BaseMismatch,
+  LaneVarying,
+  Unbounded,
+  Negative,
+  Overflow,
+};
+
+struct AbsolutePointerProof {
+  std::optional<int64_t> upper;
+  AbsolutePointerFailure failure = AbsolutePointerFailure::Unsupported;
+};
+
+static FailureOr<PointerOffset>
+getPointerElementOffset(WaveAMDMachineSelector &S, Value value) {
+  if (auto it = S.indexOffsets.find(value); it != S.indexOffsets.end())
+    return it->second;
+  if (auto indexExpr = value.getDefiningOp<IndexExprOp>())
+    return makePointerOffset(S, indexExpr);
+  std::optional<int64_t> constant = getConstantIntValue(value);
+  if (!constant)
+    return failure();
+  FailureOr<sym::ExprHandle> expr =
+      sym::composeExprInt(S.symbolStore(), *constant);
+  if (failed(expr))
+    return failure();
+  PointerOffset offset;
+  offset.expr = *expr;
+  return offset;
+}
+
+static std::optional<AbsolutePointerOffset>
+getSelectedAbsolutePointerOffset(WaveAMDMachineSelector &S, Value value) {
+  auto baseIt = S.pointerBases.find(value);
+  auto offsetIt = S.pointerIndexOffsets.find(value);
+  if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
+    return std::nullopt;
+  return AbsolutePointerOffset{offsetIt->second, baseIt->second};
+}
+
+static FailureOr<AbsolutePointerOffset>
+getAbsolutePointerOffset(WaveAMDMachineSelector &S, scf::ForOp op, Value value,
+                         Value expectedIterArg, bool &crossCarry,
+                         bool allowLoopCarryInit = true);
+
+static FailureOr<AbsolutePointerOffset>
+getAbsolutePointerAddOffset(WaveAMDMachineSelector &S, scf::ForOp op,
+                            PtrAddOp add, Value expectedIterArg,
+                            bool &crossCarry) {
+  FailureOr<AbsolutePointerOffset> base = getAbsolutePointerOffset(
+      S, op, add.getBase(), expectedIterArg, crossCarry, false);
+  FailureOr<PointerOffset> elements =
+      getPointerElementOffset(S, add.getOffset());
+  if (failed(base) || failed(elements))
+    return failure();
+  FailureOr<PointerOffset> bytes = scalePointerOffset(
+      S, *elements, S.elementSizeBytes(add.getBase().getType()));
+  if (failed(bytes))
+    return failure();
+  FailureOr<PointerOffset> merged =
+      mergePointerOffsets(S, base->byteOffset, *bytes);
+  if (failed(merged))
+    return failure();
+  return AbsolutePointerOffset{std::move(*merged), base->base};
+}
+
+static FailureOr<AbsolutePointerOffset>
+getAbsolutePointerOffset(WaveAMDMachineSelector &S, scf::ForOp op, Value value,
+                         Value expectedIterArg, bool &crossCarry,
+                         bool allowLoopCarryInit) {
+  if (std::optional<AbsolutePointerOffset> selected =
+          getSelectedAbsolutePointerOffset(S, value))
+    return std::move(*selected);
+
+  if (Value init = getLoopCarryInit(op, value)) {
+    if (!allowLoopCarryInit) {
+      crossCarry = value != expectedIterArg;
+      return failure();
+    }
+    return getAbsolutePointerOffset(S, op, init, expectedIterArg, crossCarry,
+                                    false);
+  }
+
+  if (auto cast = value.getDefiningOp<PtrCastOp>())
+    return getAbsolutePointerOffset(S, op, cast.getSource(), expectedIterArg,
+                                    crossCarry, allowLoopCarryInit);
+
+  auto add = value.getDefiningOp<PtrAddOp>();
+  if (!add)
+    return failure();
+  return getAbsolutePointerAddOffset(S, op, add, expectedIterArg, crossCarry);
+}
+
+static AbsolutePointerFailure
+classifyAbsolutePointerRangeFailure(sym::Analysis &analysis,
+                                    sym::ExprHandle expr) {
+  std::optional<sym::InferredRange> range = analysis.range(expr);
+  if (range && range->lower &&
+      sym::compareEndpointToInteger(*range->lower, 0) < 0)
+    return AbsolutePointerFailure::Negative;
+  if (range && range->upper &&
+      sym::compareEndpointToInteger(*range->upper, u32Max) > 0)
+    return AbsolutePointerFailure::Overflow;
+  return AbsolutePointerFailure::Unbounded;
+}
+
+static AbsolutePointerProof
+proveResolvedAbsolutePointerOffsetU32(WaveAMDMachineSelector &S,
+                                      const AbsolutePointerOffset &absolute,
+                                      Value expectedBase) {
+  if (absolute.base != expectedBase)
+    return {{}, AbsolutePointerFailure::BaseMismatch};
+  if (classifyPointerOffset(S, absolute.byteOffset) == TermKind::Lane)
+    return {{}, AbsolutePointerFailure::LaneVarying};
+  if (!absolute.byteOffset.expr)
+    return {int64_t{0}, AbsolutePointerFailure::None};
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), absolute.byteOffset.assumptions);
+  if (failed(analysis))
+    return {{}, AbsolutePointerFailure::Unbounded};
+  if (std::optional<int64_t> upper =
+          proveU32Upper(S, **analysis, absolute.byteOffset))
+    return {upper, AbsolutePointerFailure::None};
+  return {{},
+          classifyAbsolutePointerRangeFailure(**analysis,
+                                              absolute.byteOffset.expr)};
+}
+
+static AbsolutePointerProof
+proveAbsolutePointerOffsetU32(WaveAMDMachineSelector &S, scf::ForOp op,
+                              Value value, Value iterArg, Value expectedBase) {
+  bool crossCarry = false;
+  FailureOr<AbsolutePointerOffset> absolute =
+      getAbsolutePointerOffset(S, op, value, iterArg, crossCarry);
+  if (failed(absolute))
+    return {{},
+            crossCarry ? AbsolutePointerFailure::CrossCarry
+                       : AbsolutePointerFailure::Unsupported};
+  return proveResolvedAbsolutePointerOffsetU32(S, *absolute, expectedBase);
+}
+
+static InFlightDiagnostic
+emitAbsolutePointerFailure(scf::ForOp op, AbsolutePointerFailure failure) {
+  switch (failure) {
+  case AbsolutePointerFailure::CrossCarry:
+    return op.emitError(
+        "scf.for pointer carry cannot recur through another iter arg");
+  case AbsolutePointerFailure::BaseMismatch:
+    return op.emitError(
+        "scf.for absolute pointer carry must preserve its selected base");
+  case AbsolutePointerFailure::LaneVarying:
+    return op.emitError(
+        "scf.for absolute pointer carry offset must be uniform");
+  case AbsolutePointerFailure::Negative:
+    return op.emitError(
+        "scf.for absolute pointer carry offset may be negative");
+  case AbsolutePointerFailure::Overflow:
+    return op.emitError(
+        "scf.for absolute pointer carry offset may exceed unsigned 32-bit");
+  case AbsolutePointerFailure::Unbounded:
+    return op.emitError("scf.for absolute pointer carry offset needs explicit "
+                        "unsigned 32-bit bounds");
+  case AbsolutePointerFailure::None:
+  case AbsolutePointerFailure::Unsupported:
+    return op.emitError("scf.for pointer carry offset must fit proven "
+                        "unsigned 32-bit for every iteration");
+  }
+  llvm_unreachable("unknown absolute pointer failure");
 }
 
 static LogicalResult
@@ -574,12 +768,20 @@ static LogicalResult proveLoopCarryFitsU32(WaveAMDMachineSelector &S,
     return success();
   }
 
+  AbsolutePointerProof absolute =
+      proveAbsolutePointerOffsetU32(S, op, yieldValue, iterArg, snap.base);
+  if (absolute.upper) {
+    int64_t carryUpper = std::max(*entryUpper, *absolute.upper);
+    snap.bodyU32Upper = carryUpper;
+    snap.resultU32Upper = carryUpper;
+    return success();
+  }
+
   std::optional<int64_t> advance =
       constantPtrAdvanceBytes(S, yieldValue, iterArg);
   if (!advance ||
       !proveAccumulatingCarryFitsU32(S, op, offset, *advance, analysis.get()))
-    return op.emitError("scf.for pointer carry offset must fit proven "
-                        "unsigned 32-bit for every iteration");
+    return emitAbsolutePointerFailure(op, absolute.failure);
 
   snap.bodyU32Upper = u32Max;
   snap.resultU32Upper = u32Max;
@@ -726,7 +928,7 @@ snapshotPointerScfCarry(WaveAMDMachineSelector &S, scf::ForOp op,
   StrideBytes stride = selectStridedCarry(S, op, idx, initArg, strideInOffset);
   TermKind yieldKind = hasStride(stride)
                            ? initKind
-                           : classifyPointerYield(S, yield.getOperand(idx),
+                           : classifyPointerYield(S, op, yield.getOperand(idx),
                                                   op.getRegionIterArgs()[idx],
                                                   loopCarryKind(initKind));
   TermKind carryKind = loopCarryKind(std::max(initKind, yieldKind));

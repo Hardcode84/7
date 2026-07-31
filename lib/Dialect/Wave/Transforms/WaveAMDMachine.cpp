@@ -7147,9 +7147,9 @@ static LogicalResult appendPointerBindings(PointerOffset &dst,
 static std::optional<IntRange64>
 inferPointerOffsetRange(WaveAMDMachineSelector &S, const PointerOffset &offset);
 
-static FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
-                                                   const PointerOffset &offset,
-                                                   unsigned size) {
+FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
+                                            const PointerOffset &offset,
+                                            unsigned size) {
   PointerOffset out = offset;
   if (!out.expr || size == 1)
     return out;
@@ -7239,9 +7239,9 @@ renameConflictingPointerBindings(WaveAMDMachineSelector &S,
   return renamed;
 }
 
-static FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
-                                                    const PointerOffset &base,
-                                                    const PointerOffset &add) {
+FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
+                                             const PointerOffset &base,
+                                             const PointerOffset &add) {
   PointerOffset out = base;
   FailureOr<PointerOffset> renamedAdd =
       renameConflictingPointerBindings(S, base, add);

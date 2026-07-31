@@ -168,6 +168,14 @@ FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
 FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
                                            IndexExprOp op);
 
+FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
+                                            const PointerOffset &offset,
+                                            unsigned size);
+
+FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
+                                             const PointerOffset &base,
+                                             const PointerOffset &add);
+
 TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                       const llvm::StringMap<TermKind> &symKinds);
 
