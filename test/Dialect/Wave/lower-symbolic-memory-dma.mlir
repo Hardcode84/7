@@ -146,11 +146,14 @@ func.func @repacked_buffer_zero_fill(
       -> !wave.simd<vector<8xf16>, 64>
   %copy:2 = wave.where %mask0, %mask1, %mask2, %mask3,
       %mask4, %mask5, %mask6, %mask7 {
+    %bounded_item = wave.assume %assumed_item as "x"
+        [#wave.pred<"x >= 0">, #wave.pred<"x <= 1073741823">]
+        : !wave.simd<i32, 64>
     %value, %loaded = wave.gather %buffer mapping
         <bit_offset = <"16*offset">> bindings []()
         packet_bindings ["offset", "offset", "offset", "offset",
                          "offset", "offset", "offset", "offset"]
-                        (%assumed_item, %offset1, %offset2, %offset3,
+                        (%bounded_item, %offset1, %offset2, %offset3,
                          %offset4, %offset5, %offset6, %offset7)
         after %dependency
         : (!wave.ptr<#waveamd.buffer, f16>,

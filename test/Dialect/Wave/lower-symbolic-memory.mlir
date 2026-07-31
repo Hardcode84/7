@@ -1847,3 +1847,164 @@ func.func @simd_base_byte_address(
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<2xi32>, 32>
 }
+
+// -----
+
+// Scoped binding facts cannot prove packet activation.
+// CHECK-LABEL: func.func @statically_inactive_packet_lane(
+// CHECK-NOT: wave.gather
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.load
+func.func @statically_inactive_packet_lane(
+    %base: !wave.ptr<#waveamd.buffer, f32>)
+    -> !wave.simd<vector<2xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %offset1 = wave.binary addi %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %active0 = wave.cmpi slt %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active1 = wave.cmpi slt %offset1, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %dependency = wave.token : !wave.mem.token
+  %zero = wave.constant 0.0 : f32 -> !wave.simd<f32, 32>
+  %fallback = wave.pack %zero, %zero
+      : !wave.simd<f32, 32>, !wave.simd<f32, 32>
+      -> !wave.simd<vector<2xf32>, 32>
+  %result:2 = wave.where %active0, %active1 {
+    %bounded0 = wave.assume %item as "x"
+        [#wave.pred<"x >= 0">, #wave.pred<"x <= 0">]
+        : !wave.simd<i32, 32>
+    %bounded1 = wave.assume %offset1 as "x"
+        [#wave.pred<"x >= 0">, #wave.pred<"x <= 0">]
+        : !wave.simd<i32, 32>
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"32*offset">> bindings []()
+        packet_bindings ["offset", "offset"](%bounded0, %bounded1)
+        after %dependency
+        : (!wave.ptr<#waveamd.buffer, f32>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.mem.token)
+        -> (!wave.simd<vector<2xf32>, 32>, !wave.mem.token)
+    wave.yield %value, %token
+        : !wave.simd<vector<2xf32>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %dependency
+        : !wave.simd<vector<2xf32>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<2xf32>, 32>, !wave.mem.token
+  return %result#0 : !wave.simd<vector<2xf32>, 32>
+}
+
+// -----
+
+// Scoped binding facts rematerialize with each replacement address.
+// CHECK-LABEL: func.func @scoped_packet_address_assumption(
+// CHECK-SAME: %[[BASE:[^,]+]]: !wave.ptr<#waveamd.buffer, f16>
+// CHECK-SAME: %[[RAW0:[^,]+]]: !wave.simd<i32, 32>
+// CHECK-SAME: %[[RAW1:[^,]+]]: !wave.simd<i32, 32>
+// CHECK: wave.where
+// CHECK: wave.index_expr <"raw0"> assuming
+// CHECK-SAME: #wave.pred<"raw0 >= 0">
+// CHECK-SAME: #wave.pred<"-1073741823 + raw0 <= 0">
+// CHECK-SAME: ["raw0"](%[[RAW0]])
+// CHECK: wave.ptr_add %[[BASE]]
+// CHECK: wave.load
+// CHECK: wave.where
+// CHECK: wave.index_expr <"raw0_0"> assuming
+// CHECK-SAME: #wave.pred<"raw0_0 >= 0">
+// CHECK-SAME: #wave.pred<"-1073741823 + raw0_0 <= 0">
+// CHECK-SAME: ["raw0_0"](%[[RAW1]])
+// CHECK: wave.ptr_add %[[BASE]]
+// CHECK: wave.load
+// CHECK-NOT: wave.gather
+func.func @scoped_packet_address_assumption(
+    %base: !wave.ptr<#waveamd.buffer, f16>,
+    %raw0: !wave.simd<i32, 32>, %raw1: !wave.simd<i32, 32>,
+    %active0: !wave.mask<32>, %active1: !wave.mask<32>)
+    -> !wave.simd<vector<2xf16>, 32> {
+  %dependency = wave.token : !wave.mem.token
+  %zero = wave.constant 0.0 : f16 -> !wave.simd<f16, 32>
+  %fallback = wave.pack %zero, %zero
+      : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+      -> !wave.simd<vector<2xf16>, 32>
+  %result:2 = wave.where %active0, %active1 {
+    %bounded0 = wave.assume %raw0 as "x"
+        [#wave.pred<"x >= 0">,
+         #wave.pred<"-1073741823 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %bounded1 = wave.assume %raw1 as "x"
+        [#wave.pred<"x >= 0">,
+         #wave.pred<"-1073741823 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"16*offset">> bindings []()
+        packet_bindings ["offset", "offset"](%bounded0, %bounded1)
+        after %dependency
+        : (!wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>,
+           !wave.simd<i32, 32>, !wave.mem.token)
+        -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+    wave.yield %value, %token
+        : !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %dependency
+        : !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  return %result#0 : !wave.simd<vector<2xf16>, 32>
+}
+
+// -----
+
+// Scoped store addresses rematerialize inside each replacement guard.
+// CHECK-LABEL: func.func @scoped_packet_store_address_assumption(
+// CHECK-SAME: %[[VALUE:[^,]+]]: !wave.simd<vector<2xf16>, 32>
+// CHECK-SAME: %[[BASE:[^,]+]]: !wave.ptr<#waveamd.buffer, f16>
+// CHECK-SAME: %[[RAW0:[^,]+]]: !wave.simd<i32, 32>
+// CHECK-SAME: %[[RAW1:[^,]+]]: !wave.simd<i32, 32>
+// CHECK: [[DEP:%.*]] = wave.token
+// CHECK: wave.where
+// CHECK: wave.index_expr <"raw0"> assuming
+// CHECK-SAME: #wave.pred<"raw0 >= 0">
+// CHECK-SAME: #wave.pred<"-1073741823 + raw0 <= 0">
+// CHECK-SAME: ["raw0"](%[[RAW0]])
+// CHECK: wave.ptr_add %[[BASE]]
+// CHECK: wave.store {{%.*}} -> {{%.*}} after [[DEP]]
+// CHECK: wave.where
+// CHECK: wave.index_expr <"raw0_0"> assuming
+// CHECK-SAME: #wave.pred<"raw0_0 >= 0">
+// CHECK-SAME: #wave.pred<"-1073741823 + raw0_0 <= 0">
+// CHECK-SAME: ["raw0_0"](%[[RAW1]])
+// CHECK: wave.ptr_add %[[BASE]]
+// CHECK: wave.store {{%.*}} -> {{%.*}} after [[DEP]]
+// CHECK-NOT: wave.scatter
+func.func @scoped_packet_store_address_assumption(
+    %input: !wave.simd<vector<2xf16>, 32>,
+    %base: !wave.ptr<#waveamd.buffer, f16>,
+    %raw0: !wave.simd<i32, 32>, %raw1: !wave.simd<i32, 32>,
+    %active0: !wave.mask<32>, %active1: !wave.mask<32>) {
+  %dependency = wave.token : !wave.mem.token
+  %result = wave.where %active0, %active1 {
+    %bounded0 = wave.assume %raw0 as "x"
+        [#wave.pred<"x >= 0">,
+         #wave.pred<"-1073741823 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %bounded1 = wave.assume %raw1 as "x"
+        [#wave.pred<"x >= 0">,
+         #wave.pred<"-1073741823 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"16*offset">> bindings []()
+        packet_bindings ["offset", "offset"](%bounded0, %bounded1)
+        after %dependency
+        : (!wave.simd<vector<2xf16>, 32>,
+           !wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>,
+           !wave.simd<i32, 32>, !wave.mem.token)
+        -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %dependency : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32> -> !wave.mem.token
+  return
+}

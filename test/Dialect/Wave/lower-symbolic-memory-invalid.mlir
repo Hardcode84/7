@@ -179,3 +179,63 @@ func.func @inactive_control_fact(%x: !wave.simd<i32, 32>,
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
 }
+
+// -----
+
+func.func @packet_gather_unrelated_prefix(
+    %base: !wave.ptr<#wave.global, i32>,
+    %raw0: !wave.simd<i32, 32>, %raw1: !wave.simd<i32, 32>,
+    %active0: !wave.mask<32>, %active1: !wave.mask<32>) {
+  %dependency = wave.token : !wave.mem.token
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %fallback = wave.pack %zero, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  // expected-error @+1 {{packet-predicated symbolic memory then region must contain only leading assumptions and the memory access}}
+  %result:2 = wave.where %active0, %active1 {
+    %bounded = wave.assume %raw0 as "x" [#wave.pred<"x >= 0">]
+        : !wave.simd<i32, 32>
+    %unrelated = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"32*offset">> bindings []()
+        packet_bindings ["offset", "offset"](%bounded, %raw1)
+        after %dependency
+        : (!wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>,
+           !wave.simd<i32, 32>, !wave.mem.token)
+        -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+    wave.yield %value, %token
+        : !wave.simd<vector<2xi32>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %dependency
+        : !wave.simd<vector<2xi32>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<2xi32>, 32>, !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @packet_scatter_unrelated_prefix(
+    %value: !wave.simd<vector<2xi32>, 32>,
+    %base: !wave.ptr<#wave.global, i32>,
+    %raw0: !wave.simd<i32, 32>, %raw1: !wave.simd<i32, 32>,
+    %active0: !wave.mask<32>, %active1: !wave.mask<32>) {
+  %dependency = wave.token : !wave.mem.token
+  // expected-error @+1 {{packet-predicated symbolic memory then region must contain only leading assumptions and the memory access}}
+  %result = wave.where %active0, %active1 {
+    %bounded = wave.assume %raw0 as "x" [#wave.pred<"x >= 0">]
+        : !wave.simd<i32, 32>
+    %unrelated = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+    %stored = wave.scatter %value to %base mapping
+        <bit_offset = <"32*offset">> bindings []()
+        packet_bindings ["offset", "offset"](%bounded, %raw1)
+        after %dependency
+        : (!wave.simd<vector<2xi32>, 32>, !wave.ptr<#wave.global, i32>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.mem.token)
+        -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %dependency : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32> -> !wave.mem.token
+  return
+}

@@ -85,11 +85,13 @@ struct NamedBinding {
 struct MaterializationCandidate {
   Value value;
   sym::ExprHandle expression;
+  bool mayMaterializeAddress = true;
 };
 
 struct SlotMapping {
   SmallVector<NamedBinding> bindings;
   SmallVector<sym::PredHandle> assumptions;
+  SmallVector<sym::PredHandle> activationProofAssumptions;
   SmallVector<MaterializationCandidate> materializationCandidates;
   SmallVector<unsigned> logicalSlots;
   std::optional<sym::PredHandle> activationPredicate;
@@ -162,6 +164,7 @@ struct PacketControl {
 struct PacketComponents {
   SmallVector<Value> values;
   SmallVector<SymbolicOffset> offsets;
+  SmallVector<SmallVector<sym::PredHandle, 2>> rootAssumptions;
 };
 
 struct CoverState {
@@ -311,8 +314,11 @@ static SmallVector<Value> getDataPacketComponents(IRRewriter &rewriter,
 
 static bool hasIsolatedPacketAccess(WhereOp where, Operation *access,
                                     YieldOp thenYield) {
-  return thenYield && &where.getThenRegion().front().front() == access &&
-         access->getNextNode() == thenYield;
+  if (!thenYield || access->getNextNode() != thenYield)
+    return false;
+  return llvm::all_of(llvm::make_range(where.getThenRegion().front().begin(),
+                                       access->getIterator()),
+                      [](Operation &op) { return isa<AssumeOp>(op); });
 }
 
 static bool hasValidGatherThenYield(WhereOp where, const MemoryAccess &access,
@@ -420,8 +426,8 @@ static LogicalResult preparePacketPredication(IRRewriter &rewriter,
       dyn_cast<YieldOp>(where.getThenRegion().front().getTerminator());
   if (!hasIsolatedPacketAccess(where, access.op, thenYield))
     return where.emitOpError(
-        "packet-predicated symbolic memory then region must contain only the "
-        "memory access");
+        "packet-predicated symbolic memory then region must contain only "
+        "leading assumptions and the memory access");
 
   rewriter.setInsertionPoint(where);
   access.packetWhere = where;
@@ -805,17 +811,48 @@ static LogicalResult appendPacketControl(sym::Store &store,
   return success();
 }
 
+static LogicalResult appendActivationProofAssumptions(
+    sym::Store &store, ArrayRef<sym::PredHandle> rootAssumptions,
+    ArrayRef<sym::ExprSubstitution> offsetSubstitutions, size_t assumptionStart,
+    SlotMapping &mapping) {
+  if (!mapping.packetCondition)
+    return success();
+  FailureOr<SmallVector<sym::PredHandle>> remappedRootAssumptions =
+      SmallVector<sym::PredHandle>(rootAssumptions);
+  if (!offsetSubstitutions.empty())
+    remappedRootAssumptions = substituteIndexExprPredicates(
+        store, rootAssumptions, offsetSubstitutions);
+  if (failed(remappedRootAssumptions))
+    return failure();
+  for (sym::PredHandle assumption :
+       ArrayRef<sym::PredHandle>(mapping.assumptions)
+           .drop_front(assumptionStart)) {
+    if (llvm::is_contained(*remappedRootAssumptions, assumption))
+      continue;
+    if (llvm::is_contained(mapping.activationProofAssumptions, assumption))
+      continue;
+    mapping.activationProofAssumptions.push_back(assumption);
+  }
+  return success();
+}
+
 static LogicalResult appendPacketSubstitution(
     sym::Store &store, StringRef name, Value value,
-    const SymbolicOffset &offset, PacketBindingState &state,
-    SlotMapping &mapping,
+    const SymbolicOffset &offset, ArrayRef<sym::PredHandle> rootAssumptions,
+    PacketBindingState &state, SlotMapping &mapping,
     SmallVectorImpl<sym::ExprSubstitution> &substitutions) {
   FailureOr<sym::ExprHandle> original = sym::composeExprSym(store, name);
   SmallVector<sym::ExprSubstitution> offsetSubstitutions;
+  size_t assumptionStart = mapping.assumptions.size();
   FailureOr<sym::ExprHandle> replacement =
       remapSymbolicOffset(store, offset, state, mapping, &offsetSubstitutions);
   if (failed(original) || failed(replacement))
     return failure();
+  if (failed(appendActivationProofAssumptions(store, rootAssumptions,
+                                              offsetSubstitutions,
+                                              assumptionStart, mapping)))
+    return failure();
+  bool hasScopedProof = mapping.packetCondition && !rootAssumptions.empty();
   for (const SymbolicOffsetMaterialization &materialization :
        offset.materializations) {
     FailureOr<sym::ExprHandle> expression = materialization.expr;
@@ -825,9 +862,10 @@ static LogicalResult appendPacketSubstitution(
     if (failed(expression))
       return failure();
     mapping.materializationCandidates.push_back(
-        {materialization.value, *expression});
+        {materialization.value, *expression, !hasScopedProof});
   }
-  mapping.materializationCandidates.push_back({value, *replacement});
+  mapping.materializationCandidates.push_back(
+      {value, *replacement, !hasScopedProof});
   substitutions.push_back({*original, *replacement});
   return success();
 }
@@ -903,8 +941,9 @@ buildSlotSubstitutions(const MemoryAccess &access, sym::Store &store,
   for (auto [bindingIndex, binding] : llvm::enumerate(access.packetBindings))
     if (failed(appendPacketSubstitution(
             store, binding.name, packetComponents[bindingIndex].values[slot],
-            packetComponents[bindingIndex].offsets[slot], bindingState, mapping,
-            substitutions)))
+            packetComponents[bindingIndex].offsets[slot],
+            packetComponents[bindingIndex].rootAssumptions[slot], bindingState,
+            mapping, substitutions)))
       return failure();
   return substitutions;
 }
@@ -1023,6 +1062,12 @@ static FailureOr<PreparedSlotMapping> prepareSlotMapping(
   if (failed(appendPacketControl(store, packetControl, bindingState,
                                  prepared.mapping)))
     return failure();
+  if (prepared.mapping.packetCondition) {
+    prepared.mapping.activationProofAssumptions = prepared.mapping.assumptions;
+    if (prepared.mapping.activationPredicate)
+      llvm::erase(prepared.mapping.activationProofAssumptions,
+                  *prepared.mapping.activationPredicate);
+  }
   FailureOr<SmallVector<sym::ExprSubstitution>> substitutions =
       buildSlotSubstitutions(access, store, slotSymbol, slot,
                              bindingSubstitutions, packetComponents,
@@ -1143,11 +1188,19 @@ getNonActivationAssumptions(const SlotMapping &slot) {
   return assumptions;
 }
 
+static SmallVector<sym::PredHandle>
+getActivationProofAssumptions(const SlotMapping &slot) {
+  if (slot.packetCondition)
+    return slot.activationProofAssumptions;
+  return getNonActivationAssumptions(slot);
+}
+
 static bool isProvablyFalseActivation(sym::Store &store,
                                       const SlotMapping &slot) {
   if (!slot.activationPredicate)
     return false;
-  SmallVector<sym::PredHandle> assumptions = getNonActivationAssumptions(slot);
+  SmallVector<sym::PredHandle> assumptions =
+      getActivationProofAssumptions(slot);
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
       sym::Analysis::create(store, assumptions);
   if (failed(analysis))
@@ -1171,11 +1224,11 @@ static bool isProvablyFalseActivation(sym::Store &store,
 }
 
 static SmallVector<sym::PredHandle>
-combineNonActivationAssumptions(const SlotMapping &lhs,
-                                const SlotMapping &rhs) {
-  SmallVector<sym::PredHandle> assumptions = getNonActivationAssumptions(lhs);
+combineActivationProofAssumptions(const SlotMapping &lhs,
+                                  const SlotMapping &rhs) {
+  SmallVector<sym::PredHandle> assumptions = getActivationProofAssumptions(lhs);
   SmallVector<sym::PredHandle> rhsAssumptions =
-      getNonActivationAssumptions(rhs);
+      getActivationProofAssumptions(rhs);
   llvm::append_range(assumptions, rhsAssumptions);
   return assumptions;
 }
@@ -1563,7 +1616,7 @@ public:
     const SlotMapping &lowSlot = slots[pair->first];
     const SlotMapping &highSlot = slots[pair->second];
     SmallVector<sym::PredHandle> assumptions =
-        combineNonActivationAssumptions(lowSlot, highSlot);
+        combineActivationProofAssumptions(lowSlot, highSlot);
     sym::PredHandle lhsRelation = getActivationRelation(lowSlot);
     sym::PredHandle rhsRelation = getActivationRelation(highSlot);
     std::optional<ActivationProof> cached =
@@ -4725,7 +4778,8 @@ static Value findElementOffsetMaterialization(const SlotMapping &slot,
     return {};
   for (const MaterializationCandidate &candidate :
        llvm::reverse(slot.materializationCandidates)) {
-    if (!isLegalPtrAddOffset(candidate.value.getType()))
+    if (!candidate.mayMaterializeAddress ||
+        !isLegalPtrAddOffset(candidate.value.getType()))
       continue;
     if (analysis.equivalent(*elementOffset, candidate.expression) ==
         sym::CheckResult::True)
@@ -4983,6 +5037,9 @@ static SlotMapping buildTransactionPoint(ArrayRef<SlotMapping> slots,
     for (sym::PredHandle assumption : slot.assumptions)
       if (!llvm::is_contained(point.assumptions, assumption))
         point.assumptions.push_back(assumption);
+    for (sym::PredHandle assumption : slot.activationProofAssumptions)
+      if (!llvm::is_contained(point.activationProofAssumptions, assumption))
+        point.activationProofAssumptions.push_back(assumption);
   }
   return point;
 }
@@ -5550,18 +5607,73 @@ static SmallVector<Value> getPacketComponentValues(IRRewriter &rewriter,
   return values;
 }
 
-static FailureOr<SmallVector<SymbolicOffset>>
-buildPacketComponentOffsets(const MemoryAccess &access, ValueRange values,
-                            WaveDialect &dialect, DataFlowSolver &solver) {
+static void
+appendUniqueAssumption(SmallVectorImpl<sym::PredHandle> &assumptions,
+                       sym::PredHandle assumption) {
+  if (!llvm::is_contained(assumptions, assumption))
+    assumptions.push_back(assumption);
+}
+
+static SmallVector<AssumeOp, 2>
+peelPacketRootAssumes(const MemoryAccess &access, Value &value) {
+  SmallVector<AssumeOp, 2> rootAssumes;
+  while (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
+    if (!access.packetWhere ||
+        assume->getParentOfType<WhereOp>() != access.packetWhere)
+      break;
+    rootAssumes.push_back(assume);
+    value = assume.getValue();
+  }
+  return rootAssumes;
+}
+
+static LogicalResult appendPacketRootAssumptions(
+    WaveDialect &dialect, ArrayRef<AssumeOp> rootAssumes,
+    SymbolicOffset &symbolic,
+    SmallVectorImpl<sym::PredHandle> &componentRootAssumptions) {
+  for (AssumeOp assume : rootAssumes) {
+    FailureOr<sym::ExprHandle> target =
+        sym::composeExprSym(dialect.getSymbolStore(), assume.getName());
+    if (failed(target))
+      return failure();
+    std::array<sym::ExprSubstitution, 1> substitutions{
+        sym::ExprSubstitution{*target, symbolic.expr}};
+    for (Attribute attribute : assume.getAssumptions()) {
+      FailureOr<sym::PredHandle> predicate = sym::substitutePred(
+          dialect.getSymbolStore(), cast<PredAttr>(attribute).getValue(),
+          substitutions);
+      if (failed(predicate))
+        return failure();
+      appendUniqueAssumption(componentRootAssumptions, *predicate);
+      appendUniqueAssumption(symbolic.assumptions, *predicate);
+    }
+  }
+  return success();
+}
+
+static FailureOr<SmallVector<SymbolicOffset>> buildPacketComponentOffsets(
+    const MemoryAccess &access, MutableArrayRef<Value> values,
+    WaveDialect &dialect, DataFlowSolver &solver,
+    SmallVectorImpl<SmallVector<sym::PredHandle, 2>> &rootAssumptions) {
   SmallVector<SymbolicOffset> components;
   components.reserve(values.size());
-  for (Value value : values) {
+  rootAssumptions.reserve(values.size());
+  for (Value &value : values) {
+    Value structuralValue = value;
+    SmallVector<AssumeOp, 2> rootAssumes =
+        peelPacketRootAssumes(access, structuralValue);
+    value = structuralValue;
     FailureOr<std::optional<SymbolicOffset>> symbolic =
-        buildSymbolicIndexValue(value, dialect, solver);
+        buildSymbolicIndexValue(structuralValue, dialect, solver);
     if (failed(symbolic) || !*symbolic) {
       access.op->emitOpError("failed to specialize packet binding producer");
       return failure();
     }
+    SmallVector<sym::PredHandle, 2> componentRootAssumptions;
+    if (failed(appendPacketRootAssumptions(dialect, rootAssumes, **symbolic,
+                                           componentRootAssumptions)))
+      return failure();
+    rootAssumptions.push_back(std::move(componentRootAssumptions));
     components.push_back(std::move(**symbolic));
   }
   return components;
@@ -5588,12 +5700,14 @@ buildPacketComponents(IRRewriter &rewriter, const MemoryAccess &access,
                              "the accessed packet");
       return failure();
     }
+    SmallVector<SmallVector<sym::PredHandle, 2>> rootAssumptions;
     FailureOr<SmallVector<SymbolicOffset>> components =
-        buildPacketComponentOffsets(access, values, dialect, solver);
+        buildPacketComponentOffsets(access, values, dialect, solver,
+                                    rootAssumptions);
     if (failed(components))
       return failure();
-    packetComponents.push_back(
-        PacketComponents{std::move(values), std::move(*components)});
+    packetComponents.push_back(PacketComponents{
+        std::move(values), std::move(*components), std::move(rootAssumptions)});
   }
   return packetComponents;
 }
@@ -5719,7 +5833,7 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
     if (isProvablyFalseActivation(store, prepared->mapping)) {
       prepared->mapping.staticallyInactive = true;
       prepared->mapping.assumptions =
-          getNonActivationAssumptions(prepared->mapping);
+          getActivationProofAssumptions(prepared->mapping);
     }
     preparedMappings.push_back(std::move(*prepared));
   }
@@ -5988,7 +6102,10 @@ static std::optional<DmaCopyMatch> matchDirectDmaCopy(ScatterOp scatter) {
 
 static GatherOp matchDmaCopyThenRegion(WhereOp where) {
   Block &block = where.getThenRegion().front();
-  GatherOp gather = dyn_cast<GatherOp>(&block.front());
+  Operation *access = &block.front();
+  while (isa<AssumeOp>(access))
+    access = access->getNextNode();
+  GatherOp gather = dyn_cast<GatherOp>(access);
   YieldOp yield = dyn_cast<YieldOp>(block.getTerminator());
   if (!gather || !yield || gather->getNextNode() != yield ||
       yield.getNumOperands() != 2 || yield.getOperand(0) != gather.getValue() ||
@@ -6942,6 +7059,9 @@ static bool mergeDmaMappingMetadata(SlotMapping &target,
   for (sym::PredHandle assumption : source.assumptions)
     if (!llvm::is_contained(target.assumptions, assumption))
       target.assumptions.push_back(assumption);
+  for (sym::PredHandle assumption : source.activationProofAssumptions)
+    if (!llvm::is_contained(target.activationProofAssumptions, assumption))
+      target.activationProofAssumptions.push_back(assumption);
   return true;
 }
 
@@ -7324,7 +7444,7 @@ appendUniqueDmaAssumptions(ArrayRef<SlotMapping> mappings,
   for (const SlotMapping &mapping : mappings) {
     SmallVector<sym::PredHandle> selected =
         includeActivation ? mapping.assumptions
-                          : getNonActivationAssumptions(mapping);
+                          : getActivationProofAssumptions(mapping);
     for (sym::PredHandle assumption : selected)
       if (!llvm::is_contained(assumptions, assumption))
         assumptions.push_back(assumption);
@@ -8281,7 +8401,7 @@ static FailureOr<Value> materializeDmaTransactionCondition(
   if (!repacked || !transaction.activationPredicate)
     return condition;
   SlotMapping conditionPoint = sourcePoint;
-  conditionPoint.assumptions = getNonActivationAssumptions(conditionPoint);
+  conditionPoint.assumptions = getActivationProofAssumptions(conditionPoint);
   FailureOr<Value> materialized = materializeDmaActivationPredicate(
       rewriter, source, conditionPoint, *transaction.activationPredicate,
       source.packetType.getWidth());
