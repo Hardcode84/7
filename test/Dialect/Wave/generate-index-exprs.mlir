@@ -685,3 +685,26 @@ func.func @dead_scalar_binding_dropped(%out: !wave.ptr<#wave.global, f32>,
   %ptr = wave.ptr_add %out, %zero : !wave.ptr<#wave.global, f32>, index -> !wave.ptr<#wave.global, f32>
   return %ptr : !wave.ptr<#wave.global, f32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @index_expr_extract_pack_alias
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: wave.index_expr <"2*(1 + raw0)"> assuming
+// CHECK-SAME: ["raw0"](%[[X]])
+func.func @index_expr_extract_pack_alias(%x: !wave.simd<i32, 32>)
+    -> !wave.simd<index, 32> {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %packet[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%alias)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}

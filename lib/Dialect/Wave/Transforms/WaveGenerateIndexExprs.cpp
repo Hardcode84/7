@@ -186,6 +186,45 @@ static bool isSignlessI32SimdType(Type type) {
   return isa<SimdType>(type) && isSignlessI32StorageType(type);
 }
 
+static std::optional<int64_t> getPacketElementCount(Type type) {
+  SimdType simd = dyn_cast<SimdType>(type);
+  if (!simd)
+    return std::nullopt;
+  VectorType vector = dyn_cast<VectorType>(simd.getElementType());
+  if (vector)
+    return vector.getNumElements();
+  return 1;
+}
+
+static Value getExtractedPackAlias(Value value) {
+  ExtractOp extract = value.getDefiningOp<ExtractOp>();
+  if (!extract)
+    return {};
+  PackOp pack = extract.getSource().getDefiningOp<PackOp>();
+  if (!pack)
+    return {};
+
+  int64_t index = extract.getIndex();
+  int64_t offset = 0;
+  for (Value input : pack.getInputs()) {
+    std::optional<int64_t> elements = getPacketElementCount(input.getType());
+    if (!elements)
+      return {};
+    if (offset == index && input.getType() == value.getType())
+      return input;
+    offset += *elements;
+    if (offset > index)
+      return {};
+  }
+  return {};
+}
+
+static Value peelExtractedPackAliases(Value value) {
+  while (Value source = getExtractedPackAlias(value))
+    value = source;
+  return value;
+}
+
 static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
                                ArrayRef<sym::PredHandle> assumptions) {
   return sym::checkPredicate(store, pred, assumptions) ==
@@ -242,6 +281,41 @@ static std::optional<int64_t> getSplatOrConstantInt(Value value) {
   if (SplatOp splat = value.getDefiningOp<SplatOp>())
     return getSplatOrConstantInt(splat.getSource());
   return std::nullopt;
+}
+
+struct BooleanSelectComparison {
+  SelectOp select;
+  bool trueResult;
+  bool falseResult;
+};
+
+static std::optional<BooleanSelectComparison>
+matchBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
+                             Value rhs) {
+  bool isEqual = predicate == arith::CmpIPredicate::eq;
+  if (!isEqual && predicate != arith::CmpIPredicate::ne)
+    return std::nullopt;
+
+  SelectOp select = peelExtractedPackAliases(lhs).getDefiningOp<SelectOp>();
+  Value compared = rhs;
+  if (!select) {
+    select = peelExtractedPackAliases(rhs).getDefiningOp<SelectOp>();
+    compared = lhs;
+  }
+  if (!select)
+    return std::nullopt;
+
+  std::optional<int64_t> trueValue =
+      getSplatOrConstantInt(select.getTrueValue());
+  std::optional<int64_t> falseValue =
+      getSplatOrConstantInt(select.getFalseValue());
+  std::optional<int64_t> comparedValue = getSplatOrConstantInt(compared);
+  if (!trueValue || !falseValue || !comparedValue)
+    return std::nullopt;
+
+  return BooleanSelectComparison{select,
+                                 isEqual == (*trueValue == *comparedValue),
+                                 isEqual == (*falseValue == *comparedValue)};
 }
 
 static bool isFullSignedRange(const ConstantIntRanges &range) {
@@ -988,6 +1062,8 @@ private:
   }
 
   bool hasSymbolicRoot(Value value) {
+    if (Value source = getExtractedPackAlias(value))
+      return hasSymbolicRoot(source);
     if (value.getDefiningOp<IndexExprOp>())
       return expandIndexExprRoot;
     if (AssumeOp assume = value.getDefiningOp<AssumeOp>())
@@ -1020,6 +1096,8 @@ private:
       return buildAssumeExpr(value, assume, skip, allowLeaf, depth);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return buildSplatExpr(splat, skip, allowLeaf, depth);
+    if (Value source = getExtractedPackAlias(value))
+      return buildExpr(source, skip, allowLeaf, depth + 1);
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
       return buildBinaryExpr(value, binary, skip, allowLeaf, depth);
     if (SelectOp select = value.getDefiningOp<SelectOp>())
@@ -1335,9 +1413,46 @@ private:
                              depth);
   }
 
+  FailureOr<std::optional<sym::PredHandle>>
+  buildBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
+                               Value rhs, bool &skip, unsigned depth) {
+    std::optional<BooleanSelectComparison> match =
+        matchBooleanSelectComparison(predicate, lhs, rhs);
+    if (!match)
+      return std::optional<sym::PredHandle>{};
+    FailureOr<sym::PredHandle> recovered =
+        buildBooleanSelectComparison(*match, skip, depth);
+    if (failed(recovered))
+      return failure();
+    return std::optional<sym::PredHandle>{*recovered};
+  }
+
+  FailureOr<sym::PredHandle>
+  buildBooleanSelectComparison(BooleanSelectComparison match, bool &skip,
+                               unsigned depth) {
+    if (match.trueResult == match.falseResult)
+      return match.trueResult ? sym::composePredTrue(store)
+                              : sym::composePredFalse(store);
+    FailureOr<sym::PredHandle> condition =
+        buildPredicateExpr(match.select.getCondition(), skip, depth + 1);
+    if (failedOrSkipped(condition, skip))
+      return failure();
+    if (match.trueResult)
+      return condition;
+    return sym::composePredNot(store, *condition);
+  }
+
   FailureOr<sym::PredHandle> buildCmpPredicate(arith::CmpIPredicate predicate,
                                                Value lhsValue, Value rhsValue,
                                                bool &skip, unsigned depth = 0) {
+    FailureOr<std::optional<sym::PredHandle>> select =
+        buildBooleanSelectComparison(predicate, lhsValue, rhsValue, skip,
+                                     depth);
+    if (failed(select))
+      return failure();
+    if (*select)
+      return **select;
+
     std::optional<sym::PredCmpOp> converted =
         convertCmpPredicate(predicate, lhsValue, rhsValue, solver, store);
     if (!converted) {

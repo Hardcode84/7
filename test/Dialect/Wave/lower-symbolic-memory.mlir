@@ -259,7 +259,7 @@ func.func @packet_index_fallback(
 
 // -----
 
-// Aligned bounds make all packet predicates equivalent.
+// Structural aliases and boolean round trips preserve aligned predicate proof.
 // CHECK-LABEL: func.func @aligned_packet_predicated_gather(
 // CHECK-COUNT-1: wave.where
 // CHECK-COUNT-1: wave.load
@@ -296,17 +296,58 @@ func.func @aligned_packet_predicated_gather(
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
         !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<4xi32>, 32>
+  %index0 = wave.extract %indices[0]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %index1 = wave.extract %indices[1]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %index2 = wave.extract %indices[2]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %index3 = wave.extract %indices[3]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
   %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %boolOne = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %bool0 = wave.select %m0, %boolOne, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %bool1 = wave.select %m1, %boolOne, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %bool2 = wave.select %m2, %boolOne, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %bool3 = wave.select %m3, %boolOne, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %bools = wave.pack %bool0, %bool1, %bool2, %bool3
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %boolExtract0 = wave.extract %bools[0]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %boolExtract1 = wave.extract %bools[1]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %boolExtract2 = wave.extract %bools[2]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %boolExtract3 = wave.extract %bools[3]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %active0 = wave.cmpi ne %boolExtract0, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active1 = wave.cmpi ne %boolExtract1, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active2 = wave.cmpi ne %boolExtract2, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %active3 = wave.cmpi ne %boolExtract3, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   %fallback = wave.pack %zero, %zero, %zero, %zero
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>,
         !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<4xi32>, 32>
   %initial = wave.token : !wave.mem.token
-  %result, %token = wave.where %m0, %m1, %m2, %m3 {
+  %result, %token = wave.where %active0, %active1, %active2, %active3 {
     %value, %loaded = wave.gather %base mapping
         <bit_offset = <"32 * idx">>
-        bindings []() packet_bindings ["idx"](%indices)
-        : (!wave.ptr<#wave.global, i32>, !wave.simd<vector<4xi32>, 32>)
+        bindings []()
+        packet_bindings ["idx", "idx", "idx", "idx"]
+                        (%index0, %index1, %index2, %index3)
+        : (!wave.ptr<#wave.global, i32>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>)
         -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
     wave.yield %value, %loaded
         : !wave.simd<vector<4xi32>, 32>, !wave.mem.token

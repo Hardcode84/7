@@ -237,3 +237,32 @@ func.func @rewrite_integerized_mask_and(
   // CHECK: return %[[MASK]] : !wave.mask<32>
   return %mask : !wave.mask<32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @generate_packet_alias_after_normalize
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: wave.index_expr <"4*(1 + raw0)"> {{.*}} ["raw0"](%[[X]])
+func.func @generate_packet_alias_after_normalize(
+    %out: !wave.ptr<#wave.global, f32>, %x: !wave.simd<i32, 32>)
+    attributes {wave.kernel} {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %packet[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %out, %alias
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  %value = arith.constant 0.000000e+00 : f32
+  %values = wave.splat %value : f32 -> !wave.simd<f32, 32>
+  %token = wave.store %values -> %ptr
+      : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+      -> !wave.mem.token
+  return
+}

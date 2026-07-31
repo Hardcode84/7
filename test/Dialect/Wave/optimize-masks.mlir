@@ -199,3 +199,116 @@ func.func @constant_false_from_assumption(
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
   return %mask : !wave.mask<64>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @boolean_packet_alias_predicates
+// CHECK-DAG: %[[DIRECT:.*]] = wave.cmpi slt
+// CHECK-DAG: %[[INVERSE:.*]] = wave.cmpi sge
+// CHECK-DAG: %[[TRUE:.*]] = wave.constant true -> !wave.mask<32>
+// CHECK-DAG: %[[FALSE:.*]] = wave.constant false -> !wave.mask<32>
+// CHECK-NOT: wave.cmpi
+// CHECK: return %[[DIRECT]], %[[INVERSE]], %[[DIRECT]], %[[INVERSE]], %[[TRUE]], %[[FALSE]]
+func.func @boolean_packet_alias_predicates(
+    %x: !wave.simd<i32, 32>, %limit: !wave.simd<i32, 32>)
+    -> (!wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>,
+        !wave.mask<32>, !wave.mask<32>) {
+  %direct = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %inverse = wave.cmpi sge %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %encoded = wave.select %direct, %one, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %encoded, %two
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<3xi32>, 32>
+  %alias = wave.extract %packet[1]
+      : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32>
+  %recovered = wave.cmpi ne %alias, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %recoveredInverse = wave.cmpi eq %zero, %alias
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %alwaysTrue = wave.cmpi ne %alias, %two
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %alwaysFalse = wave.cmpi eq %alias, %two
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %direct, %inverse, %recovered, %recoveredInverse, %alwaysTrue,
+      %alwaysFalse
+      : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>,
+        !wave.mask<32>, !wave.mask<32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @boolean_packet_alias_unsupported_predicate
+// CHECK-COUNT-2: wave.cmpi
+func.func @boolean_packet_alias_unsupported_predicate(
+    %x: !wave.simd<i32, 32>, %limit: !wave.simd<i32, 32>)
+    -> (!wave.mask<32>, !wave.mask<32>) {
+  %condition = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %encoded = wave.select %condition, %one, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %encoded
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %packet[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %unsupported = wave.cmpi ult %alias, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %condition, %unsupported : !wave.mask<32>, !wave.mask<32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @boolean_select_nonconstant_arms
+// CHECK: wave.cmpi eq
+func.func @boolean_select_nonconstant_arms(
+    %condition: !wave.mask<32>, %x: !wave.simd<i32, 32>,
+    %y: !wave.simd<i32, 32>) -> !wave.mask<32> {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %selected = wave.select %condition, %x, %y
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %selected
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %packet[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %comparison = wave.cmpi eq %alias, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %comparison : !wave.mask<32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @boolean_alias_type_mismatch
+// CHECK: wave.cmpi slt
+// CHECK: wave.extract {{.*}}[0]
+// CHECK: wave.cmpi ne
+func.func @boolean_alias_type_mismatch(
+    %x: !wave.simd<i32, 32>, %limit: !wave.simd<i32, 32>)
+    -> (!wave.mask<32>, !wave.mask<32>) {
+  %condition = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %encoded = wave.select %condition, %one, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %packet = wave.pack %encoded, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %packet[0]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %zeroVector = arith.constant dense<0> : vector<1xi32>
+  %zeroPacket = wave.splat %zeroVector
+      : vector<1xi32> -> !wave.simd<vector<1xi32>, 32>
+  %comparison = wave.cmpi ne %alias, %zeroPacket
+      : !wave.simd<vector<1xi32>, 32>, !wave.simd<vector<1xi32>, 32>
+      -> !wave.mask<32>
+  return %condition, %comparison : !wave.mask<32>, !wave.mask<32>
+}
