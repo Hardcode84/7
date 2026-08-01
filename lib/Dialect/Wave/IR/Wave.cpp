@@ -3136,7 +3136,8 @@ verifyRedistributionRelationSymbols(Operation *op, RedistributionAttr relation,
 }
 
 static LogicalResult verifyRedistributionPayload(Operation *op, SimdType type,
-                                                 StringRef role) {
+                                                 StringRef role,
+                                                 bool allowPointer = false) {
   Type payload = type.getElementType();
   if (VectorType vector = dyn_cast<VectorType>(payload)) {
     if (vector.getRank() != 1)
@@ -3145,7 +3146,7 @@ static LogicalResult verifyRedistributionPayload(Operation *op, SimdType type,
       return op->emitOpError() << role << " packet vector must be fixed-size";
     payload = vector.getElementType();
   }
-  if (!payload.isIntOrFloat())
+  if (!payload.isIntOrFloat() && !(allowPointer && isa<PtrType>(payload)))
     return op->emitOpError()
            << role << " packet element type must be integer or float";
   return success();
@@ -3156,8 +3157,10 @@ LogicalResult RedistributeOp::verify() {
   SimdType resultType = cast<SimdType>(getResult().getType());
 
   if (failed(
-          verifyRedistributionPayload(getOperation(), sourceType, "source")) ||
-      failed(verifyRedistributionPayload(getOperation(), resultType, "result")))
+          verifyRedistributionPayload(getOperation(), sourceType, "source",
+                                      /*allowPointer=*/true)) ||
+      failed(verifyRedistributionPayload(getOperation(), resultType, "result",
+                                         /*allowPointer=*/true)))
     return failure();
   if (sourceType.getWidth() != resultType.getWidth())
     return emitOpError("source and result SIMD widths must match");

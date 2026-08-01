@@ -214,6 +214,23 @@ func.func @identity(%source: !wave.simd<vector<2xi32>, 32>)
 
 // -----
 
+// CHECK-LABEL: func.func @pointer_identity(
+// CHECK-NOT: wave.redistribute
+// CHECK-NEXT: return %{{.*}} : !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+func.func @pointer_identity(
+    %source: !wave.simd<!wave.ptr<#wave.global, f32>, 64>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+        -> !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+  return %result : !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reverse_slots(
 // CHECK-NOT: wave.shuffle
 // CHECK-NOT: wave.alloc
