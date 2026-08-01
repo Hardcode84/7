@@ -9,6 +9,7 @@
 #include "WaveAMDRegLiveIntervals.h"
 
 #include "WaveAMDRegAllocInternal.h"
+#include "WaveAMDRegAllocRegionFlow.h"
 #include "WaveAMDRegAllocTransformUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/BitVector.h"
@@ -293,21 +294,6 @@ static LogicalResult coalesce(Value primary, Value extra, unsigned pos,
                              requestedSlot, pos, errOp);
 }
 
-static bool operationIsInside(Operation *root, Operation *op) {
-  for (Operation *cur = op; cur; cur = cur->getParentOp())
-    if (cur == root)
-      return true;
-  return false;
-}
-
-static bool valueIsDefinedInside(Operation *root, Value value) {
-  if (Operation *def = value.getDefiningOp())
-    return operationIsInside(root, def);
-  if (auto arg = dyn_cast<BlockArgument>(value))
-    return operationIsInside(root, arg.getOwner()->getParentOp());
-  return false;
-}
-
 static bool shouldCoalesceMFMAAccResult(func::FuncOp func) {
   BoolAttr attr = func->getAttrOfType<BoolAttr>(
       wave::regalloc::kRegAllocCoalesceMFMAAccResultAttr);
@@ -375,6 +361,7 @@ public:
   FailureOr<wave::WaveAMDLiveIntervalBuildResult> build(func::FuncOp func) {
     if (func.isExternal())
       return std::move(result);
+    flow.emplace(func);
     coalesceMFMAAccResult = shouldCoalesceMFMAAccResult(func);
     if (failed(walkRegion(func.getBody())))
       return failure();
@@ -386,10 +373,24 @@ public:
   }
 
 private:
-  struct UniformIfElseContext {
-    waveamdmachine::UniformIfOp op;
-    unsigned branch = 0;
+  using RegionFlow = wave::regalloc_detail::RegAllocRegionFlow;
+  using RegionBranch = RegionFlow::Branch;
+  using OrderedAliasEdge = RegionFlow::OrderedAliasEdge;
+  using Transfer = RegionFlow::Transfer;
+  using TransferKind = RegionFlow::TransferKind;
+
+  struct ExclusiveRegionContext {
+    Operation *branchOp = nullptr;
+    unsigned branchPosition = 0;
     unsigned entry = 0;
+  };
+
+  struct RegionBranchState {
+    SmallVector<OrderedAliasEdge, 8> aliases;
+    DenseSet<OpOperand *> detached;
+    DenseMap<OpOperand *, SmallVector<Value, 2>> detachedInputs;
+    const RegionBranch *branch = nullptr;
+    bool repetitive = false;
   };
 
   void appendOriginalBlockOps(Block &block, SmallVectorImpl<Operation *> &ops) {
@@ -498,8 +499,8 @@ private:
 
     std::optional<unsigned> contextIndex;
     for (unsigned index = contextCount; index > 0; --index) {
-      UniformIfElseContext &context = uniformIfElseContexts[index - 1];
-      if (!valueIsDefinedInside(context.op, value)) {
+      ExclusiveRegionContext &context = exclusiveRegionContexts[index - 1];
+      if (!flow->isDefinedInside(context.branchOp, value)) {
         contextIndex = index - 1;
         break;
       }
@@ -509,319 +510,263 @@ private:
       return;
     }
 
-    UniformIfElseContext &context = uniformIfElseContexts[*contextIndex];
-    extendInterval(value, context.branch, *contextIndex);
+    ExclusiveRegionContext &context = exclusiveRegionContexts[*contextIndex];
+    extendInterval(value, context.branchPosition, *contextIndex);
     valueIt = table->find(value);
     wave::WaveAMDLiveInterval &interval = (*bucket)[valueIt->second];
     if (extendIntervalRange(interval, value, context.entry, pos))
       return;
     FailureOr<unsigned> slot =
-        getIntervalSlotOffset(value, interval, context.op);
+        getIntervalSlotOffset(value, interval, context.branchOp);
     if (succeeded(slot))
       appendIntervalValue(interval, value, *slot, context.entry, pos);
   }
 
   void extendInterval(Value value, unsigned pos) {
-    extendInterval(value, pos, uniformIfElseContexts.size());
+    extendInterval(value, pos, exclusiveRegionContexts.size());
   }
 
-  SmallVector<Value> buildLoopCarryAnchors(waveamdmachine::UniformLoopOp loop) {
-    SmallVector<Value> anchors(loop.getInits());
-    if (aliasPolicy != wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
-      return anchors;
-    DenseSet<Value> seen;
-    Block &body = loop.getBody().front();
-    for (auto [index, init] : llvm::enumerate(loop.getInits())) {
-      if (!wave::getTrackedWaveAMDRegType(init) || seen.insert(init).second)
-        continue;
-      // Regalloc gives each repeated init its own loop-carried register.
-      anchors[index] = body.getArgument(index);
-    }
-    return anchors;
-  }
-
-  LogicalResult coalesceLoopEntryCarries(waveamdmachine::UniformLoopOp loop,
-                                         unsigned pos,
-                                         ArrayRef<Value> anchors) {
-    Block &body = loop.getBody().front();
-    for (auto [i, init, anchor] : llvm::enumerate(loop.getInits(), anchors)) {
-      std::optional<waveamdmachine::RegType> rt =
-          wave::getTrackedWaveAMDRegType(anchor);
-      if (!rt)
-        continue;
-      if (anchor != init) {
-        (void)ensureInterval(anchor, pos, result.intervals, loop,
-                             includeAllocated);
-        continue;
-      }
-      DenseMap<Value, unsigned> *table =
-          intervalsFor(*rt, result.intervals).second;
-      // Pre-pinned inits have no interval; carry/result already share phys.
-      if (!table->contains(init))
-        continue;
-      if (failed(
-              coalesce(init, body.getArgument(i), pos, result.intervals, loop)))
-        return failure();
-    }
-    return success();
-  }
-
-  LogicalResult coalesceLoopExitResults(waveamdmachine::UniformLoopOp loop,
-                                        unsigned pos, ArrayRef<Value> anchors) {
-    for (auto [anchor, resultValue] :
-         llvm::zip_equal(anchors, loop.getResults())) {
-      std::optional<waveamdmachine::RegType> rt =
-          wave::getTrackedWaveAMDRegType(anchor);
-      if (!rt)
-        continue;
-      DenseMap<Value, unsigned> *table =
-          intervalsFor(*rt, result.intervals).second;
-      if (!table->contains(anchor))
-        continue;
-      (void)ensureInterval(resultValue, pos, result.intervals, loop,
-                           includeAllocated);
-      if (failed(coalesce(anchor, resultValue, pos, result.intervals, loop)))
-        return failure();
-    }
-    return success();
-  }
-
-  LogicalResult coalesceLoopBackEdgeCarries(waveamdmachine::UniformLoopOp loop,
-                                            ArrayRef<Value> anchors) {
-    Block &body = loop.getBody().front();
-    auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
-    // Back-edge carry is a rename into its loop slot interval.
-    for (auto [anchor, carry] : llvm::zip_equal(anchors, term.getCarries())) {
-      std::optional<waveamdmachine::RegType> rt =
-          wave::getTrackedWaveAMDRegType(anchor);
-      if (!rt)
-        continue;
-      DenseMap<Value, unsigned> *table =
-          intervalsFor(*rt, result.intervals).second;
-      auto initIt = table->find(anchor);
-      auto carryIt = table->find(carry);
-      if (carryIt == table->end() || initIt == table->end())
-        continue;
-      if (failed(coalesce(anchor, carry, result.positions.lookup(term),
-                          result.intervals, loop)))
-        return failure();
-    }
-    return success();
-  }
-
-  void extendExternalLoopUses(waveamdmachine::UniformLoopOp loop,
-                              unsigned endPos) {
-    loop.getBody().walk([&](Operation *op) {
-      for (Value operand : op->getOperands()) {
-        if (valueIsDefinedInside(loop, operand))
-          continue;
-        extendInterval(operand, endPos);
-      }
-    });
-  }
-
-  LogicalResult processLoop(waveamdmachine::UniformLoopOp loop, unsigned pos) {
-    SmallVector<Value> carryAnchors = buildLoopCarryAnchors(loop);
-    // Entry/result aliases first; back-edge aliases after body intervals exist.
-    if (failed(coalesceLoopEntryCarries(loop, pos, carryAnchors)))
-      return failure();
-    Block &body = loop.getBody().front();
-    if (failed(walkBlock(body)))
-      return failure();
-    if (failed(coalesceLoopBackEdgeCarries(loop, carryAnchors)))
-      return failure();
-    unsigned loopEnd = cursor - 1;
-    if (failed(coalesceLoopExitResults(loop, loopEnd, carryAnchors)))
-      return failure();
-    extendExternalLoopUses(loop, loopEnd);
-    return success();
-  }
-
-  LogicalResult coalesceExecIfRegionResults(waveamdmachine::ExecIfOp execIf,
-                                            Region &region, unsigned index,
-                                            unsigned pos) {
-    if (region.empty())
-      return success();
-    auto yield =
-        dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
-    if (!yield || index >= yield.getValues().size())
-      return success();
-    Value resultValue = execIf.getResult(index);
-    auto rt = wave::getTrackedWaveAMDRegType(resultValue);
-    if (!rt)
-      return success();
-    auto [bucket, table] = intervalsFor(*rt, result.intervals);
-    if (!table->contains(resultValue))
-      return success();
-    return coalesce(resultValue, yield.getValues()[index], pos,
-                    result.intervals, execIf);
-  }
-
-  LogicalResult coalesceExecIfResults(waveamdmachine::ExecIfOp execIf,
-                                      unsigned pos) {
-    for (unsigned index : llvm::seq<unsigned>(0, execIf.getNumResults())) {
-      if (failed(coalesceExecIfRegionResults(execIf, execIf.getThenRegion(),
-                                             index, pos)))
-        return failure();
-      if (failed(coalesceExecIfRegionResults(execIf, execIf.getElseRegion(),
-                                             index, pos)))
-        return failure();
-    }
-    return success();
-  }
-
-  LogicalResult walkExecIfRegion(Region &region) {
-    if (region.empty())
-      return success();
-    return walkBlock(region.front());
-  }
-
-  static bool needsConditionForDataMerge(waveamdmachine::ExecIfOp execIf) {
-    if (execIf.getElseRegion().empty())
+  bool intervalExists(Value value) {
+    std::optional<waveamdmachine::RegType> type =
+        wave::getTrackedWaveAMDRegType(value);
+    if (!type)
       return false;
-    for (Type type : execIf.getResultTypes())
-      if (!isa<waveamdmachine::MemTokenType>(type))
-        return true;
-    return false;
+    return intervalsFor(*type, result.intervals).second->contains(value);
   }
 
-  LogicalResult processExecIf(waveamdmachine::ExecIfOp execIf, unsigned pos) {
-    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Coalesce &&
-        failed(coalesceExecIfResults(execIf, pos)))
-      return failure();
-    if (failed(walkExecIfRegion(execIf.getThenRegion())))
-      return failure();
-    if (!execIf.getElseRegion().empty())
-      extendInterval(execIf.getCondition(), cursor - 1);
-    if (failed(walkExecIfRegion(execIf.getElseRegion())))
-      return failure();
-    if (needsConditionForDataMerge(execIf))
-      extendInterval(execIf.getCondition(), cursor - 1);
-    return success();
+  LogicalResult coalesceIfPresent(Value primary, Value extra, unsigned pos,
+                                  Operation *branch, int64_t offset = 0) {
+    if (!intervalExists(primary))
+      return success();
+    return coalesce(primary, extra, pos, result.intervals, branch, offset);
   }
 
-  LogicalResult
-  coalesceUniformIfRegionResults(waveamdmachine::UniformIfOp uniformIf,
-                                 Region &region, unsigned index) {
-    if (region.empty())
-      return success();
-    auto yield =
-        dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
-    if (!yield || index >= yield.getValues().size())
-      return success();
-    Value resultValue = uniformIf.getResult(index);
-    auto rt = wave::getTrackedWaveAMDRegType(resultValue);
-    if (!rt)
-      return success();
-    auto [bucket, table] = intervalsFor(*rt, result.intervals);
-    if (!table->contains(resultValue))
-      return success();
-    Value yieldValue = yield.getValues()[index];
-    if (!valueIsDefinedInside(uniformIf, yieldValue))
-      return uniformIf.emitError(
-          "uniform_if register yield must be defined inside the branch");
-    unsigned yieldPos = result.positions.lookup(yield);
-    return coalesce(resultValue, yieldValue, yieldPos, result.intervals,
-                    uniformIf);
+  void ensureRegionArguments(Region &region, unsigned pos, Operation *branch) {
+    for (Block &block : region)
+      for (BlockArgument argument : block.getArguments())
+        (void)ensureInterval(argument, pos, result.intervals, branch,
+                             includeAllocated);
   }
 
-  LogicalResult
-  coalesceUniformIfResults(waveamdmachine::UniformIfOp uniformIf) {
-    for (unsigned index : llvm::seq<unsigned>(0, uniformIf.getNumResults())) {
-      if (failed(coalesceUniformIfRegionResults(
-              uniformIf, uniformIf.getThenRegion(), index)))
-        return failure();
-      if (failed(coalesceUniformIfRegionResults(
-              uniformIf, uniformIf.getElseRegion(), index)))
+  DenseSet<OpOperand *>
+  getDetachedRepeatedEntryOperands(const RegionBranch &branch) {
+    DenseSet<OpOperand *> detached;
+    if (aliasPolicy != wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
+      return detached;
+    DenseSet<Value> seen;
+    for (const auto &transfer : branch.transfers) {
+      if (transfer.source || !transfer.target ||
+          !flow->isRepetitive(transfer.target) ||
+          !wave::getTrackedWaveAMDRegType(transfer.operand->get()))
+        continue;
+      if (!seen.insert(transfer.operand->get()).second)
+        detached.insert(transfer.operand);
+    }
+    return detached;
+  }
+
+  unsigned getTransferPosition(const RegionBranch &branch,
+                               const Transfer &transfer,
+                               unsigned branchPosition, unsigned exitPosition) {
+    if (!transfer.source && !transfer.target &&
+        flow->resultsStartAtJoin(branch.op))
+      return exitPosition;
+    if (!transfer.source)
+      return branchPosition;
+    if (!transfer.target && !flow->resultsStartAtJoin(branch.op))
+      return branchPosition;
+    return result.positions.lookup(transfer.sourceOperation);
+  }
+
+  LogicalResult coalesceBranchTransferKind(
+      const RegionBranch &branch, ArrayRef<OrderedAliasEdge> aliases,
+      TransferKind wanted, unsigned branchPosition, unsigned exitPosition,
+      const DenseSet<OpOperand *> &detached) {
+    for (const OrderedAliasEdge &alias : aliases) {
+      if (alias.kind != wanted)
+        continue;
+      const Transfer &transfer = *alias.transfer;
+      unsigned pos =
+          getTransferPosition(branch, transfer, branchPosition, exitPosition);
+      // Detach repetitive entry only; pre-test bypass still joins results.
+      if (wanted == TransferKind::RepetitiveEntry &&
+          detached.contains(transfer.operand))
+        continue;
+      if (failed(coalesceIfPresent(alias.lhs, alias.rhs, pos, branch.op)))
         return failure();
     }
     return success();
   }
 
-  LogicalResult processUniformIf(waveamdmachine::UniformIfOp uniformIf,
-                                 unsigned pos) {
-    if (failed(walkExecIfRegion(uniformIf.getThenRegion())))
-      return failure();
-    if (!uniformIf.getElseRegion().empty()) {
-      uniformIfElseContexts.push_back({uniformIf, pos, cursor});
-      if (failed(walkExecIfRegion(uniformIf.getElseRegion()))) {
-        uniformIfElseContexts.pop_back();
-        return failure();
-      }
-      uniformIfElseContexts.pop_back();
+  LogicalResult coalesceDetachedEntryInputs(
+      Operation *branch, unsigned branchPosition,
+      DenseMap<OpOperand *, SmallVector<Value, 2>> &detachedInputs) {
+    // Repeated source stays detached; its successor inputs still share storage.
+    for (auto &[operand, inputs] : detachedInputs) {
+      (void)operand;
+      if (inputs.empty())
+        continue;
+      auto blockArgument = llvm::find_if(
+          inputs, [](Value input) { return isa<BlockArgument>(input); });
+      Value primary =
+          blockArgument != inputs.end() ? *blockArgument : inputs.front();
+      for (Value input : inputs)
+        if (input != primary &&
+            failed(coalesceIfPresent(primary, input, branchPosition, branch)))
+          return failure();
     }
+    return success();
+  }
 
-    // Yield aliases cover each arm; parent results start at join.
-    unsigned exitPos = cursor - 1;
-    for (Value resultValue : uniformIf.getResults())
-      (void)ensureInterval(resultValue, exitPos, result.intervals, uniformIf,
-                           includeAllocated);
-    if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Coalesce &&
-        failed(coalesceUniformIfResults(uniformIf)))
+  void extendExternalRepetitiveUses(const RegionBranch &branch,
+                                    unsigned endPosition) {
+    for (Region *region : branch.regions) {
+      if (!flow->isRepetitive(region))
+        continue;
+      region->walk([&](Operation *op) {
+        for (Value operand : op->getOperands())
+          if (!flow->isDefinedInside(branch.op, operand))
+            extendInterval(operand, endPosition);
+      });
+    }
+  }
+
+  void extendImplicitRegisterUses(Operation *op) {
+    auto implicit =
+        dyn_cast<waveamdmachine::ImplicitRegisterUseOpInterface>(op);
+    if (!implicit)
+      return;
+    for (waveamdmachine::ImplicitRegisterUse use :
+         implicit.getImplicitRegisterUses()) {
+      auto position = result.positions.find(use.lastUse);
+      if (position != result.positions.end())
+        extendInterval(use.value, position->second);
+    }
+  }
+
+  void collectDetachedEntryInputs(RegionBranchState &state, unsigned position) {
+    for (const Transfer &transfer : state.branch->transfers) {
+      if (transfer.source || !transfer.target ||
+          !flow->isRepetitive(transfer.target) ||
+          !state.detached.contains(transfer.operand))
+        continue;
+      (void)ensureInterval(transfer.input, position, result.intervals,
+                           state.branch->op, includeAllocated);
+      state.detachedInputs[transfer.operand].push_back(transfer.input);
+    }
+  }
+
+  RegionBranchState collectRegionBranchState(Operation *op, unsigned position) {
+    RegionBranchState state;
+    state.branch = flow->lookup(op);
+    assert(state.branch && "RegionBranch operation must have a flow summary");
+    state.repetitive = state.branch->repetitiveRegions.any();
+    if (aliasPolicy != wave::WaveAMDLiveIntervalAliasPolicy::Conservative ||
+        state.repetitive)
+      flow->appendOrderedAliasEdges(op, state.aliases);
+    state.detached = getDetachedRepeatedEntryOperands(*state.branch);
+    collectDetachedEntryInputs(state, position);
+    return state;
+  }
+
+  LogicalResult prepareRegionBranchEntry(RegionBranchState &state,
+                                         unsigned position) {
+    if (state.repetitive &&
+        failed(coalesceBranchTransferKind(*state.branch, state.aliases,
+                                          TransferKind::RepetitiveEntry,
+                                          position, position, state.detached)))
       return failure();
+    return coalesceDetachedEntryInputs(state.branch->op, position,
+                                       state.detachedInputs);
+  }
+
+  LogicalResult walkBranchRegion(const RegionBranch &branch, Region &region,
+                                 unsigned position, bool pushContext) {
+    if (pushContext)
+      exclusiveRegionContexts.push_back({branch.op, position, cursor});
+    bool repetitive = flow->isRepetitive(&region);
+    if (!repetitive)
+      ensureRegionArguments(region, cursor, branch.op);
+    LogicalResult walkResult = walkRegion(region);
+    if (pushContext)
+      exclusiveRegionContexts.pop_back();
+    return walkResult;
+  }
+
+  LogicalResult walkBranchRegions(const RegionBranch &branch,
+                                  unsigned position) {
+    bool sawExclusiveRegion = false;
+    for (Region *region : branch.regions) {
+      if (region->empty())
+        continue;
+      bool exclusive = flow->isExclusiveChoice(region);
+      if (failed(walkBranchRegion(branch, *region, position,
+                                  exclusive && sawExclusiveRegion)))
+        return failure();
+      sawExclusiveRegion |= exclusive;
+    }
+    return success();
+  }
+
+  void ensureRegionBranchResults(const RegionBranchState &state,
+                                 unsigned exitPosition) {
+    if (!flow->resultsStartAtJoin(state.branch->op) || state.repetitive)
+      return;
+    for (Value value : state.branch->op->getResults())
+      (void)ensureInterval(value, exitPosition, result.intervals,
+                           state.branch->op, includeAllocated);
+  }
+
+  LogicalResult coalesceRegionBranchExit(const RegionBranchState &state,
+                                         unsigned position,
+                                         unsigned exitPosition) {
+    unsigned firstKind = state.repetitive ? 1u : 0u;
+    for (unsigned kind = firstKind; kind != 4; ++kind)
+      if (failed(coalesceBranchTransferKind(
+              *state.branch, state.aliases, static_cast<TransferKind>(kind),
+              position, exitPosition, state.detached)))
+        return failure();
+    return success();
+  }
+
+  LogicalResult processRegionBranch(Operation *op, unsigned position) {
+    RegionBranchState state = collectRegionBranchState(op, position);
+    // Entry storage precedes body definitions; cycles and exits follow them.
+    if (failed(prepareRegionBranchEntry(state, position)))
+      return failure();
+    if (failed(walkBranchRegions(*state.branch, position)))
+      return failure();
+    unsigned exitPosition = cursor == 0 ? position : cursor - 1;
+    ensureRegionBranchResults(state, exitPosition);
+    if (failed(coalesceRegionBranchExit(state, position, exitPosition)))
+      return failure();
+    extendExternalRepetitiveUses(*state.branch, exitPosition);
     return success();
   }
 
   LogicalResult processNestedRegions(Operation *op, unsigned pos) {
-    if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
-      return processLoop(loop, pos);
-    if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
-      return processUniformIf(uniformIf, pos);
-    if (auto execIf = dyn_cast<waveamdmachine::ExecIfOp>(op))
-      return processExecIf(execIf, pos);
+    if (op->getNumRegions() == 0)
+      return success();
+    if (flow->lookup(op))
+      return processRegionBranch(op, pos);
     return walkNestedRegions(op);
   }
 
-  template <typename TupleElementOp>
-  LogicalResult coalesceTupleElements(TupleElementOp top, unsigned pos) {
-    // Tuple is primary; elements get cumulative dword offsets.
-    Value tuple = top.getTuple();
-    extendInterval(tuple, pos);
-    auto rt = wave::getTrackedWaveAMDRegType(tuple);
-    if (rt) {
-      auto [bucket, table] = intervalsFor(*rt, result.intervals);
-      // Pinned tuples have no interval; elements derive tuple index + offset.
-      if (!table->contains(tuple))
-        return success();
-    }
-    unsigned cumOffset = 0;
-    for (Value element : top.getElements()) {
-      if (failed(
-              coalesce(tuple, element, pos, result.intervals, top, cumOffset)))
-        return failure();
-      cumOffset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
-    }
-    return success();
-  }
-
-  LogicalResult coalesceUpdateTupleOp(waveamdmachine::UpdateTupleOp update,
-                                      unsigned pos) {
-    Value resultTuple = update.getResult();
-    Value baseTuple = update.getBase();
-    extendInterval(baseTuple, pos);
-    if (failed(
-            coalesce(resultTuple, baseTuple, pos, result.intervals, update, 0)))
-      return failure();
-    for (auto [value, offset] :
-         llvm::zip_equal(update.getUpdates(), update.getOffsets())) {
-      unsigned slotOffset =
-          static_cast<unsigned>(cast<IntegerAttr>(offset).getInt());
-      if (failed(coalesce(resultTuple, value, pos, result.intervals, update,
-                          slotOffset)))
-        return failure();
-    }
-    return success();
-  }
-
-  LogicalResult coalesceTupleElementOps(Operation &op, unsigned pos) {
+  LogicalResult coalesceStorageAliases(Operation &op, unsigned pos) {
     if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
       return success();
-    if (auto toElems = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
-      return coalesceTupleElements(toElems, pos);
-    if (auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
-      return coalesceTupleElements(fromElems, pos);
-    if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op))
-      return coalesceUpdateTupleOp(update, pos);
+    auto aliases =
+        dyn_cast<waveamdmachine::RegisterStorageAliasOpInterface>(&op);
+    if (!aliases)
+      return success();
+    storageAliases.clear();
+    aliases.getRegisterStorageAliases(storageAliases);
+    for (waveamdmachine::RegisterStorageAlias alias : storageAliases) {
+      extendInterval(alias.storage, pos);
+      if (failed(coalesceIfPresent(alias.storage, alias.alias, pos, &op,
+                                   alias.offset)))
+        return failure();
+    }
     return success();
   }
 
@@ -915,48 +860,61 @@ private:
     return success();
   }
 
-  bool tupleRenameHandlesOperandUses(Operation *op) {
+  bool storageAliasHandlesOperandUse(Operation *op, Value operand) {
     if (aliasPolicy == wave::WaveAMDLiveIntervalAliasPolicy::Conservative)
       return false;
-    if (isa<waveamdmachine::TupleToElementsOp>(op))
-      return true;
-    auto fromElems = dyn_cast<waveamdmachine::TupleFromElementsOp>(op);
-    if (!fromElems)
+    auto aliases =
+        dyn_cast<waveamdmachine::RegisterStorageAliasOpInterface>(op);
+    if (!aliases)
       return false;
-    auto rt = wave::getTrackedWaveAMDRegType(fromElems.getTuple());
-    if (!rt)
-      return false;
-    auto [bucket, table] = intervalsFor(*rt, result.intervals);
-    return table->contains(fromElems.getTuple());
+    storageAliases.clear();
+    aliases.getRegisterStorageAliases(storageAliases);
+    return llvm::any_of(
+        storageAliases, [&](waveamdmachine::RegisterStorageAlias alias) {
+          return alias.alias == operand && intervalExists(alias.storage);
+        });
+  }
+
+  void ensureOperationResults(Operation *op, unsigned position) {
+    if (op->getNumRegions() != 0 && flow->resultsStartAtJoin(op))
+      return;
+    for (Value value : op->getResults()) {
+      // failure() means untracked register here.
+      (void)ensureInterval(value, position, result.intervals, op,
+                           includeAllocated);
+    }
+  }
+
+  void extendOperationOperands(Operation *op, unsigned position) {
+    for (Value operand : op->getOperands())
+      if (!storageAliasHandlesOperandUse(op, operand))
+        extendInterval(operand, position);
+  }
+
+  LogicalResult walkOperation(Operation *op) {
+    unsigned position = cursor++;
+    result.positions[op] = position;
+    result.orderedOps.push_back(op);
+    ensureOperationResults(op, position);
+    extendOperationOperands(op, position);
+    recordMFMAAccumulatorOp(*op, position);
+    if (failed(coalesceStorageAliases(*op, position)))
+      return failure();
+    if (failed(coalesceRequiredKilledOperandInputs(*op, position)))
+      return failure();
+    if (failed(processNestedRegions(op, position)))
+      return failure();
+    extendImplicitRegisterUses(op);
+    return success();
   }
 
   LogicalResult walkBlock(Block &block) {
     SmallVector<Operation *> ops;
     if (failed(collectBlockOps(block, ops)))
       return failure();
-    for (Operation *op : ops) {
-      unsigned pos = cursor++;
-      result.positions[op] = pos;
-      result.orderedOps.push_back(op);
-      bool deferResults =
-          isa<waveamdmachine::UniformLoopOp, waveamdmachine::UniformIfOp>(op);
-      if (!deferResults)
-        for (Value value : op->getResults()) {
-          // failure() here means "not a tracked register", not error.
-          (void)ensureInterval(value, pos, result.intervals, op,
-                               includeAllocated);
-        }
-      if (!tupleRenameHandlesOperandUses(op))
-        for (Value operand : op->getOperands())
-          extendInterval(operand, pos);
-      recordMFMAAccumulatorOp(*op, pos);
-      if (failed(coalesceTupleElementOps(*op, pos)))
+    for (Operation *op : ops)
+      if (failed(walkOperation(op)))
         return failure();
-      if (failed(coalesceRequiredKilledOperandInputs(*op, pos)))
-        return failure();
-      if (failed(processNestedRegions(op, pos)))
-        return failure();
-    }
     return success();
   }
 
@@ -976,7 +934,9 @@ private:
 
   wave::WaveAMDLiveIntervalBuildResult result;
   SmallVector<PendingMFMAAccumulatorAlias, 16> pendingMFMAAccumulatorAliases;
-  SmallVector<UniformIfElseContext, 2> uniformIfElseContexts;
+  SmallVector<ExclusiveRegionContext, 2> exclusiveRegionContexts;
+  SmallVector<waveamdmachine::RegisterStorageAlias, 8> storageAliases;
+  std::optional<RegionFlow> flow;
   wave::WaveAMDLiveIntervalOrderOverride orderOverride;
   unsigned cursor = 0;
   bool includeAllocated = false;
