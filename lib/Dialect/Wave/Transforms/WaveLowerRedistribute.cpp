@@ -142,7 +142,7 @@ struct SlotOrder {
   SmallVector<unsigned, 6> logicalBitsByPhysicalBit;
 };
 
-struct ScratchVectorizationPlan {
+struct PacketVectorizationPlan {
   SlotOrder sourceOrder;
   SlotOrder resultOrder;
   int64_t vectorElements = 1;
@@ -925,8 +925,8 @@ static LogicalResult validateWorkgroup(RedistributeOp op, func::FuncOp func,
 
 static SlotOrder getIdentitySlotOrder() { return SlotOrder{}; }
 
-static ScratchVectorizationPlan getScalarScratchVectorization() {
-  ScratchVectorizationPlan plan;
+static PacketVectorizationPlan getScalarPacketVectorization() {
+  PacketVectorizationPlan plan;
   plan.sourceOrder = getIdentitySlotOrder();
   plan.resultOrder = getIdentitySlotOrder();
   return plan;
@@ -1016,7 +1016,7 @@ static FailureOr<bool> supportsVectorAt(sym::Analysis &analysis,
 static bool supportsOrderedVectorAt(const ScratchRelationMap &map,
                                     int64_t block, int64_t item,
                                     int64_t physicalResultSlot,
-                                    const ScratchVectorizationPlan &plan) {
+                                    const PacketVectorizationPlan &plan) {
   int64_t destinationSlot =
       physicalToLogicalSlot(plan.resultOrder, physicalResultSlot);
   const SourceCoordinate &first =
@@ -1062,9 +1062,42 @@ static FailureOr<bool> supportsVectorTransfer(sym::Analysis &analysis,
   return true;
 }
 
+static FailureOr<bool> supportsItemVectorTransfer(sym::Analysis &analysis,
+                                                  RedistributeOp op,
+                                                  const RelationDomain &domain,
+                                                  int64_t vectorElements) {
+  int64_t blocks = op.getRelation().getBlocks();
+  int64_t items = op.getRelation().getItems();
+  int64_t resultSlots = getPacketElementCount(op.getResult().getType());
+  if (!fitsRelationPointBudget(op))
+    return false;
+
+  for (int64_t block : llvm::seq<int64_t>(0, blocks)) {
+    for (int64_t item : llvm::seq<int64_t>(0, items)) {
+      for (int64_t slot = 0; slot < resultSlots; slot += vectorElements) {
+        FailureOr<int64_t> first =
+            evaluateCoordinate(analysis, op.getRelation().getSourceItem(),
+                               domain, block, item, slot);
+        if (failed(first))
+          return failure();
+        for (int64_t offset : llvm::seq<int64_t>(1, vectorElements)) {
+          FailureOr<int64_t> next =
+              evaluateCoordinate(analysis, op.getRelation().getSourceItem(),
+                                 domain, block, item, slot + offset);
+          if (failed(next))
+            return failure();
+          if (*next != *first)
+            return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 static std::optional<bool>
 supportsOrderedVectorTransfer(const ScratchRelationMap &map,
-                              const ScratchVectorizationPlan &plan,
+                              const PacketVectorizationPlan &plan,
                               int64_t &remainingPoints) {
   for (int64_t block : llvm::seq<int64_t>(0, map.blocks)) {
     for (int64_t item : llvm::seq<int64_t>(0, map.items)) {
@@ -1117,7 +1150,73 @@ static FailureOr<int64_t> selectVectorElements(sym::Analysis &analysis,
   return 1;
 }
 
-static FailureOr<ScratchVectorizationPlan>
+static FailureOr<int64_t>
+selectItemVectorElements(sym::Analysis &analysis, RedistributeOp op,
+                         const RelationDomain &domain) {
+  int64_t sourceSlots = getPacketElementCount(op.getSource().getType());
+  int64_t resultSlots = getPacketElementCount(op.getResult().getType());
+  int64_t vectorElements = 1;
+  int64_t limit = std::min(sourceSlots, resultSlots);
+  while (vectorElements <= limit / 2)
+    vectorElements *= 2;
+  for (; vectorElements > 1; vectorElements /= 2) {
+    if (sourceSlots % vectorElements || resultSlots % vectorElements)
+      continue;
+    FailureOr<bool> supported =
+        supportsItemVectorTransfer(analysis, op, domain, vectorElements);
+    if (failed(supported))
+      return failure();
+    if (*supported)
+      return vectorElements;
+  }
+  return 1;
+}
+
+static FailureOr<PacketVectorizationPlan>
+selectWaveVectorization(sym::Analysis &analysis, sym::Store &store,
+                        RedistributeOp op, const RelationDomain &domain) {
+  FailureOr<int64_t> identityElements =
+      selectVectorElements(analysis, op, domain, /*maxVectorBits=*/0);
+  FailureOr<int64_t> maxElements =
+      selectItemVectorElements(analysis, op, domain);
+  if (failed(identityElements) || failed(maxElements))
+    return failure();
+
+  PacketVectorizationPlan identity;
+  identity.sourceOrder = getIdentitySlotOrder();
+  identity.resultOrder = getIdentitySlotOrder();
+  identity.vectorElements = *identityElements;
+  if (*identityElements >= *maxElements)
+    return identity;
+
+  FailureOr<ScratchRelationMap> relation =
+      buildScratchRelationMap(store, op, domain);
+  if (failed(relation))
+    return failure();
+  int64_t remainingPoints = getScratchVectorizationPointBudget(*relation);
+  int64_t sourceSlots = getPacketElementCount(op.getSource().getType());
+  for (int64_t vectorElements = *maxElements;
+       vectorElements > *identityElements; vectorElements /= 2) {
+    if (sourceSlots % vectorElements)
+      continue;
+    for (const SlotOrder &sourceOrder :
+         getSlotOrders(sourceSlots, vectorElements)) {
+      PacketVectorizationPlan plan;
+      plan.sourceOrder = sourceOrder;
+      plan.resultOrder = getIdentitySlotOrder();
+      plan.vectorElements = vectorElements;
+      std::optional<bool> supported =
+          supportsOrderedVectorTransfer(*relation, plan, remainingPoints);
+      if (!supported)
+        return identity;
+      if (*supported)
+        return plan;
+    }
+  }
+  return identity;
+}
+
+static FailureOr<PacketVectorizationPlan>
 selectScratchVectorization(const ScratchRelationMap &map, RedistributeOp op,
                            int64_t maxVectorBits) {
   int64_t sourceSlots = getPacketElementCount(op.getSource().getType());
@@ -1141,27 +1240,27 @@ selectScratchVectorization(const ScratchRelationMap &map, RedistributeOp op,
         getSlotOrders(resultSlots, vectorElements);
     for (const SlotOrder &sourceOrder : sourceOrders) {
       for (const SlotOrder &resultOrder : resultOrders) {
-        ScratchVectorizationPlan plan;
+        PacketVectorizationPlan plan;
         plan.sourceOrder = sourceOrder;
         plan.resultOrder = resultOrder;
         plan.vectorElements = vectorElements;
         std::optional<bool> supported =
             supportsOrderedVectorTransfer(map, plan, remainingPoints);
         if (!supported)
-          return getScalarScratchVectorization();
+          return getScalarPacketVectorization();
         if (*supported)
           return plan;
       }
     }
   }
 
-  return getScalarScratchVectorization();
+  return getScalarPacketVectorization();
 }
 
 static FailureOr<std::optional<int64_t>>
 inferVectorSelector(sym::Analysis &analysis, RedistributeOp op,
                     const RelationDomain &domain, int64_t destinationSlot,
-                    int64_t vectorElements) {
+                    int64_t vectorElements, const SlotOrder &sourceOrder) {
   std::optional<int64_t> selector;
   for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
     for (int64_t item : llvm::seq<int64_t>(0, op.getRelation().getItems())) {
@@ -1172,7 +1271,8 @@ inferVectorSelector(sym::Analysis &analysis, RedistributeOp op,
         op.emitOpError("failed to evaluate verified redistribution relation");
         return failure();
       }
-      int64_t current = *sourceSlot % vectorElements;
+      int64_t current =
+          logicalToPhysicalSlot(sourceOrder, *sourceSlot) % vectorElements;
       if (!selector)
         selector = current;
       else if (*selector != current)
@@ -1184,7 +1284,8 @@ inferVectorSelector(sym::Analysis &analysis, RedistributeOp op,
 
 static FailureOr<SmallVector<std::optional<int64_t>>>
 inferVectorSelectors(sym::Analysis &analysis, RedistributeOp op,
-                     const RelationDomain &domain, int64_t vectorElements) {
+                     const RelationDomain &domain, int64_t vectorElements,
+                     const SlotOrder &sourceOrder) {
   int64_t resultSlots = getPacketElementCount(op.getResult().getType());
   SmallVector<std::optional<int64_t>> selectors;
   selectors.reserve(resultSlots);
@@ -1193,8 +1294,8 @@ inferVectorSelectors(sym::Analysis &analysis, RedistributeOp op,
     return selectors;
   }
   for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
-    FailureOr<std::optional<int64_t>> selector =
-        inferVectorSelector(analysis, op, domain, slot, vectorElements);
+    FailureOr<std::optional<int64_t>> selector = inferVectorSelector(
+        analysis, op, domain, slot, vectorElements, sourceOrder);
     if (failed(selector))
       return failure();
     selectors.push_back(*selector);
@@ -1205,7 +1306,7 @@ inferVectorSelectors(sym::Analysis &analysis, RedistributeOp op,
 static std::optional<int64_t>
 inferScratchVectorSelector(const ScratchRelationMap &map,
                            int64_t destinationSlot,
-                           const ScratchVectorizationPlan &plan) {
+                           const PacketVectorizationPlan &plan) {
   std::optional<int64_t> selector;
   for (int64_t block : llvm::seq<int64_t>(0, map.blocks)) {
     for (int64_t item : llvm::seq<int64_t>(0, map.items)) {
@@ -1224,7 +1325,7 @@ inferScratchVectorSelector(const ScratchRelationMap &map,
 
 static SmallVector<std::optional<int64_t>>
 inferScratchVectorSelectors(const ScratchRelationMap &map,
-                            const ScratchVectorizationPlan &plan) {
+                            const PacketVectorizationPlan &plan) {
   SmallVector<std::optional<int64_t>> selectors;
   selectors.reserve(map.resultSlots);
   if (plan.vectorElements == 1) {
@@ -1319,7 +1420,7 @@ static int64_t scoreStoreLayout(const ScratchLayoutPlan &plan, int64_t items,
 
 static ScratchAccessPattern
 buildScratchAccessPattern(const ScratchRelationMap &map,
-                          const ScratchVectorizationPlan &plan) {
+                          const PacketVectorizationPlan &plan) {
   ScratchAccessPattern pattern;
   pattern.resultGroups = map.resultSlots / plan.vectorElements;
   pattern.loads.reserve(pattern.resultGroups * map.items);
@@ -1343,7 +1444,7 @@ struct ScratchRepGeometry {
 };
 
 static bool supportsScratchRepSlice(
-    const ScratchRelationMap &map, const ScratchVectorizationPlan &plan,
+    const ScratchRelationMap &map, const PacketVectorizationPlan &plan,
     const ScratchRepGeometry &geometry, int64_t block, int64_t item,
     int64_t localResultGroup, int64_t physicalOffset,
     MutableArrayRef<int64_t> sourceRepForResultRep) {
@@ -1397,7 +1498,7 @@ static bool isScratchRepPermutation(ArrayRef<int64_t> sourceRepForResultRep,
 
 // Equivalent per-rep gathers can publish each register segment independently.
 static bool supportsScratchRepFactor(const ScratchRelationMap &map,
-                                     const ScratchVectorizationPlan &plan,
+                                     const PacketVectorizationPlan &plan,
                                      int64_t reps) {
   int64_t sourceGroups = map.sourceSlots / plan.vectorElements;
   int64_t resultGroups = map.resultSlots / plan.vectorElements;
@@ -1424,7 +1525,7 @@ static bool supportsScratchRepFactor(const ScratchRelationMap &map,
 }
 
 static int64_t getScratchRepSourceGroups(const ScratchRelationMap &map,
-                                         const ScratchVectorizationPlan &plan) {
+                                         const PacketVectorizationPlan &plan) {
   int64_t sourceGroups = map.sourceSlots / plan.vectorElements;
   int64_t resultGroups = map.resultSlots / plan.vectorElements;
   int64_t reps = 1;
@@ -1568,16 +1669,6 @@ static FailureOr<sym::ExprHandle> composeBinaryInt(sym::Store &store,
   if (failed(rhsExpr))
     return failure();
   return sym::composeExprBinary(store, lhs, op, *rhsExpr);
-}
-
-static FailureOr<sym::ExprHandle> composeBinaryInt(sym::Analysis &analysis,
-                                                   sym::ExprHandle lhs,
-                                                   sym::ExprBinaryOp op,
-                                                   int64_t rhs) {
-  FailureOr<sym::ExprHandle> rhsExpr = analysis.composeInteger(rhs);
-  if (failed(rhsExpr))
-    return failure();
-  return analysis.compose(lhs, op, *rhsExpr);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -1851,6 +1942,33 @@ static SmallVector<Value> extractPacketSlices(IRRewriter &rewriter,
   return slices;
 }
 
+static SmallVector<Value>
+extractOrderedPacketSlices(IRRewriter &rewriter, RedistributeOp op,
+                           int64_t sliceElements,
+                           const SlotOrder &sourceOrder) {
+  if (sourceOrder.logicalBitsByPhysicalBit.empty())
+    return extractPacketSlices(rewriter, op, sliceElements);
+
+  SmallVector<Value> components = extractComponents(rewriter, op);
+  Type sliceType = getPacketSliceType(op.getSource().getType(), sliceElements);
+  SmallVector<Value> slices;
+  slices.reserve(components.size() / sliceElements);
+  for (int64_t physicalSlot = 0;
+       physicalSlot < static_cast<int64_t>(components.size());
+       physicalSlot += sliceElements) {
+    SmallVector<Value> values;
+    values.reserve(sliceElements);
+    for (int64_t offset : llvm::seq<int64_t>(0, sliceElements)) {
+      int64_t logicalSlot =
+          physicalToLogicalSlot(sourceOrder, physicalSlot + offset);
+      values.push_back(components[logicalSlot]);
+    }
+    slices.push_back(
+        PackOp::create(rewriter, op.getLoc(), sliceType, values).getResult());
+  }
+  return slices;
+}
+
 static FailureOr<Value> selectComponent(IRRewriter &rewriter, RedistributeOp op,
                                         RelationMaterializer &materializer,
                                         ArrayRef<Value> candidates,
@@ -1908,7 +2026,8 @@ static FailureOr<Value> selectKeyedCandidate(IRRewriter &rewriter,
 static FailureOr<SmallVector<int64_t>>
 collectSourceVectorGroups(sym::Analysis &analysis, RedistributeOp op,
                           const RelationDomain &domain, int64_t destinationSlot,
-                          int64_t vectorElements) {
+                          int64_t vectorElements,
+                          const SlotOrder &sourceOrder) {
   DenseSet<int64_t> groupSet;
   for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
     for (int64_t item : llvm::seq<int64_t>(0, op.getRelation().getItems())) {
@@ -1919,7 +2038,8 @@ collectSourceVectorGroups(sym::Analysis &analysis, RedistributeOp op,
         op.emitOpError("failed to evaluate verified redistribution relation");
         return failure();
       }
-      groupSet.insert(*sourceSlot / vectorElements);
+      groupSet.insert(logicalToPhysicalSlot(sourceOrder, *sourceSlot) /
+                      vectorElements);
     }
   }
   SmallVector<int64_t> groups(groupSet.begin(), groupSet.end());
@@ -2099,6 +2219,7 @@ materializeWaveSlice(IRRewriter &rewriter, RedistributeOp op,
 struct WavePacketizationPlan {
   SmallVector<SmallVector<int64_t>> sourceGroups;
   SmallVector<std::optional<int64_t>> selectors;
+  SlotOrder sourceOrder;
   sym::ExprHandle sourceLane;
   sym::ExprHandle sourceGroup;
   sym::ExprHandle sourceWithin;
@@ -2106,14 +2227,16 @@ struct WavePacketizationPlan {
 };
 
 static FailureOr<WavePacketizationPlan>
-buildWavePacketizationPlan(sym::Analysis &analysis, RedistributeOp op,
-                           const RelationDomain &domain, int64_t waveWidth) {
-  FailureOr<int64_t> vectorElements =
-      selectVectorElements(analysis, op, domain, /*maxVectorBits=*/0);
-  if (failed(vectorElements))
+buildWavePacketizationPlan(sym::Analysis &analysis, sym::Store &store,
+                           RedistributeOp op, const RelationDomain &domain,
+                           int64_t waveWidth) {
+  FailureOr<PacketVectorizationPlan> vectorization =
+      selectWaveVectorization(analysis, store, op, domain);
+  if (failed(vectorization))
     return failure();
   FailureOr<SmallVector<std::optional<int64_t>>> selectors =
-      inferVectorSelectors(analysis, op, domain, *vectorElements);
+      inferVectorSelectors(analysis, op, domain, vectorization->vectorElements,
+                           vectorization->sourceOrder);
   if (failed(selectors))
     return failure();
 
@@ -2124,11 +2247,17 @@ buildWavePacketizationPlan(sym::Analysis &analysis, RedistributeOp op,
   }
   FailureOr<sym::ExprHandle> sourceLane = analysis.compose(
       op.getRelation().getSourceItem(), sym::ExprBinaryOp::Mod, *width);
+  FailureOr<sym::ExprHandle> physicalSourceSlot = composePhysicalSlot(
+      store, op.getRelation().getSourceSlot(), vectorization->sourceOrder);
+  if (failed(physicalSourceSlot)) {
+    op.emitOpError("failed to construct physical source slot");
+    return failure();
+  }
   FailureOr<sym::ExprHandle> sourceGroup =
-      floorDiv(analysis, op.getRelation().getSourceSlot(), *vectorElements);
+      floorDiv(store, *physicalSourceSlot, vectorization->vectorElements);
   FailureOr<sym::ExprHandle> sourceWithin =
-      composeBinaryInt(analysis, op.getRelation().getSourceSlot(),
-                       sym::ExprBinaryOp::Mod, *vectorElements);
+      composeBinaryInt(store, *physicalSourceSlot, sym::ExprBinaryOp::Mod,
+                       vectorization->vectorElements);
   if (failed(sourceLane) || failed(sourceGroup) || failed(sourceWithin)) {
     op.emitOpError("failed to construct packetized wave relation");
     return failure();
@@ -2136,15 +2265,16 @@ buildWavePacketizationPlan(sym::Analysis &analysis, RedistributeOp op,
 
   WavePacketizationPlan plan;
   plan.selectors = std::move(*selectors);
+  plan.sourceOrder = vectorization->sourceOrder;
   plan.sourceLane = *sourceLane;
   plan.sourceGroup = *sourceGroup;
   plan.sourceWithin = *sourceWithin;
-  plan.vectorElements = *vectorElements;
+  plan.vectorElements = vectorization->vectorElements;
   int64_t resultSlots = getPacketElementCount(op.getResult().getType());
   plan.sourceGroups.reserve(resultSlots / plan.vectorElements);
   for (int64_t slot = 0; slot < resultSlots; slot += plan.vectorElements) {
     FailureOr<SmallVector<int64_t>> groups = collectSourceVectorGroups(
-        analysis, op, domain, slot, plan.vectorElements);
+        analysis, op, domain, slot, plan.vectorElements, plan.sourceOrder);
     if (failed(groups))
       return failure();
     plan.sourceGroups.push_back(std::move(*groups));
@@ -2157,8 +2287,8 @@ emitWavePacketizedResult(IRRewriter &rewriter, RedistributeOp op,
                          sym::Store &store, const RelationDomain &domain,
                          const WavePacketizationPlan &plan) {
   RelationMaterializer materializer(rewriter, op, store, domain);
-  SmallVector<Value> source =
-      extractPacketSlices(rewriter, op, plan.vectorElements);
+  SmallVector<Value> source = extractOrderedPacketSlices(
+      rewriter, op, plan.vectorElements, plan.sourceOrder);
   int64_t resultSlots = getPacketElementCount(op.getResult().getType());
   SmallVector<RelationMaterializationPoint> points;
   points.reserve(3 * resultSlots);
@@ -2199,7 +2329,7 @@ static LogicalResult lowerWavePacketized(IRRewriter &rewriter,
   if (failed(analysis))
     return failure();
   FailureOr<WavePacketizationPlan> plan =
-      buildWavePacketizationPlan(**analysis, op, domain, waveWidth);
+      buildWavePacketizationPlan(**analysis, store, op, domain, waveWidth);
   if (failed(plan))
     return failure();
   analysis->reset();
@@ -2509,7 +2639,7 @@ static FailureOr<ScratchGeometry> getScratchGeometry(RedistributeOp op,
 }
 
 static FailureOr<ScratchPlan> buildUnscoredScratchPlan(
-    RedistributeOp op, const ScratchVectorizationPlan &vectorization,
+    RedistributeOp op, const PacketVectorizationPlan &vectorization,
     int64_t fullScratchBytes, std::optional<int64_t> scratchBudget,
     const ScratchGeometry &geometry,
     SmallVector<std::optional<int64_t>> selectors) {
@@ -2686,7 +2816,7 @@ static int64_t getMaxScratchVectorBits(RedistributeOp op,
 
 static FailureOr<ScratchPlan>
 buildStagedScratchPlan(RedistributeOp op, const ScratchRelationMap &relation,
-                       const ScratchVectorizationPlan &vectorization,
+                       const PacketVectorizationPlan &vectorization,
                        const ScratchGeometry &geometry,
                        int64_t fullScratchBytes,
                        std::optional<int64_t> scratchBudget, int64_t waveWidth,
@@ -2735,7 +2865,7 @@ buildScratchPlan(sym::Store &store, RedistributeOp op,
                  std::optional<int64_t> scratchBudget) {
   int64_t maxVectorBits = getMaxScratchVectorBits(op, scratchBudget);
   if (!fitsRelationPointBudget(op)) {
-    ScratchVectorizationPlan scalar = getScalarScratchVectorization();
+    PacketVectorizationPlan scalar = getScalarPacketVectorization();
     FailureOr<ScratchGeometry> geometry = getScratchGeometry(op, 1);
     if (failed(geometry))
       return failure();
@@ -2748,7 +2878,7 @@ buildScratchPlan(sym::Store &store, RedistributeOp op,
       buildScratchRelationMap(store, op, domain);
   if (failed(relation))
     return failure();
-  FailureOr<ScratchVectorizationPlan> vectorization =
+  FailureOr<PacketVectorizationPlan> vectorization =
       selectScratchVectorization(*relation, op, maxVectorBits);
   if (failed(vectorization))
     return failure();

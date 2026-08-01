@@ -48,6 +48,46 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
   return
 }
 
+// ASM-LABEL: redistribute_permuted_source_slots:
+// ASM-NOT: ds_
+// ASM-NOT: s_barrier
+// ASM-COUNT-16: v_permlane32_swap_b32
+// ASM-NOT: v_permlane32_swap_b32
+// ASM-NOT: ds_
+// ASM-NOT: s_barrier
+// ASM: buffer_store_dwordx4
+// ASM: s_endpgm
+// ASM: .amdhsa_group_segment_fixed_size 0
+func.func @redistribute_permuted_source_slots(
+    %src: !wave.ptr<#wave.global, bf16>,
+    %dst: !wave.ptr<#wave.global, bf16>)
+    attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                wave.waves_per_workgroup = 8 : i64} {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %src_ptr = wave.ptr_add %src, %lane
+      : !wave.ptr<#wave.global, bf16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, bf16>, 64>
+  %source, %loaded = wave.load %src_ptr
+      : (!wave.simd<!wave.ptr<#wave.global, bf16>, 64>)
+      -> (!wave.simd<vector<64xbf16>, 64>, !wave.mem.token)
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 512,
+       source_block = "block",
+       source_item = "64*floor(1/64*item) + xor(16*Mod(floor(1/16*Mod(item, 64)), 2), xor(8*Mod(floor(1/8*Mod(item, 64)), 2), xor(4*Mod(floor(1/4*Mod(item, 64)), 2), xor(2*Mod(floor(1/2*Mod(item, 64)), 2), xor(32*Mod(floor(1/4*slot), 2), Mod(Mod(item, 64), 2))))))",
+       source_slot = "xor(16*Mod(floor(1/32*Mod(item, 64)), 2), xor(Mod(floor(1/32*slot), 2), xor(2*Mod(floor(1/16*slot), 2), xor(32*Mod(floor(1/8*slot), 2), xor(4*Mod(slot, 2), 8*Mod(floor(1/2*slot), 2))))))">
+      : !wave.simd<vector<64xbf16>, 64>
+     -> !wave.simd<vector<64xbf16>, 64>
+  %dst_ptr = wave.ptr_add %dst, %lane
+      : !wave.ptr<#wave.global, bf16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, bf16>, 64>
+  %stored = wave.store %result -> %dst_ptr after %loaded
+      : (!wave.simd<vector<64xbf16>, 64>,
+         !wave.simd<!wave.ptr<#wave.global, bf16>, 64>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: half_exchange_reduction_permlane32:
 // ASM-NOT: ds_bpermute
 // ASM: v_mov_b32_e32
