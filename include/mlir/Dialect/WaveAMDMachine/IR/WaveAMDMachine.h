@@ -34,6 +34,22 @@
 
 namespace mlir::waveamdmachine {
 
+/// Relative register-storage constraint, in dwords.
+struct RegisterStorageAlias {
+  Value storage;
+  Value alias;
+  int64_t offset = 0;
+
+  /// Alias is consumed while storage is overwritten.
+  bool destructive = false;
+};
+
+/// Machine use extending past its explicit SSA operand use.
+struct ImplicitRegisterUse {
+  Value value;
+  Operation *lastUse = nullptr;
+};
+
 struct KernelMetadataEntry {
   StringAttr name;
   Attribute value;

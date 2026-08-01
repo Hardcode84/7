@@ -459,6 +459,17 @@ LogicalResult ExecIfOp::verify() {
   return verifyExecIfYield(*this, getElseRegion(), "else", hasElse);
 }
 
+SmallVector<ImplicitRegisterUse, 2> ExecIfOp::getImplicitRegisterUses() {
+  SmallVector<ImplicitRegisterUse, 2> uses;
+  if (!getElseRegion().empty() && !getThenRegion().empty())
+    uses.push_back({getCondition(), getThenRegion().front().getTerminator()});
+  if (!getElseRegion().empty() && llvm::any_of(getResultTypes(), [](Type type) {
+        return !isa<MemTokenType>(type);
+      }))
+    uses.push_back({getCondition(), getElseRegion().front().getTerminator()});
+  return uses;
+}
+
 void ExecIfOp::getSuccessorRegions(RegionBranchPoint point,
                                    SmallVectorImpl<RegionSuccessor> &regions) {
   bool hasElse = !getElseRegion().empty();
@@ -643,6 +654,39 @@ YieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
   if (successor.isOperation())
     return values;
   return values.slice(0, 0);
+}
+
+static void
+getTupleElementStorageAliases(Value tuple, ValueRange elements,
+                              SmallVectorImpl<RegisterStorageAlias> &aliases) {
+  int64_t offset = 0;
+  for (Value element : elements) {
+    aliases.push_back({tuple, element, offset});
+    offset += cast<RegType>(element.getType()).getWidth();
+  }
+}
+
+void TupleToElementsOp::getRegisterStorageAliases(
+    SmallVectorImpl<RegisterStorageAlias> &aliases) {
+  getTupleElementStorageAliases(getTuple(), getElements(), aliases);
+}
+
+void TupleFromElementsOp::getRegisterStorageAliases(
+    SmallVectorImpl<RegisterStorageAlias> &aliases) {
+  getTupleElementStorageAliases(getTuple(), getElements(), aliases);
+}
+
+void UpdateTupleOp::getRegisterStorageAliases(
+    SmallVectorImpl<RegisterStorageAlias> &aliases) {
+  aliases.push_back({getResult(), getBase(), 0, /*destructive=*/true});
+  for (auto [value, offset] : llvm::zip_equal(getUpdates(), getOffsets()))
+    aliases.push_back({getResult(), value, cast<IntegerAttr>(offset).getInt(),
+                       /*destructive=*/true});
+}
+
+void RegAfterOp::getRegisterStorageAliases(
+    SmallVectorImpl<RegisterStorageAlias> &aliases) {
+  aliases.push_back({getResult(), getSource(), 0});
 }
 
 static LogicalResult verifyCndmaskSource(Operation *op, Value value,
