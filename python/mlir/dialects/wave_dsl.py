@@ -139,7 +139,6 @@ _PACKET_TRANSFORMS = frozenset(
         "identity",
         "broadcast",
         "expand_dims",
-        "reduction",
         "reshape",
         "transpose",
         "split",
@@ -335,15 +334,6 @@ def _validate_split_transform(
         raise ValueError("split packet transform requires selector 0 or 1")
 
 
-def _validate_reduction_transform(
-    axis: int | None, order: tuple[int, ...], selector: int | None
-) -> None:
-    if axis is None or axis < 0 or order or selector is None or selector < 0:
-        raise ValueError(
-            "reduction packet transform requires nonnegative axis and coordinate"
-        )
-
-
 def _validate_parameterless_transform(
     kind: str, axis: int | None, order: tuple[int, ...], selector: int | None
 ) -> None:
@@ -386,8 +376,6 @@ class PacketTransform:
             return _validate_transpose_transform(axis, order, selector)
         if self.kind == "split":
             return _validate_split_transform(axis, order, selector)
-        if self.kind == "reduction":
-            return _validate_reduction_transform(axis, order, selector)
         return _validate_parameterless_transform(self.kind, axis, order, selector)
 
     @staticmethod
@@ -413,10 +401,6 @@ class PacketTransform:
     @staticmethod
     def split(selector: int) -> PacketTransform:
         return PacketTransform("split", selector=selector)
-
-    @staticmethod
-    def reduction(axis: int, coordinate: int) -> PacketTransform:
-        return PacketTransform("reduction", axis=axis, selector=coordinate)
 
 
 def join_packet_layout(first: PacketLayout, second: PacketLayout) -> PacketLayout:
@@ -605,27 +589,6 @@ def _split_packet_transform(
     return lambda coordinate: (*map(int, coordinate), selector)
 
 
-def _reduction_packet_transform(
-    transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    axis = transform.axis
-    selector = transform.selector
-    assert axis is not None and selector is not None
-    if (
-        axis >= len(source_shape)
-        or selector >= source_shape[axis]
-        or source_shape[:axis] + source_shape[axis + 1 :] != result_shape
-    ):
-        raise ValueError("reduction packet transform has incompatible shapes")
-    return lambda coordinate: (
-        *map(int, coordinate[:axis]),
-        selector,
-        *map(int, coordinate[axis:]),
-    )
-
-
 _PACKET_COORDINATE_TRANSFORMS = {
     "identity": _identity_packet_transform,
     "broadcast": _broadcast_packet_transform,
@@ -633,7 +596,6 @@ _PACKET_COORDINATE_TRANSFORMS = {
     "reshape": _reshape_packet_transform,
     "transpose": _transpose_packet_transform,
     "split": _split_packet_transform,
-    "reduction": _reduction_packet_transform,
 }
 
 

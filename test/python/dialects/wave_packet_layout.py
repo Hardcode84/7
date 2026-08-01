@@ -177,8 +177,6 @@ def test_packet_layout_transforms():
     assert w.PacketTransform.expand_dims(0).axis == 0
     assert w.PacketTransform.transpose([1, 0]).order == (1, 0)
     assert w.PacketTransform.split(1).selector == 1
-    assert w.PacketTransform.reduction(1, 2).axis == 1
-    assert w.PacketTransform.reduction(1, 2).selector == 2
     assert "PacketLayout" in w.__all__
     assert "PacketTransform" in w.__all__
     assert "join_packet_layout" in w.__all__
@@ -245,49 +243,60 @@ def test_packet_layout_reductions():
             lhs, rhs = reduction.arguments
             function_builder.yield_((function_builder.addi(lhs, rhs),))
 
-        # CHECK-LABEL: func.func @packet_layout_reduce_register
-        # CHECK: wave.reduce
-        # CHECK-SAME: using <
-        # CHECK-SAME: reduction
-        # CHECK-SAME: extent 4
-        # CHECK: ^bb0(%[[REGISTER_LHS:.*]]: !wave.simd<i32, 32>, %[[REGISTER_RHS:.*]]: !wave.simd<i32, 32>):
-        # CHECK: wave.binary addi %[[REGISTER_LHS]], %[[REGISTER_RHS]]
-        # CHECK: wave.yield
-        # CHECK-LABEL: func.func @packet_layout_reduce_lane
-        # CHECK: wave.reduce
-        # CHECK-SAME: using <
-        # CHECK-SAME: reduction
-        # CHECK-SAME: extent 2
-        # CHECK-LABEL: func.func @packet_layout_reduce_wave
-        # CHECK: wave.reduce
-        # CHECK-SAME: using <
-        # CHECK-SAME: reduction
-        # CHECK-SAME: extent 2
         print(module_builder.module)
 
         w.PassManager.parse("builtin.module(wave-lower-redistribute)").run(
             module_builder.module.operation
         )
         print("LOWERED")
-        # CHECK-LABEL: LOWERED
-        # CHECK-LABEL: func.func @packet_layout_reduce_register
-        # CHECK: wave.extract
-        # CHECK: wave.binary addi
-        # CHECK-NOT: wave.reduce
-        # CHECK-LABEL: func.func @packet_layout_reduce_lane
-        # CHECK: wave.shuffle
-        # CHECK: wave.binary addi
-        # CHECK-NOT: wave.reduce
-        # CHECK-LABEL: func.func @packet_layout_reduce_wave
-        # CHECK: wave.alloc
-        # CHECK: wave.store
-        # CHECK: wave.barrier
-        # CHECK: wave.load
-        # CHECK: wave.join
-        # CHECK: wave.alloc_release
-        # CHECK: wave.binary addi
-        # CHECK-NOT: wave.reduce
         print(module_builder.module)
+
+
+# CHECK-LABEL: func.func @packet_layout_reduce_register
+# CHECK: wave.reduce
+# CHECK-SAME: using <blocks = 1, items = 32
+# CHECK-SAME: source_block = "block"
+# CHECK-SAME: source_item = "item"
+# CHECK-SAME: source_slot = "xor(2*Mod(floor(1/2*reduction), 2), Mod(reduction, 2))"
+# CHECK-SAME: extent 4
+# CHECK: ^bb0(%[[REGISTER_LHS:.*]]: !wave.simd<i32, 32>, %[[REGISTER_RHS:.*]]: !wave.simd<i32, 32>):
+# CHECK: wave.binary addi %[[REGISTER_LHS]], %[[REGISTER_RHS]]
+# CHECK: wave.yield
+# CHECK-LABEL: func.func @packet_layout_reduce_lane
+# CHECK: wave.reduce
+# CHECK-SAME: using <blocks = 1, items = 32
+# CHECK-SAME: source_block = "block"
+# CHECK-SAME: source_item = "32*floor(1/32*item) + xor(Mod(reduction, 2)
+# CHECK-SAME: xor(16*Mod(floor(1/16*Mod(item, 32)), 2)
+# CHECK-SAME: xor(8*Mod(floor(1/8*Mod(item, 32)), 2)
+# CHECK-SAME: xor(2*Mod(floor(1/2*Mod(item, 32)), 2), 4*Mod(floor(1/4*Mod(item, 32)), 2)))))"
+# CHECK-SAME: source_slot = "slot"
+# CHECK-SAME: extent 2
+# CHECK-LABEL: func.func @packet_layout_reduce_wave
+# CHECK: wave.reduce
+# CHECK-SAME: using <blocks = 1, items = 64
+# CHECK-SAME: source_block = "block"
+# CHECK-SAME: source_item = "Mod(item, 32) + 32*Mod(reduction, 2)"
+# CHECK-SAME: source_slot = "slot"
+# CHECK-SAME: extent 2
+# CHECK-LABEL: LOWERED
+# CHECK-LABEL: func.func @packet_layout_reduce_register
+# CHECK: wave.extract
+# CHECK: wave.binary addi
+# CHECK-NOT: wave.reduce
+# CHECK-LABEL: func.func @packet_layout_reduce_lane
+# CHECK: wave.shuffle
+# CHECK: wave.binary addi
+# CHECK-NOT: wave.reduce
+# CHECK-LABEL: func.func @packet_layout_reduce_wave
+# CHECK: wave.alloc
+# CHECK: wave.store
+# CHECK: wave.barrier
+# CHECK: wave.load
+# CHECK: wave.join
+# CHECK: wave.alloc_release
+# CHECK: wave.binary addi
+# CHECK-NOT: wave.reduce
 
 
 def check_packet_layout_diagnostics():
@@ -300,6 +309,11 @@ def check_packet_layout_diagnostics():
         ValueError,
         "packet layout lane width must be a positive power of two",
         lambda: w.PacketLayout(24, (("x", 32),), (("lane", LANE_BASES),)),
+    )
+    assert_raises(
+        ValueError,
+        "packet layout tensor dimensions must be named positive powers of two",
+        lambda: w.PacketLayout(1, (("x", 3),), ()),
     )
     assert_raises(
         ValueError,
@@ -348,17 +362,6 @@ def check_packet_transform_diagnostics():
         "split packet transform requires selector 0 or 1",
         lambda: w.PacketTransform.split(2),
     )
-    assert_raises(
-        ValueError,
-        "reduction packet transform requires nonnegative axis and coordinate",
-        lambda: w.PacketTransform.reduction(-1, 0),
-    )
-    assert_raises(
-        ValueError,
-        "reduction packet transform requires nonnegative axis and coordinate",
-        lambda: w.PacketTransform.reduction(0, -1),
-    )
-
     other_layout = w.PacketLayout(
         32,
         (("x", 32),),

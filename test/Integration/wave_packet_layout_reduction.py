@@ -33,15 +33,19 @@ RESULT_LAYOUT = w.PacketLayout(
 with w.module() as module_builder:
     with module_builder.function(
         "packet_layout_reduce_wave",
-        [w.ptr_type(w.i32())],
+        [w.ptr_type(w.i32()), w.ptr_type(w.i32())],
         kernel=True,
         workgroup_size=[128, 1, 1],
         attrs={"wave.waves_per_workgroup": w.i64_attr(2)},
     ) as function_builder:
-        (destination,) = function_builder.args
+        source, destination = function_builder.args
         item = function_builder.workitem_id(width=64)
+        source_pointer = function_builder.ptr_add(source, item)
+        value, read = function_builder.load(
+            source_pointer, w.simd_type(w.i32(), width=64)
+        )
         with function_builder.reduce_layout(
-            item,
+            value,
             w.simd_type(w.i32(), width=64),
             source_layout=SOURCE_LAYOUT,
             result_layout=RESULT_LAYOUT,
@@ -50,28 +54,32 @@ with w.module() as module_builder:
             lhs, rhs = reduction.arguments
             function_builder.yield_((function_builder.addi(lhs, rhs),))
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(reduction.result, pointer)
+        function_builder.store(reduction.result, pointer, after=read)
 
     print(module_builder.module)
 
 
 # REDUCE-LABEL: func.func @packet_layout_reduce_wave
-# REDUCE: %[[RESULT:.*]] = wave.reduce
-# REDUCE-SAME: using <
-# REDUCE-SAME: reduction
+# REDUCE: %[[VALUE:.*]], %[[READ:.*]] = wave.load
+# REDUCE: %[[RESULT:.*]] = wave.reduce %[[VALUE]]
+# REDUCE-SAME: using <blocks = 1, items = 128
+# REDUCE-SAME: source_block = "block"
+# REDUCE-SAME: source_item = "Mod(item, 64) + 64*Mod(reduction, 2)"
+# REDUCE-SAME: source_slot = "slot"
 # REDUCE-SAME: extent 2
 # REDUCE-NOT: associative
 # REDUCE-NOT: commutative
 # REDUCE: ^bb0(%[[LHS:.*]]: !wave.simd<i32, 64>, %[[RHS:.*]]: !wave.simd<i32, 64>):
 # REDUCE: wave.binary addi %[[LHS]], %[[RHS]]
 # REDUCE: wave.yield
-# REDUCE: wave.store %[[RESULT]]
+# REDUCE: wave.store %[[RESULT]] {{.*}} after %[[READ]]
 
 # LOWER-LABEL: func.func @packet_layout_reduce_wave
+# LOWER: %[[INPUT:.*]], %[[READ:.*]] = wave.load
 # LOWER-NOT: wave.reduce
 # LOWER-NOT: wave.redistribute
 # LOWER: %[[ALLOC:.*]] = wave.alloc()
-# LOWER: %[[STORE:.*]] = wave.store
+# LOWER: %[[STORE:.*]] = wave.store %[[INPUT]]
 # LOWER: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
 # LOWER: %[[VALUE:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 # LOWER: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
@@ -85,11 +93,13 @@ with w.module() as module_builder:
 # LOWER: %[[NEXT_DONE:.*]] = wave.join %[[NEXT_LOAD_TOKEN]]
 # LOWER: wave.alloc_release %[[NEXT_ALLOC]] after %[[NEXT_DONE]] {workgroup_collective}
 # LOWER: wave.binary addi
+# LOWER: wave.store {{.*}} after %[[READ]]
 # LOWER-NOT: wave.reduce
 # LOWER-NOT: wave.redistribute
 
 # ASM-LABEL: packet_layout_reduce_wave:
 # ASM: ; wave backend: WaveAMDMachine MLIR pipeline finalized
+# ASM: buffer_load_dword
 # ASM: ds_write_b32
 # ASM: s_waitcnt lgkmcnt(0)
 # ASM: s_barrier
