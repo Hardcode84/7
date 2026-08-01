@@ -17,7 +17,6 @@ class FuncOp;
 } // namespace func
 
 namespace wave {
-
 // Rewrites carry/tuple alias cases into explicit SSA copies before intervals.
 LogicalResult prepareWaveAMDRegAllocIR(func::FuncOp func);
 

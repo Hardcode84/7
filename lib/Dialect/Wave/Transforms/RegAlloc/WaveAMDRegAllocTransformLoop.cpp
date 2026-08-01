@@ -10,6 +10,8 @@
 
 #include "WaveAMDRegAllocInternal.h"
 #include "WaveAMDRegAllocPrep.h"
+#include "WaveAMDRegAllocRegionFlow.h"
+#include "WaveAMDRegAllocStorage.h"
 #include "WaveAMDRegAllocTransformState.h"
 #include "WaveAMDRegAllocTransformUtils.h"
 #include "WaveAMDRegisterLimits.h"
@@ -37,6 +39,7 @@ using wave::regalloc_detail::kRegClassCount;
 using wave::regalloc_detail::kRegClasses;
 using wave::regalloc_detail::liveRangeListsOverlap;
 using wave::regalloc_detail::liveRangesOverlap;
+using wave::regalloc_detail::RegAllocRegionFlow;
 using wave::regalloc_detail::RegAllocTransformDecodedState;
 using wave::regalloc_detail::RegAllocTransformStateCache;
 using wave::regalloc_detail::valueRangeEndsAt;
@@ -59,7 +62,7 @@ struct RegAllocAliasValue {
 struct RegAllocAliasOp {
   SmallVector<int64_t> path;
   Operation *op = nullptr;
-  Operation *enclosingLoop = nullptr;
+  Region *enclosingRepetitiveRegion = nullptr;
   TypeID typeId;
   unsigned id = 0;
   unsigned position = 0;
@@ -76,10 +79,8 @@ struct RegAllocAliasSet {
   unsigned id = 0;
 };
 
-static const TypeID kExecIfTypeId = TypeID::get<waveamdmachine::ExecIfOp>();
 static const TypeID kKernargPreloadTypeId =
     TypeID::get<waveamdmachine::KernargPreloadOp>();
-static const TypeID kRegAfterTypeId = TypeID::get<waveamdmachine::RegAfterOp>();
 static const TypeID kSLoadB32TypeId = TypeID::get<waveamdmachine::SLoadB32Op>();
 static const TypeID kSLoadB64TypeId = TypeID::get<waveamdmachine::SLoadB64Op>();
 static const TypeID kSLoadB128TypeId =
@@ -90,16 +91,6 @@ static const TypeID kSWorkgroupIdYTypeId =
     TypeID::get<waveamdmachine::SWorkgroupIdYOp>();
 static const TypeID kSWorkgroupIdZTypeId =
     TypeID::get<waveamdmachine::SWorkgroupIdZOp>();
-static const TypeID kTupleFromElementsTypeId =
-    TypeID::get<waveamdmachine::TupleFromElementsOp>();
-static const TypeID kTupleToElementsTypeId =
-    TypeID::get<waveamdmachine::TupleToElementsOp>();
-static const TypeID kUniformIfTypeId =
-    TypeID::get<waveamdmachine::UniformIfOp>();
-static const TypeID kUniformLoopTypeId =
-    TypeID::get<waveamdmachine::UniformLoopOp>();
-static const TypeID kUpdateTupleTypeId =
-    TypeID::get<waveamdmachine::UpdateTupleOp>();
 static const TypeID kVWorkitemIdXTypeId =
     TypeID::get<waveamdmachine::VWorkitemIdXOp>();
 static const TypeID kVWorkitemIdYTypeId =
@@ -121,18 +112,6 @@ packRegAllocClass(waveamdmachine::RegClass regClass) {
     llvm_unreachable("untracked packed register class");
   }
   llvm_unreachable("unknown register class");
-}
-
-static bool isSGPR(waveamdmachine::RegType type) {
-  return type.getRegClass() == waveamdmachine::RegClass::SGPR;
-}
-
-static bool isVGPR(waveamdmachine::RegType type) {
-  return type.getRegClass() == waveamdmachine::RegClass::VGPR;
-}
-
-static bool isAGPR(waveamdmachine::RegType type) {
-  return type.getRegClass() == waveamdmachine::RegClass::AGPR;
 }
 
 static bool requiresMCTupleEncoding(Value value) {
@@ -159,128 +138,107 @@ static bool areEquivalentFixedHardwareReads(Value lhs, Value rhs) {
   return lhs.getDefiningOp()->getName() == rhs.getDefiningOp()->getName();
 }
 
-static waveamdmachine::RegType
-getUnassignedRegType(waveamdmachine::RegType type) {
-  return waveamdmachine::RegType::get(type.getContext(), type.getRegClass(),
-                                      type.getWidth(), /*index=*/-1);
-}
+class StorageAliasSummary {
+public:
+  StorageAliasSummary() { valueIds.reserve(64); }
 
-static FailureOr<Value>
-cloneImmediateTupleMove(OpBuilder &builder, Value value,
-                        waveamdmachine::RegType resultType) {
-  auto mov = value.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-  if (!mov || !mov.getSource().getDefiningOp<waveamdmachine::ImmOp>())
-    return failure();
-  Operation *clone = builder.clone(*mov);
-  clone->getResult(0).setType(resultType);
-  return clone->getResult(0);
-}
+  void add(Value storage, Value alias, int64_t aliasOffset) {
+    unsigned storageId = getOrCreate(storage);
+    unsigned aliasId = getOrCreate(alias);
+    auto [storageRoot, storageRootOffset] = find(storageId);
+    auto [aliasRoot, aliasRootOffset] = find(aliasId);
+    if (storageRoot == aliasRoot) {
+      assert(aliasRootOffset - storageRootOffset == aliasOffset &&
+             "inconsistent register storage alias offsets");
+      return;
+    }
 
-static FailureOr<Value> cloneAGPRDuplicate(OpBuilder &builder, Value value,
-                                           waveamdmachine::RegType resultType) {
-  Operation *def = value.getDefiningOp();
-  if (!isa_and_nonnull<waveamdmachine::UninitOp,
-                       waveamdmachine::VAccvgprWriteB32TupleOp>(def))
-    return failure();
-  Operation *clone = builder.clone(*def);
-  clone->getResult(0).setType(resultType);
-  return clone->getResult(0);
-}
-
-static Value copyRegDuplicate(OpBuilder &builder, Location loc, Value value,
-                              waveamdmachine::RegType resultType) {
-  return waveamdmachine::CopyTupleOp::create(builder, loc, resultType, value)
-      .getResult();
-}
-
-static FailureOr<Value> duplicateRegValue(OpBuilder &builder, Location loc,
-                                          Value value) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  waveamdmachine::RegType resultType = getUnassignedRegType(type);
-  FailureOr<Value> immClone =
-      cloneImmediateTupleMove(builder, value, resultType);
-  if (succeeded(immClone))
-    return *immClone;
-  if (isAGPR(type)) {
-    FailureOr<Value> agprClone = cloneAGPRDuplicate(builder, value, resultType);
-    if (succeeded(agprClone))
-      return *agprClone;
-    return emitError(loc) << "regalloc transform cannot duplicate AGPR value";
+    // Offsets are coordinates relative to a node's parent.  Preserve
+    // `coordinate(alias) - coordinate(storage) == aliasOffset` regardless of
+    // which root union-by-rank chooses as the new parent.
+    if (ranks[storageRoot] < ranks[aliasRoot]) {
+      parents[storageRoot] = aliasRoot;
+      parentOffsets[storageRoot] =
+          aliasRootOffset - storageRootOffset - aliasOffset;
+      return;
+    }
+    parents[aliasRoot] = storageRoot;
+    parentOffsets[aliasRoot] =
+        aliasOffset + storageRootOffset - aliasRootOffset;
+    if (ranks[storageRoot] == ranks[aliasRoot])
+      ++ranks[storageRoot];
   }
-  if (isVGPR(type) || isSGPR(type))
-    return copyRegDuplicate(builder, loc, value, resultType);
-  return emitError(loc, "regalloc transform cannot duplicate register value");
-}
 
-using LoopCarryAliasEdge = std::pair<Value, int64_t>;
-using LoopCarryAliasGraph = DenseMap<Value, SmallVector<LoopCarryAliasEdge, 4>>;
+  std::optional<int64_t> getOffset(Value storage, Value alias) {
+    if (storage == alias)
+      return 0;
+    auto storageIt = valueIds.find(storage);
+    auto aliasIt = valueIds.find(alias);
+    if (storageIt == valueIds.end() || aliasIt == valueIds.end())
+      return std::nullopt;
+    auto [storageRoot, storageOffset] = find(storageIt->second);
+    auto [aliasRoot, aliasOffset] = find(aliasIt->second);
+    if (storageRoot != aliasRoot)
+      return std::nullopt;
+    return aliasOffset - storageOffset;
+  }
 
-static void addLoopCarryAliasEdge(LoopCarryAliasGraph &graph, Value tuple,
-                                  Value element, int64_t offset) {
-  graph[tuple].push_back({element, offset});
-  graph[element].push_back({tuple, -offset});
-}
+private:
+  unsigned getOrCreate(Value value) {
+    auto [it, inserted] = valueIds.try_emplace(value, parents.size());
+    if (inserted) {
+      parents.push_back(it->second);
+      ranks.push_back(0);
+      parentOffsets.push_back(0);
+    }
+    return it->second;
+  }
 
-static LoopCarryAliasGraph buildLoopCarryAliasGraph(func::FuncOp func) {
-  LoopCarryAliasGraph graph;
+  std::pair<unsigned, int64_t> find(unsigned id) {
+    unsigned parent = parents[id];
+    if (parent == id)
+      return {id, 0};
+    auto [root, parentOffset] = find(parent);
+    parentOffsets[id] += parentOffset;
+    parents[id] = root;
+    return {root, parentOffsets[id]};
+  }
+
+  DenseMap<Value, unsigned> valueIds;
+  SmallVector<unsigned, 64> parents;
+  SmallVector<unsigned, 64> ranks;
+  SmallVector<int64_t, 64> parentOffsets;
+};
+
+static StorageAliasSummary buildStorageAliasSummary(func::FuncOp func) {
+  StorageAliasSummary summary;
+  SmallVector<waveamdmachine::RegisterStorageAlias, 8> storageAliases;
   func.walk([&](Operation *op) {
-    auto collect = [&](Value tuple, ValueRange elements) {
-      int64_t offset = 0;
-      for (Value element : elements) {
-        addLoopCarryAliasEdge(graph, tuple, element, offset);
-        offset += cast<waveamdmachine::RegType>(element.getType()).getWidth();
-      }
-    };
-    if (auto toElements = dyn_cast<waveamdmachine::TupleToElementsOp>(op))
-      collect(toElements.getTuple(), toElements.getElements());
-    if (auto fromElements = dyn_cast<waveamdmachine::TupleFromElementsOp>(op))
-      collect(fromElements.getTuple(), fromElements.getElements());
-    if (auto update = dyn_cast<waveamdmachine::UpdateTupleOp>(op)) {
-      addLoopCarryAliasEdge(graph, update.getResult(), update.getBase(), 0);
-      for (auto [value, offset] :
-           llvm::zip_equal(update.getUpdates(), update.getOffsets()))
-        addLoopCarryAliasEdge(graph, update.getResult(), value,
-                              cast<IntegerAttr>(offset).getInt());
-    }
+    auto aliases =
+        dyn_cast<waveamdmachine::RegisterStorageAliasOpInterface>(op);
+    if (!aliases)
+      return;
+    storageAliases.clear();
+    aliases.getRegisterStorageAliases(storageAliases);
+    for (waveamdmachine::RegisterStorageAlias alias : storageAliases)
+      summary.add(alias.storage, alias.alias, alias.offset);
   });
-  return graph;
+  return summary;
 }
 
-// Returns rhs' register offset relative to lhs when tuple aliasing constrains
-// both values to the same storage.
+// rhs offset from lhs when both alias same storage.
 static std::optional<int64_t>
-getLoopCarryAliasOffset(const LoopCarryAliasGraph &graph, Value lhs,
-                        Value rhs) {
-  if (lhs == rhs)
-    return 0;
-  DenseMap<Value, int64_t> offsets;
-  SmallVector<Value> worklist;
-  offsets.try_emplace(lhs, 0);
-  worklist.push_back(lhs);
-  while (!worklist.empty()) {
-    Value value = worklist.pop_back_val();
-    auto edges = graph.find(value);
-    if (edges == graph.end())
-      continue;
-    for (auto [next, delta] : edges->second) {
-      int64_t nextOffset = offsets.lookup(value) + delta;
-      if (next == rhs)
-        return nextOffset;
-      if (offsets.try_emplace(next, nextOffset).second)
-        worklist.push_back(next);
-    }
-  }
-  return std::nullopt;
+getStorageAliasOffset(StorageAliasSummary &summary, Value lhs, Value rhs) {
+  return summary.getOffset(lhs, rhs);
 }
 
-static bool loopCarryStorageOverlaps(const LoopCarryAliasGraph &graph,
-                                     Value lhs, waveamdmachine::RegType lhsType,
-                                     Value rhs) {
+static bool storageAliasesOverlap(StorageAliasSummary &summary, Value lhs,
+                                  waveamdmachine::RegType lhsType, Value rhs) {
   std::optional<waveamdmachine::RegType> rhsType =
       wave::getRegAllocTransformTrackedRegType(rhs);
   if (!rhsType || lhsType.getRegClass() != rhsType->getRegClass())
     return false;
-  std::optional<int64_t> rhsOffset = getLoopCarryAliasOffset(graph, lhs, rhs);
+  std::optional<int64_t> rhsOffset = getStorageAliasOffset(summary, lhs, rhs);
   if (!rhsOffset)
     return false;
   int64_t lhsEnd = lhsType.getWidth();
@@ -288,18 +246,20 @@ static bool loopCarryStorageOverlaps(const LoopCarryAliasGraph &graph,
   return std::max<int64_t>(0, *rhsOffset) < std::min(lhsEnd, rhsEnd);
 }
 
-static void markOverlappingLoopInitCopies(const LoopCarryAliasGraph &graph,
-                                          ValueRange inits,
-                                          SmallVectorImpl<bool> &needsCopy) {
-  for (auto [lhsIndex, lhs] : llvm::enumerate(inits)) {
+static void
+markOverlappingEntryCopies(StorageAliasSummary &summary,
+                           ArrayRef<RegAllocRegionFlow::Transfer> transfers,
+                           BitVector &needsCopy) {
+  for (auto [lhsIndex, lhsTransfer] : llvm::enumerate(transfers)) {
+    Value lhs = lhsTransfer.operand->get();
     std::optional<waveamdmachine::RegType> lhsType =
         wave::getRegAllocTransformTrackedRegType(lhs);
     if (!lhsType)
       continue;
-    for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < inits.size();
+    for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < transfers.size();
          ++rhsIndex) {
-      Value rhs = inits[rhsIndex];
-      if (!loopCarryStorageOverlaps(graph, lhs, *lhsType, rhs))
+      Value rhs = transfers[rhsIndex].operand->get();
+      if (!storageAliasesOverlap(summary, lhs, *lhsType, rhs))
         continue;
       needsCopy[lhsIndex] = true;
       needsCopy[rhsIndex] = true;
@@ -308,18 +268,19 @@ static void markOverlappingLoopInitCopies(const LoopCarryAliasGraph &graph,
 }
 
 static void
-markOverlappingLoopBackedgeCopies(const LoopCarryAliasGraph &graph,
-                                  ValueRange carries,
-                                  SmallVectorImpl<bool> &needsCopy) {
-  for (auto [lhsIndex, lhs] : llvm::enumerate(carries)) {
+markOverlappingCycleCopies(StorageAliasSummary &summary,
+                           ArrayRef<RegAllocRegionFlow::Transfer> transfers,
+                           BitVector &needsCopy) {
+  for (auto [lhsIndex, lhsTransfer] : llvm::enumerate(transfers)) {
+    Value lhs = lhsTransfer.operand->get();
     std::optional<waveamdmachine::RegType> lhsType =
         wave::getRegAllocTransformTrackedRegType(lhs);
     if (!lhsType)
       continue;
-    for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < carries.size();
+    for (unsigned rhsIndex = lhsIndex + 1; rhsIndex < transfers.size();
          ++rhsIndex) {
-      Value rhs = carries[rhsIndex];
-      if (!loopCarryStorageOverlaps(graph, lhs, *lhsType, rhs))
+      Value rhs = transfers[rhsIndex].operand->get();
+      if (!storageAliasesOverlap(summary, lhs, *lhsType, rhs))
         continue;
       if (needsCopy[lhsIndex] || needsCopy[rhsIndex])
         continue;
@@ -333,61 +294,92 @@ markOverlappingLoopBackedgeCopies(const LoopCarryAliasGraph &graph,
   }
 }
 
-static LogicalResult duplicateMarkedRegValues(OpBuilder &builder, Location loc,
-                                              ValueRange values,
-                                              MutableOperandRange mutableValues,
-                                              ArrayRef<bool> needsCopy) {
-  assert(values.size() == mutableValues.size() &&
-         values.size() == needsCopy.size() && "loop carry arity mismatch");
-  for (auto [index, value] : llvm::enumerate(values)) {
+struct RegionCarryCopyPlan {
+  Value source;
+  Location loc;
+  OpOperand *target = nullptr;
+  Operation *anchor = nullptr;
+};
+
+static void
+appendMarkedTransferCopies(ArrayRef<RegAllocRegionFlow::Transfer> transfers,
+                           const BitVector &needsCopy,
+                           SmallVectorImpl<RegionCarryCopyPlan> &plans) {
+  assert(transfers.size() == needsCopy.size() &&
+         "region transfer arity mismatch");
+  for (auto [index, transfer] : llvm::enumerate(transfers)) {
     if (!needsCopy[index])
       continue;
-    FailureOr<Value> duplicate = duplicateRegValue(builder, loc, value);
+    plans.push_back({transfer.operand->get(),
+                     transfer.sourceOperation->getLoc(), transfer.operand,
+                     transfer.sourceOperation});
+  }
+}
+
+static LogicalResult
+materializeRegionCarryCopies(func::FuncOp func,
+                             ArrayRef<RegionCarryCopyPlan> plans) {
+  OpBuilder builder(func.getContext());
+  for (const RegionCarryCopyPlan &plan : plans) {
+    assert(plan.target && plan.anchor &&
+           "region carry copy plan is incomplete");
+    builder.setInsertionPoint(plan.anchor);
+    FailureOr<Value> duplicate = wave::regalloc_detail::materializeRegAllocCopy(
+        builder, plan.loc, plan.source);
     if (failed(duplicate))
       return failure();
-    mutableValues[index].assign(*duplicate);
+    plan.target->set(*duplicate);
   }
   return success();
 }
 
-static LogicalResult splitOverlappingLoopCarryStorage(func::FuncOp func) {
-  SmallVector<waveamdmachine::UniformLoopOp> loops;
-  func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
-  LoopCarryAliasGraph aliasGraph = buildLoopCarryAliasGraph(func);
-  OpBuilder builder(func.getContext());
-  for (waveamdmachine::UniformLoopOp loop : loops) {
-    SmallVector<bool> initNeedsCopy(loop.getInits().size(), false);
-    markOverlappingLoopInitCopies(aliasGraph, loop.getInits(), initNeedsCopy);
-    builder.setInsertionPoint(loop);
-    if (failed(duplicateMarkedRegValues(builder, loop.getLoc(), loop.getInits(),
-                                        loop.getInitsMutable(), initNeedsCopy)))
-      return failure();
-
-    auto term = cast<waveamdmachine::ContinueIfOp>(
-        loop.getBody().front().getTerminator());
-    SmallVector<bool> backedgeNeedsCopy(term.getCarries().size(), false);
-    markOverlappingLoopBackedgeCopies(aliasGraph, term.getCarries(),
-                                      backedgeNeedsCopy);
-    builder.setInsertionPoint(term);
-    if (failed(duplicateMarkedRegValues(
-            builder, term.getLoc(), term.getCarries(), term.getCarriesMutable(),
-            backedgeNeedsCopy)))
-      return failure();
+static void collectOverlappingRegionCarryCopyPlans(
+    StorageAliasSummary &aliasSummary, const RegAllocRegionFlow &flow,
+    SmallVectorImpl<RegionCarryCopyPlan> &plans) {
+  BitVector needsCopy;
+  for (const RegAllocRegionFlow::Branch &branch : flow.getBranches()) {
+    for (const RegAllocRegionFlow::TransferGroup &group :
+         branch.transferGroups) {
+      if (!group.target || !flow.isRepetitive(group.target))
+        continue;
+      ArrayRef<RegAllocRegionFlow::Transfer> transfers =
+          ArrayRef(branch.transfers)
+              .slice(group.firstTransfer, group.transferCount);
+      needsCopy.resize(transfers.size());
+      needsCopy.reset();
+      if (!group.source)
+        markOverlappingEntryCopies(aliasSummary, transfers, needsCopy);
+      else if (flow.mayReach(group.target, group.source))
+        markOverlappingCycleCopies(aliasSummary, transfers, needsCopy);
+      else
+        continue;
+      appendMarkedTransferCopies(transfers, needsCopy, plans);
+    }
   }
-  return success();
+}
+
+static LogicalResult splitOverlappingRegionCarryStorage(func::FuncOp func) {
+  SmallVector<RegionCarryCopyPlan> plans;
+  {
+    StorageAliasSummary aliasSummary = buildStorageAliasSummary(func);
+    RegAllocRegionFlow flow(func);
+    collectOverlappingRegionCarryCopyPlans(aliasSummary, flow, plans);
+  }
+  return materializeRegionCarryCopies(func, plans);
 }
 
 class RegAllocAliasStateBuilder {
 public:
   RegAllocAliasStateBuilder(func::FuncOp func, Builder &builder,
-                            bool coalesceMFMAAccResult)
-      : func(func), builder(builder),
+                            bool coalesceMFMAAccResult,
+                            const RegAllocRegionFlow &flow)
+      : func(func), builder(builder), flow(flow),
         coalesceMFMAAccResult(coalesceMFMAAccResult) {}
 
   FailureOr<DictionaryAttr>
   build(wave::regalloc_detail::RegAllocTransformStateCache *cache) {
     SmallVector<int64_t> path{0};
-    collectRegion(func.getBody(), path, nullptr);
+    collectRegion(func.getBody(), path, nullptr, std::nullopt);
     collectUsesAndAliases();
     if (failed(assignAliasSets()))
       return failure();
@@ -399,6 +391,13 @@ public:
 
 private:
   using AliasAdjacency = SmallVector<SmallVector<std::pair<unsigned, int64_t>>>;
+
+  struct ExclusiveRangeContext {
+    std::optional<unsigned> parent;
+    Operation *branch = nullptr;
+    unsigned branchPosition = 0;
+    unsigned entryPosition = 0;
+  };
 
   void registerValue(Value value, unsigned start, ArrayRef<int64_t> path,
                      bool blockArgument, unsigned number) {
@@ -431,44 +430,96 @@ private:
                     arg.getArgNumber());
   }
 
+  RegAllocAliasOp collectOperation(Operation &op, ArrayRef<int64_t> path,
+                                   Region *enclosingRepetitiveRegion,
+                                   std::optional<unsigned> exclusiveContext) {
+    RegAllocAliasOp record;
+    record.path.assign(path.begin(), path.end());
+    record.op = &op;
+    record.enclosingRepetitiveRegion = enclosingRepetitiveRegion;
+    record.typeId = op.getName().getTypeID();
+    record.id = ops.size();
+    record.position = ops.size();
+    positions[&op] = record.position;
+    if (exclusiveContext)
+      exclusiveContextByOp[&op] = *exclusiveContext;
+    opPathComponentCount += record.path.size();
+    ops.push_back(record);
+    return record;
+  }
+
+  Region *getNestedRepetitiveRegion(Region &nested,
+                                    Region *enclosingRepetitiveRegion) {
+    if (!flow.isRepetitive(&nested))
+      return enclosingRepetitiveRegion;
+    parentRepetitiveRegions[&nested] = enclosingRepetitiveRegion;
+    return &nested;
+  }
+
+  std::optional<unsigned>
+  getNestedExclusiveContext(Operation &op, Region &nested, unsigned position,
+                            std::optional<unsigned> exclusiveContext) {
+    if (!flow.isExclusiveChoice(&nested))
+      return exclusiveContext;
+    unsigned entryPosition =
+        nested.empty() || nested.front().empty() ? position : ops.size();
+    unsigned id = exclusiveContexts.size();
+    exclusiveContexts.push_back(
+        {exclusiveContext, &op, position, entryPosition});
+    return id;
+  }
+
+  void collectNestedRegions(Operation &op, const RegAllocAliasOp &record,
+                            SmallVectorImpl<int64_t> &path,
+                            Region *enclosingRepetitiveRegion,
+                            std::optional<unsigned> exclusiveContext) {
+    for (auto [regionIndex, nested] : llvm::enumerate(op.getRegions())) {
+      path.push_back(regionIndex);
+      Region *repetitiveRegion =
+          getNestedRepetitiveRegion(nested, enclosingRepetitiveRegion);
+      std::optional<unsigned> nestedExclusiveContext =
+          getNestedExclusiveContext(op, nested, record.position,
+                                    exclusiveContext);
+      collectRegion(nested, path, repetitiveRegion, nestedExclusiveContext);
+      path.pop_back();
+    }
+  }
+
+  void collectOperationResults(Operation &op, const RegAllocAliasOp &record,
+                               ArrayRef<int64_t> path) {
+    unsigned start = record.position;
+    if (flow.resultsStartAtJoin(&op))
+      start = ops.back().position;
+    for (OpResult result : op.getResults())
+      registerValue(result, start, path, /*blockArgument=*/false,
+                    result.getResultNumber());
+  }
+
+  void collectBlock(Block &block, unsigned blockArgStart,
+                    SmallVectorImpl<int64_t> &path,
+                    Region *enclosingRepetitiveRegion,
+                    std::optional<unsigned> exclusiveContext) {
+    collectBlockArguments(block, blockArgStart, path);
+    for (auto [opIndex, op] : llvm::enumerate(block)) {
+      path.push_back(opIndex);
+      RegAllocAliasOp record = collectOperation(
+          op, path, enclosingRepetitiveRegion, exclusiveContext);
+      collectNestedRegions(op, record, path, enclosingRepetitiveRegion,
+                           exclusiveContext);
+      collectOperationResults(op, record, path);
+      path.pop_back();
+    }
+  }
+
   void collectRegion(Region &region, SmallVectorImpl<int64_t> &path,
-                     Operation *enclosingLoop) {
+                     Region *enclosingRepetitiveRegion,
+                     std::optional<unsigned> exclusiveContext) {
     Operation *parent = region.getParentOp();
     unsigned blockArgStart = parent ? positions.lookup(parent) : 0;
     for (auto [blockIndex, block] : llvm::enumerate(region)) {
       path.push_back(blockIndex);
-      collectBlockArguments(block, blockArgStart, path);
-      for (auto [opIndex, op] : llvm::enumerate(block)) {
-        path.push_back(opIndex);
-        RegAllocAliasOp record;
-        record.path.assign(path.begin(), path.end());
-        record.op = &op;
-        record.enclosingLoop = enclosingLoop;
-        record.typeId = op.getName().getTypeID();
-        record.id = ops.size();
-        record.position = ops.size();
-        positions[&op] = record.position;
-        opPathComponentCount += record.path.size();
-        ops.push_back(record);
-        Operation *nestedEnclosingLoop = enclosingLoop;
-        if (op.getNumRegions() != 0 && record.typeId == kUniformLoopTypeId) {
-          parentUniformLoops[&op] = enclosingLoop;
-          nestedEnclosingLoop = &op;
-        }
-        for (auto [regionIndex, nested] : llvm::enumerate(op.getRegions())) {
-          path.push_back(regionIndex);
-          collectRegion(nested, path, nestedEnclosingLoop);
-          path.pop_back();
-        }
-        unsigned resultStart = record.position;
-        if (record.typeId == kUniformLoopTypeId ||
-            record.typeId == kUniformIfTypeId)
-          resultStart = ops.back().position;
-        for (OpResult result : op.getResults())
-          registerValue(result, resultStart, path,
-                        /*blockArgument=*/false, result.getResultNumber());
-        path.pop_back();
-      }
+      collectBlock(block, blockArgStart, path, enclosingRepetitiveRegion,
+                   exclusiveContext);
       path.pop_back();
     }
   }
@@ -498,23 +549,7 @@ private:
     }
   }
 
-  static Region *getChildRegion(Operation *parent, Operation *nested) {
-    for (Region *region = nested->getParentRegion(); region;) {
-      Operation *owner = region->getParentOp();
-      if (owner == parent)
-        return region;
-      region = owner ? owner->getParentRegion() : nullptr;
-    }
-    return nullptr;
-  }
-
-  unsigned getRegionEntryPosition(Region &region, unsigned fallback) {
-    if (region.empty() || region.front().empty())
-      return fallback;
-    return positions.lookup(&region.front().front());
-  }
-
-  struct UniformIfRangeSegment {
+  struct ExclusiveRangeSegment {
     unsigned branch = 0;
     unsigned entry = 0;
   };
@@ -524,17 +559,21 @@ private:
     if (valueIt == valueIds.end())
       return false;
     RegAllocAliasValue &record = values[valueIt->second];
-    SmallVector<UniformIfRangeSegment, 2> segments;
-    for (Operation *parent = user->getParentOp(); parent;
-         parent = parent->getParentOp()) {
-      auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(parent);
-      if (!uniformIf || isValueDefinedInside(parent, value))
-        continue;
-      Region *arm = getChildRegion(parent, user);
-      if (!arm)
-        continue;
-      unsigned branch = positions.lookup(parent);
-      segments.push_back({branch, getRegionEntryPosition(*arm, branch)});
+    if (exclusiveContexts.empty()) {
+      addLiveRange(record, record.start, end);
+      return true;
+    }
+    SmallVector<ExclusiveRangeSegment, 2> segments;
+    auto contextIt = exclusiveContextByOp.find(user);
+    std::optional<unsigned> context =
+        contextIt == exclusiveContextByOp.end()
+            ? std::nullopt
+            : std::optional<unsigned>(contextIt->second);
+    while (context) {
+      const ExclusiveRangeContext &current = exclusiveContexts[*context];
+      if (!flow.isDefinedInside(current.branch, value))
+        segments.push_back({current.branchPosition, current.entryPosition});
+      context = current.parent;
     }
     std::reverse(segments.begin(), segments.end());
     if (segments.empty()) {
@@ -565,67 +604,47 @@ private:
            pos->end == position;
   }
 
-  bool isValueDefinedInside(Operation *scope, Value value) {
-    if (Operation *def = value.getDefiningOp())
-      return def == scope || scope->isAncestor(def);
-    auto arg = cast<BlockArgument>(value);
-    Operation *owner = arg.getOwner()->getParentOp();
-    return owner && (owner == scope || scope->isAncestor(owner));
-  }
-
   std::pair<Operation *, unsigned> getUseExtent(Value operand, Operation *user,
-                                                Operation *enclosingLoop,
+                                                Region *repetitiveRegion,
                                                 unsigned position) {
-    for (Operation *loopOp = enclosingLoop; loopOp;
-         loopOp = parentUniformLoops.lookup(loopOp)) {
-      if (isValueDefinedInside(loopOp, operand))
+    for (Region *region = repetitiveRegion; region;) {
+      Operation *owner = region->getParentOp();
+      if (flow.isDefinedInside(owner, operand))
         break;
-      auto loop = cast<waveamdmachine::UniformLoopOp>(loopOp);
-      user = loopOp;
-      position = std::max(position, getLoopExitPosition(loop));
+      user = owner;
+      position = std::max(position, getRegionExitPosition(*region, position));
+      region = parentRepetitiveRegions.lookup(region);
     }
     return {user, position};
   }
 
-  unsigned getLoopExitPosition(waveamdmachine::UniformLoopOp loop) {
-    if (loop.getBody().empty())
-      return positions.lookup(loop.getOperation());
-    Operation *terminator = loop.getBody().front().getTerminator();
-    auto it = positions.find(terminator);
-    if (it != positions.end())
-      return it->second;
-    return positions.lookup(loop.getOperation());
-  }
-
   unsigned getRegionExitPosition(Region &region, unsigned fallback) {
+    auto cached = regionExitPositions.find(&region);
+    if (cached != regionExitPositions.end())
+      return cached->second;
     if (region.empty())
       return fallback;
-    Operation *terminator = region.front().getTerminator();
-    auto it = positions.find(terminator);
-    return it == positions.end() ? fallback : it->second;
+    unsigned exit = fallback;
+    for (Block &block : region) {
+      auto it = positions.find(block.getTerminator());
+      if (it != positions.end())
+        exit = std::max(exit, it->second);
+    }
+    regionExitPositions[&region] = exit;
+    return exit;
   }
 
-  static bool
-  needsExecIfConditionForDataMerge(waveamdmachine::ExecIfOp execIf) {
-    if (execIf.getElseRegion().empty())
-      return false;
-    return llvm::any_of(execIf.getResultTypes(), [](Type type) {
-      return !isa<waveamdmachine::MemTokenType>(type);
-    });
-  }
-
-  void collectExecIfConditionUses(RegAllocAliasOp &record) {
-    if (record.typeId != kExecIfTypeId)
+  void collectImplicitRegisterUses(RegAllocAliasOp &record) {
+    auto implicit =
+        dyn_cast<waveamdmachine::ImplicitRegisterUseOpInterface>(record.op);
+    if (!implicit)
       return;
-    auto execIf = cast<waveamdmachine::ExecIfOp>(record.op);
-    if (!execIf.getElseRegion().empty())
-      extendValue(
-          execIf.getCondition(), record.op,
-          getRegionExitPosition(execIf.getThenRegion(), record.position));
-    if (needsExecIfConditionForDataMerge(execIf))
-      extendValue(
-          execIf.getCondition(), record.op,
-          getRegionExitPosition(execIf.getElseRegion(), record.position));
+    for (waveamdmachine::ImplicitRegisterUse use :
+         implicit.getImplicitRegisterUses()) {
+      auto it = positions.find(use.lastUse);
+      if (it != positions.end())
+        extendValue(use.value, use.lastUse, it->second);
+    }
   }
 
   void addAliasEdge(Value lhs, Value rhs, int64_t delta) {
@@ -698,38 +717,15 @@ private:
     }
   }
 
-  void collectTupleAliases(Operation *op, TypeID typeId) {
-    auto collect = [&](Value tuple, ValueRange elements) {
-      int64_t offset = 0;
-      for (Value element : elements) {
-        addAliasEdge(tuple, element, offset);
-        if (auto type = dyn_cast<waveamdmachine::RegType>(element.getType()))
-          offset += type.getWidth();
-      }
-    };
-    if (typeId == kTupleToElementsTypeId) {
-      auto toElements = cast<waveamdmachine::TupleToElementsOp>(op);
-      collect(toElements.getTuple(), toElements.getElements());
+  void collectStorageAliases(Operation *op) {
+    auto aliases =
+        dyn_cast<waveamdmachine::RegisterStorageAliasOpInterface>(op);
+    if (!aliases)
       return;
-    }
-    if (typeId == kTupleFromElementsTypeId) {
-      auto fromElements = cast<waveamdmachine::TupleFromElementsOp>(op);
-      collect(fromElements.getTuple(), fromElements.getElements());
-      return;
-    }
-    if (typeId == kUpdateTupleTypeId) {
-      auto update = cast<waveamdmachine::UpdateTupleOp>(op);
-      addAliasEdge(update.getResult(), update.getBase(), 0);
-      for (auto [value, offset] :
-           llvm::zip_equal(update.getUpdates(), update.getOffsets()))
-        addAliasEdge(update.getResult(), value,
-                     cast<IntegerAttr>(offset).getInt());
-      return;
-    }
-    if (typeId == kRegAfterTypeId) {
-      auto after = cast<waveamdmachine::RegAfterOp>(op);
-      addAliasEdge(after.getResult(), after.getSource(), 0);
-    }
+    storageAliases.clear();
+    aliases.getRegisterStorageAliases(storageAliases);
+    for (waveamdmachine::RegisterStorageAlias alias : storageAliases)
+      addAliasEdge(alias.storage, alias.alias, alias.offset);
   }
 
   bool typeHasMFMATrait(Operation *op, TypeID typeId) {
@@ -750,72 +746,33 @@ private:
     addAliasEdge(mma.getAcc(), mma.getAccResult(), 0);
   }
 
-  void collectYieldAliases(ValueRange results, Region &region) {
-    if (region.empty())
+  void collectRegionAliases(Operation *op) {
+    if (op->getNumRegions() == 0)
       return;
-    auto yield =
-        dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
-    if (!yield)
-      return;
-    for (auto [result, yielded] : llvm::zip_equal(results, yield.getValues()))
-      addAliasEdge(result, yielded, 0);
-  }
-
-  void collectLoopCarryAliases(waveamdmachine::UniformLoopOp loop) {
-    if (loop.getBody().empty())
-      return;
-    Block &body = loop.getBody().front();
-    DenseSet<Value> seenInits;
-    for (auto [init, arg, result] : llvm::zip_equal(
-             loop.getInits(), body.getArguments(), loop.getResults())) {
-      addAliasEdge(arg, result, 0);
-      if (seenInits.insert(init).second)
-        addAliasEdge(init, arg, 0);
-    }
-    auto cont = dyn_cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
-    if (!cont)
-      return;
-    for (auto [arg, carry] :
-         llvm::zip_equal(body.getArguments(), cont.getCarries()))
-      addAliasEdge(arg, carry, 0);
-  }
-
-  void collectRegionAliases(Operation *op, TypeID typeId) {
-    if (typeId == kUniformLoopTypeId) {
-      auto loop = cast<waveamdmachine::UniformLoopOp>(op);
-      collectLoopCarryAliases(loop);
-      return;
-    }
-    if (typeId == kUniformIfTypeId) {
-      auto uniformIf = cast<waveamdmachine::UniformIfOp>(op);
-      collectYieldAliases(uniformIf.getResults(), uniformIf.getThenRegion());
-      collectYieldAliases(uniformIf.getResults(), uniformIf.getElseRegion());
-      return;
-    }
-    if (typeId == kExecIfTypeId) {
-      auto execIf = cast<waveamdmachine::ExecIfOp>(op);
-      collectYieldAliases(execIf.getResults(), execIf.getThenRegion());
-      collectYieldAliases(execIf.getResults(), execIf.getElseRegion());
-    }
+    regionAliasEdges.clear();
+    flow.appendOrderedAliasEdges(op, regionAliasEdges);
+    for (const RegAllocRegionFlow::OrderedAliasEdge &edge : regionAliasEdges)
+      addAliasEdge(edge.lhs, edge.rhs, 0);
   }
 
   void collectUses() {
     for (RegAllocAliasOp &record : ops) {
       for (Value operand : record.op->getOperands()) {
-        auto [scope, end] = getUseExtent(operand, record.op,
-                                         record.enclosingLoop, record.position);
+        auto [scope, end] =
+            getUseExtent(operand, record.op, record.enclosingRepetitiveRegion,
+                         record.position);
         extendValue(operand, scope, end);
       }
-      collectExecIfConditionUses(record);
+      collectImplicitRegisterUses(record);
     }
   }
 
   void collectAliases() {
     for (RegAllocAliasOp &record : ops) {
-      collectTupleAliases(record.op, record.typeId);
+      collectStorageAliases(record.op);
       collectMMAAliases(record.op, record.typeId);
       collectRequiredKilledOperandAliases(record.op, record.typeId);
-      collectRegionAliases(record.op, record.typeId);
+      collectRegionAliases(record.op);
     }
   }
 
@@ -1125,16 +1082,22 @@ private:
   SmallVector<RegAllocAliasOp> ops;
   SmallVector<RegAllocAliasValue> values;
   SmallVector<RegAllocAliasEdge> edges;
+  SmallVector<RegAllocRegionFlow::OrderedAliasEdge, 16> regionAliasEdges;
   SmallVector<RegAllocAliasSet> aliasSets;
+  SmallVector<ExclusiveRangeContext> exclusiveContexts;
+  SmallVector<waveamdmachine::RegisterStorageAlias, 8> storageAliases;
   SmallVector<Value> payloadValues;
   DenseMap<TypeID, bool> mfmaTypes;
-  DenseMap<Operation *, Operation *> parentUniformLoops;
   DenseMap<Operation *, unsigned> positions;
+  DenseMap<Operation *, unsigned> exclusiveContextByOp;
+  DenseMap<Region *, Region *> parentRepetitiveRegions;
+  DenseMap<Region *, unsigned> regionExitPositions;
   DenseMap<TypeID, bool> requiredKilledOperandReuseTypes;
   DenseMap<Value, unsigned> valueIds;
   std::optional<llvm::AMDGPU::IsaVersion> killedOperandReuseIsa;
   func::FuncOp func;
   Builder &builder;
+  const RegAllocRegionFlow &flow;
   size_t opPathComponentCount = 0;
   size_t valuePathComponentCount = 0;
   size_t valueRangeCount = 0;
@@ -1284,28 +1247,30 @@ getOperationEnd(Operation *op, const DenseMap<Operation *, unsigned> &positions,
   return end;
 }
 
-static unsigned
-getImplicitABIUseEnd(Operation *op,
-                     const DenseMap<Operation *, unsigned> &positions,
-                     DenseMap<Operation *, unsigned> &endCache) {
+static unsigned getImplicitABIUseEnd(
+    Operation *op, const DenseMap<Operation *, unsigned> &positions,
+    DenseMap<Operation *, unsigned> &endCache, const RegAllocRegionFlow &flow) {
   unsigned end = positions.lookup(op);
+  Operation *nested = op;
   for (Operation *parent = op->getParentOp(); parent;
-       parent = parent->getParentOp())
-    if (isa<waveamdmachine::UniformLoopOp>(parent))
+       nested = parent, parent = parent->getParentOp()) {
+    Region *child = RegAllocRegionFlow::getChildRegion(parent, nested);
+    if (child && flow.isRepetitive(child))
       end = std::max(end, getOperationEnd(parent, positions, endCache));
+  }
   return end;
 }
 
 static void noteImplicitSGPRABIUse(
     Operation *op, const DenseMap<Operation *, unsigned> &positions,
-    DenseMap<Operation *, unsigned> &endCache,
+    DenseMap<Operation *, unsigned> &endCache, const RegAllocRegionFlow &flow,
     const wave::WaveAMDKernelEntryRegs &regs, ReservedLaneUses &sgprLastUses) {
   TypeID typeId = op->getName().getTypeID();
   std::optional<StringRef> base = getSLoadBase(op, typeId);
   bool isPreload = typeId == kKernargPreloadTypeId;
   if (!base && !isPreload)
     return;
-  unsigned end = getImplicitABIUseEnd(op, positions, endCache);
+  unsigned end = getImplicitABIUseEnd(op, positions, endCache, flow);
   if (base) {
     if (std::optional<std::pair<unsigned, unsigned>> span =
             parseSGPRSpan(*base))
@@ -1400,7 +1365,7 @@ public:
       : values(decoded.values), sets(decoded.sets),
         resolvedValues(decoded.resolvedValues),
         valueLookup(&decoded.valueLookup), positions(decoded.positions),
-        func(func), builder(builder) {}
+        flow(func), func(func), builder(builder) {}
 
   LogicalResult run() {
     if (failed(parseState()))
@@ -1933,8 +1898,8 @@ private:
         continue;
       unsigned implicitEnd = 0;
       if (isFixedHardwareRead(value))
-        implicitEnd =
-            getImplicitABIUseEnd(value.getDefiningOp(), positions, endCache);
+        implicitEnd = getImplicitABIUseEnd(value.getDefiningOp(), positions,
+                                           endCache, flow);
       for (auto [index, range] : llvm::enumerate(stateValue.ranges)) {
         unsigned setId = sets.size() + fixedReservations.size();
         // Entry values exist before the first modeled op.
@@ -1955,7 +1920,7 @@ private:
 
     DenseMap<Operation *, unsigned> endCache;
     for (auto &entry : positions)
-      noteImplicitSGPRABIUse(entry.first, positions, endCache, regs,
+      noteImplicitSGPRABIUse(entry.first, positions, endCache, flow, regs,
                              sgprLastUses);
 
     for (auto [lane, lastUse] : llvm::enumerate(sgprLastUses)) {
@@ -2798,6 +2763,7 @@ private:
   ArrayRef<wave::regalloc_detail::ResolvedRegAllocValue> resolvedValues;
   const DenseMap<Value, const wave::RegAllocTransformValue *> *valueLookup;
   const DenseMap<Operation *, unsigned> &positions;
+  RegAllocRegionFlow flow;
   SmallVector<Value> payloadValues;
   SmallVector<unsigned> setIndexById;
   SmallVector<unsigned> memberConflictGenerations;
@@ -2848,11 +2814,13 @@ setRegAllocTransformState(func::FuncOp func, Builder &builder,
   if (!wave::isRegAllocPreparationValid(func)) {
     if (failed(wave::prepareWaveAMDRegAllocIR(func)))
       return failure();
-    if (failed(splitOverlappingLoopCarryStorage(func)))
+    if (failed(splitOverlappingRegionCarryStorage(func)))
       return failure();
     wave::markRegAllocPreparationValid(func);
   }
-  RegAllocAliasStateBuilder stateBuilder(func, builder, coalesceMFMAAccResult);
+  RegAllocRegionFlow flow(func);
+  RegAllocAliasStateBuilder stateBuilder(func, builder, coalesceMFMAAccResult,
+                                         flow);
   FailureOr<DictionaryAttr> state = stateBuilder.build(cache);
   if (failed(state))
     return failure();

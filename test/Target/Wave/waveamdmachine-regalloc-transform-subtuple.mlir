@@ -997,4 +997,130 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
           -> !waveamdmachine.reg<vgpr, 2>
     return %view : !waveamdmachine.reg<vgpr, 2>
   }
+
+  // RegionBranch flow drives dead incoming join reuse.
+  // PREP-LABEL: func.func @scf_if_dead_incoming_aliases_join(
+  // PREP-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP: scf.if
+  // PREP-NEXT: scf.yield [[INPUT]]
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: return
+  // SCAN-LABEL: func.func @scf_if_dead_incoming_aliases_join(
+  // SCAN-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[#REG:]]>
+  // SCAN: [[RESULT:%.*]] = scf.if
+  // SCAN-NEXT: scf.yield [[INPUT]]
+  // SCAN: return [[RESULT]] : !waveamdmachine.reg<vgpr, 1, [[#REG]]>
+  func.func @scf_if_dead_incoming_aliases_join(
+      %condition: i1, %input: !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1> {
+    %result = scf.if %condition -> !waveamdmachine.reg<vgpr, 1> {
+      scf.yield %input : !waveamdmachine.reg<vgpr, 1>
+    } else {
+      %alternative = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+      scf.yield %alternative : !waveamdmachine.reg<vgpr, 1>
+    }
+    return %result : !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // Live incoming storage cannot be the destructive join destination.
+  // PREP-LABEL: func.func @scf_if_live_incoming_copies(
+  // PREP-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
+  // PREP: scf.if
+  // PREP-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple [[INPUT]]
+  // PREP-NEXT: scf.yield [[COPY]]
+  // PREP: waveamdmachine.v_add_u32 [[INPUT]], [[INPUT]]
+  func.func @scf_if_live_incoming_copies(
+      %condition: i1, %input: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>) {
+    %result = scf.if %condition -> !waveamdmachine.reg<vgpr, 1> {
+      scf.yield %input : !waveamdmachine.reg<vgpr, 1>
+    } else {
+      %alternative = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1>
+      scf.yield %alternative : !waveamdmachine.reg<vgpr, 1>
+    }
+    %post = waveamdmachine.v_add_u32 %input, %input
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return %result, %post
+        : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // Multi-region cycle forwards one logical slot without a copy.
+  // PREP-LABEL: func.func @scf_while_preserves_carry_slot(
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: scf.condition
+  // PREP: scf.yield
+  // PREP: return
+  // SCAN-LABEL: func.func @scf_while_preserves_carry_slot(
+  // SCAN-SAME: [[INIT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[#REG:]]>
+  // SCAN: [[RESULT:%.*]] = scf.while
+  // SCAN: return [[RESULT]] : !waveamdmachine.reg<vgpr, 1, [[#REG]]>
+  func.func @scf_while_preserves_carry_slot(
+      %condition: i1, %init: !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1> {
+    %result = scf.while (%before = %init)
+        : (!waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1> {
+      scf.condition(%condition) %before : !waveamdmachine.reg<vgpr, 1>
+    } do {
+    ^bb0(%after: !waveamdmachine.reg<vgpr, 1>):
+      scf.yield %after : !waveamdmachine.reg<vgpr, 1>
+    }
+    return %result : !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // Cycle copies use one parallel-transfer snapshot.
+  // PREP-LABEL: func.func @scf_for_parallel_carry_swap(
+  // PREP: scf.for
+  // PREP: [[RHS_COPY:%.*]] = waveamdmachine.copy_tuple [[RHS:%[^ ]+]]
+  // PREP-NEXT: [[LHS_COPY:%.*]] = waveamdmachine.copy_tuple [[LHS:%[^ ]+]]
+  // PREP-NEXT: scf.yield [[RHS_COPY]], [[LHS_COPY]]
+  // SCAN-LABEL: func.func @scf_for_parallel_carry_swap(
+  // SCAN-SAME: waveamdmachine.regalloc_assignments
+  func.func @scf_for_parallel_carry_swap(
+      %lower: index, %upper: index, %step: index,
+      %lhs: !waveamdmachine.reg<vgpr, 1>,
+      %rhs: !waveamdmachine.reg<vgpr, 1>)
+      -> (!waveamdmachine.reg<vgpr, 1>,
+          !waveamdmachine.reg<vgpr, 1>) {
+    %results:2 = scf.for %i = %lower to %upper step %step
+        iter_args(%lhs_iter = %lhs, %rhs_iter = %rhs)
+        -> (!waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>) {
+      scf.yield %rhs_iter, %lhs_iter
+          : !waveamdmachine.reg<vgpr, 1>,
+            !waveamdmachine.reg<vgpr, 1>
+    }
+    return %results#0, %results#1
+        : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // Nested branches share outer carry storage without crossing sibling arms.
+  // PREP-LABEL: func.func @scf_for_nested_if(
+  // PREP: scf.for
+  // PREP: scf.if
+  // PREP: scf.yield
+  // PREP: scf.yield
+  // PREP: scf.yield
+  // SCAN-LABEL: func.func @scf_for_nested_if(
+  // SCAN-SAME: waveamdmachine.regalloc_assignments
+  func.func @scf_for_nested_if(
+      %lower: index, %upper: index, %step: index, %condition: i1,
+      %init: !waveamdmachine.reg<vgpr, 1>)
+      -> !waveamdmachine.reg<vgpr, 1> {
+    %result = scf.for %i = %lower to %upper step %step
+        iter_args(%carry = %init) -> !waveamdmachine.reg<vgpr, 1> {
+      %next = scf.if %condition -> !waveamdmachine.reg<vgpr, 1> {
+        %changed = waveamdmachine.v_add_u32 %carry, %carry
+            : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+              -> !waveamdmachine.reg<vgpr, 1>
+        scf.yield %changed : !waveamdmachine.reg<vgpr, 1>
+      } else {
+        scf.yield %carry : !waveamdmachine.reg<vgpr, 1>
+      }
+      scf.yield %next : !waveamdmachine.reg<vgpr, 1>
+    }
+    return %result : !waveamdmachine.reg<vgpr, 1>
+  }
 }

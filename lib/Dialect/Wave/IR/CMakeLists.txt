@@ -10,6 +10,7 @@ add_mlir_dialect_library(MLIRWaveDialect
   ../Transforms/WaveAMDHardwareResources.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocLDSPlanning.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocPrep.cpp
+  ../Transforms/RegAlloc/WaveAMDRegAllocRegionFlow.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocScratchPlanning.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocStorage.cpp
   ../Transforms/RegAlloc/WaveAMDRegAllocAGPRRelief.cpp
