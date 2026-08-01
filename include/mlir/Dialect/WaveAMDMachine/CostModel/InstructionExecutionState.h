@@ -9,8 +9,10 @@
 #ifndef MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_INSTRUCTIONEXECUTIONSTATE_H
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_INSTRUCTIONEXECUTIONSTATE_H
 
+#include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionResourceState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
@@ -108,9 +110,53 @@ struct ReadyRegisterPressureLimits {
 
 struct InstructionExecutionConfig;
 
+enum class ReadyResourceCandidateKind : uint8_t {
+  None,
+  StallFiller,
+  Priority,
+};
+
+struct InstructionScheduleResourceInfo {
+  FunctionalUnit functionalUnit = FunctionalUnit::None;
+  unsigned issueSlots = 0;
+  unsigned releaseSlots = 0;
+  bool realInstruction = false;
+  bool tracked = false;
+  bool usesMfmaCoissue = false;
+};
+
+struct InstructionScheduleResourcePreview {
+  FunctionalUnit functionalUnit = FunctionalUnit::None;
+  int64_t waitSlots = 0;
+  unsigned releaseSlots = 0;
+};
+
+InstructionScheduleResourceInfo
+getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
+                                   const ArchData &arch);
+
+class InstructionScheduleResourceState {
+public:
+  explicit InstructionScheduleResourceState(bool trackMfmaCoissue)
+      : trackMfmaCoissue(trackMfmaCoissue) {}
+
+  InstructionScheduleResourcePreview
+  preview(const InstructionScheduleResourceInfo &info) const;
+  void commit(const InstructionScheduleResourceInfo &info);
+  int64_t getCurrentSlot() const { return currentSlot; }
+
+private:
+  std::array<int64_t, static_cast<size_t>(FunctionalUnit::NumFunctionalUnits)>
+      readyAt{};
+  int64_t currentSlot = 0;
+  int64_t mfmaCoissueReadyAt = 0;
+  bool trackMfmaCoissue = false;
+};
+
+// The scheduler supplies legal ready candidates. All ranking, compatibility,
+// occupancy, latency, and resource policy belongs here.
 class InstructionScheduleModel {
 public:
-  bool canPreserveDmaIssueLead() const { return issueStreams > 1; }
   bool requiresStrictBarrierTokenReorder() const { return issueStreams == 1; }
   bool shouldBlockStallFillerMemoryResource() const {
     return issueStreams == 1;
@@ -120,6 +166,16 @@ public:
                                        unsigned releaseSlots,
                                        ReadyRegisterPressure current,
                                        const ReadyCandidateMetrics &next) const;
+  bool canIssueLdsDmaDuringLead(int64_t resourceWait,
+                                bool dependenciesReady) const;
+  bool shouldPrioritizeLongLatency(bool enabled, int64_t candidateLatency,
+                                   int64_t baselineLatency) const;
+  bool shouldPrioritizeLatency(int64_t candidateLatency,
+                               int64_t baselineLatency) const;
+  ReadyResourceCandidateKind classifyReadyResourceCandidate(
+      FunctionalUnit blocked, int64_t waitSlots, unsigned releaseSlots,
+      FunctionalUnit candidate, int64_t candidateWaitSlots,
+      unsigned candidateReleaseSlots, unsigned selectedReleaseSlots) const;
   bool canSelectReadyCandidate(ReadyRegisterPressure current,
                                const ReadyCandidateMetrics &candidate,
                                const ReadyCandidateMetrics &baseline) const;
@@ -140,6 +196,7 @@ private:
                                     ReadyRegisterPressureLimits pressureLimits);
 
   ReadyRegisterPressureLimits pressureLimits;
+  int64_t ldsDmaIssueLead = 0;
   unsigned issueStreams = 1;
 };
 

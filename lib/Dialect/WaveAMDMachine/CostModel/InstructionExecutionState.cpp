@@ -31,6 +31,72 @@
 
 namespace mlir::waveamdmachine {
 
+static bool tracksInstructionScheduleResource(FunctionalUnit unit) {
+  switch (unit) {
+  case FunctionalUnit::VALU:
+  case FunctionalUnit::SALU:
+  case FunctionalUnit::MFMA_XDL:
+  case FunctionalUnit::TRANS:
+    return true;
+  default:
+    return false;
+  }
+}
+
+InstructionScheduleResourceInfo
+getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
+                                   const ArchData &arch) {
+  InstructionScheduleResourceInfo info;
+  if (cls == SchedClass::NoInst)
+    return info;
+  info.realInstruction = true;
+  info.functionalUnit = funit(arch, cls);
+  info.issueSlots = getInstructionIssueCount(op, arch.isa);
+  info.tracked = tracksInstructionScheduleResource(info.functionalUnit);
+  info.usesMfmaCoissue = usesMfmaCoissueResource(op, cls, arch);
+  if (info.tracked)
+    info.releaseSlots = std::max(1, getResourceCycles(arch, cls));
+  return info;
+}
+
+InstructionScheduleResourcePreview InstructionScheduleResourceState::preview(
+    const InstructionScheduleResourceInfo &info) const {
+  InstructionScheduleResourcePreview result;
+  result.functionalUnit = info.functionalUnit;
+  if (!info.tracked)
+    return result;
+
+  result.releaseSlots = info.releaseSlots;
+  size_t index = static_cast<size_t>(result.functionalUnit);
+  int64_t readySlot = readyAt[index];
+  if (trackMfmaCoissue && info.usesMfmaCoissue)
+    readySlot = std::max(readySlot, mfmaCoissueReadyAt);
+  result.waitSlots = std::max<int64_t>(0, readySlot - currentSlot);
+  return result;
+}
+
+void InstructionScheduleResourceState::commit(
+    const InstructionScheduleResourceInfo &info) {
+  if (!info.realInstruction)
+    return;
+  InstructionScheduleResourcePreview resource = preview(info);
+  int64_t issueSlot = currentSlot + resource.waitSlots;
+  if (!info.tracked) {
+    // Resource scheduling does not cross compute-island boundaries.
+    currentSlot = issueSlot + info.issueSlots;
+    readyAt.fill(currentSlot);
+    mfmaCoissueReadyAt = currentSlot;
+    return;
+  }
+  size_t index = static_cast<size_t>(resource.functionalUnit);
+  unsigned releaseSlots =
+      std::max<unsigned>(resource.releaseSlots, info.issueSlots);
+  readyAt[index] = issueSlot + releaseSlots;
+  if (trackMfmaCoissue && info.usesMfmaCoissue)
+    mfmaCoissueReadyAt = issueSlot + releaseSlots;
+  currentSlot = issueSlot + info.issueSlots;
+}
+
 unsigned getTargetWaveCount(Operation *context) {
   for (Operation *op = context; op; op = op->getParentOp()) {
     IntegerAttr targetWaves =
@@ -51,6 +117,15 @@ void configureInstructionScheduleModel(
       std::min(targetWaveCount, static_cast<unsigned>(arch.wavesPerSIMD));
   config.scheduleModel.issueStreams = config.ldsDmaIssueWaveStreams;
   config.scheduleModel.pressureLimits = pressureLimits;
+  int64_t issuePeriod = config.issuePeriod > 0
+                            ? config.issuePeriod
+                            : std::max(1, arch.simdIssuePeriod);
+  if (arch.ldsDmaIssueQueueDepth > 0 && arch.ldsDmaIssueLatency > 0) {
+    int64_t serviceInterval =
+        arch.ldsDmaIssueLatency / arch.ldsDmaIssueQueueDepth;
+    config.scheduleModel.ldsDmaIssueLead =
+        serviceInterval / issuePeriod * issuePeriod;
+  }
   if (arch.agprCountsAgainstVGPRs) {
     unsigned familyLimit = static_cast<unsigned>(arch.vgprFileSize) /
                            config.ldsDmaIssueWaveStreams;
@@ -619,6 +694,40 @@ bool InstructionScheduleModel::shouldSelectResourceStallFiller(
       siblingOverlap = std::min(releaseSlots - 1, issueStreams - 1);
   }
   return waitSlots > siblingOverlap;
+}
+
+bool InstructionScheduleModel::canIssueLdsDmaDuringLead(
+    int64_t resourceWait, bool dependenciesReady) const {
+  return issueStreams > 1 && ldsDmaIssueLead != 0 && resourceWait > 0 &&
+         resourceWait <= ldsDmaIssueLead && dependenciesReady;
+}
+
+bool InstructionScheduleModel::shouldPrioritizeLongLatency(
+    bool enabled, int64_t candidateLatency, int64_t baselineLatency) const {
+  // LLVM latency preference; cache policy is orthogonal.
+  return enabled && baselineLatency > 0 &&
+         candidateLatency > 10 * baselineLatency;
+}
+
+bool InstructionScheduleModel::shouldPrioritizeLatency(
+    int64_t candidateLatency, int64_t baselineLatency) const {
+  return baselineLatency > 0 &&
+         candidateLatency >= 2 * std::max<int64_t>(1, baselineLatency);
+}
+
+ReadyResourceCandidateKind
+InstructionScheduleModel::classifyReadyResourceCandidate(
+    FunctionalUnit blocked, int64_t waitSlots, unsigned releaseSlots,
+    FunctionalUnit candidate, int64_t candidateWaitSlots,
+    unsigned candidateReleaseSlots, unsigned selectedReleaseSlots) const {
+  if (candidateReleaseSlots == 0 || candidateWaitSlots != 0)
+    return ReadyResourceCandidateKind::None;
+  if (waitSlots != 0)
+    return ReadyResourceCandidateKind::StallFiller;
+  if (candidate == blocked || candidateReleaseSlots <= releaseSlots ||
+      candidateReleaseSlots <= selectedReleaseSlots)
+    return ReadyResourceCandidateKind::None;
+  return ReadyResourceCandidateKind::Priority;
 }
 
 struct ReadyRegisterPressureScore {

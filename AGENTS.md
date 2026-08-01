@@ -88,6 +88,10 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   explicit token edges. Do not add implicit alias analysis, barrier inference,
   or loop-carried memory dependencies to any transform. If ordering matters,
   encode it in IR.
+- **Scheduler is a stall filler.** It builds legal ready sets and applies model
+  decisions. Target, occupancy, latency, resource, and filler compatibility
+  policy belongs in `CostModel`, represented by named stalls when applicable.
+  Never add target-specific ranking, a second order, or a post-schedule veto.
 
 ## Wave AMD Regalloc
 
