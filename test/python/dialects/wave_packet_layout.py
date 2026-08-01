@@ -201,6 +201,8 @@ def test_packet_layout_reductions():
                 source_layout=REGISTER_REDUCTION_SOURCE,
                 result_layout=IDENTITY_LAYOUT,
                 axis=1,
+                associative=True,
+                commutative=True,
             ) as reduction:
                 lhs, rhs = reduction.arguments
                 assert lhs.type == scalar
@@ -258,7 +260,7 @@ def test_packet_layout_reductions():
 # CHECK-SAME: source_block = "block"
 # CHECK-SAME: source_item = "item"
 # CHECK-SAME: source_slot = "xor(2*Mod(floor(1/2*reduction), 2), Mod(reduction, 2))"
-# CHECK-SAME: extent 4
+# CHECK-SAME: extent 4 {associative, commutative}
 # CHECK: ^bb0(%[[REGISTER_LHS:.*]]: !wave.simd<i32, 32>, %[[REGISTER_RHS:.*]]: !wave.simd<i32, 32>):
 # CHECK: wave.binary addi %[[REGISTER_LHS]], %[[REGISTER_RHS]]
 # CHECK: wave.yield

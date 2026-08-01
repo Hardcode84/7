@@ -28,6 +28,19 @@ RESULT_LAYOUT = w.PacketLayout(
         ("warp", ((0,),)),
     ),
 )
+REGISTER_SOURCE_LAYOUT = w.PacketLayout(
+    64,
+    (("x", 64), ("reduce", 4)),
+    (
+        ("register", ((0, 1), (0, 2))),
+        ("lane", ((1, 0), (2, 0), (4, 0), (8, 0), (16, 0), (32, 0))),
+    ),
+)
+REGISTER_RESULT_LAYOUT = w.PacketLayout(
+    64,
+    (("x", 64),),
+    (("lane", ((1,), (2,), (4,), (8,), (16,), (32,))),),
+)
 
 
 with w.module() as module_builder:
@@ -56,6 +69,33 @@ with w.module() as module_builder:
         pointer = function_builder.ptr_add(destination, item)
         function_builder.store(reduction.result, pointer, after=read)
 
+    with module_builder.function(
+        "packet_layout_reduce_reorderable_register",
+        [w.ptr_type(w.i32()), w.ptr_type(w.i32())],
+        kernel=True,
+        workgroup_size=[64, 1, 1],
+    ) as function_builder:
+        source, destination = function_builder.args
+        item = function_builder.workitem_id(width=64)
+        source_pointer = function_builder.ptr_add(source, item)
+        value, read = function_builder.load(
+            source_pointer,
+            w.simd_type(w.vector_type(4, w.i32()), width=64),
+        )
+        with function_builder.reduce_layout(
+            value,
+            w.simd_type(w.i32(), width=64),
+            source_layout=REGISTER_SOURCE_LAYOUT,
+            result_layout=REGISTER_RESULT_LAYOUT,
+            axis=1,
+            associative=True,
+            commutative=True,
+        ) as reduction:
+            lhs, rhs = reduction.arguments
+            function_builder.yield_((function_builder.addi(lhs, rhs),))
+        pointer = function_builder.ptr_add(destination, item)
+        function_builder.store(reduction.result, pointer, after=read)
+
     print(module_builder.module)
 
 
@@ -73,6 +113,15 @@ with w.module() as module_builder:
 # REDUCE: wave.binary addi %[[LHS]], %[[RHS]]
 # REDUCE: wave.yield
 # REDUCE: wave.store %[[RESULT]] {{.*}} after %[[READ]]
+
+# REDUCE-LABEL: func.func @packet_layout_reduce_reorderable_register
+# REDUCE: %[[REGISTER_VALUE:.*]], %[[REGISTER_READ:.*]] = wave.load
+# REDUCE: %[[REGISTER_RESULT:.*]] = wave.reduce %[[REGISTER_VALUE]]
+# REDUCE-SAME: source_block = "block"
+# REDUCE-SAME: source_item = "item"
+# REDUCE-SAME: source_slot = "xor(2*Mod(floor(1/2*reduction), 2), Mod(reduction, 2))"
+# REDUCE-SAME: extent 4 {associative, commutative}
+# REDUCE: wave.store %[[REGISTER_RESULT]] {{.*}} after %[[REGISTER_READ]]
 
 # LOWER-LABEL: func.func @packet_layout_reduce_wave
 # LOWER: %[[INPUT:.*]], %[[READ:.*]] = wave.load
@@ -97,6 +146,16 @@ with w.module() as module_builder:
 # LOWER-NOT: wave.reduce
 # LOWER-NOT: wave.redistribute
 
+# LOWER-LABEL: func.func @packet_layout_reduce_reorderable_register
+# LOWER: %[[REGISTER_INPUT:.*]], %[[REGISTER_READ:.*]] = wave.load
+# LOWER-NOT: wave.reduce
+# LOWER-NOT: wave.redistribute
+# LOWER-COUNT-4: wave.extract %[[REGISTER_INPUT]]
+# LOWER-COUNT-3: wave.binary addi
+# LOWER: wave.store {{.*}} after %[[REGISTER_READ]]
+# LOWER-NOT: wave.reduce
+# LOWER-NOT: wave.redistribute
+
 # ASM-LABEL: packet_layout_reduce_wave:
 # ASM: ; wave backend: WaveAMDMachine MLIR pipeline finalized
 # ASM: buffer_load_dword
@@ -112,3 +171,10 @@ with w.module() as module_builder:
 # ASM: buffer_store_dword
 # ASM: s_endpgm
 # ASM: .amdhsa_group_segment_fixed_size 1024
+
+# ASM-LABEL: packet_layout_reduce_reorderable_register:
+# ASM: buffer_load_dwordx4
+# ASM: v_add_u32
+# ASM-NEXT: v_add3_u32
+# ASM: buffer_store_dword
+# ASM: s_endpgm

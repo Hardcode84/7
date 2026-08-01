@@ -2688,6 +2688,8 @@ class FunctionBuilder:
         source_layout: PacketLayout,
         result_layout: PacketLayout,
         axis: int,
+        associative: bool = False,
+        commutative: bool = False,
     ) -> Iterator[_ReduceBuilder]:
         """Build a packet-layout reduction with a two-argument combiner."""
         axis = _validate_reduce_layouts(source_layout, result_layout, axis)
@@ -2704,7 +2706,14 @@ class FunctionBuilder:
             source_item,
             source_slot,
         )
-        op = wave.ReduceOp(result_type, source, relation, source_layout.shape[axis])
+        op = wave.ReduceOp(
+            result_type,
+            source,
+            relation,
+            source_layout.shape[axis],
+            associative=associative,
+            commutative=commutative,
+        )
         combiner_type = simd_type(element_type, source_layout.lane_width)
         block = op.combiner.blocks.append(combiner_type, combiner_type)
         reduction = _ReduceBuilder(op, block)
