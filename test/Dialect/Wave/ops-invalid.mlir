@@ -994,7 +994,7 @@ func.func @redistribute_multidimensional_result(
 
 func.func @redistribute_nonnumeric_scalar(
     %v: !wave.simd<index, 32>) {
-  // expected-error @+1 {{source packet element type must be integer or float}}
+  // expected-error @+1 {{source packet element type must be integer, float, or pointer}}
   %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "slot"> : !wave.simd<index, 32> -> !wave.simd<index, 32>
   return
 }

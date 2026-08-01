@@ -202,6 +202,20 @@ func.func @cross_wave_i64(%source: !wave.simd<vector<1xi64>, 32>)
 
 // -----
 
+func.func @cross_wave_pointer(
+    %source: !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  // expected-error @+1 {{cross-wave pointer redistribution is unsupported}}
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return
+}
+
+// -----
+
 func.func @cross_block(%source: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   // expected-error @+1 {{cross-block redistribution requires cluster/DSM lowering}}

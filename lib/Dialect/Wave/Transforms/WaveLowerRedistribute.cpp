@@ -1167,8 +1167,12 @@ static FailureOr<int64_t> selectVectorElements(sym::Analysis &analysis,
                                                int64_t maxVectorBits) {
   int64_t sourceSlots = getPacketElementCount(op.getSource().getType());
   int64_t resultSlots = getPacketElementCount(op.getResult().getType());
-  int64_t elementBits =
-      getPacketScalarType(op.getSource().getType()).getIntOrFloatBitWidth();
+  Type elementType = getPacketScalarType(op.getSource().getType());
+  if (!elementType.isIntOrFloat()) {
+    assert(isa<PtrType>(elementType) && "unsupported redistribution payload");
+    return 1;
+  }
+  int64_t elementBits = elementType.getIntOrFloatBitWidth();
   int64_t limit = std::min(sourceSlots, resultSlots);
   if (maxVectorBits)
     limit = std::min(limit, maxVectorBits / elementBits);
@@ -3813,6 +3817,8 @@ static LogicalResult lowerWorkgroupRedistribution(
     ScratchSequenceMap &sequences, TimingScope &timing) {
   TimingScope analysisTiming =
       timing.nest("lower_redistribute_workgroup_analyze_lds");
+  if (isa<PtrType>(getPacketScalarType(op.getSource().getType())))
+    return op.emitOpError("cross-wave pointer redistribution is unsupported");
   if (!func.getBody().hasOneBlock())
     return op.emitOpError(
         "cross-wave redistribution requires a single-block kernel function");

@@ -214,6 +214,25 @@ func.func @identity(%source: !wave.simd<vector<2xi32>, 32>)
 
 // -----
 
+// CHECK-LABEL: func.func @pointer_cross_lane(
+// CHECK-NOT: wave.alloc
+// CHECK: %[[MOVED:.*]] = wave.shuffle %{{.*}} from %{{.*}} : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+// CHECK-NOT: wave.redistribute
+// CHECK: return %[[MOVED]] : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+func.func @pointer_cross_lane(
+    %source: !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
+    -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+  return %result : !wave.simd<!wave.ptr<#wave.global, f32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reverse_slots(
 // CHECK-NOT: wave.shuffle
 // CHECK-NOT: wave.alloc

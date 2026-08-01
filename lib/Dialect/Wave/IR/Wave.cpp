@@ -3136,7 +3136,8 @@ verifyRedistributionRelationSymbols(Operation *op, RedistributionAttr relation,
 }
 
 static LogicalResult verifyRedistributionPayload(Operation *op, SimdType type,
-                                                 StringRef role) {
+                                                 StringRef role,
+                                                 bool allowPointer) {
   Type payload = type.getElementType();
   if (VectorType vector = dyn_cast<VectorType>(payload)) {
     if (vector.getRank() != 1)
@@ -3145,19 +3146,23 @@ static LogicalResult verifyRedistributionPayload(Operation *op, SimdType type,
       return op->emitOpError() << role << " packet vector must be fixed-size";
     payload = vector.getElementType();
   }
-  if (!payload.isIntOrFloat())
+  if (payload.isIntOrFloat() || (allowPointer && isa<PtrType>(payload)))
+    return success();
+  if (allowPointer)
     return op->emitOpError()
-           << role << " packet element type must be integer or float";
-  return success();
+           << role << " packet element type must be integer, float, or pointer";
+  return op->emitOpError() << role
+                           << " packet element type must be integer or float";
 }
 
 LogicalResult RedistributeOp::verify() {
   SimdType sourceType = cast<SimdType>(getSource().getType());
   SimdType resultType = cast<SimdType>(getResult().getType());
 
-  if (failed(
-          verifyRedistributionPayload(getOperation(), sourceType, "source")) ||
-      failed(verifyRedistributionPayload(getOperation(), resultType, "result")))
+  if (failed(verifyRedistributionPayload(getOperation(), sourceType, "source",
+                                         /*allowPointer=*/true)) ||
+      failed(verifyRedistributionPayload(getOperation(), resultType, "result",
+                                         /*allowPointer=*/true)))
     return failure();
   if (sourceType.getWidth() != resultType.getWidth())
     return emitOpError("source and result SIMD widths must match");
@@ -3171,9 +3176,10 @@ static LogicalResult verifyReductionPacketTypes(ReduceOp op) {
   SimdType sourceType = cast<SimdType>(op.getSource().getType());
   SimdType resultType = cast<SimdType>(op.getResult().getType());
   if (failed(verifyRedistributionPayload(op.getOperation(), sourceType,
-                                         "source")) ||
-      failed(
-          verifyRedistributionPayload(op.getOperation(), resultType, "result")))
+                                         "source", /*allowPointer=*/false)) ||
+      failed(verifyRedistributionPayload(op.getOperation(), resultType,
+                                         "result",
+                                         /*allowPointer=*/false)))
     return failure();
   if (sourceType.getWidth() != resultType.getWidth())
     return op.emitOpError("source and result SIMD widths must match");
