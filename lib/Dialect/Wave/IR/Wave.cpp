@@ -3257,7 +3257,7 @@ static LogicalResult verifyReductionCombiner(ReduceOp op) {
 }
 
 static LogicalResult verifyReductionRelation(ReduceOp op) {
-  if (op.getReductionExtent() <= 0)
+  if (op.getReductionExtentAttr().getInt() <= 0)
     return op.emitOpError("reduction extent must be positive");
   return verifyRedistributionRelationSymbols(op.getOperation(),
                                              op.getRelation(), true);

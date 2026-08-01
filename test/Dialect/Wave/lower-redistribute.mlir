@@ -140,6 +140,36 @@ func.func @reduce_register_two_results(
 
 // -----
 
+// CHECK-LABEL: func.func @reduce_workitem_slot(
+// CHECK: wave.workitem_id
+// CHECK: wave.index_expr
+// CHECK: wave.select
+// CHECK: wave.workitem_id
+// CHECK: wave.index_expr
+// CHECK: wave.select
+// CHECK: wave.binary addi
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+func.func @reduce_workitem_slot(
+    %source: !wave.simd<vector<2xi32>, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item",
+                           source_slot = "xor(Mod(item, 2), reduction)">
+      extent 2 : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %sum = wave.binary addi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %sum : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reduce_cross_wave(
 // CHECK: %[[ALLOC:.*]] = wave.alloc()
 // CHECK: %[[STORE:.*]] = wave.store

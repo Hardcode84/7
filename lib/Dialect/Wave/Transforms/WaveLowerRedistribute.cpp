@@ -212,6 +212,10 @@ static int64_t getPacketElementCount(Type type) {
   return 1;
 }
 
+static int64_t getReductionExtent(ReduceOp op) {
+  return op.getReductionExtentAttr().getInt();
+}
+
 static SimdType getPacketElementType(Type type) {
   SimdType packet = cast<SimdType>(type);
   return SimdType::get(type.getContext(), getPacketScalarType(type),
@@ -320,13 +324,14 @@ struct ReductionRelationGroup {
   SmallVector<Value> values;
 };
 
-static FailureOr<Value> extractReductionSourceSlot(IRRewriter &rewriter,
-                                                   ReduceOp op,
-                                                   MutableArrayRef<Value> cache,
-                                                   int64_t slot) {
+static FailureOr<Value>
+extractReductionSourceSlot(IRRewriter &rewriter, ReduceOp op,
+                           MutableArrayRef<Value> cache, int64_t slot,
+                           int64_t resultSlot, int64_t reductionCoordinate) {
   if (slot < 0 || slot >= static_cast<int64_t>(cache.size())) {
     op.emitOpError("relation source slot ")
-        << slot << " is outside the source packet";
+        << slot << " is outside the source packet at result slot " << resultSlot
+        << ", reduction coordinate " << reductionCoordinate;
     return failure();
   }
   if (cache[slot])
@@ -357,15 +362,16 @@ redistributeReductionValue(IRRewriter &rewriter, ReduceOp op, Value source,
 static FailureOr<Value>
 materializeReductionTerm(IRRewriter &rewriter, ReduceOp op,
                          const SpecializedReductionRelation &relation,
-                         sym::ExprHandle zero,
+                         sym::ExprHandle zero, int64_t resultSlot,
+                         int64_t reductionCoordinate,
                          MutableArrayRef<Value> extracted) {
   std::optional<int64_t> sourceSlot =
       sym::getIntegerLiteralValue(relation.sourceSlot);
   if (!sourceSlot)
     return redistributeReductionValue(rewriter, op, op.getSource(), relation,
                                       relation.sourceSlot);
-  FailureOr<Value> source =
-      extractReductionSourceSlot(rewriter, op, extracted, *sourceSlot);
+  FailureOr<Value> source = extractReductionSourceSlot(
+      rewriter, op, extracted, *sourceSlot, resultSlot, reductionCoordinate);
   if (failed(source))
     return failure();
   return redistributeReductionValue(rewriter, op, *source, relation, zero);
@@ -377,18 +383,21 @@ lowerOrderedReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
                                 int64_t resultSlot,
                                 MutableArrayRef<Value> extracted) {
   SmallVector<Value> terms;
+  terms.reserve(getReductionExtent(op));
   RedistributionAttr relation = op.getRelation();
   for (int64_t reductionCoordinate :
-       llvm::seq<int64_t>(0, op.getReductionExtent())) {
+       llvm::seq<int64_t>(0, getReductionExtent(op))) {
     FailureOr<SpecializedReductionRelation> specialized =
         specializeReductionRelation(analysis, relation, resultSlot,
                                     reductionCoordinate);
     if (failed(specialized)) {
-      op.emitOpError("failed to specialize a reduction relation");
+      op.emitOpError("failed to specialize reduction relation at result slot ")
+          << resultSlot << ", reduction coordinate " << reductionCoordinate;
       return failure();
     }
     FailureOr<Value> term =
-        materializeReductionTerm(rewriter, op, *specialized, zero, extracted);
+        materializeReductionTerm(rewriter, op, *specialized, zero, resultSlot,
+                                 reductionCoordinate, extracted);
     if (failed(term))
       return failure();
     terms.push_back(*term);
@@ -429,12 +438,13 @@ lowerReorderableReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
   SmallVector<Value> terms;
   RedistributionAttr relation = op.getRelation();
   for (int64_t reductionCoordinate :
-       llvm::seq<int64_t>(0, op.getReductionExtent())) {
+       llvm::seq<int64_t>(0, getReductionExtent(op))) {
     FailureOr<SpecializedReductionRelation> specialized =
         specializeReductionRelation(analysis, relation, resultSlot,
                                     reductionCoordinate);
     if (failed(specialized)) {
-      op.emitOpError("failed to specialize a reduction relation");
+      op.emitOpError("failed to specialize reduction relation at result slot ")
+          << resultSlot << ", reduction coordinate " << reductionCoordinate;
       return failure();
     }
 
@@ -446,8 +456,8 @@ lowerReorderableReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
       continue;
     }
 
-    FailureOr<Value> source =
-        extractReductionSourceSlot(rewriter, op, extracted, *sourceSlot);
+    FailureOr<Value> source = extractReductionSourceSlot(
+        rewriter, op, extracted, *sourceSlot, resultSlot, reductionCoordinate);
     if (failed(source))
       return failure();
     SmallVector<ReductionRelationGroup>::iterator group =
@@ -466,8 +476,22 @@ lowerReorderableReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
   return buildReductionTree(rewriter, op, terms);
 }
 
+static LogicalResult checkReductionSpecializationBudget(ReduceOp op) {
+  int64_t resultSlots = getPacketElementCount(op.getResult().getType());
+  std::optional<int64_t> points =
+      llvm::checkedMul(getReductionExtent(op), resultSlots);
+  if (!points)
+    return op.emitOpError("reduction specialization point count overflows i64");
+  if (*points > kMaxRelationPoints)
+    return op.emitOpError("reduction specialization requires ")
+           << *points << " points, exceeding the 2^20 point limit";
+  return success();
+}
+
 static LogicalResult lowerReduction(IRRewriter &rewriter, ReduceOp op,
                                     WaveDialect &dialect) {
+  if (failed(checkReductionSpecializationBudget(op)))
+    return failure();
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
       sym::Analysis::create(dialect.getSymbolStore());
   if (failed(analysis))

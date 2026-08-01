@@ -1340,6 +1340,18 @@ func.func @reduce_nonpositive_extent(%v: !wave.simd<i32, 32>) {
 
 // -----
 
+func.func @reduce_negative_extent(%v: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{reduction extent must be positive}}
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent -1
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      wave.yield %lhs : !wave.simd<i32, 32>
+    }
+  return
+}
+
+// -----
+
 func.func @reduce_missing_extent(%v: !wave.simd<i32, 32>) {
   // expected-error @+2 {{custom op 'wave.reduce' expected 'extent'}}
   %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction">

@@ -1,5 +1,52 @@
 // RUN: wave-opt --wave-lower-redistribute --split-input-file --verify-diagnostics %s
 
+func.func @reduction_specialization_budget(%source: !wave.simd<i32, 32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  // expected-error @+1 {{reduction specialization requires 1048577 points, exceeding the 2^20 point limit}}
+  %result = wave.reduce %source using
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "0">
+      extent 1048577 : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      wave.yield %lhs : !wave.simd<i32, 32>
+    }
+  return
+}
+
+// -----
+
+func.func @reduction_specialization_overflow(
+    %source: !wave.simd<vector<2xi32>, 32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  // expected-error @+1 {{reduction specialization point count overflows i64}}
+  %result = wave.reduce %source using
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "slot">
+      extent 9223372036854775807
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      wave.yield %lhs : !wave.simd<i32, 32>
+    }
+  return
+}
+
+// -----
+
+func.func @reduction_source_slot_oob(%source: !wave.simd<i32, 32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  // expected-error @+1 {{relation source slot 1 is outside the source packet at result slot 0, reduction coordinate 1}}
+  %result = wave.reduce %source using
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "item", source_slot = "reduction">
+      extent 2 : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      wave.yield %lhs : !wave.simd<i32, 32>
+    }
+  return
+}
+
+// -----
+
 func.func @source_slot_oob(%source: !wave.simd<vector<2xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   // expected-error @+1 {{source slot 2 is out of bounds at destination (0, 0, 0)}}
