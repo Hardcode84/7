@@ -93,6 +93,12 @@ struct ArchData {
   // MFMA excludes TRANS, DOT, and packed VALU while its resource is live.
   bool hasMfmaCoissueRestriction;
 
+  // Full MFMA window fillable with coexecuting VALU work.
+  int mfmaValuCoexecWindowSlots;
+
+  // Consecutive full MFMAs allowed before opening that window.
+  int mfmaValuCoexecProducerBurst;
+
   // AGPR allocation consumes VGPR-file capacity.
   bool agprCountsAgainstVGPRs;
 

@@ -190,6 +190,33 @@ bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
              VPkFmaF32Op>(op);
 }
 
+InstructionCoexecutionModel
+getInstructionCoexecutionModel(Operation *op, SchedClass cls,
+                               const ArchData &arch) {
+  InstructionCoexecutionModel model;
+  if (arch.mfmaValuCoexecWindowSlots == 0 ||
+      arch.mfmaValuCoexecProducerBurst == 0)
+    return model;
+
+  unsigned issues = getInstructionIssueCount(op, arch.isa);
+  unsigned release =
+      std::max<unsigned>(issues, std::max(1, getResourceCycles(arch, cls)));
+  if (op->hasTrait<traits::MFMAOp>()) {
+    unsigned window = static_cast<unsigned>(arch.mfmaValuCoexecWindowSlots);
+    if (release <= window)
+      return model;
+    model.openedSlots = window;
+    model.producerBurst =
+        static_cast<unsigned>(arch.mfmaValuCoexecProducerBurst);
+    model.waitsForWindow = true;
+    return model;
+  }
+  if (usesMfmaCoissueResource(op, cls, arch) || !op->hasTrait<traits::VALUOp>())
+    return model;
+  model.filledSlots = release;
+  return model;
+}
+
 bool hasSchedClassMapping(Operation *op) {
   return classifyMappedOp(op) != SchedClass::NumSchedClasses;
 }

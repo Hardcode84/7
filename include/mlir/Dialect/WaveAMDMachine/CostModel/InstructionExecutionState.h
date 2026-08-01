@@ -46,6 +46,7 @@ enum class InstructionStallKind : uint8_t {
   InstructionHazard,
   M0ReadWrite,
   StoreWriteData,
+  CoexecWindow,
 };
 
 enum class InstructionPipeKind : uint8_t {
@@ -117,18 +118,18 @@ enum class ReadyResourceCandidateKind : uint8_t {
 };
 
 struct InstructionScheduleResourceInfo {
-  FunctionalUnit functionalUnit = FunctionalUnit::None;
   unsigned issueSlots = 0;
   unsigned releaseSlots = 0;
+  FunctionalUnit functionalUnit = FunctionalUnit::None;
   bool realInstruction = false;
   bool tracked = false;
   bool usesMfmaCoissue = false;
 };
 
 struct InstructionScheduleResourcePreview {
-  FunctionalUnit functionalUnit = FunctionalUnit::None;
   int64_t waitSlots = 0;
   unsigned releaseSlots = 0;
+  FunctionalUnit functionalUnit = FunctionalUnit::None;
 };
 
 InstructionScheduleResourceInfo
@@ -166,6 +167,10 @@ public:
                                        unsigned releaseSlots,
                                        ReadyRegisterPressure current,
                                        const ReadyCandidateMetrics &next) const;
+  bool canFillStall(InstructionStallKind stall, FunctionalUnit candidate,
+                    bool usesMfmaCoissueResource) const;
+  InstructionCoexecutionModel
+  applyCoexecutionPolicy(InstructionCoexecutionModel model) const;
   bool canIssueLdsDmaDuringLead(int64_t resourceWait,
                                 bool dependenciesReady) const;
   bool shouldPrioritizeLongLatency(bool enabled, int64_t candidateLatency,
@@ -198,6 +203,7 @@ private:
   ReadyRegisterPressureLimits pressureLimits;
   int64_t ldsDmaIssueLead = 0;
   unsigned issueStreams = 1;
+  bool enableCoexecWindow = true;
 };
 
 struct InstructionExecutionConfig {
@@ -304,6 +310,7 @@ private:
     unsigned counterIssueCount = 0;
     unsigned storeDataHazardLatency = 0;
     unsigned mfmaPasses = 0;
+    InstructionCoexecutionModel coexecution;
     InstructionPipeKind pipe = InstructionPipeKind::None;
     MemoryIssueResourceMask memoryIssueResources = 0;
     InstructionWaitCounterKind counter = InstructionWaitCounterKind::None;
@@ -458,6 +465,8 @@ private:
   void commitMemoryIssue(const InstructionDesc &desc, int64_t issueCycle);
   void commitIssueSlotHazards(Operation *op, const InstructionDesc &desc);
   void commitIssueSlotProducer(Operation *op, const InstructionDesc &desc);
+  void consumeCoexecutionWait(const InstructionDesc &desc);
+  void commitCoexecution(const InstructionDesc &desc);
   void commitM0(const InstructionDesc &desc);
   void commitStoreData(const InstructionDesc &desc);
   void pruneRetiredEvents(int64_t cycle);
@@ -479,6 +488,8 @@ private:
   int64_t currentCycle = 0;
   int64_t nextLdsDmaIssueCycle = 0;
   int64_t mfmaCoissueReadyCycle = 0;
+  unsigned coexecWindowSlots = 0;
+  unsigned coexecProducerRun = 0;
   uint64_t currentIssueSlot = 0;
   EventId nextEventId = 1;
   unsigned storeDataGap = 0;

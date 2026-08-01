@@ -23,6 +23,14 @@ namespace mlir::waveamdmachine {
 
 struct ArchData;
 
+// Model-owned program-order work budget between coexecution producers.
+struct InstructionCoexecutionModel {
+  unsigned openedSlots = 0;
+  unsigned filledSlots = 0;
+  unsigned producerBurst = 0;
+  bool waitsForWindow = false;
+};
+
 // Bucket a wave.amd.machine op into a SchedClass. Aborts in debug
 // builds on an unmapped op so coverage gaps surface during testing;
 // release builds fall back to Write32Bit and emit a warning via
@@ -34,6 +42,10 @@ unsigned getInstructionIssueCount(Operation *op,
 
 bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
                              const ArchData &arch);
+
+InstructionCoexecutionModel
+getInstructionCoexecutionModel(Operation *op, SchedClass cls,
+                               const ArchData &arch);
 
 // True when the cost model has a non-fallback mapping for the op.
 bool hasSchedClassMapping(Operation *op);

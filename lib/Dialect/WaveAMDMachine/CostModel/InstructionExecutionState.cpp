@@ -116,6 +116,8 @@ void configureInstructionScheduleModel(
   config.ldsDmaIssueWaveStreams =
       std::min(targetWaveCount, static_cast<unsigned>(arch.wavesPerSIMD));
   config.scheduleModel.issueStreams = config.ldsDmaIssueWaveStreams;
+  config.scheduleModel.enableCoexecWindow =
+      config.scheduleModel.issueStreams > 1;
   config.scheduleModel.pressureLimits = pressureLimits;
   int64_t issuePeriod = config.issuePeriod > 0
                             ? config.issuePeriod
@@ -592,27 +594,22 @@ bool waitsForMemoryTokenDepsBeforeIssue(Operation *op) {
 }
 
 llvm::StringRef getInstructionStallKindName(InstructionStallKind kind) {
-  switch (kind) {
-  case InstructionStallKind::None:
-    return "none";
-  case InstructionStallKind::IssueBackpressure:
-    return "issue_backpressure";
-  case InstructionStallKind::OperandValue:
-    return "operand_value";
-  case InstructionStallKind::MemoryValue:
-    return "memory_value";
-  case InstructionStallKind::MemoryToken:
-    return "memory_token";
-  case InstructionStallKind::Waitcnt:
-    return "waitcnt";
-  case InstructionStallKind::InstructionHazard:
-    return "instruction_hazard";
-  case InstructionStallKind::M0ReadWrite:
-    return "m0_read_write";
-  case InstructionStallKind::StoreWriteData:
-    return "store_write_data";
-  }
-  llvm_unreachable("bad stall kind");
+  static constexpr std::array<llvm::StringLiteral, 10> names = {
+      "none",
+      "issue_backpressure",
+      "operand_value",
+      "memory_value",
+      "memory_token",
+      "waitcnt",
+      "instruction_hazard",
+      "m0_read_write",
+      "store_write_data",
+      "coexec_window"};
+  static_assert(static_cast<unsigned>(InstructionStallKind::CoexecWindow) + 1 ==
+                names.size());
+  unsigned index = static_cast<unsigned>(kind);
+  assert(index < names.size() && "bad stall kind");
+  return names[index];
 }
 
 llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind) {
@@ -694,6 +691,19 @@ bool InstructionScheduleModel::shouldSelectResourceStallFiller(
       siblingOverlap = std::min(releaseSlots - 1, issueStreams - 1);
   }
   return waitSlots > siblingOverlap;
+}
+
+bool InstructionScheduleModel::canFillStall(
+    InstructionStallKind stall, FunctionalUnit candidate,
+    bool usesMfmaCoissueResource) const {
+  if (stall != InstructionStallKind::CoexecWindow)
+    return true;
+  return candidate == FunctionalUnit::VALU && !usesMfmaCoissueResource;
+}
+
+InstructionCoexecutionModel InstructionScheduleModel::applyCoexecutionPolicy(
+    InstructionCoexecutionModel model) const {
+  return enableCoexecWindow ? model : InstructionCoexecutionModel{};
 }
 
 bool InstructionScheduleModel::canIssueLdsDmaDuringLead(
@@ -998,6 +1008,30 @@ void InstructionExecutionState::advanceToCycle(int64_t cycle) {
   pruneRetiredEvents(currentCycle);
 }
 
+void InstructionExecutionState::consumeCoexecutionWait(
+    const InstructionDesc &desc) {
+  if (desc.coexecution.waitsForWindow && coexecWindowSlots != 0)
+    coexecWindowSlots = 0;
+}
+
+void InstructionExecutionState::commitCoexecution(const InstructionDesc &desc) {
+  if (desc.coexecution.filledSlots != 0) {
+    coexecWindowSlots -=
+        std::min(coexecWindowSlots, desc.coexecution.filledSlots);
+    coexecProducerRun = 0;
+    return;
+  }
+  if (desc.coexecution.openedSlots == 0) {
+    coexecProducerRun = 0;
+    return;
+  }
+  ++coexecProducerRun;
+  if (coexecProducerRun < desc.coexecution.producerBurst)
+    return;
+  coexecWindowSlots = desc.coexecution.openedSlots;
+  coexecProducerRun = 0;
+}
+
 FailureOr<InstructionCommitResult>
 InstructionExecutionState::commitWithResources(
     Operation *op, InstructionResourceState *resourceState, unsigned wave,
@@ -1016,6 +1050,7 @@ InstructionExecutionState::commitWithResources(
   currentCycle += queried->cycles;
   pruneRetiredEvents(currentCycle);
   currentIssueSlot += getIssueHazardWait(*queried);
+  consumeCoexecutionWait(*desc);
 
   InstructionCommitResult result;
   result.stall = *queried;
@@ -1054,6 +1089,7 @@ InstructionExecutionState::commitWithResources(
     commitMemoryIssue(*desc, result.issueCycle);
   }
   currentIssueSlot += desc->issueSlots;
+  commitCoexecution(*desc);
   commitIssueSlotHazards(op, *desc);
   commitM0(*desc);
   commitStoreData(*desc);
@@ -1097,6 +1133,8 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.pipe = pipeFor(arch, cls);
   desc.resourceDuration = getResourceCycles(arch, cls);
   desc.instructionIssueCount = getInstructionIssueCount(op, arch.isa);
+  desc.coexecution = config.scheduleModel.applyCoexecutionPolicy(
+      getInstructionCoexecutionModel(op, cls, arch));
   desc.counterIssueCount = getWaitcntInfo(op).issueCount;
   desc.issueSlots = desc.instructionIssueCount;
   if (op->hasTrait<traits::MFMAOp>())
@@ -1264,6 +1302,11 @@ FailureOr<InstructionStall> InstructionExecutionState::queryWithResources(
   InstructionStall stall;
   if (failed(addDependencyStalls(op, desc, stall)))
     return failure();
+
+  // Coexecution is a model stall; scheduling only supplies compatible fillers.
+  if (desc.coexecution.waitsForWindow && coexecWindowSlots != 0)
+    addComponent(stall, InstructionStallKind::CoexecWindow,
+                 saturatingMultiply(coexecWindowSlots, getIssuePeriod()));
 
   if (resourceState) {
     addLocalMemoryIssueStalls(desc, stall);

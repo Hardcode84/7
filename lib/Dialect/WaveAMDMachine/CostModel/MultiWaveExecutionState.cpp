@@ -381,7 +381,9 @@ MultiWaveExecutionState::queryAfterIssueOpportunity(unsigned wave,
   int64_t covered = std::max<int64_t>(0, *opportunity - getCurrentCycle(wave));
   InstructionStall stall;
   for (InstructionStallComponent component : raw->components) {
-    component.cycles = std::max<int64_t>(0, component.cycles - covered);
+    // Sibling-wave issue time cannot fill a program-order coexecution budget.
+    if (component.kind != InstructionStallKind::CoexecWindow)
+      component.cycles = std::max<int64_t>(0, component.cycles - covered);
     if (component.cycles == 0)
       continue;
     stall.components.push_back(component);

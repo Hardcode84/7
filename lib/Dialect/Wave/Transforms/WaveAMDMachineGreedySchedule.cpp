@@ -135,6 +135,8 @@ struct FillableStall {
   FillableStallKind kind = FillableStallKind::None;
   int64_t issueCycle = 0;
   waveamdmachine::MemoryIssueResourceMask blockedMemoryResources = 0;
+  waveamdmachine::InstructionStallKind reason =
+      waveamdmachine::InstructionStallKind::None;
 };
 
 struct GreedyRegion {
@@ -341,6 +343,7 @@ struct IssuePreview {
   int64_t nextIssueCycle = 0;
   int64_t memoryReadyCycle = 0;
   int64_t memoryValueReadyCycle = 0;
+  int64_t coexecWindowWaitCycles = 0;
   unsigned issues = 0;
   bool realInst = false;
   bool memoryIssuer = false;
@@ -368,6 +371,7 @@ struct GreedyStats {
   unsigned cheapHazardGaps = 0;
   unsigned m0Gaps = 0;
   unsigned storeDataGaps = 0;
+  unsigned coexecWindowGaps = 0;
   unsigned vmemPrefetchMoves = 0;
   unsigned longLatencyVmemPrefetchMoves = 0;
   unsigned recurrenceModelMoves = 0;
@@ -616,6 +620,10 @@ static void recordPreviewStall(IssuePreview &preview,
     case waveamdmachine::InstructionStallKind::IssueBackpressure:
       preview.fuWaitCycles = std::max(preview.fuWaitCycles, component.cycles);
       break;
+    case waveamdmachine::InstructionStallKind::CoexecWindow:
+      preview.coexecWindowWaitCycles =
+          std::max(preview.coexecWindowWaitCycles, component.cycles);
+      break;
     case waveamdmachine::InstructionStallKind::None:
       break;
     default:
@@ -657,9 +665,9 @@ static FailureOr<IssuePreview> previewIssue(
 
 static bool stalls(const IssuePreview &preview) {
   return preview.operandWaitCycles != 0 || preview.memoryWaitCycles != 0 ||
-         preview.fuWaitCycles != 0 || preview.issueWaitCycles != 0 ||
-         preview.cuIssueWaitCycles != 0 || preview.cmaIssueWaitCycles != 0 ||
-         preview.hazardWaitInsts != 0;
+         preview.fuWaitCycles != 0 || preview.coexecWindowWaitCycles != 0 ||
+         preview.issueWaitCycles != 0 || preview.cuIssueWaitCycles != 0 ||
+         preview.cmaIssueWaitCycles != 0 || preview.hazardWaitInsts != 0;
 }
 
 static bool stallsPriority(const IssuePreview &preview) {
@@ -1255,6 +1263,12 @@ static bool isBarrierOp(Operation *op) {
   return isa<waveamdmachine::BarrierWaitOp>(op) || isFullBarrierOp(op);
 }
 
+static void recordCoexecGapStats(const IssuePreview &preview,
+                                 GreedyStats &stats) {
+  if (preview.coexecWindowWaitCycles != 0)
+    ++stats.coexecWindowGaps;
+}
+
 static void recordGapStats(Operation *op, const IssuePreview &preview,
                            GreedyStats &stats) {
   if (preview.operandWaitCycles != 0)
@@ -1274,6 +1288,7 @@ static void recordGapStats(Operation *op, const IssuePreview &preview,
     if (preview.storeDataHazard)
       ++stats.storeDataGaps;
   }
+  recordCoexecGapStats(preview, stats);
 }
 
 static bool filledOnlyM0HazardGaps(const GreedyStats &stats) {
@@ -1306,11 +1321,19 @@ static bool hasComputeResourceMoves(const GreedyStats &stats) {
   return stats.resourcePriorityMoves != 0 || stats.resourceStallFills != 0;
 }
 
-static StringRef getGreedyMoveReason(const GreedyStats &stats) {
+static StringRef getDirectStallMoveReason(const GreedyStats &stats) {
   if (filledOnlyM0HazardGaps(stats))
     return "m0_hazard";
   if (filledOnlyStoreDataHazardGaps(stats))
     return "store_data_hazard";
+  if (stats.coexecWindowGaps != 0)
+    return "coexec_window";
+  return {};
+}
+
+static StringRef getGreedyMoveReason(const GreedyStats &stats) {
+  if (StringRef reason = getDirectStallMoveReason(stats); !reason.empty())
+    return reason;
   if (scheduledModeledRecurrence(stats))
     return "recurrence_model";
   if (filledSteadyStateStall(stats))
@@ -1887,6 +1910,10 @@ static FillableStall getFillableStall(Operation *op,
                                       bool blockMemoryResource) {
   if (preview.memoryWaitCycles != 0)
     return {FillableStallKind::MemoryToken, preview.issueCycle};
+  if (preview.coexecWindowWaitCycles != 0)
+    return {FillableStallKind::Cycle, preview.issueCycle,
+            /*blockedMemoryResources=*/0,
+            waveamdmachine::InstructionStallKind::CoexecWindow};
   if (hasNonMemoryCycleWait(preview)) {
     MemoryResourceMask blocked =
         blockMemoryResource && preview.fuWaitCycles != 0
@@ -2707,6 +2734,11 @@ canUseGenericStallFiller(unsigned candidate, unsigned next,
     return false;
   if ((stall.blockedMemoryResources &
        waveamdmachine::getMemoryIssueResources(region.ops[candidate])) != 0)
+    return false;
+  const StaticIssueInfo &info = state.getStaticInfo(region.ops[candidate]);
+  if (!state.model.getScheduleModel().canFillStall(
+          stall.reason, info.resource.functionalUnit,
+          info.resource.usesMfmaCoissue))
     return false;
   FailureOr<IssuePreview> preview = previewIssue(state, region.ops[candidate]);
   if (failed(preview))
@@ -4626,6 +4658,7 @@ static void printDecision(const GreedyRegion &region, StringRef action,
                << " cheap_hazard_gaps=" << stats.cheapHazardGaps
                << " m0_gaps=" << stats.m0Gaps
                << " store_data_gaps=" << stats.storeDataGaps
+               << " coexec_window_gaps=" << stats.coexecWindowGaps
                << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
                << " long_latency_vmem_prefetch_moves="
                << stats.longLatencyVmemPrefetchMoves
@@ -6173,6 +6206,7 @@ struct WaveAMDMachineScheduleReportPass
                  << " cheap_hazard_gaps=" << stats.cheapHazardGaps
                  << " m0_gaps=" << stats.m0Gaps
                  << " store_data_gaps=" << stats.storeDataGaps
+                 << " coexec_window_gaps=" << stats.coexecWindowGaps
                  << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
                  << " recurrence_model_moves=" << stats.recurrenceModelMoves
                  << " memory_token_gaps=" << stats.memoryTokenGaps

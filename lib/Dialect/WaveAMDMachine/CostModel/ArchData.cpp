@@ -40,6 +40,8 @@ static constexpr ArchData kGfx803{
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
     /*hasMfmaCoissueRestriction=*/false,
+    /*mfmaValuCoexecWindowSlots=*/0,
+    /*mfmaValuCoexecProducerBurst=*/0,
     /*agprCountsAgainstVGPRs=*/false,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -70,6 +72,8 @@ static constexpr ArchData kGfx942{
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
     /*hasMfmaCoissueRestriction=*/true,
+    /*mfmaValuCoexecWindowSlots=*/0,
+    /*mfmaValuCoexecProducerBurst=*/0,
     /*agprCountsAgainstVGPRs=*/true,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -99,6 +103,8 @@ static constexpr ArchData kGfx950{
     /*ldsDmaIssuePeriod=*/4,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
     /*hasMfmaCoissueRestriction=*/true,
+    /*mfmaValuCoexecWindowSlots=*/6,
+    /*mfmaValuCoexecProducerBurst=*/2,
     /*agprCountsAgainstVGPRs=*/true,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -129,6 +135,8 @@ static constexpr ArchData kGfx1100{
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
     /*hasMfmaCoissueRestriction=*/false,
+    /*mfmaValuCoexecWindowSlots=*/0,
+    /*mfmaValuCoexecProducerBurst=*/0,
     /*agprCountsAgainstVGPRs=*/false,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -158,6 +166,8 @@ static constexpr ArchData kGfx1200{
     /*ldsDmaIssuePeriod=*/0,
     /*waveIssueArbitration=*/WaveIssueArbitration::RoundRobin,
     /*hasMfmaCoissueRestriction=*/false,
+    /*mfmaValuCoexecWindowSlots=*/0,
+    /*mfmaValuCoexecProducerBurst=*/0,
     /*agprCountsAgainstVGPRs=*/false,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -203,6 +213,8 @@ static std::optional<ArchData> makeGfx1250() {
       /*ldsDmaIssuePeriod=*/0,
       /*waveIssueArbitration=*/WaveIssueArbitration::Unsupported,
       /*hasMfmaCoissueRestriction=*/false,
+      /*mfmaValuCoexecWindowSlots=*/0,
+      /*mfmaValuCoexecProducerBurst=*/0,
       /*agprCountsAgainstVGPRs=*/false,
       /*hasTransCoexecutionHazard=*/capabilities->transCoexecutionHazard,
       /*hasWmmaCoexecutionHazard=*/capabilities->wmmaCoexecutionHazard,
@@ -249,6 +261,15 @@ template <const ArchData &A> static constexpr bool saneInstructionIssue() {
                 "simdIssueWidth out of range");
   static_assert(A.simdIssuePeriod == 1 || A.simdIssuePeriod == 4,
                 "simdIssuePeriod is 1 (RDNA) or 4 (CDNA wave64)");
+  static_assert(A.mfmaValuCoexecWindowSlots >= 0 &&
+                    A.mfmaValuCoexecWindowSlots <= 64,
+                "MFMA-VALU coexecution window out of range");
+  static_assert(A.mfmaValuCoexecProducerBurst >= 0 &&
+                    A.mfmaValuCoexecProducerBurst <= 64,
+                "MFMA-VALU producer burst out of range");
+  static_assert((A.mfmaValuCoexecWindowSlots == 0) ==
+                    (A.mfmaValuCoexecProducerBurst == 0),
+                "MFMA-VALU coexecution model requires window and burst");
   return true;
 }
 

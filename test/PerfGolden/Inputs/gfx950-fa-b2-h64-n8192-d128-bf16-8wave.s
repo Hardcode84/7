@@ -621,6 +621,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[100:103], v[104:107], v[224:239]
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[108:111], v[80:83], v[176:191]
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[112:115], v[80:83], v[192:207]
+		v_mfma_f32_32x32x16_bf16 v[208:223], v[116:119], v[80:83], v[208:223]
 		s_add_i32 m0, s3, 0x1d000
 		v_add_f32_e32 v43, v43, v49
 		buffer_load_dwordx4 v6, s[20:23], 0 offen lds
@@ -628,7 +629,6 @@ flash_attention_bf16_gfx950:
 		s_add_i32 m0, m0, 0x2200
 		v_fma_f32 v84, v161, v40, v44
 		buffer_load_dwordx4 v7, s[20:23], 0 offen lds
-		v_mfma_f32_32x32x16_bf16 v[208:223], v[116:119], v[80:83], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[120:123], v[80:83], v[224:239]
 		v_exp_f32_e32 v49, v49
 		v_exp_f32_e32 v80, v84
@@ -827,6 +827,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[120:123], v[56:59], v[224:239]
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[124:127], v[60:63], v[176:191]
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[128:131], v[60:63], v[192:207]
+		v_mfma_f32_32x32x16_bf16 v[208:223], v[132:135], v[60:63], v[208:223]
 		s_add_i32 m0, s3, 0x10400
 		v_add_f32_e32 v43, v43, v49
 		buffer_load_dwordx4 v42, s[20:23], 0 offen lds
@@ -834,7 +835,6 @@ flash_attention_bf16_gfx950:
 		s_add_i32 m0, m0, 0x2200
 		v_fma_f32 v56, v65, v40, v44
 		buffer_load_dwordx4 v46, s[20:23], 0 offen lds
-		v_mfma_f32_32x32x16_bf16 v[208:223], v[132:135], v[60:63], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[136:139], v[60:63], v[224:239]
 		v_exp_f32_e32 v49, v49
 		v_exp_f32_e32 v56, v56
@@ -1033,6 +1033,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[108:111], v[68:71], v[224:239]
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[112:115], v[72:75], v[176:191]
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[116:119], v[72:75], v[192:207]
+		v_mfma_f32_32x32x16_bf16 v[208:223], v[120:123], v[72:75], v[208:223]
 		s_add_i32 m0, s3, 0x14800
 		v_add_f32_e32 v43, v43, v49
 		buffer_load_dwordx4 v47, s[20:23], 0 offen lds
@@ -1040,7 +1041,6 @@ flash_attention_bf16_gfx950:
 		s_add_i32 m0, m0, 0x2200
 		v_fma_f32 v68, v161, v40, v44
 		buffer_load_dwordx4 v48, s[20:23], 0 offen lds
-		v_mfma_f32_32x32x16_bf16 v[208:223], v[120:123], v[72:75], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[124:127], v[72:75], v[224:239]
 		v_exp_f32_e32 v49, v49
 		v_exp_f32_e32 v68, v68

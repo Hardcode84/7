@@ -27,6 +27,10 @@
 // RUN: wave-instruction-state-report --func=mfma_packed_coissue --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-PACKED-CDNA3
 // RUN: wave-instruction-state-report --func=mfma_scalar_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-SCALAR
 // RUN: wave-instruction-state-report --func=mfma_trans_coissue --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-TRANS
+// RUN: wave-instruction-state-report --func=mfma_coexec_window --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW
+// RUN: wave-instruction-state-report --func=mfma_coexec_window --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-WINDOW-CDNA3
+// RUN: wave-instruction-state-report --func=mfma_coexec_partial_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-PARTIAL
+// RUN: wave-instruction-state-report --func=mfma_coexec_restricted_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-RESTRICTED
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @smem_value_ready(%zero: !waveamdmachine.imm,
@@ -373,6 +377,79 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
         : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
     return
   }
+
+  func.func @mfma_coexec_window(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc0: !waveamdmachine.reg<vgpr, 16>,
+      %acc1: !waveamdmachine.reg<vgpr, 16>,
+      %acc2: !waveamdmachine.reg<vgpr, 16>) {
+    %mfma0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %mfma1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %mfma2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
+
+  func.func @mfma_coexec_partial_fill(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc0: !waveamdmachine.reg<vgpr, 16>,
+      %acc1: !waveamdmachine.reg<vgpr, 16>,
+      %acc2: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 1>,
+      %y: !waveamdmachine.reg<vgpr, 1>) {
+    %mfma0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %mfma1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %scalar = waveamdmachine.v_add_f32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mfma2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
+
+  func.func @mfma_coexec_restricted_fill(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc0: !waveamdmachine.reg<vgpr, 16>,
+      %acc1: !waveamdmachine.reg<vgpr, 16>,
+      %acc2: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 2>,
+      %y: !waveamdmachine.reg<vgpr, 2>) {
+    %mfma0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %mfma1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %packed = waveamdmachine.v_pk_add_f32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %mfma2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -468,3 +545,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // MFMA-SCALAR: query op_index=1 cycle=4 op=waveamdmachine.v_add_f32 stall=none cycles=0 components=none
 
 // MFMA-TRANS: query op_index=1 cycle=4 op=waveamdmachine.v_exp_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+
+// MFMA-WINDOW: query op_index=1 cycle=4 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+// MFMA-WINDOW: query op_index=2 cycle=12 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=24 components=coexec_window:24,issue_backpressure:4@simd/mfma_coissue
+
+// MFMA-WINDOW-CDNA3: query op_index=2 cycle=12 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+
+// MFMA-WINDOW-PARTIAL: query op_index=3 cycle=16 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=20 components=coexec_window:20
+
+// MFMA-WINDOW-RESTRICTED: query op_index=3 cycle=20 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=24 components=coexec_window:24
