@@ -554,4 +554,54 @@ func.func @global_load_constant_overflow(%out: !wave.ptr<#wave.global, i32>) att
   return
 }
 
+// SELECT-LABEL: func.func @buffer_store_offset_overflow_addr64
+// SELECT: waveamdmachine.global_store_b32_addr64
+// SELECT-NOT: waveamdmachine.buffer_store_b32
+// ASM-LABEL: buffer_store_offset_overflow_addr64:
+// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+func.func @buffer_store_offset_overflow_addr64(
+    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %range = arith.constant 64 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %off = wave.index_expr <"1073741824 + lid"> ["lid"] (%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %buf, %off
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %tok = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @buffer_unbounded_load_addr64
+// SELECT: waveamdmachine.global_load_b32_addr64
+// SELECT-NOT: waveamdmachine.buffer_load_b32
+// ASM-LABEL: buffer_unbounded_load_addr64:
+// ASM: global_load_b32 v{{[0-9]+}}, v[{{[0-9]+}}:{{[0-9]+}}], off
+func.func @buffer_unbounded_load_addr64(
+    %out: !wave.ptr<#wave.global, i32>, %raw: i32)
+    attributes {wave.kernel} {
+  %range = arith.constant 4096 : i32
+  %buf = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %buf, %raw
+      : !wave.ptr<#waveamd.buffer, i32>, i32
+      -> !wave.ptr<#waveamd.buffer, i32>
+  %ptrs = wave.ptr_add %ptr, %lane
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %value, %load_token = wave.load %ptrs
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %store_token = wave.store %value -> %ptrs after %load_token
+      : (!wave.simd<i32, 32>,
+         !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 }
