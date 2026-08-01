@@ -299,6 +299,7 @@ def Wave_ExtractOp : Wave_Op<"extract", [Pure]> {
     $source `[` $index `]` attr-dict
     `:` type($source) `->` type($result)
   }];
+  let hasCanonicalizer = 1;
   let hasFolder = 1;
   let hasVerifier = 1;
 }
@@ -419,6 +420,7 @@ def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
                        Wave_Simd:$rhs);
   let results = (outs Wave_Mask:$result);
   let assemblyFormat = "$predicate $lhs `,` $rhs attr-dict `:` qualified(type($lhs)) `,` qualified(type($rhs)) `->` qualified(type($result))";
+  let hasCanonicalizer = 1;
   let hasFolder = 1;
   let hasVerifier = 1;
 }

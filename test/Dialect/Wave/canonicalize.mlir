@@ -102,6 +102,58 @@ func.func @pack_extract_swapped_stays(%v: vector<2xf16>) -> vector<2xf16> {
   return %p : vector<2xf16>
 }
 
+// CHECK-LABEL: func.func @extract_pack_chunk_results
+// CHECK-SAME: (%[[A:.*]]: vector<4xi8>, %[[B:.*]]: vector<4xi8>)
+// CHECK-NOT: wave.pack
+// CHECK: %[[ELEMENT:.*]] = wave.extract %[[B]][2] : vector<4xi8> -> i8
+// CHECK: %[[SLICE:.*]] = wave.extract %[[B]][1] : vector<4xi8> -> vector<2xi8>
+// CHECK: return %[[ELEMENT]], %[[SLICE]], %[[B]] : i8, vector<2xi8>, vector<4xi8>
+func.func @extract_pack_chunk_results(%a: vector<4xi8>, %b: vector<4xi8>)
+    -> (i8, vector<2xi8>, vector<4xi8>) {
+  %packed = wave.pack %a, %b : vector<4xi8>, vector<4xi8> -> vector<8xi8>
+  %element = wave.extract %packed[6] : vector<8xi8> -> i8
+  %slice = wave.extract %packed[5] : vector<8xi8> -> vector<2xi8>
+  %chunk = wave.extract %packed[4] : vector<8xi8> -> vector<4xi8>
+  return %element, %slice, %chunk : i8, vector<2xi8>, vector<4xi8>
+}
+
+// CHECK-LABEL: func.func @extract_pack_simd_chunk_boundary
+// CHECK-SAME: (%[[A:.*]]: !wave.simd<vector<4xi8>, 32>, %[[B:.*]]: !wave.simd<vector<4xi8>, 32>)
+// CHECK: %[[PACKED:.*]] = wave.pack %[[A]], %[[B]]
+// CHECK: %[[SLICE:.*]] = wave.extract %[[B]][1] : !wave.simd<vector<4xi8>, 32> -> !wave.simd<vector<2xi8>, 32>
+// CHECK: %[[CROSS:.*]] = wave.extract %[[PACKED]][3] : !wave.simd<vector<8xi8>, 32> -> !wave.simd<vector<2xi8>, 32>
+// CHECK: return %[[SLICE]], %[[CROSS]]
+func.func @extract_pack_simd_chunk_boundary(
+    %a: !wave.simd<vector<4xi8>, 32>,
+    %b: !wave.simd<vector<4xi8>, 32>)
+    -> (!wave.simd<vector<2xi8>, 32>, !wave.simd<vector<2xi8>, 32>) {
+  %packed = wave.pack %a, %b
+      : !wave.simd<vector<4xi8>, 32>, !wave.simd<vector<4xi8>, 32>
+        -> !wave.simd<vector<8xi8>, 32>
+  %slice = wave.extract %packed[5]
+      : !wave.simd<vector<8xi8>, 32> -> !wave.simd<vector<2xi8>, 32>
+  %cross = wave.extract %packed[3]
+      : !wave.simd<vector<8xi8>, 32> -> !wave.simd<vector<2xi8>, 32>
+  return %slice, %cross
+      : !wave.simd<vector<2xi8>, 32>, !wave.simd<vector<2xi8>, 32>
+}
+
+// CHECK-LABEL: func.func @extract_pack_unit_vector_stays
+// CHECK-SAME: (%[[A:.*]]: !wave.simd<i32, 32>, %[[B:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[PACKED:.*]] = wave.pack %[[A]], %[[B]]
+// CHECK: %[[SLICE:.*]] = wave.extract %[[PACKED]][0] : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+// CHECK: return %[[SLICE]]
+func.func @extract_pack_unit_vector_stays(
+    %a: !wave.simd<i32, 32>, %b: !wave.simd<i32, 32>)
+    -> !wave.simd<vector<1xi32>, 32> {
+  %packed = wave.pack %a, %b
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+        -> !wave.simd<vector<2xi32>, 32>
+  %slice = wave.extract %packed[0]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  return %slice : !wave.simd<vector<1xi32>, 32>
+}
+
 // CHECK-LABEL: func.func @pack_loop_carried_i8
 // CHECK-SAME: (%[[LB:.*]]: i32, %[[UB:.*]]: i32, %[[STEP:.*]]: i32
 // CHECK-SAME: %[[A0:.*]]: !wave.simd<i8, 64>, %[[A1:.*]]: !wave.simd<i8, 64>, %[[A2:.*]]: !wave.simd<i8, 64>, %[[A3:.*]]: !wave.simd<i8, 64>, %[[KEEP:.*]]: !wave.simd<i8, 64>)
@@ -241,6 +293,74 @@ func.func @constant_select_splats(%true: i32, %false: i32,
       : !wave.simd<vector<2xi32>, 32>
   return %selected_splat, %selected_vec_splat
       : !wave.simd<i32, 32>, !wave.simd<vector<2xi32>, 32>
+}
+
+// CHECK-LABEL: func.func @cmpi_boolean_select
+// CHECK-SAME: (%[[MASK:.*]]: !wave.mask<32>)
+// CHECK-NOT: wave.select
+// CHECK-NOT: wave.cmpi
+// CHECK: return %[[MASK]], %[[MASK]], %[[MASK]], %[[MASK]]
+func.func @cmpi_boolean_select(%mask: !wave.mask<32>)
+    -> (!wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>) {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %zero = wave.splat %c0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %bits = wave.select %mask, %one, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %lhs = wave.cmpi ne %bits, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %rhs = wave.cmpi ne %zero, %bits
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+
+  %three = wave.constant 3 : i32 -> !wave.simd<i32, 32>
+  %five = wave.constant 5 : i32 -> !wave.simd<i32, 32>
+  %seven = wave.constant 7 : i32 -> !wave.simd<i32, 32>
+  %range = wave.select %mask, %seven, %three
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %greater = wave.cmpi sgt %range, %five
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %reversed = wave.cmpi slt %five, %range
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %lhs, %rhs, %greater, %reversed
+      : !wave.mask<32>, !wave.mask<32>, !wave.mask<32>, !wave.mask<32>
+}
+
+// CHECK-LABEL: func.func @cmpi_boolean_select_truth_table_stays
+// CHECK-SAME: (%[[MASK:.*]]: !wave.mask<32>)
+// CHECK: %[[BITS:.*]] = wave.select %[[MASK]]
+// CHECK: %[[INVERTED:.*]] = wave.cmpi eq %[[BITS]]
+// CHECK: %[[ALWAYS:.*]] = wave.cmpi uge %[[BITS]]
+// CHECK: return %[[INVERTED]], %[[ALWAYS]]
+func.func @cmpi_boolean_select_truth_table_stays(%mask: !wave.mask<32>)
+    -> (!wave.mask<32>, !wave.mask<32>) {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %zero = wave.splat %c0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %bits = wave.select %mask, %one, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %inverted = wave.cmpi eq %bits, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %always = wave.cmpi uge %bits, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %inverted, %always : !wave.mask<32>, !wave.mask<32>
+}
+
+// CHECK-LABEL: func.func @cmpi_scalar_select_condition_stays
+// CHECK-SAME: (%[[COND:.*]]: i1)
+// CHECK: %[[BITS:.*]] = wave.select %[[COND]]
+// CHECK: %[[CMP:.*]] = wave.cmpi ne %[[BITS]]
+// CHECK: return %[[CMP]]
+func.func @cmpi_scalar_select_condition_stays(%cond: i1) -> !wave.mask<32> {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %zero = wave.splat %c0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
+  %bits = wave.select %cond, %one, %zero : !wave.simd<i32, 32>
+  %cmp = wave.cmpi ne %bits, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %cmp : !wave.mask<32>
 }
 
 // CHECK-LABEL: func.func @join_drops_dummy_and_duplicates

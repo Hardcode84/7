@@ -2026,6 +2026,43 @@ OpFoldResult ExtractOp::fold(FoldAdaptor) {
   return input;
 }
 
+namespace {
+struct ExtractFromPackChunk : OpRewritePattern<ExtractOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ExtractOp op,
+                                PatternRewriter &rewriter) const override {
+    PackOp pack = op.getSource().getDefiningOp<PackOp>();
+    if (!pack)
+      return failure();
+
+    int64_t inputElements =
+        getWavePayloadElementCount(pack.getInputs().front().getType());
+    int64_t resultElements = getWavePayloadElementCount(op.getType());
+    int64_t inputIndex = op.getIndex() / inputElements;
+    int64_t localIndex = op.getIndex() % inputElements;
+    if (inputIndex >= static_cast<int64_t>(pack.getInputs().size()) ||
+        localIndex + resultElements > inputElements)
+      return failure();
+
+    Value input = pack.getInputs()[inputIndex];
+    if (localIndex == 0 && input.getType() == op.getType()) {
+      rewriter.replaceOp(op, input);
+      return success();
+    }
+    if (!isa<VectorType>(getWavePayloadType(input.getType())))
+      return failure();
+    rewriter.replaceOpWithNewOp<ExtractOp>(op, op.getType(), input, localIndex);
+    return success();
+  }
+};
+} // namespace
+
+void ExtractOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *context) {
+  patterns.add<ExtractFromPackChunk>(context);
+}
+
 static bool isWavePackedF16Type(Type type) {
   VectorType vectorType = dyn_cast<VectorType>(type);
   return vectorType && vectorType.getRank() == 1 && !vectorType.isScalable() &&
@@ -2864,6 +2901,61 @@ OpFoldResult CmpIOp::fold(FoldAdaptor adaptor) {
   if (!result)
     return {};
   return Builder(getContext()).getBoolAttr(*result);
+}
+
+namespace {
+static std::optional<APInt> getSplatInteger(Value value) {
+  std::optional<std::pair<APInt, bool>> constant;
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    constant = getConstantAPIntValue(splat.getSource());
+  else if (ConstantOp constantOp = value.getDefiningOp<ConstantOp>())
+    constant = getConstantAPIntValue(constantOp.getValue());
+  else
+    return std::nullopt;
+  if (!constant)
+    return std::nullopt;
+  return constant->first;
+}
+
+struct FoldCmpIOfBooleanSelect : OpRewritePattern<CmpIOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(CmpIOp op,
+                                PatternRewriter &rewriter) const override {
+    SelectOp select = op.getLhs().getDefiningOp<SelectOp>();
+    Value other = op.getRhs();
+    bool selectIsLhs = true;
+    if (!select) {
+      select = op.getRhs().getDefiningOp<SelectOp>();
+      other = op.getLhs();
+      selectIsLhs = false;
+    }
+    if (!select || select.getCondition().getType() != op.getType())
+      return failure();
+
+    std::optional<APInt> trueValue = getSplatInteger(select.getTrueValue());
+    std::optional<APInt> falseValue = getSplatInteger(select.getFalseValue());
+    std::optional<APInt> otherValue = getSplatInteger(other);
+    if (!trueValue || !falseValue || !otherValue)
+      return failure();
+
+    auto compare = [&](const APInt &selected) {
+      return selectIsLhs ? arith::applyCmpPredicate(op.getPredicate(), selected,
+                                                    *otherValue)
+                         : arith::applyCmpPredicate(op.getPredicate(),
+                                                    *otherValue, selected);
+    };
+    if (!compare(*trueValue) || compare(*falseValue))
+      return failure();
+    rewriter.replaceOp(op, select.getCondition());
+    return success();
+  }
+};
+} // namespace
+
+void CmpIOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *context) {
+  patterns.add<FoldCmpIOfBooleanSelect>(context);
 }
 
 static std::optional<bool> foldWaveCmpIToBool(CmpIOp cmp) {
