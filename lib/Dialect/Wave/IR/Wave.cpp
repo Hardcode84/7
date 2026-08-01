@@ -3102,10 +3102,12 @@ LogicalResult ShuffleOp::verify() {
 
 static LogicalResult verifyRedistributionSymbols(Operation *op,
                                                  sym::ExprHandle expr,
-                                                 StringRef coordinate) {
+                                                 StringRef coordinate,
+                                                 bool allowReduction = false) {
   std::optional<std::string> badSymbol;
   sym::walkSymbolNames(expr, [&](StringRef name) {
-    if (name != "block" && name != "item" && name != "slot" && !badSymbol)
+    if (name != "block" && name != "item" && name != "slot" &&
+        (!allowReduction || name != "reduction") && !badSymbol)
       badSymbol = name.str();
   });
   if (badSymbol)
@@ -3119,16 +3121,16 @@ static LogicalResult verifyRedistributionSymbols(Operation *op,
 }
 
 static LogicalResult
-verifyRedistributionRelationSymbols(Operation *op,
-                                    RedistributionAttr relation) {
+verifyRedistributionRelationSymbols(Operation *op, RedistributionAttr relation,
+                                    bool allowReduction = false) {
   if (failed(verifyRedistributionSymbols(op, relation.getSourceBlock(),
-                                         "source block")))
+                                         "source block", allowReduction)))
     return failure();
   if (failed(verifyRedistributionSymbols(op, relation.getSourceItem(),
-                                         "source item")))
+                                         "source item", allowReduction)))
     return failure();
   if (failed(verifyRedistributionSymbols(op, relation.getSourceSlot(),
-                                         "source slot")))
+                                         "source slot", allowReduction)))
     return failure();
   return success();
 }
@@ -3254,25 +3256,11 @@ static LogicalResult verifyReductionCombiner(ReduceOp op) {
   return verifyReductionCombinerBody(op);
 }
 
-static LogicalResult verifyReductionRelations(ReduceOp op) {
-  if (op.getRelations().empty())
-    return op.emitOpError("requires at least one symbolic relation");
-  std::optional<std::pair<int64_t, int64_t>> domain;
-  for (Attribute attr : op.getRelations()) {
-    RedistributionAttr relation = dyn_cast<RedistributionAttr>(attr);
-    if (!relation)
-      return op.emitOpError(
-          "relations must contain only #wave.redistribution attributes");
-    std::pair<int64_t, int64_t> relationDomain{relation.getBlocks(),
-                                               relation.getItems()};
-    if (domain && *domain != relationDomain)
-      return op.emitOpError("all relations must use the same packet domain");
-    domain = relationDomain;
-    if (failed(
-            verifyRedistributionRelationSymbols(op.getOperation(), relation)))
-      return failure();
-  }
-  return success();
+static LogicalResult verifyReductionRelation(ReduceOp op) {
+  if (op.getReductionExtent() <= 0)
+    return op.emitOpError("reduction extent must be positive");
+  return verifyRedistributionRelationSymbols(op.getOperation(),
+                                             op.getRelation(), true);
 }
 
 LogicalResult ReduceOp::verify() {
@@ -3284,7 +3272,7 @@ LogicalResult ReduceOp::verify() {
     return failure();
   if (failed(verifyReductionCombiner(*this)))
     return failure();
-  return verifyReductionRelations(*this);
+  return verifyReductionRelation(*this);
 }
 
 OpFoldResult RedistributeOp::fold(FoldAdaptor) {

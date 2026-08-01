@@ -246,14 +246,23 @@ def test_packet_layout_reductions():
             function_builder.yield_((function_builder.addi(lhs, rhs),))
 
         # CHECK-LABEL: func.func @packet_layout_reduce_register
-        # CHECK-COUNT-4: #wave.redistribution
+        # CHECK: wave.reduce
+        # CHECK-SAME: using <
+        # CHECK-SAME: reduction
+        # CHECK-SAME: extent 4
         # CHECK: ^bb0(%[[REGISTER_LHS:.*]]: !wave.simd<i32, 32>, %[[REGISTER_RHS:.*]]: !wave.simd<i32, 32>):
         # CHECK: wave.binary addi %[[REGISTER_LHS]], %[[REGISTER_RHS]]
         # CHECK: wave.yield
         # CHECK-LABEL: func.func @packet_layout_reduce_lane
-        # CHECK-COUNT-2: #wave.redistribution
+        # CHECK: wave.reduce
+        # CHECK-SAME: using <
+        # CHECK-SAME: reduction
+        # CHECK-SAME: extent 2
         # CHECK-LABEL: func.func @packet_layout_reduce_wave
-        # CHECK-COUNT-2: #wave.redistribution
+        # CHECK: wave.reduce
+        # CHECK-SAME: using <
+        # CHECK-SAME: reduction
+        # CHECK-SAME: extent 2
         print(module_builder.module)
 
         w.PassManager.parse("builtin.module(wave-lower-redistribute)").run(

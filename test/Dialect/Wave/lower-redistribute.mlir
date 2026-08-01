@@ -32,14 +32,10 @@ func.func @reduce_ordered_odd(
     %source: !wave.simd<vector<3xi32>, 32>)
     -> !wave.simd<i32, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.reduce %source using [
+  %result = wave.reduce %source using
       #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "0">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "1">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "2">
-    ] : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32> {
+                           source_item = "item", source_slot = "reduction">
+      extent 3 : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %difference = wave.binary subi %lhs, %rhs
           : !wave.simd<i32, 32>, !wave.simd<i32, 32>
@@ -68,16 +64,11 @@ func.func @reduce_ordered_movement_groups(
     %source: !wave.simd<vector<4xi32>, 32>)
     -> !wave.simd<i32, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.reduce %source using [
+  %result = wave.reduce %source using
       #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "0">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "xor(item, 1)", source_slot = "1">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "2">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "xor(item, 1)", source_slot = "3">
-    ] : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
+                           source_item = "xor(item, Mod(reduction, 2))",
+                           source_slot = "reduction">
+      extent 4 : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %difference = wave.binary subi %lhs, %rhs
           : !wave.simd<i32, 32>, !wave.simd<i32, 32>
@@ -101,16 +92,11 @@ func.func @reduce_reorderable_movement_groups(
     %source: !wave.simd<vector<4xi32>, 32>)
     -> !wave.simd<i32, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.reduce %source using [
+  %result = wave.reduce %source using
       #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "0">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "xor(item, 1)", source_slot = "1">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "2">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "xor(item, 1)", source_slot = "3">
-    ] {associative, commutative}
+                           source_item = "xor(item, Mod(reduction, 2))",
+                           source_slot = "reduction">
+      extent 4 {associative, commutative}
       : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %sum = wave.binary addi %lhs, %rhs
@@ -137,12 +123,11 @@ func.func @reduce_register_two_results(
     %source: !wave.simd<vector<4xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.reduce %source using [
+  %result = wave.reduce %source using
       #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "slot">,
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
-                           source_item = "item", source_slot = "slot + 2">
-    ] : !wave.simd<vector<4xi32>, 32>
+                           source_item = "item",
+                           source_slot = "slot + 2 * reduction">
+      extent 2 : !wave.simd<vector<4xi32>, 32>
       -> !wave.simd<vector<2xi32>, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %sum = wave.binary addi %lhs, %rhs
@@ -169,12 +154,11 @@ func.func @reduce_cross_wave(
     %source: !wave.simd<vector<2xf32>, 32>)
     -> !wave.simd<f32, 32>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
-  %result = wave.reduce %source using [
+  %result = wave.reduce %source using
       #wave.redistribution<blocks = 1, items = 64, source_block = "block",
-                           source_item = "item", source_slot = "0">,
-      #wave.redistribution<blocks = 1, items = 64, source_block = "block",
-                           source_item = "xor(item, 32)", source_slot = "1">
-    ] : !wave.simd<vector<2xf32>, 32> -> !wave.simd<f32, 32> {
+                           source_item = "xor(item, 32 * reduction)",
+                           source_slot = "reduction">
+      extent 2 : !wave.simd<vector<2xf32>, 32> -> !wave.simd<f32, 32> {
     ^bb0(%lhs: !wave.simd<f32, 32>, %rhs: !wave.simd<f32, 32>):
       %sum = wave.fadd %lhs, %rhs
           : !wave.simd<f32, 32>, !wave.simd<f32, 32>

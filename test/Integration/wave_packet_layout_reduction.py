@@ -57,7 +57,9 @@ with w.module() as module_builder:
 
 # REDUCE-LABEL: func.func @packet_layout_reduce_wave
 # REDUCE: %[[RESULT:.*]] = wave.reduce
-# REDUCE-COUNT-2: #wave.redistribution
+# REDUCE-SAME: using <
+# REDUCE-SAME: reduction
+# REDUCE-SAME: extent 2
 # REDUCE-NOT: associative
 # REDUCE-NOT: commutative
 # REDUCE: ^bb0(%[[LHS:.*]]: !wave.simd<i32, 64>, %[[RHS:.*]]: !wave.simd<i32, 64>):

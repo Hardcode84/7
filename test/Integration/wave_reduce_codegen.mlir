@@ -47,14 +47,11 @@ func.func @reduce_ordered_cross_wave(
   %source = wave.pack %item, %next, %last
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<3xi32>, 32>
-  %result = wave.reduce %source using [
+  %result = wave.reduce %source using
       #wave.redistribution<blocks = 1, items = 64, source_block = "block",
-                           source_item = "item", source_slot = "0">,
-      #wave.redistribution<blocks = 1, items = 64, source_block = "block",
-                           source_item = "xor(item, 32)", source_slot = "1">,
-      #wave.redistribution<blocks = 1, items = 64, source_block = "block",
-                           source_item = "item", source_slot = "2">
-    ] : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32> {
+                           source_item = "xor(item, 32 * Mod(reduction, 2))",
+                           source_slot = "reduction">
+      extent 3 : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %difference = wave.binary subi %lhs, %rhs
           : !wave.simd<i32, 32>, !wave.simd<i32, 32>

@@ -869,50 +869,46 @@ def _packet_source_input(
     return expression
 
 
-def _packet_relation(
-    source: PacketLayout,
-    result: PacketLayout,
-    transform: PacketTransform,
-) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
+def _validate_packet_hardware_domain(
+    source: PacketLayout, result: PacketLayout
+) -> None:
     if (
         source.lane_width != result.lane_width
         or source.item_count != result.item_count
         or source.block_count != result.block_count
     ):
         raise ValueError("packet redistribution changes its hardware domain")
-    coordinate_transform = _packet_coordinate_transform(
-        transform, source.shape, result.shape
-    )
+
+
+def _packet_relation_from_coordinates(
+    source: PacketLayout,
+    result: PacketLayout,
+    origin_coordinate: tuple[int, ...],
+    destination_columns: tuple[tuple[str, int], ...],
+    source_coordinates: tuple[tuple[int, ...], ...],
+    destination_inputs: Mapping[str, ixsimpl.Expr],
+) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
+    _validate_packet_hardware_domain(source, result)
     source_columns, _source_values = _layout_columns(source)
-    result_columns, result_values = _layout_columns(result)
     equations, variable_count = _source_equations(source)
     if variable_count != len(source_columns):
         raise AssertionError("packet source equation width is inconsistent")
-    origin_coordinate = coordinate_transform((0,) * len(result.shape))
     origin_rhs = _flatten_logical(source, origin_coordinate)
     origin = _preferred_physical_solution(equations, origin_rhs, source_columns, None)
     basis_solutions = []
-    for column, value in zip(result_columns, result_values, strict=True):
-        transformed = coordinate_transform(value)
-        rhs = _flatten_logical(source, transformed) ^ origin_rhs
+    for column, coordinate in zip(destination_columns, source_coordinates, strict=True):
+        rhs = _flatten_logical(source, coordinate) ^ origin_rhs
         basis_solutions.append(
             _preferred_physical_solution(equations, rhs, source_columns, column)
         )
 
-    item = sym("item")
-    destination_inputs = {
-        "register": sym("slot"),
-        "lane": mod(item, result.lane_width),
-        "warp": floor(item / result.lane_width),
-        "block": sym("block"),
-    }
     source_inputs = {
         name: _packet_source_input(
             source,
             result,
             name,
             source_columns,
-            result_columns,
+            destination_columns,
             basis_solutions,
             origin,
             destination_inputs,
@@ -923,6 +919,68 @@ def _packet_relation(
         source_inputs["block"],
         source_inputs["lane"] + source.lane_width * source_inputs["warp"],
         source_inputs["register"],
+    )
+
+
+def _packet_relation(
+    source: PacketLayout,
+    result: PacketLayout,
+    transform: PacketTransform,
+) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
+    _validate_packet_hardware_domain(source, result)
+    coordinate_transform = _packet_coordinate_transform(
+        transform, source.shape, result.shape
+    )
+    result_columns, result_values = _layout_columns(result)
+    item = sym("item")
+    return _packet_relation_from_coordinates(
+        source,
+        result,
+        coordinate_transform((0,) * len(result.shape)),
+        result_columns,
+        tuple(coordinate_transform(value) for value in result_values),
+        {
+            "register": sym("slot"),
+            "lane": mod(item, result.lane_width),
+            "warp": floor(item / result.lane_width),
+            "block": sym("block"),
+        },
+    )
+
+
+def _packet_reduction_relation(
+    source: PacketLayout,
+    result: PacketLayout,
+    axis: int,
+) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
+    def source_coordinate(coordinate: Sequence[int], reduction: int) -> tuple[int, ...]:
+        return (
+            *map(int, coordinate[:axis]),
+            int(reduction),
+            *map(int, coordinate[axis:]),
+        )
+
+    result_columns, result_values = _layout_columns(result)
+    reduction_bits = source.shape[axis].bit_length() - 1
+    reduction_columns = tuple(("reduction", bit) for bit in range(reduction_bits))
+    origin = (0,) * len(result.shape)
+    item = sym("item")
+    return _packet_relation_from_coordinates(
+        source,
+        result,
+        source_coordinate(origin, 0),
+        (*result_columns, *reduction_columns),
+        (
+            *(source_coordinate(value, 0) for value in result_values),
+            *(source_coordinate(origin, 1 << bit) for bit in range(reduction_bits)),
+        ),
+        {
+            "register": sym("slot"),
+            "lane": mod(item, result.lane_width),
+            "warp": floor(item / result.lane_width),
+            "block": sym("block"),
+            "reduction": sym("reduction"),
+        },
     )
 
 
@@ -2674,23 +2732,17 @@ class FunctionBuilder:
         element_type = _validate_redistribute_layout_types(
             source.type, result_type, source_layout, result_layout
         )
-        relations = []
-        for coordinate in range(source_layout.shape[axis]):
-            source_block, source_item, source_slot = _packet_relation(
-                source_layout,
-                result_layout,
-                PacketTransform.reduction(axis, coordinate),
-            )
-            relations.append(
-                _redistribution_attr(
-                    result_layout.block_count,
-                    result_layout.item_count,
-                    source_block,
-                    source_item,
-                    source_slot,
-                )
-            )
-        op = wave.ReduceOp(result_type, source, ArrayAttr.get(relations))
+        source_block, source_item, source_slot = _packet_reduction_relation(
+            source_layout, result_layout, axis
+        )
+        relation = _redistribution_attr(
+            result_layout.block_count,
+            result_layout.item_count,
+            source_block,
+            source_item,
+            source_slot,
+        )
+        op = wave.ReduceOp(result_type, source, relation, source_layout.shape[axis])
         combiner_type = simd_type(element_type, source_layout.lane_width)
         block = op.combiner.blocks.append(combiner_type, combiner_type)
         reduction = _ReduceBuilder(op, block)

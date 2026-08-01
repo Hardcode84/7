@@ -228,9 +228,12 @@ struct SpecializedReductionRelation {
 
 static FailureOr<sym::ExprHandle>
 specializeReductionExpr(sym::Analysis &analysis, sym::ExprHandle expression,
-                        sym::ExprHandle slot, sym::ExprHandle slotValue) {
-  std::array<sym::ExprSubstitution, 1> substitutions{
-      sym::ExprSubstitution{slot, slotValue}};
+                        sym::ExprHandle slot, sym::ExprHandle slotValue,
+                        sym::ExprHandle reduction,
+                        sym::ExprHandle reductionValue) {
+  std::array<sym::ExprSubstitution, 2> substitutions{
+      sym::ExprSubstitution{slot, slotValue},
+      sym::ExprSubstitution{reduction, reductionValue}};
   FailureOr<sym::ExprHandle> specialized =
       analysis.substitute(expression, substitutions);
   if (failed(specialized))
@@ -240,17 +243,25 @@ specializeReductionExpr(sym::Analysis &analysis, sym::ExprHandle expression,
 
 static FailureOr<SpecializedReductionRelation>
 specializeReductionRelation(sym::Analysis &analysis,
-                            RedistributionAttr relation, int64_t resultSlot) {
+                            RedistributionAttr relation, int64_t resultSlot,
+                            int64_t reductionCoordinate) {
   FailureOr<sym::ExprHandle> slot = analysis.composeSymbol("slot");
   FailureOr<sym::ExprHandle> slotValue = analysis.composeInteger(resultSlot);
-  if (failed(slot) || failed(slotValue))
+  FailureOr<sym::ExprHandle> reduction = analysis.composeSymbol("reduction");
+  FailureOr<sym::ExprHandle> reductionValue =
+      analysis.composeInteger(reductionCoordinate);
+  if (failed(slot) || failed(slotValue) || failed(reduction) ||
+      failed(reductionValue))
     return failure();
-  FailureOr<sym::ExprHandle> sourceBlock = specializeReductionExpr(
-      analysis, relation.getSourceBlock(), *slot, *slotValue);
-  FailureOr<sym::ExprHandle> sourceItem = specializeReductionExpr(
-      analysis, relation.getSourceItem(), *slot, *slotValue);
-  FailureOr<sym::ExprHandle> sourceSlot = specializeReductionExpr(
-      analysis, relation.getSourceSlot(), *slot, *slotValue);
+  FailureOr<sym::ExprHandle> sourceBlock =
+      specializeReductionExpr(analysis, relation.getSourceBlock(), *slot,
+                              *slotValue, *reduction, *reductionValue);
+  FailureOr<sym::ExprHandle> sourceItem =
+      specializeReductionExpr(analysis, relation.getSourceItem(), *slot,
+                              *slotValue, *reduction, *reductionValue);
+  FailureOr<sym::ExprHandle> sourceSlot =
+      specializeReductionExpr(analysis, relation.getSourceSlot(), *slot,
+                              *slotValue, *reduction, *reductionValue);
   if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
     return failure();
   return SpecializedReductionRelation{relation.getBlocks(), relation.getItems(),
@@ -366,11 +377,12 @@ lowerOrderedReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
                                 int64_t resultSlot,
                                 MutableArrayRef<Value> extracted) {
   SmallVector<Value> terms;
-  terms.reserve(op.getRelations().size());
-  for (Attribute attr : op.getRelations()) {
-    RedistributionAttr relation = cast<RedistributionAttr>(attr);
+  RedistributionAttr relation = op.getRelation();
+  for (int64_t reductionCoordinate :
+       llvm::seq<int64_t>(0, op.getReductionExtent())) {
     FailureOr<SpecializedReductionRelation> specialized =
-        specializeReductionRelation(analysis, relation, resultSlot);
+        specializeReductionRelation(analysis, relation, resultSlot,
+                                    reductionCoordinate);
     if (failed(specialized)) {
       op.emitOpError("failed to specialize a reduction relation");
       return failure();
@@ -415,10 +427,12 @@ lowerReorderableReductionResultSlot(IRRewriter &rewriter, ReduceOp op,
                                     MutableArrayRef<Value> extracted) {
   SmallVector<ReductionRelationGroup> groups;
   SmallVector<Value> terms;
-  for (Attribute attr : op.getRelations()) {
-    RedistributionAttr relation = cast<RedistributionAttr>(attr);
+  RedistributionAttr relation = op.getRelation();
+  for (int64_t reductionCoordinate :
+       llvm::seq<int64_t>(0, op.getReductionExtent())) {
     FailureOr<SpecializedReductionRelation> specialized =
-        specializeReductionRelation(analysis, relation, resultSlot);
+        specializeReductionRelation(analysis, relation, resultSlot,
+                                    reductionCoordinate);
     if (failed(specialized)) {
       op.emitOpError("failed to specialize a reduction relation");
       return failure();

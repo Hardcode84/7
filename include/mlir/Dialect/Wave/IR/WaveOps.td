@@ -496,10 +496,11 @@ def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
 def Wave_ReduceOp : Wave_Op<"reduce", [RecursiveMemoryEffects]> {
   let summary = "reduce a symbolic packet dimension";
   let description = [{
-    Each relation selects one source value for each result packet slot. Relation
-    order defines a left fold unless both `associative` and `commutative` are
-    present. Those attributes permit regrouping; they do not infer legality
-    from the combiner operations.
+    `$relation` selects one source value for each result packet slot and
+    symbolic `reduction` coordinate. `$reduction_extent` bounds that
+    coordinate. Coordinate order defines a left fold unless both `associative`
+    and `commutative` are present. Those attributes permit regrouping; they do
+    not infer legality from the combiner operations.
 
     The combiner region takes two scalar-packet SIMD values and yields one.
     Combiners are closed and pure; token-bearing reductions need another op
@@ -507,13 +508,14 @@ def Wave_ReduceOp : Wave_Op<"reduce", [RecursiveMemoryEffects]> {
   }];
 
   let arguments = (ins Wave_Simd:$source,
-                       ArrayAttr:$relations,
+                       Wave_RedistributionAttr:$relation,
+                       I64Attr:$reduction_extent,
                        OptionalAttr<UnitAttr>:$associative,
                        OptionalAttr<UnitAttr>:$commutative);
   let results = (outs Wave_Simd:$result);
   let regions = (region SizedRegion<1>:$combiner);
   let assemblyFormat = [{
-    $source `using` $relations attr-dict `:`
+    $source `using` $relation `extent` $reduction_extent attr-dict `:`
     qualified(type($source)) `->` qualified(type($result)) $combiner
   }];
   let hasVerifier = 1;

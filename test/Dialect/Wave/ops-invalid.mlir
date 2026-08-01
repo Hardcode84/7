@@ -1269,7 +1269,7 @@ func.func @scatter_simd_base_element_type_mismatch(
 
 func.func @reduce_width_mismatch(%v: !wave.simd<vector<2xi32>, 32>) {
   // expected-error @+1 {{source and result SIMD widths must match}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 2
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 64> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1281,7 +1281,7 @@ func.func @reduce_width_mismatch(%v: !wave.simd<vector<2xi32>, 32>) {
 
 func.func @reduce_scalable_packet(%v: !wave.simd<vector<[2]xi32>, 32>) {
   // expected-error @+1 {{source packet vector must be fixed-size}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 2
       : !wave.simd<vector<[2]xi32>, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1294,7 +1294,7 @@ func.func @reduce_scalable_packet(%v: !wave.simd<vector<[2]xi32>, 32>) {
 func.func @reduce_multidimensional_packet(
     %v: !wave.simd<vector<2x2xi32>, 32>) {
   // expected-error @+1 {{source packet vector must be 1-D}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 4
       : !wave.simd<vector<2x2xi32>, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1306,7 +1306,7 @@ func.func @reduce_multidimensional_packet(
 
 func.func @reduce_nonnumeric_packet(%v: !wave.simd<index, 32>) {
   // expected-error @+1 {{source packet element type must be integer or float}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<index, 32> -> !wave.simd<index, 32> {
     ^bb0(%lhs: !wave.simd<index, 32>, %rhs: !wave.simd<index, 32>):
       wave.yield %lhs : !wave.simd<index, 32>
@@ -1318,7 +1318,7 @@ func.func @reduce_nonnumeric_packet(%v: !wave.simd<index, 32>) {
 
 func.func @reduce_element_mismatch(%v: !wave.simd<vector<2xi32>, 32>) {
   // expected-error @+1 {{source and result packet element types must match}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 2
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<f32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1328,9 +1328,21 @@ func.func @reduce_element_mismatch(%v: !wave.simd<vector<2xi32>, 32>) {
 
 // -----
 
-func.func @reduce_empty_relations(%v: !wave.simd<i32, 32>) {
-  // expected-error @+1 {{requires at least one symbolic relation}}
-  %r = wave.reduce %v using []
+func.func @reduce_nonpositive_extent(%v: !wave.simd<i32, 32>) {
+  // expected-error @+1 {{reduction extent must be positive}}
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 0
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      wave.yield %lhs : !wave.simd<i32, 32>
+    }
+  return
+}
+
+// -----
+
+func.func @reduce_missing_extent(%v: !wave.simd<i32, 32>) {
+  // expected-error @+2 {{custom op 'wave.reduce' expected 'extent'}}
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction">
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1342,7 +1354,7 @@ func.func @reduce_empty_relations(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_combiner_argument_count(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{combiner block must have exactly two arguments}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1354,7 +1366,7 @@ func.func @reduce_combiner_argument_count(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_combiner_argument_type(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{combiner block arguments must have type '!wave.simd<i32, 32>'}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<f32, 32>, %rhs: !wave.simd<f32, 32>):
       wave.yield %lhs : !wave.simd<f32, 32>
@@ -1366,7 +1378,7 @@ func.func @reduce_combiner_argument_type(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_combiner_terminator(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{combiner block must terminate with wave.yield}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       "scf.yield"() : () -> ()
@@ -1378,7 +1390,7 @@ func.func @reduce_combiner_terminator(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_combiner_yield(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{combiner must yield exactly one value of type '!wave.simd<i32, 32>'}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield
@@ -1390,7 +1402,7 @@ func.func @reduce_combiner_yield(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_combiner_effect(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{combiner contains non-pure operation 'wave.read_cycles'}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %cycles = wave.read_cycles : i32
@@ -1403,7 +1415,7 @@ func.func @reduce_combiner_effect(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_combiner_token(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{combiner must not contain memory tokens}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %token = wave.token : !wave.mem.token
@@ -1417,7 +1429,7 @@ func.func @reduce_combiner_token(%v: !wave.simd<i32, 32>) {
 func.func @reduce_combiner_capture(%v: !wave.simd<i32, 32>) {
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
   // expected-error @+1 {{combiner must not capture values from outside the reduction}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       %sum = wave.binary addi %lhs, %one
@@ -1432,19 +1444,7 @@ func.func @reduce_combiner_capture(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_associative_only(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{associative and commutative permissions must appear together}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">]
-      {associative} : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
-    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
-      wave.yield %lhs : !wave.simd<i32, 32>
-    }
-  return
-}
-
-// -----
-
-func.func @reduce_relation_type(%v: !wave.simd<i32, 32>) {
-  // expected-error @+1 {{relations must contain only #wave.redistribution attributes}}
-  %r = wave.reduce %v using [42 : i64]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> extent 1 {associative}
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1454,15 +1454,10 @@ func.func @reduce_relation_type(%v: !wave.simd<i32, 32>) {
 
 // -----
 
-func.func @reduce_relation_domain(%v: !wave.simd<i32, 32>) {
-  // expected-error @+1 {{all relations must use the same packet domain}}
-  %r = wave.reduce %v using [
-      #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "0">,
-      #wave.redistribution<blocks = 1, items = 64, source_block = "block", source_item = "item", source_slot = "0">]
-      : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
-    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
-      wave.yield %lhs : !wave.simd<i32, 32>
-    }
+func.func @redistribute_reduction_symbol(
+    %v: !wave.simd<vector<2xi32>, 32>) {
+  // expected-error @+1 {{source slot expression references unsupported symbol `reduction`}}
+  %r = wave.redistribute %v, <blocks = 1, items = 32, source_block = "block", source_item = "item", source_slot = "reduction"> : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return
 }
 
@@ -1470,7 +1465,7 @@ func.func @reduce_relation_domain(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_relation_unknown_symbol(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{source item expression references unsupported symbol `lane`}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "lane", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "lane", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
@@ -1482,7 +1477,7 @@ func.func @reduce_relation_unknown_symbol(%v: !wave.simd<i32, 32>) {
 
 func.func @reduce_relation_nonintegral(%v: !wave.simd<i32, 32>) {
   // expected-error @+1 {{source item expression must be structurally integral}}
-  %r = wave.reduce %v using [#wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item / 2", source_slot = "0">]
+  %r = wave.reduce %v using #wave.redistribution<blocks = 1, items = 32, source_block = "block", source_item = "item / 2", source_slot = "reduction"> extent 1
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32> {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
