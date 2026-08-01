@@ -906,7 +906,9 @@ def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
 
 def WaveAMDMachine_RegAfterOp : WaveAMDMachine_Op<"reg_after",
     [Pure, WaveAMDMachine_TupleAlias, WaveAMDMachine_NoMachineInst,
-     WaveAMDMachine_NoAsmEmission]> {
+     WaveAMDMachine_NoAsmEmission,
+     DeclareOpInterfaceMethods<
+       WaveAMDMachine_RegisterStorageAliasOpInterface>]> {
   let summary = "retain a GPR value until memory dependencies issue";
   let arguments = (ins WaveAMDMachine_GPR:$source,
                        Variadic<WaveAMDMachine_MemToken>:$dependencies);
@@ -1091,7 +1093,9 @@ def WaveAMDMachine_TupleToElementsOp
                        [Pure, WaveAMDMachine_TokenJoinTrait,
                         WaveAMDMachine_TupleAlias,
                         WaveAMDMachine_NoMachineInst,
-                        WaveAMDMachine_NoAsmEmission]> {
+                        WaveAMDMachine_NoAsmEmission,
+                        DeclareOpInterfaceMethods<
+                          WaveAMDMachine_RegisterStorageAliasOpInterface>]> {
   let summary = "split a GPR tuple into mixed-width GPR pieces";
   let arguments = (ins WaveAMDMachine_GPR:$tuple);
   let results = (outs Variadic<WaveAMDMachine_GPR>:$elements);
@@ -1106,7 +1110,9 @@ def WaveAMDMachine_TupleFromElementsOp
                      [Pure, WaveAMDMachine_TokenJoinTrait,
                       WaveAMDMachine_TupleAlias,
                       WaveAMDMachine_NoMachineInst,
-                      WaveAMDMachine_NoAsmEmission]> {
+                      WaveAMDMachine_NoAsmEmission,
+                      DeclareOpInterfaceMethods<
+                        WaveAMDMachine_RegisterStorageAliasOpInterface>]> {
   let summary = "concatenate mixed-width GPR pieces into a GPR tuple";
   let arguments = (ins Variadic<WaveAMDMachine_GPR>:$elements);
   let results = (outs WaveAMDMachine_GPR:$tuple);
@@ -1131,7 +1137,9 @@ def WaveAMDMachine_UpdateTupleOp
     : WaveAMDMachine_Op<"update_tuple",
                         [Pure, WaveAMDMachine_TupleAlias,
                          WaveAMDMachine_NoMachineInst,
-                         WaveAMDMachine_NoAsmEmission]> {
+                         WaveAMDMachine_NoAsmEmission,
+                         DeclareOpInterfaceMethods<
+                           WaveAMDMachine_RegisterStorageAliasOpInterface>]> {
   let summary = "replace selected tuple slots while preserving tuple base";
   let arguments = (ins WaveAMDMachine_GPR:$base,
                        Variadic<WaveAMDMachine_GPR>:$updates,
@@ -1899,6 +1907,8 @@ def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
      "areTypesCompatible"]>,
   RecursiveMemoryEffects,
   NoRegionArguments,
+  DeclareOpInterfaceMethods<
+    WaveAMDMachine_ImplicitRegisterUseOpInterface>,
   WaveAMDMachine_ReadsExec,
   WaveAMDMachine_WritesExec
 ]> {

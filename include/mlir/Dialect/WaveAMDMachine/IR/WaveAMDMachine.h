@@ -34,6 +34,26 @@
 
 namespace mlir::waveamdmachine {
 
+/// A zero-cost storage constraint exposed to register allocation.  `alias`
+/// occupies the same register tuple as `storage`, starting at `offset` dwords.
+struct RegisterStorageAlias {
+  Value storage;
+  Value alias;
+  int64_t offset = 0;
+
+  /// The operation overwrites the aliased storage while consuming `alias`.
+  /// Such operands cannot remain live through the operation.
+  bool destructive = false;
+};
+
+/// A machine-level register use whose final consumption is later than the
+/// operation's explicit SSA operand use.  This is reserved for lowering
+/// semantics that cannot be represented by RegionBranch successor operands.
+struct ImplicitRegisterUse {
+  Value value;
+  Operation *lastUse = nullptr;
+};
+
 struct KernelMetadataEntry {
   StringAttr name;
   Attribute value;

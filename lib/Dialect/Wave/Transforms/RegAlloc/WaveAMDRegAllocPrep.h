@@ -17,9 +17,15 @@ class FuncOp;
 } // namespace func
 
 namespace wave {
+namespace regalloc_detail {
+class RegAllocRegionFlow;
+} // namespace regalloc_detail
 
 // Rewrites carry/tuple alias cases into explicit SSA copies before intervals.
 LogicalResult prepareWaveAMDRegAllocIR(func::FuncOp func);
+LogicalResult
+prepareWaveAMDRegAllocIR(func::FuncOp func,
+                         const regalloc_detail::RegAllocRegionFlow &flow);
 
 } // namespace wave
 } // namespace mlir

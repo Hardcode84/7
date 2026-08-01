@@ -181,6 +181,39 @@ def WaveAMDMachine_RegisterCopyOpInterface
   ];
 }
 
+def WaveAMDMachine_RegisterStorageAliasOpInterface
+    : OpInterface<"RegisterStorageAliasOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Zero-cost relative storage constraints exposed to register allocation.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Register values constrained to share tuple storage.}],
+      "void",
+      "getRegisterStorageAliases",
+      (ins "::llvm::SmallVectorImpl<"
+           "::mlir::waveamdmachine::RegisterStorageAlias> &":$aliases)
+    >,
+  ];
+}
+
+def WaveAMDMachine_ImplicitRegisterUseOpInterface
+    : OpInterface<"ImplicitRegisterUseOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    Register uses introduced by machine lowering beyond explicit SSA uses.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Machine-level register uses and their final IR anchors.}],
+      "::llvm::SmallVector<::mlir::waveamdmachine::ImplicitRegisterUse, 2>",
+      "getImplicitRegisterUses",
+      (ins)
+    >,
+  ];
+}
+
 def WaveAMDMachine_M0WriteHazardOpInterface
     : OpInterface<"M0WriteHazardOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

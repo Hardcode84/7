@@ -114,9 +114,8 @@ func.func @uniform_if_sibling_loop_invariant_reuse()
 // ALLOC-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 64, [[REG:[0-9]+]]>
 // ALLOC-SAME: waveamdmachine.vgpr_count = 64 : i64
 // ALLOC: waveamdmachine.uniform_if
-// ALLOC-NEXT: [[RENAME:%.*]] = waveamdmachine.update_tuple [[INPUT]],
-// ALLOC-SAME: !waveamdmachine.reg<vgpr, 64, [[REG]]>
-// ALLOC-NEXT: waveamdmachine.yield [[RENAME]]
+// ALLOC-NEXT: waveamdmachine.yield [[INPUT]]
+// ALLOC-NOT: waveamdmachine.update_tuple
 // ALLOC-NOT: waveamdmachine.copy_tuple
 // ASM-LABEL: uniform_if_dead_passthrough_reuses_vgpr:
 // ASM-NOT: v_mov_b32
@@ -151,9 +150,8 @@ func.func @uniform_if_dead_passthrough_reuses_vgpr(
 // ALLOC-SAME: [[INPUT:%[^:]+]]: !waveamdmachine.reg<vgpr, 1, [[REG:[0-9]+]]>
 // ALLOC-SAME: waveamdmachine.vgpr_count = 1 : i64
 // ALLOC: waveamdmachine.uniform_if
-// ALLOC-NEXT: [[RENAME:%.*]] = waveamdmachine.update_tuple [[INPUT]],
-// ALLOC-SAME: !waveamdmachine.reg<vgpr, 1, [[REG]]>
-// ALLOC-NEXT: waveamdmachine.yield [[RENAME]]
+// ALLOC-NEXT: waveamdmachine.yield [[INPUT]]
+// ALLOC-NOT: waveamdmachine.update_tuple
 // ALLOC: otherwise
 // ALLOC-NEXT: [[CHANGED:%.*]] = waveamdmachine.v_add_u32 [[INPUT]], [[INPUT]]
 // ALLOC-SAME: -> !waveamdmachine.reg<vgpr, 1, [[REG]]>

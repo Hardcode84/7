@@ -10,6 +10,8 @@
 
 #include "../WaveAMDHardwareResources.h"
 #include "WaveAMDRegAllocInternal.h"
+#include "WaveAMDRegAllocRegionFlow.h"
+#include "WaveAMDRegAllocStorage.h"
 #include "WaveAMDRegAllocTransformUtils.h"
 #include "WaveAMDRegisterLimits.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -317,48 +319,10 @@ rematerializeDuplicateRegValue(OpBuilder &builder, Location loc, Value v,
   return clone->getResult(cast<OpResult>(v).getResultNumber());
 }
 
-static bool hasCloneableAGPRDef(Value v) {
-  if (!isReg(v))
-    return false;
-  auto rt = cast<waveamdmachine::RegType>(v.getType());
-  if (!isAGPR(rt))
-    return false;
-  Operation *def = v.getDefiningOp();
-  return isa_and_nonnull<waveamdmachine::UninitOp,
-                         waveamdmachine::VAccvgprWriteB32TupleOp>(def);
-}
-
-static FailureOr<Value>
-cloneImmediateTupleMove(OpBuilder &builder, Value v,
-                        waveamdmachine::RegType resultType) {
-  auto mov = v.getDefiningOp<waveamdmachine::VMovB32TupleOp>();
-  if (!mov || !mov.getSource().getDefiningOp<waveamdmachine::ImmOp>())
-    return failure();
-  Operation *clone = builder.clone(*mov);
-  clone->getResult(0).setType(resultType);
-  return clone->getResult(0);
-}
-
-static FailureOr<Value> cloneAGPRDuplicate(OpBuilder &builder, Value v,
-                                           waveamdmachine::RegType resultType) {
-  if (!hasCloneableAGPRDef(v))
-    return failure();
-  Operation *clone = builder.clone(*v.getDefiningOp());
-  clone->getResult(0).setType(resultType);
-  return clone->getResult(0);
-}
-
-static Value copyRegDuplicate(OpBuilder &builder, Location loc, Value v,
-                              waveamdmachine::RegType resultType) {
-  return waveamdmachine::CopyTupleOp::create(builder, loc, resultType, v)
-      .getResult();
-}
-
 static FailureOr<Value> duplicateRegValue(
     OpBuilder &builder, Location loc, Value v,
     DuplicateRematPolicy rematPolicy = DuplicateRematPolicy::Never) {
   auto rt = cast<waveamdmachine::RegType>(v.getType());
-  waveamdmachine::RegType resultType = getUnassignedRegType(rt);
   if (rematPolicy != DuplicateRematPolicy::Never && isVGPR(rt)) {
     bool canRematerialize = false;
     if (rematPolicy == DuplicateRematPolicy::AnyLegal) {
@@ -373,21 +337,7 @@ static FailureOr<Value> duplicateRegValue(
     }
   }
 
-  FailureOr<Value> immClone = cloneImmediateTupleMove(builder, v, resultType);
-  if (succeeded(immClone))
-    return *immClone;
-
-  if (isAGPR(rt)) {
-    FailureOr<Value> agprClone = cloneAGPRDuplicate(builder, v, resultType);
-    if (succeeded(agprClone))
-      return *agprClone;
-    return emitError(loc) << "waveamd regalloc cannot duplicate AGPR value "
-                             "before register allocation";
-  }
-
-  if (isVGPR(rt) || isSGPR(rt))
-    return copyRegDuplicate(builder, loc, v, resultType);
-  return emitError(loc, "duplicateRegValue: unsupported register class/width");
+  return wave::regalloc_detail::materializeRegAllocCopy(builder, loc, v);
 }
 
 static Operation *ancestorInBlock(Operation *op, Block *block) {
@@ -396,180 +346,98 @@ static Operation *ancestorInBlock(Operation *op, Block *block) {
   return op;
 }
 
-static Region *getChildRegion(Operation *parent, Operation *nested) {
-  for (Region *region = nested->getParentRegion(); region;) {
-    Operation *owner = region->getParentOp();
-    if (owner == parent)
-      return region;
-    region = owner ? owner->getParentRegion() : nullptr;
-  }
-  return nullptr;
-}
+using wave::regalloc_detail::RegAllocRegionFlow;
 
-static bool regionMayReach(RegionBranchOpInterface branch, Region *source,
-                           Region *target) {
-  SmallVector<Region *, 4> pending{source};
-  DenseSet<Region *> visited;
-  SmallVector<RegionSuccessor, 4> successors;
-  while (!pending.empty()) {
-    Region *region = pending.pop_back_val();
-    if (!visited.insert(region).second)
-      continue;
-    if (region == target)
-      return true;
-    for (Block &block : *region) {
-      RegionBranchTerminatorOpInterface terminator =
-          dyn_cast<RegionBranchTerminatorOpInterface>(block.getTerminator());
-      if (!terminator)
-        continue;
-      successors.clear();
-      branch.getSuccessorRegions(RegionBranchPoint(terminator), successors);
-      for (RegionSuccessor successor : successors)
-        if (!successor.isOperation())
-          pending.push_back(successor.getSuccessor());
-    }
-  }
-  return false;
-}
-
-static bool useCannotFollow(Operation *from, Operation *user) {
-  for (Operation *parent = from->getParentOp(); parent;
-       parent = parent->getParentOp()) {
-    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
-    if (!branch)
-      continue;
-    Region *fromRegion = getChildRegion(parent, from);
-    Region *useRegion = getChildRegion(parent, user);
-    if (fromRegion && useRegion && fromRegion != useRegion &&
-        !regionMayReach(branch, fromRegion, useRegion))
-      return true;
-  }
-  return false;
-}
-
-static bool operationIsInside(Operation *root, Operation *op) {
-  for (Operation *cur = op; cur; cur = cur->getParentOp())
-    if (cur == root)
-      return true;
-  return false;
-}
-
-static bool valueIsDefinedInside(Operation *root, Value value) {
-  if (Operation *def = value.getDefiningOp())
-    return operationIsInside(root, def);
-  if (BlockArgument arg = dyn_cast<BlockArgument>(value))
-    return operationIsInside(root, arg.getOwner()->getParentOp());
-  return false;
-}
-
-static bool useMayFollowThroughLoop(Value value, Operation *from,
-                                    Operation *user) {
-  for (Operation *parent = from->getParentOp(); parent;
-       parent = parent->getParentOp()) {
-    auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(parent);
-    if (loop && !valueIsDefinedInside(loop, value) &&
-        user != loop.getOperation() &&
-        operationIsInside(loop.getOperation(), user))
-      return true;
-  }
-  return false;
-}
-
-static bool useMayFollow(Value value, Operation *from, Operation *user) {
-  if (from == user)
-    return false;
-  if (useMayFollowThroughLoop(value, from, user))
-    return true;
-  if (useCannotFollow(from, user))
-    return false;
-  for (Operation *fromTop = from; fromTop; fromTop = fromTop->getParentOp()) {
-    Operation *userTop = ancestorInBlock(user, fromTop->getBlock());
-    if (!userTop)
-      continue;
-    if (fromTop == userTop)
-      return true;
-    return fromTop->isBeforeInBlock(userTop);
-  }
-  return true;
-}
-
-static bool hasInvariantBodyRead(Value value,
-                                 waveamdmachine::UniformLoopOp loop) {
-  Operation *terminator = loop.getBody().front().getTerminator();
+static bool hasInvariantRegionRead(Value value, Operation *branch,
+                                   Region *region) {
   for (OpOperand &use : value.getUses()) {
     Operation *user = use.getOwner();
-    if (user != loop.getOperation() && user != terminator &&
-        operationIsInside(loop.getOperation(), user))
+    if (user != branch &&
+        RegAllocRegionFlow::getChildRegion(branch, user) == region &&
+        !(user->getParentRegion() == region &&
+          user->hasTrait<OpTrait::IsTerminator>()))
       return true;
   }
   return false;
 }
 
-static bool hasUseBeforeLoop(Value value, waveamdmachine::UniformLoopOp loop) {
-  Block *block = loop->getBlock();
+static bool hasUseBeforeBranch(Value value, Operation *branch) {
+  Block *block = branch->getBlock();
   for (OpOperand &use : value.getUses()) {
     Operation *user = use.getOwner();
-    if (user == loop.getOperation())
+    if (user == branch)
       continue;
     Operation *top = ancestorInBlock(user, block);
-    if (!top || top == loop.getOperation())
+    if (!top || top == branch)
       continue;
-    if (top->isBeforeInBlock(loop.getOperation()))
+    if (top->isBeforeInBlock(branch))
       return true;
   }
   return false;
 }
 
-static bool hasUseAfterLoop(Value value, waveamdmachine::UniformLoopOp loop) {
+static bool hasUseAfterBranch(const RegAllocRegionFlow &flow, Value value,
+                              Operation *branch) {
   return llvm::any_of(value.getUses(), [&](OpOperand &use) {
     Operation *user = use.getOwner();
-    return user != loop.getOperation() &&
-           !operationIsInside(loop.getOperation(), user) &&
-           useMayFollow(value, loop, user);
+    return user != branch &&
+           !RegAllocRegionFlow::isOperationInside(branch, user) &&
+           flow.useMayFollow(value, branch, user);
   });
 }
 
-static bool valueIsLiveAfter(Value value, Operation *op) {
+static bool valueIsLiveAfter(const RegAllocRegionFlow &flow, Value value,
+                             Operation *op) {
   return llvm::any_of(value.getUses(), [&](OpOperand &use) {
-    return use.getOwner() != op && useMayFollow(value, op, use.getOwner());
+    return use.getOwner() != op && flow.useMayFollow(value, op, use.getOwner());
   });
 }
 
-static bool valueUseRepeatsAfter(Value value, Operation *op) {
+static bool valueUseRepeatsAfter(const RegAllocRegionFlow &flow, Value value,
+                                 Operation *op) {
   for (Operation *parent = op->getParentOp(); parent;
-       parent = parent->getParentOp())
-    if (isa<waveamdmachine::UniformLoopOp>(parent) &&
-        !valueIsDefinedInside(parent, value))
+       parent = parent->getParentOp()) {
+    Region *child = RegAllocRegionFlow::getChildRegion(parent, op);
+    if (child && flow.isRepetitive(child) &&
+        !RegAllocRegionFlow::isDefinedInside(parent, value))
       return true;
+  }
   return false;
 }
 
-static bool valueDiesAt(Value value, Operation *op) {
-  return !valueUseRepeatsAfter(value, op) && !valueIsLiveAfter(value, op);
+static bool valueDiesAt(const RegAllocRegionFlow &flow, Value value,
+                        Operation *op) {
+  return !valueUseRepeatsAfter(flow, value, op) &&
+         !valueIsLiveAfter(flow, value, op);
 }
 
 static Operation *
-getUpdateTupleCopyAnchor(waveamdmachine::UpdateTupleOp update) {
+getUpdateTupleCopyAnchor(const RegAllocRegionFlow &flow,
+                         waveamdmachine::UpdateTupleOp update) {
   Operation *anchor = update.getOperation();
   Value base = update.getBase();
-  for (Operation *parent = update->getParentOp(); parent;
-       parent = parent->getParentOp())
-    if (isa<waveamdmachine::UniformLoopOp>(parent) &&
-        !valueIsDefinedInside(parent, base))
+  for (Operation *nested = update.getOperation(),
+                 *parent = nested->getParentOp();
+       parent; nested = parent, parent = parent->getParentOp()) {
+    Region *child = RegAllocRegionFlow::getChildRegion(parent, nested);
+    if (child && flow.isRepetitive(child) &&
+        !RegAllocRegionFlow::isDefinedInside(parent, base))
       anchor = parent;
+  }
   return anchor;
 }
 
-static LogicalResult splitLiveUpdateTupleBases(func::FuncOp func) {
+static LogicalResult splitLiveUpdateTupleBases(func::FuncOp func,
+                                               const RegAllocRegionFlow &flow) {
   SmallVector<waveamdmachine::UpdateTupleOp> updates;
   func.walk([&](waveamdmachine::UpdateTupleOp update) {
-    if (valueIsLiveAfter(update.getBase(), update))
+    if (valueIsLiveAfter(flow, update.getBase(), update))
       updates.push_back(update);
   });
 
   OpBuilder builder(func.getContext());
   for (waveamdmachine::UpdateTupleOp update : updates) {
-    Operation *anchor = getUpdateTupleCopyAnchor(update);
+    Operation *anchor = getUpdateTupleCopyAnchor(flow, update);
     builder.setInsertionPoint(anchor);
     FailureOr<Value> copy =
         duplicateRegValue(builder, update.getLoc(), update.getBase());
@@ -580,60 +448,68 @@ static LogicalResult splitLiveUpdateTupleBases(func::FuncOp func) {
   return success();
 }
 
-static bool shouldRematerializeLoopInit(Value init,
-                                        waveamdmachine::UniformLoopOp loop) {
+static bool shouldRematerializeRegionInit(Value init, Operation *branch) {
   DenseSet<Value> visiting;
   if (!canRematerializeDuplicateRegValue(init, visiting))
     return false;
   Operation *def = init.getDefiningOp();
-  if (def && def->getBlock() == loop->getBlock() &&
-      def->getNextNode() == loop.getOperation())
+  if (def && def->getBlock() == branch->getBlock() &&
+      def->getNextNode() == branch)
     return false;
-  return hasUseBeforeLoop(init, loop);
+  return hasUseBeforeBranch(init, branch);
 }
 
-static bool needsLocalNestedLoopInit(waveamdmachine::UniformLoopOp loop,
-                                     Value init) {
+static bool needsLocalNestedRepetitiveInit(const RegAllocRegionFlow &flow,
+                                           Operation *branch, Value init) {
   if (!trackedRegType(init))
     return false;
-  waveamdmachine::UniformLoopOp parentLoop =
-      loop->getParentOfType<waveamdmachine::UniformLoopOp>();
-  return parentLoop && !valueIsDefinedInside(parentLoop.getOperation(), init);
+  Region *parentRegion = flow.getEnclosingRepetitiveRegion(branch);
+  return parentRegion && !RegAllocRegionFlow::isDefinedInside(
+                             parentRegion->getParentOp(), init);
 }
 
-static bool needsDistinctLoopInit(Value init,
-                                  waveamdmachine::UniformLoopOp loop,
-                                  bool repeatedInit, bool rematInit) {
-  return repeatedInit || needsLocalNestedLoopInit(loop, init) || rematInit ||
-         hasInvariantBodyRead(init, loop) || hasUseAfterLoop(init, loop);
+static bool needsDistinctRegionInit(const RegAllocRegionFlow &flow, Value init,
+                                    Operation *branch, Region *target,
+                                    bool repeatedInit, bool rematInit) {
+  return repeatedInit || needsLocalNestedRepetitiveInit(flow, branch, init) ||
+         rematInit || hasInvariantRegionRead(init, branch, target) ||
+         hasUseAfterBranch(flow, init, branch);
 }
 
-static LogicalResult splitDuplicateLoopInits(func::FuncOp func) {
-  SmallVector<waveamdmachine::UniformLoopOp> loops;
-  func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
+static LogicalResult
+splitDuplicateRepetitiveRegionInits(func::FuncOp func,
+                                    const RegAllocRegionFlow &flow) {
   OpBuilder builder(func.getContext());
-  for (waveamdmachine::UniformLoopOp loop : loops) {
-    DenseSet<Value> seen;
-    builder.setInsertionPoint(loop);
-    for (auto [i, init] : llvm::enumerate(loop.getInits())) {
-      if (!trackedRegType(init)) {
-        seen.insert(init);
+  for (const RegAllocRegionFlow::Branch &branch : flow.getBranches()) {
+    for (Region *target : branch.regions) {
+      if (!flow.isRepetitive(target))
         continue;
+      DenseSet<Value> seen;
+      builder.setInsertionPoint(branch.op);
+      for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers) {
+        if (transfer.source || transfer.target != target)
+          continue;
+        Value init = transfer.operand->get();
+        if (!trackedRegType(init)) {
+          seen.insert(init);
+          continue;
+        }
+        bool repeatedInit = !seen.insert(init).second;
+        bool rematInit = shouldRematerializeRegionInit(init, branch.op);
+        if (!needsDistinctRegionInit(flow, init, branch.op, target,
+                                     repeatedInit, rematInit))
+          continue;
+        Operation *def = init.getDefiningOp();
+        DuplicateRematPolicy rematPolicy =
+            rematInit ? DuplicateRematPolicy::AnyLegal
+                      : DuplicateRematPolicy::CopyCostBounded;
+        FailureOr<Value> dup =
+            duplicateRegValue(builder, branch.op->getLoc(), init, rematPolicy);
+        if (failed(dup))
+          return failure();
+        transfer.operand->set(*dup);
+        eraseDeadCheapRegOps({def});
       }
-      bool repeatedInit = !seen.insert(init).second;
-      bool rematInit = shouldRematerializeLoopInit(init, loop);
-      if (!needsDistinctLoopInit(init, loop, repeatedInit, rematInit))
-        continue;
-      Operation *def = init.getDefiningOp();
-      DuplicateRematPolicy rematPolicy =
-          rematInit ? DuplicateRematPolicy::AnyLegal
-                    : DuplicateRematPolicy::CopyCostBounded;
-      FailureOr<Value> dup =
-          duplicateRegValue(builder, loop.getLoc(), init, rematPolicy);
-      if (failed(dup))
-        return failure();
-      loop.getInitsMutable()[i].assign(*dup);
-      eraseDeadCheapRegOps({def});
     }
   }
   return success();
@@ -755,17 +631,11 @@ splitRequiredKilledOperandInputs(func::FuncOp func,
   return success();
 }
 
-static Operation *topLevelBodyOp(Block &body, Operation *op) {
-  while (op && op->getBlock() != &body)
-    op = op->getParentOp();
-  return op;
-}
-
-static bool hasUseAfter(BlockArgument arg, Operation *op) {
-  Block &body = *arg.getOwner();
-  for (OpOperand &use : arg.getUses()) {
-    Operation *user = topLevelBodyOp(body, use.getOwner());
-    if (!user || isa<waveamdmachine::ContinueIfOp>(user))
+static bool hasUseAfterInBlock(Value value, Operation *op) {
+  Block *block = op->getBlock();
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = ancestorInBlock(use.getOwner(), block);
+    if (!user || user->hasTrait<OpTrait::IsTerminator>())
       continue;
     if (op->isBeforeInBlock(user))
       return true;
@@ -773,57 +643,78 @@ static bool hasUseAfter(BlockArgument arg, Operation *op) {
   return false;
 }
 
-static bool needsBackedgeCopy(waveamdmachine::UniformLoopOp loop, unsigned i,
-                              Value carry) {
-  Block &body = loop.getBody().front();
-  Value init = loop.getInits()[i];
-  BlockArgument arg = body.getArgument(i);
-  if (carry == arg || carry == init)
+static bool needsCycleCopy(const RegAllocRegionFlow &flow,
+                           const RegAllocRegionFlow::Transfer &transfer,
+                           Value entry) {
+  Value carry = transfer.operand->get();
+  Value input = transfer.input;
+  if (carry == input || carry == entry)
     return false;
+  if (transfer.repetitiveInputRelation ==
+      RegAllocRegionFlow::RepetitiveInputRelation::SameSlot)
+    return false;
+  if (transfer.repetitiveInputRelation ==
+      RegAllocRegionFlow::RepetitiveInputRelation::DifferentSlots)
+    return true;
   Operation *def = carry.getDefiningOp();
   if (!def)
     return true;
-  Operation *top = topLevelBodyOp(body, def);
+  Region *source = transfer.source;
+  if (!source ||
+      !RegAllocRegionFlow::isOperationInside(source->getParentOp(), def))
+    return true;
+  if (source != transfer.target)
+    return true;
+  Operation *top = ancestorInBlock(def, transfer.sourceOperation->getBlock());
   if (!top)
     return true;
-  return hasUseAfter(arg, top);
+  return hasUseAfterInBlock(input, top);
 }
 
-static LogicalResult materializeLoopBackedgeCopies(func::FuncOp func) {
-  SmallVector<waveamdmachine::UniformLoopOp> loops;
-  func.walk([&](waveamdmachine::UniformLoopOp loop) { loops.push_back(loop); });
+static LogicalResult
+materializeRepetitiveRegionCycleCopies(func::FuncOp func,
+                                       const RegAllocRegionFlow &flow) {
   OpBuilder builder(func.getContext());
-  for (waveamdmachine::UniformLoopOp loop : loops) {
-    Block &body = loop.getBody().front();
-    auto term = cast<waveamdmachine::ContinueIfOp>(body.getTerminator());
-    SmallVector<std::pair<unsigned, Value>> copies;
-    for (auto [i, carry] : llvm::enumerate(term.getCarries())) {
+  for (const RegAllocRegionFlow::Branch &branch : flow.getBranches()) {
+    DenseMap<Value, Value> entries;
+    DenseMap<OpOperand *, Value> incomingValues;
+    for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers)
+      if (!transfer.source && transfer.target &&
+          flow.isRepetitive(transfer.target)) {
+        entries.try_emplace(transfer.input, transfer.operand->get());
+      } else if (transfer.source && transfer.target &&
+                 flow.isRepetitive(transfer.target)) {
+        incomingValues.try_emplace(transfer.operand, transfer.operand->get());
+      }
+
+    SmallVector<const RegAllocRegionFlow::Transfer *> copies;
+    for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers) {
+      if (!transfer.source || !transfer.target ||
+          !flow.isRepetitive(transfer.target) ||
+          !flow.mayReach(transfer.target, transfer.source))
+        continue;
+      Value carry = incomingValues.lookup(transfer.operand);
       if (!trackedRegType(carry))
         continue;
-      if (needsBackedgeCopy(loop, i, carry))
-        copies.push_back({i, carry});
+      if (needsCycleCopy(flow, transfer, entries.lookup(transfer.input)))
+        copies.push_back(&transfer);
     }
-    builder.setInsertionPoint(term);
-    for (auto [i, carry] : copies) {
-      FailureOr<Value> dup = duplicateRegValue(builder, term.getLoc(), carry);
+    for (const RegAllocRegionFlow::Transfer *transfer : copies) {
+      builder.setInsertionPoint(transfer->sourceOperation);
+      FailureOr<Value> dup =
+          duplicateRegValue(builder, transfer->sourceOperation->getLoc(),
+                            incomingValues.lookup(transfer->operand));
       if (failed(dup))
         return failure();
-      term.getCarriesMutable()[i].assign(*dup);
+      transfer->operand->set(*dup);
     }
   }
   return success();
 }
 
-static bool feedsLoopCarry(Value v) {
-  if (auto arg = dyn_cast<BlockArgument>(v))
-    if (isa<waveamdmachine::UniformLoopOp>(arg.getOwner()->getParentOp()))
-      return true;
-  if (v.getDefiningOp<waveamdmachine::UniformLoopOp>())
-    return true;
-  return llvm::any_of(v.getUsers(), [](Operation *user) {
-    return isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp>(
-        user);
-  });
+static bool feedsRepetitiveRegionCarry(const RegAllocRegionFlow &flow,
+                                       Value value) {
+  return flow.feedsRepetitiveTransfer(value);
 }
 
 using ToElementsSourceMap = DenseMap<Value, std::pair<Value, unsigned>>;
@@ -1031,12 +922,19 @@ getReanchorableSources(waveamdmachine::TupleFromElementsOp op,
   return result;
 }
 
-static bool isStorageClobberUse(OpOperand &use,
+static bool isStorageClobberUse(const RegAllocRegionFlow &flow, OpOperand &use,
                                 KilledOperandReuseIsaCache &isaCache) {
   Operation *user = use.getOwner();
-  if (isa<waveamdmachine::UniformLoopOp, waveamdmachine::ContinueIfOp,
-          waveamdmachine::UpdateTupleOp>(user))
+  if (flow.isRepetitiveTransferOperand(&use))
     return true;
+  if (auto aliasOp =
+          dyn_cast<waveamdmachine::RegisterStorageAliasOpInterface>(user)) {
+    SmallVector<waveamdmachine::RegisterStorageAlias, 8> aliases;
+    aliasOp.getRegisterStorageAliases(aliases);
+    for (waveamdmachine::RegisterStorageAlias alias : aliases)
+      if (alias.destructive && alias.alias == use.get())
+        return true;
+  }
   if (auto mma = dyn_cast<waveamdmachine::MMAOpInterface>(user))
     if (user->hasTrait<OpTrait::waveamdmachine::MFMAOp>() &&
         mma.getAcc() == use.get())
@@ -1050,10 +948,10 @@ static bool isStorageClobberUse(OpOperand &use,
                     reuse, use, *isa);
 }
 
-static bool hasStorageClobberUse(Value value,
+static bool hasStorageClobberUse(const RegAllocRegionFlow &flow, Value value,
                                  KilledOperandReuseIsaCache &isaCache) {
   return llvm::any_of(value.getUses(), [&](OpOperand &use) {
-    return isStorageClobberUse(use, isaCache);
+    return isStorageClobberUse(flow, use, isaCache);
   });
 }
 
@@ -1073,7 +971,8 @@ static std::optional<RegSplatMove> getRegSplatMove(Operation *op) {
 }
 
 static bool isLastUseRegSplat(RegSplatMove move,
-                              KilledOperandReuseIsaCache &isaCache) {
+                              KilledOperandReuseIsaCache &isaCache,
+                              const RegAllocRegionFlow &flow) {
   std::optional<waveamdmachine::RegType> sourceType =
       copyableRegType(move.source);
   waveamdmachine::RegType resultType =
@@ -1082,18 +981,19 @@ static bool isLastUseRegSplat(RegSplatMove move,
          sourceType->getWidth() == 1 && sourceType->getIndex() < 0 &&
          resultType.getIndex() < 0 && resultType.getWidth() > 1 &&
          llvm::hasSingleElement(move.result.getUses()) &&
-         isStorageClobberUse(*move.result.use_begin(), isaCache) &&
-         valueDiesAt(move.source, move.op);
+         isStorageClobberUse(flow, *move.result.use_begin(), isaCache) &&
+         valueDiesAt(flow, move.source, move.op);
 }
 
 static void
 decomposeLastUseRegSplatCopies(func::FuncOp func,
                                KilledOperandReuseIsaCache &isaCache,
+                               const RegAllocRegionFlow &flow,
                                DenseSet<Operation *> &decomposedSplatTuples) {
   SmallVector<RegSplatMove> moves;
   func.walk([&](Operation *op) {
     std::optional<RegSplatMove> move = getRegSplatMove(op);
-    if (move && isLastUseRegSplat(*move, isaCache))
+    if (move && isLastUseRegSplat(*move, isaCache, flow))
       moves.push_back(*move);
   });
 
@@ -1112,12 +1012,11 @@ decomposeLastUseRegSplatCopies(func::FuncOp func,
   }
 }
 
-static bool
-hasAlignedViewLifetimeConflict(waveamdmachine::TupleFromElementsOp op,
-                               AlignedTupleView view,
-                               KilledOperandReuseIsaCache &isaCache) {
+static bool hasAlignedViewLifetimeConflict(
+    waveamdmachine::TupleFromElementsOp op, AlignedTupleView view,
+    const RegAllocRegionFlow &flow, KilledOperandReuseIsaCache &isaCache) {
   if (llvm::none_of(op.getTuple().getUses(), [&](OpOperand &use) {
-        return isStorageClobberUse(use, isaCache);
+        return isStorageClobberUse(flow, use, isaCache);
       }))
     return false;
   auto split = op.getElements()
@@ -1137,22 +1036,24 @@ static bool hasSlotMismatch(const DenseMap<Value, unsigned> &anchorSlot,
   return anchorIt != anchorSlot.end() && anchorIt->second != slot;
 }
 
-static bool needsTupleElementCopy(Value element, bool slotMismatch, bool reuse,
+static bool needsTupleElementCopy(const RegAllocRegionFlow &flow, Value element,
+                                  bool slotMismatch, bool reuse,
                                   bool dragInConflict,
                                   bool fixedElementInUnfixedTuple,
                                   bool liveThroughClobber) {
   return slotMismatch || reuse || dragInConflict ||
          fixedElementInUnfixedTuple || liveThroughClobber ||
-         feedsLoopCarry(element);
+         feedsRepetitiveRegionCarry(flow, element);
 }
 
 static bool canPreserveAlignedView(waveamdmachine::TupleFromElementsOp op,
                                    AlignedTupleView view,
                                    const ToElementsSourceMap &source,
+                                   const RegAllocRegionFlow &flow,
                                    KilledOperandReuseIsaCache &isaCache) {
   if (hasFixedViewConflict(op, view, source))
     return false;
-  return !hasAlignedViewLifetimeConflict(op, view, isaCache);
+  return !hasAlignedViewLifetimeConflict(op, view, flow, isaCache);
 }
 
 static bool isReanchoredElement(Value element,
@@ -1244,7 +1145,8 @@ getRegSplatSource(waveamdmachine::TupleFromElementsOp op,
 }
 
 static bool isLastUseRegSplat(waveamdmachine::TupleFromElementsOp op,
-                              bool newlyDecomposed) {
+                              bool newlyDecomposed,
+                              const RegAllocRegionFlow &flow) {
   std::optional<waveamdmachine::RegType> tupleType =
       copyableRegType(op.getTuple());
   if (!tupleType || tupleType->getIndex() >= 0 || tupleType->getWidth() <= 1)
@@ -1252,12 +1154,13 @@ static bool isLastUseRegSplat(waveamdmachine::TupleFromElementsOp op,
   std::optional<RegSplatSource> source =
       getRegSplatSource(op, tupleType->getRegClass());
   return source && (newlyDecomposed || source->directElements == 1) &&
-         valueDiesAt(source->value, op.getOperation());
+         valueDiesAt(flow, source->value, op.getOperation());
 }
 
 static FailureOr<Value> rewriteTupleElementForSharing(
-    waveamdmachine::TupleFromElementsOp op, OpBuilder &builder, Value element,
-    unsigned slot, waveamdmachine::RegType tupleType, bool preserveAlignedView,
+    const RegAllocRegionFlow &flow, waveamdmachine::TupleFromElementsOp op,
+    OpBuilder &builder, Value element, unsigned slot,
+    waveamdmachine::RegType tupleType, bool preserveAlignedView,
     bool preserveLayout, bool tupleIsClobbered, bool lastUseSplat,
     DenseMap<Value, unsigned> &anchorSlot, const ToElementsSourceMap &source,
     DenseSet<Value> &consumedByFromElements) {
@@ -1268,10 +1171,11 @@ static FailureOr<Value> rewriteTupleElementForSharing(
   bool dragInConflict = hasSourceDragConflict(element, source, preserveLayout);
   bool fixedConflict =
       hasFixedElementConflict(element, tupleType, preserveAlignedView);
-  bool elementDies = lastUseSplat ? valueDiesAt(element, op.getOperation())
-                                  : hasSingleUseBy(element, op.getOperation());
+  bool elementDies = lastUseSplat
+                         ? valueDiesAt(flow, element, op.getOperation())
+                         : hasSingleUseBy(element, op.getOperation());
   bool liveThroughClobber = tupleIsClobbered && !elementDies;
-  if (!needsTupleElementCopy(element, slotMismatch, reuse, dragInConflict,
+  if (!needsTupleElementCopy(flow, element, slotMismatch, reuse, dragInConflict,
                              fixedConflict, liveThroughClobber)) {
     if (!preserveAlignedView)
       anchorSlot[element] = slot;
@@ -1288,8 +1192,8 @@ static FailureOr<Value> rewriteTupleElementForSharing(
 }
 
 static LogicalResult rewriteFromElementsForSharing(
-    waveamdmachine::TupleFromElementsOp op, OpBuilder &builder,
-    DenseMap<Value, unsigned> &anchorSlot,
+    const RegAllocRegionFlow &flow, waveamdmachine::TupleFromElementsOp op,
+    OpBuilder &builder, DenseMap<Value, unsigned> &anchorSlot,
     const ToElementsSourceMap &toElementsSource,
     DenseSet<Value> &consumedByFromElements,
     const DenseSet<Operation *> &decomposedSplatTuples,
@@ -1301,8 +1205,8 @@ static LogicalResult rewriteFromElementsForSharing(
       getReanchorableSources(op, toElementsSource, consumerSlots, targetLimits);
   std::optional<AlignedTupleView> alignedView =
       getAlignedTupleView(op, toElementsSource, targetLimits);
-  if (alignedView &&
-      !canPreserveAlignedView(op, *alignedView, toElementsSource, isaCache)) {
+  if (alignedView && !canPreserveAlignedView(op, *alignedView, toElementsSource,
+                                             flow, isaCache)) {
     reanchorableSources.erase(alignedView->sourceTuple);
     alignedView.reset();
   }
@@ -1313,17 +1217,18 @@ static LogicalResult rewriteFromElementsForSharing(
   waveamdmachine::RegType tupleType =
       cast<waveamdmachine::RegType>(op.getTuple().getType());
   bool preserveAlignedView = alignedView.has_value();
-  bool tupleIsClobbered = hasStorageClobberUse(op.getTuple(), isaCache);
+  bool tupleIsClobbered = hasStorageClobberUse(flow, op.getTuple(), isaCache);
   bool lastUseSplat =
       tupleIsClobbered &&
-      isLastUseRegSplat(op, decomposedSplatTuples.contains(op.getOperation()));
+      isLastUseRegSplat(op, decomposedSplatTuples.contains(op.getOperation()),
+                        flow);
   for (Value element : op.getElements()) {
     unsigned slot = cumOffset;
     bool reanchorSource =
         isReanchoredElement(element, toElementsSource, reanchorableSources);
     bool preserveLayout = preserveAlignedView || reanchorSource;
     FailureOr<Value> use = rewriteTupleElementForSharing(
-        op, builder, element, slot, tupleType, preserveAlignedView,
+        flow, op, builder, element, slot, tupleType, preserveAlignedView,
         preserveLayout, tupleIsClobbered, lastUseSplat, anchorSlot,
         toElementsSource, consumedByFromElements);
     if (failed(use))
@@ -1340,6 +1245,7 @@ static LogicalResult rewriteFromElementsForSharing(
 static LogicalResult
 splitTupleElementSharing(func::FuncOp func,
                          KilledOperandReuseIsaCache &isaCache,
+                         const RegAllocRegionFlow &flow,
                          const DenseSet<Operation *> &decomposedSplatTuples,
                          const wave::WaveAMDRegisterLimits *targetLimits) {
   OpBuilder builder(func.getContext());
@@ -1363,146 +1269,103 @@ splitTupleElementSharing(func::FuncOp func,
   });
   for (waveamdmachine::TupleFromElementsOp op : fromElementsOps) {
     if (failed(rewriteFromElementsForSharing(
-            op, builder, anchorSlot, toElementsSource, consumedByFromElements,
-            decomposedSplatTuples, isaCache, targetLimits)))
+            flow, op, builder, anchorSlot, toElementsSource,
+            consumedByFromElements, decomposedSplatTuples, isaCache,
+            targetLimits)))
       return failure();
   }
   return success();
 }
 
-static bool isRegionCopyableYield(Value value) {
-  auto rt = dyn_cast<waveamdmachine::RegType>(value.getType());
-  return rt && (isSGPR(rt) || isVGPR(rt));
-}
-
-static waveamdmachine::YieldOp getRegionYield(Region &region) {
-  if (region.empty())
-    return {};
-  return dyn_cast<waveamdmachine::YieldOp>(region.front().getTerminator());
-}
-
-static bool isUniqueUniformIfIncoming(waveamdmachine::UniformIfOp uniformIf,
-                                      unsigned resultIndex, Value value) {
-  for (Region *region :
-       {&uniformIf.getThenRegion(), &uniformIf.getElseRegion()}) {
-    waveamdmachine::YieldOp yield = getRegionYield(*region);
-    if (!yield)
-      continue;
-    for (auto [index, incoming] : llvm::enumerate(yield.getValues()))
-      if (index != resultIndex && incoming == value)
-        return false;
-  }
+static bool
+isUniqueJoinIncoming(const RegAllocRegionFlow::Branch &branch,
+                     const RegAllocRegionFlow::Transfer &current, Value value,
+                     const DenseMap<OpOperand *, Value> &incomingValues) {
+  for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers)
+    if (!transfer.target && transfer.input != current.input &&
+        incomingValues.lookup(transfer.operand) == value)
+      return false;
   return true;
 }
 
-static bool
-uniformIfAlternativesCanOverwrite(waveamdmachine::UniformIfOp uniformIf,
-                                  unsigned resultIndex, Value value) {
-  for (Region *region :
-       {&uniformIf.getThenRegion(), &uniformIf.getElseRegion()}) {
-    waveamdmachine::YieldOp yield = getRegionYield(*region);
-    if (!yield || resultIndex >= yield.getValues().size())
+static bool alternativesCanOverwrite(
+    const RegAllocRegionFlow &flow, const RegAllocRegionFlow::Branch &branch,
+    const RegAllocRegionFlow::Transfer &current, Value value,
+    const DenseMap<OpOperand *, Value> &incomingValues) {
+  bool sawAlternative = false;
+  for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers) {
+    if (transfer.target || transfer.input != current.input ||
+        &transfer == &current)
+      continue;
+    if (!flow.areMutuallyExclusive(current.source, transfer.source))
       return false;
-    Value incoming = yield.getValues()[resultIndex];
+    sawAlternative = true;
+    Value incoming = incomingValues.lookup(transfer.operand);
     if (incoming == value)
       continue;
     Operation *def = incoming.getDefiningOp();
-    if (!def || !valueIsDefinedInside(uniformIf, incoming) ||
-        !valueDiesAt(value, def))
+    if (!def || !RegAllocRegionFlow::isDefinedInside(branch.op, incoming) ||
+        !valueDiesAt(flow, value, def))
       return false;
   }
-  return true;
+  return sawAlternative;
 }
 
-static bool
-canAliasExternalUniformIfYield(waveamdmachine::UniformIfOp uniformIf,
-                               unsigned resultIndex, Value value,
-                               waveamdmachine::YieldOp currentYield) {
-  waveamdmachine::RegType type = cast<waveamdmachine::RegType>(value.getType());
-  // SGPR inputs may occupy reserved ABI registers; keep their edge copies.
-  if (!isVGPR(type) || !valueDiesAt(value, currentYield))
+static bool canAliasExternalJoinIncoming(
+    const RegAllocRegionFlow &flow, const RegAllocRegionFlow::Branch &branch,
+    const RegAllocRegionFlow::Transfer &transfer, Value value,
+    const DenseMap<OpOperand *, Value> &incomingValues) {
+  std::optional<wave::regalloc_detail::RegAllocStorageProperties> storage =
+      wave::regalloc_detail::getRegAllocStorageProperties(value);
+  if (!storage || !storage->mayAliasExclusiveJoin ||
+      !valueDiesAt(flow, value, transfer.sourceOperation))
     return false;
-  if (!isUniqueUniformIfIncoming(uniformIf, resultIndex, value))
+  if (!isUniqueJoinIncoming(branch, transfer, value, incomingValues))
     return false;
-  return uniformIfAlternativesCanOverwrite(uniformIf, resultIndex, value);
-}
-
-static Value createBranchLocalRegAlias(OpBuilder &builder, Location loc,
-                                       Value value) {
-  return waveamdmachine::UpdateTupleOp::create(builder, loc, value.getType(),
-                                               value, ValueRange{},
-                                               builder.getArrayAttr({}))
-      .getResult();
+  return alternativesCanOverwrite(flow, branch, transfer, value,
+                                  incomingValues);
 }
 
 static LogicalResult
-materializeExternalRegionYieldCopies(Operation *regionBranch, Region &region,
-                                     OpBuilder &builder) {
-  waveamdmachine::YieldOp yield = getRegionYield(region);
-  if (!yield)
-    return success();
-  SmallVector<Value> values(yield.getValues());
-  bool changed = false;
-  builder.setInsertionPoint(yield);
-  for (auto [index, value] : llvm::enumerate(values)) {
-    if (!isRegionCopyableYield(value))
-      continue;
-    if (valueIsDefinedInside(regionBranch, value))
-      continue;
-    if (waveamdmachine::UniformIfOp uniformIf =
-            dyn_cast<waveamdmachine::UniformIfOp>(regionBranch);
-        uniformIf &&
-        canAliasExternalUniformIfYield(uniformIf, index, value, yield)) {
-      values[index] = createBranchLocalRegAlias(builder, yield.getLoc(), value);
-      changed = true;
-      continue;
-    }
-    FailureOr<Value> dup = duplicateRegValue(builder, yield.getLoc(), value);
-    if (failed(dup))
-      return failure();
-    values[index] = *dup;
-    changed = true;
-  }
-  if (changed)
-    yield.getValuesMutable().assign(values);
-  return success();
-}
-
-static LogicalResult materializeConditionalYieldCopies(func::FuncOp func) {
-  SmallVector<waveamdmachine::UniformIfOp> uniformIfOps;
-  SmallVector<waveamdmachine::ExecIfOp> execIfOps;
-  func.walk([&](Operation *op) {
-    if (waveamdmachine::UniformIfOp uniformIf =
-            dyn_cast<waveamdmachine::UniformIfOp>(op))
-      uniformIfOps.push_back(uniformIf);
-    else if (waveamdmachine::ExecIfOp execIf =
-                 dyn_cast<waveamdmachine::ExecIfOp>(op))
-      execIfOps.push_back(execIf);
-  });
-
+materializeAcyclicRegionJoinCopies(func::FuncOp func,
+                                   const RegAllocRegionFlow &flow) {
   OpBuilder builder(func.getContext());
-  for (waveamdmachine::UniformIfOp op : uniformIfOps) {
-    if (failed(materializeExternalRegionYieldCopies(
-            op.getOperation(), op.getThenRegion(), builder)))
-      return failure();
-    if (failed(materializeExternalRegionYieldCopies(
-            op.getOperation(), op.getElseRegion(), builder)))
-      return failure();
-  }
-  for (waveamdmachine::ExecIfOp op : execIfOps) {
-    if (failed(materializeExternalRegionYieldCopies(
-            op.getOperation(), op.getThenRegion(), builder)))
-      return failure();
-    if (failed(materializeExternalRegionYieldCopies(
-            op.getOperation(), op.getElseRegion(), builder)))
-      return failure();
+  for (const RegAllocRegionFlow::Branch &branch : flow.getBranches()) {
+    DenseMap<OpOperand *, Value> incomingValues;
+    for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers)
+      incomingValues.try_emplace(transfer.operand, transfer.operand->get());
+    SmallVector<const RegAllocRegionFlow::Transfer *> copies;
+    for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers) {
+      if (transfer.target || !transfer.source ||
+          flow.isRepetitive(transfer.source))
+        continue;
+      Value value = incomingValues.lookup(transfer.operand);
+      if (!trackedRegType(value) ||
+          RegAllocRegionFlow::isDefinedInside(branch.op, value))
+        continue;
+      if (canAliasExternalJoinIncoming(flow, branch, transfer, value,
+                                       incomingValues))
+        continue;
+      copies.push_back(&transfer);
+    }
+    for (const RegAllocRegionFlow::Transfer *transfer : copies) {
+      Value value = incomingValues.lookup(transfer->operand);
+      builder.setInsertionPoint(transfer->sourceOperation);
+      FailureOr<Value> duplicate = duplicateRegValue(
+          builder, transfer->sourceOperation->getLoc(), value);
+      if (failed(duplicate))
+        return failure();
+      transfer->operand->set(*duplicate);
+    }
   }
   return success();
 }
 
 } // namespace
 
-LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+LogicalResult
+mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func,
+                                     const RegAllocRegionFlow &flow) {
   std::optional<WaveAMDRegisterLimits> targetLimits;
   if (waveamdmachine::findAMDGPUTargetModule(func)) {
     FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(func);
@@ -1511,13 +1374,13 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
     targetLimits = std::move(*limits);
   }
   eraseRegAfterOps(func);
-  if (failed(splitLiveUpdateTupleBases(func)))
+  if (failed(splitLiveUpdateTupleBases(func, flow)))
     return failure();
-  if (failed(materializeConditionalYieldCopies(func)))
+  if (failed(materializeAcyclicRegionJoinCopies(func, flow)))
     return failure();
-  if (failed(materializeLoopBackedgeCopies(func)))
+  if (failed(materializeRepetitiveRegionCycleCopies(func, flow)))
     return failure();
-  if (failed(splitDuplicateLoopInits(func)))
+  if (failed(splitDuplicateRepetitiveRegionInits(func, flow)))
     return failure();
   if (failed(splitDuplicateMFMAAccumulatorInputs(func)))
     return failure();
@@ -1525,7 +1388,12 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   if (failed(splitRequiredKilledOperandInputs(func, isaCache)))
     return failure();
   DenseSet<Operation *> decomposedSplatTuples;
-  decomposeLastUseRegSplatCopies(func, isaCache, decomposedSplatTuples);
-  return splitTupleElementSharing(func, isaCache, decomposedSplatTuples,
+  decomposeLastUseRegSplatCopies(func, isaCache, flow, decomposedSplatTuples);
+  return splitTupleElementSharing(func, isaCache, flow, decomposedSplatTuples,
                                   targetLimits ? &*targetLimits : nullptr);
+}
+
+LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  RegAllocRegionFlow flow(func);
+  return prepareWaveAMDRegAllocIR(func, flow);
 }
