@@ -22,11 +22,11 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rdivnorm = transform.apply_registered_pass "wave-normalize-integer-div-rem" to %rmeta
         : (!transform.any_op) -> !transform.any_op
-    %rmemory = transform.apply_registered_pass "wave-lower-symbolic-memory" to %rdivnorm
+    %rredistribute = transform.apply_registered_pass "wave-lower-redistribute" to %rdivnorm
         : (!transform.any_op) -> !transform.any_op
-    %rredistribute = transform.apply_registered_pass "wave-lower-redistribute" to %rmemory
+    %rmemory = transform.apply_registered_pass "wave-lower-symbolic-memory" to %rredistribute
         : (!transform.any_op) -> !transform.any_op
-    %rmod = transform.apply_registered_pass "wave-strength-reduce-modulo" to %rredistribute
+    %rmod = transform.apply_registered_pass "wave-strength-reduce-modulo" to %rmemory
         : (!transform.any_op) -> !transform.any_op
     %rnorm = transform.apply_registered_pass "wave-normalize-pointer-offsets" to %rmod
         : (!transform.any_op) -> !transform.any_op

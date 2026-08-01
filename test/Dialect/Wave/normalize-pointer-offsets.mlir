@@ -73,6 +73,32 @@ func.func @memory_ops(%p: !wave.ptr<#wave.global, i32>)
 
 // -----
 
+// NORMALIZE-LABEL: func.func @pointer_shuffle_chain
+// NORMALIZE-SAME: ([[P:%.*]]: !wave.ptr<#wave.global>)
+// NORMALIZE: [[LANE:%.*]] = wave.lane_id : !wave.simd<i32, 32>
+// NORMALIZE: [[MOVED_ITEM0:%.*]] = wave.shuffle [[LANE]] from [[LANE]] : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+// NORMALIZE: [[MOVED_ITEM1:%.*]] = wave.shuffle [[MOVED_ITEM0]] from [[LANE]] : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+// NORMALIZE: [[MOVED_OFFSET:%.*]] = wave.index_expr <"4*orig"> ["orig"]([[MOVED_ITEM1]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// NORMALIZE: [[MOVED:%.*]] = wave.ptr_add [[P]], [[MOVED_OFFSET]] : !wave.ptr<#wave.global>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#wave.global>, 32>
+// NORMALIZE: return [[MOVED]] : !wave.simd<!wave.ptr<#wave.global>, 32>
+func.func @pointer_shuffle_chain(%p: !wave.ptr<#wave.global, i32>)
+    -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %source = wave.ptr_add %p, %lane
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %moved = wave.shuffle %source from %lane
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %moved_again = wave.shuffle %moved from %lane
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return %moved_again : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+}
+
+// -----
+
 // NORMALIZE-LABEL: func.func @allocation_release
 // NORMALIZE: [[ALLOC:%.*]] = wave.alloc() {align = 16 : i64, bytesize = 128 : i64} : !wave.ptr<#wave.shared>
 // NORMALIZE: wave.alloc_release [[ALLOC]] after {{%.*}} {workgroup_collective} : (!wave.ptr<#wave.shared>, !wave.mem.token) -> !wave.mem.token

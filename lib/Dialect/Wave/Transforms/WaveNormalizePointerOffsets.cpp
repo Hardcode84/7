@@ -250,6 +250,34 @@ public:
   }
 };
 
+static void decomposePointerShuffles(func::FuncOp func) {
+  SmallVector<ShuffleOp> shuffles;
+  func.walk([&](ShuffleOp op) {
+    SimdType sourceType = dyn_cast<SimdType>(op.getSource().getType());
+    if (!sourceType || !isa<PtrType>(sourceType.getElementType()))
+      return;
+    shuffles.push_back(op);
+  });
+
+  IRRewriter rewriter(func.getContext());
+  for (ShuffleOp op : shuffles) {
+    PtrAddOp source = op.getSource().getDefiningOp<PtrAddOp>();
+    if (!source || isa<SimdType>(source.getBase().getType()) ||
+        !isa<SimdType>(source.getOffset().getType()))
+      continue;
+    bool eraseSource = source->hasOneUse();
+    rewriter.setInsertionPoint(op);
+    Value offset = source.getOffset();
+    Value shuffled = ShuffleOp::create(rewriter, op.getLoc(), offset.getType(),
+                                       offset, op.getSourceLane());
+    Value result = PtrAddOp::create(rewriter, op.getLoc(), op.getType(),
+                                    source.getBase(), shuffled);
+    rewriter.replaceOp(op, result);
+    if (eraseSource)
+      rewriter.eraseOp(source);
+  }
+}
+
 class ConvertWhereOp : public OpConversionPattern<WhereOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -329,6 +357,8 @@ struct WaveNormalizePointerOffsetsPass
 
   LogicalResult convertFunc(func::FuncOp func) {
     MLIRContext *ctx = &getContext();
+    decomposePointerShuffles(func);
+
     PointerOffsetTypeConverter converter;
     RewritePatternSet patterns(ctx);
     ConversionTarget target(*ctx);

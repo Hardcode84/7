@@ -52,6 +52,43 @@ func.func @redistribute_same_wave_scalar(
   return
 }
 
+// ASM-LABEL: redistribute_pointer_load_store:
+// ASM: ds_bpermute_b32
+// ASM: {{buffer|global}}_load_b32
+// ASM: s_waitcnt vmcnt(0)
+// ASM: {{buffer|global}}_store_b32
+func.func @redistribute_pointer_load_store(
+    %src: !wave.ptr<#wave.global, i32>,
+    %dst: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 32, 1, 1>,
+                wave.waves_per_workgroup = 1 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %src_ptr = wave.ptr_add %src, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %moved = wave.redistribute %src_ptr,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+        -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %packet, %read = wave.gather %moved mapping
+      <bit_offset = <"0">>
+      bindings []() packet_bindings []()
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> (!wave.simd<vector<1xi32>, 32>, !wave.mem.token)
+  %value = wave.extract %packet[0]
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+  %dst_ptr = wave.ptr_add %dst, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %stored = wave.store %value -> %dst_ptr after %read
+      : (!wave.simd<i32, 32>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: redistribute_same_wave_packet_select:
 // ASM-COUNT-8: ds_bpermute_b32
 // ASM-COUNT-4: v_cndmask_b32
