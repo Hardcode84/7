@@ -35,7 +35,7 @@
 # CHECK: matmul_perf_sweep_precompile_plan: ok
 # CHECK: perf_sweep_fa_8wave: ok
 # CHECK: matmul_perf_sweep_rand_int_forwarding: ok
-# CHECK: calibration_scheduler_region_cap: ok
+# CHECK: calibration_scheduler_options: ok
 # CHECK: matmul_pingpong_removed: ok
 
 from __future__ import annotations
@@ -312,8 +312,6 @@ def check_shared_calibration_support(common, matmul, fa) -> None:
     names = (
         "run",
         "detect_chip",
-        "scheduler_policy_options",
-        "schedule_pass_policy_options",
         "schedule_pass_options",
         "schedule_report_options",
         "backend_pipeline_path",
@@ -2457,18 +2455,18 @@ def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
     print("matmul_perf_sweep_rand_int_forwarding: ok")
 
 
-def check_calibration_scheduler_region_cap(matmul, fa) -> None:
+def check_calibration_scheduler_options(matmul, fa) -> None:
     matmul_args = matmul.parse_args(["--chip=gfx950", "--skip-hw"])
     matmul_variant = matmul.VARIANTS["scheduled"]
-    matmul_pass = matmul.schedule_pass_options(matmul_variant, matmul_args)
+    matmul_pass = matmul.schedule_pass_options(matmul_variant)
     matmul_report = matmul.schedule_report_options(matmul_variant, matmul_args)
     require(
-        "calibration_scheduler_region_cap",
-        "max-region-ops" not in matmul_pass,
-        "matmul apply pipeline should not set scheduler region cap",
+        "calibration_scheduler_options",
+        matmul_pass == {"apply-schedule": True},
+        "matmul apply options drifted",
     )
     require(
-        "calibration_scheduler_region_cap",
+        "calibration_scheduler_options",
         matmul_report == {},
         "matmul report should stay empty without report flags",
     )
@@ -2477,19 +2475,19 @@ def check_calibration_scheduler_region_cap(matmul, fa) -> None:
         ["--chip=gfx950", "--print-candidates", "--skip-hw"]
     )
     fa_variant = fa.VARIANTS["scheduled"]
-    fa_pass = fa.schedule_pass_options(fa_variant, fa_args)
+    fa_pass = fa.schedule_pass_options(fa_variant)
     fa_report = fa.schedule_report_options(fa_variant, fa_args)
     require(
-        "calibration_scheduler_region_cap",
-        "max-region-ops" not in fa_pass,
-        "FA apply pipeline should not set scheduler region cap",
+        "calibration_scheduler_options",
+        fa_pass == {"apply-schedule": True},
+        "FA apply options drifted",
     )
     require(
-        "calibration_scheduler_region_cap",
-        "max-region-ops" not in fa_report,
-        "FA report pipeline should not set scheduler region cap",
+        "calibration_scheduler_options",
+        fa_report == {"print-candidates": True},
+        "FA report options drifted",
     )
-    print("calibration_scheduler_region_cap: ok")
+    print("calibration_scheduler_options: ok")
 
 
 def main() -> int:
@@ -2544,7 +2542,7 @@ def main() -> int:
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
     check_perf_sweep_fa_8wave(perf_sweep)
     check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)
-    check_calibration_scheduler_region_cap(matmul, fa)
+    check_calibration_scheduler_options(matmul, fa)
     try:
         matmul.parse_variants("pingpong")
     except argparse.ArgumentTypeError:

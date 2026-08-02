@@ -47,9 +47,7 @@ from wave_calibration import (  # noqa: E402, F401
     run,
     run_hw_repeats,
     schedule_pass_options,
-    schedule_pass_policy_options,
     schedule_report_options,
-    scheduler_policy_options,
     write_pipeline,
 )
 

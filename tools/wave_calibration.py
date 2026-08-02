@@ -65,28 +65,10 @@ def detect_chip() -> str:
     sys.exit("rocminfo did not report a gfx Name")
 
 
-def scheduler_policy_options(
-    variant: Variant, args: argparse.Namespace
-) -> dict[str, bool | int | str]:
+def schedule_pass_options(variant: Variant) -> dict[str, bool | int | str]:
     if not variant.apply_schedule:
         return {}
-    return {}
-
-
-def schedule_pass_policy_options(
-    variant: Variant, args: argparse.Namespace
-) -> dict[str, bool | int | str]:
-    if not variant.apply_schedule:
-        return {}
-    return {}
-
-
-def schedule_pass_options(
-    variant: Variant, args: argparse.Namespace
-) -> dict[str, bool | int | str]:
-    if not variant.apply_schedule:
-        return {}
-    return {"apply-schedule": True, **schedule_pass_policy_options(variant, args)}
+    return {"apply-schedule": True}
 
 
 def schedule_report_options(
@@ -104,7 +86,7 @@ def schedule_report_options(
     }
     if not report_options:
         return {}
-    return {**report_options, **scheduler_policy_options(variant, args)}
+    return report_options
 
 
 def backend_pipeline_path(build_dir: Path) -> Path:
@@ -223,7 +205,7 @@ def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Pat
     path.write_text(
         pipeline_text(
             args.build_dir,
-            schedule_options=schedule_pass_options(variant, args),
+            schedule_options=schedule_pass_options(variant),
             report_options=schedule_report_options(variant, args),
         )
     )
