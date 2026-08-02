@@ -1,18 +1,7 @@
 /*===- lower.h - AST -> Wave IR lowering bridge ---------------*- C -*-===*/
 /*
- * Part of the wavec C99 frontend. Stage 4: a CHECKED AST -> textual
- * Wave-dialect MLIR. This is the ONE stage allowed to be C++ and to
- * touch MLIR (the "lowering bridge"); the front (lexer/parser/sema)
- * contains no MLIR. The interface is therefore declared `extern "C"` so
- * the C driver and the C99 stages can call into the C++ implementation
- * (src/lower.cpp) without seeing any C++/MLIR type in this header.
- *
- * IMPLEMENTED LATER. This header pins the contract the parser/sema
- * agents lower into; src/lower.cpp builds IR via the MLIR C API
- * (`mlirOperationCreate` with op-name strings, as the Python DSL does --
- * Wave-c has no per-op builders) and renders it to text. Per the
- * Implementation rules, an unsupported construct makes lowering fail
- * with a clear error rather than emit a canned/hardcoded result.
+ * C ABI for checked AST -> textual Wave MLIR. The C++ lowering bridge owns
+ * MLIR; lexer, parser, and sema see no C++ or MLIR types.
  */
 
 #ifndef WAVEC_LOWER_H
