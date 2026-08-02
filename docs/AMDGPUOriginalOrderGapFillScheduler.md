@@ -17,6 +17,10 @@ Scheduling policy:
 - If no filler is available, keep the original next instruction and let the
   wait/hazard passes repair the gap.
 
+That is the base step. Loop replay, recurrence actions, compute-resource
+selection, pressure control, and joint multi-wave scheduling refine which ready
+instruction reaches that step.
+
 Reuse boundary: scheduler policy owns dependence construction and candidate
 selection. Instruction timing and stalls come from
 `InstructionExecutionState`.
@@ -166,7 +170,7 @@ Preview covers architectural stalls and memory stalls:
 
 ## Algorithm
 
-Per region:
+Base step per region:
 
 ```
 pending = dependency predecessor counts
@@ -213,6 +217,117 @@ After `schedule(node)`:
 
 The original next op is retried after each filler. Multi-slot gaps are filled
 one real instruction at a time.
+
+Before the fallback above, each step drains ready no-instruction ops, then tries
+ready actions in this order:
+
+1. accepted recurrence order;
+2. pressure-reducing compute op;
+3. steady-state producer or filler;
+4. token consumer, barrier-pair filler, or VMEM prefetch;
+5. compute-resource alternative;
+6. longer-latency ready op.
+
+Target schedule-model hooks own candidate admission and ranking. Dependency,
+split-barrier, and explicit memory-token checks remain scheduler legality.
+
+## Steady-State Replay
+
+Replay applies only when one region covers every non-terminator op in a
+`waveamdmachine.uniform_loop` body. Sliced loop regions use the ordinary greedy
+path.
+
+The first greedy order starts from loop inits. The scheduler then:
+
+1. replays that order for four iterations, rebinding body arguments from
+   `continue_if` carries after each iteration;
+2. rebuilds the greedy order with the replayed state as a steady-state view;
+3. repeats for at most three refinements, stopping at a fixed or previously seen
+   order.
+
+Each selected op commits to both local and steady-state views. Steady-state
+producer choices feed loop-carried memory recurrences without using a memory
+resource already blocking the target. Steady-state fillers must be pure,
+non-memory, one-slot instructions that issue without a stall in both views.
+Split barriers block both forms of motion. One stalled target accepts at most 16
+steady-state fillers.
+
+Replay is bounded policy state, not a whole-order score veto. Diagnostics expose
+`steady_state_fills`, `steady_state_iterations`, and
+`steady_state_refinements`.
+
+## Recurrence Actions
+
+Complete `uniform_loop` regions build recurrence plans from non-token
+`continue_if` carries. The scheduler traces through no-instruction wrappers to
+the real carry producers and next-iteration consumers. Memory-token carries stay
+outside this plan; their SSA edges remain the ordering contract.
+
+At the first eligible step, the scheduler builds a recurrence-disabled greedy
+completion as baseline. A modeled order may advance each carry producer to the
+first point after:
+
+- all unscheduled ordinary predecessors;
+- all current-iteration consumers of that carry;
+- earlier moved producers sharing a wait-counter order.
+
+Moves cannot cross split barriers or unrelated producers using the same memory
+counter. The completed order is checked against ordinary dependencies and the
+recurrence requirements.
+
+The model projects the remaining current iteration, binds the backedge, then
+projects the next iteration. The recurrence order is accepted only when its
+projected cycle count is strictly lower than the baseline. Once accepted, its
+ready actions drive the rest of that completion. `recurrence_model_moves`
+records moved producers.
+
+## Compute Islands And Pressure
+
+A compute island is a maximal run of pure, non-barrier, non-memory-issuing ops.
+Real instructions in the run need a tracked scheduling resource; no-instruction
+ops may remain inside it.
+
+For a ready original op, the scheduler may start another multi-cycle resource
+or fill the original resource's wait/release slots. It searches the current
+island first. If no local candidate exists, a recurrence-critical compute op may
+come from a later island when no split barrier is crossed. Resource kind,
+release slots, stall-fill legality, and candidate ranking come from the target
+schedule model.
+
+Ready-candidate ranking includes projected SGPR, VGPR, AGPR, and VGPR-family
+pressure. A pressure-reducing ready compute op has priority over the other
+alternatives above. Orders changed by pressure-sensitive policy, steady-state
+refinement, or pressure priority receive a full live-interval check against
+regalloc limits. Unsafe orders retry with the responsible policies disabled in
+this order: recurrence, long-latency VMEM, latency, then compute resources. If
+no retry produces a safe order, the region keeps original order. Diagnostics
+expose pressure, resource-priority, and resource-stall-fill moves.
+
+## Multi-Wave Cohort Scheduling
+
+`waveamd-machine-multi-wave-specialize` clones an eligible top-level loop into a
+marked two-arm `uniform_if`. The scheduler handles that marker jointly instead
+of scheduling each arm as an independent region.
+
+Corresponding arms must have the same region count, op/type shape, dependency
+graph, and barrier lineage. The execution model creates the full-CU placement
+set from target occupancy and maps each placement to one of two classes. Each
+class owns a normal greedy frontier and one static order; dynamic wave state is
+per placement, while resource calendars follow Wave, SIMD, SIMD-pair, or CU
+scope.
+
+The coordinator rotates class preference and advances one class through the
+normal greedy step. A selected static op commits across every placement in that
+class before the next class choice. This is coordinated lockstep, not strict
+class alternation: independent SIMD resources may issue in the same modeled
+cycle. A class reaching a barrier waits until the other class reaches the
+matching lineage, then all placements rendezvous.
+
+Complete loop arms replay all placements together for four iterations and use
+the same three-refinement bound. Pressure is checked per class; an unsafe class
+retries policy or keeps its original order. See
+[`WaveAMDMultiWaveSpecializationDesign.md`](WaveAMDMultiWaveSpecializationDesign.md)
+for topology, placement, and specialization legality.
 
 ## Stall Predicate
 
@@ -312,9 +427,10 @@ These may still affect final ISA. They are not cheap pre-RA legality facts.
 
 ## Apply Rule
 
-The mutating pass builds one greedy gap-fill order per region. If the order
-differs from original, it applies the order. Event-simulator scoring is
-available in the report pass; it is not a mutating-pass gate.
+The mutating pass applies a greedy order after any required pressure checks when
+it differs from original. Whole-order event-simulator scoring is available in
+the report pass; it never post-vetoes an order. Recurrence actions use their
+bounded current-plus-next-iteration projection while choosing the order.
 
 ## Diagnostics
 
@@ -348,7 +464,15 @@ Summary reasons:
 - `same_order`
 - `greedy`
 - `m0_hazard`
+- `store_data_hazard`
+- `coexec_window`
+- `recurrence_model`
+- `loop_wait`
 - `barrier_memory`
+- `vmem_prefetch`
+- `register_pressure`
+- `latency_priority`
+- `compute_resource`
 - `dependency_cycle`
 - `missing_target`
 - `malformed_target`
@@ -413,12 +537,18 @@ Focused lit tests:
 - Memory-value stall: independent ready op fills the latency gap.
 - MFMA result latency is modeled as operand readiness, not as a cheap hazard.
 - Pipe/resource stall: independent ready op fills the issue gap.
-- Greedy order simulates worse than original: keep original.
+- Whole-order report score does not veto a greedy order.
 - Missing/malformed target and bad model options still diagnose.
 - Op outside the scheduler-supported list is a hard pass failure.
 - Dependency graph cycle is a hard pass failure.
 - Loop-carried scalar and mem-token values do not enter ready predecessor
   counts.
+- Complete loops replay four iterations; sliced loop regions do not replay.
+- Recurrence moves preserve dependencies, split barriers, and wait-counter
+  order, and require a lower recurring projection.
+- Compute-island moves obey target resource ranking and pressure limits.
+- Marked multi-wave branches schedule jointly, rendezvous matching barriers,
+  and replay all resident placements together.
 - Old policy options diagnose as unsupported.
 - Summary diagnostics cover `apply`, `keep`, and `fail` reasons.
 
