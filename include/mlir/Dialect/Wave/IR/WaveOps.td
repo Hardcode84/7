@@ -191,7 +191,7 @@ def Wave_SplatOp : Wave_Op<"splat", [Pure,
   let hasVerifier = 1;
 }
 
-def Wave_BinaryOp : Wave_Op<"binary", [Pure,
+def Wave_BinaryOp : Wave_Op<"binary", [Pure, Elementwise,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>,
     DeclareOpInterfaceMethods<ArithIntegerOverflowFlagsInterface>]> {
   let summary = "integer binary operation";
@@ -213,7 +213,7 @@ def Wave_BinaryOp : Wave_Op<"binary", [Pure,
   let hasVerifier = 1;
 }
 
-def Wave_URecipOp : Wave_Op<"urecip", [Pure]> {
+def Wave_URecipOp : Wave_Op<"urecip", [Pure, Elementwise]> {
   let summary = "unsigned i32 reciprocal estimate";
   let arguments = (ins AnyType:$source);
   let results = (outs AnyType:$result);
@@ -221,7 +221,7 @@ def Wave_URecipOp : Wave_Op<"urecip", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_CtzOp : Wave_Op<"ctz", [Pure]> {
+def Wave_CtzOp : Wave_Op<"ctz", [Pure, Elementwise]> {
   let summary = "integer count trailing zeros";
   let arguments = (ins AnyType:$source);
   let results = (outs AnyType:$result);
@@ -230,7 +230,7 @@ def Wave_CtzOp : Wave_Op<"ctz", [Pure]> {
 }
 
 def Wave_CastOp : Wave_Op<"cast", [
-    Pure,
+    Pure, Elementwise,
     DeclareOpInterfaceMethods<InferIntRangeInterface,
                               ["inferResultRanges"]>]> {
   let summary = "numeric conversion over scalar or SIMD values";
@@ -243,7 +243,8 @@ def Wave_CastOp : Wave_Op<"cast", [
   let hasVerifier = 1;
 }
 
-def Wave_PtrCastOp : Wave_Op<"ptr_cast", [Pure, ViewLikeOpInterface]> {
+def Wave_PtrCastOp
+    : Wave_Op<"ptr_cast", [Pure, Elementwise, ViewLikeOpInterface]> {
   let summary = "reinterpret a Wave pointer element type";
   let arguments = (ins AnyType:$source);
   let results = (outs AnyType:$result);
@@ -255,7 +256,8 @@ def Wave_PtrCastOp : Wave_Op<"ptr_cast", [Pure, ViewLikeOpInterface]> {
 }
 
 def Wave_SelectOp : Wave_Op<"select", [
-    Pure, AllTypesMatch<["true_value", "false_value", "result"]>]> {
+    Pure, Elementwise,
+    AllTypesMatch<["true_value", "false_value", "result"]>]> {
   let summary = "select a Wave value";
   let description = [{
     Selects between two values. An `i1` condition selects the whole value,
@@ -306,7 +308,8 @@ def Wave_ExtractOp : Wave_Op<"extract", [Pure]> {
 
 class Wave_FloatSimdBinary<string mnemonic>
     : Wave_Op<mnemonic,
-              [Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
+              [Pure, Elementwise,
+               DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
   let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs,
                        DefaultValuedAttr<
                          Arith_FastMathAttr,
@@ -322,7 +325,8 @@ class Wave_FloatSimdBinary<string mnemonic>
 
 class Wave_FloatSimdTernary<string mnemonic>
     : Wave_Op<mnemonic,
-              [Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
+              [Pure, Elementwise,
+               DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
   let arguments = (ins Wave_Simd:$lhs, Wave_Simd:$rhs, Wave_Simd:$acc,
                        DefaultValuedAttr<
                          Arith_FastMathAttr,
@@ -338,7 +342,8 @@ class Wave_FloatSimdTernary<string mnemonic>
 
 class Wave_FloatSimdUnary<string mnemonic>
     : Wave_Op<mnemonic,
-              [Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
+              [Pure, Elementwise,
+               DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
   let arguments = (ins Wave_Simd:$source,
                        DefaultValuedAttr<
                          Arith_FastMathAttr,
@@ -382,7 +387,7 @@ def Wave_FRcpOp : Wave_FloatSimdUnary<"frcp"> {
 }
 
 def Wave_AssumeOp : Wave_Op<"assume", [
-    Pure, AllTypesMatch<["value", "result"]>,
+    Pure, Elementwise, AllTypesMatch<["value", "result"]>,
     DeclareOpInterfaceMethods<InferIntRangeInterface,
                               ["inferResultRangesFromOptional"]>
   ]> {
@@ -408,7 +413,7 @@ def Wave_AssumeOp : Wave_Op<"assume", [
   let hasCanonicalizer = 1;
 }
 
-def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
+def Wave_CmpIOp : Wave_Op<"cmpi", [Pure, Elementwise]> {
   let summary = "lane-wise integer comparison";
   let description = [{
     Compares two SIMD integer values lane-wise and returns a first-class
@@ -425,7 +430,7 @@ def Wave_CmpIOp : Wave_Op<"cmpi", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Wave_CmpFOp : Wave_Op<"cmpf", [Pure]> {
+def Wave_CmpFOp : Wave_Op<"cmpf", [Pure, Elementwise]> {
   let summary = "lane-wise floating-point comparison";
   let arguments = (ins Arith_CmpFPredicateAttr:$predicate,
                        Wave_Simd:$lhs,
@@ -692,7 +697,8 @@ def Wave_BarrierOp : Wave_Op<"barrier", [MemoryEffects<[MemWrite, MemRead]>]> {
   }];
 }
 
-def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure, ViewLikeOpInterface]> {
+def Wave_PtrAddOp
+    : Wave_Op<"ptr_add", [Pure, Elementwise, ViewLikeOpInterface]> {
   let summary = "add an element offset to a Wave pointer";
   let arguments = (ins AnyType:$base, AnyType:$offset);
   let results = (outs AnyType:$result);
@@ -703,7 +709,7 @@ def Wave_PtrAddOp : Wave_Op<"ptr_add", [Pure, ViewLikeOpInterface]> {
   }];
 }
 
-def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure,
+def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure, Elementwise,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "materialize a symbolic offset as a wave index value";
   let description = [{
