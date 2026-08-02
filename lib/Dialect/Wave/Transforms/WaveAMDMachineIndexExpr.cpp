@@ -15,6 +15,7 @@
 #include "WaveAMDMachineSelector.h"
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/DivisionByConstantInfo.h"
 #include "llvm/Support/MathExtras.h"
@@ -1230,9 +1231,8 @@ static bool containsRationalMaterialization(sym::ExprHandle expr) {
   }
 }
 
-static bool rationalNumeratorFitsRange(sym::Analysis &analysis,
-                                       sym::ExprHandle expr, int64_t min,
-                                       int64_t max) {
+static bool exprProvablyInRange(sym::Analysis &analysis, sym::ExprHandle expr,
+                                int64_t min, int64_t max) {
   if (std::optional<sym::InferredRange> range = analysis.range(expr);
       range && range->lower && range->upper &&
       sym::compareEndpointToInteger(*range->lower, min) >= 0 &&
@@ -1249,14 +1249,14 @@ static bool rationalNumeratorFitsB32(sym::Analysis &analysis,
                                      sym::ExprHandle expr) {
   constexpr int64_t min = std::numeric_limits<int32_t>::min();
   constexpr int64_t max = (int64_t{1} << 32) - 1;
-  return rationalNumeratorFitsRange(analysis, expr, min, max);
+  return exprProvablyInRange(analysis, expr, min, max);
 }
 
 static bool rationalNumeratorFitsI32(sym::Analysis &analysis,
                                      sym::ExprHandle expr) {
-  return rationalNumeratorFitsRange(analysis, expr,
-                                    std::numeric_limits<int32_t>::min(),
-                                    std::numeric_limits<int32_t>::max());
+  return exprProvablyInRange(analysis, expr,
+                             std::numeric_limits<int32_t>::min(),
+                             std::numeric_limits<int32_t>::max());
 }
 
 static LogicalResult
@@ -3356,6 +3356,159 @@ static FailureOr<AddressPlanCandidates> buildAddressPlanCandidates(
   return AddressPlanCandidates{*decomposed, materialExpr, wholeFits};
 }
 
+static const PointerOffsetBinding *findPlanBinding(const AddressPlan &plan,
+                                                   StringRef name) {
+  auto it = llvm::find_if(plan.bindings, [&](const PointerOffsetBinding &b) {
+    return b.name == name;
+  });
+  return it == plan.bindings.end() ? nullptr : &*it;
+}
+
+static std::optional<uint32_t> getSymbolLaneStride(const AddressPlan &plan,
+                                                   sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Symbol)
+    return std::nullopt;
+  const PointerOffsetBinding *binding =
+      findPlanBinding(plan, view.getSymbolName());
+  if (!binding)
+    return std::nullopt;
+  if (binding->laneStrideBytes != 0)
+    return binding->laneStrideBytes;
+  return binding->value.getDefiningOp<LaneIdOp>() ? std::optional<uint32_t>{1}
+                                                  : std::nullopt;
+}
+
+static bool isLaneWorkitemBinding(const PointerOffsetBinding &binding,
+                                  int64_t modulus) {
+  WorkitemIdOp workitem = binding.value.getDefiningOp<WorkitemIdOp>();
+  if (!workitem || workitem.getAxis() != 0)
+    return false;
+  SimdType simd = dyn_cast<SimdType>(binding.value.getType());
+  return simd && modulus == simd.getWidth();
+}
+
+static std::optional<uint32_t> getModuloLaneStride(const AddressPlan &plan,
+                                                   sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Mod)
+    return std::nullopt;
+  std::optional<int64_t> modulus = staticIntLiteral(view.getBinaryRhs());
+  sym::ExprView lhs(view.getBinaryLhs());
+  if (!modulus || lhs.getKind() != sym::ExprKind::Symbol)
+    return std::nullopt;
+  const PointerOffsetBinding *binding =
+      findPlanBinding(plan, lhs.getSymbolName());
+  if (!binding || !isLaneWorkitemBinding(*binding, *modulus))
+    return std::nullopt;
+  return 1;
+}
+
+static std::optional<uint32_t> getLaneStride(const AddressPlan &plan,
+                                             sym::ExprHandle expr) {
+  if (std::optional<uint32_t> stride = getSymbolLaneStride(plan, expr))
+    return stride;
+  return getModuloLaneStride(plan, expr);
+}
+
+static std::optional<uint32_t> matchBufferLaneStride(const AddressPlan &plan,
+                                                     sym::ExprHandle expr) {
+  if (std::optional<uint32_t> stride = getLaneStride(plan, expr))
+    return stride;
+  sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Mul || view.getMulFactorCount() != 1)
+    return std::nullopt;
+  std::optional<int64_t> coefficient =
+      staticIntLiteral(view.getMulCoefficient());
+  sym::MulFactor factor = view.getMulFactor(0);
+  std::optional<uint32_t> laneStride = getLaneStride(plan, factor.base);
+  if (!coefficient || *coefficient <= 0 || factor.exponent != 1 || !laneStride)
+    return std::nullopt;
+  std::optional<int64_t> stride =
+      llvm::checkedMul(*coefficient, static_cast<int64_t>(*laneStride));
+  if (!stride || *stride > 262143)
+    return std::nullopt;
+  return static_cast<uint32_t>(*stride);
+}
+
+static void pruneUnusedPlanBindings(AddressPlan &plan) {
+  llvm::StringSet<> used;
+  for (sym::ExprHandle expr :
+       {plan.voffsetExpr, plan.soffsetExpr, plan.fullAddressRemainderExpr})
+    if (expr)
+      sym::walkSymbolNames(expr, [&](StringRef name) { used.insert(name); });
+  llvm::erase_if(plan.bindings, [&](const PointerOffsetBinding &binding) {
+    return !used.contains(binding.name);
+  });
+}
+
+static bool canFoldBufferLaneStride(const WaveAMDMachineSelector &S,
+                                    const AddressPlan &plan,
+                                    int64_t maxCheckedByteOffset) {
+  if (!S.target)
+    return false;
+  return S.target->isa.Major == 9 && S.target->isa.Minor == 5 &&
+         plan.voffsetExpr && plan.bufferConstStride == 0 &&
+         maxCheckedByteOffset >= 0;
+}
+
+static FailureOr<sym::ExprHandle>
+getCheckedBufferOffset(WaveAMDMachineSelector &S, sym::Analysis &analysis,
+                       const AddressPlan &plan) {
+  sym::ExprHandle checkedOffset = plan.voffsetExpr;
+  if (plan.soffsetExpr &&
+      failed(appendPlanExpr(analysis, plan.soffsetExpr, checkedOffset)))
+    return failure();
+  if (plan.instOffset == 0)
+    return checkedOffset;
+
+  FailureOr<sym::ExprHandle> instOffset =
+      sym::composeExprInt(S.symbolStore(), plan.instOffset);
+  if (failed(instOffset))
+    return failure();
+  return sym::composeExprBinary(S.symbolStore(), checkedOffset,
+                                sym::ExprBinaryOp::Add, *instOffset);
+}
+
+static llvm::StringMap<TermKind> getPlanTermKinds(const AddressPlan &plan) {
+  llvm::StringMap<TermKind> symKinds;
+  for (const PointerOffsetBinding &binding : plan.bindings)
+    symKinds[binding.name] = binding.kind;
+  return symKinds;
+}
+
+static LogicalResult removeBufferLaneAddend(sym::Analysis &analysis,
+                                            AddressPlan &plan,
+                                            ArrayRef<AddressPlanAddend> addends,
+                                            size_t removed,
+                                            uint32_t bufferConstStride) {
+  sym::ExprHandle residual;
+  for (auto [index, addend] : llvm::enumerate(addends)) {
+    if (index == removed)
+      continue;
+    if (failed(appendPlanExpr(analysis, addend.expr, residual)))
+      return failure();
+  }
+  selectPlanMaterialization(analysis, residual);
+  plan.voffsetExpr = residual;
+  plan.voffsetNeedsWide = needsWideAddressMaterialization(residual, plan);
+  plan.bufferConstStride = bufferConstStride;
+  pruneUnusedPlanBindings(plan);
+  return success();
+}
+
+static LogicalResult
+foldFirstBufferLaneAddend(sym::Analysis &analysis, AddressPlan &plan,
+                          ArrayRef<AddressPlanAddend> addends) {
+  for (auto [index, addend] : llvm::enumerate(addends)) {
+    std::optional<uint32_t> stride = matchBufferLaneStride(plan, addend.expr);
+    if (!stride)
+      continue;
+    return removeBufferLaneAddend(analysis, plan, addends, index, *stride);
+  }
+  return success();
+}
+
 } // namespace
 
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
@@ -3363,6 +3516,31 @@ static FailureOr<AddressPlanCandidates> buildAddressPlanCandidates(
 bool needsWideAddressMaterialization(sym::ExprHandle expr,
                                      const AddressPlan &plan) {
   return needsWideAddressMaterializationImpl(expr, plan);
+}
+
+LogicalResult foldBufferLaneStrideIntoDescriptor(WaveAMDMachineSelector &S,
+                                                 AddressPlan &plan,
+                                                 int64_t maxCheckedByteOffset) {
+  if (!canFoldBufferLaneStride(S, plan, maxCheckedByteOffset))
+    return success();
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), plan.assumptions);
+  if (failed(analysis))
+    return failure();
+
+  FailureOr<sym::ExprHandle> checkedOffset =
+      getCheckedBufferOffset(S, **analysis, plan);
+  if (failed(checkedOffset))
+    return failure();
+  if (!exprProvablyInRange(**analysis, *checkedOffset, 0, maxCheckedByteOffset))
+    return success();
+
+  llvm::StringMap<TermKind> symKinds = getPlanTermKinds(plan);
+  SmallVector<AddressPlanAddend, 8> addends;
+  if (failed(collectPlanAddends(S, plan.voffsetExpr, **analysis, symKinds,
+                                addends)))
+    return failure();
+  return foldFirstBufferLaneAddend(**analysis, plan, addends);
 }
 
 bool hasRationalIndexExpr(sym::ExprHandle expr) {

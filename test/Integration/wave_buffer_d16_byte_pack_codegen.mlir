@@ -10,10 +10,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-LABEL: buffer_i8_pack_d16_codegen:
 // ASM: buffer_load_ubyte_d16 [[EVEN_LO:v[0-9]+]],
 // ASM: buffer_load_ubyte_d16 [[ODD_LO:v[0-9]+]],
-// ASM: v_mov_b32_e32 [[ODD_HI:v[0-9]+]], 0
-// ASM: v_mov_b32_e32 [[EVEN_HI:v[0-9]+]], 0
-// ASM: buffer_load_ubyte_d16_hi [[EVEN_HI]],
-// ASM: buffer_load_ubyte_d16_hi [[ODD_HI]],
+// ASM-DAG: v_mov_b32_e32 [[EVEN_HI:v[0-9]+]], 0
+// ASM-DAG: buffer_load_ubyte_d16_hi [[EVEN_HI]],
+// ASM-DAG: v_mov_b32_e32 [[ODD_HI:v[0-9]+]], 0
+// ASM-DAG: buffer_load_ubyte_d16_hi [[ODD_HI]],
 // ASM: v_or_b32_e32 [[ODD_PAIR:v[0-9]+]], [[ODD_LO]], [[ODD_HI]]
 // ASM: v_lshlrev_b32_e32 [[SHIFTED:v[0-9]+]], 8, [[ODD_PAIR]]
 // ASM: v_or3_b32 {{v[0-9]+}}, [[EVEN_LO]], [[EVEN_HI]], [[SHIFTED]]

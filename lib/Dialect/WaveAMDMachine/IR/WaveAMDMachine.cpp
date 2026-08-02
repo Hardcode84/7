@@ -322,6 +322,13 @@ LogicalResult VMovB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult MakeBufferRsrcOp::verify() {
+  if ((getConstStride() != 0) != getConstAddTidEnable())
+    return emitOpError(
+        "const_stride and const_add_tid_enable must be enabled together");
+  return success();
+}
+
 LogicalResult VPermlane32SwapB32TupleOp::verify() {
   RegType sourceType = cast<RegType>(getSource().getType());
   RegType resultType = cast<RegType>(getResult().getType());

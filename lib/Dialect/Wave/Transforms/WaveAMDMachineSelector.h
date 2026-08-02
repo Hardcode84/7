@@ -57,6 +57,7 @@ struct PointerOffsetBinding {
   std::string name;
   Value value;
   TermKind kind = TermKind::Lane;
+  uint32_t laneStrideBytes = 0;
 };
 
 // Canonical symbolic pointer offset. Slot materialization happens in
@@ -75,6 +76,7 @@ struct AddressPlan {
   sym::ExprHandle soffsetExpr;
   sym::ExprHandle fullAddressRemainderExpr;
   int64_t instOffset = 0;
+  uint32_t bufferConstStride = 0;
   bool voffsetNeedsWide = false;
   bool soffsetNeedsWide = false;
 };
@@ -252,6 +254,10 @@ LogicalResult foldBufferAddressFieldsIntoVOffset(WaveAMDMachineSelector &S,
                                                  AddressPlan &plan,
                                                  bool includeInstOffset);
 
+LogicalResult foldBufferLaneStrideIntoDescriptor(WaveAMDMachineSelector &S,
+                                                 AddressPlan &plan,
+                                                 int64_t maxCheckedByteOffset);
+
 FailureOr<std::optional<SelectedBufferSources>>
 matchSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user,
                            Value ptr, bool requirePtrAdd);
@@ -308,6 +314,7 @@ public:
   DenseSet<Value> preselectedPointerAdds;
   DenseMap<SlotFitsU32CacheKey, SmallVector<SlotFitsU32CacheEntry, 1>>
       slotFitsU32Cache;
+  DenseMap<std::pair<Value, uint32_t>, Value> bufferConstAddTidDescriptors;
   std::optional<waveamdmachine::AMDGPUTarget> target;
   PointerOffset lastDmaDstOffset;
   SmallVector<Operation *> opsToErase;

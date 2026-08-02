@@ -35,6 +35,17 @@ static constexpr uint32_t getDefaultBufferRsrcFlags() {
   return (gfx11Format32Float << 12) | (1u << 24) | (3u << 28);
 }
 
+static uint32_t getLegacyBufferRsrcFlags(MakeBufferRsrcOp make) {
+  uint32_t flags = getDefaultBufferRsrcFlags();
+  if (!make.getConstAddTidEnable())
+    return flags;
+  constexpr uint32_t dataFormatMask = 0xfu << 15;
+  flags &= ~dataFormatMask;
+  flags |= 1u << 23;
+  flags |= static_cast<uint32_t>(make.getConstStride() >> 14) << 15;
+  return flags;
+}
+
 static RegType getTuplePartType(RegType tupleType, unsigned offset,
                                 unsigned width) {
   int64_t index = -1;
@@ -62,7 +73,7 @@ static Value getWideImm(IRRewriter &rewriter, Location loc, uint64_t value) {
       rewriter.getI64IntegerAttr(static_cast<int64_t>(value)));
 }
 
-static uint64_t getFieldMask(unsigned bits) {
+static constexpr uint64_t getFieldMask(unsigned bits) {
   return (uint64_t{1} << bits) - 1;
 }
 
@@ -169,6 +180,32 @@ static FailureOr<Value> getWideBufferRange(Value value, IRRewriter &rewriter,
   return getBufferRange(value, targetType, rewriter, op);
 }
 
+static FailureOr<Value> getLegacyBufferBase(MakeBufferRsrcOp make,
+                                            IRRewriter &rewriter,
+                                            RegType targetType) {
+  FailureOr<Value> base = getSGPR(make.getBase(), targetType, rewriter, make);
+  if (failed(base) || !make.getConstAddTidEnable())
+    return base;
+  constexpr uint64_t baseMask = getFieldMask(48);
+  uint64_t stride = static_cast<uint64_t>(make.getConstStride() & 0x3fff) << 48;
+  if (std::optional<int64_t> constant = getConstantValue(*base))
+    return SMovB64ImmOp::create(
+               rewriter, make.getLoc(), targetType,
+               rewriter.getI64IntegerAttr(static_cast<int64_t>(
+                   (static_cast<uint64_t>(*constant) & baseMask) | stride)))
+        .getResult();
+
+  RegType pairType = getVirtualSGPRType(make.getContext(), 2);
+  RegType sccType = getVirtualSCCType(make.getContext());
+  auto masked =
+      SAndB64Op::create(rewriter, make.getLoc(), pairType, sccType, *base,
+                        getWideImm(rewriter, make.getLoc(), baseMask));
+  return SOrB64Op::create(rewriter, make.getLoc(), targetType, sccType,
+                          masked.getResult(),
+                          getWideImm(rewriter, make.getLoc(), stride))
+      .getResult();
+}
+
 static FailureOr<Value>
 convertConstantWideMakeBufferRsrc(MakeBufferRsrcOp make, IRRewriter &rewriter,
                                   RegType descriptorType, uint64_t base,
@@ -257,8 +294,8 @@ convertWideMakeBufferRsrc(MakeBufferRsrcOp make, IRRewriter &rewriter,
 static FailureOr<Value> convertLegacyMakeBufferRsrc(MakeBufferRsrcOp make,
                                                     IRRewriter &rewriter,
                                                     RegType descriptorType) {
-  FailureOr<Value> base = getSGPR(
-      make.getBase(), getTuplePartType(descriptorType, 0, 2), rewriter, make);
+  FailureOr<Value> base = getLegacyBufferBase(
+      make, rewriter, getTuplePartType(descriptorType, 0, 2));
   if (failed(base))
     return failure();
   if (failed(validateLegacyBufferRange(make.getRange(), make)))
@@ -267,7 +304,8 @@ static FailureOr<Value> convertLegacyMakeBufferRsrc(MakeBufferRsrcOp make,
       make.getRange(), getTuplePartType(descriptorType, 2, 1), rewriter, make);
   if (failed(range))
     return failure();
-  Value flagsImm = getImm(rewriter, make.getLoc(), getDefaultBufferRsrcFlags());
+  Value flagsImm =
+      getImm(rewriter, make.getLoc(), getLegacyBufferRsrcFlags(make));
   auto flags =
       SMovB32TupleOp::create(rewriter, make.getLoc(),
                              getTuplePartType(descriptorType, 3, 1), flagsImm);
@@ -280,8 +318,11 @@ static FailureOr<Value> convertLegacyMakeBufferRsrc(MakeBufferRsrcOp make,
 
 static FailureOr<Value>
 convertMakeBufferRsrc(MakeBufferRsrcOp make, IRRewriter &rewriter,
-                      const AMDGPUTargetCapabilities *wideCapabilities) {
+                      const AMDGPUTargetCapabilities *wideCapabilities,
+                      bool supportsConstAddTid) {
   rewriter.setInsertionPoint(make);
+  if (make.getConstAddTidEnable() && !supportsConstAddTid)
+    return make.emitError("constant TID buffer stride requires a CDNA4 target");
   RegType descriptorType = cast<RegType>(make.getDescriptor().getType());
   if (wideCapabilities)
     return convertWideMakeBufferRsrc(make, rewriter, descriptorType,
@@ -368,12 +409,13 @@ static SmallVector<Operation *> collectBufferRsrcOps(Operation *root) {
 
 static LogicalResult
 convertBufferRsrcOp(Operation *op, IRRewriter &rewriter,
-                    const AMDGPUTargetCapabilities *wideCapabilities) {
+                    const AMDGPUTargetCapabilities *wideCapabilities,
+                    bool supportsConstAddTid) {
   if (!op->getParentOp())
     return success();
   if (auto make = dyn_cast<MakeBufferRsrcOp>(op))
-    return success(
-        succeeded(convertMakeBufferRsrc(make, rewriter, wideCapabilities)));
+    return success(succeeded(convertMakeBufferRsrc(
+        make, rewriter, wideCapabilities, supportsConstAddTid)));
   auto update = cast<UpdateBufferRsrcBaseOp>(op);
   return success(succeeded(
       convertUpdateBufferRsrcBase(update, rewriter, wideCapabilities)));
@@ -394,10 +436,14 @@ struct WaveAMDBufferRsrcToTuplesPass
       return signalPassFailure();
     const AMDGPUTargetCapabilities *wideCapabilities =
         *capabilities ? &**capabilities : nullptr;
+    llvm::AMDGPU::IsaVersion isa =
+        llvm::AMDGPU::getIsaVersion((**sti).getCPU());
+    bool supportsConstAddTid = isa.Major == 9 && isa.Minor == 5;
 
     IRRewriter rewriter(&getContext());
     for (Operation *op : collectBufferRsrcOps(getOperation()))
-      if (failed(convertBufferRsrcOp(op, rewriter, wideCapabilities)))
+      if (failed(convertBufferRsrcOp(op, rewriter, wideCapabilities,
+                                     supportsConstAddTid)))
         return signalPassFailure();
   }
 };

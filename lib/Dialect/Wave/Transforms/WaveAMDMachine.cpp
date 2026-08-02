@@ -7400,7 +7400,8 @@ FailureOr<PointerOffset> makePointerOffset(WaveAMDMachineSelector &S,
 
 static bool samePointerBinding(const PointerOffsetBinding &lhs,
                                const PointerOffsetBinding &rhs) {
-  return lhs.name == rhs.name && lhs.value == rhs.value && lhs.kind == rhs.kind;
+  return lhs.name == rhs.name && lhs.value == rhs.value &&
+         lhs.kind == rhs.kind && lhs.laneStrideBytes == rhs.laneStrideBytes;
 }
 
 static LogicalResult appendPointerBindings(PointerOffset &dst,
@@ -7598,7 +7599,8 @@ planRawPtrAddByteOffset(WaveAMDMachineSelector &S, PtrAddOp op, unsigned size,
   }
   PointerOffset offset;
   offset.expr = *expr;
-  offset.bindings.push_back({name, *scaled, kind});
+  uint32_t laneStrideBytes = source.getDefiningOp<LaneIdOp>() ? size : 0;
+  offset.bindings.push_back({name, *scaled, kind, laneStrideBytes});
   S.appendBindingAssumptions(source, name, offset.assumptions, size);
   if (sourceOffset && failed(appendScaledPointerOffsetRange(
                           S, *sourceOffset, name, size, offset.assumptions)))
