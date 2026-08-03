@@ -1319,9 +1319,35 @@ private:
     return failure();
   }
 
+  FailureOr<std::optional<sym::ExprHandle>>
+  tryBuildPrivateSingletonAssume(Value value, AssumeOp assume, bool &skip,
+                                 bool allowLeaf) {
+    if (!allowLeaf || !assume.getValue().hasOneUse())
+      return std::optional<sym::ExprHandle>{};
+    std::optional<SignedI64Range> range =
+        finiteAssumeSignedI64Range(store, assume);
+    if (!range || range->first != range->second)
+      return std::optional<sym::ExprHandle>{};
+
+    FailureOr<sym::ExprHandle> expr = bindSymbol(value, skip, range);
+    if (failed(expr))
+      return failure();
+    if (failed(appendAssumePredicatesForExpr(assume, *expr))) {
+      skip = true;
+      return failure();
+    }
+    return std::optional<sym::ExprHandle>{*expr};
+  }
+
   FailureOr<sym::ExprHandle> buildAssumeExpr(Value value, AssumeOp assume,
                                              bool &skip, bool allowLeaf,
                                              unsigned depth) {
+    FailureOr<std::optional<sym::ExprHandle>> singleton =
+        tryBuildPrivateSingletonAssume(value, assume, skip, allowLeaf);
+    if (failed(singleton))
+      return failure();
+    if (*singleton)
+      return **singleton;
     if (!hasSymbolicRoot(assume.getValue()))
       return bindOrSkip(value, skip, allowLeaf);
     bool childSkip = false;

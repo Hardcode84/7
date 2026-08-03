@@ -472,6 +472,61 @@ func.func @assumed_existing_index_expr_binding_expands(
 
 // -----
 
+// Private singleton: preserve producer identity as one symbolic root.
+// CHECK-LABEL: func.func @private_singleton_assume_stays_atomic
+// CHECK-SAME: (%[[ORIGIN:.*]]: !wave.simd<i32, 32>, %{{.*}}: !wave.simd<i32, 32>)
+// CHECK: wave.index_expr <"1 + raw0"> assuming
+// CHECK-SAME: ["raw0"](%[[ORIGIN]])
+func.func @private_singleton_assume_stays_atomic(
+    %origin: !wave.simd<i32, 32>, %next: !wave.simd<i32, 32>)
+    -> !wave.simd<index, 32>
+    attributes {wave.address_arithmetic_no_overflow} {
+  %delta = wave.binary subi %next, %origin
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %unit = wave.assume %delta as "x"
+      [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x <= 0">]
+      : !wave.simd<i32, 32>
+  %normalized = wave.binary addi %origin, %unit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %out = wave.index_expr <"y"> ["y"](%normalized)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %out : !wave.simd<index, 32>
+}
+
+// -----
+
+// Shared producer: expand both paths through canonical operand bindings.
+// CHECK-LABEL: func.func @shared_singleton_assume_deduplicates_bindings
+// CHECK-SAME: (%[[ORIGIN:.*]]: !wave.simd<i32, 32>, %[[NEXT:.*]]: !wave.simd<i32, 32>)
+// CHECK: wave.index_expr <"-raw0 + 2*raw1"> assuming
+// CHECK-SAME: #wave.pred<"-1 - raw0 + raw1 >= 0">
+// CHECK-SAME: #wave.pred<"-1 - raw0 + raw1 <= 0">
+// CHECK-SAME: ["raw0", "raw1"](%[[ORIGIN]], %[[NEXT]])
+func.func @shared_singleton_assume_deduplicates_bindings(
+    %origin: !wave.simd<i32, 32>, %next: !wave.simd<i32, 32>)
+    -> !wave.simd<index, 32>
+    attributes {wave.address_arithmetic_no_overflow} {
+  %delta = wave.binary subi %next, %origin
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %unit = wave.assume %delta as "x"
+      [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x <= 0">]
+      : !wave.simd<i32, 32>
+  %normalized = wave.binary addi %origin, %unit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %combined = wave.binary addi %normalized, %delta
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %out = wave.index_expr <"y"> ["y"](%combined)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %out : !wave.simd<index, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @rewritten_index_expr_range_expands
 // CHECK-SAME: (%[[X_RAW:.*]]: i32, %[[Y_RAW:.*]]: i32)
 func.func @rewritten_index_expr_range_expands(
