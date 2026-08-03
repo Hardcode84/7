@@ -9,6 +9,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDABILowering.cpp
   WaveAMDBarrierCleanup.cpp
   WaveAMDBufferRsrcToTuples.cpp
+  WaveAMDCanonicalizePackedTuples.cpp
   WaveAMDCrossLanePeepholes.cpp
   WaveAMDDecomposeMemTuples.cpp
   WaveAMDDeduplicateWrites.cpp

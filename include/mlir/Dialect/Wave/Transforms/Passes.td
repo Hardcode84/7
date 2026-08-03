@@ -505,6 +505,20 @@ def WaveAMDMachineCleanup
   ];
 }
 
+def WaveAMDCanonicalizePackedTuples
+    : Pass<"waveamd-canonicalize-packed-tuples"> {
+  let summary = "Reuse canonical VGPR2 tuples in packed F32 operands";
+  let description = [{
+    Hoists an existing two-scalar tuple across earlier packed F32 repacks when
+    its later use already keeps both scalars live. Lane selectors preserve
+    splats and permutations.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDHoistTuples
     : Pass<"waveamd-hoist-tuples"> {
   let summary = "Hoist invariant tuple-like dwords out of machine loops";

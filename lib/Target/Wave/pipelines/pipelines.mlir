@@ -122,7 +122,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rcl = transform.apply_registered_pass "waveamd-machine-cleanup" to %rclane
         : (!transform.any_op) -> !transform.any_op
-    %rfc = transform.apply_registered_pass "canonicalize" to %rcl
+    %rct = transform.apply_registered_pass "waveamd-canonicalize-packed-tuples" to %rcl
+        : (!transform.any_op) -> !transform.any_op
+    %rfc = transform.apply_registered_pass "canonicalize" to %rct
         : (!transform.any_op) -> !transform.any_op
     %rfcs = transform.apply_registered_pass "cse" to %rfc
         : (!transform.any_op) -> !transform.any_op
