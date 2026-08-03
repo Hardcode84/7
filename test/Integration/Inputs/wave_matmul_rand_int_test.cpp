@@ -159,6 +159,131 @@ static void checkOutputLayouts() {
   std::printf("output_layouts: ok\n");
 }
 
+static Args makeAITERArgs() {
+  Args args;
+  args.m = 256;
+  args.n = 512;
+  args.k = 512;
+  args.bm = 1;
+  args.bn = 4;
+  args.waveMTiles = 2;
+  args.waveNTiles = 2;
+  args.waveKTiles = 2;
+  args.waveSize = 64;
+  args.inputType = InputType::MXFP4;
+  args.cType = CType::F16;
+  args.accumulatorLayout = AccumulatorLayout::Mfma;
+  args.mxfp4InputLayout = MXFP4InputLayout::AITER;
+  return args;
+}
+
+static void checkAITERRunnerContract() {
+  Args args = makeAITERArgs();
+  validateArgs(args);
+  if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked ||
+      getFinalOutputLayout(args) != OutputLayout::RowMajor)
+    fail("AITER output contract mismatch");
+  HostInputs inputs = makeHostInputs(args);
+  validateRandomAITERInputs(inputs, args);
+  validateAITEROutputMapping(args.m * args.n, args);
+  std::printf("aiter_runner_contract: ok\n");
+}
+
+struct AITERExpectedOutput {
+  std::vector<uint16_t> values;
+  std::vector<uint8_t> seen;
+  int packedIndex = 0;
+};
+
+static void fillExpectedAITERTile(const Args &args,
+                                  const std::vector<uint16_t> &packed,
+                                  AITERExpectedOutput &expected, int wgM,
+                                  int wgN, int waveN, int tileM, int tileN) {
+  for (int lane = 0; lane < 64; ++lane) {
+    for (int laneValue = 0; laneValue < 4; ++laneValue) {
+      int m = wgM * 32 + tileM * 16 + (lane / 16) * 4 + laneValue;
+      int n = wgN * 128 + waveN * 32 + tileN * 16 + lane % 16;
+      int logicalIndex = m * args.n + n;
+      if (expected.seen[logicalIndex])
+        fail("AITER expected mapping is not bijective");
+      expected.seen[logicalIndex] = 1;
+      expected.values[logicalIndex] = packed[expected.packedIndex++];
+    }
+  }
+}
+
+static void fillExpectedAITERWorkgroup(const Args &args,
+                                       const std::vector<uint16_t> &packed,
+                                       AITERExpectedOutput &expected, int wgM,
+                                       int wgN) {
+  for (int waveN = 0; waveN < 4; ++waveN)
+    for (int tileM = 0; tileM < 2; ++tileM)
+      for (int tileN = 0; tileN < 2; ++tileN)
+        fillExpectedAITERTile(args, packed, expected, wgM, wgN, waveN, tileM,
+                              tileN);
+}
+
+static std::vector<uint16_t>
+makeExpectedAITEROutput(const Args &args, const std::vector<uint16_t> &packed) {
+  AITERExpectedOutput expected{std::vector<uint16_t>(packed.size()),
+                               std::vector<uint8_t>(packed.size())};
+  for (int wgM = 0; wgM < 8; ++wgM)
+    for (int wgN = 0; wgN < 2; ++wgN)
+      fillExpectedAITERWorkgroup(args, packed, expected, wgM, wgN);
+  if (expected.packedIndex != static_cast<int>(packed.size()))
+    fail("AITER expected mapping missed packed values");
+  for (uint8_t value : expected.seen)
+    if (!value)
+      fail("AITER expected mapping missed row-major values");
+  return std::move(expected.values);
+}
+
+static void runAITERDeviceOutputConversion(const Args &args,
+                                           DeviceBuffers &buffers,
+                                           bool invert) {
+  std::vector<uint16_t> packed(buffers.cElements);
+  for (int index = 0; index < buffers.cElements; ++index) {
+    uint16_t value = static_cast<uint16_t>(index);
+    packed[index] = invert ? static_cast<uint16_t>(~value) : value;
+  }
+  std::vector<uint16_t> expected = makeExpectedAITEROutput(args, packed);
+  checkHip(hipMemset(buffers.deviceFinalC, 0xa5, buffers.cBytes),
+           "hipMemset test final C");
+  checkHip(hipMemcpy(buffers.deviceC, packed.data(), buffers.cBytes,
+                     hipMemcpyHostToDevice),
+           "hipMemcpy test C");
+  launchAITEROutputConversion(buffers, args);
+  checkHip(hipDeviceSynchronize(), "AITER conversion sync");
+  std::vector<uint16_t> rowMajor(buffers.cElements);
+  checkHip(hipMemcpy(rowMajor.data(), buffers.deviceFinalC, buffers.cBytes,
+                     hipMemcpyDeviceToHost),
+           "hipMemcpy test final C");
+  for (int index = 0; index < buffers.cElements; ++index)
+    if (rowMajor[index] != expected[index])
+      fail("AITER device output conversion mismatch");
+}
+
+static void checkAITERDeviceOutputConversion() {
+  Args args = makeAITERArgs();
+  args.n = 256;
+  validateArgs(args);
+  if (args.m != 256 || args.n != 256 || args.bm != 1 || args.bn != 4 ||
+      args.waveMTiles != 2 || args.waveNTiles != 2 || args.waveSize != 64)
+    fail("AITER conversion test geometry changed");
+
+  DeviceBuffers buffers;
+  buffers.cElements = getOutputElementCount(args);
+  buffers.cBytes = buffers.cElements * sizeof(uint16_t);
+  checkHip(hipMalloc(&buffers.deviceC, buffers.cBytes), "hipMalloc test C");
+  checkHip(hipMalloc(&buffers.deviceFinalC, buffers.cBytes),
+           "hipMalloc test final C");
+  runAITERDeviceOutputConversion(args, buffers, false);
+  runAITERDeviceOutputConversion(args, buffers, true);
+  checkHip(hipFree(buffers.deviceC), "hipFree test C");
+  checkHip(hipFree(buffers.deviceFinalC), "hipFree test final C");
+  std::printf("aiter_device_output_conversion: ok\n");
+}
+
 static Args makeStreamKArgs() {
   Args args;
   args.m = 512;
@@ -220,48 +345,156 @@ static void checkStreamKABI() {
   std::printf("streamk_kernel_abi: ok\n");
 }
 
-[[noreturn]] static void runInvalidMode(const char *mode) {
-  Args args;
+static bool setInputInvalidMode(const char *mode, Args &args) {
   if (std::strcmp(mode, "mutual-exclusion") == 0) {
     args.allOnes = true;
     args.hpl = true;
-  } else if (std::strcmp(mode, "mxfp4") == 0) {
+    return true;
+  }
+  if (std::strcmp(mode, "mxfp4") == 0) {
     args.inputType = InputType::MXFP4;
     args.waveSize = 64;
     args.randInt = true;
-  } else if (std::strcmp(mode, "hpl-mxfp4") == 0) {
+    return true;
+  }
+  if (std::strcmp(mode, "hpl-mxfp4") == 0) {
     args.inputType = InputType::MXFP4;
     args.waveSize = 64;
     args.hpl = true;
-  } else if (std::strcmp(mode, "streamk-workers") == 0) {
+    return true;
+  }
+  return false;
+}
+
+static bool setStreamKInvalidMode(const char *mode, Args &args) {
+  if (std::strcmp(mode, "streamk-workers") == 0) {
     args = makeStreamKArgs();
     args.streamKWorkers = 0;
-  } else if (std::strcmp(mode, "streamk-layout") == 0) {
+    return true;
+  }
+  if (std::strcmp(mode, "streamk-layout") == 0) {
     args = makeStreamKArgs();
     args.outputLayout = OutputLayout::RowMajor;
-  } else if (std::strcmp(mode, "streamk-work-overflow") == 0) {
+    return true;
+  }
+  if (std::strcmp(mode, "streamk-work-overflow") == 0) {
     args = makeStreamKArgs();
     args.m = 256 * 32768;
     args.n = 256 * 32768;
-  } else if (std::strcmp(mode, "streamk-buffer-overflow") == 0) {
+    return true;
+  }
+  if (std::strcmp(mode, "streamk-buffer-overflow") == 0) {
     args = makeStreamKArgs();
     args.m = 2147481600;
     args.n = 256;
     args.k = 64;
     args.streamKWorkers = 1;
-  } else if (std::strcmp(mode, "workspace-overflow") == 0) {
+    return true;
+  }
+  return false;
+}
+
+static bool setAITERInvalidMode(const char *mode, Args &args) {
+  if (std::strcmp(mode, "aiter-output-layout") == 0) {
+    args = makeAITERArgs();
+    args.outputLayout = OutputLayout::RowMajor;
+    return true;
+  }
+  if (std::strcmp(mode, "aiter-wmma") == 0) {
+    args = makeAITERArgs();
+    args.accumulatorLayout = AccumulatorLayout::Wmma;
+    return true;
+  }
+  if (std::strcmp(mode, "aiter-wave-k") == 0) {
+    args = makeAITERArgs();
+    args.waveKTiles = 3;
+    return true;
+  }
+  if (std::strcmp(mode, "aiter-wave-mn") == 0) {
+    args = makeAITERArgs();
+    args.waveMTiles = 3;
+    return true;
+  }
+  if (std::strcmp(mode, "aiter-b-range-overflow") == 0) {
+    args = makeAITERArgs();
+    args.m = 32;
+    args.n = 128;
+    args.k = 67109120;
+    return true;
+  }
+  return false;
+}
+
+static bool setScalarInvalidMode(const char *mode, Args &args) {
+  if (std::strcmp(mode, "iters-zero") == 0) {
+    args.iters = 0;
+    return true;
+  }
+  if (std::strcmp(mode, "warmup-negative") == 0) {
+    args.warmupIters = -1;
+    return true;
+  }
+  if (std::strcmp(mode, "output-elements-overflow") == 0) {
+    args.m = std::numeric_limits<int>::max();
+    args.n = 2;
+    return true;
+  }
+  return false;
+}
+
+static bool runOverflowInvalidMode(const char *mode) {
+  if (std::strcmp(mode, "workspace-overflow") == 0) {
     checkedSizeProduct(std::numeric_limits<size_t>::max(), 2,
                        "Stream-K workspace size overflow");
-  } else if (std::strcmp(mode, "integer-overflow") == 0) {
-    (void)parseInt("2147483648");
-  } else {
-    fail("unknown test mode");
+    return true;
   }
+  if (std::strcmp(mode, "aiter-scale-padding-overflow") == 0) {
+    Args args = makeAITERArgs();
+    (void)makeAITERScaleBytes({}, std::numeric_limits<int>::max(), args);
+    return true;
+  }
+  if (std::strcmp(mode, "aiter-scale-range-overflow") == 0) {
+    Args args = makeAITERArgs();
+    (void)makeAITERScaleBytes({}, 1 << 28, args);
+    return true;
+  }
+  if (std::strcmp(mode, "launch-k-overflow") == 0) {
+    Args args;
+    args.waveKTiles = 1 << 28;
+    validateArgs(args);
+    (void)makeLaunchShape(args);
+    return true;
+  }
+  if (std::strcmp(mode, "integer-overflow") == 0) {
+    (void)parseInt("2147483648");
+    return true;
+  }
+  return false;
+}
+
+[[noreturn]] static void runInvalidMode(const char *mode) {
+  Args args;
+  bool matched = setInputInvalidMode(mode, args);
+  if (!matched)
+    matched = setStreamKInvalidMode(mode, args);
+  if (!matched)
+    matched = setAITERInvalidMode(mode, args);
+  if (!matched)
+    matched = setScalarInvalidMode(mode, args);
+  if (!matched && runOverflowInvalidMode(mode))
+    fail("overflow input accepted");
+  if (!matched)
+    fail("unknown test mode");
   validateArgs(args);
   fail("invalid input arguments accepted");
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 &&
+      std::strcmp(argv[1], "aiter-device-output-conversion") == 0) {
+    checkAITERDeviceOutputConversion();
+    return 0;
+  }
   if (argc == 2)
     runInvalidMode(argv[1]);
   if (argc != 1)
@@ -281,6 +514,7 @@ int main(int argc, char **argv) {
   checkHplCPUReference(InputType::BF16, "bf16");
   checkOutputCoordinates();
   checkOutputLayouts();
+  checkAITERRunnerContract();
   checkStreamKABI();
   return 0;
 }

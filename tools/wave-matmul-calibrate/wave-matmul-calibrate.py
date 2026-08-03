@@ -102,6 +102,19 @@ _PHASED_DMA_PROFILES = frozenset(
     )
 )
 
+_MXFP4_AITER_PROFILE: dict[str, ProfileValue] = {
+    "target_waves": 1,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "mxfp4",
+    "output_type": "f16",
+    "output_store_cache": "cs",
+    "mxfp4_input_layout": "aiter",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
 KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
     "gfx950-f16-256x256-16wave": {
         "bm": 4,
@@ -214,6 +227,47 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "mxfp4_scale_path": "regs",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
+    },
+    "gfx950-mxfp4-aiter-32x128": {
+        **_MXFP4_AITER_PROFILE,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 2,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+    },
+    "gfx950-mxfp4-aiter-64x128": {
+        **_MXFP4_AITER_PROFILE,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+    },
+    "gfx950-mxfp4-aiter-128x128": {
+        **_MXFP4_AITER_PROFILE,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+    },
+    "gfx950-mxfp4-aiter-128x256": {
+        **_MXFP4_AITER_PROFILE,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 4,
+    },
+    "gfx950-mxfp4-aiter-256x256": {
+        **_MXFP4_AITER_PROFILE,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 16,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 2,
+        "cta_group_m": 8,
     },
     "v9-4096-original-wave": {
         "example": "v9-perf-golden",
@@ -408,6 +462,12 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
         cmd,
         mxfp4_scale_path != "dma",
         f"--mxfp4-scale-path={mxfp4_scale_path}",
+    )
+    mxfp4_input_layout = getattr(args, "mxfp4_input_layout", "canonical")
+    append_option_if(
+        cmd,
+        mxfp4_input_layout != "canonical",
+        f"--mxfp4-input-layout={mxfp4_input_layout}",
     )
     cta_swizzle_xcds = getattr(args, "cta_swizzle_xcds", 1)
     cta_group_m = getattr(args, "cta_group_m", 1)
@@ -782,6 +842,8 @@ def mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
 
 
 def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
+    if getattr(args, "mxfp4_input_layout", "canonical") == "aiter":
+        return 0
     if selected_example(args) == "tensilelite-subtile":
         k_groups = args.wave_k_tiles // 2
         scale_tiles = (
@@ -821,9 +883,10 @@ def compute_lds_bytes(args: argparse.Namespace) -> int:
         return data_lds + mxfp4_scale_lds_bytes(args)
 
     if getattr(args, "use_dma_lds", False):
-        slots = args.wave_k_tiles * (
-            args.bm * args.wave_m_tiles + args.bn * args.wave_n_tiles
-        )
+        block_tiles = args.bm * args.wave_m_tiles
+        if getattr(args, "mxfp4_input_layout", "canonical") != "aiter":
+            block_tiles += args.bn * args.wave_n_tiles
+        slots = args.wave_k_tiles * block_tiles
         dwords_per_slot = lds_dwords_per_frag(args)
         if getattr(args, "coalesced_mfma_output", False):
             dwords_per_slot += 4
@@ -885,6 +948,23 @@ def compile_runner(args: argparse.Namespace, tmp: Path) -> Path:
     return runner
 
 
+def append_hw_runner_options(cmd: list[str], args: argparse.Namespace) -> None:
+    if is_streamk_gemm(args):
+        cmd.extend(["--streamk-workers", str(args.streamk_workers)])
+    if selected_scale_input(args) == "tensilelite":
+        cmd.extend(["--scale-layout", "tensilelite"])
+    if getattr(args, "mxfp4_input_layout", "canonical") != "canonical":
+        cmd.extend(["--mxfp4-input-layout", args.mxfp4_input_layout])
+    if getattr(args, "all_ones", False):
+        cmd.append("--all-ones")
+    if getattr(args, "rand_int", False):
+        cmd.append("--rand-int")
+    if getattr(args, "hpl", False):
+        cmd.append("--hpl")
+    if args.no_check:
+        cmd.append("--no-check")
+
+
 def run_hw(
     runner: Path, hsaco: Path, args: argparse.Namespace, rocm_lib: str
 ) -> tuple[int, float, str]:
@@ -935,18 +1015,7 @@ def run_hw(
         "--seed",
         str(getattr(args, "seed", 0)),
     ]
-    if is_streamk_gemm(args):
-        cmd.extend(["--streamk-workers", str(args.streamk_workers)])
-    if selected_scale_input(args) == "tensilelite":
-        cmd.extend(["--scale-layout", "tensilelite"])
-    if getattr(args, "all_ones", False):
-        cmd.append("--all-ones")
-    if getattr(args, "rand_int", False):
-        cmd.append("--rand-int")
-    if getattr(args, "hpl", False):
-        cmd.append("--hpl")
-    if args.no_check:
-        cmd.append("--no-check")
+    append_hw_runner_options(cmd, args)
     cmd += [str(hsaco), kernel_name(args)]
     stdout = run(cmd, env=env)
     sys.stdout.write(stdout)
@@ -1094,6 +1163,9 @@ def add_kernel_shape_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--input-type", choices=("f16", "bf16", "mxfp4"), default="f16")
     ap.add_argument("--mxfp4-scale-path", choices=("dma", "regs"), default="dma")
     ap.add_argument(
+        "--mxfp4-input-layout", choices=("canonical", "aiter"), default="canonical"
+    )
+    ap.add_argument(
         "--scale-input",
         choices=("canonical", "tensilelite"),
         default="canonical",
@@ -1221,6 +1293,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def validate_aiter_mxfp4_args(args: argparse.Namespace) -> None:
+    mxfp4_scale_path = getattr(args, "mxfp4_scale_path", "dma")
+    mxfp4_input_layout = getattr(args, "mxfp4_input_layout", "canonical")
+    if mxfp4_input_layout != "aiter":
+        return
+    if args.input_type != "mxfp4":
+        sys.exit("--mxfp4-input-layout=aiter requires --input-type=mxfp4")
+    if mxfp4_scale_path != "dma":
+        sys.exit("--mxfp4-input-layout=aiter requires --mxfp4-scale-path=dma")
+    if args.coalesced_mfma_output or args.output_layout not in (
+        "automatic",
+        "tile-packed",
+    ):
+        sys.exit("AITER input layout requires tile-packed kernel output")
+
+
 def validate_mxfp4_args(args: argparse.Namespace) -> None:
     mxfp4_scale_path = getattr(args, "mxfp4_scale_path", "dma")
     if args.input_type == "mxfp4":
@@ -1228,8 +1316,10 @@ def validate_mxfp4_args(args: argparse.Namespace) -> None:
             sys.exit("--input-type=mxfp4 requires gfx950")
         if selected_matrix_intrinsic(args) != "mfma_gfx950":
             sys.exit("--input-type=mxfp4 requires gfx950 MFMA")
-    elif mxfp4_scale_path != "dma":
-        sys.exit("--mxfp4-scale-path=regs requires --input-type=mxfp4")
+    else:
+        if mxfp4_scale_path != "dma":
+            sys.exit("--mxfp4-scale-path=regs requires --input-type=mxfp4")
+    validate_aiter_mxfp4_args(args)
 
 
 def _require_arg(condition: bool, message: str) -> None:
@@ -1530,6 +1620,10 @@ def validate_matmul_target_args(args: argparse.Namespace) -> None:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.iters <= 0:
+        sys.exit("--iters must be positive")
+    if args.warmup < 0:
+        sys.exit("--warmup must be non-negative")
     if args.repeats <= 0:
         sys.exit("--repeats must be positive")
     if args.target_waves < 0:
@@ -1576,6 +1670,7 @@ def print_header(args: argparse.Namespace, chip: str) -> None:
         f"target_waves={effective_target_waves(args)} "
         f"input_type={args.input_type} output_type={args.output_type} "
         f"mxfp4_scale_path={args.mxfp4_scale_path} "
+        f"mxfp4_input_layout={args.mxfp4_input_layout} "
         f"output_store_cache={args.output_store_cache} "
         f"example={selected_example(args)} "
         f"scale_input={selected_scale_input(args)} "

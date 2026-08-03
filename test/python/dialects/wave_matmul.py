@@ -8,6 +8,8 @@ from mlir.dialects.wave_matmul import (
     generate_mxfp4_packed_matmul_inputs,
     generate_mxfp4_scale_inputs,
     generate_wmma_f16_matmul_inputs,
+    shuffle_mxfp4_b_aiter,
+    shuffle_mxfp4_scales_aiter,
 )
 
 
@@ -129,6 +131,28 @@ def build_spatial_subpanel(**overrides):
     return build_wmma_f16_matmul_module(**args)
 
 
+def build_aiter_mxfp4(**overrides):
+    args = {
+        "M": 32,
+        "N": 128,
+        "K": 256,
+        "BM": 1,
+        "BN": 4,
+        "wave_m_tiles": 2,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+        "use_buffer": True,
+        "use_dma_lds": True,
+        "matrix_intrinsic": "mfma_gfx950",
+        "input_type": "mxfp4",
+        "output_type": "f16",
+        "mxfp4_input_layout": "aiter",
+        "include_host": False,
+    }
+    args.update(overrides)
+    return build_wmma_f16_matmul_module(**args)
+
+
 assert_raises(
     ValueError,
     "DMA subpanel pipelines are mutually exclusive",
@@ -185,6 +209,17 @@ assert_raises(
         matrix_intrinsic="mfma_gfx950",
         phased_dma_schedule=subpanel_schedule,
     ),
+)
+assert_raises(
+    ValueError,
+    "AITER input layout requires tile-packed kernel output",
+    lambda: build_aiter_mxfp4(coalesced_mfma_output=True),
+)
+assert_raises(
+    ValueError,
+    "buffer range needs 4294967296 bytes; 32-bit buffer range holds at most "
+    "4294967295",
+    lambda: build_aiter_mxfp4(M=33554432),
 )
 print("subpanel-validation ok")
 
@@ -521,6 +556,47 @@ mxfp4_a2, _ = generate_mxfp4_packed_matmul_inputs(16, 16, 128, random_seed=8)
 assert mxfp4_a0 == mxfp4_a1 and mxfp4_b0 == mxfp4_b1
 assert mxfp4_a0 != mxfp4_a2
 print("mxfp4-packed-random", len(mxfp4_a0), len(mxfp4_b0), mxfp4_a0[0], mxfp4_b0[-1])
+aiter_b_input = tuple(i % 251 for i in range(32 * 64))
+aiter_b = shuffle_mxfp4_b_aiter(aiter_b_input, 32, 128)
+for row in range(32):
+    row_block, row_inner = divmod(row, 16)
+    for k_byte in range(64):
+        k_block, k_inner = divmod(k_byte, 32)
+        half, byte = divmod(k_inner, 16)
+        dst = ((((row_block * 2 + k_block) * 2 + half) * 16 + row_inner) * 16) + byte
+        assert aiter_b[dst] == aiter_b_input[row * 64 + k_byte]
+aiter_scale_input = tuple(i % 251 for i in range(257 * 16))
+aiter_scales = shuffle_mxfp4_scales_aiter(aiter_scale_input, 257, 512)
+mapped_scales = set()
+for row in range(257):
+    row_block, row_inner = divmod(row, 32)
+    row_half, row_lane = divmod(row_inner, 16)
+    for group in range(16):
+        group_block, group_inner = divmod(group, 8)
+        group_half, group_lane = divmod(group_inner, 4)
+        dst = (
+            (row_block * 2 + group_block) * 256
+            + group_lane * 64
+            + row_lane * 4
+            + group_half * 2
+            + row_half
+        )
+        mapped_scales.add(dst)
+        assert aiter_scales[dst] == aiter_scale_input[group * 257 + row]
+assert all(
+    value == 0x7F for i, value in enumerate(aiter_scales) if i not in mapped_scales
+)
+print("mxfp4-aiter-shuffle", len(aiter_b), len(aiter_scales))
+assert_raises(
+    ValueError,
+    "AITER B shuffle requires positive N/16 and K/64",
+    lambda: shuffle_mxfp4_b_aiter((0,) * (16 * 32), 16, 65),
+)
+assert_raises(
+    ValueError,
+    "AITER scale shuffle requires positive rows and K/32",
+    lambda: shuffle_mxfp4_scales_aiter((0,) * 16, 16, 33),
+)
 ref_mxfp4_random = compute_wmma_f16_matmul_reference_buffer(
     16,
     16,
@@ -678,6 +754,7 @@ print(static_bld.module)
 # CHECK: mxfp4-scales 64 64 127 122
 # CHECK: mxfp4-ref 256 42.5 21.25
 # CHECK: mxfp4-packed-random 1024 1024 68 34
+# CHECK: mxfp4-aiter-shuffle 2048 8192
 # CHECK: mxfp4-random-ref 256 92.703125 12.6484375
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK: mxfp4-random-module ok

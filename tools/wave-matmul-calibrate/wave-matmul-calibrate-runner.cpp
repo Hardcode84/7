@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -29,6 +30,7 @@ enum class KernelABI { Matmul, V9Golden, TLXMXFP, StreamK };
 enum class AccumulatorLayout { Automatic, Wmma, Mfma };
 enum class OutputLayout { Automatic, TilePacked, RowMajor, ColumnMajor };
 enum class ScaleLayout { Canonical, TensileLite };
+enum class MXFP4InputLayout { Canonical, AITER };
 
 struct Args {
   const char *hsaco = nullptr;
@@ -57,6 +59,7 @@ struct Args {
   bool randInt = false;
   bool hpl = false;
   ScaleLayout scaleLayout = ScaleLayout::Canonical;
+  MXFP4InputLayout mxfp4InputLayout = MXFP4InputLayout::Canonical;
 };
 
 [[noreturn]] static void die(const char *msg) {
@@ -90,6 +93,7 @@ static void usage() {
       "  --warmup N             warmup launches (default 10)\n"
       "  --seed N               deterministic input seed (default 0)\n"
       "  --scale-layout canonical|tensilelite  MXFP4 scale upload layout\n"
+      "  --mxfp4-input-layout canonical|aiter  MXFP4 data/scale ABI\n"
       "  --all-ones             fill A/B with ones and MXFP4 scales with 1\n"
       "  --rand-int             match hipBLASLt f16/bf16 rand_int inputs\n"
       "  --hpl                  match hipBLASLt f16/bf16 HPL inputs\n"
@@ -165,6 +169,17 @@ static void setScaleLayout(Args &a, const char *v) {
     return;
   }
   die("bad --scale-layout; expected canonical or tensilelite");
+}
+static void setMXFP4InputLayout(Args &a, const char *v) {
+  if (std::strcmp(v, "canonical") == 0) {
+    a.mxfp4InputLayout = MXFP4InputLayout::Canonical;
+    return;
+  }
+  if (std::strcmp(v, "aiter") == 0) {
+    a.mxfp4InputLayout = MXFP4InputLayout::AITER;
+    return;
+  }
+  die("bad --mxfp4-input-layout; expected canonical or aiter");
 }
 static void setKernelABI(Args &a, const char *v) {
   if (std::strcmp(v, "matmul") == 0) {
@@ -246,6 +261,7 @@ static constexpr FlagHandler kFlags[] = {
     {"--accumulator-layout", setAccumulatorLayout},
     {"--output-layout", setOutputLayout},
     {"--scale-layout", setScaleLayout},
+    {"--mxfp4-input-layout", setMXFP4InputLayout},
     {"--dynamic-lds", setDynamicLds},
     {"--streamk-workers", setStreamKWorkers},
     {"--iters", setIters},
@@ -343,6 +359,28 @@ static size_t checkedSizeProduct(size_t lhs, size_t rhs, const char *message) {
   if (rhs && lhs > std::numeric_limits<size_t>::max() / rhs)
     die(message);
   return lhs * rhs;
+}
+
+static int checkedIntProduct(int lhs, int rhs, const char *message) {
+  uint64_t product = checkedU64Product(static_cast<uint64_t>(lhs),
+                                       static_cast<uint64_t>(rhs), message);
+  if (product > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+    die(message);
+  return static_cast<int>(product);
+}
+
+static int getOutputElementCount(const Args &a) {
+  return checkedIntProduct(a.m, a.n, "output element count exceeds i32");
+}
+
+static int checkedAlignUp(int value, int alignment, const char *message) {
+  int remainder = value % alignment;
+  if (!remainder)
+    return value;
+  int increment = alignment - remainder;
+  if (value > std::numeric_limits<int>::max() - increment)
+    die(message);
+  return value + increment;
 }
 
 struct StreamKWorkspaceSizes {
@@ -462,6 +500,76 @@ static void validateTLXMXFPArgs(const Args &a) {
     die("TLX MXFP ABI requires the TLX 256x256x256 tile shape");
 }
 
+static void validateAITERTilePackedPlan(const Args &a);
+
+static void validateAITERTileCounts(const Args &a) {
+  if (a.waveKTiles % 2)
+    die("aiter input layout requires even wave K tiles");
+  if (a.waveMTiles % 2 || a.waveNTiles % 2)
+    die("aiter input layout requires even wave M/N tiles");
+  if (a.k % 64)
+    die("aiter input layout requires K multiple of 64");
+  if ((a.k / 64) % a.waveKTiles)
+    die("aiter wave K tiles must divide K/64");
+}
+
+static void validateAITERBufferRange(uint64_t bytes, const char *message) {
+  if (bytes > std::numeric_limits<uint32_t>::max())
+    die(message);
+}
+
+static void validateAITERBufferRanges(const Args &a) {
+  int packedK = a.k / 2;
+  validateAITERBufferRange(checkedU64Product(static_cast<uint64_t>(a.m),
+                                             packedK,
+                                             "AITER A buffer range overflow"),
+                           "AITER A buffer range exceeds u32");
+  validateAITERBufferRange(checkedU64Product(static_cast<uint64_t>(a.n),
+                                             packedK,
+                                             "AITER B buffer range overflow"),
+                           "AITER B buffer range exceeds u32");
+  int paddedGroups =
+      checkedAlignUp(a.k / 32, 8, "AITER scale group padding overflow");
+  int paddedM = checkedAlignUp(a.m, 256, "AITER scale row padding overflow");
+  int paddedN = checkedAlignUp(a.n, 256, "AITER scale row padding overflow");
+  validateAITERBufferRange(
+      checkedU64Product(static_cast<uint64_t>(paddedM), paddedGroups,
+                        "AITER A scale buffer range overflow"),
+      "AITER A scale buffer range exceeds u32");
+  validateAITERBufferRange(
+      checkedU64Product(static_cast<uint64_t>(paddedN), paddedGroups,
+                        "AITER B scale buffer range overflow"),
+      "AITER B scale buffer range exceeds u32");
+}
+
+static void validateAITERInputArgs(const Args &a) {
+  if (a.mxfp4InputLayout != MXFP4InputLayout::AITER)
+    return;
+  if (a.inputType != InputType::MXFP4)
+    die("aiter input layout requires MXFP4 input");
+  if (a.scaleLayout != ScaleLayout::Canonical)
+    die("aiter input layout owns the scale layout");
+  if (a.kernelABI != KernelABI::Matmul)
+    die("aiter input layout requires the matmul ABI");
+  if (a.accumulatorLayout == AccumulatorLayout::Wmma)
+    die("aiter input layout requires MFMA accumulators");
+  if (a.outputLayout != OutputLayout::Automatic &&
+      a.outputLayout != OutputLayout::TilePacked)
+    die("aiter final output conversion requires tile-packed kernel output");
+  validateAITERTileCounts(a);
+  validateAITERBufferRanges(a);
+  validateAITERTilePackedPlan(a);
+}
+
+static void validateMXFP4InputArgs(const Args &a) {
+  if (a.inputType == InputType::MXFP4 && a.waveSize != 64)
+    die("MXFP4 calibration expects wave-size 64");
+  if (a.scaleLayout == ScaleLayout::TensileLite &&
+      a.inputType != InputType::MXFP4)
+    die("tensilelite scale layout requires MXFP4 input");
+  validateAITERInputArgs(a);
+}
+
 static void validateArgs(const Args &a) {
   requirePositive(a.m, "m must be positive");
   requirePositive(a.n, "n must be positive");
@@ -472,13 +580,12 @@ static void validateArgs(const Args &a) {
   requirePositive(a.waveNTiles, "wave-n-tiles must be positive");
   requirePositive(a.waveKTiles, "wave-k-tiles must be positive");
   requirePositive(a.waveSize, "wave-size must be positive");
+  requirePositive(a.iters, "iters must be positive");
+  if (a.warmupIters < 0)
+    die("warmup must be non-negative");
   if (a.dynamicLdsBytes < 0)
     die("dynamic LDS bytes must be non-negative");
-  if (a.inputType == InputType::MXFP4 && a.waveSize != 64)
-    die("MXFP4 calibration expects wave-size 64");
-  if (a.scaleLayout == ScaleLayout::TensileLite &&
-      a.inputType != InputType::MXFP4)
-    die("tensilelite scale layout requires MXFP4 input");
+  validateMXFP4InputArgs(a);
   if (static_cast<int>(a.allOnes) + static_cast<int>(a.randInt) +
           static_cast<int>(a.hpl) >
       1)
@@ -488,6 +595,7 @@ static void validateArgs(const Args &a) {
   validateV9GoldenArgs(a);
   validateTLXMXFPArgs(a);
   validateStreamKArgs(a);
+  (void)getOutputElementCount(a);
 }
 
 static Args parseArgs(int argc, char **argv) {
@@ -602,15 +710,14 @@ static float hipblasLtHpl(size_t index) {
 }
 
 static uint8_t randomMXFP4Code(uint32_t &state) {
-  return ((nextRand(state) >> 31) & 1u) ? 0x2 : 0x4;
+  return static_cast<uint8_t>((nextRand(state) >> 28) & 0xfu);
 }
 
 static float mxfp4CodeToFloat(uint8_t code) {
-  if (code == 0x2)
-    return 1.0f;
-  if (code == 0x4)
-    return 2.0f;
-  die("unsupported random MXFP4 code");
+  static constexpr std::array<float, 8> magnitudes = {0.0f, 0.5f, 1.0f, 1.5f,
+                                                      2.0f, 3.0f, 4.0f, 6.0f};
+  float value = magnitudes[code & 0x7u];
+  return code & 0x8u ? -value : value;
 }
 
 static float e8m0ToFloat(uint8_t raw) {
@@ -635,94 +742,211 @@ struct OutputCoordinate {
   int n;
 };
 
+struct TilePackedOutputPlan {
+  int elements;
+  int n;
+  int nBlocks;
+  int mTilesPerBlock;
+  int nTilesPerBlock;
+  int bn;
+  int waveMTiles;
+  int waveNTiles;
+  int ctaElements;
+  int waveElements;
+  int valuesPerLane;
+  bool wmma;
+};
+
 static AccumulatorLayout getEffectiveAccumulatorLayout(const Args &a) {
   if (a.accumulatorLayout != AccumulatorLayout::Automatic)
     return a.accumulatorLayout;
   return a.waveSize == 64 ? AccumulatorLayout::Mfma : AccumulatorLayout::Wmma;
 }
 
-static int getAccumulatorRow(const Args &a, int lane, int laneValue,
-                             int valuesPerLane) {
-  // WMMA interleaves row parity; MFMA assigns contiguous rows per lane group.
-  if (getEffectiveAccumulatorLayout(a) == AccumulatorLayout::Wmma) {
-    if (a.waveSize != 32)
-      die("WMMA output check requires wave32");
-    return (lane / 16) + 2 * laneValue;
-  }
-  if (a.waveSize != 32 && a.waveSize != 64)
+static TilePackedOutputPlan makeTilePackedOutputPlan(const Args &a) {
+  bool wmma = getEffectiveAccumulatorLayout(a) == AccumulatorLayout::Wmma;
+  if (wmma && a.waveSize != 32)
+    die("WMMA output check requires wave32");
+  if (!wmma && a.waveSize != 32 && a.waveSize != 64)
     die("MFMA output check requires wave32 or wave64");
+  int valuesPerLane = divExact(256, a.waveSize, "bad output wave size");
+  int mTilesPerBlock = checkedIntProduct(a.bm, a.waveMTiles,
+                                         "tile-packed M blocking exceeds i32");
+  int nTilesPerBlock = checkedIntProduct(a.bn, a.waveNTiles,
+                                         "tile-packed N blocking exceeds i32");
+  int mBlockRows = checkedIntProduct(mTilesPerBlock, 16,
+                                     "tile-packed M blocking exceeds i32");
+  int nBlockCols = checkedIntProduct(nTilesPerBlock, 16,
+                                     "tile-packed N blocking exceeds i32");
+  int mBlocks = divExact(a.m, mBlockRows, "bad M blocking");
+  int nBlocks = divExact(a.n, nBlockCols, "bad N blocking");
+  int tilesPerWave = checkedIntProduct(a.waveMTiles, a.waveNTiles,
+                                       "tile-packed wave elements exceed i32");
+  int wavesPerWorkgroup = checkedIntProduct(
+      a.bm, a.bn, "tile-packed workgroup elements exceed i32");
+  int waveElements = checkedIntProduct(tilesPerWave, 256,
+                                       "tile-packed wave elements exceed i32");
+  int ctaElements =
+      checkedIntProduct(wavesPerWorkgroup, waveElements,
+                        "tile-packed workgroup elements exceed i32");
+  int ctaCount =
+      checkedIntProduct(mBlocks, nBlocks, "tile-packed CTA count exceeds i32");
+  int elements = getOutputElementCount(a);
+  if (checkedIntProduct(ctaCount, ctaElements,
+                        "tile-packed output elements exceed i32") != elements)
+    die("tile-packed output geometry does not cover M*N");
+  return {elements,       a.n,          nBlocks,       mTilesPerBlock,
+          nTilesPerBlock, a.bn,         a.waveMTiles,  a.waveNTiles,
+          ctaElements,    waveElements, valuesPerLane, wmma};
+}
+
+static void validateAITERTilePackedPlan(const Args &a) {
+  (void)makeTilePackedOutputPlan(a);
+}
+
+static __host__ __device__ int
+getAccumulatorRow(bool wmma, int lane, int laneValue, int valuesPerLane) {
+  if (wmma)
+    return (lane / 16) + 2 * laneValue;
   return (lane / 16) * valuesPerLane + laneValue;
 }
 
-static OutputCoordinate getOutputCoordinate(const Args &a, int index) {
-  int tilesPerWave = a.waveMTiles * a.waveNTiles;
-  int wavesPerWorkgroup = a.bm * a.bn;
-  int ctaElems = wavesPerWorkgroup * tilesPerWave * 256;
-  int nBlocks = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
-  int cta = index / ctaElems;
-  int ctaRem = index % ctaElems;
-  int wgM = cta / nBlocks;
-  int wgN = cta % nBlocks;
-  int waveElems = tilesPerWave * 256;
-  int waveId = ctaRem / waveElems;
-  int waveRem = ctaRem % waveElems;
+static __host__ __device__ OutputCoordinate
+getOutputCoordinate(int index, const TilePackedOutputPlan &plan) {
+  int cta = index / plan.ctaElements;
+  int ctaRem = index % plan.ctaElements;
+  int wgM = cta / plan.nBlocks;
+  int wgN = cta % plan.nBlocks;
+  int waveId = ctaRem / plan.waveElements;
+  int waveRem = ctaRem % plan.waveElements;
   int tileId = waveRem / 256;
   int slot = waveRem % 256;
-  int mWave = waveId / a.bn;
-  int nWave = waveId % a.bn;
-  int valuesPerLane = divExact(256, a.waveSize, "bad output wave size");
-  int lane = slot / valuesPerLane;
-  int laneValue = slot % valuesPerLane;
-  int mLane = getAccumulatorRow(a, lane, laneValue, valuesPerLane);
-  int mTile =
-      wgM * a.bm * a.waveMTiles + mWave * a.waveMTiles + tileId / a.waveNTiles;
-  int nTile =
-      wgN * a.bn * a.waveNTiles + nWave * a.waveNTiles + tileId % a.waveNTiles;
+  int mWave = waveId / plan.bn;
+  int nWave = waveId % plan.bn;
+  int lane = slot / plan.valuesPerLane;
+  int laneValue = slot % plan.valuesPerLane;
+  int mLane = getAccumulatorRow(plan.wmma, lane, laneValue, plan.valuesPerLane);
+  int mTile = wgM * plan.mTilesPerBlock + mWave * plan.waveMTiles +
+              tileId / plan.waveNTiles;
+  int nTile = wgN * plan.nTilesPerBlock + nWave * plan.waveNTiles +
+              tileId % plan.waveNTiles;
   return {mTile * 16 + mLane, nTile * 16 + lane % 16};
 }
 
-static double computeExpectedOutputSlot(const HostInputs &inputs, const Args &a,
-                                        int index) {
-  OutputCoordinate coord = getOutputCoordinate(a, index);
-  return roundExpectedOutput(
-      computeExpectedElement(inputs, a, coord.m, coord.n), a.cType);
+static OutputCoordinate getOutputCoordinate(const Args &a, int index) {
+  TilePackedOutputPlan plan = makeTilePackedOutputPlan(a);
+  return getOutputCoordinate(index, plan);
+}
+
+template <typename T>
+static __global__ void materializeRowMajorOutput(const T *tilePacked,
+                                                 T *rowMajor,
+                                                 TilePackedOutputPlan plan) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= plan.elements)
+    return;
+  OutputCoordinate coord = getOutputCoordinate(index, plan);
+  rowMajor[coord.m * plan.n + coord.n] = tilePacked[index];
+}
+
+struct ReorderedTilePackedOutput {
+  std::vector<double> values;
+  std::vector<int> packedIndices;
+};
+
+static std::vector<int> getTilePackedIndexMap(int elements, const Args &a) {
+  TilePackedOutputPlan plan = makeTilePackedOutputPlan(a);
+  if (elements != plan.elements)
+    die("tile-packed output element count mismatch");
+  std::vector<int> packedIndices(elements, -1);
+  for (int index = 0; index < elements; ++index) {
+    OutputCoordinate coord = getOutputCoordinate(index, plan);
+    if (coord.m < 0 || coord.m >= a.m || coord.n < 0 || coord.n >= a.n) {
+      std::fprintf(stderr,
+                   "output_check: tile-packed index=%d maps out of bounds "
+                   "m=%d n=%d\n",
+                   index, coord.m, coord.n);
+      std::exit(1);
+    }
+    int logicalIndex = coord.m * a.n + coord.n;
+    if (packedIndices[logicalIndex] >= 0) {
+      std::fprintf(stderr,
+                   "output_check: duplicate tile-packed coordinate m=%d n=%d "
+                   "indices=%d,%d\n",
+                   coord.m, coord.n, packedIndices[logicalIndex], index);
+      std::exit(1);
+    }
+    packedIndices[logicalIndex] = index;
+  }
+  for (int index = 0; index < elements; ++index)
+    if (packedIndices[index] < 0)
+      die("tile-packed output mapping missed a row-major coordinate");
+  return packedIndices;
 }
 
 template <typename ReadFn>
-static void validateOutput(int elements, const Args &a,
-                           const HostInputs &inputs, ReadFn readValue) {
-  if (elements % 256 != 0)
-    die("output check expects 16x16 tile-packed output");
+static ReorderedTilePackedOutput
+reorderTilePackedOutput(int elements, const Args &a, ReadFn readValue) {
+  std::vector<int> packedIndices = getTilePackedIndexMap(elements, a);
+  std::vector<double> values(elements);
+  for (int index = 0; index < elements; ++index)
+    values[index] = static_cast<double>(readValue(packedIndices[index]));
+  return {std::move(values), std::move(packedIndices)};
+}
+
+static void validateAITEROutputMapping(int elements, const Args &a) {
+  if (a.mxfp4InputLayout != MXFP4InputLayout::AITER)
+    return;
+  validateAITERTilePackedPlan(a);
+  if (!a.checkOutput)
+    return;
+  (void)getTilePackedIndexMap(elements, a);
+  std::printf("output_layout_check: passed kernel=tile-packed "
+              "final=row-major conversion=device coordinates=bijective "
+              "elements=%d\n",
+              elements);
+}
+
+template <typename ReadFn>
+static void validateTilePackedOutput(int elements, const Args &a,
+                                     const HostInputs &inputs,
+                                     ReadFn readValue) {
+  ReorderedTilePackedOutput output =
+      reorderTilePackedOutput(elements, a, readValue);
   double worst = 0.0;
   int worstIdx = 0;
-  for (int tileBase = 0; tileBase < elements; tileBase += 256) {
-    for (int slot = 0; slot < 256; ++slot) {
-      int index = tileBase + slot;
-      double got = static_cast<double>(readValue(index));
-      double exp = computeExpectedOutputSlot(inputs, a, index);
+  for (int m = 0; m < a.m; ++m) {
+    for (int n = 0; n < a.n; ++n) {
+      int logicalIndex = m * a.n + n;
+      double got = output.values[logicalIndex];
+      double exp =
+          roundExpectedOutput(computeExpectedElement(inputs, a, m, n), a.cType);
       double diff = std::fabs(got - exp);
       if (diff > worst) {
         worst = diff;
-        worstIdx = tileBase + slot;
+        worstIdx = logicalIndex;
       }
       double limit = 1.0e-2 + 1.0e-3 * std::fabs(exp);
       if (diff > limit) {
         std::fprintf(stderr,
-                     "output_check: failed tile=%d slot=%d expected=%.6f "
-                     "got=%.6f abs_diff=%.6f tolerance=%.6f\n",
-                     tileBase / 256, slot, exp, got, diff, limit);
+                     "output_check: failed m=%d n=%d packed_index=%d "
+                     "expected=%.6f got=%.6f abs_diff=%.6f tolerance=%.6f\n",
+                     m, n, output.packedIndices[logicalIndex], exp, got, diff,
+                     limit);
         std::exit(1);
       }
     }
   }
-  std::printf("output_check: passed mode=strict max_abs_diff=%.6f index=%d\n",
-              worst, worstIdx);
+  std::printf("output_check: passed mode=strict layout=tile-packed "
+              "reordered=row-major coordinates=bijective elements=%d "
+              "max_abs_diff=%.6f index=%d\n",
+              elements, worst, worstIdx);
 }
 
 template <typename ReadFn>
 static void validateRowMajorOutput(int elements, const Args &a,
                                    const HostInputs &inputs, ReadFn readValue) {
-  if (elements != a.m * a.n)
+  if (elements != getOutputElementCount(a))
     die("row-major output check expects dense MxN output");
   double worst = 0.0;
   int worstIdx = 0;
@@ -747,15 +971,16 @@ static void validateRowMajorOutput(int elements, const Args &a,
       }
     }
   }
-  std::printf("output_check: passed mode=strict max_abs_diff=%.6f index=%d\n",
-              worst, worstIdx);
+  std::printf("output_check: passed mode=strict layout=row-major elements=%d "
+              "max_abs_diff=%.6f index=%d\n",
+              elements, worst, worstIdx);
 }
 
 template <typename ReadFn>
 static void validateColumnMajorOutput(int elements, const Args &a,
                                       const HostInputs &inputs,
                                       ReadFn readValue) {
-  if (elements != a.m * a.n)
+  if (elements != getOutputElementCount(a))
     die("column-major output check expects dense MxN output");
   double worst = 0.0;
   int worstIdx = 0;
@@ -840,6 +1065,10 @@ static const char *getScaleLayoutName(ScaleLayout layout) {
   return layout == ScaleLayout::TensileLite ? "tensilelite" : "canonical";
 }
 
+static const char *getMXFP4InputLayoutName(MXFP4InputLayout layout) {
+  return layout == MXFP4InputLayout::AITER ? "aiter" : "canonical";
+}
+
 static const char *getInputModeName(const Args &a) {
   if (a.allOnes)
     return "all-ones";
@@ -882,6 +1111,15 @@ static OutputLayout getEffectiveOutputLayout(const Args &a) {
   return OutputLayout::TilePacked;
 }
 
+static bool needsAITEROutputConversion(const Args &a) {
+  return a.mxfp4InputLayout == MXFP4InputLayout::AITER;
+}
+
+static OutputLayout getFinalOutputLayout(const Args &a) {
+  return needsAITEROutputConversion(a) ? OutputLayout::RowMajor
+                                       : getEffectiveOutputLayout(a);
+}
+
 static bool usesFlattenedGrid(const Args &a) {
   return isV9Golden(a) || isTLXMXFP(a) || isStreamK(a);
 }
@@ -892,6 +1130,35 @@ static int mmaKTile(const Args &a) {
   if (a.waveSize == 64)
     return 32;
   return 16;
+}
+
+struct MatmulBlocking {
+  int blocksX;
+  int blocksY;
+  int virtualKSteps;
+  int wavesPerWorkgroup;
+  int blockThreads;
+};
+
+static MatmulBlocking getMatmulBlocking(const Args &a) {
+  int mTilesPerBlock =
+      checkedIntProduct(a.bm, a.waveMTiles, "M blocking exceeds i32");
+  int nTilesPerBlock =
+      checkedIntProduct(a.bn, a.waveNTiles, "N blocking exceeds i32");
+  int mBlockRows =
+      checkedIntProduct(16, mTilesPerBlock, "M blocking exceeds i32");
+  int nBlockCols =
+      checkedIntProduct(16, nTilesPerBlock, "N blocking exceeds i32");
+  int kBlock =
+      checkedIntProduct(mmaKTile(a), a.waveKTiles, "K blocking exceeds i32");
+  int wavesPerWorkgroup =
+      checkedIntProduct(a.bm, a.bn, "workgroup wave count exceeds i32");
+  int blockThreads = checkedIntProduct(wavesPerWorkgroup, a.waveSize,
+                                       "block thread count exceeds i32");
+  return {divExact(a.m, mBlockRows, "bad M blocking"),
+          divExact(a.n, nBlockCols, "bad N blocking"),
+          divExact(a.k, kBlock, "bad K blocking"), wavesPerWorkgroup,
+          blockThreads};
 }
 
 static std::vector<uint8_t> makeMXFP4InputBytes(size_t elements, int seed,
@@ -981,6 +1248,67 @@ static std::vector<uint8_t> makeMXFP4ScaleBytes(int rows, int k, int seed,
   return bytes;
 }
 
+static std::vector<uint8_t>
+makeAITERBBytes(const std::vector<uint8_t> &canonical, const Args &a) {
+  int storageK = divExact(a.k, 2, "bad MXFP4 packed K");
+  if (a.n % 16 || storageK % 32)
+    die("aiter B layout requires N/16 and packed K/32 alignment");
+  int kBlocks = storageK / 32;
+  std::vector<uint8_t> shuffled(canonical.size());
+  for (int row = 0; row < a.n; ++row) {
+    int rowBlock = row / 16;
+    int rowInner = row % 16;
+    for (int kByte = 0; kByte < storageK; ++kByte) {
+      int kBlock = kByte / 32;
+      int kInner = kByte % 32;
+      int half = kInner / 16;
+      int byte = kInner % 16;
+      size_t src = static_cast<size_t>(row) * storageK + kByte;
+      size_t dst =
+          ((static_cast<size_t>(rowBlock) * kBlocks + kBlock) * 2 + half) *
+              256 +
+          rowInner * 16 + byte;
+      shuffled[dst] = canonical[src];
+    }
+  }
+  return shuffled;
+}
+
+static std::vector<uint8_t>
+makeAITERScaleBytes(const std::vector<uint8_t> &canonical, int rows,
+                    const Args &a) {
+  int groups = divExact(a.k, 32, "bad MXFP4 scale groups");
+  int paddedRows =
+      checkedAlignUp(rows, 256, "AITER scale row padding overflow");
+  int paddedGroups =
+      checkedAlignUp(groups, 8, "AITER scale group padding overflow");
+  int groupBlocks = paddedGroups / 8;
+  size_t paddedElements = checkedSizeProduct(static_cast<size_t>(paddedRows),
+                                             static_cast<size_t>(paddedGroups),
+                                             "AITER scale size overflow");
+  if (paddedElements > std::numeric_limits<uint32_t>::max())
+    die("AITER scale buffer range exceeds u32");
+  std::vector<uint8_t> shuffled(paddedElements, 0x7f);
+  for (int row = 0; row < rows; ++row) {
+    int rowBlock = row / 32;
+    int rowInner = row % 32;
+    int rowHalf = rowInner / 16;
+    int rowLane = rowInner % 16;
+    for (int group = 0; group < groups; ++group) {
+      int groupBlock = group / 8;
+      int groupInner = group % 8;
+      int groupHalf = groupInner / 4;
+      int groupLane = groupInner % 4;
+      size_t src = static_cast<size_t>(group) * rows + row;
+      size_t dst =
+          (static_cast<size_t>(rowBlock) * groupBlocks + groupBlock) * 256 +
+          groupLane * 64 + rowLane * 4 + groupHalf * 2 + rowHalf;
+      shuffled[dst] = canonical[src];
+    }
+  }
+  return shuffled;
+}
+
 struct TensileLiteScaleLayout {
   int mBlocks;
   int nBlocks;
@@ -1000,20 +1328,25 @@ static TensileLiteScaleLayout makeTensileLiteScaleLayout(const Args &a,
   if (a.waveKTiles % 2 || a.waveMTiles % 2 || a.waveNTiles % 2)
     die("tensilelite scale layout needs even wave tile counts");
 
+  MatmulBlocking blocking = getMatmulBlocking(a);
   TensileLiteScaleLayout layout;
-  layout.mBlocks = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
-  layout.nBlocks = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
-  layout.virtualKSteps =
-      divExact(a.k, mmaKTile(a) * a.waveKTiles, "bad K blocking");
+  layout.mBlocks = blocking.blocksX;
+  layout.nBlocks = blocking.blocksY;
+  layout.virtualKSteps = blocking.virtualKSteps;
   layout.blockWaves = isA ? a.bm : a.bn;
   layout.waveTiles = isA ? a.waveMTiles : a.waveNTiles;
   layout.rows = isA ? a.m : a.n;
   layout.kScaleGroupsPerStep = a.waveKTiles / 2;
   layout.groupsPerPartition =
-      (layout.waveTiles / 2) * layout.kScaleGroupsPerStep;
-  layout.partitionBytes = layout.groupsPerPartition * 256;
-  layout.ctaBytes =
-      layout.blockWaves * layout.partitionBytes * layout.virtualKSteps;
+      checkedIntProduct(layout.waveTiles / 2, layout.kScaleGroupsPerStep,
+                        "tensilelite scale partition exceeds i32");
+  layout.partitionBytes =
+      checkedIntProduct(layout.groupsPerPartition, 256,
+                        "tensilelite scale partition exceeds i32");
+  layout.ctaBytes = checkedIntProduct(layout.blockWaves, layout.partitionBytes,
+                                      "tensilelite scale CTA bytes exceed i32");
+  layout.ctaBytes = checkedIntProduct(layout.ctaBytes, layout.virtualKSteps,
+                                      "tensilelite scale CTA bytes exceed i32");
   layout.isA = isA;
   return layout;
 }
@@ -1107,6 +1440,7 @@ makeTensileLiteScaleBytes(const std::vector<uint8_t> &canonical, const Args &a,
 struct HostInputs {
   std::vector<uint8_t> a;
   std::vector<uint8_t> b;
+  std::vector<uint8_t> bKernel;
   std::vector<uint8_t> aScale;
   std::vector<uint8_t> bScale;
   std::vector<uint8_t> aKernelScale;
@@ -1135,7 +1469,11 @@ static HostInputs makeHostInputs(const Args &a) {
   if (isMXFP4(a.inputType)) {
     inputs.aScale = makeMXFP4ScaleBytes(a.m, a.k, a.seed, 2, a.allOnes);
     inputs.bScale = makeMXFP4ScaleBytes(a.n, a.k, a.seed, 3, a.allOnes);
-    if (a.scaleLayout == ScaleLayout::TensileLite) {
+    if (a.mxfp4InputLayout == MXFP4InputLayout::AITER) {
+      inputs.bKernel = makeAITERBBytes(inputs.b, a);
+      inputs.aKernelScale = makeAITERScaleBytes(inputs.aScale, a.m, a);
+      inputs.bKernelScale = makeAITERScaleBytes(inputs.bScale, a.n, a);
+    } else if (a.scaleLayout == ScaleLayout::TensileLite) {
       inputs.aKernelScale = makeTensileLiteScaleBytes(inputs.aScale, a, true);
       inputs.bKernelScale = makeTensileLiteScaleBytes(inputs.bScale, a, false);
     } else {
@@ -1144,6 +1482,42 @@ static HostInputs makeHostInputs(const Args &a) {
     }
   }
   return inputs;
+}
+
+static uint32_t getMXFP4CodeMask(const std::vector<uint8_t> &bytes) {
+  uint32_t mask = 0;
+  for (uint8_t packed : bytes) {
+    mask |= 1u << (packed & 0xfu);
+    mask |= 1u << (packed >> 4);
+  }
+  return mask;
+}
+
+static uint32_t getMXFP4ScaleMask(const std::vector<uint8_t> &bytes) {
+  uint32_t mask = 0;
+  for (uint8_t value : bytes) {
+    if (value < 124 || value > 127)
+      die("random MXFP4 scale outside test domain");
+    mask |= 1u << (value - 124);
+  }
+  return mask;
+}
+
+static void validateRandomAITERInputs(const HostInputs &inputs, const Args &a) {
+  if (!a.checkOutput || a.allOnes ||
+      a.mxfp4InputLayout != MXFP4InputLayout::AITER)
+    return;
+  if (getMXFP4CodeMask(inputs.a) != 0xffffu)
+    die("random AITER A did not cover all MXFP4 codes");
+  if (getMXFP4CodeMask(inputs.b) != 0xffffu)
+    die("random AITER B did not cover all MXFP4 codes");
+  if (getMXFP4ScaleMask(inputs.aScale) != 0xfu)
+    die("random AITER A scales did not cover all values");
+  if (getMXFP4ScaleMask(inputs.bScale) != 0xfu)
+    die("random AITER B scales did not cover all values");
+  std::printf("input_check: passed mode=random a_codes=16 b_codes=16 "
+              "a_scale_values=4 b_scale_values=4 reference=canonical "
+              "upload=aiter-preshuffled\n");
 }
 
 static uint16_t readU16(const std::vector<uint8_t> &bytes, size_t element) {
@@ -1196,6 +1570,7 @@ struct DeviceBuffers {
   void *deviceAScale = nullptr;
   void *deviceBScale = nullptr;
   void *deviceC = nullptr;
+  void *deviceFinalC = nullptr;
   void *deviceStreamKScratch = nullptr;
   void *deviceStreamKCounters = nullptr;
   size_t cBytes = 0;
@@ -1208,11 +1583,15 @@ struct DeviceBuffers {
 static DeviceBuffers prepareDeviceBuffers(const Args &a,
                                           const HostInputs &inputs) {
   DeviceBuffers b;
-  b.cElements = a.m * a.n;
-  b.cBytes = static_cast<size_t>(b.cElements) *
-             (a.cType == CType::F32 ? sizeof(float) : sizeof(uint16_t));
+  const std::vector<uint8_t> &kernelB =
+      inputs.bKernel.empty() ? inputs.b : inputs.bKernel;
+  b.cElements = getOutputElementCount(a);
+  b.cBytes = checkedSizeProduct(static_cast<size_t>(b.cElements),
+                                a.cType == CType::F32 ? sizeof(float)
+                                                      : sizeof(uint16_t),
+                                "output buffer size overflow");
   checkHip(hipMalloc(&b.deviceA, inputs.a.size()), "hipMalloc A");
-  checkHip(hipMalloc(&b.deviceB, inputs.b.size()), "hipMalloc B");
+  checkHip(hipMalloc(&b.deviceB, kernelB.size()), "hipMalloc B");
   if (isMXFP4(a.inputType)) {
     checkHip(hipMalloc(&b.deviceAScale, inputs.aKernelScale.size()),
              "hipMalloc A scale");
@@ -1220,6 +1599,8 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
              "hipMalloc B scale");
   }
   checkHip(hipMalloc(&b.deviceC, b.cBytes), "hipMalloc C");
+  if (needsAITEROutputConversion(a))
+    checkHip(hipMalloc(&b.deviceFinalC, b.cBytes), "hipMalloc final C");
   if (isStreamK(a)) {
     StreamKWorkspaceSizes sizes = getStreamKWorkspaceSizes(a);
     b.streamKScratchBytes = sizes.scratchBytes;
@@ -1237,7 +1618,7 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
   checkHip(hipMemcpy(b.deviceA, inputs.a.data(), inputs.a.size(),
                      hipMemcpyHostToDevice),
            "hipMemcpy A");
-  checkHip(hipMemcpy(b.deviceB, inputs.b.data(), inputs.b.size(),
+  checkHip(hipMemcpy(b.deviceB, kernelB.data(), kernelB.size(),
                      hipMemcpyHostToDevice),
            "hipMemcpy B");
   if (isMXFP4(a.inputType)) {
@@ -1249,6 +1630,8 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
              "hipMemcpy B scale");
   }
   checkHip(hipMemset(b.deviceC, 0, b.cBytes), "hipMemset C");
+  if (b.deviceFinalC)
+    checkHip(hipMemset(b.deviceFinalC, 0, b.cBytes), "hipMemset final C");
   return b;
 }
 
@@ -1260,17 +1643,39 @@ static void freeDeviceBuffers(DeviceBuffers &b) {
   if (b.deviceBScale)
     checkHip(hipFree(b.deviceBScale), "hipFree B scale");
   checkHip(hipFree(b.deviceC), "hipFree C");
+  if (b.deviceFinalC)
+    checkHip(hipFree(b.deviceFinalC), "hipFree final C");
   if (b.deviceStreamKScratch)
     checkHip(hipFree(b.deviceStreamKScratch), "hipFree Stream-K scratch");
   if (b.deviceStreamKCounters)
     checkHip(hipFree(b.deviceStreamKCounters), "hipFree Stream-K counters");
 }
 
+static void launchAITEROutputConversion(const DeviceBuffers &b, const Args &a) {
+  if (!needsAITEROutputConversion(a))
+    return;
+  constexpr int threads = 256;
+  int blocks = 1 + (b.cElements - 1) / threads;
+  TilePackedOutputPlan plan = makeTilePackedOutputPlan(a);
+  if (plan.elements != b.cElements)
+    die("AITER conversion output element count mismatch");
+  if (a.cType == CType::F32) {
+    materializeRowMajorOutput<float>
+        <<<blocks, threads>>>(static_cast<const float *>(b.deviceC),
+                              static_cast<float *>(b.deviceFinalC), plan);
+  } else {
+    materializeRowMajorOutput<uint16_t>
+        <<<blocks, threads>>>(static_cast<const uint16_t *>(b.deviceC),
+                              static_cast<uint16_t *>(b.deviceFinalC), plan);
+  }
+  checkHip(hipGetLastError(), "launch AITER output conversion");
+}
+
 static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
-                               const Args &a, const HostInputs &inputs) {
+                               OutputLayout layout, const Args &a,
+                               const HostInputs &inputs) {
   if (!a.checkOutput)
     return;
-  OutputLayout layout = getEffectiveOutputLayout(a);
   if (a.cType == CType::F16 || a.cType == CType::BF16) {
     std::vector<uint16_t> hostC(cElements);
     checkHip(hipMemcpy(hostC.data(), deviceC, cBytes, hipMemcpyDeviceToHost),
@@ -1287,7 +1692,7 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
       validateRowMajorOutput(cElements, a, inputs, readValue);
       return;
     }
-    validateOutput(cElements, a, inputs, readValue);
+    validateTilePackedOutput(cElements, a, inputs, readValue);
     return;
   }
   std::vector<float> hostC(cElements);
@@ -1303,7 +1708,8 @@ static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
                            [&](int i) { return hostC[i]; });
     return;
   }
-  validateOutput(cElements, a, inputs, [&](int i) { return hostC[i]; });
+  validateTilePackedOutput(cElements, a, inputs,
+                           [&](int i) { return hostC[i]; });
 }
 
 static void checkStreamKCounters(const DeviceBuffers &b, const Args &a) {
@@ -1327,27 +1733,29 @@ struct LaunchShape {
   int gridX = 1;
   int gridY = 1;
   int blockThreads = 1;
+  int wavesPerWorkgroup = 1;
   int tripCount = 0;
   int displayTripCount = 0;
 };
 
 static LaunchShape makeLaunchShape(const Args &a) {
-  int blocksX = divExact(a.m, 16 * a.bm * a.waveMTiles, "bad M blocking");
-  int blocksY = divExact(a.n, 16 * a.bn * a.waveNTiles, "bad N blocking");
-  int virtualKSteps =
-      divExact(a.k, mmaKTile(a) * a.waveKTiles, "bad K blocking");
+  MatmulBlocking blocking = getMatmulBlocking(a);
   LaunchShape shape;
   if (isStreamK(a)) {
     shape.gridX = a.streamKWorkers;
     shape.gridY = 1;
   } else {
-    shape.gridX = usesFlattenedGrid(a) ? blocksX * blocksY : blocksX;
-    shape.gridY = usesFlattenedGrid(a) ? 1 : blocksY;
+    shape.gridX = usesFlattenedGrid(a)
+                      ? checkedIntProduct(blocking.blocksX, blocking.blocksY,
+                                          "flattened grid size exceeds i32")
+                      : blocking.blocksX;
+    shape.gridY = usesFlattenedGrid(a) ? 1 : blocking.blocksY;
   }
-  shape.blockThreads = a.bm * a.bn * a.waveSize;
-  shape.tripCount = std::max(virtualKSteps - 1, 0);
+  shape.blockThreads = blocking.blockThreads;
+  shape.wavesPerWorkgroup = blocking.wavesPerWorkgroup;
+  shape.tripCount = std::max(blocking.virtualKSteps - 1, 0);
   shape.displayTripCount = usesFlattenedGrid(a)
-                               ? std::max((virtualKSteps - 2) / 2, 0)
+                               ? std::max((blocking.virtualKSteps - 2) / 2, 0)
                                : shape.tripCount;
   return shape;
 }
@@ -1436,31 +1844,47 @@ int main(int argc, char **argv) {
   checkHip(hipModuleGetFunction(&kfn, mod, a.kernel), "hipModuleGetFunction");
 
   HostInputs inputs = makeHostInputs(a);
+  validateRandomAITERInputs(inputs, a);
   DeviceBuffers buffers = prepareDeviceBuffers(a, inputs);
+  validateAITEROutputMapping(buffers.cElements, a);
   KernelArgStorage kernelArgs;
   initKernelArgStorage(kernelArgs, a, buffers, launch.tripCount);
 
-  for (int i = 0; i < a.warmupIters; ++i)
+  auto launchGemm = [&](const char *what) {
     checkHip(hipModuleLaunchKernel(kfn, launch.gridX, launch.gridY, 1,
                                    launch.blockThreads, 1, 1, a.dynamicLdsBytes,
                                    nullptr, kernelArgs.active, nullptr),
-             "warmup launch");
+             what);
+  };
+  for (int i = 0; i < a.warmupIters; ++i) {
+    launchGemm("warmup launch");
+    launchAITEROutputConversion(buffers, a);
+  }
   checkHip(hipDeviceSynchronize(), "warmup sync");
 
   hipEvent_t start, stop;
   checkHip(hipEventCreate(&start), "event create start");
   checkHip(hipEventCreate(&stop), "event create stop");
   checkHip(hipEventRecord(start, nullptr), "event record start");
-  for (int i = 0; i < a.iters; ++i)
-    checkHip(hipModuleLaunchKernel(kfn, launch.gridX, launch.gridY, 1,
-                                   launch.blockThreads, 1, 1, a.dynamicLdsBytes,
-                                   nullptr, kernelArgs.active, nullptr),
-             "timed launch");
+  for (int i = 0; i < a.iters; ++i) {
+    launchGemm("timed launch");
+    launchAITEROutputConversion(buffers, a);
+  }
   checkHip(hipEventRecord(stop, nullptr), "event record stop");
   checkHip(hipEventSynchronize(stop), "event sync stop");
 
   float elapsedMs = 0.0f;
   checkHip(hipEventElapsedTime(&elapsedMs, start, stop), "event elapsed");
+  float kernelOnlyElapsedMs = 0.0f;
+  if (needsAITEROutputConversion(a)) {
+    checkHip(hipEventRecord(start, nullptr), "kernel event record start");
+    for (int i = 0; i < a.iters; ++i)
+      launchGemm("kernel-only timed launch");
+    checkHip(hipEventRecord(stop, nullptr), "kernel event record stop");
+    checkHip(hipEventSynchronize(stop), "kernel event sync stop");
+    checkHip(hipEventElapsedTime(&kernelOnlyElapsedMs, start, stop),
+             "kernel event elapsed");
+  }
   double perLaunchUs = (elapsedMs * 1000.0) / a.iters;
   double perLaunchCycles = perLaunchUs * (clockHz / 1e6);
 
@@ -1470,21 +1894,35 @@ int main(int argc, char **argv) {
   std::printf("shape: m=%d n=%d k=%d bm=%d bn=%d wave_m_tiles=%d "
               "wave_n_tiles=%d wave_k_tiles=%d wave_size=%d input_type=%s "
               "c_type=%s kernel_abi=%s output_layout=%s scale_layout=%s "
-              "input_mode=%s\n",
+              "mxfp4_input_layout=%s input_mode=%s\n",
               a.m, a.n, a.k, a.bm, a.bn, a.waveMTiles, a.waveNTiles,
               a.waveKTiles, a.waveSize, getInputTypeName(a.inputType),
               getCTypeName(a.cType), getKernelABIName(a.kernelABI),
               getOutputLayoutName(getEffectiveOutputLayout(a)),
-              getScaleLayoutName(a.scaleLayout), getInputModeName(a));
+              getScaleLayoutName(a.scaleLayout),
+              getMXFP4InputLayoutName(a.mxfp4InputLayout), getInputModeName(a));
+  std::printf("output_contract: kernel=%s final=%s conversion=%s\n",
+              getOutputLayoutName(getEffectiveOutputLayout(a)),
+              getOutputLayoutName(getFinalOutputLayout(a)),
+              needsAITEROutputConversion(a) ? "device" : "none");
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n",
-              launch.gridX, launch.gridY, launch.blockThreads, a.bm * a.bn);
+              launch.gridX, launch.gridY, launch.blockThreads,
+              launch.wavesPerWorkgroup);
   std::printf("loop_trip_count: %d\n", launch.displayTripCount);
   std::printf("iters: %d\n", a.iters);
+  std::printf("timing_scope: %s\n", needsAITEROutputConversion(a)
+                                        ? "gemm+device-output-conversion"
+                                        : "gemm");
+  if (needsAITEROutputConversion(a))
+    std::printf("kernel_only_per_launch_us: %.3f\n",
+                kernelOnlyElapsedMs * 1000.0 / a.iters);
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
-  copyAndCheckOutput(buffers.deviceC, buffers.cBytes, buffers.cElements, a,
-                     inputs);
+  void *finalOutput =
+      buffers.deviceFinalC ? buffers.deviceFinalC : buffers.deviceC;
+  copyAndCheckOutput(finalOutput, buffers.cBytes, buffers.cElements,
+                     getFinalOutputLayout(a), a, inputs);
   checkStreamKCounters(buffers, a);
   freeDeviceBuffers(buffers);
   return 0;

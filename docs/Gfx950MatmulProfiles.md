@@ -158,6 +158,48 @@ python tools/wave-matmul-calibrate/wave-matmul-calibrate.py \
   --variants=scheduled --iters=200 --warmup=20 --repeats=3 --no-check
 ```
 
+## AITER MXFP4 Input Layout
+
+`--mxfp4-input-layout=aiter` consumes the AITER preshuffle ABI:
+
+- A: raw packed FP4, `[M, K/2]` bytes.
+- B: `shuffle_mxfp4_b_aiter` output.
+- A/B scales: `shuffle_mxfp4_scales_aiter` output, row count padded to a
+  multiple of 256 and K32 group count padded to a multiple of eight.
+
+A stays on the global-to-LDS DMA path. B fragments and packed scale dwords load
+directly from their preshuffled global layouts. Kernel output is F16
+tile-packed. Calibration materializes row-major output on-device after every
+GEMM launch.
+
+Runtime integration covers all 16 MXFP4 codes and four scale values in each
+input buffer. CPU reference uses independent canonical inputs. Validation
+proves the tile-packed mapping is bijective and compares every row-major device
+result.
+
+Five named profiles cover the AITER benchmark matrix:
+
+| Profile | CTA | Wave tiles | K tiles | Shapes |
+|---|---:|---:|---:|---|
+| `gfx950-mxfp4-aiter-32x128` | 32x128 | 2x2 | 2 | 256x4096x4096 |
+| `gfx950-mxfp4-aiter-64x128` | 64x128 | 4x2 | 2 | 256x8192x4096, 512x4096x4096 |
+| `gfx950-mxfp4-aiter-128x128` | 128x128 | 8x2 | 2 | 512x8192x4096 |
+| `gfx950-mxfp4-aiter-128x256` | 128x256 | 8x4 | 4 | 2048x4096x8192 |
+| `gfx950-mxfp4-aiter-256x256` | 256x256 | 16x4 | 2 | 2048x8192x4096, 2048x8192x8192 |
+
+`per_launch_us` and sweep TFLOP/s cover GEMM plus device output conversion.
+`kernel_only_per_launch_us` reports GEMM alone. Host copy and CPU reference stay
+outside both timings. `mxfp4-aiter` selects the five profiles explicitly; the
+default `all` sweep excludes them until final gfx950 evidence is recorded.
+
+Run the AITER matrix with:
+
+```bash
+python tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py \
+  --kernels=mxfp4-aiter --hip-visible-devices=0 \
+  --iters=200 --warmup=25 --repeats=9
+```
+
 ## MXFP4 8-Wave K=32768 ATT Investigation
 
 Use this when `gfx950-mxfp4-256x256-8wave` regresses against master. Keep the

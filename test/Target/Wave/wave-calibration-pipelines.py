@@ -22,6 +22,8 @@
 # CHECK: matmul_f16_8wave_profile: ok
 # CHECK: matmul_f16_spatial_profile: ok
 # CHECK: matmul_mxfp4_4wave_profile: ok
+# CHECK: matmul_mxfp4_aiter_profiles: ok
+# CHECK: matmul_runtime_count_validation: ok
 # CHECK: matmul_dynamic_lds_forwarding: ok
 # CHECK: matmul_f16_dma_buffer_count: ok
 # CHECK: matmul_dma_sim_trip_count: ok
@@ -33,6 +35,7 @@
 # CHECK: matmul_perf_sweep_spatial: ok
 # CHECK: matmul_perf_sweep_streamk: ok
 # CHECK: matmul_perf_sweep_precompile_plan: ok
+# CHECK: matmul_perf_sweep_mxfp4_aiter: ok
 # CHECK: perf_sweep_fa_8wave: ok
 # CHECK: matmul_perf_sweep_rand_int_forwarding: ok
 # CHECK: calibration_scheduler_options: ok
@@ -954,6 +957,7 @@ def make_mxfp4_args() -> argparse.Namespace:
         input_type="mxfp4",
         output_type="f32",
         mxfp4_scale_path="dma",
+        mxfp4_input_layout="canonical",
         cta_swizzle_xcds=1,
         cta_group_m=1,
         target_waves=0,
@@ -1364,6 +1368,87 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
         "bad 4-wave LDS byte accounting",
     )
     print("matmul_mxfp4_4wave_profile: ok")
+
+
+def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
+    expected = {
+        "gfx950-mxfp4-aiter-32x128": (1, 4, 2, 2, 2, 4),
+        "gfx950-mxfp4-aiter-64x128": (1, 4, 4, 2, 2, 4),
+        "gfx950-mxfp4-aiter-128x128": (1, 4, 8, 2, 2, 4),
+        "gfx950-mxfp4-aiter-128x256": (1, 4, 8, 4, 4, 4),
+        "gfx950-mxfp4-aiter-256x256": (1, 4, 16, 4, 2, 8),
+    }
+    for profile, shape in expected.items():
+        args = matmul.parse_args(
+            [
+                "--chip=gfx950",
+                f"--kernel-profile={profile}",
+                "--m=2048",
+                "--n=8192",
+                "--k=4096",
+                "--skip-hw",
+            ]
+        )
+        actual = (
+            args.bm,
+            args.bn,
+            args.wave_m_tiles,
+            args.wave_n_tiles,
+            args.wave_k_tiles,
+            args.cta_group_m,
+        )
+        require("matmul_mxfp4_aiter_profiles", actual == shape, f"bad {profile}")
+        require(
+            "matmul_mxfp4_aiter_profiles",
+            args.mxfp4_input_layout == "aiter"
+            and args.output_store_cache == "cs"
+            and matmul.effective_target_waves(args) == 1,
+            f"bad {profile} mode",
+        )
+        command = matmul.build_matmul_example_args(args, "gfx950")
+        require(
+            "matmul_mxfp4_aiter_profiles",
+            "--mxfp4-input-layout=aiter" in command,
+            f"{profile} lost AITER ABI",
+        )
+        example_defaults = matmul_example.profile_defaults(
+            [f"--kernel-profile={profile}"]
+        )
+        example_shape = tuple(
+            example_defaults[key]
+            for key in (
+                "bm",
+                "bn",
+                "wave_m_tiles",
+                "wave_n_tiles",
+                "wave_k_tiles",
+                "cta_group_m",
+            )
+        )
+        require(
+            "matmul_mxfp4_aiter_profiles",
+            example_shape == shape
+            and example_defaults["mxfp4_input_layout"] == "aiter",
+            f"direct example profile drifted for {profile}",
+        )
+    print("matmul_mxfp4_aiter_profiles: ok")
+
+
+def check_matmul_runtime_count_validation(matmul) -> None:
+    check_name = "matmul_runtime_count_validation"
+    cases = (
+        (["--iters=0"], "--iters must be positive"),
+        (["--warmup=-1"], "--warmup must be non-negative"),
+    )
+    for options, message in cases:
+        args = matmul.parse_args(["--chip=gfx950", "--skip-hw", *options])
+        try:
+            matmul.validate_args(args)
+        except SystemExit as exc:
+            require(check_name, str(exc) == message, f"bad diagnostic: {exc}")
+            continue
+        require(check_name, False, f"accepted {' '.join(options)}")
+    print(f"{check_name}: ok")
 
 
 def check_matmul_f16_4wave_profile(matmul) -> None:
@@ -2250,6 +2335,53 @@ def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     print("matmul_perf_sweep_precompile_plan: ok")
 
 
+def check_matmul_perf_sweep_mxfp4_aiter(perf_sweep) -> None:
+    check_name = "matmul_perf_sweep_mxfp4_aiter"
+    kernels = perf_sweep.parse_kernel_csv("mxfp4-aiter")
+    require(check_name, len(kernels) == 5, "AITER alias should select five profiles")
+    args = perf_sweep.build_argparser().parse_args(
+        ["--kernels=mxfp4-aiter", "--skip-rebuild", "--dry-run"]
+    )
+    perf_sweep.validate_args(args)
+    specs = perf_sweep.build_run_specs(args)
+    profile_shapes = [
+        (spec.kernel.profile, (spec.shape.m, spec.shape.n, spec.shape.k))
+        for spec in specs
+    ]
+    require(
+        check_name,
+        profile_shapes
+        == [
+            ("gfx950-mxfp4-aiter-32x128", (256, 4096, 4096)),
+            ("gfx950-mxfp4-aiter-64x128", (256, 8192, 4096)),
+            ("gfx950-mxfp4-aiter-64x128", (512, 4096, 4096)),
+            ("gfx950-mxfp4-aiter-128x128", (512, 8192, 4096)),
+            ("gfx950-mxfp4-aiter-128x256", (2048, 4096, 8192)),
+            ("gfx950-mxfp4-aiter-256x256", (2048, 8192, 4096)),
+            ("gfx950-mxfp4-aiter-256x256", (2048, 8192, 8192)),
+        ],
+        "AITER profile-to-shape matrix changed",
+    )
+    commands = [perf_sweep.calibrator_command(args, spec) for spec in specs]
+    require(
+        check_name,
+        all("--kernel-profile" in command for command in commands),
+        "AITER sweep lost named profiles",
+    )
+    default_keys = [kernel.key for kernel in perf_sweep.parse_kernel_csv("all")]
+    aiter_keys = [kernel.key for kernel in kernels]
+    deduplicated = [
+        kernel.key for kernel in perf_sweep.parse_kernel_csv("all,mxfp4-aiter")
+    ]
+    require(
+        check_name,
+        all(key not in default_keys for key in aiter_keys)
+        and deduplicated == default_keys + aiter_keys,
+        "AITER profiles should remain an explicit sweep",
+    )
+    print(f"{check_name}: ok")
+
+
 def make_perf_sweep_fa_args(perf_sweep) -> argparse.Namespace:
     args = perf_sweep.build_argparser().parse_args(
         [
@@ -2507,6 +2639,10 @@ def main() -> int:
         "wave_matmul_perf_sweep",
         REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-perf-sweep.py",
     )
+    matmul_example = load_module(
+        "wave_matmul_example",
+        REPO_ROOT / "examples/wave/wmma_matmul_tiled.py",
+    )
     check_calibration_entry("matmul_pipeline", matmul)
     check_calibration_entry("fa_pipeline", fa)
     check_shared_calibration_support(common, matmul, fa)
@@ -2528,6 +2664,8 @@ def main() -> int:
     check_matmul_f16_8wave_profile(matmul)
     check_matmul_f16_spatial_profile(matmul)
     check_matmul_mxfp4_4wave_profile(matmul)
+    check_matmul_mxfp4_aiter_profiles(matmul, matmul_example)
+    check_matmul_runtime_count_validation(matmul)
     check_matmul_f16_4wave_profile(matmul)
     check_matmul_dynamic_lds_forwarding(matmul)
     check_matmul_f16_dma_buffer_count(matmul)
@@ -2540,6 +2678,7 @@ def main() -> int:
     check_matmul_perf_sweep_spatial(perf_sweep)
     check_matmul_perf_sweep_streamk(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
+    check_matmul_perf_sweep_mxfp4_aiter(perf_sweep)
     check_perf_sweep_fa_8wave(perf_sweep)
     check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)
     check_calibration_scheduler_options(matmul, fa)

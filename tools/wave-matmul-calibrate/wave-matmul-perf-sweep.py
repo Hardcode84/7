@@ -59,6 +59,7 @@ class KernelSpec:
     sweep_k: bool
     waves: int = 0
     default_streamk_workers: int = 0
+    fixed_shapes: tuple[tuple[int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -203,6 +204,56 @@ KERNELS = {
         default_k_values=MXFP4_DOC_K_VALUES,
         sweep_k=True,
     ),
+    "mxfp4-aiter-32x128": KernelSpec(
+        key="mxfp4-aiter-32x128",
+        label="mxfp4-aiter-32x128",
+        workload=Workload.MATMUL,
+        profile="gfx950-mxfp4-aiter-32x128",
+        variants="scheduled",
+        default_k_values=(),
+        sweep_k=False,
+        fixed_shapes=((256, 4096, 4096),),
+    ),
+    "mxfp4-aiter-64x128": KernelSpec(
+        key="mxfp4-aiter-64x128",
+        label="mxfp4-aiter-64x128",
+        workload=Workload.MATMUL,
+        profile="gfx950-mxfp4-aiter-64x128",
+        variants="scheduled",
+        default_k_values=(),
+        sweep_k=False,
+        fixed_shapes=((256, 8192, 4096), (512, 4096, 4096)),
+    ),
+    "mxfp4-aiter-128x128": KernelSpec(
+        key="mxfp4-aiter-128x128",
+        label="mxfp4-aiter-128x128",
+        workload=Workload.MATMUL,
+        profile="gfx950-mxfp4-aiter-128x128",
+        variants="scheduled",
+        default_k_values=(),
+        sweep_k=False,
+        fixed_shapes=((512, 8192, 4096),),
+    ),
+    "mxfp4-aiter-128x256": KernelSpec(
+        key="mxfp4-aiter-128x256",
+        label="mxfp4-aiter-128x256",
+        workload=Workload.MATMUL,
+        profile="gfx950-mxfp4-aiter-128x256",
+        variants="scheduled",
+        default_k_values=(),
+        sweep_k=False,
+        fixed_shapes=((2048, 4096, 8192),),
+    ),
+    "mxfp4-aiter-256x256": KernelSpec(
+        key="mxfp4-aiter-256x256",
+        label="mxfp4-aiter-256x256",
+        workload=Workload.MATMUL,
+        profile="gfx950-mxfp4-aiter-256x256",
+        variants="scheduled",
+        default_k_values=(),
+        sweep_k=False,
+        fixed_shapes=((2048, 8192, 4096), (2048, 8192, 8192)),
+    ),
     "v9": KernelSpec(
         key="v9",
         label="v9",
@@ -249,6 +300,13 @@ KERNEL_ALIASES = {
     "mxfp4": ("mxfp4",),
     "mxfp4-8wave": ("mxfp4",),
     "mxfp4-4wave": ("mxfp4-4wave",),
+    "mxfp4-aiter": (
+        "mxfp4-aiter-32x128",
+        "mxfp4-aiter-64x128",
+        "mxfp4-aiter-128x128",
+        "mxfp4-aiter-128x256",
+        "mxfp4-aiter-256x256",
+    ),
     "f16": ("f16",),
     "f16-8wave": ("f16",),
     "f16-spatial": ("f16-spatial",),
@@ -411,6 +469,33 @@ def resolve_streamk_workers(args: argparse.Namespace, kernel: KernelSpec) -> int
     return kernel.default_streamk_workers
 
 
+def _build_matmul_run_specs(
+    args: argparse.Namespace, kernel: KernelSpec, variants: list[str]
+) -> list[RunSpec]:
+    if kernel.fixed_shapes:
+        return [
+            RunSpec(kernel, MatmulShape(*shape), variant)
+            for variant in variants
+            for shape in kernel.fixed_shapes
+        ]
+    k_values = (
+        args.k_values or kernel.default_k_values
+        if kernel.sweep_k
+        else kernel.default_k_values
+    )
+    streamk_workers = resolve_streamk_workers(args, kernel)
+    return [
+        RunSpec(
+            kernel,
+            MatmulShape(args.m, args.n, k),
+            variant,
+            streamk_workers,
+        )
+        for variant in variants
+        for k in k_values
+    ]
+
+
 def build_run_specs(args: argparse.Namespace) -> list[RunSpec]:
     specs: list[RunSpec] = []
     for kernel in args.kernels:
@@ -426,21 +511,7 @@ def build_run_specs(args: argparse.Namespace) -> list[RunSpec]:
             )
             specs.extend(RunSpec(kernel, shape, variant) for variant in variants)
             continue
-        if kernel.sweep_k:
-            k_values = args.k_values or kernel.default_k_values
-        else:
-            k_values = kernel.default_k_values
-        streamk_workers = resolve_streamk_workers(args, kernel)
-        for variant in variants:
-            for k in k_values:
-                specs.append(
-                    RunSpec(
-                        kernel,
-                        MatmulShape(args.m, args.n, k),
-                        variant,
-                        streamk_workers,
-                    )
-                )
+        specs.extend(_build_matmul_run_specs(args, kernel, variants))
     return specs
 
 
@@ -791,8 +862,9 @@ def add_shape_arguments(parser: argparse.ArgumentParser) -> None:
         type=parse_kernel_csv,
         default=parse_kernel_csv("all"),
         help=(
-            "comma-separated f16,f16-spatial,f16-4wave,f16-streamk,mxfp4,"
-            "mxfp4-4wave,v9,v9-transposed,fa-8wave,all; f16-8wave aliases f16, "
+            "comma-separated f16,f16-spatial,f16-4wave,f16-streamk,"
+            "mxfp4,mxfp4-4wave,mxfp4-aiter,v9,v9-transposed,fa-8wave,all; "
+            "f16-8wave aliases f16, "
             "mxfp/mxfp4-8wave alias mxfp4, and fa aliases fa-8wave"
         ),
     )
@@ -818,9 +890,8 @@ def add_shape_arguments(parser: argparse.ArgumentParser) -> None:
         type=parse_int_csv,
         default=None,
         help=(
-            "comma-separated K override for f16/MXFP4 sweep kernels; defaults match "
-            "docs/Gfx950MatmulProfiles.md; v9 uses K=4096 and FA uses "
-            "--fa-sequence"
+            "comma-separated K override for variable-shape f16/MXFP4 kernels; "
+            "AITER and v9 use fixed documented shapes, and FA uses --fa-sequence"
         ),
     )
 

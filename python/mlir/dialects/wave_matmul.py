@@ -299,6 +299,7 @@ class _MatmulConfig:
     output_type: str = "f32"
     output_store_cache: str = "none"
     mxfp4_scale_path: str = "dma"
+    mxfp4_input_layout: str = "canonical"
     random_data: bool = False
     random_seed: int = 0
     cta_swizzle_xcds: int = 1
@@ -350,6 +351,10 @@ class _MatmulConfig:
         return self.input_type == "mxfp4"
 
     @property
+    def uses_aiter_mxfp4_layout(self) -> bool:
+        return self.mxfp4_input_layout == "aiter"
+
+    @property
     def storage_K(self) -> int:
         return self.K // 2 if self.uses_packed_mxfp4 else self.K
 
@@ -377,11 +382,23 @@ class _MatmulConfig:
 
     @property
     def a_scale_elements(self) -> int:
+        if self.uses_aiter_mxfp4_layout:
+            return self.aiter_scale_rows(self.M) * self.aiter_scale_groups
         return self.M * self.scale_groups
 
     @property
     def b_scale_elements(self) -> int:
+        if self.uses_aiter_mxfp4_layout:
+            return self.aiter_scale_rows(self.N) * self.aiter_scale_groups
         return self.N * self.scale_groups
+
+    @property
+    def aiter_scale_groups(self) -> int:
+        return _align_up(self.scale_groups, 8)
+
+    @staticmethod
+    def aiter_scale_rows(rows: int) -> int:
+        return _align_up(rows, 256)
 
     @property
     def trip_count_arg_index(self) -> int:
@@ -430,7 +447,7 @@ class _MatmulConfig:
     @property
     def data_lds_bytes(self) -> int:
         if self.use_dma_lds:
-            if self.coalesced_mfma_output:
+            if self.coalesced_mfma_output or self.uses_aiter_mxfp4_layout:
                 return _dma_cta_buffer_dwords(self) * _dma_buffer_count(self) * 4
             one_buffer = (
                 self.wave_k_tiles
@@ -449,7 +466,7 @@ class _MatmulConfig:
 
     @property
     def scale_lds_bytes(self) -> int:
-        if not self.uses_packed_mxfp4:
+        if not self.uses_packed_mxfp4 or self.uses_aiter_mxfp4_layout:
             return 0
         scale_tiles = self.BM * _mxfp4_scale_tiles_per_wave(
             self.wave_m_tiles
@@ -479,6 +496,9 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
     )
     _validate_choice("input_type", cfg.input_type, ("f16", "bf16", "mxfp4"))
     _validate_choice("mxfp4_scale_path", cfg.mxfp4_scale_path, ("dma", "regs"))
+    _validate_choice(
+        "mxfp4_input_layout", cfg.mxfp4_input_layout, ("canonical", "aiter")
+    )
 
 
 def _validate_cta_remap_params(cfg: _MatmulConfig) -> None:
@@ -612,7 +632,7 @@ def _validate_dma_slot_distribution(cfg: _MatmulConfig) -> None:
     b_slots = cfg.wave_k_tiles * cfg.BN * cfg.wave_n_tiles
     if a_slots % cfg.waves_per_workgroup != 0:
         raise ValueError("DMA LDS A slots must divide evenly across waves")
-    if b_slots % cfg.waves_per_workgroup != 0:
+    if not cfg.uses_aiter_mxfp4_layout and b_slots % cfg.waves_per_workgroup != 0:
         raise ValueError("DMA LDS B slots must divide evenly across waves")
 
 
@@ -648,9 +668,27 @@ def _validate_dma_lds_shape(cfg: _MatmulConfig) -> None:
     _validate_dma_spatial_lds_shape(cfg)
 
 
+def _validate_aiter_mxfp4_shape(cfg: _MatmulConfig) -> None:
+    if cfg.mma.name != "mfma_gfx950" or not cfg.use_buffer or not cfg.use_dma_lds:
+        raise ValueError("AITER input layout requires buffered gfx950 DMA MFMA")
+    if cfg.coalesced_mfma_output:
+        raise ValueError("AITER input layout requires tile-packed kernel output")
+    if cfg.mxfp4_scale_path != "dma":
+        raise ValueError("AITER input layout requires the direct scale path")
+    if cfg.wave_k_tiles % 2:
+        raise ValueError("AITER input layout requires even wave K tiles")
+    if cfg.wave_m_tiles % 2 or cfg.wave_n_tiles % 2:
+        raise ValueError("AITER input layout requires even wave M/N tiles")
+    if cfg.phased_dma_schedule is not None:
+        raise ValueError("AITER input layout does not support phased DMA pipelines")
+
+
 def _validate_mxfp4_shape(cfg: _MatmulConfig) -> None:
-    if not cfg.uses_packed_mxfp4:
+    if not cfg.uses_aiter_mxfp4_layout:
         return
+    if not cfg.uses_packed_mxfp4:
+        raise ValueError("AITER input layout requires MXFP4 input")
+    _validate_aiter_mxfp4_shape(cfg)
 
 
 _KERNEL_NAME = "wmma_f16_matmul_tiled"
@@ -675,6 +713,10 @@ _DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
 _STATIC_LDS_LIMIT = 64 * 1024
 _MXFP4_SCALE_PACK = 4
 _Mxfp4ScaleAxis = Literal["m", "n"]
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
 
 
 def _mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
@@ -783,6 +825,55 @@ def generate_mxfp4_packed_matmul_inputs(
     a_codes = _deterministic_mxfp4_codes(M * K, seed=random_seed, stream=0)
     b_codes = _deterministic_mxfp4_codes(N * K, seed=random_seed, stream=1)
     return _pack_mxfp4_codes(a_codes), _pack_mxfp4_codes(b_codes)
+
+
+def shuffle_mxfp4_b_aiter(values: tuple[int, ...], N: int, K: int) -> tuple[int, ...]:
+    if N <= 0 or K <= 0 or N % 16 or K % 64:
+        raise ValueError("AITER B shuffle requires positive N/16 and K/64")
+    storage_k = K // 2
+    if len(values) != N * storage_k:
+        raise ValueError("AITER B shuffle input size does not match NxK")
+    k_blocks = storage_k // 32
+    shuffled = [0] * len(values)
+    for row in range(N):
+        row_block, row_inner = divmod(row, 16)
+        for k_byte in range(storage_k):
+            k_block, k_inner = divmod(k_byte, 32)
+            half, byte = divmod(k_inner, 16)
+            dst = (
+                (((row_block * k_blocks + k_block) * 2 + half) * 16 + row_inner) * 16
+            ) + byte
+            shuffled[dst] = values[row * storage_k + k_byte]
+    return tuple(shuffled)
+
+
+def shuffle_mxfp4_scales_aiter(
+    values: tuple[int, ...], rows: int, K: int
+) -> tuple[int, ...]:
+    if rows <= 0 or K <= 0 or K % 32:
+        raise ValueError("AITER scale shuffle requires positive rows and K/32")
+    groups = K // 32
+    if len(values) != rows * groups:
+        raise ValueError("canonical MXFP4 scales must be group-major")
+    padded_rows = _align_up(rows, 256)
+    padded_groups = _align_up(groups, 8)
+    shuffled = [0x7F] * (padded_rows * padded_groups)
+    group_blocks = padded_groups // 8
+    for row in range(rows):
+        row_block, row_inner = divmod(row, 32)
+        row_half, row_lane = divmod(row_inner, 16)
+        for group in range(groups):
+            group_block, group_inner = divmod(group, 8)
+            group_half, group_lane = divmod(group_inner, 4)
+            dst = (
+                (row_block * group_blocks + group_block) * 256
+                + group_lane * 64
+                + row_lane * 4
+                + group_half * 2
+                + row_half
+            )
+            shuffled[dst] = values[group * rows + row]
+    return tuple(shuffled)
 
 
 def _mxfp4_scale_raw_values(
@@ -1002,7 +1093,13 @@ def _wrap_in_buffer(
     element_type: dsl.Type,
     element_bytes: int,
 ) -> dsl.Value:
-    range_bytes = bld.constant(dsl.i32(), num_elements * element_bytes)
+    byte_count = num_elements * element_bytes
+    if byte_count > _MAX_BUFFER_BYTES:
+        raise ValueError(
+            f"buffer range needs {byte_count} bytes; "
+            f"32-bit buffer range holds at most {_MAX_BUFFER_BYTES}"
+        )
+    range_bytes = bld.constant(dsl.i32(), byte_count)
     return bld.make_buffer(ptr, range_bytes, dsl.buffer_ptr_type(element_type))
 
 
@@ -1210,6 +1307,14 @@ def _emit_tile_inputs(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileInpu
             cfg.input_element_type,
             cfg.input_element_bytes,
         )
+        if cfg.uses_aiter_mxfp4_layout:
+            assert a_scale_arg is not None and b_scale_arg is not None
+            a_scale_arg = _wrap_in_buffer(
+                bld, a_scale_arg, cfg.a_scale_elements, dsl.i8(), 1
+            )
+            b_scale_arg = _wrap_in_buffer(
+                bld, b_scale_arg, cfg.b_scale_elements, dsl.i8(), 1
+            )
         if cfg.coalesced_mfma_output:
             c_arg = _wrap_in_buffer(
                 bld,
@@ -1314,7 +1419,9 @@ def _dma_cta_geometry(cfg: _MatmulConfig) -> _DmaCtaGeometry:
     block_m_tiles = cfg.BM * cfg.wave_m_tiles
     block_n_tiles = cfg.BN * cfg.wave_n_tiles
     a_total_slots = cfg.wave_k_tiles * block_m_tiles
-    b_total_slots = cfg.wave_k_tiles * block_n_tiles
+    b_total_slots = (
+        0 if cfg.uses_aiter_mxfp4_layout else cfg.wave_k_tiles * block_n_tiles
+    )
     dwords = cfg.mma.lds_dwords_per_frag
     if cfg.coalesced_mfma_output:
         dwords += cfg.mma.ab_registers
@@ -1534,6 +1641,15 @@ def _a_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
         + k_offset,
         bindings=ctx.bindings,
     )
+    if cfg.uses_aiter_mxfp4_layout:
+        remaining = 0 if ctx.k_step is not None else cfg.virtual_k_steps - 1
+        off = ctx.bld.assume_range(
+            off,
+            0,
+            cfg.a_elements
+            - cfg.storage_lane_k_elems
+            - remaining * cfg.storage_k_tile * cfg.wave_k_tiles,
+        )
     if ctx.coords.explicit_cta and ctx.k_step is not None:
         off = ctx.bld.assume_range(off, 0, cfg.a_elements - cfg.storage_lane_k_elems)
     return ctx.bld.ptr_add(ctx.coords.a_base, off)
@@ -1799,9 +1915,14 @@ def _emit_regular_dma_cta_staging_ptrs(
         a_read_offsets = _regular_dma_read_offsets(
             cfg, geom, geom.block_m_tiles, cfg.wave_m_tiles
         )
-        b_read_offsets = _regular_dma_read_offsets(
-            cfg, geom, geom.block_n_tiles, cfg.wave_n_tiles
-        )
+        if cfg.uses_aiter_mxfp4_layout:
+            b_read_slots = ()
+            b_read_base_offset = a_read_base_offset
+            b_read_offsets = ()
+        else:
+            b_read_offsets = _regular_dma_read_offsets(
+                cfg, geom, geom.block_n_tiles, cfg.wave_n_tiles
+            )
     common = _emit_dma_cta_common_ptrs(ctx)
     if _uses_dma_spatial_subpanel_pipeline(cfg):
         a_read = ()
@@ -2184,6 +2305,70 @@ def _dma_read_ready(
     return tuple(a_frags), tuple(b_frags), _join_tokens(bld, load_tokens)
 
 
+def _aiter_b_fragment_ptrs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    step: dsl.Value | int,
+) -> tuple[dsl.Value, ...]:
+    wi = dsl.sym("__wave_dsl_aiter_b_wi")
+    wg_n = dsl.sym("__wave_dsl_aiter_b_wg_n")
+    bindings = {wi: coords.wi, wg_n: coords.wg_n}
+    if isinstance(step, int):
+        step_expr: int | dsl.Expr = step
+    else:
+        step_expr = dsl.sym("__wave_dsl_aiter_b_step")
+        bindings[step_expr] = step
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    n_wave = dsl.mod(wave_id, cfg.BN)
+    lane = dsl.mod(wi, cfg.mma.wave_size)
+    row = dsl.mod(lane, 16)
+    chunk = dsl.floor(lane / 16)
+    row_block_base = wg_n * (cfg.BN * cfg.wave_n_tiles) + n_wave * cfg.wave_n_tiles
+    chunks_per_row = cfg.storage_K // 16
+    ptrs: list[dsl.Value] = []
+    for k in range(cfg.wave_k_tiles):
+        for j in range(cfg.wave_n_tiles):
+            offset = bld.index_expr(
+                (
+                    (row_block_base + j) * chunks_per_row
+                    + step_expr * (4 * cfg.wave_k_tiles)
+                    + k * 4
+                    + chunk
+                )
+                * 256
+                + row * 16,
+                bindings=bindings,
+            )
+            offset = bld.assume_range(offset, 0, cfg.b_elements - 16)
+            ptrs.append(bld.ptr_add(coords.b_base, offset))
+    return tuple(ptrs)
+
+
+def _read_aiter_dma_ready(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    types: _KernelTypes,
+    staging: _LdsStaging,
+    coords: _TileCoords,
+    ready_token: dsl.Value,
+    step: dsl.Value | int,
+    *,
+    lds_offset: int | dsl.Value = 0,
+) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
+    a_frags: list[dsl.Value] = []
+    a_tokens: list[dsl.Value] = []
+    for ptr in _offset_ptrs(bld, staging.a_dma_read_ptrs, lds_offset):
+        regs, token = bld.load(ptr, staging.reg_simd_type, after=ready_token)
+        a_frags.append(bld.fragment_pack(regs, types.a))
+        a_tokens.append(token)
+    b_frags: list[dsl.Value] = []
+    for ptr in _aiter_b_fragment_ptrs(bld, cfg, coords, step):
+        regs, _ = bld.load(ptr, staging.reg_simd_type)
+        b_frags.append(bld.fragment_pack(regs, types.b))
+    return tuple(a_frags), tuple(b_frags), _join_tokens(bld, a_tokens)
+
+
 def _load_fragment_group(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -2507,7 +2692,6 @@ def _load_ptrs_for_step(
     b0 = staging.b_dma_src_ptrs if cfg.use_dma_lds else ptrs.b0
     step = bld.addi(loop_iv, bld.constant(dsl.i32(), step_base))
     offset = bld.muli(step, virtual_k_stride)
-
     return _advance_ptrs(bld, a0, offset), _advance_ptrs(bld, b0, offset)
 
 
@@ -3869,7 +4053,7 @@ def _mxfp4_raw_k_step(
 def _initial_scale_state(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> tuple[dsl.Value | None, dsl.Value | None]:
-    if not cfg.uses_packed_mxfp4:
+    if not cfg.uses_packed_mxfp4 or cfg.uses_aiter_mxfp4_layout:
         return None, None
     _, scale_token = _stage_mxfp4_scale_batch(
         bld,
@@ -3923,9 +4107,20 @@ def _initial_dma_load_state(
                 request_offset=len(a0) + len(b0),
             ),
         )
-    a_frags, b_frags, reuse_token = _dma_drain(
-        bld, _join_tokens(bld, dma_tokens), types.a, types.b, staging, lds_offset=0
-    )
+    if cfg.uses_aiter_mxfp4_layout:
+        a_frags, b_frags, reuse_token = _read_aiter_dma_ready(
+            bld,
+            cfg,
+            types,
+            staging,
+            coords,
+            bld.barrier(_join_tokens(bld, dma_tokens)),
+            0,
+        )
+    else:
+        a_frags, b_frags, reuse_token = _dma_drain(
+            bld, _join_tokens(bld, dma_tokens), types.a, types.b, staging, lds_offset=0
+        )
     return _InitialLoadState(
         a_frags,
         b_frags,
@@ -3965,7 +4160,7 @@ def _initial_loop_token_args(
         args.append(loads.ready_token)
     if cfg.uses_packed_mxfp4 or (cfg.use_dma_lds and cfg.virtual_k_steps > 1):
         args.append(loads.reuse_token)
-    if cfg.use_dma_lds and cfg.uses_packed_mxfp4:
+    if cfg.use_dma_lds and cfg.uses_packed_mxfp4 and not cfg.uses_aiter_mxfp4_layout:
         assert loads.scale_token is not None
         args.append(loads.scale_token)
         if cfg.virtual_k_steps > 1:
@@ -4016,7 +4211,7 @@ def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _Loo
         cursor += 1
     scale_token = None
     next_scale_token = None
-    if cfg.use_dma_lds and cfg.uses_packed_mxfp4:
+    if cfg.use_dma_lds and cfg.uses_packed_mxfp4 and not cfg.uses_aiter_mxfp4_layout:
         scale_token = values[cursor]
         cursor += 1
         if cfg.virtual_k_steps > 1:
@@ -4098,6 +4293,115 @@ def _flat_extract(
     return tuple(out)
 
 
+def _aiter_mxfp4_scale_axis_params(
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    axis: _Mxfp4ScaleAxis,
+    wave_id: dsl.Expr,
+) -> tuple[dsl.Value, dsl.Expr, int, int, dsl.Value]:
+    if axis == "m":
+        if coords.a_scale_base is None:
+            raise ValueError("MXFP4 A scale buffer is required")
+        return (
+            coords.wg_m,
+            dsl.floor(wave_id / cfg.BN),
+            cfg.BM,
+            cfg.wave_m_tiles,
+            coords.a_scale_base,
+        )
+    if coords.b_scale_base is None:
+        raise ValueError("MXFP4 B scale buffer is required")
+    return (
+        coords.wg_n,
+        dsl.mod(wave_id, cfg.BN),
+        cfg.BN,
+        cfg.wave_n_tiles,
+        coords.b_scale_base,
+    )
+
+
+def _load_aiter_mxfp4_scale_axis(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    scale_step: dsl.Value | int,
+    axis: _Mxfp4ScaleAxis,
+) -> tuple[list[list[dsl.Value]], list[list[dsl.Value]]]:
+    wi = dsl.sym("__wave_dsl_aiter_scale_wi")
+    wg = dsl.sym(f"__wave_dsl_aiter_scale_wg_{axis}")
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    wg_value, wave, waves, tiles, global_base = _aiter_mxfp4_scale_axis_params(
+        cfg, coords, axis, wave_id
+    )
+    bindings = {wi: coords.wi, wg: wg_value}
+    if isinstance(scale_step, int):
+        step: int | dsl.Expr = scale_step
+    else:
+        step = dsl.sym(f"__wave_dsl_aiter_scale_step_{axis}")
+        bindings[step] = scale_step
+    lane = dsl.mod(wi, cfg.mma.wave_size)
+    lane_mod16 = dsl.mod(lane, 16)
+    lane_scale_group = dsl.floor(lane / 16)
+    pair_base = wg * (waves * tiles // 2) + wave * (tiles // 2)
+    group_blocks = cfg.aiter_scale_groups // 8
+    load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
+    values: list[list[dsl.Value]] = []
+    tokens: list[list[dsl.Value]] = []
+    for k_pair in range(cfg.wave_k_tiles // 2):
+        pair_values: list[dsl.Value] = []
+        pair_tokens: list[dsl.Value] = []
+        for tile_pair in range(tiles // 2):
+            offset = bld.index_expr(
+                (
+                    (pair_base + tile_pair) * group_blocks
+                    + step * (cfg.wave_k_tiles // 2)
+                    + k_pair
+                )
+                * 256
+                + lane_scale_group * 64
+                + lane_mod16 * 4,
+                bindings=bindings,
+            )
+            value, token = bld.load(bld.ptr_add(global_base, offset), load_type)
+            pair_values.append(value)
+            pair_tokens.append(token)
+        values.append(pair_values)
+        tokens.append(pair_tokens)
+    return values, tokens
+
+
+def _load_aiter_mxfp4_scale_sets(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    scale_step: dsl.Value | int,
+) -> tuple[list[tuple[int, _Mxfp4ScaleSet]], dsl.Value]:
+    a_values, a_tokens = _load_aiter_mxfp4_scale_axis(bld, cfg, coords, scale_step, "m")
+    b_values, b_tokens = _load_aiter_mxfp4_scale_axis(bld, cfg, coords, scale_step, "n")
+    scale_sets: list[tuple[int, _Mxfp4ScaleSet]] = []
+    all_tokens = [token for groups in (*a_tokens, *b_tokens) for token in groups]
+    for k in range(cfg.wave_k_tiles):
+        k_pair = k // 2
+        token = _join_tokens(bld, [*a_tokens[k_pair], *b_tokens[k_pair]])
+        scale_sets.append(
+            (
+                k,
+                _Mxfp4ScaleSet(
+                    a_scales=[
+                        a_values[k_pair][i // 2] for i in range(cfg.wave_m_tiles)
+                    ],
+                    a_scale_idxs=[2 * (k % 2) + i % 2 for i in range(cfg.wave_m_tiles)],
+                    b_scales=[
+                        b_values[k_pair][j // 2] for j in range(cfg.wave_n_tiles)
+                    ],
+                    b_scale_idxs=[2 * (k % 2) + j % 2 for j in range(cfg.wave_n_tiles)],
+                    token=token,
+                ),
+            )
+        )
+    return scale_sets, _join_tokens(bld, all_tokens)
+
+
 def _emit_mxfp4_mma_grid(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
@@ -4111,6 +4415,10 @@ def _emit_mxfp4_mma_grid(
     scale_tokens: list[dsl.Value] | None,
     scale_ready_token: dsl.Value | None,
 ) -> tuple[dsl.Value, ...]:
+    if cfg.uses_aiter_mxfp4_layout:
+        scale_sets, _ = _load_aiter_mxfp4_scale_sets(bld, cfg, coords, scale_step)
+        return _emit_mxfp4_mma_grid_scale_sets(bld, cfg, afs, bfs, accs, scale_sets)
+
     if scale_ready_token is not None:
         if scale_after is not None:
             scale_ready_token = _join_tokens(bld, [scale_ready_token, scale_after])
@@ -5012,14 +5320,26 @@ def _emit_dma_step(
     if early_dma and not uses_prefetched_scales:
         new_accs = _emit_mxfp4_mma_state_step(bld, cfg, state, scales)
     if cfg.uses_packed_mxfp4 or ready_loads is None:
-        ready_loads = _dma_read_ready(
-            bld,
-            get_ready_token(),
-            types.a,
-            types.b,
-            staging,
-            lds_offset=ready_lds_offset,
-        )
+        if cfg.uses_aiter_mxfp4_layout:
+            ready_loads = _read_aiter_dma_ready(
+                bld,
+                cfg,
+                types,
+                staging,
+                coords,
+                get_ready_token(),
+                bld.addi(scale_step, bld.constant(dsl.i32(), 1)),
+                lds_offset=ready_lds_offset,
+            )
+        else:
+            ready_loads = _dma_read_ready(
+                bld,
+                get_ready_token(),
+                types.a,
+                types.b,
+                staging,
+                lds_offset=ready_lds_offset,
+            )
     new_afs, new_bfs, reuse_token = ready_loads
     return (
         new_accs,
@@ -5062,14 +5382,26 @@ def _emit_dma_tail_step(
         scale_ready_token=state.scale_token,
     )
     tail_step = cfg.virtual_k_steps - 1
-    new_afs, new_bfs, reuse_token = _dma_drain(
-        bld,
-        state.dma_token,
-        types.a,
-        types.b,
-        staging,
-        lds_offset=_dma_buffer_offset(bld, cfg, tail_step),
-    )
+    if cfg.uses_aiter_mxfp4_layout:
+        new_afs, new_bfs, reuse_token = _read_aiter_dma_ready(
+            bld,
+            cfg,
+            types,
+            staging,
+            coords,
+            bld.barrier(state.dma_token),
+            tail_step,
+            lds_offset=_dma_buffer_offset(bld, cfg, tail_step),
+        )
+    else:
+        new_afs, new_bfs, reuse_token = _dma_drain(
+            bld,
+            state.dma_token,
+            types.a,
+            types.b,
+            staging,
+            lds_offset=_dma_buffer_offset(bld, cfg, tail_step),
+        )
     wave_k = bld.static_param("wave_k_tiles", IndexType.get())
     a_pt = _pack_frags_into_nested_parametric_ptuple(
         bld, new_afs, cfg.wave_m_tiles, cfg.wave_k_tiles, wave_k
@@ -5537,6 +5869,8 @@ def _fill_host_inputs(
                 cfg.K,
                 random_seed=cfg.random_seed,
             )
+            if cfg.uses_aiter_mxfp4_layout:
+                b_packed = shuffle_mxfp4_b_aiter(b_packed, cfg.N, cfg.K)
             _emit_constant_fill(bld, buffers.a, a_packed, cfg.input_element_type, index)
             _emit_constant_fill(bld, buffers.b, b_packed, cfg.input_element_type, index)
             return
@@ -5559,12 +5893,25 @@ def _fill_host_inputs(
     with bld.for_loop(a_half, a_total, c1) as i:
         bld.memref_store(two_input, buffers.a, [i])
 
-    b_half = bld.constant(index, cfg.b_elements // 2)
-    b_total = bld.constant(index, cfg.b_elements)
-    with bld.for_loop(c0, b_half, c1) as i:
-        bld.memref_store(one_input, buffers.b, [i])
-    with bld.for_loop(b_half, b_total, c1) as i:
-        bld.memref_store(two_input, buffers.b, [i])
+    if cfg.uses_aiter_mxfp4_layout:
+        raw_b = tuple(
+            [0x22] * (cfg.b_elements // 2)
+            + [0x44] * (cfg.b_elements - cfg.b_elements // 2)
+        )
+        _emit_constant_fill(
+            bld,
+            buffers.b,
+            shuffle_mxfp4_b_aiter(raw_b, cfg.N, cfg.K),
+            cfg.input_element_type,
+            index,
+        )
+    else:
+        b_half = bld.constant(index, cfg.b_elements // 2)
+        b_total = bld.constant(index, cfg.b_elements)
+        with bld.for_loop(c0, b_half, c1) as i:
+            bld.memref_store(one_input, buffers.b, [i])
+        with bld.for_loop(b_half, b_total, c1) as i:
+            bld.memref_store(two_input, buffers.b, [i])
 
 
 def _fill_mxfp4_scales(
@@ -5577,6 +5924,9 @@ def _fill_mxfp4_scales(
         return
     assert buffers.a_scale is not None and buffers.b_scale is not None
     a_scales, b_scales = generate_mxfp4_scale_inputs(cfg.M, cfg.N, cfg.K)
+    if cfg.uses_aiter_mxfp4_layout:
+        a_scales = shuffle_mxfp4_scales_aiter(a_scales, cfg.M, cfg.K)
+        b_scales = shuffle_mxfp4_scales_aiter(b_scales, cfg.N, cfg.K)
     _emit_constant_fill(bld, buffers.a_scale, a_scales, dsl.i8(), index)
     _emit_constant_fill(bld, buffers.b_scale, b_scales, dsl.i8(), index)
 
@@ -9462,6 +9812,7 @@ def _make_matmul_config(
     input_type: str,
     output_type: str,
     mxfp4_scale_path: str,
+    mxfp4_input_layout: str = "canonical",
     random_data: bool,
     random_seed: int,
     cta_swizzle_xcds: int,
@@ -9489,6 +9840,7 @@ def _make_matmul_config(
         output_type=output_type,
         output_store_cache=output_store_cache,
         mxfp4_scale_path=mxfp4_scale_path,
+        mxfp4_input_layout=mxfp4_input_layout,
         random_data=random_data,
         random_seed=random_seed,
         cta_swizzle_xcds=cta_swizzle_xcds,
@@ -9535,6 +9887,7 @@ def _make_gfx950_f16_streamk_config(
         output_type="f16",
         output_store_cache="cs",
         mxfp4_scale_path="dma",
+        mxfp4_input_layout="canonical",
         random_data=False,
         random_seed=0,
         cta_swizzle_xcds=cta_swizzle_xcds,
@@ -9612,6 +9965,7 @@ def build_wmma_f16_matmul_module(
     output_type: str = "f32",
     output_store_cache: str = "none",
     mxfp4_scale_path: str = "dma",
+    mxfp4_input_layout: str = "canonical",
     random_data: bool = False,
     random_seed: int = 0,
     cta_swizzle_xcds: int = 1,
@@ -9641,6 +9995,7 @@ def build_wmma_f16_matmul_module(
         output_type=output_type,
         output_store_cache=output_store_cache,
         mxfp4_scale_path=mxfp4_scale_path,
+        mxfp4_input_layout=mxfp4_input_layout,
         random_data=random_data,
         random_seed=random_seed,
         cta_swizzle_xcds=cta_swizzle_xcds,
@@ -9772,6 +10127,8 @@ __all__ = [
     "generate_mxfp4_packed_matmul_inputs",
     "generate_mxfp4_scale_inputs",
     "generate_wmma_f16_matmul_inputs",
+    "shuffle_mxfp4_b_aiter",
+    "shuffle_mxfp4_scales_aiter",
     "streamk_counter_elements",
     "streamk_owner_for_iteration",
     "streamk_scratch_elements",

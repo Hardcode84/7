@@ -191,6 +191,19 @@ _GFX950_MXFP4_256X256_4WAVE: dict[str, _ProfileValue] = {
     "cta_group_m": 4,
 }
 
+_GFX950_MXFP4_AITER: dict[str, _ProfileValue] = {
+    "target_waves": 1,
+    "use_buffer": True,
+    "use_dma_lds": True,
+    "matrix_intrinsic": "mfma_gfx950",
+    "input_type": "mxfp4",
+    "output_type": "f16",
+    "output_store_cache": "cs",
+    "mxfp4_input_layout": "aiter",
+    "cta_swizzle_xcds": 8,
+    "cta_group_m": 4,
+}
+
 _KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
     "gfx950-sw-pipeline": _GFX950_SW_PIPELINE,
     "gfx950-f16-256x256-16wave": _GFX950_F16_256X256_16WAVE,
@@ -199,6 +212,47 @@ _KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
     "gfx950-f16-256x256-4wave": _GFX950_F16_256X256_4WAVE,
     "gfx950-mxfp4-256x256-8wave": _GFX950_MXFP4_256X256_8WAVE,
     "gfx950-mxfp4-256x256-4wave": _GFX950_MXFP4_256X256_4WAVE,
+    "gfx950-mxfp4-aiter-32x128": {
+        **_GFX950_MXFP4_AITER,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 2,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+    },
+    "gfx950-mxfp4-aiter-64x128": {
+        **_GFX950_MXFP4_AITER,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 4,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+    },
+    "gfx950-mxfp4-aiter-128x128": {
+        **_GFX950_MXFP4_AITER,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 2,
+        "wave_k_tiles": 2,
+    },
+    "gfx950-mxfp4-aiter-128x256": {
+        **_GFX950_MXFP4_AITER,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 8,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 4,
+    },
+    "gfx950-mxfp4-aiter-256x256": {
+        **_GFX950_MXFP4_AITER,
+        "bm": 1,
+        "bn": 4,
+        "wave_m_tiles": 16,
+        "wave_n_tiles": 4,
+        "wave_k_tiles": 2,
+        "cta_group_m": 8,
+    },
 }
 
 _DEFAULT_ATOL = 1.0e-3
@@ -350,6 +404,12 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         help="MXFP4 scale staging path when A/B use LDS DMA",
     )
     parser.add_argument(
+        "--mxfp4-input-layout",
+        choices=("canonical", "aiter"),
+        default="canonical",
+        help="physical MXFP4 B and scale input layout",
+    )
+    parser.add_argument(
         "--kernel-only",
         action="store_true",
         help="emit only the GPU kernel module, skipping host setup",
@@ -365,20 +425,36 @@ def _add_runner_args(parser: argparse.ArgumentParser) -> None:
     add_execution_args(parser, default_atol=_DEFAULT_ATOL, default_rtol=_DEFAULT_RTOL)
 
 
+def _validate_mxfp4_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.mxfp4_scale_path != "dma" and args.input_type != "mxfp4":
+        parser.error("--mxfp4-scale-path=regs requires --input-type=mxfp4")
+    if args.mxfp4_input_layout != "canonical" and args.input_type != "mxfp4":
+        parser.error("--mxfp4-input-layout=aiter requires --input-type=mxfp4")
+    if args.mxfp4_input_layout == "aiter" and args.mxfp4_scale_path != "dma":
+        parser.error("--mxfp4-input-layout=aiter requires --mxfp4-scale-path=dma")
+    if args.mxfp4_input_layout == "aiter" and args.coalesced_mfma_output:
+        parser.error("AITER input layout requires tile-packed kernel output")
+
+
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.target_waves < 0:
+        parser.error("--target-waves must be non-negative")
+    _validate_mxfp4_args(parser, args)
+    if args.kernel_only and (args.run or args.compare_cpu):
+        parser.error("--kernel-only cannot be used with --run/--compare-cpu")
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     _add_shape_args(parser)
     _add_tile_args(parser)
     _add_codegen_args(parser)
     _add_runner_args(parser)
-    parser.set_defaults(**_profile_defaults(argv))
+    parser.set_defaults(**profile_defaults(argv))
     args = parser.parse_args(argv)
-    if args.target_waves < 0:
-        parser.error("--target-waves must be non-negative")
-    if args.mxfp4_scale_path != "dma" and args.input_type != "mxfp4":
-        parser.error("--mxfp4-scale-path=regs requires --input-type=mxfp4")
-    if args.kernel_only and (args.run or args.compare_cpu):
-        parser.error("--kernel-only cannot be used with --run/--compare-cpu")
+    _validate_args(parser, args)
     try:
         args.matrix_intrinsic = _select_matrix_intrinsic(
             args.chip, args.matrix_intrinsic
@@ -388,7 +464,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _profile_defaults(argv: list[str]) -> dict[str, bool | int | str]:
+def profile_defaults(argv: list[str]) -> dict[str, bool | int | str]:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
         "--kernel-profile",
@@ -518,6 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         output_type=args.output_type,
         output_store_cache=args.output_store_cache,
         mxfp4_scale_path=args.mxfp4_scale_path,
+        mxfp4_input_layout=args.mxfp4_input_layout,
         random_data=random_data,
         random_seed=args.seed,
         cta_swizzle_xcds=args.cta_swizzle_xcds,
