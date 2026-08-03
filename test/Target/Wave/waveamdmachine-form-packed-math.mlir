@@ -145,6 +145,25 @@ func.func @gfx950_f32_math_forms(%a0: !wave.simd<f32, 64>,
   return %r0 : f32
 }
 
+// CHECK-LABEL: func.func @gfx950_f32_sub_forms
+// CHECK: waveamdmachine.v_pk_add_f32
+// CHECK-SAME: neg_hi = 2
+// CHECK-SAME: neg_lo = 2
+// CHECK-NOT: waveamdmachine.v_sub_f32
+// CHECK: return
+func.func @gfx950_f32_sub_forms(%a0: !wave.simd<f32, 64>,
+                                %a1: !wave.simd<f32, 64>,
+                                %b0: !wave.simd<f32, 64>,
+                                %b1: !wave.simd<f32, 64>) -> f32 {
+  %s0 = wave.fsub %a0, %b0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s1 = wave.fsub %a1, %b1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %r0 = wave.read_first %s0 : !wave.simd<f32, 64> -> f32
+  %r1 = wave.read_first %s1 : !wave.simd<f32, 64> -> f32
+  return %r0 : f32
+}
+
 // CHECK-LABEL: func.func @gfx950_sched_barrier_partitions_packing
 // CHECK: waveamdmachine.v_pk_add_f32
 // CHECK: waveamdmachine.sched_barrier

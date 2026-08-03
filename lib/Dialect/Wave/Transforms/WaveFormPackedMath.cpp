@@ -36,6 +36,7 @@ namespace {
 enum class PairKind {
   Cast,
   FAdd,
+  FSub,
   FMul,
   Fma,
 };
@@ -117,6 +118,8 @@ static std::optional<PairKind> getFloatMathKind(Operation *op) {
     return std::nullopt;
   if (isa<FAddOp>(op))
     return PairKind::FAdd;
+  if (isa<FSubOp>(op))
+    return PairKind::FSub;
   if (isa<FMulOp>(op))
     return PairKind::FMul;
   if (isa<FmaOp>(op))
@@ -164,6 +167,8 @@ static bool isCommutative(PairKind kind) {
 static arith::FastMathFlags getFastmath(Operation *op) {
   if (auto add = dyn_cast<FAddOp>(op))
     return add.getFastmath();
+  if (auto sub = dyn_cast<FSubOp>(op))
+    return sub.getFastmath();
   if (auto mul = dyn_cast<FMulOp>(op))
     return mul.getFastmath();
   return cast<FmaOp>(op).getFastmath();
@@ -438,6 +443,10 @@ private:
         lo->getContext(), getFastmath(lo) & getFastmath(hi));
     if (isa<FAddOp>(lo))
       return FAddOp::create(builder, loc, packedType, packedOperands[0],
+                            packedOperands[1], fastmath)
+          .getResult();
+    if (isa<FSubOp>(lo))
+      return FSubOp::create(builder, loc, packedType, packedOperands[0],
                             packedOperands[1], fastmath)
           .getResult();
     if (isa<FMulOp>(lo))

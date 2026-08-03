@@ -56,6 +56,24 @@ func.func @fastmath_intersection(
   return %x, %y : !wave.simd<f32, 64>, !wave.simd<f32, 64>
 }
 
+// CHECK-LABEL: func.func @fsub_order_and_fastmath
+// CHECK-SAME: ([[A0:%.*]]: !wave.simd<f32, 64>, [[B0:%.*]]: !wave.simd<f32, 64>, [[A1:%.*]]: !wave.simd<f32, 64>, [[B1:%.*]]: !wave.simd<f32, 64>)
+// CHECK: [[LHS:%.*]] = wave.pack [[A0]], [[B1]]
+// CHECK: [[RHS:%.*]] = wave.pack [[B0]], [[A1]]
+// CHECK: [[SUB:%.*]] = wave.fsub [[LHS]], [[RHS]] fastmath<contract>
+// CHECK: wave.extract [[SUB]][0]
+// CHECK: wave.extract [[SUB]][1]
+func.func @fsub_order_and_fastmath(
+    %a0: !wave.simd<f32, 64>, %b0: !wave.simd<f32, 64>,
+    %a1: !wave.simd<f32, 64>, %b1: !wave.simd<f32, 64>)
+    -> (!wave.simd<f32, 64>, !wave.simd<f32, 64>) {
+  %s0 = wave.fsub %a0, %b0 fastmath<nnan,contract>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %s1 = wave.fsub %b1, %a1 fastmath<ninf,contract>
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  return %s0, %s1 : !wave.simd<f32, 64>, !wave.simd<f32, 64>
+}
+
 // CHECK-LABEL: func.func @cast_pair
 // CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 32>, [[B:%.*]]: !wave.simd<f32, 32>)
 // CHECK: [[SRC:%.*]] = wave.pack [[A]], [[B]]

@@ -36,4 +36,14 @@ func.func @packed_wave_f32_math_v2(%a: !wave.simd<vector<2xf32>, 64>,
   return
 }
 
+// SELECT-LABEL: func.func @packed_wave_f32_sub_v4
+// SELECT-COUNT-2: waveamdmachine.v_pk_add_f32 {{.*}}neg_hi = 2 : i64, neg_lo = 2 : i64
+func.func @packed_wave_f32_sub_v4(%a: !wave.simd<vector<4xf32>, 64>,
+                                  %b: !wave.simd<vector<4xf32>, 64>) {
+  %sub = wave.fsub %a, %b
+      : !wave.simd<vector<4xf32>, 64>, !wave.simd<vector<4xf32>, 64>
+      -> !wave.simd<vector<4xf32>, 64>
+  return
+}
+
 }

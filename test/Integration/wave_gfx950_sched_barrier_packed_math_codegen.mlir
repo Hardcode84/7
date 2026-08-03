@@ -45,4 +45,39 @@ func.func @sched_barrier_packed_math(
   return
 }
 
+// ASM-LABEL: paired_f32_sub_math:
+// ASM: v_pk_add_f32 {{.*}} neg_lo:[0,1] neg_hi:[0,1]
+// ASM-NOT: v_sub_f32
+// ASM: v_add_f32
+// ASM: buffer_store_dword
+// ASM: s_endpgm
+func.func @paired_f32_sub_math(
+    %dst: !wave.ptr<#wave.global, f32>,
+    %a0: f32, %a1: f32, %b0: f32, %b1: f32)
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %range = arith.constant 256 : i32
+  %buffer = waveamd.make_buffer %dst, %range
+      : !wave.ptr<#wave.global, f32>, i32
+      -> !wave.ptr<#waveamd.buffer, f32>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %ptr = wave.ptr_add %buffer, %lane
+      : !wave.ptr<#waveamd.buffer, f32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 64>
+  %va0 = wave.splat %a0 : f32 -> !wave.simd<f32, 64>
+  %va1 = wave.splat %a1 : f32 -> !wave.simd<f32, 64>
+  %vb0 = wave.splat %b0 : f32 -> !wave.simd<f32, 64>
+  %vb1 = wave.splat %b1 : f32 -> !wave.simd<f32, 64>
+  %left = wave.fsub %va0, %vb0
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %right = wave.fsub %va1, %vb1
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %sum = wave.fadd %left, %right
+      : !wave.simd<f32, 64>, !wave.simd<f32, 64> -> !wave.simd<f32, 64>
+  %token = wave.store %sum -> %ptr
+      : (!wave.simd<f32, 64>,
+         !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 64>)
+      -> !wave.mem.token
+  return
+}
+
 }

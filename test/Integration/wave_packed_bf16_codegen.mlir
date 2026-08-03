@@ -69,4 +69,31 @@ func.func @scalar_bf16_pack_codegen(
   return
 }
 
+// ASM-LABEL: packed_bf16_to_f32_codegen:
+// ASM: v_lshlrev_b32_e32 {{.*}}, 16,
+// ASM: v_and_b32_e32 {{.*}}, 0xffff0000,
+// ASM: buffer_store_dwordx2
+// ASM: .amdhsa_kernel packed_bf16_to_f32_codegen
+func.func @packed_bf16_to_f32_codegen(
+    %src: !wave.ptr<#wave.global, bf16>,
+    %dst: !wave.ptr<#wave.global, f32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  %src_ptrs = wave.ptr_add %src, %lane
+      : !wave.ptr<#wave.global, bf16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, bf16>, 64>
+  %value, %loaded = wave.load %src_ptrs
+      : (!wave.simd<!wave.ptr<#wave.global, bf16>, 64>)
+      -> (!wave.simd<vector<2xbf16>, 64>, !wave.mem.token)
+  %f32 = wave.cast fpconvert %value
+      : !wave.simd<vector<2xbf16>, 64> -> !wave.simd<vector<2xf32>, 64>
+  %dst_ptrs = wave.ptr_add %dst, %lane
+      : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, f32>, 64>
+  %stored = wave.store %f32 -> %dst_ptrs after %loaded
+      : (!wave.simd<vector<2xf32>, 64>,
+         !wave.simd<!wave.ptr<#wave.global, f32>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return
+}
+
 }

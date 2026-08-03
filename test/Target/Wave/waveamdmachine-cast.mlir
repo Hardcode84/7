@@ -69,6 +69,24 @@ func.func @cast_f32_to_bf16_gfx950(%x: !wave.simd<f32, 64>) attributes {wave.ker
   return
 }
 
+// SELECT-LABEL: func.func @cast_bf16_to_f32_gfx950
+// SELECT: waveamdmachine.v_lshlrev_b32
+func.func @cast_bf16_to_f32_gfx950(%x: !wave.simd<bf16, 64>) attributes {wave.kernel} {
+  %f = wave.cast fpconvert %x : !wave.simd<bf16, 64> -> !wave.simd<f32, 64>
+  return
+}
+
+// SELECT-LABEL: func.func @cast_packed_bf16_to_f32_gfx950
+// SELECT: waveamdmachine.v_lshlrev_b32
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.v_lshlrev_b32
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.tuple_from_elements
+func.func @cast_packed_bf16_to_f32_gfx950(%x: !wave.simd<vector<4xbf16>, 64>) attributes {wave.kernel} {
+  %f = wave.cast fpconvert %x : !wave.simd<vector<4xbf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+  return
+}
+
 }
 
 // -----

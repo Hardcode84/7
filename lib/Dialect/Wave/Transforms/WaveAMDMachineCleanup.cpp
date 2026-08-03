@@ -1421,6 +1421,39 @@ static bool canFusePackedMul(VPkMulF32Op mul) {
          !getBoolAttr(mul, "clamp", false);
 }
 
+// Identity lane maps only; tuple matching handles selected accumulators.
+static bool combineDirectPackedMulSub(func::FuncOp func) {
+  SmallVector<VPkAddF32Op, 16> candidates;
+  func.walk([&](VPkAddF32Op add) { candidates.push_back(add); });
+
+  OpBuilder builder(func.getContext());
+  bool changed = false;
+  for (VPkAddF32Op add : candidates) {
+    VPkMulF32Op mul = add.getLhs().getDefiningOp<VPkMulF32Op>();
+    if (!mul || !mul.getResult().hasOneUse() ||
+        mul->getBlock() != add->getBlock() || !canFusePackedMul(mul) ||
+        add.getClamp() || add.getOpSel() != 0 || add.getOpSelHi() != 3 ||
+        add.getNegLo() != 2 || add.getNegHi() != 2)
+      continue;
+
+    builder.setInsertionPoint(add);
+    unsigned opSel = mul.getOpSel() & 3;
+    unsigned opSelHi = (mul.getOpSelHi() & 3) | 4;
+    Value fused =
+        VPkFmaF32Op::create(builder, add.getLoc(), add.getResult().getType(),
+                            mul.getLhs(), mul.getRhs(), add.getRhs(),
+                            /*clamp=*/false, opSel, opSelHi,
+                            /*negLo=*/mul.getNegLo() | 4,
+                            /*negHi=*/mul.getNegHi() | 4)
+            .getResult();
+    add.getResult().replaceAllUsesWith(fused);
+    add.erase();
+    mul.erase();
+    changed = true;
+  }
+  return changed;
+}
+
 static TupleToElementsOp matchPackedMulSplit(VPkMulF32Op mul) {
   if (!mul.getResult().hasOneUse())
     return {};
@@ -1522,7 +1555,8 @@ static void combinePackedMulSub(PackedMulSubCandidate candidate, Value acc,
                           candidate.mul.getResult().getType(),
                           candidate.mul.getLhs(), candidate.mul.getRhs(), acc,
                           /*clamp=*/false, opSel, opSelHi,
-                          /*negLo=*/4, /*negHi=*/4)
+                          /*negLo=*/candidate.mul.getNegLo() | 4,
+                          /*negHi=*/candidate.mul.getNegHi() | 4)
           .getResult();
   SmallVector<Type, 2> resultTypes(candidate.split.getResultTypes());
   TupleToElementsOp fusedSplit = TupleToElementsOp::create(
@@ -1874,6 +1908,7 @@ struct WaveAMDMachineCleanupPass
         changed |= hoistFunction(func);
         changed |= scaleLoopCarries(func);
         changed |= combineMaxTrees(func);
+        changed |= combineDirectPackedMulSub(func);
         changed |= combinePackedMulSubs(func, packedAccTupleCaches);
         changed |= chainDmaM0Increments(func);
         changed |= foldVccCndmask(func);

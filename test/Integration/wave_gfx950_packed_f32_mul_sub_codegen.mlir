@@ -40,4 +40,34 @@ func.func @packed_f32_mul_sub_codegen()
   return
 }
 
+// ASM-LABEL: packed_f32_direct_mul_sub_codegen:
+// ASM-NOT: v_pk_mul_f32
+// ASM: v_pk_fma_f32 {{.*}} neg_lo:[0,0,1] neg_hi:[0,0,1]
+// ASM-NOT: v_pk_add_f32
+// ASM: v_add_f32
+func.func @packed_f32_direct_mul_sub_codegen()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                waveamdmachine.target_waves = 4 : i64} {
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2>
+  %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2>
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {contract = true}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %sub = waveamdmachine.v_pk_add_f32 %mul, %c
+      {neg_hi = 2, neg_lo = 2}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %parts:2 = waveamdmachine.tuple_to_elements %sub
+      : (!waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+  %sum = waveamdmachine.v_add_f32 %parts#0, %parts#1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %sum, %sum
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
 }
