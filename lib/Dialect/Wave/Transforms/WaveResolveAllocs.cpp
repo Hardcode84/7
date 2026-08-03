@@ -42,9 +42,18 @@ using namespace mlir::wave;
 
 namespace {
 
+struct ValueLifetime {
+  SmallVector<Value, 8> aliases;
+  SmallVector<Operation *, 8> terminalUses;
+  SmallVector<Region *, 4> repetitiveRegions;
+  Value source;
+  Value result;
+};
+
 struct AllocInterval {
   SmallVector<Operation *, 4> accesses;
   SmallVector<Value, 4> completionTokens;
+  std::unique_ptr<ValueLifetime> valueLifetime;
   std::optional<int64_t> fixedOffset;
   AllocOp op;
   AllocReleaseOp release;
@@ -592,6 +601,13 @@ static LogicalResult associateReleases(ArrayRef<AllocReleaseOp> releases,
     if (interval.release)
       return release.emitOpError("allocation already has a wave.alloc_release");
     interval.release = release;
+    if (release.getLifetimeSource()) {
+      ValueLifetime lifetime;
+      lifetime.source = release.getLifetimeSource();
+      lifetime.result = release.getLifetimeResult();
+      interval.valueLifetime =
+          std::make_unique<ValueLifetime>(std::move(lifetime));
+    }
   }
   return success();
 }
@@ -679,6 +695,138 @@ static void collectAllocationUses(const OperationOrder &order,
   }
 }
 
+static void appendForwardedValue(Value value,
+                                 SmallVectorImpl<Value> &forwarded) {
+  if (value && !llvm::is_contained(forwarded, value))
+    forwarded.push_back(value);
+}
+
+static bool appendForwardedRange(OpOperand &use, OperandRange sources,
+                                 ValueRange targets,
+                                 SmallVectorImpl<Value> &forwarded) {
+  if (sources.empty())
+    return false;
+  unsigned operand = use.getOperandNumber();
+  unsigned begin = sources.getBeginOperandIndex();
+  if (operand < begin || operand >= begin + sources.size())
+    return false;
+  unsigned index = operand - begin;
+  if (index >= targets.size())
+    return false;
+  appendForwardedValue(targets[index], forwarded);
+  return true;
+}
+
+static bool appendRegionForwardedValues(OpOperand &use,
+                                        SmallVectorImpl<Value> &forwarded) {
+  Operation *user = use.getOwner();
+  if (RegionBranchOpInterface branch =
+          dyn_cast<RegionBranchOpInterface>(user)) {
+    bool forwards = false;
+    SmallVector<RegionSuccessor> successors;
+    branch.getSuccessorRegions(RegionBranchPoint::parent(), successors);
+    for (RegionSuccessor successor : successors)
+      forwards |=
+          appendForwardedRange(use, branch.getEntrySuccessorOperands(successor),
+                               branch.getSuccessorInputs(successor), forwarded);
+    return forwards;
+  }
+
+  RegionBranchTerminatorOpInterface terminator =
+      dyn_cast<RegionBranchTerminatorOpInterface>(user);
+  if (!terminator)
+    return false;
+  RegionBranchOpInterface branch =
+      dyn_cast<RegionBranchOpInterface>(user->getParentOp());
+  if (!branch)
+    return false;
+  bool forwards = false;
+  SmallVector<RegionSuccessor> successors;
+  branch.getSuccessorRegions(RegionBranchPoint(terminator), successors);
+  for (RegionSuccessor successor : successors)
+    forwards |=
+        appendForwardedRange(use, terminator.getSuccessorOperands(successor),
+                             branch.getSuccessorInputs(successor), forwarded);
+  return forwards;
+}
+
+static void appendRepetitiveAncestors(Operation *point,
+                                      SmallVectorImpl<Region *> &regions) {
+  for (Region *region = point->getParentRegion(); region;) {
+    Operation *parent = region->getParentOp();
+    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
+    if (branch && branch.isRepetitiveRegion(region->getRegionNumber()) &&
+        !llvm::is_contained(regions, region))
+      regions.push_back(region);
+    region = parent->getParentRegion();
+  }
+}
+
+static bool consumeValueLifetimeMarker(const OperationOrder &order,
+                                       AllocInterval &interval,
+                                       OpOperand &use) {
+  AllocReleaseOp marker = dyn_cast<AllocReleaseOp>(use.getOwner());
+  if (!marker)
+    return false;
+  MutableOperandRange source = marker.getLifetimeSourceMutable();
+  MutableOperandRange result = marker.getLifetimeResultMutable();
+  bool isSource = !source.empty() && &source[0] == &use;
+  bool isResult = !result.empty() && &result[0] == &use;
+  if (!isSource && !isResult)
+    return false;
+  if (!isSource)
+    return true;
+
+  Operation *consumption = marker.getAllocation().getDefiningOp();
+  extendIntervalForUse(order, interval, consumption);
+  ValueLifetime &lifetime = *interval.valueLifetime;
+  appendRepetitiveAncestors(consumption, lifetime.repetitiveRegions);
+  if (!llvm::is_contained(lifetime.terminalUses, consumption))
+    lifetime.terminalUses.push_back(consumption);
+  return true;
+}
+
+static void collectValueLifetime(const OperationOrder &order,
+                                 AllocInterval &interval) {
+  if (!interval.valueLifetime)
+    return;
+  ValueLifetime &lifetime = *interval.valueLifetime;
+  SmallVector<Value, 8> worklist{lifetime.result};
+  DenseSet<Value> visited;
+  appendRepetitiveAncestors(interval.op, lifetime.repetitiveRegions);
+  if (Operation *def = lifetime.result.getDefiningOp())
+    extendIntervalForUse(order, interval, def);
+
+  while (!worklist.empty()) {
+    Value value = worklist.pop_back_val();
+    if (!visited.insert(value).second)
+      continue;
+    lifetime.aliases.push_back(value);
+    for (OpOperand &use : value.getUses()) {
+      if (use.getOwner() == interval.release.getOperation())
+        continue;
+      Operation *user = use.getOwner();
+      if (consumeValueLifetimeMarker(order, interval, use))
+        continue;
+      extendIntervalForUse(order, interval, user);
+      appendRepetitiveAncestors(user, lifetime.repetitiveRegions);
+      SmallVector<Value, 4> forwarded;
+      if (appendRegionForwardedValues(use, forwarded)) {
+        llvm::append_range(worklist, forwarded);
+        continue;
+      }
+      if (!llvm::is_contained(lifetime.terminalUses, user))
+        lifetime.terminalUses.push_back(user);
+    }
+  }
+}
+
+static void collectValueLifetimes(const OperationOrder &order,
+                                  SmallVectorImpl<AllocInterval> &allocs) {
+  for (AllocInterval &interval : allocs)
+    collectValueLifetime(order, interval);
+}
+
 static SmallVector<Value, 4> collectAccessTokens(AllocInterval &interval) {
   SmallVector<Value, 4> accessTokens;
   for (Operation *access : interval.accesses) {
@@ -716,6 +864,7 @@ static LogicalResult
 collectAllocationIntervals(const OperationOrder &order, TokenOrdering &ordering,
                            SmallVectorImpl<AllocInterval> &allocs) {
   collectAllocationUses(order, allocs);
+  collectValueLifetimes(order, allocs);
   for (AllocInterval &interval : allocs) {
     if (failed(finalizeAllocationInterval(interval, ordering)))
       return failure();
@@ -955,6 +1104,308 @@ static void addTokenDependency(IRRewriter &rewriter, Operation *access,
     genericDependency->set(combined);
 }
 
+static Operation *replaceWithPrivateResult(IRRewriter &rewriter, Operation *op,
+                                           Type type) {
+  SmallVector<Type> resultTypes(op->getResultTypes());
+  resultTypes.push_back(type);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(op);
+  OperationState state(op->getLoc(), op->getName(), op->getOperands(),
+                       resultTypes, op->getAttrs(), op->getSuccessors());
+  state.propertiesAttr = op->getPropertiesAsAttribute();
+  for ([[maybe_unused]] Region &region : op->getRegions())
+    state.addRegion();
+  Operation *replacement = rewriter.create(state);
+  rewriter.startOpModification(replacement);
+  rewriter.startOpModification(op);
+  for (auto [index, region] : llvm::enumerate(op->getRegions()))
+    replacement->getRegion(index).takeBody(region);
+  rewriter.finalizeOpModification(op);
+  rewriter.finalizeOpModification(replacement);
+  rewriter.replaceAllOpUsesWith(
+      op, replacement->getResults().take_front(op->getNumResults()));
+  rewriter.eraseOp(op);
+  return replacement;
+}
+
+static bool supportsPrivateResult(Operation *op) {
+  return isa<scf::ExecuteRegionOp, scf::IfOp, scf::IndexSwitchOp, WhereOp>(op);
+}
+
+static LogicalResult ensurePrivateBranchRegion(IRRewriter &rewriter,
+                                               Operation *branchOp,
+                                               Region &region) {
+  if (!region.empty())
+    return success();
+  if (!isa<scf::IfOp, WhereOp>(branchOp))
+    return branchOp->emitOpError(
+        "cannot forward private allocation state through an empty region");
+  Block *block = rewriter.createBlock(&region);
+  rewriter.setInsertionPointToEnd(block);
+  if (isa<scf::IfOp>(branchOp))
+    scf::YieldOp::create(rewriter, branchOp->getLoc());
+  else
+    YieldOp::create(rewriter, branchOp->getLoc());
+  return success();
+}
+
+static LogicalResult appendPrivateBranchYields(IRRewriter &rewriter,
+                                               Operation *branchOp,
+                                               unsigned activeRegion,
+                                               Value completed,
+                                               Value inactive) {
+  RegionBranchOpInterface branch = cast<RegionBranchOpInterface>(branchOp);
+  for (auto [index, region] : llvm::enumerate(branchOp->getRegions())) {
+    if (failed(ensurePrivateBranchRegion(rewriter, branchOp, region)))
+      return failure();
+    if (!llvm::hasSingleElement(region))
+      return branchOp->emitOpError(
+          "private allocation state requires single-block regions");
+    Operation *terminator = region.front().getTerminator();
+    RegionBranchTerminatorOpInterface branchTerminator =
+        dyn_cast<RegionBranchTerminatorOpInterface>(terminator);
+    if (!branchTerminator)
+      return branchOp->emitOpError(
+          "region terminator cannot forward private allocation state");
+    SmallVector<RegionSuccessor> successors;
+    branch.getSuccessorRegions(RegionBranchPoint(branchTerminator), successors);
+    auto successor = llvm::find_if(successors, [](RegionSuccessor candidate) {
+      return candidate.isOperation();
+    });
+    if (successor == successors.end())
+      return branchOp->emitOpError(
+          "region has no exit for private allocation state");
+    Value yielded = index == activeRegion ? completed : inactive;
+    rewriter.modifyOpInPlace(terminator, [&] {
+      branchTerminator.getMutableSuccessorOperands(*successor).append(yielded);
+    });
+  }
+  return success();
+}
+
+static FailureOr<Value> liftPrivateCompletion(IRRewriter &rewriter,
+                                              AllocInterval &interval,
+                                              Value completed, Value inactive,
+                                              Block *target) {
+  Region *targetRegion = target->getParent();
+  while (Region *region = getValueParentRegion(completed)) {
+    if (region == targetRegion)
+      return completed;
+    Operation *branchOp = region->getParentOp();
+    RegionBranchOpInterface branch =
+        dyn_cast_or_null<RegionBranchOpInterface>(branchOp);
+    if (!branch || !supportsPrivateResult(branchOp) ||
+        !target->getParentOp()->isProperAncestor(branchOp)) {
+      interval.release.emitOpError(
+          "cannot carry scratch completion to repetitive region exit");
+      return failure();
+    }
+    if (branch.isRepetitiveRegion(region->getRegionNumber())) {
+      interval.release.emitOpError(
+          "nested repetitive region lacks a private completion result");
+      return failure();
+    }
+    unsigned activeRegion = region->getRegionNumber();
+    unsigned result = branchOp->getNumResults();
+    Operation *replacement =
+        replaceWithPrivateResult(rewriter, branchOp, completed.getType());
+    if (failed(appendPrivateBranchYields(rewriter, replacement, activeRegion,
+                                         completed, inactive)))
+      return failure();
+    completed = replacement->getResult(result);
+  }
+  interval.release.emitOpError(
+      "scratch completion is not nested in its repetitive region");
+  return failure();
+}
+
+static SmallVector<Operation *>
+collectLoopLifetimeEntryAccesses(ArrayRef<AllocInterval *> intervals,
+                                 TokenOrdering &ordering);
+
+static FailureOr<Value>
+materializePrivateLoopLifetimeCarry(IRRewriter &rewriter,
+                                    ArrayRef<AllocInterval *> intervals,
+                                    AllocInterval &terminal, scf::ForOp loop,
+                                    Value completed, TokenOrdering &ordering) {
+  for (AllocInterval *interval : intervals) {
+    if (!interval->release.getWorkgroupCollectiveAttr()) {
+      interval->release.emitOpError(
+          "value lifetime recurrence requires workgroup_collective");
+      return failure();
+    }
+    if (!llvm::all_of(interval->accesses, canAddTokenDependency)) {
+      interval->release.emitOpError(
+          "scratch access cannot accept private recurrence dependency");
+      return failure();
+    }
+  }
+  SmallVector<Operation *> entries =
+      collectLoopLifetimeEntryAccesses(intervals, ordering);
+  if (entries.empty()) {
+    terminal.release.emitOpError("scratch recurrence has no entry access");
+    return failure();
+  }
+
+  Type tokenType = terminal.release.getToken().getType();
+  rewriter.setInsertionPoint(loop);
+  Value initial = TokenOp::create(rewriter, loop.getLoc(), tokenType);
+  NewYieldValuesFn yieldValues =
+      [](OpBuilder &, Location,
+         ArrayRef<BlockArgument> arguments) -> SmallVector<Value> {
+    return {arguments.front()};
+  };
+  FailureOr<LoopLikeOpInterface> replacement = loop.replaceWithAdditionalYields(
+      rewriter, initial, /*replaceInitOperandUsesInLoop=*/false, yieldValues);
+  if (failed(replacement))
+    return terminal.release.emitOpError(
+        "repetitive region cannot carry private allocation state");
+
+  scf::ForOp newLoop = cast<scf::ForOp>(replacement->getOperation());
+  Value carried = newLoop.getRegionIterArgs().back();
+  for (Operation *access : entries)
+    addTokenDependency(rewriter, access, carried);
+  FailureOr<Value> loopCompletion = liftPrivateCompletion(
+      rewriter, terminal, completed, carried, newLoop.getBody());
+  if (failed(loopCompletion))
+    return failure();
+
+  scf::YieldOp yield = cast<scf::YieldOp>(newLoop.getBody()->getTerminator());
+  rewriter.setInsertionPoint(yield);
+  Value barrier =
+      BarrierOp::create(rewriter, yield.getLoc(), tokenType, *loopCompletion);
+  rewriter.modifyOpInPlace(
+      yield, [&] { yield->setOperand(yield.getNumOperands() - 1, barrier); });
+  return newLoop.getResult(newLoop.getNumResults() - 1);
+}
+
+static FailureOr<std::optional<scf::ForOp>>
+getNextValueLifetimeLoop(AllocInterval &interval, Value completed) {
+  assert(interval.valueLifetime && "expected value lifetime");
+  for (Region *region = getValueParentRegion(completed); region;) {
+    Operation *parent = region->getParentOp();
+    RegionBranchOpInterface branch = dyn_cast<RegionBranchOpInterface>(parent);
+    if (branch && branch.isRepetitiveRegion(region->getRegionNumber()) &&
+        llvm::is_contained(interval.valueLifetime->repetitiveRegions, region)) {
+      if (scf::ForOp loop = dyn_cast<scf::ForOp>(parent))
+        return std::optional<scf::ForOp>(loop);
+      interval.release.emitOpError(
+          "value lifetime crosses an unsupported repetitive region");
+      return failure();
+    }
+    region = parent->getParentRegion();
+  }
+  return std::optional<scf::ForOp>();
+}
+
+using PrivateCompletionMap = DenseMap<Operation *, Value>;
+using CompletedPrivateLifetimeSet = DenseSet<Operation *>;
+
+static Value getPrivateCompletion(AllocInterval &interval,
+                                  PrivateCompletionMap &completions) {
+  Value completed = completions.lookup(interval.release.getOperation());
+  return completed ? completed : interval.release.getToken();
+}
+
+static bool hasSamePrivateRange(const AllocInterval &lhs,
+                                const AllocInterval &rhs) {
+  if (!lhs.fixedOffset || !rhs.fixedOffset ||
+      *lhs.fixedOffset != *rhs.fixedOffset || lhs.bytes != rhs.bytes)
+    return false;
+  return ArrayRef(lhs.valueLifetime->repetitiveRegions) ==
+         ArrayRef(rhs.valueLifetime->repetitiveRegions);
+}
+
+static FailureOr<SmallVector<AllocInterval *, 4>> collectPrivateLifetimeGroup(
+    AllocInterval &seed, scf::ForOp loop, MutableArrayRef<AllocInterval> allocs,
+    PrivateCompletionMap &completions, CompletedPrivateLifetimeSet &complete) {
+  SmallVector<AllocInterval *, 4> group{&seed};
+  for (AllocInterval &candidate : allocs) {
+    if (&candidate == &seed || !candidate.valueLifetime ||
+        complete.contains(candidate.release.getOperation()) ||
+        !hasSamePrivateRange(seed, candidate))
+      continue;
+    FailureOr<std::optional<scf::ForOp>> candidateLoop =
+        getNextValueLifetimeLoop(candidate,
+                                 getPrivateCompletion(candidate, completions));
+    if (failed(candidateLoop))
+      return failure();
+    if (*candidateLoop &&
+        candidateLoop->value().getOperation() == loop.getOperation())
+      group.push_back(&candidate);
+  }
+  return group;
+}
+
+static std::optional<std::pair<AllocInterval *, Value>>
+findPrivateLifetimeTerminal(ArrayRef<AllocInterval *> group,
+                            PrivateCompletionMap &completions,
+                            TokenOrdering &ordering) {
+  SmallVector<Value, 4> groupCompletions;
+  for (AllocInterval *interval : group)
+    groupCompletions.push_back(getPrivateCompletion(*interval, completions));
+  for (auto [interval, completed] : llvm::zip(group, groupCompletions))
+    if (ordering.dependsOnAll(completed, groupCompletions,
+                              /*requireBarrier=*/false))
+      return std::pair<AllocInterval *, Value>{interval, completed};
+  return std::nullopt;
+}
+
+static void markCompletedPrivateGroup(Value completed,
+                                      MutableArrayRef<AllocInterval> allocs,
+                                      PrivateCompletionMap &completions,
+                                      CompletedPrivateLifetimeSet &complete) {
+  for (AllocInterval &candidate : allocs) {
+    Operation *release = candidate.release.getOperation();
+    if (!candidate.valueLifetime || complete.contains(release))
+      continue;
+    if (getPrivateCompletion(candidate, completions) == completed)
+      complete.insert(release);
+  }
+}
+
+static FailureOr<bool> materializeNextValueLifetimeRecurrence(
+    IRRewriter &rewriter, MutableArrayRef<AllocInterval> allocs,
+    TokenOrdering &ordering, PrivateCompletionMap &completions,
+    CompletedPrivateLifetimeSet &complete) {
+  for (AllocInterval &interval : allocs) {
+    if (!interval.valueLifetime)
+      continue;
+    Operation *releaseOp = interval.release.getOperation();
+    if (complete.contains(releaseOp))
+      continue;
+    Value completed = getPrivateCompletion(interval, completions);
+    FailureOr<std::optional<scf::ForOp>> loop =
+        getNextValueLifetimeLoop(interval, completed);
+    if (failed(loop))
+      return failure();
+    if (!*loop) {
+      markCompletedPrivateGroup(completed, allocs, completions, complete);
+      continue;
+    }
+    FailureOr<SmallVector<AllocInterval *, 4>> group =
+        collectPrivateLifetimeGroup(interval, **loop, allocs, completions,
+                                    complete);
+    if (failed(group))
+      return failure();
+    std::optional<std::pair<AllocInterval *, Value>> terminal =
+        findPrivateLifetimeTerminal(*group, completions, ordering);
+    if (!terminal) {
+      group->resize(1);
+      terminal = std::pair<AllocInterval *, Value>{
+          &interval, getPrivateCompletion(interval, completions)};
+    }
+    FailureOr<Value> next = materializePrivateLoopLifetimeCarry(
+        rewriter, *group, *terminal->first, **loop, terminal->second, ordering);
+    if (failed(next))
+      return failure();
+    for (AllocInterval *member : *group)
+      completions[member->release.getOperation()] = *next;
+    return true;
+  }
+  return false;
+}
+
 static std::optional<unsigned>
 findLoopHeaderCarry(scf::ForOp loop, ArrayRef<AllocInterval *> intervals,
                     TokenOrdering &ordering) {
@@ -1121,6 +1572,8 @@ static LogicalResult collectRepeatedLifetimeBarrierSites(
   for (AllocInterval &interval : allocs) {
     if (!interval.release)
       continue;
+    if (interval.valueLifetime)
+      continue;
     if (!repeatedLifetimeNeedsBarrier(interval, ordering))
       continue;
     if (!interval.release.getWorkgroupCollectiveAttr()) {
@@ -1186,13 +1639,19 @@ static bool usesExplicitLifetime(const AllocInterval &earlier,
   return earlier.release || later.release;
 }
 
-static bool canReuseStorage(const AllocInterval &earlier,
-                            const AllocInterval &later,
-                            TokenOrdering &ordering) {
-  if (earlier.end >= later.start)
-    return false;
-  if (!usesExplicitLifetime(earlier, later))
+static bool lifetimeEndpointAllowsReuse(const AllocInterval &earlier,
+                                        const AllocInterval &later) {
+  if (earlier.end != later.start)
     return true;
+  if (!earlier.valueLifetime)
+    return false;
+  return llvm::is_contained(earlier.valueLifetime->terminalUses,
+                            later.op.operator->());
+}
+
+static bool accessesOrderReuse(const AllocInterval &earlier,
+                               const AllocInterval &later,
+                               TokenOrdering &ordering) {
   if (earlier.hasUntrackedAccess || later.hasUntrackedAccess)
     return false;
   for (Operation *access : later.accesses)
@@ -1200,6 +1659,12 @@ static bool canReuseStorage(const AllocInterval &earlier,
                                /*requireBarrier=*/
                                !earlier.collectivelyComplete))
       return false;
+  return true;
+}
+
+static bool loopBackedgesOrderReuse(const AllocInterval &earlier,
+                                    const AllocInterval &later,
+                                    TokenOrdering &ordering) {
   for (Region *region :
        getCommonEnclosingRepetitiveRegions(earlier.op, later.op)) {
     scf::ForOp loop = dyn_cast<scf::ForOp>(region->getParentOp());
@@ -1207,6 +1672,20 @@ static bool canReuseStorage(const AllocInterval &earlier,
       return false;
   }
   return true;
+}
+
+static bool canReuseStorage(const AllocInterval &earlier,
+                            const AllocInterval &later,
+                            TokenOrdering &ordering) {
+  if (earlier.end > later.start)
+    return false;
+  if (!lifetimeEndpointAllowsReuse(earlier, later))
+    return false;
+  if (!usesExplicitLifetime(earlier, later))
+    return true;
+  if (!accessesOrderReuse(earlier, later, ordering))
+    return false;
+  return loopBackedgesOrderReuse(earlier, later, ordering);
 }
 
 static FailureOr<int64_t> findAvailableOffset(ArrayRef<PlacedAllocation> active,
@@ -1470,6 +1949,19 @@ appendBlockedRanges(ArrayRef<WaveLDSRange> ranges,
 static LogicalResult materializeAndReanalyzeRepeatedLifetimes(
     func::FuncOp func, ArrayRef<AllocOp> ops, ArrayRef<AllocReleaseOp> releases,
     IRRewriter &rewriter, AllocationAnalysis &analysis) {
+  PrivateCompletionMap completions;
+  CompletedPrivateLifetimeSet complete;
+  while (true) {
+    FailureOr<bool> materialized = materializeNextValueLifetimeRecurrence(
+        rewriter, analysis.allocs, *analysis.ordering, completions, complete);
+    if (failed(materialized))
+      return failure();
+    if (!*materialized)
+      break;
+    if (failed(analyzeAllocations(func, ops, releases, analysis)))
+      return failure();
+  }
+
   FailureOr<bool> materialized = materializeRepeatedLifetimeBarriers(
       rewriter, analysis.allocs, *analysis.ordering);
   if (failed(materialized))

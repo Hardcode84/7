@@ -3640,7 +3640,7 @@ lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
                                    execution->completionTokens);
   AllocReleaseOp released = AllocReleaseOp::create(
       rewriter, op.getLoc(), tokenType, scratch->allocation, completed,
-      rewriter.getUnitAttr());
+      op.getSource(), packed, rewriter.getUnitAttr());
   sequences[op->getBlock()] = {released.getToken(),
                                execution->analysisCompletion, released,
                                scratch->range};

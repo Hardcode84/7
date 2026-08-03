@@ -58,7 +58,8 @@ with w.module() as module_builder:
 # LOWER: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
 # LOWER: %[[VALUE:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 # LOWER: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
-# LOWER: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
+# LOWER: wave.alloc_release %[[ALLOC]] after %[[DONE]]
+# LOWER-SAME: value_lifetime({{.*}} -> %[[VALUE]]) {workgroup_collective}
 
 # ASM-LABEL: packet_layout_cross_wave:
 # ASM: ds_write_b32

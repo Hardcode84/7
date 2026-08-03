@@ -3834,6 +3834,14 @@ LogicalResult AllocReleaseOp::verify() {
   if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
     return emitOpError(
         "allocation pointer must live in the shared address space");
+  if (static_cast<bool>(getLifetimeSource()) !=
+      static_cast<bool>(getLifetimeResult()))
+    return emitOpError(
+        "lifetime_source and lifetime_result must be present together");
+  if (Value source = getLifetimeSource())
+    if (isa<MemTokenType>(source.getType()) ||
+        isa<MemTokenType>(getLifetimeResult().getType()))
+      return emitOpError("value lifetime operands cannot be memory tokens");
   return success();
 }
 

@@ -653,7 +653,8 @@ def Wave_AllocOp : Wave_Op<"alloc"> {
   let hasVerifier = 1;
 }
 
-def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
+def Wave_AllocReleaseOp
+    : Wave_Op<"alloc_release", [AttrSizedOperandSegments]> {
   let summary = "end a workgroup allocation lifetime";
   let description = [{
     Marks `$allocation` logically complete after `$dependency`. The dependency
@@ -663,13 +664,23 @@ def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
     Allocation resolution removes the marker. `workgroup_collective` asserts
     that every workitem reaches the release and permits resolution to
     materialize a workgroup barrier for a repeated lifetime.
+
+    Optional `$lifetime_source` and `$lifetime_result` record the SSA value
+    lifetime whose implementation uses this allocation. Both operands must be
+    present or absent. They do not carry memory ordering.
   }];
 
   let arguments = (ins Arg<Wave_Ptr, "", [MemFree]>:$allocation,
                        Wave_MemToken:$dependency,
+                       Optional<AnyType>:$lifetime_source,
+                       Optional<AnyType>:$lifetime_result,
                        OptionalAttr<UnitAttr>:$workgroup_collective);
   let results = (outs Wave_MemToken:$token);
-  let assemblyFormat = "$allocation `after` $dependency attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = [{
+    $allocation `after` $dependency
+    (`value_lifetime` `(` $lifetime_source^ `->` $lifetime_result `)`)?
+    attr-dict `:` functional-type(operands, results)
+  }];
   let hasVerifier = 1;
 }
 

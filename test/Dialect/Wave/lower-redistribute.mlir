@@ -176,7 +176,7 @@ func.func @reduce_workitem_slot(
 // CHECK: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
 // CHECK: %[[MOVED:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 // CHECK: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] value_lifetime({{.*}} -> %[[MOVED]]) {workgroup_collective}
 // CHECK: wave.fadd
 // CHECK-NOT: wave.reduce
 // CHECK-NOT: wave.redistribute
@@ -376,7 +376,7 @@ func.func @same_wave_uniform_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK: %[[LOAD1:.*]] = wave.extract %[[LOAD]][1]
 // CHECK: %[[PACK:.*]] = wave.pack %[[LOAD0]], %[[LOAD1]]
 // CHECK: %[[DONE:.*]] = wave.join %[[LOADTOK]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] value_lifetime({{.*}} -> %[[PACK]]) {workgroup_collective}
 // CHECK-NOT: wave.redistribute
 func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
@@ -397,7 +397,7 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
 // CHECK-NOT: wave.extract
 // CHECK-NOT: wave.pack
 // CHECK: %[[DONE:.*]] = wave.join %[[TOKEN]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] value_lifetime({{.*}} -> %[[LOAD]]) {workgroup_collective}
 // CHECK: return %[[LOAD]]
 func.func @cross_wave_scalar(%source: !wave.simd<i32, 32>)
     -> !wave.simd<i32, 32>
@@ -502,7 +502,7 @@ func.func @cross_wave_vector_select(
 // CHECK-COUNT-1: wave.barrier
 // CHECK: wave.load
 // CHECK: wave.join
-// CHECK: wave.alloc_release
+// CHECK: wave.alloc_release {{.*}} value_lifetime(
 func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
                                 %condition: i1)
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
@@ -522,7 +522,7 @@ func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK: %[[PTR:.*]] = wave.ptr_add %[[ALLOC]], {{.*}} : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
 // CHECK: wave.load %[[PTR]] after %[[PUBLISH]]
 // CHECK: wave.join
-// CHECK: wave.alloc_release
+// CHECK: wave.alloc_release {{.*}} value_lifetime(
 func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
     -> !wave.simd<vector<1xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
@@ -540,13 +540,13 @@ func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
 // CHECK: %[[PUBLISH0:.*]] = wave.barrier %[[STORE0]]
 // CHECK: %[[LOAD0:.*]], %[[LOADTOK0:.*]] = wave.load {{.*}} after %[[PUBLISH0]]
 // CHECK: %[[DONE0:.*]] = wave.join %[[LOADTOK0]]
-// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] value_lifetime({{.*}}) {workgroup_collective}
 // CHECK: %[[ALLOC1:.*]] = wave.alloc()
 // CHECK: %[[STORE1:.*]] = wave.store {{.*}} after %[[RELEASE0]]
 // CHECK: %[[PUBLISH1:.*]] = wave.barrier %[[STORE1]]
 // CHECK: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH1]]
 // CHECK: %[[DONE1:.*]] = wave.join %[[LOADTOK1]]
-// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]] {workgroup_collective}
+// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]] value_lifetime({{.*}}) {workgroup_collective}
 // CHECK: %[[ALLOC2:.*]] = wave.alloc()
 // CHECK: wave.store {{.*}} after %[[RELEASE1]]
 func.func @cross_wave_sequence(
@@ -571,7 +571,7 @@ func.func @cross_wave_sequence(
 // CHECK-LABEL: func.func @cross_wave_existing_barrier(
 // CHECK: %[[ALLOC0:.*]] = wave.alloc()
 // CHECK: %[[DONE0:.*]] = wave.join
-// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] value_lifetime({{.*}}) {workgroup_collective}
 // CHECK: %[[ROOT:.*]] = wave.token
 // CHECK: %[[SYNC:.*]] = wave.barrier %[[ROOT]], %[[RELEASE0]]
 // CHECK: wave.alloc

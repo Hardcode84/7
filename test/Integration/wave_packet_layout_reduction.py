@@ -133,6 +133,7 @@ with w.module() as module_builder:
 # LOWER: %[[VALUE:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 # LOWER: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
 # LOWER: %[[RELEASE:.*]] = wave.alloc_release %[[ALLOC]] after %[[DONE]]
+# LOWER-SAME: value_lifetime({{.*}} -> %[[VALUE]])
 # LOWER-SAME: {workgroup_collective}
 # LOWER: %[[NEXT_ALLOC:.*]] = wave.alloc()
 # LOWER: %[[NEXT_STORE:.*]] = wave.store {{.*}} after %[[RELEASE]]
@@ -140,7 +141,8 @@ with w.module() as module_builder:
 # LOWER: %[[NEXT_VALUE:.*]], %[[NEXT_LOAD_TOKEN:.*]] = wave.load
 # LOWER-SAME: after %[[NEXT_PUBLISH]]
 # LOWER: %[[NEXT_DONE:.*]] = wave.join %[[NEXT_LOAD_TOKEN]]
-# LOWER: wave.alloc_release %[[NEXT_ALLOC]] after %[[NEXT_DONE]] {workgroup_collective}
+# LOWER: wave.alloc_release %[[NEXT_ALLOC]] after %[[NEXT_DONE]]
+# LOWER-SAME: value_lifetime({{.*}}) {workgroup_collective}
 # LOWER: wave.binary addi
 # LOWER: wave.store {{.*}} after %[[READ]]
 # LOWER-NOT: wave.reduce

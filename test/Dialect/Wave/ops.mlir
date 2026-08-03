@@ -74,9 +74,13 @@ func.func @wave_alloc() {
                          offset = 256 : i64}
       : !wave.ptr<#wave.shared, i8>
   %dependency = wave.token : !wave.mem.token
-  // CHECK: wave.alloc_release {{.*}} after {{.*}} {workgroup_collective} : (!wave.ptr<#wave.shared, i8>, !wave.mem.token) -> !wave.mem.token
-  %released = wave.alloc_release %alloc after %dependency {workgroup_collective}
-      : (!wave.ptr<#wave.shared, i8>, !wave.mem.token) -> !wave.mem.token
+  %source = arith.constant 0 : i32
+  %result = arith.constant 1 : i32
+  // CHECK: wave.alloc_release {{.*}} after {{.*}} value_lifetime({{.*}} -> {{.*}}) {workgroup_collective} : (!wave.ptr<#wave.shared, i8>, !wave.mem.token, i32, i32) -> !wave.mem.token
+  %released = wave.alloc_release %alloc after %dependency
+      value_lifetime(%source -> %result) {workgroup_collective}
+      : (!wave.ptr<#wave.shared, i8>, !wave.mem.token, i32, i32)
+      -> !wave.mem.token
   return
 }
 

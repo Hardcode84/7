@@ -868,6 +868,31 @@ func.func @alloc_release_wrong_address_space(
 
 // -----
 
+func.func @alloc_release_partial_value_lifetime(
+    %p: !wave.ptr<#wave.shared, i32>, %dependency: !wave.mem.token,
+    %source: i32) {
+  // expected-error @+1 {{lifetime_source and lifetime_result must be present together}}
+  %released = "wave.alloc_release"(%p, %dependency, %source)
+      <{operandSegmentSizes = array<i32: 1, 1, 1, 0>}>
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token, i32)
+      -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @alloc_release_token_value_lifetime(
+    %p: !wave.ptr<#wave.shared, i32>, %dependency: !wave.mem.token) {
+  // expected-error @+1 {{value lifetime operands cannot be memory tokens}}
+  %released = wave.alloc_release %p after %dependency
+      value_lifetime(%dependency -> %dependency)
+      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token,
+         !wave.mem.token, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @alloc_zero_bytesize() {
   // expected-error @+1 {{bytesize must be positive}}
   %p = wave.alloc() {align = 4 : i64, bytesize = 0 : i64} : !wave.ptr<#wave.shared, i32>
