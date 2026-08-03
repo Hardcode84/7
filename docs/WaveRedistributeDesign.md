@@ -314,6 +314,7 @@ parallel wave.load operations after the publish barrier
 wave.pack
 wave.join after all load tokens
 wave.alloc_release {workgroup_collective} after the joined completion
+    value_lifetime(source -> result)
 ```
 
 Stores are siblings, not a component-by-component chain. Loads are siblings and
@@ -330,20 +331,83 @@ release and can permit immediate offset reuse.
 
 Token order alone does not permit workgroup storage aliasing. Allocation
 resolution requires every path from an earlier release to a later access to
-cross `wave.barrier`. A join proves per-wave completion only. Repeated logical
-lifetimes, such as an allocation inside `scf.for`, require collective
-quiescence on the backedge. A terminal direct loop lifetime can put the
-collective barrier on the next iteration's access when an existing carried
-token orders both release and access. A completion used after the loop, or a
-loop without that explicit edge, retains the conservative release-site
-barrier. Resolution materializes either form only for a
-`workgroup_collective` release; an unproven generic release fails instead of
-risking a barrier in divergent control.
+cross `wave.barrier`. A join proves per-wave completion only.
 
-Scratch lifetime, overlapping offsets, reuse dependencies, and loop-carried
-reuse are general `wave.alloc` concerns. `wave.redistribute` neither changes nor
-duplicates that policy. The allocator may reuse this scratch only under its
-ordinary explicit-token contract.
+### Value-derived scratch lifetime
+
+Redistribution scratch has two independent contracts:
+
+- source/result SSA defines logical lifetime and control recurrence;
+- generated memory tokens prove scratch access completion.
+
+Lowering records the first contract as an optional pair on
+`wave.alloc_release`:
+
+```mlir
+%released = wave.alloc_release %scratch after %completion
+    value_lifetime(%source -> %result) {workgroup_collective}
+```
+
+Both lifetime operands are present or absent. They are ordinary SSA operands,
+not memory dependencies. `%source` is the original `wave.redistribute` source;
+`%result` is the lowered packet replacing its result. Unannotated allocations
+retain the generic explicit-token contract.
+
+Allocator representation keeps the pair separate from access and completion
+tokens:
+
+```text
+ValueLifetime { source, result, aliases, terminal_uses, repetitive_regions }
+AllocInterval { allocation, release, accesses, completions, value_lifetime? }
+```
+
+The logical interval starts at the source consumption represented by the
+scratch allocation. Result lifetime is the forward closure of `%result`:
+
+- an ordinary use is a terminal use;
+- a `RegionBranchOpInterface` entry operand forwards to matching successor
+  inputs;
+- a `RegionBranchTerminatorOpInterface` yield forwards to matching successor
+  inputs, including loop block arguments and parent results;
+- every forwarded value is visited once; mixed incoming paths union
+  conservatively;
+- an unused result ends at its definition.
+
+No arbitrary consumer result forwards lifetime. No token ancestry, nearby
+barrier, block position, sibling use, or enclosing-op scan supplies a value
+edge. Unsupported region flow is a diagnostic, not a token-based fallback.
+
+A scratch allocation inside a repetitive region has one dynamic instance per
+region execution. Resolution adds a private `!wave.mem.token` recurrence for
+every such enclosing region crossed by the logical interval:
+
+1. Fresh token initializes the added region input.
+2. First scratch access depends on the added region argument.
+3. A generated workgroup barrier joins scratch completion before the backedge.
+4. Barrier completion feeds only the added backedge operand.
+5. Inactive paths forward the private token unchanged; region exits expose a
+   private result only to later allocator-generated scratch dependencies.
+
+Nested regions materialize inner recurrences before outer recurrences. Scratch
+allocations may share one recurrence only when allocation analysis proves the
+same range, repetitive regions, and a completion chain covering every member.
+Otherwise each allocation gets its own carry.
+
+Existing region operands and results keep their indices and values. Resolution
+never appends scratch completion to a user `scf.yield` operand, selects a user
+memory-token carry, or changes unrelated memory ordering. Any required join,
+barrier, region argument, result, or yield operand belongs to the private
+scratch chain. Release and lifetime markers are erased; synchronization and
+its private carry remain in lowered IR.
+
+Value lifetime controls placement and recurrence. Generated completion tokens
+control quiescence. Reanalysis follows every region rewrite; no flow summary or
+operand pointer survives an IR mutation.
+
+Focused coverage must prove identical recurrence for identical source/result
+flow with no token, one unrelated token carry, or multiple unrelated carries.
+It must also cover direct loop yields, loop-result uses, mixed branch joins,
+nested repetitive regions, and multiple redistributions sharing one range.
 
 ### Scratch optimization
 
@@ -650,8 +714,12 @@ No failure fabricates values or silently changes the relation.
   workgroup barriers.
 - Token-only lifetime order cannot alias workgroup storage; the path must cross
   a workgroup barrier.
-- Repeated logical lifetimes materialize a barrier when the loop backedge lacks
-  collective quiescence and the release is workgroup-collective.
+- Redistribution scratch lifetime follows its source/result SSA pair through
+  structured control flow.
+- Repeated redistribution scratch uses allocator-private carries and never
+  rewrites a user memory-token carry.
+- Repeated generic allocation lifetimes materialize a barrier when the loop
+  backedge lacks collective quiescence and the release is workgroup-collective.
 - A generic repeated release without a collective path or
   `workgroup_collective` guarantee fails allocation resolution.
 - Any redistribution under lane-masked control fails the V1 full-wave contract.
@@ -697,6 +765,8 @@ measurement before golden replacement.
 - Cross-wave lowering emits explicit LDS token and barrier edges.
 - Cross-wave scratch uses one target-scored vector/swizzle map for stores and
   loads per capacity-sized stage.
+- Cross-wave scratch carries source/result lifetime operands into generic
+  allocation resolution.
 - Target capacity chooses one stage or Triton-style rounds; generic allocation
   and resource planning validate the result.
 - Internal barriers do not become user-visible memory-ordering semantics.

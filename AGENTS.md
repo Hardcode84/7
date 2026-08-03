@@ -91,6 +91,9 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 - **Assumptions follow SSA.** `wave.assume` predicates attach to its result.
   Recover them only through defining-value chains, never nearby operations,
   sibling uses, or enclosing regions.
+- **Redistribution lifetime follows SSA.** Derive `wave.redistribute` scratch
+  lifetime from its source and result flow. Never select or rewrite a user
+  memory-token carry; allocator-generated scratch synchronization stays private.
 - **Scheduler is a stall filler.** It builds legal ready sets and applies model
   decisions. Target, occupancy, latency, resource, and filler compatibility
   policy belongs in `CostModel`, represented by named stalls when applicable.
