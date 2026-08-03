@@ -2107,6 +2107,12 @@ def check_matmul_perf_sweep_f16_profiles(perf_sweep) -> None:
         len(four_wave) == 1 and four_wave[0].profile == "gfx950-f16-256x256-4wave",
         "f16 four-wave alias should select only its profile",
     )
+    streamk = perf_sweep.parse_kernel_csv("f16-streamk")
+    require(
+        "matmul_perf_sweep_f16_profiles",
+        len(streamk) == 1 and streamk[0].profile == "gfx950-f16-256x256-4wave-streamk",
+        "f16 Stream-K alias should select only its profile",
+    )
     print("matmul_perf_sweep_f16_profiles: ok")
 
 
