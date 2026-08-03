@@ -523,9 +523,9 @@ until 4-wave is gated or fixed by the scheduler model.
 ## `gfx950-f16-256x256-8wave-spatial`
 
 Opt-in TLX-shaped f16 pipeline. It keeps the standard 256x256 eight-wave tile
-and tile-packed output, but splits each wave's tile into four 16-MFMA spatial
-quadrants. Waves 0-3 and 4-7 run one stage apart. Compute and memory barriers
-alternate; DMA waits attach to compute boundaries.
+and direct column-major output, but splits each wave's tile into four 16-MFMA
+spatial quadrants. Waves 0-3 and 4-7 run one stage apart. Compute and memory
+barriers alternate; DMA waits attach to compute boundaries.
 
 Two K64 steps share one steady-loop branch. At 8192x8192x8192, matched medians
 are 1.502 PFLOP/s random and 1.205 PFLOP/s HPL. The ordinary eight-wave profile
