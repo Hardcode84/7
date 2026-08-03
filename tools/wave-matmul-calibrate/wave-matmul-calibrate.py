@@ -109,6 +109,7 @@ _MXFP4_AITER_PROFILE: dict[str, ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "mxfp4",
     "output_type": "f16",
+    "output_layout": "row-major",
     "output_store_cache": "cs",
     "mxfp4_input_layout": "aiter",
     "cta_swizzle_xcds": 8,
@@ -127,6 +128,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
         "output_type": "f16",
+        "output_layout": "column-major",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
@@ -142,6 +144,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
         "output_type": "f16",
+        "output_layout": "column-major",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
@@ -157,7 +160,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
         "output_type": "f16",
-        "output_layout": "tile-packed",
+        "output_layout": "column-major",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
@@ -173,6 +176,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "f16",
         "output_type": "f16",
+        "output_layout": "column-major",
         "output_store_cache": "cs",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
@@ -209,6 +213,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "mxfp4",
         "output_type": "f16",
+        "output_layout": "column-major",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
     },
@@ -224,6 +229,7 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "matrix_intrinsic": "mfma_gfx950",
         "input_type": "mxfp4",
         "output_type": "f16",
+        "output_layout": "column-major",
         "mxfp4_scale_path": "regs",
         "cta_swizzle_xcds": 8,
         "cta_group_m": 4,
@@ -394,6 +400,21 @@ def input_mode_name(args: argparse.Namespace) -> str:
     return "random"
 
 
+def effective_output_layout(args: argparse.Namespace) -> str:
+    output_layout = getattr(args, "output_layout", "automatic")
+    if output_layout != "automatic":
+        return output_layout
+    if is_v9_perf_golden(args):
+        return "row-major"
+    if is_tlx_mxfp_perf_golden(args) or selected_example(args) == "tensilelite-subtile":
+        return "tile-packed"
+    if is_streamk_gemm(args) or getattr(args, "coalesced_mfma_output", False):
+        return "column-major"
+    if getattr(args, "mxfp4_input_layout", "canonical") == "aiter":
+        return "row-major"
+    return "row-major"
+
+
 def append_option_if(cmd: list[str], enabled: bool, option: str) -> None:
     if enabled:
         cmd.append(option)
@@ -452,6 +473,7 @@ def build_matmul_example_args(args: argparse.Namespace, chip: str) -> list[str]:
     append_option_if(
         cmd, args.output_type != "f32", f"--output-type={args.output_type}"
     )
+    cmd.append(f"--output-layout={effective_output_layout(args)}")
     output_store_cache = getattr(args, "output_store_cache", "none")
     append_option_if(
         cmd,
@@ -987,11 +1009,6 @@ def run_hw(
     env = os.environ.copy()
     existing_ld = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = rocm_lib + (":" + existing_ld if existing_ld else "")
-    effective_output_layout = getattr(args, "output_layout", "automatic")
-    if effective_output_layout == "automatic" and getattr(
-        args, "coalesced_mfma_output", False
-    ):
-        effective_output_layout = "column-major"
     cmd = [
         str(runner),
         "--m",
@@ -1015,7 +1032,7 @@ def run_hw(
         "--accumulator-layout",
         accumulator_layout(args),
         "--output-layout",
-        effective_output_layout,
+        effective_output_layout(args),
         "--input-type",
         args.input_type,
         "--c-type",
@@ -1318,11 +1335,10 @@ def validate_aiter_mxfp4_args(args: argparse.Namespace) -> None:
         sys.exit("--mxfp4-input-layout=aiter requires --input-type=mxfp4")
     if mxfp4_scale_path != "dma":
         sys.exit("--mxfp4-input-layout=aiter requires --mxfp4-scale-path=dma")
-    if args.coalesced_mfma_output or args.output_layout not in (
-        "automatic",
-        "tile-packed",
-    ):
-        sys.exit("AITER input layout requires tile-packed kernel output")
+    if args.coalesced_mfma_output:
+        sys.exit("AITER input layout does not support coalesced output")
+    if effective_output_layout(args) != "row-major":
+        sys.exit("AITER input layout requires row-major output")
 
 
 def validate_mxfp4_args(args: argparse.Namespace) -> None:
@@ -1336,6 +1352,14 @@ def validate_mxfp4_args(args: argparse.Namespace) -> None:
         if mxfp4_scale_path != "dma":
             sys.exit("--mxfp4-scale-path=regs requires --input-type=mxfp4")
     validate_aiter_mxfp4_args(args)
+
+
+def validate_output_layout_args(args: argparse.Namespace) -> None:
+    if (
+        getattr(args, "coalesced_mfma_output", False)
+        and effective_output_layout(args) != "column-major"
+    ):
+        sys.exit("coalesced MFMA output requires column-major output")
 
 
 def _require_arg(condition: bool, message: str) -> None:
@@ -1434,7 +1458,7 @@ def _validate_streamk_topology(args: argparse.Namespace, tile_count: int) -> Non
         "--example=streamk-gemm requires GROUP_SIZE_M to divide M tiles",
     )
     _require_arg(
-        args.output_layout == "column-major",
+        effective_output_layout(args) == "column-major",
         "--example=streamk-gemm requires column-major output",
     )
 
@@ -1657,6 +1681,7 @@ def validate_args(args: argparse.Namespace) -> None:
     validate_tool_output_args(args)
     validate_example_args(args)
     validate_mxfp4_args(args)
+    validate_output_layout_args(args)
     validate_matmul_target_args(args)
 
 

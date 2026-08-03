@@ -281,6 +281,8 @@ _OUTPUT_STORE_CACHE_KINDS = {
     "wt": dsl.StoreCacheAttr.WT,
 }
 
+_OUTPUT_LAYOUTS = ("tile-packed", "row-major", "column-major")
+
 
 @dataclass(frozen=True)
 class _MatmulConfig:
@@ -297,6 +299,7 @@ class _MatmulConfig:
     matrix_intrinsic: str = "wmma"
     input_type: str = "f16"
     output_type: str = "f32"
+    output_layout: str = "row-major"
     output_store_cache: str = "none"
     mxfp4_scale_path: str = "dma"
     mxfp4_input_layout: str = "canonical"
@@ -491,6 +494,7 @@ def _validate_positive_shape(cfg: _MatmulConfig) -> None:
     _validate_cta_remap_params(cfg)
     _validate_wave_tile_counts(cfg)
     _validate_choice("output_type", cfg.output_type, ("f32", "f16"))
+    _validate_choice("output_layout", cfg.output_layout, _OUTPUT_LAYOUTS)
     _validate_choice(
         "output_store_cache",
         cfg.output_store_cache,
@@ -577,14 +581,20 @@ def _validate_coalesced_mfma_output(cfg: _MatmulConfig) -> None:
         raise ValueError("coalesced MFMA output requires gfx950 f16 MFMA")
     if cfg.output_type != "f16":
         raise ValueError("coalesced MFMA output requires f16 output")
-    if (
-        cfg.mma.wave_size != 64
-        or cfg.mma.acc_registers != 4
-        or cfg.wave_m_tiles != 8
-        or cfg.wave_n_tiles != 8
-        or cfg.BM != cfg.BN
-    ):
+    if cfg.output_layout != "column-major":
+        raise ValueError("coalesced MFMA output requires column-major output")
+    if not _has_coalesced_mfma_shape(cfg):
         raise ValueError("coalesced MFMA output requires a square 8x8 wave64 tile")
+
+
+def _has_coalesced_mfma_shape(cfg: _MatmulConfig) -> bool:
+    return (
+        cfg.mma.wave_size == 64
+        and cfg.mma.acc_registers == 4
+        and cfg.wave_m_tiles == 8
+        and cfg.wave_n_tiles == 8
+        and cfg.BM == cfg.BN
+    )
 
 
 def _validate_dma_subpanel_schedule(
@@ -610,7 +620,9 @@ def _validate_dma_spatial_subpanel_schedule(
     if cfg.wave_k_tiles != 2:
         raise ValueError("DMA spatial subpanel pipeline requires two K32 phases")
     if cfg.coalesced_mfma_output:
-        raise ValueError("DMA spatial subpanel pipeline requires tile-packed output")
+        raise ValueError(
+            "DMA spatial subpanel pipeline does not support coalesced output"
+        )
     if cfg.wave_m_tiles % 2 or cfg.wave_n_tiles % 2:
         raise ValueError("DMA spatial subpanel pipeline requires even wave tiles")
     if cfg.waves_per_workgroup != 8:
@@ -682,7 +694,9 @@ def _validate_aiter_mxfp4_pipeline(cfg: _MatmulConfig) -> None:
     if cfg.mma.name != "mfma_gfx950" or not cfg.use_buffer or not cfg.use_dma_lds:
         raise ValueError("AITER input layout requires buffered gfx950 DMA MFMA")
     if cfg.coalesced_mfma_output:
-        raise ValueError("AITER input layout requires tile-packed kernel output")
+        raise ValueError("AITER input layout does not support coalesced output")
+    if cfg.output_layout != "row-major":
+        raise ValueError("AITER input layout requires row-major output")
     if cfg.mxfp4_scale_path != "dma":
         raise ValueError("AITER input layout requires the DMA scale path")
 
@@ -986,16 +1000,32 @@ def _store_reference_tile(
     tile: tuple[float, ...],
     m_tile: int,
     n_tile: int,
-    coalesced_mfma_output: bool,
+    output_layout: str,
 ) -> None:
-    if not coalesced_mfma_output:
+    if output_layout == "tile-packed":
         out.extend(tile)
         return
     for mi in range(16):
         for nj in range(16):
             m = m_tile * 16 + mi
             n = n_tile * 16 + nj
-            out[n * cfg.M + m] = tile[mi * 16 + nj]
+            offset = n * cfg.M + m if output_layout == "column-major" else m * cfg.N + n
+            out[offset] = tile[mi * 16 + nj]
+
+
+def _resolve_output_layout(
+    output_layout: str,
+    coalesced_mfma_output: bool,
+    aiter_mxfp4_input: bool = False,
+) -> str:
+    if output_layout == "automatic":
+        if aiter_mxfp4_input:
+            return "row-major"
+        return "column-major" if coalesced_mfma_output else "row-major"
+    if output_layout not in _OUTPUT_LAYOUTS:
+        choices = ", ".join(("automatic", *_OUTPUT_LAYOUTS))
+        raise ValueError(f"output_layout must be one of {choices}; got {output_layout}")
+    return output_layout
 
 
 def compute_wmma_f16_matmul_reference_buffer(
@@ -1015,8 +1045,10 @@ def compute_wmma_f16_matmul_reference_buffer(
     output_type: str = "f32",
     cta_swizzle_xcds: int = 1,
     cta_group_m: int = 1,
+    output_layout: str = "automatic",
     coalesced_mfma_output: bool = False,
 ) -> tuple[float, ...]:
+    output_layout = _resolve_output_layout(output_layout, coalesced_mfma_output)
     cfg = _MatmulConfig(
         M=M,
         N=N,
@@ -1031,6 +1063,7 @@ def compute_wmma_f16_matmul_reference_buffer(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        output_layout=output_layout,
         cta_swizzle_xcds=cta_swizzle_xcds,
         cta_group_m=cta_group_m,
         coalesced_mfma_output=coalesced_mfma_output,
@@ -1047,7 +1080,9 @@ def compute_wmma_f16_matmul_reference_buffer(
     b_scales: tuple[int, ...] | None = None
     if cfg.uses_packed_mxfp4:
         a_scales, b_scales = generate_mxfp4_scale_inputs(M, N, K)
-    out: list[float] = [0.0] * cfg.total_elements if coalesced_mfma_output else []
+    out: list[float] = (
+        [] if output_layout == "tile-packed" else [0.0] * cfg.total_elements
+    )
     for wg_m in range(cfg.M_blocks):
         for wg_n in range(cfg.N_blocks):
             for wave_id in range(cfg.waves_per_workgroup):
@@ -1074,7 +1109,7 @@ def compute_wmma_f16_matmul_reference_buffer(
                             tile,
                             m_tile,
                             n_tile,
-                            coalesced_mfma_output,
+                            output_layout,
                         )
     if cfg.output_type == "f16":
         return tuple(_round_f16(value) for value in out)
@@ -1200,6 +1235,24 @@ def _emit_c_ptr(
                 c_wave_off,
                 0,
                 cfg.c_elements - 1 - (wave_m - 1) - (wave_n - 1) * cfg.M,
+            )
+        return bld.ptr_add(c_arg, c_wave_off)
+
+    if cfg.output_layout != "tile-packed":
+        wave_m = 16 * cfg.wave_m_tiles
+        wave_n = 16 * cfg.wave_n_tiles
+        m_base = wg_m * (cfg.BM * wave_m) + m_wave * wave_m
+        n_base = wg_n * (cfg.BN * wave_n) + n_wave * wave_n
+        if cfg.output_layout == "column-major":
+            offset = m_base + n_base * cfg.M
+            local_extent = wave_m - 1 + (wave_n - 1) * cfg.M
+        else:
+            offset = m_base * cfg.N + n_base
+            local_extent = (wave_m - 1) * cfg.N + wave_n - 1
+        c_wave_off = bld.index_expr(offset, bindings=bindings)
+        if assume_bounds:
+            c_wave_off = bld.assume_range(
+                c_wave_off, 0, cfg.c_elements - 1 - local_extent
             )
         return bld.ptr_add(c_arg, c_wave_off)
 
@@ -1339,7 +1392,7 @@ def _emit_tile_inputs(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileInpu
             b_scale_arg = _wrap_in_buffer(
                 bld, b_scale_arg, cfg.b_scale_elements, dsl.i8(), 1
             )
-        if cfg.coalesced_mfma_output:
+        if cfg.output_layout != "tile-packed":
             c_arg = _wrap_in_buffer(
                 bld,
                 c_arg,
@@ -2642,9 +2695,13 @@ def _initial_tile_ptrs(
 ) -> _TilePtrs:
     a0 = _tile_fragment_ptrs(bld, cfg, coords.a_lane_base, cfg.wave_m_tiles)
     b0 = _tile_fragment_ptrs(bld, cfg, coords.b_lane_base, cfg.wave_n_tiles)
-    c = tuple(
-        _ptr_add_const(bld, coords.c_ptr, i * 256) for i in range(cfg.tiles_per_wave)
-    )
+    if cfg.output_layout != "tile-packed":
+        c = (coords.c_ptr,) * cfg.tiles_per_wave
+    else:
+        c = tuple(
+            _ptr_add_const(bld, coords.c_ptr, i * 256)
+            for i in range(cfg.tiles_per_wave)
+        )
     return _TilePtrs(a0=a0, b0=b0, a_dma0=(), b_dma0=(), c=c)
 
 
@@ -5964,6 +6021,7 @@ def _mxfp4_output_lds_bytes(cfg: _MatmulConfig) -> int:
 def _can_coalesce_mxfp4_epilogue(cfg: _MatmulConfig) -> bool:
     return (
         cfg.uses_packed_mxfp4
+        and cfg.output_layout == "tile-packed"
         and cfg.output_type == "f16"
         and cfg.waves_per_workgroup <= 4
         and cfg.mma.acc_registers * 16 == 64
@@ -6029,7 +6087,13 @@ def _store_final_mxfp4_tiles_split(
         )
     else:
         _store_acc_tiles(
-            bld, cfg, right_accs, c_ptrs, n_mid, cfg.wave_n_tiles, after=scale_token
+            bld,
+            cfg,
+            right_accs,
+            c_ptrs,
+            n_mid,
+            cfg.wave_n_tiles,
+            after=scale_token,
         )
 
 
@@ -6043,11 +6107,15 @@ def _store_acc_tiles(
     *,
     after: dsl.Value | None = None,
 ) -> dsl.Value:
-    cache = _output_store_cache(cfg)
     if cfg.coalesced_mfma_output:
         return _store_acc_tiles_mfma_coalesced(
             bld, cfg, accs, c_ptrs[0], n_begin, n_end, after=after
         )
+    if cfg.output_layout != "tile-packed":
+        return _store_acc_tiles_dense(
+            bld, cfg, accs, c_ptrs, n_begin, n_end, after=after
+        )
+    cache = _output_store_cache(cfg)
     tokens: list[dsl.Value] = []
     for i in range(cfg.wave_m_tiles):
         for j in range(n_begin, n_end):
@@ -6070,6 +6138,153 @@ def _store_acc_tiles(
                     )
                 )
     return _join_tokens(bld, tokens)
+
+
+def _store_acc_tiles_dense(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    accs: tuple[dsl.Value, ...],
+    c_ptrs: tuple[dsl.Value, ...],
+    n_begin: int,
+    n_end: int,
+    *,
+    after: dsl.Value | None = None,
+) -> dsl.Value:
+    cache = _output_store_cache(cfg)
+    regs_type = dsl.simd_type(
+        dsl.vector_type(cfg.mma.acc_registers, dsl.f32()), width=cfg.mma.wave_size
+    )
+    f32_simd = dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size)
+    f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
+    wi = dsl.sym("__wave_dsl_dense_store_wi")
+    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
+    lane = dsl.mod(wi, cfg.mma.wave_size)
+    lane_col = dsl.mod(lane, 16)
+
+    tokens: list[dsl.Value] = []
+    for i in range(cfg.wave_m_tiles):
+        for j in range(n_begin, n_end):
+            acc_idx = i * cfg.wave_n_tiles + j
+            c_ptr = _dense_tile_ptr(bld, cfg, c_ptrs[acc_idx], i, j)
+            regs = waveamd.FragmentUnpackOp(regs_type, accs[acc_idx]).result
+            if cfg.output_layout == "column-major" and cfg.mma.name != "wmma":
+                tokens.append(
+                    _store_dense_mfma_column_tile(
+                        bld,
+                        cfg,
+                        accs[acc_idx],
+                        regs,
+                        c_ptr,
+                        wi,
+                        wi_val,
+                        lane,
+                        lane_col,
+                        after,
+                        cache,
+                    )
+                )
+            else:
+                tokens.extend(
+                    _store_dense_scalar_tile(
+                        bld,
+                        cfg,
+                        regs,
+                        c_ptr,
+                        wi,
+                        wi_val,
+                        lane,
+                        lane_col,
+                        f32_simd,
+                        f16_simd,
+                        after,
+                        cache,
+                    )
+                )
+    return _join_tokens(bld, tokens)
+
+
+def _dense_tile_ptr(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    c_ptr: dsl.Value,
+    i: int,
+    j: int,
+) -> dsl.Value:
+    if _uses_dma_spatial_subpanel_pipeline(cfg):
+        return c_ptr
+    tile_offset = (
+        i * 16 + j * 16 * cfg.M
+        if cfg.output_layout == "column-major"
+        else i * 16 * cfg.N + j * 16
+    )
+    return _ptr_add_const(bld, c_ptr, tile_offset)
+
+
+def _store_dense_mfma_column_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    acc: dsl.Value,
+    regs: dsl.Value,
+    c_ptr: dsl.Value,
+    wi: dsl.Expr,
+    wi_val: dsl.Value,
+    lane: dsl.Expr,
+    lane_col: dsl.Expr,
+    after: dsl.Value | None,
+    cache: Attribute | None,
+) -> dsl.Value:
+    offset = bld.index_expr(
+        dsl.floor(lane / 16) * cfg.mma.acc_registers + lane_col * cfg.M,
+        bindings={wi: wi_val},
+    )
+    value = _pack_fragment_f16(bld, cfg, acc) if cfg.output_type == "f16" else regs
+    return bld.store(
+        value,
+        bld.ptr_add(c_ptr, offset),
+        after=after,
+        cache=cache,
+    )
+
+
+def _store_dense_scalar_tile(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    regs: dsl.Value,
+    c_ptr: dsl.Value,
+    wi: dsl.Expr,
+    wi_val: dsl.Value,
+    lane: dsl.Expr,
+    lane_col: dsl.Expr,
+    f32_simd: dsl.Type,
+    f16_simd: dsl.Type,
+    after: dsl.Value | None,
+    cache: Attribute | None,
+) -> list[dsl.Value]:
+    tokens: list[dsl.Value] = []
+    for reg in range(cfg.mma.acc_registers):
+        value = wave.ExtractOp(f32_simd, regs, reg).result
+        if cfg.output_type == "f16":
+            value = bld.fpconvert(value, f16_simd)
+        row = (
+            dsl.floor(lane / 16) + 2 * reg
+            if cfg.mma.name == "wmma"
+            else dsl.floor(lane / 16) * cfg.mma.acc_registers + reg
+        )
+        offset_expr = (
+            row + lane_col * cfg.M
+            if cfg.output_layout == "column-major"
+            else row * cfg.N + lane_col
+        )
+        offset = bld.index_expr(offset_expr, bindings={wi: wi_val})
+        tokens.append(
+            bld.store(
+                value,
+                bld.ptr_add(c_ptr, offset),
+                after=after,
+                cache=cache,
+            )
+        )
+    return tokens
 
 
 def _output_store_cache(cfg: _MatmulConfig) -> Attribute | None:
@@ -8441,6 +8656,17 @@ def _dma_spatial_c_ptrs(
             owner_wave = owner_m * cfg.BN + owner_n
             local_i = dsl.mod(m_tile, cfg.wave_m_tiles)
             local_j = dsl.mod(n_tile, cfg.wave_n_tiles)
+            if cfg.output_layout != "tile-packed":
+                global_m = wg_m * (cfg.BM * cfg.wave_m_tiles * 16) + m_tile * 16
+                global_n = wg_n * (cfg.BN * cfg.wave_n_tiles * 16) + n_tile * 16
+                offset_expr = (
+                    global_m + global_n * cfg.M
+                    if cfg.output_layout == "column-major"
+                    else global_m * cfg.N + global_n
+                )
+                offset = bld.index_expr(offset_expr, bindings=bindings)
+                ptrs.append(bld.ptr_add(coords.c_base, offset))
+                continue
             slot = (
                 owner_wave * cfg.tiles_per_wave + local_i * cfg.wave_n_tiles + local_j
             )
@@ -10725,6 +10951,7 @@ def _make_matmul_config(
     matrix_intrinsic: str,
     input_type: str,
     output_type: str,
+    output_layout: str,
     mxfp4_scale_path: str,
     mxfp4_input_layout: str = "canonical",
     random_data: bool,
@@ -10752,6 +10979,7 @@ def _make_matmul_config(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        output_layout=output_layout,
         output_store_cache=output_store_cache,
         mxfp4_scale_path=mxfp4_scale_path,
         mxfp4_input_layout=mxfp4_input_layout,
@@ -10799,6 +11027,7 @@ def _make_gfx950_f16_streamk_config(
         matrix_intrinsic="mfma_gfx950",
         input_type="f16",
         output_type="f16",
+        output_layout="column-major",
         output_store_cache="cs",
         mxfp4_scale_path="dma",
         mxfp4_input_layout="canonical",
@@ -10877,6 +11106,7 @@ def build_wmma_f16_matmul_module(
     matrix_intrinsic: str = "wmma",
     input_type: str = "f16",
     output_type: str = "f32",
+    output_layout: str = "automatic",
     output_store_cache: str = "none",
     mxfp4_scale_path: str = "dma",
     mxfp4_input_layout: str = "canonical",
@@ -10893,6 +11123,11 @@ def build_wmma_f16_matmul_module(
     include_host: bool = True,
 ) -> Module:
     """Return an MLIR module for tiled matmul."""
+    output_layout = _resolve_output_layout(
+        output_layout,
+        coalesced_mfma_output,
+        mxfp4_input_layout == "aiter",
+    )
     cfg = _make_matmul_config(
         M=M,
         N=N,
@@ -10907,6 +11142,7 @@ def build_wmma_f16_matmul_module(
         matrix_intrinsic=matrix_intrinsic,
         input_type=input_type,
         output_type=output_type,
+        output_layout=output_layout,
         output_store_cache=output_store_cache,
         mxfp4_scale_path=mxfp4_scale_path,
         mxfp4_input_layout=mxfp4_input_layout,

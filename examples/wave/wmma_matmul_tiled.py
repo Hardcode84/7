@@ -108,6 +108,7 @@ _GFX950_SW_PIPELINE: dict[str, _ProfileValue] = {
     "use_buffer": True,
     "use_dma_lds": True,
     "matrix_intrinsic": "mfma_gfx950",
+    "output_layout": "column-major",
 }
 
 _GFX950_F16_256X256_16WAVE: dict[str, _ProfileValue] = {
@@ -121,6 +122,7 @@ _GFX950_F16_256X256_16WAVE: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "f16",
     "output_type": "f16",
+    "output_layout": "column-major",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
 }
@@ -137,6 +139,7 @@ _GFX950_F16_256X256_8WAVE: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "f16",
     "output_type": "f16",
+    "output_layout": "column-major",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
 }
@@ -153,6 +156,7 @@ _GFX950_F16_256X256_4WAVE: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "f16",
     "output_type": "f16",
+    "output_layout": "column-major",
     "output_store_cache": "cs",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
@@ -170,6 +174,7 @@ _GFX950_MXFP4_256X256_8WAVE: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "mxfp4",
     "output_type": "f16",
+    "output_layout": "column-major",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
 }
@@ -186,6 +191,7 @@ _GFX950_MXFP4_256X256_4WAVE: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "mxfp4",
     "output_type": "f16",
+    "output_layout": "column-major",
     "mxfp4_scale_path": "regs",
     "cta_swizzle_xcds": 8,
     "cta_group_m": 4,
@@ -198,6 +204,7 @@ _GFX950_MXFP4_AITER: dict[str, _ProfileValue] = {
     "matrix_intrinsic": "mfma_gfx950",
     "input_type": "mxfp4",
     "output_type": "f16",
+    "output_layout": "row-major",
     "output_store_cache": "cs",
     "mxfp4_input_layout": "aiter",
     "cta_swizzle_xcds": 8,
@@ -318,6 +325,27 @@ def _add_tile_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_output_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--output-type",
+        choices=("f32", "f16"),
+        default="f32",
+        help="output element type for C",
+    )
+    parser.add_argument(
+        "--output-layout",
+        choices=("automatic", "tile-packed", "row-major", "column-major"),
+        default="automatic",
+        help="physical output layout",
+    )
+    parser.add_argument(
+        "--output-store-cache",
+        choices=("none", "wb", "cg", "cs", "wt"),
+        default="none",
+        help="cache policy for output stores",
+    )
+
+
 def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
     ensure_package_on_path("mlir.dialects.wave_target")
     from mlir.dialects.wave_target import MATRIX_INTRINSIC_CHOICES
@@ -386,18 +414,7 @@ def _add_codegen_args(parser: argparse.ArgumentParser) -> None:
         default="f16",
         help="input element type for A and B",
     )
-    parser.add_argument(
-        "--output-type",
-        choices=("f32", "f16"),
-        default="f32",
-        help="output element type for C",
-    )
-    parser.add_argument(
-        "--output-store-cache",
-        choices=("none", "wb", "cg", "cs", "wt"),
-        default="none",
-        help="cache policy for output stores",
-    )
+    _add_output_args(parser)
     parser.add_argument(
         "--mxfp4-scale-path",
         choices=("dma", "regs"),
@@ -433,16 +450,34 @@ def _validate_mxfp4_args(
         parser.error("--mxfp4-scale-path=regs requires --input-type=mxfp4")
     if args.mxfp4_input_layout != "canonical" and args.input_type != "mxfp4":
         parser.error("--mxfp4-input-layout=aiter requires --input-type=mxfp4")
-    if args.mxfp4_input_layout == "aiter" and args.mxfp4_scale_path != "dma":
+    _validate_aiter_args(parser, args)
+
+
+def _validate_aiter_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.mxfp4_input_layout != "aiter":
+        return
+    if args.mxfp4_scale_path != "dma":
         parser.error("--mxfp4-input-layout=aiter requires --mxfp4-scale-path=dma")
-    if args.mxfp4_input_layout == "aiter" and args.coalesced_mfma_output:
-        parser.error("AITER input layout requires tile-packed kernel output")
+    if args.coalesced_mfma_output:
+        parser.error("AITER input layout does not support coalesced output")
+    if args.output_layout != "row-major":
+        parser.error("AITER input layout requires row-major output")
+
+
+def _validate_output_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.coalesced_mfma_output and args.output_layout != "column-major":
+        parser.error("coalesced MFMA output requires column-major output")
 
 
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.target_waves < 0:
         parser.error("--target-waves must be non-negative")
     _validate_mxfp4_args(parser, args)
+    _validate_output_args(parser, args)
     if args.kernel_only and (args.run or args.compare_cpu):
         parser.error("--kernel-only cannot be used with --run/--compare-cpu")
 
@@ -455,6 +490,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     _add_runner_args(parser)
     parser.set_defaults(**profile_defaults(argv))
     args = parser.parse_args(argv)
+    if args.output_layout == "automatic":
+        if args.mxfp4_input_layout == "aiter":
+            args.output_layout = "row-major"
+        elif args.coalesced_mfma_output:
+            args.output_layout = "column-major"
+        else:
+            args.output_layout = "row-major"
     _validate_args(parser, args)
     try:
         args.matrix_intrinsic = _select_matrix_intrinsic(
@@ -558,11 +600,13 @@ def _compare_output(
     actual: tuple[float, ...],
     expected: tuple[float, ...],
     *,
-    coalesced_mfma_output: bool,
+    output_layout: str,
     atol: float,
     rtol: float,
 ) -> tuple[bool, str]:
-    compare = _compare_buffers if coalesced_mfma_output else _compare_tile_multisets
+    compare = (
+        _compare_tile_multisets if output_layout == "tile-packed" else _compare_buffers
+    )
     return compare(actual, expected, atol=atol, rtol=rtol)
 
 
@@ -593,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=args.matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
+        output_layout=args.output_layout,
         output_store_cache=args.output_store_cache,
         mxfp4_scale_path=args.mxfp4_scale_path,
         mxfp4_input_layout=args.mxfp4_input_layout,
@@ -642,6 +687,7 @@ def main(argv: list[str] | None = None) -> int:
         matrix_intrinsic=args.matrix_intrinsic,
         input_type=args.input_type,
         output_type=args.output_type,
+        output_layout=args.output_layout,
         cta_swizzle_xcds=args.cta_swizzle_xcds,
         cta_group_m=args.cta_group_m,
         coalesced_mfma_output=args.coalesced_mfma_output,
@@ -649,7 +695,7 @@ def main(argv: list[str] | None = None) -> int:
     ok, message = _compare_output(
         parse_runner_values(output),
         expected,
-        coalesced_mfma_output=args.coalesced_mfma_output,
+        output_layout=args.output_layout,
         atol=args.atol,
         rtol=args.rtol,
     )

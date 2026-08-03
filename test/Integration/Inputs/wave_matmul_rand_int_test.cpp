@@ -142,7 +142,7 @@ static void checkOutputCoordinates() {
 
 static void checkOutputLayouts() {
   Args args;
-  if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked)
+  if (getEffectiveOutputLayout(args) != OutputLayout::RowMajor)
     fail("matmul automatic output layout mismatch");
   args.kernelABI = KernelABI::V9Golden;
   if (getEffectiveOutputLayout(args) != OutputLayout::RowMajor)
@@ -180,12 +180,10 @@ static Args makeAITERArgs() {
 static void checkAITERRunnerContract() {
   Args args = makeAITERArgs();
   validateArgs(args);
-  if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked ||
-      getFinalOutputLayout(args) != OutputLayout::RowMajor)
+  if (getEffectiveOutputLayout(args) != OutputLayout::RowMajor)
     fail("AITER output contract mismatch");
   HostInputs inputs = makeHostInputs(args);
   validateRandomAITERInputs(inputs, args);
-  validateAITEROutputMapping(args.m * args.n, args);
   std::printf("aiter_runner_contract: ok\n");
 }
 
@@ -196,101 +194,6 @@ static void checkAITERRunnerContract() {
               inputs.aKernelScale.begin() + 256);
   validateRandomAITERInputs(inputs, args);
   fail("random AITER scale block alias accepted");
-}
-
-struct AITERExpectedOutput {
-  std::vector<uint16_t> values;
-  std::vector<uint8_t> seen;
-  int packedIndex = 0;
-};
-
-static void fillExpectedAITERTile(const Args &args,
-                                  const std::vector<uint16_t> &packed,
-                                  AITERExpectedOutput &expected, int wgM,
-                                  int wgN, int waveN, int tileM, int tileN) {
-  for (int lane = 0; lane < 64; ++lane) {
-    for (int laneValue = 0; laneValue < 4; ++laneValue) {
-      int m = wgM * 32 + tileM * 16 + (lane / 16) * 4 + laneValue;
-      int n = wgN * 128 + waveN * 32 + tileN * 16 + lane % 16;
-      int logicalIndex = m * args.n + n;
-      if (expected.seen[logicalIndex])
-        fail("AITER expected mapping is not bijective");
-      expected.seen[logicalIndex] = 1;
-      expected.values[logicalIndex] = packed[expected.packedIndex++];
-    }
-  }
-}
-
-static void fillExpectedAITERWorkgroup(const Args &args,
-                                       const std::vector<uint16_t> &packed,
-                                       AITERExpectedOutput &expected, int wgM,
-                                       int wgN) {
-  for (int waveN = 0; waveN < 4; ++waveN)
-    for (int tileM = 0; tileM < 2; ++tileM)
-      for (int tileN = 0; tileN < 2; ++tileN)
-        fillExpectedAITERTile(args, packed, expected, wgM, wgN, waveN, tileM,
-                              tileN);
-}
-
-static std::vector<uint16_t>
-makeExpectedAITEROutput(const Args &args, const std::vector<uint16_t> &packed) {
-  AITERExpectedOutput expected{std::vector<uint16_t>(packed.size()),
-                               std::vector<uint8_t>(packed.size())};
-  for (int wgM = 0; wgM < 8; ++wgM)
-    for (int wgN = 0; wgN < 2; ++wgN)
-      fillExpectedAITERWorkgroup(args, packed, expected, wgM, wgN);
-  if (expected.packedIndex != static_cast<int>(packed.size()))
-    fail("AITER expected mapping missed packed values");
-  for (uint8_t value : expected.seen)
-    if (!value)
-      fail("AITER expected mapping missed row-major values");
-  return std::move(expected.values);
-}
-
-static void runAITERDeviceOutputConversion(const Args &args,
-                                           DeviceBuffers &buffers,
-                                           bool invert) {
-  std::vector<uint16_t> packed(buffers.cElements);
-  for (int index = 0; index < buffers.cElements; ++index) {
-    uint16_t value = static_cast<uint16_t>(index);
-    packed[index] = invert ? static_cast<uint16_t>(~value) : value;
-  }
-  std::vector<uint16_t> expected = makeExpectedAITEROutput(args, packed);
-  checkHip(hipMemset(buffers.deviceFinalC, 0xa5, buffers.cBytes),
-           "hipMemset test final C");
-  checkHip(hipMemcpy(buffers.deviceC, packed.data(), buffers.cBytes,
-                     hipMemcpyHostToDevice),
-           "hipMemcpy test C");
-  launchAITEROutputConversion(buffers, args);
-  checkHip(hipDeviceSynchronize(), "AITER conversion sync");
-  std::vector<uint16_t> rowMajor(buffers.cElements);
-  checkHip(hipMemcpy(rowMajor.data(), buffers.deviceFinalC, buffers.cBytes,
-                     hipMemcpyDeviceToHost),
-           "hipMemcpy test final C");
-  for (int index = 0; index < buffers.cElements; ++index)
-    if (rowMajor[index] != expected[index])
-      fail("AITER device output conversion mismatch");
-}
-
-static void checkAITERDeviceOutputConversion() {
-  Args args = makeAITERArgs();
-  args.n = 256;
-  validateArgs(args);
-  if (args.m != 256 || args.n != 256 || args.bm != 1 || args.bn != 4 ||
-      args.waveMTiles != 2 || args.waveNTiles != 2 || args.waveSize != 64)
-    fail("AITER conversion test geometry changed");
-
-  DeviceBuffers buffers;
-  buffers.cElements = getOutputElementCount(args);
-  buffers.cBytes = buffers.cElements * sizeof(uint16_t);
-  checkHip(hipMalloc(&buffers.deviceC, buffers.cBytes), "hipMalloc test C");
-  checkHip(hipMalloc(&buffers.deviceFinalC, buffers.cBytes),
-           "hipMalloc test final C");
-  runAITERDeviceOutputConversion(args, buffers, false);
-  runAITERDeviceOutputConversion(args, buffers, true);
-  checkHip(hipFree(buffers.deviceC), "hipFree test C");
-  checkHip(hipFree(buffers.deviceFinalC), "hipFree test final C");
-  std::printf("aiter_device_output_conversion: ok\n");
 }
 
 static Args makeStreamKArgs() {
@@ -406,7 +309,7 @@ static bool setStreamKInvalidMode(const char *mode, Args &args) {
 static bool setAITERInvalidMode(const char *mode, Args &args) {
   if (std::strcmp(mode, "aiter-output-layout") == 0) {
     args = makeAITERArgs();
-    args.outputLayout = OutputLayout::RowMajor;
+    args.outputLayout = OutputLayout::TilePacked;
     return true;
   }
   if (std::strcmp(mode, "aiter-wmma") == 0) {
@@ -499,11 +402,6 @@ static bool runOverflowInvalidMode(const char *mode) {
 }
 
 int main(int argc, char **argv) {
-  if (argc == 2 &&
-      std::strcmp(argv[1], "aiter-device-output-conversion") == 0) {
-    checkAITERDeviceOutputConversion();
-    return 0;
-  }
   if (argc == 2 && std::strcmp(argv[1], "aiter-scale-block-alias") == 0)
     checkAITERScaleBlockAlias();
   if (argc == 2)

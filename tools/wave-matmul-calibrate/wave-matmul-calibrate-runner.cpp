@@ -501,8 +501,6 @@ static void validateTLXMXFPArgs(const Args &a) {
     die("TLX MXFP ABI requires the TLX 256x256x256 tile shape");
 }
 
-static void validateAITERTilePackedPlan(const Args &a);
-
 static void validateAITERTileCounts(const Args &a) {
   if (a.waveKTiles % 2)
     die("aiter input layout requires even wave K tiles");
@@ -555,11 +553,10 @@ static void validateAITERInputArgs(const Args &a) {
   if (a.accumulatorLayout == AccumulatorLayout::Wmma)
     die("aiter input layout requires MFMA accumulators");
   if (a.outputLayout != OutputLayout::Automatic &&
-      a.outputLayout != OutputLayout::TilePacked)
-    die("aiter final output conversion requires tile-packed kernel output");
+      a.outputLayout != OutputLayout::RowMajor)
+    die("aiter input layout requires row-major output");
   validateAITERTileCounts(a);
   validateAITERBufferRanges(a);
-  validateAITERTilePackedPlan(a);
 }
 
 static void validateMXFP4InputArgs(const Args &a) {
@@ -801,10 +798,6 @@ static TilePackedOutputPlan makeTilePackedOutputPlan(const Args &a) {
           ctaElements,    waveElements, valuesPerLane, wmma};
 }
 
-static void validateAITERTilePackedPlan(const Args &a) {
-  (void)makeTilePackedOutputPlan(a);
-}
-
 static __host__ __device__ int
 getAccumulatorRow(bool wmma, int lane, int laneValue, int valuesPerLane) {
   if (wmma)
@@ -837,17 +830,6 @@ getOutputCoordinate(int index, const TilePackedOutputPlan &plan) {
 static OutputCoordinate getOutputCoordinate(const Args &a, int index) {
   TilePackedOutputPlan plan = makeTilePackedOutputPlan(a);
   return getOutputCoordinate(index, plan);
-}
-
-template <typename T>
-static __global__ void materializeRowMajorOutput(const T *tilePacked,
-                                                 T *rowMajor,
-                                                 TilePackedOutputPlan plan) {
-  int index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= plan.elements)
-    return;
-  OutputCoordinate coord = getOutputCoordinate(index, plan);
-  rowMajor[coord.m * plan.n + coord.n] = tilePacked[index];
 }
 
 struct ReorderedTilePackedOutput {
@@ -893,19 +875,6 @@ reorderTilePackedOutput(int elements, const Args &a, ReadFn readValue) {
   for (int index = 0; index < elements; ++index)
     values[index] = static_cast<double>(readValue(packedIndices[index]));
   return {std::move(values), std::move(packedIndices)};
-}
-
-static void validateAITEROutputMapping(int elements, const Args &a) {
-  if (a.mxfp4InputLayout != MXFP4InputLayout::AITER)
-    return;
-  validateAITERTilePackedPlan(a);
-  if (!a.checkOutput)
-    return;
-  (void)getTilePackedIndexMap(elements, a);
-  std::printf("output_layout_check: passed kernel=tile-packed "
-              "final=row-major conversion=device coordinates=bijective "
-              "elements=%d\n",
-              elements);
 }
 
 template <typename ReadFn>
@@ -1109,16 +1078,11 @@ static OutputLayout getEffectiveOutputLayout(const Args &a) {
     return OutputLayout::RowMajor;
   if (isStreamK(a))
     return OutputLayout::ColumnMajor;
-  return OutputLayout::TilePacked;
-}
-
-static bool needsAITEROutputConversion(const Args &a) {
-  return a.mxfp4InputLayout == MXFP4InputLayout::AITER;
-}
-
-static OutputLayout getFinalOutputLayout(const Args &a) {
-  return needsAITEROutputConversion(a) ? OutputLayout::RowMajor
-                                       : getEffectiveOutputLayout(a);
+  if (a.mxfp4InputLayout == MXFP4InputLayout::AITER)
+    return OutputLayout::RowMajor;
+  if (isTLXMXFP(a))
+    return OutputLayout::TilePacked;
+  return OutputLayout::RowMajor;
 }
 
 static bool usesFlattenedGrid(const Args &a) {
@@ -1630,7 +1594,6 @@ struct DeviceBuffers {
   void *deviceAScale = nullptr;
   void *deviceBScale = nullptr;
   void *deviceC = nullptr;
-  void *deviceFinalC = nullptr;
   void *deviceStreamKScratch = nullptr;
   void *deviceStreamKCounters = nullptr;
   size_t cBytes = 0;
@@ -1659,8 +1622,6 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
              "hipMalloc B scale");
   }
   checkHip(hipMalloc(&b.deviceC, b.cBytes), "hipMalloc C");
-  if (needsAITEROutputConversion(a))
-    checkHip(hipMalloc(&b.deviceFinalC, b.cBytes), "hipMalloc final C");
   if (isStreamK(a)) {
     StreamKWorkspaceSizes sizes = getStreamKWorkspaceSizes(a);
     b.streamKScratchBytes = sizes.scratchBytes;
@@ -1690,8 +1651,6 @@ static DeviceBuffers prepareDeviceBuffers(const Args &a,
              "hipMemcpy B scale");
   }
   checkHip(hipMemset(b.deviceC, 0, b.cBytes), "hipMemset C");
-  if (b.deviceFinalC)
-    checkHip(hipMemset(b.deviceFinalC, 0, b.cBytes), "hipMemset final C");
   return b;
 }
 
@@ -1703,32 +1662,10 @@ static void freeDeviceBuffers(DeviceBuffers &b) {
   if (b.deviceBScale)
     checkHip(hipFree(b.deviceBScale), "hipFree B scale");
   checkHip(hipFree(b.deviceC), "hipFree C");
-  if (b.deviceFinalC)
-    checkHip(hipFree(b.deviceFinalC), "hipFree final C");
   if (b.deviceStreamKScratch)
     checkHip(hipFree(b.deviceStreamKScratch), "hipFree Stream-K scratch");
   if (b.deviceStreamKCounters)
     checkHip(hipFree(b.deviceStreamKCounters), "hipFree Stream-K counters");
-}
-
-static void launchAITEROutputConversion(const DeviceBuffers &b, const Args &a) {
-  if (!needsAITEROutputConversion(a))
-    return;
-  constexpr int threads = 256;
-  int blocks = 1 + (b.cElements - 1) / threads;
-  TilePackedOutputPlan plan = makeTilePackedOutputPlan(a);
-  if (plan.elements != b.cElements)
-    die("AITER conversion output element count mismatch");
-  if (a.cType == CType::F32) {
-    materializeRowMajorOutput<float>
-        <<<blocks, threads>>>(static_cast<const float *>(b.deviceC),
-                              static_cast<float *>(b.deviceFinalC), plan);
-  } else {
-    materializeRowMajorOutput<uint16_t>
-        <<<blocks, threads>>>(static_cast<const uint16_t *>(b.deviceC),
-                              static_cast<uint16_t *>(b.deviceFinalC), plan);
-  }
-  checkHip(hipGetLastError(), "launch AITER output conversion");
 }
 
 static void copyAndCheckOutput(void *deviceC, size_t cBytes, int cElements,
@@ -1906,7 +1843,6 @@ int main(int argc, char **argv) {
   HostInputs inputs = makeHostInputs(a);
   validateRandomAITERInputs(inputs, a);
   DeviceBuffers buffers = prepareDeviceBuffers(a, inputs);
-  validateAITEROutputMapping(buffers.cElements, a);
   KernelArgStorage kernelArgs;
   initKernelArgStorage(kernelArgs, a, buffers, launch.tripCount);
 
@@ -1916,35 +1852,21 @@ int main(int argc, char **argv) {
                                    nullptr, kernelArgs.active, nullptr),
              what);
   };
-  for (int i = 0; i < a.warmupIters; ++i) {
+  for (int i = 0; i < a.warmupIters; ++i)
     launchGemm("warmup launch");
-    launchAITEROutputConversion(buffers, a);
-  }
   checkHip(hipDeviceSynchronize(), "warmup sync");
 
   hipEvent_t start, stop;
   checkHip(hipEventCreate(&start), "event create start");
   checkHip(hipEventCreate(&stop), "event create stop");
   checkHip(hipEventRecord(start, nullptr), "event record start");
-  for (int i = 0; i < a.iters; ++i) {
+  for (int i = 0; i < a.iters; ++i)
     launchGemm("timed launch");
-    launchAITEROutputConversion(buffers, a);
-  }
   checkHip(hipEventRecord(stop, nullptr), "event record stop");
   checkHip(hipEventSynchronize(stop), "event sync stop");
 
   float elapsedMs = 0.0f;
   checkHip(hipEventElapsedTime(&elapsedMs, start, stop), "event elapsed");
-  float kernelOnlyElapsedMs = 0.0f;
-  if (needsAITEROutputConversion(a)) {
-    checkHip(hipEventRecord(start, nullptr), "kernel event record start");
-    for (int i = 0; i < a.iters; ++i)
-      launchGemm("kernel-only timed launch");
-    checkHip(hipEventRecord(stop, nullptr), "kernel event record stop");
-    checkHip(hipEventSynchronize(stop), "kernel event sync stop");
-    checkHip(hipEventElapsedTime(&kernelOnlyElapsedMs, start, stop),
-             "kernel event elapsed");
-  }
   double perLaunchUs = (elapsedMs * 1000.0) / a.iters;
   double perLaunchCycles = perLaunchUs * (clockHz / 1e6);
 
@@ -1963,26 +1885,18 @@ int main(int argc, char **argv) {
               getMXFP4InputLayoutName(a.mxfp4InputLayout), getInputModeName(a));
   std::printf("output_contract: kernel=%s final=%s conversion=%s\n",
               getOutputLayoutName(getEffectiveOutputLayout(a)),
-              getOutputLayoutName(getFinalOutputLayout(a)),
-              needsAITEROutputConversion(a) ? "device" : "none");
+              getOutputLayoutName(getEffectiveOutputLayout(a)), "none");
   std::printf("grid: %d,%d,1 block: %d,1,1 waves_per_workgroup=%d\n",
               launch.gridX, launch.gridY, launch.blockThreads,
               launch.wavesPerWorkgroup);
   std::printf("loop_trip_count: %d\n", launch.displayTripCount);
   std::printf("iters: %d\n", a.iters);
-  std::printf("timing_scope: %s\n", needsAITEROutputConversion(a)
-                                        ? "gemm+device-output-conversion"
-                                        : "gemm");
-  if (needsAITEROutputConversion(a))
-    std::printf("kernel_only_per_launch_us: %.3f\n",
-                kernelOnlyElapsedMs * 1000.0 / a.iters);
+  std::printf("timing_scope: gemm\n");
   std::printf("total_ms: %.3f\n", elapsedMs);
   std::printf("per_launch_us: %.3f\n", perLaunchUs);
   std::printf("per_launch_cycles_wallclock: %.0f\n", perLaunchCycles);
-  void *finalOutput =
-      buffers.deviceFinalC ? buffers.deviceFinalC : buffers.deviceC;
-  copyAndCheckOutput(finalOutput, buffers.cBytes, buffers.cElements,
-                     getFinalOutputLayout(a), a, inputs);
+  copyAndCheckOutput(buffers.deviceC, buffers.cBytes, buffers.cElements,
+                     getEffectiveOutputLayout(a), a, inputs);
   checkStreamKCounters(buffers, a);
   freeDeviceBuffers(buffers);
   return 0;

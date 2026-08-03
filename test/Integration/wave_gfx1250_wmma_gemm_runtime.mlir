@@ -8,4 +8,4 @@
 // RUN:   --random-data --compare-cpu --seed=29 \
 // RUN:   | FileCheck %s
 
-// CHECK: CPU comparison passed: tiles=1 max_abs_diff=0.0
+// CHECK: CPU comparison passed: elements=256 max_abs_diff=0.0

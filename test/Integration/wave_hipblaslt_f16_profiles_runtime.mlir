@@ -29,7 +29,7 @@
 // F8-SAME: output_store_cache=none
 // F8: seed=0 input_mode=rand-int
 // F8: cta_swizzle_xcds=8 cta_group_m=4
-// F8: kernel_abi=matmul output_layout=tile-packed
+// F8: kernel_abi=matmul output_layout=column-major
 // F8: output_check: passed mode=strict
 // F8: variant: scheduled
 // F8: hw_output_check: passed
@@ -38,7 +38,7 @@
 // F8S-SAME: output_store_cache=none
 // F8S: seed=23 input_mode=random
 // F8S: cta_swizzle_xcds=8 cta_group_m=4
-// F8S: kernel_abi=matmul output_layout=tile-packed
+// F8S: kernel_abi=matmul output_layout=column-major
 // F8S: output_check: passed mode=strict
 // F8S: variant: scheduled
 // F8S: hw_output_check: passed
@@ -46,7 +46,7 @@
 // F16-SAME: input_type=f16 output_type=f16
 // F16: seed=0 input_mode=rand-int
 // F16: cta_swizzle_xcds=8 cta_group_m=4
-// F16: kernel_abi=matmul output_layout=tile-packed
+// F16: kernel_abi=matmul output_layout=column-major
 // F16: output_check: passed mode=strict
 // F16: variant: scheduled
 // F16: hw_output_check: passed

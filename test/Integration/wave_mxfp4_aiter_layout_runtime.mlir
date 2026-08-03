@@ -14,12 +14,10 @@
 // LARGE-TILE: seed=17 input_mode=random
 // LARGE-TILE: cta_swizzle_xcds=1 cta_group_m=2
 // LARGE-TILE: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled
-// LARGE-TILE: output_layout_check: passed kernel=tile-packed final=row-major conversion=device coordinates=bijective elements=262144
-// LARGE-TILE: kernel_abi=matmul output_layout=tile-packed
-// LARGE-TILE: output_contract: kernel=tile-packed final=row-major conversion=device
+// LARGE-TILE: kernel_abi=matmul output_layout=row-major
+// LARGE-TILE: output_contract: kernel=row-major final=row-major conversion=none
 // LARGE-TILE: grid: 2,2,1 block: 256,1,1
-// LARGE-TILE: timing_scope: gemm+device-output-conversion
-// LARGE-TILE: kernel_only_per_launch_us:
+// LARGE-TILE: timing_scope: gemm
 // LARGE-TILE: output_check: passed mode=strict layout=row-major elements=262144
 // LARGE-TILE: variant: scheduled
 // LARGE-TILE: hw_output_check: passed
@@ -28,31 +26,26 @@
 // MULTI-CTA: seed=29 input_mode=random
 // MULTI-CTA: cta_swizzle_xcds=8 cta_group_m=4
 // MULTI-CTA: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled
-// MULTI-CTA: output_layout_check: passed kernel=tile-packed final=row-major conversion=device coordinates=bijective elements=131072
-// MULTI-CTA: kernel_abi=matmul output_layout=tile-packed
-// MULTI-CTA: output_contract: kernel=tile-packed final=row-major conversion=device
+// MULTI-CTA: kernel_abi=matmul output_layout=row-major
+// MULTI-CTA: output_contract: kernel=row-major final=row-major conversion=none
 // MULTI-CTA: grid: 8,4,1 block: 256,1,1
-// MULTI-CTA: timing_scope: gemm+device-output-conversion
-// MULTI-CTA: kernel_only_per_launch_us:
+// MULTI-CTA: timing_scope: gemm
 // MULTI-CTA: output_check: passed mode=strict layout=row-major elements=131072
 // MULTI-CTA: variant: scheduled
 // MULTI-CTA: hw_output_check: passed
 // WAVE-K4: m=128 n=256 k=1024 bm=1 bn=4 wave_m_tiles=8 wave_n_tiles=4 wave_k_tiles=4
 // WAVE-K4: input_type=mxfp4 output_type=f16 mxfp4_scale_path=dma mxfp4_input_layout=aiter
 // WAVE-K4: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled
-// WAVE-K4: output_layout_check: passed kernel=tile-packed final=row-major conversion=device coordinates=bijective elements=32768
-// WAVE-K4: output_contract: kernel=tile-packed final=row-major conversion=device
+// WAVE-K4: output_contract: kernel=row-major final=row-major conversion=none
 // WAVE-K4: grid: 1,1,1 block: 256,1,1
-// WAVE-K4: timing_scope: gemm+device-output-conversion
-// WAVE-K4: kernel_only_per_launch_us:
+// WAVE-K4: timing_scope: gemm
 // WAVE-K4: output_check: passed mode=strict layout=row-major elements=32768
 // WAVE-K4: variant: scheduled
 // WAVE-K4: hw_output_check: passed
 // OWNER-SPLIT: m=192 n=320 k=512 bm=2 bn=2 wave_m_tiles=2 wave_n_tiles=2 wave_k_tiles=2
 // OWNER-SPLIT: input_type=mxfp4 output_type=f16 mxfp4_scale_path=dma mxfp4_input_layout=aiter
 // OWNER-SPLIT: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled scale_blocks=position-distinct scale_axes=distinct
-// OWNER-SPLIT: output_layout_check: passed kernel=tile-packed final=row-major conversion=device coordinates=bijective elements=61440
-// OWNER-SPLIT: output_contract: kernel=tile-packed final=row-major conversion=device
+// OWNER-SPLIT: output_contract: kernel=row-major final=row-major conversion=none
 // OWNER-SPLIT: grid: 3,5,1 block: 256,1,1
 // OWNER-SPLIT: output_check: passed mode=strict layout=row-major elements=61440
 // OWNER-SPLIT: variant: scheduled

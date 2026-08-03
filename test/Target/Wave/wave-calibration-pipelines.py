@@ -537,18 +537,51 @@ def check_matmul_runner_wave_size(matmul) -> None:
     print("matmul_runner_gfx950_wave_size: ok")
 
 
-def check_matmul_runner_output_layout(matmul) -> None:
-    explicit = matmul.parse_args(
-        ["--chip=gfx950", "--output-layout=row-major", "--no-check"]
+def matmul_output_layout_cases():
+    return (
+        ("automatic", ["--chip=gfx950", "--no-check"], "row-major"),
+        (
+            "tile-packed",
+            ["--chip=gfx950", "--output-layout=tile-packed", "--no-check"],
+            "tile-packed",
+        ),
+        (
+            "column-major",
+            ["--chip=gfx950", "--output-layout=column-major", "--no-check"],
+            "column-major",
+        ),
+        (
+            "coalesced",
+            [
+                "--chip=gfx950",
+                "--kernel-profile=gfx950-f16-256x256-4wave",
+                "--m=256",
+                "--n=256",
+                "--k=64",
+                "--cta-swizzle-xcds=1",
+                "--cta-group-m=1",
+                "--no-check",
+            ],
+            "column-major",
+        ),
+        (
+            "aiter",
+            [
+                "--chip=gfx950",
+                "--kernel-profile=gfx950-mxfp4-aiter-32x128",
+                "--m=32",
+                "--n=128",
+                "--k=256",
+                "--cta-swizzle-xcds=1",
+                "--cta-group-m=1",
+                "--no-check",
+            ],
+            "row-major",
+        ),
     )
-    coalesced = matmul.parse_args(
-        [
-            "--chip=gfx950",
-            "--kernel-profile=gfx950-f16-256x256-4wave",
-            "--k=64",
-            "--no-check",
-        ]
-    )
+
+
+def capture_matmul_runner_commands(matmul, args_list) -> list[list[str]]:
     captured: list[list[str]] = []
     old_run = matmul.run
     try:
@@ -558,18 +591,105 @@ def check_matmul_runner_output_layout(matmul) -> None:
             return "per_launch_cycles_wallclock: 1\nper_launch_us: 1.0\n"
 
         matmul.run = fake_run
-        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), explicit, "/tmp")
-        matmul.run_hw(Path("runner"), Path("kernel.hsaco"), coalesced, "/tmp")
+        for args in args_list:
+            matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
     finally:
         matmul.run = old_run
+    return captured
 
+
+def require_invalid_matmul_output_layout(matmul, argv, message, label) -> None:
+    args = matmul.parse_args(argv)
+    try:
+        matmul.validate_args(args)
+    except SystemExit as exc:
+        require(
+            "matmul_runner_output_layout",
+            str(exc) == message,
+            f"bad {label} output diagnostic: {exc}",
+        )
+        return
     require(
         "matmul_runner_output_layout",
-        len(captured) == 2,
+        False,
+        f"accepted invalid {label} output options: {argv}",
+    )
+
+
+def check_matmul_output_layout_rejections(matmul) -> None:
+    aiter_argv = [
+        "--chip=gfx950",
+        "--kernel-profile=gfx950-mxfp4-aiter-32x128",
+        "--m=32",
+        "--n=128",
+        "--k=256",
+        "--cta-swizzle-xcds=1",
+        "--cta-group-m=1",
+        "--skip-hw",
+    ]
+    aiter_invalid = (
+        (
+            ["--output-layout=tile-packed"],
+            "AITER input layout requires row-major output",
+        ),
+        (
+            ["--output-layout=column-major"],
+            "AITER input layout requires row-major output",
+        ),
+        (
+            ["--coalesced-mfma-output"],
+            "AITER input layout does not support coalesced output",
+        ),
+    )
+    for options, message in aiter_invalid:
+        require_invalid_matmul_output_layout(
+            matmul, [*aiter_argv, *options], message, "AITER"
+        )
+
+    coalesced_argv = [
+        "--chip=gfx950",
+        "--kernel-profile=gfx950-f16-256x256-4wave",
+        "--m=256",
+        "--n=256",
+        "--k=64",
+        "--cta-swizzle-xcds=1",
+        "--cta-group-m=1",
+        "--skip-hw",
+    ]
+    message = "coalesced MFMA output requires column-major output"
+    for layout in ("row-major", "tile-packed"):
+        require_invalid_matmul_output_layout(
+            matmul,
+            [*coalesced_argv, f"--output-layout={layout}"],
+            message,
+            "coalesced",
+        )
+
+
+def check_matmul_runner_output_layout(matmul) -> None:
+    cases = matmul_output_layout_cases()
+    parsed = [(label, matmul.parse_args(argv), layout) for label, argv, layout in cases]
+    for label, args, layout in parsed:
+        require(
+            "matmul_runner_output_layout",
+            matmul.effective_output_layout(args) == layout,
+            f"bad {label} effective layout",
+        )
+        generator = matmul.build_matmul_example_args(args, "gfx950")
+        output_args = [arg for arg in generator if arg.startswith("--output-layout=")]
+        require(
+            "matmul_runner_output_layout",
+            output_args == [f"--output-layout={layout}"],
+            f"generator should receive one {layout} layout",
+        )
+
+    captured = capture_matmul_runner_commands(matmul, [args for _, args, _ in parsed])
+    require(
+        "matmul_runner_output_layout",
+        len(captured) == len(cases),
         "runner call count mismatch",
     )
-    expected = ("row-major", "column-major")
-    for cmd, layout in zip(captured, expected, strict=True):
+    for cmd, (_, _, layout) in zip(captured, parsed, strict=True):
         require(
             "matmul_runner_output_layout",
             cmd.count("--output-layout") == 1,
@@ -581,6 +701,8 @@ def check_matmul_runner_output_layout(matmul) -> None:
             cmd[index + 1] == layout,
             f"runner should receive {layout}",
         )
+
+    check_matmul_output_layout_rejections(matmul)
     print("matmul_runner_output_layout: ok")
 
 
@@ -1212,8 +1334,8 @@ def check_matmul_f16_8wave_profile(matmul) -> None:
     )
     require(
         "matmul_f16_8wave_profile",
-        args.output_store_cache == "none",
-        "8-wave output-store cache policy changed",
+        args.output_layout == "column-major" and args.output_store_cache == "none",
+        "8-wave output contract changed",
     )
     require(
         "matmul_f16_8wave_profile",
@@ -1273,7 +1395,7 @@ def check_matmul_f16_spatial_profile(matmul) -> None:
     )
     require(
         "matmul_f16_spatial_profile",
-        args.output_layout == "tile-packed"
+        args.output_layout == "column-major"
         and matmul.dma_buffer_count(args) == 2
         and matmul.compute_dynamic_lds_bytes(args) == 131072,
         "bad spatial output layout or LDS accounting",
@@ -1314,9 +1436,9 @@ def check_matmul_f16_spatial_profile(matmul) -> None:
         "matmul_f16_spatial_profile",
         result == (1, 1.0, "passed")
         and runner.count("--output-layout") == 1
-        and runner[runner.index("--output-layout") + 1] == "tile-packed"
+        and runner[runner.index("--output-layout") + 1] == "column-major"
         and "--no-check" not in runner,
-        "spatial runner lost tile-packed strict checking",
+        "spatial runner lost column-major strict checking",
     )
     print("matmul_f16_spatial_profile: ok")
 
@@ -1354,8 +1476,8 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     )
     require(
         "matmul_mxfp4_4wave_profile",
-        args.mxfp4_scale_path == "regs",
-        "bad 4-wave scale path",
+        args.mxfp4_scale_path == "regs" and args.output_layout == "column-major",
+        "bad 4-wave scale path or output contract",
     )
     require(
         "matmul_mxfp4_4wave_profile",
@@ -1461,6 +1583,7 @@ def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
         require(
             "matmul_mxfp4_aiter_profiles",
             args.mxfp4_input_layout == "aiter"
+            and args.output_layout == "row-major"
             and args.output_store_cache == "cs"
             and matmul.effective_target_waves(args) == 1,
             f"bad {profile} mode",

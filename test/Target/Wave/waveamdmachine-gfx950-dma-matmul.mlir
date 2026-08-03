@@ -37,7 +37,7 @@
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA-K2
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=256 --n=256 --k=128 --bm=4 --bn=2 --wave-m-tiles=4 --wave-n-tiles=8 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-SCALEPACK
-// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=256 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --use-dma-lds --dump-asm 2>/dev/null \
+// RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=32 --n=32 --k=256 --bm=1 --bn=1 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --output-layout=tile-packed --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-EPILOGUE
 // RUN: %python %S/../../../examples/wave/wmma_matmul_tiled.py --chip=gfx950 --m=16 --n=16 --k=384 --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --use-dma-lds --dump-asm 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=ASMMXFP4-DMA-PIPE

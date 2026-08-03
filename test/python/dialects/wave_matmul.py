@@ -88,6 +88,36 @@ def assert_external_assumption_count(module, count):
     assert str(module).count("wave.assume ") == count
 
 
+def cached_output_stores(module, kind):
+    marker = f"#waveamd.store_cache<{kind}>"
+    return [
+        str(op)
+        for block in operation_blocks(module.operation)
+        for op in block.operations
+        if op.name == "wave.store" and marker in str(op)
+    ]
+
+
+def build_dense_mfma_output(output_layout="automatic"):
+    return build_wmma_f16_matmul_module(
+        M=32,
+        N=16,
+        K=64,
+        BM=1,
+        BN=1,
+        wave_m_tiles=2,
+        wave_n_tiles=1,
+        wave_k_tiles=2,
+        use_buffer=True,
+        matrix_intrinsic="mfma_gfx950",
+        output_type="f16",
+        output_layout=output_layout,
+        output_store_cache="cs",
+        skip_specialize=True,
+        include_host=False,
+    )
+
+
 subpanel_schedule = wm.PhasedDmaSchedule(
     issue_group_size=1,
     initial_delay_cycles=0,
@@ -212,8 +242,28 @@ assert_raises(
 )
 assert_raises(
     ValueError,
-    "AITER input layout requires tile-packed kernel output",
+    "AITER input layout does not support coalesced output",
     lambda: build_aiter_mxfp4(coalesced_mfma_output=True),
+)
+for invalid_layout in ("tile-packed", "column-major"):
+    assert_raises(
+        ValueError,
+        "AITER input layout requires row-major output",
+        lambda invalid_layout=invalid_layout: build_aiter_mxfp4(
+            output_layout=invalid_layout
+        ),
+    )
+assert_raises(
+    ValueError,
+    "output_layout must be one of automatic, tile-packed, row-major, "
+    "column-major; got invalid",
+    lambda: build_wmma_f16_matmul_module(
+        M=16,
+        N=16,
+        K=32,
+        output_layout="invalid",
+        include_host=False,
+    ),
 )
 assert_raises(
     ValueError,
@@ -255,6 +305,9 @@ assert_raises(
     ),
 )
 aiter_packed_scale_module = build_aiter_mxfp4(K=512)
+assert str(aiter_packed_scale_module) == str(
+    build_aiter_mxfp4(K=512, output_layout="row-major")
+)
 aiter_packed_scale_ops = [
     op
     for block in operation_blocks(aiter_packed_scale_module.operation)
@@ -281,6 +334,22 @@ assert any(
     op.name == "wave.barrier" and len(op.operands) == 3 for op in aiter_packed_scale_ops
 )
 assert "wave.lds_size = 24576 : i64" in str(aiter_packed_scale_module)
+aiter_output_stores = [
+    op
+    for op in aiter_packed_scale_ops
+    if op.name == "wave.store" and "!wave.ptr<#waveamd.buffer, f16>" in str(op)
+]
+assert len(aiter_output_stores) == 16
+scale_read_token = aiter_output_stores[0].operands[-1]
+assert all(store.operands[-1] == scale_read_token for store in aiter_output_stores)
+scale_read_join = scale_read_token.owner
+assert scale_read_join.name == "wave.join"
+assert all(
+    operand.owner.name == "wave.load" for operand in scale_read_join.operation.operands
+)
+assert "512*floor(1/16*Mod(__wave_dsl_dense_store_wi, 64))" in str(
+    aiter_packed_scale_module
+)
 aiter_pipeline_module = build_aiter_mxfp4(
     M=128,
     N=256,
@@ -353,7 +422,7 @@ assert_raises(
 )
 assert_raises(
     ValueError,
-    "DMA spatial subpanel pipeline requires tile-packed output",
+    "DMA spatial subpanel pipeline does not support coalesced output",
     lambda: build_spatial_subpanel(
         BM=2,
         BN=2,
@@ -472,7 +541,7 @@ for output_store_cache in ("wb", "cg", "cs", "wt"):
         output_store_cache=output_store_cache,
         include_host=False,
     )
-    assert_output_store_cache(module_fragment_cache, output_store_cache, 1)
+    assert_output_store_cache(module_fragment_cache, output_store_cache, 8)
 module_default_cache = build_wmma_f16_matmul_module(
     M=16,
     N=16,
@@ -499,9 +568,31 @@ module_f16_cache = build_wmma_f16_matmul_module(
     output_store_cache="cg",
     include_host=False,
 )
-assert_output_store_cache(module_f16_cache, "cg", 1)
+assert_output_store_cache(module_f16_cache, "cg", 8)
 assert_external_assumption_count(module_f16_cache, 3)
 print("output-store-cache ok")
+
+dense_automatic = build_dense_mfma_output()
+dense_row_major = build_dense_mfma_output("row-major")
+dense_column_major = build_dense_mfma_output("column-major")
+assert str(dense_automatic) == str(dense_row_major)
+row_major_stores = cached_output_stores(dense_row_major, "cs")
+column_major_stores = cached_output_stores(dense_column_major, "cs")
+assert len(row_major_stores) == 8
+assert all("!wave.simd<f16, 64>" in store for store in row_major_stores)
+assert len(column_major_stores) == 2
+assert all("!wave.simd<vector<4xf16>, 64>" in store for store in column_major_stores)
+row_major_text = str(dense_row_major)
+column_major_text = str(dense_column_major)
+assert (
+    'wave.index_expr <"64*floor(1/16*Mod(__wave_dsl_dense_store_wi, 64)) '
+    '+ Mod(Mod(__wave_dsl_dense_store_wi, 64), 16)">' in row_major_text
+)
+assert (
+    'wave.index_expr <"4*floor(1/16*Mod(__wave_dsl_dense_store_wi, 64)) '
+    '+ 32*Mod(Mod(__wave_dsl_dense_store_wi, 64), 16)">' in column_major_text
+)
+print("dense-output-layouts ok")
 
 module_symbolic_mma_index = build_wmma_f16_matmul_module(
     M=32,
@@ -535,6 +626,28 @@ assert_raises(
         coalesced_mfma_output=True,
     ),
 )
+for invalid_layout in ("tile-packed", "row-major"):
+    assert_raises(
+        ValueError,
+        "coalesced MFMA output requires column-major output",
+        lambda invalid_layout=invalid_layout: build_wmma_f16_matmul_module(
+            M=256,
+            N=256,
+            K=64,
+            BM=2,
+            BN=2,
+            wave_m_tiles=8,
+            wave_n_tiles=8,
+            wave_k_tiles=2,
+            use_buffer=True,
+            use_dma_lds=True,
+            matrix_intrinsic="mfma_gfx950",
+            output_type="f16",
+            output_layout=invalid_layout,
+            coalesced_mfma_output=True,
+            include_host=False,
+        ),
+    )
 module_coalesced = build_wmma_f16_matmul_module(
     M=256,
     N=256,
@@ -582,6 +695,7 @@ module_lds_coalesced_cache = build_wmma_f16_matmul_module(
     matrix_intrinsic="mfma_gfx950",
     input_type="mxfp4",
     output_type="f16",
+    output_layout="tile-packed",
     output_store_cache="wt",
     include_host=False,
 )
@@ -639,6 +753,46 @@ ref = compute_wmma_f16_matmul_reference_buffer(
     matrix_intrinsic="mfma",
 )
 print("random-ref", len(a0), len(b0), len(ref))
+ref_row_major = compute_wmma_f16_matmul_reference_buffer(
+    32,
+    48,
+    32,
+    wave_m_tiles=2,
+    wave_n_tiles=3,
+    wave_k_tiles=2,
+    random_data=True,
+    random_seed=7,
+    matrix_intrinsic="mfma",
+    output_layout="row-major",
+)
+ref_column_major = compute_wmma_f16_matmul_reference_buffer(
+    32,
+    48,
+    32,
+    wave_m_tiles=2,
+    wave_n_tiles=3,
+    wave_k_tiles=2,
+    random_data=True,
+    random_seed=7,
+    matrix_intrinsic="mfma",
+    output_layout="column-major",
+)
+for m in range(32):
+    for n in range(48):
+        assert ref_row_major[m * 48 + n] == ref_column_major[n * 32 + m]
+ref_automatic = compute_wmma_f16_matmul_reference_buffer(
+    32,
+    48,
+    32,
+    wave_m_tiles=2,
+    wave_n_tiles=3,
+    wave_k_tiles=2,
+    random_data=True,
+    random_seed=7,
+    matrix_intrinsic="mfma",
+)
+assert ref_automatic == ref_row_major
+print("output-layout-reference ok")
 ref_bf16 = compute_wmma_f16_matmul_reference_buffer(
     16,
     16,
@@ -725,6 +879,7 @@ aiter_shared_cfg = wm._make_matmul_config(
     matrix_intrinsic="mfma_gfx950",
     input_type="mxfp4",
     output_type="f16",
+    output_layout="row-major",
     mxfp4_scale_path="dma",
     mxfp4_input_layout="aiter",
     random_data=False,
@@ -807,6 +962,7 @@ module_f16 = build_wmma_f16_matmul_module(
     N=16,
     K=32,
     output_type="f16",
+    output_layout="tile-packed",
 )
 print(module_f16)
 
@@ -858,6 +1014,7 @@ static_cfg = wm._make_matmul_config(
     matrix_intrinsic="wmma",
     input_type="f16",
     output_type="f32",
+    output_layout="tile-packed",
     mxfp4_scale_path="dma",
     random_data=False,
     random_seed=0,
@@ -893,11 +1050,13 @@ print(static_bld.module)
 # CHECK: cta-remap-symbolic-ranges ok
 # CHECK: rectangular-subpanel-serpentine ok
 # CHECK: output-store-cache ok
+# CHECK: dense-output-layouts ok
 # CHECK: symbolic-mma-index ok
 # CHECK: coalesced-mfma-output ok
 # CHECK: lds-coalesced-output-store-cache ok
 # CHECK: symbolic-mxfp4-step ok
 # CHECK: random-ref 1024 1024 1024
+# CHECK: output-layout-reference ok
 # CHECK: bf16-ref 256 32.0
 # CHECK: mxfp4-scales 64 64 127 122
 # CHECK: mxfp4-ref 256 42.5 21.25
