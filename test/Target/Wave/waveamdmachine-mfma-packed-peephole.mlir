@@ -5,21 +5,24 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-LABEL: func.func @unpack_round_trip(
 // CHECK-SAME: %[[ADD_MMA_A:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 4>
 // CHECK-SAME: %[[ADD_MMA_B:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 4>
-// CHECK-SAME: %[[ADD_ACC:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 4>
+// CHECK-SAME: %[[ADD_ACC:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 16>
 // CHECK-SAME: %[[ADD_LHS0:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-SAME: %[[ADD_LHS1:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-SAME: %[[ADD_RHS0:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-SAME: %[[ADD_RHS1:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-NOT: waveamdmachine.tuple_
-// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
-// CHECK-NEXT: %[[ADD_LO:.*]] = waveamdmachine.v_add_f32 %[[ADD_LHS1]], %[[ADD_RHS0]]
-// CHECK-NEXT: %[[ADD_HI:.*]] = waveamdmachine.v_add_f32 %[[ADD_LHS0]], %[[ADD_RHS1]]
+// CHECK: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: %[[ADD_SIGN:.*]] = waveamdmachine.imm 2147483648
+// CHECK-NEXT: %[[ADD_NEG_RHS0:.*]] = waveamdmachine.v_xor_b32 %[[ADD_RHS0]], %[[ADD_SIGN]]
+// CHECK-NEXT: %[[ADD_LO:.*]] = waveamdmachine.v_add_f32 %[[ADD_LHS1]], %[[ADD_NEG_RHS0]]
+// CHECK-NEXT: %[[ADD_NEG_RHS1:.*]] = waveamdmachine.v_xor_b32 %[[ADD_RHS1]], %[[ADD_SIGN]]
+// CHECK-NEXT: %[[ADD_HI:.*]] = waveamdmachine.v_add_f32 %[[ADD_LHS0]], %[[ADD_NEG_RHS1]]
 // CHECK-NEXT: return %[[ADD_LO]], %[[ADD_HI]]
 // CHECK-NOT: waveamdmachine.v_pk_add_f32
 func.func @unpack_round_trip(
     %a: !waveamdmachine.reg<vgpr, 4>,
     %b: !waveamdmachine.reg<vgpr, 4>,
-    %acc: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 16>,
     %lhs0: !waveamdmachine.reg<vgpr, 1>,
     %lhs1: !waveamdmachine.reg<vgpr, 1>,
     %rhs0: !waveamdmachine.reg<vgpr, 1>,
@@ -32,11 +35,12 @@ func.func @unpack_round_trip(
   %rhs = waveamdmachine.tuple_from_elements %rhs0, %rhs1
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 2>
-  %mfma = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+  %mfma = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
       : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
-         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+         !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
   %packed = waveamdmachine.v_pk_add_f32 %lhs, %rhs
-      {op_sel = 1 : i64, op_sel_hi = 2 : i64}
+      {neg_hi = 2 : i64, neg_lo = 2 : i64, op_sel = 1 : i64,
+       op_sel_hi = 2 : i64}
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> !waveamdmachine.reg<vgpr, 2>
   %parts:2 = waveamdmachine.tuple_to_elements %packed

@@ -9,7 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ROUND: [[MUL:%.*]] = waveamdmachine.v_pk_mul_f32 [[ADD]],
 // ROUND: waveamdmachine.v_pk_fma_f32 [[MUL]], [[ADD]],
 // ASM-LABEL: packed_f32_gfx950:
-// ASM: v_pk_add_f32
+// ASM: v_pk_add_f32 {{.*}} neg_lo:[0,1] neg_hi:[0,1]
 // ASM: v_pk_mul_f32
 // ASM: v_pk_fma_f32 {{.*}} op_sel:[0,0,1] op_sel_hi:[1,0,1] neg_lo:[0,0,1] neg_hi:[0,0,1]
 func.func @packed_f32_gfx950(%out: !wave.ptr<#wave.global, i32>)
@@ -26,7 +26,7 @@ func.func @packed_f32_gfx950(%out: !wave.ptr<#wave.global, i32>)
   %rhs = waveamdmachine.tuple_from_elements %b, %a
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 2>
-  %add = waveamdmachine.v_pk_add_f32 %lhs, %rhs
+  %add = waveamdmachine.v_pk_add_f32 %lhs, %rhs {neg_lo = 2, neg_hi = 2}
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> !waveamdmachine.reg<vgpr, 2>
   %mul = waveamdmachine.v_pk_mul_f32 %add, %lhs

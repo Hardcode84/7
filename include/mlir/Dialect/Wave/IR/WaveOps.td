@@ -363,7 +363,7 @@ def Wave_FAddOp : Wave_FloatSimdBinary<"fadd"> {
 }
 
 def Wave_FSubOp : Wave_FloatSimdBinary<"fsub"> {
-  let summary = "lane-wise f32 subtract";
+  let summary = "lane-wise floating-point subtract";
 }
 
 def Wave_FMulOp : Wave_FloatSimdBinary<"fmul"> {

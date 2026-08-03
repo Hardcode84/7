@@ -4116,8 +4116,8 @@ static LogicalResult selectPackedF16Binary(WaveAMDMachineSelector &S, WaveOp op,
 
 template <typename MachineOp, typename WaveOp>
 static LogicalResult selectPackedF32Binary(WaveAMDMachineSelector &S, WaveOp op,
-                                           StringRef kind, Value lhs,
-                                           Value rhs) {
+                                           StringRef kind, Value lhs, Value rhs,
+                                           bool negateRhs = false) {
   if (failed(requirePackedF32Target(op.getOperation(), kind)))
     return failure();
 
@@ -4147,7 +4147,9 @@ static LogicalResult selectPackedF32Binary(WaveAMDMachineSelector &S, WaveOp op,
   for (unsigned index : llvm::seq<unsigned>(0, pairCount)) {
     Value selected =
         MachineOp::create(S.builder, op.getLoc(), vgpr2Type, (*lhsPairs)[index],
-                          (*rhsPairs)[index], false, 0, 3, contract)
+                          (*rhsPairs)[index], false, 0, 3,
+                          /*negLo=*/negateRhs ? 2 : 0,
+                          /*negHi=*/negateRhs ? 2 : 0, contract)
             .getResult();
     resultPairs.push_back(selected);
   }
@@ -4267,6 +4269,9 @@ LogicalResult WaveAMDMachineSelector::selectFAdd(FAddOp op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectFSub(FSubOp op) {
+  if (isSimdPackedF32(op.getResult().getType()))
+    return selectPackedF32Binary<waveamdmachine::VPkAddF32Op>(
+        *this, op, "fsub", op.getLhs(), op.getRhs(), /*negateRhs=*/true);
   return selectF32<waveamdmachine::VSubF32Op>(*this, op, op.getLhs(),
                                               op.getRhs());
 }

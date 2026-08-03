@@ -377,12 +377,44 @@ func.func @keep_packed_f32_mul_add_separate(%a: !waveamdmachine.reg<vgpr, 2>,
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
-// CHECK-LABEL: func.func @fuse_contract_packed_f32_mul_sub_pair(
+// CHECK-LABEL: func.func @fuse_contract_direct_packed_f32_mul_sub(
+// CHECK-SAME: [[A:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[C:%.*]]: !waveamdmachine.reg<vgpr, 2>)
 // CHECK-NOT: waveamdmachine.v_pk_mul_f32
-// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements %arg2, %arg3
-// CHECK: [[FMA:%.*]] = waveamdmachine.v_pk_fma_f32 %arg0, %arg1, [[ACC]]
-// CHECK-SAME: neg_hi = 4
-// CHECK-SAME: neg_lo = 4
+// CHECK-NOT: waveamdmachine.v_pk_add_f32
+// CHECK: [[FMA:%.*]] = waveamdmachine.v_pk_fma_f32 [[A]], [[B]], [[C]]
+// CHECK-SAME: neg_hi = 6
+// CHECK-SAME: neg_lo = 5
+// CHECK-SAME: op_sel = 2
+// CHECK-SAME: op_sel_hi = 5
+// CHECK: return [[FMA]]
+func.func @fuse_contract_direct_packed_f32_mul_sub(
+    %a: !waveamdmachine.reg<vgpr, 2>,
+    %b: !waveamdmachine.reg<vgpr, 2>,
+    %c: !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2> {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      {contract = true, neg_hi = 2, neg_lo = 1, op_sel = 2, op_sel_hi = 1}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  %sub = waveamdmachine.v_pk_add_f32 %mul, %c
+      {neg_hi = 2, neg_lo = 2}
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  return %sub : !waveamdmachine.reg<vgpr, 2>
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @fuse_contract_packed_f32_mul_sub_pair(
+// CHECK-SAME: [[A:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[C0:%.*]]: !waveamdmachine.reg<vgpr, 1>, [[C1:%.*]]: !waveamdmachine.reg<vgpr, 1>)
+// CHECK-NOT: waveamdmachine.v_pk_mul_f32
+// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements [[C0]], [[C1]]
+// CHECK: [[FMA:%.*]] = waveamdmachine.v_pk_fma_f32 [[A]], [[B]], [[ACC]]
+// CHECK-SAME: neg_hi = 6
+// CHECK-SAME: neg_lo = 5
 // CHECK-NOT: waveamdmachine.v_sub_f32
 // CHECK: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[FMA]]
 // CHECK: return [[PARTS]]#0, [[PARTS]]#1
@@ -392,7 +424,8 @@ func.func @fuse_contract_packed_f32_mul_sub_pair(
     %c0: !waveamdmachine.reg<vgpr, 1>,
     %c1: !waveamdmachine.reg<vgpr, 1>)
     -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
-  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {contract = true}
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      {contract = true, neg_hi = 2, neg_lo = 1}
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
         -> !waveamdmachine.reg<vgpr, 2>
   %parts:2 = waveamdmachine.tuple_to_elements %mul
@@ -415,13 +448,14 @@ func.func @fuse_contract_packed_f32_mul_sub_pair(
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @fuse_contract_packed_f32_mul_sub_broadcasts(
+// CHECK-SAME: [[A0:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B0:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[A1:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B1:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[C0:%.*]]: !waveamdmachine.reg<vgpr, 1>, [[C1:%.*]]: !waveamdmachine.reg<vgpr, 1>)
 // CHECK-NOT: waveamdmachine.v_pk_mul_f32
-// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements %arg4, %arg5
-// CHECK: [[FMA0:%.*]] = waveamdmachine.v_pk_fma_f32 %arg0, %arg1, [[ACC]]
+// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements [[C0]], [[C1]]
+// CHECK: [[FMA0:%.*]] = waveamdmachine.v_pk_fma_f32 [[A0]], [[B0]], [[ACC]]
 // CHECK-SAME: neg_hi = 4
 // CHECK-SAME: neg_lo = 4
 // CHECK-SAME: op_sel_hi = 3
-// CHECK: [[FMA1:%.*]] = waveamdmachine.v_pk_fma_f32 %arg2, %arg3, [[ACC]]
+// CHECK: [[FMA1:%.*]] = waveamdmachine.v_pk_fma_f32 [[A1]], [[B1]], [[ACC]]
 // CHECK-SAME: neg_hi = 4
 // CHECK-SAME: neg_lo = 4
 // CHECK-SAME: op_sel = 4
@@ -563,8 +597,9 @@ func.func @keep_shared_packed_f32_mul_sub(
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @keep_lone_packed_f32_mul_sub_broadcast(
+// CHECK-SAME: [[A:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[C:%.*]]: !waveamdmachine.reg<vgpr, 1>)
 // CHECK: waveamdmachine.v_pk_mul_f32
-// CHECK-NOT: waveamdmachine.tuple_from_elements %arg2, %arg2
+// CHECK-NOT: waveamdmachine.tuple_from_elements [[C]], [[C]]
 // CHECK-NOT: waveamdmachine.v_pk_fma_f32
 // CHECK-COUNT-2: waveamdmachine.v_sub_f32
 // CHECK: return
@@ -633,11 +668,12 @@ func.func @keep_late_packed_f32_mul_sub_accumulator(
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @keep_conflicting_packed_f32_acc_pair(
-// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements %arg4, %arg5
-// CHECK: waveamdmachine.v_pk_fma_f32 %arg0, %arg1, [[ACC]]
-// CHECK: [[MUL:%.*]] = waveamdmachine.v_pk_mul_f32 %arg2, %arg3
-// CHECK-NOT: waveamdmachine.tuple_from_elements %arg4, %arg6
-// CHECK-NOT: waveamdmachine.v_pk_fma_f32 %arg2, %arg3
+// CHECK-SAME: [[A0:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B0:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[A1:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[B1:%.*]]: !waveamdmachine.reg<vgpr, 2>, [[C0:%.*]]: !waveamdmachine.reg<vgpr, 1>, [[C1:%.*]]: !waveamdmachine.reg<vgpr, 1>, [[C2:%.*]]: !waveamdmachine.reg<vgpr, 1>)
+// CHECK: [[ACC:%.*]] = waveamdmachine.tuple_from_elements [[C0]], [[C1]]
+// CHECK: waveamdmachine.v_pk_fma_f32 [[A0]], [[B0]], [[ACC]]
+// CHECK: [[MUL:%.*]] = waveamdmachine.v_pk_mul_f32 [[A1]], [[B1]]
+// CHECK-NOT: waveamdmachine.tuple_from_elements [[C0]], [[C2]]
+// CHECK-NOT: waveamdmachine.v_pk_fma_f32 [[A1]], [[B1]]
 // CHECK-COUNT-2: waveamdmachine.v_sub_f32
 // CHECK: return
 func.func @keep_conflicting_packed_f32_acc_pair(

@@ -763,6 +763,10 @@ class WaveAMDMachine_PackedF32BinaryResult<string mnemonic>
                                          "0">:$op_sel,
                        DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
                                          "3">:$op_sel_hi,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
+                                         "0">:$neg_lo,
+                       DefaultValuedAttr<WaveAMDMachine_PackedOpSel2Attr,
+                                         "0">:$neg_hi,
                        DefaultValuedAttr<BoolAttr, "false">:$contract);
   let results = (outs WaveAMDMachine_VGPR2:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";

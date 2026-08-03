@@ -2169,7 +2169,8 @@ LogicalResult FSubOp::verify() {
   return verifyWaveFloatSimdBinary(getOperation(), getLhs().getType(),
                                    getRhs().getType(), getResult().getType(),
                                    /*allowScalarF16=*/false,
-                                   /*allowPackedF16=*/false);
+                                   /*allowPackedF16=*/false,
+                                   /*allowPackedF32=*/true);
 }
 
 LogicalResult FMulOp::verify() {

@@ -565,7 +565,7 @@ func.func @fadd_packed_f32_too_short(%a: !wave.simd<vector<1xf32>, 32>, %b: !wav
 // -----
 
 func.func @fsub_packed_f16_rejected(%a: !wave.simd<vector<2xf16>, 32>, %b: !wave.simd<vector<2xf16>, 32>) {
-  // expected-error @+1 {{SIMD element type must be f32}}
+  // expected-error @+1 {{SIMD element type must be f32 or vector<2^nxf32> with at least two f32 elements}}
   %r = wave.fsub %a, %b : !wave.simd<vector<2xf16>, 32>, !wave.simd<vector<2xf16>, 32> -> !wave.simd<vector<2xf16>, 32>
   return
 }

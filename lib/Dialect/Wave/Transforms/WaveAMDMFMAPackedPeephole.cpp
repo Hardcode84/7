@@ -82,6 +82,8 @@ static std::optional<PackedF32Info> getPackedF32Info(Operation *op) {
     info.kind = PackedF32Kind::Add;
     info.opSel = add.getOpSel();
     info.opSelHi = add.getOpSelHi();
+    info.negLo = add.getNegLo();
+    info.negHi = add.getNegHi();
     info.clamp = add.getClamp();
     return info;
   }
@@ -90,6 +92,8 @@ static std::optional<PackedF32Info> getPackedF32Info(Operation *op) {
     info.kind = PackedF32Kind::Mul;
     info.opSel = mul.getOpSel();
     info.opSelHi = mul.getOpSelHi();
+    info.negLo = mul.getNegLo();
+    info.negHi = mul.getNegHi();
     info.clamp = mul.getClamp();
     return info;
   }

@@ -322,6 +322,18 @@ func.func @wave_f32_ops(%a: !wave.simd<f32, 32>, %b: !wave.simd<f32, 32>) -> !wa
   func.return %rcp : !wave.simd<f32, 32>
 }
 
+// CHECK-LABEL: func.func @wave_packed_f32_sub
+// CHECK-SAME: ([[A:%.*]]: !wave.simd<vector<2xf32>, 32>, [[B:%.*]]: !wave.simd<vector<2xf32>, 32>)
+// CHECK: [[SUB:%.*]] = wave.fsub [[A]], [[B]] fastmath<contract> : !wave.simd<vector<2xf32>, 32>, !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf32>, 32>
+func.func @wave_packed_f32_sub(%a: !wave.simd<vector<2xf32>, 32>,
+                               %b: !wave.simd<vector<2xf32>, 32>)
+    -> !wave.simd<vector<2xf32>, 32> {
+  %sub = wave.fsub %a, %b fastmath<contract>
+      : !wave.simd<vector<2xf32>, 32>, !wave.simd<vector<2xf32>, 32>
+      -> !wave.simd<vector<2xf32>, 32>
+  return %sub : !wave.simd<vector<2xf32>, 32>
+}
+
 // CHECK-LABEL: func.func @wave_f32_fastmath_ops
 // CHECK-SAME: ([[A:%.*]]: !wave.simd<f32, 32>, [[B:%.*]]: !wave.simd<f32, 32>, [[C:%.*]]: !wave.simd<f32, 32>)
 func.func @wave_f32_fastmath_ops(%a: !wave.simd<f32, 32>,
