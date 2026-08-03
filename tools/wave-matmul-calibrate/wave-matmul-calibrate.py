@@ -266,8 +266,9 @@ KERNEL_PROFILES: dict[str, dict[str, ProfileValue]] = {
         "bn": 4,
         "wave_m_tiles": 16,
         "wave_n_tiles": 4,
-        "wave_k_tiles": 2,
-        "cta_group_m": 8,
+        "wave_k_tiles": 4,
+        "cta_swizzle_xcds": 1,
+        "cta_group_m": 4,
     },
     "v9-4096-original-wave": {
         "example": "v9-perf-golden",
@@ -846,8 +847,19 @@ def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
         k_pairs = args.wave_k_tiles // 2
         a_blocks = k_pairs * (args.wave_m_tiles // 2)
         b_blocks = k_pairs * (args.wave_n_tiles // 2)
-        dma_groups = (a_blocks + 3) // 4 + (b_blocks + 3) // 4
-        return 2 * args.bm * args.bn * dma_groups * 1024
+        a_groups = (a_blocks + 3) // 4
+        b_groups = (b_blocks + 3) // 4
+        waves = args.bm * args.bn
+        if (
+            args.bm * a_groups == waves
+            and args.bn * b_groups == waves
+            and a_blocks % 4 == 0
+            and b_blocks % 4 == 0
+        ):
+            dma_groups = args.bm * a_groups + args.bn * b_groups
+        else:
+            dma_groups = waves * (a_groups + b_groups)
+        return 2 * dma_groups * 1024
     if selected_example(args) == "tensilelite-subtile":
         k_groups = args.wave_k_tiles // 2
         scale_tiles = (

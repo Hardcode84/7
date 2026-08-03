@@ -250,8 +250,9 @@ _KERNEL_PROFILES: dict[str, dict[str, _ProfileValue]] = {
         "bn": 4,
         "wave_m_tiles": 16,
         "wave_n_tiles": 4,
-        "wave_k_tiles": 2,
-        "cta_group_m": 8,
+        "wave_k_tiles": 4,
+        "cta_swizzle_xcds": 1,
+        "cta_group_m": 4,
     },
 }
 

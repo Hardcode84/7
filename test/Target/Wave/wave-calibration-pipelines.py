@@ -1370,22 +1370,66 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
     print("matmul_mxfp4_4wave_profile: ok")
 
 
+def check_matmul_mxfp4_aiter_example_profile(
+    matmul, matmul_example, args, profile: str, shape: tuple[int, ...]
+) -> None:
+    command = matmul.build_matmul_example_args(args, "gfx950")
+    require(
+        "matmul_mxfp4_aiter_profiles",
+        "--mxfp4-input-layout=aiter" in command,
+        f"{profile} lost AITER ABI",
+    )
+    example_defaults = matmul_example.profile_defaults([f"--kernel-profile={profile}"])
+    example_shape = tuple(
+        example_defaults[key]
+        for key in (
+            "bm",
+            "bn",
+            "wave_m_tiles",
+            "wave_n_tiles",
+            "wave_k_tiles",
+            "cta_swizzle_xcds",
+            "cta_group_m",
+        )
+    )
+    require(
+        "matmul_mxfp4_aiter_profiles",
+        example_shape == shape and example_defaults["mxfp4_input_layout"] == "aiter",
+        f"direct example profile drifted for {profile}",
+    )
+
+
 def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
     expected = {
-        "gfx950-mxfp4-aiter-32x128": ((1, 4, 2, 2, 2, 4), 16384, 24576, 0),
-        "gfx950-mxfp4-aiter-64x128": ((1, 4, 4, 2, 2, 4), 16384, 32768, 0),
-        "gfx950-mxfp4-aiter-128x128": ((1, 4, 8, 2, 2, 4), 16384, 49152, 0),
+        "gfx950-mxfp4-aiter-32x128": (
+            (1, 4, 2, 2, 2, 8, 4),
+            16384,
+            24576,
+            0,
+        ),
+        "gfx950-mxfp4-aiter-64x128": (
+            (1, 4, 4, 2, 2, 8, 4),
+            16384,
+            32768,
+            0,
+        ),
+        "gfx950-mxfp4-aiter-128x128": (
+            (1, 4, 8, 2, 2, 8, 4),
+            16384,
+            49152,
+            0,
+        ),
         "gfx950-mxfp4-aiter-128x256": (
-            (1, 4, 8, 4, 4, 4),
+            (1, 4, 8, 4, 4, 8, 4),
             24576,
             90112,
             90112,
         ),
         "gfx950-mxfp4-aiter-256x256": (
-            (1, 4, 16, 4, 2, 8),
-            24576,
-            90112,
-            90112,
+            (1, 4, 16, 4, 4, 1, 4),
+            16384,
+            147456,
+            147456,
         ),
     }
     for profile, (shape, scale_lds, total_lds, dynamic_lds) in expected.items():
@@ -1405,9 +1449,15 @@ def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
             args.wave_m_tiles,
             args.wave_n_tiles,
             args.wave_k_tiles,
+            args.cta_swizzle_xcds,
             args.cta_group_m,
         )
         require("matmul_mxfp4_aiter_profiles", actual == shape, f"bad {profile}")
+        require(
+            "matmul_mxfp4_aiter_profiles",
+            matmul.dma_buffer_count(args) == 2,
+            f"bad {profile} LDS pipeline",
+        )
         require(
             "matmul_mxfp4_aiter_profiles",
             args.mxfp4_input_layout == "aiter"
@@ -1422,31 +1472,8 @@ def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
             and matmul.compute_dynamic_lds_bytes(args) == dynamic_lds,
             f"bad {profile} LDS accounting",
         )
-        command = matmul.build_matmul_example_args(args, "gfx950")
-        require(
-            "matmul_mxfp4_aiter_profiles",
-            "--mxfp4-input-layout=aiter" in command,
-            f"{profile} lost AITER ABI",
-        )
-        example_defaults = matmul_example.profile_defaults(
-            [f"--kernel-profile={profile}"]
-        )
-        example_shape = tuple(
-            example_defaults[key]
-            for key in (
-                "bm",
-                "bn",
-                "wave_m_tiles",
-                "wave_n_tiles",
-                "wave_k_tiles",
-                "cta_group_m",
-            )
-        )
-        require(
-            "matmul_mxfp4_aiter_profiles",
-            example_shape == shape
-            and example_defaults["mxfp4_input_layout"] == "aiter",
-            f"direct example profile drifted for {profile}",
+        check_matmul_mxfp4_aiter_example_profile(
+            matmul, matmul_example, args, profile, shape
         )
     print("matmul_mxfp4_aiter_profiles: ok")
 

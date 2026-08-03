@@ -226,6 +226,34 @@ assert_raises(
     "4294967295",
     lambda: build_aiter_mxfp4(M=33554432),
 )
+assert_raises(
+    ValueError,
+    "streamed AITER K phases require uniform A DMA ownership",
+    lambda: build_aiter_mxfp4(K=1024, wave_k_tiles=4),
+)
+assert_raises(
+    ValueError,
+    "AITER wave M/N tile pairs must be powers of two",
+    lambda: build_aiter_mxfp4(
+        M=192,
+        N=128,
+        K=1024,
+        BM=2,
+        BN=2,
+        wave_m_tiles=6,
+        wave_k_tiles=4,
+    ),
+)
+assert_raises(
+    ValueError,
+    "streamed AITER K phases require at least two panels",
+    lambda: build_aiter_mxfp4(
+        M=64,
+        K=512,
+        wave_m_tiles=4,
+        wave_k_tiles=4,
+    ),
+)
 aiter_packed_scale_module = build_aiter_mxfp4(K=512)
 aiter_packed_scale_ops = [
     op
@@ -250,12 +278,40 @@ aiter_scale_loads = [
 assert len(aiter_scale_loads) == 6
 assert all("#wave.shared" in op and " after " in op for op in aiter_scale_loads)
 assert any(
-    op.name == "wave.barrier" and len(op.operands) == 4 for op in aiter_packed_scale_ops
+    op.name == "wave.barrier" and len(op.operands) == 3 for op in aiter_packed_scale_ops
 )
 assert "wave.lds_size = 24576 : i64" in str(aiter_packed_scale_module)
+aiter_pipeline_module = build_aiter_mxfp4(
+    M=128,
+    N=256,
+    K=2048,
+    BM=1,
+    BN=4,
+    wave_m_tiles=8,
+    wave_n_tiles=4,
+    wave_k_tiles=4,
+)
+aiter_pipeline_loops = [
+    op
+    for block in operation_blocks(aiter_pipeline_module.operation)
+    for op in block.operations
+    if op.name == "scf.for" and len(op.results) == 42
+]
+assert len(aiter_pipeline_loops) == 1
+assert any(
+    op.name == "wave.barrier" and len(op.operands) == 8
+    for block in operation_blocks(aiter_pipeline_loops[0])
+    for op in block.operations
+)
 aiter_partial_scale_module = build_aiter_mxfp4(
-    M=96,
-    wave_m_tiles=6,
+    M=64,
+    N=64,
+    K=1536,
+    BM=2,
+    BN=2,
+    wave_m_tiles=2,
+    wave_n_tiles=2,
+    wave_k_tiles=6,
 )
 aiter_partial_scale_text = str(aiter_partial_scale_module)
 assert (
@@ -263,7 +319,7 @@ assert (
 )
 assert '<"512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">' in aiter_partial_scale_text
 assert (
-    '<"256 + 512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">'
+    '<"256*(1 + 2*floor(1/64*__wave_dsl_aiter_stage_wi_first))">'
     in aiter_partial_scale_text
 )
 aiter_split_owner_text = str(
@@ -654,6 +710,40 @@ assert_raises(
     "AITER scale shuffle requires positive rows and K/32",
     lambda: shuffle_mxfp4_scales_aiter((0,) * 16, 16, 33),
 )
+
+aiter_shared_cfg = wm._make_matmul_config(
+    M=256,
+    N=256,
+    K=1024,
+    BM=2,
+    BN=2,
+    wave_m_tiles=8,
+    wave_n_tiles=8,
+    wave_k_tiles=4,
+    use_buffer=True,
+    use_dma_lds=True,
+    matrix_intrinsic="mfma_gfx950",
+    input_type="mxfp4",
+    output_type="f16",
+    mxfp4_scale_path="dma",
+    mxfp4_input_layout="aiter",
+    random_data=False,
+    random_seed=0,
+    cta_swizzle_xcds=1,
+    cta_group_m=1,
+)
+assert wm._uses_cta_shared_aiter_mxfp4_scales(aiter_shared_cfg)
+wave = dsl.sym("__wave_dsl_aiter_shared_test_wave")
+for wave_id in range(4):
+    for axis, expected_owner, expected_group in (
+        ("m", wave_id // 2, wave_id % 2),
+        ("n", wave_id % 2, wave_id // 2),
+    ):
+        owner, group = wm._aiter_mxfp4_scale_owner(aiter_shared_cfg, axis, wave)
+        assert owner.subs({wave: wave_id}).eval({}) == expected_owner
+        assert group.subs({wave: wave_id}).eval({}) == expected_group
+print("mxfp4-aiter-shared-scale-owners ok")
+
 ref_mxfp4_random = compute_wmma_f16_matmul_reference_buffer(
     16,
     16,
@@ -813,6 +903,7 @@ print(static_bld.module)
 # CHECK: mxfp4-ref 256 42.5 21.25
 # CHECK: mxfp4-packed-random 1024 1024 68 34
 # CHECK: mxfp4-aiter-shuffle 2048 8192
+# CHECK: mxfp4-aiter-shared-scale-owners ok
 # CHECK: mxfp4-random-ref 256 92.703125 12.6484375
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK: mxfp4-random-module ok
