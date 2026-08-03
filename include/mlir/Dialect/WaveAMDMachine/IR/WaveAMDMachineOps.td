@@ -770,6 +770,7 @@ class WaveAMDMachine_PackedF32BinaryResult<string mnemonic>
                        DefaultValuedAttr<BoolAttr, "false">:$contract);
   let results = (outs WaveAMDMachine_VGPR2:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+  let hasCanonicalizer = 1;
 }
 
 class WaveAMDMachine_PackedF32TernaryResult<string mnemonic>
@@ -790,6 +791,7 @@ class WaveAMDMachine_PackedF32TernaryResult<string mnemonic>
   let results = (outs WaveAMDMachine_VGPR2:$result);
   let assemblyFormat =
       "$a `,` $b `,` $c attr-dict `:` functional-type(operands, results)";
+  let hasCanonicalizer = 1;
 }
 
 class WaveAMDMachine_UnaryNoResult<string mnemonic, Type operandType,

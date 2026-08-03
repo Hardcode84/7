@@ -66,6 +66,11 @@ LogicalResult setKernelMetadataEntry(Operation *op, Builder &builder,
 LogicalResult removeKernelMetadataEntries(Operation *op, Builder &builder,
                                           ArrayRef<StringRef> names);
 
+/// Rebind packed-F32 operand and compose its lane selectors.
+LogicalResult remapPackedF32Operand(Operation *op, unsigned operandIndex,
+                                    Value source,
+                                    ArrayRef<unsigned> sourceLanes);
+
 } // namespace mlir::waveamdmachine
 
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOpsDialect.h.inc"

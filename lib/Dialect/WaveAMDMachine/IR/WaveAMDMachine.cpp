@@ -14,6 +14,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/Utils/InferIntRangeCommon.h"
@@ -21,6 +22,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <array>
 #include <cstdint>
 #include <limits>
 
@@ -861,6 +863,126 @@ OpFoldResult TupleFromElementsOp::fold(FoldAdaptor) {
   if (sourceTuple && sourceTuple.getType() == getTuple().getType())
     return sourceTuple;
   return {};
+}
+
+namespace {
+struct PackedF32TupleRepack {
+  Value source;
+  std::array<unsigned, 2> lanes;
+};
+
+static FailureOr<PackedF32TupleRepack> matchPackedF32TupleRepack(Value value) {
+  TupleFromElementsOp join = value.getDefiningOp<TupleFromElementsOp>();
+  if (!join || join.getElements().size() != 2)
+    return failure();
+
+  PackedF32TupleRepack repack;
+  for (unsigned index : llvm::seq<unsigned>(0, 2)) {
+    OpResult element = dyn_cast<OpResult>(join.getElements()[index]);
+    if (!element)
+      return failure();
+    TupleToElementsOp split =
+        dyn_cast_or_null<TupleToElementsOp>(element.getOwner());
+    if (!split || split.getElements().size() != 2)
+      return failure();
+    if (!repack.source)
+      repack.source = split.getTuple();
+    else if (repack.source != split.getTuple())
+      return failure();
+    repack.lanes[index] = element.getResultNumber();
+  }
+  if (repack.source.getType() != value.getType())
+    return failure();
+  return repack;
+}
+
+static uint64_t composePackedSelector(uint64_t selector, unsigned operandIndex,
+                                      ArrayRef<unsigned> lanes) {
+  uint64_t mask = uint64_t{1} << operandIndex;
+  unsigned selectedLane = (selector & mask) != 0;
+  return (selector & ~mask) | (uint64_t{lanes[selectedLane]} << operandIndex);
+}
+
+template <typename PackedOp>
+static void remapPackedF32OperandImpl(PackedOp op, unsigned operandIndex,
+                                      Value source,
+                                      ArrayRef<unsigned> sourceLanes) {
+  op->setOperand(operandIndex, source);
+  op.setOpSel(composePackedSelector(op.getOpSel(), operandIndex, sourceLanes));
+  op.setOpSelHi(
+      composePackedSelector(op.getOpSelHi(), operandIndex, sourceLanes));
+}
+
+} // namespace
+
+LogicalResult
+mlir::waveamdmachine::remapPackedF32Operand(Operation *op,
+                                            unsigned operandIndex, Value source,
+                                            ArrayRef<unsigned> sourceLanes) {
+  if (operandIndex >= op->getNumOperands() || sourceLanes.size() != 2 ||
+      sourceLanes[0] > 1 || sourceLanes[1] > 1 ||
+      source.getType() != op->getOperand(operandIndex).getType())
+    return failure();
+
+  if (VPkAddF32Op packed = dyn_cast<VPkAddF32Op>(op)) {
+    remapPackedF32OperandImpl(packed, operandIndex, source, sourceLanes);
+    return success();
+  }
+  if (VPkMulF32Op packed = dyn_cast<VPkMulF32Op>(op)) {
+    remapPackedF32OperandImpl(packed, operandIndex, source, sourceLanes);
+    return success();
+  }
+  if (VPkFmaF32Op packed = dyn_cast<VPkFmaF32Op>(op)) {
+    remapPackedF32OperandImpl(packed, operandIndex, source, sourceLanes);
+    return success();
+  }
+  return failure();
+}
+
+namespace {
+template <typename PackedOp>
+struct CanonicalizePackedF32TupleRepack : OpRewritePattern<PackedOp> {
+  using OpRewritePattern<PackedOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(PackedOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<std::pair<unsigned, PackedF32TupleRepack>, 3> repacks;
+    for (unsigned index : llvm::seq<unsigned>(0, op->getNumOperands())) {
+      FailureOr<PackedF32TupleRepack> repack =
+          matchPackedF32TupleRepack(op->getOperand(index));
+      if (failed(repack))
+        continue;
+      repacks.emplace_back(index, *repack);
+    }
+    if (repacks.empty())
+      return failure();
+
+    rewriter.modifyOpInPlace(op, [&] {
+      for (const std::pair<unsigned, PackedF32TupleRepack> &entry : repacks) {
+        LogicalResult remapped = remapPackedF32Operand(
+            op, entry.first, entry.second.source, entry.second.lanes);
+        assert(succeeded(remapped) && "matched packed-F32 operand must remap");
+        (void)remapped;
+      }
+    });
+    return success();
+  }
+};
+} // namespace
+
+void VPkAddF32Op::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<CanonicalizePackedF32TupleRepack<VPkAddF32Op>>(context);
+}
+
+void VPkMulF32Op::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<CanonicalizePackedF32TupleRepack<VPkMulF32Op>>(context);
+}
+
+void VPkFmaF32Op::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<CanonicalizePackedF32TupleRepack<VPkFmaF32Op>>(context);
 }
 
 LogicalResult CopyTupleOp::verify() {
