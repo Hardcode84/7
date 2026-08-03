@@ -81,12 +81,12 @@ beat group 8 on device 2: `818.454` versus `822.964 us` in long runs.
 VGPR address space: 396
 VGPRs below AGPR base: 256
 AGPRs used: 140
-SGPRs: 25
+SGPRs: 24
 spills: 0
 static f16 MFMAs: 384
 static direct-to-LDS loads: 48
 static LDS reads: 96
-static workgroup barriers: 3
+static workgroup barriers: 5
 ```
 
 Combined register pressure fits the one-wave-per-SIMD target. Bank placement

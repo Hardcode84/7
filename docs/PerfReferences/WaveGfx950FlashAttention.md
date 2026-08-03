@@ -9,7 +9,7 @@ The current golden is
 `test/PerfGolden/Inputs/gfx950-fa-b2-h64-n8192-d128-bf16-8wave.s`:
 
 - SHA-256:
-  `2866fc967b574febc7d7e78a45bc5f751abc6b4d0dad7c8be192dd03d48f4891`
+  `be83362d9062a894dd0fb66b1bd70377d5077e881b519201d03ea97ea28c19b8`
 - 256 VGPR, 28 SGPR, no scratch
 - 136,192 bytes dynamic LDS; fixed group segment size remains zero
 - 384 BF16 MFMA instructions, 576 LDS reads, 48 DMA-to-LDS loads

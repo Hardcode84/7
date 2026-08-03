@@ -161,11 +161,11 @@ Current-tree generated ASM:
 
 | Golden | SHA-256 |
 |---|---|
-| Stream-K aligned | `443beedd06d87dc6c1b370a31bd79c046d5e49240d270014dccc9df412f7d557` |
+| Stream-K aligned | `5d743a7392960a5123c8d5a3c2c2a43b1a75792c2d9c91c4062c6e724e5d77b3` |
 | Four-wave control | `db776c0c9ff870de4c67f91f2347c10212ecb5901104d35c25b7f26919aa9ee1` |
 | Four-wave specialized | `83f72664ae4e12145fd7afdaa59c88b9a8f8e09ec28121d10d856f1fb65a3a8e` |
 
-The aligned Stream-K golden uses 392 VGPRs, 48 SGPRs, and 136 AGPRs. It has no
+The aligned Stream-K golden uses 428 VGPRs, 48 SGPRs, and 172 AGPRs. It has no
 scratch or atomic instructions. Output stores are interleaved with the final
 MFMA groups.
 
