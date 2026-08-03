@@ -448,7 +448,11 @@ def effective_output_layout(args: argparse.Namespace) -> str:
         return "row-major"
     if selected_example(args) == "tensilelite-subtile":
         return "tile-packed"
-    if is_streamk_gemm(args) or getattr(args, "coalesced_mfma_output", False):
+    if (
+        is_streamk_gemm(args)
+        or is_persistent_gemm(args)
+        or getattr(args, "coalesced_mfma_output", False)
+    ):
         return "column-major"
     if getattr(args, "mxfp4_input_layout", "canonical") == "aiter":
         return "row-major"
@@ -1630,7 +1634,7 @@ def _validate_persistent_gemm_args(args: argparse.Namespace) -> None:
         "--example=persistent-gemm requires NUM_XCDS=8 and GROUP_SIZE_M=4",
     )
     _require_arg(
-        args.output_layout == "column-major",
+        effective_output_layout(args) == "column-major",
         "--example=persistent-gemm requires column-major output",
     )
     _require_arg(
