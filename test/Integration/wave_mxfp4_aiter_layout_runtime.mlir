@@ -9,9 +9,9 @@
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --m=192 --n=320 --k=512 --bm=2 --bn=2 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --target-waves=1 --use-buffer --use-dma-lds --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --output-store-cache=cs --mxfp4-input-layout=aiter --cta-swizzle-xcds=1 --cta-group-m=1 --seed=53 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
 // RUN:   | FileCheck %s --check-prefix=OWNER-SPLIT
 //
+// LARGE-TILE: m=512 n=512 k=2048 bm=1 bn=4 wave_m_tiles=16 wave_n_tiles=4 wave_k_tiles=4
 // LARGE-TILE: input_type=mxfp4 output_type=f16 mxfp4_scale_path=dma mxfp4_input_layout=aiter
 // LARGE-TILE: seed=17 input_mode=random
-// LARGE-TILE: m=512 n=512 k=2048 bm=1 bn=4 wave_m_tiles=16 wave_n_tiles=4 wave_k_tiles=4
 // LARGE-TILE: cta_swizzle_xcds=1 cta_group_m=2
 // LARGE-TILE: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled
 // LARGE-TILE: output_layout_check: passed kernel=tile-packed final=row-major conversion=device coordinates=bijective elements=262144
