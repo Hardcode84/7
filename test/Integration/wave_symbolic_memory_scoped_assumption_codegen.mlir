@@ -34,11 +34,11 @@
 // ASM: s_endpgm
 
 // LOWER-LABEL: func.func @symbolic_memory_ssa_assumption_codegen(
-// LOWER-COUNT-1: wave.where
+// LOWER-COUNT-1: [[GUARDED:%.*]]:2 = wave.where
 // LOWER-COUNT-1: wave.load
 // LOWER-SAME: -> (!wave.simd<vector<2xf16>, 64>, !wave.mem.token)
 // LOWER-NOT: wave.gather
-// LOWER: wave.store
+// LOWER: wave.store {{.*}} after [[GUARDED]]#1
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @symbolic_memory_scoped_assumption_codegen(
