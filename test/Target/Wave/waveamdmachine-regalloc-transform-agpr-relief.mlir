@@ -79,6 +79,49 @@ module attributes {transform.with_named_sequence} {
       return %long : !waveamdmachine.reg<vgpr, 1>
     }
 
+    // CHECK-LABEL: func.func @agpr_relief_keeps_ds_store2_cohort_in_agpr()
+    // CHECK-NOT: waveamdmachine.regalloc_transform_state
+    // CHECK: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // CHECK: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // CHECK-SAME: -> !waveamdmachine.reg<agpr, 2>
+    // CHECK: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[AG]]
+    // CHECK-SAME: -> (!waveamdmachine.reg<agpr, 1>, !waveamdmachine.reg<agpr, 1>)
+    // CHECK-NOT: waveamdmachine.v_accvgpr_read_b32_tuple
+    // CHECK: waveamdmachine.ds_store2_b32 {{%.*}}, [[PARTS]]#0, [[PARTS]]#1
+    // CHECK-SAME: !waveamdmachine.reg<agpr, 1>
+    // CHECK-SAME: !waveamdmachine.reg<agpr, 1>
+    func.func @agpr_relief_keeps_ds_store2_cohort_in_agpr()
+        attributes {waveamdmachine.vgpr_count_max = 4 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64} {
+      %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %tuple = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %parts:2 = waveamdmachine.tuple_to_elements %tuple
+          : (!waveamdmachine.reg<vgpr, 2>)
+            -> (!waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>)
+      %request = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+      %request_parts:2 = waveamdmachine.tuple_to_elements %request
+          : (!waveamdmachine.reg<vgpr, 2>)
+            -> (!waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.reg<vgpr, 1>)
+      %dep = waveamdmachine.token : !waveamdmachine.mem.token
+      %store = waveamdmachine.ds_store2_b32
+          %addr, %parts#0, %parts#1 after %dep offsets(0, 1)
+          : (!waveamdmachine.reg<vgpr, 1, 0>,
+             !waveamdmachine.reg<vgpr, 1>,
+             !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+            -> !waveamdmachine.mem.token
+      %tail = waveamdmachine.ds_store_b32
+          %addr, %request_parts#0 after %store
+          : (!waveamdmachine.reg<vgpr, 1, 0>,
+             !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+            -> !waveamdmachine.mem.token
+      return
+    }
+
     // DIRECT-LABEL: func.func @agpr_relief_direct_promotes_mfma_acc_result_group(
     // DIRECT-NOT: waveamdmachine.regalloc_transform_state
     // DIRECT: [[A:%.*]] = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 4, 0>
@@ -195,6 +238,71 @@ module attributes {transform.with_named_sequence} {
       %dep = waveamdmachine.token : !waveamdmachine.mem.token
       %store = waveamdmachine.ds_store_b32 %addr, %value after %dep
           : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1>,
+             !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+      return
+    }
+
+    // DIRECT-LABEL: func.func @agpr_relief_bridges_split_ds_store2_cohort()
+    // DIRECT: [[ZERO:%.*]] = waveamdmachine.imm 0
+    // DIRECT: [[AG:%.*]] = waveamdmachine.v_accvgpr_write_b32_tuple [[ZERO]]
+    // DIRECT: [[PEER:%.*]] = waveamdmachine.v_mov_b32_tuple [[ZERO]]
+    // DIRECT: [[READ:%.*]] = waveamdmachine.v_accvgpr_read_b32_tuple [[AG]]
+    // DIRECT: waveamdmachine.ds_store2_b32 {{%.*}}, [[READ]], [[PEER]]
+    // DIRECT-SAME: !waveamdmachine.reg<vgpr, 1>
+    // DIRECT-SAME: !waveamdmachine.reg<vgpr, 1>
+    func.func @agpr_relief_bridges_split_ds_store2_cohort()
+        attributes {waveamdmachine.vgpr_count_max = 2 : i64,
+                    waveamdmachine.agpr_count_max = 4 : i64,
+                    waveamdmachine.regalloc_transform_state = {
+          alias_sets = [
+            {class = "vgpr", id = 0 : i64,
+             members = [{value = 0 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 1 : i64,
+             members = [{value = 1 : i64}], width = 1 : i64},
+            {class = "vgpr", id = 2 : i64,
+             members = [{value = 2 : i64}], width = 1 : i64}
+          ],
+          failure = {
+            class = "vgpr",
+            overlaps = [
+              {base = 0 : i64, class = "vgpr", end = 5 : i64, set = 0 : i64,
+               start = 0 : i64, width = 1 : i64},
+              {base = 0 : i64, class = "vgpr", end = 5 : i64, set = 1 : i64,
+               start = 2 : i64, width = 1 : i64},
+              {base = 1 : i64, class = "vgpr", end = 5 : i64, set = 2 : i64,
+               start = 3 : i64, width = 1 : i64}
+            ],
+            position = 5 : i64,
+            reason = "pressure",
+            set = 2 : i64
+          },
+          stage = "linear-scan-failure",
+          values = [
+            {class = "vgpr", end = 5 : i64, fixed = 0 : i64, id = 0 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 0], set = 0 : i64, start = 0 : i64,
+             width = 1 : i64},
+            {class = "vgpr", end = 5 : i64, id = 1 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 2], set = 1 : i64, start = 2 : i64,
+             width = 1 : i64},
+            {class = "vgpr", end = 5 : i64, id = 2 : i64,
+             kind = "op_result", number = 0 : i64, offset = 0 : i64,
+             path = [0, 0, 3], set = 2 : i64, start = 3 : i64,
+             width = 1 : i64}
+          ]
+        }} {
+      %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+      %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+      %value0 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %value1 = waveamdmachine.v_mov_b32_tuple %zero {registers = 1 : i64}
+          : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
+      %dep = waveamdmachine.token : !waveamdmachine.mem.token
+      %store = waveamdmachine.ds_store2_b32 %addr, %value0, %value1 after %dep
+          offsets(0, 1)
+          : (!waveamdmachine.reg<vgpr, 1, 0>,
+             !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
              !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
       return
     }

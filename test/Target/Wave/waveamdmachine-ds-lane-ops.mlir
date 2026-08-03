@@ -92,4 +92,38 @@ func.func @ds_agpr_load_store() attributes {wave.kernel} {
   return
 }
 
+// ROUNDTRIP-LABEL: func.func @ds_agpr_store2
+// ROUNDTRIP: waveamdmachine.ds_store2_b32
+// ROUNDTRIP-SAME: !waveamdmachine.reg<agpr, 1, 0>
+// ROUNDTRIP-SAME: !waveamdmachine.reg<agpr, 1, 1>
+// ROUNDTRIP: waveamdmachine.ds_store2_b64
+// ROUNDTRIP-SAME: !waveamdmachine.reg<agpr, 2, 2>
+// ROUNDTRIP-SAME: !waveamdmachine.reg<agpr, 2, 4>
+
+// ASM-LABEL: ds_agpr_store2:
+// ASM: ds_write2_b32 v0, a0, a1 offset0:1 offset1:2
+// ASM: ds_write2st64_b64 v0, a[2:3], a[4:5] offset1:1
+func.func @ds_agpr_store2() attributes {wave.kernel} {
+  %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %a0 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 0>
+  %a1 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 1, 1>
+  %a2 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 2, 2>
+  %a4 = waveamdmachine.uninit : !waveamdmachine.reg<agpr, 2, 4>
+  %root = waveamdmachine.token : !waveamdmachine.mem.token
+  %tok0 = waveamdmachine.ds_store2_b32 %addr, %a0, %a1 after %root
+      offsets(1, 2)
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<agpr, 1, 0>,
+         !waveamdmachine.reg<agpr, 1, 1>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %tok1 = waveamdmachine.ds_store2_b64 %addr, %a2, %a4 after %tok0
+      offsets(0, 1) {st64 = true}
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<agpr, 2, 2>,
+         !waveamdmachine.reg<agpr, 2, 4>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm
+  return
+}
+
 }

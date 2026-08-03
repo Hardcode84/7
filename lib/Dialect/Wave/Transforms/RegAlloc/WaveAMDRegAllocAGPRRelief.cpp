@@ -496,10 +496,25 @@ canDefineAGPRThroughInterface(Value value,
 
 static bool
 canConsumeAGPRThroughInterface(OpOperand &use,
+                               const DenseSet<Value> &groupValues,
                                const llvm::AMDGPU::IsaVersion &isaVersion) {
   auto banking =
       dyn_cast<waveamdmachine::AGPRBankingOpInterface>(use.getOwner());
-  return banking && banking.isOperandAGPRValid(isaVersion, use);
+  if (!banking || !banking.isOperandAGPRValid(isaVersion, use))
+    return false;
+  uint64_t cohort = banking.getAGPROperandCohortMask(use);
+  for (unsigned operandNumber :
+       llvm::seq<unsigned>(use.getOwner()->getNumOperands())) {
+    if (operandNumber >= 64)
+      break;
+    if (!(cohort & (uint64_t{1} << operandNumber)))
+      continue;
+    Value peer = use.getOwner()->getOperand(operandNumber);
+    if (!hasRegAllocTransformClass(peer, waveamdmachine::RegClass::AGPR) &&
+        !groupValues.contains(peer))
+      return false;
+  }
+  return true;
 }
 
 static bool canDefineAGPR(Value value, const DenseSet<Value> &groupValues,
@@ -601,7 +616,7 @@ canConsumeAGPRAfterRelief(OpOperand &use, const DenseSet<Value> &groupValues,
     return true;
   if (canRebankTupleAliasOp(user, groupValues))
     return true;
-  if (canConsumeAGPRThroughInterface(use, isaVersion))
+  if (canConsumeAGPRThroughInterface(use, groupValues, isaVersion))
     return true;
   auto read = dyn_cast<waveamdmachine::VAccvgprReadB32TupleOp>(user);
   return read && use.getOperandNumber() == 0;
@@ -1104,7 +1119,7 @@ static void rewriteAGPRReliefUse(OpBuilder &builder, OpOperand &use, Value agpr,
     use.set(agpr);
     return;
   }
-  if (canConsumeAGPRThroughInterface(use, isaVersion)) {
+  if (canConsumeAGPRThroughInterface(use, groupValues, isaVersion)) {
     use.set(agpr);
     return;
   }

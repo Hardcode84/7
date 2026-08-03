@@ -6021,15 +6021,45 @@ private:
     if (isa<waveamdmachine::DsStoreB32Op>(op))
       return emitDsStore(op, dsWriteB32());
     if (isa<waveamdmachine::DsStore2B32Op>(op)) {
-      unsigned opcode =
-          getBoolAttr(&op, "st64", false) ? dsWrite2St64B32() : dsWrite2B32();
+      bool value0IsAGPR = isAGPRType(op.getOperand(1).getType());
+      bool value1IsAGPR = isAGPRType(op.getOperand(2).getType());
+      if (value0IsAGPR != value1IsAGPR)
+        return op.emitError("paired DS store values must use the same bank");
+      unsigned opcode;
+      if (value0IsAGPR) {
+        waveamdmachine::AGPRBankingOpInterface banking =
+            cast<waveamdmachine::AGPRBankingOpInterface>(op);
+        if (!banking.isOperandAGPRValid(isaVersion, op.getOpOperand(1)))
+          return op.emitError("paired DS AGPR store unsupported on target");
+        opcode = getBoolAttr(&op, "st64", false)
+                     ? llvm::AMDGPU::DS_WRITE2ST64_B32_vi_agpr
+                     : llvm::AMDGPU::DS_WRITE2_B32_vi_agpr;
+      } else {
+        opcode =
+            getBoolAttr(&op, "st64", false) ? dsWrite2St64B32() : dsWrite2B32();
+      }
       return emitDsStore2(op, opcode);
     }
     if (isa<waveamdmachine::DsStoreB64Op>(op))
       return emitDsStore(op, dsWriteB64());
     if (isa<waveamdmachine::DsStore2B64Op>(op)) {
-      unsigned opcode =
-          getBoolAttr(&op, "st64", false) ? dsWrite2St64B64() : dsWrite2B64();
+      bool value0IsAGPR = isAGPRType(op.getOperand(1).getType());
+      bool value1IsAGPR = isAGPRType(op.getOperand(2).getType());
+      if (value0IsAGPR != value1IsAGPR)
+        return op.emitError("paired DS store values must use the same bank");
+      unsigned opcode;
+      if (value0IsAGPR) {
+        waveamdmachine::AGPRBankingOpInterface banking =
+            cast<waveamdmachine::AGPRBankingOpInterface>(op);
+        if (!banking.isOperandAGPRValid(isaVersion, op.getOpOperand(1)))
+          return op.emitError("paired DS AGPR store unsupported on target");
+        opcode = getBoolAttr(&op, "st64", false)
+                     ? llvm::AMDGPU::DS_WRITE2ST64_B64_vi_agpr
+                     : llvm::AMDGPU::DS_WRITE2_B64_vi_agpr;
+      } else {
+        opcode =
+            getBoolAttr(&op, "st64", false) ? dsWrite2St64B64() : dsWrite2B64();
+      }
       return emitDsStore2(op, opcode);
     }
     if (isa<waveamdmachine::DsStoreB96Op>(op))

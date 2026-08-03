@@ -116,6 +116,12 @@ def WaveAMDMachine_AGPRBankingOpInterface
            "::mlir::OpOperand &":$operand)
     >,
     InterfaceMethod<
+      [{AGPR-capable operands that must use the same register bank.}],
+      "uint64_t",
+      "getAGPROperandCohortMask",
+      (ins "::mlir::OpOperand &":$operand)
+    >,
+    InterfaceMethod<
       [{Whether this result can be AGPR-backed.}],
       "bool",
       "isResultAGPRValid",

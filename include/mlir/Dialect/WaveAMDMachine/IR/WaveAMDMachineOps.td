@@ -122,6 +122,7 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
   string operandVGPRValueMask = "0";
   string operandMCTupleMask = "0";
   string agprOperandMask = "0";
+  string agprOperandCohortMask = "0";
   string agprResultMask = "0";
   string agprPredicate = "true";
   string killedOperandReusePredicate =
@@ -171,6 +172,15 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
         return false;
       return (static_cast<uint64_t>(}] # agprOperandMask # [{) &
               (uint64_t{1} << operandNumber)) != 0;
+    }
+
+    uint64_t getAGPROperandCohortMask(::mlir::OpOperand &operand) {
+      unsigned operandNumber = operand.getOperandNumber();
+      if (operandNumber >= 64)
+        return 0;
+      uint64_t operandBit = uint64_t{1} << operandNumber;
+      uint64_t cohort = static_cast<uint64_t>(}] # agprOperandCohortMask # [{);
+      return cohort & operandBit ? cohort : operandBit;
     }
 
     bool isResultAGPRValid(const ::llvm::AMDGPU::IsaVersion &isa,
@@ -238,8 +248,10 @@ class WaveAMDMachine_OperandLegality<string constantBusMask = "0",
 
 class WaveAMDMachine_AGPRBanking<string operandMask = "0",
                                  string resultMask = "0",
-                                 string predicate = "true"> {
+                                 string predicate = "true",
+                                 string operandCohortMask = "0"> {
   string agprOperandMask = operandMask;
+  string agprOperandCohortMask = operandCohortMask;
   string agprResultMask = resultMask;
   string agprPredicate = predicate;
 }
@@ -3291,7 +3303,8 @@ def WaveAMDMachine_DsStoreB32Op
 def WaveAMDMachine_DsStore2B32Op
     : WaveAMDMachine_DsMemoryOp<"ds_store2_b32", [WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
-      WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget> {
+      WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget,
+                                 "0x6"> {
   let summary = "LDS paired 32-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        WaveAMDMachine_AVGPR1:$value0,
@@ -3525,7 +3538,8 @@ def WaveAMDMachine_DsStoreB64Op
 def WaveAMDMachine_DsStore2B64Op
     : WaveAMDMachine_DsMemoryOp<"ds_store2_b64", [WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
-      WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget> {
+      WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget,
+                                 "0x6"> {
   let summary = "LDS paired 64-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
                        WaveAMDMachine_AVGPR2:$value0,
