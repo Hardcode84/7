@@ -946,7 +946,9 @@ public:
                                 bool foldWaveConstants = false,
                                 bool allowWrappingArithmetic = false,
                                 bool modelWrappingArithmetic = false,
-                                bool assumeAddressArithmeticNoOverflow = false)
+                                bool assumeAddressArithmeticNoOverflow = false,
+                                bool preservePrivateSingletonAssumes = true,
+                                bool expandLeafAssumes = false)
       : dialect(dialect), solver(solver), store(dialect.getSymbolStore()),
         allowI64Integers(allowI64Integers),
         assumeI32StorageRange(assumeI32StorageRange), bindI32Root(bindI32Root),
@@ -955,7 +957,9 @@ public:
         foldWaveConstants(foldWaveConstants),
         allowWrappingArithmetic(allowWrappingArithmetic),
         modelWrappingArithmetic(modelWrappingArithmetic),
-        assumeAddressArithmeticNoOverflow(assumeAddressArithmeticNoOverflow) {}
+        assumeAddressArithmeticNoOverflow(assumeAddressArithmeticNoOverflow),
+        preservePrivateSingletonAssumes(preservePrivateSingletonAssumes),
+        expandLeafAssumes(expandLeafAssumes) {}
 
   FailureOr<std::optional<SymbolicOffset>> build(Value value) {
     return build(value, /*allowRootLeaf=*/false);
@@ -1322,7 +1326,8 @@ private:
   FailureOr<std::optional<sym::ExprHandle>>
   tryBuildPrivateSingletonAssume(Value value, AssumeOp assume, bool &skip,
                                  bool allowLeaf) {
-    if (!allowLeaf || !assume.getValue().hasOneUse())
+    if (!preservePrivateSingletonAssumes || !allowLeaf ||
+        !assume.getValue().hasOneUse())
       return std::optional<sym::ExprHandle>{};
     std::optional<SignedI64Range> range =
         finiteAssumeSignedI64Range(store, assume);
@@ -1348,7 +1353,7 @@ private:
       return failure();
     if (*singleton)
       return **singleton;
-    if (!hasSymbolicRoot(assume.getValue()))
+    if (!hasSymbolicRoot(assume.getValue()) && !expandLeafAssumes)
       return bindOrSkip(value, skip, allowLeaf);
     bool childSkip = false;
     FailureOr<sym::ExprHandle> expr =
@@ -2005,21 +2010,90 @@ private:
   bool allowWrappingArithmetic = false;
   bool modelWrappingArithmetic = false;
   bool assumeAddressArithmeticNoOverflow = false;
+  bool preservePrivateSingletonAssumes = true;
+  bool expandLeafAssumes = false;
   unsigned nextRawSymbol = 0;
 };
+
+static bool isI32WrappingInvariant(sym::ExprHandle expression) {
+  sym::ExprView view(expression);
+  if (view.getKind() != sym::ExprKind::Mod)
+    return false;
+  std::optional<int64_t> modulus =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  return modulus && *modulus > 1 && *modulus <= (int64_t{1} << 32) &&
+         llvm::isPowerOf2_64(static_cast<uint64_t>(*modulus));
+}
+
+static bool isI32WrappingInvariant(sym::PredHandle predicate) {
+  sym::PredView view(predicate);
+  if (view.getKind() != sym::PredKind::Cmp ||
+      view.getCmpOp() != sym::PredCmpOp::Eq)
+    return false;
+  sym::ExprHandle lhs = view.getCmpLhs();
+  sym::ExprHandle rhs = view.getCmpRhs();
+  return (sym::getIntegerLiteralValue(lhs) == 0 &&
+          isI32WrappingInvariant(rhs)) ||
+         (sym::getIntegerLiteralValue(rhs) == 0 && isI32WrappingInvariant(lhs));
+}
+
+static void
+appendUniqueAssumptions(ArrayRef<sym::PredHandle> source,
+                        SmallVectorImpl<sym::PredHandle> &destination) {
+  for (sym::PredHandle assumption : source)
+    if (!llvm::is_contained(destination, assumption))
+      destination.push_back(assumption);
+}
+
+static SmallVector<sym::PredHandle>
+getWrappingInvariantAssumptions(const SymbolicPredicate &predicate) {
+  SmallVector<sym::PredHandle> assumptions;
+  llvm::copy_if(predicate.assumptions, std::back_inserter(assumptions),
+                [](sym::PredHandle assumption) {
+                  return isI32WrappingInvariant(assumption);
+                });
+  return assumptions;
+}
+
+static FailureOr<SmallVector<sym::PredHandle>>
+getExactRelationAssumptions(sym::Store &store,
+                            const SymbolicPredicate &relation,
+                            const SymbolicPredicate &exact) {
+  llvm::DenseMap<Value, sym::ExprHandle> relationNames;
+  for (const SymbolicOffsetBinding &binding : relation.bindings)
+    relationNames.try_emplace(binding.value, binding.name);
+  SmallVector<sym::ExprSubstitution> substitutions;
+  for (const SymbolicOffsetBinding &binding : exact.bindings) {
+    auto found = relationNames.find(binding.value);
+    if (found == relationNames.end())
+      return failure();
+    if (!(binding.name == found->second))
+      substitutions.push_back({binding.name, found->second});
+  }
+  if (substitutions.empty())
+    return SmallVector<sym::PredHandle>(exact.assumptions.begin(),
+                                        exact.assumptions.end());
+  return substituteIndexExprPredicates(store, exact.assumptions, substitutions);
+}
 
 } // namespace
 
 FailureOr<std::optional<SymbolicOffset>>
 mlir::wave::buildSymbolicIndexValue(Value value, WaveDialect &dialect,
-                                    DataFlowSolver &solver) {
+                                    DataFlowSolver &solver,
+                                    SymbolicIndexValueMode mode) {
+  bool packetProof = mode == SymbolicIndexValueMode::PacketProof;
+  bool materialization = mode == SymbolicIndexValueMode::Materialization;
   SymbolicValueBuilder builder(
       dialect, solver, /*allowI64Integers=*/false,
       /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
       /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
-      /*foldWaveConstants=*/false, /*allowWrappingArithmetic=*/false,
+      /*foldWaveConstants=*/packetProof || materialization,
+      /*allowWrappingArithmetic=*/false,
       /*modelWrappingArithmetic=*/false,
-      hasAddressArithmeticNoOverflowAssumption(value));
+      hasAddressArithmeticNoOverflowAssumption(value),
+      /*preservePrivateSingletonAssumes=*/!materialization,
+      /*expandLeafAssumes=*/packetProof || materialization);
   return builder.buildAllowingRootLeaf(value);
 }
 
@@ -2038,12 +2112,41 @@ FailureOr<std::optional<SymbolicPredicate>>
 mlir::wave::buildSymbolicPacketPredicateRelation(Value value,
                                                  WaveDialect &dialect,
                                                  DataFlowSolver &solver) {
-  SymbolicValueBuilder builder(
+  SymbolicValueBuilder relationBuilder(
       dialect, solver, /*allowI64Integers=*/false,
       /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
       /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
       /*foldWaveConstants=*/true, /*allowWrappingArithmetic=*/true);
-  return builder.buildPredicate(value);
+  FailureOr<std::optional<SymbolicPredicate>> relation =
+      relationBuilder.buildPredicate(value);
+  if (failed(relation) || !*relation)
+    return relation;
+  SmallVector<sym::PredHandle> assumptions =
+      getWrappingInvariantAssumptions(**relation);
+
+  // Relation drops i32 wrap; proof facts come from the exact SSA model.
+  SymbolicValueBuilder exactBuilder(
+      dialect, solver, /*allowI64Integers=*/false,
+      /*assumeI32StorageRange=*/true, /*bindI32Root=*/false,
+      /*requireI32RootRange=*/false, /*expandIndexExprRoot=*/true,
+      /*foldWaveConstants=*/true, /*allowWrappingArithmetic=*/false,
+      /*modelWrappingArithmetic=*/true);
+  FailureOr<std::optional<SymbolicPredicate>> exact =
+      exactBuilder.buildPredicate(value);
+  if (failed(exact))
+    return failure();
+  if (!*exact) {
+    (**relation).assumptions = std::move(assumptions);
+    return relation;
+  }
+  FailureOr<SmallVector<sym::PredHandle>> exactAssumptions =
+      getExactRelationAssumptions(dialect.getSymbolStore(), **relation,
+                                  **exact);
+  if (failed(exactAssumptions))
+    return failure();
+  appendUniqueAssumptions(*exactAssumptions, assumptions);
+  (**relation).assumptions = std::move(assumptions);
+  return relation;
 }
 
 FailureOr<std::optional<SymbolicPredicate>>

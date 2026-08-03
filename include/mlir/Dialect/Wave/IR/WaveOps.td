@@ -393,9 +393,9 @@ def Wave_AssumeOp : Wave_Op<"assume", [
   ]> {
   let summary = "assert symbolic integer predicates on a value";
   let description = [{
-    Identity at runtime. Producer-side assertion that `$value`, bound to
-    `$name`, satisfies every predicate in `$assumptions`. SIMD operands
-    assert the predicates lane-wise.
+    Identity at runtime. `$result` carries the assertion that its value, bound
+    to `$name`, satisfies every predicate in `$assumptions`. Consumers must use
+    `$result` to receive the predicates. SIMD values assert them lane-wise.
   }];
 
   let arguments = (ins

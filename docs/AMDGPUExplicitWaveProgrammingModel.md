@@ -976,16 +976,14 @@ identity story is the reason the carrier op exists at the wave level
 rather than as an analysis attached to ordinary arith chains.
 
 Predicate information is a separate carrier op: `wave.assume %v as
-"x" [#wave.pred<"...">]` is identity at runtime and a producer-side
-assertion over one SSA value. The Python DSL's `assume_range` helper
-emits two predicates, `x >= lo` and `x <= hi`. The kernel author
-already knows the grid dimensions, tile sizes, divisibility facts, and
-which workgroup-id ranges are safely representable in 32 bits; the
-dialect refuses to rediscover those by inference and instead takes
-them from the source program. Wrapping a single SSA value is enough;
-the predicate flows through `InferIntRangeInterface` and symbolic
-simplification to every consumer that opts in, including the
-bucketizer's slot-fit checks.
+"x" [#wave.pred<"...">]` is identity at runtime; its result carries
+predicates over one SSA value. The Python DSL's `assume_range` helper emits
+two predicates, `x >= lo` and `x <= hi`. The kernel author already knows the
+grid dimensions, tile sizes, divisibility facts, and which workgroup-id ranges
+are safely representable in 32 bits; the dialect refuses to rediscover those
+by inference and instead takes them from the source program. Consumers receive
+predicates only through the result's SSA chain. `InferIntRangeInterface` and
+symbolic simplification propagate them to the bucketizer's slot-fit checks.
 
 ### Bucketization
 

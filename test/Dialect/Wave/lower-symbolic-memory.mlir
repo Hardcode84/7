@@ -1274,14 +1274,46 @@ func.func @negative_divisor_signed_remainder_adjacency(
 
 // -----
 
-// Facts attached to another SSA use still describe the producer value. The
-// memory planner discovers them from the remainder component itself; operation
-// order and dominance are irrelevant for declarative assumptions.
-// CHECK-LABEL: func.func @signed_remainder_adjacency_from_ssa_use(
+// Proof results carry remainder facts into the packet.
+// CHECK-LABEL: func.func @signed_remainder_adjacency_from_ssa_results(
 // CHECK-COUNT-1: wave.store
 // CHECK-SAME: !wave.simd<vector<2xf16>, 32>
 // CHECK-NOT: wave.store {{.*}}!wave.simd<f16, 32>
-func.func @signed_remainder_adjacency_from_ssa_use(
+func.func @signed_remainder_adjacency_from_ssa_results(
+    %value: !wave.simd<vector<2xf16>, 32>,
+    %base: !wave.ptr<#wave.global, f16>,
+    %origin_raw: !wave.simd<i32, 32>, %extent_raw: i32) {
+  %origin = wave.assume %origin_raw as "x"
+      [#wave.pred<"Mod(x, 2) == 0">] : !wave.simd<i32, 32>
+  %extent = wave.assume %extent_raw as "d"
+      [#wave.pred<"Mod(d, 4) == 0">] : i32
+  %extent_splat = wave.splat %extent : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %origin, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %r0 = wave.binary remsi %origin, %extent_splat
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %r1 = wave.binary remsi %next, %extent_splat
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %proof0 = wave.assume %r0 as "x" [#wave.pred<"x >= 0">]
+      : !wave.simd<i32, 32>
+  %proof1 = wave.index_expr <"x"> assuming [#wave.pred<"x >= 0">]
+      ["x"](%r1) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %token = wave.scatter %value to %base mapping
+      <bit_offset = <"16 * idx">>
+      bindings []() packet_bindings ["idx", "idx"](%proof0, %proof1)
+      : (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.simd<i32, 32>, !wave.simd<index, 32>) -> !wave.mem.token
+  return
+}
+
+// -----
+
+// Unused proof results do not constrain their operands.
+// CHECK-LABEL: func.func @signed_remainder_unused_assumptions(
+// CHECK-COUNT-2: wave.store
+// CHECK-SAME: !wave.simd<f16, 32>
+func.func @signed_remainder_unused_assumptions(
     %value: !wave.simd<vector<2xf16>, 32>,
     %base: !wave.ptr<#wave.global, f16>,
     %origin_raw: !wave.simd<i32, 32>, %extent_raw: i32) {
@@ -1887,6 +1919,90 @@ func.func @simd_base_byte_address(
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// Singleton delta proves adjacent packet components through SSA.
+// CHECK-LABEL: func.func @packet_predicated_gather_with_index_producers(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @packet_predicated_gather_with_index_producers(
+    %base: !wave.ptr<#wave.global, f16>,
+    %raw_origin: !wave.simd<i32, 32>, %next: !wave.simd<i32, 32>,
+    %active: !wave.mask<32>) -> !wave.simd<vector<2xf16>, 32>
+    attributes {wave.address_arithmetic_no_overflow} {
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %origin = wave.binary muli %raw_origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %zero = wave.constant 0.0 : f16 -> !wave.simd<f16, 32>
+  %fallback = wave.pack %zero, %zero
+      : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+      -> !wave.simd<vector<2xf16>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result, %token = wave.where %active, %active {
+    %delta = wave.binary subi %next, %origin
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %unit = wave.assume %delta as "x"
+        [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %normalized = wave.binary addi %origin, %unit
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %value, %loaded = wave.gather %base mapping
+        <bit_offset = <"16 * idx">> bindings []()
+        packet_bindings ["idx", "idx"](%origin, %normalized)
+        : (!wave.ptr<#wave.global, f16>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>)
+        -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+    wave.yield %value, %loaded
+        : !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %initial
+        : !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  return %result : !wave.simd<vector<2xf16>, 32>
+}
+
+// -----
+
+// Singleton delta combines adjacent store components.
+// CHECK-LABEL: func.func @packet_predicated_scatter_with_index_producers(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.store
+// CHECK-SAME: !wave.simd<vector<2xf16>, 32>
+// CHECK-NOT: wave.scatter
+func.func @packet_predicated_scatter_with_index_producers(
+    %input: !wave.simd<vector<2xf16>, 32>,
+    %base: !wave.ptr<#wave.global, f16>,
+    %raw_origin: !wave.simd<i32, 32>, %next: !wave.simd<i32, 32>,
+    %active: !wave.mask<32>) attributes {
+      wave.address_arithmetic_no_overflow
+    } {
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %origin = wave.binary muli %raw_origin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %initial = wave.token : !wave.mem.token
+  %result = wave.where %active, %active {
+    %delta = wave.binary subi %next, %origin
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %unit = wave.assume %delta as "x"
+        [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %normalized = wave.binary addi %origin, %unit
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %stored = wave.scatter %input to %base mapping
+        <bit_offset = <"16 * idx">> bindings []()
+        packet_bindings ["idx", "idx"](%origin, %normalized)
+        : (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#wave.global, f16>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>) -> !wave.mem.token
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %initial : !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32> -> !wave.mem.token
+  return
 }
 
 // -----

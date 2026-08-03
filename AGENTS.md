@@ -88,6 +88,9 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   explicit token edges. Do not add implicit alias analysis, barrier inference,
   or loop-carried memory dependencies to any transform. If ordering matters,
   encode it in IR.
+- **Assumptions follow SSA.** `wave.assume` predicates attach to its result.
+  Recover them only through defining-value chains, never nearby operations,
+  sibling uses, or enclosing regions.
 - **Scheduler is a stall filler.** It builds legal ready sets and applies model
   decisions. Target, occupancy, latency, resource, and filler compatibility
   policy belongs in `CostModel`, represented by named stalls when applicable.

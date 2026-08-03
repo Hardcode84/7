@@ -24,9 +24,11 @@ struct SymbolicPredicate {
   sym::PredHandle predicate;
 };
 
-FailureOr<std::optional<SymbolicOffset>>
-buildSymbolicIndexValue(Value value, WaveDialect &dialect,
-                        DataFlowSolver &solver);
+enum class SymbolicIndexValueMode { Default, PacketProof, Materialization };
+
+FailureOr<std::optional<SymbolicOffset>> buildSymbolicIndexValue(
+    Value value, WaveDialect &dialect, DataFlowSolver &solver,
+    SymbolicIndexValueMode mode = SymbolicIndexValueMode::Default);
 FailureOr<std::optional<SymbolicPredicate>>
 buildSymbolicIndexPredicate(Value value, WaveDialect &dialect,
                             DataFlowSolver &solver);
