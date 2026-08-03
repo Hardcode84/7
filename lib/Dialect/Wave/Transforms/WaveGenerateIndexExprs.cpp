@@ -196,21 +196,18 @@ static std::optional<int64_t> getPacketElementCount(Type type) {
   return 1;
 }
 
-static Value getExtractedPackAlias(Value value) {
-  ExtractOp extract = value.getDefiningOp<ExtractOp>();
-  if (!extract)
-    return {};
-  PackOp pack = extract.getSource().getDefiningOp<PackOp>();
+static Value getPackedElementAlias(Value source, int64_t index,
+                                   Type resultType) {
+  PackOp pack = source.getDefiningOp<PackOp>();
   if (!pack)
     return {};
 
-  int64_t index = extract.getIndex();
   int64_t offset = 0;
   for (Value input : pack.getInputs()) {
     std::optional<int64_t> elements = getPacketElementCount(input.getType());
     if (!elements)
       return {};
-    if (offset == index && input.getType() == value.getType())
+    if (offset == index && input.getType() == resultType)
       return input;
     offset += *elements;
     if (offset > index)
@@ -219,10 +216,96 @@ static Value getExtractedPackAlias(Value value) {
   return {};
 }
 
-static Value peelExtractedPackAliases(Value value) {
-  while (Value source = getExtractedPackAlias(value))
-    value = source;
-  return value;
+static Value getExtractedPackAlias(Value value) {
+  ExtractOp extract = value.getDefiningOp<ExtractOp>();
+  if (!extract)
+    return {};
+  return getPackedElementAlias(extract.getSource(), extract.getIndex(),
+                               value.getType());
+}
+
+static bool hasIdentityRedistributeDomain(RedistributionAttr relation) {
+  sym::ExprView sourceBlock(relation.getSourceBlock());
+  bool identityBlock = sourceBlock.getSymbolName() == "block";
+  if (relation.getBlocks() == 1)
+    identityBlock |= sourceBlock.getInt() == 0;
+  return identityBlock &&
+         sym::ExprView(relation.getSourceItem()).getSymbolName() == "item";
+}
+
+static Value getDirectRedistributeAlias(Value value) {
+  RedistributeOp redistribute = value.getDefiningOp<RedistributeOp>();
+  if (!redistribute || redistribute.getSource().getType() != value.getType())
+    return {};
+  RedistributionAttr relation = redistribute.getRelation();
+  if (!hasIdentityRedistributeDomain(relation) ||
+      sym::ExprView(relation.getSourceSlot()).getSymbolName() != "slot")
+    return {};
+  return redistribute.getSource();
+}
+
+static std::optional<int64_t>
+getRedistributedSourceIndex(RedistributionAttr relation,
+                            int64_t destinationIndex, sym::Store &store) {
+  if (!hasIdentityRedistributeDomain(relation))
+    return std::nullopt;
+
+  FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
+  FailureOr<sym::ExprHandle> index =
+      sym::composeExprInt(store, destinationIndex);
+  if (failed(slot) || failed(index))
+    return std::nullopt;
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{*slot, *index}};
+  FailureOr<sym::ExprHandle> sourceSlot =
+      sym::substituteExpr(store, relation.getSourceSlot(), substitution);
+  if (failed(sourceSlot))
+    return std::nullopt;
+  sourceSlot = sym::simplifyExpr(store, *sourceSlot);
+  if (failed(sourceSlot))
+    return std::nullopt;
+  std::optional<int64_t> sourceIndex = sym::getIntegerLiteralValue(*sourceSlot);
+  if (!sourceIndex || *sourceIndex < 0)
+    return std::nullopt;
+  return sourceIndex;
+}
+
+static Value getExtractedRedistributeAlias(Value value, sym::Store &store) {
+  ExtractOp extract = value.getDefiningOp<ExtractOp>();
+  if (!extract)
+    return {};
+  RedistributeOp redistribute =
+      extract.getSource().getDefiningOp<RedistributeOp>();
+  if (!redistribute)
+    return {};
+
+  RedistributionAttr relation = redistribute.getRelation();
+  std::optional<int64_t> sourceIndex =
+      getRedistributedSourceIndex(relation, extract.getIndex(), store);
+  if (!sourceIndex)
+    return {};
+  Value source = redistribute.getSource();
+  if (*sourceIndex == 0 && source.getType() == value.getType())
+    return source;
+  return getPackedElementAlias(source, *sourceIndex, value.getType());
+}
+
+static Value peelExtractedSymbolicAliases(Value value, sym::Store &store) {
+  while (true) {
+    if (Value source = getDirectRedistributeAlias(value)) {
+      value = source;
+      continue;
+    }
+    if (Value source = getExtractedPackAlias(value)) {
+      value = source;
+      continue;
+    }
+    if (Value source = getExtractedRedistributeAlias(value, store)) {
+      value = source;
+      continue;
+    }
+    return value;
+  }
 }
 
 static bool isPredicateImplied(sym::Store &store, sym::PredHandle pred,
@@ -291,15 +374,16 @@ struct BooleanSelectComparison {
 
 static std::optional<BooleanSelectComparison>
 matchBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
-                             Value rhs) {
+                             Value rhs, sym::Store &store) {
   bool isEqual = predicate == arith::CmpIPredicate::eq;
   if (!isEqual && predicate != arith::CmpIPredicate::ne)
     return std::nullopt;
 
-  SelectOp select = peelExtractedPackAliases(lhs).getDefiningOp<SelectOp>();
+  SelectOp select =
+      peelExtractedSymbolicAliases(lhs, store).getDefiningOp<SelectOp>();
   Value compared = rhs;
   if (!select) {
-    select = peelExtractedPackAliases(rhs).getDefiningOp<SelectOp>();
+    select = peelExtractedSymbolicAliases(rhs, store).getDefiningOp<SelectOp>();
     compared = lhs;
   }
   if (!select)
@@ -920,6 +1004,14 @@ public:
   bool canExpand(Value value) { return hasSymbolicRoot(value); }
 
 private:
+  Value getExtractedSymbolicAlias(Value value) {
+    if (Value source = getDirectRedistributeAlias(value))
+      return source;
+    if (Value source = getExtractedPackAlias(value))
+      return source;
+    return getExtractedRedistributeAlias(value, store);
+  }
+
   struct LoopCarriedRecurrence {
     scf::ForOp loop;
     Value init;
@@ -1062,7 +1154,7 @@ private:
   }
 
   bool hasSymbolicRoot(Value value) {
-    if (Value source = getExtractedPackAlias(value))
+    if (Value source = getExtractedSymbolicAlias(value))
       return hasSymbolicRoot(source);
     if (value.getDefiningOp<IndexExprOp>())
       return expandIndexExprRoot;
@@ -1096,7 +1188,7 @@ private:
       return buildAssumeExpr(value, assume, skip, allowLeaf, depth);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return buildSplatExpr(splat, skip, allowLeaf, depth);
-    if (Value source = getExtractedPackAlias(value))
+    if (Value source = getExtractedSymbolicAlias(value))
       return buildExpr(source, skip, allowLeaf, depth + 1);
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
       return buildBinaryExpr(value, binary, skip, allowLeaf, depth);
@@ -1253,9 +1345,41 @@ private:
     return failure();
   }
 
+  FailureOr<std::optional<sym::ExprHandle>>
+  tryBuildPrivateSingletonAssume(Value value, AssumeOp assume, bool &skip,
+                                 bool allowLeaf) {
+    if (!allowLeaf || !assume.getValue().hasOneUse())
+      return std::optional<sym::ExprHandle>{};
+    std::optional<SignedI64Range> range =
+        finiteAssumeSignedI64Range(store, assume);
+    if (!range || range->first != range->second)
+      return std::optional<sym::ExprHandle>{};
+
+    FailureOr<sym::ExprHandle> expr = bindSymbol(value, skip, range);
+    if (failed(expr))
+      return failure();
+    if (failed(appendAssumePredicatesForExpr(assume, *expr))) {
+      skip = true;
+      return failure();
+    }
+    return std::optional<sym::ExprHandle>{*expr};
+  }
+
   FailureOr<sym::ExprHandle> buildAssumeExpr(Value value, AssumeOp assume,
                                              bool &skip, bool allowLeaf,
                                              unsigned depth) {
+    // Keep an exactly constrained, private producer as an atomic symbolic
+    // root. This preserves its real SSA identity and lets the generic solver
+    // consume the singleton range without expanding a relational producer
+    // such as `next - previous` into two otherwise independent roots. If the
+    // producer is shared, expand every path through the same producer domain
+    // so its bindings remain consistent and deduplicated.
+    FailureOr<std::optional<sym::ExprHandle>> singleton =
+        tryBuildPrivateSingletonAssume(value, assume, skip, allowLeaf);
+    if (failed(singleton))
+      return failure();
+    if (*singleton)
+      return **singleton;
     if (!hasSymbolicRoot(assume.getValue()))
       return bindOrSkip(value, skip, allowLeaf);
     bool childSkip = false;
@@ -1417,7 +1541,7 @@ private:
   buildBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
                                Value rhs, bool &skip, unsigned depth) {
     std::optional<BooleanSelectComparison> match =
-        matchBooleanSelectComparison(predicate, lhs, rhs);
+        matchBooleanSelectComparison(predicate, lhs, rhs, store);
     if (!match)
       return std::optional<sym::PredHandle>{};
     FailureOr<sym::PredHandle> recovered =

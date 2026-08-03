@@ -361,6 +361,54 @@ func.func @aligned_packet_predicated_gather(
 
 // -----
 
+// A scoped singleton delta is the only proof that two unrelated runtime f16
+// indices are adjacent.  Preserve that proof while forming one dword load.
+// CHECK-LABEL: func.func @packet_predicated_gather_with_index_producers(
+// CHECK-COUNT-1: wave.where
+// CHECK-COUNT-1: wave.load
+// CHECK-SAME: -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+// CHECK-NOT: wave.gather
+func.func @packet_predicated_gather_with_index_producers(
+    %base: !wave.ptr<#wave.global, f16>,
+    %rawOrigin: !wave.simd<i32, 32>,
+    %next: !wave.simd<i32, 32>,
+    %active: !wave.mask<32>)
+    -> !wave.simd<vector<2xf16>, 32>
+    attributes {wave.address_arithmetic_no_overflow} {
+  %two = wave.constant 2 : i32 -> !wave.simd<i32, 32>
+  %origin = wave.binary muli %rawOrigin, %two overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %zero = wave.constant 0.0 : f16 -> !wave.simd<f16, 32>
+  %fallback = wave.pack %zero, %zero
+      : !wave.simd<f16, 32>, !wave.simd<f16, 32>
+      -> !wave.simd<vector<2xf16>, 32>
+  %initial = wave.token : !wave.mem.token
+  %result, %token = wave.where %active, %active {
+    %delta = wave.binary subi %next, %origin
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %unit = wave.assume %delta as "x"
+        [#wave.pred<"-1 + x >= 0">, #wave.pred<"-1 + x <= 0">]
+        : !wave.simd<i32, 32>
+    %normalized = wave.binary addi %origin, %unit
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    %value, %loaded = wave.gather %base mapping
+        <bit_offset = <"16 * idx">>
+        bindings []() packet_bindings ["idx", "idx"](%origin, %normalized)
+        : (!wave.ptr<#wave.global, f16>,
+           !wave.simd<i32, 32>, !wave.simd<i32, 32>)
+        -> (!wave.simd<vector<2xf16>, 32>, !wave.mem.token)
+    wave.yield %value, %loaded
+        : !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  } otherwise {
+    wave.yield %fallback, %initial
+        : !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  } : !wave.mask<32>, !wave.mask<32>
+      -> !wave.simd<vector<2xf16>, 32>, !wave.mem.token
+  return %result : !wave.simd<vector<2xf16>, 32>
+}
+
+// -----
+
 // Unknown bound alignment preserves independent predicates.
 // CHECK-LABEL: func.func @unaligned_packet_predicated_gather(
 // CHECK: wave.where

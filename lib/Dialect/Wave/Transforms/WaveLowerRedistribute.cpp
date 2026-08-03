@@ -3012,6 +3012,7 @@ struct ScratchExecution {
 struct ScratchSequence {
   Value completion;
   Value analysisCompletion;
+  Value entryDependency;
   Operation *cursor = nullptr;
   WaveLDSRange range;
 };
@@ -3025,6 +3026,67 @@ struct ScratchCapacity {
 };
 
 using ScratchSequenceMap = DenseMap<Block *, ScratchSequence>;
+
+static std::optional<unsigned> getLoopCarryIndex(scf::ForOp loop, Value token) {
+  for (auto [index, argument] : llvm::enumerate(loop.getRegionIterArgs()))
+    if (token == argument)
+      return index;
+  return std::nullopt;
+}
+
+static void appendTokenOperands(Value token, SmallVectorImpl<Value> &pending) {
+  Operation *def = token.getDefiningOp();
+  if (!def)
+    return;
+  for (Value operand : def->getOperands())
+    if (isa<MemTokenType>(operand.getType()))
+      pending.push_back(operand);
+}
+
+static SmallVector<unsigned, 2> findLoopCarryIndices(Block *block,
+                                                     Value dependency) {
+  scf::ForOp loop = dyn_cast<scf::ForOp>(block->getParentOp());
+  if (!loop || loop.getBody() != block || !dependency)
+    return {};
+
+  SmallVector<unsigned, 2> indices;
+  SmallVector<Value, 8> pending{dependency};
+  DenseSet<Value> visited;
+  while (!pending.empty()) {
+    Value token = pending.pop_back_val();
+    if (!isa<MemTokenType>(token.getType()))
+      continue;
+    if (!visited.insert(token).second)
+      continue;
+    if (std::optional<unsigned> index = getLoopCarryIndex(loop, token)) {
+      indices.push_back(*index);
+      continue;
+    }
+    appendTokenOperands(token, pending);
+  }
+  llvm::sort(indices);
+  return indices;
+}
+
+static void carryFinalScratchCompletion(IRRewriter &rewriter,
+                                        const ScratchSequenceMap &sequences) {
+  for (const auto &[block, sequence] : sequences) {
+    SmallVector<unsigned, 2> indices =
+        findLoopCarryIndices(block, sequence.entryDependency);
+    if (indices.empty())
+      continue;
+    scf::YieldOp yield = cast<scf::YieldOp>(block->getTerminator());
+    for (unsigned index : indices) {
+      Value carried = yield.getOperand(index);
+      rewriter.setInsertionPoint(yield);
+      Value completed =
+          AfterOp::create(rewriter, yield.getLoc(), carried.getType(),
+                          ValueRange{carried, sequence.completion});
+      rewriter.modifyOpInPlace(yield,
+                               [&] { yield->setOperand(index, completed); });
+    }
+  }
+}
 
 static SmallVector<WaveLDSRange, 4>
 collectScratchRanges(Block *block, const ScratchSequenceMap &sequences,
@@ -3621,6 +3683,10 @@ lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
       plan->capacity, analysis, sequences);
   if (failed(scratch))
     return failure();
+  Value entryDependency = scratch->dependency;
+  auto previous = sequences.find(op->getBlock());
+  if (previous != sequences.end())
+    entryDependency = previous->second.entryDependency;
   allocationTiming.stop();
 
   TimingScope emitTiming = timing.nest("lower_redistribute_workgroup_emit");
@@ -3638,8 +3704,8 @@ lowerWorkgroup(IRRewriter &rewriter, RedistributeOp op, sym::Store &store,
       rewriter, op.getLoc(), tokenType, scratch->allocation, completed,
       rewriter.getUnitAttr());
   sequences[op->getBlock()] = {released.getToken(),
-                               execution->analysisCompletion, released,
-                               scratch->range};
+                               execution->analysisCompletion, entryDependency,
+                               released, scratch->range};
   rewriter.replaceOp(op, packed);
   return success();
 }
@@ -3947,6 +4013,7 @@ static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
     coordinateCaches.erase(operation);
     classifications.erase(operation);
   }
+  carryFinalScratchCompletion(rewriter, sequences);
   return success();
 }
 

@@ -191,7 +191,7 @@ func.func @packet_gather_unrelated_prefix(
   %fallback = wave.pack %zero, %zero
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<2xi32>, 32>
-  // expected-error @+1 {{packet-predicated symbolic memory then region must contain only leading assumptions and the memory access}}
+  // expected-error @+1 {{packet-predicated symbolic memory then region must contain only leading symbolic index producers and the memory access}}
   %result:2 = wave.where %active0, %active1 {
     %bounded = wave.assume %raw0 as "x" [#wave.pred<"x >= 0">]
         : !wave.simd<i32, 32>
@@ -221,7 +221,7 @@ func.func @packet_scatter_unrelated_prefix(
     %raw0: !wave.simd<i32, 32>, %raw1: !wave.simd<i32, 32>,
     %active0: !wave.mask<32>, %active1: !wave.mask<32>) {
   %dependency = wave.token : !wave.mem.token
-  // expected-error @+1 {{packet-predicated symbolic memory then region must contain only leading assumptions and the memory access}}
+  // expected-error @+1 {{packet-predicated symbolic memory then region must contain only leading symbolic index producers and the memory access}}
   %result = wave.where %active0, %active1 {
     %bounded = wave.assume %raw0 as "x" [#wave.pred<"x >= 0">]
         : !wave.simd<i32, 32>

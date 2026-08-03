@@ -312,13 +312,18 @@ static SmallVector<Value> getDataPacketComponents(IRRewriter &rewriter,
   return components;
 }
 
+static bool isPacketIndexProducer(Operation *op) {
+  return isa<AssumeOp, BinaryOp, CastOp, ExtractOp, IndexExprOp, PackOp,
+             SelectOp, SplatOp>(op);
+}
+
 static bool hasIsolatedPacketAccess(WhereOp where, Operation *access,
                                     YieldOp thenYield) {
   if (!thenYield || access->getNextNode() != thenYield)
     return false;
   return llvm::all_of(llvm::make_range(where.getThenRegion().front().begin(),
                                        access->getIterator()),
-                      [](Operation &op) { return isa<AssumeOp>(op); });
+                      [](Operation &op) { return isPacketIndexProducer(&op); });
 }
 
 static bool hasValidGatherThenYield(WhereOp where, const MemoryAccess &access,
@@ -427,7 +432,7 @@ static LogicalResult preparePacketPredication(IRRewriter &rewriter,
   if (!hasIsolatedPacketAccess(where, access.op, thenYield))
     return where.emitOpError(
         "packet-predicated symbolic memory then region must contain only "
-        "leading assumptions and the memory access");
+        "leading symbolic index producers and the memory access");
 
   rewriter.setInsertionPoint(where);
   access.packetWhere = where;
@@ -460,11 +465,6 @@ static DenseI32ArrayAttr getWorkgroupShape(Operation *op) {
     if (DenseI32ArrayAttr shape = func->getAttrOfType<DenseI32ArrayAttr>(name))
       return shape;
   return {};
-}
-
-static bool isPacketIndexProducer(Operation *op) {
-  return isa<AssumeOp, BinaryOp, CastOp, ExtractOp, IndexExprOp, PackOp,
-             SelectOp, SplatOp>(op);
 }
 
 static std::array<SmallVector<Value>, 3>
@@ -5614,12 +5614,37 @@ appendUniqueAssumption(SmallVectorImpl<sym::PredHandle> &assumptions,
     assumptions.push_back(assumption);
 }
 
+static bool isScopedPacketProducer(const MemoryAccess &access, Operation *op) {
+  return access.packetWhere &&
+         op->getParentOfType<WhereOp>() == access.packetWhere;
+}
+
+static bool isPacketContiguitySuccessor(const MemoryAccess &access,
+                                        Value previous, Value candidate) {
+  AssumeOp assume = candidate.getDefiningOp<AssumeOp>();
+  if (!assume || !isScopedPacketProducer(access, assume))
+    return false;
+  BinaryOp delta = assume.getValue().getDefiningOp<BinaryOp>();
+  if (!delta || delta.getKind() != BinaryKind::SubI)
+    return false;
+  return isScopedPacketProducer(access, delta) && delta.getRhs() == previous;
+}
+
+static bool hasPacketContiguityIdentity(const MemoryAccess &access,
+                                        Value value) {
+  BinaryOp add = value.getDefiningOp<BinaryOp>();
+  if (!add || add.getKind() != BinaryKind::AddI ||
+      !isScopedPacketProducer(access, add))
+    return false;
+  return isPacketContiguitySuccessor(access, add.getLhs(), add.getRhs()) ||
+         isPacketContiguitySuccessor(access, add.getRhs(), add.getLhs());
+}
+
 static SmallVector<AssumeOp, 2>
 peelPacketRootAssumes(const MemoryAccess &access, Value &value) {
   SmallVector<AssumeOp, 2> rootAssumes;
   while (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
-    if (!access.packetWhere ||
-        assume->getParentOfType<WhereOp>() != access.packetWhere)
+    if (!isScopedPacketProducer(access, assume))
       break;
     rootAssumes.push_back(assume);
     value = assume.getValue();
@@ -5662,6 +5687,8 @@ static FailureOr<SmallVector<SymbolicOffset>> buildPacketComponentOffsets(
     Value structuralValue = value;
     SmallVector<AssumeOp, 2> rootAssumes =
         peelPacketRootAssumes(access, structuralValue);
+    bool hasScopedContiguity =
+        hasPacketContiguityIdentity(access, structuralValue);
     value = structuralValue;
     FailureOr<std::optional<SymbolicOffset>> symbolic =
         buildSymbolicIndexValue(structuralValue, dialect, solver);
@@ -5673,6 +5700,9 @@ static FailureOr<SmallVector<SymbolicOffset>> buildPacketComponentOffsets(
     if (failed(appendPacketRootAssumptions(dialect, rootAssumes, **symbolic,
                                            componentRootAssumptions)))
       return failure();
+    if (hasScopedContiguity)
+      for (sym::PredHandle assumption : (**symbolic).assumptions)
+        appendUniqueAssumption(componentRootAssumptions, assumption);
     rootAssumptions.push_back(std::move(componentRootAssumptions));
     components.push_back(std::move(**symbolic));
   }
@@ -6103,7 +6133,7 @@ static std::optional<DmaCopyMatch> matchDirectDmaCopy(ScatterOp scatter) {
 static GatherOp matchDmaCopyThenRegion(WhereOp where) {
   Block &block = where.getThenRegion().front();
   Operation *access = &block.front();
-  while (isa<AssumeOp>(access))
+  while (isPacketIndexProducer(access))
     access = access->getNextNode();
   GatherOp gather = dyn_cast<GatherOp>(access);
   YieldOp yield = dyn_cast<YieldOp>(block.getTerminator());

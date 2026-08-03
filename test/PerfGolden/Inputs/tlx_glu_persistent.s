@@ -1318,7 +1318,6 @@ tlx_addmm_glu_kernel_persistent:
 		s_cbranch_execz .Ltlx_addmm_glu_kernel_persistent.exec_endif_9
 .Ltlx_addmm_glu_kernel_persistent.exec_endif_9:
 		s_mov_b64 exec, s[86:87]
-		s_barrier
 		s_add_i32 s3, s3, 0x100
 		s_cmp_lt_i32 s3, s20
 		s_cbranch_scc1 .Ltlx_addmm_glu_kernel_persistent.loop_head_0

@@ -566,6 +566,44 @@ func.func @cross_wave_sequence(
 
 // -----
 
+// CHECK-LABEL: func.func @cross_wave_loop_carries_final_scratch(
+// CHECK: scf.for
+// CHECK-SAME: iter_args([[CARRY:%[^ ]+]] = {{.*}}, [[OTHER:%[^ ]+]] =
+// CHECK: %[[READY:.*]] = wave.barrier [[CARRY]]
+// CHECK: %[[ALLOC0:.*]] = wave.alloc()
+// CHECK: %[[DONE0:.*]] = wave.join
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
+// CHECK: %[[ALLOC1:.*]] = wave.alloc()
+// CHECK: wave.store {{.*}} after %[[RELEASE0]]
+// CHECK: %[[DONE1:.*]] = wave.join
+// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]] {workgroup_collective}
+// CHECK: %[[BACKEDGE:.*]] = wave.after %[[READY]], %[[RELEASE1]]
+// CHECK: scf.yield %[[BACKEDGE]], [[OTHER]]
+func.func @cross_wave_loop_carries_final_scratch(
+    %source0: !wave.simd<vector<1xi32>, 32>,
+    %source1: !wave.simd<vector<1xi32>, 32>)
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %root = wave.token : !wave.mem.token
+  %loop:2 = scf.for %i = %c0 to %c2 step %c1
+      iter_args(%carry = %root, %other = %root)
+      -> (!wave.mem.token, !wave.mem.token) {
+    %ready = wave.barrier %carry : (!wave.mem.token) -> !wave.mem.token
+    %result0 = wave.redistribute %source0,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    %result1 = wave.redistribute %source1,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    scf.yield %ready, %other : !wave.mem.token, !wave.mem.token
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @cross_wave_existing_barrier(
 // CHECK: %[[ALLOC0:.*]] = wave.alloc()
 // CHECK: %[[DONE0:.*]] = wave.join
