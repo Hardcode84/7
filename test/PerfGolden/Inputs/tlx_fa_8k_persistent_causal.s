@@ -582,8 +582,6 @@ _attn_fwd_persistent:
 		s_cmp_lt_i32 s21, s23
 		s_cselect_b32 s23, s21, s23
 		s_add_i32 s25, s23, 0x7f
-		s_waitcnt lgkmcnt(0)
-		s_barrier
 		s_cmp_lt_i32 s25, 0
 		s_cselect_b32 s36, s24, 0
 		s_add_i32 s25, s25, s36
@@ -3980,8 +3978,6 @@ _attn_fwd_persistent:
 		s_cmp_lt_i32 s21, s1
 		s_cselect_b32 s1, s21, s1
 		s_add_i32 s24, s1, 0x7f
-		s_waitcnt lgkmcnt(0)
-		s_barrier
 		s_cmp_lt_i32 s24, 0
 		s_cselect_b32 s25, s23, 0
 		s_add_i32 s24, s24, s25
@@ -6947,6 +6943,8 @@ _attn_fwd_persistent:
 		s_branch .L_attn_fwd_persistent.if_end_0
 .L_attn_fwd_persistent.if_else_0:
 .L_attn_fwd_persistent.if_end_0:
+		s_waitcnt lgkmcnt(0)
+		s_barrier
 		s_add_i32 s0, s0, 32
 		v_accvgpr_read_b32 v2, a8
 		s_nop 0
