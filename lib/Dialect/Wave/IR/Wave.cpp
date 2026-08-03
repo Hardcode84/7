@@ -3281,18 +3281,23 @@ LogicalResult ReduceOp::verify() {
   return verifyReductionRelation(*this);
 }
 
-OpFoldResult RedistributeOp::fold(FoldAdaptor) {
-  if (getSource().getType() != getResult().getType())
-    return {};
-
-  RedistributionAttr relation = getRelation();
+bool mlir::wave::isItemLocalRedistribution(RedistributionAttr relation) {
   sym::ExprView sourceBlock(relation.getSourceBlock());
   bool identityBlock = sourceBlock.getSymbolName() == "block";
   if (relation.getBlocks() == 1)
     identityBlock |= sourceBlock.getInt() == 0;
-  if (!identityBlock ||
-      sym::ExprView(relation.getSourceItem()).getSymbolName() != "item" ||
-      sym::ExprView(relation.getSourceSlot()).getSymbolName() != "slot")
+  return identityBlock &&
+         sym::ExprView(relation.getSourceItem()).getSymbolName() == "item";
+}
+
+bool mlir::wave::isIdentityRedistribution(RedistributionAttr relation) {
+  return isItemLocalRedistribution(relation) &&
+         sym::ExprView(relation.getSourceSlot()).getSymbolName() == "slot";
+}
+
+OpFoldResult RedistributeOp::fold(FoldAdaptor) {
+  if (getSource().getType() != getResult().getType() ||
+      !isIdentityRedistribution(getRelation()))
     return {};
   return getSource();
 }

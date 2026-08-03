@@ -243,6 +243,36 @@ func.func @boolean_packet_alias_predicates(
 
 // -----
 
+// CHECK-LABEL: func.func @boolean_redistribute_alias_predicate
+// CHECK: %[[DIRECT:.*]] = wave.cmpi slt
+// CHECK-NOT: wave.cmpi
+// CHECK: return %[[DIRECT]], %[[DIRECT]]
+func.func @boolean_redistribute_alias_predicate(
+    %x: !wave.simd<i32, 32>, %limit: !wave.simd<i32, 32>)
+    -> (!wave.mask<32>, !wave.mask<32>) {
+  %direct = wave.cmpi slt %x, %limit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %encoded = wave.select %direct, %one, %zero
+      : !wave.mask<32>, !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %encoded, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<3xi32>, 32>
+  %broadcast = wave.redistribute %packet,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "item", source_slot = "1">
+      : !wave.simd<vector<3xi32>, 32>
+      -> !wave.simd<vector<3xi32>, 32>
+  %alias = wave.extract %broadcast[2]
+      : !wave.simd<vector<3xi32>, 32> -> !wave.simd<i32, 32>
+  %recovered = wave.cmpi ne %alias, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  return %direct, %recovered : !wave.mask<32>, !wave.mask<32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @boolean_packet_alias_unsupported_predicate
 // CHECK-COUNT-2: wave.cmpi
 func.func @boolean_packet_alias_unsupported_predicate(

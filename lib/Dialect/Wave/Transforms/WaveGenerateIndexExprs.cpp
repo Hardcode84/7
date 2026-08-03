@@ -196,21 +196,18 @@ static std::optional<int64_t> getPacketElementCount(Type type) {
   return 1;
 }
 
-static Value getExtractedPackAlias(Value value) {
-  ExtractOp extract = value.getDefiningOp<ExtractOp>();
-  if (!extract)
-    return {};
-  PackOp pack = extract.getSource().getDefiningOp<PackOp>();
+static Value getPackedElementAlias(Value source, int64_t index,
+                                   Type resultType) {
+  PackOp pack = source.getDefiningOp<PackOp>();
   if (!pack)
     return {};
 
-  int64_t index = extract.getIndex();
   int64_t offset = 0;
   for (Value input : pack.getInputs()) {
     std::optional<int64_t> elements = getPacketElementCount(input.getType());
     if (!elements)
       return {};
-    if (offset == index && input.getType() == value.getType())
+    if (offset == index && input.getType() == resultType)
       return input;
     offset += *elements;
     if (offset > index)
@@ -219,8 +216,77 @@ static Value getExtractedPackAlias(Value value) {
   return {};
 }
 
-static Value peelExtractedPackAliases(Value value) {
-  while (Value source = getExtractedPackAlias(value))
+static Value getExtractedPackAlias(Value value) {
+  ExtractOp extract = value.getDefiningOp<ExtractOp>();
+  if (!extract)
+    return {};
+  return getPackedElementAlias(extract.getSource(), extract.getIndex(),
+                               value.getType());
+}
+
+static Value getDirectRedistributeAlias(Value value) {
+  RedistributeOp redistribute = value.getDefiningOp<RedistributeOp>();
+  if (!redistribute || redistribute.getSource().getType() != value.getType() ||
+      !isIdentityRedistribution(redistribute.getRelation()))
+    return {};
+  return redistribute.getSource();
+}
+
+static std::optional<int64_t>
+getRedistributedSourceIndex(RedistributionAttr relation,
+                            int64_t destinationIndex, sym::Store &store) {
+  if (!isItemLocalRedistribution(relation))
+    return std::nullopt;
+
+  FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
+  FailureOr<sym::ExprHandle> index =
+      sym::composeExprInt(store, destinationIndex);
+  if (failed(slot) || failed(index))
+    return std::nullopt;
+  std::array<sym::ExprSubstitution, 1> substitutions{
+      sym::ExprSubstitution{*slot, *index}};
+  FailureOr<sym::ExprHandle> sourceSlot =
+      sym::substituteExpr(store, relation.getSourceSlot(), substitutions);
+  if (failed(sourceSlot))
+    return std::nullopt;
+  sourceSlot = sym::simplifyExpr(store, *sourceSlot);
+  if (failed(sourceSlot))
+    return std::nullopt;
+  std::optional<int64_t> sourceIndex = sym::getIntegerLiteralValue(*sourceSlot);
+  if (!sourceIndex || *sourceIndex < 0)
+    return std::nullopt;
+  return sourceIndex;
+}
+
+static Value getExtractedRedistributeAlias(Value value, sym::Store &store) {
+  ExtractOp extract = value.getDefiningOp<ExtractOp>();
+  if (!extract)
+    return {};
+  RedistributeOp redistribute =
+      extract.getSource().getDefiningOp<RedistributeOp>();
+  if (!redistribute)
+    return {};
+
+  std::optional<int64_t> sourceIndex = getRedistributedSourceIndex(
+      redistribute.getRelation(), extract.getIndex(), store);
+  if (!sourceIndex)
+    return {};
+  Value source = redistribute.getSource();
+  if (*sourceIndex == 0 && source.getType() == value.getType())
+    return source;
+  return getPackedElementAlias(source, *sourceIndex, value.getType());
+}
+
+static Value getSymbolicAlias(Value value, sym::Store &store) {
+  if (Value source = getDirectRedistributeAlias(value))
+    return source;
+  if (Value source = getExtractedPackAlias(value))
+    return source;
+  return getExtractedRedistributeAlias(value, store);
+}
+
+static Value peelSymbolicAliases(Value value, sym::Store &store) {
+  while (Value source = getSymbolicAlias(value, store))
     value = source;
   return value;
 }
@@ -291,15 +357,15 @@ struct BooleanSelectComparison {
 
 static std::optional<BooleanSelectComparison>
 matchBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
-                             Value rhs) {
+                             Value rhs, sym::Store &store) {
   bool isEqual = predicate == arith::CmpIPredicate::eq;
   if (!isEqual && predicate != arith::CmpIPredicate::ne)
     return std::nullopt;
 
-  SelectOp select = peelExtractedPackAliases(lhs).getDefiningOp<SelectOp>();
+  SelectOp select = peelSymbolicAliases(lhs, store).getDefiningOp<SelectOp>();
   Value compared = rhs;
   if (!select) {
-    select = peelExtractedPackAliases(rhs).getDefiningOp<SelectOp>();
+    select = peelSymbolicAliases(rhs, store).getDefiningOp<SelectOp>();
     compared = lhs;
   }
   if (!select)
@@ -1062,7 +1128,7 @@ private:
   }
 
   bool hasSymbolicRoot(Value value) {
-    if (Value source = getExtractedPackAlias(value))
+    if (Value source = getSymbolicAlias(value, store))
       return hasSymbolicRoot(source);
     if (value.getDefiningOp<IndexExprOp>())
       return expandIndexExprRoot;
@@ -1096,7 +1162,7 @@ private:
       return buildAssumeExpr(value, assume, skip, allowLeaf, depth);
     if (SplatOp splat = value.getDefiningOp<SplatOp>())
       return buildSplatExpr(splat, skip, allowLeaf, depth);
-    if (Value source = getExtractedPackAlias(value))
+    if (Value source = getSymbolicAlias(value, store))
       return buildExpr(source, skip, allowLeaf, depth + 1);
     if (BinaryOp binary = value.getDefiningOp<BinaryOp>())
       return buildBinaryExpr(value, binary, skip, allowLeaf, depth);
@@ -1417,7 +1483,7 @@ private:
   buildBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
                                Value rhs, bool &skip, unsigned depth) {
     std::optional<BooleanSelectComparison> match =
-        matchBooleanSelectComparison(predicate, lhs, rhs);
+        matchBooleanSelectComparison(predicate, lhs, rhs, store);
     if (!match)
       return std::optional<sym::PredHandle>{};
     FailureOr<sym::PredHandle> recovered =

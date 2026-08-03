@@ -708,3 +708,173 @@ func.func @index_expr_extract_pack_alias(%x: !wave.simd<i32, 32>)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return %index : !wave.simd<index, 32>
 }
+
+// -----
+
+// Item-local redistribution preserves source packet element identity.
+// CHECK-LABEL: func.func @index_expr_extract_redistribute_alias
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: wave.index_expr <"2*(1 + raw0)"> assuming
+// CHECK-SAME: ["raw0"](%[[X]])
+func.func @index_expr_extract_redistribute_alias(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %moved = wave.redistribute %packet,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<vector<2xi32>, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %moved[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %bounded = wave.assume %alias as "value"
+      [#wave.pred<"value >= 0">, #wave.pred<"value <= 31">]
+      : !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%bounded)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}
+
+// -----
+
+// Constant source slot broadcasts still identify the scalar source.
+// CHECK-LABEL: func.func @index_expr_extract_redistribute_broadcast_alias
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: wave.index_expr <"2*(1 + raw0)"> assuming
+// CHECK-SAME: ["raw0"](%[[X]])
+func.func @index_expr_extract_redistribute_broadcast_alias(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %broadcast = wave.redistribute %next,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "item", source_slot = "0">
+      : !wave.simd<i32, 32> -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %broadcast[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%alias)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}
+
+// -----
+
+// Cross-item mappings cannot preserve an item-local root.
+// CHECK-LABEL: func.func @index_expr_cross_item_redistribute_stays_opaque
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[NEXT:.*]] = wave.binary addi %[[X]],
+// CHECK: %[[MOVED:.*]] = wave.redistribute %[[NEXT]],
+// CHECK: wave.index_expr <"2*y"> ["y"](%[[MOVED]])
+func.func @index_expr_cross_item_redistribute_stays_opaque(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %moved = wave.redistribute %next,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "xor(item, 1)", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%moved)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}
+
+// -----
+
+// Constant block is local only in a single-block relation.
+// CHECK-LABEL: func.func @index_expr_multiblock_redistribute_stays_opaque
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[NEXT:.*]] = wave.binary addi %[[X]],
+// CHECK: %[[MOVED:.*]] = wave.redistribute %[[NEXT]],
+// CHECK: wave.index_expr <"2*y"> ["y"](%[[MOVED]])
+func.func @index_expr_multiblock_redistribute_stays_opaque(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %moved = wave.redistribute %next,
+      <blocks = 2, items = 32, source_block = "0",
+       source_item = "item", source_slot = "slot">
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%moved)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}
+
+// -----
+
+// Item-varying slot selection stays opaque after slot substitution.
+// CHECK-LABEL: func.func @index_expr_varying_slot_redistribute_stays_opaque
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[PACKET:.*]] = wave.pack
+// CHECK: %[[MOVED:.*]] = wave.redistribute %[[PACKET]],
+// CHECK: %[[ALIAS:.*]] = wave.extract %[[MOVED]][1]
+// CHECK: wave.index_expr <"2*y"> ["y"](%[[ALIAS]])
+func.func @index_expr_varying_slot_redistribute_stays_opaque(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %packet = wave.pack %zero, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %moved = wave.redistribute %packet,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "item", source_slot = "Mod(item, 2)">
+      : !wave.simd<vector<2xi32>, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %alias = wave.extract %moved[1]
+      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%alias)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}
+
+// -----
+
+// Extract inside a packed input cannot alias that whole input.
+// CHECK-LABEL: func.func @index_expr_nonboundary_pack_extract_stays_opaque
+// CHECK-SAME: (%[[X:.*]]: !wave.simd<i32, 32>)
+// CHECK: %[[INNER:.*]] = wave.pack
+// CHECK: %[[OUTER:.*]] = wave.pack %[[INNER]],
+// CHECK: %[[ALIAS:.*]] = wave.extract %[[OUTER]][1]
+// CHECK: wave.index_expr <"2*y"> ["y"](%[[ALIAS]])
+func.func @index_expr_nonboundary_pack_extract_stays_opaque(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
+  %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %x, %one overflow<nsw>
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %inner = wave.pack %zero, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %other = wave.pack %zero, %zero
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<vector<2xi32>, 32>
+  %outer = wave.pack %inner, %other
+      : !wave.simd<vector<2xi32>, 32>, !wave.simd<vector<2xi32>, 32>
+      -> !wave.simd<vector<4xi32>, 32>
+  %alias = wave.extract %outer[1]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %index = wave.index_expr <"2*y"> ["y"](%alias)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %index : !wave.simd<index, 32>
+}
