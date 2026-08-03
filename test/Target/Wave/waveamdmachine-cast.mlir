@@ -69,6 +69,24 @@ func.func @cast_f32_to_bf16_gfx950(%x: !wave.simd<f32, 64>) attributes {wave.ker
   return
 }
 
+// SELECT-LABEL: func.func @cast_bf16_to_f32_gfx950
+// SELECT: waveamdmachine.v_lshlrev_b32
+func.func @cast_bf16_to_f32_gfx950(%x: !wave.simd<bf16, 64>) attributes {wave.kernel} {
+  %f = wave.cast fpconvert %x : !wave.simd<bf16, 64> -> !wave.simd<f32, 64>
+  return
+}
+
+// SELECT-LABEL: func.func @cast_packed_bf16_to_f32_gfx950
+// SELECT: waveamdmachine.v_lshlrev_b32
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.v_lshlrev_b32
+// SELECT: waveamdmachine.v_and_b32
+// SELECT: waveamdmachine.tuple_from_elements
+func.func @cast_packed_bf16_to_f32_gfx950(%x: !wave.simd<vector<4xbf16>, 64>) attributes {wave.kernel} {
+  %f = wave.cast fpconvert %x : !wave.simd<vector<4xbf16>, 64> -> !wave.simd<vector<4xf32>, 64>
+  return
+}
+
 }
 
 // -----
@@ -77,6 +95,16 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @cast_f32_to_f16_unsupported_rounding(%x: !wave.simd<f32, 32>) attributes {wave.kernel} {
   // expected-error @+1 {{WaveAMDMachine fpconvert lowering supports only rne rounding}}
   %h = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<f32, 32> -> !wave.simd<f16, 32>
+  return
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @cast_packed_bf16_to_f32_unsupported_rounding(%x: !wave.simd<vector<2xbf16>, 64>) attributes {wave.kernel} {
+  // expected-error @+1 {{packed bf16 to f32 lowering supports only rne rounding}}
+  %f = wave.cast fpconvert %x policy {rounding = #wave.cast_rounding<rtz>} : !wave.simd<vector<2xbf16>, 64> -> !wave.simd<vector<2xf32>, 64>
   return
 }
 }
