@@ -466,8 +466,10 @@ class _MatmulConfig:
 
     @property
     def scale_lds_bytes(self) -> int:
-        if not self.uses_packed_mxfp4 or self.uses_aiter_mxfp4_layout:
+        if not self.uses_packed_mxfp4:
             return 0
+        if self.uses_aiter_mxfp4_layout:
+            return 2 * _aiter_mxfp4_scale_batch_dwords(self) * 4
         scale_tiles = self.BM * _mxfp4_scale_tiles_per_wave(
             self.wave_m_tiles
         ) + self.BN * _mxfp4_scale_tiles_per_wave(self.wave_n_tiles)
@@ -674,7 +676,7 @@ def _validate_aiter_mxfp4_shape(cfg: _MatmulConfig) -> None:
     if cfg.coalesced_mfma_output:
         raise ValueError("AITER input layout requires tile-packed kernel output")
     if cfg.mxfp4_scale_path != "dma":
-        raise ValueError("AITER input layout requires the direct scale path")
+        raise ValueError("AITER input layout requires the DMA scale path")
     if cfg.wave_k_tiles % 2:
         raise ValueError("AITER input layout requires even wave K tiles")
     if cfg.wave_m_tiles % 2 or cfg.wave_n_tiles % 2:
@@ -2857,7 +2859,11 @@ def _scale_lds_batch_stride_dwords(cfg: _MatmulConfig) -> int:
 def _scale_buffer_offset(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, step: dsl.Value | int
 ) -> dsl.Value | int:
-    buffer_dwords = _scale_lds_batch_stride_dwords(cfg)
+    buffer_dwords = (
+        _aiter_mxfp4_scale_batch_dwords(cfg)
+        if cfg.uses_aiter_mxfp4_layout
+        else _scale_lds_batch_stride_dwords(cfg)
+    )
     if isinstance(step, int):
         return (step & 1) * buffer_dwords
     i = dsl.sym("i")
@@ -4053,8 +4059,13 @@ def _mxfp4_raw_k_step(
 def _initial_scale_state(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, coords: _TileCoords
 ) -> tuple[dsl.Value | None, dsl.Value | None]:
-    if not cfg.uses_packed_mxfp4 or cfg.uses_aiter_mxfp4_layout:
+    if not cfg.uses_packed_mxfp4:
         return None, None
+    if cfg.uses_aiter_mxfp4_layout:
+        scale_token = _stage_aiter_mxfp4_scale_batch(
+            bld, cfg, coords, 0, _scale_buffer_offset(bld, cfg, 0), None
+        )
+        return scale_token, None
     _, scale_token = _stage_mxfp4_scale_batch(
         bld,
         cfg,
@@ -4094,27 +4105,27 @@ def _initial_dma_load_state(
     if cfg.virtual_k_steps > 1:
         a1 = _advance_ptrs(bld, a0, virtual_k_stride)
         b1 = _advance_ptrs(bld, b0, virtual_k_stride)
-        ready_token = _join_tokens(
+        next_dma_tokens = _dma_issue(
             bld,
-            _dma_issue(
-                bld,
-                cfg,
-                a1,
-                b1,
-                staging,
-                lds_offset=_dma_buffer_offset(bld, cfg, 1),
-                in_loop=False,
-                request_offset=len(a0) + len(b0),
-            ),
+            cfg,
+            a1,
+            b1,
+            staging,
+            lds_offset=_dma_buffer_offset(bld, cfg, 1),
+            in_loop=False,
+            request_offset=len(a0) + len(b0),
         )
+        ready_token = _join_tokens(bld, next_dma_tokens)
     if cfg.uses_aiter_mxfp4_layout:
+        assert scale_token is not None
+        scale_token = bld.barrier(_join_tokens(bld, [*dma_tokens, scale_token]))
         a_frags, b_frags, reuse_token = _read_aiter_dma_ready(
             bld,
             cfg,
             types,
             staging,
             coords,
-            bld.barrier(_join_tokens(bld, dma_tokens)),
+            scale_token,
             0,
         )
     else:
@@ -4160,10 +4171,10 @@ def _initial_loop_token_args(
         args.append(loads.ready_token)
     if cfg.uses_packed_mxfp4 or (cfg.use_dma_lds and cfg.virtual_k_steps > 1):
         args.append(loads.reuse_token)
-    if cfg.use_dma_lds and cfg.uses_packed_mxfp4 and not cfg.uses_aiter_mxfp4_layout:
+    if cfg.use_dma_lds and cfg.uses_packed_mxfp4:
         assert loads.scale_token is not None
         args.append(loads.scale_token)
-        if cfg.virtual_k_steps > 1:
+        if cfg.virtual_k_steps > 1 and not cfg.uses_aiter_mxfp4_layout:
             assert loads.next_scale_token is not None
             args.append(loads.next_scale_token)
     return tuple(args)
@@ -4211,10 +4222,10 @@ def _split_loop_state(values: tuple[dsl.Value, ...], cfg: _MatmulConfig) -> _Loo
         cursor += 1
     scale_token = None
     next_scale_token = None
-    if cfg.use_dma_lds and cfg.uses_packed_mxfp4 and not cfg.uses_aiter_mxfp4_layout:
+    if cfg.use_dma_lds and cfg.uses_packed_mxfp4:
         scale_token = values[cursor]
         cursor += 1
-        if cfg.virtual_k_steps > 1:
+        if cfg.virtual_k_steps > 1 and not cfg.uses_aiter_mxfp4_layout:
             next_scale_token = values[cursor]
             cursor += 1
     return _LoopState(
@@ -4320,86 +4331,190 @@ def _aiter_mxfp4_scale_axis_params(
     )
 
 
-def _load_aiter_mxfp4_scale_axis(
+def _aiter_mxfp4_scale_axis_blocks(cfg: _MatmulConfig, axis: _Mxfp4ScaleAxis) -> int:
+    tiles = cfg.wave_m_tiles if axis == "m" else cfg.wave_n_tiles
+    return (cfg.wave_k_tiles // 2) * (tiles // 2)
+
+
+def _aiter_mxfp4_scale_axis_dma_groups(
+    cfg: _MatmulConfig, axis: _Mxfp4ScaleAxis
+) -> int:
+    return (_aiter_mxfp4_scale_axis_blocks(cfg, axis) + 3) // 4
+
+
+def _aiter_mxfp4_scale_dma_groups_per_wave(cfg: _MatmulConfig) -> int:
+    return _aiter_mxfp4_scale_axis_dma_groups(
+        cfg, "m"
+    ) + _aiter_mxfp4_scale_axis_dma_groups(cfg, "n")
+
+
+_AITER_MXFP4_SCALE_LDS_BLOCK_DWORDS = 64
+_AITER_MXFP4_SCALE_LDS_DMA_DWORDS = 256
+
+
+def _aiter_mxfp4_scale_batch_dwords(cfg: _MatmulConfig) -> int:
+    return (
+        cfg.waves_per_workgroup
+        * _aiter_mxfp4_scale_dma_groups_per_wave(cfg)
+        * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+    )
+
+
+def _stage_aiter_mxfp4_scale_batch(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
     scale_step: dsl.Value | int,
-    axis: _Mxfp4ScaleAxis,
-) -> tuple[list[list[dsl.Value]], list[list[dsl.Value]]]:
-    wi = dsl.sym("__wave_dsl_aiter_scale_wi")
-    wg = dsl.sym(f"__wave_dsl_aiter_scale_wg_{axis}")
-    wave_id = dsl.floor(wi / cfg.mma.wave_size)
-    wg_value, wave, waves, tiles, global_base = _aiter_mxfp4_scale_axis_params(
-        cfg, coords, axis, wave_id
-    )
-    bindings = {wi: coords.wi, wg: wg_value}
+    lds_offset: dsl.Value | int,
+    after: dsl.Value | None,
+) -> dsl.Value:
+    if coords.a_scale_base is None or coords.b_scale_base is None:
+        raise ValueError("MXFP4 scale buffers are required")
+
+    wi = dsl.sym("__wave_dsl_aiter_stage_wi")
+    wi_first = dsl.sym("__wave_dsl_aiter_stage_wi_first")
+    wg_m = dsl.sym("__wave_dsl_aiter_stage_wg_m")
+    wg_n = dsl.sym("__wave_dsl_aiter_stage_wg_n")
+    bindings = {wi: coords.wi, wg_m: coords.wg_m, wg_n: coords.wg_n}
+    first_bindings = {wi_first: bld.read_first(coords.wi)}
     if isinstance(scale_step, int):
         step: int | dsl.Expr = scale_step
     else:
-        step = dsl.sym(f"__wave_dsl_aiter_scale_step_{axis}")
+        step = dsl.sym("__wave_dsl_aiter_stage_step")
         bindings[step] = scale_step
+
     lane = dsl.mod(wi, cfg.mma.wave_size)
-    lane_mod16 = dsl.mod(lane, 16)
-    lane_scale_group = dsl.floor(lane / 16)
-    pair_base = wg * (waves * tiles // 2) + wave * (tiles // 2)
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    wave_id_uniform = dsl.floor(wi_first / cfg.mma.wave_size)
+    # Four 16-lane groups fill four scale blocks per DMA.
+    lane_group = dsl.floor(lane / 16)
+    source_lane = dsl.mod(lane, 16)
+    k_pairs = cfg.wave_k_tiles // 2
+    dma_groups = _aiter_mxfp4_scale_dma_groups_per_wave(cfg)
     group_blocks = cfg.aiter_scale_groups // 8
-    load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
-    values: list[list[dsl.Value]] = []
-    tokens: list[list[dsl.Value]] = []
-    for k_pair in range(cfg.wave_k_tiles // 2):
-        pair_values: list[dsl.Value] = []
-        pair_tokens: list[dsl.Value] = []
-        for tile_pair in range(tiles // 2):
-            offset = bld.index_expr(
-                (
-                    (pair_base + tile_pair) * group_blocks
-                    + step * (cfg.wave_k_tiles // 2)
-                    + k_pair
-                )
-                * 256
-                + lane_scale_group * 64
-                + lane_mod16 * 4,
-                bindings=bindings,
+    lds = bld.ptr_cast(
+        _scale_shared_memory_base(bld, cfg, lds_offset),
+        dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
+    )
+    dep = after if after is not None else bld.token()
+    tokens: list[dsl.Value] = []
+    axis_group_base = 0
+    for axis in ("m", "n"):
+        wg_value, wave, waves, tiles, global_base = _aiter_mxfp4_scale_axis_params(
+            cfg, coords, axis, wave_id
+        )
+        pairs = tiles // 2
+        blocks = k_pairs * pairs
+        axis_groups = _aiter_mxfp4_scale_axis_dma_groups(cfg, axis)
+        wg = wg_m if axis == "m" else wg_n
+        axis_bindings = {**bindings, wg: wg_value}
+        for group in range(axis_groups):
+            group_blocks_valid = min(4, blocks - 4 * group)
+            # Partial groups duplicate valid blocks into unread slots.
+            block = 4 * group + dsl.mod(lane_group, group_blocks_valid)
+            k_pair = dsl.floor(block / pairs)
+            tile_pair = dsl.mod(block, pairs)
+            pair_base = (wg * waves + wave) * pairs
+            source_offset = bld.index_expr(
+                ((pair_base + tile_pair) * group_blocks + step * k_pairs + k_pair) * 256
+                + source_lane * 16,
+                bindings=axis_bindings,
             )
-            value, token = bld.load(bld.ptr_add(global_base, offset), load_type)
-            pair_values.append(value)
-            pair_tokens.append(token)
-        values.append(pair_values)
-        tokens.append(pair_tokens)
-    return values, tokens
+            source = bld.ptr_add(global_base, source_offset)
+            dest_offset = bld.index_expr(
+                wave_id_uniform * dma_groups * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+                + (axis_group_base + group) * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS,
+                bindings=first_bindings,
+            )
+            tokens.append(
+                bld.dma_load_lds(
+                    source,
+                    bld.ptr_add(lds, dest_offset),
+                    after=dep,
+                    bytes=16,
+                )
+            )
+        axis_group_base += axis_groups
+    return _join_tokens(bld, tokens)
 
 
-def _load_aiter_mxfp4_scale_sets(
+def _read_aiter_mxfp4_scale_batch(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
-    scale_step: dsl.Value | int,
+    lds_offset: dsl.Value | int,
+    ready_token: dsl.Value,
 ) -> tuple[list[tuple[int, _Mxfp4ScaleSet]], dsl.Value]:
-    a_values, a_tokens = _load_aiter_mxfp4_scale_axis(bld, cfg, coords, scale_step, "m")
-    b_values, b_tokens = _load_aiter_mxfp4_scale_axis(bld, cfg, coords, scale_step, "n")
+    lds = bld.ptr_cast(
+        _scale_shared_memory_base(bld, cfg, lds_offset),
+        dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
+    )
+    wi = dsl.sym("__wave_dsl_aiter_read_wi")
+    wave_id = dsl.floor(wi / cfg.mma.wave_size)
+    lane = dsl.mod(wi, cfg.mma.wave_size)
+    bindings = {wi: coords.wi}
+    a_pairs = cfg.wave_m_tiles // 2
+    b_pairs = cfg.wave_n_tiles // 2
+    a_dma_groups = _aiter_mxfp4_scale_axis_dma_groups(cfg, "m")
+    dma_groups = _aiter_mxfp4_scale_dma_groups_per_wave(cfg)
+    load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
     scale_sets: list[tuple[int, _Mxfp4ScaleSet]] = []
-    all_tokens = [token for groups in (*a_tokens, *b_tokens) for token in groups]
-    for k in range(cfg.wave_k_tiles):
-        k_pair = k // 2
-        token = _join_tokens(bld, [*a_tokens[k_pair], *b_tokens[k_pair]])
-        scale_sets.append(
-            (
-                k,
-                _Mxfp4ScaleSet(
-                    a_scales=[
-                        a_values[k_pair][i // 2] for i in range(cfg.wave_m_tiles)
-                    ],
-                    a_scale_idxs=[2 * (k % 2) + i % 2 for i in range(cfg.wave_m_tiles)],
-                    b_scales=[
-                        b_values[k_pair][j // 2] for j in range(cfg.wave_n_tiles)
-                    ],
-                    b_scale_idxs=[2 * (k % 2) + j % 2 for j in range(cfg.wave_n_tiles)],
-                    token=token,
-                ),
+    tokens: list[dsl.Value] = []
+    for k_pair in range(cfg.wave_k_tiles // 2):
+        a_block_base = k_pair * a_pairs
+        a_scales: list[dsl.Value] = []
+        a_tokens: list[dsl.Value] = []
+        for tile_pair in range(a_pairs):
+            block = a_block_base + tile_pair
+            offset = bld.index_expr(
+                wave_id * dma_groups * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+                + (block // 4) * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+                + (block % 4) * _AITER_MXFP4_SCALE_LDS_BLOCK_DWORDS
+                + lane,
+                bindings=bindings,
             )
-        )
-    return scale_sets, _join_tokens(bld, all_tokens)
+            scale, token = bld.load(
+                bld.ptr_add(lds, offset), load_type, after=ready_token
+            )
+            a_scales.extend((scale, scale))
+            a_tokens.append(token)
+        b_scales: list[dsl.Value] = []
+        b_tokens: list[dsl.Value] = []
+        for tile_pair in range(b_pairs):
+            block = k_pair * b_pairs + tile_pair
+            offset = bld.index_expr(
+                wave_id * dma_groups * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+                + a_dma_groups * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+                + (block // 4) * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
+                + (block % 4) * _AITER_MXFP4_SCALE_LDS_BLOCK_DWORDS
+                + lane,
+                bindings=bindings,
+            )
+            scale, token = bld.load(
+                bld.ptr_add(lds, offset), load_type, after=ready_token
+            )
+            b_scales.extend((scale, scale))
+            b_tokens.append(token)
+        token = _join_tokens(bld, [*a_tokens, *b_tokens])
+        tokens.append(token)
+        for k in (2 * k_pair, 2 * k_pair + 1):
+            scale_sets.append(
+                (
+                    k,
+                    _Mxfp4ScaleSet(
+                        a_scales=a_scales,
+                        a_scale_idxs=[
+                            2 * (k % 2) + i % 2 for i in range(cfg.wave_m_tiles)
+                        ],
+                        b_scales=b_scales,
+                        b_scale_idxs=[
+                            2 * (k % 2) + j % 2 for j in range(cfg.wave_n_tiles)
+                        ],
+                        token=token,
+                    ),
+                )
+            )
+    return scale_sets, _join_tokens(bld, tokens)
 
 
 def _emit_mxfp4_mma_grid(
@@ -4416,7 +4531,12 @@ def _emit_mxfp4_mma_grid(
     scale_ready_token: dsl.Value | None,
 ) -> tuple[dsl.Value, ...]:
     if cfg.uses_aiter_mxfp4_layout:
-        scale_sets, _ = _load_aiter_mxfp4_scale_sets(bld, cfg, coords, scale_step)
+        assert scale_ready_token is not None, "AITER MXFP4 scales must be staged"
+        scale_sets, token = _read_aiter_mxfp4_scale_batch(
+            bld, cfg, coords, scale_lds_offset, scale_ready_token
+        )
+        if scale_tokens is not None:
+            scale_tokens.append(token)
         return _emit_mxfp4_mma_grid_scale_sets(bld, cfg, afs, bfs, accs, scale_sets)
 
     if scale_ready_token is not None:
@@ -4961,12 +5081,16 @@ def _emit_dma_step(
     next_split_tokens: list[dsl.Value] = []
     new_scale_token: dsl.Value | None = None
     new_next_scale_token: dsl.Value | None = None
+    next_scale_dma_token: dsl.Value | None = None
     ready_token: dsl.Value | None = None
 
     def get_ready_token() -> dsl.Value:
         nonlocal ready_token
         if ready_token is None:
-            ready_token = bld.barrier(state.dma_token, state.reuse_token)
+            dependencies = [state.dma_token, state.reuse_token, *scale_tokens]
+            if next_scale_dma_token is not None:
+                dependencies.append(next_scale_dma_token)
+            ready_token = bld.barrier(*dependencies)
         return ready_token
 
     def dma_after_token() -> dsl.Value:
@@ -5028,7 +5152,30 @@ def _emit_dma_step(
 
     early_dma = cfg.uses_packed_mxfp4 and cfg.wave_k_tiles == 1
     uses_prefetched_scales = cfg.uses_packed_mxfp4 and state.scale_token is not None
-    if uses_prefetched_scales:
+    if uses_prefetched_scales and cfg.uses_aiter_mxfp4_layout:
+        scale_sets, scale_reuse_token = _read_aiter_mxfp4_scale_batch(
+            bld,
+            cfg,
+            coords,
+            _scale_buffer_offset(bld, cfg, scale_step),
+            state.scale_token,
+        )
+        scale_tokens.append(scale_reuse_token)
+        next_scale_step = bld.addi(scale_step, bld.constant(dsl.i32(), 1))
+        next_scale_dma_token = _stage_aiter_mxfp4_scale_batch(
+            bld,
+            cfg,
+            coords,
+            next_scale_step,
+            _scale_buffer_offset(bld, cfg, next_scale_step),
+            state.scale_token,
+        )
+        if _use_reuse_data_dma_issue(cfg):
+            issue_next_dma()
+        new_accs = _emit_mxfp4_mma_grid_scale_sets(
+            bld, cfg, state.afs, state.bfs, state.accs, scale_sets
+        )
+    elif uses_prefetched_scales:
         if state.next_scale_token is None:
             raise ValueError("DMA MXFP4 loop requires next prefetched scales")
         next_scale_step = bld.addi(scale_step, bld.constant(dsl.i32(), 2))
@@ -5317,6 +5464,9 @@ def _emit_dma_step(
             ready_loads = None
     if next_token is None:
         finish_next_dma()
+    if next_scale_dma_token is not None:
+        assert next_token is not None
+        next_token = bld.join(next_token, next_scale_dma_token)
     if early_dma and not uses_prefetched_scales:
         new_accs = _emit_mxfp4_mma_state_step(bld, cfg, state, scales)
     if cfg.uses_packed_mxfp4 or ready_loads is None:
@@ -5341,6 +5491,8 @@ def _emit_dma_step(
                 lds_offset=ready_lds_offset,
             )
     new_afs, new_bfs, reuse_token = ready_loads
+    if uses_prefetched_scales and cfg.uses_aiter_mxfp4_layout:
+        new_scale_token = get_ready_token()
     return (
         new_accs,
         next_token,
@@ -5364,6 +5516,19 @@ def _emit_dma_tail_step(
         raise ValueError("DMA tail step requires a ready token")
     scale_tokens: list[dsl.Value] = []
     current_step = cfg.virtual_k_steps - 2
+    tail_step = cfg.virtual_k_steps - 1
+    tail_scale_dma_token = None
+    if cfg.uses_aiter_mxfp4_layout:
+        if state.scale_token is None:
+            raise ValueError("AITER MXFP4 tail requires staged scales")
+        tail_scale_dma_token = _stage_aiter_mxfp4_scale_batch(
+            bld,
+            cfg,
+            coords,
+            tail_step,
+            _scale_buffer_offset(bld, cfg, tail_step),
+            state.scale_token,
+        )
     new_accs = _emit_mma_grid(
         bld,
         cfg,
@@ -5381,15 +5546,18 @@ def _emit_dma_tail_step(
         scale_tokens=scale_tokens,
         scale_ready_token=state.scale_token,
     )
-    tail_step = cfg.virtual_k_steps - 1
     if cfg.uses_aiter_mxfp4_layout:
+        assert tail_scale_dma_token is not None
+        tail_ready_token = bld.barrier(
+            state.dma_token, tail_scale_dma_token, *scale_tokens
+        )
         new_afs, new_bfs, reuse_token = _read_aiter_dma_ready(
             bld,
             cfg,
             types,
             staging,
             coords,
-            bld.barrier(state.dma_token),
+            tail_ready_token,
             tail_step,
             lds_offset=_dma_buffer_offset(bld, cfg, tail_step),
         )
@@ -5414,7 +5582,9 @@ def _emit_dma_tail_step(
         afs=(a_pt,),
         bfs=(b_pt,),
         reuse_token=_join_tokens(bld, [reuse_token, *scale_tokens]),
-        scale_token=state.next_scale_token,
+        scale_token=(
+            tail_ready_token if cfg.uses_aiter_mxfp4_layout else state.next_scale_token
+        ),
     )
 
 
@@ -5496,9 +5666,14 @@ def _store_final_mxfp4_tiles_split(
     scale_ready_token = state.scale_token
     if state.reuse_token is not None:
         scale_ready_token = _join_tokens(bld, [scale_ready_token, state.reuse_token])
-    scale_sets, scale_token = _read_mxfp4_scale_batch(
-        bld, cfg, coords, scale_step, scale_lds_offset, scale_ready_token
-    )
+    if cfg.uses_aiter_mxfp4_layout:
+        scale_sets, scale_token = _read_aiter_mxfp4_scale_batch(
+            bld, cfg, coords, scale_lds_offset, scale_ready_token
+        )
+    else:
+        scale_sets, scale_token = _read_mxfp4_scale_batch(
+            bld, cfg, coords, scale_step, scale_lds_offset, scale_ready_token
+        )
     right_scale_sets = scale_sets
     n_mid = cfg.wave_n_tiles // 2
     left_accs = _emit_mxfp4_mma_grid_scale_sets_slice(

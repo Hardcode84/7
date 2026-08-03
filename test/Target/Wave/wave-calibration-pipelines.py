@@ -1372,13 +1372,23 @@ def check_matmul_mxfp4_4wave_profile(matmul) -> None:
 
 def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
     expected = {
-        "gfx950-mxfp4-aiter-32x128": (1, 4, 2, 2, 2, 4),
-        "gfx950-mxfp4-aiter-64x128": (1, 4, 4, 2, 2, 4),
-        "gfx950-mxfp4-aiter-128x128": (1, 4, 8, 2, 2, 4),
-        "gfx950-mxfp4-aiter-128x256": (1, 4, 8, 4, 4, 4),
-        "gfx950-mxfp4-aiter-256x256": (1, 4, 16, 4, 2, 8),
+        "gfx950-mxfp4-aiter-32x128": ((1, 4, 2, 2, 2, 4), 16384, 24576, 0),
+        "gfx950-mxfp4-aiter-64x128": ((1, 4, 4, 2, 2, 4), 16384, 32768, 0),
+        "gfx950-mxfp4-aiter-128x128": ((1, 4, 8, 2, 2, 4), 16384, 49152, 0),
+        "gfx950-mxfp4-aiter-128x256": (
+            (1, 4, 8, 4, 4, 4),
+            24576,
+            90112,
+            90112,
+        ),
+        "gfx950-mxfp4-aiter-256x256": (
+            (1, 4, 16, 4, 2, 8),
+            24576,
+            90112,
+            90112,
+        ),
     }
-    for profile, shape in expected.items():
+    for profile, (shape, scale_lds, total_lds, dynamic_lds) in expected.items():
         args = matmul.parse_args(
             [
                 "--chip=gfx950",
@@ -1404,6 +1414,13 @@ def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
             and args.output_store_cache == "cs"
             and matmul.effective_target_waves(args) == 1,
             f"bad {profile} mode",
+        )
+        require(
+            "matmul_mxfp4_aiter_profiles",
+            matmul.mxfp4_scale_lds_bytes(args) == scale_lds
+            and matmul.compute_lds_bytes(args) == total_lds
+            and matmul.compute_dynamic_lds_bytes(args) == dynamic_lds,
+            f"bad {profile} LDS accounting",
         )
         command = matmul.build_matmul_example_args(args, "gfx950")
         require(

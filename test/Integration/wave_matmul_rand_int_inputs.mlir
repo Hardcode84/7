@@ -17,6 +17,7 @@
 // RUN: not %t workspace-overflow 2>&1 | FileCheck %s --check-prefix=WORKSPACE
 // RUN: not %t aiter-scale-padding-overflow 2>&1 | FileCheck %s --check-prefix=AITER-SCALE-OVERFLOW
 // RUN: not %t aiter-scale-range-overflow 2>&1 | FileCheck %s --check-prefix=AITER-SCALE-RANGE
+// RUN: not %t aiter-scale-block-alias 2>&1 | FileCheck %s --check-prefix=AITER-SCALE-ALIAS
 // RUN: not %t launch-k-overflow 2>&1 | FileCheck %s --check-prefix=LAUNCH-K
 // RUN: not %t output-elements-overflow 2>&1 | FileCheck %s --check-prefix=OUTPUT-ELEMENTS
 // RUN: not %t iters-zero 2>&1 | FileCheck %s --check-prefix=ITERS
@@ -51,6 +52,7 @@
 // WORKSPACE: Stream-K workspace size overflow
 // AITER-SCALE-OVERFLOW: AITER scale row padding overflow
 // AITER-SCALE-RANGE: AITER scale buffer range exceeds u32
+// AITER-SCALE-ALIAS: random AITER A scale blocks were not position-distinct
 // LAUNCH-K: K blocking exceeds i32
 // OUTPUT-ELEMENTS: output element count exceeds i32
 // ITERS: iters must be positive

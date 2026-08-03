@@ -189,6 +189,15 @@ static void checkAITERRunnerContract() {
   std::printf("aiter_runner_contract: ok\n");
 }
 
+[[noreturn]] static void checkAITERScaleBlockAlias() {
+  Args args = makeAITERArgs();
+  HostInputs inputs = makeHostInputs(args);
+  std::copy_n(inputs.aKernelScale.begin(), 256,
+              inputs.aKernelScale.begin() + 256);
+  validateRandomAITERInputs(inputs, args);
+  fail("random AITER scale block alias accepted");
+}
+
 struct AITERExpectedOutput {
   std::vector<uint16_t> values;
   std::vector<uint8_t> seen;
@@ -495,6 +504,8 @@ int main(int argc, char **argv) {
     checkAITERDeviceOutputConversion();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "aiter-scale-block-alias") == 0)
+    checkAITERScaleBlockAlias();
   if (argc == 2)
     runInvalidMode(argv[1]);
   if (argc != 1)

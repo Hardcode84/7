@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1503,6 +1504,63 @@ static uint32_t getMXFP4ScaleMask(const std::vector<uint8_t> &bytes) {
   return mask;
 }
 
+static size_t getActiveAITERScaleBlockCount(int rows, int k) {
+  int groups = divExact(k, 32, "bad MXFP4 scale groups");
+  int rowBlocks =
+      checkedAlignUp(rows, 32, "AITER scale row blocks overflow") / 32;
+  int groupBlocks =
+      checkedAlignUp(groups, 8, "AITER scale group blocks overflow") / 8;
+  return static_cast<size_t>(rowBlocks) * groupBlocks;
+}
+
+using AITERScaleBlock = std::array<uint8_t, 256>;
+
+struct AITERScaleBlockHash {
+  size_t operator()(const AITERScaleBlock &block) const noexcept {
+    uint64_t hash = 1469598103934665603ull;
+    for (uint8_t value : block)
+      hash = (hash ^ value) * 1099511628211ull;
+    return static_cast<size_t>(hash);
+  }
+};
+
+using AITERScaleBlockSet =
+    std::unordered_set<AITERScaleBlock, AITERScaleBlockHash>;
+
+static AITERScaleBlock getAITERScaleBlock(const std::vector<uint8_t> &bytes,
+                                          size_t block) {
+  AITERScaleBlock result;
+  std::copy_n(bytes.begin() + block * result.size(), result.size(),
+              result.begin());
+  return result;
+}
+
+static AITERScaleBlockSet
+collectDistinctAITERScaleBlocks(const std::vector<uint8_t> &bytes,
+                                size_t blocks, const char *message) {
+  AITERScaleBlockSet result;
+  result.reserve(blocks);
+  for (size_t block = 0; block < blocks; ++block)
+    if (!result.insert(getAITERScaleBlock(bytes, block)).second)
+      die(message);
+  return result;
+}
+
+static void validateAITERScaleBlockEntropy(const HostInputs &inputs,
+                                           const Args &a) {
+  size_t aBlocks = getActiveAITERScaleBlockCount(a.m, a.k);
+  size_t bBlocks = getActiveAITERScaleBlockCount(a.n, a.k);
+  AITERScaleBlockSet aScaleBlocks = collectDistinctAITERScaleBlocks(
+      inputs.aKernelScale, aBlocks,
+      "random AITER A scale blocks were not position-distinct");
+  AITERScaleBlockSet bScaleBlocks = collectDistinctAITERScaleBlocks(
+      inputs.bKernelScale, bBlocks,
+      "random AITER B scale blocks were not position-distinct");
+  for (const AITERScaleBlock &block : bScaleBlocks)
+    if (aScaleBlocks.find(block) != aScaleBlocks.end())
+      die("random AITER scale axes were not distinct");
+}
+
 static void validateRandomAITERInputs(const HostInputs &inputs, const Args &a) {
   if (!a.checkOutput || a.allOnes ||
       a.mxfp4InputLayout != MXFP4InputLayout::AITER)
@@ -1515,9 +1573,11 @@ static void validateRandomAITERInputs(const HostInputs &inputs, const Args &a) {
     die("random AITER A scales did not cover all values");
   if (getMXFP4ScaleMask(inputs.bScale) != 0xfu)
     die("random AITER B scales did not cover all values");
+  validateAITERScaleBlockEntropy(inputs, a);
   std::printf("input_check: passed mode=random a_codes=16 b_codes=16 "
               "a_scale_values=4 b_scale_values=4 reference=canonical "
-              "upload=aiter-preshuffled\n");
+              "upload=aiter-preshuffled scale_blocks=position-distinct "
+              "scale_axes=distinct\n");
 }
 
 static uint16_t readU16(const std::vector<uint8_t> &bytes, size_t element) {

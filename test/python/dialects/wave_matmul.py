@@ -217,10 +217,67 @@ assert_raises(
 )
 assert_raises(
     ValueError,
+    "AITER input layout requires the DMA scale path",
+    lambda: build_aiter_mxfp4(mxfp4_scale_path="regs"),
+)
+assert_raises(
+    ValueError,
     "buffer range needs 4294967296 bytes; 32-bit buffer range holds at most "
     "4294967295",
     lambda: build_aiter_mxfp4(M=33554432),
 )
+aiter_packed_scale_module = build_aiter_mxfp4(K=512)
+aiter_packed_scale_ops = [
+    op
+    for block in operation_blocks(aiter_packed_scale_module.operation)
+    for op in block.operations
+]
+aiter_scale_dmas = [
+    op
+    for op in aiter_packed_scale_ops
+    if op.name == "waveamd.dma_load_lds" and "zero_fill_inactive" not in str(op)
+]
+assert len(aiter_scale_dmas) == 6
+assert all(
+    "#waveamd.buffer" in str(op) and "bytes = 16" in str(op) and len(op.operands) == 3
+    for op in aiter_scale_dmas
+)
+aiter_scale_loads = [
+    str(op)
+    for op in aiter_packed_scale_ops
+    if op.name == "wave.load" and "vector<4xi8>" in str(op)
+]
+assert len(aiter_scale_loads) == 6
+assert all("#wave.shared" in op and " after " in op for op in aiter_scale_loads)
+assert any(
+    op.name == "wave.barrier" and len(op.operands) == 4 for op in aiter_packed_scale_ops
+)
+assert "wave.lds_size = 24576 : i64" in str(aiter_packed_scale_module)
+aiter_partial_scale_module = build_aiter_mxfp4(
+    M=96,
+    wave_m_tiles=6,
+)
+aiter_partial_scale_text = str(aiter_partial_scale_module)
+assert (
+    "Mod(floor(1/16*Mod(__wave_dsl_aiter_stage_wi, 64)), 3)" in aiter_partial_scale_text
+)
+assert '<"512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">' in aiter_partial_scale_text
+assert (
+    '<"256 + 512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">'
+    in aiter_partial_scale_text
+)
+aiter_split_owner_text = str(
+    build_aiter_mxfp4(
+        M=128,
+        N=128,
+        K=512,
+        BM=2,
+        BN=2,
+    )
+)
+assert "512*floor(1/128*__wave_dsl_aiter_stage_wi)" in aiter_split_owner_text
+assert "512*Mod(floor(1/64*__wave_dsl_aiter_stage_wi), 2)" in aiter_split_owner_text
+print("mxfp4-aiter-packed-scale-dma ok")
 print("subpanel-validation ok")
 
 assert_raises(
@@ -738,6 +795,7 @@ assert "i32" not in static_signature
 assert_external_assumption_count(static_bld.module, 2)
 print(static_bld.module)
 
+# CHECK: mxfp4-aiter-packed-scale-dma ok
 # CHECK: subpanel-validation ok
 # CHECK: spatial-subpanel ok
 # CHECK: spatial-subpanel-short-k ok

@@ -6,6 +6,8 @@
 // RUN:   | FileCheck %s --check-prefix=MULTI-CTA
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-mxfp4-aiter-128x256 --m=128 --n=256 --k=512 --cta-swizzle-xcds=1 --cta-group-m=1 --seed=41 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
 // RUN:   | FileCheck %s --check-prefix=WAVE-K4
+// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --m=192 --n=320 --k=512 --bm=2 --bn=2 --wave-m-tiles=2 --wave-n-tiles=2 --wave-k-tiles=2 --target-waves=1 --use-buffer --use-dma-lds --matrix-intrinsic=mfma_gfx950 --input-type=mxfp4 --output-type=f16 --output-store-cache=cs --mxfp4-input-layout=aiter --cta-swizzle-xcds=1 --cta-group-m=1 --seed=53 --variants=scheduled --iters=2 --warmup=1 --repeats=1 \
+// RUN:   | FileCheck %s --check-prefix=OWNER-SPLIT
 //
 // LARGE-TILE: input_type=mxfp4 output_type=f16 mxfp4_scale_path=dma mxfp4_input_layout=aiter
 // LARGE-TILE: seed=17 input_mode=random
@@ -44,3 +46,12 @@
 // WAVE-K4: output_check: passed mode=strict layout=row-major elements=32768
 // WAVE-K4: variant: scheduled
 // WAVE-K4: hw_output_check: passed
+// OWNER-SPLIT: m=192 n=320 k=512 bm=2 bn=2 wave_m_tiles=2 wave_n_tiles=2 wave_k_tiles=2
+// OWNER-SPLIT: input_type=mxfp4 output_type=f16 mxfp4_scale_path=dma mxfp4_input_layout=aiter
+// OWNER-SPLIT: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled scale_blocks=position-distinct scale_axes=distinct
+// OWNER-SPLIT: output_layout_check: passed kernel=tile-packed final=row-major conversion=device coordinates=bijective elements=61440
+// OWNER-SPLIT: output_contract: kernel=tile-packed final=row-major conversion=device
+// OWNER-SPLIT: grid: 3,5,1 block: 256,1,1
+// OWNER-SPLIT: output_check: passed mode=strict layout=row-major elements=61440
+// OWNER-SPLIT: variant: scheduled
+// OWNER-SPLIT: hw_output_check: passed

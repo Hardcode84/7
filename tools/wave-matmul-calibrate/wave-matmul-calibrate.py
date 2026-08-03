@@ -843,7 +843,11 @@ def mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
 
 def mxfp4_scale_lds_bytes(args: argparse.Namespace) -> int:
     if getattr(args, "mxfp4_input_layout", "canonical") == "aiter":
-        return 0
+        k_pairs = args.wave_k_tiles // 2
+        a_blocks = k_pairs * (args.wave_m_tiles // 2)
+        b_blocks = k_pairs * (args.wave_n_tiles // 2)
+        dma_groups = (a_blocks + 3) // 4 + (b_blocks + 3) // 4
+        return 2 * args.bm * args.bn * dma_groups * 1024
     if selected_example(args) == "tensilelite-subtile":
         k_groups = args.wave_k_tiles // 2
         scale_tiles = (

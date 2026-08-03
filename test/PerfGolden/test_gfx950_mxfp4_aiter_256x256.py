@@ -4,13 +4,18 @@
 # RUN: %PYTHON %s --build-dir %t.no-build --emit-mlir %t.mlir
 # RUN: FileCheck %s --check-prefix=SOURCE --input-file=%t.mlir
 
-# CHECK: perf-golden: gfx950-mxfp4-aiter-256x256: asm matches golden
+# CHECK: perf-golden: gfx950-mxfp4-aiter-256x256: all VMEM loads are 128-bit
+# CHECK-NEXT: perf-golden: gfx950-mxfp4-aiter-256x256: asm matches golden
 # SOURCE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"}
+# SOURCE: func.func @wmma_f16_matmul_tiled
+# SOURCE-SAME: wave.dynamic_lds_size = 90112 : i64
+# SOURCE-SAME: wave.lds_size = 0 : i64
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,6 +26,10 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 CALIBRATOR = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py"
 GOLDEN = HERE / "Inputs" / f"{NAME}.s"
+VMEM_LOAD = re.compile(r"^\s*(?:buffer|global)_load_\S+")
+MAX_WIDTH_VMEM_LOAD = re.compile(
+    r"^\s*(?:buffer_load_dwordx4|global_load_b128|global_load_lds_dwordx4)\b"
+)
 
 
 def normalize_asm(text: str) -> str:
@@ -83,6 +92,16 @@ def print_diff(
         print(line)
 
 
+def check_max_width_vmem_loads(asm: str) -> None:
+    loads = [line for line in asm.splitlines() if VMEM_LOAD.match(line)]
+    if not loads:
+        raise SystemExit("no VMEM loads found")
+    narrow = [line for line in loads if not MAX_WIDTH_VMEM_LOAD.match(line)]
+    if narrow:
+        raise SystemExit("non-128-bit VMEM load:\n" + "\n".join(narrow))
+    print(f"perf-golden: {NAME}: all VMEM loads are 128-bit")
+
+
 def check_asm(
     build_dir: Path,
     generated_out: Path | None = None,
@@ -93,6 +112,7 @@ def check_asm(
         out = generated_out or Path(td) / f"{NAME}.s"
         run_calibrator(build_dir, out, emit_mlir)
         generated = normalize_asm(out.read_text(encoding="utf-8"))
+        check_max_width_vmem_loads(generated)
         golden = normalize_asm(GOLDEN.read_text(encoding="utf-8"))
         if generated == golden:
             print(f"perf-golden: {NAME}: asm matches golden")
