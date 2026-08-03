@@ -2385,10 +2385,86 @@ def check_matmul_perf_sweep_precompile_plan(perf_sweep) -> None:
     print("matmul_perf_sweep_precompile_plan: ok")
 
 
-def check_matmul_perf_sweep_mxfp4_aiter(perf_sweep) -> None:
-    check_name = "matmul_perf_sweep_mxfp4_aiter"
+MXFP4_AITER_SWEEP_KEYS = (
+    "mxfp4-aiter-32x128",
+    "mxfp4-aiter-64x128",
+    "mxfp4-aiter-128x128",
+    "mxfp4-aiter-128x256",
+    "mxfp4-aiter-256x256",
+)
+
+DEFAULT_SWEEP_KEYS = (
+    "f16",
+    "f16-spatial",
+    "f16-4wave",
+    "f16-streamk",
+    "mxfp4",
+    "mxfp4-4wave",
+    *MXFP4_AITER_SWEEP_KEYS,
+    "v9",
+    "v9-transposed",
+    "fa-8wave",
+)
+
+
+def check_mxfp4_aiter_sweep_aliases(perf_sweep, check_name: str) -> None:
+    aiter_alias = perf_sweep.KERNEL_ALIASES["mxfp4-aiter"]
+    default_alias = perf_sweep.KERNEL_ALIASES["all"]
+    require(
+        check_name,
+        aiter_alias == MXFP4_AITER_SWEEP_KEYS
+        and len(aiter_alias) == len(set(aiter_alias)),
+        "AITER alias has missing, duplicate, or reordered profiles",
+    )
+    require(
+        check_name,
+        default_alias == DEFAULT_SWEEP_KEYS
+        and len(default_alias) == len(set(default_alias)),
+        "default sweep has missing, duplicate, or reordered profiles",
+    )
     kernels = perf_sweep.parse_kernel_csv("mxfp4-aiter")
-    require(check_name, len(kernels) == 5, "AITER alias should select five profiles")
+    aiter_keys = tuple(kernel.key for kernel in kernels)
+    require(
+        check_name,
+        aiter_keys == MXFP4_AITER_SWEEP_KEYS,
+        "AITER alias expansion changed",
+    )
+    default_keys = tuple(kernel.key for kernel in perf_sweep.parse_kernel_csv("all"))
+    deduplicated = tuple(
+        kernel.key
+        for kernel in perf_sweep.parse_kernel_csv("all,mxfp4-aiter,mxfp4-aiter")
+    )
+    require(
+        check_name,
+        default_keys == DEFAULT_SWEEP_KEYS and deduplicated == default_keys,
+        "AITER default expansion is missing or duplicated",
+    )
+
+
+def check_mxfp4_aiter_sweep_commands(
+    perf_sweep, matmul, args: argparse.Namespace, specs, check_name: str
+) -> None:
+    commands = [perf_sweep.calibrator_command(args, spec) for spec in specs]
+    resolved_args = [matmul.parse_args(command[2:]) for command in commands]
+    require(
+        check_name,
+        all("--kernel-profile" in command for command in commands),
+        "AITER sweep lost named profiles",
+    )
+    require(
+        check_name,
+        all(
+            resolved.mxfp4_input_layout == "aiter"
+            and resolved.mxfp4_scale_path == "dma"
+            for resolved in resolved_args
+        ),
+        "AITER sweep lost input layout or packed DMA scales",
+    )
+
+
+def check_matmul_perf_sweep_mxfp4_aiter(perf_sweep, matmul) -> None:
+    check_name = "matmul_perf_sweep_mxfp4_aiter"
+    check_mxfp4_aiter_sweep_aliases(perf_sweep, check_name)
     args = perf_sweep.build_argparser().parse_args(
         ["--kernels=mxfp4-aiter", "--skip-rebuild", "--dry-run"]
     )
@@ -2412,23 +2488,7 @@ def check_matmul_perf_sweep_mxfp4_aiter(perf_sweep) -> None:
         ],
         "AITER profile-to-shape matrix changed",
     )
-    commands = [perf_sweep.calibrator_command(args, spec) for spec in specs]
-    require(
-        check_name,
-        all("--kernel-profile" in command for command in commands),
-        "AITER sweep lost named profiles",
-    )
-    default_keys = [kernel.key for kernel in perf_sweep.parse_kernel_csv("all")]
-    aiter_keys = [kernel.key for kernel in kernels]
-    deduplicated = [
-        kernel.key for kernel in perf_sweep.parse_kernel_csv("all,mxfp4-aiter")
-    ]
-    require(
-        check_name,
-        all(key not in default_keys for key in aiter_keys)
-        and deduplicated == default_keys + aiter_keys,
-        "AITER profiles should remain an explicit sweep",
-    )
+    check_mxfp4_aiter_sweep_commands(perf_sweep, matmul, args, specs, check_name)
     print(f"{check_name}: ok")
 
 
@@ -2728,7 +2788,7 @@ def main() -> int:
     check_matmul_perf_sweep_spatial(perf_sweep)
     check_matmul_perf_sweep_streamk(perf_sweep)
     check_matmul_perf_sweep_precompile_plan(perf_sweep)
-    check_matmul_perf_sweep_mxfp4_aiter(perf_sweep)
+    check_matmul_perf_sweep_mxfp4_aiter(perf_sweep, matmul)
     check_perf_sweep_fa_8wave(perf_sweep)
     check_matmul_perf_sweep_rand_int_forwarding(perf_sweep)
     check_calibration_scheduler_options(matmul, fa)

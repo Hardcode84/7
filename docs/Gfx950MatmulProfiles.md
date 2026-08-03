@@ -185,12 +185,14 @@ Five named profiles cover the AITER benchmark matrix:
 | `gfx950-mxfp4-aiter-64x128` | 64x128 | 4x2 | 2 | 256x8192x4096, 512x4096x4096 |
 | `gfx950-mxfp4-aiter-128x128` | 128x128 | 8x2 | 2 | 512x8192x4096 |
 | `gfx950-mxfp4-aiter-128x256` | 128x256 | 8x4 | 4 | 2048x4096x8192 |
-| `gfx950-mxfp4-aiter-256x256` | 256x256 | 16x4 | 2 | 2048x8192x4096, 2048x8192x8192 |
+| `gfx950-mxfp4-aiter-256x256` | 256x256 | 16x4 | 4 | 2048x8192x4096, 2048x8192x8192 |
 
 `per_launch_us` and sweep TFLOP/s cover GEMM plus device output conversion.
 `kernel_only_per_launch_us` reports GEMM alone. Host copy and CPU reference stay
-outside both timings. `mxfp4-aiter` selects the five profiles explicitly; the
-default `all` sweep excludes them until final gfx950 evidence is recorded.
+outside both timings. `mxfp4-aiter` and default `all` each select the five
+profiles once in table order. Matching-gfx950 device and end-to-end results are
+not recorded for this integrated pipeline; default inclusion is not a
+performance claim.
 
 Run the AITER matrix with:
 
@@ -557,10 +559,10 @@ workspace cost, selection limits, current artifact hashes, reproduction
 commands, and source-branch measurements.
 
 Sweep only the regular four-wave profile with `--kernels=f16-4wave`. Default
-`all` includes all three f16 profiles, both MXFP4 profiles, both v9 goldens,
-and the B2/H64/N8192/D128 eight-wave BF16 FlashAttention kernel. Use
-`--kernels=fa` for FA alone; its shape overrides are `--fa-batch`,
-`--fa-heads`, `--fa-sequence`, and `--fa-xcds`.
+`all` includes all four f16 profiles, both standard MXFP4 profiles, five AITER
+MXFP4 profiles, both v9 goldens, and the B2/H64/N8192/D128 eight-wave BF16
+FlashAttention kernel. Use `--kernels=fa` for FA alone; its shape overrides are
+`--fa-batch`, `--fa-heads`, `--fa-sequence`, and `--fa-xcds`.
 
 See [Wave gfx950 FlashAttention](PerfReferences/WaveGfx950FlashAttention.md)
 for the current ISA profile and retained branch experiments.
