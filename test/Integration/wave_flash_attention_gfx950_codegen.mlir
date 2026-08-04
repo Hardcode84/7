@@ -89,8 +89,13 @@
 // CHECK-8W: v_exp_f32
 // CHECK-8W: s_barrier
 // CHECK-8W-NEXT: s_setprio 3
+// CHECK-8W: v_cvt_pk_bf16_f32
+// CHECK-8W: v_pk_mul_f32
 // CHECK-8W: v_add_f32
 // CHECK-8W: s_setprio 0
 // CHECK-8W: v_rcp_f32
 // CHECK-8W: .amdhsa_next_free_vgpr 240
 // CHECK-8W: .amdhsa_next_free_sgpr 28
+// CHECK-8W: .private_segment_fixed_size: 0
+// CHECK-8W: .sgpr_spill_count: 0
+// CHECK-8W: .vgpr_spill_count: 0
