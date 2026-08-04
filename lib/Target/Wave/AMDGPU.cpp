@@ -5142,15 +5142,7 @@ private:
           : isa<waveamdmachine::VCmpGtI32Op, waveamdmachine::VCmpGtI32VccOp>(op)
               ? vCmpGtI32()
               : vCmpGeI32();
-      bool writesVcc =
-          isa<waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
-              waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
-              waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
-              waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
-              waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
-              waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
-              waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
-              waveamdmachine::VCmpGeI32VccOp>(op);
+      bool writesVcc = op.hasTrait<OpTrait::waveamdmachine::VCmpVccOp>();
       waveamdmachine::RegType resultType =
           cast<waveamdmachine::RegType>(result().getType());
       if (!writesVcc && resultType.getWidth() * 32 != wavefrontSize)

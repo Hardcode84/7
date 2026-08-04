@@ -26,14 +26,7 @@ using namespace mlir;
 namespace {
 
 static bool isVCCCompare(Operation *op) {
-  return isa<waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
-             waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
-             waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
-             waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
-             waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
-             waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
-             waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
-             waveamdmachine::VCmpGeI32VccOp>(op);
+  return op->hasTrait<OpTrait::waveamdmachine::VCmpVccOp>();
 }
 
 static bool hasLiveVCCWrite(Operation *op) {
@@ -225,15 +218,8 @@ static bool isScalarMaskSinkOp(Operation *op) {
            waveamdmachine::SCmpGeU32Op, waveamdmachine::SCmpEqI32Op,
            waveamdmachine::SCmpLtI32Op, waveamdmachine::SCmpLeI32Op,
            waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,
-           waveamdmachine::SCmpEqU64Op, waveamdmachine::SCmpLgU64Op,
-           waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
-           waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
-           waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
-           waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
-           waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
-           waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
-           waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
-           waveamdmachine::VCmpGeI32VccOp>(op))
+           waveamdmachine::SCmpEqU64Op, waveamdmachine::SCmpLgU64Op>(op) &&
+      !isVCCCompare(op))
     return false;
   return llvm::all_of(op->getResults(), [](Value result) {
     auto type = dyn_cast<waveamdmachine::RegType>(result.getType());

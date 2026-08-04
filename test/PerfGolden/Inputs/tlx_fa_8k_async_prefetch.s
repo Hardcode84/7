@@ -1021,47 +1021,45 @@ _attn_fwd_async_prefetch:
 		buffer_load_dwordx4 v23, s[32:35], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[188:191], a[40:43], v[224:239]
 		v_cmp_lt_i32_e64 s[42:43], v41, s25
-		v_mfma_f32_32x32x16_bf16 v[240:255], v[176:179], a[40:43], v[240:255]
-		s_nop 0
-		v_cndmask_b32_e64 v23, v26, v38, s[42:43]
-		v_cmp_lt_i32_e64 s[44:45], v42, s25
 		s_add_i32 m0, m0, 0x1040
-		s_nop 0
-		v_cndmask_b32_e64 v38, v26, v39, s[44:45]
+		v_cmp_lt_i32_e64 s[44:45], v42, s25
+		v_mfma_f32_32x32x16_bf16 v[240:255], v[176:179], a[40:43], v[240:255]
+		v_cndmask_b32_e64 v23, v26, v38, s[42:43]
 		buffer_load_dwordx4 v23, s[32:35], 0 offen lds
-		v_cndmask_b32_e32 v23, v26, v33, vcc
-		v_mfma_f32_32x32x16_bf16 v[192:207], a[64:67], a[12:15], v[192:207]
+		v_cndmask_b32_e64 v23, v26, v39, s[44:45]
+		v_cndmask_b32_e32 v33, v26, v33, vcc
 		s_add_i32 m0, m0, 0x1040
 		s_lshl_b32 s29, s29, 1
 		s_add_i32 s46, s5, s29
-		buffer_load_dwordx4 v38, s[32:35], 0 offen lds
-		v_add_u32_e32 v33, s46, v21
-		v_cndmask_b32_e64 v33, v26, v33, s[40:41]
+		buffer_load_dwordx4 v23, s[32:35], 0 offen lds
+		v_add_u32_e32 v23, s46, v21
+		v_cndmask_b32_e64 v23, v26, v23, s[40:41]
 		s_add_i32 m0, m0, 0x1040
 		s_mul_i32 s7, 0x4400, s7
 		s_add_i32 s7, s3, s7
-		buffer_load_dwordx4 v23, s[32:35], 0 offen lds
-		v_add_u32_e32 v23, s29, v21
-		v_add_u32_e32 v38, s27, v23
+		buffer_load_dwordx4 v33, s[32:35], 0 offen lds
+		v_add_u32_e32 v33, s29, v21
+		v_add_u32_e32 v38, s27, v33
 		s_add_i32 m0, s7, 0x81f0
 		v_cndmask_b32_e64 v38, v26, v38, s[42:43]
-		v_add_u32_e32 v39, s28, v23
-		buffer_load_dwordx4 v33, s[36:39], 0 offen lds
-		v_cndmask_b32_e64 v33, v26, v39, s[44:45]
-		v_add_u32_e32 v23, s1, v23
+		v_add_u32_e32 v39, s28, v33
+		buffer_load_dwordx4 v23, s[36:39], 0 offen lds
+		v_cndmask_b32_e64 v23, v26, v39, s[44:45]
+		v_add_u32_e32 v33, s1, v33
 		s_add_i32 m0, m0, 0x1100
-		v_cndmask_b32_e32 v23, v26, v23, vcc
-		v_mfma_f32_32x32x16_bf16 v[208:223], a[84:87], a[12:15], v[208:223]
+		v_cndmask_b32_e32 v33, v26, v33, vcc
+		v_mfma_f32_32x32x16_bf16 v[192:207], a[64:67], a[12:15], v[192:207]
 		buffer_load_dwordx4 v38, s[36:39], 0 offen lds
-		v_mfma_f32_32x32x16_bf16 v[224:239], a[84:87], a[44:47], v[224:239]
+		v_mfma_f32_32x32x16_bf16 v[208:223], a[84:87], a[12:15], v[208:223]
 		s_add_i32 m0, m0, 0x1100
+		v_mfma_f32_32x32x16_bf16 v[224:239], a[84:87], a[44:47], v[224:239]
+		buffer_load_dwordx4 v23, s[36:39], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[240:255], a[64:67], a[44:47], v[240:255]
-		buffer_load_dwordx4 v33, s[36:39], 0 offen lds
-		v_mfma_f32_32x32x16_bf16 v[192:207], a[68:71], a[16:19], v[192:207]
 		s_add_i32 m0, m0, 0x1100
 		s_cmp_lt_i32 s18, s14
+		v_mfma_f32_32x32x16_bf16 v[192:207], a[68:71], a[16:19], v[192:207]
+		buffer_load_dwordx4 v33, s[36:39], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[208:223], a[88:91], a[16:19], v[208:223]
-		buffer_load_dwordx4 v23, s[36:39], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[224:239], a[88:91], a[48:51], v[224:239]
 		v_mfma_f32_32x32x16_bf16 v[240:255], a[68:71], a[48:51], v[240:255]
 		v_mfma_f32_32x32x16_bf16 v[192:207], a[72:75], a[20:23], v[192:207]

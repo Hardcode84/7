@@ -350,6 +350,8 @@ def WaveAMDMachine_MFMA : NativeOpTrait<"waveamdmachine::MFMAOp">;
 def WaveAMDMachine_WMMA : NativeOpTrait<"waveamdmachine::WMMAOp">;
 def WaveAMDMachine_ReadsExec : NativeOpTrait<"waveamdmachine::ReadsExecOp">;
 def WaveAMDMachine_WritesExec : NativeOpTrait<"waveamdmachine::WritesExecOp">;
+def WaveAMDMachine_VCmpVccTrait
+    : NativeOpTrait<"waveamdmachine::VCmpVccOp">;
 
 def WaveAMDMachine_SGPR
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
@@ -1408,7 +1410,8 @@ def WaveAMDMachine_VPkMulF32Op
 def WaveAMDMachine_VPkFmaF32Op
     : WaveAMDMachine_PackedF32TernaryResult<"v_pk_fma_f32">;
 class WaveAMDMachine_VCmpVcc<string mnemonic>
-    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]>,
+    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU,
+                                   WaveAMDMachine_VCmpVccTrait, Pure]>,
       WaveAMDMachine_VCmpLegality {
   let arguments = (ins WaveAMDMachine_RegOrImm:$lhs,
                        WaveAMDMachine_RegOrImm:$rhs);

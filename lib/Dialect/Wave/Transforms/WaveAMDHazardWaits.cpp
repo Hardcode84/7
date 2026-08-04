@@ -1097,16 +1097,7 @@ static void addProducedTransRegHazard(Value result, HazardState &state,
 }
 
 static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
-  if (resultIndex != 0)
-    return false;
-  return isa<waveamdmachine::VCmpEqF32VccOp, waveamdmachine::VCmpLtF32VccOp,
-             waveamdmachine::VCmpLeF32VccOp, waveamdmachine::VCmpGtF32VccOp,
-             waveamdmachine::VCmpGeF32VccOp, waveamdmachine::VCmpEqU32VccOp,
-             waveamdmachine::VCmpNeU32VccOp, waveamdmachine::VCmpLtU32VccOp,
-             waveamdmachine::VCmpLeU32VccOp, waveamdmachine::VCmpGtU32VccOp,
-             waveamdmachine::VCmpGeU32VccOp, waveamdmachine::VCmpLtI32VccOp,
-             waveamdmachine::VCmpLeI32VccOp, waveamdmachine::VCmpGtI32VccOp,
-             waveamdmachine::VCmpGeI32VccOp>(op);
+  return resultIndex == 0 && op->hasTrait<OpTrait::waveamdmachine::VCmpVccOp>();
 }
 
 static HazardOpInfoMap collectHazardOpInfo(Operation *root,

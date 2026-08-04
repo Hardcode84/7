@@ -108,6 +108,9 @@ class ReadsExecOp : public TraitBase<ConcreteType, ReadsExecOp> {};
 template <typename ConcreteType>
 class WritesExecOp : public TraitBase<ConcreteType, WritesExecOp> {};
 
+template <typename ConcreteType>
+class VCmpVccOp : public TraitBase<ConcreteType, VCmpVccOp> {};
+
 } // namespace mlir::OpTrait::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINETRAITS_H

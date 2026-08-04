@@ -165,6 +165,13 @@ static std::optional<RegClass> getRegClass(Value value) {
   return std::nullopt;
 }
 
+static bool isValuSGPRHazardResult(Operation *op, unsigned resultIndex,
+                                   std::optional<RegClass> regClass) {
+  if (resultIndex == 0 && op->hasTrait<traits::VCmpVccOp>())
+    return false;
+  return regClass == RegClass::SGPR || regClass == RegClass::VCC;
+}
+
 static bool hasRegClass(ValueRange values, RegClass regClass) {
   return llvm::any_of(
       values, [&](Value value) { return getRegClass(value) == regClass; });
@@ -1443,9 +1450,9 @@ unsigned InstructionExecutionState::legacyValuIssueSlotHazardWait(
       wait = std::max(wait, issueSlotsUntil(hazards.valuWriteVGPRScalarReadyAt,
                                             currentIssueSlot));
   }
-  if (regClass == RegClass::VCC)
+  if (regClass == RegClass::SGPR || regClass == RegClass::VCC)
     wait = std::max(
-        wait, issueSlotsUntil(hazards.valuWriteVCCReadyAt, currentIssueSlot));
+        wait, issueSlotsUntil(hazards.valuWriteSGPRReadyAt, currentIssueSlot));
   return wait;
 }
 
@@ -1841,7 +1848,7 @@ void InstructionExecutionState::commitIssueSlotProducer(
     }
     return;
   }
-  for (Value result : op->getResults()) {
+  for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
     std::optional<RegClass> regClass = getRegClass(result);
     if (regClass == RegClass::VGPR) {
       IssueSlotHazards &hazards = issueSlotHazards[result];
@@ -1857,8 +1864,8 @@ void InstructionExecutionState::commitIssueSlotProducer(
         hazards.transWriteVGPRReadyAt =
             currentIssueSlot + issueSlotHazardConfig.transWriteVGPRValuRead;
     }
-    if (regClass == RegClass::VCC)
-      issueSlotHazards[result].valuWriteVCCReadyAt =
+    if (isValuSGPRHazardResult(op, resultIndex, regClass))
+      issueSlotHazards[result].valuWriteSGPRReadyAt =
           currentIssueSlot + issueSlotHazardConfig.valuWriteSGPRValuRead;
   }
 }
