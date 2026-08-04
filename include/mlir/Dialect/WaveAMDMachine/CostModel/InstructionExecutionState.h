@@ -223,7 +223,6 @@ private:
   int64_t ldsDmaIssueLead = 0;
   unsigned issueStreams = 1;
   unsigned readyPressureWaveCohort = 1;
-  unsigned mfmaTransCoexecSlotsPerIssue = 0;
   bool enableCoexecWindow = true;
 };
 
@@ -509,7 +508,6 @@ private:
   int64_t currentCycle = 0;
   int64_t nextLdsDmaIssueCycle = 0;
   int64_t mfmaCoissueReadyCycle = 0;
-  int64_t coexecWindowDeadlineCycle = 0;
   unsigned coexecWindowSlots = 0;
   unsigned coexecProducerRun = 0;
   uint64_t currentIssueSlot = 0;
