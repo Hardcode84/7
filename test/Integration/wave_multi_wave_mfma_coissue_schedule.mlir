@@ -146,11 +146,12 @@ func.func @cohort_mfma_coexec_window_reject_salu(
     %acc2: !waveamdmachine.reg<vgpr, 16>,
     %x: !waveamdmachine.reg<sgpr, 1>,
     %y: !waveamdmachine.reg<sgpr, 1>)
-    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
                 wave.kernel,
-                wave.workgroup_size = array<i32: 512, 1, 1>,
+                wave.waves_per_workgroup = 4 : i64,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
                 waveamdmachine.schedule_input,
-                waveamdmachine.target_waves = 2 : i64} {
+                waveamdmachine.target_waves = 1 : i64} {
   waveamdmachine.uniform_loop {
     %m0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,

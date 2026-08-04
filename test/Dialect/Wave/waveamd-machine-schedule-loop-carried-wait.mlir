@@ -402,10 +402,10 @@ func.func @model_under_tight_pressure(
 // IR-LABEL: func.func @model_under_tight_pressure
 // IR: ^bb0
 // IR-NEXT: [[DESC:%.*]] = waveamdmachine.tuple_from_elements
-// IR-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[DESC]]
 // IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[DESC]]
 // DIAG: waveamd-machine-schedule region func=model_under_tight_pressure index=1
-// DIAG-SAME: action=keep reason=pressure
+// DIAG-SAME: action=apply reason=loop_wait
 // DIAG-SAME: steady_state_fills=1
 // DIAG-SAME: steady_state_iterations=4
 // DIAG-SAME: steady_state_refinements=2

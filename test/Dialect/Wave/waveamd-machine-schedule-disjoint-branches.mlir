@@ -4,13 +4,17 @@
 // IR-LABEL: func.func @disjoint_branch_pressure
 // IR: [[SHARED:%.*]] = waveamdmachine.v_add_u32
 // IR: waveamdmachine.uniform_if
+// IR: waveamdmachine.v_add_u32 [[SHARED]]
 // IR: [[THEN_M0:%.*]] = waveamdmachine.s_mov_m0
-// IR-NEXT: waveamdmachine.v_add_u32 [[SHARED]]
-// IR-NEXT: waveamdmachine.global_load_lds_b32
+// IR-NEXT: waveamdmachine.s_cmp_eq_u32
+// IR-NEXT: waveamdmachine.global_load_lds_b32 {{.*}} [[THEN_M0]]
+// IR-NEXT: waveamdmachine.v_add_u32
 // IR: otherwise
+// IR: waveamdmachine.v_add_u32 [[SHARED]]
 // IR: [[ELSE_M0:%.*]] = waveamdmachine.s_mov_m0
-// IR-NEXT: waveamdmachine.v_add_u32 [[SHARED]]
-// IR-NEXT: waveamdmachine.global_load_lds_b32
+// IR-NEXT: waveamdmachine.s_cmp_eq_u32
+// IR-NEXT: waveamdmachine.global_load_lds_b32 {{.*}} [[ELSE_M0]]
+// IR-NEXT: waveamdmachine.v_add_u32
 // IR-LABEL: func.func @boundary_touching_ranges
 // IR: [[RIGHT_FIRST:%.*]] = waveamdmachine.v_add_u32
 // IR: [[RIGHT_MIDDLE:%.*]] = waveamdmachine.v_xor_b32
@@ -22,19 +26,19 @@
 // IR: [[LEFT_MIDDLE:%.*]] = waveamdmachine.v_xor_b32
 // IR: waveamdmachine.v_add_u32 [[LEFT_FIRST]], [[LEFT_MIDDLE]]
 
-// Seven states x four in-range members per arm.
+// Seven states x thirteen in-range members per arm.
 // REPORT-LABEL: waveamd-machine-schedule-report candidate func=disjoint_branch_pressure region=1 name=greedy
-// REPORT-SAME: order=0,4,1,2,3,5,6
-// REPORT-SAME: pressure_state_builds=7 pressure_member_visits=28
+// REPORT-SAME: order=4,0,3,1,2,5,6
+// REPORT-SAME: pressure_state_builds=7 pressure_member_visits=91
 // REPORT-LABEL: waveamd-machine-schedule-report candidate func=disjoint_branch_pressure region=2 name=greedy
-// REPORT-SAME: order=0,4,1,2,3,5,6
-// REPORT-SAME: pressure_state_builds=7 pressure_member_visits=28
+// REPORT-SAME: order=4,0,3,1,2,5,6
+// REPORT-SAME: pressure_state_builds=7 pressure_member_visits=91
 // REPORT-LABEL: waveamd-machine-schedule-report candidate func=boundary_touching_ranges region=0 name=greedy
 // REPORT-SAME: order=0,1,2
-// REPORT-SAME: pressure_state_builds=3 pressure_member_visits=9
+// REPORT-SAME: pressure_state_builds=3 pressure_member_visits=18
 // REPORT-LABEL: waveamd-machine-schedule-report candidate func=left_boundary_touching_range region=1 name=greedy
 // REPORT-SAME: order=0,1,2
-// REPORT-SAME: pressure_state_builds=3 pressure_member_visits=12
+// REPORT-SAME: pressure_state_builds=3 pressure_member_visits=18
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @disjoint_branch_pressure(

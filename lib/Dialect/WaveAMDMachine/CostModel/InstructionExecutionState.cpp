@@ -15,7 +15,9 @@
 #include "mlir/Dialect/WaveAMDMachine/CostModel/MemoryCounterTiming.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
+#include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -27,6 +29,7 @@
 #include <array>
 #include <cassert>
 #include <limits>
+#include <optional>
 #include <utility>
 
 namespace mlir::waveamdmachine {
@@ -109,6 +112,61 @@ unsigned getTargetWaveCount(Operation *context) {
   return 1;
 }
 
+static std::optional<uint64_t> flattenWorkgroupShape(DenseI32ArrayAttr shape) {
+  if (shape.empty() || shape.size() > 3)
+    return std::nullopt;
+  uint64_t flat = 1;
+  for (int32_t dim : shape.asArrayRef()) {
+    if (dim <= 0 || flat > std::numeric_limits<uint64_t>::max() /
+                               static_cast<uint64_t>(dim))
+      return std::nullopt;
+    flat *= static_cast<uint64_t>(dim);
+  }
+  return flat;
+}
+
+static std::optional<unsigned> getWorkgroupWaveCount(Operation *context) {
+  std::optional<uint64_t> flatWorkgroupSize;
+  std::optional<unsigned> explicitWaves;
+  for (Operation *op = context; op; op = op->getParentOp()) {
+    for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+      DenseI32ArrayAttr shape = op->getAttrOfType<DenseI32ArrayAttr>(name);
+      if (!shape)
+        continue;
+      std::optional<uint64_t> candidate = flattenWorkgroupShape(shape);
+      if (!candidate || (flatWorkgroupSize && *flatWorkgroupSize != *candidate))
+        return std::nullopt;
+      flatWorkgroupSize = candidate;
+    }
+
+    IntegerAttr waves =
+        op->getAttrOfType<IntegerAttr>("wave.waves_per_workgroup");
+    if (!waves)
+      continue;
+    if (waves.getInt() <= 0)
+      return std::nullopt;
+    unsigned candidate = static_cast<unsigned>(
+        waves.getValue().getLimitedValue(std::numeric_limits<unsigned>::max()));
+    if (explicitWaves && *explicitWaves != candidate)
+      return std::nullopt;
+    explicitWaves = candidate;
+  }
+
+  if (!flatWorkgroupSize)
+    return explicitWaves;
+  FailureOr<unsigned> wavefront = getAMDGPUWavefrontSize(
+      context, "waveamd-machine-instruction-schedule-model");
+  if (failed(wavefront) || *wavefront == 0)
+    return std::nullopt;
+  uint64_t derivedWaves = llvm::divideCeil(*flatWorkgroupSize, *wavefront);
+  if (derivedWaves > std::numeric_limits<unsigned>::max())
+    return std::nullopt;
+  unsigned result = static_cast<unsigned>(derivedWaves);
+  if (explicitWaves && *explicitWaves != result)
+    return std::nullopt;
+  return explicitWaves.value_or(result);
+}
+
 void configureInstructionScheduleModel(
     InstructionExecutionConfig &config, const ArchData &arch,
     Operation *context, ReadyRegisterPressureLimits pressureLimits) {
@@ -116,8 +174,11 @@ void configureInstructionScheduleModel(
   config.ldsDmaIssueWaveStreams =
       std::min(targetWaveCount, static_cast<unsigned>(arch.wavesPerSIMD));
   config.scheduleModel.issueStreams = config.ldsDmaIssueWaveStreams;
+  config.scheduleModel.readyPressureWaveCohort =
+      getWorkgroupWaveCount(context).value_or(
+          config.scheduleModel.issueStreams);
   config.scheduleModel.enableCoexecWindow =
-      config.scheduleModel.issueStreams > 1;
+      config.scheduleModel.readyPressureWaveCohort > 1;
   config.scheduleModel.pressureLimits = pressureLimits;
   int64_t issuePeriod = config.issuePeriod > 0
                             ? config.issuePeriod
@@ -642,7 +703,8 @@ static unsigned getReadyRegisterPressureLimit(unsigned limit,
                                               unsigned allocGranule) {
   if (allocGranule == 0)
     return limit;
-  return limit > allocGranule ? limit - allocGranule : 0;
+  unsigned alignedLimit = limit - limit % allocGranule;
+  return alignedLimit > allocGranule ? alignedLimit - allocGranule : 0;
 }
 
 static unsigned getReadyRegisterPressureCeiling(unsigned limit,
@@ -660,21 +722,22 @@ static bool canUseReadyCandidate(ReadyRegisterPressure current,
       limits.vgpr, limits.vgprAllocGranule, candidate.pressureCeiling.vgpr);
   unsigned agprLimit = getReadyRegisterPressureCeiling(
       limits.agpr, limits.agprAllocGranule, candidate.pressureCeiling.agpr);
-  if (!canUseReadyRegisterClass(current.sgpr, candidate.pressureDelta.sgpr,
+  if (!canUseReadyRegisterClass(current.sgpr, candidate.pressurePeakDelta.sgpr,
                                 sgprLimit))
     return false;
+  if (!canUseReadyRegisterClass(current.vgpr, candidate.pressurePeakDelta.vgpr,
+                                vgprLimit) ||
+      !canUseReadyRegisterClass(current.agpr, candidate.pressurePeakDelta.agpr,
+                                agprLimit))
+    return false;
   if (limits.vgprFamily == 0)
-    return canUseReadyRegisterClass(current.vgpr, candidate.pressureDelta.vgpr,
-                                    vgprLimit) &&
-           canUseReadyRegisterClass(current.agpr, candidate.pressureDelta.agpr,
-                                    agprLimit);
+    return true;
   unsigned familyGranule =
       std::max(limits.vgprAllocGranule, limits.agprAllocGranule);
   unsigned familyLimit = getReadyRegisterPressureCeiling(
       limits.vgprFamily, familyGranule, candidate.pressureCeiling.vgprFamily);
-  return canUseReadyRegisterClass(
-      current.vgpr + current.agpr,
-      candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr, familyLimit);
+  return canUseReadyRegisterClass(current.vgpr + current.agpr,
+                                  candidate.vgprFamilyPeakDelta, familyLimit);
 }
 
 bool InstructionScheduleModel::shouldSelectResourceStallFiller(
@@ -742,16 +805,19 @@ InstructionScheduleModel::classifyReadyResourceCandidate(
 
 struct ReadyRegisterPressureScore {
   uint64_t maximum = 0;
+  uint64_t total = 0;
 };
+
+static constexpr uint64_t kReadyPressureScoreScale = uint64_t{1} << 20;
 
 static void addReadyRegisterPressureScore(int64_t pressure, unsigned limit,
                                           ReadyRegisterPressureScore &score) {
   if (limit == 0)
     return;
-  constexpr uint64_t scale = uint64_t{1} << 20;
   uint64_t used = static_cast<uint64_t>(std::max<int64_t>(pressure, 0));
-  uint64_t normalized = used * scale / limit;
+  uint64_t normalized = used * kReadyPressureScoreScale / limit;
   score.maximum = std::max(score.maximum, normalized);
+  score.total += normalized;
 }
 
 static ReadyRegisterPressureScore
@@ -761,6 +827,10 @@ getReadyRegisterPressureScore(ReadyRegisterPressure current,
   ReadyRegisterPressureScore score;
   unsigned sgprLimit = getReadyRegisterPressureCeiling(
       limits.sgpr, limits.sgprAllocGranule, candidate.pressureCeiling.sgpr);
+  unsigned vgprLimit = getReadyRegisterPressureCeiling(
+      limits.vgpr, limits.vgprAllocGranule, candidate.pressureCeiling.vgpr);
+  unsigned agprLimit = getReadyRegisterPressureCeiling(
+      limits.agpr, limits.agprAllocGranule, candidate.pressureCeiling.agpr);
   addReadyRegisterPressureScore(current.sgpr + candidate.pressureDelta.sgpr,
                                 sgprLimit, score);
   if (limits.vgprFamily != 0) {
@@ -772,84 +842,281 @@ getReadyRegisterPressureScore(ReadyRegisterPressure current,
                                       candidate.pressureDelta.vgpr +
                                       candidate.pressureDelta.agpr,
                                   familyLimit, score);
-  } else {
-    unsigned vgprLimit = getReadyRegisterPressureCeiling(
-        limits.vgpr, limits.vgprAllocGranule, candidate.pressureCeiling.vgpr);
-    unsigned agprLimit = getReadyRegisterPressureCeiling(
-        limits.agpr, limits.agprAllocGranule, candidate.pressureCeiling.agpr);
-    addReadyRegisterPressureScore(current.vgpr + candidate.pressureDelta.vgpr,
-                                  vgprLimit, score);
-    addReadyRegisterPressureScore(current.agpr + candidate.pressureDelta.agpr,
-                                  agprLimit, score);
+    if (vgprLimit < familyLimit)
+      addReadyRegisterPressureScore(current.vgpr + candidate.pressureDelta.vgpr,
+                                    vgprLimit, score);
+    if (agprLimit < familyLimit)
+      addReadyRegisterPressureScore(current.agpr + candidate.pressureDelta.agpr,
+                                    agprLimit, score);
+    return score;
   }
+  addReadyRegisterPressureScore(current.vgpr + candidate.pressureDelta.vgpr,
+                                vgprLimit, score);
+  addReadyRegisterPressureScore(current.agpr + candidate.pressureDelta.agpr,
+                                agprLimit, score);
   return score;
 }
 
-static ReadyCandidateMetrics
-reserveReadyCandidatePressure(const ReadyCandidateMetrics &candidate,
-                              const ReadyCandidateMetrics &baseline) {
-  ReadyCandidateMetrics reserved = candidate;
-  reserved.pressureDelta.sgpr +=
-      std::max<int64_t>(0, baseline.pressureDelta.sgpr);
-  reserved.pressureDelta.vgpr +=
-      std::max<int64_t>(0, baseline.pressureDelta.vgpr);
-  reserved.pressureDelta.agpr +=
-      std::max<int64_t>(0, baseline.pressureDelta.agpr);
-  return reserved;
+static bool improvesOverBudgetReadyRegisterClass(int64_t current,
+                                                 int64_t candidateDelta,
+                                                 int64_t selectedDelta,
+                                                 unsigned limit,
+                                                 unsigned allocGranule) {
+  if (limit == 0)
+    return false;
+  int64_t selectedPressure = current + selectedDelta;
+  return candidateDelta < 0 &&
+         selectedPressure > static_cast<int64_t>(getReadyRegisterPressureLimit(
+                                limit, allocGranule)) &&
+         current + candidateDelta < selectedPressure;
+}
+
+static bool
+improvesOverBudgetReadyPressure(ReadyRegisterPressure current,
+                                const ReadyCandidateMetrics &candidate,
+                                const ReadyCandidateMetrics &selected,
+                                const ReadyRegisterPressureLimits &limits) {
+  if (improvesOverBudgetReadyRegisterClass(
+          current.sgpr, candidate.pressureDelta.sgpr,
+          selected.pressureDelta.sgpr, limits.sgpr, limits.sgprAllocGranule))
+    return true;
+  if (improvesOverBudgetReadyRegisterClass(
+          current.vgpr, candidate.pressureDelta.vgpr,
+          selected.pressureDelta.vgpr, limits.vgpr, limits.vgprAllocGranule) ||
+      improvesOverBudgetReadyRegisterClass(
+          current.agpr, candidate.pressureDelta.agpr,
+          selected.pressureDelta.agpr, limits.agpr, limits.agprAllocGranule))
+    return true;
+  if (limits.vgprFamily != 0) {
+    unsigned familyGranule =
+        std::max(limits.vgprAllocGranule, limits.agprAllocGranule);
+    return improvesOverBudgetReadyRegisterClass(
+        current.vgpr + current.agpr,
+        candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr,
+        selected.pressureDelta.vgpr + selected.pressureDelta.agpr,
+        limits.vgprFamily, familyGranule);
+  }
+  return false;
+}
+
+static bool canUseReadyRegisterClassAgainstBaseline(int64_t current,
+                                                    int64_t candidatePeakDelta,
+                                                    int64_t baselinePeakDelta,
+                                                    unsigned limit,
+                                                    unsigned allocGranule) {
+  int64_t candidatePressure = current + candidatePeakDelta;
+  int64_t baselinePressure = current + baselinePeakDelta;
+  int64_t ceiling = std::max<int64_t>(
+      getReadyRegisterPressureLimit(limit, allocGranule), baselinePressure);
+  return candidatePressure <= ceiling;
+}
+
+static bool canUseReadyRegisterClassAgainstOriginalCeiling(
+    int64_t current, int64_t candidatePeakDelta, int64_t baselinePeakDelta,
+    unsigned originalCeiling, unsigned limit, unsigned allocGranule) {
+  int64_t candidatePressure = current + candidatePeakDelta;
+  int64_t baselinePressure = current + baselinePeakDelta;
+  int64_t ceiling = std::max<int64_t>(
+      std::max(getReadyRegisterPressureLimit(limit, allocGranule),
+               originalCeiling),
+      baselinePressure);
+  return candidatePressure <= ceiling;
+}
+
+static bool
+canUseReadyCandidateAgainstBaseline(ReadyRegisterPressure current,
+                                    const ReadyCandidateMetrics &candidate,
+                                    const ReadyCandidateMetrics &baseline,
+                                    const ReadyRegisterPressureLimits &limits) {
+  if (!canUseReadyRegisterClassAgainstBaseline(
+          current.sgpr, candidate.pressurePeakDelta.sgpr,
+          baseline.pressurePeakDelta.sgpr, limits.sgpr,
+          limits.sgprAllocGranule))
+    return false;
+  if (!canUseReadyRegisterClassAgainstBaseline(
+          current.vgpr, candidate.pressurePeakDelta.vgpr,
+          baseline.pressurePeakDelta.vgpr, limits.vgpr,
+          limits.vgprAllocGranule) ||
+      !canUseReadyRegisterClassAgainstBaseline(
+          current.agpr, candidate.pressurePeakDelta.agpr,
+          baseline.pressurePeakDelta.agpr, limits.agpr,
+          limits.agprAllocGranule))
+    return false;
+  if (limits.vgprFamily != 0) {
+    unsigned familyGranule =
+        std::max(limits.vgprAllocGranule, limits.agprAllocGranule);
+    return canUseReadyRegisterClassAgainstBaseline(
+        current.vgpr + current.agpr, candidate.vgprFamilyPeakDelta,
+        baseline.vgprFamilyPeakDelta, limits.vgprFamily, familyGranule);
+  }
+  return true;
+}
+
+static bool canUseReadySGPRCandidateOrder(
+    ReadyRegisterPressure current,
+    const ReadyCandidateMetrics &candidateThenBaseline,
+    const ReadyCandidateMetrics &baselineThenCandidate,
+    const ReadyCandidateMetrics &baseline, unsigned limit) {
+  if (!canUseReadyRegisterClassAgainstBaseline(
+          current.sgpr, candidateThenBaseline.pressurePeakDelta.sgpr,
+          baselineThenCandidate.pressurePeakDelta.sgpr, limit, 0))
+    return false;
+  return candidateThenBaseline.autoDrainedNodes <= baseline.autoDrainedNodes ||
+         canUseReadyRegisterClassAgainstBaseline(
+             current.sgpr, candidateThenBaseline.pressurePeakDelta.sgpr,
+             baseline.pressurePeakDelta.sgpr, limit, 0);
+}
+
+static bool raisesOverBudgetReadyRegisterClass(unsigned pressureCeiling,
+                                               int64_t peakDelta,
+                                               unsigned limit,
+                                               unsigned allocGranule) {
+  return pressureCeiling > getReadyRegisterPressureLimit(limit, allocGranule) &&
+         peakDelta > 0;
 }
 
 bool InstructionScheduleModel::shouldPreferReadyPressure(
     ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &candidateThenSelected,
+    const ReadyCandidateMetrics &selectedThenCandidate,
     const ReadyCandidateMetrics &selected) const {
-  if (issueStreams <= 1)
-    return false;
-  ReadyCandidateMetrics reserved =
-      reserveReadyCandidatePressure(candidate, selected);
+  // Pressure ordering protects the target issue-stream occupancy contract.
+  // The workgroup cohort remains the policy for filler balancing below.
+  if (issueStreams <= 1) {
+    int64_t selectedPeak = current.sgpr + selected.pressurePeakDelta.sgpr;
+    if (pressureLimits.sgpr == 0 ||
+        selectedPeak <= static_cast<int64_t>(pressureLimits.sgpr) ||
+        !canUseReadySGPRCandidateOrder(current, candidateThenSelected,
+                                       selectedThenCandidate, selected,
+                                       pressureLimits.sgpr))
+      return false;
+    if (candidate.pressurePeakDelta.sgpr != selected.pressurePeakDelta.sgpr)
+      return candidate.pressurePeakDelta.sgpr < selected.pressurePeakDelta.sgpr;
+    return candidate.pressureDelta.sgpr < selected.pressureDelta.sgpr;
+  }
+  ReadyCandidateMetrics reserved = candidate;
+  reserved.pressureDelta.sgpr +=
+      std::max<int64_t>(0, selected.pressureDelta.sgpr);
+  reserved.pressureDelta.vgpr +=
+      std::max<int64_t>(0, selected.pressureDelta.vgpr);
+  reserved.pressureDelta.agpr +=
+      std::max<int64_t>(0, selected.pressureDelta.agpr);
+  reserved.pressurePeakDelta.sgpr =
+      std::max(candidate.pressurePeakDelta.sgpr,
+               candidate.pressureDelta.sgpr + selected.pressurePeakDelta.sgpr);
+  reserved.pressurePeakDelta.vgpr =
+      std::max(candidate.pressurePeakDelta.vgpr,
+               candidate.pressureDelta.vgpr + selected.pressurePeakDelta.vgpr);
+  reserved.pressurePeakDelta.agpr =
+      std::max(candidate.pressurePeakDelta.agpr,
+               candidate.pressureDelta.agpr + selected.pressurePeakDelta.agpr);
+  int64_t candidateFinalFamily =
+      candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr;
+  reserved.vgprFamilyPeakDelta =
+      std::max(candidate.vgprFamilyPeakDelta,
+               candidateFinalFamily + selected.vgprFamilyPeakDelta);
   bool candidateFits = canUseReadyCandidate(current, reserved, pressureLimits);
   bool selectedFits = canUseReadyCandidate(current, selected, pressureLimits);
   if (candidateFits != selectedFits)
     return candidateFits;
-  if (candidateFits)
-    return false;
   ReadyRegisterPressureScore candidatePressure =
       getReadyRegisterPressureScore(current, reserved, pressureLimits);
   ReadyRegisterPressureScore selectedPressure =
       getReadyRegisterPressureScore(current, selected, pressureLimits);
-  return candidatePressure.maximum < selectedPressure.maximum;
+  if (candidateFits && selectedFits &&
+      improvesOverBudgetReadyPressure(current, candidate, selected,
+                                      pressureLimits)) {
+    uint64_t candidateBalance = candidatePressure.total;
+    uint64_t selectedBalance = selectedPressure.total;
+    unsigned sgprLimit = getReadyRegisterPressureLimit(
+        pressureLimits.sgpr, pressureLimits.sgprAllocGranule);
+    if (current.sgpr > static_cast<int64_t>(sgprLimit)) {
+      candidateBalance += candidatePressure.maximum;
+      selectedBalance += selectedPressure.maximum;
+    }
+    if (candidateBalance != selectedBalance)
+      return candidateBalance < selectedBalance;
+  }
+  if (candidatePressure.maximum != selectedPressure.maximum)
+    return candidatePressure.maximum < selectedPressure.maximum;
+  return false;
 }
 
 bool InstructionScheduleModel::canSelectReadyCandidate(
-    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    ReadyRegisterPressure current,
+    const ReadyCandidateMetrics &candidateThenBaseline,
     const ReadyCandidateMetrics &baseline) const {
+  // Admission protects the target occupancy contract. The workgroup cohort
+  // still controls how admitted candidates are ranked and balanced below.
   if (issueStreams <= 1)
+    return canUseReadyRegisterClassAgainstBaseline(
+        current.sgpr, candidateThenBaseline.pressurePeakDelta.sgpr,
+        baseline.pressurePeakDelta.sgpr, pressureLimits.sgpr, 0);
+  bool fits =
+      canUseReadyCandidate(current, candidateThenBaseline, pressureLimits);
+  if (!fits)
+    return fits;
+  return canUseReadyCandidateAgainstBaseline(current, candidateThenBaseline,
+                                             baseline, pressureLimits);
+}
+
+bool InstructionScheduleModel::canSelectReadyFullPrefix(
+    ReadyRegisterPressure current,
+    const ReadyCandidateMetrics &candidateThenBaseline,
+    const ReadyCandidateMetrics &baseline) const {
+  if (!canUseReadyRegisterClassAgainstOriginalCeiling(
+          current.sgpr, candidateThenBaseline.pressurePeakDelta.sgpr,
+          baseline.pressurePeakDelta.sgpr,
+          candidateThenBaseline.pressureCeiling.sgpr, pressureLimits.sgpr,
+          pressureLimits.sgprAllocGranule))
+    return false;
+  if (!canUseReadyRegisterClassAgainstOriginalCeiling(
+          current.vgpr, candidateThenBaseline.pressurePeakDelta.vgpr,
+          baseline.pressurePeakDelta.vgpr,
+          candidateThenBaseline.pressureCeiling.vgpr, pressureLimits.vgpr,
+          pressureLimits.vgprAllocGranule) ||
+      !canUseReadyRegisterClassAgainstOriginalCeiling(
+          current.agpr, candidateThenBaseline.pressurePeakDelta.agpr,
+          baseline.pressurePeakDelta.agpr,
+          candidateThenBaseline.pressureCeiling.agpr, pressureLimits.agpr,
+          pressureLimits.agprAllocGranule))
+    return false;
+  if (pressureLimits.vgprFamily == 0)
     return true;
-  ReadyCandidateMetrics reserved =
-      reserveReadyCandidatePressure(candidate, baseline);
-  return canUseReadyCandidate(current, reserved, pressureLimits);
+  unsigned familyGranule = std::max(pressureLimits.vgprAllocGranule,
+                                    pressureLimits.agprAllocGranule);
+  return canUseReadyRegisterClassAgainstOriginalCeiling(
+      current.vgpr + current.agpr, candidateThenBaseline.vgprFamilyPeakDelta,
+      baseline.vgprFamilyPeakDelta,
+      candidateThenBaseline.pressureCeiling.vgprFamily,
+      pressureLimits.vgprFamily, familyGranule);
 }
 
 bool InstructionScheduleModel::canSelectReadyFiller(
     ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &candidateThenBaseline,
     const ReadyCandidateMetrics &baseline) const {
-  if (issueStreams <= 1)
-    return true;
+  if (readyPressureWaveCohort <= 1)
+    return canSelectReadyCandidate(current, candidateThenBaseline, baseline);
+  if (raisesOverBudgetReadyRegisterClass(
+          candidate.pressureCeiling.sgpr, candidate.pressurePeakDelta.sgpr,
+          pressureLimits.sgpr, pressureLimits.sgprAllocGranule))
+    return false;
   if (pressureLimits.vgprFamily != 0) {
     unsigned familyGranule = std::max(pressureLimits.vgprAllocGranule,
                                       pressureLimits.agprAllocGranule);
-    unsigned familyLimit =
-        getReadyRegisterPressureLimit(pressureLimits.vgprFamily, familyGranule);
-    // Above occupancy budget, optional fillers cannot lengthen the family.
-    if (candidate.pressureCeiling.vgprFamily > familyLimit &&
-        candidate.pressureDelta.vgpr + candidate.pressureDelta.agpr > 0)
+    if (raisesOverBudgetReadyRegisterClass(
+            candidate.pressureCeiling.vgprFamily, candidate.vgprFamilyPeakDelta,
+            pressureLimits.vgprFamily, familyGranule))
       return false;
   }
-  return canSelectReadyCandidate(current, candidate, baseline);
+  return canSelectReadyCandidate(current, candidateThenBaseline, baseline);
 }
 
 bool InstructionScheduleModel::shouldPreferReadyFiller(
     ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
     const ReadyCandidateMetrics &selected) const {
-  if (issueStreams <= 1)
+  if (readyPressureWaveCohort <= 1)
     return false;
   if (pressureLimits.vgprFamily != 0) {
     int64_t candidateFamily =
@@ -863,7 +1130,9 @@ bool InstructionScheduleModel::shouldPreferReadyFiller(
       getReadyRegisterPressureScore(current, candidate, pressureLimits);
   ReadyRegisterPressureScore selectedPressure =
       getReadyRegisterPressureScore(current, selected, pressureLimits);
-  return candidatePressure.maximum < selectedPressure.maximum;
+  if (candidatePressure.maximum != selectedPressure.maximum)
+    return candidatePressure.maximum < selectedPressure.maximum;
+  return false;
 }
 
 InstructionResourceCapacities InstructionExecutionState::getResourceCapacities(

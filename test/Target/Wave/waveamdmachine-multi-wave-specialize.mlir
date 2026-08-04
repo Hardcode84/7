@@ -336,11 +336,11 @@ func.func @nested_regions(
   return
 }
 
-// DIAG: waveamd-machine-schedule region func=pressure_fallback
-// DIAG-SAME: action=keep reason=pressure
-// DIAG-NEXT: waveamd-machine-schedule region func=pressure_fallback
+// DIAG: waveamd-machine-schedule region func=pressure_model
 // DIAG-SAME: action=apply reason=loop_wait
-func.func @pressure_fallback(
+// DIAG-NEXT: waveamd-machine-schedule region func=pressure_model
+// DIAG-SAME: action=apply reason=loop_wait
+func.func @pressure_model(
     %addr: !waveamdmachine.reg<vgpr, 1>,
     %off: !waveamdmachine.reg<vgpr, 1>,
     %d0: !waveamdmachine.reg<sgpr, 1>,
