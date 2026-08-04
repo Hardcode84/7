@@ -327,8 +327,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NOT: wave.load
 // CHECK: wave.ptr_cast
 // CHECK: wave.index_expr <"xor(
-// CHECK-SAME: Mod(floor(1/16*item), 2)
 // CHECK-SAME: Mod(floor(1/8*item), 2)
+// CHECK-SAME: Mod(floor(1/16*item), 2)
 // CHECK: wave.ptr_add
 // CHECK: wave.ptr_cast
 // CHECK: waveamd.transpose_load

@@ -1076,11 +1076,11 @@ v9_beyond_hotloop:
 		v_lshl_add_u32 v5, v10, 1, v5
 		v_mul_lo_u32 v5, s12, v5
 		v_lshl_add_u32 v5, v5, 1, s1
-		v_lshlrev_b32_e32 v11, 4, v52
-		v_lshl_add_u32 v12, v2, 2, 32
-		v_lshlrev_b32_e32 v13, 3, v0
-		v_bitop3_b32 v12, v11, v12, v13 bitop3:0x96
-		v_lshl_add_u32 v19, v12, 1, v5
+		v_lshl_add_u32 v11, v2, 2, 32
+		v_lshlrev_b32_e32 v12, 3, v0
+		v_lshlrev_b32_e32 v13, 4, v52
+		v_bitop3_b32 v11, v11, v12, v13 bitop3:0x96
+		v_lshl_add_u32 v19, v11, 1, v5
 		s_and_saveexec_b64 s[54:55], s[40:41]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_7
 		buffer_store_dwordx2 v[92:93], v19, s[16:19], 0 offen
@@ -1090,7 +1090,7 @@ v9_beyond_hotloop:
 .Lv9_beyond_hotloop.exec_endif_7:
 		s_mov_b64 exec, s[54:55]
 		v_lshl_add_u32 v19, v2, 2, 64
-		v_bitop3_b32 v19, v11, v19, v13 bitop3:0x96
+		v_bitop3_b32 v19, v19, v12, v13 bitop3:0x96
 		v_lshl_add_u32 v54, v19, 1, v5
 		s_and_saveexec_b64 s[54:55], s[42:43]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_8
@@ -1102,8 +1102,8 @@ v9_beyond_hotloop:
 		s_mov_b64 exec, s[54:55]
 		v_lshlrev_b32_e32 v54, 2, v2
 		v_add_u32_e32 v54, 0x60, v54
-		v_bitop3_b32 v11, v11, v54, v13 bitop3:0x96
-		v_lshl_add_u32 v5, v11, 1, v5
+		v_bitop3_b32 v12, v54, v12, v13 bitop3:0x96
+		v_lshl_add_u32 v5, v12, 1, v5
 		s_and_saveexec_b64 s[54:55], s[44:45]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_9
 		buffer_store_dwordx2 v[96:97], v5, s[16:19], 0 offen
@@ -1139,7 +1139,7 @@ v9_beyond_hotloop:
 		v_lshl_add_u32 v5, v10, 1, v5
 		v_mul_lo_u32 v5, s12, v5
 		v_lshl_add_u32 v5, v5, 1, s1
-		v_lshl_add_u32 v13, v12, 1, v5
+		v_lshl_add_u32 v13, v11, 1, v5
 		s_and_saveexec_b64 s[54:55], s[48:49]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_11
 		buffer_store_dwordx2 v[100:101], v13, s[16:19], 0 offen
@@ -1157,7 +1157,7 @@ v9_beyond_hotloop:
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_endif_12
 .Lv9_beyond_hotloop.exec_endif_12:
 		s_mov_b64 exec, s[54:55]
-		v_lshl_add_u32 v5, v11, 1, v5
+		v_lshl_add_u32 v5, v12, 1, v5
 		s_and_saveexec_b64 s[54:55], s[52:53]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_13
 		buffer_store_dwordx2 v[104:105], v5, s[16:19], 0 offen
@@ -1193,7 +1193,7 @@ v9_beyond_hotloop:
 		v_lshl_add_u32 v1, v10, 1, v1
 		v_mul_lo_u32 v1, s12, v1
 		v_lshl_add_u32 v1, v1, 1, s1
-		v_lshl_add_u32 v3, v12, 1, v1
+		v_lshl_add_u32 v3, v11, 1, v1
 		s_and_saveexec_b64 s[54:55], s[22:23]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_15
 		buffer_store_dwordx2 v[108:109], v3, s[16:19], 0 offen
@@ -1211,7 +1211,7 @@ v9_beyond_hotloop:
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_endif_16
 .Lv9_beyond_hotloop.exec_endif_16:
 		s_mov_b64 exec, s[54:55]
-		v_lshl_add_u32 v1, v11, 1, v1
+		v_lshl_add_u32 v1, v12, 1, v1
 		s_and_saveexec_b64 s[54:55], s[26:27]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_17
 		buffer_store_dwordx2 v[112:113], v1, s[16:19], 0 offen

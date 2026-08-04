@@ -79,7 +79,7 @@ private:
   const ixs_node *node = nullptr;
 };
 
-enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod, Xor, Max, Min };
+enum class ExprBinaryOp { Add, Sub, Mul, Div, Mod, Xor, And, Or, Max, Min };
 enum class PredCmpOp { Lt, Le, Gt, Ge, Eq, Ne };
 
 enum class ExprKind {
@@ -96,6 +96,8 @@ enum class ExprKind {
   Max,
   Min,
   Xor,
+  And,
+  Or,
   Error,
   ParseError,
 };
@@ -161,6 +163,8 @@ public:
   ExprHandle getUnaryArg() const;
   ExprHandle getBinaryLhs() const;
   ExprHandle getBinaryRhs() const;
+  uint32_t getAssocArgCount() const;
+  ExprHandle getAssocArg(uint32_t index) const;
   uint32_t getPiecewiseCaseCount() const;
   PiecewiseCase getPiecewiseCase(uint32_t index) const;
 

@@ -300,11 +300,11 @@ tlx_addmm_glu_kernel_persistent:
 		v_add_u32_e32 v58, s36, v15
 		s_mul_i32 s21, 0x4200, s21
 		v_add_u32_e32 v59, s21, v54
-		v_lshlrev_b32_e32 v13, 3, v13
-		v_lshlrev_b32_e32 v50, 2, v50
 		v_lshlrev_b32_e32 v49, 1, v49
-		v_xor_b32_e32 v49, v0, v49
-		v_bitop3_b32 v13, v13, v50, v49 bitop3:0x96
+		v_lshlrev_b32_e32 v50, 2, v50
+		v_lshlrev_b32_e32 v13, 3, v13
+		v_xor_b32_e32 v13, v50, v13
+		v_bitop3_b32 v13, v0, v49, v13 bitop3:0x96
 		v_lshlrev_b32_e32 v49, 4, v13
 		v_add_u32_e32 v49, 0x10000, v49
 		v_xor_b32_e32 v13, 1, v13
@@ -316,21 +316,21 @@ tlx_addmm_glu_kernel_persistent:
 		v_lshrrev_b32_e32 v53, 3, v52
 		v_and_b32_e32 v53, 1, v53
 		v_lshl_add_u32 v50, v53, 13, v50
+		v_lshrrev_b32_e32 v60, 5, v52
+		v_lshl_add_u32 v11, v11, 1, v60
 		v_lshrrev_b32_e32 v60, 2, v52
 		v_and_b32_e32 v60, 1, v60
-		v_lshlrev_b32_e32 v61, 3, v60
-		v_lshrrev_b32_e32 v62, 1, v52
-		v_and_b32_e32 v62, 1, v62
-		v_lshlrev_b32_e32 v63, 2, v62
-		v_lshrrev_b32_e32 v64, 5, v52
-		v_lshl_add_u32 v11, v11, 1, v64
 		v_lshl_add_u32 v11, v60, 7, v11
-		v_lshl_add_u32 v11, v62, 6, v11
+		v_lshrrev_b32_e32 v61, 1, v52
+		v_and_b32_e32 v61, 1, v61
+		v_lshl_add_u32 v11, v61, 6, v11
 		v_and_b32_e32 v52, 1, v52
 		v_lshl_add_u32 v11, v52, 5, v11
 		v_lshlrev_b32_e32 v52, 1, v52
-		v_bitop3_b32 v11, v63, v11, v52 bitop3:0x96
-		v_bitop3_b32 v11, v53, v61, v11 bitop3:0x96
+		v_lshlrev_b32_e32 v61, 2, v61
+		v_lshlrev_b32_e32 v60, 3, v60
+		v_bitop3_b32 v53, v61, v60, v53 bitop3:0x96
+		v_bitop3_b32 v11, v11, v52, v53 bitop3:0x96
 		v_lshl_add_u32 v11, v11, 4, v50
 		v_mul_lo_u32 v8, s19, v8
 		v_lshlrev_b32_e32 v8, 1, v8

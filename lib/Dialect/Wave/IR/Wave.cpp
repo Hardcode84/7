@@ -4206,13 +4206,14 @@ static std::optional<int64_t> getIndexExprModDenominator(sym::ExprView view) {
   return getIndexExprStaticDenominator(view.getBinaryLhs());
 }
 
-static std::optional<int64_t> getIndexExprXorDenominator(sym::ExprView view) {
-  std::optional<int64_t> lhs =
-      getIndexExprStaticDenominator(view.getBinaryLhs());
-  std::optional<int64_t> rhs =
-      getIndexExprStaticDenominator(view.getBinaryRhs());
-  if (!lhs || !rhs || *lhs != 1 || *rhs != 1)
-    return std::nullopt;
+static std::optional<int64_t>
+getIndexExprBitwiseDenominator(sym::ExprView view) {
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount())) {
+    std::optional<int64_t> denominator =
+        getIndexExprStaticDenominator(view.getAssocArg(i));
+    if (!denominator || *denominator != 1)
+      return std::nullopt;
+  }
   return 1;
 }
 
@@ -4226,7 +4227,9 @@ getIndexExprCompoundDenominator(sym::ExprView view) {
   case sym::ExprKind::Mod:
     return getIndexExprModDenominator(view);
   case sym::ExprKind::Xor:
-    return getIndexExprXorDenominator(view);
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return getIndexExprBitwiseDenominator(view);
   default:
     return std::nullopt;
   }
@@ -4362,15 +4365,14 @@ getModIndexExprMaterializationCost(sym::ExprView view, bool rationalAllowed) {
 }
 
 static std::optional<uint64_t>
-getXorIndexExprMaterializationCost(sym::ExprView view) {
+getBitwiseIndexExprMaterializationCost(sym::ExprView view) {
   uint64_t cost = 0;
-  std::optional<uint64_t> lhs =
-      getIndexExprMaterializationCostImpl(view.getBinaryLhs(), false);
-  std::optional<uint64_t> rhs =
-      getIndexExprMaterializationCostImpl(view.getBinaryRhs(), false);
-  if (!lhs || !rhs || !addIndexExprMaterializationCost(*lhs, cost) ||
-      !addIndexExprMaterializationCost(*rhs, cost) ||
-      !addIndexExprMaterializationCost(1, cost))
+  uint32_t argCount = view.getAssocArgCount();
+  for (uint32_t i : llvm::seq<uint32_t>(0, argCount))
+    if (!appendIndexExprNodeMaterializationCost(view.getAssocArg(i), false,
+                                                cost))
+      return std::nullopt;
+  if (!appendIndexExprOperatorCost(argCount, cost))
     return std::nullopt;
   return cost;
 }
@@ -4389,7 +4391,9 @@ getCompoundIndexExprMaterializationCost(sym::ExprView view,
   case sym::ExprKind::Mod:
     return getModIndexExprMaterializationCost(view, rationalAllowed);
   case sym::ExprKind::Xor:
-    return getXorIndexExprMaterializationCost(view);
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return getBitwiseIndexExprMaterializationCost(view);
   default:
     return std::nullopt;
   }

@@ -191,6 +191,15 @@ piecewiseMaterializationKind(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return kind;
 }
 
+static TermKind assocMaterializationKind(WaveAMDMachineSelector &S,
+                                         sym::ExprView view,
+                                         const llvm::StringMap<Value> &subs) {
+  TermKind kind = TermKind::Const;
+  for (uint32_t i = 0, e = view.getAssocArgCount(); i != e; ++i)
+    kind = std::max(kind, materializationKind(S, view.getAssocArg(i), subs));
+  return kind;
+}
+
 static TermKind compoundMaterializationKind(WaveAMDMachineSelector &S,
                                             sym::ExprHandle expr,
                                             const llvm::StringMap<Value> &subs,
@@ -204,9 +213,12 @@ static TermKind compoundMaterializationKind(WaveAMDMachineSelector &S,
   case sym::ExprKind::Ceil:
     return materializationKind(S, view.getUnaryArg(), subs);
   case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
     return std::max(materializationKind(S, view.getBinaryLhs(), subs),
                     materializationKind(S, view.getBinaryRhs(), subs));
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return assocMaterializationKind(S, view, subs);
   case sym::ExprKind::Piecewise:
     return piecewiseMaterializationKind(S, expr, subs);
   default:
@@ -305,6 +317,16 @@ piecewiseMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
 }
 
 static unsigned
+assocMaterializationLoopDepth(sym::ExprView view, Operation *user,
+                              const llvm::StringMap<Value> &subs) {
+  unsigned depth = 0;
+  for (uint32_t i = 0, e = view.getAssocArgCount(); i != e; ++i)
+    depth = std::max(depth,
+                     materializationLoopDepth(view.getAssocArg(i), user, subs));
+  return depth;
+}
+
+static unsigned
 compoundMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
                                  const llvm::StringMap<Value> &subs,
                                  sym::ExprView view) {
@@ -317,9 +339,12 @@ compoundMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
   case sym::ExprKind::Ceil:
     return materializationLoopDepth(view.getUnaryArg(), user, subs);
   case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
     return std::max(materializationLoopDepth(view.getBinaryLhs(), user, subs),
                     materializationLoopDepth(view.getBinaryRhs(), user, subs));
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return assocMaterializationLoopDepth(view, user, subs);
   case sym::ExprKind::Piecewise:
     return piecewiseMaterializationLoopDepth(expr, user, subs);
   default:
@@ -791,55 +816,124 @@ FailureOr<Value> materializeMod(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   return materializeStaticMod(S, user, *lhsValue, *rhsInt);
 }
 
-std::optional<Value> foldXorImmediates(WaveAMDMachineSelector &S, Location loc,
-                                       Value lhs, Value rhs) {
+static int64_t applyBitwise(sym::ExprKind kind, int64_t lhs, int64_t rhs) {
+  switch (kind) {
+  case sym::ExprKind::Xor:
+    return lhs ^ rhs;
+  case sym::ExprKind::And:
+    return lhs & rhs;
+  case sym::ExprKind::Or:
+    return lhs | rhs;
+  default:
+    llvm_unreachable("expected bitwise expression");
+  }
+}
+
+static sym::ExprBinaryOp getBitwiseBinaryOp(sym::ExprKind kind) {
+  switch (kind) {
+  case sym::ExprKind::Xor:
+    return sym::ExprBinaryOp::Xor;
+  case sym::ExprKind::And:
+    return sym::ExprBinaryOp::And;
+  case sym::ExprKind::Or:
+    return sym::ExprBinaryOp::Or;
+  default:
+    llvm_unreachable("expected bitwise expression");
+  }
+}
+
+static std::optional<Value> foldBitwiseImmediates(WaveAMDMachineSelector &S,
+                                                  Location loc,
+                                                  sym::ExprKind kind, Value lhs,
+                                                  Value rhs) {
   std::optional<int64_t> lhsImm = S.getImmediateValue(lhs);
   std::optional<int64_t> rhsImm = S.getImmediateValue(rhs);
   if (lhsImm && rhsImm)
-    return createImm(S.builder, loc, *lhsImm ^ *rhsImm);
-  if (lhsImm && *lhsImm == 0)
+    return createImm(S.builder, loc, applyBitwise(kind, *lhsImm, *rhsImm));
+  int64_t identity = kind == sym::ExprKind::And ? -1 : 0;
+  if (lhsImm && *lhsImm == identity)
     return rhs;
-  if (rhsImm && *rhsImm == 0)
+  if (rhsImm && *rhsImm == identity)
     return lhs;
   return std::nullopt;
 }
 
-Value materializeUniformXor(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                            Value rhs) {
-  return waveamdmachine::SXorB32Op::create(
-             S.builder, loc,
-             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
-             getSCCType(S.builder.getContext()), lhs, rhs)
-      .getResult();
+static Value materializeUniformBitwise(WaveAMDMachineSelector &S, Location loc,
+                                       sym::ExprKind kind, Value lhs,
+                                       Value rhs) {
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR);
+  Type sccType = getSCCType(S.builder.getContext());
+  switch (kind) {
+  case sym::ExprKind::Xor:
+    return waveamdmachine::SXorB32Op::create(S.builder, loc, resultType,
+                                             sccType, lhs, rhs)
+        .getResult();
+  case sym::ExprKind::And:
+    return waveamdmachine::SAndB32Op::create(S.builder, loc, resultType,
+                                             sccType, lhs, rhs)
+        .getResult();
+  case sym::ExprKind::Or:
+    return waveamdmachine::SOrB32Op::create(S.builder, loc, resultType, sccType,
+                                            lhs, rhs)
+        .getResult();
+  default:
+    llvm_unreachable("expected bitwise expression");
+  }
 }
 
-Value materializeLaneXor(WaveAMDMachineSelector &S, Location loc, Value lhs,
-                         Value rhs) {
-  return waveamdmachine::VXorB32Op::create(
-             S.builder, loc,
-             getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-             lhs, rhs)
-      .getResult();
+static Value materializeLaneBitwise(WaveAMDMachineSelector &S, Location loc,
+                                    sym::ExprKind kind, Value lhs, Value rhs) {
+  Type resultType =
+      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR);
+  switch (kind) {
+  case sym::ExprKind::Xor:
+    return waveamdmachine::VXorB32Op::create(S.builder, loc, resultType, lhs,
+                                             rhs)
+        .getResult();
+  case sym::ExprKind::And:
+    return waveamdmachine::VAndB32Op::create(S.builder, loc, resultType, lhs,
+                                             rhs);
+  case sym::ExprKind::Or:
+    return waveamdmachine::VOrB32Op::create(S.builder, loc, resultType, lhs,
+                                            rhs);
+  default:
+    llvm_unreachable("expected bitwise expression");
+  }
 }
 
-FailureOr<Value> materializeXor(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                                Operation *user,
-                                const llvm::StringMap<Value> &subs,
-                                ArrayRef<sym::PredHandle> assumptions,
-                                IndexExprAddOrder addOrder) {
+static Value materializeBitwisePair(WaveAMDMachineSelector &S, Location loc,
+                                    sym::ExprKind kind, Value lhs, Value rhs) {
+  if (std::optional<Value> folded =
+          foldBitwiseImmediates(S, loc, kind, lhs, rhs))
+    return *folded;
+  if (S.isUniformValue(lhs) && S.isUniformValue(rhs))
+    return materializeUniformBitwise(S, loc, kind, lhs, rhs);
+  return materializeLaneBitwise(S, loc, kind, lhs, rhs);
+}
+
+static FailureOr<Value>
+materializeBitwise(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                   Operation *user, const llvm::StringMap<Value> &subs,
+                   ArrayRef<sym::PredHandle> assumptions,
+                   IndexExprAddOrder addOrder) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
-  FailureOr<Value> lhs = materializeIndexExprNode(S, view.getBinaryLhs(), user,
-                                                  subs, assumptions, addOrder);
-  FailureOr<Value> rhs = materializeIndexExprNode(S, view.getBinaryRhs(), user,
-                                                  subs, assumptions, addOrder);
-  if (failed(lhs) || failed(rhs))
-    return failure();
-  if (std::optional<Value> folded = foldXorImmediates(S, loc, *lhs, *rhs))
-    return *folded;
-  if (S.isUniformValue(*lhs) && S.isUniformValue(*rhs))
-    return materializeUniformXor(S, loc, *lhs, *rhs);
-  return materializeLaneXor(S, loc, *lhs, *rhs);
+  uint32_t count = view.getAssocArgCount();
+  assert(count >= 2 && "expected associative bitwise operands");
+  SmallVector<Value> values;
+  values.reserve(count);
+  for (uint32_t i : llvm::seq<uint32_t>(0, count)) {
+    FailureOr<Value> value = materializeIndexExprNode(
+        S, view.getAssocArg(i), user, subs, assumptions, addOrder);
+    if (failed(value))
+      return failure();
+    values.push_back(*value);
+  }
+  Value result = values.back();
+  for (uint32_t i : llvm::reverse(llvm::seq<uint32_t>(0, count - 1)))
+    result = materializeBitwisePair(S, loc, view.getKind(), values[i], result);
+  return result;
 }
 
 static std::optional<CmpRelation> convertPredCmpOp(sym::PredCmpOp op) {
@@ -1090,6 +1184,29 @@ static bool binaryContainsRationalMaterialization(sym::ExprView view) {
          containsRationalMaterialization(view.getBinaryRhs());
 }
 
+static bool assocContainsRationalMaterialization(sym::ExprView view) {
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    if (containsRationalMaterialization(view.getAssocArg(i)))
+      return true;
+  return false;
+}
+
+static bool compoundContainsRationalMaterialization(sym::ExprView view) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return containsRationalMaterialization(view.getUnaryArg());
+  case sym::ExprKind::Mod:
+    return binaryContainsRationalMaterialization(view);
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return assocContainsRationalMaterialization(view);
+  default:
+    return false;
+  }
+}
+
 static bool containsRationalMaterialization(sym::ExprHandle expr) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
@@ -1101,14 +1218,8 @@ static bool containsRationalMaterialization(sym::ExprHandle expr) {
     return addContainsRationalMaterialization(view);
   case sym::ExprKind::Mul:
     return mulContainsRationalMaterialization(view);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    return containsRationalMaterialization(view.getUnaryArg());
-  case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
-    return binaryContainsRationalMaterialization(view);
   default:
-    return false;
+    return compoundContainsRationalMaterialization(view);
   }
 }
 
@@ -1404,6 +1515,43 @@ proveRationalBinary(sym::Analysis &analysis, sym::ExprHandle expr,
 }
 
 static FailureOr<RationalNarrowingProof>
+proveRationalAssoc(sym::Analysis &analysis, sym::ExprHandle expr,
+                   sym::ExprView view) {
+  bool operandsFit = true;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount())) {
+    FailureOr<RationalNarrowingProof> operand =
+        proveRationalNarrowing(analysis, view.getAssocArg(i));
+    if (failed(operand))
+      return failure();
+    operandsFit &= operand->fitsB32;
+  }
+  if (analysis.integerValued(expr) != sym::CheckResult::True)
+    return failure();
+  RationalNarrowingProof result = proveRationalIntegerNode(analysis, expr);
+  result.fitsB32 &= operandsFit;
+  return result;
+}
+
+static FailureOr<RationalNarrowingProof>
+proveRationalCompound(sym::Analysis &analysis, sym::ExprHandle expr,
+                      sym::ExprView view) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Floor:
+    return proveRationalRounded(analysis, expr, /*isCeil=*/false);
+  case sym::ExprKind::Ceil:
+    return proveRationalRounded(analysis, expr, /*isCeil=*/true);
+  case sym::ExprKind::Mod:
+    return proveRationalBinary(analysis, expr, view);
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return proveRationalAssoc(analysis, expr, view);
+  default:
+    return failure();
+  }
+}
+
+static FailureOr<RationalNarrowingProof>
 proveRationalNarrowing(sym::Analysis &analysis, sym::ExprHandle expr) {
   sym::ExprView view(expr);
   switch (view.getKind()) {
@@ -1416,15 +1564,8 @@ proveRationalNarrowing(sym::Analysis &analysis, sym::ExprHandle expr) {
     return proveRationalAdd(analysis, expr);
   case sym::ExprKind::Mul:
     return proveRationalMul(analysis, expr);
-  case sym::ExprKind::Floor:
-    return proveRationalRounded(analysis, expr, /*isCeil=*/false);
-  case sym::ExprKind::Ceil:
-    return proveRationalRounded(analysis, expr, /*isCeil=*/true);
-  case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
-    return proveRationalBinary(analysis, expr, view);
   default:
-    return failure();
+    return proveRationalCompound(analysis, expr, view);
   }
 }
 
@@ -1474,6 +1615,14 @@ static bool binaryRequiresWideRationalIntermediates(sym::Analysis &analysis,
          requiresWideRationalIntermediatesImpl(analysis, view.getBinaryRhs());
 }
 
+static bool assocRequiresWideRationalIntermediates(sym::Analysis &analysis,
+                                                   sym::ExprView view) {
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    if (requiresWideRationalIntermediatesImpl(analysis, view.getAssocArg(i)))
+      return true;
+  return false;
+}
+
 static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
                                                   sym::ExprHandle expr) {
   sym::ExprView view(expr);
@@ -1486,8 +1635,11 @@ static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
   case sym::ExprKind::Ceil:
     return rationalProofNeedsWide(analysis, expr);
   case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
     return binaryRequiresWideRationalIntermediates(analysis, view);
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return assocRequiresWideRationalIntermediates(analysis, view);
   default:
     return false;
   }
@@ -2112,6 +2264,15 @@ static bool modPreservesLowBitsThroughB32(sym::ExprView view,
          preservesLowBitsThroughB32(view.getBinaryLhs(), subs);
 }
 
+static bool
+assocPreservesLowBitsThroughB32(sym::ExprView view,
+                                const llvm::StringMap<Value> &subs) {
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    if (!preservesLowBitsThroughB32(view.getAssocArg(i), subs))
+      return false;
+  return true;
+}
+
 static bool preservesLowBitsThroughB32(sym::ExprHandle expr,
                                        const llvm::StringMap<Value> &subs) {
   sym::ExprView view(expr);
@@ -2127,8 +2288,9 @@ static bool preservesLowBitsThroughB32(sym::ExprHandle expr,
   case sym::ExprKind::Mod:
     return modPreservesLowBitsThroughB32(view, subs);
   case sym::ExprKind::Xor:
-    return preservesLowBitsThroughB32(view.getBinaryLhs(), subs) &&
-           preservesLowBitsThroughB32(view.getBinaryRhs(), subs);
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return assocPreservesLowBitsThroughB32(view, subs);
   default:
     return false;
   }
@@ -2225,15 +2387,10 @@ materializeRationalMod(WaveAMDMachineSelector &S, sym::Analysis &analysis,
                                       assumptions);
 }
 
-struct RationalXorProof {
-  sym::ExprHandle numerator;
-  sym::ExprHandle denominator;
-};
-
-static FailureOr<RationalXorProof>
-prepareRationalXorProof(WaveAMDMachineSelector &S, sym::Analysis &analysis,
-                        RationalIndexValue lhs, RationalIndexValue rhs,
-                        Operation *user) {
+static FailureOr<RationalIndexValue>
+combineRationalBitwise(WaveAMDMachineSelector &S, sym::Analysis &analysis,
+                       sym::ExprKind kind, RationalIndexValue lhs,
+                       RationalIndexValue rhs, Operation *user) {
   if (failed(requireIntegerRationalOperands(S, lhs, rhs, user)))
     return failure();
   if (failed(
@@ -2242,57 +2399,47 @@ prepareRationalXorProof(WaveAMDMachineSelector &S, sym::Analysis &analysis,
   if (failed(
           requireNarrowRationalNumerator(S, analysis, rhs.numeratorExpr, user)))
     return failure();
-  FailureOr<sym::ExprHandle> numerator =
-      composeRationalBinary(analysis, lhs.numeratorExpr, sym::ExprBinaryOp::Xor,
-                            rhs.numeratorExpr, user);
-  if (failed(numerator))
-    return failure();
+  FailureOr<BinaryValues> numerators =
+      materializeRationalNumerators(S, user->getLoc(), lhs, rhs, user);
+  FailureOr<sym::ExprHandle> numeratorExpr =
+      composeRationalBinary(analysis, lhs.numeratorExpr,
+                            getBitwiseBinaryOp(kind), rhs.numeratorExpr, user);
   FailureOr<sym::ExprHandle> denominator =
       composeRationalInteger(analysis, 1, user);
-  if (failed(denominator))
+  if (failed(numerators) || failed(numeratorExpr) || failed(denominator))
     return failure();
-  return RationalXorProof{*numerator, *denominator};
-}
-
-static FailureOr<Value>
-materializeRationalXorNumerator(WaveAMDMachineSelector &S, Location loc,
-                                RationalIndexValue lhs, RationalIndexValue rhs,
-                                Operation *user) {
-  FailureOr<BinaryValues> numerators =
-      materializeRationalNumerators(S, loc, lhs, rhs, user);
-  if (failed(numerators))
-    return failure();
-  if (std::optional<Value> folded =
-          foldXorImmediates(S, loc, numerators->lhs, numerators->rhs))
-    return *folded;
-  if (S.isUniformValue(numerators->lhs) && S.isUniformValue(numerators->rhs))
-    return materializeUniformXor(S, loc, numerators->lhs, numerators->rhs);
-  return materializeLaneXor(S, loc, numerators->lhs, numerators->rhs);
+  Value numerator = materializeBitwisePair(S, user->getLoc(), kind,
+                                           numerators->lhs, numerators->rhs);
+  return RationalIndexValue{numerator, getIntFoldResult(S, 1), *numeratorExpr,
+                            *denominator};
 }
 
 static FailureOr<RationalIndexValue>
-materializeRationalXor(WaveAMDMachineSelector &S, sym::Analysis &analysis,
-                       sym::ExprHandle expr, Operation *user,
-                       const llvm::StringMap<Value> &subs,
-                       ArrayRef<sym::PredHandle> assumptions) {
-  Location loc = user->getLoc();
+materializeRationalBitwise(WaveAMDMachineSelector &S, sym::Analysis &analysis,
+                           sym::ExprHandle expr, Operation *user,
+                           const llvm::StringMap<Value> &subs,
+                           ArrayRef<sym::PredHandle> assumptions) {
   sym::ExprView view(expr);
-  FailureOr<RationalIndexValue> lhs = materializeRationalIndexExprNode(
-      S, analysis, view.getBinaryLhs(), user, subs, assumptions);
-  FailureOr<RationalIndexValue> rhs = materializeRationalIndexExprNode(
-      S, analysis, view.getBinaryRhs(), user, subs, assumptions);
-  if (failed(lhs) || failed(rhs))
-    return failure();
-  FailureOr<RationalXorProof> proof =
-      prepareRationalXorProof(S, analysis, *lhs, *rhs, user);
-  if (failed(proof))
-    return failure();
-  FailureOr<Value> numerator =
-      materializeRationalXorNumerator(S, loc, *lhs, *rhs, user);
-  if (failed(numerator))
-    return failure();
-  return RationalIndexValue{*numerator, getIntFoldResult(S, 1),
-                            proof->numerator, proof->denominator};
+  uint32_t count = view.getAssocArgCount();
+  assert(count >= 2 && "expected associative bitwise operands");
+  SmallVector<RationalIndexValue> values;
+  values.reserve(count);
+  for (uint32_t i : llvm::seq<uint32_t>(0, count)) {
+    FailureOr<RationalIndexValue> value = materializeRationalIndexExprNode(
+        S, analysis, view.getAssocArg(i), user, subs, assumptions);
+    if (failed(value))
+      return failure();
+    values.push_back(*value);
+  }
+  RationalIndexValue result = values.back();
+  for (uint32_t i : llvm::reverse(llvm::seq<uint32_t>(0, count - 1))) {
+    FailureOr<RationalIndexValue> combined = combineRationalBitwise(
+        S, analysis, view.getKind(), values[i], result, user);
+    if (failed(combined))
+      return failure();
+    result = *combined;
+  }
+  return result;
 }
 
 static LogicalResult requireIntegerRationalOperands(WaveAMDMachineSelector &S,
@@ -2302,7 +2449,8 @@ static LogicalResult requireIntegerRationalOperands(WaveAMDMachineSelector &S,
   std::optional<int64_t> lhsDen = getStaticInt(S, lhs.denominator);
   std::optional<int64_t> rhsDen = getStaticInt(S, rhs.denominator);
   if (!lhsDen || !rhsDen || *lhsDen != 1 || *rhsDen != 1)
-    return user->emitError("wave.index_expr xor needs integer operands");
+    return user->emitError(
+        "wave.index_expr bitwise operation needs integer operands");
   return success();
 }
 
@@ -2411,7 +2559,10 @@ static FailureOr<RationalIndexValue> materializeRationalCompoundIndexExprNode(
   case sym::ExprKind::Mod:
     return materializeRationalMod(S, analysis, expr, user, subs, assumptions);
   case sym::ExprKind::Xor:
-    return materializeRationalXor(S, analysis, expr, user, subs, assumptions);
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return materializeRationalBitwise(S, analysis, expr, user, subs,
+                                      assumptions);
   default:
     break;
   }
@@ -2531,6 +2682,33 @@ mulExprReferencesWideScalarInteger(sym::ExprHandle expr,
 }
 
 static bool
+assocExprReferencesWideScalarInteger(sym::ExprView view,
+                                     const llvm::StringMap<bool> &wideSymbols) {
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    if (exprReferencesWideScalarInteger(view.getAssocArg(i), wideSymbols))
+      return true;
+  return false;
+}
+
+static bool compoundExprReferencesWideScalarInteger(
+    sym::ExprView view, const llvm::StringMap<bool> &wideSymbols) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return exprReferencesWideScalarInteger(view.getUnaryArg(), wideSymbols);
+  case sym::ExprKind::Mod:
+    return exprReferencesWideScalarInteger(view.getBinaryLhs(), wideSymbols) ||
+           exprReferencesWideScalarInteger(view.getBinaryRhs(), wideSymbols);
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return assocExprReferencesWideScalarInteger(view, wideSymbols);
+  default:
+    return false;
+  }
+}
+
+static bool
 exprReferencesWideScalarInteger(sym::ExprHandle expr,
                                 const llvm::StringMap<bool> &wideSymbols) {
   sym::ExprView view(expr);
@@ -2541,15 +2719,8 @@ exprReferencesWideScalarInteger(sym::ExprHandle expr,
     return addExprReferencesWideScalarInteger(expr, wideSymbols);
   case sym::ExprKind::Mul:
     return mulExprReferencesWideScalarInteger(expr, wideSymbols);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    return exprReferencesWideScalarInteger(view.getUnaryArg(), wideSymbols);
-  case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
-    return exprReferencesWideScalarInteger(view.getBinaryLhs(), wideSymbols) ||
-           exprReferencesWideScalarInteger(view.getBinaryRhs(), wideSymbols);
   default:
-    return false;
+    return compoundExprReferencesWideScalarInteger(view, wideSymbols);
   }
 }
 
@@ -3079,7 +3250,9 @@ static FailureOr<Value> materializeCompoundIndexExprNode(
   case sym::ExprKind::Mod:
     return materializeMod(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Xor:
-    return materializeXor(S, expr, user, subs, assumptions, addOrder);
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return materializeBitwise(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Piecewise:
     return materializePiecewise(S, expr, user, subs, assumptions, addOrder);
   default:
@@ -3141,6 +3314,26 @@ classifyPredicateTerm(WaveAMDMachineSelector &S, sym::PredHandle pred,
   }
 }
 
+static TermKind classifyAssocTerm(WaveAMDMachineSelector &S, sym::ExprView view,
+                                  const llvm::StringMap<TermKind> &symKinds) {
+  TermKind kind = TermKind::Const;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    kind = std::max(kind, classifyTerm(S, view.getAssocArg(i), symKinds));
+  return kind;
+}
+
+static TermKind
+classifyPiecewiseTerm(WaveAMDMachineSelector &S, sym::ExprView view,
+                      const llvm::StringMap<TermKind> &symKinds) {
+  TermKind kind = TermKind::Const;
+  for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
+    sym::PiecewiseCase piece = view.getPiecewiseCase(i);
+    kind = std::max(kind, classifyTerm(S, piece.value, symKinds));
+    kind = std::max(kind, classifyPredicateTerm(S, piece.condition, symKinds));
+  }
+  return kind;
+}
+
 static TermKind
 classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      const llvm::StringMap<TermKind> &symKinds) {
@@ -3154,19 +3347,14 @@ classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   case sym::ExprKind::Ceil:
     return classifyTerm(S, view.getUnaryArg(), symKinds);
   case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
     return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),
                     classifyTerm(S, view.getBinaryRhs(), symKinds));
-  case sym::ExprKind::Piecewise: {
-    TermKind kind = TermKind::Const;
-    for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
-      sym::PiecewiseCase piece = view.getPiecewiseCase(i);
-      kind = std::max(kind, classifyTerm(S, piece.value, symKinds));
-      kind =
-          std::max(kind, classifyPredicateTerm(S, piece.condition, symKinds));
-    }
-    return kind;
-  }
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return classifyAssocTerm(S, view, symKinds);
+  case sym::ExprKind::Piecewise:
+    return classifyPiecewiseTerm(S, view, symKinds);
   default:
     return TermKind::Lane;
   }

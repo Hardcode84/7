@@ -292,6 +292,36 @@ func.func @ptr_add_power_of_two_mask_nonnegative(
 
 // -----
 
+// CHECK-LABEL: func.func @ptr_add_dynamic_bitwise_offsets
+// CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, i32>, %[[LHS:.*]]: !wave.simd<i32, 32>, %[[RHS:.*]]: !wave.simd<i32, 32>)
+func.func @ptr_add_dynamic_bitwise_offsets(
+    %out: !wave.ptr<#wave.global, i32>, %lhs: !wave.simd<i32, 32>,
+    %rhs: !wave.simd<i32, 32>)
+    -> (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+        !wave.simd<!wave.ptr<#wave.global, i32>, 32>) {
+  %and = wave.binary andi %lhs, %rhs
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %or = wave.binary ori %lhs, %rhs
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  // CHECK-NOT: wave.binary andi
+  // CHECK-NOT: wave.binary ori
+  // CHECK: [[AND:%.*]] = wave.index_expr <"raw0 & raw1">
+  // CHECK: [[AND_PTR:%.*]] = wave.ptr_add %{{.*}}, [[AND]]
+  %and_ptr = wave.ptr_add %out, %and
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  // CHECK: [[OR:%.*]] = wave.index_expr <"raw0 | raw1">
+  // CHECK: [[OR_PTR:%.*]] = wave.ptr_add %{{.*}}, [[OR]]
+  %or_ptr = wave.ptr_add %out, %or
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return %and_ptr, %or_ptr
+      : !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+        !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @workitem_id_without_known_size_uses_range_fallback
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>)
 func.func @workitem_id_without_known_size_uses_range_fallback(

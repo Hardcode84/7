@@ -268,10 +268,10 @@ def test_packet_layout_reductions():
 # CHECK: wave.reduce
 # CHECK-SAME: using <blocks = 1, items = 32
 # CHECK-SAME: source_block = "block"
-# CHECK-SAME: source_item = "32*floor(1/32*item) + xor(Mod(reduction, 2)
-# CHECK-SAME: xor(16*Mod(floor(1/16*Mod(item, 32)), 2)
-# CHECK-SAME: xor(8*Mod(floor(1/8*Mod(item, 32)), 2)
-# CHECK-SAME: xor(2*Mod(floor(1/2*Mod(item, 32)), 2), 4*Mod(floor(1/4*Mod(item, 32)), 2)))))"
+# CHECK-SAME: source_item = "32*floor(1/32*item) + xor(2*Mod(floor(1/2*Mod(item, 32)), 2)
+# CHECK-SAME: 4*Mod(floor(1/4*Mod(item, 32)), 2)
+# CHECK-SAME: 8*Mod(floor(1/8*Mod(item, 32)), 2)
+# CHECK-SAME: 16*Mod(floor(1/16*Mod(item, 32)), 2), Mod(reduction, 2))"
 # CHECK-SAME: source_slot = "slot"
 # CHECK-SAME: extent 2
 # CHECK-LABEL: func.func @packet_layout_reduce_wave

@@ -1274,11 +1274,11 @@ tlx_addmm_glu_kernel_optimized:
 		v_mfma_f32_16x16x32_f16 v[156:159], v[80:83], v[72:75], v[156:159]
 		v_mfma_f32_16x16x32_f16 v[160:163], v[88:91], v[72:75], v[160:163]
 		v_mfma_f32_16x16x32_f16 v[164:167], v[96:99], v[72:75], v[164:167]
-		v_lshlrev_b32_e32 v1, 3, v7
-		v_lshlrev_b32_e32 v5, 2, v5
-		v_lshlrev_b32_e32 v3, 1, v3
-		v_xor_b32_e32 v0, v0, v3
-		v_bitop3_b32 v0, v1, v5, v0 bitop3:0x96
+		v_lshlrev_b32_e32 v1, 1, v3
+		v_lshlrev_b32_e32 v3, 2, v5
+		v_lshlrev_b32_e32 v5, 3, v7
+		v_xor_b32_e32 v3, v3, v5
+		v_bitop3_b32 v0, v0, v1, v3 bitop3:0x96
 		v_lshlrev_b32_e32 v1, 4, v0
 		ds_write_b128 v1, v[108:111]
 		v_xor_b32_e32 v0, 1, v0
@@ -1297,21 +1297,21 @@ tlx_addmm_glu_kernel_optimized:
 		v_and_b32_e32 v5, 1, v5
 		v_lshlrev_b32_e32 v7, 13, v5
 		v_lshl_add_u32 v3, v3, 14, v7
-		v_lshrrev_b32_e32 v7, 2, v24
-		v_and_b32_e32 v7, 1, v7
-		v_lshlrev_b32_e32 v8, 3, v7
+		v_lshrrev_b32_e32 v7, 5, v24
+		v_lshl_add_u32 v7, s2, 1, v7
+		v_lshrrev_b32_e32 v8, 2, v24
+		v_and_b32_e32 v8, 1, v8
+		v_lshl_add_u32 v7, v8, 7, v7
 		v_lshrrev_b32_e32 v9, 1, v24
 		v_and_b32_e32 v9, 1, v9
-		v_lshlrev_b32_e32 v15, 2, v9
-		v_lshrrev_b32_e32 v18, 5, v24
-		v_lshl_add_u32 v18, s2, 1, v18
-		v_lshl_add_u32 v7, v7, 7, v18
 		v_lshl_add_u32 v7, v9, 6, v7
-		v_and_b32_e32 v9, 1, v24
-		v_lshl_add_u32 v7, v9, 5, v7
-		v_lshlrev_b32_e32 v9, 1, v9
-		v_bitop3_b32 v7, v15, v7, v9 bitop3:0x96
-		v_bitop3_b32 v5, v5, v8, v7 bitop3:0x96
+		v_and_b32_e32 v15, 1, v24
+		v_lshl_add_u32 v7, v15, 5, v7
+		v_lshlrev_b32_e32 v15, 1, v15
+		v_lshlrev_b32_e32 v9, 2, v9
+		v_lshlrev_b32_e32 v8, 3, v8
+		v_bitop3_b32 v5, v9, v8, v5 bitop3:0x96
+		v_bitop3_b32 v5, v7, v15, v5 bitop3:0x96
 		v_lshl_add_u32 v3, v5, 4, v3
 		ds_read_b128 v[48:51], v3
 		ds_read_b128 v[52:55], v3 offset:256

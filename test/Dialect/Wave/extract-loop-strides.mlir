@@ -66,7 +66,7 @@ func.func @non_unit_step(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 // -----
 
 // CHECK-LABEL: func.func @preserve_cheaper_xor_base
-// CHECK: %[[BASE:.*]] = wave.index_expr <"xor(16*a, xor(32 + 4*b, 8*c))">
+// CHECK: %[[BASE:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
 // CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE]]
 // CHECK: %[[STRIDE:.*]] = wave.index_expr <"128"> []() : () -> index
 // CHECK: scf.for {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])

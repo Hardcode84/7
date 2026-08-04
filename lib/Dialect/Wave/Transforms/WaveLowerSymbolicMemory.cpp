@@ -2203,10 +2203,10 @@ private:
     collectExpressionModuli(view.getBinaryRhs(), moduli);
   }
 
-  static void collectBinaryModuli(sym::ExprView view,
-                                  SmallVectorImpl<int64_t> &moduli) {
-    collectExpressionModuli(view.getBinaryLhs(), moduli);
-    collectExpressionModuli(view.getBinaryRhs(), moduli);
+  static void collectAssociativeModuli(sym::ExprView view,
+                                       SmallVectorImpl<int64_t> &moduli) {
+    for (uint32_t index : llvm::seq(view.getAssocArgCount()))
+      collectExpressionModuli(view.getAssocArg(index), moduli);
   }
 
   static void collectOtherExpressionModuli(sym::ExprView view,
@@ -2219,7 +2219,9 @@ private:
     case sym::ExprKind::Max:
     case sym::ExprKind::Min:
     case sym::ExprKind::Xor:
-      collectBinaryModuli(view, moduli);
+    case sym::ExprKind::And:
+    case sym::ExprKind::Or:
+      collectAssociativeModuli(view, moduli);
       return;
     case sym::ExprKind::Piecewise:
       for (uint32_t index : llvm::seq(view.getPiecewiseCaseCount()))

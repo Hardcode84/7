@@ -68,10 +68,10 @@ func.func @preserves_equal_cost_scaled_sum(%k: i32)
 
 // CHECK-LABEL: func.func @preserves_xor_bit_permutation
 // CHECK-SAME: (%[[A:.*]]: i32, %[[B:.*]]: i32, %[[C:.*]]: i32)
-// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(16*a, xor(32 + 4*b, 8*c))">
+// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
 // CHECK: return %[[OFF]] : index
 // CANON-LABEL: func.func @preserves_xor_bit_permutation
-// CANON: %[[OFF:.*]] = wave.index_expr <"xor(16*a, xor(32 + 4*b, 8*c))">
+// CANON: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
 // CANON: return %[[OFF]] : index
 func.func @preserves_xor_bit_permutation(%a: i32, %b: i32, %c: i32)
     -> index {

@@ -841,6 +841,7 @@ static bool canBuildSymbolicBinaryOp(BinaryOp op, bool allowI64Integers,
                                        assumeAddressArithmeticNoOverflow);
   switch (op.getKind()) {
   case BinaryKind::XOrI:
+  case BinaryKind::OrI:
   case BinaryKind::ShRUI:
   case BinaryKind::AndI:
     return true;
@@ -1434,7 +1435,7 @@ private:
     case BinaryKind::ShRUI:
       return buildUnsignedShiftRight(op, skip, depth);
     case BinaryKind::AndI:
-      return buildPowerOfTwoMask(op, skip, depth);
+      return buildAnd(op, skip, depth);
     default:
       return buildPlainBinary(op, skip, depth);
     }
@@ -1592,6 +1593,10 @@ private:
       return sym::ExprBinaryOp::Mul;
     case BinaryKind::XOrI:
       return sym::ExprBinaryOp::Xor;
+    case BinaryKind::AndI:
+      return sym::ExprBinaryOp::And;
+    case BinaryKind::OrI:
+      return sym::ExprBinaryOp::Or;
     default:
       return std::nullopt;
     }
@@ -1711,8 +1716,7 @@ private:
     return sym::composeExprFloor(store, *div);
   }
 
-  FailureOr<sym::ExprHandle> buildPowerOfTwoMask(BinaryOp op, bool &skip,
-                                                 unsigned depth) {
+  FailureOr<sym::ExprHandle> buildAnd(BinaryOp op, bool &skip, unsigned depth) {
     Value value = op.getLhs();
     std::optional<int64_t> mask = getSplatOrConstantInt(op.getRhs());
     if (!mask) {
@@ -1721,12 +1725,12 @@ private:
     }
     std::optional<int64_t> modulus =
         mask ? getPowerOfTwoMaskModulus(*mask) : std::nullopt;
+    if (!modulus)
+      return buildPlainBinary(op, skip, depth);
     std::optional<SignedI64Range> valueRange =
         computeSignedI64Range(value, solver, store);
-    if (!modulus || !valueRange || valueRange->first < 0) {
-      skip = true;
-      return failure();
-    }
+    if (!valueRange || valueRange->first < 0)
+      return buildPlainBinary(op, skip, depth);
 
     FailureOr<sym::ExprHandle> lhs = buildExpr(value, skip, true, depth);
     if (skip || failed(lhs))

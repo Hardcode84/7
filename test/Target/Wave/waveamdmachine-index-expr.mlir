@@ -504,6 +504,85 @@ func.func @xor_uniform_buffer_soffset(%out: !wave.ptr<#wave.global, i32>, %u_raw
   return
 }
 
+// CHECK-LABEL: func.func @flat_nary_xor
+// CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 2 : i64, pointer = false}
+// CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[SXOR:[^,]+]], %{{.*}} = waveamdmachine.s_xor_b32 %[[U]], %[[V]]
+// CHECK: %[[VXOR:.*]] = waveamdmachine.v_xor_b32 %[[LANE]], %[[SXOR]]
+// CHECK: %[[BYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[VXOR]],
+// CHECK: waveamdmachine.global_store_b32 %[[BYTE]], %[[LANE]]
+func.func @flat_nary_xor(%out: !wave.ptr<#wave.global, i32>, %u_raw: i32,
+                         %v_raw: i32) attributes {wave.kernel} {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %u = wave.assume %u_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %v = wave.assume %v_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %off = wave.index_expr <"xor(a_lane, u, v)"> ["a_lane", "u", "v"]
+      (%lane, %u, %v)
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// CHECK-LABEL: func.func @flat_nary_integer_and
+// CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 0 : i64, pointer = false}
+// CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[SAND:[^,]+]], %{{.*}} = waveamdmachine.s_and_b32 %[[U]], %[[V]]
+// CHECK: %[[VAND:.*]] = waveamdmachine.v_and_b32 %[[LANE]], %[[SAND]]
+// CHECK: waveamdmachine.v_readfirstlane_b32 %[[VAND]]
+func.func @flat_nary_integer_and(%u_raw: i32, %v_raw: i32)
+    -> !wave.simd<index, 32> {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %u = wave.assume %u_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %v = wave.assume %v_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %off = wave.index_expr <"a_lane & u & v"> assuming
+      [#wave.pred<"(a_lane & u & v) >= 0">,
+       #wave.pred<"(a_lane & u & v) <= 31">]
+      ["a_lane", "u", "v"]
+      (%lane, %u, %v)
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
+}
+
+// CHECK-LABEL: func.func @flat_nary_integer_or
+// CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 0 : i64, pointer = false}
+// CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
+// CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[SOR:[^,]+]], %{{.*}} = waveamdmachine.s_or_b32 %[[U]], %[[V]]
+// CHECK: %[[VOR:.*]] = waveamdmachine.v_or_b32 %[[LANE]], %[[SOR]]
+// CHECK: waveamdmachine.v_readfirstlane_b32 %[[VOR]]
+func.func @flat_nary_integer_or(%u_raw: i32, %v_raw: i32)
+    -> !wave.simd<index, 32> {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
+  %u = wave.assume %u_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %v = wave.assume %v_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %off = wave.index_expr <"a_lane | u | v"> assuming
+      [#wave.pred<"(a_lane | u | v) >= 0">,
+       #wave.pred<"(a_lane | u | v) <= 31">]
+      ["a_lane", "u", "v"]
+      (%lane, %u, %v)
+      : (!wave.simd<i32, 32>, i32, i32) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
+}
+
 // CHECK-LABEL: func.func @buffer_subset_packs_uniform_slots
 // CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 2 : i64, pointer = false}
@@ -716,6 +795,26 @@ func.func @integer_rational_wide_intermediate(
   %off = wave.index_expr <"1/4*a + 1/4*b + 1/4*c + 1/4*d">
       ["a", "b", "c", "d"](%a, %b, %c, %d)
       : (i32, i32, i32, i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @rational_integer_bitwise
+// CHECK: %[[SHR:[^,]+]], %{{.*}} = waveamdmachine.s_lshr_b64
+// CHECK: %[[AND:[^,]+]], %{{.*}} = waveamdmachine.s_and_b64 {{.*}}, %[[SHR]]
+// CHECK: waveamdmachine.s_or_b64 {{.*}}, %[[AND]]
+func.func @rational_integer_bitwise(
+    %a_raw: i32, %b_raw: i32, %c_raw: i32) -> index {
+  %a = wave.assume %a_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 62">,
+       #wave.pred<"Mod(x, 2) == 0">] : i32
+  %b = wave.assume %b_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %c = wave.assume %c_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
+  %off = wave.index_expr <"(1/2*a & b) | c"> assuming
+      [#wave.pred<"((1/2*a & b) | c) >= 0">,
+       #wave.pred<"((1/2*a & b) | c) <= 31">]
+      ["a", "b", "c"](%a, %b, %c) : (i32, i32, i32) -> index
   return %off : index
 }
 

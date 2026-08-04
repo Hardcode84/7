@@ -1368,6 +1368,40 @@ static TermKind wideMulMaterializationKind(sym::ExprHandle expr,
   return kind;
 }
 
+static TermKind
+wideAssocMaterializationKind(sym::ExprView view,
+                             ArrayRef<WideSymbolBinding> bindings,
+                             bool symbolsAreUniform) {
+  TermKind kind = TermKind::Const;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    kind = std::max(kind, wideMaterializationKind(view.getAssocArg(i), bindings,
+                                                  symbolsAreUniform));
+  return kind;
+}
+
+static TermKind
+wideCompoundMaterializationKind(sym::ExprView view,
+                                ArrayRef<WideSymbolBinding> bindings,
+                                bool symbolsAreUniform) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return wideMaterializationKind(view.getUnaryArg(), bindings,
+                                   symbolsAreUniform);
+  case sym::ExprKind::Mod:
+    return std::max(wideMaterializationKind(view.getBinaryLhs(), bindings,
+                                            symbolsAreUniform),
+                    wideMaterializationKind(view.getBinaryRhs(), bindings,
+                                            symbolsAreUniform));
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return wideAssocMaterializationKind(view, bindings, symbolsAreUniform);
+  default:
+    return TermKind::Lane;
+  }
+}
+
 static TermKind wideMaterializationKind(sym::ExprHandle expr,
                                         ArrayRef<WideSymbolBinding> bindings,
                                         bool symbolsAreUniform) {
@@ -1382,18 +1416,8 @@ static TermKind wideMaterializationKind(sym::ExprHandle expr,
     return wideAddMaterializationKind(expr, bindings, symbolsAreUniform);
   case sym::ExprKind::Mul:
     return wideMulMaterializationKind(expr, bindings, symbolsAreUniform);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    return wideMaterializationKind(view.getUnaryArg(), bindings,
-                                   symbolsAreUniform);
-  case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
-    return std::max(wideMaterializationKind(view.getBinaryLhs(), bindings,
-                                            symbolsAreUniform),
-                    wideMaterializationKind(view.getBinaryRhs(), bindings,
-                                            symbolsAreUniform));
   default:
-    return TermKind::Lane;
+    return wideCompoundMaterializationKind(view, bindings, symbolsAreUniform);
   }
 }
 
@@ -1436,6 +1460,36 @@ wideMulMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
 }
 
 static unsigned
+wideAssocMaterializationLoopDepth(sym::ExprView view, Operation *user,
+                                  ArrayRef<WideSymbolBinding> bindings) {
+  unsigned depth = 0;
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    depth = std::max(depth, wideMaterializationLoopDepth(view.getAssocArg(i),
+                                                         user, bindings));
+  return depth;
+}
+
+static unsigned
+wideCompoundMaterializationLoopDepth(sym::ExprView view, Operation *user,
+                                     ArrayRef<WideSymbolBinding> bindings) {
+  switch (view.getKind()) {
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+    return wideMaterializationLoopDepth(view.getUnaryArg(), user, bindings);
+  case sym::ExprKind::Mod:
+    return std::max(
+        wideMaterializationLoopDepth(view.getBinaryLhs(), user, bindings),
+        wideMaterializationLoopDepth(view.getBinaryRhs(), user, bindings));
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    return wideAssocMaterializationLoopDepth(view, user, bindings);
+  default:
+    return std::numeric_limits<unsigned>::max();
+  }
+}
+
+static unsigned
 wideMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
                              ArrayRef<WideSymbolBinding> bindings) {
   sym::ExprView view(expr);
@@ -1449,16 +1503,8 @@ wideMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
     return wideAddMaterializationLoopDepth(expr, user, bindings);
   case sym::ExprKind::Mul:
     return wideMulMaterializationLoopDepth(expr, user, bindings);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-    return wideMaterializationLoopDepth(view.getUnaryArg(), user, bindings);
-  case sym::ExprKind::Mod:
-  case sym::ExprKind::Xor:
-    return std::max(
-        wideMaterializationLoopDepth(view.getBinaryLhs(), user, bindings),
-        wideMaterializationLoopDepth(view.getBinaryRhs(), user, bindings));
   default:
-    return std::numeric_limits<unsigned>::max();
+    return wideCompoundMaterializationLoopDepth(view, user, bindings);
   }
 }
 
@@ -1590,6 +1636,11 @@ static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform = false);
+
+static FailureOr<Value> materializeWideIntegerRationalExpr(
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
+    bool symbolsAreUniform);
 
 static FailureOr<Value> materializeWideAddTerm(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
@@ -1868,21 +1919,33 @@ static FailureOr<Value> materializeWideRational(WaveAMDMachineSelector &S,
   return createWideImm(S, user->getLoc(), rational->numerator);
 }
 
-static FailureOr<Value>
-materializeWideXor(WaveAMDMachineSelector &S,
-                   WideMaterializationContext &context, sym::ExprHandle expr,
-                   Operation *user, ArrayRef<WideSymbolBinding> bindings,
-                   bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+static FailureOr<Value> materializeWideBitwise(
+    WaveAMDMachineSelector &S, WideMaterializationContext &context,
+    sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
+    bool symbolsAreUniform, IndexExprAddOrder addOrder, BinaryKind kind) {
+  assert((kind == BinaryKind::AndI || kind == BinaryKind::OrI ||
+          kind == BinaryKind::XOrI) &&
+         "expected bitwise operation");
   sym::ExprView view(expr);
-  FailureOr<Value> lhs =
-      materializeWideIndexExprNode(S, context, view.getBinaryLhs(), user,
-                                   bindings, symbolsAreUniform, addOrder);
-  FailureOr<Value> rhs =
-      materializeWideIndexExprNode(S, context, view.getBinaryRhs(), user,
-                                   bindings, symbolsAreUniform, addOrder);
-  if (failed(lhs) || failed(rhs))
-    return failure();
-  return xorWide(S, user->getLoc(), *lhs, *rhs);
+  uint32_t count = view.getAssocArgCount();
+  assert(count >= 2 && "expected associative bitwise operands");
+  SmallVector<Value> values;
+  values.reserve(count);
+  for (uint32_t i : llvm::seq<uint32_t>(0, count)) {
+    FailureOr<Value> value =
+        materializeWideIndexExprNode(S, context, view.getAssocArg(i), user,
+                                     bindings, symbolsAreUniform, addOrder);
+    if (failed(value))
+      return failure();
+    values.push_back(*value);
+  }
+  Value acc = values.back();
+  for (uint32_t i : llvm::reverse(llvm::seq<uint32_t>(0, count - 1))) {
+    acc = kind == BinaryKind::XOrI
+              ? xorWide(S, user->getLoc(), values[i], acc)
+              : bitwiseWide(S, user->getLoc(), kind, values[i], acc);
+  }
+  return acc;
 }
 
 static std::optional<int64_t> checkedLCM64(int64_t lhs, int64_t rhs) {
@@ -2127,6 +2190,8 @@ static FailureOr<WideRationalValue> materializeWideRationalCompound(
     return materializeWideRationalMod(S, context, expr, user, bindings,
                                       symbolsAreUniform);
   case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
     return materializeWideIntegerRational(S, context, expr, user, bindings,
@@ -2263,8 +2328,16 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
     return materializeWideMul(S, context, expr, user, bindings,
                               symbolsAreUniform, addOrder);
   case sym::ExprKind::Xor:
-    return materializeWideXor(S, context, expr, user, bindings,
-                              symbolsAreUniform, addOrder);
+    return materializeWideBitwise(S, context, expr, user, bindings,
+                                  symbolsAreUniform, addOrder,
+                                  BinaryKind::XOrI);
+  case sym::ExprKind::And:
+    return materializeWideBitwise(S, context, expr, user, bindings,
+                                  symbolsAreUniform, addOrder,
+                                  BinaryKind::AndI);
+  case sym::ExprKind::Or:
+    return materializeWideBitwise(S, context, expr, user, bindings,
+                                  symbolsAreUniform, addOrder, BinaryKind::OrI);
   case sym::ExprKind::Floor:
     return materializeWideRounded(S, context, expr, user, bindings,
                                   /*isCeil=*/false, symbolsAreUniform);
@@ -2285,6 +2358,12 @@ static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+  if (needsIntegerRationalMaterialization(expr)) {
+    sym::Analysis *analysis = context.getAnalysis();
+    if (analysis && analysis->integerValued(expr) == sym::CheckResult::True)
+      return materializeWideIntegerRationalExpr(S, context, expr, user,
+                                                bindings, symbolsAreUniform);
+  }
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
@@ -2323,12 +2402,6 @@ static FailureOr<Value> materializeWideIndexExprNode(
     ArrayRef<WideSymbolBinding> bindings, ArrayRef<sym::PredHandle> assumptions,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   WideMaterializationContext context(S, assumptions);
-  if (needsIntegerRationalMaterialization(expr)) {
-    sym::Analysis *analysis = context.getAnalysis();
-    if (analysis && analysis->integerValued(expr) == sym::CheckResult::True)
-      return materializeWideIntegerRationalExpr(S, context, expr, user,
-                                                bindings, symbolsAreUniform);
-  }
   return materializeWideIndexExprNode(S, context, expr, user, bindings,
                                       symbolsAreUniform, addOrder);
 }

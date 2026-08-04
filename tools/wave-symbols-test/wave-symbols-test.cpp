@@ -40,11 +40,13 @@ void printLiteral(llvm::StringRef label, std::optional<int64_t> value) {
 const char *boolName(bool value) { return value ? "true" : "false"; }
 
 const char *exprKindName(sym::ExprKind kind) {
-  static constexpr std::array<const char *, 15> names = {
-      "invalid", "integer", "rational", "symbol", "add",
-      "mul",     "floor",   "ceil",     "mod",    "piecewise",
-      "max",     "min",     "xor",      "error",  "parse-error",
+  static constexpr std::array<const char *, 17> names = {
+      "invalid", "integer", "rational", "symbol",    "add",         "mul",
+      "floor",   "ceil",    "mod",      "piecewise", "max",         "min",
+      "xor",     "and",     "or",       "error",     "parse-error",
   };
+  static_assert(names.size() ==
+                static_cast<size_t>(sym::ExprKind::ParseError) + 1);
   size_t index = static_cast<size_t>(kind);
   return index < names.size() ? names[index] : "invalid";
 }
@@ -317,6 +319,13 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
                << "\n";
   printLiteral("view-mod-rhs",
                sym::getIntegerLiteralValue(modView.getBinaryRhs()));
+
+  sym::ExprView andView(mustParseExpr(store, "x & y & z"));
+  llvm::outs() << "view-and-kind: " << exprKindName(andView.getKind()) << "\n";
+  llvm::outs() << "view-and-args: " << andView.getAssocArgCount() << "\n";
+  sym::ExprView orView(mustParseExpr(store, "x | y | z"));
+  llvm::outs() << "view-or-kind: " << exprKindName(orView.getKind()) << "\n";
+  llvm::outs() << "view-or-args: " << orView.getAssocArgCount() << "\n";
 
   auto geZero =
       sym::composePredCmp(store, x, sym::PredCmpOp::Ge, mustBuildInt(store, 0));

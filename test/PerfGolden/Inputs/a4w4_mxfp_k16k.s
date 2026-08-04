@@ -1251,10 +1251,10 @@ _a4w4_kernel:
 		ds_read_b128 v[252:255], v1 offset:36608
 		s_barrier
 		ds_write_b32 v64, v46 offset:6048
-		v_accvgpr_read_b32 v2, a2
-		v_lshlrev_b32_e32 v2, 3, v2
-		v_lshlrev_b32_e32 v3, 2, v4
-		v_bitop3_b32 v0, v2, v0, v3 bitop3:0x96
+		v_lshlrev_b32_e32 v2, 2, v4
+		v_accvgpr_read_b32 v3, a2
+		v_lshlrev_b32_e32 v3, 3, v3
+		v_bitop3_b32 v0, v0, v2, v3 bitop3:0x96
 		v_lshlrev_b32_e32 v2, 4, v0
 		s_waitcnt lgkmcnt(0)
 		s_barrier
@@ -1523,17 +1523,17 @@ _a4w4_kernel:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		v_lshl_add_u32 v1, v5, 1, v1
-		v_lshrrev_b32_e32 v5, 1, v61
-		v_and_b32_e32 v5, 1, v5
-		v_lshlrev_b32_e32 v8, 3, v5
-		v_accvgpr_read_b32 v11, a1
-		v_lshl_add_u32 v11, s21, 2, v11
-		v_lshl_add_u32 v5, v5, 6, v11
+		v_accvgpr_read_b32 v5, a1
+		v_lshl_add_u32 v5, s21, 2, v5
+		v_lshrrev_b32_e32 v8, 1, v61
+		v_and_b32_e32 v8, 1, v8
+		v_lshl_add_u32 v5, v8, 6, v5
 		v_and_b32_e32 v11, 1, v61
 		v_lshl_add_u32 v5, v11, 5, v5
 		v_lshlrev_b32_e32 v11, 2, v11
-		v_xor_b32_e32 v5, v5, v11
-		v_bitop3_b32 v1, v1, v8, v5 bitop3:0x96
+		v_lshlrev_b32_e32 v8, 3, v8
+		v_xor_b32_e32 v8, v11, v8
+		v_bitop3_b32 v1, v1, v5, v8 bitop3:0x96
 		v_lshl_add_u32 v1, v1, 4, v7
 		ds_read_b128 v[40:43], v1
 		ds_read_b128 v[48:51], v1 offset:256

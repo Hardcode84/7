@@ -37,7 +37,7 @@ static ExprKind getExprKind(ixs_tag tag) {
       ExprKind::Add,     ExprKind::Mul,      ExprKind::Floor,
       ExprKind::Ceil,    ExprKind::Mod,      ExprKind::Piecewise,
       ExprKind::Max,     ExprKind::Min,      ExprKind::Xor,
-      ExprKind::Invalid, ExprKind::Invalid,  ExprKind::Invalid,
+      ExprKind::Invalid, ExprKind::And,      ExprKind::Or,
       ExprKind::Invalid, ExprKind::Error,    ExprKind::ParseError,
   };
   size_t index = static_cast<size_t>(tag);
@@ -206,6 +206,21 @@ static FailureOr<PredHandle> finishPred(ixs_session *session,
   return PredHandle(node);
 }
 
+static const ixs_node *composeRawBitwise(ixs_session *session,
+                                         const ixs_node *lhs, ExprBinaryOp op,
+                                         const ixs_node *rhs) {
+  switch (op) {
+  case ExprBinaryOp::Xor:
+    return ixs_xor(session, lhs, rhs);
+  case ExprBinaryOp::And:
+    return ixs_and(session, lhs, rhs);
+  case ExprBinaryOp::Or:
+    return ixs_or(session, lhs, rhs);
+  default:
+    llvm_unreachable("not a symbolic bitwise operation");
+  }
+}
+
 static const ixs_node *composeRawBinary(ixs_session *session,
                                         const ixs_node *lhs, ExprBinaryOp op,
                                         const ixs_node *rhs) {
@@ -220,14 +235,13 @@ static const ixs_node *composeRawBinary(ixs_session *session,
     return ixs_div(session, lhs, rhs);
   case ExprBinaryOp::Mod:
     return ixs_mod(session, lhs, rhs);
-  case ExprBinaryOp::Xor:
-    return ixs_xor(session, lhs, rhs);
   case ExprBinaryOp::Max:
     return ixs_max(session, lhs, rhs);
   case ExprBinaryOp::Min:
     return ixs_min(session, lhs, rhs);
+  default:
+    return composeRawBitwise(session, lhs, op, rhs);
   }
-  llvm_unreachable("unknown symbolic binary operation");
 }
 
 } // namespace
@@ -1184,19 +1198,29 @@ ExprHandle ExprView::getUnaryArg() const {
 }
 
 ExprHandle ExprView::getBinaryLhs() const {
-  ExprKind kind = getKind();
-  if (kind != ExprKind::Mod && kind != ExprKind::Max && kind != ExprKind::Min &&
-      kind != ExprKind::Xor)
+  if (getKind() != ExprKind::Mod)
     return {};
   return ExprHandle(ixs_node_binary_lhs(value.raw()));
 }
 
 ExprHandle ExprView::getBinaryRhs() const {
-  ExprKind kind = getKind();
-  if (kind != ExprKind::Mod && kind != ExprKind::Max && kind != ExprKind::Min &&
-      kind != ExprKind::Xor)
+  if (getKind() != ExprKind::Mod)
     return {};
   return ExprHandle(ixs_node_binary_rhs(value.raw()));
+}
+
+uint32_t ExprView::getAssocArgCount() const {
+  ExprKind kind = getKind();
+  if (kind != ExprKind::Max && kind != ExprKind::Min && kind != ExprKind::Xor &&
+      kind != ExprKind::And && kind != ExprKind::Or)
+    return 0;
+  return ixs_node_assoc_nargs(value.raw());
+}
+
+ExprHandle ExprView::getAssocArg(uint32_t index) const {
+  if (index >= getAssocArgCount())
+    return {};
+  return ExprHandle(ixs_node_assoc_arg(value.raw(), index));
 }
 
 uint32_t ExprView::getPiecewiseCaseCount() const {
@@ -1259,7 +1283,7 @@ uint32_t PredView::getLogicArgCount() const {
   PredKind kind = getKind();
   if (kind != PredKind::And && kind != PredKind::Or)
     return 0;
-  return ixs_node_logic_nargs(value.raw());
+  return ixs_node_assoc_nargs(value.raw());
 }
 
 PredHandle PredView::getLogicArg(uint32_t index) const {
@@ -1267,9 +1291,9 @@ PredHandle PredView::getLogicArg(uint32_t index) const {
   if (kind != PredKind::And && kind != PredKind::Or)
     return {};
   const ixs_node *node = value.raw();
-  if (index >= ixs_node_logic_nargs(node))
+  if (index >= ixs_node_assoc_nargs(node))
     return {};
-  return PredHandle(ixs_node_logic_arg(node, index));
+  return PredHandle(ixs_node_assoc_arg(node, index));
 }
 
 FailureOr<ExprHandle> mlir::wave::sym::parseExpr(Store &store,
