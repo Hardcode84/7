@@ -1085,10 +1085,6 @@ static SmallVector<unsigned, 16> getOriginalOrder(const GreedyRegion &region) {
   return order;
 }
 
-static bool isRegionAboveLimit(const GreedyRegion &region, int limit) {
-  return limit >= 0 && region.ops.size() > static_cast<unsigned>(limit);
-}
-
 static bool sameOrder(ArrayRef<unsigned> lhs, ArrayRef<unsigned> rhs) {
   return lhs.size() == rhs.size() &&
          std::equal(lhs.begin(), lhs.end(), rhs.begin());
@@ -3084,20 +3080,11 @@ struct WaveAMDMachineSchedulePass
     MachineScheduleStageTiming timing;
     TimingScope setupTiming = timing.nest("machine_schedule_setup");
     Operation *root = getOperation();
-    if (failed(validateOptions(root)))
-      return signalPassFailure();
-
     setupTiming.stop();
     WalkResult walk = root->walk(
         [&](func::FuncOp func) { return processFunction(func, timing); });
     if (walk.wasInterrupted())
       return signalPassFailure();
-  }
-
-  LogicalResult validateOptions(Operation *op) {
-    if (maxRegionOps < -1)
-      return op->emitError("max-region-ops must be -1 or non-negative");
-    return success();
   }
 
   LogicalResult
@@ -3219,9 +3206,6 @@ struct WaveAMDMachineSchedulePass
                               const ValueOriginMap &origins,
                               const WaveAMDMachineScheduleModel &scheduleModel,
                               MachineScheduleStageTiming &timing) {
-    if (isRegionAboveLimit(region, maxRegionOps))
-      return success();
-
     TimingScope graphTiming = timing.nest("machine_schedule_build_graph");
     GraphTables graph;
     if (failed(buildGraph(region, graph)))
@@ -3269,11 +3253,6 @@ struct WaveAMDMachineSchedulePass
                            const WaveAMDMachineScheduleModel &scheduleModel,
                            ArrayRef<waveamdmachine::WavePlacement> placements,
                            MachineScheduleStageTiming &timing) {
-    if (llvm::any_of(regions, [&](const GreedyRegion &region) {
-          return isRegionAboveLimit(region, maxRegionOps);
-        }))
-      return success();
-
     TimingScope graphTiming = timing.nest("machine_schedule_build_joint_graph");
     MultiWaveGraphs graphs;
     if (failed(buildMultiWaveGraphs(uniformIf, regions, origins, graphs)))
@@ -3384,6 +3363,10 @@ static void printReportDeps(const GreedyRegion &region,
                  << " dst=" << region.ops[edge.dst]->getName().getStringRef()
                  << "\n";
   }
+}
+
+static bool isReportRegionAboveLimit(const GreedyRegion &region, int limit) {
+  return limit >= 0 && region.ops.size() > static_cast<unsigned>(limit);
 }
 
 static void printReportSkip(const GreedyRegion &region, int maxRegionOps) {
@@ -3694,7 +3677,7 @@ struct WaveAMDMachineScheduleReportPass
 
     if (!wantsGraphForRegion(region))
       return success();
-    if (isRegionAboveLimit(region, maxRegionOps)) {
+    if (isReportRegionAboveLimit(region, maxRegionOps)) {
       printReportSkip(region, maxRegionOps);
       return success();
     }

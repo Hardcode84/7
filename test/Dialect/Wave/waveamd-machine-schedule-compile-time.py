@@ -4,6 +4,7 @@
 # CHECK: matmul_scheduled: ok
 # CHECK: matmul_greedy_report: ok
 # CHECK: fa_seq32_d16_u4_greedy_report: ok
+# CHECK: gfx950_mfma_dma_scheduled: ok
 # CHECK: gfx950_mfma_dma_report: ok
 
 from __future__ import annotations
@@ -211,9 +212,35 @@ def check_gfx950_mfma_dma_report() -> None:
     )
     require_true(
         "gfx950_mfma_dma_report",
+        stats["pressure_projections"] <= 2 * cma_count**2,
+        "ready-pressure candidate work exceeded the quadratic bound",
+    )
+    require_true(
+        "gfx950_mfma_dma_report",
         stats["pressure_projection_checks"] <= 2 * stats["pressure_projections"],
         "candidate projection rescanned unrelated no-inst nodes",
     )
+
+
+def check_gfx950_mfma_dma_scheduled() -> None:
+    # Crosses largest PerfGolden region: 1205 ops.
+    cma_count = 608
+    text = run_case(
+        "gfx950_mfma_dma_scheduled",
+        [
+            str(resolve_wave_tool("wave-opt")),
+            "-",
+            "--waveamd-machine-schedule=apply-schedule=1",
+        ],
+        input_text=gfx950_mfma_dma_mlir(cma_count),
+        timeout=10.0,
+    )
+    require(
+        "gfx950_mfma_dma_scheduled",
+        text,
+        r"region func=gfx950_mfma_dma index=0 ops=1218 action=apply",
+    )
+    reject("gfx950_mfma_dma_scheduled", text, r"reason=max_region_ops")
 
 
 def main() -> int:
@@ -272,6 +299,7 @@ def main() -> int:
         r"sim_cycles: [0-9]+",
     )
 
+    check_gfx950_mfma_dma_scheduled()
     check_gfx950_mfma_dma_report()
     return 0
 

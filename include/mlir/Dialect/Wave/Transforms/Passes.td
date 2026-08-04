@@ -732,9 +732,7 @@ def WaveAMDMachineSchedule
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
            "Apply greedy local schedules.">,
     Option<"requireSelectedInput", "require-selected-input", "bool", /*default=*/"false",
-           "Only schedule functions stamped by waveamd-to-machine.">,
-    Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
-           "Skip scheduling regions above this op count; -1 disables the cap.">
+           "Only schedule functions stamped by waveamd-to-machine.">
   ];
 }
 
@@ -800,8 +798,8 @@ def WaveAMDMachineScheduleReport
     region discovery, dependence construction, stall modeling, greedy order
     construction, and instruction-state scoring with `waveamd-machine-schedule`.
 
-    Functions may override the region cap with integer attribute
-    `waveamdmachine.schedule_max_region_ops`; `-1` disables that cap.
+    Use `max-region-ops` to bound graph and scoring diagnostics; `-1` disables
+    the report cap.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -819,7 +817,7 @@ def WaveAMDMachineScheduleReport
     Option<"printClasses", "print-classes", "bool", /*default=*/"false",
            "Print scheduler class, functional unit, latency, and resource cycles for each local-region op.">,
     Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
-           "Skip scheduling diagnostics above this region op count; -1 disables the cap.">,
+           "Skip graph, score, and candidate diagnostics above this region op count; -1 disables the cap.">,
     Option<"scoreFunc", "score-func", "std::string", /*default=*/"\"\"",
            "Function name whose local region should score a candidate order.">,
     Option<"scoreRegion", "score-region", "int", /*default=*/"-1",
