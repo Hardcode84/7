@@ -40,8 +40,10 @@ module attributes {transform.with_named_sequence} {
     // CHECK: waveamdmachine.v_add_u32 [[RELOAD]],
     func.func @lds_relief_spills_post_failure_use()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+                    wave.waves_per_workgroup = 1 : ui2,
                     waveamdmachine.vgpr_count_max = 3 : i64,
-                    waveamdmachine.agpr_count_max = 0 : i64} {
+                    waveamdmachine.agpr_count_max = 0 : i64,
+                    waveamdmachine.target_waves = 1 : ui2} {
       %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2>
       %off = waveamdmachine.v_workitem_id_x : !waveamdmachine.reg<vgpr, 1, 0>
       %tok0 = waveamdmachine.token : !waveamdmachine.mem.token

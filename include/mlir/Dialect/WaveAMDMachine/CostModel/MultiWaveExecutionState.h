@@ -19,8 +19,6 @@ bool areWavePlacementsValid(const ArchData &arch,
                             ArrayRef<WavePlacement> placements);
 SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
                                                    unsigned wavesPerSIMD);
-SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
-                                                   Operation *context);
 
 class MultiWaveExecutionState {
 public:

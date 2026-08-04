@@ -62,7 +62,13 @@ static inline bool hasConsistentWavesPerWorkgroup(func::FuncOp func,
                                                   unsigned waves) {
   IntegerAttr attr =
       func->getAttrOfType<IntegerAttr>("wave.waves_per_workgroup");
-  return !attr || attr.getInt() == waves;
+  if (!attr)
+    return true;
+  const APInt &value = attr.getValue();
+  if ((!attr.getType().isUnsignedInteger() && value.isNegative()) ||
+      value.getActiveBits() > std::numeric_limits<unsigned>::digits)
+    return false;
+  return value.getZExtValue() == waves;
 }
 
 static inline std::optional<unsigned> getExpectedWaves(func::FuncOp func,

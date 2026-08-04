@@ -755,11 +755,11 @@ std::optional<unsigned> getUnsignedIntegerAttr(Operation *op, StringRef name) {
   auto attr = op->getAttrOfType<IntegerAttr>(name);
   if (!attr)
     return std::nullopt;
-  int64_t value = attr.getInt();
-  if (value < 0 ||
-      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+  const APInt &value = attr.getValue();
+  if ((!attr.getType().isUnsignedInteger() && value.isNegative()) ||
+      value.getActiveBits() > std::numeric_limits<unsigned>::digits)
     return std::nullopt;
-  return static_cast<unsigned>(value);
+  return static_cast<unsigned>(value.getZExtValue());
 }
 
 Attribute findAncestorAttr(Operation *op, StringRef name) {

@@ -628,12 +628,13 @@ static std::optional<unsigned> getUnsignedIntegerAttr(Operation *op,
   auto attr = op->getAttrOfType<IntegerAttr>(name);
   if (!attr)
     return std::nullopt;
-  int64_t value = attr.getInt();
-  if (value <= 0)
+  const APInt &value = attr.getValue();
+  if (value.isZero() ||
+      (!attr.getType().isUnsignedInteger() && value.isNegative()))
     return 0;
-  if (value > std::numeric_limits<unsigned>::max())
+  if (value.getActiveBits() > std::numeric_limits<unsigned>::digits)
     return std::numeric_limits<unsigned>::max();
-  return static_cast<unsigned>(value);
+  return static_cast<unsigned>(value.getZExtValue());
 }
 
 static unsigned adjustSGPRBudgetForExecIfSaveStack(
@@ -685,11 +686,12 @@ static std::optional<unsigned> getRegAllocBudgetTargetWaves(func::FuncOp func) {
       dyn_cast_or_null<IntegerAttr>(findAncestorAttr(func, kTargetWavesAttr));
   if (!intAttr)
     return std::nullopt;
-  int64_t value = intAttr.getInt();
-  if (value <= 0 ||
-      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+  const APInt &value = intAttr.getValue();
+  if (value.isZero() ||
+      (!intAttr.getType().isUnsignedInteger() && value.isNegative()) ||
+      value.getActiveBits() > std::numeric_limits<unsigned>::digits)
     return std::nullopt;
-  return static_cast<unsigned>(value);
+  return static_cast<unsigned>(value.getZExtValue());
 }
 
 static unsigned getRegAllocOccupancyBudget(const WaveAMDRegisterLimits &limits,
@@ -727,14 +729,16 @@ getTargetWaves(func::FuncOp func, unsigned maxWavesPerEU) {
   if (!intAttr)
     return func.emitError("regalloc transform ")
            << kTargetWavesAttr << " must be an integer attribute";
-  int64_t value = intAttr.getInt();
-  if (value <= 0)
+  const APInt &value = intAttr.getValue();
+  if (value.isZero() ||
+      (!intAttr.getType().isUnsignedInteger() && value.isNegative()))
     return func.emitError("regalloc transform ")
            << kTargetWavesAttr << " must be positive";
-  if (static_cast<uint64_t>(value) > maxWavesPerEU)
+  if (value.getActiveBits() > std::numeric_limits<unsigned>::digits ||
+      value.getZExtValue() > maxWavesPerEU)
     return func.emitError("regalloc transform ")
            << kTargetWavesAttr << " exceeds target wave capacity";
-  return std::optional<unsigned>(static_cast<unsigned>(value));
+  return std::optional<unsigned>(static_cast<unsigned>(value.getZExtValue()));
 }
 
 RegAllocTransformBudget

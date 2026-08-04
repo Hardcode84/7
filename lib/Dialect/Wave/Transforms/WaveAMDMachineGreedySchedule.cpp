@@ -8,9 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "RegAlloc/WaveAMDRegAllocTransformState.h"
-#include "RegAlloc/WaveAMDRegLiveIntervals.h"
-#include "RegAlloc/WaveAMDRegisterLimits.h"
 #include "WaveAMDMachineScheduleEligibility.h"
 #include "WaveAMDMachineScheduleModel.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -401,8 +398,6 @@ struct GreedyResult {
   GreedyStats stats;
   StringRef failureReason;
   bool success = false;
-  bool pressureFallback = false;
-  bool steadyStateOrder = false;
 };
 
 struct OrderScore {
@@ -463,6 +458,8 @@ static ArchResolution resolveArch(Operation *op) {
     return {"missing_target", nullptr};
 
   StringAttr target = mod->getAttrOfType<StringAttr>("waveamdmachine.target");
+  if (!target)
+    return {"malformed_target", nullptr};
   std::optional<waveamdmachine::AMDGPUTarget> parsed =
       waveamdmachine::parseAMDGPUTargetAttr(target.getValue());
   if (!parsed)
@@ -2274,13 +2271,6 @@ static bool isReadyComputeResourceCandidate(const IssuePreview &preview) {
          preview.resource.waitSlots == 0;
 }
 
-static waveamdmachine::ReadyCandidateMetrics
-getReadyCandidateMetrics(unsigned candidate,
-                         const ComputeIslandInfo &computeIslands,
-                         const ReadyScheduleState &readyState) {
-  return computeIslands.session.getReadyCandidateMetrics(candidate, readyState);
-}
-
 static void addReadyScheduleWorkStats(const ComputeIslandInfo &computeIslands,
                                       GreedyStats &stats) {
   ReadyScheduleWorkStats work = computeIslands.session.getWorkStats();
@@ -2289,41 +2279,7 @@ static void addReadyScheduleWorkStats(const ComputeIslandInfo &computeIslands,
   stats.pressureProjections = work.projections;
   stats.pressureProjectedNodes = work.projectedNodes;
   stats.pressureProjectionChecks = work.projectionChecks;
-}
-
-struct ReadyCandidateRanking {
-  waveamdmachine::ReadyRegisterPressure currentPressure;
-  waveamdmachine::ReadyCandidateMetrics baseline;
-  const ReadyScheduleState *readyState = nullptr;
-};
-
-static ReadyCandidateRanking
-buildReadyCandidateRanking(unsigned baseline, const BitVector &scheduled,
-                           const ComputeIslandInfo &computeIslands) {
-  ReadyCandidateRanking ranking;
-  ranking.readyState = &computeIslands.session.getReadyState(scheduled);
-  ranking.currentPressure =
-      computeIslands.session.getReadyPressure(*ranking.readyState);
-  ranking.baseline =
-      getReadyCandidateMetrics(baseline, computeIslands, *ranking.readyState);
-  return ranking;
-}
-
-static bool trySelectReadyFiller(
-    const waveamdmachine::InstructionScheduleModel &model,
-    waveamdmachine::ReadyRegisterPressure currentPressure,
-    const waveamdmachine::ReadyCandidateMetrics &metrics,
-    const waveamdmachine::ReadyCandidateMetrics &baseline, unsigned candidate,
-    unsigned &selected,
-    std::optional<waveamdmachine::ReadyCandidateMetrics> &selectedMetrics) {
-  if (!model.canSelectReadyFiller(currentPressure, metrics, baseline))
-    return false;
-  if (selectedMetrics && !model.shouldPreferReadyFiller(
-                             currentPressure, metrics, *selectedMetrics))
-    return true;
-  selected = candidate;
-  selectedMetrics = metrics;
-  return true;
+  stats.pressurePriorityMoves = work.pressureSelections;
 }
 
 static FailureOr<bool>
@@ -2358,10 +2314,7 @@ findGenericStallFiller(const BitVector &ready, unsigned next,
                        const IssueState &state, const BitVector &scheduled,
                        FillableStall stall,
                        const ComputeIslandInfo &computeIslands) {
-  ReadyCandidateRanking ranking =
-      buildReadyCandidateRanking(next, scheduled, computeIslands);
-  unsigned selected = region.ops.size();
-  std::optional<waveamdmachine::ReadyCandidateMetrics> selectedMetrics;
+  SmallVector<ReadyScheduleProposal, 8> proposals;
   for (int readyIndex = ready.find_first(); readyIndex >= 0;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
@@ -2371,13 +2324,14 @@ findGenericStallFiller(const BitVector &ready, unsigned next,
       return failure();
     if (!*usable)
       continue;
-    waveamdmachine::ReadyCandidateMetrics metrics =
-        getReadyCandidateMetrics(index, computeIslands, *ranking.readyState);
-    trySelectReadyFiller(state.model.getScheduleModel(),
-                         ranking.currentPressure, metrics, ranking.baseline,
-                         index, selected, selectedMetrics);
+    proposals.push_back(
+        {index, ReadyScheduleProposalKind::RankedFiller, /*group=*/0});
   }
-  return selected;
+  BitVector noDiscoveries(region.ops.size());
+  ReadyScheduleDecision decision = computeIslands.session.selectNext(
+      scheduled, next, noDiscoveries, proposals,
+      state.model.getScheduleModel());
+  return decision.candidate.value_or(region.ops.size());
 }
 
 static FailureOr<unsigned>
@@ -2392,73 +2346,77 @@ findStallFiller(const BitVector &ready, unsigned next,
   if (failed(postBarrier))
     return failure();
   if (*postBarrier != region.ops.size()) {
-    ReadyCandidateRanking ranking =
-        buildReadyCandidateRanking(next, scheduled, computeIslands);
-    waveamdmachine::ReadyCandidateMetrics metrics = getReadyCandidateMetrics(
-        *postBarrier, computeIslands, *ranking.readyState);
-    if (state.model.getScheduleModel().canSelectReadyFiller(
-            ranking.currentPressure, metrics, ranking.baseline))
-      return postBarrier;
+    BitVector noDiscoveries(region.ops.size());
+    ReadyScheduleProposal proposal{*postBarrier,
+                                   ReadyScheduleProposalKind::RankedFiller,
+                                   /*group=*/0};
+    ReadyScheduleDecision decision = computeIslands.session.selectNext(
+        scheduled, next, noDiscoveries, proposal,
+        state.model.getScheduleModel());
+    if (decision.candidate)
+      return *decision.candidate;
   }
   return findGenericStallFiller(ready, next, region, graph, state, scheduled,
                                 stall, computeIslands);
 }
 
 static FailureOr<unsigned>
-findReadyPressureCandidate(const BitVector &ready, unsigned next,
-                           const GreedyRegion &region, const GraphTables &graph,
-                           const IssueState &state, const BitVector &scheduled,
-                           const ComputeIslandInfo &computeIslands) {
-  const ReadyScheduleState &readyState =
-      computeIslands.session.getReadyState(scheduled);
-  waveamdmachine::ReadyRegisterPressure currentPressure =
-      computeIslands.session.getReadyPressure(readyState);
-  unsigned selected = region.ops.size();
-  waveamdmachine::ReadyCandidateMetrics selectedMetrics =
-      getReadyCandidateMetrics(next, computeIslands, readyState);
+findModelReadyOverride(const BitVector &ready, unsigned next,
+                       const GreedyRegion &region, const GraphTables &graph,
+                       const IssueState &state, const BitVector &scheduled,
+                       const ComputeIslandInfo &computeIslands) {
+  BitVector legalReadyCandidates(region.ops.size());
   for (int readyIndex = ready.find_first(); readyIndex >= 0;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
-    Operation *candidate = region.ops[index];
-    if (index == next ||
-        !isPureComputeIslandOp(candidate, state.getStaticInfo(candidate)) ||
-        !canUseStallFiller(graph, scheduled, next, index) ||
+    if (index == next || !canUseStallFiller(graph, scheduled, next, index) ||
         crossesSplitBarrier(region, scheduled, next, index))
       continue;
-    FailureOr<IssuePreview> preview = previewIssue(state, candidate);
+    FailureOr<IssuePreview> preview = previewIssue(state, region.ops[index]);
     if (failed(preview))
       return failure();
     if (stalls(*preview))
       continue;
-    waveamdmachine::ReadyCandidateMetrics metrics =
-        getReadyCandidateMetrics(index, computeIslands, readyState);
-    if (!state.model.getScheduleModel().shouldPreferReadyPressure(
-            currentPressure, metrics, selectedMetrics))
-      continue;
-    selected = index;
-    selectedMetrics = metrics;
+    legalReadyCandidates.set(index);
   }
-  return selected;
+  ReadyScheduleDecision decision =
+      computeIslands.session.selectNext(scheduled, next, legalReadyCandidates,
+                                        {}, state.model.getScheduleModel());
+  return decision.candidate.value_or(region.ops.size());
 }
 
+struct ReadyProposalContext {
+  ReadyScheduleDecision select(unsigned candidate,
+                               ReadyScheduleProposalKind kind) const {
+    BitVector noDiscoveries(regionSize);
+    ReadyScheduleProposal proposal{candidate, kind, /*group=*/0};
+    return session->selectNext(*scheduled, baseline, noDiscoveries, proposal,
+                               state->model.getScheduleModel());
+  }
+
+  const RegionScheduleSession *session = nullptr;
+  const IssueState *state = nullptr;
+  const BitVector *scheduled = nullptr;
+  unsigned baseline = 0;
+  unsigned regionSize = 0;
+};
+
 struct ComputeResourceSelection {
-  std::optional<waveamdmachine::ReadyCandidateMetrics> selectedMetrics;
-  unsigned index = 0;
-  unsigned releaseSlots = 0;
+  SmallVector<ReadyScheduleProposal, 8> proposals;
 };
 
 static FailureOr<bool> considerComputeResourceCandidate(
-    unsigned index, unsigned next, const GreedyRegion &region,
-    const IssueState &state, const BitVector &scheduled,
-    const IssuePreview &nextPreview, const ComputeIslandInfo &computeIslands,
-    const ReadyCandidateRanking &ranking, ComputeResourceSelection &selection) {
+    unsigned index, const GreedyRegion &region, const IssueState &state,
+    const IssuePreview &nextPreview, bool prioritizeComputeResources,
+    unsigned group, ComputeResourceSelection &selection) {
   waveamdmachine::InstructionScheduleResourcePreview resource =
       state.resources.preview(state.getStaticInfo(region.ops[index]).resource);
   waveamdmachine::ReadyResourceCandidateKind kind =
       state.model.getScheduleModel().classifyReadyResourceCandidate(
           nextPreview.resource.functionalUnit, nextPreview.resource.waitSlots,
           nextPreview.resource.releaseSlots, resource.functionalUnit,
-          resource.waitSlots, resource.releaseSlots, selection.releaseSlots);
+          resource.waitSlots, resource.releaseSlots,
+          /*selectedReleaseSlots=*/0);
   if (kind == waveamdmachine::ReadyResourceCandidateKind::None)
     return false;
   FailureOr<IssuePreview> preview =
@@ -2469,51 +2427,45 @@ static FailureOr<bool> considerComputeResourceCandidate(
     return false;
 
   if (kind == waveamdmachine::ReadyResourceCandidateKind::StallFiller) {
-    waveamdmachine::ReadyCandidateMetrics metrics =
-        getReadyCandidateMetrics(index, computeIslands, *ranking.readyState);
-    const waveamdmachine::ReadyCandidateMetrics &baseline =
-        selection.selectedMetrics ? *selection.selectedMetrics
-                                  : ranking.baseline;
-    return trySelectReadyFiller(
-        state.model.getScheduleModel(), ranking.currentPressure, metrics,
-        baseline, index, selection.index, selection.selectedMetrics);
+    ReadyScheduleProposalKind proposalKind =
+        prioritizeComputeResources
+            ? ReadyScheduleProposalKind::RankedFiller
+            : ReadyScheduleProposalKind::ResourceStallFiller;
+    selection.proposals.push_back({index, proposalKind, group, /*rank=*/0,
+                                   nextPreview.resource.waitSlots,
+                                   nextPreview.resource.releaseSlots});
+    return true;
   }
-  selection.index = index;
-  selection.releaseSlots = preview->resource.releaseSlots;
+  selection.proposals.push_back({index,
+                                 ReadyScheduleProposalKind::ResourcePriority,
+                                 group, preview->resource.releaseSlots});
   return true;
 }
 
-static FailureOr<unsigned> findComputeResourceCandidate(
+static LogicalResult collectComputeResourceCandidates(
     const BitVector &ready, unsigned next, unsigned islandEnd,
     const GreedyRegion &region, const IssueState &state,
-    const BitVector &scheduled, const IssuePreview &nextPreview,
-    const ComputeIslandInfo &computeIslands,
-    const ReadyCandidateRanking &ranking, bool &fillsResourceStall) {
-  ComputeResourceSelection selection;
-  selection.index = region.ops.size();
+    const IssuePreview &nextPreview, bool prioritizeComputeResources,
+    unsigned group, ComputeResourceSelection &selection) {
   for (int readyIndex = ready.find_next(next);
        readyIndex >= 0 && static_cast<unsigned>(readyIndex) < islandEnd;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
     FailureOr<bool> considered = considerComputeResourceCandidate(
-        index, next, region, state, scheduled, nextPreview, computeIslands,
-        ranking, selection);
+        index, region, state, nextPreview, prioritizeComputeResources, group,
+        selection);
     if (failed(considered))
       return failure();
-    if (*considered && nextPreview.resource.waitSlots != 0)
-      fillsResourceStall = true;
   }
-  return selection.index;
+  return success();
 }
 
-static FailureOr<unsigned> findComputeRecurrenceResourceCandidate(
+static LogicalResult collectComputeRecurrenceResourceCandidates(
     const BitVector &ready, unsigned next, const GreedyRegion &region,
     const GraphTables &graph, const IssueState &state,
     const BitVector &scheduled, const IssuePreview &nextPreview,
-    const ComputeIslandInfo &computeIslands,
-    const ReadyCandidateRanking &ranking) {
-  ComputeResourceSelection selection;
-  selection.index = region.ops.size();
+    bool prioritizeComputeResources, unsigned group,
+    ComputeResourceSelection &selection) {
   for (int readyIndex = ready.find_next(next); readyIndex >= 0;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
@@ -2523,17 +2475,16 @@ static FailureOr<unsigned> findComputeRecurrenceResourceCandidate(
         crossesSplitBarrier(region, scheduled, next, index))
       continue;
     FailureOr<bool> considered = considerComputeResourceCandidate(
-        index, next, region, state, scheduled, nextPreview, computeIslands,
-        ranking, selection);
+        index, region, state, nextPreview, prioritizeComputeResources, group,
+        selection);
     if (failed(considered))
       return failure();
   }
-  return selection.index;
+  return success();
 }
 
 struct ReadyComputeResourceContext {
   IssuePreview nextPreview;
-  ReadyCandidateRanking ranking;
 };
 
 static FailureOr<std::optional<ReadyComputeResourceContext>>
@@ -2554,14 +2505,7 @@ buildReadyComputeResourceContext(unsigned next, const GreedyRegion &region,
   if (nextPreview->resource.waitSlots == 0 && !prioritizeComputeResources)
     return std::optional<ReadyComputeResourceContext>{};
 
-  ReadyComputeResourceContext context{
-      *nextPreview,
-      buildReadyCandidateRanking(next, scheduled, computeIslands)};
-  if (nextPreview->resource.waitSlots != 0 && !prioritizeComputeResources &&
-      !state.model.getScheduleModel().shouldSelectResourceStallFiller(
-          nextPreview->resource.waitSlots, nextPreview->resource.releaseSlots,
-          context.ranking.currentPressure, context.ranking.baseline))
-    return std::optional<ReadyComputeResourceContext>{};
+  ReadyComputeResourceContext context{*nextPreview};
   return std::optional<ReadyComputeResourceContext>(std::move(context));
 }
 
@@ -2581,17 +2525,33 @@ static FailureOr<unsigned> findReadyComputeResourceAlternative(
     return region.ops.size();
 
   unsigned islandEnd = computeIslands.ends[next];
-  FailureOr<unsigned> local = findComputeResourceCandidate(
-      ready, next, islandEnd, region, state, scheduled, (*context)->nextPreview,
-      computeIslands, (*context)->ranking, fillsResourceStall);
-  if (failed(local) || *local != region.ops.size())
-    return local;
-  FailureOr<unsigned> recurrence = findComputeRecurrenceResourceCandidate(
-      ready, next, region, graph, state, scheduled, (*context)->nextPreview,
-      computeIslands, (*context)->ranking);
-  if (succeeded(recurrence) && *recurrence != region.ops.size())
+  ComputeResourceSelection local;
+  if (failed(collectComputeResourceCandidates(
+          ready, next, islandEnd, region, state, (*context)->nextPreview,
+          prioritizeComputeResources, /*group=*/0, local)))
+    return failure();
+  BitVector noDiscoveries(region.ops.size());
+  ReadyScheduleDecision localDecision = computeIslands.session.selectNext(
+      scheduled, next, noDiscoveries, local.proposals,
+      state.model.getScheduleModel());
+  if (localDecision.candidate) {
     fillsResourceStall = (*context)->nextPreview.resource.waitSlots != 0;
-  return recurrence;
+    return *localDecision.candidate;
+  }
+  if (localDecision.suppressFallback)
+    return region.ops.size();
+
+  ComputeResourceSelection recurrence;
+  if (failed(collectComputeRecurrenceResourceCandidates(
+          ready, next, region, graph, state, scheduled, (*context)->nextPreview,
+          prioritizeComputeResources, /*group=*/0, recurrence)))
+    return failure();
+  ReadyScheduleDecision recurrenceDecision = computeIslands.session.selectNext(
+      scheduled, next, noDiscoveries, recurrence.proposals,
+      state.model.getScheduleModel());
+  if (recurrenceDecision.candidate)
+    fillsResourceStall = (*context)->nextPreview.resource.waitSlots != 0;
+  return recurrenceDecision.candidate.value_or(region.ops.size());
 }
 
 static FailureOr<std::optional<unsigned>> findReadyComputeAlternative(
@@ -2646,10 +2606,7 @@ findReadyLatencyCandidate(const BitVector &ready, unsigned next,
                           const waveamdmachine::ArchData &arch,
                           const waveamdmachine::EventSimConfig &config,
                           const ComputeIslandInfo &computeIslands) {
-  ReadyCandidateRanking ranking =
-      buildReadyCandidateRanking(next, scheduled, computeIslands);
-  unsigned selected = region.ops.size();
-  std::optional<waveamdmachine::ReadyCandidateMetrics> selectedMetrics;
+  SmallVector<ReadyScheduleProposal, 8> proposals;
   for (int readyIndex = ready.find_first(); readyIndex >= 0;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
@@ -2661,19 +2618,14 @@ findReadyLatencyCandidate(const BitVector &ready, unsigned next,
       return failure();
     if (stallsPriority(*preview))
       continue;
-    waveamdmachine::ReadyCandidateMetrics metrics =
-        getReadyCandidateMetrics(index, computeIslands, *ranking.readyState);
-    if (!state.model.getScheduleModel().canSelectReadyFiller(
-            ranking.currentPressure, metrics, ranking.baseline))
-      continue;
-    if (!selectedMetrics ||
-        state.model.getScheduleModel().shouldPreferReadyFiller(
-            ranking.currentPressure, metrics, *selectedMetrics)) {
-      selected = index;
-      selectedMetrics = metrics;
-    }
+    proposals.push_back(
+        {index, ReadyScheduleProposalKind::RankedFiller, /*group=*/0});
   }
-  return selected;
+  BitVector noDiscoveries(region.ops.size());
+  ReadyScheduleDecision decision = computeIslands.session.selectNext(
+      scheduled, next, noDiscoveries, proposals,
+      state.model.getScheduleModel());
+  return decision.candidate.value_or(region.ops.size());
 }
 
 static FailureOr<std::optional<unsigned>> findReadyLatencyAlternative(
@@ -2792,10 +2744,7 @@ findSteadyStateFiller(const BitVector &ready, unsigned next,
                       const GreedyRegion &region, const IssueState &localState,
                       const IssueState &steadyState, const BitVector &scheduled,
                       const ComputeIslandInfo &computeIslands) {
-  ReadyCandidateRanking ranking =
-      buildReadyCandidateRanking(next, scheduled, computeIslands);
-  unsigned selected = region.ops.size();
-  std::optional<waveamdmachine::ReadyCandidateMetrics> selectedMetrics;
+  SmallVector<ReadyScheduleProposal, 8> proposals;
   for (unsigned index : llvm::seq(next + 1, ready.size())) {
     Operation *candidate = region.ops[index];
     if (!isSteadyStateFillerCandidate(ready, next, index, region, scheduled))
@@ -2808,19 +2757,14 @@ findSteadyStateFiller(const BitVector &ready, unsigned next,
     if (!isSingleSlotStallFree(*localPreview) ||
         !isSingleSlotStallFree(*steadyPreview))
       continue;
-    waveamdmachine::ReadyCandidateMetrics metrics =
-        getReadyCandidateMetrics(index, computeIslands, *ranking.readyState);
-    if (!localState.model.getScheduleModel().canSelectReadyFiller(
-            ranking.currentPressure, metrics, ranking.baseline))
-      continue;
-    if (!selectedMetrics ||
-        localState.model.getScheduleModel().shouldPreferReadyFiller(
-            ranking.currentPressure, metrics, *selectedMetrics)) {
-      selected = index;
-      selectedMetrics = metrics;
-    }
+    proposals.push_back(
+        {index, ReadyScheduleProposalKind::RankedFiller, /*group=*/0});
   }
-  return selected;
+  BitVector noDiscoveries(region.ops.size());
+  ReadyScheduleDecision decision = computeIslands.session.selectNext(
+      scheduled, next, noDiscoveries, proposals,
+      localState.model.getScheduleModel());
+  return decision.candidate.value_or(region.ops.size());
 }
 
 static void
@@ -2838,7 +2782,8 @@ static FailureOr<std::optional<unsigned>> findSteadyStateProducerAlternative(
     const BitVector &ready, unsigned next, const GreedyRegion &region,
     const IssueState &localState, const IssueState &steadyState,
     const IssuePreview &nextPreview, const BitVector &scheduled,
-    const BitVector &critical, GreedyStats &stats) {
+    const BitVector &critical, const ComputeIslandInfo &computeIslands,
+    GreedyStats &stats) {
   if (!localState.model.getScheduleModel()
            .shouldPrioritizeSteadyStateProducer() ||
       !stalls(nextPreview))
@@ -2852,8 +2797,16 @@ static FailureOr<std::optional<unsigned>> findSteadyStateProducerAlternative(
     return failure();
   if (*producer == region.ops.size())
     return std::optional<unsigned>{};
+  BitVector noDiscoveries(region.ops.size());
+  ReadyScheduleProposal proposal{*producer, ReadyScheduleProposalKind::Direct,
+                                 /*group=*/0};
+  ReadyScheduleDecision decision = computeIslands.session.selectNext(
+      scheduled, next, noDiscoveries, proposal,
+      localState.model.getScheduleModel());
+  if (!decision.candidate)
+    return std::optional<unsigned>{};
   ++stats.steadyStateFills;
-  return std::optional<unsigned>(*producer);
+  return decision.candidate;
 }
 
 static FailureOr<std::optional<unsigned>> findSteadyStateFillerAlternative(
@@ -3352,7 +3305,7 @@ static FailureOr<std::optional<unsigned>> findSteadyStateAlternative(
   FailureOr<std::optional<unsigned>> producer =
       findSteadyStateProducerAlternative(ready, next, region, state,
                                          *steadyState, *nextPreview, scheduled,
-                                         critical, stats);
+                                         critical, computeIslands, stats);
   if (failed(producer))
     return failure();
   if (*producer)
@@ -3369,24 +3322,23 @@ static FailureOr<std::optional<unsigned>> findReadyMemoryAlternative(
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     const ComputeIslandInfo &computeIslands, GreedyStats &stats,
     bool prioritizeLongLatencyVmem) {
-  ReadyCandidateRanking ranking =
-      buildReadyCandidateRanking(next, scheduled, computeIslands);
-  auto canSelect = [&](unsigned candidate) {
-    waveamdmachine::ReadyCandidateMetrics metrics = getReadyCandidateMetrics(
-        candidate, computeIslands, *ranking.readyState);
-    return state.model.getScheduleModel().canSelectReadyFiller(
-        ranking.currentPressure, metrics, ranking.baseline);
+  ReadyProposalContext proposals{&computeIslands.session, &state, &scheduled,
+                                 next,
+                                 static_cast<unsigned>(region.ops.size())};
+  auto select = [&](unsigned candidate) {
+    return proposals.select(candidate, ReadyScheduleProposalKind::RankedFiller)
+        .candidate;
   };
 
   FailureOr<unsigned> consumer = findReadyTokenConsumer(
       ready, region, graph, scheduled, next, state, origins);
   if (failed(consumer))
     return failure();
-  if (*consumer != region.ops.size() && canSelect(*consumer))
+  if (*consumer != region.ops.size() && select(*consumer))
     return std::optional<unsigned>(*consumer);
 
   unsigned filler = findReadyBarrierPairFiller(ready, region, scheduled, next);
-  if (filler != region.ops.size() && canSelect(filler))
+  if (filler != region.ops.size() && select(filler))
     return std::optional<unsigned>(filler);
 
   bool usedLongLatencyPriority = false;
@@ -3395,7 +3347,7 @@ static FailureOr<std::optional<unsigned>> findReadyMemoryAlternative(
       prioritizeLongLatencyVmem, usedLongLatencyPriority);
   if (failed(prefetch))
     return failure();
-  if (*prefetch == region.ops.size() || !canSelect(*prefetch))
+  if (*prefetch == region.ops.size() || !select(*prefetch))
     return std::optional<unsigned>{};
   ++stats.vmemPrefetchMoves;
   if (usedLongLatencyPriority)
@@ -3414,12 +3366,11 @@ static FailureOr<std::optional<unsigned>> findReadyAlternative(
     const ComputeIslandInfo &computeIslands, GreedyStats &stats,
     bool prioritizeLongLatencyVmem, bool prioritizeComputeResources,
     bool prioritizeLatency, std::optional<unsigned> &resumeTarget) {
-  FailureOr<unsigned> pressureCandidate = findReadyPressureCandidate(
+  FailureOr<unsigned> pressureCandidate = findModelReadyOverride(
       ready, next, region, graph, state, scheduled, computeIslands);
   if (failed(pressureCandidate))
     return failure();
   if (*pressureCandidate != region.ops.size()) {
-    ++stats.pressurePriorityMoves;
     return std::optional<unsigned>(*pressureCandidate);
   }
 
@@ -3584,13 +3535,12 @@ static FailureOr<std::optional<GreedyStepStatus>> resumeGreedyStallTarget(
     stallTarget.reset();
     return std::optional<GreedyStepStatus>{};
   }
-  FailureOr<unsigned> pressureCandidate = findReadyPressureCandidate(
+  FailureOr<unsigned> pressureCandidate = findModelReadyOverride(
       ready, *stallTarget, region, graph, state, scheduled, computeIslands);
   if (failed(pressureCandidate))
     return failure();
 
   if (*pressureCandidate != region.ops.size()) {
-    ++result.stats.pressurePriorityMoves;
     FailureOr<GreedyStepStatus> scheduledResult = scheduleReadyByIndex(
         *pressureCandidate, region, graph, state, steadyState, ready, scheduled,
         pending, result.order, origins);
@@ -3767,9 +3717,8 @@ static GreedyResult buildGreedyOrderFromState(
     bool prioritizeLatency) {
   assert((!initialState || initialState->staticInfo == &staticInfo) &&
          "initial issue state uses different static info");
-  IssueState state(
-      arch, buildWaveAMDMachineInstructionConfig(arch, config, region.first),
-      staticInfo);
+  IssueState state(arch, scheduleModel.buildInstructionConfig(config),
+                   staticInfo);
   std::unique_ptr<IssueState> steadyState =
       initialState ? std::make_unique<IssueState>(*initialState) : nullptr;
   bindValueOrigins(state.model, origins, state.frozenLoopArgs);
@@ -3859,14 +3808,15 @@ replayLoopOrder(const GreedyRegion &region, ArrayRef<unsigned> order,
                 const waveamdmachine::ArchData &arch,
                 const waveamdmachine::EventSimConfig &config,
                 const ValueOriginMap &origins,
-                const StaticIssueInfoMap &staticInfo) {
+                const StaticIssueInfoMap &staticInfo,
+                const WaveAMDMachineScheduleModel &scheduleModel) {
   waveamdmachine::UniformLoopOp loop = getCompleteUniformLoop(region);
   if (!loop)
     return failure();
 
   std::unique_ptr<IssueState> state = std::make_unique<IssueState>(
-      arch, buildWaveAMDMachineInstructionConfig(arch, config, region.first),
-      staticInfo, region.block);
+      arch, scheduleModel.buildInstructionConfig(config), staticInfo,
+      region.block);
   bindValueOrigins(state->model, origins, region.block);
   bindLoopEntry(*state, loop);
   for (unsigned iteration : llvm::seq(kSteadyStateIterations)) {
@@ -3891,241 +3841,6 @@ static void materializeOrder(const GreedyRegion &region,
     ops.push_back(region.ops[index]);
 }
 
-struct PeakRegisterPressure {
-  unsigned sgpr = 0;
-  unsigned vgpr = 0;
-  unsigned agpr = 0;
-  unsigned vgprFamily = 0;
-};
-
-struct RegisterPressureLimits {
-  unsigned sgpr = 0;
-  unsigned vgpr = 0;
-  unsigned agpr = 0;
-  std::optional<unsigned> vgprFamily;
-};
-
-struct RegisterPressureEvent {
-  unsigned position = 0;
-  unsigned slot = 0;
-  int delta = 0;
-};
-
-static void
-appendRegisterPressureEvents(const WaveAMDLiveInterval &interval,
-                             unsigned eventCount,
-                             SmallVectorImpl<RegisterPressureEvent> &events) {
-  unsigned intervalWidth = interval.type.getWidth();
-  for (auto [value, slot, start, end] :
-       llvm::zip(interval.values, interval.slotOffsets, interval.valueStarts,
-                 interval.valueEnds)) {
-    unsigned valueWidth =
-        cast<waveamdmachine::RegType>(value.getType()).getWidth();
-    assert(start <= end && end + 1 < eventCount &&
-           slot + valueWidth <= intervalWidth && "invalid live interval range");
-    for (unsigned bit : llvm::seq<unsigned>(slot, slot + valueWidth)) {
-      events.push_back({start, bit, 1});
-      events.push_back({end + 1, bit, -1});
-    }
-  }
-}
-
-static void
-applyRegisterPressureEvents(ArrayRef<RegisterPressureEvent> events,
-                            unsigned intervalWidth,
-                            MutableArrayRef<int64_t> pressureChanges) {
-  SmallVector<unsigned, 16> slotUseCounts(intervalWidth, 0);
-  unsigned liveWidth = 0;
-  for (unsigned first = 0; first < events.size();) {
-    unsigned position = events[first].position;
-    unsigned oldLiveWidth = liveWidth;
-    unsigned last = first;
-    while (last < events.size() && events[last].position == position) {
-      RegisterPressureEvent event = events[last++];
-      unsigned &useCount = slotUseCounts[event.slot];
-      if (event.delta > 0) {
-        if (useCount++ == 0)
-          ++liveWidth;
-      } else {
-        assert(useCount > 0 && "live interval slot count underflow");
-        if (--useCount == 0)
-          --liveWidth;
-      }
-    }
-    pressureChanges[position] += static_cast<int64_t>(liveWidth) - oldLiveWidth;
-    first = last;
-  }
-  assert(liveWidth == 0 && "unbalanced live interval events");
-}
-
-static void
-addRegisterPressureChanges(ArrayRef<WaveAMDLiveInterval> intervals,
-                           MutableArrayRef<int64_t> pressureChanges) {
-  for (const WaveAMDLiveInterval &interval : intervals) {
-    if (interval.values.empty())
-      continue;
-
-    SmallVector<RegisterPressureEvent, 16> events;
-    appendRegisterPressureEvents(interval, pressureChanges.size(), events);
-    llvm::sort(events, [](const RegisterPressureEvent &lhs,
-                          const RegisterPressureEvent &rhs) {
-      return lhs.position < rhs.position;
-    });
-    applyRegisterPressureEvents(events, interval.type.getWidth(),
-                                pressureChanges);
-  }
-}
-
-static PeakRegisterPressure
-getPeakRegisterPressure(const WaveAMDLiveIntervalBuildResult &liveness) {
-  unsigned eventCount = liveness.orderedOps.size() + 1;
-  SmallVector<int64_t> sgprChanges(eventCount, 0);
-  SmallVector<int64_t> vgprChanges(eventCount, 0);
-  SmallVector<int64_t> agprChanges(eventCount, 0);
-  addRegisterPressureChanges(liveness.intervals.sgprs, sgprChanges);
-  addRegisterPressureChanges(liveness.intervals.vgprs, vgprChanges);
-  addRegisterPressureChanges(liveness.intervals.agprs, agprChanges);
-
-  PeakRegisterPressure peak;
-  int64_t sgpr = 0;
-  int64_t vgpr = 0;
-  int64_t agpr = 0;
-  for (unsigned position : llvm::seq<unsigned>(liveness.orderedOps.size())) {
-    sgpr += sgprChanges[position];
-    vgpr += vgprChanges[position];
-    agpr += agprChanges[position];
-    assert(sgpr >= 0 && vgpr >= 0 && agpr >= 0 &&
-           "register pressure underflow");
-    peak.sgpr = std::max(peak.sgpr, static_cast<unsigned>(sgpr));
-    peak.vgpr = std::max(peak.vgpr, static_cast<unsigned>(vgpr));
-    peak.agpr = std::max(peak.agpr, static_cast<unsigned>(agpr));
-    peak.vgprFamily =
-        std::max(peak.vgprFamily, static_cast<unsigned>(vgpr + agpr));
-  }
-  return peak;
-}
-
-static FailureOr<PeakRegisterPressure>
-getCandidateRegisterPressure(const GreedyRegion &region,
-                             ArrayRef<unsigned> order) {
-  SmallVector<Operation *, 16> ops;
-  materializeOrder(region, order, ops);
-  FailureOr<WaveAMDLiveIntervalBuildResult> liveness =
-      buildAllocatedWaveAMDLiveIntervals(
-          region.func, WaveAMDLiveIntervalOrderOverride{ops, region.block},
-          WaveAMDLiveIntervalAliasPolicy::Conservative);
-  if (failed(liveness))
-    return failure();
-  return getPeakRegisterPressure(*liveness);
-}
-
-static FailureOr<PeakRegisterPressure>
-getCurrentRegisterPressure(func::FuncOp func) {
-  FailureOr<WaveAMDLiveIntervalBuildResult> liveness =
-      buildAllocatedWaveAMDLiveIntervals(
-          func, WaveAMDLiveIntervalOrderOverride{},
-          WaveAMDLiveIntervalAliasPolicy::Conservative);
-  if (failed(liveness))
-    return failure();
-  return getPeakRegisterPressure(*liveness);
-}
-
-static FailureOr<RegisterPressureLimits>
-getRegisterPressureLimits(func::FuncOp func) {
-  RegisterPressureLimits limits;
-  limits.sgpr =
-      getRegAllocTransformBudget(func, waveamdmachine::RegClass::SGPR).limit;
-  limits.vgpr =
-      getRegAllocTransformBudget(func, waveamdmachine::RegClass::VGPR).limit;
-  limits.agpr =
-      getRegAllocTransformBudget(func, waveamdmachine::RegClass::AGPR).limit;
-  FailureOr<std::optional<RegAllocTransformBudget>> familyBudget =
-      getRegAllocTransformVGPRFamilyBudget(func);
-  if (failed(familyBudget))
-    return failure();
-  if (*familyBudget)
-    limits.vgprFamily = (*familyBudget)->limit;
-  return limits;
-}
-
-static bool isWithinRegisterPressureLimits(
-    PeakRegisterPressure candidate, const RegisterPressureLimits &limits,
-    std::optional<PeakRegisterPressure> current = std::nullopt) {
-  unsigned sgprLimit =
-      current ? std::max(limits.sgpr, current->sgpr) : limits.sgpr;
-  if (candidate.sgpr > sgprLimit)
-    return false;
-  if (limits.vgprFamily) {
-    unsigned familyLimit =
-        current ? std::max(*limits.vgprFamily, current->vgprFamily)
-                : *limits.vgprFamily;
-    return candidate.vgprFamily <= familyLimit;
-  }
-  unsigned vgprLimit =
-      current ? std::max(limits.vgpr, current->vgpr) : limits.vgpr;
-  unsigned agprLimit =
-      current ? std::max(limits.agpr, current->agpr) : limits.agpr;
-  return candidate.vgpr <= vgprLimit && candidate.agpr <= agprLimit;
-}
-
-static FailureOr<bool> isRegisterPressureSafe(const GreedyRegion &region,
-                                              ArrayRef<unsigned> order) {
-  FailureOr<PeakRegisterPressure> candidate =
-      getCandidateRegisterPressure(region, order);
-  FailureOr<RegisterPressureLimits> limits =
-      getRegisterPressureLimits(region.func);
-  if (failed(candidate) || failed(limits))
-    return failure();
-  if (isWithinRegisterPressureLimits(*candidate, *limits))
-    return true;
-
-  FailureOr<PeakRegisterPressure> current =
-      getCurrentRegisterPressure(region.func);
-  if (failed(current))
-    return failure();
-  return isWithinRegisterPressureLimits(*candidate, *limits, *current);
-}
-
-struct RegisterPressurePolicy {
-  bool *enabled;
-  bool changedOrder;
-};
-
-enum class RegisterPressureDecision : uint8_t {
-  Accept,
-  Retry,
-  KeepOriginal,
-};
-
-static FailureOr<RegisterPressureDecision>
-resolveRegisterPressure(const GreedyRegion &region, ArrayRef<unsigned> order,
-                        bool orderChanged, bool requireSafeOrder,
-                        ArrayRef<RegisterPressurePolicy> policies) {
-  if (!orderChanged)
-    return RegisterPressureDecision::Accept;
-
-  bool hasChangedPolicy =
-      llvm::any_of(policies, [](RegisterPressurePolicy policy) {
-        return policy.changedOrder;
-      });
-  if (!requireSafeOrder && !hasChangedPolicy)
-    return RegisterPressureDecision::Accept;
-
-  FailureOr<bool> pressureSafe = isRegisterPressureSafe(region, order);
-  if (failed(pressureSafe))
-    return failure();
-  if (*pressureSafe)
-    return RegisterPressureDecision::Accept;
-
-  for (RegisterPressurePolicy policy : policies) {
-    if (*policy.enabled && policy.changedOrder) {
-      *policy.enabled = false;
-      return RegisterPressureDecision::Retry;
-    }
-  }
-  return RegisterPressureDecision::KeepOriginal;
-}
-
 static bool hasSeenOrder(ArrayRef<SmallVector<unsigned, 16>> seen,
                          ArrayRef<unsigned> order) {
   return llvm::any_of(
@@ -4145,8 +3860,8 @@ static GreedyResult refineSteadyStateGreedyOrder(
   SmallVector<SmallVector<unsigned, 16>, 4> seenOrders{currentOrder};
   unsigned refinements = 0;
 
-  FailureOr<std::unique_ptr<IssueState>> replayed =
-      replayLoopOrder(region, currentOrder, arch, config, origins, staticInfo);
+  FailureOr<std::unique_ptr<IssueState>> replayed = replayLoopOrder(
+      region, currentOrder, arch, config, origins, staticInfo, scheduleModel);
   if (failed(replayed))
     return failGreedyModel(best);
   std::unique_ptr<IssueState> entryState = std::move(*replayed);
@@ -4166,13 +3881,12 @@ static GreedyResult refineSteadyStateGreedyOrder(
 
     seenOrders.push_back(stableCandidate.order);
     best = std::move(stableCandidate);
-    best.steadyStateOrder = true;
     currentOrder = best.order;
     if (refinement + 1 == kSteadyStateRefinementLimit)
       break;
 
     FailureOr<std::unique_ptr<IssueState>> candidateState = replayLoopOrder(
-        region, currentOrder, arch, config, origins, staticInfo);
+        region, currentOrder, arch, config, origins, staticInfo, scheduleModel);
     if (failed(candidateState))
       return failGreedyModel(best);
     entryState = std::move(*candidateState);
@@ -4294,11 +4008,11 @@ using MultiWaveRegionLists =
     std::array<SmallVector<GreedyRegion, 16>, kMultiWaveClassCount>;
 
 static waveamdmachine::InstructionExecutionConfig
-buildMultiWaveInstructionConfig(const waveamdmachine::ArchData &arch,
-                                const waveamdmachine::EventSimConfig &config,
-                                Operation *context) {
+buildMultiWaveInstructionConfig(
+    const waveamdmachine::EventSimConfig &config,
+    const WaveAMDMachineScheduleModel &scheduleModel) {
   waveamdmachine::InstructionExecutionConfig stateConfig =
-      buildWaveAMDMachineInstructionConfig(arch, config, context);
+      scheduleModel.buildInstructionConfig(config);
   stateConfig.smoothLdsDmaIssue = false;
   stateConfig.enablePipeBackpressure = true;
   stateConfig.valuMaxInFlight = 1;
@@ -4393,34 +4107,6 @@ static LogicalResult verifySameBarrier(Operation *left, Operation *right) {
 
 using MultiWaveGreedyResults = std::array<GreedyResult, kMultiWaveClassCount>;
 
-struct GreedyPolicyConfig {
-  bool prioritizeRecurrences = true;
-  bool prioritizeLongLatencyVmem = true;
-  bool prioritizeComputeResources = true;
-  bool prioritizeLatency = true;
-};
-
-static FailureOr<RegisterPressureDecision> resolveGreedyRegisterPressure(
-    const GreedyRegion &region, ArrayRef<unsigned> originalOrder,
-    const GreedyResult &greedy, GreedyPolicyConfig &policy) {
-  std::array policies{
-      RegisterPressurePolicy{&policy.prioritizeRecurrences,
-                             greedy.stats.recurrenceModelMoves != 0},
-      RegisterPressurePolicy{&policy.prioritizeLongLatencyVmem,
-                             greedy.stats.longLatencyVmemPrefetchMoves != 0},
-      RegisterPressurePolicy{&policy.prioritizeLatency,
-                             greedy.stats.latencyPriorityMoves != 0},
-      RegisterPressurePolicy{&policy.prioritizeComputeResources,
-                             hasComputeResourceMoves(greedy.stats)}};
-  bool requireSafeOrder =
-      greedy.steadyStateOrder || greedy.stats.pressurePriorityMoves != 0;
-  return resolveRegisterPressure(region, greedy.order,
-                                 !sameOrder(originalOrder, greedy.order),
-                                 requireSafeOrder, policies);
-}
-
-using MultiWavePolicies = std::array<GreedyPolicyConfig, kMultiWaveClassCount>;
-
 // Coordinator picks a class; buildGreedyStep owns every ordering choice.
 class MultiWaveGreedyCoordinator {
 public:
@@ -4431,13 +4117,12 @@ public:
       const waveamdmachine::ArchData &arch,
       const waveamdmachine::EventSimConfig &config,
       ArrayRef<waveamdmachine::WavePlacement> placements,
-      const MultiWavePolicies &policies,
       const waveamdmachine::MultiWaveExecutionState *steadyState)
       : regions(regions), graphs(graphs), origins(origins), arch(arch),
-        config(config), policies(policies), scheduleModel(scheduleModel),
+        config(config), scheduleModel(scheduleModel),
         localState(std::make_unique<waveamdmachine::MultiWaveExecutionState>(
             arch, placements,
-            buildMultiWaveInstructionConfig(arch, config, regions[0].first))) {
+            buildMultiWaveInstructionConfig(config, scheduleModel))) {
     if (steadyState)
       this->steadyState =
           std::make_unique<waveamdmachine::MultiWaveExecutionState>(
@@ -4494,7 +4179,6 @@ private:
   const ValueOriginMap &origins;
   const waveamdmachine::ArchData &arch;
   const waveamdmachine::EventSimConfig &config;
-  const MultiWavePolicies &policies;
   const WaveAMDMachineScheduleModel &scheduleModel;
   std::unique_ptr<waveamdmachine::MultiWaveExecutionState> localState;
   std::unique_ptr<waveamdmachine::MultiWaveExecutionState> steadyState;
@@ -4563,11 +4247,11 @@ LogicalResult MultiWaveGreedyCoordinator::advanceClass(unsigned classId,
   GreedyOrderState &classState = *classes[classId];
   size_t previousSize = classState.result.order.size();
   loadModel(classId);
-  const GreedyPolicyConfig &policy = policies[classId];
   FailureOr<GreedyStepStatus> step = classState.step(
       regions[classId], graphs[classId], arch, config, origins,
-      policy.prioritizeRecurrences, policy.prioritizeLongLatencyVmem,
-      policy.prioritizeComputeResources, policy.prioritizeLatency);
+      /*prioritizeRecurrences=*/true,
+      /*prioritizeLongLatencyVmem=*/true,
+      /*prioritizeComputeResources=*/true, /*prioritizeLatency=*/true);
   if (failed(step))
     return failure();
   if (*step == GreedyStepStatus::Blocked)
@@ -4774,10 +4458,10 @@ replayMultiWaveOrders(const MultiWaveRegions &regions,
                       const waveamdmachine::ArchData &arch,
                       const waveamdmachine::EventSimConfig &config,
                       const ValueOriginMap &origins,
-                      ArrayRef<waveamdmachine::WavePlacement> placements) {
+                      ArrayRef<waveamdmachine::WavePlacement> placements,
+                      const WaveAMDMachineScheduleModel &scheduleModel) {
   auto state = std::make_unique<waveamdmachine::MultiWaveExecutionState>(
-      arch, placements,
-      buildMultiWaveInstructionConfig(arch, config, regions[0].first));
+      arch, placements, buildMultiWaveInstructionConfig(config, scheduleModel));
   initializeMultiWaveState(*state, regions, origins);
   MultiWaveOrderReplay replay(regions, orders, origins, *state,
                               kSteadyStateIterations);
@@ -4800,11 +4484,10 @@ static FailureOr<MultiWaveGreedyResults> buildMultiWaveGreedyResults(
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     const WaveAMDMachineScheduleModel &scheduleModel,
     ArrayRef<waveamdmachine::WavePlacement> placements,
-    const MultiWavePolicies &policies,
     const waveamdmachine::MultiWaveExecutionState *steadyState = nullptr) {
   MultiWaveGreedyCoordinator coordinator(regions, graphs, origins,
                                          scheduleModel, arch, config,
-                                         placements, policies, steadyState);
+                                         placements, steadyState);
   return coordinator.run();
 }
 
@@ -4842,10 +4525,6 @@ initializeMultiWaveRefinement(MultiWaveGreedyResults best) {
 static void acceptMultiWaveRefinement(MultiWaveRefinementState &state,
                                       MultiWaveGreedyResults candidate,
                                       MultiWaveOrders candidateOrders) {
-  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount))
-    candidate[classId].steadyStateOrder =
-        state.best[classId].steadyStateOrder ||
-        !sameOrder(state.best[classId].order, candidate[classId].order);
   state.best = std::move(candidate);
   state.current = std::move(candidateOrders);
   state.seen.push_back(state.current);
@@ -4857,15 +4536,15 @@ static FailureOr<bool> refineMultiWaveGreedyOnce(
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     const WaveAMDMachineScheduleModel &scheduleModel,
     ArrayRef<waveamdmachine::WavePlacement> placements,
-    const MultiWavePolicies &policies, MultiWaveRefinementState &refinement) {
+    MultiWaveRefinementState &refinement) {
   FailureOr<std::unique_ptr<waveamdmachine::MultiWaveExecutionState>> state =
       replayMultiWaveOrders(regions, refinement.current, arch, config, origins,
-                            placements);
+                            placements, scheduleModel);
   if (failed(state))
     return failure();
-  FailureOr<MultiWaveGreedyResults> candidate = buildMultiWaveGreedyResults(
-      regions, graphs, arch, config, origins, scheduleModel, placements,
-      policies, state->get());
+  FailureOr<MultiWaveGreedyResults> candidate =
+      buildMultiWaveGreedyResults(regions, graphs, arch, config, origins,
+                                  scheduleModel, placements, state->get());
   if (failed(candidate))
     return failure();
   ++refinement.refinements;
@@ -4899,11 +4578,9 @@ static FailureOr<MultiWaveGreedyResults> buildBoundedMultiWaveGreedyResults(
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
     const WaveAMDMachineScheduleModel &scheduleModel,
-    ArrayRef<waveamdmachine::WavePlacement> placements,
-    const MultiWavePolicies &policies) {
-  FailureOr<MultiWaveGreedyResults> first =
-      buildMultiWaveGreedyResults(regions, graphs, arch, config, origins,
-                                  scheduleModel, placements, policies);
+    ArrayRef<waveamdmachine::WavePlacement> placements) {
+  FailureOr<MultiWaveGreedyResults> first = buildMultiWaveGreedyResults(
+      regions, graphs, arch, config, origins, scheduleModel, placements);
   if (failed(first) || !areCompleteMultiWaveLoops(regions))
     return first;
 
@@ -4911,9 +4588,9 @@ static FailureOr<MultiWaveGreedyResults> buildBoundedMultiWaveGreedyResults(
       initializeMultiWaveRefinement(std::move(*first));
   for ([[maybe_unused]] unsigned iteration :
        llvm::seq<unsigned>(kSteadyStateRefinementLimit)) {
-    FailureOr<bool> changed = refineMultiWaveGreedyOnce(
-        regions, graphs, arch, config, origins, scheduleModel, placements,
-        policies, refinement);
+    FailureOr<bool> changed =
+        refineMultiWaveGreedyOnce(regions, graphs, arch, config, origins,
+                                  scheduleModel, placements, refinement);
     if (failed(changed))
       return failure();
     if (!*changed)
@@ -5074,28 +4751,6 @@ getOriginalMultiWaveOrders(const MultiWaveRegions &regions) {
   return orders;
 }
 
-static FailureOr<bool> resolveMultiWaveRegisterPressure(
-    const MultiWaveRegions &regions, const MultiWaveOrders &originalOrders,
-    MultiWaveGreedyResults &greedy, MultiWavePolicies &policies) {
-  bool retry = false;
-  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
-    FailureOr<RegisterPressureDecision> decision =
-        resolveGreedyRegisterPressure(regions[classId], originalOrders[classId],
-                                      greedy[classId], policies[classId]);
-    if (failed(decision))
-      return failure();
-    if (*decision == RegisterPressureDecision::Retry) {
-      retry = true;
-      continue;
-    }
-    if (*decision == RegisterPressureDecision::KeepOriginal) {
-      greedy[classId].order = originalOrders[classId];
-      greedy[classId].pressureFallback = true;
-    }
-  }
-  return retry;
-}
-
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
@@ -5180,7 +4835,8 @@ struct WaveAMDMachineSchedulePass
     TimingScope livenessTiming = timing.nest("machine_schedule_build_liveness");
     // Region-local moves preserve cross-region liveness classification.
     FailureOr<WaveAMDMachineScheduleModel> scheduleModel =
-        WaveAMDMachineScheduleModel::create(func, *arch.arch);
+        WaveAMDMachineScheduleModel::create(func, *arch.arch,
+                                            modelConfig->wavefrontSize);
     if (failed(scheduleModel))
       return WalkResult::interrupt();
     livenessTiming.stop();
@@ -5223,9 +4879,7 @@ struct WaveAMDMachineSchedulePass
                                  ArrayRef<unsigned> originalOrder,
                                  const GreedyResult &greedy) {
     if (sameOrder(originalOrder, greedy.order)) {
-      printDecision(region, "keep",
-                    greedy.pressureFallback ? "pressure" : "same_order",
-                    greedy.stats);
+      printDecision(region, "keep", "same_order", greedy.stats);
       return success();
     }
 
@@ -5252,71 +4906,34 @@ struct WaveAMDMachineSchedulePass
     graphTiming.stop();
 
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
-    GreedyPolicyConfig policy;
-    GreedyResult greedy;
-    while (true) {
-      TimingScope orderTiming = timing.nest("machine_schedule_build_order");
-      greedy = buildBoundedGreedyOrder(
-          region, graph, arch, config, origins, scheduleModel,
-          policy.prioritizeRecurrences, policy.prioritizeLongLatencyVmem,
-          policy.prioritizeComputeResources, policy.prioritizeLatency);
-      if (!greedy.success)
-        return emitGreedyFailure(region, greedy);
-      orderTiming.stop();
-      TimingScope pressureTiming =
-          timing.nest("machine_schedule_pressure_checks");
-      FailureOr<RegisterPressureDecision> decision =
-          resolveGreedyRegisterPressure(region, originalOrder, greedy, policy);
-      if (failed(decision))
-        return failure();
-      if (*decision == RegisterPressureDecision::Retry)
-        continue;
-      if (*decision == RegisterPressureDecision::KeepOriginal) {
-        greedy.order = originalOrder;
-        greedy.pressureFallback = true;
-      }
-      pressureTiming.stop();
-      break;
-    }
+    TimingScope orderTiming = timing.nest("machine_schedule_build_order");
+    GreedyResult greedy = buildBoundedGreedyOrder(region, graph, arch, config,
+                                                  origins, scheduleModel);
+    if (!greedy.success)
+      return emitGreedyFailure(region, greedy);
+    orderTiming.stop();
 
     TimingScope applyTiming = timing.nest("machine_schedule_apply_order");
     return applyGreedyOrder(region, originalOrder, greedy);
   }
 
-  FailureOr<MultiWaveGreedyResults> buildPressureSafeMultiWaveOrder(
+  FailureOr<MultiWaveGreedyResults> buildMultiWaveOrder(
       waveamdmachine::UniformIfOp uniformIf, const MultiWaveRegions &regions,
       const MultiWaveGraphs &graphs, const waveamdmachine::ArchData &arch,
       const waveamdmachine::EventSimConfig &config,
       const ValueOriginMap &origins,
       const WaveAMDMachineScheduleModel &scheduleModel,
       ArrayRef<waveamdmachine::WavePlacement> placements,
-      const MultiWaveOrders &originalOrders,
       MachineScheduleStageTiming &timing) {
-    MultiWavePolicies policies;
-    while (true) {
-      TimingScope orderTiming =
-          timing.nest("machine_schedule_build_joint_order");
-      FailureOr<MultiWaveGreedyResults> candidate =
-          buildBoundedMultiWaveGreedyResults(regions, graphs, arch, config,
-                                             origins, scheduleModel, placements,
-                                             policies);
-      if (failed(candidate)) {
-        uniformIf.emitOpError("joint greedy scheduling failed");
-        return failure();
-      }
-      MultiWaveGreedyResults greedy = std::move(*candidate);
-      orderTiming.stop();
-
-      TimingScope pressureTiming =
-          timing.nest("machine_schedule_pressure_checks");
-      FailureOr<bool> retry = resolveMultiWaveRegisterPressure(
-          regions, originalOrders, greedy, policies);
-      if (failed(retry))
-        return failure();
-      pressureTiming.stop();
-      if (!*retry)
-        return greedy;
+    TimingScope orderTiming = timing.nest("machine_schedule_build_joint_order");
+    FailureOr<MultiWaveGreedyResults> candidate =
+        buildBoundedMultiWaveGreedyResults(regions, graphs, arch, config,
+                                           origins, scheduleModel, placements);
+    if (failed(candidate)) {
+      uniformIf.emitOpError("joint greedy scheduling failed");
+      return failure();
     }
+    return candidate;
   }
 
   LogicalResult
@@ -5340,9 +4957,9 @@ struct WaveAMDMachineSchedulePass
     graphTiming.stop();
 
     MultiWaveOrders originalOrders = getOriginalMultiWaveOrders(regions);
-    FailureOr<MultiWaveGreedyResults> greedy = buildPressureSafeMultiWaveOrder(
-        uniformIf, regions, graphs, arch, config, origins, scheduleModel,
-        placements, originalOrders, timing);
+    FailureOr<MultiWaveGreedyResults> greedy =
+        buildMultiWaveOrder(uniformIf, regions, graphs, arch, config, origins,
+                            scheduleModel, placements, timing);
     if (failed(greedy))
       return failure();
 
@@ -5366,7 +4983,8 @@ struct WaveAMDMachineSchedulePass
     if (failed(collected))
       return failure();
     SmallVector<waveamdmachine::WavePlacement> placements =
-        waveamdmachine::getFullCUWavePlacements(arch, uniformIf);
+        waveamdmachine::getFullCUWavePlacements(
+            arch, scheduleModel.getTargetWaveCount());
     if (placements.empty())
       return uniformIf.emitOpError("invalid multi-wave occupancy");
 
@@ -5586,7 +5204,8 @@ struct WaveAMDMachineScheduleReportPass
     std::optional<WaveAMDMachineScheduleModel> scheduleModel;
     if (printCandidates) {
       FailureOr<WaveAMDMachineScheduleModel> built =
-          WaveAMDMachineScheduleModel::create(func, arch);
+          WaveAMDMachineScheduleModel::create(func, arch,
+                                              modelConfig->wavefrontSize);
       if (failed(built))
         return WalkResult::interrupt();
       scheduleModel.emplace(std::move(*built));

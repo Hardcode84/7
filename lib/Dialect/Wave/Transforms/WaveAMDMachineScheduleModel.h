@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace mlir {
 class Operation;
@@ -26,15 +27,10 @@ namespace waveamdmachine {
 struct ArchData;
 struct EventSimConfig;
 struct InstructionExecutionConfig;
-struct ReadyCandidateMetrics;
-struct ReadyRegisterPressure;
+class InstructionScheduleModel;
 } // namespace waveamdmachine
 
 namespace wave {
-
-waveamdmachine::InstructionExecutionConfig buildWaveAMDMachineInstructionConfig(
-    const waveamdmachine::ArchData &arch,
-    const waveamdmachine::EventSimConfig &config, Operation *context);
 
 struct ReadyScheduleWorkStats {
   uint64_t stateBuilds = 0;
@@ -42,9 +38,33 @@ struct ReadyScheduleWorkStats {
   uint64_t projections = 0;
   uint64_t projectedNodes = 0;
   uint64_t projectionChecks = 0;
+  uint64_t pressureSelections = 0;
+  uint64_t pressureRejections = 0;
+  uint64_t proposalSelections = 0;
+  uint64_t proposalRejections = 0;
 };
 
-class ReadyScheduleState;
+enum class ReadyScheduleProposalKind : uint8_t {
+  Direct,
+  RankedFiller,
+  ResourceStallFiller,
+  ResourcePriority,
+};
+
+struct ReadyScheduleProposal {
+  unsigned candidate = 0;
+  ReadyScheduleProposalKind kind = ReadyScheduleProposalKind::Direct;
+  unsigned group = 0;
+  uint64_t rank = 0;
+  int64_t waitSlots = 0;
+  unsigned releaseSlots = 0;
+};
+
+struct ReadyScheduleDecision {
+  std::optional<unsigned> candidate;
+  bool selectedProposal = false;
+  bool suppressFallback = false;
+};
 
 class RegionScheduleSession {
 public:
@@ -55,13 +75,11 @@ public:
   RegionScheduleSession(const RegionScheduleSession &) = delete;
   RegionScheduleSession &operator=(const RegionScheduleSession &) = delete;
 
-  const ReadyScheduleState &
-  getReadyState(const llvm::BitVector &scheduled) const;
-  waveamdmachine::ReadyRegisterPressure
-  getReadyPressure(const ReadyScheduleState &state) const;
-  waveamdmachine::ReadyCandidateMetrics
-  getReadyCandidateMetrics(unsigned candidate,
-                           const ReadyScheduleState &state) const;
+  ReadyScheduleDecision
+  selectNext(const llvm::BitVector &scheduled, unsigned baseline,
+             const llvm::BitVector &legalReadyCandidates,
+             ArrayRef<ReadyScheduleProposal> proposals,
+             const waveamdmachine::InstructionScheduleModel &policy) const;
   ReadyScheduleWorkStats getWorkStats() const;
 
 private:
@@ -74,7 +92,8 @@ private:
 class WaveAMDMachineScheduleModel {
 public:
   static FailureOr<WaveAMDMachineScheduleModel>
-  create(func::FuncOp func, const waveamdmachine::ArchData &arch);
+  create(func::FuncOp func, const waveamdmachine::ArchData &arch,
+         unsigned wavefrontSize);
 
   WaveAMDMachineScheduleModel(WaveAMDMachineScheduleModel &&);
   WaveAMDMachineScheduleModel &operator=(WaveAMDMachineScheduleModel &&);
@@ -83,6 +102,10 @@ public:
   WaveAMDMachineScheduleModel(const WaveAMDMachineScheduleModel &) = delete;
   WaveAMDMachineScheduleModel &
   operator=(const WaveAMDMachineScheduleModel &) = delete;
+
+  waveamdmachine::InstructionExecutionConfig
+  buildInstructionConfig(const waveamdmachine::EventSimConfig &config) const;
+  unsigned getTargetWaveCount() const;
 
   // Session borrows operations and graph topology.
   RegionScheduleSession

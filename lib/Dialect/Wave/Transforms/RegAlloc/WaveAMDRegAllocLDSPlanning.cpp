@@ -56,11 +56,11 @@ static std::optional<unsigned> getUnsignedAttr(Operation *op, StringRef name) {
   IntegerAttr attr = op->getAttrOfType<IntegerAttr>(name);
   if (!attr)
     return std::nullopt;
-  int64_t value = attr.getInt();
-  if (value < 0 ||
-      static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+  const APInt &value = attr.getValue();
+  if ((!attr.getType().isUnsignedInteger() && value.isNegative()) ||
+      value.getActiveBits() > std::numeric_limits<unsigned>::digits)
     return std::nullopt;
-  return static_cast<unsigned>(value);
+  return static_cast<unsigned>(value.getZExtValue());
 }
 
 static unsigned getLDSAttr(func::FuncOp func, StringRef machineName,

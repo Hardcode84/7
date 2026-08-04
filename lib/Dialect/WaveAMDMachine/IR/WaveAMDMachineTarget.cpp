@@ -142,6 +142,9 @@ mlir::waveamdmachine::getAMDGPUTarget(Operation *op, StringRef consumer) {
 
   StringAttr targetAttr =
       mod->getAttrOfType<StringAttr>("waveamdmachine.target");
+  if (!targetAttr)
+    return mod.emitError(consumer)
+           << " requires waveamdmachine.target to be a string attribute";
   return parseAMDGPUTargetAttr(targetAttr.getValue(),
                                [&]() { return mod.emitError(); });
 }

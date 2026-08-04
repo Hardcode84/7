@@ -44,14 +44,15 @@ static FailureOr<unsigned> getLDSTransformTargetWaves(func::FuncOp func) {
   if (!intAttr)
     return func.emitError("regalloc transform LDS relief target_waves must be "
                           "an integer attribute");
-  int64_t value = intAttr.getInt();
-  if (value <= 0)
+  const APInt &value = intAttr.getValue();
+  if (value.isZero() ||
+      (!intAttr.getType().isUnsignedInteger() && value.isNegative()))
     return func.emitError(
         "regalloc transform LDS relief target_waves must be positive");
-  if (static_cast<uint64_t>(value) > std::numeric_limits<unsigned>::max())
+  if (value.getActiveBits() > std::numeric_limits<unsigned>::digits)
     return func.emitError(
         "regalloc transform LDS relief target_waves exceeds supported range");
-  return static_cast<unsigned>(value);
+  return static_cast<unsigned>(value.getZExtValue());
 }
 
 static FailureOr<wave::regalloc::RegisterBudgets>

@@ -12,7 +12,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @keep_wave_conditional_barrier(
       %cond: !waveamdmachine.reg<scc, 1>)
       attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>,
-                  wave.waves_per_workgroup = 8 : i64,
+                  wave.waves_per_workgroup = 8 : ui4,
                   waveamdmachine.enable_split_barriers} {
     %root = waveamdmachine.token : !waveamdmachine.mem.token
     %ready = waveamdmachine.s_barrier %root

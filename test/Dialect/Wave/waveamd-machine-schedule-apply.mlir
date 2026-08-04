@@ -13,7 +13,6 @@
 // TIMING: machine_schedule_build_liveness
 // TIMING: machine_schedule_build_graph
 // TIMING: machine_schedule_build_order
-// TIMING: machine_schedule_pressure_checks
 // TIMING: machine_schedule_apply_order
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
@@ -276,7 +275,8 @@ func.func @long_latency_prefetch_respects_repeated_loop_carry_pressure(
     %a: !waveamdmachine.reg<vgpr, 1>,
     %b: !waveamdmachine.reg<vgpr, 1>,
     %cond: !waveamdmachine.reg<scc, 1>)
-    attributes {waveamdmachine.vgpr_count_max = 96 : i64} {
+    attributes {waveamdmachine.target_waves = 2 : i64,
+                waveamdmachine.vgpr_count_max = 96 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %wide = waveamdmachine.v_mov_b32_tuple %zero {registers = 32 : i64}
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 32>
@@ -373,14 +373,13 @@ func.func @long_latency_prefetch_respects_repeated_loop_carry_pressure(
 // IR: waveamdmachine.uniform_loop
 // IR: ^bb0
 // IR-NEXT: waveamdmachine.v_mov_b32_tuple
-// IR-NEXT: [[V0:%.*]] = waveamdmachine.v_add_u32
-// IR-NEXT: [[V1:%.*]] = waveamdmachine.v_add_u32 [[V0]]
 // IR-NEXT: [[LOADED:%.*]], {{%.*}} = waveamdmachine.global_load_b64
-// IR: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[LOADED]]
+// IR-NEXT: [[PARTS:%.*]]:2 = waveamdmachine.tuple_to_elements [[LOADED]]
+// IR-NEXT: [[V0:%.*]] = waveamdmachine.v_add_u32
 // IR: waveamdmachine.v_add_u32 {{%.*}}, [[PARTS]]#0
 // DIAG: waveamd-machine-schedule region func=long_latency_prefetch_respects_repeated_loop_carry_pressure index=1
 // DIAG-SAME: action=apply reason=vmem_prefetch
-// DIAG-SAME: long_latency_vmem_prefetch_moves=0
+// DIAG-SAME: long_latency_vmem_prefetch_moves=1
 
 // -----
 
@@ -1000,7 +999,7 @@ func.func @mfma_packed_coissue_stall_fill(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @single_wave_pressure_retry_drops_resource_filler(
+func.func @single_wave_pressure_guard_blocks_hazard_filler(
     %a: !waveamdmachine.reg<vgpr, 4>,
     %b: !waveamdmachine.reg<vgpr, 4>,
     %acc0: !waveamdmachine.reg<vgpr, 4>,
@@ -1031,14 +1030,14 @@ func.func @single_wave_pressure_retry_drops_resource_filler(
 }
 }
 
-// IR-LABEL: func.func @single_wave_pressure_retry_drops_resource_filler
+// IR-LABEL: func.func @single_wave_pressure_guard_blocks_hazard_filler
 // IR: waveamdmachine.mfma_f32_16x16x32_f16
 // IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
 // IR-NEXT: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements
-// IR-NEXT: [[SUM:%.*]], {{%.*}} = waveamdmachine.s_add_i32
 // IR-NEXT: waveamdmachine.v_add_u32 [[PARTS]]#0
+// IR-NEXT: [[SUM:%.*]], {{%.*}} = waveamdmachine.s_add_i32
 // IR-NEXT: return [[SUM]]
-// DIAG: waveamd-machine-schedule region func=single_wave_pressure_retry_drops_resource_filler
+// DIAG: waveamd-machine-schedule region func=single_wave_pressure_guard_blocks_hazard_filler
 // DIAG-SAME: resource_stall_fills=0
 
 // -----

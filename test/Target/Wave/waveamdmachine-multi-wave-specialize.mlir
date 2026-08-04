@@ -35,7 +35,7 @@ func.func @specialize(%cond: !waveamdmachine.reg<scc, 1>,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
                 waveamdmachine.enable_multi_wave_specialization,
                 waveamdmachine.schedule_input,
-                waveamdmachine.target_waves = 1 : i64} {
+                waveamdmachine.target_waves = 1 : ui2} {
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
   %limit = waveamdmachine.imm 8 : !waveamdmachine.imm
   %result = waveamdmachine.uniform_loop
@@ -336,11 +336,11 @@ func.func @nested_regions(
   return
 }
 
-// DIAG: waveamd-machine-schedule region func=pressure_fallback
-// DIAG-SAME: action=keep reason=pressure
-// DIAG-NEXT: waveamd-machine-schedule region func=pressure_fallback
+// DIAG: waveamd-machine-schedule region func=pressure_model
 // DIAG-SAME: action=apply reason=loop_wait
-func.func @pressure_fallback(
+// DIAG-NEXT: waveamd-machine-schedule region func=pressure_model
+// DIAG-SAME: action=apply reason=loop_wait
+func.func @pressure_model(
     %addr: !waveamdmachine.reg<vgpr, 1>,
     %off: !waveamdmachine.reg<vgpr, 1>,
     %d0: !waveamdmachine.reg<sgpr, 1>,
@@ -412,7 +412,6 @@ func.func @conflicting_shapes(%cond: !waveamdmachine.reg<scc, 1>)
                 wave.kernel,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
                 waveamdmachine.enable_multi_wave_specialization,
-                waveamdmachine.schedule_input,
                 waveamdmachine.target_waves = 1 : i64} {
   waveamdmachine.uniform_loop {
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
@@ -428,7 +427,6 @@ func.func @conflicting_wave_count(%cond: !waveamdmachine.reg<scc, 1>)
                 wave.waves_per_workgroup = 8 : i64,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
                 waveamdmachine.enable_multi_wave_specialization,
-                waveamdmachine.schedule_input,
                 waveamdmachine.target_waves = 1 : i64} {
   waveamdmachine.uniform_loop {
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>

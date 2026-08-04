@@ -114,6 +114,17 @@ deriveWorkgroupWaves(std::optional<uint64_t> flat, unsigned wavefront) {
   return std::optional<unsigned>(static_cast<unsigned>(waves));
 }
 
+static std::optional<unsigned> getPositiveUnsignedValue(IntegerAttr attr) {
+  if (!attr)
+    return std::nullopt;
+  const APInt &value = attr.getValue();
+  if (value.isZero() ||
+      (!attr.getType().isUnsignedInteger() && value.isNegative()) ||
+      value.getActiveBits() > std::numeric_limits<unsigned>::digits)
+    return std::nullopt;
+  return static_cast<unsigned>(value.getZExtValue());
+}
+
 static std::optional<unsigned> getWorkgroupWaves(func::FuncOp func) {
   FailureOr<std::optional<uint64_t>> flat = getFlatWorkgroupSize(func);
   FailureOr<unsigned> wavefront = waveamdmachine::getAMDGPUWavefrontSize(
@@ -129,10 +140,11 @@ static std::optional<unsigned> getWorkgroupWaves(func::FuncOp func) {
       func->getAttrOfType<IntegerAttr>("wave.waves_per_workgroup");
   if (!explicitAttr)
     return *derived;
-  if (explicitAttr.getInt() <= 0)
+  std::optional<unsigned> explicitWaves =
+      getPositiveUnsignedValue(explicitAttr);
+  if (!explicitWaves)
     return std::nullopt;
-  unsigned explicitWaves = explicitAttr.getValue().getLimitedValue();
-  if (*derived && **derived != explicitWaves)
+  if (*derived && **derived != *explicitWaves)
     return std::nullopt;
   return explicitWaves;
 }
@@ -140,9 +152,7 @@ static std::optional<unsigned> getWorkgroupWaves(func::FuncOp func) {
 static std::optional<unsigned> getTargetWaves(func::FuncOp func) {
   IntegerAttr attr =
       func->getAttrOfType<IntegerAttr>("waveamdmachine.target_waves");
-  if (!attr || attr.getInt() <= 0)
-    return std::nullopt;
-  return attr.getValue().getLimitedValue();
+  return getPositiveUnsignedValue(attr);
 }
 
 static bool isSupportedResultType(Type type) {

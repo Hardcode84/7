@@ -89,11 +89,6 @@ SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
   return placements;
 }
 
-SmallVector<WavePlacement> getFullCUWavePlacements(const ArchData &arch,
-                                                   Operation *context) {
-  return getFullCUWavePlacements(arch, getTargetWaveCount(context));
-}
-
 MultiWaveExecutionState::MultiWaveExecutionState(
     const ArchData &arch, ArrayRef<WavePlacement> placements,
     InstructionExecutionConfig config)

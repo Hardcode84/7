@@ -362,8 +362,10 @@ public:
     if (func.isExternal())
       return std::move(result);
     flow.emplace(func);
-    coalesceMFMAAccResult = shouldCoalesceMFMAAccResult(func);
-    if (failed(walkRegion(func.getBody())))
+    coalesceMFMAAccResult =
+        aliasPolicy != wave::WaveAMDLiveIntervalAliasPolicy::Conservative &&
+        shouldCoalesceMFMAAccResult(func);
+    if (failed(walkFunctionBody(func)))
       return failure();
     if (hasOrderOverride && !usedOrderOverride)
       return func.emitError("live interval order override block not visited");
@@ -392,6 +394,18 @@ private:
     const RegionBranch *branch = nullptr;
     bool repetitive = false;
   };
+
+  LogicalResult walkFunctionBody(func::FuncOp func) {
+    for (Block &block : func.getBody()) {
+      for (BlockArgument argument : block.getArguments())
+        if (!argument.use_empty())
+          (void)ensureInterval(argument, cursor, result.intervals, func,
+                               includeAllocated);
+      if (failed(walkBlock(block)))
+        return failure();
+    }
+    return success();
+  }
 
   void appendOriginalBlockOps(Block &block, SmallVectorImpl<Operation *> &ops) {
     for (Operation &op : block)

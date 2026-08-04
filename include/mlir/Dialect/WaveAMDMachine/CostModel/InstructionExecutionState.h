@@ -96,7 +96,10 @@ struct ReadyRegisterPressureCeiling {
 
 struct ReadyCandidateMetrics {
   ReadyRegisterPressure pressureDelta;
+  ReadyRegisterPressure pressurePeakDelta;
+  int64_t vgprFamilyPeakDelta = 0;
   ReadyRegisterPressureCeiling pressureCeiling;
+  unsigned autoDrainedNodes = 0;
 };
 
 struct ReadyRegisterPressureLimits {
@@ -182,28 +185,38 @@ public:
       FunctionalUnit blocked, int64_t waitSlots, unsigned releaseSlots,
       FunctionalUnit candidate, int64_t candidateWaitSlots,
       unsigned candidateReleaseSlots, unsigned selectedReleaseSlots) const;
-  bool canSelectReadyCandidate(ReadyRegisterPressure current,
-                               const ReadyCandidateMetrics &candidate,
-                               const ReadyCandidateMetrics &baseline) const;
+  bool
+  canSelectReadyCandidate(ReadyRegisterPressure current,
+                          const ReadyCandidateMetrics &candidateThenBaseline,
+                          const ReadyCandidateMetrics &baseline) const;
+  bool
+  canSelectReadyFullPrefix(ReadyRegisterPressure current,
+                           const ReadyCandidateMetrics &candidateThenBaseline,
+                           const ReadyCandidateMetrics &baseline) const;
   bool canSelectReadyFiller(ReadyRegisterPressure current,
                             const ReadyCandidateMetrics &candidate,
+                            const ReadyCandidateMetrics &candidateThenBaseline,
                             const ReadyCandidateMetrics &baseline) const;
-  bool shouldPreferReadyPressure(ReadyRegisterPressure current,
-                                 const ReadyCandidateMetrics &candidate,
-                                 const ReadyCandidateMetrics &selected) const;
+  bool
+  shouldPreferReadyPressure(ReadyRegisterPressure current,
+                            const ReadyCandidateMetrics &candidate,
+                            const ReadyCandidateMetrics &candidateThenSelected,
+                            const ReadyCandidateMetrics &selectedThenCandidate,
+                            const ReadyCandidateMetrics &selected) const;
   bool shouldPreferReadyFiller(ReadyRegisterPressure current,
                                const ReadyCandidateMetrics &candidate,
                                const ReadyCandidateMetrics &selected) const;
 
 private:
-  friend void
-  configureInstructionScheduleModel(InstructionExecutionConfig &config,
-                                    const ArchData &arch, Operation *context,
-                                    ReadyRegisterPressureLimits pressureLimits);
+  friend void configureInstructionScheduleModel(
+      InstructionExecutionConfig &config, const ArchData &arch,
+      unsigned targetWaveCount, unsigned readyPressureWaveCohort,
+      ReadyRegisterPressureLimits pressureLimits);
 
   ReadyRegisterPressureLimits pressureLimits;
   int64_t ldsDmaIssueLead = 0;
   unsigned issueStreams = 1;
+  unsigned readyPressureWaveCohort = 1;
   bool enableCoexecWindow = true;
 };
 
@@ -229,9 +242,8 @@ struct InstructionExecutionConfig {
 
 void configureInstructionScheduleModel(
     InstructionExecutionConfig &config, const ArchData &arch,
-    Operation *context, ReadyRegisterPressureLimits pressureLimits = {});
-unsigned getTargetWaveCount(Operation *context);
-
+    unsigned targetWaveCount, unsigned readyPressureWaveCohort,
+    ReadyRegisterPressureLimits pressureLimits = {});
 bool isInstructionExecutionStateArchSupported(
     const llvm::AMDGPU::IsaVersion &isa);
 
