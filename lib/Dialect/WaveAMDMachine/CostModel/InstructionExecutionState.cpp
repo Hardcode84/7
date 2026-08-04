@@ -90,8 +90,7 @@ void InstructionScheduleResourceState::commit(
     return;
   }
   size_t index = static_cast<size_t>(resource.functionalUnit);
-  unsigned releaseSlots =
-      std::max<unsigned>(resource.releaseSlots, info.issueSlots);
+  unsigned releaseSlots = std::max(resource.releaseSlots, info.issueSlots);
   readyAt[index] = issueSlot + releaseSlots;
   if (trackMfmaCoissue && info.usesMfmaCoissue)
     mfmaCoissueReadyAt = issueSlot + releaseSlots;
@@ -1357,12 +1356,12 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.noMachineInst = cls == SchedClass::NoInst;
   desc.legacyVALU = isLegacyVALU(op);
   desc.trans = cls == SchedClass::WriteTrans32;
-  desc.mfmaCoissueResource = usesMfmaCoissueResource(op, cls, arch);
   desc.laneRead = desc.legacyVALU &&
                   hasRegClass(op->getOperands(), RegClass::VGPR) &&
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
   desc.resourceDuration = getResourceCycles(arch, cls);
+  desc.mfmaCoissueResource = usesMfmaCoissueResource(op, cls, arch);
   desc.instructionIssueCount =
       getInstructionIssueCount(op, arch.isa, config.wavefrontSize);
   desc.coexecution = config.scheduleModel.applyCoexecutionPolicy(

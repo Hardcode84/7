@@ -11,7 +11,7 @@
 #include "WaveAMDMachineScheduleEligibility.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
-#include "mlir/Dialect/WaveAMDMachine/CostModel/LatencyTable.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/OpClassifier.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -222,7 +222,9 @@ static void commitOperation(Operation *op, const ArchData &arch,
   if (cls == SchedClass::NoInst)
     return;
 
-  unsigned issues = getInstructionIssueCount(op, arch.isa, wavefrontSize);
+  InstructionScheduleResourceInfo resource =
+      getInstructionScheduleResourceInfo(op, cls, arch, wavefrontSize);
+  unsigned issues = resource.issueSlots;
   FunctionalUnit fu = funit(arch, cls);
   if (!tracksComputeResource(fu)) {
     state.currentSlot += issues;
@@ -231,12 +233,11 @@ static void commitOperation(Operation *op, const ArchData &arch,
   }
 
   int64_t issueSlot = getResourceReadySlot(op, arch, state);
-  if (usesMfmaCoissueResource(op, cls, arch))
+  if (resource.usesMfmaCoissue)
     issueSlot = std::max(issueSlot, state.mfmaReadyAt);
-  unsigned releaseSlots =
-      std::max<unsigned>(issues, std::max(1, getResourceCycles(arch, cls)));
+  unsigned releaseSlots = std::max(issues, resource.releaseSlots);
   state.readyAt[static_cast<size_t>(fu)] = issueSlot + releaseSlots;
-  if (usesMfmaCoissueResource(op, cls, arch)) {
+  if (resource.usesMfmaCoissue) {
     state.mfmaReadyAt = issueSlot + releaseSlots;
     state.activeMfma =
         op->hasTrait<OpTrait::waveamdmachine::MFMAOp>() ? op : nullptr;

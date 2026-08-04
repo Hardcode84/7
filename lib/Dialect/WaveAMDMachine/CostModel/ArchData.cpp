@@ -80,8 +80,7 @@ static constexpr ArchData kGfx942{
     /*hasScratchBaseForwardingHazard=*/false,
 };
 
-// CDNA4 / MI350. Shares the gfx9_4 feature shape with gfx942 on
-// every dimension this table tracks.
+// CDNA4 / MI350.
 static constexpr ArchData kGfx950{
     /*isa=*/{9, 5, 0},
     /*name=*/"gfx950",
