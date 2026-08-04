@@ -613,8 +613,9 @@ mlir::waveamdmachine::getAMDGPUDefaultWavefrontSize(Operation *op,
   return llvm::AMDGPU::IsaInfo::getWavefrontSize(**sti);
 }
 
-static bool supportsWavefrontSize(const llvm::MCSubtargetInfo &sti,
-                                  unsigned width, unsigned defaultWidth) {
+bool mlir::waveamdmachine::isAMDGPUWavefrontSizeSupported(
+    const llvm::MCSubtargetInfo &sti, unsigned width) {
+  unsigned defaultWidth = llvm::AMDGPU::IsaInfo::getWavefrontSize(sti);
   if (width == defaultWidth)
     return true;
   return (width == 32 || width == 64) && llvm::AMDGPU::supportsWave32(sti);
@@ -651,7 +652,7 @@ FailureOr<unsigned> mlir::waveamdmachine::getAMDGPUWavefrontSize(
     return failure();
   width = *attrWidth;
 
-  if (!supportsWavefrontSize(sti, width, defaultWavefrontSize))
+  if (!isAMDGPUWavefrontSizeSupported(sti, width))
     return mod.emitError(consumer)
            << " target " << target.chip << " does not support wave" << width;
   return width;

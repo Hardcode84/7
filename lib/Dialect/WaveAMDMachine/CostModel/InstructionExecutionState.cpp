@@ -45,13 +45,14 @@ static bool tracksInstructionScheduleResource(FunctionalUnit unit) {
 
 InstructionScheduleResourceInfo
 getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
-                                   const ArchData &arch) {
+                                   const ArchData &arch,
+                                   unsigned wavefrontSize) {
   InstructionScheduleResourceInfo info;
   if (cls == SchedClass::NoInst)
     return info;
   info.realInstruction = true;
   info.functionalUnit = funit(arch, cls);
-  info.issueSlots = getInstructionIssueCount(op, arch.isa);
+  info.issueSlots = getInstructionIssueCount(op, arch.isa, wavefrontSize);
   info.tracked = tracksInstructionScheduleResource(info.functionalUnit);
   info.usesMfmaCoissue = usesMfmaCoissueResource(op, cls, arch);
   if (info.tracked)
@@ -633,7 +634,10 @@ llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind) {
 InstructionExecutionState::InstructionExecutionState(
     const ArchData &arch, InstructionExecutionConfig config)
     : config(config), arch(arch),
-      issueSlotHazardConfig(getInstructionIssueSlotHazardConfig(arch.isa)) {}
+      issueSlotHazardConfig(getInstructionIssueSlotHazardConfig(arch.isa)) {
+  assert((config.wavefrontSize == 32 || config.wavefrontSize == 64) &&
+         "invalid wavefront size");
+}
 
 static bool canUseReadyRegisterClass(int64_t current, int64_t delta,
                                      unsigned limit) {
@@ -1136,9 +1140,10 @@ InstructionExecutionState::describe(Operation *op) const {
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
   desc.resourceDuration = getResourceCycles(arch, cls);
-  desc.instructionIssueCount = getInstructionIssueCount(op, arch.isa);
+  desc.instructionIssueCount =
+      getInstructionIssueCount(op, arch.isa, config.wavefrontSize);
   desc.coexecution = config.scheduleModel.applyCoexecutionPolicy(
-      getInstructionCoexecutionModel(op, cls, arch));
+      getInstructionCoexecutionModel(op, cls, arch, config.wavefrontSize));
   desc.counterIssueCount = getWaitcntInfo(op).issueCount;
   desc.issueSlots = desc.instructionIssueCount;
   if (op->hasTrait<traits::MFMAOp>())

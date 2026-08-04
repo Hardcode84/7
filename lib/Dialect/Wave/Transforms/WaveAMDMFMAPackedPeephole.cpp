@@ -217,12 +217,12 @@ static int64_t getResourceReadySlot(Operation *op, const ArchData &arch,
 }
 
 static void commitOperation(Operation *op, const ArchData &arch,
-                            ComputeSlotState &state) {
+                            unsigned wavefrontSize, ComputeSlotState &state) {
   SchedClass cls = classifyOp(op);
   if (cls == SchedClass::NoInst)
     return;
 
-  unsigned issues = getInstructionIssueCount(op, arch.isa);
+  unsigned issues = getInstructionIssueCount(op, arch.isa, wavefrontSize);
   FunctionalUnit fu = funit(arch, cls);
   if (!tracksComputeResource(fu)) {
     state.currentSlot += issues;
@@ -275,6 +275,7 @@ static bool trySelectPackedCandidate(Operation *op, const PackedF32Info &info,
 }
 
 static void collectBlockCandidates(Block &block, const ArchData &arch,
+                                   unsigned wavefrontSize,
                                    llvm::SetVector<Operation *> &candidates) {
   ComputeSlotState state;
   for (Operation &op : block) {
@@ -299,7 +300,7 @@ static void collectBlockCandidates(Block &block, const ArchData &arch,
       candidates.insert(&op);
       continue;
     }
-    commitOperation(&op, arch, state);
+    commitOperation(&op, arch, wavefrontSize, state);
   }
 }
 
@@ -456,10 +457,14 @@ struct WaveAMDMFMAPackedPeepholePass
     const ArchData &arch = getArchData(*isa);
     if (!arch.hasMfmaCoissueRestriction)
       return;
+    FailureOr<unsigned> wavefrontSize =
+        getAMDGPUWavefrontSize(root, "waveamd-mfma-packed-peephole");
+    if (failed(wavefrontSize))
+      return signalPassFailure();
 
     llvm::SetVector<Operation *> candidates;
     root->walk([&](Block *block) {
-      collectBlockCandidates(*block, arch, candidates);
+      collectBlockCandidates(*block, arch, *wavefrontSize, candidates);
     });
 
     for (Operation *candidate : candidates)

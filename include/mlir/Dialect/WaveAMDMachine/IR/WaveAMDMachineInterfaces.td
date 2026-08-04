@@ -80,7 +80,8 @@ def WaveAMDMachine_InstructionIssueOpInterface
       [{Number of hardware instructions emitted by this op.}],
       "unsigned",
       "getInstructionIssueCount",
-      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa)
+      (ins "const ::llvm::AMDGPU::IsaVersion &":$isa,
+           "unsigned":$wavefrontSize)
     >,
   ];
 }

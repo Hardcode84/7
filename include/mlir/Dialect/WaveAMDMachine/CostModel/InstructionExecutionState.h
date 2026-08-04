@@ -134,7 +134,8 @@ struct InstructionScheduleResourcePreview {
 
 InstructionScheduleResourceInfo
 getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
-                                   const ArchData &arch);
+                                   const ArchData &arch,
+                                   unsigned wavefrontSize);
 
 class InstructionScheduleResourceState {
 public:
@@ -207,9 +208,13 @@ private:
 };
 
 struct InstructionExecutionConfig {
+  explicit InstructionExecutionConfig(unsigned wavefrontSize)
+      : wavefrontSize(wavefrontSize) {}
+
   const CalibrationData *calibration = nullptr;
   MemoryCounterLatencies counterLatencies;
   MemoryValueLatencies valueLatencies;
+  unsigned wavefrontSize;
   int issuePeriod = 0;
   bool enablePipeBackpressure = false;
   bool smoothLdsDmaIssue = false;
@@ -267,7 +272,7 @@ llvm::StringRef getInstructionPipeKindName(InstructionPipeKind kind);
 
 struct InstructionExecutionState {
   InstructionExecutionState(const ArchData &arch,
-                            InstructionExecutionConfig config = {});
+                            InstructionExecutionConfig config);
 
   FailureOr<InstructionStall> query(Operation *op) const;
   FailureOr<InstructionCommitResult> commit(Operation *op);

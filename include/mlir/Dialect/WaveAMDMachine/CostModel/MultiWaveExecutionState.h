@@ -26,7 +26,7 @@ class MultiWaveExecutionState {
 public:
   MultiWaveExecutionState(const ArchData &arch,
                           ArrayRef<WavePlacement> placements,
-                          InstructionExecutionConfig config = {});
+                          InstructionExecutionConfig config);
   MultiWaveExecutionState(const MultiWaveExecutionState &other);
   MultiWaveExecutionState &operator=(const MultiWaveExecutionState &) = delete;
 

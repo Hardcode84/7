@@ -23,6 +23,7 @@
 #include "llvm/Support/ErrorHandling.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -46,15 +47,11 @@ bool isEventSimCmaClass(SchedClass cls) {
   }
 }
 
-static unsigned getNativeWaveSize(const ArchData &arch) {
-  return arch.isa.Major >= 10 ? 32 : 64;
-}
-
 int getEventSimIssuePeriod(const ArchData &arch, const EventSimConfig &config) {
+  assert((config.wavefrontSize == 32 || config.wavefrontSize == 64) &&
+         "invalid wavefront size");
   int period = std::max(1, arch.simdIssuePeriod);
-  unsigned waveSize =
-      config.waveSize > 0 ? config.waveSize : getNativeWaveSize(arch);
-  if (waveSize == 64)
+  if (config.wavefrontSize == 64)
     period *= std::max(1, arch.wave64IssueMultiplier);
   return period;
 }
@@ -99,7 +96,7 @@ static unsigned getCounterIssueCount(Operation *op) {
 
 static InstructionExecutionConfig
 buildInstructionConfig(const ArchData &arch, const EventSimConfig &config) {
-  InstructionExecutionConfig stateConfig;
+  InstructionExecutionConfig stateConfig(config.wavefrontSize);
   stateConfig.calibration = config.calibration;
   stateConfig.counterLatencies = config.counterLatencies;
   stateConfig.valueLatencies = config.valueLatencies;

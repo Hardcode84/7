@@ -270,8 +270,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // WAIT: issued_ops: 2
 // WAIT: issue cycle=0 fu=LGKM op=waveamdmachine.s_load_b32
 // WAIT: issue cycle=20 fu=SALU op=waveamdmachine.s_add_i32
-// WAIT: counter_drained cycle=20 fu=LGKM counter=lgkm op=waveamdmachine.s_load_b32
-// WAIT: counter_drained cycle=20 op=waveamdmachine.s_waitcnt
+// WAIT-DAG: counter_drained cycle=20 fu=LGKM counter=lgkm op=waveamdmachine.s_load_b32
+// WAIT-DAG: counter_drained cycle=20 op=waveamdmachine.s_waitcnt
 
 // COUNTER: issue cycle=0 fu=LGKM op=waveamdmachine.s_load_b32
 // COUNTER: issue cycle=7 fu=SALU op=waveamdmachine.s_add_i32

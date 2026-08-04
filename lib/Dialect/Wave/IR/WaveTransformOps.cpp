@@ -565,10 +565,11 @@ resolveArch(Operation *target) {
 }
 
 static FailureOr<int64_t> sumFuncCycles(Operation *target,
-                                        const waveamdmachine::ArchData &arch) {
+                                        const waveamdmachine::ArchData &arch,
+                                        unsigned wavefrontSize) {
   int64_t total = 0;
   auto runOne = [&](func::FuncOp f) -> LogicalResult {
-    waveamdmachine::EventSimConfig config;
+    waveamdmachine::EventSimConfig config(wavefrontSize);
     waveamdmachine::EventSimResult result;
     if (failed(waveamdmachine::simulateEventTimeline(f, arch, config, result)))
       return failure();
@@ -600,7 +601,11 @@ wave::TransformEstimateCyclesOp::apply(transform::TransformRewriter &rewriter,
       return emitDefiniteFailure()
              << "target has no enclosing module with `waveamdmachine.target` "
                 "or arch is unsupported";
-    auto cycles = sumFuncCycles(target, **arch);
+    FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
+        target, "wave.transform.estimate_cycles");
+    if (failed(wavefrontSize))
+      return emitDefiniteFailure() << "failed to resolve wavefront size";
+    auto cycles = sumFuncCycles(target, **arch, *wavefrontSize);
     if (failed(cycles))
       return emitDefiniteFailure() << "cycle estimate failed on target";
     values.push_back(b.getI64IntegerAttr(*cycles));

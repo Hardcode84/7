@@ -1359,7 +1359,6 @@ _attn_fwd_async_prefetch:
 		v_permlane32_swap_b32_e32 v221, v223
 		v_permlane32_swap_b32_e32 v216, v218
 		v_permlane32_swap_b32_e32 v217, v219
-		s_nop 0
 		v_mfma_f32_32x32x16_bf16 v[48:63], a[104:107], v[220:223], v[48:63]
 		v_permlane32_swap_b32_e32 v224, v226
 		v_permlane32_swap_b32_e32 v225, v227
@@ -1863,7 +1862,6 @@ _attn_fwd_async_prefetch:
 		v_permlane32_swap_b32_e32 v197, v199
 		v_permlane32_swap_b32_e32 v160, v162
 		v_permlane32_swap_b32_e32 v161, v163
-		s_nop 0
 		v_mfma_f32_32x32x16_bf16 v[240:255], a[100:103], v[196:199], v[240:255]
 		v_permlane32_swap_b32_e32 v164, v166
 		v_permlane32_swap_b32_e32 v165, v167

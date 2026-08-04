@@ -897,8 +897,12 @@ static void collectIssuerResults(Operation *op, SmallVectorImpl<Value> &out) {
 //===----------------------------------------------------------------------===//
 
 struct WaitTarget {
+  WaitTarget(const llvm::AMDGPU::IsaVersion &isa, unsigned wavefrontSize)
+      : isa(isa), wavefrontSize(wavefrontSize) {}
+
   std::optional<unsigned> execIfSaveBase;
   llvm::AMDGPU::IsaVersion isa;
+  unsigned wavefrontSize;
   waveamdmachine::WaitCounterFamily family =
       waveamdmachine::WaitCounterFamily::Legacy;
   bool waitXcnt = false;
@@ -906,39 +910,50 @@ struct WaitTarget {
   bool expertScheduling = false;
 };
 
+static LogicalResult configureFunctionWaitTarget(func::FuncOp func,
+                                                 bool gfx12Plus,
+                                                 WaitTarget &target) {
+  StringRef attrName = waveamdmachine::getExpertSchedulingModeAttrName();
+  if (Attribute attr = func->getAttr(attrName)) {
+    if (!isa<UnitAttr>(attr)) {
+      func.emitError() << attrName << " must be a unit attribute";
+      return failure();
+    }
+    if (!gfx12Plus || llvm::AMDGPU::DepCtr::getVaVdstBitMask() == 0 ||
+        llvm::AMDGPU::DepCtr::getVmVsrcBitMask() == 0) {
+      func.emitError() << attrName
+                       << " requires GFX12+ expert scheduling support";
+      return failure();
+    }
+    target.expertScheduling = true;
+  }
+  std::optional<unsigned> sgprCount = getExecIfEmissionSGPRCount(func);
+  if (sgprCount)
+    target.execIfSaveBase = wave::getWaveAMDExecIfSaveBase(func, *sgprCount);
+  return success();
+}
+
 static FailureOr<WaitTarget> getWaitTarget(Operation *op) {
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> sti =
       waveamdmachine::createAMDGPUMCSubtargetInfo(
           op, "waveamd-insert-ticket-waits");
   if (failed(sti))
     return failure();
-  WaitTarget target;
-  target.isa = llvm::AMDGPU::getIsaVersion((*sti)->getCPU());
+  FailureOr<unsigned> wavefrontSize =
+      waveamdmachine::getAMDGPUWavefrontSize(op, "waveamd-insert-ticket-waits");
+  if (failed(wavefrontSize))
+    return failure();
+  WaitTarget target(llvm::AMDGPU::getIsaVersion((*sti)->getCPU()),
+                    *wavefrontSize);
   bool gfx12Plus = llvm::AMDGPU::isGFX12Plus(**sti);
   target.family = gfx12Plus ? waveamdmachine::WaitCounterFamily::Gfx12Split
                             : waveamdmachine::WaitCounterFamily::Legacy;
   target.waitXcnt = (**sti).hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
   target.requiresNopBeforeDeallocVGPRs =
       !(**sti).hasFeature(llvm::AMDGPU::FeatureGFX1250Insts);
-  if (auto func = dyn_cast<func::FuncOp>(op)) {
-    StringRef attrName = waveamdmachine::getExpertSchedulingModeAttrName();
-    if (Attribute attr = func->getAttr(attrName)) {
-      if (!isa<UnitAttr>(attr)) {
-        func.emitError() << attrName << " must be a unit attribute";
-        return failure();
-      }
-      if (!gfx12Plus || llvm::AMDGPU::DepCtr::getVaVdstBitMask() == 0 ||
-          llvm::AMDGPU::DepCtr::getVmVsrcBitMask() == 0) {
-        func.emitError() << attrName
-                         << " requires GFX12+ expert scheduling support";
-        return failure();
-      }
-      target.expertScheduling = true;
-    }
-    std::optional<unsigned> sgprCount = getExecIfEmissionSGPRCount(func);
-    if (sgprCount)
-      target.execIfSaveBase = wave::getWaveAMDExecIfSaveBase(func, *sgprCount);
-  }
+  if (auto func = dyn_cast<func::FuncOp>(op))
+    if (failed(configureFunctionWaitTarget(func, gfx12Plus, target)))
+      return failure();
   return target;
 }
 
@@ -1441,7 +1456,8 @@ static void recordExpertIssue(Operation *op, WaitState &state,
   ExpertEvent event = classifyExpertEvent(op);
   if (event == ExpertEvent::None)
     return;
-  unsigned count = waveamdmachine::getInstructionIssueCount(op, target.isa);
+  unsigned count = waveamdmachine::getInstructionIssueCount(
+      op, target.isa, target.wavefrontSize);
   if (count == 0)
     return;
 

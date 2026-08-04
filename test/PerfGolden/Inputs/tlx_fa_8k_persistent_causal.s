@@ -1522,7 +1522,6 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v185, v187
 		v_permlane32_swap_b32_e32 v176, v178
 		v_permlane32_swap_b32_e32 v177, v179
-		s_nop 0
 		v_mfma_f32_32x32x16_bf16 v[32:47], a[124:127], v[184:187], v[32:47]
 		v_permlane32_swap_b32_e32 v180, v182
 		v_permlane32_swap_b32_e32 v181, v183
@@ -4864,7 +4863,6 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v185, v187
 		v_permlane32_swap_b32_e32 v176, v178
 		v_permlane32_swap_b32_e32 v177, v179
-		s_nop 0
 		v_mfma_f32_32x32x16_bf16 v[32:47], a[124:127], v[184:187], v[32:47]
 		v_permlane32_swap_b32_e32 v180, v182
 		v_permlane32_swap_b32_e32 v181, v183
@@ -6462,7 +6460,6 @@ _attn_fwd_persistent:
 		v_permlane32_swap_b32_e32 v125, v127
 		v_permlane32_swap_b32_e32 v116, v118
 		v_permlane32_swap_b32_e32 v117, v119
-		s_nop 0
 		v_mfma_f32_32x32x16_bf16 v[32:47], a[192:195], v[124:127], v[32:47]
 		v_permlane32_swap_b32_e32 v132, v134
 		v_permlane32_swap_b32_e32 v133, v135

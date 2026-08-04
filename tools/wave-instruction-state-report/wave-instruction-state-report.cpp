@@ -138,6 +138,20 @@ static const ArchData *resolveModuleArch(ModuleOp mod) {
   return resolveArch(target.getValue());
 }
 
+static std::optional<unsigned> resolveWavefrontSize(ModuleOp mod) {
+  if (archName.empty()) {
+    FailureOr<unsigned> resolved =
+        getAMDGPUWavefrontSize(mod, "wave-instruction-state-report");
+    return succeeded(resolved) ? std::optional<unsigned>(*resolved)
+                               : std::nullopt;
+  }
+  llvm::StringRef targetName = archName;
+  if (!targetName.contains("--"))
+    return getAMDGPUDefaultWavefrontSize(targetName);
+  std::optional<AMDGPUTarget> target = parseAMDGPUTargetAttr(targetName);
+  return target ? getAMDGPUDefaultWavefrontSize(target->chip) : std::nullopt;
+}
+
 static func::FuncOp selectFunc(ModuleOp mod) {
   if (!funcName.empty()) {
     for (func::FuncOp func : mod.getOps<func::FuncOp>())
@@ -184,8 +198,8 @@ static bool validateOptions() {
          isValidLatencyOverride(ldsValueLatency);
 }
 
-static InstructionExecutionConfig buildConfig() {
-  InstructionExecutionConfig config;
+static InstructionExecutionConfig buildConfig(unsigned wavefrontSize) {
+  InstructionExecutionConfig config(wavefrontSize);
   config.issuePeriod = issuePeriod;
   config.counterLatencies.vmemLoad = vmemCounterLatency;
   config.counterLatencies.vmemStore = vscntCounterLatency;
@@ -247,7 +261,13 @@ static int report(ModuleOp mod) {
     return 1;
   }
 
-  InstructionExecutionState state(*arch, buildConfig());
+  std::optional<unsigned> wavefrontSize = resolveWavefrontSize(mod);
+  if (!wavefrontSize) {
+    llvm::errs() << "failed to resolve wavefront size\n";
+    return 1;
+  }
+
+  InstructionExecutionState state(*arch, buildConfig(*wavefrontSize));
   SmallVector<Operation *> ops = collectOps(func);
 
   llvm::outs() << "func: " << func.getName() << "\n";

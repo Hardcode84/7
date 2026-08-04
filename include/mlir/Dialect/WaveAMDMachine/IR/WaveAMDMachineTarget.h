@@ -156,6 +156,9 @@ std::optional<unsigned> getAMDGPUDefaultWavefrontSize(llvm::StringRef chip);
 FailureOr<unsigned> getAMDGPUDefaultWavefrontSize(Operation *op,
                                                   llvm::StringRef consumer);
 
+bool isAMDGPUWavefrontSizeSupported(const llvm::MCSubtargetInfo &sti,
+                                    unsigned width);
+
 FailureOr<unsigned> getAMDGPUWavefrontSize(Operation *op,
                                            llvm::StringRef consumer);
 

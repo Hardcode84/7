@@ -154,6 +154,7 @@ getValuWriteExecConsumerLatency(const llvm::AMDGPU::IsaVersion &isa) {
 struct HazardConfig {
   const waveamdmachine::ArchData *arch;
   llvm::AMDGPU::IsaVersion isaVersion;
+  unsigned wavefrontSize;
   unsigned defaultLgkmcnt;
   unsigned valuDep1;
 
@@ -181,7 +182,8 @@ struct HazardConfig {
   bool legacyWaitCounters;
 };
 
-static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
+static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti,
+                                     unsigned wavefrontSize) {
   llvm::AMDGPU::IsaVersion isaVersion =
       llvm::AMDGPU::getIsaVersion(sti.getCPU());
   const waveamdmachine::ArchData *arch =
@@ -194,6 +196,7 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti) {
   return HazardConfig{
       /*arch=*/arch,
       /*isaVersion=*/isaVersion,
+      /*wavefrontSize=*/wavefrontSize,
       /*defaultLgkmcnt=*/
       legacyWaitCounters
           ? llvm::AMDGPU::decodeLgkmcnt(
@@ -1106,8 +1109,8 @@ static HazardOpInfoMap collectHazardOpInfo(Operation *root,
     info.waitcnt = getWaitcntInfo(op);
     info.noMachineInst = emitsNoMachineInst(*op);
     info.controlFlow = isControlFlowOp(op);
-    info.instructionIssueCount =
-        waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion);
+    info.instructionIssueCount = waveamdmachine::getInstructionIssueCount(
+        op, cfg.isaVersion, cfg.wavefrontSize);
     info.mfma = isMFMA(op);
     info.mfmaPasses = info.mfma ? getMfmaPassCount(op) : 0;
     info.legacyValu = isLegacyVALU(op, cfg);
@@ -1236,7 +1239,8 @@ static unsigned getCachedInstructionIssueCount(Operation *op,
                                                const HazardConfig &cfg,
                                                const HazardOpInfo *info) {
   return info ? info->instructionIssueCount
-              : waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion);
+              : waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion,
+                                                         cfg.wavefrontSize);
 }
 
 static unsigned getWmmaVALUWaitSlots(Operation *op, const HazardConfig &cfg,
@@ -1451,8 +1455,8 @@ static void transferHazards(Operation *op, HazardState &state,
                             const HazardOpInfo *info = nullptr) {
   bool controlFlow = info ? info->controlFlow : isControlFlowOp(op);
   if (!(info ? info->noMachineInst : emitsNoMachineInst(*op))) {
-    advanceHazards(state, /*count=*/1, /*advanceLgkm=*/!controlFlow);
     unsigned issueCount = getCachedInstructionIssueCount(op, cfg, info);
+    advanceHazards(state, issueCount, /*advanceLgkm=*/!controlFlow);
     if (isCachedVALUForCoexecution(op, info))
       advanceCoexecHazards(state, issueCount);
     if (isCachedSGPRWrite(op, info))
@@ -2131,7 +2135,11 @@ struct WaveAMDHazardRepairPass
     if (failed(sti))
       return signalPassFailure();
 
-    HazardConfig cfg = makeHazardConfig(**sti);
+    FailureOr<unsigned> wavefrontSize =
+        waveamdmachine::getAMDGPUWavefrontSize(root, "waveamd-hazard-repair");
+    if (failed(wavefrontSize))
+      return signalPassFailure();
+    HazardConfig cfg = makeHazardConfig(**sti, *wavefrontSize);
     DominanceInfo dom(root);
     setupTiming.stop();
 
@@ -2159,7 +2167,11 @@ struct WaveAMDHazardWaitsPass
         createSubtargetInfo(root);
     if (failed(sti))
       return signalPassFailure();
-    HazardConfig cfg = makeHazardConfig(**sti);
+    FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
+        root, "waveamd-insert-hazard-waits");
+    if (failed(wavefrontSize))
+      return signalPassFailure();
+    HazardConfig cfg = makeHazardConfig(**sti, *wavefrontSize);
     SmallVector<func::FuncOp> kernels;
     root->walk([&](func::FuncOp f) {
       if (!f.isExternal())

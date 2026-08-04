@@ -150,8 +150,9 @@ class WaveAMDMachine_Op<string mnemonic, list<Trait> traits = []> :
     }
 
     unsigned getInstructionIssueCount(
-        const ::llvm::AMDGPU::IsaVersion &isa) {
+        const ::llvm::AMDGPU::IsaVersion &isa, unsigned wavefrontSize) {
       (void)isa;
+      (void)wavefrontSize;
       return static_cast<unsigned>(}] # instructionIssueCount # [{);
     }
 
@@ -1649,7 +1650,7 @@ def WaveAMDMachine_SReadVccB64Op
 def WaveAMDMachine_SMovVccB32Op
     : WaveAMDMachine_UnaryResult<"s_mov_vcc_b32", WaveAMDMachine_SGPR1,
                                  WaveAMDMachine_VCC, [WaveAMDMachine_SALU]>,
-      WaveAMDMachine_InstructionIssueCount<"isa.Major == 9 ? 2 : 1">;
+      WaveAMDMachine_InstructionIssueCount<"wavefrontSize == 64 ? 2 : 1">;
 
 // Value-producing scalar move: materialises an SGPR1 holding the
 // given Imm or copies an existing SGPR1/RegOrImm into a fresh

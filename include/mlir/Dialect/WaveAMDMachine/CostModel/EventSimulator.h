@@ -29,8 +29,11 @@ struct ArchData;
 class CalibrationData;
 
 struct EventSimConfig {
+  explicit EventSimConfig(unsigned wavefrontSize)
+      : wavefrontSize(wavefrontSize) {}
+
   unsigned wavesPerSIMD = 0;
-  int waveSize = 0;
+  unsigned wavefrontSize;
   int64_t tripCountOverride = -1;
   const CalibrationData *calibration = nullptr;
   bool recordTimeline = false;

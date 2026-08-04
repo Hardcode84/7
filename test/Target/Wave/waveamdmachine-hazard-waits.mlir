@@ -873,7 +873,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: waveamdmachine.v_and_b32
 // CHECK: waveamdmachine.v_mul_lo_u32
 // CHECK: waveamdmachine.v_lshlrev_b32
-// CHECK-NEXT: waveamdmachine.imm 4
+// CHECK-NEXT: waveamdmachine.imm 3
 // CHECK-NEXT: waveamdmachine.s_nop
 // CHECK-NEXT: waveamdmachine.global_store_b128
 func.func @mfma_result_store_delay_ignores_preloaded(

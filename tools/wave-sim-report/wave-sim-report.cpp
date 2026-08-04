@@ -25,6 +25,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/InitLLVM.h"
@@ -142,6 +143,54 @@ static const ArchData *resolveModuleArch(ModuleOp mod) {
   if (!target)
     return nullptr;
   return resolveArch(target.getValue());
+}
+
+static std::optional<AMDGPUTarget> resolveSelectedTarget(ModuleOp mod) {
+  if (archName.empty()) {
+    FailureOr<AMDGPUTarget> target = getAMDGPUTarget(mod, "wave-sim-report");
+    return succeeded(target) ? std::optional<AMDGPUTarget>(*target)
+                             : std::nullopt;
+  }
+  llvm::StringRef targetName = archName;
+  if (targetName.contains("--"))
+    return parseAMDGPUTargetAttr(targetName);
+  AMDGPUTarget target;
+  target.triple = "amdgcn-amd-amdhsa";
+  target.chip = targetName;
+  target.isa = llvm::AMDGPU::getIsaVersion(target.chip);
+  target.kind = llvm::AMDGPU::parseArchAMDGCN(target.chip);
+  return target;
+}
+
+static std::optional<unsigned> resolveWavefrontSize(ModuleOp mod) {
+  if (waveSize == 0 && archName.empty()) {
+    FailureOr<unsigned> resolved =
+        getAMDGPUWavefrontSize(mod, "wave-sim-report");
+    return succeeded(resolved) ? std::optional<unsigned>(*resolved)
+                               : std::nullopt;
+  }
+
+  std::optional<AMDGPUTarget> target = resolveSelectedTarget(mod);
+  if (!target)
+    return std::nullopt;
+  std::optional<unsigned> defaultWavefrontSize =
+      getAMDGPUDefaultWavefrontSize(target->chip);
+  if (!defaultWavefrontSize)
+    return std::nullopt;
+  if (waveSize == 0)
+    return defaultWavefrontSize;
+
+  std::unique_ptr<llvm::MCSubtargetInfo> sti =
+      createAMDGPUMCSubtargetInfo(*target);
+  if (!sti)
+    return std::nullopt;
+  unsigned resolved = static_cast<unsigned>(waveSize.getValue());
+  if (!isAMDGPUWavefrontSizeSupported(*sti, resolved)) {
+    llvm::errs() << "target " << target->chip << " does not support wave"
+                 << resolved << "\n";
+    return std::nullopt;
+  }
+  return resolved;
 }
 
 static func::FuncOp selectFunc(ModuleOp mod) {
@@ -270,10 +319,10 @@ static int getConfiguredLatency(const ArchData &arch, SchedClass cls,
   return getCalibratedLatency(arch, cls, *calibration);
 }
 
-static EventSimConfig buildConfig(const CalibrationData *calibration) {
-  EventSimConfig config;
+static EventSimConfig buildConfig(const CalibrationData *calibration,
+                                  unsigned wavefrontSize) {
+  EventSimConfig config(wavefrontSize);
   config.wavesPerSIMD = static_cast<unsigned>(wavesPerSIMD.getValue());
-  config.waveSize = waveSize.getValue();
   config.tripCountOverride = std::max<int64_t>(-1, tripCount.getValue());
   config.calibration = calibration;
   config.recordTimeline = timeline.getValue();
@@ -291,7 +340,8 @@ static EventSimConfig buildConfig(const CalibrationData *calibration) {
 static void printOpLatencies(func::FuncOp func, const ArchData &arch,
                              const MemoryCounterLatencies &counterLatencies,
                              const MemoryValueLatencies &valueLatencies,
-                             const CalibrationData *calibration) {
+                             const CalibrationData *calibration,
+                             unsigned wavefrontSize) {
   SmallVector<Operation *> ops = flattenOps(func);
   llvm::outs() << "op_latencies:\n";
   for (auto [idx, op] : llvm::enumerate(ops)) {
@@ -312,7 +362,8 @@ static void printOpLatencies(func::FuncOp func, const ArchData &arch,
       llvm::outs() << " value_latency="
                    << getMemoryValueLatency(arch, op, valueLatencies,
                                             calibration);
-    llvm::outs() << " issues=" << getInstructionIssueCount(op, arch.isa);
+    llvm::outs() << " issues="
+                 << getInstructionIssueCount(op, arch.isa, wavefrontSize);
     if (op->hasTrait<::mlir::OpTrait::waveamdmachine::WaitcntOp>())
       llvm::outs() << " waitcnt=1";
     llvm::outs() << "\n";
@@ -324,8 +375,7 @@ static void printSimulationReport(func::FuncOp func, const ArchData &arch,
                                   const EventSimResult &result) {
   llvm::outs() << "func: " << func.getName() << "\n";
   llvm::outs() << "arch: " << arch.name << "\n";
-  if (config.waveSize != 0)
-    llvm::outs() << "wave_size: " << config.waveSize << "\n";
+  llvm::outs() << "wave_size: " << config.wavefrontSize << "\n";
   if (config.wavesPerSIMD != 0) {
     llvm::outs() << "waves_per_simd: " << config.wavesPerSIMD << "\n";
     llvm::outs() << "resident_waves: " << result.waveCompletedCycles.size()
@@ -346,7 +396,7 @@ static void printOptionalReports(func::FuncOp func, const ArchData &arch,
                                  const EventSimResult &result) {
   if (opLatencies)
     printOpLatencies(func, arch, config.counterLatencies, config.valueLatencies,
-                     config.calibration);
+                     config.calibration, config.wavefrontSize);
   if (timeline)
     for (const EventSimEvent &event : result.events)
       printEvent(event, config.wavesPerSIMD != 0);
@@ -358,6 +408,16 @@ static bool validateWavesPerSIMD(const ArchData &arch) {
   llvm::errs() << "waves-per-simd must be between 0 and " << arch.wavesPerSIMD
                << "\n";
   return false;
+}
+
+static int runSimulationReport(func::FuncOp func, const ArchData &arch,
+                               const EventSimConfig &config) {
+  EventSimResult result;
+  if (failed(simulateEventTimeline(func, arch, config, result)))
+    return 1;
+  printSimulationReport(func, arch, config, result);
+  printOptionalReports(func, arch, config, result);
+  return 0;
 }
 
 static int report(ModuleOp mod) {
@@ -381,21 +441,20 @@ static int report(ModuleOp mod) {
   }
   if (!validateWavesPerSIMD(*arch))
     return 1;
+  std::optional<unsigned> wavefrontSize = resolveWavefrontSize(mod);
+  if (!wavefrontSize) {
+    llvm::errs() << "failed to resolve wavefront size\n";
+    return 1;
+  }
   std::optional<CalibrationData> calibration;
   if (!loadCalibration(calibration))
     return 1;
   if (!validateCalibrationArch(*arch, calibration))
     return 1;
 
-  EventSimConfig config = buildConfig(calibration ? &*calibration : nullptr);
-
-  EventSimResult result;
-  if (failed(simulateEventTimeline(func, *arch, config, result)))
-    return 1;
-
-  printSimulationReport(func, *arch, config, result);
-  printOptionalReports(func, *arch, config, result);
-  return 0;
+  EventSimConfig config =
+      buildConfig(calibration ? &*calibration : nullptr, *wavefrontSize);
+  return runSimulationReport(func, *arch, config);
 }
 
 int main(int argc, char **argv) {

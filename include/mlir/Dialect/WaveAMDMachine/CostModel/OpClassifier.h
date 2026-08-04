@@ -38,14 +38,15 @@ struct InstructionCoexecutionModel {
 SchedClass classifyOp(Operation *op);
 
 unsigned getInstructionIssueCount(Operation *op,
-                                  const llvm::AMDGPU::IsaVersion &targetIsa);
+                                  const llvm::AMDGPU::IsaVersion &targetIsa,
+                                  unsigned wavefrontSize);
 
 bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
                              const ArchData &arch);
 
 InstructionCoexecutionModel
 getInstructionCoexecutionModel(Operation *op, SchedClass cls,
-                               const ArchData &arch);
+                               const ArchData &arch, unsigned wavefrontSize);
 
 // True when the cost model has a non-fallback mapping for the op.
 bool hasSchedClassMapping(Operation *op);

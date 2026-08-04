@@ -494,7 +494,7 @@ static waveamdmachine::InstructionExecutionConfig
 buildInstructionConfig(const waveamdmachine::ArchData &arch,
                        const waveamdmachine::EventSimConfig &config,
                        Operation *context) {
-  waveamdmachine::InstructionExecutionConfig stateConfig;
+  waveamdmachine::InstructionExecutionConfig stateConfig(config.wavefrontSize);
   stateConfig.calibration = config.calibration;
   stateConfig.counterLatencies = config.counterLatencies;
   stateConfig.valueLatencies = config.valueLatencies;
@@ -527,8 +527,13 @@ buildInstructionConfig(const waveamdmachine::ArchData &arch,
   return stateConfig;
 }
 
-static waveamdmachine::EventSimConfig buildModelConfig() {
-  waveamdmachine::EventSimConfig modelConfig;
+static FailureOr<waveamdmachine::EventSimConfig>
+buildModelConfig(Operation *op, StringRef consumer) {
+  FailureOr<unsigned> wavefrontSize =
+      waveamdmachine::getAMDGPUWavefrontSize(op, consumer);
+  if (failed(wavefrontSize))
+    return failure();
+  waveamdmachine::EventSimConfig modelConfig(*wavefrontSize);
   modelConfig.completePendingLdsDmaCounters = true;
   return modelConfig;
 }
@@ -552,15 +557,16 @@ validateSchedClassSupport(const GreedyRegion &region,
 }
 
 static StaticIssueInfo
-buildStaticIssueInfo(Operation *op, const waveamdmachine::ArchData &arch) {
+buildStaticIssueInfo(Operation *op, const waveamdmachine::ArchData &arch,
+                     unsigned wavefrontSize) {
   StaticIssueInfo info;
   info.cls = waveamdmachine::classifyOp(op);
   info.realInst = info.cls != waveamdmachine::SchedClass::NoInst;
   if (!info.realInst)
     return info;
 
-  info.resource =
-      waveamdmachine::getInstructionScheduleResourceInfo(op, info.cls, arch);
+  info.resource = waveamdmachine::getInstructionScheduleResourceInfo(
+      op, info.cls, arch, wavefrontSize);
   info.issues = info.resource.issueSlots;
   info.memoryIssuer = waveamdmachine::getMemoryCounterKind(op) !=
                       waveamdmachine::MemoryCounterKind::None;
@@ -570,13 +576,14 @@ buildStaticIssueInfo(Operation *op, const waveamdmachine::ArchData &arch) {
 
 static FailureOr<StaticIssueInfoMap>
 buildStaticIssueInfoMap(const GreedyRegion &region,
-                        const waveamdmachine::ArchData &arch) {
+                        const waveamdmachine::ArchData &arch,
+                        unsigned wavefrontSize) {
   if (failed(validateSchedClassSupport(region, arch)))
     return failure();
   StaticIssueInfoMap result;
   result.reserve(region.ops.size());
   for (Operation *op : region.ops)
-    result.try_emplace(op, buildStaticIssueInfo(op, arch));
+    result.try_emplace(op, buildStaticIssueInfo(op, arch, wavefrontSize));
   return result;
 }
 
@@ -4205,7 +4212,7 @@ static GreedyResult buildGreedyOrder(
     bool prioritizeRecurrences = true, bool prioritizeLongLatencyVmem = true,
     bool prioritizeComputeResources = true, bool prioritizeLatency = true) {
   FailureOr<StaticIssueInfoMap> staticInfo =
-      buildStaticIssueInfoMap(region, arch);
+      buildStaticIssueInfoMap(region, arch, config.wavefrontSize);
   if (failed(staticInfo)) {
     GreedyResult result;
     return failGreedyModel(result);
@@ -4598,7 +4605,7 @@ static GreedyResult buildBoundedGreedyOrder(
                             prioritizeComputeResources, prioritizeLatency);
 
   FailureOr<StaticIssueInfoMap> staticInfo =
-      buildStaticIssueInfoMap(region, arch);
+      buildStaticIssueInfoMap(region, arch, config.wavefrontSize);
   if (failed(staticInfo)) {
     GreedyResult result;
     return failGreedyModel(result);
@@ -4847,7 +4854,7 @@ public:
     }
     for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
       FailureOr<StaticIssueInfoMap> info =
-          buildStaticIssueInfoMap(regions[classId], arch);
+          buildStaticIssueInfoMap(regions[classId], arch, config.wavefrontSize);
       if (failed(info)) {
         initializationFailed = true;
         return;
@@ -5509,11 +5516,9 @@ struct WaveAMDMachineSchedulePass
     if (failed(validateOptions(root)))
       return signalPassFailure();
 
-    waveamdmachine::EventSimConfig modelConfig = buildModelConfig();
     setupTiming.stop();
-    WalkResult walk = root->walk([&](func::FuncOp func) {
-      return processFunction(func, modelConfig, timing);
-    });
+    WalkResult walk = root->walk(
+        [&](func::FuncOp func) { return processFunction(func, timing); });
     if (walk.wasInterrupted())
       return signalPassFailure();
   }
@@ -5544,7 +5549,6 @@ struct WaveAMDMachineSchedulePass
   }
 
   WalkResult processFunction(func::FuncOp func,
-                             const waveamdmachine::EventSimConfig &modelConfig,
                              MachineScheduleStageTiming &timing) {
     TimingScope prepareTiming =
         timing.nest("machine_schedule_prepare_function");
@@ -5557,6 +5561,10 @@ struct WaveAMDMachineSchedulePass
 
     if (!applySchedule)
       return WalkResult::advance();
+    FailureOr<waveamdmachine::EventSimConfig> modelConfig =
+        buildModelConfig(func, "waveamd-machine-schedule");
+    if (failed(modelConfig))
+      return WalkResult::interrupt();
     func->removeAttr(kScheduleInputAttr);
     prepareTiming.stop();
 
@@ -5587,7 +5595,7 @@ struct WaveAMDMachineSchedulePass
       return WalkResult::interrupt();
     livenessTiming.stop();
     if (failed(processCollectedRegions(specializations, *collected, *arch.arch,
-                                       modelConfig, origins, *liveness,
+                                       *modelConfig, origins, *liveness,
                                        timing)))
       return WalkResult::interrupt();
     for (waveamdmachine::UniformIfOp specialization : specializations)
@@ -5815,7 +5823,8 @@ printReportClasses(const GreedyRegion &region,
   if (failed(validateSchedClassSupport(region, arch)))
     return failure();
   for (auto [index, op] : llvm::enumerate(region.ops)) {
-    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(op);
+    StaticIssueInfo info = buildStaticIssueInfo(op, arch, config.wavefrontSize);
+    waveamdmachine::SchedClass cls = info.cls;
     waveamdmachine::FunctionalUnit fu = waveamdmachine::funit(arch, cls);
     llvm::errs() << kReportPrefix << " op func=" << getRegionFuncName(region)
                  << " region=" << region.regionOrdinal << " index=" << index
@@ -5824,7 +5833,8 @@ printReportClasses(const GreedyRegion &region,
                  << " fu=" << waveamdmachine::getFunctionalUnitName(fu)
                  << " latency=" << getModelLatency(arch, cls, config)
                  << " resource_cycles="
-                 << waveamdmachine::getResourceCycles(arch, cls) << "\n";
+                 << waveamdmachine::getResourceCycles(arch, cls)
+                 << " issues=" << info.issues << "\n";
   }
   return success();
 }
@@ -5931,7 +5941,6 @@ struct WaveAMDMachineScheduleReportPass
     if (failed(validateOptions(root)))
       return signalPassFailure();
 
-    waveamdmachine::EventSimConfig modelConfig = buildModelConfig();
     FailureOr<SmallVector<unsigned, 16>> parsedOrder =
         parseScoreOrder(StringRef(scoreOrder));
     if (failed(parsedOrder)) {
@@ -5939,9 +5948,8 @@ struct WaveAMDMachineScheduleReportPass
       return signalPassFailure();
     }
 
-    WalkResult walk = root->walk([&](func::FuncOp func) {
-      return processFunction(func, modelConfig, *parsedOrder);
-    });
+    WalkResult walk = root->walk(
+        [&](func::FuncOp func) { return processFunction(func, *parsedOrder); });
     if (walk.wasInterrupted())
       return signalPassFailure();
   }
@@ -5960,7 +5968,6 @@ struct WaveAMDMachineScheduleReportPass
   }
 
   WalkResult processFunction(func::FuncOp func,
-                             const waveamdmachine::EventSimConfig &modelConfig,
                              ArrayRef<unsigned> parsedOrder) {
     if (func.isExternal() || !hasAnyWaveMachineOp(func))
       return WalkResult::advance();
@@ -5974,6 +5981,17 @@ struct WaveAMDMachineScheduleReportPass
     if (!arch.arch)
       return reportMissingArch(*collected, func, arch);
 
+    return reportFunction(func, *collected, *arch.arch, parsedOrder);
+  }
+
+  WalkResult reportFunction(func::FuncOp func, ArrayRef<GreedyRegion> regions,
+                            const waveamdmachine::ArchData &arch,
+                            ArrayRef<unsigned> parsedOrder) {
+    FailureOr<waveamdmachine::EventSimConfig> modelConfig =
+        buildModelConfig(func, "waveamd-machine-schedule-report");
+    if (failed(modelConfig))
+      return WalkResult::interrupt();
+
     ValueOriginMap origins = buildValueOriginMap(func);
     std::optional<WaveAMDLiveIntervalBuildResult> liveness;
     if (printCandidates) {
@@ -5985,9 +6003,9 @@ struct WaveAMDMachineScheduleReportPass
         return WalkResult::interrupt();
       liveness = std::move(*built);
     }
-    for (const GreedyRegion &region : *collected)
-      if (failed(reportRegion(region, *arch.arch, modelConfig, parsedOrder,
-                              origins, liveness ? &*liveness : nullptr)))
+    for (const GreedyRegion &region : regions)
+      if (failed(reportRegion(region, arch, *modelConfig, parsedOrder, origins,
+                              liveness ? &*liveness : nullptr)))
         return WalkResult::interrupt();
     return WalkResult::advance();
   }

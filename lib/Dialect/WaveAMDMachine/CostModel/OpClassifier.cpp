@@ -18,6 +18,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cassert>
 
 namespace mlir::waveamdmachine {
 
@@ -166,11 +167,15 @@ SchedClass classifyOp(Operation *op) {
 }
 
 unsigned getInstructionIssueCount(Operation *op,
-                                  const llvm::AMDGPU::IsaVersion &targetIsa) {
+                                  const llvm::AMDGPU::IsaVersion &targetIsa,
+                                  unsigned wavefrontSize) {
+  assert((wavefrontSize == 32 || wavefrontSize == 64) &&
+         "invalid wavefront size");
   if (!isa<InstructionIssueOpInterface>(op))
     return 1;
   InstructionIssueOpInterface info = cast<InstructionIssueOpInterface>(op);
-  unsigned declaredIssues = info.getInstructionIssueCount(targetIsa);
+  unsigned declaredIssues =
+      info.getInstructionIssueCount(targetIsa, wavefrontSize);
   if (!isa<TDMLoadOp, TDMStoreOp>(op))
     return std::max(1u, declaredIssues);
   SchedClass cls = classifyOp(op);
@@ -192,13 +197,13 @@ bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
 
 InstructionCoexecutionModel
 getInstructionCoexecutionModel(Operation *op, SchedClass cls,
-                               const ArchData &arch) {
+                               const ArchData &arch, unsigned wavefrontSize) {
   InstructionCoexecutionModel model;
   if (arch.mfmaValuCoexecWindowSlots == 0 ||
       arch.mfmaValuCoexecProducerBurst == 0)
     return model;
 
-  unsigned issues = getInstructionIssueCount(op, arch.isa);
+  unsigned issues = getInstructionIssueCount(op, arch.isa, wavefrontSize);
   unsigned release =
       std::max<unsigned>(issues, std::max(1, getResourceCycles(arch, cls)));
   if (op->hasTrait<traits::MFMAOp>()) {
