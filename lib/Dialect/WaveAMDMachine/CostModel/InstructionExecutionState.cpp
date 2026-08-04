@@ -694,6 +694,22 @@ bool InstructionScheduleModel::canFillStall(
   return candidate == FunctionalUnit::VALU && !usesMfmaCoissueResource;
 }
 
+bool InstructionScheduleModel::isStallFillerCompatible(
+    const InstructionStallFillerCompatibilityFacts &facts) const {
+  return (facts.blockedMemoryResources & facts.candidateMemoryResources) == 0 &&
+         canFillStall(facts.stall, facts.candidateFunctionalUnit,
+                      facts.usesMfmaCoissueResource);
+}
+
+bool InstructionScheduleModel::canSelectStallFiller(
+    const InstructionStallFillerFacts &facts) const {
+  if (!facts.candidateRealInstruction || facts.candidateStalls ||
+      !isStallFillerCompatible(facts.compatibility))
+    return false;
+  return !facts.issueDeadlineCycle ||
+         facts.candidateRequiredCycle <= *facts.issueDeadlineCycle;
+}
+
 InstructionCoexecutionModel InstructionScheduleModel::applyCoexecutionPolicy(
     InstructionCoexecutionModel model) const {
   return enableCoexecWindow ? model : InstructionCoexecutionModel{};

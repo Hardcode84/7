@@ -937,26 +937,66 @@ struct RegionScheduleSession::Impl {
         ReadyScheduleSelectionKind::VmemPrefetch);
   }
 
-  bool fillsReservedStall(const ReadyScheduleStallFacts &stall,
-                          const ReadyScheduleCandidateIssueFacts &issue) const {
-    if (stall.kind == ReadyScheduleStallKind::None || !issue.realInstruction ||
-        issue.stalls)
-      return false;
-    if (stall.kind == ReadyScheduleStallKind::Cycle &&
-        issue.nextIssueCycle > stall.issueCycle)
-      return false;
-    int64_t reserveCycles =
-        static_cast<int64_t>(issue.issues) *
-        waveamdmachine::getEventSimIssuePeriod(*arch, config);
-    return issue.nextIssueCycle + reserveCycles <= stall.issueCycle;
+  waveamdmachine::InstructionStallFillerCompatibilityFacts
+  getStallFillerCompatibility(unsigned candidate,
+                              const ReadyScheduleStallFacts &stall) const {
+    Operation *candidateOp = operations[candidate];
+    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(candidateOp);
+    waveamdmachine::InstructionScheduleResourceInfo resource =
+        waveamdmachine::getInstructionScheduleResourceInfo(
+            candidateOp, cls, *arch, wavefrontSize);
+    waveamdmachine::InstructionStallFillerCompatibilityFacts facts;
+    facts.blockedMemoryResources = stall.blockedMemoryResources;
+    facts.candidateMemoryResources =
+        waveamdmachine::getMemoryIssueResources(candidateOp);
+    facts.stall = stall.reason;
+    facts.candidateFunctionalUnit = resource.functionalUnit;
+    facts.usesMfmaCoissueResource = resource.usesMfmaCoissue;
+    return facts;
   }
 
-  FailureOr<std::optional<unsigned>>
-  findDmaPostBarrierFiller(const llvm::BitVector &scheduled, unsigned baseline,
-                           const llvm::BitVector &legalReadyCandidates,
-                           const ReadyScheduleStallFacts &stall,
-                           ReadyScheduleIssueProvider issueProvider) const {
-    if (!dmaIssueTiming ||
+  static bool modelAdmitsStallFiller(
+      const waveamdmachine::InstructionStallFillerCompatibilityFacts
+          &compatibility,
+      bool candidateRealInstruction, bool candidateStalls,
+      int64_t candidateRequiredCycle, std::optional<int64_t> issueDeadlineCycle,
+      const waveamdmachine::InstructionScheduleModel &policy) {
+    waveamdmachine::InstructionStallFillerFacts facts;
+    facts.issueDeadlineCycle = issueDeadlineCycle;
+    facts.candidateRequiredCycle = candidateRequiredCycle;
+    facts.compatibility = compatibility;
+    facts.candidateRealInstruction = candidateRealInstruction;
+    facts.candidateStalls = candidateStalls;
+    return policy.canSelectStallFiller(facts);
+  }
+
+  FailureOr<bool> admitsDmaPostBarrierFiller(
+      unsigned candidate, const ReadyScheduleStallFacts &stall,
+      const waveamdmachine::InstructionScheduleModel &policy,
+      ReadyScheduleIssueProvider issueProvider) const {
+    waveamdmachine::InstructionStallFillerCompatibilityFacts compatibility =
+        getStallFillerCompatibility(candidate, stall);
+    if (!policy.isStallFillerCompatible(compatibility))
+      return false;
+    FailureOr<ReadyScheduleCandidateIssueFacts> issue =
+        issueProvider(candidate);
+    if (failed(issue))
+      return failure();
+    int64_t reserveCycles =
+        static_cast<int64_t>(issue->issues) *
+        waveamdmachine::getEventSimIssuePeriod(*arch, config);
+    return modelAdmitsStallFiller(
+        compatibility, issue->realInstruction, issue->stalls,
+        issue->nextIssueCycle + reserveCycles, stall.issueCycle, policy);
+  }
+
+  FailureOr<std::optional<unsigned>> findDmaPostBarrierFiller(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates,
+      const ReadyScheduleStallFacts &stall,
+      const waveamdmachine::InstructionScheduleModel &policy,
+      ReadyScheduleIssueProvider issueProvider) const {
+    if (stall.kind == ReadyScheduleStallKind::None || !dmaIssueTiming ||
         !isa<waveamdmachine::DmaIssueDelayOp>(operations[baseline]))
       return std::optional<unsigned>{};
     unsigned barrier = findFirstUnscheduledBarrier(scheduled, baseline + 1);
@@ -970,11 +1010,11 @@ struct RegionScheduleSession::Impl {
       if (!isPostBarrierFillerCandidate(candidate, legalReadyCandidates,
                                         scheduled))
         continue;
-      FailureOr<ReadyScheduleCandidateIssueFacts> issue =
-          issueProvider(candidate);
-      if (failed(issue))
+      FailureOr<bool> admitted =
+          admitsDmaPostBarrierFiller(candidate, stall, policy, issueProvider);
+      if (failed(admitted))
         return failure();
-      if (fillsReservedStall(stall, *issue))
+      if (*admitted)
         return std::optional<unsigned>(candidate);
     }
     return std::optional<unsigned>{};
@@ -992,8 +1032,11 @@ struct RegionScheduleSession::Impl {
          ready = legalReadyCandidates.find_next(ready)) {
       unsigned candidate = ready;
       if (candidate == baseline || scheduled.test(candidate) ||
-          !isGenericStallFillerCompatible(scheduled, baseline, candidate, stall,
-                                          policy))
+          !hasGenericStallFillerLegality(scheduled, baseline, candidate, stall))
+        continue;
+      waveamdmachine::InstructionStallFillerCompatibilityFacts compatibility =
+          getStallFillerCompatibility(candidate, stall);
+      if (!policy.isStallFillerCompatible(compatibility))
         continue;
       FailureOr<ReadyScheduleCandidateIssueFacts> issue =
           issueProvider(candidate);
@@ -1002,8 +1045,11 @@ struct RegionScheduleSession::Impl {
       ReadyScheduleProposal proposal{
           candidate, ReadyScheduleProposalKind::GenericStallFiller,
           /*group=*/0};
-      proposal.filler = {stall, issue->nextIssueCycle, issue->realInstruction,
-                         issue->stalls};
+      proposal.filler.stall = stall;
+      proposal.filler.compatibility = compatibility;
+      proposal.filler.candidateNextIssueCycle = issue->nextIssueCycle;
+      proposal.filler.candidateRealInstruction = issue->realInstruction;
+      proposal.filler.candidateStalls = issue->stalls;
       proposals.push_back(proposal);
     }
     return proposals;
@@ -1983,23 +2029,13 @@ struct RegionScheduleSession::Impl {
            isLatencyCompatible(scheduled, baseline, candidate, policy);
   }
 
-  bool isGenericStallFillerCompatible(
-      const llvm::BitVector &scheduled, unsigned baseline, unsigned candidate,
-      const ReadyScheduleStallFacts &stall,
-      const waveamdmachine::InstructionScheduleModel &policy) const {
-    Operation *candidateOp = operations[candidate];
-    if (stall.kind == ReadyScheduleStallKind::None ||
-        (isFullBarrier(baseline) && isFullBarrier(candidate)) ||
-        !canUseStallFiller(scheduled, baseline, candidate) ||
-        (stall.blockedMemoryResources &
-         waveamdmachine::getMemoryIssueResources(candidateOp)) != 0)
-      return false;
-    waveamdmachine::SchedClass cls = waveamdmachine::classifyOp(candidateOp);
-    waveamdmachine::InstructionScheduleResourceInfo resource =
-        waveamdmachine::getInstructionScheduleResourceInfo(
-            candidateOp, cls, *arch, wavefrontSize);
-    return policy.canFillStall(stall.reason, resource.functionalUnit,
-                               resource.usesMfmaCoissue);
+  bool
+  hasGenericStallFillerLegality(const llvm::BitVector &scheduled,
+                                unsigned baseline, unsigned candidate,
+                                const ReadyScheduleStallFacts &stall) const {
+    return stall.kind != ReadyScheduleStallKind::None &&
+           !(isFullBarrier(baseline) && isFullBarrier(candidate)) &&
+           canUseStallFiller(scheduled, baseline, candidate);
   }
 
   bool isGenericStallFillerCandidate(
@@ -2007,12 +2043,16 @@ struct RegionScheduleSession::Impl {
       unsigned baseline, unsigned candidate,
       const waveamdmachine::InstructionScheduleModel &policy) const {
     const ReadyScheduleFillerFacts &filler = proposal.filler;
-    if (!isGenericStallFillerCompatible(scheduled, baseline, candidate,
-                                        filler.stall, policy) ||
-        !filler.candidateRealInstruction || filler.candidateStalls)
+    if (!hasGenericStallFillerLegality(scheduled, baseline, candidate,
+                                       filler.stall))
       return false;
-    return filler.stall.kind != ReadyScheduleStallKind::Cycle ||
-           filler.candidateNextIssueCycle <= filler.stall.issueCycle;
+    std::optional<int64_t> issueDeadlineCycle;
+    if (filler.stall.kind == ReadyScheduleStallKind::Cycle)
+      issueDeadlineCycle = filler.stall.issueCycle;
+    return modelAdmitsStallFiller(
+        filler.compatibility, filler.candidateRealInstruction,
+        filler.candidateStalls, filler.candidateNextIssueCycle,
+        issueDeadlineCycle, policy);
   }
 
   struct ProposalCandidateClassification {
@@ -3246,7 +3286,7 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectStallFiller(
     ReadyScheduleIssueProvider issueProvider) const {
   impl->assertValidReadySelection(scheduled, baseline, legalReadyCandidates);
   FailureOr<std::optional<unsigned>> dma = impl->findDmaPostBarrierFiller(
-      scheduled, baseline, legalReadyCandidates, stall, issueProvider);
+      scheduled, baseline, legalReadyCandidates, stall, policy, issueProvider);
   if (failed(dma))
     return failure();
   if (*dma) {

@@ -240,6 +240,7 @@ struct ReadyScheduleLatencyFacts {
 struct ReadyScheduleFillerFacts {
   ReadyScheduleStallFacts stall;
   int64_t candidateNextIssueCycle = 0;
+  waveamdmachine::InstructionStallFillerCompatibilityFacts compatibility;
   bool candidateRealInstruction = false;
   bool candidateStalls = false;
 };

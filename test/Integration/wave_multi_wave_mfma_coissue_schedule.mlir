@@ -250,4 +250,45 @@ func.func @cohort_mfma_coexec_window_single_wave(
   return
 }
 
+// CHECK-LABEL: func.func @cohort_mfma_coexec_window_reject_ready_packed(
+// CHECK: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.v_cmpx_eq_u32
+// CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.v_pk_add_f32
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_reject_ready_packed
+// DIAG-SAME: action=keep reason=same_order
+// DIAG-SAME: filled_gaps=0
+// DIAG-SAME: coexec_window_gaps=1
+func.func @cohort_mfma_coexec_window_reject_ready_packed(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 16>,
+    %acc1: !waveamdmachine.reg<vgpr, 16>,
+    %acc2: !waveamdmachine.reg<vgpr, 16>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %packed_x: !waveamdmachine.reg<vgpr, 2>,
+    %packed_y: !waveamdmachine.reg<vgpr, 2>)
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 2 : i64} {
+  %m0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+  %m1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+  waveamdmachine.v_cmpx_eq_u32 %x, %x
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  %m2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+  %packed = waveamdmachine.v_pk_add_f32 %packed_x, %packed_y
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> !waveamdmachine.reg<vgpr, 2>
+  return
+}
+
 }

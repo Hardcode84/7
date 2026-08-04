@@ -12,9 +12,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NEXT: [[PREFIX2:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[PREFIX1]]
 // CHECK-NEXT: waveamdmachine.s_add_m0_i32
 // CHECK-NEXT: [[POST:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[ACC]]
-// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST]]
+// CHECK-NEXT: [[POST1:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST]]
+// CHECK-NEXT: [[POST2:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST1]]
+// CHECK-NEXT: [[POST3:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST2]]
+// CHECK-NEXT: [[POST4:%.*]] = waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST3]]
 // CHECK-NEXT: waveamdmachine.dma_issue_delay
-// CHECK: waveamdmachine.s_barrier
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16 {{%.*}}, {{%.*}}, [[POST4]]
+// CHECK-NEXT: waveamdmachine.s_barrier
 // CHECK-NEXT: waveamdmachine.ds_load_b32
 func.func @post_barrier_fill(
     %off: !waveamdmachine.reg<vgpr, 1>,
@@ -73,6 +77,18 @@ func.func @post_barrier_fill(
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
            !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
     %post1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %post
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %post2 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %post1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %post3 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %post2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %post4 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %post3
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %post5 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %post4
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
            !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>

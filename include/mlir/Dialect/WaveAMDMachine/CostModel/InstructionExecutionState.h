@@ -135,6 +135,22 @@ struct InstructionScheduleResourcePreview {
   FunctionalUnit functionalUnit = FunctionalUnit::None;
 };
 
+struct InstructionStallFillerCompatibilityFacts {
+  FunctionalUnit candidateFunctionalUnit = FunctionalUnit::None;
+  MemoryIssueResourceMask blockedMemoryResources = 0;
+  MemoryIssueResourceMask candidateMemoryResources = 0;
+  InstructionStallKind stall = InstructionStallKind::None;
+  bool usesMfmaCoissueResource = false;
+};
+
+struct InstructionStallFillerFacts {
+  std::optional<int64_t> issueDeadlineCycle;
+  int64_t candidateRequiredCycle = 0;
+  InstructionStallFillerCompatibilityFacts compatibility;
+  bool candidateRealInstruction = false;
+  bool candidateStalls = false;
+};
+
 InstructionScheduleResourceInfo
 getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
                                    const ArchData &arch,
@@ -171,8 +187,9 @@ public:
                                        unsigned releaseSlots,
                                        ReadyRegisterPressure current,
                                        const ReadyCandidateMetrics &next) const;
-  bool canFillStall(InstructionStallKind stall, FunctionalUnit candidate,
-                    bool usesMfmaCoissueResource) const;
+  bool isStallFillerCompatible(
+      const InstructionStallFillerCompatibilityFacts &facts) const;
+  bool canSelectStallFiller(const InstructionStallFillerFacts &facts) const;
   InstructionCoexecutionModel
   applyCoexecutionPolicy(InstructionCoexecutionModel model) const;
   bool canIssueLdsDmaDuringLead(int64_t resourceWait,
@@ -208,6 +225,9 @@ public:
                                const ReadyCandidateMetrics &selected) const;
 
 private:
+  bool canFillStall(InstructionStallKind stall, FunctionalUnit candidate,
+                    bool usesMfmaCoissueResource) const;
+
   friend void configureInstructionScheduleModel(
       InstructionExecutionConfig &config, const ArchData &arch,
       unsigned targetWaveCount, unsigned readyPressureWaveCohort,
