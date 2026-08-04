@@ -42,6 +42,7 @@ static constexpr ArchData kGfx803{
     /*hasMfmaCoissueRestriction=*/false,
     /*mfmaValuCoexecWindowSlots=*/0,
     /*mfmaValuCoexecProducerBurst=*/0,
+    /*mfmaTransCoexecSlotsPerIssue=*/0,
     /*agprCountsAgainstVGPRs=*/false,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -74,6 +75,7 @@ static constexpr ArchData kGfx942{
     /*hasMfmaCoissueRestriction=*/true,
     /*mfmaValuCoexecWindowSlots=*/0,
     /*mfmaValuCoexecProducerBurst=*/0,
+    /*mfmaTransCoexecSlotsPerIssue=*/0,
     /*agprCountsAgainstVGPRs=*/true,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -104,6 +106,7 @@ static constexpr ArchData kGfx950{
     /*hasMfmaCoissueRestriction=*/true,
     /*mfmaValuCoexecWindowSlots=*/6,
     /*mfmaValuCoexecProducerBurst=*/2,
+    /*mfmaTransCoexecSlotsPerIssue=*/2,
     /*agprCountsAgainstVGPRs=*/true,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -136,6 +139,7 @@ static constexpr ArchData kGfx1100{
     /*hasMfmaCoissueRestriction=*/false,
     /*mfmaValuCoexecWindowSlots=*/0,
     /*mfmaValuCoexecProducerBurst=*/0,
+    /*mfmaTransCoexecSlotsPerIssue=*/0,
     /*agprCountsAgainstVGPRs=*/false,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -167,6 +171,7 @@ static constexpr ArchData kGfx1200{
     /*hasMfmaCoissueRestriction=*/false,
     /*mfmaValuCoexecWindowSlots=*/0,
     /*mfmaValuCoexecProducerBurst=*/0,
+    /*mfmaTransCoexecSlotsPerIssue=*/0,
     /*agprCountsAgainstVGPRs=*/false,
     /*hasTransCoexecutionHazard=*/false,
     /*hasWmmaCoexecutionHazard=*/false,
@@ -214,6 +219,7 @@ static std::optional<ArchData> makeGfx1250() {
       /*hasMfmaCoissueRestriction=*/false,
       /*mfmaValuCoexecWindowSlots=*/0,
       /*mfmaValuCoexecProducerBurst=*/0,
+      /*mfmaTransCoexecSlotsPerIssue=*/0,
       /*agprCountsAgainstVGPRs=*/false,
       /*hasTransCoexecutionHazard=*/capabilities->transCoexecutionHazard,
       /*hasWmmaCoexecutionHazard=*/capabilities->wmmaCoexecutionHazard,
@@ -269,6 +275,12 @@ template <const ArchData &A> static constexpr bool saneInstructionIssue() {
   static_assert((A.mfmaValuCoexecWindowSlots == 0) ==
                     (A.mfmaValuCoexecProducerBurst == 0),
                 "MFMA-VALU coexecution model requires window and burst");
+  static_assert(A.mfmaTransCoexecSlotsPerIssue >= 0 &&
+                    A.mfmaTransCoexecSlotsPerIssue <= 64,
+                "MFMA-TRANS coexecution slot cost out of range");
+  static_assert(A.mfmaTransCoexecSlotsPerIssue == 0 ||
+                    A.mfmaValuCoexecWindowSlots != 0,
+                "MFMA-TRANS coexecution requires an MFMA window");
   return true;
 }
 

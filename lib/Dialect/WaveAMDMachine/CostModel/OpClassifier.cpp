@@ -211,6 +211,14 @@ getInstructionCoexecutionModel(Operation *op, SchedClass cls,
     model.waitsForWindow = true;
     return model;
   }
+  // TRANS keeps its native resource duration; its separate model cost describes
+  // how much of an MFMA coexecution window the issued work occupies.
+  if (cls == SchedClass::WriteTrans32 &&
+      arch.mfmaTransCoexecSlotsPerIssue != 0) {
+    model.filledSlots =
+        release * static_cast<unsigned>(arch.mfmaTransCoexecSlotsPerIssue);
+    return model;
+  }
   if (usesMfmaCoissueResource(op, cls, arch) || !op->hasTrait<traits::VALUOp>())
     return model;
   model.filledSlots = release;

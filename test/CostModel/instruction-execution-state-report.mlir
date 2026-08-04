@@ -33,6 +33,9 @@
 // RUN: wave-instruction-state-report --func=mfma_coexec_window --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-WINDOW-CDNA3
 // RUN: wave-instruction-state-report --func=mfma_coexec_partial_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-PARTIAL
 // RUN: wave-instruction-state-report --func=mfma_coexec_restricted_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-RESTRICTED
+// RUN: wave-instruction-state-report --func=mfma_coexec_trans_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-TRANS
+// RUN: wave-instruction-state-report --func=mfma_coexec_trans_full_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-TRANS-FULL
+// RUN: wave-instruction-state-report --func=trans_exposed_issue --arch=gfx950 %s | FileCheck %s --check-prefix=TRANS-ISSUE
 // RUN: wave-instruction-state-report --func=packed_f32_exposed_issue --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-F32-ISSUE
 // RUN: wave-instruction-state-report --func=packed_f32_exposed_issue --arch=gfx942 %s | FileCheck %s --check-prefix=PACKED-F32-CDNA3
 // RUN: wave-instruction-state-report --func=packed_f32_exposed_issue --arch=gfx1100 %s | FileCheck %s --check-prefix=PACKED-F32-RDNA
@@ -489,6 +492,70 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  func.func @mfma_coexec_trans_fill(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc0: !waveamdmachine.reg<vgpr, 16>,
+      %acc1: !waveamdmachine.reg<vgpr, 16>,
+      %acc2: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 1>) {
+    %mfma0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %mfma1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %trans = waveamdmachine.v_exp_f32 %x
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %mfma2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
+
+  func.func @trans_exposed_issue(
+      %x: !waveamdmachine.reg<vgpr, 1>,
+      %y: !waveamdmachine.reg<vgpr, 1>) {
+    %first = waveamdmachine.v_exp_f32 %x
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %second = waveamdmachine.v_exp_f32 %y
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @mfma_coexec_trans_full_fill(
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc0: !waveamdmachine.reg<vgpr, 16>,
+      %acc1: !waveamdmachine.reg<vgpr, 16>,
+      %acc2: !waveamdmachine.reg<vgpr, 16>,
+      %x: !waveamdmachine.reg<vgpr, 1>,
+      %y: !waveamdmachine.reg<vgpr, 1>,
+      %z: !waveamdmachine.reg<vgpr, 1>) {
+    %mfma0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %mfma1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    %trans0 = waveamdmachine.v_exp_f32 %x
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %trans1 = waveamdmachine.v_exp_f32 %y
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %trans2 = waveamdmachine.v_exp_f32 %z
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %mfma2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
+    return
+  }
+
   func.func @packed_f32_exposed_issue(
       %a: !waveamdmachine.reg<vgpr, 2>,
       %b: !waveamdmachine.reg<vgpr, 2>,
@@ -659,6 +726,20 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // MFMA-WINDOW-PARTIAL: query op_index=3 cycle=16 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=20 components=coexec_window:20
 
 // MFMA-WINDOW-RESTRICTED: query op_index=3 cycle=20 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=24 components=coexec_window:24
+
+// MFMA-WINDOW-TRANS: query op_index=2 cycle=12 op=waveamdmachine.v_exp_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+// MFMA-WINDOW-TRANS: commit op_index=2 issue=16 next=20
+// MFMA-WINDOW-TRANS: query op_index=3 cycle=20 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=16 components=coexec_window:16
+// MFMA-WINDOW-TRANS: commit op_index=3 issue=36 next=40
+
+// MFMA-WINDOW-TRANS-FULL: commit op_index=2 issue=16 next=20
+// MFMA-WINDOW-TRANS-FULL: commit op_index=3 issue=20 next=24
+// MFMA-WINDOW-TRANS-FULL: commit op_index=4 issue=24 next=28
+// MFMA-WINDOW-TRANS-FULL: query op_index=5 cycle=28 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=8 components=coexec_window:8
+// MFMA-WINDOW-TRANS-FULL: commit op_index=5 issue=36 next=40
+
+// TRANS-ISSUE: query op_index=1 cycle=4 op=waveamdmachine.v_exp_f32 stall=none cycles=0 components=none
+// TRANS-ISSUE: commit op_index=1 issue=4 next=8
 
 // PACKED-F32-ISSUE: func: packed_f32_exposed_issue
 // PACKED-F32-ISSUE: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f32 stall=none cycles=0 components=none

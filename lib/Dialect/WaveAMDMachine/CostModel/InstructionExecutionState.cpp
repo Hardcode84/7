@@ -176,6 +176,8 @@ void configureInstructionScheduleModel(
   config.scheduleModel.readyPressureWaveCohort =
       getWorkgroupWaveCount(context).value_or(
           config.scheduleModel.issueStreams);
+  config.scheduleModel.mfmaTransCoexecSlotsPerIssue =
+      static_cast<unsigned>(arch.mfmaTransCoexecSlotsPerIssue);
   config.scheduleModel.enableCoexecWindow =
       config.scheduleModel.readyPressureWaveCohort > 1;
   config.scheduleModel.pressureLimits = pressureLimits;
@@ -760,7 +762,9 @@ bool InstructionScheduleModel::canFillStall(
     bool usesMfmaCoissueResource) const {
   if (stall != InstructionStallKind::CoexecWindow)
     return true;
-  return candidate == FunctionalUnit::VALU && !usesMfmaCoissueResource;
+  return (candidate == FunctionalUnit::TRANS &&
+          mfmaTransCoexecSlotsPerIssue != 0) ||
+         (candidate == FunctionalUnit::VALU && !usesMfmaCoissueResource);
 }
 
 InstructionCoexecutionModel InstructionScheduleModel::applyCoexecutionPolicy(
@@ -1278,8 +1282,10 @@ void InstructionExecutionState::advanceToCycle(int64_t cycle) {
 
 void InstructionExecutionState::consumeCoexecutionWait(
     const InstructionDesc &desc) {
-  if (desc.coexecution.waitsForWindow && coexecWindowSlots != 0)
+  if (desc.coexecution.waitsForWindow) {
     coexecWindowSlots = 0;
+    coexecWindowDeadlineCycle = 0;
+  }
 }
 
 void InstructionExecutionState::commitCoexecution(const InstructionDesc &desc) {
@@ -1297,6 +1303,13 @@ void InstructionExecutionState::commitCoexecution(const InstructionDesc &desc) {
   if (coexecProducerRun < desc.coexecution.producerBurst)
     return;
   coexecWindowSlots = desc.coexecution.openedSlots;
+  // Weighted fillers may retire window debt faster than issue time advances,
+  // but they cannot pull the next producer ahead of the no-filler deadline.
+  coexecWindowDeadlineCycle = saturatingAdd(
+      currentCycle,
+      saturatingAdd(
+          getInstructionSpan(desc),
+          saturatingMultiply(coexecWindowSlots, getIssuePeriod())));
   coexecProducerRun = 0;
 }
 
@@ -1572,9 +1585,13 @@ FailureOr<InstructionStall> InstructionExecutionState::queryWithResources(
     return failure();
 
   // Coexecution is a model stall; scheduling only supplies compatible fillers.
-  if (desc.coexecution.waitsForWindow && coexecWindowSlots != 0)
+  if (desc.coexecution.waitsForWindow) {
+    int64_t remainingWork =
+        saturatingMultiply(coexecWindowSlots, getIssuePeriod());
+    int64_t deadlineWait = coexecWindowDeadlineCycle - currentCycle;
     addComponent(stall, InstructionStallKind::CoexecWindow,
-                 saturatingMultiply(coexecWindowSlots, getIssuePeriod()));
+                 std::max(remainingWork, deadlineWait));
+  }
 
   if (resourceState) {
     addLocalMemoryIssueStalls(desc, stall);
