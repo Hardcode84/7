@@ -1581,7 +1581,6 @@ static bool sameResourcePreview(
     const waveamdmachine::InstructionScheduleResourcePreview &rhs) {
   return lhs.waitSlots == rhs.waitSlots &&
          lhs.releaseSlots == rhs.releaseSlots &&
-         lhs.mfmaCoissueReleaseSlots == rhs.mfmaCoissueReleaseSlots &&
          lhs.functionalUnit == rhs.functionalUnit;
 }
 

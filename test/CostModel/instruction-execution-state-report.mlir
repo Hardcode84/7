@@ -33,9 +33,10 @@
 // RUN: wave-instruction-state-report --func=mfma_coexec_window --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-WINDOW-CDNA3
 // RUN: wave-instruction-state-report --func=mfma_coexec_partial_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-PARTIAL
 // RUN: wave-instruction-state-report --func=mfma_coexec_restricted_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-RESTRICTED
-// RUN: wave-instruction-state-report --func=packed_f32_coissue_duration --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-F32-DURATION
-// RUN: wave-instruction-state-report --func=packed_f32_coissue_duration --arch=gfx942 %s | FileCheck %s --check-prefix=PACKED-F32-CDNA3
-// RUN: wave-instruction-state-report --func=packed_f32_coissue_duration --arch=gfx1100 %s | FileCheck %s --check-prefix=PACKED-F32-RDNA
+// RUN: wave-instruction-state-report --func=packed_f32_exposed_issue --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-F32-ISSUE
+// RUN: wave-instruction-state-report --func=packed_f32_exposed_issue --arch=gfx942 %s | FileCheck %s --check-prefix=PACKED-F32-CDNA3
+// RUN: wave-instruction-state-report --func=packed_f32_exposed_issue --arch=gfx1100 %s | FileCheck %s --check-prefix=PACKED-F32-RDNA
+// RUN: wave-instruction-state-report --func=packed_f32_before_mfma --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-BEFORE-MFMA
 // RUN: wave-instruction-state-report --func=packed_f16_coissue_duration --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-F16-DURATION
 // RUN: wave-instruction-state-report --func=packed_cast_coissue_duration --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-CAST-DURATION
 
@@ -488,7 +489,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
-  func.func @packed_f32_coissue_duration(
+  func.func @packed_f32_exposed_issue(
       %a: !waveamdmachine.reg<vgpr, 2>,
       %b: !waveamdmachine.reg<vgpr, 2>,
       %c: !waveamdmachine.reg<vgpr, 2>) {
@@ -501,6 +502,22 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %fma = waveamdmachine.v_pk_fma_f32 %a, %b, %c
         : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
            !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+    return
+  }
+
+  func.func @packed_f32_before_mfma(
+      %x: !waveamdmachine.reg<vgpr, 2>,
+      %y: !waveamdmachine.reg<vgpr, 2>,
+      %a: !waveamdmachine.reg<vgpr, 4>,
+      %b: !waveamdmachine.reg<vgpr, 4>,
+      %acc: !waveamdmachine.reg<vgpr, 16>) {
+    %packed = waveamdmachine.v_pk_add_f32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %mfma = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>)
+          -> !waveamdmachine.reg<vgpr, 16>
     return
   }
 
@@ -643,11 +660,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // MFMA-WINDOW-RESTRICTED: query op_index=3 cycle=20 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=24 components=coexec_window:24
 
-// PACKED-F32-DURATION: func: packed_f32_coissue_duration
-// PACKED-F32-DURATION: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
-// PACKED-F32-DURATION: commit op_index=1 issue=8 next=12
-// PACKED-F32-DURATION: query op_index=2 cycle=12 op=waveamdmachine.v_pk_fma_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
-// PACKED-F32-DURATION: commit op_index=2 issue=16 next=20
+// PACKED-F32-ISSUE: func: packed_f32_exposed_issue
+// PACKED-F32-ISSUE: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f32 stall=none cycles=0 components=none
+// PACKED-F32-ISSUE: commit op_index=1 issue=4 next=8
+// PACKED-F32-ISSUE: query op_index=2 cycle=8 op=waveamdmachine.v_pk_fma_f32 stall=none cycles=0 components=none
+// PACKED-F32-ISSUE: commit op_index=2 issue=8 next=12
 
 // PACKED-F32-CDNA3: arch: gfx942
 // PACKED-F32-CDNA3: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f32 stall=none cycles=0 components=none
@@ -656,6 +673,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PACKED-F32-RDNA: arch: gfx1100
 // PACKED-F32-RDNA: query op_index=1 cycle=1 op=waveamdmachine.v_pk_mul_f32 stall=none cycles=0 components=none
 // PACKED-F32-RDNA: query op_index=2 cycle=2 op=waveamdmachine.v_pk_fma_f32 stall=none cycles=0 components=none
+
+// PACKED-BEFORE-MFMA: query op_index=1 cycle=4 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=none cycles=0 components=none
 
 // PACKED-F16-DURATION: func: packed_f16_coissue_duration
 // PACKED-F16-DURATION: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f16 stall=none cycles=0 components=none

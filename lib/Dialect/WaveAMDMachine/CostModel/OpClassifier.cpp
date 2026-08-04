@@ -190,19 +190,6 @@ bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
              VPkFmaF32Op>(op);
 }
 
-unsigned getMfmaCoissueResourceDuration(Operation *op, SchedClass cls,
-                                        const ArchData &arch,
-                                        unsigned issuePeriod) {
-  if (!usesMfmaCoissueResource(op, cls, arch))
-    return 0;
-  unsigned duration = std::max(1, getResourceCycles(arch, cls));
-  if (arch.packedF32MfmaCoissueSlots == 0 ||
-      !isa<VPkAddF32Op, VPkMulF32Op, VPkFmaF32Op>(op))
-    return duration;
-  return std::max(duration, issuePeriod * static_cast<unsigned>(
-                                              arch.packedF32MfmaCoissueSlots));
-}
-
 InstructionCoexecutionModel
 getInstructionCoexecutionModel(Operation *op, SchedClass cls,
                                const ArchData &arch) {

@@ -413,7 +413,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // PACKEDMULTI: waves_per_simd: 2
 // PACKEDMULTI-DAG: issue cycle=0 wave=0 simd=0 fu=VALU op=waveamdmachine.v_pk_add_f32
-// PACKEDMULTI-DAG: issue cycle=8 wave=1 simd=0 fu=VALU op=waveamdmachine.v_pk_add_f32
+// PACKEDMULTI-DAG: issue cycle=4 wave=1 simd=0 fu=VALU op=waveamdmachine.v_pk_add_f32
 
 // CASTMULTI: waves_per_simd: 2
 // CASTMULTI-DAG: issue cycle=0 wave=0 simd=0 fu=VALU op=waveamdmachine.v_cvt_pk_bf16_f32

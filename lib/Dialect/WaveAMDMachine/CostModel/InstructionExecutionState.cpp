@@ -59,9 +59,6 @@ getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
   info.usesMfmaCoissue = usesMfmaCoissueResource(op, cls, arch);
   if (info.tracked)
     info.releaseSlots = std::max(1, getResourceCycles(arch, cls));
-  if (info.usesMfmaCoissue)
-    info.mfmaCoissueReleaseSlots =
-        getMfmaCoissueResourceDuration(op, cls, arch, /*issuePeriod=*/1);
   return info;
 }
 
@@ -73,7 +70,6 @@ InstructionScheduleResourcePreview InstructionScheduleResourceState::preview(
     return result;
 
   result.releaseSlots = info.releaseSlots;
-  result.mfmaCoissueReleaseSlots = info.mfmaCoissueReleaseSlots;
   size_t index = static_cast<size_t>(result.functionalUnit);
   int64_t readySlot = readyAt[index];
   if (trackMfmaCoissue && info.usesMfmaCoissue)
@@ -98,11 +94,8 @@ void InstructionScheduleResourceState::commit(
   size_t index = static_cast<size_t>(resource.functionalUnit);
   unsigned releaseSlots = std::max(info.releaseSlots, info.issueSlots);
   readyAt[index] = issueSlot + releaseSlots;
-  if (trackMfmaCoissue && info.usesMfmaCoissue) {
-    unsigned mfmaCoissueReleaseSlots =
-        std::max(info.mfmaCoissueReleaseSlots, info.issueSlots);
-    mfmaCoissueReadyAt = issueSlot + mfmaCoissueReleaseSlots;
-  }
+  if (trackMfmaCoissue && info.usesMfmaCoissue)
+    mfmaCoissueReadyAt = issueSlot + releaseSlots;
   currentSlot = issueSlot + info.issueSlots;
 }
 
@@ -1360,7 +1353,7 @@ InstructionExecutionState::commitWithResources(
     commitPipe(desc->pipe, valueReadyCycle);
     if (desc->mfmaCoissueResource)
       mfmaCoissueReadyCycle =
-          saturatingAdd(result.issueCycle, desc->mfmaCoissueDuration);
+          saturatingAdd(result.issueCycle, desc->resourceDuration);
     commitMemoryIssue(*desc, result.issueCycle);
   }
   currentIssueSlot += desc->issueSlots;
@@ -1406,9 +1399,7 @@ InstructionExecutionState::describe(Operation *op) const {
                   hasOnlyRegClass(op->getResults(), RegClass::SGPR);
   desc.pipe = pipeFor(arch, cls);
   desc.resourceDuration = getResourceCycles(arch, cls);
-  desc.mfmaCoissueDuration =
-      getMfmaCoissueResourceDuration(op, cls, arch, getIssuePeriod());
-  desc.mfmaCoissueResource = desc.mfmaCoissueDuration != 0;
+  desc.mfmaCoissueResource = usesMfmaCoissueResource(op, cls, arch);
   desc.instructionIssueCount = getInstructionIssueCount(op, arch.isa);
   desc.coexecution = config.scheduleModel.applyCoexecutionPolicy(
       getInstructionCoexecutionModel(op, cls, arch));
@@ -1475,12 +1466,12 @@ void InstructionExecutionState::appendPipeResourceUse(
 void InstructionExecutionState::appendMfmaCoissueResourceUse(
     const InstructionDesc &desc, const InstructionResourceState &resourceState,
     SmallVectorImpl<InstructionResourceUse> &uses) const {
-  if (!desc.mfmaCoissueResource || desc.mfmaCoissueDuration <= 0 ||
+  if (!desc.mfmaCoissueResource || desc.resourceDuration <= 0 ||
       !resourceState.isEnabled(InstructionResourceKind::MfmaCoissue))
     return;
   uses.push_back({InstructionResourceKind::MfmaCoissue,
                   InstructionResourceScope::SIMD, /*units=*/1, /*count=*/1,
-                  /*offset=*/0, /*period=*/0, desc.mfmaCoissueDuration});
+                  /*offset=*/0, /*period=*/0, desc.resourceDuration});
 }
 
 void InstructionExecutionState::appendLdsResourceUses(

@@ -238,9 +238,7 @@ static void commitOperation(Operation *op, const ArchData &arch,
   unsigned releaseSlots = std::max(issues, resource.releaseSlots);
   state.readyAt[static_cast<size_t>(fu)] = issueSlot + releaseSlots;
   if (resource.usesMfmaCoissue) {
-    unsigned mfmaCoissueReleaseSlots =
-        std::max(issues, resource.mfmaCoissueReleaseSlots);
-    state.mfmaReadyAt = issueSlot + mfmaCoissueReleaseSlots;
+    state.mfmaReadyAt = issueSlot + releaseSlots;
     state.activeMfma =
         op->hasTrait<OpTrait::waveamdmachine::MFMAOp>() ? op : nullptr;
   }

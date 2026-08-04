@@ -43,10 +43,6 @@ unsigned getInstructionIssueCount(Operation *op,
 bool usesMfmaCoissueResource(Operation *op, SchedClass cls,
                              const ArchData &arch);
 
-unsigned getMfmaCoissueResourceDuration(Operation *op, SchedClass cls,
-                                        const ArchData &arch,
-                                        unsigned issuePeriod);
-
 InstructionCoexecutionModel
 getInstructionCoexecutionModel(Operation *op, SchedClass cls,
                                const ArchData &arch);
