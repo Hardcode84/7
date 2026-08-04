@@ -123,6 +123,7 @@ enum class ReadyResourceCandidateKind : uint8_t {
 struct InstructionScheduleResourceInfo {
   unsigned issueSlots = 0;
   unsigned releaseSlots = 0;
+  unsigned coexecWindowFilledSlots = 0;
   FunctionalUnit functionalUnit = FunctionalUnit::None;
   bool realInstruction = false;
   bool tracked = false;
@@ -170,8 +171,14 @@ public:
                                        unsigned releaseSlots,
                                        ReadyRegisterPressure current,
                                        const ReadyCandidateMetrics &next) const;
-  bool canFillStall(InstructionStallKind stall, FunctionalUnit candidate,
-                    bool usesMfmaCoissueResource) const;
+  bool canFillStall(InstructionStallKind stall,
+                    unsigned coexecWindowFilledSlots) const;
+  bool canSelectStallFiller(InstructionStallKind stall,
+                            unsigned coexecWindowFilledSlots,
+                            bool candidateStalls, bool hasIssueDeadline,
+                            int64_t candidateNextIssueCycle,
+                            int64_t candidateIssueEndCycle,
+                            int64_t stallIssueCycle) const;
   InstructionCoexecutionModel
   applyCoexecutionPolicy(InstructionCoexecutionModel model) const;
   bool canIssueLdsDmaDuringLead(int64_t resourceWait,
@@ -216,7 +223,6 @@ private:
   int64_t ldsDmaIssueLead = 0;
   unsigned issueStreams = 1;
   unsigned readyPressureWaveCohort = 1;
-  unsigned mfmaTransCoexecSlotsPerIssue = 0;
   bool enableCoexecWindow = true;
 };
 
