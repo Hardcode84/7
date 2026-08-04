@@ -70,6 +70,7 @@ public:
   MultiWaveCohortExecutionState &
   operator=(MultiWaveCohortExecutionState &&) = default;
 
+  FailureOr<InstructionStall> queryPriorityStall(Operation *op) const;
   FailureOr<InstructionCommitResult> commit(Operation *op);
   int64_t getCurrentCycle() const;
   void bindValue(Value result, Value source);

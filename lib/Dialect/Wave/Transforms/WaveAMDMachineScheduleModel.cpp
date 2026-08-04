@@ -297,6 +297,14 @@ addReadyPressureSlot(waveamdmachine::ReadyRegisterPressure &pressure,
   llvm_unreachable("unknown ready-pressure register class");
 }
 
+static bool sameResourcePreview(
+    const waveamdmachine::InstructionScheduleResourcePreview &lhs,
+    const waveamdmachine::InstructionScheduleResourcePreview &rhs) {
+  return lhs.waitSlots == rhs.waitSlots &&
+         lhs.releaseSlots == rhs.releaseSlots &&
+         lhs.functionalUnit == rhs.functionalUnit;
+}
+
 } // namespace
 
 struct WaveAMDMachineScheduleModel::Impl {
@@ -484,15 +492,32 @@ struct RegionScheduleSession::Impl {
     std::optional<waveamdmachine::ReadyCandidateMetrics> metrics;
     std::optional<unsigned> candidate;
     uint64_t rank = 0;
+    waveamdmachine::ReadyResourceCandidateKind resourceKind =
+        waveamdmachine::ReadyResourceCandidateKind::None;
   };
+
+  static ReadyScheduleSelectionKind
+  getProposalSelectionKind(const ProposalWinner &winner) {
+    switch (winner.resourceKind) {
+    case waveamdmachine::ReadyResourceCandidateKind::None:
+      return ReadyScheduleSelectionKind::Proposal;
+    case waveamdmachine::ReadyResourceCandidateKind::Priority:
+      return ReadyScheduleSelectionKind::ResourcePriority;
+    case waveamdmachine::ReadyResourceCandidateKind::StallFiller:
+      return ReadyScheduleSelectionKind::ResourceStallFiller;
+    }
+    llvm_unreachable("unknown ready resource candidate kind");
+  }
 
   static void setProposalWinner(
       unsigned candidate,
       const waveamdmachine::ReadyCandidateMetrics &candidateMetrics,
-      uint64_t rank, ProposalWinner &winner) {
+      uint64_t rank, waveamdmachine::ReadyResourceCandidateKind resourceKind,
+      ProposalWinner &winner) {
     winner.metrics = candidateMetrics;
     winner.candidate = candidate;
     winner.rank = rank;
+    winner.resourceKind = resourceKind;
   }
 
   static void considerDirectProposal(
@@ -506,25 +531,8 @@ struct RegionScheduleSession::Impl {
     if (!policy.canSelectReadyCandidate(state.pressure, candidateFirst,
                                         baselineMetrics))
       return;
-    setProposalWinner(proposal.candidate, candidateMetrics, proposal.rank,
-                      winner);
-  }
-
-  static void considerResourcePriorityProposal(
-      const ReadyScheduleProposal &proposal,
-      const waveamdmachine::ReadyCandidateMetrics &candidateMetrics,
-      const waveamdmachine::ReadyCandidateMetrics &candidateFirst,
-      const ReadyScheduleState &state,
-      const waveamdmachine::ReadyCandidateMetrics &baselineMetrics,
-      const waveamdmachine::InstructionScheduleModel &policy,
-      ProposalWinner &winner) {
-    if (winner.candidate && proposal.rank <= winner.rank)
-      return;
-    if (!policy.canSelectReadyCandidate(state.pressure, candidateFirst,
-                                        baselineMetrics))
-      return;
-    setProposalWinner(proposal.candidate, candidateMetrics, proposal.rank,
-                      winner);
+    setProposalWinner(proposal.candidate, candidateMetrics, /*rank=*/0,
+                      waveamdmachine::ReadyResourceCandidateKind::None, winner);
   }
 
   static void considerFillerProposal(
@@ -542,12 +550,47 @@ struct RegionScheduleSession::Impl {
         !policy.shouldPreferReadyFiller(state.pressure, candidateMetrics,
                                         *winner.metrics))
       return;
-    setProposalWinner(proposal.candidate, candidateMetrics, proposal.rank,
-                      winner);
+    setProposalWinner(proposal.candidate, candidateMetrics, /*rank=*/0,
+                      waveamdmachine::ReadyResourceCandidateKind::None, winner);
+  }
+
+  static void considerComputeResourceProposal(
+      const ReadyScheduleProposal &proposal,
+      waveamdmachine::ReadyResourceCandidateKind resourceKind,
+      const waveamdmachine::ReadyCandidateMetrics &candidateMetrics,
+      const waveamdmachine::ReadyCandidateMetrics &candidateFirst,
+      const ReadyScheduleState &state,
+      const waveamdmachine::ReadyCandidateMetrics &baselineMetrics,
+      const waveamdmachine::InstructionScheduleModel &policy,
+      ProposalWinner &winner) {
+    if (resourceKind == waveamdmachine::ReadyResourceCandidateKind::Priority) {
+      uint64_t rank = proposal.resource.candidate.releaseSlots;
+      if (winner.candidate && rank <= winner.rank)
+        return;
+      if (!policy.canSelectReadyCandidate(state.pressure, candidateFirst,
+                                          baselineMetrics))
+        return;
+      setProposalWinner(proposal.candidate, candidateMetrics, rank,
+                        resourceKind, winner);
+      return;
+    }
+    assert(resourceKind ==
+               waveamdmachine::ReadyResourceCandidateKind::StallFiller &&
+           "invalid compute resource candidate");
+    if (!policy.canSelectReadyFiller(state.pressure, candidateMetrics,
+                                     candidateFirst, baselineMetrics))
+      return;
+    if (winner.metrics &&
+        !policy.shouldPreferReadyFiller(state.pressure, candidateMetrics,
+                                        *winner.metrics))
+      return;
+    setProposalWinner(proposal.candidate, candidateMetrics, /*rank=*/0,
+                      resourceKind, winner);
   }
 
   static void considerProposal(
       const ReadyScheduleProposal &proposal,
+      waveamdmachine::ReadyResourceCandidateKind resourceKind,
       const waveamdmachine::ReadyCandidateMetrics &candidateMetrics,
       const waveamdmachine::ReadyCandidateMetrics &candidateFirst,
       const ReadyScheduleState &state,
@@ -558,14 +601,13 @@ struct RegionScheduleSession::Impl {
     case ReadyScheduleProposalKind::Direct:
       return considerDirectProposal(proposal, candidateMetrics, candidateFirst,
                                     state, baselineMetrics, policy, winner);
-    case ReadyScheduleProposalKind::ResourcePriority:
-      return considerResourcePriorityProposal(proposal, candidateMetrics,
-                                              candidateFirst, state,
-                                              baselineMetrics, policy, winner);
     case ReadyScheduleProposalKind::RankedFiller:
-    case ReadyScheduleProposalKind::ResourceStallFiller:
       return considerFillerProposal(proposal, candidateMetrics, candidateFirst,
                                     state, baselineMetrics, policy, winner);
+    case ReadyScheduleProposalKind::ComputeResource:
+      return considerComputeResourceProposal(
+          proposal, resourceKind, candidateMetrics, candidateFirst, state,
+          baselineMetrics, policy, winner);
     }
     llvm_unreachable("unknown ready proposal kind");
   }
@@ -575,13 +617,28 @@ struct RegionScheduleSession::Impl {
                                 const ReadyScheduleProposal &proposal) {
     assert(groupInfo.kind == proposal.kind &&
            "ready proposal group mixes selection policies");
-    assert((proposal.kind != ReadyScheduleProposalKind::ResourceStallFiller ||
-            (proposal.waitSlots == groupInfo.waitSlots &&
-             proposal.releaseSlots == groupInfo.releaseSlots)) &&
-           "resource filler group mixes baseline previews");
+    if (proposal.kind != ReadyScheduleProposalKind::ComputeResource)
+      return;
+    assert(sameResourcePreview(proposal.resource.baseline,
+                               groupInfo.resource.baseline) &&
+           proposal.resource.baselinePriorityStall ==
+               groupInfo.resource.baselinePriorityStall &&
+           proposal.resource.prioritize == groupInfo.resource.prioritize &&
+           "resource group mixes baseline facts");
   }
 
-  std::optional<unsigned> selectProposalGroupCandidate(
+  static waveamdmachine::ReadyResourceCandidateKind classifyResourceCandidate(
+      const ReadyScheduleProposal &proposal,
+      const waveamdmachine::InstructionScheduleModel &policy) {
+    const ReadyScheduleResourceFacts &resource = proposal.resource;
+    return policy.classifyReadyResourceCandidate(
+        resource.baseline.functionalUnit, resource.baseline.waitSlots,
+        resource.baseline.releaseSlots, resource.candidate.functionalUnit,
+        resource.candidate.waitSlots, resource.candidate.releaseSlots,
+        /*selectedReleaseSlots=*/0);
+  }
+
+  ProposalWinner selectProposalGroupCandidate(
       unsigned group, const ReadyScheduleProposal &groupInfo,
       const llvm::BitVector &scheduled, unsigned baseline,
       const ReadyScheduleState &state,
@@ -597,15 +654,23 @@ struct RegionScheduleSession::Impl {
       if (candidate >= operations.size() || candidate == baseline ||
           scheduled.test(candidate))
         continue;
+      waveamdmachine::ReadyResourceCandidateKind resourceKind =
+          waveamdmachine::ReadyResourceCandidateKind::None;
+      if (proposal.kind == ReadyScheduleProposalKind::ComputeResource) {
+        resourceKind = classifyResourceCandidate(proposal, policy);
+        if (resourceKind == waveamdmachine::ReadyResourceCandidateKind::None ||
+            proposal.resource.candidatePriorityStall)
+          continue;
+      }
       waveamdmachine::ReadyCandidateMetrics candidateMetrics =
           getCandidateMetrics(scheduled, candidate, state);
       std::pair<waveamdmachine::ReadyCandidateMetrics,
                 waveamdmachine::ReadyCandidateMetrics>
           order = getOrderMetrics(scheduled, candidate, baseline, state);
-      considerProposal(proposal, candidateMetrics, order.first, state,
-                       baselineMetrics, policy, winner);
+      considerProposal(proposal, resourceKind, candidateMetrics, order.first,
+                       state, baselineMetrics, policy, winner);
     }
-    return winner.candidate;
+    return winner;
   }
 
   static SmallVector<unsigned, 8>
@@ -633,10 +698,17 @@ struct RegionScheduleSession::Impl {
       const ReadyScheduleProposal &groupInfo, const ReadyScheduleState &state,
       const waveamdmachine::ReadyCandidateMetrics &baselineMetrics,
       const waveamdmachine::InstructionScheduleModel &policy) {
-    return groupInfo.kind != ReadyScheduleProposalKind::ResourceStallFiller ||
-           policy.shouldSelectResourceStallFiller(
-               groupInfo.waitSlots, groupInfo.releaseSlots, state.pressure,
-               baselineMetrics);
+    if (groupInfo.kind != ReadyScheduleProposalKind::ComputeResource)
+      return true;
+    const ReadyScheduleResourceFacts &resource = groupInfo.resource;
+    if (resource.baselinePriorityStall || resource.baseline.releaseSlots == 0 ||
+        (resource.baseline.waitSlots == 0 && !resource.prioritize))
+      return false;
+    if (resource.baseline.waitSlots == 0 || resource.prioritize)
+      return true;
+    return policy.shouldSelectResourceStallFiller(
+        resource.baseline.waitSlots, resource.baseline.releaseSlots,
+        state.pressure, baselineMetrics);
   }
 
   template <typename Replay>
@@ -1054,8 +1126,8 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
     if (impl->hasSafeFullPrefix(scheduled, *pressureWinner, baseline, state,
                                 policy)) {
       ++impl->work.pressureSelections;
-      return {*pressureWinner, /*selectedProposal=*/false,
-              /*suppressFallback=*/false};
+      return {*pressureWinner, /*suppressFallback=*/false,
+              ReadyScheduleSelectionKind::Pressure};
     }
     ++impl->work.pressureRejections;
   }
@@ -1067,21 +1139,22 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
     if (!Impl::shouldEvaluateProposalGroup(groupInfo, state, baselineMetrics,
                                            policy))
       continue;
-    std::optional<unsigned> winner = impl->selectProposalGroupCandidate(
+    Impl::ProposalWinner winner = impl->selectProposalGroupCandidate(
         group, groupInfo, scheduled, baseline, state, baselineMetrics,
         proposals, policy);
-    if (!winner)
+    if (!winner.candidate)
       continue;
-    if (impl->hasSafeFullPrefix(scheduled, *winner, baseline, state, policy)) {
+    if (impl->hasSafeFullPrefix(scheduled, *winner.candidate, baseline, state,
+                                policy)) {
       ++impl->work.proposalSelections;
-      return {*winner, /*selectedProposal=*/true,
-              /*suppressFallback=*/false};
+      return {*winner.candidate, /*suppressFallback=*/false,
+              Impl::getProposalSelectionKind(winner)};
     }
     ++impl->work.proposalRejections;
     rejectedProposalWinner = true;
   }
-  return {std::nullopt, /*selectedProposal=*/false,
-          /*suppressFallback=*/rejectedProposalWinner};
+  return {std::nullopt, /*suppressFallback=*/rejectedProposalWinner,
+          ReadyScheduleSelectionKind::Baseline};
 }
 
 ReadyScheduleWorkStats RegionScheduleSession::getWorkStats() const {

@@ -63,6 +63,55 @@ func.func @cohort_mfma_coissue_resource_fill(
   return
 }
 
+// CHECK-LABEL: func.func @cohort_mfma_result_stall_rejects_resource_fill(
+// CHECK: waveamdmachine.uniform_if
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: {{%.*}}:4 = waveamdmachine.tuple_to_elements
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.v_cvt_pk_f16_f32
+// CHECK: } otherwise {
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: {{%.*}}:4 = waveamdmachine.tuple_to_elements
+// CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// CHECK-NEXT: waveamdmachine.v_cvt_pk_f16_f32
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_result_stall_rejects_resource_fill
+// DIAG-SAME: resource_priority_moves=0
+// DIAG-SAME: resource_stall_fills=0
+// DIAG-NEXT: waveamd-machine-schedule region func=cohort_mfma_result_stall_rejects_resource_fill
+// DIAG-SAME: resource_priority_moves=0
+// DIAG-SAME: resource_stall_fills=0
+func.func @cohort_mfma_result_stall_rejects_resource_fill(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 4>)
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 2 : i64} {
+  waveamdmachine.uniform_loop {
+    %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %parts:4 = waveamdmachine.tuple_to_elements %r0
+        : (!waveamdmachine.reg<vgpr, 4>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+    %packed = waveamdmachine.v_cvt_pk_f16_f32 %parts#0, %parts#1
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
 // CHECK-LABEL: func.func @cohort_mfma_coexec_window_fill(
 // CHECK: waveamdmachine.uniform_if
 // CHECK: waveamdmachine.uniform_loop

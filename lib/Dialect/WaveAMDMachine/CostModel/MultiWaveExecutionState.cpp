@@ -168,6 +168,21 @@ MultiWaveCohortExecutionState &MultiWaveCohortExecutionState::operator=(
   return *this;
 }
 
+FailureOr<InstructionStall>
+MultiWaveCohortExecutionState::queryPriorityStall(Operation *op) const {
+  SmallVector<Operation *, 8> candidates(state->getWaveCount(), nullptr);
+  for (unsigned wave : waves)
+    candidates[wave] = op;
+  FailureOr<unsigned> wave = state->selectWave(candidates);
+  if (failed(wave))
+    return failure();
+  FailureOr<InstructionStall> stall =
+      state->queryAfterIssueOpportunity(*wave, op);
+  if (failed(stall))
+    return failure();
+  return getPriorityStall(*stall);
+}
+
 FailureOr<InstructionCommitResult>
 MultiWaveCohortExecutionState::commit(Operation *op) {
   SmallVector<Operation *, 8> candidates(state->getWaveCount(), nullptr);
