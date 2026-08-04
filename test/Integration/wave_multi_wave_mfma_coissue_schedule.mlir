@@ -128,6 +128,47 @@ func.func @cohort_mfma_coexec_window_fill(
   return
 }
 
+// CHECK-LABEL: func.func @cohort_mfma_coexec_trans_stall_fill(
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.v_exp_f32
+// CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_trans_stall_fill
+// DIAG-SAME: action=apply reason=coexec_window
+// DIAG-SAME: filled_gaps=1
+// DIAG-SAME: coexec_window_gaps=2
+func.func @cohort_mfma_coexec_trans_stall_fill(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 16>,
+    %acc1: !waveamdmachine.reg<vgpr, 16>,
+    %acc2: !waveamdmachine.reg<vgpr, 16>,
+    %x: !waveamdmachine.reg<vgpr, 1>)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                wave.waves_per_workgroup = 4 : i64,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    %m0 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc0
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+    %m1 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc1
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+    %m2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
+        : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+           !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+    %trans = waveamdmachine.v_exp_f32 %x
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
 // CHECK-LABEL: func.func @cohort_mfma_coexec_window_reject_salu(
 // CHECK: waveamdmachine.uniform_loop
 // CHECK: waveamdmachine.s_add_i32
