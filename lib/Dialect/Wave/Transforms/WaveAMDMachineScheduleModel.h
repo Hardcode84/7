@@ -157,6 +157,41 @@ struct RecurrenceScheduleDecision {
   bool activated = false;
 };
 
+// The model requests either an initial greedy build or a factual replay of an
+// accepted order followed by another greedy build. Replay depth and refinement
+// policy are model-owned; the provider only performs the requested work.
+struct SingleWaveScheduleBuildRequest {
+  ArrayRef<unsigned> steadyStateOrder;
+  unsigned steadyStateIterations = 0;
+  bool replaySteadyState = false;
+};
+
+// An opaque scheduler-owned result token plus the facts needed by the model's
+// refinement controller. The provider does not accept, reject, or compare
+// candidates.
+struct SingleWaveScheduleCandidateFacts {
+  SmallVector<unsigned, 16> order;
+  unsigned resultToken = 0;
+  unsigned recurrenceModelMoves = 0;
+  bool success = false;
+};
+
+using SingleWaveScheduleBuildProvider =
+    llvm::function_ref<FailureOr<SingleWaveScheduleCandidateFacts>(
+        const SingleWaveScheduleBuildRequest &)>;
+
+struct SingleWaveScheduleRefinementStats {
+  unsigned steadyStateIterations = 0;
+  unsigned steadyStateRefinements = 0;
+  unsigned recurrenceModelMoves = 0;
+};
+
+struct SingleWaveScheduleDecision {
+  unsigned resultToken = 0;
+  std::optional<SingleWaveScheduleRefinementStats> refinementStats;
+  bool modelFailed = false;
+};
+
 struct ReadyScheduleResourceFacts {
   waveamdmachine::InstructionScheduleResourcePreview baseline;
   waveamdmachine::InstructionScheduleResourcePreview candidate;
@@ -321,6 +356,10 @@ public:
   WaveAMDMachineScheduleModel(const WaveAMDMachineScheduleModel &) = delete;
   WaveAMDMachineScheduleModel &
   operator=(const WaveAMDMachineScheduleModel &) = delete;
+
+  FailureOr<SingleWaveScheduleDecision>
+  selectSingleWaveSchedule(ArrayRef<Operation *> operations,
+                           SingleWaveScheduleBuildProvider buildProvider) const;
 
   RegionScheduleSession createRegionSession(
       ArrayRef<Operation *> operations,

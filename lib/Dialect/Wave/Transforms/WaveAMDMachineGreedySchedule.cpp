@@ -92,8 +92,8 @@ static constexpr StringLiteral kBarrierSitesAttr =
     "waveamdmachine.barrier_sites";
 static constexpr StringLiteral kReportPrefix =
     "waveamd-machine-schedule-report";
-static constexpr unsigned kSteadyStateIterations = 4;
-static constexpr unsigned kSteadyStateRefinementLimit = 3;
+static constexpr unsigned kMultiWaveSteadyStateIterations = 4;
+static constexpr unsigned kMultiWaveSteadyStateRefinementLimit = 3;
 static constexpr unsigned kMultiWaveClassCount = 2;
 
 enum class EdgeKind : uint8_t {
@@ -2122,23 +2122,6 @@ buildGreedyOrderFromState(const GreedyRegion &region, const GraphTables &graph,
   return orderState.result;
 }
 
-static GreedyResult
-buildGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
-                 const waveamdmachine::ArchData &arch,
-                 const waveamdmachine::EventSimConfig &config,
-                 const ValueOriginMap &origins,
-                 const WaveAMDMachineScheduleModel &scheduleModel) {
-  FailureOr<StaticIssueInfoMap> staticInfo =
-      buildStaticIssueInfoMap(region, arch);
-  if (failed(staticInfo)) {
-    GreedyResult result;
-    return failGreedyModel(result);
-  }
-  return buildGreedyOrderFromState(region, graph, arch, config, origins,
-                                   *staticInfo, scheduleModel,
-                                   /*initialState=*/nullptr);
-}
-
 static waveamdmachine::UniformLoopOp
 getCompleteUniformLoop(const GreedyRegion &region) {
   waveamdmachine::UniformLoopOp loop =
@@ -2178,7 +2161,7 @@ static LogicalResult bindLoopBackedge(IssueState &state,
 
 static FailureOr<std::unique_ptr<IssueState>>
 replayLoopOrder(const GreedyRegion &region, ArrayRef<unsigned> order,
-                const waveamdmachine::ArchData &arch,
+                unsigned iterations, const waveamdmachine::ArchData &arch,
                 const waveamdmachine::EventSimConfig &config,
                 const ValueOriginMap &origins,
                 const StaticIssueInfoMap &staticInfo) {
@@ -2191,7 +2174,7 @@ replayLoopOrder(const GreedyRegion &region, ArrayRef<unsigned> order,
       staticInfo, region.block);
   bindValueOrigins(state->model, origins, region.block);
   bindLoopEntry(*state, loop);
-  for (unsigned iteration : llvm::seq(kSteadyStateIterations)) {
+  for (unsigned iteration : llvm::seq(iterations)) {
     (void)iteration;
     for (unsigned index : order) {
       FailureOr<IssuePreview> preview = previewIssue(*state, region.ops[index]);
@@ -2213,61 +2196,6 @@ static void materializeOrder(const GreedyRegion &region,
     ops.push_back(region.ops[index]);
 }
 
-static bool hasSeenOrder(ArrayRef<SmallVector<unsigned, 16>> seen,
-                         ArrayRef<unsigned> order) {
-  return llvm::any_of(
-      seen, [&](ArrayRef<unsigned> prior) { return sameOrder(prior, order); });
-}
-
-static GreedyResult refineSteadyStateGreedyOrder(
-    const GreedyRegion &region, const GraphTables &graph,
-    const waveamdmachine::ArchData &arch,
-    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
-    const StaticIssueInfoMap &staticInfo,
-    const WaveAMDMachineScheduleModel &scheduleModel, GreedyResult best) {
-  bool usedModeledRecurrence = best.stats.recurrenceModelMoves != 0;
-  SmallVector<unsigned, 16> currentOrder = best.order;
-  SmallVector<SmallVector<unsigned, 16>, 4> seenOrders{currentOrder};
-  unsigned refinements = 0;
-
-  FailureOr<std::unique_ptr<IssueState>> replayed =
-      replayLoopOrder(region, currentOrder, arch, config, origins, staticInfo);
-  if (failed(replayed))
-    return failGreedyModel(best);
-  std::unique_ptr<IssueState> entryState = std::move(*replayed);
-
-  for (unsigned refinement : llvm::seq(kSteadyStateRefinementLimit)) {
-    GreedyResult stableCandidate =
-        buildGreedyOrderFromState(region, graph, arch, config, origins,
-                                  staticInfo, scheduleModel, entryState.get());
-    ++refinements;
-    if (!stableCandidate.success)
-      return stableCandidate;
-    usedModeledRecurrence |= stableCandidate.stats.recurrenceModelMoves != 0;
-    if (sameOrder(stableCandidate.order, currentOrder) ||
-        hasSeenOrder(seenOrders, stableCandidate.order))
-      break;
-
-    seenOrders.push_back(stableCandidate.order);
-    best = std::move(stableCandidate);
-    currentOrder = best.order;
-    if (refinement + 1 == kSteadyStateRefinementLimit)
-      break;
-
-    FailureOr<std::unique_ptr<IssueState>> candidateState = replayLoopOrder(
-        region, currentOrder, arch, config, origins, staticInfo);
-    if (failed(candidateState))
-      return failGreedyModel(best);
-    entryState = std::move(*candidateState);
-  }
-
-  best.stats.steadyStateIterations = kSteadyStateIterations;
-  best.stats.steadyStateRefinements = refinements;
-  if (usedModeledRecurrence && best.stats.recurrenceModelMoves == 0)
-    best.stats.recurrenceModelMoves = 1;
-  return best;
-}
-
 // Never post-veto greedy orders with simulated cycles; fix greedy choices.
 static GreedyResult
 buildBoundedGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
@@ -2275,24 +2203,57 @@ buildBoundedGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
                         const waveamdmachine::EventSimConfig &config,
                         const ValueOriginMap &origins,
                         const WaveAMDMachineScheduleModel &scheduleModel) {
-  if (!getCompleteUniformLoop(region))
-    return buildGreedyOrder(region, graph, arch, config, origins,
-                            scheduleModel);
-
   FailureOr<StaticIssueInfoMap> staticInfo =
       buildStaticIssueInfoMap(region, arch);
   if (failed(staticInfo)) {
     GreedyResult result;
     return failGreedyModel(result);
   }
-  GreedyResult best = buildGreedyOrderFromState(
-      region, graph, arch, config, origins, *staticInfo, scheduleModel,
-      /*initialState=*/nullptr);
-  if (!best.success)
-    return best;
-  return refineSteadyStateGreedyOrder(region, graph, arch, config, origins,
-                                      *staticInfo, scheduleModel,
-                                      std::move(best));
+  SmallVector<GreedyResult, 4> results;
+  auto buildProvider = [&](const SingleWaveScheduleBuildRequest &request)
+      -> FailureOr<SingleWaveScheduleCandidateFacts> {
+    std::unique_ptr<IssueState> replayed;
+    if (request.replaySteadyState) {
+      FailureOr<std::unique_ptr<IssueState>> state = replayLoopOrder(
+          region, request.steadyStateOrder, request.steadyStateIterations, arch,
+          config, origins, *staticInfo);
+      if (failed(state))
+        return failure();
+      replayed = std::move(*state);
+    }
+
+    GreedyResult result =
+        buildGreedyOrderFromState(region, graph, arch, config, origins,
+                                  *staticInfo, scheduleModel, replayed.get());
+    SingleWaveScheduleCandidateFacts facts;
+    facts.order = result.order;
+    facts.resultToken = results.size();
+    facts.recurrenceModelMoves = result.stats.recurrenceModelMoves;
+    facts.success = result.success;
+    results.push_back(std::move(result));
+    return facts;
+  };
+
+  FailureOr<SingleWaveScheduleDecision> decision =
+      scheduleModel.selectSingleWaveSchedule(region.ops, buildProvider);
+  if (failed(decision)) {
+    GreedyResult result;
+    return failGreedyModel(result);
+  }
+  assert(decision->resultToken < results.size() &&
+         "schedule model returned an invalid result token");
+  GreedyResult result = std::move(results[decision->resultToken]);
+  if (decision->modelFailed)
+    return failGreedyModel(result);
+  if (decision->refinementStats) {
+    result.stats.steadyStateIterations =
+        decision->refinementStats->steadyStateIterations;
+    result.stats.steadyStateRefinements =
+        decision->refinementStats->steadyStateRefinements;
+    result.stats.recurrenceModelMoves =
+        decision->refinementStats->recurrenceModelMoves;
+  }
+  return result;
 }
 
 static FailureOr<OrderScore>
@@ -2823,7 +2784,7 @@ replayMultiWaveOrders(const MultiWaveRegions &regions,
       buildMultiWaveInstructionConfig(arch, config, regions[0].first));
   initializeMultiWaveState(*state, regions, origins);
   MultiWaveOrderReplay replay(regions, orders, origins, *state,
-                              kSteadyStateIterations);
+                              kMultiWaveSteadyStateIterations);
   if (failed(replay.run()))
     return failure();
   return state;
@@ -2922,7 +2883,7 @@ static MultiWaveGreedyResults
 finishMultiWaveRefinement(MultiWaveRefinementState refinement) {
   for (unsigned classId : llvm::seq<unsigned>(kMultiWaveClassCount)) {
     GreedyResult &result = refinement.best[classId];
-    result.stats.steadyStateIterations = kSteadyStateIterations;
+    result.stats.steadyStateIterations = kMultiWaveSteadyStateIterations;
     result.stats.steadyStateRefinements = refinement.refinements;
     if (refinement.usedModeledRecurrence[classId] &&
         result.stats.recurrenceModelMoves == 0)
@@ -2946,7 +2907,7 @@ static FailureOr<MultiWaveGreedyResults> buildBoundedMultiWaveGreedyResults(
   MultiWaveRefinementState refinement =
       initializeMultiWaveRefinement(std::move(*first));
   for ([[maybe_unused]] unsigned iteration :
-       llvm::seq<unsigned>(kSteadyStateRefinementLimit)) {
+       llvm::seq<unsigned>(kMultiWaveSteadyStateRefinementLimit)) {
     FailureOr<bool> changed =
         refineMultiWaveGreedyOnce(regions, graphs, arch, config, origins,
                                   scheduleModel, placements, refinement);

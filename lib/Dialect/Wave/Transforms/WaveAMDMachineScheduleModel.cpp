@@ -41,6 +41,8 @@ namespace mlir::wave {
 static constexpr StringLiteral kDmaIssueAfterDelayAttr =
     "waveamdmachine.dma_issue_after_delay";
 static constexpr unsigned kSteadyStateFillsPerTarget = 16;
+static constexpr unsigned kSingleWaveSteadyStateIterations = 4;
+static constexpr unsigned kSingleWaveSteadyStateRefinementLimit = 3;
 
 waveamdmachine::InstructionExecutionConfig buildWaveAMDMachineInstructionConfig(
     const waveamdmachine::ArchData &arch,
@@ -78,6 +80,38 @@ waveamdmachine::InstructionExecutionConfig buildWaveAMDMachineInstructionConfig(
 }
 
 namespace {
+
+static waveamdmachine::UniformLoopOp
+getCompleteUniformLoop(ArrayRef<Operation *> operations) {
+  if (operations.empty())
+    return nullptr;
+  Block *block = operations.front()->getBlock();
+  waveamdmachine::UniformLoopOp loop =
+      dyn_cast_if_present<waveamdmachine::UniformLoopOp>(block->getParentOp());
+  if (!loop)
+    return nullptr;
+
+  unsigned index = 0;
+  for (Operation &op : block->without_terminator()) {
+    if (index >= operations.size() || operations[index] != &op)
+      return nullptr;
+    ++index;
+  }
+  return index == operations.size() ? loop : nullptr;
+}
+
+static bool sameSingleWaveOrder(ArrayRef<unsigned> lhs,
+                                ArrayRef<unsigned> rhs) {
+  return lhs.size() == rhs.size() &&
+         std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+static bool hasSeenSingleWaveOrder(ArrayRef<SmallVector<unsigned, 16>> seen,
+                                   ArrayRef<unsigned> order) {
+  return llvm::any_of(seen, [&](ArrayRef<unsigned> prior) {
+    return sameSingleWaveOrder(prior, order);
+  });
+}
 
 struct ReadyPressureMember {
   SmallVector<unsigned, 4> useNodes;
@@ -424,22 +458,7 @@ struct RegionScheduleSession::Impl {
   }
 
   waveamdmachine::UniformLoopOp getCompleteUniformLoop() const {
-    if (operations.empty())
-      return nullptr;
-    Block *block = operations.front()->getBlock();
-    waveamdmachine::UniformLoopOp loop =
-        dyn_cast_if_present<waveamdmachine::UniformLoopOp>(
-            block->getParentOp());
-    if (!loop)
-      return nullptr;
-
-    unsigned index = 0;
-    for (Operation &op : block->without_terminator()) {
-      if (index >= operations.size() || operations[index] != &op)
-        return nullptr;
-      ++index;
-    }
-    return index == operations.size() ? loop : nullptr;
+    return mlir::wave::getCompleteUniformLoop(operations);
   }
 
   bool isMemoryAddressUse(Operation *user, Value address) const {
@@ -1317,6 +1336,60 @@ WaveAMDMachineScheduleModel::WaveAMDMachineScheduleModel(
 WaveAMDMachineScheduleModel &WaveAMDMachineScheduleModel::operator=(
     WaveAMDMachineScheduleModel &&) = default;
 WaveAMDMachineScheduleModel::~WaveAMDMachineScheduleModel() = default;
+
+FailureOr<SingleWaveScheduleDecision>
+WaveAMDMachineScheduleModel::selectSingleWaveSchedule(
+    ArrayRef<Operation *> operations,
+    SingleWaveScheduleBuildProvider buildProvider) const {
+  FailureOr<SingleWaveScheduleCandidateFacts> initial =
+      buildProvider(SingleWaveScheduleBuildRequest{});
+  if (failed(initial))
+    return failure();
+
+  SingleWaveScheduleDecision decision{initial->resultToken};
+  if (!initial->success || !getCompleteUniformLoop(operations))
+    return decision;
+
+  SingleWaveScheduleCandidateFacts accepted = std::move(*initial);
+  SmallVector<SmallVector<unsigned, 16>, 4> seenOrders{accepted.order};
+  bool usedModeledRecurrence = accepted.recurrenceModelMoves != 0;
+  unsigned refinements = 0;
+
+  for ([[maybe_unused]] unsigned refinement :
+       llvm::seq<unsigned>(kSingleWaveSteadyStateRefinementLimit)) {
+    SingleWaveScheduleBuildRequest request{accepted.order,
+                                           kSingleWaveSteadyStateIterations,
+                                           /*replaySteadyState=*/true};
+    FailureOr<SingleWaveScheduleCandidateFacts> candidate =
+        buildProvider(request);
+    if (failed(candidate)) {
+      decision.resultToken = accepted.resultToken;
+      decision.modelFailed = true;
+      return decision;
+    }
+
+    ++refinements;
+    if (!candidate->success) {
+      decision.resultToken = candidate->resultToken;
+      return decision;
+    }
+    usedModeledRecurrence |= candidate->recurrenceModelMoves != 0;
+    if (sameSingleWaveOrder(candidate->order, accepted.order) ||
+        hasSeenSingleWaveOrder(seenOrders, candidate->order))
+      break;
+
+    seenOrders.push_back(candidate->order);
+    accepted = std::move(*candidate);
+    decision.resultToken = accepted.resultToken;
+  }
+
+  unsigned recurrenceModelMoves = accepted.recurrenceModelMoves;
+  if (usedModeledRecurrence && recurrenceModelMoves == 0)
+    recurrenceModelMoves = 1;
+  decision.refinementStats = SingleWaveScheduleRefinementStats{
+      kSingleWaveSteadyStateIterations, refinements, recurrenceModelMoves};
+  return decision;
+}
 
 RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
     ArrayRef<Operation *> operations,
