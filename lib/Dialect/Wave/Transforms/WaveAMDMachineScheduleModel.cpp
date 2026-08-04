@@ -43,6 +43,8 @@ static constexpr StringLiteral kDmaIssueAfterDelayAttr =
     "waveamdmachine.dma_issue_after_delay";
 static constexpr uint64_t kMaxFlatWorkgroupSize = 1024;
 static constexpr unsigned kSteadyStateFillsPerTarget = 16;
+static constexpr unsigned kSingleWaveSteadyStateIterations = 4;
+static constexpr unsigned kSingleWaveSteadyStateRefinementLimit = 3;
 
 struct WorkgroupShape {
   std::array<uint32_t, 3> dims = {1, 1, 1};
@@ -212,6 +214,104 @@ public:
 };
 
 namespace {
+
+static waveamdmachine::UniformLoopOp
+getCompleteUniformLoop(ArrayRef<Operation *> operations) {
+  if (operations.empty())
+    return nullptr;
+  Block *block = operations.front()->getBlock();
+  waveamdmachine::UniformLoopOp loop =
+      dyn_cast_if_present<waveamdmachine::UniformLoopOp>(block->getParentOp());
+  if (!loop)
+    return nullptr;
+
+  unsigned index = 0;
+  for (Operation &op : block->without_terminator()) {
+    if (index >= operations.size() || operations[index] != &op)
+      return nullptr;
+    ++index;
+  }
+  return index == operations.size() ? loop : nullptr;
+}
+
+static bool sameSingleWaveOrder(ArrayRef<unsigned> lhs,
+                                ArrayRef<unsigned> rhs) {
+  return llvm::equal(lhs, rhs);
+}
+
+static bool hasSeenSingleWaveOrder(ArrayRef<SmallVector<unsigned, 16>> seen,
+                                   ArrayRef<unsigned> order) {
+  return llvm::any_of(seen, [&](ArrayRef<unsigned> prior) {
+    return sameSingleWaveOrder(prior, order);
+  });
+}
+
+static bool
+canRefineSingleWaveSchedule(ArrayRef<Operation *> operations,
+                            const SingleWaveScheduleCandidateFacts &candidate) {
+  return candidate.success && getCompleteUniformLoop(operations);
+}
+
+static bool
+hasConvergedSingleWaveSchedule(ArrayRef<unsigned> acceptedOrder,
+                               ArrayRef<SmallVector<unsigned, 16>> seenOrders,
+                               ArrayRef<unsigned> candidateOrder) {
+  return sameSingleWaveOrder(candidateOrder, acceptedOrder) ||
+         hasSeenSingleWaveOrder(seenOrders, candidateOrder);
+}
+
+enum class SingleWaveRefinementStep : uint8_t {
+  Continue,
+  Converged,
+  BuildFailed,
+};
+
+struct SingleWaveRefinementState {
+  SmallVector<SmallVector<unsigned, 16>, 4> seenOrders;
+  SingleWaveScheduleCandidateFacts accepted;
+  unsigned refinements = 0;
+  bool usedModeledRecurrence = false;
+};
+
+static SingleWaveRefinementStep
+refineSingleWaveScheduleOnce(SingleWaveScheduleBuildProvider buildProvider,
+                             SingleWaveRefinementState &state,
+                             SingleWaveScheduleDecision &decision) {
+  SingleWaveScheduleBuildRequest request{state.accepted.order,
+                                         kSingleWaveSteadyStateIterations,
+                                         /*replaySteadyState=*/true};
+  FailureOr<SingleWaveScheduleCandidateFacts> candidate =
+      buildProvider(request);
+  if (failed(candidate)) {
+    decision.resultToken = state.accepted.resultToken;
+    decision.modelFailed = true;
+    return SingleWaveRefinementStep::BuildFailed;
+  }
+
+  ++state.refinements;
+  if (!candidate->success) {
+    decision.resultToken = candidate->resultToken;
+    return SingleWaveRefinementStep::BuildFailed;
+  }
+  state.usedModeledRecurrence |= candidate->recurrenceModelMoves != 0;
+  if (hasConvergedSingleWaveSchedule(state.accepted.order, state.seenOrders,
+                                     candidate->order))
+    return SingleWaveRefinementStep::Converged;
+
+  state.seenOrders.push_back(candidate->order);
+  state.accepted = std::move(*candidate);
+  decision.resultToken = state.accepted.resultToken;
+  return SingleWaveRefinementStep::Continue;
+}
+
+static SingleWaveScheduleRefinementStats
+finishSingleWaveRefinement(const SingleWaveRefinementState &state) {
+  unsigned recurrenceModelMoves = state.accepted.recurrenceModelMoves;
+  if (state.usedModeledRecurrence && recurrenceModelMoves == 0)
+    recurrenceModelMoves = 1;
+  return {kSingleWaveSteadyStateIterations, state.refinements,
+          recurrenceModelMoves};
+}
 
 struct ReadyPressureMember {
   SmallVector<unsigned, 4> useNodes;
@@ -827,22 +927,7 @@ struct RegionScheduleSession::Impl {
   }
 
   waveamdmachine::UniformLoopOp getCompleteUniformLoop() const {
-    if (operations.empty())
-      return nullptr;
-    Block *block = operations.front()->getBlock();
-    waveamdmachine::UniformLoopOp loop =
-        dyn_cast_if_present<waveamdmachine::UniformLoopOp>(
-            block->getParentOp());
-    if (!loop)
-      return nullptr;
-
-    unsigned index = 0;
-    for (Operation &op : block->without_terminator()) {
-      if (index >= operations.size() || operations[index] != &op)
-        return nullptr;
-      ++index;
-    }
-    return index == operations.size() ? loop : nullptr;
+    return mlir::wave::getCompleteUniformLoop(operations);
   }
 
   bool isMemoryAddressUse(Operation *user, Value address) const {
@@ -2365,6 +2450,38 @@ WaveAMDMachineScheduleModel::buildInstructionConfig(
 
 unsigned WaveAMDMachineScheduleModel::getTargetWaveCount() const {
   return impl->targetWaveCount;
+}
+
+FailureOr<SingleWaveScheduleDecision>
+WaveAMDMachineScheduleModel::selectSingleWaveSchedule(
+    ArrayRef<Operation *> operations,
+    SingleWaveScheduleBuildProvider buildProvider) const {
+  FailureOr<SingleWaveScheduleCandidateFacts> initial =
+      buildProvider(SingleWaveScheduleBuildRequest{});
+  if (failed(initial))
+    return failure();
+
+  SingleWaveScheduleDecision decision;
+  decision.resultToken = initial->resultToken;
+  if (!canRefineSingleWaveSchedule(operations, *initial))
+    return decision;
+
+  SingleWaveRefinementState state;
+  state.usedModeledRecurrence = initial->recurrenceModelMoves != 0;
+  state.seenOrders.push_back(initial->order);
+  state.accepted = std::move(*initial);
+  for ([[maybe_unused]] unsigned refinement :
+       llvm::seq<unsigned>(kSingleWaveSteadyStateRefinementLimit)) {
+    SingleWaveRefinementStep step =
+        refineSingleWaveScheduleOnce(buildProvider, state, decision);
+    if (step == SingleWaveRefinementStep::BuildFailed)
+      return decision;
+    if (step == SingleWaveRefinementStep::Converged)
+      break;
+  }
+
+  decision.refinementStats = finishSingleWaveRefinement(state);
+  return decision;
 }
 
 static void assertRegionScheduleFactSizes(

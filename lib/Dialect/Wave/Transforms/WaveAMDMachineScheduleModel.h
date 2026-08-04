@@ -137,6 +137,36 @@ struct RecurrenceScheduleDecision {
   bool activated = false;
 };
 
+struct SingleWaveScheduleBuildRequest {
+  ArrayRef<unsigned> steadyStateOrder;
+  unsigned steadyStateIterations = 0;
+  bool replaySteadyState = false;
+};
+
+// Opaque token keeps model policy independent of scheduler-owned state.
+struct SingleWaveScheduleCandidateFacts {
+  SmallVector<unsigned, 16> order;
+  unsigned resultToken = 0;
+  unsigned recurrenceModelMoves = 0;
+  bool success = false;
+};
+
+using SingleWaveScheduleBuildProvider =
+    llvm::function_ref<FailureOr<SingleWaveScheduleCandidateFacts>(
+        const SingleWaveScheduleBuildRequest &)>;
+
+struct SingleWaveScheduleRefinementStats {
+  unsigned steadyStateIterations = 0;
+  unsigned steadyStateRefinements = 0;
+  unsigned recurrenceModelMoves = 0;
+};
+
+struct SingleWaveScheduleDecision {
+  std::optional<SingleWaveScheduleRefinementStats> refinementStats;
+  unsigned resultToken = 0;
+  bool modelFailed = false;
+};
+
 struct ReadyScheduleResourceFacts {
   waveamdmachine::InstructionScheduleResourcePreview baseline;
   waveamdmachine::InstructionScheduleResourcePreview candidate;
@@ -339,6 +369,10 @@ public:
   waveamdmachine::InstructionExecutionConfig
   buildInstructionConfig(const waveamdmachine::EventSimConfig &config) const;
   unsigned getTargetWaveCount() const;
+
+  FailureOr<SingleWaveScheduleDecision>
+  selectSingleWaveSchedule(ArrayRef<Operation *> operations,
+                           SingleWaveScheduleBuildProvider buildProvider) const;
 
   // Session owns noInstructions; graph fact storage must outlive it.
   RegionScheduleSession
