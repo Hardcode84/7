@@ -718,9 +718,7 @@ def WaveAMDMachineSchedule
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
            "Apply greedy local schedules.">,
     Option<"requireSelectedInput", "require-selected-input", "bool", /*default=*/"false",
-           "Only schedule functions stamped by waveamd-to-machine.">,
-    Option<"maxRegionOps", "max-region-ops", "int", /*default=*/"-1",
-           "Skip scheduling regions above this op count; -1 disables the cap.">
+           "Only schedule functions stamped by waveamd-to-machine.">
   ];
 }
 

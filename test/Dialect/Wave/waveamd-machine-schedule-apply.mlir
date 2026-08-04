@@ -2,8 +2,10 @@
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' --waveamd-barrier-cleanup | FileCheck %s --check-prefix=CLEANUP
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule-report='print-classes=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=CLASS
-// RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1 max-region-ops=2' | FileCheck %s --check-prefix=CAP
+// RUN: not wave-opt %s --waveamd-machine-schedule='apply-schedule=1 max-region-ops=2' 2>&1 | FileCheck %s --check-prefix=NO-CAP
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' --mlir-timing --mlir-timing-display=tree 2>&1 >/dev/null | FileCheck %s --check-prefix=TIMING
+
+// NO-CAP: <Pass-Options-Parser>: no such option max-region-ops
 
 // TIMING: wave_machine_schedule_stages
 // TIMING: machine_schedule_setup
@@ -39,9 +41,6 @@ func.func @m0_fill(%base: !waveamdmachine.reg<sgpr, 1>,
 // IR: [[M0:%.*]] = waveamdmachine.s_mov_m0
 // IR-NEXT: [[FILL:%.*]] = waveamdmachine.v_add_u32
 // IR-NEXT: waveamdmachine.global_load_lds_b32 {{.*}}, [[M0]] after
-// CAP-LABEL: func.func @m0_fill
-// CAP: [[M0:%.*]] = waveamdmachine.s_mov_m0
-// CAP-NEXT: waveamdmachine.global_load_lds_b32 {{.*}}, [[M0]] after
 // DIAG: waveamd-machine-schedule region func=m0_fill
 // DIAG-SAME: action=apply reason=m0_hazard
 // DIAG-SAME: filled_gaps=1

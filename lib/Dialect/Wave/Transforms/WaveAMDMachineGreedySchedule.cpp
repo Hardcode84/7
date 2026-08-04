@@ -2998,9 +2998,6 @@ struct WaveAMDMachineSchedulePass
     MachineScheduleStageTiming timing;
     TimingScope setupTiming = timing.nest("machine_schedule_setup");
     Operation *root = getOperation();
-    if (failed(validateOptions(root)))
-      return signalPassFailure();
-
     waveamdmachine::EventSimConfig modelConfig = buildModelConfig();
     setupTiming.stop();
     WalkResult walk = root->walk([&](func::FuncOp func) {
@@ -3008,12 +3005,6 @@ struct WaveAMDMachineSchedulePass
     });
     if (walk.wasInterrupted())
       return signalPassFailure();
-  }
-
-  LogicalResult validateOptions(Operation *op) {
-    if (maxRegionOps < -1)
-      return op->emitError("max-region-ops must be -1 or non-negative");
-    return success();
   }
 
   LogicalResult
@@ -3130,9 +3121,6 @@ struct WaveAMDMachineSchedulePass
                               const ValueOriginMap &origins,
                               const WaveAMDMachineScheduleModel &scheduleModel,
                               MachineScheduleStageTiming &timing) {
-    if (isRegionAboveLimit(region, maxRegionOps))
-      return success();
-
     TimingScope graphTiming = timing.nest("machine_schedule_build_graph");
     GraphTables graph;
     if (failed(buildGraph(region, graph)))
@@ -3180,11 +3168,6 @@ struct WaveAMDMachineSchedulePass
                            const WaveAMDMachineScheduleModel &scheduleModel,
                            ArrayRef<waveamdmachine::WavePlacement> placements,
                            MachineScheduleStageTiming &timing) {
-    if (llvm::any_of(regions, [&](const GreedyRegion &region) {
-          return isRegionAboveLimit(region, maxRegionOps);
-        }))
-      return success();
-
     TimingScope graphTiming = timing.nest("machine_schedule_build_joint_graph");
     MultiWaveGraphs graphs;
     if (failed(buildMultiWaveGraphs(uniformIf, regions, origins, graphs)))

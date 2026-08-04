@@ -17,9 +17,9 @@ Scheduling policy:
 - If no filler is available, keep the original next instruction and let the
   wait/hazard passes repair the gap.
 
-Reuse boundary: scheduler policy owns dependence construction and candidate
-selection. Instruction timing and stalls come from
-`InstructionExecutionState`.
+Reuse boundary: the scheduler owns dependence construction and the legal ready
+frontier. Candidate ranking, instruction timing, stalls, resources, and
+register-pressure policy come from the Wave schedule model.
 
 ## File Boundary
 
@@ -31,13 +31,16 @@ lib/Dialect/Wave/Transforms/WaveAMDMachineGreedySchedule.cpp
 
 The pass surface can stay `waveamd-machine-schedule` so pipelines do not churn.
 Default no-op behavior should stay: without `apply-schedule`, the pass validates
-options and returns.
+target support and returns.
 
 Option compatibility:
 
 - Keep `apply-schedule`.
-- Keep `max-region-ops`.
-- No-op mode still validates current options and target support.
+- Do not cap the mutating pass by region size; every collected supported region
+  is scheduled.
+- Keep `max-region-ops` only on the non-mutating report pass to bound diagnostic
+  work.
+- No-op mode still validates target support.
 
 ## Reuse
 
