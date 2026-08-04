@@ -165,10 +165,7 @@ static std::optional<RegClass> getRegClass(Value value) {
   return std::nullopt;
 }
 
-static bool isValuSGPRHazardResult(Operation *op, unsigned resultIndex,
-                                   std::optional<RegClass> regClass) {
-  if (resultIndex == 0 && op->hasTrait<traits::VCmpVccOp>())
-    return false;
+static bool isValuScalarHazardResult(std::optional<RegClass> regClass) {
   return regClass == RegClass::SGPR || regClass == RegClass::VCC;
 }
 
@@ -1848,7 +1845,7 @@ void InstructionExecutionState::commitIssueSlotProducer(
     }
     return;
   }
-  for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
+  for (Value result : op->getResults()) {
     std::optional<RegClass> regClass = getRegClass(result);
     if (regClass == RegClass::VGPR) {
       IssueSlotHazards &hazards = issueSlotHazards[result];
@@ -1864,7 +1861,7 @@ void InstructionExecutionState::commitIssueSlotProducer(
         hazards.transWriteVGPRReadyAt =
             currentIssueSlot + issueSlotHazardConfig.transWriteVGPRValuRead;
     }
-    if (isValuSGPRHazardResult(op, resultIndex, regClass))
+    if (isValuScalarHazardResult(regClass))
       issueSlotHazards[result].valuWriteSGPRReadyAt =
           currentIssueSlot + issueSlotHazardConfig.valuWriteSGPRValuRead;
   }

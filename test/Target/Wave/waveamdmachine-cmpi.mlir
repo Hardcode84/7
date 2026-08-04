@@ -161,14 +161,20 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 
 // CHECK-LABEL: func.func @i64_cmpi_gfx803
 // CHECK: waveamdmachine.tuple_to_elements
-// CHECK: waveamdmachine.v_cmp_gt_u32_vcc
+// CHECK: [[UGT_VCC:%.*]] = waveamdmachine.v_cmp_gt_u32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64 [[UGT_VCC]]
 // CHECK: waveamdmachine.v_cmp_eq_u32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.v_cmp_ge_u32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.s_and_b64
 // CHECK: waveamdmachine.s_or_b64
 // CHECK: waveamdmachine.v_cmp_gt_i32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.v_cmp_eq_u32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.v_cmp_ge_u32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.s_and_b64
 // CHECK: waveamdmachine.s_or_b64
 func.func @i64_cmpi_gfx803(%vlhs: !wave.simd<i64, 64>,
@@ -182,9 +188,13 @@ func.func @i64_cmpi_gfx803(%vlhs: !wave.simd<i64, 64>,
 
 // CHECK-LABEL: func.func @signed_cmpi_gfx803
 // CHECK: waveamdmachine.v_cmp_lt_i32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.v_cmp_le_i32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.v_cmp_gt_i32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 // CHECK: waveamdmachine.v_cmp_ge_i32_vcc
+// CHECK-NEXT: waveamdmachine.s_read_vcc_b64
 func.func @signed_cmpi_gfx803(%limit: i32) {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 64>

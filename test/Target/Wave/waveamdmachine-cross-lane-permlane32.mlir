@@ -99,9 +99,11 @@ func.func @high_wave_near_miss(
   %c1 = waveamdmachine.imm 1 : !waveamdmachine.imm
   %one = waveamdmachine.s_mov_b32_value %c1
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
-  %condition, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %half, %one
+  %vcc = waveamdmachine.v_cmp_eq_u32_vcc %half, %one
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
-      -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+      -> !waveamdmachine.reg<vcc, 1>
+  %condition = waveamdmachine.s_read_vcc_b64 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2>
   %lower = waveamdmachine.v_cndmask_b32_tuple %a_low, %b_low, %condition
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>

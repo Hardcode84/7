@@ -643,8 +643,8 @@ def WaveAMDScalarMaskPreschedule
   let description = [{
     Sinks SCC/VCC compare chains to their sole consumer before hazard repair and
     model scheduling. Single-use compare masks feed `exec_if` directly through
-    VCC when no live VCC write crosses the mask. Dead VCC results become
-    allocatable SGPR masks directly, avoiding a copy and false VCC dependency.
+    VCC when no live VCC write crosses the mask. Sole-use VCC-to-SGPR copies
+    become direct SGPR compares, avoiding a copy and false VCC dependency.
     Register allocation then sees the repaired schedule.
   }];
   let dependentDialects = [

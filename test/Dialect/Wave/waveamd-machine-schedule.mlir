@@ -91,9 +91,9 @@ func.func @legacy_vcc_edges(%a: !waveamdmachine.reg<vgpr, 1>,
   %sum, %vcc0 = waveamdmachine.v_add_u32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
-  %mask, %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %sum, %c
+  %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %sum, %c
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
   return
 }
 

@@ -16,9 +16,11 @@ func.func @legacy_vcc_ops(%a: !waveamdmachine.reg<vgpr, 1, 0>,
         -> (!waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vcc, 1>)
   // CHECK: v_cmp_lt_u32
   // CHECK: s_mov_b32 s4, vcc_lo
-  %mask, %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %sum, %c
+  %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %sum, %c
       : (!waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vgpr, 1, 2>)
-        -> (!waveamdmachine.reg<sgpr, 1, 4>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
+  %mask = waveamdmachine.s_read_vcc_b32 %vcc1
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 1, 4>
   return %mask : !waveamdmachine.reg<sgpr, 1, 4>
 }
 
@@ -28,9 +30,11 @@ func.func @legacy_signed_vcc_cmp(%a: !waveamdmachine.reg<vgpr, 1, 0>,
     -> !waveamdmachine.reg<sgpr, 1, 5> {
   // CHECK: v_cmp_lt_i32
   // CHECK: s_mov_b32 s5, vcc_lo
-  %signed_mask, %vcc = waveamdmachine.v_cmp_lt_i32_vcc %a, %b
+  %vcc = waveamdmachine.v_cmp_lt_i32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 1, 5>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
+  %signed_mask = waveamdmachine.s_read_vcc_b32 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 1, 5>
   return %signed_mask : !waveamdmachine.reg<sgpr, 1, 5>
 }
 
@@ -43,9 +47,9 @@ func.func @legacy_vcc_cndmask(%a: !waveamdmachine.reg<vgpr, 1, 0>,
   // CHECK: v_cmp_lt_u32_e64 vcc, v0, v1
   // CHECK-NOT: s_mov_b64
   // CHECK: v_cndmask_b32_e32 v4, v2, v3, vcc
-  %mask, %vcc = waveamdmachine.v_cmp_lt_u32_vcc %a, %b
+  %vcc = waveamdmachine.v_cmp_lt_u32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 2, 4>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
   %selected = waveamdmachine.v_cndmask_b32_vcc %false, %true, %vcc
       : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1, 4>
@@ -61,9 +65,11 @@ func.func @legacy_tuple_cndmask_cleanup(%a: !waveamdmachine.reg<vgpr, 1, 0>,
   // CLEANUP: v_cmp_lt_u32_e64 vcc, v0, v1
   // CLEANUP-NOT: s_mov_b64
   // CLEANUP: v_cndmask_b32_e32 v4, v2, v3, vcc
-  %mask, %vcc = waveamdmachine.v_cmp_lt_u32_vcc %a, %b
+  %vcc = waveamdmachine.v_cmp_lt_u32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 2, 4>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
+  %mask = waveamdmachine.s_read_vcc_b64 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2, 4>
   %selected = waveamdmachine.v_cndmask_b32_tuple %false, %true, %mask
       : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<sgpr, 2, 4>) -> !waveamdmachine.reg<vgpr, 1, 4>

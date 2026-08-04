@@ -76,102 +76,127 @@ static bool regionWritesVCC(Region &region) {
 }
 
 static Value getUnusedVCCResult(Value mask) {
-  Operation *compare = mask.getDefiningOp();
-  if (!compare || !isVCCCompare(compare) || compare->getResult(0) != mask)
+  Value vcc = waveamdmachine::getVCCCopySource(mask);
+  if (!vcc || !vcc.hasOneUse())
     return {};
-  Value vcc = compare->getResult(1);
-  return vcc.use_empty() ? vcc : Value();
+  Operation *compare = vcc.getDefiningOp();
+  return compare && isVCCCompare(compare) ? vcc : Value();
 }
 
 template <typename DirectCompareOp, typename VCCCompareOp>
-static void makeCompareResultDirect(OpBuilder &builder, VCCCompareOp compare) {
+static void makeCompareResultDirect(OpBuilder &builder, Operation *copy,
+                                    VCCCompareOp compare) {
   builder.setInsertionPoint(compare);
   DirectCompareOp direct = DirectCompareOp::create(
-      builder, compare.getLoc(), compare.getResult().getType(),
-      compare.getLhs(), compare.getRhs());
+      builder, compare.getLoc(), copy->getResult(0).getType(), compare.getLhs(),
+      compare.getRhs());
   direct->setAttrs(compare->getAttrs());
-  compare.getResult().replaceAllUsesWith(direct.getResult());
+  copy->getResult(0).replaceAllUsesWith(direct.getResult());
+  copy->erase();
   compare.erase();
 }
 
-static bool makeUnsignedCompareResultDirect(OpBuilder &builder, Operation *op) {
+static bool makeUnsignedCompareResultDirect(OpBuilder &builder, Operation *copy,
+                                            Operation *op) {
   if (auto compare = dyn_cast<waveamdmachine::VCmpEqU32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpEqU32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpEqU32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpNeU32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpNeU32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpNeU32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpLtU32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpLtU32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpLtU32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpLeU32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpLeU32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpLeU32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpGtU32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpGtU32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpGtU32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpGeU32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpGeU32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpGeU32Op>(builder, copy,
+                                                         compare);
   else
     return false;
   return true;
 }
 
-static bool makeSignedCompareResultDirect(OpBuilder &builder, Operation *op) {
+static bool makeSignedCompareResultDirect(OpBuilder &builder, Operation *copy,
+                                          Operation *op) {
   if (auto compare = dyn_cast<waveamdmachine::VCmpLtI32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpLtI32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpLtI32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpLeI32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpLeI32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpLeI32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpGtI32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpGtI32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpGtI32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpGeI32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpGeI32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpGeI32Op>(builder, copy,
+                                                         compare);
   else
     return false;
   return true;
 }
 
-static bool makeFloatCompareResultDirect(OpBuilder &builder, Operation *op) {
+static bool makeFloatCompareResultDirect(OpBuilder &builder, Operation *copy,
+                                         Operation *op) {
   if (auto compare = dyn_cast<waveamdmachine::VCmpEqF32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpEqF32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpEqF32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpLtF32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpLtF32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpLtF32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpLeF32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpLeF32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpLeF32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpGtF32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpGtF32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpGtF32Op>(builder, copy,
+                                                         compare);
   else if (auto compare = dyn_cast<waveamdmachine::VCmpGeF32VccOp>(op))
-    makeCompareResultDirect<waveamdmachine::VCmpGeF32Op>(builder, compare);
+    makeCompareResultDirect<waveamdmachine::VCmpGeF32Op>(builder, copy,
+                                                         compare);
   else
     return false;
   return true;
 }
 
-static bool makeDeadVCCCompareResultDirect(OpBuilder &builder, Operation *op,
-                                           unsigned wavefrontSize) {
-  if (!isVCCCompare(op) || !op->getResult(1).use_empty())
+static bool makeCopiedVCCCompareResultDirect(OpBuilder &builder,
+                                             Operation *copy,
+                                             unsigned wavefrontSize) {
+  if (!copy->hasTrait<OpTrait::waveamdmachine::VCCToSGPRCopyOp>())
+    return false;
+  Value vcc = copy->getOperand(0);
+  Operation *compare = vcc.getDefiningOp();
+  if (!vcc.hasOneUse() || !compare || !isVCCCompare(compare))
     return false;
   waveamdmachine::RegType resultType =
-      cast<waveamdmachine::RegType>(op->getResult(0).getType());
+      cast<waveamdmachine::RegType>(copy->getResult(0).getType());
   if (resultType.getWidth() * 32 != wavefrontSize)
     return false;
-  if (makeFloatCompareResultDirect(builder, op) ||
-      makeUnsignedCompareResultDirect(builder, op) ||
-      makeSignedCompareResultDirect(builder, op))
+  if (makeFloatCompareResultDirect(builder, copy, compare) ||
+      makeUnsignedCompareResultDirect(builder, copy, compare) ||
+      makeSignedCompareResultDirect(builder, copy, compare))
     return true;
   llvm_unreachable("unhandled VCC compare");
 }
 
-static LogicalResult makeDeadVCCCompareResultsDirect(Operation *root) {
+static LogicalResult makeCopiedVCCCompareResultsDirect(Operation *root) {
   if (!waveamdmachine::findAMDGPUTargetModule(root))
     return success();
   FailureOr<unsigned> wavefrontSize = waveamdmachine::getAMDGPUWavefrontSize(
       root, "waveamd-scalar-mask-preschedule");
   if (failed(wavefrontSize))
     return failure();
-  SmallVector<Operation *> compares;
+  SmallVector<Operation *> copies;
   root->walk([&](Operation *op) {
-    if (isVCCCompare(op))
-      compares.push_back(op);
+    if (op->hasTrait<OpTrait::waveamdmachine::VCCToSGPRCopyOp>())
+      copies.push_back(op);
   });
   OpBuilder builder(root->getContext());
-  for (Operation *compare : compares)
-    makeDeadVCCCompareResultDirect(builder, compare, *wavefrontSize);
+  for (Operation *copy : copies)
+    makeCopiedVCCCompareResultDirect(builder, copy, *wavefrontSize);
   return success();
 }
 
@@ -183,7 +208,7 @@ static void useVCCScalarCompare(Operation *op) {
     if (!mask.hasOneUse())
       continue;
     Value vcc = getUnusedVCCResult(mask);
-    Operation *compare = mask.getDefiningOp();
+    Operation *compare = vcc ? vcc.getDefiningOp() : nullptr;
     if (!vcc || compare->getBlock() != op->getBlock() ||
         !compare->isBeforeInBlock(op) || hasLiveVCCWriteBetween(compare, op))
       continue;
@@ -198,8 +223,8 @@ static void useVCCExecMask(waveamdmachine::ExecIfOp execIf) {
   Value vcc = getUnusedVCCResult(mask);
   if (!vcc)
     return;
-  Operation *compare = mask.getDefiningOp();
-  if (compare->getNextNode() != execIf)
+  Operation *copy = mask.getDefiningOp();
+  if (copy->getNextNode() != execIf)
     return;
   if (!execIf.getElseRegion().empty() &&
       regionWritesVCC(execIf.getThenRegion()))
@@ -213,13 +238,19 @@ static void useVCCExecMask(waveamdmachine::ExecIfOp execIf) {
 }
 
 static bool isScalarMaskSinkOp(Operation *op) {
+  if (op->hasTrait<OpTrait::waveamdmachine::VCCToSGPRCopyOp>()) {
+    Operation *vccDef = op->getOperand(0).getDefiningOp();
+    if (!vccDef || !isVCCCompare(vccDef))
+      return false;
+  }
   if (!isa<waveamdmachine::SCmpEqU32Op, waveamdmachine::SCmpLtU32Op,
            waveamdmachine::SCmpLeU32Op, waveamdmachine::SCmpGtU32Op,
            waveamdmachine::SCmpGeU32Op, waveamdmachine::SCmpEqI32Op,
            waveamdmachine::SCmpLtI32Op, waveamdmachine::SCmpLeI32Op,
            waveamdmachine::SCmpGtI32Op, waveamdmachine::SCmpGeI32Op,
            waveamdmachine::SCmpEqU64Op, waveamdmachine::SCmpLgU64Op>(op) &&
-      !isVCCCompare(op))
+      !isVCCCompare(op) &&
+      !op->hasTrait<OpTrait::waveamdmachine::VCCToSGPRCopyOp>())
     return false;
   return llvm::all_of(op->getResults(), [](Value result) {
     auto type = dyn_cast<waveamdmachine::RegType>(result.getType());
@@ -300,6 +331,15 @@ static void sinkScalarMasks(Operation *root) {
       useVCCExecMask(execIf);
 }
 
+static void eraseDeadVCCCopies(Operation *root) {
+  SmallVector<Operation *> ops;
+  collectOps(root, ops);
+  for (Operation *op : ops)
+    if (op->hasTrait<OpTrait::waveamdmachine::VCCToSGPRCopyOp>() &&
+        op->getResult(0).use_empty())
+      op->erase();
+}
+
 struct WaveAMDScalarMaskPreschedulePass
     : public wave::impl::WaveAMDScalarMaskPrescheduleBase<
           WaveAMDScalarMaskPreschedulePass> {
@@ -307,8 +347,9 @@ struct WaveAMDScalarMaskPreschedulePass
 
   void runOnOperation() override {
     sinkScalarMasks(getOperation());
-    if (failed(makeDeadVCCCompareResultsDirect(getOperation())))
+    if (failed(makeCopiedVCCCompareResultsDirect(getOperation())))
       return signalPassFailure();
+    eraseDeadVCCCopies(getOperation());
   }
 };
 
@@ -323,8 +364,10 @@ struct WaveAMDScalarMaskPostSchedulePass
       if (hasDmaIssueDelay(func))
         funcs.push_back(func);
     });
-    for (func::FuncOp func : funcs)
+    for (func::FuncOp func : funcs) {
       sinkScalarMasks(func);
+      eraseDeadVCCCopies(func);
+    }
   }
 };
 

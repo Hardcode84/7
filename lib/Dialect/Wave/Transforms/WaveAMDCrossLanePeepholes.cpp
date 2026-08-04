@@ -246,9 +246,10 @@ static std::optional<unsigned> getXLinearWorkgroupSize(func::FuncOp func) {
 static std::optional<bool> evaluateCondition(Value condition, uint32_t lane,
                                              uint32_t workitemX) {
   MachineU32Evaluator evaluator(lane, workitemX);
-  if (VCmpEqU32VccOp compare = condition.getDefiningOp<VCmpEqU32VccOp>()) {
-    if (condition != compare.getResult())
-      return std::nullopt;
+  Value vcc = getVCCCopySource(condition);
+  if (!vcc)
+    return std::nullopt;
+  if (VCmpEqU32VccOp compare = vcc.getDefiningOp<VCmpEqU32VccOp>()) {
     std::optional<uint32_t> lhs = evaluator.evaluate(compare.getLhs());
     std::optional<uint32_t> rhs = evaluator.evaluate(compare.getRhs());
     if (lhs && rhs)

@@ -5157,23 +5157,11 @@ private:
         return failure();
       if (floatCmp) {
         llvm::MCOperand zero = llvm::MCOperand::createImm(0);
-        if (failed(emitMC(opcode, {dst, zero, toMCB32(op.getOperand(0)), zero,
-                                   toMCB32(op.getOperand(1)), zero})))
-          return failure();
-      } else if (failed(emitMC(opcode, {dst, toMCB32(op.getOperand(0)),
-                                        toMCB32(op.getOperand(1))})))
-        return failure();
-      if (!writesVcc)
-        return success();
-      if (result().use_empty())
-        return success();
-      if (resultType.getWidth() == 2)
-        return emitMC(sMovB64(),
-                      {toMCOperand(result()),
-                       llvm::MCOperand::createReg(namedPhysReg("vcc"))});
-      return emitMC(sMovB32(),
-                    {toMCOperand(result()),
-                     llvm::MCOperand::createReg(namedPhysReg("vcc_lo"))});
+        return emitMC(opcode, {dst, zero, toMCB32(op.getOperand(0)), zero,
+                               toMCB32(op.getOperand(1)), zero});
+      }
+      return emitMC(
+          opcode, {dst, toMCB32(op.getOperand(0)), toMCB32(op.getOperand(1))});
     }
     if (isa<waveamdmachine::SMovB32Op>(op)) {
       StringRef dst = op.getAttrOfType<StringAttr>("dst").getValue();
@@ -5514,13 +5502,14 @@ private:
       return emitMC(sCselectB32(),
                     {toMCOperand(result()), toMCOperand(op.getOperand(1)),
                      toMCOperand(op.getOperand(2))});
-    if (isa<waveamdmachine::SReadVccB32Op>(op)) {
-      if (wavefrontSize != 32)
-        return op.emitError("s_read_vcc_b32 supports wave32 only");
+    if (isa<waveamdmachine::SReadVccB32Op>(op))
       return emitMC(sMovB32(),
                     {toMCOperand(result()),
                      llvm::MCOperand::createReg(namedPhysReg("vcc_lo"))});
-    }
+    if (isa<waveamdmachine::SReadVccB64Op>(op))
+      return emitMC(sMovB64(),
+                    {toMCOperand(result()),
+                     llvm::MCOperand::createReg(namedPhysReg("vcc"))});
     if (isa<waveamdmachine::SMovVccB32Op>(op)) {
       if (failed(emitMC(sMovB32(),
                         {llvm::MCOperand::createReg(namedPhysReg("vcc_lo")),

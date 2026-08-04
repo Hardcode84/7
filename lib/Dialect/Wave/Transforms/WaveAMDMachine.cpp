@@ -5659,60 +5659,60 @@ static Value createVCmpI32(OpBuilder &builder, Location loc,
 }
 
 static Value createVCmpU32Vcc(OpBuilder &builder, Location loc,
-                              CmpRelation relation, Type resultType,
-                              Type vccType, Value lhs, Value rhs) {
+                              CmpRelation relation, Type vccType, Value lhs,
+                              Value rhs) {
   switch (relation) {
   case CmpRelation::Eq:
-    return waveamdmachine::VCmpEqU32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpEqU32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Ne:
-    return waveamdmachine::VCmpNeU32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpNeU32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Lt:
-    return waveamdmachine::VCmpLtU32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpLtU32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Le:
-    return waveamdmachine::VCmpLeU32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpLeU32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Gt:
-    return waveamdmachine::VCmpGtU32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpGtU32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Ge:
-    return waveamdmachine::VCmpGeU32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpGeU32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   }
   llvm_unreachable("handled unsigned compare relation");
 }
 
 static Value createVCmpF32Vcc(OpBuilder &builder, Location loc,
-                              CmpRelation relation, Type resultType,
-                              Type vccType, Value lhs, Value rhs) {
+                              CmpRelation relation, Type vccType, Value lhs,
+                              Value rhs) {
   switch (relation) {
   case CmpRelation::Eq:
-    return waveamdmachine::VCmpEqF32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpEqF32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Lt:
-    return waveamdmachine::VCmpLtF32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpLtF32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Le:
-    return waveamdmachine::VCmpLeF32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpLeF32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Gt:
-    return waveamdmachine::VCmpGtF32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpGtF32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Ge:
-    return waveamdmachine::VCmpGeF32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpGeF32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Ne:
     llvm_unreachable("ordered f32 not-equal compare is unsupported");
@@ -5721,24 +5721,24 @@ static Value createVCmpF32Vcc(OpBuilder &builder, Location loc,
 }
 
 static Value createVCmpI32Vcc(OpBuilder &builder, Location loc,
-                              CmpRelation relation, Type resultType,
-                              Type vccType, Value lhs, Value rhs) {
+                              CmpRelation relation, Type vccType, Value lhs,
+                              Value rhs) {
   switch (relation) {
   case CmpRelation::Lt:
-    return waveamdmachine::VCmpLtI32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpLtI32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Le:
-    return waveamdmachine::VCmpLeI32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpLeI32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Gt:
-    return waveamdmachine::VCmpGtI32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpGtI32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Ge:
-    return waveamdmachine::VCmpGeI32VccOp::create(builder, loc, resultType,
-                                                  vccType, lhs, rhs)
+    return waveamdmachine::VCmpGeI32VccOp::create(builder, loc, vccType, lhs,
+                                                  rhs)
         .getResult();
   case CmpRelation::Eq:
   case CmpRelation::Ne:
@@ -5755,14 +5755,25 @@ static Value createVCmp(OpBuilder &builder, Location loc, CmpRelation relation,
 }
 
 static Value createVCmpVcc(OpBuilder &builder, Location loc,
-                           CmpRelation relation, bool signedCmp,
-                           Type resultType, Type vccType, Value lhs,
-                           Value rhs) {
+                           CmpRelation relation, bool signedCmp, Type vccType,
+                           Value lhs, Value rhs) {
   if (signedCmp)
-    return createVCmpI32Vcc(builder, loc, relation, resultType, vccType, lhs,
-                            rhs);
-  return createVCmpU32Vcc(builder, loc, relation, resultType, vccType, lhs,
-                          rhs);
+    return createVCmpI32Vcc(builder, loc, relation, vccType, lhs, rhs);
+  return createVCmpU32Vcc(builder, loc, relation, vccType, lhs, rhs);
+}
+
+static Value copyVCCToSGPR(OpBuilder &builder, Location loc, Type resultType,
+                           Value vcc) {
+  waveamdmachine::RegType regType = cast<waveamdmachine::RegType>(resultType);
+  assert(regType.getRegClass() == waveamdmachine::RegClass::SGPR &&
+         "compare mask must be SGPR");
+  assert((regType.getWidth() == 1 || regType.getWidth() == 2) &&
+         "compare mask must be SGPR1/2");
+  if (regType.getWidth() == 1)
+    return waveamdmachine::SReadVccB32Op::create(builder, loc, resultType, vcc)
+        .getResult();
+  return waveamdmachine::SReadVccB64Op::create(builder, loc, resultType, vcc)
+      .getResult();
 }
 
 static bool usesLegacyVCmpVcc(const WaveAMDMachineSelector &selector) {
@@ -5895,8 +5906,9 @@ Value createWordCmp(WaveAMDMachineSelector &S, Location loc,
       rhs = S.materializeSGPR1(loc, rhs);
     shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
                       rhs);
-    return createVCmpVcc(S.builder, loc, relation, signedCmp, resultType,
-                         getVCCType(S.builder.getContext()), lhs, rhs);
+    Value vcc = createVCmpVcc(S.builder, loc, relation, signedCmp,
+                              getVCCType(S.builder.getContext()), lhs, rhs);
+    return copyVCCToSGPR(S.builder, loc, resultType, vcc);
   }
   if (isa<waveamdmachine::ImmType>(lhs.getType()) &&
       isa<waveamdmachine::ImmType>(rhs.getType()))
@@ -5917,8 +5929,9 @@ static Value createF32Cmp(WaveAMDMachineSelector &S, Location loc,
       rhs = S.materializeSGPR1(loc, rhs);
     shapeVALUOperands(S, loc, /*user=*/nullptr, VALUOperandShape::AnyVGPR, lhs,
                       rhs);
-    return createVCmpF32Vcc(S.builder, loc, relation, resultType,
-                            getVCCType(S.builder.getContext()), lhs, rhs);
+    Value vcc = createVCmpF32Vcc(S.builder, loc, relation,
+                                 getVCCType(S.builder.getContext()), lhs, rhs);
+    return copyVCCToSGPR(S.builder, loc, resultType, vcc);
   }
   if (isa<waveamdmachine::ImmType>(lhs.getType()) &&
       isa<waveamdmachine::ImmType>(rhs.getType()))

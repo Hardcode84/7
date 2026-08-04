@@ -15,6 +15,8 @@
 // RUN: wave-instruction-state-report --func=readfirstlane_sgpr_gap --arch=gfx950 %s | FileCheck %s --check-prefix=READLANESGPR
 // RUN: wave-instruction-state-report --func=permlane32_gap --arch=gfx950 %s | FileCheck %s --check-prefix=PERMLANE
 // RUN: wave-instruction-state-report --func=vcc_gap --arch=gfx950 %s | FileCheck %s --check-prefix=VCC
+// RUN: wave-instruction-state-report --func=vcc_gap_filled --arch=gfx950 %s | FileCheck %s --check-prefix=VCCFILL
+// RUN: wave-instruction-state-report --func=vcc_gap_no_copy --arch=gfx950 %s | FileCheck %s --check-prefix=VCCNOCOPY
 // RUN: wave-instruction-state-report --func=direct_sgpr_mask_gap --arch=gfx950 %s | FileCheck %s --check-prefix=DIRECTMASK
 // RUN: wave-instruction-state-report --func=direct_sgpr_mask_gap_filled --arch=gfx950 %s | FileCheck %s --check-prefix=DIRECTMASKFILL
 // RUN: wave-instruction-state-report --func=copied_vcc_sgpr_no_gap --arch=gfx950 %s | FileCheck %s --check-prefix=COPIEDMASK
@@ -250,13 +252,46 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @vcc_gap(%a: !waveamdmachine.reg<vgpr, 1>,
                      %b: !waveamdmachine.reg<vgpr, 1>,
                      %c: !waveamdmachine.reg<vgpr, 1>) {
-    %mask, %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+    %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-          -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
-    %sum = waveamdmachine.v_add_u32 %a, %c
+          -> !waveamdmachine.reg<vcc, 1>
+    %mask = waveamdmachine.s_read_vcc_b64 %vcc
+        : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2>
+    %pick = waveamdmachine.v_cndmask_b32_vcc %a, %c, %vcc
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %mask_pick = waveamdmachine.v_cndmask_b32_tuple %a, %pick, %mask
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @vcc_gap_filled(%a: !waveamdmachine.reg<vgpr, 1>,
+                            %b: !waveamdmachine.reg<vgpr, 1>,
+                            %c: !waveamdmachine.reg<vgpr, 1>) {
+    %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vcc, 1>
+    %mask = waveamdmachine.s_read_vcc_b64 %vcc
+        : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2>
+    %fill = waveamdmachine.v_add_u32 %a, %c
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
-    %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %vcc
+    %pick = waveamdmachine.v_cndmask_b32_vcc %a, %fill, %vcc
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    %mask_pick = waveamdmachine.v_cndmask_b32_tuple %a, %pick, %mask
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @vcc_gap_no_copy(%a: !waveamdmachine.reg<vgpr, 1>,
+                             %b: !waveamdmachine.reg<vgpr, 1>) {
+    %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vcc, 1>
+    %pick = waveamdmachine.v_cndmask_b32_vcc %a, %b, %vcc
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
            !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
     return
@@ -295,9 +330,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @copied_vcc_sgpr_no_gap(
       %a: !waveamdmachine.reg<vgpr, 1>,
       %b: !waveamdmachine.reg<vgpr, 1>) {
-    %mask, %vcc = waveamdmachine.v_cmp_ge_i32_vcc %a, %b
+    %vcc = waveamdmachine.v_cmp_ge_i32_vcc %a, %b
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-          -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+          -> !waveamdmachine.reg<vcc, 1>
+    %mask = waveamdmachine.s_read_vcc_b64 %vcc
+        : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2>
     %pick = waveamdmachine.v_cndmask_b32_tuple %a, %b, %mask
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
            !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
@@ -562,6 +599,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // VCC: query op_index=2 cycle=8 op=waveamdmachine.v_cndmask_b32_vcc stall=instruction_hazard cycles=1 components=instruction_hazard:1
 
+// VCCFILL: query op_index=3 cycle=12 op=waveamdmachine.v_cndmask_b32_vcc stall=none cycles=0 components=none
+
+// VCCNOCOPY: query op_index=1 cycle=4 op=waveamdmachine.v_cndmask_b32_vcc stall=instruction_hazard cycles=2 components=instruction_hazard:2
+
 // DIRECTMASK: func: direct_sgpr_mask_gap
 // DIRECTMASK: query op_index=1 cycle=4 op=waveamdmachine.v_cndmask_b32_tuple stall=instruction_hazard cycles=2 components=instruction_hazard:2
 
@@ -569,7 +610,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // DIRECTMASKFILL: query op_index=3 cycle=12 op=waveamdmachine.v_cndmask_b32_tuple stall=none cycles=0 components=none
 
 // COPIEDMASK: func: copied_vcc_sgpr_no_gap
-// COPIEDMASK: query op_index=1 cycle=4 op=waveamdmachine.v_cndmask_b32_tuple stall=none cycles=0 components=none
+// COPIEDMASK: query op_index=2 cycle=8 op=waveamdmachine.v_cndmask_b32_tuple stall=none cycles=0 components=none
 
 // ALIAS: query op_index=1 cycle=4 op=waveamdmachine.tuple_to_elements stall=none cycles=0 components=none
 // ALIAS: commit op_index=1 issue=4 next=4 value_ready=20

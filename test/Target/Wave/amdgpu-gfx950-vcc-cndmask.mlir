@@ -15,9 +15,11 @@ func.func @shared_mask_tuple_cndmask_cleanup(
   // CHECK-NOT: s_mov_b64
   // CHECK: v_cndmask_b32_e32 v6, v2, v3, vcc
   // CHECK-NEXT: v_cndmask_b32_e32 v7, v4, v5, vcc
-  %mask, %vcc = waveamdmachine.v_cmp_lt_i32_vcc %a, %b
+  %vcc = waveamdmachine.v_cmp_lt_i32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 2, 4>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
+  %mask = waveamdmachine.s_read_vcc_b64 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2, 4>
   %selected0 = waveamdmachine.v_cndmask_b32_tuple %false0, %true0, %mask
       : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<sgpr, 2, 4>) -> !waveamdmachine.reg<vgpr, 1, 6>

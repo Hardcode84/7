@@ -96,6 +96,13 @@ inline bool isWaveAMDMachineOp(Operation *op) {
   return isa<WaveAMDMachineDialect>(op->getDialect());
 }
 
+inline Value getVCCCopySource(Value value) {
+  Operation *copy = value.getDefiningOp();
+  if (!copy || !copy->hasTrait<OpTrait::waveamdmachine::VCCToSGPRCopyOp>())
+    return {};
+  return copy->getOperand(0);
+}
+
 } // namespace mlir::waveamdmachine
 
 #endif // MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINE_H

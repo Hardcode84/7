@@ -1230,27 +1230,30 @@ func.func @vcc_hazard_fill(%a: !waveamdmachine.reg<vgpr, 1>,
                            %b: !waveamdmachine.reg<vgpr, 1>,
                            %c: !waveamdmachine.reg<vgpr, 1>,
                            %d: !waveamdmachine.reg<vgpr, 1>) {
-  %mask, %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+  %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-        -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
-  %sum = waveamdmachine.v_add_u32 %a, %c
-      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-        -> !waveamdmachine.reg<vgpr, 1>
-  %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %vcc
+        -> !waveamdmachine.reg<vcc, 1>
+  %mask = waveamdmachine.s_read_vcc_b64 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2>
+  %pick = waveamdmachine.v_cndmask_b32_vcc %a, %c, %vcc
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %fill = waveamdmachine.v_xor_b32 %c, %d
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
+  %mask_pick = waveamdmachine.v_cndmask_b32_tuple %a, %pick, %mask
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
   return
 }
 }
 
 // IR-LABEL: func.func @vcc_hazard_fill
-// IR: {{%.*}}, [[VCC:%.*]] = waveamdmachine.v_cmp_ge_u32_vcc
-// IR-NEXT: [[SUM:%.*]] = waveamdmachine.v_add_u32
+// IR: [[VCC:%.*]] = waveamdmachine.v_cmp_ge_u32_vcc
+// IR-NEXT: [[MASK:%.*]] = waveamdmachine.s_read_vcc_b64 [[VCC]]
 // IR-NEXT: waveamdmachine.v_xor_b32
-// IR-NEXT: waveamdmachine.v_cndmask_b32_vcc {{.*}}, [[SUM]], [[VCC]]
+// IR-NEXT: [[PICK:%.*]] = waveamdmachine.v_cndmask_b32_vcc {{.*}}, {{.*}}, [[VCC]]
+// IR-NEXT: waveamdmachine.v_cndmask_b32_tuple {{.*}}, [[PICK]], [[MASK]]
 
 // -----
 

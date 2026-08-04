@@ -10,7 +10,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950", wavemeta
   }
 
   // CHECK-LABEL: func.func @vcc_gap_survives_regalloc
-  // CHECK: {{^ *}}%{{.*}}, %{{.*}} = waveamdmachine.v_cmp_ge_u32_vcc
+  // CHECK: {{^ *}}%{{.*}} = waveamdmachine.v_cmp_ge_u32_vcc
   // CHECK-NEXT: {{^ *}}%{{.*}} = waveamdmachine.v_add_u32
   // CHECK-NEXT: {{^ *}}%{{.*}} = waveamdmachine.v_xor_b32
   // CHECK-NEXT: {{^ *}}%{{.*}} = waveamdmachine.v_cndmask_b32_vcc
@@ -20,9 +20,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950", wavemeta
       %limit: !waveamdmachine.reg<vgpr, 1>)
       -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
       attributes {waveamdmachine.schedule_input} {
-    %mask, %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %limit
+    %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %limit
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-          -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+          -> !waveamdmachine.reg<vcc, 1>
     %sum = waveamdmachine.v_add_u32 %a, %b
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>

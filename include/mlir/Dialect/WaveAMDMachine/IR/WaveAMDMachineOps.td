@@ -352,6 +352,8 @@ def WaveAMDMachine_ReadsExec : NativeOpTrait<"waveamdmachine::ReadsExecOp">;
 def WaveAMDMachine_WritesExec : NativeOpTrait<"waveamdmachine::WritesExecOp">;
 def WaveAMDMachine_VCmpVccTrait
     : NativeOpTrait<"waveamdmachine::VCmpVccOp">;
+def WaveAMDMachine_VCCToSGPRCopyTrait
+    : NativeOpTrait<"waveamdmachine::VCCToSGPRCopyOp">;
 
 def WaveAMDMachine_SGPR
     : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType>($_self) && "
@@ -1415,7 +1417,7 @@ class WaveAMDMachine_VCmpVcc<string mnemonic>
       WaveAMDMachine_VCmpLegality {
   let arguments = (ins WaveAMDMachine_RegOrImm:$lhs,
                        WaveAMDMachine_RegOrImm:$rhs);
-  let results = (outs WaveAMDMachine_SGPR:$result, WaveAMDMachine_VCC:$vcc);
+  let results = (outs WaveAMDMachine_VCC:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
 }
 class WaveAMDMachine_VCmpx<string mnemonic>
@@ -1624,10 +1626,22 @@ def WaveAMDMachine_SCSelectB32Op
 }
 
 def WaveAMDMachine_SReadVccB32Op
-    : WaveAMDMachine_Op<"s_read_vcc_b32", [WaveAMDMachine_SALU, Pure]> {
+    : WaveAMDMachine_Op<"s_read_vcc_b32", [WaveAMDMachine_SALU,
+                                            WaveAMDMachine_VCCToSGPRCopyTrait,
+                                            Pure]> {
   let summary = "copy VCC low bits into SGPR";
   let arguments = (ins WaveAMDMachine_VCC:$source);
   let results = (outs WaveAMDMachine_SGPR1:$result);
+  let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SReadVccB64Op
+    : WaveAMDMachine_Op<"s_read_vcc_b64", [WaveAMDMachine_SALU,
+                                            WaveAMDMachine_VCCToSGPRCopyTrait,
+                                            Pure]> {
+  let summary = "copy VCC into SGPR pair";
+  let arguments = (ins WaveAMDMachine_VCC:$source);
+  let results = (outs WaveAMDMachine_SGPR2:$result);
   let assemblyFormat = "$source attr-dict `:` functional-type(operands, results)";
 }
 

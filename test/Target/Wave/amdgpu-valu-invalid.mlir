@@ -71,9 +71,11 @@ func.func @bad_v_cmp_eq_u32(%lhs: !waveamdmachine.reg<sgpr, 1, 0>,
                             %rhs: !waveamdmachine.reg<sgpr, 1, 1>)
     -> !waveamdmachine.reg<sgpr, 1, 2> {
   // expected-error @below {{v_cmp_eq_u32_vcc exceeds constant bus limit}}
-  %out, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %lhs, %rhs
+  %vcc = waveamdmachine.v_cmp_eq_u32_vcc %lhs, %rhs
       : (!waveamdmachine.reg<sgpr, 1, 0>, !waveamdmachine.reg<sgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 1, 2>, !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
+  %out = waveamdmachine.s_read_vcc_b32 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 1, 2>
   return %out : !waveamdmachine.reg<sgpr, 1, 2>
 }
 

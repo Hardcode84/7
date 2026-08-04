@@ -57,9 +57,10 @@ func.func @readfirstlane_hazard_schedule_codegen() attributes {wave.kernel} {
 
 // ASM-LABEL: vcc_hazard_schedule_codegen:
 // ASM: v_cmp_ge_u32_e64 vcc, v0, v1
-// ASM-NEXT: v_add_u32_e32 v8, v0, v2
+// ASM-NEXT: s_mov_b64 s[2:3], vcc
 // ASM-NEXT: v_xor_b32_e32 v10, v2, v3
-// ASM-NEXT: v_cndmask_b32_e32 v9, v0, v8, vcc
+// ASM-NEXT: v_cndmask_b32_e32 v9, v0, v2, vcc
+// ASM-NEXT: v_cndmask_b32_e64 v11, v0, v9, s[2:3]
 // ASM-NOT: s_nop
 // ASM: s_endpgm
 func.func @vcc_hazard_schedule_codegen() attributes {wave.kernel} {
@@ -67,18 +68,20 @@ func.func @vcc_hazard_schedule_codegen() attributes {wave.kernel} {
   %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
   %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 2>
   %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 3>
-  %mask, %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
+  %vcc = waveamdmachine.v_cmp_ge_u32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 2, 2>, !waveamdmachine.reg<vcc, 1>)
-  %sum = waveamdmachine.v_add_u32 %a, %c
-      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 2>)
-        -> !waveamdmachine.reg<vgpr, 1, 8>
-  %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %vcc
-      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 8>,
+        -> !waveamdmachine.reg<vcc, 1>
+  %mask = waveamdmachine.s_read_vcc_b64 %vcc
+      : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 2, 2>
+  %pick = waveamdmachine.v_cndmask_b32_vcc %a, %c, %vcc
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 2>,
          !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1, 9>
   %fill = waveamdmachine.v_xor_b32 %c, %d
       : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>)
         -> !waveamdmachine.reg<vgpr, 1, 10>
+  %mask_pick = waveamdmachine.v_cndmask_b32_tuple %a, %pick, %mask
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 9>,
+         !waveamdmachine.reg<sgpr, 2, 2>) -> !waveamdmachine.reg<vgpr, 1, 11>
   waveamdmachine.s_endpgm
   return
 }

@@ -17,11 +17,16 @@
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 // GFX950-SELECT-LABEL: func.func @ordered_cmpf_gfx950
-// GFX950-SELECT: waveamdmachine.v_cmp_eq_f32_vcc
+// GFX950-SELECT: [[EQ_VCC:%.*]] = waveamdmachine.v_cmp_eq_f32_vcc
+// GFX950-SELECT-NEXT: waveamdmachine.s_read_vcc_b64 [[EQ_VCC]]
 // GFX950-SELECT: waveamdmachine.v_cmp_lt_f32_vcc
+// GFX950-SELECT-NEXT: waveamdmachine.s_read_vcc_b64
 // GFX950-SELECT: waveamdmachine.v_cmp_le_f32_vcc
+// GFX950-SELECT-NEXT: waveamdmachine.s_read_vcc_b64
 // GFX950-SELECT: waveamdmachine.v_cmp_gt_f32_vcc
+// GFX950-SELECT-NEXT: waveamdmachine.s_read_vcc_b64
 // GFX950-SELECT: waveamdmachine.v_cmp_ge_f32_vcc
+// GFX950-SELECT-NEXT: waveamdmachine.s_read_vcc_b64
 // GFX950-ASM-LABEL: ordered_cmpf_gfx950:
 // GFX950-ASM: v_cmp_eq_f32_e64
 // GFX950-ASM: v_cmp_lt_f32_e64

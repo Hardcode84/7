@@ -1879,7 +1879,9 @@ static bool foldVccCndmask(func::FuncOp func) {
   bool changed = false;
   for (VCndmaskB32TupleOp select : selects) {
     Value condition = select.getCondition();
-    Operation *compare = condition.getDefiningOp();
+    Operation *copy = condition.getDefiningOp();
+    Value vcc = getVCCCopySource(condition);
+    Operation *compare = vcc ? vcc.getDefiningOp() : nullptr;
     if (!isVccCompare(compare) || compare->getBlock() != select->getBlock())
       continue;
     if (hasInterveningVccWriter(compare, select))
@@ -1888,12 +1890,14 @@ static bool foldVccCndmask(func::FuncOp func) {
     builder.setInsertionPoint(select);
     Value trueValue = ensureVccCndmaskTrueVGPR(builder, select);
     Value replacement =
-        VCndmaskB32VccOp::create(
-            builder, select.getLoc(), select.getResult().getType(),
-            select.getFalseValue(), trueValue, compare->getResult(1))
+        VCndmaskB32VccOp::create(builder, select.getLoc(),
+                                 select.getResult().getType(),
+                                 select.getFalseValue(), trueValue, vcc)
             .getResult();
     select.getResult().replaceAllUsesWith(replacement);
     select.erase();
+    if (condition.use_empty())
+      copy->erase();
     changed = true;
   }
   return changed;

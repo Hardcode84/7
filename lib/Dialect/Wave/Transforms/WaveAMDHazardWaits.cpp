@@ -820,7 +820,6 @@ struct HazardOpInfo {
   bool xdlResultConsumer = false;
   bool readFirstLane = false;
   bool permlane32Swap = false;
-  bool copiedVccCompare = false;
   bool ldsDmaIssue = false;
 };
 
@@ -1096,10 +1095,6 @@ static void addProducedTransRegHazard(Value result, HazardState &state,
                     cfg.transForwardingWaitStates);
 }
 
-static bool isCopiedVccCompareSGPRResult(Operation *op, unsigned resultIndex) {
-  return resultIndex == 0 && op->hasTrait<OpTrait::waveamdmachine::VCmpVccOp>();
-}
-
 static HazardOpInfoMap collectHazardOpInfo(Operation *root,
                                            const HazardConfig &cfg) {
   HazardOpInfoMap infos;
@@ -1135,7 +1130,6 @@ static HazardOpInfoMap collectHazardOpInfo(Operation *root,
     info.xdlResultConsumer = waveamdmachine::isXdlResultHazardConsumer(op);
     info.readFirstLane = isa<waveamdmachine::VReadfirstlaneB32Op>(op);
     info.permlane32Swap = isPermlane32Swap(op);
-    info.copiedVccCompare = isCopiedVccCompareSGPRResult(op, 0);
     info.ldsDmaIssue = isLdsDmaIssue(op);
     infos.try_emplace(op, info);
   });
@@ -1151,11 +1145,7 @@ static void addProducedValuPhysicalHazards(Operation *op, HazardState &state,
         std::max(state.execWriteHazard, cfg.valuWriteExecConsumerLatency);
   bool transOp =
       cfg.hasTransForwardingHazard && (info ? info->trans : isTransOp(op, cfg));
-  for (auto [resultIndex, result] : llvm::enumerate(op->getResults())) {
-    if (resultIndex == 0 &&
-        (info ? info->copiedVccCompare
-              : isCopiedVccCompareSGPRResult(op, resultIndex)))
-      continue;
+  for (Value result : op->getResults()) {
     if (transOp)
       addProducedTransRegHazard(result, state, cfg);
     addProducedValuRegHazard(result, state, cfg);

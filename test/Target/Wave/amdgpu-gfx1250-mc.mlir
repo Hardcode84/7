@@ -131,11 +131,10 @@ func.func @scalar_vector_control() {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>)
         -> !waveamdmachine.reg<vgpr, 1, 2>
-  %mask, %vcc = waveamdmachine.v_cmp_eq_u32_vcc %vsum, %v1
+  %vcc = waveamdmachine.v_cmp_eq_u32_vcc %vsum, %v1
       : (!waveamdmachine.reg<vgpr, 1, 2>,
          !waveamdmachine.reg<vgpr, 1, 1>)
-        -> (!waveamdmachine.reg<sgpr, 1, 7>,
-            !waveamdmachine.reg<vcc, 1>)
+        -> !waveamdmachine.reg<vcc, 1>
   %saved, %exec_scc = waveamdmachine.s_and_saveexec_b32 %sum
       : (!waveamdmachine.reg<sgpr, 1, 5>)
         -> (!waveamdmachine.reg<sgpr, 1, 6>,

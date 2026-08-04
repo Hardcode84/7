@@ -145,7 +145,7 @@ static SchedClass classifyMappedOp(Operation *op) {
             SMulI32Op, SMulHiU32Op, SMulU64Op, SNopOp, SSleepOp, SFf1I32B32Op,
             SFf1I32B64Op,
             SFlbitI32B32Op, SFlbitI32B64Op, SOrB32Op, SOrB64Op,
-            SReadVccB32Op,
+            SReadVccB32Op, SReadVccB64Op,
             SSendmsgDeallocVgprsOp, SSetprioOp, SSetprioIncWgOp,
             SGetregShaderCyclesOp, SGetregHwIdOp, SSetSchedulingModeOp,
             SXorB32Op, SXorB64Op>(
