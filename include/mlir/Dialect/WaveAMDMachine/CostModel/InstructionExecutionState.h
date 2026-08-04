@@ -172,6 +172,13 @@ public:
                                        const ReadyCandidateMetrics &next) const;
   bool canFillStall(InstructionStallKind stall, FunctionalUnit candidate,
                     bool usesMfmaCoissueResource) const;
+  bool canSelectStallFiller(InstructionStallKind stall,
+                            FunctionalUnit candidate,
+                            bool usesMfmaCoissueResource,
+                            bool candidateRealInstruction,
+                            bool candidateStalls, bool hasIssueDeadline,
+                            int64_t candidateNextIssueCycle,
+                            int64_t stallIssueCycle) const;
   InstructionCoexecutionModel
   applyCoexecutionPolicy(InstructionCoexecutionModel model) const;
   bool canIssueLdsDmaDuringLead(int64_t resourceWait,

@@ -767,6 +767,17 @@ bool InstructionScheduleModel::canFillStall(
          (candidate == FunctionalUnit::VALU && !usesMfmaCoissueResource);
 }
 
+bool InstructionScheduleModel::canSelectStallFiller(
+    InstructionStallKind stall, FunctionalUnit candidate,
+    bool usesMfmaCoissueResource, bool candidateRealInstruction,
+    bool candidateStalls, bool hasIssueDeadline,
+    int64_t candidateNextIssueCycle, int64_t stallIssueCycle) const {
+  if (!candidateRealInstruction || candidateStalls ||
+      !canFillStall(stall, candidate, usesMfmaCoissueResource))
+    return false;
+  return !hasIssueDeadline || candidateNextIssueCycle <= stallIssueCycle;
+}
+
 InstructionCoexecutionModel InstructionScheduleModel::applyCoexecutionPolicy(
     InstructionCoexecutionModel model) const {
   return enableCoexecWindow ? model : InstructionCoexecutionModel{};

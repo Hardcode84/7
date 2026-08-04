@@ -1762,11 +1762,12 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
             !impl->canUseStallFiller(scheduled, baseline, candidate) ||
             (filler.stall.blockedMemoryResources &
              waveamdmachine::getMemoryIssueResources(candidateOp)) != 0 ||
-            !policy.canFillStall(filler.stall.reason, resource.functionalUnit,
-                                 resource.usesMfmaCoissue) ||
-            !filler.candidateRealInstruction || filler.candidateStalls ||
-            (filler.stall.kind == ReadyScheduleStallKind::Cycle &&
-             filler.candidateNextIssueCycle > filler.stall.issueCycle))
+            !policy.canSelectStallFiller(
+                filler.stall.reason, resource.functionalUnit,
+                resource.usesMfmaCoissue, filler.candidateRealInstruction,
+                filler.candidateStalls,
+                filler.stall.kind == ReadyScheduleStallKind::Cycle,
+                filler.candidateNextIssueCycle, filler.stall.issueCycle))
           continue;
       }
 
