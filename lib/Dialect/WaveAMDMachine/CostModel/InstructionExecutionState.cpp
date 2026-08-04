@@ -57,8 +57,6 @@ getInstructionScheduleResourceInfo(Operation *op, SchedClass cls,
   info.issueSlots = getInstructionIssueCount(op, arch.isa);
   info.tracked = tracksInstructionScheduleResource(info.functionalUnit);
   info.usesMfmaCoissue = usesMfmaCoissueResource(op, cls, arch);
-  info.coexecWindowFilledSlots =
-      getInstructionCoexecutionModel(op, cls, arch).filledSlots;
   if (info.tracked)
     info.releaseSlots = std::max(1, getResourceCycles(arch, cls));
   return info;
@@ -178,6 +176,8 @@ void configureInstructionScheduleModel(
   config.scheduleModel.readyPressureWaveCohort =
       getWorkgroupWaveCount(context).value_or(
           config.scheduleModel.issueStreams);
+  config.scheduleModel.mfmaTransCoexecSlotsPerIssue =
+      static_cast<unsigned>(arch.mfmaTransCoexecSlotsPerIssue);
   config.scheduleModel.enableCoexecWindow =
       config.scheduleModel.readyPressureWaveCohort > 1;
   config.scheduleModel.pressureLimits = pressureLimits;
@@ -758,26 +758,13 @@ bool InstructionScheduleModel::shouldSelectResourceStallFiller(
 }
 
 bool InstructionScheduleModel::canFillStall(
-    InstructionStallKind stall, unsigned coexecWindowFilledSlots) const {
+    InstructionStallKind stall, FunctionalUnit candidate,
+    bool usesMfmaCoissueResource) const {
   if (stall != InstructionStallKind::CoexecWindow)
     return true;
-  return coexecWindowFilledSlots != 0;
-}
-
-bool InstructionScheduleModel::canSelectStallFiller(
-    InstructionStallKind stall, unsigned coexecWindowFilledSlots,
-    bool candidateStalls, bool hasIssueDeadline,
-    int64_t candidateNextIssueCycle, int64_t candidateIssueEndCycle,
-    int64_t stallIssueCycle) const {
-  if (!canFillStall(stall, coexecWindowFilledSlots))
-    return false;
-  if (stall != InstructionStallKind::CoexecWindow && candidateStalls)
-    return false;
-  if (!hasIssueDeadline)
-    return true;
-  if (candidateStalls)
-    return candidateIssueEndCycle <= stallIssueCycle;
-  return candidateNextIssueCycle <= stallIssueCycle;
+  return (candidate == FunctionalUnit::TRANS &&
+          mfmaTransCoexecSlotsPerIssue != 0) ||
+         (candidate == FunctionalUnit::VALU && !usesMfmaCoissueResource);
 }
 
 InstructionCoexecutionModel InstructionScheduleModel::applyCoexecutionPolicy(

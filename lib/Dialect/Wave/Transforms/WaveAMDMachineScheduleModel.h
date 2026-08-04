@@ -67,8 +67,7 @@ enum class ReadyScheduleProposalKind : uint8_t {
   // latency, barrier, memory-crossing, admission, and ranking policy.
   Latency,
   // A raw candidate for filling an already classified issue stall. The
-  // session supplies graph legality and raw timing/resource facts; the
-  // instruction model owns filler compatibility and final admission.
+  // session owns target/resource/memory compatibility and final admission.
   GenericStallFiller,
 };
 
@@ -264,7 +263,6 @@ struct ReadyScheduleLatencyFacts {
 struct ReadyScheduleFillerFacts {
   ReadyScheduleStallFacts stall;
   int64_t candidateNextIssueCycle = 0;
-  int64_t candidateIssueEndCycle = 0;
   bool candidateRealInstruction = false;
   bool candidateStalls = false;
 };

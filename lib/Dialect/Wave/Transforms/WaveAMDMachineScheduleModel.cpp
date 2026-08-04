@@ -1762,13 +1762,11 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
             !impl->canUseStallFiller(scheduled, baseline, candidate) ||
             (filler.stall.blockedMemoryResources &
              waveamdmachine::getMemoryIssueResources(candidateOp)) != 0 ||
-            !filler.candidateRealInstruction ||
-            !policy.canSelectStallFiller(
-                filler.stall.reason, resource.coexecWindowFilledSlots,
-                filler.candidateStalls,
-                filler.stall.kind == ReadyScheduleStallKind::Cycle,
-                filler.candidateNextIssueCycle,
-                filler.candidateIssueEndCycle, filler.stall.issueCycle))
+            !policy.canFillStall(filler.stall.reason, resource.functionalUnit,
+                                 resource.usesMfmaCoissue) ||
+            !filler.candidateRealInstruction || filler.candidateStalls ||
+            (filler.stall.kind == ReadyScheduleStallKind::Cycle &&
+             filler.candidateNextIssueCycle > filler.stall.issueCycle))
           continue;
       }
 
@@ -2449,8 +2447,8 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectStallFiller(
       waveamdmachine::InstructionScheduleResourceInfo resource =
           waveamdmachine::getInstructionScheduleResourceInfo(
               impl->operations[candidate], cls, *impl->arch);
-      if (!policy.canFillStall(stall.reason,
-                               resource.coexecWindowFilledSlots))
+      if (!policy.canFillStall(stall.reason, resource.functionalUnit,
+                               resource.usesMfmaCoissue))
         continue;
       FailureOr<ReadyScheduleCandidateIssueFacts> issue =
           issueProvider(candidate);
@@ -2459,12 +2457,8 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectStallFiller(
       ReadyScheduleProposal proposal{
           candidate, ReadyScheduleProposalKind::GenericStallFiller,
           /*group=*/0};
-      int64_t reserveCycles =
-          static_cast<int64_t>(issue->issues) *
-          waveamdmachine::getEventSimIssuePeriod(*impl->arch, impl->config);
-      proposal.filler = {stall, issue->nextIssueCycle,
-                         issue->nextIssueCycle + reserveCycles,
-                         issue->realInstruction, issue->stalls};
+      proposal.filler = {stall, issue->nextIssueCycle, issue->realInstruction,
+                         issue->stalls};
       proposals.push_back(proposal);
     }
   return selectNext(scheduled, baseline, noDiscoveries, proposals, policy);
