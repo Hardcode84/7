@@ -114,6 +114,30 @@ using ReadyScheduleProjectionProvider =
     llvm::function_ref<FailureOr<ReadyScheduleProjectionFacts>(
         ArrayRef<unsigned>)>;
 
+struct RecurrenceScheduleBaselineFacts {
+  SmallVector<unsigned, 16> order;
+};
+
+struct RecurrenceScheduleProjectionFacts {
+  int64_t modelCycles = 0;
+  int64_t resourceCycles = 0;
+};
+
+// The session decides whether a baseline completion is needed and supplies
+// every order to the neutral providers. Providers only replay scheduler state
+// and return dynamic facts; they never construct or admit recurrence orders.
+using RecurrenceScheduleBaselineProvider =
+    llvm::function_ref<FailureOr<RecurrenceScheduleBaselineFacts>()>;
+using RecurrenceScheduleProjectionProvider =
+    llvm::function_ref<FailureOr<RecurrenceScheduleProjectionFacts>(
+        ArrayRef<unsigned>, ArrayRef<unsigned>)>;
+
+struct RecurrenceScheduleDecision {
+  std::optional<unsigned> candidate;
+  unsigned movedCount = 0;
+  bool activated = false;
+};
+
 struct ReadyScheduleResourceFacts {
   waveamdmachine::InstructionScheduleResourcePreview baseline;
   waveamdmachine::InstructionScheduleResourcePreview candidate;
@@ -228,6 +252,12 @@ public:
   bool canIssueBaselineDespiteStall(
       unsigned baseline, const ReadyScheduleIssueFacts &issue,
       const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  FailureOr<RecurrenceScheduleDecision> selectRecurrence(
+      unsigned baseline, const llvm::BitVector &legalReadyCandidates,
+      const llvm::BitVector &scheduled, ArrayRef<unsigned> scheduledPrefix,
+      RecurrenceScheduleBaselineProvider baselineProvider,
+      RecurrenceScheduleProjectionProvider projectionProvider) const;
 
   ReadyScheduleStallFacts classifyStall(unsigned baseline,
                                         const ReadyScheduleIssueFacts &issue,

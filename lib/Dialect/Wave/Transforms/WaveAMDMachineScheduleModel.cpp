@@ -182,6 +182,16 @@ struct WaveAMDMachineScheduleModel::Impl {
 };
 
 struct RegionScheduleSession::Impl {
+  struct RecurrenceProducer {
+    SmallVector<unsigned, 4> consumers;
+    unsigned node = 0;
+  };
+
+  struct ModeledRecurrenceOrder {
+    SmallVector<unsigned, 16> order;
+    llvm::BitVector moved;
+  };
+
   static bool isMemToken(Value value) {
     return isa<waveamdmachine::MemTokenType>(value.getType());
   }
@@ -405,6 +415,351 @@ struct RegionScheduleSession::Impl {
     return ready.test(index) && !scheduled.test(index) &&
            isPure(operations[index]) &&
            memoryKinds[index] == waveamdmachine::MemoryCounterKind::None;
+  }
+
+  waveamdmachine::UniformLoopOp getCompleteUniformLoop() const {
+    if (operations.empty())
+      return nullptr;
+    Block *block = operations.front()->getBlock();
+    waveamdmachine::UniformLoopOp loop =
+        dyn_cast_if_present<waveamdmachine::UniformLoopOp>(
+            block->getParentOp());
+    if (!loop)
+      return nullptr;
+
+    unsigned index = 0;
+    for (Operation &op : block->without_terminator()) {
+      if (index >= operations.size() || operations[index] != &op)
+        return nullptr;
+      ++index;
+    }
+    return index == operations.size() ? loop : nullptr;
+  }
+
+  void collectRealRecurrenceProducers(Value value,
+                                      SmallVectorImpl<unsigned> &producers,
+                                      DenseSet<unsigned> &producerSet,
+                                      DenseSet<Value> &seen) const {
+    if (!seen.insert(value).second)
+      return;
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return;
+    auto node = nodeIndices.find(def);
+    if (node == nodeIndices.end())
+      return;
+    if (waveamdmachine::classifyOp(def) != waveamdmachine::SchedClass::NoInst) {
+      if (producerSet.insert(node->second).second)
+        producers.push_back(node->second);
+      return;
+    }
+    for (Value operand : def->getOperands())
+      collectRealRecurrenceProducers(operand, producers, producerSet, seen);
+  }
+
+  void collectRealRecurrenceConsumers(Value value,
+                                      SmallVectorImpl<unsigned> &consumers,
+                                      DenseSet<unsigned> &consumerSet,
+                                      DenseSet<Value> &seen) const {
+    if (!seen.insert(value).second)
+      return;
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      auto node = nodeIndices.find(user);
+      if (node == nodeIndices.end())
+        continue;
+      if (waveamdmachine::classifyOp(user) !=
+          waveamdmachine::SchedClass::NoInst) {
+        if (consumerSet.insert(node->second).second)
+          consumers.push_back(node->second);
+        continue;
+      }
+      for (Value result : user->getResults())
+        collectRealRecurrenceConsumers(result, consumers, consumerSet, seen);
+    }
+  }
+
+  void initializeRecurrencePlan() {
+    waveamdmachine::UniformLoopOp loop = getCompleteUniformLoop();
+    if (!loop)
+      return;
+    Block *block = operations.front()->getBlock();
+    auto terminator =
+        dyn_cast<waveamdmachine::ContinueIfOp>(block->getTerminator());
+    if (!terminator)
+      return;
+
+    DenseMap<unsigned, unsigned> producerEntries;
+    for (auto [arg, carry] :
+         llvm::zip_equal(block->getArguments(), terminator.getCarries())) {
+      // Token SSA remains legality; tracing joins creates false
+      // self-recurrences.
+      if (isMemToken(arg) || isMemToken(carry))
+        continue;
+      SmallVector<unsigned, 4> producers;
+      SmallVector<unsigned, 4> consumers;
+      DenseSet<unsigned> producerSet;
+      DenseSet<unsigned> consumerSet;
+      DenseSet<Value> seenProducers;
+      DenseSet<Value> seenConsumers;
+      collectRealRecurrenceProducers(carry, producers, producerSet,
+                                     seenProducers);
+      collectRealRecurrenceConsumers(arg, consumers, consumerSet,
+                                     seenConsumers);
+      if (consumers.empty())
+        continue;
+      for (unsigned producer : producers) {
+        auto [it, inserted] =
+            producerEntries.try_emplace(producer, recurrenceProducers.size());
+        if (inserted) {
+          RecurrenceProducer entry;
+          entry.node = producer;
+          recurrenceProducers.push_back(std::move(entry));
+        }
+        llvm::append_range(recurrenceProducers[it->second].consumers,
+                           consumers);
+      }
+    }
+
+    for (RecurrenceProducer &producer : recurrenceProducers) {
+      llvm::sort(producer.consumers);
+      producer.consumers.erase(
+          std::unique(producer.consumers.begin(), producer.consumers.end()),
+          producer.consumers.end());
+    }
+    llvm::sort(recurrenceProducers, [](const RecurrenceProducer &lhs,
+                                       const RecurrenceProducer &rhs) {
+      return lhs.node < rhs.node;
+    });
+  }
+
+  const RecurrenceProducer *findRecurrenceProducer(unsigned node) const {
+    auto producer =
+        llvm::lower_bound(recurrenceProducers, node,
+                          [](const RecurrenceProducer &entry, unsigned value) {
+                            return entry.node < value;
+                          });
+    return producer != recurrenceProducers.end() && producer->node == node
+               ? &*producer
+               : nullptr;
+  }
+
+  bool crossesSplitBarrierInOrder(ArrayRef<unsigned> order, unsigned begin,
+                                  unsigned end) const {
+    return llvm::any_of(order.slice(begin, end - begin), [&](unsigned node) {
+      return isa<waveamdmachine::BarrierArriveOp,
+                 waveamdmachine::BarrierWaitOp>(operations[node]);
+    });
+  }
+
+  static bool
+  containsMemoryKind(ArrayRef<waveamdmachine::MemoryCounterKind> kinds,
+                     waveamdmachine::MemoryCounterKind kind) {
+    return kind != waveamdmachine::MemoryCounterKind::None &&
+           llvm::is_contained(kinds, kind);
+  }
+
+  bool crossesSameMemoryProducerExcept(
+      ArrayRef<unsigned> order, unsigned begin, unsigned end,
+      ArrayRef<waveamdmachine::MemoryCounterKind> producerKinds,
+      const llvm::BitVector &ignored) const {
+    for (unsigned position : llvm::seq(begin, end)) {
+      unsigned node = order[position];
+      if (ignored.test(node))
+        continue;
+      if (containsMemoryKind(producerKinds, memoryKinds[node]))
+        return true;
+    }
+    return false;
+  }
+
+  bool hasPlacedPredecessors(unsigned node,
+                             const llvm::BitVector &placed) const {
+    return llvm::all_of(predecessors[node], [&](unsigned predecessor) {
+      return placed.test(predecessor);
+    });
+  }
+
+  bool hasPlacedRecurrenceConsumers(unsigned node,
+                                    const llvm::BitVector &placed) const {
+    const RecurrenceProducer *producer = findRecurrenceProducer(node);
+    if (!producer)
+      return false;
+    return llvm::all_of(producer->consumers, [&](unsigned consumer) {
+      return consumer == node || placed.test(consumer);
+    });
+  }
+
+  bool validateModeledRecurrenceOrder(ArrayRef<unsigned> order,
+                                      const llvm::BitVector &scheduled,
+                                      const llvm::BitVector &moved) const {
+    llvm::BitVector placed = scheduled;
+    for (unsigned node : order) {
+      if (node >= placed.size() || placed.test(node))
+        return false;
+      if (!hasPlacedPredecessors(node, placed))
+        return false;
+      if (moved.test(node) && !hasPlacedRecurrenceConsumers(node, placed))
+        return false;
+      placed.set(node);
+    }
+    return placed.all();
+  }
+
+  bool indexBaselineOrder(ArrayRef<unsigned> baselineOrder,
+                          const llvm::BitVector &scheduled,
+                          MutableArrayRef<int> baselinePosition) const {
+    for (auto [position, node] : llvm::enumerate(baselineOrder)) {
+      if (node >= operations.size() || scheduled.test(node) ||
+          baselinePosition[node] >= 0)
+        return false;
+      baselinePosition[node] = static_cast<int>(position);
+    }
+    return baselineOrder.size() + scheduled.count() == operations.size();
+  }
+
+  FailureOr<int>
+  findLastRecurrenceRequirement(const RecurrenceProducer &producer,
+                                const llvm::BitVector &scheduled,
+                                ArrayRef<int> baselinePosition) const {
+    int lastRequired = -1;
+    for (unsigned predecessor : predecessors[producer.node]) {
+      if (scheduled.test(predecessor))
+        continue;
+      if (baselinePosition[predecessor] < 0)
+        return failure();
+      lastRequired = std::max(lastRequired, baselinePosition[predecessor]);
+    }
+    for (unsigned consumer : producer.consumers) {
+      if (consumer == producer.node || scheduled.test(consumer))
+        continue;
+      if (baselinePosition[consumer] < 0)
+        return failure();
+      lastRequired = std::max(lastRequired, baselinePosition[consumer]);
+    }
+    return lastRequired;
+  }
+
+  void selectInitialRecurrenceMoves(ArrayRef<unsigned> baselineOrder,
+                                    const llvm::BitVector &scheduled,
+                                    ArrayRef<int> baselinePosition,
+                                    MutableArrayRef<int> insertionAfter,
+                                    llvm::BitVector &moved) const {
+    for (const RecurrenceProducer &producer : recurrenceProducers) {
+      int producerPosition = baselinePosition[producer.node];
+      if (scheduled.test(producer.node) || producerPosition < 0)
+        continue;
+      FailureOr<int> lastRequired =
+          findLastRecurrenceRequirement(producer, scheduled, baselinePosition);
+      if (failed(lastRequired) || *lastRequired + 1 >= producerPosition)
+        continue;
+      unsigned begin = static_cast<unsigned>(*lastRequired + 1);
+      if (crossesSplitBarrierInOrder(baselineOrder, begin, producerPosition))
+        continue;
+      insertionAfter[producer.node] = *lastRequired;
+      moved.set(producer.node);
+    }
+  }
+
+  static SmallVector<unsigned, 8>
+  collectMovedInBaselineOrder(ArrayRef<unsigned> baselineOrder,
+                              const llvm::BitVector &moved) {
+    SmallVector<unsigned, 8> movedInBaselineOrder;
+    for (unsigned node : baselineOrder)
+      if (moved.test(node))
+        movedInBaselineOrder.push_back(node);
+    return movedInBaselineOrder;
+  }
+
+  void
+  constrainRecurrenceCounterOrder(ArrayRef<unsigned> movedInBaselineOrder,
+                                  MutableArrayRef<int> insertionAfter) const {
+    for (auto [position, producer] : llvm::enumerate(movedInBaselineOrder)) {
+      ArrayRef<waveamdmachine::MemoryCounterKind> kinds =
+          fillerMemoryKinds[producer];
+      for (unsigned prior : movedInBaselineOrder.take_front(position)) {
+        waveamdmachine::MemoryCounterKind priorKind = memoryKinds[prior];
+        if (containsMemoryKind(kinds, priorKind))
+          insertionAfter[producer] =
+              std::max(insertionAfter[producer], insertionAfter[prior]);
+      }
+    }
+  }
+
+  void rejectRecurrenceCounterCrossings(ArrayRef<unsigned> baselineOrder,
+                                        ArrayRef<unsigned> movedInBaselineOrder,
+                                        ArrayRef<int> baselinePosition,
+                                        ArrayRef<int> insertionAfter,
+                                        llvm::BitVector &moved) const {
+    // Re-run after a rejected cohort member becomes a counter boundary.
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (unsigned producer : movedInBaselineOrder) {
+        if (!moved.test(producer))
+          continue;
+        unsigned begin = static_cast<unsigned>(insertionAfter[producer] + 1);
+        unsigned end = baselinePosition[producer];
+        ArrayRef<waveamdmachine::MemoryCounterKind> kinds =
+            fillerMemoryKinds[producer];
+        if (begin < end && !crossesSameMemoryProducerExcept(
+                               baselineOrder, begin, end, kinds, moved))
+          continue;
+        moved.reset(producer);
+        changed = true;
+      }
+    }
+  }
+
+  static SmallVector<unsigned, 16> materializeModeledRecurrenceOrder(
+      ArrayRef<unsigned> baselineOrder, ArrayRef<unsigned> movedInBaselineOrder,
+      ArrayRef<int> insertionAfter, const llvm::BitVector &moved) {
+    SmallVector<unsigned, 16> order;
+    for (unsigned producer : movedInBaselineOrder)
+      if (moved.test(producer) && insertionAfter[producer] < 0)
+        order.push_back(producer);
+    for (auto [position, node] : llvm::enumerate(baselineOrder)) {
+      if (!moved.test(node))
+        order.push_back(node);
+      for (unsigned producer : movedInBaselineOrder)
+        if (moved.test(producer) &&
+            insertionAfter[producer] == static_cast<int>(position))
+          order.push_back(producer);
+    }
+    return order;
+  }
+
+  ModeledRecurrenceOrder
+  buildModeledRecurrenceOrder(ArrayRef<unsigned> baselineOrder,
+                              const llvm::BitVector &scheduled) const {
+    ModeledRecurrenceOrder result;
+    result.moved.resize(operations.size());
+    SmallVector<int, 16> baselinePosition(operations.size(), -1);
+    if (!indexBaselineOrder(baselineOrder, scheduled, baselinePosition))
+      return result;
+
+    SmallVector<int, 16> insertionAfter(operations.size(), -1);
+    selectInitialRecurrenceMoves(baselineOrder, scheduled, baselinePosition,
+                                 insertionAfter, result.moved);
+    SmallVector<unsigned, 8> movedInBaselineOrder =
+        collectMovedInBaselineOrder(baselineOrder, result.moved);
+    // waitcnt observes issue order within each counter.
+    constrainRecurrenceCounterOrder(movedInBaselineOrder, insertionAfter);
+    rejectRecurrenceCounterCrossings(baselineOrder, movedInBaselineOrder,
+                                     baselinePosition, insertionAfter,
+                                     result.moved);
+    result.order = materializeModeledRecurrenceOrder(
+        baselineOrder, movedInBaselineOrder, insertionAfter, result.moved);
+    if (validateModeledRecurrenceOrder(result.order, scheduled, result.moved))
+      return result;
+    result.order.clear();
+    result.moved.reset();
+    return result;
+  }
+
+  static bool changesRecurrenceOrder(ArrayRef<unsigned> baselineOrder,
+                                     const ModeledRecurrenceOrder &modeled) {
+    return modeled.moved.any() && !llvm::equal(baselineOrder, modeled.order);
   }
 
   int getLatency(unsigned index) const {
@@ -822,6 +1177,10 @@ struct RegionScheduleSession::Impl {
   SmallVector<unsigned, 16> memoryNodes;
   llvm::BitVector computeRecurrenceCritical;
   SmallVector<unsigned, 16> computeIslandEnds;
+  SmallVector<RecurrenceProducer, 8> recurrenceProducers;
+  mutable SmallVector<unsigned, 16> recurrenceOrder;
+  mutable unsigned recurrenceCursor = 0;
+  mutable bool recurrenceEvaluated = false;
   const waveamdmachine::ArchData *arch = nullptr;
   waveamdmachine::EventSimConfig config;
   bool dmaIssueTiming = false;
@@ -900,6 +1259,7 @@ RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
   for (auto [index, op] : llvm::enumerate(operations))
     if (waveamdmachine::classifyOp(op) == waveamdmachine::SchedClass::NoInst)
       region->noInstructions.set(index);
+  region->initializeRecurrencePlan();
   region->initialize(impl->liveness);
   region->initializeComputeIslands();
   return RegionScheduleSession(std::move(region));
@@ -1577,6 +1937,62 @@ bool RegionScheduleSession::canIssueBaselineDespiteStall(
   bool emptyBarrierWait =
       isa<waveamdmachine::BarrierWaitOp>(op) && issue.memoryWaitCycles == 0;
   return preserveDmaIssueLead || emptyBarrierWait;
+}
+
+FailureOr<RecurrenceScheduleDecision> RegionScheduleSession::selectRecurrence(
+    unsigned baseline, const llvm::BitVector &legalReadyCandidates,
+    const llvm::BitVector &scheduled, ArrayRef<unsigned> scheduledPrefix,
+    RecurrenceScheduleBaselineProvider baselineProvider,
+    RecurrenceScheduleProjectionProvider projectionProvider) const {
+  assert(legalReadyCandidates.size() == impl->operations.size() &&
+         scheduled.size() == impl->operations.size() &&
+         baseline < impl->operations.size() &&
+         "invalid recurrence selection state");
+
+  while (impl->recurrenceCursor < impl->recurrenceOrder.size() &&
+         scheduled.test(impl->recurrenceOrder[impl->recurrenceCursor]))
+    ++impl->recurrenceCursor;
+  if (impl->recurrenceCursor < impl->recurrenceOrder.size()) {
+    unsigned candidate = impl->recurrenceOrder[impl->recurrenceCursor];
+    if (!legalReadyCandidates.test(candidate))
+      return failure();
+    return RecurrenceScheduleDecision{candidate};
+  }
+
+  if (!legalReadyCandidates.test(baseline) || impl->recurrenceEvaluated ||
+      impl->recurrenceProducers.empty())
+    return RecurrenceScheduleDecision{};
+
+  FailureOr<RecurrenceScheduleBaselineFacts> baselineCompletion =
+      baselineProvider();
+  if (failed(baselineCompletion))
+    return failure();
+  impl->recurrenceEvaluated = true;
+
+  Impl::ModeledRecurrenceOrder modeled =
+      impl->buildModeledRecurrenceOrder(baselineCompletion->order, scheduled);
+  if (!Impl::changesRecurrenceOrder(baselineCompletion->order, modeled))
+    return RecurrenceScheduleDecision{};
+
+  FailureOr<RecurrenceScheduleProjectionFacts> baselineProjection =
+      projectionProvider(scheduledPrefix, baselineCompletion->order);
+  FailureOr<RecurrenceScheduleProjectionFacts> modeledProjection =
+      projectionProvider(scheduledPrefix, modeled.order);
+  if (failed(baselineProjection) || failed(modeledProjection))
+    return failure();
+  int64_t baselineCycles = std::max(baselineProjection->modelCycles,
+                                    baselineProjection->resourceCycles);
+  int64_t modeledCycles = std::max(modeledProjection->modelCycles,
+                                   modeledProjection->resourceCycles);
+  if (modeledCycles >= baselineCycles || modeled.order.empty() ||
+      !legalReadyCandidates.test(modeled.order.front()))
+    return RecurrenceScheduleDecision{};
+
+  unsigned movedCount = modeled.moved.count();
+  impl->recurrenceOrder = std::move(modeled.order);
+  impl->recurrenceCursor = 0;
+  return RecurrenceScheduleDecision{impl->recurrenceOrder.front(), movedCount,
+                                    /*activated=*/true};
 }
 
 ReadyScheduleStallFacts
