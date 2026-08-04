@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULEMODEL_H
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
+#include "mlir/Dialect/WaveAMDMachine/CostModel/MultiWaveExecutionState.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/BitVector.h"
@@ -17,6 +18,7 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -32,6 +34,8 @@ struct EventSimConfig;
 } // namespace waveamdmachine
 
 namespace wave {
+
+inline constexpr unsigned kMultiWaveScheduleClassCount = 2;
 
 struct ReadyScheduleWorkStats {
   uint64_t stateBuilds = 0;
@@ -165,6 +169,56 @@ struct SingleWaveScheduleDecision {
   std::optional<SingleWaveScheduleRefinementStats> refinementStats;
   unsigned resultToken = 0;
   bool modelFailed = false;
+};
+
+using MultiWaveScheduleOrders =
+    std::array<SmallVector<unsigned, 16>, kMultiWaveScheduleClassCount>;
+
+struct MultiWaveScheduleBuildRequest {
+  MultiWaveScheduleOrders steadyStateOrders;
+  unsigned steadyStateIterations = 0;
+  bool replaySteadyState = false;
+};
+
+struct MultiWaveScheduleCandidateFacts {
+  MultiWaveScheduleOrders orders;
+  std::array<unsigned, kMultiWaveScheduleClassCount> recurrenceModelMoves{};
+  unsigned resultToken = 0;
+};
+
+using MultiWaveScheduleBuildProvider =
+    llvm::function_ref<FailureOr<MultiWaveScheduleCandidateFacts>(
+        const MultiWaveScheduleBuildRequest &)>;
+
+struct MultiWaveScheduleRefinementStats {
+  std::array<unsigned, kMultiWaveScheduleClassCount> recurrenceModelMoves{};
+  unsigned steadyStateIterations = 0;
+  unsigned steadyStateRefinements = 0;
+};
+
+struct MultiWaveScheduleDecision {
+  std::optional<MultiWaveScheduleRefinementStats> refinementStats;
+  unsigned resultToken = 0;
+};
+
+struct MultiWaveClassScheduleFacts {
+  bool complete = false;
+  bool waitingAtBarrier = false;
+};
+
+// Model owns eligibility and stable round-robin preference.
+class MultiWaveScheduleSession {
+public:
+  std::optional<unsigned>
+  selectClass(const std::array<MultiWaveClassScheduleFacts,
+                               kMultiWaveScheduleClassCount> &classes) const;
+  void recordClassAdvance(unsigned classId);
+
+private:
+  friend class WaveAMDMachineScheduleModel;
+  MultiWaveScheduleSession() = default;
+
+  unsigned preferredClass = 0;
 };
 
 struct ReadyScheduleResourceFacts {
@@ -368,11 +422,23 @@ public:
 
   waveamdmachine::InstructionExecutionConfig
   buildInstructionConfig(const waveamdmachine::EventSimConfig &config) const;
-  unsigned getTargetWaveCount() const;
 
   FailureOr<SingleWaveScheduleDecision>
   selectSingleWaveSchedule(ArrayRef<Operation *> operations,
                            SingleWaveScheduleBuildProvider buildProvider) const;
+
+  FailureOr<MultiWaveScheduleDecision> selectMultiWaveSchedule(
+      const std::array<ArrayRef<Operation *>, kMultiWaveScheduleClassCount>
+          &operations,
+      MultiWaveScheduleBuildProvider buildProvider) const;
+
+  waveamdmachine::InstructionExecutionConfig buildMultiWaveInstructionConfig(
+      const waveamdmachine::EventSimConfig &config) const;
+  SmallVector<waveamdmachine::WavePlacement> getMultiWavePlacements() const;
+  unsigned
+  getMultiWaveClass(const waveamdmachine::MultiWaveExecutionState &state,
+                    unsigned wave) const;
+  MultiWaveScheduleSession createMultiWaveScheduleSession() const;
 
   // Session owns noInstructions; graph fact storage must outlive it.
   RegionScheduleSession

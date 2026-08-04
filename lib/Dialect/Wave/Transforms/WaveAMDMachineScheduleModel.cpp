@@ -45,6 +45,8 @@ static constexpr uint64_t kMaxFlatWorkgroupSize = 1024;
 static constexpr unsigned kSteadyStateFillsPerTarget = 16;
 static constexpr unsigned kSingleWaveSteadyStateIterations = 4;
 static constexpr unsigned kSingleWaveSteadyStateRefinementLimit = 3;
+static constexpr unsigned kMultiWaveSteadyStateIterations = 4;
+static constexpr unsigned kMultiWaveSteadyStateRefinementLimit = 3;
 
 struct WorkgroupShape {
   std::array<uint32_t, 3> dims = {1, 1, 1};
@@ -311,6 +313,87 @@ finishSingleWaveRefinement(const SingleWaveRefinementState &state) {
     recurrenceModelMoves = 1;
   return {kSingleWaveSteadyStateIterations, state.refinements,
           recurrenceModelMoves};
+}
+
+static bool sameMultiWaveOrders(const MultiWaveScheduleOrders &lhs,
+                                const MultiWaveScheduleOrders &rhs) {
+  return llvm::all_of(llvm::seq<unsigned>(kMultiWaveScheduleClassCount),
+                      [&](unsigned classId) {
+                        return sameSingleWaveOrder(lhs[classId], rhs[classId]);
+                      });
+}
+
+static bool hasSeenMultiWaveOrders(ArrayRef<MultiWaveScheduleOrders> seen,
+                                   const MultiWaveScheduleOrders &orders) {
+  return llvm::any_of(seen, [&](const MultiWaveScheduleOrders &prior) {
+    return sameMultiWaveOrders(prior, orders);
+  });
+}
+
+static void recordMultiWaveRecurrences(
+    const MultiWaveScheduleCandidateFacts &candidate,
+    std::array<bool, kMultiWaveScheduleClassCount> &used) {
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveScheduleClassCount))
+    used[classId] |= candidate.recurrenceModelMoves[classId] != 0;
+}
+
+static bool canRefineMultiWaveSchedule(
+    const std::array<ArrayRef<Operation *>, kMultiWaveScheduleClassCount>
+        &operations) {
+  return llvm::all_of(operations, [](ArrayRef<Operation *> classOperations) {
+    return getCompleteUniformLoop(classOperations) != nullptr;
+  });
+}
+
+static bool
+hasConvergedMultiWaveSchedule(const MultiWaveScheduleOrders &acceptedOrders,
+                              ArrayRef<MultiWaveScheduleOrders> seenOrders,
+                              const MultiWaveScheduleOrders &candidateOrders) {
+  return sameMultiWaveOrders(acceptedOrders, candidateOrders) ||
+         hasSeenMultiWaveOrders(seenOrders, candidateOrders);
+}
+
+struct MultiWaveRefinementState {
+  SmallVector<MultiWaveScheduleOrders, 4> seenOrders;
+  MultiWaveScheduleCandidateFacts accepted;
+  std::array<bool, kMultiWaveScheduleClassCount> usedModeledRecurrence{};
+  unsigned refinements = 0;
+};
+
+static FailureOr<bool>
+refineMultiWaveScheduleOnce(MultiWaveScheduleBuildProvider buildProvider,
+                            MultiWaveRefinementState &state,
+                            MultiWaveScheduleDecision &decision) {
+  MultiWaveScheduleBuildRequest request{state.accepted.orders,
+                                        kMultiWaveSteadyStateIterations,
+                                        /*replaySteadyState=*/true};
+  FailureOr<MultiWaveScheduleCandidateFacts> candidate = buildProvider(request);
+  if (failed(candidate))
+    return failure();
+
+  ++state.refinements;
+  recordMultiWaveRecurrences(*candidate, state.usedModeledRecurrence);
+  if (hasConvergedMultiWaveSchedule(state.accepted.orders, state.seenOrders,
+                                    candidate->orders))
+    return false;
+
+  state.seenOrders.push_back(candidate->orders);
+  state.accepted = std::move(*candidate);
+  decision.resultToken = state.accepted.resultToken;
+  return true;
+}
+
+static MultiWaveScheduleRefinementStats
+finishMultiWaveRefinement(const MultiWaveRefinementState &state) {
+  MultiWaveScheduleRefinementStats stats;
+  stats.recurrenceModelMoves = state.accepted.recurrenceModelMoves;
+  stats.steadyStateIterations = kMultiWaveSteadyStateIterations;
+  stats.steadyStateRefinements = state.refinements;
+  for (unsigned classId : llvm::seq<unsigned>(kMultiWaveScheduleClassCount))
+    if (state.usedModeledRecurrence[classId] &&
+        stats.recurrenceModelMoves[classId] == 0)
+      stats.recurrenceModelMoves[classId] = 1;
+  return stats;
 }
 
 struct ReadyPressureMember {
@@ -2448,8 +2531,22 @@ WaveAMDMachineScheduleModel::buildInstructionConfig(
   return stateConfig;
 }
 
-unsigned WaveAMDMachineScheduleModel::getTargetWaveCount() const {
-  return impl->targetWaveCount;
+std::optional<unsigned> MultiWaveScheduleSession::selectClass(
+    const std::array<MultiWaveClassScheduleFacts, kMultiWaveScheduleClassCount>
+        &classes) const {
+  for (unsigned offset : llvm::seq<unsigned>(kMultiWaveScheduleClassCount)) {
+    unsigned classId = (preferredClass + offset) % kMultiWaveScheduleClassCount;
+    const MultiWaveClassScheduleFacts &facts = classes[classId];
+    if (facts.waitingAtBarrier || facts.complete)
+      continue;
+    return classId;
+  }
+  return std::nullopt;
+}
+
+void MultiWaveScheduleSession::recordClassAdvance(unsigned classId) {
+  assert(classId < kMultiWaveScheduleClassCount && "invalid multi-wave class");
+  preferredClass = (classId + 1) % kMultiWaveScheduleClassCount;
 }
 
 FailureOr<SingleWaveScheduleDecision>
@@ -2482,6 +2579,71 @@ WaveAMDMachineScheduleModel::selectSingleWaveSchedule(
 
   decision.refinementStats = finishSingleWaveRefinement(state);
   return decision;
+}
+
+FailureOr<MultiWaveScheduleDecision>
+WaveAMDMachineScheduleModel::selectMultiWaveSchedule(
+    const std::array<ArrayRef<Operation *>, kMultiWaveScheduleClassCount>
+        &operations,
+    MultiWaveScheduleBuildProvider buildProvider) const {
+  FailureOr<MultiWaveScheduleCandidateFacts> initial =
+      buildProvider(MultiWaveScheduleBuildRequest{});
+  if (failed(initial))
+    return failure();
+
+  MultiWaveScheduleDecision decision;
+  decision.resultToken = initial->resultToken;
+  if (!canRefineMultiWaveSchedule(operations))
+    return decision;
+
+  MultiWaveRefinementState state;
+  state.seenOrders.push_back(initial->orders);
+  recordMultiWaveRecurrences(*initial, state.usedModeledRecurrence);
+  state.accepted = std::move(*initial);
+  for ([[maybe_unused]] unsigned refinement :
+       llvm::seq<unsigned>(kMultiWaveSteadyStateRefinementLimit)) {
+    FailureOr<bool> changed =
+        refineMultiWaveScheduleOnce(buildProvider, state, decision);
+    if (failed(changed))
+      return failure();
+    if (!*changed)
+      break;
+  }
+
+  decision.refinementStats = finishMultiWaveRefinement(state);
+  return decision;
+}
+
+waveamdmachine::InstructionExecutionConfig
+WaveAMDMachineScheduleModel::buildMultiWaveInstructionConfig(
+    const waveamdmachine::EventSimConfig &config) const {
+  waveamdmachine::InstructionExecutionConfig stateConfig =
+      buildInstructionConfig(config);
+  stateConfig.smoothLdsDmaIssue = false;
+  stateConfig.enablePipeBackpressure = true;
+  stateConfig.valuMaxInFlight = 1;
+  stateConfig.saluMaxInFlight = 1;
+  stateConfig.xdlMaxInFlight = 1;
+  return stateConfig;
+}
+
+SmallVector<waveamdmachine::WavePlacement>
+WaveAMDMachineScheduleModel::getMultiWavePlacements() const {
+  SmallVector<waveamdmachine::WavePlacement> placements =
+      waveamdmachine::getFullCUWavePlacements(*impl->arch,
+                                              impl->targetWaveCount);
+  assert(!placements.empty() && "model has invalid multi-wave occupancy");
+  return placements;
+}
+
+unsigned WaveAMDMachineScheduleModel::getMultiWaveClass(
+    const waveamdmachine::MultiWaveExecutionState &state, unsigned wave) const {
+  return state.getWaveCohort(wave, kMultiWaveScheduleClassCount);
+}
+
+MultiWaveScheduleSession
+WaveAMDMachineScheduleModel::createMultiWaveScheduleSession() const {
+  return MultiWaveScheduleSession();
 }
 
 static void assertRegionScheduleFactSizes(
