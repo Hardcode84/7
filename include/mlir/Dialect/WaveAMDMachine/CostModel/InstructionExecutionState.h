@@ -102,6 +102,12 @@ struct ReadyCandidateMetrics {
   unsigned autoDrainedNodes = 0;
 };
 
+enum class ReadyPressureComparisonMode : uint8_t {
+  None,
+  CandidateOnly,
+  Ordered
+};
+
 struct ReadyRegisterPressureLimits {
   unsigned sgpr = 0;
   unsigned vgpr = 0;
@@ -214,12 +220,17 @@ public:
                             const ReadyCandidateMetrics &candidate,
                             const ReadyCandidateMetrics &candidateThenBaseline,
                             const ReadyCandidateMetrics &baseline) const;
-  bool
-  shouldPreferReadyPressure(ReadyRegisterPressure current,
-                            const ReadyCandidateMetrics &candidate,
-                            const ReadyCandidateMetrics &candidateThenSelected,
-                            const ReadyCandidateMetrics &selectedThenCandidate,
-                            const ReadyCandidateMetrics &selected) const;
+  ReadyPressureComparisonMode
+  getReadyPressureComparisonMode(ReadyRegisterPressure current,
+                                 const ReadyCandidateMetrics &selected) const;
+  bool shouldPreferReadyPressureCandidateOnly(
+      ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+      const ReadyCandidateMetrics &selected) const;
+  bool shouldPreferReadyPressureOrdered(
+      ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+      const ReadyCandidateMetrics &candidateThenSelected,
+      const ReadyCandidateMetrics &selectedThenCandidate,
+      const ReadyCandidateMetrics &selected) const;
   bool shouldPreferReadyFiller(ReadyRegisterPressure current,
                                const ReadyCandidateMetrics &candidate,
                                const ReadyCandidateMetrics &selected) const;

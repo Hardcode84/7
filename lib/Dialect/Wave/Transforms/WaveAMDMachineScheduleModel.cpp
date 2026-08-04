@@ -1811,6 +1811,10 @@ struct RegionScheduleSession::Impl {
     waveamdmachine::ReadyCandidateMetrics winnerMetrics = baselineMetrics;
     unsigned winnerIndex = baseline;
     std::optional<unsigned> winner;
+    waveamdmachine::ReadyPressureComparisonMode mode =
+        policy.getReadyPressureComparisonMode(state.pressure, winnerMetrics);
+    if (mode == waveamdmachine::ReadyPressureComparisonMode::None)
+      return winner;
     for (int candidate = legalReadyCandidates.find_first(); candidate >= 0;
          candidate = legalReadyCandidates.find_next(candidate)) {
       unsigned index = candidate;
@@ -1819,16 +1823,34 @@ struct RegionScheduleSession::Impl {
         continue;
       waveamdmachine::ReadyCandidateMetrics candidateMetrics =
           getCandidateMetrics(scheduled, index, state);
-      std::pair<waveamdmachine::ReadyCandidateMetrics,
-                waveamdmachine::ReadyCandidateMetrics>
-          order = getOrderMetrics(scheduled, index, winnerIndex, state);
-      if (!policy.shouldPreferReadyPressure(state.pressure, candidateMetrics,
-                                            order.first, order.second,
-                                            winnerMetrics))
+      bool prefer = false;
+      switch (mode) {
+      case waveamdmachine::ReadyPressureComparisonMode::None:
+        llvm_unreachable(
+            "disabled ready-pressure comparison in candidate loop");
+      case waveamdmachine::ReadyPressureComparisonMode::CandidateOnly:
+        prefer = policy.shouldPreferReadyPressureCandidateOnly(
+            state.pressure, candidateMetrics, winnerMetrics);
+        break;
+      case waveamdmachine::ReadyPressureComparisonMode::Ordered: {
+        std::pair<waveamdmachine::ReadyCandidateMetrics,
+                  waveamdmachine::ReadyCandidateMetrics>
+            order = getOrderMetrics(scheduled, index, winnerIndex, state);
+        prefer = policy.shouldPreferReadyPressureOrdered(
+            state.pressure, candidateMetrics, order.first, order.second,
+            winnerMetrics);
+        break;
+      }
+      }
+      if (!prefer)
         continue;
       winnerMetrics = candidateMetrics;
       winnerIndex = index;
       winner = index;
+      mode =
+          policy.getReadyPressureComparisonMode(state.pressure, winnerMetrics);
+      if (mode == waveamdmachine::ReadyPressureComparisonMode::None)
+        break;
     }
     return winner;
   }
@@ -2117,11 +2139,11 @@ struct RegionScheduleSession::Impl {
         continue;
       waveamdmachine::ReadyCandidateMetrics candidateMetrics =
           getCandidateMetrics(scheduled, candidate, state);
-      std::pair<waveamdmachine::ReadyCandidateMetrics,
-                waveamdmachine::ReadyCandidateMetrics>
-          order = getOrderMetrics(scheduled, candidate, baseline, state);
+      std::array<unsigned, 2> candidateThenBaseline = {candidate, baseline};
+      waveamdmachine::ReadyCandidateMetrics candidateFirst =
+          getSequenceMetrics(scheduled, candidateThenBaseline, state);
       considerProposal(proposal, classification.resourceKind, candidateMetrics,
-                       order.first, state, baselineMetrics, policy, winner);
+                       candidateFirst, state, baselineMetrics, policy, winner);
     }
     return winner;
   }

@@ -921,14 +921,15 @@ static bool raisesOverBudgetReadyRegisterClass(unsigned pressureCeiling,
          peakDelta > 0;
 }
 
-static bool shouldPreferSingleWaveReadyPressure(
+static bool shouldPreferSingleWaveReadyPressureOrdered(
     ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
     const ReadyCandidateMetrics &candidateThenSelected,
     const ReadyCandidateMetrics &selectedThenCandidate,
     const ReadyCandidateMetrics &selected, unsigned sgprLimit) {
   int64_t selectedPeak = current.sgpr + selected.pressurePeakDelta.sgpr;
-  if (sgprLimit == 0 || selectedPeak <= static_cast<int64_t>(sgprLimit) ||
-      !canUseReadySGPRCandidateOrder(current, candidateThenSelected,
+  assert(sgprLimit != 0 && selectedPeak > static_cast<int64_t>(sgprLimit) &&
+         "ordered ready-pressure comparison requires over-limit SGPRs");
+  if (!canUseReadySGPRCandidateOrder(current, candidateThenSelected,
                                      selectedThenCandidate, selected,
                                      sgprLimit))
     return false;
@@ -1008,17 +1009,38 @@ shouldPreferMultiWaveReadyPressure(ReadyRegisterPressure current,
   return candidatePressure.maximum < selectedPressure.maximum;
 }
 
-bool InstructionScheduleModel::shouldPreferReadyPressure(
+ReadyPressureComparisonMode
+InstructionScheduleModel::getReadyPressureComparisonMode(
+    ReadyRegisterPressure current,
+    const ReadyCandidateMetrics &selected) const {
+  if (issueStreams > 1)
+    return ReadyPressureComparisonMode::CandidateOnly;
+  int64_t selectedPeak = current.sgpr + selected.pressurePeakDelta.sgpr;
+  if (pressureLimits.sgpr == 0 ||
+      selectedPeak <= static_cast<int64_t>(pressureLimits.sgpr))
+    return ReadyPressureComparisonMode::None;
+  return ReadyPressureComparisonMode::Ordered;
+}
+
+bool InstructionScheduleModel::shouldPreferReadyPressureCandidateOnly(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &selected) const {
+  assert(issueStreams > 1 &&
+         "candidate-only ready-pressure comparison requires multiple streams");
+  return shouldPreferMultiWaveReadyPressure(current, candidate, selected,
+                                            pressureLimits);
+}
+
+bool InstructionScheduleModel::shouldPreferReadyPressureOrdered(
     ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
     const ReadyCandidateMetrics &candidateThenSelected,
     const ReadyCandidateMetrics &selectedThenCandidate,
     const ReadyCandidateMetrics &selected) const {
-  if (issueStreams <= 1)
-    return shouldPreferSingleWaveReadyPressure(
-        current, candidate, candidateThenSelected, selectedThenCandidate,
-        selected, pressureLimits.sgpr);
-  return shouldPreferMultiWaveReadyPressure(current, candidate, selected,
-                                            pressureLimits);
+  assert(issueStreams <= 1 &&
+         "ordered ready-pressure comparison requires one stream");
+  return shouldPreferSingleWaveReadyPressureOrdered(
+      current, candidate, candidateThenSelected, selectedThenCandidate,
+      selected, pressureLimits.sgpr);
 }
 
 bool InstructionScheduleModel::canSelectReadyCandidate(

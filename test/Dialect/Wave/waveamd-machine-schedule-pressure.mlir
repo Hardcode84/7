@@ -1,5 +1,6 @@
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' | FileCheck %s --check-prefix=IR
 // RUN: wave-opt %s --split-input-file --waveamd-machine-schedule='apply-schedule=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
+// RUN: wave-opt %s --split-input-file --waveamd-machine-schedule-report='print-candidates=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=WORK
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @no_inst_closure_peak(
@@ -528,6 +529,10 @@ func.func @shared_issue_streams_prefer_pressure_neutral_filler(
 // IR-LABEL: func.func @single_issue_stream_keeps_first_filler
 // IR: [[SINGLE_M0:%.*]] = waveamdmachine.s_mov_m0
 // IR-NEXT: [[RAISED:%.*]] = waveamdmachine.v_add_u32
+// WORK-LABEL: waveamd-machine-schedule-report candidate func=single_issue_stream_keeps_first_filler region=0 name=greedy
+// WORK-SAME: order=0,1,2,4,3,5,6,7
+// WORK-SAME: pressure_state_builds=7 pressure_member_visits=77
+// WORK-SAME: pressure_projections=15 pressure_projected_nodes=19 pressure_projection_checks=6
 
 // IR-LABEL: func.func @shared_issue_streams_prefer_pressure_neutral_filler
 // IR: [[SHARED_M0:%.*]] = waveamdmachine.s_mov_m0
@@ -537,6 +542,46 @@ func.func @shared_issue_streams_prefer_pressure_neutral_filler(
 // DIAG: waveamd-machine-schedule region func=shared_issue_streams_prefer_pressure_neutral_filler
 // DIAG-SAME: action=apply reason=m0_hazard
 // DIAG-SAME: m0_gaps={{[1-9][0-9]*}}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @single_stream_under_sgpr_limit(
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %acc1: !waveamdmachine.reg<vgpr, 4>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<vgpr, 1>)
+    attributes {waveamdmachine.target_waves = 1 : i64,
+                waveamdmachine.sgpr_count_max = 64 : i64} {
+  waveamdmachine.sched_barrier
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %candidate = waveamdmachine.v_add_u32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+  return
+}
+}
+
+// IR-LABEL: func.func @single_stream_under_sgpr_limit
+// IR: waveamdmachine.sched_barrier
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// IR-NEXT: waveamdmachine.v_add_u32
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
+// DIAG: waveamd-machine-schedule region func=single_stream_under_sgpr_limit index=0
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_stall_fills=1
+// DIAG-SAME: pressure_priority_moves=0
+// WORK-LABEL: waveamd-machine-schedule-report candidate func=single_stream_under_sgpr_limit region=0 name=greedy
+// WORK-SAME: order=0,2,1
+// WORK-SAME: pressure_state_builds=3 pressure_member_visits=27
+// WORK-SAME: pressure_projections=9 pressure_projected_nodes=12 pressure_projection_checks=0
 
 // -----
 
@@ -626,6 +671,10 @@ func.func @ready_pressure_over_raw_limit() -> !waveamdmachine.reg<sgpr, 63>
 // DIAG: waveamd-machine-schedule region func=ready_pressure_over_raw_limit
 // DIAG-SAME: action=apply reason=register_pressure
 // DIAG-SAME: pressure_priority_moves=1
+// WORK-LABEL: waveamd-machine-schedule-report candidate func=ready_pressure_over_raw_limit region=0 name=greedy
+// WORK-SAME: order=0,1,2,4,3,5
+// WORK-SAME: pressure_state_builds=5 pressure_member_visits=15
+// WORK-SAME: pressure_projections=12 pressure_projected_nodes=16 pressure_projection_checks=13
 
 // -----
 
@@ -687,3 +736,7 @@ func.func @ready_vgpr_pressure_over_budget()
 // DIAG: waveamd-machine-schedule region func=ready_vgpr_pressure_over_budget
 // DIAG-SAME: action=apply reason=register_pressure
 // DIAG-SAME: pressure_priority_moves=1
+// WORK-LABEL: waveamd-machine-schedule-report candidate func=ready_vgpr_pressure_over_budget region=0 name=greedy
+// WORK-SAME: order=0,1,4,2,3,5
+// WORK-SAME: pressure_state_builds=5 pressure_member_visits=25
+// WORK-SAME: pressure_projections=14 pressure_projected_nodes=18 pressure_projection_checks=8
