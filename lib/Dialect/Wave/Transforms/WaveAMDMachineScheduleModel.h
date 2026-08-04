@@ -58,6 +58,39 @@ enum class ReadyScheduleProposalKind : uint8_t {
   // The model owns baseline eligibility, candidate compatibility, stall versus
   // priority classification, admission, and ranking.
   ComputeResource,
+  // A raw ready candidate for latency prioritization. The session owns target
+  // latency, barrier, memory-crossing, admission, and ranking policy.
+  Latency,
+  // A raw candidate for filling an already classified issue stall. The
+  // session owns target/resource/memory compatibility and final admission.
+  GenericStallFiller,
+};
+
+enum class ReadyScheduleStallKind : uint8_t {
+  None,
+  Cycle,
+  MemoryToken,
+  InstructionHazard,
+};
+
+struct ReadyScheduleStallFacts {
+  ReadyScheduleStallKind kind = ReadyScheduleStallKind::None;
+  int64_t issueCycle = 0;
+  waveamdmachine::MemoryIssueResourceMask blockedMemoryResources = 0;
+  waveamdmachine::InstructionStallKind reason =
+      waveamdmachine::InstructionStallKind::None;
+};
+
+struct ReadyScheduleIssueFacts {
+  int64_t operandWaitCycles = 0;
+  int64_t memoryWaitCycles = 0;
+  int64_t functionalUnitWaitCycles = 0;
+  int64_t issueWaitCycles = 0;
+  int64_t cuIssueWaitCycles = 0;
+  int64_t cmaIssueWaitCycles = 0;
+  int64_t coexecWindowWaitCycles = 0;
+  unsigned hazardWaitInstructions = 0;
+  int64_t issueCycle = 0;
 };
 
 struct ReadyScheduleResourceFacts {
@@ -66,6 +99,18 @@ struct ReadyScheduleResourceFacts {
   bool baselinePriorityStall = false;
   bool candidatePriorityStall = false;
   bool prioritize = false;
+};
+
+struct ReadyScheduleLatencyFacts {
+  bool baselinePriorityStall = false;
+  bool candidatePriorityStall = false;
+};
+
+struct ReadyScheduleFillerFacts {
+  ReadyScheduleStallFacts stall;
+  int64_t candidateNextIssueCycle = 0;
+  bool candidateRealInstruction = false;
+  bool candidateStalls = false;
 };
 
 struct ReadyScheduleProposal {
@@ -77,6 +122,10 @@ struct ReadyScheduleProposal {
   unsigned group = 0;
   // Only ComputeResource consumes these raw facts.
   ReadyScheduleResourceFacts resource;
+  // Only Latency consumes these raw facts.
+  ReadyScheduleLatencyFacts latency;
+  // Only GenericStallFiller consumes these raw facts.
+  ReadyScheduleFillerFacts filler;
 };
 
 enum class ReadyScheduleSelectionKind : uint8_t {
@@ -85,6 +134,8 @@ enum class ReadyScheduleSelectionKind : uint8_t {
   Proposal,
   ResourcePriority,
   ResourceStallFiller,
+  LatencyPriority,
+  GenericStallFiller,
 };
 
 struct ReadyScheduleDecision {
@@ -102,15 +153,14 @@ struct ReadyScheduleDecision {
   ReadyScheduleSelectionKind kind = ReadyScheduleSelectionKind::Baseline;
 };
 
-class ReadyRegionScheduleModel {
+class RegionScheduleSession {
 public:
-  ReadyRegionScheduleModel(ReadyRegionScheduleModel &&);
-  ReadyRegionScheduleModel &operator=(ReadyRegionScheduleModel &&);
-  ~ReadyRegionScheduleModel();
+  RegionScheduleSession(RegionScheduleSession &&);
+  RegionScheduleSession &operator=(RegionScheduleSession &&);
+  ~RegionScheduleSession();
 
-  ReadyRegionScheduleModel(const ReadyRegionScheduleModel &) = delete;
-  ReadyRegionScheduleModel &
-  operator=(const ReadyRegionScheduleModel &) = delete;
+  RegionScheduleSession(const RegionScheduleSession &) = delete;
+  RegionScheduleSession &operator=(const RegionScheduleSession &) = delete;
 
   ReadyScheduleDecision
   selectNext(const llvm::BitVector &scheduled, unsigned baseline,
@@ -118,12 +168,41 @@ public:
              ArrayRef<ReadyScheduleProposal> proposals,
              const waveamdmachine::InstructionScheduleModel &policy) const;
 
+  ReadyScheduleDecision selectComputeResource(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates,
+      ArrayRef<ReadyScheduleProposal> rawProposals,
+      const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  llvm::BitVector getComputeResourceCandidates(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates) const;
+
+  bool supportsLatencyPriority(bool enabled) const;
+  llvm::BitVector getLatencyCandidates(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates, bool baselinePriorityStall,
+      const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  llvm::BitVector getGenericStallFillerCandidates(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates,
+      const ReadyScheduleStallFacts &stall,
+      const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  ReadyScheduleStallFacts classifyStall(unsigned baseline,
+                                        const ReadyScheduleIssueFacts &issue,
+                                        bool blockMemoryResource) const;
+  ReadyScheduleStallFacts
+  classifyStall(unsigned baseline, const ReadyScheduleIssueFacts &issue,
+                const waveamdmachine::InstructionScheduleModel &policy) const;
+
   ReadyScheduleWorkStats getWorkStats() const;
 
 private:
   friend class WaveAMDMachineScheduleModel;
   struct Impl;
-  explicit ReadyRegionScheduleModel(std::unique_ptr<Impl> impl);
+  explicit RegionScheduleSession(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl;
 };
 
@@ -140,10 +219,16 @@ public:
   WaveAMDMachineScheduleModel &
   operator=(const WaveAMDMachineScheduleModel &) = delete;
 
-  ReadyRegionScheduleModel
-  createRegion(ArrayRef<Operation *> operations,
-               ArrayRef<SmallVector<unsigned, 4>> predecessors,
-               ArrayRef<SmallVector<unsigned, 4>> successors) const;
+  RegionScheduleSession createRegionSession(
+      ArrayRef<Operation *> operations,
+      ArrayRef<SmallVector<unsigned, 4>> predecessors,
+      ArrayRef<SmallVector<unsigned, 4>> successors,
+      ArrayRef<waveamdmachine::MemoryCounterKind> memoryKinds,
+      ArrayRef<SmallVector<waveamdmachine::MemoryCounterKind, 4>>
+          fillerMemoryKinds,
+      ArrayRef<unsigned> memoryNodes,
+      const llvm::BitVector &computeRecurrenceCritical,
+      const waveamdmachine::EventSimConfig &config) const;
 
 private:
   struct Impl;
