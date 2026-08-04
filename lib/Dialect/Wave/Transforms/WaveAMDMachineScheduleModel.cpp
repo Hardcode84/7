@@ -42,6 +42,7 @@ namespace mlir::wave {
 static constexpr StringLiteral kDmaIssueAfterDelayAttr =
     "waveamdmachine.dma_issue_after_delay";
 static constexpr uint64_t kMaxFlatWorkgroupSize = 1024;
+static constexpr unsigned kSteadyStateFillsPerTarget = 16;
 
 struct WorkgroupShape {
   std::array<uint32_t, 3> dims = {1, 1, 1};
@@ -346,6 +347,11 @@ struct RegionScheduleSession::Impl {
     llvm::BitVector moved;
   };
 
+  struct SteadyStallTarget {
+    unsigned index = 0;
+    unsigned fills = 0;
+  };
+
   static bool isMemToken(Value value) {
     return isa<waveamdmachine::MemTokenType>(value.getType());
   }
@@ -403,6 +409,45 @@ struct RegionScheduleSession::Impl {
         return false;
     }
     return true;
+  }
+
+  bool isReadyOverrideCandidate(const llvm::BitVector &scheduled,
+                                unsigned baseline, unsigned candidate) const {
+    return candidate != baseline && !scheduled.test(candidate) &&
+           canUseStallFiller(scheduled, baseline, candidate) &&
+           !crossesSplitBarrier(scheduled, baseline, candidate);
+  }
+
+  bool isReadySteadyProducerCandidate(
+      const llvm::BitVector &scheduled, unsigned baseline, unsigned candidate,
+      waveamdmachine::MemoryIssueResourceMask blockedResources) const {
+    if (candidate == baseline || scheduled.test(candidate) ||
+        !steadyCritical.test(candidate) || isBarrier(candidate))
+      return false;
+    if ((blockedResources &
+         waveamdmachine::getMemoryIssueResources(operations[candidate])) != 0)
+      return false;
+    return candidate <= baseline ||
+           !crossesSplitBarrier(scheduled, baseline, candidate);
+  }
+
+  bool isReadySteadyFillerCandidate(
+      const llvm::BitVector &scheduled, unsigned baseline, unsigned candidate,
+      const llvm::BitVector &legalReadyCandidates) const {
+    Operation *op = operations[candidate];
+    return legalReadyCandidates.test(candidate) && !scheduled.test(candidate) &&
+           isPure(op) &&
+           memoryKinds[candidate] == waveamdmachine::MemoryCounterKind::None &&
+           !crossesSplitBarrier(scheduled, baseline, candidate);
+  }
+
+  void updateSteadyStallTarget(unsigned baseline, bool baselineStalls,
+                               bool fillable) const {
+    if (steadyStallTarget && steadyStallTarget->index != baseline)
+      steadyStallTarget.reset();
+    if (steadyStallTarget || !baselineStalls || !fillable)
+      return;
+    steadyStallTarget = SteadyStallTarget{baseline, /*fills=*/0};
   }
 
   unsigned findBarrierPairFiller(const llvm::BitVector &ready,
@@ -798,6 +843,94 @@ struct RegionScheduleSession::Impl {
       ++index;
     }
     return index == operations.size() ? loop : nullptr;
+  }
+
+  bool isMemoryAddressUse(Operation *user, Value address) const {
+    auto memory = dyn_cast<waveamdmachine::AddressFieldsOpInterface>(user);
+    return memory &&
+           waveamdmachine::getMemoryCounterKind(user) !=
+               waveamdmachine::MemoryCounterKind::None &&
+           memory.getVAddress() == address;
+  }
+
+  bool
+  findMemoryAddressUse(Value value,
+                       SmallVectorImpl<Value> &pendingAddressValues) const {
+    assert(nodeIndices && "missing region node indices");
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      if (!nodeIndices->contains(user))
+        continue;
+      if (user->hasTrait<OpTrait::waveamdmachine::TupleAliasOp>()) {
+        llvm::append_range(pendingAddressValues, user->getResults());
+        continue;
+      }
+      if (isMemoryAddressUse(user, value))
+        return true;
+    }
+    return false;
+  }
+
+  bool isComputeRecurrence(Value arg) const {
+    auto regType = dyn_cast<waveamdmachine::RegType>(arg.getType());
+    if (regType && regType.getRegClass() == waveamdmachine::RegClass::SGPR)
+      return true;
+
+    SmallVector<Value, 4> pendingAddressValues{arg};
+    SmallPtrSet<Value, 16> visitedAddressValues;
+    while (!pendingAddressValues.empty()) {
+      Value value = pendingAddressValues.pop_back_val();
+      if (!visitedAddressValues.insert(value).second)
+        continue;
+      if (findMemoryAddressUse(value, pendingAddressValues))
+        return true;
+    }
+    return false;
+  }
+
+  static void
+  markDependencyClosure(unsigned source,
+                        ArrayRef<SmallVector<unsigned, 4>> adjacency,
+                        llvm::BitVector &critical) {
+    SmallVector<unsigned, 16> pending{source};
+    while (!pending.empty()) {
+      unsigned index = pending.pop_back_val();
+      if (critical.test(index))
+        continue;
+      critical.set(index);
+      llvm::append_range(pending, adjacency[index]);
+    }
+  }
+
+  void initializeReadyCriticalSets() {
+    assert(nodeIndices && "missing region node indices");
+    steadyCritical.resize(operations.size());
+    computeRecurrenceCritical.resize(operations.size());
+    if (operations.empty())
+      return;
+    Block *block = operations.front()->getBlock();
+    waveamdmachine::UniformLoopOp loop =
+        dyn_cast_if_present<waveamdmachine::UniformLoopOp>(
+            block->getParentOp());
+    if (!loop)
+      return;
+    auto terminator =
+        dyn_cast<waveamdmachine::ContinueIfOp>(block->getTerminator());
+    if (!terminator)
+      return;
+
+    for (auto [arg, carry] :
+         llvm::zip_equal(block->getArguments(), terminator.getCarries())) {
+      Operation *def = carry.getDefiningOp();
+      auto defIt = def ? nodeIndices->find(def) : nodeIndices->end();
+      if (defIt == nodeIndices->end())
+        continue;
+      if (isMemToken(arg))
+        markDependencyClosure(defIt->second, predecessors, steadyCritical);
+      if (isComputeRecurrence(arg))
+        markDependencyClosure(defIt->second, ssaPredecessors,
+                              computeRecurrenceCritical);
+    }
   }
 
   void collectRealRecurrenceProducers(Value value,
@@ -1209,8 +1342,10 @@ struct RegionScheduleSession::Impl {
       RecurrenceScheduleProjectionProvider projectionProvider) const {
     if (!canEvaluateRecurrence(baseline, legalReadyCandidates))
       return RecurrenceScheduleDecision{};
+    std::optional<SteadyStallTarget> savedSteadyStallTarget = steadyStallTarget;
     FailureOr<RecurrenceScheduleBaselineFacts> baselineCompletion =
         baselineProvider();
+    steadyStallTarget = savedSteadyStallTarget;
     if (failed(baselineCompletion))
       return failure();
     recurrenceEvaluated = true;
@@ -1263,7 +1398,7 @@ struct RegionScheduleSession::Impl {
   bool isComputeRecurrenceCandidate(const llvm::BitVector &scheduled,
                                     unsigned baseline,
                                     unsigned candidate) const {
-    return computeRecurrenceCritical->test(candidate) &&
+    return computeRecurrenceCritical.test(candidate) &&
            isPureCompute(candidate) &&
            !crossesSplitBarrier(scheduled, baseline, candidate);
   }
@@ -1280,7 +1415,8 @@ struct RegionScheduleSession::Impl {
       const llvm::BitVector &scheduled, unsigned baseline,
       const llvm::BitVector &legalReadyCandidates) const {
     assertValidReadySelection(scheduled, baseline, legalReadyCandidates);
-    assert(computeRecurrenceCritical && "missing compute recurrence facts");
+    assert(computeRecurrenceCritical.size() == operations.size() &&
+           "missing compute recurrence facts");
   }
 
   SmallVector<unsigned, 8> getLocalComputeResourceCandidates(
@@ -2135,21 +2271,27 @@ struct RegionScheduleSession::Impl {
   mutable std::optional<ReadyScheduleState> cachedState;
   mutable llvm::BitVector cachedScheduled;
   llvm::BitVector noInstructions;
+  llvm::BitVector steadyCritical;
+  llvm::BitVector computeRecurrenceCritical;
+  mutable std::optional<SteadyStallTarget> steadyStallTarget;
   mutable ReadyScheduleWorkStats work;
   ArrayRef<Operation *> operations;
   ArrayRef<SmallVector<unsigned, 4>> predecessors;
   ArrayRef<SmallVector<unsigned, 4>> successors;
+  ArrayRef<SmallVector<unsigned, 4>> ssaPredecessors;
   ArrayRef<waveamdmachine::MemoryCounterKind> memoryKinds;
   ArrayRef<SmallVector<waveamdmachine::MemoryCounterKind, 4>> fillerMemoryKinds;
   ArrayRef<unsigned> memoryNodes;
   const llvm::DenseMap<Operation *, unsigned> *nodeIndices = nullptr;
-  const llvm::BitVector *computeRecurrenceCritical = nullptr;
   const waveamdmachine::ArchData *arch = nullptr;
   waveamdmachine::ReadyRegisterPressureCeiling pressureCeiling;
   unsigned wavefrontSize = 64;
   mutable unsigned recurrenceCursor = 0;
   bool dmaIssueTiming = false;
   mutable bool recurrenceEvaluated = false;
+  bool prioritizeLongLatencyVmem = true;
+  bool prioritizeComputeResources = true;
+  bool prioritizeLatency = true;
 };
 
 FailureOr<WaveAMDMachineScheduleModel>
@@ -2229,17 +2371,17 @@ static void assertRegionScheduleFactSizes(
     ArrayRef<Operation *> operations,
     ArrayRef<SmallVector<unsigned, 4>> predecessors,
     ArrayRef<SmallVector<unsigned, 4>> successors,
+    ArrayRef<SmallVector<unsigned, 4>> ssaPredecessors,
     const llvm::BitVector &noInstructions,
     ArrayRef<waveamdmachine::MemoryCounterKind> memoryKinds,
     ArrayRef<SmallVector<waveamdmachine::MemoryCounterKind, 4>>
-        fillerMemoryKinds,
-    const llvm::BitVector &computeRecurrenceCritical) {
+        fillerMemoryKinds) {
   assert(predecessors.size() == operations.size() &&
          successors.size() == operations.size() &&
+         ssaPredecessors.size() == operations.size() &&
          noInstructions.size() == operations.size() &&
          memoryKinds.size() == operations.size() &&
          fillerMemoryKinds.size() == operations.size() &&
-         computeRecurrenceCritical.size() == operations.size() &&
          "region schedule facts have different sizes");
 }
 
@@ -2265,9 +2407,9 @@ RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
     const RegionScheduleGraphFacts &facts, llvm::BitVector noInstructions,
     const waveamdmachine::EventSimConfig &config) const {
   assertRegionScheduleFactSizes(facts.operations, facts.predecessors,
-                                facts.successors, noInstructions,
-                                facts.memoryKinds, facts.fillerMemoryKinds,
-                                facts.computeRecurrenceCritical);
+                                facts.successors, facts.ssaPredecessors,
+                                noInstructions, facts.memoryKinds,
+                                facts.fillerMemoryKinds);
   assertRegionMemoryNodes(facts.operations, facts.memoryNodes);
   assert(config.wavefrontSize == impl->wavefrontSize &&
          "region schedule config uses another wavefront size");
@@ -2277,12 +2419,12 @@ RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
   region->operations = facts.operations;
   region->predecessors = facts.predecessors;
   region->successors = facts.successors;
+  region->ssaPredecessors = facts.ssaPredecessors;
   region->noInstructions = std::move(noInstructions);
   region->memoryKinds = facts.memoryKinds;
   region->fillerMemoryKinds = facts.fillerMemoryKinds;
   region->memoryNodes = facts.memoryNodes;
   region->nodeIndices = &facts.nodeIndices;
-  region->computeRecurrenceCritical = &facts.computeRecurrenceCritical;
   region->config = config;
   region->arch = impl->arch;
   region->wavefrontSize = impl->wavefrontSize;
@@ -2294,6 +2436,7 @@ RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
           return isa<waveamdmachine::DmaIssueDelayOp>(op);
         });
   }
+  region->initializeReadyCriticalSets();
   region->initializeRecurrencePlan();
   region->initialize(impl->liveness);
   region->initializeComputeIslands();
@@ -2357,27 +2500,327 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
           ReadyScheduleSelectionKind::Baseline};
 }
 
-static ReadyScheduleDecision
-selectRankedFiller(const RegionScheduleSession &session,
-                   const llvm::BitVector &scheduled, unsigned baseline,
-                   unsigned candidate, ReadyScheduleSelectionKind kind,
-                   const waveamdmachine::InstructionScheduleModel &policy) {
+static bool stallsReadyIssue(const ReadyScheduleIssueFacts &issue) {
+  return issue.operandWaitCycles != 0 || issue.memoryWaitCycles != 0 ||
+         issue.functionalUnitWaitCycles != 0 ||
+         issue.coexecWindowWaitCycles != 0 || issue.issueWaitCycles != 0 ||
+         issue.cuIssueWaitCycles != 0 || issue.cmaIssueWaitCycles != 0 ||
+         issue.hazardWaitInstructions != 0;
+}
+
+static bool stallsReadyPriority(const ReadyScheduleDynamicIssueFacts &issue) {
+  return issue.priorityStall || issue.issue.issueWaitCycles != 0 ||
+         issue.issue.cuIssueWaitCycles != 0 ||
+         issue.issue.cmaIssueWaitCycles != 0;
+}
+
+static bool
+isReadySteadyProducerIssue(const ReadyScheduleDynamicIssueFacts &local,
+                           const ReadyScheduleDynamicIssueFacts &steady) {
+  return local.realInstruction && !stallsReadyIssue(local.issue) &&
+         steady.realInstruction && !stallsReadyIssue(steady.issue);
+}
+
+static bool
+isReadySteadyFillerIssue(const ReadyScheduleDynamicIssueFacts &local,
+                         const ReadyScheduleDynamicIssueFacts &steady) {
+  return isReadySteadyProducerIssue(local, steady) &&
+         local.resource.releaseSlots == 1 && steady.resource.releaseSlots == 1;
+}
+
+struct RegionScheduleSession::ReadySelectionContext {
+  ReadySelectionContext(const llvm::BitVector &scheduled, unsigned baseline,
+                        const llvm::BitVector &legalReadyCandidates,
+                        bool hasSteadyState,
+                        const waveamdmachine::InstructionScheduleModel &policy,
+                        ReadyScheduleDynamicIssueProvider issueProvider,
+                        ReadyScheduleResourceFactsProvider resourceProvider,
+                        ReadyScheduleProjectionProvider projectionProvider)
+      : issueProvider(issueProvider), resourceProvider(resourceProvider),
+        projectionProvider(projectionProvider), scheduled(scheduled),
+        legalReadyCandidates(legalReadyCandidates), policy(policy),
+        baseline(baseline), hasSteadyState(hasSteadyState) {}
+
+  ReadyScheduleDynamicIssueProvider issueProvider;
+  ReadyScheduleResourceFactsProvider resourceProvider;
+  ReadyScheduleProjectionProvider projectionProvider;
+  const llvm::BitVector &scheduled;
+  const llvm::BitVector &legalReadyCandidates;
+  const waveamdmachine::InstructionScheduleModel &policy;
+  unsigned baseline = 0;
+  bool hasSteadyState = false;
+};
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadyOverride(
+    const ReadySelectionContext &context) const {
+  llvm::BitVector candidates(impl->operations.size());
+  for (int ready = context.legalReadyCandidates.find_first(); ready >= 0;
+       ready = context.legalReadyCandidates.find_next(ready)) {
+    unsigned candidate = ready;
+    if (!impl->isReadyOverrideCandidate(context.scheduled, context.baseline,
+                                        candidate))
+      continue;
+    FailureOr<ReadyScheduleDynamicIssueFacts> issue =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Local);
+    if (failed(issue))
+      return failure();
+    if (!stallsReadyIssue(issue->issue))
+      candidates.set(candidate);
+  }
+  return selectNext(context.scheduled, context.baseline, candidates, {},
+                    context.policy);
+}
+
+FailureOr<std::optional<unsigned>>
+RegionScheduleSession::findReadySteadyProducer(
+    const ReadySelectionContext &context,
+    waveamdmachine::MemoryIssueResourceMask blockedResources) const {
+  for (int ready = context.legalReadyCandidates.find_first(); ready >= 0;
+       ready = context.legalReadyCandidates.find_next(ready)) {
+    unsigned candidate = ready;
+    if (!impl->isReadySteadyProducerCandidate(
+            context.scheduled, context.baseline, candidate, blockedResources))
+      continue;
+    FailureOr<ReadyScheduleDynamicIssueFacts> local =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Local);
+    FailureOr<ReadyScheduleDynamicIssueFacts> steady =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Steady);
+    if (failed(local) || failed(steady))
+      return failure();
+    if (isReadySteadyProducerIssue(*local, *steady))
+      return std::optional<unsigned>(candidate);
+  }
+  return std::optional<unsigned>{};
+}
+
+FailureOr<ReadyScheduleDecision>
+RegionScheduleSession::selectReadySteadyProducer(
+    const ReadySelectionContext &context,
+    const ReadyScheduleDynamicIssueFacts &baselineIssue) const {
+  if (!context.policy.shouldPrioritizeSteadyStateProducer() ||
+      !stallsReadyIssue(baselineIssue.issue))
+    return ReadyScheduleDecision{};
+  ReadyScheduleStallFacts stall =
+      classifyStall(context.baseline, baselineIssue.issue,
+                    /*blockMemoryResource=*/true);
+  FailureOr<std::optional<unsigned>> producer =
+      findReadySteadyProducer(context, stall.blockedMemoryResources);
+  if (failed(producer))
+    return failure();
+  if (!*producer)
+    return ReadyScheduleDecision{};
+
+  llvm::BitVector noDiscoveries(impl->operations.size());
+  ReadyScheduleProposal proposal{**producer, ReadyScheduleProposalKind::Direct,
+                                 /*group=*/0};
+  ReadyScheduleDecision decision =
+      selectNext(context.scheduled, context.baseline, noDiscoveries, proposal,
+                 context.policy);
+  if (decision.candidate)
+    decision.kind = ReadyScheduleSelectionKind::SteadyStateProducer;
+  return decision;
+}
+
+FailureOr<SmallVector<ReadyScheduleProposal, 8>>
+RegionScheduleSession::buildReadySteadyFillerProposals(
+    const ReadySelectionContext &context) const {
+  SmallVector<ReadyScheduleProposal, 8> proposals;
+  for (unsigned candidate :
+       llvm::seq(context.baseline + 1,
+                 static_cast<unsigned>(impl->operations.size()))) {
+    if (!impl->isReadySteadyFillerCandidate(context.scheduled, context.baseline,
+                                            candidate,
+                                            context.legalReadyCandidates))
+      continue;
+    FailureOr<ReadyScheduleDynamicIssueFacts> local =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Local);
+    FailureOr<ReadyScheduleDynamicIssueFacts> steady =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Steady);
+    if (failed(local) || failed(steady))
+      return failure();
+    if (isReadySteadyFillerIssue(*local, *steady))
+      proposals.push_back({candidate, ReadyScheduleProposalKind::RankedFiller,
+                           /*group=*/0});
+  }
+  return proposals;
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadySteadyFiller(
+    const ReadySelectionContext &context,
+    const ReadyScheduleDynamicIssueFacts &baselineIssue) const {
+  bool baselineStalls = stallsReadyIssue(baselineIssue.issue);
+  bool fillable = false;
+  if (baselineStalls)
+    fillable = classifyStall(context.baseline, baselineIssue.issue,
+                             /*blockMemoryResource=*/false)
+                   .kind != ReadyScheduleStallKind::None;
+  impl->updateSteadyStallTarget(context.baseline, baselineStalls, fillable);
+  if (!impl->steadyStallTarget ||
+      impl->steadyStallTarget->fills >= kSteadyStateFillsPerTarget)
+    return ReadyScheduleDecision{};
+
+  FailureOr<SmallVector<ReadyScheduleProposal, 8>> proposals =
+      buildReadySteadyFillerProposals(context);
+  if (failed(proposals))
+    return failure();
+  llvm::BitVector noDiscoveries(impl->operations.size());
+  ReadyScheduleDecision decision =
+      selectNext(context.scheduled, context.baseline, noDiscoveries, *proposals,
+                 context.policy);
+  if (!decision.candidate) {
+    impl->steadyStallTarget.reset();
+    return decision;
+  }
+
+  ++impl->steadyStallTarget->fills;
+  decision.kind = ReadyScheduleSelectionKind::SteadyStateFiller;
+  decision.filledStall = baselineStalls;
+  bool barrierMemoryStall = baselineStalls;
+  barrierMemoryStall &= baselineIssue.issue.memoryWaitCycles != 0;
+  barrierMemoryStall &= impl->isBarrier(context.baseline);
+  decision.filledBarrierMemoryStall = barrierMemoryStall;
+  return decision;
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadySteady(
+    const ReadySelectionContext &context) const {
+  FailureOr<ReadyScheduleDynamicIssueFacts> baselineIssue =
+      context.issueProvider(context.baseline, ReadyScheduleTimeline::Steady);
+  if (failed(baselineIssue))
+    return failure();
+  FailureOr<ReadyScheduleDecision> producer =
+      selectReadySteadyProducer(context, *baselineIssue);
+  if (failed(producer))
+    return failure();
+  if (producer->candidate)
+    return producer;
+  return selectReadySteadyFiller(context, *baselineIssue);
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadyMemory(
+    const ReadySelectionContext &context) const {
+  auto getIssue =
+      [&](unsigned candidate) -> FailureOr<ReadyScheduleCandidateIssueFacts> {
+    FailureOr<ReadyScheduleDynamicIssueFacts> issue =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Local);
+    if (failed(issue))
+      return failure();
+    return ReadyScheduleCandidateIssueFacts{
+        issue->nextIssueCycle, issue->issues, issue->realInstruction,
+        stallsReadyIssue(issue->issue)};
+  };
+  return selectMemoryReady(context.scheduled, context.baseline,
+                           context.legalReadyCandidates,
+                           impl->prioritizeLongLatencyVmem, context.policy,
+                           getIssue, context.projectionProvider);
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadyCompute(
+    const ReadySelectionContext &context) const {
+  return selectComputeResource(context.scheduled, context.baseline,
+                               context.legalReadyCandidates, context.policy,
+                               context.resourceProvider);
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadyLatency(
+    const ReadySelectionContext &context) const {
+  if (!supportsLatencyPriority(impl->prioritizeLatency))
+    return ReadyScheduleDecision{};
+  FailureOr<ReadyScheduleDynamicIssueFacts> baselineIssue =
+      context.issueProvider(context.baseline, ReadyScheduleTimeline::Local);
+  if (failed(baselineIssue))
+    return failure();
+  llvm::BitVector candidates = getLatencyCandidates(
+      context.scheduled, context.baseline, context.legalReadyCandidates,
+      stallsReadyPriority(*baselineIssue), context.policy);
+  if (!candidates.any())
+    return ReadyScheduleDecision{};
+
+  SmallVector<ReadyScheduleProposal, 8> proposals;
+  for (int candidate = candidates.find_first(); candidate >= 0;
+       candidate = candidates.find_next(candidate)) {
+    FailureOr<ReadyScheduleDynamicIssueFacts> issue =
+        context.issueProvider(candidate, ReadyScheduleTimeline::Local);
+    if (failed(issue))
+      return failure();
+    ReadyScheduleProposal proposal{static_cast<unsigned>(candidate),
+                                   ReadyScheduleProposalKind::Latency,
+                                   /*group=*/0};
+    proposal.latency = {stallsReadyPriority(*baselineIssue),
+                        stallsReadyPriority(*issue)};
+    proposals.push_back(proposal);
+  }
+  llvm::BitVector noDiscoveries(impl->operations.size());
+  ReadyScheduleDecision decision =
+      selectNext(context.scheduled, context.baseline, noDiscoveries, proposals,
+                 context.policy);
+  if (decision.candidate)
+    decision.resumeBaseline = true;
+  return decision;
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReadyNormal(
+    const ReadySelectionContext &context) const {
+  if (context.hasSteadyState) {
+    FailureOr<ReadyScheduleDecision> steady = selectReadySteady(context);
+    if (failed(steady))
+      return failure();
+    if (steady->candidate)
+      return steady;
+  }
+  FailureOr<ReadyScheduleDecision> memory = selectReadyMemory(context);
+  if (failed(memory))
+    return failure();
+  if (memory->candidate)
+    return memory;
+  FailureOr<ReadyScheduleDecision> compute = selectReadyCompute(context);
+  if (failed(compute))
+    return failure();
+  if (compute->candidate)
+    return compute;
+  return selectReadyLatency(context);
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectReady(
+    ReadySchedulePhase phase, const llvm::BitVector &scheduled,
+    unsigned baseline, const llvm::BitVector &legalReadyCandidates,
+    bool hasSteadyState, const waveamdmachine::InstructionScheduleModel &policy,
+    ReadyScheduleDynamicIssueProvider issueProvider,
+    ReadyScheduleResourceFactsProvider resourceProvider,
+    ReadyScheduleProjectionProvider projectionProvider) const {
+  impl->assertValidReadySelection(scheduled, baseline, legalReadyCandidates);
+  ReadySelectionContext context(scheduled, baseline, legalReadyCandidates,
+                                hasSteadyState, policy, issueProvider,
+                                resourceProvider, projectionProvider);
+  FailureOr<ReadyScheduleDecision> override = selectReadyOverride(context);
+  if (failed(override))
+    return failure();
+  if (override->candidate || phase == ReadySchedulePhase::ResumeBaseline)
+    return override;
+  return selectReadyNormal(context);
+}
+
+ReadyScheduleDecision RegionScheduleSession::selectRankedFiller(
+    const llvm::BitVector &scheduled, unsigned baseline, unsigned candidate,
+    ReadyScheduleSelectionKind kind,
+    const waveamdmachine::InstructionScheduleModel &policy) const {
   llvm::BitVector noDiscoveries(scheduled.size());
   ReadyScheduleProposal proposal{candidate,
                                  ReadyScheduleProposalKind::RankedFiller,
                                  /*group=*/0};
   ReadyScheduleDecision decision =
-      session.selectNext(scheduled, baseline, noDiscoveries, proposal, policy);
+      selectNext(scheduled, baseline, noDiscoveries, proposal, policy);
   if (decision.candidate)
     decision.kind = kind;
   return decision;
 }
 
-static FailureOr<ReadyScheduleDecision> selectComputeResourceGroup(
-    const RegionScheduleSession &session, const llvm::BitVector &scheduled,
-    unsigned baseline, ArrayRef<unsigned> candidates,
+FailureOr<ReadyScheduleDecision>
+RegionScheduleSession::selectComputeResourceGroup(
+    const llvm::BitVector &scheduled, unsigned baseline,
+    ArrayRef<unsigned> candidates,
     const waveamdmachine::InstructionScheduleModel &policy,
-    ReadyScheduleResourceFactsProvider getResourceFacts) {
+    ReadyScheduleResourceFactsProvider getResourceFacts) const {
   SmallVector<ReadyScheduleProposal, 8> proposals;
   for (unsigned candidate : candidates) {
     FailureOr<ReadyScheduleResourceFacts> facts = getResourceFacts(candidate);
@@ -2386,11 +2829,11 @@ static FailureOr<ReadyScheduleDecision> selectComputeResourceGroup(
     ReadyScheduleProposal proposal{
         candidate, ReadyScheduleProposalKind::ComputeResource, /*group=*/0};
     proposal.resource = *facts;
+    proposal.resource.prioritize = impl->prioritizeComputeResources;
     proposals.push_back(proposal);
   }
   llvm::BitVector noDiscoveries(scheduled.size());
-  return session.selectNext(scheduled, baseline, noDiscoveries, proposals,
-                            policy);
+  return selectNext(scheduled, baseline, noDiscoveries, proposals, policy);
 }
 
 FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectComputeResource(
@@ -2407,7 +2850,7 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectComputeResource(
                                               legalReadyCandidates);
   if (!localCandidates.empty()) {
     FailureOr<ReadyScheduleDecision> local = selectComputeResourceGroup(
-        *this, scheduled, baseline, localCandidates, policy, getResourceFacts);
+        scheduled, baseline, localCandidates, policy, getResourceFacts);
     if (failed(local) || local->candidate || local->suppressFallback)
       return local;
   }
@@ -2416,9 +2859,8 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectComputeResource(
                                                    legalReadyCandidates);
   if (recurrenceCandidates.empty())
     return ReadyScheduleDecision{};
-  return selectComputeResourceGroup(*this, scheduled, baseline,
-                                    recurrenceCandidates, policy,
-                                    getResourceFacts);
+  return selectComputeResourceGroup(scheduled, baseline, recurrenceCandidates,
+                                    policy, getResourceFacts);
 }
 
 bool RegionScheduleSession::supportsLatencyPriority(bool enabled) const {
@@ -2482,7 +2924,7 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectMemoryReady(
     return failure();
   if (*token) {
     ReadyScheduleDecision decision = selectRankedFiller(
-        *this, scheduled, baseline, **token,
+        scheduled, baseline, **token,
         ReadyScheduleSelectionKind::MemoryTokenConsumer, policy);
     if (decision.candidate)
       return decision;
@@ -2492,7 +2934,7 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectMemoryReady(
       impl->findBarrierPairFiller(legalReadyCandidates, scheduled, baseline);
   if (barrierFiller != impl->operations.size()) {
     ReadyScheduleDecision decision = selectRankedFiller(
-        *this, scheduled, baseline, barrierFiller,
+        scheduled, baseline, barrierFiller,
         ReadyScheduleSelectionKind::BarrierPairFiller, policy);
     if (decision.candidate)
       return decision;
@@ -2513,8 +2955,8 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectMemoryReady(
     return failure();
   if (!*kind)
     return ReadyScheduleDecision{};
-  return selectRankedFiller(*this, scheduled, baseline, (**prefetch).head,
-                            **kind, policy);
+  return selectRankedFiller(scheduled, baseline, (**prefetch).head, **kind,
+                            policy);
 }
 
 FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectStallFiller(
@@ -2530,7 +2972,7 @@ FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectStallFiller(
     return failure();
   if (*dma) {
     ReadyScheduleDecision decision = selectRankedFiller(
-        *this, scheduled, baseline, **dma,
+        scheduled, baseline, **dma,
         ReadyScheduleSelectionKind::DmaPostBarrierFiller, policy);
     if (decision.candidate)
       return decision;
