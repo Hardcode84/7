@@ -1351,6 +1351,43 @@ func.func @compute_resource_overlap(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+func.func @compute_resource_model_preserves_equal_rank(
+    %s0: !waveamdmachine.reg<sgpr, 1>,
+    %s1: !waveamdmachine.reg<sgpr, 1>,
+    %a: !waveamdmachine.reg<vgpr, 4>,
+    %b: !waveamdmachine.reg<vgpr, 4>,
+    %acc0: !waveamdmachine.reg<vgpr, 4>,
+    %acc1: !waveamdmachine.reg<vgpr, 4>) {
+  %sum, %cc = waveamdmachine.s_add_i32 %s0, %s1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %r0 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc0
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  %r1 = waveamdmachine.mfma_f32_16x16x32_f16 %a, %b, %acc1
+      : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
+         !waveamdmachine.reg<vgpr, 4>) -> !waveamdmachine.reg<vgpr, 4>
+  return
+}
+}
+
+// IR-LABEL: func.func @compute_resource_model_preserves_equal_rank(
+// IR-SAME: [[S0:%[^ ,]+]]: !waveamdmachine.reg<sgpr, 1>,
+// IR-SAME: [[S1:%[^ ,]+]]: !waveamdmachine.reg<sgpr, 1>,
+// IR-SAME: [[A:%[^ ,]+]]: !waveamdmachine.reg<vgpr, 4>,
+// IR-SAME: [[B:%[^ ,]+]]: !waveamdmachine.reg<vgpr, 4>,
+// IR-SAME: [[ACC0:%[^ ,]+]]: !waveamdmachine.reg<vgpr, 4>,
+// IR-SAME: [[ACC1:%[^ ,]+]]: !waveamdmachine.reg<vgpr, 4>)
+// IR: waveamdmachine.mfma_f32_16x16x32_f16 [[A]], [[B]], [[ACC0]]
+// IR-NEXT: waveamdmachine.s_add_i32
+// IR-NEXT: waveamdmachine.mfma_f32_16x16x32_f16 [[A]], [[B]], [[ACC1]]
+// DIAG: waveamd-machine-schedule region func=compute_resource_model_preserves_equal_rank
+// DIAG-SAME: action=apply reason=compute_resource
+// DIAG-SAME: resource_priority_moves=1
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @compute_resource_pressure_rejects_priority(
     %x: !waveamdmachine.reg<vgpr, 1>,
     %y: !waveamdmachine.reg<vgpr, 1>,

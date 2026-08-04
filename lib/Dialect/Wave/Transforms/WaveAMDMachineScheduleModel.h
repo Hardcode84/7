@@ -10,6 +10,7 @@
 #ifndef MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULEMODEL_H
 #define MLIR_DIALECT_WAVE_TRANSFORMS_WAVEAMDMACHINESCHEDULEMODEL_H
 
+#include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/BitVector.h"
@@ -27,8 +28,6 @@ class FuncOp;
 namespace waveamdmachine {
 struct ArchData;
 struct EventSimConfig;
-struct InstructionExecutionConfig;
-class InstructionScheduleModel;
 } // namespace waveamdmachine
 
 namespace wave {
@@ -55,12 +54,18 @@ enum class ReadyScheduleProposalKind : uint8_t {
   Direct,
   // A group of filler candidates. The model owns admission and ranking.
   RankedFiller,
-  // Resource-stall fillers additionally require the model-owned decision to
-  // open a sibling-wave overlap window.
-  ResourceStallFiller,
-  // A group ordered by the scheduler's generic resource preview. The model
-  // owns admission and selects the final admissible candidate.
-  ResourcePriority,
+  // A ready compute candidate described by raw execution and resource facts.
+  // The model owns baseline eligibility, candidate compatibility, stall versus
+  // priority classification, admission, and ranking.
+  ComputeResource,
+};
+
+struct ReadyScheduleResourceFacts {
+  waveamdmachine::InstructionScheduleResourcePreview baseline;
+  waveamdmachine::InstructionScheduleResourcePreview candidate;
+  bool baselinePriorityStall = false;
+  bool candidatePriorityStall = false;
+  bool prioritize = false;
 };
 
 struct ReadyScheduleProposal {
@@ -70,14 +75,16 @@ struct ReadyScheduleProposal {
   // tournament: if its final winner is rejected, an earlier runner-up is not
   // revived.
   unsigned group = 0;
-  // Generic scheduler score. ResourcePriority selects the highest-ranked
-  // admitted candidate; pressure admission and final-prefix validation remain
-  // model-owned. Other proposal kinds ignore this field.
-  uint64_t rank = 0;
-  // Generic baseline resource preview. ResourceStallFiller proposals in one
-  // group carry identical values; other proposal kinds ignore them.
-  int64_t waitSlots = 0;
-  unsigned releaseSlots = 0;
+  // Only ComputeResource consumes these raw facts.
+  ReadyScheduleResourceFacts resource;
+};
+
+enum class ReadyScheduleSelectionKind : uint8_t {
+  Baseline,
+  Pressure,
+  Proposal,
+  ResourcePriority,
+  ResourceStallFiller,
 };
 
 struct ReadyScheduleDecision {
@@ -90,6 +97,9 @@ struct ReadyScheduleDecision {
   // explicit later proposal group, but must not manufacture an implicit
   // runner-up or recurrence fallback.
   bool suppressFallback = false;
+  // Model-owned selection provenance. The scheduler may use this for
+  // bookkeeping, but not to reconsider the choice.
+  ReadyScheduleSelectionKind kind = ReadyScheduleSelectionKind::Baseline;
 };
 
 class ReadyRegionScheduleModel {

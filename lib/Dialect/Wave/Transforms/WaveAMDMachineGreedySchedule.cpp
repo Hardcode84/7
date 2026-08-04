@@ -2255,11 +2255,6 @@ static BitVector buildNoInsts(const GreedyRegion &region,
   return noInsts;
 }
 
-static bool isReadyComputeResourceCandidate(const IssuePreview &preview) {
-  return !stallsPriority(preview) && preview.resource.releaseSlots != 0 &&
-         preview.resource.waitSlots == 0;
-}
-
 static FailureOr<bool>
 canUseGenericStallFiller(unsigned candidate, unsigned next,
                          const GreedyRegion &region, const GraphTables &graph,
@@ -2383,41 +2378,25 @@ struct ComputeResourceSelection {
   SmallVector<ReadyScheduleProposal, 8> proposals;
 };
 
-static FailureOr<bool> considerComputeResourceCandidate(
+static LogicalResult describeComputeResourceCandidate(
     unsigned index, const GreedyRegion &region, const IssueState &state,
     const IssuePreview &nextPreview, bool prioritizeComputeResources,
     unsigned group, ComputeResourceSelection &selection) {
   waveamdmachine::InstructionScheduleResourcePreview resource =
       state.resources.preview(state.getStaticInfo(region.ops[index]).resource);
-  waveamdmachine::ReadyResourceCandidateKind kind =
-      state.model.getScheduleModel().classifyReadyResourceCandidate(
-          nextPreview.resource.functionalUnit, nextPreview.resource.waitSlots,
-          nextPreview.resource.releaseSlots, resource.functionalUnit,
-          resource.waitSlots, resource.releaseSlots,
-          /*selectedReleaseSlots=*/0);
-  if (kind == waveamdmachine::ReadyResourceCandidateKind::None)
-    return false;
   FailureOr<IssuePreview> preview =
       previewIssue(state, region.ops[index], resource);
   if (failed(preview))
     return failure();
-  if (!isReadyComputeResourceCandidate(*preview))
-    return false;
-
-  if (kind == waveamdmachine::ReadyResourceCandidateKind::StallFiller) {
-    ReadyScheduleProposalKind proposalKind =
-        prioritizeComputeResources
-            ? ReadyScheduleProposalKind::RankedFiller
-            : ReadyScheduleProposalKind::ResourceStallFiller;
-    selection.proposals.push_back({index, proposalKind, group, /*rank=*/0,
-                                   nextPreview.resource.waitSlots,
-                                   nextPreview.resource.releaseSlots});
-    return true;
-  }
-  selection.proposals.push_back({index,
-                                 ReadyScheduleProposalKind::ResourcePriority,
-                                 group, preview->resource.releaseSlots});
-  return true;
+  // Keep this descriptor policy-free. The ready model classifies, admits, and
+  // ranks the raw baseline and candidate facts.
+  ReadyScheduleProposal proposal{
+      index, ReadyScheduleProposalKind::ComputeResource, group};
+  proposal.resource = {nextPreview.resource, preview->resource,
+                       stallsComputePriority(nextPreview),
+                       stallsPriority(*preview), prioritizeComputeResources};
+  selection.proposals.push_back(proposal);
+  return success();
 }
 
 static LogicalResult collectComputeResourceCandidates(
@@ -2429,10 +2408,9 @@ static LogicalResult collectComputeResourceCandidates(
        readyIndex >= 0 && static_cast<unsigned>(readyIndex) < islandEnd;
        readyIndex = ready.find_next(readyIndex)) {
     unsigned index = readyIndex;
-    FailureOr<bool> considered = considerComputeResourceCandidate(
-        index, region, state, nextPreview, prioritizeComputeResources, group,
-        selection);
-    if (failed(considered))
+    if (failed(describeComputeResourceCandidate(
+            index, region, state, nextPreview, prioritizeComputeResources,
+            group, selection)))
       return failure();
   }
   return success();
@@ -2452,10 +2430,9 @@ static LogicalResult collectComputeRecurrenceResourceCandidates(
         !isPureComputeIslandOp(candidate, state.getStaticInfo(candidate)) ||
         crossesSplitBarrier(region, scheduled, next, index))
       continue;
-    FailureOr<bool> considered = considerComputeResourceCandidate(
-        index, region, state, nextPreview, prioritizeComputeResources, group,
-        selection);
-    if (failed(considered))
+    if (failed(describeComputeResourceCandidate(
+            index, region, state, nextPreview, prioritizeComputeResources,
+            group, selection)))
       return failure();
   }
   return success();
@@ -2467,21 +2444,13 @@ struct ReadyComputeResourceContext {
 
 static FailureOr<std::optional<ReadyComputeResourceContext>>
 buildReadyComputeResourceContext(unsigned next, const GreedyRegion &region,
-                                 const IssueState &state,
-                                 const BitVector &scheduled,
-                                 const ComputeIslandInfo &computeIslands,
-                                 bool prioritizeComputeResources) {
+                                 const IssueState &state) {
   Operation *nextOp = region.ops[next];
   if (!isPureComputeIslandOp(nextOp, state.getStaticInfo(nextOp)))
     return std::optional<ReadyComputeResourceContext>{};
   FailureOr<IssuePreview> nextPreview = previewIssue(state, nextOp);
   if (failed(nextPreview))
     return failure();
-  if (stallsComputePriority(*nextPreview) ||
-      nextPreview->resource.releaseSlots == 0)
-    return std::optional<ReadyComputeResourceContext>{};
-  if (nextPreview->resource.waitSlots == 0 && !prioritizeComputeResources)
-    return std::optional<ReadyComputeResourceContext>{};
 
   ReadyComputeResourceContext context{*nextPreview};
   return std::optional<ReadyComputeResourceContext>(std::move(context));
@@ -2491,12 +2460,9 @@ static FailureOr<unsigned> findReadyComputeResourceAlternative(
     const BitVector &ready, unsigned next, const GreedyRegion &region,
     const GraphTables &graph, const IssueState &state,
     const BitVector &scheduled, const ComputeIslandInfo &computeIslands,
-    bool prioritizeComputeResources, bool &fillsResourceStall) {
-  fillsResourceStall = false;
+    bool prioritizeComputeResources, GreedyStats &stats) {
   FailureOr<std::optional<ReadyComputeResourceContext>> context =
-      buildReadyComputeResourceContext(next, region, state, scheduled,
-                                       computeIslands,
-                                       prioritizeComputeResources);
+      buildReadyComputeResourceContext(next, region, state);
   if (failed(context))
     return failure();
   if (!*context)
@@ -2513,7 +2479,14 @@ static FailureOr<unsigned> findReadyComputeResourceAlternative(
       scheduled, next, noDiscoveries, local.proposals,
       state.model.getScheduleModel());
   if (localDecision.candidate) {
-    fillsResourceStall = (*context)->nextPreview.resource.waitSlots != 0;
+    if (localDecision.kind == ReadyScheduleSelectionKind::ResourceStallFiller)
+      ++stats.resourceStallFills;
+    else {
+      assert(localDecision.kind ==
+                 ReadyScheduleSelectionKind::ResourcePriority &&
+             "compute resource selection has unexpected provenance");
+      ++stats.resourcePriorityMoves;
+    }
     return *localDecision.candidate;
   }
   if (localDecision.suppressFallback)
@@ -2527,8 +2500,17 @@ static FailureOr<unsigned> findReadyComputeResourceAlternative(
   ReadyScheduleDecision recurrenceDecision = computeIslands.ready.selectNext(
       scheduled, next, noDiscoveries, recurrence.proposals,
       state.model.getScheduleModel());
-  if (recurrenceDecision.candidate)
-    fillsResourceStall = (*context)->nextPreview.resource.waitSlots != 0;
+  if (recurrenceDecision.candidate) {
+    if (recurrenceDecision.kind ==
+        ReadyScheduleSelectionKind::ResourceStallFiller)
+      ++stats.resourceStallFills;
+    else {
+      assert(recurrenceDecision.kind ==
+                 ReadyScheduleSelectionKind::ResourcePriority &&
+             "compute resource selection has unexpected provenance");
+      ++stats.resourcePriorityMoves;
+    }
+  }
   return recurrenceDecision.candidate.value_or(region.ops.size());
 }
 
@@ -2537,18 +2519,13 @@ static FailureOr<std::optional<unsigned>> findReadyComputeAlternative(
     const GraphTables &graph, const IssueState &state,
     const BitVector &scheduled, const ComputeIslandInfo &computeIslands,
     GreedyStats &stats, bool prioritizeComputeResources) {
-  bool fillsResourceStall = false;
   FailureOr<unsigned> compute = findReadyComputeResourceAlternative(
       ready, next, region, graph, state, scheduled, computeIslands,
-      prioritizeComputeResources, fillsResourceStall);
+      prioritizeComputeResources, stats);
   if (failed(compute))
     return failure();
   if (*compute == region.ops.size())
     return std::optional<unsigned>{};
-  if (fillsResourceStall)
-    ++stats.resourceStallFills;
-  else
-    ++stats.resourcePriorityMoves;
   return std::optional<unsigned>(*compute);
 }
 

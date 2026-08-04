@@ -631,6 +631,14 @@ ReadyRegionScheduleModel &
 ReadyRegionScheduleModel::operator=(ReadyRegionScheduleModel &&) = default;
 ReadyRegionScheduleModel::~ReadyRegionScheduleModel() = default;
 
+static bool sameResourcePreview(
+    const waveamdmachine::InstructionScheduleResourcePreview &lhs,
+    const waveamdmachine::InstructionScheduleResourcePreview &rhs) {
+  return lhs.waitSlots == rhs.waitSlots &&
+         lhs.releaseSlots == rhs.releaseSlots &&
+         lhs.functionalUnit == rhs.functionalUnit;
+}
+
 ReadyScheduleDecision ReadyRegionScheduleModel::selectNext(
     const llvm::BitVector &scheduled, unsigned baseline,
     const llvm::BitVector &legalReadyCandidates,
@@ -698,7 +706,7 @@ ReadyScheduleDecision ReadyRegionScheduleModel::selectNext(
     if (hasSafeFullPrefix(*pressureWinner)) {
       ++impl->work.pressureSelections;
       return {*pressureWinner, /*selectedProposal=*/false,
-              /*suppressFallback=*/false};
+              /*suppressFallback=*/false, ReadyScheduleSelectionKind::Pressure};
     }
     ++impl->work.pressureRejections;
   }
@@ -718,28 +726,55 @@ ReadyScheduleDecision ReadyRegionScheduleModel::selectNext(
         break;
       }
     assert(groupInfo && "missing ready proposal group");
-    if (groupInfo->kind == ReadyScheduleProposalKind::ResourceStallFiller &&
-        !policy.shouldSelectResourceStallFiller(
-            groupInfo->waitSlots, groupInfo->releaseSlots, state.pressure,
-            baselineMetrics))
-      continue;
+    if (groupInfo->kind == ReadyScheduleProposalKind::ComputeResource) {
+      const ReadyScheduleResourceFacts &resource = groupInfo->resource;
+      if (resource.baselinePriorityStall ||
+          resource.baseline.releaseSlots == 0 ||
+          (resource.baseline.waitSlots == 0 && !resource.prioritize))
+        continue;
+      if (resource.baseline.waitSlots != 0 && !resource.prioritize &&
+          !policy.shouldSelectResourceStallFiller(
+              resource.baseline.waitSlots, resource.baseline.releaseSlots,
+              state.pressure, baselineMetrics))
+        continue;
+    }
 
     std::optional<unsigned> winner;
     std::optional<waveamdmachine::ReadyCandidateMetrics> winnerMetrics;
     uint64_t winnerRank = 0;
+    waveamdmachine::ReadyResourceCandidateKind winnerResourceKind =
+        waveamdmachine::ReadyResourceCandidateKind::None;
     for (const ReadyScheduleProposal &proposal : proposals) {
       if (proposal.group != group)
         continue;
       assert(groupInfo->kind == proposal.kind &&
              "ready proposal group mixes selection policies");
-      assert((proposal.kind != ReadyScheduleProposalKind::ResourceStallFiller ||
-              (proposal.waitSlots == groupInfo->waitSlots &&
-               proposal.releaseSlots == groupInfo->releaseSlots)) &&
-             "resource filler group mixes baseline previews");
+      assert(
+          (proposal.kind != ReadyScheduleProposalKind::ComputeResource ||
+           (sameResourcePreview(proposal.resource.baseline,
+                                groupInfo->resource.baseline) &&
+            proposal.resource.baselinePriorityStall ==
+                groupInfo->resource.baselinePriorityStall &&
+            proposal.resource.prioritize == groupInfo->resource.prioritize)) &&
+          "resource group mixes baseline facts");
       unsigned candidate = proposal.candidate;
       if (candidate >= impl->operations.size() || candidate == baseline ||
           scheduled.test(candidate))
         continue;
+
+      waveamdmachine::ReadyResourceCandidateKind resourceKind =
+          waveamdmachine::ReadyResourceCandidateKind::None;
+      if (proposal.kind == ReadyScheduleProposalKind::ComputeResource) {
+        const ReadyScheduleResourceFacts &resource = proposal.resource;
+        resourceKind = policy.classifyReadyResourceCandidate(
+            resource.baseline.functionalUnit, resource.baseline.waitSlots,
+            resource.baseline.releaseSlots, resource.candidate.functionalUnit,
+            resource.candidate.waitSlots, resource.candidate.releaseSlots,
+            /*selectedReleaseSlots=*/0);
+        if (resourceKind == waveamdmachine::ReadyResourceCandidateKind::None ||
+            resource.candidatePriorityStall)
+          continue;
+      }
 
       waveamdmachine::ReadyCandidateMetrics candidateMetrics =
           impl->getCandidateMetrics(scheduled, candidate, state);
@@ -752,17 +787,7 @@ ReadyScheduleDecision ReadyRegionScheduleModel::selectNext(
         winner = candidate;
         winnerMetrics = candidateMetrics;
         break;
-      case ReadyScheduleProposalKind::ResourcePriority:
-        if ((winner && proposal.rank <= winnerRank) ||
-            !policy.canSelectReadyCandidate(state.pressure, order.first,
-                                            baselineMetrics))
-          continue;
-        winner = candidate;
-        winnerMetrics = candidateMetrics;
-        winnerRank = proposal.rank;
-        break;
       case ReadyScheduleProposalKind::RankedFiller:
-      case ReadyScheduleProposalKind::ResourceStallFiller:
         if (!policy.canSelectReadyFiller(state.pressure, candidateMetrics,
                                          order.first, baselineMetrics))
           continue;
@@ -773,14 +798,49 @@ ReadyScheduleDecision ReadyRegionScheduleModel::selectNext(
           winnerMetrics = candidateMetrics;
         }
         break;
+      case ReadyScheduleProposalKind::ComputeResource: {
+        const ReadyScheduleResourceFacts &resource = proposal.resource;
+        if (resourceKind ==
+            waveamdmachine::ReadyResourceCandidateKind::Priority) {
+          uint64_t rank = resource.candidate.releaseSlots;
+          if ((winner && rank <= winnerRank) ||
+              !policy.canSelectReadyCandidate(state.pressure, order.first,
+                                              baselineMetrics))
+            continue;
+          winner = candidate;
+          winnerMetrics = candidateMetrics;
+          winnerRank = rank;
+          winnerResourceKind = resourceKind;
+          continue;
+        }
+        if (!policy.canSelectReadyFiller(state.pressure, candidateMetrics,
+                                         order.first, baselineMetrics))
+          continue;
+        if (!winnerMetrics ||
+            policy.shouldPreferReadyFiller(state.pressure, candidateMetrics,
+                                           *winnerMetrics)) {
+          winner = candidate;
+          winnerMetrics = candidateMetrics;
+          winnerResourceKind = resourceKind;
+        }
+        break;
+      }
       }
     }
     if (!winner)
       continue;
     if (hasSafeFullPrefix(*winner)) {
       ++impl->work.proposalSelections;
+      ReadyScheduleSelectionKind selection =
+          ReadyScheduleSelectionKind::Proposal;
+      if (winnerResourceKind ==
+          waveamdmachine::ReadyResourceCandidateKind::StallFiller)
+        selection = ReadyScheduleSelectionKind::ResourceStallFiller;
+      else if (winnerResourceKind ==
+               waveamdmachine::ReadyResourceCandidateKind::Priority)
+        selection = ReadyScheduleSelectionKind::ResourcePriority;
       return {*winner, /*selectedProposal=*/true,
-              /*suppressFallback=*/false};
+              /*suppressFallback=*/false, selection};
     }
     // The selected final winner is rejected as a unit. Do not revisit an
     // earlier candidate from this group; only the next explicit fallback
