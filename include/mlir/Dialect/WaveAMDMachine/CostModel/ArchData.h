@@ -99,6 +99,9 @@ struct ArchData {
   // Consecutive full MFMAs allowed before opening that window.
   int mfmaValuCoexecProducerBurst;
 
+  // Packed-F32 arithmetic occupancy in MFMA-coissue issue slots.
+  int packedF32MfmaCoissueSlots;
+
   // AGPR allocation consumes VGPR-file capacity.
   bool agprCountsAgainstVGPRs;
 

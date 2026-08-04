@@ -24,6 +24,8 @@
 // RUN: wave-sim-report --func=two_dep_salu --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=MULTI
 // RUN: wave-sim-report --func=lds_dma_issue_spacing --arch=gfx950 --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=MULTIDMA
 // RUN: wave-sim-report --func=dma_delay_interleave --arch=gfx950 --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=DMAMULTI
+// RUN: wave-sim-report --func=packed_f32_multi_phase --arch=gfx950 --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=PACKEDMULTI
+// RUN: wave-sim-report --func=packed_cast_multi_phase --arch=gfx950 --waves-per-simd=2 --timeline %s | FileCheck %s --check-prefix=CASTMULTI
 // RUN: not wave-sim-report --func=trip_loop --waves-per-simd=1 %s 2>&1 | FileCheck %s --check-prefix=MULTIERR
 // RUN: not wave-sim-report --func=barrier_report --waves-per-simd=1 %s 2>&1 | FileCheck %s --check-prefix=MULTIBARRIER
 
@@ -250,6 +252,24 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 
+  func.func @packed_f32_multi_phase(
+      %a: !waveamdmachine.reg<vgpr, 2>,
+      %b: !waveamdmachine.reg<vgpr, 2>) {
+    %packed = waveamdmachine.v_pk_add_f32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    return
+  }
+
+  func.func @packed_cast_multi_phase(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>) {
+    %packed = waveamdmachine.v_cvt_pk_bf16_f32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
   func.func @barrier_report() {
     waveamdmachine.s_barrier : () -> ()
     return
@@ -390,6 +410,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // DMAMULTI-DAG: issue cycle=4 wave=1 simd=0 fu=SALU op=waveamdmachine.dma_issue_delay
 // DMAMULTI-DAG: issue cycle=24 wave=0 simd=0 fu=SALU op=waveamdmachine.s_add_i32
 // DMAMULTI-DAG: issue cycle=28 wave=1 simd=0 fu=SALU op=waveamdmachine.s_add_i32
+
+// PACKEDMULTI: waves_per_simd: 2
+// PACKEDMULTI-DAG: issue cycle=0 wave=0 simd=0 fu=VALU op=waveamdmachine.v_pk_add_f32
+// PACKEDMULTI-DAG: issue cycle=8 wave=1 simd=0 fu=VALU op=waveamdmachine.v_pk_add_f32
+
+// CASTMULTI: waves_per_simd: 2
+// CASTMULTI-DAG: issue cycle=0 wave=0 simd=0 fu=VALU op=waveamdmachine.v_cvt_pk_bf16_f32
+// CASTMULTI-DAG: issue cycle=4 wave=1 simd=0 fu=VALU op=waveamdmachine.v_cvt_pk_bf16_f32
 
 // MULTIERR: error: 'waveamdmachine.uniform_loop' op multi-wave event simulation requires linear machine control flow
 // MULTIBARRIER: error: 'waveamdmachine.s_barrier' op multi-wave event simulation does not model wave rendezvous

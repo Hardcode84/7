@@ -33,6 +33,11 @@
 // RUN: wave-instruction-state-report --func=mfma_coexec_window --arch=gfx942 %s | FileCheck %s --check-prefix=MFMA-WINDOW-CDNA3
 // RUN: wave-instruction-state-report --func=mfma_coexec_partial_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-PARTIAL
 // RUN: wave-instruction-state-report --func=mfma_coexec_restricted_fill --arch=gfx950 %s | FileCheck %s --check-prefix=MFMA-WINDOW-RESTRICTED
+// RUN: wave-instruction-state-report --func=packed_f32_coissue_duration --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-F32-DURATION
+// RUN: wave-instruction-state-report --func=packed_f32_coissue_duration --arch=gfx942 %s | FileCheck %s --check-prefix=PACKED-F32-CDNA3
+// RUN: wave-instruction-state-report --func=packed_f32_coissue_duration --arch=gfx1100 %s | FileCheck %s --check-prefix=PACKED-F32-RDNA
+// RUN: wave-instruction-state-report --func=packed_f16_coissue_duration --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-F16-DURATION
+// RUN: wave-instruction-state-report --func=packed_cast_coissue_duration --arch=gfx950 %s | FileCheck %s --check-prefix=PACKED-CAST-DURATION
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @smem_value_ready(%zero: !waveamdmachine.imm,
@@ -482,6 +487,51 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
           -> !waveamdmachine.reg<vgpr, 16>
     return
   }
+
+  func.func @packed_f32_coissue_duration(
+      %a: !waveamdmachine.reg<vgpr, 2>,
+      %b: !waveamdmachine.reg<vgpr, 2>,
+      %c: !waveamdmachine.reg<vgpr, 2>) {
+    %add = waveamdmachine.v_pk_add_f32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %fma = waveamdmachine.v_pk_fma_f32 %a, %b, %c
+        : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>,
+           !waveamdmachine.reg<vgpr, 2>) -> !waveamdmachine.reg<vgpr, 2>
+    return
+  }
+
+  func.func @packed_f16_coissue_duration(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>,
+      %c: !waveamdmachine.reg<vgpr, 1>) {
+    %add = waveamdmachine.v_pk_add_f16 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %mul = waveamdmachine.v_pk_mul_f16 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %fma = waveamdmachine.v_pk_fma_f16 %a, %b, %c
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @packed_cast_coissue_duration(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>,
+      %c: !waveamdmachine.reg<vgpr, 1>) {
+    %first = waveamdmachine.v_cvt_pk_bf16_f32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %second = waveamdmachine.v_cvt_pk_bf16_f32 %b, %c
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
 }
 
 // SMEMVALUE: func: smem_value_ready
@@ -592,3 +642,24 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // MFMA-WINDOW-PARTIAL: query op_index=3 cycle=16 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=20 components=coexec_window:20
 
 // MFMA-WINDOW-RESTRICTED: query op_index=3 cycle=20 op=waveamdmachine.mfma_f32_32x32x16_f16 stall=coexec_window cycles=24 components=coexec_window:24
+
+// PACKED-F32-DURATION: func: packed_f32_coissue_duration
+// PACKED-F32-DURATION: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+// PACKED-F32-DURATION: commit op_index=1 issue=8 next=12
+// PACKED-F32-DURATION: query op_index=2 cycle=12 op=waveamdmachine.v_pk_fma_f32 stall=issue_backpressure cycles=4 components=issue_backpressure:4@simd/mfma_coissue
+// PACKED-F32-DURATION: commit op_index=2 issue=16 next=20
+
+// PACKED-F32-CDNA3: arch: gfx942
+// PACKED-F32-CDNA3: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f32 stall=none cycles=0 components=none
+// PACKED-F32-CDNA3: query op_index=2 cycle=8 op=waveamdmachine.v_pk_fma_f32 stall=none cycles=0 components=none
+
+// PACKED-F32-RDNA: arch: gfx1100
+// PACKED-F32-RDNA: query op_index=1 cycle=1 op=waveamdmachine.v_pk_mul_f32 stall=none cycles=0 components=none
+// PACKED-F32-RDNA: query op_index=2 cycle=2 op=waveamdmachine.v_pk_fma_f32 stall=none cycles=0 components=none
+
+// PACKED-F16-DURATION: func: packed_f16_coissue_duration
+// PACKED-F16-DURATION: query op_index=1 cycle=4 op=waveamdmachine.v_pk_mul_f16 stall=none cycles=0 components=none
+// PACKED-F16-DURATION: query op_index=2 cycle=8 op=waveamdmachine.v_pk_fma_f16 stall=none cycles=0 components=none
+
+// PACKED-CAST-DURATION: func: packed_cast_coissue_duration
+// PACKED-CAST-DURATION: query op_index=1 cycle=4 op=waveamdmachine.v_cvt_pk_bf16_f32 stall=none cycles=0 components=none

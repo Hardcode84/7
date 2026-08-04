@@ -123,6 +123,7 @@ enum class ReadyResourceCandidateKind : uint8_t {
 struct InstructionScheduleResourceInfo {
   unsigned issueSlots = 0;
   unsigned releaseSlots = 0;
+  unsigned mfmaCoissueReleaseSlots = 0;
   FunctionalUnit functionalUnit = FunctionalUnit::None;
   bool realInstruction = false;
   bool tracked = false;
@@ -132,6 +133,7 @@ struct InstructionScheduleResourceInfo {
 struct InstructionScheduleResourcePreview {
   int64_t waitSlots = 0;
   unsigned releaseSlots = 0;
+  unsigned mfmaCoissueReleaseSlots = 0;
   FunctionalUnit functionalUnit = FunctionalUnit::None;
 };
 
@@ -318,6 +320,7 @@ private:
     int64_t memoryValueLatency = 0;
     int64_t instructionSpan = 0;
     int64_t resourceDuration = 0;
+    int64_t mfmaCoissueDuration = 0;
     uint64_t issueSlots = 1;
     unsigned instructionIssueCount = 1;
     unsigned counterIssueCount = 0;
