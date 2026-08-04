@@ -1443,9 +1443,9 @@ unsigned InstructionExecutionState::legacyValuIssueSlotHazardWait(
       wait = std::max(wait, issueSlotsUntil(hazards.valuWriteVGPRScalarReadyAt,
                                             currentIssueSlot));
   }
-  if (regClass == RegClass::VCC)
+  if (regClass == RegClass::SGPR || regClass == RegClass::VCC)
     wait = std::max(
-        wait, issueSlotsUntil(hazards.valuWriteVCCReadyAt, currentIssueSlot));
+        wait, issueSlotsUntil(hazards.valuWriteSGPRReadyAt, currentIssueSlot));
   return wait;
 }
 
@@ -1857,8 +1857,8 @@ void InstructionExecutionState::commitIssueSlotProducer(
         hazards.transWriteVGPRReadyAt =
             currentIssueSlot + issueSlotHazardConfig.transWriteVGPRValuRead;
     }
-    if (regClass == RegClass::VCC)
-      issueSlotHazards[result].valuWriteVCCReadyAt =
+    if (regClass == RegClass::SGPR || regClass == RegClass::VCC)
+      issueSlotHazards[result].valuWriteSGPRReadyAt =
           currentIssueSlot + issueSlotHazardConfig.valuWriteSGPRValuRead;
   }
 }

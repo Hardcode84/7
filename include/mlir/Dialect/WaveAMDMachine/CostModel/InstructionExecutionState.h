@@ -335,7 +335,7 @@ private:
     uint64_t valuWriteVGPRMfmaReadyAt = 0;
     uint64_t valuWriteVGPRPermlane32SwapReadyAt = 0;
     uint64_t transWriteVGPRReadyAt = 0;
-    uint64_t valuWriteVCCReadyAt = 0;
+    uint64_t valuWriteSGPRReadyAt = 0;
     uint64_t mfmaResultReadyAt = 0;
     uint64_t mfmaSrcCOverlapReadyAt = 0;
     uint64_t mfmaSrcCExactReadyAt = 0;
@@ -343,7 +343,7 @@ private:
     bool empty() const {
       return valuWriteVGPRScalarReadyAt == 0 && valuWriteVGPRMfmaReadyAt == 0 &&
              valuWriteVGPRPermlane32SwapReadyAt == 0 &&
-             transWriteVGPRReadyAt == 0 && valuWriteVCCReadyAt == 0 &&
+             transWriteVGPRReadyAt == 0 && valuWriteSGPRReadyAt == 0 &&
              mfmaResultReadyAt == 0 && mfmaSrcCOverlapReadyAt == 0 &&
              mfmaSrcCExactReadyAt == 0;
     }
@@ -358,8 +358,8 @@ private:
                    rhs.valuWriteVGPRPermlane32SwapReadyAt);
       transWriteVGPRReadyAt =
           std::max(transWriteVGPRReadyAt, rhs.transWriteVGPRReadyAt);
-      valuWriteVCCReadyAt =
-          std::max(valuWriteVCCReadyAt, rhs.valuWriteVCCReadyAt);
+      valuWriteSGPRReadyAt =
+          std::max(valuWriteSGPRReadyAt, rhs.valuWriteSGPRReadyAt);
       mfmaResultReadyAt = std::max(mfmaResultReadyAt, rhs.mfmaResultReadyAt);
       mfmaSrcCOverlapReadyAt =
           std::max(mfmaSrcCOverlapReadyAt, rhs.mfmaSrcCOverlapReadyAt);

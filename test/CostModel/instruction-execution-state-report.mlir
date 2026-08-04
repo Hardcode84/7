@@ -14,6 +14,8 @@
 // RUN: wave-instruction-state-report --func=readfirstlane_gap --arch=gfx950 %s | FileCheck %s --check-prefix=READLANE
 // RUN: wave-instruction-state-report --func=permlane32_gap --arch=gfx950 %s | FileCheck %s --check-prefix=PERMLANE
 // RUN: wave-instruction-state-report --func=vcc_gap --arch=gfx950 %s | FileCheck %s --check-prefix=VCC
+// RUN: wave-instruction-state-report --func=direct_sgpr_mask_gap --arch=gfx950 %s | FileCheck %s --check-prefix=DIRECTMASK
+// RUN: wave-instruction-state-report --func=direct_sgpr_mask_gap_filled --arch=gfx950 %s | FileCheck %s --check-prefix=DIRECTMASKFILL
 // RUN: wave-instruction-state-report --func=noinst_memory_alias_zero_cycle --arch=gfx950 --vmem-value-latency=20 %s | FileCheck %s --check-prefix=ALIAS
 // RUN: wave-instruction-state-report --func=noinst_token_alias --arch=gfx950 --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=TOKENALIAS
 // RUN: wave-instruction-state-report --func=issue_token_drops_completion --arch=gfx950 --vmem-counter-latency=20 %s | FileCheck %s --check-prefix=ISSUETOKEN
@@ -244,6 +246,36 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %pick = waveamdmachine.v_cndmask_b32_vcc %a, %sum, %vcc
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
            !waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @direct_sgpr_mask_gap(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>) {
+    %mask = waveamdmachine.v_cmp_ge_i32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<sgpr, 2>
+    %pick = waveamdmachine.v_cndmask_b32_tuple %a, %b, %mask
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
+    return
+  }
+
+  func.func @direct_sgpr_mask_gap_filled(
+      %a: !waveamdmachine.reg<vgpr, 1>,
+      %b: !waveamdmachine.reg<vgpr, 1>) {
+    %mask = waveamdmachine.v_cmp_ge_i32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<sgpr, 2>
+    %fill0 = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %fill1 = waveamdmachine.v_add_u32 %a, %fill0
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %pick = waveamdmachine.v_cndmask_b32_tuple %a, %b, %mask
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.reg<vgpr, 1>
     return
   }
 
@@ -502,6 +534,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // PERMLANE: query op_index=1 cycle=8 op=waveamdmachine.v_permlane32_swap_b32_tuple stall=instruction_hazard cycles=2 components=instruction_hazard:2
 
 // VCC: query op_index=2 cycle=8 op=waveamdmachine.v_cndmask_b32_vcc stall=instruction_hazard cycles=1 components=instruction_hazard:1
+
+// DIRECTMASK: func: direct_sgpr_mask_gap
+// DIRECTMASK: query op_index=1 cycle=4 op=waveamdmachine.v_cndmask_b32_tuple stall=instruction_hazard cycles=2 components=instruction_hazard:2
+
+// DIRECTMASKFILL: func: direct_sgpr_mask_gap_filled
+// DIRECTMASKFILL: query op_index=3 cycle=12 op=waveamdmachine.v_cndmask_b32_tuple stall=none cycles=0 components=none
 
 // ALIAS: query op_index=1 cycle=4 op=waveamdmachine.tuple_to_elements stall=none cycles=0 components=none
 // ALIAS: commit op_index=1 issue=4 next=4 value_ready=20

@@ -83,6 +83,36 @@ func.func @vcc_hazard_schedule_codegen() attributes {wave.kernel} {
   return
 }
 
+// ASM-LABEL: direct_sgpr_mask_hazard_schedule_codegen:
+// ASM: v_cmp_ge_i32_e64 s[0:1], v0, v1
+// ASM-NEXT: v_add_u32_e32 v8, v0, v2
+// ASM-NEXT: v_xor_b32_e32 v9, v2, v3
+// ASM-NEXT: v_cndmask_b32_e64 v10, v0, v1, s[0:1]
+// ASM-NOT: s_nop
+// ASM: s_endpgm
+func.func @direct_sgpr_mask_hazard_schedule_codegen()
+    attributes {wave.kernel} {
+  %a = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
+  %b = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
+  %c = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 2>
+  %d = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 3>
+  %mask = waveamdmachine.v_cmp_ge_i32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<sgpr, 2, 0>
+  %fill0 = waveamdmachine.v_add_u32 %a, %c
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 8>
+  %fill1 = waveamdmachine.v_xor_b32 %c, %d
+      : (!waveamdmachine.reg<vgpr, 1, 2>, !waveamdmachine.reg<vgpr, 1, 3>)
+        -> !waveamdmachine.reg<vgpr, 1, 9>
+  %pick = waveamdmachine.v_cndmask_b32_tuple %a, %b, %mask
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>,
+         !waveamdmachine.reg<sgpr, 2, 0>)
+        -> !waveamdmachine.reg<vgpr, 1, 10>
+  waveamdmachine.s_endpgm
+  return
+}
+
 // ASM-LABEL: compute_resource_schedule_codegen:
 // ASM: v_mfma_f32_16x16x32_f16 v[8:11], v[0:3], v[4:7], v[8:11]
 // ASM-NEXT: s_add_i32 s8, s0, s1
