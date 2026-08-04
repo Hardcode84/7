@@ -13,6 +13,7 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -79,6 +80,25 @@ struct ReadyScheduleIssueFacts {
   unsigned hazardWaitInstructions = 0;
 };
 
+struct ReadyScheduleCandidateIssueFacts {
+  int64_t nextIssueCycle = 0;
+  unsigned issues = 0;
+  bool realInstruction = false;
+  bool stalls = false;
+};
+
+struct ReadyScheduleProjectionFacts {
+  SmallVector<waveamdmachine::InstructionStallComponent, 8> stalls;
+  int64_t cycles = 0;
+};
+
+// Session builds candidate orders; providers return dynamic facts only.
+using ReadyScheduleIssueProvider =
+    llvm::function_ref<FailureOr<ReadyScheduleCandidateIssueFacts>(unsigned)>;
+using ReadyScheduleProjectionProvider =
+    llvm::function_ref<FailureOr<ReadyScheduleProjectionFacts>(
+        ArrayRef<unsigned>)>;
+
 struct ReadyScheduleResourceFacts {
   waveamdmachine::InstructionScheduleResourcePreview baseline;
   waveamdmachine::InstructionScheduleResourcePreview candidate;
@@ -119,6 +139,11 @@ enum class ReadyScheduleSelectionKind : uint8_t {
   ResourceStallFiller,
   LatencyPriority,
   GenericStallFiller,
+  MemoryTokenConsumer,
+  BarrierPairFiller,
+  VmemPrefetch,
+  LongLatencyVmemPrefetch,
+  DmaPostBarrierFiller,
 };
 
 struct ReadyScheduleDecision {
@@ -154,10 +179,23 @@ public:
       const llvm::BitVector &legalReadyCandidates, bool baselinePriorityStall,
       const waveamdmachine::InstructionScheduleModel &policy) const;
 
-  llvm::BitVector getGenericStallFillerCandidates(
-      const llvm::BitVector &scheduled, unsigned baseline,
-      const llvm::BitVector &legalReadyCandidates,
-      const ReadyScheduleStallFacts &stall,
+  FailureOr<ReadyScheduleDecision>
+  selectMemoryReady(const llvm::BitVector &scheduled, unsigned baseline,
+                    const llvm::BitVector &legalReadyCandidates,
+                    bool prioritizeLongLatencyVmem,
+                    const waveamdmachine::InstructionScheduleModel &policy,
+                    ReadyScheduleIssueProvider issueProvider,
+                    ReadyScheduleProjectionProvider projectionProvider) const;
+
+  FailureOr<ReadyScheduleDecision>
+  selectStallFiller(const llvm::BitVector &scheduled, unsigned baseline,
+                    const llvm::BitVector &legalReadyCandidates,
+                    const ReadyScheduleStallFacts &stall,
+                    const waveamdmachine::InstructionScheduleModel &policy,
+                    ReadyScheduleIssueProvider issueProvider) const;
+
+  bool canIssueBaselineDespiteStall(
+      unsigned baseline, const ReadyScheduleIssueFacts &issue,
       const waveamdmachine::InstructionScheduleModel &policy) const;
 
   ReadyScheduleStallFacts classifyStall(unsigned baseline,
@@ -183,6 +221,7 @@ struct RegionScheduleGraphFacts {
   ArrayRef<waveamdmachine::MemoryCounterKind> memoryKinds;
   ArrayRef<SmallVector<waveamdmachine::MemoryCounterKind, 4>> fillerMemoryKinds;
   ArrayRef<unsigned> memoryNodes;
+  const llvm::DenseMap<Operation *, unsigned> &nodeIndices;
   const llvm::BitVector &computeRecurrenceCritical;
 };
 
