@@ -1026,7 +1026,7 @@ static bool hasAlignedViewLifetimeConflict(
       !hasSingleUseBy(view.sourceTuple, split.getOperation()))
     return true;
   return llvm::any_of(op.getElements(), [&](Value element) {
-    return !hasSingleUseBy(element, op.getOperation());
+    return !valueDiesAt(flow, element, op.getOperation());
   });
 }
 
@@ -1171,7 +1171,7 @@ static FailureOr<Value> rewriteTupleElementForSharing(
   bool dragInConflict = hasSourceDragConflict(element, source, preserveLayout);
   bool fixedConflict =
       hasFixedElementConflict(element, tupleType, preserveAlignedView);
-  bool elementDies = lastUseSplat
+  bool elementDies = lastUseSplat || preserveAlignedView
                          ? valueDiesAt(flow, element, op.getOperation())
                          : hasSingleUseBy(element, op.getOperation());
   bool liveThroughClobber = tupleIsClobbered && !elementDies;

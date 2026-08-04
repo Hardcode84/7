@@ -140,6 +140,115 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return %loop : !waveamdmachine.reg<vgpr, 2>
   }
 
+  // PREP-LABEL: func.func @aligned_view_prior_reads_loop_carry(
+  // PREP-NOT: waveamdmachine.copy_tuple
+  // PREP: return
+  // SCAN-LABEL: func.func @aligned_view_prior_reads_loop_carry(
+  // SCAN-SAME: [[SRC:%[^:]+]]: !waveamdmachine.reg<vgpr, 4, [[#BASE:]]>
+  // SCAN: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements [[SRC]]
+  // SCAN: [[VIEW:%.*]] = waveamdmachine.tuple_from_elements [[PARTS]]#2, [[PARTS]]#3
+  // SCAN-SAME: -> !waveamdmachine.reg<vgpr, 2, [[#BASE+2]]>
+  // SCAN: waveamdmachine.uniform_loop
+  // SCAN-SAME: carries([[VIEW]] : !waveamdmachine.reg<vgpr, 2, [[#BASE+2]]>)
+  // SCAN: ^bb0([[CARRY:%[^:]+]]: !waveamdmachine.reg<vgpr, 2, [[#BASE+2]]>):
+  func.func @aligned_view_prior_reads_loop_carry(
+      %src: !waveamdmachine.reg<vgpr, 4>,
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+    %parts:4 = waveamdmachine.tuple_to_elements %src
+        : (!waveamdmachine.reg<vgpr, 4>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %prior = waveamdmachine.v_add_u32 %parts#2, %parts#3
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %view = waveamdmachine.tuple_from_elements %parts#2, %parts#3
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%view : !waveamdmachine.reg<vgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 2>)
+    } -> !waveamdmachine.reg<vgpr, 2>
+    return %loop, %prior
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // PREP-LABEL: func.func @aligned_view_element_live_after_loop_copies(
+  // PREP: [[PARTS:%.*]]:4 = waveamdmachine.tuple_to_elements
+  // PREP-NEXT: [[COPY0:%.*]] = waveamdmachine.copy_tuple [[PARTS]]#2
+  // PREP-NEXT: [[COPY1:%.*]] = waveamdmachine.copy_tuple [[PARTS]]#3
+  // PREP-NEXT: waveamdmachine.tuple_from_elements [[COPY0]], [[COPY1]]
+  func.func @aligned_view_element_live_after_loop_copies(
+      %src: !waveamdmachine.reg<vgpr, 4>,
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+    %parts:4 = waveamdmachine.tuple_to_elements %src
+        : (!waveamdmachine.reg<vgpr, 4>)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+              !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    %view = waveamdmachine.tuple_from_elements %parts#2, %parts#3
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%view : !waveamdmachine.reg<vgpr, 2>) {
+    ^bb0(%carry: !waveamdmachine.reg<vgpr, 2>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%carry : !waveamdmachine.reg<vgpr, 2>)
+    } -> !waveamdmachine.reg<vgpr, 2>
+    %post = waveamdmachine.v_add_u32 %parts#2, %parts#3
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    return %loop, %post
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  }
+
+  // PREP-LABEL: func.func @scalar_loop_init_tuple_slot_keeps_copy(
+  // PREP: [[OTHER:%.*]] = waveamdmachine.s_mov_b32_value
+  // PREP-NEXT: [[INIT:%.*]] = waveamdmachine.s_mov_b32_value
+  // PREP-NEXT: [[COPY:%.*]] = waveamdmachine.copy_tuple [[INIT]]
+  // PREP-NEXT: [[TUPLE:%.*]] = waveamdmachine.tuple_from_elements {{%.*}}, [[COPY]]
+  // PREP: waveamdmachine.uniform_loop
+  // PREP-SAME: carries([[INIT]]
+  // SCAN-LABEL: func.func @scalar_loop_init_tuple_slot_keeps_copy(
+  // SCAN: [[OTHER:%.*]] = waveamdmachine.s_mov_b32_value
+  // SCAN-NEXT: [[INIT:%.*]] = waveamdmachine.s_mov_b32_value
+  // SCAN-SAME: -> !waveamdmachine.reg<sgpr, 1, [[#REG:]]>
+  // SCAN: waveamdmachine.uniform_loop
+  // SCAN-SAME: carries([[INIT]] : !waveamdmachine.reg<sgpr, 1, [[#REG]]>)
+  // SCAN: ^bb0([[CARRY:%[^:]+]]: !waveamdmachine.reg<sgpr, 1, [[#REG]]>):
+  // SCAN: waveamdmachine.continue_if
+  // SCAN-SAME: carries({{%.*}} : !waveamdmachine.reg<sgpr, 1, [[#REG]]>)
+  func.func @scalar_loop_init_tuple_slot_keeps_copy(
+      %cond: !waveamdmachine.reg<scc, 1>)
+      -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 2>) {
+    %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+    %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+    %other = waveamdmachine.s_mov_b32_value %one
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %init = waveamdmachine.s_mov_b32_value %zero
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1>
+    %tuple = waveamdmachine.tuple_from_elements %other, %init
+        : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>)
+          -> !waveamdmachine.reg<sgpr, 2>
+    %loop = waveamdmachine.uniform_loop if %cond
+        : !waveamdmachine.reg<scc, 1>
+        carries(%init : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%carry: !waveamdmachine.reg<sgpr, 1>):
+      %next, %next_scc = waveamdmachine.s_add_i32 %carry, %one
+          : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+            -> (!waveamdmachine.reg<sgpr, 1>,
+                !waveamdmachine.reg<scc, 1>)
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+          carries(%next : !waveamdmachine.reg<sgpr, 1>)
+    } -> !waveamdmachine.reg<sgpr, 1>
+    return %loop, %tuple
+        : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 2>
+  }
+
   // A loop init that is also read as an invariant in the body needs separate
   // writable carry storage.
   // PREP-LABEL: func.func @tuple_loop_init_with_invariant_use(
