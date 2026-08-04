@@ -13,6 +13,7 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
@@ -47,6 +48,35 @@ enum class ReadyScheduleProposalKind : uint8_t {
   Direct,
   RankedFiller,
   ComputeResource,
+  Latency,
+  GenericStallFiller,
+};
+
+enum class ReadyScheduleStallKind : uint8_t {
+  None,
+  Cycle,
+  MemoryToken,
+  InstructionHazard,
+};
+
+struct ReadyScheduleStallFacts {
+  int64_t issueCycle = 0;
+  waveamdmachine::MemoryIssueResourceMask blockedMemoryResources = 0;
+  waveamdmachine::InstructionStallKind reason =
+      waveamdmachine::InstructionStallKind::None;
+  ReadyScheduleStallKind kind = ReadyScheduleStallKind::None;
+};
+
+struct ReadyScheduleIssueFacts {
+  int64_t operandWaitCycles = 0;
+  int64_t memoryWaitCycles = 0;
+  int64_t functionalUnitWaitCycles = 0;
+  int64_t issueWaitCycles = 0;
+  int64_t cuIssueWaitCycles = 0;
+  int64_t cmaIssueWaitCycles = 0;
+  int64_t coexecWindowWaitCycles = 0;
+  int64_t issueCycle = 0;
+  unsigned hazardWaitInstructions = 0;
 };
 
 struct ReadyScheduleResourceFacts {
@@ -57,11 +87,28 @@ struct ReadyScheduleResourceFacts {
   bool prioritize = false;
 };
 
+using ReadyScheduleResourceFactsProvider =
+    llvm::function_ref<FailureOr<ReadyScheduleResourceFacts>(unsigned)>;
+
+struct ReadyScheduleLatencyFacts {
+  bool baselinePriorityStall = false;
+  bool candidatePriorityStall = false;
+};
+
+struct ReadyScheduleFillerFacts {
+  ReadyScheduleStallFacts stall;
+  int64_t candidateNextIssueCycle = 0;
+  bool candidateRealInstruction = false;
+  bool candidateStalls = false;
+};
+
 struct ReadyScheduleProposal {
   unsigned candidate = 0;
   ReadyScheduleProposalKind kind = ReadyScheduleProposalKind::Direct;
   unsigned group = 0;
   ReadyScheduleResourceFacts resource;
+  ReadyScheduleLatencyFacts latency;
+  ReadyScheduleFillerFacts filler;
 };
 
 enum class ReadyScheduleSelectionKind : uint8_t {
@@ -70,6 +117,8 @@ enum class ReadyScheduleSelectionKind : uint8_t {
   Proposal,
   ResourcePriority,
   ResourceStallFiller,
+  LatencyPriority,
+  GenericStallFiller,
 };
 
 struct ReadyScheduleDecision {
@@ -92,6 +141,32 @@ public:
              const llvm::BitVector &legalReadyCandidates,
              ArrayRef<ReadyScheduleProposal> proposals,
              const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  FailureOr<ReadyScheduleDecision> selectComputeResource(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates,
+      const waveamdmachine::InstructionScheduleModel &policy,
+      ReadyScheduleResourceFactsProvider getResourceFacts) const;
+
+  bool supportsLatencyPriority(bool enabled) const;
+  llvm::BitVector getLatencyCandidates(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates, bool baselinePriorityStall,
+      const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  llvm::BitVector getGenericStallFillerCandidates(
+      const llvm::BitVector &scheduled, unsigned baseline,
+      const llvm::BitVector &legalReadyCandidates,
+      const ReadyScheduleStallFacts &stall,
+      const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  ReadyScheduleStallFacts classifyStall(unsigned baseline,
+                                        const ReadyScheduleIssueFacts &issue,
+                                        bool blockMemoryResource) const;
+  ReadyScheduleStallFacts
+  classifyStall(unsigned baseline, const ReadyScheduleIssueFacts &issue,
+                const waveamdmachine::InstructionScheduleModel &policy) const;
+
   ReadyScheduleWorkStats getWorkStats() const;
 
 private:
@@ -99,6 +174,16 @@ private:
   struct Impl;
   explicit RegionScheduleSession(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl;
+};
+
+struct RegionScheduleGraphFacts {
+  ArrayRef<Operation *> operations;
+  ArrayRef<SmallVector<unsigned, 4>> predecessors;
+  ArrayRef<SmallVector<unsigned, 4>> successors;
+  ArrayRef<waveamdmachine::MemoryCounterKind> memoryKinds;
+  ArrayRef<SmallVector<waveamdmachine::MemoryCounterKind, 4>> fillerMemoryKinds;
+  ArrayRef<unsigned> memoryNodes;
+  const llvm::BitVector &computeRecurrenceCritical;
 };
 
 class WaveAMDMachineScheduleModel {
@@ -119,12 +204,11 @@ public:
   buildInstructionConfig(const waveamdmachine::EventSimConfig &config) const;
   unsigned getTargetWaveCount() const;
 
-  // Session borrows operations and graph topology.
+  // Session owns noInstructions; graph fact storage must outlive it.
   RegionScheduleSession
-  createRegionSession(ArrayRef<Operation *> operations,
-                      ArrayRef<SmallVector<unsigned, 4>> predecessors,
-                      ArrayRef<SmallVector<unsigned, 4>> successors,
-                      llvm::BitVector noInstructions) const;
+  createRegionSession(const RegionScheduleGraphFacts &facts,
+                      llvm::BitVector noInstructions,
+                      const waveamdmachine::EventSimConfig &config) const;
 
 private:
   struct Impl;
