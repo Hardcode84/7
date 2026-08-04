@@ -38,6 +38,9 @@
 
 namespace mlir::wave {
 
+static constexpr StringLiteral kDmaIssueAfterDelayAttr =
+    "waveamdmachine.dma_issue_after_delay";
+
 waveamdmachine::InstructionExecutionConfig buildWaveAMDMachineInstructionConfig(
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, Operation *context) {
@@ -179,6 +182,10 @@ struct WaveAMDMachineScheduleModel::Impl {
 };
 
 struct RegionScheduleSession::Impl {
+  static bool isMemToken(Value value) {
+    return isa<waveamdmachine::MemTokenType>(value.getType());
+  }
+
   bool isFullBarrier(unsigned index) const {
     return isa<waveamdmachine::ClusterBarrierOp, waveamdmachine::SBarrierOp>(
         operations[index]);
@@ -230,6 +237,174 @@ struct RegionScheduleSession::Impl {
         return false;
     }
     return true;
+  }
+
+  unsigned findBarrierPairFiller(const llvm::BitVector &ready,
+                                 const llvm::BitVector &scheduled,
+                                 unsigned baseline) const {
+    if (!isFullBarrier(baseline))
+      return operations.size();
+
+    unsigned filler = operations.size();
+    for (unsigned index :
+         llvm::seq(baseline + 1, static_cast<unsigned>(operations.size()))) {
+      Operation *op = operations[index];
+      if (isFullBarrier(index))
+        return scheduled.test(index) ? operations.size() : filler;
+      if (!isPure(op))
+        return operations.size();
+      if (scheduled.test(index))
+        continue;
+      if (filler == operations.size()) {
+        if (!ready.test(index))
+          return operations.size();
+        filler = index;
+      }
+    }
+    return operations.size();
+  }
+
+  unsigned findFirstRealDataConsumer(unsigned producer,
+                                     const llvm::BitVector &scheduled) const {
+    SmallVector<Value, 8> pending;
+    for (Value result : operations[producer]->getResults())
+      if (!isMemToken(result))
+        pending.push_back(result);
+
+    DenseSet<Value> seen;
+    unsigned first = operations.size();
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      if (!seen.insert(value).second)
+        continue;
+      for (OpOperand &use : value.getUses()) {
+        Operation *user = use.getOwner();
+        auto it = nodeIndices.find(user);
+        if (it == nodeIndices.end())
+          continue;
+        if (waveamdmachine::classifyOp(user) ==
+            waveamdmachine::SchedClass::NoInst) {
+          llvm::append_range(pending, user->getResults());
+          continue;
+        }
+        if (!scheduled.test(it->second))
+          first = std::min(first, it->second);
+      }
+    }
+    return first;
+  }
+
+  bool collectPrefetchChain(unsigned node, unsigned candidate,
+                            unsigned baseline, const llvm::BitVector &scheduled,
+                            llvm::BitVector &chain) const {
+    if (scheduled.test(node) || chain.test(node))
+      return true;
+    if (node == baseline)
+      return false;
+    Operation *op = operations[node];
+    if (node != candidate &&
+        waveamdmachine::classifyOp(op) != waveamdmachine::SchedClass::NoInst &&
+        !isPure(op))
+      return false;
+    for (unsigned predecessor : predecessors[node])
+      if (!collectPrefetchChain(predecessor, candidate, baseline, scheduled,
+                                chain))
+        return false;
+    chain.set(node);
+    return true;
+  }
+
+  unsigned findNextVmemValue(unsigned baseline,
+                             const llvm::BitVector &scheduled) const {
+    for (unsigned node : memoryNodes) {
+      if (node <= baseline || scheduled.test(node))
+        continue;
+      if (memoryKinds[node] == waveamdmachine::MemoryCounterKind::Vmem)
+        return node;
+    }
+    return operations.size();
+  }
+
+  bool isRealInstruction(unsigned index) const {
+    return waveamdmachine::classifyOp(operations[index]) !=
+           waveamdmachine::SchedClass::NoInst;
+  }
+
+  unsigned getIssueSlots(unsigned index) const {
+    waveamdmachine::SchedClass cls =
+        waveamdmachine::classifyOp(operations[index]);
+    if (cls == waveamdmachine::SchedClass::NoInst)
+      return 0;
+    return waveamdmachine::getInstructionScheduleResourceInfo(operations[index],
+                                                              cls, *arch)
+        .issueSlots;
+  }
+
+  bool hasPrefetchSlack(unsigned baseline, unsigned candidate,
+                        unsigned consumer, const llvm::BitVector &chain,
+                        const llvm::BitVector &scheduled) const {
+    int64_t issuePeriod = waveamdmachine::getEventSimIssuePeriod(*arch, config);
+    int64_t slack = 0;
+    for (unsigned index : llvm::seq(baseline, consumer)) {
+      if (scheduled.test(index) || chain.test(index) ||
+          !isRealInstruction(index))
+        continue;
+      slack += static_cast<int64_t>(getIssueSlots(index)) * issuePeriod;
+    }
+    int64_t baselineSpan =
+        static_cast<int64_t>(getIssueSlots(baseline)) * issuePeriod;
+    int64_t valueLatency = waveamdmachine::getMemoryValueLatency(
+        *arch, operations[candidate], config.counterLatencies,
+        config.valueLatencies, config.calibration);
+    return slack - baselineSpan >= valueLatency;
+  }
+
+  SmallVector<unsigned, 32>
+  buildPrefetchProjectionOrder(unsigned baseline, const llvm::BitVector &chain,
+                               unsigned consumer, bool prefetchFirst,
+                               const llvm::BitVector &scheduled) const {
+    SmallVector<unsigned, 32> order;
+    if (!prefetchFirst)
+      order.push_back(baseline);
+    for (unsigned index : llvm::seq<unsigned>(0, chain.size()))
+      if (chain.test(index))
+        order.push_back(index);
+    if (prefetchFirst)
+      order.push_back(baseline);
+    for (unsigned index : llvm::seq(baseline + 1, consumer)) {
+      if (chain.test(index) || scheduled.test(index))
+        continue;
+      order.push_back(index);
+    }
+    order.push_back(consumer);
+    return order;
+  }
+
+  unsigned findFirstUnscheduledBarrier(const llvm::BitVector &scheduled,
+                                       unsigned begin) const {
+    for (unsigned index :
+         llvm::seq(begin, static_cast<unsigned>(operations.size())))
+      if (!scheduled.test(index) && isBarrier(index))
+        return index;
+    return operations.size();
+  }
+
+  unsigned findFirstUnscheduledMemory(const llvm::BitVector &scheduled,
+                                      unsigned begin) const {
+    for (unsigned index :
+         llvm::seq(begin, static_cast<unsigned>(operations.size())))
+      if (!scheduled.test(index) &&
+          memoryKinds[index] != waveamdmachine::MemoryCounterKind::None)
+        return index;
+    return operations.size();
+  }
+
+  bool isPostBarrierFillerCandidate(unsigned index,
+                                    const llvm::BitVector &ready,
+                                    const llvm::BitVector &scheduled) const {
+    return ready.test(index) && !scheduled.test(index) &&
+           isPure(operations[index]) &&
+           memoryKinds[index] == waveamdmachine::MemoryCounterKind::None;
   }
 
   int getLatency(unsigned index) const {
@@ -638,6 +813,7 @@ struct RegionScheduleSession::Impl {
   }
 
   SmallVector<Operation *, 16> operations;
+  DenseMap<Operation *, unsigned> nodeIndices;
   SmallVector<SmallVector<unsigned, 4>, 16> predecessors;
   SmallVector<SmallVector<unsigned, 4>, 16> successors;
   SmallVector<waveamdmachine::MemoryCounterKind, 16> memoryKinds;
@@ -648,6 +824,7 @@ struct RegionScheduleSession::Impl {
   SmallVector<unsigned, 16> computeIslandEnds;
   const waveamdmachine::ArchData *arch = nullptr;
   waveamdmachine::EventSimConfig config;
+  bool dmaIssueTiming = false;
   llvm::BitVector noInstructions;
   DenseMap<Value, unsigned> memberByValue;
   SmallVector<ReadyPressureMember, 0> members;
@@ -696,6 +873,8 @@ RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
     const waveamdmachine::EventSimConfig &config) const {
   auto region = std::make_unique<RegionScheduleSession::Impl>();
   region->operations.assign(operations.begin(), operations.end());
+  for (auto [index, op] : llvm::enumerate(operations))
+    region->nodeIndices[op] = index;
   region->predecessors.assign(predecessors.begin(), predecessors.end());
   region->successors.assign(successors.begin(), successors.end());
   region->memoryKinds.assign(memoryKinds.begin(), memoryKinds.end());
@@ -707,6 +886,11 @@ RegionScheduleSession WaveAMDMachineScheduleModel::createRegionSession(
   region->config = config;
   if (!operations.empty()) {
     Block *block = operations.front()->getBlock();
+    region->dmaIssueTiming =
+        isa_and_nonnull<waveamdmachine::UniformLoopOp>(block->getParentOp()) &&
+        llvm::any_of(block->without_terminator(), [](Operation &op) {
+          return isa<waveamdmachine::DmaIssueDelayOp>(op);
+        });
     assert(
         llvm::all_of(operations,
                      [&](Operation *op) { return op->getBlock() == block; }) &&
@@ -1124,38 +1308,275 @@ llvm::BitVector RegionScheduleSession::getLatencyCandidates(
   return candidates;
 }
 
-llvm::BitVector RegionScheduleSession::getGenericStallFillerCandidates(
+static int64_t
+getProjectedMemoryWaitCycles(const ReadyScheduleProjectionFacts &projection) {
+  int64_t cycles = 0;
+  for (const waveamdmachine::InstructionStallComponent &stall :
+       projection.stalls)
+    if (stall.kind == waveamdmachine::InstructionStallKind::MemoryToken ||
+        stall.kind == waveamdmachine::InstructionStallKind::Waitcnt)
+      cycles += stall.cycles;
+  return cycles;
+}
+
+static int64_t getProjectedIssueBackpressureCycles(
+    const ReadyScheduleProjectionFacts &projection) {
+  int64_t cycles = 0;
+  for (const waveamdmachine::InstructionStallComponent &stall :
+       projection.stalls)
+    if (stall.kind == waveamdmachine::InstructionStallKind::IssueBackpressure)
+      cycles += stall.cycles;
+  return cycles;
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectMemoryReady(
     const llvm::BitVector &scheduled, unsigned baseline,
-    const llvm::BitVector &legalReadyCandidates,
-    const ReadyScheduleStallFacts &stall,
-    const waveamdmachine::InstructionScheduleModel &policy) const {
+    const llvm::BitVector &legalReadyCandidates, bool prioritizeLongLatencyVmem,
+    const waveamdmachine::InstructionScheduleModel &policy,
+    ReadyScheduleIssueProvider issueProvider,
+    ReadyScheduleProjectionProvider projectionProvider) const {
   assert(scheduled.size() == impl->operations.size() &&
          legalReadyCandidates.size() == impl->operations.size() &&
          baseline < impl->operations.size() &&
-         "invalid generic stall filler candidates");
-  llvm::BitVector candidates(impl->operations.size());
-  if (stall.kind == ReadyScheduleStallKind::None)
-    return candidates;
-  for (int ready = legalReadyCandidates.find_first(); ready >= 0;
-       ready = legalReadyCandidates.find_next(ready)) {
-    unsigned candidate = ready;
-    if (candidate == baseline || scheduled.test(candidate) ||
-        (impl->isFullBarrier(baseline) && impl->isFullBarrier(candidate)) ||
-        !impl->canUseStallFiller(scheduled, baseline, candidate) ||
-        (stall.blockedMemoryResources & waveamdmachine::getMemoryIssueResources(
-                                            impl->operations[candidate])) != 0)
+         "invalid memory ready selection");
+  llvm::BitVector noDiscoveries(impl->operations.size());
+  auto selectRanked = [&](unsigned candidate, ReadyScheduleSelectionKind kind) {
+    ReadyScheduleProposal proposal{candidate,
+                                   ReadyScheduleProposalKind::RankedFiller,
+                                   /*group=*/0};
+    ReadyScheduleDecision decision =
+        selectNext(scheduled, baseline, noDiscoveries, proposal, policy);
+    if (decision.candidate)
+      decision.kind = kind;
+    return decision;
+  };
+
+  // A token consumer is considered only after its explicit graph dependencies
+  // made it ready. Never infer readiness from memory aliasing or wait state.
+  for (unsigned candidate : llvm::seq(
+           baseline + 1, static_cast<unsigned>(impl->operations.size()))) {
+    if (!legalReadyCandidates.test(candidate) ||
+        !waveamdmachine::waitsForMemoryTokenDepsBeforeIssue(
+            impl->operations[candidate]))
       continue;
-    waveamdmachine::SchedClass cls =
-        waveamdmachine::classifyOp(impl->operations[candidate]);
-    waveamdmachine::InstructionScheduleResourceInfo resource =
-        waveamdmachine::getInstructionScheduleResourceInfo(
-            impl->operations[candidate], cls, *impl->arch);
-    if (!policy.canFillStall(stall.reason, resource.functionalUnit,
-                             resource.usesMfmaCoissue))
+    if (impl->findBarrierPairFiller(legalReadyCandidates, scheduled,
+                                    candidate) != impl->operations.size() ||
+        (impl->isFullBarrier(baseline) && impl->isFullBarrier(candidate)))
+      break;
+    if (!impl->canUseStallFiller(scheduled, baseline, candidate))
       continue;
-    candidates.set(candidate);
+
+    SmallVector<unsigned, 2> original{baseline, candidate};
+    SmallVector<unsigned, 2> moved{candidate, baseline};
+    FailureOr<ReadyScheduleProjectionFacts> originalProjection =
+        projectionProvider(original);
+    if (failed(originalProjection))
+      return failure();
+    FailureOr<ReadyScheduleProjectionFacts> movedProjection =
+        projectionProvider(moved);
+    if (failed(movedProjection))
+      return failure();
+
+    int64_t originalMemoryWaitCycles =
+        getProjectedMemoryWaitCycles(*originalProjection);
+    int64_t movedMemoryWaitCycles =
+        getProjectedMemoryWaitCycles(*movedProjection);
+    int64_t originalIssueBackpressureCycles =
+        getProjectedIssueBackpressureCycles(*originalProjection);
+    int64_t movedIssueBackpressureCycles =
+        getProjectedIssueBackpressureCycles(*movedProjection);
+    bool strict =
+        (impl->dmaIssueTiming || policy.requiresStrictBarrierTokenReorder()) &&
+        impl->isBarrier(candidate);
+    bool canMove =
+        strict ? movedMemoryWaitCycles < originalMemoryWaitCycles ||
+                     (movedMemoryWaitCycles == originalMemoryWaitCycles &&
+                      movedIssueBackpressureCycles <
+                          originalIssueBackpressureCycles)
+               : movedMemoryWaitCycles <= originalMemoryWaitCycles &&
+                     movedIssueBackpressureCycles <=
+                         originalIssueBackpressureCycles;
+    if (!canMove)
+      continue;
+    ReadyScheduleDecision decision = selectRanked(
+        candidate, ReadyScheduleSelectionKind::MemoryTokenConsumer);
+    if (decision.candidate)
+      return decision;
+    break;
   }
-  return candidates;
+
+  unsigned barrierFiller =
+      impl->findBarrierPairFiller(legalReadyCandidates, scheduled, baseline);
+  if (barrierFiller != impl->operations.size()) {
+    ReadyScheduleDecision decision = selectRanked(
+        barrierFiller, ReadyScheduleSelectionKind::BarrierPairFiller);
+    if (decision.candidate)
+      return decision;
+  }
+
+  unsigned candidate = impl->findNextVmemValue(baseline, scheduled);
+  if (candidate == impl->operations.size() ||
+      !waveamdmachine::hasMemoryValueLatency(impl->operations[candidate]) ||
+      !impl->canUseStallFiller(scheduled, baseline, candidate))
+    return ReadyScheduleDecision{};
+
+  llvm::BitVector chain(impl->operations.size());
+  if (!impl->collectPrefetchChain(candidate, candidate, baseline, scheduled,
+                                  chain))
+    return ReadyScheduleDecision{};
+  int chainHead = chain.find_first();
+  if (chainHead < 0 || !legalReadyCandidates.test(chainHead))
+    return ReadyScheduleDecision{};
+  FailureOr<ReadyScheduleCandidateIssueFacts> headIssue =
+      issueProvider(chainHead);
+  if (failed(headIssue))
+    return failure();
+  if (headIssue->stalls)
+    return ReadyScheduleDecision{};
+
+  unsigned consumer = impl->findFirstRealDataConsumer(candidate, scheduled);
+  if (consumer == impl->operations.size() || consumer <= candidate)
+    return ReadyScheduleDecision{};
+  int64_t memoryLatency = waveamdmachine::getMemoryValueLatency(
+      *impl->arch, impl->operations[candidate], impl->config.counterLatencies,
+      impl->config.valueLatencies, impl->config.calibration);
+  bool longLatency = policy.shouldPrioritizeLongLatency(
+      prioritizeLongLatencyVmem, memoryLatency, impl->getLatency(baseline));
+  if (!longLatency) {
+    if (impl->hasPrefetchSlack(baseline, candidate, consumer, chain, scheduled))
+      return ReadyScheduleDecision{};
+    SmallVector<unsigned, 32> nextFirst = impl->buildPrefetchProjectionOrder(
+        baseline, chain, consumer, /*prefetchFirst=*/false, scheduled);
+    FailureOr<ReadyScheduleProjectionFacts> nextFirstProjection =
+        projectionProvider(nextFirst);
+    if (failed(nextFirstProjection))
+      return failure();
+    SmallVector<unsigned, 32> prefetchFirst =
+        impl->buildPrefetchProjectionOrder(baseline, chain, consumer,
+                                           /*prefetchFirst=*/true, scheduled);
+    FailureOr<ReadyScheduleProjectionFacts> prefetchFirstProjection =
+        projectionProvider(prefetchFirst);
+    if (failed(prefetchFirstProjection))
+      return failure();
+    if (prefetchFirstProjection->cycles >= nextFirstProjection->cycles)
+      return ReadyScheduleDecision{};
+  }
+
+  return selectRanked(chainHead,
+                      longLatency
+                          ? ReadyScheduleSelectionKind::LongLatencyVmemPrefetch
+                          : ReadyScheduleSelectionKind::VmemPrefetch);
+}
+
+FailureOr<ReadyScheduleDecision> RegionScheduleSession::selectStallFiller(
+    const llvm::BitVector &scheduled, unsigned baseline,
+    const llvm::BitVector &legalReadyCandidates,
+    const ReadyScheduleStallFacts &stall,
+    const waveamdmachine::InstructionScheduleModel &policy,
+    ReadyScheduleIssueProvider issueProvider) const {
+  assert(scheduled.size() == impl->operations.size() &&
+         legalReadyCandidates.size() == impl->operations.size() &&
+         baseline < impl->operations.size() &&
+         "invalid stall filler selection");
+  llvm::BitVector noDiscoveries(impl->operations.size());
+  auto selectRanked = [&](unsigned candidate, ReadyScheduleSelectionKind kind) {
+    ReadyScheduleProposal proposal{candidate,
+                                   ReadyScheduleProposalKind::RankedFiller,
+                                   /*group=*/0};
+    ReadyScheduleDecision decision =
+        selectNext(scheduled, baseline, noDiscoveries, proposal, policy);
+    if (decision.candidate)
+      decision.kind = kind;
+    return decision;
+  };
+
+  if (impl->dmaIssueTiming &&
+      isa<waveamdmachine::DmaIssueDelayOp>(impl->operations[baseline])) {
+    unsigned barrier =
+        impl->findFirstUnscheduledBarrier(scheduled, baseline + 1);
+    if (barrier != impl->operations.size()) {
+      unsigned memory =
+          impl->findFirstUnscheduledMemory(scheduled, barrier + 1);
+      if (memory != impl->operations.size()) {
+        for (unsigned candidate : llvm::seq(
+                 memory + 1, static_cast<unsigned>(impl->operations.size()))) {
+          if (!impl->isPostBarrierFillerCandidate(
+                  candidate, legalReadyCandidates, scheduled))
+            continue;
+          FailureOr<ReadyScheduleCandidateIssueFacts> issue =
+              issueProvider(candidate);
+          if (failed(issue))
+            return failure();
+          if (stall.kind == ReadyScheduleStallKind::None ||
+              !issue->realInstruction || issue->stalls ||
+              (stall.kind == ReadyScheduleStallKind::Cycle &&
+               issue->nextIssueCycle > stall.issueCycle))
+            continue;
+          int64_t reserveCycles =
+              static_cast<int64_t>(issue->issues) *
+              waveamdmachine::getEventSimIssuePeriod(*impl->arch, impl->config);
+          if (issue->nextIssueCycle + reserveCycles > stall.issueCycle)
+            continue;
+          ReadyScheduleDecision decision = selectRanked(
+              candidate, ReadyScheduleSelectionKind::DmaPostBarrierFiller);
+          if (decision.candidate)
+            return decision;
+          break;
+        }
+      }
+    }
+  }
+
+  SmallVector<ReadyScheduleProposal, 8> proposals;
+  if (stall.kind != ReadyScheduleStallKind::None)
+    for (int ready = legalReadyCandidates.find_first(); ready >= 0;
+         ready = legalReadyCandidates.find_next(ready)) {
+      unsigned candidate = ready;
+      if (candidate == baseline || scheduled.test(candidate) ||
+          (impl->isFullBarrier(baseline) && impl->isFullBarrier(candidate)) ||
+          !impl->canUseStallFiller(scheduled, baseline, candidate) ||
+          (stall.blockedMemoryResources &
+           waveamdmachine::getMemoryIssueResources(
+               impl->operations[candidate])) != 0)
+        continue;
+      waveamdmachine::SchedClass cls =
+          waveamdmachine::classifyOp(impl->operations[candidate]);
+      waveamdmachine::InstructionScheduleResourceInfo resource =
+          waveamdmachine::getInstructionScheduleResourceInfo(
+              impl->operations[candidate], cls, *impl->arch);
+      if (!policy.canFillStall(stall.reason, resource.functionalUnit,
+                               resource.usesMfmaCoissue))
+        continue;
+      FailureOr<ReadyScheduleCandidateIssueFacts> issue =
+          issueProvider(candidate);
+      if (failed(issue))
+        return failure();
+      ReadyScheduleProposal proposal{
+          candidate, ReadyScheduleProposalKind::GenericStallFiller,
+          /*group=*/0};
+      proposal.filler = {stall, issue->nextIssueCycle, issue->realInstruction,
+                         issue->stalls};
+      proposals.push_back(proposal);
+    }
+  return selectNext(scheduled, baseline, noDiscoveries, proposals, policy);
+}
+
+bool RegionScheduleSession::canIssueBaselineDespiteStall(
+    unsigned baseline, const ReadyScheduleIssueFacts &issue,
+    const waveamdmachine::InstructionScheduleModel &policy) const {
+  assert(baseline < impl->operations.size() && "invalid stall baseline");
+  Operation *op = impl->operations[baseline];
+  bool dependenciesReady = issue.operandWaitCycles == 0 &&
+                           issue.memoryWaitCycles == 0 &&
+                           issue.hazardWaitInstructions == 0;
+  bool preserveDmaIssueLead =
+      impl->dmaIssueTiming && !op->hasAttr(kDmaIssueAfterDelayAttr) &&
+      op->hasTrait<OpTrait::waveamdmachine::LDSDmaOp>() &&
+      policy.canIssueLdsDmaDuringLead(issue.functionalUnitWaitCycles,
+                                      dependenciesReady);
+  bool emptyBarrierWait =
+      isa<waveamdmachine::BarrierWaitOp>(op) && issue.memoryWaitCycles == 0;
+  return preserveDmaIssueLead || emptyBarrierWait;
 }
 
 ReadyScheduleStallFacts
