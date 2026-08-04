@@ -101,6 +101,25 @@ struct ReadyScheduleCandidateIssueFacts {
   bool stalls = false;
 };
 
+enum class ReadyScheduleTimeline : uint8_t { Local, Steady };
+enum class ReadySchedulePhase : uint8_t { Normal, ResumeBaseline };
+
+struct ReadyScheduleDynamicIssueFacts {
+  ReadyScheduleIssueFacts issue;
+  waveamdmachine::InstructionScheduleResourcePreview resource;
+  int64_t nextIssueCycle = 0;
+  unsigned issues = 0;
+  bool realInstruction = false;
+  // Raw simulator priority signals. Which waits count as a scheduling stall is
+  // model policy, not a provider classification.
+  bool priorityStall = false;
+  bool computePriorityStall = false;
+};
+
+using ReadyScheduleDynamicIssueProvider =
+    llvm::function_ref<FailureOr<ReadyScheduleDynamicIssueFacts>(
+        unsigned, ReadyScheduleTimeline)>;
+
 struct ReadyScheduleProjectionFacts {
   int64_t cycles = 0;
   SmallVector<waveamdmachine::InstructionStallComponent, 8> stalls;
@@ -186,6 +205,8 @@ enum class ReadyScheduleSelectionKind : uint8_t {
   VmemPrefetch,
   LongLatencyVmemPrefetch,
   DmaPostBarrierFiller,
+  SteadyStateProducer,
+  SteadyStateFiller,
 };
 
 struct ReadyScheduleDecision {
@@ -201,6 +222,11 @@ struct ReadyScheduleDecision {
   // Model-owned selection provenance. The scheduler may use this for
   // bookkeeping, but not to reconsider the choice.
   ReadyScheduleSelectionKind kind = ReadyScheduleSelectionKind::Baseline;
+  // Bookkeeping requested by the selected model action. Callers apply these
+  // facts without reclassifying or reconsidering the candidate.
+  bool resumeBaseline = false;
+  bool filledStall = false;
+  bool filledBarrierMemoryStall = false;
 };
 
 class RegionScheduleSession {
@@ -212,6 +238,41 @@ public:
   RegionScheduleSession(const RegionScheduleSession &) = delete;
   RegionScheduleSession &operator=(const RegionScheduleSession &) = delete;
 
+  FailureOr<ReadyScheduleDecision>
+  selectReady(ReadySchedulePhase phase, const llvm::BitVector &scheduled,
+              unsigned baseline, const llvm::BitVector &legalReadyCandidates,
+              bool hasSteadyState,
+              const waveamdmachine::InstructionScheduleModel &policy,
+              ReadyScheduleDynamicIssueProvider issueProvider,
+              ReadyScheduleProjectionProvider projectionProvider) const;
+
+  FailureOr<ReadyScheduleDecision>
+  selectStallFiller(const llvm::BitVector &scheduled, unsigned baseline,
+                    const llvm::BitVector &legalReadyCandidates,
+                    const ReadyScheduleStallFacts &stall,
+                    const waveamdmachine::InstructionScheduleModel &policy,
+                    ReadyScheduleIssueProvider issueProvider) const;
+
+  bool canIssueBaselineDespiteStall(
+      unsigned baseline, const ReadyScheduleIssueFacts &issue,
+      const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  FailureOr<RecurrenceScheduleDecision> selectRecurrence(
+      unsigned baseline, const llvm::BitVector &legalReadyCandidates,
+      const llvm::BitVector &scheduled, ArrayRef<unsigned> scheduledPrefix,
+      RecurrenceScheduleBaselineProvider baselineProvider,
+      RecurrenceScheduleProjectionProvider projectionProvider) const;
+
+  ReadyScheduleStallFacts classifyStall(unsigned baseline,
+                                        const ReadyScheduleIssueFacts &issue,
+                                        bool blockMemoryResource) const;
+  ReadyScheduleStallFacts
+  classifyStall(unsigned baseline, const ReadyScheduleIssueFacts &issue,
+                const waveamdmachine::InstructionScheduleModel &policy) const;
+
+  ReadyScheduleWorkStats getWorkStats() const;
+
+private:
   ReadyScheduleDecision
   selectNext(const llvm::BitVector &scheduled, unsigned baseline,
              const llvm::BitVector &legalReadyCandidates,
@@ -242,33 +303,6 @@ public:
                     ReadyScheduleIssueProvider issueProvider,
                     ReadyScheduleProjectionProvider projectionProvider) const;
 
-  FailureOr<ReadyScheduleDecision>
-  selectStallFiller(const llvm::BitVector &scheduled, unsigned baseline,
-                    const llvm::BitVector &legalReadyCandidates,
-                    const ReadyScheduleStallFacts &stall,
-                    const waveamdmachine::InstructionScheduleModel &policy,
-                    ReadyScheduleIssueProvider issueProvider) const;
-
-  bool canIssueBaselineDespiteStall(
-      unsigned baseline, const ReadyScheduleIssueFacts &issue,
-      const waveamdmachine::InstructionScheduleModel &policy) const;
-
-  FailureOr<RecurrenceScheduleDecision> selectRecurrence(
-      unsigned baseline, const llvm::BitVector &legalReadyCandidates,
-      const llvm::BitVector &scheduled, ArrayRef<unsigned> scheduledPrefix,
-      RecurrenceScheduleBaselineProvider baselineProvider,
-      RecurrenceScheduleProjectionProvider projectionProvider) const;
-
-  ReadyScheduleStallFacts classifyStall(unsigned baseline,
-                                        const ReadyScheduleIssueFacts &issue,
-                                        bool blockMemoryResource) const;
-  ReadyScheduleStallFacts
-  classifyStall(unsigned baseline, const ReadyScheduleIssueFacts &issue,
-                const waveamdmachine::InstructionScheduleModel &policy) const;
-
-  ReadyScheduleWorkStats getWorkStats() const;
-
-private:
   friend class WaveAMDMachineScheduleModel;
   struct Impl;
   explicit RegionScheduleSession(std::unique_ptr<Impl> impl);
@@ -296,7 +330,7 @@ public:
       ArrayRef<SmallVector<waveamdmachine::MemoryCounterKind, 4>>
           fillerMemoryKinds,
       ArrayRef<unsigned> memoryNodes,
-      const llvm::BitVector &computeRecurrenceCritical,
+      ArrayRef<SmallVector<unsigned, 4>> ssaPredecessors,
       const waveamdmachine::EventSimConfig &config) const;
 
 private:
