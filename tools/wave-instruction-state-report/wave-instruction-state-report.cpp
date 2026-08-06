@@ -17,7 +17,6 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/InitAllDialects.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -308,8 +307,7 @@ int main(int argc, char **argv) {
       argc, argv, "Print WaveAMDMachine instruction execution state.\n");
 
   DialectRegistry registry;
-  registerAllDialects(registry);
-  registry.insert<wave::WaveDialect, waveamd::WaveAMDDialect,
+  registry.insert<func::FuncDialect, wave::WaveDialect, waveamd::WaveAMDDialect,
                   wavemeta::WaveMetaDialect,
                   waveamdmachine::WaveAMDMachineDialect>();
   MLIRContext context(registry);

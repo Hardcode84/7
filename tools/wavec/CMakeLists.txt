@@ -1,5 +1,3 @@
-get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
-
 set(LLVM_LINK_COMPONENTS
   Support
   TargetParser
@@ -12,12 +10,14 @@ target_link_libraries(wavec PRIVATE
   clangBasic
   clangFrontend
   clangLex
-  ${dialect_libs}
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRGPUDialect
   MLIRIR
   MLIRParser
-  MLIRRegisterAllDialects
   MLIRSupport
   MLIRTargetWave
+  MLIRUBDialect
   MLIRWaveAMDDialect
   MLIRWaveAMDMachineDialect
   MLIRWaveDialect

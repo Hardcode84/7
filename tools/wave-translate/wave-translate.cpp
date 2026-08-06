@@ -6,14 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/InitAllTranslations.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Tools/mlir-translate/MlirTranslateMain.h"
 
 #include "mlir/Target/Wave/AMDGPU.h"
 
 int main(int argc, char **argv) {
-  mlir::registerAllTranslations();
   mlir::wave::registerWaveToAMDGPUTranslation();
   return failed(mlir::mlirTranslateMain(argc, argv, "Wave translate driver\n"));
 }

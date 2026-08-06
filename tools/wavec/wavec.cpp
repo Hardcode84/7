@@ -28,6 +28,7 @@ extern "C" {
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
@@ -39,7 +40,6 @@ extern "C" {
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/InitAllDialects.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Target/Wave/AMDGPU.h"
 
@@ -601,9 +601,8 @@ static bool emitAstOutput(FrontendResult &result,
 }
 
 static void registerWaveDialects(DialectRegistry &registry) {
-  registerAllDialects(registry);
-  registry.insert<arith::ArithDialect, func::FuncDialect, ub::UBDialect,
-                  wave::WaveDialect, waveamd::WaveAMDDialect,
+  registry.insert<arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
+                  ub::UBDialect, wave::WaveDialect, waveamd::WaveAMDDialect,
                   wavemeta::WaveMetaDialect,
                   waveamdmachine::WaveAMDMachineDialect>();
 }

@@ -10,7 +10,6 @@ target_link_libraries(wave-sim-report PRIVATE
   MLIRFuncDialect
   MLIRIR
   MLIRParser
-  MLIRRegisterAllDialects
   MLIRSupport
   MLIRWaveAMDDialect
   MLIRWaveAMDMachineCostModel

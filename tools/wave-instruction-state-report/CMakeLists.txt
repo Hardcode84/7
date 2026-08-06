@@ -12,7 +12,6 @@ target_link_libraries(wave-instruction-state-report PRIVATE
   MLIRFuncDialect
   MLIRIR
   MLIRParser
-  MLIRRegisterAllDialects
   MLIRSupport
   MLIRWaveAMDDialect
   MLIRWaveAMDMachineCostModel
