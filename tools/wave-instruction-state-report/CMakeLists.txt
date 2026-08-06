@@ -6,6 +6,7 @@ set(LLVM_LINK_COMPONENTS
 add_llvm_executable(wave-instruction-state-report
   wave-instruction-state-report.cpp
 )
+wave_strip_release_executable(wave-instruction-state-report)
 
 llvm_update_compile_flags(wave-instruction-state-report)
 target_link_libraries(wave-instruction-state-report PRIVATE

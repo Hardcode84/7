@@ -7,6 +7,7 @@ set(LLVM_LINK_COMPONENTS
 )
 
 add_llvm_executable(wave-opt wave-opt.cpp)
+wave_strip_release_executable(wave-opt)
 
 llvm_update_compile_flags(wave-opt)
 target_link_libraries(wave-opt PRIVATE

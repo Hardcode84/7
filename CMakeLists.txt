@@ -38,7 +38,6 @@ list(PREPEND CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}")
 find_package(LLVM CONFIG)
 find_package(MLIR CONFIG)
 find_package(Clang CONFIG)
-find_package(LLD CONFIG)
 if(NOT LLVM_FOUND OR NOT MLIR_FOUND OR NOT Clang_FOUND)
   message(FATAL_ERROR
     "Could not find LLVM/MLIR/Clang at '${LLVM_INSTALL_DIR}'.\n"
@@ -48,10 +47,13 @@ if(NOT LLVM_FOUND OR NOT MLIR_FOUND OR NOT Clang_FOUND)
     "    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "
     "-DLLVM_INSTALL_DIR=/path/to/llvm-install")
 endif()
-if(NOT LLD_FOUND)
+find_program(WAVE_LLD_EXECUTABLE ld.lld
+  HINTS "${LLVM_INSTALL_DIR}/bin"
+  NO_DEFAULT_PATH)
+if(NOT WAVE_LLD_EXECUTABLE)
   message(FATAL_ERROR
-    "Could not find LLD at '${LLVM_INSTALL_DIR}'. The wave-compile-kernels "
-    "pass links lld in-process; rebuild LLVM with `-DLLVM_ENABLE_PROJECTS=...;lld`.")
+    "Could not find ld.lld at '${LLVM_INSTALL_DIR}/bin'. Rebuild LLVM with "
+    "`-DLLVM_ENABLE_PROJECTS=...;lld`.")
 endif()
 
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -107,6 +109,13 @@ include_directories(${PROJECT_BINARY_DIR}/include)
 
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
+
+function(wave_strip_release_executable target)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(${target} PRIVATE
+      "$<$<CONFIG:Release>:LINKER:--strip-all>")
+  endif()
+endfunction()
 
 # Wave transforms and the AMDGPU target translation reach into AMDGPU's
 # internal headers (SIDefines, AMDGPUMCTargetDesc, ...) which aren't part

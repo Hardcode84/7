@@ -14,6 +14,7 @@ set(LLVM_LINK_COMPONENTS
 add_llvm_executable(wave-target-info
   wave-target-info.cpp
 )
+wave_strip_release_executable(wave-target-info)
 
 llvm_update_compile_flags(wave-target-info)
 add_dependencies(wave-target-info

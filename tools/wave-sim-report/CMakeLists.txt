@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
 )
 
 add_llvm_executable(wave-sim-report wave-sim-report.cpp)
+wave_strip_release_executable(wave-sim-report)
 
 llvm_update_compile_flags(wave-sim-report)
 target_link_libraries(wave-sim-report PRIVATE

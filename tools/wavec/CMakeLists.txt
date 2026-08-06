@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
 )
 
 add_llvm_executable(wavec wavec.cpp)
+wave_strip_release_executable(wavec)
 
 llvm_update_compile_flags(wavec)
 target_link_libraries(wavec PRIVATE

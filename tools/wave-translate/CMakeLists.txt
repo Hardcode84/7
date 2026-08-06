@@ -3,6 +3,7 @@ set(LLVM_LINK_COMPONENTS
 )
 
 add_llvm_executable(wave-translate wave-translate.cpp)
+wave_strip_release_executable(wave-translate)
 
 llvm_update_compile_flags(wave-translate)
 target_link_libraries(wave-translate PRIVATE
