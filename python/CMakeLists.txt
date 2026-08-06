@@ -66,6 +66,23 @@ declare_mlir_python_extension(WavePythonSources.NanobindExtension
     WaveCAPI
 )
 
+declare_mlir_python_extension(WavePythonSources.SiteInitializer
+  MODULE_NAME _site_initialize_0
+  ADD_TO_PARENT WavePythonSources
+  SOURCES
+    WaveSiteInitialize.cpp
+  EMBED_CAPI_LINK_LIBS
+    MLIRCAPIArith
+    MLIRCAPIFunc
+    MLIRCAPIGPU
+    MLIRCAPIIR
+    MLIRCAPIMemRef
+    MLIRCAPISCF
+    MLIRCAPITransformDialect
+    MLIRCAPIUB
+    WaveCAPI
+)
+
 set(WavePythonModules_ROOT_PREFIX
   "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 set(WAVE_PYTHON_MLIR_LIBS "${WavePythonModules_ROOT_PREFIX}/_mlir_libs")
@@ -74,8 +91,15 @@ set(WAVE_PYTHON_NB_DOMAIN "mlir")
 
 _flatten_mlir_python_targets(_wave_python_targets
   WavePythonSources
-  MLIRPythonSources
-  MLIRPythonExtension.RegisterEverything)
+  MLIRPythonSources.Core
+  MLIRPythonSources.Dialects.arith
+  MLIRPythonSources.Dialects.func
+  MLIRPythonSources.Dialects.gpu
+  MLIRPythonSources.Dialects.memref
+  MLIRPythonSources.Dialects.scf
+  MLIRPythonSources.Dialects.transform
+  MLIRPythonSources.Dialects.transform.interpreter
+  MLIRPythonSources.Dialects.ub)
 
 set(_wave_python_pure_targets)
 set(_wave_python_bundle_link_libs)
@@ -116,6 +140,9 @@ foreach(source_target IN LISTS _wave_python_targets)
     endif()
   endif()
 endforeach()
+list(APPEND _wave_python_embed_libs
+  MLIRCAPIConversion
+  MLIRCAPITransforms)
 list(REMOVE_DUPLICATES _wave_python_embed_libs)
 list(REMOVE_DUPLICATES _wave_python_bundle_link_libs)
 list(REMOVE_DUPLICATES _wave_python_module_names)
@@ -251,6 +278,7 @@ set(WAVE_PYTHON_MLIR_LIBS \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${MLIR_BINDIN
 set(WAVE_PYTHON_BUNDLE \"_mlir${WAVE_PYTHON_MODULE_SUFFIX}\")
 set(WAVE_PYTHON_MODULE_SUFFIX \"${WAVE_PYTHON_MODULE_SUFFIX}\")
 set(WAVE_PYTHON_MODULE_NAMES_CSV \"${WAVE_PYTHON_MODULE_NAMES_CSV}\")
+include(\"${CMAKE_CURRENT_SOURCE_DIR}/wave-python-cleanup.cmake\")
 include(\"${CMAKE_CURRENT_SOURCE_DIR}/wave-python-link-aliases.cmake\")
 ")
 install(CODE "${_wave_python_install_aliases_code}" COMPONENT WavePythonModules)

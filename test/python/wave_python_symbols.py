@@ -46,7 +46,7 @@ bundle = next(iter(real_paths))
 defined = set(nm_symbols(bundle, "--defined-only"))
 required = {
     "PyInit__mlir",
-    "PyInit__mlirRegisterEverything",
+    "PyInit__site_initialize_0",
     "PyInit__waveDialectsNanobind",
 }
 missing = sorted(required - defined)
