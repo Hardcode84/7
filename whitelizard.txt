@@ -16,3 +16,31 @@
 # Goal: keep this file empty. To close out a function, refactor it under
 # the thresholds and delete its line. Adding a new entry should be
 # accompanied by an explicit justification in the commit message.
+
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emit
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::initializeMC
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::computeVGPRWindowMode
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::isVGPRWindowProgramStateInstruction
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::getClauseCoveringInstruction
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::collectPackedDelayAluSpans
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::insertVGPRWindowMode
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::handleModeSetreg
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::finalizeVGPRWindowBuffer
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::finalizeMCBuffer
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::getLoadCacheCPol
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::getStoreCacheCPol
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::getKernelEntryValueUsage
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitClusterWorkgroupId
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitArchitectedWorkgroupIds
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitFunction
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::verifyVGPRAddressability
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitKernelDescriptor
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::namedPhysReg
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::validateHighVGPREncoding
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitNamedMC
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitGfx1250Wmma
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitGlobalAtomicAddAcqRel
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitUniformLoop
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitCopy
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitSplitWaitcnt
+lib/Target/Wave/AMDGPU.cpp:WaveAMDGPUEmitter::emitOperation

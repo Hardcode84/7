@@ -49,7 +49,6 @@ add_mlir_translation_library(MLIRTargetWave
   MLIRIR
   MLIRParser
   MLIRROCDLDialect
-  MLIRROCDLTarget
   MLIRSupport
   MLIRTransformDialect
   MLIRTransformDialectTransforms
@@ -58,8 +57,6 @@ add_mlir_translation_library(MLIRTargetWave
   MLIRWaveDialect
   MLIRWaveAMDMachineDialect
   MLIRWaveTransforms
-  lldCommon
-  lldELF
   )
 
 target_include_directories(obj.MLIRTargetWave
@@ -76,4 +73,5 @@ target_include_directories(obj.MLIRTargetWave
 target_compile_definitions(obj.MLIRTargetWave
   PRIVATE
   "WAVE_DEFAULT_PIPELINE_REL=\"../share/wave-mlir/pipelines/pipelines.mlir\""
+  "WAVE_DEFAULT_LLD_REL=\"../llvm-install/bin/ld.lld\""
   )

@@ -13,7 +13,6 @@
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIDefines.h"
 #include "Utils/AMDGPUBaseInfo.h"
-#include "lld/Common/Driver.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
@@ -33,7 +32,6 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OwningOpRef.h"
-#include "mlir/Target/LLVM/ROCDL/Utils.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -43,13 +41,20 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Config/Targets.h"
+#include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCObjectFileInfo.h"
+#include "llvm/MC/MCObjectWriter.h"
+#include "llvm/MC/MCParser/MCAsmParser.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetOptions.h"
@@ -60,7 +65,9 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/SaveAndRestore.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/TargetParser.h"
@@ -73,8 +80,6 @@
 #include <limits>
 #include <optional>
 #include <variant>
-
-LLD_HAS_DRIVER(elf)
 
 using namespace mlir;
 
@@ -612,12 +617,9 @@ private:
   LogicalResult initializeMC(Operation *op) {
     static llvm::once_flag initializeBackendOnce;
     llvm::call_once(initializeBackendOnce, []() {
-      llvm::InitializeAllTargetInfos();
-      llvm::InitializeAllTargetMCs();
-      llvm::InitializeAllAsmPrinters();
-      // The `wave-compile-kernels` pass round-trips through MC asm parsing
-      // (`ROCDL::assembleIsa`), so the asm parser needs registering too.
-      llvm::InitializeAllAsmParsers();
+      LLVMInitializeAMDGPUTargetInfo();
+      LLVMInitializeAMDGPUTargetMC();
+      LLVMInitializeAMDGPUAsmParser();
     });
     auto module = dyn_cast<ModuleOp>(op);
     if (!module)
@@ -6120,10 +6122,11 @@ private:
 #error "WAVE_DEFAULT_PIPELINE_REL must be defined by the build system"
 #endif
 
-// Anchor symbol whose containing image getMainExecutable can hash back
-// to on platforms that need a fallback when `/proc/self/exe` is
-// unavailable.
-static void wavePipelineAnchor() {}
+#ifndef WAVE_DEFAULT_LLD_REL
+#error "WAVE_DEFAULT_LLD_REL must be defined by the build system"
+#endif
+
+static void waveImageAnchor() {}
 
 // Resolve the wave compilation pipeline library path.
 // `WAVE_PIPELINES_DIR` in the environment wins; otherwise compose the
@@ -6136,12 +6139,168 @@ static std::string findDefaultPipelineFile() {
     return std::string(p);
   }
   std::string exe = llvm::sys::fs::getMainExecutable(
-      /*Argv0=*/nullptr, reinterpret_cast<void *>(&wavePipelineAnchor));
+      /*Argv0=*/nullptr, reinterpret_cast<void *>(&waveImageAnchor));
   if (exe.empty())
     return {};
   SmallString<256> p(llvm::sys::path::parent_path(exe));
   llvm::sys::path::append(p, WAVE_DEFAULT_PIPELINE_REL);
   return std::string(p);
+}
+
+static FailureOr<std::string> findLldPath(Operation *opForDiag) {
+  if (const char *env = std::getenv("WAVE_LLVM_TOOLS_DIR")) {
+    SmallString<256> path(env);
+    llvm::sys::path::append(path, "ld.lld");
+    if (llvm::sys::fs::can_execute(path))
+      return std::string(path);
+    opForDiag->emitError(
+        "WAVE_LLVM_TOOLS_DIR does not contain executable ld.lld: ")
+        << path;
+    return failure();
+  }
+
+  std::string exe = llvm::sys::fs::getMainExecutable(
+      /*Argv0=*/nullptr, reinterpret_cast<void *>(&waveImageAnchor));
+  if (!exe.empty()) {
+    SmallString<256> path(llvm::sys::path::parent_path(exe));
+    llvm::sys::path::append(path, "ld.lld");
+    if (llvm::sys::fs::can_execute(path))
+      return std::string(path);
+
+    path = llvm::sys::path::parent_path(exe);
+    llvm::sys::path::append(path, WAVE_DEFAULT_LLD_REL);
+    if (llvm::sys::fs::can_execute(path))
+      return std::string(path);
+  }
+
+  llvm::ErrorOr<std::string> path = llvm::sys::findProgramByName("ld.lld");
+  if (path)
+    return *path;
+  opForDiag->emitError(
+      "unable to find ld.lld; set WAVE_LLVM_TOOLS_DIR to its bin directory");
+  return failure();
+}
+
+struct AMDGPUAssemblerInfo {
+  std::unique_ptr<llvm::MCRegisterInfo> registers;
+  std::unique_ptr<llvm::MCAsmInfo> assembly;
+  std::unique_ptr<llvm::MCSubtargetInfo> subtarget;
+  std::unique_ptr<llvm::MCInstrInfo> instructions;
+  llvm::MCTargetOptions options;
+  const llvm::Target *target;
+};
+
+static FailureOr<AMDGPUAssemblerInfo>
+createAMDGPUAssemblerInfo(Operation *opForDiag, const llvm::Triple &triple,
+                          StringRef chip, StringRef features) {
+  std::string error;
+  AMDGPUAssemblerInfo info;
+  info.target = llvm::TargetRegistry::lookupTarget(triple, error);
+  if (!info.target)
+    return opForDiag->emitError("failed to lookup AMDGPU target: ") << error;
+
+  info.registers.reset(info.target->createMCRegInfo(triple));
+  if (!info.registers)
+    return opForDiag->emitError("failed to create AMDGPU register info");
+  info.assembly.reset(
+      info.target->createMCAsmInfo(*info.registers, triple, info.options));
+  info.subtarget.reset(
+      info.target->createMCSubtargetInfo(triple, chip, features));
+  info.instructions.reset(info.target->createMCInstrInfo());
+  if (!info.assembly || !info.subtarget || !info.instructions)
+    return opForDiag->emitError("failed to create AMDGPU assembler state");
+  return info;
+}
+
+static FailureOr<SmallVector<char, 0>>
+assembleIsa(Operation *opForDiag, StringRef isa, StringRef targetTriple,
+            StringRef chip, StringRef features) {
+  SmallVector<char, 0> result;
+  llvm::raw_svector_ostream os(result);
+  llvm::Triple triple(llvm::Triple::normalize(targetTriple));
+  FailureOr<AMDGPUAssemblerInfo> info =
+      createAMDGPUAssemblerInfo(opForDiag, triple, chip, features);
+  if (failed(info))
+    return failure();
+
+  llvm::SourceMgr sourceManager;
+  sourceManager.AddNewSourceBuffer(llvm::MemoryBuffer::getMemBufferCopy(isa),
+                                   llvm::SMLoc());
+  llvm::MCContext ctx(triple, *info->assembly, *info->registers,
+                      *info->subtarget, &sourceManager);
+  std::unique_ptr<llvm::MCObjectFileInfo> objectInfo(
+      info->target->createMCObjectFileInfo(ctx, /*PIC=*/false,
+                                           /*LargeCodeModel=*/false));
+  ctx.setObjectFileInfo(objectInfo.get());
+  SmallString<128> cwd;
+  if (!llvm::sys::fs::current_path(cwd))
+    ctx.setCompilationDir(cwd);
+
+  std::unique_ptr<llvm::MCCodeEmitter> emitter(
+      info->target->createMCCodeEmitter(*info->instructions, ctx));
+  std::unique_ptr<llvm::MCAsmBackend> backend(info->target->createMCAsmBackend(
+      *info->subtarget, *info->registers, info->options));
+  if (!emitter || !backend)
+    return opForDiag->emitError("failed to create AMDGPU assembler backend");
+  std::unique_ptr<llvm::MCObjectWriter> objectWriter =
+      backend->createObjectWriter(os);
+  std::unique_ptr<llvm::MCStreamer> streamer(
+      info->target->createMCObjectStreamer(
+          triple, ctx, std::move(backend), std::move(objectWriter),
+          std::move(emitter), *info->subtarget));
+  std::unique_ptr<llvm::MCAsmParser> parser(
+      createMCAsmParser(sourceManager, ctx, *streamer, *info->assembly));
+  std::unique_ptr<llvm::MCTargetAsmParser> targetParser(
+      info->target->createMCAsmParser(*info->subtarget, *parser,
+                                      *info->instructions));
+  if (!targetParser)
+    return opForDiag->emitError("failed to create AMDGPU assembly parser");
+  parser->setTargetParser(*targetParser);
+  if (parser->Run(/*NoInitialTextSection=*/false))
+    return opForDiag->emitError("failed to assemble AMDGPU ISA");
+  return result;
+}
+
+static LogicalResult linkElfToHsaco(Operation *opForDiag, StringRef lldPath,
+                                    ArrayRef<char> objBytes,
+                                    SmallVectorImpl<char> &out) {
+  SmallString<128> objPath;
+  int objFd = -1;
+  if (llvm::sys::fs::createTemporaryFile("wave_obj", "o", objFd, objPath))
+    return opForDiag->emitError("failed to create temporary ELF object file");
+  llvm::FileRemover removeObj(objPath);
+  {
+    llvm::raw_fd_ostream os(objFd, /*shouldClose=*/true);
+    os.write(objBytes.data(), objBytes.size());
+  }
+
+  SmallString<128> hsacoPath;
+  if (llvm::sys::fs::createTemporaryFile("wave_kernels", "hsaco", hsacoPath))
+    return opForDiag->emitError("failed to create temporary HSACO file");
+  llvm::FileRemover removeHsaco(hsacoPath);
+
+  std::array<StringRef, 5> args = {lldPath, "-shared", objPath, "-o",
+                                   hsacoPath};
+  std::string error;
+  int status = llvm::sys::ExecuteAndWait(lldPath, args, std::nullopt, {},
+                                         /*SecondsToWait=*/0,
+                                         /*MemoryLimit=*/0, &error);
+  if (status != 0) {
+    InFlightDiagnostic diag = opForDiag->emitError("ld.lld failed");
+    if (!error.empty())
+      diag << ": " << error;
+    else
+      diag << " with exit code " << status;
+    return failure();
+  }
+
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> hsaco =
+      llvm::MemoryBuffer::getFile(hsacoPath, /*IsText=*/false);
+  if (std::error_code ec = hsaco.getError())
+    return opForDiag->emitError("failed to read HSACO blob: ") << ec.message();
+  StringRef bytes = (*hsaco)->getBuffer();
+  out.assign(bytes.begin(), bytes.end());
+  return success();
 }
 
 static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
@@ -6217,48 +6376,6 @@ LogicalResult mlir::wave::translateWaveToAMDGPU(Operation *op, raw_ostream &os,
   return WaveAMDGPUEmitter(os).emit(module);
 }
 
-// In-process lld driver wrapping the ELF input bytes in a temp file (the
-// system linker insists on file paths) and returning the produced HSACO as
-// a memory buffer. Temp files are removed on scope exit so they never leak
-// to user-visible paths.
-static LogicalResult linkElfToHsacoInProcess(Operation *opForDiag,
-                                             ArrayRef<char> objBytes,
-                                             SmallVectorImpl<char> &out) {
-  SmallString<128> objPath;
-  int objFd = -1;
-  if (llvm::sys::fs::createTemporaryFile("wave_obj", "o", objFd, objPath))
-    return opForDiag->emitError("failed to create temporary ELF object file");
-  llvm::FileRemover removeObj(objPath);
-  {
-    llvm::raw_fd_ostream os(objFd, /*shouldClose=*/true);
-    os.write(objBytes.data(), objBytes.size());
-  }
-
-  SmallString<128> hsacoPath;
-  if (llvm::sys::fs::createTemporaryFile("wave_kernels", "hsaco", hsacoPath))
-    return opForDiag->emitError("failed to create temporary HSACO file");
-  llvm::FileRemover removeHsaco(hsacoPath);
-
-  std::string stderrStr;
-  llvm::raw_string_ostream stderrOS(stderrStr);
-  std::string objStr(objPath.str());
-  std::string hsacoStr(hsacoPath.str());
-  std::array<const char *, 5> args = {"ld.lld", "-shared", objStr.c_str(), "-o",
-                                      hsacoStr.c_str()};
-  bool ok = lld::elf::link(args, llvm::nulls(), stderrOS,
-                           /*exitEarly=*/false,
-                           /*disableOutput=*/false);
-  if (!ok)
-    return opForDiag->emitError("lld failed: ") << stderrStr;
-
-  auto buf = llvm::MemoryBuffer::getFile(hsacoPath, /*IsText=*/false);
-  if (std::error_code ec = buf.getError())
-    return opForDiag->emitError("failed to read HSACO blob: ") << ec.message();
-  StringRef bytes = (*buf)->getBuffer();
-  out.assign(bytes.begin(), bytes.end());
-  return success();
-}
-
 LogicalResult
 mlir::wave::assembleWaveAMDGPUKernels(Operation *op, StringRef triple,
                                       StringRef chip, StringRef features,
@@ -6273,12 +6390,14 @@ mlir::wave::assembleWaveAMDGPUKernels(Operation *op, StringRef triple,
   if (failed(WaveAMDGPUEmitter(isaOS).emit(module)))
     return failure();
 
-  auto errCallback = [&] { return op->emitError(); };
   FailureOr<SmallVector<char, 0>> elf =
-      ROCDL::assembleIsa(StringRef(isaStorage.data(), isaStorage.size()),
-                         triple, chip, features, errCallback);
+      assembleIsa(op, StringRef(isaStorage.data(), isaStorage.size()), triple,
+                  chip, features);
   if (failed(elf))
     return failure();
 
-  return linkElfToHsacoInProcess(op, *elf, out);
+  FailureOr<std::string> lldPath = findLldPath(op);
+  if (failed(lldPath))
+    return failure();
+  return linkElfToHsaco(op, *lldPath, *elf, out);
 }
