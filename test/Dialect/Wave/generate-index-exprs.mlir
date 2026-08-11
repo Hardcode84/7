@@ -159,7 +159,7 @@ func.func @i64_signed_div_xor_global(%out: !wave.ptr<#wave.global, i8>,
   %idx = wave.assume %idx_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 8">] : i64
   %xor = wave.binary xori %idx, %c1 : i64, i64 -> i64
   %half = wave.binary divsi %xor, %c2 : i64, i64 -> i64
-  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*xor(1, raw0))"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-8 + raw0 <= 0">] ["raw0"](%[[ASSUME]]) : (i64) -> index
+  // CHECK: [[OFF:%.*]] = wave.index_expr <"floor(1/2*raw0)"> assuming [#wave.pred<"raw0 >= 0">, #wave.pred<"-8 + raw0 <= 0">] ["raw0"](%[[ASSUME]]) : (i64) -> index
   // CHECK: wave.ptr_add %{{.*}}, [[OFF]]
   %ptr = wave.ptr_add %out, %half
       : !wave.ptr<#wave.global, i8>, i64 -> !wave.ptr<#wave.global, i8>
@@ -493,7 +493,8 @@ func.func @assumed_existing_index_expr_binding_expands(
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
       : !wave.simd<index, 32>
   // CHECK: [[OUT:%.*]] = wave.index_expr <"2*(origin + xor(1, lid))"> assuming
-  // CHECK-SAME: #wave.pred<"2*(origin + xor(1, lid)) >= 0 & -62 + 2*origin + 2*xor(1, lid) <= 0">
+  // CHECK-SAME: #wave.pred<"origin + xor(1, lid) >= 0">
+  // CHECK-SAME: #wave.pred<"-31 + origin + xor(1, lid) <= 0">
   // CHECK-SAME: ["origin", "lid"](%[[ORIGIN]], %[[LANE]]) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %outer = wave.index_expr <"2*x"> ["x"](%bounded)
       : (!wave.simd<index, 32>) -> !wave.simd<index, 32>

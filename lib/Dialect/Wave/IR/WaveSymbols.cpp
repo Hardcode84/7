@@ -30,15 +30,17 @@ using namespace mlir::wave::sym;
 namespace {
 
 static ExprKind getExprKind(ixs_tag tag) {
-  static_assert(IXS_CMP == 12 && IXS_NOT == 15 && IXS_PARSE_ERROR == 17,
+  static_assert(IXS_CMP == 12 && IXS_NOT == 15 && IXS_PARSE_ERROR == 17 &&
+                    IXS_TRUNC == 18,
                 "update ixs_tag mappings");
-  static constexpr std::array<ExprKind, IXS_PARSE_ERROR + 1> kindByTag = {
+  static constexpr std::array<ExprKind, IXS_TRUNC + 1> kindByTag = {
       ExprKind::Integer, ExprKind::Rational, ExprKind::Symbol,
       ExprKind::Add,     ExprKind::Mul,      ExprKind::Floor,
       ExprKind::Ceil,    ExprKind::Mod,      ExprKind::Piecewise,
       ExprKind::Max,     ExprKind::Min,      ExprKind::Xor,
       ExprKind::Invalid, ExprKind::And,      ExprKind::Or,
       ExprKind::Invalid, ExprKind::Error,    ExprKind::ParseError,
+      ExprKind::Trunc,
   };
   size_t index = static_cast<size_t>(tag);
   return index < kindByTag.size() ? kindByTag[index] : ExprKind::Invalid;
@@ -97,7 +99,9 @@ static std::string renderNode(const ixs_node *node) {
     llvm::report_fatal_error(
         "wave symbolic printer reported an invalid length");
   std::string text(n + 1, '\0');
-  ixs_print(node, text.data(), text.size());
+  if (ixs_print(node, text.data(), text.size()) ==
+      std::numeric_limits<size_t>::max())
+    llvm::report_fatal_error("wave symbolic printer failed");
   text.resize(n);
   return text;
 }
@@ -244,7 +248,38 @@ static const ixs_node *composeRawBinary(ixs_session *session,
   }
 }
 
+static const ixs_node *composeFiniteDifference(ixs_session *session,
+                                               ixs_facts *facts,
+                                               const ixs_node *expr,
+                                               const ixs_node *symbol,
+                                               const ixs_node *step) {
+  if (ixs_node_tag(symbol) != IXS_SYM)
+    return nullptr;
+  const ixs_node *shiftedSymbol = ixs_add(session, symbol, step);
+  if (!shiftedSymbol)
+    return nullptr;
+  const ixs_node *shifted = ixs_subs(session, expr, symbol, shiftedSymbol);
+  if (!shifted)
+    return nullptr;
+  const ixs_node *difference = ixs_sub(session, shifted, expr);
+  if (!difference)
+    return nullptr;
+  difference = ixs_expand(session, difference);
+  return difference ? ixs_simplify_facts(facts, difference) : nullptr;
+}
+
 } // namespace
+
+llvm::StringRef mlir::wave::sym::getExprKindName(ExprKind kind) {
+  static constexpr std::array<llvm::StringLiteral, 18> names = {
+      "invalid", "integer", "rational", "symbol", "add",       "mul",
+      "floor",   "ceil",    "trunc",    "mod",    "piecewise", "max",
+      "min",     "xor",     "and",      "or",     "error",     "parse-error",
+  };
+  static_assert(names.size() == static_cast<size_t>(ExprKind::ParseError) + 1);
+  size_t index = static_cast<size_t>(kind);
+  return index < names.size() ? names[index] : names.front();
+}
 
 Store::Store() : ctx(ixs_ctx_create()) {
   if (!ctx)
@@ -1056,11 +1091,13 @@ std::optional<int64_t> Analysis::constantDifference(ExprHandle lhs,
     return std::nullopt;
   const ixs_node *rawLhs = rawExprNode(lhs, /*diagnostic=*/nullptr);
   const ixs_node *rawRhs = rawExprNode(rhs, /*diagnostic=*/nullptr);
-  int64_t delta = 0;
-  if (!rawLhs || !rawRhs ||
-      !ixs_constant_difference_facts(facts, rawLhs, rawRhs, &delta))
+  if (!rawLhs || !rawRhs)
     return std::nullopt;
-  return delta;
+  const ixs_node *difference = ixs_sub(session.raw(), rawLhs, rawRhs);
+  difference = difference ? ixs_simplify_facts(facts, difference) : nullptr;
+  if (!difference || ixs_node_tag(difference) != IXS_INT)
+    return std::nullopt;
+  return ixs_node_int_val(difference);
 }
 
 std::optional<AffineDecomposition>
@@ -1086,10 +1123,11 @@ std::optional<ExprHandle> Analysis::finiteDifference(ExprHandle expr,
   const ixs_node *rawExpr = rawExprNode(expr, /*diagnostic=*/nullptr);
   const ixs_node *rawSymbol = rawExprNode(symbol, /*diagnostic=*/nullptr);
   const ixs_node *rawStep = rawExprNode(step, /*diagnostic=*/nullptr);
-  const ixs_node *difference = nullptr;
-  if (!rawExpr || !rawSymbol || !rawStep ||
-      !ixs_finite_difference_facts(facts, rawExpr, rawSymbol, rawStep,
-                                   &difference))
+  if (!rawExpr || !rawSymbol || !rawStep)
+    return std::nullopt;
+  const ixs_node *difference = composeFiniteDifference(
+      session.raw(), facts, rawExpr, rawSymbol, rawStep);
+  if (!difference || !ixs_node_is_expr(difference))
     return std::nullopt;
   return ExprHandle(difference);
 }
@@ -1192,7 +1230,8 @@ MulFactor ExprView::getMulFactor(uint32_t index) const {
 
 ExprHandle ExprView::getUnaryArg() const {
   ExprKind kind = getKind();
-  if (kind != ExprKind::Floor && kind != ExprKind::Ceil)
+  if (kind != ExprKind::Floor && kind != ExprKind::Ceil &&
+      kind != ExprKind::Trunc)
     return {};
   return ExprHandle(ixs_node_unary_arg(value.raw()));
 }

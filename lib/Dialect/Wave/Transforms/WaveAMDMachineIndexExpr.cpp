@@ -2568,7 +2568,7 @@ static FailureOr<RationalIndexValue> materializeRationalCompoundIndexExprNode(
   }
   return user->emitError(
              "wave.index_expr selection does not support expression kind ")
-         << static_cast<int>(view.getKind());
+         << sym::getExprKindName(view.getKind());
 }
 
 static FailureOr<RationalIndexValue> materializeRationalIndexExprNode(
@@ -3260,7 +3260,7 @@ static FailureOr<Value> materializeCompoundIndexExprNode(
   }
   return user->emitError(
              "wave.index_expr selection does not support expression kind ")
-         << static_cast<int>(view.getKind());
+         << sym::getExprKindName(view.getKind());
 }
 
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,

@@ -383,9 +383,7 @@ aiter_partial_scale_module = build_aiter_mxfp4(
     wave_k_tiles=6,
 )
 aiter_partial_scale_text = str(aiter_partial_scale_module)
-assert (
-    "Mod(floor(1/16*Mod(__wave_dsl_aiter_stage_wi, 64)), 3)" in aiter_partial_scale_text
-)
+assert "Mod(Mod(__wave_dsl_aiter_stage_wi, 64), 48)" in aiter_partial_scale_text
 assert '<"512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">' in aiter_partial_scale_text
 assert (
     '<"256*(1 + 2*floor(1/64*__wave_dsl_aiter_stage_wi_first))">'

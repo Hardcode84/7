@@ -189,10 +189,10 @@ func.func @contiguous_buffer_scatter(
 // CHECK-LABEL: func.func @predicated_wrapping_buffer_scatter(
 // CHECK-SAME: %[[BASE:.*]]: !wave.ptr<#waveamd.buffer, f16>
 // CHECK: wave.where
-// CHECK: wave.index_expr <"1/2*Mod(2*raw0, 4294967296)">
+// CHECK: wave.index_expr <"Mod(raw0, 2147483648)">
 // CHECK: wave.ptr_add %[[BASE]]
 // CHECK: wave.where
-// CHECK: wave.index_expr <"1/2*Mod(2*raw0_0, 4294967296)">
+// CHECK: wave.index_expr <"Mod(raw0_0, 2147483648)">
 // CHECK: wave.ptr_add %[[BASE]]
 // CHECK-NOT: wave.scatter
 func.func @predicated_wrapping_buffer_scatter(

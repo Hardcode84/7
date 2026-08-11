@@ -40,10 +40,10 @@ void printLiteral(llvm::StringRef label, std::optional<int64_t> value) {
 const char *boolName(bool value) { return value ? "true" : "false"; }
 
 const char *exprKindName(sym::ExprKind kind) {
-  static constexpr std::array<const char *, 17> names = {
-      "invalid", "integer", "rational", "symbol",    "add",         "mul",
-      "floor",   "ceil",    "mod",      "piecewise", "max",         "min",
-      "xor",     "and",     "or",       "error",     "parse-error",
+  static constexpr std::array<const char *, 18> names = {
+      "invalid", "integer", "rational", "symbol", "add",       "mul",
+      "floor",   "ceil",    "trunc",    "mod",    "piecewise", "max",
+      "min",     "xor",     "and",      "or",     "error",     "parse-error",
   };
   static_assert(names.size() ==
                 static_cast<size_t>(sym::ExprKind::ParseError) + 1);
@@ -309,6 +309,13 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
   sym::ExprView floorView(*floorHandle);
   llvm::outs() << "view-floor-arg-kind: "
                << exprKindName(sym::ExprView(floorView.getUnaryArg()).getKind())
+               << "\n";
+
+  sym::ExprView truncView(mustParseExpr(store, "Trunc(x/5)"));
+  llvm::outs() << "view-trunc-kind: " << exprKindName(truncView.getKind())
+               << "\n";
+  llvm::outs() << "view-trunc-arg-kind: "
+               << exprKindName(sym::ExprView(truncView.getUnaryArg()).getKind())
                << "\n";
 
   sym::ExprHandle mod =

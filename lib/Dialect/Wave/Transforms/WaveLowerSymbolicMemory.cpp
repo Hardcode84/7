@@ -5792,7 +5792,7 @@ static FailureOr<SmallVector<SlotMapping, 4>> buildAccessSlotMappings(
     TimingScope analysisTiming =
         timing.nest("lower_symbolic_memory_create_mapping_analysis");
     FailureOr<std::unique_ptr<sym::Analysis>> analysis =
-        sym::Analysis::create(store, group.assumptions);
+        sym::Analysis::createDirect(store, group.assumptions);
     if (failed(analysis)) {
       access.op->emitOpError("mapping fact domain is inconsistent");
       return failure();

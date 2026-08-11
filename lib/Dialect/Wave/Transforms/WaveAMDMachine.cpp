@@ -2351,7 +2351,7 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
     break;
   }
   return user->emitError("full-address index_expr unsupported expression kind ")
-         << static_cast<int>(view.getKind());
+         << sym::getExprKindName(view.getKind());
 }
 
 static FailureOr<Value> materializeWideIndexExprNode(

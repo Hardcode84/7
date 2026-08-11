@@ -91,6 +91,7 @@ enum class ExprKind {
   Mul,
   Floor,
   Ceil,
+  Trunc,
   Mod,
   Piecewise,
   Max,
@@ -101,6 +102,8 @@ enum class ExprKind {
   Error,
   ParseError,
 };
+
+llvm::StringRef getExprKindName(ExprKind kind);
 
 enum class PredKind {
   Invalid,

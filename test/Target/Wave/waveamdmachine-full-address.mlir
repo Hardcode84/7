@@ -184,13 +184,12 @@ func.func @global_i64_floor_addr64(%out: !wave.ptr<#wave.global, i32>,
 }
 
 // SELECT-LABEL: func.func @global_i64_xor_floor_addr64
-// SELECT: waveamdmachine.v_xor_b64
+// SELECT-NOT: waveamdmachine.v_xor_b64
 // SELECT: waveamdmachine.v_lshrrev_b64
 // SELECT-NOT: waveamdmachine.global_store_b32_addr64
 // SELECT: waveamdmachine.global_store_b32
 // ASM-LABEL: global_i64_xor_floor_addr64:
-// ASM: v_xor_b32
-// ASM: v_xor_b32
+// ASM-NOT: v_xor_b32
 // ASM: v_lshrrev_b64
 // ASM: global_store_b32 v{{[0-9]+}}, v{{[0-9]+}}, s
 func.func @global_i64_xor_floor_addr64(%out: !wave.ptr<#wave.global, i32>,

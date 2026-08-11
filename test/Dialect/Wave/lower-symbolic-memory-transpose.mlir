@@ -325,12 +325,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @gfx950_b16_xor_transpose(
 // CHECK-NOT: wave.load
-// CHECK: wave.ptr_cast
 // CHECK: wave.index_expr <"xor(
 // CHECK-SAME: Mod(floor(1/8*item), 2)
 // CHECK-SAME: Mod(floor(1/16*item), 2)
 // CHECK: wave.ptr_add
-// CHECK: wave.ptr_cast
 // CHECK: waveamd.transpose_load
 // CHECK-NOT: wave.gather
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
@@ -353,7 +351,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-SAME: [[BASE:%.*]]: !wave.ptr<#wave.shared, f16>, [[ORIGIN:%.*]]: index)
 // CHECK-NOT: wave.load
 // CHECK: [[ITEM:%.*]] = wave.workitem_id 0
-// CHECK: [[OFFSET:%.*]] = wave.index_expr <"2*origin + xor(
+// CHECK: [[OFFSET:%.*]] = wave.index_expr <"origin + xor(
 // CHECK-SAME: ["origin", "item"]([[ORIGIN]], [[ITEM]])
 // CHECK: waveamd.transpose_load
 // CHECK-NOT: wave.gather
