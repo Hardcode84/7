@@ -134,21 +134,16 @@ inferScaledIntegerRange(sym::Store &store, sym::ExprHandle expr,
   return scaleIntegerRange(range->first, range->second, scale);
 }
 
-static FailureOr<sym::PredHandle> composeRangePredicate(sym::Store &store,
-                                                        sym::ExprHandle expr,
-                                                        int64_t lo,
-                                                        int64_t hi) {
-  FailureOr<sym::ExprHandle> lower = sym::composeExprInt(store, lo);
-  FailureOr<sym::ExprHandle> upper = sym::composeExprInt(store, hi);
-  if (failed(lower) || failed(upper))
-    return failure();
-  FailureOr<sym::PredHandle> ge =
-      sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, *lower);
-  FailureOr<sym::PredHandle> le =
-      sym::composePredCmp(store, expr, sym::PredCmpOp::Le, *upper);
-  if (failed(ge) || failed(le))
-    return failure();
-  return sym::composePredAnd(store, *ge, *le);
+static sym::PredHandle composeRangePredicate(sym::Store &store,
+                                             sym::ExprHandle expr, int64_t lo,
+                                             int64_t hi) {
+  sym::ExprHandle lower = sym::composeExprInt(store, lo);
+  sym::ExprHandle upper = sym::composeExprInt(store, hi);
+  sym::PredHandle ge =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, lower);
+  sym::PredHandle le =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Le, upper);
+  return sym::composePredAnd(store, ge, le);
 }
 
 static FailureOr<Value> scaleOffset(Operation *diagOp, Location loc,
@@ -160,14 +155,11 @@ static FailureOr<Value> scaleOffset(Operation *diagOp, Location loc,
   if (!dialect)
     return diagOp->emitError("Wave dialect is not loaded");
 
-  FailureOr<sym::ExprHandle> orig =
-      sym::composeExprSym(dialect->getSymbolStore(), "orig");
-  FailureOr<sym::ExprHandle> scaleExpr =
+  sym::ExprHandle orig = sym::composeExprSym(dialect->getSymbolStore(), "orig");
+  sym::ExprHandle scaleExpr =
       sym::composeExprInt(dialect->getSymbolStore(), scale);
-  if (failed(orig) || failed(scaleExpr))
-    return diagOp->emitError("failed to compose pointer offset scale");
   FailureOr<sym::ExprHandle> expr = sym::composeExprBinary(
-      dialect->getSymbolStore(), *orig, sym::ExprBinaryOp::Mul, *scaleExpr);
+      dialect->getSymbolStore(), orig, sym::ExprBinaryOp::Mul, scaleExpr);
   if (failed(expr))
     return diagOp->emitError("failed to compose pointer offset scale");
 
@@ -175,15 +167,13 @@ static FailureOr<Value> scaleOffset(Operation *diagOp, Location loc,
   SmallVector<sym::PredHandle> assumptions;
   appendAssumePredicates(dialect->getSymbolStore(), offset, name, assumptions);
   std::optional<std::pair<int64_t, int64_t>> scaledRange =
-      inferScaledIntegerRange(dialect->getSymbolStore(), *orig, assumptions,
+      inferScaledIntegerRange(dialect->getSymbolStore(), orig, assumptions,
                               scale);
   if (scaledRange) {
-    FailureOr<sym::PredHandle> pred =
+    sym::PredHandle pred =
         composeRangePredicate(dialect->getSymbolStore(), *expr,
                               scaledRange->first, scaledRange->second);
-    if (failed(pred))
-      return diagOp->emitError("failed to compose scaled offset range");
-    assumptions.push_back(*pred);
+    assumptions.push_back(pred);
   }
   Type resultType =
       getIndexExprResultType(offset.getContext(), ValueRange{offset});

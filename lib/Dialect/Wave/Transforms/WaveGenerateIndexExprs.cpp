@@ -63,8 +63,7 @@ static StringRef symbolName(const SymbolicOffsetBinding &binding) {
   return name;
 }
 
-static FailureOr<sym::ExprHandle> symbolExpr(sym::Store &store,
-                                             StringRef name) {
+static sym::ExprHandle symbolExpr(sym::Store &store, StringRef name) {
   return sym::composeExprSym(store, name);
 }
 
@@ -97,11 +96,9 @@ remapSymbolicOffset(sym::Store &store, const SymbolicOffset &offset,
     if (newName == oldName)
       continue;
 
-    FailureOr<sym::ExprHandle> target = symbolExpr(store, oldName);
-    FailureOr<sym::ExprHandle> replacement = symbolExpr(store, newName);
-    if (failed(target) || failed(replacement))
-      return failure();
-    substitutions.push_back({*target, *replacement});
+    sym::ExprHandle target = symbolExpr(store, oldName);
+    sym::ExprHandle replacement = symbolExpr(store, newName);
+    substitutions.push_back({target, replacement});
   }
 
   if (substitutions.empty())
@@ -514,15 +511,13 @@ appendExprSignedRangeAssumption(sym::Store &store, sym::ExprHandle expr,
                                 SignedI64Range range,
                                 SmallVectorImpl<sym::PredHandle> &assumptions) {
   constexpr llvm::StringLiteral resultName = "__wave_generated_result";
-  FailureOr<sym::ExprHandle> result = symbolExpr(store, resultName);
-  FailureOr<sym::PredHandle> resultRange =
+  sym::ExprHandle result = symbolExpr(store, resultName);
+  sym::PredHandle resultRange =
       sym::rangeAssumption(store, resultName, range.first, range.second);
-  if (failed(result) || failed(resultRange))
-    return failure();
   std::array<sym::ExprSubstitution, 1> substitution{
-      sym::ExprSubstitution{*result, expr}};
+      sym::ExprSubstitution{result, expr}};
   FailureOr<sym::PredHandle> remapped =
-      sym::substitutePred(store, *resultRange, substitution);
+      sym::substitutePred(store, resultRange, substitution);
   if (failed(remapped))
     return failure();
   if (!isPredicateImplied(store, *remapped, assumptions))
@@ -1828,11 +1823,11 @@ private:
       return success();
     FailureOr<std::unique_ptr<sym::Analysis>> analysis =
         sym::Analysis::create(store, offset.assumptions);
-    FailureOr<sym::ExprHandle> expression = symbolExpr(store, name);
-    if (failed(analysis) || failed(expression))
+    if (failed(analysis))
       return failure();
+    sym::ExprHandle expression = symbolExpr(store, name);
     std::optional<sym::Congruence> congruence =
-        (*analysis)->getSymbolCongruence(*expression);
+        (*analysis)->getSymbolCongruence(expression);
     if (!congruence || congruence->modulus <= 1)
       return success();
 
@@ -2427,12 +2422,12 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
     return preserveGeneratedBinding(state, name, value);
 
   sym::Store &store = dialect.getSymbolStore();
-  FailureOr<sym::ExprHandle> target = symbolExpr(store, name);
+  sym::ExprHandle target = symbolExpr(store, name);
   FailureOr<sym::ExprHandle> replacement =
       remapSymbolicOffset(store, **symbolic, state);
-  if (failed(target) || failed(replacement))
+  if (failed(replacement))
     return failure();
-  substitutions.push_back({*target, *replacement});
+  substitutions.push_back({target, *replacement});
   return true;
 }
 

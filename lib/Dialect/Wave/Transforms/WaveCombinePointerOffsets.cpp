@@ -55,8 +55,7 @@ struct NestedProducer {
   SmallVector<AssumeOp, 2> assumes;
 };
 
-static FailureOr<sym::ExprHandle> symbolExpr(sym::Store &store,
-                                             StringRef name) {
+static sym::ExprHandle symbolExpr(sym::Store &store, StringRef name) {
   return sym::composeExprSym(store, name);
 }
 
@@ -90,7 +89,7 @@ static StringRef reserveBindingName(StringRef requested, Value value,
   return reserveIndexExprBindingName(requested, value, reserved, byValue);
 }
 
-static FailureOr<sym::ExprHandle>
+static sym::ExprHandle
 substituteExprSymbols(sym::Store &store, sym::ExprHandle expr,
                       ArrayRef<sym::ExprSubstitution> substitutions) {
   if (substitutions.empty())
@@ -115,11 +114,9 @@ remapProducerExpr(sym::Store &store, IndexExprOp producer,
     if (newName == oldName)
       continue;
 
-    FailureOr<sym::ExprHandle> target = symbolExpr(store, oldName);
-    FailureOr<sym::ExprHandle> replacement = symbolExpr(store, newName);
-    if (failed(target) || failed(replacement))
-      return failure();
-    substitutions.push_back({*target, *replacement});
+    sym::ExprHandle target = symbolExpr(store, oldName);
+    sym::ExprHandle replacement = symbolExpr(store, newName);
+    substitutions.push_back({target, replacement});
   }
 
   SmallVector<sym::PredHandle> producerAssumptions;
@@ -267,31 +264,25 @@ inferIntegerRange(sym::Store &store, sym::ExprHandle expr,
   return std::make_pair(*lower, *upper);
 }
 
-static FailureOr<sym::PredHandle>
+static sym::PredHandle
 buildExprRangeAssumption(sym::Store &store, sym::ExprHandle expr,
                          std::pair<int64_t, int64_t> range) {
   constexpr llvm::StringLiteral resultName = "__wave_combined_result";
-  FailureOr<sym::ExprHandle> result = symbolExpr(store, resultName);
-  FailureOr<sym::PredHandle> assumption =
+  sym::ExprHandle result = symbolExpr(store, resultName);
+  sym::PredHandle assumption =
       sym::rangeAssumption(store, resultName, range.first, range.second);
-  if (failed(result) || failed(assumption))
-    return failure();
   std::array<sym::ExprSubstitution, 1> substitution{
-      sym::ExprSubstitution{*result, expr}};
-  return sym::substitutePred(store, *assumption, substitution);
+      sym::ExprSubstitution{result, expr}};
+  return sym::substitutePred(store, assumption, substitution);
 }
 
-static LogicalResult
+static void
 appendExprRangeAssumption(sym::Store &store, MergedIndexExpr &merged,
                           std::optional<std::pair<int64_t, int64_t>> range) {
   if (!range)
-    return success();
-  FailureOr<sym::PredHandle> assumption =
-      buildExprRangeAssumption(store, merged.expr, *range);
-  if (failed(assumption))
-    return failure();
-  merged.assumptions.push_back(*assumption);
-  return success();
+    return;
+  merged.assumptions.push_back(
+      buildExprRangeAssumption(store, merged.expr, *range));
 }
 
 static FailureOr<MergedIndexExpr>
@@ -363,12 +354,12 @@ static LogicalResult appendProducerBinding(sym::Store &store,
                                            IndexExprMergeState &state,
                                            StringRef name, Value value,
                                            NestedProducer nested) {
-  FailureOr<sym::ExprHandle> target = symbolExpr(store, name);
+  sym::ExprHandle target = symbolExpr(store, name);
   FailureOr<sym::ExprHandle> replacement =
       remapNestedBinding(store, nested.producer, state);
-  if (failed(target) || failed(replacement))
+  if (failed(replacement))
     return failure();
-  state.substitutions.push_back({*target, *replacement});
+  state.substitutions.push_back({target, *replacement});
   appendAssumePredicates(store, value, name, state.assumptions);
   for (AssumeOp nestedAssume : nested.assumes)
     if (llvm::none_of(state.assumes,
@@ -413,9 +404,7 @@ static FailureOr<bool> combineIndexExpr(IRRewriter &rewriter, IndexExprOp op,
       substituteAndSimplify(op, store, state.substitutions, state.assumptions);
   if (failed(merged))
     return failure();
-  if (failed(appendExprRangeAssumption(store, *merged, resultRange)))
-    return op.emitError(
-        "failed to preserve chained wave.index_expr result range");
+  appendExprRangeAssumption(store, *merged, resultRange);
 
   FailureOr<SmallVector<IndexExprBinding>> liveBindings =
       collectLiveBindings(merged->expr, state.bindings);

@@ -7321,10 +7321,13 @@ FailureOr<PointerOffset> scalePointerOffset(WaveAMDMachineSelector &S,
   if (failed(scaled))
     return failure();
   if (std::optional<IntRange64> range = inferPointerOffsetRange(S, offset);
-      range && !scaleRange64(*range, size) &&
-      failed(sym::expandExpr(S.symbolStore(), *scaled)))
-    return failure();
-  out.expr = *scaled;
+      range && !scaleRange64(*range, size)) {
+    out.expr = sym::expandExpr(S.symbolStore(), *scaled);
+    if (!sym::isExpr(out.expr))
+      return failure();
+  } else {
+    out.expr = *scaled;
+  }
   return out;
 }
 

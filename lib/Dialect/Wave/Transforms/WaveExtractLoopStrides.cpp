@@ -172,22 +172,19 @@ static void collectUsedNames(const BoundExpr &expr, llvm::StringSet<> &used) {
     used.insert(name);
 }
 
-static FailureOr<sym::ExprHandle>
-symbolForValue(sym::Store &store, Value value, StringRef stem,
-               llvm::StringSet<> &used, SmallVectorImpl<NamedBinding> &extra) {
+static sym::ExprHandle symbolForValue(sym::Store &store, Value value,
+                                      StringRef stem, llvm::StringSet<> &used,
+                                      SmallVectorImpl<NamedBinding> &extra) {
   if (std::optional<int64_t> constant = getConstantIntValue(value))
     return sym::composeExprInt(store, *constant);
 
   std::string name = uniqueName(used, stem);
-  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
-  if (failed(expr))
-    return failure();
+  sym::ExprHandle expr = sym::composeExprSym(store, name);
   extra.push_back({name, value});
-  return *expr;
+  return expr;
 }
 
-static FailureOr<sym::ExprHandle> symbolExpr(sym::Store &store,
-                                             StringRef name) {
+static sym::ExprHandle symbolExpr(sym::Store &store, StringRef name) {
   return sym::composeExprSym(store, name);
 }
 
@@ -462,21 +459,17 @@ expandIndexExpr(IndexExprOp op, scf::ForOp loop, sym::Store &store,
   SmallVector<sym::ExprSubstitution> substitutions;
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
-    FailureOr<sym::ExprHandle> target = symbolExpr(store, name);
-    if (failed(target))
-      return failure();
+    sym::ExprHandle target = symbolExpr(store, name);
 
     FailureOr<sym::ExprHandle> replacement =
         expandValueExpr(value, name, loop, store, solver, state, /*depth=*/0);
     if (failed(replacement))
       return failure();
-    substitutions.push_back({*target, *replacement});
+    substitutions.push_back({target, *replacement});
   }
 
-  FailureOr<sym::ExprHandle> substituted =
+  sym::ExprHandle substituted =
       sym::substituteExpr(store, op.getExpr().getValue(), substitutions);
-  if (failed(substituted))
-    return failure();
 
   SmallVector<sym::PredHandle> assumptions;
   appendIndexExprPredicates(op, assumptions);
@@ -485,7 +478,7 @@ expandIndexExpr(IndexExprOp op, scf::ForOp loop, sym::Store &store,
   if (failed(substitutedAssumptions))
     return failure();
   llvm::append_range(state.assumptions, *substitutedAssumptions);
-  return *substituted;
+  return substituted;
 }
 
 static FailureOr<ExpandedIndexExpr> expandIndexExpr(IndexExprOp op,
@@ -597,24 +590,19 @@ static FailureOr<BoundExpr> buildBaseExpr(const ExpandedIndexExpr &expanded,
   llvm::StringSet<> used;
   collectUsedNames(expanded, used);
 
-  FailureOr<sym::ExprHandle> iv = sym::composeExprSym(store, ivName);
+  sym::ExprHandle iv = sym::composeExprSym(store, ivName);
   SmallVector<NamedBinding> extra;
-  FailureOr<sym::ExprHandle> lower = symbolForValue(
+  sym::ExprHandle lower = symbolForValue(
       store, loop.getLowerBound(), (Twine(ivName) + "_lb").str(), used, extra);
-  if (failed(iv) || failed(lower))
-    return failure();
 
-  FailureOr<sym::ExprHandle> substituted =
-      sym::substituteExpr(store, expanded.materializationExpr, {{*iv, *lower}});
-  if (failed(substituted))
-    return failure();
+  sym::ExprHandle substituted =
+      sym::substituteExpr(store, expanded.materializationExpr, {{iv, lower}});
   FailureOr<SmallVector<sym::PredHandle>> substitutedAssumptions =
-      substituteIndexExprPredicates(store, expanded.assumptions,
-                                    {{*iv, *lower}});
+      substituteIndexExprPredicates(store, expanded.assumptions, {{iv, lower}});
   if (failed(substitutedAssumptions))
     return failure();
   FailureOr<sym::ExprHandle> simplified = simplifyExpandedForMaterialization(
-      store, *substituted, *substitutedAssumptions);
+      store, substituted, *substitutedAssumptions);
   if (failed(simplified))
     return failure();
   return bindLiveExpr(expanded, *simplified, ivName, *substitutedAssumptions,
@@ -708,23 +696,21 @@ static FailureOr<BoundExpr> buildStrideExpr(const ExpandedIndexExpr &expanded,
   llvm::StringSet<> used;
   collectUsedNames(expanded, used);
 
-  FailureOr<sym::ExprHandle> iv = sym::composeExprSym(store, ivName);
+  sym::ExprHandle iv = sym::composeExprSym(store, ivName);
   SmallVector<NamedBinding> extra;
-  FailureOr<sym::ExprHandle> step = symbolForValue(
+  sym::ExprHandle step = symbolForValue(
       store, loop.getStep(), (Twine(ivName) + "_step").str(), used, extra);
-  if (failed(iv) || failed(step))
-    return failure();
 
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
       sym::Analysis::create(store, expanded.assumptions);
   if (failed(analysis))
     return failure();
   FailureOr<StrideProof> proof =
-      buildStrideProof(**analysis, expanded, *iv, *step);
+      buildStrideProof(**analysis, expanded, iv, step);
   if (failed(proof))
     return failure();
   FailureOr<sym::ExprHandle> stride =
-      selectStrideExpr(**analysis, expanded, ivName, *iv, *step, *proof);
+      selectStrideExpr(**analysis, expanded, ivName, iv, step, *proof);
   if (failed(stride))
     return failure();
   (*analysis).reset();

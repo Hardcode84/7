@@ -18,6 +18,16 @@
 // CHECK: fits-u32: true
 // CHECK: fits-u32-unbounded: false
 // CHECK: fits-u32-compound: true
+// CHECK: sentinel-expr-invalid: true
+// CHECK: sentinel-expr-neg-propagates: true
+// CHECK: sentinel-expr-add-propagates: true
+// CHECK: sentinel-expr-simplify-propagates: true
+// CHECK: sentinel-analysis-add-propagates: true
+// CHECK: sentinel-analysis-simplify-propagates: true
+// CHECK: sentinel-analysis-batch-propagates: true
+// CHECK: sentinel-expr-expand-propagates: true
+// CHECK: sentinel-pred-invalid: true
+// CHECK: sentinel-pred-not-propagates: true
 
 // Const-correct facade over ixsimpl ADD/MUL/unary/binary/predicate nodes.
 // CHECK: view-add-valid: true
@@ -77,8 +87,6 @@
 // CHECK: analysis-substituted-upper: 28
 // CHECK: analysis-substituted-congruence: true
 // CHECK: analysis-batch-mutator-joint-success: true
-// CHECK: analysis-batch-mutator-rejected: true
-// CHECK: analysis-batch-mutator-poisoned: unknown
 // CHECK: analysis-query-cache-assume-invalidated: true
 // CHECK: analysis-query-cache-substitute-invalidated: true
 // CHECK: analysis-query-cache-range-invalidated: true
@@ -93,8 +101,6 @@
 // CHECK: analysis-or-mutator-rejected: true
 // CHECK: analysis-poisoned-query: unknown
 // CHECK: analysis-poisoned-expand: true
-// CHECK: analysis-invalid-handle-rejected: true
-// CHECK: analysis-invalid-handle-diagnostic: expected non-null wave.pred
 // CHECK: analysis-singleton-simplified: floor(1/128*raw0)
 // CHECK: analysis-singleton-source-cost: none
 // CHECK: analysis-singleton-simplified-cost: 2

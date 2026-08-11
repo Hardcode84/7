@@ -41,7 +41,7 @@ class AsmPrinter;
 
 namespace mlir::wave::sym {
 
-/// Hash-consed symbolic expression handle scoped to one Store/ixs_ctx.
+/// Hash-consed expression or propagated error sentinel, scoped to one Store.
 struct ExprHandle {
   ExprHandle() = default;
   explicit ExprHandle(const ixs_node *node) : node(node) {}
@@ -60,7 +60,7 @@ private:
   const ixs_node *node = nullptr;
 };
 
-/// Hash-consed symbolic predicate handle scoped to one Store/ixs_ctx.
+/// Hash-consed predicate or propagated error sentinel, scoped to one Store.
 struct PredHandle {
   PredHandle() = default;
   explicit PredHandle(const ixs_node *node) : node(node) {}
@@ -254,63 +254,46 @@ mlir::FailureOr<ExprHandle> importExpr(Store &store, const ixs_node *foreign,
 mlir::FailureOr<PredHandle> importPred(Store &store, const ixs_node *foreign,
                                        std::string *diagnostic = nullptr);
 
+/// Allocation failure follows llvm::report_bad_alloc_error.
 mlir::FailureOr<ExprHandle>
 composeExprBinary(Store &store, ExprHandle lhs, ExprBinaryOp op, ExprHandle rhs,
                   std::string *diagnostic = nullptr);
-mlir::FailureOr<ExprHandle> composeExprCeil(Store &store, ExprHandle value,
-                                            std::string *diagnostic = nullptr);
+ExprHandle composeExprCeil(Store &store, ExprHandle value);
 /// Floor of `value`. Use to turn an exact-rational `Div` into Python
 /// `//` (floored integer division).
-mlir::FailureOr<ExprHandle> composeExprFloor(Store &store, ExprHandle value,
-                                             std::string *diagnostic = nullptr);
-mlir::FailureOr<ExprHandle> composeExprNeg(Store &store, ExprHandle value,
-                                           std::string *diagnostic = nullptr);
+ExprHandle composeExprFloor(Store &store, ExprHandle value);
+ExprHandle composeExprNeg(Store &store, ExprHandle value);
 
 /// Symbol / integer leaves.
-mlir::FailureOr<ExprHandle> composeExprSym(Store &store, llvm::StringRef name,
-                                           std::string *diagnostic = nullptr);
-mlir::FailureOr<ExprHandle> composeExprInt(Store &store, int64_t value,
-                                           std::string *diagnostic = nullptr);
+ExprHandle composeExprSym(Store &store, llvm::StringRef name);
+ExprHandle composeExprInt(Store &store, int64_t value);
 mlir::FailureOr<ExprHandle>
 composeExprPiecewise(Store &store, llvm::ArrayRef<PiecewiseCase> cases,
                      std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle> composePredTrue(Store &store,
-                                            std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle> composePredFalse(Store &store,
-                                             std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle> composePredCmp(Store &store, ExprHandle lhs,
-                                           PredCmpOp op, ExprHandle rhs,
-                                           std::string *diagnostic = nullptr);
+PredHandle composePredTrue(Store &store);
+PredHandle composePredFalse(Store &store);
+PredHandle composePredCmp(Store &store, ExprHandle lhs, PredCmpOp op,
+                          ExprHandle rhs);
 /// AND / OR of two predicates.
-mlir::FailureOr<PredHandle> composePredAnd(Store &store, PredHandle lhs,
-                                           PredHandle rhs,
-                                           std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle> composePredOr(Store &store, PredHandle lhs,
-                                          PredHandle rhs,
-                                          std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle> composePredNot(Store &store, PredHandle value,
-                                           std::string *diagnostic = nullptr);
+PredHandle composePredAnd(Store &store, PredHandle lhs, PredHandle rhs);
+PredHandle composePredOr(Store &store, PredHandle lhs, PredHandle rhs);
+PredHandle composePredNot(Store &store, PredHandle value);
 /// Simplify under no assumptions.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          std::string *diagnostic = nullptr);
 mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
                                          std::string *diagnostic = nullptr);
 /// Simultaneous substitution; replacements are not rewritten.
-mlir::FailureOr<ExprHandle>
-substituteExpr(Store &store, ExprHandle value,
-               llvm::ArrayRef<ExprSubstitution> substitutions,
-               std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle>
-substitutePred(Store &store, PredHandle value,
-               llvm::ArrayRef<ExprSubstitution> substitutions,
-               std::string *diagnostic = nullptr);
+ExprHandle substituteExpr(Store &store, ExprHandle value,
+                          llvm::ArrayRef<ExprSubstitution> substitutions);
+PredHandle substitutePred(Store &store, PredHandle value,
+                          llvm::ArrayRef<ExprSubstitution> substitutions);
 
 /// Simplify `value` under `assumptions`.
 mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
                                          llvm::ArrayRef<PredHandle> assumptions,
                                          std::string *diagnostic = nullptr);
-mlir::FailureOr<ExprHandle> expandExpr(Store &store, ExprHandle value,
-                                       std::string *diagnostic = nullptr);
+ExprHandle expandExpr(Store &store, ExprHandle value);
 
 /// Three-valued result of a predicate entailment query.
 enum class CheckResult { True, False, Unknown };
@@ -392,47 +375,33 @@ public:
   mlir::FailureOr<ExprHandle> compose(ExprHandle lhs, ExprBinaryOp op,
                                       ExprHandle rhs,
                                       std::string *diagnostic = nullptr);
-  mlir::FailureOr<ExprHandle> composeCeil(ExprHandle value,
-                                          std::string *diagnostic = nullptr);
-  mlir::FailureOr<ExprHandle> composeFloor(ExprHandle value,
-                                           std::string *diagnostic = nullptr);
-  mlir::FailureOr<ExprHandle> composeNeg(ExprHandle value,
-                                         std::string *diagnostic = nullptr);
-  mlir::FailureOr<ExprHandle> composeSymbol(llvm::StringRef name,
-                                            std::string *diagnostic = nullptr);
-  mlir::FailureOr<ExprHandle> composeInteger(int64_t value,
-                                             std::string *diagnostic = nullptr);
+  ExprHandle composeCeil(ExprHandle value);
+  ExprHandle composeFloor(ExprHandle value);
+  ExprHandle composeNeg(ExprHandle value);
+  ExprHandle composeSymbol(llvm::StringRef name);
+  ExprHandle composeInteger(int64_t value);
   mlir::FailureOr<ExprHandle>
   composePiecewise(llvm::ArrayRef<PiecewiseCase> cases,
                    std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> composeTrue(std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> composeFalse(std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> compare(ExprHandle lhs, PredCmpOp op,
-                                      ExprHandle rhs,
-                                      std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> composeAnd(PredHandle lhs, PredHandle rhs,
-                                         std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> composeOr(PredHandle lhs, PredHandle rhs,
-                                        std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> composeNot(PredHandle value,
-                                         std::string *diagnostic = nullptr);
+  PredHandle composeTrue();
+  PredHandle composeFalse();
+  PredHandle compare(ExprHandle lhs, PredCmpOp op, ExprHandle rhs);
+  PredHandle composeAnd(PredHandle lhs, PredHandle rhs);
+  PredHandle composeOr(PredHandle lhs, PredHandle rhs);
+  PredHandle composeNot(PredHandle value);
 
-  mlir::FailureOr<ExprHandle>
-  substitute(ExprHandle value, llvm::ArrayRef<ExprSubstitution> substitutions,
-             std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle>
-  substitute(PredHandle value, llvm::ArrayRef<ExprSubstitution> substitutions,
-             std::string *diagnostic = nullptr);
+  ExprHandle substitute(ExprHandle value,
+                        llvm::ArrayRef<ExprSubstitution> substitutions);
+  PredHandle substitute(PredHandle value,
+                        llvm::ArrayRef<ExprSubstitution> substitutions);
   mlir::FailureOr<ExprHandle> simplify(ExprHandle value,
                                        std::string *diagnostic = nullptr);
   mlir::FailureOr<PredHandle> simplify(PredHandle value,
                                        std::string *diagnostic = nullptr);
   mlir::LogicalResult simplify(llvm::MutableArrayRef<ExprHandle> values,
                                std::string *diagnostic = nullptr);
-  mlir::FailureOr<ExprHandle> expand(ExprHandle value,
-                                     std::string *diagnostic = nullptr);
-  mlir::FailureOr<PredHandle> expand(PredHandle value,
-                                     std::string *diagnostic = nullptr);
+  ExprHandle expand(ExprHandle value);
+  PredHandle expand(PredHandle value);
 
   CheckResult check(PredHandle pred);
   CheckResult equivalent(ExprHandle lhs, ExprHandle rhs);
@@ -484,9 +453,8 @@ Pow2Fact getPow2Fact(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions);
 
 /// Build the assumption `name in [lo, hi]`.
-mlir::FailureOr<PredHandle> rangeAssumption(Store &store, llvm::StringRef name,
-                                            int64_t lo, int64_t hi,
-                                            std::string *diagnostic = nullptr);
+PredHandle rangeAssumption(Store &store, llvm::StringRef name, int64_t lo,
+                           int64_t hi);
 
 /// True iff `expr` provably stays in `[lo, hi]` under `assumptions`.
 bool provablyInRange(Analysis &analysis, ExprHandle expr, int64_t lo,

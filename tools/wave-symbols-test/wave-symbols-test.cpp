@@ -105,21 +105,11 @@ void printRendered(sym::Store &store, llvm::StringRef label,
 }
 
 sym::ExprHandle mustBuildInt(sym::Store &store, int64_t value) {
-  auto handle = sym::composeExprInt(store, value);
-  if (failed(handle)) {
-    llvm::errs() << "failed to build integer literal\n";
-    std::exit(1);
-  }
-  return *handle;
+  return sym::composeExprInt(store, value);
 }
 
 sym::ExprHandle mustBuildSym(sym::Store &store, llvm::StringRef name) {
-  auto handle = sym::composeExprSym(store, name);
-  if (failed(handle)) {
-    llvm::errs() << "failed to build symbol '" << name << "'\n";
-    std::exit(1);
-  }
-  return *handle;
+  return sym::composeExprSym(store, name);
 }
 
 sym::ExprHandle mustParseExpr(sym::Store &store, llvm::StringRef text) {
@@ -144,7 +134,8 @@ sym::PredHandle mustParsePred(sym::Store &store, llvm::StringRef text) {
 
 sym::ExprHandle mustCompose(sym::Store &store, sym::ExprHandle lhs,
                             sym::ExprBinaryOp op, sym::ExprHandle rhs) {
-  auto handle = sym::composeExprBinary(store, lhs, op, rhs);
+  FailureOr<sym::ExprHandle> handle =
+      sym::composeExprBinary(store, lhs, op, rhs);
   if (failed(handle)) {
     llvm::errs() << "failed to compose binary expression\n";
     std::exit(1);
@@ -184,17 +175,10 @@ sym::ExprHandle mustBuildAnalysisExpr(FailureOr<sym::ExprHandle> handle) {
   return *handle;
 }
 
-sym::PredHandle mustBuildAnalysisPred(FailureOr<sym::PredHandle> handle) {
-  if (failed(handle)) {
-    llvm::errs() << "failed to build symbolic analysis predicate\n";
-    std::exit(1);
-  }
-  return *handle;
-}
-
 sym::ExprHandle mustSimplify(sym::Store &store, sym::ExprHandle value) {
   std::string diagnostic;
-  auto handle = sym::simplifyExpr(store, value, &diagnostic);
+  FailureOr<sym::ExprHandle> handle =
+      sym::simplifyExpr(store, value, &diagnostic);
   if (failed(handle)) {
     llvm::errs() << "failed to simplify: " << diagnostic << "\n";
     std::exit(1);
@@ -203,13 +187,7 @@ sym::ExprHandle mustSimplify(sym::Store &store, sym::ExprHandle value) {
 }
 
 sym::ExprHandle mustExpand(sym::Store &store, sym::ExprHandle value) {
-  std::string diagnostic;
-  auto handle = sym::expandExpr(store, value, &diagnostic);
-  if (failed(handle)) {
-    llvm::errs() << "failed to expand: " << diagnostic << "\n";
-    std::exit(1);
-  }
-  return *handle;
+  return sym::expandExpr(store, value);
 }
 
 void printRange(llvm::StringRef label, sym::Store &store, sym::ExprHandle expr,
@@ -252,12 +230,8 @@ void printUtilitySmoke(sym::Store &store, sym::ExprHandle x) {
                       std::numeric_limits<int64_t>::max())
                << "\n";
 
-  auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
-  if (failed(rangeAssumption)) {
-    llvm::errs() << "failed to build range assumption\n";
-    std::exit(1);
-  }
-  llvm::SmallVector<sym::PredHandle, 1> assumptions{*rangeAssumption};
+  sym::PredHandle rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
+  llvm::SmallVector<sym::PredHandle, 1> assumptions{rangeAssumption};
   llvm::outs() << "fits-u32: "
                << boolName(sym::provablyFitsU32(store, x, assumptions)) << "\n";
   llvm::outs() << "fits-u32-unbounded: "
@@ -301,12 +275,7 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
 
   sym::ExprHandle ratio =
       mustCompose(store, threeX, sym::ExprBinaryOp::Div, five);
-  auto floorHandle = sym::composeExprFloor(store, ratio);
-  if (failed(floorHandle)) {
-    llvm::errs() << "failed to build floor facade smoke\n";
-    std::exit(1);
-  }
-  sym::ExprView floorView(*floorHandle);
+  sym::ExprView floorView(sym::composeExprFloor(store, ratio));
   llvm::outs() << "view-floor-arg-kind: "
                << exprKindName(sym::ExprView(floorView.getUnaryArg()).getKind())
                << "\n";
@@ -334,20 +303,11 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
   llvm::outs() << "view-or-kind: " << exprKindName(orView.getKind()) << "\n";
   llvm::outs() << "view-or-args: " << orView.getAssocArgCount() << "\n";
 
-  auto geZero =
+  sym::PredHandle geZero =
       sym::composePredCmp(store, x, sym::PredCmpOp::Ge, mustBuildInt(store, 0));
-  auto leMax = sym::composePredCmp(store, x, sym::PredCmpOp::Le,
-                                   mustBuildInt(store, 31));
-  if (failed(geZero) || failed(leMax)) {
-    llvm::errs() << "failed to build predicate facade smoke\n";
-    std::exit(1);
-  }
-  auto range = sym::composePredAnd(store, *geZero, *leMax);
-  if (failed(range)) {
-    llvm::errs() << "failed to build predicate AND facade smoke\n";
-    std::exit(1);
-  }
-  sym::PredView predView(*range);
+  sym::PredHandle leMax = sym::composePredCmp(store, x, sym::PredCmpOp::Le,
+                                              mustBuildInt(store, 31));
+  sym::PredView predView(sym::composePredAnd(store, geZero, leMax));
   llvm::outs() << "view-pred-valid: " << boolName(predView.isValid()) << "\n";
   llvm::outs() << "view-pred-kind: " << predKindName(predView.getKind())
                << "\n";
@@ -443,12 +403,12 @@ static void collectAnalysisAlgebra(sym::Analysis &analysis, sym::ExprHandle x,
 
 static sym::PredHandle buildXorCancellationQuery(sym::Analysis &analysis,
                                                  sym::ExprHandle x) {
-  sym::ExprHandle one = mustBuildAnalysisExpr(analysis.composeInteger(1));
+  sym::ExprHandle one = analysis.composeInteger(1);
   sym::ExprHandle inner =
       mustBuildAnalysisExpr(analysis.compose(one, sym::ExprBinaryOp::Xor, x));
   sym::ExprHandle outer = mustBuildAnalysisExpr(
       analysis.compose(one, sym::ExprBinaryOp::Xor, inner));
-  return mustBuildAnalysisPred(analysis.compare(outer, sym::PredCmpOp::Eq, x));
+  return analysis.compare(outer, sym::PredCmpOp::Eq, x);
 }
 
 static void runAnalysisCore(sym::Store &store, sym::ExprHandle x,
@@ -462,18 +422,15 @@ static void runAnalysisCore(sym::Store &store, sym::ExprHandle x,
   sym::ExprHandle affine = mustParseExpr(store, "3*x + 5");
   sym::ExprHandle unitSlope = mustParseExpr(store, "x + 5");
   std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store, {facts});
-  sym::ExprHandle four = mustBuildAnalysisExpr(analysis->composeInteger(4));
+  sym::ExprHandle four = analysis->composeInteger(4);
   sym::ExprHandle xPlusFour =
       mustBuildAnalysisExpr(analysis->compose(x, sym::ExprBinaryOp::Add, four));
-  sym::ExprHandle thirtyTwo =
-      mustBuildAnalysisExpr(analysis->composeInteger(32));
-  sym::ExprHandle zero = mustBuildAnalysisExpr(analysis->composeInteger(0));
-  sym::PredHandle belowThirtyTwo = mustBuildAnalysisPred(
-      analysis->compare(x, sym::PredCmpOp::Lt, thirtyTwo));
-  sym::PredHandle nonNegative =
-      mustBuildAnalysisPred(analysis->compare(x, sym::PredCmpOp::Ge, zero));
-  sym::PredHandle bounded =
-      mustBuildAnalysisPred(analysis->composeAnd(nonNegative, belowThirtyTwo));
+  sym::ExprHandle thirtyTwo = analysis->composeInteger(32);
+  sym::ExprHandle zero = analysis->composeInteger(0);
+  sym::PredHandle belowThirtyTwo =
+      analysis->compare(x, sym::PredCmpOp::Lt, thirtyTwo);
+  sym::PredHandle nonNegative = analysis->compare(x, sym::PredCmpOp::Ge, zero);
+  sym::PredHandle bounded = analysis->composeAnd(nonNegative, belowThirtyTwo);
   sym::PredHandle xorCancellation = buildXorCancellationQuery(*analysis, x);
 
   AnalysisRenderResults results;
@@ -523,8 +480,8 @@ static void runAnalysisRangeMutation(sym::Store &store, sym::ExprHandle x) {
   sym::InferredRange explicitRange;
   explicitRange.lower = sym::RationalEndpoint{2, 1};
   explicitRange.upper = sym::RationalEndpoint{4, 1};
-  sym::ExprHandle two = mustBuildAnalysisExpr(analysis->composeInteger(2));
-  sym::ExprHandle one = mustBuildAnalysisExpr(analysis->composeInteger(1));
+  sym::ExprHandle two = analysis->composeInteger(2);
+  sym::ExprHandle one = analysis->composeInteger(1);
   sym::ExprHandle scaled =
       mustBuildAnalysisExpr(analysis->compose(two, sym::ExprBinaryOp::Mul, x));
   sym::ExprHandle derived = mustBuildAnalysisExpr(
@@ -554,7 +511,7 @@ static void runAnalysisFactSubstitution(sym::Store &store, sym::ExprHandle x,
                << checkResultName(analysis->congruent(y, 4, 0)) << "\n";
 }
 
-static void runAnalysisBatchMutation(sym::Store &store, sym::ExprHandle x) {
+static void runAnalysisBatchMutation(sym::Store &store) {
   sym::PredHandle nonnegative = mustParsePred(store, "x >= 0");
   sym::PredHandle nonpositive = mustParsePred(store, "x <= 0");
   sym::PredHandle zero = mustParsePred(store, "x == 0");
@@ -564,13 +521,6 @@ static void runAnalysisBatchMutation(sym::Store &store, sym::ExprHandle x) {
                       analysis->check(zero) == sym::CheckResult::True;
   llvm::outs() << "analysis-batch-mutator-joint-success: "
                << boolName(jointSuccess) << "\n";
-
-  analysis = mustCreateAnalysis(store);
-  std::array<sym::PredHandle, 2> invalidFacts{nonnegative, sym::PredHandle{}};
-  llvm::outs() << "analysis-batch-mutator-rejected: "
-               << boolName(failed(analysis->assume(invalidFacts))) << "\n";
-  llvm::outs() << "analysis-batch-mutator-poisoned: "
-               << checkResultName(analysis->defined(x)) << "\n";
 }
 
 struct QueryCacheState {
@@ -739,17 +689,9 @@ static void runAnalysisRejection(sym::Store &store, sym::ExprHandle x,
                << boolName(failed(analysis->assume(invalidFacts))) << "\n";
   llvm::outs() << "analysis-poisoned-query: "
                << checkResultName(analysis->defined(x)) << "\n";
-  FailureOr<sym::ExprHandle> expanded = analysis->expand(x);
-  llvm::outs() << "analysis-poisoned-expand: "
-               << boolName(succeeded(expanded) && *expanded == x) << "\n";
-
-  analysis = mustCreateAnalysis(store);
-  std::string diagnostic = "stale";
-  llvm::outs() << "analysis-invalid-handle-rejected: "
-               << boolName(
-                      failed(analysis->assume(sym::PredHandle{}, &diagnostic)))
+  sym::ExprHandle expanded = analysis->expand(x);
+  llvm::outs() << "analysis-poisoned-expand: " << boolName(expanded == x)
                << "\n";
-  llvm::outs() << "analysis-invalid-handle-diagnostic: " << diagnostic << "\n";
 }
 
 static void runSingletonFactSimplification(sym::Store &store) {
@@ -814,17 +756,15 @@ static void runMaterializationCostQueries(sym::Store &store) {
 }
 
 void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
-  sym::PredHandle range =
-      mustBuildAnalysisPred(sym::rangeAssumption(store, "x", 0, 31));
+  sym::PredHandle range = sym::rangeAssumption(store, "x", 0, 31);
   sym::PredHandle multipleOfFour = mustParsePred(store, "Mod(x, 4) == 0");
-  sym::PredHandle facts =
-      mustBuildAnalysisPred(sym::composePredAnd(store, range, multipleOfFour));
-  sym::PredHandle invalidFacts = mustBuildAnalysisPred(sym::composePredOr(
-      store, mustParsePred(store, "x < 0"), mustParsePred(store, "x > 31")));
+  sym::PredHandle facts = sym::composePredAnd(store, range, multipleOfFour);
+  sym::PredHandle invalidFacts = sym::composePredOr(
+      store, mustParsePred(store, "x < 0"), mustParsePred(store, "x > 31"));
   runAnalysisCore(store, x, facts);
   runAnalysisRangeMutation(store, x);
   runAnalysisFactSubstitution(store, x, facts);
-  runAnalysisBatchMutation(store, x);
+  runAnalysisBatchMutation(store);
   runAnalysisQueryCacheInvalidation(store, x);
   runAnalysisBatchClosure(store);
   runOrderedGridEquivalence(store);
@@ -838,12 +778,8 @@ void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
 // fast path.
 void runRangeQueries(sym::Store &store, sym::ExprHandle x,
                      sym::ExprHandle fourX) {
-  auto rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
-  if (failed(rangeAssumption)) {
-    llvm::errs() << "failed to build range assumption\n";
-    std::exit(1);
-  }
-  llvm::SmallVector<sym::PredHandle, 1> assumptions{*rangeAssumption};
+  sym::PredHandle rangeAssumption = sym::rangeAssumption(store, "x", 0, 31);
+  llvm::SmallVector<sym::PredHandle, 1> assumptions{rangeAssumption};
 
   printRange("x-nonneg", store, x, assumptions, 0, 31);
 
@@ -880,12 +816,8 @@ void runPow2Queries(sym::Store &store, sym::ExprHandle x) {
 }
 
 void runDefinednessQueries(sym::Store &store) {
-  FailureOr<sym::PredHandle> range = sym::rangeAssumption(store, "x", 0, 31);
-  if (failed(range)) {
-    llvm::errs() << "failed to build definedness range\n";
-    std::exit(1);
-  }
-  llvm::SmallVector<sym::PredHandle, 1> assumptions{*range};
+  sym::PredHandle range = sym::rangeAssumption(store, "x", 0, 31);
+  llvm::SmallVector<sym::PredHandle, 1> assumptions{range};
   sym::ExprHandle safe = mustParseExpr(store, "floor(1 / (x + 1))");
   sym::ExprHandle literalDenominator = mustParseExpr(store, "floor(1/32*x)");
   sym::ExprHandle partial = mustParseExpr(store, "floor(1 / (x - 1))");
@@ -913,6 +845,48 @@ void runDefinednessQueries(sym::Store &store) {
                << boolName(sym::provablyDefined(store, symbolicMod,
                                                 {positiveDivisor}))
                << "\n";
+}
+
+static void runSentinelPropagation(sym::Store &store, sym::ExprHandle x) {
+  sym::ExprHandle partial = mustParseExpr(store, "Piecewise((0, x == 0))");
+  sym::ExprHandle one = sym::composeExprInt(store, 1);
+  sym::ExprHandle error = sym::substituteExpr(store, partial, {{x, one}});
+  sym::ExprHandle negated = sym::composeExprNeg(store, error);
+  sym::ExprHandle added =
+      mustCompose(store, error, sym::ExprBinaryOp::Add, one);
+  sym::ExprHandle simplified = mustSimplify(store, error);
+  sym::ExprHandle expanded = sym::expandExpr(store, error);
+  sym::PredHandle predicate =
+      sym::composePredCmp(store, error, sym::PredCmpOp::Eq, one);
+  sym::PredHandle inverted = sym::composePredNot(store, predicate);
+  std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
+  sym::ExprHandle analysisAdded = mustBuildAnalysisExpr(
+      analysis->compose(error, sym::ExprBinaryOp::Add, one));
+  sym::ExprHandle analysisSimplified =
+      mustBuildAnalysisExpr(analysis->simplify(error));
+  std::array<sym::ExprHandle, 2> batch{one, error};
+  bool batchPropagated = succeeded(analysis->simplify(batch)) &&
+                         batch[0] == one && batch[1] == error;
+  llvm::outs() << "sentinel-expr-invalid: " << boolName(!sym::isExpr(error))
+               << "\n";
+  llvm::outs() << "sentinel-expr-neg-propagates: " << boolName(negated == error)
+               << "\n";
+  llvm::outs() << "sentinel-expr-add-propagates: " << boolName(added == error)
+               << "\n";
+  llvm::outs() << "sentinel-expr-simplify-propagates: "
+               << boolName(simplified == error) << "\n";
+  llvm::outs() << "sentinel-analysis-add-propagates: "
+               << boolName(analysisAdded == error) << "\n";
+  llvm::outs() << "sentinel-analysis-simplify-propagates: "
+               << boolName(analysisSimplified == error) << "\n";
+  llvm::outs() << "sentinel-analysis-batch-propagates: "
+               << boolName(batchPropagated) << "\n";
+  llvm::outs() << "sentinel-expr-expand-propagates: "
+               << boolName(expanded == error) << "\n";
+  llvm::outs() << "sentinel-pred-invalid: " << boolName(!sym::isPred(predicate))
+               << "\n";
+  llvm::outs() << "sentinel-pred-not-propagates: "
+               << boolName(inverted == predicate) << "\n";
 }
 
 } // namespace
@@ -952,6 +926,7 @@ int main() {
   sym::ExprHandle six = mustBuildInt(store, 6);
 
   printUtilitySmoke(store, x);
+  runSentinelPropagation(store, x);
   sym::ExprHandle threeX = mustCompose(store, three, sym::ExprBinaryOp::Mul, x);
   printFacadeSmoke(store, x, five, threeX);
   runAnalysisQueries(store, x);
@@ -962,26 +937,12 @@ int main() {
       mustCompose(store, fourX, sym::ExprBinaryOp::Add, twoX);
   sym::ExprHandle lhsDiv =
       mustCompose(store, fourXPlusTwoX, sym::ExprBinaryOp::Div, three);
-  sym::ExprHandle lhs = [&] {
-    auto handle = sym::composeExprFloor(store, lhsDiv);
-    if (failed(handle)) {
-      llvm::errs() << "failed to build floor(lhs)\n";
-      std::exit(1);
-    }
-    return *handle;
-  }();
+  sym::ExprHandle lhs = sym::composeExprFloor(store, lhsDiv);
 
   sym::ExprHandle sixX = mustCompose(store, six, sym::ExprBinaryOp::Mul, x);
   sym::ExprHandle rhsDiv =
       mustCompose(store, sixX, sym::ExprBinaryOp::Div, three);
-  sym::ExprHandle rhs = [&] {
-    auto handle = sym::composeExprFloor(store, rhsDiv);
-    if (failed(handle)) {
-      llvm::errs() << "failed to build floor(rhs)\n";
-      std::exit(1);
-    }
-    return *handle;
-  }();
+  sym::ExprHandle rhs = sym::composeExprFloor(store, rhsDiv);
 
   printRendered(store, "lhs-raw", lhs);
   printRendered(store, "rhs-raw", rhs);

@@ -2419,11 +2419,7 @@ buildIndexExprRangeAssumption(sym::Store &store, StringRef name,
   std::optional<int64_t> hi = getSExtI64(range.smax());
   if (!lo || !hi)
     return std::nullopt;
-  FailureOr<sym::PredHandle> assumption =
-      sym::rangeAssumption(store, name, *lo, *hi);
-  if (failed(assumption))
-    return std::nullopt;
-  return *assumption;
+  return sym::rangeAssumption(store, name, *lo, *hi);
 }
 
 static bool isCmpAndTree(sym::PredHandle pred) {
@@ -2576,18 +2572,14 @@ buildIndexExprProducerRange(sym::Store &store, Value value) {
                                    producer.getResult().getType(), assumptions);
 }
 
-static FailureOr<sym::PredHandle>
+static sym::PredHandle
 composeLogicPredicate(sym::Analysis &analysis, sym::PredKind kind,
                       ArrayRef<sym::PredHandle> predicates) {
   assert(!predicates.empty() && "expected at least one predicate");
   sym::PredHandle current = predicates.front();
   for (sym::PredHandle pred : predicates.drop_front()) {
-    FailureOr<sym::PredHandle> next = kind == sym::PredKind::And
-                                          ? analysis.composeAnd(current, pred)
-                                          : analysis.composeOr(current, pred);
-    if (failed(next))
-      return failure();
-    current = *next;
+    current = kind == sym::PredKind::And ? analysis.composeAnd(current, pred)
+                                         : analysis.composeOr(current, pred);
   }
   return current;
 }
@@ -2622,11 +2614,8 @@ removeContradictedPredicateParts(sym::Analysis &analysis,
     return std::optional<sym::PredHandle>{};
   if (!changed)
     return std::optional<sym::PredHandle>{pred};
-  FailureOr<sym::PredHandle> rebuilt =
-      composeLogicPredicate(analysis, view.getKind(), kept);
-  if (failed(rebuilt))
-    return failure();
-  return std::optional<sym::PredHandle>{*rebuilt};
+  return std::optional<sym::PredHandle>{
+      composeLogicPredicate(analysis, view.getKind(), kept)};
 }
 
 static void
@@ -2676,23 +2665,17 @@ static void
 appendAssumePredicatesImpl(sym::Store &store, Value binding, StringRef name,
                            SmallVectorImpl<sym::PredHandle> &assumptions,
                            bool includeProducerRange) {
-  FailureOr<sym::ExprHandle> replacement = sym::composeExprSym(store, name);
-  if (failed(replacement))
-    return;
+  sym::ExprHandle replacement = sym::composeExprSym(store, name);
 
   while (auto assume = binding.getDefiningOp<AssumeOp>()) {
-    FailureOr<sym::ExprHandle> target =
-        sym::composeExprSym(store, assume.getName());
-    if (failed(target))
-      return;
+    sym::ExprHandle target = sym::composeExprSym(store, assume.getName());
     std::array<sym::ExprSubstitution, 1> substitutions{
-        sym::ExprSubstitution{*target, *replacement}};
-    for (Attribute attr : assume.getAssumptions()) {
-      FailureOr<sym::PredHandle> pred = sym::substitutePred(
-          store, cast<PredAttr>(attr).getValue(), substitutions);
-      if (succeeded(pred))
-        appendUniquePredicate(assumptions, *pred);
-    }
+        sym::ExprSubstitution{target, replacement}};
+    for (Attribute attr : assume.getAssumptions())
+      appendUniquePredicate(assumptions,
+                            sym::substitutePred(store,
+                                                cast<PredAttr>(attr).getValue(),
+                                                substitutions));
     binding = assume.getValue();
   }
   if (includeProducerRange)
@@ -2721,13 +2704,11 @@ static void appendRangePredicatesForInference(
 static std::optional<ConstantIntRanges>
 buildAssumePredicateRange(sym::Store &store, Value binding, StringRef name,
                           Type resultType, ArrayAttr attrs) {
-  FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
-  if (failed(expr))
-    return std::nullopt;
+  sym::ExprHandle expr = sym::composeExprSym(store, name);
   SmallVector<sym::PredHandle, 4> assumptions = getPredicateHandles(attrs);
   appendAssumePredicates(store, binding, name, assumptions);
   std::optional<sym::InferredRange> range =
-      sym::inferRange(store, *expr, assumptions);
+      sym::inferRange(store, expr, assumptions);
   if (!range)
     return std::nullopt;
 
@@ -4024,16 +4005,14 @@ mlir::wave::getIndexExprSymbolicOffset(IndexExprOp op) {
   appendIndexExprPredicates(op, offset.assumptions);
   for (auto [nameAttr, binding] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
-    FailureOr<sym::ExprHandle> sym = sym::composeExprSym(store, name);
-    if (failed(sym))
-      return op.emitError("failed to compose binding symbol '") << name << "'";
+    sym::ExprHandle symbol = sym::composeExprSym(store, name);
     FailureOr<SymbolicOffsetBindingKind> kind =
         classifySymbolicOffsetBinding(binding.getType(), [&](const Twine &msg) {
           return op.emitOpError(msg);
         });
     if (failed(kind))
       return failure();
-    offset.bindings.push_back({*sym, binding, *kind});
+    offset.bindings.push_back({symbol, binding, *kind});
     appendAssumePredicates(store, binding, name, offset.assumptions);
   }
   return offset;
@@ -4065,11 +4044,9 @@ static LogicalResult collectConstantIndexExprSubstitutions(
     if (!constant)
       continue;
     StringRef name = cast<StringAttr>(nameAttr).getValue();
-    FailureOr<sym::ExprHandle> target = sym::composeExprSym(store, name);
-    FailureOr<sym::ExprHandle> value = sym::composeExprInt(store, *constant);
-    if (failed(target) || failed(value))
-      return failure();
-    substitutions.push_back({*target, *value});
+    sym::ExprHandle target = sym::composeExprSym(store, name);
+    sym::ExprHandle value = sym::composeExprInt(store, *constant);
+    substitutions.push_back({target, value});
   }
   return success();
 }
@@ -4084,15 +4061,10 @@ mlir::wave::substituteIndexExprPredicates(
   SmallVector<sym::PredHandle> substituted;
   substituted.reserve(assumptions.size());
   for (sym::PredHandle pred : assumptions) {
-    FailureOr<sym::PredHandle> result =
-        analysis.substitute(pred, substitutions);
-    if (failed(result))
-      return failure();
-    FailureOr<sym::PredHandle> expanded = analysis.expand(*result);
-    if (failed(expanded))
-      return failure();
-    FailureOr<sym::PredHandle> simplified = analysis.simplify(*expanded);
-    substituted.push_back(succeeded(simplified) ? *simplified : *expanded);
+    sym::PredHandle result = analysis.substitute(pred, substitutions);
+    sym::PredHandle expanded = analysis.expand(result);
+    FailureOr<sym::PredHandle> simplified = analysis.simplify(expanded);
+    substituted.push_back(succeeded(simplified) ? *simplified : expanded);
   }
   return substituted;
 }
@@ -4527,16 +4499,14 @@ substituteAndSimplifyIndexExpr(IndexExprOp op, sym::Store &store) {
     if (failed((*analysis)->assume(pred)))
       return failure();
 
-  FailureOr<sym::ExprHandle> substituted =
+  sym::ExprHandle substituted =
       (*analysis)->substitute(op.getExpr().getValue(), substitutions);
-  if (failed(substituted))
-    return failure();
-  FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(*substituted);
+  FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(substituted);
   if (failed(simplified))
     return failure();
   sym::ExprHandle result =
-      shouldUseSimplifiedIndexExpr(*simplified, *substituted) ? *simplified
-                                                              : *substituted;
+      shouldUseSimplifiedIndexExpr(*simplified, substituted) ? *simplified
+                                                             : substituted;
 
   return CanonicalIndexExprSimplification{std::move(*substitutedAssumptions),
                                           result};
@@ -4572,24 +4542,18 @@ struct MergeChainedAssumeOp : OpRewritePattern<AssumeOp> {
       return failure();
     sym::Store &store = dialect->getSymbolStore();
 
-    FailureOr<sym::ExprHandle> sourceName =
-        sym::composeExprSym(store, source.getName());
-    FailureOr<sym::ExprHandle> targetName =
-        sym::composeExprSym(store, op.getName());
-    if (failed(sourceName) || failed(targetName))
-      return failure();
+    sym::ExprHandle sourceName = sym::composeExprSym(store, source.getName());
+    sym::ExprHandle targetName = sym::composeExprSym(store, op.getName());
 
     std::array<sym::ExprSubstitution, 1> substitutions{
-        sym::ExprSubstitution{*sourceName, *targetName}};
+        sym::ExprSubstitution{sourceName, targetName}};
     SmallVector<Attribute, 4> assumptions;
     assumptions.reserve(source.getAssumptions().size() +
                         op.getAssumptions().size());
     for (Attribute attr : source.getAssumptions()) {
-      FailureOr<sym::PredHandle> pred = sym::substitutePred(
+      sym::PredHandle pred = sym::substitutePred(
           store, cast<PredAttr>(attr).getValue(), substitutions);
-      if (failed(pred))
-        return failure();
-      assumptions.push_back(PredAttr::get(op.getContext(), *pred));
+      assumptions.push_back(PredAttr::get(op.getContext(), pred));
     }
     for (Attribute attr : op.getAssumptions())
       assumptions.push_back(attr);

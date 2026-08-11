@@ -41,12 +41,8 @@ public:
   }
 
   FailureOr<MemoryAddress> finish(Value base) {
-    if (!expr) {
-      FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-      if (failed(zero))
-        return failure();
-      expr = *zero;
-    }
+    if (!expr)
+      expr = sym::composeExprInt(store, 0);
     FailureOr<sym::ExprHandle> simplified =
         offset.assumptions.empty()
             ? sym::simplifyExpr(store, expr)
@@ -86,13 +82,10 @@ private:
           bindingByName.try_emplace(fresh, binding.value);
       (void)inserted;
       StringRef freshRef = freshIt->getKey();
-      FailureOr<sym::ExprHandle> replacement =
-          sym::composeExprSym(store, freshRef);
-      if (failed(replacement))
-        return failure();
-      offset.bindings.push_back({*replacement, binding.value, binding.kind});
+      sym::ExprHandle replacement = sym::composeExprSym(store, freshRef);
+      offset.bindings.push_back({replacement, binding.value, binding.kind});
       offset.laneWidth = std::max(offset.laneWidth, symbolic.laneWidth);
-      substitutions.push_back({binding.name, *replacement});
+      substitutions.push_back({binding.name, replacement});
     }
     FailureOr<SmallVector<sym::PredHandle>> assumptions =
         substituteIndexExprPredicates(store, symbolic.assumptions,
@@ -102,21 +95,13 @@ private:
     llvm::append_range(offset.assumptions, *assumptions);
 
     sym::ExprHandle expr = symbolic.expr;
-    if (!substitutions.empty()) {
-      FailureOr<sym::ExprHandle> substituted =
-          sym::substituteExpr(store, expr, substitutions);
-      if (failed(substituted))
-        return failure();
-      expr = *substituted;
-    }
+    if (!substitutions.empty())
+      expr = sym::substituteExpr(store, expr, substitutions);
     return appendExpr(expr);
   }
 
   LogicalResult appendConstant(int64_t value) {
-    FailureOr<sym::ExprHandle> constant = sym::composeExprInt(store, value);
-    if (failed(constant))
-      return failure();
-    return appendExpr(*constant);
+    return appendExpr(sym::composeExprInt(store, value));
   }
 
   LogicalResult appendRaw(Value value, bool &skip) {
@@ -192,18 +177,12 @@ private:
     FailureOr<sym::ExprHandle> lhs = buildValueExpr(op.getLhs(), skip, depth);
     if (skip || failed(lhs))
       return failure();
-    FailureOr<sym::ExprHandle> scale =
-        sym::composeExprInt(store, int64_t{1} << *shift);
-    if (failed(scale))
-      return failure();
-    return sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mul, *scale);
+    sym::ExprHandle scale = sym::composeExprInt(store, int64_t{1} << *shift);
+    return sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mul, scale);
   }
 
   FailureOr<sym::ExprHandle> bindSymbol(Value value) {
     std::string name = freshName();
-    FailureOr<sym::ExprHandle> sym = sym::composeExprSym(store, name);
-    if (failed(sym))
-      return failure();
     SymbolicOffsetBindingKind kind = SymbolicOffsetBindingKind::Uniform;
     if (auto simdType = dyn_cast<SimdType>(value.getType())) {
       kind = SymbolicOffsetBindingKind::Lane;
@@ -215,9 +194,10 @@ private:
     } else if (!value.getType().isIndex()) {
       return failure();
     }
+    sym::ExprHandle symbol = sym::composeExprSym(store, name);
     bindingByName[name] = value;
-    offset.bindings.push_back({*sym, value, kind});
-    return *sym;
+    offset.bindings.push_back({symbol, value, kind});
+    return symbol;
   }
 
   LogicalResult appendExpr(sym::ExprHandle term) {
@@ -308,13 +288,8 @@ substituteDeltaBindings(WaveDialect &dialect, const MemoryAddress &lhs,
   }
 
   sym::ExprHandle expr = rhs.offset.expr;
-  if (!substitutions.empty()) {
-    FailureOr<sym::ExprHandle> substituted =
-        sym::substituteExpr(store, expr, substitutions);
-    if (failed(substituted))
-      return failure();
-    expr = *substituted;
-  }
+  if (!substitutions.empty())
+    expr = sym::substituteExpr(store, expr, substitutions);
   FailureOr<SmallVector<sym::PredHandle>> assumptions =
       substituteIndexExprPredicates(store, rhs.offset.assumptions,
                                     substitutions);

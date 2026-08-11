@@ -144,10 +144,7 @@ static bool rewriteIndexExpr(IRRewriter &rewriter, IndexExprOp op,
 
 static FailureOr<sym::ExprHandle> expandAndSimplify(sym::Analysis &analysis,
                                                     sym::ExprHandle expr) {
-  if (FailureOr<sym::ExprHandle> expanded = analysis.expand(expr);
-      succeeded(expanded))
-    expr = *expanded;
-  return analysis.simplify(expr);
+  return analysis.simplify(analysis.expand(expr));
 }
 
 static FailureOr<std::optional<sym::PredHandle>>
@@ -164,13 +161,10 @@ simplifyExplicitComparison(sym::Analysis &analysis, sym::PredView view) {
       expandAndSimplify(analysis, view.getCmpRhs());
   if (failed(lhs) || failed(rhs))
     return failure();
-  FailureOr<sym::PredHandle> rewritten =
-      analysis.compare(*lhs, *comparison, *rhs);
-  if (failed(rewritten))
-    return failure();
-  if (analysis.check(*rewritten) == sym::CheckResult::False)
+  sym::PredHandle rewritten = analysis.compare(*lhs, *comparison, *rhs);
+  if (analysis.check(rewritten) == sym::CheckResult::False)
     return std::optional<sym::PredHandle>{};
-  return std::optional<sym::PredHandle>{*rewritten};
+  return std::optional<sym::PredHandle>{rewritten};
 }
 
 static FailureOr<std::optional<sym::PredHandle>>
@@ -187,10 +181,7 @@ simplifyExplicitConjunction(sym::Analysis &analysis, sym::PredView view) {
       result = **arg;
       continue;
     }
-    FailureOr<sym::PredHandle> combined = analysis.composeAnd(*result, **arg);
-    if (failed(combined))
-      return failure();
-    result = *combined;
+    result = analysis.composeAnd(*result, **arg);
   }
   return result;
 }
@@ -237,10 +228,7 @@ static FailureOr<bool> simplifyIndexExpr(IRRewriter &rewriter, IndexExprOp op,
   if (failed(analysis))
     return op.emitError("failed to create wave.index_expr analysis");
   sym::ExprHandle original = op.getExpr().getValue();
-  sym::ExprHandle expanded = original;
-  if (FailureOr<sym::ExprHandle> result = (*analysis)->expand(expanded);
-      succeeded(result))
-    expanded = *result;
+  sym::ExprHandle expanded = (*analysis)->expand(original);
   FailureOr<sym::ExprHandle> simplified = (*analysis)->simplify(expanded);
   if (failed(simplified))
     return op.emitError("failed to range-simplify wave.index_expr");

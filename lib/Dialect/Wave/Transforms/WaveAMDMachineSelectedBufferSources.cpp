@@ -76,18 +76,15 @@ collectImmediateValues(WaveAMDMachineSelector &S, const AddressPlan &plan,
   return values;
 }
 
-static std::optional<SmallVector<sym::ExprSubstitution, 4>>
+static SmallVector<sym::ExprSubstitution, 4>
 buildConstantSubstitutions(sym::Analysis &analysis, ArrayRef<StringRef> names,
                            ArrayRef<int64_t> values) {
   SmallVector<sym::ExprSubstitution, 4> substitutions;
   substitutions.reserve(names.size());
   for (size_t index : llvm::seq<size_t>(names.size())) {
-    FailureOr<sym::ExprHandle> target = analysis.composeSymbol(names[index]);
-    FailureOr<sym::ExprHandle> replacement =
-        analysis.composeInteger(values[index]);
-    if (failed(target) || failed(replacement))
-      return std::nullopt;
-    substitutions.push_back({*target, *replacement});
+    sym::ExprHandle target = analysis.composeSymbol(names[index]);
+    sym::ExprHandle replacement = analysis.composeInteger(values[index]);
+    substitutions.push_back({target, replacement});
   }
   return substitutions;
 }
@@ -106,15 +103,12 @@ static std::optional<int64_t> evaluateConstantExpr(WaveAMDMachineSelector &S,
   if (failed(created))
     return std::nullopt;
   sym::Analysis &analysis = **created;
-  std::optional<SmallVector<sym::ExprSubstitution, 4>> substitutions =
+  SmallVector<sym::ExprSubstitution, 4> substitutions =
       buildConstantSubstitutions(analysis, names, *values);
-  if (!substitutions)
+  sym::ExprHandle substituted = analysis.substitute(expr, substitutions);
+  if (failed(analysis.substituteFacts(substitutions)))
     return std::nullopt;
-  FailureOr<sym::ExprHandle> substituted =
-      analysis.substitute(expr, *substitutions);
-  if (failed(substituted) || failed(analysis.substituteFacts(*substitutions)))
-    return std::nullopt;
-  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*substituted);
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(substituted);
   if (failed(simplified))
     return std::nullopt;
   return sym::getIntegerLiteralValue(*simplified);
@@ -125,11 +119,9 @@ appendInstOffsetExpr(WaveAMDMachineSelector &S, sym::ExprHandle voffset,
                      const AddressPlan &plan, bool includeInstOffset) {
   if (!includeInstOffset || plan.instOffset == 0)
     return voffset;
-  FailureOr<sym::ExprHandle> instOffset =
+  sym::ExprHandle instOffset =
       sym::composeExprInt(S.symbolStore(), plan.instOffset);
-  if (failed(instOffset))
-    return failure();
-  return appendAddressExpr(S, voffset, *instOffset);
+  return appendAddressExpr(S, voffset, instOffset);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -147,14 +139,9 @@ composeFoldedVOffset(WaveAMDMachineSelector &S, const AddressPlan &plan,
 
 static FailureOr<sym::ExprHandle>
 buildVOffsetProof(sym::Analysis &analysis, sym::ExprHandle materialization) {
-  FailureOr<sym::ExprHandle> proof = analysis.expand(materialization);
-  if (succeeded(proof)) {
-    FailureOr<sym::ExprHandle> simplified = analysis.simplify(*proof);
-    if (succeeded(simplified))
-      return *simplified;
-    return *proof;
-  }
-  return analysis.simplify(materialization);
+  sym::ExprHandle proof = analysis.expand(materialization);
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(proof);
+  return succeeded(simplified) ? *simplified : proof;
 }
 
 static void clearFoldedAddressFields(AddressPlan &plan,

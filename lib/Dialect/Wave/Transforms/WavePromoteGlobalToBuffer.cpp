@@ -62,12 +62,10 @@ static bool provablyInRangeWithExpansion(sym::Analysis &analysis,
       succeeded(simplified) &&
       sym::provablyInRange(analysis, *simplified, lower, upper))
     return true;
-  FailureOr<sym::ExprHandle> expanded = analysis.expand(expr);
-  if (failed(expanded))
-    return false;
-  if (sym::provablyInRange(analysis, *expanded, lower, upper))
+  sym::ExprHandle expanded = analysis.expand(expr);
+  if (sym::provablyInRange(analysis, expanded, lower, upper))
     return true;
-  FailureOr<sym::ExprHandle> simplified = analysis.simplify(*expanded);
+  FailureOr<sym::ExprHandle> simplified = analysis.simplify(expanded);
   return succeeded(simplified) &&
          sym::provablyInRange(analysis, *simplified, lower, upper);
 }
@@ -135,11 +133,8 @@ static FailureOr<sym::ExprHandle>
 scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale) {
   if (!expr || scale == 1)
     return expr;
-  FailureOr<sym::ExprHandle> scaleExpr = sym::composeExprInt(store, scale);
-  if (failed(scaleExpr))
-    return failure();
-  return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mul,
-                                *scaleExpr);
+  sym::ExprHandle scaleExpr = sym::composeExprInt(store, scale);
+  return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mul, scaleExpr);
 }
 
 static bool isWideScalarInteger(Type type) {
@@ -381,11 +376,8 @@ private:
       std::optional<int64_t> scaled = llvm::checkedMul(*constant, scale);
       if (!scaled)
         return failure();
-      FailureOr<sym::ExprHandle> expr = sym::composeExprInt(store, *scaled);
-      if (failed(expr))
-        return failure();
       ByteOffset offset;
-      offset.expr = *expr;
+      offset.expr = sym::composeExprInt(store, *scaled);
       return offset;
     }
 
@@ -402,11 +394,9 @@ private:
         return failure();
       std::string name = getFreshIndexExprBindingName(
           "__wave_buffer_idx_", reservedSymbols, nextSymbol);
-      FailureOr<sym::ExprHandle> replacement = sym::composeExprSym(store, name);
-      if (failed(replacement))
-        return failure();
+      sym::ExprHandle replacement = sym::composeExprSym(store, name);
       reservedSymbols[name] = binding.value;
-      substitutions.push_back({binding.name, *replacement});
+      substitutions.push_back({binding.name, replacement});
       offset.bindings.push_back({name, binding.value});
       appendKnownPredicates(solver, store, binding.value, name,
                             offset.assumptions);
@@ -414,19 +404,16 @@ private:
     return success();
   }
 
-  LogicalResult
+  void
   appendIndexExprAssumptions(const SymbolicOffset &symbolic, ByteOffset &offset,
                              ArrayRef<sym::ExprSubstitution> substitutions) {
     for (sym::PredHandle pred : symbolic.assumptions) {
-      FailureOr<sym::PredHandle> substituted =
+      sym::PredHandle substituted =
           substitutions.empty()
-              ? FailureOr<sym::PredHandle>(pred)
+              ? pred
               : sym::substitutePred(store, pred, substitutions);
-      if (failed(substituted))
-        return failure();
-      offset.assumptions.push_back(*substituted);
+      offset.assumptions.push_back(substituted);
     }
-    return success();
   }
 
   FailureOr<ByteOffset> buildIndexExprOffset(IndexExprOp op, int64_t scale) {
@@ -438,16 +425,10 @@ private:
     SmallVector<sym::ExprSubstitution, 4> substitutions;
     if (failed(appendIndexExprBindings(*symbolic, offset, substitutions)))
       return failure();
-    if (failed(appendIndexExprAssumptions(*symbolic, offset, substitutions)))
-      return failure();
+    appendIndexExprAssumptions(*symbolic, offset, substitutions);
     offset.expr = symbolic->expr;
-    if (!substitutions.empty()) {
-      FailureOr<sym::ExprHandle> substituted =
-          sym::substituteExpr(store, offset.expr, substitutions);
-      if (failed(substituted))
-        return failure();
-      offset.expr = *substituted;
-    }
+    if (!substitutions.empty())
+      offset.expr = sym::substituteExpr(store, offset.expr, substitutions);
     FailureOr<sym::ExprHandle> scaled = scaleExpr(store, offset.expr, scale);
     if (failed(scaled))
       return failure();
@@ -462,10 +443,8 @@ private:
     reservedSymbols[name] = value;
     offset.bindings.push_back({name, value});
     appendKnownPredicates(solver, store, value, name, offset.assumptions);
-    FailureOr<sym::ExprHandle> expr = sym::composeExprSym(store, name);
-    if (failed(expr))
-      return failure();
-    FailureOr<sym::ExprHandle> scaled = scaleExpr(store, *expr, scale);
+    sym::ExprHandle expr = sym::composeExprSym(store, name);
+    FailureOr<sym::ExprHandle> scaled = scaleExpr(store, expr, scale);
     if (failed(scaled))
       return failure();
     offset.expr = *scaled;
