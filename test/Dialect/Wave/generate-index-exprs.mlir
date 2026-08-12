@@ -528,14 +528,12 @@ func.func @private_singleton_assume_stays_atomic(
 
 // -----
 
-// Shared producer: expand both paths through canonical operand bindings.
-// CHECK-LABEL: func.func @shared_singleton_assume_deduplicates_bindings
+// Exact singleton definition eliminates origin and its duplicate delta path.
+// CHECK-LABEL: func.func @shared_singleton_assume_normalizes_definition
 // CHECK-SAME: (%[[ORIGIN:.*]]: !wave.simd<i32, 32>, %[[NEXT:.*]]: !wave.simd<i32, 32>)
-// CHECK: wave.index_expr <"-raw0 + 2*raw1"> assuming
-// CHECK-SAME: #wave.pred<"-1 - raw0 + raw1 >= 0">
-// CHECK-SAME: #wave.pred<"-1 - raw0 + raw1 <= 0">
-// CHECK-SAME: ["raw0", "raw1"](%[[ORIGIN]], %[[NEXT]])
-func.func @shared_singleton_assume_deduplicates_bindings(
+// CHECK: wave.index_expr <"1 + raw1"> assuming
+// CHECK-SAME: ["raw1"](%[[NEXT]])
+func.func @shared_singleton_assume_normalizes_definition(
     %origin: !wave.simd<i32, 32>, %next: !wave.simd<i32, 32>)
     -> !wave.simd<index, 32>
     attributes {wave.address_arithmetic_no_overflow} {
