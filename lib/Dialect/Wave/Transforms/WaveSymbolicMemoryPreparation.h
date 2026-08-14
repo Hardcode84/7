@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 #ifndef MLIR_LIB_DIALECT_WAVE_TRANSFORMS_WAVESYMBOLICMEMORYPREPARATION_H
 #define MLIR_LIB_DIALECT_WAVE_TRANSFORMS_WAVESYMBOLICMEMORYPREPARATION_H
-#include "../IR/WaveIndexMap.h"
+#include "../IR/WaveMemoryAddress.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/SmallVector.h"
@@ -49,6 +49,7 @@ struct AccessMap {
   AccessAxes axes;
   indexing::IndexAddress address;
   sym::ExprHandle baseSelector;
+  SmallVector<MemoryTransactionProofDefinition, 4> proofDefinitions;
   SmallVector<PacketActivityDomain, 2> packetActivityDomains;
   Value condition;
   int64_t transactionFirstSlot = 0, transactionSlotCount = 0;

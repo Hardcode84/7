@@ -308,10 +308,10 @@ buildPointDomain(const IndexMap &map,
 }
 
 static FailureOr<IndexMap>
-specializeAtPoint(sym::Store &store, const IndexMap &map,
-                  ArrayRef<sym::ExprHandle> expressions,
-                  ArrayRef<sym::ExprSubstitution> definitions,
-                  std::string *diagnostic) {
+specializeMapAtPoint(sym::Store &store, const IndexMap &map,
+                     ArrayRef<sym::ExprHandle> expressions,
+                     ArrayRef<sym::ExprSubstitution> definitions,
+                     std::string *diagnostic) {
   IndexMap source = map;
   llvm::append_range(source.exprs, expressions);
   if (failed(validateClosed(source, {}, diagnostic)))
@@ -717,6 +717,13 @@ static FailureOr<sym::CheckResult> proveGoals(MemoizedDomainChecker &checker,
 mlir::wave::indexing::CheckMemo::CheckMemo() : impl(std::make_unique<Impl>()) {}
 mlir::wave::indexing::CheckMemo::~CheckMemo() = default;
 
+FailureOr<IndexMap> mlir::wave::indexing::specializeAtPoint(
+    sym::Store &store, const IndexMap &map,
+    ArrayRef<sym::ExprHandle> expressions,
+    ArrayRef<sym::ExprSubstitution> definitions, std::string *diagnostic) {
+  return specializeMapAtPoint(store, map, expressions, definitions, diagnostic);
+}
+
 FailureOr<sym::ExprHandle>
 mlir::wave::indexing::materialize(sym::Store &store, const IndexMap &map,
                                   sym::ExprHandle expression,
@@ -734,7 +741,7 @@ mlir::wave::indexing::simplify(sym::Store &store, const IndexMap &map,
                                ArrayRef<sym::ExprSubstitution> definitions,
                                std::string *diagnostic) {
   FailureOr<IndexMap> specialized =
-      specializeAtPoint(store, map, expressions, definitions, diagnostic);
+      specializeMapAtPoint(store, map, expressions, definitions, diagnostic);
   if (failed(specialized) ||
       failed(validateClosed(*specialized, {}, diagnostic)))
     return failure();

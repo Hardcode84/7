@@ -76,6 +76,13 @@ FailureOr<IndexMap> pullback(sym::Store &store, const IndexMap &source,
                              StringRef scope,
                              std::string *diagnostic = nullptr);
 
+/// Fix map inputs to exact structural expressions.
+FailureOr<IndexMap>
+specializeAtPoint(sym::Store &store, const IndexMap &map,
+                  ArrayRef<sym::ExprHandle> expressions,
+                  ArrayRef<sym::ExprSubstitution> definitions,
+                  std::string *diagnostic = nullptr);
+
 /// Replace proof coordinates with their composed expressions.
 FailureOr<sym::ExprHandle> materialize(sym::Store &store, const IndexMap &map,
                                        sym::ExprHandle expression,

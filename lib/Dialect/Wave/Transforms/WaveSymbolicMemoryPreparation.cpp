@@ -554,6 +554,7 @@ struct AccessPreparation {
   SmallVector<sym::ExprSubstitution> substitutions;
   SmallVector<sym::PredHandle, 8> commonFacts;
   SmallVector<ImportedCondition, 4> packetConditions;
+  SmallVector<MemoryTransactionProofDefinition, 4> proofDefinitions;
 };
 static LogicalResult initializeAccessPreparation(AccessPreparation &state) {
   FailureOr<sym::ExprHandle> localBlock =
@@ -639,6 +640,144 @@ decodeAccessValue(AccessPreparation &state, Value value, StringRef name) {
            << name << "'";
   return decoded;
 }
+static const SymbolicOffsetBinding *
+getIdentityBinding(const SymbolicOffset &offset) {
+  if (offset.bindings.size() != 1 ||
+      !(offset.expr == offset.bindings.front().name))
+    return nullptr;
+  return &offset.bindings.front();
+}
+static LogicalResult
+appendAssumeChainFacts(AccessPreparation &state, ArrayRef<AssumeOp> assumes,
+                       sym::ExprHandle expression,
+                       SmallVectorImpl<sym::PredHandle> &assumptions) {
+  for (AssumeOp assume : assumes) {
+    FailureOr<sym::ExprHandle> assumed =
+        sym::composeExprSym(state.store, assume.getName());
+    if (failed(assumed))
+      return failure();
+    std::array<sym::ExprSubstitution, 1> substitution{
+        sym::ExprSubstitution{*assumed, expression}};
+    for (Attribute attr : assume.getAssumptions()) {
+      FailureOr<sym::PredHandle> fact = sym::substitutePred(
+          state.store, cast<PredAttr>(attr).getValue(), substitution);
+      if (failed(fact))
+        return failure();
+      appendUnique(assumptions, *fact);
+    }
+  }
+  return success();
+}
+static Value collectAssumeChain(Value value,
+                                SmallVectorImpl<AssumeOp> &assumes) {
+  while (AssumeOp assume = value.getDefiningOp<AssumeOp>()) {
+    assumes.push_back(assume);
+    value = assume.getValue();
+  }
+  return value;
+}
+static FailureOr<std::optional<SymbolicOffset>>
+expandIdentityOffsetOnce(AccessPreparation &state, const SymbolicOffset &outer,
+                         llvm::DenseSet<Value> &expanded) {
+  const SymbolicOffsetBinding *binding = getIdentityBinding(outer);
+  if (!binding)
+    return std::optional<SymbolicOffset>{};
+  if (!expanded.insert(binding->value).second)
+    return std::optional<SymbolicOffset>{};
+  SmallVector<AssumeOp, 2> assumes;
+  Value nestedValue = collectAssumeChain(binding->value, assumes);
+  FailureOr<std::optional<SymbolicOffset>> nested =
+      buildSymbolicIntegerPacket(nestedValue, state.dialect);
+  if (failed(nested))
+    return failure();
+  if (!*nested)
+    return std::optional<SymbolicOffset>{};
+  const SymbolicOffsetBinding *nestedIdentity = getIdentityBinding(**nested);
+  if (nestedIdentity && nestedIdentity->value == binding->value)
+    return std::optional<SymbolicOffset>{};
+  SymbolicOffset inner = std::move(**nested);
+  if (failed(appendAssumeChainFacts(state, assumes, inner.expr,
+                                    inner.assumptions)))
+    return failure();
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{binding->name, inner.expr}};
+  FailureOr<SmallVector<sym::PredHandle>> outerFacts =
+      substituteIndexExprPredicates(state.store, outer.assumptions,
+                                    substitution);
+  if (failed(outerFacts))
+    return failure();
+  for (sym::PredHandle fact : *outerFacts)
+    appendUnique(inner.assumptions, fact);
+  inner.expr = sym::substituteExpr(state.store, outer.expr, substitution);
+  return std::optional<SymbolicOffset>{std::move(inner)};
+}
+static FailureOr<std::optional<SymbolicOffset>>
+expandIdentityOffset(AccessPreparation &state, const SymbolicOffset &offset) {
+  SymbolicOffset result = offset;
+  llvm::DenseSet<Value> expanded;
+  bool changed = false;
+  for (;;) {
+    FailureOr<std::optional<SymbolicOffset>> expandedOffset =
+        expandIdentityOffsetOnce(state, result, expanded);
+    if (failed(expandedOffset))
+      return failure();
+    if (!*expandedOffset)
+      break;
+    result = std::move(**expandedOffset);
+    changed = true;
+  }
+  return changed ? std::optional<SymbolicOffset>{std::move(result)}
+                 : std::optional<SymbolicOffset>{};
+}
+static FailureOr<sym::ExprHandle>
+bindDecodedAccessRoot(AccessPreparation &state, Value value, StringRef name,
+                      SymbolicOffsetBindingKind kind,
+                      const std::optional<SymbolicOffset> &decoded) {
+  bool materializable =
+      decoded &&
+      llvm::any_of(decoded->materializations, [&](const auto &candidate) {
+        return candidate.value == value;
+      });
+  FailureOr<sym::ExprHandle> root =
+      state.builder.bind(value, name, kind, materializable);
+  if (failed(root))
+    return failure();
+  identifyAssumeLineage(state.builder, value, *root);
+  return root;
+}
+static FailureOr<bool>
+appendExpandedProofDefinition(AccessPreparation &state,
+                              const SymbolicOffset &decoded,
+                              sym::ExprHandle root) {
+  FailureOr<std::optional<SymbolicOffset>> expanded =
+      expandIdentityOffset(state, decoded);
+  if (failed(expanded))
+    return failure();
+  if (!*expanded)
+    return false;
+  SmallVector<sym::PredHandle> proofFacts;
+  FailureOr<sym::ExprHandle> proof =
+      state.builder.import(**expanded, proofFacts);
+  if (failed(proof))
+    return failure();
+  state.proofDefinitions.push_back({std::move(proofFacts), root, *proof});
+  return true;
+}
+static LogicalResult appendDecodedAccessDefinition(
+    AccessPreparation &state, const SymbolicOffset &decoded,
+    sym::ExprHandle root, SmallVectorImpl<sym::PredHandle> &facts) {
+  FailureOr<sym::ExprHandle> definition = state.builder.import(decoded, facts);
+  if (failed(definition))
+    return failure();
+  if (root == *definition)
+    return success();
+  FailureOr<sym::PredHandle> equality =
+      composeEqual(state.store, root, *definition);
+  if (failed(equality))
+    return failure();
+  appendUnique(facts, *equality);
+  return success();
+}
 static FailureOr<sym::ExprHandle>
 importDecodedAccessValue(AccessPreparation &state, Value value, StringRef name,
                          SymbolicOffsetBindingKind kind,
@@ -651,28 +790,19 @@ importDecodedAccessValue(AccessPreparation &state, Value value, StringRef name,
   if (decoded && !*bindingDominatesPacket)
     return state.builder.import(*decoded, facts);
 
-  bool materializable =
-      decoded &&
-      llvm::any_of(decoded->materializations, [&](const auto &candidate) {
-        return candidate.value == value;
-      });
   FailureOr<sym::ExprHandle> root =
-      state.builder.bind(value, name, kind, materializable);
+      bindDecodedAccessRoot(state, value, name, kind, decoded);
   if (failed(root))
     return failure();
-  identifyAssumeLineage(state.builder, value, *root);
   if (!decoded)
     return root;
-  FailureOr<sym::ExprHandle> definition = state.builder.import(*decoded, facts);
-  if (failed(definition))
+  FailureOr<bool> proof = appendExpandedProofDefinition(state, *decoded, *root);
+  if (failed(proof))
     return failure();
-  if (*root == *definition)
+  if (*proof)
     return root;
-  FailureOr<sym::PredHandle> equality =
-      composeEqual(state.store, *root, *definition);
-  if (failed(equality))
+  if (failed(appendDecodedAccessDefinition(state, *decoded, *root, facts)))
     return failure();
-  appendUnique(facts, *equality);
   return root;
 }
 static FailureOr<sym::ExprHandle>
@@ -737,6 +867,40 @@ static LogicalResult importAccessBindings(AccessPreparation &state) {
   }
   return success();
 }
+static LogicalResult
+appendConditionProofDefinitions(AccessPreparation &state,
+                                ArrayRef<SymbolicOffsetBinding> bindings) {
+  for (const SymbolicOffsetBinding &binding : bindings) {
+    StringRef bindingName = sym::ExprView(binding.name).getSymbolName();
+    if (bindingName.empty())
+      return failure();
+    FailureOr<sym::ExprHandle> variable =
+        state.builder.bind(binding.value, bindingName, binding.kind);
+    if (failed(variable))
+      return failure();
+    if (llvm::any_of(state.proofDefinitions, [&](const auto &definition) {
+          return definition.variable == *variable;
+        }))
+      continue;
+    FailureOr<std::optional<SymbolicOffset>> expanded =
+        buildSymbolicIntegerPacket(binding.value, state.dialect);
+    if (failed(expanded))
+      return failure();
+    if (!*expanded)
+      continue;
+    const SymbolicOffsetBinding *identity = getIdentityBinding(**expanded);
+    if (identity && identity->value == binding.value)
+      continue;
+    SmallVector<sym::PredHandle> proofFacts;
+    FailureOr<sym::ExprHandle> expression =
+        state.builder.import(**expanded, proofFacts);
+    if (failed(expression))
+      return failure();
+    state.proofDefinitions.push_back(
+        {std::move(proofFacts), *variable, *expression});
+  }
+  return success();
+}
 static FailureOr<ImportedCondition>
 importAccessCondition(AccessPreparation &state, Value condition,
                       StringRef name) {
@@ -749,6 +913,8 @@ importAccessCondition(AccessPreparation &state, Value condition,
     FailureOr<IndexMapBuilder::Predicate> predicate =
         state.builder.import(**decoded);
     if (failed(predicate))
+      return failure();
+    if (failed(appendConditionProofDefinitions(state, (**decoded).bindings)))
       return failure();
     FailureOr<sym::ExprHandle> activity =
         composeIndexExprIndicator(state.store, predicate->value);
@@ -969,6 +1135,7 @@ static FailureOr<AccessMap> finishAccessPreparation(AccessPreparation &state,
   result.address = {std::move(domain), state.access.bases.front(),
                     address.owner, address.bit, *active};
   result.baseSelector = address.base;
+  result.proofDefinitions = std::move(state.proofDefinitions);
   result.condition = state.access.ambientCondition;
   if (failed(appendPacketActivityDomains(state, result)))
     return failure();

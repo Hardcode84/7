@@ -82,6 +82,10 @@ struct DmaPlan {
   bool zeroFillInactive = false;
   sym::ExprHandle readFirstOrigin, readFirstParameter;
 };
+static FailureOr<bool>
+proveActivityEquivalent(sym::Store &store, const indexing::IndexMap &proofMap,
+                        sym::PredHandle lhs, sym::PredHandle rhs,
+                        int64_t alignment, indexing::CheckMemo &memo);
 template <typename OpTy> static MemoryAccess getAccess(OpTy op) {
   MemoryAccess access;
   access.op = op;
@@ -164,6 +168,7 @@ static FailureOr<std::optional<Transaction>> buildTransaction(
   MemoryTransactionRequest request;
   request.access = {access.address,
                     access.access->bases,
+                    access.proofDefinitions,
                     access.baseSelector,
                     *activity,
                     access.axes.block,
@@ -935,6 +940,105 @@ assignTransactionConditions(ValueRange conditions,
   }
   return success();
 }
+static const PacketActivityDomain *
+findPacketActivityDomain(const AccessMap &access, int64_t slot) {
+  auto found = llvm::find_if(
+      access.packetActivityDomains, [&](const PacketActivityDomain &domain) {
+        return slot >= domain.firstSlot &&
+               slot < domain.firstSlot + domain.slotCount;
+      });
+  return found == access.packetActivityDomains.end() ? nullptr : &*found;
+}
+static FailureOr<bool> proveEquivalentPacketActivity(
+    const AccessMap &access, const PacketActivityDomain &origin,
+    const PacketActivityDomain &point, int64_t alignment, sym::Store &store,
+    indexing::CheckMemo &memo) {
+  if (origin.active == point.active)
+    return true;
+  indexing::IndexMap proofMap = access.address.map;
+  for (sym::PredHandle fact : origin.facts)
+    if (!llvm::is_contained(proofMap.facts, fact))
+      proofMap.facts.push_back(fact);
+  for (sym::PredHandle fact : point.facts)
+    if (!llvm::is_contained(proofMap.facts, fact))
+      proofMap.facts.push_back(fact);
+  std::array<sym::ExprHandle, 2> expressions{sym::asExpr(origin.active),
+                                             sym::asExpr(point.active)};
+  if (failed(appendMemoryTransactionProofDefinitions(
+          store, proofMap, access.proofDefinitions, expressions)))
+    return failure();
+  return proveActivityEquivalent(store, proofMap, origin.active, point.active,
+                                 alignment, memo);
+}
+static FailureOr<bool>
+proveUniformPacketActivity(const AccessMap &prepared,
+                           const Transaction &transaction,
+                           const PacketActivityDomain &origin,
+                           sym::Store &store, indexing::CheckMemo &memo) {
+  for (ArrayRef<unsigned> outputs : transaction.outputs) {
+    for (unsigned slot : outputs) {
+      const PacketActivityDomain *point =
+          findPacketActivityDomain(prepared, slot);
+      if (!point)
+        return failure();
+      FailureOr<bool> equivalent = proveEquivalentPacketActivity(
+          prepared, origin, *point, transaction.width, store, memo);
+      if (failed(equivalent) || !*equivalent)
+        return equivalent;
+    }
+  }
+  return true;
+}
+static FailureOr<bool> applyUniformPacketActivity(const AccessMap &prepared,
+                                                  Transaction &transaction,
+                                                  sym::Store &store,
+                                                  indexing::CheckMemo &memo) {
+  if (transaction.outputs.empty() || transaction.outputs.front().empty())
+    return failure();
+  unsigned firstSlot = transaction.outputs.front().front();
+  const PacketActivityDomain *origin =
+      findPacketActivityDomain(prepared, firstSlot);
+  if (!origin)
+    return failure();
+  FailureOr<bool> uniform =
+      proveUniformPacketActivity(prepared, transaction, *origin, store, memo);
+  if (failed(uniform) || !*uniform)
+    return uniform;
+  FailureOr<sym::ExprHandle> materialActive = indexing::materialize(
+      store, transaction.map, sym::asExpr(origin->active));
+  std::optional<sym::PredHandle> active =
+      failed(materialActive) ? std::nullopt : sym::asPred(*materialActive);
+  FailureOr<sym::ExprHandle> activity =
+      active ? composeIndexExprIndicator(store, *active)
+             : FailureOr<sym::ExprHandle>(failure());
+  if (failed(activity))
+    return failure();
+  transaction.active = *active;
+  transaction.activity = *activity;
+  transaction.condition =
+      prepared.access->packetWhere.getConditions()[firstSlot];
+  return true;
+}
+static FailureOr<std::optional<std::vector<Transaction>>>
+planUniformPacketActivity(const AccessMap &prepared, sym::Store &store,
+                          std::string &diagnostic) {
+  AccessMap addressPlan = prepared;
+  addressPlan.packetActivityDomains.clear();
+  FailureOr<std::vector<Transaction>> planned =
+      planTransactions(addressPlan, store, diagnostic);
+  if (failed(planned))
+    return failure();
+  indexing::CheckMemo memo;
+  for (Transaction &transaction : *planned) {
+    FailureOr<bool> uniform =
+        applyUniformPacketActivity(prepared, transaction, store, memo);
+    if (failed(uniform))
+      return failure();
+    if (!*uniform)
+      return std::optional<std::vector<Transaction>>{};
+  }
+  return std::optional<std::vector<Transaction>>{std::move(*planned)};
+}
 static LogicalResult
 appendPacketActivityPlan(const AccessMap &prepared,
                          const PacketActivityDomain &domain, sym::Store &store,
@@ -970,6 +1074,13 @@ planAccessTransactions(const AccessMap &prepared, sym::Store &store,
       return failure();
     return plan;
   }
+  // Address planning supplies the exact width needed by activity proofs.
+  FailureOr<std::optional<std::vector<Transaction>>> uniform =
+      planUniformPacketActivity(prepared, store, diagnostic);
+  if (failed(uniform))
+    return failure();
+  if (*uniform)
+    return std::move(**uniform);
   for (const PacketActivityDomain &domain : prepared.packetActivityDomains) {
     if (failed(appendPacketActivityPlan(prepared, domain, store, diagnostic,
                                         plan)))
@@ -2101,20 +2212,29 @@ proveCrossActivityCases(sym::Store &store, const indexing::IndexMap &proofMap,
   return true;
 }
 
-static FailureOr<bool>
-proveActivityEquivalent(sym::Store &store, const indexing::IndexMap &proofMap,
-                        sym::PredHandle lhs, sym::PredHandle rhs,
-                        int64_t alignment, indexing::CheckMemo &memo) {
-  sym::ExprView left(sym::asExpr(lhs));
-  sym::ExprView right(sym::asExpr(rhs));
-  if (left.getKind() != sym::ExprKind::Piecewise ||
-      right.getKind() != sym::ExprKind::Piecewise) {
-    FailureOr<sym::PredHandle> unconditional = sym::composePredTrue(store);
-    if (failed(unconditional))
-      return failure();
-    return proveActivityComparison(store, proofMap, lhs, rhs, *unconditional,
-                                   alignment, memo);
+static bool haveMatchingActivityLogic(sym::PredView left, sym::PredView right) {
+  bool logical = left.getKind() == sym::PredKind::And ||
+                 left.getKind() == sym::PredKind::Or;
+  return logical && left.getKind() == right.getKind() &&
+         left.getLogicArgCount() == right.getLogicArgCount();
+}
+
+static FailureOr<bool> proveMatchingActivityLogic(
+    sym::Store &store, const indexing::IndexMap &proofMap, sym::PredView left,
+    sym::PredView right, int64_t alignment, indexing::CheckMemo &memo) {
+  for (uint32_t index : llvm::seq<uint32_t>(0, left.getLogicArgCount())) {
+    FailureOr<bool> equivalent =
+        proveActivityEquivalent(store, proofMap, left.getLogicArg(index),
+                                right.getLogicArg(index), alignment, memo);
+    if (failed(equivalent) || !*equivalent)
+      return equivalent;
   }
+  return true;
+}
+
+static FailureOr<bool> provePiecewiseActivityEquivalent(
+    sym::Store &store, const indexing::IndexMap &proofMap, sym::ExprView left,
+    sym::ExprView right, int64_t alignment, indexing::CheckMemo &memo) {
   if (left.getPiecewiseCaseCount() != right.getPiecewiseCaseCount())
     return false;
   if (haveMatchingActivityConditions(left, right))
@@ -2128,6 +2248,35 @@ proveActivityEquivalent(sym::Store &store, const indexing::IndexMap &proofMap,
     return failure();
   return proveCrossActivityCases(store, proofMap, left, right, *leftSelectors,
                                  *rightSelectors, alignment, memo);
+}
+
+static FailureOr<bool>
+proveActivityEquivalent(sym::Store &store, const indexing::IndexMap &proofMap,
+                        sym::PredHandle lhs, sym::PredHandle rhs,
+                        int64_t alignment, indexing::CheckMemo &memo) {
+  if (lhs == rhs)
+    return true;
+  sym::PredView leftPredicate(lhs);
+  sym::PredView rightPredicate(rhs);
+  if (leftPredicate.getKind() == sym::PredKind::Not &&
+      rightPredicate.getKind() == sym::PredKind::Not)
+    return proveActivityEquivalent(store, proofMap, leftPredicate.getUnaryArg(),
+                                   rightPredicate.getUnaryArg(), alignment,
+                                   memo);
+  if (haveMatchingActivityLogic(leftPredicate, rightPredicate))
+    return proveMatchingActivityLogic(store, proofMap, leftPredicate,
+                                      rightPredicate, alignment, memo);
+  sym::ExprView left(sym::asExpr(lhs));
+  sym::ExprView right(sym::asExpr(rhs));
+  if (left.getKind() == sym::ExprKind::Piecewise &&
+      right.getKind() == sym::ExprKind::Piecewise)
+    return provePiecewiseActivityEquivalent(store, proofMap, left, right,
+                                            alignment, memo);
+  FailureOr<sym::PredHandle> unconditional = sym::composePredTrue(store);
+  if (failed(unconditional))
+    return failure();
+  return proveActivityComparison(store, proofMap, lhs, rhs, *unconditional,
+                                 alignment, memo);
 }
 static FailureOr<sym::PredHandle>
 getDmaPacketDomainSelector(const DmaAccessPoint &point,
@@ -2243,31 +2392,6 @@ uniformDmaActivity(const DmaPlanShape &shape, const DmaExpressions &expressions,
   return *uniform ? std::optional<sym::PredHandle>{*origin}
                   : std::optional<sym::PredHandle>{};
 }
-static const PacketActivityDomain *
-findPacketActivityDomain(const AccessMap &access, int64_t slot) {
-  auto found = llvm::find_if(
-      access.packetActivityDomains, [&](const PacketActivityDomain &domain) {
-        return slot >= domain.firstSlot &&
-               slot < domain.firstSlot + domain.slotCount;
-      });
-  return found == access.packetActivityDomains.end() ? nullptr : &*found;
-}
-static FailureOr<bool> proveUniformDmaGroupActivity(
-    const AccessMap &source, const PacketActivityDomain &origin,
-    const PacketActivityDomain &point, int64_t alignment, sym::Store &store,
-    indexing::CheckMemo &memo) {
-  if (origin.active == point.active)
-    return true;
-  indexing::IndexMap proofMap = source.address.map;
-  for (sym::PredHandle fact : origin.facts)
-    if (!llvm::is_contained(proofMap.facts, fact))
-      proofMap.facts.push_back(fact);
-  for (sym::PredHandle fact : point.facts)
-    if (!llvm::is_contained(proofMap.facts, fact))
-      proofMap.facts.push_back(fact);
-  return proveActivityEquivalent(store, proofMap, origin.active, point.active,
-                                 alignment, memo);
-}
 static FailureOr<std::optional<SmallVector<const PacketActivityDomain *>>>
 collectUniformDmaGroupActivities(const DmaPlanShape &shape, sym::Store &store,
                                  indexing::CheckMemo &memo) {
@@ -2285,7 +2409,7 @@ collectUniformDmaGroupActivities(const DmaPlanShape &shape, sym::Store &store,
           findPacketActivityDomain(source, first + within);
       if (!point)
         return std::optional<SmallVector<const PacketActivityDomain *>>{};
-      FailureOr<bool> equivalent = proveUniformDmaGroupActivity(
+      FailureOr<bool> equivalent = proveEquivalentPacketActivity(
           source, *origin, *point, shape.elements, store, memo);
       if (failed(equivalent))
         return failure();
@@ -2600,6 +2724,10 @@ static LogicalResult recoverUniformDmaFamilies(
   if (failed(activity))
     return failure();
   unconditional->source->activity = *activity;
+  unconditional->source->active = **uniformActivity;
+  if (shape.groupCount == 1 && !shape.source->packetActivityDomains.empty())
+    unconditional->source->condition =
+        shape.source->packetActivityDomains.front().condition;
   families = std::move(*unconditional);
   return success();
 }

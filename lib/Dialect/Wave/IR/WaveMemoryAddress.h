@@ -20,9 +20,20 @@ struct CheckedIndexExpr {
   sym::ExprHandle expression;
 };
 
+struct MemoryTransactionProofDefinition {
+  SmallVector<sym::PredHandle, 2> facts;
+  sym::ExprHandle variable, expression;
+};
+
+LogicalResult appendMemoryTransactionProofDefinitions(
+    sym::Store &store, indexing::IndexMap &map,
+    ArrayRef<MemoryTransactionProofDefinition> definitions,
+    ArrayRef<sym::ExprHandle> expressions);
+
 struct MemoryTransactionAccess {
   indexing::IndexAddress address;
   ArrayRef<Value> bases;
+  ArrayRef<MemoryTransactionProofDefinition> proofDefinitions;
   sym::ExprHandle baseSelector;
   sym::ExprHandle activity;
   sym::ExprHandle block;
