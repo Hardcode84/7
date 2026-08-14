@@ -140,6 +140,17 @@ struct BufferReaderState {
   size_t pos = 0;
 };
 
+struct BufferWriterState {
+  SmallVector<uint8_t> bytes;
+};
+
+static bool bufferWriterWrite(void *userdata, const void *buf, size_t len) {
+  auto *state = static_cast<BufferWriterState *>(userdata);
+  const uint8_t *begin = static_cast<const uint8_t *>(buf);
+  state->bytes.append(begin, begin + len);
+  return true;
+}
+
 static bool bufferReaderRead(void *userdata, void *buf, size_t len) {
   auto *state = static_cast<BufferReaderState *>(userdata);
   if (len > state->bytes.size() - state->pos)
@@ -152,6 +163,20 @@ static bool bufferReaderRead(void *userdata, void *buf, size_t len) {
 static size_t bufferReaderRemaining(void *userdata) {
   auto *state = static_cast<BufferReaderState *>(userdata);
   return state->bytes.size() - state->pos;
+}
+
+static FailureOr<SmallVector<uint8_t>>
+serializeNode(Store &store, const ixs_node *node, std::string *diagnostic) {
+  Session session(store);
+  BufferWriterState state;
+  ixs_writer writer{bufferWriterWrite, &state};
+  if (ixs_serialize_node(session.raw(), node, &writer))
+    return std::move(state.bytes);
+  std::string message = joinSessionErrors(session.raw());
+  setDiagnostic(diagnostic, message.empty()
+                                ? "failed to serialize symbolic node"
+                                : std::move(message));
+  return failure();
 }
 
 static void walkSymbolNamesImpl(const ixs_node *node,
@@ -1298,6 +1323,18 @@ FailureOr<PredHandle> mlir::wave::sym::parsePred(Store &store,
     return failure();
   }
   return PredHandle(node);
+}
+
+FailureOr<SmallVector<uint8_t>>
+mlir::wave::sym::serializeExpr(Store &store, ExprHandle value,
+                               std::string *diagnostic) {
+  return serializeNode(store, rawExprNode(value), diagnostic);
+}
+
+FailureOr<SmallVector<uint8_t>>
+mlir::wave::sym::serializePred(Store &store, PredHandle value,
+                               std::string *diagnostic) {
+  return serializeNode(store, rawPredNode(value), diagnostic);
 }
 
 FailureOr<ExprHandle>

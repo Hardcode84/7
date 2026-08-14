@@ -8,6 +8,10 @@ from . import arith as _arith  # noqa: F401
 from ._wave_enum_gen import *  # noqa: F403
 from ._wave_ops_gen import *  # noqa: F403
 
+ExprAttr = _wave_ext.ExprAttr
+MemoryMappingAttr = _wave_ext.MemoryMappingAttr
+PredAttr = _wave_ext.PredAttr
+
 
 def register_dialects(context, load=True):
     _wave_ext.register_dialects(context, load)

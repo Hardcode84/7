@@ -278,6 +278,18 @@ bool mlirWaveAttributeIsAExpr(MlirAttribute attr) {
   return llvm::isa<wave::ExprAttr>(unwrap(attr));
 }
 
+namespace {
+static bool writeSymbolicBytes(ArrayRef<uint8_t> bytes,
+                               MlirStringCallback callback, void *userData) {
+  if (!callback)
+    return false;
+  callback(
+      MlirStringRef{reinterpret_cast<const char *>(bytes.data()), bytes.size()},
+      userData);
+  return true;
+}
+} // namespace
+
 MlirAttribute mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text) {
   MLIRContext *context = unwrap(ctx);
   if (!text.data && text.length != 0) {
@@ -341,6 +353,18 @@ MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
     return MlirAttribute{nullptr};
   }
   return wrap(wave::ExprAttr::get(context, *handle));
+}
+
+bool mlirWaveExprAttrWriteBytes(MlirAttribute attr, MlirStringCallback callback,
+                                void *userData) {
+  wave::ExprAttr expr = llvm::cast<wave::ExprAttr>(unwrap(attr));
+  wave::WaveDialect *dialect =
+      expr.getContext()->getLoadedDialect<wave::WaveDialect>();
+  if (!dialect)
+    return false;
+  FailureOr<SmallVector<uint8_t>> bytes =
+      wave::sym::serializeExpr(dialect->getSymbolStore(), expr.getValue());
+  return succeeded(bytes) && writeSymbolicBytes(*bytes, callback, userData);
 }
 
 bool mlirWaveAttributeIsAPred(MlirAttribute attr) {
@@ -408,6 +432,18 @@ MlirAttribute mlirWavePredAttrGetFromBytes(MlirContext ctx,
     return MlirAttribute{nullptr};
   }
   return wrap(wave::PredAttr::get(context, *handle));
+}
+
+bool mlirWavePredAttrWriteBytes(MlirAttribute attr, MlirStringCallback callback,
+                                void *userData) {
+  wave::PredAttr pred = llvm::cast<wave::PredAttr>(unwrap(attr));
+  wave::WaveDialect *dialect =
+      pred.getContext()->getLoadedDialect<wave::WaveDialect>();
+  if (!dialect)
+    return false;
+  FailureOr<SmallVector<uint8_t>> bytes =
+      wave::sym::serializePred(dialect->getSymbolStore(), pred.getValue());
+  return succeeded(bytes) && writeSymbolicBytes(*bytes, callback, userData);
 }
 
 bool mlirWaveAttributeIsARedistribution(MlirAttribute attr) {

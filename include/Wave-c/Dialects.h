@@ -152,6 +152,10 @@ mlirWaveExprAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
 // Build from ixsimpl's stable binary serialization.
 MLIR_CAPI_EXPORTED MlirAttribute mlirWaveExprAttrGetFromBytes(
     MlirContext ctx, const uint8_t *bytes, size_t length);
+// Write ixsimpl's stable binary serialization to `callback`.
+MLIR_CAPI_EXPORTED bool mlirWaveExprAttrWriteBytes(MlirAttribute attr,
+                                                   MlirStringCallback callback,
+                                                   void *userData);
 
 MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAPred(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
@@ -162,6 +166,10 @@ MLIR_CAPI_EXPORTED MlirAttribute
 mlirWavePredAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePredAttrGetFromBytes(
     MlirContext ctx, const uint8_t *bytes, size_t length);
+// Write ixsimpl's stable binary serialization to `callback`.
+MLIR_CAPI_EXPORTED bool mlirWavePredAttrWriteBytes(MlirAttribute attr,
+                                                   MlirStringCallback callback,
+                                                   void *userData);
 
 MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsARedistribution(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWaveRedistributionAttrGet(

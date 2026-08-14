@@ -20,6 +20,10 @@ static MlirStringRef asMlirStringRef(const std::string &value) {
   return MlirStringRef{value.data(), value.size()};
 }
 
+static void appendToString(MlirStringRef chunk, void *userData) {
+  static_cast<std::string *>(userData)->append(chunk.data, chunk.length);
+}
+
 struct PyTargetCapabilities {
   std::string chip;
   MlirWaveAMDTargetCapabilities value;
@@ -491,7 +495,13 @@ node and owning Context must remain alive until this synchronous call returns.
               throw nb::value_error("failed to deserialize wave.expr bytes");
             return cls(attr);
           },
-          nb::arg("cls"), nb::arg("data"), nb::arg("context"));
+          nb::arg("cls"), nb::arg("data"), nb::arg("context"))
+      .def("to_bytes", [](MlirAttribute self) {
+        std::string data;
+        if (!mlirWaveExprAttrWriteBytes(self, appendToString, &data))
+          throw nb::value_error("failed to serialize wave.expr");
+        return nb::bytes(data.data(), data.size());
+      });
 }
 
 static void bindPredAttr(nb::module_ &m) {
@@ -532,7 +542,13 @@ node and owning Context must remain alive until this synchronous call returns.
               throw nb::value_error("failed to deserialize wave.pred bytes");
             return cls(attr);
           },
-          nb::arg("cls"), nb::arg("data"), nb::arg("context"));
+          nb::arg("cls"), nb::arg("data"), nb::arg("context"))
+      .def("to_bytes", [](MlirAttribute self) {
+        std::string data;
+        if (!mlirWavePredAttrWriteBytes(self, appendToString, &data))
+          throw nb::value_error("failed to serialize wave.pred");
+        return nb::bytes(data.data(), data.size());
+      });
 }
 
 static void bindRedistributionAttr(nb::module_ &m) {

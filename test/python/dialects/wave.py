@@ -413,6 +413,7 @@ def _check_typed_expr_bindings():
     del source_expr
     del source_context
     assert str(expr_from_foreign_node) == '#wave.expr<"1 + 4*source">'
+    assert expr_from_foreign_node.to_bytes() == source_bytes
     expr_after_source_lifetime = w.ExprAttr.get_from_bytes(
         source_bytes, context=w.Context.current
     )
@@ -448,6 +449,7 @@ def _check_typed_predicate_bindings(raw_expr):
         w.sym_ctx.serialize(raw_pred), context=w.Context.current
     )
     assert w.PredAttr.isinstance(pred_from_bytes)
+    assert pred_from_node.to_bytes() == w.sym_ctx.serialize(raw_pred)
     raw_piecewise = ixsimpl.pw(
         (w.sym("K") >= 0, w.sym("guard") >= 0),
         (w.sym_ctx.false_(), w.sym_ctx.true_()),
