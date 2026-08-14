@@ -185,8 +185,8 @@ The dialect should contain operations for:
 - **Proposed:** explicit crossings between uniform and lane-varying values,
   including `read_lane`, reductions, and `assert_uniform`;
 - **Proposed:** lane permutations and DPP/permlane-style communication;
-- **Proposed:** symbolic packet redistribution through one high-level op; see
-  [`WaveRedistributeDesign.md`](WaveRedistributeDesign.md);
+- **Implemented:** symbolic packet redistribution through one high-level op;
+  see [`WaveIndexMap.md`](WaveIndexMap.md#redistribution);
 - **Proposed:** higher-level wave-cooperative memory clauses beyond current
   tokenized load/store/DMA;
 - **Implemented:** standard MLIR `scf.if` lowering for uniform structured
@@ -999,11 +999,14 @@ is structurally simple because the input is structurally rich:
   whose reachable symbols are all uniform contributes to the soffset
   slot; one that touches a lane-varying symbol contributes to voffset;
   a fully literal one accumulates into inst_offset.
-- Range and divisibility assumptions composed from `wave.assume` plus
-  `IntegerRangeAnalysis` feed an `ixs_simplify` pass before
-  classification, so anything provably constant under the proven
-  bounds collapses out of the symbolic form rather than getting
-  rediscovered as an SSA chain inside the bucketizer.
+- Range and divisibility assumptions serialized on the complete
+  `wave.index_expr` packet feed symbolic simplification before
+  classification. The generator serializes explicit assumptions and semantic
+  relations while converting the defining SSA chain; ixsimpl derives their
+  range consequences. The bucketizer never reopens a binding producer or runs
+  a second IR range proof. Anything provably constant under the packet domain
+  therefore collapses out of the symbolic form without being rediscovered from
+  adjacent SSA.
 - Floor / ceil / mod nodes lower at emit time. The materialiser is
   closed over the same algebra the source program used, so a
   `wave_id = floor(wi / 32)` survives as a single shift in the
