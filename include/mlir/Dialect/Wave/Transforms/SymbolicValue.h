@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
+#include <cstdint>
 #include <optional>
 
 namespace mlir {
@@ -38,6 +39,15 @@ buildSymbolicPacketPredicateRelation(Value value, WaveDialect &dialect,
 FailureOr<std::optional<SymbolicPredicate>>
 buildSymbolicMaskPredicate(Value value, WaveDialect &dialect,
                            DataFlowSolver &solver);
+
+/// Analyze a complete in-memory integer packet for a production consumer;
+/// unsupported or unproved roots decline.
+FailureOr<std::optional<SymbolicOffset>>
+buildSymbolicIntegerPacket(Value value, WaveDialect &dialect);
+
+/// Analyze a complete mask packet; unsupported or partial roots decline.
+FailureOr<std::optional<SymbolicPredicate>>
+buildSymbolicMaskPredicate(Value value, WaveDialect &dialect);
 
 } // namespace wave
 } // namespace mlir

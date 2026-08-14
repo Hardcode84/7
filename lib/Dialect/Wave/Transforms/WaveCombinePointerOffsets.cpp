@@ -8,7 +8,11 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "../IR/WaveIndexExpr.h"
+#include "../IR/WaveMemoryAddress.h"
+#include "WaveSymbolicValueAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
@@ -433,38 +437,6 @@ static SmallVector<PtrAddOp> collectPtrAddChain(PtrAddOp op) {
   return chain;
 }
 
-static bool hasGlobalPointerBase(PtrAddOp op) {
-  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
-  return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
-}
-
-static bool isSignlessI32StorageType(Type type) {
-  if (auto simd = dyn_cast<SimdType>(type))
-    type = simd.getElementType();
-  auto intType = dyn_cast<IntegerType>(type);
-  return intType && intType.isSignless() && intType.getWidth() == 32;
-}
-
-static bool isIdentityI32IndexExpr(IndexExprOp op) {
-  if (op.getBindings().size() != 1)
-    return false;
-  sym::ExprView expr(op.getExpr().getValue());
-  if (expr.getKind() != sym::ExprKind::Symbol)
-    return false;
-  StringRef name = cast<StringAttr>(op.getNames()[0]).getValue();
-  return expr.getSymbolName() == name &&
-         isSignlessI32StorageType(op.getBindings()[0].getType());
-}
-
-static bool hasNonGlobalIdentityI32Offset(ArrayRef<PtrAddOp> chain) {
-  for (PtrAddOp add : chain)
-    if (!hasGlobalPointerBase(add))
-      if (IndexExprOp index = add.getOffset().getDefiningOp<IndexExprOp>())
-        if (isIdentityI32IndexExpr(index))
-          return true;
-  return false;
-}
-
 static FailureOr<Value> createPtrAdd(IRRewriter &rewriter, Location loc,
                                      Type resultType, Value base,
                                      Value offset) {
@@ -479,27 +451,146 @@ static FailureOr<Value> createPtrAdd(IRRewriter &rewriter, Location loc,
   return PtrAddOp::create(rewriter, loc, resultType, base, offset).getResult();
 }
 
+struct PreparedPointerOffsets {
+  SmallVector<std::pair<PtrAddOp, Value>, 0> originals;
+  SmallVector<Operation *> created;
+};
+
+static FailureOr<std::optional<PreparedPointerOffsets>>
+preparePointerOffsets(IRRewriter &rewriter, ArrayRef<PtrAddOp> chain,
+                      WaveDialect &dialect) {
+  struct DecodedOffset {
+    PtrAddOp add;
+    SymbolicOffset offset;
+  };
+  SmallVector<DecodedOffset> decoded;
+  for (PtrAddOp add : llvm::reverse(chain)) {
+    if (add.getOffset().getDefiningOp<IndexExprOp>() ||
+        getConstantIntValue(add.getOffset()))
+      continue;
+    mlir::wave::detail::SymbolicValueBuilder builder(
+        dialect, /*allowI64Integers=*/false,
+        /*assumeI32StorageRange=*/false, /*expandIndexExprRoot=*/false,
+        /*foldWaveConstants=*/true, /*modelWrappingArithmetic=*/false,
+        /*fullyMergeAssumes=*/false,
+        mlir::wave::detail::AssumeRootPolicy::ExpandSource,
+        hasAddressArithmeticNoOverflowAssumption(add.getOperation()));
+    builder.enableExactIntegerCasts();
+    FailureOr<std::optional<SymbolicOffset>> offset =
+        builder.build(add.getOffset());
+    if (failed(offset))
+      return failure();
+    if (!*offset)
+      return std::optional<PreparedPointerOffsets>{};
+    decoded.push_back({add, std::move(**offset)});
+  }
+
+  for (DecodedOffset &entry : decoded) {
+    SmallVector<Value> bindings;
+    for (const SymbolicOffsetBinding &binding : entry.offset.bindings) {
+      if (sym::ExprView(binding.name).getSymbolName().empty())
+        return failure();
+      bindings.push_back(binding.value);
+    }
+    Type indexType = getIndexExprResultType(entry.add.getContext(), bindings);
+    if (!canCreatePtrAdd(entry.add.getType(), entry.add.getBase().getType(),
+                         indexType))
+      return std::optional<PreparedPointerOffsets>{};
+  }
+
+  PreparedPointerOffsets prepared;
+  for (DecodedOffset &entry : decoded) {
+    SmallVector<Value> bindings;
+    SmallVector<StringRef> names;
+    for (const SymbolicOffsetBinding &binding : entry.offset.bindings) {
+      StringRef name = sym::ExprView(binding.name).getSymbolName();
+      assert(!name.empty() && "symbolic offset binding must have a name");
+      names.push_back(name);
+      bindings.push_back(binding.value);
+    }
+    Type indexType = getIndexExprResultType(entry.add.getContext(), bindings);
+    rewriter.setInsertionPoint(entry.add);
+    IndexExprOp index = IndexExprOp::create(
+        rewriter, entry.add.getLoc(), indexType,
+        ExprAttr::get(entry.add.getContext(), entry.offset.expr),
+        getIndexExprPredArrayAttr(entry.add.getContext(),
+                                  entry.offset.assumptions),
+        rewriter.getStrArrayAttr(names), bindings);
+    prepared.created.push_back(index);
+    Value replacement = index;
+    if (needsSimdOffset(entry.add.getType(), entry.add.getBase().getType(),
+                        indexType)) {
+      Type simdType = getSimdOffsetType(entry.add.getType(), indexType);
+      assert(simdType && "pointer offset type was prevalidated");
+      replacement =
+          SplatOp::create(rewriter, entry.add.getLoc(), simdType, replacement);
+      prepared.created.push_back(replacement.getDefiningOp());
+    }
+    prepared.originals.push_back({entry.add, entry.add.getOffset()});
+    rewriter.modifyOpInPlace(
+        entry.add, [&] { entry.add.getOffsetMutable().assign(replacement); });
+  }
+  return std::optional<PreparedPointerOffsets>{std::move(prepared)};
+}
+
+static void discardPreparedPointerOffsets(IRRewriter &rewriter,
+                                          PreparedPointerOffsets &prepared,
+                                          bool restore) {
+  if (restore)
+    for (auto [add, original] : prepared.originals)
+      rewriter.modifyOpInPlace(
+          add, [&] { add.getOffsetMutable().assign(original); });
+  for (Operation *op : llvm::reverse(prepared.created))
+    if (op->use_empty())
+      rewriter.eraseOp(op);
+}
+
 static FailureOr<bool> rewritePtrAddChain(IRRewriter &rewriter, PtrAddOp op,
                                           ArrayRef<PtrAddOp> chain,
+                                          WaveDialect &dialect,
                                           MemoryAddress address) {
-  SmallVector<std::string> names;
-  SmallVector<StringRef> nameRefs;
-  SmallVector<Value> bindings;
+  FailureOr<std::optional<int64_t>> elementBits =
+      getMemoryPointerElementBits(address.base.getType());
+  if (failed(elementBits))
+    return failure();
+  if (!*elementBits)
+    return false;
+  FailureOr<std::optional<CheckedIndexExpr>> offset =
+      getMemoryAddressElementOffset(dialect, address, **elementBits);
+  if (failed(offset))
+    return failure();
+  if (!*offset)
+    return false;
+  const CheckedIndexExpr &checked = **offset;
+  FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(
+      dialect.getSymbolStore(), checked.expression, checked.domain.facts);
+  if (failed(simplified))
+    return failure();
+  sym::ExprHandle expression =
+      shouldUseSimplifiedIndexExpr(*simplified, checked.expression)
+          ? *simplified
+          : checked.expression;
+
   llvm::DenseSet<StringRef> freeSymbols;
-  sym::walkSymbolNames(address.offset.expr,
-                       [&](StringRef name) { freeSymbols.insert(name); });
-  for (const SymbolicOffsetBinding &binding : address.offset.bindings) {
-    StringRef name = sym::ExprView(binding.name).getSymbolName();
+  collectIndexExprRequiredSymbols(expression, checked.domain.facts,
+                                  freeSymbols);
+  SmallVector<std::string> names;
+  SmallVector<Value> bindings;
+  for (const indexing::IndexMap::Input &binding : checked.domain.inputs) {
+    if (!binding.value)
+      continue;
+    StringRef name = sym::ExprView(binding.variable).getSymbolName();
     assert(!name.empty() && "symbolic offset binding must have a name");
     if (!freeSymbols.contains(name))
       continue;
     names.push_back(name.str());
     bindings.push_back(binding.value);
   }
+  SmallVector<StringRef> nameRefs;
   for (StringRef name : names)
     nameRefs.push_back(name);
-  SmallVector<sym::PredHandle> assumptions = filterIndexExprPredicatesBySymbols(
-      address.offset.assumptions, freeSymbols);
+  SmallVector<sym::PredHandle> assumptions =
+      filterIndexExprPredicatesBySymbols(checked.domain.facts, freeSymbols);
 
   MLIRContext *ctx = op->getContext();
   rewriter.setInsertionPoint(op);
@@ -507,7 +598,7 @@ static FailureOr<bool> rewritePtrAddChain(IRRewriter &rewriter, PtrAddOp op,
   if (!canCreatePtrAdd(op.getType(), address.base.getType(), indexType))
     return false;
   IndexExprOp index = IndexExprOp::create(
-      rewriter, op.getLoc(), indexType, ExprAttr::get(ctx, address.offset.expr),
+      rewriter, op.getLoc(), indexType, ExprAttr::get(ctx, expression),
       getIndexExprPredArrayAttr(ctx, assumptions),
       rewriter.getStrArrayAttr(nameRefs), bindings);
   FailureOr<Value> replacement = createPtrAdd(
@@ -525,19 +616,33 @@ static FailureOr<bool> combinePtrAdd(IRRewriter &rewriter, PtrAddOp op) {
   SmallVector<PtrAddOp> chain = collectPtrAddChain(op);
   if (chain.size() < 2)
     return false;
-  if (hasNonGlobalIdentityI32Offset(chain))
-    return false;
 
   WaveDialect *dialect = op->getContext()->getLoadedDialect<WaveDialect>();
   if (!dialect)
     return op.emitError("Wave dialect is not loaded");
+  FailureOr<std::optional<PreparedPointerOffsets>> prepared =
+      preparePointerOffsets(rewriter, chain, *dialect);
+  if (failed(prepared))
+    return op.emitError("failed to analyze combined pointer offset");
+  if (!*prepared)
+    return false;
   FailureOr<std::optional<MemoryAddress>> address =
       normalizeMemoryAddress(op.getResult(), *dialect);
-  if (failed(address))
+  if (failed(address)) {
+    discardPreparedPointerOffsets(rewriter, **prepared, /*restore=*/true);
     return op.emitError("failed to compose combined pointer offset");
-  if (!*address)
+  }
+  if (!*address) {
+    discardPreparedPointerOffsets(rewriter, **prepared, /*restore=*/true);
     return false;
-  return rewritePtrAddChain(rewriter, op, chain, std::move(**address));
+  }
+  FailureOr<bool> rewritten =
+      rewritePtrAddChain(rewriter, op, chain, *dialect, std::move(**address));
+  if (failed(rewritten) || !*rewritten)
+    discardPreparedPointerOffsets(rewriter, **prepared, /*restore=*/true);
+  else
+    discardPreparedPointerOffsets(rewriter, **prepared, /*restore=*/false);
+  return rewritten;
 }
 
 struct WaveCombinePointerOffsetsPass

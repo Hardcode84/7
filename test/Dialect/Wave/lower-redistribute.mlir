@@ -2,22 +2,7 @@
 // RUN:   --mlir-timing --mlir-timing-display=tree 2>%t | FileCheck %s
 // RUN: FileCheck %s --check-prefix=TIMING < %t
 
-// TIMING-DAG: wave_lower_redistribute_stages
-// TIMING-DAG: lower_redistribute_setup
-// TIMING-DAG: lower_redistribute_reductions
-// TIMING-DAG: lower_redistribute_collect_ops
-// TIMING-DAG: lower_redistribute_validate_classify
-// TIMING-DAG: lower_redistribute_compose
-// TIMING-DAG: lower_redistribute_prepare
-// TIMING-DAG: lower_redistribute_alias
-// TIMING-DAG: lower_redistribute_workitem
-// TIMING-DAG: lower_redistribute_wave
-// TIMING-DAG: lower_redistribute_workgroup
-// TIMING-DAG: lower_redistribute_workgroup_analyze_lds
-// TIMING-DAG: lower_redistribute_workgroup_plan
-// TIMING-DAG: lower_redistribute_workgroup_prepare_relation
-// TIMING-DAG: lower_redistribute_workgroup_allocate
-// TIMING-DAG: lower_redistribute_workgroup_emit
+// TIMING: WaveLowerRedistribute
 
 // CHECK-LABEL: func.func @reduce_ordered_odd(
 // CHECK-DAG: %[[S0:.*]] = wave.extract %{{.*}}[0]
@@ -176,7 +161,7 @@ func.func @reduce_workitem_slot(
 // CHECK: %[[PUBLISH:.*]] = wave.barrier %[[STORE]]
 // CHECK: %[[MOVED:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 // CHECK: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] value_lifetime({{.*}} -> %[[MOVED]]) {workgroup_collective}
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
 // CHECK: wave.fadd
 // CHECK-NOT: wave.reduce
 // CHECK-NOT: wave.redistribute
@@ -251,6 +236,26 @@ func.func @reverse_slots(%source: !wave.simd<vector<2xf32>, 32>)
 
 // -----
 
+// Predicate-valued scalar relations use numeric true = 1, false = 0.
+// CHECK-LABEL: func.func @predicate_scalar_slots(
+// CHECK-NOT: wave.shuffle
+// CHECK-NOT: wave.alloc
+// CHECK: %[[LO:.*]] = wave.extract %{{.*}}[0]
+// CHECK: %[[HI:.*]] = wave.extract %{{.*}}[1]
+// CHECK: %[[PACK:.*]] = wave.pack %[[HI]], %[[LO]]
+// CHECK: return %[[PACK]]
+func.func @predicate_scalar_slots(%source: !wave.simd<vector<2xf32>, 32>)
+    -> !wave.simd<vector<2xf32>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 32, source_block = "block", source_item = "item",
+       source_slot = "slot == 0">
+      : !wave.simd<vector<2xf32>, 32> -> !wave.simd<vector<2xf32>, 32>
+  return %result : !wave.simd<vector<2xf32>, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @select_scalar_slot(
 // CHECK-NOT: wave.shuffle
 // CHECK-NOT: wave.alloc
@@ -286,15 +291,15 @@ func.func @item_selected_slot(%source: !wave.simd<vector<2xi32>, 32>)
 
 // -----
 
-// CHECK-LABEL: func.func @piecewise_item(
+// CHECK-LABEL: func.func @slot_selected_item(
 // CHECK-NOT: wave.alloc
 // CHECK: wave.shuffle
-func.func @piecewise_item(%source: !wave.simd<vector<2xi32>, 32>)
+func.func @slot_selected_item(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   %result = wave.redistribute %source,
       <blocks = 1, items = 32,
-       source_block = "block", source_item = "Piecewise((item, slot == 0), (xor(item, 1), True))",
+       source_block = "block", source_item = "xor(item, slot)",
        source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
@@ -316,6 +321,26 @@ func.func @same_wave(%source: !wave.simd<vector<2xi32>, 32>)
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   return %result : !wave.simd<vector<2xi32>, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @same_wave_stage_from_domain(
+// CHECK-NOT: wave.alloc
+// CHECK: wave.shuffle
+// CHECK-NOT: wave.redistribute
+// CHECK: return
+func.func @same_wave_stage_from_domain(
+    %source: !wave.simd<vector<2xi32>, 64>)
+    -> !wave.simd<vector<2xi32>, 64>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "32 * slot + Mod(item, 32)",
+       source_slot = "floor(item / 32)">
+      : !wave.simd<vector<2xi32>, 64>
+        -> !wave.simd<vector<2xi32>, 64>
+  return %result : !wave.simd<vector<2xi32>, 64>
 }
 
 // -----
@@ -376,7 +401,7 @@ func.func @same_wave_uniform_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK: %[[LOAD1:.*]] = wave.extract %[[LOAD]][1]
 // CHECK: %[[PACK:.*]] = wave.pack %[[LOAD0]], %[[LOAD1]]
 // CHECK: %[[DONE:.*]] = wave.join %[[LOADTOK]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] value_lifetime({{.*}} -> %[[PACK]]) {workgroup_collective}
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
 // CHECK-NOT: wave.redistribute
 func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
     -> !wave.simd<vector<2xi32>, 32>
@@ -397,7 +422,7 @@ func.func @cross_wave(%source: !wave.simd<vector<2xi32>, 32>)
 // CHECK-NOT: wave.extract
 // CHECK-NOT: wave.pack
 // CHECK: %[[DONE:.*]] = wave.join %[[TOKEN]]
-// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] value_lifetime({{.*}} -> %[[LOAD]]) {workgroup_collective}
+// CHECK: wave.alloc_release %[[ALLOC]] after %[[DONE]] {workgroup_collective}
 // CHECK: return %[[LOAD]]
 func.func @cross_wave_scalar(%source: !wave.simd<i32, 32>)
     -> !wave.simd<i32, 32>
@@ -412,10 +437,10 @@ func.func @cross_wave_scalar(%source: !wave.simd<i32, 32>)
 
 // CHECK-LABEL: func.func @cross_wave_swizzled_vector(
 // CHECK: %[[ALLOC:.*]] = wave.alloc() {align = 8 : i64, bytesize = 1024 : i64}
-// CHECK: wave.pack {{.*}} -> !wave.simd<vector<2xi32>, 32>
+// CHECK-COUNT-2: wave.pack {{.*}} -> !wave.simd<vector<2xi32>, 32>
+// CHECK: wave.index_expr <"2*item">
 // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi32>, 32>
-// CHECK: wave.index_expr <"2*(64 + xor(8, item))">
-// CHECK: wave.pack {{.*}} -> !wave.simd<vector<2xi32>, 32>
+// CHECK: wave.index_expr <"128 + 2*xor(8, item)">
 // CHECK: wave.store {{.*}} : (!wave.simd<vector<2xi32>, 32>
 // CHECK: %[[PUBLISH:.*]] = wave.barrier
 // CHECK: wave.index_expr <"{{.*}}xor{{.*}}">
@@ -438,7 +463,7 @@ func.func @cross_wave_swizzled_vector(
 // -----
 
 // CHECK-LABEL: func.func @cross_wave_swizzled_gfx950(
-// CHECK: wave.index_expr <"2*(64 + xor(16, item))">
+// CHECK: wave.index_expr <"128 + 2*xor(16, item)">
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"
 } {
@@ -458,7 +483,7 @@ module attributes {
 // -----
 
 // CHECK-LABEL: func.func @cross_wave_swizzled_gfx1250(
-// CHECK: wave.index_expr <"2*(64 + xor(8, item))">
+// CHECK: wave.index_expr <"128 + 2*xor(8, item)">
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
@@ -496,13 +521,31 @@ func.func @cross_wave_vector_select(
 
 // -----
 
+// CHECK-LABEL: func.func @cross_wave_permuted_bf16_packet(
+// CHECK: wave.store {{.*}} : (!wave.simd<vector<8xbf16>, 64>
+// CHECK: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+func.func @cross_wave_permuted_bf16_packet(
+    %source: !wave.simd<vector<32xbf16>, 64>)
+    -> !wave.simd<vector<128xbf16>, 64>
+    attributes {wave.workgroup_size = array<i32: 512, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 512, source_block = "0",
+       source_item = "Mod(16*floor(item/256) + 256*floor(slot/32) + 4*floor(Mod(item, 64)/16) + 32*floor(Mod(slot, 8)/4) + 2*Mod(floor(slot/16), 2) + Mod(floor(slot/8), 2) + 128*Mod(floor(Mod(item, 64)/8), 2) + 64*Mod(floor(Mod(item, 64)/4), 2), 512)",
+       source_slot = "16*floor(slot/64) + 4*Mod(item, 2) + Mod(slot, 2) + 8*Mod(floor(Mod(item, 64)/2), 2) + 2*Mod(floor(Mod(slot, 8)/2), 2)">
+      : !wave.simd<vector<32xbf16>, 64>
+        -> !wave.simd<vector<128xbf16>, 64>
+  return %result : !wave.simd<vector<128xbf16>, 64>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @cross_wave_nested_if(
 // CHECK: scf.if
 // CHECK: wave.alloc
 // CHECK-COUNT-1: wave.barrier
 // CHECK: wave.load
 // CHECK: wave.join
-// CHECK: wave.alloc_release {{.*}} value_lifetime(
+// CHECK: wave.alloc_release
 func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
                                 %condition: i1)
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
@@ -522,7 +565,7 @@ func.func @cross_wave_nested_if(%source: !wave.simd<vector<1xi32>, 32>,
 // CHECK: %[[PTR:.*]] = wave.ptr_add %[[ALLOC]], {{.*}} : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
 // CHECK: wave.load %[[PTR]] after %[[PUBLISH]]
 // CHECK: wave.join
-// CHECK: wave.alloc_release {{.*}} value_lifetime(
+// CHECK: wave.alloc_release
 func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
     -> !wave.simd<vector<1xi32>, 32>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
@@ -540,13 +583,13 @@ func.func @broadcast_cross_wave(%source: !wave.simd<vector<1xi32>, 32>)
 // CHECK: %[[PUBLISH0:.*]] = wave.barrier %[[STORE0]]
 // CHECK: %[[LOAD0:.*]], %[[LOADTOK0:.*]] = wave.load {{.*}} after %[[PUBLISH0]]
 // CHECK: %[[DONE0:.*]] = wave.join %[[LOADTOK0]]
-// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] value_lifetime({{.*}}) {workgroup_collective}
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
 // CHECK: %[[ALLOC1:.*]] = wave.alloc()
 // CHECK: %[[STORE1:.*]] = wave.store {{.*}} after %[[RELEASE0]]
 // CHECK: %[[PUBLISH1:.*]] = wave.barrier %[[STORE1]]
 // CHECK: %[[LOAD1:.*]], %[[LOADTOK1:.*]] = wave.load {{.*}} after %[[PUBLISH1]]
 // CHECK: %[[DONE1:.*]] = wave.join %[[LOADTOK1]]
-// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]] value_lifetime({{.*}}) {workgroup_collective}
+// CHECK: %[[RELEASE1:.*]] = wave.alloc_release %[[ALLOC1]] after %[[DONE1]] {workgroup_collective}
 // CHECK: %[[ALLOC2:.*]] = wave.alloc()
 // CHECK: wave.store {{.*}} after %[[RELEASE1]]
 func.func @cross_wave_sequence(
@@ -571,7 +614,7 @@ func.func @cross_wave_sequence(
 // CHECK-LABEL: func.func @cross_wave_existing_barrier(
 // CHECK: %[[ALLOC0:.*]] = wave.alloc()
 // CHECK: %[[DONE0:.*]] = wave.join
-// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] value_lifetime({{.*}}) {workgroup_collective}
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]] after %[[DONE0]] {workgroup_collective}
 // CHECK: %[[ROOT:.*]] = wave.token
 // CHECK: %[[SYNC:.*]] = wave.barrier %[[ROOT]], %[[RELEASE0]]
 // CHECK: wave.alloc
@@ -671,5 +714,57 @@ func.func @capacity_reduces_vector_width(
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
   return %result : !wave.simd<vector<4xi32>, 32>
+}
+}
+
+// -----
+
+// CHECK-LABEL: func.func @capacity_reuse_materializes_retire_barrier(
+// CHECK: %[[ALLOC0:.*]] = wave.alloc() {align = 4 : i64, bytesize = 256 : i64, offset = 65280 : i64}
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]]
+// CHECK: %[[RETIRE:.*]] = wave.barrier %[[RELEASE0]]
+// CHECK: %[[ALLOC1:.*]] = wave.alloc() {align = 4 : i64, bytesize = 256 : i64, offset = 65280 : i64}
+// CHECK: wave.store {{.*}} after %[[RETIRE]]
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @capacity_reuse_materializes_retire_barrier(
+    %source0: !wave.simd<vector<4xi32>, 32>,
+    %source1: !wave.simd<vector<4xi32>, 32>)
+    attributes {wave.lds_size = 65280 : i64,
+                wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result0 = wave.redistribute %source0,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  %result1 = wave.redistribute %source1,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  return
+}
+}
+
+// -----
+
+// CHECK-LABEL: func.func @capacity_reuse_uses_existing_barrier(
+// CHECK: %[[ALLOC0:.*]] = wave.alloc() {align = 4 : i64, bytesize = 256 : i64, offset = 65280 : i64}
+// CHECK: %[[RELEASE0:.*]] = wave.alloc_release %[[ALLOC0]]
+// CHECK: %[[ROOT:.*]] = wave.token
+// CHECK: %[[SYNC:.*]] = wave.barrier %[[ROOT]], %[[RELEASE0]]
+// CHECK-NOT: wave.barrier
+// CHECK: wave.alloc() {align = 4 : i64, bytesize = 256 : i64, offset = 65280 : i64}
+// CHECK: wave.store {{.*}} after %[[SYNC]]
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @capacity_reuse_uses_existing_barrier(
+    %source0: !wave.simd<vector<4xi32>, 32>,
+    %source1: !wave.simd<vector<4xi32>, 32>)
+    attributes {wave.lds_size = 65280 : i64,
+                wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %result0 = wave.redistribute %source0,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  %root = wave.token : !wave.mem.token
+  %sync = wave.barrier %root : (!wave.mem.token) -> !wave.mem.token
+  %result1 = wave.redistribute %source1,
+      <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  return
 }
 }

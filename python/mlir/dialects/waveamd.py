@@ -4,6 +4,7 @@
 
 from mlir._mlir_libs import _waveDialectsNanobind as _wave_ext
 
+from . import wave as _wave  # noqa: F401
 from ._waveamd_enum_gen import *  # noqa: F403
 from ._waveamd_ops_gen import *  # noqa: F403
 

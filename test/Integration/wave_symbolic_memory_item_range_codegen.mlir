@@ -14,15 +14,18 @@ func.func @symbolic_memory_item_range_codegen(
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
   %value, %read = wave.gather %src mapping
       <base = <"floor(item / 64)">,
        bit_offset = <"Piecewise((32 * (2 * item + slot), item < 64))">>
-      bindings []() packet_bindings []()
-      : (!wave.ptr<#wave.global, i32>)
+      bindings ["item"](%bounded_item)
+      : (!wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>)
       -> (!wave.simd<vector<2xi32>, 64>, !wave.mem.token)
-  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
   %two = wave.constant 2 : i32 -> !wave.simd<i32, 64>
-  %offset = wave.binary muli %item, %two
+  %offset = wave.binary muli %bounded_item, %two overflow<nsw>
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %out = wave.ptr_add %dst, %offset
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>

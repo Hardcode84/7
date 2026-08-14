@@ -13,6 +13,9 @@ func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %source = wave.pack %item, %item
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<vector<2xi32>, 32>
@@ -21,7 +24,7 @@ func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   %value = wave.extract %moved[0]
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %value -> %ptr
@@ -40,10 +43,13 @@ func.func @redistribute_same_wave_scalar(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %moved = wave.redistribute %item,
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 1)", source_slot = "slot">
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %moved -> %ptr
@@ -64,7 +70,10 @@ func.func @redistribute_pointer_load_store(
                 wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
-  %src_ptr = wave.ptr_add %src, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
+      : !wave.simd<i32, 32>
+  %src_ptr = wave.ptr_add %src, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %moved = wave.redistribute %src_ptr,
@@ -74,12 +83,12 @@ func.func @redistribute_pointer_load_store(
         -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %packet, %read = wave.gather %moved mapping
       <bit_offset = <"0">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> (!wave.simd<vector<1xi32>, 32>, !wave.mem.token)
   %value = wave.extract %packet[0]
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
-  %dst_ptr = wave.ptr_add %dst, %item
+  %dst_ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %stored = wave.store %value -> %dst_ptr after %read
@@ -101,6 +110,9 @@ func.func @redistribute_same_wave_packet_select(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
   %v1 = wave.binary addi %item, %one
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -129,7 +141,7 @@ func.func @redistribute_same_wave_packet_select(
       : !wave.simd<vector<8xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
   %value = wave.extract %moved[0]
       : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %value -> %ptr
@@ -150,6 +162,9 @@ func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
   %next = wave.binary addi %item, %one
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -161,7 +176,7 @@ func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   %value = wave.extract %moved[0]
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %value -> %ptr
@@ -183,10 +198,13 @@ func.func @redistribute_cross_wave_scalar(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %moved = wave.redistribute %item,
       <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
       : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %moved -> %ptr
@@ -210,6 +228,9 @@ func.func @redistribute_cross_wave_swizzled(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
   %next = wave.binary addi %item, %one
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -228,7 +249,7 @@ func.func @redistribute_cross_wave_swizzled(
       : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<2xi32>, 32>
   %value = wave.extract %moved[0]
       : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %value -> %ptr
@@ -251,6 +272,9 @@ func.func @redistribute_cross_wave_nested(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %source = wave.pack %item
       : !wave.simd<i32, 32> -> !wave.simd<vector<1xi32>, 32>
   scf.if %condition {
@@ -259,7 +283,7 @@ func.func @redistribute_cross_wave_nested(
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
     %value = wave.extract %moved[0]
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
-    %ptr = wave.ptr_add %dst, %item
+    %ptr = wave.ptr_add %dst, %bounded_item
         : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
         -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
     %token = wave.store %value -> %ptr
@@ -280,6 +304,9 @@ func.func @redistribute_cross_wave_sequence(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
   %next = wave.binary addi %item, %one
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
@@ -310,7 +337,7 @@ func.func @redistribute_cross_wave_sequence(
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %sum = wave.binary addi %sum01, %value2
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %token = wave.store %sum -> %ptr
@@ -333,6 +360,9 @@ func.func @redistribute_cross_wave_loop_lifetime(
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
   %source = wave.pack %item
       : !wave.simd<i32, 32> -> !wave.simd<vector<1xi32>, 32>
   %lower = arith.constant 0 : index
@@ -370,10 +400,58 @@ func.func @redistribute_cross_wave_loop_lifetime(
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     scf.yield %next : !wave.simd<i32, 32>
   }
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %stored = wave.store %done -> %ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
+// Mutually exclusive non-repetitive lifetimes share the only scratch plane.
+// ASM-LABEL: redistribute_exclusive_scratch:
+// ASM: ds_store_b32
+// ASM: s_barrier
+// ASM: ds_load_b32
+// ASM: buffer_store_b32
+// ASM: .amdhsa_group_segment_fixed_size 65536
+func.func @redistribute_exclusive_scratch(
+    %dst: !wave.ptr<#wave.global, i32>, %condition: i1)
+    attributes {wave.kernel,
+                wave.lds_size = 65280 : i64,
+                wave.workgroup_size = array<i32: 64, 1, 1>,
+                wave.waves_per_workgroup = 2 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
+  %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
+  %next = wave.binary addi %item, %one
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %source0 = wave.pack %item, %item, %item, %item
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32> -> !wave.simd<vector<4xi32>, 32>
+  %source1 = wave.pack %next, %next, %next, %next
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.simd<i32, 32>,
+        !wave.simd<i32, 32> -> !wave.simd<vector<4xi32>, 32>
+  %moved = scf.if %condition -> (!wave.simd<vector<4xi32>, 32>) {
+    %then = wave.redistribute %source0,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+    scf.yield %then : !wave.simd<vector<4xi32>, 32>
+  } else {
+    %else = wave.redistribute %source1,
+        <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+    scf.yield %else : !wave.simd<vector<4xi32>, 32>
+  }
+  %value = wave.extract %moved[0]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %ptr = wave.ptr_add %dst, %bounded_item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %stored = wave.store %value -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
   return

@@ -23,7 +23,10 @@ func.func @buffer_dma_wide_address_codegen(
   %wi = wave.assume %wi_raw as "wi"
       [#wave.pred<"wi >= 0">, #wave.pred<"wi <= 63">]
       : !wave.simd<i32, 64>
-  %off = wave.index_expr <"1073741824*u + wi"> ["u", "wi"](%u, %wi)
+  %off = wave.index_expr <"1073741824*u + wi">
+      assuming [#wave.pred<"u >= 0">, #wave.pred<"u <= 1023">,
+                #wave.pred<"wi >= 0">, #wave.pred<"wi <= 63">]
+      ["u", "wi"](%u, %wi)
       : (i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
   %src = wave.ptr_add %buffer, %off
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>

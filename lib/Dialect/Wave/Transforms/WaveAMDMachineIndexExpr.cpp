@@ -211,6 +211,7 @@ static TermKind compoundMaterializationKind(WaveAMDMachineSelector &S,
     return mulMaterializationKind(S, expr, subs);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return materializationKind(S, view.getUnaryArg(), subs);
   case sym::ExprKind::Mod:
     return std::max(materializationKind(S, view.getBinaryLhs(), subs),
@@ -337,6 +338,7 @@ compoundMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
     return mulMaterializationLoopDepth(expr, user, subs);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return materializationLoopDepth(view.getUnaryArg(), user, subs);
   case sym::ExprKind::Mod:
     return std::max(materializationLoopDepth(view.getBinaryLhs(), user, subs),
@@ -1195,6 +1197,7 @@ static bool compoundContainsRationalMaterialization(sym::ExprView view) {
   switch (view.getKind()) {
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return containsRationalMaterialization(view.getUnaryArg());
   case sym::ExprKind::Mod:
     return binaryContainsRationalMaterialization(view);
@@ -1507,9 +1510,11 @@ proveRationalBinary(sym::Analysis &analysis, sym::ExprHandle expr,
     return failure();
   RationalNarrowingProof result = proveRationalIntegerNode(analysis, expr);
   bool operandsFit = lhs->fitsB32 && rhs->fitsB32;
-  // B32 truncation preserves remainder for power-of-two divisors up to 2^32.
+  // A power-of-two remainder only depends on the dividend's low bits. The
+  // surrounding structural walk still checks rounded subexpressions before
+  // allowing a modulo-2^32 envelope to narrow them.
   if (view.getKind() == sym::ExprKind::Mod && canTruncateModuloDividend(view))
-    operandsFit = rhs->fitsB32;
+    operandsFit = true;
   result.fitsB32 &= operandsFit;
   return result;
 }
@@ -1540,6 +1545,8 @@ proveRationalCompound(sym::Analysis &analysis, sym::ExprHandle expr,
     return proveRationalRounded(analysis, expr, /*isCeil=*/false);
   case sym::ExprKind::Ceil:
     return proveRationalRounded(analysis, expr, /*isCeil=*/true);
+  case sym::ExprKind::Trunc:
+    return proveRationalRounded(analysis, expr, /*isCeil=*/false);
   case sym::ExprKind::Mod:
     return proveRationalBinary(analysis, expr, view);
   case sym::ExprKind::Xor:
@@ -1578,6 +1585,64 @@ static bool rationalProofNeedsWide(sym::Analysis &analysis,
 
 static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
                                                   sym::ExprHandle expr);
+
+static bool isIntegralLiteral(sym::ExprHandle expr) {
+  if (sym::getIntegerLiteralValue(expr))
+    return true;
+  std::optional<sym::RationalLiteral> value = sym::ExprView(expr).getRational();
+  return value && value->denominator == 1;
+}
+
+// Inside a modulo-2^32 envelope, integer Add and Mul nodes are operations in
+// Z/2^32 and need not be exact in B32. Rounded or fractional subtrees remain
+// ordinary integer computations and must independently prove narrow.
+static bool requiresWideModuloB32Intermediates(sym::Analysis &analysis,
+                                               sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    if (!isIntegralLiteral(view.getAddConstant()))
+      return rationalProofNeedsWide(analysis, expr);
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+      sym::AddTerm term = view.getAddTerm(i);
+      if (!isIntegralLiteral(term.coefficient))
+        return rationalProofNeedsWide(analysis, expr);
+      if (requiresWideModuloB32Intermediates(analysis, term.term))
+        return true;
+    }
+    return false;
+  case sym::ExprKind::Mul:
+    if (!isIntegralLiteral(view.getMulCoefficient()))
+      return rationalProofNeedsWide(analysis, expr);
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+      sym::MulFactor factor = view.getMulFactor(i);
+      if (factor.exponent < 0)
+        return rationalProofNeedsWide(analysis, expr);
+      if (requiresWideModuloB32Intermediates(analysis, factor.base))
+        return true;
+    }
+    return false;
+  case sym::ExprKind::Floor:
+  case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
+    return rationalProofNeedsWide(analysis, expr);
+  case sym::ExprKind::Mod:
+    if (canTruncateModuloDividend(view))
+      return requiresWideModuloB32Intermediates(analysis, view.getBinaryLhs());
+    return requiresWideRationalIntermediatesImpl(analysis,
+                                                 view.getBinaryLhs()) ||
+           requiresWideRationalIntermediatesImpl(analysis, view.getBinaryRhs());
+  case sym::ExprKind::Xor:
+  case sym::ExprKind::And:
+  case sym::ExprKind::Or:
+    for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+      if (requiresWideModuloB32Intermediates(analysis, view.getAssocArg(i)))
+        return true;
+    return false;
+  default:
+    return false;
+  }
+}
 
 static bool addRequiresWideRationalIntermediates(sym::Analysis &analysis,
                                                  sym::ExprHandle expr) {
@@ -1633,8 +1698,11 @@ static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
     return mulRequiresWideRationalIntermediates(analysis, expr);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return rationalProofNeedsWide(analysis, expr);
   case sym::ExprKind::Mod:
+    if (canTruncateModuloDividend(view))
+      return requiresWideModuloB32Intermediates(analysis, view.getBinaryLhs());
     return binaryRequiresWideRationalIntermediates(analysis, view);
   case sym::ExprKind::Xor:
   case sym::ExprKind::And:
@@ -2166,6 +2234,42 @@ static FailureOr<Value> materializeCeilRational(WaveAMDMachineSelector &S,
                                        user);
 }
 
+static FailureOr<Value> materializeTruncRational(WaveAMDMachineSelector &S,
+                                                 sym::Analysis &analysis,
+                                                 RationalIndexValue value,
+                                                 sym::ExprHandle sourceExpr,
+                                                 Operation *user) {
+  std::optional<int64_t> staticDen = getStaticInt(S, value.denominator);
+  if (!staticDen)
+    return user->emitError("wave.index_expr trunc needs a static denominator");
+  int64_t den = *staticDen;
+  if (den == 1)
+    return materializeValue(S, user->getLoc(), value.numerator, user);
+  if (den <= 0 || (den & (den - 1)) != 0)
+    return user->emitError(
+               "wave.index_expr trunc needs a power-of-two denominator (got ")
+           << den << ")";
+  if (failed(requireNarrowRationalNumerator(S, analysis, value.numeratorExpr,
+                                            user)))
+    return failure();
+  if (den > std::numeric_limits<uint32_t>::max())
+    return createImm(S.builder, user->getLoc(), 0);
+  FailureOr<Value> numerator =
+      materializeValue(S, user->getLoc(), value.numerator, user);
+  if (failed(numerator))
+    return failure();
+  unsigned shift = llvm::Log2_64(den);
+  if (isProvablyNonNegative(analysis, sourceExpr))
+    return S.shrPow2(user->getLoc(), *numerator, shift);
+  if (!rationalNumeratorFitsI32(analysis, value.numeratorExpr))
+    return user->emitError(
+        "wave.index_expr trunc needs a signed 32-bit numerator");
+  Value sign = materializeSignedShrPow2(S, user->getLoc(), *numerator, 31);
+  Value bias = S.andMask(user->getLoc(), sign, den - 1);
+  Value adjusted = addIndexValues(S, user->getLoc(), *numerator, bias);
+  return materializeSignedShrPow2(S, user->getLoc(), adjusted, shift);
+}
+
 static FailureOr<Value> materializeIntegerRationalExpr(
     WaveAMDMachineSelector &S, sym::Analysis &analysis, sym::ExprHandle expr,
     Operation *user, const llvm::StringMap<Value> &subs,
@@ -2520,15 +2624,19 @@ static FailureOr<RationalIndexValue> materializeRationalPrimitiveIndexExprNode(
 static FailureOr<RationalIndexValue> materializeRationalRoundedIndexExprNode(
     WaveAMDMachineSelector &S, sym::Analysis &analysis, sym::ExprHandle expr,
     Operation *user, const llvm::StringMap<Value> &subs,
-    ArrayRef<sym::PredHandle> assumptions, bool isCeil) {
+    ArrayRef<sym::PredHandle> assumptions, sym::ExprKind kind) {
   sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
   FailureOr<RationalIndexValue> child = materializeRationalIndexExprNode(
       S, analysis, childExpr, user, subs, assumptions);
   if (failed(child))
     return failure();
-  FailureOr<Value> value =
-      isCeil ? materializeCeilRational(S, analysis, *child, childExpr, user)
-             : materializeFloorRational(S, analysis, *child, childExpr, user);
+  FailureOr<Value> value = failure();
+  if (kind == sym::ExprKind::Floor)
+    value = materializeFloorRational(S, analysis, *child, childExpr, user);
+  else if (kind == sym::ExprKind::Ceil)
+    value = materializeCeilRational(S, analysis, *child, childExpr, user);
+  else
+    value = materializeTruncRational(S, analysis, *child, childExpr, user);
   if (failed(value))
     return failure();
   FailureOr<sym::ExprHandle> denominator =
@@ -2549,13 +2657,14 @@ static FailureOr<RationalIndexValue> materializeRationalCompoundIndexExprNode(
   case sym::ExprKind::Mul:
     return materializeRationalMul(S, analysis, expr, user, subs, assumptions);
   case sym::ExprKind::Floor:
-    return materializeRationalRoundedIndexExprNode(S, analysis, expr, user,
-                                                   subs, assumptions,
-                                                   /*isCeil=*/false);
+    return materializeRationalRoundedIndexExprNode(
+        S, analysis, expr, user, subs, assumptions, sym::ExprKind::Floor);
   case sym::ExprKind::Ceil:
-    return materializeRationalRoundedIndexExprNode(S, analysis, expr, user,
-                                                   subs, assumptions,
-                                                   /*isCeil=*/true);
+    return materializeRationalRoundedIndexExprNode(
+        S, analysis, expr, user, subs, assumptions, sym::ExprKind::Ceil);
+  case sym::ExprKind::Trunc:
+    return materializeRationalRoundedIndexExprNode(
+        S, analysis, expr, user, subs, assumptions, sym::ExprKind::Trunc);
   case sym::ExprKind::Mod:
     return materializeRationalMod(S, analysis, expr, user, subs, assumptions);
   case sym::ExprKind::Xor:
@@ -2568,7 +2677,7 @@ static FailureOr<RationalIndexValue> materializeRationalCompoundIndexExprNode(
   }
   return user->emitError(
              "wave.index_expr selection does not support expression kind ")
-         << sym::getExprKindName(view.getKind());
+         << static_cast<int>(view.getKind());
 }
 
 static FailureOr<RationalIndexValue> materializeRationalIndexExprNode(
@@ -2618,6 +2727,24 @@ static FailureOr<Value> materializeCeil(WaveAMDMachineSelector &S,
   if (failed(value))
     return failure();
   return materializeCeilRational(S, **analysis, *value, childExpr, user);
+}
+
+static FailureOr<Value> materializeTrunc(WaveAMDMachineSelector &S,
+                                         sym::ExprHandle expr, Operation *user,
+                                         const llvm::StringMap<Value> &subs,
+                                         ArrayRef<sym::PredHandle> assumptions,
+                                         IndexExprAddOrder addOrder) {
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(S.symbolStore(), assumptions);
+  if (failed(analysis) ||
+      failed(assumeNarrowBindingRanges(S, **analysis, subs)))
+    return failure();
+  sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
+  FailureOr<RationalIndexValue> value = materializeRationalIndexExprNode(
+      S, **analysis, childExpr, user, subs, assumptions);
+  if (failed(value))
+    return failure();
+  return materializeTruncRational(S, **analysis, *value, childExpr, user);
 }
 
 TermKind classifyAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
@@ -2695,6 +2822,7 @@ static bool compoundExprReferencesWideScalarInteger(
   switch (view.getKind()) {
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return exprReferencesWideScalarInteger(view.getUnaryArg(), wideSymbols);
   case sym::ExprKind::Mod:
     return exprReferencesWideScalarInteger(view.getBinaryLhs(), wideSymbols) ||
@@ -3247,6 +3375,8 @@ static FailureOr<Value> materializeCompoundIndexExprNode(
     return materializeFloor(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Ceil:
     return materializeCeil(S, expr, user, subs, assumptions, addOrder);
+  case sym::ExprKind::Trunc:
+    return materializeTrunc(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Mod:
     return materializeMod(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Xor:
@@ -3260,7 +3390,7 @@ static FailureOr<Value> materializeCompoundIndexExprNode(
   }
   return user->emitError(
              "wave.index_expr selection does not support expression kind ")
-         << sym::getExprKindName(view.getKind());
+         << static_cast<int>(view.getKind());
 }
 
 FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
@@ -3345,6 +3475,7 @@ classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
     return classifyMul(S, expr, symKinds);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return classifyTerm(S, view.getUnaryArg(), symKinds);
   case sym::ExprKind::Mod:
     return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),

@@ -9,6 +9,8 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/Wave/Transforms/WaveLDSAllocation.h"
 
+#include "WaveLDSRegionLiveness.h"
+
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
@@ -43,11 +45,8 @@ using namespace mlir::wave;
 namespace {
 
 struct ValueLifetime {
-  SmallVector<Value, 8> aliases;
-  SmallVector<Operation *, 8> terminalUses;
+  SmallVector<AllocOp, 4> terminalAllocations;
   SmallVector<Region *, 4> repetitiveRegions;
-  Value source;
-  Value result;
 };
 
 struct AllocInterval {
@@ -601,13 +600,6 @@ static LogicalResult associateReleases(ArrayRef<AllocReleaseOp> releases,
     if (interval.release)
       return release.emitOpError("allocation already has a wave.alloc_release");
     interval.release = release;
-    if (release.getLifetimeSource()) {
-      ValueLifetime lifetime;
-      lifetime.source = release.getLifetimeSource();
-      lifetime.result = release.getLifetimeResult();
-      interval.valueLifetime =
-          std::make_unique<ValueLifetime>(std::move(lifetime));
-    }
   }
   return success();
 }
@@ -750,6 +742,15 @@ static bool appendRegionForwardedValues(OpOperand &use,
   return forwards;
 }
 
+static bool appendPacketForwardedValues(OpOperand &use,
+                                        SmallVectorImpl<Value> &forwarded) {
+  ExtractOp extract = dyn_cast<ExtractOp>(use.getOwner());
+  if (!extract || extract.getSource() != use.get())
+    return false;
+  appendForwardedValue(extract.getResult(), forwarded);
+  return true;
+}
+
 static void appendRepetitiveAncestors(Operation *point,
                                       SmallVectorImpl<Region *> &regions) {
   for (Region *region = point->getParentRegion(); region;) {
@@ -762,69 +763,226 @@ static void appendRepetitiveAncestors(Operation *point,
   }
 }
 
-static bool consumeValueLifetimeMarker(const OperationOrder &order,
-                                       AllocInterval &interval,
-                                       OpOperand &use) {
-  AllocReleaseOp marker = dyn_cast<AllocReleaseOp>(use.getOwner());
-  if (!marker)
-    return false;
-  MutableOperandRange source = marker.getLifetimeSourceMutable();
-  MutableOperandRange result = marker.getLifetimeResultMutable();
-  bool isSource = !source.empty() && &source[0] == &use;
-  bool isResult = !result.empty() && &result[0] == &use;
-  if (!isSource && !isResult)
-    return false;
-  if (!isSource)
-    return true;
+// Recover redistribution value lifetimes from the canonical scratch dataflow.
+struct ValueLifetimeEndpoint {
+  Operation *allocation;
+  Operation *release;
+};
 
-  Operation *consumption = marker.getAllocation().getDefiningOp();
-  extendIntervalForUse(order, interval, consumption);
-  ValueLifetime &lifetime = *interval.valueLifetime;
-  appendRepetitiveAncestors(consumption, lifetime.repetitiveRegions);
-  if (!llvm::is_contained(lifetime.terminalUses, consumption))
-    lifetime.terminalUses.push_back(consumption);
-  return true;
+using ValueLifetimeEndpointMap =
+    DenseMap<Value, SmallVector<ValueLifetimeEndpoint, 1>>;
+
+static bool isWithinAllocationImplementation(const OperationOrder &order,
+                                             const AllocInterval &interval,
+                                             Operation *op) {
+  unsigned position = order.lookup(op);
+  return order.lookup(interval.op) < position &&
+         position < order.lookup(interval.release);
 }
 
-static void collectValueLifetime(const OperationOrder &order,
-                                 AllocInterval &interval) {
-  if (!interval.valueLifetime)
+static void collectStoredValueFrontiers(const OperationOrder &order,
+                                        const AllocInterval &interval,
+                                        Value value, DenseSet<Value> &visited,
+                                        SmallVectorImpl<Value> &frontiers) {
+  if (!visited.insert(value).second)
     return;
-  ValueLifetime &lifetime = *interval.valueLifetime;
-  SmallVector<Value, 8> worklist{lifetime.result};
-  DenseSet<Value> visited;
-  appendRepetitiveAncestors(interval.op, lifetime.repetitiveRegions);
-  if (Operation *def = lifetime.result.getDefiningOp())
-    extendIntervalForUse(order, interval, def);
+  Operation *def = value.getDefiningOp();
+  if (!def || !isWithinAllocationImplementation(order, interval, def)) {
+    appendForwardedValue(value, frontiers);
+    return;
+  }
+  if (PackOp pack = dyn_cast<PackOp>(def)) {
+    for (Value input : pack.getInputs())
+      collectStoredValueFrontiers(order, interval, input, visited, frontiers);
+    return;
+  }
+  if (ExtractOp extract = dyn_cast<ExtractOp>(def)) {
+    collectStoredValueFrontiers(order, interval, extract.getSource(), visited,
+                                frontiers);
+    return;
+  }
+  appendForwardedValue(value, frontiers);
+}
 
+static ValueLifetimeEndpointMap
+buildValueLifetimeEndpoints(const OperationOrder &order,
+                            ArrayRef<AllocInterval> allocs) {
+  DenseMap<Operation *, SmallVector<unsigned, 1>> storeOwners;
+  for (auto [index, interval] : llvm::enumerate(allocs))
+    for (Operation *access : interval.accesses)
+      if (isa<StoreOp>(access) &&
+          !llvm::is_contained(storeOwners[access], index))
+        storeOwners[access].push_back(index);
+
+  ValueLifetimeEndpointMap endpoints;
+  for (auto [operation, owners] : storeOwners) {
+    if (owners.size() != 1)
+      continue;
+    const AllocInterval &interval = allocs[owners.front()];
+    if (!interval.release)
+      continue;
+    DenseSet<Value> visited;
+    SmallVector<Value, 4> frontiers;
+    StoreOp store = cast<StoreOp>(operation);
+    collectStoredValueFrontiers(order, interval, store.getValue(), visited,
+                                frontiers);
+    for (Value frontier : frontiers) {
+      AllocOp allocation = interval.op;
+      AllocReleaseOp release = interval.release;
+      auto endpoint = ValueLifetimeEndpoint{allocation.getOperation(),
+                                            release.getOperation()};
+      SmallVector<ValueLifetimeEndpoint, 1> &values = endpoints[frontier];
+      if (llvm::none_of(values, [&](const ValueLifetimeEndpoint &value) {
+            return value.release == endpoint.release;
+          }))
+        values.push_back(endpoint);
+    }
+  }
+  return endpoints;
+}
+
+static bool appendScratchAssemblyValue(OpOperand &use,
+                                       SmallVectorImpl<Value> &forwarded) {
+  Operation *user = use.getOwner();
+  if (PackOp pack = dyn_cast<PackOp>(user)) {
+    appendForwardedValue(pack.getResult(), forwarded);
+    return true;
+  }
+  if (ExtractOp extract = dyn_cast<ExtractOp>(user)) {
+    if (extract.getSource() != use.get())
+      return false;
+    appendForwardedValue(extract.getResult(), forwarded);
+    return true;
+  }
+  if (SelectOp select = dyn_cast<SelectOp>(user)) {
+    if (select.getTrueValue() != use.get() &&
+        select.getFalseValue() != use.get())
+      return false;
+    appendForwardedValue(select.getResult(), forwarded);
+    return true;
+  }
+  return appendRegionForwardedValues(use, forwarded);
+}
+
+static SmallVector<Value, 8>
+collectValueLifetimeCarriers(const OperationOrder &order,
+                             const AllocInterval &interval) {
+  SmallVector<Value, 8> worklist;
+  for (Operation *access : interval.accesses) {
+    if (LoadOp load = dyn_cast<LoadOp>(access))
+      appendForwardedValue(load.getValue(), worklist);
+    else if (auto load = dyn_cast<waveamd::TransposeLoadOp>(access))
+      appendForwardedValue(load.getValue(), worklist);
+  }
+  SmallVector<Value, 8> carriers;
+  DenseSet<Value> visited;
+  unsigned releasePosition = order.lookup(interval.release);
   while (!worklist.empty()) {
     Value value = worklist.pop_back_val();
     if (!visited.insert(value).second)
       continue;
-    lifetime.aliases.push_back(value);
+    carriers.push_back(value);
     for (OpOperand &use : value.getUses()) {
-      if (use.getOwner() == interval.release.getOperation())
+      if (order.lookup(use.getOwner()) > releasePosition)
         continue;
-      Operation *user = use.getOwner();
-      if (consumeValueLifetimeMarker(order, interval, use))
-        continue;
-      extendIntervalForUse(order, interval, user);
-      appendRepetitiveAncestors(user, lifetime.repetitiveRegions);
       SmallVector<Value, 4> forwarded;
-      if (appendRegionForwardedValues(use, forwarded)) {
+      if (appendScratchAssemblyValue(use, forwarded)) {
         llvm::append_range(worklist, forwarded);
-        continue;
       }
-      if (!llvm::is_contained(lifetime.terminalUses, user))
-        lifetime.terminalUses.push_back(user);
     }
+  }
+  return carriers;
+}
+
+static void appendValueLifetimeEndpoints(
+    const OperationOrder &order, AllocInterval &interval, Value value,
+    unsigned cutoff, const ValueLifetimeEndpointMap &endpoints) {
+  auto found = endpoints.find(value);
+  if (found == endpoints.end())
+    return;
+  ValueLifetime &lifetime = *interval.valueLifetime;
+  for (const ValueLifetimeEndpoint &endpoint : found->second) {
+    if (endpoint.release == interval.release.getOperation() ||
+        (cutoff && order.lookup(endpoint.release) < cutoff))
+      continue;
+    Operation *consumption = endpoint.allocation;
+    extendIntervalForUse(order, interval, consumption);
+    appendRepetitiveAncestors(consumption, lifetime.repetitiveRegions);
+    AllocOp allocation = cast<AllocOp>(consumption);
+    if (!llvm::is_contained(lifetime.terminalAllocations, allocation))
+      lifetime.terminalAllocations.push_back(allocation);
+  }
+}
+
+using ValueLifetimeWorklist = SmallVector<std::pair<Value, unsigned>, 16>;
+
+static bool shouldVisitValueLifetime(Value value, unsigned cutoff,
+                                     DenseMap<Value, unsigned> &visited) {
+  auto prior = visited.find(value);
+  if (prior != visited.end() &&
+      (prior->second == 0 || (cutoff && prior->second <= cutoff)))
+    return false;
+  visited[value] = cutoff;
+  return true;
+}
+
+static void appendValueLifetimeUses(const OperationOrder &order,
+                                    AllocInterval &interval, Value value,
+                                    unsigned cutoff,
+                                    ValueLifetimeWorklist &worklist) {
+  ValueLifetime &lifetime = *interval.valueLifetime;
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (isa<AllocReleaseOp>(user) || (cutoff && order.lookup(user) < cutoff))
+      continue;
+    // Completed loads live in registers. Only follow packet/region forwarding
+    // to find a later scratch allocation or a repetitive-region backedge.
+    SmallVector<Value, 4> forwarded;
+    if (!appendPacketForwardedValues(use, forwarded) &&
+        !appendRegionForwardedValues(use, forwarded))
+      continue;
+    appendRepetitiveAncestors(user, lifetime.repetitiveRegions);
+    for (Value next : forwarded)
+      worklist.emplace_back(next, 0);
+  }
+}
+
+static void collectValueLifetime(const OperationOrder &order,
+                                 AllocInterval &interval,
+                                 ArrayRef<Value> carriers,
+                                 const ValueLifetimeEndpointMap &endpoints) {
+  assert(interval.valueLifetime && "expected derived value lifetime");
+  ValueLifetime &lifetime = *interval.valueLifetime;
+  unsigned releasePosition = order.lookup(interval.release);
+  ValueLifetimeWorklist worklist;
+  for (Value carrier : carriers)
+    worklist.emplace_back(carrier, releasePosition);
+  DenseMap<Value, unsigned> visited;
+  appendRepetitiveAncestors(interval.op, lifetime.repetitiveRegions);
+
+  while (!worklist.empty()) {
+    auto [value, cutoff] = worklist.pop_back_val();
+    if (!shouldVisitValueLifetime(value, cutoff, visited))
+      continue;
+    appendValueLifetimeEndpoints(order, interval, value, cutoff, endpoints);
+    appendValueLifetimeUses(order, interval, value, cutoff, worklist);
   }
 }
 
 static void collectValueLifetimes(const OperationOrder &order,
                                   SmallVectorImpl<AllocInterval> &allocs) {
-  for (AllocInterval &interval : allocs)
-    collectValueLifetime(order, interval);
+  ValueLifetimeEndpointMap endpoints =
+      buildValueLifetimeEndpoints(order, allocs);
+  for (AllocInterval &interval : allocs) {
+    if (!interval.release)
+      continue;
+    SmallVector<Value, 8> carriers =
+        collectValueLifetimeCarriers(order, interval);
+    if (carriers.empty())
+      continue;
+    interval.valueLifetime = std::make_unique<ValueLifetime>();
+    collectValueLifetime(order, interval, carriers, endpoints);
+  }
 }
 
 static SmallVector<Value, 4> collectAccessTokens(AllocInterval &interval) {
@@ -1307,10 +1465,15 @@ static Value getPrivateCompletion(AllocInterval &interval,
   return completed ? completed : interval.release.getToken();
 }
 
-static bool hasSamePrivateRange(const AllocInterval &lhs,
-                                const AllocInterval &rhs) {
-  if (!lhs.fixedOffset || !rhs.fixedOffset ||
-      *lhs.fixedOffset != *rhs.fixedOffset || lhs.bytes != rhs.bytes)
+static bool hasOverlappingPrivateRange(const AllocInterval &lhs,
+                                       const AllocInterval &rhs) {
+  if (!lhs.fixedOffset || !rhs.fixedOffset || *lhs.fixedOffset < 0 ||
+      *rhs.fixedOffset < 0 ||
+      *lhs.fixedOffset > std::numeric_limits<int64_t>::max() - lhs.bytes ||
+      *rhs.fixedOffset > std::numeric_limits<int64_t>::max() - rhs.bytes)
+    return false;
+  if (*lhs.fixedOffset >= *rhs.fixedOffset + rhs.bytes ||
+      *rhs.fixedOffset >= *lhs.fixedOffset + lhs.bytes)
     return false;
   return ArrayRef(lhs.valueLifetime->repetitiveRegions) ==
          ArrayRef(rhs.valueLifetime->repetitiveRegions);
@@ -1323,7 +1486,7 @@ static FailureOr<SmallVector<AllocInterval *, 4>> collectPrivateLifetimeGroup(
   for (AllocInterval &candidate : allocs) {
     if (&candidate == &seed || !candidate.valueLifetime ||
         complete.contains(candidate.release.getOperation()) ||
-        !hasSamePrivateRange(seed, candidate))
+        !hasOverlappingPrivateRange(seed, candidate))
       continue;
     FailureOr<std::optional<scf::ForOp>> candidateLoop =
         getNextValueLifetimeLoop(candidate,
@@ -1645,8 +1808,8 @@ static bool lifetimeEndpointAllowsReuse(const AllocInterval &earlier,
     return true;
   if (!earlier.valueLifetime)
     return false;
-  return llvm::is_contained(earlier.valueLifetime->terminalUses,
-                            later.op.operator->());
+  return llvm::is_contained(earlier.valueLifetime->terminalAllocations,
+                            later.op);
 }
 
 static bool accessesOrderReuse(const AllocInterval &earlier,
@@ -1662,6 +1825,15 @@ static bool accessesOrderReuse(const AllocInterval &earlier,
   return true;
 }
 
+static SmallVector<Operation *, 8>
+getLifetimeOperations(const AllocInterval &interval) {
+  SmallVector<Operation *, 8> operations{interval.op};
+  llvm::append_range(operations, interval.accesses);
+  if (interval.release)
+    operations.push_back(interval.release);
+  return operations;
+}
+
 static bool loopBackedgesOrderReuse(const AllocInterval &earlier,
                                     const AllocInterval &later,
                                     TokenOrdering &ordering) {
@@ -1674,16 +1846,37 @@ static bool loopBackedgesOrderReuse(const AllocInterval &earlier,
   return true;
 }
 
+static bool lexicalLifetimeAllowsReuse(const AllocInterval &earlier,
+                                       const AllocInterval &later,
+                                       bool exclusive, bool ordered) {
+  if (earlier.end <= later.start)
+    return true;
+  return exclusive || ordered;
+}
+
 static bool canReuseStorage(const AllocInterval &earlier,
                             const AllocInterval &later,
                             TokenOrdering &ordering) {
-  if (earlier.end > later.start)
+  bool explicitLifetime = usesExplicitLifetime(earlier, later);
+  bool exclusiveLifetime = false;
+  if (explicitLifetime) {
+    SmallVector<Operation *, 8> earlierOperations =
+        getLifetimeOperations(earlier);
+    SmallVector<Operation *, 8> laterOperations = getLifetimeOperations(later);
+    exclusiveLifetime = waveLDSLifetimesAreMutuallyExclusive(earlierOperations,
+                                                             laterOperations) &&
+                        !waveLDSOperationsMayCoexecute(earlier.op, later.op);
+  }
+  bool orderedLifetime =
+      explicitLifetime && accessesOrderReuse(earlier, later, ordering);
+  if (!lexicalLifetimeAllowsReuse(earlier, later, exclusiveLifetime,
+                                  orderedLifetime))
     return false;
   if (!lifetimeEndpointAllowsReuse(earlier, later))
     return false;
-  if (!usesExplicitLifetime(earlier, later))
+  if (!explicitLifetime)
     return true;
-  if (!accessesOrderReuse(earlier, later, ordering))
+  if (!exclusiveLifetime && !orderedLifetime)
     return false;
   return loopBackedgesOrderReuse(earlier, later, ordering);
 }
@@ -2026,6 +2219,20 @@ struct WaveResolveAllocsPass
 
 } // namespace
 
+bool mlir::wave::waveLDSOperationsMayCoexecute(Operation *lhs, Operation *rhs) {
+  return !insideMutuallyExclusiveRegions(lhs, rhs) ||
+         !getCommonEnclosingRepetitiveRegions(lhs, rhs).empty();
+}
+
+bool mlir::wave::waveLDSLifetimesAreMutuallyExclusive(
+    ArrayRef<Operation *> lhs, ArrayRef<Operation *> rhs) {
+  return !lhs.empty() && !rhs.empty() && llvm::all_of(lhs, [&](Operation *a) {
+    return llvm::all_of(rhs, [&](Operation *b) {
+      return insideMutuallyExclusiveRegions(a, b);
+    });
+  });
+}
+
 struct mlir::wave::WaveLDSAllocationAnalysis::Impl {
   AllocationAnalysis analysis;
   DenseMap<std::pair<Operation *, Value>, SmallVector<PlacedAllocation>>
@@ -2038,6 +2245,22 @@ WaveLDSAllocationAnalysis::WaveLDSAllocationAnalysis(std::unique_ptr<Impl> impl)
     : impl(std::move(impl)) {}
 
 WaveLDSAllocationAnalysis::~WaveLDSAllocationAnalysis() = default;
+
+void WaveLDSAllocationAnalysis::refreshTokenOrdering() {
+  impl->analysis.ordering =
+      std::make_unique<TokenOrdering>(buildTokenOrigins(impl->func));
+  impl->blockedCache.clear();
+}
+
+bool WaveLDSAllocationAnalysis::completesThroughBarrier(Value dependency,
+                                                        Value completion) {
+  if (!dependency || !completion)
+    return false;
+  if (!impl->analysis.ordering)
+    refreshTokenOrdering();
+  return impl->analysis.ordering->dependsOnThroughBarrier(dependency,
+                                                          completion);
+}
 
 FailureOr<std::unique_ptr<WaveLDSAllocationAnalysis>>
 WaveLDSAllocationAnalysis::create(func::FuncOp func) {

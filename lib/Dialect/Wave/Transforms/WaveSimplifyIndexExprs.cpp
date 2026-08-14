@@ -8,6 +8,8 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WaveSymbolicTransformTiming.h"
+
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
@@ -270,6 +272,7 @@ struct WaveSimplifyIndexExprsPass
     : public wave::impl::WaveSimplifyIndexExprsBase<
           WaveSimplifyIndexExprsPass> {
   void runOnOperation() override {
+    SymbolicTransformTiming timing("simplify_index_exprs");
     Operation *root = getOperation();
 
     WaveDialect *dialect = root->getContext()->getLoadedDialect<WaveDialect>();
@@ -279,24 +282,35 @@ struct WaveSimplifyIndexExprsPass
     }
 
     SmallVector<IndexExprOp> ops;
-    root->walk([&](IndexExprOp op) { ops.push_back(op); });
+    {
+      TimingScope collectTiming = timing.nest("index_expr_collect");
+      root->walk([&](IndexExprOp op) { ops.push_back(op); });
+    }
     if (ops.empty())
       return;
 
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
-    if (failed(solver.initializeAndRun(root))) {
-      root->emitError("IntegerRangeAnalysis failed for wave.index_expr pass");
-      return signalPassFailure();
+    {
+      TimingScope rangeTiming = timing.nest("index_expr_range_analysis");
+      if (failed(solver.initializeAndRun(root))) {
+        root->emitError("IntegerRangeAnalysis failed for wave.index_expr pass");
+        return signalPassFailure();
+      }
     }
 
     llvm::DenseMap<Operation *, IndexExprAssumptions> assumptionsByOp;
-    for (IndexExprOp op : ops)
-      assumptionsByOp[op.getOperation()] =
-          collectIndexExprAssumptions(op, solver, dialect->getSymbolStore());
+    {
+      TimingScope assumptionsTiming =
+          timing.nest("index_expr_collect_assumptions");
+      for (IndexExprOp op : ops)
+        assumptionsByOp[op.getOperation()] =
+            collectIndexExprAssumptions(op, solver, dialect->getSymbolStore());
+    }
 
     IRRewriter rewriter(root->getContext());
+    TimingScope simplifyTiming = timing.nest("index_expr_simplify");
     for (IndexExprOp op : ops) {
       auto it = assumptionsByOp.find(op.getOperation());
       assert(it != assumptionsByOp.end() && "missing precomputed assumptions");

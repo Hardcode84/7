@@ -213,6 +213,18 @@ func.func @index_expr_simd_no_crash() -> !wave.simd<index, 32> {
   return %off : !wave.simd<index, 32>
 }
 
+// A full i32 range is finite information after the binding is lifted into
+// the mathematical integer domain of wave.index_expr.
+// CHECK-LABEL: func.func @index_expr_retains_full_i32_binding_range
+// CHECK-NEXT: %[[T:.*]] = arith.constant true
+// CHECK-NEXT: return %[[T]] : i1
+func.func @index_expr_retains_full_i32_binding_range(%x: i32) -> i1 {
+  %off = wave.index_expr <"x"> ["x"](%x) : (i32) -> index
+  %max = arith.constant 2147483647 : index
+  %bounded = arith.cmpi sle, %off, %max : index
+  return %bounded : i1
+}
+
 // Id-op range seeds: workgroup_id contributes [0, INT32_MAX] without
 // any `wave.assume`. The lower bound alone is enough for the
 // non-negativity check to fold.

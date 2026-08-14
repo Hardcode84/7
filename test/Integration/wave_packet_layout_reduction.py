@@ -10,38 +10,9 @@
 # RUN: llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 \
 # RUN:   -filetype=obj %t.s -o /dev/null
 
+from mlir.dialects import wave
 from mlir.dialects import wave_dsl as w
-
-SOURCE_LAYOUT = w.PacketLayout(
-    64,
-    (("reduce", 2), ("x", 64)),
-    (
-        ("lane", ((0, 1), (0, 2), (0, 4), (0, 8), (0, 16), (0, 32))),
-        ("warp", ((1, 0),)),
-    ),
-)
-RESULT_LAYOUT = w.PacketLayout(
-    64,
-    (("x", 64),),
-    (
-        ("lane", ((1,), (2,), (4,), (8,), (16,), (32,))),
-        ("warp", ((0,),)),
-    ),
-)
-REGISTER_SOURCE_LAYOUT = w.PacketLayout(
-    64,
-    (("x", 64), ("reduce", 4)),
-    (
-        ("register", ((0, 1), (0, 2))),
-        ("lane", ((1, 0), (2, 0), (4, 0), (8, 0), (16, 0), (32, 0))),
-    ),
-)
-REGISTER_RESULT_LAYOUT = w.PacketLayout(
-    64,
-    (("x", 64),),
-    (("lane", ((1,), (2,), (4,), (8,), (16,), (32,))),),
-)
-
+from mlir.ir import InsertionPoint
 
 with w.module() as module_builder:
     with module_builder.function(
@@ -52,22 +23,30 @@ with w.module() as module_builder:
         attrs={"wave.waves_per_workgroup": w.i64_attr(2)},
     ) as function_builder:
         source, destination = function_builder.args
-        item = function_builder.workitem_id(width=64)
+        raw_item = function_builder.workitem_id(width=64)
+        item = function_builder.assume_range(raw_item, 0, 127)
         source_pointer = function_builder.ptr_add(source, item)
         value, read = function_builder.load(
             source_pointer, w.simd_type(w.i32(), width=64)
         )
-        with function_builder.reduce_layout(
-            value,
+        reduction = w.sym("reduction")
+        relation = w._redistribution_attr(
+            1,
+            128,
+            w.sym("block"),
+            w.mod(w.sym("item"), 64) + 64 * w.mod(reduction, 2),
+            w.sym("slot"),
+        )
+        reduce_op = wave.ReduceOp(w.simd_type(w.i32(), width=64), value, relation, 2)
+        combiner = reduce_op.combiner.blocks.append(
             w.simd_type(w.i32(), width=64),
-            source_layout=SOURCE_LAYOUT,
-            result_layout=RESULT_LAYOUT,
-            axis=0,
-        ) as reduction:
-            lhs, rhs = reduction.arguments
-            function_builder.yield_((function_builder.addi(lhs, rhs),))
+            w.simd_type(w.i32(), width=64),
+        )
+        with InsertionPoint(combiner):
+            lhs, rhs = combiner.arguments
+            wave.YieldOp([function_builder.addi(lhs, rhs)])
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(reduction.result, pointer, after=read)
+        function_builder.store(reduce_op.result, pointer, after=read)
 
     with module_builder.function(
         "packet_layout_reduce_reorderable_register",
@@ -76,25 +55,41 @@ with w.module() as module_builder:
         workgroup_size=[64, 1, 1],
     ) as function_builder:
         source, destination = function_builder.args
-        item = function_builder.workitem_id(width=64)
+        raw_item = function_builder.workitem_id(width=64)
+        item = function_builder.assume_range(raw_item, 0, 63)
         source_pointer = function_builder.ptr_add(source, item)
         value, read = function_builder.load(
             source_pointer,
             w.simd_type(w.vector_type(4, w.i32()), width=64),
         )
-        with function_builder.reduce_layout(
-            value,
+        reduction = w.sym("reduction")
+        relation = w._redistribution_attr(
+            1,
+            64,
+            w.sym("block"),
+            w.sym("item"),
+            w.xor(
+                2 * w.mod(w.floor(reduction / 2), 2),
+                w.mod(reduction, 2),
+            ),
+        )
+        reduce_op = wave.ReduceOp(
             w.simd_type(w.i32(), width=64),
-            source_layout=REGISTER_SOURCE_LAYOUT,
-            result_layout=REGISTER_RESULT_LAYOUT,
-            axis=1,
+            value,
+            relation,
+            4,
             associative=True,
             commutative=True,
-        ) as reduction:
-            lhs, rhs = reduction.arguments
-            function_builder.yield_((function_builder.addi(lhs, rhs),))
+        )
+        combiner = reduce_op.combiner.blocks.append(
+            w.simd_type(w.i32(), width=64),
+            w.simd_type(w.i32(), width=64),
+        )
+        with InsertionPoint(combiner):
+            lhs, rhs = combiner.arguments
+            wave.YieldOp([function_builder.addi(lhs, rhs)])
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(reduction.result, pointer, after=read)
+        function_builder.store(reduce_op.result, pointer, after=read)
 
     print(module_builder.module)
 
@@ -133,7 +128,6 @@ with w.module() as module_builder:
 # LOWER: %[[VALUE:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 # LOWER: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
 # LOWER: %[[RELEASE:.*]] = wave.alloc_release %[[ALLOC]] after %[[DONE]]
-# LOWER-SAME: value_lifetime({{.*}} -> %[[VALUE]])
 # LOWER-SAME: {workgroup_collective}
 # LOWER: %[[NEXT_ALLOC:.*]] = wave.alloc()
 # LOWER: %[[NEXT_STORE:.*]] = wave.store {{.*}} after %[[RELEASE]]
@@ -142,7 +136,7 @@ with w.module() as module_builder:
 # LOWER-SAME: after %[[NEXT_PUBLISH]]
 # LOWER: %[[NEXT_DONE:.*]] = wave.join %[[NEXT_LOAD_TOKEN]]
 # LOWER: wave.alloc_release %[[NEXT_ALLOC]] after %[[NEXT_DONE]]
-# LOWER-SAME: value_lifetime({{.*}}) {workgroup_collective}
+# LOWER-SAME: {workgroup_collective}
 # LOWER: wave.binary addi
 # LOWER: wave.store {{.*}} after %[[READ]]
 # LOWER-NOT: wave.reduce

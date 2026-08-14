@@ -1,7 +1,6 @@
 #  Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-
 """Light builder helpers around the Wave/WaveAMD MLIR Python bindings.
 
 The DSL is intentionally thin: it exposes a small set of context managers
@@ -28,10 +27,8 @@ Usage::
 
 from __future__ import annotations
 
-import math
-import operator
 import typing
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -109,19 +106,10 @@ def sym(name: str) -> ixsimpl.Expr:
     return sym_ctx.sym(name)
 
 
-def _ixsimpl_node_ptr(expr: ixsimpl.Expr) -> int:
-    try:
-        return int(expr.node_ptr)
-    except AttributeError as exc:
-        raise RuntimeError("ixsimpl Expr.node_ptr required") from exc
-
-
 def _pred_attr(pred: ixsimpl.Expr) -> PredAttr:
     if not pred.is_pred:
         raise TypeError("wave.assume expects ixsimpl predicate nodes")
-    return PredAttr.get_from_node_ptr(
-        _ixsimpl_node_ptr(pred), context=_current_context()
-    )
+    return PredAttr.get_from_node_ptr(pred.node_ptr, context=_current_context())
 
 
 # Re-export the ixsimpl algebraic helpers callers reach for when
@@ -129,821 +117,49 @@ def _pred_attr(pred: ixsimpl.Expr) -> PredAttr:
 # import point for kernel builders -- no separate `import ixsimpl`.
 floor = ixsimpl.floor
 ceil = ixsimpl.ceil
+trunc = ixsimpl.trunc
 mod = ixsimpl.mod
 xor = ixsimpl.xor_
 
 
-_PACKET_INPUT_DIMS = ("register", "lane", "warp", "block")
-_PACKET_TRANSFORMS = frozenset(
-    {
-        "identity",
-        "broadcast",
-        "expand_dims",
-        "reshape",
-        "transpose",
-        "split",
-    }
-)
-
-
-def _packet_int(value: Any, name: str) -> int:
-    if isinstance(value, bool):
-        raise TypeError(f"{name} must be an integer")
-    try:
-        return operator.index(value)
-    except TypeError as exc:
-        raise TypeError(f"{name} must be an integer") from exc
-
-
-def _is_power_of_two(value: int) -> bool:
-    return value > 0 and value & (value - 1) == 0
-
-
-def _packet_pair(value: Any, message: str) -> tuple[Any, Any]:
-    try:
-        first, second = value
-    except (TypeError, ValueError) as exc:
-        raise TypeError(message) from exc
-    return first, second
-
-
-def _normalize_packet_out_dims(value: Any) -> tuple[tuple[str, int], ...]:
-    try:
-        dimensions = tuple(value)
-    except TypeError as exc:
-        raise TypeError("packet layout tensor dimensions must be iterable") from exc
-    result = []
-    for dimension in dimensions:
-        name, size = _packet_pair(
-            dimension, "packet layout tensor dimensions must be name-size pairs"
-        )
-        if not isinstance(name, str):
-            raise TypeError("packet layout tensor dimension names must be strings")
-        result.append((name, _packet_int(size, "packet layout tensor size")))
-    return tuple(result)
-
-
-def _normalize_packet_basis(value: Any) -> tuple[tuple[int, ...], ...]:
-    try:
-        raw_values = tuple(value)
-    except TypeError as exc:
-        raise TypeError("packet layout input bases must be iterable") from exc
-    result = []
-    for raw_value in raw_values:
-        try:
-            components = tuple(raw_value)
-        except TypeError as exc:
-            raise TypeError("packet layout basis must be iterable") from exc
-        result.append(
-            tuple(
-                _packet_int(component, "packet layout basis component")
-                for component in components
-            )
-        )
-    return tuple(result)
-
-
-def _normalize_packet_bases(
-    value: Any,
-) -> tuple[tuple[str, tuple[tuple[int, ...], ...]], ...]:
-    try:
-        bases = tuple(value)
-    except TypeError as exc:
-        raise TypeError("packet layout bases must be iterable") from exc
-    result = []
-    for entry in bases:
-        name, values = _packet_pair(
-            entry, "packet layout bases must be input-basis pairs"
-        )
-        if not isinstance(name, str):
-            raise TypeError("packet layout input dimension names must be strings")
-        result.append((name, _normalize_packet_basis(values)))
-    return tuple(result)
-
-
-def _validate_packet_out_dims(out_dims: tuple[tuple[str, int], ...]) -> None:
-    if not out_dims:
-        raise ValueError("packet layout requires at least one tensor dimension")
-    if len({name for name, _size in out_dims}) != len(out_dims):
-        raise ValueError("packet layout tensor dimension names must be unique")
-    if any(not name or not _is_power_of_two(size) for name, size in out_dims):
-        raise ValueError(
-            "packet layout tensor dimensions must be named positive powers of two"
-        )
-
-
-def _validate_packet_basis(
-    out_dims: tuple[tuple[str, int], ...], value: tuple[int, ...]
-) -> None:
-    rank = len(out_dims)
-    if len(value) != rank:
-        raise ValueError("packet layout basis rank does not match its tensor rank")
-    if any(
-        component < 0 or component >= out_dims[index][1]
-        for index, component in enumerate(value)
-    ):
-        raise ValueError("packet layout basis is outside its tensor shape")
-
-
-def _validate_packet_bases(
-    out_dims: tuple[tuple[str, int], ...],
-    bases: tuple[tuple[str, tuple[tuple[int, ...], ...]], ...],
-) -> None:
-    if len({name for name, _values in bases}) != len(bases):
-        raise ValueError("packet layout input dimension names must be unique")
-    if any(name not in _PACKET_INPUT_DIMS for name, _values in bases):
-        raise ValueError("packet layout has an unsupported input dimension")
-    for _name, values in bases:
-        for value in values:
-            _validate_packet_basis(out_dims, value)
-
-
-@dataclass(frozen=True)
-class PacketLayout:
-    """Bit-linear hardware-to-tensor packet mapping."""
-
-    lane_width: int
-    out_dims: tuple[tuple[str, int], ...]
-    bases: tuple[tuple[str, tuple[tuple[int, ...], ...]], ...]
-
-    def __post_init__(self) -> None:
-        lane_width = _packet_int(self.lane_width, "packet layout lane width")
-        out_dims = _normalize_packet_out_dims(self.out_dims)
-        bases = _normalize_packet_bases(self.bases)
-        object.__setattr__(self, "lane_width", lane_width)
-        object.__setattr__(self, "out_dims", out_dims)
-        object.__setattr__(self, "bases", bases)
-        if not _is_power_of_two(lane_width):
-            raise ValueError("packet layout lane width must be a positive power of two")
-        _validate_packet_out_dims(out_dims)
-        _validate_packet_bases(out_dims, bases)
-        if self.input_size("lane") != self.lane_width:
-            raise ValueError("packet layout lane domain does not match its lane width")
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return tuple(size for _name, size in self.out_dims)
-
-    @property
-    def slot_count(self) -> int:
-        return self.input_size("register")
-
-    @property
-    def item_count(self) -> int:
-        return self.lane_width * self.input_size("warp")
-
-    @property
-    def block_count(self) -> int:
-        return self.input_size("block")
-
-    def input_size(self, name: str) -> int:
-        for input_name, values in self.bases:
-            if input_name == name:
-                return 1 << len(values)
-        return 1
-
-
-def _normalize_packet_order(value: Any) -> tuple[int, ...]:
-    try:
-        order = tuple(value)
-    except TypeError as exc:
-        raise TypeError("packet transform order must be iterable") from exc
-    return tuple(_packet_int(dim, "packet transform order dimension") for dim in order)
-
-
-def _validate_expand_dims_transform(
-    axis: int | None, order: tuple[int, ...], selector: int | None
-) -> None:
-    if axis is None or axis < 0 or order or selector is not None:
-        raise ValueError("expand_dims packet transform requires one axis")
-
-
-def _validate_transpose_transform(
-    axis: int | None, order: tuple[int, ...], selector: int | None
-) -> None:
-    if axis is not None or not order or selector is not None:
-        raise ValueError("transpose packet transform requires an order")
-    if len(set(order)) != len(order) or any(dim < 0 for dim in order):
-        raise ValueError("transpose packet transform order must be a permutation")
-
-
-def _validate_split_transform(
-    axis: int | None, order: tuple[int, ...], selector: int | None
-) -> None:
-    if axis is not None or order or selector not in (0, 1):
-        raise ValueError("split packet transform requires selector 0 or 1")
-
-
-def _validate_parameterless_transform(
-    kind: str, axis: int | None, order: tuple[int, ...], selector: int | None
-) -> None:
-    if axis is not None or order or selector is not None:
-        raise ValueError(f"{kind} packet transform takes no parameters")
-
-
-@dataclass(frozen=True)
-class PacketTransform:
-    """Tensor transform relating source and result layouts."""
-
-    kind: str = "identity"
-    axis: int | None = None
-    order: tuple[int, ...] = ()
-    selector: int | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind, str):
-            raise TypeError("packet transform kind must be a string")
-        if self.kind not in _PACKET_TRANSFORMS:
-            raise ValueError(f"unsupported packet transform {self.kind!r}")
-        axis = (
-            None
-            if self.axis is None
-            else _packet_int(self.axis, "packet transform axis")
-        )
-        selector = (
-            None
-            if self.selector is None
-            else _packet_int(self.selector, "packet transform selector")
-        )
-        order = _normalize_packet_order(self.order)
-        object.__setattr__(self, "axis", axis)
-        object.__setattr__(self, "order", order)
-        object.__setattr__(self, "selector", selector)
-
-        if self.kind == "expand_dims":
-            return _validate_expand_dims_transform(axis, order, selector)
-        if self.kind == "transpose":
-            return _validate_transpose_transform(axis, order, selector)
-        if self.kind == "split":
-            return _validate_split_transform(axis, order, selector)
-        return _validate_parameterless_transform(self.kind, axis, order, selector)
-
-    @staticmethod
-    def identity() -> PacketTransform:
-        return PacketTransform()
-
-    @staticmethod
-    def broadcast() -> PacketTransform:
-        return PacketTransform("broadcast")
-
-    @staticmethod
-    def expand_dims(axis: int) -> PacketTransform:
-        return PacketTransform("expand_dims", axis=axis)
-
-    @staticmethod
-    def reshape() -> PacketTransform:
-        return PacketTransform("reshape")
-
-    @staticmethod
-    def transpose(order: Sequence[int]) -> PacketTransform:
-        return PacketTransform("transpose", order=tuple(order))
-
-    @staticmethod
-    def split(selector: int) -> PacketTransform:
-        return PacketTransform("split", selector=selector)
-
-
-def join_packet_layout(first: PacketLayout, second: PacketLayout) -> PacketLayout:
-    """Return the packet layout of two equally laid-out joined operands."""
-    if first != second:
-        raise ValueError("joined packet operands must have identical layouts")
-    selector_name = f"dim{len(first.out_dims)}"
-    existing_names = {name for name, _size in first.out_dims}
-    while selector_name in existing_names:
-        selector_name = f"_{selector_name}"
-    bases = []
-    saw_register = False
-    for name, values in first.bases:
-        extended = tuple((*value, 0) for value in values)
-        if name == "register":
-            saw_register = True
-            extended += ((0,) * len(first.out_dims) + (1,),)
-        bases.append((name, extended))
-    if not saw_register:
-        bases.append(
-            (
-                "register",
-                ((0,) * len(first.out_dims) + (1,),),
-            )
-        )
-    return PacketLayout(
-        first.lane_width,
-        (*first.out_dims, (selector_name, 2)),
-        tuple(bases),
-    )
-
-
-def _layout_columns(
-    layout: PacketLayout,
-) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[int, ...], ...]]:
-    columns = []
-    values = []
-    for name, bases in layout.bases:
-        for bit, basis in enumerate(bases):
-            columns.append((name, bit))
-            values.append(tuple(int(component) for component in basis))
-    return tuple(columns), tuple(values)
-
-
-def _logical_offsets(layout: PacketLayout) -> tuple[int, ...]:
-    offsets = []
-    offset = 0
-    for _name, size in layout.out_dims:
-        offsets.append(offset)
-        offset += int(size).bit_length() - 1
-    return tuple(offsets)
-
-
-def _flatten_logical(layout: PacketLayout, coordinate: Sequence[int]) -> int:
-    if len(coordinate) != len(layout.out_dims):
-        raise ValueError("packet transform returned the wrong tensor rank")
-    result = 0
-    for index, (component, (_name, size), offset) in enumerate(
-        zip(coordinate, layout.out_dims, _logical_offsets(layout), strict=True)
-    ):
-        component = int(component)
-        if component < 0 or component >= int(size):
-            raise ValueError(
-                f"packet transform coordinate {index} is outside its source shape"
-            )
-        result |= component << offset
-    return result
-
-
-def _source_equations(layout: PacketLayout) -> tuple[tuple[int, ...], int]:
-    columns, values = _layout_columns(layout)
-    logical_bits = sum(int(size).bit_length() - 1 for _name, size in layout.out_dims)
-    equations = [0] * logical_bits
-    offsets = _logical_offsets(layout)
-    for column, value in enumerate(values):
-        for dim, component in enumerate(value):
-            for bit in range(int(layout.out_dims[dim][1]).bit_length() - 1):
-                if int(component) & (1 << bit):
-                    equations[offsets[dim] + bit] |= 1 << column
-    return tuple(equations), len(columns)
-
-
-def _reshape_coordinate(
-    coordinate: Sequence[int],
-    result_shape: Sequence[int],
-    source_shape: Sequence[int],
-) -> tuple[int, ...]:
-    linear = 0
-    for component, extent in zip(coordinate, result_shape, strict=True):
-        linear = linear * int(extent) + int(component)
-    source = [0] * len(source_shape)
-    for dim in reversed(range(len(source_shape))):
-        source[dim] = linear % int(source_shape[dim])
-        linear //= int(source_shape[dim])
-    return tuple(source)
-
-
-_PacketCoordinateTransform = Callable[[Sequence[int]], tuple[int, ...]]
-
-
-def _identity_packet_transform(
-    _transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    if source_shape != result_shape:
-        raise ValueError("identity packet transform requires equal tensor shapes")
-    return lambda coordinate: tuple(int(value) for value in coordinate)
-
-
-def _broadcast_packet_transform(
-    _transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    if len(source_shape) != len(result_shape) or any(
-        source not in (1, result)
-        for source, result in zip(source_shape, result_shape, strict=True)
-    ):
-        raise ValueError("broadcast packet transform has incompatible shapes")
-    return lambda coordinate: tuple(
-        0 if source == 1 else int(value)
-        for source, value in zip(source_shape, coordinate, strict=True)
-    )
-
-
-def _expand_dims_packet_transform(
-    transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    axis = transform.axis
-    assert axis is not None
-    if (
-        axis >= len(result_shape)
-        or result_shape[axis] != 1
-        or result_shape[:axis] + result_shape[axis + 1 :] != source_shape
-    ):
-        raise ValueError("expand_dims packet transform has incompatible shapes")
-    return lambda coordinate: tuple(coordinate[:axis]) + tuple(coordinate[axis + 1 :])
-
-
-def _reshape_packet_transform(
-    _transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    if math.prod(source_shape) != math.prod(result_shape):
-        raise ValueError("reshape packet transform changes the element count")
-    return lambda coordinate: _reshape_coordinate(
-        coordinate, result_shape, source_shape
-    )
-
-
-def _transpose_packet_transform(
-    transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    order = transform.order
-    if (
-        len(order) != len(source_shape)
-        or sorted(order) != list(range(len(source_shape)))
-        or tuple(source_shape[dim] for dim in order) != result_shape
-    ):
-        raise ValueError("transpose packet transform has an invalid order")
-
-    def transpose_coordinate(coordinate: Sequence[int]) -> tuple[int, ...]:
-        source = [0] * len(source_shape)
-        for result_dim, source_dim in enumerate(order):
-            source[source_dim] = int(coordinate[result_dim])
-        return tuple(source)
-
-    return transpose_coordinate
-
-
-def _split_packet_transform(
-    transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    selector = transform.selector
-    assert selector is not None
-    if not source_shape or source_shape[-1] != 2 or source_shape[:-1] != result_shape:
-        raise ValueError("split packet transform has incompatible shapes")
-    return lambda coordinate: (*map(int, coordinate), selector)
-
-
-_PACKET_COORDINATE_TRANSFORMS = {
-    "identity": _identity_packet_transform,
-    "broadcast": _broadcast_packet_transform,
-    "expand_dims": _expand_dims_packet_transform,
-    "reshape": _reshape_packet_transform,
-    "transpose": _transpose_packet_transform,
-    "split": _split_packet_transform,
-}
-
-
-def _packet_coordinate_transform(
-    transform: PacketTransform,
-    source_shape: tuple[int, ...],
-    result_shape: tuple[int, ...],
-) -> _PacketCoordinateTransform:
-    return _PACKET_COORDINATE_TRANSFORMS[transform.kind](
-        transform, source_shape, result_shape
-    )
-
-
-def _gf2_rows(
-    equations: Sequence[int], rhs: int, constraints: Sequence[tuple[int, int]]
-) -> list[list[int]]:
-    rows = [[mask, (rhs >> index) & 1] for index, mask in enumerate(equations)]
-    rows.extend([[1 << variable, value] for variable, value in constraints])
-    return rows
-
-
-def _gf2_find_pivot(
-    rows: Sequence[Sequence[int]], start: int, column: int
-) -> int | None:
-    return next(
-        (row for row in range(start, len(rows)) if rows[row][0] & (1 << column)),
-        None,
-    )
-
-
-def _gf2_eliminate(rows: list[list[int]], pivot_row: int, column: int) -> None:
-    pivot_mask, pivot_rhs = rows[pivot_row]
-    for row, values in enumerate(rows):
-        if row == pivot_row or not values[0] & (1 << column):
+def ixs_check(
+    exprs: Sequence[ixsimpl.Expr],
+    facts: Sequence[ixsimpl.Expr],
+) -> tuple[tuple[bool | None, ...], tuple[ixsimpl.Expr, ...]]:
+    """Normalize expressions and prove predicates under one symbolic fact set."""
+    query_facts = sym_ctx.facts()
+    query_facts.assume_many(tuple(facts))
+    normalized = tuple(expr.simplify(facts=query_facts) for expr in exprs)
+    proofs: list[bool | None] = []
+    for expr, normalized_expr in zip(exprs, normalized, strict=True):
+        if not expr.is_pred:
+            proofs.append(None)
             continue
-        values[0] ^= pivot_mask
-        values[1] ^= pivot_rhs
+        proof = sym_ctx.check(normalized_expr, facts=query_facts)
+        if proof is None and normalized_expr.node_ptr != expr.node_ptr:
+            proof = sym_ctx.check(expr, facts=query_facts)
+        proofs.append(proof)
+    return tuple(proofs), normalized
 
 
-def _gf2_read_solution(
-    rows: Sequence[Sequence[int]], pivots: Sequence[tuple[int, int]]
-) -> int:
-    return sum(1 << column for column, row in pivots if rows[row][1])
+def ixs_int(value: int) -> ixsimpl.Expr:
+    """Return an integer literal rooted in the Wave symbolic context."""
+    return sym_ctx.int_(int(value))
 
 
-def _gf2_solve(
-    equations: Sequence[int],
-    rhs: int,
-    variable_count: int,
-    constraints: Sequence[tuple[int, int]],
-) -> int | None:
-    rows = _gf2_rows(equations, rhs, constraints)
-    pivot_row = 0
-    pivots: list[tuple[int, int]] = []
-    for column in range(variable_count):
-        pivot = _gf2_find_pivot(rows, pivot_row, column)
-        if pivot is None:
-            continue
-        rows[pivot_row], rows[pivot] = rows[pivot], rows[pivot_row]
-        _gf2_eliminate(rows, pivot_row, column)
-        pivots.append((column, pivot_row))
-        pivot_row += 1
-    if any(mask == 0 and value for mask, value in rows):
-        return None
-    return _gf2_read_solution(rows, pivots)
+def ixs_eq(lhs: ixsimpl.Expr, rhs: ixsimpl.Expr | int) -> ixsimpl.Expr:
+    """Return symbolic equality rooted in the Wave symbolic context."""
+    return sym_ctx.eq(lhs, rhs)
 
 
-def _physical_column_groups(
-    source_columns: Sequence[tuple[str, int]],
-) -> dict[str, tuple[int, ...]]:
-    return {
-        name: tuple(
-            index
-            for index, (column_name, _bit) in enumerate(source_columns)
-            if column_name == name
-        )
-        for name in _PACKET_INPUT_DIMS
-    }
+def ixs_serialize(expr: ixsimpl.Expr) -> tuple[int, ...]:
+    """Serialize a Wave symbolic expression for bridge transport."""
+    return tuple(sym_ctx.serialize(expr))
 
 
-def _preferred_group_constraints(
-    equations: Sequence[int],
-    rhs: int,
-    variable_count: int,
-    groups: Mapping[str, Sequence[int]],
-    preferred: Mapping[int, int],
-) -> list[tuple[int, int]]:
-    constraints: list[tuple[int, int]] = []
-    for name in reversed(_PACKET_INPUT_DIMS):
-        proposed = constraints + [
-            (variable, preferred[variable]) for variable in groups[name]
-        ]
-        if _gf2_solve(equations, rhs, variable_count, proposed) is not None:
-            constraints = proposed
-    return constraints
-
-
-def _complete_solution_constraints(
-    equations: Sequence[int],
-    rhs: int,
-    variable_count: int,
-    source_columns: Sequence[tuple[str, int]],
-    groups: Mapping[str, Sequence[int]],
-    constraints: list[tuple[int, int]],
-) -> None:
-    constrained = {variable for variable, _value in constraints}
-    for name in _PACKET_INPUT_DIMS:
-        by_high_bit = sorted(
-            groups[name], key=lambda index: source_columns[index][1], reverse=True
-        )
-        for variable in by_high_bit:
-            if variable in constrained:
-                continue
-            proposed = [*constraints, (variable, 0)]
-            value = int(_gf2_solve(equations, rhs, variable_count, proposed) is None)
-            constraints.append((variable, value))
-            constrained.add(variable)
-
-
-def _preferred_physical_solution(
-    equations: Sequence[int],
-    rhs: int,
-    source_columns: Sequence[tuple[str, int]],
-    destination_column: tuple[str, int] | None,
-) -> int:
-    variable_count = len(source_columns)
-    groups = _physical_column_groups(source_columns)
-    preferred = {
-        index: int(destination_column == source_column)
-        for index, source_column in enumerate(source_columns)
-    }
-    constraints = _preferred_group_constraints(
-        equations, rhs, variable_count, groups, preferred
-    )
-    _complete_solution_constraints(
-        equations, rhs, variable_count, source_columns, groups, constraints
-    )
-    solution = _gf2_solve(equations, rhs, variable_count, constraints)
-    if solution is None:
-        raise ValueError("packet layouts do not define a total redistribution")
-    return solution
-
-
-def _packet_source_group(
-    source_columns: Sequence[tuple[str, int]], name: str
-) -> dict[int, int]:
-    return {
-        source_index: source_bit
-        for source_index, (source_name, source_bit) in enumerate(source_columns)
-        if source_name == name
-    }
-
-
-def _packet_input_is_direct(
-    source: PacketLayout,
-    result: PacketLayout,
-    name: str,
-    source_group: Mapping[int, int],
-    result_columns: Sequence[tuple[str, int]],
-    basis_solutions: Sequence[int],
-    origin: int,
-) -> bool:
-    if source.input_size(name) != result.input_size(name):
-        return False
-    if any(origin & (1 << source_index) for source_index in source_group):
-        return False
-    for result_index, (result_name, result_bit) in enumerate(result_columns):
-        actual = {
-            source_bit
-            for source_index, source_bit in source_group.items()
-            if basis_solutions[result_index] & (1 << source_index)
-        }
-        expected = {result_bit} if result_name == name else set()
-        if actual != expected:
-            return False
-    return True
-
-
-def _packet_input_origin(
-    source_columns: Sequence[tuple[str, int]], name: str, origin: int
-) -> int:
-    return sum(
-        1 << source_bit
-        for source_index, (source_name, source_bit) in enumerate(source_columns)
-        if source_name == name and origin & (1 << source_index)
-    )
-
-
-def _packet_input_coefficient(
-    source_columns: Sequence[tuple[str, int]],
-    basis_solution: int,
-    name: str,
-) -> int:
-    return sum(
-        1 << source_bit
-        for source_index, (source_name, source_bit) in enumerate(source_columns)
-        if source_name == name and basis_solution & (1 << source_index)
-    )
-
-
-def _packet_source_input(
-    source: PacketLayout,
-    result: PacketLayout,
-    name: str,
-    source_columns: Sequence[tuple[str, int]],
-    result_columns: Sequence[tuple[str, int]],
-    basis_solutions: Sequence[int],
-    origin: int,
-    destination_inputs: Mapping[str, ixsimpl.Expr],
-) -> ixsimpl.Expr:
-    source_group = _packet_source_group(source_columns, name)
-    if _packet_input_is_direct(
-        source,
-        result,
-        name,
-        source_group,
-        result_columns,
-        basis_solutions,
-        origin,
-    ):
-        return destination_inputs[name]
-    expression = sym_ctx.int_(_packet_input_origin(source_columns, name, origin))
-    for result_index, (result_name, result_bit) in enumerate(result_columns):
-        coefficient = _packet_input_coefficient(
-            source_columns, basis_solutions[result_index], name
-        )
-        if not coefficient:
-            continue
-        source_bit_value = mod(
-            floor(destination_inputs[result_name] / (1 << result_bit)), 2
-        )
-        expression = xor(expression, coefficient * source_bit_value)
-    return expression
-
-
-def _validate_packet_hardware_domain(
-    source: PacketLayout, result: PacketLayout
-) -> None:
-    if (
-        source.lane_width != result.lane_width
-        or source.item_count != result.item_count
-        or source.block_count != result.block_count
-    ):
-        raise ValueError("packet redistribution changes its hardware domain")
-
-
-def _packet_relation_from_coordinates(
-    source: PacketLayout,
-    result: PacketLayout,
-    origin_coordinate: tuple[int, ...],
-    destination_columns: tuple[tuple[str, int], ...],
-    source_coordinates: tuple[tuple[int, ...], ...],
-    destination_inputs: Mapping[str, ixsimpl.Expr],
-) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
-    _validate_packet_hardware_domain(source, result)
-    source_columns, _source_values = _layout_columns(source)
-    equations, variable_count = _source_equations(source)
-    if variable_count != len(source_columns):
-        raise AssertionError("packet source equation width is inconsistent")
-    origin_rhs = _flatten_logical(source, origin_coordinate)
-    origin = _preferred_physical_solution(equations, origin_rhs, source_columns, None)
-    basis_solutions = []
-    for column, coordinate in zip(destination_columns, source_coordinates, strict=True):
-        rhs = _flatten_logical(source, coordinate) ^ origin_rhs
-        basis_solutions.append(
-            _preferred_physical_solution(equations, rhs, source_columns, column)
-        )
-
-    source_inputs = {
-        name: _packet_source_input(
-            source,
-            result,
-            name,
-            source_columns,
-            destination_columns,
-            basis_solutions,
-            origin,
-            destination_inputs,
-        )
-        for name in ("block", "lane", "warp", "register")
-    }
-    return (
-        source_inputs["block"],
-        source_inputs["lane"] + source.lane_width * source_inputs["warp"],
-        source_inputs["register"],
-    )
-
-
-def _packet_relation(
-    source: PacketLayout,
-    result: PacketLayout,
-    transform: PacketTransform,
-) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
-    _validate_packet_hardware_domain(source, result)
-    coordinate_transform = _packet_coordinate_transform(
-        transform, source.shape, result.shape
-    )
-    result_columns, result_values = _layout_columns(result)
-    item = sym("item")
-    return _packet_relation_from_coordinates(
-        source,
-        result,
-        coordinate_transform((0,) * len(result.shape)),
-        result_columns,
-        tuple(coordinate_transform(value) for value in result_values),
-        {
-            "register": sym("slot"),
-            "lane": mod(item, result.lane_width),
-            "warp": floor(item / result.lane_width),
-            "block": sym("block"),
-        },
-    )
-
-
-def _packet_reduction_relation(
-    source: PacketLayout,
-    result: PacketLayout,
-    axis: int,
-) -> tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr]:
-    def source_coordinate(coordinate: Sequence[int], reduction: int) -> tuple[int, ...]:
-        return (
-            *map(int, coordinate[:axis]),
-            int(reduction),
-            *map(int, coordinate[axis:]),
-        )
-
-    result_columns, result_values = _layout_columns(result)
-    reduction_bits = source.shape[axis].bit_length() - 1
-    reduction_columns = tuple(("reduction", bit) for bit in range(reduction_bits))
-    origin = (0,) * len(result.shape)
-    item = sym("item")
-    return _packet_relation_from_coordinates(
-        source,
-        result,
-        source_coordinate(origin, 0),
-        (*result_columns, *reduction_columns),
-        (
-            *(source_coordinate(value, 0) for value in result_values),
-            *(source_coordinate(origin, 1 << bit) for bit in range(reduction_bits)),
-        ),
-        {
-            "register": sym("slot"),
-            "lane": mod(item, result.lane_width),
-            "warp": floor(item / result.lane_width),
-            "block": sym("block"),
-            "reduction": sym("reduction"),
-        },
-    )
+def ixs_deserialize(data: bytes | Sequence[int]) -> ixsimpl.Expr:
+    """Deserialize bridge transport data in the Wave symbolic context."""
+    return sym_ctx.deserialize(bytes(data))
 
 
 def _redistribution_attr(
@@ -956,68 +172,10 @@ def _redistribution_attr(
     return RedistributionAttr.get(
         blocks,
         items,
-        ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(source_block), context=_current_context()
-        ),
-        ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(source_item), context=_current_context()
-        ),
-        ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(source_slot), context=_current_context()
-        ),
+        ExprAttr.get_from_node_ptr(source_block.node_ptr, context=_current_context()),
+        ExprAttr.get_from_node_ptr(source_item.node_ptr, context=_current_context()),
+        ExprAttr.get_from_node_ptr(source_slot.node_ptr, context=_current_context()),
     )
-
-
-def _packet_type_info(type_: Type, role: str) -> tuple[int, int, Type]:
-    if not SimdType.isinstance(type_):
-        raise ValueError(f"{role} must be a Wave SIMD packet")
-    simd = SimdType(type_)
-    payload = simd.element_type
-    if not isinstance(payload, VectorType):
-        return int(simd.width), 1, payload
-    vector = VectorType(payload)
-    if len(vector.shape) != 1:
-        raise ValueError(f"{role} packet vector must be 1-D")
-    return int(simd.width), int(vector.shape[0]), vector.element_type
-
-
-def _validate_packet_type(type_: Type, layout: PacketLayout, role: str) -> Type:
-    width, slots, element_type = _packet_type_info(type_, role)
-    if width != layout.lane_width:
-        raise ValueError(f"{role} SIMD width does not match its packet layout")
-    if slots != layout.slot_count:
-        raise ValueError(f"{role} slot count does not match its packet layout")
-    return element_type
-
-
-def _validate_redistribute_layout_types(
-    source_type: Type,
-    result_type: Type,
-    source_layout: PacketLayout,
-    result_layout: PacketLayout,
-) -> Type:
-    source_element = _validate_packet_type(source_type, source_layout, "source")
-    result_element = _validate_packet_type(result_type, result_layout, "result")
-    if source_element != result_element:
-        raise ValueError("source and result packet element types must match")
-    return source_element
-
-
-def _validate_reduce_layouts(
-    source_layout: PacketLayout, result_layout: PacketLayout, axis: Any
-) -> int:
-    normalized_axis = _packet_int(axis, "packet reduction axis")
-    if normalized_axis < 0 or normalized_axis >= len(source_layout.shape):
-        raise ValueError("packet reduction axis is out of range")
-    if (
-        source_layout.shape[:normalized_axis]
-        + source_layout.shape[normalized_axis + 1 :]
-        != result_layout.shape
-    ):
-        raise ValueError(
-            "packet reduction result shape does not remove its source axis"
-        )
-    return normalized_axis
 
 
 # ---------------------------------------------------------------------------
@@ -1859,7 +1017,30 @@ def _index_expr_assumptions_attr(
     return ArrayAttr.get([_pred_attr(pred) for pred in assumptions])
 
 
-_MEMORY_MAPPING_RESERVED_SYMBOLS = frozenset({"block", "item", "slot"})
+def _index_expr_project_assumptions(
+    expr: ixsimpl.Expr,
+    bindings: Mapping[str, Value],
+    assumptions: Sequence[ixsimpl.Expr] | None,
+) -> tuple[ixsimpl.Expr, ...] | None:
+    if assumptions is None:
+        return None
+    expr_names = {symbol.sym_name for symbol in expr.free_symbols}
+    projected = tuple(
+        pred
+        for pred in assumptions
+        if {symbol.sym_name for symbol in pred.free_symbols} <= expr_names
+    )
+    unknown = {
+        symbol.sym_name for pred in projected for symbol in pred.free_symbols
+    } - bindings.keys()
+    if unknown:
+        raise ValueError(
+            f"assumption free symbols missing from bindings: {sorted(unknown)}"
+        )
+    return projected
+
+
+_MEMORY_MAPPING_IMPLICIT_SYMBOLS = frozenset({"block", "slot"})
 
 
 def _memory_mapping_required_names(
@@ -1869,36 +1050,34 @@ def _memory_mapping_required_names(
         symbol.sym_name
         for expr in expressions
         for symbol in expr.free_symbols
-        if symbol.sym_name not in _MEMORY_MAPPING_RESERVED_SYMBOLS
+        if symbol.sym_name not in _MEMORY_MAPPING_IMPLICIT_SYMBOLS
     }
 
 
 def _named_memory_mapping_values(
-    values: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None,
-    kind: str,
+    values: Mapping[ixsimpl.Expr, Value] | None,
     required_names: set[str],
-) -> dict[str, Value | Sequence[Value]]:
-    named: dict[str, Value | Sequence[Value]] = {}
+) -> dict[str, Value]:
+    named: dict[str, Value] = {}
     for symbol, value in (values or {}).items():
         try:
             name = symbol.sym_name
         except (AttributeError, RuntimeError, TypeError) as exc:
-            raise TypeError(f"{kind} keys must be symbol expressions") from exc
-        if name in _MEMORY_MAPPING_RESERVED_SYMBOLS:
-            raise ValueError(f"{kind} name {name!r} is reserved")
+            raise TypeError("binding keys must be symbol expressions") from exc
+        if name in _MEMORY_MAPPING_IMPLICIT_SYMBOLS:
+            raise ValueError(f"binding name {name!r} is reserved")
         if name in named:
-            raise ValueError(f"duplicate {kind} name {name!r}")
-        if name in required_names:
-            named[name] = value
+            raise ValueError(f"duplicate binding name {name!r}")
+        if not isinstance(value, Value):
+            raise TypeError(f"binding {name!r} must be one SSA value")
+        named[name] = value
     return dict(sorted(named.items()))
 
 
 def _memory_mapping_expr_attr(expr: ixsimpl.Expr | None) -> ExprAttr | None:
     if expr is None:
         return None
-    return ExprAttr.get_from_node_ptr(
-        _ixsimpl_node_ptr(expr), context=_current_context()
-    )
+    return ExprAttr.get_from_node_ptr(expr.node_ptr, context=_current_context())
 
 
 def _memory_mapping_parts(
@@ -1906,64 +1085,42 @@ def _memory_mapping_parts(
     base: ixsimpl.Expr | None,
     target_block: ixsimpl.Expr | None,
     bindings: Mapping[ixsimpl.Expr, Value] | None,
-    packet_bindings: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None,
-) -> tuple[
-    MemoryMappingAttr,
-    dict[str, Value],
-    dict[str, Value | Sequence[Value]],
-]:
+) -> tuple[MemoryMappingAttr, dict[str, Value]]:
     """Import a symbolic memory map and its bindings structurally."""
     expressions = tuple(
         expr for expr in (base, target_block, bit_offset) if expr is not None
     )
     required_names = _memory_mapping_required_names(expressions)
-    bound_values = _named_memory_mapping_values(bindings, "binding", required_names)
-    explicit_packet_values = _named_memory_mapping_values(
-        packet_bindings, "packet binding", required_names
-    )
-    overlap = bound_values.keys() & explicit_packet_values.keys()
-    if overlap:
-        raise ValueError(
-            f"symbols cannot be both scalar and packet bindings: {sorted(overlap)}"
-        )
-    missing = required_names - bound_values.keys() - explicit_packet_values.keys()
+    bound_values = _named_memory_mapping_values(bindings, required_names)
+    missing = required_names - bound_values.keys()
     if missing:
         raise ValueError(f"mapping symbols missing from bindings: {sorted(missing)}")
-
-    scalar_values: dict[str, Value] = {}
-    packet_values = dict(explicit_packet_values)
-    for name, value in bound_values.items():
-        if not isinstance(value, Value):
-            raise TypeError(f"binding {name!r} must be one SSA value")
-        if SimdType.isinstance(value.type) and isinstance(
-            SimdType(value.type).element_type, VectorType
-        ):
-            packet_values[name] = value
-        else:
-            scalar_values[name] = value
 
     mapping = MemoryMappingAttr.get(
         _memory_mapping_expr_attr(bit_offset),
         base=_memory_mapping_expr_attr(base),
         target_block=_memory_mapping_expr_attr(target_block),
     )
-    return mapping, scalar_values, packet_values
+    return mapping, bound_values
 
 
-def _flatten_packet_mapping_values(
-    packet_values: Mapping[str, Value | Sequence[Value]],
-) -> tuple[list[str], list[Value]]:
-    names: list[str] = []
-    values: list[Value] = []
-    for name, binding in packet_values.items():
-        components = [binding] if isinstance(binding, Value) else list(binding)
-        if not components:
-            raise ValueError(f"packet binding {name!r} must not be empty")
-        if not all(isinstance(component, Value) for component in components):
-            raise TypeError(f"packet binding {name!r} components must be SSA values")
-        names.extend([name] * len(components))
-        values.extend(components)
-    return names, values
+def _verify_memory_item_binding(
+    bound_values: Mapping[str, Value],
+    packet_type: Type,
+) -> None:
+    item = bound_values.get("item")
+    if item is None:
+        return
+    try:
+        item_type = SimdType(item.type)
+        element_type = IntegerType(item_type.element_type)
+        packet_width = int(SimdType(packet_type).width)
+    except ValueError as exc:
+        raise TypeError(
+            "item binding must be lane SIMD i32 with packet SIMD width"
+        ) from exc
+    if element_type.width != 32 or int(item_type.width) != packet_width:
+        raise TypeError("item binding must be lane SIMD i32 with packet SIMD width")
 
 
 def specialize_wavemeta(module: Module) -> None:
@@ -2540,7 +1697,7 @@ class FunctionBuilder:
         Python-side data model fully structural -- no string names
         crossing between the expression builder and the binding map.
 
-        The dialect imports `expr.node_ptr` into its own symbol store.
+        The dialect structurally imports `expr` into its own symbol store.
         Bindings are filtered to actual free symbols, so callers can pass a
         superset without tracking which symbols simplification dropped.
 
@@ -2550,9 +1707,14 @@ class FunctionBuilder:
         `index`.
         """
         filtered = _index_expr_bindings(expr, bindings)
+        assumptions = _index_expr_project_assumptions(
+            expr,
+            filtered,
+            assumptions,
+        )
         result_type = _index_expr_result_type_from_bindings(filtered, result_type)
         expr_attr = ExprAttr.get_from_node_ptr(
-            _ixsimpl_node_ptr(expr), context=_current_context()
+            expr.node_ptr, context=_current_context()
         )
         names_attr = ArrayAttr.get([StringAttr.get(n) for n in filtered])
         return wave.IndexExprOp(
@@ -2570,28 +1732,25 @@ class FunctionBuilder:
         *,
         bit_offset: ixsimpl.Expr,
         bindings: Mapping[ixsimpl.Expr, Value] | None = None,
-        packet_bindings: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None = None,
         base: ixsimpl.Expr | None = None,
         target_block: ixsimpl.Expr | None = None,
         after: Value | None = None,
         cache: Attribute | None = None,
     ) -> tuple[Value, Value]:
         """Build target-neutral symbolic packet gather."""
-        mapping, scalar_values, packet_values = _memory_mapping_parts(
-            bit_offset, base, target_block, bindings, packet_bindings
+        mapping, bound_values = _memory_mapping_parts(
+            bit_offset, base, target_block, bindings
         )
-        packet_names, packet_operands = _flatten_packet_mapping_values(packet_values)
+        _verify_memory_item_binding(bound_values, result_type)
         sources = [bases] if isinstance(bases, Value) else list(bases)
         op = wave.GatherOp(
             result_type,
             mem_token_type(),
             sources,
-            list(scalar_values.values()),
-            packet_operands,
+            list(bound_values.values()),
             mapping,
             dependency=after,
-            binding_names=list(scalar_values),
-            packet_binding_names=packet_names,
+            binding_names=list(bound_values),
             cache=cache,
         )
         return op.value, op.token
@@ -2603,28 +1762,25 @@ class FunctionBuilder:
         *,
         bit_offset: ixsimpl.Expr,
         bindings: Mapping[ixsimpl.Expr, Value] | None = None,
-        packet_bindings: Mapping[ixsimpl.Expr, Value | Sequence[Value]] | None = None,
         base: ixsimpl.Expr | None = None,
         target_block: ixsimpl.Expr | None = None,
         after: Value | None = None,
         cache: Attribute | None = None,
     ) -> Value:
         """Build target-neutral symbolic packet scatter."""
-        mapping, scalar_values, packet_values = _memory_mapping_parts(
-            bit_offset, base, target_block, bindings, packet_bindings
+        mapping, bound_values = _memory_mapping_parts(
+            bit_offset, base, target_block, bindings
         )
-        packet_names, packet_operands = _flatten_packet_mapping_values(packet_values)
+        _verify_memory_item_binding(bound_values, value.type)
         destinations = [bases] if isinstance(bases, Value) else list(bases)
         return wave.ScatterOp(
             mem_token_type(),
             value,
             destinations,
-            list(scalar_values.values()),
-            packet_operands,
+            list(bound_values.values()),
             mapping,
             dependency=after,
-            binding_names=list(scalar_values),
-            packet_binding_names=packet_names,
+            binding_names=list(bound_values),
             cache=cache,
         ).token
 
@@ -2651,57 +1807,26 @@ class FunctionBuilder:
         )
         return wave.RedistributeOp(result_type, source, relation).result
 
-    def redistribute_layout(
-        self,
-        source: Value,
-        result_type: Type,
-        *,
-        source_layout: PacketLayout,
-        result_layout: PacketLayout,
-        transform: PacketTransform | None = None,
-    ) -> Value:
-        """Build redistribution derived from packet layouts."""
-        _validate_redistribute_layout_types(
-            source.type, result_type, source_layout, result_layout
-        )
-        source_block, source_item, source_slot = _packet_relation(
-            source_layout,
-            result_layout,
-            transform or PacketTransform.identity(),
-        )
-        return self.redistribute(
-            source,
-            result_type,
-            blocks=result_layout.block_count,
-            items=result_layout.item_count,
-            source_block=source_block,
-            source_item=source_item,
-            source_slot=source_slot,
-        )
-
     @contextmanager
-    def reduce_layout(
+    def reduce(
         self,
         source: Value,
         result_type: Type,
         *,
-        source_layout: PacketLayout,
-        result_layout: PacketLayout,
-        axis: int,
-        associative: bool = False,
-        commutative: bool = False,
+        reduction_extent: int,
+        items: int,
+        source_item: ixsimpl.Expr,
+        source_slot: ixsimpl.Expr,
+        blocks: int = 1,
+        source_block: ixsimpl.Expr | None = None,
+        reorderable: bool = False,
     ) -> Iterator[_ReduceBuilder]:
-        """Build a packet-layout reduction with a two-argument combiner."""
-        axis = _validate_reduce_layouts(source_layout, result_layout, axis)
-        element_type = _validate_redistribute_layout_types(
-            source.type, result_type, source_layout, result_layout
-        )
-        source_block, source_item, source_slot = _packet_reduction_relation(
-            source_layout, result_layout, axis
-        )
+        """Build a symbolic packet reduction and its scalar combiner."""
+        if source_block is None:
+            source_block = sym("block")
         relation = _redistribution_attr(
-            result_layout.block_count,
-            result_layout.item_count,
+            blocks,
+            items,
             source_block,
             source_item,
             source_slot,
@@ -2710,11 +1835,15 @@ class FunctionBuilder:
             result_type,
             source,
             relation,
-            source_layout.shape[axis],
-            associative=associative,
-            commutative=commutative,
+            reduction_extent,
+            associative=reorderable,
+            commutative=reorderable,
         )
-        combiner_type = simd_type(element_type, source_layout.lane_width)
+        source_type = SimdType(source.type)
+        element_type = source_type.element_type
+        if isinstance(element_type, VectorType):
+            element_type = element_type.element_type
+        combiner_type = simd_type(element_type, source_type.width)
         block = op.combiner.blocks.append(combiner_type, combiner_type)
         reduction = _ReduceBuilder(op, block)
         with InsertionPoint(block):
@@ -3320,8 +2449,6 @@ __all__ = [
     "MemTokenType",
     "MemoryMappingAttr",
     "ModuleBuilder",
-    "PacketLayout",
-    "PacketTransform",
     "PredAttr",
     "PrivateAddressSpaceAttr",
     "PtrType",
@@ -3345,7 +2472,6 @@ __all__ = [
     "i8",
     "i32",
     "index_type",
-    "join_packet_layout",
     "load_cache",
     "mask_type",
     "mem_token_type",

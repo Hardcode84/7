@@ -139,6 +139,51 @@ func.func @overlapping_fixed_allocations()
 
 // -----
 
+func.func @repetitive_exclusive_fixed_allocations(%condition: i1)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %lower = arith.constant 0 : index
+  %upper = arith.constant 2 : index
+  %step = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %lower to %upper step %step {
+    scf.if %condition {
+      %a = wave.alloc() {align = 16 : i64, bytesize = 64 : i64,
+                         offset = 0 : i64}
+          : !wave.ptr<#wave.shared, i32>
+      %ap = wave.ptr_add %a, %lane
+          : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+          -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+      %stored = wave.store %lane -> %ap
+          : (!wave.simd<i32, 32>,
+             !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) -> !wave.mem.token
+      %loaded, %done = wave.load %ap after %stored
+          : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
+          -> (!wave.simd<i32, 32>, !wave.mem.token)
+      %released = wave.alloc_release %a after %done {workgroup_collective}
+          : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    } else {
+      // expected-error @+1 {{fixed offset overlaps live LDS storage}}
+      %b = wave.alloc() {align = 16 : i64, bytesize = 64 : i64,
+                         offset = 0 : i64}
+          : !wave.ptr<#wave.shared, i32>
+      %bp = wave.ptr_add %b, %lane
+          : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+          -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+      %stored = wave.store %lane -> %bp
+          : (!wave.simd<i32, 32>,
+             !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) -> !wave.mem.token
+      %loaded, %done = wave.load %bp after %stored
+          : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
+          -> (!wave.simd<i32, 32>, !wave.mem.token)
+      %released = wave.alloc_release %b after %done {workgroup_collective}
+          : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    }
+  }
+  return
+}
+
+// -----
+
 func.func @loop_release_ignores_body_access(%n: index)
     attributes {wave.kernel, wave.lds_size = 0 : i64} {
   %c0 = arith.constant 0 : index

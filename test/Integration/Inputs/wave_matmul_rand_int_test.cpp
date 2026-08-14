@@ -148,7 +148,7 @@ static void checkOutputLayouts() {
   if (getEffectiveOutputLayout(args) != OutputLayout::RowMajor)
     fail("v9 automatic output layout mismatch");
   args.kernelABI = KernelABI::TLXMXFP;
-  if (getEffectiveOutputLayout(args) != OutputLayout::TilePacked)
+  if (getEffectiveOutputLayout(args) != OutputLayout::RowMajor)
     fail("TLX automatic output layout mismatch");
   args.kernelABI = KernelABI::StreamK;
   if (getEffectiveOutputLayout(args) != OutputLayout::ColumnMajor)
@@ -257,6 +257,43 @@ static void checkStreamKABI() {
   std::printf("streamk_kernel_abi: ok\n");
 }
 
+static Args makeTLXMXFPArgs() {
+  Args args;
+  args.m = 256;
+  args.n = 768;
+  args.k = 16384;
+  args.bm = 2;
+  args.bn = 2;
+  args.waveMTiles = 8;
+  args.waveNTiles = 8;
+  args.waveKTiles = 2;
+  args.waveSize = 64;
+  args.inputType = InputType::MXFP4;
+  args.cType = CType::BF16;
+  args.kernelABI = KernelABI::TLXMXFP;
+  return args;
+}
+
+static void checkTLXMXFPABI() {
+  Args args = makeTLXMXFPArgs();
+  validateArgs(args);
+
+  DeviceBuffers buffers;
+  int tripCount = 0;
+  KernelArgStorage storage;
+  initKernelArgStorage(storage, args, buffers, tripCount);
+  if (storage.active != storage.tlxArgs.data() || storage.tlxArgs.size() != 13)
+    fail("TLX MXFP argument block mismatch");
+  std::array<int, 8> actual;
+  for (size_t i = 0; i < actual.size(); ++i)
+    actual[i] = *static_cast<int *>(storage.tlxArgs[i + 5]);
+  const std::array<int, 8> expected = {args.m,     args.n, args.k, args.k / 2,
+                                       args.k / 2, args.n, args.m, args.n};
+  if (actual != expected)
+    fail("TLX MXFP argument block mismatch");
+  std::printf("tlx_mxfp_kernel_abi: ok\n");
+}
+
 static bool setInputInvalidMode(const char *mode, Args &args) {
   if (std::strcmp(mode, "mutual-exclusion") == 0) {
     args.allOnes = true;
@@ -301,6 +338,20 @@ static bool setStreamKInvalidMode(const char *mode, Args &args) {
     args.n = 256;
     args.k = 64;
     args.streamKWorkers = 1;
+    return true;
+  }
+  return false;
+}
+
+static bool setTLXMXFPInvalidMode(const char *mode, Args &args) {
+  if (std::strcmp(mode, "tlx-mxfp-shape") == 0) {
+    args = makeTLXMXFPArgs();
+    args.m = 384;
+    return true;
+  }
+  if (std::strcmp(mode, "tlx-mxfp-output") == 0) {
+    args = makeTLXMXFPArgs();
+    args.outputLayout = OutputLayout::TilePacked;
     return true;
   }
   return false;
@@ -390,6 +441,8 @@ static bool runOverflowInvalidMode(const char *mode) {
   if (!matched)
     matched = setStreamKInvalidMode(mode, args);
   if (!matched)
+    matched = setTLXMXFPInvalidMode(mode, args);
+  if (!matched)
     matched = setAITERInvalidMode(mode, args);
   if (!matched)
     matched = setScalarInvalidMode(mode, args);
@@ -425,5 +478,6 @@ int main(int argc, char **argv) {
   checkOutputLayouts();
   checkAITERRunnerContract();
   checkStreamKABI();
+  checkTLXMXFPABI();
   return 0;
 }

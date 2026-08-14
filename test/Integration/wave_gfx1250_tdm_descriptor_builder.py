@@ -25,7 +25,8 @@ with w.module() as m:
     ) as f:
         (base,) = f.args
         workitem_first = w.sym("tdm_workitem_first")
-        first = f.read_first(f.workitem_id(0, width=wave_size))
+        item = f.workitem_id(0, width=wave_size)
+        first = f.read_first(item)
         wave_id = w.floor(workitem_first / wave_size)
         global_offset = f.index_expr(wave_id * 128, {workitem_first: first})
         lds_address = f.index_expr(wave_id * 512, {workitem_first: first})

@@ -41,7 +41,10 @@ func.func @reduce_ordered_cross_wave(
                 wave.workgroup_size = array<i32: 128, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %src_ptr = wave.ptr_add %src, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 127">]
+      : !wave.simd<i32, 64>
+  %src_ptr = wave.ptr_add %src, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %source, %read = wave.load %src_ptr
@@ -58,7 +61,7 @@ func.func @reduce_ordered_cross_wave(
           -> !wave.simd<i32, 64>
       wave.yield %difference : !wave.simd<i32, 64>
     }
-  %ptr = wave.ptr_add %dst, %item
+  %ptr = wave.ptr_add %dst, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %token = wave.store %result -> %ptr after %read

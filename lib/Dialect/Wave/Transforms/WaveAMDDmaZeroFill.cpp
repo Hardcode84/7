@@ -120,10 +120,26 @@ static bool canMoveOut(Operation *op,
   return isMemoryEffectFree(op) && isSpeculatable(op);
 }
 
+static bool hasValidOtherwise(WhereOp where, Operation *terminator,
+                              ArrayRef<waveamd::DmaLoadLdsOp> dmas) {
+  Region &otherwise = where.getElseRegion();
+  if (otherwise.empty())
+    return true;
+  auto thenYield = cast<YieldOp>(terminator);
+  if (dmas.size() != 1 || thenYield.getValues().size() != 1)
+    return false;
+  waveamd::DmaLoadLdsOp dma = dmas.front();
+  if (thenYield.getValues().front() != dma.getToken() ||
+      !llvm::hasSingleElement(otherwise) ||
+      !llvm::hasSingleElement(otherwise.front()))
+    return false;
+  auto elseYield = dyn_cast<YieldOp>(otherwise.front().getTerminator());
+  return elseYield && elseYield.getValues().size() == 1 &&
+         elseYield.getValues().front() == dma.getDependency();
+}
+
 static bool collectMovableBody(WhereOp where, SmallVectorImpl<Operation *> &ops,
                                SmallVectorImpl<waveamd::DmaLoadLdsOp> &dmas) {
-  if (!where.getElseRegion().empty())
-    return false;
   if (where.getNumResults() > 1)
     return false;
   if (where.getNumResults() == 1 &&
@@ -139,7 +155,9 @@ static bool collectMovableBody(WhereOp where, SmallVectorImpl<Operation *> &ops,
       return false;
     ops.push_back(&op);
   }
-  return !dmas.empty();
+  if (dmas.empty())
+    return false;
+  return hasValidOtherwise(where, terminator, dmas);
 }
 
 static FailureOr<Value> createSelectedSource(IRRewriter &rewriter,
@@ -192,7 +210,10 @@ static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
         createSelectedSource(rewriter, dma, where.getCondition());
     if (failed(source))
       return false;
-    dma->setOperand(0, *source);
+    rewriter.modifyOpInPlace(dma, [&] {
+      dma->setOperand(0, *source);
+      dma.setZeroFillInactive(false);
+    });
   }
 
   rewriter.replaceOp(where, results);

@@ -103,14 +103,13 @@ enum class ExprKind {
   ParseError,
 };
 
-llvm::StringRef getExprKindName(ExprKind kind);
-
 enum class PredKind {
   Invalid,
   Cmp,
   And,
   Or,
   Not,
+  Piecewise,
   True,
   False,
   Error,
@@ -145,6 +144,8 @@ struct ExprSubstitution {
 bool isExpr(ExprHandle value);
 bool isPred(PredHandle value);
 bool isIntegerValued(ExprHandle value);
+ExprHandle asExpr(PredHandle value);
+std::optional<PredHandle> asPred(ExprHandle value);
 
 // Wrong-kind accessors return empty handles / zero counts.
 class ExprView {
@@ -254,7 +255,6 @@ mlir::FailureOr<ExprHandle> importExpr(Store &store, const ixs_node *foreign,
 mlir::FailureOr<PredHandle> importPred(Store &store, const ixs_node *foreign,
                                        std::string *diagnostic = nullptr);
 
-/// Allocation failure follows llvm::report_bad_alloc_error.
 mlir::FailureOr<ExprHandle>
 composeExprBinary(Store &store, ExprHandle lhs, ExprBinaryOp op, ExprHandle rhs,
                   std::string *diagnostic = nullptr);
@@ -262,6 +262,7 @@ ExprHandle composeExprCeil(Store &store, ExprHandle value);
 /// Floor of `value`. Use to turn an exact-rational `Div` into Python
 /// `//` (floored integer division).
 ExprHandle composeExprFloor(Store &store, ExprHandle value);
+ExprHandle composeExprTrunc(Store &store, ExprHandle value);
 ExprHandle composeExprNeg(Store &store, ExprHandle value);
 
 /// Symbol / integer leaves.
@@ -408,8 +409,6 @@ public:
   CheckResult equivalent(PredHandle lhs, PredHandle rhs);
   /// Return equivalent normalized forms for an ordered comparison.
   llvm::SmallVector<PredHandle, 4> orderedComparisonForms(PredHandle predicate);
-  CheckResult defined(ExprHandle expr);
-  CheckResult defined(PredHandle pred);
   CheckResult integerValued(ExprHandle expr);
   CheckResult divisible(ExprHandle expr, int64_t modulus);
   CheckResult congruent(ExprHandle expr, int64_t modulus, int64_t residue);
@@ -435,7 +434,6 @@ private:
   llvm::DenseMap<std::pair<const ixs_node *, int64_t>, ExactDivideResult>
       exactDivideCache;
   llvm::DenseMap<const ixs_node *, const ixs_node *> simplifyExprCache;
-  llvm::DenseMap<const ixs_node *, CheckResult> definedCache;
   Session session;
   ixs_facts *facts = nullptr;
   bool usable = false;
@@ -445,10 +443,6 @@ private:
 CheckResult checkPredicate(Store &store, PredHandle predicate,
                            llvm::ArrayRef<PredHandle> assumptions);
 /// Prove evaluation cannot produce a domain error under `assumptions`.
-bool provablyDefined(Store &store, ExprHandle expr,
-                     llvm::ArrayRef<PredHandle> assumptions);
-bool provablyDefined(Store &store, PredHandle pred,
-                     llvm::ArrayRef<PredHandle> assumptions);
 Pow2Fact getPow2Fact(Store &store, ExprHandle expr,
                      llvm::ArrayRef<PredHandle> assumptions);
 
@@ -501,6 +495,17 @@ template <> struct DenseMapInfo<mlir::wave::sym::ExprHandle> {
 
   static bool isEqual(mlir::wave::sym::ExprHandle lhs,
                       mlir::wave::sym::ExprHandle rhs) {
+    return lhs == rhs;
+  }
+};
+
+template <> struct DenseMapInfo<mlir::wave::sym::PredHandle> {
+  static unsigned getHashValue(mlir::wave::sym::PredHandle value) {
+    return DenseMapInfo<const ixs_node *>::getHashValue(value.raw());
+  }
+
+  static bool isEqual(mlir::wave::sym::PredHandle lhs,
+                      mlir::wave::sym::PredHandle rhs) {
     return lhs == rhs;
   }
 };

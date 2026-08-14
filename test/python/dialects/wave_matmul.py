@@ -85,7 +85,10 @@ def assert_output_store_cache(module, kind, count):
 
 
 def assert_external_assumption_count(module, count):
-    assert str(module).count("wave.assume ") == count
+    # Workitem definitions are raw; their launch range and input-specific
+    # contracts are explicit wave.assume operations.
+    actual = str(module).count("wave.assume ")
+    assert actual == count, (actual, count)
 
 
 def cached_output_stores(module, kind):
@@ -383,7 +386,7 @@ aiter_partial_scale_module = build_aiter_mxfp4(
     wave_k_tiles=6,
 )
 aiter_partial_scale_text = str(aiter_partial_scale_module)
-assert "Mod(Mod(__wave_dsl_aiter_stage_wi, 64), 48)" in aiter_partial_scale_text
+assert "16*Mod(Mod(__wave_dsl_aiter_stage_wi, 64), 48)" in aiter_partial_scale_text
 assert '<"512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">' in aiter_partial_scale_text
 assert (
     '<"256*(1 + 2*floor(1/64*__wave_dsl_aiter_stage_wi_first))">'
@@ -496,7 +499,7 @@ module_regular_subpanel = build_wmma_f16_matmul_module(
     include_host=False,
 )
 assert "waveamd.dma_load_lds" in str(module_regular_subpanel)
-assert_external_assumption_count(module_regular_subpanel, 2)
+assert_external_assumption_count(module_regular_subpanel, 3)
 print("regular-subpanel ok")
 
 module_cta_remap = build_wmma_f16_matmul_module(
@@ -509,7 +512,7 @@ module_cta_remap = build_wmma_f16_matmul_module(
     include_host=False,
 )
 cta_remap_text = str(module_cta_remap)
-assert_external_assumption_count(module_cta_remap, 3)
+assert_external_assumption_count(module_cta_remap, 4)
 assert cta_remap_text.count('["wg_m_raw", "wg_n_raw"]') == 2
 dsl.specialize_wavemeta(module_cta_remap)
 print("cta-remap-symbolic-ranges ok")
@@ -567,7 +570,7 @@ module_f16_cache = build_wmma_f16_matmul_module(
     include_host=False,
 )
 assert_output_store_cache(module_f16_cache, "cg", 8)
-assert_external_assumption_count(module_f16_cache, 3)
+assert_external_assumption_count(module_f16_cache, 4)
 print("output-store-cache ok")
 
 dense_automatic = build_dense_mfma_output()
@@ -671,7 +674,7 @@ assert "__wave_dsl_mma_wave_m" in coalesced_symbolic_text
 dsl.specialize_wavemeta(module_coalesced)
 coalesced_text = str(module_coalesced)
 assert "__wave_dsl_mma_" not in coalesced_text
-assert_external_assumption_count(module_coalesced, 2)
+assert_external_assumption_count(module_coalesced, 3)
 assert coalesced_text.count("wave.pack") == 32
 assert coalesced_text.count("!wave.simd<vector<8xf16>, 64>") >= 32
 assert "!waveamd.fragment<0, f16, 16, 16, 64, 4>" in coalesced_text
@@ -698,7 +701,7 @@ module_lds_coalesced_cache = build_wmma_f16_matmul_module(
     include_host=False,
 )
 assert_output_store_cache(module_lds_coalesced_cache, "wt", 4)
-assert_external_assumption_count(module_lds_coalesced_cache, 2)
+assert_external_assumption_count(module_lds_coalesced_cache, 3)
 print("lds-coalesced-output-store-cache ok")
 
 module_symbolic_mxfp4_step = build_wmma_f16_matmul_module(
@@ -727,7 +730,7 @@ assert (
     'wave.index_expr <"1 + 2*__wave_dsl_mxfp4_step"> ["__wave_dsl_mxfp4_step"]'
     in symbolic_mxfp4_step_text
 )
-assert_external_assumption_count(module_symbolic_mxfp4_step, 2)
+assert_external_assumption_count(module_symbolic_mxfp4_step, 3)
 print("symbolic-mxfp4-step ok")
 
 a0, b0 = generate_wmma_f16_matmul_inputs(32, 32, 32, random_data=True, random_seed=7)
@@ -1037,7 +1040,7 @@ static_signature = static_text.split("func.func @static_matmul_kernel", 1)[1].sp
     ")", 1
 )[0]
 assert "i32" not in static_signature
-assert_external_assumption_count(static_bld.module, 2)
+assert_external_assumption_count(static_bld.module, 3)
 print(static_bld.module)
 
 # CHECK: mxfp4-aiter-packed-scale-dma ok

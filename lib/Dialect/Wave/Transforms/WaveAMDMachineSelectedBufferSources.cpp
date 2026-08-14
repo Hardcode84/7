@@ -42,78 +42,6 @@ lookupBufferSelectedSourcePointer(WaveAMDMachineSelector &S, Operation *user,
                                      S.pointerBuffers.lookup(source)};
 }
 
-static const PointerOffsetBinding *lookupBinding(const AddressPlan &plan,
-                                                 StringRef name) {
-  for (const PointerOffsetBinding &binding : plan.bindings)
-    if (StringRef(binding.name) == name)
-      return &binding;
-  return nullptr;
-}
-
-static SmallVector<StringRef, 4> collectSymbolNames(sym::ExprHandle expr) {
-  SmallVector<StringRef, 4> names;
-  sym::walkSymbolNames(expr, [&](StringRef name) {
-    if (!llvm::is_contained(names, name))
-      names.push_back(name);
-  });
-  return names;
-}
-
-static std::optional<SmallVector<int64_t, 4>>
-collectImmediateValues(WaveAMDMachineSelector &S, const AddressPlan &plan,
-                       ArrayRef<StringRef> names) {
-  SmallVector<int64_t, 4> values;
-  values.reserve(names.size());
-  for (StringRef name : names) {
-    const PointerOffsetBinding *binding = lookupBinding(plan, name);
-    if (!binding)
-      return std::nullopt;
-    std::optional<int64_t> value = S.getImmediateValue(binding->value);
-    if (!value)
-      return std::nullopt;
-    values.push_back(*value);
-  }
-  return values;
-}
-
-static SmallVector<sym::ExprSubstitution, 4>
-buildConstantSubstitutions(sym::Analysis &analysis, ArrayRef<StringRef> names,
-                           ArrayRef<int64_t> values) {
-  SmallVector<sym::ExprSubstitution, 4> substitutions;
-  substitutions.reserve(names.size());
-  for (size_t index : llvm::seq<size_t>(names.size())) {
-    sym::ExprHandle target = analysis.composeSymbol(names[index]);
-    sym::ExprHandle replacement = analysis.composeInteger(values[index]);
-    substitutions.push_back({target, replacement});
-  }
-  return substitutions;
-}
-
-static std::optional<int64_t> evaluateConstantExpr(WaveAMDMachineSelector &S,
-                                                   const AddressPlan &plan,
-                                                   sym::ExprHandle expr) {
-  SmallVector<StringRef, 4> names = collectSymbolNames(expr);
-  std::optional<SmallVector<int64_t, 4>> values =
-      collectImmediateValues(S, plan, names);
-  if (!values)
-    return std::nullopt;
-
-  FailureOr<std::unique_ptr<sym::Analysis>> created =
-      sym::Analysis::create(S.symbolStore(), plan.assumptions);
-  if (failed(created))
-    return std::nullopt;
-  sym::Analysis &analysis = **created;
-  SmallVector<sym::ExprSubstitution, 4> substitutions =
-      buildConstantSubstitutions(analysis, names, *values);
-  sym::ExprHandle substituted = analysis.substitute(expr, substitutions);
-  if (failed(analysis.substituteFacts(substitutions)))
-    return std::nullopt;
-  FailureOr<sym::ExprHandle> simplified = analysis.simplify(substituted);
-  if (failed(simplified))
-    return std::nullopt;
-  return sym::getIntegerLiteralValue(*simplified);
-}
-
 static FailureOr<sym::ExprHandle>
 appendInstOffsetExpr(WaveAMDMachineSelector &S, sym::ExprHandle voffset,
                      const AddressPlan &plan, bool includeInstOffset) {
@@ -225,13 +153,87 @@ bool hasOnlyVOffsetField(const AddressPlan &plan) {
          plan.instOffset == 0;
 }
 
-bool isBufferSelectedSourceOobPlan(WaveAMDMachineSelector &S,
-                                   const AddressPlan &plan) {
-  if (!hasOnlyVOffsetField(plan) || !plan.voffsetExpr)
-    return false;
-  std::optional<int64_t> value =
-      evaluateConstantExpr(S, plan, plan.voffsetExpr);
-  return value && *value == kBufferSelectedSourceOobOffset;
+LogicalResult rebaseSelectedBufferPlan(WaveAMDMachineSelector &S,
+                                       const AddressPlan &active,
+                                       AddressPlan &inactive) {
+  if (!active.soffsetExpr && active.instOffset == 0 && !inactive.soffsetExpr &&
+      inactive.instOffset == 0)
+    return success();
+
+  for (const PointerOffsetBinding &binding : active.bindings) {
+    auto existing = llvm::find_if(inactive.bindings,
+                                  [&](const PointerOffsetBinding &candidate) {
+                                    return candidate.name == binding.name;
+                                  });
+    if (existing != inactive.bindings.end()) {
+      if (existing->value != binding.value || existing->kind != binding.kind)
+        return failure();
+      continue;
+    }
+    inactive.bindings.push_back(binding);
+  }
+  for (sym::PredHandle assumption : active.assumptions)
+    if (!llvm::is_contained(inactive.assumptions, assumption))
+      inactive.assumptions.push_back(assumption);
+
+  sym::ExprHandle rebased = inactive.voffsetExpr;
+  if (!rebased) {
+    FailureOr<sym::ExprHandle> zero = sym::composeExprInt(S.symbolStore(), 0);
+    if (failed(zero))
+      return failure();
+    rebased = *zero;
+  }
+  if (inactive.soffsetExpr) {
+    FailureOr<sym::ExprHandle> sum = sym::composeExprBinary(
+        S.symbolStore(), rebased, sym::ExprBinaryOp::Add, inactive.soffsetExpr);
+    if (failed(sum))
+      return failure();
+    rebased = *sum;
+  }
+  if (inactive.instOffset != 0) {
+    FailureOr<sym::ExprHandle> inst =
+        sym::composeExprInt(S.symbolStore(), inactive.instOffset);
+    if (failed(inst))
+      return failure();
+    FailureOr<sym::ExprHandle> sum = sym::composeExprBinary(
+        S.symbolStore(), rebased, sym::ExprBinaryOp::Add, *inst);
+    if (failed(sum))
+      return failure();
+    rebased = *sum;
+  }
+  if (active.soffsetExpr) {
+    FailureOr<sym::ExprHandle> difference = sym::composeExprBinary(
+        S.symbolStore(), rebased, sym::ExprBinaryOp::Sub, active.soffsetExpr);
+    if (failed(difference))
+      return failure();
+    rebased = *difference;
+  }
+  if (active.instOffset != 0) {
+    FailureOr<sym::ExprHandle> inst =
+        sym::composeExprInt(S.symbolStore(), active.instOffset);
+    if (failed(inst))
+      return failure();
+    FailureOr<sym::ExprHandle> difference = sym::composeExprBinary(
+        S.symbolStore(), rebased, sym::ExprBinaryOp::Sub, *inst);
+    if (failed(difference))
+      return failure();
+    rebased = *difference;
+  }
+  FailureOr<sym::ExprHandle> modulus =
+      sym::composeExprInt(S.symbolStore(), int64_t{1} << 32);
+  if (failed(modulus))
+    return failure();
+  FailureOr<sym::ExprHandle> wrapped = sym::composeExprBinary(
+      S.symbolStore(), rebased, sym::ExprBinaryOp::Mod, *modulus);
+  if (failed(wrapped))
+    return failure();
+  inactive.voffsetExpr = *wrapped;
+  inactive.voffsetNeedsWide =
+      needsWideAddressMaterialization(inactive.voffsetExpr, inactive);
+  inactive.soffsetExpr = {};
+  inactive.soffsetNeedsWide = false;
+  inactive.instOffset = 0;
+  return success();
 }
 
 std::optional<Value> lookupSelectedPointerVOffset(WaveAMDMachineSelector &S,

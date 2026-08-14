@@ -24,6 +24,12 @@ set(WAVE_MLIR_TEST_DEPENDS
   wave-translate
   wavec
 )
+if(TARGET WavePythonModules)
+  # The Python lit tests import the staged package from this build tree.  Keep
+  # named test targets from either skipping those tests in a fresh tree or
+  # reusing an extension left by an older build.
+  list(APPEND WAVE_MLIR_TEST_DEPENDS WavePythonModules)
+endif()
 
 add_lit_testsuite(check-wave-mlir "Running the wave-mlir regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}

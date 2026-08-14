@@ -589,6 +589,8 @@ void MmaScaleOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 static LogicalResult verifyDmaLoadLdsOptions(DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
     return op.emitOpError("currently supports only bytes = 4 or 16");
+  if (op.getAux() != 0)
+    return op.emitOpError("requires aux = 0");
   IntegerAttr delay = op->getAttrOfType<IntegerAttr>("issue_delay_cycles");
   IntegerAttr overlap =
       op->getAttrOfType<IntegerAttr>("issue_delay_overlap_cycles");

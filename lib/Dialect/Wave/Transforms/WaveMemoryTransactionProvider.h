@@ -9,31 +9,18 @@
 #ifndef MLIR_LIB_DIALECT_WAVE_TRANSFORMS_WAVEMEMORYTRANSACTIONPROVIDER_H
 #define MLIR_LIB_DIALECT_WAVE_TRANSFORMS_WAVEMEMORYTRANSACTIONPROVIDER_H
 
+#include "../IR/WaveIndexMap.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
-#include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace mlir::wave::memory_lowering {
-
-struct MemoryTransactionBinding {
-  StringRef name;
-  Value value;
-};
-
-struct MemoryTransactionPoint {
-  ArrayRef<MemoryTransactionBinding> bindings;
-  ArrayRef<sym::PredHandle> assumptions;
-  sym::ExprHandle base;
-  sym::ExprHandle targetBlock;
-  sym::ExprHandle byteOffset;
-  sym::ExprHandle materializationByteOffset;
-  int64_t baseIndex = 0;
-};
 
 struct GatherTransactionResult {
   Value value;
@@ -44,71 +31,73 @@ class GatherTransactionEmitter {
 public:
   virtual ~GatherTransactionEmitter() = default;
 
-  virtual FailureOr<GatherTransactionResult>
-  emit(IRRewriter &rewriter, Location loc, SimdType resultType, Type tokenType,
-       Value address, Value dependency) const = 0;
+  // The checked target formula is trusted at emission.
+  virtual GatherTransactionResult emit(IRRewriter &rewriter, Location loc,
+                                       SimdType resultType, Type tokenType,
+                                       Value address,
+                                       Value dependency) const = 0;
 };
 
-struct GatherTransactionCandidate {
-  SmallVector<unsigned> slots;
-  std::unique_ptr<GatherTransactionEmitter> emitter;
-  sym::ExprHandle byteOffset;
-  unsigned addressPoint = 0;
-  int64_t baseIndex = 0;
+struct GatherTransaction {
+  struct VerifiedAddress {
+    unsigned firstSlot;
+    sym::ExprHandle bitOffset;
+  };
+
+  unsigned width;
+  sym::ExprHandle sourceItem;
+  sym::ExprHandle intraBits;
+  sym::ExprHandle originItem;
+  sym::ExprHandle originSlot;
+  std::vector<VerifiedAddress> verifiedAddresses;
+  std::shared_ptr<const GatherTransactionEmitter> emitter;
 };
 
 struct GatherTransactionRequest {
   ValueRange bases;
-  ArrayRef<MemoryTransactionPoint> points;
   Operation *op = nullptr;
-  sym::Store *store = nullptr;
   SimdType resultType;
-  Value dependency;
   Attribute cache;
-  Type tokenType;
-};
-
-class GatherTransactionProvider {
-public:
-  virtual ~GatherTransactionProvider() = default;
-
-  virtual void
-  enumerate(const GatherTransactionRequest &request,
-            SmallVectorImpl<GatherTransactionCandidate> &candidates) const = 0;
+  sym::ExprHandle item;
+  sym::ExprHandle slot;
+  std::optional<int64_t> itemCount;
+  const indexing::IndexAddress *address = nullptr;
 };
 
 struct CopyTransactionRequest {
   Value sourceBase;
   Value destinationBase;
   Operation *op = nullptr;
+  SimdType packetType;
   bool zeroFillInactive = false;
+};
+
+class CopyTransactionEmitter;
+
+struct CopyTransaction {
+  int64_t bytes = 0;
+  int64_t windowBytes = 0;
+  std::shared_ptr<const CopyTransactionEmitter> emitter;
 };
 
 class CopyTransactionEmitter {
 public:
   virtual ~CopyTransactionEmitter() = default;
 
-  virtual ArrayRef<int64_t> getSupportedByteWidths() const = 0;
-
-  virtual FailureOr<Value> emit(IRRewriter &rewriter, Location loc,
-                                Type tokenType, Value source, Value destination,
-                                Value dependency, int64_t bytes,
-                                Value condition) const = 0;
+  // The provider selected `bytes` and zero-fill eligibility before emission.
+  virtual Value emit(IRRewriter &rewriter, Location loc, Type tokenType,
+                     Value source, Value destination, Value dependency,
+                     int64_t bytes, bool zeroFillInactive) const = 0;
 };
 
-class CopyTransactionProvider {
-public:
-  virtual ~CopyTransactionProvider() = default;
+SmallVector<GatherTransaction, 2>
+getGatherTransactions(const GatherTransactionRequest &request);
 
-  virtual std::unique_ptr<CopyTransactionEmitter>
-  match(const CopyTransactionRequest &request) const = 0;
-};
-
-void populateGatherTransactionProviders(
-    SmallVectorImpl<std::unique_ptr<GatherTransactionProvider>> &providers);
-
-void populateCopyTransactionProviders(
-    SmallVectorImpl<std::unique_ptr<CopyTransactionProvider>> &providers);
+// AMD currently has exactly two direct-to-LDS widths. Keep both candidates so
+// mapping legality, which is only known by the planner, can select the widest
+// legal transaction.
+SmallVector<CopyTransaction>
+getCopyTransactions(const CopyTransactionRequest &request);
 
 } // namespace mlir::wave::memory_lowering
 

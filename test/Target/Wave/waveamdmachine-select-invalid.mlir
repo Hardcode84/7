@@ -562,7 +562,7 @@ func.func @global_dma_lds_addr64_fallback_rejects_aux(
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %tok0 = wave.token : !wave.mem.token
-  // expected-error @below {{addr64 DMA LDS fallback does not support nonzero aux}}
+  // expected-error @below {{'waveamd.dma_load_lds' op requires aux = 0}}
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {aux = 1 : i64, bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
@@ -688,27 +688,6 @@ func.func @set_priority_inc_wg_requires_target_support() attributes {
   } {
   // expected-error @below {{unsupported on WaveAMDMachine target}}
   waveamd.set_priority_inc_wg 100
-  return
-}
-}
-
-// -----
-
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @unsupported_trunc_index_expr(%out: !wave.ptr<#wave.global, i32>,
-                                        %x: i32)
-    attributes {wave.kernel} {
-  %lane = wave.lane_id : !wave.simd<i32, 32>
-  %value = wave.splat %x : i32 -> !wave.simd<i32, 32>
-  %off = wave.index_expr <"Trunc(1/2*x)"> ["x"](%value)
-      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %ptr = wave.ptr_add %out, %off
-      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
-  // expected-error @below {{full-address index_expr unsupported expression kind trunc}}
-  %tok = wave.store %lane -> %ptr
-      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
-      -> !wave.mem.token
   return
 }
 }

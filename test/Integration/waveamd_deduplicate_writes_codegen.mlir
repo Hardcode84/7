@@ -42,7 +42,10 @@ func.func @distinct_identical_dma_codegen(
   %buffer = waveamd.make_buffer %input, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %source = wave.ptr_add %buffer, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %source = wave.ptr_add %buffer, %bounded_item
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %destination = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -70,7 +73,10 @@ func.func @repeated_token_dma_codegen(
   %buffer = waveamd.make_buffer %input, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %source = wave.ptr_add %buffer, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %source = wave.ptr_add %buffer, %bounded_item
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %destination = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -94,7 +100,10 @@ func.func @external_dma_token_use_codegen(
   %buffer = waveamd.make_buffer %input, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %source = wave.ptr_add %buffer, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %source = wave.ptr_add %buffer, %bounded_item
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %destination = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -119,7 +128,10 @@ func.func @distinct_identical_store_codegen(
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %destination = wave.ptr_add %output, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %destination = wave.ptr_add %output, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %root = wave.token : !wave.mem.token
@@ -143,7 +155,10 @@ func.func @external_store_token_use_codegen(
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %destination = wave.ptr_add %output, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %destination = wave.ptr_add %output, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %root = wave.token : !wave.mem.token
@@ -168,13 +183,16 @@ func.func @ordered_then_independent_store_codegen(
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %source = wave.ptr_add %input, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %source = wave.ptr_add %input, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %unused, %read = wave.load %source
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>)
       -> (!wave.simd<i32, 64>, !wave.mem.token)
-  %destination = wave.ptr_add %output, %item
+  %destination = wave.ptr_add %output, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %ordered = wave.store %item -> %destination after %read

@@ -1,27 +1,34 @@
 // RUN: split-file %s %t
-// RUN: wave-opt --wave-lower-symbolic-memory %t/eight.mlir | FileCheck %s --check-prefix=EIGHT-IR
-// RUN: wave-opt --wave-lower-symbolic-memory %t/sixteen.mlir | FileCheck %s --check-prefix=SIXTEEN-IR
-// RUN: wave-opt --wave-lower-symbolic-memory %t/sixty-four.mlir | FileCheck %s --check-prefix=SIXTY-FOUR-IR
-// RUN: wave-opt --wave-lower-symbolic-memory %t/sixty-five.mlir | FileCheck %s --check-prefix=SIXTY-FIVE-IR
-// RUN: wave-opt --wave-lower-symbolic-memory --mlir-pass-statistics %t/eight.mlir 2>&1 >/dev/null | FileCheck %s --check-prefix=EIGHT
-// RUN: wave-opt --wave-lower-symbolic-memory --mlir-pass-statistics %t/sixteen.mlir 2>&1 >/dev/null | FileCheck %s --check-prefix=SIXTEEN
-// RUN: wave-opt --wave-lower-symbolic-memory --mlir-pass-statistics %t/sixty-four.mlir 2>&1 >/dev/null | FileCheck %s --check-prefix=SIXTY-FOUR
-// RUN: wave-opt --wave-lower-symbolic-memory --mlir-pass-statistics %t/sixty-five.mlir 2>&1 >/dev/null | FileCheck %s --check-prefix=SIXTY-FIVE
+// RUN: wave-opt --wave-generate-index-exprs --wave-lower-symbolic-memory %t/eight.mlir | FileCheck %s --check-prefix=EIGHT-IR
+// RUN: wave-opt --wave-generate-index-exprs --wave-lower-symbolic-memory %t/sixteen.mlir | FileCheck %s --check-prefix=SIXTEEN-IR
+// RUN: wave-opt --wave-generate-index-exprs --wave-lower-symbolic-memory %t/seventeen-duplicate.mlir | FileCheck %s --check-prefix=SEVENTEEN-DUPLICATE-IR
+// RUN: wave-opt --wave-generate-index-exprs --wave-lower-symbolic-memory %t/sixty-four.mlir | FileCheck %s --check-prefix=SIXTY-FOUR-IR
+// RUN: wave-opt --wave-generate-index-exprs --wave-lower-symbolic-memory %t/sixty-five.mlir | FileCheck %s --check-prefix=SIXTY-FIVE-IR
+// RUN: wave-opt --wave-generate-index-exprs --wave-lower-symbolic-memory %t/unknown-base.mlir | FileCheck %s --check-prefix=UNKNOWN-BASE-IR
 
 // EIGHT-IR-LABEL: func.func @eight_slots(
 // EIGHT-IR-NOT: wave.gather
 // EIGHT-IR-COUNT-1: wave.load
 // EIGHT-IR-SAME: -> (!wave.simd<vector<8xf16>, 32>, !wave.mem.token)
+// EIGHT-IR-NOT: wave.load
 // EIGHT-IR-NOT: wave.gather
 // SIXTEEN-IR-LABEL: func.func @sixteen_slots(
 // SIXTEEN-IR-NOT: wave.gather
+// SEVENTEEN-DUPLICATE-IR-LABEL: func.func @seventeen_duplicate_slots(
+// SEVENTEEN-DUPLICATE-IR-NOT: wave.gather
+// SEVENTEEN-DUPLICATE-IR-COUNT-1: wave.load
+// SEVENTEEN-DUPLICATE-IR-SAME: -> (!wave.simd<f16, 32>, !wave.mem.token)
+// SEVENTEEN-DUPLICATE-IR-NOT: wave.load
+// SEVENTEEN-DUPLICATE-IR-NOT: wave.gather
 // SIXTEEN-IR-COUNT-1: wave.load
 // SIXTEEN-IR-SAME: -> (!wave.simd<vector<16xf16>, 32>, !wave.mem.token)
+// SIXTEEN-IR-NOT: wave.load
 // SIXTEEN-IR-NOT: wave.gather
 // SIXTY-FOUR-IR-LABEL: func.func @sixty_four_slots(
 // SIXTY-FOUR-IR-NOT: wave.scatter
 // SIXTY-FOUR-IR-COUNT-8: wave.store
 // SIXTY-FOUR-IR-SAME: !wave.simd<vector<8xf16>, 32>
+// SIXTY-FOUR-IR-NOT: wave.store
 // SIXTY-FOUR-IR-NOT: wave.scatter
 // SIXTY-FIVE-IR-LABEL: func.func @sixty_five_slots(
 // SIXTY-FIVE-IR-NOT: wave.scatter
@@ -32,15 +39,11 @@
 // SIXTY-FIVE-IR-SAME: !wave.simd<f16, 32>
 // SIXTY-FIVE-IR-NOT: wave.store
 // SIXTY-FIVE-IR-NOT: wave.scatter
-
-// EIGHT: WaveLowerSymbolicMemory
-// EIGHT: (S) 0 relation-planning-fact-domains
-// SIXTEEN: WaveLowerSymbolicMemory
-// SIXTEEN: (S) 0 relation-planning-fact-domains
-// SIXTY-FOUR: WaveLowerSymbolicMemory
-// SIXTY-FOUR: (S) 14 relation-planning-fact-domains
-// SIXTY-FIVE: WaveLowerSymbolicMemory
-// SIXTY-FIVE: (S) 1 relation-planning-fact-domains
+// UNKNOWN-BASE-IR-LABEL: func.func @unknown_base_pair_falls_back(
+// UNKNOWN-BASE-IR-NOT: wave.scatter
+// UNKNOWN-BASE-IR-COUNT-17: wave.store {{.*}}!wave.simd<i32, 32>
+// UNKNOWN-BASE-IR-NOT: wave.store
+// UNKNOWN-BASE-IR-NOT: wave.scatter
 
 //--- eight.mlir
 
@@ -51,7 +54,7 @@ func.func @eight_slots(%base: !wave.ptr<#wave.global, f16>,
       : !wave.simd<index, 32>
   %value, %token = wave.gather %base mapping
       <bit_offset = <"16 * offset + 16 * slot">>
-      bindings ["offset"](%offset) packet_bindings []()
+      bindings ["offset"](%offset)
       : (!wave.ptr<#wave.global, f16>, !wave.simd<index, 32>)
       -> (!wave.simd<vector<8xf16>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<8xf16>, 32>
@@ -66,10 +69,22 @@ func.func @sixteen_slots(%base: !wave.ptr<#wave.global, f16>,
       : !wave.simd<index, 32>
   %value, %token = wave.gather %base mapping
       <bit_offset = <"16 * offset + 16 * slot">>
-      bindings ["offset"](%offset) packet_bindings []()
+      bindings ["offset"](%offset)
       : (!wave.ptr<#wave.global, f16>, !wave.simd<index, 32>)
       -> (!wave.simd<vector<16xf16>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<16xf16>, 32>
+}
+
+//--- seventeen-duplicate.mlir
+
+func.func @seventeen_duplicate_slots(%base: !wave.ptr<#wave.global, f16>)
+    -> !wave.simd<vector<17xf16>, 32> {
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"0">>
+      bindings []()
+      : (!wave.ptr<#wave.global, f16>)
+      -> (!wave.simd<vector<17xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<17xf16>, 32>
 }
 
 //--- sixty-four.mlir
@@ -127,7 +142,7 @@ func.func @sixty_four_slots(
       %m7, %m7, %m7, %m7, %m7, %m7, %m7, %m7 {
     %stored = wave.scatter %value to %base mapping
         <bit_offset = <"16 * slot">>
-        bindings []() packet_bindings []()
+        bindings []()
         : (!wave.simd<vector<64xf16>, 32>, !wave.ptr<#wave.global, f16>)
         -> !wave.mem.token
     wave.yield %stored : !wave.mem.token
@@ -162,8 +177,22 @@ func.func @sixty_five_slots(
       : !wave.simd<index, 32>
   %token = wave.scatter %value to %base mapping
       <bit_offset = <"16 * offset + 16 * slot">>
-      bindings ["offset"](%offset) packet_bindings []()
+      bindings ["offset"](%offset)
       : (!wave.simd<vector<65xf16>, 32>, !wave.ptr<#wave.global, f16>,
          !wave.simd<index, 32>) -> !wave.mem.token
+  return
+}
+
+//--- unknown-base.mlir
+
+func.func @unknown_base_pair_falls_back(
+    %value: !wave.simd<vector<17xi32>, 32>,
+    %first: !wave.ptr<#wave.shared, i32>,
+    %second: !wave.ptr<#wave.shared, i32>) {
+  %token = wave.scatter %value to %first, %second mapping
+      <base = <"slot >= 2">, bit_offset = <"32 * slot">>
+      bindings []()
+      : (!wave.simd<vector<17xi32>, 32>, !wave.ptr<#wave.shared, i32>,
+         !wave.ptr<#wave.shared, i32>) -> !wave.mem.token
   return
 }

@@ -164,6 +164,19 @@ func.func @dma_load_lds_overlap_exceeds_delay(
 
 // -----
 
+func.func @dma_load_lds_nonzero_aux(
+    %src: !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+    %lds: !wave.ptr<#wave.shared, i32>, %t: !wave.mem.token) {
+  // expected-error @below {{'waveamd.dma_load_lds' op requires aux = 0}}
+  %tok = waveamd.dma_load_lds %src -> %lds after %t
+      {aux = 1 : i64, bytes = 4 : i64}
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+         !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @make_buffer_base_not_global(%p: !wave.ptr<#wave.shared, i32>, %r: i32) {
   // expected-error @below {{base must be a global wave pointer}}
   %b = waveamd.make_buffer %p, %r : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>

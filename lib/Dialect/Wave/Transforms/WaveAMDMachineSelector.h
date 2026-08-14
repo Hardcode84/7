@@ -86,8 +86,6 @@ struct SlotFitsU32CacheEntry {
 
 using SlotFitsU32CacheKey = std::pair<sym::ExprHandle, llvm::hash_code>;
 
-inline constexpr int64_t kBufferSelectedSourceOobOffset = int64_t{1} << 31;
-
 struct BufferSelectedSourcePointer {
   PointerOffset offset;
   Value base;
@@ -260,8 +258,9 @@ matchSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user,
 
 bool hasOnlyVOffsetField(const AddressPlan &plan);
 
-bool isBufferSelectedSourceOobPlan(WaveAMDMachineSelector &S,
-                                   const AddressPlan &plan);
+LogicalResult rebaseSelectedBufferPlan(WaveAMDMachineSelector &S,
+                                       const AddressPlan &active,
+                                       AddressPlan &inactive);
 
 std::optional<Value> lookupSelectedPointerVOffset(WaveAMDMachineSelector &S,
                                                   Value ptr);

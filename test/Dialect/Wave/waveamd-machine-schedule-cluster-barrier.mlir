@@ -1,6 +1,6 @@
-// RUN: wave-opt %s --waveamd-machine-schedule-report='print-classes=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=CLASS
-// RUN: wave-opt %s --waveamd-machine-schedule='apply-schedule=1' | FileCheck %s --check-prefix=IR
-// RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=NOSPECIALIZE
+// RUN: wave-opt %s -split-input-file --waveamd-machine-schedule-report='print-classes=1' 2>&1 >/dev/null | FileCheck %s --check-prefix=CLASS
+// RUN: wave-opt %s -split-input-file --waveamd-machine-schedule='apply-schedule=1' | FileCheck %s --check-prefix=IR
+// RUN: wave-opt %s -split-input-file --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=NOSPECIALIZE
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 
@@ -25,6 +25,12 @@ func.func @cluster_barrier_boundary(
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   return
 }
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // NOSPECIALIZE-LABEL: func.func @cluster_barrier_not_specialized(
 // NOSPECIALIZE-NOT: waveamdmachine.uniform_if

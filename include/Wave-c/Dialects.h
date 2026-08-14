@@ -134,15 +134,18 @@ mlirWaveCastExtensionPolicyAttrGet(MlirContext ctx, uint32_t value);
 MLIR_CAPI_EXPORTED uint32_t
 mlirWaveCastExtensionPolicyAttrGetValue(MlirAttribute attr);
 
-// Returns a #wave.expr attribute parsed from `text`. On parse failure
-// emits a diagnostic on the context and returns a null MlirAttribute.
+// Returns a #wave.expr scalar attribute parsed from `text`. Predicates are
+// accepted with numeric 0/1 semantics. On parse failure, emits a diagnostic on
+// the context and returns a null MlirAttribute.
 // Note: the dialect-owned symbol store hash-conses the underlying node,
 // so equal texts return pointer-equal handles.
 MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAExpr(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text);
 
-// Import a live process-local ixsimpl node pointer into the dialect store.
+// Import a live process-local ixsimpl node into the dialect store. The source
+// must use the same ixsimpl ABI/build as Wave, and the node and its owning
+// context must remain alive for the duration of this call.
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWaveExprAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
 
@@ -153,6 +156,8 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirWaveExprAttrGetFromBytes(
 MLIR_CAPI_EXPORTED bool mlirWaveAttributeIsAPred(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWavePredAttrGetFromText(MlirContext ctx, MlirStringRef text);
+// Same-build ABI, live-node lifetime, and synchronous-import contract as
+// wave.expr.
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirWavePredAttrGetFromNodePtr(MlirContext ctx, uintptr_t nodePtr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirWavePredAttrGetFromBytes(

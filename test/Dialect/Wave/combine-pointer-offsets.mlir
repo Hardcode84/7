@@ -30,7 +30,7 @@ func.func @raw_wave_arith(%out: !wave.ptr<#wave.global, i32>) attributes {wave.k
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %base = wave.ptr_add %out, %c8
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
-  // CHECK: %[[OFF:.*]] = wave.index_expr <"8 + 8*raw0"> ["raw0"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// CHECK: %[[OFF:.*]] = wave.index_expr <"8 + 8*raw0"> {{.*}}["raw0"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK: wave.ptr_add %arg0, %[[OFF]]
   %ptrs = wave.ptr_add %base, %lane_off
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -111,7 +111,7 @@ func.func @raw_wave_xor(%out: !wave.ptr<#wave.global, i32>) attributes {wave.ker
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   %base = wave.ptr_add %out, %c31
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
-  // CHECK: %[[OFF:.*]] = wave.index_expr <"31 + xor(31, raw0)"> ["raw0"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// CHECK: %[[OFF:.*]] = wave.index_expr <"31 + xor(31, raw0)"> {{.*}}["raw0"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   // CHECK: wave.ptr_add %arg0, %[[OFF]]
   %ptrs = wave.ptr_add %base, %swizzled
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -332,14 +332,12 @@ func.func @ptr_add_scalarized_offset_is_splatted(
 
 // -----
 
-// CHECK-LABEL: func.func @non_global_identity_i32_offset_stays_split
+// CHECK-LABEL: func.func @non_global_identity_i32_offset_combines
 // CHECK-SAME: (%[[OUT:.*]]: !wave.ptr<#waveamd.buffer, i32>, %[[RAW:.*]]: !wave.simd<i32, 32>)
-// CHECK: %[[BASE:.*]] = wave.ptr_add %[[OUT]], %{{.*}} : !wave.ptr<#waveamd.buffer, i32>, index -> !wave.ptr<#waveamd.buffer, i32>
-// CHECK: %[[IDX:.*]] = wave.index_expr <"raw0"> ["raw0"](%[[RAW]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-// CHECK-NOT: wave.index_expr <"4 + raw0">
-// CHECK: %[[PTR:.*]] = wave.ptr_add %[[BASE]], %[[IDX]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+// CHECK: %[[IDX:.*]] = wave.index_expr <"4 + raw0"> ["raw0"](%[[RAW]]) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// CHECK: %[[PTR:.*]] = wave.ptr_add %[[OUT]], %[[IDX]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
 // CHECK: return %[[PTR]]
-func.func @non_global_identity_i32_offset_stays_split(
+func.func @non_global_identity_i32_offset_combines(
     %out: !wave.ptr<#waveamd.buffer, i32>,
     %raw: !wave.simd<i32, 32>)
     -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32> attributes {wave.kernel} {

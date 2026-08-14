@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "../IR/WaveMemoryAddress.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/Builders.h"
@@ -42,6 +43,7 @@ struct MemoryGroup {
   Operation *firstOp = nullptr;
   Operation *lastOp = nullptr;
   int64_t simdWidth = 0;
+  int64_t pointerElementBits = 0;
   unsigned spanElements = 0;
   MemoryGroupKind kind;
 };
@@ -50,22 +52,6 @@ struct AddressOrderedGroups {
   const MemoryGroup *lo;
   const MemoryGroup *hi;
 };
-
-static std::optional<PtrType> getPointerType(Type type) {
-  return getWavePointerType(type);
-}
-
-static std::optional<unsigned> getPointerElementBits(Type type) {
-  std::optional<PtrType> ptrType = getPointerType(type);
-  if (!ptrType)
-    return std::nullopt;
-  Type elementType = ptrType->getElementType();
-  if (!elementType)
-    return 8;
-  if (!elementType.isIntOrFloat())
-    return std::nullopt;
-  return elementType.getIntOrFloatBitWidth();
-}
 
 static bool hasNoEffects(Operation *op) {
   if (op->hasTrait<OpTrait::IsTerminator>() || op->getNumRegions() != 0)
@@ -125,6 +111,13 @@ static JoinOp getOnlyJoinUser(Value token) {
   return dyn_cast<JoinOp>(token.use_begin()->getOwner());
 }
 
+static bool equivalentDependencies(Value lhs, Value rhs) {
+  if (lhs == rhs)
+    return true;
+  return lhs && rhs && lhs.getDefiningOp<TokenOp>() &&
+         rhs.getDefiningOp<TokenOp>();
+}
+
 static std::optional<JoinOp> getCommonJoinUser(const MemoryGroup &group) {
   JoinOp join;
   for (Operation *op : group.ops) {
@@ -147,7 +140,8 @@ static std::optional<JoinOp> getCommonJoinUser(const MemoryGroup &group) {
 
 static bool tokensUsedOnlyBySameJoin(const MemoryGroup &lhs,
                                      const MemoryGroup &rhs) {
-  if (getMemoryDependency(lhs.firstOp) != getMemoryDependency(rhs.firstOp))
+  if (!equivalentDependencies(getMemoryDependency(lhs.firstOp),
+                              getMemoryDependency(rhs.firstOp)))
     return false;
 
   std::optional<JoinOp> lhsJoin = getCommonJoinUser(lhs);
@@ -162,12 +156,13 @@ static bool deadStoreTokensShareDependency(const MemoryGroup &lhs,
   if (lhs.kind != MemoryGroupKind::Store || rhs.kind != MemoryGroupKind::Store)
     return false;
   Value dependency = getMemoryDependency(lhs.firstOp);
-  if (!dependency || getMemoryDependency(rhs.firstOp) != dependency)
+  if (!dependency ||
+      !equivalentDependencies(getMemoryDependency(rhs.firstOp), dependency))
     return false;
   auto hasDeadTokens = [&](const MemoryGroup &group) {
     return llvm::all_of(group.ops, [&](Operation *op) {
       return getMemoryToken(op).use_empty() &&
-             getMemoryDependency(op) == dependency;
+             equivalentDependencies(getMemoryDependency(op), dependency);
     });
   };
   return hasDeadTokens(lhs) && hasDeadTokens(rhs);
@@ -212,10 +207,8 @@ static std::optional<Type> getScalarElementType(Operation *op) {
 }
 
 static FailureOr<std::optional<unsigned>>
-getSpanElements(Operation *op, Type scalarElementType) {
-  std::optional<unsigned> ptrBits =
-      getPointerElementBits(getMemoryPtr(op).getType());
-  if (!ptrBits || *ptrBits == 0)
+getSpanElements(Operation *op, Type scalarElementType, int64_t elementBits) {
+  if (elementBits <= 0)
     return std::optional<unsigned>{};
 
   FailureOr<MemoryPayloadShape> shape =
@@ -224,9 +217,9 @@ getSpanElements(Operation *op, Type scalarElementType) {
       });
   if (failed(shape))
     return failure();
-  if (shape->payloadBits % *ptrBits != 0)
+  if (shape->payloadBits % elementBits != 0)
     return std::optional<unsigned>{};
-  return std::optional<unsigned>{shape->payloadBits / *ptrBits};
+  return std::optional<unsigned>{shape->payloadBits / elementBits};
 }
 
 static FailureOr<std::optional<MemoryGroup>>
@@ -234,8 +227,14 @@ getMemorySeed(Operation *op, WaveDialect &dialect) {
   std::optional<Type> scalarElementType = getScalarElementType(op);
   if (!scalarElementType)
     return std::optional<MemoryGroup>{};
+  FailureOr<std::optional<int64_t>> elementBits =
+      getMemoryPointerElementBits(getMemoryPtr(op).getType());
+  if (failed(elementBits))
+    return failure();
+  if (!*elementBits)
+    return std::optional<MemoryGroup>{};
   FailureOr<std::optional<unsigned>> spanElements =
-      getSpanElements(op, *scalarElementType);
+      getSpanElements(op, *scalarElementType, **elementBits);
   if (failed(spanElements))
     return failure();
   if (!*spanElements)
@@ -257,6 +256,7 @@ getMemorySeed(Operation *op, WaveDialect &dialect) {
   group.firstOp = op;
   group.lastOp = op;
   group.simdWidth = cast<SimdType>(getMemoryPayload(op).getType()).getWidth();
+  group.pointerElementBits = **elementBits;
   group.spanElements = **spanElements;
   group.kind = getMemoryGroupKind(op);
   return std::optional<MemoryGroup>{std::move(group)};
@@ -266,6 +266,7 @@ static bool compatibleGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
   return lhs.kind == rhs.kind &&
          lhs.scalarElementType == rhs.scalarElementType &&
          lhs.simdWidth == rhs.simdWidth &&
+         lhs.pointerElementBits == rhs.pointerElementBits &&
          lhs.address.base == rhs.address.base && lhs.cache == rhs.cache;
 }
 
@@ -291,17 +292,20 @@ getRewriteOrderedGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
 static FailureOr<std::optional<AddressOrderedGroups>>
 getAddressOrderedGroups(WaveDialect &dialect, const MemoryGroup &lhs,
                         const MemoryGroup &rhs) {
-  FailureOr<std::optional<int64_t>> delta =
-      computeConstantMemoryAddressDelta(dialect, rhs.address, lhs.address);
-  if (failed(delta))
+  FailureOr<bool> rhsFollowsLhs = proveMemoryAddressElementDelta(
+      dialect, rhs.address, lhs.address, static_cast<int64_t>(lhs.spanElements),
+      lhs.pointerElementBits);
+  if (failed(rhsFollowsLhs))
     return failure();
-  if (!*delta)
-    return std::optional<AddressOrderedGroups>{};
-
-  if (**delta == static_cast<int64_t>(lhs.spanElements))
+  if (*rhsFollowsLhs)
     return std::optional<AddressOrderedGroups>{
         AddressOrderedGroups{&lhs, &rhs}};
-  if (**delta == -static_cast<int64_t>(rhs.spanElements))
+  FailureOr<bool> lhsFollowsRhs = proveMemoryAddressElementDelta(
+      dialect, lhs.address, rhs.address, static_cast<int64_t>(rhs.spanElements),
+      rhs.pointerElementBits);
+  if (failed(lhsFollowsRhs))
+    return failure();
+  if (*lhsFollowsRhs)
     return std::optional<AddressOrderedGroups>{
         AddressOrderedGroups{&rhs, &lhs}};
   return std::optional<AddressOrderedGroups>{};
@@ -325,6 +329,7 @@ buildMergedGroup(std::pair<const MemoryGroup *, const MemoryGroup *> ordered,
   merged.firstOp = merged.ops.front();
   merged.lastOp = merged.ops.back();
   merged.simdWidth = ordered.first->simdWidth;
+  merged.pointerElementBits = ordered.first->pointerElementBits;
   merged.spanElements =
       ordered.first->spanElements + ordered.second->spanElements;
   merged.kind = ordered.first->kind;

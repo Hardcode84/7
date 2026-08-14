@@ -16,42 +16,31 @@ func.func @symbolic_memory_codegen(%dst: !wave.ptr<#wave.global, i32>)
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
-  %one = wave.constant 1 : i32 -> !wave.simd<i32, 64>
-  %two = wave.constant 2 : i32 -> !wave.simd<i32, 64>
-  %three = wave.constant 3 : i32 -> !wave.simd<i32, 64>
-  %v1 = wave.binary addi %item, %one
-      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-  %v2 = wave.binary addi %item, %two
-      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-  %v3 = wave.binary addi %item, %three
-      : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-  %source = wave.pack %item, %v1, %v2, %v3
-      : !wave.simd<i32, 64>, !wave.simd<i32, 64>,
-        !wave.simd<i32, 64>, !wave.simd<i32, 64>
-      -> !wave.simd<vector<4xi32>, 64>
-
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
   %input, %input_ready = wave.gather %dst mapping
-      <bit_offset = <"32 * idx">>
-      bindings []() packet_bindings ["idx"](%source)
-      : (!wave.ptr<#wave.global, i32>, !wave.simd<vector<4xi32>, 64>)
+      <bit_offset = <"32 * (item + slot)">>
+      bindings ["item"](%bounded_item)
+      : (!wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>)
       -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
 
   %scratch = wave.alloc() {align = 16 : i64, bytesize = 1024 : i64}
       : !wave.ptr<#wave.shared, i32>
   %written = wave.scatter %input to %scratch mapping
       <bit_offset = <"32 * (4 * item + slot)">>
-      bindings []() packet_bindings []() after %input_ready
+      bindings ["item"](%bounded_item) after %input_ready
       : (!wave.simd<vector<4xi32>, 64>, !wave.ptr<#wave.shared, i32>,
-         !wave.mem.token)
+         !wave.simd<i32, 64>, !wave.mem.token)
       -> !wave.mem.token
   %loaded, %read = wave.gather %scratch mapping
       <bit_offset = <"32 * (4 * item + slot)">>
-      bindings []() packet_bindings []() after %written
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token)
+      bindings ["item"](%bounded_item) after %written
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>, !wave.mem.token)
       -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
 
   %four = wave.constant 4 : i32 -> !wave.simd<i32, 64>
-  %offset = wave.binary muli %item, %four
+  %offset = wave.binary muli %bounded_item, %four overflow<nsw>
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %out = wave.ptr_add %dst, %offset
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>

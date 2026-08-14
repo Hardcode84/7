@@ -24,10 +24,13 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 64>
-  %next = wave.binary addi %item, %one
+  %next = wave.binary addi %bounded_item, %one overflow<nsw>
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
-  %source = wave.pack %item, %next
+  %source = wave.pack %bounded_item, %next
       : !wave.simd<i32, 64>, !wave.simd<i32, 64>
       -> !wave.simd<vector<2xi32>, 64>
   %result = wave.redistribute %source,
@@ -37,7 +40,7 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
       : !wave.simd<vector<2xi32>, 64>
       -> !wave.simd<vector<2xi32>, 64>
   %two = wave.constant 2 : i32 -> !wave.simd<i32, 64>
-  %offset = wave.binary muli %item, %two
+  %offset = wave.binary muli %bounded_item, %two overflow<nsw>
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   %ptr = wave.ptr_add %dst, %offset
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>

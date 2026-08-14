@@ -280,6 +280,11 @@ bool mlirWaveAttributeIsAExpr(MlirAttribute attr) {
 
 MlirAttribute mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text) {
   MLIRContext *context = unwrap(ctx);
+  if (!text.data && text.length != 0) {
+    emitError(UnknownLoc::get(context))
+        << "wave.expr text has nonzero length with a null data pointer";
+    return MlirAttribute{nullptr};
+  }
   // getOrLoad so the call is safe from Python before any other Wave op has
   // forced the dialect to load.
   auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
@@ -318,6 +323,11 @@ MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
                                            const uint8_t *bytes,
                                            size_t length) {
   MLIRContext *context = unwrap(ctx);
+  if (!bytes && length != 0) {
+    emitError(UnknownLoc::get(context))
+        << "wave.expr bytes have nonzero length with a null data pointer";
+    return MlirAttribute{nullptr};
+  }
   auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
   if (!dialect)
     return MlirAttribute{nullptr};
@@ -339,6 +349,11 @@ bool mlirWaveAttributeIsAPred(MlirAttribute attr) {
 
 MlirAttribute mlirWavePredAttrGetFromText(MlirContext ctx, MlirStringRef text) {
   MLIRContext *context = unwrap(ctx);
+  if (!text.data && text.length != 0) {
+    emitError(UnknownLoc::get(context))
+        << "wave.pred text has nonzero length with a null data pointer";
+    return MlirAttribute{nullptr};
+  }
   auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
   if (!dialect)
     return MlirAttribute{nullptr};
@@ -375,6 +390,11 @@ MlirAttribute mlirWavePredAttrGetFromBytes(MlirContext ctx,
                                            const uint8_t *bytes,
                                            size_t length) {
   MLIRContext *context = unwrap(ctx);
+  if (!bytes && length != 0) {
+    emitError(UnknownLoc::get(context))
+        << "wave.pred bytes have nonzero length with a null data pointer";
+    return MlirAttribute{nullptr};
+  }
   auto *dialect = context->getOrLoadDialect<wave::WaveDialect>();
   if (!dialect)
     return MlirAttribute{nullptr};
@@ -398,15 +418,28 @@ MlirAttribute mlirWaveRedistributionAttrGet(int64_t blocks, int64_t items,
                                             MlirAttribute sourceBlock,
                                             MlirAttribute sourceItem,
                                             MlirAttribute sourceSlot) {
-  wave::ExprAttr block = llvm::cast<wave::ExprAttr>(unwrap(sourceBlock));
-  wave::ExprAttr item = llvm::cast<wave::ExprAttr>(unwrap(sourceItem));
-  wave::ExprAttr slot = llvm::cast<wave::ExprAttr>(unwrap(sourceSlot));
-  assert(block.getContext() == item.getContext() &&
-         item.getContext() == slot.getContext() &&
-         "redistribution expressions must share an MLIR context");
-  return wrap(wave::RedistributionAttr::get(item.getContext(), blocks, items,
-                                            block.getValue(), item.getValue(),
-                                            slot.getValue()));
+  Attribute rawBlock = unwrap(sourceBlock);
+  Attribute rawItem = unwrap(sourceItem);
+  Attribute rawSlot = unwrap(sourceSlot);
+  MLIRContext *context = rawBlock  ? rawBlock.getContext()
+                         : rawItem ? rawItem.getContext()
+                         : rawSlot ? rawSlot.getContext()
+                                   : nullptr;
+  if (!context)
+    return MlirAttribute{nullptr};
+  auto block = dyn_cast_if_present<wave::ExprAttr>(rawBlock);
+  auto item = dyn_cast_if_present<wave::ExprAttr>(rawItem);
+  auto slot = dyn_cast_if_present<wave::ExprAttr>(rawSlot);
+  if (!block || !item || !slot) {
+    emitError(UnknownLoc::get(context))
+        << "wave.redistribution requires three wave.expr attributes";
+    return MlirAttribute{nullptr};
+  }
+  auto emit = [&]() { return emitError(UnknownLoc::get(context)); };
+  wave::RedistributionAttr attr = wave::RedistributionAttr::getChecked(
+      emit, context, blocks, items, block.getValue(), item.getValue(),
+      slot.getValue());
+  return attr ? wrap(attr) : MlirAttribute{nullptr};
 }
 
 int64_t mlirWaveRedistributionAttrGetBlocks(MlirAttribute attr) {
@@ -447,19 +480,24 @@ MlirAttribute mlirWaveMemoryMappingAttrGet(MlirContext ctx,
                                            MlirAttribute base,
                                            MlirAttribute targetBlock) {
   MLIRContext *context = unwrap(ctx);
-  wave::ExprAttr bitOffsetAttr = llvm::cast<wave::ExprAttr>(unwrap(bitOffset));
-  wave::ExprAttr baseAttr;
-  wave::ExprAttr targetBlockAttr;
-  if (base.ptr)
-    baseAttr = llvm::cast<wave::ExprAttr>(unwrap(base));
-  if (targetBlock.ptr)
-    targetBlockAttr = llvm::cast<wave::ExprAttr>(unwrap(targetBlock));
-  assert(bitOffsetAttr.getContext() == context &&
-         (!baseAttr || baseAttr.getContext() == context) &&
-         (!targetBlockAttr || targetBlockAttr.getContext() == context) &&
-         "memory mapping expressions must share an MLIR context");
-  return wrap(wave::MemoryMappingAttr::get(context, baseAttr, targetBlockAttr,
-                                           bitOffsetAttr));
+  if (!context)
+    return MlirAttribute{nullptr};
+  auto bitOffsetAttr = dyn_cast_if_present<wave::ExprAttr>(unwrap(bitOffset));
+  auto baseAttr = base.ptr ? dyn_cast_if_present<wave::ExprAttr>(unwrap(base))
+                           : wave::ExprAttr{};
+  auto targetBlockAttr =
+      targetBlock.ptr ? dyn_cast_if_present<wave::ExprAttr>(unwrap(targetBlock))
+                      : wave::ExprAttr{};
+  if (!bitOffsetAttr || (base.ptr && !baseAttr) ||
+      (targetBlock.ptr && !targetBlockAttr)) {
+    emitError(UnknownLoc::get(context))
+        << "wave.memory_mapping requires wave.expr attributes";
+    return MlirAttribute{nullptr};
+  }
+  auto emit = [&]() { return emitError(UnknownLoc::get(context)); };
+  wave::MemoryMappingAttr attr = wave::MemoryMappingAttr::getChecked(
+      emit, context, baseAttr, targetBlockAttr, bitOffsetAttr);
+  return attr ? wrap(attr) : MlirAttribute{nullptr};
 }
 
 MlirAttribute mlirWaveMemoryMappingAttrGetBase(MlirAttribute attr) {

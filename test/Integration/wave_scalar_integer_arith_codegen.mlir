@@ -112,6 +112,28 @@ func.func @simd_i32_const_signed_rem3_codegen(
   return
 }
 
+// ASM-LABEL: scalar_i64_signed_i32_range_rem_codegen:
+// ASM-NOT: s_lshr_b64
+// ASM: s_mul_hi_u32
+// ASM: global_store_b32
+func.func @scalar_i64_signed_i32_range_rem_codegen(
+    %out: !wave.ptr<#wave.global, i32>, %x: i64, %d: i64)
+    attributes {wave.kernel} {
+  %bx = wave.assume %x as "x"
+      [#wave.pred<"2147483648 + x >= 0">,
+       #wave.pred<"-2147483647 + x <= 0">] : i64
+  %bd = wave.assume %d as "d"
+      [#wave.pred<"2147483648 + d >= 0">,
+       #wave.pred<"-2147483647 + d <= 0">] : i64
+  %rem = wave.binary remsi %bx, %bd : i64, i64 -> i64
+  %narrow = wave.cast intconvert %rem : i64 -> i32
+  %v = wave.splat %narrow : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %v -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: scalar_i64_div_rem_codegen:
 // ASM: s_lshr_b64
 // ASM: s_and_b64

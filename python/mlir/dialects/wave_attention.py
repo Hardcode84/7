@@ -1311,7 +1311,11 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:
     k_arg = _wrap_in_buffer(bld, k_arg, dsl.f16(), cfg.kv_elements, 2)
     v_arg = _wrap_in_buffer(bld, v_arg, dsl.f16(), cfg.kv_elements, 2)
     out_arg = _wrap_in_buffer(bld, out_arg, dsl.f32(), cfg.out_elements, 4)
-    lane = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
+    lane = bld.workitem_id(
+        axis=0,
+        width=cfg.mma.wave_size,
+    )
+    lane = bld.assume_range(lane, 0, cfg.threads_per_workgroup - 1)
     types = _kernel_types(cfg)
     if cfg.seq_len == cfg.block_n:
         _emit_single_tile_mma_kernel(

@@ -257,11 +257,13 @@ func.func @uniform_i64_signed_div_dynamic_pow2(%x: i64, %d: i64) attributes {wav
   return
 }
 
-// SELECT-LABEL: func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr
+// An index expression backed only by i32 values retains their signed range, so
+// the dynamic power-of-two division is exactly representable in one dword.
+// SELECT-LABEL: func.func @uniform_index_signed_div_dynamic_pow2_i32_index_expr
 // SELECT-NOT: waveamdmachine.v_mov_b32_tuple
-// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b64
-// SELECT: waveamdmachine.s_lshr_b64 {{.*}}, %[[SHIFT]]
-func.func @uniform_index_signed_div_dynamic_pow2_wide_index_expr(%x: i32, %d: i32) attributes {wave.kernel} {
+// SELECT: %[[SHIFT:.*]] = waveamdmachine.s_ff1_i32_b32
+// SELECT: waveamdmachine.s_lshr_b32 {{.*}}, %[[SHIFT]]
+func.func @uniform_index_signed_div_dynamic_pow2_i32_index_expr(%x: i32, %d: i32) attributes {wave.kernel} {
   %num = wave.index_expr <"x"> ["x"](%x) : (i32) -> index
   %nonneg = wave.assume %num as "x" [#wave.pred<"x >= 0">] : index
   %divisor = wave.index_expr <"d"> ["d"](%d) : (i32) -> index

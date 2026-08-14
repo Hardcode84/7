@@ -1120,7 +1120,7 @@ def compute_wmma_f16_matmul_reference_buffer(
 class _TileCoords:
     """Per-wave coordinates derived from `workitem_id` / `workgroup_id`."""
 
-    wi: dsl.Value  # raw workitem_id; wave_id = wi // 32 lives in index_expr
+    wi: dsl.Value  # bounded workitem; wave_id = wi // 32 lives in index_expr
     wg_m: dsl.Value
     wg_n: dsl.Value
     a_base: dsl.Value
@@ -1292,7 +1292,11 @@ def _emit_tile_coords(
     a_arg, b_arg, c_arg = inputs.a, inputs.b, inputs.c
     a_scale_arg, b_scale_arg = inputs.a_scale, inputs.b_scale
 
-    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
+    wi_val = bld.workitem_id(
+        axis=0,
+        width=cfg.mma.wave_size,
+    )
+    wi_val = bld.assume_range(wi_val, 0, cfg.threads_per_workgroup - 1)
     if wg_m_raw is None:
         assert wg_n_raw is None
         wg_m_val, wg_n_val = _emit_cta_coords(bld, cfg)
@@ -2828,6 +2832,7 @@ def _load_ptrs_for_step(
 @dataclass(frozen=True)
 class _Mxfp4ScaleLayout:
     bindings: dict[dsl.Expr, dsl.Value]
+    execution_item: dsl.Value
     wg_m: dsl.Expr
     wg_n: dsl.Expr
     m_wave: dsl.Expr
@@ -2913,6 +2918,7 @@ def _mxfp4_scale_layout(
     scale_k = step_expr * (cfg.mma.k_tile // 32) + lane_scale_group
     return _Mxfp4ScaleLayout(
         bindings=bindings,
+        execution_item=coords.wi,
         wg_m=wg_m,
         wg_n=wg_n,
         m_wave=m_wave,
@@ -3829,7 +3835,7 @@ def _read_mxfp4_scale_tile(
         lds,
         load_type,
         bit_offset=byte_offset * 8,
-        bindings=layout.bindings,
+        bindings={**layout.bindings, item: layout.execution_item},
         after=ready_token,
     )
     return value, token
@@ -6000,6 +6006,7 @@ def _store_final_tiles(
         c_ptrs,
         0,
         cfg.wave_n_tiles,
+        coords.wi,
         after=store_after,
     )
 
@@ -6062,7 +6069,9 @@ def _store_final_mxfp4_tiles_split(
             bld, cfg, coords, left_accs, c_ptrs, 0, n_mid, after=scale_read_done
         )
     else:
-        _store_acc_tiles(bld, cfg, left_accs, c_ptrs, 0, n_mid, after=scale_token)
+        _store_acc_tiles(
+            bld, cfg, left_accs, c_ptrs, 0, n_mid, coords.wi, after=scale_token
+        )
 
     right_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
         bld,
@@ -6093,6 +6102,7 @@ def _store_final_mxfp4_tiles_split(
             c_ptrs,
             n_mid,
             cfg.wave_n_tiles,
+            coords.wi,
             after=scale_token,
         )
 
@@ -6104,16 +6114,31 @@ def _store_acc_tiles(
     c_ptrs: tuple[dsl.Value, ...],
     n_begin: int,
     n_end: int,
+    execution_item: dsl.Value,
     *,
     after: dsl.Value | None = None,
 ) -> dsl.Value:
     if cfg.coalesced_mfma_output:
         return _store_acc_tiles_mfma_coalesced(
-            bld, cfg, accs, c_ptrs[0], n_begin, n_end, after=after
+            bld,
+            cfg,
+            accs,
+            c_ptrs[0],
+            n_begin,
+            n_end,
+            execution_item,
+            after=after,
         )
     if cfg.output_layout != "tile-packed":
         return _store_acc_tiles_dense(
-            bld, cfg, accs, c_ptrs, n_begin, n_end, after=after
+            bld,
+            cfg,
+            accs,
+            c_ptrs,
+            n_begin,
+            n_end,
+            execution_item,
+            after=after,
         )
     cache = _output_store_cache(cfg)
     tokens: list[dsl.Value] = []
@@ -6127,6 +6152,7 @@ def _store_acc_tiles(
                         cfg,
                         accs[acc_idx],
                         c_ptrs[acc_idx],
+                        execution_item,
                         after=after,
                         cache=cache,
                     )
@@ -6147,6 +6173,7 @@ def _store_acc_tiles_dense(
     c_ptrs: tuple[dsl.Value, ...],
     n_begin: int,
     n_end: int,
+    execution_item: dsl.Value,
     *,
     after: dsl.Value | None = None,
 ) -> dsl.Value:
@@ -6157,7 +6184,7 @@ def _store_acc_tiles_dense(
     f32_simd = dsl.simd_type(dsl.f32(), width=cfg.mma.wave_size)
     f16_simd = dsl.simd_type(dsl.f16(), width=cfg.mma.wave_size)
     wi = dsl.sym("__wave_dsl_dense_store_wi")
-    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
+    wi_val = execution_item
     lane = dsl.mod(wi, cfg.mma.wave_size)
     lane_col = dsl.mod(lane, 16)
 
@@ -6301,6 +6328,7 @@ def _store_acc_tiles_mfma_coalesced(
     c_ptr: dsl.Value,
     n_begin: int,
     n_end: int,
+    execution_item: dsl.Value,
     *,
     after: dsl.Value | None = None,
 ) -> dsl.Value:
@@ -6317,7 +6345,7 @@ def _store_acc_tiles_mfma_coalesced(
         dsl.vector_type(cfg.wave_m_tiles, dsl.f16()), width=cfg.mma.wave_size
     )
     wi_sym = dsl.sym("__wave_dsl_coalesced_wi")
-    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
+    wi_val = execution_item
     lane = dsl.mod(wi_sym, cfg.mma.wave_size)
     lane_m = dsl.mod(lane, 16) * cfg.wave_m_tiles
     lane_n = dsl.floor(lane / 16) * (cfg.mma.acc_registers * cfg.wave_n_tiles)
@@ -6452,6 +6480,7 @@ def _fragment_store_f16(
     cfg: _MatmulConfig,
     fragment: dsl.Value,
     ptr: dsl.Value,
+    execution_item: dsl.Value,
     *,
     after: dsl.Value | None = None,
     cache: Attribute | None = None,
@@ -6459,7 +6488,7 @@ def _fragment_store_f16(
     if cfg.mma.acc_registers % 2 != 0:
         raise ValueError("f16 output needs an even accumulator register count")
     wi_sym = dsl.sym("__wave_dsl_frag_wi")
-    wi_val = bld.workitem_id(axis=0, width=cfg.mma.wave_size)
+    wi_val = execution_item
     lane_off = bld.index_expr(
         dsl.mod(wi_sym, cfg.mma.wave_size) * cfg.mma.acc_registers,
         {wi_sym: wi_val},
@@ -8040,11 +8069,12 @@ def _emit_dma_subpanel_kernel(
     cfg: _MatmulConfig,
     types: _KernelTypes,
     staging: _LdsStaging,
+    coords: _TileCoords,
     ptrs: _TilePtrs,
     virtual_k_stride: dsl.Value,
 ) -> None:
     final_accs = _compute_dma_subpanel_tile(bld, cfg, types, staging, virtual_k_stride)
-    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles)
+    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles, coords.wi)
 
 
 def _flatten_dma_spatial_tokens(tokens: _DmaSpatialTokens) -> tuple[dsl.Value, ...]:
@@ -8774,6 +8804,7 @@ def _emit_dma_spatial_kernel(
             _dma_spatial_c_ptrs(bld, cfg, coords),
             0,
             cfg.wave_n_tiles,
+            coords.wi,
         )
         return
 
@@ -8832,6 +8863,7 @@ def _emit_dma_spatial_kernel(
         _dma_spatial_c_ptrs(bld, cfg, coords),
         0,
         cfg.wave_n_tiles,
+        coords.wi,
     )
 
 
@@ -10790,7 +10822,7 @@ def _emit_aiter_mxfp4_stream_kernel(
         bld, cfg, types, staging, coords, ptrs, virtual_k_stride, init_state
     )
     final_accs = _finish_aiter_mxfp4_stream(bld, cfg, types, staging, coords, state)
-    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles)
+    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles, coords.wi)
 
 
 def _emit_dedicated_kernel(
@@ -10811,7 +10843,9 @@ def _emit_dedicated_kernel(
         _emit_dma_spatial_kernel(bld, cfg, types, staging, coords, virtual_k_stride)
         return True
     if _uses_dma_subpanel_pipeline(cfg):
-        _emit_dma_subpanel_kernel(bld, cfg, types, staging, ptrs, virtual_k_stride)
+        _emit_dma_subpanel_kernel(
+            bld, cfg, types, staging, coords, ptrs, virtual_k_stride
+        )
         return True
     return False
 

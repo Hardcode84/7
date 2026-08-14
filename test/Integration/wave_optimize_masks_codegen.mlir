@@ -27,6 +27,9 @@ func.func @equivalent_mask_codegen(
   %c7 = wave.constant 7 : i32 -> !wave.simd<i32, 64>
   %zero = wave.constant 0 : i32 -> !wave.simd<i32, 64>
   %wi = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %bounded_wi = wave.assume %wi as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 255">]
+      : !wave.simd<i32, 64>
   %i1 = wave.binary addi %base_splat, %c1
       : !wave.simd<i32, 64>, !wave.simd<i32, 64>
       -> !wave.simd<i32, 64>
@@ -44,7 +47,7 @@ func.func @equivalent_mask_codegen(
   %sum = wave.binary addi %v1, %v7
       : !wave.simd<i32, 64>, !wave.simd<i32, 64>
       -> !wave.simd<i32, 64>
-  %ptr = wave.ptr_add %buffer, %wi
+  %ptr = wave.ptr_add %buffer, %bounded_wi
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %token = wave.store %sum -> %ptr

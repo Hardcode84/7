@@ -30,6 +30,10 @@ func.func @paired_agpr_store_codegen(
                 wave.waves_per_workgroup = 1 : i64,
                 waveamdmachine.vgpr_count_max = 16 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
   %four = wave.constant 4 : i32 -> !wave.simd<i32, 64>
   %input_offset = wave.binary muli %lane, %four
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
@@ -66,9 +70,9 @@ func.func @paired_agpr_store_codegen(
       : !wave.ptr<#wave.shared, i32>
   %written = wave.scatter %regs to %scratch mapping
       <bit_offset = <"32 * (item + 64 * slot)">>
-      bindings []() packet_bindings []() after %input_ready
+      bindings ["item"](%bounded_item) after %input_ready
       : (!wave.simd<vector<16xi32>, 64>, !wave.ptr<#wave.shared, i32>,
-         !wave.mem.token)
+         !wave.simd<i32, 64>, !wave.mem.token)
       -> !wave.mem.token
   %visible = wave.barrier %written
       : (!wave.mem.token) -> !wave.mem.token
@@ -78,8 +82,8 @@ func.func @paired_agpr_store_codegen(
 
   %loaded0, %read0 = wave.gather %scratch mapping
       <bit_offset = <"32 * (item + 64 * slot)">>
-      bindings []() packet_bindings []() after %visible
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token)
+      bindings ["item"](%bounded_item) after %visible
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>, !wave.mem.token)
       -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
   %out_ptr0 = wave.ptr_add %out, %out_lane_offset
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -94,8 +98,8 @@ func.func @paired_agpr_store_codegen(
       : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
   %loaded1, %read1 = wave.gather %scratch1 mapping
       <bit_offset = <"32 * (item + 64 * slot)">>
-      bindings []() packet_bindings []() after %stored0
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token)
+      bindings ["item"](%bounded_item) after %stored0
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>, !wave.mem.token)
       -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
   %c4 = arith.constant 4 : i32
   %out1 = wave.ptr_add %out, %c4
@@ -113,8 +117,8 @@ func.func @paired_agpr_store_codegen(
       : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
   %loaded2, %read2 = wave.gather %scratch2 mapping
       <bit_offset = <"32 * (item + 64 * slot)">>
-      bindings []() packet_bindings []() after %stored1
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token)
+      bindings ["item"](%bounded_item) after %stored1
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>, !wave.mem.token)
       -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
   %c8 = arith.constant 8 : i32
   %out2 = wave.ptr_add %out, %c8
@@ -132,8 +136,8 @@ func.func @paired_agpr_store_codegen(
       : !wave.ptr<#wave.shared, i32>, i32 -> !wave.ptr<#wave.shared, i32>
   %loaded3, %read3 = wave.gather %scratch3 mapping
       <bit_offset = <"32 * (item + 64 * slot)">>
-      bindings []() packet_bindings []() after %stored2
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token)
+      bindings ["item"](%bounded_item) after %stored2
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>, !wave.mem.token)
       -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
   %c12 = arith.constant 12 : i32
   %out3 = wave.ptr_add %out, %c12

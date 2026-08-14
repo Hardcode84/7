@@ -8,7 +8,7 @@
 
 // COVERED-LABEL: covered:
 // COVERED: .amdhsa_group_segment_fixed_size 65536
-// UNRELATED: error: 'wave.redistribute' op remaining target LDS capacity 0 bytes cannot hold one 64-byte scratch vector group
+// UNRELATED: error: 'wave.redistribute' op remaining target LDS capacity 0 bytes cannot hold one 64-element scratch plane
 // CONDITIONAL-LABEL: conditional:
 // CONDITIONAL: .amdhsa_group_segment_fixed_size 64
 

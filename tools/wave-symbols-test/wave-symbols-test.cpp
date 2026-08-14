@@ -52,9 +52,9 @@ const char *exprKindName(sym::ExprKind kind) {
 }
 
 const char *predKindName(sym::PredKind kind) {
-  static constexpr std::array<const char *, 9> names = {
-      "invalid", "cmp",   "and",   "or",          "not",
-      "true",    "false", "error", "parse-error",
+  static constexpr std::array<const char *, 10> names = {
+      "invalid",   "cmp",  "and",   "or",    "not",
+      "piecewise", "true", "false", "error", "parse-error",
   };
   size_t index = static_cast<size_t>(kind);
   return index < names.size() ? names[index] : "invalid";
@@ -134,8 +134,7 @@ sym::PredHandle mustParsePred(sym::Store &store, llvm::StringRef text) {
 
 sym::ExprHandle mustCompose(sym::Store &store, sym::ExprHandle lhs,
                             sym::ExprBinaryOp op, sym::ExprHandle rhs) {
-  FailureOr<sym::ExprHandle> handle =
-      sym::composeExprBinary(store, lhs, op, rhs);
+  auto handle = sym::composeExprBinary(store, lhs, op, rhs);
   if (failed(handle)) {
     llvm::errs() << "failed to compose binary expression\n";
     std::exit(1);
@@ -175,10 +174,17 @@ sym::ExprHandle mustBuildAnalysisExpr(FailureOr<sym::ExprHandle> handle) {
   return *handle;
 }
 
+sym::PredHandle mustBuildAnalysisPred(FailureOr<sym::PredHandle> handle) {
+  if (failed(handle)) {
+    llvm::errs() << "failed to build symbolic analysis predicate\n";
+    std::exit(1);
+  }
+  return *handle;
+}
+
 sym::ExprHandle mustSimplify(sym::Store &store, sym::ExprHandle value) {
   std::string diagnostic;
-  FailureOr<sym::ExprHandle> handle =
-      sym::simplifyExpr(store, value, &diagnostic);
+  auto handle = sym::simplifyExpr(store, value, &diagnostic);
   if (failed(handle)) {
     llvm::errs() << "failed to simplify: " << diagnostic << "\n";
     std::exit(1);
@@ -275,14 +281,13 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
 
   sym::ExprHandle ratio =
       mustCompose(store, threeX, sym::ExprBinaryOp::Div, five);
-  sym::ExprView floorView(sym::composeExprFloor(store, ratio));
+  sym::ExprHandle floorHandle = sym::composeExprFloor(store, ratio);
+  sym::ExprView floorView(floorHandle);
   llvm::outs() << "view-floor-arg-kind: "
                << exprKindName(sym::ExprView(floorView.getUnaryArg()).getKind())
                << "\n";
-
-  sym::ExprView truncView(mustParseExpr(store, "Trunc(x/5)"));
-  llvm::outs() << "view-trunc-kind: " << exprKindName(truncView.getKind())
-               << "\n";
+  sym::ExprHandle truncHandle = sym::composeExprTrunc(store, ratio);
+  sym::ExprView truncView(truncHandle);
   llvm::outs() << "view-trunc-arg-kind: "
                << exprKindName(sym::ExprView(truncView.getUnaryArg()).getKind())
                << "\n";
@@ -296,6 +301,9 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
   printLiteral("view-mod-rhs",
                sym::getIntegerLiteralValue(modView.getBinaryRhs()));
 
+  sym::ExprView xorView(mustParseExpr(store, "xor(1, x)"));
+  llvm::outs() << "view-xor-kind: " << exprKindName(xorView.getKind()) << "\n";
+  llvm::outs() << "view-xor-args: " << xorView.getAssocArgCount() << "\n";
   sym::ExprView andView(mustParseExpr(store, "x & y & z"));
   llvm::outs() << "view-and-kind: " << exprKindName(andView.getKind()) << "\n";
   llvm::outs() << "view-and-args: " << andView.getAssocArgCount() << "\n";
@@ -307,7 +315,8 @@ void printFacadeSmoke(sym::Store &store, sym::ExprHandle x,
       sym::composePredCmp(store, x, sym::PredCmpOp::Ge, mustBuildInt(store, 0));
   sym::PredHandle leMax = sym::composePredCmp(store, x, sym::PredCmpOp::Le,
                                               mustBuildInt(store, 31));
-  sym::PredView predView(sym::composePredAnd(store, geZero, leMax));
+  sym::PredHandle range = sym::composePredAnd(store, geZero, leMax);
+  sym::PredView predView(range);
   llvm::outs() << "view-pred-valid: " << boolName(predView.isValid()) << "\n";
   llvm::outs() << "view-pred-kind: " << predKindName(predView.getKind())
                << "\n";
@@ -328,7 +337,7 @@ struct AnalysisRenderResults {
 };
 
 static void printAnalysisProofs(sym::Analysis &analysis, sym::ExprHandle x,
-                                sym::ExprHandle xQuarter, sym::ExprHandle safe,
+                                sym::ExprHandle xQuarter,
                                 sym::ExprHandle shiftedMod,
                                 sym::ExprHandle baseMod,
                                 sym::PredHandle belowThirtyTwo) {
@@ -337,8 +346,6 @@ static void printAnalysisProofs(sym::Analysis &analysis, sym::ExprHandle x,
   llvm::outs() << "analysis-equivalent-mod: "
                << checkResultName(analysis.equivalent(shiftedMod, baseMod))
                << "\n";
-  llvm::outs() << "analysis-defined: "
-               << checkResultName(analysis.defined(safe)) << "\n";
   llvm::outs() << "analysis-integer-valued: "
                << checkResultName(analysis.integerValued(xQuarter)) << "\n";
   llvm::outs() << "analysis-divisible: "
@@ -403,18 +410,17 @@ static void collectAnalysisAlgebra(sym::Analysis &analysis, sym::ExprHandle x,
 
 static sym::PredHandle buildXorCancellationQuery(sym::Analysis &analysis,
                                                  sym::ExprHandle x) {
-  sym::ExprHandle one = analysis.composeInteger(1);
+  sym::ExprHandle one = mustBuildAnalysisExpr(analysis.composeInteger(1));
   sym::ExprHandle inner =
       mustBuildAnalysisExpr(analysis.compose(one, sym::ExprBinaryOp::Xor, x));
   sym::ExprHandle outer = mustBuildAnalysisExpr(
       analysis.compose(one, sym::ExprBinaryOp::Xor, inner));
-  return analysis.compare(outer, sym::PredCmpOp::Eq, x);
+  return mustBuildAnalysisPred(analysis.compare(outer, sym::PredCmpOp::Eq, x));
 }
 
 static void runAnalysisCore(sym::Store &store, sym::ExprHandle x,
                             sym::PredHandle facts) {
   sym::ExprHandle xQuarter = mustParseExpr(store, "x/4");
-  sym::ExprHandle safe = mustParseExpr(store, "floor(1/(x + 1))");
   sym::ExprHandle partial = mustParseExpr(store, "floor(1/x)");
   sym::ExprHandle square = mustCompose(store, x, sym::ExprBinaryOp::Mul, x);
   sym::ExprHandle shiftedMod = mustParseExpr(store, "Mod(x + 4, 4)");
@@ -422,15 +428,18 @@ static void runAnalysisCore(sym::Store &store, sym::ExprHandle x,
   sym::ExprHandle affine = mustParseExpr(store, "3*x + 5");
   sym::ExprHandle unitSlope = mustParseExpr(store, "x + 5");
   std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store, {facts});
-  sym::ExprHandle four = analysis->composeInteger(4);
+  sym::ExprHandle four = mustBuildAnalysisExpr(analysis->composeInteger(4));
   sym::ExprHandle xPlusFour =
       mustBuildAnalysisExpr(analysis->compose(x, sym::ExprBinaryOp::Add, four));
-  sym::ExprHandle thirtyTwo = analysis->composeInteger(32);
-  sym::ExprHandle zero = analysis->composeInteger(0);
-  sym::PredHandle belowThirtyTwo =
-      analysis->compare(x, sym::PredCmpOp::Lt, thirtyTwo);
-  sym::PredHandle nonNegative = analysis->compare(x, sym::PredCmpOp::Ge, zero);
-  sym::PredHandle bounded = analysis->composeAnd(nonNegative, belowThirtyTwo);
+  sym::ExprHandle thirtyTwo =
+      mustBuildAnalysisExpr(analysis->composeInteger(32));
+  sym::ExprHandle zero = mustBuildAnalysisExpr(analysis->composeInteger(0));
+  sym::PredHandle belowThirtyTwo = mustBuildAnalysisPred(
+      analysis->compare(x, sym::PredCmpOp::Lt, thirtyTwo));
+  sym::PredHandle nonNegative =
+      mustBuildAnalysisPred(analysis->compare(x, sym::PredCmpOp::Ge, zero));
+  sym::PredHandle bounded =
+      mustBuildAnalysisPred(analysis->composeAnd(nonNegative, belowThirtyTwo));
   sym::PredHandle xorCancellation = buildXorCancellationQuery(*analysis, x);
 
   AnalysisRenderResults results;
@@ -445,7 +454,11 @@ static void runAnalysisCore(sym::Store &store, sym::ExprHandle x,
   llvm::outs() << "analysis-undefined-self-equivalent: "
                << checkResultName(analysis->equivalent(partial, partial))
                << "\n";
-  printAnalysisProofs(*analysis, x, xQuarter, safe, shiftedMod, baseMod,
+  sym::PredHandle partialSelfEquality = mustBuildAnalysisPred(
+      analysis->compare(partial, sym::PredCmpOp::Eq, partial));
+  llvm::outs() << "analysis-undefined-self-equality-check: "
+               << checkResultName(analysis->check(partialSelfEquality)) << "\n";
+  printAnalysisProofs(*analysis, x, xQuarter, shiftedMod, baseMod,
                       belowThirtyTwo);
   llvm::outs() << "analysis-xor-cancellation: "
                << checkResultName(analysis->check(xorCancellation)) << "\n";
@@ -480,8 +493,8 @@ static void runAnalysisRangeMutation(sym::Store &store, sym::ExprHandle x) {
   sym::InferredRange explicitRange;
   explicitRange.lower = sym::RationalEndpoint{2, 1};
   explicitRange.upper = sym::RationalEndpoint{4, 1};
-  sym::ExprHandle two = analysis->composeInteger(2);
-  sym::ExprHandle one = analysis->composeInteger(1);
+  sym::ExprHandle two = mustBuildAnalysisExpr(analysis->composeInteger(2));
+  sym::ExprHandle one = mustBuildAnalysisExpr(analysis->composeInteger(1));
   sym::ExprHandle scaled =
       mustBuildAnalysisExpr(analysis->compose(two, sym::ExprBinaryOp::Mul, x));
   sym::ExprHandle derived = mustBuildAnalysisExpr(
@@ -511,7 +524,7 @@ static void runAnalysisFactSubstitution(sym::Store &store, sym::ExprHandle x,
                << checkResultName(analysis->congruent(y, 4, 0)) << "\n";
 }
 
-static void runAnalysisBatchMutation(sym::Store &store) {
+static void runAnalysisBatchMutation(sym::Store &store, sym::ExprHandle x) {
   sym::PredHandle nonnegative = mustParsePred(store, "x >= 0");
   sym::PredHandle nonpositive = mustParsePred(store, "x <= 0");
   sym::PredHandle zero = mustParsePred(store, "x == 0");
@@ -525,13 +538,11 @@ static void runAnalysisBatchMutation(sym::Store &store) {
 
 struct QueryCacheState {
   std::optional<int64_t> simplified;
-  sym::CheckResult defined = sym::CheckResult::Unknown;
   sym::ExactDivideStatus exactDivide = sym::ExactDivideStatus::Error;
 };
 
 static QueryCacheState queryCacheState(sym::Analysis &analysis,
                                        sym::ExprHandle mod,
-                                       sym::ExprHandle safe,
                                        sym::ExprHandle divisible) {
   FailureOr<sym::ExprHandle> simplified = analysis.simplify(mod);
   if (failed(simplified)) {
@@ -540,35 +551,33 @@ static QueryCacheState queryCacheState(sym::Analysis &analysis,
   }
   QueryCacheState state;
   state.simplified = sym::getIntegerLiteralValue(*simplified);
-  state.defined = analysis.defined(safe);
   state.exactDivide = analysis.tryExactDivide(divisible, 3).status;
   return state;
 }
 
 static bool isUnconstrainedCacheState(const QueryCacheState &state) {
-  return !state.simplified && state.defined != sym::CheckResult::True &&
+  return !state.simplified &&
          state.exactDivide != sym::ExactDivideStatus::Proven;
 }
 
 static bool isSixCacheState(const QueryCacheState &state) {
-  return state.simplified == 2 && state.defined == sym::CheckResult::True &&
+  return state.simplified == 2 &&
          state.exactDivide == sym::ExactDivideStatus::Proven;
 }
 
 static void runAnalysisQueryCacheInvalidation(sym::Store &store,
                                               sym::ExprHandle x) {
   sym::ExprHandle mod = mustParseExpr(store, "Mod(x, 4)");
-  sym::ExprHandle safe = mustParseExpr(store, "floor(1/(x + 1))");
   sym::PredHandle six = mustParsePred(store, "x == 6");
   std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
 
-  QueryCacheState initial = queryCacheState(*analysis, mod, safe, x);
-  (void)queryCacheState(*analysis, mod, safe, x);
+  QueryCacheState initial = queryCacheState(*analysis, mod, x);
+  (void)queryCacheState(*analysis, mod, x);
   if (failed(analysis->assume(six))) {
     llvm::errs() << "failed cached-query assumption\n";
     std::exit(1);
   }
-  QueryCacheState assumed = queryCacheState(*analysis, mod, safe, x);
+  QueryCacheState assumed = queryCacheState(*analysis, mod, x);
   llvm::outs() << "analysis-query-cache-assume-invalidated: "
                << boolName(isUnconstrainedCacheState(initial) &&
                            isSixCacheState(assumed))
@@ -579,7 +588,7 @@ static void runAnalysisQueryCacheInvalidation(sym::Store &store,
     llvm::errs() << "failed cached-query fact substitution\n";
     std::exit(1);
   }
-  QueryCacheState substituted = queryCacheState(*analysis, mod, safe, x);
+  QueryCacheState substituted = queryCacheState(*analysis, mod, x);
   llvm::outs() << "analysis-query-cache-substitute-invalidated: "
                << boolName(isUnconstrainedCacheState(substituted)) << "\n";
 
@@ -590,35 +599,34 @@ static void runAnalysisQueryCacheInvalidation(sym::Store &store,
     llvm::errs() << "failed cached-query range assumption\n";
     std::exit(1);
   }
-  QueryCacheState ranged = queryCacheState(*analysis, mod, safe, x);
+  QueryCacheState ranged = queryCacheState(*analysis, mod, x);
   llvm::outs() << "analysis-query-cache-range-invalidated: "
                << boolName(isSixCacheState(ranged)) << "\n";
 
   analysis = mustCreateAnalysis(store);
-  (void)queryCacheState(*analysis, mod, safe, x);
+  (void)queryCacheState(*analysis, mod, x);
   std::array<sym::PredHandle, 2> bounds{mustParsePred(store, "x >= 6"),
                                         mustParsePred(store, "x <= 6")};
   if (failed(analysis->assume(bounds))) {
     llvm::errs() << "failed cached-query batch assumption\n";
     std::exit(1);
   }
-  QueryCacheState batchAssumed = queryCacheState(*analysis, mod, safe, x);
+  QueryCacheState batchAssumed = queryCacheState(*analysis, mod, x);
   llvm::outs() << "analysis-query-cache-batch-assume-invalidated: "
                << boolName(isSixCacheState(batchAssumed)) << "\n";
 
   sym::ExprHandle yMod = mustParseExpr(store, "Mod(cache_y, 4)");
-  sym::ExprHandle ySafe = mustParseExpr(store, "floor(1/(cache_y + 1))");
   analysis = mustCreateAnalysis(store);
   if (failed(analysis->assumeRange(x, range))) {
     llvm::errs() << "failed cached-query derived range base\n";
     std::exit(1);
   }
-  (void)queryCacheState(*analysis, yMod, ySafe, y);
+  (void)queryCacheState(*analysis, yMod, y);
   if (failed(analysis->deriveAffine(x, 1, 0, y))) {
     llvm::errs() << "failed cached-query affine derivation\n";
     std::exit(1);
   }
-  QueryCacheState derived = queryCacheState(*analysis, yMod, ySafe, y);
+  QueryCacheState derived = queryCacheState(*analysis, yMod, y);
   llvm::outs() << "analysis-query-cache-derive-invalidated: "
                << boolName(isSixCacheState(derived)) << "\n";
 }
@@ -688,7 +696,7 @@ static void runAnalysisRejection(sym::Store &store, sym::ExprHandle x,
   llvm::outs() << "analysis-or-mutator-rejected: "
                << boolName(failed(analysis->assume(invalidFacts))) << "\n";
   llvm::outs() << "analysis-poisoned-query: "
-               << checkResultName(analysis->defined(x)) << "\n";
+               << checkResultName(analysis->check(validFacts)) << "\n";
   sym::ExprHandle expanded = analysis->expand(x);
   llvm::outs() << "analysis-poisoned-expand: " << boolName(expanded == x)
                << "\n";
@@ -756,15 +764,17 @@ static void runMaterializationCostQueries(sym::Store &store) {
 }
 
 void runAnalysisQueries(sym::Store &store, sym::ExprHandle x) {
-  sym::PredHandle range = sym::rangeAssumption(store, "x", 0, 31);
+  sym::PredHandle range =
+      mustBuildAnalysisPred(sym::rangeAssumption(store, "x", 0, 31));
   sym::PredHandle multipleOfFour = mustParsePred(store, "Mod(x, 4) == 0");
-  sym::PredHandle facts = sym::composePredAnd(store, range, multipleOfFour);
-  sym::PredHandle invalidFacts = sym::composePredOr(
-      store, mustParsePred(store, "x < 0"), mustParsePred(store, "x > 31"));
+  sym::PredHandle facts =
+      mustBuildAnalysisPred(sym::composePredAnd(store, range, multipleOfFour));
+  sym::PredHandle invalidFacts = mustBuildAnalysisPred(sym::composePredOr(
+      store, mustParsePred(store, "x < 0"), mustParsePred(store, "x > 31")));
   runAnalysisCore(store, x, facts);
   runAnalysisRangeMutation(store, x);
   runAnalysisFactSubstitution(store, x, facts);
-  runAnalysisBatchMutation(store);
+  runAnalysisBatchMutation(store, x);
   runAnalysisQueryCacheInvalidation(store, x);
   runAnalysisBatchClosure(store);
   runOrderedGridEquivalence(store);
@@ -813,38 +823,6 @@ void runPow2Queries(sym::Store &store, sym::ExprHandle x) {
   assumptions.push_back(positive);
   llvm::outs() << "pow2-positive: "
                << pow2FactName(sym::getPow2Fact(store, x, assumptions)) << "\n";
-}
-
-void runDefinednessQueries(sym::Store &store) {
-  sym::PredHandle range = sym::rangeAssumption(store, "x", 0, 31);
-  llvm::SmallVector<sym::PredHandle, 1> assumptions{range};
-  sym::ExprHandle safe = mustParseExpr(store, "floor(1 / (x + 1))");
-  sym::ExprHandle literalDenominator = mustParseExpr(store, "floor(1/32*x)");
-  sym::ExprHandle partial = mustParseExpr(store, "floor(1 / (x - 1))");
-  sym::ExprHandle uncovered = mustParseExpr(store, "Piecewise((x, x < 16))");
-  sym::ExprHandle symbolicMod = mustParseExpr(store, "Mod(x, m)");
-  sym::PredHandle negativeDivisor = mustParsePred(store, "m < 0");
-  sym::PredHandle positiveDivisor = mustParsePred(store, "m > 0");
-  llvm::outs() << "defined-safe-div: "
-               << boolName(sym::provablyDefined(store, safe, assumptions))
-               << "\n";
-  llvm::outs() << "defined-literal-denominator: "
-               << boolName(sym::provablyDefined(store, literalDenominator, {}))
-               << "\n";
-  llvm::outs() << "defined-partial-div: "
-               << boolName(sym::provablyDefined(store, partial, assumptions))
-               << "\n";
-  llvm::outs() << "defined-uncovered-piecewise: "
-               << boolName(sym::provablyDefined(store, uncovered, assumptions))
-               << "\n";
-  llvm::outs() << "defined-mod-negative: "
-               << boolName(sym::provablyDefined(store, symbolicMod,
-                                                {negativeDivisor}))
-               << "\n";
-  llvm::outs() << "defined-mod-positive: "
-               << boolName(sym::provablyDefined(store, symbolicMod,
-                                                {positiveDivisor}))
-               << "\n";
 }
 
 static void runSentinelPropagation(sym::Store &store, sym::ExprHandle x) {
@@ -966,7 +944,6 @@ int main() {
 
   runRangeQueries(store, x, fourX);
   runPow2Queries(store, x);
-  runDefinednessQueries(store);
 
   return 0;
 }

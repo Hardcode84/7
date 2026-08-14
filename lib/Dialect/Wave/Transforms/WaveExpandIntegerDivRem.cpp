@@ -764,6 +764,9 @@ static bool isProvenSignedI32RangeWithLowerBound(DataFlowSolver &solver,
   if (std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value))
     if (isSignedI32RangeWithLowerBound(*range, lower))
       return true;
+  if (isProvenSignedLowerBound(solver, store, value, lower) &&
+      isProvenSignedUpperBound(solver, store, value, signedI32Max))
+    return true;
 
   FailureOr<DynamicDivisorQuery> query =
       DynamicDivisorQueryBuilder(store).build(value);
@@ -908,8 +911,7 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   return DivRemValues{quotient, remainder};
 }
 
-static Value createNonNegativeI32View(OpBuilder &builder, Location loc,
-                                      Value value) {
+static Value createI32View(OpBuilder &builder, Location loc, Value value) {
   Type i32 = i32Like(builder, value.getType());
   if (std::optional<APInt> constant =
           getConstantAPInt(value, elementBits(value.getType())))
@@ -919,10 +921,11 @@ static Value createNonNegativeI32View(OpBuilder &builder, Location loc,
       .getResult();
 }
 
-static DictionaryAttr createZeroExtendPolicy(OpBuilder &builder) {
+static DictionaryAttr createExtensionPolicy(OpBuilder &builder,
+                                            CastExtension extension) {
   MLIRContext *context = builder.getContext();
   return builder.getDictionaryAttr(builder.getNamedAttr(
-      "extension", CastExtensionPolicyAttr::get(context, CastExtension::Zero)));
+      "extension", CastExtensionPolicyAttr::get(context, extension)));
 }
 
 static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
@@ -931,30 +934,53 @@ static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
                                                       sym::Store &store) {
   if (!canNarrowDivRemTypeToI32(op.getResult().getType()))
     return std::nullopt;
-  if (!isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(), 0) ||
-      !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(), 1))
-    return std::nullopt;
 
   Location loc = op.getLoc();
   Type i32 = i32Like(rewriter, op.getResult().getType());
   BinaryKind kind = op.getKind();
-  Value lhs = createNonNegativeI32View(rewriter, loc, op.getLhs());
-  Value rhs = createNonNegativeI32View(rewriter, loc, op.getRhs());
+  Value lhs = createI32View(rewriter, loc, op.getLhs());
+  Value rhs = createI32View(rewriter, loc, op.getRhs());
 
   Value narrow;
-  if (std::optional<Value> pow2 =
-          tryCreateDynamicPow2Value(rewriter, loc, i32, kind, lhs, rhs,
-                                    op.getLhs(), op.getRhs(), solver, store)) {
-    narrow = *pow2;
+  CastExtension extension = CastExtension::Zero;
+  bool nonnegative =
+      isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(), 0) &&
+      isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(), 0);
+  if (nonnegative) {
+    if (std::optional<Value> pow2 = tryCreateDynamicPow2Value(
+            rewriter, loc, i32, kind, lhs, rhs, op.getLhs(), op.getRhs(),
+            solver, store)) {
+      narrow = *pow2;
+    } else {
+      DivRemValues result = createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
+      narrow = (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI)
+                   ? result.quotient
+                   : result.remainder;
+    }
   } else {
-    DivRemValues result = createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
-    narrow = (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI)
-                 ? result.quotient
-                 : result.remainder;
+    constexpr int64_t signedI32Min = -(int64_t{1} << 31);
+    if (!isSignedDivRem(kind) ||
+        !isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(),
+                                              signedI32Min) ||
+        !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(),
+                                              signedI32Min))
+      return std::nullopt;
+    DivRemValues result = createSignedDivRem(rewriter, loc, i32, lhs, rhs);
+    narrow = kind == BinaryKind::DivSI ? result.quotient : result.remainder;
+    extension = CastExtension::Sign;
   }
+  SmallVector<CastOp> narrowingUsers;
+  for (Operation *user : op.getResult().getUsers()) {
+    CastOp cast = dyn_cast<CastOp>(user);
+    if (cast && cast.getKind() == CastKind::IntConvert &&
+        elementBits(cast.getResult().getType()) == 32)
+      narrowingUsers.push_back(cast);
+  }
+  for (CastOp cast : narrowingUsers)
+    rewriter.replaceOp(cast, narrow);
   return CastOp::create(rewriter, loc, op.getResult().getType(),
                         CastKind::IntConvert, narrow,
-                        createZeroExtendPolicy(rewriter))
+                        createExtensionPolicy(rewriter, extension))
       .getResult();
 }
 

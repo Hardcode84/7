@@ -9,6 +9,8 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/Wave/Transforms/SymbolicValue.h"
 
+#include "WaveSymbolicTransformTiming.h"
+
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Analysis/DataFlowFramework.h"
@@ -2600,16 +2602,21 @@ struct WaveGenerateIndexExprsPass
     : public wave::impl::WaveGenerateIndexExprsBase<
           WaveGenerateIndexExprsPass> {
   void runOnOperation() override {
+    SymbolicTransformTiming timing("generate_index_exprs");
     Operation *root = getOperation();
     DataFlowSolver solver;
     dataflow::loadBaselineAnalyses(solver);
     solver.load<dataflow::IntegerRangeAnalysis>();
-    if (failed(solver.initializeAndRun(root))) {
-      root->emitError("IntegerRangeAnalysis failed for wave.index_expr "
-                      "generation pass");
-      return signalPassFailure();
+    {
+      TimingScope rangeTiming = timing.nest("index_expr_range_analysis");
+      if (failed(solver.initializeAndRun(root))) {
+        root->emitError("IntegerRangeAnalysis failed for wave.index_expr "
+                        "generation pass");
+        return signalPassFailure();
+      }
     }
 
+    TimingScope rewriteTiming = timing.nest("index_expr_rewrite");
     bool failed = false;
     RewritePatternSet patterns(&getContext());
     patterns.add<GenerateCmpIndexExprPattern>(&getContext(), failed);

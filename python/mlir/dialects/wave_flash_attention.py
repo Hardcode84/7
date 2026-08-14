@@ -1109,6 +1109,7 @@ def _setup_kernel(
     q_arg, k_arg, v_arg, output_arg = bld.args
     workgroup_m, head = _workgroup_coords(bld, cfg)
     workitem = bld.workitem_id(axis=0, width=_WAVE_SIZE)
+    workitem = bld.assume_range(workitem, 0, cfg.threads - 1)
     workitem_first = bld.read_first(workitem)
     q_buffer = _head_buffer(bld, q_arg, head, cfg)
     k_buffer = _head_buffer(bld, k_arg, head, cfg)

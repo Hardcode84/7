@@ -1,8 +1,9 @@
-# RUN: %PYTHON %s | FileCheck %s
+# RUN: env PYTHONWARNINGS=error %PYTHON %s | FileCheck %s
 
 import ixsimpl
-from mlir.dialects import arith
+from mlir.dialects import arith, gpu
 from mlir.dialects import wave_dsl as w
+from mlir.ir import ArrayAttr, Attribute, Context, Location, Module
 
 
 def run(f):
@@ -17,6 +18,46 @@ def assert_raises(error_type, message, callback):
         assert str(exc) == message
         return
     raise AssertionError(f"expected {error_type.__name__}: {message}")
+
+
+# CHECK-LABEL: TEST: test_ixs_check_uses_reusable_facts
+@run
+def test_ixs_check_uses_reusable_facts():
+    x = w.sym("ixs_check_proof_carrier_x")
+    bits = tuple(w.mod(w.floor(w.mod(x, 8) / (1 << bit)), 2) for bit in range(3))
+    packed = sum(
+        (digit * (1 << bit) for bit, digit in enumerate(bits)),
+        w.ixs_int(0),
+    )
+    facts = (x >= 0, x <= 15, w.ixs_eq(packed, 0))
+    normalized_carrier = (x < -(1 << 31)) | (x > -(1 << 31))
+    queries = (
+        w.ixs_eq(bits[-1], 0),
+        normalized_carrier,
+        w.ixs_eq(bits[-1], 1),
+        w.ixs_eq(x, 0),
+    )
+
+    proofs, normalized = w.ixs_check(queries, facts)
+
+    assert proofs == (True, True, False, None)
+    assert str(normalized[0]) == "1"
+    assert str(normalized[1]) == "1"
+
+
+# CHECK-LABEL: TEST: test_rocdl_target_registration
+@run
+def test_rocdl_target_registration():
+    with Context() as ctx, Location.unknown():
+        w.register_dialects(ctx)
+        module = Module.parse(r"""module attributes {gpu.container_module} {
+  gpu.binary @kernels [#gpu.object<#rocdl.target<chip = "gfx950", O = 3>, bin = "\7FELF">]
+}""")
+        binary = module.body.operations[0]
+        objects = ArrayAttr(binary.attributes["objects"])
+        print(bytes(gpu.ObjectAttr(objects[0]).object))
+
+    # CHECK: b'\x7fELF'
 
 
 # CHECK-LABEL: TEST: test_generic_wave_kernel
@@ -287,99 +328,184 @@ def test_cache_attrs():
         print(m.module)
 
 
+def _check_typed_type_bindings():
+    i32, f32 = w.i32(), w.f32()
+    global_addr = w.global_address_space()
+    simd = w.simd_type(i32)
+    assert w.SimdType.isinstance(simd)
+    casted = w.SimdType(simd)
+    assert casted.element_type == i32 and casted.width == 32
+
+    ptr = w.ptr_type(f32, global_addr)
+    assert w.PtrType.isinstance(ptr)
+    casted_ptr = w.PtrType(ptr)
+    assert casted_ptr.element_type == f32
+    assert casted_ptr.address_space == global_addr
+
+    opaque = w.opaque_ptr_type(global_addr)
+    assert w.PtrType.isinstance(opaque)
+    opaque_ptr = w.PtrType(opaque)
+    assert opaque_ptr.element_type is None
+    assert opaque_ptr.address_space == global_addr
+    print(opaque)
+
+    mask = w.mask_type(32)
+    assert w.MaskType.isinstance(mask)
+    assert w.MaskType(mask).width == 32
+    assert w.MemTokenType.isinstance(w.mem_token_type())
+    assert w.PtrType(w.buffer_ptr_type(f32)).address_space == w.buffer_address_space()
+
+    frag = w.fragment_type(2, f32, registers=8)
+    assert w.FragmentType.isinstance(frag)
+    casted_frag = w.FragmentType(frag)
+    assert casted_frag.role == 2
+    assert casted_frag.element_type == f32
+    assert casted_frag.rows == 16
+    assert casted_frag.columns == 16
+    assert casted_frag.wave_size == 32
+    assert casted_frag.registers == 8
+
+    idx = w.index_type()
+    lane_idx = w.simd_type(idx, 32)
+    assert str(idx) == "index"
+    assert w.SimdType.isinstance(lane_idx)
+    assert w.SimdType(lane_idx).element_type == idx
+
+
+def _check_typed_expr_bindings():
+    expr = w.ExprAttr.get("4*lid + K", context=w.Context.current)
+    assert w.ExprAttr.isinstance(expr)
+    raw_expr = 4 * w.sym("lid") + w.sym("K")
+    expr_from_node = w.ExprAttr.get_from_node_ptr(
+        raw_expr.node_ptr, context=w.Context.current
+    )
+    assert w.ExprAttr.isinstance(expr_from_node)
+    assert expr_from_node == expr
+    expr_from_bytes = w.ExprAttr.get_from_bytes(
+        w.sym_ctx.serialize(raw_expr), context=w.Context.current
+    )
+    assert w.ExprAttr.isinstance(expr_from_bytes)
+    assert expr_from_bytes == expr
+    assert_raises(
+        ValueError,
+        "failed to import wave.expr node",
+        lambda: w.ExprAttr.get_from_node_ptr(0, context=w.Context.current),
+    )
+    assert_raises(
+        ValueError,
+        "failed to import wave.pred node",
+        lambda: w.PredAttr.get_from_node_ptr(0, context=w.Context.current),
+    )
+    assert_raises(
+        ValueError,
+        "failed to import wave.pred node",
+        lambda: w.PredAttr.get_from_node_ptr(
+            raw_expr.node_ptr, context=w.Context.current
+        ),
+    )
+
+    source_context = ixsimpl.Context()
+    source_expr = 4 * source_context.sym("source") + 1
+    expr_from_foreign_node = w.ExprAttr.get_from_node_ptr(
+        source_expr.node_ptr, context=w.Context.current
+    )
+    source_bytes = source_context.serialize(source_expr)
+    del source_expr
+    del source_context
+    assert str(expr_from_foreign_node) == '#wave.expr<"1 + 4*source">'
+    expr_after_source_lifetime = w.ExprAttr.get_from_bytes(
+        source_bytes, context=w.Context.current
+    )
+    assert str(expr_after_source_lifetime) == '#wave.expr<"1 + 4*source">'
+
+    attrs = {
+        name: w.ExprAttr.get_from_node_ptr(
+            w.sym(name).node_ptr, context=w.Context.current
+        )
+        for name in ("block", "item", "slot")
+    }
+    relation = w.RedistributionAttr.get(
+        2, 64, attrs["block"], attrs["item"], attrs["slot"]
+    )
+    assert w.RedistributionAttr.isinstance(relation)
+    assert relation.blocks == 2
+    assert relation.items == 64
+    assert str(relation.source_block) == '#wave.expr<"block">'
+    assert str(relation.source_item) == '#wave.expr<"item">'
+    assert str(relation.source_slot) == '#wave.expr<"slot">'
+    return raw_expr
+
+
+def _check_typed_predicate_bindings(raw_expr):
+    pred = w.PredAttr.get("K >= 0", context=w.Context.current)
+    assert w.PredAttr.isinstance(pred)
+    raw_pred = w.sym_ctx.eq(w.mod(w.sym("K"), w.sym_ctx.int_(16)), w.sym_ctx.int_(0))
+    pred_from_node = w.PredAttr.get_from_node_ptr(
+        raw_pred.node_ptr, context=w.Context.current
+    )
+    assert w.PredAttr.isinstance(pred_from_node)
+    pred_from_bytes = w.PredAttr.get_from_bytes(
+        w.sym_ctx.serialize(raw_pred), context=w.Context.current
+    )
+    assert w.PredAttr.isinstance(pred_from_bytes)
+    raw_piecewise = ixsimpl.pw(
+        (w.sym("K") >= 0, w.sym("guard") >= 0),
+        (w.sym_ctx.false_(), w.sym_ctx.true_()),
+    )
+    pred_piecewise = w.PredAttr.get_from_node_ptr(
+        raw_piecewise.node_ptr, context=w.Context.current
+    )
+    assert w.PredAttr.isinstance(pred_piecewise)
+    expr_piecewise = w.ExprAttr.get_from_node_ptr(
+        raw_piecewise.node_ptr, context=w.Context.current
+    )
+    assert w.ExprAttr.isinstance(expr_piecewise)
+    pred_piecewise_bytes = w.PredAttr.get_from_bytes(
+        w.sym_ctx.serialize(raw_piecewise), context=w.Context.current
+    )
+    assert w.PredAttr.isinstance(pred_piecewise_bytes)
+    expr_piecewise_bytes = w.ExprAttr.get_from_bytes(
+        w.sym_ctx.serialize(raw_piecewise), context=w.Context.current
+    )
+    assert w.ExprAttr.isinstance(expr_piecewise_bytes)
+    assert w.ExprAttr.isinstance(Attribute.parse(str(expr_piecewise_bytes)))
+    raw_pred_expr = w.ExprAttr.get_from_bytes(
+        w.sym_ctx.serialize(raw_pred), context=w.Context.current
+    )
+    assert w.ExprAttr.isinstance(raw_pred_expr)
+    assert w.ExprAttr.isinstance(Attribute.parse(str(raw_pred_expr)))
+    assert_raises(
+        ValueError,
+        "failed to deserialize wave.pred bytes",
+        lambda: w.PredAttr.get_from_bytes(
+            w.sym_ctx.serialize(raw_expr), context=w.Context.current
+        ),
+    )
+    assert_raises(
+        ValueError,
+        "failed to deserialize wave.expr bytes",
+        lambda: w.ExprAttr.get_from_bytes(
+            w.sym_ctx.serialize(raw_expr)[:-1], context=w.Context.current
+        ),
+    )
+    assert_raises(
+        ValueError,
+        "failed to deserialize wave.pred bytes",
+        lambda: w.PredAttr.get_from_bytes(
+            b"not-an-ixsimpl-blob", context=w.Context.current
+        ),
+    )
+
+
 # CHECK-LABEL: TEST: test_typed_bindings
 @run
 def test_typed_bindings():
     with w.module():
-        i32, f32 = w.i32(), w.f32()
-        global_addr = w.global_address_space()
-        buffer_addr = w.buffer_address_space()
-
-        simd = w.simd_type(i32)
-        assert w.SimdType.isinstance(simd)
-        casted = w.SimdType(simd)
-        assert casted.element_type == i32 and casted.width == 32
-
-        ptr = w.ptr_type(f32, global_addr)
-        assert w.PtrType.isinstance(ptr)
-        casted_ptr = w.PtrType(ptr)
-        assert casted_ptr.element_type == f32
-        assert casted_ptr.address_space == global_addr
-
-        opaque = w.opaque_ptr_type(global_addr)
-        assert w.PtrType.isinstance(opaque)
-        opaque_ptr = w.PtrType(opaque)
-        assert opaque_ptr.element_type is None
-        assert opaque_ptr.address_space == global_addr
-        print(opaque)
-        # CHECK: !wave.ptr<#wave.global>
-
-        mask = w.mask_type(32)
-        assert w.MaskType.isinstance(mask)
-        assert w.MaskType(mask).width == 32
-
-        tok = w.mem_token_type()
-        assert w.MemTokenType.isinstance(tok)
-
-        bptr = w.buffer_ptr_type(f32)
-        assert w.PtrType(bptr).address_space == buffer_addr
-
-        frag = w.fragment_type(2, f32, registers=8)
-        assert w.FragmentType.isinstance(frag)
-        casted_frag = w.FragmentType(frag)
-        assert casted_frag.role == 2
-        assert casted_frag.element_type == f32
-        assert casted_frag.rows == 16
-        assert casted_frag.columns == 16
-        assert casted_frag.wave_size == 32
-        assert casted_frag.registers == 8
-
-        idx = w.index_type()
-        lane_idx = w.simd_type(idx, 32)
-        assert str(idx) == "index"
-        assert w.SimdType.isinstance(lane_idx)
-        assert w.SimdType(lane_idx).element_type == idx
-
-        expr = w.ExprAttr.get("4*lid + K", context=w.Context.current)
-        assert w.ExprAttr.isinstance(expr)
-        raw_expr = 4 * w.sym("lid") + w.sym("K")
-        expr_from_node = w.ExprAttr.get_from_node_ptr(
-            raw_expr.node_ptr,
-            context=w.Context.current,
-        )
-        assert w.ExprAttr.isinstance(expr_from_node)
-
-        block_attr = w.ExprAttr.get_from_node_ptr(
-            w.sym("block").node_ptr,
-            context=w.Context.current,
-        )
-        item_attr = w.ExprAttr.get_from_node_ptr(
-            w.sym("item").node_ptr,
-            context=w.Context.current,
-        )
-        slot_attr = w.ExprAttr.get_from_node_ptr(
-            w.sym("slot").node_ptr,
-            context=w.Context.current,
-        )
-        relation = w.RedistributionAttr.get(2, 64, block_attr, item_attr, slot_attr)
-        assert w.RedistributionAttr.isinstance(relation)
-        assert relation.blocks == 2
-        assert relation.items == 64
-        assert str(relation.source_block) == '#wave.expr<"block">'
-        assert str(relation.source_item) == '#wave.expr<"item">'
-        assert str(relation.source_slot) == '#wave.expr<"slot">'
-
-        pred = w.PredAttr.get("K >= 0", context=w.Context.current)
-        assert w.PredAttr.isinstance(pred)
-        raw_pred = w.sym_ctx.eq(
-            w.mod(w.sym("K"), w.sym_ctx.int_(16)), w.sym_ctx.int_(0)
-        )
-        pred_from_node = w.PredAttr.get_from_node_ptr(
-            raw_pred.node_ptr,
-            context=w.Context.current,
-        )
-        assert w.PredAttr.isinstance(pred_from_node)
+        _check_typed_type_bindings()
+        raw_expr = _check_typed_expr_bindings()
+        _check_typed_predicate_bindings(raw_expr)
         print("ok")
+        # CHECK: !wave.ptr<#wave.global>
         # CHECK: ok
 
 
@@ -560,27 +686,36 @@ def test_waveamd_transpose_load():
 @run
 def test_symbolic_gather():
     with w.module() as m:
-        packet_indices = w.simd_type(w.vector_type(8, w.i32()), width=64)
         with m.function(
             "symbolic_gather",
             [
                 w.ptr_type(w.i8(), w.shared_address_space()),
                 w.index_type(),
-                packet_indices,
             ],
+            workgroup_size=[64, 1, 1],
         ) as f:
-            base, origin_value, indices = f.args
+            base, origin_value = f.args
             origin = w.sym("origin")
-            index = w.sym("index")
+            item = w.sym("item")
+            item_value = f.workitem_id(0, w.i32(), width=64)
             f.gather(
                 base,
                 w.simd_type(w.vector_type(8, w.i8()), width=64),
-                bit_offset=8 * (origin + index + w.sym("item") + w.sym("slot")),
-                bindings={origin: origin_value, index: indices},
+                bit_offset=8 * (origin + item + w.sym("slot")),
+                bindings={origin: origin_value, item: item_value},
             )
+            f.gather(
+                base,
+                w.simd_type(w.vector_type(8, w.i8()), width=64),
+                bit_offset=8 * (origin + 2 * w.sym("slot")),
+                bindings={origin: origin_value},
+            )
+        # CHECK: wave.workitem_id 0
         # CHECK: wave.gather %arg0 mapping
-        # CHECK-SAME: bindings ["origin"](%arg1) packet_bindings ["index"](%arg2)
+        # CHECK-SAME: bindings ["item", "origin"](%{{.*}}, %arg1)
         # CHECK-SAME: -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+        # CHECK: wave.gather %arg0 mapping
+        # CHECK-SAME: bindings ["origin"](%arg1)
         print(m.module)
 
 
@@ -588,12 +723,11 @@ def test_symbolic_gather():
 @run
 def test_symbolic_memory_builder_diagnostics():
     with w.module() as m:
-        packet = w.simd_type(w.vector_type(4, w.i32()), width=64)
         with m.function(
             "symbolic_memory_diagnostics",
-            [w.ptr_type(w.i32()), w.index_type(), packet],
+            [w.ptr_type(w.i32()), w.index_type()],
         ) as f:
-            base, scalar_value, packet_value = f.args
+            base, scalar_value = f.args
             index = w.sym("index")
             result_type = w.simd_type(w.vector_type(4, w.i32()), width=64)
 
@@ -605,6 +739,16 @@ def test_symbolic_memory_builder_diagnostics():
                     **kwargs,
                 )
 
+            item = w.sym("item")
+
+            def item_gather(**kwargs):
+                return f.gather(
+                    base,
+                    result_type,
+                    bit_offset=32 * (index + item),
+                    **kwargs,
+                )
+
             assert_raises(
                 TypeError,
                 "binding keys must be symbol expressions",
@@ -612,8 +756,16 @@ def test_symbolic_memory_builder_diagnostics():
             )
             assert_raises(
                 ValueError,
-                "binding name 'item' is reserved",
-                lambda: gather(bindings={w.sym("item"): scalar_value}),
+                "mapping symbols missing from bindings: ['item']",
+                lambda: item_gather(bindings={index: scalar_value}),
+            )
+            wrong_item = f.workitem_id(0, w.i32(), width=32)
+            assert_raises(
+                TypeError,
+                "item binding must be lane SIMD i32 with packet SIMD width",
+                lambda: item_gather(
+                    bindings={index: scalar_value, item: wrong_item},
+                ),
             )
 
             other_context = ixsimpl.Context()
@@ -627,12 +779,9 @@ def test_symbolic_memory_builder_diagnostics():
                 lambda: gather(bindings=duplicate_bindings),
             )
             assert_raises(
-                ValueError,
-                "symbols cannot be both scalar and packet bindings: ['index']",
-                lambda: gather(
-                    bindings={index: scalar_value},
-                    packet_bindings={index: packet_value},
-                ),
+                TypeError,
+                "binding 'index' must be one SSA value",
+                lambda: gather(bindings={index: [scalar_value]}),
             )
             assert_raises(
                 ValueError,

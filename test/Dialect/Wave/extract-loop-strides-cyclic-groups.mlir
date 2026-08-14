@@ -112,7 +112,7 @@ func.func @group_three_cyclic_offsets_with_negative_rebase(
 
 // -----
 
-// CHECK-LABEL: func.func @rebase_compatible_span_subset(
+// CHECK-LABEL: func.func @reject_span_without_partial_rebase(
 // CHECK: %[[GROUP_INIT:.*]] = wave.index_expr <"16384 + b">
 // CHECK: %[[REJECTED_INIT:.*]] = wave.index_expr <"b">
 // CHECK: scf.for {{.*}} iter_args(%[[GROUP:.*]] = %[[GROUP_INIT]], %[[REJECTED:.*]] = %[[REJECTED_INIT]])
@@ -122,7 +122,7 @@ func.func @group_three_cyclic_offsets_with_negative_rebase(
 // CHECK: wave.ptr_add %arg1, %[[FAR]]
 // CHECK: wave.ptr_add %arg2, %[[REJECTED]]
 // CHECK: wave.ptr_add %arg3, %[[NEAR]]
-func.func @rebase_compatible_span_subset(
+func.func @reject_span_without_partial_rebase(
     %a: !wave.ptr<#wave.global, i32>, %b: !wave.ptr<#wave.global, i32>,
     %c: !wave.ptr<#wave.global, i32>, %d: !wave.ptr<#wave.global, i32>,
     %bias: i32) attributes {wave.kernel} {

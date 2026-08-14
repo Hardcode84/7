@@ -3,8 +3,8 @@
 // RUN:   --pass-pipeline='builtin.module(func.func(wave-optimize-masks))' \
 // RUN:   %s 2>&1 | FileCheck %s
 
-// CHECK-NOT: error: 'wave.cast' op unknown policy field 'target_free'
-// CHECK: error: 'wave.cast' op unknown policy field 'target_bearing'
+// CHECK-NOT: error:
+// CHECK: func.func @target_bearing
 // CHECK-NOT: error:
 
 module {

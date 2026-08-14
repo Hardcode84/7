@@ -40,6 +40,12 @@ public:
                                     Value dependency = {},
                                     ArrayRef<WaveLDSRange> blocked = {});
 
+  /// Refreshes token ordering after a client materializes new dependencies.
+  void refreshTokenOrdering();
+
+  /// Returns true when `dependency` proves `completion` through a barrier.
+  bool completesThroughBarrier(Value dependency, Value completion);
+
 private:
   struct Impl;
 

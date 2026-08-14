@@ -514,6 +514,30 @@ func.func @cast_simd_constant_fold() -> !wave.simd<i64, 32> {
   return %wide : !wave.simd<i64, 32>
 }
 
+// Match upstream arith.trunci(extui/extsi(x)) canonicalization for Wave's
+// index-aware integer cast.
+// CHECK-LABEL: func.func @cast_widen_narrow_fold
+// CHECK-SAME: (%[[X:.*]]: i32)
+// CHECK-NOT: wave.cast
+// CHECK: return %[[X]] : i32
+func.func @cast_widen_narrow_fold(%x: i32) -> i32 {
+  %wide = wave.cast intconvert %x
+      policy {extension = #wave.cast_extension<sign>} : i32 -> index
+  %narrow = wave.cast intconvert %wide : index -> i32
+  return %narrow : i32
+}
+
+// CHECK-LABEL: func.func @cast_nested_trunc_fold
+// CHECK-SAME: (%[[X:.*]]: i64)
+// CHECK: %[[NARROW:.*]] = wave.cast intconvert %[[X]] : i64 -> i16
+// CHECK-NOT: i64 -> i32
+// CHECK: return %[[NARROW]] : i16
+func.func @cast_nested_trunc_fold(%x: i64) -> i16 {
+  %i32 = wave.cast intconvert %x : i64 -> i32
+  %i16 = wave.cast intconvert %i32 : i32 -> i16
+  return %i16 : i16
+}
+
 // CHECK-LABEL: func.func @ballot_cmpi_constant_fold
 // CHECK-NOT: wave.cmpi
 // CHECK-NOT: wave.ballot

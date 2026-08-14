@@ -153,6 +153,10 @@ def Wave_ExprAttr : Wave_Attr<"Expr", "expr"> {
   }];
   let parameters = (ins Wave_ExprHandleParameter:$value);
   let assemblyFormat = "`<` $value `>`";
+  let builders = [
+    AttrBuilder<(ins "::mlir::wave::sym::ExprHandle":$value)>
+  ];
+  let skipDefaultBuilders = 1;
   let genVerifyDecl = 1;
 }
 
@@ -164,6 +168,10 @@ def Wave_PredAttr : Wave_Attr<"Pred", "pred"> {
   }];
   let parameters = (ins Wave_PredHandleParameter:$value);
   let assemblyFormat = "`<` $value `>`";
+  let builders = [
+    AttrBuilder<(ins "::mlir::wave::sym::PredHandle":$value)>
+  ];
+  let skipDefaultBuilders = 1;
   let genVerifyDecl = 1;
 }
 
@@ -189,6 +197,14 @@ def Wave_RedistributionAttr : Wave_Attr<"Redistribution", "redistribution"> {
         `source_item` `=` $sourceItem `,`
         `source_slot` `=` $sourceSlot `>`
   }];
+  let builders = [
+    AttrBuilder<(ins
+        "int64_t":$blocks, "int64_t":$items,
+        "::mlir::wave::sym::ExprHandle":$sourceBlock,
+        "::mlir::wave::sym::ExprHandle":$sourceItem,
+        "::mlir::wave::sym::ExprHandle":$sourceSlot)>
+  ];
+  let skipDefaultBuilders = 1;
   let genVerifyDecl = 1;
 }
 
@@ -203,6 +219,12 @@ def Wave_MemoryMappingAttr : Wave_Attr<"MemoryMapping", "memory_mapping"> {
                         OptionalParameter<"::mlir::wave::ExprAttr">:$target_block,
                         "::mlir::wave::ExprAttr":$bit_offset);
   let assemblyFormat = "`<` struct(params) `>`";
+  let builders = [
+    AttrBuilder<(ins "::mlir::wave::ExprAttr":$base,
+                     "::mlir::wave::ExprAttr":$targetBlock,
+                     "::mlir::wave::ExprAttr":$bitOffset)>
+  ];
+  let skipDefaultBuilders = 1;
   let genVerifyDecl = 1;
 }
 

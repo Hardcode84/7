@@ -692,6 +692,70 @@ func.func @bounded_shared_simd_index_stays_narrow(
   return
 }
 
+// A signed-i32 result range is also one physical dword. Rational-intermediate
+// safety is checked separately before the selector uses this final range. A
+// genuinely wide result is sign-extended only after the narrow evaluation.
+// CHECK-LABEL: func.func @signed_i32_index_stays_narrow
+// CHECK: waveamdmachine.v_cmp_lt_i32
+// CHECK: waveamdmachine.v_cndmask_b32_tuple
+// CHECK: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.v_readfirstlane_b32
+// CHECK: return
+func.func @signed_i32_index_stays_narrow(
+    %x_raw: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"2147483648 + x >= 0">,
+       #wave.pred<"1 + x <= 0">] : !wave.simd<i32, 32>
+  %offset = wave.index_expr <"x"> assuming
+      [#wave.pred<"2147483648 + x >= 0">,
+       #wave.pred<"1 + x <= 0">]
+      ["x"](%x)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %offset : !wave.simd<index, 32>
+}
+
+// A narrowing consumer requests the low dword directly. The exact index
+// expression is not first widened only to be truncated again.
+// CHECK-LABEL: func.func @narrowing_index_expr_uses_low_dword
+// CHECK-NOT: waveamdmachine.v_add_u64
+// CHECK-NOT: waveamdmachine.tuple_from_elements
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: return
+func.func @narrowing_index_expr_uses_low_dword(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<i32, 32> {
+  %offset = wave.index_expr <"7 + x"> ["x"](%x)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %low = wave.cast intconvert %offset
+      : !wave.simd<index, 32> -> !wave.simd<i32, 32>
+  return %low : !wave.simd<i32, 32>
+}
+
+// Modulo 2^32 is the identity once a narrowing consumer requests the low
+// dword; do not emit an AND with an all-ones mask.
+// CHECK-LABEL: func.func @narrowing_mod_2pow32_omits_identity_mask
+// CHECK-NOT: waveamdmachine.v_and_b32
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: return
+func.func @narrowing_mod_2pow32_omits_identity_mask(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<i32, 32> {
+  %offset = wave.index_expr <"Mod(7 + x, 4294967296)"> ["x"](%x)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %low = wave.cast intconvert %offset
+      : !wave.simd<index, 32> -> !wave.simd<i32, 32>
+  return %low : !wave.simd<i32, 32>
+}
+
+// CHECK-LABEL: func.func @sign_extend_i32_index
+// CHECK: waveamdmachine.v_cmp_lt_i32
+// CHECK: waveamdmachine.v_cndmask_b32_tuple
+// CHECK: waveamdmachine.tuple_from_elements
+func.func @sign_extend_i32_index(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
+  %wide = wave.cast intconvert %x policy {extension = #wave.cast_extension<sign>}
+      : !wave.simd<i32, 32> -> !wave.simd<index, 32>
+  return %wide : !wave.simd<index, 32>
+}
+
 // Selected machine immediates remain static through symbol bindings.
 // CHECK-LABEL: func.func @simd_constant_staticizes_mod_divisor
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
@@ -761,7 +825,7 @@ func.func @pointer_offset_binding_collision(
 // Signed rational floor uses arithmetic shift.
 // CHECK-LABEL: func.func @signed_floor_index
 // CHECK: %[[X:.*]] = waveamdmachine.arg
-// CHECK: waveamdmachine.s_ashr_i64
+// CHECK: waveamdmachine.s_ashr_i32
 func.func @signed_floor_index(%x: i32) -> index {
   %off = wave.index_expr <"floor(1/2*x)"> ["x"](%x) : (i32) -> index
   return %off : index
@@ -773,6 +837,29 @@ func.func @signed_floor_index(%x: i32) -> index {
 func.func @signed_ceil_index(%x: i32) -> index {
   %off = wave.index_expr <"ceiling(1/2*x)"> ["x"](%x) : (i32) -> index
   return %off : index
+}
+
+// Signed rational truncation biases only negative values before shifting.
+// CHECK-LABEL: func.func @signed_trunc_index
+// CHECK: waveamdmachine.s_ashr_i32
+// CHECK: waveamdmachine.s_and_b32
+// CHECK: waveamdmachine.s_add_i32
+// CHECK: waveamdmachine.s_ashr_i32
+func.func @signed_trunc_index(%x: i32) -> index {
+  %off = wave.index_expr <"Trunc(1/64*x)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+
+// CHECK-LABEL: func.func @signed_trunc_simd_index
+// CHECK: waveamdmachine.v_ashrrev_i32
+// CHECK: waveamdmachine.v_and_b32
+// CHECK: waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.v_ashrrev_i32
+func.func @signed_trunc_simd_index(
+    %x: !wave.simd<i32, 32>) -> !wave.simd<index, 32> {
+  %off = wave.index_expr <"Trunc(1/64*x)"> ["x"](%x)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
 }
 
 // CHECK-LABEL: func.func @integer_rational_wide_intermediate
@@ -793,6 +880,28 @@ func.func @integer_rational_wide_intermediate(
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483644">,
        #wave.pred<"Mod(x, 4) == 0">] : i32
   %off = wave.index_expr <"1/4*a + 1/4*b + 1/4*c + 1/4*d">
+      ["a", "b", "c", "d"](%a, %b, %c, %d)
+      : (i32, i32, i32, i32) -> index
+  return %off : index
+}
+
+// A modulo-bounded result does not permit narrowing a value before a rounded
+// operation. Wrapping the sum first would change floor((a+b+c+d)/4).
+// CHECK-LABEL: func.func @wrapped_rational_wide_intermediate
+// CHECK: waveamdmachine.s_add_u64
+// CHECK: waveamdmachine.s_lshr_b64
+func.func @wrapped_rational_wide_intermediate(
+    %a_raw: i32, %b_raw: i32, %c_raw: i32, %d_raw: i32) -> index {
+  %a = wave.assume %a_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483647">] : i32
+  %b = wave.assume %b_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483647">] : i32
+  %c = wave.assume %c_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483647">] : i32
+  %d = wave.assume %d_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 2147483647">] : i32
+  %off = wave.index_expr
+      <"Mod(floor(1/4*(a + b + c + d)), 4294967296)">
       ["a", "b", "c", "d"](%a, %b, %c, %d)
       : (i32, i32, i32, i32) -> index
   return %off : index

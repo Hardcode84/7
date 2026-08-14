@@ -222,7 +222,10 @@ func.func @loop_index_imm_upper_sgpr2() attributes {wave.kernel} {
 // SELECT-LABEL: func.func @loop_index_negative_lower_sgpr2
 // SELECT: waveamdmachine.s_cselect_b32
 // SELECT: waveamdmachine.tuple_from_elements
-// SELECT: waveamdmachine.uniform_loop if %{{.+}} : !waveamdmachine.reg<scc, 1> carries(%{{.+}} : !waveamdmachine.reg<sgpr, 2>)
+// The i32-backed lower bound is at most INT_MAX, while the upper bound is
+// 2^32+1, so the loop always has a first iteration.
+// SELECT-NOT: waveamdmachine.uniform_loop if %
+// SELECT: waveamdmachine.uniform_loop carries(%{{.+}} : !waveamdmachine.reg<sgpr, 2>)
 // SELECT: ^bb0(%[[IV:.+]]: !waveamdmachine.reg<sgpr, 2>):
 // SELECT:   waveamdmachine.s_add_u64 %[[IV]],
 func.func @loop_index_negative_lower_sgpr2(%lo_raw: i32) attributes {wave.kernel} {

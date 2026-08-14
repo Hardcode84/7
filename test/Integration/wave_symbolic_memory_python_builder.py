@@ -9,31 +9,25 @@ with w.module() as m:
         [
             w.ptr_type(w.i32()),
             w.index_type(),
-            w.simd_type(w.index_type(), 32),
-            w.simd_type(w.index_type(), 32),
-            w.simd_type(w.index_type(), 32),
-            w.simd_type(w.index_type(), 32),
         ],
         kernel=True,
         workgroup_size=[32, 1, 1],
     ) as f:
-        base, origin_value, *index_components = f.args
+        base, origin_value = f.args
         origin = w.sym("origin")
-        index = w.sym("index")
+        slot = w.sym("slot")
         packet = w.simd_type(w.vector_type(4, w.i32()), 32)
         loaded, read = f.gather(
             base,
             packet,
-            bit_offset=32 * (origin + index),
+            bit_offset=32 * (origin + slot),
             bindings={origin: origin_value},
-            packet_bindings={index: index_components},
         )
         f.scatter(
             loaded,
             base,
-            bit_offset=32 * (origin + index),
+            bit_offset=32 * (origin + slot),
             bindings={origin: origin_value},
-            packet_bindings={index: index_components},
             after=read,
         )
 
@@ -43,10 +37,6 @@ with w.module() as m:
         "packet_predicated_symbolic_memory_python_builder",
         [
             w.ptr_type(w.i32()),
-            w.simd_type(w.index_type(), 32),
-            w.simd_type(w.index_type(), 32),
-            w.simd_type(w.index_type(), 32),
-            w.simd_type(w.index_type(), 32),
             packet,
             mask,
             mask,
@@ -56,15 +46,14 @@ with w.module() as m:
         kernel=True,
         workgroup_size=[32, 1, 1],
     ) as f:
-        base, i0, i1, i2, i3, fallback, m0, m1, m2, m3 = f.args
-        index = w.sym("index")
+        base, fallback, m0, m1, m2, m3 = f.args
+        slot = w.sym("slot")
         inactive = f.token()
         with f.where([m0, m1, m2, m3], [packet, w.mem_token_type()]) as active:
             loaded, read = f.gather(
                 base,
                 packet,
-                bit_offset=32 * index,
-                packet_bindings={index: [i0, i1, i2, i3]},
+                bit_offset=32 * slot,
             )
             f.yield_([loaded, read])
             with active.otherwise():

@@ -531,21 +531,23 @@ def Wave_GatherOp : Wave_Op<"gather", [AttrSizedOperandSegments]> {
   let description = [{
     Reads one memory point for every active packet point. The mapping contains
     physical coordinates only; lowering derives transaction shape.
+    A mapping that uses the `item` coordinate carries its exact lane-SIMD i32
+    value, or its normalized lane-SIMD index packet, as the regular binding
+    named `item`. Symbolic-memory lowering interprets the binding's SSA chain;
+    when the binding is an existing `wave.index_expr`, it consumes exactly the
+    serialized expression and bounds without reopening its producers.
   }];
 
   let arguments = (ins Arg<Variadic<Wave_PtrOrSimdPtr>, "", [MemRead]>:$bases,
                        Variadic<AnyType>:$bindings,
-                       Variadic<AnyType>:$packet_bindings,
                        Optional<Wave_MemToken>:$dependency,
                        Wave_MemoryMappingAttr:$mapping,
                        DefaultValuedAttr<StrArrayAttr, "{}">:$binding_names,
-                       DefaultValuedAttr<StrArrayAttr, "{}">:$packet_binding_names,
                        OptionalAttr<AnyAttr>:$cache);
   let results = (outs Wave_SimdOf1DVector:$value, Wave_MemToken:$token);
   let assemblyFormat = [{
     $bases `mapping` $mapping
     `bindings` $binding_names `(` $bindings `)`
-    `packet_bindings` $packet_binding_names `(` $packet_bindings `)`
     (`after` $dependency^)? attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
@@ -556,22 +558,24 @@ def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
   let description = [{
     Writes every active packet point. Address equality does not remove writes;
     atomic and reduction collisions use different operations.
+    A mapping that uses the `item` coordinate carries its exact lane-SIMD i32
+    value, or its normalized lane-SIMD index packet, as the regular binding
+    named `item`. Symbolic-memory lowering interprets the binding's SSA chain;
+    when the binding is an existing `wave.index_expr`, it consumes exactly the
+    serialized expression and bounds without reopening its producers.
   }];
 
   let arguments = (ins Wave_SimdOf1DVector:$value,
                        Arg<Variadic<Wave_PtrOrSimdPtr>, "", [MemWrite]>:$bases,
                        Variadic<AnyType>:$bindings,
-                       Variadic<AnyType>:$packet_bindings,
                        Optional<Wave_MemToken>:$dependency,
                        Wave_MemoryMappingAttr:$mapping,
                        DefaultValuedAttr<StrArrayAttr, "{}">:$binding_names,
-                       DefaultValuedAttr<StrArrayAttr, "{}">:$packet_binding_names,
                        OptionalAttr<AnyAttr>:$cache);
   let results = (outs Wave_MemToken:$token);
   let assemblyFormat = [{
     $value `to` $bases `mapping` $mapping
     `bindings` $binding_names `(` $bindings `)`
-    `packet_bindings` $packet_binding_names `(` $packet_bindings `)`
     (`after` $dependency^)? attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
@@ -589,6 +593,9 @@ def Wave_SchedBarrierOp : Wave_Op<"sched_barrier"> {
 
 def Wave_TokenOp : Wave_Op<"token", [Pure]> {
   let summary = "create an empty memory dependency token";
+  let description = [{
+    All empty tokens are equivalent; CSE may merge them.
+  }];
   let results = (outs Wave_MemToken:$result);
   let assemblyFormat = "attr-dict `:` qualified(type($result))";
 }
@@ -653,8 +660,7 @@ def Wave_AllocOp : Wave_Op<"alloc"> {
   let hasVerifier = 1;
 }
 
-def Wave_AllocReleaseOp
-    : Wave_Op<"alloc_release", [AttrSizedOperandSegments]> {
+def Wave_AllocReleaseOp : Wave_Op<"alloc_release"> {
   let summary = "end a workgroup allocation lifetime";
   let description = [{
     Marks `$allocation` logically complete after `$dependency`. The dependency
@@ -664,23 +670,13 @@ def Wave_AllocReleaseOp
     Allocation resolution removes the marker. `workgroup_collective` asserts
     that every workitem reaches the release and permits resolution to
     materialize a workgroup barrier for a repeated lifetime.
-
-    Optional `$lifetime_source` and `$lifetime_result` record the SSA value
-    lifetime whose implementation uses this allocation. Both operands must be
-    present or absent. They do not carry memory ordering.
   }];
 
   let arguments = (ins Arg<Wave_Ptr, "", [MemFree]>:$allocation,
                        Wave_MemToken:$dependency,
-                       Optional<AnyType>:$lifetime_source,
-                       Optional<AnyType>:$lifetime_result,
                        OptionalAttr<UnitAttr>:$workgroup_collective);
   let results = (outs Wave_MemToken:$token);
-  let assemblyFormat = [{
-    $allocation `after` $dependency
-    (`value_lifetime` `(` $lifetime_source^ `->` $lifetime_result `)`)?
-    attr-dict `:` functional-type(operands, results)
-  }];
+  let assemblyFormat = "$allocation `after` $dependency attr-dict `:` functional-type(operands, results)";
   let hasVerifier = 1;
 }
 
@@ -724,10 +720,22 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure, Elementwise,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "materialize a symbolic offset as a wave index value";
   let description = [{
-    Produces an index-shaped value defined by a symbolic expression and a
-    list of bindings. Each binding pairs an SSA operand with the name of
-    a free symbol referenced by the expression. The free-symbol set of
-    `$expr` must equal the set of `$names` (bijective).
+    Produces an index-shaped value from one complete serialized symbolic
+    expression, assumptions, and SSA bindings for every referenced symbol.
+    Every instance must form a closed domain in which the expression is defined
+    and integer-valued. A binding may be retained solely by an assumption that
+    is transitively connected to the result expression; disconnected bindings
+    and undeclared assumption symbols are rejected.
+
+    `wave-generate-index-exprs` owns conversion of supported pointer offsets and
+    merging nested packet bindings. Nested composition substitutes serialized
+    expressions and explicit bounds mechanically; it does not invoke symbolic
+    proof or solver-driven simplification. Symbolic-memory lowering owns access
+    bindings, predicate domains, and transaction placement. Downstream
+    consumers of an existing packet treat its binding operands as opaque
+    identities: they use only `$expr` and `$assumptions`, never inspect binding
+    producers to recover additional facts. Unsupported producer trees remain
+    ordinary SSA rather than becoming incomplete packets.
 
     Binding operand types are restricted to either wave-uniform scalars
     (builtin `index`, signless integer) or lane-varying SIMD values
@@ -735,7 +743,8 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure, Elementwise,
     `index` for uniform offsets and `!wave.simd<index, W>` for lane-varying
     offsets.
 
-    The op is pure: equal `$expr`, `$bindings`, and `$names` CSE.
+    The op is pure: equal `$expr`, `$assumptions`, `$bindings`, and `$names`
+    CSE.
   }];
 
   let arguments = (ins Wave_ExprAttr:$expr,
@@ -810,9 +819,12 @@ def Wave_WhereOp : Wave_Op<"where", [
     mask. Multiple conditions define a packet predicate domain: condition `i`
     applies to logical packet slot `i` of a nested symbolic memory access.
     Symbolic memory lowering specializes that domain together with the gather
-    or scatter relation and predicates each selected target transaction. If an
-    `otherwise` region is present, it supplies inactive packet values and
-    dependency tokens.
+    or scatter relation and predicates each selected target transaction. A
+    directly nested access may use the enclosing condition as a branch fact;
+    every other index relation and fact must arrive through the access or
+    condition's SSA chains, never from adjacent operations. If an `otherwise`
+    region is present, it supplies inactive packet values and dependency
+    tokens.
 
     WaveAMDMachine lowering consumes single-condition `wave.where` directly:
     it saves EXEC, installs the then-mask, emits the nested region, optionally

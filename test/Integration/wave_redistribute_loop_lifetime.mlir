@@ -1,4 +1,8 @@
 // RUN: wave-opt --wave-lower-redistribute --wave-resolve-allocs %s | FileCheck %s
+// RUN: wave-opt --wave-lower-redistribute %s \
+// RUN:   | FileCheck %s --check-prefix=PROVISIONAL
+// RUN: wave-opt --wave-lower-redistribute --canonicalize --wave-resolve-allocs %s \
+// RUN:   | FileCheck %s --check-prefix=PLACEMENT
 // RUN: wave-translate --wave-to-amdgpu-asm %s \
 // RUN:   | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate --wave-to-amdgpu-asm %s \
@@ -39,6 +43,27 @@
 // ASM: buffer_store_b32
 // ASM: s_endpgm
 
+// PROVISIONAL-LABEL: func.func @nested_component_lifetime(
+// PROVISIONAL: wave.alloc() {{.*}}offset = 0 : i64
+// PROVISIONAL: wave.alloc() {{.*}}offset = 256 : i64
+// PROVISIONAL: scf.if
+// PROVISIONAL: wave.alloc() {{.*}}offset = 1280 : i64
+
+// PLACEMENT-LABEL: func.func @nested_component_lifetime(
+// PLACEMENT-SAME: wave.lds_size = 1536 : i64
+// PLACEMENT: wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+// PLACEMENT: wave.shared_memory_base {offset = 256 : i64} : !wave.ptr<#wave.shared, i32>
+// PLACEMENT: scf.if
+// PLACEMENT: wave.shared_memory_base {offset = 1280 : i64} : !wave.ptr<#wave.shared, i32>
+// PLACEMENT-NOT: wave.alloc
+
+// PLACEMENT-LABEL: func.func @same_block_component_lifetime(
+// PLACEMENT-SAME: wave.lds_size = 65536 : i64
+// PLACEMENT: wave.shared_memory_base {offset = 64256 : i64} : !wave.ptr<#wave.shared, i32>
+// PLACEMENT: wave.shared_memory_base {offset = 64512 : i64} : !wave.ptr<#wave.shared, i32>
+// PLACEMENT: wave.shared_memory_base {offset = 64256 : i64} : !wave.ptr<#wave.shared, i32>
+// PLACEMENT-NOT: wave.alloc
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @redistribute_loop_private_lifetime(
     %source0: !wave.ptr<#wave.global, i32>,
@@ -50,13 +75,16 @@ func.func @redistribute_loop_private_lifetime(
   %c1 = arith.constant 1 : index
   %c2 = arith.constant 2 : index
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
-  %source_ptr0 = wave.ptr_add %source0, %item
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 32>
+  %source_ptr0 = wave.ptr_add %source0, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %input0, %read0 = wave.load %source_ptr0
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> (!wave.simd<i32, 32>, !wave.mem.token)
-  %source_ptr1 = wave.ptr_add %source1, %item
+  %source_ptr1 = wave.ptr_add %source1, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %input1, %read1 = wave.load %source_ptr1
@@ -98,7 +126,7 @@ func.func @redistribute_loop_private_lifetime(
   %sum = wave.binary addi %loop#0, %loop#1
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<i32, 32>
-  %output = wave.ptr_add %destination, %item
+  %output = wave.ptr_add %destination, %bounded_item
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %ready = wave.join %loop#2, %loop#3
@@ -107,5 +135,70 @@ func.func @redistribute_loop_private_lifetime(
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
   return
+}
+
+func.func @nested_component_lifetime(
+    %small: !wave.simd<vector<1xi32>, 32>,
+    %large: !wave.simd<vector<4xi32>, 32>, %condition: i1)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %first = wave.redistribute %small,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %first_component = wave.extract %first[0]
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+  %second = wave.redistribute %large,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  %second_component = wave.extract %second[0]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %selected = scf.if %condition -> (!wave.simd<i32, 32>) {
+    %third = wave.redistribute %small,
+        <blocks = 1, items = 64, source_block = "block",
+         source_item = "xor(item, 32)", source_slot = "slot">
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+    %third_component = wave.extract %third[0]
+        : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+    %sum = wave.binary addi %first_component, %third_component
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    scf.yield %sum : !wave.simd<i32, 32>
+  } else {
+    scf.yield %first_component : !wave.simd<i32, 32>
+  }
+  %result = wave.binary addi %selected, %second_component
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %result : !wave.simd<i32, 32>
+}
+
+func.func @same_block_component_lifetime(
+    %small: !wave.simd<vector<1xi32>, 32>,
+    %large: !wave.simd<vector<4xi32>, 32>) -> !wave.simd<i32, 32>
+    attributes {wave.lds_size = 64256 : i64,
+                wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %first = wave.redistribute %small,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %first_component = wave.extract %first[0]
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+  %second = wave.redistribute %large,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<vector<4xi32>, 32>
+  %second_component = wave.extract %second[0]
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32>
+  %third = wave.redistribute %small,
+      <blocks = 1, items = 64, source_block = "block",
+       source_item = "xor(item, 32)", source_slot = "slot">
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
+  %third_component = wave.extract %third[0]
+      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<i32, 32>
+  %first_sum = wave.binary addi %first_component, %third_component
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  %result = wave.binary addi %first_sum, %second_component
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return %result : !wave.simd<i32, 32>
 }
 }

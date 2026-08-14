@@ -12,10 +12,14 @@ func.func @symbolic_memory_dead_item_codegen(
     %src: !wave.ptr<#wave.global, i32>,
     %dst: !wave.ptr<#wave.global, i32>)
     attributes {wave.kernel, wave.waves_per_workgroup = 1 : i64} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
   %value, %read = wave.gather %src mapping
       <bit_offset = <"Piecewise((32 * slot, slot < 2), (32 * item, True))">>
-      bindings []() packet_bindings []()
-      : (!wave.ptr<#wave.global, i32>)
+      bindings ["item"](%bounded_item)
+      : (!wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>)
       -> (!wave.simd<vector<2xi32>, 64>, !wave.mem.token)
   %zero = wave.constant 0 : i32 -> !wave.simd<i32, 64>
   %out = wave.ptr_add %dst, %zero

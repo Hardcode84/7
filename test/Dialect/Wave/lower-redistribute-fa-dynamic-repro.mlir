@@ -34,6 +34,10 @@
 // SHUFFLE-COUNT-32: wave.shuffle {{.*}}!wave.simd<vector<4xbf16>, 64>
 // SHUFFLE-NOT: wave.shuffle
 // SHUFFLE: return
+// SELECT-LABEL: func.func @fa_permuted_source_slots(
+// SELECT-COUNT-16: wave.select {{.*}}!wave.simd<vector<4xbf16>, 64>
+// SELECT-NOT: wave.select
+// SELECT: return
 // LOCAL-LABEL: func.func @fa_permuted_source_slots(
 // LOCAL-NOT: wave.alloc
 // LOCAL-NOT: wave.barrier
@@ -41,6 +45,7 @@
 // PERMLANE-LABEL: func.func @fa_permuted_source_slots(
 // PERMLANE-COUNT-8: waveamdmachine.v_permlane32_swap_b32_tuple
 // PERMLANE-NOT: waveamdmachine.ds_bpermute_b32
+// PERMLANE-NOT: waveamdmachine.v_cndmask_b32_tuple
 // PERMLANE: return
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @fa_mfma_to_linear_dynamic_slot(

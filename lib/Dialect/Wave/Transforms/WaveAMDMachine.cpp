@@ -1386,6 +1386,7 @@ wideCompoundMaterializationKind(sym::ExprView view,
   switch (view.getKind()) {
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return wideMaterializationKind(view.getUnaryArg(), bindings,
                                    symbolsAreUniform);
   case sym::ExprKind::Mod:
@@ -1475,6 +1476,7 @@ wideCompoundMaterializationLoopDepth(sym::ExprView view, Operation *user,
   switch (view.getKind()) {
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return wideMaterializationLoopDepth(view.getUnaryArg(), user, bindings);
   case sym::ExprKind::Mod:
     return std::max(
@@ -2194,6 +2196,7 @@ static FailureOr<WideRationalValue> materializeWideRationalCompound(
   case sym::ExprKind::Or:
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return materializeWideIntegerRational(S, context, expr, user, bindings,
                                           symbolsAreUniform);
   default:
@@ -2239,7 +2242,7 @@ static bool isProvablyNonNegativeForWideShift(sym::Analysis &analysis,
 static FailureOr<Value> materializeWideRounded(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
-    bool isCeil, bool symbolsAreUniform) {
+    sym::ExprKind kind, bool symbolsAreUniform) {
   sym::ExprHandle childExpr = sym::ExprView(expr).getUnaryArg();
   FailureOr<WideRationalValue> child = materializeWideRationalIndexExprNode(
       S, context, childExpr, user, bindings, symbolsAreUniform);
@@ -2257,10 +2260,15 @@ static FailureOr<Value> materializeWideRounded(
   bool nonNegative =
       analysis && isProvablyNonNegativeForWideShift(*analysis, childExpr);
   Value numerator = child->numerator;
-  if (isCeil)
+  if (kind == sym::ExprKind::Ceil)
     numerator = addWide(S, user->getLoc(), numerator,
                         createWideImm(S, user->getLoc(), den - 1));
   unsigned shift = llvm::Log2_64(den);
+  if (kind == sym::ExprKind::Trunc && !nonNegative) {
+    Value sign = ashrWidePow2(S, user->getLoc(), numerator, 63);
+    Value bias = andWideMask(S, user->getLoc(), sign, den - 1);
+    numerator = addWide(S, user->getLoc(), numerator, bias);
+  }
   return nonNegative ? lshrWidePow2(S, user->getLoc(), numerator, shift)
                      : ashrWidePow2(S, user->getLoc(), numerator, shift);
 }
@@ -2340,10 +2348,13 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
                                   symbolsAreUniform, addOrder, BinaryKind::OrI);
   case sym::ExprKind::Floor:
     return materializeWideRounded(S, context, expr, user, bindings,
-                                  /*isCeil=*/false, symbolsAreUniform);
+                                  sym::ExprKind::Floor, symbolsAreUniform);
   case sym::ExprKind::Ceil:
     return materializeWideRounded(S, context, expr, user, bindings,
-                                  /*isCeil=*/true, symbolsAreUniform);
+                                  sym::ExprKind::Ceil, symbolsAreUniform);
+  case sym::ExprKind::Trunc:
+    return materializeWideRounded(S, context, expr, user, bindings,
+                                  sym::ExprKind::Trunc, symbolsAreUniform);
   case sym::ExprKind::Mod:
     return materializeWideMod(S, context, expr, user, bindings,
                               symbolsAreUniform, addOrder);
@@ -2351,7 +2362,7 @@ static FailureOr<Value> materializeWideCompoundIndexExprNode(
     break;
   }
   return user->emitError("full-address index_expr unsupported expression kind ")
-         << sym::getExprKindName(view.getKind());
+         << static_cast<int>(view.getKind());
 }
 
 static FailureOr<Value> materializeWideIndexExprNode(
@@ -2421,6 +2432,36 @@ FailureOr<Value> materializePointerOffsetValue(WaveAMDMachineSelector &S,
     subs[binding.name] = S.expect(binding.value, user);
   return materializeIndexExprNode(S, offset.expr, user, subs,
                                   offset.assumptions);
+}
+
+static FailureOr<Value>
+materializePointerOffsetLowDword(WaveAMDMachineSelector &S, Operation *user,
+                                 const PointerOffset &offset) {
+  if (!offset.expr)
+    return createImm(S.builder, user->getLoc(), 0);
+
+  llvm::StringMap<Value> narrowBindings;
+  SmallVector<WideSymbolBinding, 4> wideBindings;
+  for (const PointerOffsetBinding &binding : offset.bindings) {
+    Value value = S.expect(binding.value, user);
+    narrowBindings[binding.name] = value;
+    wideBindings.push_back({binding.name, binding.value, value});
+  }
+
+  if (requiresWideRationalIntermediates(S, offset.expr, offset.assumptions,
+                                        narrowBindings)) {
+    FailureOr<Value> wide = materializeWideIndexExprNode(
+        S, offset.expr, user, wideBindings, offset.assumptions);
+    if (failed(wide))
+      return failure();
+    return extractLowDword(S, user->getLoc(), *wide);
+  }
+
+  FailureOr<Value> value = materializeIndexExprNode(
+      S, offset.expr, user, narrowBindings, offset.assumptions);
+  if (failed(value))
+    return failure();
+  return extractLowDword(S, user->getLoc(), *value);
 }
 
 static FailureOr<Value>
@@ -2867,7 +2908,14 @@ static FailureOr<Value> materializePlanLowDword(
       return failure();
     return extractLowDword(S, user->getLoc(), *wide);
   }
-  return materializePlanExpr(S, user, expr, bindings, assumptions, addOrder);
+  FailureOr<Value> value =
+      materializePlanExpr(S, user, expr, bindings, assumptions, addOrder);
+  if (failed(value))
+    return failure();
+  auto regType = dyn_cast<waveamdmachine::RegType>(value->getType());
+  if (!regType || regType.getWidth() == 1)
+    return *value;
+  return extractLowDword(S, user->getLoc(), *value);
 }
 
 FailureOr<Value> materializeFullPlanAddress(WaveAMDMachineSelector &S,
@@ -5013,21 +5061,40 @@ static LogicalResult selectI32I64IntConvert(WaveAMDMachineSelector &S,
                                             CastOp op) {
   Type sourceType = op.getSource().getType();
   Type resultType = op.getResult().getType();
-  Value source = S.expect(op.getSource(), op);
   if (has64BitIntElement(sourceType) && hasI32Element(resultType)) {
-    S.values[op.getResult()] =
-        extractLowDword(S, op.getLoc(), source, op.getSource());
+    Value source;
+    if (auto value = S.values.find(op.getSource()); value != S.values.end()) {
+      source = extractLowDword(S, op.getLoc(), value->second, op.getSource());
+    } else {
+      auto offset = S.indexOffsets.find(op.getSource());
+      if (offset == S.indexOffsets.end())
+        return op.emitError(
+            "missing symbolic index expression for narrowing intconvert");
+      FailureOr<Value> low =
+          materializePointerOffsetLowDword(S, op, offset->second);
+      if (failed(low))
+        return failure();
+      source = *low;
+    }
+    S.values[op.getResult()] = source;
     S.eraseIfTopLevel(op);
     return success();
   }
   if (hasI32Element(sourceType) && has64BitIntElement(resultType)) {
-    if (getIntConvertExtension(op) != CastExtension::Zero)
-      return op.emitError(
-          "WaveAMDMachine i32 to 64-bit intconvert requires zero extension");
-    if (isa<SimdType>(resultType) && !S.isUniformValue(source))
-      S.values[op.getResult()] = ensureVGPR2(S, op.getLoc(), source);
+    Value source = S.expect(op.getSource(), op);
+    std::optional<CastExtension> extension = getIntConvertExtension(op);
+    bool divergent = isa<SimdType>(resultType) && !S.isUniformValue(source);
+    if (extension == CastExtension::Zero)
+      S.values[op.getResult()] = divergent
+                                     ? ensureVGPR2(S, op.getLoc(), source)
+                                     : ensureSGPR2(S, op.getLoc(), source);
+    else if (extension == CastExtension::Sign)
+      S.values[op.getResult()] =
+          divergent ? signExtendVGPR2(S, op.getLoc(), op.getSource(), source)
+                    : signExtendSGPR2(S, op.getLoc(), source);
     else
-      S.values[op.getResult()] = ensureSGPR2(S, op.getLoc(), source);
+      return op.emitError("WaveAMDMachine i32 to 64-bit intconvert requires "
+                          "an extension policy");
     S.eraseIfTopLevel(op);
     return success();
   }
@@ -7122,6 +7189,8 @@ Value WaveAMDMachineSelector::shrPow2(Location loc, Value v, unsigned log2Den) {
 // SGPR-or-VGPR bitwise AND with a literal mask, for power-of-two
 // modulo. `mask` is `divisor - 1`.
 Value WaveAMDMachineSelector::andMask(Location loc, Value v, int64_t mask) {
+  if (static_cast<uint64_t>(mask) == std::numeric_limits<uint32_t>::max())
+    return v;
   Value m = createImm(builder, loc, mask);
   if (std::optional<int64_t> imm = getImmediateValue(v))
     return createImm(builder, loc, *imm & mask);
@@ -7200,6 +7269,20 @@ static bool valueRangeFitsU32(WaveAMDMachineSelector &S, Value value) {
          range->smax().getActiveBits() <= 32;
 }
 
+static bool valueRangeFitsI32(WaveAMDMachineSelector &S, Value value) {
+  std::optional<ConstantIntRanges> range = S.finiteSignedRange(value);
+  return range && range->smin().isSignedIntN(32) &&
+         range->smax().isSignedIntN(32);
+}
+
+static bool usesSignedI32IndexExprValue(WaveAMDMachineSelector &S,
+                                        IndexExprOp op,
+                                        const PointerOffset &offset) {
+  return offset.expr && !S.slotFitsU32(offset.expr, offset.assumptions) &&
+         !valueRangeFitsU32(S, op.getResult()) &&
+         valueRangeFitsI32(S, op.getResult());
+}
+
 static bool needsWideIndexExprValue(WaveAMDMachineSelector &S, IndexExprOp op,
                                     const PointerOffset &offset,
                                     const llvm::StringMap<Value> &bindings) {
@@ -7209,7 +7292,8 @@ static bool needsWideIndexExprValue(WaveAMDMachineSelector &S, IndexExprOp op,
                                         bindings))
     return true;
   return !S.slotFitsU32(offset.expr, offset.assumptions) &&
-         !valueRangeFitsU32(S, op.getResult());
+         !valueRangeFitsU32(S, op.getResult()) &&
+         !valueRangeFitsI32(S, op.getResult());
 }
 
 LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
@@ -7217,8 +7301,13 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   if (failed(pointerOffset))
     return failure();
   bool needsValue =
-      llvm::any_of(op.getResult().getUsers(),
-                   [](Operation *user) { return !isa<PtrAddOp>(user); });
+      llvm::any_of(op.getResult().getUsers(), [](Operation *user) {
+        if (isa<PtrAddOp>(user))
+          return false;
+        auto cast = dyn_cast<CastOp>(user);
+        return !cast || cast.getKind() != CastKind::IntConvert ||
+               !hasI32Element(cast.getResult().getType());
+      });
   indexOffsets[op.getResult()] = *pointerOffset;
   if (needsValue) {
     llvm::StringMap<Value> bindings;
@@ -7236,6 +7325,13 @@ LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
     }
     if (failed(value))
       return failure();
+    if (usesSignedI32IndexExprValue(*this, op, *pointerOffset)) {
+      bool divergent = isa<SimdType>(op.getResult().getType()) &&
+                       !isUniformValue(op.getResult());
+      *value = divergent
+                   ? signExtendVGPR2(*this, op.getLoc(), op.getResult(), *value)
+                   : signExtendSGPR2(*this, op.getLoc(), *value);
+    }
     values[op.getResult()] = *value;
   }
   eraseIfTopLevel(op);
@@ -8588,33 +8684,10 @@ materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   return DmaSourceAddress{*buckets, base};
 }
 
-static bool isZeroSOffset(WaveAMDMachineSelector &S,
-                          const WaveAMDMachineSelector::BucketedOperands &b) {
-  return !b.soffset || isZeroImm(S, b.soffset);
-}
-
-static FailureOr<DmaSourceAddress> materializeBufferDmaSourceAddress(
-    WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
-    const BufferSelectedSourcePointer &source,
-    const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan =
-      planDmaSourceAddress(S, op, source.offset, /*isBuffer=*/true, spec);
-  if (failed(plan))
-    return failure();
-  if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
-                                                /*includeInstOffset=*/false)))
-    return failure();
-  return materializeDmaSourceAddress(S, op, source.base, *plan,
-                                     /*isBuffer=*/true, spec);
-}
-
 static FailureOr<std::optional<DmaSourceAddress>>
 materializeSelectedBufferDmaSourceAddress(
     WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
     const waveamdmachine::AddressFieldSpec &spec) {
-  if (!op.getZeroFillInactive().value_or(false))
-    return std::optional<DmaSourceAddress>{};
-
   FailureOr<std::optional<SelectedBufferSources>> pointers =
       matchSelectedBufferSources(S, op, op.getSource(),
                                  /*requirePtrAdd=*/false);
@@ -8623,24 +8696,44 @@ materializeSelectedBufferDmaSourceAddress(
   if (!*pointers)
     return std::optional<DmaSourceAddress>{};
 
-  FailureOr<DmaSourceAddress> activeSource =
-      materializeBufferDmaSourceAddress(S, op, (*pointers)->active, spec);
-  FailureOr<DmaSourceAddress> inactiveSource =
-      materializeBufferDmaSourceAddress(S, op, (*pointers)->inactive, spec);
-  if (failed(activeSource) || failed(inactiveSource))
+  FailureOr<AddressPlan> activePlan =
+      planMemoryAddress(S, op, (*pointers)->active.offset, spec);
+  FailureOr<AddressPlan> inactivePlan =
+      planMemoryAddress(S, op, (*pointers)->inactive.offset, spec);
+  if (failed(activePlan) || failed(inactivePlan))
     return failure();
-  if (inactiveSource->buckets.instOffset != 0 ||
-      !isZeroSOffset(S, inactiveSource->buckets))
+  if (activePlan->fullAddressRemainderExpr ||
+      inactivePlan->fullAddressRemainderExpr)
     return std::optional<DmaSourceAddress>{};
+  if (hasOnlyVOffsetField(*activePlan)) {
+    std::optional<Value> selected =
+        lookupSelectedPointerVOffset(S, op.getSource());
+    if (selected) {
+      WaveAMDMachineSelector::BucketedOperands buckets;
+      buckets.voffset = *selected;
+      buckets.soffset = createImm(S.builder, op.getLoc(), 0);
+      return std::optional<DmaSourceAddress>{
+          DmaSourceAddress{buckets, (*pointers)->active.base}};
+    }
+  }
+  if (failed(rebaseSelectedBufferPlan(S, *activePlan, *inactivePlan)))
+    return failure();
 
-  FailureOr<Value> selectedVOffset = createLaneSelect(
-      S, op, S.expect((*pointers)->select.getCondition(), op),
-      activeSource->buckets.voffset, inactiveSource->buckets.voffset,
-      /*width=*/1);
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> active =
+      materializePlanBuckets(S, op, *activePlan, spec);
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> inactive =
+      materializePlanBuckets(S, op, *inactivePlan, spec);
+  if (failed(active) || failed(inactive))
+    return failure();
+
+  FailureOr<Value> selectedVOffset =
+      createLaneSelect(S, op, S.expect((*pointers)->select.getCondition(), op),
+                       active->voffset, inactive->voffset, /*width=*/1);
   if (failed(selectedVOffset))
     return failure();
-  activeSource->buckets.voffset = *selectedVOffset;
-  return std::optional<DmaSourceAddress>{*activeSource};
+  active->voffset = *selectedVOffset;
+  return std::optional<DmaSourceAddress>{
+      DmaSourceAddress{*active, (*pointers)->active.base}};
 }
 
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,

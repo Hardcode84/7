@@ -661,3 +661,34 @@ func.func @buffer_dma_lds_composed_source_assumption(
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// SELECT-LABEL: func.func @gfx950_simd_i64_shl
+// SELECT: waveamdmachine.v_lshlrev_b64
+// ASM-LABEL: gfx950_simd_i64_shl:
+// ASM: v_lshlrev_b64
+func.func @gfx950_simd_i64_shl(%out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %value = wave.cast intconvert %item
+      policy {extension = #wave.cast_extension<zero>}
+      : !wave.simd<i32, 64> -> !wave.simd<i64, 64>
+  %two = arith.constant 2 : i64
+  %shift = wave.splat %two : i64 -> !wave.simd<i64, 64>
+  %result = wave.binary shli %value, %shift
+      : !wave.simd<i64, 64>, !wave.simd<i64, 64> -> !wave.simd<i64, 64>
+  %stored = wave.cast intconvert %result
+      : !wave.simd<i64, 64> -> !wave.simd<i32, 64>
+  %ptrs = wave.ptr_add %out, %item
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %token = wave.store %stored -> %ptrs
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
+      -> !wave.mem.token
+  return
+}
+
+}

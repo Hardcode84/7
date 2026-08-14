@@ -8,6 +8,8 @@
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
 
+#include "WaveIndexExpr.h"
+
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/CommonFolders.h"
@@ -88,6 +90,21 @@ sym::Store &WaveDialect::getSymbolStore() {
 const sym::Store &WaveDialect::getSymbolStore() const {
   assert(symbolStore && "wave symbolic store must be initialized");
   return *symbolStore;
+}
+
+std::optional<int64_t> mlir::wave::getSplatOrConstantInt(Value value) {
+  if (std::optional<int64_t> constant = getConstantIntValue(value))
+    return constant;
+  if (ConstantOp constant = value.getDefiningOp<ConstantOp>()) {
+    if (auto attr = dyn_cast<IntegerAttr>(constant.getValue())) {
+      APInt intValue = attr.getValue();
+      if (intValue.isSignedIntN(64))
+        return intValue.getSExtValue();
+    }
+  }
+  if (SplatOp splat = value.getDefiningOp<SplatOp>())
+    return getSplatOrConstantInt(splat.getSource());
+  return std::nullopt;
 }
 
 ParseResult ConstantOp::parse(OpAsmParser &parser, OperationState &result) {
@@ -1461,6 +1478,25 @@ OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
   if (getSource().getType() == getType())
     return getSource();
 
+  if (getKind() == CastKind::IntConvert) {
+    unsigned sourceBits = getWaveCastIntegerBits(getSource().getType());
+    unsigned resultBits = getWaveCastIntegerBits(getType());
+    if (resultBits < sourceBits) {
+      if (auto inner = getSource().getDefiningOp<CastOp>();
+          inner && inner.getKind() == CastKind::IntConvert) {
+        unsigned innerSourceBits =
+            getWaveCastIntegerBits(inner.getSource().getType());
+        if (innerSourceBits == resultBits &&
+            inner.getSource().getType() == getType())
+          return inner.getSource();
+        if (innerSourceBits > resultBits) {
+          setOperand(inner.getSource());
+          return getResult();
+        }
+      }
+    }
+  }
+
   FailureOr<WaveCastPolicy> policy = getWaveCastPolicy(*this);
   if (failed(policy))
     return {};
@@ -2396,14 +2432,6 @@ LogicalResult CtzOp::verify() {
   return success();
 }
 
-static bool isFullSignedRange(const ConstantIntRanges &range) {
-  unsigned width = range.smin().getBitWidth();
-  if (width == 0)
-    return true;
-  return range.smin() == APInt::getSignedMinValue(width) &&
-         range.smax() == APInt::getSignedMaxValue(width);
-}
-
 static std::optional<int64_t> getSExtI64(const APInt &value) {
   if (!value.isSignedIntN(64))
     return std::nullopt;
@@ -2413,7 +2441,7 @@ static std::optional<int64_t> getSExtI64(const APInt &value) {
 static std::optional<sym::PredHandle>
 buildIndexExprRangeAssumption(sym::Store &store, StringRef name,
                               const ConstantIntRanges &range) {
-  if (isFullSignedRange(range))
+  if (range.smin().getBitWidth() == 0)
     return std::nullopt;
   std::optional<int64_t> lo = getSExtI64(range.smin());
   std::optional<int64_t> hi = getSExtI64(range.smax());
@@ -2514,6 +2542,92 @@ SmallVector<sym::PredHandle> mlir::wave::filterIndexExprPredicatesBySymbols(
         predicateSymbolsContained(pred, symbols))
       appendUniquePredicate(filtered, pred);
   return filtered;
+}
+
+FailureOr<std::unique_ptr<sym::Analysis>>
+mlir::wave::createClosedIndexExprAnalysis(sym::Store &store,
+                                          ArrayRef<sym::PredHandle> assumptions,
+                                          std::string *diagnostic) {
+  return sym::Analysis::create(store, assumptions, diagnostic);
+}
+
+void mlir::wave::collectIndexExprRequiredSymbols(
+    sym::ExprHandle expr, ArrayRef<sym::PredHandle> assumptions,
+    llvm::DenseSet<StringRef> &symbols) {
+  sym::walkSymbolNames(expr, [&](StringRef name) { symbols.insert(name); });
+  SmallVector<sym::PredHandle> components;
+  SmallVector<sym::PredHandle> pending(assumptions);
+  while (!pending.empty()) {
+    sym::PredHandle predicate = pending.pop_back_val();
+    sym::PredView view(predicate);
+    if (view.getKind() != sym::PredKind::And) {
+      components.push_back(predicate);
+      continue;
+    }
+    for (uint32_t index = view.getLogicArgCount(); index > 0; --index)
+      pending.push_back(view.getLogicArg(index - 1));
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (sym::PredHandle assumption : components) {
+      SmallVector<StringRef, 4> names;
+      sym::walkSymbolNames(assumption,
+                           [&](StringRef name) { names.push_back(name); });
+      if (names.empty() || !llvm::any_of(names, [&](StringRef name) {
+            return symbols.contains(name);
+          }))
+        continue;
+      for (StringRef name : names)
+        changed |= symbols.insert(name).second;
+    }
+  }
+}
+
+SmallVector<sym::PredHandle>
+mlir::wave::selectIndexExprAnalysisFacts(ArrayRef<sym::ExprHandle> expressions,
+                                         ArrayRef<sym::PredHandle> requirements,
+                                         ArrayRef<sym::PredHandle> facts) {
+  SmallVector<sym::PredHandle> components;
+  for (sym::PredHandle fact : facts) {
+    SmallVector<sym::PredHandle> pending{fact};
+    while (!pending.empty()) {
+      sym::PredHandle predicate = pending.pop_back_val();
+      sym::PredView view(predicate);
+      if (view.getKind() != sym::PredKind::And) {
+        appendUniquePredicate(components, predicate);
+        continue;
+      }
+      for (uint32_t index = view.getLogicArgCount(); index > 0; --index)
+        pending.push_back(view.getLogicArg(index - 1));
+    }
+  }
+  llvm::DenseSet<StringRef> symbols;
+  for (sym::ExprHandle expression : expressions)
+    collectIndexExprRequiredSymbols(expression, components, symbols);
+  for (sym::PredHandle requirement : requirements)
+    collectIndexExprRequiredSymbols(sym::asExpr(requirement), components,
+                                    symbols);
+  return filterIndexExprPredicatesBySymbols(components, symbols);
+}
+
+FailureOr<sym::ExprHandle>
+mlir::wave::composeIndexExprIndicator(sym::Store &store,
+                                      sym::PredHandle predicate) {
+  sym::ExprHandle zero = sym::composeExprInt(store, 0);
+  sym::ExprHandle two = sym::composeExprInt(store, 2);
+  sym::PredHandle otherwise = sym::composePredTrue(store);
+  std::array<sym::PiecewiseCase, 2> cases{sym::PiecewiseCase{two, predicate},
+                                          sym::PiecewiseCase{zero, otherwise}};
+  FailureOr<sym::ExprHandle> piecewise =
+      sym::composeExprPiecewise(store, cases);
+  FailureOr<sym::ExprHandle> scaled =
+      failed(piecewise) ? FailureOr<sym::ExprHandle>(failure())
+                        : sym::composeExprBinary(store, *piecewise,
+                                                 sym::ExprBinaryOp::Div, two);
+  return failed(scaled) ? FailureOr<sym::ExprHandle>(failure())
+                        : FailureOr<sym::ExprHandle>(
+                              sym::composeExprFloor(store, *scaled));
 }
 
 static unsigned indexValueElementWidth(Type type) {
@@ -2695,8 +2809,17 @@ static void appendRangePredicatesForInference(
     SmallVectorImpl<sym::PredHandle> &assumptions) {
   appendAssumePredicatesImpl(store, binding, name, assumptions,
                              /*includeProducerRange=*/false);
+  std::optional<ConstantIntRanges> storageRange;
+  const ConstantIntRanges *effectiveRange = &range;
+  if (range.smin().getBitWidth() == 0) {
+    Type elementType = getWaveCastElementType(binding.getType());
+    if (auto integer = dyn_cast<IntegerType>(elementType)) {
+      storageRange = ConstantIntRanges::maxRange(integer.getWidth());
+      effectiveRange = &*storageRange;
+    }
+  }
   std::optional<sym::PredHandle> assumption =
-      buildIndexExprRangeAssumption(store, name, range);
+      buildIndexExprRangeAssumption(store, name, *effectiveRange);
   if (assumption)
     appendUniquePredicate(assumptions, *assumption);
 }
@@ -3468,8 +3591,8 @@ LogicalResult LoadOp::verify() {
                                         *ptrElementType, emit);
 }
 
-static bool isMemoryMappingReservedSymbol(StringRef name) {
-  return name == "block" || name == "item" || name == "slot";
+static bool isMemoryMappingImplicitSymbol(StringRef name) {
+  return name == "block" || name == "slot";
 }
 
 static void
@@ -3479,7 +3602,7 @@ collectMemoryMappingBindings(ExprAttr attr,
     return;
   sym::ExprHandle expr = attr.getValue();
   sym::walkSymbolNames(expr, [&](StringRef name) {
-    if (!isMemoryMappingReservedSymbol(name))
+    if (!isMemoryMappingImplicitSymbol(name))
       requiredBindings.insert(name);
   });
 }
@@ -3496,40 +3619,12 @@ static LogicalResult verifyMemoryMappingBindingNames(
     StringRef name = cast<StringAttr>(attr).getValue();
     if (name.empty())
       return op->emitOpError() << kind << " names must be non-empty";
-    if (isMemoryMappingReservedSymbol(name))
+    if (isMemoryMappingImplicitSymbol(name))
       return op->emitOpError() << kind << " name `" << name << "` is reserved";
     if (!declaredBindings.insert(name).second)
       return op->emitOpError() << "duplicate mapping binding `" << name << "`";
-    if (!requiredBindings.contains(name))
-      return op->emitOpError()
-             << kind << " `" << name << "` is not referenced by the mapping";
-  }
-  return success();
-}
-
-static LogicalResult verifyMemoryMappingPacketBindingNames(
-    Operation *op, ArrayAttr names, ValueRange bindings,
-    llvm::DenseSet<StringRef> &declaredBindings,
-    const llvm::DenseSet<StringRef> &requiredBindings) {
-  if (names.size() != bindings.size())
-    return op->emitOpError()
-           << "expected one packet binding name per operand (got "
-           << names.size() << " names and " << bindings.size() << " operands)";
-
-  llvm::DenseSet<StringRef> packetNames;
-  for (Attribute attr : names) {
-    StringRef name = cast<StringAttr>(attr).getValue();
-    if (name.empty())
-      return op->emitOpError("packet binding names must be non-empty");
-    if (isMemoryMappingReservedSymbol(name))
-      return op->emitOpError("packet binding name `")
-             << name << "` is reserved";
-    if (packetNames.insert(name).second &&
-        !declaredBindings.insert(name).second)
-      return op->emitOpError("duplicate mapping binding `") << name << "`";
-    if (!requiredBindings.contains(name))
-      return op->emitOpError("packet binding `")
-             << name << "` is not referenced by the mapping";
+    // Extra bindings are exact SSA carriers used by symbolic-memory analysis;
+    // the mapping need not reference every carrier directly.
   }
   return success();
 }
@@ -3571,9 +3666,7 @@ static LogicalResult verifyMemoryMappingBases(Operation *op, ValueRange bases,
 static LogicalResult verifyMemoryMappingNames(Operation *op,
                                               MemoryMappingAttr mapping,
                                               ValueRange bindings,
-                                              ArrayAttr bindingNames,
-                                              ValueRange packetBindings,
-                                              ArrayAttr packetBindingNames) {
+                                              ArrayAttr bindingNames) {
   llvm::DenseSet<StringRef> requiredBindings;
   collectMemoryMappingBindings(mapping.getBase(), requiredBindings);
   collectMemoryMappingBindings(mapping.getTargetBlock(), requiredBindings);
@@ -3584,10 +3677,6 @@ static LogicalResult verifyMemoryMappingNames(Operation *op,
                                              "binding", declaredBindings,
                                              requiredBindings)))
     return failure();
-  if (failed(verifyMemoryMappingPacketBindingNames(
-          op, packetBindingNames, packetBindings, declaredBindings,
-          requiredBindings)))
-    return failure();
   for (StringRef name : requiredBindings)
     if (!declaredBindings.contains(name))
       return op->emitOpError()
@@ -3597,9 +3686,22 @@ static LogicalResult verifyMemoryMappingNames(Operation *op,
 
 static LogicalResult verifyMemoryMappingBindings(Operation *op,
                                                  ValueRange bindings,
+                                                 ArrayAttr bindingNames,
                                                  SimdType packetType) {
   auto emit = [op](const Twine &msg) { return op->emitOpError(msg); };
-  for (Value binding : bindings) {
+  for (auto [binding, nameAttr] : llvm::zip(bindings, bindingNames)) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    if (name == "item") {
+      SimdType itemType = dyn_cast<SimdType>(binding.getType());
+      if (!itemType ||
+          (!itemType.getElementType().isInteger(32) &&
+           !itemType.getElementType().isIndex()) ||
+          itemType.getWidth() != packetType.getWidth())
+        return op->emitOpError(
+            "item binding must be lane SIMD i32 or index with packet SIMD "
+            "width");
+      continue;
+    }
     FailureOr<SymbolicOffsetBindingKind> kind =
         classifySymbolicOffsetBinding(binding.getType(), emit);
     if (failed(kind))
@@ -3611,110 +3713,33 @@ static LogicalResult verifyMemoryMappingBindings(Operation *op,
   return success();
 }
 
-static LogicalResult verifyPackedPacketBinding(
-    Operation *op, StringRef name, VectorType vector, VectorType packetVector,
-    llvm::StringMap<int64_t> &scalarCounts, llvm::StringSet<> &vectorBindings) {
-  if (scalarCounts.contains(name) || !vectorBindings.insert(name).second)
-    return op->emitOpError("packet binding `")
-           << name << "` mixes packed and component operands";
-  if (vector.isScalable() ||
-      vector.getNumElements() != packetVector.getNumElements())
-    return op->emitOpError(
-        "packet binding slot count must match the accessed packet");
-  if (!vector.getElementType().isInteger(32))
-    return op->emitOpError(
-        "packed packet binding elements must be signless i32");
-  return success();
-}
-
-static LogicalResult
-verifyComponentPacketBinding(Operation *op, StringRef name, Type element,
-                             llvm::StringMap<int64_t> &scalarCounts,
-                             const llvm::StringSet<> &vectorBindings) {
-  if (vectorBindings.contains(name))
-    return op->emitOpError("packet binding `")
-           << name << "` mixes packed and component operands";
-  if (!element.isIndex() && !element.isInteger(32))
-    return op->emitOpError(
-        "packet binding components must be index or signless i32");
-  ++scalarCounts[name];
-  return success();
-}
-
-static LogicalResult
-verifyMemoryMappingPacketBinding(Operation *op, Value binding, StringRef name,
-                                 SimdType packetType, VectorType packetVector,
-                                 llvm::StringMap<int64_t> &scalarCounts,
-                                 llvm::StringSet<> &vectorBindings) {
-  SimdType simd = dyn_cast<SimdType>(binding.getType());
-  if (!simd)
-    return op->emitOpError("packet binding operands must have wave SIMD type");
-  if (simd.getWidth() != packetType.getWidth())
-    return op->emitOpError(
-        "packet binding SIMD width must match packet SIMD width");
-
-  Type element = simd.getElementType();
-  if (VectorType vector = dyn_cast<VectorType>(element))
-    return verifyPackedPacketBinding(op, name, vector, packetVector,
-                                     scalarCounts, vectorBindings);
-  return verifyComponentPacketBinding(op, name, element, scalarCounts,
-                                      vectorBindings);
-}
-
-static LogicalResult verifyMemoryMappingPacketBindings(
-    Operation *op, ValueRange packetBindings, ArrayAttr packetBindingNames,
-    SimdType packetType, VectorType packetVector) {
-  llvm::StringMap<int64_t> scalarCounts;
-  llvm::StringSet<> vectorBindings;
-  for (auto [binding, nameAttr] :
-       llvm::zip(packetBindings, packetBindingNames)) {
-    StringRef name = cast<StringAttr>(nameAttr).getValue();
-    if (failed(verifyMemoryMappingPacketBinding(op, binding, name, packetType,
-                                                packetVector, scalarCounts,
-                                                vectorBindings)))
-      return failure();
-  }
-  for (auto &entry : scalarCounts)
-    if (entry.getValue() != packetVector.getNumElements())
-      return op->emitOpError("packet binding `")
-             << entry.getKey()
-             << "` component count must match the accessed packet";
-  return success();
-}
-
 static LogicalResult
 verifyMemoryMappingOp(Operation *op, MemoryMappingAttr mapping,
                       ValueRange bases, ValueRange bindings,
-                      ArrayAttr bindingNames, ValueRange packetBindings,
-                      ArrayAttr packetBindingNames, SimdType packetType) {
+                      ArrayAttr bindingNames, SimdType packetType) {
   VectorType packetVector = cast<VectorType>(packetType.getElementType());
   if (packetVector.isScalable())
     return op->emitOpError("packet vector must be fixed-size");
   if (failed(verifyMemoryMappingBases(op, bases, packetType)))
     return failure();
-  if (failed(verifyMemoryMappingNames(op, mapping, bindings, bindingNames,
-                                      packetBindings, packetBindingNames)))
+  if (failed(verifyMemoryMappingNames(op, mapping, bindings, bindingNames)))
     return failure();
-  if (failed(verifyMemoryMappingBindings(op, bindings, packetType)))
+  if (failed(
+          verifyMemoryMappingBindings(op, bindings, bindingNames, packetType)))
     return failure();
-  return verifyMemoryMappingPacketBindings(
-      op, packetBindings, packetBindingNames, packetType, packetVector);
+  return success();
 }
 
 LogicalResult GatherOp::verify() {
   SimdType packetType = cast<SimdType>(getValue().getType());
   return verifyMemoryMappingOp(getOperation(), getMapping(), getBases(),
-                               getBindings(), getBindingNames(),
-                               getPacketBindings(), getPacketBindingNames(),
-                               packetType);
+                               getBindings(), getBindingNames(), packetType);
 }
 
 LogicalResult ScatterOp::verify() {
   SimdType packetType = cast<SimdType>(getValue().getType());
   return verifyMemoryMappingOp(getOperation(), getMapping(), getBases(),
-                               getBindings(), getBindingNames(),
-                               getPacketBindings(), getPacketBindingNames(),
-                               packetType);
+                               getBindings(), getBindingNames(), packetType);
 }
 
 namespace {
@@ -3749,14 +3774,18 @@ verifyPtrAddOffset(Type offsetType,
   if (offsetType.isIndex())
     return int64_t{0};
   if (auto intType = dyn_cast<IntegerType>(offsetType)) {
-    if (intType.getWidth() != 32 && intType.getWidth() != 64)
-      return emitError("integer offset must be i32 or i64");
+    if (!intType.isSignless() ||
+        (intType.getWidth() != 32 && intType.getWidth() != 64))
+      return emitError("integer offset must be signless i32 or i64");
     return int64_t{0};
   }
   if (auto offsetSimd = dyn_cast<SimdType>(offsetType)) {
     Type elementType = offsetSimd.getElementType();
-    if (!elementType.isIndex() && !elementType.isInteger(32))
-      return emitError("SIMD offset element type must be index or i32");
+    auto integer = dyn_cast<IntegerType>(elementType);
+    if (!elementType.isIndex() &&
+        (!integer || !integer.isSignless() || integer.getWidth() != 32))
+      return emitError(
+          "SIMD offset element type must be index or signless i32");
     return offsetSimd.getWidth();
   }
   return emitError("offset must be index, integer, or index/i32 SIMD");
@@ -3816,14 +3845,6 @@ LogicalResult AllocReleaseOp::verify() {
   if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
     return emitOpError(
         "allocation pointer must live in the shared address space");
-  if (static_cast<bool>(getLifetimeSource()) !=
-      static_cast<bool>(getLifetimeResult()))
-    return emitOpError(
-        "lifetime_source and lifetime_result must be present together");
-  if (Value source = getLifetimeSource())
-    if (isa<MemTokenType>(source.getType()) ||
-        isa<MemTokenType>(getLifetimeResult().getType()))
-      return emitOpError("value lifetime operands cannot be memory tokens");
   return success();
 }
 
@@ -3892,8 +3913,8 @@ static FailureOr<int64_t> classifyIndexBinding(
 }
 
 // Bijection check: every entry in `names` is a non-empty unique string
-// that names a free symbol of `freeSymbols`, and every member of
-// `freeSymbols` is covered. Successful return populates `bindingNames`.
+// required by the expression and its connected assumptions, and every
+// required symbol is covered. Successful return populates `bindingNames`.
 static LogicalResult verifyIndexExprNames(
     ArrayAttr names, const llvm::DenseSet<StringRef> &freeSymbols,
     llvm::DenseSet<StringRef> &bindingNames,
@@ -3908,7 +3929,8 @@ static LogicalResult verifyIndexExprNames(
       return emitError("duplicate binding name '" + name + "'");
     if (!freeSymbols.count(name))
       return emitError("binding name '" + name +
-                       "' is not a free symbol of the expression");
+                       "' is not referenced by the expression or "
+                       "result-connected assumptions");
   }
   for (StringRef name : freeSymbols)
     if (!bindingNames.count(name))
@@ -4013,7 +4035,6 @@ mlir::wave::getIndexExprSymbolicOffset(IndexExprOp op) {
     if (failed(kind))
       return failure();
     offset.bindings.push_back({symbol, binding, *kind});
-    appendAssumePredicates(store, binding, name, offset.assumptions);
   }
   return offset;
 }
@@ -4212,7 +4233,8 @@ getIndexExprStaticDenominator(sym::ExprHandle expr) {
   sym::ExprView view(expr);
   sym::ExprKind kind = view.getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Symbol ||
-      kind == sym::ExprKind::Floor || kind == sym::ExprKind::Ceil)
+      kind == sym::ExprKind::Floor || kind == sym::ExprKind::Ceil ||
+      kind == sym::ExprKind::Trunc)
     return 1;
   if (kind == sym::ExprKind::Rational) {
     std::optional<sym::RationalLiteral> rational = view.getRational();
@@ -4359,6 +4381,7 @@ getCompoundIndexExprMaterializationCost(sym::ExprView view,
     return getIndexExprMulMaterializationCost(view, rationalAllowed);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
+  case sym::ExprKind::Trunc:
     return getRoundedIndexExprMaterializationCost(view);
   case sym::ExprKind::Mod:
     return getModIndexExprMaterializationCost(view, rationalAllowed);
@@ -4422,6 +4445,12 @@ bool mlir::wave::shouldUseSimplifiedIndexExpr(sym::ExprHandle candidate,
   if (*candidateCost != *baselineCost)
     return *candidateCost < *baselineCost;
   return removesSymbols;
+}
+
+FailureOr<bool> mlir::wave::shouldUseSimplifiedIndexExpr(
+    sym::Store &, ArrayRef<sym::PredHandle>, sym::ExprHandle candidate,
+    sym::ExprHandle baseline) {
+  return shouldUseSimplifiedIndexExpr(candidate, baseline);
 }
 
 static Value preserveIndexExprResultType(OpBuilder &builder, Location loc,
@@ -4621,18 +4650,32 @@ LogicalResult IndexExprOp::verify() {
     return emit("expected one name per binding (got ")
            << names.size() << " names and " << bindings.size() << " bindings)";
 
-  // Hash-consed leaves may appear multiple times in the AST: dedupe.
-  llvm::DenseSet<StringRef> freeSymbols;
+  SmallVector<sym::PredHandle> assumptions;
+  assumptions.reserve(getAssumptionsAttr().size());
+  for (Attribute attr : getAssumptionsAttr())
+    assumptions.push_back(cast<PredAttr>(attr).getValue());
+
+  // An assumption may introduce a symbol when it is connected to the result
+  // through another symbol. Disconnected assumption components are not part
+  // of the packet contract.
+  llvm::DenseSet<StringRef> requiredSymbols;
+  collectIndexExprRequiredSymbols(getExpr().getValue(), assumptions,
+                                  requiredSymbols);
+  llvm::DenseSet<StringRef> referencedSymbols;
   sym::walkSymbolNames(getExpr().getValue(),
-                       [&](StringRef name) { freeSymbols.insert(name); });
+                       [&](StringRef name) { referencedSymbols.insert(name); });
+  for (sym::PredHandle assumption : assumptions)
+    sym::walkSymbolNames(
+        assumption, [&](StringRef name) { referencedSymbols.insert(name); });
 
   llvm::DenseSet<StringRef> bindingNames;
-  if (failed(verifyIndexExprNames(names, freeSymbols, bindingNames, emit)))
+  if (failed(
+          verifyIndexExprNames(names, referencedSymbols, bindingNames, emit)))
     return failure();
 
-  for (auto [index, attr] : llvm::enumerate(getAssumptionsAttr())) {
-    sym::PredHandle pred = cast<PredAttr>(attr).getValue();
+  for (auto [index, pred] : llvm::enumerate(assumptions)) {
     std::optional<StringRef> badName;
+    bool disconnected = false;
     sym::walkSymbolNames(pred, [&](StringRef name) {
       if (!bindingNames.count(name) && !badName)
         badName = name;
@@ -4640,6 +4683,27 @@ LogicalResult IndexExprOp::verify() {
     if (badName)
       return emit("assumption #")
              << index << " references undeclared symbol `" << *badName << "`";
+    SmallVector<sym::PredHandle> components{pred};
+    while (!components.empty()) {
+      sym::PredHandle component = components.pop_back_val();
+      sym::PredView view(component);
+      if (view.getKind() == sym::PredKind::And) {
+        for (uint32_t componentIndex = 0;
+             componentIndex < view.getLogicArgCount(); ++componentIndex)
+          components.push_back(view.getLogicArg(componentIndex));
+        continue;
+      }
+      bool hasSymbol = false;
+      bool connected = false;
+      sym::walkSymbolNames(component, [&](StringRef name) {
+        hasSymbol = true;
+        connected |= requiredSymbols.contains(name);
+      });
+      disconnected |= hasSymbol && !connected;
+    }
+    if (disconnected)
+      return emit("assumption #")
+             << index << " is disconnected from its expression";
   }
 
   auto laneWidth = reduceIndexBindingWidth(bindings, emit);
@@ -4662,6 +4726,74 @@ void IndexExprOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 
 #define GET_ATTRDEF_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOpsAttributes.cpp.inc"
+
+ExprAttr ExprAttr::get(MLIRContext *context, sym::ExprHandle value) {
+  if (!sym::isExpr(value))
+    llvm::report_fatal_error("wave.expr requires a scalar expression");
+  return Base::get(context, value);
+}
+
+ExprAttr ExprAttr::getChecked(function_ref<InFlightDiagnostic()> emitError,
+                              MLIRContext *context, sym::ExprHandle value) {
+  if (!sym::isExpr(value)) {
+    emitError() << "wave.expr requires a scalar expression";
+    return {};
+  }
+  return Base::getChecked(emitError, context, value);
+}
+
+PredAttr PredAttr::get(MLIRContext *context, sym::PredHandle value) {
+  if (!sym::isPred(value))
+    llvm::report_fatal_error("wave.pred requires a predicate");
+  return Base::get(context, value);
+}
+
+PredAttr PredAttr::getChecked(function_ref<InFlightDiagnostic()> emitError,
+                              MLIRContext *context, sym::PredHandle value) {
+  if (!sym::isPred(value)) {
+    emitError() << "wave.pred requires a predicate";
+    return {};
+  }
+  return Base::getChecked(emitError, context, value);
+}
+
+RedistributionAttr RedistributionAttr::get(MLIRContext *context, int64_t blocks,
+                                           int64_t items,
+                                           sym::ExprHandle sourceBlock,
+                                           sym::ExprHandle sourceItem,
+                                           sym::ExprHandle sourceSlot) {
+  if (!sym::isExpr(sourceBlock) || !sym::isExpr(sourceItem) ||
+      !sym::isExpr(sourceSlot))
+    llvm::report_fatal_error(
+        "wave.redistribution coordinates must be scalar expressions");
+  return Base::get(context, blocks, items, sourceBlock, sourceItem, sourceSlot);
+}
+
+RedistributionAttr RedistributionAttr::getChecked(
+    function_ref<InFlightDiagnostic()> emitError, MLIRContext *context,
+    int64_t blocks, int64_t items, sym::ExprHandle sourceBlock,
+    sym::ExprHandle sourceItem, sym::ExprHandle sourceSlot) {
+  if (!sym::isExpr(sourceBlock) || !sym::isExpr(sourceItem) ||
+      !sym::isExpr(sourceSlot)) {
+    emitError() << "wave.redistribution coordinates must be scalar expressions";
+    return {};
+  }
+  return Base::getChecked(emitError, context, blocks, items, sourceBlock,
+                          sourceItem, sourceSlot);
+}
+
+MemoryMappingAttr MemoryMappingAttr::get(MLIRContext *context, ExprAttr base,
+                                         ExprAttr targetBlock,
+                                         ExprAttr bitOffset) {
+  return Base::get(context, base, targetBlock, bitOffset);
+}
+
+MemoryMappingAttr
+MemoryMappingAttr::getChecked(function_ref<InFlightDiagnostic()> emitError,
+                              MLIRContext *context, ExprAttr base,
+                              ExprAttr targetBlock, ExprAttr bitOffset) {
+  return Base::getChecked(emitError, context, base, targetBlock, bitOffset);
+}
 
 PtrType PtrType::get(MLIRContext *context, Type elementType,
                      Attribute addressSpace) {

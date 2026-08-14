@@ -7,7 +7,7 @@ func.func @dead_fractional_mapping(%base: !wave.ptr<#wave.shared, i32>) {
   scf.if %false {
     %value, %token = wave.gather %base mapping
         <bit_offset = <"slot / 2">>
-        bindings []() packet_bindings []()
+        bindings []()
         : (!wave.ptr<#wave.shared, i32>)
         -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   }

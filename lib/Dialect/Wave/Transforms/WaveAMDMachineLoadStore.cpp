@@ -111,16 +111,7 @@ planSelectedBufferSourceAddress(WaveAMDMachineSelector &S, Operation *user,
   FailureOr<AddressPlan> plan = planMemoryAddress(S, user, source.offset, spec);
   if (failed(plan))
     return failure();
-  if (failed(foldBufferAddressFieldsIntoVOffset(S, *plan,
-                                                /*includeInstOffset=*/true)))
-    return failure();
-  if (plan->fullAddressRemainderExpr) {
-    plan = planMemoryAddress(S, user, source.offset, spec,
-                             /*allowFullAddressRemainder=*/false);
-    if (failed(plan))
-      return failure();
-  }
-  if (!hasOnlyVOffsetField(*plan))
+  if (plan->fullAddressRemainderExpr)
     return std::optional<AddressPlan>{};
   return std::optional<AddressPlan>{*plan};
 }
@@ -141,9 +132,10 @@ planSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user, Value ptr,
       planSelectedBufferSourceAddress(S, user, (*sources)->inactive, spec);
   if (failed(activePlan) || failed(inactivePlan))
     return failure();
-  if (!*activePlan || !*inactivePlan ||
-      !isBufferSelectedSourceOobPlan(S, **inactivePlan))
+  if (!*activePlan || !*inactivePlan)
     return std::optional<SelectedBufferSourcePlans>{};
+  if (failed(rebaseSelectedBufferPlan(S, **activePlan, **inactivePlan)))
+    return failure();
   return std::optional<SelectedBufferSourcePlans>{
       SelectedBufferSourcePlans{**sources, **activePlan, **inactivePlan}};
 }
@@ -178,8 +170,6 @@ materializeSelectedBufferSourceBuckets(
   if (failed(selectedVOffset))
     return failure();
   active->voffset = *selectedVOffset;
-  active->soffset = createImm(S.builder, user->getLoc(), 0);
-  active->instOffset = 0;
   return *active;
 }
 
@@ -194,9 +184,10 @@ materializeSelectedBufferSourceBuckets(
   if (!*plans)
     return std::optional<WaveAMDMachineSelector::BucketedOperands>{};
 
-  if (std::optional<WaveAMDMachineSelector::BucketedOperands> selected =
-          selectedBufferSourceBucketsForVOffset(S, user, ptr))
-    return selected;
+  if (hasOnlyVOffsetField((**plans).active))
+    if (std::optional<WaveAMDMachineSelector::BucketedOperands> selected =
+            selectedBufferSourceBucketsForVOffset(S, user, ptr))
+      return selected;
 
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
       materializeSelectedBufferSourceBuckets(S, user, **plans, spec);

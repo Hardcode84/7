@@ -861,6 +861,7 @@ private:
   unsigned vLshrrevB32() const { return opcodes.vLshrrevB32; }
   unsigned vAshrrevI32() const { return opcodes.vAshrrevI32; }
   unsigned vLshrrevB64() const { return opcodes.vLshrrevB64; }
+  unsigned vLshlrevB64() const { return opcodes.vLshlrevB64; }
   unsigned vAshrrevI64() const { return opcodes.vAshrrevI64; }
   unsigned vFfbhU32() const { return opcodes.vFfbhU32; }
   unsigned vFfblB32() const { return opcodes.vFfblB32; }
@@ -5408,10 +5409,9 @@ private:
                      toMCOperand(op.getOperand(0)),
                      toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::VLshlrevB64Op>(op))
-      return emitMC(postVIOpcode(llvm::AMDGPU::V_LSHLREV_B64_pseudo_e64),
-                    {toMCOperand(op.getResult(0)),
-                     toMCOperand(op.getOperand(0)),
-                     toMCOperand(op.getOperand(1))});
+      return emitMC(vLshlrevB64(), {toMCOperand(op.getResult(0)),
+                                    toMCOperand(op.getOperand(0)),
+                                    toMCOperand(op.getOperand(1))});
     if (isa<waveamdmachine::SLshrB64Op>(op))
       return emitMC(sLshrB64(), {toMCOperand(op.getResult(0)),
                                  toMCOperand(op.getOperand(0)),

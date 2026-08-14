@@ -24,19 +24,23 @@ func.func @wave_block_redistribution_attr()
 // CHECK: wave.scatter {{.*}} mapping <bit_offset = <"32*(4*item + origin + slot)">>
 func.func @wave_symbolic_memory_ops(
     %base: !wave.ptr<#wave.shared, f32>, %origin: index) {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
+      : !wave.simd<i32, 32>
   %value, %loaded = wave.gather %base mapping
       #wave.memory_mapping<
         base = #wave.expr<"0">,
         target_block = #wave.expr<"block">,
         bit_offset = #wave.expr<"32 * (origin + 4 * item + slot)">>
-      bindings ["origin"](%origin) packet_bindings []()
-      : (!wave.ptr<#wave.shared, f32>, index)
+      bindings ["origin", "item"](%origin, %bounded_item)
+      : (!wave.ptr<#wave.shared, f32>, index, !wave.simd<i32, 32>)
       -> (!wave.simd<vector<4xf32>, 32>, !wave.mem.token)
   %stored = wave.scatter %value to %base mapping
       #wave.memory_mapping<bit_offset = #wave.expr<"32 * (origin + 4 * item + slot)">>
-      bindings ["origin"](%origin) packet_bindings []() after %loaded
+      bindings ["origin", "item"](%origin, %bounded_item) after %loaded
       : (!wave.simd<vector<4xf32>, 32>, !wave.ptr<#wave.shared, f32>,
-         index, !wave.mem.token) -> !wave.mem.token
+         index, !wave.simd<i32, 32>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -48,7 +52,7 @@ func.func @wave_unchecked_memory_mapping(
   %value, %token = wave.gather %base mapping
       <base = <"99">, target_block = <"7">,
        bit_offset = <"slot / 2">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.ptr<#wave.private, i32>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
@@ -74,13 +78,10 @@ func.func @wave_alloc() {
                          offset = 256 : i64}
       : !wave.ptr<#wave.shared, i8>
   %dependency = wave.token : !wave.mem.token
-  %source = arith.constant 0 : i32
-  %result = arith.constant 1 : i32
-  // CHECK: wave.alloc_release {{.*}} after {{.*}} value_lifetime({{.*}} -> {{.*}}) {workgroup_collective} : (!wave.ptr<#wave.shared, i8>, !wave.mem.token, i32, i32) -> !wave.mem.token
+  // CHECK: wave.alloc_release {{.*}} after {{.*}} {workgroup_collective} : (!wave.ptr<#wave.shared, i8>, !wave.mem.token) -> !wave.mem.token
   %released = wave.alloc_release %alloc after %dependency
-      value_lifetime(%source -> %result) {workgroup_collective}
-      : (!wave.ptr<#wave.shared, i8>, !wave.mem.token, i32, i32)
-      -> !wave.mem.token
+      {workgroup_collective}
+      : (!wave.ptr<#wave.shared, i8>, !wave.mem.token) -> !wave.mem.token
   return
 }
 
@@ -490,8 +491,17 @@ func.func @wave_index_expr(%lane: !wave.simd<i32, 32>,
   // CHECK: wave.index_expr <"K + lid"> assuming [#wave.pred<"K >= 0">, #wave.pred<"lid >= 0">] ["K", "lid"](%{{.*}}, %{{.*}}) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %a = wave.index_expr #wave.expr<"K + lid"> assuming [#wave.pred<"K >= 0">, #wave.pred<"lid >= 0">] ["K", "lid"] (%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
 
-  // CHECK: wave.index_expr <"lid"> assuming [#wave.pred<"lid >= 0 | -31 + lid <= 0">] ["lid"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  %o = wave.index_expr #wave.expr<"lid"> assuming [#wave.pred<"lid >= 0 | lid <= 31">] ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  // A relational assumption may retain a binding that simplification removed
+  // from the value expression.
+  // CHECK: wave.index_expr <"lid"> assuming [#wave.pred<"-K + lid >= 0">] ["lid", "K"](%{{.*}}, %{{.*}}) : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %r = wave.index_expr #wave.expr<"lid"> assuming [#wave.pred<"lid >= K">]
+      ["lid", "K"] (%lane, %k)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+
+  // Packet assumptions form one conjunctive domain. Disjunction remains
+  // available in expression predicates such as Piecewise conditions.
+  // CHECK: wave.index_expr <"lid"> assuming [#wave.pred<"lid >= 0 & -31 + lid <= 0">] ["lid"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %o = wave.index_expr #wave.expr<"lid"> assuming [#wave.pred<"lid >= 0 & lid <= 31">] ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
 
   // CHECK: wave.index_expr <"xor(31, lid)"> ["lid"](%{{.*}}) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %x = wave.index_expr #wave.expr<"xor(lid, 31)"> ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>

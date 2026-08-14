@@ -15,6 +15,20 @@ func.func @reduction_specialization_budget(%source: !wave.simd<i32, 32>)
 
 // -----
 
+func.func @nonlinear_slot_map_uses_exact_scalar_factor(
+    %source: !wave.simd<vector<128xi8>, 64>)
+    attributes {wave.workgroup_size = array<i32: 128, 1, 1>} {
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 128,
+       source_block = "block", source_item = "xor(item, 64)",
+       source_slot = "xor(slot, floor(1/127*item)*xor(slot, 2*Mod(slot, 2) + 4*Mod(floor(1/2*slot), 2) + Mod(floor(1/4*slot), 2) + 16*Mod(floor(1/8*slot), 2) + 32*Mod(floor(1/16*slot), 2) + 64*Mod(floor(1/32*slot), 2) + 8*floor(1/64*slot)))">
+      : !wave.simd<vector<128xi8>, 64>
+     -> !wave.simd<vector<128xi8>, 64>
+  return
+}
+
+// -----
+
 func.func @reduction_specialization_overflow(
     %source: !wave.simd<vector<2xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
@@ -49,7 +63,7 @@ func.func @reduction_source_slot_oob(%source: !wave.simd<i32, 32>)
 
 func.func @source_slot_oob(%source: !wave.simd<vector<2xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{source slot 2 is out of bounds at destination (0, 0, 0)}}
+  // expected-error @+1 {{redistribution relation is not provably total, integral, and in bounds}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 32, source_block = "block",
        source_item = "item", source_slot = "2">
@@ -61,7 +75,7 @@ func.func @source_slot_oob(%source: !wave.simd<vector<2xi32>, 32>)
 
 func.func @source_item_oob(%source: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{source item 32 is out of bounds at destination (0, 0, 0)}}
+  // expected-error @+1 {{redistribution relation is not provably total, integral, and in bounds}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 32, source_block = "block",
        source_item = "32", source_slot = "slot">
@@ -71,9 +85,9 @@ func.func @source_item_oob(%source: !wave.simd<vector<1xi32>, 32>)
 
 // -----
 
-func.func @partial_piecewise(%source: !wave.simd<vector<2xi32>, 32>)
+// A missing piecewise arm is poison and may refine to an in-bounds source.
+func.func @poison_piecewise_refines(%source: !wave.simd<vector<2xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{relation is not total at destination (0, 0, 1)}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 32, source_block = "block",
        source_item = "item", source_slot = "Piecewise((0, slot == 0))">
@@ -83,9 +97,9 @@ func.func @partial_piecewise(%source: !wave.simd<vector<2xi32>, 32>)
 
 // -----
 
-func.func @partial_division(%source: !wave.simd<vector<2xi32>, 32>)
+// Division by zero is poison and may refine to an in-bounds source slot.
+func.func @poison_division_refines(%source: !wave.simd<vector<2xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{relation is not total at destination (0, 1, 0)}}
   %result = wave.redistribute %source,
       <blocks = 1, items = 32, source_block = "block",
        source_item = "item",
@@ -98,7 +112,7 @@ func.func @partial_division(%source: !wave.simd<vector<2xi32>, 32>)
 
 func.func @source_block_oob(%source: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{source block 2 is out of bounds at destination (0, 0, 0)}}
+  // expected-error @+1 {{redistribution relation is not provably total, integral, and in bounds}}
   %result = wave.redistribute %source,
       <blocks = 2, items = 32, source_block = "2",
        source_item = "item", source_slot = "slot">
@@ -108,26 +122,13 @@ func.func @source_block_oob(%source: !wave.simd<vector<1xi32>, 32>)
 
 // -----
 
-func.func @partial_source_block(%source: !wave.simd<vector<1xi32>, 32>)
+// A missing piecewise arm may likewise refine to an in-bounds source block.
+func.func @poison_source_block_refines(%source: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{relation is not total at destination (1, 0, 0)}}
   %result = wave.redistribute %source,
       <blocks = 2, items = 32,
        source_block = "Piecewise((block, block == 0))",
        source_item = "item", source_slot = "slot">
-      : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
-  return
-}
-
-// -----
-
-func.func @exhaustive_limit(%source: !wave.simd<vector<1xi32>, 32>)
-    attributes {wave.workgroup_size = array<i32: 1048608, 1, 1>} {
-  // expected-error @+1 {{symbolic movement classification exceeds the 2^20 point limit}}
-  %result = wave.redistribute %source,
-      <blocks = 1, items = 1048608, source_block = "block",
-       source_item = "Mod(1 + item, 1048608)",
-       source_slot = "0">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
   return
 }
@@ -218,7 +219,7 @@ func.func @cross_wave_pointer(
 
 func.func @cross_block(%source: !wave.simd<vector<1xi32>, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  // expected-error @+1 {{cross-block redistribution requires cluster/DSM lowering}}
+  // expected-error @+1 {{cluster/DSM redistribution is unsupported}}
   %result = wave.redistribute %source,
       <blocks = 2, items = 32, source_block = "xor(block, 1)", source_item = "item", source_slot = "slot">
       : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
@@ -256,7 +257,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
       scf.yield %source : !wave.simd<vector<1xi8>, 32>
     }
     %second = scf.if %condition -> (!wave.simd<vector<1xi8>, 32>) {
-      // expected-error @+1 {{remaining target LDS capacity 32 bytes cannot hold one 64-byte scratch vector group}}
+      // expected-error @+1 {{remaining target LDS capacity 32 bytes cannot hold one 64-element scratch plane}}
       %moved = wave.redistribute %first,
           <blocks = 1, items = 64, source_block = "block",
            source_item = "xor(item, 32)", source_slot = "slot">
@@ -264,6 +265,40 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
       scf.yield %moved : !wave.simd<vector<1xi8>, 32>
     } else {
       scf.yield %first : !wave.simd<vector<1xi8>, 32>
+    }
+    return
+  }
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+  func.func @repetitive_sibling_scratch_exceeds_lds(
+      %condition: i1, %source0: !wave.simd<vector<4xi32>, 32>,
+      %source1: !wave.simd<vector<4xi32>, 32>)
+      attributes {wave.kernel, wave.lds_size = 65280 : i64,
+                  wave.workgroup_size = array<i32: 64, 1, 1>,
+                  wave.waves_per_workgroup = 2 : i64} {
+    %lower = arith.constant 0 : index
+    %upper = arith.constant 2 : index
+    %step = arith.constant 1 : index
+    scf.for %i = %lower to %upper step %step {
+      %selected = scf.if %condition -> (!wave.simd<vector<4xi32>, 32>) {
+        %then = wave.redistribute %source0,
+            <blocks = 1, items = 64, source_block = "block",
+             source_item = "xor(item, 32)", source_slot = "slot">
+            : !wave.simd<vector<4xi32>, 32>
+              -> !wave.simd<vector<4xi32>, 32>
+        scf.yield %then : !wave.simd<vector<4xi32>, 32>
+      } else {
+        // expected-error @+1 {{remaining target LDS capacity 0 bytes cannot hold one 64-element scratch plane}}
+        %else = wave.redistribute %source1,
+            <blocks = 1, items = 64, source_block = "block",
+             source_item = "xor(item, 32)", source_slot = "slot">
+            : !wave.simd<vector<4xi32>, 32>
+              -> !wave.simd<vector<4xi32>, 32>
+        scf.yield %else : !wave.simd<vector<4xi32>, 32>
+      }
     }
     return
   }

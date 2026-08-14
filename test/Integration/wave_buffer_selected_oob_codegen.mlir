@@ -1,16 +1,19 @@
-// RUN: wave-opt --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s \
+// RUN: wave-opt --wave-generate-index-exprs --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: wave-opt --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s \
+// RUN: wave-opt --wave-generate-index-exprs --waveamd-to-machine --waveamd-buffer-rsrc-to-tuples %s \
 // RUN:   | wave-translate --wave-to-amdgpu-asm - \
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM-LABEL: buffer_selected_oob_load_codegen:
-// ASM: v_mov_b32_e32 [[LOAD_OOB:v[0-9]+]], 0x80000000
+// ASM: s_lshl_b32 [[LOAD_SOFF:s[0-9]+]], {{s[0-9]+}}, 2
+// ASM: s_mul_i32 [[LOAD_NEG:s[0-9]+]], -4, {{s[0-9]+}}
+// ASM: s_add_i32 [[LOAD_REBASED:s[0-9]+]], [[LOAD_NEG]], 0x80000000
+// ASM: v_mov_b32_e32 [[LOAD_OOB:v[0-9]+]], [[LOAD_REBASED]]
 // ASM: v_cndmask_b32_e64 [[LOAD_VOFF:v[0-9]+]], [[LOAD_OOB]], {{v[0-9]+}}, {{s[0-9]+}}
-// ASM: buffer_load_b32 {{v[0-9]+}}, [[LOAD_VOFF]], {{s\[[0-9]+:[0-9]+\]}}, 0 offen
+// ASM: buffer_load_b32 {{v[0-9]+}}, [[LOAD_VOFF]], {{s\[[0-9]+:[0-9]+\]}}, [[LOAD_SOFF]] offen
 func.func @buffer_selected_oob_load_codegen(
     %in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>,
     %raw: i32) attributes {wave.kernel} {
@@ -52,9 +55,12 @@ func.func @buffer_selected_oob_load_codegen(
 }
 
 // ASM-LABEL: buffer_selected_oob_store_codegen:
-// ASM: v_mov_b32_e32 [[STORE_OOB:v[0-9]+]], 0x80000000
+// ASM: s_lshl_b32 [[STORE_SOFF:s[0-9]+]], {{s[0-9]+}}, 2
+// ASM: s_mul_i32 [[STORE_NEG:s[0-9]+]], -4, {{s[0-9]+}}
+// ASM: s_add_i32 [[STORE_REBASED:s[0-9]+]], [[STORE_NEG]], 0x80000000
+// ASM: v_mov_b32_e32 [[STORE_OOB:v[0-9]+]], [[STORE_REBASED]]
 // ASM: v_cndmask_b32_e64 [[STORE_VOFF:v[0-9]+]], [[STORE_OOB]], {{v[0-9]+}}, {{s[0-9]+}}
-// ASM: buffer_store_b32 {{v[0-9]+}}, [[STORE_VOFF]], {{s\[[0-9]+:[0-9]+\]}}, 0 offen
+// ASM: buffer_store_b32 {{v[0-9]+}}, [[STORE_VOFF]], {{s\[[0-9]+:[0-9]+\]}}, [[STORE_SOFF]] offen
 func.func @buffer_selected_oob_store_codegen(
     %out: !wave.ptr<#wave.global, i32>, %raw: i32) attributes {wave.kernel} {
   %range = arith.constant 128 : i32

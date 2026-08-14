@@ -21,7 +21,7 @@ module = build_wmma_f16_matmul_module(
 )
 print(module)
 
-# CHECK-COUNT-2: wave.assume
+# CHECK-COUNT-3: wave.assume
 # CHECK-NOT: wave.assume
 # CHECK: scf.for
 # CHECK: wave.index_expr <"2*__wave_dsl_mxfp4_step"> ["__wave_dsl_mxfp4_step"]

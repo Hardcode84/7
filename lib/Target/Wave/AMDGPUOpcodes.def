@@ -92,6 +92,7 @@
     V_LSHRREV_B32_e32_gfx11)                                                   \
   X(vAshrrevI32, V_ASHRREV_I32_e32, V_ASHRREV_I32_e32_vi,                      \
     V_ASHRREV_I32_e32_gfx11)                                                   \
+  X(vLshlrevB64, V_LSHLREV_B64_e64, V_LSHLREV_B64_vi, V_LSHLREV_B64_e64_gfx11) \
   X(vLshrrevB64, V_LSHRREV_B64_e64, V_LSHRREV_B64_vi, V_LSHRREV_B64_e64_gfx11) \
   X(vAshrrevI64, V_ASHRREV_I64_e64, V_ASHRREV_I64_vi, V_ASHRREV_I64_e64_gfx11) \
   X(vFfbhU32, V_FFBH_U32_e32, V_FFBH_U32_e32_vi, V_CLZ_I32_U32_e32_gfx11)      \

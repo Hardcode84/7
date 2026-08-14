@@ -528,12 +528,12 @@ func.func @private_singleton_assume_stays_atomic(
 
 // -----
 
-// Exact singleton definition eliminates origin and its duplicate delta path.
-// CHECK-LABEL: func.func @shared_singleton_assume_normalizes_definition
+// Shared producer: use the exact unit delta to remove the redundant origin.
+// CHECK-LABEL: func.func @shared_singleton_assume_deduplicates_bindings
 // CHECK-SAME: (%[[ORIGIN:.*]]: !wave.simd<i32, 32>, %[[NEXT:.*]]: !wave.simd<i32, 32>)
 // CHECK: wave.index_expr <"1 + raw1"> assuming
 // CHECK-SAME: ["raw1"](%[[NEXT]])
-func.func @shared_singleton_assume_normalizes_definition(
+func.func @shared_singleton_assume_deduplicates_bindings(
     %origin: !wave.simd<i32, 32>, %next: !wave.simd<i32, 32>)
     -> !wave.simd<index, 32>
     attributes {wave.address_arithmetic_no_overflow} {

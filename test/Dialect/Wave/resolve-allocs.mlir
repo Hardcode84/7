@@ -432,6 +432,63 @@ func.func @same_loop_reuse_with_backedge(%n: index)
 
 // -----
 
+// Partially overlapping fixed ranges share one private value-lifetime
+// recurrence.  The later release must order the whole reused range before the
+// first access in the next iteration.
+// CHECK-LABEL: func.func @partial_fixed_overlap_value_lifetime
+// CHECK-SAME: wave.lds_size = 80 : i64
+// CHECK-NOT: wave.alloc
+// CHECK: scf.for {{.*}} iter_args(%[[READY:.*]] =
+// CHECK: wave.shared_memory_base {offset = 16 : i64}
+// CHECK: wave.store {{.*}} after %[[READY]]
+// CHECK: wave.shared_memory_base
+// CHECK: scf.yield
+func.func @partial_fixed_overlap_value_lifetime(%n: index)
+    attributes {wave.kernel, wave.lds_size = 0 : i64} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 {
+    %a = wave.alloc() {align = 16 : i64, bytesize = 64 : i64,
+                       offset = 16 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %ap = wave.ptr_add %a, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %ta = wave.store %lane -> %ap
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
+        -> !wave.mem.token
+    %va, %ta_done = wave.load %ap after %ta
+        : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+    %a_released = wave.alloc_release %a after %ta_done {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    %a_safe = wave.barrier %a_released
+        : (!wave.mem.token) -> !wave.mem.token
+
+    %b = wave.alloc() {align = 16 : i64, bytesize = 64 : i64,
+                       offset = 0 : i64}
+        : !wave.ptr<#wave.shared, i32>
+    %bp = wave.ptr_add %b, %lane
+        : !wave.ptr<#wave.shared, i32>, !wave.simd<i32, 32>
+        -> !wave.simd<!wave.ptr<#wave.shared, i32>, 32>
+    %tb = wave.store %lane -> %bp after %a_safe
+        : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>,
+           !wave.mem.token) -> !wave.mem.token
+    %vb, %tb_done = wave.load %bp after %tb
+        : (!wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+    %b_released = wave.alloc_release %b after %tb_done {workgroup_collective}
+        : (!wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    %packed = wave.pack %va, %vb
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+        -> !wave.simd<vector<2xi32>, 32>
+  }
+  return
+}
+
+// -----
+
 // Fixed provisional offsets model clients that plan a bounded rotating LDS
 // scratch sequence before final allocation resolution.
 // CHECK-LABEL: func.func @fixed_loop_reuse_synthesizes_backedge

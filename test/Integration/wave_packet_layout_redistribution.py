@@ -11,24 +11,6 @@
 
 from mlir.dialects import wave_dsl as w
 
-SOURCE_LAYOUT = w.PacketLayout(
-    64,
-    (("x", 128),),
-    (
-        ("lane", ((1,), (2,), (4,), (8,), (16,), (32,))),
-        ("warp", ((64,),)),
-    ),
-)
-RESULT_LAYOUT = w.PacketLayout(
-    64,
-    (("x", 128),),
-    (
-        ("lane", ((1,), (2,), (4,), (8,), (16,), (64,))),
-        ("warp", ((32,),)),
-    ),
-)
-
-
 with w.module() as module_builder:
     with module_builder.function(
         "packet_layout_cross_wave",
@@ -38,12 +20,20 @@ with w.module() as module_builder:
         attrs={"wave.waves_per_workgroup": w.i64_attr(2)},
     ) as function_builder:
         (destination,) = function_builder.args
-        item = function_builder.workitem_id(width=64)
-        moved = function_builder.redistribute_layout(
+        raw_item = function_builder.workitem_id(width=64)
+        item = function_builder.assume_range(raw_item, 0, 127)
+        symbolic_item = w.sym("item")
+        source_item = (
+            w.mod(symbolic_item, 32)
+            + 32 * w.floor(symbolic_item / 64)
+            + 64 * w.mod(w.floor(symbolic_item / 32), 2)
+        )
+        moved = function_builder.redistribute(
             item,
             w.simd_type(w.i32(), width=64),
-            source_layout=SOURCE_LAYOUT,
-            result_layout=RESULT_LAYOUT,
+            items=128,
+            source_item=source_item,
+            source_slot=w.sym("slot"),
         )
         pointer = function_builder.ptr_add(destination, item)
         function_builder.store(moved, pointer)
@@ -59,7 +49,7 @@ with w.module() as module_builder:
 # LOWER: %[[VALUE:.*]], %[[LOAD_TOKEN:.*]] = wave.load {{.*}} after %[[PUBLISH]]
 # LOWER: %[[DONE:.*]] = wave.join %[[LOAD_TOKEN]]
 # LOWER: wave.alloc_release %[[ALLOC]] after %[[DONE]]
-# LOWER-SAME: value_lifetime({{.*}} -> %[[VALUE]]) {workgroup_collective}
+# LOWER-SAME: {workgroup_collective}
 
 # ASM-LABEL: packet_layout_cross_wave:
 # ASM: ds_write_b32

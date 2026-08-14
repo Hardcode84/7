@@ -7,6 +7,8 @@
 // RUN: not %t hpl-mxfp4 2>&1 | FileCheck %s --check-prefix=MXFP4
 // RUN: not %t streamk-workers 2>&1 | FileCheck %s --check-prefix=WORKERS
 // RUN: not %t streamk-layout 2>&1 | FileCheck %s --check-prefix=LAYOUT
+// RUN: not %t tlx-mxfp-shape 2>&1 | FileCheck %s --check-prefix=TLX-SHAPE
+// RUN: not %t tlx-mxfp-output 2>&1 | FileCheck %s --check-prefix=TLX-OUTPUT
 // RUN: not %t aiter-output-layout 2>&1 | FileCheck %s --check-prefix=AITER-LAYOUT
 // RUN: not %t aiter-wmma 2>&1 | FileCheck %s --check-prefix=AITER-WMMA
 // RUN: not %t aiter-wave-k 2>&1 | FileCheck %s --check-prefix=AITER-WAVE-K
@@ -37,10 +39,13 @@
 // VALID: input_check: passed mode=random a_codes=16 b_codes=16 a_scale_values=4 b_scale_values=4 reference=canonical upload=aiter-preshuffled
 // VALID: aiter_runner_contract: ok
 // VALID: streamk_kernel_abi: ok
+// VALID: tlx_mxfp_kernel_abi: ok
 // MUTEX: --all-ones, --rand-int, and --hpl are mutually exclusive
 // MXFP4: --rand-int/--hpl support f16/bf16 inputs only
 // WORKERS: Stream-K worker count must fit the work
 // LAYOUT: Stream-K ABI requires column-major output
+// TLX-SHAPE: TLX MXFP ABI requires M and N multiples of 256
+// TLX-OUTPUT: TLX MXFP ABI requires row-major output
 // AITER-LAYOUT: aiter input layout requires row-major output
 // AITER-WMMA: aiter input layout requires MFMA accumulators
 // AITER-WAVE-K: aiter input layout requires even wave K tiles

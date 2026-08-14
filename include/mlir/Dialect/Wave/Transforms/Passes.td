@@ -104,8 +104,8 @@ def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
   let summary = "Combine chained Wave pointer offsets into one symbolic offset";
   let description = [{
     Folds chained `wave.ptr_add` offsets into one `wave.index_expr` feeding a
-    single `wave.ptr_add`, and composes `wave.index_expr` values used as
-    bindings by other `wave.index_expr` ops.
+    single `wave.ptr_add`. Offset expressions and proof facts must already be
+    serialized in self-contained `wave.index_expr` packets.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -114,11 +114,18 @@ def WaveCombinePointerOffsets : Pass<"wave-combine-pointer-offsets"> {
 }
 
 def WaveGenerateIndexExprs : Pass<"wave-generate-index-exprs"> {
-  let summary = "Generate Wave index expressions for pointer offset arithmetic";
+  let summary = "Mechanically serialize Wave index SSA into symbolic packets";
   let description = [{
-    Promotes supported no-signed-wrap `wave.binary` arithmetic in address
-    contexts to `wave.index_expr`. The pass rewrites `wave.ptr_add` offsets and
-    `wave.index_expr` bindings, leaving unrelated arithmetic in SSA form.
+    For each supported pointer offset or existing `wave.index_expr` binding,
+    follows the supported defining SSA tree and emits
+    one self-contained `wave.index_expr`. Fixed-width integer semantics and
+    `wave.assume` predicates are retained as explicit packet assumptions.
+    Existing `wave.index_expr` expressions and bounds are substituted into the
+    enclosing packet without interpreting its consumers.
+    Unsupported compound producers remain ordinary SSA so downstream consumers
+    cannot mistake a partial conversion for a complete proof.
+    Symbolic-memory lowering owns access interpretation, predicate domains,
+    binding analysis, transaction planning, placement, and the access rewrite.
   }];
   let dependentDialects = [
     "wave::WaveDialect"
@@ -128,9 +135,10 @@ def WaveGenerateIndexExprs : Pass<"wave-generate-index-exprs"> {
 def WaveOptimizeMasks : Pass<"wave-optimize-masks"> {
   let summary = "Optimize Wave mask expressions under symbolic assumptions";
   let description = [{
-    Shares same-block comparisons proven equivalent from symbolic SSA
-    expressions and `wave.assume` facts, and folds comparisons proven
-    constant by those facts.
+    Recovers mask conjunctions encoded through integer select/and/compare
+    chains. It then shares same-block comparisons whose canonical forms agree
+    under both comparisons' symbolic SSA expressions and `wave.assume` facts,
+    and folds comparisons proven constant by those facts.
   }];
   let dependentDialects = [
     "wave::WaveDialect"
@@ -142,8 +150,11 @@ def WaveNormalizePointerOffsets : Pass<"wave-normalize-pointer-offsets"> {
   let description = [{
     Converts typed `!wave.ptr<#space, T>` values to opaque byte-addressed
     `!wave.ptr<#space>` values and scales `wave.ptr_add` offsets by the
-    original element size. Downstream pointer-offset planning then sees byte
-    offsets only.
+    original element size. Closed `wave.index_expr` packets are scaled as
+    packets. Raw offsets remain ordinary fixed-width SSA arithmetic for the
+    following GenerateIndexExprs pass; normalization never disguises an
+    unconverted producer tree as an opaque packet binding. Downstream
+    pointer-offset planning then sees byte offsets only.
   }];
   let dependentDialects = [
     "arith::ArithDialect",
@@ -236,11 +247,12 @@ def WaveResolveAllocs : Pass<"wave-resolve-allocs"> {
 }
 
 def WaveSimplifyIndexExprs : Pass<"wave-simplify-index-exprs"> {
-  let summary = "Simplify Wave index expressions with integer range facts";
+  let summary = "Simplify closed Wave index-expression packets with ixsimpl";
   let description = [{
-    Runs MLIR integer range analysis, converts proven binding ranges into
-    ixsimpl assumptions, and rewrites `wave.index_expr` expressions and binding
-    lists when analysis makes symbols redundant.
+    Passes each complete expression and its serialized assumptions to ixsimpl,
+    then removes bindings and predicates disconnected from the retained
+    expression. It does not import ambient SSA range facts or normalize bounds
+    in Wave.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -302,8 +314,10 @@ def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
     Rewrites loop-local `wave.ptr_add(base, wave.index_expr(... iv ...))`
     address formation into a pointer iter_arg when ixsimpl proves the
     per-iteration stride `expr(iv + step) - expr(iv)` no longer depends on the
-    loop IV. Machine lowering can then choose SGPR base carries, buffer soffset
-    marching, or fallback from the ordinary carried-pointer form.
+    loop IV. Proofs consume only the closed expression and explicit assumptions
+    serialized in that `wave.index_expr`; producer SSA is opaque. Machine
+    lowering can then choose SGPR base carries, buffer soffset marching, or
+    fallback from the ordinary carried-pointer form.
   }];
   let dependentDialects = [
     "func::FuncDialect",

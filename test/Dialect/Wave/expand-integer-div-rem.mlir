@@ -557,6 +557,31 @@ func.func @bounded_dynamic_signed_index_uses_i32(%x: index, %d: index)
 
 // -----
 
+// A signed-i32 range permits the same narrowing even when either operand may
+// be negative. The i32 signed div/rem expansion is total on poison inputs, and
+// the mathematical index result is sign-extended for remaining wide users.
+// CHECK-LABEL: func.func @signed_i32_range_index_uses_i32
+// CHECK: [[X32:%.*]] = wave.cast intconvert {{.*}} : index -> i32
+// CHECK: [[D32:%.*]] = wave.cast intconvert {{.*}} : index -> i32
+// CHECK: wave.urecip {{.*}} : i32 -> i32
+// CHECK: wave.cast intconvert {{.*}} policy {extension = #wave.cast_extension<sign>} : i32 -> index
+// CHECK-NOT: wave.binary divsi
+// CHECK-NOT: wave.binary remsi
+func.func @signed_i32_range_index_uses_i32(%x: index, %d: index)
+    -> (index, index) {
+  %bx = wave.assume %x as "x"
+      [#wave.pred<"2147483648 + x >= 0">,
+       #wave.pred<"-2147483647 + x <= 0">] : index
+  %bd = wave.assume %d as "d"
+      [#wave.pred<"2147483648 + d >= 0">,
+       #wave.pred<"-2147483647 + d <= 0">] : index
+  %q = wave.binary divsi %bx, %bd : index, index -> index
+  %r = wave.binary remsi %bx, %bd : index, index -> index
+  return %q, %r : index, index
+}
+
+// -----
+
 // CHECK-LABEL: func.func @bounded_dynamic_simd_i64_rem_uses_i32
 // CHECK-SAME: ([[X:%.*]]: !wave.simd<i64, 32>, [[D:%.*]]: !wave.simd<i64, 32>)
 // CHECK: [[BX:%.*]] = wave.assume [[X]]

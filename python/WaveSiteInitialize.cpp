@@ -11,6 +11,7 @@
 #include "mlir-c/Dialect/Func.h"
 #include "mlir-c/Dialect/GPU.h"
 #include "mlir-c/Dialect/MemRef.h"
+#include "mlir-c/Dialect/ROCDL.h"
 #include "mlir-c/Dialect/SCF.h"
 #include "mlir-c/Dialect/Transform.h"
 #include "mlir-c/Dialect/UB.h"
@@ -33,6 +34,7 @@ NB_MODULE(_site_initialize_0, m) {
     insertDialect(registry, mlirGetDialectHandle__func__());
     insertDialect(registry, mlirGetDialectHandle__gpu__());
     insertDialect(registry, mlirGetDialectHandle__memref__());
+    insertDialect(registry, mlirGetDialectHandle__rocdl__());
     insertDialect(registry, mlirGetDialectHandle__scf__());
     insertDialect(registry, mlirGetDialectHandle__transform__());
     insertDialect(registry, mlirGetDialectHandle__ub__());

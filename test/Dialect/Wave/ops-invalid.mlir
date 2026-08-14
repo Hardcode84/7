@@ -142,6 +142,24 @@ func.func @assume_on_signed(%v: si32) -> si32 {
 
 // -----
 
+func.func @ptr_add_signed_scalar_offset(
+    %base: !wave.ptr<#wave.global, i32>, %offset: si32) {
+  // expected-error @+1 {{integer offset must be signless i32 or i64}}
+  %ptr = wave.ptr_add %base, %offset : !wave.ptr<#wave.global, i32>, si32 -> !wave.ptr<#wave.global, i32>
+  return
+}
+
+// -----
+
+func.func @ptr_add_unsigned_simd_offset(
+    %base: !wave.ptr<#wave.global, i32>, %offset: !wave.simd<ui32, 32>) {
+  // expected-error @+1 {{SIMD offset element type must be index or signless i32}}
+  %ptr = wave.ptr_add %base, %offset : !wave.ptr<#wave.global, i32>, !wave.simd<ui32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  return
+}
+
+// -----
+
 func.func @assume_empty_name(%v: i32) -> i32 {
   // expected-error @+1 {{symbol name must be non-empty}}
   %r = wave.assume %v as "" [#wave.pred<"x >= 0">] : i32
@@ -293,7 +311,7 @@ func.func @index_expr_unbound_symbol(%lane: !wave.simd<i32, 32>) {
 // -----
 
 func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: i32) {
-  // expected-error @+1 {{binding name 'K' is not a free symbol of the expression}}
+  // expected-error @+1 {{binding name 'K' is not referenced by the expression or result-connected assumptions}}
   %v = wave.index_expr #wave.expr<"lid"> ["lid", "K"] (%lane, %k) : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   return
 }
@@ -301,8 +319,20 @@ func.func @index_expr_stray_binding(%lane: !wave.simd<i32, 32>, %k: i32) {
 // -----
 
 func.func @index_expr_assumption_undeclared_symbol(%lane: !wave.simd<i32, 32>) {
-  // expected-error @+1 {{assumption #0 references undeclared symbol `x`}}
+  // expected-error @+1 {{free symbol 'x' has no binding}}
   %v = wave.index_expr #wave.expr<"lid"> assuming [#wave.pred<"x >= 0">] ["lid"] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return
+}
+
+// -----
+
+func.func @index_expr_disconnected_assumption_conjunct(
+    %lane: !wave.simd<i32, 32>, %k: i32) {
+  // expected-error @+1 {{assumption #0 is disconnected from its expression}}
+  %v = wave.index_expr #wave.expr<"lid">
+      assuming [#wave.pred<"lid >= 0 & K >= 0">]
+      ["lid", "K"] (%lane, %k)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
   return
 }
 
@@ -359,6 +389,31 @@ func.func @index_expr_conflicting_widths(%lane32: !wave.simd<i32, 32>, %lane64: 
 func.func @index_expr_empty_name(%lane: !wave.simd<i32, 32>) {
   // expected-error @+1 {{binding name must be non-empty}}
   %v = wave.index_expr #wave.expr<"lid"> [""] (%lane) : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return
+}
+
+// -----
+
+func.func @index_expr_legacy_proof_attribute() {
+  %v = wave.index_expr <"0"> []() {proof = {}} : () -> index
+  return
+}
+
+// -----
+
+func.func @index_expr_legacy_externalization_attribute(%x: i32) {
+  %v = wave.index_expr <"x"> ["x"](%x) {
+    wave.index_externalization = {
+      expr = #wave.expr<"x">, assumptions = []
+    }
+  } : (i32) -> index
+  return
+}
+
+// -----
+
+func.func @index_expr_defined_fractional(%x: i32) {
+  %v = wave.index_expr <"1/2*x"> ["x"](%x) : (i32) -> index
   return
 }
 
@@ -868,31 +923,6 @@ func.func @alloc_release_wrong_address_space(
 
 // -----
 
-func.func @alloc_release_partial_value_lifetime(
-    %p: !wave.ptr<#wave.shared, i32>, %dependency: !wave.mem.token,
-    %source: i32) {
-  // expected-error @+1 {{lifetime_source and lifetime_result must be present together}}
-  %released = "wave.alloc_release"(%p, %dependency, %source)
-      <{operandSegmentSizes = array<i32: 1, 1, 1, 0>}>
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token, i32)
-      -> !wave.mem.token
-  return
-}
-
-// -----
-
-func.func @alloc_release_token_value_lifetime(
-    %p: !wave.ptr<#wave.shared, i32>, %dependency: !wave.mem.token) {
-  // expected-error @+1 {{value lifetime operands cannot be memory tokens}}
-  %released = wave.alloc_release %p after %dependency
-      value_lifetime(%dependency -> %dependency)
-      : (!wave.ptr<#wave.shared, i32>, !wave.mem.token,
-         !wave.mem.token, !wave.mem.token) -> !wave.mem.token
-  return
-}
-
-// -----
-
 func.func @alloc_zero_bytesize() {
   // expected-error @+1 {{bytesize must be positive}}
   %p = wave.alloc() {align = 4 : i64, bytesize = 0 : i64} : !wave.ptr<#wave.shared, i32>
@@ -1098,8 +1128,64 @@ func.func @gather_missing_binding(%base: !wave.ptr<#wave.shared, i32>) {
   // expected-error @+1 {{mapping symbol `origin` has no binding}}
   %value, %token = wave.gather %base mapping
       <bit_offset = <"32 * (origin + slot)">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_missing_item_ignores_adjacent_ssa(
+    %base: !wave.ptr<#wave.shared, i32>) {
+  %raw = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded = wave.assume %raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
+      : !wave.simd<i32, 32>
+  // expected-error @+1 {{mapping symbol `item` has no binding}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * (item + slot)">>
+      bindings []()
+      : (!wave.ptr<#wave.shared, i32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_scalar_item_rejected(
+    %base: !wave.ptr<#wave.shared, i32>, %item: index) {
+  // expected-error @+1 {{item binding must be lane SIMD i32 or index with packet SIMD width}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * (item + slot)">>
+      bindings ["item"](%item)
+      : (!wave.ptr<#wave.shared, i32>, index)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_i64_item_rejected(
+    %base: !wave.ptr<#wave.shared, i32>, %item: !wave.simd<i64, 32>) {
+  // expected-error @+1 {{item binding must be lane SIMD i32 or index with packet SIMD width}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * (item + slot)">>
+      bindings ["item"](%item)
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i64, 32>)
+      -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
+  return
+}
+
+// -----
+
+func.func @gather_wrong_width_item_rejected(
+    %base: !wave.ptr<#wave.shared, i32>, %item: !wave.simd<i32, 64>) {
+  // expected-error @+1 {{item binding must be lane SIMD i32 or index with packet SIMD width}}
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"32 * (item + slot)">>
+      bindings ["item"](%item)
+      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i32, 64>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
 }
@@ -1108,127 +1194,12 @@ func.func @gather_missing_binding(%base: !wave.ptr<#wave.shared, i32>) {
 
 func.func @gather_unused_binding(%base: !wave.ptr<#wave.shared, i32>,
                                  %origin: index) {
-  // expected-error @+1 {{binding `origin` is not referenced by the mapping}}
+  // Extra bindings may carry proof facts without appearing in the address.
   %value, %token = wave.gather %base mapping
       <bit_offset = <"32 * slot">>
-      bindings ["origin"](%origin) packet_bindings []()
+      bindings ["origin"](%origin)
       : (!wave.ptr<#wave.shared, i32>, index)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_slots_mismatch(
-    %base: !wave.ptr<#wave.shared, i32>,
-    %indices: !wave.simd<vector<2xi32>, 32>) {
-  // expected-error @+1 {{packet binding slot count must match the accessed packet}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index"](%indices)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<2xi32>, 32>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_component_count_mismatch(
-    %base: !wave.ptr<#wave.shared, i32>,
-    %i0: !wave.simd<index, 32>, %i1: !wave.simd<index, 32>,
-    %i2: !wave.simd<index, 32>) {
-  // expected-error @+1 {{packet binding `index` component count must match the accessed packet}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings
-      ["index", "index", "index"](%i0, %i1, %i2)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<index, 32>,
-         !wave.simd<index, 32>, !wave.simd<index, 32>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_binding_name_count(
-    %base: !wave.ptr<#wave.shared, i32>,
-    %indices: !wave.simd<vector<4xi32>, 32>) {
-  // expected-error @+1 {{expected one packet binding name per operand}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index", "index"](%indices)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<4xi32>, 32>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_binding_requires_simd(
-    %base: !wave.ptr<#wave.shared, i32>, %index: i32) {
-  // expected-error @+1 {{packet binding operands must have wave SIMD type}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index"](%index)
-      : (!wave.ptr<#wave.shared, i32>, i32)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_binding_width_mismatch(
-    %base: !wave.ptr<#wave.shared, i32>,
-    %indices: !wave.simd<vector<4xi32>, 64>) {
-  // expected-error @+1 {{packet binding SIMD width must match packet SIMD width}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index"](%indices)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<4xi32>, 64>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_binding_packed_element(
-    %base: !wave.ptr<#wave.shared, i32>,
-    %indices: !wave.simd<vector<4xi16>, 32>) {
-  // expected-error @+1 {{packed packet binding elements must be signless i32}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index"](%indices)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<4xi16>, 32>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_binding_component_element(
-    %base: !wave.ptr<#wave.shared, i32>, %index: !wave.simd<i16, 32>) {
-  // expected-error @+1 {{packet binding components must be index or signless i32}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index"](%index)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<i16, 32>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
-  return
-}
-
-// -----
-
-func.func @gather_packet_mixed_packed_and_components(
-    %base: !wave.ptr<#wave.shared, i32>,
-    %indices: !wave.simd<vector<4xi32>, 32>,
-    %i0: !wave.simd<index, 32>) {
-  // expected-error @+1 {{packet binding `index` mixes packed and component operands}}
-  %value, %token = wave.gather %base mapping
-      <bit_offset = <"32 * index">>
-      bindings []() packet_bindings ["index", "index"](%indices, %i0)
-      : (!wave.ptr<#wave.shared, i32>, !wave.simd<vector<4xi32>, 32>,
-         !wave.simd<index, 32>)
-      -> (!wave.simd<vector<4xi32>, 32>, !wave.mem.token)
   return
 }
 
@@ -1240,7 +1211,7 @@ func.func @gather_pointer_type_mismatch(
   // expected-error @+1 {{pointer bases must have identical address spaces and element types}}
   %value, %token = wave.gather %global, %shared mapping
       <base = <"slot">, bit_offset = <"0">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.ptr<#wave.global, i32>, !wave.ptr<#wave.shared, i32>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
@@ -1253,7 +1224,7 @@ func.func @gather_simd_base_width_mismatch(
   // expected-error @+1 {{SIMD pointer base width must match packet SIMD width}}
   %value, %token = wave.gather %base mapping
       <bit_offset = <"32 * slot">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
   return
@@ -1267,7 +1238,7 @@ func.func @gather_simd_base_address_space_mismatch(
   // expected-error @+1 {{pointer bases must have identical address spaces and element types}}
   %value, %token = wave.gather %global, %shared mapping
       <base = <"slot">, bit_offset = <"0">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.ptr<#wave.global, i32>,
          !wave.simd<!wave.ptr<#wave.shared, i32>, 32>)
       -> (!wave.simd<vector<2xi32>, 32>, !wave.mem.token)
@@ -1283,7 +1254,7 @@ func.func @scatter_simd_base_element_type_mismatch(
   // expected-error @+1 {{pointer bases must have identical address spaces and element types}}
   %token = wave.scatter %value to %first, %second mapping
       <base = <"slot">, bit_offset = <"0">>
-      bindings []() packet_bindings []()
+      bindings []()
       : (!wave.simd<vector<2xi32>, 32>, !wave.ptr<#wave.global, i32>,
          !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
       -> !wave.mem.token
@@ -1519,5 +1490,24 @@ func.func @reduce_relation_nonintegral(%v: !wave.simd<i32, 32>) {
     ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
       wave.yield %lhs : !wave.simd<i32, 32>
     }
+  return
+}
+
+// -----
+
+func.func @index_expr_accepts_poison_packet(
+    %x: i32, %d: i32) {
+  %v = wave.index_expr <"floor(x/d)"> ["x", "d"](%x, %d)
+      : (i32, i32) -> index
+  return
+}
+
+// -----
+
+func.func @index_expr_accepts_poison_refinement_assumption(
+    %x: i32, %d: i32) {
+  %v = wave.index_expr <"floor(x/d)"> assuming
+      [#wave.pred<"floor(x/d) == 0">] ["x", "d"](%x, %d)
+      : (i32, i32) -> index
   return
 }

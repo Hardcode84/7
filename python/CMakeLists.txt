@@ -36,7 +36,8 @@ declare_mlir_dialect_python_bindings(
   ADD_TO_PARENT WavePythonSources
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mlir"
   TD_FILE dialects/WaveOps.td
-  GEN_ENUM_BINDINGS
+  GEN_ENUM_BINDINGS_TD_FILE
+    ../../include/mlir/Dialect/Wave/IR/WaveEnums.td
   SOURCES_GLOB dialects/_wave_*_gen.py
   DIALECT_NAME wave)
 
@@ -44,7 +45,8 @@ declare_mlir_dialect_python_bindings(
   ADD_TO_PARENT WavePythonSources
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mlir"
   TD_FILE dialects/WaveAMDOps.td
-  GEN_ENUM_BINDINGS
+  GEN_ENUM_BINDINGS_TD_FILE
+    ../../include/mlir/Dialect/Wave/IR/WaveAMDAttrs.td
   SOURCES_GLOB dialects/_waveamd_*_gen.py
   DIALECT_NAME waveamd)
 
@@ -77,6 +79,7 @@ declare_mlir_python_extension(WavePythonSources.SiteInitializer
     MLIRCAPIGPU
     MLIRCAPIIR
     MLIRCAPIMemRef
+    MLIRCAPIROCDL
     MLIRCAPISCF
     MLIRCAPITransformDialect
     MLIRCAPIUB
@@ -96,6 +99,7 @@ _flatten_mlir_python_targets(_wave_python_targets
   MLIRPythonSources.Dialects.func
   MLIRPythonSources.Dialects.gpu
   MLIRPythonSources.Dialects.memref
+  MLIRPythonSources.Dialects.rocdl
   MLIRPythonSources.Dialects.scf
   MLIRPythonSources.Dialects.transform
   MLIRPythonSources.Dialects.transform.interpreter
@@ -159,6 +163,7 @@ foreach(source_target IN LISTS _wave_python_pure_targets)
     SOURCES_TARGETS ${source_target})
   add_dependencies(WavePythonModules.sources ${sources_target})
 endforeach()
+
 _flatten_mlir_python_targets(_wave_python_header_targets
   MLIRPythonCAPI.HeaderSources)
 add_mlir_python_sources_target(WavePythonModules.capi-headers

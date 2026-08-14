@@ -486,6 +486,11 @@ static void validateV9GoldenArgs(const Args &a) {
     die("v9 golden ABI requires the v9 256x256x64 tile shape");
 }
 
+static void validateTLXMXFPOutputLayout(OutputLayout layout) {
+  if (layout != OutputLayout::Automatic && layout != OutputLayout::RowMajor)
+    die("TLX MXFP ABI requires row-major output");
+}
+
 static void validateTLXMXFPArgs(const Args &a) {
   if (a.kernelABI != KernelABI::TLXMXFP)
     return;
@@ -497,6 +502,9 @@ static void validateTLXMXFPArgs(const Args &a) {
     die("TLX MXFP ABI requires wave-size 64");
   if (a.k != 16384)
     die("TLX MXFP ABI is frozen for k=16384");
+  if (a.m % 256 || a.n % 256)
+    die("TLX MXFP ABI requires M and N multiples of 256");
+  validateTLXMXFPOutputLayout(a.outputLayout);
   if (!hasTLXMXFPTileShape(a))
     die("TLX MXFP ABI requires the TLX 256x256x256 tile shape");
 }
@@ -1080,8 +1088,6 @@ static OutputLayout getEffectiveOutputLayout(const Args &a) {
     return OutputLayout::ColumnMajor;
   if (a.mxfp4InputLayout == MXFP4InputLayout::AITER)
     return OutputLayout::RowMajor;
-  if (isTLXMXFP(a))
-    return OutputLayout::TilePacked;
   return OutputLayout::RowMajor;
 }
 
@@ -1761,14 +1767,15 @@ struct KernelArgStorage {
   std::array<void *, 4> matmulArgs;
   std::array<void *, 6> mxfp4Args;
   std::array<void *, 8> v9Args;
-  std::array<void *, 12> tlxArgs;
+  std::array<void *, 13> tlxArgs;
   std::array<void *, 6> streamKArgs;
   void **active = nullptr;
   int strideAM = 0;
   int strideBK = 0;
   int strideCM = 0;
   int packedKStride = 0;
-  int scaleKStride = 0;
+  int aScaleKStride = 0;
+  int bScaleKStride = 0;
 };
 
 static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
@@ -1778,8 +1785,8 @@ static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
   storage.strideCM = a.n;
   storage.packedKStride =
       isMXFP4(a.inputType) ? divExact(a.k, 2, "bad MXFP4 packed K stride") : 0;
-  storage.scaleKStride =
-      isMXFP4(a.inputType) ? divExact(a.k, 32, "bad MXFP4 scale stride") : 0;
+  storage.aScaleKStride = isMXFP4(a.inputType) ? a.m : 0;
+  storage.bScaleKStride = isMXFP4(a.inputType) ? a.n : 0;
   storage.matmulArgs = {&buffers.deviceA, &buffers.deviceB, &buffers.deviceC,
                         &tripCount};
   storage.mxfp4Args = {&buffers.deviceA,      &buffers.deviceB,
@@ -1795,11 +1802,12 @@ static void initKernelArgStorage(KernelArgStorage &storage, Args &a,
                      &buffers.deviceBScale,
                      &a.m,
                      &a.n,
+                     &a.k,
                      &storage.packedKStride,
                      &storage.packedKStride,
                      &storage.strideCM,
-                     &storage.scaleKStride,
-                     &storage.scaleKStride};
+                     &storage.aScaleKStride,
+                     &storage.bScaleKStride};
   storage.streamKArgs = {&buffers.deviceA,
                          &buffers.deviceB,
                          &buffers.deviceC,

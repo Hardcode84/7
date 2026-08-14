@@ -80,7 +80,7 @@
 // F16-ASM-NEXT: s_barrier_wait
 // F16-ASM: ds_load_b128
 // F16-ASM: v_wmma_f32_16x16x32_f16
-// F16-ASM: buffer_store_b32
+// F16-ASM-COUNT-8: buffer_store_b32
 // F16-ASM: .amdhsa_group_segment_fixed_size 2048
 
 // BF16-ASM: .amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
@@ -91,7 +91,7 @@
 // BF16-ASM-NEXT: s_barrier_wait
 // BF16-ASM: ds_load_b128
 // BF16-ASM: v_wmma_f32_16x16x32_bf16
-// BF16-ASM: buffer_store_b32
+// BF16-ASM-COUNT-8: buffer_store_b32
 // BF16-ASM: .amdhsa_group_segment_fixed_size 2048
 
 // F16-DIS-LABEL: <wmma_f16_matmul_tiled>:
@@ -101,7 +101,7 @@
 // F16-DIS-NEXT: s_barrier_wait
 // F16-DIS: ds_load_b128
 // F16-DIS: v_wmma_f32_16x16x32_f16
-// F16-DIS: buffer_store_b32
+// F16-DIS-COUNT-8: buffer_store_b32
 
 // BF16-DIS-LABEL: <wmma_f16_matmul_tiled>:
 // BF16-DIS: buffer_load_b128
@@ -110,4 +110,4 @@
 // BF16-DIS-NEXT: s_barrier_wait
 // BF16-DIS: ds_load_b128
 // BF16-DIS: v_wmma_f32_16x16x32_bf16
-// BF16-DIS: buffer_store_b32
+// BF16-DIS-COUNT-8: buffer_store_b32

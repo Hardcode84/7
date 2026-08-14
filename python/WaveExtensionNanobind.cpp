@@ -50,6 +50,7 @@ static void bindTargetEnums(nb::module_ &m) {
       .value("MfmaF32_32x32x16_BF16", MmaKind::MfmaF32_32x32x16_BF16)
       .value("MfmaScaleF32_16x16x128_F4F4",
              MmaKind::MfmaScaleF32_16x16x128_F4F4)
+      .value("MfmaScaleF32_32x32x64_F4F4", MmaKind::MfmaScaleF32_32x32x64_F4F4)
       .value("WmmaF32_16x16x32_F16", MmaKind::WmmaF32_16x16x32_F16)
       .value("WmmaF32_16x16x32_BF16", MmaKind::WmmaF32_16x16x32_BF16)
       .def("__str__", [](MmaKind value) {
@@ -473,6 +474,11 @@ static void bindExprAttr(nb::module_ &m) {
               throw nb::value_error("failed to import wave.expr node");
             return cls(attr);
           },
+          R"doc(Low-level FFI import from a raw node address.
+
+The address must come from the exact ixsimpl ABI/build packaged with Wave. Its
+node and owning Context must remain alive until this synchronous call returns.
+)doc",
           nb::arg("cls"), nb::arg("node_ptr"), nb::arg("context"))
       .def_classmethod(
           "get_from_bytes",
@@ -509,6 +515,11 @@ static void bindPredAttr(nb::module_ &m) {
               throw nb::value_error("failed to import wave.pred node");
             return cls(attr);
           },
+          R"doc(Low-level FFI import from a raw predicate-node address.
+
+The address must come from the exact ixsimpl ABI/build packaged with Wave. Its
+node and owning Context must remain alive until this synchronous call returns.
+)doc",
           nb::arg("cls"), nb::arg("node_ptr"), nb::arg("context"))
       .def_classmethod(
           "get_from_bytes",

@@ -61,9 +61,14 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveNormalizePointerOffsets.cpp
   WaveOptimizeMasks.cpp
   WavePromoteGlobalToBuffer.cpp
+  WaveRedistributeLayoutPlanning.cpp
+  WaveRedistributePlanning.cpp
   WaveResolveAllocs.cpp
   WaveSetTargetAttr.cpp
   WaveSimplifyIndexExprs.cpp
+  WaveSymbolicMemoryPreparation.cpp
+  WaveSymbolicValueAnalysis.cpp
+  WaveSymbolicValueAnalysisExpr.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Wave

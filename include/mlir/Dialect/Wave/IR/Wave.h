@@ -24,6 +24,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -71,11 +72,6 @@ struct SymbolicOffset {
   bool isUniform() const { return laneWidth == 0; }
 };
 
-struct MemoryAddress {
-  SymbolicOffset offset;
-  Value base;
-};
-
 FailureOr<SymbolicOffsetBindingKind> classifySymbolicOffsetBinding(
     Type type, function_ref<InFlightDiagnostic(const Twine &)> emitError);
 unsigned getSymbolicOffsetLaneWidth(ValueRange bindings);
@@ -116,6 +112,8 @@ filterIndexExprPredicatesBySymbols(ArrayRef<sym::PredHandle> assumptions,
 std::optional<uint64_t> getIndexExprMaterializationCost(sym::ExprHandle expr);
 bool shouldUseSimplifiedIndexExpr(sym::ExprHandle candidate,
                                   sym::ExprHandle baseline);
+/// Decode exactly the expression, assumptions, and binding identities
+/// serialized by `op`; never inspect a binding's producer.
 FailureOr<SymbolicOffset> getIndexExprSymbolicOffset(IndexExprOp op);
 FailureOr<MemoryPayloadShape> getMemoryPayloadShape(
     Type elementType,
@@ -126,13 +124,6 @@ bool isItemLocalRedistribution(RedistributionAttr relation);
 bool isIdentityRedistribution(RedistributionAttr relation);
 bool hasAddressArithmeticNoOverflowAssumption(Operation *op);
 bool hasAddressArithmeticNoOverflowAssumption(Value value);
-FailureOr<std::optional<MemoryAddress>>
-normalizeMemoryAddress(Value ptr, WaveDialect &dialect);
-FailureOr<std::optional<sym::ExprHandle>>
-computeMemoryAddressDelta(WaveDialect &dialect, const MemoryAddress &lhs,
-                          const MemoryAddress &rhs);
-FailureOr<std::optional<int64_t>> computeConstantMemoryAddressDelta(
-    WaveDialect &dialect, const MemoryAddress &lhs, const MemoryAddress &rhs);
 } // namespace mlir::wave
 
 #define GET_OP_CLASSES

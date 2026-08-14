@@ -27,7 +27,7 @@ module = build_flash_attention_f32_module(
 module_text = str(module)
 assert module_text.count("waveamd.mma") == 4
 assert module_text.count("waveamd.make_buffer") == 4
-assert "wave.assume" not in module_text
+assert module_text.count("wave.assume ") == 1
 assert "iter_args" in module_text
 unrolled = build_flash_attention_f32_module(
     block_m=16,
