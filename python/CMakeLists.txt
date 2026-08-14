@@ -164,6 +164,67 @@ foreach(source_target IN LISTS _wave_python_pure_targets)
   add_dependencies(WavePythonModules.sources ${sources_target})
 endforeach()
 
+# Package same ixsimpl checkout as WaveIXSimpl; raw node ABI must match.
+get_filename_component(WAVE_PYTHON_PACKAGE_ROOT
+  "${WavePythonModules_ROOT_PREFIX}" DIRECTORY)
+get_filename_component(WAVE_PYTHON_INSTALL_ROOT
+  "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}" DIRECTORY)
+set(WAVE_IXSIMPL_SOURCE_ROOT "${PROJECT_SOURCE_DIR}/third_party/ixsimpl")
+set(WAVE_IXSIMPL_PYTHON_SOURCE_DIR
+  "${WAVE_IXSIMPL_SOURCE_ROOT}/bindings/python/ixsimpl")
+set(WAVE_IXSIMPL_PYTHON_PACKAGE_DIR
+  "${WAVE_PYTHON_PACKAGE_ROOT}/ixsimpl")
+
+set(_wave_ixsimpl_python_sources
+  __init__.py
+  _ixsimpl.pyi
+  sympy_conv.py)
+set(_wave_ixsimpl_python_source_paths)
+set(_wave_ixsimpl_staged_sources)
+set(_wave_ixsimpl_source_copy_commands)
+foreach(source IN LISTS _wave_ixsimpl_python_sources)
+  list(APPEND _wave_ixsimpl_python_source_paths
+    "${WAVE_IXSIMPL_PYTHON_SOURCE_DIR}/${source}")
+  list(APPEND _wave_ixsimpl_staged_sources
+    "${WAVE_IXSIMPL_PYTHON_PACKAGE_DIR}/${source}")
+  list(APPEND _wave_ixsimpl_source_copy_commands
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${WAVE_IXSIMPL_PYTHON_SOURCE_DIR}/${source}"
+            "${WAVE_IXSIMPL_PYTHON_PACKAGE_DIR}/${source}")
+endforeach()
+add_custom_command(
+  OUTPUT ${_wave_ixsimpl_staged_sources}
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+          "${WAVE_IXSIMPL_PYTHON_PACKAGE_DIR}"
+  ${_wave_ixsimpl_source_copy_commands}
+  DEPENDS ${_wave_ixsimpl_python_source_paths}
+  VERBATIM)
+add_custom_target(WaveIXSimplPythonSources
+  DEPENDS ${_wave_ixsimpl_staged_sources})
+
+Python3_add_library(WaveIXSimplPythonExtension MODULE WITH_SOABI
+  "${WAVE_IXSIMPL_SOURCE_ROOT}/bindings/python/_ixsimpl.c")
+target_link_libraries(WaveIXSimplPythonExtension PRIVATE WaveIXSimpl)
+target_compile_options(WaveIXSimplPythonExtension PRIVATE
+  -Wno-cast-qual
+  -Wno-write-strings)
+set_target_properties(WaveIXSimplPythonExtension PROPERTIES
+  C_STANDARD 99
+  C_STANDARD_REQUIRED ON
+  C_EXTENSIONS OFF
+  C_VISIBILITY_PRESET hidden
+  LIBRARY_OUTPUT_DIRECTORY "${WAVE_IXSIMPL_PYTHON_PACKAGE_DIR}"
+  OUTPUT_NAME "_ixsimpl")
+add_dependencies(WaveIXSimplPythonExtension WaveIXSimplPythonSources)
+add_dependencies(WavePythonModules WaveIXSimplPythonExtension)
+
+install(TARGETS WaveIXSimplPythonExtension
+  COMPONENT WavePythonModules
+  LIBRARY DESTINATION "${WAVE_PYTHON_INSTALL_ROOT}/ixsimpl")
+install(FILES ${_wave_ixsimpl_staged_sources}
+  COMPONENT WavePythonModules
+  DESTINATION "${WAVE_PYTHON_INSTALL_ROOT}/ixsimpl")
+
 _flatten_mlir_python_targets(_wave_python_header_targets
   MLIRPythonCAPI.HeaderSources)
 add_mlir_python_sources_target(WavePythonModules.capi-headers
