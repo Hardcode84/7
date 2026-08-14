@@ -46,6 +46,7 @@ config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 config.substitutions.append(("%python", f'"{sys.executable}"'))
 config.substitutions.append(("%PYTHON", f'"{sys.executable}"'))
 config.substitutions.append(("%wave_obj_root", config.wave_mlir_obj_root))
+config.substitutions.append(("%wave_llvm_tools_dir", config.llvm_tools_dir))
 if sys.platform.startswith("linux"):
     config.available_features.add("linux")
 

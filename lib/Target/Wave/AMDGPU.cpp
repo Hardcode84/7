@@ -6126,6 +6126,10 @@ private:
 #error "WAVE_DEFAULT_LLD_REL must be defined by the build system"
 #endif
 
+#ifndef WAVE_EMBEDDED_LLD_REL
+#error "WAVE_EMBEDDED_LLD_REL must be defined by the build system"
+#endif
+
 static void waveImageAnchor() {}
 
 // Resolve the wave compilation pipeline library path.
@@ -6169,6 +6173,11 @@ static FailureOr<std::string> findLldPath(Operation *opForDiag) {
 
     path = llvm::sys::path::parent_path(exe);
     llvm::sys::path::append(path, WAVE_DEFAULT_LLD_REL);
+    if (llvm::sys::fs::can_execute(path))
+      return std::string(path);
+
+    path = llvm::sys::path::parent_path(exe);
+    llvm::sys::path::append(path, WAVE_EMBEDDED_LLD_REL);
     if (llvm::sys::fs::can_execute(path))
       return std::string(path);
   }

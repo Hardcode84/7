@@ -74,4 +74,5 @@ target_compile_definitions(obj.MLIRTargetWave
   PRIVATE
   "WAVE_DEFAULT_PIPELINE_REL=\"../share/wave-mlir/pipelines/pipelines.mlir\""
   "WAVE_DEFAULT_LLD_REL=\"../llvm-install/bin/ld.lld\""
+  "WAVE_EMBEDDED_LLD_REL=\"../../llvm-install/bin/ld.lld\""
   )
