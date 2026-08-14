@@ -80,6 +80,16 @@ static TermKind materializationKind(WaveAMDMachineSelector &S,
                                     sym::ExprHandle expr,
                                     const llvm::StringMap<Value> &subs);
 
+static bool isRoundedIndexExprKind(sym::ExprKind kind) {
+  return kind == sym::ExprKind::Floor || kind == sym::ExprKind::Ceil ||
+         kind == sym::ExprKind::Trunc;
+}
+
+static bool isBitwiseIndexExprKind(sym::ExprKind kind) {
+  return kind == sym::ExprKind::Xor || kind == sym::ExprKind::And ||
+         kind == sym::ExprKind::Or;
+}
+
 static unsigned materializationLoopDepth(sym::ExprHandle expr, Operation *user,
                                          const llvm::StringMap<Value> &subs);
 
@@ -204,22 +214,19 @@ static TermKind compoundMaterializationKind(WaveAMDMachineSelector &S,
                                             sym::ExprHandle expr,
                                             const llvm::StringMap<Value> &subs,
                                             sym::ExprView view) {
-  switch (view.getKind()) {
-  case sym::ExprKind::Add:
+  auto kind = view.getKind();
+  if (view.getKind() == sym::ExprKind::Add)
     return addMaterializationKind(S, expr, subs);
-  case sym::ExprKind::Mul:
+  if (view.getKind() == sym::ExprKind::Mul)
     return mulMaterializationKind(S, expr, subs);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-  case sym::ExprKind::Trunc:
+  if (isRoundedIndexExprKind(kind))
     return materializationKind(S, view.getUnaryArg(), subs);
+  if (isBitwiseIndexExprKind(kind))
+    return assocMaterializationKind(S, view, subs);
+  switch (view.getKind()) {
   case sym::ExprKind::Mod:
     return std::max(materializationKind(S, view.getBinaryLhs(), subs),
                     materializationKind(S, view.getBinaryRhs(), subs));
-  case sym::ExprKind::Xor:
-  case sym::ExprKind::And:
-  case sym::ExprKind::Or:
-    return assocMaterializationKind(S, view, subs);
   case sym::ExprKind::Piecewise:
     return piecewiseMaterializationKind(S, expr, subs);
   default:
@@ -331,22 +338,19 @@ static unsigned
 compoundMaterializationLoopDepth(sym::ExprHandle expr, Operation *user,
                                  const llvm::StringMap<Value> &subs,
                                  sym::ExprView view) {
-  switch (view.getKind()) {
-  case sym::ExprKind::Add:
+  auto kind = view.getKind();
+  if (view.getKind() == sym::ExprKind::Add)
     return addMaterializationLoopDepth(expr, user, subs);
-  case sym::ExprKind::Mul:
+  if (view.getKind() == sym::ExprKind::Mul)
     return mulMaterializationLoopDepth(expr, user, subs);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-  case sym::ExprKind::Trunc:
+  if (isRoundedIndexExprKind(kind))
     return materializationLoopDepth(view.getUnaryArg(), user, subs);
+  if (isBitwiseIndexExprKind(kind))
+    return assocMaterializationLoopDepth(view, user, subs);
+  switch (view.getKind()) {
   case sym::ExprKind::Mod:
     return std::max(materializationLoopDepth(view.getBinaryLhs(), user, subs),
                     materializationLoopDepth(view.getBinaryRhs(), user, subs));
-  case sym::ExprKind::Xor:
-  case sym::ExprKind::And:
-  case sym::ExprKind::Or:
-    return assocMaterializationLoopDepth(view, user, subs);
   case sym::ExprKind::Piecewise:
     return piecewiseMaterializationLoopDepth(expr, user, subs);
   default:
@@ -1593,52 +1597,68 @@ static bool isIntegralLiteral(sym::ExprHandle expr) {
   return value && value->denominator == 1;
 }
 
+static bool requiresWideModuloB32Intermediates(sym::Analysis &analysis,
+                                               sym::ExprHandle expr);
+
+static bool addRequiresWideModuloB32Intermediates(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr,
+                                                  sym::ExprView view) {
+  if (!isIntegralLiteral(view.getAddConstant()))
+    return rationalProofNeedsWide(analysis, expr);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
+    sym::AddTerm term = view.getAddTerm(i);
+    if (!isIntegralLiteral(term.coefficient))
+      return rationalProofNeedsWide(analysis, expr);
+    if (requiresWideModuloB32Intermediates(analysis, term.term))
+      return true;
+  }
+  return false;
+}
+
+static bool mulRequiresWideModuloB32Intermediates(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr,
+                                                  sym::ExprView view) {
+  if (!isIntegralLiteral(view.getMulCoefficient()))
+    return rationalProofNeedsWide(analysis, expr);
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
+    sym::MulFactor factor = view.getMulFactor(i);
+    if (factor.exponent < 0)
+      return rationalProofNeedsWide(analysis, expr);
+    if (requiresWideModuloB32Intermediates(analysis, factor.base))
+      return true;
+  }
+  return false;
+}
+
+static bool assocRequiresWideModuloB32Intermediates(sym::Analysis &analysis,
+                                                    sym::ExprView view) {
+  for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
+    if (requiresWideModuloB32Intermediates(analysis, view.getAssocArg(i)))
+      return true;
+  return false;
+}
+
 // Inside a modulo-2^32 envelope, integer Add and Mul nodes are operations in
 // Z/2^32 and need not be exact in B32. Rounded or fractional subtrees remain
 // ordinary integer computations and must independently prove narrow.
 static bool requiresWideModuloB32Intermediates(sym::Analysis &analysis,
                                                sym::ExprHandle expr) {
   sym::ExprView view(expr);
+  if (isRoundedIndexExprKind(view.getKind()))
+    return rationalProofNeedsWide(analysis, expr);
+  if (isBitwiseIndexExprKind(view.getKind()))
+    return assocRequiresWideModuloB32Intermediates(analysis, view);
   switch (view.getKind()) {
   case sym::ExprKind::Add:
-    if (!isIntegralLiteral(view.getAddConstant()))
-      return rationalProofNeedsWide(analysis, expr);
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
-      sym::AddTerm term = view.getAddTerm(i);
-      if (!isIntegralLiteral(term.coefficient))
-        return rationalProofNeedsWide(analysis, expr);
-      if (requiresWideModuloB32Intermediates(analysis, term.term))
-        return true;
-    }
-    return false;
+    return addRequiresWideModuloB32Intermediates(analysis, expr, view);
   case sym::ExprKind::Mul:
-    if (!isIntegralLiteral(view.getMulCoefficient()))
-      return rationalProofNeedsWide(analysis, expr);
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount())) {
-      sym::MulFactor factor = view.getMulFactor(i);
-      if (factor.exponent < 0)
-        return rationalProofNeedsWide(analysis, expr);
-      if (requiresWideModuloB32Intermediates(analysis, factor.base))
-        return true;
-    }
-    return false;
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-  case sym::ExprKind::Trunc:
-    return rationalProofNeedsWide(analysis, expr);
+    return mulRequiresWideModuloB32Intermediates(analysis, expr, view);
   case sym::ExprKind::Mod:
     if (canTruncateModuloDividend(view))
       return requiresWideModuloB32Intermediates(analysis, view.getBinaryLhs());
     return requiresWideRationalIntermediatesImpl(analysis,
                                                  view.getBinaryLhs()) ||
            requiresWideRationalIntermediatesImpl(analysis, view.getBinaryRhs());
-  case sym::ExprKind::Xor:
-  case sym::ExprKind::And:
-  case sym::ExprKind::Or:
-    for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
-      if (requiresWideModuloB32Intermediates(analysis, view.getAssocArg(i)))
-        return true;
-    return false;
   default:
     return false;
   }
@@ -1688,14 +1708,10 @@ static bool assocRequiresWideRationalIntermediates(sym::Analysis &analysis,
   return false;
 }
 
-static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
-                                                  sym::ExprHandle expr) {
-  sym::ExprView view(expr);
+static bool requiresWideRationalCompound(sym::Analysis &analysis,
+                                         sym::ExprHandle expr,
+                                         sym::ExprView view) {
   switch (view.getKind()) {
-  case sym::ExprKind::Add:
-    return addRequiresWideRationalIntermediates(analysis, expr);
-  case sym::ExprKind::Mul:
-    return mulRequiresWideRationalIntermediates(analysis, expr);
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
   case sym::ExprKind::Trunc:
@@ -1711,6 +1727,16 @@ static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
   default:
     return false;
   }
+}
+
+static bool requiresWideRationalIntermediatesImpl(sym::Analysis &analysis,
+                                                  sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  if (view.getKind() == sym::ExprKind::Add)
+    return addRequiresWideRationalIntermediates(analysis, expr);
+  if (view.getKind() == sym::ExprKind::Mul)
+    return mulRequiresWideRationalIntermediates(analysis, expr);
+  return requiresWideRationalCompound(analysis, expr, view);
 }
 
 static FailureOr<bool> canMaterializeIntegerRationalExpr(
@@ -3366,23 +3392,23 @@ static FailureOr<Value> materializeCompoundIndexExprNode(
     const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
     IndexExprAddOrder addOrder) {
   sym::ExprView view(expr);
-  switch (view.getKind()) {
-  case sym::ExprKind::Add:
+  auto kind = view.getKind();
+  if (view.getKind() == sym::ExprKind::Add)
     return materializeAdd(S, expr, user, subs, assumptions, addOrder);
-  case sym::ExprKind::Mul:
+  if (view.getKind() == sym::ExprKind::Mul)
     return materializeMul(S, expr, user, subs, assumptions, addOrder);
-  case sym::ExprKind::Floor:
-    return materializeFloor(S, expr, user, subs, assumptions, addOrder);
-  case sym::ExprKind::Ceil:
-    return materializeCeil(S, expr, user, subs, assumptions, addOrder);
-  case sym::ExprKind::Trunc:
+  if (isRoundedIndexExprKind(kind)) {
+    if (kind == sym::ExprKind::Floor)
+      return materializeFloor(S, expr, user, subs, assumptions, addOrder);
+    if (kind == sym::ExprKind::Ceil)
+      return materializeCeil(S, expr, user, subs, assumptions, addOrder);
     return materializeTrunc(S, expr, user, subs, assumptions, addOrder);
+  }
+  if (isBitwiseIndexExprKind(kind))
+    return materializeBitwise(S, expr, user, subs, assumptions, addOrder);
+  switch (view.getKind()) {
   case sym::ExprKind::Mod:
     return materializeMod(S, expr, user, subs, assumptions, addOrder);
-  case sym::ExprKind::Xor:
-  case sym::ExprKind::And:
-  case sym::ExprKind::Or:
-    return materializeBitwise(S, expr, user, subs, assumptions, addOrder);
   case sym::ExprKind::Piecewise:
     return materializePiecewise(S, expr, user, subs, assumptions, addOrder);
   default:
@@ -3468,22 +3494,19 @@ static TermKind
 classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                      const llvm::StringMap<TermKind> &symKinds) {
   sym::ExprView view(expr);
-  switch (view.getKind()) {
-  case sym::ExprKind::Add:
+  auto kind = view.getKind();
+  if (view.getKind() == sym::ExprKind::Add)
     return classifyAdd(S, expr, symKinds);
-  case sym::ExprKind::Mul:
+  if (view.getKind() == sym::ExprKind::Mul)
     return classifyMul(S, expr, symKinds);
-  case sym::ExprKind::Floor:
-  case sym::ExprKind::Ceil:
-  case sym::ExprKind::Trunc:
+  if (isRoundedIndexExprKind(kind))
     return classifyTerm(S, view.getUnaryArg(), symKinds);
+  if (isBitwiseIndexExprKind(kind))
+    return classifyAssocTerm(S, view, symKinds);
+  switch (view.getKind()) {
   case sym::ExprKind::Mod:
     return std::max(classifyTerm(S, view.getBinaryLhs(), symKinds),
                     classifyTerm(S, view.getBinaryRhs(), symKinds));
-  case sym::ExprKind::Xor:
-  case sym::ExprKind::And:
-  case sym::ExprKind::Or:
-    return classifyAssocTerm(S, view, symKinds);
   case sym::ExprKind::Piecewise:
     return classifyPiecewiseTerm(S, view, symKinds);
   default:

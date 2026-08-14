@@ -344,6 +344,13 @@ getKnownWorkitemRange(WorkitemIdOp workitem) {
   return SignedI64Range{0, int64_t(shape.asArrayRef()[axis]) - 1};
 }
 
+static inline bool isNonnegativeHardwareId(Value value) {
+  return value.getDefiningOp<WorkgroupIdOp>() ||
+         value.getDefiningOp<ClusterIdOp>() ||
+         value.getDefiningOp<ClusterWorkgroupIdOp>() ||
+         value.getDefiningOp<ClusterWorkgroupMaxIdOp>();
+}
+
 // Return only range contracts owned by the leaf definition.
 static inline std::optional<SignedI64Range>
 getAtomicLeafSemanticRange(Value value) {
@@ -370,10 +377,7 @@ getAtomicLeafSemanticRange(Value value) {
     return SignedI64Range{0, std::numeric_limits<int32_t>::max()};
   }
 
-  if (value.getDefiningOp<WorkgroupIdOp>() ||
-      value.getDefiningOp<ClusterIdOp>() ||
-      value.getDefiningOp<ClusterWorkgroupIdOp>() ||
-      value.getDefiningOp<ClusterWorkgroupMaxIdOp>())
+  if (isNonnegativeHardwareId(value))
     return SignedI64Range{0, std::numeric_limits<int32_t>::max()};
 
   return std::nullopt;
@@ -681,6 +685,11 @@ private:
 
   FailureOr<std::optional<SymbolicOffset>>
   finishBuiltOffset(sym::ExprHandle expr);
+
+  FailureOr<std::optional<SymbolicOffset>>
+  buildExpandedRoot(Value value, bool allowRootLeaf, bool hasRoot);
+
+  FailureOr<std::optional<SymbolicOffset>> buildRootLeaf(Value value);
 
   bool shouldAllowRootLeaf(Value value, bool allowRootLeaf, bool hasRoot) const;
 

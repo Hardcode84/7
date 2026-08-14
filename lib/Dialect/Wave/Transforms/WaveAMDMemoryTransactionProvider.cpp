@@ -147,6 +147,36 @@ static FailureOr<sym::ExprHandle> specializeB16Item(sym::Analysis &analysis,
 }
 
 static FailureOr<sym::ExprHandle>
+buildB16BitContribution(sym::Analysis &analysis, sym::ExprHandle address,
+                        sym::ExprHandle base, sym::ExprHandle item,
+                        sym::ExprHandle slot, unsigned firstSlot, int64_t bit,
+                        int64_t bitValue, B16Composition composition) {
+  int64_t sampleItem = bit < 2 ? 4 * bitValue : bitValue;
+  int64_t sampleSlot = bit < 2   ? firstSlot
+                       : bit < 4 ? firstSlot + bitValue / 4
+                                 : firstSlot;
+  if (bit >= 2 && bit < 4)
+    sampleItem = 0;
+  FailureOr<sym::ExprHandle> sample = specializeB16Address(
+      analysis, address, item, sampleItem, slot, sampleSlot);
+  if (failed(sample))
+    return failure();
+  FailureOr<sym::ExprHandle> coefficient =
+      analysis.compose(*sample, getB16DeltaOp(composition.base), base);
+  sym::ExprHandle divisor = analysis.composeInteger(bitValue);
+  FailureOr<sym::ExprHandle> ratio =
+      analysis.compose(item, sym::ExprBinaryOp::Div, divisor);
+  if (failed(coefficient) || failed(ratio))
+    return failure();
+  sym::ExprHandle itemBit = analysis.composeFloor(*ratio);
+  FailureOr<sym::ExprHandle> reduced = analysis.compose(
+      itemBit, sym::ExprBinaryOp::Mod, analysis.composeInteger(2));
+  if (failed(reduced))
+    return failure();
+  return analysis.compose(*coefficient, sym::ExprBinaryOp::Mul, *reduced);
+}
+
+static FailureOr<sym::ExprHandle>
 buildB16SourceAddress(sym::Analysis &analysis, sym::ExprHandle address,
                       sym::ExprHandle item, sym::ExprHandle slot,
                       int64_t itemCount, unsigned firstSlot,
@@ -158,32 +188,9 @@ buildB16SourceAddress(sym::Analysis &analysis, sym::ExprHandle address,
   FailureOr<sym::ExprHandle> source = *base;
   for (int64_t bit = 0, bitValue = 1; bitValue < itemCount;
        ++bit, bitValue <<= 1) {
-    int64_t sampleItem = bit < 2 ? 4 * bitValue : bitValue;
-    int64_t sampleSlot = bit < 2   ? firstSlot
-                         : bit < 4 ? firstSlot + bitValue / 4
-                                   : firstSlot;
-    if (bit >= 2 && bit < 4)
-      sampleItem = 0;
-    FailureOr<sym::ExprHandle> sample = specializeB16Address(
-        analysis, address, item, sampleItem, slot, sampleSlot);
-    FailureOr<sym::ExprHandle> coefficient =
-        failed(sample)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : analysis.compose(*sample, getB16DeltaOp(composition.base), *base);
-    sym::ExprHandle divisor = analysis.composeInteger(bitValue);
-    FailureOr<sym::ExprHandle> ratio =
-        analysis.compose(item, sym::ExprBinaryOp::Div, divisor);
-    FailureOr<sym::ExprHandle> itemBit =
-        failed(ratio)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : FailureOr<sym::ExprHandle>(analysis.composeFloor(*ratio));
-    if (succeeded(itemBit))
-      itemBit = analysis.compose(*itemBit, sym::ExprBinaryOp::Mod,
-                                 analysis.composeInteger(2));
     FailureOr<sym::ExprHandle> contribution =
-        failed(coefficient) || failed(itemBit)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : analysis.compose(*coefficient, sym::ExprBinaryOp::Mul, *itemBit);
+        buildB16BitContribution(analysis, address, *base, item, slot, firstSlot,
+                                bit, bitValue, composition);
     if (failed(contribution) || failed(source))
       return failure();
     source = analysis.compose(*source, getB16CombineOp(composition.bits),
@@ -224,14 +231,39 @@ static bool verifyB16SourceAddress(sym::Analysis &analysis,
   return true;
 }
 
+static FailureOr<sym::ExprHandle>
+findB16SourceAddress(sym::Analysis &analysis, sym::ExprHandle address,
+                     sym::ExprHandle item, sym::ExprHandle slot,
+                     int64_t itemCount, unsigned firstSlot) {
+  constexpr std::array<B16Composition, 4> compositions{
+      B16Composition{B16Combine::Add, B16Combine::Add},
+      B16Composition{B16Combine::Add, B16Combine::Xor},
+      B16Composition{B16Combine::Xor, B16Combine::Add},
+      B16Composition{B16Combine::Xor, B16Combine::Xor}};
+  for (B16Composition composition : compositions) {
+    FailureOr<sym::ExprHandle> source = buildB16SourceAddress(
+        analysis, address, item, slot, itemCount, firstSlot, composition);
+    if (succeeded(source) &&
+        verifyB16SourceAddress(analysis, address, *source, item, slot,
+                               itemCount, firstSlot))
+      return source;
+  }
+  return failure();
+}
+
+static bool isValidB16Request(
+    const wave::memory_lowering::GatherTransactionRequest &request) {
+  return request.address && request.item && request.slot && request.itemCount &&
+         *request.itemCount > 0;
+}
+
 static FailureOr<wave::memory_lowering::GatherTransaction>
 buildVerifiedB16Transaction(
     const wave::memory_lowering::GatherTransactionRequest &request,
     sym::Store &store,
     std::shared_ptr<const wave::memory_lowering::GatherTransactionEmitter>
         emitter) {
-  if (!request.address || !request.item || !request.slot ||
-      !request.itemCount || *request.itemCount <= 0)
+  if (!isValidB16Request(request))
     return failure();
   FailureOr<sym::ExprHandle> address = indexing::materialize(
       store, request.address->map, request.address->bitOffset);
@@ -244,29 +276,15 @@ buildVerifiedB16Transaction(
   VectorType packet = cast<VectorType>(request.resultType.getElementType());
   if (packet.getNumElements() % 4)
     return failure();
-  constexpr std::array<B16Composition, 4> compositions{
-      B16Composition{B16Combine::Add, B16Combine::Add},
-      B16Composition{B16Combine::Add, B16Combine::Xor},
-      B16Composition{B16Combine::Xor, B16Combine::Add},
-      B16Composition{B16Combine::Xor, B16Combine::Xor}};
   std::vector<wave::memory_lowering::GatherTransaction::VerifiedAddress>
       verified;
   for (unsigned first = 0; first < packet.getNumElements(); first += 4) {
-    bool found = false;
-    for (B16Composition composition : compositions) {
-      FailureOr<sym::ExprHandle> source = buildB16SourceAddress(
-          **analysis, *address, request.item, request.slot, *request.itemCount,
-          first, composition);
-      if (succeeded(source) &&
-          verifyB16SourceAddress(**analysis, *address, *source, request.item,
-                                 request.slot, *request.itemCount, first)) {
-        verified.push_back({first, *source});
-        found = true;
-        break;
-      }
-    }
-    if (!found)
+    FailureOr<sym::ExprHandle> source =
+        findB16SourceAddress(**analysis, *address, request.item, request.slot,
+                             *request.itemCount, first);
+    if (failed(source))
       return failure();
+    verified.push_back({first, *source});
   }
   wave::memory_lowering::GatherTransaction transaction;
   transaction.width = 4;
@@ -444,6 +462,57 @@ buildHardwareTransposePermutation(
                                                   std::move(emitter)};
 }
 
+static FailureOr<sym::ExprHandle>
+buildB8SourceItem(sym::Store &store, const TransposeFrame &frame) {
+  FailureOr<sym::ExprHandle> sourceBase = sym::composeExprBinary(
+      store, frame.waveBase, sym::ExprBinaryOp::Add, frame.groupBase);
+  FailureOr<sym::ExprHandle> sourceRow =
+      composeFloorDiv(store, frame.withinGroup, 2);
+  if (failed(sourceBase) || failed(sourceRow))
+    return failure();
+  return sym::composeExprBinary(store, *sourceBase, sym::ExprBinaryOp::Add,
+                                *sourceRow);
+}
+
+static FailureOr<sym::ExprHandle>
+buildB8IntraBits(sym::Store &store, const TransposeFrame &frame) {
+  FailureOr<sym::ExprHandle> laneParity =
+      composeIntBinary(store, frame.lane, sym::ExprBinaryOp::Mod, 2);
+  FailureOr<sym::ExprHandle> withinPair =
+      composeFloorDiv(store, frame.within, 2);
+  if (failed(laneParity) || failed(withinPair))
+    return failure();
+  FailureOr<sym::ExprHandle> parityBits =
+      composeIntBinary(store, *laneParity, sym::ExprBinaryOp::Mul, 32);
+  FailureOr<sym::ExprHandle> withinBits =
+      composeIntBinary(store, *withinPair, sym::ExprBinaryOp::Mul, 8);
+  if (failed(parityBits) || failed(withinBits))
+    return failure();
+  return sym::composeExprBinary(store, *parityBits, sym::ExprBinaryOp::Add,
+                                *withinBits);
+}
+
+static FailureOr<TransposeOrigin> buildB8Origin(sym::Store &store,
+                                                const TransposeFrame &frame,
+                                                sym::ExprHandle sourceBase) {
+  constexpr int64_t width = 8;
+  FailureOr<sym::ExprHandle> originLane =
+      composeIntBinary(store, frame.lane, sym::ExprBinaryOp::Mod, width);
+  if (succeeded(originLane))
+    originLane =
+        composeIntBinary(store, *originLane, sym::ExprBinaryOp::Mul, 2);
+  FailureOr<sym::ExprHandle> originItem =
+      failed(originLane)
+          ? FailureOr<sym::ExprHandle>(failure())
+          : sym::composeExprBinary(store, sourceBase, sym::ExprBinaryOp::Add,
+                                   *originLane);
+  FailureOr<sym::ExprHandle> originSlot =
+      composeIntBinary(store, frame.group, sym::ExprBinaryOp::Mul, width);
+  if (failed(originItem) || failed(originSlot))
+    return failure();
+  return TransposeOrigin{*originItem, *originSlot};
+}
+
 static FailureOr<wave::memory_lowering::GatherTransaction>
 buildB8BitAffineTransposePermutation(
     sym::Store &store, const TransposeFrame &frame,
@@ -452,53 +521,19 @@ buildB8BitAffineTransposePermutation(
   constexpr int64_t width = 8;
   FailureOr<sym::ExprHandle> sourceBase = sym::composeExprBinary(
       store, frame.waveBase, sym::ExprBinaryOp::Add, frame.groupBase);
-  FailureOr<sym::ExprHandle> sourceRow =
-      composeFloorDiv(store, frame.withinGroup, 2);
-  FailureOr<sym::ExprHandle> sourceItem =
-      failed(sourceBase) || failed(sourceRow)
-          ? FailureOr<sym::ExprHandle>(failure())
-          : sym::composeExprBinary(store, *sourceBase, sym::ExprBinaryOp::Add,
-                                   *sourceRow);
-
-  FailureOr<sym::ExprHandle> laneParity =
-      composeIntBinary(store, frame.lane, sym::ExprBinaryOp::Mod, 2);
-  FailureOr<sym::ExprHandle> parityBits =
-      failed(laneParity)
-          ? FailureOr<sym::ExprHandle>(failure())
-          : composeIntBinary(store, *laneParity, sym::ExprBinaryOp::Mul, 32);
-  FailureOr<sym::ExprHandle> withinPair =
-      composeFloorDiv(store, frame.within, 2);
-  FailureOr<sym::ExprHandle> withinBits =
-      failed(withinPair)
-          ? FailureOr<sym::ExprHandle>(failure())
-          : composeIntBinary(store, *withinPair, sym::ExprBinaryOp::Mul, 8);
-  FailureOr<sym::ExprHandle> intraBits =
-      failed(parityBits) || failed(withinBits)
-          ? FailureOr<sym::ExprHandle>(failure())
-          : sym::composeExprBinary(store, *parityBits, sym::ExprBinaryOp::Add,
-                                   *withinBits);
-
-  FailureOr<sym::ExprHandle> originLane =
-      composeIntBinary(store, frame.lane, sym::ExprBinaryOp::Mod, width);
-  if (succeeded(originLane))
-    originLane =
-        composeIntBinary(store, *originLane, sym::ExprBinaryOp::Mul, 2);
-  FailureOr<sym::ExprHandle> originItem =
-      failed(sourceBase) || failed(originLane)
-          ? FailureOr<sym::ExprHandle>(failure())
-          : sym::composeExprBinary(store, *sourceBase, sym::ExprBinaryOp::Add,
-                                   *originLane);
-  FailureOr<sym::ExprHandle> originSlot =
-      composeIntBinary(store, frame.group, sym::ExprBinaryOp::Mul, width);
-  if (failed(sourceItem) || failed(intraBits) || failed(originItem) ||
-      failed(originSlot))
+  FailureOr<sym::ExprHandle> sourceItem = buildB8SourceItem(store, frame);
+  FailureOr<sym::ExprHandle> intraBits = buildB8IntraBits(store, frame);
+  FailureOr<TransposeOrigin> origin =
+      failed(sourceBase) ? FailureOr<TransposeOrigin>(failure())
+                         : buildB8Origin(store, frame, *sourceBase);
+  if (failed(sourceItem) || failed(intraBits) || failed(origin))
     return failure();
 
   // MXFP scale layout needs this second gfx950 b8 permutation. The generic
   // transaction proof decides whether an access map has the relation.
   return wave::memory_lowering::GatherTransaction{
-      width,       *sourceItem, *intraBits,        *originItem,
-      *originSlot, {},          std::move(emitter)};
+      width,        *sourceItem, *intraBits,        origin->item,
+      origin->slot, {},          std::move(emitter)};
 }
 
 static bool hasTransposeExecutionContext(

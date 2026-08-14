@@ -5057,47 +5057,55 @@ static bool has64BitIntElement(Type type) {
   return elementType.isIndex() || elementType.isInteger(64);
 }
 
+static LogicalResult selectI64ToI32IntConvert(WaveAMDMachineSelector &S,
+                                              CastOp op) {
+  Value source;
+  if (auto value = S.values.find(op.getSource()); value != S.values.end()) {
+    source = extractLowDword(S, op.getLoc(), value->second, op.getSource());
+  } else {
+    auto offset = S.indexOffsets.find(op.getSource());
+    if (offset == S.indexOffsets.end())
+      return op.emitError(
+          "missing symbolic index expression for narrowing intconvert");
+    FailureOr<Value> low =
+        materializePointerOffsetLowDword(S, op, offset->second);
+    if (failed(low))
+      return failure();
+    source = *low;
+  }
+  S.values[op.getResult()] = source;
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+static LogicalResult selectI32ToI64IntConvert(WaveAMDMachineSelector &S,
+                                              CastOp op) {
+  Type resultType = op.getResult().getType();
+  Value source = S.expect(op.getSource(), op);
+  std::optional<CastExtension> extension = getIntConvertExtension(op);
+  bool divergent = isa<SimdType>(resultType) && !S.isUniformValue(source);
+  if (extension == CastExtension::Zero)
+    S.values[op.getResult()] = divergent ? ensureVGPR2(S, op.getLoc(), source)
+                                         : ensureSGPR2(S, op.getLoc(), source);
+  else if (extension == CastExtension::Sign)
+    S.values[op.getResult()] =
+        divergent ? signExtendVGPR2(S, op.getLoc(), op.getSource(), source)
+                  : signExtendSGPR2(S, op.getLoc(), source);
+  else
+    return op.emitError("WaveAMDMachine i32 to 64-bit intconvert requires "
+                        "an extension policy");
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
 static LogicalResult selectI32I64IntConvert(WaveAMDMachineSelector &S,
                                             CastOp op) {
   Type sourceType = op.getSource().getType();
   Type resultType = op.getResult().getType();
-  if (has64BitIntElement(sourceType) && hasI32Element(resultType)) {
-    Value source;
-    if (auto value = S.values.find(op.getSource()); value != S.values.end()) {
-      source = extractLowDword(S, op.getLoc(), value->second, op.getSource());
-    } else {
-      auto offset = S.indexOffsets.find(op.getSource());
-      if (offset == S.indexOffsets.end())
-        return op.emitError(
-            "missing symbolic index expression for narrowing intconvert");
-      FailureOr<Value> low =
-          materializePointerOffsetLowDword(S, op, offset->second);
-      if (failed(low))
-        return failure();
-      source = *low;
-    }
-    S.values[op.getResult()] = source;
-    S.eraseIfTopLevel(op);
-    return success();
-  }
-  if (hasI32Element(sourceType) && has64BitIntElement(resultType)) {
-    Value source = S.expect(op.getSource(), op);
-    std::optional<CastExtension> extension = getIntConvertExtension(op);
-    bool divergent = isa<SimdType>(resultType) && !S.isUniformValue(source);
-    if (extension == CastExtension::Zero)
-      S.values[op.getResult()] = divergent
-                                     ? ensureVGPR2(S, op.getLoc(), source)
-                                     : ensureSGPR2(S, op.getLoc(), source);
-    else if (extension == CastExtension::Sign)
-      S.values[op.getResult()] =
-          divergent ? signExtendVGPR2(S, op.getLoc(), op.getSource(), source)
-                    : signExtendSGPR2(S, op.getLoc(), source);
-    else
-      return op.emitError("WaveAMDMachine i32 to 64-bit intconvert requires "
-                          "an extension policy");
-    S.eraseIfTopLevel(op);
-    return success();
-  }
+  if (has64BitIntElement(sourceType) && hasI32Element(resultType))
+    return selectI64ToI32IntConvert(S, op);
+  if (hasI32Element(sourceType) && has64BitIntElement(resultType))
+    return selectI32ToI64IntConvert(S, op);
   return op.emitError(
       "WaveAMDMachine intconvert lowering supports only i32 <-> 64-bit "
       "integer/index casts");
@@ -7296,42 +7304,48 @@ static bool needsWideIndexExprValue(WaveAMDMachineSelector &S, IndexExprOp op,
          !valueRangeFitsI32(S, op.getResult());
 }
 
+static bool indexExprNeedsValue(IndexExprOp op) {
+  return llvm::any_of(op.getResult().getUsers(), [](Operation *user) {
+    if (isa<PtrAddOp>(user))
+      return false;
+    auto cast = dyn_cast<CastOp>(user);
+    return !cast || cast.getKind() != CastKind::IntConvert ||
+           !hasI32Element(cast.getResult().getType());
+  });
+}
+
+static FailureOr<Value> materializeIndexExprValue(WaveAMDMachineSelector &S,
+                                                  IndexExprOp op,
+                                                  const PointerOffset &offset) {
+  llvm::StringMap<Value> bindings;
+  for (const PointerOffsetBinding &binding : offset.bindings)
+    bindings[binding.name] = S.expect(binding.value, op);
+  FailureOr<Value> value =
+      needsWideIndexExprValue(S, op, offset, bindings)
+          ? (op.getResult().getType().isIndex()
+                 ? materializeUniformPointerOffsetWideValue(S, op, offset)
+                 : materializePointerOffsetWideValue(S, op, offset))
+          : materializePointerOffsetValue(S, op, offset);
+  if (failed(value))
+    return failure();
+  if (!usesSignedI32IndexExprValue(S, op, offset))
+    return value;
+  bool divergent = isa<SimdType>(op.getResult().getType()) &&
+                   !S.isUniformValue(op.getResult());
+  return divergent ? signExtendVGPR2(S, op.getLoc(), op.getResult(), *value)
+                   : signExtendSGPR2(S, op.getLoc(), *value);
+}
+
 LogicalResult WaveAMDMachineSelector::selectIndexExpr(IndexExprOp op) {
   FailureOr<PointerOffset> pointerOffset = makePointerOffset(*this, op);
   if (failed(pointerOffset))
     return failure();
-  bool needsValue =
-      llvm::any_of(op.getResult().getUsers(), [](Operation *user) {
-        if (isa<PtrAddOp>(user))
-          return false;
-        auto cast = dyn_cast<CastOp>(user);
-        return !cast || cast.getKind() != CastKind::IntConvert ||
-               !hasI32Element(cast.getResult().getType());
-      });
   indexOffsets[op.getResult()] = *pointerOffset;
-  if (needsValue) {
-    llvm::StringMap<Value> bindings;
-    for (const PointerOffsetBinding &binding : pointerOffset->bindings)
-      bindings[binding.name] = expect(binding.value, op);
-    FailureOr<Value> value = failure();
-    if (needsWideIndexExprValue(*this, op, *pointerOffset, bindings)) {
-      value =
-          op.getResult().getType().isIndex()
-              ? materializeUniformPointerOffsetWideValue(*this, op,
-                                                         *pointerOffset)
-              : materializePointerOffsetWideValue(*this, op, *pointerOffset);
-    } else {
-      value = materializePointerOffsetValue(*this, op, *pointerOffset);
-    }
+  if (indexExprNeedsValue(op)) {
+    FailureOr<Value> value =
+        materializeIndexExprValue(*this, op, *pointerOffset);
     if (failed(value))
       return failure();
-    if (usesSignedI32IndexExprValue(*this, op, *pointerOffset)) {
-      bool divergent = isa<SimdType>(op.getResult().getType()) &&
-                       !isUniformValue(op.getResult());
-      *value = divergent
-                   ? signExtendVGPR2(*this, op.getLoc(), op.getResult(), *value)
-                   : signExtendSGPR2(*this, op.getLoc(), *value);
-    }
     values[op.getResult()] = *value;
   }
   eraseIfTopLevel(op);
@@ -8684,6 +8698,46 @@ materializeDmaSourceAddress(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
   return DmaSourceAddress{*buckets, base};
 }
 
+static std::optional<DmaSourceAddress>
+tryDirectSelectedDmaVOffset(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                            const SelectedBufferSources &pointers,
+                            const AddressPlan &activePlan) {
+  if (!hasOnlyVOffsetField(activePlan))
+    return std::nullopt;
+  std::optional<Value> selected =
+      lookupSelectedPointerVOffset(S, op.getSource());
+  if (!selected)
+    return std::nullopt;
+  WaveAMDMachineSelector::BucketedOperands buckets;
+  buckets.voffset = *selected;
+  buckets.soffset = createImm(S.builder, op.getLoc(), 0);
+  return DmaSourceAddress{buckets, pointers.active.base};
+}
+
+static FailureOr<DmaSourceAddress>
+materializeSelectedDmaPlans(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
+                            const waveamdmachine::AddressFieldSpec &spec,
+                            const SelectedBufferSources &pointers,
+                            AddressPlan &activePlan,
+                            AddressPlan &inactivePlan) {
+  if (failed(rebaseSelectedBufferPlan(S, activePlan, inactivePlan)))
+    return failure();
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> active =
+      materializePlanBuckets(S, op, activePlan, spec);
+  FailureOr<WaveAMDMachineSelector::BucketedOperands> inactive =
+      materializePlanBuckets(S, op, inactivePlan, spec);
+  if (failed(active) || failed(inactive))
+    return failure();
+  SelectOp select = pointers.select;
+  FailureOr<Value> selectedVOffset =
+      createLaneSelect(S, op, S.expect(select.getCondition(), op),
+                       active->voffset, inactive->voffset, /*width=*/1);
+  if (failed(selectedVOffset))
+    return failure();
+  active->voffset = *selectedVOffset;
+  return DmaSourceAddress{*active, pointers.active.base};
+}
+
 static FailureOr<std::optional<DmaSourceAddress>>
 materializeSelectedBufferDmaSourceAddress(
     WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
@@ -8705,35 +8759,14 @@ materializeSelectedBufferDmaSourceAddress(
   if (activePlan->fullAddressRemainderExpr ||
       inactivePlan->fullAddressRemainderExpr)
     return std::optional<DmaSourceAddress>{};
-  if (hasOnlyVOffsetField(*activePlan)) {
-    std::optional<Value> selected =
-        lookupSelectedPointerVOffset(S, op.getSource());
-    if (selected) {
-      WaveAMDMachineSelector::BucketedOperands buckets;
-      buckets.voffset = *selected;
-      buckets.soffset = createImm(S.builder, op.getLoc(), 0);
-      return std::optional<DmaSourceAddress>{
-          DmaSourceAddress{buckets, (*pointers)->active.base}};
-    }
-  }
-  if (failed(rebaseSelectedBufferPlan(S, *activePlan, *inactivePlan)))
+  if (std::optional<DmaSourceAddress> direct =
+          tryDirectSelectedDmaVOffset(S, op, **pointers, *activePlan))
+    return std::optional<DmaSourceAddress>{*direct};
+  FailureOr<DmaSourceAddress> selected = materializeSelectedDmaPlans(
+      S, op, spec, **pointers, *activePlan, *inactivePlan);
+  if (failed(selected))
     return failure();
-
-  FailureOr<WaveAMDMachineSelector::BucketedOperands> active =
-      materializePlanBuckets(S, op, *activePlan, spec);
-  FailureOr<WaveAMDMachineSelector::BucketedOperands> inactive =
-      materializePlanBuckets(S, op, *inactivePlan, spec);
-  if (failed(active) || failed(inactive))
-    return failure();
-
-  FailureOr<Value> selectedVOffset =
-      createLaneSelect(S, op, S.expect((*pointers)->select.getCondition(), op),
-                       active->voffset, inactive->voffset, /*width=*/1);
-  if (failed(selectedVOffset))
-    return failure();
-  active->voffset = *selectedVOffset;
-  return std::optional<DmaSourceAddress>{
-      DmaSourceAddress{*active, (*pointers)->active.base}};
+  return std::optional<DmaSourceAddress>{*selected};
 }
 
 static waveamdmachine::AddressFieldSpec dmaAddressSpec(bool isBuffer,

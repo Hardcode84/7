@@ -17,10 +17,10 @@ flash_attention_bf16_gfx950:
 	; wave backend: WaveAMDMachine MLIR pipeline finalized
 		v_readfirstlane_b32 s0, v0
 		s_lshr_b32 s1, s11, 3
-		s_and_b32 s12, s10, 7
-		s_lshl_b32 s12, s12, 4
-		s_add_i32 s1, s1, s12
 		s_lshl_b32 s1, s1, 21
+		s_and_b32 s12, s10, 7
+		s_lshl_b32 s12, s12, 25
+		s_add_i32 s1, s1, s12
 		s_add_u32 s12, s2, s1
 		s_addc_u32 s13, s3, 0
 		s_mov_b32 s18, 0x200000

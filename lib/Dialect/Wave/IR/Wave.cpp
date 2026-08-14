@@ -1474,28 +1474,32 @@ void CastOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
     setResultRange(getResult(), intrange::extSIRange(sourceRange, resultBits));
 }
 
+static OpFoldResult foldNarrowingIntConvert(CastOp op) {
+  unsigned sourceBits = getWaveCastIntegerBits(op.getSource().getType());
+  unsigned resultBits = getWaveCastIntegerBits(op.getType());
+  if (resultBits >= sourceBits)
+    return {};
+  auto inner = op.getSource().getDefiningOp<CastOp>();
+  if (!inner || inner.getKind() != CastKind::IntConvert)
+    return {};
+  unsigned innerSourceBits =
+      getWaveCastIntegerBits(inner.getSource().getType());
+  if (innerSourceBits == resultBits &&
+      inner.getSource().getType() == op.getType())
+    return inner.getSource();
+  if (innerSourceBits <= resultBits)
+    return {};
+  op.setOperand(inner.getSource());
+  return op.getResult();
+}
+
 OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
   if (getSource().getType() == getType())
     return getSource();
 
-  if (getKind() == CastKind::IntConvert) {
-    unsigned sourceBits = getWaveCastIntegerBits(getSource().getType());
-    unsigned resultBits = getWaveCastIntegerBits(getType());
-    if (resultBits < sourceBits) {
-      if (auto inner = getSource().getDefiningOp<CastOp>();
-          inner && inner.getKind() == CastKind::IntConvert) {
-        unsigned innerSourceBits =
-            getWaveCastIntegerBits(inner.getSource().getType());
-        if (innerSourceBits == resultBits &&
-            inner.getSource().getType() == getType())
-          return inner.getSource();
-        if (innerSourceBits > resultBits) {
-          setOperand(inner.getSource());
-          return getResult();
-        }
-      }
-    }
-  }
+  if (getKind() == CastKind::IntConvert)
+    if (OpFoldResult narrowed = foldNarrowingIntConvert(*this))
+      return narrowed;
 
   FailureOr<WaveCastPolicy> policy = getWaveCastPolicy(*this);
   if (failed(policy))
@@ -3768,6 +3772,17 @@ verifyPtrAddBase(Type baseType,
 
 // Validate the offset operand type and return its SIMD lane width
 // (0 for non-SIMD offsets).
+static FailureOr<int64_t> verifyPtrAddSimdOffset(
+    SimdType offsetType,
+    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
+  Type elementType = offsetType.getElementType();
+  auto integer = dyn_cast<IntegerType>(elementType);
+  if (!elementType.isIndex() &&
+      (!integer || !integer.isSignless() || integer.getWidth() != 32))
+    return emitError("SIMD offset element type must be index or signless i32");
+  return offsetType.getWidth();
+}
+
 static FailureOr<int64_t>
 verifyPtrAddOffset(Type offsetType,
                    function_ref<InFlightDiagnostic(const Twine &)> emitError) {
@@ -3779,16 +3794,10 @@ verifyPtrAddOffset(Type offsetType,
       return emitError("integer offset must be signless i32 or i64");
     return int64_t{0};
   }
-  if (auto offsetSimd = dyn_cast<SimdType>(offsetType)) {
-    Type elementType = offsetSimd.getElementType();
-    auto integer = dyn_cast<IntegerType>(elementType);
-    if (!elementType.isIndex() &&
-        (!integer || !integer.isSignless() || integer.getWidth() != 32))
-      return emitError(
-          "SIMD offset element type must be index or signless i32");
-    return offsetSimd.getWidth();
-  }
-  return emitError("offset must be index, integer, or index/i32 SIMD");
+  auto offsetSimd = dyn_cast<SimdType>(offsetType);
+  if (!offsetSimd)
+    return emitError("offset must be index, integer, or index/i32 SIMD");
+  return verifyPtrAddSimdOffset(offsetSimd, emitError);
 }
 
 // Check that `resultType` matches `pointerType` when both base and offset are
@@ -4641,6 +4650,43 @@ void AssumeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
   patterns.add<MergeChainedAssumeOp>(context);
 }
 
+static LogicalResult verifyIndexExprAssumption(
+    sym::PredHandle predicate, size_t index,
+    const llvm::DenseSet<StringRef> &requiredSymbols,
+    const llvm::DenseSet<StringRef> &bindingNames,
+    function_ref<InFlightDiagnostic(const Twine &)> emit) {
+  std::optional<StringRef> badName;
+  sym::walkSymbolNames(predicate, [&](StringRef name) {
+    if (!bindingNames.count(name) && !badName)
+      badName = name;
+  });
+  if (badName)
+    return emit("assumption #")
+           << index << " references undeclared symbol `" << *badName << "`";
+
+  SmallVector<sym::PredHandle> components{predicate};
+  while (!components.empty()) {
+    sym::PredHandle component = components.pop_back_val();
+    sym::PredView view(component);
+    if (view.getKind() == sym::PredKind::And) {
+      for (uint32_t componentIndex = 0;
+           componentIndex < view.getLogicArgCount(); ++componentIndex)
+        components.push_back(view.getLogicArg(componentIndex));
+      continue;
+    }
+    bool hasSymbol = false;
+    bool connected = false;
+    sym::walkSymbolNames(component, [&](StringRef name) {
+      hasSymbol = true;
+      connected |= requiredSymbols.contains(name);
+    });
+    if (hasSymbol && !connected)
+      return emit("assumption #")
+             << index << " is disconnected from its expression";
+  }
+  return success();
+}
+
 LogicalResult IndexExprOp::verify() {
   auto emit = [this](const Twine &msg) { return emitOpError(msg); };
 
@@ -4674,36 +4720,9 @@ LogicalResult IndexExprOp::verify() {
     return failure();
 
   for (auto [index, pred] : llvm::enumerate(assumptions)) {
-    std::optional<StringRef> badName;
-    bool disconnected = false;
-    sym::walkSymbolNames(pred, [&](StringRef name) {
-      if (!bindingNames.count(name) && !badName)
-        badName = name;
-    });
-    if (badName)
-      return emit("assumption #")
-             << index << " references undeclared symbol `" << *badName << "`";
-    SmallVector<sym::PredHandle> components{pred};
-    while (!components.empty()) {
-      sym::PredHandle component = components.pop_back_val();
-      sym::PredView view(component);
-      if (view.getKind() == sym::PredKind::And) {
-        for (uint32_t componentIndex = 0;
-             componentIndex < view.getLogicArgCount(); ++componentIndex)
-          components.push_back(view.getLogicArg(componentIndex));
-        continue;
-      }
-      bool hasSymbol = false;
-      bool connected = false;
-      sym::walkSymbolNames(component, [&](StringRef name) {
-        hasSymbol = true;
-        connected |= requiredSymbols.contains(name);
-      });
-      disconnected |= hasSymbol && !connected;
-    }
-    if (disconnected)
-      return emit("assumption #")
-             << index << " is disconnected from its expression";
+    if (failed(verifyIndexExprAssumption(pred, index, requiredSymbols,
+                                         bindingNames, emit)))
+      return failure();
   }
 
   auto laneWidth = reduceIndexBindingWidth(bindings, emit);

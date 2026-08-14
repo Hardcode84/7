@@ -332,25 +332,16 @@ public:
   bind(Value value, StringRef requested,
        SymbolicOffsetBindingKind kind = SymbolicOffsetBindingKind::Lane,
        bool materializable = false) {
-    auto markMaterial = [&](sym::ExprHandle variable) {
-      if (!materializable)
-        return;
-      auto input = llvm::find_if(map.inputs, [&](const auto &candidate) {
-        return candidate.variable == variable;
-      });
-      assert(input != map.inputs.end());
-      input->materializable = true;
-    };
     if (auto found = identities.find(value); found != identities.end()) {
       if (failed(appendExplicitAssumeFacts(value, found->second)))
         return failure();
-      markMaterial(found->second);
+      markMaterial(found->second, materializable);
       return found->second;
     }
     if (auto found = values.find(value); found != values.end()) {
       if (failed(appendExplicitAssumeFacts(value, found->second)))
         return failure();
-      markMaterial(found->second);
+      markMaterial(found->second, materializable);
       return found->second;
     }
     StringRef name =
@@ -362,18 +353,8 @@ public:
         {*variable, std::nullopt, value, kind, materializable});
     if (failed(appendExplicitAssumeFacts(value, *variable)))
       return failure();
-    Type storageType = value.getType();
-    if (auto simd = dyn_cast<SimdType>(storageType))
-      storageType = simd.getElementType();
-    if (auto integer = dyn_cast<IntegerType>(storageType);
-        integer && integer.isSignless() && integer.getWidth() == 32) {
-      FailureOr<sym::PredHandle> storage =
-          sym::rangeAssumption(store, sym::ExprView(*variable).getSymbolName(),
-                               -(int64_t{1} << 31), (int64_t{1} << 31) - 1);
-      if (failed(storage))
-        return failure();
-      appendUnique(map.facts, *storage);
-    }
+    if (failed(appendStorageRange(value, *variable)))
+      return failure();
     values.try_emplace(value, *variable);
     return *variable;
   }
@@ -417,6 +398,30 @@ public:
   indexing::IndexMap map;
 
 private:
+  void markMaterial(sym::ExprHandle variable, bool materializable) {
+    if (!materializable)
+      return;
+    auto input = llvm::find_if(map.inputs, [&](const auto &candidate) {
+      return candidate.variable == variable;
+    });
+    assert(input != map.inputs.end());
+    input->materializable = true;
+  }
+  LogicalResult appendStorageRange(Value value, sym::ExprHandle variable) {
+    Type storageType = value.getType();
+    if (auto simd = dyn_cast<SimdType>(storageType))
+      storageType = simd.getElementType();
+    auto integer = dyn_cast<IntegerType>(storageType);
+    if (!integer || !integer.isSignless() || integer.getWidth() != 32)
+      return success();
+    FailureOr<sym::PredHandle> storage =
+        sym::rangeAssumption(store, sym::ExprView(variable).getSymbolName(),
+                             -(int64_t{1} << 31), (int64_t{1} << 31) - 1);
+    if (failed(storage))
+      return failure();
+    appendUnique(map.facts, *storage);
+    return success();
+  }
   FailureOr<sym::PredHandle>
   remapPredicate(sym::PredHandle value,
                  ArrayRef<sym::ExprSubstitution> substitutions) {
@@ -453,6 +458,27 @@ static void identifyAssumeLineage(IndexMapBuilder &builder, Value value,
     builder.identify(value, identity);
   }
 }
+
+static std::optional<Value>
+extractItemIdentity(const std::optional<SymbolicOffset> &offset) {
+  if (!offset)
+    return std::nullopt;
+  StringRef name = sym::ExprView(offset->expr).getSymbolName();
+  if (offset->bindings.size() != 1 || name.empty() ||
+      sym::ExprView(offset->bindings.front().name).getSymbolName() != name)
+    return std::nullopt;
+  return offset->bindings.front().value;
+}
+
+static std::optional<Value> findWorkitemIdentity(Value value) {
+  while (AssumeOp assume = value.getDefiningOp<AssumeOp>())
+    value = assume.getValue();
+  auto workitem = value.getDefiningOp<WorkitemIdOp>();
+  if (!workitem || workitem.getAxis() != 0)
+    return std::nullopt;
+  return value;
+}
+
 static FailureOr<std::optional<Value>>
 findItemIdentity(const MemoryAccess &access, WaveDialect &dialect) {
   auto found = llvm::find(access.bindingNames, kMemoryItem);
@@ -472,18 +498,8 @@ findItemIdentity(const MemoryAccess &access, WaveDialect &dialect) {
       builder.buildAllowingRootLeaf(binding);
   if (failed(decoded))
     return failure();
-  auto extractIdentity =
-      [](const std::optional<SymbolicOffset> &offset) -> std::optional<Value> {
-    if (!offset)
-      return std::nullopt;
-    StringRef name = sym::ExprView(offset->expr).getSymbolName();
-    if (offset->bindings.size() != 1 || name.empty() ||
-        sym::ExprView(offset->bindings.front().name).getSymbolName() != name)
-      return std::nullopt;
-    return offset->bindings.front().value;
-  };
   if (*decoded) {
-    std::optional<Value> decodedIdentity = extractIdentity(*decoded);
+    std::optional<Value> decodedIdentity = extractItemIdentity(*decoded);
     if (!decodedIdentity)
       return std::optional<Value>{};
     identity = *decodedIdentity;
@@ -492,17 +508,11 @@ findItemIdentity(const MemoryAccess &access, WaveDialect &dialect) {
           builder.buildAllowingRootLeaf(identity);
       if (failed(local))
         return failure();
-      if (std::optional<Value> localIdentity = extractIdentity(*local))
+      if (std::optional<Value> localIdentity = extractItemIdentity(*local))
         identity = *localIdentity;
     }
   }
-  Value value = identity;
-  while (AssumeOp assume = value.getDefiningOp<AssumeOp>())
-    value = assume.getValue();
-  auto workitem = value.getDefiningOp<WorkitemIdOp>();
-  if (!workitem || workitem.getAxis() != 0)
-    return std::optional<Value>{};
-  return std::optional<Value>{value};
+  return findWorkitemIdentity(identity);
 }
 static LogicalResult
 appendInteger(sym::Store &store, sym::ExprHandle expression,

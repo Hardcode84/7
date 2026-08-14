@@ -645,6 +645,25 @@ public:
   }
 
 private:
+  std::optional<sym::CheckResult>
+  proveFiniteInputAt(sym::PredHandle predicate, const IndexMap::Input &input,
+                     sym::Analysis &analysis) {
+    std::optional<sym::CheckResult> common;
+    for (int64_t point = 0; point < *input.extent; ++point) {
+      sym::ExprHandle value = sym::composeExprInt(store, point);
+      std::array<sym::ExprSubstitution, 1> substitution{
+          sym::ExprSubstitution{input.variable, value}};
+      sym::PredHandle specialized =
+          sym::substitutePred(store, predicate, substitution);
+      sym::CheckResult checked = analysis.check(specialized);
+      if (checked == sym::CheckResult::Unknown ||
+          (common && checked != *common))
+        return std::nullopt;
+      common = checked;
+    }
+    return common;
+  }
+
   sym::CheckResult proveFiniteInput(sym::PredHandle predicate,
                                     sym::Analysis &analysis) {
     constexpr int64_t maxEnumeratedExtent = 8;
@@ -652,23 +671,9 @@ private:
       if (!input.extent || *input.extent <= 0 ||
           *input.extent > maxEnumeratedExtent)
         continue;
-      std::optional<sym::CheckResult> common;
-      bool unresolved = false;
-      for (int64_t point = 0; point < *input.extent; ++point) {
-        sym::ExprHandle value = sym::composeExprInt(store, point);
-        std::array<sym::ExprSubstitution, 1> substitution{
-            sym::ExprSubstitution{input.variable, value}};
-        sym::PredHandle specialized =
-            sym::substitutePred(store, predicate, substitution);
-        sym::CheckResult checked = analysis.check(specialized);
-        if (checked == sym::CheckResult::Unknown ||
-            (common && checked != *common)) {
-          unresolved = true;
-          break;
-        }
-        common = checked;
-      }
-      if (!unresolved && common)
+      std::optional<sym::CheckResult> common =
+          proveFiniteInputAt(predicate, input, analysis);
+      if (common)
         return *common;
     }
     return sym::CheckResult::Unknown;
@@ -757,6 +762,20 @@ mlir::wave::indexing::simplify(sym::Store &store, const IndexMap &map,
   return simplifyExpressions(*analysis, *materialized, diagnostic);
 }
 
+static FailureOr<std::unique_ptr<sym::Analysis>>
+createExactDivideAnalysis(sym::Store &store, const PreparedDomain &domain,
+                          sym::ExprHandle expression, std::string *diagnostic) {
+  std::array<sym::ExprHandle, 1> expressions{expression};
+  SmallVector<sym::PredHandle> relevantFacts = selectIndexExprAnalysisFacts(
+      expressions, domain.requirements, domain.facts);
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      sym::Analysis::create(store, relevantFacts, diagnostic);
+  if (failed(created) || failed(provePreparedRequirements(
+                             **created, domain.requirements, diagnostic)))
+    return failure();
+  return created;
+}
+
 FailureOr<sym::ExactDivideResult> mlir::wave::indexing::tryExactDivide(
     sym::Store &store, const IndexMap &map, sym::ExprHandle expression,
     int64_t divisor, ArrayRef<sym::PredHandle> assumptions,
@@ -773,14 +792,6 @@ FailureOr<sym::ExactDivideResult> mlir::wave::indexing::tryExactDivide(
   if (failed(domain) || failed(materialized) || failed(materializedAssumptions))
     return failure();
 
-  std::array<sym::ExprHandle, 1> expressions{*materialized};
-  SmallVector<sym::PredHandle> relevantFacts = selectIndexExprAnalysisFacts(
-      expressions, domain->requirements, domain->facts);
-  FailureOr<std::unique_ptr<sym::Analysis>> created =
-      sym::Analysis::create(store, relevantFacts, diagnostic);
-  if (failed(created) || failed(provePreparedRequirements(
-                             **created, domain->requirements, diagnostic)))
-    return failure();
   FailureOr<std::unique_ptr<sym::Analysis>> structural =
       sym::Analysis::create(store, {}, diagnostic);
   if (failed(structural))
@@ -790,6 +801,11 @@ FailureOr<sym::ExactDivideResult> mlir::wave::indexing::tryExactDivide(
   if (divided.status == sym::ExactDivideStatus::Proven ||
       divided.status == sym::ExactDivideStatus::NotExact)
     return divided;
+
+  FailureOr<std::unique_ptr<sym::Analysis>> created =
+      createExactDivideAnalysis(store, *domain, *materialized, diagnostic);
+  if (failed(created))
+    return failure();
   if (failed((*created)->assume(*materializedAssumptions, diagnostic)))
     return failure();
   return (*created)->tryExactDivide(*materialized, divisor);

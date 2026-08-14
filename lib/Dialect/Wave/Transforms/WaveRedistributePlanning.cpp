@@ -333,6 +333,63 @@ static FailureOr<bool> proveSpecializedSourceToggle(
   return true;
 }
 
+static FailureOr<std::optional<int64_t>>
+findDirectSourceToggle(sym::Store &store, const indexing::IndexMap &carrier,
+                       sym::ExprHandle sourceSlot,
+                       sym::ExprHandle toggledSource, unsigned sourceBits,
+                       unsigned resultBits, unsigned resultBit,
+                       indexing::CheckMemo &memo) {
+  for (unsigned sourceBit = 0; sourceBit <= sourceBits; ++sourceBit) {
+    int64_t candidate = sourceBit == sourceBits ? 0 : int64_t{1} << sourceBit;
+    FailureOr<sym::ExprHandle> expected =
+        toggleCoordinateBit(store, sourceSlot, candidate);
+    FailureOr<sym::PredHandle> exact =
+        succeeded(expected) ? equal(store, toggledSource, *expected)
+                            : FailureOr<sym::PredHandle>(failure());
+    FailureOr<sym::CheckResult> proven =
+        succeeded(exact)
+            ? indexing::check(store, carrier, ArrayRef<sym::PredHandle>{*exact},
+                              memo)
+            : FailureOr<sym::CheckResult>(failure());
+    if (failed(proven))
+      return failure();
+    if (*proven == sym::CheckResult::True)
+      return std::optional<int64_t>{candidate};
+    FailureOr<bool> specialized = proveSpecializedSourceToggle(
+        store, carrier, sourceSlot, resultBit, resultBits, candidate, memo);
+    if (failed(specialized))
+      return failure();
+    if (*specialized)
+      return std::optional<int64_t>{candidate};
+  }
+  return std::optional<int64_t>{};
+}
+
+static FailureOr<uint64_t>
+findDependentSourceBits(sym::Store &store, const indexing::IndexMap &carrier,
+                        sym::ExprHandle sourceSlot, unsigned sourceBits,
+                        ArrayRef<sym::ExprSubstitution> substitution,
+                        indexing::CheckMemo &memo) {
+  uint64_t dependencies = 0;
+  for (unsigned sourceBit : llvm::seq<unsigned>(0, sourceBits)) {
+    FailureOr<CoordinateFactor> factor =
+        factorCoordinate(store, sourceSlot, int64_t{1} << sourceBit);
+    FailureOr<sym::ExprHandle> bit =
+        succeeded(factor)
+            ? composeWithInt(store, factor->group, sym::ExprBinaryOp::Mod, 2)
+            : FailureOr<sym::ExprHandle>(failure());
+    FailureOr<bool> invariant =
+        succeeded(bit) ? isInvariantUnderSubstitution(store, carrier, *bit,
+                                                      substitution, memo)
+                       : FailureOr<bool>(failure());
+    if (failed(invariant))
+      return failure();
+    if (!*invariant)
+      dependencies |= uint64_t{1} << sourceBit;
+  }
+  return dependencies;
+}
+
 static LogicalResult appendPacketBitDependencies(
     sym::Store &store, const indexing::IndexMap &carrier,
     sym::ExprHandle resultSlot, sym::ExprHandle owner,
@@ -356,49 +413,20 @@ static LogicalResult appendPacketBitDependencies(
       sym::substituteExpr(store, sourceSlot, substitution);
   if (failed(toggledSource))
     return failure();
-  for (unsigned sourceBit = 0; sourceBit <= sourceBits; ++sourceBit) {
-    int64_t candidate = sourceBit == sourceBits ? 0 : int64_t{1} << sourceBit;
-    FailureOr<sym::ExprHandle> expected =
-        toggleCoordinateBit(store, sourceSlot, candidate);
-    FailureOr<sym::PredHandle> exact =
-        succeeded(expected) ? equal(store, *toggledSource, *expected)
-                            : FailureOr<sym::PredHandle>(failure());
-    FailureOr<sym::CheckResult> proven =
-        succeeded(exact)
-            ? indexing::check(store, carrier, ArrayRef<sym::PredHandle>{*exact},
-                              memo)
-            : FailureOr<sym::CheckResult>(failure());
-    if (failed(proven))
-      return failure();
-    if (*proven == sym::CheckResult::True) {
-      dependencies.sourceByResultBit[resultBit] = candidate;
-      return success();
-    }
-    FailureOr<bool> specialized = proveSpecializedSourceToggle(
-        store, carrier, sourceSlot, resultBit, resultBits, candidate, memo);
-    if (failed(specialized))
-      return failure();
-    if (*specialized) {
-      dependencies.sourceByResultBit[resultBit] = candidate;
-      return success();
-    }
+  FailureOr<std::optional<int64_t>> direct =
+      findDirectSourceToggle(store, carrier, sourceSlot, *toggledSource,
+                             sourceBits, resultBits, resultBit, memo);
+  if (failed(direct))
+    return failure();
+  if (*direct) {
+    dependencies.sourceByResultBit[resultBit] = **direct;
+    return success();
   }
-  for (unsigned sourceBit : llvm::seq<unsigned>(0, sourceBits)) {
-    FailureOr<CoordinateFactor> factor =
-        factorCoordinate(store, sourceSlot, int64_t{1} << sourceBit);
-    FailureOr<sym::ExprHandle> bit =
-        succeeded(factor)
-            ? composeWithInt(store, factor->group, sym::ExprBinaryOp::Mod, 2)
-            : FailureOr<sym::ExprHandle>(failure());
-    FailureOr<bool> invariant =
-        succeeded(bit) ? isInvariantUnderSubstitution(store, carrier, *bit,
-                                                      substitution, memo)
-                       : FailureOr<bool>(failure());
-    if (failed(invariant))
-      return failure();
-    if (!*invariant)
-      dependencies.sourceByResultBit[resultBit] |= uint64_t{1} << sourceBit;
-  }
+  FailureOr<uint64_t> dependent = findDependentSourceBits(
+      store, carrier, sourceSlot, sourceBits, substitution, memo);
+  if (failed(dependent))
+    return failure();
+  dependencies.sourceByResultBit[resultBit] = *dependent;
   return success();
 }
 
@@ -641,21 +669,13 @@ static bool supportsEnumeratedPacket(ArrayRef<EnumeratedPacketPoint> points,
   return true;
 }
 
-static FailureOr<std::optional<PacketPlan>> searchEnumeratedPacketPlan(
-    sym::Store &store, RedistributeOp op, const indexing::IndexMap &carrier,
-    sym::ExprHandle sourceItem, sym::ExprHandle sourceSlot, int64_t sourceSlots,
-    int64_t resultSlots, int64_t maxVectorElements, int64_t minVectorElements,
-    bool allowResultPermutation) {
-  int64_t blocks = op.getRelation().getBlocks();
-  int64_t items = op.getRelation().getItems();
-  std::optional<int64_t> pointCount = llvm::checkedMul(blocks, items);
-  if (pointCount)
-    pointCount = llvm::checkedMul(*pointCount, resultSlots);
-  if (!pointCount || *pointCount > kMaxEnumeratedPacketPoints)
-    return std::optional<PacketPlan>();
-
+static FailureOr<std::vector<EnumeratedPacketPoint>>
+enumeratePacketPoints(sym::Store &store, const indexing::IndexMap &carrier,
+                      sym::ExprHandle sourceItem, sym::ExprHandle sourceSlot,
+                      int64_t blocks, int64_t items, int64_t resultSlots,
+                      int64_t pointCount) {
   std::vector<EnumeratedPacketPoint> points;
-  points.reserve(*pointCount);
+  points.reserve(pointCount);
   for (int64_t block : llvm::seq<int64_t>(0, blocks)) {
     for (int64_t item : llvm::seq<int64_t>(0, items)) {
       for (int64_t slot : llvm::seq<int64_t>(0, resultSlots)) {
@@ -669,7 +689,15 @@ static FailureOr<std::optional<PacketPlan>> searchEnumeratedPacketPlan(
       }
     }
   }
+  return points;
+}
 
+static FailureOr<std::optional<PacketPlan>> searchEnumeratedPacketMasks(
+    sym::Store &store, const indexing::IndexMap &carrier,
+    ArrayRef<EnumeratedPacketPoint> points, sym::ExprHandle sourceItem,
+    sym::ExprHandle sourceSlot, int64_t blocks, int64_t items,
+    int64_t sourceSlots, int64_t resultSlots, int64_t maxVectorElements,
+    int64_t minVectorElements, bool allowResultPermutation) {
   unsigned sourceBits = llvm::Log2_64(sourceSlots);
   unsigned resultBits = llvm::Log2_64(resultSlots);
   for (int64_t vectorElements = maxVectorElements;
@@ -702,6 +730,30 @@ static FailureOr<std::optional<PacketPlan>> searchEnumeratedPacketPlan(
     }
   }
   return std::optional<PacketPlan>();
+}
+
+static FailureOr<std::optional<PacketPlan>> searchEnumeratedPacketPlan(
+    sym::Store &store, RedistributeOp op, const indexing::IndexMap &carrier,
+    sym::ExprHandle sourceItem, sym::ExprHandle sourceSlot, int64_t sourceSlots,
+    int64_t resultSlots, int64_t maxVectorElements, int64_t minVectorElements,
+    bool allowResultPermutation) {
+  int64_t blocks = op.getRelation().getBlocks();
+  int64_t items = op.getRelation().getItems();
+  std::optional<int64_t> pointCount = llvm::checkedMul(blocks, items);
+  if (pointCount)
+    pointCount = llvm::checkedMul(*pointCount, resultSlots);
+  if (!pointCount || *pointCount > kMaxEnumeratedPacketPoints)
+    return std::optional<PacketPlan>();
+
+  FailureOr<std::vector<EnumeratedPacketPoint>> points =
+      enumeratePacketPoints(store, carrier, sourceItem, sourceSlot, blocks,
+                            items, resultSlots, *pointCount);
+  if (failed(points))
+    return failure();
+  return searchEnumeratedPacketMasks(store, carrier, *points, sourceItem,
+                                     sourceSlot, blocks, items, sourceSlots,
+                                     resultSlots, maxVectorElements,
+                                     minVectorElements, allowResultPermutation);
 }
 
 static std::optional<int64_t> getMaxPacketVectorElements(int64_t sourceSlots,
@@ -816,6 +868,38 @@ int64_t logicalToPackedSlot(uint64_t withinMask, int64_t slots,
   return packedSlot;
 }
 
+static FailureOr<std::optional<PacketPlan>> proveInitialPacketPlan(
+    sym::Store &store, const indexing::IndexMap &carrier, sym::ExprHandle owner,
+    sym::ExprHandle sourceItem, sym::ExprHandle sourceSlot, int64_t sourceSlots,
+    int64_t resultSlots, int64_t maxVectorElements, bool allowResultPermutation,
+    indexing::CheckMemo &memo, std::string &diagnostic) {
+  if (llvm::isPowerOf2_64(sourceSlots) && llvm::isPowerOf2_64(resultSlots))
+    return searchPowerOfTwoPacketPlan(
+        store, carrier, owner, sourceItem, sourceSlot, sourceSlots, resultSlots,
+        maxVectorElements, allowResultPermutation, memo, diagnostic);
+  return provePacketPlan(store, carrier, sourceItem, sourceSlot, sourceSlots,
+                         resultSlots, /*vectorElements=*/1, 0, 0, memo,
+                         diagnostic);
+}
+
+static FailureOr<std::optional<PacketPlan>> refineEnumeratedPacketPlan(
+    sym::Store &store, RedistributeOp op, const indexing::IndexMap &carrier,
+    sym::ExprHandle sourceItem, sym::ExprHandle sourceSlot, int64_t sourceSlots,
+    int64_t resultSlots, int64_t maxVectorElements, bool allowResultPermutation,
+    std::optional<PacketPlan> candidate) {
+  if (!allowResultPermutation || !llvm::isPowerOf2_64(sourceSlots) ||
+      !llvm::isPowerOf2_64(resultSlots) ||
+      (candidate && candidate->vectorElements >= maxVectorElements))
+    return candidate;
+  FailureOr<std::optional<PacketPlan>> enumerated = searchEnumeratedPacketPlan(
+      store, op, carrier, sourceItem, sourceSlot, sourceSlots, resultSlots,
+      maxVectorElements, candidate ? candidate->vectorElements : 0,
+      allowResultPermutation);
+  if (failed(enumerated))
+    return op.emitOpError("failed to enumerate direct packet partition");
+  return *enumerated ? std::move(*enumerated) : std::move(candidate);
+}
+
 FailureOr<PacketPlan> buildPacketPlan(sym::Store &store, RedistributeOp op,
                                       const indexing::IndexMap &carrier,
                                       int64_t maxElements,
@@ -837,34 +921,19 @@ FailureOr<PacketPlan> buildPacketPlan(sym::Store &store, RedistributeOp op,
     return failure();
   indexing::CheckMemo memo;
   std::string diagnostic;
-  FailureOr<std::optional<PacketPlan>> candidate =
-      llvm::isPowerOf2_64(sourceSlots) && llvm::isPowerOf2_64(resultSlots)
-          ? searchPowerOfTwoPacketPlan(store, carrier, *owner, sourceItem,
-                                       sourceSlot, sourceSlots, resultSlots,
-                                       *maxVectorElements,
-                                       allowResultPermutation, memo, diagnostic)
-          : provePacketPlan(store, carrier, sourceItem, sourceSlot, sourceSlots,
-                            resultSlots, /*vectorElements=*/1, 0, 0, memo,
-                            diagnostic);
+  FailureOr<std::optional<PacketPlan>> candidate = proveInitialPacketPlan(
+      store, carrier, *owner, sourceItem, sourceSlot, sourceSlots, resultSlots,
+      *maxVectorElements, allowResultPermutation, memo, diagnostic);
   if (failed(candidate))
     return op.emitOpError("failed to prove direct packet partition: ")
            << diagnostic;
-  if (allowResultPermutation && llvm::isPowerOf2_64(sourceSlots) &&
-      llvm::isPowerOf2_64(resultSlots) &&
-      (!*candidate || (**candidate).vectorElements < *maxVectorElements)) {
-    FailureOr<std::optional<PacketPlan>> enumerated =
-        searchEnumeratedPacketPlan(store, op, carrier, sourceItem, sourceSlot,
-                                   sourceSlots, resultSlots, *maxVectorElements,
-                                   *candidate ? (**candidate).vectorElements
-                                              : 0,
-                                   allowResultPermutation);
-    if (failed(enumerated))
-      return op.emitOpError("failed to enumerate direct packet partition");
-    if (*enumerated)
-      return std::move(**enumerated);
-  }
-  if (*candidate)
-    return std::move(**candidate);
+  FailureOr<std::optional<PacketPlan>> refined = refineEnumeratedPacketPlan(
+      store, op, carrier, sourceItem, sourceSlot, sourceSlots, resultSlots,
+      *maxVectorElements, allowResultPermutation, std::move(*candidate));
+  if (failed(refined))
+    return failure();
+  if (*refined)
+    return std::move(**refined);
   return op.emitOpError("could not prove the scalar direct packet partition: ")
          << diagnostic;
 }

@@ -340,33 +340,46 @@ buildProduct(sym::Store &store, int64_t coefficient,
   return result;
 }
 
+static bool containsDynamicReciprocal(sym::ExprHandle expression);
+
+static bool addContainsDynamicReciprocal(sym::ExprView view) {
+  if (containsDynamicReciprocal(view.getAddConstant()))
+    return true;
+  for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
+    sym::AddTerm term = view.getAddTerm(index);
+    if (containsDynamicReciprocal(term.coefficient) ||
+        containsDynamicReciprocal(term.term))
+      return true;
+  }
+  return false;
+}
+
+static bool multiplyContainsDynamicReciprocal(sym::ExprView view) {
+  if (containsDynamicReciprocal(view.getMulCoefficient()))
+    return true;
+  for (uint32_t index = 0; index < view.getMulFactorCount(); ++index) {
+    sym::MulFactor factor = view.getMulFactor(index);
+    if (factor.exponent < 0 && !sym::getIntegerLiteralValue(factor.base))
+      return true;
+    if (containsDynamicReciprocal(factor.base))
+      return true;
+  }
+  return false;
+}
+
 static bool containsDynamicReciprocal(sym::ExprHandle expression) {
   sym::ExprView view(expression);
-  if (view.getKind() == sym::ExprKind::Add) {
-    if (containsDynamicReciprocal(view.getAddConstant()))
-      return true;
-    for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
-      sym::AddTerm term = view.getAddTerm(index);
-      if (containsDynamicReciprocal(term.coefficient) ||
-          containsDynamicReciprocal(term.term))
-        return true;
-    }
-  }
-  if (view.getKind() == sym::ExprKind::Mul) {
-    if (containsDynamicReciprocal(view.getMulCoefficient()))
-      return true;
-    for (uint32_t index = 0; index < view.getMulFactorCount(); ++index) {
-      sym::MulFactor factor = view.getMulFactor(index);
-      if (factor.exponent < 0 && !sym::getIntegerLiteralValue(factor.base))
-        return true;
-      if (containsDynamicReciprocal(factor.base))
-        return true;
-    }
-  }
-  if (view.getKind() == sym::ExprKind::Mod)
+  switch (view.getKind()) {
+  case sym::ExprKind::Add:
+    return addContainsDynamicReciprocal(view);
+  case sym::ExprKind::Mul:
+    return multiplyContainsDynamicReciprocal(view);
+  case sym::ExprKind::Mod:
     return containsDynamicReciprocal(view.getBinaryLhs()) ||
            containsDynamicReciprocal(view.getBinaryRhs());
-  return false;
+  default:
+    return false;
+  }
 }
 
 static FailureOr<sym::ExprHandle>
@@ -393,188 +406,265 @@ multiplyDistributedSum(sym::Store &store, sym::ExprView sum,
   return failed(result) ? result : sym::simplifyExpr(store, *result);
 }
 
+struct OuterTrunc {
+  SmallVector<sym::MulFactor> factors;
+  sym::ExprHandle trunc;
+  int64_t coefficient = 1;
+};
+
+struct TruncatingTerm {
+  SmallVector<sym::MulFactor> outerFactors;
+  sym::AddTerm addend;
+  sym::ExprHandle trunc;
+  sym::ExprHandle quotient;
+  int64_t signedCoefficient;
+  bool floored;
+};
+
+struct RemainderOperands {
+  sym::ExprHandle numerator;
+  sym::ExprHandle denominator;
+  sym::ExprHandle scale;
+};
+
+static std::optional<OuterTrunc> matchMultipliedTrunc(sym::ExprView term) {
+  std::optional<int64_t> coefficient =
+      getIntegralLiteral(term.getMulCoefficient());
+  if (!coefficient)
+    return std::nullopt;
+  OuterTrunc result;
+  result.coefficient = *coefficient;
+  for (uint32_t index = 0; index < term.getMulFactorCount(); ++index) {
+    sym::MulFactor factor = term.getMulFactor(index);
+    if (factor.exponent <= 0)
+      return std::nullopt;
+    sym::ExprKind kind = sym::ExprView(factor.base).getKind();
+    if (kind != sym::ExprKind::Trunc && kind != sym::ExprKind::Floor) {
+      result.factors.push_back(factor);
+      continue;
+    }
+    if (result.trunc || factor.exponent != 1)
+      return std::nullopt;
+    result.trunc = factor.base;
+  }
+  return result.trunc ? std::optional<OuterTrunc>(std::move(result))
+                      : std::nullopt;
+}
+
+static std::optional<OuterTrunc> matchOuterTrunc(sym::ExprHandle expression) {
+  sym::ExprKind kind = sym::ExprView(expression).getKind();
+  if (kind == sym::ExprKind::Trunc || kind == sym::ExprKind::Floor)
+    return OuterTrunc{{}, expression, 1};
+  if (kind != sym::ExprKind::Mul)
+    return std::nullopt;
+  return matchMultipliedTrunc(sym::ExprView(expression));
+}
+
+static std::optional<TruncatingTerm> matchTruncatingTerm(sym::AddTerm addend) {
+  std::optional<int64_t> addCoefficient =
+      getIntegralLiteral(addend.coefficient);
+  std::optional<OuterTrunc> outer = matchOuterTrunc(addend.term);
+  if (!addCoefficient || !outer)
+    return std::nullopt;
+  std::optional<int64_t> signedCoefficient =
+      llvm::checkedMul(*addCoefficient, outer->coefficient);
+  if (!signedCoefficient || *signedCoefficient >= 0)
+    return std::nullopt;
+  sym::ExprView trunc(outer->trunc);
+  return TruncatingTerm{std::move(outer->factors),
+                        addend,
+                        outer->trunc,
+                        trunc.getUnaryArg(),
+                        *signedCoefficient,
+                        trunc.getKind() == sym::ExprKind::Floor};
+}
+
+static FailureOr<std::optional<RemainderOperands>>
+buildFlooredRemainderOperands(sym::Store &store, sym::ExprView argument,
+                              TruncatingTerm &term) {
+  FailureOr<sym::ExprHandle> numerator = failure();
+  FailureOr<sym::ExprHandle> denominator = failure();
+  for (sym::MulFactor &outer : term.outerFactors) {
+    SmallVector<sym::MulFactor> candidate{{outer.base, 1}};
+    FailureOr<sym::ExprHandle> candidateDenominator =
+        buildProduct(store, 1, candidate);
+    FailureOr<sym::ExprHandle> candidateNumerator =
+        failed(candidateDenominator)
+            ? FailureOr<sym::ExprHandle>(failure())
+            : multiplyDistributedSum(store, argument, *candidateDenominator);
+    if (failed(candidateNumerator) ||
+        containsDynamicReciprocal(*candidateNumerator))
+      continue;
+    numerator = candidateNumerator;
+    denominator = candidateDenominator;
+    --outer.exponent;
+    break;
+  }
+  if (failed(numerator) ||
+      term.signedCoefficient == std::numeric_limits<int64_t>::min())
+    return std::optional<RemainderOperands>{};
+  llvm::erase_if(term.outerFactors,
+                 [](sym::MulFactor factor) { return factor.exponent == 0; });
+  FailureOr<sym::ExprHandle> scale =
+      buildProduct(store, -term.signedCoefficient, term.outerFactors);
+  if (failed(scale))
+    return failure();
+  return std::optional<RemainderOperands>{
+      RemainderOperands{*numerator, *denominator, *scale}};
+}
+
+static std::optional<sym::RationalLiteral>
+getRationalCoefficient(sym::ExprHandle expression) {
+  if (std::optional<int64_t> integer = sym::getIntegerLiteralValue(expression))
+    return sym::RationalLiteral{*integer, 1};
+  return sym::ExprView(expression).getRational();
+}
+
+static void splitProductFactors(sym::ExprView argument,
+                                SmallVectorImpl<sym::MulFactor> &numerator,
+                                SmallVectorImpl<sym::MulFactor> &denominator) {
+  for (uint32_t index = 0; index < argument.getMulFactorCount(); ++index) {
+    sym::MulFactor factor = argument.getMulFactor(index);
+    if (factor.exponent > 0) {
+      numerator.push_back(factor);
+      continue;
+    }
+    if (factor.exponent < 0) {
+      factor.exponent = -factor.exponent;
+      denominator.push_back(factor);
+    }
+  }
+}
+
+static bool
+consumeDenominatorFactors(SmallVectorImpl<sym::MulFactor> &outerFactors,
+                          ArrayRef<sym::MulFactor> denominatorFactors) {
+  for (sym::MulFactor denominator : denominatorFactors) {
+    auto outer = llvm::find_if(outerFactors, [&](sym::MulFactor factor) {
+      return factor.base == denominator.base;
+    });
+    if (outer == outerFactors.end() || outer->exponent < denominator.exponent)
+      return false;
+    outer->exponent -= denominator.exponent;
+  }
+  llvm::erase_if(outerFactors,
+                 [](sym::MulFactor factor) { return factor.exponent == 0; });
+  return true;
+}
+
+static FailureOr<std::optional<RemainderOperands>>
+buildProductRemainderOperands(sym::Store &store, sym::ExprView argument,
+                              TruncatingTerm &term) {
+  std::optional<sym::RationalLiteral> coefficient =
+      getRationalCoefficient(argument.getMulCoefficient());
+  if (!coefficient || coefficient->denominator <= 0)
+    return std::optional<RemainderOperands>{};
+  SmallVector<sym::MulFactor> numeratorFactors;
+  SmallVector<sym::MulFactor> denominatorFactors;
+  splitProductFactors(argument, numeratorFactors, denominatorFactors);
+  if (denominatorFactors.empty() ||
+      !consumeDenominatorFactors(term.outerFactors, denominatorFactors) ||
+      term.signedCoefficient % coefficient->denominator != 0)
+    return std::optional<RemainderOperands>{};
+  int64_t scaleCoefficient = term.signedCoefficient / coefficient->denominator;
+  if (scaleCoefficient == std::numeric_limits<int64_t>::min())
+    return std::optional<RemainderOperands>{};
+  FailureOr<sym::ExprHandle> numerator =
+      buildProduct(store, coefficient->numerator, numeratorFactors);
+  FailureOr<sym::ExprHandle> denominator =
+      buildProduct(store, coefficient->denominator, denominatorFactors);
+  FailureOr<sym::ExprHandle> scale =
+      buildProduct(store, -scaleCoefficient, term.outerFactors);
+  if (failed(numerator) || failed(denominator) || failed(scale))
+    return failure();
+  return std::optional<RemainderOperands>{
+      RemainderOperands{*numerator, *denominator, *scale}};
+}
+
+static FailureOr<std::optional<RemainderOperands>>
+buildRemainderOperands(sym::Store &store, TruncatingTerm &term) {
+  sym::ExprView argument(term.quotient);
+  if (term.floored && argument.getKind() == sym::ExprKind::Add)
+    return buildFlooredRemainderOperands(store, argument, term);
+  if (argument.getKind() != sym::ExprKind::Mul)
+    return std::optional<RemainderOperands>{};
+  return buildProductRemainderOperands(store, argument, term);
+}
+
+static FailureOr<bool> matchesSignedTerm(sym::Store &store,
+                                         const TruncatingTerm &term,
+                                         const RemainderOperands &operands,
+                                         sym::ExprHandle signedTerm) {
+  FailureOr<sym::ExprHandle> expected = sym::composeExprBinary(
+      store, operands.scale, sym::ExprBinaryOp::Mul, operands.denominator);
+  if (succeeded(expected))
+    expected = sym::composeExprBinary(store, *expected, sym::ExprBinaryOp::Mul,
+                                      term.trunc);
+  if (succeeded(expected))
+    expected = sym::composeExprNeg(store, *expected);
+  if (failed(expected))
+    return failure();
+  FailureOr<sym::ExprHandle> simplifiedExpected =
+      sym::simplifyExpr(store, *expected);
+  FailureOr<sym::ExprHandle> simplifiedSignedTerm =
+      sym::simplifyExpr(store, signedTerm);
+  if (failed(simplifiedExpected) || failed(simplifiedSignedTerm))
+    return failure();
+  return *simplifiedExpected == *simplifiedSignedTerm;
+}
+
+static FailureOr<sym::ExprHandle>
+buildRemainderResidual(sym::Store &store, sym::ExprHandle expression,
+                       const RemainderOperands &operands,
+                       sym::ExprHandle signedTerm) {
+  FailureOr<sym::ExprHandle> positive = sym::composeExprBinary(
+      store, operands.scale, sym::ExprBinaryOp::Mul, operands.numerator);
+  FailureOr<sym::ExprHandle> group =
+      failed(positive)
+          ? FailureOr<sym::ExprHandle>(failure())
+          : sym::composeExprBinary(store, *positive, sym::ExprBinaryOp::Add,
+                                   signedTerm);
+  FailureOr<sym::ExprHandle> residual =
+      failed(group) ? FailureOr<sym::ExprHandle>(failure())
+                    : sym::composeExprBinary(store, expression,
+                                             sym::ExprBinaryOp::Sub, *group);
+  return failed(residual) ? residual : sym::simplifyExpr(store, *residual);
+}
+
 static FailureOr<std::optional<TruncatingRemainder>>
 matchTruncatingRemainder(sym::Store &store, sym::ExprHandle expression) {
   sym::ExprView sum(expression);
   if (sum.getKind() != sym::ExprKind::Add)
     return std::optional<TruncatingRemainder>{};
-  for (uint32_t addIndex = 0; addIndex < sum.getAddTermCount(); ++addIndex) {
-    sym::AddTerm addend = sum.getAddTerm(addIndex);
-    std::optional<int64_t> addCoefficient =
-        getIntegralLiteral(addend.coefficient);
-    if (!addCoefficient)
+  for (uint32_t index = 0; index < sum.getAddTermCount(); ++index) {
+    std::optional<TruncatingTerm> term =
+        matchTruncatingTerm(sum.getAddTerm(index));
+    if (!term)
       continue;
-    int64_t termCoefficient = 1;
-    sym::ExprHandle trunc;
-    SmallVector<sym::MulFactor> outerFactors;
-    sym::ExprView term(addend.term);
-    if (term.getKind() == sym::ExprKind::Trunc ||
-        term.getKind() == sym::ExprKind::Floor) {
-      trunc = addend.term;
-    } else if (term.getKind() == sym::ExprKind::Mul) {
-      std::optional<int64_t> coefficient =
-          getIntegralLiteral(term.getMulCoefficient());
-      if (!coefficient)
-        continue;
-      termCoefficient = *coefficient;
-      for (uint32_t factorIndex = 0; factorIndex < term.getMulFactorCount();
-           ++factorIndex) {
-        sym::MulFactor factor = term.getMulFactor(factorIndex);
-        if (factor.exponent <= 0)
-          break;
-        sym::ExprKind factorKind = sym::ExprView(factor.base).getKind();
-        if (factorKind == sym::ExprKind::Trunc ||
-            factorKind == sym::ExprKind::Floor) {
-          if (trunc || factor.exponent != 1)
-            break;
-          trunc = factor.base;
-        } else {
-          outerFactors.push_back(factor);
-        }
-      }
-      if (outerFactors.size() + (trunc ? 1 : 0) != term.getMulFactorCount())
-        continue;
-    } else {
-      continue;
-    }
-    if (!trunc)
-      continue;
-    sym::ExprHandle quotient = sym::ExprView(trunc).getUnaryArg();
-    sym::ExprView argument(quotient);
-    bool floored = sym::ExprView(trunc).getKind() == sym::ExprKind::Floor;
-    std::optional<int64_t> signedCoefficient =
-        llvm::checkedMul(*addCoefficient, termCoefficient);
-    if (!signedCoefficient || *signedCoefficient >= 0)
-      continue;
-    FailureOr<sym::ExprHandle> numerator = failure();
-    FailureOr<sym::ExprHandle> denominator = failure();
-    FailureOr<sym::ExprHandle> scale = failure();
-    if (floored && argument.getKind() == sym::ExprKind::Add) {
-      for (sym::MulFactor &outer : outerFactors) {
-        if (outer.exponent <= 0)
-          continue;
-        SmallVector<sym::MulFactor> candidate{{outer.base, 1}};
-        FailureOr<sym::ExprHandle> candidateDenominator =
-            buildProduct(store, 1, candidate);
-        FailureOr<sym::ExprHandle> candidateNumerator =
-            failed(candidateDenominator)
-                ? FailureOr<sym::ExprHandle>(failure())
-                : multiplyDistributedSum(store, argument,
-                                         *candidateDenominator);
-        if (failed(candidateNumerator) ||
-            containsDynamicReciprocal(*candidateNumerator))
-          continue;
-        numerator = candidateNumerator;
-        denominator = candidateDenominator;
-        --outer.exponent;
-        break;
-      }
-      if (failed(numerator) || failed(denominator) ||
-          *signedCoefficient == std::numeric_limits<int64_t>::min())
-        continue;
-      llvm::erase_if(outerFactors, [](sym::MulFactor factor) {
-        return factor.exponent == 0;
-      });
-      scale = buildProduct(store, -*signedCoefficient, outerFactors);
-    } else if (argument.getKind() != sym::ExprKind::Mul) {
-      continue;
-    } else {
-      sym::RationalLiteral argumentCoefficient;
-      if (std::optional<int64_t> integer =
-              sym::getIntegerLiteralValue(argument.getMulCoefficient())) {
-        argumentCoefficient.numerator = *integer;
-      } else {
-        std::optional<sym::RationalLiteral> rational =
-            sym::ExprView(argument.getMulCoefficient()).getRational();
-        if (!rational)
-          continue;
-        argumentCoefficient = *rational;
-      }
-      if (argumentCoefficient.denominator <= 0)
-        continue;
-      SmallVector<sym::MulFactor> numeratorFactors;
-      SmallVector<sym::MulFactor> denominatorFactors;
-      for (uint32_t factorIndex = 0; factorIndex < argument.getMulFactorCount();
-           ++factorIndex) {
-        sym::MulFactor factor = argument.getMulFactor(factorIndex);
-        if (factor.exponent > 0) {
-          numeratorFactors.push_back(factor);
-        } else if (factor.exponent < 0) {
-          factor.exponent = -factor.exponent;
-          denominatorFactors.push_back(factor);
-        }
-      }
-      if (denominatorFactors.empty())
-        continue;
-      bool matchedDenominator = true;
-      for (sym::MulFactor denominatorFactor : denominatorFactors) {
-        auto outer = llvm::find_if(outerFactors, [&](sym::MulFactor factor) {
-          return factor.base == denominatorFactor.base;
-        });
-        if (outer == outerFactors.end() ||
-            outer->exponent < denominatorFactor.exponent) {
-          matchedDenominator = false;
-          break;
-        }
-        outer->exponent -= denominatorFactor.exponent;
-      }
-      if (!matchedDenominator)
-        continue;
-      llvm::erase_if(outerFactors, [](sym::MulFactor factor) {
-        return factor.exponent == 0;
-      });
-      if (*signedCoefficient % argumentCoefficient.denominator != 0)
-        continue;
-      int64_t scaleCoefficient =
-          *signedCoefficient / argumentCoefficient.denominator;
-      if (scaleCoefficient == std::numeric_limits<int64_t>::min())
-        continue;
-      numerator =
-          buildProduct(store, argumentCoefficient.numerator, numeratorFactors);
-      denominator = buildProduct(store, argumentCoefficient.denominator,
-                                 denominatorFactors);
-      scale = buildProduct(store, -scaleCoefficient, outerFactors);
-    }
-    FailureOr<sym::ExprHandle> signedTerm = sym::composeExprBinary(
-        store, addend.coefficient, sym::ExprBinaryOp::Mul, addend.term);
-    if (failed(numerator) || failed(denominator) || failed(scale) ||
-        failed(signedTerm))
+    FailureOr<std::optional<RemainderOperands>> operands =
+        buildRemainderOperands(store, *term);
+    if (failed(operands))
       return failure();
-    FailureOr<sym::ExprHandle> expected = sym::composeExprBinary(
-        store, *scale, sym::ExprBinaryOp::Mul, *denominator);
-    if (succeeded(expected))
-      expected = sym::composeExprBinary(store, *expected,
-                                        sym::ExprBinaryOp::Mul, trunc);
-    if (succeeded(expected))
-      expected = sym::composeExprNeg(store, *expected);
-    if (failed(expected))
-      return failure();
-    FailureOr<sym::ExprHandle> simplifiedExpected =
-        sym::simplifyExpr(store, *expected);
-    FailureOr<sym::ExprHandle> simplifiedSignedTerm =
-        sym::simplifyExpr(store, *signedTerm);
-    if (failed(simplifiedExpected) || failed(simplifiedSignedTerm))
-      return failure();
-    if (!(*simplifiedExpected == *simplifiedSignedTerm))
+    if (!*operands)
       continue;
-    FailureOr<sym::ExprHandle> positive = sym::composeExprBinary(
-        store, *scale, sym::ExprBinaryOp::Mul, *numerator);
-    FailureOr<sym::ExprHandle> group =
-        failed(positive)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : sym::composeExprBinary(store, *positive, sym::ExprBinaryOp::Add,
-                                     *signedTerm);
+    FailureOr<sym::ExprHandle> signedTerm =
+        sym::composeExprBinary(store, term->addend.coefficient,
+                               sym::ExprBinaryOp::Mul, term->addend.term);
+    if (failed(signedTerm))
+      return failure();
+    FailureOr<bool> matched =
+        matchesSignedTerm(store, *term, **operands, *signedTerm);
+    if (failed(matched))
+      return failure();
+    if (!*matched)
+      continue;
     FailureOr<sym::ExprHandle> residual =
-        failed(group) ? FailureOr<sym::ExprHandle>(failure())
-                      : sym::composeExprBinary(store, expression,
-                                               sym::ExprBinaryOp::Sub, *group);
-    if (failed(residual))
-      return failure();
-    residual = sym::simplifyExpr(store, *residual);
+        buildRemainderResidual(store, expression, **operands, *signedTerm);
     if (failed(residual))
       return failure();
     return std::optional<TruncatingRemainder>{TruncatingRemainder{
-        *numerator, *denominator, *scale, *residual, quotient, floored}};
+        (**operands).numerator, (**operands).denominator, (**operands).scale,
+        *residual, term->quotient, term->floored}};
   }
   return std::optional<TruncatingRemainder>{};
 }
@@ -770,37 +860,124 @@ struct MemoryTransactionAddressMaterializer::Impl {
                                    falseValue);
   }
 
+  static bool isIntegerLike(Type type) {
+    return isa<IntegerType, IndexType>(type);
+  }
+
+  Value convertSimdInteger(Value value, SimdType source, SimdType target) {
+    if (target.getWidth() != source.getWidth() ||
+        !isIntegerLike(target.getElementType()) ||
+        !isIntegerLike(source.getElementType()))
+      return {};
+    return CastOp::create(rewriter, location, target, CastKind::IntConvert,
+                          value, DictionaryAttr());
+  }
+
+  Value splatInteger(Value value, SimdType target) {
+    Value scalar = value;
+    if (scalar.getType() != target.getElementType()) {
+      if (!isIntegerLike(scalar.getType()) ||
+          !isIntegerLike(target.getElementType()))
+        return {};
+      scalar = CastOp::create(rewriter, location, target.getElementType(),
+                              CastKind::IntConvert, scalar, DictionaryAttr());
+    }
+    return SplatOp::create(rewriter, location, target, scalar);
+  }
+
   Value conformToType(Value value, Type type) {
     if (value.getType() == type)
       return value;
-    auto isIntegerLike = [](Type candidate) {
-      return isa<IntegerType, IndexType>(candidate);
-    };
     auto targetSimd = dyn_cast<SimdType>(type);
     auto sourceSimd = dyn_cast<SimdType>(value.getType());
-    if (targetSimd && sourceSimd) {
-      if (targetSimd.getWidth() != sourceSimd.getWidth() ||
-          !isIntegerLike(targetSimd.getElementType()) ||
-          !isIntegerLike(sourceSimd.getElementType()))
-        return {};
-      return CastOp::create(rewriter, location, type, CastKind::IntConvert,
-                            value, DictionaryAttr());
-    }
+    if (targetSimd && sourceSimd)
+      return convertSimdInteger(value, sourceSimd, targetSimd);
     if (!targetSimd && !sourceSimd && isIntegerLike(type) &&
         isIntegerLike(value.getType()))
       return CastOp::create(rewriter, location, type, CastKind::IntConvert,
                             value, DictionaryAttr());
     if (!targetSimd || sourceSimd)
       return {};
-    Value scalar = value;
-    if (scalar.getType() != targetSimd.getElementType()) {
-      if (!isIntegerLike(scalar.getType()) ||
-          !isIntegerLike(targetSimd.getElementType()))
-        return {};
-      scalar = CastOp::create(rewriter, location, targetSimd.getElementType(),
-                              CastKind::IntConvert, scalar, DictionaryAttr());
+    return splatInteger(value, targetSimd);
+  }
+
+  FailureOr<Value> materializeComparison(const MemoryTransaction &transaction,
+                                         sym::PredView view,
+                                         sym::PredHandle active,
+                                         Type expressionType) {
+    std::optional<arith::CmpIPredicate> comparison =
+        getCmpPredicate(*view.getCmpOp());
+    FailureOr<Value> lhs =
+        materializeExpr(transaction, view.getCmpLhs(), active);
+    FailureOr<Value> rhs =
+        materializeExpr(transaction, view.getCmpRhs(), active);
+    if (!comparison || failed(lhs) || failed(rhs))
+      return failure();
+    Value typedLhs = conformToType(*lhs, expressionType);
+    Value typedRhs = conformToType(*rhs, expressionType);
+    if (!typedLhs || !typedRhs)
+      return failure();
+    if (auto simd = dyn_cast<SimdType>(expressionType))
+      return CmpIOp::create(
+                 rewriter, location,
+                 MaskType::get(rewriter.getContext(), simd.getWidth()),
+                 *comparison, typedLhs, typedRhs)
+          .getResult();
+    return arith::CmpIOp::create(rewriter, location, *comparison, typedLhs,
+                                 typedRhs)
+        .getResult();
+  }
+
+  FailureOr<Value> materializeNegation(const MemoryTransaction &transaction,
+                                       sym::PredView view,
+                                       sym::PredHandle active,
+                                       Type expressionType) {
+    FailureOr<Value> argument = materializePredicate(
+        transaction, view.getUnaryArg(), active, expressionType);
+    if (failed(argument))
+      return failure();
+    Value falseValue = createPredicateConstant(expressionType, false);
+    Value trueValue = createPredicateConstant(expressionType, true);
+    return createSelect(*argument, falseValue, trueValue);
+  }
+
+  FailureOr<Value> materializeLogic(const MemoryTransaction &transaction,
+                                    sym::PredView view, sym::PredHandle active,
+                                    Type expressionType) {
+    bool isAnd = view.getKind() == sym::PredKind::And;
+    Value result = createPredicateConstant(expressionType, isAnd);
+    for (uint32_t index = 0; index < view.getLogicArgCount(); ++index) {
+      FailureOr<Value> argument = materializePredicate(
+          transaction, view.getLogicArg(index), active, expressionType);
+      if (failed(argument))
+        return failure();
+      Value constant = createPredicateConstant(expressionType, !isAnd);
+      result = isAnd ? createSelect(result, *argument, constant)
+                     : createSelect(result, constant, *argument);
     }
-    return SplatOp::create(rewriter, location, targetSimd, scalar);
+    return result;
+  }
+
+  FailureOr<Value> materializePiecewise(const MemoryTransaction &transaction,
+                                        sym::PredHandle predicate,
+                                        sym::PredHandle active,
+                                        Type expressionType) {
+    sym::ExprView expression(sym::asExpr(predicate));
+    Value result;
+    for (uint32_t index = expression.getPiecewiseCaseCount(); index-- > 0;) {
+      sym::PiecewiseCase arm = expression.getPiecewiseCase(index);
+      std::optional<sym::PredHandle> armValue = sym::asPred(arm.value);
+      if (!armValue)
+        return failure();
+      FailureOr<Value> value =
+          materializePredicate(transaction, *armValue, active, expressionType);
+      FailureOr<Value> condition = materializePredicate(
+          transaction, arm.condition, active, expressionType);
+      if (failed(value) || failed(condition))
+        return failure();
+      result = result ? createSelect(*condition, *value, result) : *value;
+    }
+    return result ? FailureOr<Value>(result) : FailureOr<Value>(failure());
   }
 
   FailureOr<Value> materializePredicate(const MemoryTransaction &transaction,
@@ -813,77 +990,19 @@ struct MemoryTransactionAddressMaterializer::Impl {
       return createPredicateConstant(expressionType, true);
     case sym::PredKind::False:
       return createPredicateConstant(expressionType, false);
-    case sym::PredKind::Cmp: {
-      std::optional<arith::CmpIPredicate> comparison =
-          getCmpPredicate(*view.getCmpOp());
-      FailureOr<Value> lhs =
-          materializeExpr(transaction, view.getCmpLhs(), active);
-      FailureOr<Value> rhs =
-          materializeExpr(transaction, view.getCmpRhs(), active);
-      if (!comparison || failed(lhs) || failed(rhs))
-        return failure();
-      Value typedLhs = conformToType(*lhs, expressionType);
-      Value typedRhs = conformToType(*rhs, expressionType);
-      if (!typedLhs || !typedRhs)
-        return failure();
-      if (auto simd = dyn_cast<SimdType>(expressionType))
-        return CmpIOp::create(
-                   rewriter, location,
-                   MaskType::get(rewriter.getContext(), simd.getWidth()),
-                   *comparison, typedLhs, typedRhs)
-            .getResult();
-      return arith::CmpIOp::create(rewriter, location, *comparison, typedLhs,
-                                   typedRhs)
-          .getResult();
-    }
-    case sym::PredKind::Not: {
-      FailureOr<Value> argument = materializePredicate(
-          transaction, view.getUnaryArg(), active, expressionType);
-      if (failed(argument))
-        return failure();
-      Value falseValue = createPredicateConstant(expressionType, false);
-      Value trueValue = createPredicateConstant(expressionType, true);
-      return createSelect(*argument, falseValue, trueValue);
-    }
+    case sym::PredKind::Cmp:
+      return materializeComparison(transaction, view, active, expressionType);
+    case sym::PredKind::Not:
+      return materializeNegation(transaction, view, active, expressionType);
     case sym::PredKind::And:
-    case sym::PredKind::Or: {
-      bool isAnd = view.getKind() == sym::PredKind::And;
-      Value result = createPredicateConstant(expressionType, isAnd);
-      for (uint32_t index = 0; index < view.getLogicArgCount(); ++index) {
-        FailureOr<Value> argument = materializePredicate(
-            transaction, view.getLogicArg(index), active, expressionType);
-        if (failed(argument))
-          return failure();
-        Value constant = createPredicateConstant(expressionType, !isAnd);
-        result = isAnd ? createSelect(result, *argument, constant)
-                       : createSelect(result, constant, *argument);
-      }
-      return result;
-    }
-    case sym::PredKind::Piecewise: {
-      sym::ExprView expression(sym::asExpr(predicate));
-      Value result;
-      for (uint32_t index = expression.getPiecewiseCaseCount(); index-- > 0;) {
-        sym::PiecewiseCase arm = expression.getPiecewiseCase(index);
-        std::optional<sym::PredHandle> armValue = sym::asPred(arm.value);
-        FailureOr<Value> value =
-            armValue ? materializePredicate(transaction, *armValue, active,
-                                            expressionType)
-                     : FailureOr<Value>(failure());
-        FailureOr<Value> condition = materializePredicate(
-            transaction, arm.condition, active, expressionType);
-        if (failed(value) || failed(condition))
-          return failure();
-        result = result ? createSelect(*condition, *value, result) : *value;
-      }
-      return result ? FailureOr<Value>(result) : FailureOr<Value>(failure());
-    }
-    case sym::PredKind::Invalid:
-    case sym::PredKind::Error:
-    case sym::PredKind::ParseError:
+    case sym::PredKind::Or:
+      return materializeLogic(transaction, view, active, expressionType);
+    case sym::PredKind::Piecewise:
+      return materializePiecewise(transaction, predicate, active,
+                                  expressionType);
+    default:
       return failure();
     }
-    llvm_unreachable("unknown symbolic predicate kind");
   }
 
   FailureOr<Value> materializePredicate(const MemoryTransaction &transaction,
@@ -948,6 +1067,10 @@ struct MemoryTransactionAddressMaterializer::Impl {
                                        typedLhs, typedRhs);
     if (*dividendNonnegative)
       return remainder;
+    return adjustSignedRemainder(resultType, remainder, typedRhs);
+  }
+
+  Value adjustSignedRemainder(Type resultType, Value remainder, Value divisor) {
     Value zero = createIndexConstant(resultType, 0);
     Value negative;
     if (auto simd = dyn_cast<SimdType>(resultType))
@@ -959,7 +1082,7 @@ struct MemoryTransactionAddressMaterializer::Impl {
       negative = arith::CmpIOp::create(
           rewriter, location, arith::CmpIPredicate::slt, remainder, zero);
     Value adjusted = BinaryOp::create(rewriter, location, resultType,
-                                      BinaryKind::AddI, remainder, typedRhs);
+                                      BinaryKind::AddI, remainder, divisor);
     return createSelect(negative, adjusted, remainder);
   }
 
@@ -996,26 +1119,34 @@ struct MemoryTransactionAddressMaterializer::Impl {
         rewriter, location, resultType, BinaryKind::MulI, *remainder, factor)};
   }
 
+  bool addContainsDynamicTrunc(sym::ExprView view) {
+    FailureOr<std::optional<TruncatingRemainder>> remainder =
+        ::matchTruncatingRemainder(store, view.getHandle());
+    if (succeeded(remainder) && *remainder &&
+        ::containsDynamicReciprocal((*remainder)->quotient))
+      return true;
+    for (uint32_t index = 0; index < view.getAddTermCount(); ++index)
+      if (containsDynamicTrunc(view.getAddTerm(index).term))
+        return true;
+    return false;
+  }
+
+  bool multiplyContainsDynamicTrunc(sym::ExprView view) {
+    for (uint32_t index = 0; index < view.getMulFactorCount(); ++index)
+      if (containsDynamicTrunc(view.getMulFactor(index).base))
+        return true;
+    return false;
+  }
+
   bool containsDynamicTrunc(sym::ExprHandle expression) {
     sym::ExprView view(expression);
     if (view.getKind() == sym::ExprKind::Trunc &&
         ::containsDynamicReciprocal(view.getUnaryArg()))
       return true;
-    if (view.getKind() == sym::ExprKind::Add) {
-      FailureOr<std::optional<TruncatingRemainder>> remainder =
-          ::matchTruncatingRemainder(store, expression);
-      if (succeeded(remainder) && *remainder &&
-          ::containsDynamicReciprocal((*remainder)->quotient))
-        return true;
-      for (uint32_t index = 0; index < view.getAddTermCount(); ++index)
-        if (containsDynamicTrunc(view.getAddTerm(index).term))
-          return true;
-    }
-    if (view.getKind() == sym::ExprKind::Mul) {
-      for (uint32_t index = 0; index < view.getMulFactorCount(); ++index)
-        if (containsDynamicTrunc(view.getMulFactor(index).base))
-          return true;
-    }
+    if (view.getKind() == sym::ExprKind::Add)
+      return addContainsDynamicTrunc(view);
+    if (view.getKind() == sym::ExprKind::Mul)
+      return multiplyContainsDynamicTrunc(view);
     if (view.getKind() == sym::ExprKind::Mod)
       return containsDynamicTrunc(view.getBinaryLhs()) ||
              containsDynamicTrunc(view.getBinaryRhs());
@@ -1083,150 +1214,140 @@ struct MemoryTransactionAddressMaterializer::Impl {
     return result;
   }
 
-  FailureOr<Value> materializeDynamicArithmeticImpl(
-      const MemoryTransaction &transaction, sym::ExprHandle expression,
-      Type resultType, ArrayRef<sym::PredHandle> facts, bool cache) {
-    sym::ExprView view(expression);
-    if (!containsDynamicTrunc(expression))
-      return materializeArithmeticLeaf(transaction, expression, resultType,
-                                       facts);
-    auto multiply = [&](Value lhs, Value rhs) {
-      return BinaryOp::create(rewriter, location, resultType, BinaryKind::MulI,
-                              lhs, rhs)
-          .getResult();
-    };
-    auto add = [&](Value lhs, Value rhs) {
-      return BinaryOp::create(rewriter, location, resultType, BinaryKind::AddI,
-                              lhs, rhs)
-          .getResult();
-    };
-    if (view.getKind() == sym::ExprKind::Add) {
-      FailureOr<std::optional<TruncatingRemainder>> remainder =
-          ::matchTruncatingRemainder(store, expression);
-      if (failed(remainder))
-        return failure();
-      if (*remainder) {
-        if ((*remainder)->floored) {
-          for (sym::ExprHandle operand :
-               {(*remainder)->numerator, (*remainder)->denominator}) {
-            FailureOr<bool> nonnegative = proveNonnegative(facts, operand);
-            if (failed(nonnegative) || !*nonnegative)
-              return failure();
-          }
-        }
-        FailureOr<Value> numerator = materializeDynamicArithmetic(
-            transaction, (*remainder)->numerator, resultType, facts, cache);
-        FailureOr<Value> denominator = materializeDynamicArithmetic(
-            transaction, (*remainder)->denominator, resultType, facts, cache);
-        FailureOr<Value> scale = materializeDynamicArithmetic(
-            transaction, (*remainder)->scale, resultType, facts, cache);
-        FailureOr<Value> residual = materializeDynamicArithmetic(
-            transaction, (*remainder)->residual, resultType, facts, cache);
-        if (failed(numerator) || failed(denominator) || failed(scale) ||
-            failed(residual))
+  Value createIntegerBinary(Type type, BinaryKind kind, Value lhs, Value rhs) {
+    return BinaryOp::create(rewriter, location, type, kind, lhs, rhs);
+  }
+
+  FailureOr<Value>
+  materializeRemainderExpression(const MemoryTransaction &transaction,
+                                 const TruncatingRemainder &remainder,
+                                 Type resultType,
+                                 ArrayRef<sym::PredHandle> facts, bool cache) {
+    if (remainder.floored) {
+      for (sym::ExprHandle operand :
+           {remainder.numerator, remainder.denominator}) {
+        FailureOr<bool> nonnegative = proveNonnegative(facts, operand);
+        if (failed(nonnegative) || !*nonnegative)
           return failure();
-        Value rem =
-            BinaryOp::create(rewriter, location, resultType, BinaryKind::RemSI,
-                             *numerator, *denominator);
-        return add(*residual, multiply(*scale, rem));
       }
-      std::optional<int64_t> constant =
-          sym::getIntegerLiteralValue(view.getAddConstant());
-      if (!constant)
-        return failure();
-      Value result = createIndexConstant(resultType, *constant);
-      for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
-        sym::AddTerm addend = view.getAddTerm(index);
-        std::optional<int64_t> coefficient =
-            sym::getIntegerLiteralValue(addend.coefficient);
-        FailureOr<Value> term = materializeDynamicArithmetic(
-            transaction, addend.term, resultType, facts, cache);
-        if (!coefficient || failed(term))
-          return failure();
-        Value scaled =
-            *coefficient == 1
-                ? *term
-                : multiply(createIndexConstant(resultType, *coefficient),
-                           *term);
-        result = add(result, scaled);
-      }
-      return result;
     }
-    if (view.getKind() == sym::ExprKind::Mul) {
-      std::optional<int64_t> coefficient =
-          sym::getIntegerLiteralValue(view.getMulCoefficient());
-      if (!coefficient)
-        return failure();
-      Value result = createIndexConstant(resultType, *coefficient);
-      for (uint32_t index = 0; index < view.getMulFactorCount(); ++index) {
-        sym::MulFactor factor = view.getMulFactor(index);
-        if (factor.exponent < 0)
-          return failure();
-        FailureOr<Value> value = materializeDynamicArithmetic(
-            transaction, factor.base, resultType, facts, cache);
-        if (failed(value))
-          return failure();
-        for (int32_t power = 0; power < factor.exponent; ++power)
-          result = multiply(result, *value);
-      }
-      return result;
-    }
-    if (view.getKind() == sym::ExprKind::Mod) {
-      Type elementType = resultType;
-      if (auto simd = dyn_cast<SimdType>(elementType))
-        elementType = simd.getElementType();
-      if (elementType.isInteger(32) &&
-          sym::getIntegerLiteralValue(view.getBinaryRhs()) ==
-              (int64_t{1} << 32))
-        return materializeDynamicArithmetic(transaction, view.getBinaryLhs(),
-                                            resultType, facts, cache);
-      FailureOr<Value> lhs = materializeDynamicArithmetic(
-          transaction, view.getBinaryLhs(), resultType, facts, cache);
-      FailureOr<Value> rhs = materializeDynamicArithmetic(
-          transaction, view.getBinaryRhs(), resultType, facts, cache);
-      FailureOr<bool> dividendNonnegative =
-          proveNonnegative(facts, view.getBinaryLhs());
-      if (failed(lhs) || failed(rhs) || failed(dividendNonnegative))
-        return failure();
-      BinaryKind kind =
-          *dividendNonnegative ? BinaryKind::RemUI : BinaryKind::RemSI;
-      Value remainder =
-          BinaryOp::create(rewriter, location, resultType, kind, *lhs, *rhs);
-      if (*dividendNonnegative)
-        return remainder;
-      Value zero = createIndexConstant(resultType, 0);
-      Value negative;
-      if (auto simd = dyn_cast<SimdType>(resultType))
-        negative = CmpIOp::create(
-            rewriter, location,
-            MaskType::get(rewriter.getContext(), simd.getWidth()),
-            arith::CmpIPredicate::slt, remainder, zero);
-      else
-        negative = arith::CmpIOp::create(
-            rewriter, location, arith::CmpIPredicate::slt, remainder, zero);
-      Value adjusted = BinaryOp::create(rewriter, location, resultType,
-                                        BinaryKind::AddI, remainder, *rhs);
-      return createSelect(negative, adjusted, remainder);
-    }
-    if (view.getKind() != sym::ExprKind::Trunc)
+    FailureOr<Value> numerator = materializeDynamicArithmetic(
+        transaction, remainder.numerator, resultType, facts, cache);
+    FailureOr<Value> denominator = materializeDynamicArithmetic(
+        transaction, remainder.denominator, resultType, facts, cache);
+    FailureOr<Value> scale = materializeDynamicArithmetic(
+        transaction, remainder.scale, resultType, facts, cache);
+    FailureOr<Value> residual = materializeDynamicArithmetic(
+        transaction, remainder.residual, resultType, facts, cache);
+    if (failed(numerator) || failed(denominator) || failed(scale) ||
+        failed(residual))
       return failure();
+    Value rem = createIntegerBinary(resultType, BinaryKind::RemSI, *numerator,
+                                    *denominator);
+    Value scaled =
+        createIntegerBinary(resultType, BinaryKind::MulI, *scale, rem);
+    return createIntegerBinary(resultType, BinaryKind::AddI, *residual, scaled);
+  }
+
+  FailureOr<Value> materializeDynamicAdd(const MemoryTransaction &transaction,
+                                         sym::ExprView view, Type resultType,
+                                         ArrayRef<sym::PredHandle> facts,
+                                         bool cache) {
+    FailureOr<std::optional<TruncatingRemainder>> remainder =
+        ::matchTruncatingRemainder(store, view.getHandle());
+    if (failed(remainder))
+      return failure();
+    if (*remainder)
+      return materializeRemainderExpression(transaction, **remainder,
+                                            resultType, facts, cache);
+    std::optional<int64_t> constant =
+        sym::getIntegerLiteralValue(view.getAddConstant());
+    if (!constant)
+      return failure();
+    Value result = createIndexConstant(resultType, *constant);
+    for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
+      sym::AddTerm addend = view.getAddTerm(index);
+      std::optional<int64_t> coefficient =
+          sym::getIntegerLiteralValue(addend.coefficient);
+      FailureOr<Value> term = materializeDynamicArithmetic(
+          transaction, addend.term, resultType, facts, cache);
+      if (!coefficient || failed(term))
+        return failure();
+      Value scaled =
+          *coefficient == 1
+              ? *term
+              : createIntegerBinary(
+                    resultType, BinaryKind::MulI,
+                    createIndexConstant(resultType, *coefficient), *term);
+      result =
+          createIntegerBinary(resultType, BinaryKind::AddI, result, scaled);
+    }
+    return result;
+  }
+
+  FailureOr<Value>
+  materializeDynamicProduct(const MemoryTransaction &transaction,
+                            sym::ExprView view, Type resultType,
+                            ArrayRef<sym::PredHandle> facts, bool cache) {
+    std::optional<int64_t> coefficient =
+        sym::getIntegerLiteralValue(view.getMulCoefficient());
+    if (!coefficient)
+      return failure();
+    Value result = createIndexConstant(resultType, *coefficient);
+    for (uint32_t index = 0; index < view.getMulFactorCount(); ++index) {
+      sym::MulFactor factor = view.getMulFactor(index);
+      if (factor.exponent < 0)
+        return failure();
+      FailureOr<Value> value = materializeDynamicArithmetic(
+          transaction, factor.base, resultType, facts, cache);
+      if (failed(value))
+        return failure();
+      for (int32_t power = 0; power < factor.exponent; ++power)
+        result =
+            createIntegerBinary(resultType, BinaryKind::MulI, result, *value);
+    }
+    return result;
+  }
+
+  FailureOr<Value>
+  materializeDynamicModulo(const MemoryTransaction &transaction,
+                           sym::ExprView view, Type resultType,
+                           ArrayRef<sym::PredHandle> facts, bool cache) {
+    Type elementType = resultType;
+    if (auto simd = dyn_cast<SimdType>(elementType))
+      elementType = simd.getElementType();
+    if (elementType.isInteger(32) &&
+        sym::getIntegerLiteralValue(view.getBinaryRhs()) == (int64_t{1} << 32))
+      return materializeDynamicArithmetic(transaction, view.getBinaryLhs(),
+                                          resultType, facts, cache);
+    FailureOr<Value> lhs = materializeDynamicArithmetic(
+        transaction, view.getBinaryLhs(), resultType, facts, cache);
+    FailureOr<Value> rhs = materializeDynamicArithmetic(
+        transaction, view.getBinaryRhs(), resultType, facts, cache);
+    FailureOr<bool> nonnegative = proveNonnegative(facts, view.getBinaryLhs());
+    if (failed(lhs) || failed(rhs) || failed(nonnegative))
+      return failure();
+    BinaryKind kind = *nonnegative ? BinaryKind::RemUI : BinaryKind::RemSI;
+    Value remainder = createIntegerBinary(resultType, kind, *lhs, *rhs);
+    return *nonnegative ? FailureOr<Value>(remainder)
+                        : FailureOr<Value>(adjustSignedRemainder(
+                              resultType, remainder, *rhs));
+  }
+
+  FailureOr<Value>
+  materializeDynamicQuotient(const MemoryTransaction &transaction,
+                             sym::ExprView view, Type resultType,
+                             ArrayRef<sym::PredHandle> facts, bool cache) {
     sym::ExprView argument(view.getUnaryArg());
     if (argument.getKind() != sym::ExprKind::Mul)
       return failure();
-    sym::RationalLiteral coefficient;
-    if (std::optional<int64_t> integer =
-            sym::getIntegerLiteralValue(argument.getMulCoefficient())) {
-      coefficient.numerator = *integer;
-    } else {
-      std::optional<sym::RationalLiteral> rational =
-          sym::ExprView(argument.getMulCoefficient()).getRational();
-      if (!rational)
-        return failure();
-      coefficient = *rational;
-    }
-    Value numerator = createIndexConstant(resultType, coefficient.numerator);
+    std::optional<sym::RationalLiteral> coefficient =
+        getRationalCoefficient(argument.getMulCoefficient());
+    if (!coefficient)
+      return failure();
+    Value numerator = createIndexConstant(resultType, coefficient->numerator);
     Value denominator =
-        createIndexConstant(resultType, coefficient.denominator);
+        createIndexConstant(resultType, coefficient->denominator);
     bool hasDynamicDenominator = false;
     for (uint32_t index = 0; index < argument.getMulFactorCount(); ++index) {
       sym::MulFactor factor = argument.getMulFactor(index);
@@ -1235,20 +1356,42 @@ struct MemoryTransactionAddressMaterializer::Impl {
       if (failed(value))
         return failure();
       int64_t power = std::abs(static_cast<int64_t>(factor.exponent));
-      for (int64_t index = 0; index < power; ++index) {
-        if (factor.exponent < 0) {
-          denominator = multiply(denominator, *value);
-          hasDynamicDenominator |= !sym::getIntegerLiteralValue(factor.base);
-        } else {
-          numerator = multiply(numerator, *value);
-        }
+      for (int64_t iteration = 0; iteration < power; ++iteration) {
+        if (factor.exponent < 0)
+          denominator = createIntegerBinary(resultType, BinaryKind::MulI,
+                                            denominator, *value);
+        else
+          numerator = createIntegerBinary(resultType, BinaryKind::MulI,
+                                          numerator, *value);
       }
+      hasDynamicDenominator |=
+          factor.exponent < 0 && !sym::getIntegerLiteralValue(factor.base);
     }
     if (!hasDynamicDenominator)
       return failure();
-    return BinaryOp::create(rewriter, location, resultType, BinaryKind::DivSI,
-                            numerator, denominator)
-        .getResult();
+    return createIntegerBinary(resultType, BinaryKind::DivSI, numerator,
+                               denominator);
+  }
+
+  FailureOr<Value> materializeDynamicArithmeticImpl(
+      const MemoryTransaction &transaction, sym::ExprHandle expression,
+      Type resultType, ArrayRef<sym::PredHandle> facts, bool cache) {
+    sym::ExprView view(expression);
+    if (!containsDynamicTrunc(expression))
+      return materializeArithmeticLeaf(transaction, expression, resultType,
+                                       facts);
+    if (view.getKind() == sym::ExprKind::Add)
+      return materializeDynamicAdd(transaction, view, resultType, facts, cache);
+    if (view.getKind() == sym::ExprKind::Mul)
+      return materializeDynamicProduct(transaction, view, resultType, facts,
+                                       cache);
+    if (view.getKind() == sym::ExprKind::Mod)
+      return materializeDynamicModulo(transaction, view, resultType, facts,
+                                      cache);
+    if (view.getKind() == sym::ExprKind::Trunc)
+      return materializeDynamicQuotient(transaction, view, resultType, facts,
+                                        cache);
+    return failure();
   }
 
   FailureOr<std::optional<sym::ExprHandle>>
@@ -1291,6 +1434,70 @@ struct MemoryTransactionAddressMaterializer::Impl {
     return type.isInteger(32);
   }
 
+  FailureOr<bool>
+  canMaterializeRemainderI32(const MemoryTransaction &transaction,
+                             const TruncatingRemainder &remainder) {
+    FailureOr<std::optional<sym::ExprHandle>> numerator =
+        matchSignedI32Value(remainder.numerator);
+    FailureOr<std::optional<sym::ExprHandle>> denominator =
+        matchSignedI32Value(remainder.denominator);
+    bool fixedNumerator =
+        succeeded(numerator) &&
+        (*numerator || isI32Input(transaction, remainder.numerator));
+    bool fixedDenominator =
+        succeeded(denominator) &&
+        (*denominator || isI32Input(transaction, remainder.denominator));
+    return fixedNumerator && fixedDenominator &&
+           !containsDynamicTrunc(remainder.residual) &&
+           !containsDynamicTrunc(remainder.scale);
+  }
+
+  FailureOr<bool> canMaterializeAddI32(const MemoryTransaction &transaction,
+                                       sym::ExprView view) {
+    FailureOr<std::optional<TruncatingRemainder>> remainder =
+        ::matchTruncatingRemainder(store, view.getHandle());
+    if (failed(remainder))
+      return failure();
+    if (*remainder)
+      return canMaterializeRemainderI32(transaction, **remainder);
+    for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
+      FailureOr<bool> term =
+          canMaterializeDynamicI32(transaction, view.getAddTerm(index).term);
+      if (failed(term) || !*term)
+        return term;
+    }
+    return true;
+  }
+
+  FailureOr<bool> canMaterializeProductI32(const MemoryTransaction &transaction,
+                                           sym::ExprView view) {
+    for (uint32_t index = 0; index < view.getMulFactorCount(); ++index) {
+      FailureOr<bool> factor =
+          canMaterializeDynamicI32(transaction, view.getMulFactor(index).base);
+      if (failed(factor) || !*factor)
+        return factor;
+    }
+    return true;
+  }
+
+  FailureOr<bool>
+  canMaterializeQuotientI32(const MemoryTransaction &transaction,
+                            sym::ExprView view) {
+    sym::ExprView argument(view.getUnaryArg());
+    if (argument.getKind() != sym::ExprKind::Mul)
+      return false;
+    bool dynamicDenominator = false;
+    for (uint32_t index = 0; index < argument.getMulFactorCount(); ++index) {
+      sym::MulFactor factor = argument.getMulFactor(index);
+      FailureOr<std::optional<sym::ExprHandle>> fixed =
+          matchSignedI32Value(factor.base);
+      if (failed(fixed) || (!*fixed && !isI32Input(transaction, factor.base)))
+        return false;
+      dynamicDenominator |= factor.exponent < 0;
+    }
+    return dynamicDenominator;
+  }
+
   FailureOr<bool> canMaterializeDynamicI32(const MemoryTransaction &transaction,
                                            sym::ExprHandle expression) {
     if (!containsDynamicTrunc(expression))
@@ -1302,60 +1509,132 @@ struct MemoryTransactionAddressMaterializer::Impl {
         return false;
       return canMaterializeDynamicI32(transaction, view.getBinaryLhs());
     }
-    if (view.getKind() == sym::ExprKind::Add) {
-      FailureOr<std::optional<TruncatingRemainder>> remainder =
-          ::matchTruncatingRemainder(store, expression);
-      if (failed(remainder))
-        return failure();
-      if (*remainder) {
-        FailureOr<std::optional<sym::ExprHandle>> numerator =
-            matchSignedI32Value((*remainder)->numerator);
-        FailureOr<std::optional<sym::ExprHandle>> denominator =
-            matchSignedI32Value((*remainder)->denominator);
-        bool fixedNumerator =
-            succeeded(numerator) &&
-            (*numerator || isI32Input(transaction, (*remainder)->numerator));
-        bool fixedDenominator =
-            succeeded(denominator) &&
-            (*denominator ||
-             isI32Input(transaction, (*remainder)->denominator));
-        return fixedNumerator && fixedDenominator &&
-               !containsDynamicTrunc((*remainder)->residual) &&
-               !containsDynamicTrunc((*remainder)->scale);
-      }
-      for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
-        FailureOr<bool> term =
-            canMaterializeDynamicI32(transaction, view.getAddTerm(index).term);
-        if (failed(term) || !*term)
-          return term;
-      }
-      return true;
-    }
-    if (view.getKind() == sym::ExprKind::Mul) {
-      for (uint32_t index = 0; index < view.getMulFactorCount(); ++index) {
-        FailureOr<bool> factor = canMaterializeDynamicI32(
-            transaction, view.getMulFactor(index).base);
-        if (failed(factor) || !*factor)
-          return factor;
-      }
-      return true;
-    }
-    if (view.getKind() == sym::ExprKind::Trunc) {
-      sym::ExprView argument(view.getUnaryArg());
-      if (argument.getKind() != sym::ExprKind::Mul)
-        return false;
-      bool dynamicDenominator = false;
-      for (uint32_t index = 0; index < argument.getMulFactorCount(); ++index) {
-        sym::MulFactor factor = argument.getMulFactor(index);
-        FailureOr<std::optional<sym::ExprHandle>> fixed =
-            matchSignedI32Value(factor.base);
-        if (failed(fixed) || (!*fixed && !isI32Input(transaction, factor.base)))
-          return false;
-        dynamicDenominator |= factor.exponent < 0;
-      }
-      return dynamicDenominator;
-    }
+    if (view.getKind() == sym::ExprKind::Add)
+      return canMaterializeAddI32(transaction, view);
+    if (view.getKind() == sym::ExprKind::Mul)
+      return canMaterializeProductI32(transaction, view);
+    if (view.getKind() == sym::ExprKind::Trunc)
+      return canMaterializeQuotientI32(transaction, view);
     return false;
+  }
+
+  void rememberExpression(sym::ExprHandle expression, ExpressionInputs inputs,
+                          Value result) {
+    expressions.push_back({expression, std::move(inputs.facts),
+                           std::move(inputs.names), std::move(inputs.values),
+                           inputs.type, result});
+  }
+
+  Type getSimdExpressionType(Type type) {
+    return isa<SimdType>(type)
+               ? type
+               : Type(SimdType::get(anchor->getContext(), type, waveWidth));
+  }
+
+  std::pair<sym::ExprHandle, bool>
+  unwrapU32Expression(sym::ExprHandle expression) {
+    sym::ExprView view(expression);
+    if (view.getKind() == sym::ExprKind::Mod &&
+        sym::getIntegerLiteralValue(view.getBinaryRhs()) == (int64_t{1} << 32))
+      return {view.getBinaryLhs(), true};
+    return {expression, false};
+  }
+
+  Type getNarrowDynamicType(Type type) {
+    Type i32 = rewriter.getI32Type();
+    if (auto simd = dyn_cast<SimdType>(type))
+      return SimdType::get(anchor->getContext(), i32, simd.getWidth());
+    return i32;
+  }
+
+  FailureOr<Value> conformWrappedU32(Value value, Type resultType) {
+    Type i32 = rewriter.getI32Type();
+    if (auto simd = dyn_cast<SimdType>(resultType))
+      i32 = SimdType::get(anchor->getContext(), i32, simd.getWidth());
+    Value result = conformToType(value, i32);
+    return result ? FailureOr<Value>(result) : FailureOr<Value>(failure());
+  }
+
+  FailureOr<Value> materializeDynamicExpression(
+      const MemoryTransaction &transaction, sym::ExprHandle expression,
+      sym::PredHandle active, ArrayRef<sym::PredHandle> candidates,
+      ExpressionInputs inputs) {
+    Type resultType = getSimdExpressionType(inputs.type);
+    auto [arithmetic, wrapsU32] = unwrapU32Expression(expression);
+    FailureOr<bool> narrow = canMaterializeDynamicI32(transaction, expression);
+    if (failed(narrow))
+      return failure();
+    if (*narrow)
+      resultType = getNarrowDynamicType(resultType);
+    FailureOr<Value> result = materializeDynamicArithmetic(
+        transaction, arithmetic, resultType, candidates, !active);
+    if (failed(result))
+      return anchor->emitOpError(
+          "failed to lower dynamic truncating index quotient");
+    if (wrapsU32)
+      result = conformWrappedU32(*result, resultType);
+    if (failed(result))
+      return failure();
+    if (!active)
+      rememberExpression(expression, std::move(inputs), *result);
+    return *result;
+  }
+
+  FailureOr<Value> materializePredicateExpression(
+      const MemoryTransaction &transaction, sym::ExprHandle expression,
+      sym::PredHandle predicate, sym::PredHandle active,
+      ExpressionInputs inputs) {
+    FailureOr<Value> condition =
+        materializePredicate(transaction, predicate, active, inputs.type);
+    if (failed(condition))
+      return anchor->emitOpError("failed to lower symbolic predicate");
+    Value zero = createIndexConstant(inputs.type, 0);
+    Value one = createIndexConstant(inputs.type, 1);
+    Value result = createSelect(*condition, one, zero);
+    if (!active)
+      rememberExpression(expression, std::move(inputs), result);
+    return result;
+  }
+
+  FailureOr<std::optional<Value>> materializeModuloExpression(
+      const MemoryTransaction &transaction, sym::ExprHandle expression,
+      sym::PredHandle active, ArrayRef<sym::PredHandle> candidates,
+      ExpressionInputs &inputs) {
+    FailureOr<std::optional<Value>> modulo =
+        materializeScaledModulo(transaction, expression, active,
+                                getSimdExpressionType(inputs.type), candidates);
+    if (failed(modulo))
+      return failure();
+    if (!*modulo)
+      return std::optional<Value>{};
+    Value result = **modulo;
+    if (!result)
+      return failure();
+    if (!active)
+      rememberExpression(expression, std::move(inputs), result);
+    return std::optional<Value>{result};
+  }
+
+  FailureOr<Value> materializePreparedExpression(
+      const MemoryTransaction &transaction, sym::ExprHandle expression,
+      sym::PredHandle active, ArrayRef<sym::PredHandle> candidates,
+      ExpressionInputs inputs) {
+    if (!active)
+      if (Value cached = findCachedExpression(expression, inputs))
+        return cached;
+    FailureOr<std::optional<Value>> modulo = materializeModuloExpression(
+        transaction, expression, active, candidates, inputs);
+    if (failed(modulo))
+      return failure();
+    if (*modulo)
+      return **modulo;
+    if (containsDynamicTrunc(expression))
+      return materializeDynamicExpression(transaction, expression, active,
+                                          candidates, std::move(inputs));
+    if (std::optional<sym::PredHandle> predicate = sym::asPred(expression))
+      return materializePredicateExpression(transaction, expression, *predicate,
+                                            active, std::move(inputs));
+    return createMaterialExpr(expression, std::move(inputs), !active);
   }
 
   FailureOr<Value> materializeExpr(const MemoryTransaction &transaction,
@@ -1395,89 +1674,8 @@ struct MemoryTransactionAddressMaterializer::Impl {
         transaction, candidates, expression, /*diagnoseMissing=*/true);
     if (failed(inputs))
       return failure();
-    if (!active) {
-      Value cached = findCachedExpression(expression, *inputs);
-      if (cached)
-        return cached;
-    }
-    FailureOr<std::optional<Value>> modulo = materializeScaledModulo(
-        transaction, expression, active,
-        isa<SimdType>(inputs->type)
-            ? inputs->type
-            : Type(
-                  SimdType::get(anchor->getContext(), inputs->type, waveWidth)),
-        candidates);
-    if (failed(modulo))
-      return failure();
-    if (*modulo) {
-      Value result = **modulo;
-      if (!result)
-        return failure();
-      if (!active)
-        expressions.push_back(
-            {expression, std::move(inputs->facts), std::move(inputs->names),
-             std::move(inputs->values), inputs->type, result});
-      return result;
-    }
-    if (containsDynamicTrunc(expression)) {
-      Type resultType = isa<SimdType>(inputs->type)
-                            ? inputs->type
-                            : Type(SimdType::get(anchor->getContext(),
-                                                 inputs->type, waveWidth));
-      sym::ExprHandle arithmetic = expression;
-      bool wrapsU32 = false;
-      sym::ExprView view(expression);
-      if (view.getKind() == sym::ExprKind::Mod &&
-          sym::getIntegerLiteralValue(view.getBinaryRhs()) ==
-              (int64_t{1} << 32)) {
-        arithmetic = view.getBinaryLhs();
-        wrapsU32 = true;
-      }
-      FailureOr<bool> narrow =
-          canMaterializeDynamicI32(transaction, expression);
-      if (failed(narrow))
-        return failure();
-      if (*narrow) {
-        Type i32 = rewriter.getI32Type();
-        resultType =
-            isa<SimdType>(resultType)
-                ? Type(SimdType::get(anchor->getContext(), i32, waveWidth))
-                : Type(i32);
-      }
-      FailureOr<Value> result = materializeDynamicArithmetic(
-          transaction, arithmetic, resultType, candidates, !active);
-      if (failed(result))
-        return anchor->emitOpError(
-            "failed to lower dynamic truncating index quotient");
-      if (wrapsU32) {
-        Type i32 = rewriter.getI32Type();
-        if (auto simd = dyn_cast<SimdType>(resultType))
-          i32 = SimdType::get(anchor->getContext(), i32, simd.getWidth());
-        *result = conformToType(*result, i32);
-        if (!*result)
-          return failure();
-      }
-      if (!active)
-        expressions.push_back(
-            {expression, std::move(inputs->facts), std::move(inputs->names),
-             std::move(inputs->values), inputs->type, *result});
-      return *result;
-    }
-    if (std::optional<sym::PredHandle> predicate = sym::asPred(expression)) {
-      FailureOr<Value> condition =
-          materializePredicate(transaction, *predicate, active, inputs->type);
-      if (failed(condition))
-        return anchor->emitOpError("failed to lower symbolic predicate");
-      Value zero = createIndexConstant(inputs->type, 0);
-      Value one = createIndexConstant(inputs->type, 1);
-      Value result = createSelect(*condition, one, zero);
-      if (!active)
-        expressions.push_back(
-            {expression, std::move(inputs->facts), std::move(inputs->names),
-             std::move(inputs->values), inputs->type, result});
-      return result;
-    }
-    return createMaterialExpr(expression, std::move(*inputs), !active);
+    return materializePreparedExpression(transaction, expression, active,
+                                         candidates, std::move(*inputs));
   }
 
   FailureOr<SplitOffset> splitOffset(const MemoryTransaction &transaction,
@@ -1689,6 +1887,11 @@ struct MemoryTransactionAddressMaterializer::Impl {
     sym::ExprHandle lane;
   };
 
+  struct BufferAddressSum {
+    sym::ExprHandle expression;
+    sym::ExprHandle scale;
+  };
+
   FailureOr<bool> isLaneAddressExpr(const MemoryTransaction &transaction,
                                     sym::ExprHandle expression) {
     llvm::DenseSet<StringRef> required;
@@ -1708,124 +1911,115 @@ struct MemoryTransactionAddressMaterializer::Impl {
     return false;
   }
 
-  FailureOr<std::optional<BufferAddressFields>>
-  splitBufferAddressFields(const MemoryTransaction &transaction,
-                           sym::ExprHandle expression) {
+  std::optional<BufferAddressSum>
+  matchBufferAddressSum(sym::ExprHandle expression) {
     sym::ExprView modulo(expression);
     if (modulo.getKind() != sym::ExprKind::Mod ||
         sym::getIntegerLiteralValue(modulo.getBinaryRhs()) !=
             (int64_t{1} << 32))
-      return std::optional<BufferAddressFields>{};
-
-    sym::ExprHandle scale;
-    sym::ExprHandle sumExpression = modulo.getBinaryLhs();
-    sym::ExprView sum(sumExpression);
+      return std::nullopt;
+    BufferAddressSum result{modulo.getBinaryLhs(), {}};
+    sym::ExprView sum(result.expression);
     if (sum.getKind() == sym::ExprKind::Mul) {
       if (sum.getMulFactorCount() != 1 || sum.getMulFactor(0).exponent != 1 ||
           !sym::getIntegerLiteralValue(sum.getMulCoefficient()))
-        return std::optional<BufferAddressFields>{};
-      scale = sum.getMulCoefficient();
-      sumExpression = sum.getMulFactor(0).base;
-      sum = sym::ExprView(sumExpression);
+        return std::nullopt;
+      result.scale = sum.getMulCoefficient();
+      result.expression = sum.getMulFactor(0).base;
+      sum = sym::ExprView(result.expression);
     }
-    if (sum.getKind() != sym::ExprKind::Add)
-      return std::optional<BufferAddressFields>{};
+    return sum.getKind() == sym::ExprKind::Add
+               ? std::optional<BufferAddressSum>(result)
+               : std::nullopt;
+  }
 
-    auto scaleExpr =
-        [&](sym::ExprHandle value,
-            sym::ExprHandle coefficient) -> FailureOr<sym::ExprHandle> {
-      sym::ExprHandle result = value;
-      if (coefficient) {
-        FailureOr<sym::ExprHandle> product = sym::composeExprBinary(
-            store, coefficient, sym::ExprBinaryOp::Mul, result);
-        if (failed(product))
-          return failure();
-        result = *product;
-      }
-      if (scale) {
-        FailureOr<sym::ExprHandle> product = sym::composeExprBinary(
-            store, scale, sym::ExprBinaryOp::Mul, result);
-        if (failed(product))
-          return failure();
-        result = *product;
-      }
-      return result;
-    };
-    auto append = [&](sym::ExprHandle value,
-                      sym::ExprHandle &field) -> LogicalResult {
-      if (!field) {
-        field = value;
-        return success();
-      }
-      FailureOr<sym::ExprHandle> sum =
-          sym::composeExprBinary(store, field, sym::ExprBinaryOp::Add, value);
-      if (failed(sum))
+  FailureOr<sym::ExprHandle> scaleBufferAddressExpr(sym::ExprHandle value,
+                                                    sym::ExprHandle coefficient,
+                                                    sym::ExprHandle scale) {
+    sym::ExprHandle result = value;
+    for (sym::ExprHandle factor : {coefficient, scale}) {
+      if (!factor)
+        continue;
+      FailureOr<sym::ExprHandle> product =
+          sym::composeExprBinary(store, factor, sym::ExprBinaryOp::Mul, result);
+      if (failed(product))
         return failure();
-      field = *sum;
-      return success();
-    };
-
-    BufferAddressFields fields;
-    auto appendClassified = [&](sym::ExprHandle expression,
-                                sym::ExprHandle coefficient) -> LogicalResult {
-      FailureOr<sym::ExprHandle> value = scaleExpr(expression, coefficient);
-      if (failed(value))
-        return failure();
-      if (sym::getIntegerLiteralValue(*value) == 0)
-        return success();
-      FailureOr<bool> lane = isLaneAddressExpr(transaction, *value);
-      if (failed(lane) ||
-          failed(append(*value, *lane ? fields.lane : fields.uniform)))
-        return failure();
-      return success();
-    };
-    auto appendSum = [&](sym::ExprHandle expression) -> LogicalResult {
-      sym::ExprView view(expression);
-      if (view.getKind() != sym::ExprKind::Add)
-        return appendClassified(expression, /*coefficient=*/{});
-      if (failed(appendClassified(view.getAddConstant(),
-                                  /*coefficient=*/{})))
-        return failure();
-      for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
-        sym::AddTerm term = view.getAddTerm(index);
-        if (failed(appendClassified(term.term, term.coefficient)))
-          return failure();
-      }
-      return success();
-    };
-
-    FailureOr<std::optional<TruncatingRemainder>> remainder =
-        ::matchTruncatingRemainder(store, sumExpression);
-    if (failed(remainder))
-      return failure();
-    if (*remainder) {
-      FailureOr<sym::ExprHandle> group = sym::composeExprBinary(
-          store, sumExpression, sym::ExprBinaryOp::Sub, (**remainder).residual);
-      if (failed(group))
-        return failure();
-      FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, *group);
-      if (failed(simplified) || failed(appendSum((**remainder).residual)) ||
-          failed(appendClassified(*simplified, /*coefficient=*/{})))
-        return failure();
-    } else if (failed(appendSum(sumExpression))) {
-      return failure();
+      result = *product;
     }
-    auto simplifyField = [&](sym::ExprHandle &field) -> LogicalResult {
-      if (!field)
-        return success();
-      FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, field);
-      if (failed(simplified))
-        return failure();
-      field = getIntegralLiteral(*simplified) == 0 ? sym::ExprHandle{}
-                                                   : *simplified;
-      return success();
-    };
-    if (failed(simplifyField(fields.uniform)) ||
-        failed(simplifyField(fields.lane)))
-      return failure();
-    if (!fields.uniform || !fields.lane)
-      return std::optional<BufferAddressFields>{};
+    return result;
+  }
 
+  LogicalResult appendBufferAddressField(sym::ExprHandle value,
+                                         sym::ExprHandle &field) {
+    if (!field) {
+      field = value;
+      return success();
+    }
+    FailureOr<sym::ExprHandle> sum =
+        sym::composeExprBinary(store, field, sym::ExprBinaryOp::Add, value);
+    if (failed(sum))
+      return failure();
+    field = *sum;
+    return success();
+  }
+
+  LogicalResult appendClassifiedBufferExpr(const MemoryTransaction &transaction,
+                                           sym::ExprHandle expression,
+                                           sym::ExprHandle coefficient,
+                                           sym::ExprHandle scale,
+                                           BufferAddressFields &fields) {
+    FailureOr<sym::ExprHandle> value =
+        scaleBufferAddressExpr(expression, coefficient, scale);
+    if (failed(value))
+      return failure();
+    if (sym::getIntegerLiteralValue(*value) == 0)
+      return success();
+    FailureOr<bool> lane = isLaneAddressExpr(transaction, *value);
+    if (failed(lane))
+      return failure();
+    return appendBufferAddressField(*value,
+                                    *lane ? fields.lane : fields.uniform);
+  }
+
+  LogicalResult appendBufferAddressSum(const MemoryTransaction &transaction,
+                                       sym::ExprHandle expression,
+                                       sym::ExprHandle scale,
+                                       BufferAddressFields &fields) {
+    sym::ExprView view(expression);
+    if (view.getKind() != sym::ExprKind::Add)
+      return appendClassifiedBufferExpr(transaction, expression, {}, scale,
+                                        fields);
+    if (failed(appendClassifiedBufferExpr(transaction, view.getAddConstant(),
+                                          {}, scale, fields)))
+      return failure();
+    for (uint32_t index = 0; index < view.getAddTermCount(); ++index) {
+      sym::AddTerm term = view.getAddTerm(index);
+      if (failed(appendClassifiedBufferExpr(transaction, term.term,
+                                            term.coefficient, scale, fields)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult simplifyBufferAddressField(sym::ExprHandle &field) {
+    if (!field)
+      return success();
+    FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, field);
+    if (failed(simplified))
+      return failure();
+    field =
+        getIntegralLiteral(*simplified) == 0 ? sym::ExprHandle{} : *simplified;
+    return success();
+  }
+
+  LogicalResult simplifyBufferAddressFields(BufferAddressFields &fields) {
+    if (failed(simplifyBufferAddressField(fields.uniform)))
+      return failure();
+    return simplifyBufferAddressField(fields.lane);
+  }
+
+  FailureOr<BufferAddressFields>
+  wrapBufferAddressFields(BufferAddressFields fields) {
     FailureOr<sym::ExprHandle> modulus =
         sym::composeExprInt(store, int64_t{1} << 32);
     if (failed(modulus))
@@ -1838,12 +2032,63 @@ struct MemoryTransactionAddressMaterializer::Impl {
       return failure();
     fields.uniform = *uniform;
     fields.lane = *lane;
-    if (failed(simplifyField(fields.uniform)) ||
-        failed(simplifyField(fields.lane)))
+    return fields;
+  }
+
+  LogicalResult appendTruncatingBufferSum(const MemoryTransaction &transaction,
+                                          const BufferAddressSum &sum,
+                                          const TruncatingRemainder &remainder,
+                                          BufferAddressFields &fields) {
+    FailureOr<sym::ExprHandle> group = sym::composeExprBinary(
+        store, sum.expression, sym::ExprBinaryOp::Sub, remainder.residual);
+    FailureOr<sym::ExprHandle> simplified =
+        failed(group) ? FailureOr<sym::ExprHandle>(failure())
+                      : sym::simplifyExpr(store, *group);
+    if (failed(simplified) ||
+        failed(appendBufferAddressSum(transaction, remainder.residual,
+                                      sum.scale, fields)))
+      return failure();
+    return appendClassifiedBufferExpr(transaction, *simplified, {}, sum.scale,
+                                      fields);
+  }
+
+  FailureOr<std::optional<BufferAddressFields>>
+  finalizeBufferAddressFields(BufferAddressFields fields) {
+    if (failed(simplifyBufferAddressFields(fields)))
       return failure();
     if (!fields.uniform || !fields.lane)
       return std::optional<BufferAddressFields>{};
-    return std::optional<BufferAddressFields>(fields);
+    FailureOr<BufferAddressFields> wrapped = wrapBufferAddressFields(fields);
+    if (failed(wrapped))
+      return failure();
+    fields = *wrapped;
+    if (failed(simplifyBufferAddressFields(fields)))
+      return failure();
+    return fields.uniform && fields.lane
+               ? FailureOr<std::optional<BufferAddressFields>>(
+                     std::optional<BufferAddressFields>(fields))
+               : FailureOr<std::optional<BufferAddressFields>>(
+                     std::optional<BufferAddressFields>{});
+  }
+
+  FailureOr<std::optional<BufferAddressFields>>
+  splitBufferAddressFields(const MemoryTransaction &transaction,
+                           sym::ExprHandle expression) {
+    std::optional<BufferAddressSum> sum = matchBufferAddressSum(expression);
+    if (!sum)
+      return std::optional<BufferAddressFields>{};
+    FailureOr<std::optional<TruncatingRemainder>> remainder =
+        ::matchTruncatingRemainder(store, sum->expression);
+    if (failed(remainder))
+      return failure();
+    BufferAddressFields fields;
+    if (*remainder && failed(appendTruncatingBufferSum(transaction, *sum,
+                                                       **remainder, fields)))
+      return failure();
+    if (!*remainder && failed(appendBufferAddressSum(
+                           transaction, sum->expression, sum->scale, fields)))
+      return failure();
+    return finalizeBufferAddressFields(fields);
   }
 
   FailureOr<Value>
@@ -1859,9 +2104,7 @@ struct MemoryTransactionAddressMaterializer::Impl {
     if (failed(inputs) || isa<SimdType>(inputs->type))
       return failure();
     sym::ExprView view(expression);
-    if (view.getKind() == sym::ExprKind::Mod &&
-        sym::getIntegerLiteralValue(view.getBinaryRhs()) ==
-            (int64_t{1} << 32)) {
+    if (isU32Modulo(view)) {
       FailureOr<Value> result = materializeDynamicArithmetic(
           transaction, view.getBinaryLhs(), rewriter.getI32Type(), candidates,
           !active);
@@ -1885,6 +2128,52 @@ struct MemoryTransactionAddressMaterializer::Impl {
     return *result;
   }
 
+  static bool isU32Modulo(sym::ExprView view) {
+    return view.getKind() == sym::ExprKind::Mod &&
+           sym::getIntegerLiteralValue(view.getBinaryRhs()) ==
+               (int64_t{1} << 32);
+  }
+
+  Value extendBufferOffset(Value base, Value offset) {
+    std::optional<PtrType> pointerType = getWavePointerType(base.getType());
+    Type offsetType = offset.getType();
+    Type offsetElement = offsetType;
+    if (auto simd = dyn_cast<SimdType>(offsetType))
+      offsetElement = simd.getElementType();
+    if (!pointerType ||
+        !isa<waveamd::BufferAddressSpaceAttr>(pointerType->getAddressSpace()) ||
+        !offsetElement.isInteger(32))
+      return offset;
+    Type indexType = rewriter.getIndexType();
+    if (auto simd = dyn_cast<SimdType>(offsetType))
+      indexType =
+          SimdType::get(rewriter.getContext(), indexType, simd.getWidth());
+    DictionaryAttr policy = rewriter.getDictionaryAttr(rewriter.getNamedAttr(
+        "extension", CastExtensionPolicyAttr::get(rewriter.getContext(),
+                                                  CastExtension::Zero)));
+    return CastOp::create(rewriter, location, indexType, CastKind::IntConvert,
+                          offset, policy);
+  }
+
+  Type getPointerOffsetType(Value base, Value offset) {
+    Type type = base.getType();
+    if (auto simd = dyn_cast<SimdType>(offset.getType()))
+      if (!isa<SimdType>(type))
+        type = SimdType::get(base.getContext(), type, simd.getWidth());
+    return type;
+  }
+
+  Value createPointerOffset(Value base, Value offset, Type type,
+                            sym::PredHandle active) {
+    Value pointer = active ? Value{} : findCachedPointer(base, offset, type);
+    if (!pointer) {
+      pointer = PtrAddOp::create(rewriter, location, type, base, offset);
+      if (!active)
+        pointers.push_back({base, offset, type, pointer});
+    }
+    return pointer;
+  }
+
   FailureOr<Value> appendPointerOffset(const MemoryTransaction &transaction,
                                        Value base, sym::ExprHandle expression,
                                        sym::PredHandle active, bool uniform) {
@@ -1893,37 +2182,9 @@ struct MemoryTransactionAddressMaterializer::Impl {
                 : materializeExpr(transaction, expression, active);
     if (failed(materialized))
       return failure();
-    Value offset = *materialized;
-    std::optional<PtrType> pointerType = getWavePointerType(base.getType());
-    Type offsetType = offset.getType();
-    Type offsetElement = offsetType;
-    if (auto simd = dyn_cast<SimdType>(offsetType))
-      offsetElement = simd.getElementType();
-    if (pointerType &&
-        isa<waveamd::BufferAddressSpaceAttr>(pointerType->getAddressSpace()) &&
-        offsetElement.isInteger(32)) {
-      Type indexType = rewriter.getIndexType();
-      if (auto simd = dyn_cast<SimdType>(offsetType))
-        indexType =
-            SimdType::get(rewriter.getContext(), indexType, simd.getWidth());
-      DictionaryAttr policy = rewriter.getDictionaryAttr(rewriter.getNamedAttr(
-          "extension", CastExtensionPolicyAttr::get(rewriter.getContext(),
-                                                    CastExtension::Zero)));
-      offset = CastOp::create(rewriter, location, indexType,
-                              CastKind::IntConvert, offset, policy)
-                   .getResult();
-    }
-    Type type = base.getType();
-    if (auto simd = dyn_cast<SimdType>(offset.getType()))
-      if (!isa<SimdType>(type))
-        type = SimdType::get(base.getContext(), type, simd.getWidth());
-    Value pointer = active ? Value{} : findCachedPointer(base, offset, type);
-    if (!pointer) {
-      pointer = PtrAddOp::create(rewriter, location, type, base, offset);
-      if (!active)
-        pointers.push_back({base, offset, type, pointer});
-    }
-    return pointer;
+    Value offset = extendBufferOffset(base, *materialized);
+    Type type = getPointerOffsetType(base, offset);
+    return createPointerOffset(base, offset, type, active);
   }
 
   FailureOr<Value>
@@ -3013,6 +3274,141 @@ private:
     return mergeTransactionMap(proofMap, materialMap);
   }
 
+  bool proveCyclicBounds(sym::ExprHandle inner, sym::ExprHandle modulus) {
+    FailureOr<sym::PredHandle> nonnegative =
+        sym::composePredCmp(store, inner, sym::PredCmpOp::Ge, zero);
+    FailureOr<sym::PredHandle> belowModulus =
+        sym::composePredCmp(store, inner, sym::PredCmpOp::Lt, modulus);
+    FailureOr<sym::CheckResult> provenNonnegative =
+        failed(nonnegative)
+            ? FailureOr<sym::CheckResult>(failure())
+            : indexing::check(store, proofMap, {*nonnegative}, memo);
+    FailureOr<sym::CheckResult> provenBelowModulus =
+        failed(belowModulus)
+            ? FailureOr<sym::CheckResult>(failure())
+            : indexing::check(store, proofMap, {*belowModulus}, memo);
+    return succeeded(provenNonnegative) && succeeded(provenBelowModulus) &&
+           *provenNonnegative == sym::CheckResult::True &&
+           *provenBelowModulus == sym::CheckResult::True;
+  }
+
+  std::optional<int64_t> getCyclicSpan(const ScaledModulo &cyclic) {
+    std::optional<int64_t> transactionBits =
+        llvm::checkedMul(layout.width, access.elementBits);
+    if (cyclic.scale <= 0 || !transactionBits ||
+        *transactionBits % cyclic.scale != 0)
+      return std::nullopt;
+    return *transactionBits / cyclic.scale;
+  }
+
+  FailureOr<std::optional<sym::ExprHandle>>
+  getCyclicWindowWidth(const ScaledModulo &cyclic) {
+    std::optional<int64_t> modulus =
+        sym::getIntegerLiteralValue(cyclic.modulus);
+    std::optional<int64_t> span = getCyclicSpan(cyclic);
+    if (!modulus || *modulus <= 0 || !span || *span <= 0 ||
+        *modulus % *span != 0)
+      return std::optional<sym::ExprHandle>{};
+    FailureOr<sym::ExprHandle> width = sym::composeExprInt(store, *span);
+    if (failed(width))
+      return failure();
+    return std::optional<sym::ExprHandle>{*width};
+  }
+
+  static bool isProven(const FailureOr<sym::CheckResult> &result) {
+    return succeeded(result) && *result == sym::CheckResult::True;
+  }
+
+  FailureOr<bool>
+  proveCyclicWindowPredicates(const ScaledModulo &cyclic,
+                              const sym::ExactDivideResult &displacement,
+                              sym::ExprHandle width) {
+    FailureOr<sym::ExprHandle> wrappedRemainder = sym::composeExprBinary(
+        store, cyclic.wrapped, sym::ExprBinaryOp::Mod, width);
+    FailureOr<sym::PredHandle> aligned =
+        failed(wrappedRemainder)
+            ? FailureOr<sym::PredHandle>(failure())
+            : sym::composePredCmp(store, *wrappedRemainder, sym::PredCmpOp::Eq,
+                                  zero);
+    FailureOr<sym::PredHandle> nonnegative = sym::composePredCmp(
+        store, displacement.quotient, sym::PredCmpOp::Ge, zero);
+    FailureOr<sym::PredHandle> inRange = sym::composePredCmp(
+        store, displacement.quotient, sym::PredCmpOp::Lt, width);
+    if (failed(aligned) || failed(nonnegative) || failed(inRange))
+      return failure();
+    FailureOr<sym::CheckResult> provenAligned =
+        indexing::check(store, proofMap, {*aligned}, memo);
+    FailureOr<sym::CheckResult> provenNonnegative =
+        indexing::check(store, proofMap, {*nonnegative}, memo);
+    FailureOr<sym::CheckResult> provenInRange =
+        indexing::check(store, proofMap, {*inRange}, memo);
+    return isProven(provenAligned) && isProven(provenNonnegative) &&
+           isProven(provenInRange);
+  }
+
+  FailureOr<bool>
+  proveAlignedCyclicWindow(const ScaledModulo &cyclic,
+                           const sym::ExactDivideResult &displacement) {
+    FailureOr<std::optional<sym::ExprHandle>> width =
+        getCyclicWindowWidth(cyclic);
+    if (failed(width))
+      return failure();
+    if (!*width)
+      return false;
+    return proveCyclicWindowPredicates(cyclic, displacement, **width);
+  }
+
+  FailureOr<std::optional<sym::ExactDivideResult>>
+  getCyclicDisplacement(const ScaledModulo &cyclic) {
+    std::array<sym::ExprHandle, 1> expressions{layout.displacement};
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        createTransactionAnalysis(store, expressions, proofMap.facts);
+    if (failed(analysis))
+      return std::optional<sym::ExactDivideResult>{};
+    FailureOr<sym::ExactDivideResult> displacement =
+        (*analysis)->tryExactDivide(layout.displacement, cyclic.scale);
+    if (failed(displacement) ||
+        displacement->status != sym::ExactDivideStatus::Proven)
+      return std::optional<sym::ExactDivideResult>{};
+    return std::optional<sym::ExactDivideResult>{*displacement};
+  }
+
+  FailureOr<std::optional<sym::ExprHandle>>
+  composeCyclicExpectedOffset(const ScaledModulo &cyclic) {
+    FailureOr<std::optional<sym::ExactDivideResult>> displacement =
+        getCyclicDisplacement(cyclic);
+    if (failed(displacement))
+      return failure();
+    if (!*displacement)
+      return std::optional<sym::ExprHandle>{};
+    FailureOr<sym::ExprHandle> inner =
+        sym::composeExprBinary(store, cyclic.wrapped, sym::ExprBinaryOp::Add,
+                               (**displacement).quotient);
+    bool noWrap = succeeded(inner) && proveCyclicBounds(*inner, cyclic.modulus);
+    if (!noWrap) {
+      FailureOr<bool> aligned =
+          proveAlignedCyclicWindow(cyclic, **displacement);
+      if (failed(aligned))
+        return failure();
+      noWrap = *aligned;
+    }
+    if (!noWrap)
+      return std::optional<sym::ExprHandle>{};
+    FailureOr<sym::ExprHandle> wrapped =
+        failed(inner)
+            ? FailureOr<sym::ExprHandle>(failure())
+            : sym::composeExprBinary(store, *inner, sym::ExprBinaryOp::Mod,
+                                     cyclic.modulus);
+    FailureOr<sym::ExprHandle> expected =
+        failed(wrapped)
+            ? FailureOr<sym::ExprHandle>(failure())
+            : composeIntBinary(store, *wrapped, sym::ExprBinaryOp::Mul,
+                               cyclic.scale);
+    if (failed(expected))
+      return failure();
+    return std::optional<sym::ExprHandle>{*expected};
+  }
+
   LogicalResult composeProofExpressions() {
     proofBitOffset = layout.verifiedBitOffset ? layout.verifiedBitOffset
                                               : proofOrigins.exprs[3];
@@ -3024,96 +3420,14 @@ private:
         store, transactionActivity, sym::PredCmpOp::Ne, zero);
     FailureOr<sym::ExprHandle> expectedOffset = sym::composeExprBinary(
         store, proofBitOffset, sym::ExprBinaryOp::Add, layout.displacement);
-    std::optional<ScaledModulo> cyclic = matchScaledModulo(proofBitOffset);
-    if (cyclic) {
-      std::array<sym::ExprHandle, 1> expressions{layout.displacement};
-      FailureOr<std::unique_ptr<sym::Analysis>> analysis =
-          createTransactionAnalysis(store, expressions, proofMap.facts);
-      FailureOr<sym::ExactDivideResult> displacement =
-          failed(analysis)
-              ? FailureOr<sym::ExactDivideResult>(failure())
-              : (*analysis)->tryExactDivide(layout.displacement, cyclic->scale);
-      if (succeeded(displacement) &&
-          displacement->status == sym::ExactDivideStatus::Proven) {
-        FailureOr<sym::ExprHandle> inner = sym::composeExprBinary(
-            store, cyclic->wrapped, sym::ExprBinaryOp::Add,
-            displacement->quotient);
-        FailureOr<sym::PredHandle> nonnegative =
-            failed(inner)
-                ? FailureOr<sym::PredHandle>(failure())
-                : sym::composePredCmp(store, *inner, sym::PredCmpOp::Ge, zero);
-        FailureOr<sym::PredHandle> belowModulus =
-            failed(inner)
-                ? FailureOr<sym::PredHandle>(failure())
-                : sym::composePredCmp(store, *inner, sym::PredCmpOp::Lt,
-                                      cyclic->modulus);
-        FailureOr<sym::CheckResult> provenNonnegative =
-            failed(nonnegative)
-                ? FailureOr<sym::CheckResult>(failure())
-                : indexing::check(store, proofMap, {*nonnegative}, memo);
-        FailureOr<sym::CheckResult> provenBelowModulus =
-            failed(belowModulus)
-                ? FailureOr<sym::CheckResult>(failure())
-                : indexing::check(store, proofMap, {*belowModulus}, memo);
-        bool noWrap = succeeded(provenNonnegative) &&
-                      succeeded(provenBelowModulus) &&
-                      *provenNonnegative == sym::CheckResult::True &&
-                      *provenBelowModulus == sym::CheckResult::True;
-        std::optional<int64_t> modulus =
-            sym::getIntegerLiteralValue(cyclic->modulus);
-        std::optional<int64_t> transactionBits =
-            llvm::checkedMul(layout.width, access.elementBits);
-        std::optional<int64_t> span;
-        if (cyclic->scale > 0 && transactionBits &&
-            *transactionBits % cyclic->scale == 0)
-          span = *transactionBits / cyclic->scale;
-        if (!noWrap && modulus && *modulus > 0 && span && *span > 0 &&
-            *modulus % *span == 0) {
-          FailureOr<sym::ExprHandle> width = sym::composeExprInt(store, *span);
-          FailureOr<sym::ExprHandle> wrappedRemainder =
-              failed(width)
-                  ? FailureOr<sym::ExprHandle>(failure())
-                  : sym::composeExprBinary(store, cyclic->wrapped,
-                                           sym::ExprBinaryOp::Mod, *width);
-          FailureOr<sym::PredHandle> aligned =
-              failed(wrappedRemainder)
-                  ? FailureOr<sym::PredHandle>(failure())
-                  : sym::composePredCmp(store, *wrappedRemainder,
-                                        sym::PredCmpOp::Eq, zero);
-          FailureOr<sym::PredHandle> displacementNonnegative =
-              sym::composePredCmp(store, displacement->quotient,
-                                  sym::PredCmpOp::Ge, zero);
-          FailureOr<sym::PredHandle> displacementInRange =
-              failed(width) ? FailureOr<sym::PredHandle>(failure())
-                            : sym::composePredCmp(store, displacement->quotient,
-                                                  sym::PredCmpOp::Lt, *width);
-          if (failed(aligned) || failed(displacementNonnegative) ||
-              failed(displacementInRange))
-            return failure();
-          FailureOr<sym::CheckResult> provenAligned =
-              indexing::check(store, proofMap, {*aligned}, memo);
-          FailureOr<sym::CheckResult> provenDisplacementNonnegative =
-              indexing::check(store, proofMap, {*displacementNonnegative},
-                              memo);
-          FailureOr<sym::CheckResult> provenDisplacementInRange =
-              indexing::check(store, proofMap, {*displacementInRange}, memo);
-          noWrap = succeeded(provenAligned) &&
-                   succeeded(provenDisplacementNonnegative) &&
-                   succeeded(provenDisplacementInRange) &&
-                   *provenAligned == sym::CheckResult::True &&
-                   *provenDisplacementNonnegative == sym::CheckResult::True &&
-                   *provenDisplacementInRange == sym::CheckResult::True;
-        }
-        if (noWrap) {
-          FailureOr<sym::ExprHandle> wrapped = sym::composeExprBinary(
-              store, *inner, sym::ExprBinaryOp::Mod, cyclic->modulus);
-          expectedOffset =
-              failed(wrapped)
-                  ? FailureOr<sym::ExprHandle>(failure())
-                  : composeIntBinary(store, *wrapped, sym::ExprBinaryOp::Mul,
-                                     cyclic->scale);
-        }
-      }
+    if (std::optional<ScaledModulo> cyclic =
+            matchScaledModulo(proofBitOffset)) {
+      FailureOr<std::optional<sym::ExprHandle>> cyclicExpected =
+          composeCyclicExpectedOffset(*cyclic);
+      if (failed(cyclicExpected))
+        return failure();
+      if (*cyclicExpected)
+        expectedOffset = **cyclicExpected;
     }
     FailureOr<sym::ExprHandle> extent =
         itemExtent ? sym::composeExprInt(store, *itemExtent)
@@ -3143,14 +3457,46 @@ private:
                               sym::PredCmpOp::Eq, access.block);
   }
 
-  LogicalResult appendBitOffsetEquality(sym::ExprHandle lhs,
-                                        sym::ExprHandle rhs) {
-    bool buffer = llvm::all_of(access.bases, [](Value base) {
+  bool isBufferAccess() {
+    return llvm::all_of(access.bases, [](Value base) {
       std::optional<PtrType> pointer = getWavePointerType(base.getType());
       return pointer &&
              isa<waveamd::BufferAddressSpaceAttr>(pointer->getAddressSpace());
     });
-    if (!buffer)
+  }
+
+  LogicalResult appendByteAlignment(bool exact, sym::ExprHandle bits,
+                                    sym::ExprHandle bytes) {
+    if (exact)
+      return success();
+    FailureOr<sym::ExprHandle> reconstructed =
+        composeIntBinary(store, bytes, sym::ExprBinaryOp::Mul, 8);
+    if (failed(reconstructed))
+      return failure();
+    return addTransactionGoal(store, commonGoals, bits, sym::PredCmpOp::Eq,
+                              *reconstructed);
+  }
+
+  LogicalResult appendWrappedByteEquality(sym::ExprHandle lhs,
+                                          sym::ExprHandle rhs) {
+    FailureOr<sym::ExprHandle> modulus =
+        sym::composeExprInt(store, int64_t{1} << 32);
+    FailureOr<sym::ExprHandle> difference =
+        sym::composeExprBinary(store, lhs, sym::ExprBinaryOp::Sub, rhs);
+    FailureOr<sym::ExprHandle> wrappedDifference =
+        failed(difference) || failed(modulus)
+            ? FailureOr<sym::ExprHandle>(failure())
+            : sym::composeExprBinary(store, *difference, sym::ExprBinaryOp::Mod,
+                                     *modulus);
+    if (failed(wrappedDifference))
+      return failure();
+    return addTransactionGoal(store, commonGoals, *wrappedDifference,
+                              sym::PredCmpOp::Eq, zero);
+  }
+
+  LogicalResult appendBitOffsetEquality(sym::ExprHandle lhs,
+                                        sym::ExprHandle rhs) {
+    if (!isBufferAccess())
       return addTransactionGoal(store, commonGoals, lhs, sym::PredCmpOp::Eq,
                                 rhs);
 
@@ -3172,34 +3518,10 @@ private:
         composeElementOffset(store, rhs, unitBits);
     if (failed(byteLhs) || failed(byteRhs))
       return failure();
-    auto appendAlignment = [&](bool exact, sym::ExprHandle bits,
-                               sym::ExprHandle bytes) -> LogicalResult {
-      if (exact)
-        return success();
-      FailureOr<sym::ExprHandle> reconstructed =
-          composeIntBinary(store, bytes, sym::ExprBinaryOp::Mul, unitBits);
-      if (failed(reconstructed) ||
-          failed(addTransactionGoal(store, commonGoals, bits,
-                                    sym::PredCmpOp::Eq, *reconstructed)))
-        return failure();
-      return success();
-    };
-    if (failed(appendAlignment(exactLhs, lhs, *byteLhs)) ||
-        failed(appendAlignment(exactRhs, rhs, *byteRhs)))
+    if (failed(appendByteAlignment(exactLhs, lhs, *byteLhs)) ||
+        failed(appendByteAlignment(exactRhs, rhs, *byteRhs)))
       return failure();
-    FailureOr<sym::ExprHandle> modulus =
-        sym::composeExprInt(store, int64_t{1} << 32);
-    FailureOr<sym::ExprHandle> difference = sym::composeExprBinary(
-        store, *byteLhs, sym::ExprBinaryOp::Sub, *byteRhs);
-    FailureOr<sym::ExprHandle> wrappedDifference =
-        failed(difference) || failed(modulus)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : sym::composeExprBinary(store, *difference, sym::ExprBinaryOp::Mod,
-                                     *modulus);
-    if (failed(wrappedDifference))
-      return failure();
-    return addTransactionGoal(store, commonGoals, *wrappedDifference,
-                              sym::PredCmpOp::Eq, zero);
+    return appendWrappedByteEquality(*byteLhs, *byteRhs);
   }
 
   LogicalResult appendItemAndOffsetGoals() {

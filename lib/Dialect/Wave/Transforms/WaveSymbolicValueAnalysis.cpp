@@ -389,6 +389,39 @@ void SymbolicValueBuilder::appendRootSSAFacts(Value value) {
 }
 
 FailureOr<std::optional<SymbolicOffset>>
+SymbolicValueBuilder::buildExpandedRoot(Value value, bool allowRootLeaf,
+                                        bool hasRoot) {
+  bool skip = false;
+  ProducerProofContext context;
+  FailureOr<sym::ExprHandle> expr = buildExpr(
+      value, skip, shouldAllowRootLeaf(value, allowRootLeaf, hasRoot), context);
+  if (skip)
+    return std::optional<SymbolicOffset>{};
+  if (failed(expr)) {
+    emitError(rootValue.getLoc()) << "failed to compose symbolic SSA packet";
+    return failure();
+  }
+  appendRootSSAFacts(value);
+  FailureOr<sym::ExprHandle> simplified = simplifyPacketExpr(*expr);
+  if (failed(simplified))
+    return failure();
+  return finishBuiltOffset(*simplified);
+}
+
+FailureOr<std::optional<SymbolicOffset>>
+SymbolicValueBuilder::buildRootLeaf(Value value) {
+  bool skip = false;
+  FailureOr<sym::ExprHandle> expr =
+      bindSymbol(value, skip, /*importDefinitionFacts=*/false);
+  if (skip)
+    return std::optional<SymbolicOffset>{};
+  if (failed(expr))
+    return failure();
+  appendRootSSAFacts(value);
+  return finishBuiltOffset(*expr);
+}
+
+FailureOr<std::optional<SymbolicOffset>>
 SymbolicValueBuilder::build(Value value, bool allowRootLeaf) {
   rootValue = value;
   FailureOr<bool> hasRoot = hasSymbolicRoot(value);
@@ -400,37 +433,14 @@ SymbolicValueBuilder::build(Value value, bool allowRootLeaf) {
     return std::optional<SymbolicOffset>{};
 
   StateMark mark = markState();
-  bool skip = false;
-  ProducerProofContext context;
-  FailureOr<sym::ExprHandle> expr =
-      buildExpr(value, skip,
-                shouldAllowRootLeaf(value, allowRootLeaf, *hasRoot), context);
-  if (skip)
-    return std::optional<SymbolicOffset>{};
-  if (failed(expr)) {
-    emitError(rootValue.getLoc()) << "failed to compose symbolic SSA packet";
-    return failure();
-  }
-
-  appendRootSSAFacts(value);
-
-  FailureOr<sym::ExprHandle> simplified = simplifyPacketExpr(*expr);
-  if (failed(simplified))
-    return failure();
   FailureOr<std::optional<SymbolicOffset>> result =
-      finishBuiltOffset(*simplified);
+      buildExpandedRoot(value, allowRootLeaf, *hasRoot);
   if (failed(result) || *result || !allowRootLeaf ||
       !allowSSAIntermediateLeaves)
     return result;
 
   rollbackState(mark);
-  skip = false;
-  expr = bindSymbol(value, skip, /*importDefinitionFacts=*/false);
-  if (skip || failed(expr))
-    return failed(expr) ? FailureOr<std::optional<SymbolicOffset>>(failure())
-                        : std::optional<SymbolicOffset>{};
-  appendRootSSAFacts(value);
-  return finishBuiltOffset(*expr);
+  return buildRootLeaf(value);
 }
 
 FailureOr<bool> SymbolicValueBuilder::hasSymbolicRoot(Value value) {

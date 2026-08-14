@@ -465,6 +465,45 @@ static FailureOr<bool> carrierAccepts(sym::Store &store,
 static FailureOr<int64_t> evaluateRedistributionPoint(
     sym::Store &store, const indexing::IndexMap &carrier,
     sym::ExprHandle expression, int64_t block, int64_t item, int64_t slot);
+
+struct MovementProperties {
+  bool sameBlock = true;
+  bool sameItem = true;
+  bool sameWave = true;
+  bool identitySlot;
+};
+
+static LogicalResult
+updateMovementProperties(sym::Store &store, const indexing::IndexMap &carrier,
+                         ArrayRef<sym::ExprHandle> sourceCoordinates,
+                         int64_t block, int64_t item, int64_t slot,
+                         int64_t waveWidth, MovementProperties &properties) {
+  FailureOr<int64_t> sourceBlock = evaluateRedistributionPoint(
+      store, carrier, sourceCoordinates[0], block, item, slot);
+  FailureOr<int64_t> sourceItem = evaluateRedistributionPoint(
+      store, carrier, sourceCoordinates[1], block, item, slot);
+  FailureOr<int64_t> sourceSlot = evaluateRedistributionPoint(
+      store, carrier, sourceCoordinates[2], block, item, slot);
+  if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
+    return failure();
+  properties.sameBlock &= *sourceBlock == block;
+  properties.sameItem &= *sourceItem == item;
+  properties.sameWave &= *sourceItem / waveWidth == item / waveWidth;
+  properties.identitySlot &= *sourceSlot == slot;
+  return success();
+}
+
+static Movement
+classifyMovementProperties(const MovementProperties &properties) {
+  if (!properties.sameBlock)
+    return Movement::Cluster;
+  if (properties.sameItem && properties.identitySlot)
+    return Movement::Alias;
+  if (properties.sameItem)
+    return Movement::Workitem;
+  return properties.sameWave ? Movement::Wave : Movement::Workgroup;
+}
+
 static FailureOr<std::optional<Movement>> classifyCarrierByEnumeration(
     sym::Store &store, RedistributeOp op, const indexing::IndexMap &carrier,
     ArrayRef<sym::ExprHandle> sourceCoordinates, int64_t waveWidth) {
@@ -477,37 +516,20 @@ static FailureOr<std::optional<Movement>> classifyCarrierByEnumeration(
   if (!points || *points > kMaxEnumerationPoints)
     return std::optional<Movement>{};
 
-  bool sameBlock = true;
-  bool sameItem = true;
-  bool sameWave = true;
-  bool identitySlot = op.getSource().getType() == op.getResult().getType();
+  MovementProperties properties;
+  properties.identitySlot =
+      op.getSource().getType() == op.getResult().getType();
   for (int64_t block : llvm::seq<int64_t>(0, blocks)) {
     for (int64_t item : llvm::seq<int64_t>(0, items)) {
       for (int64_t slot : llvm::seq<int64_t>(0, slots)) {
-        FailureOr<int64_t> sourceBlock = evaluateRedistributionPoint(
-            store, carrier, sourceCoordinates[0], block, item, slot);
-        FailureOr<int64_t> sourceItem = evaluateRedistributionPoint(
-            store, carrier, sourceCoordinates[1], block, item, slot);
-        FailureOr<int64_t> sourceSlot = evaluateRedistributionPoint(
-            store, carrier, sourceCoordinates[2], block, item, slot);
-        if (failed(sourceBlock) || failed(sourceItem) || failed(sourceSlot))
+        if (failed(updateMovementProperties(store, carrier, sourceCoordinates,
+                                            block, item, slot, waveWidth,
+                                            properties)))
           return failure();
-        sameBlock &= *sourceBlock == block;
-        sameItem &= *sourceItem == item;
-        sameWave &= *sourceItem / waveWidth == item / waveWidth;
-        identitySlot &= *sourceSlot == slot;
       }
     }
   }
-  if (!sameBlock)
-    return std::optional<Movement>{Movement::Cluster};
-  if (sameItem && identitySlot)
-    return std::optional<Movement>{Movement::Alias};
-  if (sameItem)
-    return std::optional<Movement>{Movement::Workitem};
-  if (sameWave)
-    return std::optional<Movement>{Movement::Wave};
-  return std::optional<Movement>{Movement::Workgroup};
+  return std::optional<Movement>{classifyMovementProperties(properties)};
 }
 static LogicalResult
 validateCarrierCoordinates(sym::Store &store, RedistributeOp op,
@@ -531,18 +553,28 @@ validateCarrierCoordinates(sym::Store &store, RedistributeOp op,
         "bounds");
   return success();
 }
-static FailureOr<Movement>
-classifyCarrierMovement(sym::Store &store, RedistributeOp op,
-                        const indexing::IndexMap &carrier,
-                        ArrayRef<sym::ExprHandle> sourceCoordinates,
-                        int64_t waveWidth, indexing::CheckMemo &memo) {
-  FailureOr<std::optional<Movement>> enumerated = classifyCarrierByEnumeration(
-      store, op, carrier, sourceCoordinates, waveWidth);
-  if (failed(enumerated))
-    return failure();
-  if (*enumerated)
-    return **enumerated;
 
+using MovementCandidate = std::pair<Movement, SmallVector<sym::PredHandle, 3>>;
+
+static FailureOr<std::optional<Movement>>
+findAcceptedMovement(sym::Store &store, const indexing::IndexMap &carrier,
+                     ArrayRef<MovementCandidate> candidates,
+                     indexing::CheckMemo &memo) {
+  for (const auto &[candidate, goals] : candidates) {
+    FailureOr<bool> accepted = carrierAccepts(store, carrier, goals, memo);
+    if (failed(accepted))
+      return failure();
+    if (*accepted)
+      return std::optional<Movement>{candidate};
+  }
+  return std::optional<Movement>{};
+}
+
+static FailureOr<Movement>
+classifyCarrierByProof(sym::Store &store, RedistributeOp op,
+                       const indexing::IndexMap &carrier,
+                       ArrayRef<sym::ExprHandle> sourceCoordinates,
+                       int64_t waveWidth, indexing::CheckMemo &memo) {
   sym::ExprHandle block = getInput(carrier, kBlock).variable;
   sym::ExprHandle item = getInput(carrier, kItem).variable;
   sym::ExprHandle slot = getInput(carrier, kSlot).variable;
@@ -557,25 +589,38 @@ classifyCarrierMovement(sym::Store &store, RedistributeOp op,
   if (failed(blockIdentity) || failed(itemIdentity) || failed(slotIdentity) ||
       failed(waveIdentity))
     return failure();
-  using Candidate = std::pair<Movement, SmallVector<sym::PredHandle, 3>>;
-  SmallVector<Candidate, 4> candidates;
+  SmallVector<MovementCandidate, 4> candidates;
   if (op.getSource().getType() == op.getResult().getType())
     candidates.push_back(
         {Movement::Alias, {*blockIdentity, *itemIdentity, *slotIdentity}});
   candidates.push_back({Movement::Workitem, {*blockIdentity, *itemIdentity}});
   candidates.push_back({Movement::Wave, {*blockIdentity, *waveIdentity}});
-  for (const auto &[candidate, goals] : candidates) {
-    FailureOr<bool> accepted = carrierAccepts(store, carrier, goals, memo);
-    if (failed(accepted))
-      return failure();
-    if (*accepted)
-      return candidate;
-  }
+  FailureOr<std::optional<Movement>> accepted =
+      findAcceptedMovement(store, carrier, candidates, memo);
+  if (failed(accepted))
+    return failure();
+  if (*accepted)
+    return **accepted;
   FailureOr<bool> sameBlock =
       carrierAccepts(store, carrier, {*blockIdentity}, memo);
   if (failed(sameBlock))
     return failure();
   return *sameBlock ? Movement::Workgroup : Movement::Cluster;
+}
+
+static FailureOr<Movement>
+classifyCarrierMovement(sym::Store &store, RedistributeOp op,
+                        const indexing::IndexMap &carrier,
+                        ArrayRef<sym::ExprHandle> sourceCoordinates,
+                        int64_t waveWidth, indexing::CheckMemo &memo) {
+  FailureOr<std::optional<Movement>> enumerated = classifyCarrierByEnumeration(
+      store, op, carrier, sourceCoordinates, waveWidth);
+  if (failed(enumerated))
+    return failure();
+  if (*enumerated)
+    return **enumerated;
+  return classifyCarrierByProof(store, op, carrier, sourceCoordinates,
+                                waveWidth, memo);
 }
 static LogicalResult
 validateBlockIndependentMovement(sym::Store &store, RedistributeOp op,
@@ -730,67 +775,72 @@ private:
     return SelectOp::create(rewriter, op.getLoc(), trueValue.getType(),
                             condition, trueValue, falseValue);
   }
-  FailureOr<Value> materializePredicate(sym::PredHandle predicate) {
-    sym::PredView view(predicate);
+  FailureOr<Value> materializeComparison(sym::PredView view) {
+    std::optional<arith::CmpIPredicate> comparison =
+        getCmpPredicate(*view.getCmpOp());
+    FailureOr<Value> lhs = materializeExpression(view.getCmpLhs());
+    FailureOr<Value> rhs = materializeExpression(view.getCmpRhs());
+    if (!comparison || failed(lhs) || failed(rhs))
+      return failure();
+    return CmpIOp::create(rewriter, op.getLoc(),
+                          MaskType::get(op.getContext(), getWaveWidth()),
+                          *comparison, *lhs, *rhs)
+        .getResult();
+  }
+  FailureOr<Value> materializeLogic(sym::PredView view) {
+    bool isAnd = view.getKind() == sym::PredKind::And;
+    Value result = constantMask(isAnd);
+    for (uint32_t index = 0; index < view.getLogicArgCount(); ++index) {
+      FailureOr<Value> argument = materializePredicate(view.getLogicArg(index));
+      if (failed(argument))
+        return failure();
+      Value constant = constantMask(!isAnd);
+      result = isAnd ? selectMask(result, *argument, constant)
+                     : selectMask(result, constant, *argument);
+    }
+    return result;
+  }
+  FailureOr<Value> materializePiecewise(sym::PredHandle predicate) {
+    sym::ExprView expression(sym::asExpr(predicate));
+    Value result;
+    for (uint32_t index = expression.getPiecewiseCaseCount(); index-- > 0;) {
+      sym::PiecewiseCase arm = expression.getPiecewiseCase(index);
+      std::optional<sym::PredHandle> armValue = sym::asPred(arm.value);
+      FailureOr<Value> value = armValue ? materializePredicate(*armValue)
+                                        : FailureOr<Value>(failure());
+      FailureOr<Value> condition = materializePredicate(arm.condition);
+      if (failed(value) || failed(condition))
+        return failure();
+      result = result ? selectMask(*condition, *value, result) : *value;
+    }
+    return result ? FailureOr<Value>(result) : FailureOr<Value>(failure());
+  }
+  FailureOr<Value> materializePredicateLeaf(sym::PredView view) {
     switch (view.getKind()) {
     case sym::PredKind::True:
       return constantMask(true);
     case sym::PredKind::False:
       return constantMask(false);
-    case sym::PredKind::Cmp: {
-      std::optional<arith::CmpIPredicate> comparison =
-          getCmpPredicate(*view.getCmpOp());
-      FailureOr<Value> lhs = materializeExpression(view.getCmpLhs());
-      FailureOr<Value> rhs = materializeExpression(view.getCmpRhs());
-      if (!comparison || failed(lhs) || failed(rhs))
-        return failure();
-      return CmpIOp::create(rewriter, op.getLoc(),
-                            MaskType::get(op.getContext(), getWaveWidth()),
-                            *comparison, *lhs, *rhs)
-          .getResult();
-    }
+    case sym::PredKind::Cmp:
+      return materializeComparison(view);
     case sym::PredKind::Not: {
       FailureOr<Value> argument = materializePredicate(view.getUnaryArg());
       if (failed(argument))
         return failure();
       return selectMask(*argument, constantMask(false), constantMask(true));
     }
-    case sym::PredKind::And:
-    case sym::PredKind::Or: {
-      bool isAnd = view.getKind() == sym::PredKind::And;
-      Value result = constantMask(isAnd);
-      for (uint32_t index = 0; index < view.getLogicArgCount(); ++index) {
-        FailureOr<Value> argument =
-            materializePredicate(view.getLogicArg(index));
-        if (failed(argument))
-          return failure();
-        Value constant = constantMask(!isAnd);
-        result = isAnd ? selectMask(result, *argument, constant)
-                       : selectMask(result, constant, *argument);
-      }
-      return result;
-    }
-    case sym::PredKind::Piecewise: {
-      sym::ExprView expression(sym::asExpr(predicate));
-      Value result;
-      for (uint32_t index = expression.getPiecewiseCaseCount(); index-- > 0;) {
-        sym::PiecewiseCase arm = expression.getPiecewiseCase(index);
-        std::optional<sym::PredHandle> armValue = sym::asPred(arm.value);
-        FailureOr<Value> value = armValue ? materializePredicate(*armValue)
-                                          : FailureOr<Value>(failure());
-        FailureOr<Value> condition = materializePredicate(arm.condition);
-        if (failed(value) || failed(condition))
-          return failure();
-        result = result ? selectMask(*condition, *value, result) : *value;
-      }
-      return result ? FailureOr<Value>(result) : FailureOr<Value>(failure());
-    }
-    case sym::PredKind::Invalid:
-    case sym::PredKind::Error:
-    case sym::PredKind::ParseError:
+    default:
       return failure();
     }
-    llvm_unreachable("unknown symbolic predicate kind");
+  }
+  FailureOr<Value> materializePredicate(sym::PredHandle predicate) {
+    sym::PredView view(predicate);
+    if (view.getKind() == sym::PredKind::And ||
+        view.getKind() == sym::PredKind::Or)
+      return materializeLogic(view);
+    if (view.getKind() == sym::PredKind::Piecewise)
+      return materializePiecewise(predicate);
+    return materializePredicateLeaf(view);
   }
   FailureOr<Value> materializeExpression(sym::ExprHandle expression) {
     if (std::optional<int64_t> literal =

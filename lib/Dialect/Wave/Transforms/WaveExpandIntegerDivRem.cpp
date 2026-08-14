@@ -928,47 +928,46 @@ static DictionaryAttr createExtensionPolicy(OpBuilder &builder,
       "extension", CastExtensionPolicyAttr::get(context, extension)));
 }
 
-static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
-                                                      BinaryOp op,
-                                                      DataFlowSolver &solver,
-                                                      sym::Store &store) {
-  if (!canNarrowDivRemTypeToI32(op.getResult().getType()))
-    return std::nullopt;
+struct NarrowDivRemResult {
+  Value value;
+  CastExtension extension;
+};
 
+static std::optional<NarrowDivRemResult>
+createNarrowDivRem(IRRewriter &rewriter, BinaryOp op, Value lhs, Value rhs,
+                   DataFlowSolver &solver, sym::Store &store) {
   Location loc = op.getLoc();
-  Type i32 = i32Like(rewriter, op.getResult().getType());
+  Type i32 = lhs.getType();
   BinaryKind kind = op.getKind();
-  Value lhs = createI32View(rewriter, loc, op.getLhs());
-  Value rhs = createI32View(rewriter, loc, op.getRhs());
-
-  Value narrow;
-  CastExtension extension = CastExtension::Zero;
   bool nonnegative =
       isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(), 0) &&
       isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(), 0);
   if (nonnegative) {
-    if (std::optional<Value> pow2 = tryCreateDynamicPow2Value(
-            rewriter, loc, i32, kind, lhs, rhs, op.getLhs(), op.getRhs(),
-            solver, store)) {
-      narrow = *pow2;
-    } else {
-      DivRemValues result = createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
-      narrow = (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI)
-                   ? result.quotient
-                   : result.remainder;
-    }
-  } else {
-    constexpr int64_t signedI32Min = -(int64_t{1} << 31);
-    if (!isSignedDivRem(kind) ||
-        !isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(),
-                                              signedI32Min) ||
-        !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(),
-                                              signedI32Min))
-      return std::nullopt;
-    DivRemValues result = createSignedDivRem(rewriter, loc, i32, lhs, rhs);
-    narrow = kind == BinaryKind::DivSI ? result.quotient : result.remainder;
-    extension = CastExtension::Sign;
+    if (std::optional<Value> pow2 =
+            tryCreateDynamicPow2Value(rewriter, loc, i32, kind, lhs, rhs,
+                                      op.getLhs(), op.getRhs(), solver, store))
+      return NarrowDivRemResult{*pow2, CastExtension::Zero};
+    DivRemValues result = createUnsignedDivRem(rewriter, loc, i32, lhs, rhs);
+    Value value = kind == BinaryKind::DivUI || kind == BinaryKind::DivSI
+                      ? result.quotient
+                      : result.remainder;
+    return NarrowDivRemResult{value, CastExtension::Zero};
   }
+
+  constexpr int64_t signedI32Min = -(int64_t{1} << 31);
+  if (!isSignedDivRem(kind) ||
+      !isProvenSignedI32RangeWithLowerBound(solver, store, op.getLhs(),
+                                            signedI32Min) ||
+      !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(),
+                                            signedI32Min))
+    return std::nullopt;
+  DivRemValues result = createSignedDivRem(rewriter, loc, i32, lhs, rhs);
+  Value value = kind == BinaryKind::DivSI ? result.quotient : result.remainder;
+  return NarrowDivRemResult{value, CastExtension::Sign};
+}
+
+static void replaceNarrowingUsers(IRRewriter &rewriter, BinaryOp op,
+                                  Value replacement) {
   SmallVector<CastOp> narrowingUsers;
   for (Operation *user : op.getResult().getUsers()) {
     CastOp cast = dyn_cast<CastOp>(user);
@@ -977,10 +976,27 @@ static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
       narrowingUsers.push_back(cast);
   }
   for (CastOp cast : narrowingUsers)
-    rewriter.replaceOp(cast, narrow);
+    rewriter.replaceOp(cast, replacement);
+}
+
+static std::optional<Value> tryExpandIndexDivRemAsI32(IRRewriter &rewriter,
+                                                      BinaryOp op,
+                                                      DataFlowSolver &solver,
+                                                      sym::Store &store) {
+  if (!canNarrowDivRemTypeToI32(op.getResult().getType()))
+    return std::nullopt;
+
+  Location loc = op.getLoc();
+  Value lhs = createI32View(rewriter, loc, op.getLhs());
+  Value rhs = createI32View(rewriter, loc, op.getRhs());
+  std::optional<NarrowDivRemResult> narrow =
+      createNarrowDivRem(rewriter, op, lhs, rhs, solver, store);
+  if (!narrow)
+    return std::nullopt;
+  replaceNarrowingUsers(rewriter, op, narrow->value);
   return CastOp::create(rewriter, loc, op.getResult().getType(),
-                        CastKind::IntConvert, narrow,
-                        createExtensionPolicy(rewriter, extension))
+                        CastKind::IntConvert, narrow->value,
+                        createExtensionPolicy(rewriter, narrow->extension))
       .getResult();
 }
 

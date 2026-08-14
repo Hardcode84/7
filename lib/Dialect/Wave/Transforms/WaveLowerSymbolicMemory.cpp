@@ -653,6 +653,25 @@ static Value findCachedTransactionValue(
       return cachedValue;
   return {};
 }
+static bool isScalarizedPacket(const AccessMap &access, Type component) {
+  if (access.access->gather || !access.access->packet)
+    return false;
+  PackOp sourcePack = access.access->packet.getDefiningOp<PackOp>();
+  return sourcePack && llvm::all_of(sourcePack.getInputs(), [&](Value input) {
+           return input.getType() == component;
+         });
+}
+static Value packTransactionWords(IRRewriter &rewriter, const AccessMap &access,
+                                  ArrayRef<Value> values, Type type,
+                                  int64_t elementsPerWord) {
+  SmallVector<Value> words;
+  Type wordType = getTransactionType(*access.access, elementsPerWord);
+  for (int64_t first = 0; first < static_cast<int64_t>(values.size());
+       first += elementsPerWord)
+    words.push_back(PackOp::create(rewriter, access.getLoc(), wordType,
+                                   values.slice(first, elementsPerWord)));
+  return PackOp::create(rewriter, access.getLoc(), type, words);
+}
 static Value buildTransactionValue(
     IRRewriter &rewriter, const AccessMap &access, const Transaction &checked,
     ArrayRef<Value> components, bool aliasedOutputs = false,
@@ -664,30 +683,17 @@ static Value buildTransactionValue(
   Type type = getTransactionType(*access.access, values.size());
   if (Value cached = findCachedTransactionValue(type, values, cache))
     return cached;
-  Value packed;
-  PackOp sourcePack;
-  if (!access.access->gather && access.access->packet)
-    sourcePack = access.access->packet.getDefiningOp<PackOp>();
   Type component = getComponentType(*access.access);
-  bool scalarizedPacket =
-      sourcePack && llvm::all_of(sourcePack.getInputs(), [&](Value input) {
-        return input.getType() == component;
-      });
   int64_t elementsPerWord = 32 / access.shape.elementBits;
-  if (scalarizedPacket && elementsPerWord > 1 &&
-      values.size() > static_cast<size_t>(elementsPerWord) &&
-      values.size() % elementsPerWord == 0) {
-    SmallVector<Value> words;
-    Type wordType = getTransactionType(*access.access, elementsPerWord);
-    for (int64_t first = 0; first < static_cast<int64_t>(values.size());
-         first += elementsPerWord)
-      words.push_back(
-          PackOp::create(rewriter, access.getLoc(), wordType,
-                         ArrayRef(values).slice(first, elementsPerWord)));
-    packed = PackOp::create(rewriter, access.getLoc(), type, words);
-  } else {
-    packed = PackOp::create(rewriter, access.getLoc(), type, values);
-  }
+  bool packWords = isScalarizedPacket(access, component) &&
+                   elementsPerWord > 1 &&
+                   values.size() > static_cast<size_t>(elementsPerWord) &&
+                   values.size() % elementsPerWord == 0;
+  Value packed =
+      packWords
+          ? packTransactionWords(rewriter, access, values, type,
+                                 elementsPerWord)
+          : Value(PackOp::create(rewriter, access.getLoc(), type, values));
   if (cache)
     cache->emplace_back(std::move(values), packed);
   return packed;
@@ -903,6 +909,58 @@ static LogicalResult appendAccessPlan(const AccessMap &access,
   llvm::append_range(plan, std::move(*planned));
   return success();
 }
+static bool isProvenInactive(FailureOr<sym::CheckResult> checked) {
+  return succeeded(checked) && *checked == sym::CheckResult::True;
+}
+static LogicalResult
+markTransactionsInactive(sym::Store &store,
+                         MutableArrayRef<Transaction> transactions) {
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  if (failed(zero))
+    return failure();
+  for (Transaction &transaction : transactions)
+    transaction.activity = *zero;
+  return success();
+}
+static LogicalResult
+assignTransactionConditions(ValueRange conditions,
+                            MutableArrayRef<Transaction> transactions) {
+  for (Transaction &transaction : transactions) {
+    if (transaction.outputs.empty() || transaction.outputs.front().empty())
+      return failure();
+    unsigned slot = transaction.outputs.front().front();
+    if (slot >= conditions.size())
+      return failure();
+    transaction.condition = conditions[slot];
+  }
+  return success();
+}
+static LogicalResult
+appendPacketActivityPlan(const AccessMap &prepared,
+                         const PacketActivityDomain &domain, sym::Store &store,
+                         std::string &diagnostic,
+                         std::vector<Transaction> &plan) {
+  FailureOr<sym::PredHandle> inactive =
+      sym::composePredNot(store, domain.active);
+  if (failed(inactive))
+    return failure();
+  FailureOr<sym::CheckResult> checked =
+      indexing::check(store, prepared.address.map, {*inactive});
+  bool provenInactive = isProvenInactive(checked);
+  if (provenInactive && !prepared.access->gather)
+    return success();
+  AccessMap specialized = specializePacketActivity(prepared, domain);
+  size_t firstTransaction = plan.size();
+  if (failed(appendAccessPlan(specialized, store, diagnostic, plan)))
+    return failure();
+  MutableArrayRef<Transaction> appended =
+      MutableArrayRef(plan).drop_front(firstTransaction);
+  if (prepared.access->gather)
+    return provenInactive ? markTransactionsInactive(store, appended)
+                          : success();
+  return assignTransactionConditions(
+      prepared.access->packetWhere.getConditions(), appended);
+}
 static FailureOr<std::vector<Transaction>>
 planAccessTransactions(const AccessMap &prepared, sym::Store &store,
                        std::string &diagnostic) {
@@ -913,41 +971,9 @@ planAccessTransactions(const AccessMap &prepared, sym::Store &store,
     return plan;
   }
   for (const PacketActivityDomain &domain : prepared.packetActivityDomains) {
-    FailureOr<sym::PredHandle> inactive =
-        sym::composePredNot(store, domain.active);
-    if (failed(inactive))
+    if (failed(appendPacketActivityPlan(prepared, domain, store, diagnostic,
+                                        plan)))
       return failure();
-    FailureOr<sym::CheckResult> checked =
-        indexing::check(store, prepared.address.map, {*inactive});
-    bool provenInactive =
-        succeeded(checked) && *checked == sym::CheckResult::True;
-    if (provenInactive && !prepared.access->gather)
-      continue;
-    AccessMap specialized = specializePacketActivity(prepared, domain);
-    size_t firstTransaction = plan.size();
-    if (failed(appendAccessPlan(specialized, store, diagnostic, plan)))
-      return failure();
-    if (prepared.access->gather) {
-      if (provenInactive) {
-        FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-        if (failed(zero))
-          return failure();
-        for (Transaction &transaction :
-             MutableArrayRef(plan).drop_front(firstTransaction))
-          transaction.activity = *zero;
-      }
-      continue;
-    }
-    ValueRange conditions = prepared.access->packetWhere.getConditions();
-    for (Transaction &transaction :
-         MutableArrayRef(plan).drop_front(firstTransaction)) {
-      if (transaction.outputs.empty() || transaction.outputs.front().empty())
-        return failure();
-      unsigned slot = transaction.outputs.front().front();
-      if (slot >= conditions.size())
-        return failure();
-      transaction.condition = conditions[slot];
-    }
   }
   return plan;
 }
@@ -1298,11 +1324,65 @@ composeDmaSelectorBit(sym::Store &store, sym::ExprHandle selector,
              : composeIntBinary(store, *floored, sym::ExprBinaryOp::Mod, 2);
 }
 
+static SmallVector<bool> getDmaBitCoefficients(ArrayRef<int64_t> values,
+                                               unsigned outputBit,
+                                               unsigned inputBits) {
+  bool constant = (static_cast<uint64_t>(values.front()) >> outputBit) & 1;
+  SmallVector<bool> coefficients;
+  coefficients.reserve(inputBits);
+  for (unsigned inputBit = 0; inputBit < inputBits; ++inputBit)
+    coefficients.push_back(
+        constant ^
+        ((static_cast<uint64_t>(values[uint64_t{1} << inputBit]) >> outputBit) &
+         1));
+  return coefficients;
+}
+
+static bool isDmaAffineBit(ArrayRef<int64_t> values, unsigned outputBit,
+                           ArrayRef<bool> coefficients) {
+  bool constant = (static_cast<uint64_t>(values.front()) >> outputBit) & 1;
+  for (uint64_t input = 0; input < values.size(); ++input) {
+    bool expected = constant;
+    for (auto [inputBit, coefficient] : llvm::enumerate(coefficients))
+      if (coefficient && (input & (uint64_t{1} << inputBit)))
+        expected = !expected;
+    bool actual = (static_cast<uint64_t>(values[input]) >> outputBit) & 1;
+    if (expected != actual)
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<sym::ExprHandle>
+composeDmaOutputBit(sym::Store &store, sym::ExprHandle selector,
+                    unsigned outputBit, ArrayRef<bool> coefficients,
+                    bool constant) {
+  FailureOr<sym::ExprHandle> output =
+      sym::composeExprInt(store, constant ? 1 : 0);
+  for (auto [inputBit, coefficient] : llvm::enumerate(coefficients)) {
+    if (!coefficient)
+      continue;
+    FailureOr<sym::ExprHandle> input =
+        composeDmaSelectorBit(store, selector, inputBit);
+    output = failed(output) || failed(input)
+                 ? FailureOr<sym::ExprHandle>(failure())
+                 : sym::composeExprBinary(store, *output,
+                                          sym::ExprBinaryOp::Xor, *input);
+  }
+  if (failed(output))
+    return failure();
+  return composeIntBinary(store, *output, sym::ExprBinaryOp::Mul,
+                          int64_t{1} << outputBit);
+}
+static bool isValidDmaPermutation(ArrayRef<int64_t> values) {
+  return !values.empty() && llvm::isPowerOf2_64(values.size()) &&
+         llvm::none_of(values, [](int64_t value) { return value < 0; });
+}
+
 static FailureOr<std::optional<sym::ExprHandle>>
 synthesizeDmaBitPermutation(sym::Store &store, sym::ExprHandle selector,
                             ArrayRef<int64_t> values) {
-  if (values.empty() || !llvm::isPowerOf2_64(values.size()) ||
-      llvm::any_of(values, [](int64_t value) { return value < 0; }))
+  if (!isValidDmaPermutation(values))
     return std::optional<sym::ExprHandle>{};
   uint64_t maximum = static_cast<uint64_t>(*llvm::max_element(values));
   unsigned inputBits = llvm::Log2_64(values.size());
@@ -1312,40 +1392,12 @@ synthesizeDmaBitPermutation(sym::Store &store, sym::ExprHandle selector,
     return failure();
   for (unsigned outputBit = 0; outputBit < outputBits; ++outputBit) {
     bool constant = (static_cast<uint64_t>(values.front()) >> outputBit) & 1;
-    SmallVector<bool> coefficients;
-    coefficients.reserve(inputBits);
-    for (unsigned inputBit = 0; inputBit < inputBits; ++inputBit)
-      coefficients.push_back(
-          constant ^ ((static_cast<uint64_t>(values[uint64_t{1} << inputBit]) >>
-                       outputBit) &
-                      1));
-    for (uint64_t input = 0; input < values.size(); ++input) {
-      bool expected = constant;
-      for (auto [inputBit, coefficient] : llvm::enumerate(coefficients))
-        if (coefficient && (input & (uint64_t{1} << inputBit)))
-          expected = !expected;
-      if (expected !=
-          static_cast<bool>(
-              (static_cast<uint64_t>(values[input]) >> outputBit) & 1))
-        return std::optional<sym::ExprHandle>{};
-    }
-    FailureOr<sym::ExprHandle> output =
-        sym::composeExprInt(store, constant ? 1 : 0);
-    for (auto [inputBit, coefficient] : llvm::enumerate(coefficients)) {
-      if (!coefficient)
-        continue;
-      FailureOr<sym::ExprHandle> input =
-          composeDmaSelectorBit(store, selector, inputBit);
-      output = failed(output) || failed(input)
-                   ? FailureOr<sym::ExprHandle>(failure())
-                   : sym::composeExprBinary(store, *output,
-                                            sym::ExprBinaryOp::Xor, *input);
-    }
+    SmallVector<bool> coefficients =
+        getDmaBitCoefficients(values, outputBit, inputBits);
+    if (!isDmaAffineBit(values, outputBit, coefficients))
+      return std::optional<sym::ExprHandle>{};
     FailureOr<sym::ExprHandle> term =
-        failed(output)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : composeIntBinary(store, *output, sym::ExprBinaryOp::Mul,
-                               int64_t{1} << outputBit);
+        composeDmaOutputBit(store, selector, outputBit, coefficients, constant);
     result = failed(result) || failed(term)
                  ? FailureOr<sym::ExprHandle>(failure())
                  : sym::composeExprBinary(store, *result,
@@ -1384,13 +1436,23 @@ getRankedDmaBitOffset(sym::Store &store, sym::Analysis &analysis,
   return difference;
 }
 
-static FailureOr<std::optional<DmaAccessPoint>>
-buildRankedDmaAccessPoint(const DmaPlanShape &shape,
-                          const DmaExpressions &expressions,
-                          sym::Store &store) {
-  if (!shape.destination->axes.item ||
-      shape.destination->access->bases.size() != 1)
-    return std::optional<DmaAccessPoint>{};
+struct RankedDmaAnalysis {
+  std::unique_ptr<sym::Analysis> analysis;
+  sym::ExprHandle destinationOffset;
+  sym::ExprHandle reference;
+  int64_t itemCount;
+  int64_t selectorCount;
+};
+
+static bool isRankedDmaCandidate(const DmaPlanShape &shape) {
+  return shape.destination->axes.item &&
+         shape.destination->access->bases.size() == 1;
+}
+
+static std::optional<std::pair<int64_t, int64_t>>
+getRankedDmaCounts(const DmaPlanShape &shape) {
+  if (!isRankedDmaCandidate(shape))
+    return std::nullopt;
   auto itemInput = llvm::find_if(
       shape.destination->address.map.inputs, [&](const auto &input) {
         return input.variable == *shape.destination->axes.item;
@@ -1398,12 +1460,46 @@ buildRankedDmaAccessPoint(const DmaPlanShape &shape,
   if (itemInput == shape.destination->address.map.inputs.end() ||
       !itemInput->extent || *itemInput->extent <= 0 || shape.waveWidth <= 0 ||
       shape.groupCount <= 0 || *itemInput->extent % shape.waveWidth)
-    return std::optional<DmaAccessPoint>{};
-  int64_t itemCount = *itemInput->extent;
+    return std::nullopt;
   std::optional<int64_t> selectorCount =
-      llvm::checkedMul(itemCount, shape.groupCount);
+      llvm::checkedMul(*itemInput->extent, shape.groupCount);
   if (!selectorCount || !llvm::isPowerOf2_64(*selectorCount))
-    return std::optional<DmaAccessPoint>{};
+    return std::nullopt;
+  return std::pair<int64_t, int64_t>{*itemInput->extent, *selectorCount};
+}
+
+static FailureOr<std::optional<sym::ExprHandle>>
+getRankedDmaReference(const DmaPlanShape &shape,
+                      sym::ExprHandle destinationOffset,
+                      sym::Analysis &analysis, sym::Store &store) {
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  FailureOr<sym::ExprHandle> baseSelector = indexing::materialize(
+      store, shape.destination->address.map, shape.destination->baseSelector);
+  if (failed(zero) || failed(baseSelector))
+    return failure();
+  std::optional<int64_t> selectedBase =
+      analysis.constantDifference(*baseSelector, *zero);
+  if (!selectedBase || *selectedBase != 0)
+    return std::optional<sym::ExprHandle>{};
+  std::array<sym::ExprSubstitution, 2> origin{
+      sym::ExprSubstitution{*shape.destination->axes.item, *zero},
+      sym::ExprSubstitution{shape.destination->axes.slot, *zero}};
+  FailureOr<sym::ExprHandle> reference =
+      sym::substituteExpr(store, destinationOffset, origin);
+  if (failed(reference))
+    return failure();
+  return analysis.divisible(*reference, 8) == sym::CheckResult::True
+             ? FailureOr<std::optional<sym::ExprHandle>>(
+                   std::optional<sym::ExprHandle>{*reference})
+             : FailureOr<std::optional<sym::ExprHandle>>(
+                   std::optional<sym::ExprHandle>{});
+}
+
+static FailureOr<std::optional<RankedDmaAnalysis>>
+prepareRankedDmaAnalysis(const DmaPlanShape &shape, sym::Store &store) {
+  std::optional<std::pair<int64_t, int64_t>> counts = getRankedDmaCounts(shape);
+  if (!counts)
+    return std::optional<RankedDmaAnalysis>{};
   FailureOr<sym::ExprHandle> destinationOffset =
       indexing::materialize(store, shape.destination->address.map,
                             shape.destination->address.bitOffset);
@@ -1412,76 +1508,110 @@ buildRankedDmaAccessPoint(const DmaPlanShape &shape,
                                     shape.destination->address.map.facts);
   if (failed(destinationOffset) || failed(analysis))
     return failure();
-  FailureOr<sym::ExprHandle> zeroItem = sym::composeExprInt(store, 0);
-  FailureOr<sym::ExprHandle> zeroSlot = sym::composeExprInt(store, 0);
-  if (failed(zeroItem) || failed(zeroSlot))
-    return failure();
-  FailureOr<sym::ExprHandle> baseSelector = indexing::materialize(
-      store, shape.destination->address.map, shape.destination->baseSelector);
-  if (failed(baseSelector))
-    return failure();
-  std::optional<int64_t> selectedBase =
-      (**analysis).constantDifference(*baseSelector, *zeroItem);
-  if (!selectedBase || *selectedBase != 0)
-    return std::optional<DmaAccessPoint>{};
-  std::array<sym::ExprSubstitution, 2> origin{
-      sym::ExprSubstitution{*shape.destination->axes.item, *zeroItem},
-      sym::ExprSubstitution{shape.destination->axes.slot, *zeroSlot}};
-  FailureOr<sym::ExprHandle> reference =
-      sym::substituteExpr(store, *destinationOffset, origin);
+  FailureOr<std::optional<sym::ExprHandle>> reference =
+      getRankedDmaReference(shape, *destinationOffset, **analysis, store);
   if (failed(reference))
     return failure();
-  if ((**analysis).divisible(*reference, 8) != sym::CheckResult::True)
-    return std::optional<DmaAccessPoint>{};
-  SmallVector<int64_t> items(*selectorCount, -1);
-  SmallVector<int64_t> slots(*selectorCount, -1);
-  int64_t waveCount = itemCount / shape.waveWidth;
-  for (int64_t wave = 0; wave < waveCount; ++wave) {
-    int64_t waveBase = wave * shape.waveWidth;
-    SmallVector<RankedDmaBlock> blocks;
-    blocks.reserve(shape.waveWidth * shape.groupCount);
-    for (int64_t item = waveBase; item < waveBase + shape.waveWidth; ++item) {
-      for (int64_t group = 0; group < shape.groupCount; ++group) {
-        int64_t firstSlot = group * shape.elements;
-        FailureOr<std::optional<int64_t>> offset =
-            getRankedDmaBitOffset(store, **analysis, shape, *destinationOffset,
-                                  item, firstSlot, *reference);
-        if (failed(offset))
-          return failure();
-        if (!*offset)
-          return std::optional<DmaAccessPoint>{};
-        for (int64_t within = 1; within < shape.elements; ++within) {
-          FailureOr<std::optional<int64_t>> pointOffset = getRankedDmaBitOffset(
-              store, **analysis, shape, *destinationOffset, item,
-              firstSlot + within, *reference);
-          if (failed(pointOffset))
-            return failure();
-          if (!*pointOffset ||
-              **pointOffset !=
-                  **offset + within * shape.destination->shape.elementBits)
-            return std::optional<DmaAccessPoint>{};
-        }
-        blocks.push_back({item, firstSlot, **offset});
-      }
-    }
-    llvm::sort(blocks,
-               [](const RankedDmaBlock &lhs, const RankedDmaBlock &rhs) {
-                 return lhs.bitOffset < rhs.bitOffset;
-               });
-    int64_t transactionBits = shape.bytes * 8;
-    for (auto [rank, block] : llvm::enumerate(blocks)) {
-      int64_t group = static_cast<int64_t>(rank) / shape.waveWidth;
-      int64_t lane = static_cast<int64_t>(rank) % shape.waveWidth;
-      int64_t first = blocks[group * shape.waveWidth].bitOffset;
-      if (block.bitOffset != first + lane * transactionBits)
-        return std::optional<DmaAccessPoint>{};
-      int64_t selector = group * itemCount + waveBase + lane;
-      items[selector] = block.item;
-      slots[selector] = block.firstSlot;
+  if (!*reference)
+    return std::optional<RankedDmaAnalysis>{};
+  return std::optional<RankedDmaAnalysis>{
+      RankedDmaAnalysis{std::move(*analysis), *destinationOffset, **reference,
+                        counts->first, counts->second}};
+}
+
+static FailureOr<std::optional<RankedDmaBlock>>
+getRankedDmaBlock(sym::Store &store, const DmaPlanShape &shape,
+                  RankedDmaAnalysis &ranked, int64_t item, int64_t group) {
+  int64_t firstSlot = group * shape.elements;
+  FailureOr<std::optional<int64_t>> offset = getRankedDmaBitOffset(
+      store, *ranked.analysis, shape, ranked.destinationOffset, item, firstSlot,
+      ranked.reference);
+  if (failed(offset))
+    return failure();
+  if (!*offset)
+    return std::optional<RankedDmaBlock>{};
+  for (int64_t within = 1; within < shape.elements; ++within) {
+    FailureOr<std::optional<int64_t>> pointOffset = getRankedDmaBitOffset(
+        store, *ranked.analysis, shape, ranked.destinationOffset, item,
+        firstSlot + within, ranked.reference);
+    if (failed(pointOffset))
+      return failure();
+    if (!*pointOffset ||
+        **pointOffset !=
+            **offset + within * shape.destination->shape.elementBits)
+      return std::optional<RankedDmaBlock>{};
+  }
+  return std::optional<RankedDmaBlock>{
+      RankedDmaBlock{item, firstSlot, **offset}};
+}
+
+static FailureOr<std::optional<SmallVector<RankedDmaBlock>>>
+collectRankedDmaWave(const DmaPlanShape &shape, RankedDmaAnalysis &ranked,
+                     int64_t waveBase, sym::Store &store) {
+  SmallVector<RankedDmaBlock> blocks;
+  blocks.reserve(shape.waveWidth * shape.groupCount);
+  for (int64_t item = waveBase; item < waveBase + shape.waveWidth; ++item) {
+    for (int64_t group = 0; group < shape.groupCount; ++group) {
+      FailureOr<std::optional<RankedDmaBlock>> block =
+          getRankedDmaBlock(store, shape, ranked, item, group);
+      if (failed(block))
+        return failure();
+      if (!*block)
+        return std::optional<SmallVector<RankedDmaBlock>>{};
+      blocks.push_back(**block);
     }
   }
-  FailureOr<sym::ExprHandle> groupBase = composeIntBinary(
-      store, expressions.symbols.group, sym::ExprBinaryOp::Mul, itemCount);
+  return std::optional<SmallVector<RankedDmaBlock>>{std::move(blocks)};
+}
+
+static bool assignRankedDmaWave(const DmaPlanShape &shape, int64_t itemCount,
+                                int64_t waveBase,
+                                SmallVectorImpl<RankedDmaBlock> &blocks,
+                                MutableArrayRef<int64_t> items,
+                                MutableArrayRef<int64_t> slots) {
+  llvm::sort(blocks, [](const RankedDmaBlock &lhs, const RankedDmaBlock &rhs) {
+    return lhs.bitOffset < rhs.bitOffset;
+  });
+  int64_t transactionBits = shape.bytes * 8;
+  for (auto [rank, block] : llvm::enumerate(blocks)) {
+    int64_t group = static_cast<int64_t>(rank) / shape.waveWidth;
+    int64_t lane = static_cast<int64_t>(rank) % shape.waveWidth;
+    int64_t first = blocks[group * shape.waveWidth].bitOffset;
+    if (block.bitOffset != first + lane * transactionBits)
+      return false;
+    int64_t selector = group * itemCount + waveBase + lane;
+    items[selector] = block.item;
+    slots[selector] = block.firstSlot;
+  }
+  return true;
+}
+
+static FailureOr<bool> buildRankedDmaTables(const DmaPlanShape &shape,
+                                            RankedDmaAnalysis &ranked,
+                                            SmallVectorImpl<int64_t> &items,
+                                            SmallVectorImpl<int64_t> &slots,
+                                            sym::Store &store) {
+  int64_t waveCount = ranked.itemCount / shape.waveWidth;
+  for (int64_t wave = 0; wave < waveCount; ++wave) {
+    int64_t waveBase = wave * shape.waveWidth;
+    FailureOr<std::optional<SmallVector<RankedDmaBlock>>> blocks =
+        collectRankedDmaWave(shape, ranked, waveBase, store);
+    if (failed(blocks))
+      return failure();
+    if (!*blocks || !assignRankedDmaWave(shape, ranked.itemCount, waveBase,
+                                         **blocks, items, slots))
+      return false;
+  }
+  return true;
+}
+
+static FailureOr<std::optional<DmaAccessPoint>>
+composeRankedDmaAccessPoint(const DmaExpressions &expressions,
+                            RankedDmaAnalysis &ranked, ArrayRef<int64_t> items,
+                            ArrayRef<int64_t> slots, sym::Store &store) {
+  FailureOr<sym::ExprHandle> groupBase =
+      composeIntBinary(store, expressions.symbols.group, sym::ExprBinaryOp::Mul,
+                       ranked.itemCount);
   FailureOr<sym::ExprHandle> selector =
       failed(groupBase)
           ? FailureOr<sym::ExprHandle>(failure())
@@ -1504,64 +1634,124 @@ buildRankedDmaAccessPoint(const DmaPlanShape &shape,
              : std::optional<DmaAccessPoint>{DmaAccessPoint{**item, *slot}};
 }
 
-static FailureOr<Transaction>
-buildRankedDmaDestination(const DmaPlanShape &shape,
+static FailureOr<std::optional<DmaAccessPoint>>
+buildRankedDmaAccessPoint(const DmaPlanShape &shape,
                           const DmaExpressions &expressions,
-                          const DmaAccessPoint &point, sym::Store &store) {
+                          sym::Store &store) {
+  FailureOr<std::optional<RankedDmaAnalysis>> ranked =
+      prepareRankedDmaAnalysis(shape, store);
+  if (failed(ranked))
+    return failure();
+  if (!*ranked)
+    return std::optional<DmaAccessPoint>{};
+  SmallVector<int64_t> items((**ranked).selectorCount, -1);
+  SmallVector<int64_t> slots((**ranked).selectorCount, -1);
+  FailureOr<bool> built =
+      buildRankedDmaTables(shape, **ranked, items, slots, store);
+  if (failed(built))
+    return failure();
+  if (!*built)
+    return std::optional<DmaAccessPoint>{};
+  return composeRankedDmaAccessPoint(expressions, **ranked, items, slots,
+                                     store);
+}
+
+struct RankedDmaAddress {
+  sym::ExprHandle baseSelector;
+  sym::ExprHandle bitOffset;
+  sym::ExprHandle byteOffset;
+  sym::ExprHandle zero;
+  sym::ExprHandle one;
+};
+
+static FailureOr<sym::ExprHandle>
+getRankedDmaByteOffset(sym::Store &store, sym::ExprHandle bitOffset) {
+  FailureOr<sym::ExprHandle> ratio =
+      composeIntBinary(store, bitOffset, sym::ExprBinaryOp::Div, 8);
+  return failed(ratio) ? FailureOr<sym::ExprHandle>(failure())
+                       : sym::composeExprFloor(store, *ratio);
+}
+
+static FailureOr<std::pair<sym::ExprHandle, sym::ExprHandle>>
+getRankedDmaOrigin(const DmaExpressions &expressions,
+                   const DmaAccessPoint &point, sym::ExprHandle zero,
+                   sym::Store &store) {
+  std::array<sym::ExprSubstitution, 2> atOrigin{
+      sym::ExprSubstitution{expressions.symbols.within, zero},
+      sym::ExprSubstitution{expressions.physicalItem,
+                            expressions.symbols.formal}};
+  FailureOr<sym::ExprHandle> item =
+      sym::substituteExpr(store, point.item, atOrigin);
+  FailureOr<sym::ExprHandle> slot =
+      sym::substituteExpr(store, point.slot, atOrigin);
+  if (failed(item) || failed(slot))
+    return failure();
+  return std::pair<sym::ExprHandle, sym::ExprHandle>{*item, *slot};
+}
+
+static FailureOr<RankedDmaAddress>
+materializeRankedDmaAddress(const DmaPlanShape &shape,
+                            const DmaExpressions &expressions,
+                            const DmaAccessPoint &point, sym::Store &store) {
   FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
   FailureOr<sym::ExprHandle> one = sym::composeExprInt(store, 1);
   if (failed(zero) || failed(one))
     return failure();
-  std::array<sym::ExprSubstitution, 2> atOrigin{
-      sym::ExprSubstitution{expressions.symbols.within, *zero},
-      sym::ExprSubstitution{expressions.physicalItem,
-                            expressions.symbols.formal}};
-  FailureOr<sym::ExprHandle> originItem =
-      sym::substituteExpr(store, point.item, atOrigin);
-  FailureOr<sym::ExprHandle> originSlot =
-      sym::substituteExpr(store, point.slot, atOrigin);
+  FailureOr<std::pair<sym::ExprHandle, sym::ExprHandle>> origin =
+      getRankedDmaOrigin(expressions, point, *zero, store);
   FailureOr<sym::ExprHandle> baseSelector = indexing::materialize(
       store, shape.destination->address.map, shape.destination->baseSelector);
   FailureOr<sym::ExprHandle> bitOffset =
       indexing::materialize(store, shape.destination->address.map,
                             shape.destination->address.bitOffset);
-  if (failed(originItem) || failed(originSlot) || failed(baseSelector) ||
-      failed(bitOffset))
+  if (failed(origin) || failed(baseSelector) || failed(bitOffset))
     return failure();
   std::array<sym::ExprSubstitution, 2> addressPoint{
-      sym::ExprSubstitution{*shape.destination->axes.item, *originItem},
-      sym::ExprSubstitution{shape.destination->axes.slot, *originSlot}};
+      sym::ExprSubstitution{*shape.destination->axes.item, origin->first},
+      sym::ExprSubstitution{shape.destination->axes.slot, origin->second}};
   baseSelector = sym::substituteExpr(store, *baseSelector, addressPoint);
   bitOffset = sym::substituteExpr(store, *bitOffset, addressPoint);
-  FailureOr<sym::ExprHandle> byteRatio =
-      failed(bitOffset)
-          ? FailureOr<sym::ExprHandle>(failure())
-          : composeIntBinary(store, *bitOffset, sym::ExprBinaryOp::Div, 8);
   FailureOr<sym::ExprHandle> byteOffset =
-      failed(byteRatio) ? FailureOr<sym::ExprHandle>(failure())
-                        : sym::composeExprFloor(store, *byteRatio);
+      failed(bitOffset) ? FailureOr<sym::ExprHandle>(failure())
+                        : getRankedDmaByteOffset(store, *bitOffset);
   if (failed(baseSelector) || failed(bitOffset) || failed(byteOffset))
+    return failure();
+  return RankedDmaAddress{*baseSelector, *bitOffset, *byteOffset, *zero, *one};
+}
+
+static void appendUniformDmaInput(indexing::IndexMap &map,
+                                  sym::ExprHandle variable, int64_t extent) {
+  if (llvm::none_of(map.inputs, [&](const auto &input) {
+        return input.variable == variable;
+      }))
+    map.inputs.push_back(
+        {variable, extent, Value(), SymbolicOffsetBindingKind::Uniform});
+}
+
+static FailureOr<Transaction>
+buildRankedDmaDestination(const DmaPlanShape &shape,
+                          const DmaExpressions &expressions,
+                          const DmaAccessPoint &point, sym::Store &store) {
+  FailureOr<RankedDmaAddress> address =
+      materializeRankedDmaAddress(shape, expressions, point, store);
+  if (failed(address))
     return failure();
   Transaction result;
   result.map = shape.destination->address.map;
-  auto addInput = [&](sym::ExprHandle variable, int64_t extent) {
-    if (llvm::none_of(result.map.inputs, [&](const auto &input) {
-          return input.variable == variable;
-        }))
-      result.map.inputs.push_back(
-          {variable, extent, Value(), SymbolicOffsetBindingKind::Uniform});
-  };
-  addInput(expressions.symbols.group, shape.groupCount);
+  appendUniformDmaInput(result.map, expressions.symbols.group,
+                        shape.groupCount);
   auto itemInput = llvm::find_if(
       shape.destination->address.map.inputs, [&](const auto &input) {
         return input.variable == *shape.destination->axes.item;
       });
   assert(itemInput != shape.destination->address.map.inputs.end() &&
          itemInput->extent && "ranked DMA point requires a bounded item");
-  addInput(expressions.symbols.formal, *itemInput->extent);
-  result.addresses.push_back({shape.destination->access->bases, *zero,
-                              *baseSelector, *bitOffset, *byteOffset, 8});
-  result.activity = *one;
+  appendUniformDmaInput(result.map, expressions.symbols.formal,
+                        *itemInput->extent);
+  result.addresses.push_back({shape.destination->access->bases, address->zero,
+                              address->baseSelector, address->bitOffset,
+                              address->byteOffset, 8});
+  result.activity = address->one;
   result.outputSlot = point.slot;
   result.slot = point.slot;
   result.group = expressions.symbols.group;
@@ -1569,35 +1759,48 @@ buildRankedDmaDestination(const DmaPlanShape &shape,
   result.width = shape.elements;
   return result;
 }
-static FailureOr<DmaAccessPoint>
-buildDmaAccessPoint(const DmaPlanShape &shape,
-                    const DmaExpressions &expressions, sym::ExprHandle linear,
-                    bool itemMajor, sym::Store &store) {
-  int64_t itemDivisor = itemMajor ? shape.source->transactionSlotCount : 1;
-  int64_t itemModulus = itemMajor ? 0 : shape.waveWidth;
-  FailureOr<sym::ExprHandle> localItemRatio =
-      composeIntBinary(store, linear, sym::ExprBinaryOp::Div, itemDivisor);
-  FailureOr<sym::ExprHandle> localItem =
-      failed(localItemRatio) ? FailureOr<sym::ExprHandle>(failure())
-      : itemModulus ? composeIntBinary(store, *localItemRatio,
-                                       sym::ExprBinaryOp::Mod, itemModulus)
-                    : sym::composeExprFloor(store, *localItemRatio);
-  if (failed(localItem))
+
+static FailureOr<sym::ExprHandle> buildDmaLocalItem(const DmaPlanShape &shape,
+                                                    sym::ExprHandle linear,
+                                                    bool itemMajor,
+                                                    sym::Store &store) {
+  int64_t divisor = itemMajor ? shape.source->transactionSlotCount : 1;
+  FailureOr<sym::ExprHandle> ratio =
+      composeIntBinary(store, linear, sym::ExprBinaryOp::Div, divisor);
+  if (failed(ratio))
     return failure();
-  FailureOr<sym::ExprHandle> item = sym::composeExprBinary(
-      store, expressions.physicalWave, sym::ExprBinaryOp::Add, *localItem);
+  return itemMajor ? sym::composeExprFloor(store, *ratio)
+                   : composeIntBinary(store, *ratio, sym::ExprBinaryOp::Mod,
+                                      shape.waveWidth);
+}
+
+static FailureOr<sym::ExprHandle> buildDmaSlot(const DmaPlanShape &shape,
+                                               sym::ExprHandle linear,
+                                               bool itemMajor,
+                                               sym::Store &store) {
   FailureOr<sym::ExprHandle> slot =
       itemMajor ? composeIntBinary(store, linear, sym::ExprBinaryOp::Mod,
                                    shape.source->transactionSlotCount)
                 : composeIntBinary(store, linear, sym::ExprBinaryOp::Div,
                                    shape.waveWidth);
+  if (failed(slot) || itemMajor)
+    return slot;
+  return sym::composeExprFloor(store, *slot);
+}
+static FailureOr<DmaAccessPoint>
+buildDmaAccessPoint(const DmaPlanShape &shape,
+                    const DmaExpressions &expressions, sym::ExprHandle linear,
+                    bool itemMajor, sym::Store &store) {
+  FailureOr<sym::ExprHandle> localItem =
+      buildDmaLocalItem(shape, linear, itemMajor, store);
+  if (failed(localItem))
+    return failure();
+  FailureOr<sym::ExprHandle> item = sym::composeExprBinary(
+      store, expressions.physicalWave, sym::ExprBinaryOp::Add, *localItem);
+  FailureOr<sym::ExprHandle> slot =
+      buildDmaSlot(shape, linear, itemMajor, store);
   if (failed(item) || failed(slot))
     return failure();
-  if (!itemMajor) {
-    slot = sym::composeExprFloor(store, *slot);
-    if (failed(slot))
-      return failure();
-  }
   return DmaAccessPoint{*item, *slot};
 }
 struct DmaOrigins {
@@ -1639,119 +1842,269 @@ proveActivityImplication(sym::Store &store, const indexing::IndexMap &proofMap,
   return failed(checked) ? FailureOr<bool>(failure())
                          : FailureOr<bool>(*checked == sym::CheckResult::True);
 }
+
+static FailureOr<sym::ExprHandle>
+getActivityDifference(sym::Store &store, const indexing::IndexMap &proofMap,
+                      sym::PredView comparison) {
+  FailureOr<sym::ExprHandle> difference =
+      sym::composeExprBinary(store, comparison.getCmpLhs(),
+                             sym::ExprBinaryOp::Sub, comparison.getCmpRhs());
+  if (failed(difference))
+    return failure();
+  FailureOr<SmallVector<sym::ExprHandle>> simplified =
+      indexing::simplify(store, proofMap, {*difference}, {});
+  return succeeded(simplified) && simplified->size() == 1
+             ? FailureOr<sym::ExprHandle>(simplified->front())
+             : difference;
+}
+
+static FailureOr<sym::PredHandle>
+buildActivityAlignment(sym::Store &store, sym::ExprHandle difference,
+                       int64_t alignment) {
+  FailureOr<sym::ExprHandle> remainder =
+      composeIntBinary(store, difference, sym::ExprBinaryOp::Mod, alignment);
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  if (failed(remainder) || failed(zero))
+    return failure();
+  return sym::composePredCmp(store, *remainder, sym::PredCmpOp::Eq, *zero);
+}
+
+struct ActivityDelta {
+  sym::ExprHandle rightDifference;
+  sym::ExprHandle zero;
+  sym::PredHandle nonnegative;
+  sym::PredHandle inRange;
+};
+
+static sym::ExprHandle
+simplifyActivityExpression(sym::Store &store,
+                           const indexing::IndexMap &proofMap,
+                           sym::ExprHandle expression) {
+  FailureOr<SmallVector<sym::ExprHandle>> simplified =
+      indexing::simplify(store, proofMap, {expression}, {});
+  return succeeded(simplified) && simplified->size() == 1 ? simplified->front()
+                                                          : expression;
+}
+
+static FailureOr<ActivityDelta>
+buildActivityDelta(sym::Store &store, const indexing::IndexMap &proofMap,
+                   sym::PredView rightComparison,
+                   sym::ExprHandle leftDifference, int64_t alignment) {
+  FailureOr<sym::ExprHandle> rightDifference =
+      getActivityDifference(store, proofMap, rightComparison);
+  if (failed(rightDifference))
+    return failure();
+  FailureOr<sym::ExprHandle> delta = sym::composeExprBinary(
+      store, *rightDifference, sym::ExprBinaryOp::Sub, leftDifference);
+  if (failed(delta))
+    return failure();
+  *delta = simplifyActivityExpression(store, proofMap, *delta);
+  FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
+  FailureOr<sym::ExprHandle> alignmentValue =
+      sym::composeExprInt(store, alignment);
+  if (failed(zero) || failed(alignmentValue))
+    return failure();
+  FailureOr<sym::PredHandle> nonnegative =
+      sym::composePredCmp(store, *delta, sym::PredCmpOp::Ge, *zero);
+  FailureOr<sym::PredHandle> inRange =
+      sym::composePredCmp(store, *delta, sym::PredCmpOp::Lt, *alignmentValue);
+  if (failed(nonnegative) || failed(inRange))
+    return failure();
+  return ActivityDelta{*rightDifference, *zero, *nonnegative, *inRange};
+}
+
+static FailureOr<bool> proveActivityDelta(sym::Store &store,
+                                          const indexing::IndexMap &proofMap,
+                                          sym::PredHandle condition,
+                                          const ActivityDelta &delta,
+                                          indexing::CheckMemo &memo) {
+  FailureOr<bool> nonnegative = proveActivityImplication(
+      store, proofMap, {condition}, delta.nonnegative, memo);
+  FailureOr<bool> inRange = proveActivityImplication(
+      store, proofMap, {condition}, delta.inRange, memo);
+  if (failed(nonnegative) || failed(inRange))
+    return failure();
+  return *nonnegative && *inRange;
+}
+
+static LogicalResult
+appendActivityMargin(sym::Store &store, sym::PredCmpOp operation,
+                     int64_t alignment, sym::ExprHandle difference,
+                     SmallVectorImpl<sym::PredHandle> &assumptions) {
+  if (operation != sym::PredCmpOp::Lt)
+    return success();
+  FailureOr<sym::ExprHandle> marginValue =
+      sym::composeExprInt(store, -alignment);
+  FailureOr<sym::PredHandle> margin =
+      failed(marginValue)
+          ? FailureOr<sym::PredHandle>(failure())
+          : sym::composePredCmp(store, difference, sym::PredCmpOp::Le,
+                                *marginValue);
+  if (failed(margin))
+    return failure();
+  // Divisible negative value is at most -alignment.
+  assumptions.push_back(*margin);
+  return success();
+}
+
+static FailureOr<bool> proveNormalizedActivityComparison(
+    sym::Store &store, const indexing::IndexMap &proofMap,
+    sym::PredCmpOp operation, sym::ExprHandle leftDifference,
+    sym::PredHandle condition, sym::PredHandle aligned,
+    const ActivityDelta &delta, int64_t alignment, indexing::CheckMemo &memo) {
+  FailureOr<sym::PredHandle> normalizedLeft =
+      sym::composePredCmp(store, leftDifference, operation, delta.zero);
+  FailureOr<sym::PredHandle> normalizedRight =
+      sym::composePredCmp(store, delta.rightDifference, operation, delta.zero);
+  if (failed(normalizedLeft) || failed(normalizedRight))
+    return failure();
+  SmallVector<sym::PredHandle> forwardAssumptions{
+      condition, aligned, delta.nonnegative, delta.inRange, *normalizedLeft};
+  if (failed(appendActivityMargin(store, operation, alignment, leftDifference,
+                                  forwardAssumptions)))
+    return failure();
+  FailureOr<bool> forward = proveActivityImplication(
+      store, proofMap, forwardAssumptions, *normalizedRight, memo);
+  FailureOr<bool> reverse = proveActivityImplication(
+      store, proofMap,
+      {condition, aligned, delta.nonnegative, delta.inRange, *normalizedRight},
+      *normalizedLeft, memo);
+  if (failed(forward) || failed(reverse))
+    return failure();
+  return *forward && *reverse;
+}
+
+static bool haveMatchingActivityComparison(sym::PredView left,
+                                           sym::PredView right) {
+  return left.getKind() == sym::PredKind::Cmp &&
+         right.getKind() == sym::PredKind::Cmp &&
+         left.getCmpOp() == right.getCmpOp();
+}
+
+static FailureOr<bool>
+proveActivityComparison(sym::Store &store, const indexing::IndexMap &proofMap,
+                        sym::PredHandle leftValue, sym::PredHandle rightValue,
+                        sym::PredHandle condition, int64_t alignment,
+                        indexing::CheckMemo &memo) {
+  sym::PredView left(leftValue);
+  sym::PredView right(rightValue);
+  bool matchingComparison = haveMatchingActivityComparison(left, right);
+  if (!matchingComparison)
+    return false;
+  FailureOr<sym::ExprHandle> difference =
+      getActivityDifference(store, proofMap, left);
+  FailureOr<sym::PredHandle> aligned =
+      failed(difference)
+          ? FailureOr<sym::PredHandle>(failure())
+          : buildActivityAlignment(store, *difference, alignment);
+  if (failed(aligned))
+    return failure();
+  FailureOr<bool> provenAligned =
+      proveActivityImplication(store, proofMap, {condition}, *aligned, memo);
+  if (failed(provenAligned) || !*provenAligned)
+    return provenAligned;
+  FailureOr<ActivityDelta> delta =
+      buildActivityDelta(store, proofMap, right, *difference, alignment);
+  if (failed(delta))
+    return failure();
+  FailureOr<bool> provenDelta =
+      proveActivityDelta(store, proofMap, condition, *delta, memo);
+  if (failed(provenDelta) || !*provenDelta)
+    return provenDelta;
+  return proveNormalizedActivityComparison(store, proofMap, *left.getCmpOp(),
+                                           *difference, condition, *aligned,
+                                           *delta, alignment, memo);
+}
+
+static bool haveMatchingActivityConditions(sym::ExprView left,
+                                           sym::ExprView right) {
+  if (left.getPiecewiseCaseCount() != right.getPiecewiseCaseCount())
+    return false;
+  for (uint32_t index = 0; index < left.getPiecewiseCaseCount(); ++index)
+    if (!(left.getPiecewiseCase(index).condition ==
+          right.getPiecewiseCase(index).condition))
+      return false;
+  return true;
+}
+
+static FailureOr<bool> proveMatchingActivityCases(
+    sym::Store &store, const indexing::IndexMap &proofMap, sym::ExprView left,
+    sym::ExprView right, int64_t alignment, indexing::CheckMemo &memo) {
+  for (uint32_t index = 0; index < left.getPiecewiseCaseCount(); ++index) {
+    sym::PiecewiseCase leftCase = left.getPiecewiseCase(index);
+    sym::PiecewiseCase rightCase = right.getPiecewiseCase(index);
+    std::optional<sym::PredHandle> leftValue = sym::asPred(leftCase.value);
+    std::optional<sym::PredHandle> rightValue = sym::asPred(rightCase.value);
+    if (!leftValue || !rightValue)
+      return false;
+    FailureOr<bool> equivalent =
+        proveActivityComparison(store, proofMap, *leftValue, *rightValue,
+                                leftCase.condition, alignment, memo);
+    if (failed(equivalent) || !*equivalent)
+      return equivalent;
+  }
+  return true;
+}
+
+static FailureOr<SmallVector<sym::PredHandle>>
+buildActivityCaseSelectors(sym::Store &store, sym::ExprView view) {
+  SmallVector<sym::PredHandle> selectors;
+  SmallVector<sym::PredHandle> prior;
+  selectors.reserve(view.getPiecewiseCaseCount());
+  prior.reserve(view.getPiecewiseCaseCount());
+  for (uint32_t index = 0; index < view.getPiecewiseCaseCount(); ++index) {
+    sym::PredHandle condition = view.getPiecewiseCase(index).condition;
+    sym::PredHandle selected = condition;
+    for (sym::PredHandle earlier : prior) {
+      FailureOr<sym::PredHandle> inactive = sym::composePredNot(store, earlier);
+      FailureOr<sym::PredHandle> combined =
+          failed(inactive) ? FailureOr<sym::PredHandle>(failure())
+                           : sym::composePredAnd(store, selected, *inactive);
+      if (failed(combined))
+        return failure();
+      selected = *combined;
+    }
+    selectors.push_back(selected);
+    prior.push_back(condition);
+  }
+  return selectors;
+}
+
+static FailureOr<bool>
+proveCrossActivityCases(sym::Store &store, const indexing::IndexMap &proofMap,
+                        sym::ExprView left, sym::ExprView right,
+                        ArrayRef<sym::PredHandle> leftSelectors,
+                        ArrayRef<sym::PredHandle> rightSelectors,
+                        int64_t alignment, indexing::CheckMemo &memo) {
+  for (uint32_t leftIndex = 0; leftIndex < left.getPiecewiseCaseCount();
+       ++leftIndex) {
+    std::optional<sym::PredHandle> leftValue =
+        sym::asPred(left.getPiecewiseCase(leftIndex).value);
+    if (!leftValue)
+      return false;
+    for (uint32_t rightIndex = 0; rightIndex < right.getPiecewiseCaseCount();
+         ++rightIndex) {
+      std::optional<sym::PredHandle> rightValue =
+          sym::asPred(right.getPiecewiseCase(rightIndex).value);
+      if (!rightValue)
+        return false;
+      FailureOr<sym::PredHandle> selected = sym::composePredAnd(
+          store, leftSelectors[leftIndex], rightSelectors[rightIndex]);
+      if (failed(selected))
+        return failure();
+      FailureOr<bool> equivalent = proveActivityComparison(
+          store, proofMap, *leftValue, *rightValue, *selected, alignment, memo);
+      if (failed(equivalent) || !*equivalent)
+        return equivalent;
+    }
+  }
+  return true;
+}
+
 static FailureOr<bool>
 proveActivityEquivalent(sym::Store &store, const indexing::IndexMap &proofMap,
                         sym::PredHandle lhs, sym::PredHandle rhs,
                         int64_t alignment, indexing::CheckMemo &memo) {
-  auto proveComparison = [&](sym::PredHandle leftValue,
-                             sym::PredHandle rightValue,
-                             sym::PredHandle condition) -> FailureOr<bool> {
-    sym::PredView comparison(leftValue);
-    sym::PredView rightComparison(rightValue);
-    if (comparison.getKind() != sym::PredKind::Cmp ||
-        rightComparison.getKind() != sym::PredKind::Cmp ||
-        comparison.getCmpOp() != rightComparison.getCmpOp())
-      return false;
-    FailureOr<sym::ExprHandle> difference =
-        sym::composeExprBinary(store, comparison.getCmpLhs(),
-                               sym::ExprBinaryOp::Sub, comparison.getCmpRhs());
-    if (succeeded(difference)) {
-      FailureOr<SmallVector<sym::ExprHandle>> simplified =
-          indexing::simplify(store, proofMap, {*difference}, {});
-      if (succeeded(simplified) && simplified->size() == 1)
-        difference = simplified->front();
-    }
-    FailureOr<sym::ExprHandle> remainder =
-        failed(difference)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : composeIntBinary(store, *difference, sym::ExprBinaryOp::Mod,
-                               alignment);
-    FailureOr<sym::ExprHandle> zero = sym::composeExprInt(store, 0);
-    FailureOr<sym::PredHandle> aligned =
-        failed(remainder) || failed(zero)
-            ? FailureOr<sym::PredHandle>(failure())
-            : sym::composePredCmp(store, *remainder, sym::PredCmpOp::Eq, *zero);
-    if (failed(aligned))
-      return failure();
-    FailureOr<bool> provenAligned =
-        proveActivityImplication(store, proofMap, {condition}, *aligned, memo);
-    if (failed(provenAligned) || !*provenAligned)
-      return provenAligned;
-    FailureOr<sym::ExprHandle> rightDifference = sym::composeExprBinary(
-        store, rightComparison.getCmpLhs(), sym::ExprBinaryOp::Sub,
-        rightComparison.getCmpRhs());
-    if (succeeded(rightDifference)) {
-      FailureOr<SmallVector<sym::ExprHandle>> simplified =
-          indexing::simplify(store, proofMap, {*rightDifference}, {});
-      if (succeeded(simplified) && simplified->size() == 1)
-        rightDifference = simplified->front();
-    }
-    FailureOr<sym::ExprHandle> delta =
-        failed(rightDifference)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : sym::composeExprBinary(store, *rightDifference,
-                                     sym::ExprBinaryOp::Sub, *difference);
-    if (succeeded(delta)) {
-      FailureOr<SmallVector<sym::ExprHandle>> simplified =
-          indexing::simplify(store, proofMap, {*delta}, {});
-      if (succeeded(simplified) && simplified->size() == 1)
-        delta = simplified->front();
-    }
-    FailureOr<sym::ExprHandle> alignmentValue =
-        sym::composeExprInt(store, alignment);
-    FailureOr<sym::PredHandle> deltaNonnegative =
-        failed(delta) || failed(zero)
-            ? FailureOr<sym::PredHandle>(failure())
-            : sym::composePredCmp(store, *delta, sym::PredCmpOp::Ge, *zero);
-    FailureOr<sym::PredHandle> deltaInRange =
-        failed(delta) || failed(alignmentValue)
-            ? FailureOr<sym::PredHandle>(failure())
-            : sym::composePredCmp(store, *delta, sym::PredCmpOp::Lt,
-                                  *alignmentValue);
-    if (failed(deltaNonnegative) || failed(deltaInRange))
-      return failure();
-    FailureOr<bool> provenDeltaNonnegative = proveActivityImplication(
-        store, proofMap, {condition}, *deltaNonnegative, memo);
-    FailureOr<bool> provenDeltaInRange = proveActivityImplication(
-        store, proofMap, {condition}, *deltaInRange, memo);
-    if (failed(provenDeltaNonnegative) || failed(provenDeltaInRange))
-      return failure();
-    if (!*provenDeltaNonnegative || !*provenDeltaInRange)
-      return false;
-    FailureOr<sym::PredHandle> normalizedLeft =
-        sym::composePredCmp(store, *difference, *comparison.getCmpOp(), *zero);
-    FailureOr<sym::PredHandle> normalizedRight = sym::composePredCmp(
-        store, *rightDifference, *comparison.getCmpOp(), *zero);
-    if (failed(normalizedLeft) || failed(normalizedRight))
-      return failure();
-    SmallVector<sym::PredHandle> forwardAssumptions{
-        condition, *aligned, *deltaNonnegative, *deltaInRange, *normalizedLeft};
-    if (comparison.getCmpOp() == sym::PredCmpOp::Lt) {
-      FailureOr<sym::ExprHandle> marginValue =
-          sym::composeExprInt(store, -alignment);
-      FailureOr<sym::PredHandle> margin =
-          failed(marginValue)
-              ? FailureOr<sym::PredHandle>(failure())
-              : sym::composePredCmp(store, *difference, sym::PredCmpOp::Le,
-                                    *marginValue);
-      if (failed(margin))
-        return failure();
-      // An integer strictly below zero and divisible by `alignment` is at
-      // most -alignment. The symbolic checker proves divisibility above; this
-      // exact discrete bound lets it compare the remaining points directly.
-      forwardAssumptions.push_back(*margin);
-    }
-    FailureOr<bool> forward = proveActivityImplication(
-        store, proofMap, forwardAssumptions, *normalizedRight, memo);
-    FailureOr<bool> reverse =
-        proveActivityImplication(store, proofMap,
-                                 {condition, *aligned, *deltaNonnegative,
-                                  *deltaInRange, *normalizedRight},
-                                 *normalizedLeft, memo);
-    if (failed(forward) || failed(reverse))
-      return failure();
-    return *forward && *reverse;
-  };
   sym::ExprView left(sym::asExpr(lhs));
   sym::ExprView right(sym::asExpr(rhs));
   if (left.getKind() != sym::ExprKind::Piecewise ||
@@ -1759,93 +2112,39 @@ proveActivityEquivalent(sym::Store &store, const indexing::IndexMap &proofMap,
     FailureOr<sym::PredHandle> unconditional = sym::composePredTrue(store);
     if (failed(unconditional))
       return failure();
-    return proveComparison(lhs, rhs, *unconditional);
+    return proveActivityComparison(store, proofMap, lhs, rhs, *unconditional,
+                                   alignment, memo);
   }
   if (left.getPiecewiseCaseCount() != right.getPiecewiseCaseCount())
     return false;
-  uint32_t caseCount = left.getPiecewiseCaseCount();
-  bool matchingConditions = true;
-  for (uint32_t index = 0; index < caseCount; ++index)
-    matchingConditions &= left.getPiecewiseCase(index).condition ==
-                          right.getPiecewiseCase(index).condition;
-  if (matchingConditions) {
-    for (uint32_t index = 0; index < caseCount; ++index) {
-      sym::PiecewiseCase leftCase = left.getPiecewiseCase(index);
-      sym::PiecewiseCase rightCase = right.getPiecewiseCase(index);
-      std::optional<sym::PredHandle> leftValue = sym::asPred(leftCase.value);
-      std::optional<sym::PredHandle> rightValue = sym::asPred(rightCase.value);
-      if (!leftValue || !rightValue)
-        return false;
-      FailureOr<bool> equivalent =
-          proveComparison(*leftValue, *rightValue, leftCase.condition);
-      if (failed(equivalent) || !*equivalent)
-        return equivalent;
-    }
-    return true;
-  }
-  auto buildCaseSelectors =
-      [&](sym::ExprView view) -> FailureOr<SmallVector<sym::PredHandle>> {
-    SmallVector<sym::PredHandle> selectors;
-    SmallVector<sym::PredHandle> prior;
-    selectors.reserve(caseCount);
-    prior.reserve(caseCount);
-    for (uint32_t index = 0; index < caseCount; ++index) {
-      sym::PredHandle condition = view.getPiecewiseCase(index).condition;
-      sym::PredHandle selected = condition;
-      for (sym::PredHandle earlier : prior) {
-        FailureOr<sym::PredHandle> inactive =
-            sym::composePredNot(store, earlier);
-        FailureOr<sym::PredHandle> combined =
-            failed(inactive) ? FailureOr<sym::PredHandle>(failure())
-                             : sym::composePredAnd(store, selected, *inactive);
-        if (failed(combined))
-          return failure();
-        selected = *combined;
-      }
-      selectors.push_back(selected);
-      prior.push_back(condition);
-    }
-    return selectors;
-  };
+  if (haveMatchingActivityConditions(left, right))
+    return proveMatchingActivityCases(store, proofMap, left, right, alignment,
+                                      memo);
   FailureOr<SmallVector<sym::PredHandle>> leftSelectors =
-      buildCaseSelectors(left);
+      buildActivityCaseSelectors(store, left);
   FailureOr<SmallVector<sym::PredHandle>> rightSelectors =
-      buildCaseSelectors(right);
+      buildActivityCaseSelectors(store, right);
   if (failed(leftSelectors) || failed(rightSelectors))
     return failure();
-  for (uint32_t leftIndex = 0; leftIndex < caseCount; ++leftIndex) {
-    sym::PiecewiseCase leftCase = left.getPiecewiseCase(leftIndex);
-    std::optional<sym::PredHandle> leftValue = sym::asPred(leftCase.value);
-    if (!leftValue)
-      return false;
-    for (uint32_t rightIndex = 0; rightIndex < caseCount; ++rightIndex) {
-      sym::PiecewiseCase rightCase = right.getPiecewiseCase(rightIndex);
-      std::optional<sym::PredHandle> rightValue = sym::asPred(rightCase.value);
-      if (!rightValue)
-        return false;
-      FailureOr<sym::PredHandle> selected = sym::composePredAnd(
-          store, (*leftSelectors)[leftIndex], (*rightSelectors)[rightIndex]);
-      if (failed(selected))
-        return failure();
-      FailureOr<bool> equivalent =
-          proveComparison(*leftValue, *rightValue, *selected);
-      if (failed(equivalent) || !*equivalent)
-        return equivalent;
-    }
-  }
-  return true;
+  return proveCrossActivityCases(store, proofMap, left, right, *leftSelectors,
+                                 *rightSelectors, alignment, memo);
 }
-static FailureOr<sym::PredHandle> remapDmaActivity(const DmaPlanShape &shape,
-                                                   const DmaAccessPoint &point,
-                                                   sym::Store &store) {
-  std::array<sym::ExprSubstitution, 2> remap{
-      sym::ExprSubstitution{*shape.source->axes.item, point.item},
-      sym::ExprSubstitution{shape.source->axes.slot, point.slot}};
-  FailureOr<sym::PredHandle> active =
-      sym::substitutePred(store, shape.source->address.active, remap);
-  if (failed(active) || shape.source->packetActivityDomains.empty())
-    return active;
-
+static FailureOr<sym::PredHandle>
+getDmaPacketDomainSelector(const DmaAccessPoint &point,
+                           const PacketActivityDomain &domain, bool last,
+                           sym::Store &store) {
+  if (last)
+    return sym::composePredTrue(store);
+  FailureOr<sym::ExprHandle> end =
+      sym::composeExprInt(store, domain.firstSlot + domain.slotCount);
+  return failed(end)
+             ? FailureOr<sym::PredHandle>(failure())
+             : sym::composePredCmp(store, point.slot, sym::PredCmpOp::Lt, *end);
+}
+static FailureOr<sym::PredHandle>
+buildDmaPacketActivity(const DmaPlanShape &shape, const DmaAccessPoint &point,
+                       ArrayRef<sym::ExprSubstitution> remap,
+                       sym::Store &store) {
   ArrayRef<PacketActivityDomain> domains = shape.source->packetActivityDomains;
   assert(domains.front().firstSlot == 0 &&
          domains.back().firstSlot + domains.back().slotCount ==
@@ -1860,26 +2159,68 @@ static FailureOr<sym::PredHandle> remapDmaActivity(const DmaPlanShape &shape,
              "packet activity domains must be contiguous");
     FailureOr<sym::PredHandle> value =
         sym::substitutePred(store, domain.active, remap);
-    FailureOr<sym::PredHandle> selected = sym::composePredTrue(store);
-    if (index + 1 != domains.size()) {
-      FailureOr<sym::ExprHandle> end =
-          sym::composeExprInt(store, domain.firstSlot + domain.slotCount);
-      selected = failed(end) ? FailureOr<sym::PredHandle>(failure())
-                             : sym::composePredCmp(store, point.slot,
-                                                   sym::PredCmpOp::Lt, *end);
-    }
+    FailureOr<sym::PredHandle> selected = getDmaPacketDomainSelector(
+        point, domain, index + 1 == domains.size(), store);
     if (failed(value) || failed(selected))
       return failure();
     cases.push_back({sym::asExpr(*value), *selected});
   }
   FailureOr<sym::ExprHandle> packet = sym::composeExprPiecewise(store, cases);
-  std::optional<sym::PredHandle> packetPred =
+  std::optional<sym::PredHandle> predicate =
       failed(packet) ? std::nullopt : sym::asPred(*packet);
-  if (!packetPred)
+  return predicate ? FailureOr<sym::PredHandle>(*predicate)
+                   : FailureOr<sym::PredHandle>(failure());
+}
+static FailureOr<sym::PredHandle> remapDmaActivity(const DmaPlanShape &shape,
+                                                   const DmaAccessPoint &point,
+                                                   sym::Store &store) {
+  std::array<sym::ExprSubstitution, 2> remap{
+      sym::ExprSubstitution{*shape.source->axes.item, point.item},
+      sym::ExprSubstitution{shape.source->axes.slot, point.slot}};
+  FailureOr<sym::PredHandle> active =
+      sym::substitutePred(store, shape.source->address.active, remap);
+  if (failed(active) || shape.source->packetActivityDomains.empty())
+    return active;
+  FailureOr<sym::PredHandle> packet =
+      buildDmaPacketActivity(shape, point, remap, store);
+  if (failed(packet))
     return failure();
-  FailureOr<sym::PredHandle> combined =
-      sym::composePredAnd(store, *active, *packetPred);
-  return combined;
+  return sym::composePredAnd(store, *active, *packet);
+}
+static indexing::IndexMap
+buildDmaActivityProofMap(const DmaPlanShape &shape,
+                         const DmaExpressions &expressions) {
+  indexing::IndexMap proofMap = shape.source->address.map;
+  for (const PacketActivityDomain &domain : shape.source->packetActivityDomains)
+    for (sym::PredHandle fact : domain.facts)
+      if (!llvm::is_contained(proofMap.facts, fact))
+        proofMap.facts.push_back(fact);
+  proofMap.inputs.push_back({expressions.symbols.group, shape.groupCount,
+                             Value(), SymbolicOffsetBindingKind::Uniform});
+  return proofMap;
+}
+static FailureOr<bool>
+proveUniformDmaActivity(const DmaPlanShape &shape,
+                        const DmaExpressions &expressions,
+                        sym::PredHandle mapped, sym::PredHandle origin,
+                        const indexing::IndexMap &proofMap, sym::Store &store,
+                        indexing::CheckMemo &memo) {
+  for (int64_t index = 1; index < shape.elements; ++index) {
+    FailureOr<sym::ExprHandle> within = sym::composeExprInt(store, index);
+    if (failed(within))
+      return failure();
+    std::array<sym::ExprSubstitution, 1> atPoint{
+        sym::ExprSubstitution{expressions.symbols.within, *within}};
+    FailureOr<sym::PredHandle> actual =
+        sym::substitutePred(store, mapped, atPoint);
+    if (failed(actual))
+      return failure();
+    FailureOr<bool> equivalent = proveActivityEquivalent(
+        store, proofMap, origin, *actual, shape.elements, memo);
+    if (failed(equivalent) || !*equivalent)
+      return equivalent;
+  }
+  return true;
 }
 static FailureOr<std::optional<sym::PredHandle>>
 uniformDmaActivity(const DmaPlanShape &shape, const DmaExpressions &expressions,
@@ -1888,37 +2229,19 @@ uniformDmaActivity(const DmaPlanShape &shape, const DmaExpressions &expressions,
   FailureOr<sym::PredHandle> mapped = remapDmaActivity(shape, point, store);
   if (failed(mapped))
     return failure();
-  indexing::IndexMap proofMap = shape.source->address.map;
-  for (const PacketActivityDomain &domain : shape.source->packetActivityDomains)
-    for (sym::PredHandle fact : domain.facts)
-      if (!llvm::is_contained(proofMap.facts, fact))
-        proofMap.facts.push_back(fact);
-  proofMap.inputs.push_back({expressions.symbols.group, shape.groupCount,
-                             Value(), SymbolicOffsetBindingKind::Uniform});
+  indexing::IndexMap proofMap = buildDmaActivityProofMap(shape, expressions);
   std::array<sym::ExprSubstitution, 1> atOrigin{sym::ExprSubstitution{
       expressions.symbols.within, expressions.symbols.zero}};
   FailureOr<sym::PredHandle> origin =
       sym::substitutePred(store, *mapped, atOrigin);
   if (failed(origin))
     return failure();
-  for (int64_t index = 1; index < shape.elements; ++index) {
-    FailureOr<sym::ExprHandle> within = sym::composeExprInt(store, index);
-    if (failed(within))
-      return failure();
-    std::array<sym::ExprSubstitution, 1> atPoint{
-        sym::ExprSubstitution{expressions.symbols.within, *within}};
-    FailureOr<sym::PredHandle> actual =
-        sym::substitutePred(store, *mapped, atPoint);
-    if (failed(actual))
-      return failure();
-    FailureOr<bool> equivalent = proveActivityEquivalent(
-        store, proofMap, *origin, *actual, shape.elements, memo);
-    if (failed(equivalent))
-      return failure();
-    if (!*equivalent)
-      return std::optional<sym::PredHandle>{};
-  }
-  return std::optional<sym::PredHandle>{*origin};
+  FailureOr<bool> uniform = proveUniformDmaActivity(
+      shape, expressions, *mapped, *origin, proofMap, store, memo);
+  if (failed(uniform))
+    return failure();
+  return *uniform ? std::optional<sym::PredHandle>{*origin}
+                  : std::optional<sym::PredHandle>{};
 }
 static const PacketActivityDomain *
 findPacketActivityDomain(const AccessMap &access, int64_t slot) {
@@ -1928,6 +2251,22 @@ findPacketActivityDomain(const AccessMap &access, int64_t slot) {
                slot < domain.firstSlot + domain.slotCount;
       });
   return found == access.packetActivityDomains.end() ? nullptr : &*found;
+}
+static FailureOr<bool> proveUniformDmaGroupActivity(
+    const AccessMap &source, const PacketActivityDomain &origin,
+    const PacketActivityDomain &point, int64_t alignment, sym::Store &store,
+    indexing::CheckMemo &memo) {
+  if (origin.active == point.active)
+    return true;
+  indexing::IndexMap proofMap = source.address.map;
+  for (sym::PredHandle fact : origin.facts)
+    if (!llvm::is_contained(proofMap.facts, fact))
+      proofMap.facts.push_back(fact);
+  for (sym::PredHandle fact : point.facts)
+    if (!llvm::is_contained(proofMap.facts, fact))
+      proofMap.facts.push_back(fact);
+  return proveActivityEquivalent(store, proofMap, origin.active, point.active,
+                                 alignment, memo);
 }
 static FailureOr<std::optional<SmallVector<const PacketActivityDomain *>>>
 collectUniformDmaGroupActivities(const DmaPlanShape &shape, sym::Store &store,
@@ -1946,17 +2285,8 @@ collectUniformDmaGroupActivities(const DmaPlanShape &shape, sym::Store &store,
           findPacketActivityDomain(source, first + within);
       if (!point)
         return std::optional<SmallVector<const PacketActivityDomain *>>{};
-      if (origin->active == point->active)
-        continue;
-      indexing::IndexMap proofMap = source.address.map;
-      for (sym::PredHandle fact : origin->facts)
-        if (!llvm::is_contained(proofMap.facts, fact))
-          proofMap.facts.push_back(fact);
-      for (sym::PredHandle fact : point->facts)
-        if (!llvm::is_contained(proofMap.facts, fact))
-          proofMap.facts.push_back(fact);
-      FailureOr<bool> equivalent = proveActivityEquivalent(
-          store, proofMap, origin->active, point->active, shape.elements, memo);
+      FailureOr<bool> equivalent = proveUniformDmaGroupActivity(
+          source, *origin, *point, shape.elements, store, memo);
       if (failed(equivalent))
         return failure();
       if (!*equivalent)
@@ -1966,6 +2296,81 @@ collectUniformDmaGroupActivities(const DmaPlanShape &shape, sym::Store &store,
   }
   return std::optional<SmallVector<const PacketActivityDomain *>>{
       std::move(activities)};
+}
+static void setRemappedDmaLayouts(const DmaExpressions &expressions,
+                                  const DmaAccessPoint &point,
+                                  const DmaOrigins &origins,
+                                  DmaFamilies &families) {
+  families.sourceLayout.group = families.destinationLayout.group =
+      expressions.symbols.group;
+  families.sourceLayout.within = families.destinationLayout.within =
+      expressions.symbols.within;
+  families.sourceLayout.accessItem = families.destinationLayout.accessItem =
+      point.item;
+  families.sourceLayout.slot = families.destinationLayout.slot = point.slot;
+  families.sourceLayout.originItem = origins.sourceItem;
+  families.sourceLayout.originSlot = origins.sourceSlot;
+  families.sourceLayout.displacement = expressions.withinBits;
+  families.destinationLayout.originItem = origins.destinationItem;
+  families.destinationLayout.originSlot = origins.destinationSlot;
+  families.destinationLayout.displacement = expressions.destinationDisplacement;
+}
+static LogicalResult makeDmaSourceUnconditional(AccessMap &source,
+                                                sym::Store &store) {
+  FailureOr<sym::PredHandle> active = sym::composePredTrue(store);
+  if (failed(active))
+    return failure();
+  source.address.active = *active;
+  source.packetActivityDomains.clear();
+  return success();
+}
+static LogicalResult applyUniformDmaActivity(Transaction &source,
+                                             sym::PredHandle uniformActivity,
+                                             const DmaPlanShape &shape,
+                                             sym::Store &store) {
+  FailureOr<sym::ExprHandle> activity =
+      composeIndexExprIndicator(store, uniformActivity);
+  if (failed(activity))
+    return failure();
+  source.activity = *activity;
+  if (shape.source->packetActivityDomains.size() != 1)
+    return success();
+  const PacketActivityDomain &domain =
+      shape.source->packetActivityDomains.front();
+  if (domain.firstSlot == 0 &&
+      domain.slotCount == shape.source->shape.slotCount)
+    source.condition = domain.condition;
+  return success();
+}
+struct RemappedDmaTransactions {
+  std::optional<Transaction> source;
+  std::optional<Transaction> destination;
+};
+static FailureOr<RemappedDmaTransactions> buildRemappedDmaTransactions(
+    const DmaPlanShape &shape, const AccessMap &sourceAccess,
+    const DmaFamilies &families, sym::Store &store, indexing::CheckMemo &memo) {
+  FailureOr<std::optional<Transaction>> source =
+      buildTransaction(sourceAccess, families.sourceLayout, store, memo,
+                       std::nullopt, shape.windowBytes);
+  FailureOr<std::optional<Transaction>> destination =
+      buildTransaction(*shape.destination, families.destinationLayout, store,
+                       memo, families.destinationProjection, shape.windowBytes);
+  if (failed(source) || failed(destination))
+    return failure();
+  return RemappedDmaTransactions{std::move(*source), std::move(*destination)};
+}
+static LogicalResult
+commitRemappedDmaTransactions(const DmaPlanShape &shape,
+                              std::optional<sym::PredHandle> uniformActivity,
+                              RemappedDmaTransactions transactions,
+                              DmaFamilies &families, sym::Store &store) {
+  if (uniformActivity && transactions.source &&
+      failed(applyUniformDmaActivity(*transactions.source, *uniformActivity,
+                                     shape, store)))
+    return failure();
+  families.source = std::move(transactions.source);
+  families.destination = std::move(transactions.destination);
+  return success();
 }
 static LogicalResult remapDmaOwnershipAtPoint(const DmaPlanShape &shape,
                                               const DmaExpressions &expressions,
@@ -1977,19 +2382,7 @@ static LogicalResult remapDmaOwnershipAtPoint(const DmaPlanShape &shape,
       buildDmaOrigins(shape, expressions, point, store);
   if (failed(origins))
     return failure();
-  families.sourceLayout.group = families.destinationLayout.group =
-      expressions.symbols.group;
-  families.sourceLayout.within = families.destinationLayout.within =
-      expressions.symbols.within;
-  families.sourceLayout.accessItem = families.destinationLayout.accessItem =
-      point.item;
-  families.sourceLayout.slot = families.destinationLayout.slot = point.slot;
-  families.sourceLayout.originItem = origins->sourceItem;
-  families.sourceLayout.originSlot = origins->sourceSlot;
-  families.sourceLayout.displacement = expressions.withinBits;
-  families.destinationLayout.originItem = origins->destinationItem;
-  families.destinationLayout.originSlot = origins->destinationSlot;
-  families.destinationLayout.displacement = expressions.destinationDisplacement;
+  setRemappedDmaLayouts(expressions, point, *origins, families);
   AccessMap sourceAccess = *shape.source;
   FailureOr<std::optional<sym::PredHandle>> uniformActivity =
       uniformDmaActivity(shape, expressions, point, store, memo);
@@ -1997,39 +2390,15 @@ static LogicalResult remapDmaOwnershipAtPoint(const DmaPlanShape &shape,
     return failure();
   if (!*uniformActivity && !shape.source->packetActivityDomains.empty())
     return success();
-  if (*uniformActivity) {
-    FailureOr<sym::PredHandle> active = sym::composePredTrue(store);
-    if (failed(active))
-      return failure();
-    sourceAccess.address.active = *active;
-    sourceAccess.packetActivityDomains.clear();
-  }
-  FailureOr<std::optional<Transaction>> source =
-      buildTransaction(sourceAccess, families.sourceLayout, store, memo,
-                       std::nullopt, shape.windowBytes);
-  FailureOr<std::optional<Transaction>> destination =
-      buildTransaction(*shape.destination, families.destinationLayout, store,
-                       memo, families.destinationProjection, shape.windowBytes);
-  if (failed(source) || failed(destination))
+  if (*uniformActivity &&
+      failed(makeDmaSourceUnconditional(sourceAccess, store)))
     return failure();
-  if (*uniformActivity && *source) {
-    FailureOr<sym::ExprHandle> activity =
-        composeIndexExprIndicator(store, **uniformActivity);
-    if (failed(activity))
-      return failure();
-    (*source)->activity = *activity;
-  }
-  if (*uniformActivity && *source &&
-      shape.source->packetActivityDomains.size() == 1) {
-    const PacketActivityDomain &domain =
-        shape.source->packetActivityDomains.front();
-    if (domain.firstSlot == 0 &&
-        domain.slotCount == shape.source->shape.slotCount)
-      (*source)->condition = domain.condition;
-  }
-  families.source = std::move(*source);
-  families.destination = std::move(*destination);
-  return success();
+  FailureOr<RemappedDmaTransactions> transactions =
+      buildRemappedDmaTransactions(shape, sourceAccess, families, store, memo);
+  if (failed(transactions))
+    return failure();
+  return commitRemappedDmaTransactions(
+      shape, *uniformActivity, std::move(*transactions), families, store);
 }
 
 static LogicalResult remapDmaOwnership(const DmaPlanShape &shape,
@@ -2071,6 +2440,88 @@ instantiateDmaPlan(const DmaPlanShape &shape, const DmaExpressions &expressions,
   }
   return result;
 }
+static void
+specializeDmaGroupActivity(AccessMap &source,
+                           ArrayRef<const PacketActivityDomain *> activities,
+                           int64_t group) {
+  if (activities.empty())
+    return;
+  source.address.active = activities[group]->active;
+  source.condition = activities[group]->condition;
+  source.packetActivityDomains.clear();
+}
+static LogicalResult applySpecializedDmaGroupActivity(
+    Transaction &source, ArrayRef<const PacketActivityDomain *> activities,
+    int64_t group, sym::Store &store) {
+  if (activities.empty())
+    return success();
+  FailureOr<sym::ExprHandle> activity =
+      composeIndexExprIndicator(store, activities[group]->active);
+  if (failed(activity))
+    return failure();
+  source.activity = *activity;
+  source.condition = activities[group]->condition;
+  return success();
+}
+static bool failedDmaTransactionPair(
+    const FailureOr<std::optional<Transaction>> &source,
+    const FailureOr<std::optional<Transaction>> &destination) {
+  return failed(source) || failed(destination);
+}
+static FailureOr<std::optional<DmaTransaction>> buildSpecializedDmaTransaction(
+    const DmaPlanShape &shape, const DmaExpressions &expressions,
+    bool zeroFillInactive,
+    ArrayRef<const PacketActivityDomain *> groupActivities, int64_t group,
+    sym::Store &store, indexing::CheckMemo &memo) {
+  int64_t firstSlot = group * shape.elements;
+  FailureOr<sym::ExprHandle> first = sym::composeExprInt(store, firstSlot);
+  FailureOr<sym::ExprHandle> slot =
+      failed(first)
+          ? FailureOr<sym::ExprHandle>(failure())
+          : sym::composeExprBinary(store, *first, sym::ExprBinaryOp::Add,
+                                   expressions.symbols.within);
+  if (failed(slot))
+    return failure();
+  AccessMap sourceAccess =
+      specializeTransactionRange(*shape.source, firstSlot, shape.elements);
+  AccessMap destinationAccess =
+      specializeTransactionRange(*shape.destination, firstSlot, shape.elements);
+  specializeDmaGroupActivity(sourceAccess, groupActivities, group);
+  Layout sourceLayout;
+  sourceLayout.width = shape.elements;
+  sourceLayout.groupCount = 1;
+  sourceLayout.within = expressions.symbols.within;
+  sourceLayout.slot = *slot;
+  sourceLayout.originSlot = *first;
+  Layout destinationLayout = sourceLayout;
+  destinationLayout.originItem = expressions.physicalWave;
+  destinationLayout.displacement = expressions.destinationDisplacement;
+  MemoryTransactionProjection projection{expressions.physicalItem,
+                                         expressions.physicalWave,
+                                         expressions.symbols.formal};
+  FailureOr<std::optional<Transaction>> source = buildTransaction(
+      sourceAccess, sourceLayout, store, memo, std::nullopt, shape.windowBytes);
+  FailureOr<std::optional<Transaction>> destination =
+      buildTransaction(destinationAccess, destinationLayout, store, memo,
+                       projection, shape.windowBytes);
+  if (failedDmaTransactionPair(source, destination))
+    return failure();
+  if (!*source || !*destination)
+    return std::optional<DmaTransaction>{};
+  FailureOr<Transaction> sourceTransaction =
+      instantiateTransaction(sourceAccess, **source, 0, false, store);
+  FailureOr<Transaction> destinationTransaction =
+      instantiateTransaction(destinationAccess, **destination, 0, false, store);
+  if (failed(sourceTransaction) || failed(destinationTransaction))
+    return failure();
+  if (failed(applySpecializedDmaGroupActivity(*sourceTransaction,
+                                              groupActivities, group, store)))
+    return failure();
+  sourceTransaction->activity =
+      zeroFillInactive ? sourceTransaction->activity : expressions.symbols.one;
+  return std::optional<DmaTransaction>{DmaTransaction{
+      std::move(*sourceTransaction), std::move(*destinationTransaction)}};
+}
 static FailureOr<std::optional<DmaPlan>>
 buildSpecializedDmaPlan(const DmaPlanShape &shape,
                         const DmaExpressions &expressions,
@@ -2085,66 +2536,159 @@ buildSpecializedDmaPlan(const DmaPlanShape &shape,
                  expressions.physicalWave,
                  expressions.symbols.formal};
   for (int64_t group = 0; group < shape.groupCount; ++group) {
-    int64_t firstSlot = group * shape.elements;
-    FailureOr<sym::ExprHandle> first = sym::composeExprInt(store, firstSlot);
-    FailureOr<sym::ExprHandle> slot =
-        failed(first)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : sym::composeExprBinary(store, *first, sym::ExprBinaryOp::Add,
-                                     expressions.symbols.within);
-    if (failed(slot))
+    FailureOr<std::optional<DmaTransaction>> transaction =
+        buildSpecializedDmaTransaction(shape, expressions, zeroFillInactive,
+                                       groupActivities, group, store, memo);
+    if (failed(transaction))
       return failure();
-    AccessMap sourceAccess =
-        specializeTransactionRange(*shape.source, firstSlot, shape.elements);
-    AccessMap destinationAccess = specializeTransactionRange(
-        *shape.destination, firstSlot, shape.elements);
-    if (!groupActivities.empty()) {
-      sourceAccess.address.active = groupActivities[group]->active;
-      sourceAccess.condition = groupActivities[group]->condition;
-      sourceAccess.packetActivityDomains.clear();
-    }
-    Layout sourceLayout;
-    sourceLayout.width = shape.elements;
-    sourceLayout.groupCount = 1;
-    sourceLayout.within = expressions.symbols.within;
-    sourceLayout.slot = *slot;
-    sourceLayout.originSlot = *first;
-    Layout destinationLayout = sourceLayout;
-    destinationLayout.originItem = expressions.physicalWave;
-    destinationLayout.displacement = expressions.destinationDisplacement;
-    MemoryTransactionProjection projection{expressions.physicalItem,
-                                           expressions.physicalWave,
-                                           expressions.symbols.formal};
-    FailureOr<std::optional<Transaction>> source =
-        buildTransaction(sourceAccess, sourceLayout, store, memo, std::nullopt,
-                         shape.windowBytes);
-    FailureOr<std::optional<Transaction>> destination =
-        buildTransaction(destinationAccess, destinationLayout, store, memo,
-                         projection, shape.windowBytes);
-    if (failed(source) || failed(destination))
-      return failure();
-    if (!*source || !*destination)
+    if (!*transaction)
       return std::optional<DmaPlan>{};
-    FailureOr<Transaction> sourceTransaction =
-        instantiateTransaction(sourceAccess, **source, 0, false, store);
-    FailureOr<Transaction> destinationTransaction = instantiateTransaction(
-        destinationAccess, **destination, 0, false, store);
-    if (failed(sourceTransaction) || failed(destinationTransaction))
-      return failure();
-    if (!groupActivities.empty()) {
-      FailureOr<sym::ExprHandle> activity =
-          composeIndexExprIndicator(store, groupActivities[group]->active);
-      if (failed(activity))
-        return failure();
-      sourceTransaction->activity = *activity;
-      sourceTransaction->condition = groupActivities[group]->condition;
-    }
-    sourceTransaction->activity = zeroFillInactive ? sourceTransaction->activity
-                                                   : expressions.symbols.one;
-    result.transactions.push_back(
-        {std::move(*sourceTransaction), std::move(*destinationTransaction)});
+    result.transactions.push_back(std::move(**transaction));
   }
   return std::optional<DmaPlan>{std::move(result)};
+}
+static FailureOr<std::optional<sym::PredHandle>>
+getNaturalDmaActivity(const DmaPlanShape &shape,
+                      const DmaExpressions &expressions, sym::Store &store,
+                      indexing::CheckMemo &memo) {
+  FailureOr<sym::ExprHandle> groupBase = composeIntBinary(
+      store, expressions.symbols.group, sym::ExprBinaryOp::Mul, shape.elements);
+  FailureOr<sym::ExprHandle> slot =
+      failed(groupBase)
+          ? FailureOr<sym::ExprHandle>(failure())
+          : sym::composeExprBinary(store, *groupBase, sym::ExprBinaryOp::Add,
+                                   expressions.symbols.within);
+  if (failed(slot))
+    return failure();
+  DmaAccessPoint point{expressions.physicalItem, *slot};
+  return uniformDmaActivity(shape, expressions, point, store, memo);
+}
+static FailureOr<DmaFamilies> buildUnconditionalDmaFamilies(
+    const AccessGroup &prepared,
+    const wave::memory_lowering::CopyTransaction &selected,
+    const DmaExpressions &expressions, sym::Store &store,
+    indexing::CheckMemo &memo) {
+  AccessGroup unconditional = prepared;
+  FailureOr<sym::PredHandle> active = sym::composePredTrue(store);
+  if (failed(active))
+    return failure();
+  unconditional[0].address.active = *active;
+  std::optional<DmaPlanShape> shape = getDmaPlanShape(unconditional, selected);
+  if (!shape)
+    return failure();
+  return buildInitialDmaFamilies(*shape, expressions, store, memo);
+}
+static LogicalResult recoverUniformDmaFamilies(
+    const AccessGroup &prepared,
+    const wave::memory_lowering::CopyTransaction &selected,
+    const DmaPlanShape &shape, const DmaExpressions &expressions,
+    DmaFamilies &families, sym::Store &store, indexing::CheckMemo &memo) {
+  FailureOr<std::optional<sym::PredHandle>> uniformActivity =
+      getNaturalDmaActivity(shape, expressions, store, memo);
+  if (failed(uniformActivity))
+    return failure();
+  if (!*uniformActivity)
+    return success();
+  FailureOr<DmaFamilies> unconditional = buildUnconditionalDmaFamilies(
+      prepared, selected, expressions, store, memo);
+  if (failed(unconditional))
+    return failure();
+  if (!unconditional->source || !unconditional->destination)
+    return success();
+  FailureOr<sym::ExprHandle> activity =
+      composeIndexExprIndicator(store, **uniformActivity);
+  if (failed(activity))
+    return failure();
+  unconditional->source->activity = *activity;
+  families = std::move(*unconditional);
+  return success();
+}
+static LogicalResult tryRankDmaOwnership(const DmaPlanShape &shape,
+                                         const DmaExpressions &expressions,
+                                         DmaFamilies &families,
+                                         sym::Store &store,
+                                         indexing::CheckMemo &memo) {
+  FailureOr<std::optional<DmaAccessPoint>> point =
+      buildRankedDmaAccessPoint(shape, expressions, store);
+  if (failed(point))
+    return failure();
+  if (!*point)
+    return success();
+  if (failed(remapDmaOwnershipAtPoint(shape, expressions, **point, families,
+                                      store, memo)))
+    return failure();
+  if (!families.source || families.destination)
+    return success();
+  FailureOr<Transaction> destination =
+      buildRankedDmaDestination(shape, expressions, **point, store);
+  if (failed(destination))
+    return failure();
+  families.destination = std::move(*destination);
+  return success();
+}
+static LogicalResult tryNaturalDmaOwnership(const DmaPlanShape &shape,
+                                            const DmaExpressions &expressions,
+                                            DmaFamilies &families,
+                                            sym::Store &store,
+                                            indexing::CheckMemo &memo) {
+  if (failed(remapDmaOwnership(shape, expressions, families, store, memo)))
+    return failure();
+  if (families.source && families.destination)
+    return success();
+  return remapDmaOwnership(shape, expressions, families, store, memo,
+                           /*itemMajor=*/true);
+}
+static FailureOr<std::optional<DmaPlan>> buildFallbackDmaPlan(
+    const DmaPlanShape &shape, const DmaExpressions &expressions,
+    const wave::memory_lowering::CopyTransaction &selected,
+    bool zeroFillInactive, sym::Store &store, indexing::CheckMemo &memo) {
+  if (!shape.source->packetActivityDomains.empty()) {
+    FailureOr<std::optional<SmallVector<const PacketActivityDomain *>>>
+        activities = collectUniformDmaGroupActivities(shape, store, memo);
+    if (failed(activities))
+      return failure();
+    if (!*activities)
+      return std::optional<DmaPlan>{};
+    return buildSpecializedDmaPlan(shape, expressions, selected,
+                                   zeroFillInactive, **activities, store, memo);
+  }
+  FailureOr<std::optional<DmaPlan>> specialized = buildSpecializedDmaPlan(
+      shape, expressions, selected, zeroFillInactive, {}, store, memo);
+  if (failed(specialized) || *specialized)
+    return specialized;
+  return std::optional<DmaPlan>{};
+}
+static FailureOr<DmaFamilies>
+prepareDmaFamilies(const AccessGroup &prepared,
+                   const wave::memory_lowering::CopyTransaction &selected,
+                   const DmaPlanShape &shape, const DmaExpressions &expressions,
+                   bool zeroFillInactive, sym::Store &store,
+                   indexing::CheckMemo &memo) {
+  FailureOr<DmaFamilies> families =
+      buildInitialDmaFamilies(shape, expressions, store, memo);
+  if (failed(families))
+    return failure();
+  if (zeroFillInactive && !shape.source->packetActivityDomains.empty())
+    families->source.reset();
+  if (zeroFillInactive && (!families->source || !families->destination))
+    if (failed(recoverUniformDmaFamilies(prepared, selected, shape, expressions,
+                                         *families, store, memo)))
+      return failure();
+  return families;
+}
+static LogicalResult refineDmaFamilies(const DmaPlanShape &shape,
+                                       const DmaExpressions &expressions,
+                                       DmaFamilies &families,
+                                       bool zeroFillInactive, sym::Store &store,
+                                       indexing::CheckMemo &memo) {
+  if (canRankDmaOwnership(shape, families, zeroFillInactive))
+    if (failed(tryRankDmaOwnership(shape, expressions, families, store, memo)))
+      return failure();
+  if (canRemapDmaOwnership(shape, families, zeroFillInactive))
+    if (failed(
+            tryNaturalDmaOwnership(shape, expressions, families, store, memo)))
+      return failure();
+  return success();
 }
 static FailureOr<std::optional<DmaPlan>>
 planDmaCopy(const AccessGroup &prepared,
@@ -2160,101 +2704,16 @@ planDmaCopy(const AccessGroup &prepared,
     shape->source->access->op->emitOpError("failed to build DMA expressions");
     return failure();
   }
-  FailureOr<DmaFamilies> families =
-      buildInitialDmaFamilies(*shape, *expressions, store, memo);
+  FailureOr<DmaFamilies> families = prepareDmaFamilies(
+      prepared, selected, *shape, *expressions, zeroFillInactive, store, memo);
   if (failed(families))
     return failure();
-  if (zeroFillInactive && !shape->source->packetActivityDomains.empty())
-    families->source.reset();
-  if (zeroFillInactive && (!families->source || !families->destination)) {
-    FailureOr<sym::ExprHandle> groupBase =
-        composeIntBinary(store, expressions->symbols.group,
-                         sym::ExprBinaryOp::Mul, shape->elements);
-    FailureOr<sym::ExprHandle> slot =
-        failed(groupBase)
-            ? FailureOr<sym::ExprHandle>(failure())
-            : sym::composeExprBinary(store, *groupBase, sym::ExprBinaryOp::Add,
-                                     expressions->symbols.within);
-    if (failed(slot))
-      return failure();
-    DmaAccessPoint naturalPoint{expressions->physicalItem, *slot};
-    FailureOr<std::optional<sym::PredHandle>> uniformActivity =
-        uniformDmaActivity(*shape, *expressions, naturalPoint, store, memo);
-    if (failed(uniformActivity))
-      return failure();
-    if (*uniformActivity) {
-      AccessGroup unconditional = prepared;
-      FailureOr<sym::PredHandle> active = sym::composePredTrue(store);
-      if (failed(active))
-        return failure();
-      unconditional[0].address.active = *active;
-      std::optional<DmaPlanShape> unconditionalShape =
-          getDmaPlanShape(unconditional, selected);
-      if (!unconditionalShape)
-        return failure();
-      FailureOr<DmaFamilies> unconditionalFamilies = buildInitialDmaFamilies(
-          *unconditionalShape, *expressions, store, memo);
-      if (failed(unconditionalFamilies))
-        return failure();
-      if (unconditionalFamilies->source && unconditionalFamilies->destination) {
-        FailureOr<sym::ExprHandle> activity =
-            composeIndexExprIndicator(store, **uniformActivity);
-        if (failed(activity))
-          return failure();
-        unconditionalFamilies->source->activity = *activity;
-        families = std::move(*unconditionalFamilies);
-      }
-    }
-  }
-  if (canRankDmaOwnership(*shape, *families, zeroFillInactive)) {
-    FailureOr<std::optional<DmaAccessPoint>> point =
-        buildRankedDmaAccessPoint(*shape, *expressions, store);
-    if (failed(point))
-      return failure();
-    if (*point) {
-      if (failed(remapDmaOwnershipAtPoint(*shape, *expressions, **point,
-                                          *families, store, memo)))
-        return failure();
-      if (families->source && !families->destination) {
-        FailureOr<Transaction> destination =
-            buildRankedDmaDestination(*shape, *expressions, **point, store);
-        if (failed(destination))
-          return failure();
-        families->destination = std::move(*destination);
-      }
-    }
-  }
-  if (canRemapDmaOwnership(*shape, *families, zeroFillInactive)) {
-    // Flatten (group, executing lane, within), then unflatten it as a logical
-    // (item, slot) point in the same wave. Euclidean quotient/remainder makes
-    // this a bijection: flattening the mapped pair reconstructs `linear`, and
-    // its inverse recovers group, lane, and within over the exact extents.
-    if (failed(remapDmaOwnership(*shape, *expressions, *families, store, memo)))
-      return failure();
-    if (!families->source || !families->destination)
-      if (failed(remapDmaOwnership(*shape, *expressions, *families, store, memo,
-                                   /*itemMajor=*/true)))
-        return failure();
-  }
-  if (!families->source || !families->destination) {
-    if (!shape->source->packetActivityDomains.empty()) {
-      FailureOr<std::optional<SmallVector<const PacketActivityDomain *>>>
-          activities = collectUniformDmaGroupActivities(*shape, store, memo);
-      if (failed(activities))
-        return failure();
-      if (!*activities)
-        return std::optional<DmaPlan>{};
-      FailureOr<std::optional<DmaPlan>> specialized =
-          buildSpecializedDmaPlan(*shape, *expressions, selected,
-                                  zeroFillInactive, **activities, store, memo);
-      return specialized;
-    }
-    FailureOr<std::optional<DmaPlan>> specialized = buildSpecializedDmaPlan(
-        *shape, *expressions, selected, zeroFillInactive, {}, store, memo);
-    if (failed(specialized) || *specialized)
-      return specialized;
-    return std::optional<DmaPlan>{};
-  }
+  if (failed(refineDmaFamilies(*shape, *expressions, *families,
+                               zeroFillInactive, store, memo)))
+    return failure();
+  if (!families->source || !families->destination)
+    return buildFallbackDmaPlan(*shape, *expressions, selected,
+                                zeroFillInactive, store, memo);
   FailureOr<DmaPlan> plan = instantiateDmaPlan(
       *shape, *expressions, *families, selected, zeroFillInactive, store);
   return failed(plan) ? FailureOr<std::optional<DmaPlan>>(failure())
@@ -2561,6 +3020,20 @@ static Value getDmaDependency(IRRewriter &rewriter, ScatterOp scatter,
     return source.dependency;
   return TokenOp::create(rewriter, scatter.getLoc(), source.tokenType);
 }
+static FailureOr<std::optional<DmaPlan>>
+selectDmaPlan(ScatterOp scatter, const AccessGroup &prepared,
+              ArrayRef<wave::memory_lowering::CopyTransaction> targets,
+              bool zeroFillInactive, WaveDialect &dialect) {
+  for (const wave::memory_lowering::CopyTransaction &target : targets) {
+    FailureOr<std::optional<DmaPlan>> candidate =
+        prepareDmaPlan(scatter, prepared, target, zeroFillInactive, dialect);
+    if (failed(candidate))
+      return failure();
+    if (*candidate)
+      return std::optional<DmaPlan>{std::move(**candidate)};
+  }
+  return std::optional<DmaPlan>{};
+}
 static FailureOr<bool> tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect,
                                        IRRewriter &rewriter) {
   std::optional<DmaCopyMatch> match = matchDmaCopy(scatter);
@@ -2589,24 +3062,16 @@ static FailureOr<bool> tryLowerDmaCopy(ScatterOp scatter, WaveDialect &dialect,
       transaction);
   if (failed(prepared))
     return failure();
-  std::optional<DmaPlan> plan;
-  for (const wave::memory_lowering::CopyTransaction &target : targets) {
-    FailureOr<std::optional<DmaPlan>> candidate = prepareDmaPlan(
-        scatter, *prepared, target, match->zeroFillInactive, dialect);
-    if (failed(candidate))
-      return failure();
-    if (*candidate) {
-      plan = std::move(**candidate);
-      break;
-    }
-  }
-  if (!plan) {
+  FailureOr<std::optional<DmaPlan>> plan = selectDmaPlan(
+      scatter, *prepared, targets, match->zeroFillInactive, dialect);
+  if (failed(plan))
+    return failure();
+  if (!*plan)
     return false;
-  }
   rewriter.setInsertionPoint(anchor);
   Value dependency = getDmaDependency(rewriter, scatter, source);
   FailureOr<Value> token = materializeDmaPlan(scatter, rewriter, *prepared,
-                                              *plan, dependency, dialect);
+                                              **plan, dependency, dialect);
   if (failed(token))
     return failure();
   finishDmaCopy(rewriter, scatter, *match, *token, transaction);
