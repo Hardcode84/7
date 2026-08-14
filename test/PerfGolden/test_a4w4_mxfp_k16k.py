@@ -29,6 +29,10 @@ def normalize_asm(text: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def isolate_kernel(_output_dir: Path) -> Path:
+    return SOURCE
+
+
 def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -> str:
     wave_translate = build_dir / "bin/wave-translate"
     if not wave_translate.exists():

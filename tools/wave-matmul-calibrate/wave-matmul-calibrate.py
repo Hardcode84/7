@@ -406,7 +406,7 @@ def effective_output_layout(args: argparse.Namespace) -> str:
         return output_layout
     if is_v9_perf_golden(args):
         return "row-major"
-    if is_tlx_mxfp_perf_golden(args) or selected_example(args) == "tensilelite-subtile":
+    if selected_example(args) == "tensilelite-subtile":
         return "tile-packed"
     if is_streamk_gemm(args) or getattr(args, "coalesced_mfma_output", False):
         return "column-major"
@@ -1559,6 +1559,10 @@ def _validate_tlx_mxfp_perf_golden_args(args: argparse.Namespace) -> None:
     _require_arg(
         args.m % 256 == 0 and args.n % 256 == 0,
         "--example=tlx-mxfp-perf-golden requires M/N multiples of 256",
+    )
+    _require_arg(
+        effective_output_layout(args) == "row-major",
+        "--example=tlx-mxfp-perf-golden requires row-major output",
     )
     _require_arg(
         (

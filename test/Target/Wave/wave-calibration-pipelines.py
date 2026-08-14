@@ -2159,6 +2159,12 @@ def check_tlx_mxfp_runner_forwarding(
     )
     require(
         check_name,
+        "--output-layout" in cmd
+        and cmd[cmd.index("--output-layout") + 1] == "row-major",
+        "runner should receive row-major output",
+    )
+    require(
+        check_name,
         cmd[-1] == "_a4w4_kernel",
         "runner should launch TLX MXFP symbol",
     )
@@ -2180,6 +2186,23 @@ def check_tlx_mxfp_validation(
             False,
             "TLX MXFP golden should reject non-frozen K",
         )
+    for layout in ("tile-packed", "column-major"):
+        bad_layout_values = vars(args).copy()
+        bad_layout_values["output_layout"] = layout
+        try:
+            matmul.validate_args(argparse.Namespace(**bad_layout_values))
+        except SystemExit as exc:
+            require(
+                check_name,
+                str(exc) == "--example=tlx-mxfp-perf-golden requires row-major output",
+                f"bad {layout} output diagnostic: {exc}",
+            )
+        else:
+            require(
+                check_name,
+                False,
+                f"accepted incompatible {layout} output",
+            )
 
 
 def check_matmul_a4w4_mxfp_k16k_profile(matmul) -> None:
