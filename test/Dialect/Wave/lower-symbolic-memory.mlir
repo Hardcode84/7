@@ -419,10 +419,12 @@ func.func @unaligned_packet_predicated_gather(
 
 // -----
 
-// A possibly-zero divisor keeps discrete-cut predicates non-equivalent.
+// Pointer-identical partial predicates group; equivalent cuts stay separate.
 // CHECK-LABEL: func.func @partial_packet_predicates(
-// CHECK-COUNT-3: wave.load
-// CHECK-NOT: wave.load {{.*}}vector<
+// CHECK: wave.load {{.*}} -> (!wave.simd<vector<2xi32>, 32>
+// CHECK-NOT: wave.load
+// CHECK: wave.load {{.*}} -> (!wave.simd<i32, 32>
+// CHECK-NOT: wave.load
 // CHECK-NOT: wave.gather
 func.func @partial_packet_predicates(
     %base: !wave.ptr<#wave.global, i32>,

@@ -976,7 +976,7 @@ static MappingCoordinates getMappingCoordinates(const MemoryAccess &access,
 }
 
 static FailureOr<MappingCoordinates>
-specializeCoordinates(sym::Analysis &analysis,
+substituteCoordinates(sym::Analysis &analysis,
                       const MappingCoordinates &coordinates,
                       ArrayRef<sym::ExprSubstitution> substitutions) {
   std::array<sym::ExprHandle, 3> roots{
@@ -988,9 +988,17 @@ specializeCoordinates(sym::Analysis &analysis,
       return failure();
     root = *substituted;
   }
+  return MappingCoordinates{roots[0], roots[1], roots[2]};
+}
+
+static LogicalResult simplifyCoordinates(sym::Analysis &analysis,
+                                         MappingCoordinates &coordinates) {
+  std::array<sym::ExprHandle, 3> roots{
+      coordinates.base, coordinates.targetBlock, coordinates.bitOffset};
   if (failed(analysis.simplify(roots)))
     return failure();
-  return MappingCoordinates{roots[0], roots[1], roots[2]};
+  coordinates = MappingCoordinates{roots[0], roots[1], roots[2]};
+  return success();
 }
 
 static bool coordinatesProvablyDefined(sym::Analysis &analysis,
@@ -5516,6 +5524,22 @@ static bool coordinatesHaveSymbol(const MappingCoordinates &coordinates,
          hasSymbol(coordinates.bitOffset, name);
 }
 
+static bool coordinatesNeedSymbol(sym::Analysis &analysis,
+                                  const MappingCoordinates &coordinates,
+                                  StringRef name) {
+  MappingCoordinates simplified = coordinates;
+  if (failed(simplifyCoordinates(analysis, simplified)) ||
+      coordinatesHaveSymbol(simplified, name))
+    return true;
+  std::array<sym::ExprHandle, 3> roots{
+      coordinates.base, coordinates.targetBlock, coordinates.bitOffset};
+  // Poison refinement may erase dependencies only from total roots.
+  return llvm::any_of(roots, [&](sym::ExprHandle root) {
+    return hasSymbol(root, name) &&
+           analysis.defined(root) != sym::CheckResult::True;
+  });
+}
+
 static bool mappingNeedsItemAfterSlotSpecialization(
     const MemoryAccess &access, sym::Store &store, const MappingDomain &domain,
     int64_t slotCount, ArrayRef<sym::ExprSubstitution> bindingSubstitutions) {
@@ -5533,9 +5557,10 @@ static bool mappingNeedsItemAfterSlotSpecialization(
       return true;
     SmallVector<sym::ExprSubstitution> substitutions(bindingSubstitutions);
     substitutions.push_back({domain.slot, *slotValue});
-    FailureOr<MappingCoordinates> specialized =
-        specializeCoordinates(**analysis, coordinates, substitutions);
-    if (failed(specialized) || coordinatesHaveSymbol(*specialized, "item"))
+    FailureOr<MappingCoordinates> substituted =
+        substituteCoordinates(**analysis, coordinates, substitutions);
+    if (failed(substituted) ||
+        coordinatesNeedSymbol(**analysis, *substituted, "item"))
       return true;
   }
   return false;

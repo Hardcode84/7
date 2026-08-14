@@ -57,7 +57,7 @@
 
 // Reusable facts serve construction, proof, algebra, and substitution queries.
 // CHECK: analysis-batch-pointer-equal: true
-// CHECK: analysis-undefined-self-equivalent: unknown
+// CHECK: analysis-undefined-self-equivalent: true
 // CHECK: analysis-check: true
 // CHECK: analysis-equivalent-mod: true
 // CHECK: analysis-defined: true
