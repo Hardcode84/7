@@ -219,6 +219,45 @@ planGlobalOrBufferAddress(WaveAMDMachineSelector &S, Operation *user,
   return *plan;
 }
 
+static FailureOr<Value>
+materializeBufferLaneStrideDescriptor(WaveAMDMachineSelector &S,
+                                      Operation *user, Value descriptor,
+                                      AddressPlan &plan, unsigned accessBytes) {
+  // AddTID disables bounds checks; require every component in range.
+  auto make = descriptor.getDefiningOp<waveamdmachine::MakeBufferRsrcOp>();
+  if (!make || make.getConstStride() != 0)
+    return descriptor;
+  auto range = make.getRange().getDefiningOp<waveamdmachine::ImmOp>();
+  if (!range || range.getValue() < static_cast<int64_t>(accessBytes))
+    return descriptor;
+  int64_t maxCheckedByteOffset = range.getValue() - accessBytes;
+  if (failed(foldBufferLaneStrideIntoDescriptor(S, plan, maxCheckedByteOffset)))
+    return user->emitError("failed to fold buffer lane stride");
+  if (plan.bufferConstStride == 0)
+    return descriptor;
+
+  if (make.getDescriptor().hasOneUse()) {
+    make.setConstStrideAttr(
+        S.builder.getI64IntegerAttr(plan.bufferConstStride));
+    make.setConstAddTidEnableAttr(S.builder.getBoolAttr(true));
+    return descriptor;
+  }
+
+  std::pair<Value, uint32_t> key{descriptor, plan.bufferConstStride};
+  auto cached = S.bufferConstAddTidDescriptors.find(key);
+  if (cached != S.bufferConstAddTidDescriptors.end())
+    return cached->second;
+
+  OpBuilder::InsertionGuard guard(S.builder);
+  S.builder.setInsertionPointAfter(make);
+  Value specialized = waveamdmachine::MakeBufferRsrcOp::create(
+      S.builder, user->getLoc(), make.getDescriptor().getType(), make.getBase(),
+      make.getRange(), plan.bufferConstStride,
+      /*const_add_tid_enable=*/true);
+  S.bufferConstAddTidDescriptors[key] = specialized;
+  return specialized;
+}
+
 LogicalResult selectSharedStore(WaveAMDMachineSelector &S, StoreOp op,
                                 Value base, const PointerOffset &offset,
                                 unsigned registers, bool useB8Op,
@@ -422,6 +461,16 @@ static LogicalResult selectGlobalOrBufferStore(
   if (plan->fullAddressRemainderExpr)
     return selectFullAddressStore(S, op, globalBase, *plan, registers, useB8Op,
                                   useB16Op);
+  if (isBuffer) {
+    FailureOr<Value> specialized =
+        materializeBufferLaneStrideDescriptor(S, op, base, *plan,
+                                              useB8Op    ? 1
+                                              : useB16Op ? 2
+                                                         : registers * 4);
+    if (failed(specialized))
+      return failure();
+    base = *specialized;
+  }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
       materializePlanBuckets(S, op, *plan, spec);
   if (failed(buckets))
@@ -734,6 +783,16 @@ static LogicalResult selectGlobalOrBufferLoad(
   if (plan->fullAddressRemainderExpr)
     return selectFullAddressLoad(S, op, globalBase, *plan, registers, useB8Op,
                                  useB16Op);
+  if (isBuffer) {
+    FailureOr<Value> specialized =
+        materializeBufferLaneStrideDescriptor(S, op, base, *plan,
+                                              useB8Op    ? 1
+                                              : useB16Op ? 2
+                                                         : registers * 4);
+    if (failed(specialized))
+      return failure();
+    base = *specialized;
+  }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
       materializePlanBuckets(S, op, *plan, spec);
   if (failed(buckets))

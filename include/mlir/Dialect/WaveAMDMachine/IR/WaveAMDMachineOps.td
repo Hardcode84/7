@@ -549,6 +549,8 @@ def WaveAMDMachine_BitOp3Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<255>]>;
 def WaveAMDMachine_NonNegativeI64Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>]>;
+def WaveAMDMachine_ConstStrideAttr
+    : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<262143>]>;
 def WaveAMDMachine_Offset8Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<255>]>;
 
@@ -2476,9 +2478,14 @@ def WaveAMDMachine_MakeBufferRsrcOp
     : WaveAMDMachine_Op<"make_buffer_rsrc", [Pure]> {
   let summary = "construct an AMD buffer descriptor";
   let arguments = (ins WaveAMDMachine_SGPR2:$base,
-                       WaveAMDMachine_RegOrImm:$range);
+                       WaveAMDMachine_RegOrImm:$range,
+                       DefaultValuedAttr<WaveAMDMachine_ConstStrideAttr,
+                                         "0">:$const_stride,
+                       DefaultValuedAttr<BoolAttr,
+                                         "false">:$const_add_tid_enable);
   let results = (outs WaveAMDMachine_SGPR4:$descriptor);
   let assemblyFormat = "$base `,` $range attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
 }
 
 def WaveAMDMachine_UpdateBufferRsrcBaseOp
