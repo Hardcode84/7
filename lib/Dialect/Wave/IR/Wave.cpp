@@ -3278,17 +3278,7 @@ LogicalResult RedistributeOp::verify() {
   if (getWavePayloadElementType(sourceType) !=
       getWavePayloadElementType(resultType))
     return emitOpError("source and result packet element types must match");
-  if (failed(
-          verifyRedistributionRelationSymbols(getOperation(), getRelation())))
-    return failure();
-  RedistributionAttr equivalent = getEquivalentRelationAttr();
-  if (!equivalent)
-    return success();
-  if (equivalent.getBlocks() != getRelation().getBlocks() ||
-      equivalent.getItems() != getRelation().getItems())
-    return emitOpError(
-        "equivalent relation must have the same block and item extents");
-  return verifyRedistributionRelationSymbols(getOperation(), equivalent);
+  return verifyRedistributionRelationSymbols(getOperation(), getRelation());
 }
 
 static LogicalResult verifyReductionPacketTypes(ReduceOp op) {

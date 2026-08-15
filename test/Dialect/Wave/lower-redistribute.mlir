@@ -4,66 +4,6 @@
 
 // TIMING: WaveLowerRedistribute
 
-// CHECK-LABEL: func.func @select_equivalent_workitem_relation(
-// CHECK-SAME: %[[SOURCE:[a-zA-Z0-9_]+]]:
-// CHECK-NOT: wave.shuffle
-// CHECK-NOT: wave.redistribute
-// CHECK: return %[[SOURCE]]
-func.func @select_equivalent_workitem_relation(
-    %source: !wave.simd<i32, 32>) -> !wave.simd<i32, 32>
-    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.redistribute %source,
-      <blocks = 1, items = 32, source_block = "0",
-       source_item = "xor(item, 16)", source_slot = "0">
-      {equivalent_relation = #wave.redistribution<
-          blocks = 1, items = 32, source_block = "0",
-          source_item = "item", source_slot = "0">}
-      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  return %result : !wave.simd<i32, 32>
-}
-
-// -----
-
-// CHECK-LABEL: func.func @retain_cheaper_exact_relation(
-// CHECK-SAME: %[[SOURCE:[a-zA-Z0-9_]+]]:
-// CHECK-NOT: wave.shuffle
-// CHECK-NOT: wave.redistribute
-// CHECK: return %[[SOURCE]]
-func.func @retain_cheaper_exact_relation(
-    %source: !wave.simd<i32, 32>) -> !wave.simd<i32, 32>
-    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.redistribute %source,
-      <blocks = 1, items = 32, source_block = "0",
-       source_item = "item", source_slot = "0">
-      {equivalent_relation = #wave.redistribution<
-          blocks = 1, items = 32, source_block = "0",
-          source_item = "xor(item, 16)", source_slot = "0">}
-      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
-  return %result : !wave.simd<i32, 32>
-}
-
-// -----
-
-// CHECK-LABEL: func.func @select_equivalent_same_movement_class(
-// CHECK-SAME: %[[SOURCE:[a-zA-Z0-9_]+]]:
-// CHECK: %[[RESULT:.*]] = wave.extract %[[SOURCE]][1]
-// CHECK-NOT: wave.redistribute
-// CHECK: return %[[RESULT]]
-func.func @select_equivalent_same_movement_class(
-    %source: !wave.simd<vector<2xi32>, 32>) -> !wave.simd<i32, 32>
-    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
-  %result = wave.redistribute %source,
-      <blocks = 1, items = 32, source_block = "0",
-       source_item = "item", source_slot = "0">
-      {equivalent_relation = #wave.redistribution<
-          blocks = 1, items = 32, source_block = "0",
-          source_item = "item", source_slot = "1">}
-      : !wave.simd<vector<2xi32>, 32> -> !wave.simd<i32, 32>
-  return %result : !wave.simd<i32, 32>
-}
-
-// -----
-
 // CHECK-LABEL: func.func @reduce_ordered_odd(
 // CHECK-DAG: %[[S0:.*]] = wave.extract %{{.*}}[0]
 // CHECK-DAG: %[[S1:.*]] = wave.extract %{{.*}}[1]

@@ -249,7 +249,7 @@ redistributeReductionValue(IRRewriter &rewriter, ReduceOp op, Value source,
                               relation.sourceItem, sourceSlot);
   return RedistributeOp::create(rewriter, op.getLoc(),
                                 getPacketElementType(op.getResult().getType()),
-                                source, attr, RedistributionAttr())
+                                source, attr)
       .getResult();
 }
 static FailureOr<Value>
@@ -432,27 +432,23 @@ appendCoordinateRequirements(sym::Store &store, sym::ExprHandle expression,
   return success();
 }
 static FailureOr<indexing::IndexMap> buildCarrier(sym::Store &store,
-                                                  RedistributeOp op,
-                                                  RedistributionAttr relation) {
+                                                  RedistributeOp op) {
   FailureOr<sym::ExprHandle> block = sym::composeExprSym(store, kBlock);
   FailureOr<sym::ExprHandle> item = sym::composeExprSym(store, kItem);
   FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, kSlot);
   if (failed(block) || failed(item) || failed(slot))
     return failure();
   indexing::IndexMap carrier;
-  carrier.inputs = {
-      {*block, relation.getBlocks(), Value(),
-       SymbolicOffsetBindingKind::Uniform},
-      {*item, relation.getItems(), Value(), SymbolicOffsetBindingKind::Lane},
-      {*slot, getPacketElementCount(op.getResult().getType()), Value(),
-       SymbolicOffsetBindingKind::Uniform}};
-  carrier.exprs = {relation.getSourceBlock(), relation.getSourceItem(),
-                   relation.getSourceSlot()};
+  carrier.inputs = {{*block, op.getRelation().getBlocks(), Value(),
+                     SymbolicOffsetBindingKind::Uniform},
+                    {*item, op.getRelation().getItems(), Value(),
+                     SymbolicOffsetBindingKind::Lane},
+                    {*slot, getPacketElementCount(op.getResult().getType()),
+                     Value(), SymbolicOffsetBindingKind::Uniform}};
+  carrier.exprs = {op.getRelation().getSourceBlock(),
+                   op.getRelation().getSourceItem(),
+                   op.getRelation().getSourceSlot()};
   return carrier;
-}
-static FailureOr<indexing::IndexMap> buildCarrier(sym::Store &store,
-                                                  RedistributeOp op) {
-  return buildCarrier(store, op, op.getRelation());
 }
 static FailureOr<sym::PredHandle> equal(sym::Store &store, sym::ExprHandle lhs,
                                         sym::ExprHandle rhs) {
@@ -689,29 +685,6 @@ validateAndClassifyMovement(sym::Store &store, RedistributeOp op,
           succeeded(movement) ? *movement : Movement::Cluster, memo)))
     return failure();
   return *movement;
-}
-static LogicalResult selectEquivalentRelation(sym::Store &store,
-                                              RedistributeOp op,
-                                              int64_t waveWidth) {
-  RedistributionAttr equivalent = op.getEquivalentRelationAttr();
-  if (!equivalent)
-    return success();
-
-  FailureOr<indexing::IndexMap> exactCarrier = buildCarrier(store, op);
-  FailureOr<indexing::IndexMap> equivalentCarrier =
-      buildCarrier(store, op, equivalent);
-  if (failed(exactCarrier) || failed(equivalentCarrier))
-    return op.emitOpError("failed to build equivalent redistribution carrier");
-  FailureOr<Movement> exact =
-      validateAndClassifyMovement(store, op, *exactCarrier, waveWidth);
-  FailureOr<Movement> alternative =
-      validateAndClassifyMovement(store, op, *equivalentCarrier, waveWidth);
-  if (failed(exact) || failed(alternative))
-    return failure();
-  if (*alternative <= *exact)
-    op.setRelationAttr(equivalent);
-  op->removeAttr("equivalent_relation");
-  return success();
 }
 static DenseI32ArrayAttr getWorkgroupShape(func::FuncOp func) {
   for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"})
@@ -2223,22 +2196,24 @@ lowerRedistribution(IRRewriter &rewriter, RedistributeOp op,
   }
   llvm_unreachable("unknown redistribution movement");
 }
-static LogicalResult lowerRedistributions(func::FuncOp func,
-                                          WaveDialect &dialect,
-                                          IRRewriter &rewriter,
-                                          SymbolicTransformTiming &timing,
-                                          ArrayRef<RedistributeOp> ops) {
+static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
+                               IRRewriter &rewriter,
+                               SymbolicTransformTiming &timing) {
+  SmallVector<ReduceOp> reductions;
+  {
+    TimingScope reductionTiming = timing.nest("redistribute_lower_reductions");
+    func.walk([&](ReduceOp op) { reductions.push_back(op); });
+    for (ReduceOp op : reductions)
+      if (failed(lowerReduction(rewriter, op, dialect)))
+        return failure();
+  }
+  SmallVector<RedistributeOp> ops;
+  {
+    TimingScope collectTiming = timing.nest("redistribute_collect");
+    func.walk([&](RedistributeOp op) { ops.push_back(op); });
+  }
   if (ops.empty())
     return success();
-  {
-    TimingScope equivalentTiming =
-        timing.nest("redistribute_select_equivalent_relations");
-    for (RedistributeOp op : ops) {
-      int64_t width = cast<SimdType>(op.getSource().getType()).getWidth();
-      if (failed(selectEquivalentRelation(dialect.getSymbolStore(), op, width)))
-        return failure();
-    }
-  }
   DenseSet<Operation *> erased;
   {
     TimingScope composeTiming = timing.nest("redistribute_compose_adjacent");
@@ -2261,24 +2236,6 @@ static LogicalResult lowerRedistributions(func::FuncOp func,
       return failure();
   }
   return success();
-}
-static LogicalResult lowerFunc(func::FuncOp func, WaveDialect &dialect,
-                               IRRewriter &rewriter,
-                               SymbolicTransformTiming &timing) {
-  SmallVector<ReduceOp> reductions;
-  {
-    TimingScope reductionTiming = timing.nest("redistribute_lower_reductions");
-    func.walk([&](ReduceOp op) { reductions.push_back(op); });
-    for (ReduceOp op : reductions)
-      if (failed(lowerReduction(rewriter, op, dialect)))
-        return failure();
-  }
-  SmallVector<RedistributeOp> ops;
-  {
-    TimingScope collectTiming = timing.nest("redistribute_collect");
-    func.walk([&](RedistributeOp op) { ops.push_back(op); });
-  }
-  return lowerRedistributions(func, dialect, rewriter, timing, ops);
 }
 struct WaveLowerRedistributePass
     : public wave::impl::WaveLowerRedistributeBase<WaveLowerRedistributePass> {
