@@ -1,5 +1,35 @@
 // RUN: wave-opt --wave-lower-redistribute --split-input-file --verify-diagnostics %s
 
+func.func @equivalent_extent_mismatch(%source: !wave.simd<i32, 32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  // expected-error @+1 {{equivalent relation must have the same block and item extents}}
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "item", source_slot = "0">
+      {equivalent_relation = #wave.redistribution<
+          blocks = 1, items = 64, source_block = "block",
+          source_item = "item", source_slot = "0">}
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
+func.func @equivalent_source_item_oob(%source: !wave.simd<i32, 32>)
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  // expected-error @+1 {{redistribution relation is not provably total, integral, and in bounds}}
+  %result = wave.redistribute %source,
+      <blocks = 1, items = 32, source_block = "block",
+       source_item = "item", source_slot = "0">
+      {equivalent_relation = #wave.redistribution<
+          blocks = 1, items = 32, source_block = "block",
+          source_item = "32", source_slot = "0">}
+      : !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+  return
+}
+
+// -----
+
 func.func @reduction_specialization_budget(%source: !wave.simd<i32, 32>)
     attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
   // expected-error @+1 {{reduction specialization requires 1048577 points, exceeding the 2^20 point limit}}

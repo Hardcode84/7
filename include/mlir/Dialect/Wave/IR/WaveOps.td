@@ -484,11 +484,15 @@ def Wave_RedistributeOp : Wave_Op<"redistribute", [NoMemoryEffect]> {
   let description = [{
     Applies a total gather relation to a SIMD packet. Lowering derives
     register, wave-shuffle, workgroup-memory, or cluster movement from the
-    relation.
+    relation. `equivalent_relation` is an optional producer proof that selects
+    the same logical values as `relation`; lowering uses it only when its
+    validated movement class is no more expensive. This is trusted compiler
+    pipeline state, not a claim inferred from physical aliasing.
   }];
 
   let arguments = (ins Wave_Simd:$source,
-                       Wave_RedistributionAttr:$relation);
+                       Wave_RedistributionAttr:$relation,
+                       OptionalAttr<Wave_RedistributionAttr>:$equivalent_relation);
   let results = (outs Wave_Simd:$result);
   let assemblyFormat = [{
     $source `,` $relation attr-dict `:` qualified(type($source)) `->`

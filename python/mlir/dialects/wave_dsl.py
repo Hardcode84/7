@@ -1794,6 +1794,9 @@ class FunctionBuilder:
         source_slot: ixsimpl.Expr,
         blocks: int = 1,
         source_block: ixsimpl.Expr | None = None,
+        equivalent_relation: (
+            tuple[ixsimpl.Expr, ixsimpl.Expr, ixsimpl.Expr] | None
+        ) = None,
     ) -> Value:
         """Build symbolic cluster packet redistribution."""
         if source_block is None:
@@ -1805,7 +1808,17 @@ class FunctionBuilder:
             source_item,
             source_slot,
         )
-        return wave.RedistributeOp(result_type, source, relation).result
+        op = wave.RedistributeOp(result_type, source, relation)
+        if equivalent_relation is not None:
+            equivalent_block, equivalent_item, equivalent_slot = equivalent_relation
+            op.operation.attributes["equivalent_relation"] = _redistribution_attr(
+                blocks,
+                items,
+                equivalent_block,
+                equivalent_item,
+                equivalent_slot,
+            )
+        return op.result
 
     @contextmanager
     def reduce(
