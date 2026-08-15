@@ -210,7 +210,14 @@ static FailureOr<Value> reduceTerms(IRRewriter &rewriter, ReduceOp op,
 struct ReductionRelationGroup {
   SpecializedReductionRelation relation;
   SmallVector<Value> values;
+  SmallVector<int64_t> sourceSlots;
 };
+static bool hasConsecutiveSourceSlots(ArrayRef<int64_t> sourceSlots) {
+  return llvm::all_of(
+      llvm::enumerate(sourceSlots.drop_front()), [&](auto indexedSlot) {
+        return indexedSlot.value() == sourceSlots[indexedSlot.index()] + 1;
+      });
+}
 static FailureOr<Value>
 extractReductionSourceSlot(IRRewriter &rewriter, ReduceOp op,
                            MutableArrayRef<Value> cache, int64_t slot,
@@ -286,13 +293,18 @@ lowerReductionResultSlot(IRRewriter &rewriter, ReduceOp op, sym::Store &store,
                  candidate.relation.sourceItem == specialized->sourceItem;
         });
     if (group == groups.end()) {
-      groups.push_back(ReductionRelationGroup{*specialized, {}});
+      groups.push_back(ReductionRelationGroup{*specialized, {}, {}});
       group = std::prev(groups.end());
     }
     group->values.push_back(*source);
+    group->sourceSlots.push_back(*sourceSlot);
   }
   for (ReductionRelationGroup &group : groups) {
-    FailureOr<Value> local = reduceTerms(rewriter, op, group.values, true);
+    // A balanced tree exposes adjacent packet slots to packed arithmetic.
+    // With a permuted slot order it instead retains a wide frontier of
+    // unrelated tuple elements, so use an accumulator fold for that case.
+    bool balanced = hasConsecutiveSourceSlots(group.sourceSlots);
+    FailureOr<Value> local = reduceTerms(rewriter, op, group.values, balanced);
     if (failed(local))
       return failure();
     terms.push_back(

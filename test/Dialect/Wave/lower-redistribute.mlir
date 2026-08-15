@@ -94,6 +94,80 @@ func.func @reduce_reorderable_movement_groups(
 
 // -----
 
+// CHECK-LABEL: func.func @reduce_reorderable_contiguous_local_tree(
+// CHECK-DAG: %[[S0:.*]] = wave.extract %{{.*}}[0]
+// CHECK-DAG: %[[S1:.*]] = wave.extract %{{.*}}[1]
+// CHECK-DAG: %[[S2:.*]] = wave.extract %{{.*}}[2]
+// CHECK-DAG: %[[S3:.*]] = wave.extract %{{.*}}[3]
+// CHECK: %[[L01:.*]] = wave.binary addi %[[S0]], %[[S1]]
+// CHECK: %[[L23:.*]] = wave.binary addi %[[S2]], %[[S3]]
+// CHECK: %[[LOCAL:.*]] = wave.binary addi %[[L01]], %[[L23]]
+// CHECK: %[[R01:.*]] = wave.binary addi %[[S0]], %[[S1]]
+// CHECK: %[[R23:.*]] = wave.binary addi %[[S2]], %[[S3]]
+// CHECK: %[[REMOTE_LOCAL:.*]] = wave.binary addi %[[R01]], %[[R23]]
+// CHECK: %[[REMOTE:.*]] = wave.shuffle %[[REMOTE_LOCAL]]
+// CHECK: wave.binary addi %[[LOCAL]], %[[REMOTE]]
+// CHECK-NOT: wave.shuffle
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+func.func @reduce_reorderable_contiguous_local_tree(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "xor(item, Mod(reduction, 2))",
+                           source_slot = "floor(reduction / 2)">
+      extent 8 {associative, commutative}
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %sum = wave.binary addi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %sum : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reduce_reorderable_permuted_local_fold(
+// CHECK-DAG: %[[S0:.*]] = wave.extract %{{.*}}[0]
+// CHECK-DAG: %[[S1:.*]] = wave.extract %{{.*}}[1]
+// CHECK-DAG: %[[S2:.*]] = wave.extract %{{.*}}[2]
+// CHECK-DAG: %[[S3:.*]] = wave.extract %{{.*}}[3]
+// CHECK: %[[L02:.*]] = wave.binary addi %[[S0]], %[[S2]]
+// CHECK: %[[L021:.*]] = wave.binary addi %[[L02]], %[[S1]]
+// CHECK: %[[LOCAL:.*]] = wave.binary addi %[[L021]], %[[S3]]
+// CHECK: %[[R02:.*]] = wave.binary addi %[[S0]], %[[S2]]
+// CHECK: %[[R021:.*]] = wave.binary addi %[[R02]], %[[S1]]
+// CHECK: %[[REMOTE_LOCAL:.*]] = wave.binary addi %[[R021]], %[[S3]]
+// CHECK: %[[REMOTE:.*]] = wave.shuffle %[[REMOTE_LOCAL]]
+// CHECK: wave.binary addi %[[LOCAL]], %[[REMOTE]]
+// CHECK-NOT: wave.shuffle
+// CHECK-NOT: wave.reduce
+// CHECK-NOT: wave.redistribute
+func.func @reduce_reorderable_permuted_local_fold(
+    %source: !wave.simd<vector<4xi32>, 32>)
+    -> !wave.simd<i32, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %result = wave.reduce %source using
+      #wave.redistribution<blocks = 1, items = 32, source_block = "block",
+                           source_item = "xor(item, Mod(reduction, 2))",
+                           source_slot = "2 * Mod(floor(reduction / 2), 2) + floor(reduction / 4)">
+      extent 8 {associative, commutative}
+      : !wave.simd<vector<4xi32>, 32> -> !wave.simd<i32, 32> {
+    ^bb0(%lhs: !wave.simd<i32, 32>, %rhs: !wave.simd<i32, 32>):
+      %sum = wave.binary addi %lhs, %rhs
+          : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+          -> !wave.simd<i32, 32>
+      wave.yield %sum : !wave.simd<i32, 32>
+    }
+  return %result : !wave.simd<i32, 32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reduce_register_two_results(
 // CHECK: %[[S0:.*]] = wave.extract %{{.*}}[0]
 // CHECK: %[[S2:.*]] = wave.extract %{{.*}}[2]
