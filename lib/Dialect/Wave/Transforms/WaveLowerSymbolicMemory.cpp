@@ -2725,7 +2725,7 @@ static LogicalResult recoverUniformDmaFamilies(
     return failure();
   unconditional->source->activity = *activity;
   unconditional->source->active = **uniformActivity;
-  if (shape.groupCount == 1 && !shape.source->packetActivityDomains.empty())
+  if (!shape.source->packetActivityDomains.empty())
     unconditional->source->condition =
         shape.source->packetActivityDomains.front().condition;
   families = std::move(*unconditional);

@@ -584,6 +584,79 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// A proof that distinct packet predicates are equivalent must retain the
+// representative SSA condition for every DMA group. Re-materializing the
+// proof expression widens the original i32 comparison and bloats the mask
+// path.
+// ZF-LABEL: func.func @multi_group_zero_fill_uses_packet_condition
+// ZF: [[ACTIVE:%.*]] = wave.cmpi slt
+// ZF: wave.cmpi slt
+// ZF: [[SELECTED0:%.*]] = wave.select [[ACTIVE]]
+// ZF: waveamd.dma_load_lds [[SELECTED0]]
+// ZF-SAME: bytes = 16
+// ZF: [[SELECTED1:%.*]] = wave.select [[ACTIVE]]
+// ZF: waveamd.dma_load_lds [[SELECTED1]]
+// ZF-SAME: bytes = 16
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @multi_group_zero_fill_uses_packet_condition(
+      %source: !wave.ptr<#wave.global, i32>,
+      %destination: !wave.ptr<#wave.shared, i32>, %limit_raw: i32)
+      attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %bounded_item = wave.index_expr <"item"> assuming
+        [#wave.pred<"item >= 0">, #wave.pred<"item <= 63">]
+        ["item"](%item)
+        : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+    %range = arith.constant 4096 : i32
+    %buffer = waveamd.make_buffer %source, %range
+        : !wave.ptr<#wave.global, i32>, i32
+        -> !wave.ptr<#waveamd.buffer, i32>
+    %dependency = wave.token : !wave.mem.token
+    %zero = wave.constant 0 : i32 -> !wave.simd<i32, 64>
+    %same_item = wave.binary addi %item, %zero overflow<nsw>
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64>
+        -> !wave.simd<i32, 64>
+    %limit = wave.splat %limit_raw : i32 -> !wave.simd<i32, 64>
+    %active0 = wave.cmpi slt %item, %limit
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+    %active1 = wave.cmpi slt %same_item, %limit
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
+    %fallback = wave.pack %zero, %zero, %zero, %zero,
+                          %zero, %zero, %zero, %zero
+        : !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>,
+          !wave.simd<i32, 64>, !wave.simd<i32, 64>
+        -> !wave.simd<vector<8xi32>, 64>
+    %copy:2 = wave.where %active0, %active1, %active0, %active1,
+                         %active0, %active1, %active0, %active1 {
+      %value, %loaded = wave.gather %buffer mapping
+          <bit_offset =
+            <"32*(4*item + Mod(slot, 4) + 256*floor(slot/4))">>
+          bindings ["item"](%bounded_item) after %dependency
+          : (!wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64>,
+             !wave.mem.token)
+          -> (!wave.simd<vector<8xi32>, 64>, !wave.mem.token)
+      wave.yield %value, %loaded
+          : !wave.simd<vector<8xi32>, 64>, !wave.mem.token
+    } otherwise {
+      wave.yield %fallback, %dependency
+          : !wave.simd<vector<8xi32>, 64>, !wave.mem.token
+    } : !wave.mask<64>, !wave.mask<64>, !wave.mask<64>, !wave.mask<64>,
+        !wave.mask<64>, !wave.mask<64>, !wave.mask<64>, !wave.mask<64>
+        -> !wave.simd<vector<8xi32>, 64>, !wave.mem.token
+    %stored = wave.scatter %copy#0 to %destination mapping
+        <bit_offset =
+          <"32*(4*item + Mod(slot, 4) + 256*floor(slot/4))">>
+        bindings ["item"](%bounded_item) after %copy#1
+        : (!wave.simd<vector<8xi32>, 64>, !wave.ptr<#wave.shared, i32>,
+           !wave.simd<index, 64>, !wave.mem.token) -> !wave.mem.token
+    return
+  }
+}
+
+// -----
+
 // Packet activity may partition a zero-fill copy only at complete hardware
 // transaction boundaries. Two four-element i32 domains form two 16-byte DMAs.
 // LOWER-LABEL: func.func @aligned_activity_domains_form_dma(
