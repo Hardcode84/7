@@ -16,6 +16,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
@@ -3592,8 +3593,105 @@ private:
         return failure();
     }
     elementOffset = *offset;
-    return proveGuardedMemoryAddress(store, proofMap, transactionActive,
-                                     commonGoals, activityGoals, &memo);
+    FailureOr<bool> proven = proveGuardedMemoryAddress(
+        store, proofMap, transactionActive, commonGoals, activityGoals, &memo);
+    if (failed(proven) || *proven)
+      return proven;
+    return proveFiniteTransactionCoordinates();
+  }
+
+  struct SpecializedProofPoint {
+    indexing::IndexMap map;
+    SmallVector<sym::PredHandle> common;
+    SmallVector<sym::PredHandle, 2> activity;
+    sym::PredHandle active;
+  };
+
+  FailureOr<SmallVector<sym::PredHandle>>
+  getPredicates(ArrayRef<sym::ExprHandle> expressions) {
+    SmallVector<sym::PredHandle> predicates;
+    predicates.reserve(expressions.size());
+    for (sym::ExprHandle expression : expressions) {
+      std::optional<sym::PredHandle> predicate = sym::asPred(expression);
+      if (!predicate)
+        return failure();
+      predicates.push_back(*predicate);
+    }
+    return predicates;
+  }
+
+  FailureOr<SpecializedProofPoint>
+  specializeProofPoint(ArrayRef<sym::ExprHandle> expressions,
+                       int64_t groupValue, int64_t withinValue) {
+    FailureOr<sym::ExprHandle> fixedGroup =
+        sym::composeExprInt(store, groupValue);
+    if (failed(fixedGroup))
+      return failure();
+    FailureOr<sym::ExprHandle> fixedWithin =
+        sym::composeExprInt(store, withinValue);
+    if (failed(fixedWithin))
+      return failure();
+    std::array<sym::ExprSubstitution, 2> point{
+        sym::ExprSubstitution{group, *fixedGroup},
+        sym::ExprSubstitution{within, *fixedWithin}};
+    FailureOr<indexing::IndexMap> specialized =
+        indexing::specializeAtPoint(store, proofMap, expressions, point);
+    if (failed(specialized))
+      return failure();
+    if (specialized->exprs.size() != expressions.size())
+      return failure();
+    std::optional<sym::PredHandle> active =
+        sym::asPred(specialized->exprs.front());
+    if (!active)
+      return failure();
+    ArrayRef<sym::ExprHandle> specializedExpressions = specialized->exprs;
+    FailureOr<SmallVector<sym::PredHandle>> common =
+        getPredicates(specializedExpressions.slice(1, commonGoals.size()));
+    if (failed(common))
+      return failure();
+    FailureOr<SmallVector<sym::PredHandle>> activity =
+        getPredicates(specializedExpressions.slice(1 + commonGoals.size()));
+    if (failed(activity))
+      return failure();
+    specialized->exprs.clear();
+    return SpecializedProofPoint{std::move(*specialized), std::move(*common),
+                                 std::move(*activity), *active};
+  }
+
+  FailureOr<bool>
+  proveFiniteTransactionCoordinate(ArrayRef<sym::ExprHandle> expressions,
+                                   int64_t groupValue, int64_t withinValue) {
+    FailureOr<SpecializedProofPoint> point =
+        specializeProofPoint(expressions, groupValue, withinValue);
+    if (failed(point))
+      return failure();
+    SmallVector<sym::ExprHandle> proofExpressions{sym::asExpr(point->active)};
+    for (sym::PredHandle goal : point->common)
+      proofExpressions.push_back(sym::asExpr(goal));
+    for (sym::PredHandle goal : point->activity)
+      proofExpressions.push_back(sym::asExpr(goal));
+    if (failed(appendMemoryTransactionProofDefinitions(
+            store, point->map, access.proofDefinitions, proofExpressions)))
+      return failure();
+    return proveGuardedMemoryAddress(store, point->map, point->active,
+                                     point->common, point->activity, &memo);
+  }
+
+  FailureOr<bool> proveFiniteTransactionCoordinates() {
+    SmallVector<sym::ExprHandle> expressions{sym::asExpr(transactionActive)};
+    for (sym::PredHandle goal : commonGoals)
+      expressions.push_back(sym::asExpr(goal));
+    for (sym::PredHandle goal : activityGoals)
+      expressions.push_back(sym::asExpr(goal));
+    for (int64_t groupValue : llvm::seq<int64_t>(0, groupCount)) {
+      for (int64_t withinValue : llvm::seq<int64_t>(0, layout.width)) {
+        FailureOr<bool> proven = proveFiniteTransactionCoordinate(
+            expressions, groupValue, withinValue);
+        if (failed(proven) || !*proven)
+          return proven;
+      }
+    }
+    return true;
   }
 
   FailureOr<MemoryTransaction> materializeResult() {
@@ -3691,6 +3789,42 @@ private:
 };
 
 } // namespace
+
+LogicalResult mlir::wave::appendMemoryTransactionProofDefinitions(
+    sym::Store &store, indexing::IndexMap &map,
+    ArrayRef<MemoryTransactionProofDefinition> definitions,
+    ArrayRef<sym::ExprHandle> expressions) {
+  llvm::DenseSet<StringRef> live;
+  for (sym::ExprHandle expression : expressions)
+    collectIndexExprRequiredSymbols(expression, {}, live);
+
+  llvm::SmallBitVector selected(definitions.size());
+  for (size_t remaining = definitions.size(); remaining > 0;) {
+    bool changed = false;
+    for (auto [index, definition] : llvm::enumerate(definitions)) {
+      if (selected.test(index))
+        continue;
+      StringRef name = sym::ExprView(definition.variable).getSymbolName();
+      if (name.empty() || !live.contains(name))
+        continue;
+      FailureOr<sym::PredHandle> equal =
+          composeEqual(store, definition.variable, definition.expression);
+      if (failed(equal))
+        return failure();
+      appendUnique(map.facts, *equal);
+      for (sym::PredHandle fact : definition.facts)
+        appendUnique(map.facts, fact);
+      collectIndexExprRequiredSymbols(definition.expression, definition.facts,
+                                      live);
+      selected.set(index);
+      --remaining;
+      changed = true;
+    }
+    if (!changed)
+      break;
+  }
+  return success();
+}
 
 FailureOr<std::optional<MemoryTransaction>>
 mlir::wave::planMemoryTransaction(sym::Store &store,
