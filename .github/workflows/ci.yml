@@ -78,7 +78,13 @@ jobs:
           test -f build/llvm-build/lib/Target/AMDGPU/AMDGPUGenInstrInfo.inc
 
       - name: Configure Wave
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          nanobind_dir="$("${VENV_DIR}/bin/python" -m nanobind --cmake_dir)"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPython3_EXECUTABLE="${VENV_DIR}/bin/python" \
+            -DPython_EXECUTABLE="${VENV_DIR}/bin/python" \
+            -Dnanobind_DIR="${nanobind_dir}"
 
       - name: Compile Wave
         run: cmake --build build --parallel "$(nproc)"
