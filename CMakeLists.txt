@@ -134,9 +134,22 @@ if(NOT LLVM_EXTERNAL_LIT AND EXISTS "${WAVE_LLVM_PROJECT_BUILD_DIR}/bin/llvm-lit
 endif()
 if(LLVM_EXTERNAL_LIT)
   file(MAKE_DIRECTORY "${LLVM_RUNTIME_OUTPUT_INTDIR}")
-  execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E create_symlink
-            "${LLVM_EXTERNAL_LIT}" "${LLVM_RUNTIME_OUTPUT_INTDIR}/llvm-lit")
+  if(UNIX)
+    # llvm-lit finds its Python package relative to the real script path.
+    set(WAVE_LLVM_LIT_WRAPPER "${LLVM_RUNTIME_OUTPUT_INTDIR}/llvm-lit")
+    file(REMOVE "${WAVE_LLVM_LIT_WRAPPER}")
+    file(WRITE "${WAVE_LLVM_LIT_WRAPPER}"
+      "#!/bin/sh\nexec \"${LLVM_EXTERNAL_LIT}\" \"\$@\"\n")
+    file(CHMOD "${WAVE_LLVM_LIT_WRAPPER}"
+      PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE)
+  else()
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E create_symlink
+              "${LLVM_EXTERNAL_LIT}" "${LLVM_RUNTIME_OUTPUT_INTDIR}/llvm-lit")
+  endif()
 endif()
 
 # The imported CMakeLists reference these names directly.

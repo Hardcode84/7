@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 wave-mlir contributors
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+cmake==3.31.6
+nanobind==2.9.2
+ninja==1.13.0
+numpy==2.3.3

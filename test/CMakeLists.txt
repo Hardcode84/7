@@ -37,6 +37,15 @@ add_lit_testsuite(check-wave-mlir "Running the wave-mlir regression tests"
 )
 set_target_properties(check-wave-mlir PROPERTIES FOLDER "Tests")
 
+add_lit_testsuite(check-wave-mlir-compile-only
+  "Running the wave-mlir compile-only regression tests"
+  ${CMAKE_CURRENT_BINARY_DIR}
+  EXCLUDE_FROM_CHECK_ALL
+  ARGS --filter-out=Integration/
+  DEPENDS ${WAVE_MLIR_TEST_DEPENDS}
+)
+set_target_properties(check-wave-mlir-compile-only PROPERTIES FOLDER "Tests")
+
 add_lit_testsuites(WAVE_MLIR ${CMAKE_CURRENT_SOURCE_DIR}
   BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${WAVE_MLIR_TEST_DEPENDS}

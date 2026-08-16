@@ -58,7 +58,7 @@ ixsimpl symbolic engine ships as a git submodule under
 # Fetch ixsimpl (clone with --recurse-submodules to skip this step).
 git submodule update --init --recursive
 
-# One-off: fetch + build LLVM/MLIR into build/llvm-install. Slow.
+# One-off: fetch + build the LLVM/MLIR distribution into build/llvm-install.
 python build_tools/build_llvm.py -j$(nproc)
 
 # Configure and build wave-mlir.

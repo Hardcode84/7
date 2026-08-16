@@ -39,6 +39,40 @@ DEFAULT_BUILD_DIR = REPO_ROOT / "build" / "llvm-build"
 DEFAULT_INSTALL_DIR = REPO_ROOT / "build" / "llvm-install"
 DEFAULT_WAVE_BUILD_DIR = REPO_ROOT / "build"
 STAMP_FILE = ".wave-mlir-commit"
+LLVM_DISTRIBUTION_COMPONENTS = (
+    "FileCheck",
+    "clang",
+    "clang-cmake-exports",
+    "clang-headers",
+    "clang-libraries",
+    "clang-resource-headers",
+    "cmake-exports",
+    "count",
+    "lld",
+    "lld-cmake-exports",
+    "llvm-headers",
+    "llvm-libraries",
+    "llvm-mc",
+    "llvm-nm",
+    "llvm-objcopy",
+    "llvm-objdump",
+    "llvm-readelf",
+    "llvm-readobj",
+    "mlir-cmake-exports",
+    "mlir-headers",
+    "mlir-libraries",
+    "mlir-python-sources",
+    "mlir-tblgen",
+    "not",
+    "split-file",
+)
+ROCM_RUNNER_DISTRIBUTION_COMPONENTS = (
+    "mlir-runner",
+    "mlir_apfloat_wrappers",
+    "mlir_float16_utils",
+    "mlir_rocm_runtime",
+    "mlir_runner_utils",
+)
 
 
 def read_pinned_commit() -> str:
@@ -123,26 +157,59 @@ def resolve_source(default_source: Path, commit: str) -> Path:
     return default_source
 
 
+def required_install_files(
+    install_dir: Path,
+    enable_python_bindings: bool,
+    enable_rocm_runner: bool,
+) -> list[Path]:
+    tools = (
+        "FileCheck",
+        "count",
+        "ld.lld",
+        "llvm-mc",
+        "llvm-nm",
+        "llvm-objcopy",
+        "llvm-objdump",
+        "llvm-readelf",
+        "llvm-readobj",
+        "mlir-tblgen",
+        "not",
+        "split-file",
+    )
+    paths = [install_dir / "bin" / tool for tool in tools]
+    if enable_python_bindings:
+        paths.append(
+            install_dir / "src" / "python" / "MLIRPythonSources.Core.Python" / "ir.py"
+        )
+    if enable_rocm_runner:
+        paths.extend(
+            (
+                install_dir / "bin" / "mlir-runner",
+                install_dir / "lib" / "libmlir_rocm_runtime.so",
+                install_dir / "lib" / "libmlir_runner_utils.so",
+            )
+        )
+    return paths
+
+
 def already_installed(
     install_dir: Path,
     commit: str,
     enable_python_bindings: bool,
+    enable_rocm_runner: bool,
 ) -> bool:
     stamp = install_dir / STAMP_FILE
-    if not stamp.is_file():
-        return False
-    if stamp.read_text().strip() != commit:
+    if not stamp.is_file() or stamp.read_text().strip() != commit:
         return False
     for package in ("llvm", "mlir", "clang", "lld"):
         if not (install_dir / "lib" / "cmake" / package).is_dir():
             return False
-    if enable_python_bindings:
-        mlir_libs = (
-            install_dir / "python_packages" / "mlir_core" / "mlir" / "_mlir_libs"
-        )
-        if not any(mlir_libs.glob("_mlir*.so")):
-            return False
-    return True
+    required_files = required_install_files(
+        install_dir,
+        enable_python_bindings,
+        enable_rocm_runner,
+    )
+    return all(path.is_file() for path in required_files)
 
 
 def configure_and_build(
@@ -152,6 +219,7 @@ def configure_and_build(
     build_type: str,
     jobs: int | None,
     enable_python_bindings: bool,
+    enable_rocm_runner: bool,
 ) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
     install_dir.mkdir(parents=True, exist_ok=True)
@@ -171,17 +239,30 @@ def configure_and_build(
         "-DLLVM_ENABLE_RTTI=ON",
         "-DLLVM_ENABLE_ZSTD=OFF",
         "-DLLVM_INSTALL_UTILS=ON",
+        "-DLLVM_ENABLE_BINDINGS=OFF",
         "-DLLVM_INCLUDE_BENCHMARKS=OFF",
         "-DLLVM_INCLUDE_EXAMPLES=OFF",
         "-DLLVM_INCLUDE_DOCS=OFF",
-        # MLIR ROCm runner library (used by mlir-runner integration tests).
-        "-DMLIR_ENABLE_ROCM_RUNNER=ON",
+        "-DMLIR_INCLUDE_TESTS=OFF",
+        "-DLLVM_DISTRIBUTION_COMPONENTS="
+        + ";".join(
+            (*LLVM_DISTRIBUTION_COMPONENTS, *ROCM_RUNNER_DISTRIBUTION_COMPONENTS)
+            if enable_rocm_runner
+            else LLVM_DISTRIBUTION_COMPONENTS
+        ),
+        f"-DMLIR_ENABLE_ROCM_RUNNER={'ON' if enable_rocm_runner else 'OFF'}",
         f"-DMLIR_ENABLE_BINDINGS_PYTHON={'ON' if enable_python_bindings else 'OFF'}",
         f"-DPython3_EXECUTABLE={sys.executable}",
     ]
     run(cmake_args)
 
-    build_cmd = ["cmake", "--build", str(build_dir), "--target", "install"]
+    build_cmd = [
+        "cmake",
+        "--build",
+        str(build_dir),
+        "--target",
+        "install-distribution",
+    ]
     if jobs is not None:
         build_cmd += ["--", f"-j{jobs}"]
     run(build_cmd)
@@ -249,6 +330,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Build MLIR Python bindings (requires nanobind).",
     )
     parser.add_argument(
+        "--rocm-runner",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Build mlir-runner and its ROCm runtime support.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Rebuild even if the install matches the pinned commit.",
@@ -275,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         install_dir,
         commit,
         args.python_bindings,
+        args.rocm_runner,
     ):
         print(
             f"LLVM already installed at {install_dir} "
@@ -291,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         build_type=args.build_type,
         jobs=args.jobs,
         enable_python_bindings=args.python_bindings,
+        enable_rocm_runner=args.rocm_runner,
     )
     (install_dir / STAMP_FILE).write_text(commit + "\n")
     print(f"\nLLVM/MLIR installed at {install_dir} (commit {commit[:12]})")
