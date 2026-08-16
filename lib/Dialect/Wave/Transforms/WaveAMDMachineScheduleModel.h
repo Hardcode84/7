@@ -246,6 +246,10 @@ struct ReadyScheduleFillerFacts {
 };
 
 struct ReadyScheduleProposal {
+  ReadyScheduleProposal(unsigned candidate, ReadyScheduleProposalKind kind,
+                        unsigned group)
+      : candidate(candidate), kind(kind), group(group) {}
+
   unsigned candidate = 0;
   ReadyScheduleProposalKind kind = ReadyScheduleProposalKind::Direct;
   unsigned group = 0;

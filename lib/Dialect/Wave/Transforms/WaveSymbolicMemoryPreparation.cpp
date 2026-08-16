@@ -947,7 +947,7 @@ importAccessCondition(AccessPreparation &state, Value condition,
       sym::composePredCmp(state.store, *bound, sym::PredCmpOp::Ne, state.zero);
   if (failed(range) || failed(active))
     return failure();
-  ImportedCondition result{*bound, *active};
+  ImportedCondition result{*bound, *active, {}};
   result.facts.push_back(*range);
   return result;
 }

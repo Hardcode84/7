@@ -29,7 +29,7 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
   )
 
 target_include_directories(obj.MLIRWaveAMDMachineDialect
-  PRIVATE
+  SYSTEM PRIVATE
   ${LLVM_MAIN_SRC_DIR}/lib/Target/AMDGPU
   ${LLVM_BINARY_DIR}/lib/Target/AMDGPU
   )

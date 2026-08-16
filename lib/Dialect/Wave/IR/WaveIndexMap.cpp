@@ -382,7 +382,8 @@ validatePullbackSubstitutions(const IndexMap &source,
     setDiagnostic(diagnostic, "index-map pullback must bind every input once");
     return failure();
   }
-  for (auto [index, substitution] : llvm::enumerate(substitutions)) {
+  for (size_t index : llvm::seq<size_t>(substitutions.size())) {
+    const sym::ExprSubstitution &substitution = substitutions[index];
     const IndexMap::Input *input = findInput(source, substitution.target);
     if (!input || findDefinition(source, input->variable) ||
         llvm::any_of(substitutions.take_front(index),

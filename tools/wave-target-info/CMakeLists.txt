@@ -25,7 +25,7 @@ target_link_libraries(wave-target-info PRIVATE
 )
 
 target_include_directories(wave-target-info
-  PRIVATE
+  SYSTEM PRIVATE
   ${LLVM_MAIN_SRC_DIR}/lib/Target/AMDGPU
   ${LLVM_BINARY_DIR}/lib/Target/AMDGPU
 )

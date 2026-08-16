@@ -192,9 +192,10 @@ appendForwardedAliases(Operation *user, Value value, unsigned index,
 
 static void appendTokenOrigins(TokenOriginMap &origins, OperandRange sources,
                                ValueRange targets, Region *predecessorRegion) {
-  for (auto [index, source] : llvm::enumerate(sources)) {
+  for (size_t index : llvm::seq<size_t>(sources.size())) {
     if (index >= targets.size())
       break;
+    Value source = sources[index];
     Value target = targets[index];
     if (!isa<MemTokenType>(source.getType()) ||
         source.getType() != target.getType())

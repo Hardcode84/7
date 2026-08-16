@@ -62,9 +62,14 @@ add_mlir_dialect_library(MLIRWaveDialect
   )
 
 target_include_directories(obj.MLIRWaveDialect
-  PRIVATE
+  SYSTEM PRIVATE
   ${LLVM_MAIN_SRC_DIR}/lib/Target/AMDGPU
   ${LLVM_BINARY_DIR}/lib/Target/AMDGPU
+  )
+
+# Shared static templates instantiate only in provider translation units.
+target_compile_options(obj.MLIRWaveDialect PRIVATE
+  $<$<CXX_COMPILER_ID:Clang>:-Wno-unused-template>
   )
 
 add_mlir_dialect_library(MLIRWaveAMDDialect

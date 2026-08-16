@@ -6195,13 +6195,13 @@ struct AMDGPUAssemblerInfo {
   std::unique_ptr<llvm::MCAsmInfo> assembly;
   std::unique_ptr<llvm::MCSubtargetInfo> subtarget;
   std::unique_ptr<llvm::MCInstrInfo> instructions;
-  llvm::MCTargetOptions options;
   const llvm::Target *target;
 };
 
 static FailureOr<AMDGPUAssemblerInfo>
 createAMDGPUAssemblerInfo(Operation *opForDiag, const llvm::Triple &triple,
-                          StringRef chip, StringRef features) {
+                          StringRef chip, StringRef features,
+                          llvm::MCTargetOptions &options) {
   std::string error;
   AMDGPUAssemblerInfo info;
   info.target = llvm::TargetRegistry::lookupTarget(triple, error);
@@ -6212,7 +6212,7 @@ createAMDGPUAssemblerInfo(Operation *opForDiag, const llvm::Triple &triple,
   if (!info.registers)
     return opForDiag->emitError("failed to create AMDGPU register info");
   info.assembly.reset(
-      info.target->createMCAsmInfo(*info.registers, triple, info.options));
+      info.target->createMCAsmInfo(*info.registers, triple, options));
   info.subtarget.reset(
       info.target->createMCSubtargetInfo(triple, chip, features));
   info.instructions.reset(info.target->createMCInstrInfo());
@@ -6227,8 +6227,9 @@ assembleIsa(Operation *opForDiag, StringRef isa, StringRef targetTriple,
   SmallVector<char, 0> result;
   llvm::raw_svector_ostream os(result);
   llvm::Triple triple(llvm::Triple::normalize(targetTriple));
+  llvm::MCTargetOptions options;
   FailureOr<AMDGPUAssemblerInfo> info =
-      createAMDGPUAssemblerInfo(opForDiag, triple, chip, features);
+      createAMDGPUAssemblerInfo(opForDiag, triple, chip, features, options);
   if (failed(info))
     return failure();
 
@@ -6248,7 +6249,7 @@ assembleIsa(Operation *opForDiag, StringRef isa, StringRef targetTriple,
   std::unique_ptr<llvm::MCCodeEmitter> emitter(
       info->target->createMCCodeEmitter(*info->instructions, ctx));
   std::unique_ptr<llvm::MCAsmBackend> backend(info->target->createMCAsmBackend(
-      *info->subtarget, *info->registers, info->options));
+      *info->subtarget, *info->registers, options));
   if (!emitter || !backend)
     return opForDiag->emitError("failed to create AMDGPU assembler backend");
   std::unique_ptr<llvm::MCObjectWriter> objectWriter =

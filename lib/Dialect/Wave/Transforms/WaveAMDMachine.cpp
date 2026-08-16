@@ -50,6 +50,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <tuple>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_CONVERTWAVEAMDTOWAVEAMDMACHINE
@@ -4093,10 +4094,19 @@ static LogicalResult selectF32(WaveAMDMachineSelector &S, WaveOp op,
   auto toVGPR = [&](Value operand) {
     return S.ensureVGPRForVSrc1(op.getLoc(), S.expect(operand, op));
   };
-  auto selected = MachineOp::create(
-      S.builder, op.getLoc(),
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
-      toVGPR(operands)...);
+  std::array<Value, sizeof...(OperandValues)> waveOperands{operands...};
+  std::array<Value, sizeof...(OperandValues)> selectedOperands;
+  // Materialization order affects machine SSA and register allocation.
+  for (size_t index : llvm::reverse(llvm::seq<size_t>(0, waveOperands.size())))
+    selectedOperands[index] = toVGPR(waveOperands[index]);
+  auto selected = std::apply(
+      [&](auto... selectedOperands) {
+        return MachineOp::create(
+            S.builder, op.getLoc(),
+            getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR),
+            selectedOperands...);
+      },
+      selectedOperands);
   S.values[op.getResult()] = selected.getResult();
   S.eraseIfTopLevel(op);
   return success();

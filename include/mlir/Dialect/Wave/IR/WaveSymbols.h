@@ -227,7 +227,6 @@ public:
   ixs_session *raw() { return &session; }
 
 private:
-  Store &store;
   llvm::sys::SmartScopedLock<true> lock;
   ixs_session session;
 };

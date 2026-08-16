@@ -70,7 +70,7 @@ private:
     Block &body = loop.getBody().front();
     for (Operation &op : body.without_terminator())
       if (isa<TupleFromElementsOp>(op))
-        candidates.push_back({&op});
+        candidates.push_back({&op, {}, {}, {}});
   }
 
   void filterCandidates() {

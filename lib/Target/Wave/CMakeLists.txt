@@ -60,7 +60,7 @@ add_mlir_translation_library(MLIRTargetWave
   )
 
 target_include_directories(obj.MLIRTargetWave
-  PRIVATE
+  SYSTEM PRIVATE
   ${LLVM_MAIN_SRC_DIR}/lib/Target/AMDGPU
   ${LLVM_BINARY_DIR}/lib/Target/AMDGPU
   )

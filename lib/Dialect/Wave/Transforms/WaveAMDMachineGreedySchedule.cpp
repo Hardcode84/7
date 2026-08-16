@@ -2506,7 +2506,7 @@ public:
             arch, placements,
             scheduleModel.buildMultiWaveInstructionConfig(config))),
         regions(regions), graphs(graphs), origins(origins), arch(arch),
-        config(config), scheduleModel(scheduleModel),
+        config(config),
         classSchedule(scheduleModel.createMultiWaveScheduleSession()) {
     if (steadyState)
       this->steadyState =
@@ -2566,7 +2566,6 @@ private:
   const ValueOriginMap &origins;
   const waveamdmachine::ArchData &arch;
   const waveamdmachine::EventSimConfig &config;
-  const WaveAMDMachineScheduleModel &scheduleModel;
   MultiWaveScheduleSession classSchedule;
   bool initializationFailed = false;
 };

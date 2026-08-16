@@ -17,6 +17,8 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "llvm/ADT/StringRef.h"
 
+#include <limits>
+
 using namespace mlir;
 using namespace mlir::wave;
 using namespace mlir::waveamd;
@@ -228,9 +230,12 @@ materializeBufferLaneStrideDescriptor(WaveAMDMachineSelector &S,
   if (!make || make.getConstStride() != 0)
     return descriptor;
   auto range = make.getRange().getDefiningOp<waveamdmachine::ImmOp>();
-  if (!range || range.getValue() < static_cast<int64_t>(accessBytes))
+  if (!range || range.getValue() < accessBytes ||
+      range.getValue() - accessBytes >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
     return descriptor;
-  int64_t maxCheckedByteOffset = range.getValue() - accessBytes;
+  int64_t maxCheckedByteOffset =
+      static_cast<int64_t>(range.getValue() - accessBytes);
   if (failed(foldBufferLaneStrideIntoDescriptor(S, plan, maxCheckedByteOffset)))
     return user->emitError("failed to fold buffer lane stride");
   if (plan.bufferConstStride == 0)

@@ -1787,14 +1787,14 @@ static std::optional<DmaM0IncrementPlan> planDmaM0Increment(SAddM0I32Op add) {
   if (previous->offset == 0) {
     if (!absolute || static_cast<uint32_t>(*absolute) != 0)
       return DmaM0IncrementPlan{*previousM0, add.getRhs()};
-    return DmaM0IncrementPlan{*previousM0};
+    return DmaM0IncrementPlan{*previousM0, {}, 0, false};
   }
   if (!absolute)
     return std::nullopt;
   // M0 arithmetic wraps at 32 bits; derive delta in the same ring.
   uint32_t delta = static_cast<uint32_t>(*absolute) - previous->offset;
   if (delta == 0)
-    return DmaM0IncrementPlan{*previousM0};
+    return DmaM0IncrementPlan{*previousM0, {}, 0, false};
   return DmaM0IncrementPlan{*previousM0, {}, delta, true};
 }
 

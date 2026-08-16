@@ -562,10 +562,14 @@ preparePointerOffsets(IRRewriter &rewriter, ArrayRef<PtrAddOp> chain,
 static void discardPreparedPointerOffsets(IRRewriter &rewriter,
                                           PreparedPointerOffsets &prepared,
                                           bool restore) {
-  if (restore)
-    for (auto [add, original] : prepared.originals)
+  if (restore) {
+    for (const std::pair<PtrAddOp, Value> &entry : prepared.originals) {
+      PtrAddOp add = entry.first;
+      Value original = entry.second;
       rewriter.modifyOpInPlace(
           add, [&] { add.getOffsetMutable().assign(original); });
+    }
+  }
   for (Operation *op : llvm::reverse(prepared.created))
     if (op->use_empty())
       rewriter.eraseOp(op);

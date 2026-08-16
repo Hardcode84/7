@@ -332,7 +332,7 @@ std::string Store::render(PredHandle value) const {
   return render(value.raw());
 }
 
-Session::Session(Store &store) : store(store), lock(store.mutex) {
+Session::Session(Store &store) : lock(store.mutex) {
   ixs_session_init(&session, store.ctx);
 }
 
