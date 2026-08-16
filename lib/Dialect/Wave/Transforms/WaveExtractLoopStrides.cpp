@@ -1837,6 +1837,9 @@ static LogicalResult cloneBodyWithoutOffsetCarries(
     ArrayRef<unsigned> newIndex) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
+  if (!dstBody.empty())
+    if (auto defaultYield = dyn_cast<scf::YieldOp>(dstBody.back()))
+      rewriter.eraseOp(defaultYield);
 
   IRMapping map;
   map.map(src.getInductionVar(), dst.getInductionVar());
